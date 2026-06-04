@@ -76,6 +76,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage3 performed read-only hardware probes from the C runtime: CP15 state, ARM generic timer (`CNTFRQ=19.2 MHz`, `CNTPCT` advancing), and GIC distributor/CPU-interface IDs at `0xf9000000` / `0xf9002000`, then reset back to Android.
 - Stage4 installed a custom ARMv7 exception vector table at VBAR `0x000080a0`, implemented a `CNTPCT/CNTFRQ` timebase with `delay_us`, verified 1000us/5000us delays, caught a deliberate undefined-instruction exception, logged LR/SPSR, and reset through PS_HOLD.
 - Stage5 split the payload into a boot-wrapper path and `kernel_entry(struct boot_args*)`, added `MI4IOS6_STAGE5_XNU` skeleton logs, implemented pexpert-like Apple-DT discovery for memory/CPUs/GIC/timer, initialized XNU-like `ml_*` timebase stubs, and returned success before PS_HOLD reset.
+- Stage6 added a `PE_state`-like platform state block populated from `boot_args`/Apple-DT, validated memory/CPU/GIC/timer/vector facts, then deliberately triggered and recovered from a data abort through the custom exception handler.
 
 ## Repository contents
 
@@ -99,11 +100,13 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage3/` — C runtime payload that performs read-only CP15, ARM generic timer, and GIC probes on the MSM8974 hardware.
 - `stage4/` — C runtime payload with custom ARMv7 exception vectors, early timebase, and deliberate exception recovery test.
 - `stage5/` — XNU-adjacent skeleton with `kernel_entry(struct boot_args*)`, pexpert-like Apple-DT discovery, and `ml_*` timebase stubs.
+- `stage6/` — XNU-adjacent skeleton with `PE_state`-like platform state and deliberate data-abort recovery test.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
 - `docs/experiment-07-stage4-timebase-vectors.md` — successful Stage4 VBAR/vector + `CNTPCT` timebase/delay test.
 - `docs/experiment-08-stage5-xnu-skeleton.md` — successful Stage5 XNU-adjacent kernel-entry skeleton test.
+- `docs/experiment-09-stage6-pe-state-abort.md` — successful Stage6 PE_state-like platform state and data-abort recovery test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -126,13 +129,13 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage5 are complete. The next practical target is Stage6: align the skeleton more tightly with public XNU ARM source concepts and begin modeling platform state.
+Stage0 through Stage6 are complete. The next practical target is Stage7: begin modeling the MSM8974 GIC driver path while keeping interrupt delivery disabled.
 
-Near-term Stage6 work:
+Near-term Stage7 work:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
-- Compare Stage5 `kernel_entry`, pexpert discovery, and timebase stubs against public `xnu-4570.1.46` ARM entry points and headers.
-- Mirror selected legal public-XNU names/types where helpful (`PE_state`-like platform state, `ml_*` timebase routines, machine info structures).
-- Add a persistent platform-state block summarizing memory, CPU count, GIC base, timer base/frequency, and boot flags.
-- Add controlled data-abort/prefetch-abort self-tests now that Stage4 vector logging is proven.
-- Only after Stage6 is stable should real public XNU source files be considered for partial compilation or adaptation.
+- Build a GIC driver skeleton that records distributor/CPU-interface base, IIDR/TYPER/CTLR, IRQ count, CPU interface count, and priority mask.
+- Read and log selected enable/pending/priority/target registers for a small safe IRQ range without modifying them.
+- Add mask/unmask routines but do not enable external IRQ delivery yet.
+- Keep custom VBAR data-abort logging enabled while probing GIC state.
+- Only after read-only GIC modeling is stable should SGI/IPI or IRQ exception handling be tested.
