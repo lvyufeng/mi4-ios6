@@ -8,6 +8,9 @@ xiaomi4-cancro-backup-*/
 *.cpio
 *.cpio.gz
 
+# External source checkouts (large, reproducible)
+external/
+
 # Generated build/output directories
 out/
 build/

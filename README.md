@@ -72,6 +72,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/boot-tooling.md` — local boot image tooling plan and no-op round-trip results.
 - `docs/cancro-platform.md` — Xiaomi Mi 4 / MSM8974 platform source pointers and bootloader notes.
 - `docs/darwin-xnu-research.md` — open Darwin/XNU research notes and milestone framing.
+- `docs/source-baseline.md` — external source checkout baseline for cancro kernel/device tree and public XNU references.
 - `docs/experiment-01-cmdline.md` — first successful experiment: custom kernel cmdline via non-persistent boot.
 - `docs/no-teardown-debugging.md` — USB-only debugging channels (`/proc/last_kmsg`, `/dev/kmsg`, ramoops) that avoid soldering a UART.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
