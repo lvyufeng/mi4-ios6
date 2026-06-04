@@ -80,6 +80,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage7 added a read-only MSM8974 GIC driver skeleton, captured distributor/CPU-interface state, enable/pending/priority/target registers for the first IRQ group, validated IRQ count 288 and 4 CPU interfaces, and returned through `kernel_entry` successfully.
 - Stage8 installed a returnable IRQ vector path, generated SGI0 to the current CPU through `GICD_SGIR`, handled it by reading `GICC_IAR` / writing `GICC_EOIR`, logged interrupt ID 0, and returned through `kernel_entry` successfully.
 - Stage9 programmed the ARM generic physical timer, enabled the local timer PPI path, handled timer interrupt ID 19 through the same IRQ/EOIR path, masked/disabled the timer again, and returned through `kernel_entry` successfully.
+- Stage10 built an ARMv7 section identity map, enabled `SCTLR.M` with caches still disabled, verified ram_console/IMEM/GIC/timer MMIO access under translation, then re-ran SGI and timer IRQ selftests successfully.
 
 ## Repository contents
 
@@ -107,6 +108,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage7/` — XNU-adjacent skeleton with a read-only MSM8974 GIC driver/state snapshot.
 - `stage8/` — XNU-adjacent skeleton with controlled SGI0 delivery and a returnable GIC IRQ handler path.
 - `stage9/` — XNU-adjacent skeleton with ARM generic timer one-shot IRQ delivery.
+- `stage10/` — XNU-adjacent skeleton with first ARMv7 MMU identity-map enable.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
@@ -116,6 +118,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-10-stage7-gic-skeleton.md` — successful Stage7 read-only GIC driver skeleton test.
 - `docs/experiment-11-stage8-sgi-irq.md` — successful Stage8 controlled SGI0 IRQ delivery test.
 - `docs/experiment-12-stage9-timer-irq.md` — successful Stage9 ARM generic timer IRQ delivery test.
+- `docs/experiment-13-stage10-mmu-identity.md` — successful Stage10 ARMv7 MMU identity-map enable test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -138,13 +141,13 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage9 are complete. The next practical target is Stage10: first MMU translation bring-up.
+Stage0 through Stage10 are complete. The next practical target is Stage11: start moving from a flat identity map toward an XNU-like bootstrap virtual-memory layout.
 
-Near-term Stage10 work:
+Near-term Stage11 work:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
-- Build a small ARMv7 section page table.
-- Identity-map the payload RAM, RAM console, IMEM, GIC, timer, and PS_HOLD MMIO regions.
-- Enable MMU with caches still disabled first.
-- Verify code/data/MMIO access and ram_console logging continue under translation.
-- Preserve the Stage8/Stage9 IRQ path and custom abort logging while testing MMU enable.
+- Preserve the Stage10 identity map for ram_console, PS_HOLD, GIC, timer, and early recovery paths.
+- Add a controlled high/offset virtual alias for a small kernel window or selected data page.
+- Validate virtual alias reads/writes and MMIO access one mapping at a time.
+- Keep caches disabled until alias behavior is understood.
+- Preserve the Stage8/Stage9 IRQ path and custom abort logging while testing new mappings.
