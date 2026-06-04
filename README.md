@@ -78,6 +78,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage5 split the payload into a boot-wrapper path and `kernel_entry(struct boot_args*)`, added `MI4IOS6_STAGE5_XNU` skeleton logs, implemented pexpert-like Apple-DT discovery for memory/CPUs/GIC/timer, initialized XNU-like `ml_*` timebase stubs, and returned success before PS_HOLD reset.
 - Stage6 added a `PE_state`-like platform state block populated from `boot_args`/Apple-DT, validated memory/CPU/GIC/timer/vector facts, then deliberately triggered and recovered from a data abort through the custom exception handler.
 - Stage7 added a read-only MSM8974 GIC driver skeleton, captured distributor/CPU-interface state, enable/pending/priority/target registers for the first IRQ group, validated IRQ count 288 and 4 CPU interfaces, and returned through `kernel_entry` successfully.
+- Stage8 installed a returnable IRQ vector path, generated SGI0 to the current CPU through `GICD_SGIR`, handled it by reading `GICC_IAR` / writing `GICC_EOIR`, logged interrupt ID 0, and returned through `kernel_entry` successfully.
 
 ## Repository contents
 
@@ -103,6 +104,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage5/` — XNU-adjacent skeleton with `kernel_entry(struct boot_args*)`, pexpert-like Apple-DT discovery, and `ml_*` timebase stubs.
 - `stage6/` — XNU-adjacent skeleton with `PE_state`-like platform state and deliberate data-abort recovery test.
 - `stage7/` — XNU-adjacent skeleton with a read-only MSM8974 GIC driver/state snapshot.
+- `stage8/` — XNU-adjacent skeleton with controlled SGI0 delivery and a returnable GIC IRQ handler path.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
@@ -110,6 +112,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-08-stage5-xnu-skeleton.md` — successful Stage5 XNU-adjacent kernel-entry skeleton test.
 - `docs/experiment-09-stage6-pe-state-abort.md` — successful Stage6 PE_state-like platform state and data-abort recovery test.
 - `docs/experiment-10-stage7-gic-skeleton.md` — successful Stage7 read-only GIC driver skeleton test.
+- `docs/experiment-11-stage8-sgi-irq.md` — successful Stage8 controlled SGI0 IRQ delivery test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -132,13 +135,13 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage7 are complete. The next practical target is Stage8: controlled SGI/IRQ delivery to prove the interrupt vector path.
+Stage0 through Stage8 are complete. The next practical target is Stage9: timer-driven IRQ delivery using the ARM generic physical timer PPI.
 
-Near-term Stage8 work:
+Near-term Stage9 work:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
-- Install an IRQ handler that reads `GICC_IAR`, logs the interrupt ID, writes `GICC_EOIR`, and returns to C.
-- Enable only SGI0/self-interrupt for a tightly controlled test; do not enable external device IRQs.
-- Send SGI0 to the current CPU through `GICD_SGIR` and verify the IRQ handler runs.
-- Restore/mask SGI0 state before PS_HOLD reset where practical.
-- Keep custom data-abort logging enabled while testing IRQ delivery.
+- Reuse the Stage8 returnable IRQ handler path (`GICC_IAR`/`GICC_EOIR`).
+- Program a short ARM generic timer one-shot deadline and enable only the required timer PPI in the local GIC bank.
+- Verify a real hardware timer interrupt reaches the IRQ vector and returns to C.
+- Keep unrelated external device IRQs disabled/unmodified.
+- Keep custom abort logging enabled while testing timer interrupt delivery.
