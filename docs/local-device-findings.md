@@ -233,6 +233,50 @@ Conclusion:
 - This bootloader exposes very little through `getvar`.
 - Actual `fastboot boot <image>` support is still untested.
 
+## Non-persistent `fastboot boot` test (success)
+
+On 2026-06-04 a non-persistent temporary boot test was performed with the locally repacked recovery image. No partition was flashed or erased.
+
+Image used:
+
+```text
+/tmp/cancro-recovery-repacked.img
+sha256=cf112d805630b0998f685fb26a31f646170fae331368e0e387aa70ea7a89fb7f
+```
+
+Command and result:
+
+```text
+sudo fastboot boot /tmp/cancro-recovery-repacked.img
+Sending 'boot.img' (16384 KB)   OKAY
+Booting                         OKAY
+Finished. Total time: 0.571s
+```
+
+After booting, ADB reported recovery mode:
+
+```text
+4a2fe00b   recovery   product:omni_cancro   model:MI_4LTE   device:cancro
+adb get-state = recovery
+```
+
+Read-only identity collected from the temporarily booted recovery:
+
+```text
+ro.twrp.version=3.7.0_9-0
+ro.build.display.id=omni_cancro-eng 7.1.2 NJH47F 20 test-keys
+ro.product.device=cancro
+uname=Linux localhost 3.4.113-perf-gad3eeff2596 #1 SMP PREEMPT Wed Dec 26 21:28:56 CST 2018 armv7l GNU/Linux
+```
+
+`sudo adb reboot` then returned the phone to normal Android (`product:cancro`, state `device`).
+
+Key conclusions:
+
+- The cancro bootloader accepts non-persistent `fastboot boot` of a locally repacked Android boot image.
+- The installed recovery is TWRP 3.7.0_9-0 on an OmniROM `omni_cancro` 7.1.2 base.
+- This confirms a safe iterate path: build a custom boot image, test it with `fastboot boot` first, and only flash after a successful temporary boot.
+
 ## Safety notes
 
 - Avoid touching `sbl1`, `aboot`, `rpm`, `tz`, `modem`, `modemst1`, `modemst2`, `persist` unless there is a very specific recovery plan.
