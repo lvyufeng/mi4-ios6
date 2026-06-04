@@ -79,6 +79,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage6 added a `PE_state`-like platform state block populated from `boot_args`/Apple-DT, validated memory/CPU/GIC/timer/vector facts, then deliberately triggered and recovered from a data abort through the custom exception handler.
 - Stage7 added a read-only MSM8974 GIC driver skeleton, captured distributor/CPU-interface state, enable/pending/priority/target registers for the first IRQ group, validated IRQ count 288 and 4 CPU interfaces, and returned through `kernel_entry` successfully.
 - Stage8 installed a returnable IRQ vector path, generated SGI0 to the current CPU through `GICD_SGIR`, handled it by reading `GICC_IAR` / writing `GICC_EOIR`, logged interrupt ID 0, and returned through `kernel_entry` successfully.
+- Stage9 programmed the ARM generic physical timer, enabled the local timer PPI path, handled timer interrupt ID 19 through the same IRQ/EOIR path, masked/disabled the timer again, and returned through `kernel_entry` successfully.
 
 ## Repository contents
 
@@ -105,6 +106,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage6/` — XNU-adjacent skeleton with `PE_state`-like platform state and deliberate data-abort recovery test.
 - `stage7/` — XNU-adjacent skeleton with a read-only MSM8974 GIC driver/state snapshot.
 - `stage8/` — XNU-adjacent skeleton with controlled SGI0 delivery and a returnable GIC IRQ handler path.
+- `stage9/` — XNU-adjacent skeleton with ARM generic timer one-shot IRQ delivery.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
@@ -113,6 +115,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-09-stage6-pe-state-abort.md` — successful Stage6 PE_state-like platform state and data-abort recovery test.
 - `docs/experiment-10-stage7-gic-skeleton.md` — successful Stage7 read-only GIC driver skeleton test.
 - `docs/experiment-11-stage8-sgi-irq.md` — successful Stage8 controlled SGI0 IRQ delivery test.
+- `docs/experiment-12-stage9-timer-irq.md` — successful Stage9 ARM generic timer IRQ delivery test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -135,13 +138,13 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage8 are complete. The next practical target is Stage9: timer-driven IRQ delivery using the ARM generic physical timer PPI.
+Stage0 through Stage9 are complete. The next practical target is Stage10: first MMU translation bring-up.
 
-Near-term Stage9 work:
+Near-term Stage10 work:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
-- Reuse the Stage8 returnable IRQ handler path (`GICC_IAR`/`GICC_EOIR`).
-- Program a short ARM generic timer one-shot deadline and enable only the required timer PPI in the local GIC bank.
-- Verify a real hardware timer interrupt reaches the IRQ vector and returns to C.
-- Keep unrelated external device IRQs disabled/unmodified.
-- Keep custom abort logging enabled while testing timer interrupt delivery.
+- Build a small ARMv7 section page table.
+- Identity-map the payload RAM, RAM console, IMEM, GIC, timer, and PS_HOLD MMIO regions.
+- Enable MMU with caches still disabled first.
+- Verify code/data/MMIO access and ram_console logging continue under translation.
+- Preserve the Stage8/Stage9 IRQ path and custom abort logging while testing MMU enable.
