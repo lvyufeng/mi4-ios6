@@ -72,6 +72,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - USB-only debugging works through Android `/proc/last_kmsg` / `ram_console`; no teardown/UART was required for Stage0/Stage1.
 - Stage0 executed a raw non-Linux ARMv7 payload at `0x00008000`, wrote `MI4IOS6_STAGE0` into persistent RAM at `0xde500000`, and reset the phone through MSM8974 PS_HOLD at `0xfc4ab000`.
 - Stage1 executed a boot-wrapper payload, set up stack and `.bss`, built a public-XNU-style ARM `boot_args` structure, attached a minimal Apple flattened device tree stub, called `test_kernel_entry(boot_args*)`, validated the handoff, logged `MI4IOS6_STAGE1 handoff ok`, and reset back to Android.
+- Stage2 entered a freestanding C runtime, built a fuller Apple-style device tree (`/chosen`, `/memory`, `/cpus`, `/msm8974-io`, `/interrupt-controller`, `/timer`), walked/validated the tree, logged `apple_dt selftest ok` and `handoff ok`, and reset back to Android.
 
 ## Repository contents
 
@@ -91,6 +92,8 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-04-stage1-boot-wrapper.md` — successful Stage1 boot-wrapper hardware test and recovered persistent log.
 - `stage0/` — tiny bare-metal ARMv7 payload that writes a ram_console marker and attempts MSM8974 reset.
 - `stage1/` — ARMv7 boot-wrapper payload that builds a public-XNU-style `boot_args` structure and validates `test_kernel_entry(boot_args*)` handoff.
+- `stage2/` — freestanding C runtime payload that builds and walks a fuller Apple-style device tree for the MSM8974 bring-up contract.
+- `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -113,13 +116,13 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 and Stage1 are complete. The next practical target is Stage2: a larger early runtime that can support more XNU-like bring-up code.
+Stage0, Stage1, and Stage2 are complete. The next practical target is Stage3: early hardware-facing bring-up from the C runtime.
 
-Near-term Stage2 work:
+Near-term Stage3 work:
 
-- Factor the persistent log writer into a reusable boot-wrapper module.
-- Add a safer append/ring strategy for the Android 2 MiB `ram_console` area.
-- Generate a fuller Apple-style device tree with `/cpus`, memory, chosen, MSM8974/GIC, timer, and debug-log nodes.
-- Add a tiny C-capable runtime or equivalent assembly support (`memcpy`, `memset`, stack discipline, maybe simple formatting).
-- Begin a public-source XNU-adjacent entry stub that consumes `boot_args` before attempting real pexpert or VM initialization.
-- Keep all hardware tests non-persistent through `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
+- Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
+- Safely read CP15/system registers and MSM8974 MMIO identification/status registers from C and log them.
+- Probe GIC distributor/CPU interface at `0xf9000000` / `0xf9002000` without enabling interrupts yet.
+- Probe ARM/MSM timer registers around `0xf9020000` and log monotonic counter behavior if safely readable.
+- Feed the probed facts back into the Apple-style device tree and `boot_args` contract.
+- Only after read-only hardware probes are stable, attempt controlled GIC/timer initialization and a public-XNU-adjacent early entry path.
