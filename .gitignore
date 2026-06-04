@@ -1,0 +1,19 @@
+# Local phone partition backups and extracted artifacts
+xiaomi4-cancro-backup-*/
+*.img
+*.bin
+*.elf
+*.dtb
+*.dtbo
+*.cpio
+*.cpio.gz
+
+# Generated build/output directories
+out/
+build/
+dist/
+
+# Host/editor noise
+.DS_Store
+*.swp
+*.swo
