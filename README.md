@@ -86,6 +86,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage13 called a named high-virtual `kernel_bootstrap`-style entry, consumed high-virtual boot args, wrote PE/XNU-like bootstrap state through a high alias, validated it through identity/alias views, and re-ran SGI/timer IRQ selftests successfully.
 - Stage14 moved richer PE/XNU-like state handling into the high-virtual bootstrap path, consumed high-virtual `PE_state`, emitted high-virtual log markers, validated memory/CPU/GIC/timer/vector facts, and re-ran SGI/timer IRQ selftests successfully.
 - Stage15 moved selected pexpert/PE_state validation into the high-virtual bootstrap path, returned structured status `0x15000001`, verified validation mask `0x00000000`, and re-ran SGI/timer IRQ selftests successfully.
+- Stage16 ran a small ordered XNU-like init sequence from high-virtual bootstrap, validated step mask `0x0000000f`, returned structured status `0x16000001`, and re-ran SGI/timer IRQ selftests successfully.
 
 ## Repository contents
 
@@ -119,6 +120,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage13/` — XNU-adjacent skeleton with a high-virtual kernel bootstrap handoff and state block.
 - `stage14/` — XNU-adjacent skeleton with richer PE/XNU-like high-virtual bootstrap state handling.
 - `stage15/` — XNU-adjacent skeleton with high-virtual bootstrap validation and structured status reporting.
+- `stage16/` — XNU-adjacent skeleton with a small ordered high-virtual init sequence.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
@@ -134,6 +136,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-16-stage13-high-bootstrap.md` — successful Stage13 high-virtual kernel bootstrap handoff test.
 - `docs/experiment-17-stage14-high-pe-state.md` — successful Stage14 high-virtual PE/XNU state bootstrap test.
 - `docs/experiment-18-stage15-high-validation.md` — successful Stage15 high-virtual bootstrap validation/status test.
+- `docs/experiment-19-stage16-high-init-sequence.md` — successful Stage16 high-virtual init-sequence test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -156,13 +159,13 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage15 are complete. The next practical target is Stage16: start running a small ordered XNU-like init sequence from the high-virtual bootstrap path.
+Stage0 through Stage16 are complete. The next practical target is Stage17: move from a high-virtual helper call toward a high-virtual root kernel path.
 
-Near-term Stage16 work:
+Near-term Stage17 work:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
 - Preserve identity mappings for ram_console, PS_HOLD, GIC, timer, and early recovery paths.
-- Build a tiny ordered high-virtual init sequence that performs timebase, PE_state, and interrupt-controller checks.
-- Return a structured success/failure status object from high virtual execution.
+- Call a high-virtual root entry that owns the ordered init sequence.
+- Return a structured kernel-result object from high virtual execution.
 - Keep caches disabled and validate identity/high alias state after returning.
 - Preserve SGI/timer IRQ retests plus custom abort logging.
