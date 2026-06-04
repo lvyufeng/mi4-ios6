@@ -65,6 +65,19 @@ Backed-up `boot.img` is a standard Android boot image:
 
 Backed-up `recovery.img` is also a standard Android boot image and uses a serial-console-oriented command line (`console=ttyHSL0,115200,n8`).
 
+## Repository contents
+
+- `docs/local-device-findings.md` — detailed local observations, partition map, backup status, and parsed boot/recovery image fields.
+- `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
+
+Example parser usage:
+
+```bash
+./tools/parse_android_bootimg.py xiaomi4-cancro-backup-20260604-112053/boot.img
+```
+
+The backup directory is ignored by git, so this command only works on a host where the local backup exists.
+
 ## Safety rules for this repo
 
 - Do not flash or erase partitions without an explicit confirmation for that specific operation.
