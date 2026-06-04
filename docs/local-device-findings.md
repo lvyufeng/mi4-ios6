@@ -197,9 +197,46 @@ recovery-unpacked/kernel
 recovery-unpacked/ramdisk.gz
 ```
 
+## Fastboot read-only check
+
+A read-only fastboot check was performed on 2026-06-04. The phone was rebooted into bootloader and then rebooted back to Android without flashing or erasing anything.
+
+Important host note: non-root `fastboot` waited for a device, while `sudo fastboot` worked. Use `sudo fastboot` unless host USB permissions are fixed for the fastboot-mode vendor/product combination.
+
+Observed output:
+
+```text
+sudo fastboot devices -l
+4a2fe00b               fastboot usb:3-10
+
+sudo fastboot getvar product
+product: MSM8974
+
+sudo fastboot getvar max-download-size
+max-download-size: 0x30000000
+```
+
+These queried variables returned empty values on this bootloader:
+
+```text
+secure:
+unlocked:
+partition-size:boot:
+partition-size:recovery:
+all:
+```
+
+Conclusion:
+
+- Fastboot mode is reachable.
+- `fastboot reboot` returns the phone to Android successfully.
+- This bootloader exposes very little through `getvar`.
+- Actual `fastboot boot <image>` support is still untested.
+
 ## Safety notes
 
 - Avoid touching `sbl1`, `aboot`, `rpm`, `tz`, `modem`, `modemst1`, `modemst2`, `persist` unless there is a very specific recovery plan.
 - Prefer non-persistent `fastboot boot <image>` experiments before any `fastboot flash`.
 - Re-check that fastboot mode is reachable before any destructive experiment.
 - Keep the verified backup directory out of source commits.
+

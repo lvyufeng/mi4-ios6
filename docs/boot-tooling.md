@@ -239,6 +239,15 @@ fastboot boot /tmp/cancro-recovery-repacked.img
 
 Some older Xiaomi/Qualcomm bootloaders may reject `fastboot boot`, hang, or require a specific accepted image format. Failure of `fastboot boot` does not prove an image is flash-safe.
 
+Local read-only fastboot result on 2026-06-04:
+
+- `sudo fastboot devices -l` saw serial `4a2fe00b` in fastboot mode.
+- `sudo fastboot getvar product` returned `MSM8974`.
+- `sudo fastboot getvar max-download-size` returned `0x30000000`.
+- `secure`, `unlocked`, `partition-size:boot`, `partition-size:recovery`, and `all` returned empty values.
+- `sudo fastboot reboot` returned the phone to Android successfully.
+- `fastboot boot` remains untested.
+
 ## Sources
 
 - [Ubuntu 22.04 `abootimg` package](https://packages.ubuntu.com/jammy/abootimg)
