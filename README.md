@@ -81,6 +81,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage8 installed a returnable IRQ vector path, generated SGI0 to the current CPU through `GICD_SGIR`, handled it by reading `GICC_IAR` / writing `GICC_EOIR`, logged interrupt ID 0, and returned through `kernel_entry` successfully.
 - Stage9 programmed the ARM generic physical timer, enabled the local timer PPI path, handled timer interrupt ID 19 through the same IRQ/EOIR path, masked/disabled the timer again, and returned through `kernel_entry` successfully.
 - Stage10 built an ARMv7 section identity map, enabled `SCTLR.M` with caches still disabled, verified ram_console/IMEM/GIC/timer MMIO access under translation, then re-ran SGI and timer IRQ selftests successfully.
+- Stage11 added high virtual aliases for the low payload section, ram_console, and GIC/timer MMIO, validated alias-vs-identity data/vector/MMIO reads with caches disabled, and re-ran SGI/timer IRQ selftests successfully.
 
 ## Repository contents
 
@@ -109,6 +110,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage8/` — XNU-adjacent skeleton with controlled SGI0 delivery and a returnable GIC IRQ handler path.
 - `stage9/` — XNU-adjacent skeleton with ARM generic timer one-shot IRQ delivery.
 - `stage10/` — XNU-adjacent skeleton with first ARMv7 MMU identity-map enable.
+- `stage11/` — XNU-adjacent skeleton with controlled high virtual aliases over the identity map.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
@@ -119,6 +121,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-11-stage8-sgi-irq.md` — successful Stage8 controlled SGI0 IRQ delivery test.
 - `docs/experiment-12-stage9-timer-irq.md` — successful Stage9 ARM generic timer IRQ delivery test.
 - `docs/experiment-13-stage10-mmu-identity.md` — successful Stage10 ARMv7 MMU identity-map enable test.
+- `docs/experiment-14-stage11-high-alias.md` — successful Stage11 high virtual alias mapping test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -141,13 +144,13 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage10 are complete. The next practical target is Stage11: start moving from a flat identity map toward an XNU-like bootstrap virtual-memory layout.
+Stage0 through Stage11 are complete. The next practical target is Stage12: a tiny high-virtual call/data bootstrap experiment.
 
-Near-term Stage11 work:
+Near-term Stage12 work:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
-- Preserve the Stage10 identity map for ram_console, PS_HOLD, GIC, timer, and early recovery paths.
-- Add a controlled high/offset virtual alias for a small kernel window or selected data page.
-- Validate virtual alias reads/writes and MMIO access one mapping at a time.
-- Keep caches disabled until alias behavior is understood.
-- Preserve the Stage8/Stage9 IRQ path and custom abort logging while testing new mappings.
+- Preserve identity mappings for ram_console, PS_HOLD, GIC, timer, and early recovery paths.
+- Add high aliases for code and data and call a tiny function through its high virtual alias.
+- Use a high virtual pointer for a small state block and validate writes through both identity and alias paths.
+- Keep caches disabled while alias execution behavior is tested.
+- Return safely to the identity-mapped path and preserve SGI/timer IRQ retests plus abort logging.
