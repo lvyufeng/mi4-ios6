@@ -68,6 +68,10 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 ## Repository contents
 
 - `docs/local-device-findings.md` — detailed local observations, partition map, backup status, and parsed boot/recovery image fields.
+- `docs/recovery-and-rollback.md` — required recovery checklist and rollback procedure before any persistent write.
+- `docs/boot-tooling.md` — local boot image tooling plan and no-op round-trip results.
+- `docs/cancro-platform.md` — Xiaomi Mi 4 / MSM8974 platform source pointers and bootloader notes.
+- `docs/darwin-xnu-research.md` — open Darwin/XNU research notes and milestone framing.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 
 Example parser usage:
