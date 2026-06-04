@@ -60,10 +60,18 @@ Backed-up `boot.img` is a standard Android boot image:
 - Kernel load address: `0x8000`
 - Ramdisk load address: `0x2000000`
 - Tags address: `0x1e00000`
-- Device tree blob present in the boot image
+- Device tree blob / Qualcomm QCDT present in the boot image (`dt_size=2521088`)
 - Command line includes `androidboot.hardware=qcom` and `androidboot.bootdevice=msm_sdcc.1`
+- The cancro bootloader requires the legacy Android v0 `dt_size`/QCDT field for custom `fastboot boot` payloads (`dtb not found` without it)
 
 Backed-up `recovery.img` is also a standard Android boot image and uses a serial-console-oriented command line (`console=ttyHSL0,115200,n8`).
+
+## Confirmed milestones
+
+- Non-persistent `sudo fastboot boot <img>` works on this device.
+- USB-only debugging works through Android `/proc/last_kmsg` / `ram_console`; no teardown/UART was required for Stage0/Stage1.
+- Stage0 executed a raw non-Linux ARMv7 payload at `0x00008000`, wrote `MI4IOS6_STAGE0` into persistent RAM at `0xde500000`, and reset the phone through MSM8974 PS_HOLD at `0xfc4ab000`.
+- Stage1 executed a boot-wrapper payload, set up stack and `.bss`, built a public-XNU-style ARM `boot_args` structure, attached a minimal Apple flattened device tree stub, called `test_kernel_entry(boot_args*)`, validated the handoff, logged `MI4IOS6_STAGE1 handoff ok`, and reset back to Android.
 
 ## Repository contents
 
@@ -78,9 +86,14 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-02-usb-log-loop.md` — verified printk/kmsg markers survive reboot into `/proc/last_kmsg`.
 - `docs/msm8974-xnu-porting-map.md` — concrete MSM8974 ↔ XNU platform interface and work-package map.
 - `docs/stage0-payload-plan.md` — plan for first non-Linux ARMv7 payload executed via `fastboot boot`.
+- `docs/experiment-03-stage0-bare-metal.md` — successful Stage0 bare-metal payload execution and ram_console/PS_HOLD proof.
+- `docs/stage1-boot-wrapper-plan.md` — Stage1 boot-wrapper design for XNU-style `boot_args` and Apple-DT handoff.
+- `docs/experiment-04-stage1-boot-wrapper.md` — successful Stage1 boot-wrapper hardware test and recovered persistent log.
 - `stage0/` — tiny bare-metal ARMv7 payload that writes a ram_console marker and attempts MSM8974 reset.
+- `stage1/` — ARMv7 boot-wrapper payload that builds a public-XNU-style `boot_args` structure and validates `test_kernel_entry(boot_args*)` handoff.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
+- `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
 
 Example parser usage:
 
@@ -100,9 +113,13 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-- Add `.gitignore` rules for backup images and generated artifacts.
-- Document the exact partition map and recovery procedure.
-- Install or vendor boot image tooling (`unpackbootimg`, `mkbootimg`, or equivalent scripts).
-- Identify Xiaomi `cancro` kernel source and device trees.
-- Identify relevant open-source Darwin/XNU ARMv7 materials for study.
-- Build a minimal non-destructive boot experiment before attempting any deeper kernel work.
+Stage0 and Stage1 are complete. The next practical target is Stage2: a larger early runtime that can support more XNU-like bring-up code.
+
+Near-term Stage2 work:
+
+- Factor the persistent log writer into a reusable boot-wrapper module.
+- Add a safer append/ring strategy for the Android 2 MiB `ram_console` area.
+- Generate a fuller Apple-style device tree with `/cpus`, memory, chosen, MSM8974/GIC, timer, and debug-log nodes.
+- Add a tiny C-capable runtime or equivalent assembly support (`memcpy`, `memset`, stack discipline, maybe simple formatting).
+- Begin a public-source XNU-adjacent entry stub that consumes `boot_args` before attempting real pexpert or VM initialization.
+- Keep all hardware tests non-persistent through `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
