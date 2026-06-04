@@ -75,6 +75,8 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/source-baseline.md` — external source checkout baseline for cancro kernel/device tree and public XNU references.
 - `docs/experiment-01-cmdline.md` — first successful experiment: custom kernel cmdline via non-persistent boot.
 - `docs/no-teardown-debugging.md` — USB-only debugging channels (`/proc/last_kmsg`, `/dev/kmsg`, ramoops) that avoid soldering a UART.
+- `docs/experiment-02-usb-log-loop.md` — verified printk/kmsg markers survive reboot into `/proc/last_kmsg`.
+- `docs/msm8974-xnu-porting-map.md` — concrete MSM8974 ↔ XNU platform interface and work-package map.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 
