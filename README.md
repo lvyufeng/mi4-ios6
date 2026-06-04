@@ -77,6 +77,8 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/no-teardown-debugging.md` — USB-only debugging channels (`/proc/last_kmsg`, `/dev/kmsg`, ramoops) that avoid soldering a UART.
 - `docs/experiment-02-usb-log-loop.md` — verified printk/kmsg markers survive reboot into `/proc/last_kmsg`.
 - `docs/msm8974-xnu-porting-map.md` — concrete MSM8974 ↔ XNU platform interface and work-package map.
+- `docs/stage0-payload-plan.md` — plan for first non-Linux ARMv7 payload executed via `fastboot boot`.
+- `stage0/` — tiny bare-metal ARMv7 payload that writes a ram_console marker and attempts MSM8974 reset.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 
