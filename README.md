@@ -103,6 +103,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage30 added a minimal startup routine driven by the startup boundary, validated required/observed routine root steps `0x0000fff3`, startup/launch/root statuses `0x30000001`, boot args pointer `0xc002c000`, DT pointer `0xc002c140`, timebase `0x0124f800`, interrupt mask `0x0000000f`, routine satisfied mask `0x000000ff`, root step mask `0x0001ffff`, returned status `0x30000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage31 split the startup routine into a separately called high-virtual startup entry, validated a compact handoff object (`0x00000030`, checksum `0x3025068c`), startup-entry required/observed root steps `0x0001fff3`, routine/startup/root statuses `0x31000001`, boot args pointer `0xc002c000`, DT pointer `0xc002c140`, timebase `0x0124f800`, interrupt mask `0x0000000f`, entry satisfied mask `0x000000ff`, root step mask `0x0003ffff`, returned status `0x31000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage32 made the high-virtual startup entry dispatch a minimal descriptor-driven kernel-start callout table, validated callout order/handler/service masks `0x0000000f`, callout checksum `0x00000005`, callout status `0x32000001`, root step mask `0x0007ffff`, returned status `0x32000001`, and re-ran SGI/timer IRQ selftests successfully.
+- Stage33 made the startup-entry callouts populate a versioned kernel-start context object, validated context required/satisfied mask `0x0000003f`, context checksum `0x012506ba`, context status `0x33000001`, boot args pointer `0xc002c000`, DT pointer `0xc002c140`, platform consistency `0x0000000f`, timebase `0x0124f800`, interrupt mask `0x0000000f`, callout mask `0x0000000f`, root step mask `0x000fffff`, returned status `0x33000001`, and re-ran SGI/timer IRQ selftests successfully.
 
 ## Repository contents
 
@@ -153,6 +154,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage30/` — XNU-adjacent skeleton with a minimal startup routine driven by the startup boundary.
 - `stage31/` — XNU-adjacent skeleton with a separately called high-virtual startup entry and explicit startup handoff object.
 - `stage32/` — XNU-adjacent skeleton with a startup-entry-owned descriptor-driven kernel-start callout table.
+- `stage33/` — XNU-adjacent skeleton with startup-entry-populated kernel-start context object.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
@@ -185,6 +187,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-33-stage30-startup-routine.md` — successful Stage30 startup-routine handoff test.
 - `docs/experiment-34-stage31-startup-entry.md` — successful Stage31 high-virtual startup-entry handoff test.
 - `docs/experiment-35-stage32-kernel-callouts.md` — successful Stage32 startup-entry kernel-callout table test.
+- `docs/experiment-36-stage33-kernel-context.md` — successful Stage33 startup-entry kernel-context object test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -207,14 +210,14 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage32 are complete. The next practical target is Stage33: make the startup-entry callouts populate a minimal kernel-start context object.
+Stage0 through Stage33 are complete. The next practical target is Stage34: make the kernel-start context produce a minimal VM bootstrap plan object.
 
-Near-term Stage33 work:
+Near-term Stage34 work:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
 - Preserve identity mappings for ram_console, PS_HOLD, GIC, timer, and early recovery paths.
-- Keep descriptor-driven service/phase dispatchers plus registry, policy, manifest, launch-contract, startup-boundary, startup-routine, startup-entry, and callout-table checks.
-- Add a versioned context object containing validated boot args, DT, platform, timebase, interrupt, and callout status facts.
-- Validate context checksum/status through identity and high-alias views.
+- Keep descriptor-driven service/phase dispatchers plus registry, policy, manifest, launch-contract, startup-boundary, startup-routine, startup-entry, callout-table, and kernel-context checks.
+- Add a versioned VM plan object containing low/high alias base, L1 table, memory base/size, context status, and MMU/cache policy facts.
+- Validate VM plan checksum/status through identity and high-alias views.
 - Keep caches disabled and validate identity/high alias state after returning.
 - Preserve SGI/timer IRQ retests plus custom abort logging.
