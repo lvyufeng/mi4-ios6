@@ -111,6 +111,8 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage38 made the pmap workspace descriptor drive a versioned kernel object table descriptor, validated object-table required/satisfied mask `0x0000003f`, object coverage mask `0x0000007f`, pmap workspace checksum/status `0xce451213`/`0x38000001`, object table checksum/status `0xa61ac796`/`0x38000001`, object slots for boot args `0xc0034000`, device tree `0xc0034140`, PE state `0xc0029020`, VM plan/state `0xc002c000`/`0xc002c04c`, allocator `0xc002c09c`, pmap workspace `0xc002c0e4`, L1 table `0x00030000`/`0xc0030000`, root step mask `0x01ffffff`, returned status `0x38000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage39 made the kernel object table descriptor drive a versioned kernel collection handoff descriptor, validated collection-handoff required/satisfied mask `0x0000003f`, handoff entry/object mask `0x00000007`/`0x0000007f`, object table checksum/status `0xa71ac796`/`0x39000001`, collection handoff checksum/status `0xce451213`/`0x39000001`, object slots for boot args `0xc0034000`, device tree `0xc0034140`, PE state `0xc0029020`, VM plan/state `0xc002c000`/`0xc002c04c`, allocator `0xc002c09c`, pmap workspace `0xc002c0e4`, L1 table `0x00030000`/`0xc0030000`, root step mask `0x03ffffff`, returned status `0x39000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage40 made the kernel collection handoff descriptor drive a versioned kernel collection entry-table descriptor, validated entry-table required/satisfied mask `0x0000007f`, object/order masks `0x0000007f`/`0x0000007f`, class mask `0x0000000f`, handoff checksum/status `0xce451213`/`0x40000001`, entry-table checksum/status `0xde1ac77d`/`0x40000001`, ordered object slots `0x00000001` through `0x00000040`, object pointers for boot args `0xc0034000`, device tree `0xc0034140`, PE state `0xc0029020`, VM plan/state `0xc002c000`/`0xc002c04c`, allocator `0xc002c09c`, pmap workspace `0xc002c0e4`, L1 table `0x00030000`/`0xc0030000`, root step mask `0x07ffffff`, returned status `0x40000001`, and re-ran SGI/timer IRQ selftests successfully.
+- Stage41 made the kernel collection entry-table descriptor drive a versioned kernel collection object-graph descriptor, validated object-graph required/satisfied mask `0x0000003f`, node/edge masks `0x0000007f`/`0x0000007f`, class mask `0x0000000f`, entry-table checksum/status `0xdf1a877d`/`0x41000001`, object-graph checksum/status `0xce451242`/`0x41000001`, node dependency sequence `0x00000000`, `0x00000001`, `0x00000003`, `0x00000007`, `0x00000008`, `0x00000010`, `0x00000020`, object pointers for boot args `0xc0038000`, device tree `0xc0038140`, PE state `0xc002d020`, VM plan/state `0xc0030000`/`0xc003004c`, allocator `0xc003009c`, pmap workspace `0xc00300e4`, L1 table `0x00034000`/`0xc0034000`, root step mask `0x0fffffff`, returned status `0x41000001`, and re-ran SGI/timer IRQ selftests successfully.
+- Stage42 made the kernel collection object-graph descriptor drive a versioned kernel collection dependency-resolution descriptor, validated dependency-resolution required/satisfied mask `0x0000007f`, resolved-order/dependency/activation masks `0x0000007f`/`0x0000007f`/`0x0000007f`, class mask `0x0000000f`, object-graph checksum/status `0xce451242`/`0x42000001`, dependency-resolution checksum/status `0xdc1b472e`/`0x42000001`, resolved object sequence `0x00000001` through `0x00000040`, dependency sequence `0x00000000`, `0x00000001`, `0x00000003`, `0x00000007`, `0x00000008`, `0x00000010`, `0x00000020`, activation-ready sequence `0x00000001` through `0x00000040`, object pointers for boot args `0xc003c000`, device tree `0xc003c140`, PE state `0xc0031020`, VM plan/state `0xc0034000`/`0xc003404c`, allocator `0xc003409c`, pmap workspace `0xc00340e4`, L1 table `0x00038000`/`0xc0038000`, root step mask `0x1fffffff`, returned status `0x42000001`, and re-ran SGI/timer IRQ selftests successfully.
 
 ## Repository contents
 
@@ -169,6 +171,8 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage38/` — XNU-adjacent skeleton with pmap-workspace-driven kernel object table descriptor.
 - `stage39/` — XNU-adjacent skeleton with object-table-driven kernel collection handoff descriptor.
 - `stage40/` — XNU-adjacent skeleton with collection-handoff-driven kernel collection entry-table descriptor.
+- `stage41/` — XNU-adjacent skeleton with entry-table-driven kernel collection object-graph descriptor.
+- `stage42/` — XNU-adjacent skeleton with object-graph-driven kernel collection dependency-resolution descriptor.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
@@ -209,6 +213,8 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-41-stage38-kernel-object-table.md` — successful Stage38 kernel object table descriptor test.
 - `docs/experiment-42-stage39-kernel-collection-handoff.md` — successful Stage39 kernel collection handoff descriptor test.
 - `docs/experiment-43-stage40-kernel-collection-entry-table.md` — successful Stage40 kernel collection entry-table descriptor test.
+- `docs/experiment-44-stage41-kernel-collection-object-graph.md` — successful Stage41 kernel collection object-graph descriptor test.
+- `docs/experiment-45-stage42-kernel-collection-dependency-resolution.md` — successful Stage42 kernel collection dependency-resolution descriptor test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -231,14 +237,14 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage40 are complete. The next practical target is Stage41: make the kernel collection entry table drive a minimal kernel collection object graph.
+Stage0 through Stage42 are complete. The next practical target is Stage43: make the kernel collection dependency-resolution descriptor drive a minimal activation-order descriptor.
 
-Near-term Stage41 work:
+Near-term Stage43 work:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
 - Preserve identity mappings for ram_console, PS_HOLD, GIC, timer, and early recovery paths.
-- Keep descriptor-driven service/phase dispatchers plus registry, policy, manifest, launch-contract, startup-boundary, startup-routine, startup-entry, callout-table, kernel-context, VM-plan, VM-state, allocator, pmap-workspace, object-table, collection-handoff, and entry-table checks.
-- Add a versioned kernel collection object-graph descriptor consuming ordered entry-table nodes.
-- Validate node count, node mask, dependency/edge ordering, boot/platform/VM/pmap class coverage, checksum/status, and identity/high-alias views.
+- Keep descriptor-driven service/phase dispatchers plus registry, policy, manifest, launch-contract, startup-boundary, startup-routine, startup-entry, callout-table, kernel-context, VM-plan, VM-state, allocator, pmap-workspace, object-table, collection-handoff, entry-table, object-graph, and dependency-resolution checks.
+- Add a versioned activation-order descriptor consuming resolved nodes and activation-ready facts.
+- Validate activation sequence, prerequisite coverage, class readiness, checksum/status, and identity/high-alias views.
 - Keep caches disabled and validate identity/high alias state after returning.
 - Preserve SGI/timer IRQ retests plus custom abort logging.
