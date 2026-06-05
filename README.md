@@ -122,6 +122,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/cancro-platform.md` — Xiaomi Mi 4 / MSM8974 platform source pointers and bootloader notes.
 - `docs/darwin-xnu-research.md` — open Darwin/XNU research notes and milestone framing.
 - `docs/source-baseline.md` — external source checkout baseline for cancro kernel/device tree and public XNU references.
+- `docs/upstream-xnu-analysis.md` — selected iOS 6-era public XNU tag analysis, Stage42 gap review, and revised Stage43 loader direction.
 - `docs/experiment-01-cmdline.md` — first successful experiment: custom kernel cmdline via non-persistent boot.
 - `docs/no-teardown-debugging.md` — USB-only debugging channels (`/proc/last_kmsg`, `/dev/kmsg`, ramoops) that avoid soldering a UART.
 - `docs/experiment-02-usb-log-loop.md` — verified printk/kmsg markers survive reboot into `/proc/last_kmsg`.
@@ -237,14 +238,15 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage42 are complete. The next practical target is Stage43: make the kernel collection dependency-resolution descriptor drive a minimal activation-order descriptor.
+Stage0 through Stage42 are complete. The next practical target is Stage43: pivot from synthetic activation-order descriptors toward a Mach-O/XNU loader probe grounded in the selected public iOS 6-era XNU baseline (`external/xnu-upstream` detached at `xnu-2050.22.13`).
 
 Near-term Stage43 work:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
 - Preserve identity mappings for ram_console, PS_HOLD, GIC, timer, and early recovery paths.
-- Keep descriptor-driven service/phase dispatchers plus registry, policy, manifest, launch-contract, startup-boundary, startup-routine, startup-entry, callout-table, kernel-context, VM-plan, VM-state, allocator, pmap-workspace, object-table, collection-handoff, entry-table, object-graph, and dependency-resolution checks.
-- Add a versioned activation-order descriptor consuming resolved nodes and activation-ready facts.
-- Validate activation sequence, prerequisite coverage, class readiness, checksum/status, and identity/high-alias views.
+- Keep descriptor-driven service/phase dispatchers plus registry, policy, manifest, launch-contract, startup-boundary, startup-routine, startup-entry, callout-table, kernel-context, VM-plan, VM-state, allocator, pmap-workspace, object-table, collection-handoff, entry-table, object-graph, and dependency-resolution checks as safety gates.
+- Parse or stage a real XNU-style Mach-O/kernel artifact enough to validate load commands, segment layout, entry expectations, boot_args compatibility, `topOfKernelData`/translation-table requirements, and Apple-DT handoff assumptions.
+- Use `xnu-2050.22.13` for iOS 6 / Darwin 12-era public context and `xnu-4570.1.46` as the public ARM implementation reference where the 2050 tree lacks ARMv7 files.
+- Do not jump into XNU yet; first produce a loader-preflight descriptor with Mach-O, segment, VM/pmap workspace, Apple-DT, timer, and interrupt readiness facts.
 - Keep caches disabled and validate identity/high alias state after returning.
 - Preserve SGI/timer IRQ retests plus custom abort logging.
