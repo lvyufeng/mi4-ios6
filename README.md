@@ -99,6 +99,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage26 added a registry-gated high-root boot policy object, validated required/observed root mask `0x00000ff3`, service/phase/dependency masks `0x0000000f`, dispatch coverage `0x000f000f`, policy satisfied mask `0x0000003f`, policy checksum `0x000001ea`, root step mask `0x00001fff`, returned status `0x26000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage27 added a descriptor-driven bootstrap manifest over services, phases, dependencies, dispatcher coverage, boot policy, and final status, validated manifest order/satisfied masks `0x0000003f`, manifest root-step observation `0x00001ff3`, manifest checksum `0x00000038`, root step mask `0x00003fff`, returned status `0x27000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage28 added a manifest-driven launch contract for the next kernel bootstrap boundary, validated required/observed launch root steps `0x00003ff3`, root/manifest/policy statuses `0x28000001`, MMU state `0x00000001`, timebase `0x0124f800`, interrupt mask `0x0000000f`, launch satisfied mask `0x0000007f`, root step mask `0x00007fff`, returned status `0x28000001`, and re-ran SGI/timer IRQ selftests successfully.
+- Stage29 added a contract-consuming startup boundary, validated required/observed startup root steps `0x00007ff3`, launch/root/manifest statuses `0x29000001`, boot args pointer `0xc0028000`, DT pointer `0xc0028140`, timebase `0x0124f800`, interrupt mask `0x0000000f`, startup satisfied mask `0x000000ff`, root step mask `0x0000ffff`, returned status `0x29000001`, and re-ran SGI/timer IRQ selftests successfully.
 
 ## Repository contents
 
@@ -145,6 +146,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage26/` — XNU-adjacent skeleton with registry-gated high-root boot policy checks before final root success.
 - `stage27/` — XNU-adjacent skeleton with a descriptor-driven bootstrap manifest over registry and boot-policy state.
 - `stage28/` — XNU-adjacent skeleton with a manifest-driven launch contract for the next kernel bootstrap boundary.
+- `stage29/` — XNU-adjacent skeleton with a contract-consuming startup boundary after the launch contract.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
@@ -173,6 +175,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-29-stage26-boot-policy.md` — successful Stage26 registry-gated boot policy test.
 - `docs/experiment-30-stage27-bootstrap-manifest.md` — successful Stage27 descriptor-driven bootstrap manifest test.
 - `docs/experiment-31-stage28-launch-contract.md` — successful Stage28 manifest-driven launch contract test.
+- `docs/experiment-32-stage29-startup-boundary.md` — successful Stage29 contract-consuming startup boundary test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -195,14 +198,14 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage28 are complete. The next practical target is Stage29: add a contract-consuming startup boundary.
+Stage0 through Stage29 are complete. The next practical target is Stage30: make the startup boundary drive a minimal startup routine.
 
-Near-term Stage29 work:
+Near-term Stage30 work:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
 - Preserve identity mappings for ram_console, PS_HOLD, GIC, timer, and early recovery paths.
-- Keep descriptor-driven service/phase dispatchers plus registry, policy, manifest, and launch-contract checks.
-- Add a high-root-to-startup handoff object that consumes the launch contract.
-- Validate startup boundary version, launch status, root status, manifest status, boot args pointer, DT pointer, timebase, and interrupt readiness.
+- Keep descriptor-driven service/phase dispatchers plus registry, policy, manifest, launch-contract, and startup-boundary checks.
+- Add a distinct XNU-like startup entry that consumes the startup boundary.
+- Validate startup entry arguments, startup state version, high-root status, boot args pointer, DT pointer, timebase, and interrupt readiness.
 - Keep caches disabled and validate identity/high alias state after returning.
 - Preserve SGI/timer IRQ retests plus custom abort logging.
