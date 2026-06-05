@@ -106,6 +106,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage33 made the startup-entry callouts populate a versioned kernel-start context object, validated context required/satisfied mask `0x0000003f`, context checksum `0x012506ba`, context status `0x33000001`, boot args pointer `0xc002c000`, DT pointer `0xc002c140`, platform consistency `0x0000000f`, timebase `0x0124f800`, interrupt mask `0x0000000f`, callout mask `0x0000000f`, root step mask `0x000fffff`, returned status `0x33000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage34 made the kernel-start context produce a versioned VM bootstrap plan object, validated VM plan required/satisfied mask `0x0000007f`, VM plan checksum `0xeb540a8a`, VM plan status `0x34000001`, low/high alias bases `0x00000000`/`0xc0000000`, ram_console/GIC aliases `0xc0100000`/`0xc0200000`, L1 table `0x00028000`/`0xc0028000`, memory range `0x80000000`/`0x5e500000`, section policy `0x00100000`/`0x00010c02`, MMU/cache policy `0x00000001`/`0x00000000`, root step mask `0x001fffff`, returned status `0x34000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage35 made the accepted VM bootstrap plan drive a versioned VM bootstrap state object, validated VM state required/satisfied mask `0x0000003f`, VM plan checksum/status `0xea540a8a`/`0x35000001`, VM state checksum/status `0x1f4506e6`/`0x35000001`, kernel map `0xc0000000`-`0xc0100000`, available-memory cursor `0x80000000`->`0x80100000`, bootstrap allocation span `0x80000000`+`0x00100000`, pmap L1 table `0x0002c000`/`0xc002c000`, section policy `0x00100000`/`0x00010c02`, MMU/cache policy `0x00000001`/`0x00000000`, root step mask `0x003fffff`, returned status `0x35000001`, and re-ran SGI/timer IRQ selftests successfully.
+- Stage36 made the VM bootstrap state drive a versioned bootstrap allocator descriptor, validated allocator required/satisfied mask `0x0000003f`, VM state checksum/status `0x1f4506e6`/`0x36000001`, allocator checksum/status `0x68195ad2`/`0x36000001`, allocator span `0x80000000`/`0x00100000`/`0x80100000`, cursor `0x80000000`->`0x80100000`, remaining bytes `0x00000000`, first allocation tag `0x414c4c43`, alignment `0x00001000`, root step mask `0x007fffff`, returned status `0x36000001`, and re-ran SGI/timer IRQ selftests successfully.
 
 ## Repository contents
 
@@ -159,6 +160,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage33/` — XNU-adjacent skeleton with startup-entry-populated kernel-start context object.
 - `stage34/` — XNU-adjacent skeleton with kernel-context-produced VM bootstrap plan object.
 - `stage35/` — XNU-adjacent skeleton with VM-plan-driven VM bootstrap state object.
+- `stage36/` — XNU-adjacent skeleton with VM-state-driven bootstrap allocator descriptor.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
@@ -194,6 +196,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-36-stage33-kernel-context.md` — successful Stage33 startup-entry kernel-context object test.
 - `docs/experiment-37-stage34-vm-plan.md` — successful Stage34 VM bootstrap plan object test.
 - `docs/experiment-38-stage35-vm-state.md` — successful Stage35 VM bootstrap state object test.
+- `docs/experiment-39-stage36-bootstrap-allocator.md` — successful Stage36 bootstrap allocator descriptor test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -216,14 +219,14 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage35 are complete. The next practical target is Stage36: make the VM bootstrap state drive a minimal bootstrap allocator descriptor.
+Stage0 through Stage36 are complete. The next practical target is Stage37: make the bootstrap allocator descriptor drive a minimal pmap bootstrap workspace descriptor.
 
-Near-term Stage36 work:
+Near-term Stage37 work:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
 - Preserve identity mappings for ram_console, PS_HOLD, GIC, timer, and early recovery paths.
-- Keep descriptor-driven service/phase dispatchers plus registry, policy, manifest, launch-contract, startup-boundary, startup-routine, startup-entry, callout-table, kernel-context, VM-plan, and VM-state checks.
-- Add a versioned bootstrap allocator object consuming the VM state's allocation base, size, end, and cursor.
-- Validate allocator current cursor, remaining bytes, first allocation metadata, checksum/status, and identity/high-alias views.
+- Keep descriptor-driven service/phase dispatchers plus registry, policy, manifest, launch-contract, startup-boundary, startup-routine, startup-entry, callout-table, kernel-context, VM-plan, VM-state, and allocator checks.
+- Add a versioned pmap bootstrap workspace object consuming allocator span/cursor facts and L1 table facts.
+- Validate workspace base/limit, section count, L1 table identity/high aliases, allocation tag, checksum/status, and identity/high-alias views.
 - Keep caches disabled and validate identity/high alias state after returning.
 - Preserve SGI/timer IRQ retests plus custom abort logging.
