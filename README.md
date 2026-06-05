@@ -89,6 +89,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage16 ran a small ordered XNU-like init sequence from high-virtual bootstrap, validated step mask `0x0000000f`, returned structured status `0x16000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage17 moved that flow into a high-virtual `kernel_root` shape, validated root/init step masks `0x0000000f`, returned structured root status `0x17000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage18 moved high-virtual boot_args/Apple-DT consumption into `kernel_root`, validated root step mask `0x0000001f`, recorded memory/timer DT facts, returned status `0x18000001`, and re-ran SGI/timer IRQ selftests successfully.
+- Stage19 built a versioned high-root platform-result object, validated consistency mask `0x0000000f`, root step mask `0x0000003f`, returned status `0x19000001`, and re-ran SGI/timer IRQ selftests successfully.
 
 ## Repository contents
 
@@ -125,6 +126,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage16/` — XNU-adjacent skeleton with a small ordered high-virtual init sequence.
 - `stage17/` — XNU-adjacent skeleton with a high-virtual root kernel entry shape.
 - `stage18/` — XNU-adjacent skeleton with high-virtual boot_args and Apple-DT summary inside the root path.
+- `stage19/` — XNU-adjacent skeleton with a versioned high-root platform-result object.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
@@ -143,6 +145,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-19-stage16-high-init-sequence.md` — successful Stage16 high-virtual init-sequence test.
 - `docs/experiment-20-stage17-high-root.md` — successful Stage17 high-virtual root kernel path test.
 - `docs/experiment-21-stage18-high-dt-summary.md` — successful Stage18 high-virtual boot_args and Apple-DT summary test.
+- `docs/experiment-22-stage19-platform-result.md` — successful Stage19 versioned high-root platform-result test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -165,13 +168,13 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage18 are complete. The next practical target is Stage19: let the high root build a versioned early platform-result object from high DT and PE_state facts.
+Stage0 through Stage19 are complete. The next practical target is Stage20: make the high root dispatch multiple early init phases from a small phase table.
 
-Near-term Stage19 work:
+Near-term Stage20 work:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
 - Preserve identity mappings for ram_console, PS_HOLD, GIC, timer, and early recovery paths.
-- Summarize CPU/GIC/timer/memory from high DT and PE_state together.
-- Include result object versioning and size fields.
+- Define ordered high-root phase records.
+- Record per-phase status and checksum.
 - Keep caches disabled and validate identity/high alias state after returning.
 - Preserve SGI/timer IRQ retests plus custom abort logging.
