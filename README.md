@@ -92,6 +92,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage19 built a versioned high-root platform-result object, validated consistency mask `0x0000000f`, root step mask `0x0000003f`, returned status `0x19000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage20 added a high-root phase table, validated phase mask `0x0000000f`, phase checksum `0x0000000b`, root step mask `0x0000007f`, returned status `0x20000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage21 added a high-root service table for logging/timebase/platform/interrupts, validated service mask `0x0000000f`, service checksum `0x0000000b`, root step mask `0x000000ff`, returned status `0x21000001`, and re-ran SGI/timer IRQ selftests successfully.
+- Stage22 made the high-root phase table consume service-table state explicitly, validated phase-service dependency mask `0x0000000f`, satisfied phase mask `0x0000000f`, phase-service checksum `0x00000008`, root step mask `0x000001ff`, returned status `0x22000001`, and re-ran SGI/timer IRQ selftests successfully.
 
 ## Repository contents
 
@@ -131,6 +132,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage19/` — XNU-adjacent skeleton with a versioned high-root platform-result object.
 - `stage20/` — XNU-adjacent skeleton with an ordered high-root phase table.
 - `stage21/` — XNU-adjacent skeleton with a high-root early service table.
+- `stage22/` — XNU-adjacent skeleton with high-root phase-service dependency validation.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
@@ -152,6 +154,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-22-stage19-platform-result.md` — successful Stage19 versioned high-root platform-result test.
 - `docs/experiment-23-stage20-phase-table.md` — successful Stage20 ordered high-root phase-table test.
 - `docs/experiment-24-stage21-service-table.md` — successful Stage21 high-root service-table test.
+- `docs/experiment-25-stage22-phase-service-deps.md` — successful Stage22 high-root phase-service dependency test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -174,13 +177,14 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage21 are complete. The next practical target is Stage22: make the high-root phase table consume service-table state explicitly.
+Stage0 through Stage22 are complete. The next practical target is Stage23: turn the phase table into a descriptor-driven high-root dispatcher.
 
-Near-term Stage22 work:
+Near-term Stage23 work:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
 - Preserve identity mappings for ram_console, PS_HOLD, GIC, timer, and early recovery paths.
-- Make each high-root phase declare required service bits.
-- Validate phase-service dependency masks in high virtual execution.
+- Keep Stage22 phase-service dependency masks.
+- Describe each phase with an ID, required services, handler result, and status slot.
+- Execute those descriptors from high virtual execution rather than open-coded per-phase blocks.
 - Keep caches disabled and validate identity/high alias state after returning.
 - Preserve SGI/timer IRQ retests plus custom abort logging.
