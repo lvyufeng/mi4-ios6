@@ -95,6 +95,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage22 made the high-root phase table consume service-table state explicitly, validated phase-service dependency mask `0x0000000f`, satisfied phase mask `0x0000000f`, phase-service checksum `0x00000008`, root step mask `0x000001ff`, returned status `0x22000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage23 replaced open-coded phase completion with a descriptor-driven high-root phase dispatcher, validated dispatcher order/handler masks `0x0000000f`, dispatcher checksum `0x00000004`, root step mask `0x000003ff`, returned status `0x23000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage24 replaced open-coded service availability with a descriptor-driven high-root service dispatcher, validated service dispatcher order/handler masks `0x0000000f`, service dispatcher checksum `0x00000004`, root step mask `0x000007ff`, returned status `0x24000001`, and re-ran SGI/timer IRQ selftests successfully.
+- Stage25 added a high-root bootstrap registry over service and phase descriptors, validated service/phase descriptor masks `0x0000000f`, dependency coverage `0x0000000f`, dispatch coverage `0x000f000f`, registry checksum `0x000f0191`, root step mask `0x00000fff`, returned status `0x25000001`, and re-ran SGI/timer IRQ selftests successfully.
 
 ## Repository contents
 
@@ -137,6 +138,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage22/` — XNU-adjacent skeleton with high-root phase-service dependency validation.
 - `stage23/` — XNU-adjacent skeleton with a descriptor-driven high-root phase dispatcher.
 - `stage24/` — XNU-adjacent skeleton with a descriptor-driven high-root service dispatcher.
+- `stage25/` — XNU-adjacent skeleton with a high-root bootstrap registry that cross-checks service and phase descriptor coverage.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
@@ -161,6 +163,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-25-stage22-phase-service-deps.md` — successful Stage22 high-root phase-service dependency test.
 - `docs/experiment-26-stage23-phase-dispatcher.md` — successful Stage23 descriptor-driven high-root phase dispatcher test.
 - `docs/experiment-27-stage24-service-dispatcher.md` — successful Stage24 descriptor-driven high-root service dispatcher test.
+- `docs/experiment-28-stage25-bootstrap-registry.md` — successful Stage25 high-root bootstrap registry test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -183,15 +186,14 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage24 are complete. The next practical target is Stage25: add a high-root bootstrap registry that cross-checks service descriptors and phase descriptors as one object graph.
+Stage0 through Stage25 are complete. The next practical target is Stage26: add registry-gated boot policy checks before root success.
 
-Near-term Stage25 work:
+Near-term Stage26 work:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
 - Preserve identity mappings for ram_console, PS_HOLD, GIC, timer, and early recovery paths.
-- Keep descriptor-driven service and phase dispatchers.
-- Record registry counts, descriptor masks, and dependency masks in one summary object.
-- Validate that every phase dependency is provided by a service descriptor.
-- Validate that dispatcher execution order covers all registered descriptors.
+- Keep descriptor-driven service and phase dispatchers plus the Stage25 bootstrap registry.
+- Add a boot policy object that records required registry, service, phase, dependency, and dispatcher coverage masks.
+- Gate final high-root success on that policy object rather than only raw root-step masks.
 - Keep caches disabled and validate identity/high alias state after returning.
 - Preserve SGI/timer IRQ retests plus custom abort logging.
