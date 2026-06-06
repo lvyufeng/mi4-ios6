@@ -434,11 +434,13 @@ The important boundary is that Stage51 compiles public-XNU objects but does not 
 
 ## Next stage
 
-Stage52 should perform a linkable minimal public-XNU Mach-O experiment while preserving the Stage51 safety boundary:
+Stage52 is complete. It preserved the Stage51 safety boundary while linking the minimal public-XNU object subset into a controlled host-only ARM ELF proof artifact, embedding only link metadata into an inert Mach-O fixture, and proving zero undefined symbols plus `loader_status=0x52000001` on hardware.
+
+The next stage should start formal public-XNU compile migration while preserving the Stage52 no-execution boundary:
 
 - keep consuming `external/xnu-upstream` at `xnu-2050.22.13` read-only,
-- keep using Stage51-owned shims or a tracked minimal compatibility layer,
-- link only a tiny public-XNU-derived object subset into a controlled artifact,
+- keep using Stage-owned shims or a tracked minimal compatibility layer,
+- expand from the tiny pexpert/device-tree subset toward a tracked public-XNU compile unit graph,
 - do not build a full public `mach_kernel`,
 - do not jump into XNU or execute public-XNU object code on hardware yet,
 - do not install proposed XNU page tables yet,

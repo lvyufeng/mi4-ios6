@@ -63,7 +63,7 @@ class Segment:
         return 56 + len(self.sections) * 68
 
 
-def build_segments(stage_number: int) -> list[Segment]:
+def build_segments(stage_number: int, metadata: bytes | None = None) -> list[Segment]:
     stage = f"ST{stage_number}"
     stage_lower = f"stage{stage_number}"
     segments: list[Segment] = []
@@ -84,9 +84,12 @@ def build_segments(stage_number: int) -> list[Segment]:
     segments.append(prelink_text)
 
     prelink_info = Segment("__PRELINK_INFO", VM_BASE + 0x6000, 0x2000, 0x1, 0x1)
+    info_payload = f'<{stage_lower}-prelink-info generated="true" proprietary="false" executable="false"/>\0'.encode("ascii")
+    if metadata:
+        info_payload += b"\n" + metadata.rstrip(b"\0") + b"\0"
     prelink_info.add_section(
         "__info",
-        f'<{stage_lower}-prelink-info generated="true" proprietary="false" executable="false"/>\0'.encode("ascii"),
+        info_payload,
         align_pow2=2,
     )
     prelink_info.add_section("__kernel", f"{stage}-PRELINK-KERNEL-METADATA\0".encode("ascii"), align_pow2=2)
@@ -169,8 +172,8 @@ def pack_segment(segment: Segment) -> bytes:
     return bytes(out)
 
 
-def build_fixture(stage_number: int) -> bytes:
-    segments = build_segments(stage_number)
+def build_fixture(stage_number: int, metadata: bytes | None = None) -> bytes:
+    segments = build_segments(stage_number, metadata)
     symtab_size = 24
     unixthread_size = 16
     sizeofcmds = sum(segment.cmdsize for segment in segments) + symtab_size + unixthread_size
@@ -258,10 +261,12 @@ def main() -> int:
     parser.add_argument("--c-output", type=Path, required=True, help="generated C source path")
     parser.add_argument("--bin-output", type=Path, required=True, help="raw Mach-O fixture output path")
     parser.add_argument("--symbol-prefix", default="stage44", help="C symbol prefix")
+    parser.add_argument("--metadata-file", type=Path, help="optional ASCII metadata to embed in the inert __PRELINK_INFO,__info section")
     args = parser.parse_args()
 
     stage_number = stage_number_from_prefix(args.symbol_prefix)
-    data = build_fixture(stage_number)
+    metadata = args.metadata_file.read_bytes() if args.metadata_file else None
+    data = build_fixture(stage_number, metadata)
     args.bin_output.parent.mkdir(parents=True, exist_ok=True)
     args.c_output.parent.mkdir(parents=True, exist_ok=True)
     args.bin_output.write_bytes(data)

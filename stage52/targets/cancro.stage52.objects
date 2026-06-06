@@ -1,0 +1,23 @@
+# Stage52 public-XNU object subset manifest
+#
+# Stage52 compiles a tiny public-only subset from these first candidates under
+# ignored out/stage52/xnu-objects/ with Stage52-owned compatibility shims.
+# Start with dependency-light 2050-era device-tree/boot-argument-adjacent code
+# or compatibility wrappers. Do not start Stage52 by compiling full arm_init.c,
+# pmap.c, or start.s; those later ARM references are dependency-heavy and are
+# listed only to guide the cancro ARMv7 migration boundary.
+
+# Era-correct/public 2050 candidates for Stage52 consideration.
+external/xnu-upstream/pexpert/gen/device_tree.c
+external/xnu-upstream/pexpert/gen/bootargs.c
+external/xnu-upstream/pexpert/pexpert/device_tree.h
+external/xnu-upstream/libkern/libkern/OSByteOrder.h
+
+# Later public ARM references only; dependency-heavy, not first-build defaults.
+external/xnu-4570.1.46/pexpert/pexpert/arm/boot.h
+external/xnu-4570.1.46/pexpert/arm/pe_bootargs.c
+external/xnu-4570.1.46/pexpert/arm/pe_identify_machine.c
+external/xnu-4570.1.46/osfmk/arm/start.s
+external/xnu-4570.1.46/osfmk/arm/arm_init.c
+external/xnu-4570.1.46/osfmk/arm/arm_vm_init.c
+external/xnu-4570.1.46/osfmk/arm/pmap.c
