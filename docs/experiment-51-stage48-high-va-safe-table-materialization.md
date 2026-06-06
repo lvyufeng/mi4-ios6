@@ -322,7 +322,9 @@ MI4IOS6_STAGE48 attempting MSM8974 PS_HOLD reset
 
 Stage48 is still not a real XNU boot, but it removes another pre-handoff uncertainty. Stage47 proved local descriptor bytes could be verified and walked. Stage48 proves those bytes can be copied into a separate Stage-owned safe table buffer, that a high-VA table can be built with explicit VA-slot/PA-base descriptor composition, and that loader preflight can fail closed unless high-VA, safe-table, and local-only safety masks are complete.
 
-The major remaining blockers are still real sub-section/page-granular XNU mapping policy, controlled live table switching, real pmap/bootstrap table population, exact XNU cache policy, MSM8974 pexpert support, XNU interrupt/timer hooks, IOKit/platform drivers, real kernelcache/loading details, relocation/linking/prelink details, and later code-signing/userspace policy work.
+Follow-up: Stage49 has now completed the controlled live-table step that this document identified as the next blocker. It used a separate Stage49-owned recovery L1 table at `0x00068000`, switched TTBR0 to that table, restored original TTBR0 `0x0006c000`, preserved cache bits before/during/after at `0x00000000`, proved `stage49_ttbr_roundtrip_satisfied_mask=0x0000ffff`, and still avoided XNU/Mach-O execution plus proposed physical/workspace writes.
+
+The major remaining blockers are now public XNU build workspace / cancro target scaffolding, minimal public-XNU object subset compilation, linkable minimal public-XNU Mach-O construction, real sub-section/page-granular XNU mapping policy, real pmap/bootstrap table population, exact XNU cache policy, MSM8974 pexpert support, XNU interrupt/timer hooks, IOKit/platform drivers, real kernelcache/loading details, relocation/linking/prelink details, and later code-signing/userspace policy work.
 
 ## Success criteria — met
 
@@ -355,4 +357,6 @@ The major remaining blockers are still real sub-section/page-granular XNU mappin
 
 ## Next stage
 
-Stage49 should attempt a controlled **no-XNU** TTBR-switch selftest using Stage-owned tables only. It should not jump to XNU yet. The table must preserve recovery identity mappings, ram_console, PS_HOLD, GIC, timer, abort logging, and an immediate success/failure reporting path. If Stage49 switches TTBRs, it should use the Stage-owned safe-table concept from Stage48 rather than the proposed XNU physical workspace, and it should still keep caches unchanged unless a separate cache-policy stage explicitly validates otherwise.
+Stage49 completed the controlled **no-XNU** TTBR-switch selftest using Stage-owned tables only. It did not jump to XNU. The recovery table preserved identity mappings, ram_console, PS_HOLD, GIC, timer, abort logging, and an immediate success/failure reporting path. Stage49 used the Stage-owned safe-table concept from Stage48 rather than the proposed XNU physical workspace, restored original TTBR/control state, and kept caches unchanged.
+
+Stage50 should now start the accelerated public-XNU compile migration: create a public-XNU build workspace / cancro target scaffold from public Apple OSS only, without executing XNU on hardware yet and without relaxing the Stage49 non-persistent/no-proposed-write/no-cache-change safety boundary.
