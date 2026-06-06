@@ -1,0 +1,23 @@
+# Stage50 Stage51 candidate public-XNU object manifest
+#
+# Stage50 does not compile these files. This manifest records the first
+# public-only inputs Stage51 should examine for a tiny object-subset compile.
+# Start with dependency-light 2050-era device-tree/boot-argument-adjacent code
+# or compatibility wrappers. Do not start Stage51 by compiling full arm_init.c,
+# pmap.c, or start.s; those later ARM references are dependency-heavy and are
+# listed only to guide the cancro ARMv7 migration boundary.
+
+# Era-correct/public 2050 candidates for Stage51 consideration.
+external/xnu-upstream/pexpert/gen/device_tree.c
+external/xnu-upstream/pexpert/gen/bootargs.c
+external/xnu-upstream/pexpert/pexpert/device_tree.h
+external/xnu-upstream/libkern/libkern/OSByteOrder.h
+
+# Later public ARM references only; dependency-heavy, not first-build defaults.
+external/xnu-4570.1.46/pexpert/pexpert/arm/boot.h
+external/xnu-4570.1.46/pexpert/arm/pe_bootargs.c
+external/xnu-4570.1.46/pexpert/arm/pe_identify_machine.c
+external/xnu-4570.1.46/osfmk/arm/start.s
+external/xnu-4570.1.46/osfmk/arm/arm_init.c
+external/xnu-4570.1.46/osfmk/arm/arm_vm_init.c
+external/xnu-4570.1.46/osfmk/arm/pmap.c

@@ -306,6 +306,14 @@ Hardware validation reports `stage49_ttbr_roundtrip_status=0x49000001`, `stage49
 
 This is still not a real XNU `_start`/`arm_init` handoff and not a public-XNU pmap table install. It proves that a Stage-owned recovery table can safely carry execution/logging/MMIO/timebase probes through a TTBR0 round-trip and restore original MMU state. The remaining accelerated blockers are now the public XNU build workspace / cancro target scaffold, minimal public-XNU object subset compilation, linkable minimal public-XNU Mach-O construction, sub-section/page-granular XNU mapping policy, real pmap/bootstrap table population, exact XNU cache policy, MSM8974 pexpert support, XNU interrupt/timer hooks, IOKit/platform drivers, real kernelcache/loading details, relocation/linking/prelink details, and later code-signing/userspace policy work.
 
+## Stage50 implementation note
+
+Stage50 completes the next accelerated blocker by creating a tracked public-XNU workspace and cancro/MSM8974 ARMv7 target scaffold without attempting a full public `mach_kernel` build and without executing public-XNU code. The read-only validator confirms `external/xnu-upstream` is still detached at public `xnu-2050.22.13` (`cc8a9b0c`, first-line `config/MasterVersion` `12.3.0`) and records the incomplete public 2050 ARM tree as an explicit known limitation. It also validates later public ARM reference files from `external/xnu-4570.1.46` for boot args, `_start`/`arm_init`, pexpert, VM/pmap, timer, and interrupt guidance.
+
+Stage50 tracks `stage50/targets/cancro.mk` and `stage50/targets/cancro.stage51.objects`, emits ignored validation artifacts under `out/stage50/`, and publishes target-side workspace status through `struct stage50_xnu_workspace`. Hardware validation reports `stage50_xnu_workspace_status=0x50000001`, `stage50_xnu_workspace_satisfied_mask=0x0007ffff`, `stage50_xnu_workspace_failure_mask=0x00000000`, `loader_xnu_workspace_status=0x50000001`, `loader_cancro_target_status=0x50000001`, `loader_stage51_plan_status=0x50000001`, `loader_safety_mask=0x0003ffff`, `loader_satisfied_mask=0x003fffff`, and loader status `0x50000001`.
+
+Stage50 keeps the inherited TTBR0 restore/cache proof intact (`stage50_ttbr_roundtrip_status=0x50000001`, restored TTBR0 `0x0006c000`, cache bits `0x00000000` before/during/after) and confirms no full public-XNU build, no public-XNU object execution, no generated Mach-O execution, no external checkout mutation, no proposed physical/workspace writes, no persistent writes, and no cache changes. The next blocker is now Stage51: a minimal public-only object-subset compile from the Stage50 manifest, still without linking or executing public-XNU code on hardware.
+
 ## Verification commands used
 
 Representative commands used during this pass:
@@ -326,4 +334,4 @@ The clone remains under ignored `external/` and must not be committed.
 
 ## Safety notes
 
-This was a source-only analysis task. No hardware boot, flash, erase, partition write, or bootloader change was performed. Future hardware validation must continue using non-persistent `sudo fastboot boot` unless the user explicitly authorizes a specific persistent operation.
+The initial upstream analysis was source-only. Later Stage43 through Stage50 hardware validations used non-persistent `sudo fastboot boot` only. No flash, erase, partition write, persistent hardware configuration, or bootloader change was performed. Future hardware validation must continue using non-persistent `sudo fastboot boot` unless the user explicitly authorizes a specific persistent operation.
