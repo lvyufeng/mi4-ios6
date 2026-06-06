@@ -276,6 +276,14 @@ To make materialized reparse meaningful, the Stage45 fixture generator emits a S
 
 The remaining blockers are still real ARM XNU pmap/bootstrap table construction, MSM8974 pexpert support, XNU interrupt/timer hooks, IOKit/platform drivers, real kernelcache/loading details, and later kernelcache/userspace policy work.
 
+## Stage46 implementation note
+
+Stage46 uses the concrete Stage45 load/materialization facts to model the public ARM XNU early TTE workspace contract. It preserves the proposed physical load range (`0x80000000`-`0x80009000`) and derived `topOfKernelData=0x8000c000`, then records a 10-page workspace ending at `0x80016000` with a 16 KiB L1 table reservation, a page-granular L2/coarse-table reservation, and remaining scratch space. It also records section-index coverage for the loaded kernel, low RAM, ram_console, and GIC/timer MMIO.
+
+All TTE bytes are modeled only in `stage46_tte_dryrun_arena`, a local BSS simulation arena. Stage46 does not write the proposed physical TTE workspace, does not write TTBR0/TTBR1, does not replace the live MMU tables, does not enable caches, and does not execute the Mach-O fixture or XNU. Its hardware run returns `xnu_tte_dryrun_status=0x46000001`, `xnu_tte_satisfied_mask=0x000003ff`, `loader_safety_mask=0x000003ff`, `loader_satisfied_mask=0x000003ff`, and loader status `0x46000001`.
+
+The remaining blockers are now more focused: real pmap/bootstrap table population, exact XNU mapping/cache policy, MSM8974 pexpert support, XNU interrupt/timer hooks, IOKit/platform drivers, real kernelcache/loading details, relocation/linking/prelink details, and later code-signing/userspace policy work.
+
 ## Verification commands used
 
 Representative commands used during this pass:

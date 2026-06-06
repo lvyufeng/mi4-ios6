@@ -364,10 +364,6 @@ The explicit blockers remain real pmap bootstrap, a real MSM8974 pexpert impleme
 
 ## Next stage
 
-Stage46 should keep moving toward a real XNU handoff without executing XNU yet. Practical next options:
+Completed by Stage46. Stage46 modeled the early ARM XNU `_start` page-table/TTE workspace from Stage45's materialized image and proposed `topOfKernelData`, recorded a 10-page workspace layout, reported loaded-kernel/RAM/ram_console/GIC section indices, and returned TTE dry-run status `0x46000001` while still not programming TTBRs, enabling caches, executing XNU, or writing proposed physical addresses.
 
-- model the early ARM XNU `_start` page-table/TTE layout from Stage45's materialized image and proposed `topOfKernelData`,
-- add a dry-run translation-table descriptor for the proposed `virtBase`/`physBase` kernel mapping while still not programming TTBRs,
-- verify the proposed loaded image, `topOfKernelData`, early TTE workspace, and future `avail_start` do not overlap,
-- continue refining the MSM8974 pexpert/timer/interrupt gaps that block real `arm_init`,
-- preserve non-persistent booting, ram_console diagnostics, PS_HOLD reset, identity/recovery mappings, and SGI/timer retests.
+Stage47 should continue toward a real XNU handoff without executing XNU yet by populating and verifying more explicit local simulated section descriptors and adding dry-run translation checks over the local table model.
