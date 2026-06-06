@@ -355,10 +355,6 @@ The explicit blockers remain real pmap bootstrap, real TTE/L2 descriptor populat
 
 ## Next stage
 
-Stage47 should keep moving toward a real XNU handoff without executing XNU yet. Practical next options:
+Completed by Stage47. Stage47 populated and read back local simulated L1 section descriptors for loaded kernel, low RAM, ram_console, and GIC/timer MMIO ranges; verified descriptor type and attribute bits; added a software-only identity L1 section virt-to-phys checker; and recorded public-XNU `boot_ttep`/`avail_start` policy facts. It returned `xnu_tte_dryrun_status=0x47000001`, `xnu_tte_descriptor_verify_mask=0x0000007f`, `xnu_tte_translation_check_mask=0x0000001f`, and loader status `0x47000001` while still not executing XNU, writing proposed physical addresses, programming TTBRs, replacing live MMU tables, or changing caches.
 
-- populate local simulated L1 section descriptor slots more explicitly from the Stage46 TTE descriptor and verify descriptor words for the loaded kernel, low RAM, ram_console, and GIC/timer MMIO ranges,
-- add a dry-run identity/virt-to-phys translation checker over the simulated local tables,
-- compare the proposed mapping policy against public ARM XNU `_start` expectations in more detail,
-- continue refining MSM8974 pexpert/timer/interrupt gaps that block real `arm_init`,
-- preserve non-persistent booting, ram_console diagnostics, PS_HOLD reset, identity/recovery mappings, no TTBR writes, caches unchanged, and SGI/timer retests.
+Stage48 should continue toward a real XNU handoff without executing XNU yet by materializing verified table bytes into a Stage-owned safe table buffer and preparing a controlled no-XNU TTBR-switch selftest plan, while preserving non-persistent booting, ram_console diagnostics, PS_HOLD reset, recovery mappings, caches unchanged, and SGI/timer retests.

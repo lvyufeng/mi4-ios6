@@ -282,7 +282,15 @@ Stage46 uses the concrete Stage45 load/materialization facts to model the public
 
 All TTE bytes are modeled only in `stage46_tte_dryrun_arena`, a local BSS simulation arena. Stage46 does not write the proposed physical TTE workspace, does not write TTBR0/TTBR1, does not replace the live MMU tables, does not enable caches, and does not execute the Mach-O fixture or XNU. Its hardware run returns `xnu_tte_dryrun_status=0x46000001`, `xnu_tte_satisfied_mask=0x000003ff`, `loader_safety_mask=0x000003ff`, `loader_satisfied_mask=0x000003ff`, and loader status `0x46000001`.
 
-The remaining blockers are now more focused: real pmap/bootstrap table population, exact XNU mapping/cache policy, MSM8974 pexpert support, XNU interrupt/timer hooks, IOKit/platform drivers, real kernelcache/loading details, relocation/linking/prelink details, and later code-signing/userspace policy work.
+## Stage47 implementation note
+
+Stage47 builds on Stage46 by verifying the local simulated ARMv7 L1 section descriptors as actual descriptor words and by walking them through a software-only identity VTOP checker. It still uses the proposed physical load range (`0x80000000`-`0x80009000`), derived `topOfKernelData=0x8000c000`, 10-page TTE workspace ending at `0x80016000`, and local BSS-only TTE arena, but it now checks the local L1 slots for low RAM, the loaded kernel, ram_console, and GIC/timer MMIO.
+
+The Stage47 descriptor word policy remains the conservative ARMv7 short-descriptor section value `0x00010c02`, composed as `(l1_index << 20) | 0x00010c02`. Hardware validation reports `xnu_tte_descriptor_verify_mask=0x0000007f`, `xnu_tte_descriptor_failure_mask=0x00000000`, `xnu_tte_descriptor_type_mask_seen=0x00000002`, and `xnu_tte_descriptor_attr_mask_seen=0x00010c02`. The software dry-run translator reports `xnu_tte_translation_check_mask=0x0000001f` and `xnu_tte_translation_failure_mask=0x00000000` for the loaded-kernel first/last bytes, low RAM, ram_console, and GIC mappings. Stage47 also records public-XNU `boot_ttep`/availability policy facts with `xnu_tte_xnu_policy_mask=0x0000001f`.
+
+Stage47 does not claim full XNU high-virtual mapping support. It verifies the current local identity-section table model only, and still does not write the proposed physical TTE workspace, write TTBR0/TTBR1, replace live MMU tables, enable caches, execute the Mach-O fixture, or jump to XNU. Its hardware run returns `xnu_tte_dryrun_status=0x47000001`, `xnu_tte_satisfied_mask=0x0001ffff`, `loader_safety_mask=0x00000fff`, `loader_satisfied_mask=0x00000fff`, and loader status `0x47000001`.
+
+The remaining blockers are now more focused: real/high-virtual XNU mapping policy, safe live table materialization/switching, real pmap/bootstrap table population, exact XNU cache policy, MSM8974 pexpert support, XNU interrupt/timer hooks, IOKit/platform drivers, real kernelcache/loading details, relocation/linking/prelink details, and later code-signing/userspace policy work.
 
 ## Verification commands used
 
