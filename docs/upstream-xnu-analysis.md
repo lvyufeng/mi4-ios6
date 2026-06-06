@@ -314,6 +314,12 @@ Stage50 tracks `stage50/targets/cancro.mk` and `stage50/targets/cancro.stage51.o
 
 Stage50 keeps the inherited TTBR0 restore/cache proof intact (`stage50_ttbr_roundtrip_status=0x50000001`, restored TTBR0 `0x0006c000`, cache bits `0x00000000` before/during/after) and confirms no full public-XNU build, no public-XNU object execution, no generated Mach-O execution, no external checkout mutation, no proposed physical/workspace writes, no persistent writes, and no cache changes. The next blocker is now Stage51: a minimal public-only object-subset compile from the Stage50 manifest, still without linking or executing public-XNU code on hardware.
 
+## Stage51 implementation note
+
+Stage51 completes that blocker by compiling the first minimal public-XNU ARMv7 object subset from the selected public 2050 baseline. It consumes `external/xnu-upstream` read-only at `xnu-2050.22.13` and compiles `pexpert/gen/device_tree.c` plus `pexpert/gen/bootargs.c` with Stage51-owned shim headers/support under `stage51/shims/` and `stage51/xnu_object_shims.c`. The resulting ignored objects live under `out/stage51/xnu-objects/` and include `device_tree.o`, `bootargs.o`, and `xnu_object_shims.o`.
+
+Hardware validation reports `stage51_xnu_object_subset_status=0x51000001`, `stage51_xnu_object_subset_satisfied_mask=0x00003fff`, `stage51_xnu_object_subset_failure_mask=0x00000000`, `stage51_xnu_object_count=0x00000003`, `loader_xnu_object_subset_status=0x51000001`, `loader_safety_mask=0x0007ffff`, `loader_satisfied_mask=0x007fffff`, and loader status `0x51000001`. Stage51 still performs no full public `mach_kernel` build, no public-XNU Mach-O link, no public-XNU object execution, no generated Mach-O execution, no external checkout mutation, no proposed physical/workspace writes, no persistent writes, and no cache changes. The next blocker is Stage52: a linkable minimal public-XNU Mach-O experiment that records link readiness without executing XNU on hardware.
+
 ## Verification commands used
 
 Representative commands used during this pass:
@@ -334,4 +340,4 @@ The clone remains under ignored `external/` and must not be committed.
 
 ## Safety notes
 
-The initial upstream analysis was source-only. Later Stage43 through Stage50 hardware validations used non-persistent `sudo fastboot boot` only. No flash, erase, partition write, persistent hardware configuration, or bootloader change was performed. Future hardware validation must continue using non-persistent `sudo fastboot boot` unless the user explicitly authorizes a specific persistent operation.
+The initial upstream analysis was source-only. Later Stage43 through Stage51 hardware validations used non-persistent `sudo fastboot boot` only. No flash, erase, partition write, persistent hardware configuration, or bootloader change was performed. Future hardware validation must continue using non-persistent `sudo fastboot boot` unless the user explicitly authorizes a specific persistent operation.

@@ -121,6 +121,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage48 added a PA-base-aware high-VA L1 section descriptor model and a Stage-owned safe-table materialization buffer, proved `xnu_tte_descriptor_verify_mask=0x000001ff`, `xnu_tte_translation_check_mask=0x0000007f`, `xnu_tte_satisfied_mask=0x001fffff`, `loader_safety_mask=0x00007fff`, `loader_satisfied_mask=0x00007fff`, returned loader status `0x48000001`, preserved no-XNU/no-TTBR/no-cache/no-proposed-physical-write safety, and re-ran SGI/timer IRQ selftests successfully.
 - Stage49 performed a controlled no-XNU live TTBR0 round-trip using only a Stage49-owned 16 KiB recovery L1 table at `0x00068000`, restored original TTBR0 `0x0006c000`, preserved TTBCR/DACR/SCTLR and cache bits (`0x00000000` before/during/after), proved `stage49_ttbr_roundtrip_satisfied_mask=0x0000ffff`, `loader_satisfied_mask=0x0007ffff`, returned loader status `0x49000001`, avoided XNU/Mach-O execution and proposed physical/workspace writes, and reset through PS_HOLD successfully.
 - Stage50 created the public-XNU workspace and cancro/MSM8974 ARMv7 target scaffold, validated `external/xnu-upstream` at public `xnu-2050.22.13` commit `cc8a9b0c` / `MasterVersion 12.3.0`, acknowledged the incomplete public 2050 ARM source gap, validated later public ARM references from `external/xnu-4570.1.46`, prepared the Stage51 object plan, proved `stage50_xnu_workspace_satisfied_mask=0x0007ffff`, `loader_safety_mask=0x0003ffff`, `loader_satisfied_mask=0x003fffff`, returned loader status `0x50000001`, preserved the Stage-owned TTBR0 restore/cache safety, avoided public-XNU execution/full `mach_kernel` build/external mutation, and reset through PS_HOLD successfully.
+- Stage51 compiled the first minimal public-XNU ARMv7 object subset from public `xnu-2050.22.13` sources (`pexpert/gen/device_tree.c` and `pexpert/gen/bootargs.c`) using Stage51-owned compatibility shims, emitted ignored objects under `out/stage51/xnu-objects/`, proved `stage51_xnu_object_subset_satisfied_mask=0x00003fff`, `stage51_xnu_object_count=0x00000003`, `loader_safety_mask=0x0007ffff`, `loader_satisfied_mask=0x007fffff`, returned loader status `0x51000001`, preserved the Stage-owned TTBR0 restore/cache safety, avoided public-XNU Mach-O link/public-XNU execution/full `mach_kernel` build/external mutation, and reset through PS_HOLD successfully.
 
 ## Repository contents
 
@@ -190,6 +191,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage48/` — XNU-adjacent skeleton with PA-base-aware high-VA L1 descriptor modeling and Stage-owned safe-table materialization.
 - `stage49/` — XNU-adjacent skeleton with a controlled no-XNU TTBR0 round-trip using a Stage-owned recovery L1 table and restored live MMU state.
 - `stage50/` — public-XNU workspace and cancro/MSM8974 ARMv7 target scaffold that validates public source refs and prepares the Stage51 object-subset plan without executing XNU.
+- `stage51/` — minimal public-XNU object-subset compile scaffold that builds selected public `xnu-2050.22.13` pexpert/device-tree objects with Stage51-owned shims while avoiding public-XNU Mach-O link or execution.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
@@ -240,6 +242,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-51-stage48-high-va-safe-table-materialization.md` — successful Stage48 high-VA descriptor model and Stage-owned safe-table materialization test.
 - `docs/experiment-52-stage49-controlled-ttbr-roundtrip.md` — successful Stage49 controlled no-XNU TTBR0 round-trip and restore test.
 - `docs/experiment-53-stage50-public-xnu-workspace-cancro-scaffold.md` — successful Stage50 public-XNU workspace and cancro target scaffold validation.
+- `docs/experiment-54-stage51-public-xnu-object-subset-compile.md` — successful Stage51 minimal public-XNU object-subset compile and no-execution loader roll-up validation.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
@@ -263,19 +266,19 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage50 are complete. Stage50 now validates a generated non-proprietary 32-bit ARM Mach-O fixture, local materialization/TTE/high-VA/safe-table preflight, controlled Stage-owned TTBR0 round-trip/restore, and a public-XNU workspace/cancro target scaffold. The scaffold validates `external/xnu-upstream` detached at public `xnu-2050.22.13` (`cc8a9b0c`, `MasterVersion 12.3.0`), records the incomplete public 2050 ARM source gap, validates later public ARM references from `external/xnu-4570.1.46`, emits ignored host artifacts under `out/stage50/`, proves `stage50_xnu_workspace_satisfied_mask=0x0007ffff`, `loader_safety_mask=0x0003ffff`, `loader_satisfied_mask=0x003fffff`, and returns loader status `0x50000001`. Stage50 explicitly avoids any full public `mach_kernel` build, public-XNU object execution, generated Mach-O execution, proposed physical/TTE workspace write, external checkout mutation, persistent write, or cache change.
+Stage0 through Stage51 are complete. Stage51 now validates a generated non-proprietary 32-bit ARM Mach-O fixture, local materialization/TTE/high-VA/safe-table preflight, controlled Stage-owned TTBR0 round-trip/restore, the public-XNU workspace/cancro target scaffold, and the first minimal public-XNU ARMv7 object-subset compile. The object subset consumes `external/xnu-upstream` detached at public `xnu-2050.22.13` (`cc8a9b0c`, `MasterVersion 12.3.0`) read-only, compiles `pexpert/gen/device_tree.c` and `pexpert/gen/bootargs.c` with Stage51-owned shims, emits ignored objects under `out/stage51/xnu-objects/`, proves `stage51_xnu_object_subset_satisfied_mask=0x00003fff`, `loader_safety_mask=0x0007ffff`, `loader_satisfied_mask=0x007fffff`, and returns loader status `0x51000001`. Stage51 explicitly avoids any full public `mach_kernel` build, public-XNU Mach-O link, public-XNU object execution, generated Mach-O execution, proposed physical/TTE workspace write, external checkout mutation, persistent write, or cache change.
 
-Near-term Stage51 work should begin the first minimal public-XNU object-subset compile without executing XNU on hardware yet:
+Near-term Stage52 work should create a linkable minimal public-XNU Mach-O experiment without executing XNU on hardware yet:
 
 - Keep using non-persistent `sudo fastboot boot` for hardware validation; do not flash without explicit per-operation confirmation.
 - Preserve identity/recovery mappings for ram_console, PS_HOLD, GIC, timer, abort logging, and early recovery paths.
-- Keep descriptor-driven service/phase dispatchers plus registry, policy, manifest, launch-contract, startup-boundary, startup-routine, startup-entry, callout-table, kernel-context, VM-plan, VM-state, allocator, pmap-workspace, object-table, collection-handoff, entry-table, object-graph, dependency-resolution, loader-preflight, load-plan, materialization, TTE dry-run, descriptor verification, high-VA VTOP dry-run, safe-table materialization, TTBR0 restore checks, and workspace validation as safety gates.
-- Use the Stage50 TTBR0 restore proof as the live-MMU safety baseline; do not install proposed XNU tables yet.
-- Start from `stage50/targets/cancro.stage51.objects` and compile only a tiny public-only object subset or compatibility wrapper around device-tree / boot-argument-adjacent code.
-- Keep large source checkouts under ignored `external/` and build outputs under ignored `out/stage51/`.
+- Keep descriptor-driven service/phase dispatchers plus registry, policy, manifest, launch-contract, startup-boundary, startup-routine, startup-entry, callout-table, kernel-context, VM-plan, VM-state, allocator, pmap-workspace, object-table, collection-handoff, entry-table, object-graph, dependency-resolution, loader-preflight, load-plan, materialization, TTE dry-run, descriptor verification, high-VA VTOP dry-run, safe-table materialization, TTBR0 restore checks, workspace validation, and object-subset compile validation as safety gates.
+- Use the Stage51 TTBR0 restore proof as the live-MMU safety baseline; do not install proposed XNU tables yet.
+- Start from the Stage51 object subset and link only a tiny controlled public-XNU-derived artifact.
+- Keep large source checkouts under ignored `external/` and build outputs under ignored `out/stage52/`.
 - Continue refining real XNU high-virtual `virtBase`/`physBase` mapping toward sub-section/page-granular behavior instead of only section-envelope translations.
 - Continue refining proposed `virtBase`/`physBase`/`topOfKernelData` and `avail_start` from concrete loader/build facts.
 - Use `xnu-2050.22.13` for iOS 6 / Darwin 12-era public context and `xnu-4570.1.46` as the public ARM implementation reference where the 2050 tree lacks ARMv7 files.
-- Do not build a full public `mach_kernel`, link a public-XNU Mach-O, or jump into XNU yet; record compile/link readiness facts first.
+- Do not build a full public `mach_kernel`, jump into XNU, execute public-XNU object code, or install proposed XNU tables yet; record link readiness facts first.
 - Keep caches disabled unless a later stage explicitly validates a safe cache policy.
 - Preserve SGI/timer IRQ retests plus custom abort logging.

@@ -481,13 +481,6 @@ The important boundary is that Stage50 did not compile or execute public-XNU obj
 
 ## Next stage
 
-Stage51 should perform the first minimal public-XNU object-subset compile. It should start from the Stage50 manifest and stay public-only:
+Stage51 has now completed the first minimal public-XNU object-subset compile. It consumed `external/xnu-upstream` at `xnu-2050.22.13` read-only, compiled public `pexpert/gen/device_tree.c` and `pexpert/gen/bootargs.c` as ARMv7 objects with Stage51-owned shims, kept outputs ignored under `out/stage51/xnu-objects/`, avoided a full public `mach_kernel` build, avoided public-XNU Mach-O link and execution, and preserved the non-persistent/no-proposed-write/no-cache-change safety boundary.
 
-- consume `external/xnu-upstream` at `xnu-2050.22.13` read-only,
-- use `external/xnu-4570.1.46` only as a public ARM reference,
-- compile a tiny dependency-light subset or compatibility wrapper around device-tree / boot-argument-adjacent code,
-- keep outputs ignored under `out/stage51/`,
-- do not build a full public `mach_kernel`,
-- do not link a public-XNU Mach-O yet,
-- do not execute any public-XNU code on hardware yet,
-- preserve the Stage50 non-persistent/no-proposed-write/no-cache-change safety boundary.
+Stage52 should now create a linkable minimal public-XNU Mach-O experiment while still avoiding a full public `mach_kernel`, avoiding XNU execution on hardware, and preserving the Stage-owned TTBR restore/cache safety boundary.

@@ -133,13 +133,13 @@ git clone --depth 1 --branch xnu-4570.1.46 \
 
 ## Current analysis focus
 
-Stage50 has validated the public-XNU workspace scaffold and cancro/MSM8974 ARMv7 target identity without mutating external checkouts. The next analysis/build pass should focus on Stage51:
+Stage51 has now completed the first minimal public-XNU object-subset compile without mutating external checkouts. It consumed `external/xnu-upstream` at `xnu-2050.22.13` read-only and compiled `pexpert/gen/device_tree.c` plus `pexpert/gen/bootargs.c` as ARMv7 objects with Stage51-owned compatibility shims under `stage51/shims/`. The next analysis/build pass should focus on Stage52:
 
-1. Start from `stage50/targets/cancro.stage51.objects` and compile a tiny public-only object subset or compatibility wrapper around device-tree / boot-argument-adjacent code.
+1. Start from the Stage51 public-XNU object subset and create a tiny linkable public-XNU-derived Mach-O experiment.
 2. Keep `external/xnu-upstream` detached at `xnu-2050.22.13` for Darwin 12/iOS 6-era context.
 3. Use `external/xnu-4570.1.46` only as a public ARM implementation reference where 2050 lacks ARMv7 files.
-4. Keep outputs ignored under `out/stage51/` and do not mutate `external/`.
-5. Do not attempt a full public `mach_kernel` build, public-XNU Mach-O link, or public-XNU execution on hardware yet.
+4. Keep outputs ignored under `out/stage52/` and do not mutate `external/`.
+5. Do not attempt a full public `mach_kernel` build, do not jump into XNU, and do not execute public-XNU code on hardware yet.
 6. Continue mapping the remaining real-XNU blockers: sub-section/page-granular `virtBase`/`physBase` mapping, pmap/bootstrap tables, cache policy, MSM8974 pexpert, timer/interrupt hooks, IOKit/platform drivers, kernelcache/prelink details, and later userspace/code-signing policy.
 
-See also `docs/upstream-xnu-analysis.md` and `docs/experiment-53-stage50-public-xnu-workspace-cancro-scaffold.md` for the Stage50 scaffold result and Stage51 direction.
+See also `docs/upstream-xnu-analysis.md`, `docs/experiment-53-stage50-public-xnu-workspace-cancro-scaffold.md`, and `docs/experiment-54-stage51-public-xnu-object-subset-compile.md` for the Stage50 scaffold result, Stage51 compile result, and Stage52 direction.
