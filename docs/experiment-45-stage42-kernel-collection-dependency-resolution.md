@@ -394,11 +394,14 @@ This is still an XNU-adjacent kernel skeleton, not a booting XNU kernel. The dep
 
 ## Next stage
 
-Stage43 can make the dependency-resolution descriptor drive a minimal activation-order descriptor:
+The earlier activation-order descriptor idea was superseded by the project goal of moving toward a real XNU loader path. Stage43 therefore pivots to a Mach-O/XNU loader probe instead of adding another purely synthetic descriptor:
 
 - keep identity/recovery mappings and caches disabled,
 - keep existing startup-entry/callout/context/VM-plan/VM-state/allocator/pmap-workspace/object-table/collection-handoff/entry-table/object-graph/dependency-resolution checks,
-- add a versioned activation-order descriptor consuming resolved nodes and activation-ready facts,
-- validate activation sequence, prerequisite coverage, class readiness, checksum/status, and identity/high-alias views,
+- add a bounded Mach-O parser over an inert embedded 32-bit ARM Mach-O-shaped artifact,
+- validate public loader-facing facts such as magic, ARM CPU subtype, filetype, load commands, segment names, entry metadata, and file/VM spans,
+- record a proposed future-XNU `virtBase`/`physBase`/`topOfKernelData` and TTE workspace without switching to it,
 - preserve post-run SGI/timer IRQ retests,
-- avoid persistent writes.
+- avoid persistent writes and avoid any XNU jump.
+
+See `docs/experiment-46-stage43-mach-o-xnu-loader-probe.md` for the completed Stage43 result.

@@ -255,6 +255,13 @@ Concrete Stage43 work packages:
 
 A later stage can attempt a controlled transition toward an XNU-style `_start` only after the loader preflight shows the boot ABI and pmap workspace are coherent.
 
+
+## Stage43 implementation note
+
+Stage43 now implements the recommended first loader-probe step with a bounded, inert, embedded 32-bit ARM Mach-O-shaped artifact. The probe validates public Mach-O/XNU-facing facts (`MH_MAGIC`, ARMv7 CPU subtype, `MH_PRELOAD`, `LC_SEGMENT`, `LC_SYMTAB`, `LC_UNIXTHREAD`, and `__TEXT`/`__DATA`/`__LINKEDIT`) and records a proposed future-XNU `virtBase`/`physBase`/`memSize`/`topOfKernelData` tuple plus a 10-page early TTE workspace.
+
+The implementation deliberately does not execute the parsed entry metadata, does not jump to XNU, does not switch TTBRs to the proposed tuple, and does not enable caches. Its hardware run confirms the inherited Stage42 MMU/GIC/timer safety checks still pass and the loader preflight returns status `0x43000001`. The remaining blockers are still real pmap bootstrap, MSM8974 pexpert support, XNU interrupt/timer hooks, IOKit/platform drivers, and later kernelcache/userspace details.
+
 ## Verification commands used
 
 Representative commands used during this pass:
