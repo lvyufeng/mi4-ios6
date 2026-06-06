@@ -392,10 +392,6 @@ This removes one class of uncertainty before any controlled TTBR or `_start` wor
 
 ## Next stage
 
-Stage48 should continue toward a real XNU handoff without executing XNU yet. Practical next options:
+Completed by Stage48. Stage48 materialized the verified identity/recovery table bytes into a Stage-owned safe table buffer, added a PA-base-aware high-VA section descriptor model, verified high-VA descriptor and software VTOP checks, and proved `xnu_tte_descriptor_verify_mask=0x000001ff`, `xnu_tte_translation_check_mask=0x0000007f`, `xnu_tte_satisfied_mask=0x001fffff`, `loader_safety_mask=0x00007fff`, `loader_satisfied_mask=0x00007fff`, and loader status `0x48000001` while still not executing XNU, writing proposed physical addresses, programming TTBRs, replacing live MMU tables, or changing caches.
 
-- materialize the verified table bytes into a Stage-owned safe table buffer that more closely models the eventual physical workspace,
-- add a controlled no-XNU TTBR-switch selftest plan that can switch to a known-safe table and still preserve recovery/logging,
-- begin modeling the real XNU high-virtual `virtBase`/`physBase` mapping instead of only identity-style section translations,
-- continue refining MSM8974 pexpert/timer/interrupt gaps that block real `arm_init`,
-- preserve non-persistent booting, ram_console diagnostics, PS_HOLD reset, no XNU jump, no proposed physical load writes, caches unchanged, and SGI/timer retests.
+Stage49 should attempt a controlled no-XNU TTBR-switch selftest using Stage-owned tables only, preserving recovery mappings, ram_console, PS_HOLD, GIC, timer, abort logging, non-persistent booting, and caches unchanged.

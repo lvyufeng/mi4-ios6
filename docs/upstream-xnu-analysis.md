@@ -292,6 +292,14 @@ Stage47 does not claim full XNU high-virtual mapping support. It verifies the cu
 
 The remaining blockers are now more focused: real/high-virtual XNU mapping policy, safe live table materialization/switching, real pmap/bootstrap table population, exact XNU cache policy, MSM8974 pexpert support, XNU interrupt/timer hooks, IOKit/platform drivers, real kernelcache/loading details, relocation/linking/prelink details, and later code-signing/userspace policy work.
 
+## Stage48 implementation note
+
+Stage48 addresses the Stage47 high-virtual mapping gap without yet installing or executing any XNU table. It keeps the public ARM XNU boot tuple model (`virtBase`, `physBase`, `memSize`, `topOfKernelData`) and adds a PA-base-aware section descriptor helper so VA slot selection (`va >> 20`) is no longer conflated with the physical descriptor base (`pa & 0xfff00000`). The generated fixture still has a section-envelope mapping around `0x80000000`, so this is not yet the final page-granular XNU bootstrap map, but it proves the implementation path can represent VA slot and PA base independently.
+
+Stage48 also materializes two local L1 tables into `stage48_safe_table_arena[]`: an identity/recovery table and a high-VA table. Hardware validation reports `xnu_tte_descriptor_verify_mask=0x000001ff`, `xnu_tte_translation_check_mask=0x0000007f`, `xnu_tte_satisfied_mask=0x001fffff`, `xnu_safe_table_status=0x48000001`, `loader_safety_mask=0x00007fff`, `loader_satisfied_mask=0x00007fff`, and loader status `0x48000001`. Safety-proof fields confirm no proposed physical load writes, no proposed workspace writes, no TTBR0/TTBR1 writes, no TTBCR/DACR/SCTLR writes, no live MMU table replacement, no TLB invalidation for table install, and no cache changes.
+
+The remaining blockers are now more focused on the next accelerated steps: controlled no-XNU table switching, sub-section/page-granular high-virtual XNU mapping policy, real pmap/bootstrap table population, exact XNU cache policy, MSM8974 pexpert support, XNU interrupt/timer hooks, IOKit/platform drivers, real kernelcache/loading details, relocation/linking/prelink details, and later code-signing/userspace policy work.
+
 ## Verification commands used
 
 Representative commands used during this pass:
