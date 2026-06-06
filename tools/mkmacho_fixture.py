@@ -2,7 +2,7 @@
 """Generate a deterministic non-proprietary 32-bit ARM Mach-O fixture.
 
 The fixture is intentionally inert. It models public Mach-O segment/section
-layout for Mi4 iOS6 Stage44 loader-preflight work, but it is not an Apple
+layout for Mi4 iOS6 loader-preflight work, but it is not an Apple
 kernelcache and it is never executed by the target payload.
 """
 
@@ -63,43 +63,45 @@ class Segment:
         return 56 + len(self.sections) * 68
 
 
-def build_segments() -> list[Segment]:
+def build_segments(stage_number: int) -> list[Segment]:
+    stage = f"ST{stage_number}"
+    stage_lower = f"stage{stage_number}"
     segments: list[Segment] = []
 
     text = Segment("__TEXT", VM_BASE, 0x2000, 0x5, 0x5)
-    text.add_section("__text", b"ST44-TEXT-NOEXEC\0", align_pow2=4)
+    text.add_section("__text", f"{stage}-TEXT-NOEXEC\0".encode("ascii"), align_pow2=4)
     segments.append(text)
 
     data = Segment("__DATA", VM_BASE + 0x2000, 0x2000, 0x3, 0x3)
-    data.add_section("__const", b"ST44-DATA-CONST\0", align_pow2=4)
+    data.add_section("__const", f"{stage}-DATA-CONST\0".encode("ascii"), align_pow2=4)
     segments.append(data)
 
     linkedit = Segment("__LINKEDIT", VM_BASE + 0x4000, 0x1000, 0x1, 0x1)
     segments.append(linkedit)
 
     prelink_text = Segment("__PRELINK_TEXT", VM_BASE + 0x5000, 0x1000, 0x5, 0x5)
-    prelink_text.add_section("__text", b"ST44-PRELINK-TEXT-NOEXEC\0", align_pow2=4)
+    prelink_text.add_section("__text", f"{stage}-PRELINK-TEXT-NOEXEC\0".encode("ascii"), align_pow2=4)
     segments.append(prelink_text)
 
     prelink_info = Segment("__PRELINK_INFO", VM_BASE + 0x6000, 0x2000, 0x1, 0x1)
     prelink_info.add_section(
         "__info",
-        b'<stage44-prelink-info generated="true" proprietary="false" executable="false"/>\0',
+        f'<{stage_lower}-prelink-info generated="true" proprietary="false" executable="false"/>\0'.encode("ascii"),
         align_pow2=2,
     )
-    prelink_info.add_section("__kernel", b"ST44-PRELINK-KERNEL-METADATA\0", align_pow2=2)
-    prelink_info.add_section("__kexts", b"ST44-PRELINK-KEXTS-METADATA\0", align_pow2=2)
+    prelink_info.add_section("__kernel", f"{stage}-PRELINK-KERNEL-METADATA\0".encode("ascii"), align_pow2=2)
+    prelink_info.add_section("__kexts", f"{stage}-PRELINK-KEXTS-METADATA\0".encode("ascii"), align_pow2=2)
     segments.append(prelink_info)
 
     prelink_state = Segment("__PRELINK_STATE", VM_BASE + 0x8000, 0x1000, 0x1, 0x1)
-    prelink_state.add_section("__kernel", b"ST44-PRELINK-STATE-KERNEL\0", align_pow2=2)
-    prelink_state.add_section("__kexts", b"ST44-PRELINK-STATE-KEXTS\0", align_pow2=2)
+    prelink_state.add_section("__kernel", f"{stage}-PRELINK-STATE-KERNEL\0".encode("ascii"), align_pow2=2)
+    prelink_state.add_section("__kexts", f"{stage}-PRELINK-STATE-KEXTS\0".encode("ascii"), align_pow2=2)
     segments.append(prelink_state)
 
     return segments
 
 
-def layout_segments(segments: list[Segment], sizeofcmds: int) -> int:
+def layout_segments(segments: list[Segment], sizeofcmds: int, include_header_in_text: bool) -> int:
     payload_offset = align(28 + sizeofcmds, 0x10)
     cursor = payload_offset
     for segment in segments:
@@ -121,7 +123,12 @@ def layout_segments(segments: list[Segment], sizeofcmds: int) -> int:
         if segment.sections:
             segment.fileoff = segment_payload_start
             segment.filesize = align(max_end - segment_payload_start, 0x10)
-            cursor = segment_payload_start + segment.filesize
+            if include_header_in_text and segment is segments[0]:
+                for section in segment.sections:
+                    section["addr"] = segment.vmaddr + int(section["offset"])
+                segment.fileoff = 0
+                segment.filesize = align(max_end, 0x10)
+            cursor = segment_payload_start + align(max_end - segment_payload_start, 0x10)
         else:
             segment.fileoff = cursor
             segment.filesize = 0
@@ -162,12 +169,12 @@ def pack_segment(segment: Segment) -> bytes:
     return bytes(out)
 
 
-def build_fixture() -> bytes:
-    segments = build_segments()
+def build_fixture(stage_number: int) -> bytes:
+    segments = build_segments(stage_number)
     symtab_size = 24
     unixthread_size = 16
     sizeofcmds = sum(segment.cmdsize for segment in segments) + symtab_size + unixthread_size
-    file_size = layout_segments(segments, sizeofcmds)
+    file_size = layout_segments(segments, sizeofcmds, stage_number >= 45)
 
     ncmds = len(segments) + 2
     out = bytearray(file_size)
@@ -214,15 +221,22 @@ def build_fixture() -> bytes:
     return bytes(out)
 
 
-def c_array(data: bytes, symbol_prefix: str) -> str:
+def stage_number_from_prefix(symbol_prefix: str) -> int:
+    if symbol_prefix.startswith("stage") and symbol_prefix[5:].isdigit():
+        return int(symbol_prefix[5:])
+    return 44
+
+
+def c_array(data: bytes, symbol_prefix: str, stage_number: int) -> str:
     digest = hashlib.sha256(data).hexdigest()
+    include_name = f"stage{stage_number}.h"
     lines = [
         "/* Generated by tools/mkmacho_fixture.py.",
-        " * Non-proprietary inert Mach-O fixture for Stage44 loader preflight.",
+        f" * Non-proprietary inert Mach-O fixture for Stage{stage_number} loader preflight.",
         " * Contains no Apple binary code and is never executed.",
         f" * sha256={digest}",
         " */",
-        "#include \"stage44.h\"",
+        f"#include \"{include_name}\"",
         "",
         f"const uint8_t {symbol_prefix}_embedded_macho[] __attribute__((aligned(4))) = {{",
     ]
@@ -246,11 +260,12 @@ def main() -> int:
     parser.add_argument("--symbol-prefix", default="stage44", help="C symbol prefix")
     args = parser.parse_args()
 
-    data = build_fixture()
+    stage_number = stage_number_from_prefix(args.symbol_prefix)
+    data = build_fixture(stage_number)
     args.bin_output.parent.mkdir(parents=True, exist_ok=True)
     args.c_output.parent.mkdir(parents=True, exist_ok=True)
     args.bin_output.write_bytes(data)
-    args.c_output.write_text(c_array(data, args.symbol_prefix))
+    args.c_output.write_text(c_array(data, args.symbol_prefix, stage_number))
 
     digest = hashlib.sha256(data).hexdigest()
     print(f"wrote {args.bin_output} size={len(data)} sha256={digest}")

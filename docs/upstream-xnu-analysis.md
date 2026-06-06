@@ -268,6 +268,14 @@ Stage44 builds on the Stage43 loader preflight by replacing the hand-written emb
 
 The proposed future-XNU `topOfKernelData` is now derived from the load plan's physical end (`load_phys_end`) rather than the Stage43 fixed-span fallback, and `avail_start` is reported after the 10-page early TTE workspace. Stage44 still does not execute the fixture, does not jump to XNU, does not switch TTBRs, and does not enable caches. Its hardware run returns loader status `0x44000001` with the inherited Stage43 MMU/GIC/timer gates intact. The remaining blockers are unchanged: real pmap bootstrap, MSM8974 pexpert support, XNU interrupt/timer hooks, IOKit/platform drivers, and later kernelcache/userspace details.
 
+## Stage45 implementation note
+
+Stage45 proves the next public loader rule: `LC_SEGMENT` file bytes are copied to their loaded addresses and `vmsize - filesize` tails are zero-filled. The implementation deliberately materializes only into a Stage45-owned local BSS arena, not into the proposed XNU physical load addresses. The proposed physical load plan therefore remains dry-run metadata while the target still executes the real copy+zero-fill loop on the owned device.
+
+To make materialized reparse meaningful, the Stage45 fixture generator emits a Stage45-compatible layout where the first `__TEXT` segment includes the Mach-O header/load commands at `fileoff=0`. Stage45 reparses the arena image, verifies marker prefixes for `ST45-TEXT`, `ST45-DATA`, and `ST45-PRELINK-TEXT`, scans all zero-fill tails, and records a public-XNU-style max loaded address (`0x80011000`). Its hardware run returns `macho_staging_status=0x45000001`, `loader_safety_mask=0x0000007f`, `loader_satisfied_mask=0x000001ff`, and loader status `0x45000001` while still not executing the fixture, not jumping to XNU, not switching TTBRs, not enabling caches, and not writing proposed physical load addresses.
+
+The remaining blockers are still real ARM XNU pmap/bootstrap table construction, MSM8974 pexpert support, XNU interrupt/timer hooks, IOKit/platform drivers, real kernelcache/loading details, and later kernelcache/userspace policy work.
+
 ## Verification commands used
 
 Representative commands used during this pass:

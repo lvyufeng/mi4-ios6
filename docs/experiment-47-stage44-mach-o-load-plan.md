@@ -348,9 +348,6 @@ The explicit blockers remain real pmap bootstrap, a real MSM8974 pexpert impleme
 
 ## Next stage
 
-Stage45 should keep moving toward a real XNU handoff without executing XNU yet. Practical next options:
+Completed by Stage45. Stage45 executed the public Mach-O segment copy+zero-fill materialization rule into a dedicated local BSS arena only, reparsed the materialized arena image, verified Stage45 marker prefixes and zero-fill tails, and recorded materialization status `0x45000001` while preserving non-persistent booting, ram_console diagnostics, PS_HOLD reset, identity/recovery mappings, and SGI/timer retests.
 
-- add a bounded dry-run segment copy/zero-fill staging descriptor that proves how the load plan would materialize bytes in RAM without branching to them,
-- model the early ARM XNU `_start` page-table/TTE layout more concretely from the Stage44 `topOfKernelData` workspace,
-- add a dry-run translation-table descriptor for the proposed `virtBase`/`physBase` kernel mapping while still not programming TTBRs,
-- preserve non-persistent booting, ram_console diagnostics, PS_HOLD reset, identity/recovery mappings, and SGI/timer retests.
+Stage46 should continue toward a real XNU handoff without executing XNU yet by modeling the early ARM XNU `_start` page-table/TTE layout from Stage45's materialized image and proposed `topOfKernelData` workspace, still without programming TTBRs.
