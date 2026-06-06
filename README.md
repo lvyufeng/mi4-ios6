@@ -114,6 +114,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - Stage41 made the kernel collection entry-table descriptor drive a versioned kernel collection object-graph descriptor, validated object-graph required/satisfied mask `0x0000003f`, node/edge masks `0x0000007f`/`0x0000007f`, class mask `0x0000000f`, entry-table checksum/status `0xdf1a877d`/`0x41000001`, object-graph checksum/status `0xce451242`/`0x41000001`, node dependency sequence `0x00000000`, `0x00000001`, `0x00000003`, `0x00000007`, `0x00000008`, `0x00000010`, `0x00000020`, object pointers for boot args `0xc0038000`, device tree `0xc0038140`, PE state `0xc002d020`, VM plan/state `0xc0030000`/`0xc003004c`, allocator `0xc003009c`, pmap workspace `0xc00300e4`, L1 table `0x00034000`/`0xc0034000`, root step mask `0x0fffffff`, returned status `0x41000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage42 made the kernel collection object-graph descriptor drive a versioned kernel collection dependency-resolution descriptor, validated dependency-resolution required/satisfied mask `0x0000007f`, resolved-order/dependency/activation masks `0x0000007f`/`0x0000007f`/`0x0000007f`, class mask `0x0000000f`, object-graph checksum/status `0xce451242`/`0x42000001`, dependency-resolution checksum/status `0xdc1b472e`/`0x42000001`, resolved object sequence `0x00000001` through `0x00000040`, dependency sequence `0x00000000`, `0x00000001`, `0x00000003`, `0x00000007`, `0x00000008`, `0x00000010`, `0x00000020`, activation-ready sequence `0x00000001` through `0x00000040`, object pointers for boot args `0xc003c000`, device tree `0xc003c140`, PE state `0xc0031020`, VM plan/state `0xc0034000`/`0xc003404c`, allocator `0xc003409c`, pmap workspace `0xc00340e4`, L1 table `0x00038000`/`0xc0038000`, root step mask `0x1fffffff`, returned status `0x42000001`, and re-ran SGI/timer IRQ selftests successfully.
 - Stage43 pivoted toward a real XNU loader path by adding a bounded Mach-O/XNU loader preflight over an inert embedded 32-bit ARM Mach-O-shaped artifact, validated `MH_MAGIC`, `CPU_TYPE_ARM`, `CPU_SUBTYPE_ARM_V7`, `MH_PRELOAD`, `LC_SEGMENT`/`LC_SYMTAB`/`LC_UNIXTHREAD`, required segments `__TEXT`/`__DATA`/`__LINKEDIT`, entry metadata marked not executed, proposed XNU tuple `virtBase=0x80008000`, `physBase=0x80000000`, `memSize=0x5e500000`, `topOfKernelData=0x80010000`, 10-page TTE workspace ending at `0x8001a000`, complete Apple-DT semantic mask `0x00000fff`, recorded remaining platform gaps `0x0000001f`, loader status `0x43000001`, preserved the high-root/MMU checks, and re-ran SGI/timer IRQ selftests successfully.
+- Stage44 replaced the hand-written Mach-O bytes with a reproducible non-proprietary host-generated fixture, parsed 32-bit `LC_SEGMENT` section records, reported `__TEXT,__text`, `__DATA,__const`, `__PRELINK_TEXT`, `__PRELINK_INFO`, and `__PRELINK_STATE` readiness, built a proposed physical load-plan (`load_phys_base=0x80000000`, `load_phys_end=0x80009000`), refined proposed `topOfKernelData=0x8000c000` and `avail_start=0x80016000`, returned loader status `0x44000001`, preserved the Stage43 safety gates, and re-ran SGI/timer IRQ selftests successfully.
 
 ## Repository contents
 
@@ -176,6 +177,7 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `stage41/` — XNU-adjacent skeleton with entry-table-driven kernel collection object-graph descriptor.
 - `stage42/` — XNU-adjacent skeleton with object-graph-driven kernel collection dependency-resolution descriptor.
 - `stage43/` — XNU-adjacent skeleton with a bounded Mach-O/XNU loader preflight, Apple-DT semantic readiness check, and proposed XNU boot tuple/workspace report.
+- `stage44/` — XNU-adjacent skeleton with a generated non-proprietary Mach-O fixture, section/prelink reporting, and proposed physical load-plan/topOfKernelData refinement.
 - `docs/ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `docs/experiment-05-stage2-c-runtime.md` — successful Stage2 C runtime + Apple-DT builder/walker hardware test.
 - `docs/experiment-06-stage3-hardware-probes.md` — successful Stage3 read-only CP15/timer/GIC hardware probes.
@@ -219,9 +221,11 @@ Backed-up `recovery.img` is also a standard Android boot image and uses a serial
 - `docs/experiment-44-stage41-kernel-collection-object-graph.md` — successful Stage41 kernel collection object-graph descriptor test.
 - `docs/experiment-45-stage42-kernel-collection-dependency-resolution.md` — successful Stage42 kernel collection dependency-resolution descriptor test.
 - `docs/experiment-46-stage43-mach-o-xnu-loader-probe.md` — successful Stage43 Mach-O/XNU loader-preflight probe test.
+- `docs/experiment-47-stage44-mach-o-load-plan.md` — successful Stage44 generated Mach-O fixture, section/prelink, and physical load-plan test.
 - `tools/parse_android_bootimg.py` — dependency-free parser/extractor for Android boot image v0/v1-style files.
 - `tools/patch_bootimg_cmdline.py` — surgical editor that changes only the kernel command line, preserving kernel/ramdisk/QCDT and the boot `id`.
 - `tools/mkbootimg_v0_qcdt.py` — legacy Android boot image v0 packer that populates the Qualcomm QCDT `dt_size` field required by cancro bootloader.
+- `tools/mkmacho_fixture.py` — deterministic host generator for the non-proprietary inert Stage44 Mach-O fixture.
 
 Example parser usage:
 
@@ -241,16 +245,16 @@ The backup directory is ignored by git, so this command only works on a host whe
 
 ## Next milestones
 
-Stage0 through Stage43 are complete. Stage43 now validates a bounded Mach-O/XNU loader preflight grounded in the selected public iOS 6-era XNU baseline (`external/xnu-upstream` detached at `xnu-2050.22.13`) while explicitly avoiding any real XNU jump.
+Stage0 through Stage44 are complete. Stage44 now validates a generated non-proprietary 32-bit ARM Mach-O fixture, section/prelink reporting, and a proposed physical load plan grounded in the selected public iOS 6-era XNU baseline (`external/xnu-upstream` detached at `xnu-2050.22.13`) while explicitly avoiding any real XNU jump.
 
-Near-term Stage44 work should keep moving toward a real loader/handoff contract without executing XNU yet:
+Near-term Stage45 work should keep moving toward a real loader/handoff contract without executing XNU yet:
 
 - Keep using non-persistent `sudo fastboot boot`; do not flash without explicit per-operation confirmation.
 - Preserve identity mappings for ram_console, PS_HOLD, GIC, timer, and early recovery paths.
-- Keep descriptor-driven service/phase dispatchers plus registry, policy, manifest, launch-contract, startup-boundary, startup-routine, startup-entry, callout-table, kernel-context, VM-plan, VM-state, allocator, pmap-workspace, object-table, collection-handoff, entry-table, object-graph, dependency-resolution, and loader-preflight checks as safety gates.
-- Replace or supplement the embedded inert Mach-O byte-array with a non-proprietary host-generated Mach-O fixture and matching parser/load-plan validation.
-- Add a physical load-plan descriptor mapping Mach-O VM segments to proposed physical ranges, then refine `topOfKernelData` placement from those ranges.
-- Expand section/prelink reporting toward the public ARM XNU expectations for `__DATA,__const`, `__PRELINK_TEXT`, and `__PRELINK_INFO`.
+- Keep descriptor-driven service/phase dispatchers plus registry, policy, manifest, launch-contract, startup-boundary, startup-routine, startup-entry, callout-table, kernel-context, VM-plan, VM-state, allocator, pmap-workspace, object-table, collection-handoff, entry-table, object-graph, dependency-resolution, loader-preflight, and load-plan checks as safety gates.
+- Add a bounded dry-run segment copy/zero-fill staging descriptor that proves how the Stage44 load plan would materialize bytes in RAM without branching to them.
+- Model the early ARM XNU `_start` page-table/TTE layout more concretely from the Stage44 `topOfKernelData` workspace while still not programming TTBRs.
+- Continue refining proposed `virtBase`/`physBase`/`topOfKernelData` and `avail_start` from concrete loader facts.
 - Use `xnu-2050.22.13` for iOS 6 / Darwin 12-era public context and `xnu-4570.1.46` as the public ARM implementation reference where the 2050 tree lacks ARMv7 files.
 - Do not jump into XNU yet; continue to record loader, VM/pmap workspace, Apple-DT, timer, and interrupt readiness facts first.
 - Keep caches disabled and validate identity/high alias state after returning.

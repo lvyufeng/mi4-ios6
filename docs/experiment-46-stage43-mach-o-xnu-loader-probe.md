@@ -306,10 +306,4 @@ This is still not XNU-runnable. The explicit blockers remain pmap bootstrap, MSM
 
 ## Next stage
 
-Stage44 should keep moving toward a real XNU loader without jumping into XNU yet. Practical next options:
-
-- replace the embedded byte-array fixture with a host-generated, checked-in, non-proprietary Mach-O fixture and matching parser tests,
-- add a physical load-plan descriptor that maps Mach-O VM segments to proposed physical load ranges,
-- expand section parsing enough to report `__DATA,__const` and prelink-related segments,
-- refine `topOfKernelData` placement using real loaded segment/file spans rather than the tiny synthetic fixture,
-- keep all Stage43 safety gates, non-persistent booting, ram_console logging, and SGI/timer retests.
+Completed by Stage44. Stage44 replaced the embedded byte-array fixture with a reproducible host-generated, checked-in, non-proprietary Mach-O fixture, added section/prelink reporting, recorded a proposed physical load-plan descriptor, and refined `topOfKernelData` placement from the proposed loaded physical range while keeping all Stage43 safety gates and still not jumping into XNU.

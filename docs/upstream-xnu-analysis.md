@@ -262,6 +262,12 @@ Stage43 now implements the recommended first loader-probe step with a bounded, i
 
 The implementation deliberately does not execute the parsed entry metadata, does not jump to XNU, does not switch TTBRs to the proposed tuple, and does not enable caches. Its hardware run confirms the inherited Stage42 MMU/GIC/timer safety checks still pass and the loader preflight returns status `0x43000001`. The remaining blockers are still real pmap bootstrap, MSM8974 pexpert support, XNU interrupt/timer hooks, IOKit/platform drivers, and later kernelcache/userspace details.
 
+## Stage44 implementation note
+
+Stage44 builds on the Stage43 loader preflight by replacing the hand-written embedded Mach-O byte array with a reproducible, non-proprietary host-generated fixture (`tools/mkmacho_fixture.py` producing `stage44/macho_fixture.c` and an ignored `out/stage44/stage44_fixture.macho`). The Stage44 parser now walks 32-bit `LC_SEGMENT` section records, reports public-XNU-relevant section/segment names including `__TEXT,__text`, `__DATA,__const`, `__PRELINK_TEXT`, `__PRELINK_INFO`, and `__PRELINK_STATE`, and records a bounded proposed physical load plan that maps each segment's VM span to a proposed physical range under `RAM_PHYS_BASE`.
+
+The proposed future-XNU `topOfKernelData` is now derived from the load plan's physical end (`load_phys_end`) rather than the Stage43 fixed-span fallback, and `avail_start` is reported after the 10-page early TTE workspace. Stage44 still does not execute the fixture, does not jump to XNU, does not switch TTBRs, and does not enable caches. Its hardware run returns loader status `0x44000001` with the inherited Stage43 MMU/GIC/timer gates intact. The remaining blockers are unchanged: real pmap bootstrap, MSM8974 pexpert support, XNU interrupt/timer hooks, IOKit/platform drivers, and later kernelcache/userspace details.
+
 ## Verification commands used
 
 Representative commands used during this pass:
