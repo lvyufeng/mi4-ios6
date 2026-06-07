@@ -133,13 +133,13 @@ git clone --depth 1 --branch xnu-4570.1.46 \
 
 ## Current analysis focus
 
-Stage52 has now completed the first controlled public-XNU link proof without mutating external checkouts. It consumed `external/xnu-upstream` at `xnu-2050.22.13` read-only, compiled `pexpert/gen/device_tree.c` plus `pexpert/gen/bootargs.c` as ARMv7 objects with Stage52-owned compatibility shims, linked those objects with Stage52-owned support into a host-only ARM ELF proof artifact under ignored `out/stage52/xnu-link/`, recorded zero undefined symbols, and embedded only link metadata into an inert generated Mach-O fixture. The next analysis/build pass should focus on Stage53:
+Stage53 has now completed formal public-XNU compile migration proof without mutating external checkouts. It consumed `external/xnu-upstream` at `xnu-2050.22.13` read-only, classified ten selected public candidates through a fail-closed compile graph, allowed only the graph-approved public 2050 sources (`pexpert/gen/device_tree.c`, `pexpert/gen/bootargs.c`, and bounded-new `pexpert/gen/pe_gen.c`), kept later public ARM bring-up sources from `external/xnu-4570.1.46` reference-only or excluded-high-risk, compiled three public objects plus Stage53-owned shims, linked them into a host-only ARM ELF proof artifact under ignored `out/stage53/xnu-link/`, recorded zero undefined symbols, and embedded only graph/link metadata into an inert generated Mach-O fixture. The next analysis/build pass should focus on Stage54:
 
-1. Start from the Stage52 public-XNU object subset and controlled link proof, then expand toward a tracked public-XNU compile unit graph.
+1. Start from the Stage53 public-XNU compile graph and controlled link proof, then expand the graph toward additional pexpert/platform compile units deliberately.
 2. Keep `external/xnu-upstream` detached at `xnu-2050.22.13` for Darwin 12/iOS 6-era context.
 3. Use `external/xnu-4570.1.46` only as a public ARM implementation reference where 2050 lacks ARMv7 files.
-4. Keep outputs ignored under `out/stage53/` and do not mutate `external/`.
+4. Keep outputs ignored under `out/stage54/` and do not mutate `external/`.
 5. Do not attempt a full public `mach_kernel` build, do not jump into XNU, and do not execute public-XNU code on hardware yet.
 6. Continue mapping the remaining real-XNU blockers: sub-section/page-granular `virtBase`/`physBase` mapping, pmap/bootstrap tables, cache policy, MSM8974 pexpert, timer/interrupt hooks, IOKit/platform drivers, kernelcache/prelink details, and later userspace/code-signing policy.
 
-See also `docs/upstream-xnu-analysis.md`, `docs/experiment-53-stage50-public-xnu-workspace-cancro-scaffold.md`, `docs/experiment-54-stage51-public-xnu-object-subset-compile.md`, and `docs/experiment-55-stage52-public-xnu-controlled-link-proof.md` for the Stage50 scaffold result, Stage51 compile result, and Stage52 controlled link-proof result.
+See also `docs/upstream-xnu-analysis.md`, `docs/experiment-53-stage50-public-xnu-workspace-cancro-scaffold.md`, `docs/experiment-54-stage51-public-xnu-object-subset-compile.md`, `docs/experiment-55-stage52-public-xnu-controlled-link-proof.md`, and `docs/experiment-56-stage53-xnu-compile-graph.md` for the Stage50 scaffold result, Stage51 compile result, Stage52 controlled link-proof result, and Stage53 compile-graph migration result.
