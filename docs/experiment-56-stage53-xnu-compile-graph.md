@@ -519,13 +519,15 @@ The important boundary is that Stage53 migrates compile/link facts, not runtime 
 
 ## Next stage
 
-Stage53 completes the formal compile graph proof for the first expanded public-XNU subset. Stage54 should use that graph discipline to continue migration toward real XNU execution preconditions while preserving the proven no-execution boundary:
+Stage53 completed the formal compile graph proof for the first expanded public-XNU subset. Stage54 has now used that graph discipline to migrate one bounded public ARM pexpert/platform object (`external/xnu-4570.1.46/pexpert/arm/pe_bootargs.c`) into the host-only proof while preserving the proven no-execution boundary, closing duplicate symbols, and validating no-platform-runtime-execution status on hardware.
 
-- expand the graph from hand-selected candidates toward more pexpert/platform compile units,
+Stage55 should continue from the Stage54 pexpert/platform graph:
+
+- expand only the next smallest tracked public-XNU pexpert/platform surface,
 - keep public `xnu-2050.22.13` as the Darwin 12/iOS 6-era baseline,
 - use later public ARM sources only as references for missing ARMv7 boot implementation details,
-- start defining cancro/MSM8974 pexpert shim packages for timebase, interrupt, debug, and platform identification hooks,
+- continue defining cancro/MSM8974 pexpert shim packages for timebase, interrupt, debug, and platform identification hooks,
 - continue refusing `start.s`, `arm_init.c`, `arm_vm_init.c`, `pmap.c`, scheduler, VM, and IOKit sources until their preconditions are explicitly modeled,
-- keep build/link outputs ignored under `out/stage54/`,
-- do not jump into XNU or execute public-XNU code on hardware until boot args, page tables, pmap, interrupts, timer, and cache policy are proven,
+- keep build/link outputs ignored under `out/stage55/`,
+- do not jump into XNU or execute public-XNU/platform-runtime code on hardware until boot args, page tables, pmap, interrupts, timer, and cache policy are proven,
 - continue non-persistent `sudo fastboot boot` validation only.

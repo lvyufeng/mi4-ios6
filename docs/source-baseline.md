@@ -1,6 +1,6 @@
 # Source Baseline
 
-Date: 2026-06-05
+Date: 2026-06-07
 
 This document records the external source checkouts used as the current reference baseline for the Xiaomi Mi 4 (`cancro`) iOS/Darwin/XNU experiment.
 
@@ -133,13 +133,13 @@ git clone --depth 1 --branch xnu-4570.1.46 \
 
 ## Current analysis focus
 
-Stage53 has now completed formal public-XNU compile migration proof without mutating external checkouts. It consumed `external/xnu-upstream` at `xnu-2050.22.13` read-only, classified ten selected public candidates through a fail-closed compile graph, allowed only the graph-approved public 2050 sources (`pexpert/gen/device_tree.c`, `pexpert/gen/bootargs.c`, and bounded-new `pexpert/gen/pe_gen.c`), kept later public ARM bring-up sources from `external/xnu-4570.1.46` reference-only or excluded-high-risk, compiled three public objects plus Stage53-owned shims, linked them into a host-only ARM ELF proof artifact under ignored `out/stage53/xnu-link/`, recorded zero undefined symbols, and embedded only graph/link metadata into an inert generated Mach-O fixture. The next analysis/build pass should focus on Stage54:
+Stage54 has now completed the first public ARM pexpert/platform object migration proof without mutating external checkouts. It consumed `external/xnu-upstream` at `xnu-2050.22.13` read-only for Darwin 12/iOS 6-era context, used `external/xnu-4570.1.46` as a later public ARM reference, classified fourteen selected public candidates through a fail-closed compile graph, allowed only four graph-approved sources (`pexpert/gen/device_tree.c`, `pexpert/gen/bootargs.c`, `pexpert/gen/pe_gen.c`, and bounded public ARM `pexpert/arm/pe_bootargs.c`), kept public ARM pexpert runtime and startup/VM/pmap sources reference-only or excluded-high-risk, compiled four public objects plus one Stage54-owned shim object, linked them into a host-only ARM ELF proof artifact under ignored `out/stage54/xnu-link/`, recorded zero undefined symbols, proved `PE_boot_args()` comes from public `arm_pe_bootargs.o` with Stage-owned `PE_state` ABI backing, and embedded only graph/link metadata into an inert generated Mach-O fixture. The next analysis/build pass should focus on Stage55:
 
-1. Start from the Stage53 public-XNU compile graph and controlled link proof, then expand the graph toward additional pexpert/platform compile units deliberately.
+1. Start from the Stage54 public-XNU pexpert/platform graph and controlled link proof, then expand toward the next smallest pexpert/platform surface deliberately.
 2. Keep `external/xnu-upstream` detached at `xnu-2050.22.13` for Darwin 12/iOS 6-era context.
 3. Use `external/xnu-4570.1.46` only as a public ARM implementation reference where 2050 lacks ARMv7 files.
-4. Keep outputs ignored under `out/stage54/` and do not mutate `external/`.
-5. Do not attempt a full public `mach_kernel` build, do not jump into XNU, and do not execute public-XNU code on hardware yet.
+4. Keep outputs ignored under `out/stage55/` and do not mutate `external/`.
+5. Do not attempt a full public `mach_kernel` build, do not jump into XNU, do not execute public-XNU code, and do not execute public pexpert/platform runtime code on hardware yet.
 6. Continue mapping the remaining real-XNU blockers: sub-section/page-granular `virtBase`/`physBase` mapping, pmap/bootstrap tables, cache policy, MSM8974 pexpert, timer/interrupt hooks, IOKit/platform drivers, kernelcache/prelink details, and later userspace/code-signing policy.
 
-See also `docs/upstream-xnu-analysis.md`, `docs/experiment-53-stage50-public-xnu-workspace-cancro-scaffold.md`, `docs/experiment-54-stage51-public-xnu-object-subset-compile.md`, `docs/experiment-55-stage52-public-xnu-controlled-link-proof.md`, and `docs/experiment-56-stage53-xnu-compile-graph.md` for the Stage50 scaffold result, Stage51 compile result, Stage52 controlled link-proof result, and Stage53 compile-graph migration result.
+See also `docs/upstream-xnu-analysis.md`, `docs/experiment-53-stage50-public-xnu-workspace-cancro-scaffold.md`, `docs/experiment-54-stage51-public-xnu-object-subset-compile.md`, `docs/experiment-55-stage52-public-xnu-controlled-link-proof.md`, `docs/experiment-56-stage53-xnu-compile-graph.md`, and `docs/experiment-57-stage54-pexpert-platform-compile-graph.md` for the Stage50 scaffold result, Stage51 compile result, Stage52 controlled link-proof result, Stage53 compile-graph migration result, and Stage54 pexpert/platform graph result.

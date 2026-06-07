@@ -428,12 +428,14 @@ The important boundary is that Stage52 links the public-XNU subset only as a con
 
 Stage52 completed the accelerated five-stage route to begin formal XNU compile migration. Stage53 has now completed that next migration step while preserving the proven safety boundary: it added a fail-closed public-XNU compile graph, graph-gated the bounded `pexpert/gen/pe_gen.c` expansion, kept later public ARM bring-up sources reference-only/excluded, linked the graph-approved subset into a controlled host-only ARM ELF proof with zero undefined symbols, and validated `loader_safety_mask=0x000fffff`, `loader_satisfied_mask=0x01ffffff`, and loader status `0x53000001` on hardware without public-XNU or Mach-O execution.
 
-Stage54 should continue from the Stage53 graph discipline:
+Stage54 has now continued from the Stage53 graph discipline by graph-gating bounded public ARM `pexpert/arm/pe_bootargs.c`, proving `PE_boot_args()` ownership from public `arm_pe_bootargs.o`, closing duplicate symbols with Stage-owned `PE_state` ABI backing, and validating `loader_safety_mask=0x001fffff`, `loader_satisfied_mask=0x01ffffff`, and loader status `0x54000001` on hardware without public-XNU, public platform runtime, or Mach-O execution.
 
-- expand from the tiny pexpert/device-tree/debug subset toward additional tracked public-XNU pexpert/platform compile units,
+Stage55 should continue from the Stage54 pexpert/platform graph:
+
+- expand only the next smallest tracked public-XNU pexpert/platform surface,
 - keep public `xnu-2050.22.13` as the Darwin 12/iOS 6-era baseline,
 - use later public ARM sources only as references for missing ARMv7 boot implementation details,
-- create cancro/MSM8974 platform shim packages for pexpert/timebase/interrupt hooks,
-- keep build/link outputs ignored under `out/stage54/`,
-- do not jump into XNU or execute public-XNU code on hardware until boot args, page tables, pmap, interrupts, timer, and cache policy are proven,
+- continue cancro/MSM8974 platform shim packages for pexpert/timebase/interrupt hooks,
+- keep build/link outputs ignored under `out/stage55/`,
+- do not jump into XNU or execute public-XNU/platform-runtime code on hardware until boot args, page tables, pmap, interrupts, timer, and cache policy are proven,
 - continue non-persistent `sudo fastboot boot` validation only.

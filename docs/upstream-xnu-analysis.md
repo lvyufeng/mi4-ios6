@@ -1,6 +1,6 @@
 # Upstream XNU Analysis for Mi4 Cancro Bring-up
 
-Date: 2026-06-05
+Date: 2026-06-07
 
 ## Purpose
 
@@ -336,7 +336,15 @@ The new bounded `pe_gen.c` dependency surface is closed only with explicit Stage
 
 Stage53 then compiles three public objects plus one Stage53-owned shim object and links them with Stage53-owned support into a closed host-only ARM ELF proof artifact under `out/stage53/xnu-link/stage53-xnu-link.elf`. The proof records zero undefined symbols, `stage53_xnu_link_object_count=0x00000004`, `stage53_xnu_link_undefined_symbol_count=0x00000000`, compact hash `0x29c6a3e2`, and layout facts for text/data/bss. Only graph/link metadata is embedded into the inert generated `MH_PRELOAD` fixture.
 
-Hardware validation reports `stage53_xnu_compile_graph_status=0x53000001`, `stage53_xnu_object_subset_status=0x53000001`, `stage53_xnu_link_status=0x53000001`, `loader_xnu_compile_graph_status_rollup=0x53000001`, `loader_xnu_link_status_rollup=0x53000001`, `loader_safety_mask=0x000fffff`, `loader_satisfied_mask=0x01ffffff`, and loader status `0x53000001`. Stage53 still performs no full public `mach_kernel` build, no public-XNU object execution, no generated Mach-O execution, no external checkout mutation, no proposed physical/workspace writes, no persistent writes, and no cache changes. The next blocker is Stage54: use the Stage53 graph discipline to expand toward additional public pexpert/platform compile units while preserving the no-execution boundary.
+Hardware validation reports `stage53_xnu_compile_graph_status=0x53000001`, `stage53_xnu_object_subset_status=0x53000001`, `stage53_xnu_link_status=0x53000001`, `loader_xnu_compile_graph_status_rollup=0x53000001`, `loader_xnu_link_status_rollup=0x53000001`, `loader_safety_mask=0x000fffff`, `loader_satisfied_mask=0x01ffffff`, and loader status `0x53000001`. Stage53 still performs no full public `mach_kernel` build, no public-XNU object execution, no generated Mach-O execution, no external checkout mutation, no proposed physical/workspace writes, no persistent writes, and no cache changes.
+
+## Stage54 implementation note
+
+Stage54 completes the first public ARM pexpert/platform object migration proof. It keeps `external/xnu-upstream` at public `xnu-2050.22.13` for Darwin 12/iOS 6-era context and graph-gates one later-public ARM pexpert source from `external/xnu-4570.1.46`: `pexpert/arm/pe_bootargs.c`. This source provides public `PE_boot_args()` for the host-only proof. Stage54 removes the Stage-owned `PE_boot_args()` shim, supplies only Stage-owned `PE_state` ABI backing, and verifies duplicate symbol count remains zero.
+
+The expanded graph classifies fourteen candidates. It allows `pexpert/gen/device_tree.c`, `pexpert/gen/bootargs.c`, `pexpert/gen/pe_gen.c`, and `pexpert/arm/pe_bootargs.c`; records public ARM `boot.h` / `pexpert.h` ABI references; keeps `pe_init.c`, `pe_identify_machine.c`, and `pe_consistent_debug.c` blocked-runtime/reference-only; and still excludes `start.s`, `arm_init.c`, `arm_vm_init.c`, and `pmap.c` as high-risk startup/VM/pmap sources. Host validation reports `stage54_xnu_compile_graph_status=0x54000001`, `stage54_xnu_compile_graph_satisfied_mask=0x00ffffff`, `stage54_xnu_object_count=0x00000005`, `stage54_xnu_object_public_arm_pexpert_count=0x00000001`, `stage54_xnu_object_duplicate_symbol_count=0x00000000`, `stage54_xnu_link_status=0x54000001`, `stage54_xnu_link_satisfied_mask=0x0001ffff`, `stage54_xnu_link_object_count=0x00000005`, and `stage54_xnu_link_undefined_symbol_count=0x00000000`.
+
+Hardware validation reports `stage54_xnu_compile_graph_status=0x54000001`, `stage54_xnu_object_subset_status=0x54000001`, `stage54_xnu_link_status=0x54000001`, `loader_xnu_compile_graph_status_rollup=0x54000001`, `loader_xnu_object_subset_status_rollup=0x54000001`, `loader_xnu_link_status_rollup=0x54000001`, `loader_safety_mask=0x001fffff`, `loader_satisfied_mask=0x01ffffff`, and loader status `0x54000001`. Stage54 still performs no full public `mach_kernel` build, no public-XNU object execution, no public platform runtime execution, no generated Mach-O execution, no external checkout mutation, no proposed physical/workspace writes, no persistent writes, and no cache changes. The next blocker is Stage55: expand only the next small pexpert/platform surface while preserving the no-execution boundary.
 
 ## Verification commands used
 
