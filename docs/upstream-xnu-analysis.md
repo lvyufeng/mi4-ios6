@@ -435,6 +435,16 @@ Local Stage63 validation reports `stage63_xnu_compile_graph_status=0x63000001`, 
 
 Stage63 still performs no full public `mach_kernel` build, no public-XNU object execution, no public platform runtime execution, no public VM/pmap runtime execution, no generated Mach-O execution, no XNU `_start` / `arm_init` jump, no proposed physical/TTE/pmap workspace writes, no live pmap table install, no control-register writes for proposed pmap install, no TLB invalidation for proposed pmap install, no external checkout mutation, no persistent writes, and no cache changes.
 
+## Stage64 implementation note
+
+Stage64 keeps the Stage63 MSM8974 pexpert interrupt/timer hook readiness contract stable, then adds a Stage-owned XNU IOKit/platform-driver scaffold readiness contract. It does not compile or execute public IOKit runtime sources, does not execute a Stage-owned platform driver, and does not enter XNU `_start` / `arm_init`. Instead, it extends the Stage-owned Apple flattened device tree with local `/iokit-platform-scaffold` and `/msm8974-platform-driver` nodes, imports public IOKit reference-only classification for `IODeviceTreeSupport.cpp`, `IOPlatformExpert.cpp`, and `IOCPU.cpp`, and records MSM8974 match facts for GIC distributor base `0xf9000000`, timer base `0xf9020000`, 19.2 MHz timebase, and four CPUs.
+
+The Stage64 IOKit/platform scaffold contract records `stage64_xnu_iokit_platform_scaffold_contract_status=0x64000001`, required/satisfied mask `0x00ffffff`, failure mask `0x00000000`, checksum `0x89af157f`, IOKit reference mask `0x00000007`, IOKit runtime-blocked mask `0x00000007`, public IOKit compile/link counts both zero, and no-I/O-Kit/no-platform-driver runtime execution markers set. It also imports the retained pmap transition dry-run contract and the Stage64 pexpert hook readiness roll-up, then refines the existing platform gap mask by clearing only the IOKit-stack gap rather than adding a 33rd top-level loader satisfied bit.
+
+Local Stage64 validation reports `stage64_xnu_compile_graph_status=0x64000001`, candidate count `0x00000017`, public pmap compile/link counts both zero, public IOKit compile/link counts both zero, `stage64_xnu_object_subset_status=0x64000001`, `stage64_xnu_link_status=0x64000001`, no undefined symbols in both the boot payload and host-only XNU link proof, final `out/stage64/stage64-qcdt.img` hash `b6dc97d83cb2d1d17cbcbc36f8997cae97b74e7a4bbe2a8623b4be20c24f6e51`, and size `text=262336 data=0 bss=398396`. Hardware validation through non-persistent `fastboot boot` recovered 182310 bytes from `/proc/last_kmsg`, confirmed `stage64_xnu_iokit_platform_scaffold_contract_status=0x64000001`, `loader_xnu_iokit_platform_scaffold_contract_status_rollup=0x64000001`, `loader_satisfied_mask=0xffffffff`, `loader_status=0x64000001`, `kernel_entry ok`, and returned to Android.
+
+Stage64 still performs no full public `mach_kernel` build, no public-XNU object execution, no public platform runtime execution, no public IOKit runtime execution, no public VM/pmap runtime execution, no generated Mach-O execution, no XNU `_start` / `arm_init` jump, no proposed physical/TTE/pmap workspace writes, no live pmap table install, no control-register writes for proposed pmap install, no TLB invalidation for proposed pmap install, no external checkout mutation, no persistent writes, and no cache changes.
+
 ## Verification commands used
 
 Representative commands used during this pass:
@@ -455,4 +465,4 @@ The clone remains under ignored `external/` and must not be committed.
 
 ## Safety notes
 
-The initial upstream analysis was source-only. Later Stage43 through Stage63 hardware validations used non-persistent `sudo fastboot boot` only. No flash, erase, partition write, persistent hardware configuration, or bootloader change was performed. Future hardware validation must continue using non-persistent `sudo fastboot boot` unless the user explicitly authorizes a specific persistent operation.
+The initial upstream analysis was source-only. Later Stage43 through Stage64 hardware validations used non-persistent `sudo fastboot boot` only. No flash, erase, partition write, persistent hardware configuration, or bootloader change was performed. Future hardware validation must continue using non-persistent `sudo fastboot boot` unless the user explicitly authorizes a specific persistent operation.
