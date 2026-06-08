@@ -395,6 +395,16 @@ Local Stage59 validation reports `stage59_xnu_compile_graph_status=0x59000001`, 
 
 Stage59 still performs no full public `mach_kernel` build, no public-XNU object execution, no public platform runtime execution, no public VM/pmap runtime execution, no generated Mach-O execution, no XNU `_start` / `arm_init` jump, no proposed physical/TTE/pmap workspace writes, no live pmap table install, no TLB invalidation for pmap install, no external checkout mutation, no persistent writes, and no cache changes.
 
+## Stage60 implementation note
+
+Stage60 keeps the Stage59 page-granular dry-run contract stable, then adds a Stage-owned XNU pmap cache/MMU attribute dry-run contract. Instead of compiling or executing public `arm_vm_init.c` or `pmap.c`, it imports the Stage58/Stage59 section/PTE readbacks plus the Stage60 bootstrap/pmap prerequisites and models the exact public ARM XNU cache attribute indices, AP encodings, VM WIMG values, ARMv7 short-descriptor PTE/TTE attr bit placements, `wimg_to_pte()` cases, and public `arm_vm_page_granular_*` templates using Stage-owned arithmetic only.
+
+The attr dry-run contract records `stage60_xnu_pmap_attr_dryrun_contract_status=0x60000001`, required/satisfied mask `0x00ffffff`, failure mask `0x00000000`, checksum `0xfd77fdcd`, cache indices `WRITEBACK=0`, `WRITECOMB=1`, `WRITETHRU=2`, `DISABLE=3`, `INNERWRITEBACK=4`, `POSTED=3`, `DEFAULT=0`, AP encodings `RWNA=0`, `RWRW=1`, `RONA=2`, `RORO=3`, WIMG values `DEFAULT/COPYBACK=0x02`, `INNERWBACK=0x12`, `IO=0x07`, `POSTED=0x27`, `WTHRU=0x0b`, and `WCOMB=0x06`, WIMG-derived PTE bits `0x00000400`, `0x0000000d`, `0x00000005`, `0x00000408`, and `0x00000440`, page template words `0x00000412`, `0x00000413`, `0x00000612`, and `0x00000613`, and inherited readback words `0x00010c02` and `0x00000412`. The contract keeps public pmap compile/link/execute counts, public `arm_vm_init` execution, proposed workspace writes, live pmap table installs, TTBR/TTBCR/DACR/SCTLR writes, TLB invalidations, generated Mach-O execution, persistent writes, and cache changes at zero.
+
+Local Stage60 validation reports `stage60_xnu_compile_graph_status=0x60000001`, public pmap compile/link counts both zero, `stage60_xnu_object_subset_status=0x60000001`, `stage60_xnu_link_status=0x60000001`, no undefined symbols in both the boot payload and host-only XNU link proof, final `out/stage60/stage60-qcdt.img` hash `74cd1f3ec18d974a088cb03767200c37d0f7224dbb654a730a12f7a862e3c680`, and size `text=224396 data=0 bss=316156`. Hardware validation through non-persistent `fastboot boot` recovered 159522 bytes from `/proc/last_kmsg`, confirmed `stage60_xnu_pmap_attr_dryrun_contract_status=0x60000001`, `loader_xnu_pmap_attr_dryrun_contract_status_rollup=0x60000001`, `loader_status=0x60000001`, `kernel_entry ok`, and returned to Android.
+
+Stage60 still performs no full public `mach_kernel` build, no public-XNU object execution, no public platform runtime execution, no public VM/pmap runtime execution, no generated Mach-O execution, no XNU `_start` / `arm_init` jump, no proposed physical/TTE/pmap workspace writes, no live pmap table install, no TLB invalidation for pmap install, no external checkout mutation, no persistent writes, and no cache changes.
+
 ## Verification commands used
 
 Representative commands used during this pass:
@@ -415,4 +425,4 @@ The clone remains under ignored `external/` and must not be committed.
 
 ## Safety notes
 
-The initial upstream analysis was source-only. Later Stage43 through Stage59 hardware validations used non-persistent `sudo fastboot boot` only. No flash, erase, partition write, persistent hardware configuration, or bootloader change was performed. Future hardware validation must continue using non-persistent `sudo fastboot boot` unless the user explicitly authorizes a specific persistent operation.
+The initial upstream analysis was source-only. Later Stage43 through Stage60 hardware validations used non-persistent `sudo fastboot boot` only. No flash, erase, partition write, persistent hardware configuration, or bootloader change was performed. Future hardware validation must continue using non-persistent `sudo fastboot boot` unless the user explicitly authorizes a specific persistent operation.
