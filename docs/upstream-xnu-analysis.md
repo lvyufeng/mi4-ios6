@@ -405,6 +405,16 @@ Local Stage60 validation reports `stage60_xnu_compile_graph_status=0x60000001`, 
 
 Stage60 still performs no full public `mach_kernel` build, no public-XNU object execution, no public platform runtime execution, no public VM/pmap runtime execution, no generated Mach-O execution, no XNU `_start` / `arm_init` jump, no proposed physical/TTE/pmap workspace writes, no live pmap table install, no TLB invalidation for pmap install, no external checkout mutation, no persistent writes, and no cache changes.
 
+## Stage61 implementation note
+
+Stage61 keeps the Stage60 pmap cache/MMU attribute dry-run contract stable, then adds a Stage-owned XNU pmap multi-window page-granular dry-run contract. Instead of compiling or executing public `arm_vm_init.c` or `pmap.c`, it imports the Stage58/Stage59 table/page prerequisites, the exact Stage60 PTE templates, and the Stage61 bootstrap/pmap snapshot, then builds three independent local 4 MiB ARMv7 coarse/L2 windows in Stage-owned scratch buffers only.
+
+The multi-window dry-run contract records `stage61_xnu_pmap_multiwindow_dryrun_contract_status=0x61000001`, required/satisfied mask `0x1fffffff`, failure mask `0x00000000`, checksum `0x252caa78`, a local L1 buffer `0x00098000`-`0x0009c000`, a local L2-bank buffer `0x00095000`-`0x00098000`, 12 local L1 descriptor writes, 3072 local L2 PTE writes, imported PTE templates `0x00000412`, `0x00000413`, and device-style `0x0000001f`, kernel/workspace window `0x80000000` -> `0x80000000`, RAM-console window `0xde400000` -> `0xde400000`, and device/GIC-style window `0xc0000000` -> `0xf9000000`. Software translations prove `0x80008000 -> 0x80008000`, `0x80000000 -> 0x80000000`, `0xde500000 -> 0xde500000`, and `0xc0000000 -> 0xf9000000`. The contract keeps public pmap compile/link/execute counts, public `arm_vm_init` execution, public pmap runtime execution, proposed workspace writes, live pmap table installs, TTBR/TTBCR/DACR/SCTLR writes, TLB invalidations, generated Mach-O execution, persistent writes, and cache changes at zero.
+
+Local Stage61 validation reports `stage61_xnu_compile_graph_status=0x61000001`, public pmap compile/link counts both zero, `stage61_xnu_object_subset_status=0x61000001`, `stage61_xnu_link_status=0x61000001`, no undefined symbols in both the boot payload and host-only XNU link proof, final `out/stage61/stage61-qcdt.img` hash `304b0f9fb60c37841f77bf6a69f553f21bb22ac3f5a74dc6b62ccd9936326839`, and size `text=239368 data=0 bss=364864`. Hardware validation through non-persistent `fastboot boot` recovered 159522 bytes from `/proc/last_kmsg`, confirmed `stage61_xnu_pmap_multiwindow_dryrun_contract_status=0x61000001`, `loader_xnu_pmap_multiwindow_dryrun_contract_status_rollup=0x61000001`, `loader_status=0x61000001`, `kernel_entry ok`, and returned to Android.
+
+Stage61 still performs no full public `mach_kernel` build, no public-XNU object execution, no public platform runtime execution, no public VM/pmap runtime execution, no generated Mach-O execution, no XNU `_start` / `arm_init` jump, no proposed physical/TTE/pmap workspace writes, no live pmap table install, no TLB invalidation for pmap install, no external checkout mutation, no persistent writes, and no cache changes.
+
 ## Verification commands used
 
 Representative commands used during this pass:
