@@ -362,6 +362,19 @@ The new contract imports only Stage-owned/generated loader facts: inert Mach-O p
 
 Local Stage56 validation reports `stage56_xnu_compile_graph_status=0x56000001`, `stage56_xnu_compile_graph_satisfied_mask=0x1fffffff`, `stage56_xnu_compile_graph_bootstrap_contract_selected=0x00000001`, `stage56_xnu_object_count=0x00000006`, `stage56_xnu_link_undefined_symbol_count=0x00000000`, and rebuilt `out/stage56/stage56-qcdt.img` hash `79322ef80cdcfc79df5e2911b03d5a80b4b397d6af005fe22fa1bdaae4b78319`. Hardware validation through non-persistent `fastboot boot` recovered 130283 bytes from `/proc/last_kmsg`, confirmed `stage56_xnu_bootstrap_contract_status=0x56000001`, `loader_xnu_bootstrap_contract_status_rollup=0x56000001`, `loader_status=0x56000001`, `kernel_entry ok`, all negative execution/write/cache safety markers at zero, and returned to Android.
 
+
+## Stage57 implementation note
+
+Stage57 keeps the Stage56 bootstrap mapping contract and adds a Stage-owned XNU pmap/bootstrap allocation contract instead of compiling or executing public `arm_vm_init.c` or `pmap.c`. The compile graph now classifies twenty candidates, still allows only the five bounded public pexpert sources (`device_tree.c`, `bootargs.c`, `pe_gen.c`, `pe_bootargs.c`, and `pe_consistent_debug.c`), and records public ARM `arm_vm_init.c`, `pmap.c`, `pmap.h`, `proc_reg.h`, and `vm_param.h` as pmap/VM reference-only inputs.
+
+The new contract imports only Stage-owned/generated facts: the bootstrap mapping contract, allocator/workspace snapshot, TTE dry-run, safe-table materialization, stage-owned table proof, TTBR0 round-trip/restore, cache preservation, compile graph, object subset, and controlled host-only ARM ELF link proof. It models public ARM VM/pmap arithmetic (`gVirtBase`, `gPhysBase`, `gPhysSize`, `boot_ttep`, `cpu_ttep`, `initial_avail_start`, `avail_end`, `vstart`, and `virtual_space_end`) using Stage-owned code. Public pmap compile/link/execute counts remain zero.
+
+Local Stage57 validation reports `stage57_xnu_compile_graph_status=0x57000001`, `stage57_xnu_compile_graph_pmap_reference_mask=0x0000001f`, `stage57_xnu_compile_graph_pmap_public_compile_count=0x00000000`, `stage57_xnu_compile_graph_pmap_public_link_count=0x00000000`, `stage57_xnu_object_count=0x00000006`, `stage57_xnu_link_undefined_symbol_count=0x00000000`, and final `out/stage57/stage57-qcdt.img` hash `8746feb4d67b99ba600590fda7a93de0bc215ee0c3ff07e7717c98e532f708fd`. Hardware validation through non-persistent `fastboot boot` recovered 138383 bytes from `/proc/last_kmsg`, confirmed `stage57_xnu_pmap_bootstrap_contract_status=0x57000001`, `stage57_xnu_pmap_bootstrap_contract_satisfied_mask=0x7fffffff`, `loader_xnu_pmap_bootstrap_contract_status_rollup=0x57000001`, `loader_status=0x57000001`, `kernel_entry ok`, all public pmap execution/write/cache safety markers at zero, and returned to Android.
+
+During Stage57 validation, an overlong `boot_args.CommandLine` string was found to overflow the fixed 256-byte public ARM boot-args field and corrupt the adjacent Apple-DT buffer, producing an Apple-DT walk mismatch on target. Stage57 now uses a shorter command line plus a bounded copy and explicit final NUL byte for `CommandLine[255]`.
+
+Stage57 still performs no full public `mach_kernel` build, no public-XNU object execution, no public platform runtime execution, no public VM/pmap runtime execution, no generated Mach-O execution, no XNU `_start` / `arm_init` jump, no proposed physical/workspace writes, no live pmap table install, no external checkout mutation, no persistent writes, and no cache changes.
+
 ## Verification commands used
 
 Representative commands used during this pass:
@@ -382,4 +395,4 @@ The clone remains under ignored `external/` and must not be committed.
 
 ## Safety notes
 
-The initial upstream analysis was source-only. Later Stage43 through Stage56 hardware validations used non-persistent `sudo fastboot boot` only. No flash, erase, partition write, persistent hardware configuration, or bootloader change was performed. Future hardware validation must continue using non-persistent `sudo fastboot boot` unless the user explicitly authorizes a specific persistent operation.
+The initial upstream analysis was source-only. Later Stage43 through Stage57 hardware validations used non-persistent `sudo fastboot boot` only. No flash, erase, partition write, persistent hardware configuration, or bootloader change was performed. Future hardware validation must continue using non-persistent `sudo fastboot boot` unless the user explicitly authorizes a specific persistent operation.
