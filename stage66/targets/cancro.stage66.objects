@@ -1,0 +1,46 @@
+# Stage66 public-XNU pexpert/platform object subset manifest
+#
+# Stage66 advances the compile graph from the previous public ARM PE_boot_args()
+# object toward the next bounded public ARM pexpert surface: consistent-debug
+# registry helpers.  Only the explicitly allowed objects below are compiled into
+# ignored out/stage66 host artifacts.  None of the public-XNU objects are linked
+# into or executed by the booted Stage66 payload.
+
+# Stage66 compile/link allowed: public 2050 dependency-light pexpert/gen objects.
+external/xnu-upstream/pexpert/gen/device_tree.c
+external/xnu-upstream/pexpert/gen/bootargs.c
+external/xnu-upstream/pexpert/gen/pe_gen.c
+
+# Stage66 compile/link allowed: bounded later-public ARM pexpert objects.
+# pe_bootargs.c contributes PE_boot_args(); pe_consistent_debug.c contributes
+# PE_consistent_debug_* symbols.  Both stay host-proof only; the Stage-owned
+# shim object supplies PE_state, OSCompareAndSwap64, and ml_map_high_window.
+external/xnu-4570.1.46/pexpert/arm/pe_bootargs.c
+external/xnu-4570.1.46/pexpert/arm/pe_consistent_debug.c
+
+# ABI/reference-only headers used to model the public ARM boot_args, PE_state,
+# and consistent-debug registry surfaces.  These are not runtime implementations.
+external/xnu-4570.1.46/pexpert/pexpert/arm/boot.h
+external/xnu-4570.1.46/pexpert/pexpert/arm/consistent_debug.h
+external/xnu-4570.1.46/pexpert/pexpert/pexpert.h
+external/xnu-4570.1.46/libkern/libkern/OSAtomic.h
+external/xnu-4570.1.46/osfmk/machine/machine_routines.h
+external/xnu-4570.1.46/osfmk/arm/machine_routines.h
+
+# Public 2050 include dependencies used by the compile-proven generic objects.
+external/xnu-upstream/pexpert/pexpert/device_tree.h
+external/xnu-upstream/libkern/libkern/OSByteOrder.h
+
+# Stage66 blocked-runtime public ARM pexpert references.  These are classified
+# and recorded for the platform migration boundary, but are not compiled or
+# called in Stage66.
+external/xnu-4570.1.46/pexpert/arm/pe_init.c
+external/xnu-4570.1.46/pexpert/arm/pe_identify_machine.c
+
+# Explicit high-risk ARM bring-up exclusions.  These remain out of the graph's
+# compile/link allow-list until the project is ready for real XNU startup, VM,
+# pmap, cache/MMU, scheduler, and platform runtime bring-up.
+external/xnu-4570.1.46/osfmk/arm/start.s
+external/xnu-4570.1.46/osfmk/arm/arm_init.c
+external/xnu-4570.1.46/osfmk/arm/arm_vm_init.c
+external/xnu-4570.1.46/osfmk/arm/pmap.c
