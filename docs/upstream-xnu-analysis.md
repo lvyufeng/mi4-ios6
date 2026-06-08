@@ -1,6 +1,6 @@
 # Upstream XNU Analysis for Mi4 Cancro Bring-up
 
-Date: 2026-06-07
+Date: 2026-06-08
 
 ## Purpose
 
@@ -374,6 +374,16 @@ Local Stage57 validation reports `stage57_xnu_compile_graph_status=0x57000001`, 
 During Stage57 validation, an overlong `boot_args.CommandLine` string was found to overflow the fixed 256-byte public ARM boot-args field and corrupt the adjacent Apple-DT buffer, producing an Apple-DT walk mismatch on target. Stage57 now uses a shorter command line plus a bounded copy and explicit final NUL byte for `CommandLine[255]`.
 
 Stage57 still performs no full public `mach_kernel` build, no public-XNU object execution, no public platform runtime execution, no public VM/pmap runtime execution, no generated Mach-O execution, no XNU `_start` / `arm_init` jump, no proposed physical/workspace writes, no live pmap table install, no external checkout mutation, no persistent writes, and no cache changes.
+
+## Stage58 implementation note
+
+Stage58 keeps the Stage57 bootstrap mapping and pmap/bootstrap allocation contracts stable, then adds a Stage-owned XNU pmap table population dry-run contract. Instead of compiling or executing public `arm_vm_init.c` or `pmap.c`, it imports the Stage57/Stage58 pmap tuple and Stage-owned pmap/bootstrap snapshot, zeroes a local Stage-owned 16 KiB L1 simulation buffer, populates ARMv7 short-descriptor section entries with the modeled `0x00010c02` attributes, reads descriptors back, runs local software translations, and checksums the populated table.
+
+The new table dry-run contract records `stage58_xnu_pmap_table_dryrun_contract_status=0x58000001`, required/satisfied mask `0x01ffffff`, failure mask `0x00000000`, local L1 buffer `0x00080000`-`0x00084000`, proposed pmap workspace L1 `0x00074000`/`0xc0074000`, descriptor type/attribute masks `0x00000002`/`0x00010c02`, low-memory section count `0x000005e5`, ram_console section count `0x00000002`, and four software translation checks. The local dry-run buffer is explicitly distinct from the proposed pmap workspace and the contract keeps proposed workspace write count, live pmap table install count, TTBR/TTBCR/DACR/SCTLR writes, TLB invalidations, public VM/pmap execution, generated Mach-O execution, persistent writes, and cache changes at zero.
+
+Local Stage58 validation reports `stage58_xnu_compile_graph_status=0x58000001`, public pmap compile/link counts both zero, `stage58_xnu_object_subset_status=0x58000001`, `stage58_xnu_link_status=0x58000001`, no undefined symbols in both the boot payload and host-only XNU link proof, and final `out/stage58/stage58-qcdt.img` hash `3d35a5af065c779cac4d5cd43dd74806e95145531523c582966a07df574ea7f5`. Hardware validation through non-persistent `fastboot boot` recovered 145908 bytes from `/proc/last_kmsg`, confirmed `stage58_xnu_pmap_table_dryrun_contract_status=0x58000001`, `loader_xnu_pmap_table_dryrun_contract_status_rollup=0x58000001`, `loader_status=0x58000001`, `kernel_entry ok`, and returned to Android.
+
+Stage58 still performs no full public `mach_kernel` build, no public-XNU object execution, no public platform runtime execution, no public VM/pmap runtime execution, no generated Mach-O execution, no XNU `_start` / `arm_init` jump, no proposed physical/TTE/pmap workspace writes, no live pmap table install, no TLB invalidation for pmap install, no external checkout mutation, no persistent writes, and no cache changes.
 
 ## Verification commands used
 
