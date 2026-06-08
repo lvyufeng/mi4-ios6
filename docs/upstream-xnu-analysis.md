@@ -415,6 +415,16 @@ Local Stage61 validation reports `stage61_xnu_compile_graph_status=0x61000001`, 
 
 Stage61 still performs no full public `mach_kernel` build, no public-XNU object execution, no public platform runtime execution, no public VM/pmap runtime execution, no generated Mach-O execution, no XNU `_start` / `arm_init` jump, no proposed physical/TTE/pmap workspace writes, no live pmap table install, no TLB invalidation for pmap install, no external checkout mutation, no persistent writes, and no cache changes.
 
+## Stage62 implementation note
+
+Stage62 keeps the Stage61-style pmap multi-window page-granular dry-run contract stable, then adds a Stage-owned XNU pmap safe live-table transition prerequisite dry-run contract. Instead of compiling or executing public `arm_vm_init.c` or `pmap.c`, it imports the Stage62 multi-window dry-run output, the Stage62 pmap/bootstrap contract, and the Stage-owned TTBR roundtrip/restored control-state facts. It mirrors only the already-proved local L1 coarse-table descriptor plan into a separate Stage-owned candidate L1 buffer, while still using the inherited local L2-bank tables for software translation checks.
+
+The transition dry-run contract records `stage62_xnu_pmap_transition_dryrun_contract_status=0x62000001`, required/satisfied mask `0x00ffffff`, failure mask `0x00000000`, checksum `0x9baa0bd1`, source multi-window checksum `0x263daa78`, local L2-bank `0x00099000`-`0x0009c000`, candidate L1 `0x000a4000`-`0x000a8000`, candidate L1 write count `0x0000000c`, descriptor words `0x00099001`, `0x0009a001`, and `0x0009b001`, and software translations `0x80008000 -> 0x80008000`, `0x80000000 -> 0x80000000`, `0xde500000 -> 0xde500000`, and `0xc0000000 -> 0xf9000000`. It also records a read-only proposed control-register plan (`TTBR0=0x000a4000`, `TTBCR=0x00000000`, `DACR=0x00000003`, `SCTLR=0x00c5487b`), restored control state, recovery L1 `0x00078000`-`0x0007c000`, proposed pmap workspace L1 `0x0007c000`, and distinctness checks for recovery/workspace/candidate tables.
+
+Local Stage62 validation reports `stage62_xnu_compile_graph_status=0x62000001`, public pmap compile/link counts both zero, `stage62_xnu_object_subset_status=0x62000001`, `stage62_xnu_link_status=0x62000001`, no undefined symbols in both the boot payload and host-only XNU link proof, final `out/stage62/stage62-qcdt.img` hash `6625f35e2f2740d9f5525ee26be8ba3d3989cb0e2a36408debf2cd4e02126327`, and size `text=249616 data=0 bss=397632`. Hardware validation through non-persistent `fastboot boot` recovered 175285 bytes from `/proc/last_kmsg`, confirmed `stage62_xnu_pmap_transition_dryrun_contract_status=0x62000001`, `loader_xnu_pmap_transition_dryrun_contract_status_rollup=0x62000001`, `loader_satisfied_mask=0xffffffff`, `loader_status=0x62000001`, `kernel_entry ok`, and returned to Android.
+
+Stage62 still performs no full public `mach_kernel` build, no public-XNU object execution, no public platform runtime execution, no public VM/pmap runtime execution, no generated Mach-O execution, no XNU `_start` / `arm_init` jump, no proposed physical/TTE/pmap workspace writes, no live pmap table install, no control-register writes for proposed pmap install, no TLB invalidation for proposed pmap install, no external checkout mutation, no persistent writes, and no cache changes.
+
 ## Verification commands used
 
 Representative commands used during this pass:
@@ -435,4 +445,4 @@ The clone remains under ignored `external/` and must not be committed.
 
 ## Safety notes
 
-The initial upstream analysis was source-only. Later Stage43 through Stage60 hardware validations used non-persistent `sudo fastboot boot` only. No flash, erase, partition write, persistent hardware configuration, or bootloader change was performed. Future hardware validation must continue using non-persistent `sudo fastboot boot` unless the user explicitly authorizes a specific persistent operation.
+The initial upstream analysis was source-only. Later Stage43 through Stage62 hardware validations used non-persistent `sudo fastboot boot` only. No flash, erase, partition write, persistent hardware configuration, or bootloader change was performed. Future hardware validation must continue using non-persistent `sudo fastboot boot` unless the user explicitly authorizes a specific persistent operation.
