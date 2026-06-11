@@ -568,6 +568,17 @@ Local Stage76 validation built `stage76-qcdt.img` with `dt_size=2521088`, zero u
 Hardware validation through non-persistent `fastboot boot` recovered 248306 bytes from `/tmp/cancro-stage76-live-probe-last_kmsg.txt`, confirmed the live probe entered and returned, confirmed `stage76_xnu_live_probe_status=0x76000001`, satisfied mask `0x000000ff`, failure mask `0x00000000`, return value `0x76000001`, magic `0x584c5052`, output lines `0x00000002`, TTBR0 unchanged at `0x000a8000`, SCTLR unchanged at `0x00c5487b`, `stage76_xnu_live_probe_mmu_unchanged=0x00000001`, `loader_xnu_live_execution_probe_status_rollup=0x76000001`, `loader_satisfied_mask=0xffffffff`, `loader_status=0x76000001`, and `kernel_entry returned success`. No flash, erase, partition write, persistent storage write, public XNU `_start` / `arm_init` entry, public XNU runtime-object execution, generated Mach-O execution, live pmap table install, TLB invalidation, or cache policy change was performed.
 
 
+
+## Stage77 implementation note
+
+Stage77 continues the Method-C live path by replacing Stage76's single returned C probe with a Stage-owned `_start` / `arm_init`-shaped entry stub. The retained loader/preflight chain still gates the live path on the client-open / provider-claim / close-readiness dry-run contract. After that prerequisite succeeds, Stage77 calls `stage77_xnu_entry_stub_run(args)`, records TTBR0/SCTLR, branches into `stage77_xnu_start_stub()` from `stage77/xnu_entry_start.S`, and the assembly stub performs a real `bl stage77_arm_init_stub` into Stage-owned C code.
+
+The Stage77 C stub validates `boot_args *`, checks revision/version, machine type, and device-tree presence, records magic `0x58535442` (`XSTB`), returns `0x77000001`, and preserves explicit zero counters for public XNU `_start` / `arm_init`, public pmap runtime, public IOKit runtime, generated Mach-O execution, live pmap install, TLB invalidation, cache-policy change, and persistent writes.
+
+Local Stage77 validation built `stage77-qcdt.img` with `dt_size=2521088`, zero undefined symbols in both the Stage77 payload and the host-only public-XNU link proof, fixed `CommandLine[256]` strings at 251 bytes including NUL, Android boot-image cmdlines at 1523 bytes including NUL, and clean `git diff --check`. The final ELF includes `stage77_xnu_start_stub` at `0x00042200`, `stage77_arm_init_stub` at `0x00042258`, and `stage77_xnu_entry_stub_run` at `0x000423c0`; disassembly confirms real `bl stage77_arm_init_stub` and `bl stage77_xnu_start_stub` calls.
+
+Hardware validation through non-persistent `fastboot boot` recovered 248873 bytes from `/tmp/cancro-stage77-entry-stub-last_kmsg.txt`, confirmed `stage77_xnu_entry_stub_status=0x77000001`, satisfied mask `0x00000fff`, failure mask `0x00000000`, required mask `0x00000fff`, magic `0x58535442`, start/arm-init called and returned, `boot_args_rev_ver=0x00020002`, boot args/device tree valid, TTBR0 unchanged at `0x000a8000`, SCTLR unchanged at `0x00c5487b`, `stage77_xnu_entry_stub_safety_boundary_preserved=0x00000001`, checksum `0x2952cf1d`, `loader_xnu_entry_stub_status_rollup=0x77000001`, `loader_satisfied_mask=0xffffffff`, `loader_status=0x77000001`, and `kernel_entry returned success`. No flash, erase, partition write, persistent storage write, public XNU `_start` / `arm_init` entry, public runtime-object execution, generated Mach-O execution, live pmap table install, TLB invalidation, or cache policy change was performed.
+
 ## Verification commands used
 
 Representative commands used during this pass:
