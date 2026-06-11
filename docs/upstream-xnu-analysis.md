@@ -557,6 +557,17 @@ Local validation built `stage75-qcdt.img` with `dt_size=2521088`, zero undefined
 
 Hardware validation through non-persistent `fastboot boot` recovered 248164 bytes from `/proc/last_kmsg`, confirmed all Stage75 client-open / provider-claim / close-readiness dry-run/status markers, confirmed no open/claim/close runtime execution, confirmed `loader_satisfied_mask=0xffffffff`, confirmed `loader_status=0x75000001`, observed `kernel_entry returned success`, and returned to Android. No flash, erase, partition write, external checkout mutation, persistent write, full public `mach_kernel` build, public-XNU execution, public pexpert/platform runtime execution, public IOKit runtime execution, public VM/pmap runtime execution, generated Mach-O execution, XNU entry jump, proposed physical/TTE/pmap workspace write, live proposed pmap table install, TLB invalidation, or cache policy change was performed.
 
+## Stage76 implementation note
+
+Stage76 intentionally pivots from another IOKit dry-run contract to a controlled Level-0 live execution probe. It keeps the Stage75-derived IOKit client-open / provider-claim / close-readiness dry-run prerequisite chain, then calls the Stage-owned `stage76_xnu_live_execution_probe_run()` wrapper, which performs a real branch-and-link into `stage76_xnu_minimal_live_probe()` from `stage76/xnu_live_probe.c`. The probe increments a volatile entry counter, writes two ram_console log lines, records magic `0x584c5052` (`XLPR`), returns `0x76000001`, and lets the loader verify called/entered/returned/status/magic/output/no-exception plus unchanged TTBR0/SCTLR facts.
+
+Stage76 removes the active boot-image command-line claims `no-xnu-jump` and `no-public-xnu-exec` and replaces them with `xnu-live-probe`, `live-stage-owned-xnu-probe`, and `no-xnu-start`. This means Stage76 is no longer a pure no-execution dry-run stage. It still does not enter public XNU `_start` / `arm_init`, does not execute the public XNU object-subset proof objects, does not execute public pexpert/pmap/IOKit runtime code, does not execute the generated Mach-O fixture, does not install live XNU/pmap tables, does not invalidate TLBs, does not change cache policy, and does not write persistent storage.
+
+Local Stage76 validation built `stage76-qcdt.img` with `dt_size=2521088`, zero undefined symbols in both the Stage76 payload and the host-only public-XNU link proof, fixed `CommandLine[256]` strings at 237 bytes including NUL, Android boot-image cmdlines at 1520 bytes including NUL, no stale Stage75 markers under `stage76/`, and clean `git diff --check`. The final ELF includes `stage76_xnu_minimal_live_probe`, `stage76_xnu_live_execution_probe_run`, and `stage76_xnu_live_execution_probe_result`, and disassembly confirms a real `bl stage76_xnu_minimal_live_probe` call.
+
+Hardware validation through non-persistent `fastboot boot` recovered 248306 bytes from `/tmp/cancro-stage76-live-probe-last_kmsg.txt`, confirmed the live probe entered and returned, confirmed `stage76_xnu_live_probe_status=0x76000001`, satisfied mask `0x000000ff`, failure mask `0x00000000`, return value `0x76000001`, magic `0x584c5052`, output lines `0x00000002`, TTBR0 unchanged at `0x000a8000`, SCTLR unchanged at `0x00c5487b`, `stage76_xnu_live_probe_mmu_unchanged=0x00000001`, `loader_xnu_live_execution_probe_status_rollup=0x76000001`, `loader_satisfied_mask=0xffffffff`, `loader_status=0x76000001`, and `kernel_entry returned success`. No flash, erase, partition write, persistent storage write, public XNU `_start` / `arm_init` entry, public XNU runtime-object execution, generated Mach-O execution, live pmap table install, TLB invalidation, or cache policy change was performed.
+
+
 ## Verification commands used
 
 Representative commands used during this pass:
@@ -577,4 +588,4 @@ The clone remains under ignored `external/` and must not be committed.
 
 ## Safety notes
 
-The initial upstream analysis was source-only. Later Stage43 through Stage74 hardware validations used non-persistent `sudo fastboot boot` only. No flash, erase, partition write, persistent hardware configuration, or bootloader change was performed. Future hardware validation must continue using non-persistent `sudo fastboot boot` unless the user explicitly authorizes a specific persistent operation.
+The initial upstream analysis was source-only. Later hardware validations use non-persistent `sudo fastboot boot` only. No flash, erase, partition write, persistent hardware configuration, or bootloader change was performed. Future hardware validation must continue using non-persistent `sudo fastboot boot` unless the user explicitly authorizes a specific persistent operation.
