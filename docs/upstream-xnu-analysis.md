@@ -201,15 +201,16 @@ Minimum loader-facing facts for Stage43:
 
 Therefore Stage43 should not be another purely synthetic activation-order descriptor. It should become a Mach-O/XNU loader preflight that parses a real XNU-style Mach-O/kernel artifact enough to validate the load contract, but still avoids jumping into XNU until boot_args, DT, pmap, interrupt, and timer preconditions are understood.
 
-## Stage78 Method-C status
+## Stage79 Method-C status
 
-The Stage76-Stage78 Method-C pivot has started exercising the public ARM boot-shape observations above on real `cancro` hardware without crossing into public XNU runtime:
+The Stage76-Stage79 Method-C pivot has started exercising the public ARM boot-shape observations above on real `cancro` hardware without crossing into public XNU runtime:
 
 - Stage76 proved a controlled live call into one Stage-owned XNU-like C probe.
 - Stage77, hardware-validated non-persistently, proved a Stage-owned `_start` / `arm_init`-shaped entry path with `r0 = boot_args *`, a real `bl stage77_arm_init_stub`, valid `boot_args` / device-tree handoff, and unchanged TTBR0/SCTLR.
-- Stage78, locally validated and pending non-persistent hardware validation, keeps the Stage77 entry shape and invokes `stage78_xnu_early_pmap_platform_init_run()` from the Stage-owned arm-init stub. It samples TTBR0/TTBCR/DACR/SCTLR before/after, imports the Stage-owned pmap-transition dry-run candidate L1/proposed control-register/translation/recovery facts, imports PE_state platform facts, and records explicit zero counters for public XNU `_start` / `arm_init`, public pmap/pexpert/IOKit runtime, generated Mach-O execution, live pmap install, control-register writes, TLB invalidation, cache-policy change, and persistent writes.
+- Stage78, hardware-validated non-persistently, kept the Stage77 entry shape and invoked `stage78_xnu_early_pmap_platform_init_run()` from the Stage-owned arm-init stub. It sampled TTBR0/TTBCR/DACR/SCTLR before/after, imported the Stage-owned pmap-transition dry-run candidate L1/proposed control-register/translation/recovery facts, imported PE_state platform facts, and recorded explicit zero counters for public XNU `_start` / `arm_init`, public pmap/pexpert/IOKit runtime, generated Mach-O execution, live pmap install, control-register writes, TLB invalidation, cache-policy change, and persistent writes.
+- Stage79, hardware-validated non-persistently, keeps the Stage78 early-init shape and invokes `stage79_xnu_pe_init_platform_false_run()` from the Stage-owned arm-init stub after early-init. It models `PE_init_platform(FALSE,args)` without calling public `PE_init_platform`, captures PE_state boot args and device-tree head/length, records DTInit-shaped root/device-tree facts without calling public `DTInit`, records pe_identify_machine-shaped model/compatible/target-type/MSM8974/cancro facts without calling public `pe_identify_machine`, samples TTBR0/TTBCR/DACR/SCTLR unchanged, and records explicit zero counters for public XNU/pexpert/pmap/IOKit runtime, generated Mach-O execution, live pmap install, control-register writes, TLB invalidation, cache-policy change, and persistent writes.
 
-This keeps the public XNU `_start`, `arm_init`, `arm_vm_init`, pmap, pexpert, and IOKit sources as analysis/reference material only. The active implementation remains Stage-owned until boot args, flattened device tree semantics, pmap workspace/translation behavior, interrupt/timer hooks, and kernelcache/prelink requirements are understood well enough to attempt a narrower real-XNU transition.
+This keeps the public XNU `_start`, `arm_init`, `arm_vm_init`, pmap, pexpert, `PE_init_platform`, `DTInit`, `pe_identify_machine`, and IOKit sources as analysis/reference material only. The active implementation remains Stage-owned until boot args, flattened device tree semantics, pmap workspace/translation behavior, interrupt/timer hooks, and kernelcache/prelink requirements are understood well enough to attempt a narrower real-XNU transition.
 
 ## Comparison with Stage42
 
