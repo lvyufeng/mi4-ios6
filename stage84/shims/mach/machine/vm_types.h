@@ -1,0 +1,6 @@
+#ifndef MI4IOS6_STAGE84_SHIM_MACH_MACHINE_VM_TYPES_H
+#define MI4IOS6_STAGE84_SHIM_MACH_MACHINE_VM_TYPES_H
+
+#include <mach/vm_types.h>
+
+#endif

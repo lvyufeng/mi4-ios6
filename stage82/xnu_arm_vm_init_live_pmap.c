@@ -348,4 +348,3 @@ stage82_xnu_arm_vm_init_live_pmap_result(void)
 {
     return &g_result;
 }
-

@@ -141,7 +141,7 @@ Rationale:
 ### L2 Tables
 - **Size per table**: 1 KB (256 entries × 4 bytes)
 - **Alignment**: 1 KB (0x400)
-- **Count needed**: 
+- **Count needed**:
   - Kernel image: ~1 table (covers 1MB, Stage82 image is ~456KB)
   - Kernel data/tables: ~1-2 tables
   - Total allocation: ~128 tables (128KB) to be safe

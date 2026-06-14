@@ -332,14 +332,14 @@ After this fix, hardware validation succeeded with `mmu_high_bootstrap_status_al
 
 Stage83 maintains all Method-C Level 4+ constraints:
 
-✓ **Stage-owned execution**: All `arm_vm_init` pmap code is Stage83-owned, not public XNU  
-✓ **No public XNU runtime**: Zero calls to public `arm_vm_init`, `pmap_bootstrap`, `set_mmu_ttb`, `flush_mmu_tlb`  
-✓ **No generated Mach-O execution**: The inert fixture is never executed  
-✓ **No persistent writes**: Zero flash/erase/partition writes, zero persistent file writes  
-✓ **No external mutation**: XNU checkouts remain clean and detached  
-✓ **Fail-closed**: All validation is required-mask driven with explicit failure masks  
-✓ **Non-persistent boot**: Hardware validation via `sudo fastboot boot` only, never `fastboot flash`  
-✓ **Clean recovery**: Device returns to Android after kernel_entry, no persistent state change  
+✓ **Stage-owned execution**: All `arm_vm_init` pmap code is Stage83-owned, not public XNU
+✓ **No public XNU runtime**: Zero calls to public `arm_vm_init`, `pmap_bootstrap`, `set_mmu_ttb`, `flush_mmu_tlb`
+✓ **No generated Mach-O execution**: The inert fixture is never executed
+✓ **No persistent writes**: Zero flash/erase/partition writes, zero persistent file writes
+✓ **No external mutation**: XNU checkouts remain clean and detached
+✓ **Fail-closed**: All validation is required-mask driven with explicit failure masks
+✓ **Non-persistent boot**: Hardware validation via `sudo fastboot boot` only, never `fastboot flash`
+✓ **Clean recovery**: Device returns to Android after kernel_entry, no persistent state change
 
 ## Renumbering Validation: Stage82
 

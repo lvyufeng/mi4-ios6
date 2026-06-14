@@ -163,12 +163,12 @@ Stage82 hardware validation confirms identical behavior to Stage81 except for st
 
 The Stage81 → Stage82 mechanical renumbering is confirmed successful:
 
-✓ **Compile/link**: No undefined symbols, all references resolved  
-✓ **Status codes**: All `0x81` codes correctly updated to `0x82`  
-✓ **Function calls**: Disassembly shows real calls to stage82 functions  
-✓ **Hardware execution**: Device boots, runs, and recovers with new status codes  
-✓ **Functional behavior**: Identical to Stage81 except status code namespace  
-✓ **Safety boundaries**: All preserved (no public runtime, no persistent writes)  
+✓ **Compile/link**: No undefined symbols, all references resolved
+✓ **Status codes**: All `0x81` codes correctly updated to `0x82`
+✓ **Function calls**: Disassembly shows real calls to stage82 functions
+✓ **Hardware execution**: Device boots, runs, and recovers with new status codes
+✓ **Functional behavior**: Identical to Stage81 except status code namespace
+✓ **Safety boundaries**: All preserved (no public runtime, no persistent writes)
 
 ## Next Steps
 

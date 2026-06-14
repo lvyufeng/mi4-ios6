@@ -239,7 +239,7 @@ machine_startup(__unused boot_args * args)
   - 仅映射小窗口（如 Stage81 低代码段的高虚拟别名）
   - 验证 L2 转换工作
   - 安装/验证/恢复，不持久化
-  
+
 - **Stage82**（主线）：完整内核虚拟地址空间候选 pmap
   - 计算 `virtBase`/`physBase`/内核虚拟窗口
   - 映射完整内核代码/数据/BSS 到高虚拟地址
