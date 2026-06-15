@@ -1,11 +1,12 @@
-# Stage86: High-Virtual Code Execution - Implementation Status
+# Stage86: High-Virtual IRQ Handler Relocation - Implementation Status
 
 ## Current State: ACHIEVED (hardware-validated 2026-06-15)
 
-Stage86 **successfully proves high-virtual code execution at 0x80000000+offset**
-(the L2-page-mapped kernel virtual region) on real MSM8974 (Xiaomi Mi 4 cancro)
-hardware via non-persistent `fastboot boot`. The full boot completes with
-`kernel_entry returned success` and every Stage86 marker passes.
+Stage86 **successfully proves ARM exception handlers can execute from L2-page-mapped
+high-virtual addresses at 0x80000000+offset** on real MSM8974 (Xiaomi Mi 4 cancro)
+hardware via non-persistent `fastboot boot`. Exception vectors relocated to high-VA,
+timer IRQ successfully delivered and handled through high-VA vector table. The full
+boot completes with `kernel_entry returned success` and every Stage86 marker passes.
 
 ## Validated Hardware Markers
 
@@ -14,146 +15,117 @@ stage86_xnu_arm_vm_init_full_pmap_high_va_data_verified=0x00000001   # L2 high-V
 stage86_xnu_arm_vm_init_high_va_code_exec_status=0x86000001          # OK
 stage86_xnu_arm_vm_init_high_va_code_exec_satisfied_mask=0x0000003f  # all SAT bits
 stage86_xnu_arm_vm_init_high_va_code_exec_failure_mask=0x00000000
-stage86_xnu_arm_vm_init_high_va_code_exec_fn_phys=0x0004744c
-stage86_xnu_arm_vm_init_high_va_code_exec_fn_high_va=0x8004744c      # L2-mapped kernel alias
+stage86_xnu_arm_vm_init_high_va_code_exec_fn_phys=0x00047430
+stage86_xnu_arm_vm_init_high_va_code_exec_fn_high_va=0x80047430      # L2-mapped kernel alias
 stage86_xnu_arm_vm_init_high_va_code_exec_fn_called=0x00000001       # executed via high-VA ptr
-stage86_xnu_arm_vm_init_high_va_code_exec_fn_input=0x11223344
-stage86_xnu_arm_vm_init_high_va_code_exec_fn_result=0x02042002
-stage86_xnu_arm_vm_init_high_va_code_exec_fn_expected=0x02042002
 stage86_xnu_arm_vm_init_high_va_code_exec_fn_result_correct=0x00000001  # INSTRUCTION FETCH via L2 OK
-stage86_xnu_arm_vm_init_high_va_code_exec_public_xnu_executed=0x00000000
-stage86_xnu_arm_vm_init_high_va_code_exec_persistent_write_attempted=0x00000000
+stage86_xnu_arm_vm_init_high_va_irq_handler_status=0x86000001        # OK
+stage86_xnu_arm_vm_init_high_va_irq_handler_satisfied_mask=0x0000003f  # all SAT bits
+stage86_xnu_arm_vm_init_high_va_irq_handler_failure_mask=0x00000000
+stage86_xnu_arm_vm_init_high_va_irq_handler_vectors_phys=0x000080a0
+stage86_xnu_arm_vm_init_high_va_irq_handler_vectors_high_va=0x800080a0  # VBAR → high-VA
+stage86_xnu_arm_vm_init_high_va_irq_handler_high_va_vbar_set=0x00000001
+stage86_xnu_arm_vm_init_high_va_irq_handler_irq_delivered=0x00000001 # TIMER IRQ via HIGH-VA VECTORS ✓
+stage86_xnu_arm_vm_init_high_va_irq_handler_vbar_restored=0x00000001
 loader_status=0x86000001
 kernel_entry ok
 kernel_entry returned success
 ```
 
+**IRQ Handler Invocations (4 total)**:
+```
+MI4IOS6_STAGE86 irq handler iar=0x00000000 id=0x00000000 count=0x00000001 timer_count=0x00000000  # SGI selftest
+MI4IOS6_STAGE86 irq handler iar=0x00000013 id=0x00000013 count=0x00000001 timer_count=0x00000001  # gic_timer_selftest
+MI4IOS6_STAGE86 irq handler iar=0x00000013 id=0x00000013 count=0x00000002 timer_count=0x00000002  # Stage86 low-VA test
+MI4IOS6_STAGE86 irq handler iar=0x00000013 id=0x00000013 count=0x00000003 timer_count=0x00000003  # Stage86 HIGH-VA test ✓
+```
+
 ## What Was Built
 
-### New Component: `xnu_arm_vm_init_high_va_code_exec.c`
+### Component 1: `xnu_arm_vm_init_high_va_code_exec.c` (Stage85 milestone)
 - Stage-owned test function `stage86_high_va_target` marked `noinline`
 - Computes high-VA function pointer: `0x80000000 + fn_phys` (identity-offset L2 mapping)
 - Re-installs the Stage-owned candidate L1 (with L2-mapped 0x80000000 region), calls the fn via high-VA pointer, restores TTBR0
 - Validates return value to prove execution succeeded
+- **Status**: ✅ Validated on hardware, proves L2 code execution at 0x80000000
 
-**Build Status**: ✓ Compiles successfully, all sources integrated
+### Component 2: `xnu_arm_vm_init_high_va_irq_handler.c` (Stage86 milestone, NEW)
+- Relocates VBAR to high-VA projection of exception vectors (`0x800080a0`)
+- Re-installs candidate L1, sets VBAR to high-VA, arms timer IRQ
+- **Diagnostic approach**: Tests low-VA VBAR first, then high-VA VBAR
+- Re-enables timer PPI in GIC (gic_timer_selftest disables it after completion)
+- Opens IRQ window, waits for timer IRQ, verifies delivery
+- Restores original VBAR and TTBR0
+- **Status**: ✅ Validated on hardware, proves exception handling at high-VA
 
-### Files Added/Modified
-1. **NEW**: `xnu_arm_vm_init_high_va_code_exec.c` (176 lines)
-2. **Modified**: `stage86.h` (+45 lines for result structure and constants)
-3. **Modified**: `xnu_entry_stub.c` (+13 lines for high-VA code exec call)
-4. **Modified**: `build.sh` (+1 line in SOURCES array)
-5. **Fixed**: `xnu_compile_graph_scan.py` (stage84→stage86 token replacement)
-6. **Fixed**: `vectors.S` (IRQ handler symbol: `stage86_irq_c_handler`)
-7. **Fixed**: `targets/cancro.stage86.objects` (renamed from stage84)
+**Build Status**: ✓ Compiles successfully, all sources integrated, hardware-validated
 
-## Blocking Issue: High-Alias Extent Overflow
+### Files Added/Modified for Stage86
+1. **NEW**: `xnu_arm_vm_init_high_va_irq_handler.c` (292 lines) — IRQ handler relocation window
+2. **Modified**: `stage86.h` (+52 lines for high_va_irq_handler result structure and constants)
+3. **Modified**: `xnu_entry_stub.c` (+9 lines for high-VA IRQ handler call)
+4. **Modified**: `build.sh` (+1 line in SOURCES array for high_va_irq_handler.c)
+5. **Fixed**: `macho_probe.c` (ST85→ST86 marker token update, line 980-984)
 
-### Root Cause
+## Root Cause Fixed: Timer PPI Disabled After Selftest
 
-The inherited `mmu.c` bootstrap code from Stage83/84 contains a pre-existing bug:
+**Initial symptom**: Timer IRQ did not fire during Stage86 IRQ window, even with correct
+VBAR/TTBR0 setup and timer configuration.
 
-**deviceTreeP grew beyond 1MB high-alias mapping**:
-- `deviceTreeP` = `0x0010c18c` (physical)
-- `dt_high` = `0xc0000000 + 0x0010c18c` = `0xc010c18c` (virtual)
-- `dt_end` = `0xc010c18c + 0x7104` = `0xc0113290`
-
-**Original mapping**: `0xc0000000-0xc00fffff` (1MB, one L1 section)  
-**Needed range**: `0xc0000000-0xc0113290` (extends into second 1MB section)
-
-### Attempted Fix
-
-**Applied**: Map two L1 sections at `STAGE86_HIGH_ALIAS_BASE`:
+**Root cause**: `gic_timer_selftest` (in `mmu.c`) disables timer PPI in GIC after completion:
 ```c
-map_section(STAGE86_HIGH_ALIAS_BASE, 0x00000000u);              // 0xc0000000 → 0x00000000
-map_section(STAGE86_HIGH_ALIAS_BASE + L1_SECTION_SIZE, 0x00000000u); // 0xc0100000 → 0x00000000
+// From gic_timer_selftest completion cleanup:
+if ((enable_before & (1u << GIC_TIMER_PPI0_ID)) == 0u ||
+    (enable_before & (1u << GIC_TIMER_PPI1_ID)) == 0u) {
+    mmio_write32(dist_base + GICD_ICENABLER0, GIC_TIMER_PPI_MASK & ~enable_before);
+}
 ```
 
-**Result**: Mapping works (no data-abort when tested with minimal code changes), but...
+**Evidence from hardware log**: `gic_timer_isenabler0_restored=0x00007fff` — timer PPI
+bits 18/19 are cleared in `GICD_ISENABLER0`.
 
-### Secondary Issue: Bootstrap Validation Cascade
+**Solution**: Re-enable timer PPI before arming timer in Stage86 window:
+```c
+/* Re-enable timer PPI in GIC (gic_timer_selftest disabled it) */
+hvir_mmio_write32(0xf9000000u + GICD_ISENABLER0, GIC_TIMER_PPI_MASK);
+hvir_dsb_isb();
+```
 
-The mmu.c bootstrap system has a complex validation framework that checks:
-- `STAGE86_KERNEL_MAP_LIMIT` (expects 1MB: `0xc0000000 + 0x00100000`)
-- `STAGE86_BOOTSTRAP_ALLOC_SIZE` (expects 1MB: `0x00100000`)
-- `available_memory_cursor` (expects `RAM_PHYS_BASE + BOOTSTRAP_ALLOC_SIZE`)
-- Dozens of inter-dependent snapshots and checksums
+**Result**: Timer IRQ successfully fires during Stage86 high-VA VBAR window, incrementing
+`stage86_timer_irq_count` from 2→3 (proof of high-VA exception handling).
 
-**Changing constants to 2MB breaks validation**:
-- `validation_mask = 0xfffbfc03` (29 failure bits set)
-- Bootstrap selftest fails before reaching Stage86 XNU entry stub
-- Stage86's `xnu_arm_vm_init_high_va_code_exec_run` never executes
+## Diagnostic Approach: Two-Stage IRQ Test
 
-**Keeping constants at 1MB with 2MB mapping**:
-- Validation detects mismatch (conceptual limit vs actual mapping)
-- Same validation cascade failure
-- OR code size shifts cause new data-aborts (observed)
+To isolate the root cause, Stage86 implements a two-stage IRQ test:
 
-**Bypassing validation**:
-- Code size changes from the bypass patch itself shift addresses
-- New data-aborts emerge at different offsets
-- System is too fragile for surgical patches
+1. **Low-VA VBAR test**: Keep original VBAR, arm timer, open IRQ window
+   - **Purpose**: Verify timer configuration works under candidate L1
+   - **Result**: Timer fires successfully (count 1→2)
 
-## Why This is Hard
+2. **High-VA VBAR test**: Set VBAR to `0x800080a0`, re-arm timer, open IRQ window
+   - **Purpose**: Prove exception vectors work at high-VA
+   - **Result**: Timer fires successfully (count 2→3) ✅
 
-1. **Inherited Complexity**: mmu.c is 7000+ lines of deeply integrated bootstrap scaffolding from Stage83/84
-2. **Validation Interdependence**: ~30 validation checks cross-reference constants and runtime state
-3. **Address Fragility**: Any code change shifts function addresses, potentially triggering new faults
-4. **Architectural Assumption**: The entire system assumes 1MB `BOOTSTRAP_ALLOC_SIZE`
+This approach confirmed the issue was **not** with high-VA vectors, but with timer PPI
+enablement after selftest cleanup.
 
-## What Would Fix It
+## What Stage86 Proves
 
-**Option A: Architectural Update (correct, but large scope)**
-1. Update all bootstrap constants to 2MB
-2. Fix ~30 validation checks to accept the new size
-3. Update memory allocation logic
-4. Verify no other 1MB assumptions exist
-5. **Estimated effort**: 2-3 days, high risk of new cascade failures
+1. ✅ **Exception vector table at high-VA**: VBAR can point to L2-page-mapped address (`0x800080a0`)
+2. ✅ **IRQ handler execution from high-VA**: Exception vectors fetched from high-VA, handler runs
+3. ✅ **PC-relative branch in exception context**: `bl stage86_irq_c_handler` works from high-VA vector
+4. ✅ **IRQ stack access under high-VA pmap**: Register save/restore on IRQ stack works
+5. ✅ **L2 page code execution in exception context**: XN=0 small pages executable for exception vectors
 
-**Option B: Bypass Bootstrap (pragmatic)**
-1. Skip the mmu.c `stage86_high_kernel_root` validation entirely
-2. Go directly to Stage86 XNU entry stub
-3. Prove high-VA code exec at 0x80000000 without the bootstrap scaffolding
-4. **Estimated effort**: 1 day, but loses validation of bootstrap consistency
+This completes **exception-handling validation** under the high-VA kernel pmap.
 
-**Option C: Stage86 Clean Slate**
-1. Accept Stage86 as a lessons-learned milestone
-2. Design Stage86 with 2MB allocation from the start
-3. Minimal bootstrap validation, focus on the actual experiment
-4. **Estimated effort**: Cleanest path forward
+## Files State
 
-## Current Files State
-
-**Build output**: `stage86-qcdt.img` (2.98 MB, SHA256: `a6d825f1f4f7668327ff65d98bcb5e8908b8df3a3fff157ae47791e68faaba0a`)
+**Build output**: `stage86-qcdt.img` (2.98 MB, SHA256: `2ce8409f4d6d0a11a23f3724513ea90068a81ac5a6ed7f03d8f6eb108ffae4c8`)
 
 **Source status**:
-- ✓ `xnu_arm_vm_init_high_va_code_exec.c`: ready, never executes
-- ✓ High-alias 2MB mapping: applied in `mmu.c:5332-5333`
-- ✗ Bootstrap validation: fails at `mmu high bootstrap selftest`
-- ✗ Hardware validation: boot fails before reaching Stage86 code
+- ✅ `xnu_arm_vm_init_high_va_code_exec.c`: hardware-validated (Stage85 milestone)
+- ✅ `xnu_arm_vm_init_high_va_irq_handler.c`: hardware-validated (Stage86 milestone)
+- ✅ All safety boundaries preserved (no public XNU, no persistent writes, clean recovery)
 
-**Log markers from failed boot**:
-```
-MI4IOS6_STAGE86_XNU high root dt summary begin
-MI4IOS6_STAGE86 exception: data-abort lr=0xc0009424 spsr=0x20000193  [OR]
-MI4IOS6_STAGE86_XNU mmu_high_bootstrap_status_alias=0xfffbfc03
-MI4IOS6_STAGE86_XNU mmu high bootstrap selftest failed: validation status
-MI4IOS6_STAGE86 kernel_entry returned failure
-```
-
-## Recommendation
-
-**For Stage86**: Document the blocking issue and move to Stage86.
-
-**For Stage86**: 
-1. Start fresh without inheriting Stage84's mmu.c bootstrap
-2. Minimal validation, 2MB allocation by design
-3. Direct focus on proving high-VA code execution at 0x80000000
-
-**Stage86 Achievement**: 
-- ✓ Correctly identified and isolated the High-Alias Extent Overflow bug
-- ✓ Implemented the correct fix (2MB mapping)
-- ✓ Designed and coded the high-VA function call test
-- ✗ Hardware validation blocked by bootstrap architecture limitations
-
-## Date: 2026-06-14
+## Date: 2026-06-15
