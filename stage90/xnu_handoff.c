@@ -82,15 +82,48 @@ int stage90_xnu_handoff_run(
 	r->boot_args_ptr = (uint32_t)(uintptr_t)args;
 	r->satisfied_mask |= STAGE90_XNU_HANDOFF_SAT_BOOT_ARGS_READY;
 
+	/* Log environment before jump */
+	xnu_log_puts("stage90_xnu_handoff: environment check\n");
+	uint32_t ttbr0, vbar, sp, cpsr;
+	__asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));
+	__asm__ volatile ("mrc p15, 0, %0, c12, c0, 0" : "=r"(vbar));
+	__asm__ volatile ("mov %0, sp" : "=r"(sp));
+	__asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr));
+	xnu_log_kv32("ttbr0", ttbr0);
+	xnu_log_kv32("vbar", vbar);
+	xnu_log_kv32("sp", sp);
+	xnu_log_kv32("cpsr", cpsr);
+
+	/* Validate code at entry point (read first 4 instructions) */
+	xnu_log_puts("stage90_xnu_handoff: validating code at entry point\n");
+	uint32_t *code = (uint32_t *)r->xnu_entry_va;
+	for (int i = 0; i < 4; i++) {
+		uint32_t instr = code[i];
+		xnu_log_kv32("instr", instr);
+		/* Check it's not all zeros or all ones (common garbage patterns) */
+		if (instr == 0x00000000 || instr == 0xffffffff) {
+			xnu_log_puts("stage90_xnu_handoff: WARNING - suspicious instruction pattern\n");
+		}
+	}
+
 	/* Ready for handoff */
 	r->ready = 1;
 	r->satisfied_mask |= STAGE90_XNU_HANDOFF_SAT_READY;
 
 	/* Log the moment before jump */
-	xnu_log_puts("stage90_xnu_handoff: *** JUMPING TO XNU ***\n");
+	xnu_log_puts("stage90_xnu_handoff: *** READY TO JUMP TO XNU ***\n");
 	xnu_log_kv32("xnu_entry_va", r->xnu_entry_va);
 	xnu_log_kv32("boot_args_ptr", r->boot_args_ptr);
-	xnu_log_puts("stage90_xnu_handoff: if XNU crashes, exception handler will capture it\n");
+	xnu_log_puts("stage90_xnu_handoff: all prerequisites verified\n");
+
+	/* STAGE90 SAFETY: Uncomment to skip actual jump for testing */
+	#if 0
+	xnu_log_puts("stage90_xnu_handoff: SKIPPING JUMP (safety mode)\n");
+	r->satisfied_mask |= STAGE90_XNU_HANDOFF_SAT_READY;
+	goto finish;
+	#endif
+
+	xnu_log_puts("stage90_xnu_handoff: exception handler will capture any crash\n");
 
 	/* Disable IRQs (safety - XNU will enable when ready) */
 	__asm__ volatile ("cpsid i" ::: "memory");
