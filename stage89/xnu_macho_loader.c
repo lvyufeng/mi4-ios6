@@ -166,30 +166,21 @@ static int load_segment(struct segment_command *seg, uint8_t *macho_base,
 	copy_size = seg->filesize;
 	zero_size = seg->vmsize - seg->filesize;
 
-	/* STAGE89 SAFETY: Dry-run mode - do NOT actually copy data yet.
-	 * Just log what we would do. This prevents crashes from bad addresses.
-	 * Once we verify all addresses are valid, we can enable actual loading. */
-	xnu_log_puts("DRY-RUN: would copy segment data\n");
-	xnu_log_kv32("src_offset", seg->fileoff);
-	xnu_log_kv32("dest_va", seg->vmaddr);
-	xnu_log_kv32("copy_size", copy_size);
-	xnu_log_kv32("zero_size", zero_size);
-
-	/* Actual memcpy/memset disabled for safety:
+	/* Copy segment data from Mach-O file to target VA */
 	if (copy_size > 0) {
 		xnu_log_puts("copying segment data\n");
 		xnu_log_kv32("src_offset", seg->fileoff);
 		xnu_log_kv32("dest_va", seg->vmaddr);
-		xnu_log_kv32("size", copy_size);
+		xnu_log_kv32("copy_size", copy_size);
 		memcpy(dest, src, copy_size);
 	}
 
+	/* Zero-fill remaining space (BSS, etc.) */
 	if (zero_size > 0) {
 		xnu_log_puts("zeroing BSS\n");
 		xnu_log_kv32("zero_size", zero_size);
 		memset(dest + copy_size, 0, zero_size);
 	}
-	*/
 
 	xnu_log_puts("loaded segment ");
 	xnu_log_puts(seg->segname);
