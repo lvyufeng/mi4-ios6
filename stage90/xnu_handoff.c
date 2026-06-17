@@ -116,9 +116,10 @@ int stage90_xnu_handoff_run(
 	xnu_log_kv32("boot_args_ptr", r->boot_args_ptr);
 	xnu_log_puts("stage90_xnu_handoff: all prerequisites verified\n");
 
-	/* STAGE90 SAFETY: Uncomment to skip actual jump for testing */
-	#if 0
-	xnu_log_puts("stage90_xnu_handoff: SKIPPING JUMP (safety mode)\n");
+	/* STAGE90 SAFETY: Skip actual jump to verify environment first */
+	#if 1
+	xnu_log_puts("stage90_xnu_handoff: SKIPPING JUMP (safety mode for environment validation)\n");
+	xnu_log_puts("stage90_xnu_handoff: all prerequisites verified, would jump if safety mode disabled\n");
 	r->satisfied_mask |= STAGE90_XNU_HANDOFF_SAT_READY;
 	goto finish;
 	#endif
