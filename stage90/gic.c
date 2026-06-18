@@ -42,6 +42,28 @@ volatile uint32_t stage90_last_timer_irq_id;
 volatile uint32_t stage90_last_timer_ctl;
 volatile uint32_t stage90_other_irq_count;
 volatile uint32_t stage90_sgi_selftest_passed;
+
+/*
+ * Stage90 PC-sampling ring buffer. Each timer/watchdog IRQ during XNU
+ * execution records the PC XNU was about to execute (interrupted PC) so we
+ * can see what loop XNU is stuck in. stage90_irq_sample_count is the number
+ * of samples captured; the ring wraps mod STAGE90_IRQ_SAMPLE_RING_SIZE.
+ */
+#define STAGE90_IRQ_SAMPLE_RING_SIZE 16u
+volatile uint32_t stage90_irq_sample_count;
+volatile uint32_t stage90_irq_sample_ring[STAGE90_IRQ_SAMPLE_RING_SIZE];
+volatile uint32_t stage90_irq_last_sampled_pc;
+
+/*
+ * PC-sampling watchdog mode for the XNU handoff. When armed, the timer IRQ
+ * handler does NOT shut the timer down; instead it re-arms the timer for
+ * another sample interval until stage90_irq_sample_max samples are captured.
+ * This lets us build a trace of where XNU executes across time.
+ */
+volatile uint32_t stage90_irq_sample_mode;        /* 0 = one-shot watchdog, 1 = periodic sampling */
+volatile uint32_t stage90_irq_sample_interval_ticks;
+volatile uint32_t stage90_irq_sample_max;
+volatile uint32_t stage90_irq_sample_watchdog_fired;
 volatile uint32_t stage90_sgi_irq_count_observed;
 volatile uint32_t stage90_sgi_sgi0_count_observed;
 volatile uint32_t stage90_sgi_last_irq_id_observed;
@@ -202,16 +224,27 @@ int gic_validate_snapshot(void)
     return ok;
 }
 
-void stage90_irq_c_handler(void)
+void stage90_irq_c_handler(uint32_t interrupted_pc)
 {
     const uint32_t cpu_base = GIC_state_stage90.cpuBase;
     const uint32_t iar = mmio_read32(cpu_base + GICC_IAR);
     const uint32_t intid = iar & GICC_IAR_INTID_MASK;
     const uint32_t count = stage90_irq_count + 1u;
+    uint32_t sample_idx;
 
     stage90_irq_count = count;
     stage90_last_iar = iar;
     stage90_last_irq_id = intid;
+
+    /*
+     * Record the interrupted PC in the sampling ring buffer regardless of the
+     * interrupt source. This is how we observe where XNU is executing when the
+     * timer/watchdog fires.
+     */
+    stage90_irq_last_sampled_pc = interrupted_pc;
+    sample_idx = stage90_irq_sample_count % STAGE90_IRQ_SAMPLE_RING_SIZE;
+    stage90_irq_sample_ring[sample_idx] = interrupted_pc;
+    stage90_irq_sample_count = stage90_irq_sample_count + 1u;
 
     if (intid == GIC_SGI0_ID) {
         stage90_sgi0_count++;
@@ -220,7 +253,35 @@ void stage90_irq_c_handler(void)
         stage90_timer_irq_count++;
         stage90_last_timer_irq_id = intid;
         stage90_last_timer_ctl = ctl;
-        generic_timer_shutdown();
+        if (stage90_irq_sample_mode == 1u) {
+            if (stage90_irq_sample_count < stage90_irq_sample_max) {
+                /* Periodic PC-sampling: re-arm for the next sample window. */
+                write_cntp_tval(stage90_irq_sample_interval_ticks);
+                write_cntp_ctl(CNTP_CTL_ENABLE);
+                barrier_dsb_isb();
+            } else {
+                /*
+                 * Sampling budget exhausted: stop the timer. Because the
+                 * handoff target may be in a non-returning loop, this IRQ
+                 * handler is the ONLY Stage code that runs after the jump, so
+                 * dump the samples here and now, then reboot through the proven
+                 * PS_HOLD path. The warm reboot preserves the RAM-console/
+                 * ramoops buffer so Android can expose the dump through
+                 * /proc/last_kmsg.
+                 */
+                stage90_irq_sample_watchdog_fired = 1u;
+                generic_timer_shutdown();
+                disable_irq_delivery();
+                stage90_dump_pc_samples();
+                mmio_write32(cpu_base + GICC_EOIR, iar);
+                barrier_dsb_isb();
+                xnu_log_puts("stage90 pc-sampling watchdog: rebooting after sample dump\n");
+                platform_reboot();
+            }
+        } else {
+            /* Normal timer selftest/non-sampling timer IRQ path. */
+            generic_timer_shutdown();
+        }
     } else if (intid == GICC_SPURIOUS_ID) {
         stage90_spurious_irq_count++;
     } else {
@@ -256,6 +317,11 @@ static void reset_irq_counters(void)
     stage90_last_timer_irq_id = 0xffffffffu;
     stage90_last_timer_ctl = 0xffffffffu;
     stage90_other_irq_count = 0;
+    stage90_irq_sample_count = 0;
+    stage90_irq_last_sampled_pc = 0xffffffffu;
+    for (uint32_t i = 0u; i < STAGE90_IRQ_SAMPLE_RING_SIZE; i++) {
+        stage90_irq_sample_ring[i] = 0u;
+    }
 }
 
 int gic_sgi_selftest(void)
@@ -418,4 +484,82 @@ int gic_timer_selftest(void)
     stage90_timer_selftest_passed = 0u;
     xnu_log_puts("gic timer selftest failed: no timer IRQ observed\n");
     return 0;
+}
+
+/*
+ * Stage90 PC-sampling watchdog for the XNU handoff. Call arm() just before
+ * jumping to XNU: it enables the GIC timer PPI, installs a periodic timer
+ * that will fire every interval_us, and enables IRQ delivery so the timer
+ * interrupts XNU and records its interrupted PC into the sample ring.
+ *
+ * The handoff runs with IRQs enabled. After max_samples PC samples (or if the
+ * one-shot watchdog fires), the timer is shut down by the IRQ handler. stop()
+ * unconditionally disables the timer and IRQs; dump() emits the captured
+ * samples to the log.
+ */
+int stage90_arm_pc_sampling_watchdog(uint32_t interval_us, uint32_t max_samples)
+{
+    const uint32_t dist_base = GIC_state_stage90.distBase;
+    const uint32_t cpu_base = GIC_state_stage90.cpuBase;
+    const uint32_t interval_ticks = timer_usec_to_ticks(interval_us);
+
+    xnu_log_puts("stage90 pc-sampling watchdog: arming\n");
+    xnu_log_kv32("watchdog_interval_us", interval_us);
+    xnu_log_kv32("watchdog_max_samples", max_samples);
+    xnu_log_kv32("watchdog_interval_ticks", interval_ticks);
+
+    /* Clear prior IRQ/sample state so the final dump only describes the handoff window. */
+    disable_irq_delivery();
+    generic_timer_shutdown();
+    reset_irq_counters();
+    stage90_irq_sample_watchdog_fired = 0u;
+    stage90_irq_sample_interval_ticks = interval_ticks;
+    stage90_irq_sample_max = max_samples;
+    stage90_irq_sample_mode = 0u;
+
+    if (!dist_base || !cpu_base) {
+        xnu_log_puts("stage90 pc-sampling watchdog: ERROR missing GIC bases\n");
+        return 0;
+    }
+
+    stage90_irq_sample_mode = 1u;
+
+    /* Enable the timer PPIs at the distributor. */
+    mmio_write32(dist_base + GICD_ISENABLER0, GIC_TIMER_PPI_MASK);
+    barrier_dsb_isb();
+
+    /* Arm the first sample window. */
+    write_cntp_tval(interval_ticks);
+    write_cntp_ctl(CNTP_CTL_ENABLE);
+    barrier_dsb_isb();
+
+    /* Enable IRQ delivery last so XNU runs interruptible. */
+    enable_irq_delivery();
+    xnu_log_kv32("watchdog_cntp_ctl_armed", read_cntp_ctl());
+    return 1;
+}
+
+void stage90_stop_pc_sampling_watchdog(void)
+{
+    disable_irq_delivery();
+    generic_timer_shutdown();
+    stage90_irq_sample_mode = 0u;
+    barrier_dsb_isb();
+}
+
+void stage90_dump_pc_samples(void)
+{
+    uint32_t total = stage90_irq_sample_count;
+    uint32_t to_print = (total < STAGE90_IRQ_SAMPLE_RING_SIZE) ? total : STAGE90_IRQ_SAMPLE_RING_SIZE;
+
+    xnu_log_puts("stage90 pc-samples: begin\n");
+    xnu_log_kv32("pc_sample_total", total);
+    xnu_log_kv32("pc_sample_watchdog_fired", stage90_irq_sample_watchdog_fired);
+    xnu_log_kv32("pc_sample_timer_irq_count", stage90_timer_irq_count);
+    xnu_log_kv32("pc_sample_last_pc", stage90_irq_last_sampled_pc);
+
+    for (uint32_t i = 0u; i < to_print; i++) {
+        xnu_log_kv32("pc_sample", stage90_irq_sample_ring[i]);
+    }
+    xnu_log_puts("stage90 pc-samples: end\n");
 }

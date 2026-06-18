@@ -3800,17 +3800,28 @@ struct stage90_xnu_macho_loader_result {
  * XNU Handoff (Stage90 NEW)
  * ============================================================================ */
 
-#define STAGE90_XNU_HANDOFF_VERSION 1u
+#define STAGE90_XNU_HANDOFF_VERSION 2u
 
 #define STAGE90_XNU_HANDOFF_SAT_LOADER_OK           0x00000001u
 #define STAGE90_XNU_HANDOFF_SAT_ENTRY_VALID         0x00000002u
 #define STAGE90_XNU_HANDOFF_SAT_BOOT_ARGS_READY     0x00000004u
-#define STAGE90_XNU_HANDOFF_SAT_READY               0x00000008u
-#define STAGE90_XNU_HANDOFF_REQUIRED_MASK           0x0000000fu
+#define STAGE90_XNU_HANDOFF_SAT_FULL_PMAP_OK        0x00000008u
+#define STAGE90_XNU_HANDOFF_SAT_CANDIDATE_L1_READY  0x00000010u
+#define STAGE90_XNU_HANDOFF_SAT_STAGE_TARGET_READY  0x00000020u
+#define STAGE90_XNU_HANDOFF_SAT_READY               0x00000040u
+#define STAGE90_XNU_HANDOFF_REQUIRED_MASK           0x0000007fu
+
+/* PC-sampling watchdog tuning for the Stage-owned high-VA handoff target. */
+#define STAGE90_HANDOFF_SAMPLE_INTERVAL_US  500u   /* sample target PC every 500us */
+#define STAGE90_HANDOFF_SAMPLE_MAX          16u    /* capture 16 PC samples */
 
 #define STAGE90_XNU_HANDOFF_FAIL_LOADER             0x00000001u
 #define STAGE90_XNU_HANDOFF_FAIL_INVALID_ENTRY      0x00000002u
 #define STAGE90_XNU_HANDOFF_FAIL_XNU_RETURNED       0x00000004u
+#define STAGE90_XNU_HANDOFF_FAIL_FULL_PMAP          0x00000008u
+#define STAGE90_XNU_HANDOFF_FAIL_CANDIDATE_L1       0x00000010u
+#define STAGE90_XNU_HANDOFF_FAIL_STAGE_TARGET       0x00000020u
+#define STAGE90_XNU_HANDOFF_FAIL_WATCHDOG          0x00000040u
 
 struct stage90_xnu_handoff_result {
     uint32_t version;
@@ -3824,13 +3835,28 @@ struct stage90_xnu_handoff_result {
     uint32_t loader_status;
 
     /* Handoff parameters */
-    uint32_t xnu_entry_va;
+    uint32_t xnu_entry_va;          /* inert Mach-O fixture entry retained for diagnostics */
+    uint32_t stage_target_phys;     /* Stage-owned target function physical address */
+    uint32_t stage_target_high_va;  /* Stage-owned target high-VA alias actually jumped to */
     uint32_t boot_args_ptr;
+
+    /* Candidate-L1 handoff state */
+    uint32_t full_pmap_status;
+    uint32_t candidate_l1_base;
+    uint32_t original_ttbr0;
+    uint32_t handoff_ttbr0;
 
     /* Handoff state */
     uint32_t ready;
     uint32_t jumped;
     uint32_t xnu_returned;
+
+    /* PC-sampling watchdog observations (populated after the jump) */
+    uint32_t jumped_observed;
+    uint32_t xnu_returned_observed;
+    uint32_t pc_sample_count;
+    uint32_t pc_sample_last_pc;
+    uint32_t watchdog_fired;
 
     uint32_t checksum;
 };
@@ -5870,6 +5896,13 @@ extern volatile uint32_t stage90_timer_irq_count;
 extern volatile uint32_t stage90_last_timer_irq_id;
 extern volatile uint32_t stage90_last_timer_ctl;
 extern volatile uint32_t stage90_other_irq_count;
+extern volatile uint32_t stage90_irq_sample_count;
+extern volatile uint32_t stage90_irq_sample_ring[16];
+extern volatile uint32_t stage90_irq_last_sampled_pc;
+extern volatile uint32_t stage90_irq_sample_mode;
+extern volatile uint32_t stage90_irq_sample_interval_ticks;
+extern volatile uint32_t stage90_irq_sample_max;
+extern volatile uint32_t stage90_irq_sample_watchdog_fired;
 extern volatile uint32_t stage90_sgi_selftest_passed;
 extern volatile uint32_t stage90_sgi_irq_count_observed;
 extern volatile uint32_t stage90_sgi_sgi0_count_observed;
@@ -5882,7 +5915,10 @@ extern volatile uint32_t stage90_timer_last_ctl_observed;
 void gic_readonly_snapshot(uint32_t dist_base, uint32_t cpu_base);
 void gic_log_snapshot(void);
 int gic_validate_snapshot(void);
-void stage90_irq_c_handler(void);
+void stage90_irq_c_handler(uint32_t interrupted_pc);
+int stage90_arm_pc_sampling_watchdog(uint32_t interval_us, uint32_t max_samples);
+void stage90_stop_pc_sampling_watchdog(void);
+void stage90_dump_pc_samples(void);
 int gic_sgi_selftest(void);
 int gic_timer_selftest(void);
 

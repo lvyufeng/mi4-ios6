@@ -74,12 +74,18 @@ vector_irq:
     /*
      * IRQ is the first returnable exception path in this experiment.
      * ARM IRQ entry sets LR_irq to the interrupted PC + 4; adjust it to
-     * the actual resume PC, preserve the volatile interrupted registers,
-     * let the C handler acknowledge/end the GIC interrupt, then return by
-     * restoring CPSR from SPSR_irq through `subs pc, lr, #0`.
+     * the actual resume PC (the instruction XNU was about to execute when
+     * the timer/watchdog fired), preserve the volatile interrupted registers,
+     * let the C handler acknowledge/end the GIC interrupt and record the
+     * interrupted PC for execution sampling, then return by restoring CPSR
+     * from SPSR_irq through `subs pc, lr, #0`.
+     *
+     * The adjusted LR (interrupted PC) is pushed as the last stacked word and
+     * also handed to the C handler in r0 as the interrupted PC.
      */
     sub lr, lr, #4
     stmdb sp!, {r0-r3, r12, lr}
+    mov r0, lr                  @ interrupted PC -> r0 for the C handler
     bl  stage90_irq_c_handler
     ldmia sp!, {r0-r3, r12, lr}
     subs pc, lr, #0
