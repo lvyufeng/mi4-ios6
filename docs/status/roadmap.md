@@ -411,10 +411,19 @@ The device-tree half produced two real blockers, found by
 `/cpus/cpu@N` had no `state` property (XNU panics on it under `MACH_ASSERT` and *silently
 skips the CPU* otherwise, so the timebase-frequency was being ignored), and there was no node
 named `arm-io` (so `gPESocBasePhys` was 0 and neither the interrupt controller nor the timer
-would ever be mapped). Both are fixed. One further item is recorded but deliberately not
-resolved: Apple's model expects a node's `reg` to be an offset from the SoC base, while ours
-are absolute — and that is where Phase 2 meets Phase 3, since the Apple function in question
-would be shimmed on MSM8974 anyway. See the contract doc.
+would ever be mapped). Both are fixed. Reading further into what `start.s` hands off to — the real
+`PE_init_platform(FALSE, args)` and `pe_identify_machine` — turned up a third: our
+`/interrupt-controller` node has no property *named* `interrupt-controller` with the value
+`"master"`, which is the Apple convention `DTFindEntry` matches on, so `gPicBase` would stay 0
+and `pe_arm_map_interrupt_controller` would return failure. **No interrupt controller at all.**
+That check is now in `tools/xnu_dt_requirements.py`.
+
+Deliberately not resolved, and now with the arithmetic written out: Apple's model expects a
+node's `reg` to be an *offset* from the SoC base (`gPicBase = soc_phys + reg[0]`), while ours
+are absolute — with our `ranges[1]` that would map `0xf2000000` instead of the GIC, silently.
+This is where Phase 2 meets Phase 3: satisfying it means choosing a `reg` encoding for a
+function (`pe_arm_map_interrupt_controller`) that Phase 3 replaces with an MSM8974 shim
+anyway. See the contract doc.
 
 **Exit criteria:** boot_args and DT dumped from the device and accepted by 4570's readers;
 `TTBR0`/`TTBR1`/`TTBCR`/`SCTLR` verified correct after 4570 code has written them. Still open:

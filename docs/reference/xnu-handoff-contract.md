@@ -209,18 +209,76 @@ because a wrong count does not fail to build and does not fail at `DTInit` — t
 reads the number it was given and lands in the middle of the next property name. Both checks
 are negative-tested: perturbing a count makes them fail.
 
-### Recorded, not resolved: `reg` is absolute, XNU expects an offset
+### Not resolved here: `reg` is absolute, XNU expects an offset
 
-`pe_arm_map_interrupt_controller` computes `gPicBase = soc_phys + reg[0]`, i.e. Apple's DT
-model expects a node's `reg` to be an **offset from the SoC base**. Our `/interrupt-controller`
-and `/timer` nodes carry absolute addresses, because that is what the project's own iokit
-contract selftests read. Both cannot be true at once, and getting it wrong maps the wrong
-physical addresses — the kind of error that presents as an unrelated fault.
+`pe_arm_map_interrupt_controller` computes `gPicBase = soc_phys + reg[0]`, so Apple's model
+expects `reg` to be an **offset from the SoC base**, while our `/interrupt-controller` and
+`/timer` carry absolute addresses. Left as a decision for Phase 3, with the arithmetic and
+both consequences spelled out in *What `PE_init_platform(FALSE, args)` then does* below.
 
-This is deliberately left as a decision rather than guessed at, because it is where Phase 2
-meets Phase 3: satisfying Apple's convention means `reg` values relative to `0xf9000000`,
-but `pe_arm_map_interrupt_controller` is Apple-platform code that on MSM8974 would be
-replaced by a shim anyway. Phase 3 should decide it, with the shim in view.
+
+## What `PE_init_platform(FALSE, args)` then does — and two concrete blockers
+
+`start.s` is only the first step. The Stage-owned ladder already models the next one
+(`xnu_pe_init_platform_false.c`), so it is worth reading what the real function requires,
+because two of its requirements our device tree currently fails.
+
+`PE_init_platform(boolean_t vm_initialized, void *args)` (`pexpert/arm/pe_init.c:283`) with
+`vm_initialized == FALSE` does, in order:
+
+1. `PE_state.bootArgs = args`, and copies the `Video` fields into `PE_state.video`
+   (`:294-307`). Harmless with a zeroed `Video` — `v_scale` is derived from `v_depth` and the
+   result is 1.
+2. `DTInit(boot_args_ptr->deviceTreeP)` — so `deviceTreeP` must point at a tree the walker
+   accepts *before* anything else runs.
+3. `pe_identify_machine(boot_args_ptr)`.
+4. Then a set of *optional* reads keyed on `DTFindEntry("name", "device-tree")`:
+   `target-type`, `model`, `firmware-version`, `unique-chip-id`, `dram-vendor-id` (`:318-368`).
+   All behind `kSuccess` checks with sane fallbacks, so absence is fine.
+
+Step 3 is where it stops being forgiving.
+
+### Blocker 1 — `interrupt-controller` must have the value `"master"`
+
+`pe_arm_map_interrupt_controller` (`pe_identify_machine.c:534`) does:
+
+```c
+gSocPhys = pe_arm_get_soc_base_phys();          /* from the arm-io node's ranges[1] */
+if (soc_phys == 0) return 0;                    /* <- no arm-io, no interrupts at all */
+if (DTFindEntry("interrupt-controller", "master", &entryP) == kSuccess) {
+        DTGetProperty(entryP, "reg", &reg_prop, &prop_size);
+        gPicBase = ml_io_map(soc_phys + *reg_prop, *(reg_prop + 1));
+}
+if (gPicBase == 0) return 0;
+```
+
+Two things follow. Our `/interrupt-controller` node has `interrupt-controller = 1` but no
+property *named* `interrupt-controller` with the *value* `"master"`, so `DTFindEntry` cannot
+match it and `gPicBase` stays 0 — **the function returns failure and there is no interrupt
+controller.** That property name/value pair is an Apple platform convention, and it is now
+checked by `tools/xnu_dt_requirements.py` rather than left to be discovered.
+
+### Blocker 2 — `reg` is an offset from the SoC base, and ours is absolute
+
+`gPicBase = soc_phys + *reg_prop` is the arithmetic. Apple's model is that a platform node's
+`reg` is an **offset** from the SoC base, and on an Apple SoC the first entry is typically
+`0`. Our `/interrupt-controller` and `/timer` carry absolute addresses (`0xf9000000`,
+`0xf9020000`) because that is what the project's own iokit contract selftests read.
+
+With `soc_phys = 0xf9000000` (our `ranges[1]`) and `reg[0] = 0xf9000000`, XNU would map
+`0x1f2000000` — wrapped into 32 bits, `0xf2000000`, which is not the GIC. The wrong address,
+mapped, with no error. This is the same item the earlier section recorded as unresolved, now
+with the arithmetic spelled out and two consequences rather than one:
+
+1. Our selftests want absolute `reg`; XNU's Apple platform code wants offsets. Both cannot
+   hold in one property.
+2. The second `reg` entry is used as the **size** (`*(reg_prop + 1)`), so the pairs must stay
+   `<reg, size>` and not become a flat list.
+
+The resolution belongs to Phase 3, and the honest framing is that Phase 3 replaces
+`pe_arm_map_interrupt_controller` with an MSM8974 shim — at which point the shim itself decides
+what `reg` means and the Apple convention stops binding. Trying to satisfy both now would
+mean choosing a `reg` encoding for a reader we are about to replace.
 
 ## Other things to check before trusting a handoff
 
