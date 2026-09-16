@@ -40,6 +40,41 @@ That last one is the clearest: `EXTERNAL_HEADERS/stdatomic.h:24` is
 
 XNU's atomic layer is clang-only, and this project's ARM toolchain is `arm-none-eabi-gcc`.
 
+## Where the measurement landed
+
+After the first level, the numbers stopped moving — 3 of 32 clean, **441 errors** across the
+layer, about 13 per file. Characterising those rather than counting them produced the finding.
+
+The kinds are **cascades**, not independent defects — one missing type produces dozens of
+follow-on diagnostics — so the honest figure is the *distinct* missing names:
+
+```
+40x _mbstate_t        14x mpqueue_head_t      7x cluster_type_t
+22x size_t            10x ast_t               5x tbd_ops_data_t
+```
+
+`_mbstate_t` and `size_t` are **not missing**. They are defined in `bsd/arm/_types.h` and
+`bsd/sys/_types/`, both in the tree. Three specific things had to be right for the compiler to
+see them, and each was found by changing one thing and reading what moved:
+
+- **`-DKERNEL=1`.** Without it `EXTERNAL_HEADERS/stdint.h` falls through to
+  `#include_next <stdint.h>`, so the compiler's `stdint.h` and Darwin's `_int32_t.h` both
+  define `int32_t`. That entire "conflicting types" class was a missing *flag* — I had been
+  treating it as a header gap.
+- **`-Ibsd/arm`.** `osfmk/mach/arm/vm_types.h:72` includes `<arm/_types.h>`, which is where
+  `__darwin_natural_t` comes from. Without the path `natural_t` is undefined and everything
+  built on it cascades — the source of the "storage class specified for parameter" errors that
+  were otherwise inexplicable.
+- **Header *order*.** The project's `shims/` must come *after* the real XNU `-I` paths, not
+  before. A 12-line `shims/sys/types.h` was shadowing the real `bsd/sys/types.h`, so
+  correctly-defined types still looked missing. Shims are a fallback, not an override.
+
+None of the three is a header to write. All three are configuration.
+
+**Tried and rejected:** `-DPEXPERT_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1`, to reach
+`tbd_ops_data_t` which sits behind that guard. It made things **worse** — 441 → 1442 errors —
+so it is not the answer. Recorded so it is not re-tried.
+
 ## So the conclusion changed
 
 An earlier estimate in `docs/status/roadmap.md` said the ARM layer's gap was **8 missing
