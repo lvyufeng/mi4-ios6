@@ -99,16 +99,19 @@ Stage0 through Stage84 built the runtime up to a full kernel virtual address spa
 
 Stage90 covers the handoff itself: the Stage-owned `arm_init`-shaped entry stub runs the early-pmap / `PE_init_platform(FALSE,args)` / post-PE-bootstrap / `arm_vm_init` ladder, relocates the high-VA handlers, loads the Mach-O fixture, and then hands control to a high-VA target through the candidate L1.
 
-The handoff target is **not** XNU code, and no public XNU object has ever been linked into or executed by any payload — the public-XNU compile graph (`targets/*.objects`) is a host-only linkability proof, and the Mach-O fixture is inert by construction. The jump target `0x80008000` is the fixture's `LC_UNIXTHREAD` PC, i.e. its Mach-O header; the fixture's `__TEXT,__text` holds the ASCII string `"ST90-TEXT-NOEXEC"`. So the first handoff attempt jumped into non-code, which is why the device **hung**: no log output, no automatic recovery, manual power-cycle required ([`stages/stage90/IMPLEMENTATION_STATUS.md`](stages/stage90/IMPLEMENTATION_STATUS.md)). With zero post-jump visibility, Stage90 is now bisecting the failure instead of re-attempting it. The switches in `stages/stage90/stage90.h` select how far the stage goes:
+The handoff target is **not** XNU code, and no public XNU object has ever been linked into or executed by any payload — the public-XNU compile graph (`targets/*.objects`) is a host-only linkability proof, and the Mach-O fixture is inert by construction. The jump target `0x80008000` is the fixture's `LC_UNIXTHREAD` PC, i.e. its Mach-O header; the fixture's `__TEXT,__text` holds the ASCII string `"ST90-TEXT-NOEXEC"`. The first handoff attempt jumped into that non-code and the device hung: no log output, no automatic recovery, manual power-cycle required. With zero post-jump visibility, Stage90 is now bisecting the failure instead of re-attempting it, under two independent switches in `stages/stage90/stage90.h`. (An earlier revision of this section described three 0/1 switches; they shadowed each other, and the bisect they drove faked its results, so both were replaced.)
 
-| Switch | Effect |
+`STAGE90_HANDOFF_MODE` — mutually exclusive, `#error` on any other value. Selects how far the handoff itself goes:
+
+| Mode | Effect |
 | --- | --- |
-| `STAGE90_HANDOFF_HARD_SKIP=1` | Take the loader-prerequisite path, then return before the candidate-L1 install, the watchdog loop and the jump. Nothing crosses the boundary. |
-| `STAGE90_HANDOFF_PREFLIGHT_WATCHDOG_ONLY=1` | Stay under the original known-good mapping: no candidate L1, no high-VA branch, no jump — just a bounded identity-mapped loop, to prove the timer IRQ still fires and `platform_reboot()`/PS_HOLD warm-reboots the device. |
-| `STAGE90_ENTRY_STUB_BISECT_LEVEL=0` / `=1` | Return from the entry stub after the boot-args check / after the early-pmap step, to place the hang inside the `arm_init` ladder. |
-| all zero | The full candidate-L1 high-VA sampling handoff — the configuration that hung. |
+| `FULL` (0) | Install the candidate L1, arm the PC-sampling watchdog, jump to the Stage-owned high-VA target. Before jumping it refuses any target whose first word is the fixture's `__TEXT` marker. |
+| `PREFLIGHT_WATCHDOG_ONLY` (1) — **default** | No candidate L1, no high-VA branch, no jump: everything stays under the original known-good mapping. Arms the *same* watchdog and spins in a bounded identity-mapped loop, to prove the interrupt → sample-dump → `platform_reboot()`/PS_HOLD warm-reboot path on its own. The loop is bounded (4× `INTERVAL × MAX`); if the watchdog never fires, control returns and the stage reports the failure and reboots visibly instead of hanging. |
+| `HARD_SKIP` (2) | Stop before the boundary entirely: no candidate L1, no watchdog, no IRQ, no jump. |
 
-None of these modes is a shipped feature; they exist to find the hang. The current work is the watchdog → `platform_reboot()` → PS_HOLD warm-reboot path, which is why `platform_reboot()` now logs each step of the restart-reason and PS_HOLD sequence.
+`STAGE90_ENTRY_LADDER_LEVEL` (0–4) — the entry stub genuinely calls the first *N* stages of the `arm_init`-shaped ladder and returns; levels above *N* are not called. `0` boot-args only, `1` +early pmap, `2` +`PE_init_platform(FALSE,args)`, `3` +post-PE bootstrap, `4` (**default**) +`arm_vm_init` live pmap and the high-VA handler windows, which is the only level that reaches the handoff. The loader preflight reads the level back out of the stub result and requires only the stages that actually ran — previously it required all five unconditionally, so every level below `FULL` failed structurally before the handoff was ever reached.
+
+None of these modes is a shipped feature; they exist to find the failure. The current work is the watchdog → `platform_reboot()` → PS_HOLD warm-reboot path, which is why `platform_reboot()` logs each step of the restart-reason and PS_HOLD sequence.
 
 ## Next milestones
 
@@ -116,8 +119,9 @@ The current plan is [`docs/status/roadmap.md`](docs/status/roadmap.md), which re
 project after Stage90 and supersedes this section. In short:
 
 1. **Phase 0 — make failure visible and recoverable.** Finish the watchdog → PS_HOLD
-   warm-reboot path so a hang self-recovers, and add a non-executable-entry guard so the
-   fixture header produces a captured fault instead of a silent hang.
+   warm-reboot path so a hang self-recovers, and reject non-executable entries so the
+   fixture header produces a captured fault instead of a silent hang. Both mechanisms are
+   in the tree; the remaining step is the hardware run in `PREFLIGHT_WATCHDOG_ONLY`.
 2. **Phase 1 — cacheable memory policy.** Every mapping in the project is
    Strongly-Ordered, non-cacheable; there is no Normal-memory descriptor anywhere. ARMv7
    `LDREX`/`STREX` are only defined on Normal memory, so this is the prerequisite for the

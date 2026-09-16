@@ -740,12 +740,19 @@ void platform_reboot(void)
     volatile uint32_t *restart_reason = (volatile uint32_t *)RESTART_REASON;
     volatile uint32_t *ps_hold = (volatile uint32_t *)MSM8974_PSHOLD;
 
+    log_puts("MI4IOS6_STAGE90 platform_reboot entered\n");
+    log_kv32("platform_reboot_restart_reason_addr", RESTART_REASON);
+    log_kv32("platform_reboot_ps_hold_addr", MSM8974_PSHOLD);
+
+    log_puts("MI4IOS6_STAGE90 platform_reboot writing restart reason\n");
     *restart_reason = RESTART_NORMAL;
     __asm__ volatile ("dsb sy" ::: "memory");
+    log_puts("MI4IOS6_STAGE90 platform_reboot restart reason write complete\n");
 
-    log_puts("MI4IOS6_STAGE90 attempting MSM8974 PS_HOLD reset\n");
+    log_puts("MI4IOS6_STAGE90 platform_reboot writing PS_HOLD=0\n");
     *ps_hold = 0;
     __asm__ volatile ("dsb sy" ::: "memory");
+    log_puts("MI4IOS6_STAGE90 platform_reboot PS_HOLD write returned; entering WFE loop\n");
 
     for (;;) {
         __asm__ volatile ("wfe");
@@ -785,5 +792,6 @@ void stage90_main(void)
         platform_reboot();
     }
 
+    log_puts("MI4IOS6_STAGE90 stage90_main final platform_reboot call\n");
     platform_reboot();
 }

@@ -3009,6 +3009,12 @@ struct stage90_xnu_entry_stub_result {
     uint32_t arm_vm_init_full_pmap_returned;
     uint32_t arm_vm_init_full_pmap_status;
     uint32_t arm_vm_init_full_pmap_checksum;
+    /*
+     * The ladder level this run was built with (STAGE90_ENTRY_LADDER_*). Consumers
+     * must only require the per-stage results for stages <= this level; stages
+     * above it were not called and their _result() globals stay zeroed.
+     */
+    uint32_t ladder_level;
     uint32_t checksum;
 };
 
@@ -3811,9 +3817,131 @@ struct stage90_xnu_macho_loader_result {
 #define STAGE90_XNU_HANDOFF_SAT_READY               0x00000040u
 #define STAGE90_XNU_HANDOFF_REQUIRED_MASK           0x0000007fu
 
+/* SAT bits every mode can satisfy: loader, entry window, boot_args, ready. */
+#define STAGE90_XNU_HANDOFF_SAT_COMMON \
+    (STAGE90_XNU_HANDOFF_SAT_LOADER_OK | STAGE90_XNU_HANDOFF_SAT_ENTRY_VALID | \
+     STAGE90_XNU_HANDOFF_SAT_BOOT_ARGS_READY | STAGE90_XNU_HANDOFF_SAT_READY)
+
+/*
+ * The candidate-L1 bits only exist in FULL mode; PREFLIGHT_WATCHDOG_ONLY never
+ * builds or installs the candidate L1, so requiring them would make the mode
+ * structurally unsatisfiable.
+ */
+#define STAGE90_XNU_HANDOFF_SAT_L1_HANDOFF \
+    (STAGE90_XNU_HANDOFF_SAT_FULL_PMAP_OK | STAGE90_XNU_HANDOFF_SAT_CANDIDATE_L1_READY | \
+     STAGE90_XNU_HANDOFF_SAT_STAGE_TARGET_READY)
+
 /* PC-sampling watchdog tuning for the Stage-owned high-VA handoff target. */
 #define STAGE90_HANDOFF_SAMPLE_INTERVAL_US  500u   /* sample target PC every 500us */
 #define STAGE90_HANDOFF_SAMPLE_MAX          16u    /* capture 16 PC samples */
+
+/*
+ * Handoff execution mode - exactly one of these, selected by STAGE90_HANDOFF_MODE.
+ *
+ * These used to be three independent 0/1 switches, and the combination silently
+ * shadowed itself: HARD_SKIP returned from xnu_handoff_run() before the
+ * PREFLIGHT_WATCHDOG_ONLY block was reached, so setting both meant the watchdog
+ * preflight never executed while the stage still reported success. A single
+ * enumerated mode makes an impossible combination a compile error instead of a
+ * silent no-op.
+ *
+ *   FULL (0)                      install the candidate L1, arm the sampling
+ *                                 watchdog, jump to the Stage-owned high-VA target.
+ *   PREFLIGHT_WATCHDOG_ONLY (1)   stay under the original known-good mapping: no
+ *                                 candidate L1, no high-VA branch. Arms the
+ *                                 PC-sampling watchdog and spins in a bounded
+ *                                 identity-mapped loop so the interrupt ->
+ *                                 sample-dump -> platform_reboot()/PS_HOLD
+ *                                 warm-reboot path is exercised on its own. The
+ *                                 loop is bounded on purpose: if the watchdog does
+ *                                 not fire, control returns and the stage reports
+ *                                 the negative instead of hanging the device.
+ *   HARD_SKIP (2)                 stop before the boundary entirely: no candidate
+ *                                 L1, no watchdog, no IRQ, no jump.
+ */
+#define STAGE90_HANDOFF_MODE_FULL                    0u
+#define STAGE90_HANDOFF_MODE_PREFLIGHT_WATCHDOG_ONLY 1u
+#define STAGE90_HANDOFF_MODE_HARD_SKIP               2u
+
+#if !defined(STAGE90_HANDOFF_MODE)
+#define STAGE90_HANDOFF_MODE STAGE90_HANDOFF_MODE_PREFLIGHT_WATCHDOG_ONLY
+#endif
+
+#if (STAGE90_HANDOFF_MODE != STAGE90_HANDOFF_MODE_FULL) && \
+    (STAGE90_HANDOFF_MODE != STAGE90_HANDOFF_MODE_PREFLIGHT_WATCHDOG_ONLY) && \
+    (STAGE90_HANDOFF_MODE != STAGE90_HANDOFF_MODE_HARD_SKIP)
+#error "STAGE90_HANDOFF_MODE must be STAGE90_HANDOFF_MODE_FULL, _PREFLIGHT_WATCHDOG_ONLY or _HARD_SKIP"
+#endif
+
+/*
+ * The candidate L1 only exists in FULL mode, so requiring its SAT bits in the
+ * other modes would make them structurally unsatisfiable.
+ */
+#if STAGE90_HANDOFF_MODE == STAGE90_HANDOFF_MODE_FULL
+#define STAGE90_XNU_HANDOFF_REQUIRED_MASK_FOR_MODE \
+    (STAGE90_XNU_HANDOFF_SAT_COMMON | STAGE90_XNU_HANDOFF_SAT_L1_HANDOFF)
+#else
+#define STAGE90_XNU_HANDOFF_REQUIRED_MASK_FOR_MODE STAGE90_XNU_HANDOFF_SAT_COMMON
+#endif
+
+/*
+ * Entry-stub ladder bisect level.
+ *
+ * The stub genuinely calls the first STAGE90_ENTRY_LADDER_LEVEL stages of the
+ * arm_init-shaped ladder and then returns; stages above the level are not called
+ * and leave their _result() globals zeroed. The earlier version of this bisect
+ * instead wrote synthetic OK values into the stub's own result without calling
+ * anything, which could never pass the loader preflight: the preflight cross-checks
+ * the per-stage _result() globals, not the stub result, so levels 0 and 1 were
+ * structurally guaranteed to fail before the handoff was reached. The preflight and
+ * the handoff now read STAGE90_ENTRY_LADDER_LEVEL through the stub result and only
+ * require the stages this level actually runs.
+ *
+ *   0  BOOT_ARGS_ONLY      boot-args validation only
+ *   1  EARLY_PMAP          + early pmap/platform init
+ *   2  PE_INIT_PLATFORM    + PE_init_platform(FALSE,args)-shaped init
+ *   3  POST_PE_BOOTSTRAP   + post-PE bootstrap / timebase registration
+ *   4  FULL                + arm_vm_init live pmap and the high-VA windows (the
+ *                          only level that can reach the handoff jump)
+ */
+#define STAGE90_ENTRY_LADDER_BOOT_ARGS_ONLY    0u
+#define STAGE90_ENTRY_LADDER_EARLY_PMAP        1u
+#define STAGE90_ENTRY_LADDER_PE_INIT_PLATFORM  2u
+#define STAGE90_ENTRY_LADDER_POST_PE_BOOTSTRAP 3u
+#define STAGE90_ENTRY_LADDER_FULL              4u
+
+#if !defined(STAGE90_ENTRY_LADDER_LEVEL)
+#define STAGE90_ENTRY_LADDER_LEVEL STAGE90_ENTRY_LADDER_FULL
+#endif
+
+#if (STAGE90_ENTRY_LADDER_LEVEL < STAGE90_ENTRY_LADDER_BOOT_ARGS_ONLY) || \
+    (STAGE90_ENTRY_LADDER_LEVEL > STAGE90_ENTRY_LADDER_FULL)
+#error "STAGE90_ENTRY_LADDER_LEVEL must be between STAGE90_ENTRY_LADDER_BOOT_ARGS_ONLY and _FULL"
+#endif
+
+/* Skip the entry-stub ladder inside the loader preflight (host/shape testing only). */
+#if !defined(STAGE90_BYPASS_ENTRY_STUB)
+#define STAGE90_BYPASS_ENTRY_STUB 0u
+#endif
+
+/*
+ * A jump target is only acceptable if it points at real, executable Stage-owned
+ * code. The Mach-O fixture is inert by construction - its LC_UNIXTHREAD PC is its
+ * own header and its __TEXT payload is the ASCII string "ST90-TEXT-NOEXEC" - so
+ * jumping to it executes non-code and hangs the device with no output. That is
+ * what the first Stage90 handoff attempt did.
+ *
+ * The guard is a content check, not an address range: the Stage-owned high-VA
+ * alias and the fixture both live in the fixture's own VA window (the candidate
+ * L2 maps VA 0x80000000+N -> PA N, and the Stage-owned code sits below PA 1MB),
+ * so a range test cannot tell them apart. Instead the handoff refuses to jump if
+ * the first word at the target is the fixture's __TEXT marker, and separately
+ * refuses any target equal to the loader's reported fixture entry VA.
+ *
+ * Little-endian first word of the ASCII "ST90" that tools/mkmacho_fixture.py
+ * writes into __TEXT,__text.
+ */
+#define STAGE90_HANDOFF_GUARD_FIXTURE_TEXT_MAGIC 0x30395453u
 
 #define STAGE90_XNU_HANDOFF_FAIL_LOADER             0x00000001u
 #define STAGE90_XNU_HANDOFF_FAIL_INVALID_ENTRY      0x00000002u
@@ -3830,6 +3958,10 @@ struct stage90_xnu_handoff_result {
     uint32_t required_mask;
     uint32_t satisfied_mask;
     uint32_t failure_mask;
+
+    /* Build configuration this result came from */
+    uint32_t handoff_mode;          /* STAGE90_HANDOFF_MODE_* */
+    uint32_t entry_ladder_level;    /* STAGE90_ENTRY_LADDER_* the entry stub ran */
 
     /* Prerequisites */
     uint32_t loader_status;
@@ -3857,6 +3989,17 @@ struct stage90_xnu_handoff_result {
     uint32_t pc_sample_count;
     uint32_t pc_sample_last_pc;
     uint32_t watchdog_fired;
+
+    /*
+     * Identity-mapped preflight (STAGE90_HANDOFF_MODE_PREFLIGHT_WATCHDOG_ONLY).
+     * In that mode nothing is jumped to: the stage arms the same PC-sampling
+     * watchdog and spins in a bounded loop under the original known-good
+     * mapping, so a watchdog reboot proves the interrupt -> sample-dump ->
+     * platform_reboot()/PS_HOLD path on its own.
+     */
+    uint32_t preflight_watchdog_armed;
+    uint32_t preflight_loop_entered;
+    uint32_t preflight_loop_ticks;
 
     uint32_t checksum;
 };

@@ -30,10 +30,50 @@ static uint32_t stage90_entry_stub_checksum(const struct stage90_xnu_entry_stub_
     return checksum;
 }
 
+static const char stage90_entry_stub_enter_msg[] =
+    "stage90_arm_init_stub: entered Stage-owned _start/arm_init-shaped path\n";
+static const char stage90_entry_stub_return_msg[] =
+    "stage90_arm_init_stub: returning to stage loader\n";
+
+#if STAGE90_ENTRY_LADDER_LEVEL < STAGE90_ENTRY_LADDER_FULL
+/*
+ * Ladder bisect support: return from the entry stub after the last stage this
+ * build actually runs, reporting which level that was.
+ */
+static const char *const stage90_entry_stub_ladder_msg[] = {
+    "stage90_arm_init_stub: ladder 0 (boot_args only) - returning before the early pmap step\n",
+    "stage90_arm_init_stub: ladder 1 (early pmap) - returning before PE_init_platform\n",
+    "stage90_arm_init_stub: ladder 2 (PE_init_platform) - returning before the post-PE bootstrap\n",
+    "stage90_arm_init_stub: ladder 3 (post-PE bootstrap) - returning before the full pmap\n",
+};
+
+static uint32_t stage90_entry_stub_ladder_return(struct stage90_xnu_entry_stub_result *r,
+                                                 uint32_t ladder_level)
+{
+    const char *msg = stage90_entry_stub_ladder_msg[ladder_level];
+    uint32_t msg_len = 0u;
+
+    while (msg[msg_len] != '\0') {
+        msg_len++;
+    }
+
+    xnu_log_puts(msg);
+    r->output_lines += 1u;
+    r->output_bytes += msg_len;
+
+    xnu_log_puts(stage90_entry_stub_return_msg);
+    r->output_lines += 1u;
+    r->output_bytes += (uint32_t)(sizeof(stage90_entry_stub_return_msg) - 1u);
+
+    r->safety_boundary_preserved = 1u;
+    r->arm_init_status = STAGE90_STATUS_OK;
+
+    return STAGE90_STATUS_OK;
+}
+#endif
+
 uint32_t stage90_arm_init_stub(struct boot_args *args, struct stage90_xnu_entry_stub_result *result)
 {
-    static const char enter_msg[] = "stage90_arm_init_stub: entered Stage-owned _start/arm_init-shaped path\n";
-    static const char return_msg[] = "stage90_arm_init_stub: returning to stage loader\n";
     const struct stage90_xnu_early_pmap_platform_init_result *early;
     const struct stage90_xnu_pe_init_platform_false_result *pe;
     const struct stage90_xnu_arm_init_post_pe_bootstrap_result *post;
@@ -57,7 +97,7 @@ uint32_t stage90_arm_init_stub(struct boot_args *args, struct stage90_xnu_entry_
     uint32_t macho_loader_ok;
     uint32_t xnu_handoff_ok;
 
-    xnu_log_puts(enter_msg);
+    xnu_log_puts(stage90_entry_stub_enter_msg);
 
     if (!result) {
         return STAGE90_XNU_ENTRY_STUB_RETURN_BAD_ARG;
@@ -66,7 +106,7 @@ uint32_t stage90_arm_init_stub(struct boot_args *args, struct stage90_xnu_entry_
     result->arm_init_called = 1u;
     result->magic = STAGE90_XNU_ENTRY_STUB_MAGIC;
     result->output_lines += 1u;
-    result->output_bytes += (uint32_t)(sizeof(enter_msg) - 1u);
+    result->output_bytes += (uint32_t)(sizeof(stage90_entry_stub_enter_msg) - 1u);
 
     result->boot_args_ptr = (uint32_t)(uintptr_t)args;
     if (!args) {
@@ -98,6 +138,22 @@ uint32_t stage90_arm_init_stub(struct boot_args *args, struct stage90_xnu_entry_
         return STAGE90_STATUS_BASE;
     }
 
+    /*
+     * Genuine ladder. A level-N build calls the first N stages of the
+     * arm_init-shaped sequence and then returns; the stages above the level stay
+     * compiled in but unreachable, so every declaration below keeps a use.
+     *
+     * The earlier bisect wrote synthetic OK values straight into this result
+     * without calling anything, which could never reach the handoff: the loader
+     * preflight cross-checks the per-stage result globals, and those stayed
+     * zeroed, so levels 0 and 1 were structurally guaranteed to fail.
+     */
+    result->ladder_level = STAGE90_ENTRY_LADDER_LEVEL;
+
+#if STAGE90_ENTRY_LADDER_LEVEL < STAGE90_ENTRY_LADDER_EARLY_PMAP
+    return stage90_entry_stub_ladder_return(result, STAGE90_ENTRY_LADDER_LEVEL);
+#endif
+
     result->early_pmap_platform_init_called = 1u;
     early_ok = (uint32_t)stage90_xnu_early_pmap_platform_init_run(args, result);
     result->early_pmap_platform_init_returned = 1u;
@@ -110,6 +166,10 @@ uint32_t stage90_arm_init_stub(struct boot_args *args, struct stage90_xnu_entry_
         result->arm_init_status = STAGE90_STATUS_BASE;
         return STAGE90_STATUS_BASE;
     }
+
+#if STAGE90_ENTRY_LADDER_LEVEL < STAGE90_ENTRY_LADDER_PE_INIT_PLATFORM
+    return stage90_entry_stub_ladder_return(result, STAGE90_ENTRY_LADDER_LEVEL);
+#endif
 
     result->pe_init_platform_false_called = 1u;
     pe_ok = (uint32_t)stage90_xnu_pe_init_platform_false_run(args, result);
@@ -124,6 +184,10 @@ uint32_t stage90_arm_init_stub(struct boot_args *args, struct stage90_xnu_entry_
         return STAGE90_STATUS_BASE;
     }
 
+#if STAGE90_ENTRY_LADDER_LEVEL < STAGE90_ENTRY_LADDER_POST_PE_BOOTSTRAP
+    return stage90_entry_stub_ladder_return(result, STAGE90_ENTRY_LADDER_LEVEL);
+#endif
+
     result->arm_init_post_pe_bootstrap_called = 1u;
     post_ok = (uint32_t)stage90_xnu_arm_init_post_pe_bootstrap_run(args, result);
     result->arm_init_post_pe_bootstrap_returned = 1u;
@@ -136,6 +200,10 @@ uint32_t stage90_arm_init_stub(struct boot_args *args, struct stage90_xnu_entry_
         result->arm_init_status = STAGE90_STATUS_BASE;
         return STAGE90_STATUS_BASE;
     }
+
+#if STAGE90_ENTRY_LADDER_LEVEL < STAGE90_ENTRY_LADDER_FULL
+    return stage90_entry_stub_ladder_return(result, STAGE90_ENTRY_LADDER_LEVEL);
+#endif
 
     result->arm_vm_init_full_pmap_called = 1u;
     live_pmap_ok = (uint32_t)stage90_xnu_arm_vm_init_full_pmap_run(args, result);
@@ -219,9 +287,9 @@ uint32_t stage90_arm_init_stub(struct boot_args *args, struct stage90_xnu_entry_
     result->safety_boundary_preserved = 1u;
     result->arm_init_status = STAGE90_STATUS_OK;
 
-    xnu_log_puts(return_msg);
+    xnu_log_puts(stage90_entry_stub_return_msg);
     result->output_lines += 1u;
-    result->output_bytes += (uint32_t)(sizeof(return_msg) - 1u);
+    result->output_bytes += (uint32_t)(sizeof(stage90_entry_stub_return_msg) - 1u);
 
     return STAGE90_STATUS_OK;
 }

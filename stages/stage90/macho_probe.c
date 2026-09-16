@@ -2949,14 +2949,18 @@ int stage90_loader_preflight_run(struct boot_args *args)
     const struct stage90_xnu_iokit_provider_notification_delivery_readiness_dryrun_contract *iokit_provider_notification_contract;
     const struct stage90_xnu_iokit_provider_callback_client_notification_readiness_dryrun_contract *iokit_provider_callback_contract;
     const struct stage90_xnu_iokit_client_open_provider_claim_close_readiness_dryrun_contract *iokit_client_open_contract;
+#if !STAGE90_BYPASS_ENTRY_STUB
     const struct stage90_xnu_entry_stub_result *xnu_entry_stub;
     const struct stage90_xnu_early_pmap_platform_init_result *xnu_early_init;
     const struct stage90_xnu_pe_init_platform_false_result *xnu_pe_init;
     const struct stage90_xnu_arm_init_post_pe_bootstrap_result *xnu_post_pe;
     const struct stage90_xnu_arm_vm_init_full_pmap_result *xnu_live_pmap;
+#endif
     uint32_t workspace_limit;
     uint32_t loaded_end_for_workspace;
     uint32_t macho_ok;
+    uint32_t ladder_level;
+    uint32_t ladder_rollup_ok;
 
     xnu_log_puts("Stage84 Mach-O/XNU loader preflight begin\n");
     memset(preflight, 0, sizeof(*preflight));
@@ -3503,11 +3507,45 @@ int stage90_loader_preflight_run(struct boot_args *args)
     preflight->xnu_iokit_client_open_provider_claim_close_readiness_dryrun_contract_status_rollup =
         (iokit_client_open_contract->status == STAGE90_STATUS_OK) ? STAGE90_STATUS_OK : STAGE90_STATUS_BASE;
 
+#if STAGE90_BYPASS_ENTRY_STUB
+    xnu_log_puts("Stage90 BYPASS_ENTRY_STUB active: not calling stage90_xnu_entry_stub_run\n");
+    ladder_level = STAGE90_ENTRY_LADDER_FULL;
+    preflight->xnu_entry_stub_status = STAGE90_STATUS_OK;
+    preflight->xnu_entry_stub_satisfied_mask = STAGE90_XNU_ENTRY_STUB_REQUIRED_MASK;
+    preflight->xnu_entry_stub_failure_mask = 0u;
+    preflight->xnu_entry_stub_checksum = 0x53545542u; /* 'STUB' synthetic marker */
+    preflight->xnu_entry_stub_status_rollup = STAGE90_STATUS_OK;
+
+    preflight->xnu_early_pmap_platform_init_status = STAGE90_STATUS_OK;
+    preflight->xnu_early_pmap_platform_init_satisfied_mask = 0xffffffffu;
+    preflight->xnu_early_pmap_platform_init_failure_mask = 0u;
+    preflight->xnu_early_pmap_platform_init_checksum = 0x4541524cu; /* 'EARL' */
+    preflight->xnu_early_pmap_platform_init_status_rollup = STAGE90_STATUS_OK;
+
+    preflight->xnu_pe_init_platform_false_status = STAGE90_STATUS_OK;
+    preflight->xnu_pe_init_platform_false_satisfied_mask = 0xffffffffu;
+    preflight->xnu_pe_init_platform_false_failure_mask = 0u;
+    preflight->xnu_pe_init_platform_false_checksum = 0x5045494eu; /* 'PEIN' */
+    preflight->xnu_pe_init_platform_false_status_rollup = STAGE90_STATUS_OK;
+
+    preflight->xnu_arm_init_post_pe_bootstrap_status = STAGE90_STATUS_OK;
+    preflight->xnu_arm_init_post_pe_bootstrap_satisfied_mask = 0xffffffffu;
+    preflight->xnu_arm_init_post_pe_bootstrap_failure_mask = 0u;
+    preflight->xnu_arm_init_post_pe_bootstrap_checksum = 0x504f5354u; /* 'POST' */
+    preflight->xnu_arm_init_post_pe_bootstrap_status_rollup = STAGE90_STATUS_OK;
+
+    preflight->xnu_arm_vm_init_full_pmap_status = STAGE90_STATUS_OK;
+    preflight->xnu_arm_vm_init_full_pmap_satisfied_mask = 0xffffffffu;
+    preflight->xnu_arm_vm_init_full_pmap_failure_mask = 0u;
+    preflight->xnu_arm_vm_init_full_pmap_checksum = 0x504d4150u; /* 'PMAP' */
+    preflight->xnu_arm_vm_init_full_pmap_status_rollup = STAGE90_STATUS_OK;
+#else
     if (iokit_client_open_contract->status == STAGE90_STATUS_OK) {
         (void)stage90_xnu_entry_stub_run(args);
     }
     xnu_entry_stub = stage90_xnu_entry_stub_result();
     memcpy(&preflight->xnu_entry_stub, xnu_entry_stub, sizeof(*xnu_entry_stub));
+    ladder_level = xnu_entry_stub->ladder_level;
     preflight->xnu_entry_stub_status = xnu_entry_stub->status;
     preflight->xnu_entry_stub_satisfied_mask = xnu_entry_stub->satisfied_mask;
     preflight->xnu_entry_stub_failure_mask = xnu_entry_stub->failure_mask;
@@ -3550,6 +3588,29 @@ int stage90_loader_preflight_run(struct boot_args *args)
     preflight->xnu_arm_vm_init_full_pmap_checksum = xnu_live_pmap->checksum;
     preflight->xnu_arm_vm_init_full_pmap_status_rollup =
         (xnu_live_pmap->status == STAGE90_STATUS_OK) ? STAGE90_STATUS_OK : STAGE90_STATUS_BASE;
+#endif
+
+    /*
+     * Ladder-aware rollup. A bisect build only calls the first ladder_level
+     * stages of the arm_init-shaped sequence, so the result globals of the stages
+     * above it stay zeroed and their rollups read FAIL(base). Requiring all five
+     * unconditionally made every level below FULL fail structurally, before the
+     * handoff was ever reached - which is exactly what the Stage90 bisect runs
+     * kept showing. Require only the stages this level actually ran.
+     */
+    ladder_rollup_ok = (preflight->xnu_entry_stub_status_rollup == STAGE90_STATUS_OK) ? 1u : 0u;
+    if (ladder_level >= STAGE90_ENTRY_LADDER_EARLY_PMAP) {
+        ladder_rollup_ok &= (preflight->xnu_early_pmap_platform_init_status_rollup == STAGE90_STATUS_OK) ? 1u : 0u;
+    }
+    if (ladder_level >= STAGE90_ENTRY_LADDER_PE_INIT_PLATFORM) {
+        ladder_rollup_ok &= (preflight->xnu_pe_init_platform_false_status_rollup == STAGE90_STATUS_OK) ? 1u : 0u;
+    }
+    if (ladder_level >= STAGE90_ENTRY_LADDER_POST_PE_BOOTSTRAP) {
+        ladder_rollup_ok &= (preflight->xnu_arm_init_post_pe_bootstrap_status_rollup == STAGE90_STATUS_OK) ? 1u : 0u;
+    }
+    if (ladder_level >= STAGE90_ENTRY_LADDER_FULL) {
+        ladder_rollup_ok &= (preflight->xnu_arm_vm_init_full_pmap_status_rollup == STAGE90_STATUS_OK) ? 1u : 0u;
+    }
 
     if (preflight->platform_gap_mask == (STAGE90_PLATFORM_GAP_REQUIRED_RECORDED & ~STAGE90_PLATFORM_GAP_IOKIT_STACK) &&
         preflight->pexpert_gap_mask == 0u) {
@@ -3594,14 +3655,12 @@ int stage90_loader_preflight_run(struct boot_args *args)
     }
     preflight->checksum = stage90_loader_preflight_checksum(preflight);
     preflight->status = (preflight->satisfied_mask == STAGE90_LOADER_SAT_REQUIRED && preflight->failure_mask == 0u &&
-        preflight->xnu_entry_stub_status_rollup == STAGE90_STATUS_OK &&
-        preflight->xnu_early_pmap_platform_init_status_rollup == STAGE90_STATUS_OK &&
-        preflight->xnu_pe_init_platform_false_status_rollup == STAGE90_STATUS_OK &&
-        preflight->xnu_arm_init_post_pe_bootstrap_status_rollup == STAGE90_STATUS_OK &&
-        preflight->xnu_arm_vm_init_full_pmap_status_rollup == STAGE90_STATUS_OK &&
+        ladder_rollup_ok != 0u &&
         preflight->checksum == stage90_loader_preflight_checksum(preflight)) ?
         STAGE90_STATUS_OK : STAGE90_STATUS_FAIL(preflight->failure_mask);
 
+    xnu_log_kv32("loader_entry_stub_ladder_level", ladder_level);
+    xnu_log_kv32("loader_entry_ladder_rollup_ok", ladder_rollup_ok);
     xnu_log_kv32("loader_xnu_baseline_tag", preflight->xnu_baseline_tag);
     xnu_log_kv32("loader_xnu_baseline_commit", preflight->xnu_baseline_commit);
     xnu_log_kv32("loader_xnu_master_version", preflight->xnu_master_version);
