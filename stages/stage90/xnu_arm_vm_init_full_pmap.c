@@ -64,7 +64,8 @@
 /* L1 section descriptor (1MB, from Stage81/82) */
 #define L1_SECTION_SIZE       0x00100000u
 #define L1_SECTION_MASK       0xfff00000u
-#define L1_DESC_SECTION_SO    0x00010c02u  /* Strongly-Ordered, AP=11, section type */
+#define L1_DESC_SECTION_SO     STAGE90_PMAP_DESC_SECTION_SO
+#define L1_DESC_SECTION_DRAM   STAGE90_PMAP_DESC_SECTION_DRAM
 
 /* L1 page table pointer (points to L2 table, 1KB aligned) */
 #define L1_TABLE_MASK         0xfffffc00u  /* L2 table base address mask */
@@ -76,7 +77,8 @@
 /* L2 small page descriptor (4KB) */
 #define L2_PAGE_SIZE          0x00001000u
 #define L2_PAGE_MASK          0xfffff000u
-#define L2_DESC_PAGE_SO       0x00000012u  /* Strongly-Ordered, AP=11, XN=0, small page type */
+#define L2_DESC_PAGE_SO        STAGE90_PMAP_DESC_PAGE_SO     /* Strongly-Ordered, AP=11, XN=0, small page type */
+#define L2_DESC_PAGE_DRAM      STAGE90_PMAP_DESC_PAGE_DRAM   /* memory type per STAGE90_PMAP_ATTR_MODE */
 
 /* Index extraction macros */
 #define L1_INDEX(va)          (((va) >> 20) & 0xfffu)    /* bits [31:20] */
@@ -211,10 +213,23 @@ static uint32_t candidate_l1_checksum(const uint32_t *l1, uint32_t count)
 }
 
 /* L1 section mapping helper (1MB granularity, from Stage81/82) */
-static void map_l1_section(uint32_t *l1, uint32_t va, uint32_t pa)
+static void map_l1_section_desc(uint32_t *l1, uint32_t va, uint32_t pa, uint32_t desc)
 {
     uint32_t l1_index = L1_INDEX(va);
-    l1[l1_index] = (pa & L1_SECTION_MASK) | L1_DESC_SECTION_SO;
+    l1[l1_index] = (pa & L1_SECTION_MASK) | desc;
+}
+
+/* DRAM: the image, its high aliases, the RAM direct map, the RAM console window,
+ * and the page tables themselves (they live in .bss). */
+static void map_l1_section_dram(uint32_t *l1, uint32_t va, uint32_t pa)
+{
+    map_l1_section_desc(l1, va, pa, L1_DESC_SECTION_DRAM);
+}
+
+/* MMIO: GIC/timer, IMEM, PS_HOLD - Strongly-ordered in every mode. */
+static void map_l1_section_mmio(uint32_t *l1, uint32_t va, uint32_t pa)
+{
+    map_l1_section_desc(l1, va, pa, L1_DESC_SECTION_SO);
 }
 
 /* L2 table allocation helper */
@@ -241,11 +256,12 @@ static void map_l1_page_table(uint32_t *l1, uint32_t va, uint32_t *l2_pa)
     l1[l1_index] = (l2_base & L1_TABLE_MASK) | L1_DESC_PAGE_TABLE;
 }
 
-/* L2 small page mapping helper (4KB granularity) */
+/* L2 small page mapping helper (4KB granularity).
+ * Only used for the high-VA kernel image window, which is DRAM. */
 static void map_l2_page(uint32_t *l2, uint32_t va, uint32_t pa)
 {
     uint32_t l2_index = L2_INDEX(va);
-    l2[l2_index] = (pa & L2_PAGE_MASK) | L2_DESC_PAGE_SO;
+    l2[l2_index] = (pa & L2_PAGE_MASK) | L2_DESC_PAGE_DRAM;
 }
 
 int stage90_xnu_arm_vm_init_full_pmap_run(
@@ -308,8 +324,8 @@ int stage90_xnu_arm_vm_init_full_pmap_run(
     stage90_l2_table_allocated_count = 0;
 
     /* Phase 1: Low identity mappings (1MB sections, for current PC safety) */
-    map_l1_section(stage90_candidate_l1, 0x00000000u, 0x00000000u);  /* Stage84 image */
-    map_l1_section(stage90_candidate_l1, 0x00100000u, 0x00100000u);  /* Extra safety */
+    map_l1_section_dram(stage90_candidate_l1, 0x00000000u, 0x00000000u);  /* Stage84 image */
+    map_l1_section_dram(stage90_candidate_l1, 0x00100000u, 0x00100000u);  /* Extra safety */
 
     /* Phase 2: High kernel image mapping via L2 pages (4KB granularity) */
     /* VA 0x80000000 - 0x800fffff maps to PA 0x00000000 - 0x000fffff */
@@ -331,29 +347,29 @@ int stage90_xnu_arm_vm_init_full_pmap_run(
     for (uint32_t offset = 0; offset < (256 * 1024 * 1024); offset += L1_SECTION_SIZE) {
         uint32_t va = 0x80200000u + offset;
         uint32_t pa = 0x80200000u + offset;
-        map_l1_section(stage90_candidate_l1, va, pa);
+        map_l1_section_dram(stage90_candidate_l1, va, pa);
     }
 
     /* Phase 4: Device MMIO (1MB sections) */
-    map_l1_section(stage90_candidate_l1, 0xde500000u, RAM_CONSOLE_BASE);    /* RAM console */
-    map_l1_section(stage90_candidate_l1, 0xde600000u, RAM_CONSOLE_BASE + L1_SECTION_SIZE);  /* +1MB */
-    map_l1_section(stage90_candidate_l1, 0xf9000000u, 0xf9000000u);         /* GIC */
-    map_l1_section(stage90_candidate_l1, 0xfa000000u, 0xfa000000u);         /* MSM IMEM */
-    map_l1_section(stage90_candidate_l1, 0xfc400000u, 0xfc400000u);         /* PS_HOLD */
+    map_l1_section_dram(stage90_candidate_l1, 0xde500000u, RAM_CONSOLE_BASE);    /* RAM console */
+    map_l1_section_dram(stage90_candidate_l1, 0xde600000u, RAM_CONSOLE_BASE + L1_SECTION_SIZE);  /* +1MB */
+    map_l1_section_mmio(stage90_candidate_l1, 0xf9000000u, 0xf9000000u);         /* GIC */
+    map_l1_section_mmio(stage90_candidate_l1, 0xfa000000u, 0xfa000000u);         /* MSM IMEM */
+    map_l1_section_mmio(stage90_candidate_l1, 0xfc400000u, 0xfc400000u);         /* PS_HOLD */
 
     /* Phase 5: Legacy high-alias mappings from Stage81/82 (extend to cover full image) */
     /* Stage84 image ends at ~0x111000, need at least 2MB alias (0xc0000000-0xc01fffff) */
-    map_l1_section(stage90_candidate_l1, STAGE90_HIGH_ALIAS_BASE, 0x00000000u);
-    map_l1_section(stage90_candidate_l1, STAGE90_HIGH_ALIAS_BASE + L1_SECTION_SIZE, 0x00100000u);
+    map_l1_section_dram(stage90_candidate_l1, STAGE90_HIGH_ALIAS_BASE, 0x00000000u);
+    map_l1_section_dram(stage90_candidate_l1, STAGE90_HIGH_ALIAS_BASE + L1_SECTION_SIZE, 0x00100000u);
     /* RAM-console alias at its own VA, so it cannot shadow the image alias above. */
-    map_l1_section(stage90_candidate_l1, STAGE90_RAM_CONSOLE_ALIAS_BASE, RAM_CONSOLE_BASE);
-    map_l1_section(stage90_candidate_l1, STAGE90_GIC_ALIAS_BASE, 0xf9000000u);
-    map_l1_section(stage90_candidate_l1, 0x0fa00000u, 0x0fa00000u);
+    map_l1_section_dram(stage90_candidate_l1, STAGE90_RAM_CONSOLE_ALIAS_BASE, RAM_CONSOLE_BASE);
+    map_l1_section_mmio(stage90_candidate_l1, STAGE90_GIC_ALIAS_BASE, 0xf9000000u);
+    map_l1_section_mmio(stage90_candidate_l1, 0x0fa00000u, 0x0fa00000u);
 
     /* Phase 6: Self-mapping (L1 and L2 pool) */
     uint32_t l2_pool_base = (uint32_t)(uintptr_t)stage90_candidate_l2_pool;
-    map_l1_section(stage90_candidate_l1, candidate_l1_base, candidate_l1_base);
-    map_l1_section(stage90_candidate_l1, l2_pool_base, l2_pool_base);
+    map_l1_section_dram(stage90_candidate_l1, candidate_l1_base, candidate_l1_base);
+    map_l1_section_dram(stage90_candidate_l1, l2_pool_base, l2_pool_base);
 
     r->candidate_l1_checksum = candidate_l1_checksum(stage90_candidate_l1, STAGE90_XNU_TTE_L1_ENTRY_COUNT);
     r->satisfied_mask |= STAGE90_XNU_ARM_VM_INIT_FULL_PMAP_SAT_CANDIDATE_L1_POPULATED;

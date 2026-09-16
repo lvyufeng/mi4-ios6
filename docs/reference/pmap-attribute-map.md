@@ -20,7 +20,8 @@ Two constants, both Strongly-Ordered, used for **every** mapping the project cre
 
 ### `L1_DESC_SECTION_SO = 0x00010c02` — 1 MB section
 
-Defined in `stages/stage90/mmu.c:8` and copied in `stages/stage90/xnu_arm_vm_init_full_pmap.c:47`.
+Defined in `stages/stage90/stage90.h` (`STAGE90_PMAP_DESC_SECTION_SO`) and aliased as
+`L1_DESC_SECTION_SO` in `stages/stage90/mmu.c` and `stages/stage90/xnu_arm_vm_init_full_pmap.c`.
 
 | Field | Value | Meaning |
 | --- | --- | --- |
@@ -36,7 +37,8 @@ Defined in `stages/stage90/mmu.c:8` and copied in `stages/stage90/xnu_arm_vm_ini
 
 ### `L2_DESC_PAGE_SO = 0x00000012` — 4 KB small page
 
-Defined in `stages/stage90/xnu_arm_vm_init_full_pmap.c:59`.
+Defined in `stages/stage90/stage90.h` (`STAGE90_PMAP_DESC_PAGE_SO`), aliased in
+`stages/stage90/xnu_arm_vm_init_full_pmap.c`.
 
 | Field | Value | Meaning |
 | --- | --- | --- |
@@ -59,6 +61,11 @@ All of these are built by `stage90_xnu_arm_vm_init_full_pmap_run()` into
 `stage90_candidate_l1` / `stage90_candidate_l2_pool`, or by `mmu.c`'s `build_identity_table()`
 into `stage90_l1_table`. `virt_base` is `0x80000000` (`STAGE90_VIRT_BASE`). The two tables
 are not identical — see F-AM1 for the one place they disagree, which matters.
+
+The descriptor column describes the **default** `SO_ONLY` mode. Under
+`STAGE90_PMAP_ATTR_MODE_NORMAL_NC` every "DRAM" row uses the Normal/Non-cacheable descriptor
+instead, and the MMIO rows do not change — see *Consistency per physical address* below for
+which is which.
 
 | Purpose | VA | PA | Granularity | Descriptor |
 | --- | --- | --- | --- | --- |
@@ -140,39 +147,109 @@ TEX[2:0] / C / B select the memory type:
 S (section bit 16 / small-page bit 10) selects shareability for Normal memory; it is ignored
 for Strongly-ordered and Device.
 
-## Phase 1 target attributes
+## Consistency per physical address
 
-RAM, kernel text/data and the payload's own image become **Normal, Write-back
-write-allocate, shareable**; every MMIO region stays **Strongly-ordered**. MMIO must not
-become Normal — it has no cache to be coherent with, and Normal device access is not
-guaranteed to be ordered with respect to the GIC, timer or PS_HOLD.
+The constraint on any attribute change is not "keep everything Strongly-ordered" — it is that
+**every virtual mapping of a given physical address must use the same memory type.** The
+ARMv7 cache is physically indexed, so two VAs mapping one PA with different cacheability is
+UNPREDICTABLE. Granularity may differ (a 1 MB section and a 4 KB page may both map the same
+PA) as long as the attributes agree.
 
-Proposed constants, decoded with the same tool:
+Listing every mapping by its PA, not its VA, is therefore what decides whether a change is
+safe. The two tables are not identical — the identity table is missing the RAM direct map,
+the RAM-console alias and the self-maps — but for the PAs they share they agree:
+
+| PA region | What it is | VAs that map it | Classification |
+| --- | --- | --- | --- |
+| `0x00000000`–`0x001fffff` | payload image: code, `.data`, `.bss`, **and both page tables** | `0x00000000`, `0x80000000`–`0x800fffff` (L2, first MB only), `0xc0000000`, `0xc0100000`, plus each table's self-map | DRAM |
+| `0x00200000`–`0x801fffff` | not mapped | — | — |
+| `0x80200000`–`0x901fffff` | DRAM direct map (candidate table only) | `0x80200000`+ (VA = PA) | DRAM |
+| `0xde500000`–`0xde6fffff` | Android ram_console window (ramoops) | `0xde500000`, `0xde600000`, `0xc0300000` | DRAM |
+| `0x0fa00000` | MSM IMEM (restart reason) | `0x0fa00000`, `0x0fa00000` | **MMIO** |
+| `0xf9000000` | GIC distributor + CPU interface + ARM timer | `0xf9000000`, `0xc0200000` | **MMIO** |
+| `0xfc400000` | MSM8974 PS_HOLD | `0xfc400000` | **MMIO** |
+
+DRAM and MMIO are disjoint PA sets, so the split is clean: no PA is wanted as both. That is
+the whole reason a single switch can move DRAM to Normal without touching a single MMIO
+mapping.
+
+Three consequences that look like mistakes and are not:
+
+1. **The page tables become Normal**, because they live in `.bss` inside PA 0–2 MB and must
+   not disagree with the image mappings of that region. The requirement that matters is that
+   they be *non-cacheable*, and Normal-Non-cacheable satisfies it — Strongly-ordered was
+   never the point. (Caching them would be a separate question: with the D-cache on, table
+   walks and table writes would need real cache maintenance. Not attempted here.)
+2. **The payload's own code, data and stack also change memory type**, for the same reason.
+   With caches off this is a weaker *ordering* model, not a caching one, and every shared
+   access in the payload already sits behind a `dsb`.
+3. **Device registers are classified by physical address, not by whoever is mapping them.**
+   The TTBR0 roundtrip selftest builds a recovery table containing both DRAM and MMIO and
+   installs it briefly; a GIC register mapped Normal in that window — with a timer interrupt
+   able to arrive during it — is exactly the kind of thing that would be blamed on something
+   else. `mmu.c`'s `ttbr_section_desc_for_pa()` therefore classifies IMEM, the GIC block and
+   PS_HOLD explicitly.
+
+## Phase 1a as implemented
+
+`STAGE90_PMAP_ATTR_MODE` (`stages/stage90/stage90.h`):
+
+| Mode | DRAM descriptors | Effect |
+| --- | --- | --- |
+| `SO_ONLY` (0) — **default** | `0x00010c02` / `0x00000012` | Byte-for-byte the behaviour of every stage so far. Verified: the SO_ONLY build emits **zero** Normal descriptors. |
+| `NORMAL_NC` (1) | `0x00011c02` / `0x00000452` | DRAM becomes Normal, Non-cacheable, shareable. MMIO is unchanged. |
+
+This is the smallest change that makes `LDREX`/`STREX` architecturally defined, and it is
+deliberately *non-cacheable*: with no cache enabled it needs no cache maintenance anywhere,
+no `ram_console` flush, and no change to how page-table writes become visible. Enabling the
+I-cache and D-cache is a separate, later step, and it is the one that needs the
+clean/invalidate discipline.
+
+MMIO stays Strongly-ordered in both modes — GIC, timer, IMEM and PS_HOLD. Normal device
+access is not guaranteed to be ordered with respect to anything, and the timer interrupt that
+drives the dead-man runs through exactly those registers.
+
+Build and gate it as its own run:
+
+```bash
+STAGE90_EXTRA_CFLAGS='-DSTAGE90_PMAP_ATTR_MODE=1' ./build.sh
+./preflight_boot_check.sh --allow-attr-normal-nc
+
+# and with the probe, to get the comparison that matters:
+STAGE90_EXTRA_CFLAGS='-DSTAGE90_PMAP_ATTR_MODE=1 -DSTAGE90_EXCLUSIVE_PROBE=1' ./build.sh
+```
+
+The comparison to make is `stage90_exclusive_probe_result` between the two modes:
+`monitor_tracks` (T2 succeeds *and* T3 fails) and `exclusives_usable` must go from the
+Strongly-ordered baseline to 1. If they do not, the attribute change is not doing what it was
+supposed to and nothing built on atomics can be trusted yet.
+
+### Rules the change must still obey
+
+1. **Page tables stay non-cacheable** — satisfied by NORMAL_NC, and the reason caches are a
+   separate step.
+2. **`ram_console` must be cleaned before any reboot** once the D-cache is on. `log_puts()`
+   writes to `RAM_CONSOLE_BASE` and issues `dsb sy; isb`; with caches off that is a complete
+   guarantee and with the D-cache on it is not. The log would sit dirty across
+   `platform_reboot()` and `/proc/last_kmsg` — the dead-man dump and every diagnostic in
+   Phases 2–4 — would silently return stale or garbage text.
+3. **Enable the I-cache before the D-cache,** with explicit clean/invalidate around the TTBR
+   switch and after any code or segment copy.
+4. **Compare against `exclusive_probe`,** as above.
+5. **F-AM1 is fixed,** so the candidate table can become the handoff table as far as the image
+   alias and the device-tree alias are concerned.
+
+### The later step: caches on
+
+Phase 1a is deliberately non-cacheable. The step after it turns the I-cache on and then the
+D-cache, which is what makes the WBWA descriptors below meaningful — and it is the step that
+introduces the cache-maintenance obligations. Those descriptors are recorded here because
+they are the target, decoded with the same tool, not because 1a uses them:
 
 | Descriptor | Value | Decoded |
 | --- | --- | --- |
-| Section, Normal WBWA, shareable, PL1-only | `0x0001140e` | section, executable, AP `0b01`, TEX=`001`, C=1, B=1, S=1 |
-| Small page, Normal WBWA, shareable, PL1-only | `0x0000045e` | small page, executable, AF=1, AP `0b00`, TEX=`001`, C=1, B=1, S=1 |
+| Section, Normal WBWA, shareable | `0x0001140e` | section, executable, AP `0b01` (PL1-only), TEX=`001`, C=1, B=1, S=1 |
+| Small page, Normal WBWA, shareable | `0x0000045e` | small page, executable, AF=1, AP `0b00`, TEX=`001`, C=1, B=1, S=1 |
 
-### Rules the change must obey
-
-1. **The page tables themselves must stay non-cacheable, or every table write must be
-   cleaned.** The candidate L1 and L2 pool are self-mapped (last two rows of the table
-   above). If that self-map becomes Normal-cacheable while the MMU walks it, a written entry
-   can sit dirty in the D-cache and the MMU will read the stale value from memory. Keeping
-   the tables Strongly-ordered is the simple, safe answer, and the tables are small.
-2. **`ram_console` must be cleaned before any reboot.** `log_puts()` writes to
-   `RAM_CONSOLE_BASE` and issues `dsb sy; isb`. That is a complete guarantee with caches off
-   and is *not* one with the D-cache on: the log would sit dirty across
-   `platform_reboot()` and `/proc/last_kmsg` — the dead-man dump and every diagnostic in
-   Phases 2–4 — would silently return stale or garbage text. Fix the write path, and
-   clean-and-invalidate the log region in the dead-man dump.
-3. **Enable the I-cache before the D-cache,** and add explicit clean/invalidate around the
-   TTBR switch and after any code or segment copy.
-4. **Compare against `exclusive_probe`.** The Phase 1 `LDREX`/`STREX` result must beat the
-   Strongly-ordered baseline recorded by `stage90_exclusive_probe_run()`. If
-   `monitor_tracks` is still 0 afterwards, the attribute change is not doing what it was
-   supposed to and nothing built on atomics can be trusted yet.
-5. **F-AM1 is fixed, so the candidate table can become the handoff table** as far as the
-   image alias and the device-tree alias are concerned. It still needs a hardware run to
-   confirm (see F-AM1).
+Note AP: `0b01` on the section is PL1-only, fixing F-AM2 while the attribute change is being
+made anyway.

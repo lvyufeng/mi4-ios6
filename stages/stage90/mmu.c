@@ -4,8 +4,14 @@
 #define L1_SECTION_SIZE        0x00100000u
 #define L1_SECTION_MASK        0xfff00000u
 
-/* ARMv7 short-descriptor section: domain 0, AP full access, strongly ordered/shareable, executable. */
-#define L1_DESC_SECTION_SO     0x00010c02u
+/*
+ * ARMv7 short-descriptor section, domain 0, AP full access, shareable, executable.
+ * The memory type comes from STAGE90_PMAP_ATTR_MODE: STAGE90_PMAP_DESC_SECTION_DRAM
+ * for DRAM (the identity image mapping, its high aliases, RAM console), and
+ * STAGE90_PMAP_DESC_SECTION_SO for MMIO (GIC, IMEM, PS_HOLD).
+ */
+#define L1_DESC_SECTION_SO     STAGE90_PMAP_DESC_SECTION_SO
+#define L1_DESC_SECTION_DRAM   STAGE90_PMAP_DESC_SECTION_DRAM
 
 #define SECTION_INDEX(addr)    (((uint32_t)(addr)) >> 20)
 #define STAGE90_HIGH_ALIAS_BASE        0xc0000000u
@@ -1311,7 +1317,7 @@ static void stage90_pmap_bootstrap_snapshot_build(void)
         snapshot->bootstrap_alloc_size == STAGE90_BOOTSTRAP_ALLOC_SIZE &&
         snapshot->bootstrap_alloc_end == (RAM_PHYS_BASE + STAGE90_BOOTSTRAP_ALLOC_SIZE) &&
         snapshot->pmap_section_size == L1_SECTION_SIZE &&
-        snapshot->pmap_section_descriptor == L1_DESC_SECTION_SO &&
+        snapshot->pmap_section_descriptor == L1_DESC_SECTION_DRAM &&
         snapshot->pmap_l1_table_phys == (uint32_t)(uintptr_t)stage90_l1_table &&
         snapshot->pmap_l1_table_virt == (STAGE90_HIGH_ALIAS_BASE + (uint32_t)(uintptr_t)stage90_l1_table) &&
         snapshot->mmu_enabled == STAGE90_VM_PLAN_MMU_ENABLED &&
@@ -1328,7 +1334,7 @@ static void stage90_pmap_bootstrap_snapshot_build(void)
         snapshot->workspace_size == STAGE90_BOOTSTRAP_ALLOC_SIZE &&
         snapshot->workspace_l1_table_phys == (uint32_t)(uintptr_t)stage90_l1_table &&
         snapshot->workspace_l1_table_virt == (STAGE90_HIGH_ALIAS_BASE + (uint32_t)(uintptr_t)stage90_l1_table) &&
-        snapshot->workspace_l1_section_descriptor == L1_DESC_SECTION_SO &&
+        snapshot->workspace_l1_section_descriptor == L1_DESC_SECTION_DRAM &&
         snapshot->workspace_l1_section_size == L1_SECTION_SIZE &&
         snapshot->workspace_allocation_tag == STAGE90_PMAP_WORKSPACE_TAG &&
         snapshot->workspace_mmu_enabled == STAGE90_VM_PLAN_MMU_ENABLED &&
@@ -3171,7 +3177,7 @@ static uint32_t stage90_kernel_root(struct boot_args *args,
     vm_plan->memory_base = state->platform_memory_base;
     vm_plan->memory_size = state->platform_memory_size;
     vm_plan->section_size = L1_SECTION_SIZE;
-    vm_plan->section_descriptor = L1_DESC_SECTION_SO;
+    vm_plan->section_descriptor = L1_DESC_SECTION_DRAM;
     vm_plan->mmu_enabled = ((read_sctlr() & 1u) != 0u) ? STAGE90_VM_PLAN_MMU_ENABLED : 0u;
     vm_plan->cache_policy = ((read_sctlr() & ((1u << 2) | (1u << 12))) == 0u) ?
         STAGE90_VM_PLAN_CACHES_DISABLED : 1u;
@@ -3201,7 +3207,7 @@ static uint32_t stage90_kernel_root(struct boot_args *args,
         vm_plan->satisfied_mask |= STAGE90_VM_PLAN_SAT_CACHES;
     }
     if (vm_plan->section_size == L1_SECTION_SIZE &&
-        vm_plan->section_descriptor == L1_DESC_SECTION_SO) {
+        vm_plan->section_descriptor == L1_DESC_SECTION_DRAM) {
         vm_plan->satisfied_mask |= STAGE90_VM_PLAN_SAT_SECTION_POLICY;
     }
 
@@ -3268,7 +3274,7 @@ static uint32_t stage90_kernel_root(struct boot_args *args,
         vm_state->satisfied_mask |= STAGE90_VM_STATE_SAT_BOOT_ALLOC;
     }
     if (vm_state->pmap_section_size == L1_SECTION_SIZE &&
-        vm_state->pmap_section_descriptor == L1_DESC_SECTION_SO &&
+        vm_state->pmap_section_descriptor == L1_DESC_SECTION_DRAM &&
         vm_state->pmap_l1_table_phys == (uint32_t)(uintptr_t)stage90_l1_table &&
         vm_state->pmap_l1_table_virt == (STAGE90_HIGH_ALIAS_BASE + (uint32_t)(uintptr_t)stage90_l1_table)) {
         vm_state->satisfied_mask |= STAGE90_VM_STATE_SAT_PMAP_POLICY;
@@ -3410,7 +3416,7 @@ static uint32_t stage90_kernel_root(struct boot_args *args,
     }
     if (pmap_workspace->section_count == ((RAM_CONSOLE_BASE - RAM_PHYS_BASE) / L1_SECTION_SIZE) &&
         pmap_workspace->l1_section_size == L1_SECTION_SIZE &&
-        pmap_workspace->l1_section_descriptor == L1_DESC_SECTION_SO) {
+        pmap_workspace->l1_section_descriptor == L1_DESC_SECTION_DRAM) {
         pmap_workspace->satisfied_mask |= STAGE90_PMAP_WORKSPACE_SAT_SECTIONS;
     }
     if (pmap_workspace->allocation_tag == STAGE90_PMAP_WORKSPACE_TAG &&
@@ -4900,9 +4906,37 @@ static inline void dsb_isb(void)
 
 #define STAGE90_TTBR0_BASE_MASK 0xffffc000u
 
+/*
+ * Memory type is a property of the *physical* address, so it is classified here
+ * rather than inherited from whatever the caller happens to be doing. Device MMIO
+ * - MSM IMEM, the GIC/timer block and PS_HOLD - must never be mapped Normal, so it
+ * is named explicitly; everything else this file maps is DRAM.
+ *
+ * This matters because the TTBR0 roundtrip selftest builds a recovery table that
+ * contains both, and installs it briefly. A GIC register mapped Normal at that
+ * moment would be read through a weaker ordering model than the driver expects,
+ * and a timer interrupt arriving in that window would touch it.
+ */
+static uint32_t ttbr_section_desc_for_pa(uint32_t pa)
+{
+    const uint32_t section = pa & L1_SECTION_MASK;
+
+    if (section == (MSM_IMEM_BASE_PHYS & L1_SECTION_MASK)) {
+        return L1_DESC_SECTION_SO;
+    }
+    if (PE_state_stage90.gicDistributorBase != 0u &&
+        section == (PE_state_stage90.gicDistributorBase & L1_SECTION_MASK)) {
+        return L1_DESC_SECTION_SO;
+    }
+    if (section == (MSM8974_PSHOLD & L1_SECTION_MASK)) {
+        return L1_DESC_SECTION_SO;
+    }
+    return L1_DESC_SECTION_DRAM;
+}
+
 static uint32_t ttbr_section_word_pa(uint32_t pa)
 {
-    return (pa & L1_SECTION_MASK) | L1_DESC_SECTION_SO;
+    return (pa & L1_SECTION_MASK) | ttbr_section_desc_for_pa(pa);
 }
 
 static void ttbr_map_section_pa(uint32_t *l1, uint32_t va, uint32_t pa)
@@ -4959,7 +4993,7 @@ static uint32_t ttbr_verify_section_pa(const uint32_t *l1, uint32_t va, uint32_t
     if ((observed & STAGE90_XNU_TTE_DESC_TYPE_MASK) != STAGE90_XNU_TTE_DESC_TYPE_SECTION) {
         return 0u;
     }
-    if ((observed & STAGE90_XNU_TTE_DESC_ATTR_MASK) != (L1_DESC_SECTION_SO & STAGE90_XNU_TTE_DESC_ATTR_MASK)) {
+    if ((observed & STAGE90_XNU_TTE_DESC_ATTR_MASK) != (ttbr_section_desc_for_pa(pa) & STAGE90_XNU_TTE_DESC_ATTR_MASK)) {
         return 0u;
     }
     return ((observed & STAGE90_XNU_TTE_DESC_BASE_MASK) == (pa & STAGE90_XNU_TTE_DESC_BASE_MASK)) ? 1u : 0u;
@@ -5311,9 +5345,21 @@ finish:
     return 0;
 }
 
-static void map_section(uint32_t va, uint32_t pa)
+static void map_section_desc(uint32_t va, uint32_t pa, uint32_t desc)
 {
-    stage90_l1_table[SECTION_INDEX(va)] = (pa & L1_SECTION_MASK) | L1_DESC_SECTION_SO;
+    stage90_l1_table[SECTION_INDEX(va)] = (pa & L1_SECTION_MASK) | desc;
+}
+
+/* DRAM: image, its high aliases, the RAM console window. */
+static void map_section_dram(uint32_t va, uint32_t pa)
+{
+    map_section_desc(va, pa, L1_DESC_SECTION_DRAM);
+}
+
+/* MMIO: GIC/timer, IMEM, PS_HOLD - Strongly-ordered in every mode. */
+static void map_section_mmio(uint32_t va, uint32_t pa)
+{
+    map_section_desc(va, pa, L1_DESC_SECTION_SO);
 }
 
 static uint32_t table_entry_for(uint32_t va)
@@ -5326,7 +5372,7 @@ static void build_identity_table(void)
     memset(stage90_l1_table, 0, sizeof(stage90_l1_table));
 
     /* Low payload/code/data/BSS/stack/VBAR page-table area. */
-    map_section(0x00000000u, 0x00000000u);
+    map_section_dram(0x00000000u, 0x00000000u);
 
     /*
      * Stage86: BSS (g_boot_args, g_apple_dt, stage90_candidate_l1) and the device
@@ -5335,27 +5381,27 @@ static void build_identity_table(void)
      * loader preflight to dereference args/boot_args (e.g. 0x0010c04c) after the
      * identity MMU is installed. Without it, the first args->Version read data-aborts.
      */
-    map_section(0x00100000u, 0x00100000u);
+    map_section_dram(0x00100000u, 0x00100000u);
 
     /* First controlled XNU-like high aliases for selected low code/data and debug/MMIO windows. */
-    map_section(STAGE90_HIGH_ALIAS_BASE, 0x00000000u);
-    map_section(STAGE90_HIGH_ALIAS_BASE + L1_SECTION_SIZE, 0x00100000u);
+    map_section_dram(STAGE90_HIGH_ALIAS_BASE, 0x00000000u);
+    map_section_dram(STAGE90_HIGH_ALIAS_BASE + L1_SECTION_SIZE, 0x00100000u);
     /* Stage86: Comment out RAM_CONSOLE_ALIAS to avoid conflict with deviceTreeP high-alias at 0xc010c18c */
-    /* map_section(STAGE90_RAM_CONSOLE_ALIAS_BASE, RAM_CONSOLE_BASE); */
-    map_section(STAGE90_GIC_ALIAS_BASE, 0xf9000000u);
+    /* map_section_dram(STAGE90_RAM_CONSOLE_ALIAS_BASE, RAM_CONSOLE_BASE); */
+    map_section_mmio(STAGE90_GIC_ALIAS_BASE, 0xf9000000u);
 
     /* IMEM restart reason. */
-    map_section(0x0fa00000u, 0x0fa00000u);
+    map_section_mmio(0x0fa00000u, 0x0fa00000u);
 
     /* Android ram_console persistent RAM window. */
-    map_section(RAM_CONSOLE_BASE, RAM_CONSOLE_BASE);
-    map_section(RAM_CONSOLE_BASE + L1_SECTION_SIZE, RAM_CONSOLE_BASE + L1_SECTION_SIZE);
+    map_section_dram(RAM_CONSOLE_BASE, RAM_CONSOLE_BASE);
+    map_section_dram(RAM_CONSOLE_BASE + L1_SECTION_SIZE, RAM_CONSOLE_BASE + L1_SECTION_SIZE);
 
     /* MSM8974 GIC + ARM timer MMIO share the 0xf9000000 section in this stage. */
-    map_section(0xf9000000u, 0xf9000000u);
+    map_section_mmio(0xf9000000u, 0xf9000000u);
 
     /* MSM8974 PS_HOLD reset register lives in the 0xfc400000 section. */
-    map_section(0xfc400000u, 0xfc400000u);
+    map_section_mmio(0xfc400000u, 0xfc400000u);
 }
 
 static void enable_identity_mmu(void)
@@ -6665,7 +6711,7 @@ int mmu_high_bootstrap_selftest(void)
         stage90_vm_plan_block.memory_base != RAM_PHYS_BASE ||
         stage90_vm_plan_block.memory_size != (RAM_CONSOLE_BASE - RAM_PHYS_BASE) ||
         stage90_vm_plan_block.section_size != L1_SECTION_SIZE ||
-        stage90_vm_plan_block.section_descriptor != L1_DESC_SECTION_SO ||
+        stage90_vm_plan_block.section_descriptor != L1_DESC_SECTION_DRAM ||
         stage90_vm_plan_block.mmu_enabled != STAGE90_VM_PLAN_MMU_ENABLED ||
         stage90_vm_plan_block.cache_policy != STAGE90_VM_PLAN_CACHES_DISABLED ||
         stage90_vm_plan_block.satisfied_mask != STAGE90_VM_PLAN_SAT_REQUIRED ||
@@ -6695,7 +6741,7 @@ int mmu_high_bootstrap_selftest(void)
         stage90_vm_state_block.bootstrap_alloc_size != STAGE90_BOOTSTRAP_ALLOC_SIZE ||
         stage90_vm_state_block.bootstrap_alloc_end != (RAM_PHYS_BASE + STAGE90_BOOTSTRAP_ALLOC_SIZE) ||
         stage90_vm_state_block.pmap_section_size != L1_SECTION_SIZE ||
-        stage90_vm_state_block.pmap_section_descriptor != L1_DESC_SECTION_SO ||
+        stage90_vm_state_block.pmap_section_descriptor != L1_DESC_SECTION_DRAM ||
         stage90_vm_state_block.pmap_l1_table_phys != (uint32_t)(uintptr_t)stage90_l1_table ||
         stage90_vm_state_block.pmap_l1_table_virt != (STAGE90_HIGH_ALIAS_BASE + (uint32_t)(uintptr_t)stage90_l1_table) ||
         stage90_vm_state_block.mmu_enabled != STAGE90_VM_PLAN_MMU_ENABLED ||
@@ -6759,7 +6805,7 @@ int mmu_high_bootstrap_selftest(void)
         stage90_pmap_workspace_block.section_count != ((RAM_CONSOLE_BASE - RAM_PHYS_BASE) / L1_SECTION_SIZE) ||
         stage90_pmap_workspace_block.l1_table_phys != (uint32_t)(uintptr_t)stage90_l1_table ||
         stage90_pmap_workspace_block.l1_table_virt != (STAGE90_HIGH_ALIAS_BASE + (uint32_t)(uintptr_t)stage90_l1_table) ||
-        stage90_pmap_workspace_block.l1_section_descriptor != L1_DESC_SECTION_SO ||
+        stage90_pmap_workspace_block.l1_section_descriptor != L1_DESC_SECTION_DRAM ||
         stage90_pmap_workspace_block.l1_section_size != L1_SECTION_SIZE ||
         stage90_pmap_workspace_block.allocation_tag != STAGE90_PMAP_WORKSPACE_TAG ||
         stage90_pmap_workspace_block.mmu_enabled != STAGE90_VM_PLAN_MMU_ENABLED ||

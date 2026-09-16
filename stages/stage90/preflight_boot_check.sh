@@ -11,7 +11,7 @@
 # This script never runs fastboot and never touches the device. It verifies the
 # image and prints the command to run, or refuses and says why.
 #
-# Usage: ./preflight_boot_check.sh [--allow-preflight] [--allow-full] [--allow-selftest]
+# Usage: ./preflight_boot_check.sh [--allow-preflight] [--allow-full] [--allow-selftest] [--allow-attr-normal-nc]
 
 set -euo pipefail
 
@@ -23,12 +23,14 @@ OUT=$REPO_ROOT/out/stage90
 ALLOW_PREFLIGHT=0
 ALLOW_FULL=0
 ALLOW_SELFTEST=0
+ALLOW_ATTR=0
 
 for arg in "$@"; do
   case "$arg" in
-    --allow-preflight) ALLOW_PREFLIGHT=1 ;;
-    --allow-full)      ALLOW_FULL=1 ;;
-    --allow-selftest)  ALLOW_SELFTEST=1 ;;
+    --allow-preflight)   ALLOW_PREFLIGHT=1 ;;
+    --allow-full)        ALLOW_FULL=1 ;;
+    --allow-selftest)    ALLOW_SELFTEST=1 ;;
+    --allow-attr-normal-nc) ALLOW_ATTR=1 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -81,15 +83,18 @@ fi
 
 echo
 echo "== mode policy =="
+# A -D override records the numeric value rather than the symbolic name, so accept
+# either form. Reading the build's own config is only worth anything if the gate can
+# actually recognise what it finds there.
 case "$MODE" in
-  STAGE90_HANDOFF_MODE_HARD_SKIP)
+  STAGE90_HANDOFF_MODE_HARD_SKIP|0|0u)
     echo "HARD_SKIP: stops before the candidate L1, the watchdog loop and the jump."
     ;;
-  STAGE90_HANDOFF_MODE_PREFLIGHT_WATCHDOG_ONLY)
+  STAGE90_HANDOFF_MODE_PREFLIGHT_WATCHDOG_ONLY|1|1u)
     [[ $ALLOW_PREFLIGHT -eq 1 ]] || fail "PREFLIGHT_WATCHDOG_ONLY is not allowed without --allow-preflight"
     echo "PREFLIGHT_WATCHDOG_ONLY: allowed."
     ;;
-  STAGE90_HANDOFF_MODE_FULL)
+  STAGE90_HANDOFF_MODE_FULL|2|2u)
     [[ $ALLOW_FULL -eq 1 ]] || fail "FULL is not allowed without --allow-full"
     echo "FULL: allowed. This installs the candidate L1 and jumps to the high-VA target."
     ;;
@@ -107,6 +112,23 @@ fi
 echo
 echo "== ladder =="
 echo "STAGE90_ENTRY_LADDER_LEVEL=$LADDER"
+
+echo
+echo "== mapping attributes =="
+case "$(value_of STAGE90_PMAP_ATTR_MODE)" in
+  STAGE90_PMAP_ATTR_MODE_SO_ONLY|0|0u)
+    echo "SO_ONLY: every mapping Strongly-ordered, as in every stage so far."
+    ;;
+  STAGE90_PMAP_ATTR_MODE_NORMAL_NC|1|1u)
+    [[ $ALLOW_ATTR -eq 1 ]] || fail "NORMAL_NC changes DRAM memory types and is not allowed without --allow-attr-normal-nc"
+    echo "NORMAL_NC: DRAM is Normal/Non-cacheable, MMIO stays Strongly-ordered."
+    echo "           This is the Phase 1a exclusives change - it alters the memory"
+    echo "           model of the whole payload, so run it on its own and read the log."
+    ;;
+  *)
+    fail "unrecognised STAGE90_PMAP_ATTR_MODE: $(value_of STAGE90_PMAP_ATTR_MODE)"
+    ;;
+esac
 
 echo
 echo "All checks passed. To run the non-persistent boot (writes nothing to storage):"

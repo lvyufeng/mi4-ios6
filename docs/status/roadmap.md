@@ -256,6 +256,37 @@ always reports success is indistinguishable from a working one unless T3 is chec
 everything built on such a `STREX` would be silently wrong. This is the comparison point the
 attribute-map change has to beat.
 
+**Phase 1a implemented (2026-09-16), not yet on hardware.** `STAGE90_PMAP_ATTR_MODE`
+(`SO_ONLY` default / `NORMAL_NC`) selects the memory type for DRAM mappings; MMIO stays
+Strongly-ordered in both. `NORMAL_NC` is deliberately **non-cacheable** — it is the smallest
+change that makes exclusives architecturally defined, and with no cache enabled it needs no
+cache maintenance, no `ram_console` flush, and no change to how page-table writes become
+visible.
+
+What made it tractable was working out the real constraint, which is *not* "keep everything
+Strongly-ordered" but **consistency per physical address**: the ARMv7 cache is physically
+indexed, so two VAs mapping one PA with different memory types is UNPREDICTABLE. Listing every
+mapping by PA — in [`docs/reference/pmap-attribute-map.md`](../reference/pmap-attribute-map.md)
+— shows DRAM and MMIO form disjoint PA sets, so a single switch can move DRAM without
+touching a device register. Two consequences that look like mistakes and are not: the page
+tables become Normal (they live in `.bss` inside PA 0–2 MB and must not disagree with it; the
+requirement is *non-cacheable*, which holds), and so does the payload's own code and stack.
+
+`mmu.c`'s `ttbr_section_desc_for_pa()` classifies IMEM, the GIC block and PS_HOLD explicitly
+rather than inheriting the caller's intent, because the TTBR0 roundtrip selftest builds a
+recovery table containing both and installs it briefly — a GIC register mapped Normal in that
+window, with a timer interrupt able to arrive during it, is exactly the kind of fault that
+gets misattributed.
+
+Verified off-device: SO_ONLY emits **zero** Normal descriptors, so the default build cannot
+change any mapping's memory type; all mode × ladder × dead-man combinations compile clean;
+`preflight_boot_check.sh` refuses `NORMAL_NC` without `--allow-attr-normal-nc` and handles
+both the symbolic and the numeric (`-D`) form of every switch.
+
+Still to do this phase: run the probe in both modes on hardware and confirm `monitor_tracks`
+and `exclusives_usable` go to 1 under `NORMAL_NC`. Then caches — I-cache first, then D-cache,
+with the `ram_console` clean that the D-cache makes mandatory.
+
 **Exit criteria:** identity and high-VA mappings with caches on; `ram_console` still
 logging; timer IRQ still delivered; a documented attribute map; a passing `LDREX`/`STREX`
 test. Expect this phase to break the logging that made earlier stages easy — budget for it.

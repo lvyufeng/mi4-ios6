@@ -166,6 +166,14 @@ roadmap Phase 1 `LDREX`/`STREX` baseline
 ([`stages/stage90/exclusive_probe.c`](stages/stage90/exclusive_probe.c)) — it changes no
 mapping and no cache bit, operating on one word of the payload's own `.bss`.
 
+`STAGE90_PMAP_ATTR_MODE` is the Phase 1a mapping change: `SO_ONLY` (**default**,
+byte-for-byte the behaviour of every stage so far) or `NORMAL_NC`, which makes DRAM
+Normal/Non-cacheable while MMIO stays Strongly-ordered — the smallest change that makes
+`LDREX`/`STREX` architecturally defined. It is deliberately non-cacheable, so it needs no
+cache maintenance anywhere; enabling the caches is a separate, later step. The per-PA
+reasoning, and why the page tables are allowed to become Normal, is in
+[`docs/reference/pmap-attribute-map.md`](docs/reference/pmap-attribute-map.md).
+
 ## Next milestones
 
 The current plan is [`docs/status/roadmap.md`](docs/status/roadmap.md), which re-plans the

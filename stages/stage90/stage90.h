@@ -4013,6 +4013,69 @@ struct stage90_xnu_macho_loader_result {
 #define STAGE90_EXCLUSIVE_PROBE_CPSR_I     0x00000080u
 
 /*
+ * Mapping attribute mode (roadmap Phase 1a).
+ *
+ * Every mapping this project creates is Strongly-Ordered, and ARMv7 defines
+ * LDREX/STREX only on Normal memory - which is why the kernel cannot take a
+ * single lock today. This switch selects the memory type used for DRAM mappings.
+ * MMIO mappings (GIC, timer, IMEM, PS_HOLD) are Strongly-Ordered in every mode and
+ * are not affected by it.
+ *
+ *   SO_ONLY (0)   - default. Byte-for-byte the behaviour of every stage so far.
+ *   NORMAL_NC (1) - DRAM becomes Normal, Non-cacheable, shareable (TEX=001, C=0,
+ *                   B=0, S=1). This is the smallest change that makes exclusives
+ *                   architecturally defined, and it is deliberately *non-cacheable*:
+ *                   no cache is enabled, so it needs no cache maintenance anywhere,
+ *                   no ram_console flush, and no change to how page-table writes are
+ *                   made visible. Turning caches on is a separate, later step.
+ *
+ * The rule that constrains what may change is *consistency per physical address*,
+ * not "everything must be Strongly-ordered": on ARMv7 the cache is physically
+ * indexed, so two virtual mappings of the same PA with different memory types are
+ * UNPREDICTABLE. Decoded, DRAM and MMIO form disjoint PA sets, and every VA that
+ * maps a given PA is classified the same way - see
+ * docs/reference/pmap-attribute-map.md, which works this through per region.
+ *
+ * Two consequences worth stating because they look like mistakes:
+ *   - The page tables live in DRAM (.bss), so under NORMAL_NC they are Normal and
+ *     Non-cacheable. The requirement is that they be *non-cacheable*, which holds in
+ *     both modes; Strongly-ordered was never the point.
+ *   - The payload's own code, data and stack therefore also become Normal
+ *     Non-cacheable, because they share PA 0-2MB with the tables. With caches off
+ *     that is a weaker ordering model, not a caching one, and every shared access in
+ *     the payload already sits behind a dsb.
+ */
+#define STAGE90_PMAP_ATTR_MODE_SO_ONLY   0u
+#define STAGE90_PMAP_ATTR_MODE_NORMAL_NC 1u
+
+#if !defined(STAGE90_PMAP_ATTR_MODE)
+#define STAGE90_PMAP_ATTR_MODE STAGE90_PMAP_ATTR_MODE_SO_ONLY
+#endif
+
+#if (STAGE90_PMAP_ATTR_MODE != STAGE90_PMAP_ATTR_MODE_SO_ONLY) && \
+    (STAGE90_PMAP_ATTR_MODE != STAGE90_PMAP_ATTR_MODE_NORMAL_NC)
+#error "STAGE90_PMAP_ATTR_MODE must be STAGE90_PMAP_ATTR_MODE_SO_ONLY or _NORMAL_NC"
+#endif
+
+/*
+ * ARMv7 short-descriptor encodings. Decode any of these with
+ *   tools/decode_armv7_descriptor.py --section 0x00011c02 --smallpage 0x00000452
+ * They differ from the Strongly-ordered forms only in TEX[2:0] = 001.
+ */
+#define STAGE90_PMAP_DESC_SECTION_SO        0x00010c02u /* TEX=000 C=0 B=0: Strongly-ordered */
+#define STAGE90_PMAP_DESC_SECTION_NORMAL_NC 0x00011c02u /* TEX=001 C=0 B=0: Normal, Non-cacheable */
+#define STAGE90_PMAP_DESC_PAGE_SO           0x00000012u /* TEX=000 C=0 B=0: Strongly-ordered */
+#define STAGE90_PMAP_DESC_PAGE_NORMAL_NC    0x00000452u /* TEX=001 C=0 B=0, S=1: Normal, Non-cacheable */
+
+#if STAGE90_PMAP_ATTR_MODE == STAGE90_PMAP_ATTR_MODE_NORMAL_NC
+#define STAGE90_PMAP_DESC_SECTION_DRAM STAGE90_PMAP_DESC_SECTION_NORMAL_NC
+#define STAGE90_PMAP_DESC_PAGE_DRAM    STAGE90_PMAP_DESC_PAGE_NORMAL_NC
+#else
+#define STAGE90_PMAP_DESC_SECTION_DRAM STAGE90_PMAP_DESC_SECTION_SO
+#define STAGE90_PMAP_DESC_PAGE_DRAM    STAGE90_PMAP_DESC_PAGE_SO
+#endif
+
+/*
  * A jump target is only acceptable if it points at real, executable Stage-owned
  * code. The Mach-O fixture is inert by construction - its LC_UNIXTHREAD PC is its
  * own header and its __TEXT payload is the ASCII string "ST90-TEXT-NOEXEC" - so
