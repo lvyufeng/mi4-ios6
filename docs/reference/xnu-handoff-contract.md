@@ -229,6 +229,23 @@ asserts the unmodified tree passes first, so a broken test cannot masquerade as 
 A single-field miscount at any level is caught — including the root's own child count, which
 the walk-length check covers by requiring `skip_node` to land exactly at the buffer end.
 
+**And when it is caught, the cost is a reboot rather than a hang** — worth checking rather
+than assuming, since a hang is what the safety constraint is about. The order in a default
+run is:
+
+| Site | Step |
+| --- | --- |
+| `stage90_main:905` | hardware watchdog armed — the net exists |
+| `stage90_main:936` | device tree built |
+| `stage90_main:953` | `kernel_entry()` |
+| `xnu_kernel:29` | `apple_dt_selftest_and_log` |
+| `xnu_kernel:64` | software dead-man armed |
+
+The selftest runs *after* the hardware net and *before* the software one, and its failure
+path (`return 0`) reaches `platform_reboot()`, which forces a watchdog bite. So a
+device-tree mistake costs one reboot and a log line — not a hung phone. That is the specific
+combination the earlier ordering work was for.
+
 ### Not resolved here: `reg` is absolute, XNU expects an offset
 
 `pe_arm_map_interrupt_controller` computes `gPicBase = soc_phys + reg[0]`, so Apple's model
