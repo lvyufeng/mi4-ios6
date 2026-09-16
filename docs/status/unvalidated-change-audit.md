@@ -345,6 +345,24 @@ isolate which net fired; it was not defensible as the first thing to run on a de
 has already been hung once.
 
 
+## 10a. The gate reported the ladder level without explaining what it meant
+
+Part of the same question — what does the gate fail to *tell* the operator — rather than what
+does it fail to *check*.
+
+The ladder level decides how much of the payload runs, and therefore how much a green run is
+worth. The gate printed the raw macro, so a level-0 build under `HARD_SKIP` — which exercises
+the device tree, the watchdog arm and `kernel_entry`'s early checks and then returns, skipping
+the entire `arm_init` ladder — was presented **identically** to a `FULL` run. The run's value
+was only discoverable after booting it.
+
+Each level now states what it reaches, and an unrecognised value refuses the run. Verified at
+levels 0, 2 and 4, and with a bogus value.
+
+Worth noting what this is *not*: it does not block a low ladder level, because running one
+deliberately is legitimate — isolating an early failure is exactly what the ladder is for. The
+fix is to make the trade visible, not to prevent it.
+
 ## 11. The gate was blind to a stale image — the one direction it existed to cover
 
 `preflight_boot_check.sh` verifies the image against `SHA256SUMS.txt`. That proves the image

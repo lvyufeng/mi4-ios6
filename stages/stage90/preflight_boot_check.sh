@@ -167,7 +167,37 @@ fi
 
 echo
 echo "== ladder =="
-echo "STAGE90_ENTRY_LADDER_LEVEL=$LADDER"
+# The ladder level decides how much of the payload runs, so it decides how much a green
+# run tells you. Printing the raw macro said nothing useful: a level-0 build under HARD_SKIP
+# exercises the device tree, the watchdog arm and kernel_entry's early checks and then
+# returns - skipping the whole arm_init ladder - and the gate presented that identically to
+# a FULL run. Spelling out what each level reaches makes the run's value visible before it
+# is booted rather than after.
+case "$LADDER" in
+  STAGE90_ENTRY_LADDER_FULL|4|4u)
+    echo "FULL (4): boot-args, early pmap, PE_init_platform, post-PE bootstrap, arm_vm_init,"
+    echo "          the high-VA windows and the loader. The only level that reaches the handoff."
+    ;;
+  STAGE90_ENTRY_LADDER_POST_PE_BOOTSTRAP|3|3u)
+    echo "POST_PE_BOOTSTRAP (3): stops before arm_vm_init - no candidate L1, no high-VA"
+    echo "          windows, no loader, no handoff. Tests boot-args through post-PE only."
+    ;;
+  STAGE90_ENTRY_LADDER_PE_INIT_PLATFORM|2|2u)
+    echo "PE_INIT_PLATFORM (2): stops before the post-PE bootstrap. Tests boot-args, early"
+    echo "          pmap and PE_init_platform only."
+    ;;
+  STAGE90_ENTRY_LADDER_EARLY_PMAP|1|1u)
+    echo "EARLY_PMAP (1): stops after the early pmap step. A thin test - boot-args plus one"
+    echo "          stage of the ladder."
+    ;;
+  STAGE90_ENTRY_LADDER_BOOT_ARGS_ONLY|0|0u)
+    echo "BOOT_ARGS_ONLY (0): the stub returns after validating boot-args. This run exercises"
+    echo "          almost none of the ladder - useful only for isolating an early failure."
+    ;;
+  *)
+    fail "unrecognised STAGE90_ENTRY_LADDER_LEVEL: $LADDER"
+    ;;
+esac
 
 echo
 echo "== fault injection =="
