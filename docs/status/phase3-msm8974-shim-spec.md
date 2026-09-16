@@ -1,0 +1,207 @@
+# Phase 3: The MSM8974 Platform Shim — Specification
+
+What an MSM8974 replacement for XNU's ARM platform bring-up has to provide, why it has to
+replace rather than configure, and which hardware facts it must encode. Grounded in three
+sources that can all be read in this repository:
+
+1. **What XNU calls and expects** — `external/xnu-4570.1.46/pexpert/arm/`, `osfmk/arm/`
+2. **What the payload already has working on this device** — `stages/stage90/gic.c`,
+   `timebase.c`, and the hardware logs in `docs/experiments/`
+3. **The vendor's own hardware reference** — `external/android_kernel_xiaomi_cancro/`
+
+This is a specification, not an implementation. Its purpose is to bound the work and to make
+the hardware-specific values explicit *before* code is written, because the failure mode in
+this area is a plausible-looking constant that is architecturally correct and wrong on the
+silicon.
+
+## 1. Why a shim, and why it replaces rather than configures
+
+`pe_arm_init_interrupts` (`pexpert/arm/pe_identify_machine.c:558`) ends in
+`pe_arm_init_timer`, which is a chain of `#if defined(ARM_BOARD_CLASS_*)` tests on
+`gPESoCDeviceType`, with `return 0` as the fallthrough. The 32-bit ARM
+`pexpert/pexpert/arm/board_config.h` defines exactly three classes — `S7002`, `T8002`,
+`T8004` — all Apple.
+
+**There is no configuration in which the stock function succeeds on MSM8974.** No
+device-tree value can change that; it would require an `ARM_BOARD_CLASS_*` that does not
+exist. So Phase 3 writes a replacement for `pe_arm_init_interrupts` (and whatever else in
+that chain is Apple-specific), rather than trying to satisfy Apple's platform code from the
+device tree.
+
+One consequence worth stating because it *removes* work: the `reg`-offset-vs-absolute
+question is not on the critical path. The stock function returns before its computed address
+drives anything, and the shim will compute addresses its own way. See
+[`../reference/xnu-handoff-contract.md`](../reference/xnu-handoff-contract.md) Blocker 2.
+
+## 2. The interface the shim must satisfy
+
+### 2.1 Globals XNU's ARM code reads
+
+| Global | Declared | Written by | Consumed by |
+| --- | --- | --- | --- |
+| `gSocPhys` | `pe_identify_machine.c:305` | `pe_arm_get_soc_base_phys()` | the mapping helper |
+| `gPicBase` | `pe_identify_machine.c:305` | the mapping helper | `pe_arm_init_timer` (`:593`) |
+| `gTimerBase` | `pe_identify_machine.c` | the mapping helper | `pe_arm_init_timer` |
+| `gPESoCDeviceType` | `pe_identify_machine.c` | from the `arm-io` node's `device_type` | the board-class dispatch |
+
+`gPicBase` is consumed **only** inside `pe_identify_machine.c` in this tree — nothing else in
+`osfmk/arm` or `pexpert/arm` reads it. That bounds the blast radius of replacing the
+function: the shim owns these globals and its own consumers, and does not have to satisfy a
+wide interface.
+
+### 2.2 The timer interface: `tbd_ops` and `ml_init_timebase`
+
+`osfmk/arm/machine_routines.h:242`:
+
+```c
+struct tbd_ops {
+        void     (*tbd_fiq_handler)(void);
+        uint32_t (*tbd_get_decrementer)(void);
+        void     (*tbd_set_decrementer)(uint32_t dec_value);
+};
+typedef struct tbd_ops *tbd_ops_t;
+
+void ml_init_timebase(void *args, tbd_ops_t tbd_funcs,
+                      vm_offset_t int_address, vm_offset_t int_value);
+```
+
+And `ml_init_timebase` itself (`osfmk/arm/machine_routines.c:436`) is a **pure registration
+function** — it computes nothing and touches no timer:
+
+```c
+void ml_init_timebase(void *args, tbd_ops_t tbd_funcs,
+                      vm_offset_t int_address, vm_offset_t int_value)
+{
+        cpu_data_t *cpu_data_ptr = (cpu_data_t *)args;
+
+        if ((cpu_data_ptr == &BootCpuData)
+            && (rtclock_timebase_func.tbd_fiq_handler == (void *)NULL)) {
+                rtclock_timebase_func = *tbd_funcs;
+                rtclock_timebase_addr = int_address;
+                rtclock_timebase_val = int_value;
+        }
+}
+```
+
+That is good news and one trap, and the trap is the important part.
+
+**Good news:** there is no Apple timer-behaviour assumption to satisfy here. The ops are
+copied verbatim into globals that the rest of the kernel reads. Whatever the shim puts in
+`tbd_ops` is what XNU will call.
+
+**The trap:** registration is guarded by `cpu_data_ptr == &BootCpuData`. Passing any other
+pointer — including a perfectly valid one — makes the whole registration a **silent no-op**:
+no error, no log, and `rtclock_timebase_func` stays zeroed, so the timebase ops are absent
+and whatever fails later will look like a clock or scheduling bug rather than a call
+convention mistake. The shim must pass `&BootCpuData` exactly, and should assert that the
+registration took (read `rtclock_timebase_func.tbd_fiq_handler` back and check it is now
+non-NULL) rather than trusting the call.
+
+Note also that the second condition makes a `tbd_ops` whose `tbd_fiq_handler` is NULL
+re-registerable, which is a useful property for a probe but means "registered" cannot be
+inferred from the call having happened.
+
+So the shim must supply three things, and they map onto hardware the payload has already
+driven:
+
+| `tbd_ops` entry | What it is on MSM8974 |
+| --- | --- |
+| `tbd_get_decrementer` | Read `CNTP_TVAL` (`mrc p15, 0, r, c14, c2, 0`) |
+| `tbd_set_decrementer` | Write `CNTP_TVAL` (`mcr p15, 0, r, c14, c2, 0`) |
+| `tbd_fiq_handler` | The FIQ entry for the timer; the shim's own vectors, not Apple's |
+
+`int_address`/`int_value` are the EOI address and value. The payload's validated GIC code
+(`stages/stage90/gic.c`) acknowledges with a write to `GICC_EOIR` (`cpu_base + 0x010`) using
+the IAR value it read, so the natural pairing is `int_address = GICC_EOIR`,
+`int_value = <the IAR read in the handler>` — which is why `tbd_fiq_handler` and the EOI
+value are coupled and must be designed together rather than separately.
+
+## 3. MSM8974 facts the shim must encode
+
+These are the values where "architecturally correct" and "correct on this silicon" differ.
+Each is cited to its evidence.
+
+### 3.1 GIC
+
+| Item | Value | Evidence |
+| --- | --- | --- |
+| Distributor base | `0xf9000000` | cancro device tree; `gic_validate_snapshot()` asserts it and passes on hardware |
+| CPU interface base | `0xf9002000` | same |
+| `GICC_IAR` | `+0x00c` | `stages/stage90/gic.c:16` |
+| `GICC_EOIR` | `+0x010` | `stages/stage90/gic.c:17` |
+| `GICC_PMR` | `+0x004` | `stages/stage90/gic.c:14` |
+| Spurious intid | `0x3ff` | `stages/stage90/gic.c:21` |
+
+### 3.2 The timer interrupt number — and why it matters
+
+**The ARM generic timer's physical timer (`CNTP`) is delivered on intid 19 on this device,
+not the architectural 30.**
+
+Evidence, from a hardware log (`docs/experiments/experiment-12-stage9-timer-irq.md`):
+
+```text
+MI4IOS6_STAGE9_XNU gic_timer_ppi0_id=0x00000012     /* 18 */
+MI4IOS6_STAGE9_XNU gic_timer_ppi1_id=0x00000013     /* 19 */
+MI4IOS6_STAGE9 irq handler iar=0x00000013 id=0x00000013 count=1 timer_count=1
+MI4IOS6_STAGE9_XNU gic_timer_last_timer_id=0x00000013
+MI4IOS6_STAGE9_XNU gic_timer_cntp_ctl_armed=0x00000001
+MI4IOS6_STAGE9_XNU gic timer selftest ok
+```
+
+The payload enabled both 18 and 19 (`gic_timer_ppi_mask=0x000c0000`), armed `CNTP`
+(`cntp_ctl_armed=0x1`), and the interrupt that actually arrived carried **id 19**. The
+handler observed `CNTP_CTL = 0x5` — enable plus ISTATUS — confirming the interrupt came from
+the generic timer's CNTP and not from something else that happened to fire.
+
+This is the kind of value that costs a bring-up: a shim written from the ARM ARM would use
+30, the timer would never fire, and the failure would look like a broken GIC. The payload
+knows the real number because it has driven it.
+
+Two open questions the shim must settle at runtime rather than assume:
+
+- **What intid 18 is.** The payload enables it alongside 19 but never observed it fire. It
+  may be a second timer (MSM's own debug timer?) or unused. The shim should not require it.
+- **Whether 19 is fixed or per-SoC-variant.** Everything here is from one cancro. The shim
+  should log the intid it actually receives rather than hard-coding an assumption about it.
+
+### 3.3 Timer frequency
+
+`19,200,000 Hz`, validated by `ml timebase ok` in every stage since Stage4 — the payload
+measures a delta over a known delay and compares. The shim's `tbd_get_decrementer` /
+`tbd_set_decrementer` work in these units.
+
+### 3.4 Watchdog (relevant to Phase 3 only as a dependency)
+
+`0xf9017000`, bark/bite, `WDT_HZ = 32765`. Already implemented in
+`stages/stage90/hw_watchdog.c`; a real kernel would want the same, and the vendor driver
+(`arch/arm/mach-msm/msm_watchdog_v2.c`) is the reference. Note the vendor binding's
+qualification: the bite resets via the *secure* watchdog, so the dependency is on TrustZone,
+not on pure hardware.
+
+## 4. What the shim must *not* do
+
+- **Do not assume the stock `pe_arm_init_interrupts` can be made to succeed.** It cannot; the
+  board-class set is closed.
+- **Do not take the interrupt numbers from the ARM ARM.** Use the observed ones (§3.2).
+- **Do not map `reg` as offsets to satisfy the stock function.** The shim computes addresses
+  directly; the Apple convention stops binding once the function is replaced.
+- **Do not enable the timer interrupt before the vector/base state is ready.** The payload's
+  ordering (`gic.c`: distributor → CPU interface → arm → enable delivery last) is
+  hardware-validated; keep it.
+
+## 5. What cannot be settled from the host
+
+Stated plainly, because this document is a specification and not evidence:
+
+- **Resolved since the first draft:** `ml_init_timebase` was read (see §2.2). It is a pure
+  registration function with no Apple timer assumptions — the literal risk of "the function
+  will not accept our `tbd_ops`" does not exist. It was replaced by a sharper, concrete one:
+  the `&BootCpuData` guard, which fails silently.
+- **Whether the FIQ path is usable at all.** `tbd_fiq_handler` implies XNU expects to take
+  the timer as FIQ, and FIQ handling on MSM8974 interacts with TrustZone. The payload has
+  never used FIQ; every interrupt it has driven is IRQ.
+- **Anything about SMP.** `ml_processor_register`, IPIs and the CPU startup path are all
+  Apple-shaped and untouched here.
+
+These are where Phase 3's real risk sits, and each is a reading task before it is a coding
+task.

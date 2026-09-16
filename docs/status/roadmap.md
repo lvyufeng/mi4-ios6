@@ -500,6 +500,21 @@ So Phase 3's shape is now known: write an MSM8974 replacement for the ARM platfo
 rather than trying to satisfy Apple's platform code through device-tree values. Larger, and
 clearer. See the contract doc.
 
+### Phase 3 — specification written
+
+[`phase3-msm8974-shim-spec.md`](phase3-msm8974-shim-spec.md) bounds the shim work and makes
+the hardware-specific values explicit before code is written. Two findings that shape it:
+
+- **The stock `pe_arm_init_interrupts` cannot be configured into working on MSM8974** — the
+  board-class set is closed (three Apple SoCs, `return 0` fallthrough) — so Phase 3 replaces
+  it, which also means the `reg`-offset question stops mattering.
+- **The ARM generic timer's physical timer is delivered on intr 19 on this device, not the
+  architectural 30.** Withheld from the ARM ARM it would look like a broken GIC. The
+  evidence is a hardware log (`experiment-12`), not reasoning.
+- **`ml_init_timebase` is a pure registration function whose guard is `cpu_data_ptr ==
+  &BootCpuData`** — passing anything else makes registration a *silent* no-op. The spec
+  requires asserting the registration took rather than trusting the call.
+
 **Exit criteria:** boot_args and DT dumped from the device and accepted by 4570's readers;
 `TTBR0`/`TTBR1`/`TTBCR`/`SCTLR` verified correct after 4570 code has written them. Still open:
 both checks are source-level so far, and the `reg` model decision is Phase 3's.

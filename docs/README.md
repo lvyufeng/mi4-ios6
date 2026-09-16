@@ -34,6 +34,7 @@
 
 ## Status — `status/`
 
+- `phase3-msm8974-shim-spec.md` — what an MSM8974 replacement for XNU's ARM platform bring-up must provide: the interface to satisfy, the hardware values it must encode (with evidence), and what cannot be settled from the host.
 - `unvalidated-change-audit.md` — bounds the risk of each change made on 2026-09-16 that has not
   reached hardware, in boot order, and names the log line that confirms or clears each. Read
   alongside the roadmap before the next run.
