@@ -527,6 +527,50 @@ So Phase 3's shape is now known: write an MSM8974 replacement for the ARM platfo
 rather than trying to satisfy Apple's platform code through device-tree values. Larger, and
 clearer. See the contract doc.
 
+### Phase 4 — feasibility checked, and the build is gated by Apple's own whitelist
+
+Phase 4 says "enter public XNU `_start` / build a full `mach_kernel`". Before planning that,
+one question is worth answering first: **can the open-source tarball build an ARM kernel at
+all?** It cannot, and the reason is concrete.
+
+`external/xnu-4570.1.46/makedefs/MakeInc.def:12`:
+
+```make
+SUPPORTED_ARCH_CONFIGS := X86_64 X86_64H
+```
+
+and `makedefs/MakeInc.kernel:13`:
+
+```make
+ifeq ($(filter $(CURRENT_ARCH_CONFIG),$(SUPPORTED_ARCH_CONFIGS)),)
+$(error Unsupported CURRENT_ARCH_CONFIG $(CURRENT_ARCH_CONFIG))
+endif
+```
+
+`CURRENT_ARCH_CONFIG` is set per build target (`MakeInc.top:246`, extracted from the build
+config name), so **any ARM arch config hits that `$(error)` and stops the build.** The
+platform whitelist does include `iPhoneOS` (`MakeInc.cmd:121`) — but the arch gate fires
+regardless.
+
+Verified by evaluating the expressions in isolation (the real build additionally fails on
+`xcrun`, a macOS toolchain requirement, on this Linux host): the gate errors for `ARM`, and
+passes when the whitelist is extended on the command line. So it *is* overridable — but
+overriding it means supplying the ARM machine configs, the toolchain assumptions and the
+rest of the build configuration Apple did not ship, which is the same class of gap as the
+missing `SETUP/config` `.def` files.
+
+**Consequence for the plan:** "build a full `mach_kernel`" is not a matter of running a
+build. It means reconstructing a build configuration that is not in the tarball, on top of
+a toolchain this project does not have. That does not make it impossible, but it is a
+different and larger piece of work than the roadmap's one-line bullet implied — and it
+explains why this project's public-XNU work has been a *host-only linkability proof* rather
+than a build: the proof is what the shipped source actually supports.
+
+It also sharpens what Phase 3 and Phase 4 are for. A shim plus a conforming `boot_args`
+produces something XNU could consume; producing the XNU that consumes it needs a build system
+that is not public. Worth deciding deliberately rather than discovering during a Phase 4
+attempt.
+
 ### Phase 3 — specification written
 
 [`phase3-msm8974-shim-spec.md`](phase3-msm8974-shim-spec.md) bounds the shim work and makes
