@@ -625,7 +625,32 @@ looks like the former (it exists to hold `pal_mlock`/`pal_munlock`-style debug h
 honest statement is that no one has counted, and the count is the thing that decides whether
 Phase 4 is a weeks-scale or months-scale piece of work.
 
-**So the first Phase 4 task is a measurement, not a build.** Done, and the number is this:
+**Correction — the estimate below was wrong, and doing the work is what showed it.** An
+initial pass concluded the ARM layer's gap was 8 missing headers: bounded, enumerable, the
+same order of magnitude as the 16 shims already written. Writing them disproves that. With
+four stubs in `stages/stage90/shims_arm/` plus `-DKERNEL=1` plus the `iokit` path on the
+include line, the sweep goes from **2 of 32 to 3 of 32** — and the remaining errors stop being
+*missing files* and become **undefined build-configuration symbols** (`AST_NONE`,
+`INTSTACK_SIZE`, `gPhysBase`, `decl_simple_lock_data`). The clearest is
+`EXTERNAL_HEADERS/stdatomic.h:24`:
+
+```c
+#ifndef __clang__
+#error unsupported compiler
+#endif
+```
+
+XNU's atomic layer is clang-only; this project's ARM toolchain is `arm-none-eabi-gcc`. So the
+accurate conclusion — reaching the same place the build-system investigation did, from the
+other direction — is that **the source tree is complete and the build configuration is
+absent**. The first level of the header gap was real and is now written and verified; it is
+not a meaningful fraction of the way to compiling.
+
+The measurement below stands as the record of the first level. Its "bounded and enumerable"
+claim was over-optimistic and should not be planned from.
+
+**The first-level measurement, for the record:**
+
 
 Sweeping every `osfmk/arm/*.c` with `-fsyntax-only`, using the project's toolchain and its own
 existing `shims/` include set:
