@@ -33,6 +33,9 @@
 
 ## Status — `status/`
 
+- `unvalidated-change-audit.md` — bounds the risk of each change made on 2026-09-16 that has not
+  reached hardware, in boot order, and names the log line that confirms or clears each. Read
+  alongside the roadmap before the next run.
 - `roadmap.md` — **the current plan.** Re-planned after Stage90: what has actually been
   proven, the three findings that invalidated the previous plan (the handoff target is not
   code; every mapping is strongly-ordered with caches off; no public iOS 6-era ARM XNU

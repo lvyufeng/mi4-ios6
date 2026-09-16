@@ -206,6 +206,18 @@ Remaining in this phase:
   an unaligned target, or one whose first word is the fixture's `__TEXT` marker. Still to
   demonstrate is criterion (b) below actually producing a logged fault.
 
+#### The unvalidated stack, audited
+
+Six changes are waiting on one run, so
+[`unvalidated-change-audit.md`](unvalidated-change-audit.md) bounds each one's risk by reading
+it and names the log line that confirms or clears it — ordered as the boot executes. Its
+useful conclusions: Phase 1a is **inert** in the default build (verified to emit zero Normal
+descriptors), the hardware watchdog's MMIO is in the same 1 MB section as the GIC read that
+has preceded the payload's MMU setup in every successful run for ninety stages, and both the
+DT and F-AM1 failures would be *visible and specific* rather than silent. It also lists what
+it cannot bound: the watchdog's register semantics (what the selftest run is for), and the
+`memSize` claim behind the conforming `boot_args`.
+
 #### The queued runs, in order
 
 `STAGE90_HANDOFF_MODE=HARD_SKIP` still runs the whole `arm_init` ladder — early pmap,

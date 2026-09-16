@@ -207,7 +207,10 @@ reasoning, and why the page tables are allowed to become Normal, is in
 ## Next milestones
 
 The current plan is [`docs/status/roadmap.md`](docs/status/roadmap.md), which re-plans the
-project after Stage90 and supersedes this section. In short:
+project after Stage90 and supersedes this section. The changes made since that plan that have
+**not yet reached hardware** are audited in
+[`docs/status/unvalidated-change-audit.md`](docs/status/unvalidated-change-audit.md) — what each
+one risks, why it is bounded, and the log line that confirms or clears it. In short:
 
 1. **Phase 0 — make failure visible and recoverable.** The dead-man reset and the
    non-executable-entry guard are in the tree; the `PREFLIGHT_WATCHDOG_ONLY` run on
