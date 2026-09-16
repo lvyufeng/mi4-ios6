@@ -431,10 +431,36 @@ Three consequences:
 
 Stated so the next session does not over-read §6.2:
 
-1. **`__ARM_TIME__` is defined nowhere in the tree.** That may mean it is legacy for
-   platforms XNU no longer builds, and that enabling it leaves a path that does not compile or
-   was never finished. It must be *built*, not assumed. This is a host-side check and can be
-   done without the device.
+1. **`__ARM_TIME__` is defined nowhere in the tree — but that is not the same as "unused",
+   and the check is neither cheap nor currently in scope.** An earlier revision of this
+   document called building it "a host-side check that needs no device". That was wrong
+   twice over, and the correction is worth recording:
+
+   - **It is not host-side in the sense meant.** `__ARM_TIME__` lives in
+     `osfmk/arm/{locore.s,machine_routines_asm.s,machine_routines.c,arm_init.c,rtclock.c}` —
+     none of which this project compiles. The public-XNU compile graph is five objects from
+     `pexpert/gen` and `pexpert/arm` (`stages/stage90/targets/cancro.stage90.objects`), and
+     every manifest says none of them are linked into the payload. Answering "does that path
+     build" means building XNU's ARM kernel — which the project's own README gates to Phase 4
+     ("Enter public XNU `_start` / build a full `mach_kernel`").
+   - **The real selection cannot be reproduced from source anyway.** `__ARM_TIME__` is not a
+     source-level constant; it comes from the build configuration (`ARCH_CONFIGS` →
+     `SETUP/config` `.def` files), and the OSS tarball ships only the `doconf` generator, not
+     the `.def` files. So there is no way to read off what real ARM XNU sets.
+
+   **What can be established from source, and is worth stating because it sharpens the
+   picture:** `__ARM_TIME_TIMEBASE_ONLY__` is defined inside `#if defined(ARMA7)`
+   (`proc_reg.h:74-98`), and `ARMA7` itself is defined by
+   `pexpert/pexpert/arm/board_config.h` — inside the `ARM_BOARD_CONFIG_S7002/T8002/T8004`
+   blocks. So the macro that makes `ml_get_timebase` read the real counter derives from
+   **the same closed Apple board-class set that §1 says Phase 3 must replace.** The
+   timebase question and the shim question are coupled through one macro rather than being
+   independent.
+
+   The fact that `__ARM_TIME__` and `__ARM_TIME_TIMEBASE_ONLY__` are written as alternatives
+   (`#if __ARM_TIME__ || __ARM_TIME_TIMEBASE_ONLY__`) is consistent with the reading that a
+   real ARM build sets the weaker one and not the stronger — i.e. that the FIQ path is live —
+   but that is inference from the code's shape, not a configuration we can inspect.
 2. **`__ARM_TIME__` does more than move the vector** — now read, and the list is short and
    tractable: the vector (`locore.s:147`), the exception-vector table slot (`locore.s:188`),
    `fiq_context_init` (`machine_routines_asm.s:924`, which enables CNTV instead of loading the
@@ -456,4 +482,9 @@ Stated so the next session does not over-read §6.2:
    TrustZone-configured state where FIQ *is* routed to the non-secure world, since aboot
    loads us directly. The only way to know is to try.
 
-Check 1 is the highest-value next action, and it needs no hardware.
+Check 1 was described as "the highest-value next action, and it needs no hardware". Both
+halves of that were wrong — it is not a host check this project can run (it means building
+XNU's ARM kernel, gated to Phase 4) and the configuration behind it is not in the tarball.
+The corrected statement is that check 1 is a **Phase 4 prerequisite to investigate**, not a
+cheap win available now, and checks 3 and 4 are the ones that are both cheap and available —
+but only with the device.
