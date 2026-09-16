@@ -99,7 +99,7 @@ Stage0 through Stage84 built the runtime up to a full kernel virtual address spa
 
 Stage90 covers the handoff itself: the Stage-owned `arm_init`-shaped entry stub runs the early-pmap / `PE_init_platform(FALSE,args)` / post-PE-bootstrap / `arm_vm_init` ladder, relocates the high-VA handlers, loads the Mach-O fixture, and then hands control to a high-VA target through the candidate L1.
 
-The first handoff attempt jumped and **hung the device**: no log output, no automatic recovery, manual power-cycle required ([`stages/stage90/IMPLEMENTATION_STATUS.md`](stages/stage90/IMPLEMENTATION_STATUS.md)). With zero post-jump visibility, Stage90 is now bisecting the failure instead of re-attempting it. The switches in `stages/stage90/stage90.h` select how far the stage goes:
+The handoff target is **not** XNU code, and no public XNU object has ever been linked into or executed by any payload — the public-XNU compile graph (`targets/*.objects`) is a host-only linkability proof, and the Mach-O fixture is inert by construction. The jump target `0x80008000` is the fixture's `LC_UNIXTHREAD` PC, i.e. its Mach-O header; the fixture's `__TEXT,__text` holds the ASCII string `"ST90-TEXT-NOEXEC"`. So the first handoff attempt jumped into non-code, which is why the device **hung**: no log output, no automatic recovery, manual power-cycle required ([`stages/stage90/IMPLEMENTATION_STATUS.md`](stages/stage90/IMPLEMENTATION_STATUS.md)). With zero post-jump visibility, Stage90 is now bisecting the failure instead of re-attempting it. The switches in `stages/stage90/stage90.h` select how far the stage goes:
 
 | Switch | Effect |
 | --- | --- |
@@ -112,18 +112,46 @@ None of these modes is a shipped feature; they exist to find the hang. The curre
 
 ## Next milestones
 
-- Get the device to recover on its own: prove the watchdog fires and PS_HOLD warm-reboots back to Android, so a failed handoff stops requiring a manual power-cycle.
-- Re-attempt the high-VA handoff one increment at a time, with the bisection switches above, until the point that loses the device is identified.
-- Only then revisit what the handoff target may do. Sequencing that isolates each step is worth more here than a faster jump.
+The current plan is [`docs/status/roadmap.md`](docs/status/roadmap.md), which re-plans the
+project after Stage90 and supersedes this section. In short:
+
+1. **Phase 0 — make failure visible and recoverable.** Finish the watchdog → PS_HOLD
+   warm-reboot path so a hang self-recovers, and add a non-executable-entry guard so the
+   fixture header produces a captured fault instead of a silent hang.
+2. **Phase 1 — cacheable memory policy.** Every mapping in the project is
+   Strongly-Ordered, non-cacheable; there is no Normal-memory descriptor anywhere. ARMv7
+   `LDREX`/`STREX` are only defined on Normal memory, so this is the prerequisite for the
+   kernel taking a single lock — not a performance tweak.
+3. **Phase 2 — the iBoot-equivalent handoff contract** (`boot_args`, Apple-format device
+   tree, bootstrap page tables in `topOfKernelData`), which is what
+   `external/xnu-4570.1.46/osfmk/arm/start.s` actually expects.
+4. Only after 1–3: revisit what the handoff target may do.
+
+Two findings that reshape the plan: there is **no public iOS 6-era ARM XNU** (`xnu-2050`
+has no `osfmk/arm`; only `xnu-4570.1.46` has ARM code), and the Stage90 jump target is an
+inert fixture entry, not kernel code. The realistic target is a 4570-derived ARM kernel on
+MSM8974; see the roadmap for the tiers and for the explicit non-goals.
 
 Standing constraints, unchanged from earlier stages:
 
 - Hardware validation stays non-persistent (`sudo fastboot boot`). No flashing without explicit per-operation confirmation.
 - Preserve the identity/recovery mappings for ram_console, PS_HOLD, GIC, timer, abort logging and early recovery paths.
-- Keep caches disabled unless a later stage explicitly validates a safe cache policy.
 - Keep large source checkouts under the ignored `external/` and build outputs under the ignored `out/`.
-- Use `xnu-2050.22.13` for iOS 6 / Darwin 12-era public context and `xnu-4570.1.46` as the public ARM implementation reference where the 2050 tree lacks ARMv7 files.
-- Do not build a full public `mach_kernel`, enter public XNU `_start`, execute public-XNU pexpert/pmap/IOKit object code or generated Mach-O bytes, change cache policy, or write persistent storage.
+- Use `xnu-4570.1.46` as the public ARM implementation reference. `xnu-2050.22.13` is iOS 6 / Darwin 12-era context only — it contains no ARM code at all (see `docs/status/roadmap.md` §3).
+- No persistent storage writes, in any phase.
+
+The boundaries that earlier stages held closed are now **phase-gated rather than
+permanent**, because Phases 1 and 2 of the roadmap require them:
+
+| Boundary | Closed until |
+| --- | --- |
+| Change cache policy (any Normal/cacheable mapping) | Phase 1 validates an attribute map and an `LDREX`/`STREX` test on hardware |
+| Execute public-XNU object code | Phase 3 adds objects one at a time, each with an explicit shim list and a hardware run |
+| Enter public XNU `_start` / build a full `mach_kernel` | Phase 4, on top of Phase 1–3 results |
+| Execute generated Mach-O bytes | Excluded. The fixture is a fault-injection test case, not a target — see Phase 0 |
+
+Anything not yet at its phase stays closed, with the Stage90 fail-closed switches as the
+mechanism.
 
 ## Archive policy
 

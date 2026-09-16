@@ -1,0 +1,314 @@
+# Roadmap: XNU bring-up on MSM8974 — re-planned 2026-09-16
+
+This document re-plans the project after Stage90. It supersedes the "Next milestones"
+section of the root `README.md` and the framing in `method-c-progression-summary.md`,
+both of which describe a plan that the Stage90 result invalidates.
+
+It is written to be checked, not believed: every claim below is tied to a file in this
+repository that can be read.
+
+---
+
+## 1. What the project has actually proven
+
+These are hardware results. Each was validated by non-persistent `fastboot boot` and
+recovered through `/proc/last_kmsg`, under the safety rules in the root `README.md`.
+
+| Capability | Status | Evidence |
+| --- | --- | --- |
+| Non-persistent custom boot on a locked-down bootloader | ✅ | `docs/reference/boot-tooling.md`, QCDT `dt_size` requirement |
+| Bare-metal ARMv7 payload, C runtime, exception vectors | ✅ | `experiment-03` … `experiment-07` |
+| GIC (MSM8974 QGIC2) SGI + timer-PPI IRQ delivery | ✅ | `experiment-11`, `experiment-12`, `experiment-88` |
+| ARMv7 two-level pmap (1 MB sections + 4 KB pages) | ✅ | `experiment-13`, `experiment-86` |
+| High-virtual alias at `0x80000000` (`VA = 0x80000000 + PA`) | ✅ | `experiment-88` |
+| Code execution, IRQ, data-abort and undef handlers at high VA | ✅ | `experiment-88` … `experiment-91` |
+| Mach-O parsing and a loader that *can* materialize a fixture | ✅ | `experiment-92`, `stages/stage90/xnu_macho_loader.c` |
+| Crash evidence survives a hang (`ram_console` at top of DRAM) | ✅ | `docs/reference/no-teardown-debugging.md` |
+
+This is a real and unusually complete bring-up layer for a platform with no vendor
+documentation. Nothing in this re-plan asks for it to be thrown away.
+
+## 2. What the project has *not* done — despite the wording in earlier notes
+
+Three things need stating plainly, because earlier notes read as if they were done and
+future planning that assumes them would be wrong.
+
+**Nothing from public XNU has ever executed on the device.** The object manifests say so
+themselves, from Stage76 through Stage90 — e.g.
+`stages/stage90/targets/cancro.stage90.objects`:
+
+> `None of the public-XNU objects are linked into or executed by the booted StageNN payload.`
+
+The entire public-XNU compile graph is five host-only objects: `pexpert/gen/{device_tree,
+bootargs,pe_gen}.c` from `xnu-upstream`, and `pexpert/arm/{pe_bootargs,
+pe_consistent_debug}.c` from `xnu-4570.1.46`. It is a *linkability proof*, valuable as a
+host-side checklist and worth nothing as runtime evidence. Every `arm_init`-shaped,
+`_start`-shaped and `arm_vm_init`-shaped symbol in the payload is Stage-owned code with an
+XNU name. Phrases such as "public XNU `_start` executes" in
+`method-c-progression-summary.md` (Stage76) refer to a Stage-owned stub called from a
+Stage-owned `start.S`.
+
+**The Stage90 handoff target is not executable code.** `xnu_macho_loader.c` resolves the
+jump target as:
+
+```c
+if (found_entry) r->xnu_entry_va = r->entry_point_offset;   /* LC_UNIXTHREAD pc */
+else             r->xnu_entry_va = r->text_segment_va;
+```
+
+`entry_point_offset` is the fixture's `LC_UNIXTHREAD` PC, which
+`tools/mkmacho_fixture.py` writes as `VM_BASE` — `0x80008000`. That address is the Mach-O
+*header*. The fixture's `__TEXT,__text` payload is the ASCII string `"ST90-TEXT-NOEXEC"`,
+and the generator's own docstring calls the fixture "intentionally inert… it is never
+executed by the target payload". So the handoff jumped to a magic number, and the device
+hung because it executed non-code. The handoff could not have started XNU.
+
+**That is a test result, not only a defect.** The project's crash-visibility layer is what
+made this findable at all; the missing piece is that a jump into non-code produced *no log*.
+Turning that into a captured, logged, self-recovering fault is the first work item below —
+and the fixture becomes a fault-injection test case rather than a fake XNU.
+
+## 3. The three findings that reshape the plan
+
+**F1 — The jump contract is wrong, not just the jump target.** Real ARM XNU entry
+(`external/xnu-4570.1.46/osfmk/arm/start.s`) states its expectations in its first
+instructions:
+
+- the MMU is **off** on entry; `start.s` does `cpsid if` and enables the **I-cache**
+- XNU itself writes `TTBR0` and `TTBR1` from `BA_TOP_OF_KERNEL_DATA` and sets `TTBCR`
+- `r0` = `boot_args` physical address, `r1` = `cpu_data` physical address
+- `SP` is loaded from `CPU_INTSTACK_TOP`
+
+The current stage hands over the opposite of several of these: MMU on and running on a
+Stage-built candidate L1, caches off, `r1` unused, and no `topOfKernelData` region
+containing bootstrap page tables. Stage90's `arm_init` ladder is a *simulation* of the
+sequence; the real entry point is not reachable from it by adding a jump.
+
+**F2 — Every mapping is strongly-ordered, and there is no cacheable mapping anywhere in
+the tree.** Both descriptor constants are unambiguous:
+
+```c
+#define L1_DESC_SECTION_SO 0x00010c02u   /* TEX=0 C=0 B=0 S=1 -> Strongly-Ordered, shareable */
+#define L2_DESC_PAGE_SO    0x00000012u   /* TEX=0 C=0 B=0    -> Strongly-Ordered */
+```
+
+`mmu.c` then enables the MMU with `SCTLR.C` and `SCTLR.I` explicitly cleared, and Stage90
+carries a status bit `..._SAT_NO_CACHE_POLICY_CHANGE` asserting that this never varies.
+Grepping the whole stage for a Normal-memory descriptor returns nothing.
+
+This is why the bring-up layer has been so reliable — everything is immediately visible,
+so `ram_console` logging survives a hang, and there are no cache-coherency bugs to find.
+It is also a hard ceiling:
+
+1. XNU's `start.s` enables the I-cache within its first few instructions and assumes
+   cacheable Normal memory for kernel text and data.
+2. **ARMv7 `LDREX`/`STREX` are architecturally only defined on Normal memory.** On
+   Strongly-Ordered/Device memory the exclusive monitor is unpredictable. The current pmap
+   therefore cannot support a single lock, spinlock or atomic — and XNU takes locks
+   immediately.
+3. Any DMA-capable driver (the eMMC the kernel will need) requires correct
+   Normal/Device attribute distinctions.
+
+"Turn on caches" is not a performance tweak; it is the prerequisite for the kernel having
+working atomics.
+
+**F3 — There is no public iOS 6-era ARM XNU.** The checks were run against the checkouts in
+`external/`:
+
+| Tree | `osfmk/arm` |
+| --- | --- |
+| `xnu-2050.18.24` (Darwin 12 / iOS 6-era) | absent — i386/x86_64 only |
+| `xnu-upstream`, `apple-xnu-rel-2050` | absent |
+| `xnu-4570.1.46` (Darwin 14-era) | present — 90 files, plus `pexpert/arm` (6), `iokit` (70), `bsd` (409 `.c`) |
+
+The iOS 6.1.3 OSS distribution contains userland projects, not the kernel. So a
+source-derived kernel from this era is not obtainable, and `xnu-2050` can serve only as a
+userland/ABI-era reference. Any XNU that actually runs on this phone will be
+**4570-derived**. The project's own naming should stop implying otherwise.
+
+## 4. Re-planned target
+
+The goal is restated as: **get real, unmodified public XNU-4570 ARM code executing on
+MSM8974, with the crash visibility to iterate.** "iOS 6" stays as historical motivation
+and as the userland-era reference; it is not the deliverable and it is not the plausible
+endpoint (§7).
+
+Three tiers, so the achievable part is not held hostage to the unachievable part:
+
+| Tier | Deliverable | Honest estimate |
+| --- | --- | --- |
+| **T1** | Real XNU code running on the device with self-recovering hangs, captured fault PC/LR/DFAR, and a documented boot_args / Apple-DT / attribute contract. | Weeks–months. Achievable with the existing layer. |
+| **T2** | 4570's `arm_init` → `arm_vm_init` bootstrap proceeds past its own platform callouts and reaches a first scheduler tick, printing through a platform `kprintf`. | Months–a year+. Plausible with sustained work. |
+| **T3** | A Darwin-like userland. Not iOS. | Years, and probably blocked on proprietary drivers (§7). |
+
+Phases 0–3 below are identical under all three tiers. T1 is worth reaching on its own
+terms: for a platform with no vendor kernel documentation, "real XNU instructions execute
+and faults are captured" is a novel, publishable artifact.
+
+## 5. Technical roadmap
+
+Each phase has a hardware exit criterion. No phase advances on host-side evidence alone —
+that rule is what this re-plan is *for*.
+
+### Phase 0 — Make failure visible and recoverable (days)
+
+*Why first:* the Stage90 hang consumed a manual power-cycle and produced zero information.
+Every later phase will hang repeatedly, and iteration speed is set entirely by how much a
+hang tells you. This is also the cheapest phase.
+
+- Finish `STAGE90_HANDOFF_PREFLIGHT_WATCHDOG_ONLY`: prove the watchdog fires and
+  `platform_reboot()`/PS_HOLD warm-reboots the device back to Android from a real hang.
+- Verify `VBAR` still points at the high-VA vectors **after** the candidate L1 install, and
+  that a timer IRQ is still delivered through them. The existing `PREFLIGHT_WATCHDOG_ONLY`
+  path checks this under the *original* mapping; the interesting case is after the switch.
+- Add an entry-validity guard to the handoff: reject a target that is not in an executable
+  segment of the Mach-O, and log the rejection. Jumping at a Mach-O header must become a
+  caught undefined-instruction fault instead of a silent hang.
+
+**Exit criteria:** (a) an induced hang self-recovers to Android without a manual
+power-cycle; (b) a jump to the Stage90 fixture header produces a logged undef/abort with
+PC/LR, not a hang; (c) a real Stage-owned function executes via the candidate L1 at high VA
+and returns, with the IRQ handler still live afterwards.
+
+### Phase 1 — Cacheable memory policy (1–3 weeks)
+
+*Why:* F2. This is the wall between "an MMU demo" and "a kernel".
+
+- Introduce Normal, cacheable, shareable descriptors for RAM and kernel text/data, keeping
+  Device-nGnRnE for GIC, UART, timer and PS_HOLD. The attribute map must be written down,
+  not inferred from constants, because every later fault will be blamed on it first.
+- Turn the I-cache on first (XNU does), then the D-cache, with explicit clean/invalidate on
+  the TTBR switch and after any code or page-table write — the loader materializes tables
+  and copies segments at runtime, which Strongly-Ordered memory currently hides.
+- Prove exclusive access works: a `LDREX`/`STREX` loop that increments a shareable counter
+  reliably. This is the single test that distinguishes a working kernel pmap from the
+  current one.
+
+**Exit criteria:** identity and high-VA mappings with caches on; `ram_console` still
+logging; timer IRQ still delivered; a documented attribute map; a passing `LDREX`/`STREX`
+test. Expect this phase to break the logging that made earlier stages easy — budget for it.
+
+### Phase 2 — The iBoot-equivalent handoff contract (2–6 weeks)
+
+*Why:* F1. XNU's entry reads state out of `boot_args` and writes page tables from it. Get
+this wrong and the first real XNU instructions fault in ways that look like pmap bugs.
+
+- Produce `boot_args` as `external/xnu-4570.1.46/pexpert/pexpert/arm/boot.h` expects:
+  `physBase`, `virtBase`, `memSize`, `topOfKernelData`, `deviceTreeP`/`Length`,
+  `CommandLine`, `machineType`, `bootArgsVersion`, revision/version.
+- Produce an Apple-format flattened device tree — root, `/cpus` with
+  `timebase-frequency`, `/arm-io`, the interrupt controller, the timer — not the Android
+  DT the bootloader hands over.
+- Reserve and populate a `topOfKernelData` region containing the bootstrap page tables XNU
+  will adopt, and validate our tables against what `start.s` writes.
+- Validate by reading the structures back with 4570's own `PE_boot_args()` /
+  device-tree reader code, on hardware, before anything jumps.
+
+**Exit criteria:** boot_args and DT dumped from the device and accepted by 4570's readers;
+`TTBR0`/`TTBR1`/`TTBCR`/`SCTLR` verified correct after 4570 code has written them.
+
+### Phase 3 — Platform shim layer and compile-graph expansion (months)
+
+*Why:* this is the actual port, and it is currently ~0 % built. The five allowed objects
+are a linkability proof; the payload has no XNU runtime.
+
+- Expand the compile graph in dependency order: `pexpert/arm` (`pe_init`,
+  `pe_identify_machine`, `pe_serial`, `pe_kprintf`) → the `osfmk/arm` pieces that do not
+  need the scheduler (`start.s`, `arm_init`, `arm_vm_init`, `pmap`, `machine_routines`,
+  `caches`, `cpu`, `exception`) → then whatever they call.
+- Build the shim layer those functions need: a GIC-backed stand-in for Apple's AIC, a
+  19.2 MHz `timebase` registration, `ml_*`/`PE_state` glue, and a `kprintf` that writes to
+  the existing `ram_console` (no new debug channel needed — this one already works).
+- Keep the host-side link proof as a gate: zero undefined symbols outside an explicit,
+  reviewed shim list. Remove the four explicit exclusions in
+  `targets/cancro.stage90.objects` (`osfmk/arm/{start.s,arm_init.c,arm_vm_init.c,pmap.c}`)
+  one at a time, each with its shim list and hardware run.
+
+**Exit criteria:** a real subset reaching `arm_vm_init` links clean, and executes on
+hardware under Phase 0's crash capture.
+
+### Phase 4 — First real XNU instructions (weeks of iteration)
+
+Enter 4570's `start.s` with Phase 2's `boot_args`, Phase 3's objects mapped at high VA per
+Phase 1's attributes, caches on, functions relocated — and the crash capture live.
+
+**Exit criteria:** crash #1 within the first few hundred instructions, *captured*: PC, LR,
+DFAR, CPSR and the exact missing symbol or service. Then fix one thing per cycle. "It
+hangs" is a failed experiment; a captured fault is a successful one.
+
+### Phase 5 — Kernel subsystems and drivers (years)
+
+Scheduler and threads, VM, IPC, IOKit registry, then MSM8974 drivers beyond the UART, GIC
+and timer already working: eMMC, USB, PMIC, display. Each driver is its own project against
+a SoC with no public documentation for the parts that matter. Expect to spend most of the
+remaining calendar time here, and to reach a kernel that boots and prints long before one
+that mounts a filesystem.
+
+## 6. Process re-plan
+
+The stage-copy convention has done its job and has stopped paying for itself.
+
+**What to keep.** Non-persistent boot, fail-closed switches, `ram_console` evidence, the
+existing hardware-proven payload, the six retained snapshots, `tools/stage-archive.sh`, and
+the discipline of validating every claim on the device.
+
+**What to change.** A complete copy per experiment was the right shape for 2-file deltas on
+a tested base. It is the wrong shape for Phases 1–3, where the work is thousands of lines
+in a shared platform layer and the interesting question is always "what changed relative to
+the working baseline". Concretely:
+
+1. Keep `stages/stage90/` as the frozen, hardware-validated base and stop copying it per
+   experiment. New work evolves a single tree, with the Phase 1/2/3 feature switches and a
+   `make` target per milestone.
+2. Record each hardware-validated milestone as a **git tag plus one entry in the milestone
+   log (`docs/history/milestones.md`)** — what was proven, the `last_kmsg` evidence, the
+   commit. That is what a snapshot was for; a tag carries the same information without
+   3 200 duplicated files.
+3. **Retire the dry-run contract pattern.** 16 of Stage90's 58 `.c` files (~11 100 of
+   ~39 300 lines) are `*_dryrun*` contracts. They were a legitimate device for safely
+   deferring real work at a time when nothing could execute, but they are not evidence, and
+   at this scale they are where the effort went instead of into executable tests. Phases 1
+   onward get executable tests with hardware results, or nothing.
+4. Rename the goal in the root `README.md` from "iOS 6 adaptation" to "XNU/Darwin bring-up
+   on MSM8974", keeping iOS 6 as historical context. The current title sets an expectation
+   the project cannot meet and hides the one it can.
+
+## 7. Non-goals, stated plainly
+
+- **Stock iOS 6 userland: not achievable.** It needs Apple's boot chain, Apple's drivers,
+  AMFI/code signing, the dyld shared cache, and proprietary UIKit/SpringBoard/
+  CoreAnimation — none of which exist for MSM8974.
+- **An iOS-6-era kernel: not obtainable.** F3: no public ARM XNU from that era exists.
+- **Any persistent write to the device: out of scope**, unchanged from the root `README.md`.
+- **T3 (a userland) is not planned here.** If it is ever attempted it will be a
+  Darwin-like userland of our own, on top of a kernel we control — not iOS.
+
+Failure is not the same as no result: the bring-up method (non-persistent ARMv7 bring-up on
+a locked bootloader, register-level MSM8974 findings, QCDT/boot-image constraints, hang
+forensics through `ram_console`) is documented and reusable regardless of how far T2 gets.
+
+## 8. Immediate next actions
+
+In order, none of them requiring a new stage directory:
+
+1. Finish the self-recovering watchdog: prove PS_HOLD warm reboot from an induced hang
+   (Phase 0).
+2. Add the post-switch visibility checks and the non-executable-entry guard; re-run the
+   Stage90 jump and confirm the fixture header now produces a captured fault (Phase 0).
+3. Write down the current attribute map, then introduce the first Normal, cacheable,
+   shareable mapping and the `LDREX`/`STREX` test (Phase 1).
+4. Only after 1–3: revisit what the handoff target may do.
+
+## 9. Decision needed
+
+One strategic choice, and it does not block Phase 0–2:
+
+- **T1 only** — stop at "real XNU code executes, faults are captured, the contract is
+  documented and published". Weeks–months, high confidence.
+- **T2** — commit to the shim layer and driver work as an open-ended project. Phase 3 is
+  where the cost curve turns vertical; the estimate is months to a year+ with no guarantee
+  of a booting kernel.
+
+The recommendation is to fund T1 to completion, publish it, and treat T2 as a separate
+decision made after Phase 2's results are in hand — by which point the remaining cost will
+be measurable rather than estimated.

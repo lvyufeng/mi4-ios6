@@ -1,5 +1,13 @@
 # Method-C Staged XNU Bring-Up Progression Summary
 
+> **Historical — written at Stage83.** Kept as a record of the stages, not as current
+> status. It uses the pre-reorganization flat `stageN/` paths (those directories now live
+> at the tag `stage-archive-base`; see `../../stages/README.md`), and its entries naming
+> "public XNU `_start`" describe Stage-owned stubs with XNU-shaped names — no public XNU
+> object has been linked into or executed by any payload. For the current plan, what has
+> actually been proven, and the findings that reshaped it, see
+> [`roadmap.md`](roadmap.md).
+
 ## Overview
 
 Method-C is a fail-closed, Stage-owned, incremental approach to XNU kernel bring-up on Xiaomi Mi 4 (cancro) MSM8974 ARMv7 hardware. Each stage proves one additional capability boundary while maintaining strict safety constraints: no public XNU runtime execution, no generated Mach-O execution, no persistent writes, and non-persistent hardware validation only.

@@ -24,7 +24,16 @@
 
 ## Status — `status/`
 
-- `method-c-progression-summary.md` — the Method-C staged XNU bring-up progression, level by level.
+- `roadmap.md` — **the current plan.** Re-planned after Stage90: what has actually been
+  proven, the three findings that invalidated the previous plan (the handoff target is not
+  code; every mapping is strongly-ordered with caches off; no public iOS 6-era ARM XNU
+  exists), the Phase 0–5 technical roadmap with hardware exit criteria, and the open
+  strategic decision.
+- `method-c-progression-summary.md` — the Method-C staged XNU bring-up progression, level by
+  level. **Historical:** written at Stage83, uses the pre-reorganization flat `stageN/`
+  paths, and its "public XNU `_start` executes" entries refer to Stage-owned stubs with XNU
+  names (see `../status/roadmap.md` §2). Read it as a record of the stages, not as current
+  status.
 - `stage82-next-step-analysis.md` — Stage82 next-step analysis (written in Chinese).
 
 ## History — `history/`
