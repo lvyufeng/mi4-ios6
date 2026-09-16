@@ -108,10 +108,11 @@ fi
 
 case "$HWSELFTEST" in 1|1u)
   [[ $ALLOW_HW_SELFTEST -eq 1 ]] || fail "the hardware-watchdog SELFTEST spins forever on purpose; needs --allow-hw-watchdog-selftest"
-  echo "HW WATCHDOG SELFTEST: allowed. The payload will NOT reach platform_reboot();"
-  echo "          the hardware countdown is the only route back to Android (~30s)."
-  echo "          This is the run to do FIRST: once it passes, every later run has a"
-  echo "          guaranteed reset and stops costing a manual power cycle."
+  echo "HW WATCHDOG SELFTEST: allowed. The payload spins and the hardware countdown"
+  echo "          should reboot it at ~33s. If the watchdog does NOT fire, the spin is"
+  echo "          bounded and PS_HOLD returns the device at ~90s instead - so this run"
+  echo "          cannot leave the phone dark either way. Time-to-return IS the result:"
+  echo "          ~33s = watchdog fired, ~90s = it did not (and the log says which)."
   ;;
 esac
 

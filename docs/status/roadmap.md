@@ -296,10 +296,12 @@ each of these runs buys a lot for very little risk.
 ```bash
 cd stages/stage90
 
-# 1. Prove the hardware watchdog FIRST. It arms the SoC's own counter and then spins
-#    forever, so nothing but the hardware countdown can bring the phone back (~30s).
-#    Do this one before anything else: once it passes, every later run has a
-#    guaranteed reset and stops costing a manual power cycle.
+# 1. Prove the hardware watchdog FIRST. It arms the SoC's own counter and then spins in a
+#    BOUNDED loop: the watchdog should reboot the phone at ~33s, and if it does not the
+#    bound reboots it at ~90s via PS_HOLD. So this run cannot leave the phone dark either
+#    way, and the time it takes IS the result.
+#    Do this one before anything else: once it passes, every later run has a guaranteed
+#    reset and stops costing a manual power cycle.
 STAGE90_EXTRA_CFLAGS='-DSTAGE90_HW_WATCHDOG_SELFTEST=1' ./build.sh
 ./preflight_boot_check.sh --allow-hw-watchdog-selftest
 

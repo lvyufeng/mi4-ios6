@@ -320,6 +320,30 @@ consequences worth being explicit about, because both are easy to break later:
 Verified against the definitions: `SAT_COMMON` = `0x47`, `SAT_L1_HANDOFF` = `0x38`,
 `FULL` = `0x7f`, non-`FULL` = `0x47`.
 
+
+## 10. The self-tests could hang — fixed, because that is the one run that must not
+
+Both self-tests were `for (;;)`. That made *the run whose purpose is to prove the recovery
+net* the run that could hang worst: if the net under test did not fire, nothing else would,
+and the phone needed a manual power press — reintroducing, in the test for the fix, exactly
+the failure being fixed.
+
+Bounded now. `stage90_selftest_bounded_spin(deadline_us, message)` spins to a deadline and
+then calls `platform_reboot()` — the already-proven PS_HOLD path. So:
+
+| Outcome | What happens | What it means |
+| --- | --- | --- |
+| Net fires | device returns at the net's own timeout: ~33 s (watchdog) or ~60 s (dead-man) | pass |
+| Net does not fire | device returns at 90 s via PS_HOLD, and the log says `deadline reached - the ... did NOT fire` | fail, but no power press |
+
+**Time-to-return is the result**, so the bound costs nothing in diagnostic power. 90 s is 3x
+the hardware watchdog's bite and 1.5x the dead-man's budget, so neither is rushed.
+
+This is a change to the *test*, made while the device is down, that removes the worst case
+from the first run you would do. The `for (;;)` form was defensible when the point was to
+isolate which net fired; it was not defensible as the first thing to run on a device that
+has already been hung once.
+
 ## 6. What this audit cannot bound
 
 - **The watchdog's register semantics.** The readback and liveness checks confirm the

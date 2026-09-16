@@ -881,6 +881,36 @@ uint32_t stage90_deadman_armed(void)
     return g_stage90_deadman_armed;
 }
 
+#if STAGE90_HW_WATCHDOG_SELFTEST || STAGE90_DEADMAN_SELFTEST
+/*
+ * Spin until `deadline_us` has elapsed, then reboot through PS_HOLD.
+ *
+ * Used by the self-tests. Returns only by rebooting, so the caller need not handle a
+ * return - the point is that the device always comes back, whether or not the net under
+ * test fired. The elapsed time is the result: a device back at the net's own timeout means
+ * the net fired, and one back at the deadline means it did not.
+ */
+static void stage90_selftest_bounded_spin(uint32_t deadline_us, const char *deadline_msg)
+{
+    uint64_t start = timebase_ticks();
+
+    for (;;) {
+        if (timebase_elapsed_us(start, timebase_ticks()) >= deadline_us) {
+            break;
+        }
+        __asm__ volatile ("nop" ::: "memory");
+    }
+
+    /* The net under test did not fire. Report that, then use the proven reset path. */
+    log_puts("MI4IOS6_STAGE90 ");
+    log_puts(deadline_msg);
+    log_puts("\n");
+    log_kv32("selftest_deadline_us", deadline_us);
+    log_kv32("selftest_elapsed_us", timebase_elapsed_us(start, timebase_ticks()));
+    platform_reboot();
+}
+#endif
+
 void stage90_main(void)
 {
     struct apple_dt_builder b;
@@ -907,30 +937,33 @@ void stage90_main(void)
 
 #if STAGE90_HW_WATCHDOG_SELFTEST
     /*
-     * Hardware-watchdog self-test: the software dead-man is deliberately NOT armed,
-     * so nothing but the SoC's own countdown can bring the phone back. If it returns
-     * to Android on its own after STAGE90_HW_WATCHDOG_TIMEOUT_S, the last-resort reset
-     * is proven - and every later run stops costing a manual power cycle.
+     * Hardware-watchdog self-test: the software dead-man is deliberately NOT armed, so
+     * the SoC's own countdown is the only net. If the device returns after
+     * STAGE90_HW_WATCHDOG_TIMEOUT_S (plus the bite gap) the last-resort reset is proven.
+     *
+     * The spin is bounded, so a watchdog that does NOT fire still returns the device - via
+     * PS_HOLD, at STAGE90_SELFTEST_DEADLINE_US - and says so. See that macro for why: an
+     * unbounded spin here would make the run whose purpose is to prove the recovery net the
+     * one run that could hang worst.
      */
-    log_puts("MI4IOS6_STAGE90 hw_watchdog SELFTEST: spinning; only the hardware countdown can recover\n");
-    for (;;) {
-        __asm__ volatile ("nop" ::: "memory");
-    }
+    log_puts("MI4IOS6_STAGE90 hw_watchdog SELFTEST: spinning; the hardware countdown should reboot us at ~33s\n");
+    stage90_selftest_bounded_spin(STAGE90_SELFTEST_DEADLINE_US,
+                                  "hw_watchdog SELFTEST: deadline reached - the hardware watchdog did NOT fire");
 #endif
 
 #if STAGE90_DEADMAN_SELFTEST
     /*
-     * Dead-man self-test: arm, then prove the software recovery path end to end.
-     * Nothing after this point runs - the only way back to Android is the armed
-     * dead-man firing, dumping the interrupted PC, and rebooting through PS_HOLD.
-     * The hardware watchdog is already armed above and is the second net; to attribute
-     * a success to the software dead-man alone, build with STAGE90_HW_WATCHDOG=0.
+     * Dead-man self-test: arm, then prove the software recovery path end to end. The
+     * hardware watchdog is already armed above and is the second net; to attribute a
+     * success to the software dead-man alone, build with STAGE90_HW_WATCHDOG=0.
+     *
+     * Bounded for the same reason as the other self-test, with a longer deadline since the
+     * dead-man's own budget is 60s.
      */
     (void)stage90_arm_deadman_reset();
-    log_puts("MI4IOS6_STAGE90 deadman SELFTEST: spinning without any reset call; only the dead-man can recover\n");
-    for (;;) {
-        __asm__ volatile ("nop" ::: "memory");
-    }
+    log_puts("MI4IOS6_STAGE90 deadman SELFTEST: spinning; the dead-man should dump and reboot us at ~60s\n");
+    stage90_selftest_bounded_spin(STAGE90_SELFTEST_DEADLINE_US,
+                                  "deadman SELFTEST: deadline reached - the dead-man did NOT fire");
 #endif
 
     build_stage90_apple_dt(&b);

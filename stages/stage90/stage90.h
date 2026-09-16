@@ -4073,6 +4073,30 @@ struct stage90_xnu_macho_loader_result {
 #endif
 
 /*
+ * How long a self-test spin is allowed to run before it gives up and reboots through
+ * PS_HOLD.
+ *
+ * Both self-tests used to be `for (;;)`, which made the run whose whole purpose is to
+ * prove the recovery net the one run that could hang worst: if the net under test did not
+ * fire, nothing else would, and the phone needed a manual power press. Bounding the spin
+ * removes that:
+ *
+ *   - net works  -> the device returns at the net's own timeout (30s, or 60s for the
+ *                   dead-man), which is the pass
+ *   - net fails  -> the device returns at this deadline via platform_reboot(), which is
+ *                   the already-proven PS_HOLD path, and the log says so
+ *
+ * Either way the device comes back without being touched, and the *time* it took is the
+ * result: ~30s means the watchdog fired; ~90s means it did not and PS_HOLD did. So the
+ * bound costs nothing in diagnostic power and removes the one run that could have left the
+ * phone dark.
+ *
+ * 90s is 3x the hardware watchdog's 33s bite and 1.5x the dead-man's 60s budget, so neither
+ * net is rushed.
+ */
+#define STAGE90_SELFTEST_DEADLINE_US 90000000u
+
+/*
  * Produce a boot_args conforming to the contract in XNU's own entry code
  * (osfmk/arm/start.s), alongside - not instead of - the identity-based one the
  * Stage-owned ladder uses. Roadmap Phase 2; see xnu_boot_args_conformant.c and
