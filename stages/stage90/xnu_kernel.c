@@ -80,7 +80,16 @@ int kernel_entry(struct boot_args *args)
      *
      * It leaves the timer disarmed: the payload's own timer code owns arming from here.
      */
-    (void)stage90_xnu_msm8974_shim_run();
+    if (stage90_xnu_msm8974_shim_run() != 0) {
+        /*
+         * Non-fatal, and said out loud. This is the next stage's platform layer, not a
+         * precondition for the current one, so it must not fail the run - but a reader
+         * comparing "the run passed" with "the shim passed" would otherwise have to
+         * notice that msm8974_shim_status in the log disagrees with kernel_entry ok.
+         */
+        xnu_log_puts("kernel_entry: msm8974 platform shim did NOT satisfy its checks - "
+                     "see msm8974_shim_failures above; not fatal to this run\n");
+    }
 #endif
 
 #if STAGE90_XNU_BOOT_ARGS
@@ -91,7 +100,11 @@ int kernel_entry(struct boot_args *args)
      * on the real image_end the linker produced, which is the one number in the
      * contract that cannot be checked from the host beforehand.
      */
-    (void)stage90_xnu_boot_args_prepare(args->deviceTreeP, args->deviceTreeLength);
+    if (stage90_xnu_boot_args_prepare(args->deviceTreeP, args->deviceTreeLength) != 0) {
+        /* Same reasoning as the shim above: a Phase 2 probe, recorded and not fatal. */
+        xnu_log_puts("kernel_entry: conforming boot_args did NOT satisfy its contract - "
+                     "see xnu_ba_failures above; not fatal to this run\n");
+    }
 #endif
 
     ml_init_timebase();

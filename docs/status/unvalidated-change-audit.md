@@ -453,6 +453,34 @@ misattribution this session has been correcting elsewhere — an empty log means
 missing, not that the watchdog failed. It now says so, and suggests checking that
 `/proc/last_kmsg` is from the boot in question rather than stale.
 
+
+## 14. Two Phase 2/3 probes could fail silently under "kernel_entry ok"
+
+`xnu_kernel.c` called both probes with `(void)`:
+
+```c
+(void)stage90_xnu_msm8974_shim_run();
+(void)stage90_xnu_boot_args_prepare(args->deviceTreeP, args->deviceTreeLength);
+```
+
+Both return non-zero on failure and both are *correctly* non-fatal — they are the next
+stages' layers, not preconditions for the current one. But discarding the value meant a log
+could contain `msm8974_shim_status=0xd0000001` **and** `kernel_entry ok`, and a reader
+comparing "did the run pass" with "did the shim pass" would have to spot the disagreement
+themselves. That is the same shape as the other reporting defects this session: the log was
+true and the implication was available to be misread.
+
+Fixed by handling the return and logging a plain line when either probe fails, naming it as
+non-fatal and pointing at the field that says why. The check is unchanged — a probe failure
+still does not stop the payload, which is deliberate — but the log can no longer be read as
+saying the probe passed.
+
+Also corrected in the spec: it said the ordered arm path's `run()`/`prepare()` separation was
+"verified by reading the call graph". Reading the call graph is what *found* that nothing
+calls `prepare`/`commit`/`disarm` at all. They are an API surface written to make §4's
+ordering explicit, compile-checked, and not yet exercised — and the spec now says so rather
+than implying they had been run.
+
 ## 6. What this audit cannot bound
 
 - **The watchdog's register semantics.** The readback and liveness checks confirm the

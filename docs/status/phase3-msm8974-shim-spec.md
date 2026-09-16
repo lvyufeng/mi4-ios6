@@ -231,6 +231,13 @@ The ordering is enforced inside the functions too: `commit()` writes `CNTP_CTL` 
 inspecting the emitted code paths, since the failure they prevent — a timer firing into a
 handler whose state is not ready — looks like a broken GIC rather than a broken order.
 
+**`prepare`/`commit`/`disarm` are an API surface, not yet exercised.** Nothing calls them:
+`xnu_kernel.c` calls `shim_run()` only, which is the registration and hardware-fact check.
+They exist because the arm path is a stated requirement (§4) and because writing it down is
+what makes the ordering explicit — but "written and compile-checked" is not "run", and this
+document should not imply otherwise. The first caller would be whatever brings the timer up
+under XNU's control.
+
 Verified off-device: build clean under `-Werror` in both configurations; 18 combinations
 across shim × handoff-mode × watchdog compile clean; the `_Static_assert`s fire when a field
 offset is perturbed; the ABI checker reports field-count and size mismatch when a field is
