@@ -206,6 +206,13 @@ and returns, with the IRQ handler still live afterwards.
 - Turn the I-cache on first (XNU does), then the D-cache, with explicit clean/invalidate on
   the TTBR switch and after any code or page-table write — the loader materializes tables
   and copies segments at runtime, which Strongly-Ordered memory currently hides.
+- **Do not enable the D-cache without fixing `ram_console` first.** `log_puts()` writes to
+  `RAM_CONSOLE_BASE` and then issues `dsb sy; isb`. With caches off that is a complete
+  guarantee; with the D-cache on it is not, and the log would sit dirty in the cache across
+  `platform_reboot()` — so `/proc/last_kmsg`, the dead-man dump, and every diagnostic in
+  Phases 2–4 would silently return stale or garbage data, and the loss would look like a
+  payload failure. This must be a cache-clean in the write path, and the dead-man dump path
+  deserves a full clean-and-invalidate of the log region before the reboot.
 - Prove exclusive access works: a `LDREX`/`STREX` loop that increments a shareable counter
   reliably. This is the single test that distinguishes a working kernel pmap from the
   current one.
