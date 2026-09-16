@@ -331,8 +331,20 @@ for this section:
 - ~~Which timebase is authoritative.~~ **Resolved in §2.3:** the software TBL is dead code
   on this build, `CNTPCT` is what everything reads, and the timer therefore need not be
   periodic.
-- **Anything about SMP.** `ml_processor_register`, IPIs and the CPU startup path are all
-  Apple-shaped and untouched here.
+- **SMP — and reading it shows it is not shim-shaped the way the timer was.** `ml_processor_register`
+  (`osfmk/arm/machine_routines.c:526`) is not a registration function like `ml_init_timebase`;
+  it *allocates and initialises kernel data structures*. It `panic`s outright if
+  `phys_id >= MAX_CPUS` (`:544`, with a comment calling the panic "a convenient way to catch
+  bugs in the pexpert headers"), then calls `chudxnu_cpu_alloc`, `console_cpu_alloc`,
+  `cpu_data_register` and `processor_init` — all of which own `cpu_data_t` and `processor_t`
+  storage that belongs to the XNU kernel, not to a platform layer.
+
+  The distinction matters for planning, because the timer path *was* shim-shaped: XNU copies
+  the ops into a global and calls them, so a platform can supply behaviour. This one cannot
+  — replacing it means replacing parts of the scheduler's CPU model, which is a kernel
+  concern. So SMP is not "the next shim"; it is a question about how much of XNU has to be
+  present before a second core can exist at all, and it belongs after Phase 4 rather than
+  inside Phase 3. Recorded as a boundary rather than a task.
 
 These are where Phase 3's real risk sits, and each is a reading task before it is a coding
 task.
