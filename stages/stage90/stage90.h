@@ -6300,6 +6300,11 @@ extern volatile uint32_t stage90_last_timer_irq_id;
 extern volatile uint32_t stage90_last_timer_ctl;
 extern volatile uint32_t stage90_other_irq_count;
 extern volatile uint32_t stage90_irq_sample_count;
+/*
+ * Sampling budget, distinct from the ring index above: only interrupts the sampler asked
+ * for (timer ticks in sample mode) may consume it. See the comment in gic.c.
+ */
+extern volatile uint32_t stage90_irq_sample_budget_used;
 extern volatile uint32_t stage90_irq_sample_ring[16];
 extern volatile uint32_t stage90_irq_last_sampled_pc;
 extern volatile uint32_t stage90_irq_sample_mode;

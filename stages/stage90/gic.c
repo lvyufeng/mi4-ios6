@@ -52,6 +52,21 @@ volatile uint32_t stage90_sgi_selftest_passed;
 #define STAGE90_IRQ_SAMPLE_RING_SIZE 16u
 volatile uint32_t stage90_irq_sample_count;
 volatile uint32_t stage90_irq_sample_ring[STAGE90_IRQ_SAMPLE_RING_SIZE];
+/*
+ * Sampling BUDGET, kept separate from the ring index above.
+ *
+ * They used to be the same variable, and that was a bug: the ring records every
+ * interrupt (useful - it shows the PC at any interrupt), but the budget that decides when
+ * the watchdog fires must count only the samples it actually asked for, i.e. timer
+ * interrupts while in sample mode. With one variable, any interrupt consumed budget - so
+ * a few stray interrupts made the next timer tick fire the watchdog early.
+ *
+ * The exposure was not theoretical. The handoff's sampling watchdog uses SAMPLE_MAX = 16
+ * at 500us, an 8ms budget: sixteen unrelated interrupts would end the sampling and reboot
+ * the device before it had sampled the target at all, which would look like "the jump hung
+ * instantly". The dead-man uses 600 at 100ms and is less exposed, but wrong the same way.
+ */
+volatile uint32_t stage90_irq_sample_budget_used;
 volatile uint32_t stage90_irq_last_sampled_pc;
 
 /*
@@ -254,7 +269,8 @@ void stage90_irq_c_handler(uint32_t interrupted_pc)
         stage90_last_timer_irq_id = intid;
         stage90_last_timer_ctl = ctl;
         if (stage90_irq_sample_mode == 1u) {
-            if (stage90_irq_sample_count < stage90_irq_sample_max) {
+            stage90_irq_sample_budget_used = stage90_irq_sample_budget_used + 1u;
+            if (stage90_irq_sample_budget_used < stage90_irq_sample_max) {
                 /* Periodic PC-sampling: re-arm for the next sample window. */
                 write_cntp_tval(stage90_irq_sample_interval_ticks);
                 write_cntp_ctl(CNTP_CTL_ENABLE);
@@ -318,6 +334,7 @@ static void reset_irq_counters(void)
     stage90_last_timer_ctl = 0xffffffffu;
     stage90_other_irq_count = 0;
     stage90_irq_sample_count = 0;
+    stage90_irq_sample_budget_used = 0;
     stage90_irq_last_sampled_pc = 0xffffffffu;
     for (uint32_t i = 0u; i < STAGE90_IRQ_SAMPLE_RING_SIZE; i++) {
         stage90_irq_sample_ring[i] = 0u;
@@ -554,6 +571,7 @@ void stage90_dump_pc_samples(void)
 
     xnu_log_puts("stage90 pc-samples: begin\n");
     xnu_log_kv32("pc_sample_total", total);
+    xnu_log_kv32("pc_sample_budget_used", stage90_irq_sample_budget_used);
     xnu_log_kv32("pc_sample_watchdog_fired", stage90_irq_sample_watchdog_fired);
     xnu_log_kv32("pc_sample_timer_irq_count", stage90_timer_irq_count);
     xnu_log_kv32("pc_sample_last_pc", stage90_irq_last_sampled_pc);

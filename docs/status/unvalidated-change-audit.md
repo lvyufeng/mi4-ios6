@@ -221,6 +221,44 @@ Two honest qualifications, since the point of this section is not to overclaim:
   the safety story, and because it is why the ordering (install `VBAR` as early as possible)
   should not be changed casually.
 
+
+## 8. A defect found by reading the recovery handler: the sampling budget was shared
+
+The recovery nets depend on `stage90_irq_c_handler`, and reading it against its own
+documentation turned up a real bug — of exactly the kind this audit exists to catch, because
+it would have produced *early, unexplained reboots* rather than a clean failure.
+
+`stage90_irq_sample_count` served two purposes: the sample ring index, and the budget that
+decides when the watchdog fires. It is incremented **for every interrupt**, before the
+per-source dispatch:
+
+```c
+    stage90_irq_sample_ring[sample_idx] = interrupted_pc;
+    stage90_irq_sample_count = stage90_irq_sample_count + 1u;   /* every interrupt */
+    ...
+    } else if (intid == GIC_TIMER_PPI0_ID || intid == GIC_TIMER_PPI1_ID) {
+            if (stage90_irq_sample_count < stage90_irq_sample_max) { re-arm } else { FIRE }
+```
+
+So any interrupt from any source consumed sampling budget, and the next timer tick could
+then fire the watchdog **early**:
+
+| User | Budget | Exposed to |
+| --- | --- | --- |
+| Handoff sampling watchdog (`FULL` / `PREFLIGHT`) | 16 samples x 500 us = **8 ms** | **16 unrelated interrupts** would end sampling and reboot *before the target was sampled at all* - which would look like "the jump hung instantly" |
+| Software dead-man (default) | 600 x 100 ms = 60 s | 600 unrelated interrupts in the window |
+
+Recording the ring for every interrupt is *useful* - it shows the PC at any interrupt and is
+worth keeping. The bug is only that the **budget** was the same variable. Fixed by splitting
+them: `stage90_irq_sample_budget_used` increments only in the timer branch while in sample
+mode, and is what the fire/re-arm decision uses. It is now logged and reported as
+`pc_sample_budget_used` / `pc_sample_count`, so a run shows both numbers and the difference
+between them is visible rather than hidden.
+
+Worth noting how this was found: not by a test, and not by the device - by reading the
+handler against the comment above it, which says "this is how we observe where XNU is
+executing when the timer/watchdog fires". A non-timer interrupt is not that.
+
 ## 6. What this audit cannot bound
 
 - **The watchdog's register semantics.** The readback and liveness checks confirm the

@@ -464,6 +464,9 @@ int stage90_xnu_handoff_run(
 	 * take its normal visible reboot path, instead of spinning forever.
 	 */
 	r->preflight_loop_entered = stage90_handoff_preflight_loop_entered;
+	/* Budget used, not the ring index: they differ whenever a non-timer interrupt
+	 * arrived, and the budget is what decides when this watchdog fires. */
+	r->pc_sample_count = stage90_irq_sample_budget_used;
 	r->preflight_loop_ticks = stage90_handoff_preflight_loop_ticks;
 	xnu_log_puts("stage90_xnu_handoff: preflight loop returned without a watchdog reboot\n");
 	xnu_log_kv32("preflight_loop_entered", stage90_handoff_preflight_loop_entered);
@@ -481,7 +484,7 @@ finish:
 	stage90_dump_pc_samples();
 	r->jumped_observed = r->jumped;
 	r->xnu_returned_observed = r->xnu_returned;
-	r->pc_sample_count = stage90_irq_sample_count;
+	r->pc_sample_count = stage90_irq_sample_budget_used;
 	r->pc_sample_last_pc = stage90_irq_last_sampled_pc;
 	r->watchdog_fired = stage90_irq_sample_watchdog_fired;
 
