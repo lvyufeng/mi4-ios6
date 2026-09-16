@@ -11,7 +11,7 @@
 # This script never runs fastboot and never touches the device. It verifies the
 # image and prints the command to run, or refuses and says why.
 #
-# Usage: ./preflight_boot_check.sh [--allow-preflight] [--allow-full] [--allow-selftest] [--allow-attr-normal-nc] [--allow-hw-watchdog-selftest]
+# Usage: ./preflight_boot_check.sh [--allow-preflight] [--allow-full] [--allow-selftest] [--allow-attr-normal-nc] [--allow-hw-watchdog-selftest] [--allow-fault-inject]
 
 set -euo pipefail
 
@@ -25,6 +25,7 @@ ALLOW_FULL=0
 ALLOW_SELFTEST=0
 ALLOW_ATTR=0
 ALLOW_HW_SELFTEST=0
+ALLOW_FAULT_INJECT=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -33,6 +34,7 @@ for arg in "$@"; do
     --allow-selftest)    ALLOW_SELFTEST=1 ;;
     --allow-attr-normal-nc) ALLOW_ATTR=1 ;;
     --allow-hw-watchdog-selftest) ALLOW_HW_SELFTEST=1 ;;
+    --allow-fault-inject) ALLOW_FAULT_INJECT=1 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -58,6 +60,7 @@ DEADMAN=$(value_of STAGE90_DEADMAN_ENABLE)
 LADDER=$(value_of STAGE90_ENTRY_LADDER_LEVEL)
 HWWDT=$(value_of STAGE90_HW_WATCHDOG)
 HWSELFTEST=$(value_of STAGE90_HW_WATCHDOG_SELFTEST)
+FAULT_INJECT=$(value_of STAGE90_HANDOFF_FAULT_INJECT_VA)
 
 [[ -n $MODE ]] || fail "STAGE90_HANDOFF_MODE missing from $CONFIG"
 
@@ -143,6 +146,22 @@ fi
 echo
 echo "== ladder =="
 echo "STAGE90_ENTRY_LADDER_LEVEL=$LADDER"
+
+echo
+echo "== fault injection =="
+case "$FAULT_INJECT" in
+  0|0u|"")
+    echo "off: the handoff targets the Stage-owned high-VA function as usual."
+    ;;
+  *)
+    [[ $ALLOW_FAULT_INJECT -eq 1 ]] || fail "this build jumps at an intentionally unmapped VA ($FAULT_INJECT); needs --allow-fault-inject"
+    echo "FAULT INJECTION: this build will jump at $FAULT_INJECT, which is expected to be"
+    echo "          unmapped, and the abort path should log the fault and reboot."
+    echo "          Expected evidence: an 'exception pabort ... lr=$FAULT_INJECT' line."
+    echo "          A silent hang or a boot loop instead means the address IS mapped -"
+    echo "          the failure mode this mode exists to avoid."
+    ;;
+esac
 
 echo
 echo "== mapping attributes =="

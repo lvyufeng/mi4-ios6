@@ -44,12 +44,17 @@ static inline void handoff_dsb_isb(void)
 #define STAGE90_HANDOFF_PREFLIGHT_LOOP_US \
 	(STAGE90_HANDOFF_SAMPLE_INTERVAL_US * STAGE90_HANDOFF_SAMPLE_MAX * 4u)
 
-#if STAGE90_HANDOFF_MODE == STAGE90_HANDOFF_MODE_FULL
+#if (STAGE90_HANDOFF_MODE == STAGE90_HANDOFF_MODE_FULL) && \
+    (STAGE90_HANDOFF_FAULT_INJECT_VA == 0u)
 /*
  * Stage-owned no-return handoff target. We intentionally keep the embedded
  * Mach-O fixture inert/non-executable and jump to this local function through
  * its 0x80000000+phys high-VA alias instead. That validates the post-jump
  * PC-sampling watchdog path without crossing the no-macho-exec boundary.
+ *
+ * Excluded when fault injection is on: that build jumps to an unmapped VA instead, so
+ * this target would be unused - and a fault-injection run must not accidentally fall back
+ * to a mapped target, which is the boot-loop failure it exists to avoid.
  */
 static volatile uint32_t stage90_handoff_sample_target_entered;
 static volatile uint32_t stage90_handoff_sample_target_args;
@@ -133,6 +138,7 @@ static void stage90_xnu_handoff_log(
 	xnu_log_kv32("stage90_xnu_handoff_preflight_watchdog_armed", r->preflight_watchdog_armed);
 	xnu_log_kv32("stage90_xnu_handoff_preflight_loop_entered", r->preflight_loop_entered);
 	xnu_log_kv32("stage90_xnu_handoff_preflight_loop_ticks", r->preflight_loop_ticks);
+	xnu_log_kv32("stage90_xnu_handoff_fault_injection_armed", r->fault_injection_armed);
 	xnu_log_kv32("stage90_xnu_handoff_checksum", r->checksum);
 }
 
@@ -221,6 +227,36 @@ int stage90_xnu_handoff_run(
 	}
 	r->satisfied_mask |= STAGE90_XNU_HANDOFF_SAT_CANDIDATE_L1_READY;
 
+#if STAGE90_HANDOFF_FAULT_INJECT_VA != 0u
+	/*
+	 * Fault-injection build: target a VA that is deliberately unmapped, to exercise the
+	 * abort path end to end. See STAGE90_HANDOFF_FAULT_INJECT_VA in stage90.h for why
+	 * this is needed and why 0x80100000 is a hole in both tables.
+	 *
+	 * The guard below is the inverted form of the normal one on purpose. A fault-
+	 * injection run whose target turned out to be mapped would silently become a boot
+	 * loop - the exact failure this switch exists to avoid - so a target inside the
+	 * candidate L2 window is treated as a configuration error and refuses to jump.
+	 */
+	r->stage_target_phys = 0u;
+	r->stage_target_high_va = STAGE90_HANDOFF_FAULT_INJECT_VA;
+	xnu_log_puts("stage90_xnu_handoff: FAULT INJECTION - target is a deliberately unmapped VA\n");
+	xnu_log_kv32("fault_inject_va", STAGE90_HANDOFF_FAULT_INJECT_VA);
+	if (r->stage_target_high_va >= pmap_result->virt_base &&
+	    r->stage_target_high_va < (pmap_result->virt_base + 0x00100000u)) {
+		xnu_log_puts("stage90_xnu_handoff: fault-injection target is INSIDE the candidate L2 "
+		             "window; it would be mapped and this would become a boot loop\n");
+		r->failure_mask |= STAGE90_XNU_HANDOFF_FAIL_STAGE_TARGET;
+		goto finish;
+	}
+	if ((r->stage_target_high_va & 0x3u) != 0u) {
+		xnu_log_puts("stage90_xnu_handoff: fault-injection target unaligned\n");
+		r->failure_mask |= STAGE90_XNU_HANDOFF_FAIL_STAGE_TARGET;
+		goto finish;
+	}
+	r->satisfied_mask |= STAGE90_XNU_HANDOFF_SAT_STAGE_TARGET_READY;
+	r->fault_injection_armed = 1u;
+#else
 	/*
 	 * Compute the high-VA alias of the Stage-owned target. The candidate L2 maps
 	 * VA virt_base+N -> PA N for N in [0, 1MB). Keep the target inside that proven
@@ -249,6 +285,7 @@ int stage90_xnu_handoff_run(
 		goto finish;
 	}
 	r->satisfied_mask |= STAGE90_XNU_HANDOFF_SAT_STAGE_TARGET_READY;
+#endif /* STAGE90_HANDOFF_FAULT_INJECT_VA */
 
 	/* Log environment before installing the candidate L1. */
 	xnu_log_puts("stage90_xnu_handoff: environment check before candidate L1\n");
@@ -297,6 +334,17 @@ int stage90_xnu_handoff_run(
 	xnu_log_kv32("sp_after_candidate", sp);
 	xnu_log_kv32("cpsr_after_candidate", cpsr);
 
+#if STAGE90_HANDOFF_FAULT_INJECT_VA != 0u
+	/*
+	 * No content check on this path, and that is the point: the target is unmapped, so
+	 * dereferencing it would take a DATA abort here and be handled by the returnable
+	 * data-abort handler - which would not produce the logged-fault-then-reboot evidence
+	 * this run is for. Skipping the read lets the fault happen at the branch, as a
+	 * prefetch abort, which reaches stage90_exception_common and logs PC/LR/SPSR.
+	 */
+	xnu_log_puts("stage90_xnu_handoff: FAULT INJECTION - skipping target content check (unmapped)\n");
+	(void)code;
+#else
 	/*
 	 * Non-executable-entry guard, content half. Read the first word at the target
 	 * under the candidate L1 and refuse to jump if it is the fixture's __TEXT
@@ -320,6 +368,7 @@ int stage90_xnu_handoff_run(
 			xnu_log_puts("stage90_xnu_handoff: WARNING - suspicious target instruction pattern\n");
 		}
 	}
+#endif
 
 	/* Ready for handoff */
 	r->ready = 1;
@@ -362,7 +411,17 @@ int stage90_xnu_handoff_run(
 	/* Unreachable through the target's own body: the call returned without reaching it. */
 	stage90_stop_pc_sampling_watchdog();
 	xnu_log_puts("stage90_xnu_handoff: *** HIGH-VA TARGET RETURNED UNEXPECTEDLY ***\n");
+#if STAGE90_HANDOFF_FAULT_INJECT_VA == 0u
 	xnu_log_kv32("sample_target_entered", stage90_handoff_sample_target_entered);
+#else
+	/*
+	 * This build jumped at an unmapped VA, so there is no target body to have entered -
+	 * if control returned here at all, the "unmapped" address was mapped. Logged plainly
+	 * because it would mean the fault-injection premise is wrong, not that the target ran.
+	 */
+	xnu_log_puts("stage90_xnu_handoff: returned from an UNMAPPED target - the address was "
+	             "actually mapped; fault injection is invalid\n");
+#endif
 	r->xnu_returned = 1;
 	r->failure_mask |= STAGE90_XNU_HANDOFF_FAIL_XNU_RETURNED;
 #else

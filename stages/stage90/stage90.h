@@ -3863,6 +3863,34 @@ struct stage90_xnu_macho_loader_result {
 #define STAGE90_HANDOFF_MODE_PREFLIGHT_WATCHDOG_ONLY 1u
 #define STAGE90_HANDOFF_MODE_HARD_SKIP               2u
 
+/*
+ * Fault injection: jump to a VA that is deliberately unmapped, instead of the Stage-owned
+ * high-VA target. This exists for Phase 0's exit criterion (b) - "a jump to the Stage90
+ * fixture header produces a logged undef/abort with PC/LR, not a hang" - which could not
+ * be tested as originally planned.
+ *
+ * The plan was to jump at the fixture's entry VA and expect a fault. Under the candidate L1
+ * that VA is a *valid mapping to real code*: the candidate L2 maps VA 0x80000000+X -> PA X
+ * for X < 1 MB, and linker.ld puts _start at PA 0x8000, so 0x80008000 resolves to the
+ * payload's own entry point. That test would have produced a boot loop - and a boot loop
+ * calls log_init() on each iteration, wiping the log, so it would have looked exactly like
+ * the hang it was meant to diagnose. Hence this switch: the target is chosen to be unmapped
+ * in BOTH the candidate L1 and the identity table, so the test does not depend on which
+ * table happens to be live.
+ *
+ * The abort reaches stage90_exception_common (vectors.S), which logs the exception type,
+ * the faulting LR and the SPSR, then calls platform_reboot() - which now also forces a
+ * watchdog bite. So the log survives to /proc/last_kmsg. Expected evidence is an
+ * "exception pabort ... lr=0x80100000" line followed by the reboot sequence, not silence.
+ *
+ * 0x80100000 is the default because it sits in a genuine 1 MB hole: the candidate L2 window
+ * ends at 0x800fffff and the RAM direct map starts at 0x80200000, and the identity table
+ * maps only PA 0-2 MB. Unmapped under either.
+ */
+#if !defined(STAGE90_HANDOFF_FAULT_INJECT_VA)
+#define STAGE90_HANDOFF_FAULT_INJECT_VA 0u
+#endif
+
 #if !defined(STAGE90_HANDOFF_MODE)
 /*
  * Default is the safest mode that still exercises the payload. HARD_SKIP stops
@@ -4229,6 +4257,9 @@ struct stage90_xnu_handoff_result {
     uint32_t preflight_watchdog_armed;
     uint32_t preflight_loop_entered;
     uint32_t preflight_loop_ticks;
+
+    /* 1 when this build targeted a deliberately unmapped VA (Phase 0 criterion b). */
+    uint32_t fault_injection_armed;
 
     uint32_t checksum;
 };

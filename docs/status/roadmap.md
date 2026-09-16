@@ -91,9 +91,26 @@ of *any* log, because an abort would have been logged.
 
 Either way it changes one thing downstream: **Phase 0's criterion (b) cannot be tested by
 jumping to the fixture VA.** Under the candidate L1 that is a valid mapping to real code, so
-the test would produce a boot loop rather than a logged fault. A fault-injection test has to
-target something genuinely unmapped, or a PA that holds data — and it should say which it is
-targeting and why.
+the test would produce a boot loop rather than a logged fault. And the existing handoff
+*structurally forbids* any other target — it requires the target to be inside the candidate
+L2 window — so criterion (b) was untestable, not merely misdirected.
+
+**Implemented:** `STAGE90_HANDOFF_FAULT_INJECT_VA` (default 0 = off). When set, the handoff
+jumps at that VA instead of the Stage-owned alias, skips the target content check (so the
+fault happens at the branch as a prefetch abort, reaching `stage90_exception_common`, which
+logs PC/LR/SPSR and reboots — rather than a data abort from the check itself), and inverts
+the window guard: a target *inside* the candidate L2 window is refused, because that is
+exactly the boot-loop case this mode exists to avoid.
+
+The default `0x80100000` is chosen to be a hole in **both** tables — the candidate L2 window
+ends at `0x800fffff`, the RAM direct map starts at `0x80200000`, and the identity table maps
+only PA 0–2 MB — so the test does not depend on which table is live. That removes the
+ambiguity noted above.
+
+Expected evidence in `last_kmsg`: an `exception pabort ... lr=0x80100000` line followed by
+the `platform_reboot` sequence. A silent hang or a boot loop instead means the address *was*
+mapped, and the run says so: the return path logs "returned from an UNMAPPED target".
+Gated behind `--allow-fault-inject`.
 
 **That is a test result, not only a defect.** The project's crash-visibility layer is what
 made this findable at all; the missing piece is that a jump into non-code produced *no log*.
