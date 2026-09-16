@@ -41,6 +41,10 @@ done
 
 fail() { echo "REFUSING: $*" >&2; exit 1; }
 
+# The tools this gate calls. PYTHON is configurable for the same reason build.sh's is -
+# the host may have python3 under another name.
+PYTHON=${PYTHON:-python3}
+
 CONFIG=$OUT/stage90-build-config.txt
 IMAGE=$OUT/stage90-qcdt.img
 
@@ -92,13 +96,27 @@ echo "no source file is newer than the image"
 
 echo
 echo "== storage tripwire =="
-# The payload must never reference storage-controller code. It writes MMIO, IMEM
-# and PS_HOLD only; any storage symbol means something changed that should not have.
+# Two independent checks, because they catch different things and only one of them is
+# sufficient. Symbols catch a NAMED storage reference. Addresses catch an unnamed one - a raw
+# store to a controller register - which is the plausible case here, since the payload
+# already writes raw literals to PS_HOLD and IMEM.
+#
+# Verified by negative test: with a deliberate `*(volatile uint32_t *)0xf9824000u = 1;`
+# added to the payload, the symbol check below found NOTHING and would have approved the
+# run. The address check caught it. Both are kept because the symbol check is cheap and
+# catches a different shape.
 if arm-none-eabi-nm -a "$OUT/stage90.elf" 2>/dev/null \
      | grep -iE 'sdcc|emmc|\bmmc\b|ufs|partition|flash_|nand' ; then
   fail "payload references storage symbols (see above)"
 fi
 echo "no storage symbols in the payload"
+
+if [[ -x $REPO_ROOT/tools/check_storage_refs.py ]] || [[ -f $REPO_ROOT/tools/check_storage_refs.py ]]; then
+  "$PYTHON" "$REPO_ROOT/tools/check_storage_refs.py" "$OUT/stage90.elf" \
+    || fail "payload addresses a storage controller (see above)"
+else
+  fail "tools/check_storage_refs.py missing - the address half of the storage tripwire cannot run"
+fi
 
 echo
 echo "== recovery net =="

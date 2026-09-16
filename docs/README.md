@@ -31,6 +31,7 @@
 - `xnu_dt_requirements.py` — scans XNU's ARM sources for the device-tree lookups they make and checks our Apple-format DT against them, classified by what XNU does when each is missing. Also validates each node header's declared property count.
 - `host_dt_check.sh` — compiles XNU's own `pexpert/gen/device_tree.c` for the host and walks our device tree with it, checking the property *values* the source scan cannot; also runs `host_dt_selftest_probe` against the payload's own selftest. Extracts the shipping builder verbatim rather than copying it.
 - `host_dt_selftest_probe.c` — corrupts one device-tree node-header field at a time and confirms the payload's own selftest catches each, which is the claim that makes a device-tree edit safe without a hardware run.
+- `check_storage_refs.py` — fails if a payload can address an MSM8974 storage controller, by `movt` high halves and literal-pool words. Closes a hole the symbol tripwire could not see: with a deliberate storage store added to the payload, the symbol check found nothing.
 - `count_descriptors.py` — counts ARMv7 page-descriptor constants in a built payload. Its `--diff` mode compares two builds that differ by one switch, which is the sound way to check that a memory-attribute switch does what it claims; absolute counting is unreliable because a descriptor is often built in pieces.
 - `stage-archive.sh` — list/restore the archived stage0–84 snapshots.
 

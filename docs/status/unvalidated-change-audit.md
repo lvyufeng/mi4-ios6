@@ -387,6 +387,50 @@ caught, `start.S` touched is caught, the fixture generator touched is caught.
 
 Found by asking what the gate does *not* check, rather than by testing what it does. The
 same question is worth asking of the other checks in this audit.
+
+## 12. The storage tripwire could not see a storage access — demonstrated, then closed
+
+The gate's storage tripwire greps the payload's **symbol table** for `sdcc`, `emmc`, `mmc`,
+`ufs`, `partition`, `flash_`, `nand`. It was the stated guarantee that the payload cannot
+perform a persistent write.
+
+It is blind to an unnamed reference — and unnamed is the *plausible* case, because the
+payload already writes raw literals to `0xfc4ab000` (PS_HOLD) and `0x0fa00000` (IMEM). A
+store to an eMMC register written the same way has no symbol anywhere.
+
+**Demonstrated, not argued.** A deliberate `*(volatile uint32_t *)0xf9824000u = 1;` was added
+to the payload (the eMMC controller, from `msm8974.dtsi`'s `sdcc@f9824000`, `cell-index = <1>
+/* SDC1 eMMC slot */`):
+
+| Check | Result on that build |
+| --- | --- |
+| Symbol tripwire (what the gate ran) | `(found NOTHING)` — would have **approved the run** |
+| Address check (new) | `movt 0xf9820000  98d8: e34f3982 movt r3, #63874` → FAIL |
+
+So the gate would have booted a payload containing a storage write while reporting "no
+storage symbols in the payload". The wording was true and the guarantee was false.
+
+Closed with `tools/check_storage_refs.py`, wired into the gate. It is possible because on
+MSM8974 the whole `0xf9800000`-`0xf98fffff` megabyte contains **only** storage controllers —
+eight nodes in the device tree, all `sdcc`/`sdhci`, no ambiguity. Two checks, because a
+32-bit address reaches the instruction stream two ways: `movt` high halves in
+`0xf980`-`0xf98f` (how the compiler materialises an address — confirmed by the GIC appearing
+as `movt r3, #63744`), and literal-pool words in `.text`/`.rodata` (how an
+`ldr rN, [pc, #k]` constant appears, with no immediate at all).
+
+Both are negative-tested, including a selftest that checks the boundaries: it fires at
+`0xf980` and `0xf98f`, and stays quiet at `0xf990`, `0xf900` (GIC) and `0xfc4a` (PS_HOLD).
+The gate's exit code was verified to be 1 with the reference and 0 without.
+
+### What this still does not establish
+
+The address check cannot catch an address **computed** at runtime from a base register. The
+real guarantee is not the tripwire: it is that neither L1 table maps `0xf9` beyond
+`0xf90fffff`, so a stray store to a storage controller takes a data abort — which the
+payload's handler logs and skips — rather than reaching hardware. The tripwire is the early
+warning that someone has begun naming, mapping or hard-coding storage; **the mapping is what
+prevents the write.** Both facts are now checked rather than assumed.
+
 ## 6. What this audit cannot bound
 
 - **The watchdog's register semantics.** The readback and liveness checks confirm the
