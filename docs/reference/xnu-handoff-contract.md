@@ -280,6 +280,29 @@ The resolution belongs to Phase 3, and the honest framing is that Phase 3 replac
 what `reg` means and the Apple convention stops binding. Trying to satisfy both now would
 mean choosing a `reg` encoding for a reader we are about to replace.
 
+
+## A boot-arg that turns on an asserting path
+
+Worth knowing before anyone edits the `CommandLine`, because it is a trap in the other
+direction: `PE_init_iokit` (`pexpert/arm/pe_init.c:171`, called from
+`osfmk/kern/startup.c:545`) contains two bare `assert(*delta >= 0)` calls in its boot-progress
+calculation (`:62`, `:65`). They are only reached if the boot-arg `-progress` is present:
+
+```c
+if (PE_parse_boot_argn("-progress", &show_progress, sizeof(show_progress)) && show_progress) {
+        ... assert(*delta >= 0); ...
+}
+```
+
+Our command lines do not carry `-progress`, so the path is skipped — but the values feeding
+those asserts come from `PE_state.video.v_width`/`v_height` and the boot images, i.e. from
+display state we deliberately leave zeroed. Adding `-progress` to the command line would enter
+a graphics path, with asserts, using a zeroed `Video`. Phase 2 has no reason to add it; this
+is recorded so that if someone does, the failure is recognised rather than mysterious.
+
+More generally: `PE_parse_boot_argn` means the `CommandLine` is an input to paths that assert.
+It is not inert text.
+
 ## Other things to check before trusting a handoff
 
 - **`PRRR`/`NMRR` are not programmed by the payload.** `CACHE_ATTRINDX_DEFAULT` is
