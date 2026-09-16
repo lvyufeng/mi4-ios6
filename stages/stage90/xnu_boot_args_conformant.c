@@ -68,22 +68,44 @@ _Static_assert(offsetof(struct boot_args, CommandLine) == 56u, "CommandLine offs
  * contract and the existing translation agree rather than describing different worlds. */
 #define STAGE90_XNU_BA_VIRT_BASE     0x80000000u
 
-/* physBase: 1 MB aligned, and the start of the region the image lives in. See the file
- * comment - reporting 0 is what makes the payload's 0x8000 load address conforming. */
+/*
+ * physBase: 1 MB aligned, and the start of the region the image lives in. See the file
+ * comment - reporting 0 is what makes the payload's 0x8000 load address conforming.
+ *
+ * Independently confirmed, not just reasoned: the cancro kernel is built with
+ * CONFIG_PHYS_OFFSET=0x00000000 (arch/arm/configs/cancro_user_defconfig:31), i.e. this
+ * device's RAM genuinely starts at physical address 0 and Linux's linear map begins
+ * there. That is the device's own kernel asserting the same thing this field reports.
+ */
 #define STAGE90_XNU_BA_PHYS_BASE     0x00000000u
 
 /*
  * memSize: how much contiguous physical memory the kernel may map with sections.
  *
- * Deliberately conservative. XNU maps physBase..physBase+memSize at virtBase in 1 MB
- * sections, so this is a claim about which physical addresses are real RAM - and below
- * 0x80000000 that is not a safe assumption for a large span, because MSM8974 puts
- * device registers and non-RAM windows down there. 2 MB is the region the payload has
- * actually exercised: mmu.c's identity table maps PA 0-2 MB and the payload has run
- * from it for ninety stages. Raising this is a later phase's job, and it should be
- * raised only with a memory map to justify it, not by guessing.
+ * Sourced from the device's own memory map rather than chosen:
+ *
+ *   - RAM starts at PA 0 (CONFIG_PHYS_OFFSET above).
+ *   - The cancro device tree removes the first block at 0x5d00000:
+ *     external/android_kernel_xiaomi_cancro/arch/arm/boot/dts/msm8974.dtsi:2390
+ *       qcom,memblock-remove = <0x5d00000 0x7d00000  0xfa00000 0x500000>;
+ *     and Documentation/devicetree/bindings/arm/msm/msm_memory_hole.txt confirms the
+ *     format is <address size>.
+ *
+ * So the contiguous span from PA 0 is 0x00000000..0x5d00000. 0x5d00000 is 93 MB and is
+ * exactly 1 MB aligned (93 x 0x100000), which is what makes it usable as a section-map
+ * bound at all: XNU's loop steps 1 MB at a time from physBase, so the region must end on
+ * a section boundary to stop cleanly at the hole. 93 sections cover it exactly.
+ *
+ * The previous value here was 0x00200000 - two megabytes, itself a guess, and merely a
+ * small one. It was safe but useless: a kernel given 2 MB cannot do anything. This is the
+ * same kind of claim, made against the device's memory map instead of against caution,
+ * which is what the risk audit asked for.
+ *
+ * What this still does not do is describe the *whole* device: there is more RAM above the
+ * hole, and a later phase that wants it needs a region list rather than one span. That is
+ * a Phase 3 concern - the single-span contract is what XNU's `_start` itself consumes.
  */
-#define STAGE90_XNU_BA_MEM_SIZE      0x00200000u
+#define STAGE90_XNU_BA_MEM_SIZE      0x05d00000u
 
 /* The run start.s clears at topOfKernelData: 10240 TTEs = 10 pages = 40960 bytes.
  * Derived from the invalidation loop (PGBYTES>>2, then *5, then *2) and cross-checked
@@ -210,6 +232,19 @@ int stage90_xnu_boot_args_prepare(void *dt, uint32_t dt_len)
     checks++;
     if ((a->topOfKernelData + STAGE90_XNU_BA_TABLE_BYTES) > (a->physBase + a->memSize)) {
         failures |= STAGE90_XNU_BA_FAIL_TABLE_OUTSIDE;
+    }
+
+    /*
+     * The region must end on a section boundary, because XNU's section loop steps 1 MB
+     * at a time from physBase and stops on `memSize` reaching zero - it has no notion of
+     * a hole. A memSize that is not a whole number of megabytes would leave the last
+     * section mapping part of the address range past the end, and the value in this
+     * field is derived from a device-tree block boundary, so it is worth asserting
+     * rather than trusting the derivation to have stayed right.
+     */
+    checks++;
+    if ((a->memSize & 0x000fffffu) != 0u || a->memSize == 0u) {
+        failures |= STAGE90_XNU_BA_FAIL_MEM_SIZE_NOT_SECTIONS;
     }
 
     /* Revision/Version: start.s does not check these, but PE_init_platform does. */

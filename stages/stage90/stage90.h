@@ -4068,6 +4068,7 @@ struct stage90_xnu_macho_loader_result {
 #define STAGE90_XNU_BA_FAIL_REV_VERSION          0x00000040u
 #define STAGE90_XNU_BA_FAIL_DEVICE_TREE          0x00000080u
 #define STAGE90_XNU_BA_FAIL_COMMAND_LINE         0x00000100u
+#define STAGE90_XNU_BA_FAIL_MEM_SIZE_NOT_SECTIONS 0x00000200u
 
 /*
  * Exclusive-monitor probe (roadmap Phase 1 baseline).

@@ -101,7 +101,12 @@ It does not. **`physBase = 0x00000000` is 1 MB aligned, and the image at `0x8000
 `kernel_offset` means — an offset within the kernel region, not a base. Reporting `0` is both
 conforming and true, and nothing has to move.
 
-Two independent checks that this is the right choice rather than merely a convenient one:
+Three independent checks that this is the right choice rather than merely a convenient one:
+
+0. **The device's own kernel config.** `arch/arm/configs/cancro_user_defconfig:31` sets
+   `CONFIG_PHYS_OFFSET=0x00000000`, i.e. this device's RAM genuinely begins at physical
+   address 0 and Linux's linear map starts there. That is not an argument about
+   conventions; it is the cancro kernel asserting the same thing this field reports.
 
 1. It agrees with the pmap the project already builds. With `virtBase = 0x80000000` the
    correspondence is `VA = 0x80000000 + PA`, and `full_pmap` maps `0x80000000–0x800fffff` to
@@ -111,6 +116,33 @@ Two independent checks that this is the right choice rather than merely a conven
    change to where the image is loaded, so no new way for the existing 90 stages of behaviour
    to break.
 
+### `memSize` from the device's memory map
+
+`memSize` is a claim about which physical addresses are RAM, and XNU maps that span with
+1 MB sections. Two facts from the device pin it down:
+
+- RAM starts at PA 0 (`CONFIG_PHYS_OFFSET` above).
+- The cancro device tree removes the first block at `0x5d00000`
+  (`arch/arm/boot/dts/msm8974.dtsi:2390`):
+  `qcom,memblock-remove = <0x5d00000 0x7d00000  0xfa00000 0x500000>;` — and
+  `Documentation/devicetree/bindings/arm/msm/msm_memory_hole.txt` confirms the format is
+  `<address size>`.
+
+So the contiguous span from PA 0 is `0x00000000..0x5d00000`, which is 93 MB and exactly
+1 MB aligned (93 × `0x100000`). The alignment is not a nicety: XNU's loop steps 1 MB at a
+time from `physBase` and stops when `memSize` reaches zero — it has no notion of a hole — so
+the region has to end on a section boundary to stop *cleanly* at the boundary. 93 sections
+cover it exactly, and the payload now asserts the section multiple rather than trusting the
+derivation to stay right.
+
+The earlier value was `0x00200000` — two megabytes, itself a guess and merely a small one.
+Safe, but useless: a kernel given 2 MB cannot do anything. This is the same kind of claim
+made against the device's memory map instead of against caution.
+
+It still does not describe the *whole* device — there is more RAM above the hole, and using
+it needs a region list rather than one span. That is Phase 3's problem; the single-span
+contract is what XNU's `_start` itself consumes.
+
 **Implemented** in `stages/stage90/xnu_boot_args_conformant.c`, behind `STAGE90_XNU_BOOT_ARGS`
 (default off — it builds a *second* `boot_args` and validates it; the ladder's identity-based
 one is untouched, because the ladder itself requires `physBase == 0x8000`).
@@ -118,8 +150,8 @@ one is untouched, because the ladder itself requires `physBase == 0x8000`).
 | Field | Value | Why |
 | --- | --- | --- |
 | `virtBase` | `0x80000000` | Same as `STAGE90_VIRT_BASE`, so it agrees with the existing pmap. |
-| `physBase` | `0x00000000` | 1 MB aligned; the image at `0x8000` is inside `[0, memSize)`. |
-| `memSize` | `0x00200000` (2 MB) | Deliberately conservative: this is a claim that those physical addresses are RAM, and below `0x80000000` that is not safe to assume for a large span on MSM8974. 2 MB is what the payload has actually exercised (mmu.c's identity table maps PA 0–2 MB, and ninety stages have run from it). Raising it wants a memory map, not a guess. |
+| `physBase` | `0x00000000` | 1 MB aligned; the image at `0x8000` is inside `[0, memSize)`. Confirmed by the device's own kernel: `CONFIG_PHYS_OFFSET=0x00000000` in `arch/arm/configs/cancro_user_defconfig:31`. |
+| `memSize` | `0x05d00000` (93 MB) | The contiguous span from PA 0, ending at the first block the device tree removes — see below. |
 | `topOfKernelData` | `align_up(__stage90_image_end, 16 KB)` | Above the image, and 16 KB aligned because TTBR's low 14 bits carry `TTBR_SETUP`. |
 
 `topOfKernelData` also has to hold the tables `start.s` clears: 10240 TTEs, i.e. 40960 bytes.

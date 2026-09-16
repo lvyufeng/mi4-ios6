@@ -393,6 +393,13 @@ The unaligned-`physBase` problem the contract doc first flagged turns out to dis
 meant. Nothing has to be relocated, and the choice agrees with the `VA = 0x80000000 + PA`
 correspondence the project's own `full_pmap` already builds.
 
+The two values that were guesses are now sourced from the device. `physBase = 0` is what
+`CONFIG_PHYS_OFFSET=0x00000000` says the cancro kernel's own RAM base is, and `memSize` is
+93 MB — the span from PA 0 to the first block the cancro device tree removes
+(`msm8974.dtsi`'s `qcom,memblock-remove = <0x5d00000 ...>`), which is exactly 93 × 1 MB and so
+stops the section map cleanly at the hole. The old 2 MB was itself a guess, just a small one;
+a kernel given 2 MB cannot do anything.
+
 `tools/check_boot_args_abi.py` closes the failure mode that has no symptom: `start.s` loads
 `virtBase`/`physBase`/`memSize`/`topOfKernelData` by hand at fixed offsets, so a struct drift
 means XNU silently reads the wrong word as the physical base of memory. The tool compares both

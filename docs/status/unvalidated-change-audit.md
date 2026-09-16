@@ -119,11 +119,11 @@ the identity table is untouched, so nothing that works today depends on the old 
   window*, but not that a bite resets the SoC. That is what the
   `STAGE90_HW_WATCHDOG_SELFTEST=1` run is for, and it should come first for exactly this
   reason.
-- **Whether `physBase = 0` is right.** The conforming `boot_args`
-  (`xnu_boot_args_conformant.c`) is off by default, so it does not affect this run. Its
-  reasoning is sound and its invariants are checked, but `memSize = 2 MB` is a deliberately
-  conservative claim about which physical addresses below `0x80000000` are RAM, and that claim
-  wants a memory map behind it, not an argument.
+- **Whether `physBase = 0` is right — now sourced, not argued.** The cancro kernel is built
+  with `CONFIG_PHYS_OFFSET=0x00000000`, so RAM really does start at PA 0. `memSize` moved from
+  a 2 MB placeholder to 93 MB, the span from PA 0 to the first block the device tree removes
+  (`0x5d00000`); see the contract doc. The conforming `boot_args` is still off by default, so
+  none of it affects this run.
 - **The `reg` offset-vs-absolute question.** Recorded in
   [`xnu-handoff-contract.md`](xnu-handoff-contract.md), deliberately unresolved, and
   harmless until XNU's own platform code runs.
