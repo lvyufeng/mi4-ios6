@@ -119,6 +119,14 @@ the identity table is untouched, so nothing that works today depends on the old 
   window*, but not that a bite resets the SoC. That is what the
   `STAGE90_HW_WATCHDOG_SELFTEST=1` run is for, and it should come first for exactly this
   reason.
+- **And the bite is mediated by the secure world, not pure hardware.** The vendor binding
+  (`Documentation/devicetree/bindings/arm/msm/msm_watchdog.txt`) says the bite "is an
+  interrupt in the secure mode, which leads to a reset of the SOC via the secure watchdog".
+  So the accurate claim is "does not depend on the *payload's* GIC/timer/IRQ state", not
+  "does not depend on any software". The secure world is running (aboot loaded it, and
+  Android's own panic path relies on exactly this), so this is a dependency already
+  satisfied rather than a risk — but it is a dependency, and the earlier wording overstated
+  the independence.
 - **Whether `physBase = 0` is right — now sourced, not argued.** The cancro kernel is built
   with `CONFIG_PHYS_OFFSET=0x00000000`, so RAM really does start at PA 0. `memSize` moved from
   a 2 MB placeholder to 93 MB, the span from PA 0 to the first block the device tree removes

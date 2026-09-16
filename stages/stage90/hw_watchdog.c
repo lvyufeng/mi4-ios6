@@ -8,12 +8,22 @@
  * device stays dark until someone holds the power button. That is exactly the
  * failure the 2026-09-16 run produced.
  *
- * The SoC's own watchdog does not depend on any of it. It is a hardware counter; when
- * it expires the SoC resets, whatever the CPU is doing. It is also the mechanism
- * Android itself relies on: a kernel panic on this device ends in a watchdog bite,
- * and that bite is what produces a readable /proc/last_kmsg afterwards. So the path
- * "watchdog bite -> reset -> last_kmsg" is not speculative here; it is the normal
- * crash path of the phone this payload runs on.
+ * The SoC's own watchdog does not depend on the payload's GIC or timer state. It counts
+ * down on its own; when it expires the SoC resets. It is also the mechanism Android itself
+ * relies on: a kernel panic on this device ends in a watchdog bite, and that bite is what
+ * produces a readable /proc/last_kmsg afterwards. So the path "watchdog bite -> reset ->
+ * last_kmsg" is not speculative here; it is the normal crash path of the phone this
+ * payload runs on.
+ *
+ * One caveat the vendor documentation states, and this file should not overstate away.
+ * Documentation/devicetree/bindings/arm/msm/msm_watchdog.txt says the bite "is an
+ * interrupt in the secure mode, which leads to a reset of the SOC via the secure
+ * watchdog". So the reset is mediated by the secure world (TrustZone), not by the
+ * non-secure counter alone - it is not literally "no software involvement anywhere". That
+ * is fine in practice: the secure world is running (aboot loaded it, and Android's own
+ * panic path depends on exactly this), and this device demonstrably resets this way. But
+ * it is a dependency, and the accurate claim is "does not depend on the payload's state"
+ * rather than "does not depend on any software".
  *
  * Two uses
  * --------
@@ -138,10 +148,13 @@ void stage90_hw_watchdog_log(const struct stage90_hw_watchdog_result *r)
  * three seconds later (msm_watchdog_v2.c: `WDT0_BARK_TIME = timeout; WDT0_BITE_TIME =
  * timeout + 3*WDT_HZ`). Deviating from a sequence that is known to work on this
  * hardware is the kind of invention that costs a hardware run, so it is not deviated
- * from. The bark is an interrupt on SPI 3 (intid 35 - the device tree's `WDT_barkInt`)
- * and nothing here handles it, which is harmless: the payload's IRQ handler already
- * treats an unexpected intid generically and EOIs it, so a bark costs one counted
- * interrupt and no more. The bite is a separate counter and needs no cooperation.
+ * from.
+ *
+ * The device tree gives this block two interrupts - `interrupts = <0 3 0>, <0 4 0>`,
+ * i.e. SPI 3 and SPI 4, intid 35 and intid 36 (intid = 32 + SPI). Nothing here handles
+ * either, which is harmless: the payload's IRQ handler treats an unexpected intid
+ * generically and EOIs it, so a bark costs one counted interrupt and no more - and the
+ * bite needs no cooperation from the non-secure world at all.
  */
 int stage90_hw_watchdog_arm(uint32_t timeout_s)
 {

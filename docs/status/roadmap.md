@@ -182,8 +182,10 @@ failed, and finding out why reshaped this phase.
   a hardware counter with no software involvement, whose base address and register
   programming come from the cancro device tree and the cancro kernel's own
   `msm_watchdog_v2.c`, and which is the same mechanism Android relies on to produce a
-  readable `/proc/last_kmsg` after a panic. `platform_reboot()` also forces an immediate bite
-  after its PS_HOLD write, so the reboot no longer depends on the PMIC.
+  readable `/proc/last_kmsg` after a panic. One accurate qualification: the vendor binding
+  says the bite resets via the *secure* watchdog, so the independence claimed is from the
+  payload's state, not from software entirely. `platform_reboot()` also forces an immediate
+  bite after its PS_HOLD write, so the reboot no longer depends on the PMIC.
 - `STAGE90_HANDOFF_MODE` now defaults to `HARD_SKIP`, and
   `stages/stage90/preflight_boot_check.sh` refuses to hand over a boot command for an image
   built with a mode the caller has not explicitly allowed.
