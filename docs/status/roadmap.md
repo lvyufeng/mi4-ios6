@@ -571,6 +571,29 @@ produces something XNU could consume; producing the XNU that consumes it needs a
 that is not public. Worth deciding deliberately rather than discovering during a Phase 4
 attempt.
 
+**And the gap is wider than the arch whitelist alone.** Chasing what an override would
+actually require:
+
+- `TARGET_CONFIGS` is built from `ARCH_CONFIGS_EMBEDDED` and `DEVICEMAP_PRODUCTS_$(arch)`
+  (`MakeInc.top:136-145`). **Neither is defined anywhere in the tarball** — they come from
+  the internal build system. So the per-arch target lists are not merely restricted; they are
+  absent.
+- Build config names are parsed as `KERNEL^ARCH^MACHINE` (`MakeInc.cmd:299`, verified by
+  evaluating the extractors: `RELEASE^ARM64^NONE` → kernel `RELEASE`, arch `ARM64`, machine
+  `NONE`). So the *naming* convention is public and the parser works — what is missing is the
+  content the names index into.
+- The platform whitelist itself (`SUPPORTED_EMBEDDED_PLATFORMS`) is in `MakeInc.cmd:121`,
+  so that half *is* public and editable.
+
+So the honest summary is: **the parser and the platform list are public; the per-arch target
+definitions and machine configs are not.** Reconstructing them is a real possibility — the
+convention is visible — but it is building the build system, not configuring it, and it would
+sit on a toolchain (`xcrun`) this host does not have either.
+
+That is worth writing down before Phase 4 is attempted, because the failure mode otherwise is
+spending days fighting `$(error Unsupported CURRENT_ARCH_CONFIG ARM)` and concluding the
+source is unusable, when the source is fine and the *configuration* is what is missing.
+
 ### Phase 3 — specification written
 
 [`phase3-msm8974-shim-spec.md`](phase3-msm8974-shim-spec.md) bounds the shim work and makes
