@@ -271,6 +271,55 @@ Worth noting how this was found: not by a test, and not by the device - by readi
 handler against the comment above it, which says "this is how we observe where XNU is
 executing when the timer/watchdog fires". A non-timer interrupt is not that.
 
+
+## 9. HARD_SKIP's status computation — checked, because it is subtle
+
+The default mode is the one the first run will use, and its result is produced by a
+different code path from the others. Reading between two changes that touch this — the
+mode-dependent required mask, and the ladder split — the interaction is worth writing down,
+since it is the kind of thing a later edit breaks silently.
+
+The handoff's status test is:
+
+```c
+if (r->satisfied_mask == r->required_mask && r->failure_mask == 0u) { OK } else { FAIL }
+```
+
+and `required_mask` is now mode-dependent, because the candidate-L1 bits are unattainable in
+`PREFLIGHT_WATCHDOG_ONLY`:
+
+| Mode | Required mask |
+| --- | --- |
+| `FULL` | `0x7f` — `SAT_COMMON` (loader, entry, boot_args, ready) plus `SAT_L1_HANDOFF` (full pmap, candidate L1, stage target) |
+| everything else | `0x47` — `SAT_COMMON` only |
+
+`HARD_SKIP` takes this path:
+
+```c
+        r->satisfied_mask = r->required_mask;
+        r->status = STAGE90_STATUS_OK;
+        r->checksum = stage90_xnu_handoff_checksum(r);
+        stage90_xnu_handoff_log(r);
+        return 0;
+```
+
+**So `HARD_SKIP` sets `satisfied = required` by assignment, in whichever mode-dependent form
+that mask takes, and returns OK directly — it never reaches the shared test.** Two
+consequences worth being explicit about, because both are easy to break later:
+
+1. Its result cannot fail on a mask mismatch *whatever* `required_mask` is. An edit that
+   changed `SAT_COMMON`'s contents would change what the other modes require, and would not
+   make `HARD_SKIP` fail — it would just make `HARD_SKIP` claim satisfaction of bits it never
+   evaluated. That is a real hazard of the assignment form, and the reason the L1 bits are
+   kept out of the non-`FULL` mask rather than merely left unset.
+2. `HARD_SKIP` still reports through `stage90_xnu_handoff_log`, so `last_kmsg` will show
+   `handoff_mode`, `required_mask` and `satisfied_mask` equal and `status=0x90000001`. A run
+   that shows those unequal in `HARD_SKIP` means the assignment was lost — which would be a
+   compiler/codegen problem, not a hardware one.
+
+Verified against the definitions: `SAT_COMMON` = `0x47`, `SAT_L1_HANDOFF` = `0x38`,
+`FULL` = `0x7f`, non-`FULL` = `0x47`.
+
 ## 6. What this audit cannot bound
 
 - **The watchdog's register semantics.** The readback and liveness checks confirm the
