@@ -431,6 +431,28 @@ payload's handler logs and skips — rather than reaching hardware. The tripwire
 warning that someone has begun naming, mapping or hard-coding storage; **the mapping is what
 prevents the write.** Both facts are now checked rather than assumed.
 
+
+## 13. The log summariser now says what the counts mean, and refuses to infer from absence
+
+The run script's marker table printed counts and left the reading to whoever was looking at
+a fresh failure — which is the worst moment to be holding a mapping in your head. It is now
+a function with its own entry point (`--summarise FILE`, touching nothing: no gate, no
+device), and it prints an interpretation: whether the hardware watchdog was confirmed armed
+and counting, whether the dead-man was armed, whether an abort was logged.
+
+The `--summarise` entry point exists for a second reason: it makes the summary testable.
+Without a device it had only ever run in `--dry-run`, so the half of the script that decides
+what a run *meant* was untested. It has now been exercised against three synthetic logs
+built from the payload's own strings: a clean pass, a run where the watchdog did not confirm
+and the device-tree selftest failed, and a log with no payload lines at all.
+
+That third case found a real defect in the summary: with no payload output it still said
+*"hardware watchdog: NOT confirmed armed … if this run also failed, the watchdog is the
+first thing to investigate"*. That is an **inference from absence**, and it is exactly the
+misattribution this session has been correcting elsewhere — an empty log means the log is
+missing, not that the watchdog failed. It now says so, and suggests checking that
+`/proc/last_kmsg` is from the boot in question rather than stale.
+
 ## 6. What this audit cannot bound
 
 - **The watchdog's register semantics.** The readback and liveness checks confirm the

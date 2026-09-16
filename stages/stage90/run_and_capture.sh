@@ -15,6 +15,7 @@
 # Usage:
 #   ./run_and_capture.sh [gate flags...]        run the cycle
 #   ./run_and_capture.sh --dry-run [flags...]   print the plan, touch nothing
+#   ./run_and_capture.sh --summarise FILE       read an already-captured log
 #
 # Gate flags are passed straight through to preflight_boot_check.sh, so the run is refused
 # unless the gate approves it. Any flags you would give the gate, give here.
@@ -38,17 +39,94 @@ LOGFILE=${LOGFILE:-/tmp/cancro-last_kmsg.txt}
 RETURN_TIMEOUT=${RETURN_TIMEOUT:-180}
 
 DRY_RUN=0
+SUMMARISE_ONLY=""
 GATE_FLAGS=()
-for arg in "$@"; do
-  case "$arg" in
-    --dry-run) DRY_RUN=1 ;;
-    *) GATE_FLAGS+=("$arg") ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    # Summarise a log that was already captured - useful when the run happened in another
+    # shell, or when re-reading one after the fact. Takes the path as the next argument.
+    --summarise) SUMMARISE_ONLY=${2:-}; shift 2 ;;
+    *) GATE_FLAGS+=("$1"); shift ;;
   esac
 done
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n== %s ==\n' "$*"; }
 die() { printf 'run_and_capture: %s\n' "$*" >&2; exit 1; }
+
+summarise_log() {
+  local log=$1
+  local markers=(hw_watchdog_enabled hw_watchdog_counter_running "deadman: armed"
+                 "apple_dt selftest ok" "exception"
+                 "pc-sampling watchdog: rebooting after sample dump"
+                 "platform_reboot entered")
+
+  local n
+  n=$(grep -a -c 'MI4IOS6_STAGE90' "$log" || true)
+  say "MI4IOS6_STAGE90 lines: $n"
+  if [[ $n -eq 0 ]]; then
+    say "NONE. The log has no payload output from this run - either the power cycle that"
+    say "brought the device back cleared DRAM, or the payload never reached log_init()."
+  else
+    grep -a -n 'MI4IOS6_STAGE90' "$log" | tail -60
+  fi
+
+  say ""
+  say "key markers:"
+  local m count
+  for m in "${markers[@]}"; do
+    count=$(grep -a -c "$m" "$log" || true)
+    printf '  %-52s %s\n' "$m" "$count"
+  done
+
+  # Read the counts back out and say what they mean, so the operator does not have to hold
+  # the mapping in their head at the moment they are looking at a fresh failure.
+  local watchdog deadman abort
+  watchdog=$(grep -a -c 'hw_watchdog_counter_running=0x00000001' "$log" || true)
+  deadman=$(grep -a -c 'deadman: armed' "$log" || true)
+  abort=$(grep -a -c 'MI4IOS6_STAGE90.*abort' "$log" || true)
+
+  say ""
+  say "reading:"
+  if [[ $n -eq 0 ]]; then
+    # No payload lines at all: there is nothing to read. Saying anything about the
+    # watchdog here would be an inference from absence, which is the misattribution this
+    # whole session has been correcting - an empty log means the log is missing, not that
+    # the watchdog failed.
+    say "  nothing to read - the log contains no payload output at all. Check that the"
+    say "  device really rebooted with this payload, and that /proc/last_kmsg is the"
+    say "  ram_console from that boot and not a stale one."
+    return
+  fi
+  if [[ $watchdog -gt 0 ]]; then
+    say "  hardware watchdog: ARMED and counting - the net was live for this run"
+  else
+    say "  hardware watchdog: NOT confirmed armed (no counter_running=1). If this run also"
+    say "                     failed, the watchdog is the first thing to investigate."
+  fi
+  [[ $deadman -gt 0 ]] && say "  software dead-man: armed" \
+                       || say "  software dead-man: not armed in this log"
+  [[ $abort -gt 0 ]] && say "  an abort was logged - see the 'exception'/'abort' lines above"
+}
+
+if [[ -n $SUMMARISE_ONLY ]]; then
+  step "summarising $SUMMARISE_ONLY"
+  [[ -f $SUMMARISE_ONLY ]] || die "no such log: $SUMMARISE_ONLY"
+  summarise_log "$SUMMARISE_ONLY"
+  say ""
+  say "done."
+  exit 0
+fi
+
+step "payload output"
+if [[ $DRY_RUN -eq 1 ]]; then
+  say "would summarise $LOGFILE (see --summarise)"
+else
+  summarise_log "$LOGFILE"
+fi
+
+say ""
 
 # --- 1. the gate, with whatever flags the caller gave ------------------------------------
 step "gate"
@@ -130,33 +208,7 @@ else
   say "wrote $(wc -c < "$LOGFILE") bytes to $LOGFILE"
 fi
 
-step "payload output"
-if [[ $DRY_RUN -eq 1 ]]; then
-  say "would grep $LOGFILE for MI4IOS6_STAGE90 and the exception/reboot markers"
-else
-  MARKERS=$(grep -a -n 'MI4IOS6_STAGE90' "$LOGFILE" | wc -l)
-  say "MI4IOS6_STAGE90 lines: $MARKERS"
-  if [[ $MARKERS -eq 0 ]]; then
-    say "NONE. The log has no payload output from this run - either the power cycle that"
-    say "brought the device back cleared DRAM, or the payload never reached log_init()."
-  else
-    grep -a -n 'MI4IOS6_STAGE90' "$LOGFILE" | tail -60
-  fi
-
-  say ""
-  say "key markers to check:"
-  for marker in \
-      "hw_watchdog_enabled" \
-      "hw_watchdog_counter_running" \
-      "deadman: armed" \
-      "apple_dt selftest ok" \
-      "exception" \
-      "pc-sampling watchdog: rebooting after sample dump" \
-      "platform_reboot entered"; do
-    n=$(grep -a -c "$marker" "$LOGFILE" || true)
-    printf '  %-52s %s\n' "$marker" "$n"
-  done
-fi
-
-say ""
+# The marker table is the part that decides what a run *meant*, so it is a function with
+# its own entry point (--summarise) rather than inline: it can then be tested against
+# synthetic logs, and re-run on a log captured elsewhere, without touching the device.
 say "done. Full log: $LOGFILE"

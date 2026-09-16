@@ -324,8 +324,12 @@ too — but they are the part that, if mistyped, costs the run:
 ```bash
 # One command does gate + boot + wait + capture + summarise. It never flashes, and it
 # captures /proc/last_kmsg before touching the device again. Exit 2 means the device did
-# not come back and needs a power press.
+# not come back and needs a power press. The marker summary says what the counts mean, so
+# a fresh failure does not have to be interpreted from scratch.
 ./run_and_capture.sh --allow-hw-watchdog-selftest
+
+# Re-read a log captured earlier, or in another shell. Touches nothing.
+./run_and_capture.sh --summarise /tmp/cancro-last_kmsg.txt
 
 # or, by hand, in the same directory, with the image the gate just approved:
 sudo adb -s 4a2fe00b reboot bootloader
