@@ -249,6 +249,25 @@ STAGE90_EXTRA_CFLAGS='-DSTAGE90_DEADMAN_SELFTEST=1 -DSTAGE90_HW_WATCHDOG=0' ./bu
 # 4. Only then, step the handoff mode up: PREFLIGHT_WATCHDOG_ONLY, then FULL.
 ```
 
+The `fastboot` and log-capture steps are the same for all of them, and the gate prints them
+too — but they are the part that, if mistyped, costs the run:
+
+```bash
+# in the same directory, with the image the gate just approved
+sudo adb -s 4a2fe00b reboot bootloader
+sudo fastboot boot "$PWD/../../out/stage90/stage90-qcdt.img"
+
+# capture BEFORE anything else reboots the phone: ram_console lives at the top of DRAM
+# and survives a warm reboot, but a power cycle clears it
+sudo adb -s 4a2fe00b exec-out 'cat /proc/last_kmsg' > /tmp/cancro-last_kmsg.txt
+grep -a -n 'MI4IOS6_STAGE90' /tmp/cancro-last_kmsg.txt | tail -60
+```
+
+`-s 4a2fe00b` is not optional: two devices are attached, and without it adb answers
+`more than one device/emulator`. If the device does not come back at all, the recovery
+procedure and the exact symptom to look for are in
+[`../reference/recovery-and-rollback.md`](../reference/recovery-and-rollback.md) §4a.
+
 `STAGE90_EXTRA_CFLAGS` is how to build a variant without editing `stage90.h`; the switches
 land in `CFLAGS`, so `stage90-build-config.txt` records them and `preflight_boot_check.sh`
 gates on what the image was actually built with. Rebuild without it to return to the default.
