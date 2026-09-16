@@ -6290,7 +6290,14 @@ struct stage90_hw_watchdog_result {
     uint32_t en_after;
     uint32_t bark_after;
     uint32_t bite_after;
-    uint32_t sts_after;
+    /*
+     * WDT0_STS holds a live countdown, not flags. Sampling it twice is what proves a
+     * counter is actually running, rather than only that a write read back.
+     */
+    uint32_t countdown_first;
+    uint32_t countdown_second;
+    uint32_t counter_running;
+    uint32_t countdown_plausible;
     uint32_t readback_ok;
     uint32_t checksum;
 };

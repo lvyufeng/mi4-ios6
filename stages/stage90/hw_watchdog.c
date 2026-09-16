@@ -57,6 +57,12 @@
 /*
  * MSM8974 application-processor watchdog. See the header comment for provenance.
  * The device tree node is 0x1000 bytes; the register offsets below are the driver's.
+ *
+ * WDT0_STS is not a status register despite the name: the driver uses it as the live
+ * countdown, `(sts >> 1) & 0xFFFFF` ticks, and its pet path compares that count
+ * against the programmed bark time to work out its slack. That makes it the one
+ * register that can prove the watchdog is actually armed and running, so this driver
+ * samples it rather than only trusting a write/read-back.
  */
 #define MSM8974_WDT_BASE       0xf9017000u
 #define MSM8974_WDT_SIZE       0x00001000u
@@ -69,6 +75,9 @@
 /* The watchdog's own clock, in Hz, per msm_watchdog_v2.c (module param WDT_HZ). */
 #define MSM8974_WDT_HZ         32765u
 
+/* The vendor driver's own gap between the bark interrupt and the bite. */
+#define MSM8974_WDT_BITE_EXTRA_TICKS (3u * MSM8974_WDT_HZ)
+
 static struct stage90_hw_watchdog_result g_result;
 
 static inline uint32_t hw_wdt_read(uint32_t off)
@@ -80,6 +89,12 @@ static inline void hw_wdt_write(uint32_t off, uint32_t value)
 {
     *(volatile uint32_t *)(uintptr_t)(MSM8974_WDT_BASE + off) = value;
     __asm__ volatile ("dsb sy" ::: "memory");
+}
+
+/* Live countdown, in the encoding the vendor driver uses. */
+static uint32_t hw_wdt_countdown(void)
+{
+    return (hw_wdt_read(MSM8974_WDT_REG_STS) >> 1) & 0xfffffu;
 }
 
 static uint32_t hw_wdt_checksum(const struct stage90_hw_watchdog_result *r)
@@ -107,23 +122,34 @@ void stage90_hw_watchdog_log(const struct stage90_hw_watchdog_result *r)
     xnu_log_kv32("hw_watchdog_en_after", r->en_after);
     xnu_log_kv32("hw_watchdog_bark_after", r->bark_after);
     xnu_log_kv32("hw_watchdog_bite_after", r->bite_after);
-    xnu_log_kv32("hw_watchdog_sts_after", r->sts_after);
+    xnu_log_kv32("hw_watchdog_countdown_first", r->countdown_first);
+    xnu_log_kv32("hw_watchdog_countdown_second", r->countdown_second);
+    xnu_log_kv32("hw_watchdog_counter_running", r->counter_running);
+    xnu_log_kv32("hw_watchdog_countdown_plausible", r->countdown_plausible);
     xnu_log_kv32("hw_watchdog_readback_ok", r->readback_ok);
     xnu_log_kv32("hw_watchdog_checksum", r->checksum);
 }
 
 /*
  * Start a hardware countdown. `timeout_s` is when the SoC resets itself if nothing
- * else has rebooted it first. Bark and bite are set to the same value on purpose:
- * the bark is an interrupt, and we would rather there be no interrupt at all before
- * the reset than an unexpected one arriving in the middle of the payload.
+ * else has rebooted it first.
+ *
+ * The bark/bite split follows the vendor driver exactly: bark at the timeout, bite
+ * three seconds later (msm_watchdog_v2.c: `WDT0_BARK_TIME = timeout; WDT0_BITE_TIME =
+ * timeout + 3*WDT_HZ`). Deviating from a sequence that is known to work on this
+ * hardware is the kind of invention that costs a hardware run, so it is not deviated
+ * from. The bark is an interrupt on SPI 3 (intid 35 - the device tree's `WDT_barkInt`)
+ * and nothing here handles it, which is harmless: the payload's IRQ handler already
+ * treats an unexpected intid generically and EOIs it, so a bark costs one counted
+ * interrupt and no more. The bite is a separate counter and needs no cooperation.
  */
 int stage90_hw_watchdog_arm(uint32_t timeout_s)
 {
     struct stage90_hw_watchdog_result *r = &g_result;
-    uint32_t ticks;
-    uint32_t sts_before;
-    uint32_t en_before;
+    uint32_t bark_ticks;
+    uint32_t bite_ticks;
+    uint32_t count_first;
+    uint32_t count_second;
 
     memset(r, 0, sizeof(*r));
     r->base = MSM8974_WDT_BASE;
@@ -131,57 +157,81 @@ int stage90_hw_watchdog_arm(uint32_t timeout_s)
 
     /* Read before writing anything, so a wrong base shows up as implausible state
      * rather than as our own writes being read back at us. */
-    sts_before = hw_wdt_read(MSM8974_WDT_REG_STS);
-    en_before = hw_wdt_read(MSM8974_WDT_REG_EN);
-    r->sts_before = sts_before;
-    r->en_before = en_before;
+    r->sts_before = hw_wdt_read(MSM8974_WDT_REG_STS);
+    r->en_before = hw_wdt_read(MSM8974_WDT_REG_EN);
 
     xnu_log_puts("stage90 hw_watchdog: arming (independent of GIC, timer and IRQ state)\n");
     xnu_log_kv32("hw_watchdog_base", MSM8974_WDT_BASE);
     xnu_log_kv32("hw_watchdog_hz", MSM8974_WDT_HZ);
-    xnu_log_kv32("hw_watchdog_sts_before", sts_before);
-    xnu_log_kv32("hw_watchdog_en_before", en_before);
+    xnu_log_kv32("hw_watchdog_sts_before", r->sts_before);
+    xnu_log_kv32("hw_watchdog_en_before", r->en_before);
+    xnu_log_kv32("hw_watchdog_countdown_before", hw_wdt_countdown());
 
-    /* Guard against the tick value wrapping the 32-bit register. */
-    if (timeout_s > (0xffffffffu / MSM8974_WDT_HZ)) {
+    /* Guard against the tick values wrapping the 32-bit registers. */
+    if (timeout_s > ((0xffffffffu - MSM8974_WDT_BITE_EXTRA_TICKS) / MSM8974_WDT_HZ)) {
         xnu_log_puts("stage90 hw_watchdog: timeout too large to encode; not arming\n");
         r->readback_ok = 0u;
         return 0;
     }
-    ticks = timeout_s * MSM8974_WDT_HZ;
-    r->bark_ticks = ticks;
-    r->bite_ticks = ticks;
+    bark_ticks = timeout_s * MSM8974_WDT_HZ;
+    bite_ticks = bark_ticks + MSM8974_WDT_BITE_EXTRA_TICKS;
+    r->bark_ticks = bark_ticks;
+    r->bite_ticks = bite_ticks;
 
-    hw_wdt_write(MSM8974_WDT_REG_BARK, ticks);
-    hw_wdt_write(MSM8974_WDT_REG_BITE, ticks);
+    hw_wdt_write(MSM8974_WDT_REG_BARK, bark_ticks);
+    hw_wdt_write(MSM8974_WDT_REG_BITE, bite_ticks);
     hw_wdt_write(MSM8974_WDT_REG_EN, 1u);
     hw_wdt_write(MSM8974_WDT_REG_RST, 1u);
 
     r->en_after = hw_wdt_read(MSM8974_WDT_REG_EN);
     r->bark_after = hw_wdt_read(MSM8974_WDT_REG_BARK);
     r->bite_after = hw_wdt_read(MSM8974_WDT_REG_BITE);
-    r->sts_after = hw_wdt_read(MSM8974_WDT_REG_STS);
 
     /*
-     * Readback is the only check available without a spec: if the registers are not
-     * where the device tree says they are, what we wrote will not come back. A
-     * mismatch is logged as a plain fact - it does not abort the payload, because
-     * failing to arm a safety net is not a reason to stop doing the work.
+     * Liveness, not just read-back. A register that reads back what was written only
+     * proves the write landed; it does not prove a counter is running. Sampling the
+     * countdown twice and requiring it to have moved does prove that, and it is the
+     * cheapest way for one hardware run to settle whether this net is real. The spin
+     * is deliberately short - the counter is ticking at 32765 Hz, so a few hundred
+     * microseconds is already thousands of ticks.
      */
+    count_first = hw_wdt_countdown();
+    for (volatile uint32_t spin = 0u; spin < 200000u; spin++) {
+        __asm__ volatile ("nop" ::: "memory");
+    }
+    count_second = hw_wdt_countdown();
+
+    r->countdown_first = count_first;
+    r->countdown_second = count_second;
+    r->counter_running = (count_second != count_first) ? 1u : 0u;
+
+    /*
+     * And the count is the *right* count. A counter merely observed to move could be
+     * aboot's own arming still running from before the payload started - aboot
+     * programs 20s (msm8974.dtsi: qcom,bark-time = <20000>) - which would make the net
+     * look present with a much shorter timeout than intended. The count is taken
+     * microseconds after the reset, so it should sit just under the bark value that
+     * was just programmed; 2 s of slack is far more than the elapsed time and far less
+     * than the 10 s that separates a 30 s bake from a 20 s one.
+     */
+    r->countdown_plausible = ((count_first <= bark_ticks) &&
+                              (count_first >= (bark_ticks - (2u * MSM8974_WDT_HZ)))) ? 1u : 0u;
+
     r->readback_ok = ((r->en_after & 1u) == 1u &&
-                      r->bark_after == ticks &&
-                      r->bite_after == ticks) ? 1u : 0u;
-    r->enabled = r->readback_ok;
+                      r->bark_after == bark_ticks &&
+                      r->bite_after == bite_ticks) ? 1u : 0u;
+    r->enabled = ((r->en_after & 1u) == 1u && r->counter_running != 0u &&
+                  r->countdown_plausible != 0u) ? 1u : 0u;
 
     r->checksum = hw_wdt_checksum(r);
     stage90_hw_watchdog_log(r);
 
-    if (r->readback_ok) {
-        xnu_log_puts("stage90 hw_watchdog: armed; the SoC will reset itself if the payload stops\n");
+    if (r->enabled) {
+        xnu_log_puts("stage90 hw_watchdog: armed and counting; the SoC will reset itself if the payload stops\n");
         return 1;
     }
 
-    xnu_log_puts("stage90 hw_watchdog: readback mismatch - NOT armed; no hardware reset net\n");
+    xnu_log_puts("stage90 hw_watchdog: NOT confirmed armed; no hardware reset net\n");
     return 0;
 }
 

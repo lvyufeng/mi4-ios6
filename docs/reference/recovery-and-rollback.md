@@ -194,11 +194,14 @@ Recovery:
 The payload has **two** recovery nets designed to make this procedure unnecessary, and they
 fail in different ways, which is why there are two:
 
-- The **MSM8974 hardware watchdog** (`stages/stage90/hw_watchdog.c`, on by default, 30 s) is
-  armed at the top of `stage90_main`. It is a hardware counter — no GIC, no timer, no IRQ
-  delivery, no vector table, no unmasked IRQs — so it fires no matter what the CPU is doing.
-  `platform_reboot()` also forces an immediate bite after its PS_HOLD write, so a reboot does
-  not depend on the PMIC write landing.
+- The **MSM8974 hardware watchdog** (`stages/stage90/hw_watchdog.c`, on by default) is armed
+  at the top of `stage90_main`: bark at 30 s, bite at 33 s, following the vendor driver's own
+  split. It is a hardware counter — no GIC, no timer, no IRQ delivery, no vector table, no
+  unmasked IRQs — so it fires no matter what the CPU is doing. `platform_reboot()` also forces
+  an immediate bite after its PS_HOLD write, so a reboot does not depend on the PMIC write
+  landing. Its arming is logged with a liveness check, not just a read-back: `WDT0_STS` holds
+  a live countdown on this part, so the payload samples it twice and requires it to have
+  moved *and* to sit just under the bark value it programmed.
 - The **software dead-man** (60 s) is armed at the end of `kernel_entry`'s GIC validation: the
   timer IRQ handler dumps the interrupted PC ring and reboots through PS_HOLD.
 

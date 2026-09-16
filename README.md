@@ -116,7 +116,8 @@ Stepping back up to `PREFLIGHT_WATCHDOG_ONLY` and then `FULL` is now a deliberat
 decision, enforced by `stages/stage90/preflight_boot_check.sh`:
 it verifies the image against `SHA256SUMS.txt`, checks the payload references no storage
 symbols, and refuses a run whose image was built with a mode the caller has not explicitly
-allowed (`--allow-preflight` / `--allow-full` / `--allow-selftest`).
+allowed (`--allow-preflight` / `--allow-full` / `--allow-selftest` /
+`--allow-attr-normal-nc` / `--allow-hw-watchdog-selftest`).
 
 Build a switch variant without editing `stage90.h`:
 
@@ -173,14 +174,17 @@ It is used two ways:
 
 | | |
 | --- | --- |
-| **Arm** | At the top of `stage90_main`, before anything that can hang. 30 s countdown; the payload's normal run is ~1 s, so a good boot never sees it. |
+| **Arm** | At the top of `stage90_main`, before anything that can hang. Bark at 30 s, bite at 33 s — the vendor driver's own split. The payload's normal run is ~1 s, so a good boot never sees it. |
 | **Bite now** | `platform_reboot()` forces an immediate bite *after* its PS_HOLD write, so the reboot no longer depends on the PMIC. If PS_HOLD did not take effect — one reading of the 2026-09-16 hang — the SoC still resets. |
 
 MMIO only, no new mapping (`0xf9017000` is inside the already-mapped `0xf9000000` MMIO
 section, so it works under both the identity table and the candidate L1), and the register
-state is lost on power cycle. The armed state, the bark/bite ticks written and the readback
-are all logged, so one run tells you whether the registers are where the device tree says
-they are. `STAGE90_HW_WATCHDOG=0` builds without it; `STAGE90_HW_WATCHDOG_SELFTEST=1` arms it
+state is lost on power cycle. The arming is verified by *liveness*, not just by read-back:
+`WDT0_STS` holds a live countdown on this part (that is how the vendor driver's `pet` path
+works out its slack), so the payload samples it twice, requires it to have moved, and requires
+it to sit just under the bark value it programmed — which also distinguishes its own arming
+from aboot's 20 s one still running from before. One run therefore settles whether this net is
+real. `STAGE90_HW_WATCHDOG=0` builds without it; `STAGE90_HW_WATCHDOG_SELFTEST=1` arms it
 and then spins forever, making the hardware countdown the only route back — which is worth
 doing **first**, because once it is proven every later run stops costing a manual power cycle.
 
