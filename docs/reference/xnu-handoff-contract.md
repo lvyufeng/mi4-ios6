@@ -262,7 +262,60 @@ match it and `gPicBase` stays 0 — **the function returns failure and there is 
 controller.** That property name/value pair is an Apple platform convention, and it is now
 checked by `tools/xnu_dt_requirements.py` rather than left to be discovered.
 
-### Blocker 2 — `reg` is an offset from the SoC base, and ours is absolute
+### Blocker 2 — the interrupt/timer bring-up is a closed set of Apple SoCs
+
+This is the structural one, and it reframes Phase 3.
+
+`pe_arm_map_interrupt_controller` returning failure is not the end of it. Its caller is
+`pe_arm_init_interrupts`, which calls it and then `pe_arm_init_timer`
+(`pe_identify_machine.c:558`). That function ends in a chain of
+
+```c
+#if defined(ARM_BOARD_CLASS_S5L8960X)
+        if (!strcmp(gPESoCDeviceType, "s5l8960x-io")) { ... }
+        else
+#endif
+#if defined(ARM_BOARD_CLASS_T7000)
+        if (!strcmp(gPESoCDeviceType, "t7000-io") || ...) { ... }
+        else
+#endif
+        ... S7002, S8000, T8002, T8010, T8011 ...
+                return 0;
+```
+
+and `pexpert/pexpert/arm/board_config.h` — the 32-bit ARM one — defines exactly **three**
+board classes: `ARM_BOARD_CLASS_S7002`, and `ARM_BOARD_CLASS_T8002` (for both T8002 and
+T8004). There is no generic path and no MSM8974 path.
+
+**So on MSM8974 `pe_arm_init_timer` returns 0 unconditionally, and
+`pe_arm_init_interrupts` with it, whatever our device tree says.** No device-tree value can
+change that; it would need an `ARM_BOARD_CLASS_*` that does not exist.
+
+Three consequences for the plan:
+
+1. **Phase 3's shim is mandatory, and it must replace `pe_arm_init_interrupts` as a whole**
+   — not patch the mapping helper inside it. There is no configuration in which the stock
+   function succeeds on this platform.
+2. **The `reg` model question does not affect a working system.** The function returns 0
+   first, so whatever address it computes is never used to drive a real driver. Resolving
+   `reg` is therefore *not* on the critical path — which is the opposite of how the earlier
+   section framed it, and a better outcome: one fewer blocking decision.
+3. **But the protective absence of `interrupt-controller = "master"` is still right, and for
+   a sharper reason.** `ml_io_map` is not a bookkeeping call — it is
+   `io_map(phys_addr, size, VM_WIMG_IO)` (`machine_routines.c:698`), a real pmap operation.
+   With our absolute `reg[0]` and `ranges[1]`, adding that property would have XNU install a
+   mapping for the 32-bit-wrapped `0xf2000000` *before* the function returns 0. The absence
+   prevents a wrong mapping being installed on the way to a failure.
+
+The honest shape of Phase 3 is therefore: **write an MSM8974 replacement for the ARM
+platform bring-up**, rather than trying to satisfy Apple's platform code through device-tree
+values. That is a larger and clearer piece of work than "fix the `reg` model", and it is
+better to know that now than after attempting the latter.
+
+### Blocker 3 — `reg` is an offset from the SoC base, and ours is absolute
+
+*(Not on the critical path — see Blocker 2 above. Recorded because it still governs what
+`interrupt-controller = "master"` would do if anyone adds it.)*
 
 `gPicBase = soc_phys + *reg_prop` is the arithmetic. Apple's model is that a platform node's
 `reg` is an **offset** from the SoC base, and on an Apple SoC the first entry is typically

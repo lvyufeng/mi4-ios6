@@ -427,12 +427,27 @@ That check now runs as part of `stage90/build.sh`, and the property is emitted.
 Worth stating plainly because it is the general lesson: the weak check passed and the strong
 check failed, and the strong check was right.
 
-Deliberately not resolved, and now with the arithmetic written out: Apple's model expects a
-node's `reg` to be an *offset* from the SoC base (`gPicBase = soc_phys + reg[0]`), while ours
-are absolute — with our `ranges[1]` that would map `0xf2000000` instead of the GIC, silently.
-This is where Phase 2 meets Phase 3: satisfying it means choosing a `reg` encoding for a
-function (`pe_arm_map_interrupt_controller`) that Phase 3 replaces with an MSM8974 shim
-anyway. See the contract doc.
+And that led to the finding that actually shapes Phase 3. `pe_arm_map_interrupt_controller`'s
+caller, `pe_arm_init_interrupts`, ends in `pe_arm_init_timer`, which is a chain of
+`#if defined(ARM_BOARD_CLASS_*)` checks on `gPESoCDeviceType` — and the 32-bit ARM
+`board_config.h` defines exactly three board classes (S7002, T8002, T8004), all Apple, with
+**`return 0` as the fallthrough**. So on MSM8974 that function fails unconditionally,
+whatever our device tree says; no device-tree value can change it.
+
+Three consequences, and the first one matters for planning:
+
+1. **Phase 3 must replace `pe_arm_init_interrupts` as a whole**, not patch the mapping helper
+   inside it. There is no configuration in which the stock function succeeds here.
+2. **The `reg` model is therefore not on the critical path** — the function returns before
+   its computed address is used for anything. One fewer blocking decision than the previous
+   paragraph assumed.
+3. The protective absence of `interrupt-controller = "master"` is still right, for a sharper
+   reason: `ml_io_map` is a real `io_map(...)` pmap operation, so adding it would install a
+   mapping for the wrapped `0xf2000000` *before* the failure return.
+
+So Phase 3's shape is now known: write an MSM8974 replacement for the ARM platform bring-up,
+rather than trying to satisfy Apple's platform code through device-tree values. Larger, and
+clearer. See the contract doc.
 
 **Exit criteria:** boot_args and DT dumped from the device and accepted by 4570's readers;
 `TTBR0`/`TTBR1`/`TTBCR`/`SCTLR` verified correct after 4570 code has written them. Still open:
