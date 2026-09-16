@@ -30,6 +30,7 @@
 - `decode_armv7_descriptor.py` — decodes a short-descriptor page-table entry; field positions from Apple's own `osfmk/arm/proc_reg.h`, not from memory.
 - `xnu_dt_requirements.py` — scans XNU's ARM sources for the device-tree lookups they make and checks our Apple-format DT against them, classified by what XNU does when each is missing. Also validates each node header's declared property count.
 - `host_dt_check.sh` — compiles XNU's own `pexpert/gen/device_tree.c` for the host and walks our device tree with it, checking the property *values* the source scan cannot. Extracts the shipping builder verbatim rather than copying it.
+- `count_descriptors.py` — counts ARMv7 page-descriptor constants in a built payload. Its `--diff` mode compares two builds that differ by one switch, which is the sound way to check that a memory-attribute switch does what it claims; absolute counting is unreliable because a descriptor is often built in pieces.
 - `stage-archive.sh` — list/restore the archived stage0–84 snapshots.
 
 ## Status — `status/`

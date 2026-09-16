@@ -196,8 +196,38 @@ Three consequences that look like mistakes and are not:
 
 | Mode | DRAM descriptors | Effect |
 | --- | --- | --- |
-| `SO_ONLY` (0) — **default** | `0x00010c02` / `0x00000012` | Byte-for-byte the behaviour of every stage so far. Verified: the SO_ONLY build emits **zero** Normal descriptors. |
+| `SO_ONLY` (0) — **default** | `0x00010c02` / `0x00000012` | Byte-for-byte the behaviour of every stage so far. Verified: the SO_ONLY build contains **zero** Normal-NC descriptor values. |
 | `NORMAL_NC` (1) | `0x00011c02` / `0x00000452` | DRAM becomes Normal, Non-cacheable, shareable. MMIO is unchanged. |
+
+### How that "zero" was verified — and how it was got wrong first
+
+The claim has been made repeatedly in this project's commits and notes, and the method
+behind it was unsound twice, in opposite directions:
+
+- `grep -c '#1106'` also matches `#11068` — a **substring false positive**.
+- Counting only `movw rN, #imm` misses descriptors carried elsewhere. The section constant
+  `0x00010c02` is *never* materialised whole: the compiler builds it as a low half
+  (`#0x0c02`) plus `orr ..., #0x10000` for the S bit. So a `movw`-only scan reports **0 for
+  a value that is present 53 times** — a **false negative**, and precisely the shape of
+  error that could hide a real Normal descriptor.
+
+Neither error changed the conclusion, which is the dangerous part: it was right by luck.
+
+`tools/count_descriptors.py` replaces the ad-hoc greps, and its `--diff` mode is the sound
+test — comparing the immediate multisets of two builds that differ only in
+`STAGE90_PMAP_ATTR_MODE`, so the difference *is* the descriptor change whatever instruction
+carries it. Run against the two builds:
+
+| Immediate | `SO_ONLY` | `NORMAL_NC` |
+| --- | --- | --- |
+| `0x1c02` (Normal-NC section low half) | **0** | 30 |
+| `0x0452` (Normal-NC page) | **0** | 1 |
+| `0x0c02` (SO section low half) | 53 | 49 |
+| `0x0012` (SO page) | 17 | 16 |
+
+Both parts of the claim now hold soundly: the switch demonstrably rewrites 30–31 mapping
+sites, and `SO_ONLY` demonstrably contains none of the Normal-NC values — including the
+low half, which the old method could not see at all.
 
 This is the smallest change that makes `LDREX`/`STREX` architecturally defined, and it is
 deliberately *non-cacheable*: with no cache enabled it needs no cache maintenance anywhere,
