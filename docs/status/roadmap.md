@@ -112,6 +112,22 @@ the `platform_reboot` sequence. A silent hang or a boot loop instead means the a
 mapped, and the run says so: the return path logs "returned from an UNMAPPED target".
 Gated behind `--allow-fault-inject`.
 
+**Premises verified against the mapping code before writing any of it into a run:**
+
+| Claim | Check | Result |
+| --- | --- | --- |
+| `0x80100000` is a hole in the candidate L1 | enumerated every `map_l1_section_*` / `map_l2_page` call: the L2 window ends at `0x800fffff`, the RAM direct map begins at `0x80200000` | hole |
+| …and in the identity table | enumerated `build_identity_table()`: it maps only PA 0–2 MB and the MMIO windows | hole |
+| The abort vector is reachable *after* the candidate L1 is installed | `VBAR = 0x80a0` (start.S), candidate L1 maps section 0 `VA 0x00000000 → PA 0` | reachable |
+| The handler can log | `RAM_CONSOLE_BASE 0xde500000` is identity-mapped in the candidate L1 | yes |
+| The handler can reboot | `0x0fa00000` (IMEM) and `0xfc400000` (PS_HOLD) are mapped in the candidate L1 | yes |
+
+That third row is the non-obvious one and the reason this check was worth doing: the abort
+happens **while the candidate L1 is live**, so everything the exception handler touches —
+vector table, ram_console, IMEM, PS_HOLD — must be mapped *in the candidate table*, not just
+in the identity table it replaced. They are, but nothing had established it before this;
+Stage87 validated the IRQ path under the candidate L1, not the abort path.
+
 **That is a test result, not only a defect.** The project's crash-visibility layer is what
 made this findable at all; the missing piece is that a jump into non-code produced *no log*.
 Turning that into a captured, logged, self-recovering fault is the first work item below —
