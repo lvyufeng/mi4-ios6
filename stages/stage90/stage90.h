@@ -6433,6 +6433,7 @@ struct stage90_xnu_boot_args_result {
 #define STAGE90_XNU_MSM8974_SHIM_FAIL_DECREMENTER          0x00000010u
 #define STAGE90_XNU_MSM8974_SHIM_FAIL_CNTFRQ               0x00000020u
 #define STAGE90_XNU_MSM8974_SHIM_FAIL_TIMER_LEFT_ARMED     0x00000040u
+#define STAGE90_XNU_MSM8974_SHIM_FAIL_ARM_ORDER            0x00000080u
 
 struct stage90_xnu_msm8974_shim_result {
     uint32_t version;
@@ -6456,10 +6457,20 @@ struct stage90_xnu_msm8974_shim_result {
     uint32_t decrementer_roundtrip;
     uint32_t checks;
     uint32_t failures;
+    /* Ordered arm path (spec section 4). */
+    uint32_t arm_ticks;
+    uint32_t arm_isenabler0;
+    uint32_t arm_gicc_ctlr;
+    uint32_t arm_cntp_ctl;
+    uint32_t arm_prepared;
+    uint32_t arm_committed;
     uint32_t checksum;
 };
 
 int stage90_xnu_msm8974_shim_run(void);
+int stage90_xnu_msm8974_shim_prepare(uint32_t interval_us);
+int stage90_xnu_msm8974_shim_commit(void);
+void stage90_xnu_msm8974_shim_disarm(void);
 void stage90_xnu_msm8974_shim_log(const struct stage90_xnu_msm8974_shim_result *r);
 const struct stage90_xnu_msm8974_shim_result *stage90_xnu_msm8974_shim_result(void);
 uint32_t stage90_xnu_msm8974_shim_registered(void);

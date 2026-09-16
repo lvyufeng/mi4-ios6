@@ -93,6 +93,7 @@ static uint32_t g_shadow_cpu_data;
 /*
  * --- Hardware facts (spec section 3) ------------------------------------------
  */
+#define MSM8974_GIC_DIST_BASE    0xf9000000u
 #define MSM8974_GIC_CPU_BASE     0xf9002000u
 #define MSM8974_GICC_IAR         (MSM8974_GIC_CPU_BASE + 0x00cu)
 #define MSM8974_GICC_EOIR        (MSM8974_GIC_CPU_BASE + 0x010u)
@@ -207,6 +208,10 @@ void stage90_xnu_msm8974_shim_log(const struct stage90_xnu_msm8974_shim_result *
 	xnu_log_kv32("msm8974_shim_cntp_tval_readback", r->cntp_tval_readback);
 	xnu_log_kv32("msm8974_shim_cntp_ctl", r->cntp_ctl);
 	xnu_log_kv32("msm8974_shim_decrementer_roundtrip", r->decrementer_roundtrip);
+	xnu_log_kv32("msm8974_shim_arm_prepared", r->arm_prepared);
+	xnu_log_kv32("msm8974_shim_arm_committed", r->arm_committed);
+	xnu_log_kv32("msm8974_shim_arm_ticks", r->arm_ticks);
+	xnu_log_kv32("msm8974_shim_arm_gicc_ctlr", r->arm_gicc_ctlr);
 	xnu_log_kv32("msm8974_shim_checks", r->checks);
 	xnu_log_kv32("msm8974_shim_failures", r->failures);
 	xnu_log_kv32("msm8974_shim_checksum", r->checksum);
@@ -372,6 +377,126 @@ int stage90_xnu_msm8974_shim_run(void)
 const struct stage90_xnu_msm8974_shim_result *stage90_xnu_msm8974_shim_result(void)
 {
 	return &g_result;
+}
+
+/*
+ * --- The ordered arm path (spec section 4, final bullet) -----------------------
+ *
+ * XNU's timer has to be armed in a specific order, and the payload has validated it:
+ * distributor first, then the timer, then IRQ delivery last (gic.c:544-554). The reason the
+ * order is not arbitrary is that the last step is the one that makes the CPU *interruptible*:
+ * arming the timer before the distributor means the PPI is not enabled yet when it fires,
+ * and enabling delivery before either means an interrupt can arrive with nothing ready to
+ * service it. Both produce a timer that either never fires or fires into a handler whose
+ * state is not set up - failures that look like a broken GIC rather than a broken order.
+ *
+ * This is the XNU-shaped version of that sequence: it uses the registered `tbd_ops` for the
+ * timer half (so the same callbacks XNU would call are the ones exercised), and it returns
+ * the EOI pairing the caller needs to hand to `ml_init_timebase`.
+ *
+ * It deliberately does NOT arm anything by itself - see the "left armed" check in run(). A
+ * bring-up helper that arms a timer the caller is not yet ready to service is how you get a
+ * spurious interrupt during the ladder, so the split is: `prepare` does everything except
+ * make the CPU interruptible, and `commit` is the last step and is the caller's decision.
+ */
+int stage90_xnu_msm8974_shim_prepare(uint32_t interval_us)
+{
+	struct stage90_xnu_msm8974_shim_result *r = &g_result;
+	volatile uint32_t *gicd_isenabler0;
+	uint32_t ticks;
+
+	if (g_registered == 0u) {
+		xnu_log_puts("stage90 xnu_msm8974_shim: prepare called before registration\n");
+		r->failures |= STAGE90_XNU_MSM8974_SHIM_FAIL_REGISTRATION;
+		return 0;
+	}
+
+	/* Guard the conversion: ticks = usec * 19.2 must fit CNTP_TVAL's 32 bits. */
+	if (interval_us > (0xffffffffu / STAGE90_XNU_MSM8974_SHIM_EXPECTED_CNTFRQ)) {
+		xnu_log_puts("stage90 xnu_msm8974_shim: interval too large to encode\n");
+		r->failures |= STAGE90_XNU_MSM8974_SHIM_FAIL_DECREMENTER;
+		return 0;
+	}
+	/* usec * 96 / 5 == usec * 19.2, without a 64-bit divide helper. */
+	ticks = (interval_us * 96u) / 5u;
+
+	/* 1. Distributor: enable the timer PPI bank. A 32-bit write to the banked
+	 *    ISENABLER0 covers PPIs 0-31, which is where the generic timer's 18 and 19 live. */
+	gicd_isenabler0 = (volatile uint32_t *)(uintptr_t)(MSM8974_GIC_DIST_BASE + 0x100u);
+	*gicd_isenabler0 = (1u << MSM8974_TIMER_CNTP_INTID);
+	shim_barrier();
+
+	/* 2. Timer: arm via the registered callback, i.e. the path XNU would call. */
+	if (g_registered_ops.tbd_set_decrementer == 0) {
+		r->failures |= STAGE90_XNU_MSM8974_SHIM_FAIL_DECREMENTER;
+		return 0;
+	}
+	g_registered_ops.tbd_set_decrementer(ticks);
+	shim_barrier();
+
+	/*
+	 * 3. Enable CNTP. Deliberately NOT done here - this is the step that makes the timer
+	 *    able to fire, and it belongs to `commit` together with IRQ delivery so that the
+	 *    two always happen together and in that order. Doing it here would create a window
+	 *    where the timer can fire while the CPU is still not interruptible, which is
+	 *    harmless, and a window where it fires *after* delivery is enabled but before the
+	 *    caller's state is ready, which is not.
+	 */
+	r->arm_ticks = ticks;
+	r->arm_isenabler0 = *gicd_isenabler0;
+	r->arm_prepared = 1u;
+	xnu_log_kv32("msm8974_shim_arm_ticks", ticks);
+	xnu_log_kv32("msm8974_shim_gicd_isenabler0", r->arm_isenabler0);
+	return 1;
+}
+
+/*
+ * The last step: unmask the timer, then open IRQ delivery. Order within this function
+ * matters for the reason given above - CNTP_CTL before CPSR.I, never the reverse.
+ */
+int stage90_xnu_msm8974_shim_commit(void)
+{
+	struct stage90_xnu_msm8974_shim_result *r = &g_result;
+	volatile uint32_t *gicc_ctlr =
+		(volatile uint32_t *)(uintptr_t)(MSM8974_GIC_CPU_BASE + 0x000u);
+
+	if (r->arm_prepared != 1u) {
+		xnu_log_puts("stage90 xnu_msm8974_shim: commit called without prepare\n");
+		r->failures |= STAGE90_XNU_MSM8974_SHIM_FAIL_ARM_ORDER;
+		return 0;
+	}
+
+	/* The CPU interface must be enabled before delivery means anything. aboot normally
+	 * leaves it on (the payload's SGI/timer selftests assert it), so this only repairs the
+	 * disabled case - and it is checked rather than assumed, because "the distributor is
+	 * enabled" and "this CPU will receive anything" are different statements. */
+	if ((*gicc_ctlr & 1u) == 0u) {
+		*gicc_ctlr = *gicc_ctlr | 1u;
+		shim_barrier();
+	}
+	r->arm_gicc_ctlr = *gicc_ctlr;
+
+	/* Unmask the timer, then let interrupts in. */
+	shim_write_cntp_tval(r->arm_ticks);
+	__asm__ volatile ("mcr p15, 0, %0, c14, c2, 1" :: "r"(1u) : "memory");
+	shim_barrier();
+	r->arm_cntp_ctl = shim_read_cntp_ctl();
+
+	__asm__ volatile ("cpsie i\n\tisb" ::: "memory");
+	r->arm_committed = 1u;
+
+	xnu_log_kv32("msm8974_shim_arm_gicc_ctlr", r->arm_gicc_ctlr);
+	xnu_log_kv32("msm8974_shim_arm_cntp_ctl", r->arm_cntp_ctl);
+	return 1;
+}
+
+/* Disarm, in the reverse order: close delivery first, then stop the timer. */
+void stage90_xnu_msm8974_shim_disarm(void)
+{
+	__asm__ volatile ("cpsid i\n\tisb" ::: "memory");
+	shim_write_cntp_tval(0u);
+	__asm__ volatile ("mcr p15, 0, %0, c14, c2, 1" :: "r"(0u) : "memory");
+	shim_barrier();
 }
 
 /* Accessors the rest of the shim layer would use, exposed for the same reason. */
