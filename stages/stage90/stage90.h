@@ -6411,6 +6411,61 @@ struct stage90_xnu_boot_args_result {
     uint32_t checksum;
 };
 
+/*
+ * MSM8974 platform shim (roadmap Phase 3). See xnu_msm8974_shim.c for why XNU's ARM
+ * timer/interrupt bring-up has to be replaced rather than configured on this SoC.
+ *
+ * Default off: it is the next stage's work, and it changes nothing about the current one.
+ */
+#if !defined(STAGE90_XNU_MSM8974_SHIM)
+#define STAGE90_XNU_MSM8974_SHIM 0u
+#endif
+
+#define STAGE90_XNU_MSM8974_SHIM_VERSION 0x00010000u
+
+/* The generic timer frequency the payload has validated on hardware since Stage4. */
+#define STAGE90_XNU_MSM8974_SHIM_EXPECTED_CNTFRQ 19200000u
+
+#define STAGE90_XNU_MSM8974_SHIM_FAIL_CPU_DATA_GUARD       0x00000001u
+#define STAGE90_XNU_MSM8974_SHIM_FAIL_REGISTRATION         0x00000002u
+#define STAGE90_XNU_MSM8974_SHIM_FAIL_GUARD_NOT_ENFORCED   0x00000004u
+#define STAGE90_XNU_MSM8974_SHIM_FAIL_EOI_PAIRING          0x00000008u
+#define STAGE90_XNU_MSM8974_SHIM_FAIL_DECREMENTER          0x00000010u
+#define STAGE90_XNU_MSM8974_SHIM_FAIL_CNTFRQ               0x00000020u
+#define STAGE90_XNU_MSM8974_SHIM_FAIL_TIMER_LEFT_ARMED     0x00000040u
+
+struct stage90_xnu_msm8974_shim_result {
+    uint32_t version;
+    uint32_t size;
+    uint32_t status;
+    uint32_t cpu_data_ptr;
+    uint32_t boot_cpu_data_ptr;
+    uint32_t cpu_data_guard_ok;
+    uint32_t registered;
+    uint32_t registration_verified;
+    uint32_t get_decrementer_registered;
+    uint32_t set_decrementer_registered;
+    uint32_t fiq_handler_registered;
+    uint32_t int_address;
+    uint32_t int_value;
+    uint32_t timer_intid;
+    uint32_t gicc_eoir;
+    uint32_t cntfrq;
+    uint32_t cntp_tval_readback;
+    uint32_t cntp_ctl;
+    uint32_t decrementer_roundtrip;
+    uint32_t checks;
+    uint32_t failures;
+    uint32_t checksum;
+};
+
+int stage90_xnu_msm8974_shim_run(void);
+void stage90_xnu_msm8974_shim_log(const struct stage90_xnu_msm8974_shim_result *r);
+const struct stage90_xnu_msm8974_shim_result *stage90_xnu_msm8974_shim_result(void);
+uint32_t stage90_xnu_msm8974_shim_registered(void);
+uint32_t stage90_xnu_msm8974_shim_int_address(void);
+uint32_t stage90_xnu_msm8974_shim_int_value(void);
+
 int stage90_xnu_boot_args_prepare(void *dt, uint32_t dt_len);
 const struct boot_args *stage90_xnu_boot_args(void);
 const struct stage90_xnu_boot_args_result *stage90_xnu_boot_args_result(void);

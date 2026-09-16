@@ -8,7 +8,7 @@ This repository tracks an experimental, owner-controlled research project around
 | --- | --- |
 | `stages/stage85` … `stages/stage90` | The six retained stage snapshots. `stage90` is the current tip. See [`stages/README.md`](stages/README.md). |
 | `docs/` | All documentation, indexed in [`docs/README.md`](docs/README.md): `reference/`, `experiments/`, `status/`, `history/`. |
-| `tools/` | Host-side helpers: `stage-archive.sh` for the archived stages, `decode_armv7_descriptor.py` for page-table entries, `check_boot_args_abi.py` for the XNU `boot_args` layout, `xnu_dt_requirements.py` for the device-tree lookups XNU makes, and the boot-image and fixture generators. |
+| `tools/` | Host-side helpers: `stage-archive.sh` for the archived stages, `decode_armv7_descriptor.py` for page-table entries, `check_xnu_struct_abi.py` for the XNU `boot_args` layout, `xnu_dt_requirements.py` for the device-tree lookups XNU makes, and the boot-image and fixture generators. |
 | `Makefile` | Build/list/restore convenience targets. |
 | `out/stageNN/` | Build products (ignored by git). |
 | `external/` | Public XNU checkout used by the compile-graph and link-proof helpers (ignored by git). |

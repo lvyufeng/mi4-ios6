@@ -172,7 +172,7 @@ symptom until a kernel misbehaves somewhere else entirely.
 
 Two checks, both cheap:
 
-- `tools/check_boot_args_abi.py` computes both layouts for ARM ILP32 and compares field by
+- `tools/check_xnu_struct_abi.py` computes both layouts for ARM ILP32 and compares field by
   field; `build.sh` runs it (skipping with a warning if `external/` is absent). Its
   perturbation test — swapping a field and confirming it reports 18 differences and exits 1 —
   is part of its value: a checker that cannot fail is not a checker.

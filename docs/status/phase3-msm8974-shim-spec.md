@@ -193,6 +193,39 @@ while `cpu_timebase_init` copies all three unconditionally. Whatever the shim su
 account for XNU calling through a NULL in the generic case, or not relying on those two at
 all.
 
+## 2a. Implemented: `stages/stage90/xnu_msm8974_shim.c`
+
+The interface above is now written, behind `STAGE90_XNU_MSM8974_SHIM` (default off — it is the
+next stage's work and changes nothing about the current one). What it does:
+
+- **Mirrors the `tbd_ops` contract exactly, and asserts it.** Three 32-bit pointers at
+  offsets 0/4/8, size 12 — `_Static_assert`ed in-payload *and* checked against XNU's own
+  header by `tools/check_xnu_struct_abi.py`, which now covers both `boot_args` and `tbd_ops`.
+  The argument is the same as for `boot_args`: XNU copies this struct by value and calls
+  through it, so a field added or reordered is read as whatever XNU expects at that offset.
+- **Registers the way XNU would, and then verifies the registration took.** It mirrors
+  `ml_init_timebase`'s `cpu_data_ptr == &BootCpuData` guard rather than calling it (the
+  payload does not link XNU), because the behaviour worth reproducing is the *trap*: any other
+  pointer makes registration a silent no-op. Both paths are exercised deliberately, so the
+  difference appears in a log instead of being inferred. Then it reads the registered ops
+  back, because "the call happened" and "the ops are installed" are different statements.
+- **Points the decrementer callbacks at CNTP, not CNTV** (§6.2.1 option 2). `get`/`set` are
+  `CNTP_TVAL`, matching the counter whose interrupt is measured, so the intid is the known 19
+  rather than an unmeasured CNTV value.
+- **Leaves `tbd_fiq_handler` NULL**, which keeps XNU's registration re-entrant for a later
+  FIQ attempt and makes "the shim does not provide a FIQ path" explicit rather than implied.
+- **Checks the EOI pairing** — `int_address` = `GICC_EOIR`, `int_value` = the measured CNTP
+  intid — and the validated 19.2 MHz `CNTFRQ`, and asserts the timer is not left armed, since
+  the payload's own timer code owns arming from here.
+
+Verified off-device: build clean under `-Werror` in both the default and the enabled
+configuration; 12 combinations across shim × handoff-mode × watchdog compile clean; the
+`_Static_assert`s fire when a field offset is perturbed; the ABI checker reports the field
+count and size mismatch when a field is inserted.
+
+**Not yet on hardware**, and it does not run XNU. It is the platform layer XNU would need,
+written so its hardware facts are explicit and its registration contract is enforced.
+
 ## 3. MSM8974 facts the shim must encode
 
 These are the values where "architecturally correct" and "correct on this silicon" differ.

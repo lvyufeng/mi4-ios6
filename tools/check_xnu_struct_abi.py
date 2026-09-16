@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that our boot_args layout matches the one XNU's entry code reads.
+"""Check that our structs match the layouts XNU reads by offset.
 
 `osfmk/arm/start.s` reads `boot_args` with raw loads:
 
@@ -15,11 +15,18 @@ wrong 32-bit word and uses it as the physical base of memory. There is no way to
 that on the device except by watching a kernel misbehave, which is exactly the kind of
 failure that costs days. Catching it here costs a build-time check.
 
+The same argument applies to every struct XNU touches by offset, so this checks a list
+(STRUCT_PAIRS): `boot_args` (loaded field-by-field in osfmk/arm/start.s) and `tbd_ops`
+(copied by value into RTClockData and called through). Adding a third is one entry.
+
+Both are also asserted in-payload with _Static_assert, so a drift cannot reach hardware
+even if this tool is skipped (external/ absent).
+
 Layouts are computed for 32-bit ARM (ILP32, little-endian, natural alignment), which is
 the only ABI this payload is built for.
 
 Usage:
-    check_boot_args_abi.py [--repo-root DIR]
+    check_xnu_struct_abi.py [--repo-root DIR]
 Exit status 0 if the layouts agree, 1 if they do not, 2 on a parse problem.
 """
 
@@ -33,6 +40,19 @@ import sys
 XNU_HEADER = "external/xnu-4570.1.46/pexpert/pexpert/arm/boot.h"
 OUR_HEADER = "stages/stage90/stage90.h"
 
+# Structures whose layout XNU reads by offset. Each is (XNU file, XNU struct name, our file,
+# our struct name). `boot_args` is loaded field-by-field in osfmk/arm/start.s; `tbd_ops` is
+# copied by value into RTClockData and called through. Both fail the same way if they drift:
+# XNU reads or calls whatever is at the offset it expects, with no build error and no fault.
+STRUCT_PAIRS = [
+    ("external/xnu-4570.1.46/pexpert/pexpert/arm/boot.h", "boot_args",
+     "stages/stage90/stage90.h", "boot_args"),
+    # Our mirror lives in the shim module, not the header - pointed at the file that
+    # actually defines it, so the check follows the definition rather than a duplicate.
+    ("external/xnu-4570.1.46/osfmk/arm/machine_routines.h", "tbd_ops",
+     "stages/stage90/xnu_msm8974_shim.c", "stage90_xnu_tbd_ops"),
+]
+
 # Types as they appear, mapped to (size, alignment) on ARM ILP32. `unsigned long` is
 # 4 bytes on 32-bit ARM, which is why Boot_Video can be read as six uint32_t.
 SIZES = {
@@ -41,6 +61,7 @@ SIZES = {
     "uint32_t": (4, 4), "int": (4, 4), "unsigned int": (4, 4),
     "unsigned long": (4, 4), "long": (4, 4),
     "void *": (4, 4),
+    "fnptr": (4, 4),   # synthesised by parse_fields for function-pointer members
 }
 
 def strip_comments(text):
@@ -77,6 +98,16 @@ def parse_fields(body, defines, known_structs):
         # Normalise pointer spelling: `void *p`, `void* p` and `void * p` are all the
         # same declaration, and all three appear in these headers.
         line = re.sub(r"\s*\*\s*", " * ", line)
+
+        # A function pointer field - `void (*name)(void)` - is a 4-byte pointer on ARM.
+        # Handled before the plain declaration form because its name sits inside the
+        # declarator, which FIELD_RE cannot see.
+        fp = re.match(r"^(?P<ret>.+?)\s*\(\s*\*\s*(?P<name>[A-Za-z_]\w*)\s*\)"
+                      r"\s*\((?P<args>[^)]*)\)$", line)
+        if fp:
+            fields.append(("fnptr", fp.group("name"), 4))
+            continue
+
         m = FIELD_RE.match(line)
         if not m:
             raise ValueError("cannot parse field: %r" % line)
@@ -189,29 +220,23 @@ def camel_to_upper(name):
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).upper()
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--repo-root", default=os.path.join(os.path.dirname(__file__), ".."))
-    ap.add_argument("--verbose", action="store_true",
-                    help="list every array element instead of collapsing runs")
-    args = ap.parse_args()
-    root = os.path.abspath(args.repo_root)
-
+def check_pair(root, xnu_rel, xnu_name, our_rel, our_name, verbose):
+    """Compare one (XNU struct, ours) pair. Returns the number of differences."""
     try:
-        xnu_fields = load(os.path.join(root, XNU_HEADER), ["boot_args"])
-        our_fields = load(os.path.join(root, OUR_HEADER), ["boot_args"])
+        xnu_fields = load(os.path.join(root, xnu_rel), [xnu_name])
+        our_fields = load(os.path.join(root, our_rel), [our_name])
     except (OSError, ValueError) as exc:
-        print("check_boot_args_abi: cannot parse: %s" % exc, file=sys.stderr)
-        return 2
+        print("  cannot parse %s / %s: %s" % (xnu_name, our_name, exc), file=sys.stderr)
+        return 1
 
     xnu_layout, xnu_size = layout(xnu_fields)
     our_layout, our_size = layout(our_fields)
 
-    print("boot_args ABI (ARM ILP32)")
+    print("%s  (XNU %s  vs  ours %s)" % (xnu_name, xnu_rel, our_name))
     print("  %-24s %8s %8s   %s" % ("field", "xnu off", "our off", "verdict"))
 
     bad = 0
-    if args.verbose:
+    if verbose:
         for (xn, xo, xs), (on_, oo, osz) in zip(xnu_layout, our_layout):
             ok = (xn == on_ and xo == oo and xs == osz)
             bad += 0 if ok else 1
@@ -233,11 +258,34 @@ def main():
     if xnu_size != our_size:
         bad += 1
 
-    # The four offsets start.s actually loads. Called out separately because a mismatch
-    # here is the failure mode that matters: XNU silently uses the wrong 32-bit word as
-    # the physical base of memory, rather than failing to build or faulting visibly.
     print()
-    print("  offsets osfmk/arm/start.s loads by hand:")
+    return bad
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--repo-root", default=os.path.join(os.path.dirname(__file__), ".."))
+    ap.add_argument("--verbose", action="store_true",
+                    help="list every array element instead of collapsing runs")
+    ap.add_argument("--struct", help="check only this struct by name")
+    args = ap.parse_args()
+    root = os.path.abspath(args.repo_root)
+
+    pairs = [p for p in STRUCT_PAIRS if args.struct is None or p[1] == args.struct]
+    if not pairs:
+        print("check_struct_abi: no struct named %r" % args.struct, file=sys.stderr)
+        return 2
+
+    bad = 0
+    for xnu_rel, xnu_name, our_rel, our_name in pairs:
+        bad += check_pair(root, xnu_rel, xnu_name, our_rel, our_name, args.verbose)
+
+    print("offsets XNU's ARM code loads by hand (from osfmk/arm/genassym.c):")
+    try:
+        xnu_fields = load(os.path.join(root, STRUCT_PAIRS[0][0]), ["boot_args"])
+        xnu_layout, _ = layout(xnu_fields)
+    except (OSError, ValueError):
+        xnu_layout = []
     for name in ("virtBase", "physBase", "memSize", "topOfKernelData"):
         off = next((o for n, o, _s in xnu_layout if n == name), None)
         if off is None:
@@ -247,9 +295,9 @@ def main():
             print("    BA_%-22s @ %3d  (ldr rN, [r0, #%d])" % (camel_to_upper(name), off, off))
 
     if bad:
-        print("\nFAIL: %d difference(s) - XNU's entry code would read the wrong data." % bad)
+        print("\nFAIL: %d difference(s) - XNU would read the wrong data." % bad)
         return 1
-    print("\nOK: layout matches XNU's boot_args.")
+    print("\nOK: every checked structure matches XNU's layout.")
     return 0
 
 

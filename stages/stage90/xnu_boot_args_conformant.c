@@ -48,7 +48,7 @@
  * The ABI. These are not cosmetic: start.s loads these four fields by hand at fixed
  * offsets derived from `offsetof()` in its own tree (osfmk/arm/genassym.c), so a
  * mismatch is not a build error and not a fault - it is XNU silently using the wrong
- * 32-bit word as the physical base of memory. tools/check_boot_args_abi.py verifies the
+ * 32-bit word as the physical base of memory. tools/check_xnu_struct_abi.py verifies the
  * full layout against pexpert/pexpert/arm/boot.h at build time; these asserts are the
  * in-payload half of the same check, so a drift cannot reach hardware even if the host
  * tool is skipped (external/ absent, ABI check silenced).

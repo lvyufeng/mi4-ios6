@@ -71,6 +71,18 @@ int kernel_entry(struct boot_args *args)
     (void)stage90_exclusive_probe_run();
 #endif
 
+#if STAGE90_XNU_MSM8974_SHIM
+    /*
+     * Phase 3: exercise the Stage-owned MSM8974 platform shim - the replacement for XNU's
+     * ARM timer/interrupt bring-up. It registers its tbd_ops through a mirror of
+     * ml_init_timebase's guard and verifies the registration took, then checks the hardware
+     * facts (the EOI pairing, the measured CNTP interrupt number, the validated CNTFRQ).
+     *
+     * It leaves the timer disarmed: the payload's own timer code owns arming from here.
+     */
+    (void)stage90_xnu_msm8974_shim_run();
+#endif
+
 #if STAGE90_XNU_BOOT_ARGS
     /*
      * Phase 2: build and validate a boot_args that conforms to the contract in XNU's

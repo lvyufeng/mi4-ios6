@@ -474,7 +474,7 @@ The two values that were guesses are now sourced from the device. `physBase = 0`
 stops the section map cleanly at the hole. The old 2 MB was itself a guess, just a small one;
 a kernel given 2 MB cannot do anything.
 
-`tools/check_boot_args_abi.py` closes the failure mode that has no symptom: `start.s` loads
+`tools/check_xnu_struct_abi.py` closes the failure mode that has no symptom: `start.s` loads
 `virtBase`/`physBase`/`memSize`/`topOfKernelData` by hand at fixed offsets, so a struct drift
 means XNU silently reads the wrong word as the physical base of memory. The tool compares both
 layouts field by field (and its own perturbation test confirms it reports a mismatch rather
@@ -580,6 +580,13 @@ the hardware-specific values explicit before code is written. Two findings that 
   periodically for the timebase to be correct, which removes a constraint that would otherwise
   have shaped the shim's timer code. The decrementer callbacks still matter — they are how the
   handler re-arms — but `fleh_fiq_generic` itself does not need reimplementing.
+
+**Phase 3 has started.** [`stages/stage90/xnu_msm8974_shim.c`](../../stages/stage90/xnu_msm8974_shim.c)
+implements the interface the spec defines — the `tbd_ops` mirror (asserted in-payload and
+checked against XNU's header by `tools/check_xnu_struct_abi.py`), the `&BootCpuData`
+registration guard reproduced *and verified by reading the registration back*, CNTP-based
+decrementer callbacks rather than CNTV (§6.2.1), the EOI pairing, and the CNTFRQ check.
+Behind `STAGE90_XNU_MSM8974_SHIM`, default off.
 
 **Exit criteria:** boot_args and DT dumped from the device and accepted by 4570's readers;
 `TTBR0`/`TTBR1`/`TTBCR`/`SCTLR` verified correct after 4570 code has written them. Still open:
