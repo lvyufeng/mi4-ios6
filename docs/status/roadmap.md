@@ -514,6 +514,18 @@ the hardware-specific values explicit before code is written. Two findings that 
 - **`ml_init_timebase` is a pure registration function whose guard is `cpu_data_ptr ==
   &BootCpuData`** — passing anything else makes registration a *silent* no-op. The spec
   requires asserting the registration took rather than trusting the call.
+- **XNU requires a platform FIQ handler on this build.** The FIQ vector slot
+  (`locore.s:147`) branches to `r9` — the shim's `tbd_fiq_handler` — because `__ARM_TIME__`
+  is used 16 times in the ARM tree and defined in none of them. There is no build in which
+  XNU takes the timer as an IRQ, so the payload's IRQ-only experience does not transfer, and
+  FIQ-on-MSM8974 (TrustZone interaction) becomes Phase 3's largest single risk. XNU's own
+  `fleh_fiq_generic` shows the handler's contract, including that the EOI is literally a
+  write of `int_value` to `int_address`, and that the generic `tbd_ops` leaves both
+  decrementer callbacks NULL.
+- **An open tension worth naming:** `fleh_fiq_generic` maintains a *software* timebase
+  (TBL incremented per tick) while `__ARM_TIME_TIMEBASE_ONLY__` makes `ml_get_timebase` read
+  the real `CNTPCT`. Those imply different timer programming — periodic versus free-running —
+  so which is authoritative is the next reading task, not a detail.
 
 **Exit criteria:** boot_args and DT dumped from the device and accepted by 4570's readers;
 `TTBR0`/`TTBR1`/`TTBCR`/`SCTLR` verified correct after 4570 code has written them. Still open:

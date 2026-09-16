@@ -116,6 +116,68 @@ the IAR value it read, so the natural pairing is `int_address = GICC_EOIR`,
 `int_value = <the IAR read in the handler>` — which is why `tbd_fiq_handler` and the EOI
 value are coupled and must be designed together rather than separately.
 
+### 2.3 FIQ is not optional on this build — established, not assumed
+
+The first draft of this spec listed "whether the FIQ path is usable at all" as unsettleable
+from the host. Reading further resolves the *architectural* half of it, and the answer is
+that the shim must provide a working FIQ handler.
+
+The FIQ vector slot in `osfmk/arm/locore.s:147`:
+
+```asm
+        adr     pc, Lexc_irq_vector
+#if __ARM_TIME__
+        adr     pc, Lexc_decirq_vector
+#else /* ! __ARM_TIME__ */
+        mov     pc, r9                              /* -> cpu_get_fiq_handler */
+#endif /* __ARM_TIME__ */
+```
+
+`__ARM_TIME__` is used in 16 places in the ARM tree and **defined in none of them** (only
+`__ARM_TIME_TIMEBASE_ONLY__` is defined, at `proc_reg.h:98`). So the `#else` branch is live
+and the FIQ vector **branches to `r9`**, which `cpu_serialize_timebase` loaded from
+`CPU_GET_FIQ_HANDLER` — the shim's `tbd_fiq_handler`.
+
+Two consequences:
+
+1. **The shim must supply a real FIQ handler.** There is no build in which XNU takes the
+   timer as an IRQ; the FIQ path is the one wired up. This also means the payload's own
+   approach — every interrupt it has ever driven on this device is IRQ — does *not* transfer,
+   and the FIQ path is genuinely new work rather than a variation.
+2. **The handler's contract is readable.** XNU's own generic one
+   (`fleh_fiq_generic`, `locore.s:1650`) shows exactly what it must do:
+
+```asm
+LEXT(fleh_fiq_generic)
+        str     r11, [r10]                  /* clear the FIQ source: int_value -> int_address */
+        ldr     r13, [r8, CPU_TIMEBASE_LOW]
+        adds    r13, r13, #1                /* maintain a software TBL ... */
+        str     r13, [r8, CPU_TIMEBASE_LOW]
+        ...
+        subs    r12, r12, #1                /* ... and a software decrementer */
+        str     r12, [r8, CPU_DECREMENTER]
+        subspl  pc, lr, #4                  /* return unless DEC < 0 */
+        b       EXT(fleh_dec)
+```
+
+   The first instruction confirms the `int_address`/`int_value` pairing above: the EOI *is* a
+   write of `int_value` to `int_address`, and it is the handler's first act.
+
+   The rest is a **software-maintained timebase** — TBL incremented by one per tick — which is
+   the older ARM scheme, and it sits in tension with `__ARM_TIME_TIMEBASE_ONLY__` being
+   defined, under which `ml_get_timebase` reads the real `CNTPCT` instead
+   (`machine_routines_asm.s:979`). Resolving that tension — which timebase is authoritative,
+   and therefore whether the timer must tick at a *fixed* rate for the timebase to be correct
+   — is the next reading task, and it is a larger question than it looks: a free-running
+   `CNTPCT` tolerates an irregular interrupt, whereas an incremented TBL requires a periodic
+   one, and those imply different timer programming in the shim.
+
+`pe_arm_init_timer`'s default is `struct tbd_ops generic_funcs = {&fleh_fiq_generic, NULL,
+NULL}` (`pe_identify_machine.c:589`) — note that both decrementer operations are NULL there,
+while `cpu_timebase_init` copies all three unconditionally. Whatever the shim supplies must
+account for XNU calling through a NULL in the generic case, or not relying on those two at
+all.
+
 ## 3. MSM8974 facts the shim must encode
 
 These are the values where "architecturally correct" and "correct on this silicon" differ.
@@ -197,9 +259,14 @@ Stated plainly, because this document is a specification and not evidence:
   registration function with no Apple timer assumptions — the literal risk of "the function
   will not accept our `tbd_ops`" does not exist. It was replaced by a sharper, concrete one:
   the `&BootCpuData` guard, which fails silently.
-- **Whether the FIQ path is usable at all.** `tbd_fiq_handler` implies XNU expects to take
-  the timer as FIQ, and FIQ handling on MSM8974 interacts with TrustZone. The payload has
-  never used FIQ; every interrupt it has driven is IRQ.
+- **Whether FIQ is *usable* on MSM8974.** Split into two halves, one now resolved: XNU
+  *requires* a platform FIQ handler (§2.3), so the question is not whether it is wanted but
+  whether the hardware and TrustZone permit it. FIQ on MSM8974 interacts with the secure
+  world, and the payload has never taken one — every interrupt it has driven is IRQ. This
+  half remains open, and it is the largest single risk in Phase 3.
+- **Which timebase is authoritative.** `__ARM_TIME_TIMEBASE_ONLY__` makes `ml_get_timebase`
+  read the real `CNTPCT`, while `fleh_fiq_generic` maintains a software TBL incremented per
+  tick. Those imply different timer programming (free-running vs periodic). See §2.3.
 - **Anything about SMP.** `ml_processor_register`, IPIs and the CPU startup path are all
   Apple-shaped and untouched here.
 
