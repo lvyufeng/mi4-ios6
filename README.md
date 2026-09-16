@@ -26,7 +26,14 @@ sha256sum -c out/stage90/SHA256SUMS.txt  # per-stage build manifest
 
 cd stages/stage90 && ./preflight_boot_check.sh   # verify + gate a hardware run
 sudo fastboot boot out/stage90/stage90-qcdt.img  # non-persistent validation
+
+cd stages/stage90 && ./run_and_capture.sh        # gate + boot + capture, in one step
 ```
+
+`run_and_capture.sh` does the whole cycle — gate, boot, wait for the device, capture
+`/proc/last_kmsg`, summarise the markers — so the commands are not retyped at the moment they
+matter most. It never flashes, and it captures the log before touching the device again. It
+exits 2 if the device does not come back, which means a manual power press is needed.
 
 Every snapshot resolves the repository root itself, so its `build.sh` works from any working directory. Booting is deliberately not a `make` target: flashing is a per-operation decision, and `fastboot boot` never writes to the device.
 

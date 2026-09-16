@@ -128,7 +128,7 @@ else
 fi
 
 case "$HWSELFTEST" in 1|1u)
-  [[ $ALLOW_HW_SELFTEST -eq 1 ]] || fail "the hardware-watchdog SELFTEST spins forever on purpose; needs --allow-hw-watchdog-selftest"
+  [[ $ALLOW_HW_SELFTEST -eq 1 ]] || fail "the hardware-watchdog SELFTEST skips the normal boot path and spins until a net reboots it; needs --allow-hw-watchdog-selftest"
   echo "HW WATCHDOG SELFTEST: allowed. The payload spins and the hardware countdown"
   echo "          should reboot it at ~33s. If the watchdog does NOT fire, the spin is"
   echo "          bounded and PS_HOLD returns the device at ~90s instead - so this run"

@@ -322,7 +322,12 @@ The `fastboot` and log-capture steps are the same for all of them, and the gate 
 too — but they are the part that, if mistyped, costs the run:
 
 ```bash
-# in the same directory, with the image the gate just approved
+# One command does gate + boot + wait + capture + summarise. It never flashes, and it
+# captures /proc/last_kmsg before touching the device again. Exit 2 means the device did
+# not come back and needs a power press.
+./run_and_capture.sh --allow-hw-watchdog-selftest
+
+# or, by hand, in the same directory, with the image the gate just approved:
 sudo adb -s 4a2fe00b reboot bootloader
 sudo fastboot boot "$PWD/../../out/stage90/stage90-qcdt.img"
 
