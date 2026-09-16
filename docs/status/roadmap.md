@@ -60,8 +60,40 @@ else             r->xnu_entry_va = r->text_segment_va;
 `tools/mkmacho_fixture.py` writes as `VM_BASE` — `0x80008000`. That address is the Mach-O
 *header*. The fixture's `__TEXT,__text` payload is the ASCII string `"ST90-TEXT-NOEXEC"`,
 and the generator's own docstring calls the fixture "intentionally inert… it is never
-executed by the target payload". So the handoff jumped to a magic number, and the device
-hung because it executed non-code. The handoff could not have started XNU.
+executed by the target payload". So the handoff jumped to a magic number, and it could not
+have started XNU.
+
+**What that jump actually did is worse than "executed non-code", and it is worth stating
+correctly** — an earlier revision of this section, and the README, said the device hung
+because it executed ASCII. Checking the addresses shows otherwise:
+
+- The handoff installs the candidate L1 first. In that table the high-VA window is built by
+  `map_l1_page_table(l1, 0x80000000, l2_kernel)` followed by 256 × `map_l2_page(l2, va, pa)`
+  with `va = 0x80000000 + page*4096` and `pa = 0 + page*4096`, i.e. **VA `0x80000000+X` maps
+  to PA `X` for X < 1 MB**.
+- So `0x80008000` resolves to PA `0x8000`.
+- And `0x8000` is `_start` (`arm-none-eabi-nm` on the built payload: `00008000 T _start`,
+  with `stage90_vectors` at `0x80a0`), because `linker.ld` sets `. = 0x00008000` and
+  `KEEP`s `.text._start` first.
+
+**The jump re-entered the payload's own entry point.** Not data, not ASCII — a restart.
+That matters because `stage90_main` calls `log_init()` first, which resets the ram_console
+(`rc->size = 0`), so a restart loop **wipes its own log on every iteration**. That is a much
+better explanation of "no log output, no automatic recovery, manual power-cycle required"
+than executing non-code, which would have produced a fault at the first instruction.
+
+**Stated as inference, not evidence:** whether the original run was in fact this loop cannot
+be confirmed without `last_kmsg`, which the hang prevented capturing. Two readings fit — the
+loop above (candidate L1 installed, the normal FULL-mode path), or a prefetch abort if the
+candidate install failed and the identity table was still live, since the identity table maps
+only PA 0–2 MB so `0x80008000` is unmapped there. The loop is the better fit for the absence
+of *any* log, because an abort would have been logged.
+
+Either way it changes one thing downstream: **Phase 0's criterion (b) cannot be tested by
+jumping to the fixture VA.** Under the candidate L1 that is a valid mapping to real code, so
+the test would produce a boot loop rather than a logged fault. A fault-injection test has to
+target something genuinely unmapped, or a PA that holds data — and it should say which it is
+targeting and why.
 
 **That is a test result, not only a defect.** The project's crash-visibility layer is what
 made this findable at all; the missing piece is that a jump into non-code produced *no log*.
