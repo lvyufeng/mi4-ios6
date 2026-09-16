@@ -63,6 +63,14 @@ int kernel_entry(struct boot_args *args)
      */
     (void)stage90_arm_deadman_reset();
 
+#if STAGE90_EXCLUSIVE_PROBE
+    /*
+     * Phase 1 baseline: measure LDREX/STREX under the current Strongly-Ordered
+     * mapping, before any attribute map change. Changes nothing itself.
+     */
+    (void)stage90_exclusive_probe_run();
+#endif
+
     ml_init_timebase();
     const uint64_t t0 = ml_get_timebase();
     delay_us(2000);

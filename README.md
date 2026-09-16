@@ -141,6 +141,12 @@ is the same as any other hang).
 
 None of these modes is a shipped feature; they exist to find the failure.
 
+Two further switches are off by default and affect nothing unless set:
+`STAGE90_DEADMAN_SELFTEST` (see above) and `STAGE90_EXCLUSIVE_PROBE`, which runs the
+roadmap Phase 1 `LDREX`/`STREX` baseline
+([`stages/stage90/exclusive_probe.c`](stages/stage90/exclusive_probe.c)) — it changes no
+mapping and no cache bit, operating on one word of the payload's own `.bss`.
+
 ## Next milestones
 
 The current plan is [`docs/status/roadmap.md`](docs/status/roadmap.md), which re-plans the

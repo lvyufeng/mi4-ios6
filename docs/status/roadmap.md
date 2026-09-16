@@ -210,6 +210,15 @@ and returns, with the IRQ handler still live afterwards.
   reliably. This is the single test that distinguishes a working kernel pmap from the
   current one.
 
+**Baseline prepared.** `stages/stage90/exclusive_probe.c` (switch `STAGE90_EXCLUSIVE_PROBE`,
+default off) measures what exclusives do *today* under the current Strongly-Ordered mapping,
+without changing any mapping or cache bit: it operates on one word of the payload's own
+`.bss`. The discriminating sub-test is T3 — a plain store between `LDREX` and `STREX` clears
+the exclusive monitor, so a real monitor must make that `STREX` fail. An implementation that
+always reports success is indistinguishable from a working one unless T3 is checked, and
+everything built on such a `STREX` would be silently wrong. This is the comparison point the
+attribute-map change has to beat.
+
 **Exit criteria:** identity and high-VA mappings with caches on; `ram_console` still
 logging; timer IRQ still delivered; a documented attribute map; a passing `LDREX`/`STREX`
 test. Expect this phase to break the logging that made earlier stages easy — budget for it.

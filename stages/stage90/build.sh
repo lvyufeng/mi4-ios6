@@ -72,6 +72,7 @@ SOURCES=(
   pexpert.c
   pe_state.c
   gic.c
+  exclusive_probe.c
   macho_fixture.c
   macho_probe.c
   mmu.c

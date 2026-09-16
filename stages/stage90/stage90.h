@@ -3975,6 +3975,26 @@ struct stage90_xnu_macho_loader_result {
 #endif
 
 /*
+ * Exclusive-monitor probe (roadmap Phase 1 baseline).
+ *
+ * ARMv7 defines LDREX/STREX only on Normal memory, and every mapping in this
+ * project is Strongly-Ordered - so before changing the attribute map, measure
+ * what exclusives do here today rather than assuming. The probe changes no
+ * mapping and no cache bit: it runs on one word of the payload's own .bss under
+ * whatever mapping is live. Default off so it never affects a baseline run.
+ */
+#if !defined(STAGE90_EXCLUSIVE_PROBE)
+#define STAGE90_EXCLUSIVE_PROBE 0u
+#endif
+
+#define STAGE90_EXCLUSIVE_PROBE_ITERATIONS 1000u
+#define STAGE90_EXCLUSIVE_PROBE_VERSION    0x00010000u
+#define STAGE90_EXCLUSIVE_PROBE_MAGIC      0x45585052u /* 'EXPR' */
+#define STAGE90_EXCLUSIVE_PROBE_SEED       0x5eed1234u
+#define STAGE90_EXCLUSIVE_PROBE_DISRUPT    0xd15f0000u /* 'DISR'-ish, must differ from SEED */
+#define STAGE90_EXCLUSIVE_PROBE_CPSR_I     0x00000080u
+
+/*
  * A jump target is only acceptable if it points at real, executable Stage-owned
  * code. The Mach-O fixture is inert by construction - its LC_UNIXTHREAD PC is its
  * own header and its __TEXT payload is the ASCII string "ST90-TEXT-NOEXEC" - so
@@ -6119,6 +6139,34 @@ void stage90_dump_pc_samples(void);
  */
 int stage90_arm_deadman_reset(void);
 uint32_t stage90_deadman_armed(void);
+
+/*
+ * Exclusive-monitor probe result. `status` says whether the probe ran and
+ * produced a self-consistent observation; whether exclusives actually work is
+ * the finding, recorded in monitor_tracks / exclusives_usable.
+ */
+struct stage90_exclusive_probe_result {
+    uint32_t version;
+    uint32_t size;
+    uint32_t status;
+    uint32_t magic;
+    uint32_t target_addr;
+    uint32_t cpsr_entry;
+    uint32_t ldrex_reads_word;          /* T1: LDREX read back the stored seed */
+    uint32_t undisrupted_strex_status;  /* T2: expect 0 */
+    uint32_t disrupted_strex_status;    /* T3: expect non-zero */
+    uint32_t monitor_tracks;            /* T2 == 0 and T3 != 0 */
+    uint32_t iterations;
+    uint32_t success_count;
+    uint32_t fail_count;
+    uint32_t value_final;
+    uint32_t value_expected;
+    uint32_t exclusives_usable;
+    uint32_t checksum;
+};
+
+int stage90_exclusive_probe_run(void);
+const struct stage90_exclusive_probe_result *stage90_exclusive_probe_result(void);
 int gic_sgi_selftest(void);
 int gic_timer_selftest(void);
 
