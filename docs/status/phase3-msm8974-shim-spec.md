@@ -218,10 +218,24 @@ next stage's work and changes nothing about the current one). What it does:
   intid — and the validated 19.2 MHz `CNTFRQ`, and asserts the timer is not left armed, since
   the payload's own timer code owns arming from here.
 
-Verified off-device: build clean under `-Werror` in both the default and the enabled
-configuration; 12 combinations across shim × handoff-mode × watchdog compile clean; the
-`_Static_assert`s fire when a field offset is perturbed; the ABI checker reports the field
-count and size mismatch when a field is inserted.
+It also implements §4's last bullet — **the ordered arm path** — as two functions rather than
+one, and the split is the substance. `prepare()` does the distributor, the timer and the guard
+arithmetic; `commit()` unmasks the timer and then opens IRQ delivery, in that order. A single
+function would have to arm a timer the caller is not yet ready to service; splitting means the
+irreversible step is separately named and separately called. `run()` deliberately calls
+neither, so the shim can be exercised without arming anything — verified by reading the call
+graph, not asserted.
+
+The ordering is enforced inside the functions too: `commit()` writes `CNTP_CTL` before
+`cpsie i`, and `disarm()` closes delivery before stopping the timer. Both verified by
+inspecting the emitted code paths, since the failure they prevent — a timer firing into a
+handler whose state is not ready — looks like a broken GIC rather than a broken order.
+
+Verified off-device: build clean under `-Werror` in both configurations; 18 combinations
+across shim × handoff-mode × watchdog compile clean; the `_Static_assert`s fire when a field
+offset is perturbed; the ABI checker reports field-count and size mismatch when a field is
+inserted; the arm ordering and the `run()`/`prepare()` separation were checked by reading the
+code paths.
 
 **Not yet on hardware**, and it does not run XNU. It is the platform layer XNU would need,
 written so its hardware facts are explicit and its registration contract is enforced.
