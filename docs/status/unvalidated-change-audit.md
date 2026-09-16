@@ -158,6 +158,42 @@ run with interrupts masked (ARM sets I on exception entry, and the abort path ad
 does `cpsid if`), so there is **no nesting**; and the payload is freestanding, so no library
 call can consume stack unaccounted for here.
 
+
+## 7. The window before any net exists, and why it is bounded
+
+The audit covers what happens *after* the recovery nets are armed. The complementary
+question matters just as much for the safety constraint: **can the payload spin forever
+before either net exists?** If it could, no watchdog would help, because there would be
+nothing to arm it from.
+
+The window from `_start` to the watchdog arm is short and fully enumerable
+(`start.S` then the first statements of `stage90_main`):
+
+1. `cpsid if`, six banked-stack setups — straight-line.
+2. `.bss` zeroing — a loop with a **static** bound.
+3. `VBAR` install — straight-line.
+4. `log_init()`, one `log_puts`, four `log_kv32` — loops bounded by string length and
+   `size < max`.
+5. `stage90_hw_watchdog_arm()` — the net appears.
+
+**Every loop in that window has a compile-time or pointer-comparison bound. There is no
+`for (;;)`, no unbounded wait and no hardware poll before the arm.** So the payload cannot
+*spin* before it has a way out. The one unbounded loop in the payload is the recovery spin
+itself, reached only after both nets are armed.
+
+Two honest qualifications, since the point of this section is not to overclaim:
+
+- **A fault in step 2 is not covered.** `VBAR` is installed in step 3, so the dominant part
+  of the window — 155,867 word-stores covering 623 KB of `.bss` — runs with whatever vector
+  table aboot left behind. A fault there would jump into stale vectors with no defined
+  behaviour. It is bounded (~31–156 ms depending on uncached store cost) and it is
+  straight-line code with no data dependency, so a fault is not *expected*; but the claim
+  "nothing in this window can hang" holds for a spin, not for a fault.
+- **The same is true of every stage that has ever run**, so it is not a regression — the
+  earliest stages had the same ordering. It is recorded because it is the residual gap in
+  the safety story, and because it is why the ordering (install `VBAR` as early as possible)
+  should not be changed casually.
+
 ## 6. What this audit cannot bound
 
 - **The watchdog's register semantics.** The readback and liveness checks confirm the
