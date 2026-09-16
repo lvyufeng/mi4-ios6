@@ -514,14 +514,25 @@ the hardware-specific values explicit before code is written. Two findings that 
 - **`ml_init_timebase` is a pure registration function whose guard is `cpu_data_ptr ==
   &BootCpuData`** — passing anything else makes registration a *silent* no-op. The spec
   requires asserting the registration took rather than trusting the call.
-- **XNU requires a platform FIQ handler on this build.** The FIQ vector slot
-  (`locore.s:147`) branches to `r9` — the shim's `tbd_fiq_handler` — because `__ARM_TIME__`
-  is used 16 times in the ARM tree and defined in none of them. There is no build in which
-  XNU takes the timer as an IRQ, so the payload's IRQ-only experience does not transfer, and
-  FIQ-on-MSM8974 (TrustZone interaction) becomes Phase 3's largest single risk. XNU's own
-  `fleh_fiq_generic` shows the handler's contract, including that the EOI is literally a
-  write of `int_value` to `int_address`, and that the generic `tbd_ops` leaves both
-  decrementer callbacks NULL.
+- **XNU requires a platform FIQ handler on this build — and that may be the wrong path for
+  this SoC.** The FIQ vector slot (`locore.s:147`) branches to `r9` — the shim's
+  `tbd_fiq_handler` — because `__ARM_TIME__` is used in the ARM tree and defined in none of
+  them. XNU's own `fleh_fiq_generic` shows the handler's contract, including that the EOI is
+  literally a write of `int_value` to `int_address`.
+- **But the FIQ coupling is structural, and MSM8974 probably cannot do it.** The
+  non-`__ARM_TIME__` path keeps the decrementer in a register banked to FIQ mode
+  (`machine_routines_asm.s:1029` switches mode to touch `r8`), which is *why* it needs a FIQ
+  handler. And the vendor's own header says of FIQ on this family: *"You have to be running in
+  secure mode to use FIQ"* (`msm_watchdog.h:28`), with the cancro device tree not enabling
+  kernel FIQ at all.
+- **XNU already contains the alternative.** Defining `__ARM_TIME__` moves the timer to a
+  complete IRQ path in the tree (`Lexc_decirq_vector` → `fleh_decirq`, both real), and its
+  decrementer callbacks use the architectural timer (`CNTV_TVAL`) instead of a FIQ-banked
+  register. That is the shape of a path built for platforms with a real hardware timer — the
+  situation here — and it is the candidate resolution for Phase 3's largest risk. Two things
+  are unverified: whether that path builds at all (it is defined nowhere, so it may be
+  legacy), and that it uses **CNTV, not the CNTP the payload measured** — so the timer
+  interrupt number in §3.2 does not carry over. See the shim spec §6.
 - **The timebase tension resolved, and favourably.** `fleh_fiq_generic` maintains a software
   timebase (TBL incremented per tick) while `__ARM_TIME_TIMEBASE_ONLY__` makes
   `ml_get_timebase` read the real `CNTPCT`. Reading `rtclock.c` settles it: everything that

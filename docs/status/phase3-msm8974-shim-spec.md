@@ -277,11 +277,10 @@ for this section:
   registration function with no Apple timer assumptions — the literal risk of "the function
   will not accept our `tbd_ops`" does not exist. It was replaced by a sharper, concrete one:
   the `&BootCpuData` guard, which fails silently.
-- **Whether FIQ is *usable* on MSM8974.** Split into two halves, one now resolved: XNU
-  *requires* a platform FIQ handler (§2.3), so the question is not whether it is wanted but
-  whether the hardware and TrustZone permit it. FIQ on MSM8974 interacts with the secure
-  world, and the payload has never taken one — every interrupt it has driven is IRQ. This
-  half remains open, and it is the largest single risk in Phase 3.
+- **Whether FIQ is *usable* on MSM8974** — narrowed considerably in §6, which is the most
+  useful result in this document: the vendor tree says FIQ is a secure-world privilege here,
+  and XNU already contains a complete IRQ-based timer path selected by a single macro. What
+  remains open is whether that path builds and runs, and which interrupt its timer uses.
 - ~~Which timebase is authoritative.~~ **Resolved in §2.3:** the software TBL is dead code
   on this build, `CNTPCT` is what everything reads, and the timer therefore need not be
   periodic.
@@ -290,3 +289,137 @@ for this section:
 
 These are where Phase 3's real risk sits, and each is a reading task before it is a coding
 task.
+
+## 6. FIQ on MSM8974: evidence, and a concrete alternative
+
+This is the largest risk in Phase 3 (§2.3 establishes that XNU's ARM timer path requires a
+platform FIQ handler). Reading the vendor tree narrows it considerably — not to an answer,
+but from "unknown" to "probably blocked, and here is a path already in XNU's source".
+
+### 6.1 The evidence that FIQ is a secure-world privilege here
+
+Three independent pieces, and it is worth being precise about the strength of each:
+
+1. **The vendor's own comment.** `arch/arm/mach-msm/msm_watchdog.h:28`, attached to
+   `bool use_kernel_fiq`:
+
+   ```c
+   /* You have to be running in secure mode to use FIQ */
+   bool use_kernel_fiq;
+   ```
+
+   Precisely: this is a statement about *the watchdog's bark* being delivered to the kernel
+   as FIQ — see `msm_watchdog.c:437-439`, where `appsbark_fiq = pdata->use_kernel_fiq` is
+   gated on `!pdata->has_secure`. It is the closest vendor statement available, and it is
+   about FIQ on this family, but it is about one hardware block's use of it.
+
+2. **The device does not use it.** `msm8974.dtsi`'s watchdog node carries
+   `qcom,bark-time`, `qcom,pet-time` and `qcom,ipi-ping` — no `qcom,use-kernel-fiq`, and the
+   binding doc does not list the property at all. And `has_secure`/`use_kernel_fiq` appear
+   only in the pre-DT driver (`msm_watchdog.c`, used on 8960/8064); the DT driver this device
+   uses (`msm_watchdog_v2.c`) references neither.
+
+3. **The payload's experience.** Every interrupt it has driven on this device is IRQ —
+   GIC SGI, timer PPI, the dead-man, the watchdog bark all go through IRQ. It has never taken
+   an FIQ, and the project's SGI/timer selftests do not exercise that path.
+
+None of these is an architectural datasheet statement. Together they make "FIQ from the
+non-secure world works on MSM8974" a claim that would need evidence rather than one we can
+assume.
+
+### 6.2 The alternative is already in XNU's source
+
+XNU's ARM tree contains a **complete IRQ-based decrementer path**, selected by the same macro
+that selects the FIQ one — `locore.s:147`:
+
+```asm
+        adr     pc, Lexc_irq_vector
+#if __ARM_TIME__
+        adr     pc, Lexc_decirq_vector          /* <-- IRQ-based decrementer */
+#else
+        mov     pc, r9                          /* <-- FIQ handler, what we get today */
+#endif
+```
+
+and `Lexc_decirq_vector` (`locore.s:189`) leads to `fleh_decirq` (`locore.s:1491`), which is
+a full user/kernel-entry handler, not a stub. `start.s:135` already patches the vector table
+entry for it, and `start.s:430` generates its address definition — so the plumbing exists on
+both sides.
+
+**So `__ARM_TIME__` is the switch between "the timer arrives as FIQ" and "the timer arrives
+as IRQ", and it is currently undefined, which is why the FIQ path is the live one.**
+
+That reframes the risk. Rather than "MSM8974 may not permit what XNU requires", the
+candidate resolution is: **define `__ARM_TIME__`, and the timer moves to an IRQ path that the
+hardware demonstrably supports** — the payload takes timer IRQs today.
+
+Reading the remaining guarded sites strengthens this, because the two paths differ in a way
+that is not merely about which vector fires. In `ml_get_decrementer` /
+`ml_set_decrementer` (`machine_routines_asm.s:1004`, `:1029`):
+
+```asm
+#if __ARM_TIME__
+        mrc     p15, 0, r0, c14, c3, 0      /* read CNTV_TVAL - a real hardware timer */
+#else
+        ldr     r0, [r3, CPU_DECREMENTER]   /* read the software counter */
+#endif
+```
+
+and the `#else` arm of `ml_set_decrementer` switches mode to reach a FIQ-banked register:
+
+```asm
+        msr     cpsr_c, #(PSR_FIQ_MODE|PSR_FIQF|PSR_IRQF)   /* enter FIQ mode ... */
+        mov     r12, r0
+        str     r12, [r8, CPU_DECREMENTER]                  /* ... to touch r8 */
+```
+
+So the FIQ coupling is **structural, not incidental**: the non-`__ARM_TIME__` path keeps the
+decrementer in a register banked to FIQ mode, which is exactly why it needs a FIQ handler at
+all. The `__ARM_TIME__` path uses the architectural timer and touches no FIQ-banked register.
+That is the shape of a path designed for platforms whose timer is a real hardware timer — the
+situation here — rather than for the legacy software-decrementer scheme.
+
+### 6.2.1 And it moves the timer from CNTP to CNTV
+
+Worth flagging before anyone programs it: `__ARM_TIME__` reads and writes **`CNTV_TVAL`**
+(`c14, c3, 0` — the *virtual* timer), where the payload programs **`CNTP`** (`c14, c2, 0` —
+the *physical* timer) and observes its interrupt on intid 19 (`§3.2`).
+
+The virtual timer is a different counter with a different interrupt. On MSM8974 it should
+work — `CNTVOFF` is normally zero, making `CNTV == CNTP` — but:
+
+- the **enabling** is different (`CNTV_CTL`), and
+- **its interrupt id is very likely not 19.** The ARM architecture assigns CNTP and CNTV
+  different PPIs, and the payload has only ever observed CNTP's. Presumably-mapped, not
+  measured.
+
+So the `__ARM_TIME__` route does *not* reuse §3.2's measured value, and the interrupt number
+for CNTV is a fresh unknown that has to be established the same way 19 was: by driving it and
+reading the IAR. That is a small, self-contained experiment, and it is the one piece of
+Phase 3 that the payload's existing GIC machinery could answer directly.
+
+### 6.3 What is not yet established, and the specific next checks
+
+Stated so the next session does not over-read §6.2:
+
+1. **`__ARM_TIME__` is defined nowhere in the tree.** That may mean it is legacy for
+   platforms XNU no longer builds, and that enabling it leaves a path that does not compile or
+   was never finished. It must be *built*, not assumed. This is a host-side check and can be
+   done without the device.
+2. **`__ARM_TIME__` does more than move the vector.** It appears in 16 places
+   (`machine_routines_asm.s`, `rtclock.c`, `locore.s`, `arm_init.c`), and each has to be read
+   to see what else changes. The two `tbd` decrementer callbacks may become optional, which
+   would also change §2.2.
+3. **Whether FIQ is *actually* blocked** — worth testing directly and cheaply if the device
+   comes back: the payload could enable a timer as FIQ and see whether it arrives. That is a
+   small, non-persistent experiment, and it would settle by observation what the vendor
+   comments only suggest.
+5. **Which interrupt CNTV arrives on (§6.2.1).** Only measurable on the device, and the
+   payload's GIC code could do it in a few lines — program `CNTV_TVAL`, enable `CNTV_CTL`,
+   and log the IAR value. Small, non-persistent, and it removes the last unknown from the
+   candidate resolution.
+4. **A third possibility neither source rules out:** that the payload runs in a
+   TrustZone-configured state where FIQ *is* routed to the non-secure world, since aboot
+   loads us directly. The only way to know is to try.
+
+Check 1 is the highest-value next action, and it needs no hardware.
