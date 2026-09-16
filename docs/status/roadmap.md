@@ -416,7 +416,16 @@ would ever be mapped). Both are fixed. Reading further into what `start.s` hands
 `/interrupt-controller` node has no property *named* `interrupt-controller` with the value
 `"master"`, which is the Apple convention `DTFindEntry` matches on, so `gPicBase` would stay 0
 and `pe_arm_map_interrupt_controller` would return failure. **No interrupt controller at all.**
-That check is now in `tools/xnu_dt_requirements.py`.
+
+And a fourth, which the source-level scan could not see: `/timer` had no
+`device_type = "timer"`, so the same function's timer lookup would also have failed. Found by
+`tools/host_dt_check.sh`, which compiles XNU's *real* `pexpert/gen/device_tree.c` for the host
+and walks our tree with it — the source scan can only see that a property *name* exists
+somewhere, and `/arm-io` and the cpu nodes do have `device_type`, so it reported satisfied.
+That check now runs as part of `stage90/build.sh`, and the property is emitted.
+
+Worth stating plainly because it is the general lesson: the weak check passed and the strong
+check failed, and the strong check was right.
 
 Deliberately not resolved, and now with the arithmetic written out: Apple's model expects a
 node's `reg` to be an *offset* from the SoC base (`gPicBase = soc_phys + reg[0]`), while ours

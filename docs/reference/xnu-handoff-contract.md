@@ -240,6 +240,10 @@ Step 3 is where it stops being forgiving.
 
 ### Blocker 1 — `interrupt-controller` must have the value `"master"`
 
+*(Still open, and deliberately: see "Walking the tree with XNU's own reader" below for why
+adding the property before the `reg` model is fixed would make things worse rather than
+better.)*
+
 `pe_arm_map_interrupt_controller` (`pe_identify_machine.c:534`) does:
 
 ```c
@@ -302,6 +306,56 @@ is recorded so that if someone does, the failure is recognised rather than myste
 
 More generally: `PE_parse_boot_argn` means the `CommandLine` is an input to paths that assert.
 It is not inert text.
+
+
+## Walking the tree with XNU's own reader, on the host
+
+`tools/host_dt_check.sh` compiles `external/xnu-upstream/pexpert/gen/device_tree.c` — XNU's
+real walker — for the build host and runs it over the tree our builder produces. It is
+wired into `stage90/build.sh` and it is the stronger half of the device-tree check:
+`tools/xnu_dt_requirements.py` reads *source text*, so it can see that a property *name*
+exists somewhere; only a walker can answer whether a node actually carries the *value* XNU
+matches on. Those are different questions, and confusing them produced a false pass.
+
+It works because pexpert's `device_tree.c` is portable C once `kalloc`/`kfree` are ordinary
+allocation — so this is XNU's code, not a re-implementation of it. The builder is not a
+re-implementation either: `host_dt_check.sh` extracts `build_stage90_apple_dt` **verbatim**
+from `stage90_main.c`, extracts `align4` from `runtime.c`, and pulls the constants out of
+`stage90.h`'s own preprocessor output. If the extraction ever stops finding the function it
+aborts rather than quietly testing nothing.
+
+### What it found
+
+**`/timer` had no `device_type = "timer"`.** `pe_arm_map_interrupt_controller` locates the
+timer with `DTFindEntry("device_type", "timer")` — by property *value* — so having
+`name = "timer"` is not enough, and a node without it leaves `gTimerBase` at 0. The
+source-level scan had reported this as satisfied, because it only asked whether some node
+had a `device_type` property, and `/arm-io` and the cpu nodes do.
+
+That is the whole argument for the harness in one example: the weak check passed, the strong
+check failed, and the strong check was right.
+
+The property is now emitted. It is inert today — and deliberately so: `pe_arm_map_interrupt_controller`
+returns `0` before reaching the timer lookup, because the interrupt controller is not found
+either (below), so the wrong-address problem is not yet reachable.
+
+### What it verifies now
+
+```
+paths XNU looks up with DTLookupEntry:   /chosen ok, /cpus ok
+nodes XNU locates by (property, value):  name=device-tree ok, name=arm-io ok,
+                                         device_type=timer ok
+properties XNU reads:                    /arm-io ranges, device_type, chip-revision;
+                                         /device-tree target-type, model - all ok
+cpu topology:                            4 children, all with state="running"
+```
+
+`interrupt-controller = "master"` is reported as **deliberately absent** rather than a gap,
+and the reason is worth stating precisely: adding it today would let XNU find the node,
+read `reg[0]`, and compute `soc_phys + reg[0]`. It would still return 0 from the `gPicBase`
+check — but the moment the `reg` model is fixed, that same property would turn a clean
+failure into a wrong-address mapping. **The absence is protective.** Phase 3 resolves the
+`reg` model first; the harness records the decision rather than hiding it.
 
 ## Other things to check before trusting a handoff
 

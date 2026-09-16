@@ -313,7 +313,17 @@ def main():
         ok = present(kind, key)
         if severity == "blocks" and not ok:
             bad += 1
-        marker = "present" if ok else ("MISSING" if severity == "blocks" else "absent (ok)")
+        if kind == "prop":
+            # This scan reads source text. It can establish that some node carries a
+            # property of this name; it cannot establish that any node carries the
+            # *value* XNU's DTFindEntry matches on. Saying "present" for the weaker
+            # question is how an earlier revision of this check passed
+            # DTFindEntry("device_type", "timer") while no node had that value - which is
+            # a false pass, and worse than a gap. So the verdict says which it is.
+            marker = ("name present" if ok else
+                      ("MISSING" if severity == "blocks" else "absent (ok)"))
+        else:
+            marker = "present" if ok else ("MISSING" if severity == "blocks" else "absent (ok)")
         print("  %-22s %-8s %s" % (key, severity, marker))
         if not ok:
             print("  %-22s          %s" % ("", why))
@@ -354,7 +364,9 @@ def main():
         print("FAIL: %d node header count(s) disagree with the emitted properties."
               % len(problems))
         return 1
-    print("OK: every requirement XNU cannot recover from is satisfied.")
+    print("OK: every node XNU locates by name, and every property name it reads, is present.")
+    print("    Property *values* are not checked here - this scan reads source text. Use")
+    print("    tools/host_dt_check.sh, which walks the tree with XNU's own reader.")
     if stale:
         return 1
     return 0

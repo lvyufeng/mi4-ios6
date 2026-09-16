@@ -722,12 +722,27 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
     apple_dt_prop_u32(b, "interrupt-controller", 1);
 
     /* /timer: MSM/ARM 19.2 MHz timer facts from Linux DT. */
-    apple_dt_node_begin(b, 5, 0);
+    apple_dt_node_begin(b, 6, 0);
     apple_dt_prop_str(b, "name", "timer");
     apple_dt_prop_str(b, "compatible", "qcom,msm-timer");
     apple_dt_prop_u32(b, "frequency", 19200000u);
     apple_dt_prop_u32_array(b, "reg", timer_reg, ARRAY_SIZE(timer_reg));
     apple_dt_prop_str(b, "use", "early-timebase");
+    /*
+     * pe_arm_map_interrupt_controller locates the timer with
+     * DTFindEntry("device_type", "timer") - by property *value*, not by the node's name.
+     * Having name="timer" is not enough, and a node without this property leaves
+     * gTimerBase at 0. Found by tools/host_dt_check.sh, which runs XNU's own walker over
+     * this tree; the source-level requirements scan could not see it, because "some node
+     * has a device_type property" and "some node has device_type == timer" are different
+     * questions and it only asked the first.
+     *
+     * Inert today, and deliberately so: pe_arm_map_interrupt_controller returns before
+     * reaching the timer lookup because the interrupt controller is not found either (see
+     * the reg-model note in docs/reference/xnu-handoff-contract.md). Adding this now makes
+     * the tree correct for when Phase 3 resolves that, without changing behaviour yet.
+     */
+    apple_dt_prop_str(b, "device_type", "timer");
 }
 
 int test_kernel_entry(struct boot_args *args)

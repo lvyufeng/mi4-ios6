@@ -38,6 +38,16 @@ else
   echo "warning: external/xnu-4570.1.46 absent; skipping the device-tree requirements check" >&2
 fi
 
+# And the stronger half of the same question: the scan above can only see that a property
+# *name* exists somewhere. This walks the tree with XNU's own device-tree reader and
+# checks the values, which is how device_type="timer" was found missing after the scan had
+# passed it. Needs a host compiler; skipped with a warning if there is none.
+if [[ -d $REPO_ROOT/external/xnu-upstream ]] && command -v "${CC_HOST:-cc}" >/dev/null 2>&1; then
+  "$REPO_ROOT/tools/host_dt_check.sh"
+else
+  echo "warning: host compiler or xnu-upstream absent; skipping the device-tree walk check" >&2
+fi
+
 # Regenerate the inert non-proprietary Mach-O fixture from the host tool so the
 # checked-in macho_fixture.c stays reproducible. The raw fixture stays under
 # the ignored out/ directory.
