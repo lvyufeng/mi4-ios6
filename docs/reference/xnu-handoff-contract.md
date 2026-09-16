@@ -79,30 +79,73 @@ The struct layout is already right — `stages/stage90/stage90.h`'s `struct boot
 ladder's own validation depends on it (`stage90_arm_init_stub` requires
 `args->physBase == STAGE90_BASE`). So this is not a bug to patch in place — the ladder's
 `boot_args` and a conforming XNU `boot_args` are **two different objects**, and Phase 2 needs
-the second one produced alongside the first.
+the second one produced alongside the first — which is what
+`stages/stage90/xnu_boot_args_conformant.c` now does, behind `STAGE90_XNU_BOOT_ARGS`
+(default off, so it cannot affect a run that does not ask for it).
 
-## The awkward one: the image is loaded at PA `0x8000`
+The `memSize` figure in the table is the ladder's, and it is the one value worth calling out
+as *not* simply wrong: `0x5e500000` is `RAM_CONSOLE_BASE - RAM_PHYS_BASE`, a statement about
+the RAM window at `0x80000000`+, which is a different question from "how much RAM is there
+below `0x80000000`". The conforming object answers the second question instead.
 
-`physBase` is not just unaligned, it is unaligned *because of how the payload is loaded*.
+## The unaligned `physBase`, and why it dissolves
+
+`physBase` is not just unaligned, it is unaligned *because of how the payload is loaded*:
 `stages/stage90/build.sh`'s `mkbootimg` invocation uses `--base 0x00000000 --kernel_offset
-0x00008000`, so the payload's `_start` runs at physical `0x8000`. That is the legacy Android
-boot-image convention, and the payload's own identity table maps PA 0–2 MB to make it work.
+0x00008000`, so the payload's `_start` runs at physical `0x8000` — the legacy Android
+boot-image convention. That looked like it forced a choice between moving the load address
+and relocating the image at handoff.
 
-XNU's contract, by contrast, wants a 1 MB-aligned `physBase` that is the start of the region it
-maps at `virtBase`. Two ways to reconcile that, and the choice is a real architectural
-decision rather than a detail:
+It does not. **`physBase = 0x00000000` is 1 MB aligned, and the image at `0x8000` is simply
+*inside* the region `[physBase, physBase + memSize)`.** That is exactly what the boot image's
+`kernel_offset` means — an offset within the kernel region, not a base. Reporting `0` is both
+conforming and true, and nothing has to move.
 
-1. **Load at a 1 MB boundary.** Change the boot image's kernel offset to `0x00100000` and set
-   `physBase = 0x00100000` (or `0x00000000` with the image at +1 MB), `virtBase = 0x80000000`.
-   Cheapest, and it keeps a single contiguous region. It changes where the payload runs, so it
-   needs its own hardware run, and the identity table's section-0 mapping has to keep working.
-2. **Relocate before handing off.** Keep loading at `0x8000`, and have the loader copy the
-   image to `0x80000000`+ and pass `physBase = virtBase = 0x80000000`. This is closer to what
-   real iBoot does, and it means the payload must be position-independent across the copy —
-   including its absolute pointers into `.bss` and the C runtime's state.
+Two independent checks that this is the right choice rather than merely a convenient one:
 
-Option 1 is the smaller step and is worth doing first; option 2 is what a kernel that expects to
-own memory from the DRAM base will eventually want.
+1. It agrees with the pmap the project already builds. With `virtBase = 0x80000000` the
+   correspondence is `VA = 0x80000000 + PA`, and `full_pmap` maps `0x80000000–0x800fffff` to
+   PA `0–0xfffff` through L2 pages — the same translation XNU's own section mapping would
+   produce, arrived at independently.
+2. It costs nothing at handoff time: no relocation pass, no position-independent payload, no
+   change to where the image is loaded, so no new way for the existing 90 stages of behaviour
+   to break.
+
+**Implemented** in `stages/stage90/xnu_boot_args_conformant.c`, behind `STAGE90_XNU_BOOT_ARGS`
+(default off — it builds a *second* `boot_args` and validates it; the ladder's identity-based
+one is untouched, because the ladder itself requires `physBase == 0x8000`).
+
+| Field | Value | Why |
+| --- | --- | --- |
+| `virtBase` | `0x80000000` | Same as `STAGE90_VIRT_BASE`, so it agrees with the existing pmap. |
+| `physBase` | `0x00000000` | 1 MB aligned; the image at `0x8000` is inside `[0, memSize)`. |
+| `memSize` | `0x00200000` (2 MB) | Deliberately conservative: this is a claim that those physical addresses are RAM, and below `0x80000000` that is not safe to assume for a large span on MSM8974. 2 MB is what the payload has actually exercised (mmu.c's identity table maps PA 0–2 MB, and ninety stages have run from it). Raising it wants a memory map, not a guess. |
+| `topOfKernelData` | `align_up(__stage90_image_end, 16 KB)` | Above the image, and 16 KB aligned because TTBR's low 14 bits carry `TTBR_SETUP`. |
+
+`topOfKernelData` also has to hold the tables `start.s` clears: 10240 TTEs, i.e. 40960 bytes.
+That number comes out of the invalidation loop (`PGBYTES>>2`, then `*5`, then `*2`) and
+independently out of the page tally in its own comment at line 246 ("4 + 4 + 1" pages plus the
+high-vector table) — 4 trampoline L1 pages + 4 CPU L1 pages + 1 L2 page + 1 high-vector page
+= 10 pages. Two derivations agreeing is why the payload asserts the region is at least that
+big rather than the smaller figure a single reading might suggest.
+
+## Checking the ABI, because a mismatch is silent
+
+`start.s` loads four fields by hand at fixed offsets that come from `offsetof()` in the same
+tree (`osfmk/arm/genassym.c`: `BA_VIRT_BASE` 4, `BA_PHYS_BASE` 8, `BA_MEM_SIZE` 12,
+`BA_TOP_OF_KERNEL_DATA` 16). So if our struct's field list or types drift from
+`pexpert/pexpert/arm/boot.h`, XNU neither fails to build nor faults — it reads the wrong
+32-bit word and uses it as the physical base of memory. That is a failure mode with no
+symptom until a kernel misbehaves somewhere else entirely.
+
+Two checks, both cheap:
+
+- `tools/check_boot_args_abi.py` computes both layouts for ARM ILP32 and compares field by
+  field; `build.sh` runs it (skipping with a warning if `external/` is absent). Its
+  perturbation test — swapping a field and confirming it reports 18 differences and exits 1 —
+  is part of its value: a checker that cannot fail is not a checker.
+- `_Static_assert`s in `xnu_boot_args_conformant.c` for the size and the four hot offsets, so
+  a drift cannot reach hardware even if the host tool is skipped.
 
 ## Other things to check before trusting a handoff
 

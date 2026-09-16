@@ -351,8 +351,27 @@ moving the load address to a 1 MB boundary (smaller change) or by relocating the
 DRAM base before handoff (what real iBoot does, and what a kernel expecting to own memory from
 `0x80000000` will want).
 
+**Implemented (2026-09-16), not yet on hardware.** `stages/stage90/xnu_boot_args_conformant.c`
+builds and validates a conforming `boot_args` behind `STAGE90_XNU_BOOT_ARGS` (default off — it
+produces a *second* object; the ladder's identity-based one is untouched, since the ladder
+requires `physBase == 0x8000`).
+
+The unaligned-`physBase` problem the contract doc first flagged turns out to dissolve:
+`physBase = 0x00000000` is 1 MB aligned and the image at `0x8000` is simply inside
+`[physBase, physBase + memSize)` — which is what the boot image's `kernel_offset` has always
+meant. Nothing has to be relocated, and the choice agrees with the `VA = 0x80000000 + PA`
+correspondence the project's own `full_pmap` already builds.
+
+`tools/check_boot_args_abi.py` closes the failure mode that has no symptom: `start.s` loads
+`virtBase`/`physBase`/`memSize`/`topOfKernelData` by hand at fixed offsets, so a struct drift
+means XNU silently reads the wrong word as the physical base of memory. The tool compares both
+layouts field by field (and its own perturbation test confirms it reports a mismatch rather
+than always passing); the payload carries `_Static_assert`s for the four hot offsets as well.
+
 **Exit criteria:** boot_args and DT dumped from the device and accepted by 4570's readers;
-`TTBR0`/`TTBR1`/`TTBCR`/`SCTLR` verified correct after 4570 code has written them.
+`TTBR0`/`TTBR1`/`TTBCR`/`SCTLR` verified correct after 4570 code has written them. Still open,
+and the remaining work is the device-tree half — the payload's Apple-format DT is plausible but
+has not been tested against XNU's device-tree walker.
 
 ### Phase 3 — Platform shim layer and compile-graph expansion (months)
 

@@ -13,8 +13,20 @@ mkdir -p $REPO_ROOT/out/stage90
 ./xnu_object_subset_compile.sh $REPO_ROOT/out/stage90
 ./xnu_link_proof.sh $REPO_ROOT/out/stage90
 
+
 PYTHON=${PYTHON:-python3}
 MACHO_FIXTURE_GEN=${MACHO_FIXTURE_GEN:-$REPO_ROOT/tools/mkmacho_fixture.py}
+
+# boot_args must have the exact layout XNU's entry code reads. start.s loads
+# physBase/virtBase/memSize/topOfKernelData by hand at fixed offsets derived from
+# offsetof() in the same tree, so a field-list drift here is not a build error and not
+# a visible fault - it is XNU silently using the wrong word as the physical base of
+# memory. Cheap to check here, expensive to debug on the device.
+if [[ -d $REPO_ROOT/external/xnu-4570.1.46 ]]; then
+  "$PYTHON" $REPO_ROOT/tools/check_boot_args_abi.py --repo-root $REPO_ROOT
+else
+  echo "warning: external/xnu-4570.1.46 absent; skipping the boot_args ABI check" >&2
+fi
 
 # Regenerate the inert non-proprietary Mach-O fixture from the host tool so the
 # checked-in macho_fixture.c stays reproducible. The raw fixture stays under
@@ -83,6 +95,7 @@ SOURCES=(
   gic.c
   exclusive_probe.c
   hw_watchdog.c
+  xnu_boot_args_conformant.c
   macho_fixture.c
   macho_probe.c
   mmu.c
@@ -178,7 +191,7 @@ sha256sum $REPO_ROOT/out/stage90/stage90_fixture.macho $REPO_ROOT/out/stage90/st
 # Record the switches this image was actually built with, so preflight_boot_check.sh
 # can gate a hardware run on them instead of on what the source is assumed to say.
 $CC "${CFLAGS[@]}" -E -dM -include stage90.h - </dev/null \
-  | grep -E '^#define STAGE90_(HANDOFF_MODE|ENTRY_LADDER_LEVEL|DEADMAN_ENABLE|DEADMAN_SELFTEST|BYPASS_ENTRY_STUB|EXCLUSIVE_PROBE|PMAP_ATTR_MODE|HW_WATCHDOG|HW_WATCHDOG_SELFTEST) ' \
+  | grep -E '^#define STAGE90_(HANDOFF_MODE|ENTRY_LADDER_LEVEL|DEADMAN_ENABLE|DEADMAN_SELFTEST|BYPASS_ENTRY_STUB|EXCLUSIVE_PROBE|PMAP_ATTR_MODE|HW_WATCHDOG|HW_WATCHDOG_SELFTEST|XNU_BOOT_ARGS) ' \
   > $REPO_ROOT/out/stage90/stage90-build-config.txt
 cat $REPO_ROOT/out/stage90/stage90-build-config.txt
 

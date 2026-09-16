@@ -22,7 +22,13 @@
 - `msm8974-xnu-porting-map.md` — concrete MSM8974 ↔ XNU platform interface and work-package map.
 - `ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `pmap-attribute-map.md` — every mapping the payload creates, its ARMv7 short-descriptor encoding (decoded with `tools/decode_armv7_descriptor.py`), and the Phase 1 target attributes. Read this before blaming a fault on memory attributes.
-- `xnu-handoff-contract.md` — what public ARM XNU's `_start` actually requires of `boot_args`, read off `osfmk/arm/start.s`, and where the payload does not yet provide it. Phase 2's input.
+- `xnu-handoff-contract.md` — what public ARM XNU's `_start` actually requires of `boot_args`, read off `osfmk/arm/start.s`, where the payload does not yet provide it, and how the conforming object resolves each gap. Phase 2's reference.
+
+## Host tools — `tools/`
+
+- `check_boot_args_abi.py` — compares our `boot_args` layout against `pexpert/pexpert/arm/boot.h` for ARM ILP32, field by field. `start.s` loads four of those fields by hand at fixed offsets, so a drift is silent: XNU uses the wrong word as the physical base of memory rather than failing to build. `build.sh` runs it.
+- `decode_armv7_descriptor.py` — decodes a short-descriptor page-table entry; field positions from Apple's own `osfmk/arm/proc_reg.h`, not from memory.
+- `stage-archive.sh` — list/restore the archived stage0–84 snapshots.
 
 ## Status — `status/`
 

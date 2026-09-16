@@ -71,6 +71,17 @@ int kernel_entry(struct boot_args *args)
     (void)stage90_exclusive_probe_run();
 #endif
 
+#if STAGE90_XNU_BOOT_ARGS
+    /*
+     * Phase 2: build and validate a boot_args that conforms to the contract in XNU's
+     * own entry code. It is a second object - the ladder's identity-based one is
+     * untouched - and nothing consumes it yet, so this only proves the invariants hold
+     * on the real image_end the linker produced, which is the one number in the
+     * contract that cannot be checked from the host beforehand.
+     */
+    (void)stage90_xnu_boot_args_prepare(args->deviceTreeP, args->deviceTreeLength);
+#endif
+
     ml_init_timebase();
     const uint64_t t0 = ml_get_timebase();
     delay_us(2000);

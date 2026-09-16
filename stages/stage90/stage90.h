@@ -4045,6 +4045,31 @@ struct stage90_xnu_macho_loader_result {
 #endif
 
 /*
+ * Produce a boot_args conforming to the contract in XNU's own entry code
+ * (osfmk/arm/start.s), alongside - not instead of - the identity-based one the
+ * Stage-owned ladder uses. Roadmap Phase 2; see xnu_boot_args_conformant.c and
+ * docs/reference/xnu-handoff-contract.md.
+ *
+ * Default off: it changes no existing behaviour, it only builds and validates a second
+ * object and logs it. Turning it on cannot break a run that does not read it.
+ */
+#if !defined(STAGE90_XNU_BOOT_ARGS)
+#define STAGE90_XNU_BOOT_ARGS 0u
+#endif
+
+#define STAGE90_XNU_BOOT_ARGS_VERSION 0x00010000u
+
+#define STAGE90_XNU_BA_FAIL_PHYS_ALIGN           0x00000001u
+#define STAGE90_XNU_BA_FAIL_VIRT_ALIGN           0x00000002u
+#define STAGE90_XNU_BA_FAIL_TABLE_ALIGN          0x00000004u
+#define STAGE90_XNU_BA_FAIL_TABLE_BELOW_IMAGE    0x00000008u
+#define STAGE90_XNU_BA_FAIL_IMAGE_OUTSIDE        0x00000010u
+#define STAGE90_XNU_BA_FAIL_TABLE_OUTSIDE        0x00000020u
+#define STAGE90_XNU_BA_FAIL_REV_VERSION          0x00000040u
+#define STAGE90_XNU_BA_FAIL_DEVICE_TREE          0x00000080u
+#define STAGE90_XNU_BA_FAIL_COMMAND_LINE         0x00000100u
+
+/*
  * Exclusive-monitor probe (roadmap Phase 1 baseline).
  *
  * ARMv7 defines LDREX/STREX only on Normal memory, and every mapping in this
@@ -6301,6 +6326,33 @@ struct stage90_hw_watchdog_result {
     uint32_t readback_ok;
     uint32_t checksum;
 };
+
+/*
+ * Conforming boot_args (roadmap Phase 2). See xnu_boot_args_conformant.c.
+ */
+struct stage90_xnu_boot_args_result {
+    uint32_t version;
+    uint32_t size;
+    uint32_t status;
+    uint32_t virt_base;
+    uint32_t phys_base;
+    uint32_t mem_size;
+    uint32_t top_of_kernel_data;
+    uint32_t image_base;
+    uint32_t image_end;
+    uint32_t table_bytes;
+    uint32_t device_tree_ptr;
+    uint32_t device_tree_length;
+    uint32_t machine_type;
+    uint32_t command_line_len;
+    uint32_t checks;
+    uint32_t failures;
+    uint32_t checksum;
+};
+
+int stage90_xnu_boot_args_prepare(void *dt, uint32_t dt_len);
+const struct boot_args *stage90_xnu_boot_args(void);
+const struct stage90_xnu_boot_args_result *stage90_xnu_boot_args_result(void);
 
 int stage90_hw_watchdog_arm(uint32_t timeout_s);
 void stage90_hw_watchdog_bite_now(void);
