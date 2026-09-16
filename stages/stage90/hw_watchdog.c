@@ -56,10 +56,27 @@
  *
  * Safety
  * ------
- * MMIO only: no storage, and the register state is lost on power cycle. The armed
- * timeout is deliberately far longer than a healthy payload run (~1s), so a good run
- * never sees it. And the failure mode of a mis-timed watchdog is a reset to Android,
- * not a brick.
+ * MMIO only: no storage, and the register state is lost on power cycle. The failure mode of
+ * a mis-timed watchdog is a reset to Android, not a brick.
+ *
+ * The armed timeout is deliberately far longer than a healthy payload run, and that claim
+ * was checked rather than asserted. Bounding the payload from its own code, with a
+ * pessimistic 500 ns per uncached Strongly-Ordered byte (and every buffer byte touched
+ * twice):
+ *
+ *     explicit delay_us calls (4 sites)                       9 ms
+ *     bounded selftest waits, worst case (SGI 20ms, timer 50ms) 70 ms
+ *     logging, 275 KB at byte granularity (the largest recorded
+ *       Stage log; runtime.c's memcpy/memset are byte loops, so
+ *       byte granularity is exact here, not conservative)    138 ms
+ *     large buffer zeroing: 16K + 128K + 16K L1/L2 tables,
+ *       32K device tree, 64K Mach-O staging arena            262 ms
+ *                                                          --------
+ *     pessimistic total                                     479 ms
+ *
+ * against a 30 s bark: a 63x margin. So a healthy run cannot trip it. That matters
+ * because a watchdog that fired spuriously would reboot every run and look like a hang -
+ * the exact failure this file exists to prevent, reintroduced by its own timeout.
  */
 
 #include "stage90.h"

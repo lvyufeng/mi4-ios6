@@ -42,6 +42,24 @@ the GIC, timer and PS_HOLD addresses the payload already uses.
 **Residual risk:** the *register semantics* are unverified on this device — see "What this
 audit cannot bound" below.
 
+**The timeout is safe, and that was checked rather than asserted.** A watchdog that fired
+during a *healthy* run would reboot every run and look exactly like the hang this change
+exists to prevent — so the margin matters as much as the mechanism. Bounding the payload
+from its own code, with a pessimistic 500 ns per uncached Strongly-Ordered byte and every
+buffer byte touched twice:
+
+| Contribution | Bound |
+| --- | --- |
+| `delay_us` calls (4 sites: 1+5+2+1 ms) | 9 ms |
+| Bounded selftest waits, worst case (SGI 20 ms + timer 50 ms) | 70 ms |
+| Logging — 275 KB at byte granularity (the largest recorded Stage log; `runtime.c`'s `memcpy`/`memset` are byte loops, so byte granularity is exact, not conservative) | 138 ms |
+| Buffer zeroing — 16 KB + 128 KB L1/L2 tables, 32 KB device tree, 64 KB Mach-O arena | 262 ms |
+| **Pessimistic total** | **479 ms** |
+
+Against a 30 s bark, that is a **63x margin**. The measured end-to-end times in the early
+experiments ("~25 seconds to Android") are consistent with this and are *not* payload time:
+they include Android booting afterwards.
+
 **Confirms it:** `hw_watchdog_enabled=0x00000001` and `hw_watchdog_counter_running=0x00000001`
 in `last_kmsg`. If those are 0, the net is not armed and the run has no hardware recovery.
 
