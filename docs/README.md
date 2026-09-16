@@ -22,6 +22,7 @@
 - `msm8974-xnu-porting-map.md` — concrete MSM8974 ↔ XNU platform interface and work-package map.
 - `ios-613-oss-baseline.md` — notes on Apple OSS `distribution-iOS@ios-613` and public XNU baseline implications.
 - `pmap-attribute-map.md` — every mapping the payload creates, its ARMv7 short-descriptor encoding (decoded with `tools/decode_armv7_descriptor.py`), and the Phase 1 target attributes. Read this before blaming a fault on memory attributes.
+- `xnu-handoff-contract.md` — what public ARM XNU's `_start` actually requires of `boot_args`, read off `osfmk/arm/start.s`, and where the payload does not yet provide it. Phase 2's input.
 
 ## Status — `status/`
 

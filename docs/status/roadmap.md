@@ -307,6 +307,30 @@ this wrong and the first real XNU instructions fault in ways that look like pmap
 - Validate by reading the structures back with 4570's own `PE_boot_args()` /
   device-tree reader code, on hardware, before anything jumps.
 
+**Contract read off the source (2026-09-16).** [`docs/reference/xnu-handoff-contract.md`](../reference/xnu-handoff-contract.md)
+works through `osfmk/arm/start.s` line by line. The shape of the requirement is not what the
+bullet list above implies — XNU does **not** want a page table handed to it. It builds its own,
+in the memory at `topOfKernelData`, while executing at physical addresses with the I-cache on
+but the MMU off. Four consequences:
+
+- `virtBase` must be the kernel's **link-time virtual base**, because `LOAD_PHYS_ADDR`
+  (`start.s:108`) converts virtual to physical as `VA - virtBase + physBase`.
+- `physBase` and `virtBase` must be **1 MB aligned**: `start.s:195-207` ORs the physical
+  address straight into a section descriptor. A `physBase` of `0x8000` sets AP[2] and produces
+  a descriptor with the wrong protection.
+- `topOfKernelData` must be writable, 16 KB-aligned, inside `[physBase, physBase+memSize)` and
+  above the image, with room for the L1, an L2, the trampoline and CPU tables.
+- `memSize` must be real contiguous RAM containing the image.
+
+Against that, the payload currently passes `virtBase = 0` and `physBase = 0x8000`, and
+`physBase` is unaligned *because the boot image loads the payload at PA 0x8000*
+(`--kernel_offset 0x00008000`). So the ladder's `boot_args` and a conforming XNU `boot_args`
+are two different objects — the ladder's own validation requires `physBase == 0x8000` — and
+Phase 2 is to produce the second alongside the first. The unaligned load is resolved either by
+moving the load address to a 1 MB boundary (smaller change) or by relocating the image to the
+DRAM base before handoff (what real iBoot does, and what a kernel expecting to own memory from
+`0x80000000` will want).
+
 **Exit criteria:** boot_args and DT dumped from the device and accepted by 4570's readers;
 `TTBR0`/`TTBR1`/`TTBCR`/`SCTLR` verified correct after 4570 code has written them.
 
