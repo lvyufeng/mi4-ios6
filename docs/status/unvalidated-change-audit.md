@@ -344,6 +344,31 @@ from the first run you would do. The `for (;;)` form was defensible when the poi
 isolate which net fired; it was not defensible as the first thing to run on a device that
 has already been hung once.
 
+
+## 11. The gate was blind to a stale image — the one direction it existed to cover
+
+`preflight_boot_check.sh` verifies the image against `SHA256SUMS.txt`. That proves the image
+matches *something*, and says nothing about whether that something is the **current source**.
+If a source file is edited and not rebuilt, the image and its manifest are both stale *and
+agree with each other* — so the gate would confidently report the **old** switches and
+approve the **old** image.
+
+That is precisely the failure the gate exists to prevent, in the one direction it was blind
+to. The gate's own header says "a rebuild that silently picks up a risky mode is exactly how
+an unintended hang gets booted" — and it could not see the reverse: a source change that has
+not been built at all.
+
+Confirmed empirically before fixing: `touch stage90.h && ./preflight_boot_check.sh` **passed**.
+A switch flipped in the header and not rebuilt would have booted the previous configuration
+under a report claiming the new one.
+
+Fixed with a freshness check comparing source mtimes against the image: any `.c`, `.h`, `.S`
+or `.ld` in the stage directory, or `tools/mkmacho_fixture.py`, newer than the image refuses
+the run. Verified in all three directions — fresh build passes, `stage90.h` touched is
+caught, `start.S` touched is caught, the fixture generator touched is caught.
+
+Found by asking what the gate does *not* check, rather than by testing what it does. The
+same question is worth asking of the other checks in this audit.
 ## 6. What this audit cannot bound
 
 - **The watchdog's register semantics.** The readback and liveness checks confirm the

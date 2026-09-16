@@ -70,6 +70,27 @@ echo "== image integrity =="
 echo "sha256 verified against $OUT/SHA256SUMS.txt"
 
 echo
+echo "== image freshness =="
+# The manifest check above proves the image matches SOMETHING, but not that the something
+# is the current source. If a source file was edited and not rebuilt, the image and its
+# manifest are both stale and agree with each other - so the gate would report the OLD
+# switches and approve the OLD image, which is precisely the failure this gate exists to
+# prevent, in the direction it was blind to. Verified: without this check, touching
+# stage90.h and running the gate passes.
+STALE=$(find "$STAGE_DIR" -maxdepth 1 -type f \
+         \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.ld' \) \
+         -newer "$IMAGE" -printf '%f\n' 2>/dev/null | sort)
+BUILD_TOOLS_NEWER=$(find "$REPO_ROOT/tools" -maxdepth 1 -name 'mkmacho_fixture.py' \
+                    -newer "$IMAGE" -printf '%f\n' 2>/dev/null)
+if [[ -n $STALE || -n $BUILD_TOOLS_NEWER ]]; then
+  echo "source newer than the image:"
+  [[ -n $STALE ]] && echo "$STALE" | sed 's/^/  /'
+  [[ -n $BUILD_TOOLS_NEWER ]] && echo "  tools/$BUILD_TOOLS_NEWER"
+  fail "the image is stale - run ./build.sh, then re-run this gate"
+fi
+echo "no source file is newer than the image"
+
+echo
 echo "== storage tripwire =="
 # The payload must never reference storage-controller code. It writes MMIO, IMEM
 # and PS_HOLD only; any storage symbol means something changed that should not have.
