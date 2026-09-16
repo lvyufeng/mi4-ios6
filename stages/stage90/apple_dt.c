@@ -224,6 +224,14 @@ int apple_dt_selftest_and_log(const void *dt, uint32_t len)
     ok &= expect_child(root, end, "chosen");
     ok &= expect_child(root, end, "memory");
     ok &= expect_child(root, end, "cpus");
+    /*
+     * XNU's ARM platform code locates the SoC through a node named "arm-io"
+     * (pe_identify_machine.c:232) and takes the SoC base from its ranges; without it the
+     * interrupt controller and timer are never mapped. Asserting it by name here means a
+     * hardware run positively confirms that node, rather than only confirming the tree
+     * walks to the right length.
+     */
+    ok &= expect_child(root, end, "arm-io");
     ok &= expect_child(root, end, "msm8974-io");
     ok &= expect_child(root, end, "interrupt-controller");
     ok &= expect_child(root, end, "timer");

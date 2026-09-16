@@ -168,7 +168,9 @@ Two were genuine blockers, both found by this check rather than by a device:
   it and takes `gPESoCBasePhys` from `ranges[1]`; without it that value is 0, and
   `pe_arm_map_interrupt_controller` then returns early (`:541`) so **neither the interrupt
   controller nor the timer is ever mapped**. Fixed: an `/arm-io` node with `device_type`,
-  `ranges` and `chip-revision`.
+  `ranges` and `chip-revision`, and `apple_dt_selftest_and_log` now asserts it by name, so a
+  hardware run positively confirms that node rather than only confirming the tree walks to
+  the right length.
 
 The same tool also checks each node header's `nProperties` against what its block emits,
 because a wrong count does not fail to build and does not fail at `DTInit` — the walker

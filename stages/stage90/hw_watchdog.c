@@ -209,12 +209,21 @@ int stage90_hw_watchdog_arm(uint32_t timeout_s)
      * And the count is the *right* count. A counter merely observed to move could be
      * aboot's own arming still running from before the payload started - aboot
      * programs 20s (msm8974.dtsi: qcom,bark-time = <20000>) - which would make the net
-     * look present with a much shorter timeout than intended. The count is taken
-     * microseconds after the reset, so it should sit just under the bark value that
-     * was just programmed; 2 s of slack is far more than the elapsed time and far less
-     * than the 10 s that separates a 30 s bake from a 20 s one.
+     * look present with a much shorter timeout than intended.
+     *
+     * The window is [bark - 2s, bite], not [bark - 2s, bark]. Which value the countdown
+     * reloads from - the bark time or the bite time - is not something the vendor driver
+     * states; it only ever compares the count against the *bark* time when computing
+     * slack, which is consistent with either. Accepting both is free and removes a
+     * false-negative: a watchdog that is working perfectly but counts down from the bite
+     * value would otherwise be reported as "NOT confirmed armed", and the obvious next
+     * move would be to go fix a net that was never broken.
+     *
+     * What the window still rejects is the value that matters. aboot's 20s arming is
+     * 655300 ticks, well below bark - 2s = 917420, with our 30s bark at 982950 and bite
+     * at 1081245. So the ambiguity is absorbed without losing the discrimination.
      */
-    r->countdown_plausible = ((count_first <= bark_ticks) &&
+    r->countdown_plausible = ((count_first <= bite_ticks) &&
                               (count_first >= (bark_ticks - (2u * MSM8974_WDT_HZ)))) ? 1u : 0u;
 
     r->readback_ok = ((r->en_after & 1u) == 1u &&
