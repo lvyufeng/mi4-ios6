@@ -130,6 +130,34 @@ the identity table is untouched, so nothing that works today depends on the old 
 **Confirms it:** `stage90_xnu_arm_vm_init_full_pmap_status=0x90000001` with no
 `FAIL_RAM_CONSOLE` bit, and `..._ram_console_verified=0x00000001`.
 
+## 5a. The recovery paths have 9x stack headroom — measured, not estimated
+
+Every path that must work for a hang to be *recoverable* runs on a 1 KB banked stack
+(`start.S`: `stage90_irq_stack`, `stage90_abt_stack` each `.space 1024`). An overrun there
+would corrupt the stack rather than fail cleanly, and the symptom would be a corrupt-but-
+plausible hang — the exact failure class this audit exists to shrink. So it was worth
+measuring rather than assuming.
+
+`arm-none-eabi-gcc -fstack-usage` on the actual sources, at the build's own `-O2`:
+
+| Path | Stack | Of 1 KB |
+| --- | --- | --- |
+| IRQ → sample dump (logging) | 76 B | 7.4% |
+| IRQ → reboot → PS_HOLD + bite | 96 B | 9.4% |
+| **IRQ → reboot → bite → log** | **112 B** | **10.9%** |
+| prefetch abort → log + reboot → bite | 88 B | 8.6% |
+| data abort → handler → log | 64 B | 6.2% |
+| undefined instruction → handler | 16 B | 1.6% |
+
+**Worst case 112 B, a 9x margin.** The frames are small because `ram_console`'s logging is
+byte-at-a-time with no formatting machinery — the thing that makes it slow is also what
+makes it stack-cheap.
+
+Two properties that make this bound hold rather than merely hold on average: the handlers
+run with interrupts masked (ARM sets I on exception entry, and the abort path additionally
+does `cpsid if`), so there is **no nesting**; and the payload is freestanding, so no library
+call can consume stack unaccounted for here.
+
 ## 6. What this audit cannot bound
 
 - **The watchdog's register semantics.** The readback and liveness checks confirm the
