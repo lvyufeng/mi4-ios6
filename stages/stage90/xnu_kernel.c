@@ -50,6 +50,19 @@ int kernel_entry(struct boot_args *args)
         return 0;
     }
 
+    /*
+     * Arm the recovery net here: the GIC bases are known-good from the snapshot
+     * above, and everything from this point on - the loader preflight, the whole
+     * arm_init ladder (full pmap, candidate L1, the high-VA handler windows) and
+     * the handoff jump - is the unproven part of the payload, so it is exactly
+     * what needs covering. The code above this line has a 90-stage track record;
+     * leaving its IRQ behaviour untouched keeps that baseline intact.
+     *
+     * On the happy path this changes nothing: every exit from the payload ends in
+     * platform_reboot() well before the dead-man's budget expires.
+     */
+    (void)stage90_arm_deadman_reset();
+
     ml_init_timebase();
     const uint64_t t0 = ml_get_timebase();
     delay_us(2000);

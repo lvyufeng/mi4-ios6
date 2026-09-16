@@ -426,6 +426,15 @@ finish:
 	r->pc_sample_last_pc = stage90_irq_last_sampled_pc;
 	r->watchdog_fired = stage90_irq_sample_watchdog_fired;
 
+	/*
+	 * The stop above also disarmed the recovery net that the handoff re-used.
+	 * Re-arm it so the remaining payload work (returning up through the loader
+	 * preflight to platform_reboot()) is covered again. The handoff's own, much
+	 * shorter budget was for the no-return jump; a plain return does not need a
+	 * fast trigger.
+	 */
+	(void)stage90_arm_deadman_reset();
+
 	if (candidate_l1_installed != 0u) {
 		handoff_dsb_isb();
 		handoff_write_ttbr0(r->original_ttbr0);

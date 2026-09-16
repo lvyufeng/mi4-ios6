@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+#
+# Gate a hardware run of the Stage90 payload.
+#
+# The 2026-09-16 PREFLIGHT_WATCHDOG_ONLY run ended with the device hung and a
+# manual power-button hold needed. Knowing which switches an image was actually
+# built with, and refusing the risky ones by default, is the cheapest way to stop
+# that happening again - a rebuild that silently picks up a risky mode is exactly
+# how an unintended hang gets booted.
+#
+# This script never runs fastboot and never touches the device. It verifies the
+# image and prints the command to run, or refuses and says why.
+#
+# Usage: ./preflight_boot_check.sh [--allow-preflight] [--allow-full] [--allow-selftest]
+
+set -euo pipefail
+
+cd "$(dirname "$0")"
+STAGE_DIR=$PWD
+REPO_ROOT=$(cd "$STAGE_DIR/../.." && pwd)
+OUT=$REPO_ROOT/out/stage90
+
+ALLOW_PREFLIGHT=0
+ALLOW_FULL=0
+ALLOW_SELFTEST=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --allow-preflight) ALLOW_PREFLIGHT=1 ;;
+    --allow-full)      ALLOW_FULL=1 ;;
+    --allow-selftest)  ALLOW_SELFTEST=1 ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+
+fail() { echo "REFUSING: $*" >&2; exit 1; }
+
+CONFIG=$OUT/stage90-build-config.txt
+IMAGE=$OUT/stage90-qcdt.img
+
+[[ -f $CONFIG ]] || fail "no $CONFIG - run ./build.sh first to record the build switches"
+[[ -f $IMAGE  ]] || fail "no $IMAGE - run ./build.sh first"
+
+echo "== build configuration =="
+cat "$CONFIG"
+
+value_of() {
+  sed -n "s/^#define $1 //p" "$CONFIG"
+}
+
+MODE=$(value_of STAGE90_HANDOFF_MODE)
+SELFTEST=$(value_of STAGE90_DEADMAN_SELFTEST)
+DEADMAN=$(value_of STAGE90_DEADMAN_ENABLE)
+LADDER=$(value_of STAGE90_ENTRY_LADDER_LEVEL)
+
+[[ -n $MODE ]] || fail "STAGE90_HANDOFF_MODE missing from $CONFIG"
+
+echo
+echo "== image integrity =="
+( cd "$OUT" && sha256sum -c SHA256SUMS.txt ) || fail "image does not match SHA256SUMS.txt; rebuild before booting"
+echo "sha256 verified against $OUT/SHA256SUMS.txt"
+
+echo
+echo "== storage tripwire =="
+# The payload must never reference storage-controller code. It writes MMIO, IMEM
+# and PS_HOLD only; any storage symbol means something changed that should not have.
+if arm-none-eabi-nm -a "$OUT/stage90.elf" 2>/dev/null \
+     | grep -iE 'sdcc|emmc|\bmmc\b|ufs|partition|flash_|nand' ; then
+  fail "payload references storage symbols (see above)"
+fi
+echo "no storage symbols in the payload"
+
+echo
+echo "== recovery net =="
+if [[ $DEADMAN != "1u" ]]; then
+  echo "WARNING: STAGE90_DEADMAN_ENABLE=$DEADMAN - the payload runs with NO recovery net."
+  echo "         A hang will need a manual power-button hold."
+else
+  echo "dead-man reset is enabled: a non-progressing payload dumps and reboots on its own."
+fi
+
+echo
+echo "== mode policy =="
+case "$MODE" in
+  STAGE90_HANDOFF_MODE_HARD_SKIP)
+    echo "HARD_SKIP: stops before the candidate L1, the watchdog loop and the jump."
+    ;;
+  STAGE90_HANDOFF_MODE_PREFLIGHT_WATCHDOG_ONLY)
+    [[ $ALLOW_PREFLIGHT -eq 1 ]] || fail "PREFLIGHT_WATCHDOG_ONLY is not allowed without --allow-preflight"
+    echo "PREFLIGHT_WATCHDOG_ONLY: allowed."
+    ;;
+  STAGE90_HANDOFF_MODE_FULL)
+    [[ $ALLOW_FULL -eq 1 ]] || fail "FULL is not allowed without --allow-full"
+    echo "FULL: allowed. This installs the candidate L1 and jumps to the high-VA target."
+    ;;
+  *)
+    fail "unrecognised STAGE90_HANDOFF_MODE: $MODE"
+    ;;
+esac
+
+if [[ $SELFTEST == "1u" ]]; then
+  [[ $ALLOW_SELFTEST -eq 1 ]] || fail "dead-man SELFTEST hangs the payload on purpose; needs --allow-selftest"
+  echo "SELFTEST: allowed. The payload will NOT reach platform_reboot();"
+  echo "          the dead-man is the only route back to Android (~10s)."
+fi
+
+echo
+echo "== ladder =="
+echo "STAGE90_ENTRY_LADDER_LEVEL=$LADDER"
+
+echo
+echo "All checks passed. To run the non-persistent boot (writes nothing to storage):"
+echo
+echo "  sudo adb -s 4a2fe00b reboot bootloader"
+echo "  sudo fastboot boot $IMAGE"
+echo
+echo "Recover afterwards with:"
+echo "  sudo adb -s 4a2fe00b exec-out 'cat /proc/last_kmsg' > /tmp/cancro-last_kmsg.txt"

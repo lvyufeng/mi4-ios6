@@ -759,6 +759,72 @@ void platform_reboot(void)
     }
 }
 
+/*
+ * Dead-man reset. See STAGE90_DEADMAN_* in stage90.h for why this exists: the
+ * PS_HOLD reset path is proven (dozens of earlier stages returned to Android
+ * ~25-30s after `fastboot boot`), but until now it was only ever armed inside
+ * the handoff, leaving the whole arm_init ladder without recovery.
+ */
+static uint32_t g_stage90_deadman_armed;
+
+int stage90_arm_deadman_reset(void)
+{
+#if STAGE90_DEADMAN_ENABLE
+    volatile uint32_t *gicd_ctlr;
+    volatile uint32_t *gicc_ctlr;
+    uint32_t dist_ctlr;
+    uint32_t cpu_ctlr;
+
+    if (GIC_state_stage90.distBase == 0u || GIC_state_stage90.cpuBase == 0u) {
+        gic_readonly_snapshot(STAGE90_GIC_DIST_BASE, STAGE90_GIC_CPU_BASE);
+    }
+
+    /*
+     * The timer interrupt needs the distributor and CPU interface live. aboot
+     * normally leaves them enabled (the SGI/timer selftests require it and pass
+     * on hardware), so this only repairs the case where they are not - it does
+     * not touch the priority mask, which would widen the set of delivered IRQs.
+     */
+    gicd_ctlr = (volatile uint32_t *)(uintptr_t)(GIC_state_stage90.distBase + 0x000u);
+    gicc_ctlr = (volatile uint32_t *)(uintptr_t)(GIC_state_stage90.cpuBase + 0x000u);
+    dist_ctlr = *gicd_ctlr;
+    cpu_ctlr = *gicc_ctlr;
+
+    if ((dist_ctlr & 1u) == 0u) {
+        *gicd_ctlr = dist_ctlr | 1u;
+    }
+    if ((cpu_ctlr & 1u) == 0u) {
+        *gicc_ctlr = cpu_ctlr | 1u;
+    }
+    __asm__ volatile ("dsb sy" ::: "memory");
+
+    log_kv32("deadman_gicd_ctlr_before", dist_ctlr);
+    log_kv32("deadman_gicc_ctlr_before", cpu_ctlr);
+    log_kv32("deadman_gicd_ctlr_after", *gicd_ctlr);
+    log_kv32("deadman_gicc_ctlr_after", *gicc_ctlr);
+
+    if (!stage90_arm_pc_sampling_watchdog(STAGE90_DEADMAN_INTERVAL_US,
+                                          STAGE90_DEADMAN_SAMPLES)) {
+        log_puts("MI4IOS6_STAGE90 deadman: arm failed; payload runs without a recovery net\n");
+        return 0;
+    }
+
+    g_stage90_deadman_armed = 1u;
+    log_puts("MI4IOS6_STAGE90 deadman: armed (dump + PS_HOLD reboot if the payload stops making progress)\n");
+    log_kv32("deadman_interval_us", STAGE90_DEADMAN_INTERVAL_US);
+    log_kv32("deadman_samples", STAGE90_DEADMAN_SAMPLES);
+    return 1;
+#else
+    log_puts("MI4IOS6_STAGE90 deadman: disabled by STAGE90_DEADMAN_ENABLE=0\n");
+    return 0;
+#endif
+}
+
+uint32_t stage90_deadman_armed(void)
+{
+    return g_stage90_deadman_armed;
+}
+
 void stage90_main(void)
 {
     struct apple_dt_builder b;
@@ -767,6 +833,21 @@ void stage90_main(void)
     log_init();
     log_puts("MI4IOS6_STAGE90 v1 entered; Stage-owned arm_vm_init live-pmap install/verify/restore window; ram_console live\n");
     log_kv32("stage90_image_end", (uint32_t)(uintptr_t)__stage90_image_end);
+    log_kv32("stage90_build_handoff_mode", STAGE90_HANDOFF_MODE);
+    log_kv32("stage90_build_entry_ladder_level", STAGE90_ENTRY_LADDER_LEVEL);
+
+#if STAGE90_DEADMAN_SELFTEST
+    /*
+     * Dead-man self-test: arm, then prove the recovery path end to end. Nothing
+     * after this point runs - the only way back to Android is the armed dead-man
+     * firing, dumping the interrupted PC, and rebooting through PS_HOLD.
+     */
+    (void)stage90_arm_deadman_reset();
+    log_puts("MI4IOS6_STAGE90 deadman SELFTEST: spinning without any reset call; only the dead-man can recover\n");
+    for (;;) {
+        __asm__ volatile ("nop" ::: "memory");
+    }
+#endif
 
     build_stage90_apple_dt(&b);
     dt_len = apple_dt_finish(&b);

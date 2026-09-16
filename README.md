@@ -24,7 +24,8 @@ cd stages/stage90 && ./build.sh          # what `make` runs
 
 sha256sum -c out/stage90/SHA256SUMS.txt  # per-stage build manifest
 
-sudo fastboot boot out/stage90/stage90-qcdt.img   # non-persistent validation
+cd stages/stage90 && ./preflight_boot_check.sh   # verify + gate a hardware run
+sudo fastboot boot out/stage90/stage90-qcdt.img  # non-persistent validation
 ```
 
 Every snapshot resolves the repository root itself, so its `build.sh` works from any working directory. Booting is deliberately not a `make` target: flashing is a per-operation decision, and `fastboot boot` never writes to the device.
@@ -106,22 +107,50 @@ The handoff target is **not** XNU code, and no public XNU object has ever been l
 | Mode | Effect |
 | --- | --- |
 | `FULL` (0) | Install the candidate L1, arm the PC-sampling watchdog, jump to the Stage-owned high-VA target. Before jumping it refuses any target whose first word is the fixture's `__TEXT` marker. |
-| `PREFLIGHT_WATCHDOG_ONLY` (1) — **default** | No candidate L1, no high-VA branch, no jump: everything stays under the original known-good mapping. Arms the *same* watchdog and spins in a bounded identity-mapped loop, to prove the interrupt → sample-dump → `platform_reboot()`/PS_HOLD warm-reboot path on its own. The loop is bounded (4× `INTERVAL × MAX`); if the watchdog never fires, control returns and the stage reports the failure and reboots visibly instead of hanging. |
-| `HARD_SKIP` (2) | Stop before the boundary entirely: no candidate L1, no watchdog, no IRQ, no jump. |
+| `PREFLIGHT_WATCHDOG_ONLY` (1) | No candidate L1, no high-VA branch, no jump: everything stays under the original known-good mapping. Arms the *same* watchdog and spins in a bounded identity-mapped loop, to prove the interrupt → sample-dump → `platform_reboot()`/PS_HOLD warm-reboot path on its own. The loop is bounded (4× `INTERVAL × MAX`); if the watchdog never fires, control returns and the stage reports the failure and reboots visibly instead of hanging. |
+| `HARD_SKIP` (2) — **default** | Stop before the boundary entirely: no candidate L1, no watchdog, no IRQ, no jump. |
+
+The default is `HARD_SKIP` because the `PREFLIGHT_WATCHDOG_ONLY` run on 2026-09-16 left the
+device hung with a manual power-button hold needed ([`docs/experiments/experiment-93-stage90-phase0-preflight-watchdog.md`](docs/experiments/experiment-93-stage90-phase0-preflight-watchdog.md)).
+Stepping back up to `PREFLIGHT_WATCHDOG_ONLY` and then `FULL` is now a deliberate per-run
+decision, enforced by `stages/stage90/preflight_boot_check.sh`:
+it verifies the image against `SHA256SUMS.txt`, checks the payload references no storage
+symbols, and refuses a run whose image was built with a mode the caller has not explicitly
+allowed (`--allow-preflight` / `--allow-full` / `--allow-selftest`).
 
 `STAGE90_ENTRY_LADDER_LEVEL` (0–4) — the entry stub genuinely calls the first *N* stages of the `arm_init`-shaped ladder and returns; levels above *N* are not called. `0` boot-args only, `1` +early pmap, `2` +`PE_init_platform(FALSE,args)`, `3` +post-PE bootstrap, `4` (**default**) +`arm_vm_init` live pmap and the high-VA handler windows, which is the only level that reaches the handoff. The loader preflight reads the level back out of the stub result and requires only the stages that actually ran — previously it required all five unconditionally, so every level below `FULL` failed structurally before the handoff was ever reached.
 
-None of these modes is a shipped feature; they exist to find the failure. The current work is the watchdog → `platform_reboot()` → PS_HOLD warm-reboot path, which is why `platform_reboot()` logs each step of the restart-reason and PS_HOLD sequence.
+### Dead-man reset
+
+The same dump-then-`platform_reboot()` mechanism is now armed as a **dead-man** at the end of
+`kernel_entry`'s GIC validation — before the loader preflight, the whole ladder and the
+handoff, which is all the unproven code. Every normal exit from the payload already ends in
+`platform_reboot()`, so on the happy path the dead-man never fires; if the payload stops
+making progress for 10 s (`INTERVAL_US × SAMPLES`), the IRQ handler dumps the interrupted PC
+and reboots through PS_HOLD instead of leaving the device hung. The code before that point
+has a 90-stage track record, so it is deliberately left with its original IRQ behaviour.
+
+This matters because the earlier stages' `platform_reboot()` → PS_HOLD path is *proven* —
+experiments 03–78 all returned to Android automatically ~25–30 s after `fastboot boot`, with
+the ADB transport id advancing. What was missing was coverage: the sampling watchdog only ever
+armed *inside* the handoff, so the DT build, `boot_args`, and the whole `arm_init` ladder ran
+with no recovery at all. `STAGE90_DEADMAN_SELFTEST=1` spins forever right after arming, making
+the dead-man the only route back to Android — the direct hardware proof of the recovery path,
+and safe by construction (if it works the device returns on its own; if it does not, the state
+is the same as any other hang).
+
+None of these modes is a shipped feature; they exist to find the failure.
 
 ## Next milestones
 
 The current plan is [`docs/status/roadmap.md`](docs/status/roadmap.md), which re-plans the
 project after Stage90 and supersedes this section. In short:
 
-1. **Phase 0 — make failure visible and recoverable.** Finish the watchdog → PS_HOLD
-   warm-reboot path so a hang self-recovers, and reject non-executable entries so the
-   fixture header produces a captured fault instead of a silent hang. Both mechanisms are
-   in the tree; the remaining step is the hardware run in `PREFLIGHT_WATCHDOG_ONLY`.
+1. **Phase 0 — make failure visible and recoverable.** The dead-man reset and the
+   non-executable-entry guard are in the tree; the `PREFLIGHT_WATCHDOG_ONLY` run on
+   2026-09-16 did **not** self-recover, so the mode was demoted to non-default and the
+   recovery net was widened to cover the ladder. Next: re-establish the known-good baseline
+   with `HARD_SKIP`, then prove the dead-man with `STAGE90_DEADMAN_SELFTEST=1`.
 2. **Phase 1 — cacheable memory policy.** Every mapping in the project is
    Strongly-Ordered, non-cacheable; there is no Normal-memory descriptor anywhere. ARMv7
    `LDREX`/`STREX` are only defined on Normal memory, so this is the prerequisite for the

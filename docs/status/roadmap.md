@@ -156,14 +156,40 @@ that rule is what this re-plan is *for*.
 Every later phase will hang repeatedly, and iteration speed is set entirely by how much a
 hang tells you. This is also the cheapest phase.
 
-- Finish `STAGE90_HANDOFF_PREFLIGHT_WATCHDOG_ONLY`: prove the watchdog fires and
-  `platform_reboot()`/PS_HOLD warm-reboots the device back to Android from a real hang.
+**Status (2026-09-16).** Two mechanisms are in the tree; one has been tried on hardware and
+failed, and finding out why reshaped this phase.
+
+- The harness that was supposed to isolate the hang could not report anything: the three
+  0/1 switches shadowed each other, and the entry-stub bisect wrote synthetic results the
+  loader preflight could never accept. Both are fixed (`STAGE90_HANDOFF_MODE`,
+  `STAGE90_ENTRY_LADDER_LEVEL`).
+- A `PREFLIGHT_WATCHDOG_ONLY` hardware run on 2026-09-16 **did not self-recover**: the device
+  presented no USB in any mode for ~20 minutes and needed a power-button hold
+  ([`docs/experiments/experiment-93-stage90-phase0-preflight-watchdog.md`](../experiments/experiment-93-stage90-phase0-preflight-watchdog.md)).
+- Reading the reset path afterwards explained the gap: `platform_reboot()`/PS_HOLD is *proven*
+  (experiments 03–78 all returned to Android automatically), but the sampling watchdog was
+  only ever armed *inside* the handoff. The DT build, `boot_args`, pexpert discovery and the
+  whole `arm_init` ladder ran with no recovery at all.
+- Fixed by arming a **dead-man reset** at the end of `kernel_entry`'s GIC validation — before
+  the loader preflight and everything after it — and re-arming it after the handoff returns.
+  `STAGE90_DEADMAN_SELFTEST=1` spins forever after arming, making the dead-man the only route
+  back to Android: the direct hardware proof, safe by construction.
+- `STAGE90_HANDOFF_MODE` now defaults to `HARD_SKIP`, and
+  `stages/stage90/preflight_boot_check.sh` refuses to hand over a boot command for an image
+  built with a mode the caller has not explicitly allowed.
+
+Remaining in this phase:
+
+- **Re-establish the known-good baseline.** Boot the default build (`HARD_SKIP`, dead-man
+  armed) and confirm it completes and reboots on its own.
+- **Prove the dead-man** with `STAGE90_DEADMAN_SELFTEST=1` and confirm the device comes back
+  to Android unattended (~10 s), then read the PC ring out of `/proc/last_kmsg`.
 - Verify `VBAR` still points at the high-VA vectors **after** the candidate L1 install, and
-  that a timer IRQ is still delivered through them. The existing `PREFLIGHT_WATCHDOG_ONLY`
-  path checks this under the *original* mapping; the interesting case is after the switch.
-- Add an entry-validity guard to the handoff: reject a target that is not in an executable
-  segment of the Mach-O, and log the rejection. Jumping at a Mach-O header must become a
-  caught undefined-instruction fault instead of a silent hang.
+  that a timer IRQ is still delivered through them — the interesting case is after the
+  switch, not under the original mapping.
+- The entry-validity guard is in: the handoff rejects a target equal to the fixture entry VA,
+  an unaligned target, or one whose first word is the fixture's `__TEXT` marker. Still to
+  demonstrate is criterion (b) below actually producing a logged fault.
 
 **Exit criteria:** (a) an induced hang self-recovers to Android without a manual
 power-cycle; (b) a jump to the Stage90 fixture header produces a logged undef/abort with

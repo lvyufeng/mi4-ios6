@@ -3864,7 +3864,14 @@ struct stage90_xnu_macho_loader_result {
 #define STAGE90_HANDOFF_MODE_HARD_SKIP               2u
 
 #if !defined(STAGE90_HANDOFF_MODE)
-#define STAGE90_HANDOFF_MODE STAGE90_HANDOFF_MODE_PREFLIGHT_WATCHDOG_ONLY
+/*
+ * Default is the safest mode that still exercises the payload. HARD_SKIP stops
+ * before the candidate L1 install, the watchdog loop and the jump - the three
+ * things that can hang the device - so the next hardware run re-establishes a
+ * known-good baseline before anything riskier is attempted again. Step up to
+ * PREFLIGHT_WATCHDOG_ONLY, then FULL, as a deliberate per-run decision.
+ */
+#define STAGE90_HANDOFF_MODE STAGE90_HANDOFF_MODE_HARD_SKIP
 #endif
 
 #if (STAGE90_HANDOFF_MODE != STAGE90_HANDOFF_MODE_FULL) && \
@@ -3922,6 +3929,49 @@ struct stage90_xnu_macho_loader_result {
 /* Skip the entry-stub ladder inside the loader preflight (host/shape testing only). */
 #if !defined(STAGE90_BYPASS_ENTRY_STUB)
 #define STAGE90_BYPASS_ENTRY_STUB 0u
+#endif
+
+/*
+ * Dead-man reset.
+ *
+ * The 2026-09-16 hardware run of PREFLIGHT_WATCHDOG_ONLY ended with the device
+ * hung - no USB in any mode, manual power-button hold required. Earlier stages
+ * (experiment-03 .. experiment-78) all returned to Android automatically ~25-30s
+ * after `fastboot boot`, with the ADB transport id advancing, which is the
+ * PS_HOLD path in platform_reboot() working. So the reset mechanism is sound;
+ * what failed is that the hang happened somewhere the reset was never reached.
+ * The sampling watchdog only ever armed *inside* the handoff, so everything
+ * before it - the DT build, boot_args, the whole arm_init ladder - ran with no
+ * recovery at all.
+ *
+ * This arms the same proven dump-then-platform_reboot() mechanism at the very
+ * top of stage90_main(), before any of that, and never disarms it. Every normal
+ * exit from the payload already ends in platform_reboot(), so on the happy path
+ * this changes nothing at all; on a hang it converts "manual power-button hold"
+ * into "auto-recovers in TIMEOUT_US".
+ *
+ * Timeout = STAGE90_DEADMAN_INTERVAL_US * STAGE90_DEADMAN_SAMPLES.
+ */
+#define STAGE90_DEADMAN_INTERVAL_US 500u
+#define STAGE90_DEADMAN_SAMPLES     20000u /* 500us * 20000 = 10s */
+
+/* cancro GIC bases: distributor / CPU interface (gic_validate_snapshot asserts these). */
+#define STAGE90_GIC_DIST_BASE 0xf9000000u
+#define STAGE90_GIC_CPU_BASE  0xf9002000u
+
+#if !defined(STAGE90_DEADMAN_ENABLE)
+#define STAGE90_DEADMAN_ENABLE 1u
+#endif
+
+/*
+ * Self-test for the dead-man itself: after arming it, spin forever without ever
+ * reaching platform_reboot(). The dead-man is then the ONLY way back to Android.
+ * This is the direct hardware proof of the recovery path, and it is safe by
+ * construction - if the dead-man works the device returns on its own, and if it
+ * does not we are in exactly the state a hang would leave us in anyway.
+ */
+#if !defined(STAGE90_DEADMAN_SELFTEST)
+#define STAGE90_DEADMAN_SELFTEST 0u
 #endif
 
 /*
@@ -6062,6 +6112,13 @@ void stage90_irq_c_handler(uint32_t interrupted_pc);
 int stage90_arm_pc_sampling_watchdog(uint32_t interval_us, uint32_t max_samples);
 void stage90_stop_pc_sampling_watchdog(void);
 void stage90_dump_pc_samples(void);
+/*
+ * Arm the dead-man reset. Idempotent and never disarmed: re-arming simply resets
+ * the budget. Returns 1 if armed, 0 if STAGE90_DEADMAN_ENABLE is 0 or the GIC
+ * bases are unavailable.
+ */
+int stage90_arm_deadman_reset(void);
+uint32_t stage90_deadman_armed(void);
 int gic_sgi_selftest(void);
 int gic_timer_selftest(void);
 
