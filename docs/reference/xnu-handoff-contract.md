@@ -209,6 +209,26 @@ because a wrong count does not fail to build and does not fail at `DTInit` — t
 reads the number it was given and lands in the middle of the next property name. Both checks
 are negative-tested: perturbing a count makes them fail.
 
+**And the payload's own runtime check has now been tested too, not just asserted.** The
+reason a device-tree edit is considered safe without a hardware run is that
+`apple_dt_selftest_and_log` catches a wrong count *on the device* — load-bearing, and until
+now untested. `tools/host_dt_selftest_probe.c` (run as part of `tools/host_dt_check.sh`)
+builds the real tree, locates a node with the payload's own `apple_dt_find_child`, corrupts
+exactly one header field, and asks the payload's own selftest whether it notices. Each case
+asserts the unmodified tree passes first, so a broken test cannot masquerade as coverage:
+
+```
+  arm-io  nProperties  4+1  detected      cpus  nProperties  3+1  detected
+  arm-io  nProperties  4-1  detected      cpus  nChildren    4+1  detected
+  timer   nProperties  6+1  detected      cpus  nChildren    4-1  detected
+  timer   nProperties  6-1  detected      /     nChildren   20+1  detected
+  chosen  nProperties  4+1  detected
+  memory  nProperties  4+1  detected      -> 10/10 detected, 0 invalid
+```
+
+A single-field miscount at any level is caught — including the root's own child count, which
+the walk-length check covers by requiring `skip_node` to land exactly at the buffer end.
+
 ### Not resolved here: `reg` is absolute, XNU expects an offset
 
 `pe_arm_map_interrupt_controller` computes `gPicBase = soc_phys + reg[0]`, so Apple's model

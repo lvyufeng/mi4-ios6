@@ -149,5 +149,21 @@ echo "constants extracted: $(grep -c '^#define' "$WORK/stage90_dt_shim.h")"
   "$REPO_ROOT/external/xnu-upstream/pexpert/gen/device_tree.c" \
   -Wno-unused-parameter
 
+# --- 4. does the payload's own selftest catch a corrupted node header? --------------
+# A load-bearing claim: the reason a device-tree edit is considered safe without a hardware
+# run is that apple_dt_selftest_and_log catches a wrong count. That deserves testing against
+# the real apple_dt.c rather than being asserted, and it can be, here.
+"$CC" -std=c11 -O1 -Wall -Wextra -Werror -Wno-unused-parameter \
+  -I "$TOOLS_DIR/host_dt_shim" \
+  -I "$WORK" \
+  -o "$WORK/host_dt_selftest_probe" \
+  "$TOOLS_DIR/host_dt_selftest_probe.c" \
+  "$WORK/stage90_dt_extract.c" \
+  "$WORK/align4_extract.c" \
+  "$STAGE_DIR/apple_dt.c"
+
 echo
 "$WORK/host_dt_harness"
+
+echo
+"$WORK/host_dt_selftest_probe"
