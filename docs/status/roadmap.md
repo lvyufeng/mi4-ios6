@@ -594,6 +594,41 @@ That is worth writing down before Phase 4 is attempted, because the failure mode
 spending days fighting `$(error Unsupported CURRENT_ARCH_CONFIG ARM)` and concluding the
 source is unusable, when the source is fine and the *configuration* is what is missing.
 
+### And the configuration may not be the real obstruction — the headers are
+
+The above concludes "build the build system". Trying to compile one ARM source by hand says
+something more useful, and it is a **better** answer than the one above.
+
+`osfmk/arm/arm_init.c`, compiled directly with the project's toolchain and the project's own
+shim-header directory (the same `-Ishims` approach `xnu_object_subset_compile.sh` already
+uses for its five objects):
+
+1. Fails at `#include <debug.h>` — a `PRIVATE_DATAFILE` the build exports. The project's
+   `shims/kern/debug.h` already covers it.
+2. With the shim subdirectories on the path, gets further and fails at
+   `#include <mach_ldebug.h>`.
+3. **`mach_ldebug.h` does not exist anywhere in the tarball.** Nothing matches `*ldebug*`.
+   It is included by `osfmk/kern/thread.h:104`, `locks.c`, `simple_lock.h`, `genassym.c`,
+   `locks_arm.c` and `arm_init.c` — and 20 of the 32 `.c` files in `osfmk/arm` include
+   `thread.h`. So it is reached by most of the ARM tree, and it was never published.
+
+That reframes the work, and more favourably than the previous section suggests. The project
+does not have to reconstruct Apple's build system — it already has a working mechanism for
+compiling XNU sources outside it, in `stages/stage90/shims/` (16 headers, enough for the five
+pexpert objects). Extending that to the ARM tree is **iterative and mechanical**: point the
+compiler at the next source, be told the next missing header, write it, repeat. The compiler
+walks the include graph for you.
+
+What is unknown is the *count* — how many headers like `mach_ldebug.h` are missing, and how
+many of them are declarations-only shims versus things that need real behaviour. `mach_ldebug.h`
+looks like the former (it exists to hold `pal_mlock`/`pal_munlock`-style debug hooks). But the
+honest statement is that no one has counted, and the count is the thing that decides whether
+Phase 4 is a weeks-scale or months-scale piece of work.
+
+**So the first Phase 4 task is a measurement, not a build:** extend the shim set iteratively
+against `osfmk/arm/` until one object compiles, and count what it took. That is bounded, needs
+no device, and turns the unknown above into a number.
+
 ### Phase 3 — specification written
 
 [`phase3-msm8974-shim-spec.md`](phase3-msm8974-shim-spec.md) bounds the shim work and makes
