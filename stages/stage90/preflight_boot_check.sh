@@ -11,7 +11,7 @@
 # This script never runs fastboot and never touches the device. It verifies the
 # image and prints the command to run, or refuses and says why.
 #
-# Usage: ./preflight_boot_check.sh [--allow-preflight] [--allow-full] [--allow-selftest] [--allow-attr-normal-nc]
+# Usage: ./preflight_boot_check.sh [--allow-preflight] [--allow-full] [--allow-selftest] [--allow-attr-normal-nc] [--allow-hw-watchdog-selftest]
 
 set -euo pipefail
 
@@ -24,6 +24,7 @@ ALLOW_PREFLIGHT=0
 ALLOW_FULL=0
 ALLOW_SELFTEST=0
 ALLOW_ATTR=0
+ALLOW_HW_SELFTEST=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -31,6 +32,7 @@ for arg in "$@"; do
     --allow-full)        ALLOW_FULL=1 ;;
     --allow-selftest)    ALLOW_SELFTEST=1 ;;
     --allow-attr-normal-nc) ALLOW_ATTR=1 ;;
+    --allow-hw-watchdog-selftest) ALLOW_HW_SELFTEST=1 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -54,6 +56,8 @@ MODE=$(value_of STAGE90_HANDOFF_MODE)
 SELFTEST=$(value_of STAGE90_DEADMAN_SELFTEST)
 DEADMAN=$(value_of STAGE90_DEADMAN_ENABLE)
 LADDER=$(value_of STAGE90_ENTRY_LADDER_LEVEL)
+HWWDT=$(value_of STAGE90_HW_WATCHDOG)
+HWSELFTEST=$(value_of STAGE90_HW_WATCHDOG_SELFTEST)
 
 [[ -n $MODE ]] || fail "STAGE90_HANDOFF_MODE missing from $CONFIG"
 
@@ -74,12 +78,39 @@ echo "no storage symbols in the payload"
 
 echo
 echo "== recovery net =="
+# Two independent nets. The hardware watchdog is the one that matters, because it does
+# not depend on the GIC, the timer, IRQ delivery or IRQs being unmasked - any of which
+# may be exactly what broke in a given hang.
+case "$HWWDT" in
+  STAGE90_HW_WATCHDOG_ARMED|1|1u)
+    echo "hardware watchdog: ARMED. The SoC resets itself if the payload stops making"
+    echo "                   progress, whatever the CPU is doing - and platform_reboot()"
+    echo "                   forces a bite so the reboot does not depend on PS_HOLD."
+    ;;
+  STAGE90_HW_WATCHDOG_DISABLED|0|0u)
+    echo "WARNING: STAGE90_HW_WATCHDOG=disabled - there is NO hardware reset net."
+    echo "         A hang that the software dead-man cannot see will need a manual"
+    echo "         power-button hold."
+    ;;
+  *)
+    fail "unrecognised STAGE90_HW_WATCHDOG: $HWWDT"
+    ;;
+esac
+
 if [[ $DEADMAN != "1u" ]]; then
-  echo "WARNING: STAGE90_DEADMAN_ENABLE=$DEADMAN - the payload runs with NO recovery net."
-  echo "         A hang will need a manual power-button hold."
+  echo "WARNING: STAGE90_DEADMAN_ENABLE=$DEADMAN - the software dead-man net is off."
 else
-  echo "dead-man reset is enabled: a non-progressing payload dumps and reboots on its own."
+  echo "software dead-man: armed (60s), as a second net."
 fi
+
+case "$HWSELFTEST" in 1|1u)
+  [[ $ALLOW_HW_SELFTEST -eq 1 ]] || fail "the hardware-watchdog SELFTEST spins forever on purpose; needs --allow-hw-watchdog-selftest"
+  echo "HW WATCHDOG SELFTEST: allowed. The payload will NOT reach platform_reboot();"
+  echo "          the hardware countdown is the only route back to Android (~30s)."
+  echo "          This is the run to do FIRST: once it passes, every later run has a"
+  echo "          guaranteed reset and stops costing a manual power cycle."
+  ;;
+esac
 
 echo
 echo "== mode policy =="

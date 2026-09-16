@@ -174,13 +174,27 @@ failed, and finding out why reshaped this phase.
   the loader preflight and everything after it — and re-arming it after the handoff returns.
   `STAGE90_DEADMAN_SELFTEST=1` spins forever after arming, making the dead-man the only route
   back to Android: the direct hardware proof, safe by construction.
+- **But the dead-man has the same blind spot as the thing it protects.** It needs the GIC, the
+  timer, IRQ delivery and the vector table, and it needs IRQs unmasked. If a hang is caused by
+  any of those, it cannot fire — and a hang that leaves IRQs masked is not a contrived case.
+  So the payload also arms the **MSM8974 hardware watchdog**
+  ([`stages/stage90/hw_watchdog.c`](../../stages/stage90/hw_watchdog.c), on by default, 30 s):
+  a hardware counter with no software involvement, whose base address and register
+  programming come from the cancro device tree and the cancro kernel's own
+  `msm_watchdog_v2.c`, and which is the same mechanism Android relies on to produce a
+  readable `/proc/last_kmsg` after a panic. `platform_reboot()` also forces an immediate bite
+  after its PS_HOLD write, so the reboot no longer depends on the PMIC.
 - `STAGE90_HANDOFF_MODE` now defaults to `HARD_SKIP`, and
   `stages/stage90/preflight_boot_check.sh` refuses to hand over a boot command for an image
   built with a mode the caller has not explicitly allowed.
 
 Remaining in this phase:
 
-- **Re-establish the known-good baseline.** Boot the default build (`HARD_SKIP`, dead-man
+- **Prove the hardware watchdog first.** `STAGE90_HW_WATCHDOG_SELFTEST=1` arms the SoC's own
+  counter and spins forever; the device must come back to Android unattended (~30 s). Until
+  this passes, every run below risks another manual power cycle — so it is the highest-value
+  run available, and the 2026-09-16 hang is precisely the case it exists for.
+- **Re-establish the known-good baseline.** Boot the default build (`HARD_SKIP`, both nets
   armed) and confirm it completes and reboots on its own.
 - **Prove the dead-man** with `STAGE90_DEADMAN_SELFTEST=1` and confirm the device comes back
   to Android unattended (~60 s, the dead-man budget), then read the PC ring out of
@@ -203,18 +217,24 @@ each of these runs buys a lot for very little risk.
 ```bash
 cd stages/stage90
 
-# 1. Baseline + Phase 1 exclusives baseline, one safe boot.
+# 1. Prove the hardware watchdog FIRST. It arms the SoC's own counter and then spins
+#    forever, so nothing but the hardware countdown can bring the phone back (~30s).
+#    Do this one before anything else: once it passes, every later run has a
+#    guaranteed reset and stops costing a manual power cycle.
+STAGE90_EXTRA_CFLAGS='-DSTAGE90_HW_WATCHDOG_SELFTEST=1' ./build.sh
+./preflight_boot_check.sh --allow-hw-watchdog-selftest
+
+# 2. Baseline + Phase 1 exclusives baseline, one safe boot with both nets armed.
 #    Validates the repaired ladder end to end, the F-AM1 alias fix, and records what
 #    LDREX/STREX do under the current strongly-ordered mapping.
 STAGE90_EXTRA_CFLAGS='-DSTAGE90_EXCLUSIVE_PROBE=1' ./build.sh
 ./preflight_boot_check.sh
-sudo adb -s 4a2fe00b reboot bootloader && sudo fastboot boot $PWD/../../out/stage90/stage90-qcdt.img
 
-# 2. Prove the recovery net itself: the payload spins forever and only the dead-man
-#    can bring it back.
-STAGE90_EXTRA_CFLAGS='-DSTAGE90_DEADMAN_SELFTEST=1' ./build.sh
+# 3. Prove the software dead-man separately (build without the hardware net so a
+#    success is attributable to the dead-man alone).
+STAGE90_EXTRA_CFLAGS='-DSTAGE90_DEADMAN_SELFTEST=1 -DSTAGE90_HW_WATCHDOG=0' ./build.sh
 ./preflight_boot_check.sh --allow-selftest
-# 3. Only then, step the handoff mode up: PREFLIGHT_WATCHDOG_ONLY, then FULL.
+# 4. Only then, step the handoff mode up: PREFLIGHT_WATCHDOG_ONLY, then FULL.
 ```
 
 `STAGE90_EXTRA_CFLAGS` is how to build a variant without editing `stage90.h`; the switches

@@ -149,14 +149,40 @@ interval is coarse (100 ms, ~10 interrupts/second) for the same reason: the hand
 its own finer 500 µs interval when it needs PC resolution, and the dead-man only needs to
 know the payload stopped moving.
 
-This matters because the earlier stages' `platform_reboot()` → PS_HOLD path is *proven* —
-experiments 03–78 all returned to Android automatically ~25–30 s after `fastboot boot`, with
-the ADB transport id advancing. What was missing was coverage: the sampling watchdog only ever
-armed *inside* the handoff, so the DT build, `boot_args`, and the whole `arm_init` ladder ran
-with no recovery at all. `STAGE90_DEADMAN_SELFTEST=1` spins forever right after arming, making
-the dead-man the only route back to Android — the direct hardware proof of the recovery path,
-and safe by construction (if it works the device returns on its own; if it does not, the state
-is the same as any other hang).
+`STAGE90_DEADMAN_SELFTEST=1` spins forever right after arming, making the dead-man the only
+route back to Android.
+
+### Hardware watchdog — the last-resort reset
+
+The dead-man depends on the GIC, the ARM timer, IRQ delivery and the vector table all
+working, and on IRQs being unmasked. **If a hang happens with any of those broken, or with
+IRQs masked, it cannot fire** — which is exactly the failure the 2026-09-16 run produced.
+
+So the payload now also arms the **MSM8974's own hardware watchdog**
+([`stages/stage90/hw_watchdog.c`](stages/stage90/hw_watchdog.c), `STAGE90_HW_WATCHDOG`,
+**on by default**). It is a hardware counter: when it expires the SoC resets whatever the CPU
+is doing, with no software involvement at all. Nothing here is guessed — the base address
+`0xf9017000` is from the cancro device tree (`arch/arm/boot/dts/msm8974.dtsi`,
+`qcom,wdt@f9017000`), and the register offsets, clock rate and programming order are from that
+kernel's own driver (`arch/arm/mach-msm/msm_watchdog_v2.c`). It is also the mechanism Android
+itself relies on: a kernel panic on this phone ends in a watchdog bite, and that bite is what
+produces a readable `/proc/last_kmsg`. The path being relied on is therefore the device's
+normal crash path, not an invention.
+
+It is used two ways:
+
+| | |
+| --- | --- |
+| **Arm** | At the top of `stage90_main`, before anything that can hang. 30 s countdown; the payload's normal run is ~1 s, so a good boot never sees it. |
+| **Bite now** | `platform_reboot()` forces an immediate bite *after* its PS_HOLD write, so the reboot no longer depends on the PMIC. If PS_HOLD did not take effect — one reading of the 2026-09-16 hang — the SoC still resets. |
+
+MMIO only, no new mapping (`0xf9017000` is inside the already-mapped `0xf9000000` MMIO
+section, so it works under both the identity table and the candidate L1), and the register
+state is lost on power cycle. The armed state, the bark/bite ticks written and the readback
+are all logged, so one run tells you whether the registers are where the device tree says
+they are. `STAGE90_HW_WATCHDOG=0` builds without it; `STAGE90_HW_WATCHDOG_SELFTEST=1` arms it
+and then spins forever, making the hardware countdown the only route back — which is worth
+doing **first**, because once it is proven every later run stops costing a manual power cycle.
 
 None of these modes is a shipped feature; they exist to find the failure.
 

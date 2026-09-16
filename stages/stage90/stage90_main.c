@@ -752,8 +752,19 @@ void platform_reboot(void)
     log_puts("MI4IOS6_STAGE90 platform_reboot writing PS_HOLD=0\n");
     *ps_hold = 0;
     __asm__ volatile ("dsb sy" ::: "memory");
-    log_puts("MI4IOS6_STAGE90 platform_reboot PS_HOLD write returned; entering WFE loop\n");
+    log_puts("MI4IOS6_STAGE90 platform_reboot PS_HOLD write returned\n");
 
+#if STAGE90_HW_WATCHDOG == STAGE90_HW_WATCHDOG_ARMED
+    /*
+     * Second, independent reset path. PS_HOLD is the PMIC; the watchdog bite is the
+     * SoC's own counter. If the PS_HOLD write did not take effect - one reading of
+     * the 2026-09-16 hang - this still resets the phone within a tick. If PS_HOLD did
+     * work, the machine is already powering down and the bite is harmless.
+     */
+    stage90_hw_watchdog_bite_now();
+#endif
+
+    log_puts("MI4IOS6_STAGE90 platform_reboot entering WFE loop\n");
     for (;;) {
         __asm__ volatile ("wfe");
     }
@@ -835,12 +846,40 @@ void stage90_main(void)
     log_kv32("stage90_image_end", (uint32_t)(uintptr_t)__stage90_image_end);
     log_kv32("stage90_build_handoff_mode", STAGE90_HANDOFF_MODE);
     log_kv32("stage90_build_entry_ladder_level", STAGE90_ENTRY_LADDER_LEVEL);
+    log_kv32("stage90_build_hw_watchdog", STAGE90_HW_WATCHDOG);
+
+    /*
+     * Arm the hardware watchdog first, before anything that can hang. It needs only
+     * the already-mapped MMIO window, not the GIC or the timer, so this is the
+     * earliest point at which it can be done and the earliest point at which the
+     * payload has a guaranteed way out. Everything after this line - the DT build, the
+     * whole arm_init ladder, the handoff - is covered by hardware rather than by
+     * software that might itself be what broke.
+     */
+#if STAGE90_HW_WATCHDOG == STAGE90_HW_WATCHDOG_ARMED
+    (void)stage90_hw_watchdog_arm(STAGE90_HW_WATCHDOG_TIMEOUT_S);
+#endif
+
+#if STAGE90_HW_WATCHDOG_SELFTEST
+    /*
+     * Hardware-watchdog self-test: the software dead-man is deliberately NOT armed,
+     * so nothing but the SoC's own countdown can bring the phone back. If it returns
+     * to Android on its own after STAGE90_HW_WATCHDOG_TIMEOUT_S, the last-resort reset
+     * is proven - and every later run stops costing a manual power cycle.
+     */
+    log_puts("MI4IOS6_STAGE90 hw_watchdog SELFTEST: spinning; only the hardware countdown can recover\n");
+    for (;;) {
+        __asm__ volatile ("nop" ::: "memory");
+    }
+#endif
 
 #if STAGE90_DEADMAN_SELFTEST
     /*
-     * Dead-man self-test: arm, then prove the recovery path end to end. Nothing
-     * after this point runs - the only way back to Android is the armed dead-man
-     * firing, dumping the interrupted PC, and rebooting through PS_HOLD.
+     * Dead-man self-test: arm, then prove the software recovery path end to end.
+     * Nothing after this point runs - the only way back to Android is the armed
+     * dead-man firing, dumping the interrupted PC, and rebooting through PS_HOLD.
+     * The hardware watchdog is already armed above and is the second net; to attribute
+     * a success to the software dead-man alone, build with STAGE90_HW_WATCHDOG=0.
      */
     (void)stage90_arm_deadman_reset();
     log_puts("MI4IOS6_STAGE90 deadman SELFTEST: spinning without any reset call; only the dead-man can recover\n");

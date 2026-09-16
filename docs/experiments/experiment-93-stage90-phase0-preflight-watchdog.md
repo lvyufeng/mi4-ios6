@@ -97,6 +97,29 @@ Reading the reset path to design the fix turned up three things worth recording:
    Left as-is here (fixing dead code is not this change); noted so nobody wires it
    into the ladder without correcting the base first.
 
+## A second recovery net, added afterwards
+
+Reading the reset path further turned up a gap in the dead-man itself. It needs the GIC, the
+ARM timer, IRQ delivery and the vector table all working, and it needs IRQs unmasked. A hang
+caused by any of those — or one that leaves IRQs masked — is exactly the case it cannot
+handle, and "the thing that protects the payload broke with the payload" is not a contrived
+scenario; it is a plausible reading of this very run.
+
+So the payload also arms the **MSM8974 hardware watchdog** (`stages/stage90/hw_watchdog.c`,
+on by default, 30 s): a hardware counter with no software involvement at all. The address and
+register programming are taken from the cancro device tree (`msm8974.dtsi`,
+`qcom,wdt@f9017000`) and the cancro kernel's own `msm_watchdog_v2.c` — not guessed — and it is
+the same mechanism Android uses to produce a readable `last_kmsg` after a panic, so the
+"bite -> reset -> last_kmsg" path is this device's normal crash path rather than an
+experiment. `platform_reboot()` also forces an immediate bite after its PS_HOLD write, so the
+reboot no longer depends on the PMIC write landing — which matters, because "PS_HOLD did not
+take effect" is one of the two readings of this hang, and it is the reading in which nothing
+at all would have recovered the phone.
+
+`STAGE90_HW_WATCHDOG_SELFTEST=1` arms it and spins forever, making the hardware countdown the
+only route back. That is worth doing before anything else, because once it passes every later
+run stops costing a manual power cycle.
+
 ## What was changed in response
 
 - `STAGE90_HANDOFF_MODE` now defaults to `HARD_SKIP`; stepping up to

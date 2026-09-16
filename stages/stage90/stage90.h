@@ -3993,6 +3993,58 @@ struct stage90_xnu_macho_loader_result {
 #endif
 
 /*
+ * MSM8974 hardware watchdog - the last-resort reset. See hw_watchdog.c for the
+ * provenance of the address and registers (the cancro device tree and the cancro
+ * kernel's own msm_watchdog_v2.c) and for why this is not speculative.
+ *
+ * Armed by default. The user's standing constraint is that the device must never be
+ * left hard-hung, and this is the only mechanism that survives a hang the software
+ * dead-man cannot see - one with IRQs masked, or with the GIC, timer or vector table
+ * broken. It is MMIO-only, needs no new mapping (0xf9017000 is inside the already-
+ * mapped 0xf9000000 MMIO section), and its state is lost on power cycle.
+ *
+ * The timeout is far longer than a healthy payload run (~1s), so a good boot never
+ * sees it; and the failure mode of a mis-timed watchdog is a reset to Android, not a
+ * brick. Set STAGE90_HW_WATCHDOG=0 to build without it.
+ */
+#define STAGE90_HW_WATCHDOG_DISABLED 0u
+#define STAGE90_HW_WATCHDOG_ARMED    1u
+
+#if !defined(STAGE90_HW_WATCHDOG)
+#define STAGE90_HW_WATCHDOG STAGE90_HW_WATCHDOG_ARMED
+#endif
+
+#if (STAGE90_HW_WATCHDOG != STAGE90_HW_WATCHDOG_DISABLED) && \
+    (STAGE90_HW_WATCHDOG != STAGE90_HW_WATCHDOG_ARMED)
+#error "STAGE90_HW_WATCHDOG must be STAGE90_HW_WATCHDOG_DISABLED or _ARMED"
+#endif
+
+/*
+ * How long the payload may run before the hardware watchdog resets the SoC. The
+ * normal payload run is about a second; 30s is chosen to be unmistakably longer than
+ * any healthy run while still being far shorter than the manual power-cycle it
+ * replaces. Note this is the *outer* bound: the software dead-man (60s) is
+ * deliberately longer, because the hardware net exists precisely for the case where
+ * the software one cannot fire.
+ */
+#define STAGE90_HW_WATCHDOG_TIMEOUT_S 30u
+
+/*
+ * Self-test for the hardware watchdog alone: arm it, do NOT arm the software
+ * dead-man, then spin forever. The only way back to Android is the watchdog's own
+ * countdown resetting the SoC. This is worth running before anything else, because
+ * once it is proven every later run has a guaranteed reset and stops costing a manual
+ * power cycle.
+ */
+#if !defined(STAGE90_HW_WATCHDOG_SELFTEST)
+#define STAGE90_HW_WATCHDOG_SELFTEST 0u
+#endif
+
+#if STAGE90_HW_WATCHDOG_SELFTEST && (STAGE90_HW_WATCHDOG != STAGE90_HW_WATCHDOG_ARMED)
+#error "STAGE90_HW_WATCHDOG_SELFTEST needs STAGE90_HW_WATCHDOG=STAGE90_HW_WATCHDOG_ARMED"
+#endif
+
+/*
  * Exclusive-monitor probe (roadmap Phase 1 baseline).
  *
  * ARMv7 defines LDREX/STREX only on Normal memory, and every mapping in this
@@ -6220,6 +6272,33 @@ void stage90_dump_pc_samples(void);
  */
 int stage90_arm_deadman_reset(void);
 uint32_t stage90_deadman_armed(void);
+
+/*
+ * MSM8974 hardware watchdog. `arm` starts a countdown after which the SoC resets
+ * itself whatever the CPU is doing; `bite_now` forces that reset immediately and is
+ * called from platform_reboot() so the reboot does not depend on the PS_HOLD write
+ * landing. See hw_watchdog.c for provenance and safety notes.
+ */
+struct stage90_hw_watchdog_result {
+    uint32_t enabled;
+    uint32_t timeout_s;
+    uint32_t base;
+    uint32_t sts_before;
+    uint32_t en_before;
+    uint32_t bark_ticks;
+    uint32_t bite_ticks;
+    uint32_t en_after;
+    uint32_t bark_after;
+    uint32_t bite_after;
+    uint32_t sts_after;
+    uint32_t readback_ok;
+    uint32_t checksum;
+};
+
+int stage90_hw_watchdog_arm(uint32_t timeout_s);
+void stage90_hw_watchdog_bite_now(void);
+void stage90_hw_watchdog_log(const struct stage90_hw_watchdog_result *r);
+const struct stage90_hw_watchdog_result *stage90_hw_watchdog_result(void);
 
 /*
  * Exclusive-monitor probe result. `status` says whether the probe ran and

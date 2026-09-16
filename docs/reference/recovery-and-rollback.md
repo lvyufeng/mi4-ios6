@@ -136,7 +136,8 @@ If it fails, reboot/power-cycle. Do not immediately flash.
 For a Stage payload, gate the run first:
 
 ```bash
-cd stages/stage90 && ./build.sh && ./preflight_boot_check.sh [--allow-preflight|--allow-full|--allow-selftest]
+cd stages/stage90 && ./build.sh && ./preflight_boot_check.sh \
+    [--allow-preflight|--allow-full|--allow-selftest|--allow-attr-normal-nc|--allow-hw-watchdog-selftest]
 ```
 
 The gate verifies the image against `SHA256SUMS.txt`, checks the payload references no
@@ -187,13 +188,32 @@ Recovery:
    earlier experiments recovered 100–180 KB of payload log this way.
 
 5. If `/proc/last_kmsg` has no `MI4IOS6_STAGE90` lines from the run, the power cycle
-   reinitialised DRAM and the log is gone. That loss is exactly what the payload's dead-man
-   reset exists to prevent — see below — and it means the run produced no information at all.
+   reinitialised DRAM and the log is gone. That loss is exactly what the payload's recovery
+   nets exist to prevent — see below — and it means the run produced no information at all.
 
-The payload's **dead-man reset** is designed to make this procedure unnecessary: it is armed
-before the loader preflight, and if the payload stops making progress for 10 s the timer IRQ
-handler dumps the interrupted PC ring and reboots through PS_HOLD, returning the phone to
-Android unattended. When it fires, `last_kmsg` contains:
+The payload has **two** recovery nets designed to make this procedure unnecessary, and they
+fail in different ways, which is why there are two:
+
+- The **MSM8974 hardware watchdog** (`stages/stage90/hw_watchdog.c`, on by default, 30 s) is
+  armed at the top of `stage90_main`. It is a hardware counter — no GIC, no timer, no IRQ
+  delivery, no vector table, no unmasked IRQs — so it fires no matter what the CPU is doing.
+  `platform_reboot()` also forces an immediate bite after its PS_HOLD write, so a reboot does
+  not depend on the PMIC write landing.
+- The **software dead-man** (60 s) is armed at the end of `kernel_entry`'s GIC validation: the
+  timer IRQ handler dumps the interrupted PC ring and reboots through PS_HOLD.
+
+The hardware net is the faster and stronger of the two and is the one to rely on. Its
+register programming comes from the cancro device tree and the cancro kernel's own
+`msm_watchdog_v2.c`, and it is the same mechanism Android's panic path uses to produce a
+readable `last_kmsg` — so "bite → reset → last_kmsg" is the device's normal crash path.
+
+When the hardware watchdog is armed, `last_kmsg` contains:
+
+```text
+stage90 hw_watchdog: armed; the SoC will reset itself if the payload stops
+```
+
+and when the software dead-man is the one that fired:
 
 ```text
 pc_samples: begin
@@ -203,9 +223,12 @@ stage90 pc-sampling watchdog: rebooting after sample dump
 MI4IOS6_STAGE90 platform_reboot entered
 ```
 
-Absence of those lines after a hang means the dead-man did not fire, which is itself the
-finding for that run. `STAGE90_DEADMAN_SELFTEST=1` tests the mechanism directly: it arms the
-dead-man and then spins forever, so the only route back to Android is the dead-man firing.
+Absence of all of that after a hang means neither net fired, which is itself the finding for
+that run. Both can be tested directly, and the hardware one should be tested first:
+`STAGE90_HW_WATCHDOG_SELFTEST=1` arms the hardware counter and spins forever (~30 s to
+recovery), while `STAGE90_DEADMAN_SELFTEST=1 -DSTAGE90_HW_WATCHDOG=0` does the same for the
+software dead-man alone, so a success is attributable to one mechanism rather than to
+"one of them worked".
 
 ### 5. Persistent flash only with explicit approval
 
