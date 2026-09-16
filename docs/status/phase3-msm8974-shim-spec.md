@@ -163,14 +163,29 @@ LEXT(fleh_fiq_generic)
    The first instruction confirms the `int_address`/`int_value` pairing above: the EOI *is* a
    write of `int_value` to `int_address`, and it is the handler's first act.
 
-   The rest is a **software-maintained timebase** — TBL incremented by one per tick — which is
-   the older ARM scheme, and it sits in tension with `__ARM_TIME_TIMEBASE_ONLY__` being
-   defined, under which `ml_get_timebase` reads the real `CNTPCT` instead
-   (`machine_routines_asm.s:979`). Resolving that tension — which timebase is authoritative,
-   and therefore whether the timer must tick at a *fixed* rate for the timebase to be correct
-   — is the next reading task, and it is a larger question than it looks: a free-running
-   `CNTPCT` tolerates an irregular interrupt, whereas an incremented TBL requires a periodic
-   one, and those imply different timer programming in the shim.
+   The rest of the generic handler is a **software-maintained timebase** — TBL incremented by
+   one per tick — which is the older ARM scheme. That looked like a tension with
+   `__ARM_TIME_TIMEBASE_ONLY__`, under which `ml_get_timebase` reads the real `CNTPCT`
+   (`machine_routines_asm.s:979`); reading `rtclock.c` resolves it, and the resolution is
+   reassuring.
+
+   **It is not a tension, because with the real counter available the software TBL is dead
+   code.** Everything that wants a timestamp goes through `ml_get_timebase`, whose
+   `__ARM_TIME__ || __ARM_TIME_TIMEBASE_ONLY__` branch reads `CNTPCT` directly. The
+   software-TBL branch exists for SoCs *without* the hardware counter; on this build the
+   handler's TBL/decrementer bookkeeping maintains values nothing reads.
+
+   That matters in three ways:
+
+   1. **The shim can use XNU's generic handler as-is.** It needs `fleh_fiq_generic` to exist
+      and be installed, not to be reimplemented per-platform.
+   2. **The timer does not have to tick at a fixed rate for the timebase to be correct.** A
+      free-running `CNTPCT` tolerates an irregular interrupt; only an incremented TBL would
+      require periodicity. So the shim can program the timer for whatever interval suits it.
+      That removes a constraint that would otherwise have shaped the timer code.
+   3. **`tbd_get_decrementer`/`tbd_set_decrementer` still matter**, because they are what
+      `fleh_fiq_generic` uses to re-arm — `cpu_timebase_init` copies all three funcs
+      unconditionally. The shim supplies real implementations, not the generic NULLs.
 
 `pe_arm_init_timer`'s default is `struct tbd_ops generic_funcs = {&fleh_fiq_generic, NULL,
 NULL}` (`pe_identify_machine.c:589`) — note that both decrementer operations are NULL there,
@@ -253,7 +268,10 @@ not on pure hardware.
 
 ## 5. What cannot be settled from the host
 
-Stated plainly, because this document is a specification and not evidence:
+Stated plainly, because this document is a specification and not evidence. Two entries that
+were here in the first draft have been *removed* by reading further — §2.2's
+`ml_init_timebase` question and §2.3's timebase question — which is the intended direction
+for this section:
 
 - **Resolved since the first draft:** `ml_init_timebase` was read (see §2.2). It is a pure
   registration function with no Apple timer assumptions — the literal risk of "the function
@@ -264,9 +282,9 @@ Stated plainly, because this document is a specification and not evidence:
   whether the hardware and TrustZone permit it. FIQ on MSM8974 interacts with the secure
   world, and the payload has never taken one — every interrupt it has driven is IRQ. This
   half remains open, and it is the largest single risk in Phase 3.
-- **Which timebase is authoritative.** `__ARM_TIME_TIMEBASE_ONLY__` makes `ml_get_timebase`
-  read the real `CNTPCT`, while `fleh_fiq_generic` maintains a software TBL incremented per
-  tick. Those imply different timer programming (free-running vs periodic). See §2.3.
+- ~~Which timebase is authoritative.~~ **Resolved in §2.3:** the software TBL is dead code
+  on this build, `CNTPCT` is what everything reads, and the timer therefore need not be
+  periodic.
 - **Anything about SMP.** `ml_processor_register`, IPIs and the CPU startup path are all
   Apple-shaped and untouched here.
 

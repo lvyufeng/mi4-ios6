@@ -522,10 +522,14 @@ the hardware-specific values explicit before code is written. Two findings that 
   `fleh_fiq_generic` shows the handler's contract, including that the EOI is literally a
   write of `int_value` to `int_address`, and that the generic `tbd_ops` leaves both
   decrementer callbacks NULL.
-- **An open tension worth naming:** `fleh_fiq_generic` maintains a *software* timebase
-  (TBL incremented per tick) while `__ARM_TIME_TIMEBASE_ONLY__` makes `ml_get_timebase` read
-  the real `CNTPCT`. Those imply different timer programming — periodic versus free-running —
-  so which is authoritative is the next reading task, not a detail.
+- **The timebase tension resolved, and favourably.** `fleh_fiq_generic` maintains a software
+  timebase (TBL incremented per tick) while `__ARM_TIME_TIMEBASE_ONLY__` makes
+  `ml_get_timebase` read the real `CNTPCT`. Reading `rtclock.c` settles it: everything that
+  wants a timestamp goes through `ml_get_timebase`, so **the software TBL is dead code on this
+  build** and the generic handler is usable as-is. Consequence: the timer need *not* tick
+  periodically for the timebase to be correct, which removes a constraint that would otherwise
+  have shaped the shim's timer code. The decrementer callbacks still matter — they are how the
+  handler re-arms — but `fleh_fiq_generic` itself does not need reimplementing.
 
 **Exit criteria:** boot_args and DT dumped from the device and accepted by 4570's readers;
 `TTBR0`/`TTBR1`/`TTBCR`/`SCTLR` verified correct after 4570 code has written them. Still open:
