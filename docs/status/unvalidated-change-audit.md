@@ -15,6 +15,10 @@ boot does.
 and it overstates what one run has to prove. Counting against the actual compiled switches
 (`out/stage90/stage90-build-config.txt`, which `build.sh` writes from the preprocessor):
 
+Each row below is verified against the built image, not against the header — the point of
+the table is what the *binary* does, and a switch that is off in the header but on in the
+build would make the table a lie. The right-hand column of evidence is what was checked:
+
 | Change | Switch | In a default run |
 | --- | --- | --- |
 | Handoff harness repair (mode enum, genuine ladder, entry guard) | `STAGE90_HANDOFF_MODE` | **live** |
@@ -27,8 +31,16 @@ and it overstates what one run has to prove. Counting against the actual compile
 | Fault injection | `STAGE90_HANDOFF_FAULT_INJECT_VA=0u` | **inert** |
 
 So a default `HARD_SKIP` run exercises **five** deltas, not eight — and three of the pending
-changes provably cannot affect its outcome (Phase 1a is inert, verified to emit zero Normal
-descriptors; the other two are compile-time off). That is worth knowing before the run,
+changes provably cannot affect its outcome. Each of those three was checked in the built
+image rather than trusted:
+
+| Inert change | How it was confirmed off |
+| --- | --- |
+| Phase 1a (`SO_ONLY`) | `tools/count_descriptors.py --diff` against a `NORMAL_NC` build: the NC values `0x1c02`/`0x0452` go 0 → 30 and 0 → 1, so the switch genuinely rewrites 30–31 sites, and `SO_ONLY` contains none of them |
+| Conforming `boot_args` | `objdump --disassemble=kernel_entry` contains 0 calls to `xnu_boot_args_prepare` with the switch off, 1 with it on |
+| Fault injection | the image contains 0 occurrences of the `FAULT INJECTION` log strings by default, 2 when enabled |
+
+That is the difference between "the header says off" and "this build does nothing". That is worth knowing before the run,
 because it means a failure has five candidate causes rather than eight, and a *success*
 says nothing at all about the three inert ones — they still need their own runs later.
 
