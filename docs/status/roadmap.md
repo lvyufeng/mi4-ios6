@@ -625,9 +625,47 @@ looks like the former (it exists to hold `pal_mlock`/`pal_munlock`-style debug h
 honest statement is that no one has counted, and the count is the thing that decides whether
 Phase 4 is a weeks-scale or months-scale piece of work.
 
-**So the first Phase 4 task is a measurement, not a build:** extend the shim set iteratively
-against `osfmk/arm/` until one object compiles, and count what it took. That is bounded, needs
-no device, and turns the unknown above into a number.
+**So the first Phase 4 task is a measurement, not a build.** Done, and the number is this:
+
+Sweeping every `osfmk/arm/*.c` with `-fsyntax-only`, using the project's toolchain and its own
+existing `shims/` include set:
+
+| | |
+| --- | --- |
+| `.c` files in `osfmk/arm` | 32 |
+| compile clean with the existing 16 shims | **2** |
+| distinct missing headers blocking the other 30 | **8** |
+
+The eight, and what each actually needs:
+
+| Header | Blocking | Kind |
+| --- | --- | --- |
+| `sys/_symbol_aliasing.h` | 17 files | build-generated; **empty stub is correct** |
+| `sys/_posix_availability.h` | 16 files | build-generated; minimal stub |
+| `sys/_pthread/_pthread_types.h` | 16 files | **needs real content** — the `__darwin_pthread_*` types it names are also absent from `bsd/sys/_types.h`, and the whole `bsd/sys/_pthread/` directory is missing from the tarball |
+| `mach_assert.h` | 5 files | absent entirely |
+| `mach_ldebug.h` | 3 files | absent entirely |
+| `mach_kdp.h` | 3 files | absent entirely |
+| `mach/vm_page_size.h` | 2 files | exists, but at `libsyscall/mach/mach/vm_page_size.h` — a path shim |
+| `mach_debug.h` | 1 file | exists, but at `osfmk/mach_debug/mach_debug.h` — a path shim |
+
+**Two of the eight were verified by iterating, not by inspection.** Adding an empty
+`_symbol_aliasing.h` moved the sweep's dominant blocker to `_posix_availability.h` (16 files);
+adding that moved it to the `_pthread_types` chain. So the two build-generated headers are
+genuinely empty-stub-able, and the third is genuinely not — its names resolve to types that
+are also missing, so it needs the real definitions rather than a placeholder.
+
+**What the number means.** Eight headers, of which two are empty stubs, two are path shims,
+one needs type definitions, and three need writing (`mach_assert`, `mach_ldebug`, `mach_kdp`
+— chiefly assertion and debug macros). That is a bounded, enumerable list, not an open-ended
+one, and it is the same order of magnitude as the 16 shims already written for five pexpert
+objects.
+
+The extrapolation is the honest caveat: this is the **ARM layer only**. A full `mach_kernel`
+would need the whole `bsd/` and `libkern/` dependency closure, which nobody has swept. So
+Phase 4's cost is not "8 headers" — it is "8 headers for the first layer, times an unknown
+number of layers." But the first layer is now measured rather than guessed, and the method
+(compile, read the next missing header, add, repeat) is mechanical.
 
 ### Phase 3 — specification written
 
