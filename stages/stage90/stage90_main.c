@@ -33,8 +33,8 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
 
     apple_dt_begin(b, g_apple_dt, sizeof(g_apple_dt));
 
-    /* root: 4 properties, 19 children */
-    apple_dt_node_begin(b, 4, 19);
+    /* root: 4 properties, 20 children */
+    apple_dt_node_begin(b, 4, 20);
     apple_dt_prop_str(b, "name", "/");
     apple_dt_prop_str(b, "compatible", "qcom,msm8974-xnu-stage90");
     apple_dt_prop_str(b, "model", "Xiaomi Mi 4 cancro Stage84");
@@ -666,14 +666,44 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
     for (uint32_t cpu = 0; cpu < 4; cpu++) {
         char name[] = "cpu@0";
         name[4] = (char)('0' + cpu);
-        apple_dt_node_begin(b, 6, 0);
+        apple_dt_node_begin(b, 7, 0);
         apple_dt_prop_str(b, "name", name);
         apple_dt_prop_str(b, "device_type", "cpu");
         apple_dt_prop_str(b, "compatible", "qcom,krait");
         apple_dt_prop_u32(b, "reg", cpu);
         apple_dt_prop_u32(b, "clock-frequency", 2265600000u);
         apple_dt_prop_u32(b, "timebase-frequency", 19200000u);
+        /*
+         * `state` is not decorative. XNU's pe_identify_machine reads it and skips any
+         * cpu node whose state is not "running" (pe_identify_machine.c:117), so
+         * without it every CPU's timebase-frequency is ignored; and ml_parse_cpu_topology
+         * panics "unable to retrieve state for cpu 0" under MACH_ASSERT
+         * (machine_routines.c:474). tools/xnu_dt_requirements.py checks for it.
+         */
+        apple_dt_prop_str(b, "state", "running");
     }
+
+    /*
+     * /arm-io: the node XNU's ARM platform code locates the SoC through.
+     * pe_arm_get_soc_base_phys() finds it by name and takes gPESoCBasePhys from
+     * ranges[1] (pe_identify_machine.c:232-237); it returns 0 if the node is absent,
+     * and pe_arm_map_interrupt_controller then returns early (:541) so neither the
+     * interrupt controller nor the timer is ever mapped. The node is required, not
+     * cosmetic.
+     *
+     * Note the value model, which is Apple's and not Linux's: XNU computes
+     * `gPicBase = soc_phys + reg[0]`, i.e. it expects a node's `reg` to be an offset
+     * from the SoC base. The /interrupt-controller and /timer nodes below carry
+     * absolute addresses, because that is what the project's own iokit contract
+     * selftests read. Reconciling the two is a Phase 3 decision (it is also the point
+     * at which Apple's pe_arm_map_interrupt_controller would be replaced by an MSM8974
+     * shim), so it is recorded rather than guessed at here.
+     */
+    apple_dt_node_begin(b, 4, 0);
+    apple_dt_prop_str(b, "name", "arm-io");
+    apple_dt_prop_str(b, "device_type", "soc");
+    apple_dt_prop_u32_array(b, "ranges", io_ranges, ARRAY_SIZE(io_ranges));
+    apple_dt_prop_u32(b, "chip-revision", 0);
 
     /* /msm8974-io: Apple-XNU-like container for platform MMIO. */
     apple_dt_node_begin(b, 5, 0);

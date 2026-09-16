@@ -28,6 +28,16 @@ else
   echo "warning: external/xnu-4570.1.46 absent; skipping the boot_args ABI check" >&2
 fi
 
+# The device tree has to satisfy the lookups XNU's ARM platform code makes, and each
+# node header's nProperties has to match what the builder emits. Both fail silently on
+# the device - a missing node yields a zero SoC base or a skipped CPU, a wrong count
+# makes the walker land inside a property name - so both are checked here.
+if [[ -d $REPO_ROOT/external/xnu-4570.1.46 ]]; then
+  "$PYTHON" $REPO_ROOT/tools/xnu_dt_requirements.py --repo-root $REPO_ROOT
+else
+  echo "warning: external/xnu-4570.1.46 absent; skipping the device-tree requirements check" >&2
+fi
+
 # Regenerate the inert non-proprietary Mach-O fixture from the host tool so the
 # checked-in macho_fixture.c stays reproducible. The raw fixture stays under
 # the ignored out/ directory.

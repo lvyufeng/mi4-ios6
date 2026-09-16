@@ -28,6 +28,7 @@
 
 - `check_boot_args_abi.py` — compares our `boot_args` layout against `pexpert/pexpert/arm/boot.h` for ARM ILP32, field by field. `start.s` loads four of those fields by hand at fixed offsets, so a drift is silent: XNU uses the wrong word as the physical base of memory rather than failing to build. `build.sh` runs it.
 - `decode_armv7_descriptor.py` — decodes a short-descriptor page-table entry; field positions from Apple's own `osfmk/arm/proc_reg.h`, not from memory.
+- `xnu_dt_requirements.py` — scans XNU's ARM sources for the device-tree lookups they make and checks our Apple-format DT against them, classified by what XNU does when each is missing. Also validates each node header's declared property count.
 - `stage-archive.sh` — list/restore the archived stage0–84 snapshots.
 
 ## Status — `status/`

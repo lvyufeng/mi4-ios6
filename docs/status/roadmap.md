@@ -368,10 +368,19 @@ means XNU silently reads the wrong word as the physical base of memory. The tool
 layouts field by field (and its own perturbation test confirms it reports a mismatch rather
 than always passing); the payload carries `_Static_assert`s for the four hot offsets as well.
 
+The device-tree half produced two real blockers, found by
+`tools/xnu_dt_requirements.py` scanning XNU's own ARM lookups rather than by a device:
+`/cpus/cpu@N` had no `state` property (XNU panics on it under `MACH_ASSERT` and *silently
+skips the CPU* otherwise, so the timebase-frequency was being ignored), and there was no node
+named `arm-io` (so `gPESocBasePhys` was 0 and neither the interrupt controller nor the timer
+would ever be mapped). Both are fixed. One further item is recorded but deliberately not
+resolved: Apple's model expects a node's `reg` to be an offset from the SoC base, while ours
+are absolute — and that is where Phase 2 meets Phase 3, since the Apple function in question
+would be shimmed on MSM8974 anyway. See the contract doc.
+
 **Exit criteria:** boot_args and DT dumped from the device and accepted by 4570's readers;
-`TTBR0`/`TTBR1`/`TTBCR`/`SCTLR` verified correct after 4570 code has written them. Still open,
-and the remaining work is the device-tree half — the payload's Apple-format DT is plausible but
-has not been tested against XNU's device-tree walker.
+`TTBR0`/`TTBR1`/`TTBCR`/`SCTLR` verified correct after 4570 code has written them. Still open:
+both checks are source-level so far, and the `reg` model decision is Phase 3's.
 
 ### Phase 3 — Platform shim layer and compile-graph expansion (months)
 

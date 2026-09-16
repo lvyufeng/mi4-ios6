@@ -147,6 +147,47 @@ Two checks, both cheap:
 - `_Static_assert`s in `xnu_boot_args_conformant.c` for the size and the four hot offsets, so
   a drift cannot reach hardware even if the host tool is skipped.
 
+
+## The device tree half
+
+`tools/xnu_dt_requirements.py` scans XNU's ARM sources for the device-tree lookups
+(`pe_init.c`, `pe_identify_machine.c`, `pe_consistent_debug.c`, `pe_serial.c`,
+`machine_routines.c`) and checks ours against them. It classifies by **consequence**, which
+is the only classification that matters: a raw scan finds ~40 property names, most of which
+XNU reads opportunistically and falls back from, and reporting those as failures would drown
+the ones that actually stop a bring-up.
+
+Two were genuine blockers, both found by this check rather than by a device:
+
+- **`/cpus/cpu@N` had no `state` property.** `machine_routines.c:474` panics
+  *"unable to retrieve state for cpu 0"* under `MACH_ASSERT`, and
+  `pe_identify_machine.c:117` silently **skips any cpu node** whose state is not `"running"`
+  — so every CPU's `timebase-frequency` was being ignored and the clock stayed at the
+  hardcoded fallback. Fixed: each cpu node now carries `state = "running"`.
+- **There was no node named `arm-io`.** `pe_identify_machine.c:232` locates the SoC through
+  it and takes `gPESoCBasePhys` from `ranges[1]`; without it that value is 0, and
+  `pe_arm_map_interrupt_controller` then returns early (`:541`) so **neither the interrupt
+  controller nor the timer is ever mapped**. Fixed: an `/arm-io` node with `device_type`,
+  `ranges` and `chip-revision`.
+
+The same tool also checks each node header's `nProperties` against what its block emits,
+because a wrong count does not fail to build and does not fail at `DTInit` — the walker
+reads the number it was given and lands in the middle of the next property name. Both checks
+are negative-tested: perturbing a count makes them fail.
+
+### Recorded, not resolved: `reg` is absolute, XNU expects an offset
+
+`pe_arm_map_interrupt_controller` computes `gPicBase = soc_phys + reg[0]`, i.e. Apple's DT
+model expects a node's `reg` to be an **offset from the SoC base**. Our `/interrupt-controller`
+and `/timer` nodes carry absolute addresses, because that is what the project's own iokit
+contract selftests read. Both cannot be true at once, and getting it wrong maps the wrong
+physical addresses — the kind of error that presents as an unrelated fault.
+
+This is deliberately left as a decision rather than guessed at, because it is where Phase 2
+meets Phase 3: satisfying Apple's convention means `reg` values relative to `0xf9000000`,
+but `pe_arm_map_interrupt_controller` is Apple-platform code that on MSM8974 would be
+replaced by a shim anyway. Phase 3 should decide it, with the shim in view.
+
 ## Other things to check before trusting a handoff
 
 - **`PRRR`/`NMRR` are not programmed by the payload.** `CACHE_ATTRINDX_DEFAULT` is
