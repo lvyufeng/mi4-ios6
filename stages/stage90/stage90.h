@@ -3951,9 +3951,27 @@ struct stage90_xnu_macho_loader_result {
  * into "auto-recovers in TIMEOUT_US".
  *
  * Timeout = STAGE90_DEADMAN_INTERVAL_US * STAGE90_DEADMAN_SAMPLES.
+ *
+ * The budget is deliberately generous. Its job is to catch a *hang*, and a
+ * hung device is hung forever - so waiting a minute costs nothing next to a
+ * manual power cycle, while a tight budget risks firing on a slow but perfectly
+ * healthy payload and turning a good run into a spurious reboot. 60s is well past
+ * the ~1s this payload takes, and well under the patience of someone watching it.
+ *
+ * The interval is also deliberately coarse: at 100ms the dead-man costs ~10
+ * interrupts/second, where the 500us sampling interval the handoff uses would cost
+ * 2000/second for the whole run. The handoff re-arms its own finer interval when it
+ * needs PC resolution; the dead-man only needs to know the payload stopped moving,
+ * and 16 samples at 100ms spacing still covers the last 1.6s well enough to see
+ * roughly where it stopped.
  */
-#define STAGE90_DEADMAN_INTERVAL_US 500u
-#define STAGE90_DEADMAN_SAMPLES     20000u /* 500us * 20000 = 10s */
+#define STAGE90_DEADMAN_INTERVAL_US 100000u /* 100ms */
+#define STAGE90_DEADMAN_SAMPLES     600u    /* 100ms * 600 = 60s */
+
+/* ticks = usec * 19.2 must fit the 32-bit CNTP_TVAL the timer is armed with. */
+#if (STAGE90_DEADMAN_INTERVAL_US > (0xffffffffu / 96u))
+#error "STAGE90_DEADMAN_INTERVAL_US is too large to convert to timer ticks in 32 bits"
+#endif
 
 /* cancro GIC bases: distributor / CPU interface (gic_validate_snapshot asserts these). */
 #define STAGE90_GIC_DIST_BASE 0xf9000000u

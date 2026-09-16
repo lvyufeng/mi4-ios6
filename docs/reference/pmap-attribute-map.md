@@ -72,7 +72,7 @@ are not identical — see F-AM1 for the one place they disagree, which matters.
 | PS_HOLD identity | `0xfc400000` | `0xfc400000` | 1 MB | section SO |
 | High alias of image | `0xc0000000` | `0x00000000` | 1 MB | section SO |
 | High alias, 2nd MB | `0xc0100000` | `0x00100000` | 1 MB | section SO |
-| RAM-console alias | `0xc0100000` | `RAM_CONSOLE_BASE` | 1 MB | section SO — **candidate table only** (F-AM1) |
+| RAM-console alias | `0xc0300000` | `RAM_CONSOLE_BASE` | 1 MB | section SO *(candidate table only)* |
 | GIC alias | `0xc0200000` | `0xf9000000` | 1 MB | section SO |
 | IMEM low alias | `0x0fa00000` | `0x0fa00000` | 1 MB | section SO |
 | Candidate L1 self-map | `candidate_l1_base` | same | 1 MB | section SO *(candidate table only)* |
@@ -80,29 +80,34 @@ are not identical — see F-AM1 for the one place they disagree, which matters.
 
 ## Findings
 
-**F-AM1 — the two L1 tables resolve the same VA conflict in opposite directions, and the
-candidate table's choice breaks the device-tree high alias.** `0xc0100000` is claimed twice:
-the high-alias extension maps `0xc0100000 -> 0x00100000`, and the RAM-console alias maps the
-same VA to `RAM_CONSOLE_BASE`. One L1 slot, two callers:
+**F-AM1 — the two L1 tables resolved the same VA conflict in opposite directions. FIXED
+2026-09-16 by moving the alias, not by picking a winner.** `0xc0100000` was claimed twice:
+the high-alias extension mapped `0xc0100000 -> 0x00100000`, and the RAM-console alias mapped
+the same VA to `RAM_CONSOLE_BASE`. One L1 slot, two callers:
 
-- `mmu.c`'s `build_identity_table()` keeps the **second-MB alias** and comments the RAM-console
-  alias out, citing the conflict ("to avoid conflict with deviceTreeP high-alias at
-  `0xc010c18c`"). That is the table the payload actually runs under, which is why
-  `boot_args->deviceTreeP` works today: PA `0x10c18c` has high alias `0xc010c18c`, inside
-  `0xc0100000–0xc01fffff`.
-- `xnu_arm_vm_init_full_pmap.c` keeps the **RAM-console alias** and verifies it (it reads
-  `RAM_CONSOLE_SIG` through `0xc0100000` and compares against `RAM_CONSOLE_BASE`), which
-  means the second megabyte of the high alias does not exist in the candidate table.
+- `mmu.c`'s `build_identity_table()` kept the **second-MB image alias** and commented the
+  RAM-console alias out, citing the conflict ("to avoid conflict with deviceTreeP high-alias
+  at `0xc010c18c`"). That is the table the payload actually runs under, which is why
+  `boot_args->deviceTreeP` works today.
+- `xnu_arm_vm_init_full_pmap.c` kept the **RAM-console alias** and verified it, which meant
+  the second megabyte of the image alias did not exist in the candidate table.
 
-So under the candidate L1 — that is, after the handoff, which is exactly when a real kernel
-would run — dereferencing `boot_args->deviceTreeP` at `0xc010c18c` reads the RAM console
-buffer instead of the device tree. The Stage-owned handoff target does not touch the device
-tree, and the handoff requires its jump target below PA `0x00100000`, so nothing on the
-current path is affected. A real XNU would be: it reads the device tree from `boot_args`
-early, and the failure would present as a garbage or malformed device tree, not as a mapping
-fault. This has to be resolved before the candidate table becomes the live handoff table, and
-resolving it means changing `full_pmap`'s own alias verification too — so it is a deliberate
-change with a hardware run behind it, not a drive-by edit.
+So under the candidate L1 — after the handoff, which is exactly when a real kernel would run
+— dereferencing `boot_args->deviceTreeP` at `0xc010c18c` would have read the RAM console
+buffer instead of the device tree.
+
+The fix is `xnu_arm_vm_init_full_pmap.c`'s `STAGE90_RAM_CONSOLE_ALIAS_BASE`: `0xc0100000` →
+`0xc0300000` (free in both tables). Both mappings now exist, both verifications run
+unchanged, and the candidate table agrees with the identity table about the image alias.
+Taking the other direction — deleting the RAM-console alias, as `mmu.c` did — would have been
+the smaller diff but would have required rewriting `full_pmap`'s alias verification and its
+satisfied-mask semantics, and the alias is genuinely useful to have.
+
+This changes a hardware-validated code path, so it needs a run: the verification reads
+`RAM_CONSOLE_SIG` through the new VA and compares it against the identity mapping, so a
+mistake here surfaces as a `full_pmap` failure with `FAIL_RAM_CONSOLE` set, not as silence.
+The change is confirmed present in the built image (the loaded constant is `0xc0300000` at
+the verification site).
 
 **F-AM2 — every section grants PL0 read/write.** AP[1:0] = `0b11` with AP[2] = 0 is full
 access, not privileged-only. There is no userspace in a Stage payload so nothing exploits it
@@ -168,5 +173,6 @@ Proposed constants, decoded with the same tool:
    Strongly-ordered baseline recorded by `stage90_exclusive_probe_run()`. If
    `monitor_tracks` is still 0 afterwards, the attribute change is not doing what it was
    supposed to and nothing built on atomics can be trusted yet.
-5. **Resolve F-AM1 first if the candidate table is to become the handoff table.** Adding
-   attributes to a mapping whose contents are wrong just makes the wrong answer cacheable.
+5. **F-AM1 is fixed, so the candidate table can become the handoff table** as far as the
+   image alias and the device-tree alias are concerned. It still needs a hardware run to
+   confirm (see F-AM1).

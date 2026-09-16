@@ -183,7 +183,8 @@ Remaining in this phase:
 - **Re-establish the known-good baseline.** Boot the default build (`HARD_SKIP`, dead-man
   armed) and confirm it completes and reboots on its own.
 - **Prove the dead-man** with `STAGE90_DEADMAN_SELFTEST=1` and confirm the device comes back
-  to Android unattended (~10 s), then read the PC ring out of `/proc/last_kmsg`.
+  to Android unattended (~60 s, the dead-man budget), then read the PC ring out of
+  `/proc/last_kmsg`.
 - Verify `VBAR` still points at the high-VA vectors **after** the candidate L1 install, and
   that a timer IRQ is still delivered through them — the interesting case is after the
   switch, not under the original mapping.

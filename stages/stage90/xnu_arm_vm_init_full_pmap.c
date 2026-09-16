@@ -28,8 +28,28 @@
 #define STAGE90_VIRT_BASE              0x80000000u  /* Kernel virtual base */
 #define STAGE90_PHYS_BASE              0x00008000u  /* Kernel physical base */
 #define STAGE90_HIGH_ALIAS_BASE        0xc0000000u  /* Legacy high alias from Stage81/82 */
-#define STAGE90_RAM_CONSOLE_ALIAS_BASE 0xc0100000u
+#define STAGE90_RAM_CONSOLE_ALIAS_BASE 0xc0300000u  /* moved off 0xc0100000 - see below */
 #define STAGE90_GIC_ALIAS_BASE         0xc0200000u
+
+/*
+ * The RAM-console alias used to live at 0xc0100000, which is also the second
+ * megabyte of the high image alias (0xc0000000 -> PA 0, 0xc0100000 -> PA 1MB).
+ * One L1 slot, two callers, and this file and mmu.c's build_identity_table()
+ * resolved it in opposite directions: mmu.c keeps the image alias there (its
+ * comment cites the conflict with deviceTreeP's alias at 0xc010c18c), while this
+ * file kept the RAM-console alias.
+ *
+ * The identity table is the one the payload actually runs under, so the device
+ * tree is reachable today. But the candidate table is what a handed-off kernel
+ * would run under, and there boot_args->deviceTreeP at 0xc010c18c would resolve
+ * into the RAM console buffer instead - presenting as a garbage device tree
+ * rather than a mapping fault, which is the worst way for it to fail.
+ *
+ * Moving the alias to a free VA keeps both mappings and both verifications, so
+ * the candidate table now agrees with the identity table about the image alias.
+ * 0xc0300000 is unused in either table (0xc0000000/0xc0100000 image alias,
+ * 0xc0200000 GIC alias).
+ */
 
 /* ARMv7 short-descriptor format constants */
 #define STAGE90_XNU_TTE_L1_ENTRY_COUNT 4096u
@@ -325,6 +345,7 @@ int stage90_xnu_arm_vm_init_full_pmap_run(
     /* Stage84 image ends at ~0x111000, need at least 2MB alias (0xc0000000-0xc01fffff) */
     map_l1_section(stage90_candidate_l1, STAGE90_HIGH_ALIAS_BASE, 0x00000000u);
     map_l1_section(stage90_candidate_l1, STAGE90_HIGH_ALIAS_BASE + L1_SECTION_SIZE, 0x00100000u);
+    /* RAM-console alias at its own VA, so it cannot shadow the image alias above. */
     map_l1_section(stage90_candidate_l1, STAGE90_RAM_CONSOLE_ALIAS_BASE, RAM_CONSOLE_BASE);
     map_l1_section(stage90_candidate_l1, STAGE90_GIC_ALIAS_BASE, 0xf9000000u);
     map_l1_section(stage90_candidate_l1, 0x0fa00000u, 0x0fa00000u);

@@ -126,9 +126,16 @@ The same dump-then-`platform_reboot()` mechanism is now armed as a **dead-man** 
 `kernel_entry`'s GIC validation — before the loader preflight, the whole ladder and the
 handoff, which is all the unproven code. Every normal exit from the payload already ends in
 `platform_reboot()`, so on the happy path the dead-man never fires; if the payload stops
-making progress for 10 s (`INTERVAL_US × SAMPLES`), the IRQ handler dumps the interrupted PC
+making progress for 60 s (`INTERVAL_US × SAMPLES`), the IRQ handler dumps the interrupted PC
 and reboots through PS_HOLD instead of leaving the device hung. The code before that point
 has a 90-stage track record, so it is deliberately left with its original IRQ behaviour.
+
+The budget is generous on purpose. Its job is to catch a *hang*, and a hung device is hung
+forever — so a minute costs nothing next to a manual power cycle, while a tight budget risks
+firing on a slow but healthy payload and turning a good run into a spurious reboot. The
+interval is coarse (100 ms, ~10 interrupts/second) for the same reason: the handoff re-arms
+its own finer 500 µs interval when it needs PC resolution, and the dead-man only needs to
+know the payload stopped moving.
 
 This matters because the earlier stages' `platform_reboot()` → PS_HOLD path is *proven* —
 experiments 03–78 all returned to Android automatically ~25–30 s after `fastboot boot`, with

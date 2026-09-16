@@ -101,7 +101,7 @@ esac
 if [[ $SELFTEST == "1u" ]]; then
   [[ $ALLOW_SELFTEST -eq 1 ]] || fail "dead-man SELFTEST hangs the payload on purpose; needs --allow-selftest"
   echo "SELFTEST: allowed. The payload will NOT reach platform_reboot();"
-  echo "          the dead-man is the only route back to Android (~10s)."
+  echo "          the dead-man is the only route back to Android (~60s)."
 fi
 
 echo
