@@ -133,6 +133,80 @@ fastboot boot path/to/known-good-recovery-or-boot.img
 
 If it fails, reboot/power-cycle. Do not immediately flash.
 
+For a Stage payload, gate the run first:
+
+```bash
+cd stages/stage90 && ./build.sh && ./preflight_boot_check.sh [--allow-preflight|--allow-full|--allow-selftest]
+```
+
+The gate verifies the image against `SHA256SUMS.txt`, checks the payload references no
+storage symbols, and refuses a mode the caller has not explicitly allowed. It never runs
+fastboot itself.
+
+### 4a. When a payload hangs — the device does not come back
+
+This is the expected failure mode of an unbootable Stage payload, and it has happened
+(2026-09-16, `PREFLIGHT_WATCHDOG_ONLY`). It is not a brick.
+
+Symptom, from the host kernel log on the phone's USB port:
+
+```text
+USB disconnect, device number NN           <- leaving Android for the bootloader
+new high-speed USB device NN
+  idVendor=18d1 idProduct=d00d ... SerialNumber=4a2fe00b    <- fastboot, as expected
+USB disconnect, device number NN           <- fastboot boot handed off to the payload
+```
+
+and then nothing: no further enumeration, `adb devices` and `fastboot devices` both empty
+for minutes. Ignore unrelated devices that appear in `lsusb` on other buses.
+
+What it means: the payload either hung, or rewrote PS_HOLD and powered the phone off.
+**Nothing was written to storage** — `fastboot boot` does not persist, and the Stage payloads
+touch only MMIO, IMEM and PS_HOLD — so the device is recoverable.
+
+Recovery:
+
+1. Hold Power ~10–15 s to force a power-off, then release.
+2. Press Power normally. Android boots as before, because the boot partition was never
+   modified.
+3. Confirm it is back:
+
+   ```bash
+   sudo adb devices -l                     # 4a2fe00b ... device:cancro
+   sudo adb -s 4a2fe00b shell cat /proc/uptime   # small value = fresh boot
+   ```
+
+4. Capture the payload's log before anything else reboots the phone:
+
+   ```bash
+   sudo adb -s 4a2fe00b exec-out 'cat /proc/last_kmsg' > /tmp/cancro-last_kmsg.txt
+   grep -a -n 'MI4IOS6_STAGE90' /tmp/cancro-last_kmsg.txt | tail -40
+   ```
+
+   The ram_console buffer lives at the top of DRAM and survives a warm reboot, which is how
+   earlier experiments recovered 100–180 KB of payload log this way.
+
+5. If `/proc/last_kmsg` has no `MI4IOS6_STAGE90` lines from the run, the power cycle
+   reinitialised DRAM and the log is gone. That loss is exactly what the payload's dead-man
+   reset exists to prevent — see below — and it means the run produced no information at all.
+
+The payload's **dead-man reset** is designed to make this procedure unnecessary: it is armed
+before the loader preflight, and if the payload stops making progress for 10 s the timer IRQ
+handler dumps the interrupted PC ring and reboots through PS_HOLD, returning the phone to
+Android unattended. When it fires, `last_kmsg` contains:
+
+```text
+pc_samples: begin
+pc_sample_total=...
+pc_sample_watchdog_fired=0x00000001
+stage90 pc-sampling watchdog: rebooting after sample dump
+MI4IOS6_STAGE90 platform_reboot entered
+```
+
+Absence of those lines after a hang means the dead-man did not fire, which is itself the
+finding for that run. `STAGE90_DEADMAN_SELFTEST=1` tests the mechanism directly: it arms the
+dead-man and then spins forever, so the only route back to Android is the dead-man firing.
+
 ### 5. Persistent flash only with explicit approval
 
 A persistent flash should be a separate, explicitly approved step, for example:
