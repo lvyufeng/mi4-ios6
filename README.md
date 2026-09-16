@@ -118,6 +118,18 @@ it verifies the image against `SHA256SUMS.txt`, checks the payload references no
 symbols, and refuses a run whose image was built with a mode the caller has not explicitly
 allowed (`--allow-preflight` / `--allow-full` / `--allow-selftest`).
 
+Build a switch variant without editing `stage90.h`:
+
+```bash
+STAGE90_EXTRA_CFLAGS='-DSTAGE90_EXCLUSIVE_PROBE=1' ./build.sh
+```
+
+Those flags land in `CFLAGS`, so `build.sh` records them in
+`out/stage90/stage90-build-config.txt` and the gate sees what the image was *actually* built
+with rather than what the header is assumed to say. Rebuild without the variable to return to
+the default. The concrete run sequence is in
+[`docs/status/roadmap.md`](docs/status/roadmap.md) §Phase 0.
+
 `STAGE90_ENTRY_LADDER_LEVEL` (0–4) — the entry stub genuinely calls the first *N* stages of the `arm_init`-shaped ladder and returns; levels above *N* are not called. `0` boot-args only, `1` +early pmap, `2` +`PE_init_platform(FALSE,args)`, `3` +post-PE bootstrap, `4` (**default**) +`arm_vm_init` live pmap and the high-VA handler windows, which is the only level that reaches the handoff. The loader preflight reads the level back out of the stub result and requires only the stages that actually ran — previously it required all five unconditionally, so every level below `FULL` failed structurally before the handoff was ever reached.
 
 ### Dead-man reset

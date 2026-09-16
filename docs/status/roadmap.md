@@ -192,6 +192,35 @@ Remaining in this phase:
   an unaligned target, or one whose first word is the fixture's `__TEXT` marker. Still to
   demonstrate is criterion (b) below actually producing a logged fault.
 
+#### The queued runs, in order
+
+`STAGE90_HANDOFF_MODE=HARD_SKIP` still runs the whole `arm_init` ladder — early pmap,
+`PE_init_platform`, post-PE bootstrap, `arm_vm_init` with the candidate L1 install/verify/
+restore, the high-VA handler windows and the Mach-O loader. It only stops short of the
+three things that can hang: the candidate-L1 *switch*, the watchdog loop and the jump. So
+each of these runs buys a lot for very little risk.
+
+```bash
+cd stages/stage90
+
+# 1. Baseline + Phase 1 exclusives baseline, one safe boot.
+#    Validates the repaired ladder end to end, the F-AM1 alias fix, and records what
+#    LDREX/STREX do under the current strongly-ordered mapping.
+STAGE90_EXTRA_CFLAGS='-DSTAGE90_EXCLUSIVE_PROBE=1' ./build.sh
+./preflight_boot_check.sh
+sudo adb -s 4a2fe00b reboot bootloader && sudo fastboot boot $PWD/../../out/stage90/stage90-qcdt.img
+
+# 2. Prove the recovery net itself: the payload spins forever and only the dead-man
+#    can bring it back.
+STAGE90_EXTRA_CFLAGS='-DSTAGE90_DEADMAN_SELFTEST=1' ./build.sh
+./preflight_boot_check.sh --allow-selftest
+# 3. Only then, step the handoff mode up: PREFLIGHT_WATCHDOG_ONLY, then FULL.
+```
+
+`STAGE90_EXTRA_CFLAGS` is how to build a variant without editing `stage90.h`; the switches
+land in `CFLAGS`, so `stage90-build-config.txt` records them and `preflight_boot_check.sh`
+gates on what the image was actually built with. Rebuild without it to return to the default.
+
 **Exit criteria:** (a) an induced hang self-recovers to Android without a manual
 power-cycle; (b) a jump to the Stage90 fixture header produces a logged undef/abort with
 PC/LR, not a hang; (c) a real Stage-owned function executes via the candidate L1 at high VA

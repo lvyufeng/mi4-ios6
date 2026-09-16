@@ -51,6 +51,15 @@ CFLAGS=(
   -I$REPO_ROOT/out/stage90
 )
 
+# Build a switch variant without editing stage90.h, e.g.
+#   STAGE90_EXTRA_CFLAGS='-DSTAGE90_EXCLUSIVE_PROBE=1' ./build.sh
+# These land in CFLAGS, so the -dM config dump below records them and
+# preflight_boot_check.sh gates on what the image was actually built with.
+# shellcheck disable=SC2206
+if [[ -n ${STAGE90_EXTRA_CFLAGS:-} ]]; then
+  CFLAGS+=($STAGE90_EXTRA_CFLAGS)
+fi
+
 LDFLAGS=(
   -nostdlib
   -Wl,-T,linker.ld
@@ -168,7 +177,7 @@ sha256sum $REPO_ROOT/out/stage90/stage90_fixture.macho $REPO_ROOT/out/stage90/st
 # Record the switches this image was actually built with, so preflight_boot_check.sh
 # can gate a hardware run on them instead of on what the source is assumed to say.
 $CC "${CFLAGS[@]}" -E -dM -include stage90.h - </dev/null \
-  | grep -E '^#define STAGE90_(HANDOFF_MODE|ENTRY_LADDER_LEVEL|DEADMAN_ENABLE|DEADMAN_SELFTEST|BYPASS_ENTRY_STUB) ' \
+  | grep -E '^#define STAGE90_(HANDOFF_MODE|ENTRY_LADDER_LEVEL|DEADMAN_ENABLE|DEADMAN_SELFTEST|BYPASS_ENTRY_STUB|EXCLUSIVE_PROBE) ' \
   > $REPO_ROOT/out/stage90/stage90-build-config.txt
 cat $REPO_ROOT/out/stage90/stage90-build-config.txt
 
