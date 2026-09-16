@@ -339,6 +339,29 @@ The property is now emitted. It is inert today — and deliberately so: `pe_arm_
 returns `0` before reaching the timer lookup, because the interrupt controller is not found
 either (below), so the wrong-address problem is not yet reachable.
 
+### The device-tree buffer is 89% full, and always has been
+
+The harness reports how much of `g_apple_dt` the tree consumes, because that margin is a
+real failure mode: `apple_dt_finish` returns 0 when the builder exceeds its capacity, and
+`stage90_main` then calls `platform_reboot()`. An overgrown tree therefore reboots the
+payload at the DT build — visible in the log as `apple_dt build failed`, but as a reboot
+rather than a message, so the reason would have to be inferred from where output stops.
+
+Measured, at both revisions:
+
+| Revision | Tree size | Of 32 KB |
+| --- | --- | --- |
+| Before the `/arm-io` + `state` fixes | 28932 | 88.3% |
+| Now (also with `device_type = "timer"`) | 29332 | 89.5% |
+
+So the three additions cost 400 bytes and the buffer was **already 88% full** — this is a
+pre-existing tight margin, not something the fixes introduced. It is reported on every build
+and the harness warns above 95%. Worth knowing before adding nodes: there is room for roughly
+3 KB more, which is a handful of nodes, not an unbounded amount.
+
+(This is also why the count is worth having in the log: `built_apple_dt_len` is emitted on
+device, so a run shows the same number the host measured.)
+
 ### What it verifies now
 
 ```

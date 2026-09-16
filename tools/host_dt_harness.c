@@ -194,11 +194,31 @@ int main(void)
     build_stage90_apple_dt(&b);
     dt_len = apple_dt_finish(&b);
 
-    printf("tree built: %u bytes\n\n", dt_len);
+    printf("tree built: %u bytes of %u (%.1f%% used, %u free)\n\n",
+           dt_len, (unsigned)sizeof(g_apple_dt),
+           100.0 * dt_len / sizeof(g_apple_dt),
+           (unsigned)(sizeof(g_apple_dt) - dt_len));
     if (dt_len == 0) {
         printf("FAIL: builder produced nothing\n");
         return 1;
     }
+
+    /*
+     * Headroom is a real risk, not a curiosity. apple_dt_finish returns 0 when the
+     * builder's capacity was exceeded, and stage90_main then calls platform_reboot() - so
+     * an overgrown tree means the payload reboots early, and the reason would have to be
+     * inferred from where the log stops. The tree has grown with each /arm-io, /state and
+     * personality node added, so the margin is worth reporting on every build rather than
+     * discovered when it runs out.
+     */
+    printf("headroom: %u bytes free (%.1f%% of the buffer)\n",
+           (unsigned)(sizeof(g_apple_dt) - dt_len),
+           100.0 * (sizeof(g_apple_dt) - dt_len) / sizeof(g_apple_dt));
+    if (dt_len > (sizeof(g_apple_dt) * 95u) / 100u) {
+        printf("WARNING: over 95%% of the device-tree buffer used; the next node added\n"
+               "         would reboot the payload at the DT build, not fail visibly\n");
+    }
+    printf("\n");
 
     /* This is the call XNU makes first: PE_init_platform -> DTInit(boot_args->deviceTreeP). */
     DTInit(g_apple_dt);
