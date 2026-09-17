@@ -1589,6 +1589,34 @@ Mach/BSD boundary. One file; no flag set satisfies both views.
 
 **No count moved: `RELEASE` 602 of 615, boot path 113 stubs.**
 
+**AND THE CHOICE IS NOW MEASURED, NOT ARGUED** (2026-09-17,
+[`experiment-142`](../experiments/experiment-142-darwin-assembles.md)). Four findings had been
+pointing at the target triple and every one was an argument; this is the demonstration. Same source,
+same `assym.s`, same flags, only `--target` differs:
+
+| file | `armv7-none-eabi` | `armv7-apple-darwin` |
+| --- | --- | --- |
+| `data.s` — `.section __DATA, __data` | fail | **OK** |
+| `machine_routines_asm.s` — positional `$0` macro | fail | **OK** |
+| `WKdmData_new.s`, `lz4_decode_armv7NEON.s` | fail | **OK** |
+| the other 13 present | OK | OK |
+
+**13 of 17 → 17 of 17.** And this corrects experiment-137, which tested the macro form against
+clang's EABI assembler and `arm-none-eabi-as`, found both reject it, and concluded "no assembler on
+this host does". **One does — the one the target selects.** The earlier test varied the flags and not
+the target, which is the test that would have caught it.
+
+It also retroactively explains experiment-138: `bcopy.s`'s literal `_bcopy:` is the **right** name
+here, because `asm.h`'s `EXT(x) = _##x` is the convention; `-D__NO_UNDERSCORES__` is what makes it
+wrong. Under this target the de-underscoring step would be unnecessary rather than merely harmless.
+
+**What it does not settle**: the linker. Nothing here can link Mach-O — `/usr/lib/llvm-14/bin` has
+`llvm-nm`, `llvm-size` and `llvm-ar` but no `ld64.lld`, and `apt-cache policy lld` offers a version
+from this host's own repositories. So the question is not whether the toolchain exists but whether to
+switch, which changes what every measurement so far was taken against. **`lld` was not installed: it
+is a host toolchain change and the choice is the user's.** The measurement above needed no install —
+clang's Mach-O *assembler* is already present.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
