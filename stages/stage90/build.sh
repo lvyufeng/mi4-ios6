@@ -94,8 +94,8 @@ CFLAGS=(
   # Only for xnu_real_dt.c's <pexpert/device_tree.h>, which needs <sys/appleapiopts.h>. Kept to
   # the two paths that header needs rather than the whole XNU tree, so the payload cannot
   # accidentally start resolving its own includes against XNU's.
-  -I$REPO_ROOT/external/xnu-upstream/pexpert
   -I$STAGE_DIR/shims
+  -I$REPO_ROOT/external/xnu-upstream/pexpert
 )
 
 # Build a switch variant without editing stage90.h, e.g.
@@ -195,6 +195,9 @@ if [[ ${XNU_REAL_DT_VALUE:-0} != 0 ]]; then
   XNU_OBJECTS=(
     $REPO_ROOT/out/stage90/xnu-objects/xnu_object_shims.o
     $REPO_ROOT/out/stage90/xnu-objects/device_tree.o
+    $REPO_ROOT/out/stage90/xnu-objects/bootargs.o
+    $REPO_ROOT/out/stage90/xnu-objects/pe_gen.o
+    $REPO_ROOT/out/stage90/xnu-objects/arm_pe_bootargs.o
   )
   echo "linking public-XNU objects: ${XNU_OBJECTS[*]##*/}"
 fi

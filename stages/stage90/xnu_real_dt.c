@@ -28,7 +28,14 @@
 
 #include "stage90.h"
 
+/*
+ * <pexpert/pexpert.h> resolves to the project's shim (shims/pexpert/pexpert.h) because -Ishims
+ * comes first; <pexpert/device_tree.h> falls through to external/xnu-upstream/pexpert because the
+ * shim has no such file. That is deliberate: PE_state_t must be the same type the linked
+ * arm_pe_bootargs.o was compiled against, and the shim is what it saw.
+ */
 #include <pexpert/device_tree.h>
+#include <pexpert/pexpert.h>
 
 /* The probe's own arena for the entries it hands back; XNU's code allocates nothing here. */
 static struct stage90_xnu_real_dt_result g_result;
@@ -61,6 +68,13 @@ static void real_dt_log(const struct stage90_xnu_real_dt_result *r)
     xnu_log_kv32("xnu_real_dt_chosen_lookup_ok", r->chosen_lookup_ok);
     xnu_log_kv32("xnu_real_dt_chosen_memory_map_absent", r->chosen_memory_map_absent);
     xnu_log_kv32("xnu_real_dt_root_lookup_ok", r->root_lookup_ok);
+    xnu_log_kv32("xnu_real_dt_boot_args_ptr", r->boot_args_ptr);
+    xnu_log_kv32("xnu_real_dt_pe_boot_args_ok", r->pe_boot_args_ok);
+    xnu_log_kv32("xnu_real_dt_parse_stage_arg_found", r->parse_stage_arg_found);
+    xnu_log_kv32("xnu_real_dt_parse_stage_arg_value", r->parse_stage_arg_value);
+    xnu_log_kv32("xnu_real_dt_parse_debug_arg_found", r->parse_debug_arg_found);
+    xnu_log_kv32("xnu_real_dt_parse_debug_arg_value", r->parse_debug_arg_value);
+    xnu_log_kv32("xnu_real_dt_parse_absent_arg_found", r->parse_absent_arg_found);
     xnu_log_kv32("xnu_real_dt_checksum", r->checksum);
 }
 
@@ -124,7 +138,7 @@ static uint32_t real_dt_get_words(DTEntry entry, const char *name, uint32_t *w0,
     return 1u;
 }
 
-int stage90_xnu_real_dt_run(void *tree, uint32_t tree_len)
+int stage90_xnu_real_dt_run(struct boot_args *args, void *tree, uint32_t tree_len)
 {
     struct stage90_xnu_real_dt_result *r = &g_result;
     DTEntry entry;
@@ -132,12 +146,13 @@ int stage90_xnu_real_dt_run(void *tree, uint32_t tree_len)
     memset(r, 0, sizeof(*r));
     r->version = STAGE90_XNU_REAL_DT_VERSION;
     r->size = sizeof(*r);
+    r->boot_args_ptr = (uint32_t)(uintptr_t)args;
     r->tree_ptr = (uint32_t)(uintptr_t)tree;
     r->tree_len = tree_len;
 
     xnu_log_puts("stage90 xnu_real_dt: running XNU's own pexpert/gen/device_tree.c on this tree\n");
 
-    if (tree == NULL || tree_len == 0u) {
+    if (tree == NULL || tree_len == 0u || args == NULL) {
         r->status = STAGE90_STATUS_BASE;
         r->checksum = stage90_xnu_real_dt_checksum(r);
         real_dt_log(r);
@@ -281,6 +296,64 @@ int stage90_xnu_real_dt_run(void *tree, uint32_t tree_len)
     }
 
     r->status = (r->failures == 0u) ? STAGE90_STATUS_OK : STAGE90_STATUS_FAIL(r->failures);
+    /*
+     * 6. Real ARM pexpert, on the payload's own state. arm_pe_bootargs.c's PE_boot_args() is
+     * three lines of Apple source - it returns ((boot_args *)PE_state.bootArgs)->CommandLine - so
+     * pointing PE_state at the payload's own boot_args and reading it back is a direct test that
+     * XNU's ARM code is reading the structure this payload built, through the layout Apple
+     * declares. That layout is checked independently by tools/check_xnu_struct_abi.py.
+     */
+    r->checks++;
+    PE_state.bootArgs = args;
+    PE_state.deviceTreeHead = tree;
+    {
+        char *cmdline = PE_boot_args();
+
+        r->pe_boot_args_ok = (cmdline != NULL && strcmp(cmdline, args->CommandLine) == 0) ? 1u : 0u;
+        if (r->pe_boot_args_ok == 0u) {
+            r->failures++;
+        }
+    }
+
+    /*
+     * 7. XNU's own boot-argument parser, on the command line `PE_boot_args()` just handed back.
+     *
+     * The parser matches a token's *whole name* - bootargs.c does `strncmp(args, arg_string, i) ||
+     * (i != strlen(arg_string))`, so it is exact, not a prefix match - and it only considers
+     * `name=value` and `-flag` forms; a bare word like `xnu-postpe` is skipped. The three cases
+     * below are chosen from the payload's actual CommandLine (boot_args.c: "debug=0x144
+     * mi4ios6.stage=83 xnu-pe-init-false ..."), and the third is a negative: a parser that
+     * reported success for everything would be indistinguishable from one that works.
+     *
+     * An earlier version of this asked for "mi4ios6" and expected to find it. It is not a token -
+     * "mi4ios6.stage" is - so the probe failed against a correct parser. Third time in this
+     * project that an assertion about what the other side does turned out to be the thing at
+     * fault, which is why this comment says where the rule was read from.
+     */
+    r->checks++;
+    {
+        uint32_t value = 0u;
+        uint32_t stage = 0u;
+
+        if (PE_parse_boot_argn("mi4ios6.stage", &stage, (int)sizeof(stage))) {
+            r->parse_stage_arg_found = 1u;
+            r->parse_stage_arg_value = stage;
+        }
+        if (PE_parse_boot_argn("debug", &value, (int)sizeof(value))) {
+            r->parse_debug_arg_found = 1u;
+            r->parse_debug_arg_value = value;
+        }
+        if (PE_parse_boot_argn("no-such-stage90-arg", &value, (int)sizeof(value))) {
+            r->parse_absent_arg_found = 1u;
+        }
+        /* 0x83 = 131; the cmdline says 83 decimal, which getval returns as a number. */
+        if (r->parse_stage_arg_found != 1u || r->parse_stage_arg_value != 83u ||
+            r->parse_debug_arg_found != 1u || r->parse_debug_arg_value != 0x144u ||
+            r->parse_absent_arg_found != 0u) {
+            r->failures++;
+        }
+    }
+
     r->checksum = stage90_xnu_real_dt_checksum(r);
     real_dt_log(r);
 

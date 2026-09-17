@@ -121,6 +121,46 @@ the consumer, not the tree.
   depends on the Stage-owned one. Non-fatal, like the other probes: this is evidence about a
   boundary, not a precondition for a boot.
 
+## Extended: three of the five objects, all seven checks green
+
+The same switch now links `xnu-objects/{xnu_object_shims,device_tree,bootargs,pe_gen,
+arm_pe_bootargs}.o` — every public-XNU object this project compiles — and runs three of them:
+
+```
+xnu_real_dt_checks=7   xnu_real_dt_failures=0   xnu_real_dt_status=0x90000001
+xnu_real_dt_pe_boot_args_ok=0x00000001
+xnu_real_dt_parse_stage_arg_found=0x00000001   parse_stage_arg_value=0x00000053   (83)
+xnu_real_dt_parse_debug_arg_found=0x00000001   parse_debug_arg_value=0x00000144
+xnu_real_dt_parse_absent_arg_found=0x00000000
+stage90 xnu_real_dt: XNU's device-tree code walked this tree and agreed
+```
+
+- **`arm_pe_bootargs.c` executes.** `PE_boot_args()` — three lines of Apple ARM source, returning
+  `((boot_args *)PE_state.bootArgs)->CommandLine` — is pointed at the payload's own `boot_args` and
+  returns the payload's own command line, byte for byte. That is XNU's ARM code reading a
+  structure this payload built, through the layout Apple declares.
+- **`bootargs.c` executes.** `PE_parse_boot_argn` parses the real command line and finds
+  `mi4ios6.stage=83` (as the number 83) and `debug=0x144`, and correctly reports an invented name
+  as absent. The negative case is the one that matters: a parser returning "found" for everything
+  would be indistinguishable from one that works.
+
+Two more probe bugs surfaced on the way to this, both the same shape as the first:
+
+- It asked `PE_parse_boot_argn` for `"mi4ios6"` and expected a hit. The parser matches a token's
+  **whole name** — `strncmp(args, arg_string, i) || (i != strlen(arg_string))` — and the token is
+  `mi4ios6.stage`, so the parser was right and the probe was wrong. The comment in the source now
+  says where the rule was read from.
+- `shims/pexpert/boot.h` defined `struct boot_args` a second time, field-for-field identical to
+  `stage90.h`'s, and both become visible in one translation unit the moment a file includes
+  both. `BOOT_LINE_LENGTH` was duplicated too, as `256` against `256u`. The shim now defers to
+  `stage90.h` when `STAGE90_BOOT_ARGS_DEFINED` is set — the same one-definition remedy as the
+  device-tree child count, the descriptor literals and the cache policy.
+
+Also found, and left alone deliberately: the payload's own command line says `mi4ios6.stage=83`,
+which is stale by seven stages. It is a claim about the build, and worth fixing — but it is
+asserted by the `command_line_stage90_marker` checks in `pe_init_platform_false`, so changing it
+is its own small change rather than a drive-by.
+
 ## What this does not establish
 
 - **XNU has not been entered.** No jump, no `arm_init`, no `start.s`. One subsystem runs in the

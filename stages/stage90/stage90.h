@@ -54,6 +54,16 @@ struct boot_args {
     uint32_t memSizeActual;
 };
 
+/*
+ * Tells shims/pexpert/boot.h that this header owns the definition, so the shim supplies only the
+ * `boot_args` typedef name that the public XNU sources use. The two were field-for-field identical
+ * and defined independently, which is fine until one translation unit includes both - which
+ * xnu_real_dt.c does, since it logs through stage90.h and calls PE_boot_args() from pexpert.h.
+ * Same remedy as every other instance of this in the project: one definition, and the other side
+ * points at it.
+ */
+#define STAGE90_BOOT_ARGS_DEFINED 1
+
 #define STAGE90_STATUS_OK                         0x90000001u
 #define STAGE90_STATUS_BASE                       0x90000000u
 #define STAGE90_STATUS_FAIL_FLAG                  0x40000000u
@@ -6753,10 +6763,17 @@ struct stage90_xnu_real_dt_result {
     uint32_t chosen_lookup_ok;
     uint32_t chosen_memory_map_absent;
     uint32_t root_lookup_ok;
+    uint32_t boot_args_ptr;
+    uint32_t pe_boot_args_ok;
+    uint32_t parse_stage_arg_found;
+    uint32_t parse_stage_arg_value;
+    uint32_t parse_debug_arg_found;
+    uint32_t parse_debug_arg_value;
+    uint32_t parse_absent_arg_found;
     uint32_t checksum;
 };
 
-int stage90_xnu_real_dt_run(void *tree, uint32_t tree_len);
+int stage90_xnu_real_dt_run(struct boot_args *args, void *tree, uint32_t tree_len);
 const struct stage90_xnu_real_dt_result *stage90_xnu_real_dt_result(void);
 
 static inline uint32_t stage90_xnu_real_dt_checksum(const struct stage90_xnu_real_dt_result *r)
