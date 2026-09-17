@@ -558,6 +558,51 @@ The honest consequences:
 What this section does *not* claim: that the device cannot hang. It claims the set of
 conditions under which it hangs is now two independent hardware failures rather than one, and
 that those conditions are stated rather than left to be discovered.
+
+## 17. The Phase 2 module now *runs* on the host — first execution evidence for it
+
+Every check in this audit until now has been static: read the source, compare layouts, inspect
+disassembly. `xnu_boot_args_conformant.c` has never been executed anywhere — it sits behind a
+default-off switch, and the device has not run it. It has now been executed, on the host,
+unmodified.
+
+**What made it possible.** The module's only host-unknowable input is `__stage90_image_end`,
+whose value exists only once the image is linked. That looked like an absolute barrier, and it
+is not: the symbol is used solely as an address *value* — `(uint32_t)(uintptr_t)__stage90_image_end`
+— and never dereferenced, so `-Wl,--defsym` with the value read from the built ELF reproduces
+the device's computation exactly. Not a substitution; the same arithmetic with the real input.
+
+The build is 32-bit for a second reason: the module's own `_Static_assert`s encode the ARM
+ILP32 ABI (320 bytes, `CommandLine` at 56). At `-m32` those hold, so *compiling* is part of the
+check rather than a formality worked around.
+
+**Result, against the real layout (`__stage90_image_end = 0x00119000`):**
+
+```
+physBase=0x00000000  virtBase=0x80000000  memSize=0x05d00000
+topOfKernelData=0x0011c000  image_end=0x00119000  table_bytes=0x0000a000
+checks=0x0000000a  failures=0x00000000  status=0x90000001
+```
+
+and the harness's own independent recomputation of all eight invariants — 1 MB alignment of
+`physBase` and `virtBase`, 16 KB alignment of `topOfKernelData`, tables above the image, image
+inside `[physBase, +memSize)`, tables fitting inside it, NUL-terminated command line, device
+tree present — passes each one. The module's verdict and an independent recomputation agree.
+
+**Negative-tested**, because a test that cannot fail is not a test: shrinking `memSize` to
+`0x100` makes both the "image inside the span" and "tables fit" invariants fail, the module
+reports `contract not satisfied`, and the harness exits 1.
+
+`tools/host_boot_args_check.sh` runs as part of the build, skipping with a warning if no 32-bit
+toolchain is present. `tools/host_32bit_runtime.c` is the twenty lines of freestanding runtime
+that make a no-libc 32-bit build possible on this host.
+
+**What this does and does not establish.** It establishes that Phase 2's validation logic is
+correct *for the real `image_end`* — the one number in the contract that cannot be checked from
+the source, per the module's own comment. It does not establish that a kernel consumes the
+result, and it does not touch the device. It is the first of the pending changes to be executed
+anywhere, which is a different kind of evidence from the rest of this audit.
+
 ## 6. What this audit cannot bound
 
 - **The watchdog's register semantics.** The readback and liveness checks confirm the

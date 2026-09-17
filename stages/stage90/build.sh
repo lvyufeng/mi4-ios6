@@ -48,6 +48,16 @@ else
   echo "warning: host compiler or xnu-upstream absent; skipping the device-tree walk check" >&2
 fi
 
+# And actually EXECUTE the Phase 2 module, rather than only checking its layout. Its one
+# host-unknowable input is __stage90_image_end, which host_boot_args_check.sh reads from the
+# image just built and passes by --defsym, so the module runs unmodified against the real
+# layout. Needs a 32-bit host toolchain; skipped with a warning if there is none.
+if [[ -d $REPO_ROOT/stages/stage90 ]] && "$REPO_ROOT/tools/host_boot_args_check.sh" >/dev/null 2>&1; then
+  "$REPO_ROOT/tools/host_boot_args_check.sh"
+else
+  echo "warning: 32-bit host toolchain unavailable or the check failed; see tools/host_boot_args_check.sh" >&2
+fi
+
 # Regenerate the inert non-proprietary Mach-O fixture from the host tool so the
 # checked-in macho_fixture.c stays reproducible. The raw fixture stays under
 # the ignored out/ directory.
