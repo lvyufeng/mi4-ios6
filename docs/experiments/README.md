@@ -106,7 +106,9 @@ archived stage with `tools/stage-archive.sh`.
 | stage87 | [experiment-90](experiment-90-stage87-high-va-data-abort-handler.md) | High-VA Data Abort Handler |
 | stage88 | [experiment-91](experiment-91-stage88-high-va-undef-handler.md) | High-VA Undefined Instruction Handler |
 | stage89 | [experiment-92](experiment-92-stage89-macho-loader.md) | Mach-O Kernel Loader |
+| stage90 | [experiment-93](experiment-93-stage90-phase0-preflight-watchdog.md) | Stage90 Phase 0: Preflight Watchdog Run |
+| stage90 | [experiment-94](experiment-94-stage90-phase0-watchdog-and-baseline.md) | Stage90 Phase 0: Recovery Net Proved, and the Two Bugs the Baseline Run Found |
 
-Stage90 has no experiment log yet. Its notes currently live inside the snapshot
-directory: `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
+Stage90's other notes live inside the snapshot directory:
+`../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
 `IMPLEMENTATION_STATUS.md` and `QUICK_START.md`.

@@ -24,6 +24,8 @@ recovered through `/proc/last_kmsg`, under the safety rules in the root `README.
 | Code execution, IRQ, data-abort and undef handlers at high VA | ✅ | `experiment-88` … `experiment-91` |
 | Mach-O parsing and a loader that *can* materialize a fixture | ✅ | `experiment-92`, `stages/stage90/xnu_macho_loader.c` |
 | Crash evidence survives a hang (`ram_console` at top of DRAM) | ✅ | `docs/reference/no-teardown-debugging.md` |
+| A hung payload resets the device itself, with no power press | ✅ | `experiment-94` runs 3 and 6 (MSM8974 hardware watchdog, `stages/stage90/hw_watchdog.c`) |
+| MSM8974 hardware watchdog: arm, and read its live countdown back | ✅ | `experiment-94` runs 1–3 |
 
 This is a real and unusually complete bring-up layer for a platform with no vendor
 documentation. Nothing in this re-plan asks for it to be thrown away.
@@ -221,7 +223,27 @@ that rule is what this re-plan is *for*.
 Every later phase will hang repeatedly, and iteration speed is set entirely by how much a
 hang tells you. This is also the cheapest phase.
 
-**Status (2026-09-16).** Two mechanisms are in the tree; one has been tried on hardware and
+**Status (2026-09-17).** All three exit criteria are now demonstrated on hardware except (b),
+and the first two recovery-net runs and the baseline were done on 2026-09-17
+([`docs/experiments/experiment-94-stage90-phase0-watchdog-and-baseline.md`](../experiments/experiment-94-stage90-phase0-watchdog-and-baseline.md)):
+
+- **(a) met.** `STAGE90_HW_WATCHDOG_SELFTEST=1` was run three times. Runs 1 and 2 returned the
+  device to Android on their own but reported the watchdog as not armed — two real bugs, a
+  20-bit register truncating a 30 s timeout and a counter that counts up, not down. Run 3
+  reported `armed and counting` and the SoC's own counter, not the 90 s fallback, is what reset
+  the device. It is met a second time on an *uninduced* hang: the baseline run below hung in
+  the Mach-O loader and the watchdog reset the device ~28 s later, no manual power-cycle.
+- **The baseline is green.** `HARD_SKIP` + `-DSTAGE90_EXCLUSIVE_PROBE=1` reached
+  `kernel_entry returned success` on its fourth attempt, after the run found a device-tree
+  child count checked against a literal `19u` in two places in `mmu.c`, and a Mach-O loader
+  that wrote through an unmapped VA — see below.
+- **(c) met.** The same run: `high_va_code_exec_fn_called=1` at `fn_high_va=0x80048098` with
+  `fn_result_correct=1`, the high-VA IRQ handler delivering timer IRQs (`irq_count 1 → 3`), and
+  VBAR restored to `0x000080a0` afterwards.
+- **(b) not run.** `STAGE90_HANDOFF_FAULT_INJECT_VA` exists for it and is gated behind
+  `--allow-fault-inject`.
+
+**Status (2026-09-16).** Two mechanisms were in the tree; one had been tried on hardware and
 failed, and finding out why reshaped this phase.
 
 - The harness that was supposed to isolate the hang could not report anything: the three
@@ -257,33 +279,40 @@ failed, and finding out why reshaped this phase.
 
 Remaining in this phase:
 
-- **Prove the hardware watchdog first.** `STAGE90_HW_WATCHDOG_SELFTEST=1` arms the SoC's own
-  counter and spins forever; the device must come back to Android unattended (~30 s). Until
-  this passes, every run below risks another manual power cycle — so it is the highest-value
-  run available, and the 2026-09-16 hang is precisely the case it exists for.
-- **Re-establish the known-good baseline.** Boot the default build (`HARD_SKIP`, both nets
-  armed) and confirm it completes and reboots on its own.
-- **Prove the dead-man** with `STAGE90_DEADMAN_SELFTEST=1` and confirm the device comes back
-  to Android unattended (~60 s, the dead-man budget), then read the PC ring out of
-  `/proc/last_kmsg`.
-- Verify `VBAR` still points at the high-VA vectors **after** the candidate L1 install, and
-  that a timer IRQ is still delivered through them — the interesting case is after the
-  switch, not under the original mapping.
+- ~~Prove the hardware watchdog first.~~ **Done** (2026-09-17), by
+  `STAGE90_HW_WATCHDOG_SELFTEST=1`. Hangs now have a reset that does not depend on the
+  payload's own state, so later runs stop costing a power press — which was the point.
+- ~~Re-establish the known-good baseline.~~ **Done** (2026-09-17): the default build arms both
+  nets, completes the ladder and reboots itself.
+- ~~Verify `VBAR` still points at the high-VA vectors after the candidate L1 install.~~ **Done**
+  as a side effect of the baseline run: the high-VA IRQ handler delivered timer interrupts with
+  VBAR at `0x800080a0` and restored it to `0x000080a0` afterwards.
+- **Prove the dead-man** with `STAGE90_DEADMAN_SELFTEST=1` (built with `STAGE90_HW_WATCHDOG=0`,
+  so a success is attributable to it alone) and confirm the device comes back to Android
+  unattended (~60 s, the dead-man budget), then read the PC ring out of `/proc/last_kmsg`.
+  This is the only one of the two nets with no direct evidence yet.
 - The entry-validity guard is in: the handoff rejects a target equal to the fixture entry VA,
-  an unaligned target, or one whose first word is the fixture's `__TEXT` marker. Still to
-  demonstrate is criterion (b) below actually producing a logged fault.
+  an unaligned target, or one whose first word is the fixture's `__TEXT` marker. Criterion (b)
+  still has not produced a logged fault.
+- Then step the handoff mode up — `PREFLIGHT_WATCHDOG_ONLY`, then `FULL` — which is the first
+  time the candidate-L1 *switch* and the jump are exercised again since Stage90's original run.
 
 #### The unvalidated stack, audited
 
-Six changes are waiting on one run, so
+Six changes were waiting on one run, so
 [`unvalidated-change-audit.md`](unvalidated-change-audit.md) bounds each one's risk by reading
 it and names the log line that confirms or clears it — ordered as the boot executes. Its
 useful conclusions: Phase 1a is **inert** in the default build (verified to emit zero Normal
 descriptors), the hardware watchdog's MMIO is in the same 1 MB section as the GIC read that
 has preceded the payload's MMU setup in every successful run for ninety stages, and both the
-DT and F-AM1 failures would be *visible and specific* rather than silent. It also lists what
-it cannot bound: the watchdog's register semantics (what the selftest run is for), and the
-`memSize` claim behind the conforming `boot_args`.
+DT and F-AM1 failures would be *visible and specific* rather than silent.
+
+**That run has now happened** (2026-09-17, run 7 of experiment-94): all five live changes are
+exercised and the boot reaches `kernel_entry returned success`. It also, usefully, falsified
+the DT row's optimism — a device-tree miscount *was* the first failure, and it was visible and
+specific, but it surfaced four steps away in the MMU high-bootstrap selftest rather than where
+the count is defined. What the audit could not bound and still cannot is the `memSize` claim
+behind the conforming `boot_args`, which is inert until `STAGE90_XNU_BOOT_ARGS=1`.
 
 #### The queued runs, in order
 
@@ -296,23 +325,24 @@ each of these runs buys a lot for very little risk.
 ```bash
 cd stages/stage90
 
-# 1. Prove the hardware watchdog FIRST. It arms the SoC's own counter and then spins in a
-#    BOUNDED loop: the watchdog should reboot the phone at ~33s, and if it does not the
+# 1. Prove the hardware watchdog FIRST. [DONE 2026-09-17 - passed on the third attempt;
+#    runs 1 and 2 found two real bugs. It arms the SoC's own counter and then spins in a
+#    BOUNDED loop: the watchdog should reboot the phone at ~28s, and if it does not the
 #    bound reboots it at ~90s via PS_HOLD. So this run cannot leave the phone dark either
-#    way, and the time it takes IS the result.
-#    Do this one before anything else: once it passes, every later run has a guaranteed
-#    reset and stops costing a manual power cycle.
+#    way, and the time it takes IS the result.]
 STAGE90_EXTRA_CFLAGS='-DSTAGE90_HW_WATCHDOG_SELFTEST=1' ./build.sh
 ./preflight_boot_check.sh --allow-hw-watchdog-selftest
 
 # 2. Baseline + Phase 1 exclusives baseline, one safe boot with both nets armed.
+#    [DONE 2026-09-17 - green on the fourth attempt, after the run found the two bugs
+#    fixed in a683c9d. The exclusive-probe numbers are in experiment-94 Part 3.]
 #    Validates the repaired ladder end to end, the F-AM1 alias fix, and records what
 #    LDREX/STREX do under the current strongly-ordered mapping.
 STAGE90_EXTRA_CFLAGS='-DSTAGE90_EXCLUSIVE_PROBE=1' ./build.sh
 ./preflight_boot_check.sh
 
 # 3. Prove the software dead-man separately (build without the hardware net so a
-#    success is attributable to the dead-man alone).
+#    success is attributable to the dead-man alone). STILL QUEUED - this is the next run.
 STAGE90_EXTRA_CFLAGS='-DSTAGE90_DEADMAN_SELFTEST=1 -DSTAGE90_HW_WATCHDOG=0' ./build.sh
 ./preflight_boot_check.sh --allow-selftest
 # 4. Only then, step the handoff mode up: PREFLIGHT_WATCHDOG_ONLY, then FULL.
@@ -376,14 +406,30 @@ and returns, with the IRQ handler still live afterwards.
   reliably. This is the single test that distinguishes a working kernel pmap from the
   current one.
 
-**Baseline prepared.** `stages/stage90/exclusive_probe.c` (switch `STAGE90_EXCLUSIVE_PROBE`,
-default off) measures what exclusives do *today* under the current Strongly-Ordered mapping,
-without changing any mapping or cache bit: it operates on one word of the payload's own
-`.bss`. The discriminating sub-test is T3 — a plain store between `LDREX` and `STREX` clears
-the exclusive monitor, so a real monitor must make that `STREX` fail. An implementation that
-always reports success is indistinguishable from a working one unless T3 is checked, and
-everything built on such a `STREX` would be silently wrong. This is the comparison point the
-attribute-map change has to beat.
+**Baseline measured (2026-09-17).** `stages/stage90/exclusive_probe.c` (switch
+`STAGE90_EXCLUSIVE_PROBE`, default off) measures what exclusives do *today* under the current
+Strongly-Ordered mapping, without changing any mapping or cache bit: it operates on one word of
+the payload's own `.bss`. The discriminating sub-test is T3 — a plain store between `LDREX` and
+`STREX` clears the exclusive monitor, so a real monitor must make that `STREX` fail. An
+implementation that always reports success is indistinguishable from a working one unless T3 is
+checked, and everything built on such a `STREX` would be silently wrong. This is the comparison
+point the attribute-map change has to beat.
+
+Four hardware runs of the probe, identical results in all four:
+
+```
+exclusive_probe_ldrex_reads_word        =1
+exclusive_probe_undisrupted_strex_status=0x00000000   success, as expected
+exclusive_probe_disrupted_strex_status  =0x00000000   success - and T3 says it should FAIL
+exclusive_probe_success_count           =1000  of 1000 iterations
+exclusive_probe_monitor_tracks          =0
+exclusive_probe_exclusives_usable       =0
+```
+
+So the monitor does not track at all under this mapping and `STREX` always reports success. It is
+exactly the failure mode T3 was written to catch, which is why the probe measures rather than
+asserts. Phase 1a's `NORMAL_NC` build has to move `monitor_tracks` and `exclusives_usable` to 1
+for this to count as fixed.
 
 **Phase 1a implemented (2026-09-16), not yet on hardware.** `STAGE90_PMAP_ATTR_MODE`
 (`SO_ONLY` default / `NORMAL_NC`) selects the memory type for DRAM mappings; MMIO stays

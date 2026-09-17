@@ -9,6 +9,30 @@ It is a review, not a substitute for the run.
 The items are ordered by when they execute in the default build, so the document reads as the
 boot does.
 
+## Post-run update (2026-09-17) — the run happened, and this document is now a retrospective
+
+**Read the body below as the pre-run analysis it is.** The run this document was written for
+took place on 2026-09-17 and is recorded in
+[`../experiments/experiment-94-stage90-phase0-watchdog-and-baseline.md`](../experiments/experiment-94-stage90-phase0-watchdog-and-baseline.md).
+Read against it, this document is now evidence about *how good the risk analysis was*, which is
+its own useful result.
+
+What happened, in this document's own ordering:
+
+| Change | Predicted | Actual |
+| --- | --- | --- |
+| Hardware watchdog arming (§1) | unboundable without a run; selftest is the test | **wrong in two ways the analysis did not anticipate** — a 20-bit register truncating a 30 s timeout, and a counter that counts up rather than down. Both are *register semantics*, which §6 correctly listed as unboundable |
+| Device tree `/arm-io` + `state` (§2) | a miscount would be "visible and specific", not silent | **half right.** Visible and specific, yes — but it surfaced four steps away, in the MMU high-bootstrap selftest, not where the count is defined. The count is checked in two places in `mmu.c` and the host-side checks covered neither |
+| F-AM1 (§5) | visible and specific if wrong | no failure attributable to it; the boot reached `kernel_entry returned success` |
+| Software dead-man (§3) | armed before the loader preflight | armed and never fired, as designed; **still not proved on its own** — it was the hardware watchdog that reset the device in the hang |
+| `SO_ONLY` (§4) | nothing changed | confirmed: the exclusive probe's numbers are identical across all four runs |
+
+The "visible and specific" standard this document applies (§2 for the device tree, §5 for
+F-AM1) is the claim the run tested hardest, and the device-tree case met the letter of it but
+not the point: specific, yes, and aimed at the wrong subsystem. A failure that names the wrong
+place still costs the debugging time a silent one does, and the fix that mattered was not more
+logging but removing the duplicate definition of the count.
+
 ## 0a. Which changes the default build actually exercises — 5 live, 3 inert
 
 "Six changes have never reached hardware" has been said repeatedly in this project's notes,
