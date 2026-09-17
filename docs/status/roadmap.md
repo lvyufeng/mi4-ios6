@@ -31,6 +31,7 @@ recovered through `/proc/last_kmsg`, under the safety rules in the root `README.
 | Working `LDREX`/`STREX` (the exclusive monitor tracks) | ✅ | `experiment-96`, measured in four configurations |
 | Cacheable Normal DRAM with both caches on | ✅ | `experiment-97` (I-cache), `experiment-98` (I+D) |
 | Conforming `boot_args` checked on the device | ✅ | `experiment-99` (`xnu_ba_checks=10`, `failures=0`) |
+| Public-XNU code executing on the device | ✅ | `experiment-100`: `pexpert/gen/device_tree.c`, `failures=0` |
 
 This is a real and unusually complete bring-up layer for a platform with no vendor
 documentation. Nothing in this re-plan asks for it to be thrown away.
@@ -40,11 +41,20 @@ documentation. Nothing in this re-plan asks for it to be thrown away.
 Three things need stating plainly, because earlier notes read as if they were done and
 future planning that assumes them would be wrong.
 
-**Nothing from public XNU has ever executed on the device.** The object manifests say so
-themselves, from Stage76 through Stage90 — e.g.
+**Nothing from public XNU has ever executed on the device — UNTIL 2026-09-17.** The object
+manifests said so themselves, from Stage76 through Stage90 — e.g.
 `stages/stage90/targets/cancro.stage90.objects`:
 
 > `None of the public-XNU objects are linked into or executed by the booted StageNN payload.`
+
+**That changed with [`experiment-100`](../experiments/experiment-100-first-public-xnu-execution.md):**
+behind `STAGE90_XNU_REAL_DT=1` the payload links `xnu-objects/device_tree.o` — Apple's own
+`pexpert/gen/device_tree.c`, unmodified — and runs `DTInit`, `DTLookupEntry`, `DTFindEntry` and
+the entry/property iterators over the payload's tree. It found `/cpus` and its four children,
+read each `state` and cpu0's `timebase-frequency` (19200000, correct), located `/arm-io` by
+property value and `/timer` by `device_type`, and reported `failures=0`. It also *measured* the
+`reg`-model gap: XNU's `soc_phys + reg[0]` evaluates to `0xf2020000` for a timer that is at
+`0xf9020000`. The rest of this section is still true of the other four objects and of XNU proper.
 
 The entire public-XNU compile graph is five host-only objects: `pexpert/gen/{device_tree,
 bootargs,pe_gen}.c` from `xnu-upstream`, and `pexpert/arm/{pe_bootargs,

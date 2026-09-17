@@ -91,6 +91,11 @@ CFLAGS=(
   -Werror
   -std=c11
   -I$REPO_ROOT/out/stage90
+  # Only for xnu_real_dt.c's <pexpert/device_tree.h>, which needs <sys/appleapiopts.h>. Kept to
+  # the two paths that header needs rather than the whole XNU tree, so the payload cannot
+  # accidentally start resolving its own includes against XNU's.
+  -I$REPO_ROOT/external/xnu-upstream/pexpert
+  -I$STAGE_DIR/shims
 )
 
 # Build a switch variant without editing stage90.h, e.g.
@@ -167,6 +172,7 @@ SOURCES=(
   xnu_arm_vm_init_high_va_undef_handler.c
   xnu_macho_loader.c
   xnu_handoff.c
+  xnu_real_dt.c
   xnu_kernel.c
   stage90_main.c
 )
@@ -178,7 +184,22 @@ for src in "${SOURCES[@]}"; do
   $CC "${CFLAGS[@]}" -c "$src" -o "$obj"
 done
 
-$CC "${CFLAGS[@]}" "${LDFLAGS[@]}" "${OBJECTS[@]}" -o $REPO_ROOT/out/stage90/stage90.elf
+# Public-XNU objects, compiled by xnu_object_subset_compile.sh above with its own flags and
+# linked in only when a switch asks for them. Until 2026-09-17 nothing here was linked into the
+# payload at all, and the project's notes said so; STAGE90_XNU_REAL_DT is the switch that changes
+# that, and it is off by default.
+XNU_REAL_DT_VALUE=$($CC "${CFLAGS[@]}" -E -dM -include stage90.h - </dev/null \
+  | awk '/^#define STAGE90_XNU_REAL_DT /{print $3}')
+XNU_OBJECTS=()
+if [[ ${XNU_REAL_DT_VALUE:-0} != 0 ]]; then
+  XNU_OBJECTS=(
+    $REPO_ROOT/out/stage90/xnu-objects/xnu_object_shims.o
+    $REPO_ROOT/out/stage90/xnu-objects/device_tree.o
+  )
+  echo "linking public-XNU objects: ${XNU_OBJECTS[*]##*/}"
+fi
+
+$CC "${CFLAGS[@]}" "${LDFLAGS[@]}" "${OBJECTS[@]}" "${XNU_OBJECTS[@]}" -o $REPO_ROOT/out/stage90/stage90.elf
 $OBJCOPY -O binary $REPO_ROOT/out/stage90/stage90.elf $REPO_ROOT/out/stage90/stage90.bin
 $OBJDUMP -d $REPO_ROOT/out/stage90/stage90.elf > $REPO_ROOT/out/stage90/stage90.disasm
 $NM -n $REPO_ROOT/out/stage90/stage90.elf > $REPO_ROOT/out/stage90/stage90.symbols
@@ -242,7 +263,7 @@ sha256sum $REPO_ROOT/out/stage90/stage90_fixture.macho $REPO_ROOT/out/stage90/st
 # Record the switches this image was actually built with, so preflight_boot_check.sh
 # can gate a hardware run on them instead of on what the source is assumed to say.
 $CC "${CFLAGS[@]}" -E -dM -include stage90.h - </dev/null \
-  | grep -E '^#define STAGE90_(HANDOFF_MODE|ENTRY_LADDER_LEVEL|DEADMAN_ENABLE|DEADMAN_SELFTEST|BYPASS_ENTRY_STUB|EXCLUSIVE_PROBE|PMAP_ATTR_MODE|HW_WATCHDOG|HW_WATCHDOG_SELFTEST|XNU_BOOT_ARGS|HANDOFF_FAULT_INJECT_VA|XNU_MSM8974_SHIM|CACHE_MODE) ' \
+  | grep -E '^#define STAGE90_(HANDOFF_MODE|ENTRY_LADDER_LEVEL|DEADMAN_ENABLE|DEADMAN_SELFTEST|BYPASS_ENTRY_STUB|EXCLUSIVE_PROBE|PMAP_ATTR_MODE|HW_WATCHDOG|HW_WATCHDOG_SELFTEST|XNU_BOOT_ARGS|HANDOFF_FAULT_INJECT_VA|XNU_MSM8974_SHIM|CACHE_MODE|XNU_REAL_DT) ' \
   > $REPO_ROOT/out/stage90/stage90-build-config.txt
 cat $REPO_ROOT/out/stage90/stage90-build-config.txt
 

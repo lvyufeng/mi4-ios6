@@ -6720,6 +6720,66 @@ const struct stage90_exclusive_probe_result *stage90_exclusive_probe_result(void
 const struct stage90_exclusive_probe_result *stage90_exclusive_probe_result_mmu_on(void);
 const struct stage90_exclusive_probe_result *stage90_exclusive_probe_result_dcache(void);
 uint32_t *mmu_l1_table(void);
+
+/*
+ * The first public-XNU execution probe: runs Apple's own pexpert/gen/device_tree.c on the device
+ * tree this payload built. See xnu_real_dt.c for why the device-tree layer goes first.
+ */
+#define STAGE90_XNU_REAL_DT_VERSION 1u
+
+struct stage90_xnu_real_dt_result {
+    uint32_t version;
+    uint32_t size;
+    uint32_t status;
+    uint32_t tree_ptr;
+    uint32_t tree_len;
+    uint32_t checks;
+    uint32_t failures;
+    uint32_t lookup_cpus_ok;
+    uint32_t cpu_children;
+    uint32_t cpu0_timebase_hz;
+    uint32_t cpu0_state_is_running;
+    uint32_t cpu_state_running_count;
+    uint32_t find_name_arm_io_ok;
+    uint32_t arm_io_device_type_len;
+    uint32_t arm_io_ranges_len;
+    uint32_t arm_io_ranges0;
+    uint32_t arm_io_ranges1;
+    uint32_t find_device_type_timer_ok;
+    uint32_t timer_reg_len;
+    uint32_t timer_reg0;
+    uint32_t timer_reg1;
+    uint32_t xnu_timer_map_addr;
+    uint32_t chosen_lookup_ok;
+    uint32_t chosen_memory_map_absent;
+    uint32_t root_lookup_ok;
+    uint32_t checksum;
+};
+
+int stage90_xnu_real_dt_run(void *tree, uint32_t tree_len);
+const struct stage90_xnu_real_dt_result *stage90_xnu_real_dt_result(void);
+
+static inline uint32_t stage90_xnu_real_dt_checksum(const struct stage90_xnu_real_dt_result *r)
+{
+    const uint32_t *words = (const uint32_t *)r;
+    uint32_t count = (uint32_t)(offsetof(struct stage90_xnu_real_dt_result, checksum) / sizeof(uint32_t));
+    uint32_t chk = 0u;
+
+    for (uint32_t i = 0u; i < count; i++) {
+        chk ^= words[i];
+    }
+    return chk;
+}
+
+/*
+ * The switch. Default off, like every other probe that changes what the payload does: with it on
+ * the payload links five public-XNU objects and executes the device-tree one, which is a real
+ * change to the project's stated boundary ("no public XNU object is executed by the payload") and
+ * should be a deliberate per-run decision rather than a silent one.
+ */
+#if !defined(STAGE90_XNU_REAL_DT)
+#define STAGE90_XNU_REAL_DT 0u
+#endif
 int gic_sgi_selftest(void);
 int gic_timer_selftest(void);
 

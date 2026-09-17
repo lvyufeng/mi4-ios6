@@ -1,0 +1,299 @@
+/*
+ * Run XNU's own pexpert device-tree code on the payload's device tree.
+ *
+ * Why this exists, and what it is not. Until now this project has compiled five public-XNU
+ * objects and *proved them linkable*, and its own notes say plainly that none of them has ever
+ * executed on the device. Everything that walked the device tree was Stage-owned code with XNU's
+ * semantics reimplemented (`apple_dt.c`). This module is the first place where unmodified Apple
+ * source runs on MSM8974 and does real work: `pexpert/gen/device_tree.c`'s `DTInit`,
+ * `DTLookupEntry`, `DTFindEntry` and the entry/property iterators, compiled from the tarball and
+ * linked into the payload unchanged.
+ *
+ * It is deliberately the device-tree layer first, of the five objects available, for three
+ * reasons. It is what XNU's `pe_identify_machine` and `pe_init` actually call, so it is on the
+ * real path rather than beside it. Its dependencies are tiny - `kalloc`, `kfree`, `strcmp` - so
+ * linking it does not drag in a kernel. And it can be *checked*: the tree it walks is one this
+ * payload built, so the values XNU's code reports can be compared against the values that were
+ * put in, which makes a pass mean something.
+ *
+ * What it does not do: it does not jump to XNU, does not run XNU's `arm_init`, and does not make
+ * any of the Stage-owned `_start`/`arm_init`/`arm_vm_init` symbols real. It runs one XNU
+ * subsystem, in the payload's own context, and reports what it found.
+ *
+ * Walking it the way XNU does - by populating `PE_state` and letting `pe_identify_machine` run -
+ * is a later step, because that function's timer bring-up is the Phase 3 shim's job. This module
+ * calls the same DT entry points that function calls, in the same order, so what it establishes
+ * transfers.
+ */
+
+#include "stage90.h"
+
+#include <pexpert/device_tree.h>
+
+/* The probe's own arena for the entries it hands back; XNU's code allocates nothing here. */
+static struct stage90_xnu_real_dt_result g_result;
+
+static void real_dt_log(const struct stage90_xnu_real_dt_result *r)
+{
+    xnu_log_puts("stage90 xnu_real_dt result:\n");
+    xnu_log_kv32("xnu_real_dt_version", r->version);
+    xnu_log_kv32("xnu_real_dt_size", r->size);
+    xnu_log_kv32("xnu_real_dt_status", r->status);
+    xnu_log_kv32("xnu_real_dt_tree_ptr", r->tree_ptr);
+    xnu_log_kv32("xnu_real_dt_tree_len", r->tree_len);
+    xnu_log_kv32("xnu_real_dt_checks", r->checks);
+    xnu_log_kv32("xnu_real_dt_failures", r->failures);
+    xnu_log_kv32("xnu_real_dt_lookup_cpus_ok", r->lookup_cpus_ok);
+    xnu_log_kv32("xnu_real_dt_cpu_children", r->cpu_children);
+    xnu_log_kv32("xnu_real_dt_cpu0_timebase_hz", r->cpu0_timebase_hz);
+    xnu_log_kv32("xnu_real_dt_cpu0_state_is_running", r->cpu0_state_is_running);
+    xnu_log_kv32("xnu_real_dt_cpu_state_running_count", r->cpu_state_running_count);
+    xnu_log_kv32("xnu_real_dt_find_name_arm_io_ok", r->find_name_arm_io_ok);
+    xnu_log_kv32("xnu_real_dt_arm_io_device_type_len", r->arm_io_device_type_len);
+    xnu_log_kv32("xnu_real_dt_arm_io_ranges_len", r->arm_io_ranges_len);
+    xnu_log_kv32("xnu_real_dt_arm_io_ranges0", r->arm_io_ranges0);
+    xnu_log_kv32("xnu_real_dt_arm_io_ranges1_soc_phys", r->arm_io_ranges1);
+    xnu_log_kv32("xnu_real_dt_find_device_type_timer_ok", r->find_device_type_timer_ok);
+    xnu_log_kv32("xnu_real_dt_timer_reg_len", r->timer_reg_len);
+    xnu_log_kv32("xnu_real_dt_timer_reg0", r->timer_reg0);
+    xnu_log_kv32("xnu_real_dt_timer_reg1", r->timer_reg1);
+    xnu_log_kv32("xnu_real_dt_xnu_timer_map_addr", r->xnu_timer_map_addr);
+    xnu_log_kv32("xnu_real_dt_chosen_lookup_ok", r->chosen_lookup_ok);
+    xnu_log_kv32("xnu_real_dt_chosen_memory_map_absent", r->chosen_memory_map_absent);
+    xnu_log_kv32("xnu_real_dt_root_lookup_ok", r->root_lookup_ok);
+    xnu_log_kv32("xnu_real_dt_checksum", r->checksum);
+}
+
+/*
+ * Read a NUL-terminated string property. Returns 1 and sets *out if it is present, non-empty and
+ * NUL-terminated inside the size the tree reports - the last part matters because this walks a
+ * buffer with a declared length and a property whose size lies would otherwise read past it.
+ */
+static uint32_t real_dt_get_string(DTEntry entry, const char *name, const char **out)
+{
+    void *value = NULL;
+    unsigned int size = 0u;
+    const char *s;
+
+    if (DTGetProperty(entry, name, &value, &size) != kSuccess || value == NULL || size == 0u) {
+        return 0u;
+    }
+
+    s = (const char *)value;
+    for (unsigned int i = 0u; i < size; i++) {
+        if (s[i] == '\0') {
+            *out = s;
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+static uint32_t real_dt_get_bytes(DTEntry entry, const char *name, uint32_t *len)
+{
+    void *value = NULL;
+    unsigned int size = 0u;
+
+    if (DTGetProperty(entry, name, &value, &size) != kSuccess || value == NULL || size == 0u) {
+        return 0u;
+    }
+    *len = (uint32_t)size;
+    return 1u;
+}
+
+/*
+ * Read up to two u32 words of a property. Used for `ranges` and `reg`, whose first two words are
+ * the ones XNU's platform code uses: pe_identify_machine.c:236 takes `*(ranges_prop + 1)` as the
+ * SoC physical base, and :554 computes `ml_io_map(soc_phys + *reg_prop, *(reg_prop + 1))`.
+ * Reading them with XNU's own DTGetProperty is what makes the addresses below the ones XNU would
+ * actually use rather than the ones the builder intended.
+ */
+static uint32_t real_dt_get_words(DTEntry entry, const char *name, uint32_t *w0, uint32_t *w1)
+{
+    void *value = NULL;
+    unsigned int size = 0u;
+    const uint32_t *words;
+
+    if (DTGetProperty(entry, name, &value, &size) != kSuccess || value == NULL ||
+        size < sizeof(uint32_t)) {
+        return 0u;
+    }
+    words = (const uint32_t *)value;
+    *w0 = words[0];
+    *w1 = (size >= 2u * sizeof(uint32_t)) ? words[1] : 0u;
+    return 1u;
+}
+
+int stage90_xnu_real_dt_run(void *tree, uint32_t tree_len)
+{
+    struct stage90_xnu_real_dt_result *r = &g_result;
+    DTEntry entry;
+
+    memset(r, 0, sizeof(*r));
+    r->version = STAGE90_XNU_REAL_DT_VERSION;
+    r->size = sizeof(*r);
+    r->tree_ptr = (uint32_t)(uintptr_t)tree;
+    r->tree_len = tree_len;
+
+    xnu_log_puts("stage90 xnu_real_dt: running XNU's own pexpert/gen/device_tree.c on this tree\n");
+
+    if (tree == NULL || tree_len == 0u) {
+        r->status = STAGE90_STATUS_BASE;
+        r->checksum = stage90_xnu_real_dt_checksum(r);
+        real_dt_log(r);
+        return -1;
+    }
+
+    /*
+     * The first public-XNU call. Everything above this line in the payload is Stage-owned code;
+     * this one is Apple's, compiled from external/xnu-upstream/pexpert/gen/device_tree.c.
+     */
+    DTInit(tree);
+
+    /* 1. "/" - the root. A mis-sized header fails here before anything dereferences it. */
+    r->checks++;
+    if (DTLookupEntry(NULL, "/", &entry) == kSuccess) {
+        r->root_lookup_ok = 1u;
+    } else {
+        r->failures++;
+    }
+
+    /*
+     * 2. /cpus - the topology walk pe_identify_machine.c:117 does. It iterates the children and
+     * reads each one's state, skipping any CPU whose state is not "running"; that skip is why
+     * the missing `state` property was a real defect and not a cosmetic one (the timebase
+     * frequency of every CPU was being ignored).
+     */
+    r->checks++;
+    if (DTLookupEntry(NULL, "/cpus", &entry) == kSuccess) {
+        DTEntryIterator it;
+        DTEntry child;
+
+        r->lookup_cpus_ok = 1u;
+
+        if (DTCreateEntryIterator(entry, &it) == kSuccess) {
+            while (DTIterateEntries(it, &child) == kSuccess) {
+                const char *state = NULL;
+
+                r->cpu_children++;
+                if (real_dt_get_string(child, "state", &state) &&
+                    strcmp(state, "running") == 0) {
+                    r->cpu_state_running_count++;
+                }
+                if (r->cpu_children == 1u) {
+                    unsigned int freq_len = 0u;
+                    const void *freq = NULL;
+                    unsigned int freq_size = 0u;
+
+                    (void)freq_len;
+                    if (DTGetProperty(child, "timebase-frequency", (void **)&freq, &freq_size) == kSuccess &&
+                        freq != NULL && freq_size == sizeof(uint32_t)) {
+                        r->cpu0_timebase_hz = *(const uint32_t *)freq;
+                    }
+                    if (state != NULL && strcmp(state, "running") == 0) {
+                        r->cpu0_state_is_running = 1u;
+                    }
+                }
+            }
+            DTDisposeEntryIterator(it);
+        }
+        if (r->cpu0_timebase_hz != 19200000u || r->cpu0_state_is_running != 1u) {
+            r->failures++;
+        }
+    } else {
+        r->failures++;
+    }
+
+    /*
+     * 3. DTFindEntry("name", "arm-io") - pe_identify_machine.c:232's lookup, and the one that was
+     * returning nothing until the /arm-io node existed. It searches by property *value*, which is
+     * a different code path from DTLookupEntry's path walk, so both are worth exercising.
+     */
+    r->checks++;
+    if (DTFindEntry("name", "arm-io", &entry) == kSuccess) {
+        const char *type = NULL;
+
+        r->find_name_arm_io_ok = 1u;
+
+        /*
+         * XNU does not compare this string to anything - pe_identify_machine.c:234 copies it into
+         * gPESoCDeviceTypeBuffer with strlcpy and that is all. So the check is "present and
+         * non-empty", and nothing more; an earlier version of this probe asserted it equalled
+         * "arm-io" and reported a failure against a tree XNU's own code is perfectly happy with.
+         */
+        if (real_dt_get_string(entry, "device_type", &type)) {
+            r->arm_io_device_type_len = (uint32_t)strlen(type) + 1u;
+        }
+        if (real_dt_get_bytes(entry, "ranges", &r->arm_io_ranges_len)) {
+            (void)real_dt_get_words(entry, "ranges", &r->arm_io_ranges0, &r->arm_io_ranges1);
+        }
+
+        /*
+         * ranges[1] becomes gPESoCBasePhys (:236), and that value is added to every reg[0] below.
+         * The minimum for that read to be in-bounds is two words; the value itself is reported
+         * rather than judged, because whether it is the *right* base is the Phase 3 question.
+         */
+        if (r->arm_io_device_type_len == 0u || r->arm_io_ranges_len < 8u) {
+            r->failures++;
+        }
+    } else {
+        r->failures++;
+    }
+
+    /* 4. DTFindEntry("device_type", "timer") - the lookup host_dt_check.sh found missing. */
+    r->checks++;
+    if (DTFindEntry("device_type", "timer", &entry) == kSuccess) {
+        r->find_device_type_timer_ok = 1u;
+        if (real_dt_get_bytes(entry, "reg", &r->timer_reg_len)) {
+            (void)real_dt_get_words(entry, "reg", &r->timer_reg0, &r->timer_reg1);
+        }
+        if (r->timer_reg_len < 8u) {
+            r->failures++;
+        }
+    } else {
+        r->failures++;
+    }
+
+    /*
+     * The measurement this probe exists to make, done with XNU's own arithmetic.
+     * pe_arm_map_interrupt_controller (:554) computes `ml_io_map(soc_phys + *reg_prop, ...)`,
+     * i.e. it treats reg[0] as an *offset* from the SoC base. If our reg[0] is absolute instead,
+     * this is the address XNU would map - and a value that is not the timer's real address is the
+     * concrete statement of the reg-model gap that docs/reference/... describes from reading.
+     */
+    r->xnu_timer_map_addr = r->arm_io_ranges1 + r->timer_reg0;
+
+    /*
+     * 5. /chosen's memory-map - pe_init.c reads it behind a kSuccess check, so absent is a pass.
+     * Checked because "absent is fine" is a claim, and this is the code that gets to make it.
+     */
+    r->checks++;
+    if (DTLookupEntry(NULL, "/chosen", &entry) == kSuccess) {
+        void *value = NULL;
+        unsigned int size = 0u;
+
+        r->chosen_lookup_ok = 1u;
+        if (DTGetProperty(entry, "memory-map", &value, &size) != kSuccess) {
+            r->chosen_memory_map_absent = 1u;
+        }
+    } else {
+        r->failures++;
+    }
+
+    r->status = (r->failures == 0u) ? STAGE90_STATUS_OK : STAGE90_STATUS_FAIL(r->failures);
+    r->checksum = stage90_xnu_real_dt_checksum(r);
+    real_dt_log(r);
+
+    if (r->status == STAGE90_STATUS_OK) {
+        xnu_log_puts("stage90 xnu_real_dt: XNU's device-tree code walked this tree and agreed\n");
+    } else {
+        xnu_log_puts("stage90 xnu_real_dt: XNU's device-tree code did NOT agree - see failures\n");
+    }
+
+    return (r->status == STAGE90_STATUS_OK) ? 0 : -1;
+}
+
+const struct stage90_xnu_real_dt_result *stage90_xnu_real_dt_result(void)
+{
+    return &g_result;
+}

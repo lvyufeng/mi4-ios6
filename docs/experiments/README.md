@@ -113,6 +113,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-97](experiment-97-stage90-phase1-icache.md) | Stage90 Phase 1: The I-Cache On, and the Six Places That Asserted Caches Are Off |
 | stage90 | [experiment-98](experiment-98-stage90-phase1-dcache.md) | Stage90 Phase 1: The D-Cache On, and Phase 1 Closed |
 | stage90 | [experiment-99](experiment-99-stage90-phase2-boot-args-on-hardware.md) | Stage90 Phase 2: The Conforming boot_args on Hardware, Under the Caches |
+| stage90 | [experiment-100](experiment-100-first-public-xnu-execution.md) | The First Public-XNU Code to Execute on the Device |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

@@ -107,6 +107,19 @@ int kernel_entry(struct boot_args *args)
     }
 #endif
 
+#if STAGE90_XNU_REAL_DT
+    /*
+     * The first public-XNU execution. Apple's own pexpert/gen/device_tree.c is linked into the
+     * payload and runs here, walking the tree this payload built. It is deliberately placed after
+     * the payload's own DT checks rather than before them: if it disagrees, the log shows both
+     * verdicts and the Stage-owned one is still the one the boot depends on.
+     *
+     * Non-fatal, like the other probes below: this is evidence about a boundary, not a
+     * precondition for the boot.
+     */
+    (void)stage90_xnu_real_dt_run(args->deviceTreeP, args->deviceTreeLength);
+#endif
+
     ml_init_timebase();
     const uint64_t t0 = ml_get_timebase();
     delay_us(2000);
