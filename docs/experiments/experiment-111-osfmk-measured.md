@@ -97,6 +97,40 @@ So the honest split: the *kernel* half of the goal is a large but ordinary build
 partly solved already. The *driver* half is not started and is not reachable by continuing this
 work.
 
+## The build configuration was never absent
+
+The same turn's measurement sent me looking for where `CONFIG_ZONE_MAP_MIN` and friends come from —
+they were showing up as *undeclared identifiers* in this sweep. They are in the tarball:
+
+| What | Where |
+| --- | --- |
+| Master configuration | `config/MASTER` (737 lines) |
+| ARM master | `config/MASTER.arm` |
+| The tool's source | `SETUP/config/{main.c,parser.y,lexer.c,mkheaders.c,mkmakefile.c,…}` |
+| The driver | `SETUP/config/doconf` |
+
+`osfmk/conf/MASTER.XXX` — the path `sched_prim.h:574`'s `#error` names, and the one this project
+reported as missing for several sessions — is where doconf **writes its output**. The source is at
+`config/`. Running doconf's own pipeline gives Apple's ARM kernel attribute sets and, expanded,
+the option lines:
+
+```
+KERNEL_BASE = [ arm xsmall config_embedded ]
+SCHED_BASE  = [ config_sched_traditional config_sched_multiq ]
+options   CONFIG_ZONE_MAP_MIN=1048576
+options   CONFIG_TASK_MAX=512
+options   CONFIG_IPC_TABLE_ENTRIES_STEPS=64
+options   CONFIG_MAX_CLUSTERS=4
+```
+
+Three of those were on this sweep's "undeclared" list. And `sched_group_t` — the largest single
+blocker at 25 occurrences — is gated on `CONFIG_SCHED_MULTIQ`, which `SCHED_BASE` says is on.
+
+That is written up in [`tools/xnu_config/README.md`](../../tools/xnu_config/README.md) and it is a
+correction to the roadmap, not just an addition: **"the source tree is complete and the build
+configuration is absent" was wrong**, and it had been repeated in commit messages and used to bound
+the plan for several turns.
+
 ## What is left, and what kind of thing it is
 
 The remaining blockers are no longer headers. They are names gated behind configuration this

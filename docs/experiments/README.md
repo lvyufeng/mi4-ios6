@@ -124,7 +124,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-108](experiment-108-mig-builds-and-generates-headers.md) | MIG Builds on This Host, and 23 Mach Interface Headers Are Generated |
 | stage90 | [experiment-109](experiment-109-xnu-arm-entry-path-compiles.md) | XNU's ARM Entry Path Compiles: `arm_init.c` 35 Errors → 0 |
 | stage90 | [experiment-110](experiment-110-xnu-arm-layer-compiles.md) | XNU's Entire ARM Layer Compiles: 32 of 32, 443 Symbols From Linking |
-| stage90 | [experiment-111](experiment-111-osfmk-measured.md) | The Rest of osfmk Measured: 81 of 170, and 18 Missing Headers Down to 3 |
+| stage90 | [experiment-111](experiment-111-osfmk-measured.md) | The Rest of osfmk Measured — and the Build Configuration Was Never Absent |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

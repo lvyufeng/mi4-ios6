@@ -858,11 +858,41 @@ chain, and the types-only form is what ships. Each shim clears one name and reve
 header, so the seven is a floor as well — the closure grows as you satisfy it, exactly as
 `experiment-103` measured for `cpu_data_internal.h`.
 
-Also located precisely: with the force-included headers in place, the first thing the compiler says
-is not a type error but `osfmk/kern/sched_prim.h:574: #error Enable at least one scheduler
-algorithm in osfmk/conf/MASTER.XXX` — and **`osfmk/conf/MASTER.XXX` is not in the tarball either**
-(the build generates it). The scheduler algorithm therefore has to be *chosen*, not read;
-`CONFIG_SCHED_MULTIQ` is used and recorded as chosen.
+~~Also located precisely: … `osfmk/conf/MASTER.XXX` is not in the tarball either (the build
+generates it). The scheduler algorithm therefore has to be *chosen*, not read.~~
+
+**CORRECTED 2026-09-17, and this was the biggest error of the session. The build configuration is
+not absent — it is in the tarball.** `config/MASTER` (737 lines), `config/MASTER.arm`,
+`config/MASTER.arm64`, the tool's source under `SETUP/config/` (`main.c`, `parser.y`, `lexer.l`,
+`mkheaders.c`, `mkmakefile.c`) and the driver `SETUP/config/doconf` all ship.
+`osfmk/conf/MASTER.XXX` is where doconf **writes its output**, not where the source lives — and the
+search that concluded "absent" looked in the directory the `#error` message names, not at the
+repository root.
+
+`config/MASTER.arm` states the ARM kernel's attribute sets in Apple's own words, and
+`tools/xnu_config/expand.sh KERNEL_BASE` resolves them into the option lines the kernel is built
+with:
+
+```
+SCHED_BASE = [ config_sched_traditional config_sched_multiq ]
+options   CONFIG_ZONE_MAP_MIN=1048576
+options   CONFIG_TASK_MAX=512
+options   CONFIG_IPC_TABLE_ENTRIES_STEPS=64
+options   CONFIG_MAX_CLUSTERS=4
+options   SERIAL_CONSOLE
+options   VIDEO_CONSOLE
+```
+
+Three of those appeared in this project's own osfmk sweep as *undeclared identifiers*. They were
+never missing. And `sched_group_t` — the largest single blocker, 25 occurrences — is gated on
+`CONFIG_SCHED_MULTIQ`, which `SCHED_BASE` says is **on** alongside `TIMESHARE_CORE`, because the
+latter is the queue core the former builds on rather than a competing algorithm.
+
+See [`tools/xnu_config/README.md`](../../tools/xnu_config/README.md). This is the third time in this
+project that "not available" meant "looked in one directory": MIG was published elsewhere, the
+generated mach headers were a build step away, and this was at `config/` all along. The remedy each
+time is to search the tree for the *shape* of the thing rather than trusting the path an error
+message names.
 
 **The gap is now a list of twenty symbols, not an adjective (2026-09-17,
 [`experiment-103`](../experiments/experiment-103-xnu-entry-point-assembles.md)).**
