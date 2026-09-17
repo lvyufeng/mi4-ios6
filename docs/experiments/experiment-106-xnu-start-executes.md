@@ -144,9 +144,43 @@ useful than the fact of it:
   whose output is unambiguous. Half-working code is not left in the tree; the probe is described
   here and its source is not kept.
 
-The next attempt should start by making the *reporting* trustworthy before making the probe more
-ambitious — a flat character buffer rather than a table of pointers, written directly into
-`ram_console`, is the shape that got closest.
+**A second attempt, and where it stopped.** The reporting was rebuilt rather than patched: a flat
+character buffer, then writing each entry straight into the `ram_console` window after adding that
+window to XNU's own page table (so nothing had to survive any later state change). The mapping is
+correct — TTBR0 read live rather than guessing where `_start` left the table, an existing kernel
+section's attribute bits reused rather than hand-written, TLB flushed, and each write cleaned to the
+point of coherency by MVA.
+
+It produced **no output at all** from `arm_init`, while the epilogue's own write worked as before.
+Carrying three numbers out through the epilogue — a writer that demonstrably functions — gave:
+
+```
+map_applied=0x00000000   size_before=0x00000000   size_after=0x00000000
+```
+
+`map_applied` is the L1 entry read back after the store, and it is **zero**, which means the store
+did not take effect. `size_before` is set by the first statement inside `entry_write` when it is
+called from `arm_init`, and it is zero too — so that call did not reach its own body either. Two
+stores that must have executed, both reading back as nothing, in a function that ran to completion
+and reached the epilogue.
+
+That is the finding to start from next time, and it is narrower than "it does not work": **stores
+made from `arm_init` do not take effect, while the identical code in the epilogue does.** The
+difference between them is that the epilogue's run with the MMU off. So the suspect is the MMU
+state `_start` left behind — the domain access control, or which table TTBR0 actually holds at that
+point — not the probe.
+
+Two things were fixed on the way and are worth keeping:
+
+- **The epilogue must clean the D-cache before clearing `SCTLR.C`.** The first version did not, and
+  everything `arm_init` wrote with XNU's caches on was discarded. The Phase 1 documents say exactly
+  this and this image had not read them. That fix is in the shipped entry.
+- **A TLB invalidate is not enough to publish a page-table change on its own here.** The write
+  needs a clean to the point of coherency first, for the same reason.
+
+What shipped is the configuration from the first attempt, because it is the one whose output is
+unambiguous. The probe is reverted rather than left half-working, and the second attempt exists
+only as this record.
 
 ## Safety, for the record
 
