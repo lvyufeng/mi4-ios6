@@ -156,6 +156,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-140](experiment-140-three-missing-names.md) | Three Missing Names, Three Narrow Answers |
 | stage90 | [experiment-141](experiment-141-vnode-trim-is-the-triple.md) | `vnode_trim` Is a Target-Triple Conflict, and No Macro Can Fix It |
 | stage90 | [experiment-142](experiment-142-darwin-assembles.md) | The Darwin Target Assembles Every File the EABI Target Cannot |
+| stage90 | [experiment-143](experiment-143-fiq-not-available.md) | MSM8974 Will Not Deliver an FIQ to Non-Secure PL1, Measured |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

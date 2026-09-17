@@ -133,6 +133,7 @@ SOURCES=(
   hw_watchdog.c
   xnu_boot_args_conformant.c
   xnu_msm8974_shim.c
+  xnu_msm8974_fiq_probe.c
   macho_fixture.c
   macho_probe.c
   mmu.c
@@ -269,7 +270,7 @@ sha256sum $REPO_ROOT/out/stage90/stage90_fixture.macho $REPO_ROOT/out/stage90/st
 # Record the switches this image was actually built with, so preflight_boot_check.sh
 # can gate a hardware run on them instead of on what the source is assumed to say.
 $CC "${CFLAGS[@]}" -E -dM -include stage90.h - </dev/null \
-  | grep -E '^#define STAGE90_(HANDOFF_MODE|ENTRY_LADDER_LEVEL|DEADMAN_ENABLE|DEADMAN_SELFTEST|BYPASS_ENTRY_STUB|EXCLUSIVE_PROBE|PMAP_ATTR_MODE|HW_WATCHDOG|HW_WATCHDOG_SELFTEST|XNU_BOOT_ARGS|HANDOFF_FAULT_INJECT_VA|XNU_MSM8974_SHIM|CACHE_MODE|XNU_REAL_DT|XNU_ENTRY) ' \
+  | grep -E '^#define STAGE90_(HANDOFF_MODE|ENTRY_LADDER_LEVEL|DEADMAN_ENABLE|DEADMAN_SELFTEST|BYPASS_ENTRY_STUB|EXCLUSIVE_PROBE|PMAP_ATTR_MODE|HW_WATCHDOG|HW_WATCHDOG_SELFTEST|XNU_BOOT_ARGS|HANDOFF_FAULT_INJECT_VA|XNU_MSM8974_SHIM|CACHE_MODE|XNU_REAL_DT|XNU_ENTRY|XNU_MSM8974_FIQ_PROBE) ' \
   > $REPO_ROOT/out/stage90/stage90-build-config.txt
 cat $REPO_ROOT/out/stage90/stage90-build-config.txt
 

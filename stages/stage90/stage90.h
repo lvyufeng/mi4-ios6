@@ -6643,6 +6643,68 @@ struct stage90_xnu_boot_args_result {
 #define STAGE90_XNU_MSM8974_SHIM_FAIL_DEVICE_TYPE          0x00000800u
 #define STAGE90_XNU_MSM8974_SHIM_FAIL_DISPATCH_FALLTHROUGH 0x00001000u
 
+/*
+ * FIQ availability probe (xnu_msm8974_fiq_probe.c). XNU's timer arrives on FIQ on this build, and
+ * the spec records from the vendor's own header that FIQ on this family requires secure mode. That
+ * claim has never been measured on this device, and it decides whether a shim can supply the FIQ
+ * path at all or whether the answer is __ARM_TIME__ (spec section 6.2.1). Default off.
+ */
+#if !defined(STAGE90_XNU_MSM8974_FIQ_PROBE)
+#define STAGE90_XNU_MSM8974_FIQ_PROBE 0u
+#endif
+#define STAGE90_XNU_FIQ_PROBE_VERSION 0x00010000u
+/* Bounded so that "no FIQ" is a measured negative rather than a reset the watchdog caused. */
+#if !defined(STAGE90_XNU_FIQ_PROBE_SPIN)
+#define STAGE90_XNU_FIQ_PROBE_SPIN 500000000u
+#endif
+
+#define STAGE90_XNU_FIQ_PROBE_FAIL_FIQ_NEVER_UNMASKED   0x00000001u
+#define STAGE90_XNU_FIQ_PROBE_FAIL_TIMER_LEFT_ARMED     0x00000002u
+#define STAGE90_XNU_FIQ_PROBE_FAIL_FIQ_LEFT_UNMASKED    0x00000004u
+/* The wait ended before the timer reached its condition, so "no FIQ" would say nothing. */
+#define STAGE90_XNU_FIQ_PROBE_FAIL_WAIT_TOO_SHORT       0x00000008u
+
+struct stage90_xnu_fiq_probe_result {
+    uint32_t version;
+    uint32_t size;
+    uint32_t status;
+    /* Pre-state, logged before anything is unmasked: outcome 1 reboots before the report. */
+    uint32_t gicd_ctlr;
+    uint32_t gicc_ctlr;
+    uint32_t igroupr0_before;
+    uint32_t cpsr_before;
+    uint32_t f_bit_set_before;
+    uint32_t intid;
+    uint32_t intid_bit;
+    /* Whether Group 0 routing could be configured from here - the measurement. */
+    uint32_t igroupr0_after_write;
+    uint32_t group_write_stuck;
+    uint32_t igroupr0_all_group1;
+    uint32_t gicc_ctlr_after;
+    /* The timer, and the delivery attempt. */
+    uint32_t cntp_tval_written;
+    uint32_t cntp_ctl_after_arm;
+    uint32_t timer_armed;
+    uint32_t cpsr_after_unmask;
+    uint32_t f_bit_cleared;
+    uint32_t spin_iterations;
+    uint32_t timer_fired;
+    uint32_t cpsr_after_mask;
+    uint32_t f_bit_masked;
+    uint32_t cpsr_final;
+    uint32_t f_bit_clear_final;
+    uint32_t cntp_ctl_after_disarm;
+    uint32_t timer_disarmed;
+    uint32_t fiq_delivered;
+    uint32_t checks;
+    uint32_t failures;
+    uint32_t checksum;
+};
+
+int stage90_xnu_fiq_probe_run(void);
+void stage90_xnu_fiq_probe_log(const struct stage90_xnu_fiq_probe_result *r);
+const struct stage90_xnu_fiq_probe_result *stage90_xnu_fiq_probe_result(void);
+
 struct stage90_xnu_msm8974_shim_result {
     uint32_t version;
     uint32_t size;

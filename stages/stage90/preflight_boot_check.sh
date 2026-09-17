@@ -291,6 +291,14 @@ case "$(value_of STAGE90_XNU_MSM8974_SHIM)" in
            echo "          Non-fatal: read msm8974_shim_failures in the log for its verdict." ;;
 esac
 
+case "$(value_of STAGE90_XNU_MSM8974_FIQ_PROBE)" in
+  0|0u|"") echo "FIQ availability probe: off." ;;
+  *)       echo "FIQ availability probe: ON. Unmasks CPSR.F with the timer armed and a bounded"
+           echo "          spin, to measure whether non-secure PL1 can take an FIQ on this SoC."
+           echo "          If a FIQ IS delivered the vector logs 'exception: fiq' and reboots,"
+           echo "          which is the expected successful outcome, not a hang." ;;
+esac
+
 echo
 echo "== mapping attributes =="
 case "$(value_of STAGE90_PMAP_ATTR_MODE)" in

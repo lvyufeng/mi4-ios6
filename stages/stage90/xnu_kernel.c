@@ -92,6 +92,22 @@ int kernel_entry(struct boot_args *args)
     }
 #endif
 
+#if STAGE90_XNU_MSM8974_FIQ_PROBE
+    /*
+     * Phase 3, the open question: XNU's timer arrives on FIQ on this build (locore.s:147, with
+     * __ARM_TIME__ undefined), and the spec records from the vendor header that FIQ here requires
+     * secure mode. This measures whether a non-secure PL1 can take one at all, which decides
+     * whether the shim supplies a FIQ handler or the answer is __ARM_TIME__.
+     *
+     * Bounded, and every exit masks FIQ again. Non-fatal: if a FIQ IS delivered the vector logs
+     * and reboots, and if it is not, this returns and the run continues.
+     */
+    if (stage90_xnu_fiq_probe_run() != 0) {
+        xnu_log_puts("kernel_entry: FIQ probe reported a problem - see fiq_probe_failures above; "
+                     "not fatal to this run\n");
+    }
+#endif
+
 #if STAGE90_XNU_BOOT_ARGS
     /*
      * Phase 2: build and validate a boot_args that conforms to the contract in XNU's

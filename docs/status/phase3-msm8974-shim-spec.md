@@ -554,3 +554,32 @@ XNU's ARM kernel, gated to Phase 4) and the configuration behind it is not in th
 The corrected statement is that check 1 is a **Phase 4 prerequisite to investigate**, not a
 cheap win available now, and checks 3 and 4 are the ones that are both cheap and available —
 but only with the device.
+
+---
+
+## 2.3a MEASURED 2026-09-17: FIQ is not available on this SoC
+
+Section 2.3 establishes that the `#else` branch of `locore.s:147` is live and XNU's timer arrives on
+FIQ on this build, so the shim must supply `tbd_fiq_handler`. Section 2.3 also records, from the
+vendor's header, that FIQ on this family requires secure mode. **That is now measured**
+([`experiment-143`](../experiments/experiment-143-fiq-not-available.md)):
+
+```
+fiq_igroupr0_before=0x00000000        intid 19 is in Group 0, and so are intids 0-31
+fiq_group_write_stuck=0x00000001      the write stuck - NOT the read-only non-secure view
+fiq_gicd_ctlr=0x00000001              Group 0 enabled at the distributor
+fiq_gicc_ctlr=0x00000001              and at the CPU interface
+fiq_cpsr_after_unmask=0x60000113      F clear - FIQ unmasked
+fiq_timer_fired=0x00000001            the timer measurably reached ISTATUS
+fiq_probe_fiq_delivered=0x00000000    and no FIQ was taken
+```
+
+An interrupt in Group 0, enabled at both ends, on a core with FIQ unmasked, does not arrive as FIQ.
+The register state does not distinguish the two candidate mechanisms (a non-secure CPU-interface view,
+or a core that cannot take FIQ from this security state), but the operational fact is what the shim
+needs and it is unambiguous.
+
+**Consequence: the shim must NOT supply a `tbd_fiq_handler`, and the resolution is `__ARM_TIME__`**
+— the tree's complete IRQ path (`Lexc_decirq_vector` → `fleh_decirq`), with the decrementer callbacks
+pointed at CNTP. That is §6.2.1's option 2, and the payload has already validated that IRQ path end
+to end (`experiment-104`: 10 ms asked for, 9961 µs measured).
