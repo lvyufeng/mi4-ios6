@@ -27,10 +27,13 @@
 #
 # TRIED AND REJECTED as an include path - measured, three arrangements, all worse than not using it:
 #
-#     plain source trees only            196 of 401   <- what build_xnu_arm_kernel.sh does
+#     plain source trees only            196 of 401   <- the baseline at the time
 #     export roots only                  167
 #     export roots first, trees after    185
 #     trees first, export roots after    185
+#
+# (The baseline is 288 of 401 since experiment-118 adopted Apple's *per-component* defines, which is
+# the other half of the split this note is about: the export roots were not what was missing.)
 #
 # The reason is in Apple's own flags: `INCFLAGS_GEN` is `-I$(SRCROOT)/$(COMPONENT)
 # -I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)` - the *own* component's source tree comes first and the

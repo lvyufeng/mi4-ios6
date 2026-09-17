@@ -60,10 +60,26 @@ done
 [[ -d $MIG_HEADERS/mach ]] || {
     echo "no generated mach headers - run tools/gen_mach_headers.sh first" >&2; exit 2; }
 
+# The per-component flag table is an invariant of every count this script prints, so check it here
+# rather than discovering a drift from a surprising number. It is a table transcribed out of XNU's
+# own Makefile templates, and a transcription is exactly what drifts.
+"$TOOLS_DIR/check_component_defines.py" >/dev/null || {
+    echo "component_defines.sh no longer matches the Makefile templates - run:" >&2
+    echo "  ./tools/check_component_defines.py" >&2
+    exit 2
+}
+
 mkdir -p "$OUT"
 # Truncate every output. A build script that appends leaves the previous run's failures in the
 # list, and a count read from it is then a count of two runs - which is how a 397-file result
 # became 582 here before anyone noticed.
+#
+# The per-file logs need the same treatment, and did not get it until 2026-09-17: a file that fails
+# leaves `$OUT/$key.log` behind and nothing removes it, so an `ls *.log` or a "first error per file"
+# sweep silently mixes two runs - after the per-component fix, out/xnu_min_obj still held the
+# baseline run's `ffs` logs and read as if nothing had changed. Delete them before recreating
+# all.log, since this glob would otherwise match it.
+rm -f "$OUT"/*.log
 : > "$OUT/all.log"
 : > "$OUT/failed.txt"
 
@@ -92,7 +108,12 @@ done < <("$TOOLS_DIR/xnu_config/make_defines.sh" "$CONFIG")
 
 DEFINES=(
     "${CONFIG_DEFINES[@]}"
-    -DMACH_KERNEL=1 -DMACH_KERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DKERNEL_PRIVATE=1
+    # MACH_KERNEL_PRIVATE is NOT here. It is per-component, and putting it here was this build's
+    # single largest defect: see xnu_config/component_defines.sh for the table and the reason. In
+    # short, MACH_KERNEL_PRIVATE is what reaches kern/misc_protos.h, whose ffs/fls/copyinstr
+    # declarations collide with bsd/libkern/libkern.h's, so defining it globally broke every BSD
+    # translation unit that includes <sys/systm.h> - 127 files in the minimal configuration.
+    -DXNU_KERNEL_PRIVATE=1 -DKERNEL_PRIVATE=1
     -DMACH_BSD=1 -DPRIVATE=1 -DKPC=1 -DMONOTONIC=1 -DXPR_DEBUG=0 -DLOCK_PRIVATE=1
     -DARMA7=1 -DKERNEL=1 -D__arm__=1 -DCONFIG_EMBEDDED=1 -D__ARM_L2CACHE_SIZE_LOG__=21
     -DCONFIG_SCHED_TIMESHARE_CORE=1 -DCONFIG_SCHED_TRADITIONAL=1
@@ -154,6 +175,20 @@ CC_ARGS=(
 PER_FILE_TIMEOUT=${PER_FILE_TIMEOUT:-60}
 : > "$OUT/timedout.txt"
 
+# The per-component define set. Apple's build compiles each component with its own
+# `<component>/conf/Makefile.template` CFLAGS rather than one global flag set, and the difference is
+# not cosmetic - see xnu_config/component_defines.sh, which holds the table and the citations.
+# `build_xnu_arm_layer.sh` does not need this: it compiles only osfmk/arm, which is the osfmk row.
+component_of() {
+    local rel
+    rel=$(printf '%s' "${1#"$XNU"/}" | cut -d/ -f1)
+    # MIG's generated server stubs are build output, so they live in out/mach_headers rather than in
+    # the tree and have no component path to read. They come from osfmk/mach/*.defs and Apple builds
+    # them in osfmk, so that is what they are. (Measured: it changes nothing today - those four fail
+    # on a defect in this project's MIG output, not on their flags.)
+    printf '%s' "${rel:-osfmk}"
+}
+
 ok=0
 fail=0
 absent=0
@@ -183,11 +218,13 @@ while read -r src; do
     name=$(basename "$src" .c)
     # Disambiguate: the manifest has files of the same name in different components.
     key=$(printf '%s' "$src" | sed "s|$XNU/||; s|/|_|g; s|\.c$||")
+    # shellcheck disable=SC2207
+    COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" "$(component_of "$src")") )
     # Bounded. A file that sends clang into a loop must cost seconds, not the whole session: one
     # did, for 45 minutes, because this had no timeout and its output was buffered behind a pipe.
     # A timeout is reported as its own outcome rather than as a compile failure, because "clang
     # hung" and "XNU does not compile" are different findings.
-    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${INCLUDES[@]}" \
+    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${INCLUDES[@]}" \
          -c "$src" -o "$OUT/$key.o" 2>"$OUT/$key.log"; then
         ok=$((ok + 1))
         rm -f "$OUT/$key.log"

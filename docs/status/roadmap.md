@@ -972,11 +972,27 @@ ones — Apple exports a *selected list* per component (`EXPORT_MI_LIST` → `EX
 the whole source directory is a different and worse thing. Both changes are net measurement, neither
 is a change to XNU's code.
 
-What remains is the Mach-view-versus-BSD-view collisions (`uthread_t`, a genuinely conflicting
-`copyinstr`, `ORDINARY`/`struct tty`), and Apple's build resolves those through the **exported-header
-set** — `makedefs/MakeInc.def:463-469` shows `INCFLAGS_IMPORT` pointing at
-`$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)`, populated from `config/*.exports` by `SETUP/installfile`.
-That is the named next step.
+**AND THE COLLISIONS ARE EXPLAINED, AND WERE A FLAG** (2026-09-17,
+[`experiment-118`](../experiments/experiment-118-per-component-defines.md)). The exported-header set
+was the wrong suspect: this project's own commit for `experiment-117` measured the export roots and
+found them *worse* (167 against 196). The real cause is that Apple sets the `*_KERNEL_PRIVATE`
+macros **per component**, in `<component>/conf/Makefile.template`, and this build set
+`MACH_KERNEL_PRIVATE` globally. `MACH_KERNEL_PRIVATE` is what reaches `kern/misc_protos.h`, whose
+`ffs(unsigned int)` / `fls(unsigned int)` / `copyinstr(const user_addr_t, char *, vm_size_t, …)`
+collide with `bsd/libkern/libkern.h`'s `ffs(int)` / `fls(int)` /
+`copyinstr(const user_addr_t, void *, size_t, …)` — so every BSD file including `<sys/systm.h>`
+failed. 127 of the minimal configuration's 205 failures, from one flag in the wrong scope.
+
+Adopting the per-component table (`tools/xnu_config/component_defines.sh`, checked against the
+templates by `tools/check_component_defines.py`) takes **`STAGE90_BOOT` 196 → 288 of 401** and
+**`RELEASE` 204 → 329 of 569**. `osfmk` does not move at all (59 failing before and after); the gain
+is bsd 122 → 40, libkern 17 → 10, pexpert 3 → 0. `uthread_t` and `ORDINARY` are no longer in the
+first-error list at all — they were downstream of `ffs`.
+
+What remains is 113 failures spread over 36 missing generated headers (largest:
+`mach/memory_object_control.h`, 10 files — the `.defs` needs `upl_size_t` from `mach_types.defs`,
+which `gen_mach_headers.sh` does not feed to MIG), 18 unknown type names, 14 incomplete field types,
+14 conflicting types, and small tails.
 
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
