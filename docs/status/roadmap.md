@@ -1189,6 +1189,39 @@ which **907 are on the boot path**.
 
 **`STAGE90_BOOT` 389 → 395 of 419, `RELEASE` 507 → 513 of 587.**
 
+**AND THE FIRST REAL LINK, WHICH FOUND WHAT `nm` CANNOT** (2026-09-17,
+[`experiment-125`](../experiments/experiment-125-first-link-and-option-scope.md)). Everything
+reported so far comes from `nm` and from clang, and neither can see two objects defining one symbol
+— both compile, and only a link fails. The first `ld -r` said:
+
+```
+bsd_net_net_stubs.o: multiple definition of `ctl_register'; bsd_kern_kern_control.o: first defined
+bsd_kern_subr_xxx.o: multiple definition of `rc4_init';    bsd_crypto_rc4_rc4.o: first defined
+bsd_netinet6_in6_cksum.o: multiple definition of `inet6_cksum'; bsd_kern_kpi_mbuf.o: first defined
+```
+
+`bsd/net/net_stubs.c:31` is `#if !NETWORKING` — panicking stubs for a kernel built with no
+networking. So `NETWORKING` was false where it should have been true, and the reason is the sixth
+instance of this project's recurring defect with a new mechanism: **the generated `OPTIONS/` headers
+were one directory for both configurations.** RELEASE and STAGE90_BOOT disagree on **20 of them** —
+`CRYPTO`, `NETWORKING`, `SOCKETS`, `DEVFS`, `FIFO`, `DUMMYNET`, `CONFIG_MACF` and more — and
+whichever generation ran last won for both. That was `STAGE90_BOOT`, so the RELEASE build was
+compiled with `NETWORKING 0`; `meta_features.h` force-includes the header, so the generated
+`#define NETWORKING 0` overrode the command line's `-DNETWORKING=1` without a word.
+`gen_option_headers.py` now writes `out/xnu_options/<CONFIG>/` and the build fails loudly if that
+configuration's set is absent. **`RELEASE` 513 → 560 of 587, no regressions.**
+
+`tools/link_xnu_arm.sh` exists because a compiler answers "does this parse" and `nm` answers "what
+does this object want", while only a linker answers **"do these objects fit together"**. After the
+fix: **560 objects, 0 duplicate definitions, exit 0, one 6 338 748-byte relocatable image**. The full
+link (`-T stages/stage90/xnu_link.ld --no-undefined`) fails, correctly, on **889 symbols** — within
+rounding of what the `nm`-based `link_gap.sh` independently reports, which is a useful cross-check.
+`boot_closure.py` narrows it to **19 failing files on the boot path, 78 symbols**.
+
+**What is left is 24 failures in the minimal configuration and 27 in `RELEASE` — and the two sets
+are now nearly the same files**, which is itself a result: most of what separated them was this
+defect.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

@@ -37,7 +37,10 @@ MIG_HEADERS=${MIG_HEADERS:-$REPO_ROOT/out/mach_headers}
 # (tools/gen_libkern_version.sh). osfmk/arm reaches <mach_ldebug.h> through kern/thread.h:104, so
 # without the second root this build reports 0 of 32.
 GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
-OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}
+# Per configuration, like build_xnu_arm_kernel.sh: RELEASE and STAGE90_BOOT disagree on 20 of these
+# macros. This script compiles one directory (osfmk/arm), whose files take no `#if NETWORKING`-style
+# branch that differs between them, but the config is named for the same reason the other one is.
+OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/${XNU_KERNEL_CONFIG:-RELEASE}
 OUT=${XNU_ARM_OBJ_OUT:-$REPO_ROOT/out/xnu_arm_obj}
 
 SYNTAX_ONLY=0

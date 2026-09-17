@@ -54,7 +54,15 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 XNU = os.environ.get("XNU_TREE", os.path.join(REPO_ROOT, "external", "xnu-4570.1.46"))
-OUT = os.environ.get("XNU_OPTION_HEADERS_OUT", os.path.join(REPO_ROOT, "out", "xnu_options"))
+# Per-configuration, and that is not tidiness. RELEASE and STAGE90_BOOT disagree on **20** of these
+# macros - CRYPTO, NETWORKING, SOCKETS, DEVFS, FIFO, MACF, DUMMYNET and more - and a single shared
+# directory means whichever run was last wins for both builds. It did: the RELEASE build was
+# compiled with STAGE90_BOOT's values for all 20, because that generation happened to be the most
+# recent. Nothing said so, and the failure it produced was 400 lines into the link ("multiple
+# definition of `ctl_register`") rather than anywhere near the cause - `bsd/net/net_stubs.c:31` is
+# `#if !NETWORKING` and NETWORKING had been silently forced to 0 by a generated header that was not
+# this configuration's.
+OUT_ROOT = os.environ.get("XNU_OPTION_HEADERS_OUT", os.path.join(REPO_ROOT, "out", "xnu_options"))
 CONFIG = os.environ.get("XNU_KERNEL_CONFIG", "RELEASE")
 
 # The components whose conf/files carry OPTIONS lines, in Apple's own order (MakeInc.def:46).
@@ -111,6 +119,7 @@ def main():
     options = configured_options()
     found = scan_options()
 
+    OUT = os.path.join(OUT_ROOT, CONFIG)
     os.makedirs(OUT, exist_ok=True)
 
     on = 0

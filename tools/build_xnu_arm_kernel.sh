@@ -173,7 +173,16 @@ DEFINES=(
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.
 GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
-OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}
+# Per configuration: see tools/gen_option_headers.py. RELEASE and STAGE90_BOOT disagree on 20 of
+# these macros, so one shared directory silently gives whichever build was generated last its own
+# values - which is what happened, and it surfaced as a duplicate-symbol error in the link.
+OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
+[[ -d $OPTION_HEADERS ]] || {
+    echo "no option headers for $CONFIG at $OPTION_HEADERS - run:" >&2
+    echo "  XNU_KERNEL_CONFIG=$CONFIG ./tools/gen_option_headers.py" >&2
+    echo "  (the other configuration's directory must not be used: they disagree on 20 macros)" >&2
+    exit 2
+}
 
 # The component order is Apple's, from makedefs/MakeInc.def:46-48:
 #
