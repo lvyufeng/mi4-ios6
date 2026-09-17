@@ -107,6 +107,6 @@ except `size_t`.
 ./tools/assemble_arm_layer.sh           # 17 ok, 0 failed
 MANIFEST=$PWD/out/xnu_arm_manifest.txt XNU_KERNEL_OBJ_OUT=$PWD/out/xnu_kernel_obj \
   ./tools/build_xnu_arm_kernel.sh       # 607 of 615
-./tools/measure_link.sh --keep-stubs    # 250 stubs
-./tools/stub_reach.py                   # 72 on the boot path
+./tools/measure_link.sh --keep-stubs    # 240 stubs
+./tools/stub_reach.py                   # 66 on the boot path
 ```
