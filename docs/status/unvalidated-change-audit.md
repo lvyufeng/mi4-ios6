@@ -481,6 +481,44 @@ calls `prepare`/`commit`/`disarm` at all. They are an API surface written to mak
 ordering explicit, compile-checked, and not yet exercised — and the spec now says so rather
 than implying they had been run.
 
+
+## 15. The default build's *new* call sites, measured — there are three
+
+Section 0a argued that a default run exercises five deltas rather than eight. That is a claim
+about which switches are on. This is the stronger version of it: **what does the shipped
+binary actually do that the previous stage's did not?**
+
+Method matters here, and the first attempt was wrong. Comparing `stage89.elf` against
+`stage90.elf` by function size looked promising — 48 of 192 shared functions differed — but the
+comparison is unusable: the stage token appears in generated headers and in nearly every log
+string, so almost every function's size shifts for reasons that have nothing to do with the
+changes. Discarded rather than reported.
+
+The usable comparison holds the stage constant: build `stage90` twice, once with the recovery
+nets enabled and once with them off, and diff the **call targets** of every function. Same
+translation units, same tokens, same flags — the only difference is the switches.
+
+```
+functions whose call targets differ: 3
+  stage90_main               + stage90_hw_watchdog_arm
+  platform_reboot            + stage90_hw_watchdog_bite_now
+  stage90_arm_deadman_reset  + gic_readonly_snapshot, log_kv32, stage90_arm_pc_sampling_watchdog
+```
+
+**Three functions, and all three are the recovery nets themselves.** No other function in the
+payload calls anything different with the nets on than with them off. That is worth having for
+the first boot: enabling the two nets cannot perturb control flow anywhere else.
+
+`kernel_entry` shows no call-list change because its `stage90_arm_deadman_reset()` call is
+unconditional — the switch is inside the callee, so the call site is present either way.
+
+**What this does not cover.** Four changes have no switch and so are not isolated by this
+comparison: F-AM1 (the alias move), the device-tree additions, the `gic.c` sampling-budget
+split, and `mmu.c`'s descriptor classifier. Each was verified separately — SO_ONLY emits zero
+Normal-NC descriptor values, the device-tree counts are checked by the payload's own selftest,
+the budget split can only make the watchdog fire later, and F-AM1's failure mode is a named
+`FAIL_RAM_CONSOLE` bit — but none of them is visible in this measurement, and this section
+should not be read as saying they are.
 ## 6. What this audit cannot bound
 
 - **The watchdog's register semantics.** The readback and liveness checks confirm the
