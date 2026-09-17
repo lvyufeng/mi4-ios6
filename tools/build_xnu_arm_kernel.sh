@@ -234,9 +234,12 @@ INCLUDES=(
     -I"$OPTION_HEADERS"
     -I"$DEVICE_HEADERS"
     -I"$MIG_HEADERS"
-    -I"$XNU/osfmk"
+    # `-I$XNU/osfmk` and `-I$XNU/bsd` are NOT here: they are inserted per file by `COMP_FIRST`,
+    # because which of the two comes first is a property of the file being compiled and not of the
+    # build. They go after the generated roots, never before - putting the component ahead of MIG's
+    # output re-breaks the six `osfmk/vm` files experiment-124 fixed.
+    COMP_FIRST_PLACEHOLDER
     -I"$XNU/iokit"
-    -I"$XNU/bsd"
     -I"$XNU/libkern"
     -I"$XNU/pexpert"
     -I"$XNU"
@@ -315,13 +318,39 @@ while read -r src; do
     name=$(basename "$src" .c)
     # Disambiguate: the manifest has files of the same name in different components.
     key=$(printf '%s' "$src" | sed "s|$XNU/||; s|/|_|g; s|\.c$||")
+    # Apple's include order puts the file's OWN component first:
+    #   INCFLAGS_GEN = -I$(SRCROOT)/$(COMPONENT) -I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)
+    # (MakeInc.def:465), and a single flat include list cannot express that. It matters:
+    # `osfmk/kern/ast.h` and `bsd/kern/ast.h` **guard themselves with the same `_KERN_AST_H_`**,
+    # and `bsd/kern/kern_event.c:101` includes `<kern/ast.h>` for `AST_KEVENT_REDRIVE_THREADREQ`,
+    # which only the BSD one defines. With osfmk first the guard is already taken, the BSD header is
+    # skipped, and the error is "use of undeclared identifier" for a macro that is in the file the
+    # line above asked for. The array goes BEFORE `INCLUDES` - `-I` order is left to right, and a
+    # first version appended it, which made the component LAST and changed nothing.
+    # The component roots go where the placeholder is - after the generated roots, before the other
+    # components - and which is first depends on the file.
+    SRC_COMPONENT=$(printf '%s' "${src#"$XNU"/}" | cut -d/ -f1)
+    case "$SRC_COMPONENT" in
+        bsd)   COMP_ROOTS=(-I"$XNU/bsd" -I"$XNU/osfmk") ;;
+        osfmk) COMP_ROOTS=(-I"$XNU/osfmk" -I"$XNU/bsd") ;;
+        *)     COMP_ROOTS=(-I"$XNU/osfmk" -I"$XNU/bsd") ;;
+    esac
+    FILE_INCLUDES=()
+    for _inc in "${INCLUDES[@]}"; do
+        if [[ $_inc == COMP_FIRST_PLACEHOLDER ]]; then
+            FILE_INCLUDES+=("${COMP_ROOTS[@]}")
+        else
+            FILE_INCLUDES+=("$_inc")
+        fi
+    done
+
     # shellcheck disable=SC2207
     COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" "$(component_of "$src")") )
     # Bounded. A file that sends clang into a loop must cost seconds, not the whole session: one
     # did, for 45 minutes, because this had no timeout and its output was buffered behind a pipe.
     # A timeout is reported as its own outcome rather than as a compile failure, because "clang
     # hung" and "XNU does not compile" are different findings.
-    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${INCLUDES[@]}" \
+    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${FILE_INCLUDES[@]}" \
          -c "$src" -o "$OUT/$key.o" 2>"$OUT/$key.log"; then
         ok=$((ok + 1))
         rm -f "$OUT/$key.log"

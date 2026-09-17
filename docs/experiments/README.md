@@ -152,6 +152,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-136](experiment-136-assym-and-a-correction.md) | The Sixth Generator (`genassym.c`), and a Correction to the Fifth Experiment |
 | stage90 | [experiment-137](experiment-137-work-order.md) | The Work Order, Computed From the Image: `arm_init` Reaches a Stub One Edge In |
 | stage90 | [experiment-138](experiment-138-underscore-convention-and-work-list.md) | The Assembly Underscore Convention, and the Work List Completed |
+| stage90 | [experiment-139](experiment-139-two-ast-headers.md) | Two Headers Named `kern/ast.h`, and Apple's Per-Component Include Order |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

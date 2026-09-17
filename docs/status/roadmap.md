@@ -1534,6 +1534,24 @@ source"). Both fixed; the test is now "does an object exist", which is what the 
 **Image: 416 stubs, 130 on the boot path.** The Mach-O-vs-ELF question is untouched and still owns
 the 23 deepest.
 
+**AND XNU HAS TWO HEADERS NAMED `kern/ast.h`** (2026-09-17,
+[`experiment-139`](../experiments/experiment-139-two-ast-headers.md)). `osfmk/kern/ast.h:63` and
+`bsd/kern/ast.h:34` **guard themselves with the same `_KERN_AST_H_`** and are not variations of each
+other — `AST_KEVENT_REDRIVE_THREADREQ` is in the BSD one only. With `osfmk` ahead of `bsd`,
+`bsd/kern/kern_event.c:101`'s `<kern/ast.h>` finds the Mach header, takes the guard, and the BSD one
+is skipped: `use of undeclared identifier` for a macro in the file the line above asked for.
+
+Apple's order is per component and the file's own comes **first** (`MakeInc.def:463-469`), which is
+what experiment-117 recorded a flat include list cannot reproduce — and this is the first case where
+it *matters*. The two component roots now move per file, after the generated roots. **That position
+is not free:** putting them ahead of MIG's output re-breaks the six `osfmk/vm` files
+experiment-124 fixed — measured, and the first two attempts at this change did exactly that, one
+appending the roots instead of prepending (no effect) and one putting them before everything (594 of
+615, six regressions).
+
+**`RELEASE` 599 → 600 of 615, `STAGE90_BOOT` 406 → 407 of 426, image 416 → 377 stubs, boot path
+130 → 120.**
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
