@@ -130,6 +130,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-114](experiment-114-kernel-manifest-compiled.md) | The Kernel's Own File List, Compiled: 172 of 569 |
 | stage90 | [experiment-115](experiment-115-minimal-boot-configuration.md) | A Minimal-Boot Configuration, and One Define That Unlocked Twelve Files |
 | stage90 | [experiment-116](experiment-116-define-generator-and-timeout.md) | A 45-Minute Hang, and Two Tooling Defects It Exposed |
+| stage90 | [experiment-117](experiment-117-shadows-and-broad-paths.md) | Two Shims Were Shadowing Real Headers, and a Broad Include Path Cost Four Files |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

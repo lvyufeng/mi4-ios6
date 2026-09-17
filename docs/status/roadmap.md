@@ -961,6 +961,17 @@ Corrected: **`RELEASE` 197 of 569 compile** (was 172), **`STAGE90_BOOT` 191 of 4
 preprocessor (`clang -E` exits normally), and no single option reproduces it. Left as an unfinished
 bisect rather than implied to be resolved.
 
+**Two shims were shadows of real files** (2026-09-17,
+[`experiment-117`](../experiments/experiment-117-shadows-and-broad-paths.md)). `security/_label.h`
+and `san/kasan.h` were hand-written as absent; both are in the tarball **at the tree root**, and the
+search that concluded otherwise looked under `osfmk/`. Deleting them and adding `-I$XNU` raised the
+minimal build from 191 to 196 and `RELEASE` from 197 to **204**. The same experiment found the
+opposite lesson: putting `osfmk/libsa` on the include path to get its `uint_t` cost four files,
+because that directory also holds a bootloader-context `string.h` and `sys/` that shadow the real
+ones — Apple exports a *selected list* per component (`EXPORT_MI_LIST` → `EXPORT_HDRS`), and exposing
+the whole source directory is a different and worse thing. Both changes are net measurement, neither
+is a change to XNU's code.
+
 What remains is the Mach-view-versus-BSD-view collisions (`uthread_t`, a genuinely conflicting
 `copyinstr`, `ORDINARY`/`struct tty`), and Apple's build resolves those through the **exported-header
 set** — `makedefs/MakeInc.def:463-469` shows `INCFLAGS_IMPORT` pointing at

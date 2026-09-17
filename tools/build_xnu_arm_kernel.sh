@@ -110,10 +110,36 @@ DEFINES=(
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.
 GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
 
+# The component order is Apple's, from makedefs/MakeInc.def:46-48:
+#
+#   COMPONENT_LIST        = osfmk bsd libkern iokit pexpert libsa security san
+#   COMPONENT_IMPORT_LIST = $(filter-out $(COMPONENT),$(COMPONENT_LIST))
+#
+# so a component sees its own tree first and then the others in that order. A single build cannot
+# vary the order per file the way that mechanism does, so this uses the list's own order and the
+# components' headers are mostly in disjoint namespaces (sys/, kern/, mach/, iokit/, pexpert/,
+# security/, san/, libkern/), which keeps the approximation honest.
+#
+# `-I$XNU` is what makes <security/_label.h> and <san/kasan.h> resolve. Both exist in the tarball
+# and two hand-written shims used to shadow them - see docs/experiments/experiment-117.
+#
+# osfmk/libsa is a real component in COMPONENT_LIST and its types.h defines uint_t, but its *source*
+# directory must NOT go on the include path: it holds `string.h`, `stdlib.h` and a `sys/` subdir for
+# the bootloader context, and putting it there cost 4 files (191 -> 187) by shadowing the real ones.
+# Apple exports a *selected list* from each component (EXPORT_MI_LIST in each Makefile) into
+# EXPORT_HDRS; exposing the whole directory is not the same thing, and this is the fourth time in
+# this project that a broad include path has been the bug rather than the fix.
 INCLUDES=(
     -I"$GENERATED/bsd" -I"$GENERATED"
-    -I"$MIG_HEADERS" -I"$XNU/osfmk" -I"$XNU/iokit" -I"$XNU/bsd" -I"$XNU/libkern"
-    -I"$XNU/EXTERNAL_HEADERS" -I"$XNU/pexpert" -I"$XNU/osfmk/arm" -I"$XNU/bsd/arm"
+    -I"$MIG_HEADERS"
+    -I"$XNU/osfmk"
+    -I"$XNU/iokit"
+    -I"$XNU/bsd"
+    -I"$XNU/libkern"
+    -I"$XNU/pexpert"
+    -I"$XNU"
+    -I"$XNU/osfmk/arm" -I"$XNU/bsd/arm"
+    -I"$XNU/EXTERNAL_HEADERS"
     -I"$SHIMS" -I"$SHIMS/kern" -I"$SHIMS/mach"
     -I"$SHIMS_ARM" -I"$SHIMS_ARM/kern" -I"$SHIMS_ARM/mach"
     -I"$SHIMS_ARM/sys" -I"$SHIMS_ARM/sys/_pthread"
