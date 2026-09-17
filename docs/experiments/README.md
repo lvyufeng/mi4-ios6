@@ -127,6 +127,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-111](experiment-111-osfmk-measured.md) | The Rest of osfmk Measured — and the Build Configuration Was Never Absent |
 | stage90 | [experiment-112](experiment-112-apple-kernel-config-extracted.md) | Apple's Own Kernel Configuration, Extracted and Used |
 | stage90 | [experiment-113](experiment-113-arm-kernel-build-manifest.md) | Apple's Own Build Manifest for an ARM Kernel, Resolved: 694 Files |
+| stage90 | [experiment-114](experiment-114-kernel-manifest-compiled.md) | The Kernel's Own File List, Compiled: 172 of 569 |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

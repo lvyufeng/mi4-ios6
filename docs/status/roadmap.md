@@ -913,6 +913,25 @@ RELEASE: 694 file(s) selected for arm
   listed but absent:    3      (hand-written ARM asm Apple did not publish)
 ```
 
+**And compiled** (2026-09-17, [`experiment-114`](../experiments/experiment-114-kernel-manifest-compiled.md)):
+`tools/build_xnu_arm_kernel.sh` compiles the manifest, and **172 of 569 (30%) of its C files
+compile**. Where it succeeds is the finding:
+
+| Component | Failed |
+| --- | --- |
+| `osfmk/arm` | **0** — the whole bring-up path |
+| `iokit` | 1 of 62 |
+| `pexpert` | 4 of 9 |
+| `libkern` | 32 of 70 |
+| `osfmk` | 77 of 230 |
+| `bsd` | **288 of 293** |
+
+**The Mach side largely works and the BSD side is almost entirely blocked**, and `bsd/net`,
+`bsd/netinet` and `bsd/netinet6` are 254 of the 397 failures — the network stack, which a boot to a
+first scheduler tick does not need. `<sys/sysproto.h>` was the largest single blocker and is
+*generatable* (`bsd/kern/makesyscalls.sh`, wrapped by `tools/gen_bsd_headers.sh`); its 55 errors are
+gone and the pass count did not move, because those files fail on other things behind it.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
