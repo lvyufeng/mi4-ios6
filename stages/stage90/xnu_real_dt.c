@@ -36,6 +36,7 @@
  */
 #include <pexpert/device_tree.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/arm/consistent_debug.h>
 
 /* The probe's own arena for the entries it hands back; XNU's code allocates nothing here. */
 static struct stage90_xnu_real_dt_result g_result;
@@ -75,6 +76,11 @@ static void real_dt_log(const struct stage90_xnu_real_dt_result *r)
     xnu_log_kv32("xnu_real_dt_parse_debug_arg_found", r->parse_debug_arg_found);
     xnu_log_kv32("xnu_real_dt_parse_debug_arg_value", r->parse_debug_arg_value);
     xnu_log_kv32("xnu_real_dt_parse_absent_arg_found", r->parse_absent_arg_found);
+    xnu_log_kv32("xnu_real_dt_cd_inherit_ok", r->cd_inherit_ok);
+    xnu_log_kv32("xnu_real_dt_cd_enabled", r->cd_enabled);
+    xnu_log_kv32("xnu_real_dt_cd_register_ok", r->cd_register_ok);
+    xnu_log_kv32("xnu_real_dt_cd_record_readback_ok", r->cd_record_readback_ok);
+    xnu_log_kv32("xnu_real_dt_cd_header_intact", r->cd_header_intact);
     xnu_log_kv32("xnu_real_dt_checksum", r->checksum);
 }
 
@@ -350,6 +356,71 @@ int stage90_xnu_real_dt_run(struct boot_args *args, void *tree, uint32_t tree_le
         if (r->parse_stage_arg_found != 1u || r->parse_stage_arg_value != 83u ||
             r->parse_debug_arg_found != 1u || r->parse_debug_arg_value != 0x144u ||
             r->parse_absent_arg_found != 0u) {
+            r->failures++;
+        }
+    }
+
+    /*
+     * 8-10. XNU's consistent-debug registry, driven end to end.
+     *
+     * This is the crash-log structure iBoot hands the kernel, and it is the first piece of XNU
+     * that does something rather than observe something. Three calls, and each one is a
+     * different part of the subsystem:
+     *
+     *   PE_consistent_debug_inherit()  looks up /chosen's "consistent-debug-root" through XNU's
+     *                                 own DT reader, takes the first word as a physical address,
+     *                                 and maps it. Its -1 return when the property is missing is
+     *                                 how XNU reports "this platform has no registry".
+     *   PE_consistent_debug_enabled()  the registry pointer is now non-NULL.
+     *   PE_consistent_debug_register() allocates an entry by CAS (through the shim's
+     *                                 OSCompareAndSwap64, since ldrexd is not ours) and writes a
+     *                                 record into it.
+     *
+     * The record is read back here rather than trusted, because a register that returned 0
+     * without writing anything would look identical from the outside.
+     */
+    r->checks++;
+    if (PE_consistent_debug_inherit() == 0) {
+        r->cd_inherit_ok = 1u;
+    } else {
+        r->failures++;
+    }
+
+    r->checks++;
+    r->cd_enabled = (uint32_t)PE_consistent_debug_enabled();
+    if (r->cd_enabled != 1u) {
+        r->failures++;
+    }
+
+    r->checks++;
+    {
+        /*
+         * A record id that follows the same eight-ASCII-characters convention as the header -
+         * this is our own marker, not an Apple one, so it is spelled out here with the letters
+         * that say what it is.
+         */
+        const uint64_t record_id = DEBUG_RECORD_ID_LONG('S', 'T', '9', '0', 'D', 'B', 'G', 'R');
+        const uint64_t physaddr = 0xde500000u;   /* the ram_console window, as a plausible payload */
+        const uint64_t length = 0x1000u;
+        dbg_registry_t *registry =
+            (dbg_registry_t *)(uintptr_t)stage90_xnu_consistent_debug_region_init();
+        dbg_record_header_t *record = &registry->records[0];
+
+        if (PE_consistent_debug_register(record_id, physaddr, length) == 0) {
+            r->cd_register_ok = 1u;
+        } else {
+            r->failures++;
+        }
+        if (record->record_id == record_id && record->physaddr == physaddr &&
+            record->length == length) {
+            r->cd_record_readback_ok = 1u;
+        }
+        /* The title header must survive: the registry's own id is not the first record slot. */
+        r->cd_header_intact =
+            (registry->top_level_header.num_records == DEBUG_REGISTRY_MAX_RECORDS &&
+             registry->top_level_header.record_size_bytes == (uint32_t)sizeof(dbg_record_header_t)) ? 1u : 0u;
+        if (r->cd_register_ok != 1u || r->cd_record_readback_ok != 1u ||
+            r->cd_header_intact != 1u) {
             r->failures++;
         }
     }

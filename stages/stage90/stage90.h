@@ -6770,6 +6770,11 @@ struct stage90_xnu_real_dt_result {
     uint32_t parse_debug_arg_found;
     uint32_t parse_debug_arg_value;
     uint32_t parse_absent_arg_found;
+    uint32_t cd_inherit_ok;
+    uint32_t cd_enabled;
+    uint32_t cd_register_ok;
+    uint32_t cd_record_readback_ok;
+    uint32_t cd_header_intact;
     uint32_t checksum;
 };
 
@@ -6796,6 +6801,15 @@ static inline uint32_t stage90_xnu_real_dt_checksum(const struct stage90_xnu_rea
  */
 #if !defined(STAGE90_XNU_REAL_DT)
 #define STAGE90_XNU_REAL_DT 0u
+#endif
+
+/*
+ * XNU's consistent-debug registry, the structure iBoot hands to the kernel. Defined in
+ * xnu_object_shims.c, which is only linked when STAGE90_XNU_REAL_DT is on, so the device-tree
+ * builder can only ask for it in that configuration.
+ */
+#if STAGE90_XNU_REAL_DT
+uint32_t stage90_xnu_consistent_debug_region_init(void);
 #endif
 int gic_sgi_selftest(void);
 int gic_timer_selftest(void);

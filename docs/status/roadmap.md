@@ -31,7 +31,8 @@ recovered through `/proc/last_kmsg`, under the safety rules in the root `README.
 | Working `LDREX`/`STREX` (the exclusive monitor tracks) | ✅ | `experiment-96`, measured in four configurations |
 | Cacheable Normal DRAM with both caches on | ✅ | `experiment-97` (I-cache), `experiment-98` (I+D) |
 | Conforming `boot_args` checked on the device | ✅ | `experiment-99` (`xnu_ba_checks=10`, `failures=0`) |
-| Public-XNU code executing on the device | ✅ | `experiment-100`: `pexpert/gen/device_tree.c`, `failures=0` |
+| Public-XNU code executing on the device | ✅ | `experiment-100`: `pexpert/gen/device_tree.c`; four objects running by `experiment-102` |
+| A public-XNU subsystem doing work, not just observing | ✅ | `experiment-102`: the consistent-debug registry inherits, enables, allocates and writes a record |
 | MSM8974 replacement for `pe_arm_init_interrupts`, verified on hardware | ✅ | `experiment-101` (`checks=8`, `failures=0`); **no caller yet** |
 
 This is a real and unusually complete bring-up layer for a platform with no vendor

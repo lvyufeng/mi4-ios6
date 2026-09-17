@@ -4,6 +4,7 @@
 #include <mach/machine/vm_types.h>
 #include <pexpert/device_tree.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/arm/consistent_debug.h>
 #include <libkern/OSAtomic.h>
 #include <machine/machine_routines.h>
 
@@ -97,11 +98,42 @@ Boolean OSCompareAndSwap64(UInt64 oldValue, UInt64 newValue, volatile UInt64 *ad
     return TRUE;
 }
 
+/*
+ * Stands in for iBoot's side of the consistent-debug boundary: the registry region exists, and
+ * its top-level header is filled in. iBoot does exactly this on a real device; XNU's
+ * PE_consistent_debug_inherit() only maps what it is pointed at and reads num_records from it.
+ *
+ * The three fields are the three XNU reads. records[] is left zeroed because
+ * consistent_debug_allocate_entry() claims an entry by CASing kDbgIdUnusedEntry (0) to
+ * kDbgIdReservedEntry, so zero is the claimable state.
+ */
+uint32_t stage90_xnu_consistent_debug_region_init(void)
+{
+    dbg_registry_t *registry = (dbg_registry_t *)(uintptr_t)g_stage90_xnu_consistent_debug_window;
+
+    memset(registry, 0, sizeof(*registry));
+    registry->top_level_header.record_id = kDbgIdTopLevelHeader;
+    registry->top_level_header.num_records = DEBUG_REGISTRY_MAX_RECORDS;
+    registry->top_level_header.record_size_bytes = (uint32_t)sizeof(dbg_record_header_t);
+
+    return (uint32_t)(uintptr_t)g_stage90_xnu_consistent_debug_window;
+}
+
+/*
+ * On this payload the high window is the identity map: the region lives in .bss inside PA 0-2 MB,
+ * which the identity table maps VA = PA, so the window address is the physical address.
+ *
+ * The guard matters more than the mapping. Returning phys_addr unconditionally would make this a
+ * shim that hands out a readable pointer to any physical address a caller names, which is exactly
+ * the property a real ml_map_high_window does not have - it creates a mapping in a window the
+ * kernel chose. This one only answers for the one region it owns.
+ */
 vm_map_address_t ml_map_high_window(vm_offset_t phys_addr, vm_size_t len)
 {
-    (void)phys_addr;
-    /* Stage84 host-proof support only; public consistent-debug code is never executed on hardware. */
     if (len == 0u || len > sizeof(g_stage90_xnu_consistent_debug_window)) {
+        return 0u;
+    }
+    if (phys_addr != (vm_offset_t)(uintptr_t)g_stage90_xnu_consistent_debug_window) {
         return 0u;
     }
     return (vm_map_address_t)(uintptr_t)g_stage90_xnu_consistent_debug_window;

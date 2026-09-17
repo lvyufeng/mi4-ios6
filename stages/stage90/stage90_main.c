@@ -645,11 +645,27 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
     apple_dt_prop_str(b, "open-provenance", "stage90-rejected-noopen");
 
     /* /chosen */
+#if STAGE90_XNU_REAL_DT
+    /*
+     * XNU's crash-log registry lives at the physical address this property names - iBoot's job on
+     * a real device, and the payload's here. PE_consistent_debug_inherit() looks up exactly this
+     * path and property (pe_consistent_debug.c:35-42) and reads the first word as a physical
+     * address. Present only when the switch is on, because the region it points at is part of the
+     * same change.
+     */
+    apple_dt_node_begin(b, 5, 0);
+    apple_dt_prop_str(b, "name", "chosen");
+    apple_dt_prop_str(b, "boot-args", "debug=0x144 serial=0x1 mi4ios6.stage=83 xnu-early-init xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm live-pmap ttbr-live tlb-live pmap-restore prevm-pexpert dtinit-facts peid-machine pexpert-hook-ready pmap-ref st83dt=0x83");
+    apple_dt_prop_str(b, "stdout-path", "ram-console");
+    apple_dt_prop_u32_array(b, "ram-console-reg", ram_console_reg, ARRAY_SIZE(ram_console_reg));
+    apple_dt_prop_u32(b, "consistent-debug-root", stage90_xnu_consistent_debug_region_init());
+#else
     apple_dt_node_begin(b, 4, 0);
     apple_dt_prop_str(b, "name", "chosen");
     apple_dt_prop_str(b, "boot-args", "debug=0x144 serial=0x1 mi4ios6.stage=83 xnu-early-init xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm live-pmap ttbr-live tlb-live pmap-restore prevm-pexpert dtinit-facts peid-machine pexpert-hook-ready pmap-ref st83dt=0x83");
     apple_dt_prop_str(b, "stdout-path", "ram-console");
     apple_dt_prop_u32_array(b, "ram-console-reg", ram_console_reg, ARRAY_SIZE(ram_console_reg));
+#endif
 
     /* /memory */
     apple_dt_node_begin(b, 4, 0);

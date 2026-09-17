@@ -198,6 +198,7 @@ if [[ ${XNU_REAL_DT_VALUE:-0} != 0 ]]; then
     $REPO_ROOT/out/stage90/xnu-objects/bootargs.o
     $REPO_ROOT/out/stage90/xnu-objects/pe_gen.o
     $REPO_ROOT/out/stage90/xnu-objects/arm_pe_bootargs.o
+    $REPO_ROOT/out/stage90/xnu-objects/arm_pe_consistent_debug.o
   )
   echo "linking public-XNU objects: ${XNU_OBJECTS[*]##*/}"
 fi
