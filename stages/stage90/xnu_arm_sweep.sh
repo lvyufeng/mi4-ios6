@@ -60,7 +60,25 @@ if ! command -v "${CC_CMD[0]}" >/dev/null 2>&1; then
   exit 2
 fi
 
+# The MIG-generated headers (tools/gen_mach_headers.sh) come first: several of the mach headers
+# XNU's kernel sources include do not exist in the tarball at all.
+MIG_HEADERS=${MIG_HEADERS:-$REPO_ROOT/out/mach_headers}
+
+# The force-include set the entry-path sweep established, shared so the two scripts measure the
+# same configuration rather than two different ones.
+FORCE_INCLUDES=(
+  -include sys/_types/_u_int.h
+  -include arm/simple_lock.h
+  -include kern/queue.h
+  -include kern/ast.h
+  -include stdatomic.h
+  -include mach/task_policy.h
+  -include mach/thread_policy.h
+  -include mi4ios6_build_config.h
+)
+
 INCLUDES=(
+  -I"$MIG_HEADERS"
   -I"$XNU/osfmk"
   -I"$XNU/bsd"
   -I"$XNU/libkern"
@@ -116,10 +134,32 @@ FLAGS=(
   -DPRIVATE=1
   -DCONFIG_SCHED_TIMESHARE_CORE=1
   -DCONFIG_SCHED_TRADITIONAL=1
+  # MACH_KERNEL, not just MACH_KERNEL_PRIVATE - and the distinction is worth recording, because
+  # getting it wrong is silent rather than loud. kern/xpr.h:83 is `#ifdef MACH_KERNEL /
+  # #include <xpr_debug.h> / #else / #include <sys/features.h>`, so without it the file takes the
+  # *userland* branch and asks for a header no kernel build has. One define, and pmap.c, trap.c,
+  # locks_arm.c and status.c all move.
+  -DMACH_KERNEL=1
+  # The BSD side. task.h:236 and thread.h:467 put bsd_info and uthread behind `#ifdef MACH_BSD`,
+  # and arm/ files read both.
+  -DMACH_BSD=1
+  # KPC guards cpu_kpc_shadow/cpu_kpc_reload (cpu_data_internal.h:252) and MONOTONIC guards
+  # cpu_monotonic (:259, struct mt_cpu from machine/monotonic.h). Both have to be ON, and the
+  # reason is in the layer itself rather than in a preference: kpc_arm.c and monotonic_arm.c are
+  # files *in* osfmk/arm and read those members. Setting them to 0 leaves the files unable to
+  # compile and does not simplify anything.
+  -DKPC=1
+  -DMONOTONIC=1
+  # XPR_DEBUG=0 skips kern/xpr.h's `#include <xpr_debug.h>` (line 91), a build-generated header
+  # the tarball does not ship. Same shape as the other values here: the source offers an off switch.
+  -DXPR_DEBUG=0
+  # LOCK_PRIVATE gates osfmk/arm/locks.h:254-320, which is where LCK_MTX_THREAD_MASK lives - and
+  # locks_arm.c:2739 uses it. Without this the file is one undeclared identifier short.
+  -DLOCK_PRIVATE=1
 )
 
 if [[ -n $DETAIL ]]; then
-  "${CC_CMD[@]}" "${FLAGS[@]}" "${INCLUDES[@]}" "$XNU/osfmk/arm/$DETAIL" 2>&1 | head -60
+  "${CC_CMD[@]}" "${FLAGS[@]}" "${FORCE_INCLUDES[@]}" "${INCLUDES[@]}" "$XNU/osfmk/arm/$DETAIL" 2>&1 | head -60
   exit 0
 fi
 
@@ -134,7 +174,7 @@ declare -a FAILED=()
 
 for src in "$XNU"/osfmk/arm/*.c; do
   name=$(basename "$src")
-  if "${CC_CMD[@]}" "${FLAGS[@]}" "${INCLUDES[@]}" "$src" > /tmp/sweep-one.txt 2>&1; then
+  if "${CC_CMD[@]}" "${FLAGS[@]}" "${FORCE_INCLUDES[@]}" "${INCLUDES[@]}" "$src" > /tmp/sweep-one.txt 2>&1; then
     ok=$((ok + 1))
     echo "  ok   $name"
   else

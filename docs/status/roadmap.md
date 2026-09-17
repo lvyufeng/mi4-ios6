@@ -795,6 +795,17 @@ default `-ferror-limit` is 20 and a missing header is a *fatal* error that ends 
 unit, so the count was truncated and the fatal's own line counted as one of them. The script now
 passes `-ferror-limit=0` and labels any count containing a fatal as a floor.)*
 
+**AND THE WHOLE ARM LAYER COMPILES (2026-09-17, [`experiment-110`](../experiments/experiment-110-xnu-arm-layer-compiles.md)).**
+`tools/build_xnu_arm_layer.sh`: **32 of 32** files in `osfmk/arm` compile to objects — 118,982 bytes
+of text — against **3 of 32** three turns earlier. That layer contains `arm_init.c`, `arm_vm_init.c`,
+`pmap.c`, `machine_routines.c`, `locks_arm.c` and `trap.c`. **Not one line of XNU's code was
+changed**: the entire movement is the flag set, plus 24 MIG headers generated from Apple's own
+`.defs` and eleven headers the build supplies.
+
+What remains is a link: **443 distinct undefined symbols**, most of them outside `osfmk/arm` — the
+kernel proper, `libkern`, `bsd`, and compiler runtime (`__aeabi_memcpy4`, `__aeabi_uldivmod`). So
+the order is: the ARM layer compiles; XNU does not link, does not build, and does not run.
+
 **AND THE ENTRY PATH NOW COMPILES (2026-09-17, [`experiment-109`](../experiments/experiment-109-xnu-arm-entry-path-compiles.md)).**
 `arm_init.c` — the function `_start` branches to, and the exact thing Stage90's entry image stubs —
 is **0 errors**, as are `arm_vm_init.c` and `machine_routines.c`. The layer as a whole went from 3
