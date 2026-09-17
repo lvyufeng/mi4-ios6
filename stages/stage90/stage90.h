@@ -6660,8 +6660,23 @@ struct stage90_xnu_msm8974_shim_result {
     uint32_t arm_cntp_ctl;
     uint32_t arm_prepared;
     uint32_t arm_committed;
+    /* Bounded run of the ordered arm path with real IRQ delivery. */
+    uint32_t arm_irq_before;
+    uint32_t arm_irq_after;
+    uint32_t arm_delivered;
+    uint32_t arm_disarmed;
+    uint32_t arm_elapsed_us;
+    uint32_t arm_interval_us;
     uint32_t checksum;
 };
+
+/*
+ * The ordered arm path's bounded exercise: prepare(interval), commit(), wait for a delivered
+ * timer interrupt, disarm(). Separate from the shim's own run() because it can only be called
+ * once IRQ delivery is known-good in the payload, which is later in kernel_entry than the
+ * registration check. Returns 0 if the timer fired and was serviced.
+ */
+int stage90_xnu_msm8974_shim_arm_demo(uint32_t interval_us);
 
 int stage90_xnu_msm8974_shim_run(void);
 int stage90_xnu_msm8974_shim_prepare(uint32_t interval_us);

@@ -916,8 +916,18 @@ The first run failed all eight on a single missing assignment: `r->int_address`/
 were declared, logged and checked but never written, while the mechanism underneath was correct
 all along. Sixth instance of this project's recurring two-places-one-write defect.
 
-**Not yet wired to anything** — nothing calls it, because no XNU platform bring-up runs here yet.
-Substituting it for `pe_arm_init_interrupts` is the step that needs a caller.
+**It now has a caller, and drives hardware (2026-09-17, [`experiment-104`](../experiments/experiment-104-shim-drives-the-timer.md)).**
+`prepare`/`commit`/`disarm` run for real: a 10 ms interval goes through the registered
+`tbd_set_decrementer`, the interrupt comes back through the payload's GIC handler
+(`arm_irq_before=1 → arm_irq_after=2`), the measured elapsed time is 9961 µs against the 10000 µs
+asked for — 0.4% — and the timer is disarmed on every path. That run also found a real bug: the
+interval guard in `prepare` bounded `interval_us` by `0xffffffff / CNTFRQ` (223 µs) instead of
+bounding the intermediate `interval_us * 96`, so it rejected every realistic interval and the demo
+produced no output at all. Found by running it; the code reads like a bound either way.
+
+What is still not true: XNU does not call it. The shim registers its own ops through a mirror of
+`ml_init_timebase`'s guard, because XNU is not running. Substituting it for
+`pe_arm_init_interrupts` is the step that needs XNU.
 
 ### Phase 3 — specification written
 

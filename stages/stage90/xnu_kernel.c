@@ -117,7 +117,7 @@ int kernel_entry(struct boot_args *args)
      * Non-fatal, like the other probes below: this is evidence about a boundary, not a
      * precondition for the boot.
      */
-    (void)stage90_xnu_real_dt_run(args->deviceTreeP, args->deviceTreeLength);
+    (void)stage90_xnu_real_dt_run(args, args->deviceTreeP, args->deviceTreeLength);
 #endif
 
     ml_init_timebase();
@@ -189,6 +189,19 @@ int kernel_entry(struct boot_args *args)
         xnu_log_puts("kernel_entry bad: timer IRQ selftest\n");
         return 0;
     }
+
+#if STAGE90_XNU_MSM8974_SHIM
+    /*
+     * Phase 3: the first caller the platform shim's ordered arm path has ever had. It is placed
+     * here, not next to the shim's registration check, because it needs IRQ delivery to be live -
+     * the timer and SGI selftests above are what establish that. A failure here is therefore about
+     * the shim's sequence rather than about the platform.
+     *
+     * Non-fatal, like the other Phase 3 probes: it disarms on every path, so it cannot leave an
+     * interrupt source armed that the payload's own timer code did not expect.
+     */
+    (void)stage90_xnu_msm8974_shim_arm_demo(10000u);
+#endif
 
     if (!mmu_stage90_ttbr0_roundtrip_selftest()) {
         xnu_log_puts("kernel_entry bad: Stage84 TTBR0 roundtrip selftest\n");

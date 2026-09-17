@@ -387,6 +387,82 @@ int stage90_xnu_msm8974_shim_run(void)
 	return 0;
 }
 
+/*
+ * The bounded run of the ordered arm path, and the first caller prepare/commit/disarm have ever
+ * had. Every earlier check of this shim is a fact read once; this one drives the timer through
+ * the same registered tbd_ops XNU would call, waits for the interrupt to actually arrive through
+ * the payload's own handler, and turns it off again.
+ *
+ * Why it lives here rather than in run(): it needs IRQ delivery to be live, and run() is called
+ * before the payload's own GIC and timer selftests have run. Being second is the point - by the
+ * time this executes, "an interrupt can be delivered at all" is an established fact, so a failure
+ * here is about the shim's sequence rather than about the platform.
+ *
+ * The bound matters. The spin is capped, so a timer that never fires is a reported failure and not
+ * a hang - and the disarm runs on every path, so the shim cannot leave an interrupt source armed
+ * that the payload's own timer code did not expect to find.
+ */
+int stage90_xnu_msm8974_shim_arm_demo(uint32_t interval_us)
+{
+	struct stage90_xnu_msm8974_shim_result *r = &g_result;
+	uint64_t start;
+	uint32_t waited = 0u;
+
+	if (g_registered == 0u) {
+		xnu_log_puts("stage90 xnu_msm8974_shim: arm_demo called before registration\n");
+		return -1;
+	}
+
+	r->arm_interval_us = interval_us;
+	r->arm_irq_before = stage90_timer_irq_count;
+
+	if (!stage90_xnu_msm8974_shim_prepare(interval_us)) {
+		return -1;
+	}
+	if (!stage90_xnu_msm8974_shim_commit()) {
+		stage90_xnu_msm8974_shim_disarm();
+		return -1;
+	}
+
+	/*
+	 * Wait for the timer interrupt. The cap is derived from the requested interval rather
+	 * than fixed, so a longer interval is given proportionally longer - 100x the interval,
+	 * which is far more than the one tick that is actually needed and still bounded.
+	 */
+	start = timebase_ticks();
+	while (waited < (interval_us * 100u)) {
+		if (stage90_timer_irq_count != r->arm_irq_before) {
+			r->arm_delivered = 1u;
+			break;
+		}
+		waited = timebase_elapsed_us(start, timebase_ticks());
+	}
+
+	r->arm_elapsed_us = waited;
+	stage90_xnu_msm8974_shim_disarm();
+	r->arm_disarmed = 1u;
+	r->arm_irq_after = stage90_timer_irq_count;
+	r->arm_cntp_ctl = shim_read_cntp_ctl();
+
+	xnu_log_puts("stage90 xnu_msm8974_shim arm_demo result:\n");
+	xnu_log_kv32("msm8974_shim_arm_interval_us", r->arm_interval_us);
+	xnu_log_kv32("msm8974_shim_arm_ticks", r->arm_ticks);
+	xnu_log_kv32("msm8974_shim_arm_gicc_ctlr", r->arm_gicc_ctlr);
+	xnu_log_kv32("msm8974_shim_arm_cntp_ctl", r->arm_cntp_ctl);
+	xnu_log_kv32("msm8974_shim_arm_irq_before", r->arm_irq_before);
+	xnu_log_kv32("msm8974_shim_arm_irq_after", r->arm_irq_after);
+	xnu_log_kv32("msm8974_shim_arm_delivered", r->arm_delivered);
+	xnu_log_kv32("msm8974_shim_arm_disarmed", r->arm_disarmed);
+	xnu_log_kv32("msm8974_shim_arm_elapsed_us", r->arm_elapsed_us);
+
+	if (r->arm_delivered != 1u) {
+		xnu_log_puts("stage90 xnu_msm8974_shim: the timer did not fire through the arm path\n");
+		return -1;
+	}
+	xnu_log_puts("stage90 xnu_msm8974_shim: timer armed through tbd_ops, fired, serviced, disarmed\n");
+	return 0;
+}
+
 const struct stage90_xnu_msm8974_shim_result *stage90_xnu_msm8974_shim_result(void)
 {
 	return &g_result;
@@ -424,8 +500,17 @@ int stage90_xnu_msm8974_shim_prepare(uint32_t interval_us)
 		return 0;
 	}
 
-	/* Guard the conversion: ticks = usec * 19.2 must fit CNTP_TVAL's 32 bits. */
-	if (interval_us > (0xffffffffu / STAGE90_XNU_MSM8974_SHIM_EXPECTED_CNTFRQ)) {
+	/*
+	 * Guard the conversion. ticks = usec * 19200000 / 1000000 = usec * 96 / 5, and the thing
+	 * that must not overflow is the *intermediate* `interval_us * 96`, not `interval_us`.
+	 *
+	 * This read `interval_us > 0xffffffff / 19200000` until the first hardware run of the arm
+	 * path, which is a bound of 223 microseconds - off by a factor of a million, and it rejected
+	 * every realistic interval including the 10 ms the demo asks for. The division was there to
+	 * express "the product must fit" and it expressed "the product's *quotient* must be less than
+	 * the frequency", which is not a constraint at all. Found by running it, not by reading it.
+	 */
+	if (interval_us > (0xffffffffu / 96u)) {
 		xnu_log_puts("stage90 xnu_msm8974_shim: interval too large to encode\n");
 		r->failures |= STAGE90_XNU_MSM8974_SHIM_FAIL_DECREMENTER;
 		return 0;
