@@ -1,39 +1,36 @@
 #!/usr/bin/env bash
 #
-# Strip the leading underscore from assembled symbols that C code refers to without one.
+# Assemble XNU's ARM `.s` files for **ELF**, translating the two Darwin-assembler dialect constructs
+# the EABI assembler rejects — without editing anything in XNU's tree.
 #
-#   ./tools/assemble_arm_layer.sh            # assemble osfmk/arm's .s into out/xnu_asm_obj/
-#   ./tools/assemble_arm_layer.sh --syntax   # try every manifest .s and report, writing nothing
+#   ./tools/assemble_arm_layer.sh            # writes out/xnu_asm_obj/
+#   ./tools/assemble_arm_layer.sh --syntax   # report only
 #
-# Why this exists. `osfmk/arm/asm.h:88-98` gives two conventions behind one flag:
+# Why a translation exists at all. `experiment-142` measured that `--target=armv7-apple-darwin`
+# assembles all 17 files and `--target=armv7-none-eabi` assembles 13, and concluded the triple was the
+# answer. **`experiment-150` then measured the other half: LLVM's `ld64.lld` cannot link 32-bit ARM
+# Mach-O** — `unhandled relocation type`, in lld 14 *and* 15, while `-arch arm64` links fine. So the
+# Mach-O path can compile and cannot link on this host, and ELF is the only route to a linked image.
 #
-#   #ifndef __NO_UNDERSCORES__
-#   #define EXT(x)  _ ## x        Darwin: a C symbol `bcopy` is `_bcopy` in assembly
-#   #else
-#   #define EXT(x)  x            ELF:    it is `bcopy` in both
-#   #endif
+# Which makes these two constructs the last four files, and they are small:
 #
-# and this project assembles with `-D__NO_UNDERSCORES__=1` because the toolchain is
-# `armv7-none-eabi` (ELF), where clang emits `bcopy` for `void bcopy(void)`. **But ten of the
-# manifest's assembly files do not use `EXT()`** — they write their labels literally, with the
-# underscore Apple's convention expects:
+#   1. `osfmk/arm/data.s:41,100`       `.section __DATA, __data` — Darwin's `<segment>, <section>`.
+#                                      GNU as wants `.section <name>, "<flags>", %<type>`.
+#   2. `osfmk/arm/machine_routines_asm.s:570`  `.macro COPYIO_BODY` declared with NO parameters and
+#                                      invoked as `COPYIO_BODY copyin`, the body referring to the
+#                                      argument as `$0` (9 sites). GNU as has the same feature spelled
+#                                      `\p0\()` with a declared parameter — verified: `L\p0\()_x`
+#                                      with `BODY copyin` produces the symbol `Lcopyin_x`.
+#   3. `osfmk/arm/lz4_decode_armv7NEON.s`      10 `$N` sites, same mechanism.
 #
-#   osfmk/arm/bcopy.s:40      _bcopy:      /* void bcopy(const void *src, void *dest, size_t len); */
-#   osfmk/arm/bcopy.s:38      .globl _memcpy
+# **This is a dialect translation, not a source change**: the tree is never written to, and the
+# substitution is bounded to the two constructs and asserted to have matched something (a transform
+# that silently matches nothing would leave the file broken in a way that looks like the original
+# problem). It is the same category as the `objcopy --redefine-sym` step below, which exists because
+# `asm.h`'s `EXT(x)` is `_##x` under Apple's convention and the ELF side has to be told otherwise.
 #
-# So those objects assemble cleanly and define the *wrong names* — `_bcopy` where everything else
-# wants `bcopy` — and the failure appears at link time as "undefined reference to `bcopy'" from
-# files that plainly have an implementation. That is the same one-value-two-definitions shape this
-# project keeps meeting, in the assembler's own convention.
-#
-# What this does is apply the flag's own intent to the files that do not use the macro: for each
-# assembled object, rename `_x` to `x` **when `x` is a symbol the link cannot otherwise resolve**.
-# The condition is what keeps it safe — `start.s` defines `_start`, `start` is not undefined, so
-# `_start` is left alone. Stripping unconditionally turned the entry point into `start` and the link
-# lost its entry.
-#
-# This is not a source change: XNU's files are untouched, and the rename is a property of the
-# object, which is what `EXT()` is for in the first place.
+# Measured after it: **17 of 17 manifest `.s` files assemble for ELF**, which is what the Darwin
+# triple was reaching for — and this one can be linked.
 
 set -uo pipefail
 cd "$(dirname "$0")"
@@ -49,7 +46,7 @@ ASSYM=${XNU_ASSYM_OUT:-$REPO_ROOT/out/xnu_assym}/$CONFIG
 OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
 DEVICE_HEADERS=${XNU_DEVICE_HEADERS_OUT:-$REPO_ROOT/out/xnu_device}/$CONFIG
 MANIFEST=${MANIFEST:-$REPO_ROOT/out/xnu_arm_manifest.txt}
-UNDEF=${ASM_UNDEF:-$REPO_ROOT/out/link/RELEASE-measure-undef.txt}
+UNDEF=${ASM_UNDEF:-$REPO_ROOT/out/link/$CONFIG-measure-undef.txt}
 
 NM=${NM:-arm-none-eabi-nm}
 OBJCOPY=${OBJCOPY:-arm-none-eabi-objcopy}
@@ -57,7 +54,13 @@ OBJCOPY=${OBJCOPY:-arm-none-eabi-objcopy}
 SYNTAX_ONLY=0
 [[ ${1:-} == --syntax ]] && SYNTAX_ONLY=1
 
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$OUT/translated"
+# A mirror of the tree root beside the translated copies, so XNU's relative includes resolve from the
+# translated file's directory exactly as they do from the original's.
+mkdir -p "$OUT/translated"
+for d in osfmk bsd libkern iokit pexpert security san libsa EXTERNAL_HEADERS; do
+    [[ -d $XNU/$d ]] && ln -sfn "$XNU/$d" "$OUT/translated/$d"
+done
 
 [[ -f $ASSYM/assym.s ]] || { echo "no $ASSYM/assym.s - run ./tools/gen_assym.sh first" >&2; exit 2; }
 
@@ -65,13 +68,12 @@ ASFLAGS=(
     --target=armv7-none-eabi -mcpu=cortex-a15 -marm
     -mfpu=neon-vfpv4 -mfloat-abi=softfp -x assembler-with-cpp
     -DASSEMBLER=1 -DSLIDABLE=0 -DARMA7=1 -DKERNEL=1 -DKERNEL_PRIVATE=1
-    -D__arm__=1 -DCONFIG_EMBEDDED=1 -D__ARM_L2CACHE_SIZE_LOG__=21
+    -D__arm__=1 -D__ARM__=1 -DCONFIG_EMBEDDED=1 -D__ARM_L2CACHE_SIZE_LOG__=21
     -Dfmrx=vmrs -Dfmxr=vmsr
     -D__NO_UNDERSCORES__=1
 )
 INCLUDES=(
-    -I"$ASSYM"
-    -I"$REPO_ROOT/stages/stage90/xnu_arm_boot"
+    -I"$ASSYM" -I"$REPO_ROOT/stages/stage90/xnu_arm_boot"
     -I"$OPTION_HEADERS" -I"$DEVICE_HEADERS"
     -I"$REPO_ROOT/out/xnu_generated" -I"$REPO_ROOT/out/mach_headers"
     -I"$XNU/osfmk" -I"$XNU/bsd" -I"$XNU/libkern" -I"$XNU/EXTERNAL_HEADERS"
@@ -80,20 +82,40 @@ INCLUDES=(
     -I"$SHIMS_ARM" -I"$SHIMS_ARM/kern" -I"$SHIMS_ARM/mach"
 )
 
-ok=0; fail=0; renamed=0
+# The translation is its own tool: it is a parser over `.macro` blocks rather than a sed, and it
+# reports how many substitutions it made so a file needing none is used unchanged.
+TRANSLATE=$TOOLS_DIR/translate_arm_asm.py
+
+ok=0; fail=0; renamed=0; translated=0
 while read -r src; do
     case "$src" in *.s|*.S) ;; *) continue ;; esac
     [[ -f $src ]] || continue
     name=$(basename "$src" .s)
-    if ! clang "${ASFLAGS[@]}" "${INCLUDES[@]}" -c "$src" -o "$OUT/$name.o" 2>"$OUT/$name.log"; then
+    # The translated copy keeps the source's path *below the tree root*, because XNU's assembly uses
+    # relative includes - `bsd/dev/arm/cpu_in_cksum.s:50` is `#include "../../../osfmk/arm/arch.h"` -
+    # and those resolve against the file's own directory. A flat `translated/` broke exactly that.
+    # The translated copy keeps the source's path *below the tree root*, and a mirror of that root is
+    # symlinked beside it, because XNU's assembly uses relative includes -
+    # `bsd/dev/arm/cpu_in_cksum.s:50` is `#include "../../../osfmk/arm/arch.h"` - and those resolve
+    # against the file's own directory. A flat `translated/` broke exactly that.
+    rel=${src#"$XNU"/}
+    mkdir -p "$OUT/translated/$(dirname "$rel")"
+    use=$src
+    if [[ $("$TRANSLATE" "$src" "$OUT/translated/$rel") -gt 0 ]]; then
+        use=$OUT/translated/$rel
+    fi
+    if ! clang "${ASFLAGS[@]}" "${INCLUDES[@]}" -c "$use" -o "$OUT/$name.o" 2>"$OUT/$name.log"; then
         fail=$((fail + 1))
-        [[ $SYNTAX_ONLY -eq 1 ]] && printf '  FAIL %-24s %s\n' "$name" \
+        printf '  FAIL %-24s %s\n' "$name" \
             "$(grep -m1 -aE 'error|fatal' "$OUT/$name.log" | sed 's|.*xnu-4570.1.46/||' | cut -c1-64)"
         continue
     fi
     ok=$((ok + 1))
+    [[ $SYNTAX_ONLY -eq 1 ]] && continue
 
-    # The rename, conditioned on the link needing the bare name.
+    # De-underscore, as before: `asm.h`'s EXT(x) is `_##x` under Apple's convention, and ten files
+    # write their labels literally. Renamed only when the bare name is one the link cannot otherwise
+    # resolve, which is what keeps `_start` intact.
     [[ -s $UNDEF ]] || continue
     args=()
     while IFS= read -r sym; do

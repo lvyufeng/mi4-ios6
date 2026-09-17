@@ -1756,6 +1756,44 @@ with AAPCS, plus a Mach-O linker"* — two nameable things, no unknowns.
 **B and C do not advance the goal.** The boot path's nearest 23 stubs are blocked on the triple, and
 A - done properly - is the only option that moves them.
 
+**AND THE TOOLCHAIN QUESTION IS CLOSED BY MEASUREMENT, WITH THE OPPOSITE ANSWER TO THE ONE THE
+ANALYSIS POINTED AT** (2026-09-17,
+[`experiment-150`](../experiments/experiment-150-lld-cannot-link-armv7-and-the-dialect-translation.md)).
+Three turns of findings said the Mach-O target was the way to the boot path's 23 deepest stubs.
+Installing the linker made it checkable:
+
+```
+$ ld64.lld -arch armv7  ... -> error: unhandled relocation type
+$ ld64.lld -arch arm64  ... -> Mach-O 64-bit arm64 executable
+```
+
+**LLVM's `ld64.lld` links arm64 Mach-O and does not link armv7 Mach-O**, in 14 and in 15. So the
+Darwin target can *assemble* XNU (experiment-142) and **cannot link here** — option A was not a choice
+between two viable paths but a path that stops at the linker. Each of the three findings before it was
+right about the *cause* and wrong about the *remedy*.
+
+**So the four files were translated instead**, and the constructs are four — verified against the EABI
+assembler one at a time and applied by `tools/translate_arm_asm.py`, which is a parser over `.macro`
+blocks rather than a per-file patch: any parameterless `.macro` whose body uses `$N` gets the
+parameters it is evidently called with. **A dialect translation, not a source change** — the tree is
+never written to, and it sits in the same category as the `objcopy --redefine-sym` step that exists
+because `asm.h`'s `EXT(x)` is `_##x`.
+
+```
+manifest .s that assemble for ELF   13/17 -> 17/17
+stub symbols in the image            282 -> 250
+boot-path stubs                       89 ->  72
+"assembly the build never attempts"   23 ->   0
+```
+
+`BootCpuData`, `CpuDataEntries`, `get_mmu_control`, `set_mmu_control`, `fiq_context_init` and
+`ml_get_timebase` are **defined in the ELF objects now** — the same eight the Mach-O path produced, and
+the same ones a boot reaches first.
+
+**And that closes the decision.** A's only remaining advantage is `vnode_trim`'s `size_t`, one file,
+against a toolchain that cannot link here and thirty stages of mechanisms to port. **Option B now
+reaches everything A reached except one file.**
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

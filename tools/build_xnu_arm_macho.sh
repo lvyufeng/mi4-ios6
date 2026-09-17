@@ -49,12 +49,13 @@ LIBSA_EXPORT=${XNU_LIBSA_EXPORT:-$REPO_ROOT/out/xnu_libsa_export}
 ASSYM=${XNU_ASSYM_OUT:-$REPO_ROOT/out/xnu_assym}/$CONFIG
 
 # `ld64.lld` is the name LLVM installs; `ld64` is Apple's. Either would do.
+# `ld64.lld` is the Mach-O driver inside LLVM's `lld`; `ld64` is Apple's own. Named explicitly
+# rather than searched on PATH, because `lld` installs its Mach-O personality as a symlink beside the
+# ELF one and the PATH rarely has `/usr/lib/llvm-14/bin` on it.
 MACHO_LD=""
-for cand in ld64.lld ld64 arm64-apple-darwin-ld; do
-    if command -v "$cand" >/dev/null 2>&1; then MACHO_LD=$cand; break; fi
-done
-for cand in /usr/lib/llvm-14/bin/ld64.lld /usr/bin/ld64.lld; do
-    [[ -x $cand ]] && MACHO_LD=$cand
+for cand in ld64.lld ld64             /usr/lib/llvm-14/bin/ld64.lld /usr/bin/ld64.lld             /usr/lib/llvm-*/bin/ld64.lld; do
+    if command -v "$cand" >/dev/null 2>&1; then MACHO_LD=$(command -v "$cand"); break; fi
+    [[ -x $cand ]] && { MACHO_LD=$cand; break; }
 done
 
 DO_ASM=0; DO_CC=0; DO_LINK=0; DO_REPORT=0
@@ -216,7 +217,11 @@ EOF
         exit 3
     fi
     echo "linking with $MACHO_LD"
-    "$MACHO_LD" -arch armv7 -e _start -o "$OUT/xnu-macho" "$OUT"/*.o
+    # `-platform_version <platform> <min> <sdk>` is required by lld's Mach-O driver; `ios` and two
+    # zeros say "no deployment target enforced", which is honest for a bare-metal kernel - there is
+    # no OS to deploy onto yet.
+    "$MACHO_LD" -arch armv7 -e _start -platform_version ios 0.0 0.0 \
+                -o "$OUT/xnu-macho" "$OUT"/*.o
 fi
 
 if [[ $DO_REPORT -eq 1 ]]; then
