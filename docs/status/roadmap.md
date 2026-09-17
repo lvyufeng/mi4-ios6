@@ -1800,6 +1800,35 @@ the same ones a boot reaches first.
 against a toolchain that cannot link here and thirty stages of mechanisms to port. **Option B now
 reaches everything A reached except one file.**
 
+**AND AN ELEVENTH INSTANCE OF THE TWO-DEFINITIONS CLASS — IN A MACRO** (2026-09-17,
+[`experiment-151`](../experiments/experiment-151-force-includes-and-stdbool.md)).
+`libkern/gen/OSAtomicOperations.c:33` is `enum { false = 0, true = 1 }` and fails because
+`EXTERNAL_HEADERS/stdbool.h:36-37` has already defined those as macros. Traced through the
+preprocessed output: `mach/vm_param.h:79` (`#ifdef KERNEL`) → `libkern/os/overflow.h:45` →
+`stdbool.h`, reached from `mach/thread_policy.h` → `thread_info.h` → `clock_types.h` → `vm_region.h` →
+`dyld_kernel.h` — **a header this build force-includes for every file.** Apple's build force-includes
+nothing; this project's ten-header set stands in for what `MakeInc.*` supplies, and its cost had never
+been measured.
+
+**The scope was chosen by measurement**: a `stdbool.h` defining `bool` but not the two macros fixes
+this file and **breaks 78 others** (530 of 615), because 78 files write `true`/`false` and need them.
+Applied to **this file only**: 608 of 615, no regressions. **Not a global setting and not a flag — a
+per-file one**, with the mechanism `COMP_FIRST` already uses.
+
+**It buys the 15 boot-path stubs `OSAtomicOperations.c` provides** — `OSAddAtomic`,
+`OSCompareAndSwap`, `OSIncrementAtomic`, the primitives the scheduler and locks sit on:
+
+```
+RELEASE        607 -> 608 of 615      STAGE90_BOOT 413 -> 414 of 426
+image stubs    240 -> 224             boot path     66 ->  51
+```
+
+**And every one of the seven remaining `RELEASE` failures is now a stated limitation rather than an
+unfinished item** — two need a source edit this project does not make, one the target triple, two a
+value with no evidence in the tarball, one a configuration decision, one a file that straddles Mach
+and BSD. The boot path's 51 stubs are the same: 10 C++ (a runtime not built here), 4 `__aeabi_*` from
+libgcc, the rest behind those seven files.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

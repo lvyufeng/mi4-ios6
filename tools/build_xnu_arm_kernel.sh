@@ -362,6 +362,18 @@ while read -r src; do
     # (experiment-145).
     KSERVER_FIRST=()
     [[ $SRC_COMPONENT == osfmk ]] && KSERVER_FIRST=(-I"$MIG_KSERVER")
+
+    # `libkern/gen/OSAtomicOperations.c` needs one thing no other file does: `stdbool.h` NOT to have
+    # defined `false`/`true` before its own `enum { false = 0, true = 1 }`. Measured: it is reached
+    # because the force-include set drags `mach/vm_param.h` (-> `libkern/os/overflow.h` ->
+    # `EXTERNAL_HEADERS/stdbool.h`) into translation units that never include it. A `stdbool.h` shim
+    # that defines `bool` but not the two macros fixes this file and **breaks 78 others** - because
+    # 78 files write `true`/`false` and need the macros - so it is applied to this file only, with
+    # the same per-file mechanism the component roots use. Apple's build needs neither: it
+    # force-includes nothing, so it does not reach `stdbool.h` here at all.
+    ONE_FILE=()
+    [[ ${src#"$XNU"/} == "libkern/gen/OSAtomicOperations.c" ]] &&
+        ONE_FILE=(-I"$REPO_ROOT/tools/shims_stdbool")
     # `bsd/sys/kauth.h:113` uses `uid_t` and `gid_t`, and includes nothing that defines them:
     # `sys/types.h` — which does, through `_types/_uid_t.h` — arrives later in the same closure
     # (`kern_ktrace.c`'s trace puts types.h at line 128 and kauth.h at 107). Apple's build reaches
@@ -399,7 +411,7 @@ while read -r src; do
     # did, for 45 minutes, because this had no timeout and its output was buffered behind a pipe.
     # A timeout is reported as its own outcome rather than as a compile failure, because "clang
     # hung" and "XNU does not compile" are different findings.
-    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${FILE_DEFINES[@]}" "${BSD_FORCE[@]}" "${FILE_INCLUDES[@]}" \
+    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${FILE_DEFINES[@]}" "${BSD_FORCE[@]}" "${ONE_FILE[@]}" "${FILE_INCLUDES[@]}" \
          -c "$src" -o "$OUT/$key.o" 2>"$OUT/$key.log"; then
         ok=$((ok + 1))
         rm -f "$OUT/$key.log"
