@@ -783,6 +783,24 @@ actually require:
 - The platform whitelist itself (`SUPPORTED_EMBEDDED_PLATFORMS`) is in `MakeInc.cmd:121`,
   so that half *is* public and editable.
 
+**And the entry path specifically is four errors from compiling (2026-09-17,
+[`experiment-107`](../experiments/experiment-107-xnu-arm-entry-path-measured.md)).**
+`stages/stage90/xnu_arm_entrypath_sweep.sh` measures the files the entry path needs rather than all
+32 in `osfmk/arm`, and the scoping changes the answer: `arm_vm_init.c` is **one include** away,
+`arm_init.c` — the function `_start` branches to, and therefore the exact thing Stage90 stubs —
+is **four errors** away, and `machine_routines.c` twelve. Three of the four are include ordering,
+which is mechanical; the third is a redirect to `<mach_debug.h>`, which is real — and behind it is
+`<mach/mach_host.h>`, **which does not exist anywhere in the tarball** because MIG generates it
+from `osfmk/mach/mach_host.defs` during the build. So one concrete component of Phase 4's wall is
+now named: **MIG-generated headers**, derivable in principle (the `.defs` are public and MIG is open
+source) but a build step this host does not have.
+
+Also located precisely: with the force-included headers in place, the first thing the compiler says
+is not a type error but `osfmk/kern/sched_prim.h:574: #error Enable at least one scheduler
+algorithm in osfmk/conf/MASTER.XXX` — and **`osfmk/conf/MASTER.XXX` is not in the tarball either**
+(the build generates it). The scheduler algorithm therefore has to be *chosen*, not read;
+`CONFIG_SCHED_MULTIQ` is used and recorded as chosen.
+
 **The gap is now a list of twenty symbols, not an adjective (2026-09-17,
 [`experiment-103`](../experiments/experiment-103-xnu-entry-point-assembles.md)).**
 `stages/stage90/xnu_arm_assemble.sh` assembles `osfmk/arm/start.s` — XNU's real `_start`,
