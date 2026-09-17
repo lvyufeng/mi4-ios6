@@ -519,6 +519,45 @@ Normal-NC descriptor values, the device-tree counts are checked by the payload's
 the budget split can only make the watchdog fire later, and F-AM1's failure mode is a named
 `FAIL_RAM_CONSOLE` bit — but none of them is visible in this measurement, and this section
 should not be read as saying they are.
+
+## 16. The selftest run has three exits, and the last one hangs — precisely, and only then
+
+The bounded spin was added so the first run cannot hang. That is true *conditionally*, and the
+condition is worth stating exactly rather than as "it cannot hang".
+
+In `STAGE90_HW_WATCHDOG_SELFTEST=1`, the order is: arm the watchdog, then
+`stage90_selftest_bounded_spin(90s, ...)`. There are three ways out:
+
+| # | Path | Device returns at | Requires |
+| --- | --- | --- | --- |
+| 1 | the hardware watchdog fires and its IRQ handler dumps + reboots | ~33 s | the watchdog's counter **and** its interrupt path |
+| 2 | the 90 s deadline expires, `platform_reboot()` writes PS_HOLD=0 | ~90 s | the PS_HOLD write landing |
+| 3 | both of the above fail | **never** | — |
+
+Path 3 is not a gap in the spin — the spin does exactly what it can. It is the statement that
+**if the watchdog does not fire *and* PS_HOLD does not reset, the device hangs**, and the bite
+`platform_reboot()` attempts (`stage90_hw_watchdog_bite_now`) is the same watchdog whose
+failure would have caused path 3 in the first place. So the two nets are not fully
+independent on this one run: path 2's backup is the mechanism path 1 just failed to use.
+
+The honest consequences:
+
+- **The run distinguishes three outcomes, not two.** Return at ~33 s: the watchdog works.
+  Return at ~90 s: it did not, but PS_HOLD did. No return: both are broken — and that is a
+  real finding rather than a lost run, because it is the one outcome the log cannot deliver
+  and the absence itself carries the information.
+- **It is still strictly better than the `for (;;)` it replaced.** That version *required* the
+  watchdog to work, and hung otherwise. This one needs either of two mechanisms, and the
+  strongest evidence in the project — experiments 03–78, where PS_HOLD returned the device
+  every time — says path 2 is the likely one if path 1 fails.
+- **And it removes the one thing that could not be tolerated**: a run whose failure mode is
+  "nothing happened and nothing was learned". Path 3 at least terminates in a state the
+  operator recognises, with the payload's log already written to `ram_console` before the spin
+  started.
+
+What this section does *not* claim: that the device cannot hang. It claims the set of
+conditions under which it hangs is now two independent hardware failures rather than one, and
+that those conditions are stated rather than left to be discovered.
 ## 6. What this audit cannot bound
 
 - **The watchdog's register semantics.** The readback and liveness checks confirm the

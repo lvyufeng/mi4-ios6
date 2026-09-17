@@ -147,11 +147,14 @@ fi
 
 case "$HWSELFTEST" in 1|1u)
   [[ $ALLOW_HW_SELFTEST -eq 1 ]] || fail "the hardware-watchdog SELFTEST skips the normal boot path and spins until a net reboots it; needs --allow-hw-watchdog-selftest"
-  echo "HW WATCHDOG SELFTEST: allowed. The payload spins and the hardware countdown"
-  echo "          should reboot it at ~33s. If the watchdog does NOT fire, the spin is"
-  echo "          bounded and PS_HOLD returns the device at ~90s instead - so this run"
-  echo "          cannot leave the phone dark either way. Time-to-return IS the result:"
-  echo "          ~33s = watchdog fired, ~90s = it did not (and the log says which)."
+  echo "HW WATCHDOG SELFTEST: allowed. Three outcomes, and the time it takes is the result:"
+  echo "          ~33s  the hardware watchdog fired - it works"
+  echo "          ~90s  it did NOT, but the bounded spin's PS_HOLD reset brought the"
+  echo "                device back - the watchdog needs investigating, PS_HOLD is fine"
+  echo "          never both failed. Note this third case is reachable: platform_reboot()"
+  echo "                falls back to the same watchdog, so a dead watchdog plus a PS_HOLD"
+  echo "                that does not land means a manual power press. That is a real"
+  echo "                finding, not a lost run, but it is the one outcome with no log."
   ;;
 esac
 
