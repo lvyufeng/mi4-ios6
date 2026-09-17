@@ -48,4 +48,25 @@ cat > "$OUT/loop.h" <<'EOF'
 #define NLOOP 0
 EOF
 
+# `pty.h` is NOT generated here, and the reason is a finding rather than an omission.
+#
+# `bsd/dev/arm/conf.c:111` includes it unconditionally and `NPTY` gates its pts/ptc externs, so the
+# same treatment as `loop.h` was tried: `#define NPTY 0`, consistent with `bsd/kern/tty_pty.c` being
+# `optional pty` and `pty` not being a set option, so that file is not compiled either. Measured:
+# conf.c then fails on
+#
+#     bsd/dev/arm/conf.c:189:36: error: use of undeclared identifier 'ptsselect'
+#
+# and `ptsselect` **exists nowhere in the tree** - the `#else` branch of conf.c defines `ptcselect`
+# but not `ptsselect`. So Apple's `NPTY 0` path does not compile, at all, in 4570. `NPTY` must be
+# non-zero for this file, and then `bsd/kern/tty_pty.c` has to be compiled with it or the link
+# reports `ptsopen`, `ptcopen`, `ptyioctl` and their neighbours as undefined.
+#
+# That is the same shape as `loop` but with the opposite answer, and it exposes a limit of
+# `list_sources.py`: `pty` is a *device*, not an option, and 4570 publishes no device tables
+# (experiment-127), so `optional pty` can never match and `pty` cannot be turned on through the
+# configuration fragment the way `MONOTONIC_BASE` was. Doing this properly means giving the tool a
+# device table to read, not another one-line choice. Left as a recorded next step rather than
+# half-implemented: `NPTY 1` alone would compile conf.c and add 7 undefined symbols at link time.
+
 echo "generated 1 device header (NLOOP 0) in $OUT"

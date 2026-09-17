@@ -1307,6 +1307,29 @@ closure now defines them first, and `bsd/dev/arm/conf.c` (7) needs `pty.h` — a
 config(8) generates for a `pseudo-device pty` the tarball does not publish, the same shape as
 `loop.h`, which `tools/gen_device_headers.sh` already handles.
 
+**AND TWO INVESTIGATIONS THAT PRODUCED NEGATIVE RESULTS, WHICH ARE RESULTS** (2026-09-17,
+[`experiment-130`](../experiments/experiment-130-two-negative-results.md)). Both of the boot path's
+largest remaining items need something outside the tarball, and neither is a value to choose — which
+is what every fix since experiment-119 has been.
+
+`libkern/gen/OSAtomicOperations.c` (15 of the 42 symbols) fails because `false`/`true` are macros by
+the time its `enum { false = 0, true = 1 }` is reached. The chain is traced: `kern/debug.h` →
+`mach/vm_param.h:79` → `libkern/os/overflow.h:45` → `EXTERNAL_HEADERS/stdbool.h:36`. Both includes are
+unconditional, both files are `standard`, and Apple compiles this file — so Apple reached the same
+line without the macros and **why is not established**. Left open with the chain written down, since
+a guess is exactly what does not belong in a build script.
+
+`bsd/dev/arm/conf.c` (7) needs `<pty.h>`, and the `loop.h` treatment was tried and **measured to
+fail**: with `NPTY 0`, `conf.c:189` fails on `ptsselect`, which **exists nowhere in the tree** — the
+`#else` branch defines `ptcselect` but not `ptsselect`. Apple's `NPTY 0` path does not compile in
+4570 at all. So `NPTY` must be non-zero and `bsd/kern/tty_pty.c` must be compiled with it — and
+**`pty` is a device, not an option**, so with no device tables published (experiment-127)
+`optional pty` can never match. Doing this properly means giving `list_sources.py` a device table to
+read, which is also what would make `NLOOP` a fact rather than a choice.
+
+**What remains on the boot path is 11 files / 42 symbols: 2 that need facts from outside the
+tarball, 8 smaller ones, and `vm_object.c`'s `const` member, which is not fixable here at all.**
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
