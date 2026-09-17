@@ -113,16 +113,30 @@ while read -r src; do
     ok=$((ok + 1))
     [[ $SYNTAX_ONLY -eq 1 ]] && continue
 
-    # De-underscore, as before: `asm.h`'s EXT(x) is `_##x` under Apple's convention, and ten files
-    # write their labels literally. Renamed only when the bare name is one the link cannot otherwise
-    # resolve, which is what keeps `_start` intact.
-    [[ -s $UNDEF ]] || continue
+    # De-underscore. `asm.h`:88-98 gives two conventions behind one flag —
+    #
+    #     #ifndef __NO_UNDERSCORES__
+    #     #define EXT(x)  _ ## x      Darwin: a C symbol `bcopy` is `_bcopy` in assembly
+    #     #else
+    #     #define EXT(x)  x           ELF:    it is `bcopy` in both
+    #     #endif
+    #
+    # — and this build sets `__NO_UNDERSCORES__`, because the toolchain is ELF. **But ten of the
+    # manifest's assembly files do not use `EXT()`**: they write `_bcopy:` literally. So under this
+    # flag every `_x` they define is one underscore too many.
+    #
+    # The rule is therefore the flag's own: rename `_x` to `x`, except `_start`, which the linker
+    # script enters at by that exact name.
+    #
+    # **The first version keyed this on the linker's undefined list instead, and that was wrong in a
+    # way worth recording**: it made the assembly step depend on the *previous* `measure_link.sh`
+    # run, so on a clean tree the list was stale and only 2 of the 22 symbols were renamed - and on
+    # the *next* run the same command renamed 22. A build step whose result depends on how many times
+    # it has been run is the project's oldest defect. The exclusion is now a name, not a list.
     args=()
     while IFS= read -r sym; do
-        bare=${sym#_}
-        [[ $bare == "$sym" ]] && continue
-        grep -qx "$bare" "$UNDEF" || continue
-        args+=(--redefine-sym "$sym=$bare")
+        [[ $sym == "_start" ]] && continue
+        args+=(--redefine-sym "$sym=${sym#_}")
     done < <("$NM" --defined-only "$OUT/$name.o" 2>/dev/null | awk '$2 ~ /^[TDBR]$/ && $3 ~ /^_[a-zA-Z]/ {print $3}')
     if [[ ${#args[@]} -gt 0 ]]; then
         "$OBJCOPY" "${args[@]}" "$OUT/$name.o"

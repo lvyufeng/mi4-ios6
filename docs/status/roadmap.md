@@ -1781,10 +1781,16 @@ because `asm.h`'s `EXT(x)` is `_##x`.
 
 ```
 manifest .s that assemble for ELF   13/17 -> 17/17
-stub symbols in the image            282 -> 250
-boot-path stubs                       89 ->  72
+stub symbols in the image            282 -> 240
+boot-path stubs                       89 ->  66
 "assembly the build never attempts"   23 ->   0
 ```
+
+**And the de-underscore step had to be made deterministic**: it keyed on the linker's undefined list,
+so the assembler depended on the *previous* link run — on a clean tree 2 of 22 symbols were renamed
+and `bcopy` stayed a stub, and the identical command run again renamed 22. **A build step whose result
+depends on how many times it has been run.** The rule is now the flag's own (rename `_x` to `x` except
+`_start`), with no list and no ordering.
 
 `BootCpuData`, `CpuDataEntries`, `get_mmu_control`, `set_mmu_control`, `fiq_context_init` and
 `ml_get_timebase` are **defined in the ELF objects now** — the same eight the Mach-O path produced, and

@@ -7,8 +7,8 @@ Artifacts: `tools/translate_arm_asm.py` (new), `tools/assemble_arm_layer.sh`
 | | before | after |
 | --- | --- | --- |
 | manifest `.s` that assemble for ELF | 13 of 17 | **17 of 17** |
-| stub symbols in the measurement image | 282 | **250** |
-| boot-path stubs | 89 | **72** |
+| stub symbols in the measurement image | 282 | **240** |
+| boot-path stubs | 89 | **66** |
 | **"assembly the build never attempts"** | **23** | **0** |
 
 **The 23 stubs that were blocked on the target triple are gone, and the answer turned out not to be
@@ -68,8 +68,8 @@ to be told.
 the same eight that the Mach-O path produced, and the same ones a boot reaches first. Measured:
 
 ```
-stub symbols in the measurement image   282 -> 250
-boot-path stubs                          89 ->  72
+stub symbols in the measurement image   282 -> 240
+boot-path stubs                          89 ->  66
 "assembly the build never attempts"      23 ->   0
 ```
 
@@ -77,10 +77,17 @@ boot-path stubs                          89 ->  72
 empty**, and the top of the remaining list is now `__aeabi_memcpy4` (compiler runtime), `IODTGetDefault`
 (C++), `bcopy` (see below) and `oslog_init` (a file that fails to compile).
 
-One follow-on worth noting rather than glossing: `bcopy` is **still** a stub at 2 edges. It is defined
-by `osfmk/arm/bcopy.s`, which now assembles — so it is one of the four per-component `-D`/include
-order interactions the ELF script applies per file and this assembler script does not yet. Recorded,
-not chased.
+### And the de-underscore step had to be made deterministic
+
+That last 10 of stubs came from a defect in this stage's own script, and it is the project's oldest
+shape. The de-underscore rename keyed on **the linker's undefined list** — so `assemble_arm_layer.sh`
+depended on the *previous* `measure_link.sh` run. On a clean tree the list was stale, only **2 of 22**
+symbols were renamed, and `bcopy` stayed a stub; running the identical command again renamed **22**.
+**A build step whose result depends on how many times it has been run.**
+
+The rule is now the flag's own: rename `_x` to `x`, except `_start`, which the linker script enters at
+by that name. No list, no ordering, and verified identical across two clean runs (26 symbols each
+time, `_start` intact).
 
 ## 4. What this means for the decision
 
