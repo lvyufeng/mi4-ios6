@@ -152,7 +152,6 @@ GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
 # this project that a broad include path has been the bug rather than the fix.
 INCLUDES=(
     -I"$GENERATED/bsd" -I"$GENERATED"
-    -I"$MIG_HEADERS"
     -I"$XNU/osfmk"
     -I"$XNU/iokit"
     -I"$XNU/bsd"
@@ -161,6 +160,15 @@ INCLUDES=(
     -I"$XNU"
     -I"$XNU/osfmk/arm" -I"$XNU/bsd/arm"
     -I"$XNU/EXTERNAL_HEADERS"
+    # The MIG output goes AFTER every source tree, not before it, and that is a measured choice.
+    # MIG generates `<mach/memory_object.h>`, `<mach/notify.h>` and `<mach/semaphore.h>` from the
+    # `.defs` of the same names, and the tree has hand-written headers at exactly those paths, so in
+    # front of `-I$XNU/osfmk` the generated ones shadow the real ones: 307 files compiled with the
+    # generated root first, 312 with it last. It is the same lesson as the `osfmk/libsa` row above,
+    # from the other direction - a generated root is not the tree, and it must not sit in front of
+    # it. The 3 collisions are the whole difference; the 39 non-colliding generated headers resolve
+    # either way.
+    -I"$MIG_HEADERS"
     -I"$SHIMS" -I"$SHIMS/kern" -I"$SHIMS/mach"
     -I"$SHIMS_ARM" -I"$SHIMS_ARM/kern" -I"$SHIMS_ARM/mach"
     -I"$SHIMS_ARM/sys" -I"$SHIMS_ARM/sys/_pthread"

@@ -3,9 +3,9 @@
 # Generate the Mach interface headers XNU's kernel sources include, using the MIG built by
 # tools/build_mig.sh.
 #
-#   ./tools/gen_mach_headers.sh              # generate the set the ARM entry path needs
-#   ./tools/gen_mach_headers.sh --all        # generate from every .defs in osfmk/mach
-#   ./tools/gen_mach_headers.sh mach_host mach_port
+#   ./tools/gen_mach_headers.sh              # generate every kernel .defs in the tree
+#   ./tools/gen_mach_headers.sh mach_host mach_port    # only these (by basename)
+#   ENTRY_PATH_ONLY=1 ./tools/gen_mach_headers.sh      # only the set the ARM entry path reaches
 #
 # Why this exists. `osfmk/vm/vm_object.h` includes `<mach_pagemap.h>`, `osfmk/mach_debug/
 # mach_debug.h` includes `<mach/mach_host.h>` and `<mach/mach_port.h>`, and none of those exist in
@@ -38,12 +38,12 @@ OUT=${MIG_HEADERS_OUT:-$REPO_ROOT/out/mach_headers}
 [[ -x $MIG ]] || { echo "no MIG at $MIG - run tools/build_mig.sh first" >&2; exit 2; }
 [[ -d $XNU/osfmk/mach ]] || { echo "no .defs at $XNU/osfmk/mach" >&2; exit 2; }
 
-ALL=0
-[[ ${1:-} == --all ]] && { ALL=1; shift; }
+# `--all` used to mean "every .defs in osfmk/mach"; that is now the default, so it is accepted and
+# ignored rather than removed, in case a command line out there still spells it.
+[[ ${1:-} == --all ]] && shift
 
-# The set the ARM entry path reaches, by following its includes. Kept explicit rather than globbing
-# so that a failure here is a short list rather than forty.
-DEFAULT_DEFS=(
+# The set the ARM entry path reaches, by following its includes.
+ENTRY_PATH_DEFS=(
     mach_host
     mach_port
     mach_vm
@@ -71,58 +71,139 @@ DEFAULT_DEFS=(
     ktrace_background
 )
 
-if [[ $ALL -eq 1 ]]; then
-    mapfile -t DEFS < <(cd "$XNU/osfmk/mach" && ls *.defs | sed 's/\.defs$//')
-elif [[ $# -gt 0 ]]; then
-    DEFS=("$@")
-else
-    DEFS=("${DEFAULT_DEFS[@]}")
+# What is generated, and this changed on 2026-09-17. The first version generated an explicit list of
+# 25 `.defs`, all from `osfmk/mach`, "so that a failure here is a short list rather than forty". Two
+# of them failed and the failures were informative, so the list was extended - and extending it to
+# the whole tree is what the kernel build actually needs: `.defs` also live in `osfmk/device`,
+# `osfmk/atm`, `osfmk/UserNotification`, `osfmk/lockd`, `osfmk/gssd` and `osfmk/kextd`, and
+# `osfmk/device/iokit_rpc.c` includes `<device/device_server.h>`.
+#
+# The generated header goes to `$OUT/<dir of the .defs relative to osfmk>`, which is the spelling the
+# sources use: `osfmk/mach/task.defs` -> `mach/task.h` for `#include <mach/task.h>`, and
+# `osfmk/device/device.defs` -> `device/device_server.h` for `<device/device_server.h>`.
+#
+# `libsyscall/mach` holds 18 `.defs` that are the *user-side* copies of the same interfaces; a kernel
+# does not build them, so they are excluded rather than generated and discarded.
+mapfile -t DEFS_FILES < <(cd "$XNU" && find osfmk -name '*.defs' | sort)
+
+if [[ $# -gt 0 ]]; then
+    wanted=("$@")
+    filtered=()
+    for f in "${DEFS_FILES[@]}"; do
+        base=${f##*/}; base=${base%.defs}
+        for w in "${wanted[@]}"; do
+            [[ $base == "$w" ]] && { filtered+=("$f"); break; }
+        done
+    done
+    DEFS_FILES=("${filtered[@]}")
+elif [[ ${ENTRY_PATH_ONLY:-0} -eq 1 ]]; then
+    filtered=()
+    for f in "${DEFS_FILES[@]}"; do
+        base=${f##*/}; base=${base%.defs}
+        for w in "${ENTRY_PATH_DEFS[@]}"; do
+            [[ $base == "$w" ]] && { filtered+=("$f"); break; }
+        done
+    done
+    DEFS_FILES=("${filtered[@]}")
 fi
 
+# The whole output directory is generated, so it is cleared rather than added to: a header left
+# behind by a previous run resolves an `#include` this run no longer produces, and the build then
+# cannot tell which set it was compiled against. Same class as the stale per-file logs in
+# build_xnu_arm_kernel.sh, and the count-of-two-runs bug before that.
+rm -rf "$OUT"
 mkdir -p "$OUT"
-# The generated headers include each other by <mach/foo.h>, so they are laid out the way the
-# include path expects rather than flat.
-mkdir -p "$OUT/mach"
 
 ok=0
 fail=0
-missing=0
+typesonly=0
 
-for base in "${DEFS[@]}"; do
-    defs="$XNU/osfmk/mach/$base.defs"
-    if [[ ! -f $defs ]]; then
-        printf '  %-30s no .defs\n' "$base"
-        missing=$((missing + 1))
+for rel in "${DEFS_FILES[@]}"; do
+    defs="$XNU/$rel"
+    base=${rel##*/}; base=${base%.defs}
+    # osfmk/mach/task.defs -> mach ; osfmk/device/device.defs -> device
+    outdir=${rel#osfmk/}; outdir=${outdir%/*}
+    mkdir -p "$OUT/$outdir"
+    tag="$outdir/$base"
+
+    # A types-only `.defs` - std_types, mach_types, clock_types, mach_debug_types, machine_types,
+    # atm_types, UNDTypes - carries no messages; it exists to be `#include`d by an interface. There
+    # is nothing for MIG to generate, and running it anyway produces "no SubSystem declaration"
+    # (or, for machine_types, "type 'int16_t' not defined" because std_types is what defines them).
+    #
+    # The test is on the PREPROCESSED text, not the file, and that distinction is load-bearing:
+    # `osfmk/mach/mach_notify.defs` is 38 lines of comment and a single `#include <mach/notify.defs>`,
+    # so it has no `subsystem` line of its own - but `osfmk/ipc/ipc_notify.c:68` includes
+    # `<mach/mach_notify.h>`, and Apple's `osfmk/mach/Makefile` lists it among the MIG outputs. It is
+    # a rename of notify.defs, and testing the file rather than its expansion skipped it.
+    cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 \
+       -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" \
+       "$defs" >"$OUT/$base.pp" 2>"$OUT/$base.cpp.log"
+    if ! grep -qE '^[[:space:]]*subsystem' "$OUT/$base.pp"; then
+        printf '  %-40s types only, nothing to generate\n' "$tag"
+        typesonly=$((typesonly + 1))
+        rm -f "$OUT/$base.pp"
         continue
     fi
 
-    # -Eh: preprocess but keep the line directives, so a MIG diagnostic points at the .defs line.
-    # -P would strip them and make MIG's errors unattributable.
+    # The server-header spelling is per directory, read off each one's Makefile:
+    #
+    #   osfmk/mach/Makefile:236-238            -sheader $@          -> <base>_server.h
+    #   osfmk/device/Makefile:52-53            -sheader device_server.h
+    #   osfmk/atm/Makefile:70-71               -sheader $@          -> <base>_server.h
+    #   osfmk/UserNotification/Makefile:80-81  -sheader $*Server.h   -> <base>Server.h
+    #
+    # and that is the only directory that differs. `osfmk/ipc/ipc_kobject.c:107` includes
+    # `<UserNotification/UNDReplyServer.h>` and `<UserNotification/UNDReply_server.h>` does not exist,
+    # so getting this wrong is a "file not found" that looks like a missing MIG run.
+    case "$outdir" in
+        UserNotification) server_suffix="Server" ;;
+        *)                server_suffix="_server" ;;
+    esac
+
     # Three outputs per .defs, because the kernel's own sources include all three:
     #   X.h          the message/subroutine declarations
     #   X_server.h   the server-side prototypes - what osfmk/kern/*.c includes as
     #                <mach/mach_host_server.h> and friends, and which nothing else provides
     #   X_client.c   not built here; the user-side is not part of a kernel
-    if cc -E -x c -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" \
-          "$defs" 2>"$OUT/$base.cpp.log" \
-       | "$MIG" -header "$OUT/mach/$base.h" \
-                -sheader "$OUT/mach/${base}_server.h" \
-                -server "$OUT/mach/${base}_server.c" \
-                -user /dev/null >"$OUT/$base.mig.log" 2>&1; then
+    #
+    # The preprocessed text is reused rather than the source, which is what makes mach_notify work
+    # and costs one temp file. -E keeps the line directives, so a MIG diagnostic points at the .defs
+    # line rather than at the flattened text.
+    #
+    # The kernel defines are load-bearing, and leaving them out was why two of the first 25 `.defs`
+    # failed. `mach_types.defs` guards the whole Universal Page List block - `upl_size_t`,
+    # `upl_offset_t`, `upl_page_info_t`, `upl_t` - behind `#if KERNEL_PRIVATE`, so a `.defs` that
+    # uses those types (memory_object_control, upl) got `type 'upl_size_t' not defined` and produced
+    # nothing. Apple's MIG is fed `MIGFLAGS = $(DEFINES) ... -novouchers` (MakeInc.def:470) and
+    # `MIGKSFLAGS/MIGKUFLAGS = -DMACH_KERNEL_PRIVATE -DKERNEL_SERVER=1|-DKERNEL_USER=1` in each
+    # component Makefile; this is the kernel half of that, since the header is the same either way.
+    if "$MIG" -header "$OUT/$outdir/$base.h" \
+              -sheader "$OUT/$outdir/${base}${server_suffix}.h" \
+              -server "$OUT/$outdir/${base}${server_suffix}.c" \
+              -user /dev/null <"$OUT/$base.pp" >"$OUT/$base.mig.log" 2>&1; then
         # A MIG that exits 0 without writing a header would look like success; check the file.
-        if [[ -s $OUT/mach/$base.h ]]; then
-            printf '  %-30s %s bytes\n' "$base" "$(stat -c%s "$OUT/mach/$base.h")"
+        if [[ -s $OUT/$outdir/$base.h ]]; then
+            printf '  %-40s %s bytes\n' "$tag" "$(stat -c%s "$OUT/$outdir/$base.h")"
             ok=$((ok + 1))
         else
-            printf '  %-30s MIG wrote nothing\n' "$base"
+            printf '  %-40s MIG wrote nothing\n' "$tag"
             fail=$((fail + 1))
         fi
+    elif grep -q "no SubSystem declaration" "$OUT/$base.mig.log"; then
+        # Not reachable through the source check above; kept because a MIG that fails on a `.defs`
+        # this script believed to be an interface must say so rather than be counted as one.
+        printf '  %-40s no subsystem in the preprocessed text\n' "$tag"
+        typesonly=$((typesonly + 1))
+        rm -f "$OUT/$outdir/$base.h" "$OUT/$outdir/${base}${server_suffix}.h" \
+              "$OUT/$outdir/${base}${server_suffix}.c"
     else
-        printf '  %-30s FAILED: %s\n' "$base" "$(head -c 120 "$OUT/$base.mig.log" | tr '\n' ' ')"
+        printf '  %-40s FAILED: %s\n' "$tag" "$(head -c 120 "$OUT/$base.mig.log" | tr '\n' ' ')"
         fail=$((fail + 1))
     fi
+    rm -f "$OUT/$base.pp"
 done
 
 echo
-echo "generated $ok, failed $fail, absent-from-tarball $missing"
-echo "headers in $OUT/mach"
+echo "generated $ok, types-only $typesonly, failed $fail"
+echo "headers in $OUT"

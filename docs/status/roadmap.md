@@ -994,6 +994,42 @@ What remains is 113 failures spread over 36 missing generated headers (largest:
 which `gen_mach_headers.sh` does not feed to MIG), 18 unknown type names, 14 incomplete field types,
 14 conflicting types, and small tails.
 
+**AND THE HEADERS APPLE'S BUILD GENERATES ARE NOW GENERATED, MOSTLY** (2026-09-17,
+[`experiment-119`](../experiments/experiment-119-build-generated-headers.md)). `osfmk/mach/*.defs`
+was only part of the picture, and the pipeline itself was wrong in one place that mattered:
+
+- **MIG was run without the kernel defines.** `mach_types.defs` guards the Universal Page List block
+  (`upl_size_t`, `upl_t`) behind `#if KERNEL_PRIVATE`, and the preprocessor step passed no `-D` at
+  all, so `memory_object_control` and `upl` produced nothing at all. Apple feeds MIG `$(DEFINES)`
+  (`MakeInc.def:470`).
+- **The `.defs` set was one directory wide.** `osfmk/device/iokit_rpc.c:59` includes
+  `<device/device_server.h>`; `osfmk/device/device.defs` is where it comes from. The set is now every
+  `.defs` under `osfmk` — 44 generated, 8 types-only, 0 failed. Two details the script had to learn:
+  a types-only `.defs` has to be detected from its *preprocessed* text (`mach_notify.defs` is one
+  `#include` of `notify.defs` and is a rename of it for `ipc_notify.c:68`), and `UserNotification` is
+  the one directory whose server header is `<X>Server.h` rather than `<X>_server.h`
+  (`osfmk/UserNotification/Makefile:80-81`).
+- **The generated root was in front of the source tree.** MIG generates `mach/memory_object.h`,
+  `mach/notify.h` and `mach/semaphore.h` from the `.defs` of the same names, and the tree has
+  hand-written headers at those exact paths. `-I$MIG_HEADERS` was second in the include list, so the
+  generated ones won; moving it after every source tree is **312 vs 307** in the minimal
+  configuration. The fifth time a broad path in front of a narrow one has been the bug.
+
+**`STAGE90_BOOT` 288 → 315 of 405, `RELEASE` 329 → 356 of 573.** The denominators move because the
+manifest enumerates MIG output, so generating more of it moves files from `absent` to `tried`.
+
+**And the fourth instance of the same idea is identified but not implemented: `OPTIONS/`.** 123 lines
+across the components' `conf/files` read `OPTIONS/mach_ipc_debug optional mach_ipc_debug`, and
+`SETUP/config/mkheaders.c:104-133` is the generator: it writes `#define <option> <count>` into
+`<name>.h` if that file does not exist, and appends `#include <<name>.h>` to **`meta_features.h`** —
+the header every component force-includes. So `mach_ipc_debug.h` (9 files, the largest single
+remaining blocker), `mach_vm_debug.h`, `mach_cluster_stats.h`, `mach_ipc_test.h`, `kdebug.h`,
+`vm_cpm.h` and their siblings are one-line generated files. `osfmk/ipc/ipc_hash.h:128` includes
+`<mach_ipc_debug.h>` **unguarded** precisely because the include is what defines the option's macro,
+with the real content behind `#if MACH_IPC_DEBUG` on the next line. `libkern/version.h` (3 files) is
+the same category with a different generator (`libkern/libkern/Makefile:79-87`, from
+`version.h.template` + `config/MasterVersion`, both in the tarball). **That is the next stage.**
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
