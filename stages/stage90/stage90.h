@@ -3790,6 +3790,13 @@ struct stage90_xnu_macho_loader_result {
     uint32_t data_segment_size;
     uint32_t linkedit_segment_va;  /* __LINKEDIT for symbols */
     uint32_t segments_loaded;      /* Count of segments loaded */
+    /*
+     * Segments skipped because their destination VA is not mapped right now. Non-zero means
+     * the loader declined to write into unmapped memory rather than relying on the data-abort
+     * handler to skip it - which it cannot do safely for a post-indexed store, since skipping
+     * the store skips the pointer increment and the copy loop never advances.
+     */
+    uint32_t segments_unmapped;
 
     /* Entry point */
     uint32_t entry_point_offset;   /* From LC_UNIXTHREAD */
@@ -3958,6 +3965,20 @@ struct stage90_xnu_macho_loader_result {
 #if !defined(STAGE90_BYPASS_ENTRY_STUB)
 #define STAGE90_BYPASS_ENTRY_STUB 0u
 #endif
+
+/*
+ * The device tree's root child count, shared by the builder and by the validator that
+ * checks it.
+ *
+ * This exists because it was previously a literal `19u` in mmu.c's "high root dt summary"
+ * step while the builder separately declared its own count in stage90_main.c. Adding a node
+ * - /arm-io, in this case - updated one and not the other, and the mismatch surfaced on
+ * hardware as `kernel_entry bad: MMU high bootstrap selftest`, four steps away from the
+ * cause. The device tree is validated in two places and only one of them was covered by the
+ * host-side checks; a single named constant is what makes the second place impossible to
+ * forget.
+ */
+#define STAGE90_APPLE_DT_ROOT_CHILDREN 20u
 
 /*
  * Dead-man reset.

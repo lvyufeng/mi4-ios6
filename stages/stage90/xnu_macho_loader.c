@@ -112,6 +112,7 @@ static void stage90_xnu_macho_loader_log(
 	xnu_log_kv32("stage90_xnu_macho_loader_data_segment_size", r->data_segment_size);
 	xnu_log_kv32("stage90_xnu_macho_loader_linkedit_segment_va", r->linkedit_segment_va);
 	xnu_log_kv32("stage90_xnu_macho_loader_segments_loaded", r->segments_loaded);
+	xnu_log_kv32("stage90_xnu_macho_loader_segments_unmapped", r->segments_unmapped);
 	xnu_log_kv32("stage90_xnu_macho_loader_entry_point_offset", r->entry_point_offset);
 	xnu_log_kv32("stage90_xnu_macho_loader_xnu_entry_va", r->xnu_entry_va);
 	xnu_log_kv32("stage90_xnu_macho_loader_ready_for_handoff", r->ready_for_handoff);
@@ -137,8 +138,42 @@ static int load_segment(struct segment_command *seg, uint8_t *macho_base,
 	/* Calculate segment end address */
 	seg_end = seg->vmaddr + seg->vmsize;
 
-	/* For now, we assume segments are already mapped by the candidate L1.
-	 * The candidate L1 maps 0x80000000-0x800fffff (1MB) via L2 pages.
+	/*
+	 * The destination VA must actually be mapped *right now*.
+	 *
+	 * This used to say "we assume segments are already mapped by the candidate L1" and
+	 * copy anyway. On hardware that assumption failed and the failure was invisible for a
+	 * reason worth spelling out: under the identity table (the default, HARD_SKIP builds)
+	 * nothing maps 0x80000000, so every store in the copy data-aborted. The data-abort
+	 * handler *skips the faulting instruction* to continue - but a byte copy is a
+	 * post-indexed store, and skipping it skips the pointer increment too. So the loop
+	 * never advanced: an infinite abort-and-retry on the same address, which is what the
+	 * device hung in until the hardware watchdog reset it 28s later.
+	 *
+	 * So: check that the live TTBR0 is the candidate L1 that provides the high-VA window,
+	 * and refuse the copy if it is not. The check is on the page table, because that is what
+	 * decides whether the VA is mapped - nothing about the segment tells us.
+	 */
+	{
+		uint32_t ttbr0, live_l1;
+		const struct stage90_xnu_arm_vm_init_full_pmap_result *pm = stage90_xnu_arm_vm_init_full_pmap_result();
+
+		__asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));
+		live_l1 = ttbr0 & 0xffffc000u;
+		if (!pm || pm->status != STAGE90_STATUS_OK || pm->candidate_l1_base == 0u ||
+		    live_l1 != (pm->candidate_l1_base & 0xffffc000u)) {
+			xnu_log_puts("segment ");
+			xnu_log_puts(seg->segname);
+			xnu_log_puts(" destination VA is NOT mapped (candidate L1 not live); refusing to copy\n");
+			xnu_log_kv32("segment_vmaddr", seg->vmaddr);
+			xnu_log_kv32("live_l1_from_ttbr0", live_l1);
+			xnu_log_kv32("candidate_l1_base", pm ? pm->candidate_l1_base : 0u);
+			r->segments_unmapped++;
+			return 0;
+		}
+	}
+
+	/* The candidate L1 maps 0x80000000-0x800fffff (1MB) via L2 pages.
 	 * XNU segments MUST be in this range. */
 	if (seg->vmaddr < 0x80000000 || seg->vmaddr >= 0x80100000) {
 		xnu_log_puts("segment ");

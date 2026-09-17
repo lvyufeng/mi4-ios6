@@ -2355,7 +2355,7 @@ static uint32_t stage90_kernel_root(struct boot_args *args,
     state->root_dt_timer_frequency = apple_dt_get_u32_prop(dt_high, args->deviceTreeLength, timer_node, "frequency", 0);
     if ((uint32_t)(uintptr_t)args >= STAGE90_HIGH_ALIAS_BASE &&
         state->root_dt_virt >= STAGE90_HIGH_ALIAS_BASE &&
-        state->root_dt_root_children == 19u &&
+        state->root_dt_root_children == STAGE90_APPLE_DT_ROOT_CHILDREN &&
         state->root_dt_memory_base == RAM_PHYS_BASE &&
         state->root_dt_memory_size == (RAM_CONSOLE_BASE - RAM_PHYS_BASE) &&
         state->root_dt_timer_frequency == 19200000u) {
@@ -6307,7 +6307,7 @@ int mmu_high_bootstrap_selftest(void)
     }
     if (stage90_bootstrap_state_block.root_boot_args_virt != (uint32_t)(uintptr_t)alias_args ||
         stage90_bootstrap_state_block.root_dt_virt < STAGE90_HIGH_ALIAS_BASE ||
-        stage90_bootstrap_state_block.root_dt_root_children != 19u ||
+        stage90_bootstrap_state_block.root_dt_root_children != STAGE90_APPLE_DT_ROOT_CHILDREN ||
         stage90_bootstrap_state_block.root_dt_memory_base != RAM_PHYS_BASE ||
         stage90_bootstrap_state_block.root_dt_memory_size != (RAM_CONSOLE_BASE - RAM_PHYS_BASE) ||
         stage90_bootstrap_state_block.root_dt_timer_frequency != 19200000u ||

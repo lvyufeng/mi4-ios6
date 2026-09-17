@@ -33,8 +33,9 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
 
     apple_dt_begin(b, g_apple_dt, sizeof(g_apple_dt));
 
-    /* root: 4 properties, 20 children */
-    apple_dt_node_begin(b, 4, 20);
+    /* root: 4 properties, STAGE90_APPLE_DT_ROOT_CHILDREN children - the count mmu.c's
+     * "high root dt summary" step validates, so both sides read one constant. */
+    apple_dt_node_begin(b, 4, STAGE90_APPLE_DT_ROOT_CHILDREN);
     apple_dt_prop_str(b, "name", "/");
     apple_dt_prop_str(b, "compatible", "qcom,msm8974-xnu-stage90");
     apple_dt_prop_str(b, "model", "Xiaomi Mi 4 cancro Stage84");
