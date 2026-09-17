@@ -135,6 +135,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-119](experiment-119-build-generated-headers.md) | The Headers the Build Generates, and the Three Ways This Project Was Not Generating Them |
 | stage90 | [experiment-120](experiment-120-options-generated-headers.md) | The Third Kind of Generated Header: `OPTIONS/`, and the Ten Shims It Replaced |
 | stage90 | [experiment-121](experiment-121-apple-defines-and-two-pass-mig.md) | `__APPLE__`, and the MIG Run That Was Missing Half Its Arguments |
+| stage90 | [experiment-122](experiment-122-makesyscalls-outputs.md) | `makesyscalls.sh` Has Six Output Kinds and This Project Asked for One |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

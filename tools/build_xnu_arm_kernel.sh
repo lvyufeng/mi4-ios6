@@ -215,13 +215,26 @@ PER_FILE_TIMEOUT=${PER_FILE_TIMEOUT:-60}
 # `<component>/conf/Makefile.template` CFLAGS rather than one global flag set, and the difference is
 # not cosmetic - see xnu_config/component_defines.sh, which holds the table and the citations.
 # `build_xnu_arm_layer.sh` does not need this: it compiles only osfmk/arm, which is the osfmk row.
+#
+# Build output has no component path to read, so it needs the same mapping stated explicitly. Apple
+# builds each generated file in the component that declares it, and the three roots follow that:
+#
+#   out/mach_headers/...            from osfmk/*/*.defs        -> osfmk
+#   out/xnu_generated/bsd/...       from bsd/kern/syscalls.master, and the sys/ headers -> bsd
+#   out/xnu_generated/libkern/...   from libkern/libkern/Makefile:79  -> libkern
+#
+# Getting this wrong is not silent for long: `init_sysent.c` compiled as osfmk picked up
+# `-DMACH_KERNEL_PRIVATE`, which reaches kern/misc_protos.h, and died on the `ffs`/`fls` collision
+# that experiment-118 is about. Defaulting to osfmk was the first version of this function and it
+# was wrong in exactly that way.
 component_of() {
-    local rel
-    rel=$(printf '%s' "${1#"$XNU"/}" | cut -d/ -f1)
-    # MIG's generated server stubs are build output, so they live in out/mach_headers rather than in
-    # the tree and have no component path to read. They come from osfmk/mach/*.defs and Apple builds
-    # them in osfmk, so that is what they are. (Measured: it changes nothing today - those four fail
-    # on a defect in this project's MIG output, not on their flags.)
+    local p=$1 rel
+    case "$p" in
+        "$GENERATED"/bsd/*)      printf 'bsd'    ; return ;;
+        "$GENERATED"/libkern/*)  printf 'libkern'; return ;;
+        "$MIG_HEADERS"/*)        printf 'osfmk'  ; return ;;
+    esac
+    rel=$(printf '%s' "${p#"$XNU"/}" | cut -d/ -f1)
     printf '%s' "${rel:-osfmk}"
 }
 

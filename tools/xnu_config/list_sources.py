@@ -23,8 +23,9 @@ what the 32-of-32 ARM measurement was missing: it compiled every `.c` in `osfmk/
 ones a real kernel would not use.
 
 Paths in `files.<arch>` are relative to the component root (`osfmk/`), and paths beginning with
-`./` are relative to the generated-object directory — which is where a MIG-generated `*_server.c`
-belongs. Both are resolved here.
+`./` are relative to a *generated-object* directory — which is where a MIG-generated `*_server.c`
+and a makesyscalls-generated `init_sysent.c` belong. There is more than one such directory and they
+are searched in order; see `resolve_path`.
 """
 
 import argparse
@@ -108,16 +109,33 @@ def condition_met(kind, flags, options_lc):
     return (not unmet), " ".join(flags)
 
 
-def resolve_path(xnu, component, rel, generated_dir):
-    """`./x` is relative to the generated-object directory; anything else to the tree root.
+def resolve_path(xnu, component, rel, generated_dirs):
+    """`./x` is relative to a generated-object directory; anything else to the tree root.
 
     Verified against the lists rather than assumed: `osfmk/conf/files.arm` writes
     `osfmk/arm/pmap.c` (already component-prefixed) and `osfmk/conf/files` writes both
     `osfmk/kern/sched_prim.c` and `./gssd/gssd_mach.c`, so the prefix form is root-relative and
-    the `./` form is the generated directory - which is where a MIG `*_server.c` lives.
+    the `./` form is a generated directory.
+
+    **Which** generated directory is not one thing, and treating it as one was a defect. The 42
+    `./` entries across the components' `files` lists come from three different generators:
+
+        ./mach/task_server.c, ./device/device_server.c, ...     MIG          -> out/mach_headers
+        ./init_sysent.c, ./syscalls.c, ./audit_kevents.c, ...   makesyscalls -> out/xnu_generated/bsd
+        ./ioconf.c                                              config(8)    -> not generated here
+
+    so the roots are searched in order and the first that exists wins. Before this, every one of
+    them was resolved against the MIG root, which is why `init_sysent.c` and `syscalls.c` were
+    reported as "listed but absent" while sitting in a directory nobody had generated them into.
     """
     if rel.startswith("./"):
-        return os.path.join(generated_dir, rel[2:]), True
+        for root in generated_dirs:
+            candidate = os.path.join(root, rel[2:])
+            if os.path.exists(candidate):
+                return candidate, True
+        # Nothing generated it; report the path the first root would have used, so the message
+        # names a directory someone can go and look in.
+        return os.path.join(generated_dirs[0], rel[2:]), True
     return os.path.join(xnu, rel), False
 
 
@@ -132,7 +150,11 @@ def main():
     ap.add_argument("--why", action="store_true", help="print the condition each file met")
     ap.add_argument("--missing", action="store_true",
                     help="report listed files that are not present on disk")
-    ap.add_argument("--generated-dir", default=os.path.join(REPO_ROOT, "out", "mach_headers"))
+    ap.add_argument("--generated-dir",
+                    default=":".join([os.path.join(REPO_ROOT, "out", "mach_headers"),
+                                      os.path.join(REPO_ROOT, "out", "xnu_generated", "bsd")]),
+                    help="directories holding build-generated sources, colon-separated and "
+                         "searched in order; `./x` entries are resolved against them")
     ap.add_argument("--write", metavar="PATH",
                     help="write the selected file list here, one path per line, instead of "
                          "printing it - so the manifest is a build input rather than a report")
@@ -169,7 +191,8 @@ def main():
         if not args.write:
             print(f"== {component}: {len(chosen)} file(s) ==")
         for rel, why in chosen:
-            path, is_generated = resolve_path(args.xnu, component, rel, args.generated_dir)
+            path, is_generated = resolve_path(args.xnu, component, rel,
+                                              args.generated_dir.split(":"))
             total += 1
             selected.append(path)
             if is_generated:

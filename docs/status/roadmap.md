@@ -1097,6 +1097,34 @@ path by a different include order is not established.
 `thread_act_consume_ref_t` (7) — declared as `type X = mach_port_move_send_t` and emitted into the
 server headers without a definition. Next stage.
 
+**AND THE SAME SHAPE A THIRD TIME: A TOOL WITH SIX OUTPUTS, ASKED FOR ONE** (2026-09-17,
+[`experiment-122`](../experiments/experiment-122-makesyscalls-outputs.md)). `makesyscalls.sh:75`
+states its own interface — `names|proto|header|table|audit|trace` — and Apple's Makefiles ask for
+all six into named destinations (`bsd/sys/Makefile:216` for `header`, `bsd/conf/Makefile.template:291-305`
+for the rest). `gen_bsd_headers.sh` ran only `proto`, because `sysproto.h` was the file the failure
+list named. `sys/syscall.h` is where the syscall *numbers* live, so `kern_mman.c`, `sys_generic.c`
+and `kern_guarded.c` failed on `SYS_mmap`, `SYS_pread` and `SYS_guarded_pwrite_np` — each in a file
+that *defines* the routine whose number it is looking up. **415 `SYS_*` numbers**, and all six
+outputs now generated, with the script failing if `syscall.h` comes out with none.
+
+Two more defects came out of it, both in the *resolution* rather than the generation.
+`list_sources.py` resolved every `./` entry against one generated root, but there are three
+generators — MIG (`./mach/task_server.c`), makesyscalls (`./init_sysent.c`), and `config(8)`
+(`./ioconf.c`, not generated here); `resolve_path` now searches a list. And
+`build_xnu_arm_kernel.sh`'s `component_of()` defaulted anything outside the tree to `osfmk`, so
+`out/xnu_generated/bsd/init_sysent.c` picked up `-DMACH_KERNEL_PRIVATE` and died on the
+`ffs`/`fls` collision experiment-118 is about. Both roots are now mapped explicitly.
+
+**A fourth shim deleted and measured**: `shims_arm/sys/syscall.h` declared `unix_syscall` on the
+premise that the header "does not exist anywhere in the tarball". Byte-identical failure sets with
+and without it — but it had been *doing harm*, since `bsd/dev/arm/systemcalls.c:82` defines
+`unix_syscall` and the shim's prototype was the cause of that file's `conflicting types` error.
+
+**`STAGE90_BOOT` 375 → 381 of 419, `RELEASE` 496 → 499 of 587.** What is left is 38 and 88
+failures, small and scattered — `clock_t`/`uid_t`, `u_char`/`caddr_t`, the `_CLOCK_T` collision,
+`z_off_t` in zlib, and experiment-121's three include-order regressions. No single fix is worth 30
+files any more, which is the state change: the structural gaps are gone.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
