@@ -1728,27 +1728,34 @@ outputs do not read each other.
 | | ELF | Mach-O |
 | --- | --- | --- |
 | manifest `.s` that assemble | 13 of 17 | **17 of 17** |
-| manifest `.c` that compile | **607 of 615** | 575 of 615 |
+| manifest `.c` that compile | **607 of 615** | 601 of 615 |
 | boot-path stubs the assembly closes | — | **23 of 89, and they are the 23 nearest `arm_init`** |
 
 `BootCpuData`, `CpuDataEntries`, `intstack_top`, `fiqstack_top`, `get_mmu_control`,
 `set_mmu_control`, `fiq_context_init`, `ml_get_timebase` and 15 more now exist as Mach-O objects on
 this host, verified with `llvm-nm` — symbols the ELF build **cannot produce at all**.
 
-**The cost is measured too, and it is not the triple.** The C side is 32 behind because the ELF path
-has thirty stages of fixes and this script has four; its failures are the same ones the ELF path had
-before those stages (20 `sync_qos_count_t`, 7 `memory_object.h`, 5 `clock_t`). Every mechanism is
-target-independent and ports directly. **The price of A is roughly 32 files plus four assembly files
-of mechanical work.** Only `--link` waits for anything: there is no `ld64.lld` on this host, and the
+**The cost is measured too, and it is not the triple.** The C side started at 252 and reached **601**
+as the ELF path's mechanisms were ported; the six-file gap is what remains of them. **Every mechanism
+is target-independent.** Only `--link` waits for anything. Only `--link` waits for anything: there is no `ld64.lld` on this host, and the
 script refuses with that reason rather than producing something half-done.
 
-**And the script reproduced defect 118 on its first run** — `-DMACH_KERNEL_PRIVATE` in the global
+**And the script reproduced two of this project's own defects before it worked** — `-DMACH_KERNEL_PRIVATE` global (271 files on `ffs`, defect 118) and `-D_CLOCK_T` global (`clock_t`, defect 126) — taking it 252 → 544 → 601 as each moved into the row it belongs to. — `-DMACH_KERNEL_PRIVATE` in the global
 defines, 271 files failing on `ffs`. One move to the per-component set took it 252 → 544. The fix
 existed, was written down, and a new file did not inherit it: a build configuration living in two
 scripts will drift.
 
+**AND A REAL ABI FINDING THAT COMPLICATES THE CHOICE**: `bsd/net/dlil.c:1419`'s
+`IF_DATA_REQUIRE_ALIGNED_64(ifi_ipackets)` — **an assertion in XNU's own source** — fails under
+`armv7-apple-darwin` and passes under `armv7-none-eabi`, because `offsetof(char c; unsigned long long v)`
+is **8** under the EABI and **4** under clang 14's Darwin ARM ABI. XNU asserts 8. So Apple's build set
+an alignment their clang produced for this target and clang 14 does not default to. **Option A is not
+"change the triple" - it is "the Darwin triple with the alignment flags Apple's build used", and those
+are not established here.** A first attempt that only changes `--target` would trade four assembly
+files for one C file and a set of alignment questions.
+
 **B and C do not advance the goal.** The boot path's nearest 23 stubs are blocked on the triple, and
-A is the only option that moves them.
+A - done properly - is the only option that moves them.
 
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many

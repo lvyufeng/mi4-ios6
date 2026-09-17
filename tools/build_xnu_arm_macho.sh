@@ -86,7 +86,11 @@ DEFINES=(
     -DMACH_KERNEL=1 -DXNU_KERNEL_PRIVATE=1 -DKERNEL_PRIVATE=1
     -DMACH_BSD=1 -DPRIVATE=1 -DKPC=1 -DMONOTONIC=1 -DLOCK_PRIVATE=1 -D__ARM__=1
     -DARMA7=1 -DKERNEL=1 -D__arm__=1 -DCONFIG_EMBEDDED=1 -D__ARM_L2CACHE_SIZE_LOG__=21
-    -DCONFIG_SCHED_TIMESHARE_CORE=1 -DCONFIG_SCHED_TRADITIONAL=1 -D_CLOCK_T=1
+    -DCONFIG_SCHED_TIMESHARE_CORE=1 -DCONFIG_SCHED_TRADITIONAL=1
+    # `-D_CLOCK_T` is NOT here either, and for the same reason as MACH_KERNEL_PRIVATE: it is the
+    # osfmk-side answer, and giving it globally takes `bsd/sys/_types/_clock_t.h`'s guard away from
+    # the BSD files that need it - experiment-126's finding, reproduced by a second script. It is in
+    # the osfmk row of `extra` below.
     -DNPTY=1 -DNPTMX=1
 )
 INCLUDES=(
@@ -137,6 +141,13 @@ if [[ $DO_CC -eq 1 ]]; then
         [[ -f $src ]] || continue
         key=$(printf '%s' "$src" | sed "s|$XNU/||; s|/|_|g; s|\.c$||")
         comp=$(printf '%s' "${src#"$XNU"/}" | cut -d/ -f1)
+        # Build output has no component path to read. The KERNEL_SERVER `_server.c` files come from
+        # `osfmk/mach/*.defs` and Apple builds them in osfmk - the same mapping
+        # build_xnu_arm_kernel.sh states, and the same one that mattered at experiment-122.
+        case "$src" in
+            "$MIG_KSERVER"/*|"$MIG_HEADERS"/*) comp=osfmk ;;
+            "$GENERATED"/*) comp=bsd ;;
+        esac
         cdefs=()
         case "$comp" in
             osfmk)   cdefs=(-DMACH_KERNEL_PRIVATE=1 -DMACH_KERNEL=1) ;;
