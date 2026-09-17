@@ -108,6 +108,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage89 | [experiment-92](experiment-92-stage89-macho-loader.md) | Mach-O Kernel Loader |
 | stage90 | [experiment-93](experiment-93-stage90-phase0-preflight-watchdog.md) | Stage90 Phase 0: Preflight Watchdog Run |
 | stage90 | [experiment-94](experiment-94-stage90-phase0-watchdog-and-baseline.md) | Stage90 Phase 0: Recovery Net Proved, and the Two Bugs the Baseline Run Found |
+| stage90 | [experiment-95](experiment-95-stage90-phase1a-normal-nc.md) | Stage90 Phase 1a: Normal, Non-cacheable DRAM |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

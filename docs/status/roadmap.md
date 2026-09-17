@@ -472,7 +472,18 @@ exactly the failure mode T3 was written to catch, which is why the probe measure
 asserts. Phase 1a's `NORMAL_NC` build has to move `monitor_tracks` and `exclusives_usable` to 1
 for this to count as fixed.
 
-**Phase 1a implemented (2026-09-16), not yet on hardware.** `STAGE90_PMAP_ATTR_MODE`
+**Phase 1a run on hardware (2026-09-17, [`experiment-95`](../experiments/experiment-95-stage90-phase1a-normal-nc.md)).**
+`NORMAL_NC` now boots end to end — `kernel_entry returned success`, zero failed checks, DRAM
+descriptors at `0x00011c02`/`0x00000452`, `ram_console` verified and timer IRQs delivered through
+Normal-mapped memory. The whole bring-up layer runs on Normal memory for the first time. **But the
+exclusive probe reports `monitor_tracks=0` and `exclusives_usable=0` — identical to the
+Strongly-ordered measurement**, so the attribute change alone does not deliver the Phase 1 exit
+criterion. The remaining candidates are cacheable memory and `ACTLR.SMP`; the first is the next
+step anyway. Three descriptor literals had to be made mode-dependent first (`experiment-95` §
+"What changed in response") — the same one-value-two-definitions defect as the device-tree child
+count.
+
+**Phase 1a implemented (2026-09-16).** `STAGE90_PMAP_ATTR_MODE`
 (`SO_ONLY` default / `NORMAL_NC`) selects the memory type for DRAM mappings; MMIO stays
 Strongly-ordered in both. `NORMAL_NC` is deliberately **non-cacheable** — it is the smallest
 change that makes exclusives architecturally defined, and with no cache enabled it needs no
@@ -499,9 +510,10 @@ change any mapping's memory type; all mode × ladder × dead-man combinations co
 `preflight_boot_check.sh` refuses `NORMAL_NC` without `--allow-attr-normal-nc` and handles
 both the symbolic and the numeric (`-D`) form of every switch.
 
-Still to do this phase: run the probe in both modes on hardware and confirm `monitor_tracks`
-and `exclusives_usable` go to 1 under `NORMAL_NC`. Then caches — I-cache first, then D-cache,
-with the `ram_console` clean that the D-cache makes mandatory.
+Still to do this phase: caches — I-cache first, then D-cache, with the `ram_console` clean that
+the D-cache makes mandatory — and a passing `LDREX`/`STREX` under them. The probe has now been
+run in both modes on hardware; it did **not** reach 1 under `NORMAL_NC`, so the attribute map is
+documented and hardware-verified but the exclusives half of this phase is still open.
 
 **Exit criteria:** identity and high-VA mappings with caches on; `ram_console` still
 logging; timer IRQ still delivered; a documented attribute map; a passing `LDREX`/`STREX`

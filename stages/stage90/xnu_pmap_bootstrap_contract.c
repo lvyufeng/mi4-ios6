@@ -427,7 +427,7 @@ int stage90_xnu_pmap_bootstrap_contract_selftest(const struct stage90_loader_pre
         contract->failure_mask |= STAGE90_XNU_PMAP_BOOTSTRAP_CONTRACT_FAIL_WORKSPACE;
     }
     if (contract->workspace_section_count == (contract->proposed_memSize / STAGE90_XNU_PMAP_BOOTSTRAP_SECTION_SIZE) &&
-        contract->workspace_l1_section_descriptor == STAGE90_XNU_PMAP_BOOTSTRAP_SECTION_DESC_SO &&
+        contract->workspace_l1_section_descriptor == STAGE90_XNU_PMAP_BOOTSTRAP_SECTION_DESC_DRAM &&
         contract->workspace_l1_section_size == STAGE90_XNU_PMAP_BOOTSTRAP_SECTION_SIZE) {
         contract->satisfied_mask |= STAGE90_XNU_PMAP_BOOTSTRAP_CONTRACT_SAT_WORKSPACE_SECTIONS;
     } else {

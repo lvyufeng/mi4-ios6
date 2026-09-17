@@ -53,7 +53,7 @@ static uint32_t stage90_pmap_dryrun_section_index(uint32_t addr)
 static uint32_t stage90_pmap_dryrun_make_descriptor(uint32_t phys_base)
 {
     return (phys_base & STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_BASE_MASK) |
-           STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_SECTION_SO;
+           STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_SECTION_DRAM;
 }
 
 static uint32_t stage90_pmap_dryrun_map_range(uint32_t *l1, uint32_t virt_base,
@@ -136,7 +136,7 @@ static uint32_t stage90_pmap_dryrun_descriptor_attrs_ok(uint32_t word)
         return 0u;
     }
     return ((word & STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_ATTR_MASK) ==
-            (STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_SECTION_SO &
+            (STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_SECTION_DRAM &
              STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_ATTR_MASK)) ? 1u : 0u;
 }
 
@@ -258,11 +258,11 @@ int stage90_xnu_pmap_table_dryrun_contract_selftest(const struct stage90_loader_
     contract->l1_bytes = STAGE90_XNU_PMAP_TABLE_DRYRUN_L1_BYTES;
     contract->l1_alignment = STAGE90_XNU_PMAP_TABLE_DRYRUN_L1_ALIGNMENT;
     contract->section_size = STAGE90_XNU_PMAP_TABLE_DRYRUN_SECTION_SIZE;
-    contract->section_descriptor = STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_SECTION_SO;
+    contract->section_descriptor = STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_SECTION_DRAM;
     contract->desc_type_mask = STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_TYPE_MASK;
     contract->desc_attr_mask = STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_ATTR_MASK;
     contract->desc_base_mask = STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_BASE_MASK;
-    contract->descriptor_expected_attr_mask = STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_SECTION_SO &
+    contract->descriptor_expected_attr_mask = STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_SECTION_DRAM &
         STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_ATTR_MASK;
     contract->local_l1_base = (uint32_t)(uintptr_t)g_stage90_pmap_dryrun_l1;
     contract->local_l1_bytes = sizeof(g_stage90_pmap_dryrun_l1);
@@ -363,7 +363,7 @@ int stage90_xnu_pmap_table_dryrun_contract_selftest(const struct stage90_loader_
         contract->l1_bytes == 0x00004000u &&
         contract->l1_alignment == 0x00004000u &&
         contract->section_size == 0x00100000u &&
-        contract->section_descriptor == 0x00010c02u &&
+        contract->section_descriptor == STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_SECTION_DRAM &&
         contract->desc_type_mask == 0x00000003u &&
         contract->desc_base_mask == 0xfff00000u &&
         contract->gPhysBase == RAM_PHYS_BASE &&

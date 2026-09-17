@@ -4772,7 +4772,17 @@ struct stage90_pmap_bootstrap_snapshot {
 #define STAGE90_XNU_PMAP_BOOTSTRAP_VM_MAX_KERNEL_ADDRESS 0xfffeffffu
 #define STAGE90_XNU_PMAP_BOOTSTRAP_L1_ALIGNMENT     0x00004000u
 #define STAGE90_XNU_PMAP_BOOTSTRAP_SECTION_SIZE     0x00100000u
-#define STAGE90_XNU_PMAP_BOOTSTRAP_SECTION_DESC_SO  0x00010c02u
+/*
+ * The descriptor a 1 MB DRAM section carries in THIS build's attribute mode.
+ *
+ * It used to be the literal 0x00010c02 (Strongly-ordered) and the contract compared the real
+ * snapshot against it. That was invisible while SO_ONLY was the only mode, and it made every
+ * pmap contract fail the first time NORMAL_NC was run on hardware - the switch moved the real
+ * descriptor to 0x00011c02 and the contract was still asserting the old value. Same defect
+ * class as the device-tree root child count: one value, two definitions. There is now one
+ * definition, and it follows STAGE90_PMAP_ATTR_MODE.
+ */
+#define STAGE90_XNU_PMAP_BOOTSTRAP_SECTION_DESC_DRAM STAGE90_PMAP_DESC_SECTION_DRAM
 #define STAGE90_XNU_PMAP_BOOTSTRAP_ALLOC_TAG        0x414c4c43u
 #define STAGE90_XNU_PMAP_BOOTSTRAP_WORKSPACE_TAG    0x504d4150u
 
@@ -4933,7 +4943,10 @@ struct stage90_xnu_pmap_bootstrap_contract {
 #define STAGE90_XNU_PMAP_TABLE_DRYRUN_L1_BYTES         0x00004000u
 #define STAGE90_XNU_PMAP_TABLE_DRYRUN_L1_ALIGNMENT     0x00004000u
 #define STAGE90_XNU_PMAP_TABLE_DRYRUN_SECTION_SIZE     0x00100000u
-#define STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_SECTION_SO  0x00010c02u
+/* Same rule as the bootstrap contract's descriptor: one definition, mode-dependent. The
+ * dry-run L1 this module simulates models the real one, so its sections carry the DRAM
+ * descriptor the real pmap installs, not a fixed literal. */
+#define STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_SECTION_DRAM STAGE90_PMAP_DESC_SECTION_DRAM
 #define STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_TYPE_MASK   0x00000003u
 #define STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_TYPE_SECTION 0x00000002u
 #define STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_BASE_MASK   0xfff00000u

@@ -468,8 +468,15 @@ int stage90_xnu_pmap_attr_dryrun_contract_selftest(const struct stage90_loader_p
     contract->prior_page_pte_word = page->pte_kernel_word & STAGE90_XNU_PMAP_PAGE_DRYRUN_PTE_ATTR_MASK;
     contract->prior_page_attr_seen = page->pte_attr_mask_seen;
     contract->prior_page_expected_attr = page->pte_expected_attr_mask;
-    if (contract->prior_table_section_word == 0x00010c02u &&
-        contract->prior_table_attr_seen == (0x00010c02u & STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_ATTR_MASK) &&
+    /*
+     * The table dryrun's section word is the real DRAM descriptor for this build's attribute
+     * mode, so compare against that constant rather than the Strongly-ordered literal. With
+     * the literal, NORMAL_NC failed this check on hardware: prior_table_section_word was
+     * 0x00011c02 and the expectation was still 0x00010c02.
+     */
+    if (contract->prior_table_section_word == STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_SECTION_DRAM &&
+        contract->prior_table_attr_seen == (STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_SECTION_DRAM &
+                                            STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_ATTR_MASK) &&
         contract->prior_page_pte_word == contract->pte_template_rwx_word &&
         contract->prior_page_attr_seen == contract->pte_template_rwx_word &&
         contract->prior_page_expected_attr == contract->pte_template_rwx_word) {

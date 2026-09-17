@@ -254,8 +254,27 @@ The comparison to make is `stage90_exclusive_probe_result` between the two modes
 Strongly-ordered baseline to 1. If they do not, the attribute change is not doing what it was
 supposed to and nothing built on atomics can be trusted yet.
 
+**That comparison has now been run on hardware (2026-09-17, `experiment-95`), and the answer
+is no.** Under `NORMAL_NC` the payload boots end to end — `kernel_entry returned success`, no
+failed check anywhere in the log, `ram_console_verified=1`, timer IRQs delivered through the
+Normal-mapped payload — and the probe reports `monitor_tracks=0` and `exclusives_usable=0`,
+**identical to the Strongly-ordered measurement**. So the memory type alone is not why
+`STREX` always reports success. The two remaining candidates are cacheable memory (the monitor
+implemented only for cacheable accesses, testable by going to WBWA) and `ACTLR.SMP`, which the
+payload has never written and should read.
+
 ### Rules the change must still obey
 
+0. **A descriptor value has exactly one definition, and it follows the mode.** Adding
+   `NORMAL_NC` was the first time a second definition of one of these values could be wrong,
+   and the first hardware run found three of them: `stage90.h`'s
+   `STAGE90_XNU_PMAP_BOOTSTRAP_SECTION_DESC_SO`, `STAGE90_XNU_PMAP_TABLE_DRYRUN_DESC_SECTION_SO`,
+   and two code literals comparing against them in `xnu_pmap_table_dryrun_contract.c` and
+   `xnu_pmap_attr_dryrun_contract.c`. Each was the literal `0x00010c02u`, each was compared
+   against a value the real code produces, and each was invisible while `SO_ONLY` was the only
+   mode. They are now aliases of `STAGE90_PMAP_DESC_SECTION_DRAM`. This is the same defect
+   class as the device-tree root child count (`19u` in two places) — the third occurrence in
+   this project — and the remedy is the same: one definition, shared.
 1. **Page tables stay non-cacheable** — satisfied by NORMAL_NC, and the reason caches are a
    separate step.
 2. **`ram_console` must be cleaned before any reboot** once the D-cache is on. `log_puts()`
