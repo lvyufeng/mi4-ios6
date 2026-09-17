@@ -128,6 +128,10 @@ FORCE_INCLUDES=(
     # is that the narrow header (it defines `caddr_t` and nothing else) takes RELEASE from 591 to 592
     # with no regressions, and vm_compressor.c is the largest single item on the boot path.
     -include sys/_types/_caddr_t.h
+    # `u_char`, for the same reason and the same place: `osfmk/kern/btlog.c:641` casts to it and
+    # reaches no header that defines it — the files that *do* reach `u_char` do so through
+    # `osfmk/libsa/types.h`, via `<libsa/stdlib.h>`, which most of osfmk does not include.
+    -include sys/_types/_u_char.h
     -include meta_features.h
 )
 # `-include stdatomic.h` used to be in that list, to get `enum memory_order` for the osfmk/arm
@@ -335,6 +339,15 @@ while read -r src; do
         osfmk) COMP_ROOTS=(-I"$XNU/osfmk" -I"$XNU/bsd") ;;
         *)     COMP_ROOTS=(-I"$XNU/osfmk" -I"$XNU/bsd") ;;
     esac
+    # `bsd/sys/kauth.h:113` uses `uid_t` and `gid_t`, and includes nothing that defines them:
+    # `sys/types.h` — which does, through `_types/_uid_t.h` — arrives later in the same closure
+    # (`kern_ktrace.c`'s trace puts types.h at line 128 and kauth.h at 107). Apple's build reaches
+    # them some other way; the narrow answer that does not drag in the whole BSD type set is
+    # `sys/types.h` for BSD files only, where `kern_types.h`'s competing `clock_t` is not reachable
+    # (it is behind `MACH_KERNEL_PRIVATE`, which a BSD file does not define — experiment-118).
+    BSD_FORCE=()
+    [[ $SRC_COMPONENT == bsd ]] && BSD_FORCE=(-include sys/types.h)
+
     FILE_INCLUDES=()
     for _inc in "${INCLUDES[@]}"; do
         if [[ $_inc == COMP_FIRST_PLACEHOLDER ]]; then
@@ -350,7 +363,7 @@ while read -r src; do
     # did, for 45 minutes, because this had no timeout and its output was buffered behind a pipe.
     # A timeout is reported as its own outcome rather than as a compile failure, because "clang
     # hung" and "XNU does not compile" are different findings.
-    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${FILE_INCLUDES[@]}" \
+    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${BSD_FORCE[@]}" "${FILE_INCLUDES[@]}" \
          -c "$src" -o "$OUT/$key.o" 2>"$OUT/$key.log"; then
         ok=$((ok + 1))
         rm -f "$OUT/$key.log"

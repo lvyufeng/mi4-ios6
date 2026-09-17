@@ -1552,6 +1552,18 @@ appending the roots instead of prepending (no effect) and one putting them befor
 **`RELEASE` 599 → 600 of 615, `STAGE90_BOOT` 406 → 407 of 426, image 416 → 377 stubs, boot path
 130 → 120.**
 
+**AND THREE MORE NAMES, EACH ANSWERED NARROWLY** (2026-09-17,
+[`experiment-140`](../experiments/experiment-140-three-missing-names.md)). `bsd/sys/kauth.h:113`
+uses `uid_t` and `:118` `gid_t` and includes nothing that defines them; the definition arrives
+through `sys/types.h`, which in `kern_ktrace.c`'s closure comes at line 128 against kauth.h's 107.
+The answer is `-include sys/types.h` **for BSD files only** — the restriction being the substance,
+since that header is what collides with `kern_types.h` over `clock_t`, and a BSD file never reaches
+that definition (it is behind `MACH_KERNEL_PRIVATE`, experiment-118). `osfmk/kern/btlog.c:641`'s
+`u_char` is the same shape and gets the same answer (`sys/_types/_u_char.h`, which defines `u_char`
+and nothing else). **`RELEASE` 600 → 602, `STAGE90_BOOT` 407 → 409, image 377 → 362 stubs, boot path
+120 → 113.** Left alone and named: `vnode_pager.c`'s `vnode_trim` is a *conflict*, not an absence,
+and needs its two definitions compared rather than a header supplied.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
