@@ -79,10 +79,27 @@ hardware run.
 
 **It is not bootable.** 443 of its symbols are stubs that `mov r0, #0; bx lr`. If this image were
 loaded, XNU's entry sequence would run correctly — it is real code — and then `arm_init` would call
-stubs that silently return 0. Most consequentially, `PE_putc` and `kprintf` are among the undefined
-symbols, so **a boot attempt would produce no output at all**: a silent hang with no log, which is
-precisely the failure mode Phase 0 exists to eliminate. It is also why this image is not worth
-putting on the device yet, and it has not been.
+stubs that silently return 0.
+
+~~Most consequentially, `PE_putc` and `kprintf` are among the undefined symbols, so a boot attempt
+would produce no output at all: a silent hang with no log.~~
+
+**CORRECTED 2026-09-17 — that sentence was wrong, and it was checked against the list it was
+describing.** `PE_putc`, `kprintf`, `vprintf`, `cnputc` and `PE_init_printf` are all **defined** in
+the compiled set:
+
+```
+$ arm-none-eabi-nm --defined-only out/xnu_kernel_obj/*.o | grep -wE 'PE_putc|kprintf|cnputc'
+00000008 B PE_putc          <- a BSS variable, not a function: `void (*PE_putc)(char c);`
+000000c4 T kprintf
+000006dc T cnputc
+```
+
+`PE_putc` is a *function pointer* (`pexpert/gen/pe_gen.c:107`), which `PE_init_printf` (`:112`)
+assigns to `cnputc`; it is zero-initialised BSS, so it is a defined symbol either way. See
+[`experiment-136`](experiment-136-assym-and-a-correction.md) for what that changes — the console
+path is present as code, and the reason a boot attempt might still be silent is a different and
+narrower one than "the symbols are missing".
 
 The distance between this and a boot attempt is therefore not "the linker needs to succeed" — it
 does — but **which of the 443 stubs have to become real before a boot tells you anything**.

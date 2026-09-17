@@ -1444,6 +1444,30 @@ exact failure mode Phase 0 exists to eliminate. The distance to a boot attempt i
 "make the link succeed" (it does) but **which of the 443 stubs must become real first**; the console
 path is the one to do first, because without it every later step is unobservable.
 
+**AND THE SIXTH GENERATOR WAS IN THE TARBALL TOO** (2026-09-17,
+[`experiment-136`](../experiments/experiment-136-assym-and-a-correction.md)).
+`stages/stage90/xnu_arm_boot/assym.s` — 48 lines, 17 defines — says in its own header that the real
+one "is absent from the OSS tarball" and is "the single largest piece of the build configuration that
+osfmk/arm's assembly needs". **Both halves are wrong**: `osfmk/arm/genassym.c` is the generator, and
+`osfmk/conf/Makefile.template:184-189` is the rule that compiles it to assembly and scrapes the
+`offsetof()` values out with sed. `tools/gen_assym.sh` reproduces that pipeline unmodified and
+produces **266 defines**. It assembles three more of the manifest's `.s` files, including
+**`locore.s`** — the exception vectors, `BootCpuData` and `CpuDataEntries`, which `_start` needs four
+instructions in. The measurement link's stubs fall **443 → 427**.
+
+The error it fixes reads like an assembler bug and is not: `locore.s:92`'s `error: register expected`
+at `ldr r0, [r4, ASSIST_RESET_HANDLER]` was an **undefined name**, not bad syntax.
+
+**And a correction to experiment-135, which claimed `PE_putc` and `kprintf` are among the stubs.**
+They are not: `PE_putc` is a BSS *function pointer* (`pe_gen.c:107`) and `kprintf`, `vprintf`,
+`cnputc`, `PE_init_printf` are all defined. The console path is present as code — sixth instance of
+"a measurement can be the thing that is wrong", and the shape matters: **the claim was about a list,
+and the list was in the tree.** The next step is narrower than it looked: `cnputc` comes from
+Apple's ring-buffer `serial_console.c`, so where the bytes go depends on what drains it, and
+`PE_init_printf` has to be *reached* for `PE_putc` to be non-NULL at all.
+
+The generators-concluded-absent list is now six long, and every entry was in the tarball.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
