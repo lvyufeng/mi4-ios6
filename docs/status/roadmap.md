@@ -1642,6 +1642,38 @@ express "this component sees that header's public half and not its private half.
 
 **State unchanged: `RELEASE` 602 of 615, boot path 113 stubs.**
 
+**AND THE `simport` QUESTION IS ANSWERED — BY APPLE'S OWN TWO RULES** (2026-09-17,
+[`experiment-145`](../experiments/experiment-145-the-simport-answer.md)). experiment-144 recorded the
+hypothesis and said it was the first thing to check. It is confirmed, in `osfmk/mach/Makefile`:
+
+```make
+MIG_USHDRS : %_server.h : %.defs      $(MIG) $(MIGFLAGS) ... -sheader $@          # :231-238, EXPORTED
+MIG_KSHDRS : %_server.h : %.defs      $(MIG) $(MIGFLAGS) $(MIGKSFLAGS) -sheader $*_server.h
+                                                                                 # :372-380, NOT exported
+```
+
+`MIGKSFLAGS = -DMACH_KERNEL_PRIVATE -DKERNEL_SERVER=1` (`:247`) and the `simport` lines are behind
+`#if KERNEL_SERVER` — so **the two rules produce different files under the same name**, and
+`EXPORT_MI_GEN_LIST = ${MIGINCLUDES}` exports only the first. osfmk reads the build dir
+(`INCFLAGS_LOCAL`, `INCFLAGS_GEN`) and gets the variant **with** the simports; every other component
+reads export roots only (`INCFLAGS_IMPORT`) and gets the one **without** — which is what keeps a BSD
+file out of `osfmk/ipc/ipc_kmsg.h`.
+
+Implemented as both variants (`mach_headers/` and `mach_headers/kserver/`) with the `kserver` root
+first for osfmk files only, the same per-file mechanism experiments 139/140 built. **The generated
+`_server.c` moves with the KERNEL_SERVER header**, because it includes its own header with quotes
+(`#include "mach_vm_server.h"`), which resolves next to the file — a `.c` in the export root picks up
+the wrong header. **`RELEASE` 602 → 606 of 615, `STAGE90_BOOT` 409 → 412, image 362 → 277 stubs, boot
+path 113 → 89, no regressions.**
+
+**That change exposed one more instance of the project's oldest defect, caught by the linker**: the
+first run after it failed on `multiple definition of iokit_server_routine` between the old and new
+objects, because the build cleared `*.log` and never `*.o`. It now clears both.
+
+**This is the first of the four component-dependent findings to be resolved by reproducing Apple
+rather than by working around it** — 139 (`ast.h`), 140 (`sys/types.h`), 141 (`size_t`) and this one
+all had the same shape, and this one had an answer in the rules.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

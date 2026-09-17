@@ -44,6 +44,7 @@ XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
 SHIMS=$REPO_ROOT/stages/stage90/shims
 SHIMS_ARM=$REPO_ROOT/stages/stage90/shims_arm
 MIG_HEADERS=${MIG_HEADERS:-$REPO_ROOT/out/mach_headers}
+MIG_KSERVER=${MIG_KSERVER_OUT:-$REPO_ROOT/out/mach_headers/kserver}
 OUT=${XNU_KERNEL_OBJ_OUT:-$REPO_ROOT/out/xnu_kernel_obj}
 MANIFEST=${MANIFEST:-$REPO_ROOT/out/xnu_arm_manifest.txt}
 
@@ -107,6 +108,13 @@ mkdir -p "$OUT"
 # baseline run's `ffs` logs and read as if nothing had changed. Delete them before recreating
 # all.log, since this glob would otherwise match it.
 rm -f "$OUT"/*.log
+# And the objects, for the same reason and one level worse. A file that leaves the manifest - or
+# moves, as the MIG `_server.c` files did when the two server-header variants were separated
+# (experiment-145) - leaves its `.o` behind, and the link then reports **duplicate symbols for files
+# the manifest no longer names**. That is how this was found: the measurement link failed on
+# `multiple definition of iokit_server_routine` between `mach_headers/device_device_server.o` and
+# `mach_headers/kserver_device_device_server.o`, one of which was stale.
+rm -f "$OUT"/*.o
 : > "$OUT/all.log"
 : > "$OUT/failed.txt"
 
@@ -339,6 +347,15 @@ while read -r src; do
         osfmk) COMP_ROOTS=(-I"$XNU/osfmk" -I"$XNU/bsd") ;;
         *)     COMP_ROOTS=(-I"$XNU/osfmk" -I"$XNU/bsd") ;;
     esac
+    # And the same split for the MIG server headers, which Apple builds TWICE from one rule pair
+    # (`osfmk/mach/Makefile:231` with MIGFLAGS, `:372` with MIGFLAGS+MIGKSFLAGS). The `simport`
+    # lines are behind `#if KERNEL_SERVER`, so the two variants differ; EXPORT_MI_GEN_LIST exports
+    # only the first. osfmk reads the build dir (`INCFLAGS_LOCAL`, `INCFLAGS_GEN`) and gets the
+    # variant WITH them; every other component reads export roots only (`INCFLAGS_IMPORT`) and gets
+    # the one without — which is what keeps a BSD file out of `osfmk/ipc/ipc_kmsg.h`
+    # (experiment-145).
+    KSERVER_FIRST=()
+    [[ $SRC_COMPONENT == osfmk ]] && KSERVER_FIRST=(-I"$MIG_KSERVER")
     # `bsd/sys/kauth.h:113` uses `uid_t` and `gid_t`, and includes nothing that defines them:
     # `sys/types.h` — which does, through `_types/_uid_t.h` — arrives later in the same closure
     # (`kern_ktrace.c`'s trace puts types.h at line 128 and kauth.h at 107). Apple's build reaches
@@ -360,7 +377,7 @@ while read -r src; do
     CLOCK_FORCE=()
     [[ $SRC_COMPONENT == osfmk ]] && CLOCK_FORCE=(-D_CLOCK_T=1)
 
-    FILE_INCLUDES=()
+    FILE_INCLUDES=("${KSERVER_FIRST[@]}")
     for _inc in "${INCLUDES[@]}"; do
         if [[ $_inc == COMP_FIRST_PLACEHOLDER ]]; then
             FILE_INCLUDES+=("${COMP_ROOTS[@]}")

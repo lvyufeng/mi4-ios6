@@ -34,6 +34,9 @@ REPO_ROOT=$(cd "$TOOLS_DIR/.." && pwd)
 XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
 MIG=${MIG:-$REPO_ROOT/out/mig/build/mig}
 OUT=${MIG_HEADERS_OUT:-$REPO_ROOT/out/mach_headers}
+# The build-dir variant (MIGKSFLAGS) goes beside it, not inside it: `rm -rf $OUT` clears only OUT,
+# and the two are different files under the same name.
+KSERVER=${MIG_KSERVER_OUT:-$REPO_ROOT/out/mach_headers/kserver}
 
 [[ -x $MIG ]] || { echo "no MIG at $MIG - run tools/build_mig.sh first" >&2; exit 2; }
 [[ -d $XNU/osfmk/mach ]] || { echo "no .defs at $XNU/osfmk/mach" >&2; exit 2; }
@@ -121,7 +124,7 @@ fi
 # cannot tell which set it was compiled against. Same class as the stale per-file logs in
 # build_xnu_arm_kernel.sh, and the count-of-two-runs bug before that.
 rm -rf "$OUT"
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$KSERVER"
 
 ok=0
 fail=0
@@ -232,17 +235,55 @@ for rel in "${DEFS_FILES[@]}"; do
     rm -f "$OUT/$outdir/$base.h" "$OUT/$outdir/${base}${server_suffix_for_run}.h" \
           "$OUT/$outdir/${base}${server_suffix_for_run}.c" "$OUT/$outdir/${base}_user.c"
 
-    # --- the server side: -DKERNEL_SERVER=1 ------------------------------------------------
+    # --- the server side, TWO variants, because Apple builds two ----------------------------
+    #
+    # `osfmk/mach/Makefile` has two rules for the same `%_server.h` name:
+    #
+    #   :231-238   MIG_USHDRS  ->  $(MIG) $(MIGFLAGS)                -sheader $@
+    #   :372-380   MIG_KSHDRS  ->  $(MIG) $(MIGFLAGS) $(MIGKSFLAGS)  -sheader $*_server.h
+    #
+    # and `MIGKSFLAGS = -DMACH_KERNEL_PRIVATE -DKERNEL_SERVER=1` (:247). The `simport` lines in
+    # `mach_types.defs:606-615` are behind `#if KERNEL_SERVER`, so **the two rules produce different
+    # files under the same name** - the export one without those includes, the build-dir one with
+    # them. `EXPORT_MI_GEN_LIST = ${MIGINCLUDES}` exports UUHDRS + USHDRS and NOT KSHDRS, so the
+    # variant a component sees depends on whether it reads the build dir (osfmk: `INCFLAGS_LOCAL`,
+    # `INCFLAGS_GEN`) or only the export roots (`INCFLAGS_IMPORT`).
+    #
+    # That is what experiment-144's four `sync_qos_count_t` files need: a BSD file that reaches
+    # `exc_server.h` through `mach_interface.h` must get the file WITHOUT
+    # `simport <kern/ipc_kobject.h>`, or it is dragged into `osfmk/ipc/ipc_kmsg.h` and its
+    # MACH_KERNEL_PRIVATE-only types. The export variant is written to $OUT (as before); the
+    # build-dir variant goes to $OUT/kserver, which the build places first for osfmk files only.
     if [[ ",$kinds," == *,sheader,* || ",$kinds," == *,server,* ]]; then
-        cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 -DKERNEL_SERVER=1 \
+        # (1) the export variant: MIGFLAGS only, exactly as the MIG_USHDRS rule.
+        cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 \
            -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" "$defs" >"$OUT/$base.srv.pp" 2>>"$OUT/$base.cpp.log"
-        sheader_out=/dev/null; server_out=/dev/null
+        # Header only. Apple's MIG_USHDRS rule asks for `-sheader $@` and nothing else, which is why
+        # the export root carries no `_server.c`.
+        sheader_out=/dev/null
         [[ ",$kinds," == *,sheader,* ]] && sheader_out="$OUT/$outdir/${base}${server_suffix_for_run}.h"
-        [[ ",$kinds," == *,server,*  ]] && server_out="$OUT/$outdir/${base}${server_suffix_for_run}.c"
         if "$MIG" -header /dev/null -user /dev/null \
-                  -server "$server_out" -sheader "$sheader_out" \
+                  -server /dev/null -sheader "$sheader_out" \
                   <"$OUT/$base.srv.pp" >"$OUT/$base.mig.log" 2>&1; then
             server_ok=0
+        fi
+
+        # (2) the build-dir variant: + MIGKSFLAGS, exactly as the MIG_KSHDRS rule — and it produces
+        # the `_server.c` too, because the two belong in one directory: the generated `.c` includes
+        # its own header with QUOTES (`#include "mach_vm_server.h"`), which resolves next to the
+        # file, so a `.c` in the export root would pick up the export header and lose the types the
+        # KERNEL_SERVER run defines. Apple has both in the build dir; so does this.
+        if [[ ",$kinds," == *,sheader,* || ",$kinds," == *,server,* ]]; then
+            mkdir -p "$KSERVER/$outdir"
+            cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 -DKERNEL_SERVER=1 \
+               -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" "$defs" >"$OUT/$base.ksrv.pp" 2>>"$OUT/$base.cpp.log"
+            server_out=/dev/null; ksrv_sheader=/dev/null
+            [[ ",$kinds," == *,server,*  ]] && server_out="$KSERVER/$outdir/${base}${server_suffix_for_run}.c"
+            [[ ",$kinds," == *,sheader,* ]] && ksrv_sheader="$KSERVER/$outdir/${base}${server_suffix_for_run}.h"
+            "$MIG" -header /dev/null -user /dev/null \
+                   -server "$server_out" -sheader "$ksrv_sheader" \
+                   <"$OUT/$base.ksrv.pp" >>"$OUT/$base.mig.log" 2>&1 || true
+            rm -f "$OUT/$base.ksrv.pp"
         fi
     fi
 

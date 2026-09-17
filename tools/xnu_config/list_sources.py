@@ -193,8 +193,12 @@ def main():
     ap.add_argument("--why", action="store_true", help="print the condition each file met")
     ap.add_argument("--missing", action="store_true",
                     help="report listed files that are not present on disk")
+    # The `./` entries name generated *sources*, and a MIG `_server.c` lives in the build dir beside
+    # the KERNEL_SERVER variant of its own header - see gen_mach_headers.sh and experiment-145 - which
+    # is `kserver/`, not the export root.
     ap.add_argument("--generated-dir",
-                    default=":".join([os.path.join(REPO_ROOT, "out", "mach_headers"),
+                    default=":".join([os.path.join(REPO_ROOT, "out", "mach_headers", "kserver"),
+                                      os.path.join(REPO_ROOT, "out", "mach_headers"),
                                       os.path.join(REPO_ROOT, "out", "xnu_generated", "bsd")]),
                     help="directories holding build-generated sources, colon-separated and "
                          "searched in order; `./x` entries are resolved against them")
