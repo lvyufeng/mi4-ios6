@@ -1,11 +1,11 @@
 # Experiment 94 — Stage90 Phase 0: the recovery net proved on hardware, and the two bugs the baseline run found
 
-Date: 2026-09-17 (runs 00:27–02:34 UTC)
+Date: 2026-09-17 (runs 00:27–03:12 UTC)
 Commit under test: `a683c9d` and the two commits before it (`3b32ee4`, `07ea5a5`)
 Device: Xiaomi Mi 4 LTE `cancro`, serial `4a2fe00b`, non-persistent `fastboot boot`
 
-Three builds were used, in this order. `STAGE90_HANDOFF_MODE = HARD_SKIP` and
-`STAGE90_ENTRY_LADDER_LEVEL = FULL` throughout; the only varying switch is named per run.
+`STAGE90_ENTRY_LADDER_LEVEL = FULL` throughout, and `STAGE90_HANDOFF_MODE = HARD_SKIP` except
+where noted; the only switches that vary are named per run.
 
 | # | Captured | Build switches | Result |
 | --- | --- | --- | --- |
@@ -18,15 +18,17 @@ Three builds were used, in this order. `STAGE90_HANDOFF_MODE = HARD_SKIP` and
 | 7 | 00:52 | same, after the loader fix | `kernel_entry returned success` |
 | 8 | 01:43 | `-DSTAGE90_DEADMAN_SELFTEST=1 -DSTAGE90_HW_WATCHDOG=0` | **dead-man fired**, dumped the interrupted PC, rebooted; device returned unaided |
 | 9 | 02:34 | `-DSTAGE90_HANDOFF_MODE=STAGE90_HANDOFF_MODE_PREFLIGHT_WATCHDOG_ONLY` | preflight watchdog loop ran, dumped, rebooted; device returned unaided |
+| 10 | 03:12 | `FULL` + `-DSTAGE90_HANDOFF_FAULT_INJECT_VA=0x80100000u` | candidate L1 installed, jump taken, **logged prefetch abort**, reboot; device returned unaided |
 
-Runs 1–7 are the ones the section headings below describe. Runs 8 and 9 are addenda, run after
-this log was first written: 8 closes the last Phase 0 recovery-net item, and 9 is the first step
-up out of `HARD_SKIP` — and, unexpectedly, the best evidence yet for what hung the device on
-2026-09-16. See `Addendum` and `Addendum 2` at the end.
+Runs 1–7 are the ones the section headings below describe. Runs 8–10 are addenda, run after
+this log was first written: 8 closes the last Phase 0 recovery-net item, 9 is the first step up
+out of `HARD_SKIP` — and, unexpectedly, the best evidence yet for what hung the device on
+2026-09-16 — and 10 closes Phase 0 itself, with the first candidate-L1 install and jump since
+Stage90's original hang. See `Addendum`, `Addendum 2` and `Addendum 3` at the end.
 
 Raw captures are `/tmp/kmsg-selftest{,2,3}.txt`, `/tmp/kmsg-baseline{,2,3,4}.txt`,
-`/tmp/kmsg-deadman1.txt` and `/tmp/kmsg-preflight1.txt`. Rebuilding run 7's configuration
-reproduces `stage90-qcdt.img` sha256
+`/tmp/kmsg-deadman1.txt`, `/tmp/kmsg-preflight1.txt` and `/tmp/kmsg-faultinject1.txt`.
+Rebuilding run 7's configuration reproduces `stage90-qcdt.img` sha256
 `9eea0d49c51b5fd6807a410aef978d7ad440850313b63c92bef64f2b9acc5dea`.
 
 ## What was being tested
@@ -371,3 +373,83 @@ What makes this worth recording is the ordering: Phase 0 was designed around the
 a *recovery net* had failed. The evidence now points at a *payload bug* that no net existed for —
 and the two fixes that followed (a net in front of the loader, and a loader that refuses to write
 where nothing is mapped) cover it from both ends.
+
+---
+
+# Addendum 3 — run 10: `FULL` + fault injection — Phase 0's criterion (b), and the first jump since the original hang
+
+Run 10 closes Phase 0. Build:
+`-DSTAGE90_HANDOFF_MODE=STAGE90_HANDOFF_MODE_FULL -DSTAGE90_HANDOFF_FAULT_INJECT_VA=0x80100000u`,
+gate `--allow-full --allow-fault-inject`. Both recovery nets armed. Captured
+`/tmp/kmsg-faultinject1.txt`.
+
+The gate said in advance what to expect: *"an `exception pabort … lr=0x80100000` line. A silent
+hang or a boot loop instead means the address IS mapped."* The device produced the first:
+
+```
+stage90_xnu_handoff: FAULT INJECTION - target is a deliberately unmapped VA
+fault_inject_va=0x80100000
+stage90_xnu_handoff: environment check before candidate L1
+ttbr0_before_candidate=0x000b8000    vbar_before_candidate=0x000080a0   sp_before_candidate=0x00083ac0
+stage90_xnu_handoff: installing candidate L1 for high-VA handoff
+ttbr0_after_candidate =0x0010c000    vbar_after_candidate =0x000080a0   sp_after_candidate =0x00083ac0
+stage90_xnu_handoff: FAULT INJECTION - skipping target content check (unmapped)
+stage90_xnu_handoff: *** READY TO JUMP TO STAGE-OWNED HIGH-VA TARGET ***
+stage90_xnu_handoff: arming PC-sampling watchdog
+stage90_xnu_handoff: *** JUMPING TO STAGE-OWNED HIGH-VA TARGET ***
+exception: prefetch-abort lr=0x80100000 spsr=0x60000113
+platform_reboot entered ... writing PS_HOLD=0 ... PS_HOLD write returned
+```
+
+**Criterion (b) is met:** the jump to an unmapped VA produced a *logged* abort with the faulting
+PC, followed by a reboot — not a hang, and not a boot loop. The device returned to Android
+unattended, `run_and_capture.sh` exit 0.
+
+The logged `lr` is the faulting PC, not a return address: `vector_prefetch_abort` does
+`sub lr, lr, #4`, converting ARM's prefetch-abort `LR = PC + 4` back to the address whose fetch
+failed. So the handler printed exactly the address the jump went to.
+
+**This is also the first time the candidate L1 has been installed and the jump taken since
+Stage90's original hang.** `ttbr0_before_candidate=0x000b8000` → `ttbr0_after_candidate=0x0010c000`
+is the switch itself, and it worked; `vbar` and `sp` were unchanged across it, so the vector
+table and stack remained reachable under the candidate L1 — which is the premise the roadmap
+verified by reading and which this run confirms by executing. Stage90's original failure was a
+jump that resolved to PA `0x8000` and re-entered `_start` in a loop that wiped its own log. The
+same jump machinery, pointed at a deliberate hole, now produces a captured fault and recovers.
+
+## A side effect worth stating plainly: the loader's copy path is now dead in every mode
+
+In this run, `FULL` and the candidate L1 installed, the loader still refused:
+
+```
+segment __TEXT destination VA is NOT mapped (candidate L1 not live); refusing to copy
+live_l1_from_ttbr0=0x000b8000   candidate_l1_base=0x0010c000
+stage90_xnu_macho_loader_segments_loaded=0x00000000
+stage90_xnu_macho_loader_segments_unmapped=0x00000006
+```
+
+That is correct behaviour and it is also a structural fact about the current ordering: the loader
+preflight runs inside the `arm_init` ladder, and the candidate L1 is installed later, in
+`stage90_xnu_handoff_run`. So the live L1 is the identity table at loader time in *every* mode,
+the check refuses, and `segments_loaded` is 0 on all ten runs of this log. The fail-closed fix is
+right — the destination genuinely is unmapped at that moment — but it means the loader has become
+a parse-and-validate preflight with no reachable copy path, because the only table that maps
+`0x80008000` is installed after it runs.
+
+Whether that matters depends on what the fixture is for. It is inert by design today, so nothing
+regresses; but "the loader can materialize a fixture" is no longer something any current mode
+does, and materializing one would require moving the candidate-L1 install earlier — before the
+ladder's loader step — not merely jumping to the fixture's entry. That is a Phase 2 question, and
+it is worth knowing before it is discovered on hardware.
+
+## Phase 0, closed
+
+| Criterion | Status | Evidence |
+| --- | --- | --- |
+| (a) an induced hang self-recovers without a manual power-cycle | ✅ | runs 3 and 6 (watchdog), run 8 (dead-man) |
+| (b) a jump that produces a logged abort with PC/LR, not a hang | ✅ | run 10, above |
+| (c) a real function executes via the candidate L1 at high VA and returns, IRQ handler still live | ✅ | run 7 |
+
+The phase's own goal — make failure visible and recoverable, so later phases can iterate — is
+now backed by hardware rather than by design. The next phase that has hardware evidence owed to
+it is Phase 1: the caches and the Normal-cacheable attribute map.

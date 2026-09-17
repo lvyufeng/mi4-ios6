@@ -22,10 +22,12 @@ recovered through `/proc/last_kmsg`, under the safety rules in the root `README.
 | ARMv7 two-level pmap (1 MB sections + 4 KB pages) | ✅ | `experiment-13`, `experiment-86` |
 | High-virtual alias at `0x80000000` (`VA = 0x80000000 + PA`) | ✅ | `experiment-88` |
 | Code execution, IRQ, data-abort and undef handlers at high VA | ✅ | `experiment-88` … `experiment-91` |
-| Mach-O parsing and a loader that *can* materialize a fixture | ✅ | `experiment-92`, `stages/stage90/xnu_macho_loader.c` |
+| Mach-O parsing in the payload's loader | ✅ | `experiment-92`, `experiment-94`. **Not** materializing a fixture: the copy path refuses in every mode — see §5 Phase 0 |
 | Crash evidence survives a hang (`ram_console` at top of DRAM) | ✅ | `docs/reference/no-teardown-debugging.md` |
 | A hung payload resets the device itself, with no power press | ✅ | `experiment-94` runs 3 and 6 (MSM8974 hardware watchdog, `stages/stage90/hw_watchdog.c`) |
 | MSM8974 hardware watchdog: arm, and read its live countdown back | ✅ | `experiment-94` runs 1–3 |
+| Software dead-man reset (GIC + timer + IRQ path), proved alone | ✅ | `experiment-94` run 8 |
+| Candidate-L1 install followed by a jump, with the fault captured | ✅ | `experiment-94` run 10 (`FULL` + fault injection) |
 
 This is a real and unusually complete bring-up layer for a platform with no vendor
 documentation. Nothing in this re-plan asks for it to be thrown away.
@@ -113,6 +115,12 @@ Expected evidence in `last_kmsg`: an `exception pabort ... lr=0x80100000` line f
 the `platform_reboot` sequence. A silent hang or a boot loop instead means the address *was*
 mapped, and the run says so: the return path logs "returned from an UNMAPPED target".
 Gated behind `--allow-fault-inject`.
+
+**Run 2026-09-17 (experiment-94 run 10): the expected evidence, exactly.** The log shows
+`installing candidate L1 for high-VA handoff` (`ttbr0 0x000b8000 → 0x0010c000`), the jump, then
+`exception: prefetch-abort lr=0x80100000 spsr=0x60000113` and `platform_reboot`. The logged `lr`
+is the faulting PC, not a return address — `vector_prefetch_abort` converts ARM's prefetch-abort
+`LR = PC + 4` back with `sub lr, lr, #4` — so the handler printed the address the jump went to.
 
 **Premises verified against the mapping code before writing any of it into a run:**
 
@@ -223,8 +231,8 @@ that rule is what this re-plan is *for*.
 Every later phase will hang repeatedly, and iteration speed is set entirely by how much a
 hang tells you. This is also the cheapest phase.
 
-**Status (2026-09-17).** Eight hardware runs on 2026-09-17 closed out every Phase 0 item except
-criterion (b): both recovery nets proved, the baseline green, and criterion (c) met along the way
+**Status (2026-09-17). All three exit criteria are met, and the phase is closed.** Ten hardware
+runs on 2026-09-17
 ([`docs/experiments/experiment-94-stage90-phase0-watchdog-and-baseline.md`](../experiments/experiment-94-stage90-phase0-watchdog-and-baseline.md)):
 
 - **(a) met.** `STAGE90_HW_WATCHDOG_SELFTEST=1` was run three times. Runs 1 and 2 returned the
@@ -246,8 +254,12 @@ criterion (b): both recovery nets proved, the baseline green, and criterion (c) 
   call site and callee, so the dump is real — and `platform_reboot()` returned the device
   unattended. What it does not show is that the dead-man fires on hangs that take the GIC or the
   vector table out; that is what the hardware watchdog is for.
-- **(b) not run.** `STAGE90_HANDOFF_FAULT_INJECT_VA` exists for it and is gated behind
-  `--allow-fault-inject`, and it requires `FULL` mode. **This is the last item in the phase.**
+- **(b) met** (run 10). `FULL` + `STAGE90_HANDOFF_FAULT_INJECT_VA=0x80100000u`: the candidate L1
+  is installed (`ttbr0 0x000b8000 → 0x0010c000`), the jump is taken, and the fault is
+  *captured* — `exception: prefetch-abort lr=0x80100000` (the vector converts ARM's `LR = PC+4`
+  back to the faulting PC, so that is the address the jump went to) — followed by
+  `platform_reboot`. No hang, no boot loop. **This is also the first candidate-L1 install and
+  jump since Stage90's original hang, and it recovered.**
 - **The step up out of `HARD_SKIP` has started** (run 9): `PREFLIGHT_WATCHDOG_ONLY` completes the
   ladder, skips the candidate L1 install, arms the sampling watchdog, dumps and reboots — and the
   device returns unattended. That is the same configuration that went dark on 2026-09-16, now
@@ -288,28 +300,28 @@ failed, and finding out why reshaped this phase.
   `stages/stage90/preflight_boot_check.sh` refuses to hand over a boot command for an image
   built with a mode the caller has not explicitly allowed.
 
-Remaining in this phase:
+Remaining in this phase: **nothing — closed 2026-09-17.** What was on this list, and how it went:
 
-- ~~Prove the hardware watchdog first.~~ **Done** (2026-09-17), by
-  `STAGE90_HW_WATCHDOG_SELFTEST=1`. Hangs now have a reset that does not depend on the
-  payload's own state, so later runs stop costing a power press — which was the point.
-- ~~Re-establish the known-good baseline.~~ **Done** (2026-09-17): the default build arms both
-  nets, completes the ladder and reboots itself.
+- ~~Prove the hardware watchdog first.~~ **Done** (run 3), after runs 1 and 2 found two real
+  register-semantics bugs. Hangs now have a reset that does not depend on the payload's own
+  state, so later runs stop costing a power press — which was the point.
+- ~~Re-establish the known-good baseline.~~ **Done** (run 7): the default build arms both nets,
+  completes the ladder and reboots itself.
 - ~~Verify `VBAR` still points at the high-VA vectors after the candidate L1 install.~~ **Done**
-  as a side effect of the baseline run: the high-VA IRQ handler delivered timer interrupts with
-  VBAR at `0x800080a0` and restored it to `0x000080a0` afterwards.
-- **Prove the dead-man** with `STAGE90_DEADMAN_SELFTEST=1` (built with `STAGE90_HW_WATCHDOG=0`,
-  so a success is attributable to it alone) and confirm the device comes back to Android
-  unattended (~60 s, the dead-man budget), then read the PC ring out of `/proc/last_kmsg`. This
-  is the only one of the two nets with no direct evidence yet. **Done (2026-09-17, run 8 of
-  experiment-94).**
-- The entry-validity guard is in: the handoff rejects a target equal to the fixture entry VA,
-  an unaligned target, or one whose first word is the fixture's `__TEXT` marker. Criterion (b)
-  still has not produced a logged fault — the last thing Phase 0 owes.
-- Then step the handoff mode up — `PREFLIGHT_WATCHDOG_ONLY` (done, run 9), then `FULL`, which is
-  the first time the candidate-L1 *switch* and the jump are exercised again since Stage90's
-  original run. Pair it with `STAGE90_HANDOFF_FAULT_INJECT_VA` so that first exercise is a
-  logged fault rather than a real handoff.
+  as a side effect of the baseline run, and again in run 10 under `FULL`.
+- ~~Prove the dead-man~~ **Done** (run 8), built with `STAGE90_HW_WATCHDOG=0` so a success was
+  attributable to it alone: it fired at its 60 s budget, dumped the interrupted PC and rebooted.
+- ~~The entry-validity guard, and criterion (b) producing a logged fault.~~ **Done** (run 10).
+- ~~Step the handoff mode up~~ **Done** (runs 9 and 10). `FULL` + fault injection was the first
+  candidate-L1 install and jump since Stage90's original hang, and it recovered.
+
+**One thing this phase did not establish, found while writing it up:** the Mach-O loader's copy
+path is unreachable in every mode. The loader preflight runs inside the `arm_init` ladder, and
+the candidate L1 is installed later in `stage90_xnu_handoff_run`, so `segments_loaded` is 0 on
+all ten runs — the fail-closed check is right that the destination is unmapped at that moment,
+but the consequence is that "the loader can materialize a fixture" is no longer something any
+current mode does (§1's table is corrected). Fixing it means installing the candidate L1
+*before* the ladder's loader step, which is Phase 2 work.
 
 #### The unvalidated stack, audited
 
@@ -365,10 +377,10 @@ STAGE90_EXTRA_CFLAGS='-DSTAGE90_DEADMAN_SELFTEST=1 -DSTAGE90_HW_WATCHDOG=0' ./bu
 #    experiment-94: the preflight watchdog loop armed, dumped and rebooted; the device
 #    returned unattended, on the configuration that went dark on 2026-09-16], then FULL.
 #
-#    Next: FULL + STAGE90_HANDOFF_FAULT_INJECT_VA=0x80100000 with
-#    --allow-full --allow-fault-inject, which is Phase 0 exit criterion (b). Both recovery
-#    nets are now hardware-proved, so this is the first run since Stage90's original hang
-#    to install the candidate L1 and take the jump.
+#    FULL + STAGE90_HANDOFF_FAULT_INJECT_VA=0x80100000u with
+#    --allow-full --allow-fault-inject [DONE 2026-09-17, run 10]: the candidate L1 was
+#    installed, the jump was taken, and the prefetch abort was logged and recovered from.
+#    That was Phase 0 exit criterion (b), and Phase 0 is now closed.
 ```
 
 The `fastboot` and log-capture steps are the same for all of them, and the gate prints them
@@ -407,6 +419,12 @@ gates on what the image was actually built with. Rebuild without it to return to
 power-cycle; (b) a jump to the Stage90 fixture header produces a logged undef/abort with
 PC/LR, not a hang; (c) a real Stage-owned function executes via the candidate L1 at high VA
 and returns, with the IRQ handler still live afterwards.
+
+**(a), (b) and (c) are all met on hardware as of 2026-09-17** — runs 3 and 8, run 10, and run 7
+of [`experiment-94`](../experiments/experiment-94-stage90-phase0-watchdog-and-baseline.md)
+respectively. (b) was tested against a deliberate hole rather than the fixture header, which is
+what the fixture-header version of the test would have proved anyway once the mapping analysis
+in §2 showed that address is real code under the candidate L1.
 
 ### Phase 1 — Cacheable memory policy (1–3 weeks)
 
