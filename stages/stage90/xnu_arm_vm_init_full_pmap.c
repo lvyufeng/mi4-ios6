@@ -401,6 +401,17 @@ int stage90_xnu_arm_vm_init_full_pmap_run(
     alias_gicd_ctlr = (volatile uint32_t *)(uintptr_t)(STAGE90_GIC_ALIAS_BASE + (PE_state_stage90.gicDistributorBase - 0xf9000000u));
 
     dsb_isb();
+    /*
+     * Publish both tables before TTBR0 points at them. The MMU's table walk does not read the
+     * D-cache, so entries still sitting in dirty lines would be invisible to it and the
+     * translations this window verifies would come from stale memory instead. The L2 pool is
+     * cleaned whole rather than per allocated table because it is small and one range is
+     * obviously complete.
+     */
+    cache_clean_dcache_range(candidate_l1_base,
+                             STAGE90_XNU_TTE_L1_ENTRY_COUNT * sizeof(uint32_t));
+    cache_clean_dcache_range((uint32_t)(uintptr_t)stage90_candidate_l2_pool,
+                             sizeof(stage90_candidate_l2_pool));
     write_ttbr0(candidate_l1_base);
     r->ttbr0_write_count++;
     switched = 1;

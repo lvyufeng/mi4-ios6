@@ -786,6 +786,18 @@ void platform_reboot(void)
     volatile uint32_t *restart_reason = (volatile uint32_t *)RESTART_REASON;
     volatile uint32_t *ps_hold = (volatile uint32_t *)MSM8974_PSHOLD;
 
+    /*
+     * Get everything out of the D-cache before the machine goes down, and do it first, so the
+     * log lines written below are covered too. This is belt and braces: `ram_console` is mapped
+     * non-cacheable under every cacheable attribute mode precisely so that the crash log does
+     * not depend on maintenance happening, and `log_puts` ends in `dsb sy; isb`. But this is the
+     * path every failure ends on, including the ones where something else is already wrong, so
+     * it does not rely on that.
+     */
+#if STAGE90_CACHE_MODE == STAGE90_CACHE_MODE_ICACHE_DCACHE
+    cache_clean_invalidate_dcache_all();
+#endif
+
     log_puts("MI4IOS6_STAGE90 platform_reboot entered\n");
     log_kv32("platform_reboot_restart_reason_addr", RESTART_REASON);
     log_kv32("platform_reboot_ps_hold_addr", MSM8974_PSHOLD);

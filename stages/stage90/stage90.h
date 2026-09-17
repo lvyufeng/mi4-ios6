@@ -4287,6 +4287,34 @@ struct stage90_xnu_macho_loader_result {
 #endif
 
 /*
+ * The ram_console window is DRAM, but it is never mapped with the DRAM descriptor under a
+ * cacheable mode: it stays Normal-Non-cacheable even in NORMAL_WB.
+ *
+ * Why this is not an inconsistency. The rule that matters is one memory type per *physical*
+ * address, and the ram_console PA range (0xde500000-0xde6fffff) is disjoint from every other PA
+ * this payload maps - listed per PA in docs/reference/pmap-attribute-map.md. So it can carry a
+ * different type from the image without violating anything.
+ *
+ * Why it should. `ram_console` is the crash log: it is read by `write_remains` after a reboot,
+ * including a *warm* reboot, which does not necessarily reset the caches. A log written through
+ * the D-cache would depend on a clean happening on every path out of the payload - including the
+ * paths that are already failing when they write it. Mapping it non-cacheable makes the log
+ * correct by construction rather than by remembering, which is worth more than the uniformity.
+ * `log_puts()` already ends with `dsb sy; isb`, which is a complete guarantee for a
+ * non-cacheable store and is not one for a cached store.
+ */
+#if STAGE90_PMAP_ATTR_MODE == STAGE90_PMAP_ATTR_MODE_SO_ONLY
+#define STAGE90_PMAP_DESC_SECTION_RAM_CONSOLE STAGE90_PMAP_DESC_SECTION_SO
+#else
+#define STAGE90_PMAP_DESC_SECTION_RAM_CONSOLE STAGE90_PMAP_DESC_SECTION_NORMAL_NC
+#endif
+
+/* Cache maintenance. Defined in cache_ops.c; see its header for what each is for. */
+void cache_clean_invalidate_dcache_all(void);
+void cache_clean_dcache_range(uint32_t va, uint32_t bytes);
+void cache_invalidate_icache_all(void);
+
+/*
  * Cache enablement. Separate from the attribute mode on purpose: the descriptors say what
  * memory *is*, and these say whether the caches *use* it. A cacheable descriptor pair with the
  * caches off behaves as non-cacheable, so the two can be brought up one at a time.
@@ -4305,14 +4333,16 @@ struct stage90_xnu_macho_loader_result {
  */
 #define STAGE90_CACHE_MODE_NONE   0u
 #define STAGE90_CACHE_MODE_ICACHE 1u
+#define STAGE90_CACHE_MODE_ICACHE_DCACHE 2u
 
 #if !defined(STAGE90_CACHE_MODE)
 #define STAGE90_CACHE_MODE STAGE90_CACHE_MODE_NONE
 #endif
 
 #if (STAGE90_CACHE_MODE != STAGE90_CACHE_MODE_NONE) && \
-    (STAGE90_CACHE_MODE != STAGE90_CACHE_MODE_ICACHE)
-#error "STAGE90_CACHE_MODE must be STAGE90_CACHE_MODE_NONE or _ICACHE"
+    (STAGE90_CACHE_MODE != STAGE90_CACHE_MODE_ICACHE) && \
+    (STAGE90_CACHE_MODE != STAGE90_CACHE_MODE_ICACHE_DCACHE)
+#error "STAGE90_CACHE_MODE must be _NONE, _ICACHE or _ICACHE_DCACHE"
 #endif
 
 /*
@@ -4320,10 +4350,15 @@ struct stage90_xnu_macho_loader_result {
  * region with the D-cache off is only safe because nothing writes code at runtime. Both of
  * those are preconditions, so a build that sets ICACHE without a cacheable attribute mode is
  * refused rather than run: it would report "I-cache enabled" while fetching from memory.
+ *
+ * _ICACHE_DCACHE is the full Phase 1 configuration: both caches on, with the maintenance that
+ * makes the D-cache safe. Its obligations are in cache_ops.c and in the places that call it -
+ * a clean before every page table is published, and the ram_console window mapped
+ * non-cacheable so a crash log never depends on maintenance happening.
  */
-#if (STAGE90_CACHE_MODE == STAGE90_CACHE_MODE_ICACHE) && \
+#if (STAGE90_CACHE_MODE != STAGE90_CACHE_MODE_NONE) && \
     (STAGE90_PMAP_ATTR_MODE != STAGE90_PMAP_ATTR_MODE_NORMAL_WB)
-#error "STAGE90_CACHE_MODE_ICACHE needs STAGE90_PMAP_ATTR_MODE_NORMAL_WB - with SO or Normal-Non-cacheable memory the I-cache would cache nothing"
+#error "an enabled cache needs STAGE90_PMAP_ATTR_MODE_NORMAL_WB - with SO or Normal-Non-cacheable memory the cache would hold nothing"
 #endif
 
 /*

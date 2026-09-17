@@ -28,6 +28,8 @@ recovered through `/proc/last_kmsg`, under the safety rules in the root `README.
 | MSM8974 hardware watchdog: arm, and read its live countdown back | ✅ | `experiment-94` runs 1–3 |
 | Software dead-man reset (GIC + timer + IRQ path), proved alone | ✅ | `experiment-94` run 8 |
 | Candidate-L1 install followed by a jump, with the fault captured | ✅ | `experiment-94` run 10 (`FULL` + fault injection) |
+| Working `LDREX`/`STREX` (the exclusive monitor tracks) | ✅ | `experiment-96`, measured in four configurations |
+| Cacheable Normal DRAM with both caches on | ✅ | `experiment-97` (I-cache), `experiment-98` (I+D) |
 
 This is a real and unusually complete bring-up layer for a platform with no vendor
 documentation. Nothing in this re-plan asks for it to be thrown away.
@@ -548,17 +550,33 @@ build failed its own pmap contract for being correctly configured. One definitio
 F-AM2 is fixed in passing: the WB section descriptor is AP `0b01` (PL1-only) where the
 Strongly-ordered one was full access.
 
-Still to do this phase: **the D-cache**, and the three pieces of maintenance it makes mandatory —
-a clean in `ram_console`'s write path, a clean-and-invalidate of the log region before any
-reboot, and a clean of every page-table write a later TTBR switch depends on. The `LDREX`/`STREX`
-half is done (experiment-96), and the attribute map is documented and hardware-verified in three
-modes.
+**The D-cache is on, and Phase 1 is closed (2026-09-17,
+[`experiment-98`](../experiments/experiment-98-stage90-phase1-dcache.md)).**
+`STAGE90_CACHE_MODE = ICACHE_DCACHE` sets `SCTLR.I` and then `SCTLR.C` — the second in its own
+write, after the MMU is already on, and after a whole-cache clean-and-invalidate. The run is
+green: `SCTLR` `0x00c5487a → 0x00c5587f`, `ram_console` verified, timer IRQs delivered, every pmap
+contract satisfied, and a complete log.
 
-**Exit criteria:** identity and high-VA mappings with caches on; `ram_console` still
-logging; timer IRQ still delivered; a documented attribute map; a passing `LDREX`/`STREX`
-test. **The last two are met** — the attribute map is in `docs/reference/pmap-attribute-map.md`,
-and `LDREX`/`STREX` pass in every configuration measured. Expect the cache work to break the
-logging that made earlier stages easy — budget for it.
+The maintenance the roadmap called for was met with one deliberate substitution and two
+additions. **`ram_console` is mapped Normal-Non-cacheable even under `NORMAL_WB`** rather than
+having a clean added to its write path: its PA range is disjoint from every other PA this payload
+maps, so a different type violates nothing, and a crash log that is never in the cache cannot be
+lost by a reboot path that failed to clean it. Page tables get an explicit clean before each of
+the three places that publish one (`full_pmap`, the TTBR0 roundtrip, the exclusive probe), because
+the MMU's table walk does not read the D-cache. And `platform_reboot()` cleans and invalidates the
+whole D-cache first, as belt and braces rather than as the mechanism.
+
+Not shown by this: any speedup (none was measured), the maintenance under load (the payload is
+small and mostly sequential), or I-cache coherency after a code write (nothing writes code at
+runtime, and the loader's header records what that path will have to do).
+
+**Exit criteria — all five met, 2026-09-17:** identity and high-VA mappings with caches on
+(experiment-98: `SCTLR.C` and `.I` set, every mapping verified under them); `ram_console` still
+logging (`ram_console_verified=1`, and the log the run was read from); timer IRQ still delivered
+(`irq_count 1 → 3`); a documented attribute map (`docs/reference/pmap-attribute-map.md`, three
+modes, decoded rather than guessed); a passing `LDREX`/`STREX` (experiment-96 — which turned out
+never to have needed the attribute work). The phase's warning that the cache work would break the
+logging turned out not to apply, because the log is mapped non-cacheable by design.
 
 ### Phase 2 — The iBoot-equivalent handoff contract (2–6 weeks)
 

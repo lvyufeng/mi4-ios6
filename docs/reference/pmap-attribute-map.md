@@ -75,13 +75,13 @@ which is which.
 | Extra identity headroom | `0x00100000` | `0x00100000` | 1 MB | section SO |
 | High-VA kernel image | `0x80000000`–`0x800fffff` | `0x00000000`–`0x000fffff` | 4 KB × 256 | L2 small page SO |
 | RAM direct map | `0x80200000` + 256 MB | same | 1 MB × 256 | section SO |
-| RAM-console identity | `0xde500000`, `0xde600000` | same (identity) | 1 MB × 2 | section SO |
+| RAM-console identity | `0xde500000`, `0xde600000` | same (identity) | 1 MB × 2 | section SO — **stays Normal-Non-cacheable under `NORMAL_WB`**, see below |
 | GIC identity | `0xf9000000` | `0xf9000000` | 1 MB | section SO |
 | MSM IMEM identity | `0xfa000000` | `0xfa000000` | 1 MB | section SO |
 | PS_HOLD identity | `0xfc400000` | `0xfc400000` | 1 MB | section SO |
 | High alias of image | `0xc0000000` | `0x00000000` | 1 MB | section SO |
 | High alias, 2nd MB | `0xc0100000` | `0x00100000` | 1 MB | section SO |
-| RAM-console alias | `0xc0300000` | `RAM_CONSOLE_BASE` | 1 MB | section SO *(candidate table only)* |
+| RAM-console alias | `0xc0300000` | `RAM_CONSOLE_BASE` | 1 MB | section SO — as above *(candidate table only)* |
 | GIC alias | `0xc0200000` | `0xf9000000` | 1 MB | section SO |
 | IMEM low alias | `0x0fa00000` | `0x0fa00000` | 1 MB | section SO |
 | Candidate L1 self-map | `candidate_l1_base` | same | 1 MB | section SO *(candidate table only)* |
@@ -216,8 +216,17 @@ Three consequences that look like mistakes and are not:
 A cacheable descriptor does nothing on its own: DRAM marked `NORMAL_WB` with the caches off is
 accessed as if non-cacheable. Which cache is enabled is a **separate switch**,
 `STAGE90_CACHE_MODE` (`stages/stage90/stage90.h`): `NONE` (default) or `ICACHE`, the latter
-setting `SCTLR.I` at MMU-enable time after an `ICIALLU`. It is a compile error to set `ICACHE`
-with an uncacheable attribute mode, because the I-cache would then cache nothing.
+setting `SCTLR.I`, `ICACHE_DCACHE` (both, the D-cache in a second `write_sctlr` once the MMU is
+already on and after a whole-cache clean-and-invalidate). It is a compile error to enable a cache
+with an uncacheable attribute mode, because it would then cache nothing.
+
+**The ram_console windows keep the `NORMAL_NC` descriptor even under `NORMAL_WB`** — that is
+`STAGE90_PMAP_DESC_SECTION_RAM_CONSOLE`, and `mmu.c`'s `ttbr_section_desc_for_pa()` classifies that
+PA the same way so the TTBR0 roundtrip's recovery table cannot disagree with the live one about it.
+The PA range is disjoint from every other, so this violates nothing; the point is that a crash log
+never in the cache cannot be lost by a reboot path that failed to clean it. The table cleans that
+*are* required — before publishing any page table, because the MMU's table walk does not read the
+D-cache — are in `cache_ops.c` and at the three sites that publish one.
 
 ### How that "zero" was verified — and how it was got wrong first
 
@@ -297,13 +306,16 @@ payload has never written and should read.
    this project — and the remedy is the same: one definition, shared.
 1. **Page tables stay non-cacheable** — satisfied by NORMAL_NC, and the reason caches are a
    separate step.
-2. **`ram_console` must be cleaned before any reboot** once the D-cache is on. `log_puts()`
-   writes to `RAM_CONSOLE_BASE` and issues `dsb sy; isb`; with caches off that is a complete
-   guarantee and with the D-cache on it is not. The log would sit dirty across
-   `platform_reboot()` and `/proc/last_kmsg` — the dead-man dump and every diagnostic in
-   Phases 2–4 — would silently return stale or garbage text.
-3. **Enable the I-cache before the D-cache,** with explicit clean/invalidate around the TTBR
-   switch and after any code or segment copy.
+2. ~~**`ram_console` must be cleaned before any reboot** once the D-cache is on.~~ **Solved by
+   mapping instead (experiment-98):** the ram_console windows are Normal-Non-cacheable even under
+   `NORMAL_WB`, so the log never enters the cache and `log_puts()`'s `dsb sy; isb` remains a
+   complete guarantee. `platform_reboot()` also cleans and invalidates the whole D-cache first, as
+   belt and braces rather than as the mechanism.
+3. ~~Enable the I-cache before the D-cache, with explicit clean/invalidate around the TTBR
+   switch and after any code or segment copy.~~ **Done (experiment-97, experiment-98).** The
+   order is MMU → I-cache → D-cache, each in its own `SCTLR` write; the TTBR publishes are
+   cleaned; and "after any code or segment copy" still has no caller, because nothing writes
+   code at runtime — the loader's header records what that path will have to do.
 4. **Compare against `exclusive_probe`,** as above.
 5. **F-AM1 is fixed,** so the candidate table can become the handoff table as far as the image
    alias and the device-tree alias are concerned.

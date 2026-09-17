@@ -374,6 +374,8 @@ int stage90_exclusive_probe_run_dcache(void)
 
     l1[index] = (STAGE90_EXCLUSIVE_PROBE_DC_PA & 0xfff00000u) | STAGE90_EXCLUSIVE_PROBE_DC_DESC;
     __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
+    /* The table walk does not read the D-cache, and with a D-cache on this entry may be dirty. */
+    cache_clean_dcache_range((uint32_t)(uintptr_t)&l1[index], sizeof(l1[index]));
     probe_tlb_invalidate_va(STAGE90_EXCLUSIVE_PROBE_DC_PA);
     __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
 

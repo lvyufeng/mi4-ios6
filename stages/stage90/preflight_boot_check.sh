@@ -11,7 +11,7 @@
 # This script never runs fastboot and never touches the device. It verifies the
 # image and prints the command to run, or refuses and says why.
 #
-# Usage: ./preflight_boot_check.sh [--allow-preflight] [--allow-full] [--allow-selftest] [--allow-attr-normal-nc] [--allow-attr-normal-wb] [--allow-icache] [--allow-hw-watchdog-selftest] [--allow-fault-inject]
+# Usage: ./preflight_boot_check.sh [--allow-preflight] [--allow-full] [--allow-selftest] [--allow-attr-normal-nc] [--allow-attr-normal-wb] [--allow-icache] [--allow-dcache] [--allow-hw-watchdog-selftest] [--allow-fault-inject]
 
 set -euo pipefail
 
@@ -26,6 +26,7 @@ ALLOW_SELFTEST=0
 ALLOW_ATTR=0
 ALLOW_ATTR_WB=0
 ALLOW_ICACHE=0
+ALLOW_DCACHE=0
 ALLOW_HW_SELFTEST=0
 ALLOW_FAULT_INJECT=0
 
@@ -37,6 +38,7 @@ for arg in "$@"; do
     --allow-attr-normal-nc) ALLOW_ATTR=1 ;;
     --allow-attr-normal-wb) ALLOW_ATTR_WB=1 ;;
     --allow-icache)       ALLOW_ICACHE=1 ;;
+    --allow-dcache)       ALLOW_DCACHE=1 ;;
     --allow-hw-watchdog-selftest) ALLOW_HW_SELFTEST=1 ;;
     --allow-fault-inject) ALLOW_FAULT_INJECT=1 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
@@ -283,6 +285,24 @@ case "$(value_of STAGE90_CACHE_MODE)" in
     echo "         same kernel_entry ok as the default build, and on a real regression a"
     echo "         prefetch abort with a plausible pc rather than a silent difference."
     ;;
+  STAGE90_CACHE_MODE_ICACHE_DCACHE|2|2u)
+    [[ $ALLOW_DCACHE -eq 1 ]] || fail "the D-cache is enabled and that is not allowed without --allow-dcache"
+    echo "I-cache + D-cache: SCTLR.I and SCTLR.C, the D-cache after the MMU is already on"
+    echo "         and after a whole-cache clean-and-invalidate. This is the full Phase 1"
+    echo "         configuration. It is the first run where the payload is not"
+    echo "         immediately-visible memory, so the things to read in the log are the"
+    echo "         ones that depend on cache maintenance being right:"
+    echo "           - ram_console must still log, and the whole log must be there (it is"
+    echo "             mapped non-cacheable even in NORMAL_WB, so it should not need any"
+    echo "             maintenance - a truncated or stale log would mean that failed);"
+    echo "           - the candidate-L1 window and the TTBR0 roundtrip must still verify"
+    echo "             their translations, which is what the table cleans are for;"
+    echo "           - the timer IRQ must still be delivered and the device must come back"
+    echo "             on its own."
+    echo "         A device that hangs here costs a power press, and the two nets are both"
+    echo "         armed, so it comes back either way - but the log is how the failure is"
+    echo "         told apart from a stale-cache symptom, which is why it is read first."
+    ;;
   *)
     fail "unrecognised STAGE90_CACHE_MODE: $(value_of STAGE90_CACHE_MODE)"
     ;;
@@ -290,7 +310,7 @@ esac
 
 echo
 echo "== mapping attributes: consistency =="
-if [[ "$(value_of STAGE90_CACHE_MODE)" =~ ^(STAGE90_CACHE_MODE_ICACHE|1|1u)$ ]] &&
+if [[ ! "$(value_of STAGE90_CACHE_MODE)" =~ ^(STAGE90_CACHE_MODE_NONE|0|0u)$ ]] &&
    [[ ! "$(value_of STAGE90_PMAP_ATTR_MODE)" =~ ^(STAGE90_PMAP_ATTR_MODE_NORMAL_WB|2|2u)$ ]]; then
   fail "the I-cache is enabled but DRAM is not marked cacheable, so it would cache nothing"
 fi

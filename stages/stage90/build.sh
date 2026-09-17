@@ -114,6 +114,7 @@ SOURCES=(
   vectors.S
   runtime.c
   ram_console.c
+  cache_ops.c
   apple_dt.c
   boot_args.c
   probes.c
@@ -191,11 +192,15 @@ $SIZE $REPO_ROOT/out/stage90/stage90.elf > $REPO_ROOT/out/stage90/stage90.size
 # two cannot drift apart.
 CACHE_MODE_VALUE=$($CC "${CFLAGS[@]}" -E -dM -include stage90.h - </dev/null \
   | awk '/^#define STAGE90_CACHE_MODE /{print $3}')
-if [[ ${CACHE_MODE_VALUE:-0} == 0 ]]; then
-  CACHE_TOKEN='no-cache-change'
-else
-  CACHE_TOKEN='icache-enabled'
-fi
+# Note the value is the macro's *replacement text*, which is symbolic unless the switch was
+# passed numerically, so both forms have to be recognised - the same reason the gate accepts
+# both for every other switch.
+case "$CACHE_MODE_VALUE" in
+  STAGE90_CACHE_MODE_NONE|0|0u)               CACHE_TOKEN='no-cache-change' ;;
+  STAGE90_CACHE_MODE_ICACHE|1|1u)             CACHE_TOKEN='icache-enabled' ;;
+  STAGE90_CACHE_MODE_ICACHE_DCACHE|2|2u)      CACHE_TOKEN='icache-dcache-enabled' ;;
+  *)                                          CACHE_TOKEN='cache-mode-unrecognised' ;;
+esac
 
 CMDLINE_BASE='stage90 mi4ios6=stage90 c-runtime apple-dt macho-fixture load-plan materialize highva-dryrun safe-table stage-owned-tables ttbr0-roundtrip recovery-table cache-bits-preserved xnu-entry-stub xnu-early-init early-pmap-platform xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm live-pmap ttbr-live tlb-live pmap-restore prevm-pexpert dtinit-facts peid-machine xnu-bs-contract xnu-pmap-bs-contract xnu-pmap-table-contract xnu-pmap-page-contract xnu-pmap-attr-contract xnu-pmap-mw-contract xnu-pmap-trans-contract xnu-pexpert-hook xnu-iokit-platform xnu-iokit-match-contract xnu-iokit-regsvc-contract xnu-iokit-provider xnu-iokit-catalog xnu-iokit-propinh xnu-iokit-regtop pexpert-hook-ready iokit-platform-scaffold iokit-match-local iokit-regsvc-local iokit-provider-local iokit-catalog-local iokit-propinh-local iokit-regtop-local irq-timer-hook pmap-bootstrap-ref public-xnu-workspace public-xnu-compile-graph public-xnu-platform-graph public-xnu-object-subset xnu-controlled-link xnu-bounded-pe-gen xnu-arm-pe-bootargs xnu-arm-consistent-debug stage90-xnu-link-proof inert-macho-fixture cancro-target arm-init-stub no-full-xnu-build no-pub-start no-pub-arm-init no-pub-thread no-pub-cpuboot no-pub-rtclock no-pub-pmap no-pub-pexpert no-pub-peinit no-pub-dtinit no-pub-peid no-pub-armvm no-iokit-runtime-exec no-macho-exec'
 CMDLINE="$CMDLINE_BASE $CACHE_TOKEN no-persist-write no-external-mutation"

@@ -12,6 +12,8 @@
  */
 #define L1_DESC_SECTION_SO     STAGE90_PMAP_DESC_SECTION_SO
 #define L1_DESC_SECTION_DRAM   STAGE90_PMAP_DESC_SECTION_DRAM
+/* DRAM that must stay uncached even under a cacheable attribute mode - the ram_console window. */
+#define L1_DESC_SECTION_RAM_CONSOLE STAGE90_PMAP_DESC_SECTION_RAM_CONSOLE
 
 #define SECTION_INDEX(addr)    (((uint32_t)(addr)) >> 20)
 #define STAGE90_HIGH_ALIAS_BASE        0xc0000000u
@@ -4906,18 +4908,6 @@ static inline void invalidate_tlbs(void)
     __asm__ volatile ("mcr p15, 0, %0, c8, c7, 0" :: "r"(zero) : "memory");
 }
 
-/*
- * ICIALLU. Issued before the I-cache is first enabled, so that no line left valid by whatever
- * ran before this payload (aboot runs with caches on) can be used for one of our addresses.
- * The instruction is not needed to *keep* the cache coherent here: nothing in this payload
- * writes code at runtime. See STAGE90_CACHE_MODE in stage90.h for what would change that.
- */
-static inline void invalidate_icache_all(void)
-{
-    uint32_t zero = 0;
-    __asm__ volatile ("mcr p15, 0, %0, c7, c5, 0" :: "r"(zero) : "memory");
-}
-
 static inline void write_sctlr(uint32_t v)
 {
     __asm__ volatile ("mcr p15, 0, %0, c1, c0, 0" :: "r"(v) : "memory");
@@ -4955,6 +4945,15 @@ static uint32_t ttbr_section_desc_for_pa(uint32_t pa)
     }
     if (section == (MSM8974_PSHOLD & L1_SECTION_MASK)) {
         return L1_DESC_SECTION_SO;
+    }
+    /*
+     * The ram_console window keeps its non-cacheable descriptor here too. This table is built,
+     * installed briefly and torn down, and it maps ranges that include the log; a recovery table
+     * that disagreed with the live one about that PA would make the log's visibility depend on
+     * which table happened to be live when it was written.
+     */
+    if (section == (RAM_CONSOLE_BASE & L1_SECTION_MASK)) {
+        return L1_DESC_SECTION_RAM_CONSOLE;
     }
     return L1_DESC_SECTION_DRAM;
 }
@@ -5262,6 +5261,14 @@ int mmu_stage90_ttbr0_roundtrip_selftest(void)
     rt->selftest_probe_before = stage90_ttbr0_probe_word;
 
     dsb_isb();
+    /*
+     * Publish the recovery table before pointing TTBR0 at it. The MMU's table walk does not read
+     * the D-cache, so a table write still sitting in a dirty line would not be seen and the
+     * translations taken during this window would come from whatever memory held instead. The
+     * range is the whole L1, which is small and known.
+     */
+    cache_clean_dcache_range(stage_l1_base,
+                             STAGE90_XNU_TTE_L1_ENTRY_COUNT * sizeof(uint32_t));
     write_ttbr0(stage_l1_base);
     rt->ttbr0_write_count++;
     switched = 1u;
@@ -5418,9 +5425,11 @@ static void build_identity_table(void)
     /* IMEM restart reason. */
     map_section_mmio(0x0fa00000u, 0x0fa00000u);
 
-    /* Android ram_console persistent RAM window. */
-    map_section_dram(RAM_CONSOLE_BASE, RAM_CONSOLE_BASE);
-    map_section_dram(RAM_CONSOLE_BASE + L1_SECTION_SIZE, RAM_CONSOLE_BASE + L1_SECTION_SIZE);
+    /* Android ram_console persistent RAM window. Non-cacheable under cacheable modes: the
+     * crash log must not depend on a clean happening on the way out. */
+    map_section_desc(RAM_CONSOLE_BASE, RAM_CONSOLE_BASE, L1_DESC_SECTION_RAM_CONSOLE);
+    map_section_desc(RAM_CONSOLE_BASE + L1_SECTION_SIZE, RAM_CONSOLE_BASE + L1_SECTION_SIZE,
+                     L1_DESC_SECTION_RAM_CONSOLE);
 
     /* MSM8974 GIC + ARM timer MMIO share the 0xf9000000 section in this stage. */
     map_section_mmio(0xf9000000u, 0xf9000000u);
@@ -5441,22 +5450,40 @@ static void enable_identity_mmu(void)
     dsb_isb();
 
     sctlr = read_sctlr();
-    sctlr &= ~((1u << 2) | (1u << 12)); /* D-cache stays off; I-cache decided below */
-#if STAGE90_CACHE_MODE == STAGE90_CACHE_MODE_ICACHE
+    sctlr &= ~((1u << 2) | (1u << 12)); /* both caches off; which ones come back is decided below */
+#if STAGE90_CACHE_MODE != STAGE90_CACHE_MODE_NONE
     /*
-     * Invalidate before enabling, never after: enabling with a stale line present would let a
-     * wrong instruction be executed from the I-cache, and the first symptom would be a fault
-     * somewhere unrelated. The D-cache bit stays clear, so nothing here needs a D-side clean.
+     * Invalidate before enabling, never after: a line left valid by whatever ran before this
+     * payload would otherwise be used instead of the instruction just written, and the first
+     * symptom would be a fault somewhere unrelated.
      */
-    invalidate_icache_all();
-    dsb_isb();
+    cache_invalidate_icache_all();
 #endif
+#if STAGE90_CACHE_MODE == STAGE90_CACHE_MODE_ICACHE_DCACHE
+    /*
+     * Clean-and-invalidate, not plain invalidate: the D-cache may still hold lines from
+     * whatever ran before us, and discarding them unwritten can lose data. Cleaning first
+     * cannot.
+     */
+    cache_clean_invalidate_dcache_all();
+#endif
+    dsb_isb();
     sctlr |= 1u;                         /* MMU enable */
-#if STAGE90_CACHE_MODE == STAGE90_CACHE_MODE_ICACHE
-    sctlr |= (1u << 12);                 /* I-cache enable - XNU's start.s does this first */
+#if STAGE90_CACHE_MODE != STAGE90_CACHE_MODE_NONE
+    sctlr |= (1u << 12);                 /* I-cache - XNU's start.s enables this one first */
 #endif
     write_sctlr(sctlr);
     dsb_isb();
+#if STAGE90_CACHE_MODE == STAGE90_CACHE_MODE_ICACHE_DCACHE
+    /*
+     * The D-cache goes on in a second write, once the first has taken effect, because ARM's
+     * order is MMU first and caches after. Enabling a data cache while translation is still off
+     * would let it hold lines for physical addresses that are about to be translated
+     * differently.
+     */
+    write_sctlr(read_sctlr() | (1u << 2));
+    dsb_isb();
+#endif
 }
 
 /*

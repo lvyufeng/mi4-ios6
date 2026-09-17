@@ -111,6 +111,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-95](experiment-95-stage90-phase1a-normal-nc.md) | Stage90 Phase 1a: Normal, Non-cacheable DRAM |
 | stage90 | [experiment-96](experiment-96-stage90-phase1-exclusives-work.md) | Stage90 Phase 1: LDREX/STREX Work Here, and the Probe Said Otherwise for Four Runs |
 | stage90 | [experiment-97](experiment-97-stage90-phase1-icache.md) | Stage90 Phase 1: The I-Cache On, and the Six Places That Asserted Caches Are Off |
+| stage90 | [experiment-98](experiment-98-stage90-phase1-dcache.md) | Stage90 Phase 1: The D-Cache On, and Phase 1 Closed |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
