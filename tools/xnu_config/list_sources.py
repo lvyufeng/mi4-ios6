@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Resolve XNU's own per-component file lists against a configuration.
+
+    ./tools/xnu_config/list_sources.py RELEASE          # the ARM RELEASE kernel's source files
+    ./tools/xnu_config/list_sources.py RELEASE --why    # ...with the condition each one met
+
+XNU ships its kernel's file manifest in `*/conf/files` and `*/conf/files.<arch>`. The format is the
+classic BSD one:
+
+    path/to/file.c          standard
+    path/to/other.c         optional <flag> [<flag> ...]
+
+and the semantics are in the reference implementation, `SETUP/config/mkmakefile.c` — not guessed:
+
+  * every listed flag must be **defined** (AND, not OR). Reading `mkmakefile.c:416-422`, each word
+    is checked and, when it is *not* defined, added to the file's `needs`; the file is emitted only
+    if `needs` ends up empty.
+  * `optional not <flag>` inverts: emit when `<flag>` is **absent**.
+
+This is the piece that turns "I have a configuration" into "I have a build". Combined with the
+option set from `make_defines.sh`, it says exactly which files an ARM kernel is made of — which is
+what the 32-of-32 ARM measurement was missing: it compiled every `.c` in `osfmk/arm`, including
+ones a real kernel would not use.
+
+Paths in `files.<arch>` are relative to the component root (`osfmk/`), and paths beginning with
+`./` are relative to the generated-object directory — which is where a MIG-generated `*_server.c`
+belongs. Both are resolved here.
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
+
+# Component -> the directories its file lists live in. `conf` is the component's own conf/ dir.
+COMPONENTS = ["osfmk", "bsd", "libkern", "iokit", "pexpert", "libsa", "security", "san"]
+
+DEFAULT_COMPONENTS = ["osfmk", "bsd", "libkern", "iokit", "pexpert"]
+
+
+def expand_options(xnu, config):
+    """The option names a configuration selects, via the ported doconf pipeline."""
+    out = subprocess.run(
+        [os.path.join(HERE, "make_defines.sh"), config],
+        capture_output=True, text=True, check=True,
+        env={**os.environ, "XNU_TREE": xnu},
+    ).stdout
+    names = set()
+    for line in out.splitlines():
+        if not line.startswith("-D"):
+            continue
+        name = line[2:].split("=", 1)[0]
+        names.add(name)
+    return names
+
+
+def option_aliases(options):
+    """Options are matched case-insensitively by XNU's config tool (`opteq`), so `mach_bsd` in a
+    files list matches `MACH_BSD` in MASTER. Build the lookup the same way."""
+    return {o.lower() for o in options}
+
+
+def parse_file_list(path, component):
+    """Yield (relative_path, condition, comment) for every non-comment line."""
+    if not os.path.isfile(path):
+        return
+    with open(path) as fh:
+        for line in fh:
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            rel, kind = parts[0], parts[1]
+            if kind not in ("standard", "optional"):
+                continue
+            # `OPTIONS/foo` is not a source file. It is how the old config tool is told to emit
+            # `opt_foo.h`, the header a source includes to know whether an option is on. Those
+            # headers are ours to generate (see the shims), so the entries are dropped here rather
+            # than reported as missing files.
+            if rel.startswith("OPTIONS/"):
+                continue
+            flags = parts[2:]
+            yield rel, kind, flags
+
+
+def condition_met(kind, flags, options_lc):
+    if kind == "standard":
+        return True, ""
+    if not flags:
+        return False, "no condition given"
+    if flags[0] == "not":
+        missing = [f for f in flags[1:] if f.lower() in options_lc]
+        return (not missing), "not " + " ".join(flags[1:])
+    unmet = [f for f in flags if f.lower() not in options_lc]
+    return (not unmet), " ".join(flags)
+
+
+def resolve_path(xnu, component, rel, generated_dir):
+    """`./x` is relative to the generated-object directory; anything else to the tree root.
+
+    Verified against the lists rather than assumed: `osfmk/conf/files.arm` writes
+    `osfmk/arm/pmap.c` (already component-prefixed) and `osfmk/conf/files` writes both
+    `osfmk/kern/sched_prim.c` and `./gssd/gssd_mach.c`, so the prefix form is root-relative and
+    the `./` form is the generated directory - which is where a MIG `*_server.c` lives.
+    """
+    if rel.startswith("./"):
+        return os.path.join(generated_dir, rel[2:]), True
+    return os.path.join(xnu, rel), False
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("config", help="configuration name, e.g. RELEASE or DEVELOPMENT")
+    ap.add_argument("--xnu", default=os.path.join(REPO_ROOT, "external", "xnu-4570.1.46"))
+    ap.add_argument("--arch", default="arm")
+    ap.add_argument("--component", action="append", dest="components",
+                    help="limit to a component (repeatable); default is all kernel components")
+    ap.add_argument("--why", action="store_true", help="print the condition each file met")
+    ap.add_argument("--missing", action="store_true",
+                    help="report listed files that are not present on disk")
+    ap.add_argument("--generated-dir", default=os.path.join(REPO_ROOT, "out", "mach_headers"))
+    ap.add_argument("--write", metavar="PATH",
+                    help="write the selected file list here, one path per line, instead of "
+                         "printing it - so the manifest is a build input rather than a report")
+    args = ap.parse_args()
+
+    options = expand_options(args.xnu, args.config)
+    options_lc = option_aliases(options)
+    components = args.components or DEFAULT_COMPONENTS
+
+    total = 0
+    present = 0
+    absent = []
+    generated = []
+    selected = []
+
+    for component in components:
+        conf = os.path.join(args.xnu, component, "conf")
+        if not os.path.isdir(conf):
+            continue
+        entries = []
+        for name in ("files", f"files.{args.arch}"):
+            for rel, kind, flags in parse_file_list(os.path.join(conf, name), component):
+                entries.append((rel, kind, flags))
+
+        chosen = []
+        for rel, kind, flags in entries:
+            ok, why = condition_met(kind, flags, options_lc)
+            if ok:
+                chosen.append((rel, why))
+
+        if not chosen:
+            continue
+
+        if not args.write:
+            print(f"== {component}: {len(chosen)} file(s) ==")
+        for rel, why in chosen:
+            path, is_generated = resolve_path(args.xnu, component, rel, args.generated_dir)
+            total += 1
+            selected.append(path)
+            if is_generated:
+                generated.append(path)
+                mark = "gen" if os.path.isfile(path) else "GEN?"
+            elif os.path.isfile(path):
+                present += 1
+                mark = "   "
+            else:
+                absent.append(path)
+                mark = "MISS"
+            if not args.write:
+                suffix = f"   # {why}" if args.why else ""
+                print(f"  {mark} {path}{suffix}")
+        if not args.write:
+            print()
+
+    if args.write:
+        # Sorted and de-duplicated: a file can be listed by both `files` and `files.<arch>`, and a
+        # manifest with a duplicate is a manifest that compiles the same object twice.
+        with open(args.write, "w") as fh:
+            for path in sorted(set(selected)):
+                fh.write(path + "\n")
+        print(f"wrote {len(set(selected))} path(s) to {args.write}")
+
+    print(f"{args.config}: {total} file(s) selected for {args.arch}")
+    print(f"  present on disk:      {present}")
+    print(f"  MIG-generated:        {len(generated)}")
+    print(f"  listed but absent:    {len(absent)}")
+    if args.missing and absent:
+        print()
+        for path in absent:
+            print(f"  MISSING {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

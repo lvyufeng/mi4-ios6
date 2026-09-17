@@ -899,6 +899,24 @@ difference is precise: `monotonic_arm.c` needs `MONOTONIC`, and `MONOTONIC` is n
 configuration is *nearly* complete: the catalogue, the names and the tool are all present; what is
 missing is the small layer that varies by SoC, of which this layer needs exactly one value.
 
+**And so are Apple's file lists** (2026-09-17,
+[`experiment-113`](../experiments/experiment-113-arm-kernel-build-manifest.md)). `osfmk/conf/
+files.arm` and its siblings in four other components list the kernel's sources with the classic BSD
+`standard` / `optional <flag>` conditions. `tools/xnu_config/list_sources.py` resolves them against
+the configuration — semantics taken from `SETUP/config/mkmakefile.c:416-422` rather than guessed,
+where multiple flags are AND and `optional not x` inverts — and produces the object list:
+
+```
+RELEASE: 694 file(s) selected for arm
+  present on disk:      652
+  MIG-generated:        39
+  listed but absent:    3      (hand-written ARM asm Apple did not publish)
+```
+
+**This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
+`.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
+of **694** compile, and that measurement is now one command away.
+
 See [`tools/xnu_config/README.md`](../../tools/xnu_config/README.md). This is the third time in this
 project that "not available" meant "looked in one directory": MIG was published elsewhere, the
 generated mach headers were a build step away, and this was at `config/` all along. The remedy each

@@ -126,6 +126,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-110](experiment-110-xnu-arm-layer-compiles.md) | XNU's Entire ARM Layer Compiles: 32 of 32, 443 Symbols From Linking |
 | stage90 | [experiment-111](experiment-111-osfmk-measured.md) | The Rest of osfmk Measured — and the Build Configuration Was Never Absent |
 | stage90 | [experiment-112](experiment-112-apple-kernel-config-extracted.md) | Apple's Own Kernel Configuration, Extracted and Used |
+| stage90 | [experiment-113](experiment-113-arm-kernel-build-manifest.md) | Apple's Own Build Manifest for an ARM Kernel, Resolved: 694 Files |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
