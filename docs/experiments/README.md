@@ -140,6 +140,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-124](experiment-124-mig-output-set.md) | Generate What the Makefiles Say: 40 MIG Outputs, Not Everything — and the Include Order Flips Back |
 | stage90 | [experiment-125](experiment-125-first-link-and-option-scope.md) | The First Real Link, and the 47 Files That Were Compiled as the Wrong Configuration |
 | stage90 | [experiment-126](experiment-126-clockt-and-libsa-types.md) | `CLOCK_T` Was a Workaround for the Old Defect, and `<types.h>` Is the Kernel's |
+| stage90 | [experiment-127](experiment-127-device-headers-and-a-source-incompatibility.md) | The Loopback Header, and the First Failure That Is Not a Configuration Gap |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

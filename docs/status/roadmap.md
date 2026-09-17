@@ -1242,6 +1242,29 @@ for it.
 **`STAGE90_BOOT` 395 → 400 of 419, `RELEASE` 560 → 565 of 587, and the link 898 → 777 undefined
 symbols.** `u_char`, `caddr_t` and every `clock_t` are gone from the failure list.
 
+**AND A THIRD GENERATOR — `config(8)`'s DEVICE HEADERS** (2026-09-17,
+[`experiment-127`](../experiments/experiment-127-device-headers-and-a-source-incompatibility.md)).
+`bsd/kern/bsd_init.c:875` includes `<loop.h>` with `#if NLOOP > 0` on the next lines, and three
+`bsd/netinet6` files follow; the header is `config(8)` output from `pseudo-device loop`, which 4570
+does not publish — `grep -c '^pseudo-device' */conf/files` is 0 in every component. So `NLOOP` is a
+**choice**, and 0 is the one that agrees with the rest of the configuration: `bsd/net/if_loop.c` is
+`optional loop` and `loop` is not set, so nothing would provide `loopattach()` — with `NLOOP 1` that
+is an undefined symbol at link time. `tools/gen_device_headers.sh` writes it. **569 of 587.**
+
+**And one failure that is NOT a configuration gap, the first of the whole exercise.**
+`osfmk/vm/vm_object.c:355` is `*object = vm_object_template;` and `vm_object.h:174` declares one
+member `const`. Assigning to a struct with a `const` member is a C constraint violation, and both
+compilers on this host reject it — clang for all four `-std` modes, gcc too, not suppressible by any
+flag (the diagnostic carries no `[-Wflag]`). It is specific to 4570: `xnu-upstream`, `xnu-2050.18.24`
+and `apple-xnu-rel-2050` all declare that member without `const`. So Apple built it and a current
+compiler does not accept it — most likely the 2016-era clang allowed it and the diagnostic was
+tightened later, but that is an inference. It is left failing and recorded rather than patched, since
+the project does not modify XNU's code. It is 2 of the 62 symbols the boot closure attributes.
+
+**The link is at 699 undefined symbols**, from 1187 when it was first measured, and
+`boot_closure.py` now puts only **12 of the 18 failing files on the boot path, accounting for 62
+symbols.**
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

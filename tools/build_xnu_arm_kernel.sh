@@ -176,6 +176,8 @@ GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
 # values - which is what happened, and it surfaced as a duplicate-symbol error in the link.
 OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
 LIBSA_EXPORT=${XNU_LIBSA_EXPORT:-$REPO_ROOT/out/xnu_libsa_export}
+# The third generator: `device`/`pseudo-device` headers from config(8). One file today (loop.h).
+DEVICE_HEADERS=${XNU_DEVICE_HEADERS_OUT:-$REPO_ROOT/out/xnu_device}/$CONFIG
 [[ -d $OPTION_HEADERS ]] || {
     echo "no option headers for $CONFIG at $OPTION_HEADERS - run:" >&2
     echo "  XNU_KERNEL_CONFIG=$CONFIG ./tools/gen_option_headers.py" >&2
@@ -205,6 +207,7 @@ LIBSA_EXPORT=${XNU_LIBSA_EXPORT:-$REPO_ROOT/out/xnu_libsa_export}
 INCLUDES=(
     -I"$GENERATED/bsd" -I"$GENERATED"
     -I"$OPTION_HEADERS"
+    -I"$DEVICE_HEADERS"
     -I"$MIG_HEADERS"
     -I"$XNU/osfmk"
     -I"$XNU/iokit"
