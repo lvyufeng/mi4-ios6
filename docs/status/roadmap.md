@@ -1719,6 +1719,37 @@ configuration decision**, not a header, a flag or an include order.
 tarball**); `if_bridge.c` (a configuration decision). **That is 607 of 615, and it is the end of
 host-side compile work as a source of movement.**
 
+**AND THE TOOLCHAIN CHOICE NOW HAS NUMBERS ON BOTH SIDES** (2026-09-17,
+[`experiment-149`](../experiments/experiment-149-macho-path-measured.md)). `tools/build_xnu_arm_macho.sh`
+builds the `armv7-apple-darwin` path as far as it goes **without installing anything**, so the
+decision is priced rather than argued. Nothing was installed; the ELF build is untouched and the two
+outputs do not read each other.
+
+| | ELF | Mach-O |
+| --- | --- | --- |
+| manifest `.s` that assemble | 13 of 17 | **17 of 17** |
+| manifest `.c` that compile | **607 of 615** | 575 of 615 |
+| boot-path stubs the assembly closes | — | **23 of 89, and they are the 23 nearest `arm_init`** |
+
+`BootCpuData`, `CpuDataEntries`, `intstack_top`, `fiqstack_top`, `get_mmu_control`,
+`set_mmu_control`, `fiq_context_init`, `ml_get_timebase` and 15 more now exist as Mach-O objects on
+this host, verified with `llvm-nm` — symbols the ELF build **cannot produce at all**.
+
+**The cost is measured too, and it is not the triple.** The C side is 32 behind because the ELF path
+has thirty stages of fixes and this script has four; its failures are the same ones the ELF path had
+before those stages (20 `sync_qos_count_t`, 7 `memory_object.h`, 5 `clock_t`). Every mechanism is
+target-independent and ports directly. **The price of A is roughly 32 files plus four assembly files
+of mechanical work.** Only `--link` waits for anything: there is no `ld64.lld` on this host, and the
+script refuses with that reason rather than producing something half-done.
+
+**And the script reproduced defect 118 on its first run** — `-DMACH_KERNEL_PRIVATE` in the global
+defines, 271 files failing on `ffs`. One move to the per-component set took it 252 → 544. The fix
+existed, was written down, and a new file did not inherit it: a build configuration living in two
+scripts will drift.
+
+**B and C do not advance the goal.** The boot path's nearest 23 stubs are blocked on the triple, and
+A is the only option that moves them.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

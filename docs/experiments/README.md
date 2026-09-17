@@ -162,6 +162,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-146](experiment-146-arm-case-and-the-last-three.md) | `__ARM__` Versus `__arm__`, and the Three Single-File Failures Left |
 | stage90 | [experiment-147](experiment-147-phase3-shim-design-closed.md) | The Phase 3 Shim's Design, Closed on Hardware |
 | stage90 | [experiment-148](experiment-148-nbpfilter-and-the-last-category.md) | `NBPFILTER` Is a Count, and the Category of Files Only Valid With an Option Built |
+| stage90 | [experiment-149](experiment-149-macho-path-measured.md) | The Mach-O Path, Built and Measured, So the Decision Has a Price Tag |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
