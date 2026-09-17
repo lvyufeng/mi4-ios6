@@ -52,6 +52,7 @@ MANIFEST=${MANIFEST:-$REPO_ROOT/out/xnu_arm_manifest.txt}
 # the same XNU_MASTER_LOCAL to list_sources.py. Default is the full one, because the full one is
 # what "does XNU compile" means; the minimal one is what "can this boot" means.
 CONFIG=${XNU_KERNEL_CONFIG:-RELEASE}
+DEVICE_TABLE=${XNU_DEVICE_TABLE:-$REPO_ROOT/out/device_table.txt}
 
 LIMIT=0
 ONLY_DIR=""
@@ -81,6 +82,19 @@ done
     echo "  ./tools/check_component_defines.py" >&2
     exit 2
 }
+
+# And the same check for the conditions this script defines by hand: each must agree with
+# xnu_config/device_table.py, which is what the manifest reads. They disagreed for several stages -
+# `-DMONOTONIC=1` was defined here while the manifest excluded the only file implementing it - and
+# nothing compared them, so it is compared here now.
+# Check first, write second: the tool does the comparison and exits 1 on a disagreement, so writing
+# before checking would overwrite the very file the check is about.
+"$TOOLS_DIR/xnu_config/device_table.py" >/dev/null || {
+    echo "the conditions this script defines disagree with xnu_config/device_table.py:" >&2
+    "$TOOLS_DIR/xnu_config/device_table.py" >/dev/null
+    exit 2
+}
+"$TOOLS_DIR/xnu_config/device_table.py" --write "$DEVICE_TABLE" >/dev/null
 
 mkdir -p "$OUT"
 # Truncate every output. A build script that appends leaves the previous run's failures in the

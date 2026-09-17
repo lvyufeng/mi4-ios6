@@ -115,16 +115,41 @@ def parse_file_list(path, component):
             yield rel, kind, flags
 
 
-def condition_met(kind, flags, options_lc):
+def device_table(path):
+    """condition -> 0|1, from tools/xnu_config/device_table.py.
+
+    A `*/conf/files` condition can come from three places in Apple's build, and only the first is in
+    `config/MASTER`: an option, an `OPTIONS/` line's header value, and a `device`/`pseudo-device`
+    declaration. **4570 publishes no device lines at all**, so `optional loop` and `optional pty` can
+    never match - and `optional monotonic` could not either, while the build script defines
+    `-DMONOTONIC=1` by hand. That meant `osfmk/kern/kern_monotonic.c`, the only file implementing
+    what the macro turns on, was excluded from the manifest while every user of it was compiled
+    against `MONOTONIC 1`. This table is where those choices live, so the two cannot disagree again.
+    """
+    table = {}
+    if not path or not os.path.isfile(path):
+        return table
+    for line in open(path):
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            table[parts[0].lower()] = parts[1] == "1"
+    return table
+
+
+def condition_met(kind, flags, options_lc, extras=None):
     if kind == "standard":
         return True, ""
     if not flags:
         return False, "no condition given"
+    extras = extras or {}
     if flags[0] == "not":
-        missing = [f for f in flags[1:] if f.lower() in options_lc]
-        return (not missing), "not " + " ".join(flags[1:])
-    unmet = [f for f in flags if f.lower() not in options_lc]
-    return (not unmet), " ".join(flags)
+        present = [f for f in flags[1:] if f.lower() in options_lc or extras.get(f.lower())]
+        return (not present), "not " + " ".join(flags[1:])
+    met = [f for f in flags if f.lower() in options_lc or extras.get(f.lower())]
+    return (len(met) == len(flags)), " ".join(flags)
 
 
 def resolve_path(xnu, component, rel, generated_dirs):
@@ -173,6 +198,10 @@ def main():
                                       os.path.join(REPO_ROOT, "out", "xnu_generated", "bsd")]),
                     help="directories holding build-generated sources, colon-separated and "
                          "searched in order; `./x` entries are resolved against them")
+    ap.add_argument("--device-table",
+                    default=os.path.join(REPO_ROOT, "out", "device_table.txt"),
+                    help="conditions this project chooses beyond config/MASTER; see "
+                         "tools/xnu_config/device_table.py")
     ap.add_argument("--write", metavar="PATH",
                     help="write the selected file list here, one path per line, instead of "
                          "printing it - so the manifest is a build input rather than a report")
@@ -180,6 +209,7 @@ def main():
 
     options = expand_options(args.xnu, args.config)
     options_lc = option_aliases(options)
+    extras = device_table(args.device_table)
     components = args.components or DEFAULT_COMPONENTS
 
     total = 0
@@ -199,7 +229,7 @@ def main():
 
         chosen = []
         for rel, kind, flags in entries:
-            ok, why = condition_met(kind, flags, options_lc)
+            ok, why = condition_met(kind, flags, options_lc, extras)
             if ok:
                 chosen.append((rel, why))
 

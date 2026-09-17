@@ -1330,6 +1330,32 @@ read, which is also what would make `NLOOP` a fact rather than a choice.
 **What remains on the boot path is 11 files / 42 symbols: 2 that need facts from outside the
 tarball, 8 smaller ones, and `vm_object.c`'s `const` member, which is not fixable here at all.**
 
+**AND THE BUILD DEFINED `MONOTONIC` WHILE THE MANIFEST EXCLUDED ITS ONLY IMPLEMENTATION**
+(2026-09-17, [`experiment-131`](../experiments/experiment-131-device-table.md)).
+`osfmk/conf/files:296` is `osfmk/kern/kern_monotonic.c optional monotonic`, and
+`build_xnu_arm_kernel.sh` defines `-DMONOTONIC=1` **by hand** — it is the per-SoC value
+experiment-112 identified as genuinely absent. `list_sources.py` matched `optional` against
+`config/MASTER` only, so every *user* of `MONOTONIC` was compiled with it on while the only
+*implementation* was excluded. Ten undefined symbols at link time, and the seventh instance of the
+recurring defect with a new mechanism: **two halves of the build reading two sources of truth for
+one condition, with nothing comparing them.**
+
+**And the reason is now written down**: a `*/conf/files` condition has three origins — an option
+(MASTER), an `OPTIONS/` line (a generated `0`/`1` header), and a `device`/`pseudo-device`
+declaration. **4570 publishes no device lines at all**, so the third is simply absent. Of the 139
+distinct conditions, 89 are not in `RELEASE`: 60 are `OPTIONS/` (handled and correctly off) and **29
+have nothing**, including `loop`, `pty`, `ptmx`, `monotonic` and eleven per-SoC `config_*` names.
+
+`tools/xnu_config/device_table.py` is where those choices live, and **both** the manifest and the
+compile flags read it. The build runs it as a gate that compares the table against the script's own
+`-D` flags — reading the *value*, since `-DXPR_DEBUG=0` mentions the name and means off — and stops
+on a disagreement. Perturbation-tested. `pty`/`ptmx` are deliberately left out: `NPTY 0` was measured
+not to compile, so they need a real device table and `--unknown` keeps reporting them.
+
+**`STAGE90_BOOT` 402 → 405 of 423, `RELEASE` 592 → 595 of 612, link 454 → 444.** The boot-path list
+is unchanged at 11 files / 42 symbols — `kern_monotonic.c` was never in it, because it was never
+*attempting* to compile.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
