@@ -53,7 +53,7 @@
 #define RESTART_NORMAL     0x78665501u
 #define MSM8974_PSHOLD     0xfc4ab000u
 
-#define ENTRY_STACK_BYTES  0x2000u
+#define ENTRY_STACK_BYTES  0x8000u
 
 /* ------------------------------------------------------------------ storage XNU expects */
 
@@ -81,7 +81,51 @@ uint32_t ExceptionVectorsTable[8] __attribute__((aligned(32)));
  */
 extern uint8_t ExceptionVectorsBase[];
 
+/*
+ * ------------------------------------------------------------------ results carried to the log
+ *
+ * `arm_init` runs with XNU's page tables live, where `ram_console` is unreachable, so anything it
+ * learns has to be stashed and written out later by the epilogue. Small fixed table, no
+ * allocation, because this runs before any allocator exists.
+ */
+/*
+ * Rendered to text as they arrive, into one flat buffer, rather than stored as a table of
+ * key/value pairs to be formatted later.
+ *
+ * The first version kept two parallel arrays - pointers to the key strings, and the values - and
+ * read them back in the epilogue. The keys came out empty and the pairs came out misaligned, while
+ * the values were mostly right. Rather than keep chasing that, this removes the indirection
+ * entirely: by the time anything reads this, it is the exact characters that will be written, in
+ * one contiguous block, with no pointers to be wrong.
+ */
+#define ENTRY_KV_BUF 768
+static char g_kv_buf[ENTRY_KV_BUF];
+static uint32_t g_kv_len;
+
+void entry_kv(const char *key, uint32_t value)
+{
+    static const char hex[] = "0123456789abcdef";
+
+    if (g_kv_len + 40u >= ENTRY_KV_BUF) {
+        return;
+    }
+    g_kv_buf[g_kv_len++] = ' ';
+    while (*key != '\0' && g_kv_len + 20u < ENTRY_KV_BUF) {
+        g_kv_buf[g_kv_len++] = *key++;
+    }
+    g_kv_buf[g_kv_len++] = '=';
+    g_kv_buf[g_kv_len++] = '0';
+    g_kv_buf[g_kv_len++] = 'x';
+    for (unsigned i = 0; i < 8u; i++) {
+        g_kv_buf[g_kv_len++] = hex[(value >> (28u - (i * 4u))) & 0xfu];
+    }
+    g_kv_buf[g_kv_len++] = '\n';
+    g_kv_buf[g_kv_len] = '\0';
+}
+
 /* ------------------------------------------------------------------ the evidence path */
+
+static void entry_write(const char *s);
 
 static void entry_write(const char *s)
 {
@@ -113,7 +157,43 @@ __attribute__((noreturn, noinline)) static void entry_epilogue(const char *why)
 
     __asm__ volatile ("cpsid if" ::: "memory");
 
-    /* Caches first: with the MMU off there is no descriptor left to say what is cacheable. */
+    /*
+     * Clean and invalidate the D-cache by set and way, BEFORE touching SCTLR.
+     *
+     * This is not optional and it is the one thing this epilogue got wrong first time. Everything
+     * `arm_init` learned was written into g_kv_key/g_kv_val with XNU's D-cache on, so it was
+     * sitting dirty in the cache; clearing SCTLR.C then discards it, and the log came out with
+     * empty keys and a garbage count. The Phase 1 documents say exactly this - a dirty cache line
+     * cannot survive the cache being turned off - and here is a second place it bites, in an image
+     * that had not read them.
+     *
+     * Geometry from CCSIDR rather than assumed, same as cache_ops.c: a wrong set or way count
+     * leaves lines behind, and the failure looks like partial corruption rather than loss.
+     */
+    {
+        uint32_t ccsidr, line_log2, ways, sets, way_shift, way, set, n, w;
+
+        __asm__ volatile ("mrc p15, 1, %0, c0, c0, 0" : "=r"(ccsidr));
+        line_log2 = (ccsidr & 0x7u) + 4u;
+        ways = ((ccsidr >> 3) & 0x3ffu) + 1u;
+        sets = ((ccsidr >> 13) & 0x7fffu) + 1u;
+        n = 0u;
+        for (w = ways; w > 1u; w >>= 1) {
+            n++;
+        }
+        way_shift = line_log2 + n;
+
+        for (way = 0u; way < ways; way++) {
+            for (set = 0u; set < sets; set++) {
+                uint32_t val = (way << way_shift) | (set << line_log2);
+                __asm__ volatile ("mcr p15, 0, %0, c7, c14, 2" :: "r"(val) : "memory");
+            }
+        }
+        __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
+    }
+
+    /* Now the caches can be turned off: with the MMU off there is no descriptor left to say what
+     * is cacheable. */
     __asm__ volatile ("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
     sctlr &= ~((1u << 2) | (1u << 12));
     __asm__ volatile ("mcr p15, 0, %0, c1, c0, 0" :: "r"(sctlr) : "memory");
@@ -128,6 +208,11 @@ __attribute__((noreturn, noinline)) static void entry_epilogue(const char *why)
     entry_write("\nMI4IOS6_STAGE90_XNU real XNU entry: ");
     entry_write(why);
     entry_write("\n");
+
+    if (g_kv_len != 0u) {
+        entry_write("MI4IOS6_STAGE90_XNU real XNU entry");
+        entry_write(g_kv_buf);
+    }
 
     *(volatile uint32_t *)(uintptr_t)RESTART_REASON = RESTART_NORMAL;
     __asm__ volatile ("dsb sy" ::: "memory");
@@ -153,6 +238,20 @@ void arm_init(void *boot_args)
 {
     (void)boot_args;   /* outside the post-switch window; deliberately not dereferenced */
     entry_epilogue("_start ran to completion and branched to arm_init");
+}
+
+/*
+ * `panic`. 4570's device_tree.c calls it on a malformed tree, which is a real assertion and the
+ * reason it is here rather than stubbed to nothing: if XNU's reader rejects the tree this project
+ * built, that is the finding, and it should reach the log by the same route as everything else.
+ * The variadic arguments are ignored - the message this project can act on is which call failed,
+ * and the tree is already the thing under test.
+ */
+void panic(const char *fmt, ...);
+void panic(const char *fmt, ...)
+{
+    (void)fmt;
+    entry_epilogue("panic() - XNU rejected something; see which call precedes this line");
 }
 
 /* The secondary-CPU entry points. Unused on a single-core bring-up; present so the link closes. */

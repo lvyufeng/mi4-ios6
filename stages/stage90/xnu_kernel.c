@@ -224,7 +224,7 @@ int kernel_entry(struct boot_args *args)
      * failure, which is why it is behind its own switch, its own gate flag, and a doc comment in
      * xnu_entry_jump.c that says what the two possible log endings mean.
      */
-    (void)stage90_xnu_entry_run();
+    (void)stage90_xnu_entry_run(args);
 #endif
 
     return 1;

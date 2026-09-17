@@ -6856,7 +6856,7 @@ struct stage90_xnu_entry_result {
     uint32_t checksum;
 };
 
-int stage90_xnu_entry_run(void);
+int stage90_xnu_entry_run(const struct boot_args *args);
 const struct stage90_xnu_entry_result *stage90_xnu_entry_result(void);
 
 static inline uint32_t stage90_xnu_entry_checksum(const struct stage90_xnu_entry_result *r)

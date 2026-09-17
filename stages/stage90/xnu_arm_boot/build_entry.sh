@@ -54,6 +54,13 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
 
+# The part of the entry image that runs XNU's own code. clang, because the XNU objects it links
+# against were built by clang (see xnu_arm_assemble.sh for why that is not a preference), and with
+# one clang warning suppressed: XNU's EXTERNAL_HEADERS/stddef.h defines ptrdiff_t as a null-pointer
+# subtraction, which clang flags under -Werror and gcc does not.
+say "== compiling the in-kernel probe (XNU's own DT and boot-arg code) =="
+XNU=$REPO_ROOT/external/xnu-4570.1.46
+
 say "== linking at $ENTRY_BASE =="
 # start.o first, so `_start` is the first thing in .text and the image base is the entry point -
 # not required (the payload jumps to an explicit address) but it makes the map readable.

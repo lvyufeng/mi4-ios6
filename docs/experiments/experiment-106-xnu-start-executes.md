@@ -110,6 +110,44 @@ symbol *after* `arm_init`, which is a much larger body of code than the entry pa
 Also not established: any of this is useful yet. The stub reboots immediately. Nothing XNU
 initialised is observed to work, because nothing after `arm_init` exists to observe it.
 
+## What was tried next, and did not work
+
+With `_start` executing, the obvious next increment is to put something *inside* `arm_init` that
+runs XNU's own code from the kernel's context rather than the payload's — a device-tree walk, a
+boot-argument parse, on the tree and the `boot_args` XNU was actually handed.
+
+It was built and run, and it does not work yet. Recorded because the shape of the failure is more
+useful than the fact of it:
+
+- **XNU objects link into the entry image and `_start` still completes.** 4570's own
+  `pexpert/gen/device_tree.c`, `bootargs.c` and `arm_pe_bootargs.c` all linked alongside
+  `start.s`, and the entry ran to completion with them present. That much is established.
+- **Two ABI findings came out of it.** First, XNU 4570's `device_tree.c` is *not* the 2050 one the
+  payload links: the iterator API changed from `DTCreateEntryIterator(startEntry, DTEntryIterator
+  *iterator)` with an opaque pointer to `DTInitEntryIterator(startEntry, DTEntryIterator iter)`
+  with a caller-owned struct. `osfmk/arm/machine_routines.c:465` and
+  `pexpert/arm/pe_identify_machine.c:112` both call the 4570 form, so any 4570 caller linked
+  against 2050's implementation will not link — a trap Phase 4 would have walked into. 4570's own
+  `device_tree.c` compiles with the project's shims; it is in `out/stage90` and reproducible.
+  Second, it `panic()`s on a malformed tree, which is worth knowing before a tree is handed to it.
+- **The results were not obtained, because of a defect in the reporting.** Values arrived from the
+  walk — `tree_ptr`, `tree_len`, `cmdline_len`, `cmdline_head` all reported correctly — but the
+  key strings for several entries came back empty or truncated, so which lookups succeeded and
+  which failed cannot be read off the log. The values that did arrive suggested `/cpus`, `/arm-io`
+  and the timer lookup all failing *inside* the kernel context, which would itself be a finding,
+  but that reading is not trustworthy while the reporting is broken and is not claimed here.
+- **What was fixed while diagnosing it, and kept**: the epilogue must **clean** the D-cache before
+  clearing `SCTLR.C`. The first version did not, and everything `arm_init` wrote with XNU's caches
+  on was discarded — the Phase 1 documents say exactly this and this image had not read them. That
+  is fixed and in the shipped entry.
+- **What was reverted**: the probe itself. `STAGE90_XNU_ENTRY=1` ships the version that works and
+  whose output is unambiguous. Half-working code is not left in the tree; the probe is described
+  here and its source is not kept.
+
+The next attempt should start by making the *reporting* trustworthy before making the probe more
+ambitious — a flat character buffer rather than a table of pointers, written directly into
+`ram_console`, is the shape that got closest.
+
 ## Safety, for the record
 
 The jump is one-way by construction, and the software dead-man is deliberately *not* armed across

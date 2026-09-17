@@ -66,6 +66,16 @@ extern const uint32_t stage90_xnu_entry_blob_size;
 #define ENTRY_ARGS_OFFSET   0x00007000u   /* boot_args copy, inside the window, below the tables */
 #define ENTRY_ARGS_PA       (STAGE90_XNU_ENTRY_BASE + ENTRY_ARGS_OFFSET)
 
+/*
+ * Where the device tree goes. Inside the window, past the image and its BSS (which the link
+ * reports), and past topOfKernelData (0x00220000) plus the ~40 KB of page tables `_start` writes
+ * there. The tree is 0x7294 bytes today and the buffer below is sized for four times that, so a
+ * growing tree fails a check rather than silently overlapping the tables.
+ */
+#define ENTRY_DT_OFFSET     0x00080000u
+#define ENTRY_DT_PA         (STAGE90_XNU_ENTRY_BASE + ENTRY_DT_OFFSET)
+#define ENTRY_DT_MAX        0x00020000u
+
 static struct stage90_xnu_entry_result g_result;
 
 /*
@@ -87,7 +97,26 @@ __attribute__((naked, noreturn)) static void xnu_entry_jump(uint32_t boot_args_p
     );
 }
 
-static void xnu_entry_build_args(void)
+static void xnu_entry_copy_device_tree(const struct boot_args *src)
+{
+    void *dest = (void *)(uintptr_t)ENTRY_DT_PA;
+
+    if (src->deviceTreeP == NULL || src->deviceTreeLength == 0u ||
+        src->deviceTreeLength > ENTRY_DT_MAX) {
+        xnu_log_kv32("xnu_entry_device_tree_len", src->deviceTreeLength);
+        xnu_log_puts("xnu_entry: refusing to copy a device tree of that size\n");
+        return;
+    }
+
+    memcpy(dest, src->deviceTreeP, src->deviceTreeLength);
+    /* Same reasoning as the image: XNU reads this through page tables it writes itself. */
+    cache_clean_dcache_range(ENTRY_DT_PA, src->deviceTreeLength);
+
+    xnu_log_kv32("xnu_entry_device_tree_pa", ENTRY_DT_PA);
+    xnu_log_kv32("xnu_entry_device_tree_len", src->deviceTreeLength);
+}
+
+static void xnu_entry_build_args(const struct boot_args *src)
 {
     /*
      * Written at the physical address directly - the window is identity-mapped, so the pointer and
@@ -111,10 +140,14 @@ static void xnu_entry_build_args(void)
     /* 16 KB aligned, above the image and its BSS, inside the span, with room for L1+L2+HIGH pages. */
     a->topOfKernelData = STAGE90_XNU_ENTRY_BASE + 0x00020000u;
     a->machineType = 0x00009074u;
-    a->deviceTreeP = 0;              /* outside the window; `_start` does not read it */
-    a->deviceTreeLength = 0u;
+    /* The tree, copied in. `_start` does not read it; `arm_init` and everything after does. */
+    a->deviceTreeP = (void *)(uintptr_t)ENTRY_DT_PA;
+    a->deviceTreeLength = (src->deviceTreeLength <= ENTRY_DT_MAX) ? src->deviceTreeLength : 0u;
     a->bootFlags = 0u;
     a->memSizeActual = STAGE90_XNU_ENTRY_SIZE;
+    /* The command line goes with it, so XNU's parser has one to read. */
+    memcpy(a->CommandLine, src->CommandLine, sizeof(a->CommandLine));
+    a->CommandLine[sizeof(a->CommandLine) - 1u] = '\0';
 
     xnu_log_kv32("xnu_entry_args_pa", ENTRY_ARGS_PA);
     xnu_log_kv32("xnu_entry_args_virtBase", a->virtBase);
@@ -123,7 +156,7 @@ static void xnu_entry_build_args(void)
     xnu_log_kv32("xnu_entry_args_topOfKernelData", a->topOfKernelData);
 }
 
-int stage90_xnu_entry_run(void)
+int stage90_xnu_entry_run(const struct boot_args *args)
 {
     struct stage90_xnu_entry_result *r = &g_result;
     uint8_t *dest = (uint8_t *)(uintptr_t)STAGE90_XNU_ENTRY_BASE;
@@ -167,8 +200,13 @@ int stage90_xnu_entry_run(void)
            STAGE90_XNU_ENTRY_BSS_END - STAGE90_XNU_ENTRY_BSS_START);
     xnu_log_kv32("xnu_entry_bss_bytes", STAGE90_XNU_ENTRY_BSS_END - STAGE90_XNU_ENTRY_BSS_START);
 
-    /* 3. the boot_args, inside the window */
-    xnu_entry_build_args();
+    /* 3. the device tree and the boot_args, both inside the window
+     *
+     * The payload's own boot_args is the source for the tree and the command line - it is what
+     * this boot was actually started with - and the copy in the window is what XNU is handed.
+     */
+    xnu_entry_copy_device_tree(args);
+    xnu_entry_build_args(args);
 
     /*
      * 4. publish both to memory. The payload may be running with the D-cache on (Phase 1's
