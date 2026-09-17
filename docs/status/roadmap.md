@@ -1617,6 +1617,31 @@ switch, which changes what every measurement so far was taken against. **`lld` w
 is a host toolchain change and the choice is the user's.** The measurement above needed no install —
 clang's Mach-O *assembler* is already present.
 
+**AND THE LARGEST REMAINING GROUP IS BOUNDED BY THE INCLUDE MODEL, NOT BY A MISSING NAME**
+(2026-09-17, [`experiment-144`](../experiments/experiment-144-sync-qos-and-the-export-lists.md)).
+The four `sync_qos_count_t` failures looked like the last three stages' work and are not. The chain is
+`bsd/kern/uipc_mbuf.c` → IOKit headers → `osfmk/mach/mach_interface.h` → the MIG-generated
+`mach/exc_server.h` → its `simport <kern/ipc_kobject.h>` → `osfmk/ipc/ipc_kmsg.h:111`, whose
+`sync_qos_count_t` and `ipc_kmsg_t` live in `ipc_types.h` **under `MACH_KERNEL_PRIVATE`**.
+
+Both obvious fixes are measured failures. **Forcing `MACH_KERNEL_PRIVATE` for BSD files** re-creates
+exactly the defect experiment-118 fixed — it reaches `misc_protos.h`'s `ffs(unsigned int)` against
+`bsd/libkern/libkern.h`'s `ffs(int)`; the error simply moves to `ffs`. **Supplying the two typedefs
+narrowly** clears it and reveals `ipc_table_index_t`, then the next — *the closure grows as you
+satisfy it*, as experiment-103 measured for `cpu_data_internal.h`.
+
+**What the export lists say is the answer**: `osfmk/kern/Makefile`'s `EXPORT_FILES` does **not**
+contain `ipc_kobject.h`, and `osfmk/ipc/Makefile` exports `ipc_types.h` but **not** `ipc_kmsg.h`. No
+component exports the two headers this build reaches, so **no BSD file reaches them in Apple's build**
+— it happens here because `-I$XNU/osfmk` puts the whole source tree on the include path, which is what
+experiment-117 measured the cost of from the other direction.
+
+**Third instance of one limitation**, and the three together name it: *a flat include list cannot
+express "this component sees that header's public half and not its private half."* The other two are
+`kern/ast.h`'s shared include guard (139) and `size_t` (141).
+
+**State unchanged: `RELEASE` 602 of 615, boot path 113 stubs.**
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
