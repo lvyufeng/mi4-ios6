@@ -764,6 +764,26 @@ actually require:
 - The platform whitelist itself (`SUPPORTED_EMBEDDED_PLATFORMS`) is in `MakeInc.cmd:121`,
   so that half *is* public and editable.
 
+**The gap is now a list of twenty symbols, not an adjective (2026-09-17,
+[`experiment-103`](../experiments/experiment-103-xnu-entry-point-assembles.md)).**
+`stages/stage90/xnu_arm_assemble.sh` assembles `osfmk/arm/start.s` — XNU's real `_start`,
+unmodified — with clang 14. The undefined list is: `_arm_init` (+ its two secondary-CPU siblings),
+eight `fleh_*` handlers and `ExceptionVectorsTable` (all in `locore.s`, same treatment), and nine
+XNU data symbols that `globals_asm.h` already enumerates as `LOAD_ADDR_GEN_DEF`s. `assym.s`, the
+largest single missing piece, is supplied for `start.s`; `locore.s` needs 28 more constants, all
+`offsetof()`s into `cpu_data_t`/`arm_saved_state`, so the whole entry path reduces to one question:
+can `osfmk/arm/cpu_data_internal.h` be made to compile? Two flags were the difference between
+"header problem" and "one symbol list": **`-DASSEMBLER=1`** (without it `asm.h`'s entire `LOAD_ADDR`
+machinery is preprocessed away) and **`-Dfmrx=vmrs -Dfmxr=vmsr`** (Apple's assembler dialect).
+
+**And it corrects Phase 2.** `start.s` *builds its own* bootstrap page tables at `topOfKernelData`
+— it invalidates the TTEs, sets a V=P section, maps the kernel with 1 MB sections from
+`physBase`/`virtBase`/`memSize`, spills to an L2 table when `memSize` is unaligned, then sets
+TTBR0/TTBR1 and enables the MMU. So the Phase 2 bullet *"populate a `topOfKernelData` region
+containing the bootstrap page tables XNU will adopt"* has the direction wrong: XNU adopts nothing
+and writes its own. What it needs is a writable, 16 KB-aligned region with room — which the
+conforming `boot_args` already provides and `experiment-99` verified on the device.
+
 **One correction, 2026-09-17: the *processor* configuration is in the source.** Chasing this
 further, `osfmk/arm/proc_reg.h:73` is `#if defined (ARMA7)` → `__ARM_ARCH__ 7`, `__ARM_VMSA__ 7`.
 That is the 32-bit ARMv7 machine configuration, it is the only 32-bit branch in the chain, and

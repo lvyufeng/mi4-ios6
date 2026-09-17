@@ -116,6 +116,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-100](experiment-100-first-public-xnu-execution.md) | The First Public-XNU Code to Execute on the Device |
 | stage90 | [experiment-101](experiment-101-phase3-shim-first-hardware-run.md) | Phase 3 Platform Shim, First Hardware Run: One Missing Assignment |
 | stage90 | [experiment-102](experiment-102-xnu-consistent-debug-registry.md) | XNU's Crash-Log Registry Runs on MSM8974, and It Writes a Record |
+| stage90 | [experiment-103](experiment-103-xnu-entry-point-assembles.md) | XNU's Entry Point Assembles, and the Missing Configuration Is Now a Symbol List |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
