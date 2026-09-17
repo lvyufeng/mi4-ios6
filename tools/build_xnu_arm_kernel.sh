@@ -163,6 +163,11 @@ DEFINES=(
     -DXNU_KERNEL_PRIVATE=1 -DKERNEL_PRIVATE=1
     -DMACH_BSD=1 -DPRIVATE=1 -DKPC=1 -DMONOTONIC=1 -DXPR_DEBUG=0 -DLOCK_PRIVATE=1
     -DARMA7=1 -DKERNEL=1 -D__arm__=1 -DCONFIG_EMBEDDED=1 -D__ARM_L2CACHE_SIZE_LOG__=21
+    # NPTY/NPTMX: the device conditions this configuration turns on, so that bsd/kern/tty_pty.c,
+    # tty_ptmx.c and tty_dev.c are both compiled (device_table.py) and preprocessed consistently.
+    # NPTY 1 rather than 0 because 0 does not compile: conf.c's #else branch is missing ptsselect
+    # (experiment-130), and tty_pty.c promotes 1 to 32 itself with a #warning.
+    -DNPTY=1 -DNPTMX=1
     # __APPLE__ is what Apple's compiler defines and this project's does not. The scripts here use
     # `--target=armv7-none-eabi`; Apple's build uses a Darwin target triple, and `__APPLE__` is part
     # of that triple rather than of the source. Supplying the macro is worth 17 files in the minimal

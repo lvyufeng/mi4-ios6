@@ -1356,6 +1356,35 @@ not to compile, so they need a real device table and `--unknown` keeps reporting
 is unchanged at 11 files / 42 symbols — `kern_monotonic.c` was never in it, because it was never
 *attempting* to compile.
 
+**AND THE pty DEVICE, WHICH NEEDED FOUR THINGS TO AGREE** (2026-09-17,
+[`experiment-132`](../experiments/experiment-132-pty-device-and-a-named-unknown.md)). `NPTY 0` does
+not compile (experiment-130), so the device has to be on — and "on" means the table, the generated
+header, the `-D` flag and the manifest together: `device_table.py` says `pty: 1`, `pty.h` says
+`NPTY 1`, the build defines `-DNPTY=1`, and `list_sources.py` picks up the three files behind it.
+`NPTY 1` rather than larger because `tty_pty.c:89-92` is `#if NPTY == 1 / #define NPTY 32` with a
+`#warning`. **`conf.c` compiles**, and it is the file that *defines* `bdevsw`, `cdevsw`, `chrtoblk`,
+`nblkdev` — the device-switch tables the whole BSD device layer needs.
+
+**Two defects in the tool that exists to prevent defects**, both found by running it against a case
+that should pass: it read the *name* and not the value (`-DXPR_DEBUG=0` mentions `xpr_debug` and
+means off), and it compared a device's name to its macro (`pty` vs `NPTY`) — the same
+one-value-two-definitions shape one level up.
+
+**And one missing header narrowed to one value.** `os/firehose_buffer_private.h` is not published,
+but everything its three users take from it is, under `libkern/firehose/` (`libkern/firehose/Makefile:37-42`
+exports all four). A forwarding shim changes `file not found` into
+`use of undeclared identifier 'FIREHOSE_BUFFER_KERNEL_CHUNK_COUNT'` — **one constant, used to size
+real allocations, with no evidence in the tarball for its value.** Left failing and named: a guess
+there would under- or over-allocate a kernel buffer.
+
+**`STAGE90_BOOT` 405 → 406 of 426, `RELEASE` 595 → 599 of 615, boot path 42 → 33 symbols — and the
+link 444 → 449, five symbols worse.** The trade is the same change: `conf.c` provides nine
+device-switch tables and references fourteen log entry points that live in the two files §3 is
+about. Kept because their `NPTY 0` path is broken — any kernel from this source has the device on —
+and because the fourteen are already the queue. **The link count is a count of what is missing, not
+of what is right**; this traded five countable misses for a correct configuration and a smaller real
+work list.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

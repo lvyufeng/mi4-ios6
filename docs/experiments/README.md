@@ -145,6 +145,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-129](experiment-129-caddr-t.md) | `caddr_t`, the Biggest Boot-Path File, and the Three Items Left Behind It |
 | stage90 | [experiment-130](experiment-130-two-negative-results.md) | Two Boot-Path Files Investigated, Neither Fixed, and Why |
 | stage90 | [experiment-131](experiment-131-device-table.md) | The Build Defined `MONOTONIC` and the Manifest Never Built the File |
+| stage90 | [experiment-132](experiment-132-pty-device-and-a-named-unknown.md) | The pty Device, Resolved by Measurement — and One Value Left With No Evidence |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

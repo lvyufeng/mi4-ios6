@@ -63,14 +63,21 @@ LINE = re.compile(r"^(\S+)\s+optional\s+(.*)$")
 #                      `gen_device_headers.sh` writes `NLOOP 0` to match; `pty` is NOT safe at 0
 #                      (measured: `conf.c` then fails on `ptsselect`, which exists nowhere in the
 #                      tree) and is left out of the table entirely so `--unknown` keeps reporting it.
+#   * `pty`, `ptmx` 1 -- measured, and the measurement is what decides it. `NPTY 0` does **not**
+#                      compile in 4570: `bsd/dev/arm/conf.c:112` has `#if NPTY > 0` and its `#else`
+#                      branch defines `ptcselect` but not `ptsselect`, which exists nowhere in the
+#                      tree (experiment-130). So the device has to be on, and that means all three
+#                      files behind it — `tty_dev.c optional ptmx pty`, `tty_ptmx.c optional ptmx`,
+#                      `tty_pty.c optional pty` — and `gen_device_headers.sh` writing `NPTY 1` and
+#                      `NPTMX 1` to match. `tty_pty.c:89-92` promotes NPTY 1 to 32 with a #warning,
+#                      which is why 1 is the value that both compiles the file and satisfies the
+#                      macro's own expectation.
 TABLE = {
     "monotonic": 1,
     "xpr_debug": 0,
+    "pty": 1,
+    "ptmx": 1,
 }
-
-# Deliberately unresolved, and reported by --unknown rather than given a value:
-#   pty, ptmx -- need a real device table; NPTY 0 does not compile (experiment-130)
-UNRESOLVED = {"pty", "ptmx"}
 
 
 def conditions():
@@ -116,6 +123,9 @@ def hand_set_defines():
     path = os.path.join(REPO_ROOT, "tools", "build_xnu_arm_kernel.sh")
     body = open(path).read().split("DEFINES=(", 1)[1].split("\n)", 1)[0]
     out = {}
+    # `-DNPTY=1` is a valid C identifier; `NPTY/NPTMX` in a comment is not, which is why the name
+    # pattern rejects a `/`. A first version matched `NPTY` inside a comment line and reported the
+    # flag as present when it was not.
     for m in re.finditer(r"-D([A-Za-z_][A-Za-z0-9_]*)(?:=([0-9]+))?", body):
         name, value = m.group(1).lower(), m.group(2)
         out[name] = int(value) if value is not None else 1
@@ -144,11 +154,18 @@ def main():
             disagreements.append(f"{name}: the build script defines it =1, absent from this table")
         elif not TABLE[name]:
             disagreements.append(f"{name}: the build script defines it =1, table says 0")
-    # And the other direction: a table entry of 1 that the build does not define would compile the
-    # file with the feature off.
+    # A condition the manifest builds (table 1) whose *file list* condition the compiler will see as
+    # off is the same defect in the other direction, so a table entry of 1 that the build does not
+    # define is reported. **A device's macro is its name upper-cased with an `N`** - the
+    # condition is `pty` and the header is `pty.h` containing `#define NPTY 1` - so the check accepts
+    # either spelling. Comparing the two names directly reported a disagreement for a pair that
+    # agreed, which is the same one-value-two-definitions shape this table exists to catch, one
+    # level up.
     for name in sorted(TABLE):
-        if TABLE[name] and name in conds and not hand.get(name):
-            disagreements.append(f"{name}: table says 1, the build script does not define it =1")
+        if TABLE[name] and name in conds and not (hand.get(name) or hand.get("n" + name)):
+            disagreements.append(
+                f"{name}: table says 1, the build defines neither -D{name.upper()}=1 "
+                f"nor -DN{name.upper()}=1")
 
     lines = ["# condition\tvalue\treason"]
     for name in sorted(TABLE):
