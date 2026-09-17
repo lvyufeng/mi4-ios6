@@ -1859,6 +1859,28 @@ null pointer constant in C++ — every `return NULL;` in a `.cpp` was an error. 
 `#ifdef __cplusplus`. It moves no count and is recorded because the C++ attempt is the only way it
 would have been found.
 
+**AND THE SHIMS WERE AUDITED, AND CAME BACK CLEAN** (2026-09-17,
+[`experiment-153`](../experiments/experiment-153-shim-audit.md)). Sixteen of the project's 26 shims
+have the same path as a real header in the tree — this project's most-repeated defect class, four
+times over five turns — so they were checked against the tree, and **every one is inert in the kernel
+build by construction**: `-I$SHIMS` and `-I$SHIMS_ARM` are **last** in the include order
+(`build_xnu_arm_kernel.sh:269-271`), so a real header always wins. Verified directly
+(`#include <kern/kern_types.h>` reaches `osfmk/kern/kern_types.h`, not the shim) and by measurement:
+removing the directory costs **125 files** (608 → 490).
+
+So it is a **load-bearing fallback**, and the shadowing is the price of being one — the opposite
+arrangement from the four earlier cases, where a shim was **first** on the path and hid a real header.
+**The rule that separates them**: a shim may shadow a real header if and only if it is placed where it
+can only be reached when the real one is not. Four failures came from breaking that rule; this
+directory obeys it. The ten `shims_arm` headers that shadow nothing are the ones the build needs, and
+they are build-generated, this project's own configuration, or genuinely unpublished.
+
+Also recorded so it is not mistaken for a regression: `xnu_object_subset_compile.sh` reports
+`failure_mask=0x80000010` and did so at `26f14c5` too — checked, not chased.
+
+**This is the first audit in this project that came back clean**, which is what makes the other four
+credible.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
