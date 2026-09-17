@@ -795,6 +795,18 @@ default `-ferror-limit` is 20 and a missing header is a *fatal* error that ends 
 unit, so the count was truncated and the fatal's own line counted as one of them. The script now
 passes `-ferror-limit=0` and labels any count containing a fatal as a floor.)*
 
+**AND THE REST OF osfmk IS MEASURED (2026-09-17, [`experiment-111`](../experiments/experiment-111-osfmk-measured.md)).**
+`tools/sweep_xnu_osfmk.sh`: **81 of 170** files outside `osfmk/arm` parse (`kern` 41/83, `vm` 9/27,
+`ipc` 2/20). Two things moved it. **MIG has three outputs per `.defs`, not one** — the first
+generation run asked for `-header` only, and the kernel's sources include `X_server.h` as well;
+generating those collapsed the missing-header list from **18 names to 3**. And `u_long`, the largest
+single blocker at 223 occurrences, is now supplied. The remaining blockers are no longer headers but
+names behind configuration this project has not chosen (`fmsg`, `mnl_msg_t`, `mach_node_t`,
+`sched_group_t` — the multi-node Mach IPC machinery). Also caught: the first two runs of the sweep
+counted `osfmk/i386`, `osfmk/x86_64` and `osfmk/arm64`, producing 400-odd `_STRUCT_X86_*` blockers
+for a kernel that will never contain them. All three are now excluded, with the reason in the
+script — a measurement that counts another architecture's failures looks like a result.
+
 **AND THE WHOLE ARM LAYER COMPILES (2026-09-17, [`experiment-110`](../experiments/experiment-110-xnu-arm-layer-compiles.md)).**
 `tools/build_xnu_arm_layer.sh`: **32 of 32** files in `osfmk/arm` compile to objects — 118,982 bytes
 of text — against **3 of 32** three turns earlier. That layer contains `arm_init.c`, `arm_vm_init.c`,

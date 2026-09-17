@@ -98,10 +98,17 @@ for base in "${DEFS[@]}"; do
 
     # -Eh: preprocess but keep the line directives, so a MIG diagnostic points at the .defs line.
     # -P would strip them and make MIG's errors unattributable.
+    # Three outputs per .defs, because the kernel's own sources include all three:
+    #   X.h          the message/subroutine declarations
+    #   X_server.h   the server-side prototypes - what osfmk/kern/*.c includes as
+    #                <mach/mach_host_server.h> and friends, and which nothing else provides
+    #   X_client.c   not built here; the user-side is not part of a kernel
     if cc -E -x c -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" \
           "$defs" 2>"$OUT/$base.cpp.log" \
        | "$MIG" -header "$OUT/mach/$base.h" \
-                -server /dev/null -user /dev/null >"$OUT/$base.mig.log" 2>&1; then
+                -sheader "$OUT/mach/${base}_server.h" \
+                -server "$OUT/mach/${base}_server.c" \
+                -user /dev/null >"$OUT/$base.mig.log" 2>&1; then
         # A MIG that exits 0 without writing a header would look like success; check the file.
         if [[ -s $OUT/mach/$base.h ]]; then
             printf '  %-30s %s bytes\n' "$base" "$(stat -c%s "$OUT/mach/$base.h")"

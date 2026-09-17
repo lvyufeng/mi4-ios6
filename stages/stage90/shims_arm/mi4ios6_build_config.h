@@ -12,4 +12,12 @@
  * osfmk/arm/status.c:730 casts a pid_t through it. */
 typedef unsigned int uint_t;
 
+/* bsd/sys/types.h:87-90 defines this with a _U_LONG guard; the BSD type fragments the entry path
+ * includes (sys/_types/_u_int.h and friends) do not carry u_long, and the whole of sys/types.h
+ * collides with kern_types.h. Copied verbatim, guard and all. */
+#ifndef _U_LONG
+typedef unsigned long u_long;
+#define _U_LONG
+#endif
+
 #endif
