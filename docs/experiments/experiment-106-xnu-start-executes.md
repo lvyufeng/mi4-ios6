@@ -164,11 +164,30 @@ called from `arm_init`, and it is zero too — so that call did not reach its ow
 stores that must have executed, both reading back as nothing, in a function that ran to completion
 and reached the epilogue.
 
-That is the finding to start from next time, and it is narrower than "it does not work": **stores
-made from `arm_init` do not take effect, while the identical code in the epilogue does.** The
-difference between them is that the epilogue's run with the MMU off. So the suspect is the MMU
-state `_start` left behind — the domain access control, or which table TTBR0 actually holds at that
-point — not the probe.
+**That inference was wrong, and a third run corrected it.** Carrying the numbers in *registers*
+around a single store/read-back — a path no failed store can corrupt, unlike the globals the
+previous attempt used — gave:
+
+```
+ttbr0        = 0x0022004a      base 0x00220000 (topOfKernelData), flags 0x4a
+ttbcr        = 0x00000002      N=2, TTBR0 covers the whole address space
+dacr         = 0x00000001      domain 0 client
+sctlr        = 0x30c5787d      M=1 C=1 I=1 TRE=1 AFE=1 HIGHVEC=1
+probe_wrote   = 0xa5a5a5a5
+probe_readback= 0xa5a5a5a5
+```
+
+So **stores from `arm_init` do take effect and read back correctly, and the MMU state `_start`
+leaves behind is exactly what the source says it should be.** The previous run's zeroes were
+evidence about the *reporting path*, not about stores: the globals it wrote and the pointer table
+it read them back through came out wrong, which is a worse failure than no output, because it
+looks like data.
+
+**What is actually unresolved is the reporting, and it is nondeterministic.** Re-running the same
+probe shape produced a legible line in one run and *nothing at all* in the next — the second run
+did not even reach the epilogue's own write, which is the one path that had worked in every earlier
+run. That is where the next attempt starts: not at the MMU, which is now measured and correct, but
+at why output from inside `arm_init` appears only sometimes.
 
 Two things were fixed on the way and are worth keeping:
 
