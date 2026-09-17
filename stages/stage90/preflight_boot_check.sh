@@ -11,7 +11,7 @@
 # This script never runs fastboot and never touches the device. It verifies the
 # image and prints the command to run, or refuses and says why.
 #
-# Usage: ./preflight_boot_check.sh [--allow-preflight] [--allow-full] [--allow-selftest] [--allow-attr-normal-nc] [--allow-hw-watchdog-selftest] [--allow-fault-inject]
+# Usage: ./preflight_boot_check.sh [--allow-preflight] [--allow-full] [--allow-selftest] [--allow-attr-normal-nc] [--allow-attr-normal-wb] [--allow-icache] [--allow-hw-watchdog-selftest] [--allow-fault-inject]
 
 set -euo pipefail
 
@@ -24,6 +24,8 @@ ALLOW_PREFLIGHT=0
 ALLOW_FULL=0
 ALLOW_SELFTEST=0
 ALLOW_ATTR=0
+ALLOW_ATTR_WB=0
+ALLOW_ICACHE=0
 ALLOW_HW_SELFTEST=0
 ALLOW_FAULT_INJECT=0
 
@@ -33,6 +35,8 @@ for arg in "$@"; do
     --allow-full)        ALLOW_FULL=1 ;;
     --allow-selftest)    ALLOW_SELFTEST=1 ;;
     --allow-attr-normal-nc) ALLOW_ATTR=1 ;;
+    --allow-attr-normal-wb) ALLOW_ATTR_WB=1 ;;
+    --allow-icache)       ALLOW_ICACHE=1 ;;
     --allow-hw-watchdog-selftest) ALLOW_HW_SELFTEST=1 ;;
     --allow-fault-inject) ALLOW_FAULT_INJECT=1 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
@@ -245,13 +249,52 @@ case "$(value_of STAGE90_PMAP_ATTR_MODE)" in
   STAGE90_PMAP_ATTR_MODE_NORMAL_NC|1|1u)
     [[ $ALLOW_ATTR -eq 1 ]] || fail "NORMAL_NC changes DRAM memory types and is not allowed without --allow-attr-normal-nc"
     echo "NORMAL_NC: DRAM is Normal/Non-cacheable, MMIO stays Strongly-ordered."
-    echo "           This is the Phase 1a exclusives change - it alters the memory"
-    echo "           model of the whole payload, so run it on its own and read the log."
+    echo "           This changes the memory model of the whole payload, so run it"
+    echo "           on its own and read the log."
+    ;;
+  STAGE90_PMAP_ATTR_MODE_NORMAL_WB|2|2u)
+    [[ $ALLOW_ATTR_WB -eq 1 ]] || fail "NORMAL_WB marks DRAM cacheable and is not allowed without --allow-attr-normal-wb"
+    echo "NORMAL_WB: DRAM is Normal/Write-Back/Write-Allocate and SHAREABLE, MMIO stays"
+    echo "           Strongly-ordered. The section descriptor also drops PL0 access"
+    echo "           (AP 11 -> 01), which is F-AM2 and safe because everything in the"
+    echo "           payload runs at PL1. Cacheable descriptors do nothing on their own:"
+    echo "           the cache switches below decide whether they are used."
     ;;
   *)
     fail "unrecognised STAGE90_PMAP_ATTR_MODE: $(value_of STAGE90_PMAP_ATTR_MODE)"
     ;;
 esac
+
+echo
+echo "== caches =="
+case "$(value_of STAGE90_CACHE_MODE)" in
+  STAGE90_CACHE_MODE_NONE|0|0u)
+    echo "none: SCTLR.C and SCTLR.I both clear, as in every stage so far."
+    echo "      Cacheable DRAM descriptors, if the mode above sets them, are then"
+    echo "      treated as non-cacheable by the hardware."
+    ;;
+  STAGE90_CACHE_MODE_ICACHE|1|1u)
+    [[ $ALLOW_ICACHE -eq 1 ]] || fail "the I-cache is enabled and that is not allowed without --allow-icache"
+    echo "I-cache: SCTLR.I set at MMU enable time, after an ICIALLU. This is XNU's own"
+    echo "         order - its start.s enables the I-cache in its first instructions."
+    echo "         It is safe here only because nothing in this payload writes code at"
+    echo "         runtime; the Mach-O loader is the path that eventually would, and it"
+    echo "         currently refuses to copy at all. What to look for in the log: the"
+    echo "         same kernel_entry ok as the default build, and on a real regression a"
+    echo "         prefetch abort with a plausible pc rather than a silent difference."
+    ;;
+  *)
+    fail "unrecognised STAGE90_CACHE_MODE: $(value_of STAGE90_CACHE_MODE)"
+    ;;
+esac
+
+echo
+echo "== mapping attributes: consistency =="
+if [[ "$(value_of STAGE90_CACHE_MODE)" =~ ^(STAGE90_CACHE_MODE_ICACHE|1|1u)$ ]] &&
+   [[ ! "$(value_of STAGE90_PMAP_ATTR_MODE)" =~ ^(STAGE90_PMAP_ATTR_MODE_NORMAL_WB|2|2u)$ ]]; then
+  fail "the I-cache is enabled but DRAM is not marked cacheable, so it would cache nothing"
+fi
+echo "ok: cache and attribute switches agree"
 
 echo
 echo "All checks passed. To run the non-persistent boot (writes nothing to storage):"

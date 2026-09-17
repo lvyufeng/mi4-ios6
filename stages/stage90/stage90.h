@@ -4250,32 +4250,95 @@ struct stage90_xnu_macho_loader_result {
  */
 #define STAGE90_PMAP_ATTR_MODE_SO_ONLY   0u
 #define STAGE90_PMAP_ATTR_MODE_NORMAL_NC 1u
+#define STAGE90_PMAP_ATTR_MODE_NORMAL_WB 2u
 
 #if !defined(STAGE90_PMAP_ATTR_MODE)
 #define STAGE90_PMAP_ATTR_MODE STAGE90_PMAP_ATTR_MODE_SO_ONLY
 #endif
 
 #if (STAGE90_PMAP_ATTR_MODE != STAGE90_PMAP_ATTR_MODE_SO_ONLY) && \
-    (STAGE90_PMAP_ATTR_MODE != STAGE90_PMAP_ATTR_MODE_NORMAL_NC)
-#error "STAGE90_PMAP_ATTR_MODE must be STAGE90_PMAP_ATTR_MODE_SO_ONLY or _NORMAL_NC"
+    (STAGE90_PMAP_ATTR_MODE != STAGE90_PMAP_ATTR_MODE_NORMAL_NC) && \
+    (STAGE90_PMAP_ATTR_MODE != STAGE90_PMAP_ATTR_MODE_NORMAL_WB)
+#error "STAGE90_PMAP_ATTR_MODE must be _SO_ONLY, _NORMAL_NC or _NORMAL_WB"
 #endif
 
 /*
  * ARMv7 short-descriptor encodings. Decode any of these with
  *   tools/decode_armv7_descriptor.py --section 0x00011c02 --smallpage 0x00000452
- * They differ from the Strongly-ordered forms only in TEX[2:0] = 001.
+ * SO -> NORMAL_NC differs only in TEX[2:0]: 000 -> 001.
+ * NORMAL_NC -> NORMAL_WB sets C and B: normal memory that the caches may hold.
  */
 #define STAGE90_PMAP_DESC_SECTION_SO        0x00010c02u /* TEX=000 C=0 B=0: Strongly-ordered */
 #define STAGE90_PMAP_DESC_SECTION_NORMAL_NC 0x00011c02u /* TEX=001 C=0 B=0: Normal, Non-cacheable */
+#define STAGE90_PMAP_DESC_SECTION_NORMAL_WB 0x0001140eu /* TEX=001 C=1 B=1: Normal WBWA, AP=PL1 only */
 #define STAGE90_PMAP_DESC_PAGE_SO           0x00000012u /* TEX=000 C=0 B=0: Strongly-ordered */
 #define STAGE90_PMAP_DESC_PAGE_NORMAL_NC    0x00000452u /* TEX=001 C=0 B=0, S=1: Normal, Non-cacheable */
+#define STAGE90_PMAP_DESC_PAGE_NORMAL_WB    0x0000045eu /* TEX=001 C=1 B=1, S=1: Normal WBWA */
 
-#if STAGE90_PMAP_ATTR_MODE == STAGE90_PMAP_ATTR_MODE_NORMAL_NC
+#if STAGE90_PMAP_ATTR_MODE == STAGE90_PMAP_ATTR_MODE_NORMAL_WB
+#define STAGE90_PMAP_DESC_SECTION_DRAM STAGE90_PMAP_DESC_SECTION_NORMAL_WB
+#define STAGE90_PMAP_DESC_PAGE_DRAM    STAGE90_PMAP_DESC_PAGE_NORMAL_WB
+#elif STAGE90_PMAP_ATTR_MODE == STAGE90_PMAP_ATTR_MODE_NORMAL_NC
 #define STAGE90_PMAP_DESC_SECTION_DRAM STAGE90_PMAP_DESC_SECTION_NORMAL_NC
 #define STAGE90_PMAP_DESC_PAGE_DRAM    STAGE90_PMAP_DESC_PAGE_NORMAL_NC
 #else
 #define STAGE90_PMAP_DESC_SECTION_DRAM STAGE90_PMAP_DESC_SECTION_SO
 #define STAGE90_PMAP_DESC_PAGE_DRAM    STAGE90_PMAP_DESC_PAGE_SO
+#endif
+
+/*
+ * Cache enablement. Separate from the attribute mode on purpose: the descriptors say what
+ * memory *is*, and these say whether the caches *use* it. A cacheable descriptor pair with the
+ * caches off behaves as non-cacheable, so the two can be brought up one at a time.
+ *
+ * I-cache first, because XNU's start.s enables it within its first few instructions and because
+ * it needs no maintenance in this payload: nothing here writes code at runtime. The Mach-O
+ * loader is the one path that eventually would, and it currently refuses to copy at all
+ * (its destination is unmapped at loader time - experiment-94), so the I-cache cannot go stale
+ * through it. When the loader gains a reachable copy path, that path must issue an I-cache
+ * invalidate for the region it wrote.
+ *
+ * The D-cache is deliberately not available yet. It needs cache maintenance in three places
+ * this payload does not have it - ram_console's write path, the reboot path, and every
+ * page-table write followed by a TTBR switch - and enabling it without those produces a device
+ * whose log is stale rather than wrong, which is the worst failure mode this project has.
+ */
+#define STAGE90_CACHE_MODE_NONE   0u
+#define STAGE90_CACHE_MODE_ICACHE 1u
+
+#if !defined(STAGE90_CACHE_MODE)
+#define STAGE90_CACHE_MODE STAGE90_CACHE_MODE_NONE
+#endif
+
+#if (STAGE90_CACHE_MODE != STAGE90_CACHE_MODE_NONE) && \
+    (STAGE90_CACHE_MODE != STAGE90_CACHE_MODE_ICACHE)
+#error "STAGE90_CACHE_MODE must be STAGE90_CACHE_MODE_NONE or _ICACHE"
+#endif
+
+/*
+ * The I-cache can only cache memory the descriptors mark cacheable, and a cacheable-marked
+ * region with the D-cache off is only safe because nothing writes code at runtime. Both of
+ * those are preconditions, so a build that sets ICACHE without a cacheable attribute mode is
+ * refused rather than run: it would report "I-cache enabled" while fetching from memory.
+ */
+#if (STAGE90_CACHE_MODE == STAGE90_CACHE_MODE_ICACHE) && \
+    (STAGE90_PMAP_ATTR_MODE != STAGE90_PMAP_ATTR_MODE_NORMAL_WB)
+#error "STAGE90_CACHE_MODE_ICACHE needs STAGE90_PMAP_ATTR_MODE_NORMAL_WB - with SO or Normal-Non-cacheable memory the I-cache would cache nothing"
+#endif
+
+/*
+ * The cache-policy id a correctly-configured payload will report: 0 when no cache is on, 1 when
+ * one is. Everything that records or verifies the live cache state uses this one definition -
+ * mmu.c's vm plan/state/workspace checks, and xnu_pmap_bootstrap_contract.c's workspace policy
+ * check. They used to compare against a literal 0 in ten places between them, which meant a
+ * build that turned a cache on failed its own pmap contracts and the failure named the
+ * workspace rather than the cache switch. That is the same defect the device-tree child count
+ * and the descriptor literals were; the fix is the same, and this is the one place it lives.
+ */
+#if STAGE90_CACHE_MODE == STAGE90_CACHE_MODE_NONE
+#define STAGE90_EXPECTED_CACHE_POLICY 0u
+#else
+#define STAGE90_EXPECTED_CACHE_POLICY 1u
 #endif
 
 /*

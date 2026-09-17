@@ -16,7 +16,9 @@ project builds against — not a decoder written from memory.
 
 ## The descriptors currently in the tree
 
-Two constants, both Strongly-Ordered, used for **every** mapping the project creates.
+`stage90.h` defines the Strongly-ordered pair **and** two Normal variants of each; which pair is
+actually used is `STAGE90_PMAP_ATTR_MODE` (below). The Strongly-ordered pair is the default and
+the one every stage so far has used.
 
 ### `L1_DESC_SECTION_SO = 0x00010c02` — 1 MB section
 
@@ -63,7 +65,7 @@ into `stage90_l1_table`. `virt_base` is `0x80000000` (`STAGE90_VIRT_BASE`). The 
 are not identical — see F-AM1 for the one place they disagree, which matters.
 
 The descriptor column describes the **default** `SO_ONLY` mode. Under
-`STAGE90_PMAP_ATTR_MODE_NORMAL_NC` every "DRAM" row uses the Normal/Non-cacheable descriptor
+`STAGE90_PMAP_ATTR_MODE_NORMAL_NC` or `_NORMAL_WB` every "DRAM" row uses that mode's descriptor
 instead, and the MMIO rows do not change — see *Consistency per physical address* below for
 which is which.
 
@@ -116,18 +118,22 @@ mistake here surfaces as a `full_pmap` failure with `FAIL_RAM_CONSOLE` set, not 
 The change is confirmed present in the built image (the loaded constant is `0xc0300000` at
 the verification site).
 
-**F-AM2 — every section grants PL0 read/write.** AP[1:0] = `0b11` with AP[2] = 0 is full
-access, not privileged-only. There is no userspace in a Stage payload so nothing exploits it
-today, but this is not a kernel mapping's protection and Phase 1 should move to
-`AP[1:0] = 0b01` (PL1 RW, PL0 no access).
+**F-AM2 — every section grants PL0 read/write. FIXED in `NORMAL_WB`.** AP[1:0] = `0b11` with
+AP[2] = 0 is full access, not privileged-only; there is no userspace in a Stage payload so
+nothing exploited it, but it is not a kernel mapping's protection. The `NORMAL_WB` section
+descriptor `0x0001140e` carries AP[1:0] = `0b01` (PL1 RW, PL0 no access), taken with the I-cache
+step because nothing in the payload runs at PL0 (experiment-97). The Strongly-ordered and
+Normal-Non-cacheable section descriptors are unchanged, so `SO_ONLY` and `NORMAL_NC` still have
+full access on sections.
 
-**F-AM3 — sections are shareable, small pages are not.** S=1 on the sections, S=0 on the L2
-small pages. On a single-core bring-up this is moot; for Normal memory on a multi-core part
-it is wrong, and it is an inconsistency that will be read as intentional. Phase 1 makes RAM
-shareable in both formats.
+**F-AM3 — sections are shareable, small pages are not.** S=1 on the sections, S=0 on the
+Strongly-ordered L2 small pages. Both Normal variants carry S=1, so under `NORMAL_NC` and
+`NORMAL_WB` the two formats agree; the Strongly-ordered L2 pages remain non-shareable. On a
+single-core bring-up this is moot, and shareability is architecturally ignored for
+Strongly-ordered memory.
 
-**F-AM4 — there is no Normal or cacheable mapping anywhere.** Confirmed by decoding both
-constants: TEX/C/B is `000/0/0` in each. This is roadmap finding F2.
+**F-AM4 — there is no Normal or cacheable mapping anywhere. FIXED in `NORMAL_NC` / `NORMAL_WB`.**
+Was: TEX/C/B is `000/0/0` in every descriptor. This is roadmap finding F2.
 
 The part of F2 that said `LDREX`/`STREX` cannot be relied on without it is **corrected**: measured
 on hardware, the exclusive monitor tracks on Strongly-ordered memory, on Normal-Non-cacheable
@@ -197,7 +203,7 @@ Three consequences that look like mistakes and are not:
    else. `mmu.c`'s `ttbr_section_desc_for_pa()` therefore classifies IMEM, the GIC block and
    PS_HOLD explicitly.
 
-## Phase 1a as implemented
+## Phase 1 attribute modes and cache switches
 
 `STAGE90_PMAP_ATTR_MODE` (`stages/stage90/stage90.h`):
 
@@ -205,6 +211,13 @@ Three consequences that look like mistakes and are not:
 | --- | --- | --- |
 | `SO_ONLY` (0) — **default** | `0x00010c02` / `0x00000012` | Byte-for-byte the behaviour of every stage so far. Verified: the SO_ONLY build contains **zero** Normal-NC descriptor values. |
 | `NORMAL_NC` (1) | `0x00011c02` / `0x00000452` | DRAM becomes Normal, Non-cacheable, shareable. MMIO is unchanged. |
+| `NORMAL_WB` (2) | `0x0001140e` / `0x0000045e` | DRAM becomes Normal, Write-Back, Write-Allocate, shareable. MMIO is unchanged. The section descriptor is also AP `0b01` — PL1 RW, PL0 no access — which fixes **F-AM2**; the page descriptor already had PL1-only access. |
+
+A cacheable descriptor does nothing on its own: DRAM marked `NORMAL_WB` with the caches off is
+accessed as if non-cacheable. Which cache is enabled is a **separate switch**,
+`STAGE90_CACHE_MODE` (`stages/stage90/stage90.h`): `NONE` (default) or `ICACHE`, the latter
+setting `SCTLR.I` at MMU-enable time after an `ICIALLU`. It is a compile error to set `ICACHE`
+with an uncacheable attribute mode, because the I-cache would then cache nothing.
 
 ### How that "zero" was verified — and how it was got wrong first
 

@@ -331,6 +331,19 @@
 #define STAGE90_VM_PLAN_IDENTITY_BASE               0x00000000u
 #define STAGE90_VM_PLAN_MMU_ENABLED                 1u
 #define STAGE90_VM_PLAN_CACHES_DISABLED             0u
+#define STAGE90_VM_PLAN_CACHES_ENABLED              1u
+
+/*
+ * What the live SCTLR will read once the payload has finished setting it up, for this build.
+ *
+ * The vm plan records the *observed* cache policy and every check compares it against this.
+ * Until the I-cache step that comparison was the literal CACHES_DISABLED in eight places, which
+ * is the same "one value, two definitions" shape as the device-tree child count and the
+ * descriptor literals: a build that turns a cache on deliberately would fail its own svm plan
+ * checks, and the failure would name the VM plan rather than the cache switch. There is now one
+ * definition and it follows STAGE90_CACHE_MODE.
+ */
+#define STAGE90_VM_PLAN_CACHES_EXPECTED STAGE90_EXPECTED_CACHE_POLICY
 
 #define STAGE90_VM_STATE_VERSION                    1u
 #define STAGE90_VM_STATE_SAT_PLAN                   0x00000001u
@@ -1321,7 +1334,7 @@ static void stage90_pmap_bootstrap_snapshot_build(void)
         snapshot->pmap_l1_table_phys == (uint32_t)(uintptr_t)stage90_l1_table &&
         snapshot->pmap_l1_table_virt == (STAGE90_HIGH_ALIAS_BASE + (uint32_t)(uintptr_t)stage90_l1_table) &&
         snapshot->mmu_enabled == STAGE90_VM_PLAN_MMU_ENABLED &&
-        snapshot->cache_policy == STAGE90_VM_PLAN_CACHES_DISABLED &&
+        snapshot->cache_policy == STAGE90_VM_PLAN_CACHES_EXPECTED &&
         snapshot->allocator_span_base == RAM_PHYS_BASE &&
         snapshot->allocator_span_size == STAGE90_BOOTSTRAP_ALLOC_SIZE &&
         snapshot->allocator_span_end == (RAM_PHYS_BASE + STAGE90_BOOTSTRAP_ALLOC_SIZE) &&
@@ -1338,7 +1351,7 @@ static void stage90_pmap_bootstrap_snapshot_build(void)
         snapshot->workspace_l1_section_size == L1_SECTION_SIZE &&
         snapshot->workspace_allocation_tag == STAGE90_PMAP_WORKSPACE_TAG &&
         snapshot->workspace_mmu_enabled == STAGE90_VM_PLAN_MMU_ENABLED &&
-        snapshot->workspace_cache_policy == STAGE90_VM_PLAN_CACHES_DISABLED &&
+        snapshot->workspace_cache_policy == STAGE90_VM_PLAN_CACHES_EXPECTED &&
         snapshot->stage_owned_snapshot == 1u &&
         snapshot->no_live_pmap_tables_installed == 1u) {
         snapshot->satisfied_mask |= STAGE90_PMAP_BOOTSTRAP_SNAPSHOT_SAT_POLICY;
@@ -3180,7 +3193,7 @@ static uint32_t stage90_kernel_root(struct boot_args *args,
     vm_plan->section_descriptor = L1_DESC_SECTION_DRAM;
     vm_plan->mmu_enabled = ((read_sctlr() & 1u) != 0u) ? STAGE90_VM_PLAN_MMU_ENABLED : 0u;
     vm_plan->cache_policy = ((read_sctlr() & ((1u << 2) | (1u << 12))) == 0u) ?
-        STAGE90_VM_PLAN_CACHES_DISABLED : 1u;
+        STAGE90_VM_PLAN_CACHES_DISABLED : STAGE90_VM_PLAN_CACHES_ENABLED;
 
     if (vm_plan->context_status == STAGE90_BOOTSTRAP_STATUS_OK &&
         vm_plan->context_checksum == state->kernel_context_checksum) {
@@ -3203,7 +3216,7 @@ static uint32_t stage90_kernel_root(struct boot_args *args,
     if (vm_plan->mmu_enabled == STAGE90_VM_PLAN_MMU_ENABLED) {
         vm_plan->satisfied_mask |= STAGE90_VM_PLAN_SAT_MMU;
     }
-    if (vm_plan->cache_policy == STAGE90_VM_PLAN_CACHES_DISABLED) {
+    if (vm_plan->cache_policy == STAGE90_VM_PLAN_CACHES_EXPECTED) {
         vm_plan->satisfied_mask |= STAGE90_VM_PLAN_SAT_CACHES;
     }
     if (vm_plan->section_size == L1_SECTION_SIZE &&
@@ -3280,7 +3293,7 @@ static uint32_t stage90_kernel_root(struct boot_args *args,
         vm_state->satisfied_mask |= STAGE90_VM_STATE_SAT_PMAP_POLICY;
     }
     if (vm_state->mmu_enabled == STAGE90_VM_PLAN_MMU_ENABLED &&
-        vm_state->cache_policy == STAGE90_VM_PLAN_CACHES_DISABLED) {
+        vm_state->cache_policy == STAGE90_VM_PLAN_CACHES_EXPECTED) {
         vm_state->satisfied_mask |= STAGE90_VM_STATE_SAT_MMU_CACHE_POLICY;
     }
 
@@ -3424,7 +3437,7 @@ static uint32_t stage90_kernel_root(struct boot_args *args,
         pmap_workspace->satisfied_mask |= STAGE90_PMAP_WORKSPACE_SAT_TAG;
     }
     if (pmap_workspace->mmu_enabled == STAGE90_VM_PLAN_MMU_ENABLED &&
-        pmap_workspace->cache_policy == STAGE90_VM_PLAN_CACHES_DISABLED &&
+        pmap_workspace->cache_policy == STAGE90_VM_PLAN_CACHES_EXPECTED &&
         allocator->alignment == STAGE90_BOOT_ALLOCATOR_ALIGNMENT) {
         pmap_workspace->satisfied_mask |= STAGE90_PMAP_WORKSPACE_SAT_POLICY;
     }
@@ -3533,7 +3546,7 @@ static uint32_t stage90_kernel_root(struct boot_args *args,
     if (object_table->allocation_tag == STAGE90_PMAP_WORKSPACE_TAG &&
         allocator->first_alloc_tag == STAGE90_BOOT_ALLOCATOR_FIRST_TAG &&
         pmap_workspace->mmu_enabled == STAGE90_VM_PLAN_MMU_ENABLED &&
-        pmap_workspace->cache_policy == STAGE90_VM_PLAN_CACHES_DISABLED) {
+        pmap_workspace->cache_policy == STAGE90_VM_PLAN_CACHES_EXPECTED) {
         object_table->satisfied_mask |= STAGE90_KERNEL_OBJECT_TABLE_SAT_TAG_POLICY;
     }
 
@@ -4893,6 +4906,18 @@ static inline void invalidate_tlbs(void)
     __asm__ volatile ("mcr p15, 0, %0, c8, c7, 0" :: "r"(zero) : "memory");
 }
 
+/*
+ * ICIALLU. Issued before the I-cache is first enabled, so that no line left valid by whatever
+ * ran before this payload (aboot runs with caches on) can be used for one of our addresses.
+ * The instruction is not needed to *keep* the cache coherent here: nothing in this payload
+ * writes code at runtime. See STAGE90_CACHE_MODE in stage90.h for what would change that.
+ */
+static inline void invalidate_icache_all(void)
+{
+    uint32_t zero = 0;
+    __asm__ volatile ("mcr p15, 0, %0, c7, c5, 0" :: "r"(zero) : "memory");
+}
+
 static inline void write_sctlr(uint32_t v)
 {
     __asm__ volatile ("mcr p15, 0, %0, c1, c0, 0" :: "r"(v) : "memory");
@@ -5416,8 +5441,20 @@ static void enable_identity_mmu(void)
     dsb_isb();
 
     sctlr = read_sctlr();
-    sctlr &= ~((1u << 2) | (1u << 12)); /* keep D-cache/I-cache disabled */
+    sctlr &= ~((1u << 2) | (1u << 12)); /* D-cache stays off; I-cache decided below */
+#if STAGE90_CACHE_MODE == STAGE90_CACHE_MODE_ICACHE
+    /*
+     * Invalidate before enabling, never after: enabling with a stale line present would let a
+     * wrong instruction be executed from the I-cache, and the first symptom would be a fault
+     * somewhere unrelated. The D-cache bit stays clear, so nothing here needs a D-side clean.
+     */
+    invalidate_icache_all();
+    dsb_isb();
+#endif
     sctlr |= 1u;                         /* MMU enable */
+#if STAGE90_CACHE_MODE == STAGE90_CACHE_MODE_ICACHE
+    sctlr |= (1u << 12);                 /* I-cache enable - XNU's start.s does this first */
+#endif
     write_sctlr(sctlr);
     dsb_isb();
 }
@@ -6725,7 +6762,7 @@ int mmu_high_bootstrap_selftest(void)
         stage90_vm_plan_block.section_size != L1_SECTION_SIZE ||
         stage90_vm_plan_block.section_descriptor != L1_DESC_SECTION_DRAM ||
         stage90_vm_plan_block.mmu_enabled != STAGE90_VM_PLAN_MMU_ENABLED ||
-        stage90_vm_plan_block.cache_policy != STAGE90_VM_PLAN_CACHES_DISABLED ||
+        stage90_vm_plan_block.cache_policy != STAGE90_VM_PLAN_CACHES_EXPECTED ||
         stage90_vm_plan_block.satisfied_mask != STAGE90_VM_PLAN_SAT_REQUIRED ||
         stage90_vm_plan_block.checksum != stage90_vm_plan_checksum(&stage90_vm_plan_block) ||
         stage90_vm_plan_block.status != STAGE90_BOOTSTRAP_STATUS_OK ||
@@ -6757,7 +6794,7 @@ int mmu_high_bootstrap_selftest(void)
         stage90_vm_state_block.pmap_l1_table_phys != (uint32_t)(uintptr_t)stage90_l1_table ||
         stage90_vm_state_block.pmap_l1_table_virt != (STAGE90_HIGH_ALIAS_BASE + (uint32_t)(uintptr_t)stage90_l1_table) ||
         stage90_vm_state_block.mmu_enabled != STAGE90_VM_PLAN_MMU_ENABLED ||
-        stage90_vm_state_block.cache_policy != STAGE90_VM_PLAN_CACHES_DISABLED ||
+        stage90_vm_state_block.cache_policy != STAGE90_VM_PLAN_CACHES_EXPECTED ||
         stage90_vm_state_block.satisfied_mask != STAGE90_VM_STATE_SAT_REQUIRED ||
         stage90_vm_state_block.checksum != stage90_vm_state_checksum(&stage90_vm_state_block) ||
         stage90_vm_state_block.status != STAGE90_BOOTSTRAP_STATUS_OK ||
@@ -6821,7 +6858,7 @@ int mmu_high_bootstrap_selftest(void)
         stage90_pmap_workspace_block.l1_section_size != L1_SECTION_SIZE ||
         stage90_pmap_workspace_block.allocation_tag != STAGE90_PMAP_WORKSPACE_TAG ||
         stage90_pmap_workspace_block.mmu_enabled != STAGE90_VM_PLAN_MMU_ENABLED ||
-        stage90_pmap_workspace_block.cache_policy != STAGE90_VM_PLAN_CACHES_DISABLED ||
+        stage90_pmap_workspace_block.cache_policy != STAGE90_VM_PLAN_CACHES_EXPECTED ||
         stage90_pmap_workspace_block.satisfied_mask != STAGE90_PMAP_WORKSPACE_SAT_REQUIRED ||
         stage90_pmap_workspace_block.checksum != stage90_pmap_workspace_checksum(&stage90_pmap_workspace_block) ||
         stage90_pmap_workspace_block.status != STAGE90_BOOTSTRAP_STATUS_OK ||

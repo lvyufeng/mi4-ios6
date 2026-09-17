@@ -533,9 +533,26 @@ change any mapping's memory type; all mode × ladder × dead-man combinations co
 `preflight_boot_check.sh` refuses `NORMAL_NC` without `--allow-attr-normal-nc` and handles
 both the symbolic and the numeric (`-D`) form of every switch.
 
-Still to do this phase: **the caches** — I-cache first, then D-cache, with the `ram_console` clean
-that the D-cache makes mandatory. The `LDREX`/`STREX` half is done (experiment-96), and the
-attribute map is documented and hardware-verified in both modes.
+**The I-cache is on (2026-09-17, [`experiment-97`](../experiments/experiment-97-stage90-phase1-icache.md)).**
+`STAGE90_PMAP_ATTR_MODE = NORMAL_WB` + `STAGE90_CACHE_MODE = ICACHE` gives DRAM the Normal
+Write-Back Write-Allocate descriptors (`0x0001140e`/`0x0000045e`, MMIO unchanged) and sets
+`SCTLR.I` at MMU-enable time after an `ICIALLU` — XNU's own order. The run is green: no failed
+check, `ram_console` verified, timer IRQs delivered, `SCTLR` `0x00c5487a → 0x00c5587b`. The
+payload now runs with a cache enabled for the first time in ninety-seven stages.
+
+It also found the **fourth** instance of one-value-two-definitions — a literal `0u` standing for
+"the caches are off" in nine places between `mmu.c` and `xnu_pmap_bootstrap_contract.c`, so the
+build failed its own pmap contract for being correctly configured. One definition now:
+`STAGE90_EXPECTED_CACHE_POLICY`. The cmdline's `no-cache-change` token follows the build too.
+
+F-AM2 is fixed in passing: the WB section descriptor is AP `0b01` (PL1-only) where the
+Strongly-ordered one was full access.
+
+Still to do this phase: **the D-cache**, and the three pieces of maintenance it makes mandatory —
+a clean in `ram_console`'s write path, a clean-and-invalidate of the log region before any
+reboot, and a clean of every page-table write a later TTBR switch depends on. The `LDREX`/`STREX`
+half is done (experiment-96), and the attribute map is documented and hardware-verified in three
+modes.
 
 **Exit criteria:** identity and high-VA mappings with caches on; `ram_console` still
 logging; timer IRQ still delivered; a documented attribute map; a passing `LDREX`/`STREX`

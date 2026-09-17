@@ -435,7 +435,7 @@ int stage90_xnu_pmap_bootstrap_contract_selftest(const struct stage90_loader_pre
     }
     if (contract->workspace_allocation_tag == STAGE90_XNU_PMAP_BOOTSTRAP_WORKSPACE_TAG &&
         contract->workspace_mmu_enabled == 1u &&
-        contract->workspace_cache_policy == 0u) {
+        contract->workspace_cache_policy == STAGE90_EXPECTED_CACHE_POLICY) {
         contract->satisfied_mask |= STAGE90_XNU_PMAP_BOOTSTRAP_CONTRACT_SAT_WORKSPACE_POLICY;
     } else {
         contract->failure_mask |= STAGE90_XNU_PMAP_BOOTSTRAP_CONTRACT_FAIL_WORKSPACE;

@@ -110,6 +110,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-94](experiment-94-stage90-phase0-watchdog-and-baseline.md) | Stage90 Phase 0: Recovery Net Proved, and the Two Bugs the Baseline Run Found |
 | stage90 | [experiment-95](experiment-95-stage90-phase1a-normal-nc.md) | Stage90 Phase 1a: Normal, Non-cacheable DRAM |
 | stage90 | [experiment-96](experiment-96-stage90-phase1-exclusives-work.md) | Stage90 Phase 1: LDREX/STREX Work Here, and the Probe Said Otherwise for Four Runs |
+| stage90 | [experiment-97](experiment-97-stage90-phase1-icache.md) | Stage90 Phase 1: The I-Cache On, and the Six Places That Asserted Caches Are Off |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
