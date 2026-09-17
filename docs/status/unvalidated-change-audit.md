@@ -24,7 +24,7 @@ What happened, in this document's own ordering:
 | Hardware watchdog arming (§1) | unboundable without a run; selftest is the test | **wrong in two ways the analysis did not anticipate** — a 20-bit register truncating a 30 s timeout, and a counter that counts up rather than down. Both are *register semantics*, which §6 correctly listed as unboundable |
 | Device tree `/arm-io` + `state` (§2) | a miscount would be "visible and specific", not silent | **half right.** Visible and specific, yes — but it surfaced four steps away, in the MMU high-bootstrap selftest, not where the count is defined. The count is checked in two places in `mmu.c` and the host-side checks covered neither |
 | F-AM1 (§5) | visible and specific if wrong | no failure attributable to it; the boot reached `kernel_entry returned success` |
-| Software dead-man (§3) | armed before the loader preflight | armed and never fired, as designed; **still not proved on its own** — it was the hardware watchdog that reset the device in the hang |
+| Software dead-man (§3) | armed before the loader preflight | armed and never fired, as designed; **proved separately** in experiment-94 run 8 (`STAGE90_HW_WATCHDOG=0`), where it fired at its 60 s budget and returned the device on its own |
 | `SO_ONLY` (§4) | nothing changed | confirmed: the exclusive probe's numbers are identical across all four runs |
 
 The "visible and specific" standard this document applies (§2 for the device tree, §5 for

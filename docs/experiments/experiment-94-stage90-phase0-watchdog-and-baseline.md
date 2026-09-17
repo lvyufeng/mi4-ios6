@@ -1,6 +1,6 @@
 # Experiment 94 — Stage90 Phase 0: the recovery net proved on hardware, and the two bugs the baseline run found
 
-Date: 2026-09-17 (runs 00:27–00:52 UTC)
+Date: 2026-09-17 (runs 00:27–01:43 UTC)
 Commit under test: `a683c9d` and the two commits before it (`3b32ee4`, `07ea5a5`)
 Device: Xiaomi Mi 4 LTE `cancro`, serial `4a2fe00b`, non-persistent `fastboot boot`
 
@@ -16,9 +16,14 @@ Three builds were used, in this order. `STAGE90_HANDOFF_MODE = HARD_SKIP` and
 | 5 | 00:42 | same build as 4, re-run | identical failure |
 | 6 | 00:46 | same, after the child-count fix | **hang** in the Mach-O loader; hardware watchdog reset at ~28 s |
 | 7 | 00:52 | same, after the loader fix | `kernel_entry returned success` |
+| 8 | 01:43 | `-DSTAGE90_DEADMAN_SELFTEST=1 -DSTAGE90_HW_WATCHDOG=0` | **dead-man fired**, dumped the interrupted PC, rebooted; device returned unaided |
 
-Raw captures are `/tmp/kmsg-selftest{,2,3}.txt` and `/tmp/kmsg-baseline{,2,3,4}.txt`.
-Rebuilding run 7's configuration today reproduces `stage90-qcdt.img` sha256
+Runs 1–7 are the ones the section headings below describe. Run 8 is a later addendum: it was
+run after this log was first written, and it closes the last Phase 0 item — see the addendum at
+the end.
+
+Raw captures are `/tmp/kmsg-selftest{,2,3}.txt`, `/tmp/kmsg-baseline{,2,3,4}.txt` and
+`/tmp/kmsg-deadman1.txt`. Rebuilding run 7's configuration reproduces `stage90-qcdt.img` sha256
 `9eea0d49c51b5fd6807a410aef978d7ad440850313b63c92bef64f2b9acc5dea`.
 
 ## What was being tested
@@ -228,10 +233,8 @@ probe exists, and this is the number Phase 1a's `NORMAL_NC` change has to beat.
 
 - **Criterion (b)** — a jump that produces a logged abort rather than a hang — has not been run.
   `STAGE90_HANDOFF_FAULT_INJECT_VA` exists for it and is gated behind `--allow-fault-inject`.
-- **The software dead-man has not been proved on its own.** `STAGE90_DEADMAN_SELFTEST=1` with
-  `STAGE90_HW_WATCHDOG=0` is queued run 3 and is still the only direct evidence for it.
 - **The handoff mode has not been stepped past `HARD_SKIP`.** `PREFLIGHT_WATCHDOG_ONLY` and
-  `FULL` are queued run 4.
+  `FULL` are its own queued run.
 - **Phase 1a** (`STAGE90_PMAP_ATTR_MODE = NORMAL_NC`) has not been on hardware; the run above is
   the `SO_ONLY` baseline it will be compared against.
 
@@ -241,3 +244,66 @@ probe exists, and this is the number Phase 1a's `NORMAL_NC` change has to beat.
 in flight — so it reads as if the fix were unvalidated and the baseline still failing. Run 7
 completed at 00:52 and validated both fixes. This log is the record that the commit message
 could not be.
+
+---
+
+# Addendum — run 8: the software dead-man, proved on its own
+
+Run 8 is the queued run 3 from the roadmap, and it was run after the log above was written.
+Build: `STAGE90_EXTRA_CFLAGS='-DSTAGE90_DEADMAN_SELFTEST=1 -DSTAGE90_HW_WATCHDOG=0'`, gate
+`--allow-selftest`. The hardware watchdog is **off**, on purpose: it is the only other route
+back to Android, and if it were armed a success could not be attributed to the dead-man. The
+gate warns about exactly this and lets the run through anyway.
+
+```
+stage90_build_hw_watchdog=0x00000000
+deadman_gicd_ctlr_before=0x00000001     deadman_gicc_ctlr_before=0x00000001
+deadman_gicd_ctlr_after =0x00000001     deadman_gicc_ctlr_after =0x00000001
+stage90 pc-sampling watchdog: arming
+watchdog_interval_us=0x000186a0         100 ms
+watchdog_max_samples=0x00000258         600  -> a 60 s budget
+watchdog_interval_ticks=0x001d4c00      1920000 ticks at 19.2 MHz = 100 ms
+watchdog_cntp_ctl_armed=0x00000001
+deadman: armed (dump + PS_HOLD reboot if the payload stops making progress)
+deadman SELFTEST: spinning; the dead-man should dump and reboot us at ~60s
+irq handler iar=0x00000013 id=0x00000013 count=0x1 ... count=0x8
+stage90 pc-samples: begin
+pc_sample_total=0x00000258
+pc_sample_budget_used=0x00000258
+pc_sample_watchdog_fired=0x00000001
+pc_sample_timer_irq_count=0x00000258
+pc_sample_last_pc=0x0004a2e8
+...
+stage90 pc-sampling watchdog: rebooting after sample dump
+platform_reboot entered ... writing PS_HOLD=0 ... PS_HOLD write returned
+platform_reboot entering WFE loop
+```
+
+The device returned to Android on its own, `run_and_capture.sh` exit 0.
+
+**Why this is the direct proof.** The selftest spins with no exit of its own, and the hardware
+watchdog is disabled, so the only thing that can return the device is the dead-man: timer IRQ
+(`id 0x13` is the ARM generic timer PPI, and `timer_irq_count` tracks `count` exactly) →
+interrupt the spin → dump the interrupted PC → `platform_reboot()`. It fired after the full
+600-sample budget, 60 s, as armed.
+
+**The dumped PC is real, not filler.** The samples alternate between two addresses, and
+`arm-none-eabi-addr2line` on the built ELF resolves them:
+
+| Sample | Symbol |
+| --- | --- |
+| `0x0004a2e8`, `0x0004a300` | `stage90_main` — the selftest's own spin loop |
+| `0x000098d0` | `timebase_ticks` |
+
+That is exactly the call site and callee of a `while (timebase_ticks() < deadline);` loop, which
+is what the selftest runs. A dump that returns plausible-but-wrong PCs is the failure mode worth
+ruling out, and this rules it out.
+
+**One honest limit.** This is evidence about the dead-man *as a mechanism*. It is not evidence
+that the dead-man would fire on the hangs that actually matter — it needs the GIC, the timer,
+IRQ delivery, the vector table and unmasked IRQs, and this run had all five healthy by
+construction. The hardware watchdog remains the net for a hang that takes any of them out, which
+is why both exist and why the loader hang of run 6 was recovered by the watchdog rather than by
+the dead-man.
+
+Phase 0's remaining item is now criterion (b) alone.

@@ -223,8 +223,8 @@ that rule is what this re-plan is *for*.
 Every later phase will hang repeatedly, and iteration speed is set entirely by how much a
 hang tells you. This is also the cheapest phase.
 
-**Status (2026-09-17).** All three exit criteria are now demonstrated on hardware except (b),
-and the first two recovery-net runs and the baseline were done on 2026-09-17
+**Status (2026-09-17).** Eight hardware runs on 2026-09-17 closed out every Phase 0 item except
+criterion (b): both recovery nets proved, the baseline green, and criterion (c) met along the way
 ([`docs/experiments/experiment-94-stage90-phase0-watchdog-and-baseline.md`](../experiments/experiment-94-stage90-phase0-watchdog-and-baseline.md)):
 
 - **(a) met.** `STAGE90_HW_WATCHDOG_SELFTEST=1` was run three times. Runs 1 and 2 returned the
@@ -240,8 +240,14 @@ and the first two recovery-net runs and the baseline were done on 2026-09-17
 - **(c) met.** The same run: `high_va_code_exec_fn_called=1` at `fn_high_va=0x80048098` with
   `fn_result_correct=1`, the high-VA IRQ handler delivering timer IRQs (`irq_count 1 → 3`), and
   VBAR restored to `0x000080a0` afterwards.
+- **The software dead-man is proved on its own** (run 8): built with `STAGE90_HW_WATCHDOG=0`, so
+  the hardware net could not be the thing that returned the device. Timer IRQs preempted the
+  spin, the interrupted PC was dumped — `addr2line` resolves the samples to the selftest's own
+  call site and callee, so the dump is real — and `platform_reboot()` returned the device
+  unattended. What it does not show is that the dead-man fires on hangs that take the GIC or the
+  vector table out; that is what the hardware watchdog is for.
 - **(b) not run.** `STAGE90_HANDOFF_FAULT_INJECT_VA` exists for it and is gated behind
-  `--allow-fault-inject`.
+  `--allow-fault-inject`. **This is the last item in the phase.**
 
 **Status (2026-09-16).** Two mechanisms were in the tree; one had been tried on hardware and
 failed, and finding out why reshaped this phase.
@@ -289,11 +295,12 @@ Remaining in this phase:
   VBAR at `0x800080a0` and restored it to `0x000080a0` afterwards.
 - **Prove the dead-man** with `STAGE90_DEADMAN_SELFTEST=1` (built with `STAGE90_HW_WATCHDOG=0`,
   so a success is attributable to it alone) and confirm the device comes back to Android
-  unattended (~60 s, the dead-man budget), then read the PC ring out of `/proc/last_kmsg`.
-  This is the only one of the two nets with no direct evidence yet.
+  unattended (~60 s, the dead-man budget), then read the PC ring out of `/proc/last_kmsg`. This
+  is the only one of the two nets with no direct evidence yet. **Done (2026-09-17, run 8 of
+  experiment-94).**
 - The entry-validity guard is in: the handoff rejects a target equal to the fixture entry VA,
   an unaligned target, or one whose first word is the fixture's `__TEXT` marker. Criterion (b)
-  still has not produced a logged fault.
+  still has not produced a logged fault — the last thing Phase 0 owes.
 - Then step the handoff mode up — `PREFLIGHT_WATCHDOG_ONLY`, then `FULL` — which is the first
   time the candidate-L1 *switch* and the jump are exercised again since Stage90's original run.
 
@@ -342,7 +349,9 @@ STAGE90_EXTRA_CFLAGS='-DSTAGE90_EXCLUSIVE_PROBE=1' ./build.sh
 ./preflight_boot_check.sh
 
 # 3. Prove the software dead-man separately (build without the hardware net so a
-#    success is attributable to the dead-man alone). STILL QUEUED - this is the next run.
+#    success is attributable to the dead-man alone). [DONE 2026-09-17, run 8 of
+#    experiment-94: the dead-man fired at its 60s budget, dumped the interrupted PC
+#    and rebooted; device returned unattended.]
 STAGE90_EXTRA_CFLAGS='-DSTAGE90_DEADMAN_SELFTEST=1 -DSTAGE90_HW_WATCHDOG=0' ./build.sh
 ./preflight_boot_check.sh --allow-selftest
 # 4. Only then, step the handoff mode up: PREFLIGHT_WATCHDOG_ONLY, then FULL.
