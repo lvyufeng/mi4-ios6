@@ -1030,6 +1030,37 @@ with the real content behind `#if MACH_IPC_DEBUG` on the next line. `libkern/ver
 the same category with a different generator (`libkern/libkern/Makefile:79-87`, from
 `version.h.template` + `config/MasterVersion`, both in the tarball). **That is the next stage.**
 
+**AND THE `OPTIONS/` HEADERS ARE GENERATED TOO, AND TEN SHIMS WENT AWAY** (2026-09-17,
+[`experiment-120`](../experiments/experiment-120-options-generated-headers.md)). 124 lines of
+`*/conf/files` read `OPTIONS/mach_ipc_debug optional mach_ipc_debug`, and
+`SETUP/config/mkheaders.c:114-135` turns each into `#define <MACRO> <0|1>` in a **flat** object-dir
+header plus an `#include` in `meta_features.h`. `tools/gen_option_headers.py` reproduces it:
+**91 headers, 11 on, 80 off** for `STAGE90_BOOT`. The naming is not what it looks like — the file
+takes its name from the first word after `optional`, not from the `OPTIONS/` name
+(`mkmakefile.c:366-372`), and `#include <mach_ipc_debug.h>` is flat, not `mach/…`
+(`main.c:206-216`).
+
+The diagnostic shape is worth keeping: **a header included with no `#if` around it, existing
+nowhere in the tree, whose content is guarded on the very next line.** `osfmk/ipc/ipc_hash.h:128`
+is exactly that, and it identified nine more.
+
+**Ten shims in `stages/stage90/shims_arm/` were deleted** — nine hard-coded a value the
+configuration already states (`MACH_ASSERT 0`, `ZONE_DEBUG 0`, `CONFIG_DTRACE 0`, …), one was empty.
+Both configurations' `failed.txt` lists were **byte-identical with and without them**, so they were
+dead the moment the generator existed, and the statement they carried ("absent from the tarball")
+had become false. `libkern/version.h` is the same idea with a different generator:
+`tools/gen_libkern_version.sh` runs Apple's own `config/newvers.pl` over `version.h.template`, 7
+substitutions from `config/MasterVersion`.
+
+**`STAGE90_BOOT` 315 → 328 of 405, `RELEASE` 356 → 368 of 573.** The arm layer build is unchanged
+at 32 of 32 / 118,970 bytes, with 445 undefined symbols against 443 before (the two not identified).
+Recorded because it did *not* move: force-including `meta_features.h` changes no count, and is kept
+anyway since a macro with the wrong value is silent while a missing header is loud.
+
+**What is left is now genuinely absent rather than generated.** `loop.h`, `pty.h`, `compat_43.h`,
+`sys/modctl.h` and `os/firehose_buffer_private.h` match no `OPTIONS/` line and are in no
+component's `EXPORT_MI_LIST`. 77 failures in the minimal configuration, 205 in `RELEASE`.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

@@ -32,6 +32,12 @@ XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
 SHIMS=$REPO_ROOT/stages/stage90/shims
 SHIMS_ARM=$REPO_ROOT/stages/stage90/shims_arm
 MIG_HEADERS=${MIG_HEADERS:-$REPO_ROOT/out/mach_headers}
+# The other two generated roots: MIG's output, and the headers the build generates from the
+# configuration - the `OPTIONS/` macros (tools/gen_option_headers.py) plus `libkern/version.h`
+# (tools/gen_libkern_version.sh). osfmk/arm reaches <mach_ldebug.h> through kern/thread.h:104, so
+# without the second root this build reports 0 of 32.
+GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
+OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}
 OUT=${XNU_ARM_OBJ_OUT:-$REPO_ROOT/out/xnu_arm_obj}
 
 SYNTAX_ONLY=0
@@ -116,7 +122,9 @@ DEFINES=(
 )
 
 INCLUDES=(
+    -I"$GENERATED" -I"$GENERATED/bsd"
     -I"$MIG_HEADERS"
+    -I"$OPTION_HEADERS"
     -I"$XNU/osfmk"
     -I"$XNU/iokit"
     -I"$XNU/bsd"
@@ -125,6 +133,10 @@ INCLUDES=(
     -I"$XNU/pexpert"
     -I"$XNU/osfmk/arm"
     -I"$XNU/bsd/arm"
+    # The tree root, which is what makes <security/_label.h> resolve - osfmk/kern/exception.h:39
+    # includes it, and the file is at $XNU/security/_label.h rather than under osfmk/. Same entry as
+    # in build_xnu_arm_kernel.sh, and the same reason (experiment-117).
+    -I"$XNU"
     -I"$SHIMS" -I"$SHIMS/kern" -I"$SHIMS/mach"
     -I"$SHIMS_ARM" -I"$SHIMS_ARM/kern" -I"$SHIMS_ARM/mach"
     -I"$SHIMS_ARM/sys" -I"$SHIMS_ARM/sys/_pthread"

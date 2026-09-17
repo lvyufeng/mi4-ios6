@@ -15,7 +15,16 @@
 # Prerequisites, both reproducible:
 #   ./tools/build_mig.sh                        -> out/mig/build/migcom
 #   ./tools/gen_mach_headers.sh                 -> out/mach_headers/ (the MIG output)
+#   ./tools/gen_option_headers.py               -> out/xnu_options/ (the OPTIONS/ macros)
+#   ./tools/gen_libkern_version.sh              -> out/xnu_generated/libkern/version.h
+#   ./tools/gen_bsd_headers.sh                  -> out/xnu_generated/bsd/sys/sysproto.h
 #   ./tools/xnu_config/list_sources.py RELEASE --write out/xnu_arm_manifest.txt
+#
+# The four generated roots are ordered: the two under out/xnu_generated and out/xnu_options come
+# before every source tree, because they ARE the build's output and a source tree must not shadow
+# them; out/mach_headers comes after all of them, because three of its headers have the same paths as
+# hand-written ones in the tree (mach/memory_object.h, mach/notify.h, mach/semaphore.h) and the tree
+# must win. Both orderings are measured - see experiments 119 and 120.
 #
 # What to expect: the ARM layer compiles and most of the kernel does not. The output that matters is
 # `--blockers`: a per-file error count is not actionable, but the list of distinct missing names is,
@@ -96,6 +105,7 @@ FORCE_INCLUDES=(
     -include mach/task_policy.h
     -include mach/thread_policy.h
     -include mi4ios6_build_config.h
+    -include meta_features.h
 )
 
 # The configuration's own options, expanded from MASTER via the doconf pipeline. These are the
@@ -130,6 +140,7 @@ DEFINES=(
 # bsd/kern/makesyscalls.sh, and it is included by 55 of the failing files. Produced by
 # tools/gen_bsd_headers.sh, and placed first so it wins over anything stale.
 GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
+OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}
 
 # The component order is Apple's, from makedefs/MakeInc.def:46-48:
 #
@@ -152,6 +163,7 @@ GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
 # this project that a broad include path has been the bug rather than the fix.
 INCLUDES=(
     -I"$GENERATED/bsd" -I"$GENERATED"
+    -I"$OPTION_HEADERS"
     -I"$XNU/osfmk"
     -I"$XNU/iokit"
     -I"$XNU/bsd"

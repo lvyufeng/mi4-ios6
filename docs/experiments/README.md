@@ -133,6 +133,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-117](experiment-117-shadows-and-broad-paths.md) | Two Shims Were Shadowing Real Headers, and a Broad Include Path Cost Four Files |
 | stage90 | [experiment-118](experiment-118-per-component-defines.md) | The Per-Component Defines, and the 127-File Defect They Were |
 | stage90 | [experiment-119](experiment-119-build-generated-headers.md) | The Headers the Build Generates, and the Three Ways This Project Was Not Generating Them |
+| stage90 | [experiment-120](experiment-120-options-generated-headers.md) | The Third Kind of Generated Header: `OPTIONS/`, and the Ten Shims It Replaced |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
