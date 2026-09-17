@@ -160,13 +160,11 @@ DEFINES=(
     # measurement. See experiment-121.
     -D__APPLE__=1
     -DCONFIG_SCHED_TIMESHARE_CORE=1 -DCONFIG_SCHED_TRADITIONAL=1
-    # _CLOCK_T: makes kern_types.h's `typedef struct clock *clock_t` the surviving definition.
-    # bsd/sys/types.h:162 includes _clock_t.h unconditionally - the `#ifdef KERNEL` in that file
-    # comes later - so without this the BSD userland `clock_t` (unsigned long) is typedef'd first
-    # and the kernel's Mach clock object collides with it. One define, and iokit goes from 1
-    # failing file to none. Same shape as the device-tree child count and the descriptor literals:
-    # one name, two definitions, and the build has to say which one wins.
-    -D_CLOCK_T=1
+    # `-D_CLOCK_T=1` used to be here, to force kern_types.h's `typedef struct clock *clock_t` to win
+    # over bsd/sys/_types/_clock_t.h's `__darwin_clock_t`. It is gone, and the reason is the same
+    # one experiment-118 was about: it was a workaround for MACH_KERNEL_PRIVATE being global. With
+    # the per-component defines, kern_types.h's definition is only reachable from osfmk and iokit
+    # files, bsd files get _clock_t.h's, and the two no longer meet. Removing it is 560 -> 564.
 )
 
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
@@ -177,6 +175,7 @@ GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
 # these macros, so one shared directory silently gives whichever build was generated last its own
 # values - which is what happened, and it surfaced as a duplicate-symbol error in the link.
 OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
+LIBSA_EXPORT=${XNU_LIBSA_EXPORT:-$REPO_ROOT/out/xnu_libsa_export}
 [[ -d $OPTION_HEADERS ]] || {
     echo "no option headers for $CONFIG at $OPTION_HEADERS - run:" >&2
     echo "  XNU_KERNEL_CONFIG=$CONFIG ./tools/gen_option_headers.py" >&2
@@ -213,6 +212,9 @@ INCLUDES=(
     -I"$XNU/libkern"
     -I"$XNU/pexpert"
     -I"$XNU"
+    # The filtered `osfmk/libsa` types headers, before `bsd/arm` so that `<types.h>` resolves to the
+    # kernel's own rather than to Darwin's machine types. See tools/gen_libsa_export.sh.
+    -I"$LIBSA_EXPORT"
     -I"$XNU/osfmk/arm" -I"$XNU/bsd/arm"
     -I"$XNU/EXTERNAL_HEADERS"
     -I"$SHIMS" -I"$SHIMS/kern" -I"$SHIMS/mach"

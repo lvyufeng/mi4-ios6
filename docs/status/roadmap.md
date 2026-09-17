@@ -1222,6 +1222,26 @@ rounding of what the `nm`-based `link_gap.sh` independently reports, which is a 
 are now nearly the same files**, which is itself a result: most of what separated them was this
 defect.
 
+**AND A WORKAROUND OUTLIVED THE DEFECT IT WORKED AROUND** (2026-09-17,
+[`experiment-126`](../experiments/experiment-126-clockt-and-libsa-types.md)). `-D_CLOCK_T=1` was
+introduced in experiment-115 with a correct diagnosis — `bsd/sys/_types/_clock_t.h` and
+`osfmk/kern/kern_types.h:193` both define `clock_t`, differently — and it was **a symptom of
+`MACH_KERNEL_PRIVATE` being global**, which experiment-118 removed. With per-component defines the
+two definitions no longer meet and the flag resolves nothing: removing it is **560 → 564**, four
+files newly passing. The comment that introduced it is preserved next to the removal, because the
+general lesson is that a workaround reads as a fact about the source once the defect is gone.
+
+**`<types.h>` means `osfmk/libsa/types.h`** — the kernel's own `u_char`, `caddr_t`, `daddr_t`.
+`osfmk/device/subrs.c:138` reaches it through `<libsa/stdlib.h:63>`. Exposing that directory is what
+experiment-117 measured as costing four files and it still does: its `string.h` carries the
+`__builtin___*_chk` macros and takes `iokit/Kernel/IOStringFuncs.c` from passing to failing. A
+*filtered* root of the three headers `<types.h>` needs, placed just before `-I$XNU/bsd/arm`, is
+**565 with no regressions** — Apple's `EXPORT_HDRS` principle, third time this project has reached
+for it.
+
+**`STAGE90_BOOT` 395 → 400 of 419, `RELEASE` 560 → 565 of 587, and the link 898 → 777 undefined
+symbols.** `u_char`, `caddr_t` and every `clock_t` are gone from the failure list.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

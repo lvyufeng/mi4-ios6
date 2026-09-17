@@ -139,6 +139,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-123](experiment-123-link-gap-and-force-includes.md) | The Link Gap, Measured: 1187 Symbols — and the Force-Include That Was Reaching Nine Files |
 | stage90 | [experiment-124](experiment-124-mig-output-set.md) | Generate What the Makefiles Say: 40 MIG Outputs, Not Everything — and the Include Order Flips Back |
 | stage90 | [experiment-125](experiment-125-first-link-and-option-scope.md) | The First Real Link, and the 47 Files That Were Compiled as the Wrong Configuration |
+| stage90 | [experiment-126](experiment-126-clockt-and-libsa-types.md) | `CLOCK_T` Was a Workaround for the Old Defect, and `<types.h>` Is the Kernel's |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
