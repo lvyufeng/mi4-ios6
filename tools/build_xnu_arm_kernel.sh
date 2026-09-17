@@ -126,6 +126,22 @@ DEFINES=(
     -DXNU_KERNEL_PRIVATE=1 -DKERNEL_PRIVATE=1
     -DMACH_BSD=1 -DPRIVATE=1 -DKPC=1 -DMONOTONIC=1 -DXPR_DEBUG=0 -DLOCK_PRIVATE=1
     -DARMA7=1 -DKERNEL=1 -D__arm__=1 -DCONFIG_EMBEDDED=1 -D__ARM_L2CACHE_SIZE_LOG__=21
+    # __APPLE__ is what Apple's compiler defines and this project's does not. The scripts here use
+    # `--target=armv7-none-eabi`; Apple's build uses a Darwin target triple, and `__APPLE__` is part
+    # of that triple rather than of the source. Supplying the macro is worth 17 files in the minimal
+    # configuration and 99 in RELEASE, with no regressions in either:
+    #
+    #     osfmk/prng/YarrowCoreLib/include/yarrow.h:91   #if defined(macintosh) || defined(__APPLE__)
+    #
+    # is the clearest case - on that branch YARROWAPI is empty and `WindowsTypesForMac.h` is
+    # included, which is where BYTE, UINT, LONGLONG and LPVOID come from. Off it, the vendored
+    # Windows library takes its `__declspec(dllimport)` path and seven files die on it.
+    #
+    # Measured: `-D__MACH__=1` alongside it changes nothing (345 either way), and swapping the whole
+    # target triple for `armv7-apple-darwin` is worth exactly one more file (346) while changing the
+    # object format from ELF to Mach-O - which is a decision for the link step, not for this
+    # measurement. See experiment-121.
+    -D__APPLE__=1
     -DCONFIG_SCHED_TIMESHARE_CORE=1 -DCONFIG_SCHED_TRADITIONAL=1
     # _CLOCK_T: makes kern_types.h's `typedef struct clock *clock_t` the surviving definition.
     # bsd/sys/types.h:162 includes _clock_t.h unconditionally - the `#ifdef KERNEL` in that file

@@ -93,6 +93,13 @@ FORCE_INCLUDES=(
 # ---------------------------------------------------------------------------------------------
 DEFINES=(
     -DARMA7=1
+    # __APPLE__ is what Apple's compiler defines and `--target=armv7-none-eabi` does not; it is worth
+    # 17 files in the minimal kernel configuration and 99 in RELEASE. See build_xnu_arm_kernel.sh.
+    # Measured here: **nothing** - 32 of 32, 118,970 bytes and 445 undefined symbols either way,
+    # because nothing in osfmk/arm takes an `#ifdef __APPLE__` branch. It is kept so that the two
+    # build scripts describe one configuration rather than two; a divergence between them is the
+    # "one value, two definitions" shape this project keeps meeting, and this one is free to prevent.
+    -D__APPLE__=1
     -DKERNEL=1
     -DKERNEL_PRIVATE=1
     # MACH_KERNEL, not just MACH_KERNEL_PRIVATE. Getting this wrong is silent: kern/xpr.h:83 takes

@@ -136,7 +136,13 @@ for rel in "${DEFS_FILES[@]}"; do
     # so it has no `subsystem` line of its own - but `osfmk/ipc/ipc_notify.c:68` includes
     # `<mach/mach_notify.h>`, and Apple's `osfmk/mach/Makefile` lists it among the MIG outputs. It is
     # a rename of notify.defs, and testing the file rather than its expansion skipped it.
-    cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 \
+    #
+    # `-DKERNEL_SERVER` matters even for this test: `osfmk/mach/mach_types.defs:606-615` puts eight
+    # `simport` lines behind `#if KERNEL_SERVER` / `#ifdef MACH_KERNEL_PRIVATE`, and they are what
+    # makes the generated server headers `#include <kern/ipc_kobject.h>` - which is where IKOT_* and
+    # ipc_kobject_type_t come from for vm_user.c, memory_object.c, vm_map.c, mach_port.c and
+    # mk_timer.c. Without it those files fail on 34 occurrences of names that are in the tree.
+    cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 -DKERNEL_SERVER=1 \
        -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" \
        "$defs" >"$OUT/$base.pp" 2>"$OUT/$base.cpp.log"
     if ! grep -qE '^[[:space:]]*subsystem' "$OUT/$base.pp"; then
@@ -161,47 +167,81 @@ for rel in "${DEFS_FILES[@]}"; do
         *)                server_suffix="_server" ;;
     esac
 
-    # Three outputs per .defs, because the kernel's own sources include all three:
-    #   X.h          the message/subroutine declarations
-    #   X_server.h   the server-side prototypes - what osfmk/kern/*.c includes as
-    #                <mach/mach_host_server.h> and friends, and which nothing else provides
-    #   X_client.c   not built here; the user-side is not part of a kernel
+    # TWO runs per `.defs`, because Apple's Makefile has two rules and they do not use the same
+    # defines. `osfmk/mach/Makefile:361-382`:
+    #
+    #   %_user.c   : %.defs   $(MIG) $(MIGFLAGS) $(MIGKUFLAGS) -user $*_user.c -header $*.h ...
+    #   %_server.c : %.defs   $(MIG) $(MIGFLAGS) $(MIGKSFLAGS) -server $*_server.c -sheader $*_server.h ...
+    #
+    # with `MIGKUFLAGS = -DMACH_KERNEL_PRIVATE -DKERNEL_USER=1 -maxonstack 1024` and
+    # `MIGKSFLAGS = -DMACH_KERNEL_PRIVATE -DKERNEL_SERVER=1` (osfmk/mach/Makefile:247-248). One run
+    # asking for both outputs is not the same thing: the `.defs` language is full of
+    # `#if KERNEL_SERVER` / `#if KERNEL_USER` blocks, so the server header was being generated with
+    # KERNEL_SERVER undefined and the user header with KERNEL_USER undefined.
+    #
+    # That is where `IKOT_*` and `ipc_kobject_type_t` went. `osfmk/mach/mach_types.defs:606-615` puts
+    # eight `simport` lines behind `#if KERNEL_SERVER` + `#ifdef MACH_KERNEL_PRIVATE`:
+    #
+    #     simport <kern/ipc_kobject.h>;	/* for null conversion */
+    #     simport <kern/ipc_tt.h>;	/* for task/thread conversion */
+    #     ...
+    #
+    # and a `simport` becomes an `#include` in the generated server header. Preprocessed away, it
+    # never reached MIG, and vm_user.c, memory_object.c, vm_map.c, mach_port.c and mk_timer.c failed
+    # on 34 occurrences of names that have been in the tree all along.
     #
     # The preprocessed text is reused rather than the source, which is what makes mach_notify work
-    # and costs one temp file. -E keeps the line directives, so a MIG diagnostic points at the .defs
-    # line rather than at the flattened text.
+    # and costs two temp files. -E keeps the line directives, so a MIG diagnostic points at the
+    # .defs line rather than at the flattened text.
     #
-    # The kernel defines are load-bearing, and leaving them out was why two of the first 25 `.defs`
-    # failed. `mach_types.defs` guards the whole Universal Page List block - `upl_size_t`,
-    # `upl_offset_t`, `upl_page_info_t`, `upl_t` - behind `#if KERNEL_PRIVATE`, so a `.defs` that
-    # uses those types (memory_object_control, upl) got `type 'upl_size_t' not defined` and produced
-    # nothing. Apple's MIG is fed `MIGFLAGS = $(DEFINES) ... -novouchers` (MakeInc.def:470) and
-    # `MIGKSFLAGS/MIGKUFLAGS = -DMACH_KERNEL_PRIVATE -DKERNEL_SERVER=1|-DKERNEL_USER=1` in each
-    # component Makefile; this is the kernel half of that, since the header is the same either way.
+    # `-novouchers` is in `MIGFLAGS` (MakeInc.def:470) and is NOT passed here: it suppresses the
+    # voucher conversion routines, and the kernel's own sources reference them. Left out on purpose,
+    # and recorded rather than silently matched.
+    server_suffix_for_run="$server_suffix"
+    server_ok=0
+    user_ok=0
+
+    # --- the server side: -DKERNEL_SERVER=1 ------------------------------------------------
+    cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 -DKERNEL_SERVER=1 \
+       -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" "$defs" >"$OUT/$base.srv.pp" 2>>"$OUT/$base.cpp.log"
+    if "$MIG" -header /dev/null \
+              -user /dev/null \
+              -server "$OUT/$outdir/${base}${server_suffix_for_run}.c" \
+              -sheader "$OUT/$outdir/${base}${server_suffix_for_run}.h" \
+              <"$OUT/$base.srv.pp" >"$OUT/$base.mig.log" 2>&1; then
+        server_ok=1
+    fi
+
+    # --- the user side: -DKERNEL_USER=1 ----------------------------------------------------
+    cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 -DKERNEL_USER=1 \
+       -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" "$defs" >"$OUT/$base.usr.pp" 2>>"$OUT/$base.cpp.log"
     if "$MIG" -header "$OUT/$outdir/$base.h" \
-              -sheader "$OUT/$outdir/${base}${server_suffix}.h" \
-              -server "$OUT/$outdir/${base}${server_suffix}.c" \
-              -user /dev/null <"$OUT/$base.pp" >"$OUT/$base.mig.log" 2>&1; then
+              -user "$OUT/$outdir/${base}_user.c" \
+              -server /dev/null \
+              -sheader /dev/null \
+              <"$OUT/$base.usr.pp" >>"$OUT/$base.mig.log" 2>&1; then
+        user_ok=1
+    fi
+
+    rm -f "$OUT/$base.srv.pp" "$OUT/$base.usr.pp"
+
+    if [[ $server_ok -eq 1 && $user_ok -eq 1 && -s $OUT/$outdir/$base.h ]]; then
         # A MIG that exits 0 without writing a header would look like success; check the file.
-        if [[ -s $OUT/$outdir/$base.h ]]; then
-            printf '  %-40s %s bytes\n' "$tag" "$(stat -c%s "$OUT/$outdir/$base.h")"
-            ok=$((ok + 1))
-        else
-            printf '  %-40s MIG wrote nothing\n' "$tag"
-            fail=$((fail + 1))
-        fi
+        printf '  %-40s %s bytes (server %s)\n' "$tag" "$(stat -c%s "$OUT/$outdir/$base.h")" \
+               "$(stat -c%s "$OUT/$outdir/${base}${server_suffix_for_run}.h" 2>/dev/null || echo 0)"
+        ok=$((ok + 1))
     elif grep -q "no SubSystem declaration" "$OUT/$base.mig.log"; then
         # Not reachable through the source check above; kept because a MIG that fails on a `.defs`
         # this script believed to be an interface must say so rather than be counted as one.
         printf '  %-40s no subsystem in the preprocessed text\n' "$tag"
         typesonly=$((typesonly + 1))
-        rm -f "$OUT/$outdir/$base.h" "$OUT/$outdir/${base}${server_suffix}.h" \
-              "$OUT/$outdir/${base}${server_suffix}.c"
+        rm -f "$OUT/$outdir/$base.h" "$OUT/$outdir/${base}${server_suffix_for_run}.h" \
+              "$OUT/$outdir/${base}${server_suffix_for_run}.c" "$OUT/$outdir/${base}_user.c"
     else
-        printf '  %-40s FAILED: %s\n' "$tag" "$(head -c 120 "$OUT/$base.mig.log" | tr '\n' ' ')"
+        printf '  %-40s FAILED: server=%s user=%s %s\n' "$tag" "$server_ok" "$user_ok" \
+               "$(grep -m1 -E 'error|fatal' "$OUT/$base.mig.log" | cut -c1-90)"
         fail=$((fail + 1))
     fi
-    rm -f "$OUT/$base.pp"
 done
 
 echo

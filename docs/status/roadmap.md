@@ -1061,6 +1061,42 @@ anyway since a macro with the wrong value is silent while a missing header is lo
 `sys/modctl.h` and `os/firehose_buffer_private.h` match no `OPTIONS/` line and are in no
 component's `EXPORT_MI_LIST`. 77 failures in the minimal configuration, 205 in `RELEASE`.
 
+**AND TWO FLAGS THE PROJECT HAD BEEN SUPPLYING DIFFERENTLY FROM APPLE** (2026-09-17,
+[`experiment-121`](../experiments/experiment-121-apple-defines-and-two-pass-mig.md)). `RELEASE` is
+**85 % compiled** — 496 of 585 — and `STAGE90_BOOT` 375 of 417.
+
+**`__APPLE__` comes from the compiler, not the source.** These scripts compile with
+`clang --target=armv7-none-eabi`; Apple's build uses a Darwin triple, and `__APPLE__` arrives with
+it. Undefined, it sends `osfmk/prng/YarrowCoreLib/` — a vendored library with Windows types — down
+its `__declspec(dllimport)` branch (`yarrow.h:91`), and off the branch at `:53` that includes
+`WindowsTypesForMac.h`, where `BYTE`, `UINT`, `LONGLONG` and `LPVOID` come from. **+17 files in the
+minimal configuration, +99 in `RELEASE`, no regressions.** Measured and not adopted:
+`-D__MACH__=1` adds nothing (345 either way), and the full `armv7-apple-darwin` triple is worth one
+more file while changing ELF→Mach-O, which is a link-step decision.
+
+**MIG is run twice per `.defs`, and this project ran it once.** `osfmk/mach/Makefile:361-382` has
+two rules — `%_user.c` with `MIGKUFLAGS = -DKERNEL_USER=1` and `%_server.c` with
+`MIGKSFLAGS = -DKERNEL_SERVER=1` (`:247-248`). Asking for `-header` and `-sheader` in one
+invocation generates each side with the other's `#if` blocks already preprocessed away. The loss is
+concrete: `mach_types.defs:606-615` puts eight `simport` lines behind `#if KERNEL_SERVER`, and a
+`simport` becomes an `#include` in the generated server header — so `ikot`/`kern/ipc_*` never
+arrived, and five files failed on **34 occurrences** of `IKOT_NAMED_ENTRY`, `IKOT_TIMER` and
+`ipc_kobject_type_t`, all of which have been in `osfmk/kern/ipc_kobject.h` all along. Two runs also
+produce `*_user.c`, which the manifest lists and which were not being generated at all.
+
+**Three regressions, mechanism identified, recorded as open.** `bsd/{security/audit/audit_syscalls,
+uxkern/ux_exception}.c` (both configurations) and `bsd/kern/uipc_mbuf.c` (`RELEASE`) now reach
+`ipc/ipc_kmsg.h` through the new `simport` includes, and `ipc_kmsg.h` uses `sync_qos_count_t` and
+`ipc_kmsg_t` unconditionally while `ipc_types.h:46` defines them only under `MACH_KERNEL_PRIVATE` —
+which a BSD translation unit does not define. Adding it for `bsd` reaches `sched_prim.h:574`'s
+`#error`, the boundary that established the per-component rule. Whether Apple's own build avoids the
+path by a different include order is not established.
+
+**What is left:** 42 failures minimal, 89 `RELEASE`. The largest remaining cluster is MIG's
+`consume_ref` types — `mem_entry_name_port_move_send_t` (12), `semaphore_consume_ref_t` (9),
+`thread_act_consume_ref_t` (7) — declared as `type X = mach_port_move_send_t` and emitted into the
+server headers without a definition. Next stage.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
