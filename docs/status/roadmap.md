@@ -783,17 +783,27 @@ actually require:
 - The platform whitelist itself (`SUPPORTED_EMBEDDED_PLATFORMS`) is in `MakeInc.cmd:121`,
   so that half *is* public and editable.
 
-**And the entry path specifically is four errors from compiling (2026-09-17,
+**And the entry path specifically, measured (2026-09-17,
 [`experiment-107`](../experiments/experiment-107-xnu-arm-entry-path-measured.md)).**
 `stages/stage90/xnu_arm_entrypath_sweep.sh` measures the files the entry path needs rather than all
-32 in `osfmk/arm`, and the scoping changes the answer: `arm_vm_init.c` is **one include** away,
-`arm_init.c` — the function `_start` branches to, and therefore the exact thing Stage90 stubs —
-is **four errors** away, and `machine_routines.c` twelve. Three of the four are include ordering,
-which is mechanical; the third is a redirect to `<mach_debug.h>`, which is real — and behind it is
-`<mach/mach_host.h>`, **which does not exist anywhere in the tarball** because MIG generates it
-from `osfmk/mach/mach_host.defs` during the build. So one concrete component of Phase 4's wall is
-now named: **MIG-generated headers**, derivable in principle (the `.defs` are public and MIG is open
-source) but a build step this host does not have.
+32 in `osfmk/arm`: `arm_init.c` — the function `_start` branches to, and therefore the exact thing
+Stage90 stubs — has **seven distinct missing names**, `arm_vm_init.c` the same seven, and
+`machine_routines.c` thirty.
+
+*(A first version of this measurement said "4 errors" and "1 include". Both were wrong: clang's
+default `-ferror-limit` is 20 and a missing header is a *fatal* error that ends the translation
+unit, so the count was truncated and the fatal's own line counted as one of them. The script now
+passes `-ferror-limit=0` and labels any count containing a fatal as a floor.)*
+
+**Three of the seven are the MIG wall, and shimming does not get past it.** `osfmk/vm/vm_object.h`
+wants `<mach_pagemap.h>`, `<mach_debug.h>` wants `<mach/mach_host.h>` and `<mach/mach_port.h>` —
+and **40 `.defs` files ship under `osfmk/mach/` while their generated headers do not**. MIG is not
+in the tarball (`osfmk/mach/{mig.h,mig_errors.h,mig_log.h}` are runtime support, not the generator)
+and not in this host's package repository. Three shim variants were measured to establish that:
+the redirect form truncates at the fatal, the empty form loses the real `mach_debug_types.h`
+chain, and the types-only form is what ships. Each shim clears one name and reveals the next
+header, so the seven is a floor as well — the closure grows as you satisfy it, exactly as
+`experiment-103` measured for `cpu_data_internal.h`.
 
 Also located precisely: with the force-included headers in place, the first thing the compiler says
 is not a type error but `osfmk/kern/sched_prim.h:574: #error Enable at least one scheduler

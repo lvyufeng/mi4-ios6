@@ -76,15 +76,25 @@ DEFINES=(
   -DCONFIG_SCHED_MULTIQ=1
 )
 
-TARGET=(clang --target=armv7-none-eabi -mcpu=cortex-a15 -marm -fsyntax-only)
+# -ferror-limit=0 because the default limit is 20 and a *fatal* error (a missing header) stops the
+# translation unit outright. Both truncate, and a truncated count is worse than a wrong one: the
+# first version of this script reported arm_init.c as "4 errors" when a fatal missing include had
+# ended the file early, and the real distance was 20. Every number below is a complete count.
+TARGET=(clang --target=armv7-none-eabi -mcpu=cortex-a15 -marm -fsyntax-only -ferror-limit=0)
 
 measure_one() {
   local rel=$1
   local out
   out=$("${TARGET[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${INCLUDES[@]}" "$XNU/$rel" 2>&1)
-  local n
+  local n fatal
   n=$(printf '%s\n' "$out" | grep -cE "error:")
-  printf '  %-28s %s\n' "$(basename "$rel")" "$n error(s)"
+  fatal=$(printf '%s\n' "$out" | grep -cE "fatal error:")
+  if [[ $fatal -gt 0 ]]; then
+    # Say so loudly: a fatal error ends the translation unit, so the count is a floor, not a total.
+    printf '  %-28s %s error(s)  <-- includes %s FATAL (count is a floor)\n' "$(basename "$rel")" "$n" "$fatal"
+  else
+    printf '  %-28s %s error(s)\n' "$(basename "$rel")" "$n"
+  fi
   printf '%s\n' "$out" | grep -E "error:" | sed 's|.*/external/xnu-4570.1.46/||' | sed 's/^/      /' | head -6
 }
 
