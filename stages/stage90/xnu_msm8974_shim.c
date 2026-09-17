@@ -312,8 +312,21 @@ int stage90_xnu_msm8974_shim_run(void)
 		(void)shim_register(&g_boot_cpu_data, MSM8974_GICC_EOIR, MSM8974_TIMER_CNTP_INTID, r);
 	}
 
-	/* --- the EOI pairing: int_value is the IAR, int_address is where it is written --- */
+	/*
+	 * --- the EOI pairing: int_value is the IAR, int_address is where it is written ---
+	 *
+	 * Read through the shim's own accessors rather than from the file-scope statics, because the
+	 * accessors are what a caller uses and the point of this check is what a caller can see.
+	 *
+	 * The first hardware run of this module (2026-09-17) reported int_address=0 and int_value=0
+	 * here and failed the EOI check, for the simplest possible reason: nothing ever assigned
+	 * those two result fields. The mechanism itself was fine - registration_verified=1 is set
+	 * only after the stored address and value are read back and compared. A field that is
+	 * logged, checked, and never written reads exactly like a mechanism that does not work.
+	 */
 	checks++;
+	r->int_address = stage90_xnu_msm8974_shim_int_address();
+	r->int_value = stage90_xnu_msm8974_shim_int_value();
 	if (r->int_address != MSM8974_GICC_EOIR || r->int_value != MSM8974_TIMER_CNTP_INTID) {
 		failures |= STAGE90_XNU_MSM8974_SHIM_FAIL_EOI_PAIRING;
 	}

@@ -32,6 +32,7 @@ recovered through `/proc/last_kmsg`, under the safety rules in the root `README.
 | Cacheable Normal DRAM with both caches on | ✅ | `experiment-97` (I-cache), `experiment-98` (I+D) |
 | Conforming `boot_args` checked on the device | ✅ | `experiment-99` (`xnu_ba_checks=10`, `failures=0`) |
 | Public-XNU code executing on the device | ✅ | `experiment-100`: `pexpert/gen/device_tree.c`, `failures=0` |
+| MSM8974 replacement for `pe_arm_init_interrupts`, verified on hardware | ✅ | `experiment-101` (`checks=8`, `failures=0`); **no caller yet** |
 
 This is a real and unusually complete bring-up layer for a platform with no vendor
 documentation. Nothing in this re-plan asks for it to be thrown away.
@@ -868,6 +869,23 @@ would need the whole `bsd/` and `libkern/` dependency closure, which nobody has 
 Phase 4's cost is not "8 headers" — it is "8 headers for the first layer, times an unknown
 number of layers." But the first layer is now measured rather than guessed, and the method
 (compile, read the next missing header, add, repeat) is mechanical.
+
+### Phase 3 — the shim runs on hardware
+
+**`STAGE90_XNU_MSM8974_SHIM=1` now passes on the device (2026-09-17,
+[`experiment-101`](../experiments/experiment-101-phase3-shim-first-hardware-run.md)):**
+`checks=8`, `failures=0`. It registers its `tbd_ops` through a mirror of `ml_init_timebase`'s
+guard and verifies the installation by reading the ops back, checks the EOI pair
+(`GICC_EOIR` at `0xf9002010`, interrupt `0x13` — the CNTP PPI), confirms `CNTFRQ` reads 19200000,
+roundtrips the decrementer through the registered callback, and leaves the timer disarmed so the
+payload's own timer code keeps owning arming.
+
+The first run failed all eight on a single missing assignment: `r->int_address`/`r->int_value`
+were declared, logged and checked but never written, while the mechanism underneath was correct
+all along. Sixth instance of this project's recurring two-places-one-write defect.
+
+**Not yet wired to anything** — nothing calls it, because no XNU platform bring-up runs here yet.
+Substituting it for `pe_arm_init_interrupts` is the step that needs a caller.
 
 ### Phase 3 — specification written
 
