@@ -92,6 +92,33 @@ that header is the next named blocker.
 
 That is a materially better position than "the build configuration is absent".
 
+## Chasing the one named blocker: `cpu_data_internal.h` does not converge
+
+The section above says the whole entry path reduces to "can `osfmk/arm/cpu_data_internal.h` be made
+to compile?" It was chased, and the answer is not a number of headers.
+
+Starting from 21 errors, each round resolved to the *next* header rather than to a constant:
+
+| Round | Errors | What the round needed |
+| --- | --- | --- |
+| 0 | 21 | `natural_t` — displaced by `-DASSEMBLER=1`, which makes `mach/arm/vm_types.h` skip its C types. Use `ASSEMBLER` for `.s` only. |
+| 1 | 12 | `-I iokit`, then `decl_simple_lock_data`: defined in `osfmk/arm/simple_lock.h` and **included by nothing in the tree**. |
+| 2 | 6 | `-include kern/queue.h kern/ast.h mach/vm_statistics.h` |
+| 3 | 2 | `MACH_KERNEL_PRIVATE` (which is what gates `mpqueue_head_t`), then `string.h`, which a bare-metal ARM target does not have. |
+| 4 | 4 | `TargetConditionals.h`, `mach_ldebug.h`, `zone_debug.h` |
+| 5 | 13 | `kern/timer_call.h`, `kern/thread_call.h`, `kern/zalloc.h` — which want `call_entry`, `btlog_t`, and more. **It went up.** |
+
+That last row is the result: **the closure grows as you satisfy it.** Each `-include` is a header
+that itself needs three more, and unlike the `assym` constants there is no reason to expect a fixed
+point reachable by a handful of stubs. Which is not to say it is impossible — the real XNU build
+does exactly this with `genassym` — but it is "reconstruct the include closure", not "write six
+stubs", and the difference matters for planning.
+
+Recorded so the next attempt starts from the measurement rather than from the adjective. The shims
+written along the way (`string.h`, `TargetConditionals.h`, `mach_ldebug.h`, `zone_debug.h`) are in
+`shims_arm/` and are correct as far as they go — each follows the released-kernel configuration,
+which exercises *less* code rather than more.
+
 ## The correction to Phase 2
 
 `start.s` **builds its own bootstrap page tables**, at `topOfKernelData`: it invalidates the TTEs
