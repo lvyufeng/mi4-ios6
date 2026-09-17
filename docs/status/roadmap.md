@@ -795,7 +795,20 @@ default `-ferror-limit` is 20 and a missing header is a *fatal* error that ends 
 unit, so the count was truncated and the fatal's own line counted as one of them. The script now
 passes `-ferror-limit=0` and labels any count containing a fatal as a floor.)*
 
-**Three of the seven are the MIG wall, and shimming does not get past it.** `osfmk/vm/vm_object.h`
+**THE MIG WALL IS DOWN (2026-09-17, [`experiment-108`](../experiments/experiment-108-mig-builds-and-generates-headers.md)).**
+Apple's MIG is published in `apple-oss-distributions/bootstrap_cmds/migcom.tproj` — the real
+generator, `parser.y` + `lexxer.l` + ~550 KB of C — and `tools/build_mig.sh` now builds it on this
+host. `tools/gen_mach_headers.sh` then runs it over 4570's own `.defs`: **23 generated, 2 failed, 0
+absent**, including `<mach/mach_host.h>` and `<mach/mach_port.h>`, which were the two blocking the
+entry path. The earlier note that "MIG is not in the tarball and not in this host's package
+repository" was true and led to the wrong conclusion.
+
+With that done the entry-path error count stopped being truncated — `-ferror-limit=0` and no missing
+headers — so `arm_init.c`'s distance is now a **complete 35 errors**, higher than the earlier 20
+precisely because that 20 was cut short by a fatal include. What is left of the wall is *choosing
+values* (`CONFIG_*`, `MASTER.XXX`) and include ordering, not obtaining tools.
+
+**The rest of this section is the analysis that led there, kept because its method is the point.** `osfmk/vm/vm_object.h`
 wants `<mach_pagemap.h>`, `<mach_debug.h>` wants `<mach/mach_host.h>` and `<mach/mach_port.h>` —
 and **40 `.defs` files ship under `osfmk/mach/` while their generated headers do not**. MIG is not
 in the tarball (`osfmk/mach/{mig.h,mig_errors.h,mig_log.h}` are runtime support, not the generator)

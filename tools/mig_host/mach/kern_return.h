@@ -1,0 +1,44 @@
+#ifndef _MACH_KERN_RETURN_H_
+#define _MACH_KERN_RETURN_H_
+#include <mach/boolean.h>
+typedef int kern_return_t;
+#define KERN_SUCCESS            0
+#define KERN_INVALID_ADDRESS    1
+#define KERN_PROTECTION_FAILURE 2
+#define KERN_NO_SPACE           3
+#define KERN_INVALID_ARGUMENT   4
+#define KERN_FAILURE            5
+#define KERN_RESOURCE_SHORTAGE  6
+#define KERN_NOT_RECEIVER       7
+#define KERN_NO_ACCESS          8
+#define KERN_MEMORY_FAILURE     9
+#define KERN_MEMORY_ERROR       10
+#define KERN_NOT_IN_SET         12
+#define KERN_NAME_EXISTS        13
+#define KERN_ABORTED            14
+#define KERN_INVALID_NAME       15
+#define KERN_RIGHT_EXISTS       17
+#define KERN_INVALID_RIGHT      18
+#define KERN_INVALID_VALUE      19
+#define KERN_UREFS_OVERFLOW     20
+#define KERN_INVALID_CAPABILITY 21
+#define KERN_RCV_OVERFLOW       23
+#define KERN_NOT_DEPRESSED      24
+#define KERN_TERMINATED         25
+#define KERN_NOT_SUPPORTED      46
+#define KERN_INVALID_POLICY     47
+#define KERN_INVALID_OBJECT     48
+#define KERN_ALREADY_WAITING    49
+#define KERN_DEFAULT_SET       50
+#define KERN_EXCEPTION_PROTECTED 51
+#define KERN_INVALID_LEDGER    52
+#define KERN_INVALID_MEMORY_CONTROL 53
+#define KERN_INVALID_SECURITY  54
+#define KERN_NOT_DEPRESSED_2   55
+#define KERN_RPC_SERVER_TERMINATED 57
+#define KERN_RPC_TERMINATE_ORPHAN 58
+#define KERN_RPC_CONTINUE_ORPHAN 59
+#define KERN_NOT_SUPPORTED_2   60
+#define KERN_NODE_DOWN         61
+#define KERN_RETURN_MAX        0x100
+#endif
