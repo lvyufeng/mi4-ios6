@@ -142,6 +142,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-126](experiment-126-clockt-and-libsa-types.md) | `CLOCK_T` Was a Workaround for the Old Defect, and `<types.h>` Is the Kernel's |
 | stage90 | [experiment-127](experiment-127-device-headers-and-a-source-incompatibility.md) | The Loopback Header, and the First Failure That Is Not a Configuration Gap |
 | stage90 | [experiment-128](experiment-128-manifest-missing-component.md) | The Manifest Was Missing a Whole Component, and It Cost 200 Symbols |
+| stage90 | [experiment-129](experiment-129-caddr-t.md) | `caddr_t`, the Biggest Boot-Path File, and the Three Items Left Behind It |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

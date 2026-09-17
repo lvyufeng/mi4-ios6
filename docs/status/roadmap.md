@@ -1289,6 +1289,24 @@ and including them adds 5 failing files and contributes **0** of the link's unde
 symbols** (660 → 460 on the boot path). The boot closure is unchanged at 12 files / 60 symbols,
 because those files were already attributing theirs.
 
+**AND THE BIGGEST BOOT-PATH FILE WAS ONE MISSING TYPEDEF** (2026-09-17,
+[`experiment-129`](../experiments/experiment-129-caddr-t.md)). `osfmk/vm/vm_compressor.c` was 17 of
+the boot path's 60 symbols, on `unknown type name 'caddr_t'`. `caddr_t` is defined once in the tree
+(`bsd/sys/_types/_caddr_t.h:30`) and that file reaches no header including it — verified by
+preprocessing, where `osfmk/device/subrs.c`'s closure contains the typedef and `vm_compressor.c`'s
+does not (it reaches `osfmk/libsa/types.h`, through `<libsa/stdlib.h>`; `vm_compressor.c` reaches
+nothing). The narrow header is force-included, the same treatment `u_int` has had since the ARM
+layer first compiled. **`RELEASE` 591 → 592, no regressions; the link 499 → 454; the boot closure
+60 → 42 symbols over 11 files.** How *Apple's* build reached it is left open — the plausible answer
+is the BSD `<sys/types.h>` chain, but forcing that in would reintroduce the `clock_t` collision
+experiment-118 fixed, so it is not the mechanism to copy.
+
+**What is left on the boot path is 11 files and 42 symbols, and both of the largest are identified:**
+`libkern/gen/OSAtomicOperations.c` (15) defines `enum { false = 0, true = 1 }` and something in its
+closure now defines them first, and `bsd/dev/arm/conf.c` (7) needs `pty.h` — a header Apple's
+config(8) generates for a `pseudo-device pty` the tarball does not publish, the same shape as
+`loop.h`, which `tools/gen_device_headers.sh` already handles.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

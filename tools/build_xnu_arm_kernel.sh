@@ -108,6 +108,12 @@ FORCE_INCLUDES=(
     -include mach/task_policy.h
     -include mach/thread_policy.h
     -include mi4ios6_build_config.h
+    # `caddr_t`, for the same reason `u_int` is above: osfmk/vm/vm_compressor.c uses it and reaches
+    # no header that defines it. Apple's build does reach one - the BSD `<sys/types.h>` chain - and
+    # which one differs between the two builds enough that chasing it is guesswork; what is measured
+    # is that the narrow header (it defines `caddr_t` and nothing else) takes RELEASE from 591 to 592
+    # with no regressions, and vm_compressor.c is the largest single item on the boot path.
+    -include sys/_types/_caddr_t.h
     -include meta_features.h
 )
 # `-include stdatomic.h` used to be in that list, to get `enum memory_order` for the osfmk/arm
