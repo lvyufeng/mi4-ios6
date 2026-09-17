@@ -165,6 +165,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-149](experiment-149-macho-path-measured.md) | The Mach-O Path, Built and Measured, So the Decision Has a Price Tag |
 | stage90 | [experiment-150](experiment-150-lld-cannot-link-armv7-and-the-dialect-translation.md) | `ld64.lld` Cannot Link 32-bit ARM Mach-O; the Dialect Translation Closes All 17 |
 | stage90 | [experiment-151](experiment-151-force-includes-and-stdbool.md) | The Force-Includes Were Breaking a File, and the Fix Is Per-File |
+| stage90 | [experiment-152](experiment-152-the-cpp-block-and-one-dead-line.md) | The Whole C++ Block Is Behind One Dead Line, and No Flag Can Fix It |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

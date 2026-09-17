@@ -40,7 +40,16 @@ typedef __SIZE_TYPE__ size_t;
  * the include without this took the build from 381 of 419 to 0, on `return NULL` in
  * osfmk/kern/kcdata.h. Both are the compiler's own definitions, so this adds nothing new. */
 #ifndef NULL
+#ifdef __cplusplus
+/* `((void *)0)` is not a null pointer constant in C++ - `void *` does not implicitly convert to
+ * another pointer type - so the C spelling makes every `return NULL` in a `.cpp` an error. `0` is
+ * what C++ wants and what the compiler's own `<stddef.h>` uses there. Found by attempting the
+ * kernel's C++ files, which are the last unbuilt block: `osfmk/kern/kcdata.h:1119` is
+ * `return NULL;` in a `char *` function. */
+#define NULL 0
+#else
 #define NULL ((void *)0)
+#endif
 #endif
 
 void *memcpy(void *dst, const void *src, size_t n);

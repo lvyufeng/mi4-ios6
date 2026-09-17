@@ -1829,6 +1829,36 @@ value with no evidence in the tarball, one a configuration decision, one a file 
 and BSD. The boot path's 51 stubs are the same: 10 C++ (a runtime not built here), 4 `__aeabi_*` from
 libgcc, the rest behind those seven files.
 
+**AND THE C++ BLOCK IS CHARACTERIZED — ALL 83 FILES BEHIND ONE DEAD LINE** (2026-09-17,
+[`experiment-152`](../experiments/experiment-152-the-cpp-block-and-one-dead-line.md)). The 83 manifest
+`.cpp` files were the last unmeasured piece, accounting for 10 of the boot path's 51 stubs.
+**None of them can report anything but one error**, because a fatal error in a header ends the
+translation unit:
+
+```
+83  osfmk/kern/misc_protos.h:254:8: error: definition of type 'kmod_info_t' conflicts with
+    typedef of the same name
+```
+
+`misc_protos.h:253-254` is `/* symbol lookup */` and `struct kmod_info_t;`, and `osfmk/mach/kmod.h:100`
+ends `} kmod_info_t;`. **`struct X;` after a `typedef` of that name is valid C and invalid C++** —
+reduced to four lines — and **the declaration is used nowhere**: that header mentions `kmod_info`
+exactly once, in that line. **No flag fixes it**: `-fms-extensions`, `-fpermissive`,
+`-fno-ms-compatibility`, `-fdelayed-template-parsing` and g++ all reject.
+
+**And it is the only line of its kind in the tree** — `grep -rhn "^struct [a-z_]*_t;"` over all five
+components returns 1. Removing it in a scratch copy (a counterfactual, not a fix) takes the C++ block
+from **0 of 83 to 4**, and the errors immediately become the chain the C side already worked through:
+`clock_t`, then `IMIGObjectVtbl`, then `kqueue_id_t`. **The C++ block is not a different problem — it
+is the C block's problem entered through one line no flag can remove**, and it is the same category as
+`vm_object.c` and `subr_prof.c`: the fix is a source edit this project does not make. The difference is
+leverage: one line, 83 files, 10 boot-path stubs.
+
+**One real fix came out of it**: `shims_arm/string.h` defined `NULL` as `((void *)0)`, which is not a
+null pointer constant in C++ — every `return NULL;` in a `.cpp` was an error. Now `0` under
+`#ifdef __cplusplus`. It moves no count and is recorded because the C++ attempt is the only way it
+would have been found.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
