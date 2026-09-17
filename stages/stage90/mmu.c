@@ -5431,6 +5431,16 @@ static void build_identity_table(void)
     map_section_desc(RAM_CONSOLE_BASE + L1_SECTION_SIZE, RAM_CONSOLE_BASE + L1_SECTION_SIZE,
                      L1_DESC_SECTION_RAM_CONSOLE);
 
+#if STAGE90_XNU_ENTRY
+    /*
+     * The window XNU's entry image is copied to and runs from. The identity table otherwise stops
+     * at 2 MB, so without this the copy itself would fault. Two sections, because the image's
+     * boot_args tell XNU `memSize` = 2 MB and its own tables will map exactly that much.
+     */
+    map_section_dram(0x00200000u, 0x00200000u);
+    map_section_dram(0x00300000u, 0x00300000u);
+#endif
+
     /* MSM8974 GIC + ARM timer MMIO share the 0xf9000000 section in this stage. */
     map_section_mmio(0xf9000000u, 0xf9000000u);
 

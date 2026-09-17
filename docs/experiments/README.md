@@ -119,6 +119,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-103](experiment-103-xnu-entry-point-assembles.md) | XNU's Entry Point Assembles, and the Missing Configuration Is Now a Symbol List |
 | stage90 | [experiment-104](experiment-104-shim-drives-the-timer.md) | The Platform Shim Drives the Timer, Through XNU's Own Interface |
 | stage90 | [experiment-105](experiment-105-xnu-console-and-boot-args.md) | XNU Writes Into the Crash Log, and Acts on Our Boot Arguments |
+| stage90 | [experiment-106](experiment-106-xnu-start-executes.md) | XNU's `_start` Executes on MSM8974 |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

@@ -31,7 +31,8 @@ recovered through `/proc/last_kmsg`, under the safety rules in the root `README.
 | Working `LDREX`/`STREX` (the exclusive monitor tracks) | ✅ | `experiment-96`, measured in four configurations |
 | Cacheable Normal DRAM with both caches on | ✅ | `experiment-97` (I-cache), `experiment-98` (I+D) |
 | Conforming `boot_args` checked on the device | ✅ | `experiment-99` (`xnu_ba_checks=10`, `failures=0`) |
-| Public-XNU code executing on the device | ✅ | **all five** objects by `experiment-105` (`pexpert/gen/{device_tree,bootargs,pe_gen}.c`, `pexpert/arm/{pe_bootargs,pe_consistent_debug}.c`) |
+| Public-XNU code executing on the device | ✅ | **all five** pexpert objects by `experiment-105` |
+| **XNU's real `_start` executing, with its own page tables and MMU** | ✅ | `experiment-106` — the entry sequence ran to completion and branched to `arm_init` |
 | A public-XNU subsystem doing work, not just observing | ✅ | `experiment-102`: the consistent-debug registry inherits, enables, allocates and writes a record |
 | XNU console output landing in the device's crash log | ✅ | `experiment-105`: 62 bytes through `PE_putc`, read back from `/proc/last_kmsg` |
 | XNU acting on this payload's boot arguments | ✅ | `experiment-105`: `pe_init_debug` parses `debug=0x144`, `PE_enter_debugger` acts on it |
@@ -45,7 +46,23 @@ documentation. Nothing in this re-plan asks for it to be thrown away.
 Three things need stating plainly, because earlier notes read as if they were done and
 future planning that assumes them would be wrong.
 
-**Nothing from public XNU has ever executed on the device — UNTIL 2026-09-17.** The object
+**XNU's own `_start` executes on the device (2026-09-17,
+[`experiment-106`](../experiments/experiment-106-xnu-start-executes.md)).** `STAGE90_XNU_ENTRY=1`
+copies a linked image containing XNU's real `osfmk/arm/start.s` to PA `0x00200000`, hands it a
+`boot_args` with `physBase == virtBase`, and jumps. XNU then does what the source says: enables the
+I-cache, reads `boot_args` at the offsets the ABI check guards, patches its exception vectors,
+writes TTBR0/TTBR1/TTBCR, builds a V=P section and a `memSize`-sized kernel mapping at
+`topOfKernelData`, cleans and invalidates both caches by set and way, programs DACR/PRRR/NMRR and
+SCTLR with TEX remap and high vectors, enables the MMU, flushes the TLB, enables VFP and branches
+to `arm_init`. The log's last line is written by the entry image with the MMU off, because
+`ram_console` is outside the 2 MB window XNU maps.
+
+**What that does not mean:** `arm_init` is a Stage-owned stub, so everything after it in a real
+kernel — `arm_vm_init`, `machine_startup`, the scheduler — does not exist here. **XNU's entry point
+runs; XNU does not run.** The next thing needed is the symbol *after* `arm_init`, which is a much
+larger body of code than the entry path was.
+
+**And before that, the whole of this section was true — for the record:** The object
 manifests said so themselves, from Stage76 through Stage90 — e.g.
 `stages/stage90/targets/cancro.stage90.objects`:
 

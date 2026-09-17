@@ -11,7 +11,7 @@
 # This script never runs fastboot and never touches the device. It verifies the
 # image and prints the command to run, or refuses and says why.
 #
-# Usage: ./preflight_boot_check.sh [--allow-preflight] [--allow-full] [--allow-selftest] [--allow-attr-normal-nc] [--allow-attr-normal-wb] [--allow-icache] [--allow-dcache] [--allow-hw-watchdog-selftest] [--allow-fault-inject]
+# Usage: ./preflight_boot_check.sh [--allow-preflight] [--allow-full] [--allow-selftest] [--allow-attr-normal-nc] [--allow-attr-normal-wb] [--allow-icache] [--allow-dcache] [--allow-xnu-entry] [--allow-hw-watchdog-selftest] [--allow-fault-inject]
 
 set -euo pipefail
 
@@ -27,6 +27,7 @@ ALLOW_ATTR=0
 ALLOW_ATTR_WB=0
 ALLOW_ICACHE=0
 ALLOW_DCACHE=0
+ALLOW_XNU_ENTRY=0
 ALLOW_HW_SELFTEST=0
 ALLOW_FAULT_INJECT=0
 
@@ -39,6 +40,7 @@ for arg in "$@"; do
     --allow-attr-normal-wb) ALLOW_ATTR_WB=1 ;;
     --allow-icache)       ALLOW_ICACHE=1 ;;
     --allow-dcache)       ALLOW_DCACHE=1 ;;
+    --allow-xnu-entry)    ALLOW_XNU_ENTRY=1 ;;
     --allow-hw-watchdog-selftest) ALLOW_HW_SELFTEST=1 ;;
     --allow-fault-inject) ALLOW_FAULT_INJECT=1 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
@@ -239,6 +241,33 @@ case "$FAULT_INJECT" in
     echo "          Expected evidence: an 'exception pabort ... lr=$FAULT_INJECT' line."
     echo "          A silent hang or a boot loop instead means the address IS mapped -"
     echo "          the failure mode this mode exists to avoid."
+    ;;
+esac
+
+echo
+echo "== entering XNU =="
+case "$(value_of STAGE90_XNU_ENTRY)" in
+  0|0u|"")
+    echo "off: the payload runs its own ladder and reboots, as in every stage so far."
+    ;;
+  *)
+    [[ $ALLOW_XNU_ENTRY -eq 1 ]] || fail "this build jumps into XNU's _start and never returns; needs --allow-xnu-entry"
+    echo "ENTERING XNU: the payload copies a linked image containing XNU's real osfmk/arm/start.s"
+    echo "          to PA 0x00200000, hands it a boot_args (physBase == virtBase), and jumps."
+    echo "          Nothing after that jump is the payload's: the page tables, vectors, caches"
+    echo "          and MMU state are XNU's, and the payload never runs again."
+    echo
+    echo "          Two possible endings, and the log says which:"
+    echo "            '...real XNU entry: _start ran to completion and branched to arm_init'"
+    echo "                 XNU's own entry sequence ran on this device, end to end."
+    echo "            '...real XNU entry: exception: <which>'"
+    echo "                 it faulted, and the vector names itself."
+    echo "            neither, ending at 'jumping to XNU's _start'"
+    echo "                 it hung; the hardware watchdog brings the phone back in ~28s."
+    echo
+    echo "          Safety: the hardware watchdog is the only net across the jump, deliberately"
+    echo "          - the software dead-man needs the payload's GIC and vector state, which are"
+    echo "          gone the moment _start switches tables. The watchdog needs neither."
     ;;
 esac
 

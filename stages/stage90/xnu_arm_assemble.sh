@@ -80,6 +80,11 @@ DEFINES=(
   -D__ARM_L2CACHE_SIZE_LOG__=21
   -Dfmrx=vmrs
   -Dfmxr=vmsr
+  # osfmk/arm/asm.h's EXT(x) is `_ ## x` unless this is set, so without it every XNU assembly
+  # reference comes out underscore-prefixed (`_arm_init`, `__start`) and cannot resolve against
+  # C definitions or against a linker script naming `_start`. Turning it off is the Darwin-ELF
+  # convention and is what makes the entry image linkable at all.
+  -D__NO_UNDERSCORES__=1
 )
 
 INCLUDES=(

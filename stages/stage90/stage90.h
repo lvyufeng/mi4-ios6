@@ -6829,6 +6829,51 @@ static inline uint32_t stage90_xnu_real_dt_checksum(const struct stage90_xnu_rea
  * builder can only ask for it in that configuration.
  */
 /*
+ * Entering XNU itself. See xnu_entry_jump.c: the payload copies a linked image containing XNU's
+ * real osfmk/arm/start.s to its own base, hands it a conforming boot_args, and jumps. It does not
+ * come back. Default off, and it is the only switch in the project that ends the payload's run by
+ * design rather than by failure.
+ */
+#if !defined(STAGE90_XNU_ENTRY)
+#define STAGE90_XNU_ENTRY 0u
+#endif
+
+#define STAGE90_XNU_ENTRY_VERSION 1u
+
+struct stage90_xnu_entry_result {
+    uint32_t version;
+    uint32_t size;
+    uint32_t status;
+    uint32_t entry_base;
+    uint32_t entry_va;
+    uint32_t image_bytes;
+    uint32_t bss_start;
+    uint32_t bss_end;
+    uint32_t args_pa;
+    uint32_t top_of_kernel_data;
+    uint32_t checks;
+    uint32_t failures;
+    uint32_t checksum;
+};
+
+int stage90_xnu_entry_run(void);
+const struct stage90_xnu_entry_result *stage90_xnu_entry_result(void);
+
+static inline uint32_t stage90_xnu_entry_checksum(const struct stage90_xnu_entry_result *r)
+{
+    const uint32_t *words = (const uint32_t *)r;
+    uint32_t count = (uint32_t)(offsetof(struct stage90_xnu_entry_result, checksum) / sizeof(uint32_t));
+    uint32_t chk = 0u;
+
+    for (uint32_t i = 0u; i < count; i++) {
+        chk ^= words[i];
+    }
+    return chk;
+}
+
+void stage90_xnu_entry_log(const struct stage90_xnu_entry_result *r);
+
+/*
  * Declared unconditionally, defined only in the STAGE90_XNU_REAL_DT build (xnu_object_shims.o is
  * linked only then). A declaration costs nothing when nothing uses it; guarding these on the same
  * switch as the callers is what broke the default build the first time, because xnu_real_dt.c is

@@ -214,5 +214,18 @@ int kernel_entry(struct boot_args *args)
     }
 
     xnu_log_puts("kernel_entry ok\n");
+
+#if STAGE90_XNU_ENTRY
+    /*
+     * Last, deliberately: this never returns. Everything the payload has to say has been said by
+     * the time it runs, so the log this experiment is read from is complete up to the jump.
+     *
+     * It is also the only call site in the project that ends the run by design rather than by
+     * failure, which is why it is behind its own switch, its own gate flag, and a doc comment in
+     * xnu_entry_jump.c that says what the two possible log endings mean.
+     */
+    (void)stage90_xnu_entry_run();
+#endif
+
     return 1;
 }
