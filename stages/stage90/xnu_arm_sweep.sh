@@ -98,12 +98,24 @@ FLAGS=(
   -fno-pic
   -std=gnu11
   -fsyntax-only
+  # A kernel build is freestanding. It is also load-bearing here: without it clang's hosted
+  # <stdatomic.h> is used, which defines memory_order as macros rather than the `enum memory_order`
+  # XNU's ARM atomics refer to, and every use reads as an incomplete type.
+  -ffreestanding
+  -ferror-limit=0
   -Wno-everything
   -D__APPLE_API_PRIVATE=1
   -DCONFIG_EMBEDDED=1
   -DKERNEL=1
   -DKERNEL_PRIVATE=1
   -D__arm__=1
+  # The values the entry-path sweep found, so the two scripts report comparable numbers. Each is
+  # documented in xnu_arm_entrypath_sweep.sh; between them they took arm_init.c from 35 errors to 0.
+  -DMACH_KERNEL_PRIVATE=1
+  -DXNU_KERNEL_PRIVATE=1
+  -DPRIVATE=1
+  -DCONFIG_SCHED_TIMESHARE_CORE=1
+  -DCONFIG_SCHED_TRADITIONAL=1
 )
 
 if [[ -n $DETAIL ]]; then

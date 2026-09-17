@@ -62,9 +62,18 @@ INCLUDES=(
 # mpqueue_head_t and ast_t, which cpu_data_internal.h uses without including them. These are
 # exactly the "force-included header set is not public" half of the build-configuration finding.
 FORCE_INCLUDES=(
+  # sys/_types/_u_int.h: sched.h uses `u_int` without including sys/types.h, and the whole of
+  # sys/types.h collides with kern_types.h (both define clock_t, differently). The single fragment
+  # is the smallest thing that resolves it.
+  -include sys/_types/_u_int.h
   -include arm/simple_lock.h
   -include kern/queue.h
   -include kern/ast.h
+  # The QoS *_policy structs are members of task_t and thread_t but are declared in mach/, which
+  # neither kern/task.h nor kern/thread.h includes.
+  -include stdatomic.h
+  -include mach/task_policy.h
+  -include mach/thread_policy.h
   # Also tried and NOT effective: -include kern/call_entry.h -include kern/timer_call.h. The two
   # ordering errors below survive force-including the headers that define the types, so the cause
   # is the include graph rather than the set of headers present. Recorded so it is not re-tried.
@@ -75,17 +84,28 @@ DEFINES=(
   -DKERNEL=1
   -DKERNEL_PRIVATE=1
   -DMACH_KERNEL_PRIVATE=1
+  # XNU_KERNEL_PRIVATE is what gates vm_tag_t (mach/vm_types.h:118), used 9 times across this
+  # file's include graph. On its own it took arm_init.c from 35 errors to 10 - the single largest
+  # step of the whole measurement, and a value rather than a header.
+  -DXNU_KERNEL_PRIVATE=1
+  # PRIVATE guards kqueue_id_t in bsd/sys/event.h.
+  -DPRIVATE=1
   -D__arm__=1
   -DCONFIG_EMBEDDED=1
   -D__ARM_L2CACHE_SIZE_LOG__=21
-  -DCONFIG_SCHED_MULTIQ=1
+  # The scheduler selection MASTER.XXX would carry. TIMESHARE_CORE+TRADITIONAL rather than MULTIQ:
+  # `struct run_queue` is defined only under CONFIG_SCHED_TIMESHARE_CORE or CONFIG_SCHED_PROTO
+  # (kern/sched.h:201), and MULTIQ expects a kern/sched_multiq.h that is not in the tarball. The
+  # source therefore narrows the choice to two, and the error messages pick between them.
+  -DCONFIG_SCHED_TIMESHARE_CORE=1
+  -DCONFIG_SCHED_TRADITIONAL=1
 )
 
 # -ferror-limit=0 because the default limit is 20 and a *fatal* error (a missing header) stops the
 # translation unit outright. Both truncate, and a truncated count is worse than a wrong one: the
 # first version of this script reported arm_init.c as "4 errors" when a fatal missing include had
 # ended the file early, and the real distance was 20. Every number below is a complete count.
-TARGET=(clang --target=armv7-none-eabi -mcpu=cortex-a15 -marm -fsyntax-only -ferror-limit=0)
+TARGET=(clang --target=armv7-none-eabi -mcpu=cortex-a15 -marm -fsyntax-only -ferror-limit=0 -ffreestanding)
 
 measure_one() {
   local rel=$1

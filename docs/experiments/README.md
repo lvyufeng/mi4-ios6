@@ -122,6 +122,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-106](experiment-106-xnu-start-executes.md) | XNU's `_start` Executes on MSM8974 |
 | stage90 | [experiment-107](experiment-107-xnu-arm-entry-path-measured.md) | XNU's ARM Entry Path, Measured: Seven Missing Names, Three of Them MIG |
 | stage90 | [experiment-108](experiment-108-mig-builds-and-generates-headers.md) | MIG Builds on This Host, and 23 Mach Interface Headers Are Generated |
+| stage90 | [experiment-109](experiment-109-xnu-arm-entry-path-compiles.md) | XNU's ARM Entry Path Compiles: `arm_init.c` 35 Errors → 0 |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

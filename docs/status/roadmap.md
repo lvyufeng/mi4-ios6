@@ -795,6 +795,23 @@ default `-ferror-limit` is 20 and a missing header is a *fatal* error that ends 
 unit, so the count was truncated and the fatal's own line counted as one of them. The script now
 passes `-ferror-limit=0` and labels any count containing a fatal as a floor.)*
 
+**AND THE ENTRY PATH NOW COMPILES (2026-09-17, [`experiment-109`](../experiments/experiment-109-xnu-arm-entry-path-compiles.md)).**
+`arm_init.c` — the function `_start` branches to, and the exact thing Stage90's entry image stubs —
+is **0 errors**, as are `arm_vm_init.c` and `machine_routines.c`. The layer as a whole went from 3
+of 32 to **8 of 32**. Four values did most of it, and the largest was a single flag:
+`-DXNU_KERNEL_PRIVATE=1` took `arm_init.c` from 35 errors to 10 on its own. The scheduler choice was
+narrowed *by the source* rather than guessed: `struct run_queue` is defined only under
+`CONFIG_SCHED_TIMESHARE_CORE` or `_PROTO`, while `_MULTIQ` wants a `kern/sched_multiq.h` the tarball
+does not ship — so `MASTER.XXX` being absent is not the dead end it looked like. And `-ffreestanding`
+is load-bearing: without it clang uses its hosted `<stdatomic.h>`, which defines `memory_order` as
+macros rather than the `enum memory_order` XNU's ARM atomics name.
+
+**What that does not mean:** compiling three translation units is not a kernel. They reference
+thousands of symbols no object here provides, and the 24 files of `osfmk/arm` that still do not
+compile include the pmap, the scheduler and the interrupt path. The blocker for replacing the
+`arm_init` stub is now a *link* problem rather than a compile problem — measurable, and the next
+thing to measure.
+
 **THE MIG WALL IS DOWN (2026-09-17, [`experiment-108`](../experiments/experiment-108-mig-builds-and-generates-headers.md)).**
 Apple's MIG is published in `apple-oss-distributions/bootstrap_cmds/migcom.tproj` — the real
 generator, `parser.y` + `lexxer.l` + ~550 KB of C — and `tools/build_mig.sh` now builds it on this
