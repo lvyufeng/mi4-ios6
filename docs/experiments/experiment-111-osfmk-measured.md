@@ -52,6 +52,51 @@ that counts another architecture's failures is worse than no measurement — it 
 defines it under a `_U_LONG` guard, and the BSD type fragments the entry path can include do not
 carry it. Copied verbatim, guard and all, into `mi4ios6_build_config.h`.
 
+## How far the remainder is — the measure that matters
+
+A count of failing files is not actionable. The distribution is, so the sweep now reports it, one
+log per file:
+
+```
+== how far each failing file is ==
+  1-2 errors    55 file(s)
+  3-10          27 file(s)
+  11-50          5 file(s)
+  51+            2 file(s)
+```
+
+**55 of the 89 failing files are one or two errors from parsing**, and only 2 are more than fifty
+away. That is a long tail of config values and includes, not a wall of subsystems — and it is a
+materially different picture from "89 files fail", which is what a bare count said.
+
+Getting that number required fixing the measurement twice. The first version reused the outer
+loop's `name` variable, so every failing file in a directory wrote to one log and the histogram
+counted directories; the second still mixed per-file logs with per-directory aggregates. Both are
+recorded in the script, because a histogram that silently counts the wrong thing is exactly the
+kind of result this project has had to correct before.
+
+## The bound on "basic drivers running", stated plainly
+
+`grep -rli "msm8974\|snapdragon\|qualcomm" --include=*.c --include=*.h --include=*.cpp` over the
+whole xnu-4570.1.46 tree returns **nothing.** XNU has no Qualcomm code of any kind. What it has for
+ARM is `pexpert/arm/` (5 files) and Apple's own platform conventions.
+
+That matters for what the goal asks for, because it splits it:
+
+- **Reaching a first scheduler tick** — the roadmap's T2 — needs a timer, an interrupt controller
+  and a console. The first two are what Phase 3's shim provides, and it is verified on hardware
+  (`experiment-104`: the timer armed through XNU's own `tbd_ops`, fired, was serviced, disarmed).
+  The third does not need a driver: `ram_console` is a legitimate console and the entry image
+  already writes through it (`experiment-106`). **T2 does not require any driver XNU lacks.**
+- **"把基础驱动跑起来"** — display, eMMC, USB, power — needs drivers that do not exist here and
+  are not a build-configuration problem. They would have to be written, against a SoC with no
+  vendor documentation, for a kernel that expects Apple's platform. That is a different and much
+  larger project than the one that produced everything above.
+
+So the honest split: the *kernel* half of the goal is a large but ordinary build-and-port problem,
+partly solved already. The *driver* half is not started and is not reachable by continuing this
+work.
+
 ## What is left, and what kind of thing it is
 
 The remaining blockers are no longer headers. They are names gated behind configuration this

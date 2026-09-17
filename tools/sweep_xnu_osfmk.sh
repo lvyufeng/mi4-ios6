@@ -100,20 +100,27 @@ total=0
 for dir in "${DIRS[@]}"; do
     ok=0
     count=0
-    : > "$OUT/$dir.log"
+    : > "$OUT/$dir.agg.log"
     for src in "$XNU/osfmk/$dir"/*.c; do
         [[ -f $src ]] || continue
         count=$((count + 1))
+        # Per FILE, and it has to be re-set here: the outer loop's `name` is the directory, and
+        # reusing it silently wrote every failing file in a directory to one log.
+        name=$(basename "$src" .c)
+        # One log per FILE, not per directory. The per-file error count is the measure that
+        # matters: a file one error away is a config value or an include, a file three hundred
+        # errors away is a subsystem, and averaging them by directory hides which is which.
         if "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${INCLUDES[@]}" "$src" \
-             >"$OUT/one.log" 2>&1; then
+             >"$OUT/$name.log" 2>&1; then
             ok=$((ok + 1))
+            rm -f "$OUT/$name.log"
         else
             printf '%s\n' "$(basename "$src")" >> "$OUT/$dir.failed"
-            cat "$OUT/one.log" >> "$OUT/$dir.log"
+            cat "$OUT/$name.log" >> "$OUT/$dir.agg.log"
         fi
     done
     [[ -f $OUT/$dir.failed ]] || : > "$OUT/$dir.failed"
-    cat "$OUT/$dir.log" >> "$OUT/all.log"
+    cat "$OUT/$dir.agg.log" >> "$OUT/all.log"
     total_ok=$((total_ok + ok))
     total=$((total + count))
     printf '  %-14s %3d of %3d\n' "$dir" "$ok" "$count"
@@ -140,6 +147,20 @@ if [[ $SHOW_BLOCKERS -gt 0 ]]; then
     echo "== missing headers =="
     grep -hoE "'[^']*\.h' file not found" "$OUT/all.log" | sort -u | head -"$SHOW_BLOCKERS"
 fi
+
+echo
+echo "== how far each failing file is =="
+# A count of failing files is not actionable; the distribution is. A file one error away is a
+# config value or an include; a file three hundred errors away is a subsystem.
+for log in "$OUT"/*.log; do
+    case "$(basename "$log")" in all.log|one.log|*.agg.log) continue ;; esac
+    n=$(grep -cE "error:" "$log" 2>/dev/null)
+    [[ ${n:-0} -eq 0 ]] && continue
+    printf '%d %s\n' "$n" "$(basename "$log" .log)"
+done | sort -n | awk '
+    { b = ($1 <= 2) ? "1-2 errors" : ($1 <= 10) ? "3-10" : ($1 <= 50) ? "11-50" : "51+"
+      c[b]++ }
+    END { for (k in c) printf "  %-12s %3d file(s)\n", k, c[k] }' | sort
 
 echo
 echo "raw logs in $OUT"
