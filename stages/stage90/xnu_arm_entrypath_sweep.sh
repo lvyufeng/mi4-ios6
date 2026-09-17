@@ -60,6 +60,9 @@ FORCE_INCLUDES=(
   -include arm/simple_lock.h
   -include kern/queue.h
   -include kern/ast.h
+  # Also tried and NOT effective: -include kern/call_entry.h -include kern/timer_call.h. The two
+  # ordering errors below survive force-including the headers that define the types, so the cause
+  # is the include graph rather than the set of headers present. Recorded so it is not re-tried.
 )
 
 DEFINES=(
