@@ -40,6 +40,31 @@ That last one is the clearest: `EXTERNAL_HEADERS/stdatomic.h:24` is
 
 XNU's atomic layer is clang-only, and this project's ARM toolchain is `arm-none-eabi-gcc`.
 
+## 2026-09-17: the compiler and the processor configuration
+
+Two changes since the measurement below, both from `xnu_arm_sweep.sh` (new, and now the
+reproducible form of this measurement rather than ad-hoc greps).
+
+**clang 14 is installed and is the sweep's default compiler.** `EXTERNAL_HEADERS/stdatomic.h:24`
+is `#ifndef __clang__ / #error unsupported compiler`, so arm-none-eabi-gcc could not get past
+XNU's atomic layer at all - the single most-cited blocker in the section below. clang 14
+cross-compiles ARM EABI5 for `armv7-none-eabi` on this host. **It takes the count from 3 of 32 to
+3 of 32.** The `#error unsupported compiler` disappears and the number does not move, which is
+itself the answer: the toolchain was a real blocker for one layer and not the one that matters.
+
+**`ARMA7` is the 32-bit ARMv7 machine configuration, and it is in the source.**
+`osfmk/arm/proc_reg.h:73` is `#if defined (ARMA7)` → `__ARM_ARCH__ 7`, `__ARM_VMSA__ 7`. Every
+other branch in that chain is a 64-bit Apple part (APPLECYCLONE, APPLETYPHOON, APPLETWISTER,
+APPLEHURRICANE). Without one of them the chain reaches `#else / #error processor not supported`
+at :161, which is what *every* ARM file was failing on before this flag was found - and which the
+section below does not mention, because the sweep at the time was not reaching it.
+
+So the processor half of the "absent build configuration" is not absent; it is named in the
+source. What is still absent is the layer above it: `decl_simple_lock_data` is defined in
+`osfmk/arm/simple_lock.h` and **nothing in the tree includes that header** - the real build must
+force-include it or define it. That is the next distinct error after `ARMA7`, and it is a
+different kind of thing: not a value to choose, but a header the build arranges to be present.
+
 ## Where the measurement landed
 
 After the first level, the numbers stopped moving — 3 of 32 clean, **441 errors** across the

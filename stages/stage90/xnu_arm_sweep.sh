@@ -84,6 +84,13 @@ INCLUDES=(
 
 FLAGS=(
   "${TARGET_FLAGS[@]}"
+  # ARMA7 is the 32-bit ARMv7 machine configuration, and it is *in the source* -
+  # osfmk/arm/proc_reg.h:73 is `#if defined (ARMA7)` followed by __ARM_ARCH__ 7, __ARM_VMSA__ 7.
+  # Without one of the processor macros that chain reaches its `#else / #error processor not
+  # supported` at :161, which is what every ARM file was dying on before this flag was found.
+  # The other branches are ASC/APPLECYCLONE/APPLETYPHOON/APPLETWISTER/APPLEHURRICANE, all 64-bit
+  # Apple parts; ARMA7 is the only one that describes a 32-bit ARMv7 core like Krait.
+  -DARMA7=1
   -ffreestanding
   -fno-builtin
   -fno-stack-protector

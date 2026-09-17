@@ -763,8 +763,19 @@ actually require:
 - The platform whitelist itself (`SUPPORTED_EMBEDDED_PLATFORMS`) is in `MakeInc.cmd:121`,
   so that half *is* public and editable.
 
-So the honest summary is: **the parser and the platform list are public; the per-arch target
-definitions and machine configs are not.** Reconstructing them is a real possibility — the
+**One correction, 2026-09-17: the *processor* configuration is in the source.** Chasing this
+further, `osfmk/arm/proc_reg.h:73` is `#if defined (ARMA7)` → `__ARM_ARCH__ 7`, `__ARM_VMSA__ 7`.
+That is the 32-bit ARMv7 machine configuration, it is the only 32-bit branch in the chain, and
+without a processor macro the chain reaches `#else / #error processor not supported` at `:161` -
+which is what every ARM file was dying on. `-DARMA7` removes it. clang, now installed, is also
+what the atomic layer requires (`EXTERNAL_HEADERS/stdatomic.h:24` is `#error unsupported compiler`
+unless `__clang__`). Neither changes the file count: **3 of 32, before and after, with either
+compiler.** The next distinct error is `decl_simple_lock_data`, defined in
+`osfmk/arm/simple_lock.h`, which **nothing in the tree includes** - a header the build arranges to
+be present rather than a value to choose.
+
+So the honest summary is: **the parser, the platform list and the processor selection are public;
+the per-arch target definitions and the force-included header set are not.** Reconstructing them is a real possibility — the
 convention is visible — but it is building the build system, not configuring it, and it would
 sit on a toolchain (`xcrun`) this host does not have either.
 
