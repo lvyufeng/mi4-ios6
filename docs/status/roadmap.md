@@ -1502,6 +1502,38 @@ which produces Mach-O (what `data.s` is written for) and which **nothing on this
 stubs, including the three nearest `arm_init`, are behind one question: Mach-O or ELF.** Worth
 deciding deliberately rather than discovering.
 
+**AND THE ASSEMBLY CONVENTION WAS A THIRD THING STANDING ON THE SAME QUESTION** (2026-09-17,
+[`experiment-138`](../experiments/experiment-138-underscore-convention-and-work-list.md)).
+`asm.h:88-98` gives two conventions behind one flag — `EXT(x) = _##x` for Darwin, `x` for ELF — and
+this build sets `__NO_UNDERSCORES__` because the toolchain is ELF. **But ten of the manifest's
+assembly files do not use `EXT()`**, they write `_bcopy:` literally, so they assembled *cleanly* and
+defined the **wrong names**. The failure appears at link time as `undefined reference to 'bcopy'`
+from files that plainly have an implementation. `tools/assemble_arm_layer.sh` renames `_x` to `x`
+**when `x` is otherwise unresolved** — the condition that keeps it safe, since `start.s`'s `_start`
+is not undefined and stripping it unconditionally lost the entry point. 22 symbols across 9 objects;
+XNU's source untouched.
+
+**And the work list is complete.** `tools/stub_blockers.py` attributes every boot-path stub:
+
+| count | category |
+| --- | --- |
+| **88** | a file that fails to compile |
+| **23** | assembly the build never attempts (`machine_routines_asm.s`, `data.s`) |
+| **10** | C++ never attempted |
+| 4 | compiler runtime (`__aeabi_*`) |
+| 4 | no source in the tree |
+
+and the 88 are **four files for 76 of them**: `vm_object.c` (27, the `const` member — not fixable
+here), `uipc_mbuf.c` (24), `OSAtomicOperations.c` (15), `kern_event.c` (10).
+
+**Two defects in this stage's own tools, same shape again**: `stub_blockers.py` first classified
+`.s`/`.cpp` as "compiled" because it asked `failed.txt` and the build *skips* those extensions (30
+symbols misreported), and its definition regex missed names at column 0 (85 misreported as "no
+source"). Both fixed; the test is now "does an object exist", which is what the build answers.
+
+**Image: 416 stubs, 130 on the boot path.** The Mach-O-vs-ELF question is untouched and still owns
+the 23 deepest.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
