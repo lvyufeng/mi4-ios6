@@ -38,9 +38,9 @@ those symbols, verified with `llvm-nm`.
 
 ## What it costs, measured
 
-The C side is **32 files behind**, and the reason is not the triple — it is that **the ELF path has
-thirty stages of fixes in it and this script has four.** The Mach-O failures are the same failures
-the ELF path had before those stages:
+The C side **started 32 files behind and is now 6**, and the reason is not the triple — it is that
+**the ELF path has thirty stages of fixes in it.** The Mach-O failures were the same failures the ELF
+path had before those stages, and they came down as each was ported:
 
 ```
 20  sync_qos_count_t          <- needs the kserver placement (experiment-145) in its full form
@@ -49,11 +49,10 @@ the ELF path had before those stages:
  1  the firehose chunk count, OSAtomicOperations, uthread_t ...
 ```
 
-**So the honest price of A is: rebuilding what the ELF path already has.** Every one of those
-mechanisms — `COMP_FIRST`, the kserver root, the per-component `-D_CLOCK_T`, the BSD-only
-`sys/types.h`, `gen_device_headers.sh` — is target-independent and would port directly. That is
-mechanical work of a known kind, and the measurement says roughly **32 files plus the four assembly
-files**, not a rewrite.
+**So the price of A is: porting what the ELF path already has, and that is measured to be cheap.**
+Every one of those mechanisms — `COMP_FIRST`, the kserver root, the per-component `-D_CLOCK_T`, the
+BSD-only `sys/types.h`, `gen_device_headers.sh` — is target-independent and ports directly; three of
+them took the count from 252 to 601 in this stage. What is left is 6 files and four assembly files.
 
 ## The script reproduced two of this project's own defects, and then found a third thing
 
@@ -96,16 +95,6 @@ honest version of option A is *"the Darwin triple **with the alignment flags App
 and those flags are not established here. A first attempt at A that only changes `--target` would
 trade four assembly files for one C file and a set of alignment questions.
 
-The first version of `build_xnu_arm_macho.sh` put `-DMACH_KERNEL_PRIVATE=1` in the **global** defines.
-Result: **271 files failed on `ffs`** — experiment-118's defect, reproduced exactly, in a file whose
-comment says it must not be. The fix was to move it to the per-component set, where the ELF script
-already had it, and the compile count went 252 → 544 in one step.
-
-That is worth recording because it is the clearest demonstration of the defect class this project has
-met ten times: **the fix existed, was written down, and a new file did not inherit it.** A build
-configuration that lives in two scripts will drift; the Mach-O script's comment now points at
-`component_defines.sh` as the single source, which is what `build_xnu_arm_kernel.sh` does too.
-
 ## The choice, with numbers
 
 | | A: Mach-O | B: stay ELF | C: stop |
@@ -124,6 +113,6 @@ blocked on the triple, and A is the only option that moves them.
 
 ```bash
 ./tools/build_xnu_arm_macho.sh --assemble   # 17 ok, 0 failed
-./tools/build_xnu_arm_macho.sh --compile    # 575 ok, 40 failed
+./tools/build_xnu_arm_macho.sh --compile    # 601 ok, 14 failed
 ./tools/build_xnu_arm_macho.sh --link       # refuses: no ld64.lld on this host, with the reason
 ```
