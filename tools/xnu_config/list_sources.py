@@ -40,7 +40,25 @@ REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 # Component -> the directories its file lists live in. `conf` is the component's own conf/ dir.
 COMPONENTS = ["osfmk", "bsd", "libkern", "iokit", "pexpert", "libsa", "security", "san"]
 
-DEFAULT_COMPONENTS = ["osfmk", "bsd", "libkern", "iokit", "pexpert"]
+# Apple's own COMPONENT_LIST (MakeInc.def:46), less `libsa`:
+#
+#   COMPONENT_LIST = osfmk bsd libkern iokit pexpert libsa security san
+#
+# `libsa` is excluded because its files are bootloader-context code the kernel does not link (its
+# `<types.h>` is reached as a header, which is what tools/gen_libsa_export.sh is for). `security` and
+# `san` were excluded here too, and **that was a defect with a measurable cost**: `CONFIG_MACF=1` is
+# set in RELEASE, `security/mac_*.c` are `optional config_macf`, and the kernel's own sources call
+# them - so the manifest was selecting a configuration whose files could never define the symbols
+# the rest of the kernel referenced. `security/` alone accounted for **~180 of the 699 undefined
+# symbols** in the link, and no amount of fixing compile errors would have touched them, because the
+# files were never compiled at all.
+#
+# `san` is excluded as well, and that is a measurement rather than an omission: its five files are
+# `standard` in san/conf/files, but they are KASAN build machinery — `san/kasan.c:54` includes
+# `<kasan.h>`, which is not in the tarball, and `san/kasan_internal.h:52` is `#error KASAN undefined`
+# — and a non-KASAN kernel compiles none of them. Measured: including `san` adds 5 failing files and
+# contributes **0** of the link's undefined symbols.
+DEFAULT_COMPONENTS = ["osfmk", "bsd", "libkern", "iokit", "pexpert", "security"]
 
 
 def expand_options(xnu, config):

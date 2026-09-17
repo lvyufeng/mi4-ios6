@@ -1265,6 +1265,30 @@ the project does not modify XNU's code. It is 2 of the 62 symbols the boot closu
 `boot_closure.py` now puts only **12 of the 18 failing files on the boot path, accounting for 62
 symbols.**
 
+**AND THE MANIFEST WAS MISSING A WHOLE COMPONENT** (2026-09-17,
+[`experiment-128`](../experiments/experiment-128-manifest-missing-component.md)). This is the largest
+single movement since the per-component defines and it is not a compile fix. `list_sources.py` had
+`DEFAULT_COMPONENTS = [osfmk bsd libkern iokit pexpert]` against Apple's own
+`COMPONENT_LIST = osfmk bsd libkern iokit pexpert libsa security san` (`MakeInc.def:46`). `libsa` is
+legitimately excluded — bootloader context, reached as a header — but **`security` was not**, and
+`CONFIG_MACF=1` is set in RELEASE while `security/mac_*.c` are `optional config_macf` and are called
+by the rest of the kernel. **About 180 of the 699 undefined symbols came from `security/` alone**
+(`mac_vfs.c` 81, `mac_process.c` 26, `mac_base.c` 15, …), and no amount of fixing compile errors
+would have touched them: the files were never compiled.
+
+It only became visible once the link was real. Every earlier measurement asked "do these files
+compile", and the answer for a file that is not in the list is a shrug. **The check that catches it
+is the one this stage performed**: after a link, attribute every remaining undefined symbol to a
+source file and ask whether that file was compiled at all.
+
+`san` was included, measured and excluded on purpose: its five files are `standard` in
+`san/conf/files` but they are KASAN machinery (`#error KASAN undefined`, `<kasan.h>` not published),
+and including them adds 5 failing files and contributes **0** of the link's undefined symbols.
+
+**`STAGE90_BOOT` 400 → 401 of 420, `RELEASE` 569 → 591 of 609, and the link 699 → 499 undefined
+symbols** (660 → 460 on the boot path). The boot closure is unchanged at 12 files / 60 symbols,
+because those files were already attributing theirs.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
