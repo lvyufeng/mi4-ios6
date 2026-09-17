@@ -150,6 +150,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-134](experiment-134-pe-arm-init-interrupts-replacement.md) | The Replacement for `pe_arm_init_interrupts`, Run on the Device |
 | stage90 | [experiment-135](experiment-135-first-xnu-image.md) | An XNU Image, Linked at XNU's Own Addresses, With a Real `_start` |
 | stage90 | [experiment-136](experiment-136-assym-and-a-correction.md) | The Sixth Generator (`genassym.c`), and a Correction to the Fifth Experiment |
+| stage90 | [experiment-137](experiment-137-work-order.md) | The Work Order, Computed From the Image: `arm_init` Reaches a Stub One Edge In |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

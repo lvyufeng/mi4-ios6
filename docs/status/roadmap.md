@@ -1468,6 +1468,40 @@ Apple's ring-buffer `serial_console.c`, so where the bytes go depends on what dr
 
 The generators-concluded-absent list is now six long, and every entry was in the tarball.
 
+**AND THE WORK ORDER IS COMPUTED, NOT GUESSED** (2026-09-17,
+[`experiment-137`](../experiments/experiment-137-work-order.md)). `tools/stub_reach.py` walks the
+call graph in the measurement image, stops at each stub, and ranks what is left by distance from the
+entry:
+
+```
+functions in the image:   8063
+reachable from arm_init without hitting a stub:  1846
+stubs the boot path reaches:  136 of 427
+
+  1 edge   __aeabi_memcpy4   fiq_context_init   get_mmu_control   set_mmu_control
+  2 edges  IODTGetDefault    bcopy   memcpy   flush_mmu_tlb   ml_get_timebase
+           set_mmu_ttb   set_mmu_ttb_alternate
+```
+
+**`arm_init` reaches a stub on its first call** — one edge in, not after a filesystem or a
+scheduler. And the stubs are not spread across 427: **`machine_routines_asm.s` defines 35 and
+`data.s` defines 6**, and those two files are the deepest on the path. `data.s` alone carries
+`BootCpuData`, `CpuDataEntries`, `intstack_top` and `fiqstack_top`.
+
+**Both are blocked on one question, and it is not a value to choose.** `data.s:41` is
+`.section __DATA, __data` — Mach-O section syntax, so GNU as answers `expected string in directive`.
+`machine_routines_asm.s:696` is `.macro COPYIO_BODY` declared with no parameters and invoked with a
+positional one referred to as `$0`; tested here, **both clang's assembler and `arm-none-eabi-as`
+reject that form** (`Wrong number of arguments` / `too many positional arguments`), and declaring the
+parameter does not rescue it. So it is the assembler dialect, and fixing it means changing XNU's
+source or transforming its input — a decision, not a step.
+
+Both come back to the choice experiment-123 measured and did not take: `--target=armv7-apple-darwin`,
+which produces Mach-O (what `data.s` is written for) and which **nothing on this host can link** —
+`/usr/lib/llvm-14/bin` has `llvm-nm`, `llvm-size` and `llvm-ar` but no `ld64.lld`. **41 of the 427
+stubs, including the three nearest `arm_init`, are behind one question: Mach-O or ELF.** Worth
+deciding deliberately rather than discovering.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
