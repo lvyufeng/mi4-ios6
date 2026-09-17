@@ -888,6 +888,17 @@ never missing. And `sched_group_t` — the largest single blocker, 25 occurrence
 `CONFIG_SCHED_MULTIQ`, which `SCHED_BASE` says is **on** alongside `TIMESHARE_CORE`, because the
 latter is the queue core the former builds on rather than a competing algorithm.
 
+**And it is now extracted and used** (2026-09-17,
+[`experiment-112`](../experiments/experiment-112-apple-kernel-config-extracted.md)).
+`tools/xnu_config/{select_master,expand,make_defines}.sh` port `doconf`'s two stages to bash and
+turn Apple's attribute sets into a compiler's `-D` list — **108 option lines for `RELEASE`**.
+Rebuilding the ARM layer with those instead of the hand-guessed set gives **31 of 32**, and the one
+difference is precise: `monotonic_arm.c` needs `MONOTONIC`, and `MONOTONIC` is not in
+`config/MASTER` in any form. It is a per-SoC decision, and the per-SoC definitions
+(`ARCH_CONFIGS_EMBEDDED`, `DEVICEMAP_PRODUCTS_*`) are the piece that genuinely does not ship. So the
+configuration is *nearly* complete: the catalogue, the names and the tool are all present; what is
+missing is the small layer that varies by SoC, of which this layer needs exactly one value.
+
 See [`tools/xnu_config/README.md`](../../tools/xnu_config/README.md). This is the third time in this
 project that "not available" meant "looked in one directory": MIG was published elsewhere, the
 generated mach headers were a build step away, and this was at `config/` all along. The remedy each
