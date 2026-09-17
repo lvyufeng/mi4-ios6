@@ -137,6 +137,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-121](experiment-121-apple-defines-and-two-pass-mig.md) | `__APPLE__`, and the MIG Run That Was Missing Half Its Arguments |
 | stage90 | [experiment-122](experiment-122-makesyscalls-outputs.md) | `makesyscalls.sh` Has Six Output Kinds and This Project Asked for One |
 | stage90 | [experiment-123](experiment-123-link-gap-and-force-includes.md) | The Link Gap, Measured: 1187 Symbols — and the Force-Include That Was Reaching Nine Files |
+| stage90 | [experiment-124](experiment-124-mig-output-set.md) | Generate What the Makefiles Say: 40 MIG Outputs, Not Everything — and the Include Order Flips Back |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

@@ -1163,6 +1163,32 @@ failures, small and scattered — `clock_t`/`uid_t`, `u_char`/`caddr_t`, experim
 include-order regressions, and four genuinely absent headers (`pty.h`, `loop.h`, `compat_43.h`,
 `sys/modctl.h`). `libkern/zlib` is entirely clear.
 
+**AND THE MIG OUTPUT SET COMES FROM THE MAKEFILES NOW, WHICH REVERSES experiment-119** (2026-09-17,
+[`experiment-124`](../experiments/experiment-124-mig-output-set.md)). `gen_mach_headers.sh` ran MIG
+over *every* `.defs` in `osfmk`; Apple's Makefiles list the outputs explicitly, and two entries
+decide the file counts. **`notify.defs` yields `notify_server.h` and nothing else** — `mach/notify.h`
+is hand-written and carries `MACH_NOTIFY_NO_SENDERS`, so a generated one is a stub that hides the
+real header. And **`memory_object.defs` yields `memory_object.h`**, so Apple's kernel never sees the
+collision between it (user-side `mach_port_t`) and `memory_object_types.h` (kernel-side
+`struct memory_object *`) — the collision that was failing **six `osfmk/vm` files**.
+`tools/xnu_config/mig_outputs.py` parses the `MIG_*` blocks out of every Makefile that runs `$(MIG)`
+and writes the spec; **40 bases, 0 failures**.
+
+**And the include order flips back.** experiment-119 measured the generated root ahead of the source
+tree as worse (307 vs 312) and concluded it must go last — correct for what it tested, which was an
+*over-generating* root. With the faithful output set: **395 vs 384** in favour of first, which is
+Apple's own order (`INCFLAGS = -I. $(INCFLAGS_GEN) …`, `MakeInc.def:466-469`).
+
+**AND THE BOOT PATH IS SEPARATED FROM THE FAILURE LIST** (`tools/boot_closure.py`, new). It walks
+the symbol graph from the `osfmk/arm` objects and reports the files in that closure which have no
+object: **27 of the 74 failing files matter; the other 47 do not** — mostly `bsd/netinet6`, `bsd/nfs`
+and `bsd/vfs`, code a kernel reaching a first scheduler tick never calls. The remaining work is now
+"27 files, 86 symbols", a lower bound (calls through function pointers and assembly entries are
+invisible to a symbol walk). The link gap re-measured at the same time: **1187 → 988** missing, of
+which **907 are on the boot path**.
+
+**`STAGE90_BOOT` 389 → 395 of 419, `RELEASE` 507 → 513 of 587.**
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

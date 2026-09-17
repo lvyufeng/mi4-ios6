@@ -84,23 +84,32 @@ ENTRY_PATH_DEFS=(
 #
 # `libsyscall/mach` holds 18 `.defs` that are the *user-side* copies of the same interfaces; a kernel
 # does not build them, so they are excluded rather than generated and discarded.
-mapfile -t DEFS_FILES < <(cd "$XNU" && find osfmk -name '*.defs' | sort)
+# WHICH outputs to generate comes from Apple's own Makefiles, via xnu_config/mig_outputs.py, and
+# this is the correction that made the generated root usable ahead of the source tree. Running MIG
+# over *every* `.defs` over-generates, and the extra headers shadow real ones: Apple lists
+# `notify_server.h` but NOT `notify.h`, because `osfmk/mach/notify.h` is hand-written and carries
+# `MACH_NOTIFY_NO_SENDERS`; a generated `notify.h` is a user-side stub with none of it. Likewise
+# `memory_object.h` IS listed, so Apple's kernel sees the generated one and never hits the
+# hand-written `osfmk/mach/memory_object.h` colliding with `memory_object_types.h` over
+# `memory_object_t`. Both directions are measured; see experiment-124.
+SPEC=${MIG_OUTPUTS_SPEC:-$REPO_ROOT/out/mig_outputs.txt}
+[[ -f $SPEC ]] || "$TOOLS_DIR/xnu_config/mig_outputs.py" --write "$SPEC" >/dev/null
+
+DEFS_FILES=()
+declare -A WANT_KINDS=()
+declare -A WANT_DIR=()
+while IFS=$'\t' read -r base dir kinds; do
+    [[ -z $base || $base == \#* ]] && continue
+    DEFS_FILES+=("$dir/$base.defs")
+    WANT_KINDS[$base]=$kinds
+    WANT_DIR[$base]=$dir
+done < "$SPEC"
 
 if [[ $# -gt 0 ]]; then
-    wanted=("$@")
     filtered=()
     for f in "${DEFS_FILES[@]}"; do
         base=${f##*/}; base=${base%.defs}
-        for w in "${wanted[@]}"; do
-            [[ $base == "$w" ]] && { filtered+=("$f"); break; }
-        done
-    done
-    DEFS_FILES=("${filtered[@]}")
-elif [[ ${ENTRY_PATH_ONLY:-0} -eq 1 ]]; then
-    filtered=()
-    for f in "${DEFS_FILES[@]}"; do
-        base=${f##*/}; base=${base%.defs}
-        for w in "${ENTRY_PATH_DEFS[@]}"; do
+        for w in "$@"; do
             [[ $base == "$w" ]] && { filtered+=("$f"); break; }
         done
     done
@@ -197,48 +206,74 @@ for rel in "${DEFS_FILES[@]}"; do
     # `-novouchers` is in `MIGFLAGS` (MakeInc.def:470) and is NOT passed here: it suppresses the
     # voucher conversion routines, and the kernel's own sources reference them. Left out on purpose,
     # and recorded rather than silently matched.
+    # ONLY the outputs Apple's Makefile asks for. `kinds` comes from xnu_config/mig_outputs.py,
+    # which reads the MIG_*HDRS / MIG_*SRC lists. This is the part that matters:
+    #
+    #   notify            sheader        -> notify_server.h, and NOT notify.h
+    #   memory_object     header,user    -> memory_object.h, and no server side
+    #
+    # Note the ",$kinds," delimiters: a plain `*header*` match is true for "sheader", which is how
+    # a first version of this generated notify.h anyway - the exact bug it exists to prevent.
+    #
+    # Generating more than that is not free. `mach/notify.h` in the tree is hand-written and carries
+    # MACH_NOTIFY_NO_SENDERS and the notification structs; a generated one is a user-side stub with
+    # none of it, and it shadows the real header for osfmk/ipc/ipc_voucher.c and
+    # osfmk/kern/ipc_kobject.c the moment the generated root comes first in the include path - which
+    # is where Apple puts its own (`INCFLAGS = -I. $(INCFLAGS_GEN) ...`, MakeInc.def:469).
+    kinds=${WANT_KINDS[$base]:-}
+
     server_suffix_for_run="$server_suffix"
-    server_ok=0
-    user_ok=0
+    # `-1` means "not asked for", `0` means "ran and succeeded", `1` means "ran and failed". A pass
+    # that was never wanted must not make the base look like a failure.
+    server_ok=-1
+    user_ok=-1
+    wrote=""
+
+    rm -f "$OUT/$outdir/$base.h" "$OUT/$outdir/${base}${server_suffix_for_run}.h" \
+          "$OUT/$outdir/${base}${server_suffix_for_run}.c" "$OUT/$outdir/${base}_user.c"
 
     # --- the server side: -DKERNEL_SERVER=1 ------------------------------------------------
-    cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 -DKERNEL_SERVER=1 \
-       -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" "$defs" >"$OUT/$base.srv.pp" 2>>"$OUT/$base.cpp.log"
-    if "$MIG" -header /dev/null \
-              -user /dev/null \
-              -server "$OUT/$outdir/${base}${server_suffix_for_run}.c" \
-              -sheader "$OUT/$outdir/${base}${server_suffix_for_run}.h" \
-              <"$OUT/$base.srv.pp" >"$OUT/$base.mig.log" 2>&1; then
-        server_ok=1
+    if [[ ",$kinds," == *,sheader,* || ",$kinds," == *,server,* ]]; then
+        cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 -DKERNEL_SERVER=1 \
+           -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" "$defs" >"$OUT/$base.srv.pp" 2>>"$OUT/$base.cpp.log"
+        sheader_out=/dev/null; server_out=/dev/null
+        [[ ",$kinds," == *,sheader,* ]] && sheader_out="$OUT/$outdir/${base}${server_suffix_for_run}.h"
+        [[ ",$kinds," == *,server,*  ]] && server_out="$OUT/$outdir/${base}${server_suffix_for_run}.c"
+        if "$MIG" -header /dev/null -user /dev/null \
+                  -server "$server_out" -sheader "$sheader_out" \
+                  <"$OUT/$base.srv.pp" >"$OUT/$base.mig.log" 2>&1; then
+            server_ok=0
+        fi
     fi
 
     # --- the user side: -DKERNEL_USER=1 ----------------------------------------------------
-    cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 -DKERNEL_USER=1 \
-       -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" "$defs" >"$OUT/$base.usr.pp" 2>>"$OUT/$base.cpp.log"
-    if "$MIG" -header "$OUT/$outdir/$base.h" \
-              -user "$OUT/$outdir/${base}_user.c" \
-              -server /dev/null \
-              -sheader /dev/null \
-              <"$OUT/$base.usr.pp" >>"$OUT/$base.mig.log" 2>&1; then
-        user_ok=1
+    if [[ ",$kinds," == *,header,* || ",$kinds," == *,user,* ]]; then
+        cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 -DKERNEL_USER=1 \
+           -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" "$defs" >"$OUT/$base.usr.pp" 2>>"$OUT/$base.cpp.log"
+        header_out=/dev/null; user_out=/dev/null
+        [[ ",$kinds," == *,header,* ]] && header_out="$OUT/$outdir/$base.h"
+        [[ ",$kinds," == *,user,*   ]] && user_out="$OUT/$outdir/${base}_user.c"
+        if "$MIG" -header "$header_out" -user "$user_out" \
+                  -server /dev/null -sheader /dev/null \
+                  <"$OUT/$base.usr.pp" >>"$OUT/$base.mig.log" 2>&1; then
+            user_ok=0
+        fi
     fi
 
     rm -f "$OUT/$base.srv.pp" "$OUT/$base.usr.pp"
 
-    if [[ $server_ok -eq 1 && $user_ok -eq 1 && -s $OUT/$outdir/$base.h ]]; then
-        # A MIG that exits 0 without writing a header would look like success; check the file.
-        printf '  %-40s %s bytes (server %s)\n' "$tag" "$(stat -c%s "$OUT/$outdir/$base.h")" \
-               "$(stat -c%s "$OUT/$outdir/${base}${server_suffix_for_run}.h" 2>/dev/null || echo 0)"
+    # Name what was actually written, so the run's output is a list of files rather than a number.
+    for f in "$OUT/$outdir/$base.h" "$OUT/$outdir/${base}_user.c" \
+             "$OUT/$outdir/${base}${server_suffix_for_run}.h" \
+             "$OUT/$outdir/${base}${server_suffix_for_run}.c"; do
+        [[ -s $f ]] && wrote+="$(basename "$f") "
+    done
+
+    if [[ $server_ok -le 0 && $user_ok -le 0 && -n $wrote ]]; then
+        printf '  %-40s %s\n' "$tag" "$wrote"
         ok=$((ok + 1))
-    elif grep -q "no SubSystem declaration" "$OUT/$base.mig.log"; then
-        # Not reachable through the source check above; kept because a MIG that fails on a `.defs`
-        # this script believed to be an interface must say so rather than be counted as one.
-        printf '  %-40s no subsystem in the preprocessed text\n' "$tag"
-        typesonly=$((typesonly + 1))
-        rm -f "$OUT/$outdir/$base.h" "$OUT/$outdir/${base}${server_suffix_for_run}.h" \
-              "$OUT/$outdir/${base}${server_suffix_for_run}.c" "$OUT/$outdir/${base}_user.c"
     else
-        printf '  %-40s FAILED: server=%s user=%s %s\n' "$tag" "$server_ok" "$user_ok" \
+        printf '  %-40s FAILED: server=%s user=%s (0=ok 1=failed -1=not asked) %s\n' "$tag" "$server_ok" "$user_ok" \
                "$(grep -m1 -E 'error|fatal' "$OUT/$base.mig.log" | cut -c1-90)"
         fail=$((fail + 1))
     fi

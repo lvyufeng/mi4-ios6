@@ -20,11 +20,15 @@
 #   ./tools/gen_bsd_headers.sh                  -> out/xnu_generated/bsd/sys/sysproto.h
 #   ./tools/xnu_config/list_sources.py RELEASE --write out/xnu_arm_manifest.txt
 #
-# The four generated roots are ordered: the two under out/xnu_generated and out/xnu_options come
-# before every source tree, because they ARE the build's output and a source tree must not shadow
-# them; out/mach_headers comes after all of them, because three of its headers have the same paths as
-# hand-written ones in the tree (mach/memory_object.h, mach/notify.h, mach/semaphore.h) and the tree
-# must win. Both orderings are measured - see experiments 119 and 120.
+# The generated roots come BEFORE every source tree, which is Apple's own order:
+# `INCFLAGS = $(INCFLAGS_LOCAL) $(INCFLAGS_GEN) ...` with `INCFLAGS_LOCAL = -I.` (MakeInc.def:466-469)
+# - the build directory, which is where MIG and makesyscalls put their output, ahead of the
+# component's source tree. experiment-119 measured the opposite and concluded the generated root
+# must go last; that was right for what it was testing and wrong as a general rule, because the
+# generated root at the time held MIG output for *every* `.defs`, including `mach/notify.h`, which
+# Apple never generates and which shadows the hand-written one. With the output set taken from
+# Apple's Makefiles (xnu_config/mig_outputs.py), the order flips: 395 vs 384 in the minimal
+# configuration. See experiment-124.
 #
 # What to expect: the ARM layer compiles and most of the kernel does not. The output that matters is
 # `--blockers`: a per-file error count is not actionable, but the list of distinct missing names is,
@@ -193,6 +197,7 @@ OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}
 INCLUDES=(
     -I"$GENERATED/bsd" -I"$GENERATED"
     -I"$OPTION_HEADERS"
+    -I"$MIG_HEADERS"
     -I"$XNU/osfmk"
     -I"$XNU/iokit"
     -I"$XNU/bsd"
@@ -201,15 +206,6 @@ INCLUDES=(
     -I"$XNU"
     -I"$XNU/osfmk/arm" -I"$XNU/bsd/arm"
     -I"$XNU/EXTERNAL_HEADERS"
-    # The MIG output goes AFTER every source tree, not before it, and that is a measured choice.
-    # MIG generates `<mach/memory_object.h>`, `<mach/notify.h>` and `<mach/semaphore.h>` from the
-    # `.defs` of the same names, and the tree has hand-written headers at exactly those paths, so in
-    # front of `-I$XNU/osfmk` the generated ones shadow the real ones: 307 files compiled with the
-    # generated root first, 312 with it last. It is the same lesson as the `osfmk/libsa` row above,
-    # from the other direction - a generated root is not the tree, and it must not sit in front of
-    # it. The 3 collisions are the whole difference; the 39 non-colliding generated headers resolve
-    # either way.
-    -I"$MIG_HEADERS"
     -I"$SHIMS" -I"$SHIMS/kern" -I"$SHIMS/mach"
     -I"$SHIMS_ARM" -I"$SHIMS_ARM/kern" -I"$SHIMS_ARM/mach"
     -I"$SHIMS_ARM/sys" -I"$SHIMS_ARM/sys/_pthread"

@@ -32,17 +32,29 @@
 #     export roots first, trees after    185
 #     trees first, export roots after    185
 #
-# (The baseline is 288 of 401 since experiment-118 adopted Apple's *per-component* defines, which is
-# the other half of the split this note is about: the export roots were not what was missing.)
+# (The baseline is 395 of 419 today, after experiments 118 and 124.)
 #
-# The reason is in Apple's own flags: `INCFLAGS_GEN` is `-I$(SRCROOT)/$(COMPONENT)
-# -I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)` - the *own* component's source tree comes first and the
-# export root only supplements it, while a consuming component sees imports. A single build with no
-# per-component Makefiles cannot reproduce that split, and approximating it by putting the filtered
-# view in front of the full tree makes things worse, because the filtered view is smaller.
+# SUPERSEDED IN PART, 2026-09-17 (experiment-124), and the correction matters more than the result.
+# The measurement below was taken with a MIG root that generated *every* `.defs` in `osfmk`. With the
+# output set taken from Apple's own Makefiles (`tools/xnu_config/mig_outputs.py`), putting the
+# generated root **ahead** of the source trees is *better* - 395 against 384 - which is Apple's own
+# order:
 #
-# The tool is kept because it is a faithful reproduction of the mechanism and will matter the
-# moment anything *is* built per component. It is not wired into build_xnu_arm_kernel.sh.
+#   INCFLAGS_LOCAL = -I.                      MakeInc.def:466   the build directory, where MIG writes
+#   INCFLAGS       = $(INCFLAGS_LOCAL) $(INCFLAGS_GEN) ...      MakeInc.def:469
+#
+# So the general rule this note used to draw - "a generated root must not sit in front of the tree" -
+# was an artifact of over-generating, and `build_xnu_arm_kernel.sh` now does the opposite. The
+# export-root experiment above stands on its own terms and is unaffected: those were *copies of
+# source headers*, not generator output, and the export roots measured worse in every arrangement.
+#
+# The reason is still in Apple's flags: `INCFLAGS_GEN` is `-I$(SRCROOT)/$(COMPONENT)
+# -I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)` - the own component's source tree comes first and the export
+# root only supplements it, while a consuming component sees imports. A single build with no
+# per-component Makefiles cannot reproduce that split.
+#
+# The tool is kept because it is a faithful reproduction of the mechanism and will matter the moment
+# anything *is* built per component. It is not wired into build_xnu_arm_kernel.sh.
 
 set -uo pipefail
 
