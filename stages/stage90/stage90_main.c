@@ -946,7 +946,13 @@ void stage90_main(void)
      * unbounded spin here would make the run whose purpose is to prove the recovery net the
      * one run that could hang worst.
      */
-    log_puts("MI4IOS6_STAGE90 hw_watchdog SELFTEST: spinning; the hardware countdown should reboot us at ~33s\n");
+    /* The bark/bite gap is 3s, so the reset lands at TIMEOUT_S + 3. Say the number rather
+     * than a literal, since the timeout has already changed once (30 -> 25, see stage90.h). */
+    log_puts("MI4IOS6_STAGE90 hw_watchdog SELFTEST: spinning; the hardware countdown should reboot us at ~");
+    log_hex32(STAGE90_HW_WATCHDOG_TIMEOUT_S + STAGE90_HW_WATCHDOG_BITE_GAP_S);
+    log_puts("s; if it does not, the bounded spin reboots us at ~");
+    log_hex32(STAGE90_SELFTEST_DEADLINE_US / 1000000u);
+    log_puts("s\n");
     stage90_selftest_bounded_spin(STAGE90_SELFTEST_DEADLINE_US,
                                   "hw_watchdog SELFTEST: deadline reached - the hardware watchdog did NOT fire");
 #endif

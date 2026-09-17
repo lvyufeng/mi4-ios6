@@ -4048,14 +4048,43 @@ struct stage90_xnu_macho_loader_result {
 #endif
 
 /*
- * How long the payload may run before the hardware watchdog resets the SoC. The
- * normal payload run is about a second; 30s is chosen to be unmistakably longer than
- * any healthy run while still being far shorter than the manual power-cycle it
- * replaces. Note this is the *outer* bound: the software dead-man (60s) is
- * deliberately longer, because the hardware net exists precisely for the case where
- * the software one cannot fire.
+ * How long the payload may run before the hardware watchdog resets the SoC.
+ *
+ * 25s: unmistakably longer than any healthy run (~1s), far shorter than the manual power
+ * cycle it replaces, and - the part hardware taught us - small enough to fit.
+ *
+ * The bark and bite registers are 20 bits wide. WDT_HZ is 32765, so the largest encodable
+ * value is 0xfffff / 32765 = 32.0s, and with the vendor driver's 3s bark->bite gap the bark
+ * itself must be at most 29s. The first version used 30s: bark 982950 ticks (fits), bite
+ * 1081245 ticks (does NOT fit - it truncated to 0x7f9d, a 1.00s gap instead of 3s). Hardware
+ * showed it in the readback:
+ *
+ *     hw_watchdog_bite_ticks_written=0x00107f9d
+ *     hw_watchdog_bite_after        =0x00007f9d      <- top bit gone
+ *
+ * The watchdog still fired and the device still returned - the truncation only shortened the
+ * gap - but the mismatch made readback_ok report "NOT confirmed armed", so a net that
+ * demonstrably worked was reported as absent. Both halves are fixed: this value fits, and the
+ * readback now distinguishes truncation from a dead register.
+ *
+ * Note this is the *outer* bound: the software dead-man (60s) is deliberately longer, because
+ * the hardware net exists precisely for the case where the software one cannot fire.
  */
-#define STAGE90_HW_WATCHDOG_TIMEOUT_S 30u
+#if !defined(STAGE90_HW_WATCHDOG_TIMEOUT_S)
+#define STAGE90_HW_WATCHDOG_TIMEOUT_S 25u
+#endif
+
+/* The vendor driver's own gap between bark and bite. */
+#define STAGE90_HW_WATCHDOG_BITE_GAP_S 3u
+
+/* Both registers are 20 bits - measured, and consistent with the vendor driver's own
+ * `(sts >> 1) & 0xFFFFF` for the live countdown. Anything above this truncates in hardware. */
+#define STAGE90_HW_WATCHDOG_MAX_TICKS 0x000fffffu
+
+/* Fail at compile time rather than truncating at run time. */
+#if ((STAGE90_HW_WATCHDOG_TIMEOUT_S + STAGE90_HW_WATCHDOG_BITE_GAP_S) * 32765u) > STAGE90_HW_WATCHDOG_MAX_TICKS
+#error "STAGE90_HW_WATCHDOG_TIMEOUT_S + BITE_GAP_S overflows the 20-bit bark/bite registers"
+#endif
 
 /*
  * Self-test for the hardware watchdog alone: arm it, do NOT arm the software
@@ -6384,6 +6413,8 @@ struct stage90_hw_watchdog_result {
     uint32_t countdown_second;
     uint32_t counter_running;
     uint32_t countdown_plausible;
+    uint32_t bite_truncated;
+    uint32_t max_ticks;
     uint32_t readback_ok;
     uint32_t checksum;
 };

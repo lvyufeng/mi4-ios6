@@ -102,8 +102,14 @@
 /* The watchdog's own clock, in Hz, per msm_watchdog_v2.c (module param WDT_HZ). */
 #define MSM8974_WDT_HZ         32765u
 
-/* The vendor driver's own gap between the bark interrupt and the bite. */
-#define MSM8974_WDT_BITE_EXTRA_TICKS (3u * MSM8974_WDT_HZ)
+/*
+ * The vendor driver's own gap between the bark interrupt and the bite, and the width of the
+ * two registers. Both are 20 bits: measured on hardware, and consistent with the driver's own
+ * `(sts >> 1) & 0xFFFFF` for the live countdown. A value above 0xfffff truncates silently,
+ * which is how a 33s bite became a 1.00s one on the first selftest run.
+ */
+#define MSM8974_WDT_BITE_EXTRA_TICKS ((uint32_t)STAGE90_HW_WATCHDOG_BITE_GAP_S * MSM8974_WDT_HZ)
+#define MSM8974_WDT_MAX_TICKS        STAGE90_HW_WATCHDOG_MAX_TICKS
 
 static struct stage90_hw_watchdog_result g_result;
 
@@ -153,6 +159,8 @@ void stage90_hw_watchdog_log(const struct stage90_hw_watchdog_result *r)
     xnu_log_kv32("hw_watchdog_countdown_second", r->countdown_second);
     xnu_log_kv32("hw_watchdog_counter_running", r->counter_running);
     xnu_log_kv32("hw_watchdog_countdown_plausible", r->countdown_plausible);
+    xnu_log_kv32("hw_watchdog_bite_truncated", r->bite_truncated);
+    xnu_log_kv32("hw_watchdog_max_ticks", r->max_ticks);
     xnu_log_kv32("hw_watchdog_readback_ok", r->readback_ok);
     xnu_log_kv32("hw_watchdog_checksum", r->checksum);
 }
@@ -197,9 +205,18 @@ int stage90_hw_watchdog_arm(uint32_t timeout_s)
     xnu_log_kv32("hw_watchdog_en_before", r->en_before);
     xnu_log_kv32("hw_watchdog_countdown_before", hw_wdt_countdown());
 
-    /* Guard against the tick values wrapping the 32-bit registers. */
-    if (timeout_s > ((0xffffffffu - MSM8974_WDT_BITE_EXTRA_TICKS) / MSM8974_WDT_HZ)) {
-        xnu_log_puts("stage90 hw_watchdog: timeout too large to encode; not arming\n");
+    /*
+     * Refuse rather than truncate. The registers are 20 bits, so a value above 0xfffff is
+     * silently cut down in hardware - which is how a 33s bite became 1.00s on the first
+     * selftest run, and why the readback below had to learn to tell truncation from a dead
+     * register. STAGE90_HW_WATCHDOG_TIMEOUT_S is compile-time checked, so reaching this at
+     * run time means a caller passed its own value.
+     */
+    r->max_ticks = MSM8974_WDT_MAX_TICKS;
+    if (timeout_s > ((MSM8974_WDT_MAX_TICKS - MSM8974_WDT_BITE_EXTRA_TICKS) / MSM8974_WDT_HZ)) {
+        xnu_log_puts("stage90 hw_watchdog: timeout does not fit the 20-bit registers; refusing to arm\n");
+        xnu_log_kv32("hw_watchdog_timeout_s", timeout_s);
+        xnu_log_kv32("hw_watchdog_max_ticks", MSM8974_WDT_MAX_TICKS);
         r->readback_ok = 0u;
         return 0;
     }
@@ -236,29 +253,37 @@ int stage90_hw_watchdog_arm(uint32_t timeout_s)
     r->counter_running = (count_second != count_first) ? 1u : 0u;
 
     /*
-     * And the count is the *right* count. A counter merely observed to move could be
-     * aboot's own arming still running from before the payload started - aboot
-     * programs 20s (msm8974.dtsi: qcom,bark-time = <20000>) - which would make the net
-     * look present with a much shorter timeout than intended.
+     * And the count is the *right* count. A counter merely observed to move could be aboot's
+     * own arming still running from before the payload started - aboot programs 20s
+     * (msm8974.dtsi: qcom,bark-time = <20000>) - which would make the net look present with a
+     * much shorter timeout than intended.
      *
-     * The window is [bark - 2s, bite], not [bark - 2s, bark]. Which value the countdown
-     * reloads from - the bark time or the bite time - is not something the vendor driver
-     * states; it only ever compares the count against the *bark* time when computing
-     * slack, which is consistent with either. Accepting both is free and removes a
-     * false-negative: a watchdog that is working perfectly but counts down from the bite
-     * value would otherwise be reported as "NOT confirmed armed", and the obvious next
-     * move would be to go fix a net that was never broken.
+     * The register counts UP from zero. Two hardware runs settled that, and reading the
+     * vendor driver afterwards confirms it: its pet path computes
      *
-     * What the window still rejects is the value that matters. aboot's 20s arming is
-     * 655300 ticks, well below bark - 2s = 917420, with our 30s bark at 982950 and bite
-     * at 1081245. So the ambiguity is absorbed without losing the discrimination.
+     *     count = (__raw_readl(base + WDT0_STS) >> 1) & 0xFFFFF;
+     *     slack = (bark_time * WDT_HZ / 1000) - count;
+     *
+     * i.e. `slack = bark_ticks - count`, which is only a remaining-time figure if count rises
+     * toward bark_ticks. The first version of this checked for a *down*-counter near the bark
+     * value and so reported count_first = 0 as implausible - a working watchdog again reported
+     * as absent, for the third time in this file's short life.
+     *
+     * So: just after the reset the count should be near zero and rising. That still rejects
+     * aboot's arming, which would be near 655300 ticks (20s) rather than near zero.
      */
-    r->countdown_plausible = ((count_first <= bite_ticks) &&
-                              (count_first >= (bark_ticks - (2u * MSM8974_WDT_HZ)))) ? 1u : 0u;
+    r->countdown_plausible = ((count_first < (2u * MSM8974_WDT_HZ)) &&
+                              (count_second > count_first)) ? 1u : 0u;
 
+    /*
+     * Mask the comparison to the register width. An unmasked compare reports "not armed" for
+     * a watchdog that is demonstrably running whenever a value exceeds 20 bits - which is
+     * exactly what happened, and it turned a working net into a reported failure.
+     */
+    r->bite_truncated = (r->bite_after != bite_ticks) ? 1u : 0u;
     r->readback_ok = ((r->en_after & 1u) == 1u &&
-                      r->bark_after == bark_ticks &&
-                      r->bite_after == bite_ticks) ? 1u : 0u;
+                      (r->bark_after & MSM8974_WDT_MAX_TICKS) == (bark_ticks & MSM8974_WDT_MAX_TICKS) &&
+                      (r->bite_after & MSM8974_WDT_MAX_TICKS) == (bite_ticks & MSM8974_WDT_MAX_TICKS)) ? 1u : 0u;
     r->enabled = ((r->en_after & 1u) == 1u && r->counter_running != 0u &&
                   r->countdown_plausible != 0u) ? 1u : 0u;
 
