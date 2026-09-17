@@ -28,13 +28,23 @@ export XNU_MASTER_LOCAL=${XNU_MASTER_LOCAL:-}
 "$HERE/expand.sh" "${1:?usage: make_defines.sh CONFIG}" \
     | awk '
         $1 == "options" {
-            # The option name is the last field on the line, and it may carry a value.
-            name = $NF
+            # Everything after `options`, not the last field - and this was a real bug rather than
+            # a style choice. `options CONFIG_NMBCLUSTERS="((1024 * 256) / MCLBYTES)"` has a value
+            # containing spaces, so taking $NF gave `MCLBYTES)"`, which stripped to `MCLBYTES)` and
+            # became -DMCLBYTES)=1: one of Apple*s genuine macros redefined to garbage, which then
+            # corrupted every use of it. It cost a 45-minute clang hang on bsd/netinet/ip_input.c
+            # before anyone looked, because the build script had no per-file timeout either.
+            name = $0
+            sub(/^[[:space:]]*options[[:space:]]+/, "", name)
             # Strip a trailing comment if one survived.
             sub(/[[:space:]]*#.*$/, "", name)
+            # Trim any trailing whitespace.
+            sub(/[[:space:]]+$/, "", name)
             if (name == "") next
-            # NAME="expr" -> NAME=expr. The quotes are the config tool'"'"'s, not the compiler'"'"'s.
+            # NAME="expr" -> NAME=expr. The quotes are the config tool*s, not the compiler*s.
             gsub(/"/, "", name)
+            # A value may still contain spaces (`((1024 * 256) / MCLBYTES)`); the shell keeps it as
+            # one word because make_defines.sh emits one define per line and the caller reads lines.
             if (index(name, "=") > 0) print "-D" name
             else                      print "-D" name "=1"
         }

@@ -61,7 +61,11 @@ done
     echo "no generated mach headers - run tools/gen_mach_headers.sh first" >&2; exit 2; }
 
 mkdir -p "$OUT"
+# Truncate every output. A build script that appends leaves the previous run's failures in the
+# list, and a count read from it is then a count of two runs - which is how a 397-file result
+# became 582 here before anyone noticed.
 : > "$OUT/all.log"
+: > "$OUT/failed.txt"
 
 # The force-include set and the values are build_xnu_arm_layer.sh's, which is where they were
 # worked out and where each one's reason is recorded. Duplicated here rather than factored out
@@ -121,11 +125,15 @@ CC_ARGS=(
     -ffreestanding -fno-builtin -fno-common -fno-pic -O2 -w -ferror-limit=0
 )
 
+PER_FILE_TIMEOUT=${PER_FILE_TIMEOUT:-60}
+: > "$OUT/timedout.txt"
+
 ok=0
 fail=0
 absent=0
 skipped=0
 tried=0
+timedout=0
 
 while read -r src; do
     if [[ ! -f $src ]]; then
@@ -149,10 +157,18 @@ while read -r src; do
     name=$(basename "$src" .c)
     # Disambiguate: the manifest has files of the same name in different components.
     key=$(printf '%s' "$src" | sed "s|$XNU/||; s|/|_|g; s|\.c$||")
-    if "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${INCLUDES[@]}" \
+    # Bounded. A file that sends clang into a loop must cost seconds, not the whole session: one
+    # did, for 45 minutes, because this had no timeout and its output was buffered behind a pipe.
+    # A timeout is reported as its own outcome rather than as a compile failure, because "clang
+    # hung" and "XNU does not compile" are different findings.
+    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${INCLUDES[@]}" \
          -c "$src" -o "$OUT/$key.o" 2>"$OUT/$key.log"; then
         ok=$((ok + 1))
         rm -f "$OUT/$key.log"
+    elif [[ $? -eq 124 ]]; then
+        timedout=$((timedout + 1))
+        printf '%s\n' "$src" >> "$OUT/timedout.txt"
+        cat "$OUT/$key.log" >> "$OUT/all.log"
     else
         fail=$((fail + 1))
         cat "$OUT/$key.log" >> "$OUT/all.log"
@@ -166,6 +182,7 @@ echo "  C files tried:        $tried"
 echo "  compile:              $ok"
 echo "  fail:                 $fail"
 echo "  absent from tarball:  $absent"
+echo "  timed out (${PER_FILE_TIMEOUT}s): $timedout"
 echo "  skipped (.s, .cpp):   $skipped"
 echo "  objects in $OUT"
 
@@ -175,6 +192,11 @@ if [[ $SHOW_BLOCKERS -gt 0 ]]; then
     grep -hoE "unknown type name '[A-Za-z_][A-Za-z0-9_]*'|use of undeclared identifier '[A-Za-z_][A-Za-z0-9_]*'" "$OUT/all.log" \
         | sed "s/unknown type name '//;s/use of undeclared identifier '//;s/'//" \
         | sort | uniq -c | sort -rn | head -"$SHOW_BLOCKERS"
+    if [[ -s $OUT/timedout.txt ]]; then
+        echo
+        echo "== clang did not finish in ${PER_FILE_TIMEOUT}s =="
+        sed 's/^/  /' "$OUT/timedout.txt"
+    fi
     echo
     echo "== missing headers =="
     grep -hoE "'[^']*\.h' file not found" "$OUT/all.log" | sort | uniq -c | sort -rn | head -"$SHOW_BLOCKERS"

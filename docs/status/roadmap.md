@@ -946,6 +946,21 @@ makes the kernel's win, taking `iokit` from 1 failing file to **0**. Also correc
 script now compiles with the configuration's own 104 options rather than a handful of hand-worked
 flags, which is why `experiment-114`'s numbers were low.
 
+**Two tooling defects, found because a run hung for 45 minutes** (2026-09-17,
+[`experiment-116`](../experiments/experiment-116-define-generator-and-timeout.md)).
+`make_defines.sh` read the option name as `$NF`, which is wrong for the one option whose value
+contains spaces — `CONFIG_NMBCLUSTERS="((1024 * 256) / MCLBYTES)"` became `-DMCLBYTES)=1`, a
+*corrupted* definition of a real kernel macro rather than a missing one. And `build_xnu_arm_kernel.sh`
+had no per-file timeout and only appended to its failure list, so one non-terminating file stopped
+the run forever and a count read afterwards was a count of two runs. Both fixed: the generator now
+takes everything after `options`, the build bounds each file at 60 s, reports a timeout as its own
+outcome, and truncates every output.
+
+Corrected: **`RELEASE` 197 of 569 compile** (was 172), **`STAGE90_BOOT` 191 of 401**. One file,
+`bsd/netinet/ip_input.c`, still times out under a *combination* of `RELEASE`'s options — not the
+preprocessor (`clang -E` exits normally), and no single option reproduces it. Left as an unfinished
+bisect rather than implied to be resolved.
+
 What remains is the Mach-view-versus-BSD-view collisions (`uthread_t`, a genuinely conflicting
 `copyinstr`, `ORDINARY`/`struct tty`), and Apple's build resolves those through the **exported-header
 set** — `makedefs/MakeInc.def:463-469` shows `INCFLAGS_IMPORT` pointing at
