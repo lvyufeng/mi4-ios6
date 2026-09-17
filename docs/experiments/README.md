@@ -148,6 +148,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-132](experiment-132-pty-device-and-a-named-unknown.md) | The pty Device, Resolved by Measurement — and One Value Left With No Evidence |
 | stage90 | [experiment-133](experiment-133-device-baseline-revalidated.md) | The Device Line, Re-Validated After Fourteen Stages of Host-Side Work |
 | stage90 | [experiment-134](experiment-134-pe-arm-init-interrupts-replacement.md) | The Replacement for `pe_arm_init_interrupts`, Run on the Device |
+| stage90 | [experiment-135](experiment-135-first-xnu-image.md) | An XNU Image, Linked at XNU's Own Addresses, With a Real `_start` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

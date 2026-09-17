@@ -1413,6 +1413,37 @@ third thing `pe_arm_init_interrupts` does that is still not replaced: `tbd_fiq_h
 shim deliberately leaves NULL, because FIQ is the live path on this build and the payload has only
 ever driven IRQ.
 
+**AND THERE IS NOW AN XNU IMAGE** (2026-09-17,
+[`experiment-135`](../experiments/experiment-135-first-xnu-image.md)). `tools/measure_link.sh` links
+a **final** ELF against a script that places the kernel where `start.s` says it lives (`0x80000000`,
+`physBase` 0, sections 1 MB-aligned for the section descriptors at `start.s:195-207`), stubbing every
+symbol the build cannot provide as a weak function so the linker can do the part of its job that has
+nothing to do with missing code.
+
+| | text | data | bss | entry |
+| --- | --- | --- | --- | --- |
+| `RELEASE` | 4 179 211 B | 99 032 B | 299 644 B | `_start` @ `0x803a7074` |
+| `STAGE90_BOOT` | 2 096 167 B | 52 984 B | 222 776 B | `_start` @ `0x801cd074` |
+
+Three things it measured that `ld -r` cannot:
+
+1. **Zero linker diagnostics other than undefined references, and `readelf -r` reports "There are no
+   relocations in this file."** No branch out of range, no unrepresentable relocation, no section
+   that will not place.
+2. **XNU's real entry sequence is in the image and reads `boot_args` where the contract says** —
+   `ldr r8, [r0, #8]` / `ldr r9, [r0, #4]` / `ldr sl, [r0, #12]`, the `virtBase`/`physBase`/`memSize`
+   offsets `docs/reference/xnu-handoff-contract.md` derives and `tools/check_xnu_struct_abi.py`
+   guards. `arm_init`, `arm_vm_init`, `machine_startup`, `kernel_bootstrap` and `rtclock_init` are
+   all present as **real functions, not stubs**.
+3. **It fits**: `RELEASE` spans 4.38 MB against the 93 MB `memSize` the conforming `boot_args`
+   declares, with `.data` exactly 1 MB-aligned.
+
+**It is not bootable and has not been put on the device.** 443 symbols are stubs that return 0 —
+including `PE_putc` and `kprintf`, so a boot attempt would be a **silent hang with no log**, the
+exact failure mode Phase 0 exists to eliminate. The distance to a boot attempt is therefore not
+"make the link succeed" (it does) but **which of the 443 stubs must become real first**; the console
+path is the one to do first, because without it every later step is unobservable.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
