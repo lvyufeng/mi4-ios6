@@ -75,7 +75,19 @@ CONFIG_DEFINES=()
 while IFS= read -r d; do [[ -n $d ]] && CONFIG_DEFINES+=("$d"); done \
     < <("$TOOLS_DIR/xnu_config/make_defines.sh" "$CONFIG")
 
-TARGET=(--target=armv7-apple-darwin -mcpu=cortex-a15 -marm -mfpu=neon-vfpv4 -mfloat-abi=softfp)
+# `-mabi=aapcs` is load-bearing, and it is the answer to the one thing that argued against this
+# target. `bsd/net/dlil.c:1419` carries a compile-time assertion in XNU's own source -
+# `IF_DATA_REQUIRE_ALIGNED_64(ifi_ipackets)`, "these fields must be 64-bit aligned for atomic
+# operations" - and it FAILS under a plain `armv7-apple-darwin`, because clang 14's Darwin ARM ABI
+# aligns `long long` to 4 while XNU asserts 8. Measured:
+#
+#   armv7-none-eabi                    offsetof(char c; unsigned long long v) = 8
+#   armv7-apple-darwin                 4    <- the assertion fails
+#   armv7-apple-darwin -mabi=aapcs     8    <- and passes
+#
+# AAPCS is what Apple's own build used; `-mabi=aapcs` is how clang 14 spells it. So option A is
+# "the Darwin target with the alignment Apple's toolchain had", and it is one flag, not an unknown.
+TARGET=(--target=armv7-apple-darwin -mabi=aapcs -mcpu=cortex-a15 -marm -mfpu=neon-vfpv4 -mfloat-abi=softfp)
 DEFINES=(
     "${CONFIG_DEFINES[@]}"
     # MACH_KERNEL_PRIVATE is NOT here: it is per-component, and it is what reaches

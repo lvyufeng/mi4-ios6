@@ -1728,7 +1728,7 @@ outputs do not read each other.
 | | ELF | Mach-O |
 | --- | --- | --- |
 | manifest `.s` that assemble | 13 of 17 | **17 of 17** |
-| manifest `.c` that compile | **607 of 615** | 601 of 615 |
+| manifest `.c` that compile | **607 of 615** | 602 of 615 |
 | boot-path stubs the assembly closes | — | **23 of 89, and they are the 23 nearest `arm_init`** |
 
 `BootCpuData`, `CpuDataEntries`, `intstack_top`, `fiqstack_top`, `get_mmu_control`,
@@ -1745,14 +1745,13 @@ defines, 271 files failing on `ffs`. One move to the per-component set took it 2
 existed, was written down, and a new file did not inherit it: a build configuration living in two
 scripts will drift.
 
-**AND A REAL ABI FINDING THAT COMPLICATES THE CHOICE**: `bsd/net/dlil.c:1419`'s
-`IF_DATA_REQUIRE_ALIGNED_64(ifi_ipackets)` — **an assertion in XNU's own source** — fails under
-`armv7-apple-darwin` and passes under `armv7-none-eabi`, because `offsetof(char c; unsigned long long v)`
-is **8** under the EABI and **4** under clang 14's Darwin ARM ABI. XNU asserts 8. So Apple's build set
-an alignment their clang produced for this target and clang 14 does not default to. **Option A is not
-"change the triple" - it is "the Darwin triple with the alignment flags Apple's build used", and those
-are not established here.** A first attempt that only changes `--target` would trade four assembly
-files for one C file and a set of alignment questions.
+**AND THE ONE THING THAT ARGUED AGAINST IT IS ONE FLAG.** `bsd/net/dlil.c:1419`'s
+`IF_DATA_REQUIRE_ALIGNED_64(ifi_ipackets)` — **an assertion in XNU's own source** — fails under a
+plain `armv7-apple-darwin`, because clang 14's Darwin ARM ABI aligns `long long` to 4 and XNU asserts
+8. Measured: `armv7-none-eabi` gives 8, `armv7-apple-darwin` gives 4, and **`armv7-apple-darwin
+-mabi=aapcs` gives 8** — AAPCS is what Apple's toolchain used and clang 14 has to be told. With that
+flag `dlil.c` compiles and the Mach-O C count is **602 of 615**. So option A is *"the Darwin target
+with AAPCS, plus a Mach-O linker"* — two nameable things, no unknowns.
 
 **B and C do not advance the goal.** The boot path's nearest 23 stubs are blocked on the triple, and
 A - done properly - is the only option that moves them.
