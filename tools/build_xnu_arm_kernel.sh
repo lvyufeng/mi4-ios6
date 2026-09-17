@@ -101,12 +101,25 @@ FORCE_INCLUDES=(
     -include arm/simple_lock.h
     -include kern/queue.h
     -include kern/ast.h
-    -include stdatomic.h
     -include mach/task_policy.h
     -include mach/thread_policy.h
     -include mi4ios6_build_config.h
     -include meta_features.h
 )
+# `-include stdatomic.h` used to be in that list, to get `enum memory_order` for the osfmk/arm
+# atomics. It is NOT there any more, and the reason is a side effect nine files wide:
+# EXTERNAL_HEADERS/stdatomic.h:38 includes <stddef.h>, which defines `ptrdiff_t`, and
+# `libkern/zlib/zutil.h:193-194` is
+#
+#     #if KERNEL
+#         typedef long ptrdiff_t;
+#
+# in a file Apple compiles into the ARM kernel - so in Apple's build `ptrdiff_t` is NOT defined at
+# that point and Apple's kernel <string.h> does not pull stddef.h in. Force-including stdatomic.h
+# put it into every translation unit and failed eight libkern/zlib files with "typedef redefinition
+# with different types ('long' vs ... 'int')". Removing it is 381 -> 389 of 419 with no regressions.
+# Nothing that needs the atomics header includes it by name, so this was invisible until the
+# zlib failures were attributed to their actual source.
 
 # The configuration's own options, expanded from MASTER via the doconf pipeline. These are the
 # values Apple's build would have; the block below is only the flags that configure the *toolchain*

@@ -1125,6 +1125,44 @@ failures, small and scattered — `clock_t`/`uid_t`, `u_char`/`caddr_t`, the `_C
 `z_off_t` in zlib, and experiment-121's three include-order regressions. No single fix is worth 30
 files any more, which is the state change: the structural gaps are gone.
 
+**AND THE LINK GAP IS MEASURED, WHICH IS THE NUMBER THAT MATTERS** (2026-09-17,
+[`experiment-123`](../experiments/experiment-123-link-gap-and-force-includes.md)). Every stage so
+far reported a *compile* count, which says nothing about what is missing — most of the manifest's
+587 files do not matter for any given symbol. `tools/link_gap.sh` answers the other question
+without a linker, by taking every symbol the compiled objects reference, subtracting every symbol
+any of them defines, and separating out the compiler runtime:
+
+```
+objects:                                        539
+symbols defined:                              13682
+MISSING (referenced by every, defined by none): 1187
+  of which compiler runtime (libgcc/compiler-rt): 9      (__aeabi_*)
+  of which a source file must provide:           1178
+```
+
+**Attribution is what turns it into a work list.** At least 182 are defined by a file that currently
+fails to compile — 42 in `vm_pageout.c`, 16 each in `kern/task.c` and `vm_compressor.c`, 15 in
+`libkern/gen/OSAtomicOperations.c` — and that count is a floor, since it comes from definition-shaped
+lines at column 0 and much of XNU puts the return type on its own line.
+
+**And it immediately explained a failure that had been mis-described for several stages.** The
+"`z_off_t` in zlib" cluster (8 files) is not about `z_off_t`:
+`libkern/zlib/zutil.h:193-194` is `#if KERNEL / typedef long ptrdiff_t;` in a file Apple compiles,
+so in Apple's build `ptrdiff_t` is undefined there. Two things here defined it —
+`shims_arm/string.h` included `<stddef.h>` for `size_t`, and `-include stdatomic.h` reaches
+`EXTERNAL_HEADERS/stddef.h` at its line 38. Both now take the compiler's own builtin instead, and
+`_SIZE_T` is claimed because `stddef.h:28` and `osfmk/libsa/types.h:52` both guard `size_t` with it
+and `libsa` says `unsigned long` where this target's compiler says `unsigned int`. **389 of 419.**
+
+**`armv7-apple-darwin` measured and not adopted:** 390 vs 389, and it produces Mach-O objects that
+nothing on this host can link — `/usr/lib/llvm-14/bin` has `llvm-nm`, `llvm-size` and `llvm-ar` but
+no `ld64.lld`. The right target in principle, and a decision for the link step rather than this one.
+
+**`STAGE90_BOOT` 381 → 389 of 419, `RELEASE` 499 → 507 of 587.** What is left is 30 and 80
+failures, small and scattered — `clock_t`/`uid_t`, `u_char`/`caddr_t`, experiment-121's three
+include-order regressions, and four genuinely absent headers (`pty.h`, `loop.h`, `compat_43.h`,
+`sys/modctl.h`). `libkern/zlib` is entirely clear.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.
