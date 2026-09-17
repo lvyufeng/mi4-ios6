@@ -1564,6 +1564,31 @@ and nothing else). **`RELEASE` 600 → 602, `STAGE90_BOOT` 407 → 409, image 37
 120 → 113.** Left alone and named: `vnode_pager.c`'s `vnode_trim` is a *conflict*, not an absence,
 and needs its two definitions compared rather than a header supplied.
 
+**AND `size_t` IS THE FOURTH THING POINTING AT THE TRIPLE** (2026-09-17,
+[`experiment-141`](../experiments/experiment-141-vnode-trim-is-the-triple.md)). `vm_protos.h:224`
+declares `vnode_trim(..., unsigned long len)` and `vnode_pager.c:211` defines it with `size_t`, and
+on this target `size_t` is `unsigned int` — reduced to a minimal case, clang calls that a hard error.
+XNU's own `bsd/arm/_types.h:67-71` is `typedef __SIZE_TYPE__ __darwin_size_t` when `__SIZE_TYPE__`
+is defined and `unsigned long` otherwise, so **Apple's build and this one each agree with their own
+compiler and XNU's two headers disagree only under ELF**.
+
+**And the command line cannot change it**: `-D__SIZE_TYPE__=long` is overridden — clang applies its
+builtin *after* the command line, confirmed with `__builtin_types_compatible_p`, and adding the flag
+to the whole build changes nothing (602 either way, no regressions, no new passes). So `vnode_trim`
+is the Mach-O triple or a source edit, and this project does not edit XNU's source.
+
+That is the **fourth** independent finding pointing at the same choice: the triple (119/123), the
+Mach-O directives and macro dialect in `data.s`/`machine_routines_asm.s` (137), the underscore
+convention (138), and now `size_t` (141).
+
+**Also**: `osfmk/kperf/kperfbsd.c` is an osfmk file that includes BSD headers, so it sees both
+`clock_t` definitions. `-D_CLOCK_T=1` is now given to **osfmk files only** — the same restriction and
+reason as the BSD-only `-include sys/types.h` — which removes that conflict and moves the file on to
+`ffs`/`fls`, i.e. experiment-118's defect from the other side, in a file that genuinely straddles the
+Mach/BSD boundary. One file; no flag set satisfies both views.
+
+**No count moved: `RELEASE` 602 of 615, boot path 113 stubs.**
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

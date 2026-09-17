@@ -348,6 +348,18 @@ while read -r src; do
     BSD_FORCE=()
     [[ $SRC_COMPONENT == bsd ]] && BSD_FORCE=(-include sys/types.h)
 
+    # `clock_t`, per component, and this is the `-D_CLOCK_T` question arriving from the other side.
+    # experiment-126 removed that flag because the per-component defines made both halves agree:
+    # a BSD file gets `bsd/sys/_types/_clock_t.h`'s `__darwin_clock_t`, and `kern_types.h`'s
+    # `struct clock *` is not reachable from it. **But `osfmk/kperf/kperfbsd.c` is an osfmk file
+    # that includes `bsd/libkern/libkern.h` → `bsd/sys/types.h` → `_clock_t.h`**, so it sees both and
+    # they conflict. The flag answers it in the direction that is now correct for osfmk files - it
+    # takes `_clock_t.h`'s guard so `kern_types.h`'s definition is the one that survives - and it
+    # is given to osfmk files only, which is the same restriction the BSD-only `sys/types.h` above
+    # needs and for the same reason: which definition is right depends on the component.
+    CLOCK_FORCE=()
+    [[ $SRC_COMPONENT == osfmk ]] && CLOCK_FORCE=(-D_CLOCK_T=1)
+
     FILE_INCLUDES=()
     for _inc in "${INCLUDES[@]}"; do
         if [[ $_inc == COMP_FIRST_PLACEHOLDER ]]; then
@@ -356,6 +368,7 @@ while read -r src; do
             FILE_INCLUDES+=("$_inc")
         fi
     done
+    FILE_DEFINES=("${CLOCK_FORCE[@]}")
 
     # shellcheck disable=SC2207
     COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" "$(component_of "$src")") )
@@ -363,7 +376,7 @@ while read -r src; do
     # did, for 45 minutes, because this had no timeout and its output was buffered behind a pipe.
     # A timeout is reported as its own outcome rather than as a compile failure, because "clang
     # hung" and "XNU does not compile" are different findings.
-    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${BSD_FORCE[@]}" "${FILE_INCLUDES[@]}" \
+    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${FILE_DEFINES[@]}" "${BSD_FORCE[@]}" "${FILE_INCLUDES[@]}" \
          -c "$src" -o "$OUT/$key.o" 2>"$OUT/$key.log"; then
         ok=$((ok + 1))
         rm -f "$OUT/$key.log"
