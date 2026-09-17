@@ -47,6 +47,23 @@ extern void PE_init_printf(boolean_t vm_initialized);
 extern void PE_enter_debugger(const char *cause);
 extern void (*PE_putc)(char);
 
+/*
+ * Everything below is only reachable through kernel_entry's `#if STAGE90_XNU_REAL_DT` call site -
+ * but this file is compiled in every build, so it must not *reference* anything that only exists
+ * when the switch is on. The console hooks live in xnu_object_shims.o, which is linked only then,
+ * so the body is guarded and an empty object is left otherwise.
+ */
+#if !STAGE90_XNU_REAL_DT
+
+const struct stage90_xnu_real_dt_result *stage90_xnu_real_dt_result(void)
+{
+    static const struct stage90_xnu_real_dt_result none;
+
+    return &none;
+}
+
+#else
+
 /* The probe's own arena for the entries it hands back; XNU's code allocates nothing here. */
 static struct stage90_xnu_real_dt_result g_result;
 
@@ -521,3 +538,5 @@ const struct stage90_xnu_real_dt_result *stage90_xnu_real_dt_result(void)
 {
     return &g_result;
 }
+
+#endif /* STAGE90_XNU_REAL_DT */

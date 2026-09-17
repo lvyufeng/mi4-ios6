@@ -6828,13 +6828,16 @@ static inline uint32_t stage90_xnu_real_dt_checksum(const struct stage90_xnu_rea
  * xnu_object_shims.c, which is only linked when STAGE90_XNU_REAL_DT is on, so the device-tree
  * builder can only ask for it in that configuration.
  */
-#if STAGE90_XNU_REAL_DT
+/*
+ * Declared unconditionally, defined only in the STAGE90_XNU_REAL_DT build (xnu_object_shims.o is
+ * linked only then). A declaration costs nothing when nothing uses it; guarding these on the same
+ * switch as the callers is what broke the default build the first time, because xnu_real_dt.c is
+ * always compiled even when its caller is not.
+ */
 uint32_t stage90_xnu_consistent_debug_region_init(void);
-/* pe_gen.c's console hooks, wired by xnu_real_dt.c; see xnu_object_shims.c. */
 extern void (*stage90_xnu_shim_console_hook)(char);
 extern uint32_t stage90_xnu_shim_debugger_calls;
 extern const char *stage90_xnu_shim_debugger_reason;
-#endif
 int gic_sgi_selftest(void);
 int gic_timer_selftest(void);
 
