@@ -31,13 +31,28 @@
  *    surfaces later as a clock or scheduling bug. This shim mirrors that guard exactly and
  *    then *reads the registration back* to confirm it took.
  *
+ * 3. **No FIQ handler, and that is now a measured answer rather than an open question.**
+ *    XNU's `locore.s:147` takes the `#else` branch (because `__ARM_TIME__` is undefined), so
+ *    its timer arrives on **FIQ** on this build and `pe_arm_init_timer` supplies
+ *    `fleh_fiq_generic` for it. The shim must therefore decide whether to supply
+ *    `tbd_fiq_handler`, and the answer is **no** - measured on the device
+ *    (`docs/experiments/experiment-143-fiq-not-available.md`): with intid 19 in GIC Group 0,
+ *    Group 0 enabled at both ends, FIQ unmasked and the timer measurably fired
+ *    (`fiq_timer_fired=1`), **no FIQ is taken** (`fiq_probe_fiq_delivered=0`). The vendor
+ *    header's "FIQ requires secure mode" is true here.
+ *
+ *    **So the resolution is `__ARM_TIME__`** - the tree's complete IRQ path
+ *    (`Lexc_decirq_vector` -> `fleh_decirq`, both real code) with the decrementer callbacks
+ *    pointed at CNTP, which is decision 1 above and which the payload has already driven end
+ *    to end (experiment-104: 10 ms asked for, 9961 us measured through the payload's own GIC
+ *    IRQ path). The shim leaves `tbd_fiq_handler` NULL because a handler there **cannot be
+ *    reached on this SoC**, not because it is unfinished.
+ *
  * What is not claimed
  * -------------------
  * This does not run XNU. It is the platform layer XNU would need, written so that its
  * hardware facts are explicit, its registration contract is enforced, and it can be
- * exercised on the device by the existing payload. The FIQ question (spec section 6) is
- * deliberately not resolved here: the shim drives the timer as an IRQ, and whether XNU's own
- * FIQ vector path is usable on MSM8974 remains open.
+ * exercised on the device by the existing payload.
  */
 
 #include "stage90.h"
@@ -159,9 +174,10 @@ static inline void shim_barrier(void)
  * The three tbd_ops callbacks.
  *
  * `get`/`set` are CNTP_TVAL, matching the counter the payload already drives and whose
- * interrupt number is measured. `tbd_fiq_handler` is deliberately left NULL here: the shim
- * does not install a FIQ handler, and leaving it NULL keeps XNU's registration re-entrant
- * (ml_init_timebase's second condition) so a later FIQ attempt can register over this.
+ * interrupt number is measured. `tbd_fiq_handler` is deliberately NULL - see decision 3 above:
+ * FIQ is measurably undeliverable here, so the timer's route is `__ARM_TIME__`'s IRQ path,
+ * which is what these two callbacks serve. (Leaving it NULL also keeps XNU's registration
+ * re-entrant, `ml_init_timebase`'s second condition, which costs nothing.)
  */
 static uint32_t shim_get_decrementer(void)
 {
@@ -174,7 +190,13 @@ static void shim_set_decrementer(uint32_t dec_value)
 }
 
 static struct stage90_xnu_tbd_ops g_shim_ops = {
-	.tbd_fiq_handler = 0,               /* no FIQ path - see the file comment */
+	/*
+	 * NULL because FIQ cannot be delivered to non-secure PL1 on this SoC - measured, not
+	 * unfinished. See decision 3 in the file comment and experiment-143. A handler here would
+	 * never be called; the resolution is __ARM_TIME__, which routes the timer through the IRQ
+	 * path these two callbacks already serve.
+	 */
+	.tbd_fiq_handler = 0,
 	.tbd_get_decrementer = shim_get_decrementer,
 	.tbd_set_decrementer = shim_set_decrementer,
 };

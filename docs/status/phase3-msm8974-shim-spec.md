@@ -583,3 +583,21 @@ needs and it is unambiguous.
 — the tree's complete IRQ path (`Lexc_decirq_vector` → `fleh_decirq`), with the decrementer callbacks
 pointed at CNTP. That is §6.2.1's option 2, and the payload has already validated that IRQ path end
 to end (`experiment-104`: 10 ms asked for, 9961 µs measured).
+
+---
+
+## 2.3b The four things `pe_arm_init_interrupts` does, all answered
+
+2026-09-17. Every row has a hardware result behind it, and the third column says which experiment.
+
+| | status | evidence |
+| --- | --- | --- |
+| map step (`gSocPhys`, `gPicBase`, `gTimerBase`) | replaced, run on the device | experiment-134 |
+| board-class dispatch | replaced; **`would_return = 0` measured** | experiment-134 |
+| `tbd_ops` registration + timer | run through XNU's own interface; 10 ms asked, 9961 µs measured | experiment-104, re-run in 147 |
+| `tbd_fiq_handler` | **measured unavailable** — the resolution is `__ARM_TIME__` | experiment-143 |
+
+**What is not done is not a design gap: XNU does not call any of it.** The payload calls these
+functions, because XNU is not running. Wiring the shim in needs an XNU that reaches
+`pe_arm_init_interrupts`, which is the host-side build — 607 of 615 files compiling, with the eight
+remaining individually distinct.
