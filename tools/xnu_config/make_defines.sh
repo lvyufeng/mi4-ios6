@@ -22,6 +22,8 @@
 
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
+# A local fragment can declare extra configurations; see minimal/STAGE90_BOOT.local.
+export XNU_MASTER_LOCAL=${XNU_MASTER_LOCAL:-}
 
 "$HERE/expand.sh" "${1:?usage: make_defines.sh CONFIG}" \
     | awk '

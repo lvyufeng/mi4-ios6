@@ -128,6 +128,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-112](experiment-112-apple-kernel-config-extracted.md) | Apple's Own Kernel Configuration, Extracted and Used |
 | stage90 | [experiment-113](experiment-113-arm-kernel-build-manifest.md) | Apple's Own Build Manifest for an ARM Kernel, Resolved: 694 Files |
 | stage90 | [experiment-114](experiment-114-kernel-manifest-compiled.md) | The Kernel's Own File List, Compiled: 172 of 569 |
+| stage90 | [experiment-115](experiment-115-minimal-boot-configuration.md) | A Minimal-Boot Configuration, and One Define That Unlocked Twelve Files |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

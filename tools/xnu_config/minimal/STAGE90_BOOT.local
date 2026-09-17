@@ -1,0 +1,31 @@
+#
+# A configuration for the smallest kernel that can reach a first scheduler tick.
+#
+# Apple's RELEASE is the full iOS kernel: it pulls in NETWORKING, PF, VPN, MULTIPATH,
+# SKYWALK_RELEASE, FILESYS_RELEASE and SECURITY, and those account for 254 of the 397 compile
+# failures measured in experiment-114 — the network stack, which a boot to `machine_startup` and a
+# `kprintf` does not need.
+#
+# This is not a new mechanism. The configuration declarations in MASTER and MASTER.arm are the
+# `#  NAME = [ attribute ... ]` comment lines (the sed pipeline in select_master.sh extracts them),
+# and doconf documents a `MASTER.local` for exactly this purpose. So this file adds one declaration
+# and nothing else.
+#
+# The attribute names are all Apple's, from config/MASTER.arm:
+#   KERNEL_RELEASE = [ KERNEL_BASE ]            = [ arm xsmall config_embedded ]
+#   BSD_BASE       = [ mach_bsd config_workqueue psynch config_proc_uuid_policy ]
+#   MACH_RELEASE   = [ MACH_BASE debugger_for_zone_info ]
+#   SCHED_RELEASE  = [ SCHED_BASE ]             = [ config_sched_traditional config_sched_multiq ]
+#   VM_BASE        = [ vm_pressure_events jetsam memorystatus config_code_decryption
+#                      config_cs_validation_bitmap ]
+#   PERF_DBG_BASE  = [ mach_kdp config_serial_kdp kperf kpc MONOTONIC_BASE ]
+#
+# What is deliberately left out: NETWORKING, PF, VPN, MULTIPATH, SKYWALK_*, FILESYS_*, SECURITY
+# (macf), and the dtrace/zleaks debug sets.
+#
+# MONOTONIC_BASE is named in PERF_DBG_BASE but defined nowhere in MASTER or MASTER.arm - it is a
+# per-SoC attribute, and experiment-112 established that as the one genuinely absent piece. Naming
+# it here is the decision that per-SoC file would have made.
+#
+#  STAGE90_BOOT = [ KERNEL_RELEASE BSD_BASE IOKIT_BASE LIBKERN_BASE PERF_DBG_BASE MACH_RELEASE SCHED_RELEASE VM_BASE MONOTONIC_BASE ]
+#

@@ -34,6 +34,12 @@ MIG_HEADERS=${MIG_HEADERS:-$REPO_ROOT/out/mach_headers}
 OUT=${XNU_KERNEL_OBJ_OUT:-$REPO_ROOT/out/xnu_kernel_obj}
 MANIFEST=${MANIFEST:-$REPO_ROOT/out/xnu_arm_manifest.txt}
 
+# The configuration to build. `RELEASE` is Apple's full iOS kernel; `STAGE90_BOOT` is the minimal
+# one declared in tools/xnu_config/minimal/STAGE90_BOOT.local, and its manifest is built by passing
+# the same XNU_MASTER_LOCAL to list_sources.py. Default is the full one, because the full one is
+# what "does XNU compile" means; the minimal one is what "can this boot" means.
+CONFIG=${XNU_KERNEL_CONFIG:-RELEASE}
+
 LIMIT=0
 ONLY_DIR=""
 SHOW_BLOCKERS=0
@@ -72,11 +78,27 @@ FORCE_INCLUDES=(
     -include mi4ios6_build_config.h
 )
 
+# The configuration's own options, expanded from MASTER via the doconf pipeline. These are the
+# values Apple's build would have; the block below is only the flags that configure the *toolchain*
+# and the two that resolve collisions the config cannot express.
+CONFIG_DEFINES=()
+while IFS= read -r d; do
+    [[ -n $d ]] && CONFIG_DEFINES+=("$d")
+done < <("$TOOLS_DIR/xnu_config/make_defines.sh" "$CONFIG")
+
 DEFINES=(
+    "${CONFIG_DEFINES[@]}"
     -DMACH_KERNEL=1 -DMACH_KERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DKERNEL_PRIVATE=1
     -DMACH_BSD=1 -DPRIVATE=1 -DKPC=1 -DMONOTONIC=1 -DXPR_DEBUG=0 -DLOCK_PRIVATE=1
     -DARMA7=1 -DKERNEL=1 -D__arm__=1 -DCONFIG_EMBEDDED=1 -D__ARM_L2CACHE_SIZE_LOG__=21
     -DCONFIG_SCHED_TIMESHARE_CORE=1 -DCONFIG_SCHED_TRADITIONAL=1
+    # _CLOCK_T: makes kern_types.h's `typedef struct clock *clock_t` the surviving definition.
+    # bsd/sys/types.h:162 includes _clock_t.h unconditionally - the `#ifdef KERNEL` in that file
+    # comes later - so without this the BSD userland `clock_t` (unsigned long) is typedef'd first
+    # and the kernel's Mach clock object collides with it. One define, and iokit goes from 1
+    # failing file to none. Same shape as the device-tree child count and the descriptor literals:
+    # one name, two definitions, and the build has to say which one wins.
+    -D_CLOCK_T=1
 )
 
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
@@ -139,7 +161,7 @@ while read -r src; do
 done < "$MANIFEST"
 
 echo
-echo "== Apple's ARM RELEASE manifest, compiled =="
+echo "== $CONFIG manifest for arm, compiled =="
 echo "  C files tried:        $tried"
 echo "  compile:              $ok"
 echo "  fail:                 $fail"

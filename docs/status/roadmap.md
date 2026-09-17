@@ -932,6 +932,26 @@ first scheduler tick does not need. `<sys/sysproto.h>` was the largest single bl
 *generatable* (`bsd/kern/makesyscalls.sh`, wrapped by `tools/gen_bsd_headers.sh`); its 55 errors are
 gone and the pass count did not move, because those files fail on other things behind it.
 
+**And a minimal-boot configuration now exists** (2026-09-17,
+[`experiment-115`](../experiments/experiment-115-minimal-boot-configuration.md)). `RELEASE` is the
+full iOS kernel and 254 of its 397 failures are the network stack, which a boot to
+`machine_startup` does not need. `tools/xnu_config/minimal/STAGE90_BOOT.local` declares a smaller
+one — **one comment line**, using Apple's own attribute names and the `MASTER.local` mechanism
+doconf documents. The manifest drops from 694 files to 526, and **191 of 401 C files compile**.
+
+It also found `-D_CLOCK_T=1`: `bsd/sys/types.h:162` includes `_clock_t.h` *unconditionally* and
+typedefs `clock_t` to `unsigned long`, while `kern_types.h:193` typedefs it to `struct clock *`.
+One name, two definitions — the fourth instance of this project's recurring defect — and one flag
+makes the kernel's win, taking `iokit` from 1 failing file to **0**. Also corrected: the build
+script now compiles with the configuration's own 104 options rather than a handful of hand-worked
+flags, which is why `experiment-114`'s numbers were low.
+
+What remains is the Mach-view-versus-BSD-view collisions (`uthread_t`, a genuinely conflicting
+`copyinstr`, `ORDINARY`/`struct tty`), and Apple's build resolves those through the **exported-header
+set** — `makedefs/MakeInc.def:463-469` shows `INCFLAGS_IMPORT` pointing at
+`$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)`, populated from `config/*.exports` by `SETUP/installfile`.
+That is the named next step.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

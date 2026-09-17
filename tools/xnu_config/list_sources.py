@@ -43,11 +43,18 @@ DEFAULT_COMPONENTS = ["osfmk", "bsd", "libkern", "iokit", "pexpert"]
 
 
 def expand_options(xnu, config):
-    """The option names a configuration selects, via the ported doconf pipeline."""
+    """The option names a configuration selects, via the ported doconf pipeline.
+
+    XNU_MASTER_LOCAL, if set, names a fragment that can declare extra configurations - the same
+    role Apple's doconf gives MASTER.local. See tools/xnu_config/minimal/.
+    """
+    env = {**os.environ, "XNU_TREE": xnu}
+    if os.environ.get("XNU_MASTER_LOCAL"):
+        env["XNU_MASTER_LOCAL"] = os.environ["XNU_MASTER_LOCAL"]
     out = subprocess.run(
         [os.path.join(HERE, "make_defines.sh"), config],
         capture_output=True, text=True, check=True,
-        env={**os.environ, "XNU_TREE": xnu},
+        env=env,
     ).stdout
     names = set()
     for line in out.splitlines():
