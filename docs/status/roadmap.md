@@ -1674,6 +1674,30 @@ objects, because the build cleared `*.log` and never `*.o`. It now clears both.
 rather than by working around it** — 139 (`ast.h`), 140 (`sys/types.h`), 141 (`size_t`) and this one
 all had the same shape, and this one had an answer in the rules.
 
+**AND A CASE DIFFERENCE WAS THE WHOLE DEFECT** (2026-09-17,
+[`experiment-146`](../experiments/experiment-146-arm-case-and-the-last-three.md)).
+`bsd/kern/kern_sysctl.c:2772` is `#if defined(__ARM__)`; the build defined only the compiler's
+lowercase `__arm__`, which the rest of the ARM tree uses. So the `#else` was taken, the 64-bit
+`SYSCTL_QUAD` form was applied to 32-bit values, and the error was
+`'_sysctl__vm_global_no_user_wire_amount_size_check' declared as an array with a negative size` —
+**a message that names neither the macro nor the file that uses it.** One define; `RELEASE` 606 →
+607 of 615, `STAGE90_BOOT` 412 → 413 of 426. Ninth instance of the one-value-two-definitions class,
+and its cleanest small case.
+
+**And two of the remaining eight cannot be fixed by any flag**, which is worth stating as a
+category rather than as a backlog:
+
+- **`subr_prof.c:160-163` is malformed source** — `STATIC` is defined nowhere except in two other
+  `.c` files as a file-local macro, and the next line is a function definition nested inside the
+  first one's body. **Identical in `xnu-upstream`**, so it is a long-standing malformation in the OSS
+  drop. The second file in this project that no flag can fix, after `vm_object.c`'s `const` member.
+- `if_bridge.c`'s `DLT_EN10MB` is diagnosed and pending: the macro is unguarded in a header the file
+  includes, so the include is resolving elsewhere; it needs the same reading as the two above.
+
+**The eight left are: 2 needing the toolchain decision, 2 unfixable by any flag, 1 needing a value
+the tarball does not supply, 1 diagnosed, and 2 more in the same categories.** That is the honest
+shape of what remains on the host side.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

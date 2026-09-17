@@ -175,6 +175,12 @@ DEFINES=(
     -DXNU_KERNEL_PRIVATE=1 -DKERNEL_PRIVATE=1
     -DMACH_BSD=1 -DPRIVATE=1 -DKPC=1 -DMONOTONIC=1 -DXPR_DEBUG=0 -DLOCK_PRIVATE=1
     -DARMA7=1 -DKERNEL=1 -D__arm__=1 -DCONFIG_EMBEDDED=1 -D__ARM_L2CACHE_SIZE_LOG__=21
+    # `__ARM__`, and the case is the whole point. `bsd/kern/kern_sysctl.c:2772` is
+    # `#if defined(__ARM__)`, and the build defined only the compiler's lowercase `__arm__` - so the
+    # 64-bit `SYSCTL_QUAD` branch was taken for 32-bit values and the file failed with
+    # `'_sysctl__vm_global_no_user_wire_amount_size_check' declared as an array with a negative
+    # size`. One define; and the error named neither the macro nor the file that uses it.
+    -D__ARM__=1
     # NPTY/NPTMX: the device conditions this configuration turns on, so that bsd/kern/tty_pty.c,
     # tty_ptmx.c and tty_dev.c are both compiled (device_table.py) and preprocessed consistently.
     # NPTY 1 rather than 0 because 0 does not compile: conf.c's #else branch is missing ptsselect
