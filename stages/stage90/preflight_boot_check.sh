@@ -243,6 +243,26 @@ case "$FAULT_INJECT" in
 esac
 
 echo
+echo "== later-phase probes =="
+# These two run inside kernel_entry and are non-fatal by construction: each reports and the boot
+# continues, because they are the next phase's work rather than a precondition for this run. They
+# are listed rather than ignored so that "the run passed" and "the shim passed" cannot be
+# confused - the payload says so in the log too. Neither changes any mapping or boot decision, so
+# there is nothing to allow; if either ever does, it needs a flag of its own.
+case "$(value_of STAGE90_XNU_BOOT_ARGS)" in
+  0|0u|"") echo "conforming boot_args (Phase 2): off - only the ladder's own identity-based args exist." ;;
+  *)       echo "conforming boot_args (Phase 2): ON, as a second object alongside the ladder's. It"
+           echo "          is built and its invariants checked against the real __stage90_image_end."
+           echo "          Non-fatal: read xnu_ba_checks/xnu_ba_failures in the log for its verdict." ;;
+esac
+case "$(value_of STAGE90_XNU_MSM8974_SHIM)" in
+  0|0u|"") echo "MSM8974 platform shim (Phase 3): off." ;;
+  *)       echo "MSM8974 platform shim (Phase 3): ON. Registers its tbd_ops and checks the EOI"
+           echo "          pairing, the measured CNTP interrupt number and the validated CNTFRQ."
+           echo "          Non-fatal: read msm8974_shim_failures in the log for its verdict." ;;
+esac
+
+echo
 echo "== mapping attributes =="
 case "$(value_of STAGE90_PMAP_ATTR_MODE)" in
   STAGE90_PMAP_ATTR_MODE_SO_ONLY|0|0u)

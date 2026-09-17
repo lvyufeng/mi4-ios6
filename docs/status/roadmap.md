@@ -30,6 +30,7 @@ recovered through `/proc/last_kmsg`, under the safety rules in the root `README.
 | Candidate-L1 install followed by a jump, with the fault captured | ✅ | `experiment-94` run 10 (`FULL` + fault injection) |
 | Working `LDREX`/`STREX` (the exclusive monitor tracks) | ✅ | `experiment-96`, measured in four configurations |
 | Cacheable Normal DRAM with both caches on | ✅ | `experiment-97` (I-cache), `experiment-98` (I+D) |
+| Conforming `boot_args` checked on the device | ✅ | `experiment-99` (`xnu_ba_checks=10`, `failures=0`) |
 
 This is a real and unusually complete bring-up layer for a platform with no vendor
 documentation. Nothing in this re-plan asks for it to be thrown away.
@@ -618,7 +619,15 @@ moving the load address to a 1 MB boundary (smaller change) or by relocating the
 DRAM base before handoff (what real iBoot does, and what a kernel expecting to own memory from
 `0x80000000` will want).
 
-**Implemented (2026-09-16), not yet on hardware.** `stages/stage90/xnu_boot_args_conformant.c`
+**Run on hardware (2026-09-17, [`experiment-99`](../experiments/experiment-99-stage90-phase2-boot-args-on-hardware.md)).**
+With the Phase 1 caches on, the module reports `xnu_ba_checks=10`, `xnu_ba_failures=0` and
+"conforms to the XNU entry contract" against the real `__stage90_image_end`, and the payload still
+ends `kernel_entry returned success`. The `memSize` claim stays source-derived and is not
+something a payload run can validate; what is now hardware-exercised is the rest of the contract
+holding on the real image. What remains in this phase: the `topOfKernelData` bootstrap tables, and
+running 4570's own readers *on the device* rather than on the host.
+
+**Implemented (2026-09-16).** `stages/stage90/xnu_boot_args_conformant.c`
 builds and validates a conforming `boot_args` behind `STAGE90_XNU_BOOT_ARGS` (default off — it
 produces a *second* object; the ladder's identity-based one is untouched, since the ladder
 requires `physBase == 0x8000`).
