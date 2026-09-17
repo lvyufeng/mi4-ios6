@@ -1698,6 +1698,27 @@ category rather than as a backlog:
 the tarball does not supply, 1 diagnosed, and 2 more in the same categories.** That is the honest
 shape of what remains on the host side.
 
+**AND THE LAST OF THE EIGHT BELONGS TO A CATEGORY OF THREE** (2026-09-17,
+[`experiment-148`](../experiments/experiment-148-nbpfilter-and-the-last-category.md)).
+`bsd/net/if_bridge.c:134` is `#if NBPFILTER > 0 / #include <net/bpf.h> / #endif`, and `:1419` uses
+`DLT_EN10MB` — **outside that guard**. `NBPFILTER` is not an option: `net_osdep.h:212-215` records it
+in the source as "number of bpf pseudo devices: others: bpfilter.h, NBPFILTER", i.e. **a count like
+`NLOOP` and `NPTY`**. And `RELEASE` sets `if_bridge` while not setting `bpfilter`, so the include is
+skipped and the unguarded use fails. `gen_device_headers.sh` now writes `bpfilter.h` with
+`NBPFILTER 0` and records what 0 costs; **the file cannot be made to compile by a header value**,
+because turning the count on requires the option and its dependencies.
+
+**Three files now fail this way** — a source path valid only with an option built, in a file that
+builds either way: `conf.c` (`NPTY 0`'s branch is missing `ptsselect`, experiment-130), `if_bridge.c`
+(this), `if_loop.c` (`optional loop`, experiment-127). **All three are answerable only by a
+configuration decision**, not a header, a flag or an include order.
+
+**The final eight, no two alike**: `vm_object.c` and `subr_prof.c` (**not fixable here**);
+`vnode_pager.c` and `kperfbsd.c` (the toolchain / include-model decisions); `OSAtomicOperations.c`
+(needs Apple's header order, unknown); the firehose pair (**a value with no evidence in the
+tarball**); `if_bridge.c` (a configuration decision). **That is 607 of 615, and it is the end of
+host-side compile work as a source of movement.**
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

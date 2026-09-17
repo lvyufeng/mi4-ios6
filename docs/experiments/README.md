@@ -161,6 +161,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-145](experiment-145-the-simport-answer.md) | The `simport` Answer, Found in Two Makefile Rules — 602 → 606 of 615 |
 | stage90 | [experiment-146](experiment-146-arm-case-and-the-last-three.md) | `__ARM__` Versus `__arm__`, and the Three Single-File Failures Left |
 | stage90 | [experiment-147](experiment-147-phase3-shim-design-closed.md) | The Phase 3 Shim's Design, Closed on Hardware |
+| stage90 | [experiment-148](experiment-148-nbpfilter-and-the-last-category.md) | `NBPFILTER` Is a Count, and the Category of Files Only Valid With an Option Built |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
