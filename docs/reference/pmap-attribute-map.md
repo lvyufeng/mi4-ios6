@@ -127,9 +127,16 @@ it is wrong, and it is an inconsistency that will be read as intentional. Phase 
 shareable in both formats.
 
 **F-AM4 — there is no Normal or cacheable mapping anywhere.** Confirmed by decoding both
-constants: TEX/C/B is `000/0/0` in each. This is roadmap finding F2, and it is why
-`LDREX`/`STREX` cannot be relied on today (`stages/stage90/exclusive_probe.c` measures what
-they actually do here).
+constants: TEX/C/B is `000/0/0` in each. This is roadmap finding F2.
+
+The part of F2 that said `LDREX`/`STREX` cannot be relied on without it is **corrected**: measured
+on hardware, the exclusive monitor tracks on Strongly-ordered memory, on Normal-Non-cacheable
+memory, and with the MMU off entirely (`experiment-96`). What remains true, and is why this is
+still the phase's work, is that XNU's entry code enables the I-cache on its first instructions
+and expects cacheable Normal memory for kernel text and data, and that a DMA-capable driver needs
+the Normal/Device distinction. See `stages/stage90/exclusive_probe.c` for the measurement, and
+note that it measures rather than asserts precisely because its first version asserted a
+discriminator that turned out to be false on this implementation.
 
 ## ARMv7 short-descriptor encodings used above
 

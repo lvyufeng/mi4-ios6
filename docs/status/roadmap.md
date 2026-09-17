@@ -177,15 +177,25 @@ It is also a hard ceiling:
 
 1. XNU's `start.s` enables the I-cache within its first few instructions and assumes
    cacheable Normal memory for kernel text and data.
-2. **ARMv7 `LDREX`/`STREX` are architecturally only defined on Normal memory.** On
-   Strongly-Ordered/Device memory the exclusive monitor is unpredictable. The current pmap
-   therefore cannot support a single lock, spinlock or atomic — and XNU takes locks
-   immediately.
+2. ~~**ARMv7 `LDREX`/`STREX` are architecturally only defined on Normal memory** … the
+   current pmap therefore cannot support a single lock, spinlock or atomic.~~
+   **CORRECTED 2026-09-17 — measurably false on this device.** The claim was that
+   Strongly-ordered memory makes the exclusive monitor unpredictable; `experiment-96` measured
+   `LDREX`/`STREX` on MSM8974 with the MMU off, with Strongly-ordered DRAM, with
+   Normal-Non-cacheable DRAM, and with Normal-Write-Back plus the D-cache on — and the monitor
+   tracks in all four. Locks are **not** blocked by the memory type here, and Phase 1's
+   "working `LDREX`/`STREX`" criterion was met before any of this work started. The item was
+   wrong for a second reason worth keeping: it was quoted from the architecture rather than
+   measured, and the probe that was built to measure it encoded the same premise in its own
+   discriminator, so it reported failure for four hardware runs.
 3. Any DMA-capable driver (the eMMC the kernel will need) requires correct
    Normal/Device attribute distinctions.
 
-"Turn on caches" is not a performance tweak; it is the prerequisite for the kernel having
-working atomics.
+"Turn on caches" is therefore not the prerequisite for working atomics — atomics already work —
+but it is still required, for reason 1 and reason 3: XNU's entry code enables the I-cache on its
+first instructions and will allocate and use memory with its own cacheable attributes, and any
+driver needs the Normal/Device split to be right. The attribute work is the groundwork for that,
+not for locks.
 
 **F3 — There is no public iOS 6-era ARM XNU.** The checks were run against the checkouts in
 `external/`:
@@ -443,52 +453,65 @@ in §2 showed that address is real code under the candidate L1.
   Phases 2–4 would silently return stale or garbage data, and the loss would look like a
   payload failure. This must be a cache-clean in the write path, and the dead-man dump path
   deserves a full clean-and-invalidate of the log region before the reboot.
-- Prove exclusive access works: a `LDREX`/`STREX` loop that increments a shareable counter
-  reliably. This is the single test that distinguishes a working kernel pmap from the
-  current one.
+- ~~Prove exclusive access works~~ **Done, and it never needed proving.** `LDREX`/`STREX` work on
+  this device; see the F2 correction in §3 and
+  [`experiment-96`](../experiments/experiment-96-stage90-phase1-exclusives-work.md). A
+  `LDREX`/`STREX` increment loop is reliable today.
 
-**Baseline measured (2026-09-17).** `stages/stage90/exclusive_probe.c` (switch
-`STAGE90_EXCLUSIVE_PROBE`, default off) measures what exclusives do *today* under the current
-Strongly-Ordered mapping, without changing any mapping or cache bit: it operates on one word of
-the payload's own `.bss`. The discriminating sub-test is T3 — a plain store between `LDREX` and
-`STREX` clears the exclusive monitor, so a real monitor must make that `STREX` fail. An
-implementation that always reports success is indistinguishable from a working one unless T3 is
-checked, and everything built on such a `STREX` would be silently wrong. This is the comparison
-point the attribute-map change has to beat.
+**Baseline measured, then corrected (2026-09-17).** `stages/stage90/exclusive_probe.c` (switch
+`STAGE90_EXCLUSIVE_PROBE`, default off) measures what exclusives actually do here, on one word of
+the payload's own `.bss`.
 
-Four hardware runs of the probe, identical results in all four:
+The first design had two defects that between them produced four runs of false negative, and
+both are worth remembering because each is a *method* error rather than a coding slip:
+
+- The discriminating test was T3 — "a plain store between `LDREX` and `STREX` clears the monitor,
+  so `STREX` must then fail". That premise is **false on MSM8974/Krait**. The probe asserted it
+  rather than testing it, and so reported `exclusives_usable=0` everywhere.
+- The probe was called before `enable_identity_mmu()`, i.e. with the MMU off, and did not record
+  that. With the MMU off no descriptor applies at all, so the `SO_ONLY` vs `NORMAL_NC` comparison
+  — the entire point of Phase 1a — compared two builds running the same meaningless configuration.
+
+The probe now records `sctlr`, `ttbr0` and `mmu_enabled`; re-runs the tests after the MMU is on
+(phase 2) and once more on a cacheable mapping with the D-cache on (phase 3); and uses **CLREX**
+as its discriminator (T5), which is the mechanism XNU uses (`clear_exclusive()` in
+`osfmk/arm/atomic.h`). The corrected result, consistent across every configuration measured:
 
 ```
-exclusive_probe_ldrex_reads_word        =1
-exclusive_probe_undisrupted_strex_status=0x00000000   success, as expected
-exclusive_probe_disrupted_strex_status  =0x00000000   success - and T3 says it should FAIL
-exclusive_probe_success_count           =1000  of 1000 iterations
-exclusive_probe_monitor_tracks          =0
-exclusive_probe_exclusives_usable       =0
+              MMU   memory type              T2   T3   T5   monitor_clears  exclusives_usable
+phase 1       off   (no descriptor applies)   0    0    1    1               1
+phase 2       on    Strongly-ordered          0    0    1    1               1
+phase 2       on    Normal, Non-cacheable     0    0    1    1               1
+phase 3       on    Normal, Write-Back, D$ on 0    0    1    1               1
 ```
 
-So the monitor does not track at all under this mapping and `STREX` always reports success. It is
-exactly the failure mode T3 was written to catch, which is why the probe measures rather than
-asserts. Phase 1a's `NORMAL_NC` build has to move `monitor_tracks` and `exclusives_usable` to 1
-for this to count as fixed.
+T5 failing is the positive result: `LDREX` set the monitor, `CLREX` cleared it, `STREX` refused.
+T3 is now reported as an observation, not a criterion.
+
+Also found on the way: **`ACTLR` reads 0 and ignores writes** (`actlr_after=0` after writing
+bit 6), so `ACTLR.SMP` — which ARMv7 requires before enabling caches for coherence — cannot be
+set from non-secure PL1 here; and the payload's first ~150 log lines run with **the MMU off**,
+because aboot hands over with `SCTLR.M=0` and `TTBR0=0x0f210000` (its own table, never ours).
 
 **Phase 1a run on hardware (2026-09-17, [`experiment-95`](../experiments/experiment-95-stage90-phase1a-normal-nc.md)).**
 `NORMAL_NC` now boots end to end — `kernel_entry returned success`, zero failed checks, DRAM
 descriptors at `0x00011c02`/`0x00000452`, `ram_console` verified and timer IRQs delivered through
-Normal-mapped memory. The whole bring-up layer runs on Normal memory for the first time. **But the
-exclusive probe reports `monitor_tracks=0` and `exclusives_usable=0` — identical to the
-Strongly-ordered measurement**, so the attribute change alone does not deliver the Phase 1 exit
-criterion. The remaining candidates are cacheable memory and `ACTLR.SMP`; the first is the next
-step anyway. Three descriptor literals had to be made mode-dependent first (`experiment-95` §
-"What changed in response") — the same one-value-two-definitions defect as the device-tree child
-count.
+Normal-mapped memory. The whole bring-up layer runs on Normal memory for the first time. Three
+descriptor literals had to be made mode-dependent first (`experiment-95` § "What changed in
+response") — the same one-value-two-definitions defect as the device-tree child count.
+
+(That log also concluded that the attribute change did not fix exclusives. It does not say
+anything about exclusives at all: the probe was measuring with the MMU off. See
+[`experiment-96`](../experiments/experiment-96-stage90-phase1-exclusives-work.md) and the
+corrected baseline above.)
 
 **Phase 1a implemented (2026-09-16).** `STAGE90_PMAP_ATTR_MODE`
 (`SO_ONLY` default / `NORMAL_NC`) selects the memory type for DRAM mappings; MMIO stays
-Strongly-ordered in both. `NORMAL_NC` is deliberately **non-cacheable** — it is the smallest
-change that makes exclusives architecturally defined, and with no cache enabled it needs no
-cache maintenance, no `ram_console` flush, and no change to how page-table writes become
-visible.
+Strongly-ordered in both. `NORMAL_NC` is deliberately **non-cacheable** — the smallest change
+that moves DRAM to Normal, needing no cache maintenance, no `ram_console` flush, and no change
+to how page-table writes become visible. (Its original rationale was "makes exclusives
+architecturally defined"; exclusives turned out not to need it, but it is the stepping stone to
+cacheable DRAM, which XNU's entry code does need.)
 
 What made it tractable was working out the real constraint, which is *not* "keep everything
 Strongly-ordered" but **consistency per physical address**: the ARMv7 cache is physically
@@ -510,14 +533,15 @@ change any mapping's memory type; all mode × ladder × dead-man combinations co
 `preflight_boot_check.sh` refuses `NORMAL_NC` without `--allow-attr-normal-nc` and handles
 both the symbolic and the numeric (`-D`) form of every switch.
 
-Still to do this phase: caches — I-cache first, then D-cache, with the `ram_console` clean that
-the D-cache makes mandatory — and a passing `LDREX`/`STREX` under them. The probe has now been
-run in both modes on hardware; it did **not** reach 1 under `NORMAL_NC`, so the attribute map is
-documented and hardware-verified but the exclusives half of this phase is still open.
+Still to do this phase: **the caches** — I-cache first, then D-cache, with the `ram_console` clean
+that the D-cache makes mandatory. The `LDREX`/`STREX` half is done (experiment-96), and the
+attribute map is documented and hardware-verified in both modes.
 
 **Exit criteria:** identity and high-VA mappings with caches on; `ram_console` still
 logging; timer IRQ still delivered; a documented attribute map; a passing `LDREX`/`STREX`
-test. Expect this phase to break the logging that made earlier stages easy — budget for it.
+test. **The last two are met** — the attribute map is in `docs/reference/pmap-attribute-map.md`,
+and `LDREX`/`STREX` pass in every configuration measured. Expect the cache work to break the
+logging that made earlier stages easy — budget for it.
 
 ### Phase 2 — The iBoot-equivalent handoff contract (2–6 weeks)
 

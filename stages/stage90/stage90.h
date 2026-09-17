@@ -4186,11 +4186,34 @@ struct stage90_xnu_macho_loader_result {
 #endif
 
 #define STAGE90_EXCLUSIVE_PROBE_ITERATIONS 1000u
-#define STAGE90_EXCLUSIVE_PROBE_VERSION    0x00010000u
+#define STAGE90_EXCLUSIVE_PROBE_VERSION    0x00030000u
 #define STAGE90_EXCLUSIVE_PROBE_MAGIC      0x45585052u /* 'EXPR' */
 #define STAGE90_EXCLUSIVE_PROBE_SEED       0x5eed1234u
 #define STAGE90_EXCLUSIVE_PROBE_DISRUPT    0xd15f0000u /* 'DISR'-ish, must differ from SEED */
 #define STAGE90_EXCLUSIVE_PROBE_CPSR_I     0x00000080u
+/*
+ * Phase 3: the same tests on a cacheable mapping with the D-cache on.
+ *
+ * Normal-Non-cacheable did not make the monitor track (experiment-96, MMU on, descriptor
+ * verified in the log), so the remaining candidate is that Krait implements the local monitor
+ * only for cacheable accesses. Testing that needs a cacheable region and SCTLR.C set - and the
+ * smallest way to get both is one spare 1 MB DRAM section, mapped Normal Write-Back
+ * Write-Allocate, with the D-cache enabled for the duration of the probe and cleared again
+ * afterwards. Everything else stays Normal-Non-cacheable, so nothing else can be cached:
+ * no page-table maintenance, no ram_console clean.
+ *
+ * PA 0x00200000 is free here by three independent arguments: the payload's own image ends at
+ * 0x00119000 and is the only thing mapped above section 1; aboot's own L1 lives at
+ * 0x0f210000 (reported as exclusive_probe_ttbr0=0x0f210000, so its tables are not here); and
+ * the identity table has no entry for VA 0x00200000 at all, which the phase asserts before it
+ * writes anything. The word already there is read and logged first, so if it turns out to be
+ * the QCDT or anything else recognisable, the log says so.
+ */
+#define STAGE90_EXCLUSIVE_PROBE_DC_PA      0x00200000u
+#define STAGE90_EXCLUSIVE_PROBE_DC_DESC    0x0001140eu /* section, Normal WBWA, S=1, AP=PL1 RW */
+#define STAGE90_EXCLUSIVE_PROBE_DC_MAGIC   0xdcc0ffeeu
+#define STAGE90_EXCLUSIVE_PROBE_DC_SCTLR_D (1u << 2)
+#define STAGE90_EXCLUSIVE_PROBE_DC_ACTLR_SMP (1u << 6)   /* ACTLR.SMP: coherency and the monitor */
 
 /*
  * Mapping attribute mode (roadmap Phase 1a).
@@ -6561,12 +6584,28 @@ struct stage90_exclusive_probe_result {
     uint32_t size;
     uint32_t status;
     uint32_t magic;
+    /*
+     * The environment the probe ran in. These are not decoration - the first version of this
+     * probe did not record them, and it was run for four hardware runs in a state its own
+     * comment did not describe: with the MMU *off*. Every access is Strongly-ordered when
+     * SCTLR.M is clear, so no descriptor applies, so the attribute-mode change under test
+     * could not affect the result - which is exactly what "digit for digit identical" meant.
+     * Recording SCTLR and TTBR0 makes that visible in the log instead of inferable from the
+     * call order.
+     */
+    uint32_t phase;                     /* 1 = before enable_identity_mmu, 2 = after */
+    uint32_t mmu_enabled;               /* SCTLR.M at the moment T1-T4 ran */
+    uint32_t sctlr;                     /* full SCTLR: C and I are bits 2 and 12 */
+    uint32_t ttbr0;                     /* which L1 table was live */
     uint32_t target_addr;
     uint32_t cpsr_entry;
     uint32_t ldrex_reads_word;          /* T1: LDREX read back the stored seed */
     uint32_t undisrupted_strex_status;  /* T2: expect 0 */
     uint32_t disrupted_strex_status;    /* T3: expect non-zero */
+    uint32_t clrex_strex_status;        /* T5: expect non-zero - CLREX is what XNU uses */
+    uint32_t other_addr_strex_status;   /* T6: informational */
     uint32_t monitor_tracks;            /* T2 == 0 and T3 != 0 */
+    uint32_t monitor_clears;            /* T2 == 0 and T5 != 0 */
     uint32_t iterations;
     uint32_t success_count;
     uint32_t fail_count;
@@ -6577,7 +6616,12 @@ struct stage90_exclusive_probe_result {
 };
 
 int stage90_exclusive_probe_run(void);
+int stage90_exclusive_probe_run_mmu_on(void);
+int stage90_exclusive_probe_run_dcache(void);
 const struct stage90_exclusive_probe_result *stage90_exclusive_probe_result(void);
+const struct stage90_exclusive_probe_result *stage90_exclusive_probe_result_mmu_on(void);
+const struct stage90_exclusive_probe_result *stage90_exclusive_probe_result_dcache(void);
+uint32_t *mmu_l1_table(void);
 int gic_sgi_selftest(void);
 int gic_timer_selftest(void);
 
@@ -6589,6 +6633,7 @@ uint64_t ml_get_timebase(void);
 uint32_t ml_get_timebase_frequency(void);
 void xnu_log_puts(const char *s);
 void xnu_log_kv32(const char *key, uint32_t value);
+void xnu_log_kv32_p(const char *prefix, const char *key, uint32_t value);
 void xnu_log_kv64(const char *key, uint64_t value);
 
 /* probes.c */

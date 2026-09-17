@@ -8,7 +8,18 @@ void xnu_log_puts(const char *s)
 
 void xnu_log_kv32(const char *key, uint32_t value)
 {
+    xnu_log_kv32_p("", key, value);
+}
+
+/*
+ * Same line, with a prefix in front of the key. Used where one module reports the same field
+ * set more than once in a single boot and the two reports must not be confused in the log -
+ * exclusive_probe.c's phase 1 and phase 2 are the reason it exists.
+ */
+void xnu_log_kv32_p(const char *prefix, const char *key, uint32_t value)
+{
     log_puts("MI4IOS6_STAGE90_XNU ");
+    log_puts(prefix);
     log_puts(key);
     log_puts("=");
     log_hex32(value);

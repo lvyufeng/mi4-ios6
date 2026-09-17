@@ -5422,6 +5422,18 @@ static void enable_identity_mmu(void)
     dsb_isb();
 }
 
+/*
+ * The live identity L1, for callers that need to add and remove one entry around a bounded
+ * test. exclusive_probe.c's phase 3 uses it to give one spare 1 MB section a cacheable
+ * descriptor, and puts the entry back afterwards. Exposed rather than duplicated: a second
+ * copy of this table would be a second answer to "which page table is live", which is the
+ * class of defect that cost a loader-preflight debug cycle in experiment-95.
+ */
+uint32_t *mmu_l1_table(void)
+{
+    return stage90_l1_table;
+}
+
 int mmu_identity_selftest(void)
 {
     volatile uint32_t *gicd_ctlr = (volatile uint32_t *)(uintptr_t)PE_state_stage90.gicDistributorBase;

@@ -1,5 +1,16 @@
 # Experiment 95 — Stage90 Phase 1a: Normal, non-cacheable DRAM
 
+> **Corrected 2026-09-17 by [experiment-96](experiment-96-stage90-phase1-exclusives-work.md).**
+> The section below headed *"The Phase 1a question, answered: no"* is **wrong**, and the reason
+> is worth stating here rather than only there: the exclusive probe was called from
+> `kernel_entry` *before* `enable_identity_mmu()`, so it ran with the MMU disabled, and with the
+> MMU off no page-table descriptor applies — ARMv7 treats every access as Strongly-ordered. The
+> two "identical" measurements compared two builds running the same meaningless configuration.
+> With the probe fixed (it now records SCTLR/TTBR0, and re-runs after the MMU is on), LDREX/STREX
+> are shown to work on this device in every configuration measured, including Strongly-ordered
+> memory. Everything else in this log — the descriptor literals, the three runs, the end-to-end
+> NORMAL_NC boot — stands.
+
 Date: 2026-09-17 (runs 03:23–03:29 UTC)
 Commit under test: `3c5dfca`, plus three local fixes made during this experiment
 Build switches: `STAGE90_PMAP_ATTR_MODE = STAGE90_PMAP_ATTR_MODE_NORMAL_NC`,
@@ -86,7 +97,7 @@ That is a milestone in its own right: the whole bring-up layer — vectors, GIC,
 handlers, page tables, the device tree — runs on Normal memory for the first time. Every one of
 the previous ninety stages ran on Strongly-ordered memory.
 
-## The Phase 1a question, answered: no
+## The Phase 1a question, answered: no — **and this section is wrong, see the note at the top**
 
 The exclusive probe reports, on hardware, under Normal-Non-cacheable DRAM:
 
@@ -112,7 +123,8 @@ probe artefact — T3 exists precisely to distinguish "STREX works" from "STREX 
 success".
 
 What this does **not** yet establish is *why*. Two candidates remain, and they need different
-tests:
+tests — **both were run, and neither was the answer; the probe's own discriminator was** (see
+experiment-96):
 
 1. **The monitor needs cacheable memory, not merely Normal memory.** Some ARMv7
    implementations only implement the local monitor for cacheable accesses. That is testable by

@@ -127,6 +127,31 @@ int kernel_entry(struct boot_args *args)
         return 0;
     }
 
+#if STAGE90_EXCLUSIVE_PROBE
+    /*
+     * Phase 1, phase 2: the same four exclusive tests, re-run now that the MMU is on and a
+     * page-table descriptor actually applies to the probe word.
+     *
+     * Phase 1 above runs before enable_identity_mmu(), i.e. with SCTLR.M clear. ARMv7 treats
+     * every access as Strongly-ordered while the MMU is off, so no descriptor is consulted and
+     * the attribute mode cannot change the outcome - which is exactly why the SO_ONLY and
+     * NORMAL_NC measurements were identical. That comparison was between two builds running
+     * the same meaningless configuration, not between two memory types.
+     *
+     * This is the measurement the attribute-map work was for. It is deliberately a probe and
+     * not a check: a failure here is a finding about the platform, not a boot failure.
+     */
+    (void)stage90_exclusive_probe_run_mmu_on();
+
+    /*
+     * Phase 3: the same tests on a cacheable mapping with the D-cache on. Normal-Non-cacheable
+     * did not make the monitor track, so the remaining explanation is that Krait only monitors
+     * cacheable accesses. Phase 3 adds one cacheable 1 MB section, enables SCTLR.C, measures,
+     * and restores both before returning.
+     */
+    (void)stage90_exclusive_probe_run_dcache();
+#endif
+
     if (!mmu_high_alias_selftest()) {
         xnu_log_puts("kernel_entry bad: MMU high alias selftest\n");
         return 0;
