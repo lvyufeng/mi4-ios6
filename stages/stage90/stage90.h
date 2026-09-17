@@ -6630,6 +6630,18 @@ struct stage90_xnu_boot_args_result {
 #define STAGE90_XNU_MSM8974_SHIM_FAIL_CNTFRQ               0x00000020u
 #define STAGE90_XNU_MSM8974_SHIM_FAIL_TIMER_LEFT_ARMED     0x00000040u
 #define STAGE90_XNU_MSM8974_SHIM_FAIL_ARM_ORDER            0x00000080u
+/*
+ * The map/dispatch half of the replacement. `pe_arm_init_interrupts` is a map step plus a
+ * board-class dispatch, and the dispatch is the part that cannot work here: it is a chain of
+ * `#if defined(ARM_BOARD_CLASS_*)` tests on `gPESoCDeviceType` with `return 0` as the
+ * fallthrough, and the three classes are Apple SoCs (phase3-msm8974-shim-spec.md section 1). So
+ * the MSM8974 replacement is measured against what the stock code would do with the same inputs.
+ */
+#define STAGE90_XNU_MSM8974_SHIM_FAIL_SOC_PHYS             0x00000100u
+#define STAGE90_XNU_MSM8974_SHIM_FAIL_PIC_BASE             0x00000200u
+#define STAGE90_XNU_MSM8974_SHIM_FAIL_TIMER_BASE           0x00000400u
+#define STAGE90_XNU_MSM8974_SHIM_FAIL_DEVICE_TYPE          0x00000800u
+#define STAGE90_XNU_MSM8974_SHIM_FAIL_DISPATCH_FALLTHROUGH 0x00001000u
 
 struct stage90_xnu_msm8974_shim_result {
     uint32_t version;
@@ -6667,6 +6679,21 @@ struct stage90_xnu_msm8974_shim_result {
     uint32_t arm_disarmed;
     uint32_t arm_elapsed_us;
     uint32_t arm_interval_us;
+    /*
+     * The map/dispatch half: pe_arm_map_interrupt_controller plus the board-class dispatch.
+     * The three bases are the ones XNU's own code computes and consumes; `map_apple_formula`
+     * is what the *stock* function would have produced from the same device tree, recorded so
+     * the replacement's reason is a number in the log rather than a claim in a document.
+     */
+    uint32_t map_soc_phys;
+    uint32_t map_pic_base;
+    uint32_t map_timer_base;
+    uint32_t map_apple_pic_base;
+    uint32_t map_apple_timer_base;
+    uint32_t map_device_type_len;
+    uint32_t map_dispatch_would_return;
+    uint32_t map_checks;
+    uint32_t map_failures;
     uint32_t checksum;
 };
 
@@ -6677,6 +6704,13 @@ struct stage90_xnu_msm8974_shim_result {
  * registration check. Returns 0 if the timer fired and was serviced.
  */
 int stage90_xnu_msm8974_shim_arm_demo(uint32_t interval_us);
+
+/*
+ * The map/dispatch half, callable on its own: fills gSocPhys/gPicBase/gTimerBase and
+ * gPESoCDeviceType the MSM8974 way, and reports what Apple's own pe_arm_map_interrupt_controller
+ * would have computed from the same tree. Returns 0 if every check passed.
+ */
+int stage90_xnu_msm8974_map_platform(void);
 
 int stage90_xnu_msm8974_shim_run(void);
 int stage90_xnu_msm8974_shim_prepare(uint32_t interval_us);

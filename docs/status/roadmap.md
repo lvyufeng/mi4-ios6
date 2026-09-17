@@ -1385,6 +1385,34 @@ and because the fourteen are already the queue. **The link count is a count of w
 of what is right**; this traded five countable misses for a correct configuration and a smaller real
 work list.
 
+**AND THE MAP HALF OF THE PHASE 3 SHIM NOW RUNS ON THE DEVICE** (2026-09-17,
+[`experiment-134`](../experiments/experiment-134-pe-arm-init-interrupts-replacement.md)). The shim
+already registered `tbd_ops` and drove the timer (experiment-104); what it had never done is the
+*other* half of `pe_arm_init_interrupts` — the map step and the board-class dispatch. Both are now
+implemented and exercised on hardware, **13 checks, 0 failures**, on the image built with
+`-DSTAGE90_XNU_MSM8974_SHIM=1`.
+
+The log carries the replacement's justification as numbers rather than a paragraph:
+
+```
+msm8974_map_soc_phys=0xf9000000          <- step 1 reproduced from /arm-io ranges[1]
+msm8974_map_pic_base=0xf9000000          <- computed directly
+msm8974_map_timer_base=0xf9020000
+msm8974_map_apple_pic_base=0xf2000000    <- what Apple's soc_phys + reg[0] produces
+msm8974_map_apple_timer_base=0xf2020000
+msm8974_map_dispatch_would_return=0      <- spec section 1, evaluated on the device
+```
+
+Neither Apple formula lands where the hardware is; the two lines above each are where it is. That is
+the same gap experiment-100 measured through XNU's own device-tree code, from the other side.
+
+**What it does not establish:** it is not *called by XNU*. The payload calls it, as it calls the
+`tbd_ops` registration, because XNU is not running. What is established is that the replacement is
+correct and executable — the precondition for wiring it in. The remaining device-side piece is the
+third thing `pe_arm_init_interrupts` does that is still not replaced: `tbd_fiq_handler`, which the
+shim deliberately leaves NULL, because FIQ is the live path on this build and the payload has only
+ever driven IRQ.
+
 **This is the right denominator, and it replaces the earlier one.** "32 of 32 compile" was every
 `.c` in `osfmk/arm`; a real kernel builds what the file lists say. So the honest question is how many
 of **694** compile, and that measurement is now one command away.

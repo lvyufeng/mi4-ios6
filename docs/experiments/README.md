@@ -147,6 +147,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-131](experiment-131-device-table.md) | The Build Defined `MONOTONIC` and the Manifest Never Built the File |
 | stage90 | [experiment-132](experiment-132-pty-device-and-a-named-unknown.md) | The pty Device, Resolved by Measurement — and One Value Left With No Evidence |
 | stage90 | [experiment-133](experiment-133-device-baseline-revalidated.md) | The Device Line, Re-Validated After Fourteen Stages of Host-Side Work |
+| stage90 | [experiment-134](experiment-134-pe-arm-init-interrupts-replacement.md) | The Replacement for `pe_arm_init_interrupts`, Run on the Device |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

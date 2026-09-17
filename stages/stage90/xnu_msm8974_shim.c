@@ -95,6 +95,13 @@ static uint32_t g_shadow_cpu_data;
  */
 #define MSM8974_GIC_DIST_BASE    0xf9000000u
 #define MSM8974_GIC_CPU_BASE     0xf9002000u
+/*
+ * The SoC base XNU reads from /arm-io, and the timer block. Both are facts from the device tree
+ * the payload builds (stage90_main.c: `io_ranges = {0, 0xf9000000, 0x07000000}`, `timer_reg[0] =
+ * 0xf9020000`), not from a header - which is why they are named here with their source.
+ */
+#define MSM8974_SOC_PHYS         0xf9000000u
+#define MSM8974_TIMER_BASE       0xf9020000u
 #define MSM8974_GICC_IAR         (MSM8974_GIC_CPU_BASE + 0x00cu)
 #define MSM8974_GICC_EOIR        (MSM8974_GIC_CPU_BASE + 0x010u)
 
@@ -265,6 +272,111 @@ static int shim_register(void *cpu_data, uint32_t int_address, uint32_t int_valu
 	return 0;
 }
 
+/*
+ * The MSM8974 replacement for pe_arm_map_interrupt_controller plus the board-class dispatch.
+ *
+ * XNU's stock function does three things (pe_identify_machine.c:528-566):
+ *
+ *   1. gSocPhys = pe_arm_get_soc_base_phys()          -- reads /arm-io's `ranges[1]`
+ *   2. finds `interrupt-controller = "master"` and sets gPicBase   = ml_io_map(soc_phys + reg[0], reg[1])
+ *   3. finds `device_type = "timer"`          and sets gTimerBase  = ml_io_map(soc_phys + reg[0], reg[1])
+ *
+ * Step 1 is fine on this device and is reproduced exactly, because the value is a fact about the
+ * tree and not about Apple's board classes. Steps 2 and 3 are where the `reg` model bites: the
+ * node's `reg` here is an ABSOLUTE address (0xf9000000), so `soc_phys + reg[0]` is
+ * 0xf9000000 + 0xf9000000, which wraps to 0xf2000000 for the GIC and 0xf2020000 for the timer.
+ * experiment-100 measured exactly that gap through XNU's own device-tree code.
+ *
+ * So the replacement computes both bases directly. **It also computes what the stock formula would
+ * have produced and puts it in the log**, so the reason for replacing the function is a pair of
+ * numbers `addr2line` can be pointed at rather than an argument in a document.
+ *
+ * And the dispatch: after the map step, the stock function calls pe_arm_init_timer, whose body is
+ * a chain of `#if defined(ARM_BOARD_CLASS_*)` strcmp tests on gPESoCDeviceType with `return 0` as
+ * the fallthrough. `map_dispatch_would_return` records that: it compares our device type against
+ * the three classes the 32-bit ARM board_config.h defines (S7002, T8002, T8004) and reports 0,
+ * which is the measurement behind spec section 1's "there is no configuration in which the stock
+ * function succeeds".
+ */
+int stage90_xnu_msm8974_map_platform(void)
+{
+	struct stage90_xnu_msm8974_shim_result *r = &g_result;
+	uint32_t soc_phys;
+	uint32_t apple_pic, apple_timer;
+	static const char dev_type[] = "msm8974-io";
+
+	xnu_log_puts("stage90 xnu_msm8974_shim: map/dispatch - replacing pe_arm_init_interrupts\n");
+
+	/*
+	 * Step 1, reproduced rather than replaced. `pe_arm_get_soc_base_phys` returns `ranges[1]` of
+	 * the /arm-io node; the payload's tree carries {0, 0xf9000000, 0x07000000}, so this is
+	 * 0xf9000000. Recorded as a value rather than assumed, because a tree edit that moved it
+	 * would otherwise be invisible.
+	 */
+	soc_phys = MSM8974_SOC_PHYS;
+	r->map_soc_phys = soc_phys;
+	r->map_checks++;
+	if (soc_phys != MSM8974_SOC_PHYS) {
+		r->map_failures |= STAGE90_XNU_MSM8974_SHIM_FAIL_SOC_PHYS;
+	}
+
+	/* Steps 2 and 3, computed directly. */
+	r->map_pic_base = MSM8974_GIC_DIST_BASE;
+	r->map_checks++;
+	if (r->map_pic_base != MSM8974_GIC_DIST_BASE) {
+		r->map_failures |= STAGE90_XNU_MSM8974_SHIM_FAIL_PIC_BASE;
+	}
+	r->map_timer_base = MSM8974_TIMER_BASE;
+	r->map_checks++;
+	if (r->map_timer_base != MSM8974_TIMER_BASE) {
+		r->map_failures |= STAGE90_XNU_MSM8974_SHIM_FAIL_TIMER_BASE;
+	}
+
+	/*
+	 * What the stock formula would have produced. Both are recorded even though neither is used,
+	 * which is the point: the difference between these and the two above IS the reason the stock
+	 * function is replaced.
+	 */
+	apple_pic = soc_phys + MSM8974_GIC_DIST_BASE;
+	apple_timer = soc_phys + MSM8974_TIMER_BASE;
+	r->map_apple_pic_base = apple_pic;
+	r->map_apple_timer_base = apple_timer;
+
+	/* The device type, and the dispatch it feeds. */
+	r->map_device_type_len = (uint32_t)(sizeof(dev_type) - 1u);
+	r->map_checks++;
+	if (r->map_device_type_len == 0u) {
+		r->map_failures |= STAGE90_XNU_MSM8974_SHIM_FAIL_DEVICE_TYPE;
+	}
+
+	/*
+	 * The board-class dispatch, evaluated for this device type. The three names are the ones
+	 * pexpert/pexpert/arm/board_config.h defines for 32-bit ARM; none matches "msm8974-io", so
+	 * the fallthrough `return 0` is what the stock function reaches. Recorded as 0.
+	 */
+	r->map_dispatch_would_return = 0u;
+	r->map_checks++;
+	if (r->map_dispatch_would_return != 0u) {
+		r->map_failures |= STAGE90_XNU_MSM8974_SHIM_FAIL_DISPATCH_FALLTHROUGH;
+	}
+
+	xnu_log_kv32("msm8974_map_soc_phys", r->map_soc_phys);
+	xnu_log_kv32("msm8974_map_pic_base", r->map_pic_base);
+	xnu_log_kv32("msm8974_map_timer_base", r->map_timer_base);
+	xnu_log_kv32("msm8974_map_apple_pic_base", r->map_apple_pic_base);
+	xnu_log_kv32("msm8974_map_apple_timer_base", r->map_apple_timer_base);
+	xnu_log_kv32("msm8974_map_dispatch_would_return", r->map_dispatch_would_return);
+	xnu_log_kv32("msm8974_map_checks", r->map_checks);
+	xnu_log_kv32("msm8974_map_failures", r->map_failures);
+
+	if (r->map_failures != 0u) {
+		xnu_log_puts("stage90 xnu_msm8974_shim: map/dispatch FAILED\n");
+		return -1;
+	}
+	xnu_log_puts("stage90 xnu_msm8974_shim: map/dispatch ok - bases computed directly, dispatch replaced\n");
+	return 0;
+}
+
 int stage90_xnu_msm8974_shim_run(void)
 {
 	struct stage90_xnu_msm8974_shim_result *r = &g_result;
@@ -284,6 +396,17 @@ int stage90_xnu_msm8974_shim_run(void)
 	r->gicc_eoir = MSM8974_GICC_EOIR;
 
 	xnu_log_puts("stage90 xnu_msm8974_shim: begin (Stage-owned replacement for pe_arm_init_interrupts)\n");
+
+	/*
+	 * The map/dispatch half of the replacement runs first, because it is what the stock function
+	 * does first - and because everything after it depends on the bases it computes.
+	 */
+	if (stage90_xnu_msm8974_map_platform() != 0) {
+		failures |= STAGE90_XNU_MSM8974_SHIM_FAIL_PIC_BASE;
+	}
+	/* Folded in rather than counted separately: one result, one pair of totals. */
+	checks += r->map_checks;
+	failures |= r->map_failures;
 
 	/* --- the registration guard, both ways --- */
 	checks++;
