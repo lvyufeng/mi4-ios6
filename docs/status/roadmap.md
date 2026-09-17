@@ -247,7 +247,12 @@ criterion (b): both recovery nets proved, the baseline green, and criterion (c) 
   unattended. What it does not show is that the dead-man fires on hangs that take the GIC or the
   vector table out; that is what the hardware watchdog is for.
 - **(b) not run.** `STAGE90_HANDOFF_FAULT_INJECT_VA` exists for it and is gated behind
-  `--allow-fault-inject`. **This is the last item in the phase.**
+  `--allow-fault-inject`, and it requires `FULL` mode. **This is the last item in the phase.**
+- **The step up out of `HARD_SKIP` has started** (run 9): `PREFLIGHT_WATCHDOG_ONLY` completes the
+  ladder, skips the candidate L1 install, arms the sampling watchdog, dumps and reboots — and the
+  device returns unattended. That is the same configuration that went dark on 2026-09-16, now
+  with an explanation: the loader preflight runs *before* the preflight watchdog is armed, and
+  this build had no net in front of it. See experiment-93's update note.
 
 **Status (2026-09-16).** Two mechanisms were in the tree; one had been tried on hardware and
 failed, and finding out why reshaped this phase.
@@ -301,8 +306,10 @@ Remaining in this phase:
 - The entry-validity guard is in: the handoff rejects a target equal to the fixture entry VA,
   an unaligned target, or one whose first word is the fixture's `__TEXT` marker. Criterion (b)
   still has not produced a logged fault — the last thing Phase 0 owes.
-- Then step the handoff mode up — `PREFLIGHT_WATCHDOG_ONLY`, then `FULL` — which is the first
-  time the candidate-L1 *switch* and the jump are exercised again since Stage90's original run.
+- Then step the handoff mode up — `PREFLIGHT_WATCHDOG_ONLY` (done, run 9), then `FULL`, which is
+  the first time the candidate-L1 *switch* and the jump are exercised again since Stage90's
+  original run. Pair it with `STAGE90_HANDOFF_FAULT_INJECT_VA` so that first exercise is a
+  logged fault rather than a real handoff.
 
 #### The unvalidated stack, audited
 
@@ -354,7 +361,14 @@ STAGE90_EXTRA_CFLAGS='-DSTAGE90_EXCLUSIVE_PROBE=1' ./build.sh
 #    and rebooted; device returned unattended.]
 STAGE90_EXTRA_CFLAGS='-DSTAGE90_DEADMAN_SELFTEST=1 -DSTAGE90_HW_WATCHDOG=0' ./build.sh
 ./preflight_boot_check.sh --allow-selftest
-# 4. Only then, step the handoff mode up: PREFLIGHT_WATCHDOG_ONLY, then FULL.
+# 4. Step the handoff mode up: PREFLIGHT_WATCHDOG_ONLY [DONE 2026-09-17, run 9 of
+#    experiment-94: the preflight watchdog loop armed, dumped and rebooted; the device
+#    returned unattended, on the configuration that went dark on 2026-09-16], then FULL.
+#
+#    Next: FULL + STAGE90_HANDOFF_FAULT_INJECT_VA=0x80100000 with
+#    --allow-full --allow-fault-inject, which is Phase 0 exit criterion (b). Both recovery
+#    nets are now hardware-proved, so this is the first run since Stage90's original hang
+#    to install the candidate L1 and take the jump.
 ```
 
 The `fastboot` and log-capture steps are the same for all of them, and the gate prints them

@@ -6,6 +6,16 @@ Build switches: `STAGE90_HANDOFF_MODE = PREFLIGHT_WATCHDOG_ONLY`,
 `STAGE90_ENTRY_LADDER_LEVEL = FULL`, `STAGE90_BYPASS_ENTRY_STUB = 0`
 Payload: `out/stage90/stage90-qcdt.img`, sha256 `1f80aa96…7ce37f19`
 
+> **Update, 2026-09-17.** The cause of this hang is no longer open, and it is neither of the two
+> readings below. The same mode was run again on 2026-09-17 with a fixed loader and both
+> recovery nets armed, and it completed and returned the device unattended; the evidence points
+> at the Mach-O loader, which runs *before* the preflight watchdog is armed and which in this
+> build copied into an unmapped VA — the same store at the same address that later produced a
+> caught, logged variant of this hang. This build had no recovery net in front of the loader,
+> which is why the device went dark. The full argument is in
+> [experiment-94](experiment-94-stage90-phase0-watchdog-and-baseline.md), Addendum 2. Read the
+> two readings below as what was known at the time, not as the conclusion.
+
 ## What was being tested
 
 The Phase 0 exit criterion from `docs/status/roadmap.md`: prove that the timer

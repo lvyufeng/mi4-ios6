@@ -1,6 +1,6 @@
 # Experiment 94 — Stage90 Phase 0: the recovery net proved on hardware, and the two bugs the baseline run found
 
-Date: 2026-09-17 (runs 00:27–01:43 UTC)
+Date: 2026-09-17 (runs 00:27–02:34 UTC)
 Commit under test: `a683c9d` and the two commits before it (`3b32ee4`, `07ea5a5`)
 Device: Xiaomi Mi 4 LTE `cancro`, serial `4a2fe00b`, non-persistent `fastboot boot`
 
@@ -17,13 +17,16 @@ Three builds were used, in this order. `STAGE90_HANDOFF_MODE = HARD_SKIP` and
 | 6 | 00:46 | same, after the child-count fix | **hang** in the Mach-O loader; hardware watchdog reset at ~28 s |
 | 7 | 00:52 | same, after the loader fix | `kernel_entry returned success` |
 | 8 | 01:43 | `-DSTAGE90_DEADMAN_SELFTEST=1 -DSTAGE90_HW_WATCHDOG=0` | **dead-man fired**, dumped the interrupted PC, rebooted; device returned unaided |
+| 9 | 02:34 | `-DSTAGE90_HANDOFF_MODE=STAGE90_HANDOFF_MODE_PREFLIGHT_WATCHDOG_ONLY` | preflight watchdog loop ran, dumped, rebooted; device returned unaided |
 
-Runs 1–7 are the ones the section headings below describe. Run 8 is a later addendum: it was
-run after this log was first written, and it closes the last Phase 0 item — see the addendum at
-the end.
+Runs 1–7 are the ones the section headings below describe. Runs 8 and 9 are addenda, run after
+this log was first written: 8 closes the last Phase 0 recovery-net item, and 9 is the first step
+up out of `HARD_SKIP` — and, unexpectedly, the best evidence yet for what hung the device on
+2026-09-16. See `Addendum` and `Addendum 2` at the end.
 
-Raw captures are `/tmp/kmsg-selftest{,2,3}.txt`, `/tmp/kmsg-baseline{,2,3,4}.txt` and
-`/tmp/kmsg-deadman1.txt`. Rebuilding run 7's configuration reproduces `stage90-qcdt.img` sha256
+Raw captures are `/tmp/kmsg-selftest{,2,3}.txt`, `/tmp/kmsg-baseline{,2,3,4}.txt`,
+`/tmp/kmsg-deadman1.txt` and `/tmp/kmsg-preflight1.txt`. Rebuilding run 7's configuration
+reproduces `stage90-qcdt.img` sha256
 `9eea0d49c51b5fd6807a410aef978d7ad440850313b63c92bef64f2b9acc5dea`.
 
 ## What was being tested
@@ -307,3 +310,64 @@ is why both exist and why the loader hang of run 6 was recovered by the watchdog
 the dead-man.
 
 Phase 0's remaining item is now criterion (b) alone.
+
+---
+
+# Addendum 2 — run 9: `PREFLIGHT_WATCHDOG_ONLY`, and what it says about experiment-93
+
+Run 9 is the queued run 4a from the roadmap, and the step the roadmap asks for before `FULL`.
+Build: `-DSTAGE90_HANDOFF_MODE=STAGE90_HANDOFF_MODE_PREFLIGHT_WATCHDOG_ONLY`, gate
+`--allow-preflight`. Both recovery nets armed. Captured `/tmp/kmsg-preflight1.txt`.
+
+In this mode the ladder runs in full, the Mach-O loader preflight runs, the handoff is reached —
+and then the candidate L1 is deliberately **not** installed
+(`stage90_xnu_handoff: PREFLIGHT_WATCHDOG_ONLY active - skipping candidate L1 install`,
+`ttbr0_preflight_watchdog=0x000b8000`) and the payload arms the sampling watchdog and spins in
+its bounded identity-mapped loop:
+
+```
+watchdog_interval_us=0x000001f4        500 us
+watchdog_max_samples=0x00000010        16  -> an 8 ms loop
+pc_sample_total=0x00000010    pc_sample_budget_used=0x00000010
+pc_sample_watchdog_fired=0x00000001
+pc_sample_timer_irq_count=0x00000010
+stage90 pc-sampling watchdog: rebooting after sample dump
+platform_reboot entered ... writing PS_HOLD=0 ... PS_HOLD write returned
+```
+
+The device returned to Android unattended; `run_and_capture.sh` exit 0. The samples resolve
+(`arm-none-eabi-addr2line`) to `stage90_handoff_preflight_watchdog_loop`, `timebase_elapsed_us`
+and `timebase_ticks` — the loop's own call site and callees, so the dump is real here too. There
+is no `kernel_entry returned success` line in this run and there should not be: the preflight
+loop's exit *is* the dump-and-reboot, so it never returns to `kernel_entry`.
+
+## This is the configuration that hung on 2026-09-16, and it now explains that hang
+
+[Experiment-93](experiment-93-stage90-phase0-preflight-watchdog.md) ran exactly this mode, on
+2026-09-16, and it is the run that shaped the whole of Phase 0: the device presented no USB in
+any mode for ~20 minutes and needed a power-button hold. That run captured no log — that was the
+problem — and its write-up deliberately left the cause open between two readings: a hang that
+neither net could reach, or a PS_HOLD reset that powered the phone off.
+
+**Both readings are now unnecessary. A third and better-fitting one is available:** the payload
+hung in the Mach-O loader, for the reason run 6 found.
+
+- The loader preflight runs **before** the handoff, so before the preflight watchdog is armed.
+- In `PREFLIGHT_WATCHDOG_ONLY` — as in `HARD_SKIP` — the candidate L1 is not installed, so
+  `0x80008000` is unmapped. The 2026-09-16 build's loader had no TTBR0 check and copied anyway,
+  which is the same store at the same address that produced run 6's infinite abort loop.
+- In the 2026-09-16 build there was **no recovery net in front of the loader at all**: the
+  dead-man was added in response to that hang, and the hardware watchdog came with it. So a
+  loader hang there would leave the CPU spinning in a fault-retry loop with nothing to reset it,
+  which is precisely "no USB in any mode, no log, manual power press".
+
+**Stated as inference, not evidence** — the run produced no log to confirm it, and no future run
+can produce one for it. But it is now the reading that requires nothing else to be broken, and
+it is consistent with the observable that mattered: the complete absence of output. The
+alternative reading (PS_HOLD did not reset) needs a mechanism to have failed that experiments
+03–78 and every run since show working.
+
+What makes this worth recording is the ordering: Phase 0 was designed around the assumption that
+a *recovery net* had failed. The evidence now points at a *payload bug* that no net existed for —
+and the two fixes that followed (a net in front of the loader, and a loader that refuses to write
+where nothing is mapped) cover it from both ends.
