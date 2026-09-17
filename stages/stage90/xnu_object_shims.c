@@ -69,16 +69,32 @@ int IODTGetDefault(const char *key, void *infoAddr, unsigned int infoSize)
     return 1;
 }
 
+/*
+ * The console and debugger hooks XNU's pexpert reaches, now that those are executed rather than
+ * merely linked (STAGE90_XNU_REAL_DT, experiment-105).
+ *
+ * Each forwards to a hook the payload installs, rather than calling the payload's own log
+ * directly, so this file stays independent of stage90.h - it is compiled by a separate script with
+ * its own include set, and that separation is worth keeping.
+ *
+ * Counting as well as forwarding, because "XNU called the debugger" is a fact worth being able to
+ * read out of the log rather than inferring from a side effect.
+ */
+void (*stage90_xnu_shim_console_hook)(char);
+uint32_t stage90_xnu_shim_debugger_calls;
+const char *stage90_xnu_shim_debugger_reason;
+
 void Debugger(const char *reason)
 {
-    (void)reason;
-    /* Stage84 compile/link support only; no debugger runtime is entered. */
+    stage90_xnu_shim_debugger_calls++;
+    stage90_xnu_shim_debugger_reason = reason;
 }
 
 void cnputc(char c)
 {
-    (void)c;
-    /* Stage84 compile/link support only; public-XNU PE_putc is never called on hardware. */
+    if (stage90_xnu_shim_console_hook != 0) {
+        stage90_xnu_shim_console_hook(c);
+    }
 }
 
 void vcattach(void)

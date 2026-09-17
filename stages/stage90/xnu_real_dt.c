@@ -38,8 +38,30 @@
 #include <pexpert/pexpert.h>
 #include <pexpert/arm/consistent_debug.h>
 
+/*
+ * pe_gen.c's console entry points. The declarations are the shim header's, which is what pe_gen.o
+ * was compiled against.
+ */
+extern void pe_init_debug(void);
+extern void PE_init_printf(boolean_t vm_initialized);
+extern void PE_enter_debugger(const char *cause);
+extern void (*PE_putc)(char);
+
 /* The probe's own arena for the entries it hands back; XNU's code allocates nothing here. */
 static struct stage90_xnu_real_dt_result g_result;
+
+/*
+ * The payload's console sink for XNU. One character at a time, because that is the contract
+ * PE_putc has; log_puts is the payload's own and takes a string.
+ */
+static void real_dt_console_putc(char c)
+{
+    char buf[2];
+
+    buf[0] = c;
+    buf[1] = '\0';
+    log_puts(buf);
+}
 
 static void real_dt_log(const struct stage90_xnu_real_dt_result *r)
 {
@@ -81,6 +103,10 @@ static void real_dt_log(const struct stage90_xnu_real_dt_result *r)
     xnu_log_kv32("xnu_real_dt_cd_register_ok", r->cd_register_ok);
     xnu_log_kv32("xnu_real_dt_cd_record_readback_ok", r->cd_record_readback_ok);
     xnu_log_kv32("xnu_real_dt_cd_header_intact", r->cd_header_intact);
+    xnu_log_kv32("xnu_real_dt_pe_init_debug_ok", r->pe_init_debug_ok);
+    xnu_log_kv32("xnu_real_dt_pe_putc_installed", r->pe_putc_installed);
+    xnu_log_kv32("xnu_real_dt_console_bytes", r->console_bytes);
+    xnu_log_kv32("xnu_real_dt_debugger_calls", r->debugger_calls);
     xnu_log_kv32("xnu_real_dt_checksum", r->checksum);
 }
 
@@ -169,6 +195,9 @@ int stage90_xnu_real_dt_run(struct boot_args *args, void *tree, uint32_t tree_le
      * The first public-XNU call. Everything above this line in the payload is Stage-owned code;
      * this one is Apple's, compiled from external/xnu-upstream/pexpert/gen/device_tree.c.
      */
+    /* Point pe_gen.c's console at the payload's log before any XNU code can write to it. */
+    stage90_xnu_shim_console_hook = real_dt_console_putc;
+
     DTInit(tree);
 
     /* 1. "/" - the root. A mis-sized header fails here before anything dereferences it. */
@@ -423,6 +452,57 @@ int stage90_xnu_real_dt_run(struct boot_args *args, void *tree, uint32_t tree_le
             r->cd_header_intact != 1u) {
             r->failures++;
         }
+    }
+
+    /*
+     * 11-13. XNU's console and debugger paths, which are the last of the five objects and the
+     * ones that produce output rather than consume input.
+     *
+     * pe_init_debug() parses "debug=0x144" out of the command line with PE_parse_boot_argn and
+     * stores it in pe_gen.c's own DEBUGFlag - which is static, so the only way to observe that it
+     * worked is to make XNU act on it. PE_enter_debugger() acts on it: it calls Debugger() only
+     * when DB_NMI is set in that flag. 0x144 has DB_NMI, so a call proves the parse happened; the
+     * shim counts the calls so the log can read the fact rather than infer it.
+     *
+     * PE_init_printf(FALSE) then installs cnputc as PE_putc, and the payload has pointed cnputc at
+     * its own ram_console. So the bytes written below are XNU's console path writing into the log
+     * this experiment is read from.
+     */
+    r->checks++;
+    {
+        const char *banner = "\nMI4IOS6_STAGE90 xnu console: wrote this line through PE_putc\n";
+        uint32_t count = 0u;
+
+        pe_init_debug();
+        r->pe_init_debug_ok = 1u;
+
+        PE_init_printf(FALSE);
+        r->pe_putc_installed = (PE_putc != 0) ? 1u : 0u;
+
+        /* Only emit through XNU's own pointer, so what appears in the log came from pe_gen.c. */
+        if (PE_putc != 0) {
+            while (banner[count] != '\0') {
+                PE_putc(banner[count]);
+                count++;
+            }
+        }
+        r->console_bytes = count;
+
+        if (r->pe_putc_installed != 1u || count == 0u) {
+            r->failures++;
+        }
+    }
+
+    r->checks++;
+    PE_enter_debugger("stage90");
+    r->debugger_calls = stage90_xnu_shim_debugger_calls;
+    /*
+     * The command line says debug=0x144, whose DB_NMI bit is 0x4. So pe_init_debug's parse must
+     * have stored a flag with DB_NMI set, and PE_enter_debugger must therefore have called
+     * Debugger. A zero here would mean the parse did not happen or did not take.
+     */
+    if (r->debugger_calls != 1u) {
+        r->failures++;
     }
 
     r->checksum = stage90_xnu_real_dt_checksum(r);
