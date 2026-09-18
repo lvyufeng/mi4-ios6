@@ -3098,6 +3098,150 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 297: `__bss_start` is the first byte of `.bss`, and the 3252 bytes that were being erased
+    #
+    # **The 296 build reported** `__bss_start 0x8012fc78` where the ledger had predicted 0x80130934,
+    # 0xCB4 out, and chasing that difference found a defect the whole walk had been carrying. This
+    # script's `__bss_start` was not the start of `.bss`: it was assigned *between* the `.data` and
+    # `.bss` output sections, and `entry.ld` matches `*(.data .data.*)`, so the objects' Mach-O-named
+    # sections - `"__DATA, __const"` and `"__DATA, __data"`, where the *space* is why the pattern
+    # misses them - were orphan sections the linker placed in the gap, after `.data` and therefore
+    # after `__bss_start`. The payload then zeroed `[__bss_start, __bss_end)` *after* copying the
+    # image in (`xnu_entry_jump.c`, step 2 of `stage90_xnu_entry_run`).
+    #
+    # **The change is one line, moved.** `__bss_start = .;` goes from between the two output sections
+    # to the first statement *inside* `.bss`. Nothing else in `entry.ld` moves. That is what
+    # `stages/stage90/linker.ld:19` has always done for the payload - **the two scripts have disagreed
+    # about this for as long as both have existed, and the entry script was the wrong one** - so the
+    # fix is the project's own existing answer applied where it was missing, not a new idea. It is a
+    # step of its own because it changes the linker script, and so is the step where addresses move.
+    #
+    # **What was being erased, measured from the 296 image.** Both orphan sections, in full:
+    #
+    #     __DATA, __const   0x8012fc78   0x144   `const_boot_args` (0x140) + `BootArgs` (4), and all
+    #                                             324 bytes are zero *in the file*: `arm_init.c:154`
+    #                                             writes both at boot, so zeroing them cost nothing
+    #     __DATA, __data    0x8012fdc0   0xb70   122 `vm_allocation_site`s x 24 bytes = 2928
+    #
+    # and **all 129 non-zero bytes of it are in `__DATA, __data`**, in exactly the three fields
+    # `VM_ALLOC_SITE_STATIC` initializes:
+    #
+    #     refcount=2  tag=0    flags=0        117 sites   1 non-zero byte each    117
+    #     refcount=2  tag!=0   flags=0          3 sites   2 non-zero bytes each     6
+    #     refcount=2  tag!=0   flags=0x0080     2 sites   3 non-zero bytes each     6
+    #                                                                             ---
+    #                                                                             129
+    #
+    # The 117 are `kalloc`/`kalloc_noblock`/`kallocp` sites, `VM_ALLOC_SITE_STATIC(0, 0)`; the 3 are
+    # the `kalloc_tag` family, `(0, itag)`; the 2 are the `kalloc_tag_bt` family, `(VM_TAG_BT, itag)`
+    # with `VM_TAG_BT` = 0x0080 - `osfmk/kern/kalloc.h:90-139`.
+    #
+    # **This corrects 296's own note**, which said the zeroed `flags` were "zero either way". They are
+    # not: five of the 122 sites carry a real `tag`, and two of those carry `VM_TAG_BT` in `flags`. The
+    # field that matters is `tag`, because `vm_tag_alloc_locked` opens with `if (site->tag) return;`
+    # (`osfmk/vm/vm_resident.c:8212`). So until now those five sites, and no others, went through the
+    # tag allocator on first use instead of keeping the tag they were built with - taking a tag out of
+    # `free_tag_bits` and calling `OSAddAtomic16(1, &site->refcount)` on a count that had been zeroed
+    # from 2 (`vm_resident.c:8251`).
+    #
+    # **Prediction.**
+    #
+    #     .data             0x80118000   unchanged - nothing is added to it and nothing taken away
+    #     __DATA, __const   0x8012fc78   unchanged
+    #     __DATA, __data    0x8012fdc0   unchanged
+    #     .bss              0x80130940   unchanged - the orphans stay in the gap, so `.bss` is aligned
+    #                                    to the same place it was
+    #     __bss_start       0x80130940   (was 0x8012fc78: +0xCC8, the 3252 bytes of data plus the 0x14
+    #                                    of alignment fill around them)
+    #     __bss_end         0x80167718   unchanged
+    #     image             1247536      unchanged - `objcopy`'s binary already covered the orphans,
+    #                                    because they are file-backed and sit before `.bss`
+    #     text              1139704      unchanged
+    #     undefined 772, function 682, storage 90 - unchanged: no object is added or removed
+    #
+    # `__DATA`'s `filesize` in the Mach-O header grows by 0xCC8, which is the point of the field: it
+    # now covers everything file-backed in the segment instead of stopping at the end of `.data`.
+    #
+    # **Predicted stop: unchanged - `stub_hit=kpc_thread_create`, `xnu_entry_stub_caller=0x8000b034`.**
+    # No address moves, so unlike 296's the stop cannot move for that reason. What changes is state,
+    # and a *different* stop would be the informative outcome rather than a wrong prediction: the walk
+    # has been running with five allocation sites tagless and every site's `refcount` starting at 0,
+    # and if that mattered to any code the boot has already reached, 122 sites' worth of `kalloc`s have
+    # happened between `arm_init` and `thread_create_internal`.
+    #
+    # **Two checks, because a fix that is a placement needs one that is not.** `verify_bss` asserts
+    # that `__bss_start` is the `.bss` output section's first byte; a new layout invariant asserts
+    # `__bss_start - ENTRY_BASE >= bin_size`, which is the property the payload actually depends on,
+    # stated over the two numbers the payload is compiled from rather than over where anything was
+    # placed. **The invariant is what would have failed the 296 build**, 0xCC8 short.
+    #
+    # **The build - every line held, including the two that are the point of the step.**
+    #
+    #                   predicted        measured
+    #     undefined     772              772
+    #     function      682              682
+    #     storage        90               90
+    #     .data         0x80118000       0x80118000
+    #     __DATA, __const   0x8012fc78   0x8012fc78
+    #     __DATA, __data    0x8012fdc0   0x8012fdc0
+    #     .bss          0x80130940       0x80130940
+    #     __bss_start   0x80130940       0x80130940     <- was 0x8012fc78
+    #     __bss_end     0x80167718       0x80167718
+    #     image         1247536          1247536
+    #     text          1139704          1139704
+    #     __entry_data_filesize   +0xCC8 0x1a2d8 -> 0x1afa0
+    #
+    # and the two new build lines:
+    #
+    #     __bss_start 0x80130940 is the .bss output section's first byte (224728 bytes to 0x80167718)
+    #     the copied image ends at 0x80130930, 16 bytes below __bss_start, so the memset touches
+    #     nothing that was copied
+    #
+    # **And the image itself did not change at all.** The section table is identical to the 296
+    # image, address for address, offset for offset and size for size - `.text` at 0x80000000, the
+    # five Mach-O orphans where the linker had put them, `.data` at 0x80118000, `.bss` at 0x80130940 -
+    # so `objcopy`'s binary is byte-identical and the only thing that changed in what the device is
+    # given is the one constant the payload compiles in from `xnu_arm_entry.h`. That is the shape a
+    # fix of this kind should have: the layout is the same, and 3252 bytes that were in the memset
+    # range are not.
+    #
+    # **The run.**
+    #
+    #     stub_hit=kpc_thread_create    xnu_entry_stub_caller=0x8000b034     (unchanged, as predicted)
+    #     xnu_entry_bss_start=0x80130940                                     (was 0x8012fc78)
+    #     xnu_entry_bss_bytes=0x00036dd8                                     (was 0x00037aa0)
+    #     xnu_entry_copied_bytes=0x00130930                                  (unchanged)
+    #
+    # `0x80130930` is where the copy ends and `0x80130940` is where the memset now begins: **the two
+    # are disjoint, 16 bytes apart**, which is the arithmetic the new layout check states and the run
+    # confirms. The 122 `vm_allocation_site`s keep their `refcount = 2` and their five real `tag`s.
+    #
+    # **The stop did not move, and that is the negative half of the result rather than a surprise.**
+    # Five sites no longer allocate a tag on first use, no site's `refcount` starts at 0, and no code
+    # between `arm_init` and `thread_create_internal` notices - which is what the code says should
+    # happen: `vm_tag_alloc_locked`'s only other reader of `refcount` is the reclaim loop it reaches
+    # when `free_tag_bits` is exhausted (`vm_resident.c:8234`, `1 != prev->refcount`), and nothing on
+    # this path has exhausted 8192 tags. The state that was wrong is now right; the boot has not yet
+    # reached the place where being wrong would have shown. Where that place is: the tag-slot
+    # accounting in `vm_allocation_sites[]` and `vm_allocation_zone_totals[]`, and the release path
+    # at `vm_resident.c:8520-8532`, which asserts `refcount > 0` and acts on the transition through 1.
+    #
+    # Preflight clean (`loader_xnu_entry_stub_status=0x90000001`,
+    # `high_va_data_verified=0x00000001`), log 301118 bytes, no `exception:` line.
+    #
+    # **Safety:** non-persistent `fastboot boot` only, nothing flashed,
+    # `persistent_write_attempted=0x00000000` x25, `failure_mask=0x00000000` x87,
+    # `xnu_entry_failures=0x00000000`, and the device returned to Android on its own
+    # (`getprop ro.build.version.release` = 10).
+    #
+    # **Next:** 298 - the orphan sections themselves, on their own, because naming them in `entry.ld`
+    # moves `__entry_text_end` and `__entry_data_start` and so changes the `__TEXT`/`__DATA` split the
+    # Mach-O header describes. The complete set of Mach-O-style names over all 695 objects is
+    # `__TEXT, initcode` (1 object), `__TEXT,__const` (1), `__TEXT,__os_log` (5), `__DATA, __const`
+    # (1), `__DATA, __data` (207) and `__DATA,__sysctl_set` (105) - and they are *not* all in one
+    # place: the linker put the two `__DATA, __*` ones after `.data`, and `__DATA,__sysctl_set` up
+    # with the read-only group after `.text`, which is the clearest evidence available that ld's
+    # orphan placement is not a policy anyone can rely on.
     # 296: the first step inside thread creation, and a task flag that decides it
     #
     # **The 295 run reported** `stub_hit=uthread_alloc` at `thread_create_internal + 0x088`. Two objects
@@ -7688,6 +7832,60 @@ layout_fail() { say "FAIL: $*" >&2; exit 1; }
     layout_fail "the $ENTRY_TABLE_BYTES bytes of tables at $ENTRY_DATA_LIMIT reach the tree at $ENTRY_DT_OFFSET"
 (( ENTRY_DT_OFFSET + ENTRY_DT_MAX <= ENTRY_SIZE )) ||
     layout_fail "the tree buffer at $ENTRY_DT_OFFSET (+$ENTRY_DT_MAX) is outside the $ENTRY_SIZE window"
+
+# **The fifth invariant is the one experiment 296 found broken: nothing inside the memset range may
+# be initialized data.** `bss_end` bounding the image is not enough on its own, because the payload
+# does two separate things to the window - it copies `bin_size` bytes to ENTRY_BASE, and then it
+# zeroes `[__bss_start, __bss_end)` - and only the second is safe if the first has already ended.
+# For nine experiments the two ranges overlapped by 3252 bytes, so every run silently erased the
+# initialized part of the region: 122 `vm_allocation_site`s carrying the `refcount = 2` that
+# `VM_ALLOC_SITE_STATIC` puts there, 129 non-zero bytes in the file, zero by the time XNU ran. The
+# defect was found by a `__bss_start` that came out 0xCB4 away from its prediction, not by anything
+# failing, and this check is the reason it cannot happen again.
+#
+# It is stated in terms of `bin_size` and `__bss_start` - the two numbers the payload is compiled
+# from - rather than of where the linker put anything, so it holds however the linker chooses to
+# order or merge input sections, and it fails if a future object brings a section that lands at or
+# above `__bss_start`. `verify_bss` below is the other half: this one is the arithmetic the payload
+# depends on, that one is why `__entry_data_filesize` says what it says.
+(( bss_start - ENTRY_BASE >= bin_size )) ||
+    layout_fail "the payload copies $bin_size bytes to the base and then zeroes [$bss_start, $bss_end) - so the first $((bin_size - (bss_start - ENTRY_BASE))) bytes it zeroes are bytes it had just copied, i.e. initialized data"
+
+# --- `__bss_start` is the first byte of `.bss`, by construction and by check ---------------------
+#
+# Experiment 297 moved this symbol *inside* the `.bss` output section of `entry.ld`, which is the
+# only placement that makes it the start of `.bss` regardless of what the linker places between
+# `.data` and `.bss`. That is also what `stages/stage90/linker.ld` has always done for the payload -
+# the two scripts disagreed about this for as long as both existed, and the entry script was the
+# wrong one.
+#
+# Before the move it was assigned *between* the two output sections, so it named the end of `.data`,
+# and it was 0xCB4 away from `.bss` because `__DATA, __const` and `__DATA, __data` - the space in
+# those names is why `*(.data .data.*)` misses them - are orphans the linker placed in the gap.
+#
+# This check is worth having on top of the arithmetic invariant above because the two say different
+# things. The arithmetic one is what makes the payload safe, and it would still pass if the orphans
+# moved somewhere below `.bss`: the memset would start at the end of `.data` and zero the alignment
+# fill between the two, which costs nothing. This one is what makes `__entry_data_filesize` mean "the
+# file-backed part of `__DATA`", which is what the Mach-O header says it means, and it fails the
+# moment anything is placed between `.data` and `.bss` again.
+verify_bss() {
+    local sect
+    # readelf's section table, with the name read after the `]` so that both index widths (`[ 3]` and
+    # `[10]`) parse. `.bss` is the only name this needs and it has no space in it.
+    sect=$(arm-none-eabi-readelf -S -W "$OUT/xnu_arm_entry.elf" | awk '
+        { i = index($0, "]"); if (i == 0) next
+          s = substr($0, i + 1); sub(/^[ \t]+/, "", s)
+          if (split(s, f, /[ \t]+/) >= 5 && f[1] == ".bss") print "0x" f[3] }')
+
+    [[ -n $sect ]] || layout_fail "the linked image has no .bss output section"
+    [[ $((sect)) -eq $((bss_start)) ]] ||
+        layout_fail "__bss_start is $bss_start but the .bss output section starts at $sect - the linker placed something between .data and .bss, and the payload's memset will zero it"
+
+    say "  __bss_start $bss_start is the .bss output section's first byte ($((bss_end - bss_start)) bytes to $bss_end)"
+    say "  the copied image ends at $(printf '0x%08x' $((ENTRY_BASE + bin_size))), $((bss_start - ENTRY_BASE - bin_size)) bytes below __bss_start, so the memset touches nothing that was copied"
+}
+verify_bss
 
 # --- the two addresses XNU's own boot path writes to -------------------------------------------
 #

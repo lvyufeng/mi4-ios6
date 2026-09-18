@@ -55,8 +55,34 @@ SECTIONS
         . = ALIGN(8);
     }
 
-    __bss_start = .;
+    /*
+     * **`__bss_start` is the first byte of `.bss`, and it is placed *inside* the output section so that
+     * this is true by construction** - which is what `stages/stage90/linker.ld:19` has always done for
+     * the payload, and what this script did not do before experiment 297.
+     *
+     * It used to be assigned *between* the `.data` and `.bss` output sections, and that is not the same
+     * statement. It names the end of `.data`, and it names the start of `.bss` only if the linker places
+     * nothing between them. **The linker places something there.** This script matches `*(.data
+     * .data.*)`, and the objects carry sections whose names are Mach-O's - `"__DATA, __const"` and
+     * `"__DATA, __data"`, with the space in the name that makes the pattern miss them - so those are
+     * orphans, and the linker put them after `.data` and therefore **after** the old `__bss_start`.
+     *
+     * The payload zeroes `[__bss_start, __bss_end)` *after* copying the image in (step 2 of
+     * `stage90_xnu_entry_run`), which is the right thing for a `.bss` and the wrong thing for
+     * initialized data: every run this project made before 297 zeroed 3252 bytes of it, which is 122
+     * `vm_allocation_site`s, each with the `refcount = 2` and one of the `tag`/`flags` that
+     * `VM_ALLOC_SITE_STATIC` sets. Experiment 296 found it from a `__bss_start` 0xCB4 away from its
+     * prediction; 297 is the fix, and `entry_macho.s`'s statement that the image has no real
+     * `__DATA,__const` is one of the things it makes true again.
+     *
+     * `build_entry.sh` states the property twice and checks it twice: `verify_bss` asserts that this
+     * symbol *is* the `.bss` output section's first byte, and a layout check asserts that it is at or
+     * beyond the end of the binary `objcopy` produces. The second is the one that matters, because it
+     * is arithmetic over the two numbers the payload actually uses rather than a claim about where the
+     * linker put things - it holds however the linker chooses to order or merge anything.
+     */
     .bss : {
+        __bss_start = .;
         *(.bss .bss.*)
         *(COMMON)
         . = ALIGN(8);
@@ -125,6 +151,14 @@ SECTIONS
      * is what makes `arm_vm_init`'s `end_kern - (segPRELINKTEXTB + segSizePRELINKTEXT)` the round-up
      * slop of the last page rather than the whole address space - see `entry_macho.s` and
      * experiment 242.
+     *
+     * Experiment 297 changed `filesize`, and for the better. `__bss_start` is now the start of the
+     * `.bss` output section rather than the end of `.data`, so this number covers `.data` *and* the
+     * orphan sections the linker placed between the two - which is exactly what "the part of
+     * `__DATA` that is not zero-filled" means. It was 0xCC8 short before. No XNU code reads a kernel
+     * segment's `filesize` (`kxld_seg.c` and `kern_core.c` only write it), so this is a correctness of
+     * description rather than of behaviour - but it is the description the two fields exist to make,
+     * and it was wrong.
      */
     __entry_image_end = .;
     __entry_data_size = __entry_image_end - __entry_data_start;
