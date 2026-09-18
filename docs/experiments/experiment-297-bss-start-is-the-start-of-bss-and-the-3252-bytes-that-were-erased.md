@@ -167,15 +167,19 @@ Preflight clean (`loader_xnu_entry_stub_status=0x90000001`, `high_va_data_verifi
 `entry.ld` moves `__entry_text_end` and `__entry_data_start` and so changes the `__TEXT`/`__DATA`
 split the Mach-O header describes. The complete set of Mach-O-style names over all 695 objects is
 `__TEXT, initcode` (1 object), `__TEXT,__const` (1), `__TEXT,__os_log` (5), `__DATA, __const` (1),
-`__DATA, __data` (207) and `__DATA,__sysctl_set` (105) — and they are **not** all in one place: the
+`__DATA, __data` (207) and `__DATA,__sysctl_set` (105) — and they are not all in one place: the
 linker put the two `__DATA, __*` ones after `.data`, and `__DATA,__sysctl_set` up with the read-only
-group after `.text`. That is the clearest evidence available that ld's orphan placement is not a
-policy anyone can rely on, and it also decides the treatment: `__DATA,__sysctl_set` is the one of the
+group after `.text`. **298 read the input sections' flags and found that placement is consistent
+rather than arbitrary** — every `A`-only section went with the read-only group, every `WA` one after
+`.data` — so the lesson is narrower than "ld is unpredictable" and sharper: *this image's layout
+contract depended on a decision it had not made, and a placement that follows the linker's rules
+rather than the contract's is exactly as invisible when it is wrong.* That is why 298 names all six.
+It also decides their treatment: `__DATA,__sysctl_set` is the one of the
 six whose *name* is an interface — `LINKER_SET_BEGIN(__sysctl_set)` looks it up by name through the
 Mach-O header (`bsd/sys/linker_set.h:193`, `getsectdatafromheader(_header, "__DATA", _set, &_size)`) —
-so it wants an output section of its own and an entry in `entry_macho.s`, not to be merged into
-`.data`; and `__TEXT, initcode` holds `memorystatus_init`, so it belongs in `__TEXT` rather than in
-the writable `__DATA` region it is in today.
+so it wants an output section of its own, inside the `__DATA` segment, and an entry in
+`entry_macho.s`, not to be merged into `.data`; and `__TEXT, initcode` holds `memorystatus_init`, so
+it belongs in `__TEXT` rather than in the writable `__DATA` region it is in today.
 
 Then 299 — `osfmk/kern/kpc_thread.c` for `kpc_thread_create`, and
 `sched_set_thread_base_priority`/`sched_thread_mode_demote` (`osfmk/kern/priority.c`), which closes

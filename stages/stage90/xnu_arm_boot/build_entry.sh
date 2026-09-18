@@ -3098,6 +3098,170 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 298: the orphan sections get names, and `__DATA,__sysctl_set` gets a segment
+    #
+    # **297 fixed what the orphans broke; this step stops them being orphans.** The same build output
+    # that found 297's defect listed five sections the linker had placed on its own, because this
+    # script's patterns only name `.text`, `.rodata`, `.data` and `.bss` and the objects carry
+    # Mach-O's names as well. 297 made the payload's memset safe against any placement; 298 decides
+    # the placements, because two of them are wrong for reasons that have nothing to do with the
+    # memset.
+    #
+    # **The complete set, over all 695 objects, measured once and used here** (name, objects, flags
+    # of the input section, and where the linker put it in the 297 image):
+    #
+    #     __TEXT,__const          1   A    read-only group after `.text`
+    #     __TEXT,__os_log         5   A    read-only group after `.text`
+    #     __TEXT, initcode        1   AX   read-only group after `.text`
+    #     .ARM.exidx              -   AL   read-only group after `.text`
+    #     __DATA, __const         1   WA   **after `.data`, before `__bss_start`**
+    #     __DATA, __data        207   WA   **after `.data`, before `__bss_start`**
+    #     __DATA,__sysctl_set   105   A    read-only group after `.text`
+    #
+    # **That listing corrects a claim 297 made.** 297 said the placement showed ld's choice was "not
+    # a policy anyone can rely on", citing `__DATA,__sysctl_set` landing with the read-only group
+    # while the other `__DATA` sections landed with `.data`. Reading the *input* section flags says
+    # the opposite: ld placed every `A`-only section with the read-only group and every `WA` one
+    # after `.data`, which is consistent and explainable. The defect is not that the linker is
+    # arbitrary - it is that **this image's layout contract depended on a decision it had not made**,
+    # and a placement that follows the linker's rules rather than the contract's is exactly as
+    # invisible when it is wrong. The rule to carry is "name every input section the objects
+    # produce", not "distrust ld".
+    #
+    # **Two of the five placements are wrong, and neither is the memset's business:**
+    #
+    #   * `__TEXT, initcode` is **code** - `memorystatus_init` and `memorystatus_freeze_init`
+    #     (`bsd/sys/kern_memorystatus.h:370,463` put them there by section attribute) - and as an
+    #     orphan it sat inside what this script's Mach-O header calls `__DATA`. The header's
+    #     `__TEXT` vmsize is 0x9C0 short of the read-only material that is actually in the image.
+    #   * `__DATA,__sysctl_set` is read **by name through that same header**:
+    #     `LINKER_SET_BEGIN(__sysctl_set)` is `getsectdatafromheader(_header, "__DATA", _set, &size)`
+    #     (`bsd/sys/linker_set.h:193`), where `_set` is the string `"__sysctl_set"`. So the section
+    #     has to be inside the `__DATA` *segment* - and in the read-only group it is inside `__TEXT`,
+    #     where the lookup cannot find it however `entry_macho.s` is written.
+    #
+    # **The change.** Three patterns and one output section, all in `entry.ld`:
+    #
+    #     .text   += *("__TEXT,*")   and *(.ARM.exidx)
+    #     .data   += *("__DATA,*__data" "__DATA,*__const")
+    #     new:       .sysctl_set : { *("__DATA,*__sysctl_set") }   placed between `.data` and `.bss`,
+    #                with `__entry_sysctl_set` / `_end` / `_size` for the header entry it will need
+    #
+    # The quoting is load-bearing and was verified with a two-object link before the change was
+    # written: a pattern containing a space or a comma has to be quoted, and a quoted pattern still
+    # takes wildcards, so `*("__DATA,*__data")` covers both of XNU's spellings (`"__DATA, __data"`
+    # with the space and `__DATA,__data` without) with one entry. `.sysctl_set` is *not* merged into
+    # `.data`: its name is its interface, and a name that has been merged away cannot be given a
+    # Mach-O section entry.
+    #
+    # **What is deliberately not in this step.** `entry_macho.s` does not yet describe
+    # `__DATA,__sysctl_set`, so nothing can find the set - which is also true today, since nothing
+    # in the image calls `SYSCTL_OID`'s consumer. That entry, and the `host_entry_macho_check.sh`
+    # range assertion that goes with it, wait for the step that links `bsd/kern/kern_sysctl.c`.
+    #
+    # **Prediction.** The read-only material moves into `.text` at the end, where the orphans
+    # already were, so no function address moves and the run's two addresses should be unchanged:
+    #
+    #     __entry_text_end  0x801159a0 -> 0x80116360   (+0x9C0: __TEXT,__const 4, __TEXT,__os_log
+    #                                                   0x35c, __TEXT, initcode 0x64c, .ARM.exidx 8,
+    #                                                   plus the 16-byte alignment before initcode
+    #                                                   and the ALIGN(32))
+    #     __entry_data_start 0x801159a0 -> 0x80116360 (same number, same expression)
+    #     .data             0x80118000 unchanged (16 KB-aligned; the fill in front of it shrinks)
+    #     .data size        0x17c78 -> 0x18930 (+0xCB4, the two WA orphans)
+    #     .sysctl_set       0x80130930, 0xa4 bytes (was an orphan at 0x801159a4)
+    #     .bss              0x80130940 -> 0x80130a00  (+0xC0: `.bss` is 64-byte aligned and the
+    #                                                   sysctl section pushes it off its old one)
+    #     __bss_start       0x80130a00, __bss_end 0x801677d8 (+0xC0)
+    #     image             1247536 -> 1247700 (+164: the binary now ends at `.sysctl_set`, which is
+    #                                                  4 bytes past where `.data` now ends, rounded
+    #                                                  by the section's alignment)
+    #     __TEXT vmsize     0x1159a0 -> 0x116360, __DATA vmsize 0x51d78 -> 0x51478
+    #     __DATA filesize   0x1afa0 -> 0x1a6a0
+    #     verify_pad        writes move +0xC0, with the reserved slot, because it is in `.bss`
+    #     undefined 772, function 682, storage 90, text +0x9C0 - no object is added or removed
+    #
+    # **Predicted stop: unchanged - `stub_hit=kpc_thread_create`, `xnu_entry_stub_caller=0x8000b034`.**
+    # Nothing that runs moves: the new material is appended at the end of `.text`, after every
+    # object this image links, and `.data`'s address does not change. `xnu_entry_bss_bytes` is also
+    # unchanged at 0x36dd8, since `.bss` only moves.
+    #
+    # **And a new build check, `verify_sections`:** the set of allocated output sections must be
+    # exactly `.text .data .sysctl_set .bss`. That is what makes the six names above a closed set
+    # rather than a list that is right until the next object arrives - the day a section this script
+    # does not name appears, the build says so instead of the linker choosing.
+    #
+    # **The build - every line but one, and the one is a lesson about which column to predict.**
+    #
+    #                   predicted        measured
+    #     undefined     772              772
+    #     function      682              682
+    #     storage        90               90
+    #     .text size    0x116360         0x116360     (+0x9C0, exactly as derived)
+    #     .data         0x80118000       0x80118000
+    #     .data size    0x18930          0x18930      (+0xCB4)
+    #     .sysctl_set   0x80130930/0xa4  0x80130930/0xa4
+    #     .bss          0x80130a00       0x80130a00   (+0xC0)
+    #     __bss_start   0x80130a00       0x80130a00
+    #     __bss_end     0x801677d8       0x801677d8
+    #     __entry_text_end / __entry_data_start   0x80116360 / 0x80116360
+    #     __entry_data_size   0x51478    0x51478
+    #     __entry_data_filesize 0x1a6a0  0x1a6a0
+    #     image         1247700          1247700      (+164)
+    #     text (size column)  +0x9C0     +12          <- the miss
+    #     verify_pad writes   +0xC0      0x801677c8 / 0x801677cc
+    #
+    # and the build's own lines:
+    #
+    #     __bss_start 0x80130a00 is the .bss output section's first byte (224728 bytes to 0x801677d8)
+    #     the copied image ends at 0x801309d4, 44 bytes below __bss_start, so the memset touches
+    #     nothing that was copied
+    #     the allocated output sections are exactly .bss .data .sysctl_set .text - nothing is where
+    #     the linker put it
+    #     entry_skip_pad at 0x800023d4 branches over 512 bytes to 0x800025d4
+    #     XNU writes 0x801677c8 and 0x801677cc (ResetHandlerData - ExceptionLowVectorsBase =
+    #     0x1677c4), both inside the reserved slot at 0x801677c8
+    #
+    # **The miss is the `size` column, and it is worth the paragraph.** The prediction `+0x9C0` was
+    # derived from `.text` growing by the 0x9C0 of read-only material that moved into it, and `.text`
+    # grew by exactly that. The `size` column grew by 12, because it is not `.text`: `size` adds
+    # every `ALLOC` section that is not writable to its text column, so in the 296/297 layouts that
+    # column was `.text` **plus the 2648-byte orphan group** (1139704 against `.text`'s 1137056) and
+    # now it is `.text` plus `.sysctl_set`'s 164 bytes. +0x9C0 - (2648 - 164) = +12, exactly. So the
+    # column is derivable after all - from the section list - but it is a different quantity from the
+    # one every prediction here is about, and the build report now prints `.text` from
+    # `__entry_text_size` instead. One wrong line out of twenty, and the reason for it is recorded
+    # rather than the number quietly changed.
+    #
+    # **The run, and the two addresses did not move - which is the step's own claim about itself.**
+    #
+    #     stub_hit=kpc_thread_create    xnu_entry_stub_caller=0x8000b034    (unchanged, as predicted)
+    #     xnu_entry_bss_start=0x80130a00                                    (was 0x80130940)
+    #     xnu_entry_bss_bytes=0x00036dd8                                    (unchanged - `.bss` moved,
+    #                                                                        it did not grow)
+    #     xnu_entry_copied_bytes=0x001309d4                                 (was 0x00130930, +0xa4)
+    #
+    # `0x8000b034` is `thread_create_internal + 0x348`, the same address this walk has reported since
+    # 296, and it is the evidence that nothing which *executes* moved: the read-only orphans were
+    # appended after every object in the link, `.data`'s address did not change, and the only
+    # addresses that moved are the ones inside `.bss` that the build derives from it. The copy grew by
+    # exactly the sysctl set's 0xa4 bytes, because the set is now the last file-backed section and
+    # `objcopy` ends the binary there.
+    #
+    # Preflight clean (`loader_xnu_entry_stub_status=0x90000001`,
+    # `high_va_data_verified=0x00000001`), log 301118 bytes, no `exception:` line.
+    #
+    # **Safety:** non-persistent `fastboot boot` only, nothing flashed,
+    # `persistent_write_attempted=0x00000000` x25, `failure_mask=0x00000000` x87,
+    # `xnu_entry_failures=0x00000000`, and the device returned to Android on its own
+    # (`getprop ro.build.version.release` = 10).
+    #
+    # **Next:** 299 - `osfmk/kern/kpc_thread.c` for `kpc_thread_create`, and
+    # `sched_set_thread_base_priority`/`sched_thread_mode_demote` (`osfmk/kern/priority.c`), which
+    # closes `thread_create_internal`; after that `kernel_thread_create` returns a real thread to
+    # `kernel_bootstrap`, which calls `thread_deallocate` and branches to `load_context` at +0x380 -
+    # the first time this walk crosses into a context switch rather than a function call. And when
+    # `kern_sysctl.o` is linked: the `__DATA,__sysctl_set` section entry in `entry_macho.s`.
     # 297: `__bss_start` is the first byte of `.bss`, and the 3252 bytes that were being erased
     #
     # **The 296 build reported** `__bss_start 0x8012fc78` where the ledger had predicted 0x80130934,
@@ -3240,8 +3404,12 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `__TEXT, initcode` (1 object), `__TEXT,__const` (1), `__TEXT,__os_log` (5), `__DATA, __const`
     # (1), `__DATA, __data` (207) and `__DATA,__sysctl_set` (105) - and they are *not* all in one
     # place: the linker put the two `__DATA, __*` ones after `.data`, and `__DATA,__sysctl_set` up
-    # with the read-only group after `.text`, which is the clearest evidence available that ld's
-    # orphan placement is not a policy anyone can rely on.
+    # with the read-only group after `.text`. **298 read the input sections' flags and found that
+    # placement consistent rather than arbitrary** - every `A`-only section went with the read-only
+    # group, every `WA` one after `.data` - so the lesson is narrower than "ld is unpredictable" and
+    # sharper: this image's layout contract depended on a decision it had not made, and a placement
+    # that follows the linker's rules rather than the contract's is exactly as invisible when it is
+    # wrong.
     # 296: the first step inside thread creation, and a task flag that decides it
     #
     # **The 295 run reported** `stub_hit=uthread_alloc` at `thread_create_internal + 0x088`. Two objects
@@ -7789,7 +7957,16 @@ run arm-none-eabi-ld -T "$BOOT_DIR/entry.ld" --defsym=ENTRY_BASE=$ENTRY_BASE \
 entry=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="_start"{print "0x"$1}')
 bss_start=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="__bss_start"{print "0x"$1}')
 bss_end=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="__bss_end"{print "0x"$1}')
-text_end=$(arm-none-eabi-size "$OUT/xnu_arm_entry.elf" | awk 'NR==2{print $1}')
+# `.text`'s own size, from the linker's symbol rather than from `size`'s "text" column - because
+# they are different quantities and experiment 298's one wrong prediction is what that costs. `size`
+# classifies sections by flag and adds every `ALLOC` section that is not writable to its text column,
+# so that column is `.text` *plus whatever read-only section lives outside it*: the 2648-byte orphan
+# group in the 296/297 layouts (which is why the column was 2648 above `.text` there), and
+# `.sysctl_set`'s 164 bytes now. Moving the orphans into `.text` therefore moved the column by
+# +0x9C0 - 0x9B4 = +12 while `.text` moved by exactly the 0x9C0 that was predicted. The column is
+# derivable, but only from the section list, and `.text` is the section every prediction here is
+# about, so the report quotes the section.
+text_end=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="__entry_text_size"{print "0x"$1}')
 
 run arm-none-eabi-objcopy -O binary "$OUT/xnu_arm_entry.elf" "$OUT/xnu_arm_entry.bin"
 
@@ -7886,6 +8063,35 @@ verify_bss() {
     say "  the copied image ends at $(printf '0x%08x' $((ENTRY_BASE + bin_size))), $((bss_start - ENTRY_BASE - bin_size)) bytes below __bss_start, so the memset touches nothing that was copied"
 }
 verify_bss
+
+# --- the allocated sections are exactly the ones this script names -------------------------------
+#
+# Six input-section names that are Mach-O's, not ELF's, appear across the object set this image
+# links from - `__TEXT,__const`, `__TEXT,__os_log`, `__TEXT, initcode`, `__DATA, __const`,
+# `__DATA, __data` and `__DATA,__sysctl_set` - and until experiment 298 every one of them was an
+# orphan, placed by the linker's own rules. Experiment 297 found the cost of one such placement: the
+# two `WA` names landed between `.data` and `__bss_start`, and the payload zeroes from `__bss_start`.
+#
+# 298 names all six, and this check is what keeps the list closed. It is deliberately a check on the
+# *output* sections rather than on the names, so it catches a seventh name arriving from a future
+# object whichever spelling it uses: if the new section is not one this script claims, it shows up
+# here as an extra allocated output section and the build fails by name instead of the linker
+# choosing a home for it. `.text` and `.data` absorb whole families by wildcard (`.text*`,
+# `.rodata*`, `.data*`), so what this really asserts is that nothing else has appeared.
+verify_sections() {
+    local got want
+    # `objdump -h` lists a section's flags on the line *after* its name, which is the only reason
+    # this is parsed here rather than with readelf: `ALLOC` is a word, where readelf's flag column
+    # is a set of letters whose position shifts when it is empty.
+    got=$(arm-none-eabi-objdump -h "$OUT/xnu_arm_entry.elf" | awk '
+        /^ *[0-9]+ +[^ ]+ +[0-9a-f]+ +[0-9a-f]+/ { name = $2; next }
+        /ALLOC/ { print name }' | sort | tr '\n' ' ')
+    want=".bss .data .sysctl_set .text "
+    [[ $got == "$want" ]] ||
+        layout_fail "the allocated output sections are '$got' and this script names exactly '$want' - a section the linker placed on its own has appeared, and whatever it is will be inside the window the payload copies and zeroes"
+    say "  the allocated output sections are exactly $got- nothing is where the linker put it"
+}
+verify_sections
 
 # --- the two addresses XNU's own boot path writes to -------------------------------------------
 #
@@ -7996,7 +8202,7 @@ EOF
 say
 say "entry base   $ENTRY_BASE"
 say "entry point  $entry"
-say "text size    $text_end bytes"
+say "text size    $((text_end)) bytes (.text)"
 say "image bytes  $bin_size"
 say "bss          $bss_start .. $bss_end ($bss_bytes bytes, zeroed by the payload)"
 say "layout       args +$ENTRY_ARGS_OFFSET, topOfKernelData +$ENTRY_DATA_LIMIT, tree +$ENTRY_DT_OFFSET, window $ENTRY_SIZE"

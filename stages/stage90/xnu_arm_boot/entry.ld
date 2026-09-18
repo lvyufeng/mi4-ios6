@@ -44,6 +44,28 @@ SECTIONS
         KEEP(*(.text._start))     /* start.s's _start, entered first */
         *(.text .text.*)
         *(.rodata .rodata.*)
+        /*
+         * **The Mach-O names, which this script used to leave to the linker.** The objects this
+         * image links carry sections named after Mach-O segment/section pairs, because the XNU
+         * sources say so - `vm_types.h`'s `VM_ALLOC_SITE_STATIC` names `"__DATA, __data"`,
+         * `kern_memorystatus.h` puts two functions in `"__TEXT, initcode"`. Six names appear over
+         * the whole object set, and each is quoted here because a pattern containing a space or a
+         * comma has to be: `*("__TEXT,*")` matches `__TEXT,__const`, `__TEXT,__os_log` and
+         * `__TEXT, initcode` (the space before `initcode` is in XNU's source) with one pattern.
+         *
+         * Until experiment 298 they were orphan sections and the linker placed them by its own
+         * rules. Measured, those rules are consistent - it put the `A`-only read-only ones with the
+         * read-only group and the `WA` writable ones after `.data` - but "consistent with the
+         * linker's rules" is not "consistent with this image's layout", and the `WA` pair landing
+         * between `.data` and `.bss` is what experiment 297's `__bss_start` defect was made of.
+         *
+         * `__TEXT, initcode` is the one with a consequence beyond tidiness: it holds
+         * `memorystatus_init` and `memorystatus_freeze_init` (`bsd/sys/kern_memorystatus.h:370,463`)
+         * and is *code*, so as an orphan it sat inside what this script's Mach-O header calls
+         * `__DATA` - the writable region. It belongs in `__TEXT`, which is where it is now.
+         */
+        *("__TEXT,*")
+        *(.ARM.exidx)
         . = ALIGN(32);
     }
     __entry_text_end = .;
@@ -52,8 +74,48 @@ SECTIONS
     __entry_data_start = .;
     .data : {
         *(.data .data.*)
+        /*
+         * The two writable Mach-O sections. `__DATA, __data` is where `VM_ALLOC_SITE_STATIC` puts
+         * every `vm_allocation_site` (207 objects carry one) and `__DATA, __const` is where
+         * `arm_init.c:112` puts `const_boot_args` and `BootArgs`. Both spellings of each name are
+         * matched - XNU's sources are not consistent about the space after the comma.
+         */
+        *("__DATA,*__data" "__DATA,*__const")
         . = ALIGN(8);
     }
+
+    /*
+     * **`__DATA,__sysctl_set`, and why it gets an output section of its own.** Every `SYSCTL_OID`
+     * drops a four-byte `struct linker_set_entry` here (`bsd/sys/linker_set.h:114`), and the set is
+     * read **by name at runtime** - `LINKER_SET_BEGIN(__sysctl_set)` is
+     * `getsectdatafromheader(_mh_execute_header, "__DATA", "__sysctl_set", &size)`
+     * (`linker_set.h:193`), i.e. a walk of *this image's Mach-O header*. Three things therefore have
+     * to be true of it and only one of them was:
+     *
+     *   - the section has to exist and keep its name, which is its interface, not an implementation
+     *     detail - so it is not merged into `.data` even though its contents are four-byte pointers;
+     *   - its address has to be inside the `__DATA` *segment*, because that is the segment the
+     *     lookup asks for - and as an orphan the linker placed it with the read-only group after
+     *     `.text`, i.e. inside `__TEXT`, where the lookup cannot find it however the header is
+     *     written. That is why this section is placed here, between `.data` and `.bss`;
+     *   - `entry_macho.s` has to describe it, and does not yet: the header declares no such section,
+     *     so nothing can find the set today. That is a change to `entry_macho.s` and
+     *     `tools/host_entry_macho_check.sh` and it waits for the step that links a consumer of the
+     *     set (`bsd/kern/kern_sysctl.c`) - the same step that makes the section non-empty in a way
+     *     that matters. The two symbols below are what that entry will be written from.
+     *
+     * Nothing looks the set up yet, and nothing in this image calls `SYSCTL_OID`'s consumer, so this
+     * is preparation rather than a fix - but it is preparation with a reason written down rather
+     * than an accident of where ld happened to put a section.
+     */
+    . = ALIGN(4);
+    .sysctl_set : {
+        __entry_sysctl_set = .;
+        *("__DATA,*__sysctl_set")
+        . = ALIGN(4);
+        __entry_sysctl_set_end = .;
+    }
+    __entry_sysctl_set_size = __entry_sysctl_set_end - __entry_sysctl_set;
 
     /*
      * **`__bss_start` is the first byte of `.bss`, and it is placed *inside* the output section so that
