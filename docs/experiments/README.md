@@ -180,6 +180,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-164](experiment-164-an-off-option-has-two-spellings.md) | An Off Option Has Two Spellings, and the Tree Depends on Both — `task.c` Compiles, 220 → 114 |
 | stage90 | [experiment-165](experiment-165-two-files-one-line-each.md) | Two Files, One Line Each: the C++ Block Is Complete, and No Boot-Path Stub Is Behind a Compile Failure (114 → 102) |
 | stage90 | [experiment-166](experiment-166-the-generated-inputs-existed-for-one-configuration.md) | The Generated Inputs Existed for One Configuration Only — `pty.h`/`loop.h` Fell Through to the Host's (102 → 94) |
+| stage90 | [experiment-167](experiment-167-the-string-h-shim-was-one-block-short.md) | The `<string.h>` Shim Was One Block Short, and the Measurement Was Reading an Older Directory (94 → 92) |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

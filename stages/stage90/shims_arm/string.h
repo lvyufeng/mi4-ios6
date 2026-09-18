@@ -77,6 +77,11 @@ int strncmp(const char *a, const char *b, size_t n);
 char *strncpy(char *dst, const char *src, size_t n);
 char *strcpy(char *dst, const char *src);
 char *strchr(const char *s, int c);
+/* `strncat` is here because `san/memintrinsics.h`'s `__nosan_strncat` inline body calls it and this
+ * header is where that header's other twelve names come from - it was the one name missing from
+ * this list, which shows up as "incompatible integer to pointer conversion" inside the body of an
+ * inline function nobody calls. Apple's own declaration, `osfmk/libsa/string.h:77`. */
+char *strncat(char *dst, const char *src, size_t n);
 
 /*
  * The five BSD-legacy names, and why this header is where they are missing rather than somewhere
@@ -105,5 +110,38 @@ void bzero(void *dst, size_t n);
 #ifdef __cplusplus
 }
 #endif
+
+/*
+ * The block Apple's kernel `<string.h>` carries and this one did not, and it was missing the same
+ * way the five BSD-legacy names above were: `osfmk/libsa/string.h:97-99` is
+ *
+ *     #ifdef PRIVATE
+ *     #include <san/memintrinsics.h>
+ *     #endif
+ *
+ * right after its own `bzero`/`bcopy`/`bcmp` declarations — which is where `__nosan_bzero`,
+ * `__nosan_strncpy` and their eleven neighbours are declared, as `static inline`. Nothing else in
+ * `osfmk`, `bsd`, `libkern`, `iokit`, `pexpert` or `security` includes that header, so in Apple's
+ * build **this file is where those names come from**.
+ *
+ * What it cost to be without it: `osfmk/kern/zalloc.c:561` calls `__nosan_bzero` and `:4030` calls
+ * `__nosan_strncpy`, and with no declaration visible clang emitted an implicit-declaration reference
+ * to an external symbol that nothing defines — the tree's only definition is the `static inline`
+ * in the header. The symbol then turns up in the link as `__nosan_bzero`, 7 call-graph edges from
+ * `arm_init` (`get_zone_page_metadata <- zcram <- vm_map_init <- vm_mem_bootstrap <-
+ * kernel_bootstrap`), and `stub_blockers.py` filed it as "a file not in the manifest" — which is
+ * the wrong diagnosis of the right symptom, since the file is in the tarball and the manifest is
+ * not what was missing (experiment-165 measured 0 occurrences of `san/memintrinsics` in the
+ * preprocessed translation unit).
+ *
+ * **The `#ifdef PRIVATE` guard is deliberately dropped.** It exists in Apple's file to keep the
+ * header's contents out of a non-private export, and here `PRIVATE=1` is one of the build's global
+ * defines so the two would behave identically today — but "is this symbol declared" is not a
+ * question a per-component define should be able to answer differently for two files that link
+ * against each other, and that is the whole reason this project has a fixed define table per
+ * component. The include is unconditional, and every name in the header is `static inline`, so a
+ * translation unit that does not use them emits nothing.
+ */
+#include <san/memintrinsics.h>
 
 #endif

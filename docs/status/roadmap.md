@@ -2226,6 +2226,48 @@ both; `STAGE90_BOOT` adds `bsd_init.c`, whose single remaining error is
 experiment-164 shape again), and `RELEASE` adds `if_bridge.c` (`DLT_EN10MB`, `NBPFILTER`).
 `bsd_init.c` is on the boot path: `osfmk/kern/startup.c:629` calls it from `kernel_bootstrap`.
 
+**THE `<string.h>` SHIM WAS ONE BLOCK SHORT** (2026-09-18,
+[`experiment-167`](../experiments/experiment-167-the-string-h-shim-was-one-block-short.md)).
+`__nosan_bzero` was one of the eight boot-path stubs and `stub_blockers.py` filed it under "a file
+not in the manifest" — the right symptom with the wrong diagnosis, since `san/memintrinsics.h` is in
+the tarball and the manifest was never what was missing. `osfmk/kern/zalloc.c:561` calls
+`__nosan_bzero` and `:4030` calls `__nosan_strncpy`; the tree's only definitions are the `static
+inline`s at `san/memintrinsics.h:40,43`; those are reached through `osfmk/libsa/string.h:97-99`'s
+`#ifdef PRIVATE → #include <san/memintrinsics.h>`; and **nothing in `osfmk`, `bsd`, `libkern`,
+`iokit`, `pexpert` or `security` includes `osfmk/libsa/string.h`, because in Apple's build it *is*
+the kernel's `<string.h>`**. Here `<string.h>` resolves to this project's
+`stages/stage90/shims_arm/string.h`, which declares the same functions and had dropped that block —
+so with no declaration visible clang emitted an implicit-declaration reference to a symbol nothing
+defines. The fix is the block plus its one missing name, `strncat`, and the `#ifdef PRIVATE` guard is
+deliberately not reproduced: "is this symbol declared" is not a question a per-component define
+should answer differently for two translation units that link against each other. Compile counts are
+unchanged in both configurations (423 of 426, 612 of 615, 83 of 83, the same three failing files) and
+**`.text` shrinks by exactly 16 bytes in both** — the same change measured twice. `STAGE90_BOOT`
+undefined **94 → 92**, boot path **9 → 8**; `RELEASE` **56 → 54** and **8 → 7**.
+
+**And the first measurement of that said nothing had changed**, which is its own entry in the
+measurement class. The build script and the tool default to the *same* object directory
+(`out/xnu_kernel_obj`, both honouring `XNU_KERNEL_OBJ_OUT`), so the pairing holds only if they are
+given the same value or neither; the RELEASE build was run with an explicit directory and the
+measurement without one, so the tool linked a directory whose `osfmk_kern_zalloc.o` was 47 minutes
+old and still carried the two `__nosan` references the change had removed. A stale directory does not
+announce itself — it links and reports a plausible number, and the number it reported was the
+*previous* stage's, which is the only reason it was caught. The rule: pass the same object directory
+to both or neither, and when a count does not move after a change that provably removed two symbols,
+suspect the count before the change.
+
+**Eight stubs are left, and three of them are not reachable by a real kernel in this configuration.**
+The four `__firehose_*`/`mach_msg_destroy_from_kernel` are the port of experiment-162 and
+`chudxnu_thread_get_callstack64_kperf` is 9 edges out with `osfmk/chud/` holding only an `i386/`
+implementation; the `MD5*` trio is `libkern/crypto/corecrypto_md5.c` (`optional crypto`, and this
+configuration has `CRYPTO 0`). Those three are unreachable at runtime — `btlog.c:634` opens
+`btlog_add_entry` with `if (g_crypto_funcs == NULL) return;`, and `g_crypto_funcs` is defined in
+`register_crypto.c:33` as `= NULL`, another `optional crypto` file — **but the measurement image
+reaches them anyway**, because `measure_link.sh` stubs every undefined symbol as a weak *function*,
+so a data symbol's address is non-zero and the NULL test is false. That is the next measurement
+improvement: classify by relocation (`CALL`/`JUMP24` is a function, `ABS32` is data and belongs in
+`.bss` as a zero word), which is the difference between "the image links" and "the image behaves".
+
 **XNU'S REAL `arm_init` RAN ON THE DEVICE** (2026-09-18,
 [`experiment-159`](../experiments/experiment-159-the-real-arm-init-ran.md)). The entry image no
 longer stubs `arm_init`: it links XNU's own `osfmk_arm_arm_init.o`, plus XNU's own `data.o`
