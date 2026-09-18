@@ -285,8 +285,9 @@ printf '' > /tmp/empty.c && arm-none-eabi-gcc -mcpu=cortex-a15 -marm -c /tmp/emp
 (cd stages/stage90/xnu_arm_boot && STAGE90_ENTRY_REAL_ARM_INIT=1 \
    STAGE90_ENTRY_ARM_CPUID_OBJ=/tmp/empty.o \
    STAGE90_ENTRY_ARM_MACHINE_CPUID_OBJ=/tmp/empty.o ./build_entry.sh)
-comm -23 <(sort out/stage90/xnu_arm_entry_undef.txt) <(sort /tmp/u_without_cpuid.txt)   # 8
-comm -13 <(sort out/stage90/xnu_arm_entry_undef.txt) <(sort /tmp/u_without_cpuid.txt)   # nothing
+# `comm` prints file-1-only with -23 and file-2-only with -13, so with the linked image first:
+comm -13 <(sort out/stage90/xnu_arm_entry_undef.txt) <(sort /tmp/u_without_cpuid.txt)   # 8 resolved
+comm -23 <(sort out/stage90/xnu_arm_entry_undef.txt) <(sort /tmp/u_without_cpuid.txt)   # nothing added
 
 (cd stages/stage90 && STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' ./build.sh)
 (cd stages/stage90 && ./run_and_capture.sh --allow-xnu-entry)
