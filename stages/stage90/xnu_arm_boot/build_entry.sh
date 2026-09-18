@@ -3368,6 +3368,96 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `xnu_entry_failures=0x00000000`, and the device returned to Android on its own
     # (`getprop ro.build.version.release` = 10).
     OSFMK_KERN_PRIORITY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_PRIORITY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_priority.o}
+    # 301: `processor_up` runs real code, and the stop is the one name it calls that is not
+    #
+    # **The 300 run reported** `stub_hit=processor_up` at `load_context + 0x20`. One object defines
+    # it: `osfmk/kern/machine.c` (manifest:569), built all along as `osfmk_kern_machine.o` - `.text`
+    # 0x5F0, `.rodata.str1.1` 0xC7, `.bss` 0x28.
+    #
+    #      resolved  6   processor_up, processor_assign, processor_shutdown, host_get_boot_info,
+    #                   host_reboot, and the **storage** name `machine_info` (`B 0x28`)
+    #      added     1   `commpage_update_active_cpus` - the object defines `ml_io_read*` and
+    #                   `processor_doshutdown`/`processor_offline` too, and none of them is a stub:
+    #                   the 250/270 shape again, from both sides at once
+    #
+    # **This step's stop is decided by what `processor_up` *does*, so its body had to be read rather
+    # than assumed** - and reading it is where the step's one trap was. It calls nine things and every
+    # one of them but `commpage_update_active_cpus` is already real:
+    #
+    #     ml_set_interrupts_enabled, init_ast_check, lck_spin_lock      real
+    #     enqueue_tail(&pset->active_queue, processor)   inlined, and **this is the trap**
+    #     sched_update_pset_load_average, hw_atomic_add                 real
+    #     commpage_update_active_cpus                                   ***the stop***
+    #     lck_spin_unlock, ml_cpu_up                                    real
+    #
+    # `enqueue_tail` is not a call in the built code - it is `__QUEUE_ELT_VALIDATE` plus four stores -
+    # and the validator is *live* in this build (`osfmk/kern/queue.h:230`, inside the
+    # `XNU_KERNEL_PRIVATE` arm), so the body carries three `panic` paths with the strings
+    # "Invalid queue element pointers" and "Invalid queue element linkage". **The first reading of
+    # the disassembly made that look like a panic whenever the queue is empty** - `ldrd r8, [r7]`;
+    # `cmp r8, #0`; `beq <panic>` - which is the state a fresh processor set is in. It is not: these
+    # queues are **circular**, initialised to point at themselves, so an empty `active_queue` has
+    # `next == prev == &active_queue`, non-zero, and the validator's two equality tests
+    # (`next->prev == que`, `prev->next == que`) both hold. The `beq` is the `elt_next == 0` case,
+    # which cannot happen for an initialised set. **A panic path in a body is not a prediction that
+    # it runs**, and the way to tell the two apart was the one line of `queue_init` - not the
+    # disassembly.
+    #
+    # **_Predicted stop: `stub_hit=commpage_update_active_cpus`, `xnu_entry_stub_caller` = the return
+    # address of the `bl` at `processor_up + 0xa8`, i.e. `processor_up + 0xac`.** The object is
+    # appended after `osfmk_kern_priority.o`, whose `.text` ends at 0x800e65b8 in the 300 image, so
+    # with everything before it unmoved the new object's `.text` starts there and the caller key is
+    # **0x800e6664**. That the prediction is *this* name rather than `ml_cpu_up` is the step's claim:
+    # `processor_up`'s straight line reaches `commpage_update_active_cpus` first, and it runs real
+    # code - `init_ast_check`, the pset lock, the queue insert, the load average, the atomic
+    # increment - before it stops. **The map confirms `processor_up` at 0x800e65b8 exactly**, which
+    # is what makes 0x800e6664 a prediction about the stub's caller rather than about a guess.
+    #
+    # **The build.**
+    #
+    #                   predicted        measured
+    #     undefined     755              755
+    #     function      668              668
+    #     storage        87               87
+    #     .data         0x80118000       0x80118000   (the object has none)
+    #     __bss_start   0x80130a00       0x80130a00   (unchanged)
+    #     __bss_end     0x80167798       0x80167798   <- unchanged, as predicted, and by the same
+    #                                                   mechanism 300 used
+    #     .text         0x116780 -> ~0x1177E8   0x1176C0    (predicted 0x128 high)
+    #     image         1247700          1247700      (unchanged, as predicted)
+    #
+    # Three of the four layout lines landed exactly again - and `__bss_end` is unchanged for the
+    # *second* step running, by the same mechanism rather than by luck: machine.o's `.bss` is 0x28
+    # and lands at 0x801660a0 (measured), which grows `realstubs.o`'s `.bss` start by 0x40
+    # (0x801660c0 -> 0x80166100) while the retired `machine_info` stand-in shrinks its size by 0x40
+    # (0x16c4 -> 0x1684) - and start + size is the same number.
+    #
+    # **`.text` was predicted 0x128 high, and the step's decomposition is measurable in full:**
+    #
+    #     machine.o `.text`            +0x5F0   placed 0x5F0 at 0x800e65b8
+    #     machine.o `.rodata.str1.1`   +0x3A    <- **0xC7 in the object; the map says
+    #                                              "0xc7 (size before relaxing)"**
+    #     realstubs.o `.text`          -0x60    five function stubs retired, one added: -4 x 24
+    #     realstubs.o `.rodata.str1.4` -0x3C    five name strings retired, one added
+    #     section alignment            +0x12
+    #                                  -----
+    #                                  +0x5A0   = the measured delta, to the byte
+    #
+    # The estimate missed for two reasons and only one of them is arithmetic: **five stubs retire,
+    # not one** (the object defines five names the image was stubbing), and **`.rodata.str1.1` is a
+    # mergeable string section, so the linker relaxes it** - 0xC7 in the object became 0x3A in the
+    # image, 141 bytes of common suffixes overlapped. That second one is the general lesson and it is
+    # new here: **a `.rodata.str*` size in an object is an upper bound, not a contribution**, and the
+    # map prints both numbers side by side for exactly this reason.
+    #
+    # **Next:** 302 - `osfmk/arm/commpage/commpage.c` for `commpage_update_active_cpus`, the name this
+    # step leaves; behind it `processor_up` ends with `lck_spin_unlock` and `ml_cpu_up` (both real),
+    # after which `load_context` continues through `stack_alloc_try`, `sched_run_incr`,
+    # `thread_get_perfcontrol_class`, `processor_state_update_explicit`, `mach_absolute_time` and two
+    # `timer_start`s - all real - into `machine_load_context` (`osfmk/arm/cswitch.s`), which is a stub
+    # and **is the context switch itself**: it does not return, so that is the step where this walk
+    # stops being a walk.
+    OSFMK_KERN_MACHINE_OBJ=${STAGE90_ENTRY_OSFMK_KERN_MACHINE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_machine.o}
     # 298: the orphan sections get names, and `__DATA,__sysctl_set` gets a segment
     #
     # **297 fixed what the orphans broke; this step stops them being orphans.** The same build output
@@ -8097,6 +8187,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$BSD_KERN_KERN_EVENT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KPC_THREAD_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_PRIORITY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_MACHINE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -8109,7 +8200,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
