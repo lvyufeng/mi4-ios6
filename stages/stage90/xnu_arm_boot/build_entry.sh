@@ -137,14 +137,30 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # It is also 34927 bytes of text against experiment-168's 26744 bytes of headroom, which is why
     # `topOfKernelData` moved in the same experiment.
     ARM_PE_INIT_OBJ=${STAGE90_ENTRY_PE_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_arm_pe_init.o}
+    # `osfmk/arm/strlcpy.c`, named by experiment-169's run: with `pe_init.o` in the image,
+    # `PE_init_platform` ran its body and stopped at `stub_hit=strlcpy`, which is its first call
+    # that this image does not provide (`pe_init.c:302`, the pixel-format assignment - eight lines
+    # before the `DTInit` call the previous experiment predicted). 68 bytes of text and no external
+    # references of its own, so it is a leaf, and linking it is what puts the `DTInit` probe added
+    # in entry_stubs.c in reach.
+    ARM_STRLCPY_OBJ=${STAGE90_ENTRY_STRLCPY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_strlcpy.o}
+    # `osfmk/arm/strlen.s`, and the one place this build links two objects in one experiment on
+    # purpose rather than one. `nm -u osfmk_arm_strlcpy.o` is `memcpy` and `strlen`; `memcpy` is
+    # already in the image, and `strlen` is a leaf in the assembly pool. Linking `strlcpy.o` alone
+    # would spend a hardware run reporting a name the host already printed, and the object after it
+    # - the one whose call the `DTInit` probe in entry_stubs.c is waiting for - would still not be
+    # reached. So both are here: the edge the device named, and the one symbol that edge needs.
+    ARM_STRLEN_OBJ=${STAGE90_ENTRY_STRLEN_OBJ:-$REPO_ROOT/out/xnu_asm_obj/strlen.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BZERO_OBJ" "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_CPU_OBJ"   "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_PE_INIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$ARM_STRLCPY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$ARM_STRLEN_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
-                "$ARM_PE_INIT_OBJ")
+                "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

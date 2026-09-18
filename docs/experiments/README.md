@@ -183,6 +183,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-167](experiment-167-the-string-h-shim-was-one-block-short.md) | The `<string.h>` Shim Was One Block Short, and the Measurement Was Reading an Older Directory (94 → 92) |
 | stage90 | [experiment-168](experiment-168-cpu-data-init-ran-and-named-pe-init-platform.md) | The Second Real XNU Object Ran on the Device, and Named `PE_init_platform` |
 | stage90 | [experiment-169](experiment-169-the-image-crossed-the-limit-and-stopped-at-strlcpy.md) | The Image Crossed Its Old Page-Table Limit, and `PE_init_platform` Stopped at `strlcpy` |
+| stage90 | [experiment-170](experiment-170-xnu-own-pe-state-named-the-device-tree.md) | XNU's Own `PE_state` Named the Device Tree: `xnu_entry_dtinit_base=0x00280000` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
