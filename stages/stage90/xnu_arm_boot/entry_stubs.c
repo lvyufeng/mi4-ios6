@@ -262,10 +262,15 @@ extern uint8_t ExceptionVectorsBase[];
  * One layout property is *not* free, and has to be re-checked whenever this grows: the exception
  * handlers run on `entry_vectors_stack`, whose top `entry_vectors.s` defines as the end of its own
  * `.space`, and that top must stay at or below this buffer's first byte or a handler frame would
- * land inside the results. It held for 268 and 269 (stack top and `g_kv_buf` both at 0x800f8f00 -
- * `nm` on the image is the check), but it is adjacency the linker script happens to produce, not a
- * guarantee it makes, so `tools/host_resolve_entry_addr.sh` is not the tool for it: compare
- * `entry_vectors_stack_top` against `g_kv_buf` in `nm -n` output.
+ * land inside the results. It holds for 268 and 269 - `entry_vectors_stack` is
+ * 0x800f7f80..0x800f8f80, the stack top (and so the handlers' first push, at top-4) is 0x800f8f80,
+ * and `g_kv_buf` starts above it (0x800f8f98 in 269's canon build, 0x800f9004 after the 269
+ * diagnostics) - and `nm -n` on the image is the check. It is adjacency the linker script happens
+ * to produce, not a guarantee it makes, so `tools/host_resolve_entry_addr.sh` is not the tool for
+ * it: compare `entry_vectors_stack_top` against `g_kv_buf` in `nm -n` output. Note what the layout
+ * does *not* protect: the stack grows down from 0x800f8f80, so an overflow writes *below*
+ * `entry_vectors_stack` (0x800f7f80), not into the results - the invariant is about the frames'
+ * upper bound, and the stack's own 4 KB is the thing a storm would exhaust.
  */
 #define ENTRY_KV_BUF 8192
 static char g_kv_buf[ENTRY_KV_BUF];
@@ -277,26 +282,153 @@ static uint32_t g_kv_len;
  */
 static uint32_t g_kv_dropped;
 
+/*
+ * How many times the data-abort handler has been entered, and what the *first* entry saw.
+ *
+ * Added by experiment 269, because its run reported `xnu_entry_kv_written=0x1fe4` - a full
+ * 8164-byte results buffer - for a boot that only reaches one stub, and `xnu_entry_kv_dropped=0x11`
+ * = 17, which is *exactly* the number of `entry_kv` calls `fleh_dataabt` makes. That pairing says
+ * the handler ran, and the buffer's content - some three hundred copies of the string
+ * `xnu_entry_data_abort_dfar` with no `=` and no value after any of them - says it ran many times
+ * and that each entry stopped somewhere between writing its first key and writing that key's value.
+ *
+ * Counting and dating the entries is what turns that reading into a measurement: `entries` says
+ * whether there was a storm and how big, `first_dfar`/`first_pc` say what faulted the first time,
+ * and `first_kv_len` says how much of the buffer had already been written when it started - which
+ * distinguishes "the storm is the whole run" from "the run got to the stub and then faulted".
+ *
+ * They are plain `.bss` globals rather than register-held values like the epilogue's own, because
+ * they are written long before the teardown and read after it, and the teardown's set/way sweep
+ * covers the whole D-cache - which is the same reason `g_kv_len` can be read back as
+ * `xnu_entry_kv_in_dram`.
+ */
+static uint32_t g_abort_entries;
+static uint32_t g_first_abort_dfar;
+static uint32_t g_first_abort_pc;
+static uint32_t g_first_abort_kv_len;
+
+/*
+ * Where `entry_kv` was when the fault happened, and what it was about to store.
+ *
+ * Added by experiment 269 on the strength of its measured first abort alone. That measurement says
+ * `pc = 0x800020dc`, which the image's own disassembly makes `entry_kv.part.0+0xb8`:
+ *
+ *     add r3, r4, r3       ; r3 = &g_kv_buf + g_kv_len
+ *     str r2, [lr]         ; g_kv_len += 12
+ *     strb r1, [r3, #11]   ; g_kv_buf[g_kv_len + 11] = '\n'      <- the fault
+ *
+ * and `dfar = 0x3f` with `first_kv_len = 0x34`. Those two numbers cannot both be true of that store
+ * as written: `r4` is `&g_kv_buf` (0x800f8f98, `nm` on the image), so the address is
+ * 0x800f8f98 + 0x34 + 11 = 0x800f8fc7, and with `first_kv_len` at the value *before* the `str r2, [lr]`
+ * the address the handler *should* have seen is 0x800f8fc7 either way. `0x3f` is `g_kv_len + 11` with
+ * `&g_kv_buf` = 0 - i.e. the base register held zero at that store - and nothing in that function
+ * leaves `r4` anything but `&g_kv_buf`, on either of its two paths into the value block (0x80002040
+ * and 0x800020f4, both `movw`/`movt` pairs, both intact in the linked image).
+ *
+ * So the two readings disagree, and the disagreement is the thing to measure rather than argue:
+ * `g_kv_step`/`g_kv_step_addr` are written by `entry_kv` immediately before each of its four groups
+ * of stores, and read by the handler, which says what the code *believed* it was doing a few
+ * instructions before it faulted. `g_first_abort_dfsr` says whether this was even a translation
+ * fault, and `g_first_abort_insn` says whether `pc_abt` is really an instruction.
+ *
+ * They are `volatile` on purpose: a diagnostic that the optimizer is free to move is a diagnostic
+ * that can report the state of a program that never ran.
+ */
+static volatile uint32_t g_kv_step;
+static volatile uint32_t g_kv_step_addr;
+static uint32_t g_kv_hex_in_use;
+static uint32_t g_kv_hex_arg;
+
+/*
+ * `entry_epilogue`'s `why` string, copied out of the parameter and into `.bss` on entry.
+ *
+ * The parameter is correct and the compiler does the right thing with it - `entry_epilogue` stores
+ * it at `[sp, #4]` on entry and reloads it from there for the report (`ldr r0, [sp, #4]` at
+ * 0x80002458 in the 269 image). What the run says is that the *slot* is wrong by the time it is
+ * read: the line comes out as `MI4IOS6_STAGE90_XNU real XNU entry: ` with nothing after it, i.e. a
+ * pointer to a nul byte, and in the storm run the same line read `47`. Both are what a clobbered
+ * stack slot looks like, and neither is what the string says. So the report uses this copy, taken
+ * before anything is torn down, and prints the pointer itself beside it - a value in `.bss` cannot
+ * be clobbered by whatever is going on with the stack, and the pair (pointer, text) says which of
+ * the two readings the next run should trust.
+ */
+static const char *g_why;
+static uint32_t g_first_abort_dfsr;
+static uint32_t g_first_abort_lr;
+static uint32_t g_first_abort_insn;
+static uint32_t g_first_abort_step;
+static uint32_t g_first_abort_step_addr;
+static uint32_t g_first_abort_kvbuf;
+static uint32_t g_first_abort_sp;
+static uint32_t g_first_abort_spsr;
+static uint32_t g_first_abort_ttbr0;
+static uint32_t g_first_abort_ttbr1;
+static uint32_t g_first_abort_ttbcr;
+static uint32_t g_first_abort_sctlr;
+static uint32_t g_first_abort_cpu_ttep;
+static uint32_t g_first_abort_avail_start;
+static uint32_t g_first_abort_gphysbase;
+static uint32_t g_first_abort_mem_size;
+static uint32_t g_first_abort_end_kern;
+static uint32_t g_first_abort_prelink_b;
+static uint32_t g_first_abort_prelink_size;
+static uint32_t g_first_abort_hex;
+static uint32_t g_first_abort_hex_page;
+static uint32_t g_first_abort_hex_used;
+static uint32_t g_first_abort_hex_arg;
+
+/*
+ * The hex digits, at file scope rather than inside `entry_kv` so that the epilogue can report the
+ * address the code has for it (see `xnu_entry_hex_addr`). It is the one `.rodata` object in
+ * `entry_kv`'s value path, and 269's first fault decodes to a read at `low16(&this) + 8` with a
+ * fault status of "translation fault, read" - an address that cannot be right and a status that
+ * cannot be true of a store, which is why the number is worth having beside the linker's own.
+ */
+static const char g_hex[] = "0123456789abcdef";
+
 void entry_kv(const char *key, uint32_t value)
 {
-    static const char hex[] = "0123456789abcdef";
-
     if (g_kv_len + 40u >= ENTRY_KV_BUF) {
         g_kv_dropped++;
         return;
     }
+    g_kv_step = 1u;
+    g_kv_step_addr = (uint32_t)(uintptr_t)&g_kv_buf[g_kv_len];
     g_kv_buf[g_kv_len++] = ' ';
+    g_kv_step = 2u;
+    g_kv_step_addr = (uint32_t)(uintptr_t)&g_kv_buf[g_kv_len];
     while (*key != '\0' && g_kv_len + 20u < ENTRY_KV_BUF) {
         g_kv_buf[g_kv_len++] = *key++;
     }
+    g_kv_step = 3u;
+    g_kv_step_addr = (uint32_t)(uintptr_t)&g_kv_buf[g_kv_len];
     g_kv_buf[g_kv_len++] = '=';
     g_kv_buf[g_kv_len++] = '0';
     g_kv_buf[g_kv_len++] = 'x';
+    g_kv_step = 4u;
+    g_kv_step_addr = (uint32_t)(uintptr_t)&g_kv_buf[g_kv_len];
+    /*
+     * `g_kv_hex_in_use` is the address this function has for the digit table, written into `.bss`
+     * immediately before the loop that reads it, and `g_kv_hex_arg` is the first index that will be
+     * used. Experiment 269's first fault decodes to a read of `low16(&table) + 8` - the table's own
+     * low half and a nibble - with a *translation* fault on section zero, which is unmapped. The
+     * table is in `.text` at 0x800CA644 in this build, so the high half of the address is precisely
+     * what is missing from that fault, and these two words say whether the code's own constant lost
+     * it (a code-generation question) or whether the address was right and the fault status is
+     * describing something else (a measurement question). The digits themselves are computed
+     * arithmetically now, so nothing in this path depends on the answer.
+     */
+    g_kv_hex_in_use = (uint32_t)(uintptr_t)g_hex;
+    g_kv_hex_arg = (value >> 28u) & 0xfu;
     for (unsigned i = 0; i < 8u; i++) {
-        g_kv_buf[g_kv_len++] = hex[(value >> (28u - (i * 4u))) & 0xfu];
+        unsigned d = (value >> (28u - (i * 4u))) & 0xfu;
+        g_kv_buf[g_kv_len++] = (char)(d < 10u ? ('0' + d) : ('a' + (d - 10u)));
     }
+    g_kv_step = 5u;
+    g_kv_step_addr = (uint32_t)(uintptr_t)&g_kv_buf[g_kv_len + 11];
     g_kv_buf[g_kv_len++] = '\n';
     g_kv_buf[g_kv_len] = '\0';
+    g_kv_step = 0u;
 }
 
 /* ------------------------------------------------------------------ the evidence path */
@@ -427,6 +559,7 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
 
     kv_len_written = g_kv_len;
     kv_dropped_written = g_kv_dropped;
+    g_why = why;
 
     /*
      * CCSIDR describes whichever cache CSSELR selects, and *nothing here ever selected one*.
@@ -477,6 +610,12 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
         }
         if ((uintptr_t)&g_kv_dropped + sizeof g_kv_dropped > hi) {
             hi = (uintptr_t)&g_kv_dropped + sizeof g_kv_dropped;
+        }
+        if ((uintptr_t)&g_why < lo) {
+            lo = (uintptr_t)&g_why;
+        }
+        if ((uintptr_t)&g_why + sizeof g_why > hi) {
+            hi = (uintptr_t)&g_why + sizeof g_why;
         }
 
         for (uintptr_t p = lo; p < hi; p += 32u) {
@@ -537,7 +676,7 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
 
     entry_write("\nMI4IOS6_STAGE90_XNU real XNU entry: ");
-    entry_write(why);
+    entry_write(g_why);
     entry_write("\n");
 
     /*
@@ -555,6 +694,51 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     entry_write_kv("xnu_entry_kv_written", kv_len_written);
     entry_write_kv("xnu_entry_kv_in_dram", g_kv_len);
     entry_write_kv("xnu_entry_kv_dropped", kv_dropped_written);
+    entry_write_kv("xnu_entry_why", (uint32_t)(uintptr_t)g_why);
+    entry_write_kv("xnu_entry_why_byte", (uint32_t)(uint8_t)g_why[0]);
+    /*
+     * Experiment 269's reading of a full results buffer, in four numbers. They are read from `.bss`
+     * here rather than from registers because they are written long before the teardown and the
+     * teardown's set/way sweep covers the whole D-cache - the same reason `xnu_entry_kv_in_dram`
+     * works. `_entries` says whether the data-abort handler re-entered itself and how often;
+     * `_first_dfar`/`_first_pc` say what the first fault actually was; `_first_kv_len` says how much
+     * of the buffer was already written when it started.
+     */
+    entry_write_kv("xnu_entry_abort_entries", g_abort_entries);
+    entry_write_kv("xnu_entry_abort_first_dfar", g_first_abort_dfar);
+    entry_write_kv("xnu_entry_abort_first_pc", g_first_abort_pc);
+    entry_write_kv("xnu_entry_abort_first_kv_len", g_first_abort_kv_len);
+    /*
+     * The second group, which is the one that decides between the two readings of the first. `_dfsr`
+     * is the fault status word - bits 3:0 the fault type, bit 10 whether it was a write - and `_insn`
+     * is the word at `pc_abt`, so a `pc_abt` that is not an instruction is visible as one rather than
+     * assumed to be. `_step`/`_step_addr` come from `entry_kv` itself and say what it believed it was
+     * about to store and where, `_kvbuf` is the address the *code* has for the buffer, and `_sp` is
+     * the exception stack pointer at entry.
+     */
+    entry_write_kv("xnu_entry_abort_first_dfsr", g_first_abort_dfsr);
+    entry_write_kv("xnu_entry_abort_first_lr", g_first_abort_lr);
+    entry_write_kv("xnu_entry_abort_first_insn", g_first_abort_insn);
+    entry_write_kv("xnu_entry_abort_first_step", g_first_abort_step);
+    entry_write_kv("xnu_entry_abort_first_step_addr", g_first_abort_step_addr);
+    entry_write_kv("xnu_entry_abort_first_kvbuf", g_first_abort_kvbuf);
+    entry_write_kv("xnu_entry_abort_first_sp", g_first_abort_sp);
+    entry_write_kv("xnu_entry_abort_first_spsr", g_first_abort_spsr);
+    entry_write_kv("xnu_entry_abort_first_ttbr0", g_first_abort_ttbr0);
+    entry_write_kv("xnu_entry_abort_first_ttbr1", g_first_abort_ttbr1);
+    entry_write_kv("xnu_entry_abort_first_ttbcr", g_first_abort_ttbcr);
+    entry_write_kv("xnu_entry_abort_first_sctlr", g_first_abort_sctlr);
+    entry_write_kv("xnu_entry_abort_first_cpu_ttep", g_first_abort_cpu_ttep);
+    entry_write_kv("xnu_entry_abort_first_avail_start", g_first_abort_avail_start);
+    entry_write_kv("xnu_entry_abort_first_gphysbase", g_first_abort_gphysbase);
+    entry_write_kv("xnu_entry_abort_first_mem_size", g_first_abort_mem_size);
+    entry_write_kv("xnu_entry_abort_first_end_kern", g_first_abort_end_kern);
+    entry_write_kv("xnu_entry_abort_first_prelink_b", g_first_abort_prelink_b);
+    entry_write_kv("xnu_entry_abort_first_prelink_size", g_first_abort_prelink_size);
+    entry_write_kv("xnu_entry_abort_first_hex", g_first_abort_hex);
+    entry_write_kv("xnu_entry_abort_first_hex_page", g_first_abort_hex_page);
+    entry_write_kv("xnu_entry_abort_first_hex_used", g_first_abort_hex_used);
+    entry_write_kv("xnu_entry_abort_first_hex_arg", g_first_abort_hex_arg);
     entry_write_kv("xnu_entry_csselr_before", csselr_before);
     entry_write_kv("xnu_entry_ccsidr_before", ccsidr_before);
     entry_write_kv("xnu_entry_ccsidr_l1", ccsidr_l1);
@@ -1213,43 +1397,84 @@ void fleh_prefabt(void)
 void fleh_dataabt(void)
 {
     uint32_t dfar, dfsr, lr_abt, spsr, ttbr0, ttbr1, ttbcr, sctlr;
-    uint32_t pc_abt, insn;
+    uint32_t pc_abt, insn, sp_now;
 
     __asm__ volatile ("mrc p15, 0, %0, c6, c0, 0" : "=r"(dfar));
-    __asm__ volatile ("mrc p15, 0, %0, c5, c0, 0" : "=r"(dfsr));
     __asm__ volatile ("mov %0, lr" : "=r"(lr_abt));
-    __asm__ volatile ("mrs %0, spsr" : "=r"(spsr));
-    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));
-    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 1" : "=r"(ttbr1));
-    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));
-    __asm__ volatile ("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
-
-    entry_kv("xnu_entry_data_abort_dfar", dfar);
-    entry_kv("xnu_entry_data_abort_dfsr", dfsr);
-    entry_kv("xnu_entry_data_abort_lr", lr_abt);
-    /* LR_abt - 8 for a data abort: the instruction that could not complete. */
+    __asm__ volatile ("mrc p15, 0, %0, c5, c0, 0" : "=r"(dfsr));
+    __asm__ volatile ("mov %0, sp" : "=r"(sp_now));
     pc_abt = lr_abt - 8u;
-    entry_kv("xnu_entry_data_abort_pc", pc_abt);
-    /* The instruction itself, so a pc_abt that is not an instruction is visible as one. */
     insn = 0u;
     if (entry_image_ptr((uintptr_t)pc_abt)) {
         insn = entry_word_at((uintptr_t)pc_abt);
     }
-    entry_kv("xnu_entry_data_abort_insn", insn);
-    entry_kv("xnu_entry_data_abort_spsr", spsr);
-    entry_kv("xnu_entry_data_abort_ttbr0", ttbr0);
-    entry_kv("xnu_entry_data_abort_ttbr1", ttbr1);
-    entry_kv("xnu_entry_data_abort_ttbcr", ttbcr);
-    entry_kv("xnu_entry_data_abort_sctlr", sctlr);
-    entry_kv("xnu_entry_data_abort_cpu_ttep", cpu_ttep);
-    entry_kv("xnu_entry_data_abort_avail_start", avail_start);
-    entry_kv("xnu_entry_data_abort_gphysbase", gPhysBase);
-    entry_kv("xnu_entry_data_abort_mem_size", mem_size);
-    /* The three lives `arm_vm_prot_init`'s PreLinkInfoDictionary call is computed from. */
-    entry_kv("xnu_entry_data_abort_end_kern", end_kern);
-    entry_kv("xnu_entry_data_abort_prelink_text_b", segPRELINKTEXTB);
-    entry_kv("xnu_entry_data_abort_prelink_text_size", segSizePRELINKTEXT);
-    entry_epilogue("exception: data abort");
+
+    /*
+     * Everything the handler knows goes into `.bss`, and the handler then goes straight to the
+     * epilogue. It makes no `entry_kv` call at all, and that is the whole point of the shape.
+     *
+     * Experiment 269's run reported `xnu_entry_kv_dropped` = 17 - the number of `entry_kv` calls this
+     * function used to make - and a results buffer of 0x1fe4 bytes that was three hundred and
+     * thirteen copies of `xnu_entry_data_abort_dfar` with no value after any of them. That is a
+     * storm: one of the handler's own records faulted, which re-entered the handler, which wrote
+     * another record, which faulted. The measured first entry says `dfsr = 0x05` (translation fault,
+     * section, read) and `pc` in the middle of `entry_kv`'s value write, with `dfar` = `first_kv_len
+     * + 11` - i.e. the address that store would use if the buffer's base register were zero, which
+     * nothing in that function can produce.
+     *
+     * The 269 canon (first) run's first fault was a *store* (`strb r1, [r3, #11]`) reported with a
+     * status bit saying *read*; this run's is a read at an address that must be readable because the
+     * same `.rodata` is what every key in the report is read from. Both are exactly what an
+     * imprecise abort looks like on memory the preflight maps Strongly-ordered: DFAR and LR are
+     * unpredictable for it, so the two numbers the handler reports are stale rather than wrong about
+     * whatever actually faulted. Chasing that further is worth an experiment of its own; what is not
+     * worth anything is a reporting path that can fault, because a fault in it is not one bad line,
+     * it is three hundred.
+     *
+     * So: record, then leave. The epilogue writes all of it with `entry_write_kv` straight to the
+     * ram console after the mmu is off, which is the one reporting path here with a record of
+     * working - including for the numbers below, which is how this run's first fault was read at all.
+     */
+    if (g_abort_entries == 0u) {
+        __asm__ volatile ("mrs %0, spsr" : "=r"(spsr));
+        __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));
+        __asm__ volatile ("mrc p15, 0, %0, c2, c0, 1" : "=r"(ttbr1));
+        __asm__ volatile ("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));
+        __asm__ volatile ("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
+        g_first_abort_dfar = dfar;
+        g_first_abort_pc = pc_abt;
+        g_first_abort_kv_len = g_kv_len;
+        g_first_abort_dfsr = dfsr;
+        g_first_abort_lr = lr_abt;
+        g_first_abort_insn = insn;
+        g_first_abort_step = g_kv_step;
+        g_first_abort_step_addr = g_kv_step_addr;
+        g_first_abort_kvbuf = (uint32_t)(uintptr_t)g_kv_buf;
+        g_first_abort_sp = sp_now;
+        g_first_abort_spsr = spsr;
+        g_first_abort_ttbr0 = ttbr0;
+        g_first_abort_ttbr1 = ttbr1;
+        g_first_abort_ttbcr = ttbcr;
+        g_first_abort_sctlr = sctlr;
+        g_first_abort_cpu_ttep = cpu_ttep;
+        g_first_abort_avail_start = avail_start;
+        g_first_abort_gphysbase = gPhysBase;
+        g_first_abort_mem_size = mem_size;
+        g_first_abort_end_kern = end_kern;
+        g_first_abort_prelink_b = segPRELINKTEXTB;
+        g_first_abort_prelink_size = segSizePRELINKTEXT;
+        g_first_abort_hex = (uint32_t)(uintptr_t)g_hex;
+        g_first_abort_hex_page = (uint32_t)((uintptr_t)g_hex & ~0xfffu);
+        g_first_abort_hex_used = g_kv_hex_in_use;
+        g_first_abort_hex_arg = g_kv_hex_arg;
+        g_abort_entries = 1u;
+        entry_epilogue("exception: data abort");
+    }
+
+    /* A second entry means the epilogue's own path faulted. Count it and leave again; there is
+     * nothing left to report through, and a loop here is a loop that never ends. */
+    g_abort_entries++;
+    entry_epilogue("a data abort inside the data-abort handler");
 }
 
 void fleh_addrexc(void) { entry_epilogue("exception: address exception"); }

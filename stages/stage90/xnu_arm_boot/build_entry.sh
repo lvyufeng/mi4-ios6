@@ -2781,6 +2781,115 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # what turned "the ipc tables are built" from an inference into a reading: both calls succeed,
     # `t268_kalloc_size` = `t268_kalloc_actual` = 0x100 for each, callers `ipc_table_init+0x34` and
     # `ipc_table_init+0x120`, returning 256 bytes apart.
+    # 269: `ipc_voucher_init`, and the first step whose *value* is wrong in a way the run cannot see.
+    # 268's stop was `ipc_voucher_init`; the object that defines it is `osfmk/ipc/ipc_voucher.c`
+    # (manifest:522), `osfmk_ipc_ipc_voucher.o` - **12335 bytes of text, 120 of data, 2200 of bss,
+    # 73 definitions and 35 references**, the largest single step since 257. A voucher is a
+    # first-class Mach object: its own hash table (`ivht_bucket`, `iv_global_table`), two zones, an
+    # attribute-manager registry, and the whole `mach_voucher_*` / `host_*_mach_voucher_*` MIG
+    # surface - 22 of the 73 definitions are names the image has been carrying as stubs since the
+    # IPC init surface was added in 265.
+    #
+    # **26 of the 35 references are already real**, which is why this step is a link and not a
+    # cascade - and the other nine are stubs, which is where the useful measurement is. Reading the
+    # object's own relocations says *where* each is referenced, and not one of them is reached from
+    # `ipc_voucher_init`:
+    #
+    #     task_max                <- ipc_voucher_init                  (was already a stub)
+    #     ipc_port_alloc_special  <- convert_voucher_attr_control_to_port, convert_voucher_to_port
+    #     ipc_port_nsrequest      <- convert_voucher_attr_control_to_port, convert_voucher_to_port
+    #     ipc_port_release_send   <- ipc_voucher_receive_postprocessing, ipc_voucher_send_preprocessing
+    #     kernel_task             <- ipc_voucher_receive_postprocessing, ipc_voucher_send_preprocessing
+    #     ipc_port_make_send_locked    <- convert_voucher_attr_control_to_port, convert_voucher_to_port
+    #     ipc_port_make_sonce_locked   <- convert_voucher_attr_control_to_port, convert_voucher_to_port
+    #     ipc_port_dealloc_special     <- convert_voucher_attr_control_to_port, convert_voucher_to_port,
+    #                                     iv_dealloc, ivac_dealloc
+    #     ipc_object_translate         <- convert_port_name_to_voucher, host_create_mach_voucher,
+    #                                     mach_voucher_attr_control_create_mach_voucher
+    #
+    # The first five were *already* stubs before this step - other linked objects reference them -
+    # and the last four are new, because a stub only exists for a name something in the link actually
+    # references and nothing did until now. (The check that says "already real" has to be against the
+    # image's *real* definitions, not against absence from the stub list: absent there means "not
+    # needed", which is a different claim, and that is how a first pass at this table read the four
+    # new names as already satisfied.) So the step is 22 resolved and 4 added.
+    #
+    # `ipc_voucher_init`'s own body, disassembled from the object:
+    #
+    #     movw/movt task_max ; ldr    ; movw/movt thread_max ; ldr ; add r0, r1, r0 ; lsl r1, r0, #7
+    #     mov r0, #0x40 ; mov r2, #0x40 ; bl zinit        ; str -> ipc_voucher_zone
+    #     bl zone_change
+    #     mov r0, #0x40 ; ... ; bl zinit                  ; str -> ipc_voucher_attr_control_zone
+    #     bl zone_change
+    #     bl lck_spin_init(&ivht_lock_data, &ipc_lck_grp, &ipc_lck_attr)   ; 128 queue_init stores
+    #     bl lck_spin_init(&ivgt_lock_data, &ipc_lck_grp, &ipc_lck_attr)
+    #     pop {fp, lr} ; b user_data_attr_manager_init      (tail call, same object)
+    #
+    # `zinit`, `zone_change`, `lck_spin_init` and `queue_init` are all real, and
+    # `user_data_attr_manager_init` -> `ipc_register_well_known_mach_voucher_attr_manager` ->
+    # `ivac_alloc` stays inside this object. **Prediction: `stub_hit=ipc_importance_init`**,
+    # `xnu_entry_stub_caller=0x800abe2c` - the call after `bl ipc_voucher_init` in `ipc_bootstrap`,
+    # that is `ipc_bootstrap+0x188`, the return address of the `bl ipc_importance_init` at `+0x184`.
+    # Stated as an offset *and* an address because 268 learned that `ipc_bootstrap` can move when the
+    # link grows (0x800abc04 -> 0x800abca4 across 267 -> 268): here it did not, `ipc_voucher.o` lands
+    # after `ipc_table.o` in the same region, so both forms are checkable against the built ELF.
+    #
+    # The thing this step cannot measure, and the reason its comment is longer than its change:
+    # `task_max` is a **storage stand-in of size 4 whose value is 0**, so
+    # `ipc_voucher_max = (task_max + thread_max) * 2` computes `(0 + 1536) * 2 = 3072` where the real
+    # kernel computes `(512 + 1536) * 2 = 4096` - `CONFIG_TASK_MAX=512` is Apple's
+    # `config/MASTER.arm`, `thread_max` is real because `thread.o` has been linked since the
+    # scheduler. The consequence is a *silently smaller zone*: `zinit` round_pages `max` and clamps
+    # it up to the allocation size (`if (max && (max < alloc)) max = alloc;`, `zalloc.c:2168`), so
+    # the zone is created, `ipc_voucher_init` returns, and nothing anywhere reports that its ceiling
+    # is 3072 * 64 = 192 KB where the real kernel's is 4096 * 64 = 256 KB. **This is the
+    # [[mi4-stand-in-size-is-not-value]] class reaching a value that is used in arithmetic rather than
+    # as a pointer**, and no `--wrap` can see it: the read is an `ldr` from an address the stub
+    # generator allocated, not a call. The repair is `osfmk/kern/task.o`, which defines
+    # `task_max = CONFIG_TASK_MAX` in `.data` - a much larger object, and its own step.
+    #
+    # Measured: resolved **22** (`ipc_voucher_init` plus the 21 other names the IPC surface has been
+    # stubbing since 265 - the `convert_*_to_voucher` family, `host_*_mach_voucher_*`, the five
+    # `mach_voucher_*` entry points and `mach_init_activity_id`), added **4** (all four
+    # `ipc_port_make_*`/`ipc_object_translate`/`ipc_port_dealloc_special`, all off the path); 860 ->
+    # 842 undefined, 784 -> 766 function stubs, storage unchanged at 76 (the two storage names this
+    # object needs - `kernel_task`, `task_max` - were already stubbed); text 904484 -> 915940, image
+    # 1015520 -> 1015640, bss end 0x8012a508 -> 0x8012c648, args +1232896 -> +1236992, headroom
+    # 1917688 -> 1915320.
+    #
+    # Device: **`stub_hit=ipc_importance_init`** - the prediction, a twelfth time - and the caller is
+    # the return address of the `bl ipc_importance_init` in `ipc_bootstrap`, which the final image
+    # puts at `+0x188` (`bl ipc_table_init` +0x17c, `bl ipc_voucher_init` +0x184, `bl
+    # ipc_importance_init` +0x188). 268's lesson repeated exactly: the *offset* is the durable form
+    # and the absolute address is not, because the link below grew again here - the diagnostics this
+    # step ended up adding moved `ipc_bootstrap` from 0x800abe28 to 0x800abfcc.
+    #
+    # That run also found two defects, both in this image rather than in XNU, and both fixed here:
+    #
+    #   - **The data-abort handler's own report path could fault.** The handler used to make 17
+    #     `entry_kv` calls after recording its facts. In this step's first run one of those records
+    #     faulted, which re-entered the handler, which wrote another record, which faulted - 0x139
+    #     entries, a full 8192-byte results buffer of 313 bare `xnu_entry_data_abort_dfar` keys with
+    #     no value after any of them, and a report whose `why` line was three characters long. The
+    #     handler now records into `.bss` and goes straight to the epilogue, which reports all of it
+    #     through `entry_write_kv` after the mmu is off - the one path here with a record of working.
+    #     A second entry can no longer happen, and if it does it says so and leaves.
+    #   - **`entry_epilogue`'s `why` line printed garbage.** It read `"47"`, then nothing at all,
+    #     where the string is `a symbol this image does not provide was called`. The parameter is
+    #     passed correctly and stored to `[sp, #4]` on entry, so what the run says is that the *slot*
+    #     did not survive to the report. The string is now copied to `.bss` at entry
+    #     (`g_why`) and the pointer is printed beside it; the line reads correctly, and the pointer
+    #     it reports - 0x800ca2b8, first byte 'a' - says the string was always fine.
+    #
+    # And one open question, recorded rather than guessed: the first run's fault decodes to a read at
+    # `low16(&g_hex) + index` - the digit table's own low half plus a nibble - with a *section
+    # translation* fault stored in DFSR, on a read. `dfar` is a store's address in the canon run and
+    # a load's in the instrumented one, and the code between the table's address being formed and
+    # the read has no branch and no call in it. The digits are computed arithmetically now, which
+    # removes the read entirely and takes the run to **zero aborts**, so the step is not blocked on
+    # it - but "the page is not mapped" and "the address lost its high half" cannot both be true, and
+    # the run that separates them is the next thing this thread needs.
+    OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
     # 267: `mig_init`, and **the step is 18 objects, because the datum it reads has 17 entries.**
     # 266's stop was `mig_init`. `osfmk/kern/ipc_kobject.c` (manifest:551) is the object that
@@ -3054,6 +3163,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_IPC_IPC_SPACE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_IPC_KOBJECT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_TABLE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_IPC_IPC_VOUCHER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -3066,7 +3176,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
