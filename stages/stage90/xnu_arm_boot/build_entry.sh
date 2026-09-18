@@ -182,6 +182,17 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # last thing between the walk and the probe in entry_stubs.c: if `state` matches "running", the
     # reader goes on to read the frequencies out of the same node and then returns.
     ARM_STRNCMP_OBJ=${STAGE90_ENTRY_STRNCMP_OBJ:-$REPO_ROOT/out/xnu_asm_obj/strncmp.o}
+    # `pexpert/gen/pe_gen.c`, named by experiment-173's `stub_hit=pe_init_debug` - the last
+    # statement of `PE_init_platform`, so the one symbol between that function and its return, and
+    # therefore the one between the image and the `ml_parse_cpu_topology` probe that has been
+    # waiting since experiment 171. 508 bytes of text, and it also defines `PE_putc`,
+    # `PE_init_printf`, `PE_enter_debugger` and `PE_get_random_seed`, all of which are stubs today.
+    ARM_PE_GEN_OBJ=${STAGE90_ENTRY_PE_GEN_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_gen_pe_gen.o}
+    # `pexpert/gen/bootargs.c`, and this is `nm -u` on the object above, not a guess: `pe_init_debug`
+    # is four `PE_parse_boot_argn` calls and a bitmask. Linking pe_gen.o alone would therefore
+    # produce a run whose one possible outcome the host can already name, which is the same reason
+    # strlcpy and strlen travelled together in experiment 170.
+    ARM_BOOTARGS_OBJ=${STAGE90_ENTRY_BOOTARGS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_gen_bootargs.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -194,9 +205,12 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$ARM_PE_IDENTIFY_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_SUBRS_OBJ"        "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_STRNCMP_OBJ"      "run ./tools/assemble_arm_layer.sh first"
+    require "$ARM_PE_GEN_OBJ"       "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$ARM_BOOTARGS_OBJ"     "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
-                "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ")
+                "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
+                "$ARM_BOOTARGS_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
