@@ -310,6 +310,19 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `timer_resort_threshold` and `quantum_timer_set_deadline`, all of which the image already
     # references.
     ARM_ARM_TIMER_OBJ=${STAGE90_ENTRY_ARM_TIMER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_arm_timer.o}
+    # `osfmk/arm/cpuid.c`, named by experiment-188's `stub_hit=do_cpuid` - the first symbol
+    # `cpu_init` asks for, and the statement in `arm_init` right after `kernel_early_bootstrap`.
+    # 850 bytes of text across 9 functions and 10 references, and it resolves five things at once:
+    # `do_cpuid`, `do_cacheid`, `do_mvfpid`, `do_debugid`, `cpuid_info` and `cache_info`. This is
+    # the first object in the image whose work is reading the CPU - MIDR, CLIDR, CCSIDR and the
+    # MVFR registers - rather than reading what XNU or the device tree computed.
+    ARM_ARM_CPUID_OBJ=${STAGE90_ENTRY_ARM_CPUID_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_cpuid.o}
+    # `osfmk/arm/machine_cpuid.c`, which is what the line above is missing: all nine of cpuid.o's
+    # `machine_*` references are here, and this object's own `nm -u` is empty. 220 bytes of text
+    # across 9 functions and 24 bytes of `.bss`, so it is self-contained and costs nothing beyond
+    # its size. It is linked in the same step rather than discovered in the next one because a
+    # frontier that is only reachable through stubs is not a frontier.
+    ARM_ARM_MACHINE_CPUID_OBJ=${STAGE90_ENTRY_ARM_MACHINE_CPUID_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_machine_cpuid.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -338,10 +351,12 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$ARM_KERN_LOCKS_OBJ"        "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_LOCKS_ARM_OBJ"         "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_ARM_TIMER_OBJ"         "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$ARM_ARM_CPUID_OBJ"         "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$ARM_ARM_MACHINE_CPUID_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ")
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

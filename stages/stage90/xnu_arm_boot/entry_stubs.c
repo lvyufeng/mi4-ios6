@@ -361,128 +361,220 @@ void entry_stub_hit(const char *name)
 
 #ifdef STAGE90_ENTRY_REAL_ARM_INIT
 /*
- * `do_cpuid()` - `osfmk/arm/cpuid.c:85`, and the first symbol `cpu_init` asks for.
+ * `processor_bootstrap()` - `osfmk/kern/processor.c:120`, and the next symbol `arm_init` reaches.
  *
- * Experiment 187 stopped at `timer_call_get_priority_params`, the first statement of
- * `timer_call_init_abstime`. This run links the object that defines it, so the whole of that
- * function is real now - including the loop that converts every threshold in arm_timer.c's table
- * from nanoseconds to `rtclock_sec_divisor` ticks - and `timer_call_init` and
- * `kernel_early_bootstrap` return, `arm_init` continues, and the next thing it asks for is
- * `cpu_init()`.
+ * Experiment 188 stopped at `do_cpuid`, the first symbol `cpu_init` asks for. This run links the
+ * two objects that define it - `osfmk/arm/cpuid.o` and the `machine_cpuid.o` every one of its
+ * `machine_*` references lives in - so the whole of the boot CPU's identification runs for real:
  *
- * That is what makes this probe one function further out than the last one rather than one symbol
- * further along. The last three probes were placed inside the function the frontier lived in.
- * This one cannot be: `timer_call_init_abstime` ends with the loop, `timer_call_init` ends with it,
- * and `kernel_early_bootstrap` (`startup.c:225`) ends with `timer_call_init()` - its caller is
- * `arm_init` (`arm_init.c:269`), whose next statement is `cpu_init()`. So the frontier moved from
- * "a function in `timer_call.c`" to "the first line of the next function in `arm_init`", and the
- * rule that finds it is still the same: read the function the frontier is in, and take the next
- * symbol in it that nothing defines.
+ *     do_cpuid()      reads MIDR
+ *     do_cacheid()    reads CLIDR, then CSSELR/CCSIDR for the L1 data cache and for L2
+ *     do_mvfpid()     reads MVFR1
+ *     do_debugid()    reads ID_DFR0 and, on a part that has one, DBGDIDR
+ *     cpuid_info()    returns what the four above filled in
  *
- * `cpu_init` (`cpu.c:198`) is `cdp = getCpuDatap(); if (cdp->cpu_type != CPU_TYPE_ARM) { ... }`,
- * and `getCpuDatap` is `current_thread()->machine.CpuDatap` (`cpu_data.h:79`) - which `arm_init`
- * set to `&BootCpuData` at `arm_init.c:250`, four statements before it called
- * `kernel_early_bootstrap`. So the condition is true on this CPU and the branch taken is the one
- * containing `do_cpuid`, `do_cacheid` and `do_mvfpid`. `pmap_cpu_data_init` is the *other*
- * branch's first call, defined here too so that the run reports which one was taken instead of
- * taking one and silently reaching the other; both are `void f(void)`, so neither can disagree
- * with the declaration the linker sees.
+ * and `cpu_init` finishes: the `switch (cpu_info_p->arm_info.arm_arch)` decides `cdp->cpu_subtype`
+ * and the function returns. `arm_init` (`arm_init.c:269-274`) then does one store -
+ * `EntropyData.index_ptr = EntropyData.buffer`, and `EntropyData` is defined in
+ * `osfmk/prng/random.o`, which this image does not link, so it is a generated storage stub and the
+ * store lands in `.bss` - and calls `processor_bootstrap()`, which nothing defines.
  *
- * The eight values are arm_timer.o's table and `timer_call.c`'s arithmetic over it, read back
- * through the two structs - which is the first time in this sequence that a newly linked object's
- * work can be checked against *its own source* rather than against the run continuing past it:
+ * This is the first object in the sequence whose work is reading the CPU. Every value reported
+ * below is either a register the hardware reports or a number XNU computed from one, so the probe
+ * is checking the new objects against the *device* rather than against the tree:
  *
- *   - `timer_call_get_priority_params()` is now the real one, so calling it is itself the check
- *     that `arm_timer.o` displaced the stub: a stub returns 0 and every read below faults.
- *   - `tcoal_prio_params_init` is `static` in `arm_timer.c` and cannot be named from here. Its
- *     four members are read at their offsets through the returned pointer instead.
- *   - `tcoal_prio_params` is the *destination*, and it is a global in `timer_call.c`
- *     (`timer_call.h:173`), which the image already links, so it is named directly.
+ *   cpuid_info()->value     do_cpuid is `cpuid_cpu_info.value = machine_read_midr()` followed by
+ *                           `bfi r0, r1, #16, #4` with r1 = 11 (the compiled code, not the
+ *                           header: `ARMA7` makes `__ARM_SUB_ARCH__` `CPU_ARCH_ARMv7k` = 0xb), so
+ *                           this word is MIDR with bits 19:16 replaced by 0xb. Our own payload
+ *                           measured MIDR as 0x512f06f1 in experiment 06 (`cp15_midr`), so the
+ *                           prediction is 0x512f06f1 -> **0x512b06f1**.
+ *   cpuid_get_cpufamily()   switches on the implementor. `CPU_VID_` has ARM 0x41, DEC 0x44,
+ *                           Motorola 0x4d, Marvell 0x56, Intel 0x69 and Apple 0x61 - and MIDR's
+ *                           implementor here is 0x51, which has no case, so this is the `default:`
+ *                           and the prediction is **0** (`CPUFAMILY_UNKNOWN`).
+ *   BootCpuData.cpu_type    `cpu_init`'s first statement is `cdp->cpu_type != CPU_TYPE_ARM`, and
+ *                           the compiled test is `ldr r0, [r4, #56]; cmp r0, #12`, so after the
+ *                           `mov r0, #12 / str r0, [r4, #56]` that follows it, offset 56 of
+ *                           `BootCpuData` holds **12**.
+ *   BootCpuData.cpu_subtype the switch's answer, stored at offset 60. arm_arch is 0xb, the jump
+ *                           table is indexed by `(arch - 2)` over 10 entries, and entry 9 is
+ *                           `mov r0, #12` - `CPU_SUBTYPE_ARM_V7K`. Prediction **12**.
+ *   cache_info()            what `do_cacheid` computed from its two CCSIDR reads. Offsets 4 and 12
+ *                           are both the same product for the L1 data cache (**0x4000**, 16 KB -
+ *                           XNU writes the D size into the I field too, which is why both are the
+ *                           same number). Offsets 24, 28 and 32 are the L2's line size (**0x80**,
+ *                           128 bytes), associativity (**8**) and size (**0x200000**, 2 MB).
+ *                           Offsets 0 and 20 are `(Ctype1 == 0x4) ? 1 : 0` for a unified L1
+ *                           (**0** - Krait's L1 is separate) and the CCSIDR type mapping. The
+ *                           second of those came out **4**, `CACHE_UNKNOWN`, where the predication
+ *                           said 1, and the reason is a field in the wrong place: XNU declares
+ *                           `c_type` as a 4-bit field of the CCSIDR at bits 31:28
+ *                           (`cpuid.c:72`) and switches over the one-hot nibble values 1, 2, 4
+ *                           and 8, while the ARM ARM puts CCSIDR.Type at [2:0] and leaves [31:28]
+ *                           RES0 - so on a conforming implementation the field XNU reads is always
+ *                           zero and the switch always falls to its `default:`. The compiled code
+ *                           is that switch: `add r3, r0, r1, lsr #28` with r0 = -1 indexes a table
+ *                           over 1..8 and leaves `mov r2, #4` in place. The other three CCSIDR
+ *                           fields XNU reads *are* the ARM ARM's (`and r3, r1, #7` for LineSize at
+ *                           [2:0], `ubfx r1, r1, #3, #10` for Assoc at [12:3], `ubfx r6, r1, #13,
+ *                           #15` for NumSets at [27:13]), which is what makes the type the odd one
+ *                           out rather than the struct being for another register entirely.
  *
- * Every offset below is one the compiler used, read out of this image's own
- * `osfmk_kern_timer_call.o` rather than from the header - `timer_call_init_abstime` is `static` and
- * was inlined into `timer_call_init`, and its disassembly stores exactly these:
+ *                           The first full run of this experiment is what makes offsets 24 and 28
+ *                           worth naming twice. It predicted 0x40 at 24 and 0x200 for the colors
+ *                           below, and read 0x80 and 0x40. The cause is one line of the source:
+ *                           `do_cacheid` writes `c_linesz` and `c_assoc` once for L1
+ *                           (`cpuid.c:231-232`) and then **again** for L2 inside the level-2 block
+ *                           (`cpuid.c:275-276`), so by the time the function returns both fields
+ *                           hold the L2's geometry and the L1's is gone. It is visible in the
+ *                           compiled code as `stm ip, {r2, r3, r6}` at offset 20 and then
+ *                           `str r2, [r5, #24]` / `str r7, [r5, #28]` in the second block - the
+ *                           same two offsets, written twice.
+ *   vm_cache_geometry_colors the global `do_cacheid` writes into. `cpuid.c:290` is
+ *                           `((NumSets + 1) * c_linesz) / PAGE_SIZE`, and `c_linesz` is the L2's,
+ *                           so this is the L2's **sets x line size / 4096** and the L1's 16 KB is
+ *                           not in it at all: 2048 x 128 / 4096 = **0x40**. It is defined in
+ *                           `osfmk/vm/vm_resident.o`, which this image does not link, so it is a
+ *                           generated storage stub here and the store lands in `.bss` harmlessly.
  *
- *     ldr r0, [r4]        -> str r1, [r6, #4]      source 0   dest 4    (idle)
- *     ldr r0, [r4, #8]    -> str r1, [r6, #12]     source 8   dest 12   (resort)
- *     add r0, r4, #12     -> add r1, r6, #16       shifts, 5 words, 12->16
- *     ldrd r8, [r4, #32]  -> add r2, r6, #40       rt_ns_max 32 -> 40
- *     ldr r0, [r4, #72]   -> str r0, [r6, #80]     scale 72 -> 80
- *     ldrd r8, [r4, #96]  -> add r2, r6, #104      qos[0] 96 -> 104
- *     ldr r2, [r4, #144]  -> str r2, [r6, #152]    rate_limited 144 -> 152
+ *                           The three L2 numbers then have to agree with each other, and they do
+ *                           exactly: sets x line size x ways = 2048 x 128 x 8 = 2,097,152 =
+ *                           0x200000 = the measured `c_l2size`, with the sets from the measured
+ *                           colors and the line size measured directly. That is what makes the
+ *                           prediction for `c_assoc` a real one rather than a restatement.
+ *   arm_mvfp_info()         `mrc mvfr0` then `vmrs r0, mvfr1`, and the compiled code keeps only
+ *                           the second: `ubfx r1, r0, #20, #4` -> offset 4, `ubfx r0, r0, #16, #4`
+ *                           -> offset 0. So this is MVFR1's HPFP nibble and SP nibble, and the two
+ *                           values are reported rather than predicted, because the A7 the tree
+ *                           names is not the A7 this device has and MVFR1 is the register that
+ *                           says so.
  *
- * where r4 is the ns struct and r6 the abstime one, and `str r4`/`r6` are the two MOVW/MOVT pairs
- * of `timer_call_get_priority_params` and `tcoal_prio_params`. The two layouts differ by exactly
- * the `powergate_latency_abstime` word the abstime struct has in front (`timer_call.h:151`), which
- * is why the same member is four bytes further along in r6 than in r4.
+ * Every offset above is one the compiler used, read out of this image's own
+ * `osfmk_arm_cpuid.o`, `osfmk_arm_machine_cpuid.o` and `osfmk_arm_cpu.o` - the same rule as
+ * exp-186's `add r0, r4, #28` and exp-188's `str r1, [r6, #4]`. The `mov r1, #11` in `do_cpuid` is
+ * the reason this matters: the header says `CPU_ARCH_ARMv7` is 8, and the code says 11, because
+ * `ARMA7` selects `__ARM_SUB_ARCH__` before it can select `CPU_ARCH_ARMv7`. Reading the header
+ * instead would have predicted an arch nibble of 8 and a `cpu_subtype` of 9.
  *
- * The numbers they should hold, from the two sources:
+ * `vmrs` needs the VFP coprocessor enabled, which `_start` does twice: `CPACR |= 0xf << 20`
+ * (`start.s:371-377`) and `FPEXC.EN` (`start.s:404-413`), the second with the comment that VFP is
+ * enabled for the `arm_init` path precisely so it cannot take an undefined-instruction fault before
+ * there is a handler. Exp-188 confirmed it on this device the hard way: the shift block in
+ * `timer_call_init` is copied with `vld1.32`/`vst1.32`, and the run read back the right shifts.
  *
- *   ns[0]            5000 * NSEC_PER_USEC        = 5,000,000   = 0x004c4b40
- *   ns[96]           1 * NSEC_PER_MSEC           = 1,000,000   = 0x000f4240
- *   ab[4]   5,000,000 ns   x 19200000 / 1e9      =    96,000   = 0x00017700
- *   ab[12]  50,000,000 ns  x 19200000 / 1e9      =   960,000   = 0x000ea600
- *   ab[20]  tcoal_prio_params_init.timer_coalesce_bg_shift = -5 = 0xfffffffb
- *   ab[128] 75,000,000 ns  x 19200000 / 1e9      = 1,440,000   = 0x0015f900
- *   ab[136] 10,000,000,000 ns x 19200000 / 1e9   = 192,000,000 = 0x0b71b000
+ * Both branches of `cpu_init`'s `if (cdp == &BootCpuData)` have their first call defined here -
+ * `do_cpuid` is real now, and `pmap_cpu_data_init` stops and names itself - so a run that took the
+ * other branch says so instead of stopping somewhere further along with no explanation.
  *
- * 19200000 is the timebase `nanoseconds_to_absolutetime` divides by, measured from both directions
- * in exp-184 and exp-186. The five ns numbers are `timer_coalescing_priority_params_ns_t` in
- * `timer_queue.h:114` and the last two are `timer_coalescing_priority_params_t` in `timer_call.h:150`;
- * the ns struct is 168 bytes and `arm_timer.o`'s data section is 168 bytes, which is the check
- * that the table linked and the struct read are the same shape.
+ * ------------------------------------------------------------------ `kprintf` in this kernel
  *
- * `ab[20]` is worth its own line: the five shift fields are copied as one 20-byte block by
- * `vld1.32 {d16-d17}`/`vst1.32`, not field by field, and `timer_coalesce_bg_shift` is `-5`, so it is
- * the one value in that block that cannot be produced by zeroed memory or by a stale copy of the
- * wrong member. `ab[136]` is 10 seconds' worth of ticks - 192,000,000 - which is the largest number
- * in the table and the one furthest from any alignment padding.
+ * The first run of this experiment did not reach the probe. It stopped at
+ * `stub_hit=_consume_kprintf_args`, which is `do_cacheid`'s own debug print: `cpuid.c:290` and
+ * `:298` both `kprintf(...)` the cache geometry they have just computed, and the print is the
+ * first thing after the last store, so linking `cpuid.o` put it on the path.
+ *
+ * `_consume_kprintf_args` is not a print. This kernel is built with `CONFIG_NO_KPRINTF_STRINGS=1`
+ * - `RELEASE` is `build_xnu_arm_kernel.sh`'s default configuration (`:84`), Apple's
+ * `BSD_RELEASE = [ BSD_BASE no_printf_str no_kprintf_str secure_kernel ]` (`MASTER.arm:24`) is its
+ * BSD half, and `make_defines.sh RELEASE` emits the define - so `pexpert.h:204-210` rewrites every
+ * `kprintf` in osfmk:
+ *
+ *     #define kprintf(x, ...) _consume_kprintf_args( 0, ## __VA_ARGS__ )
+ *
+ * and the real function is `osfmk/kern/printf.c:197`:
+ *
+ *     void _consume_kprintf_args(int a __unused, ...) { }
+ *
+ * Its whole body is one instruction - the disassembly of `osfmk_kern_printf.o` at offset 8 is
+ * `bx lr`, and the symbol is 4 bytes - so what the kernel hands it, it throws away. The
+ * configuration strips kprintf *strings*; this function exists so the arguments are still compiled
+ * and still evaluated, which is what keeps a `kprintf` from changing the surrounding code.
+ *
+ * So the probe defines it, and the definition is not an approximation of the real one - an empty
+ * variadic function is the real one. Linking `printf.o` to obtain those four bytes would bring
+ * 5607 bytes of text across 23 functions and 24 obligations the image does not have, nearly all of
+ * them the console stack (`cnputc`, `cnputc_unbuffered`, `PE_kputc`, `console_printbuf_*`,
+ * `debug_putc`, `disable_serial_output`, `os_log_with_args`, `paniclog_flush`, `bsd_log_init`) that
+ * `no_printf_str` and `no_kprintf_str` are the configuration's way of keeping out. The print
+ * subsystem is not on this kernel's boot path by construction, and the first run is the evidence:
+ * the only thing that stopped the image was the function that means "nothing to print".
  */
-typedef struct timer_coalescing_priority_params_ns timer_coalescing_priority_params_ns_t;
 
-/* Both real now: `timer_call_get_priority_params` from `arm_timer.o`, the other from `timer_call.o`. */
-timer_coalescing_priority_params_ns_t *timer_call_get_priority_params(void);
-extern uint8_t tcoal_prio_params[];
-extern uint8_t past_deadline_timer_adjustment[];
+/*
+ * `osfmk/kern/printf.c:197`, an empty variadic function. The `(void)a` is for `-Wunused-parameter`;
+ * the body stays empty so the compiled code is the `bx lr` the real one is.
+ */
+void _consume_kprintf_args(int a, ...)
+{
+    (void)a;
+}
 
-/* Source = `timer_queue.h:114`; dest = `timer_call.h:150`. Offsets measured from the compiled code. */
-#define NS_SRC_IDLE_OFF      0u
-#define NS_SRC_QOS0_MAX_OFF  96u
-#define AB_DST_IDLE_OFF      4u
-#define AB_DST_RESORT_OFF    12u
-#define AB_DST_BG_SHIFT_OFF  20u
-#define AB_DST_QOS3_MAX_OFF  128u
-#define AB_DST_QOS4_MAX_OFF  136u
+typedef struct { uint32_t neon; uint32_t neon_hpfp; } arm_mvfp_info_t;
+
+/*
+ * Return types matter here, and they are the one thing the compiler cannot check for us: these are
+ * the real signatures from `cpuid.h`/`machine_cpuid.h`. A pointer returned where a `uint64_t` was
+ * declared is the class of defect that cost exp-184 a run (there through *out-parameters*, which
+ * leave a register the callee then stores through); a `void *` against a real pointer type is not,
+ * because both are one register wide.
+ */
+void *cpuid_info(void);
+void *cache_info(void);
+arm_mvfp_info_t *arm_mvfp_info(void);
+int cpuid_get_cpufamily(void);
+
+/* `data.s` and, until vm_resident.o is linked, a generated storage stub; both typed as bytes. */
+extern uint8_t BootCpuData[];
+extern uint8_t vm_cache_geometry_colors[];
+
+#define CPU_INFO_VALUE_OFF       0u    /* arm_cpu_info_t.value; arm_info.arm_arch is bits 19:16 */
+#define CACHE_UNIFIED_OFF        0u    /* `(Ctype1 == 0x4) ? 1 : 0` - Krait's L1 is separate */
+#define CACHE_ISIZE_OFF          4u    /* do_cacheid writes the L1D size here */
+#define CACHE_DSIZE_OFF         12u    /* ... and here */
+#define CACHE_TYPE_OFF          20u    /* CACHE_UNKNOWN = 4 - the nibble XNU reads is [31:28] */
+#define CACHE_LINESZ_OFF        24u    /* written twice: L1's line size, then L2's */
+#define CACHE_ASSOC_OFF         28u    /* written twice as well */
+#define CACHE_L2SIZE_OFF        32u
+#define MVFP_NEON_OFF            0u    /* MVFR1[19:16] */
+#define MVFP_HPFP_OFF            4u    /* MVFR1[23:20] */
+#define BOOTCPU_TYPE_OFF        56u    /* `ldr r0, [r4, #56]; cmp r0, #12` */
+#define BOOTCPU_SUBTYPE_OFF     60u    /* `str r0, [r4, #60]`, from the arm_arch switch */
 
 static uint32_t rd32(const volatile uint8_t *base, uint32_t off)
 {
     return *(const volatile uint32_t *)(const void *)(base + off);
 }
 
-static void tcoal_probe(const char *hit)
+void processor_bootstrap(void)
 {
-    timer_coalescing_priority_params_ns_t *src = timer_call_get_priority_params();
+    const volatile uint8_t *ci = (const volatile uint8_t *)cpuid_info();
+    const volatile uint8_t *cc = (const volatile uint8_t *)cache_info();
+    const volatile uint8_t *mv = (const volatile uint8_t *)arm_mvfp_info();
 
-    entry_kv("xnu_entry_tcoal_src_idle_ns",      rd32((const volatile uint8_t *)src, NS_SRC_IDLE_OFF));
-    entry_kv("xnu_entry_tcoal_src_qos0_ns",      rd32((const volatile uint8_t *)src, NS_SRC_QOS0_MAX_OFF));
-    entry_kv("xnu_entry_tcoal_idle_abstime",     rd32(tcoal_prio_params, AB_DST_IDLE_OFF));
-    entry_kv("xnu_entry_tcoal_resort_abstime",   rd32(tcoal_prio_params, AB_DST_RESORT_OFF));
-    entry_kv("xnu_entry_tcoal_bg_shift",         rd32(tcoal_prio_params, AB_DST_BG_SHIFT_OFF));
-    entry_kv("xnu_entry_tcoal_qos3_abstime_max", rd32(tcoal_prio_params, AB_DST_QOS3_MAX_OFF));
-    entry_kv("xnu_entry_tcoal_qos4_abstime_max", rd32(tcoal_prio_params, AB_DST_QOS4_MAX_OFF));
-    entry_kv("xnu_entry_past_deadline_adj",      rd32(past_deadline_timer_adjustment, 0u));
+    entry_kv("xnu_entry_cpuid_value",    rd32(ci, CPU_INFO_VALUE_OFF));
+    entry_kv("xnu_entry_cpuid_family",   (uint32_t)cpuid_get_cpufamily());
+    entry_kv("xnu_entry_cpu_type",       rd32(BootCpuData, BOOTCPU_TYPE_OFF));
+    entry_kv("xnu_entry_cpu_subtype",    rd32(BootCpuData, BOOTCPU_SUBTYPE_OFF));
+    entry_kv("xnu_entry_cache_unified",  rd32(cc, CACHE_UNIFIED_OFF));
+    entry_kv("xnu_entry_cache_isize",    rd32(cc, CACHE_ISIZE_OFF));
+    entry_kv("xnu_entry_cache_dsize",    rd32(cc, CACHE_DSIZE_OFF));
+    entry_kv("xnu_entry_cache_type",     rd32(cc, CACHE_TYPE_OFF));
+    entry_kv("xnu_entry_cache_linesz",   rd32(cc, CACHE_LINESZ_OFF));
+    entry_kv("xnu_entry_cache_assoc",    rd32(cc, CACHE_ASSOC_OFF));
+    entry_kv("xnu_entry_cache_l2size",   rd32(cc, CACHE_L2SIZE_OFF));
+    entry_kv("xnu_entry_cache_colors",   rd32(vm_cache_geometry_colors, 0u));
+    entry_kv("xnu_entry_mvfp_neon",      rd32(mv, MVFP_NEON_OFF));
+    entry_kv("xnu_entry_mvfp_hpfp",      rd32(mv, MVFP_HPFP_OFF));
 
-    entry_stub_hit(hit);
+    entry_stub_hit("processor_bootstrap");
 }
 
-void do_cpuid(void)
-{
-    tcoal_probe("do_cpuid");
-}
-
+/* The other branch of `cpu_init`'s boot-CPU test, defined so the run reports which one it took. */
 void pmap_cpu_data_init(void)
 {
-    tcoal_probe("pmap_cpu_data_init");
+    entry_kv("xnu_entry_cpu_init_other_branch", 1u);
+    entry_stub_hit("pmap_cpu_data_init");
 }
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */
 
