@@ -165,8 +165,10 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-149](experiment-149-macho-path-measured.md) | The Mach-O Path, Built and Measured, So the Decision Has a Price Tag |
 | stage90 | [experiment-150](experiment-150-lld-cannot-link-armv7-and-the-dialect-translation.md) | `ld64.lld` Cannot Link 32-bit ARM Mach-O; the Dialect Translation Closes All 17 |
 | stage90 | [experiment-151](experiment-151-force-includes-and-stdbool.md) | The Force-Includes Were Breaking a File, and the Fix Is Per-File |
-| stage90 | [experiment-152](experiment-152-the-cpp-block-and-one-dead-line.md) | The Whole C++ Block Is Behind One Dead Line, and No Flag Can Fix It |
+| stage90 | [experiment-152](experiment-152-the-cpp-block-and-one-dead-line.md) | The Whole C++ Block Is Behind One Dead Line, and No Flag Can Fix It *(retracted — see 154)* |
 | stage90 | [experiment-153](experiment-153-shim-audit.md) | The Shims Audited: 16 Shadow Real Headers, and None of Them Matter |
+| stage90 | [experiment-154](experiment-154-cpp-entered-the-build.md) | The C++ Block Entered the Build at 75 of 83 — and the Line Blocking It Was Mine |
+| stage90 | [experiment-155](experiment-155-the-translator-wrote-into-the-tree.md) | The Assembler Translator Was Writing Into Apple's Tree, Through a Symlink |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

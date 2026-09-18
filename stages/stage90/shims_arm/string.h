@@ -52,6 +52,19 @@ typedef __SIZE_TYPE__ size_t;
 #endif
 #endif
 
+/* The declarations are C declarations and must say so. Without this wrapper a C++ translation unit
+ * gives every one of them **C++ linkage**, so the reference it emits is the mangled name —
+ * `bzero(void*, unsigned int)` — and the kernel's own `bzero` (a C symbol, from `osfmk/arm/bzero.s`)
+ * no longer matches it. Measured at the link: the C++ objects added 14 undefined symbols whose names
+ * are signatures, `bzero`, `bcopy`, `bcmp`, `memcpy`, `memmove`, `memset`, `memcmp`, `strlen`,
+ * `strnlen`, `strcmp`, `strncmp`, `strncpy`, `strcpy`, `strchr`, `strlcpy`, `strlcat` — every
+ * function below, and nothing else. Apple's own kernel `<string.h>` is reached through
+ * `__BEGIN_DECLS` for the same reason; this is that, spelled out, since this header shim has no
+ * `<sys/cdefs.h>` guarantee to lean on at this point in the include order. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void *memcpy(void *dst, const void *src, size_t n);
 void *memmove(void *dst, const void *src, size_t n);
 void *memset(void *dst, int c, size_t n);
@@ -63,5 +76,34 @@ int strcmp(const char *a, const char *b);
 int strncmp(const char *a, const char *b, size_t n);
 char *strncpy(char *dst, const char *src, size_t n);
 char *strcpy(char *dst, const char *src);
+char *strchr(const char *s, int c);
+
+/*
+ * The five BSD-legacy names, and why this header is where they are missing rather than somewhere
+ * else. `libkern/c++/*.cpp` writes `bcopy`, `bzero`, `bcmp`, `strlcpy` and `strlcat`
+ * (OSSymbol.cpp:123, OSString.cpp:78, OSUnserializeXML.y:964 and their neighbours) and declares
+ * three of them by including `<string.h>` - which in this build resolves to *this file*, because
+ * `EXTERNAL_HEADERS/` ships stdarg, stdatomic, stdbool, stddef and stdint and **no string.h at
+ * all**. So this shim is the kernel's `<string.h>` here, and it was four functions short.
+ *
+ * The declarations are Apple's own, transcribed from `osfmk/libsa/string.h:72,73,93,94,95` - the
+ * one place in the tree that declares them for a kernel context. That directory is deliberately
+ * NOT on the include path (it holds a `string.h`, a `stdlib.h` and a `sys/` that shadow the real
+ * ones - four files, experiment-117), so these three lines are the exports that cost the least.
+ *
+ * What they were worth, measured with `build_xnu_arm_kernel.sh` on the libkern component alone:
+ * 22 `.cpp` attempted, **7 compiled before this and 19 after**, with `bzero` (33 errors), `bcopy`
+ * (22), `strlcpy` (8), `strlcat` (5) and `bcmp` (1) gone from the blocker list. `strchr` came with
+ * them for the same reason and the same place.
+ */
+size_t strlcpy(char *dst, const char *src, size_t n);
+size_t strlcat(char *dst, const char *src, size_t n);
+int bcmp(const void *a, const void *b, size_t n);
+void bcopy(const void *src, void *dst, size_t n);
+void bzero(void *dst, size_t n);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -74,6 +74,11 @@ emit_stubs() {   # $1 = undefined-symbol list, $2 = output .s
         echo "	.arm"
         echo "	.text"
         while IFS= read -r sym; do
+            # A stub can only be emitted for a name that is already a valid assembly symbol, which
+            # every C name and every raw Itanium-mangled C++ name is - and a demangled one is not.
+            # The filter stays; what changed (experiment-154) is that the list it filters is now
+            # read back with `--no-demangle`, so it is filtering for real rather than skipping the
+            # whole C++ half of the image.
             [[ $sym =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
             printf '\t.weak %s\n\t.type %s, %%function\n%s:\n\tmov r0, #0\n\tbx lr\n' "$sym" "$sym" "$sym"
         done < "$1"
@@ -90,7 +95,16 @@ emit_stubs() {   # $1 = undefined-symbol list, $2 = output .s
 # most of them, but a symbol with hidden visibility fails differently -
 # `hidden symbol 'X' isn't defined` - and GNU ld reports that one even when
 # --unresolved-symbols=ignore-all is given. So both are collected.
-"$LD" -T "$SCRIPT" "${OBJS[@]}" "${ASMOBJS[@]}" -o "$ELF" 2>"$OUT/$CONFIG-measure.err"
+#
+# `--no-demangle`, and it is not cosmetic. GNU ld demangles C++ names in its diagnostics, so the
+# moment the image contains a `.cpp` object the list holds `IOUserClient::getService()` and
+# `bzero(void*, unsigned int)` instead of `_ZN14IOUserClient10getServiceEv`. `emit_stubs` refuses
+# any name that is not a bare identifier - correctly, it cannot emit a stub for `a::b()` - so it
+# skipped **every** C++ symbol, pass 2 failed, and the tool's report became "the linker refused
+# even with every undefined symbol stubbed" with no undefined references under it, which is what
+# that message means and why it reads as impossible. The names a linker is given are the names it
+# must be read back in; this prints and consumes the same spelling the objects contain.
+"$LD" --no-demangle -T "$SCRIPT" "${OBJS[@]}" "${ASMOBJS[@]}" -o "$ELF" 2>"$OUT/$CONFIG-measure.err"
 {
     grep -oE "undefined reference to ['\`][^'\`]*" "$OUT/$CONFIG-measure.err" | sed "s/.*['\`]//"
     grep -oE "hidden symbol ['\`][^'\`]*" "$OUT/$CONFIG-measure.err" | sed "s/.*['\`]//"
@@ -101,7 +115,7 @@ emit_stubs "$OUT/$CONFIG-measure-undef.txt" "$STUBS"
 "$AS" -o "$OUT/$CONFIG-stubs.o" "$STUBS" || { echo "stub assembly failed" >&2; exit 2; }
 
 # Pass 2: link with them.
-"$LD" -T "$SCRIPT" "${OBJS[@]}" "${ASMOBJS[@]}" "$OUT/$CONFIG-stubs.o" -o "$ELF" 2>"$OUT/$CONFIG-measure.err"
+"$LD" --no-demangle -T "$SCRIPT" "${OBJS[@]}" "${ASMOBJS[@]}" "$OUT/$CONFIG-stubs.o" -o "$ELF" 2>"$OUT/$CONFIG-measure.err"
 rc=$?
 
 echo "== $CONFIG measurement link =="

@@ -7,8 +7,21 @@
 #   ./tools/build_xnu_arm_kernel.sh --dir osfmk     # one component
 #   ./tools/build_xnu_arm_kernel.sh --blockers 25   # the distinct things blocking the rest
 #
+# The manifest is both halves of the kernel: `.c` compiled with `clang` and `.cpp` with `clang++`,
+# through one pipeline and one per-component define table, reported separately. `.s` is still
+# skipped — that is `xnu_arm_assemble.sh`'s job.
+#
+# Two environment variables that exist for controlled comparisons rather than for building:
+#
+#   XNU_KERNEL_EXTRA_DEFINES='-DFOO=1'   appended after this configuration's own defines, so a
+#                                        "what if this flag were global" question is one command
+#                                        against the real build instead of a hand-copied flag list.
+#                                        That difference is not cosmetic: the hand-copied list is
+#                                        how the C++ block was measured wrong — see experiment-154.
+#   XNU_KERNEL_OBJ_OUT=/absolute/path    where the objects go. Must be absolute: this script `cd`s.
+#
 # This is the honest measurement. `build_xnu_arm_layer.sh` answers "does osfmk/arm compile" — all
-# 32 files in the directory — and it does. But a kernel is not a directory: it is the 694 files
+# 32 files in the directory — and it does. But a kernel is not a directory: it is the files
 # `list_sources.py RELEASE` selects from Apple's `*/conf/files` lists under Apple's own
 # configuration. This compiles that set.
 #
@@ -276,9 +289,36 @@ CC_ARGS=(
     -mfpu=neon-vfpv4 -mfloat-abi=softfp
     -ffreestanding -fno-builtin -fno-common -fno-pic -O2 -w -ferror-limit=0
 )
+# The C++ half of the kernel - libkern/libkern/c++ and iokit, 83 of the manifest's files - is the
+# same compiler with `clang++` and the two flags Apple's own rules pass for a kernel build
+# (MakeInc.def: `-fno-exceptions -fno-rtti`; there is no exception unwinder or RTTI in a kernel).
+# Nothing else differs, which is the point: the per-component define table, the generated roots,
+# the include order and the shim placement are the *same mechanism*, because a `.cpp` in `libkern`
+# is a `libkern` translation unit like any other.
+CXX_ARGS=(
+    clang++ --target=armv7-none-eabi -mcpu=cortex-a15 -marm
+    -mfpu=neon-vfpv4 -mfloat-abi=softfp
+    -ffreestanding -fno-builtin -fno-common -fno-pic -O2 -w -ferror-limit=0
+    -fno-exceptions -fno-rtti
+)
 
 PER_FILE_TIMEOUT=${PER_FILE_TIMEOUT:-60}
 : > "$OUT/timedout.txt"
+
+# Extra `-D` flags for a controlled comparison, appended after the configuration's own. This exists
+# because the alternative is a hand-copied flag list, and a hand-copied flag list is how the C++
+# block got measured wrong in the first place: the sweep that produced "all 83 fail on
+# osfmk/kern/misc_protos.h:254" passed `-DMACH_KERNEL_PRIVATE=1` for every file, which is a
+# *component* define (xnu_config/component_defines.sh) and one no libkern or iokit file gets. With
+# this hook the same experiment is one command against the real build:
+#
+#   XNU_KERNEL_EXTRA_DEFINES=-DMACH_KERNEL_PRIVATE=1 ./tools/build_xnu_arm_kernel.sh --dir libkern
+#
+EXTRA_DEFINES=()
+if [[ -n ${XNU_KERNEL_EXTRA_DEFINES:-} ]]; then
+    # shellcheck disable=SC2206
+    EXTRA_DEFINES=( ${XNU_KERNEL_EXTRA_DEFINES} )
+fi
 
 # The per-component define set. Apple's build compiles each component with its own
 # `<component>/conf/Makefile.template` CFLAGS rather than one global flag set, and the difference is
@@ -313,17 +353,33 @@ absent=0
 skipped=0
 tried=0
 timedout=0
+# Counted separately, because "does XNU compile" is a question about the C and the C++ halves
+# together and a single pooled number hides which half moved. The C++ half's denominator is 83 of
+# the manifest's 698 - the same manifest, one build.
+cpp_ok=0
+cpp_fail=0
 
 while read -r src; do
     if [[ ! -f $src ]]; then
         absent=$((absent + 1))
         continue
     fi
-    # Only C. The .s files need the assembler flags from xnu_arm_assemble.sh, and the .cpp files
-    # need libkern's C++ runtime, which is a separate and larger problem than this measures.
+    # `.s` only. The assembler is `xnu_arm_assemble.sh`'s job (Darwin dialect, a translation step,
+    # and the toolchain question experiment-150 closed), not this script's.
+    #
+    # `.cpp` used to be skipped here too, with a comment saying it "needs libkern's C++ runtime,
+    # which is a separate and larger problem than this measures". That was true of the *link* and
+    # false of the compile, and skipping it cost the project a wrong answer: the 83 C++ files were
+    # measured by hand, in a loop whose flags were not this script's, and one of those flags
+    # (`-DMACH_KERNEL_PRIVATE` globally) made all 83 report the same error - which experiment-152
+    # then recorded as "the whole C++ block is behind one dead line". It is behind no such line.
+    # See experiment-154. Attempting them here, with this script's own flags, is what makes the
+    # count comparable to the C count and the mistake unrepeatable.
     case "$src" in
-        *.cpp|*.s|*.S) skipped=$((skipped + 1)); continue ;;
+        *.s|*.S) skipped=$((skipped + 1)); continue ;;
     esac
+    is_cpp=0
+    case "$src" in *.cpp) is_cpp=1 ;; esac
     if [[ -n $ONLY_DIR && $src != *"/$ONLY_DIR/"* ]]; then
         continue
     fi
@@ -333,9 +389,12 @@ while read -r src; do
         break
     fi
 
-    name=$(basename "$src" .c)
-    # Disambiguate: the manifest has files of the same name in different components.
-    key=$(printf '%s' "$src" | sed "s|$XNU/||; s|/|_|g; s|\.c$||")
+    # Disambiguate: the manifest has files of the same name in different components. Both
+    # extensions are stripped so the object names of the 615 C files are exactly what they were
+    # before this script learned about C++, and the collision that could hide in doing so - one
+    # `X.c` and one `X.cpp` in the same directory, one object path, whichever compiled last wins,
+    # silently - is checked for rather than assumed absent (see the key check after the loop).
+    key=$(printf '%s' "$src" | sed "s|$XNU/||; s|/|_|g; s|\.c$||; s|\.cpp$||")
     # Apple's include order puts the file's OWN component first:
     #   INCFLAGS_GEN = -I$(SRCROOT)/$(COMPONENT) -I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)
     # (MakeInc.def:465), and a single flat include list cannot express that. It matters:
@@ -346,13 +405,29 @@ while read -r src; do
     # line above asked for. The array goes BEFORE `INCLUDES` - `-I` order is left to right, and a
     # first version appended it, which made the component LAST and changed nothing.
     # The component roots go where the placeholder is - after the generated roots, before the other
-    # components - and which is first depends on the file.
+    # The component list is Apple's, from `makedefs/MakeInc.def:46-48`, and the rule is exact:
+    #
+    #   COMPONENT_LIST        = osfmk bsd libkern iokit pexpert libsa security san
+    #   COMPONENT_IMPORT_LIST = $(filter-out $(COMPONENT),$(COMPONENT_LIST))
+    #
+    # so a file sees its OWN component root first and then every other component in that fixed
+    # order. Written as the list minus the file's own component rather than as a case for the two
+    # components that happen to have `.cpp` files, because a case is how this was got wrong: adding
+    # rows for `libkern` and `iokit` and forgetting `bsd` in them silently dropped
+    # `-I$XNU/bsd` for 68 libkern files, and the error - `sys/_types/_u_int.h not found`, from a
+    # force-include - named neither the component nor the missing root.
+    #
+    # `-I$XNU/libsa` is deliberately NOT in the list even though it is a component: its source
+    # directory holds `string.h`, `stdlib.h` and a `sys/` for the bootloader context, and putting
+    # it on the path costs 4 files by shadowing the real ones (tools/gen_libsa_export.sh exports
+    # the three type headers Apple actually exports, and only those).
     SRC_COMPONENT=$(printf '%s' "${src#"$XNU"/}" | cut -d/ -f1)
-    case "$SRC_COMPONENT" in
-        bsd)   COMP_ROOTS=(-I"$XNU/bsd" -I"$XNU/osfmk") ;;
-        osfmk) COMP_ROOTS=(-I"$XNU/osfmk" -I"$XNU/bsd") ;;
-        *)     COMP_ROOTS=(-I"$XNU/osfmk" -I"$XNU/bsd") ;;
-    esac
+    COMP_IMPORT=()
+    for _c in osfmk bsd libkern iokit pexpert security san; do
+        [[ $_c == "$SRC_COMPONENT" ]] && continue
+        COMP_IMPORT+=(-I"$XNU/$_c")
+    done
+    COMP_ROOTS=(-I"$XNU/$SRC_COMPONENT" "${COMP_IMPORT[@]}")
     # And the same split for the MIG server headers, which Apple builds TWICE from one rule pair
     # (`osfmk/mach/Makefile:231` with MIGFLAGS, `:372` with MIGFLAGS+MIGKSFLAGS). The `simport`
     # lines are behind `#if KERNEL_SERVER`, so the two variants differ; EXPORT_MI_GEN_LIST exports
@@ -407,13 +482,25 @@ while read -r src; do
 
     # shellcheck disable=SC2207
     COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" "$(component_of "$src")") )
+    # C++ goes through the same pipeline with the same flags, plus its own compiler and the two
+    # rules flags. `CPP_FORCE` starts empty: the first measurement of the C++ block in this script
+    # is the one with *no* C++-specific accommodation at all, so that whatever is added later has a
+    # number to be worth. (The hand sweep this replaces force-included `sys/types.h` for every
+    # `.cpp`; that is measured against this baseline below, not assumed.)
+    CPP_FORCE=()
+    CXX_EXTRA=()
+    case "$src" in
+        *.cpp) CXX_EXTRA=("${CXX_ARGS[@]}"); CPP_FORCE=("${CPP_FORCE[@]}") ;;
+        *)     CXX_EXTRA=("${CC_ARGS[@]}") ;;
+    esac
     # Bounded. A file that sends clang into a loop must cost seconds, not the whole session: one
     # did, for 45 minutes, because this had no timeout and its output was buffered behind a pipe.
     # A timeout is reported as its own outcome rather than as a compile failure, because "clang
     # hung" and "XNU does not compile" are different findings.
-    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${FILE_DEFINES[@]}" "${BSD_FORCE[@]}" "${ONE_FILE[@]}" "${FILE_INCLUDES[@]}" \
+    if timeout "$PER_FILE_TIMEOUT" "${CXX_EXTRA[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${FILE_DEFINES[@]}" "${BSD_FORCE[@]}" "${ONE_FILE[@]}" "${CPP_FORCE[@]}" "${EXTRA_DEFINES[@]}" "${FILE_INCLUDES[@]}" \
          -c "$src" -o "$OUT/$key.o" 2>"$OUT/$key.log"; then
         ok=$((ok + 1))
+        [[ $is_cpp == 1 ]] && cpp_ok=$((cpp_ok + 1))
         rm -f "$OUT/$key.log"
     elif [[ $? -eq 124 ]]; then
         timedout=$((timedout + 1))
@@ -421,19 +508,34 @@ while read -r src; do
         cat "$OUT/$key.log" >> "$OUT/all.log"
     else
         fail=$((fail + 1))
+        [[ $is_cpp == 1 ]] && cpp_fail=$((cpp_fail + 1))
         cat "$OUT/$key.log" >> "$OUT/all.log"
         printf '%s\n' "$src" >> "$OUT/failed.txt"
     fi
 done < "$MANIFEST"
 
+# The key check the loop's comment promises. Two sources, one object path, whichever compiled last
+# wins - and it would show up as nothing at all: a build that reports success and an object that
+# belongs to a different file. It is the same defect as `-D_CLOCK_T` and the shadowed headers
+# (memory: mi4-one-value-two-definitions), so it is checked rather than reasoned about.
+dupes=$(sed "s|$XNU/||; s|/|_|g; s|\.c$||; s|\.cpp$||" "$MANIFEST" | sort | uniq -d)
+if [[ -n $dupes ]]; then
+    echo "ERROR: two manifest sources share one object name:" >&2
+    printf '%s\n' "$dupes" | sed 's/^/  /' >&2
+    exit 3
+fi
+
 echo
 echo "== $CONFIG manifest for arm, compiled =="
-echo "  C files tried:        $tried"
-echo "  compile:              $ok"
-echo "  fail:                 $fail"
+echo "  C files tried:        $((tried - cpp_ok - cpp_fail))"
+echo "  compile:              $((ok - cpp_ok))"
+echo "  fail:                 $((fail - cpp_fail))"
 echo "  absent from tarball:  $absent"
 echo "  timed out (${PER_FILE_TIMEOUT}s): $timedout"
-echo "  skipped (.s, .cpp):   $skipped"
+echo "  C++ files tried:      $((cpp_ok + cpp_fail))"
+echo "  C++ compile:          $cpp_ok"
+echo "  C++ fail:             $cpp_fail"
+echo "  skipped (.s):         $skipped"
 echo "  objects in $OUT"
 
 if [[ $SHOW_BLOCKERS -gt 0 ]]; then

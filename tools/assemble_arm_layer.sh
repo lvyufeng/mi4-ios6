@@ -55,12 +55,48 @@ SYNTAX_ONLY=0
 [[ ${1:-} == --syntax ]] && SYNTAX_ONLY=1
 
 mkdir -p "$OUT" "$OUT/translated"
-# A mirror of the tree root beside the translated copies, so XNU's relative includes resolve from the
-# translated file's directory exactly as they do from the original's.
-mkdir -p "$OUT/translated"
-for d in osfmk bsd libkern iokit pexpert security san libsa EXTERNAL_HEADERS; do
-    [[ -d $XNU/$d ]] && ln -sfn "$XNU/$d" "$OUT/translated/$d"
-done
+# The translated copies live in a mirror of the tree, because XNU's assembly uses *relative*
+# includes — `bsd/dev/arm/cpu_in_cksum.s:50` is `#include "../../../osfmk/arm/arch.h"` — so a file
+# has to keep its position under the tree root for them to resolve.
+#
+# **And the mirror must not be the tree.** The first version symlinked each top-level component in
+# (`ln -sfn "$XNU/$d" "$OUT/translated/$d"`) and then wrote the translated text to
+# `$OUT/translated/<path>`. Through the symlink that is `$XNU/<path>`: **every translated copy was a
+# write into Apple's source**, four files were rewritten in place on every run of this script, and
+# the tool's own comment said "the tree is never written to" while it did exactly that. Found by the
+# payload's `external_clean` gate — `stages/stage90/xnu_compile_graph_scan.py` runs `git status` in
+# `external/xnu-4570.1.46` and had been failing `stage90_xnu_compile_graph_no_external_mutation` on a
+# checkout this project believes it never touches. See experiment-155.
+#
+# So the mirror is built the other way round: **directories are real, files are symlinks into the
+# tree**, and only the directories on the path to a file that actually needs translating stop being
+# symlinks. Nothing here can write to the tree even if the translation changes, because no path this
+# script opens for writing passes through a symlink.
+materialize_dir() {   # $1 = relative directory, "" for the tree root
+    local rel=$1 src dst e b
+    src=$XNU${rel:+/$rel}
+    dst=$OUT/translated${rel:+/$rel}
+    [[ -L $dst ]] && rm -f "$dst"
+    mkdir -p "$dst"
+    for e in "$src"/*; do
+        [[ -e $e ]] || continue
+        b=$(basename "$e")
+        [[ -e $dst/$b || -L $dst/$b ]] && continue
+        ln -sfn "$e" "$dst/$b"
+    done
+}
+
+materialize_for() {   # $1 = relative path of a file: make every directory above it real
+    local rel=$1 p cur=""
+    local -a parts=()
+    IFS=/ read -r -a parts <<< "$(dirname "$rel")"
+    materialize_dir ""
+    for p in "${parts[@]}"; do
+        [[ $p == . ]] && continue
+        cur=${cur:+$cur/}$p
+        materialize_dir "$cur"
+    done
+}
 
 [[ -f $ASSYM/assym.s ]] || { echo "no $ASSYM/assym.s - run ./tools/gen_assym.sh first" >&2; exit 2; }
 
@@ -99,10 +135,16 @@ while read -r src; do
     # `bsd/dev/arm/cpu_in_cksum.s:50` is `#include "../../../osfmk/arm/arch.h"` - and those resolve
     # against the file's own directory. A flat `translated/` broke exactly that.
     rel=${src#"$XNU"/}
-    mkdir -p "$OUT/translated/$(dirname "$rel")"
+    # Translated to a scratch file first, and only moved into the mirror when it needed translating:
+    # making a directory real is the one thing here with a cost, and there is no reason to pay it for
+    # a file that will be assembled from the tree unchanged.
     use=$src
-    if [[ $("$TRANSLATE" "$src" "$OUT/translated/$rel") -gt 0 ]]; then
+    n=$("$TRANSLATE" "$src" "$OUT/translated.tmp")
+    if [[ $n -gt 0 ]]; then
+        materialize_for "$rel"
+        mv -f "$OUT/translated.tmp" "$OUT/translated/$rel"
         use=$OUT/translated/$rel
+        translated=$((translated + 1))
     fi
     if ! clang "${ASFLAGS[@]}" "${INCLUDES[@]}" -c "$use" -o "$OUT/$name.o" 2>"$OUT/$name.log"; then
         fail=$((fail + 1))
@@ -145,5 +187,5 @@ while read -r src; do
 done < "$MANIFEST"
 
 echo
-echo "assemble: $ok ok, $fail failed; $renamed symbol(s) de-underscored"
+echo "assemble: $ok ok, $fail failed; $translated file(s) translated, $renamed symbol(s) de-underscored"
 echo "objects in $OUT"

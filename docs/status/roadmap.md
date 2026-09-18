@@ -1827,37 +1827,102 @@ image stubs    240 -> 224             boot path     66 ->  51
 unfinished item** — two need a source edit this project does not make, one the target triple, two a
 value with no evidence in the tarball, one a configuration decision, one a file that straddles Mach
 and BSD. The boot path's 51 stubs are the same: 10 C++ (a runtime not built here), 4 `__aeabi_*` from
-libgcc, the rest behind those seven files.
+libgcc, the rest behind those seven files. *(Superseded the next day: the C++ block was built and is
+75 of 83, the boot path is 46, and the "10 C++ never attempted" row is 0 — experiment-154, below.)*
 
-**AND THE C++ BLOCK IS CHARACTERIZED — ALL 83 FILES BEHIND ONE DEAD LINE** (2026-09-17,
-[`experiment-152`](../experiments/experiment-152-the-cpp-block-and-one-dead-line.md)). The 83 manifest
-`.cpp` files were the last unmeasured piece, accounting for 10 of the boot path's 51 stubs.
-**None of them can report anything but one error**, because a fatal error in a header ends the
-translation unit:
+**AND THE C++ BLOCK IS AT 75 OF 83, AND THE "ONE DEAD LINE" WAS NEVER IN THE TREE** (2026-09-18,
+[`experiment-154`](../experiments/experiment-154-cpp-entered-the-build.md)). This entry replaces one
+written the day before, which said all 83 `.cpp` files failed on `osfmk/kern/misc_protos.h:254` and
+that "no flag can fix it". **Both halves were wrong, for the same reason: the number came from a
+hand-written compile loop that passed `-DMACH_KERNEL_PRIVATE` and `-DMACH_KERNEL` for every file.**
+
+Those two are *component* defines (`xnu_config/component_defines.sh`), and no `libkern` or `iokit`
+file gets either. `kern_types.h:190-192` reaches `misc_protos.h` only under `#ifdef
+MACH_KERNEL_PRIVATE`, and `IOTypes.h:148`'s `#ifndef MACH_KERNEL` block is where `io_object_t`,
+`io_connect_t`, `io_service_t` and the `<device/device_types.h>` include all live. So the "dead line"
+was reached by a flag this project invented, and the fix it was said to need — a one-line edit to
+Apple's source — would have bought nothing. Reproduced with the real build, one command:
 
 ```
-83  osfmk/kern/misc_protos.h:254:8: error: definition of type 'kmod_info_t' conflicts with
-    typedef of the same name
+$ XNU_KERNEL_EXTRA_DEFINES=-DMACH_KERNEL_PRIVATE=1 ./tools/build_xnu_arm_kernel.sh --dir libkern
+  C++ compile: 0 of 22     all 22: osfmk/kern/misc_protos.h:254  'kmod_info_t'
+$ XNU_KERNEL_EXTRA_DEFINES=-DMACH_KERNEL=1 ./tools/build_xnu_arm_kernel.sh --dir iokit
+  C++ compile: 51 of 61    io_buf_ptr_t 12, io_connect_t 8, io_service_t 4, io_iterator_t 2
 ```
 
-`misc_protos.h:253-254` is `/* symbol lookup */` and `struct kmod_info_t;`, and `osfmk/mach/kmod.h:100`
-ends `} kmod_info_t;`. **`struct X;` after a `typedef` of that name is valid C and invalid C++** —
-reduced to four lines — and **the declaration is used nowhere**: that header mentions `kmod_info`
-exactly once, in that line. **No flag fixes it**: `-fms-extensions`, `-fpermissive`,
-`-fno-ms-compatibility`, `-fdelayed-template-parsing` and g++ all reject.
+**And the 83 `.cpp` files are now compiled by the build itself** — they were skipped by
+`build_xnu_arm_kernel.sh` with the comment that they "need libkern's C++ runtime, which is a separate
+and larger problem than this measures". That is true of the *link* and false of the *compile*: a
+`.cpp` in `libkern` is a `libkern` translation unit and needs the same per-component table, the same
+generated roots, the same include order and the same shims, with `clang++` in place of `clang`. The
+script counts them separately now, and `XNU_KERNEL_EXTRA_DEFINES` exists so a controlled comparison is
+one command rather than a private flag list.
 
-**And it is the only line of its kind in the tree** — `grep -rhn "^struct [a-z_]*_t;"` over all five
-components returns 1. Removing it in a scratch copy (a counterfactual, not a fix) takes the C++ block
-from **0 of 83 to 4**, and the errors immediately become the chain the C side already worked through:
-`clock_t`, then `IMIGObjectVtbl`, then `kqueue_id_t`. **The C++ block is not a different problem — it
-is the C block's problem entered through one line no flag can remove**, and it is the same category as
-`vm_object.c` and `subr_prof.c`: the fix is a source edit this project does not make. The difference is
-leverage: one line, 83 files, 10 boot-path stubs.
+| | before | after |
+| --- | --- | --- |
+| `RELEASE`, C | 608 of 615 | 608 of 615 |
+| `RELEASE`, C++ | **not attempted** | **75 of 83** |
+| `STAGE90_BOOT`, C++ | not attempted | **75 of 83** |
+| boot-path stubs (`RELEASE`) | 51 | **46** |
+| C-side undefined symbols in the image | 224 | **209** |
 
-**One real fix came out of it**: `shims_arm/string.h` defined `NULL` as `((void *)0)`, which is not a
-null pointer constant in C++ — every `return NULL;` in a `.cpp` was an error. Now `0` under
-`#ifdef __cplusplus`. It moves no count and is recorded because the C++ attempt is the only way it
-would have been found.
+**And putting the C++ objects into the image turned up three more of the same defect in the tools**:
+the shim's declarations had C++ linkage (`.cpp` asked for `_Z5bzeropvj` while the kernel defines
+`bzero` — 14 undefined symbols whose names are C signatures; fixed with `extern "C"`);
+`measure_link.sh` read the linker's diagnostics **demangled** and then tried to assemble stubs named
+with the demangled spellings, so it silently stubbed none of the C++ symbols and reported "the linker
+refused even with every undefined symbol stubbed" under a list of undefined references (fixed with
+`--no-demangle`); and `stub_blockers.py` looked mangled names up as text, so 19 stubs landed in
+"no source in the tree", which means *write a driver* — a demangling lookup puts them behind
+`IOService.cpp` and `IOUserClient.cpp` where they belong.
+
+The gap was five declarations in `shims_arm/string.h` — `bcopy`, `bzero`, `bcmp`, `strlcpy`,
+`strlcat`, plus `strchr`. They are not missing from the tree (`osfmk/libsa/string.h:72,73,93,94,95`
+declares them); they were missing from this build, because `libkern/c++/*.cpp` includes `<string.h>`
+and `EXTERNAL_HEADERS/` ships no `string.h` at all, so `<string.h>` is the shim. Worth **29 files**
+(46 → 75 of 83), and on `libkern` alone 7 → 19 of 22.
+
+The eight that remain: three on `vm_deallocate`/`mach_vm_deallocate` — which is a **missing `-DKERNEL`
+in the MIG input**, not a source problem (`vm_map.defs:132` is `#if !KERNEL && !LIBSYSCALL_INTERFACE`
+around the routine, and `grep -c deallocate out/mach_headers/mach/vm_map.h` is **0**) — plus
+`thread_policy_set`, two out-of-line `enqueue` signature disagreements, `kext_request`'s language
+linkage, and `operator new[]`'s `size_t` (the target triple, same as `vnode_pager.c`). The MIG one is
+the next stage.
+
+**One thing from the retracted entry survives**: the shim's `NULL` was `((void *)0)`, which is not a
+null pointer constant in C++, so every `return NULL;` in a `.cpp` was an error; it is `0` under
+`#ifdef __cplusplus` now. The *cause* of the C++ failures came from the private flag list; that defect
+came from a `.cpp` the flag list could not stop from being compiled. A measurement can be an artifact
+and still have something real inside it.
+
+**AND THE ASSEMBLY TRANSLATOR HAD BEEN WRITING INTO APPLE'S TREE** (2026-09-18,
+[`experiment-155`](../experiments/experiment-155-the-translator-wrote-into-the-tree.md)). Found
+because `stages/stage90/build.sh` stopped at its own gate:
+
+```
+stage90_xnu_compile_graph_no_external_mutation=0x00000000
+stage90_xnu_compile_graph_failure_mask=0x80000000
+```
+
+`external/xnu-4570.1.46` is a git repo of its own, and four files in it were modified — the four
+`experiment-150` is about. The mechanism: `assemble_arm_layer.sh` mirrored the tree into its output
+directory with `ln -sfn "$XNU/$d" "$OUT/translated/$d"`, so `$OUT/translated/osfmk` **was**
+`$XNU/osfmk`, and `open($OUT/translated/osfmk/arm/data.s, "w")` was `open($XNU/osfmk/arm/data.s,
+"w")`. **Every translated copy was a write into Apple's source**, on every run, while the tool's own
+comment said "the tree is never written to".
+
+Reverting and re-running is what made it undeniable: the script reverted the tree and un-reverted it
+in one command, with the same sha256. The fix builds the mirror the other way round — **directories
+real, files symlinks into the tree**, and only the directories above a file that actually needs
+translating stop being symlinks — and translates to a scratch file first, so nothing this script
+opens for writing passes through a symlink.
+
+**And the in-tree edits were pure leakage**: from a pristine tree, **17 of 17** assemble and all
+**17 objects are byte-identical** to the ones built from the edited tree, the tree is clean after the
+run, and `build.sh` is **exit 0** with all three `*_no_external_mutation` markers `1`. So
+`experiment-150`'s 17-of-17 was measured against a mutated tree and now stands re-measured against
+the original. **The rule "XNU's source is never modified" now holds for the assembly path as
+written, not only as intended.**
 
 **AND THE SHIMS WERE AUDITED, AND CAME BACK CLEAN** (2026-09-17,
 [`experiment-153`](../experiments/experiment-153-shim-audit.md)). Sixteen of the project's 26 shims

@@ -1,5 +1,17 @@
 # Experiment 152 — the whole C++ block is behind one dead line, and no flag can fix it
 
+> **CORRECTED 2026-09-18 by [experiment-154](experiment-154-cpp-entered-the-build.md).** The
+> headline is wrong and so is the recommendation it leads to. The "83 of 83 fail on
+> `osfmk/kern/misc_protos.h:254`" measurement came from a hand-written compile loop that passed
+> `-DMACH_KERNEL_PRIVATE` and `-DMACH_KERNEL` for **every** file; both are *component* defines, and
+> no `libkern` or `iokit` file gets either, so no `.cpp` in the manifest reaches that line at all.
+> Compiling them in the build, with the build's flags, gives **46 of 83** — and **75 of 83** once
+> five missing declarations are supplied. **The source edit this page puts in front of the reader is
+> not needed and would have bought nothing.** Everything below about the line itself (it is valid C
+> and invalid C++, it is used nowhere, it is the only one of its kind in the tree) is correct; what
+> is wrong is which translation units reach it, and that is the whole finding. Kept unedited
+> underneath as the record of how the mistake was made.
+
 Date: 2026-09-17
 Host only — nothing here runs on the device.
 Artifacts: `stages/stage90/shims_arm/string.h` (the C++ `NULL`)
