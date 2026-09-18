@@ -259,6 +259,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-243](experiment-243-the-prelink-segment-and-the-frontier-is-an-object-again.md) | the `__PRELINK_TEXT` Segment — the Fault Is Gone, `vm_map_init` Passes, and the Stop Is `kmem_init` |
 | stage90 | [experiment-244](experiment-244-vm-kern-linked-and-a-stub-that-names-its-caller.md) | `osfmk_vm_vm_kern.o` — `kmem_init` Runs, a Real `zalloc` Returns on the Hardware, and the Device Names Its Own Call Site (`vm_map_store_init`, from `vm_map_create+0x58`) |
 | stage90 | [experiment-245](experiment-245-the-ll-store-and-a-dispatchers-first-statement.md) | `osfmk_vm_vm_map_store.o` — a Dispatcher's First Statement Stops the Run (`vm_map_store_init_ll`), and a Linked Object That Moves No Address |
+| stage90 | [experiment-246](experiment-246-an-empty-function-a-tail-call-and-what-the-caller-key-names.md) | `osfmk_vm_vm_map_store_ll.o` — the Empty Function Returns, the RB Branch Is Taken, and a Tail Call Makes `xnu_entry_stub_caller` Name the Caller of the Caller |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

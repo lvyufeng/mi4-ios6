@@ -1992,6 +1992,57 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # definitions or deeper, which is a prediction for its own disassembly rather than for an object
     # list.
     OSFMK_VM_VM_MAP_STORE_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_STORE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_map_store.o}
+    # `osfmk/vm/vm_map_store_ll.c` -> **776 bytes of text, 8 definitions, and exactly two references,
+    # both already defined**: `_consume_printf_args` (`bsd_kern_subr_prf.o`, linked since 235) and
+    # `OSCompareAndSwapPtr` (`libkern_gen_OSAtomicOperations.o`, linked since 228). The object 245's
+    # stop named, and **the first step in this sequence whose object has nothing missing under it** -
+    # so the frontier is inside one of these eight definitions or deeper, and that is a question for
+    # the disassembly.
+    #
+    # The eight are the hole-list store: `vm_map_store_init_ll`, `vm_map_store_lookup_entry_ll`,
+    # `vm_map_store_entry_link_ll`, `vm_map_store_entry_unlink_ll`, `first_free_is_valid_ll`,
+    # `update_first_free_ll`, `vm_map_store_copy_insert_ll`, `vm_map_store_copy_reset_ll` - the
+    # implementation half of the dispatcher 245 linked, and the reason the module comment above says
+    # both stores are live in 4570.
+    #
+    # Worth noting before the run, because it is the kind of thing that has cost a step here: the
+    # `_ll` and `_rb` objects share a *family* of names and differ by suffix, and the stub list is
+    # keyed on exact names. A prediction of `vm_map_store_init_ll` when the run stops on
+    # `vm_map_store_init_rb` would be a wrong reading of a right run, not a missing object.
+    #
+    # **246 measured it, and the object moved the stop rather than resolving it.** `vm_map_store_init_ll`
+    # is `bx lr` - four bytes, a genuinely empty function - because the LL store has nothing to
+    # initialise in 4570. So the call returns and the dispatcher continues: the build resolved 6 and
+    # added 0 (639 -> 633 undefined, 554 -> 548 function stubs), and the stop moved to the *next*
+    # thing `vm_map_store_init` does, which is the `vm_map_store_has_RB_support` test and then the tail
+    # call. Two of the object's eight definitions were never stubs at all
+    # (`first_free_is_valid_ll`, `vm_map_store_lookup_entry_ll`), which is what "resolved everything I
+    # linked" would have got wrong.
+    #
+    # The branch is decided by `hdr.rb_head_store.rbh_root != SKIP_RB_TREE`, a runtime value no walk
+    # can read - the shape that cost 234 a run - so it was resolved the way that one was, by finding
+    # the writers: all nine uses of `SKIP_RB_TREE` are in `vm_map_store.c`'s predicate and in
+    # `vm_map.c`'s copy/clip/switch-context paths, none of which this boot has reached, so the
+    # sentinel is not in the header and the tail call is taken. Device: **`stub_hit=vm_map_store_init_rb`,
+    # `xnu_entry_stub_caller=0x8004651c`** - and that address is `vm_map_create+0x5c`, the *same* one
+    # 244 reported, because the call is a `b`: `pop {r4, lr}` restored the `lr` the prologue saved, so
+    # the key holds `vm_map_create`'s return address and not the tail call site.
+    #
+    # **Read the key that way from here on.** `caller - 4` is the address of a call instruction only
+    # when the call was a `bl`; for a tail-called stub it points at a `bl` to a *different* symbol,
+    # which is exactly what `0x80046518: bl vm_map_store_init` is. Resolving `caller - 4` and comparing
+    # its target against the stub that stopped the run is how the two cases are told apart, and
+    # `tools/host_resolve_entry_addr.sh` prints both readings for that reason.
+    #
+    # No exception, `kv_written == kv_in_dram == 0x41` (65 bytes: 31 + 34), 87 contracts with
+    # failure_mask=0 and 25 with persistent_write_attempted=0. Text 611345 -> 611793 (+448), and the
+    # image, `.bss`, `__entry_image_end`, layout, headroom and the payload's own size are unchanged
+    # again - two steps in a row where linking an object cost nothing in layout.
+    #
+    # Next: `vm_map_store_init_rb` is in `osfmk_vm_vm_map_store_rb.o` - 5808 bytes of text, 24
+    # definitions, 4 references (`panic`, `vm_map_holes_zone`, `zalloc`, `zfree`) that are **all four
+    # already defined**, so that step may also have nothing missing underneath it.
+    OSFMK_VM_VM_MAP_STORE_LL_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_STORE_LL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_map_store_ll.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -2069,6 +2120,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$BSD_KERN_SUBR_PRF_OBJ"      "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_KERN_OBJ"       "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_MAP_STORE_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
@@ -2076,7 +2128,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$LIBKERN_GEN_OSATOMICOPERATIONS_OBJ" "$BSD_KERN_KERN_MEMORYSTATUS_OBJ"
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
-    "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ")
+    "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
