@@ -94,6 +94,18 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
     TRACE_LDFLAGS=(--wrap=kalloc_canblock --wrap=lck_grp_alloc_init
                    --wrap=kernel_memory_allocate --wrap=vm_page_wait --wrap=thread_block)
 fi
+# `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
+# every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that
+# symbol exactly as it would at a missing one and stops there. It is the tracer's move at one
+# symbol instead of five, and for the case the tracer cannot cover: 280's run was silent, so the
+# question is not *why* a frame blocked but *whether the run reached a frame at all*. The one
+# variable is the symbol name; `entry_checkpoint.c` carries the argument. Unset - which is the
+# default and every stage image - the file is not compiled and the link is unchanged.
+ENTRY_CHECKPOINT=${STAGE90_ENTRY_CHECKPOINT:-}
+CHECKPOINT_LDFLAGS=()
+if [[ -n $ENTRY_CHECKPOINT ]]; then
+    CHECKPOINT_LDFLAGS=(--wrap=$ENTRY_CHECKPOINT)
+fi
 # `osfmk_arm_pmap.o` is linked in every real-`arm_init` build, so `pmap_bootstrap` is defined by
 # XNU's own object and the probe that used to stand on it - a second definition - is compiled out
 # here rather than left to be a link error. Same mechanism as `arm_init`'s stand-in above, and the
@@ -163,6 +175,17 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -O2 -Wall -Wextra -Werror -std=gnu11 \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
+fi
+
+# The one-symbol checkpoint, likewise only when asked for. `-Werror` is on because the wrapper is
+# three lines; the symbol name arrives as a bare token so the wrapper's own name can be built from
+# it with `##` and the string it reports with `#`.
+if [[ -n $ENTRY_CHECKPOINT ]]; then
+    run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
+        -O2 -Wall -Wextra -Werror -std=gnu11 \
+        -DSTAGE90_ENTRY_CHECKPOINT_SYM="$ENTRY_CHECKPOINT" \
+        -c "$BOOT_DIR/entry_checkpoint.c" -o "$OUT/xnu_arm_entry_checkpoint.o"
+    say "  STAGE90_ENTRY_CHECKPOINT=$ENTRY_CHECKPOINT: stopping there"
 fi
 
 # The part of the entry image that runs XNU's own code. clang, because the XNU objects it links
@@ -3047,6 +3070,144 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 280: `klist_init`, and a step that needed a size decision before it could be built.
+    # 279's stop was `klist_init`, and the object that defines it is `bsd/kern/kern_event.c`
+    # (manifest:34), `bsd_kern_kern_event.o` - the largest step this walk has taken by a wide margin:
+    # **43084 bytes of text, 336 of data, 136 of bss, 1349 of strings, 448 of rodata, 229 definitions
+    # and 165 references**. It is the BSD kqueue/kevent implementation, and `klist_init` is the
+    # smallest thing in it:
+    #
+    #     4bc8: mov r1, #0
+    #     sbcc: str r1, [r0]
+    #     4bd0: bx lr
+    #
+    # - `SLIST_INIT(list)`, three instructions, no call, no `lr`. So it completes and returns.
+    #
+    # **The step needed one decision before it could be built, and the build is what asked for it.**
+    # Of the 165 references, 75 are already real, 21 already have stand-ins, and 69 are new - and
+    # **68 of the 69 have a definition in this project's object pool** (each with a measured size, so
+    # the generator has nothing to guess). The 69th, `bpfread_filtops`, has no definition anywhere in
+    # the pool: `bsd/net/bpf.c` is `optional bpfilter` in `bsd/conf/files:192`, a flag the device table
+    # this project builds from does not select, so the file is not in the manifest for this
+    # *configuration* and not one of the pool's ~700 objects defines the name. That is the case the
+    # storage generator was built to fail on rather than paper over ("add a hand-written definition
+    # with the size taken from its source"), and the definition is in `entry_stubs.c` with the size
+    # argued two ways: fifteen sibling filter tables in the pool all measure 0x28, and
+    # `struct filterops` (`bsd/sys/event.h:939-951`) is two `bool`s and nine pointers = 40 on armv7.
+    # Nothing on this path dereferences it - it is one element of a table only `kern_event_init`
+    # indexes - and this walk stops far short of that.
+    #
+    # **Prediction: `stub_hit=kernel_set_special_port`, with the caller at `ipc_host_init+0x78`.**
+    # This is the point where the step stops being a step in `kern_event.c` and becomes a step back in
+    # `ipc_host_init`, and the whole path was walked by hand before the build:
+    #
+    #     ipc_host_init+0x2c   bl ipc_port_alloc_special      ; entered in 278, stops in this one
+    #     ipc_port_alloc_special+0x90  bl ipc_mqueue_init     ; entered in 279
+    #     ipc_mqueue_init+0x58 b  klist_init                  ; a tail call - the step's own name
+    #     klist_init           mov/str/bx lr -> returns to `ipc_port_alloc_special+0x94`
+    #     ipc_port_alloc_special+0x94  mov r0, r4 / pop {r4, r5, fp, pc}  -> ipc_host_init+0x30
+    #     ipc_host_init+0x30   mov r4, r0 / cmp r0, #0 / bne +0x48        ; r0 is the port, non-null
+    #     ipc_host_init+0x5c   bl ipc_kobject_set             ; REAL - ipc_kobject.o, linked in 266
+    #     ipc_host_init+0x64   bl ipc_port_make_send          ; REAL - retired by 278, never yet run
+    #     ipc_host_init+0x74   bl kernel_set_special_port     ; A STUB  <- the stop
+    #     ipc_host_init+0x78   mov r2, r0                     ; the return address
+    #
+    # The two calls between are checked, not assumed: `ipc_kobject_set`'s body in this image calls
+    # only `lck_spin_lock` and `lck_spin_unlock` (its four `b` targets - `mk_timer_port_destroy`,
+    # `mach_destroy_memory_entry`, `host_notify_port_destroy` - are a *destroy* switch this call does
+    # not take, `IKOT_HOST_SECURITY` being a set), and `ipc_port_make_send`'s calls only
+    # `lck_spin_lock`, `OSCompareAndSwap` and `lck_spin_unlock`. All five are real, so the first stub
+    # the run can reach is `kernel_set_special_port`.
+    #
+    # The caller key is `ipc_host_init+0x78` - an address inside the function the `bl` is in, the same
+    # shape 276/277/278 had, and the third different value this walk has reported from
+    # `ipc_host_init`: 277 measured `+0x30`, and this is `+0x78`, because two whole functions ran in
+    # between. `kernel_set_special_port` is `osfmk/kern/host.c`, and it is one of the eight names 277
+    # added as a stub - so this step retires an obligation this walk created three experiments ago.
+    BSD_KERN_KERN_EVENT_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_EVENT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_event.o}
+    #
+    # **280 did not measure that. The run stopped nowhere at all.** The build is exactly what the
+    # prediction block describes - **10 resolved, 69 added** (863 -> 921 undefined, 789 -> 827
+    # function stubs, storage 74 -> 94; 68 of the 69 are generated from the object, 48 as function
+    # stubs and 20 as storage stand-ins, and the 69th is `bpfread_filtops`), text 968100 -> 1013620
+    # (+46528 = 0xB5C0), image bytes 1082488 -> 1115688 (one 16 KB alignment step), `.bss`
+    # `0x8010fb50` .. `0x80145c88`, headroom 1845944 -> 1811320, `args` one page above the image at
+    # `0x80147000`, `topOfKernelData` unmoved at `0x80300000`. The ten retired are `klist_init`
+    # itself plus nine of the ten `knote_*` / `kev_*` / `waitq_set__CALLING_PREPOST_HOOK__` names
+    # 279's own additions had obliged.
+    #
+    # The linked path is the prediction's, instruction for instruction: `ipc_host_init` is real at
+    # `0x800b7550` with `800b75c4 bl 800dd29c <kernel_set_special_port>` at `+0x74` and the return
+    # address at `+0x78`; `kernel_set_special_port` is a healthy generated stub, **24 bytes** at
+    # `0x800dd29c`; `klist_init` is real, **12 bytes** at `0x800c0788`, `mov r1, #0 / str r1, [r0] /
+    # bx lr`; `ipc_mqueue_init` is 0x5c bytes with its tail call as its last instruction; and the
+    # two calls in between (`ipc_kobject_set`, `ipc_port_make_send`) reach only real code.
+    #
+    # What the device did: **nothing.** The payload's whole ladder completes and is byte-identical in
+    # *structure* to the 279 control's, address for address except the 0x8000 the payload itself grew
+    # - so the jump is taken. The log's last line is `stage90 xnu_entry: jumping to XNU's _start`,
+    # and after it the entry image writes **not one byte**: `stub_hit` count 0, no `exception:
+    # <vector>` line, and none of the epilogue's own records (`xnu_entry_csselr_before`,
+    # `xnu_entry_ccsidr_l1`, `xnu_entry_kv_words`) that 279's run carries. Two runs of the same image
+    # and a third of the checkpoint build below, all three silent.
+    #
+    # **The 279 configuration, rebuilt from this same ledger in the same session and run on the same
+    # device through the same `run_and_capture.sh`, reached the frontier exactly**: `stub_hit=klist_init`
+    # at log line 3961 with `xnu_entry_stub_caller_v=0x800ba300` = `ipc_port_alloc_special+0x94`,
+    # `kv_written=0x5b`, `kv_in_dram=0x7f`, `kv_dropped=0x0`, `why_byte=0x61`, zero aborts. So the
+    # device, the payload, the boot flow, the capture and the entry image's own report path are all
+    # healthy *right now*, and the image is the single failing variable.
+    #
+    # **The location of the failure, as far as it is measured.** `STAGE90_ENTRY_CHECKPOINT=klist_init`
+    # - the instrument `entry_checkpoint.c` carries, which links `--wrap=klist_init` so that the very
+    # instruction 279's run stopped on becomes a terminal stop of the same kind - was **also silent**.
+    # The host side verified the wrap took effect (`ipc_mqueue_init+0x58` re-pointed to
+    # `__wrap_klist_init`). A checkpoint at `klist_init` needs no new code to run: it stops at exactly
+    # the point 279's run reported from. So in this image the run does not reach that point, or the
+    # reporting path that reported it in 279's image does not report in this one - and the instrument
+    # was built to say which of those two, so its own reading is the second: *the frontier is not
+    # where the problem is*.
+    #
+    # **Host-side rule-outs, completed before that run.** The disassembly of `[0x80000000,
+    # 0x800bbbc0)` - `_start`, `arm_init`, `arm_vm_init` and the whole IPC allocation path - is the
+    # 279 image's once `movw`/`movt` pairs are resolved as single addresses: the 1761 raw halfword
+    # differences are every one a relocated address or a shifted literal pool, and no instruction
+    # differs. Both calls between the stop and the port are real. All 94 storage stand-ins match a
+    # pool definition's size exactly and `bpfread_filtops` is the only hand-sized one, and nothing on
+    # this path dereferences it. `entry_epilogue` and `entry_probe_dump_kv_words` are off the
+    # `entry_stub_hit` path; `g_hex` is outside `.bss`; and there is no size-dependent gate anywhere
+    # before the first report.
+    #
+    # **And the layout, measured this time rather than argued.** A per-symbol address delta between
+    # the two images (nm on both, 5685 names in common) gives the whole story and leaves nothing
+    # unexplained: **2726 symbols are at the same address**, every one of them below `0x800bb000`;
+    # from `0x800bb000` up the stub object is regenerated and shifts by `+0xabf8` / `+0xabe0`; `.data`
+    # moves by `+0x8000` because it snaps to a 16 KB boundary and the 0x3A54 bytes of padding below it
+    # in 279 became 0x484, and its first 0x8000 bytes - `intstack` and `fiqstack`, 16 KB each, with
+    # `intstack_top` at `.data + 0x8000` in **both** images - ride with it, so the boot stack is the
+    # same size on the same relative address; `__DATA,__const` and `__DATA,__data` take `+0x8150`, and
+    # `.bss` `+0x81c0`. `klist_init`'s stub at `0x800d298c` is simply gone, superseded by the real
+    # definition at `0x800c0788`. The only "backwards" deltas in the whole table are
+    # `__entry_data_size` and `__entry_data_filesize`, which are absolute linker symbols - values,
+    # not addresses - and so are not addresses at all.
+    #
+    # **The instrument, and the one thing worth carrying forward from it.** `entry_checkpoint.c` plus
+    # `STAGE90_ENTRY_CHECKPOINT=<symbol>` in this script: `--wrap` redirects every *reference* to a
+    # symbol through a 24-byte wrapper that calls `entry_stub_hit`, so one named function becomes a
+    # terminal stop of exactly the shape a missing symbol produces, at one symbol's cost instead of
+    # five. It is unset by default and no stage image contains it. It is also the first probe in this
+    # walk whose *negative* result is the load-bearing one, and its next use is to bisect from the
+    # top of the ladder rather than from the frontier.
+    #
+    # **A correction owed to 279's own write-up.** Its committed layout paragraph says the 279-vs-280
+    # diff "shows only 101 symbols moved". Re-measured, 2959 of the 5685 common symbols moved; 101 is
+    # the count of *some* subset, not of the moved set. The *code*-identity conclusion 279 draws from
+    # it survives, because that conclusion rests on the disassembly comparison, not on the count - but
+    # the sentence as written is wrong and 279's `Reproduce` note is not a sound argument for it.
+    #
+    # 280 is therefore a step that is **built, predicted, instrumented and not finished**: the walk
+    # stands one object short of the frontier it reached in 279, and the next move is not another
+    # object. `docs/experiments/experiment-280-*.md` carries the whole record.
     # 279: `ipc_mqueue_init`, and a stop that reports the caller key 278 already reported.
     # 278's stop was `ipc_mqueue_init`, and the object that defines it is `osfmk/ipc/ipc_mqueue.c`
     # (manifest:514), `osfmk_ipc_ipc_mqueue.o` - **5436 bytes of text, 8 of bss, 238 of rodata, 47
@@ -3865,6 +4026,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_IPC_HOST_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_PORT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_MQUEUE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_KERN_EVENT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -3877,7 +4039,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
@@ -3985,9 +4147,11 @@ say "== linking at $ENTRY_BASE =="
 # start.o first, so `_start` is the first thing in .text and the image base is the entry point -
 # not required (the payload jumps to an explicit address) but it makes the map readable.
 [[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_trace.o")
+[[ -n $ENTRY_CHECKPOINT ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_checkpoint.o")
 run arm-none-eabi-ld -T "$BOOT_DIR/entry.ld" --defsym=ENTRY_BASE=$ENTRY_BASE \
     -nostdlib -Map "$OUT/xnu_arm_entry.map" \
     ${TRACE_LDFLAGS[@]+"${TRACE_LDFLAGS[@]}"} \
+    ${CHECKPOINT_LDFLAGS[@]+"${CHECKPOINT_LDFLAGS[@]}"} \
     -o "$OUT/xnu_arm_entry.elf" \
     "${LINK_OBJS[@]}" \
     --start-group "$LIBGCC" --end-group

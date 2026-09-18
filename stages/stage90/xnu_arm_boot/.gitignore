@@ -1,1 +1,9 @@
-*.o
+# Throwaway build-script variants.
+#
+# `build_entry.sh` derives REPO_ROOT from its own location, so an A/B build of a *different
+# configuration has to be a copy of the script placed in this directory. Those copies are made,
+# used once and deleted - but 279's control build left one behind long enough for `git status` to
+# offer it, and a build script that is never meant to be committed is exactly the kind of file that
+# gets committed by accident. This pattern makes that impossible rather than unlikely.
+*_variant.sh
+zz_*.sh

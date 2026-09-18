@@ -171,6 +171,41 @@ char osversion[256];
 uint8_t EntropyData[68] __attribute__((aligned(8)));
 #endif /* !STAGE90_ENTRY_REAL_ENTROPY_DATA */
 
+/* ------------------------------------------------------------------ bpfread_filtops */
+
+/*
+ * `bpfread_filtops` - the first stand-in in this file whose defining source the manifest does not
+ * contain **at all**.
+ *
+ * `bsd/kern/kern_event.c:390` declares it `extern const struct filterops bpfread_filtops;` and
+ * `:448` puts its *address* in the `kern_event_filtops[]` table at index `EVFILTID_BPFREAD`. It is
+ * defined in `bsd/net/bpf.c:2216` as `SECURITY_READ_ONLY_EARLY(struct filterops)`, and bpf.c is
+ * `optional bpfilter` in `bsd/conf/files:192` - a flag the device table this project builds from
+ * does not select, so the file is not in `out/xnu_arm_manifest.txt` and no object in the pool
+ * defines the name. (It is the same omission class as the ~126 `optional` sources the manifest
+ * skips; here it is the first one a *step* has needed.)
+ *
+ * The size is not a guess, and it has two independent roads to it:
+ *
+ *   - **Measured over the pool.** Fifteen sibling filter tables are compiled here and every one of
+ *     them is 0x28: `fs_filtops` (`bsd_vfs_vfs_subr.o`), `machport_filtops` (`osfmk_ipc_ipc_pset.o`),
+ *     `soread_filtops`/`sowrite_filtops`/`sock_filtops`/`soexcept_filtops`
+ *     (`bsd_kern_uipc_socket.o`), `pipe_rfiltops`/`pipe_wfiltops` (`bsd_kern_sys_pipe.o`),
+ *     `sig_filtops`, `ptsd_kqops` (`bsd_kern_tty_ptmx.o`), `vnode_filtops`, `spec_filtops`,
+ *     `fsevent_filtops`, `necp_fd_rfiltops`, `tty_filtops`. `nm -S --defined-only` reports
+ *     `R fsevent_filtops 00000028` and the same for the rest.
+ *   - **Derived from the type.** `struct filterops` (`bsd/sys/event.h:939-951`) is two `bool`s and
+ *     nine function pointers: 2 + 2 padding + 9 * 4 = 40 = 0x28 on armv7, which is the number the
+ *     pool measured.
+ *
+ * Zero is the right *value* here in a way it would not be for `EntropyData` above: this is a table
+ * of function pointers that only `kern_event_init` indexes and only a `kqfilter` call on a BPF file
+ * descriptor dereferences, and neither is on this walk's path - the run stops at `klist_init`,
+ * inside `ipc_mqueue_init`, long before any of it. A reader of the linker map will find 40 bytes of
+ * zero where XNU has a filter table, and this comment is why.
+ */
+uint8_t bpfread_filtops[0x28] __attribute__((aligned(4)));
+
 /*
  * `_start` loads SP from intstack_top, so this must be real, writable, and in the window - but only
  * when XNU's own `osfmk/arm/data.s` is not in the image. With `STAGE90_ENTRY_REAL_ARM_INIT=1` it
