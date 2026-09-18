@@ -3047,6 +3047,77 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 279: `ipc_mqueue_init`, and a stop that reports the caller key 278 already reported.
+    # 278's stop was `ipc_mqueue_init`, and the object that defines it is `osfmk/ipc/ipc_mqueue.c`
+    # (manifest:514), `osfmk_ipc_ipc_mqueue.o` - **5436 bytes of text, 8 of bss, 238 of rodata, 47
+    # definitions and 46 references**. The 8 bytes of bss are the two counters `ipc_mqueue_full` and
+    # `ipc_mqueue_rcv`, 4 each; the strings are the `"ipc_mqueue_send"` panics and the
+    # `"Unknown mqueue type 0x%x: likely memory corruption!"` panic.
+    #
+    # **5 resolved, 9 added.** The five retired are exactly the five names 278 obliged -
+    # `ipc_mqueue_init`, `_deinit`, `_changed`, `_destroy_locked`, `_override_send` - which is the
+    # cleanest kind of step: the previous step's own additions coming good, one experiment later. The
+    # nine added are all functions, all defined by objects already compiled:
+    #
+    #     ipc_kmsg_dequeue         ipc_kmsg_enqueue_qos     ipc_kmsg_override_qos
+    #     ipc_kmsg_rmqueue         ipc_kmsg_queue_next      ipc_kmsg_delayed_destroy
+    #     ipc_kmsg_copyout_size    knote_vanish             mach_msg_receive_continue
+    #
+    # seven out of `osfmk/ipc/ipc_kmsg.c` (the first names this walk has obliged out of it), one more
+    # out of `bsd/kern/kern_event.c`, and one out of `osfmk/ipc/mach_msg.c`.
+    #
+    # **Prediction: `stub_hit=klist_init`, with the caller at `ipc_port_alloc_special+0x94` - the
+    # same value 278 measured, and this time the name is the only thing that tells the two stops
+    # apart.** `ipc_port_alloc_special` calls `ipc_mqueue_init(port+16, FALSE, NULL)`, and the
+    # object's whole `is_set == FALSE` path is real:
+    #
+    #     0000: push {r4, r5, fp, lr}            ; saves lr = `ipc_port_alloc_special+0x94`
+    #     0008: cmp r1, #0 / beq +0x24           ; is_set is FALSE, so the set path is skipped
+    #     0030: bl waitq_init(port+16, SYNC_POLICY_FIFO)     ; REAL (waitq.o, 267)
+    #           ... `ipc_kmsg_queue_init` inlined, imq_seqno/imq_msgcount 0,
+    #               imq_qlimit = 0x50000 = MACH_PORT_QLIMIT_DEFAULT << 16, imq_fullwaiters FALSE
+    #     0050: add r0, r4, #48
+    #     0054: pop {r4, r5, fp, lr}             ; lr = `ipc_port_alloc_special+0x94` again
+    #     0058: b klist_init                     ; A TAIL CALL, and a stub
+    #
+    # `klist_init` is `bsd/kern/kern_event.c`, and the last instruction of `ipc_mqueue_init` is a
+    # `b`, not a `bl` - so the stub's `lr` is the one `ipc_mqueue_init` inherited from its own caller
+    # and carried through its `pop`. That makes the caller key `ipc_port_alloc_special+0x94`: the
+    # **same address 278's run reported**, where the `bl` at `caller-4` was the call *into*
+    # `ipc_mqueue_init`. Here that same `bl` is one function further back, and what it points at is a
+    # function that has already returned. This is 275's shape exactly - a tail call reporting its
+    # caller's caller, and an ambiguity between two *consecutive* stops - and it is the second time
+    # this walk has met it.
+    #
+    # `waitq_init`'s own body calls only `hw_lock_init` and `waitq_lock`, both real, so there is no
+    # stub between the entry of `ipc_mqueue_init` and its tail.
+    OSFMK_IPC_IPC_MQUEUE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_MQUEUE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_mqueue.o}
+    #
+    # **279 measured it, including the part that was the reason to write it down carefully.** The
+    # build measured **5 resolved, 9 added**: 859 -> 863 undefined, 785 -> 789 function stubs, storage
+    # unchanged at 74, text 962244 -> 968100, image bytes 1066104 -> 1082488 (one 16 KB alignment
+    # step), `.bss` `0x80107a00` .. `0x8013d548`, headroom 1845944. `ipc_mqueue_init` is real at
+    # `0x800ba680` and the linked stream is the object's: `800ba69c bl waitq_set_init` (the
+    # `is_set == TRUE` arm), `800ba6b0 bl waitq_init`, `800ba6d4 pop {r4, r5, fp, lr}`,
+    # `800ba6d8 b 800d298c <klist_init>`.
+    #
+    # The run stopped at **`stub_hit=klist_init`** with `xnu_entry_stub_caller_v=0x800ba300` =
+    # **`ipc_port_alloc_special+0x94`** - *the same value 278's run reported*, which is what the
+    # prediction said would happen and why it was spelled out: the last instruction of
+    # `ipc_mqueue_init` is a `b`, so the stub's `lr` is the one its own `pop` restored, which is its
+    # caller's return address and not the address of the tail call. `caller-4` is `800ba2fc`, and in
+    # 278 that same `bl` was the call *into* `ipc_mqueue_init`; here the function it calls has already
+    # returned. So `caller-4` alone no longer says which function's body the run is in, and the stub's
+    # own name is the only discriminator between two consecutive stops - 275's shape, twice now.
+    # `_a` and `_e` agree, `_w0 = 0x62303038` / `_w1 = 0x30303361` = `800ba300` from the first digit
+    # (`digits = 0x2e` = 21 + 25, a 10-character name), `kv_written=0x5b` (91 = 21 + 34 + 36),
+    # `kv_in_dram=0x7f` (127 = 91 + 36), `kv_dropped=0`, `why_byte=0x61`, zero abort entries, echo
+    # intact. 661 of 661 words of `entry_kv` through `entry_stub_hit` match the linked ELF (eighth
+    # build running).
+    #
+    # So the port object's message queue was initialized with a real `waitq_init(port+16, FIFO)` - the
+    # waitq machinery 267 linked and 268 measured - and `ipc_mqueue_init` then stopped one instruction
+    # from the end, on `klist_init`. `klist_init` is `bsd/kern/kern_event.c` and is the next step.
     # 278: `ipc_port_alloc_special`, and the step that starts on the object XNU's own linkage makes
     # the largest one on this path.
     # 277's stop was `ipc_port_alloc_special`, and the object that defines it is `osfmk/ipc/ipc_port.c`
@@ -3793,6 +3864,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$SECURITY_MAC_LABEL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_IPC_HOST_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_PORT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_IPC_IPC_MQUEUE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -3805,7 +3877,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
