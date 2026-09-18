@@ -110,8 +110,9 @@ FORCE_INCLUDES=(
 # ---------------------------------------------------------------------------------------------
 DEFINES=(
     -DARMA7=1
-    # __APPLE__ is what Apple's compiler defines and `--target=armv7-none-eabi` does not; it is worth
-    # 17 files in the minimal kernel configuration and 99 in RELEASE. See build_xnu_arm_kernel.sh.
+    # __APPLE__ is what Apple's compiler defines and this project's ELF target triple does not; it
+    # is worth 17 files in the minimal kernel configuration and 99 in RELEASE. See
+    # build_xnu_arm_kernel.sh and xnu_config/arm_target.sh.
     # Measured here: **nothing** - 32 of 32, 118,970 bytes and 445 undefined symbols either way,
     # because nothing in osfmk/arm takes an `#ifdef __APPLE__` branch. It is kept so that the two
     # build scripts describe one configuration rather than two; a divergence between them is the
@@ -169,7 +170,7 @@ INCLUDES=(
 # -mfpu/-mfloat-abi: machine_cpuid.c reads the VFP identification registers, and without an FPU
 # selected the assembler rejects them with "instruction requires: VFP2". Cortex-A15 is NEON/VFPv4.
 CC_ARGS=(
-    clang --target=armv7-none-eabi -mcpu=cortex-a15 -marm
+    clang --target=$("$TOOLS_DIR/xnu_config/arm_target.sh") -mcpu=cortex-a15 -marm
     -mfpu=neon-vfpv4 -mfloat-abi=softfp
     -ffreestanding -fno-builtin -fno-common -fno-pic -O2 -w -ferror-limit=0
 )

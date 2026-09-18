@@ -1958,6 +1958,54 @@ and the C++ list already names it ("`operator new[]`'s `size_t`, the target trip
 XNU_KERNEL_EXTRA_DEFINES='-D__SIZE_TYPE__=long unsigned int' ./tools/build_xnu_arm_kernel.sh
 ```
 
+**THE TARGET ABI: AN ELF TRIPLE THAT CARRIES DARWIN'S TYPE WIDTHS** (2026-09-18,
+[`experiment-161`](../experiments/experiment-161-the-target-abi.md)). experiment-160 left one file in
+`osfmk/vm` failing, and its failure turned out not to be about that file. `vm_protos.h:224` declares
+`vnode_trim(struct vnode *, int64_t, unsigned long)` and `vnode_pager.c:211` defines
+`vnode_trim(struct vnode *, off_t, size_t)`. Preprocessing shows the return types agree — `u_int32_t`,
+`uint32_t` and `__uint32_t` are all `unsigned int` — and the **third parameter** does not, because
+`size_t` here is `unsigned int`. `bsd/arm/_types.h:67-71` takes `__SIZE_TYPE__`, and clang defines that
+**per target**: `long unsigned int` for `armv7-apple-ios`, `unsigned int` for `armv7-none-eabi`. The
+source is not at fault; the compiler's idea of the target is. The project had already recorded this
+from the other end — "`operator new[]`'s `size_t` (the target triple, same as `vnode_pager.c`)".
+
+`-D__SIZE_TYPE__='long unsigned int'` fixes the C half (610 of 615) and **destroys the C++ half**: 80
+of 83 becomes **3 of 83**, every file failing on `OSMetaClass.h:922`'s `operator new(size_t)` —
+because clang checks that parameter against the *target's* built-in size type and not against the
+macro. So the target moved instead. Four macros differ between the triples
+(`__SIZE_TYPE__`, `__UINTPTR_TYPE__`, `__INTPTR_TYPE__`, `__WCHAR_TYPE__`); `armv7-apple-ios` carries
+all four and is Mach-O, which experiment-150 closed. Of the ELF triples with those widths,
+`armv7-unknown-netbsd-eabi` is chosen over `armv7-unknown-openbsd` because the macro delta is smaller
+(OpenBSD additionally claims `unix`, `__PIC__`/`__PIE__`, `__SSP_STRONG__` — none read anywhere in the
+tree, and `-fno-pic` beats its PIE default byte for byte, so this is a preference and not a
+measurement). The one branch in the tree that reads either name is `bsd/netinet/ip_compat.h:122`, and
+it selects the same `typedef u_int32_t u_32_t` as the path it replaces.
+
+**One value, four places.** The triple was spelled out in `build_xnu_arm_kernel.sh` (C *and* C++),
+`build_xnu_arm_layer.sh`, `sweep_xnu_osfmk.sh` and `gen_assym.sh`. It now lives in
+`tools/xnu_config/arm_target.sh`, beside `component_defines.sh` and `make_defines.sh` — the same kind
+of thing, a value the build configuration would have supplied. It honours `XNU_ARM_TARGET`, so the
+before case is `XNU_ARM_TARGET=armv7-none-eabi ./tools/build_xnu_arm_kernel.sh`.
+
+| | before | after |
+| --- | --- | --- |
+| `RELEASE`, C | 609 of 615 | **610 of 615** |
+| `RELEASE`, C++ | 80 of 83 | **82 of 83** |
+| `RELEASE`, undefined | 132 | **97** |
+| `RELEASE`, boot-path stubs from `arm_init` | 15 of 132 | **12 of 97** |
+| `STAGE90_BOOT`, C | 415 of 426 | **416 of 426** |
+| `STAGE90_BOOT`, C++ | 80 of 83 | **82 of 83** |
+| `STAGE90_BOOT`, undefined | 273 | **238** |
+
+40 symbols closed and 5 opened, and both lists are what they should be: the 40 are `vnode_pager.c`'s
+9, `libkern/c++/OSKext.cpp`'s 31 and `OSRuntime.cpp`'s 3 plus `__cxa_pure_virtual`, and the 5 are
+everything `libkern_c++_OSKext.o` references. Three costs, all measured: `__NetBSD__` becomes defined,
+`__PTRDIFF_TYPE__` becomes `long int` where Darwin has `int`, and the EH model changes from ARM EHABI
+to DWARF, so **no `.ARM.exidx` sections are emitted** (the old build emitted 113 orphan ones) — nothing
+in XNU, in the measurement link or in the entry image reads them, and that is where the 46 KB of
+`.text` went. Verified unchanged: `build_xnu_arm_layer.sh` at 32 of 32 and 445 undefined,
+`gen_assym.sh`'s `assym.s` byte-identical at 266 defines.
+
 **XNU'S REAL `arm_init` RAN ON THE DEVICE** (2026-09-18,
 [`experiment-159`](../experiments/experiment-159-the-real-arm-init-ran.md)). The entry image no
 longer stubs `arm_init`: it links XNU's own `osfmk_arm_arm_init.o`, plus XNU's own `data.o`

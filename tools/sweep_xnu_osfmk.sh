@@ -72,7 +72,7 @@ INCLUDES=(
 )
 
 CC_ARGS=(
-    clang --target=armv7-none-eabi -mcpu=cortex-a15 -marm
+    clang --target=$("$TOOLS_DIR/xnu_config/arm_target.sh") -mcpu=cortex-a15 -marm
     -mfpu=neon-vfpv4 -mfloat-abi=softfp
     -fsyntax-only -ferror-limit=0 -ffreestanding -w
 )

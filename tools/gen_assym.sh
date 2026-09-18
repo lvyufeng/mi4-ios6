@@ -63,7 +63,7 @@ done < <("$TOOLS_DIR/xnu_config/make_defines.sh" "$CONFIG")
 # step by intent rather than by construction, which is the one place in this pipeline where a
 # divergence would be silent; the check at the end catches the case that matters (an empty assym.s).
 CFLAGS=(
-    clang --target=armv7-none-eabi -mcpu=cortex-a15 -marm
+    clang --target=$("$TOOLS_DIR/xnu_config/arm_target.sh") -mcpu=cortex-a15 -marm
     -mfpu=neon-vfpv4 -mfloat-abi=softfp
     -ffreestanding -fno-builtin -fno-common -fno-pic -O2 -w -ferror-limit=0
     "${CONFIG_DEFINES[@]}"

@@ -213,9 +213,9 @@ DEFINES=(
     # (experiment-130), and tty_pty.c promotes 1 to 32 itself with a #warning.
     -DNPTY=1 -DNPTMX=1
     # __APPLE__ is what Apple's compiler defines and this project's does not. The scripts here use
-    # `--target=armv7-none-eabi`; Apple's build uses a Darwin target triple, and `__APPLE__` is part
-    # of that triple rather than of the source. Supplying the macro is worth 17 files in the minimal
-    # configuration and 99 in RELEASE, with no regressions in either:
+    # an ELF target triple (see xnu_config/arm_target.sh); Apple's build uses a Darwin target triple,
+    # and `__APPLE__` is part of that triple rather than of the source. Supplying the macro is worth
+    # 17 files in the minimal configuration and 99 in RELEASE, with no regressions in either:
     #
     #     osfmk/prng/YarrowCoreLib/include/yarrow.h:91   #if defined(macintosh) || defined(__APPLE__)
     #
@@ -226,7 +226,9 @@ DEFINES=(
     # Measured: `-D__MACH__=1` alongside it changes nothing (345 either way), and swapping the whole
     # target triple for `armv7-apple-darwin` is worth exactly one more file (346) while changing the
     # object format from ELF to Mach-O - which is a decision for the link step, not for this
-    # measurement. See experiment-121.
+    # measurement. See experiment-121. **And the type widths that triple carries ARE now available
+    # without Mach-O** - that is what xnu_config/arm_target.sh is about, and it is worth three files
+    # and 35 symbols. experiment-161.
     -D__APPLE__=1
     -DCONFIG_SCHED_TIMESHARE_CORE=1 -DCONFIG_SCHED_TRADITIONAL=1
     # `-D_CLOCK_T=1` used to be here, to force kern_types.h's `typedef struct clock *clock_t` to win
@@ -298,7 +300,7 @@ INCLUDES=(
 )
 
 CC_ARGS=(
-    clang --target=armv7-none-eabi -mcpu=cortex-a15 -marm
+    clang --target=$("$TOOLS_DIR/xnu_config/arm_target.sh") -mcpu=cortex-a15 -marm
     -mfpu=neon-vfpv4 -mfloat-abi=softfp
     -ffreestanding -fno-builtin -fno-common -fno-pic -O2 -w -ferror-limit=0
 )
@@ -309,7 +311,7 @@ CC_ARGS=(
 # the include order and the shim placement are the *same mechanism*, because a `.cpp` in `libkern`
 # is a `libkern` translation unit like any other.
 CXX_ARGS=(
-    clang++ --target=armv7-none-eabi -mcpu=cortex-a15 -marm
+    clang++ --target=$("$TOOLS_DIR/xnu_config/arm_target.sh") -mcpu=cortex-a15 -marm
     -mfpu=neon-vfpv4 -mfloat-abi=softfp
     -ffreestanding -fno-builtin -fno-common -fno-pic -O2 -w -ferror-limit=0
     -fno-exceptions -fno-rtti
