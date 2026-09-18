@@ -3098,6 +3098,144 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 295: four more objects in `kernel_bootstrap`'s tail, and the walk reaches thread creation
+    #
+    # **The 294 run reported** `stub_hit=atm_init` at `kernel_bootstrap + 0x2d8`. The four stubs left
+    # in that function's tail are `atm_init`, `bank_init`, `ipc_pthread_priority_init` and
+    # `corpses_init`, and they sit at +0x2d4, +0x2f4, +0x304 and +0x308 - the last two back to back,
+    # the first two separated only by `mach_init_activity_id` (real). Same shape as 294, one object
+    # more:
+    #
+    #     atm_init                  osfmk/atm/atm.c                          osfmk_atm_atm.o
+    #     bank_init                 osfmk/bank/bank.c                        osfmk_bank_bank.o
+    #     ipc_pthread_priority_init osfmk/voucher/ipc_pthread_priority.c     osfmk_voucher_ipc_pthread_priority.o
+    #     corpses_init              osfmk/corpses/corpse.c                   osfmk_corpses_corpse.o
+    #
+    # **The objects, measured.** 5408 + 6288 + 396 + 2652 bytes of `.text`, 1236 of `.rodata`, and
+    # 4416 + 300 + 4 + 8 of `.bss`:
+    #
+    #     resolved  29   26 functions and 3 storage (`bank_ledgers`, `corpse_for_fatal_memkill`,
+    #                    `exc_via_corpse_forking` - the last two named like functions and *are*
+    #                    storage, which is exactly the trap 294 recorded)
+    #     added      7   atm_collect_trace_info, atm_inspect_process_buffer,
+    #                    commpage_update_atm_diagnostic_config, proc_getgid, proc_getuid,
+    #                    proc_persona_id, gather_populate_corpse_crashinfo
+    #
+    # with the 294 qualifier applied: an added name that another object in the same step defines is not
+    # an obligation. Nothing in these four overlaps, so the qualifier changes nothing here - but the
+    # `--disassemble` trap from 294 does, and this step is where it nearly cost a wrong prediction.
+    #
+    # **The measurement that had to be redone.** A `-dr` dump of an object prints the relocations of
+    # the *whole section* before the function's own, so a naive parse of `--disassemble=NAME` attributes
+    # every call in the object to that function. Scoped that way, `ipc_pthread_priority_init` appeared to
+    # call **`pthread_priority_canonicalize`** - a stub - and the prediction would have been that name.
+    # Scoped to the function's own address range, it makes **three** calls: `_consume_kprintf_args`,
+    # `ipc_register_well_known_mach_voucher_attr_manager` (both real) and `panic`. The three bodies,
+    # properly scoped:
+    #
+    #     atm_init    14 calls, every one real: PE_get_default, PE_parse_boot_argn, zinit x3,
+    #                 lck_grp_attr_setdefault, lck_grp_init, lck_attr_setdefault, lck_mtx_init,
+    #                 ipc_register_well_known_mach_voucher_attr_manager, panic, _consume_kprintf_args
+    #     bank_init   16 calls, every one real: zinit x2, ledger_template_create, ledger_entry_add x2,
+    #                 ledger_template_complete, lck_spin_init and the same lock-group set
+    #     ipc_pthread_priority_init   3 calls, all real
+    #     corpses_init                3 calls, all real: PE_parse_boot_argn x3
+    #
+    # **So the four are clean, and the frontier moves somewhere new.** `kernel_bootstrap`'s next call is
+    # `kernel_thread_create` at +0x32c (real, and not in the stub list), and the image's own body of it
+    # calls `stack_alloc` - real since 294 - and then `thread_create_internal`. **Thread creation is
+    # where the next frontier is**, and its first stub is the first stub `thread_create_internal` makes:
+    #
+    #     +0x038  zalloc                real
+    #     +0x074  __aeabi_memcpy8       real
+    #     +0x084  uthread_alloc         ***STUB***   <- the stop, return address +0x088
+    #
+    # **Predicted stop, the address to be confirmed against the rebuilt image before the device is
+    # touched:**
+    #
+    #     stub_hit=uthread_alloc    xnu_entry_stub_caller=thread_create_internal + 0x088
+    #
+    # and the rebuild confirms it, because `osfmk_kern_thread.o` sits earlier in the link list than any
+    # object this step adds and so did not move: `thread_create_internal` is at 0x8000acec both before
+    # and after, `uthread_alloc` is a stub at 0x800fbffc, and the caller is
+    #
+    #     xnu_entry_stub_caller=0x8000ad74     (thread_create_internal + 0x088, in osfmk_kern_thread.o)
+    #
+    # which is the `bl` the image has at 0x8000ad70.
+    #
+    # **The build, and the boundary is a close call for the first time.** `.data` is at 0x80114000 and
+    # `__TEXT,initcode` now ends at 0x8011071c, leaving **14564 bytes**. The objects bring 15980 and
+    # the net name cost is `26 - 7 = 19` names at the 49.7 bytes a name that 294 calibrated, so the need
+    # is about **15036** - over, but only by ~470. At 74 bytes a name the two would tie; everything
+    # measured so far is 50-65, so the prediction is that `.data` moves **a third time**, and this is
+    # the least certain of the three:
+    #
+    #                   predicted        measured
+    #     undefined     751
+    #     function      664
+    #     storage        87
+    #     .data         0x80114000 -> **0x80118000**
+    #     __bss_start   0x8012bc08 -> **0x8012fc08**
+    #     image         1230896  -> **1247420** (+16384 of fill and 140 of the objects' own `.data`)
+    #     text          1115928  -> ~1130964
+    #
+    # The size thresholds for `thread_create_internal`'s stub: `uthread_alloc` is the first of a family
+    # (`uthread_cleanup`, `uthread_cred_free`, `uthread_zone_free`) that `thread_create_internal` calls
+    # on its error paths, so one step will likely retire four names at once - `osfmk/kern/uthread.c`.
+    #
+    # **The build.**
+    #
+    #                   predicted        measured
+    #     undefined     751              751
+    #     function      664              664
+    #     storage        87               87
+    #     .data         0x80118000       0x80118000
+    #     __bss_start   0x8012fc08       0x8012fc68   (off by 0x60: `.bss` itself grew by 4576, the
+    #                                                  objects' 4728 less the three storage slots
+    #                                                  retired - the first time the *content* of
+    #                                                  `.bss` moved it rather than the alignment)
+    #     image         1247420          1247424      (+4)
+    #     text          1130964          1130904      (-60)
+    #
+    # `.data` moved for the **third step running**, and the marginal call the ledger flagged was a real
+    # one: the need was about 15036 against 14564 of room. The three moves so far have taken it
+    # 0x8010c000 -> 0x80110000 -> 0x80114000 -> 0x80118000, each 16 KB, and the image 1198104 ->
+    # 1214488 -> 1230896 -> 1247424. Headroom 1694824 -> 1673768.
+    #
+    # **The run.**
+    #
+    #     stub_hit=uthread_alloc    xnu_entry_stub_caller=0x8000ad74
+    #
+    # `0x8000ad74` is `thread_create_internal + 0x088`, the return address of the `bl` at 0x8000ad70 -
+    # and `thread_create_internal` is at 0x8000acec, **unchanged by the build**, because
+    # `osfmk_kern_thread.o` sits earlier in the link list than everything this step adds. That makes
+    # this the first prediction whose caller address could be confirmed before the run and was.
+    #
+    # So one run measured `atm_init`, `bank_init`, `ipc_pthread_priority_init` and `corpses_init` all
+    # completing, `atm_init`'s three `zinit`s and `bank_init`'s four ledger-template calls among them,
+    # `kernel_bootstrap` reaching `kernel_thread_create`, and `kernel_thread_create` reaching
+    # `thread_create_internal` and its `zalloc` and `__aeabi_memcpy8`. **The walk is inside thread
+    # creation.** `kernel_bootstrap`'s own body is finished except for `thread_deallocate` and the
+    # branch to `load_context` at +0x380.
+    #
+    # Preflight clean (`loader_xnu_entry_stub_status=0x90000001`,
+    # `high_va_data_verified=0x00000001`), log 301114 bytes, no `exception:` line.
+    #
+    # **Safety:** non-persistent `fastboot boot` only, nothing flashed,
+    # `persistent_write_attempted=0x00000000` x25, `failure_mask=0x00000000` x87,
+    # `xnu_entry_failures=0x00000000`, and the device returned to Android on its own
+    # (`getprop ro.build.version.release` = 10).
+    #
+    # **Next:** experiment 296 - `osfmk/kern/uthread.c` for `uthread_alloc` and its three siblings, and
+    # then the rest of `thread_create_internal`: `kpc_thread_create`, `sched_set_thread_base_priority`,
+    # `sched_thread_mode_demote`, `machine_thread_create` -> `machine_thread_state_initialize`,
+    # `ipc_thread_terminate` -> `io_free`. After those, `kernel_thread_create` returns a real thread to
+    # `kernel_bootstrap`, which calls `thread_deallocate` on the throwaway and then `load_context` - the
+    # first time this walk crosses into a context switch rather than a function call.
+    OSFMK_ATM_ATM_OBJ=${STAGE90_ENTRY_OSFMK_ATM_ATM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_atm_atm.o}
+    OSFMK_BANK_BANK_OBJ=${STAGE90_ENTRY_OSFMK_BANK_BANK_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_bank_bank.o}
+    OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ=${STAGE90_ENTRY_OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_voucher_ipc_pthread_priority.o}
+    OSFMK_CORPSES_CORPSE_OBJ=${STAGE90_ENTRY_OSFMK_CORPSES_CORPSE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corpses_corpse.o}
     # 294: three objects for three stubs in a row, and the walk reaches the scheduler's door
     #
     # **The 293 run reported** `stub_hit=stack_init` at `thread_init + 0xd8`. That step also settled
@@ -7204,6 +7342,10 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_STACK_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_THREAD_POLICY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_ARM_PCB_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_ATM_ATM_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_BANK_BANK_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_CORPSES_CORPSE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_EVENT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
@@ -7217,7 +7359,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
