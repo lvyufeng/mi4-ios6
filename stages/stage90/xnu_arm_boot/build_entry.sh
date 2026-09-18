@@ -1600,6 +1600,77 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # So the frontier is not an object any more. There is nothing left to link until the panic is
     # named, and the next step is an instrument rather than a step: read what XNU said before it
     # trapped, from the panic string pointer the trap is handed.
+    #
+    # Experiments 237 to 239 are that instrument, and they close the question with an answer that is
+    # not an object at all. Three runs, three readings, no object linked in any of them and not one
+    # byte of image size across all three.
+    #
+    # **237: the panic state is cached, and the cache is cleared before the trap.** XNU keeps the
+    # panic message in three globals - `debugger_panic_str`, `debugger_message`,
+    # `debugger_panic_caller`, all `B` objects in the already-linked `osfmk_kern_debug.o`, so
+    # declaring them costs nothing and cannot go stale the way a hard-coded address could - and all
+    # three read zero. That is predicted rather than surprising: `handle_debugger_trap` sets
+    # `debugger_panic_str` at `debug.c:905` and restores it to `NULL` at `debug.c:947`, and it runs
+    # *before* `DebuggerTrapWithState`. So the message has to be read where it cannot have been
+    # cleared - the registers, which the vector trampoline does not touch.
+    #
+    # **238: the message, out of the argument registers.** `panic_trap_to_debugger` moves its first
+    # four arguments into callee-saved registers at `+0x10` and they stay there - `r9 = fmt`,
+    # `r8 = va_list *args`, `r7 = reason`, `r6 = ctx` - and `DebuggerSaveState` pushes and restores
+    # them without writing them. The run read `r9` and dumped the six words it points at:
+    # **`"zfree: freeing invalid "`**, which is `zalloc.c:1208`,
+    #
+    #   if (__improbable(!is_sane_zone_element(zone, element)))
+    #           panic("zfree: freeing invalid pointer %p to zone %s\n",
+    #                 (void *) element, zone->zone_name);
+    #
+    # `free_to_zone` was handed an element its own sanity check rejected. A first version of 238 also
+    # read `r4` as `panic_options_mask`; the disassembly showed `fleh_undef`'s own prologue emitting
+    # `mov r4, lr` before the first statement, so the key was deleted rather than kept with a caveat.
+    #
+    # **239: the check that fired is the first one, and it cannot pass at this image's addresses.**
+    # The two arguments - element and zone name - were read one dereference short, and `r8` is why:
+    # it is a `va_list *`, so the word at it is the list's `__ap` and not the first argument.
+    # `panic`'s own frame settles the offset to the byte - `str r1, [sp, #16]` with the varargs at
+    # `sp+28` makes `__ap` twelve bytes into the struct, exactly the `0x0029be94 - 0x0029be88` the
+    # run measured. Experiment 240 reads the frame instead of the live registers, which is also the
+    # only way to get `r5 = db_panic_caller`: `fleh_undef`'s prologue clobbers `r5` with
+    # `mrs r5, SPSR`, but saves it at `[sp+4]`. `sl` and `r4` are the two halves of the 64-bit
+    # options mask and not the caller - `stm sp, {r4, sl}` at the `DebuggerTrapWithState` call - a
+    # correction to 238's own comment, which read `sl` as the mask and `r4` as the caller.
+    #
+    # The two bounds that check compares against, `zone_map_min_address` and `zone_map_max_address`,
+    # both read zero - which is what `zone_init` never having run looks like. `zone_init` is their
+    # only writer (`zalloc.c:2958-2959`), its only caller in the image is `vm_mem_bootstrap+0x204`,
+    # and before it on that path sit two stubs (`kmem_init` at `+0x074`, `kext_alloc_init` at
+    # `+0x1a4`), while its own first call is `kmem_suballoc` - also a stub. A stub ends the run, so
+    # these globals have never been anything but zero here.
+    #
+    # **But that is not why the free panicked.** `is_sane_zone_ptr` tests in this order -
+    # `pmap_kernel_va`, then alignment, then the bounds - and the bounds test is not even reached
+    # for `vm_map_zone`, which is `Z_COLLECT FALSE` / `Z_FOREIGN TRUE`, and whose element is a
+    # multiple of the zone's 160-byte element size. The test that fires is the first one, and
+    # `pmap_kernel_va` is `[0x80000000, 0xFFFEFFFF]` (`osfmk/arm/pmap.h:371`,
+    # `osfmk/mach/arm/vm_param.h:169-170`) - a compile-time constant with nothing to do with where
+    # this image was linked. This image runs at `0x00200000`, and two consequences follow, both
+    # arithmetic:
+    #
+    #   arm_vm_init.c:496   vm_kernel_slide = gVirtBase - 0x80000000         = 0x80200000
+    #   arm_vm_init.c:505   virtual_space_start = (gVirtBase + MEM_SIZE_MAX + 0x3FFFFF) & 0xFFC00000
+    #                                                                       = 0x40400000
+    #
+    # so every address XNU's own allocator hands out is below `VM_MIN_KERNEL_ADDRESS` and is
+    # rejected by XNU's own kernel-address test. The panicking free is `vm_map_init+0x260`'s
+    # `zcram(vm_map_zone, map_data, map_data_size)` (`vm_map.c:869`), the first free on the
+    # straight-line boot path - `map_data` is the boot's first `pmap_steal_memory`, so it *is*
+    # `virtual_space_start`, `0x40400000`, and `vm_map_zone`'s name is the literal `"maps"`.
+    #
+    # **So the frontier has moved off objects and onto the image's base, and no object can fix it.**
+    # The next stage links and runs the image at a base at or above `0x80000000`, which is where the
+    # device's RAM already starts (`RAM_PHYS_BASE`, stage90.h:21) and where this SoC's kernel
+    # normally loads (`0x80008000`). That is `ENTRY_BASE`, the payload's mapping of the window, and
+    # `physBase`/`virtBase` in the boot_args - with the entry epilogue's identity trick as the thing
+    # to re-derive rather than assume.
     BSD_KERN_SUBR_PRF_OBJ=${STAGE90_ENTRY_BSD_KERN_SUBR_PRF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_subr_prf.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"

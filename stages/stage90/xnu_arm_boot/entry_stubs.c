@@ -234,7 +234,7 @@ extern uint8_t ExceptionVectorsBase[];
  * entirely: by the time anything reads this, it is the exact characters that will be written, in
  * one contiguous block, with no pointers to be wrong.
  */
-#define ENTRY_KV_BUF 768
+#define ENTRY_KV_BUF 1024
 static char g_kv_buf[ENTRY_KV_BUF];
 static uint32_t g_kv_len;
 
@@ -730,28 +730,116 @@ void pmap_bootstrap(uint32_t next_paddr)
  * reached. The distance between those two diagnoses is the whole reason these four lines exist.
  */
 void fleh_reset(void) { entry_epilogue("exception: reset"); }
+extern const char *debugger_panic_str;
+extern const char *debugger_message;
+extern unsigned long debugger_panic_caller;
 /*
- * The undefined-instruction vector reports where it fired, and it is the one vector that had no
- * address at all until experiment 236. The two abort handlers read IFAR/DFAR, which are the fault
- * *addresses*; there is no equivalent register for an undefined instruction, but there does not
- * need to be one: **the vector trampoline branches here rather than calling**, so r14 still holds
- * `LR_undef`, the preferred return address of the undefined instruction, and nothing has
- * overwritten it by the time this function's first statement runs.
+ * XNU's panic state. `debugger_panic_str`, `debugger_message` and `debugger_panic_caller` are `B`
+ * objects in the image, defined by `osfmk_kern_debug.o`, which is already linked - so declaring them
+ * costs nothing and they cannot go stale the way a hard-coded address would. **Experiments 237 and
+ * 238 measured all three as zero**, which is the answer the caveat predicted: `handle_debugger_trap`
+ * sets them from the CPU's debugger context and then restores them to NULL before returning
+ * (`debug.c:905` then `debug.c:947`), and it runs before `DebuggerTrapWithState`, so the cache is
+ * always clear by the time the trap fires. They are still reported, because a non-zero value here
+ * would be news.
  *
- * ARM's preferred return address for an undefined instruction is the address of the instruction
- * itself plus 4, on the same rule as a prefetch abort - so the faulting instruction is `LR_undef - 4`,
- * and the entry is reported in both forms rather than one, because the +4 is a claim about the
- * architecture and the raw register is not.
+ * So the message is read from where it cannot have been cleared - **the registers**, which the
+ * vector trampoline does not touch. The trampoline (`entry_vectors.s`) loads SP from a literal and
+ * branches to the handler without pushing anything, so the handler's first statement runs with the
+ * trapping instruction's registers intact. Not `r0`-`r3`: `panic_trap_to_debugger` moves its first
+ * four arguments into callee-saved registers at `+0x10` and they stay there, because
+ * `DebuggerSaveState` pushes and restores `r4`-`r9` and `sl` and neither function touches them
+ * again:
  *
- * Why it matters: experiment 235's run ended with `exception: undefined instruction` and no stub
- * hit, and the entry image contains exactly two `udf` instructions - `DebuggerTrapWithState` and
- * `DebuggerWithContext`, the deliberate debugger traps - so "undefined instruction" here most
- * likely means "XNU called Debugger()", and the two possibilities are 0x22d168 and 0x22d3d8 until
- * this reports which. A trap named is a bug found; a trap unnamed is a run spent guessing.
+ *   r9   = `panic_format_str`  - the panic message.
+ *   r8   = `panic_args`        - a `va_list *`: the pointer `panic()` passed, not the list. The
+ *                                list itself lives in `panic`'s frame, which is still live.
+ *   r4   = the low half of `db_panic_options`, `sl` the high half. **Not the caller.** This key was
+ *                                named `xnu_entry_trap_sl_caller` when it was written and the name
+ *                                is wrong; experiment 239 established which register each of the
+ *                                three is, and the name is kept here only because it is the key the
+ *                                run printed and the record has to match the run. Experiment 240
+ *                                renames it.
+ *   r5   = `panic_caller`      - the way `panic()` got here, i.e. the instruction after its `bl`.
+ *
+ * **Experiment 238 read the message through `r9` and got it:**
+ *
+ *   w0=0x72667a22 w1=0x203a6565 w2=0x65657266 w3=0x20676e69 w4=0x61766e69 w5=0x2064696c
+ *   -> "zfree: freeing invalid
+ *
+ * which is `zalloc.c:1208`, the `is_sane_zone_element` check inside `free_to_zone`. That is a
+ * `%p`/`%s` panic, so the two things it names are the first two entries of the `va_list` - **and
+ * experiment 239 measured that the read below is one dereference short.** `r8` is `va_list *`, so
+ * the word at `r8` is the list's `__ap`, a pointer to the first argument, and the word after it is
+ * whatever follows the struct in `panic`'s frame. The run reported `arg0=0x0029be94` and
+ * `arg1=0x00000020`, and `0x0029be94 - 0x0029be88 = 12` is exactly `panic`'s own layout: the list
+ * is at its `sp+16`, its `__ap` is `sp+28` where the three varargs were stored, and 12 bytes is the
+ * distance between them. The element and the zone name are one dereference further on, which is
+ * what experiment 240 reads.
+ *
+ * `r0`-`r3` are not read either: they would hold `DebuggerTrapWithState`'s first four arguments -
+ * `db_panic_str` among them, which is the same string as `r9` - but they are clobbered inside
+ * `DebuggerSaveState` before the trap. `r9` and `r10` survive everything, and the disassembly is
+ * the check that they do: this function's prologue is `strd r4, [sp, #-24]!`, `strd r6, [sp, #8]`,
+ * `str r8, [sp, #16]`, so it writes `r4` (`mov r4, lr`) and `r5` (`mrs r5, SPSR`) before its first
+ * statement and never writes `r9` or `r10` - while `r6`, `r7` and `r8` keep their values only until
+ * the compiler reuses them, which is why `r6`, `r7` and `r8` are worth reading out of the frame
+ * *the prologue saved them into* and not out of the registers. Experiment 240 does that, and four
+ * of the five values it will read are already known.
+ *
+ * The six words at each pointer are read only if that pointer is inside the entry image, because a
+ * wild pointer here would fault inside the fault handler and say nothing at all. They are read a
+ * byte at a time rather than as words: an unaligned `ldr` is allowed on ARMv7 only while SCTLR.A is
+ * clear, and this code has no business assuming which mapping mode it is running under. Note that
+ * the address the *element* is expected to have - 0x40400000, XNU's `virtual_space_start` in this
+ * image - is **outside** the range this guard accepts, so experiment 240 has to widen it before it
+ * can report what happened.
+ *
+ * ## Why `free_to_zone` panics at all in this image
+ *
+ * `is_sane_zone_ptr` (`zalloc.c:1071-1077`) tests in this order: alignment, then `pmap_kernel_va`,
+ * then - only when the zone is `collectable && !allows_foreign` - the zone-map range. **The second
+ * test is false for every address this image uses**, which is experiment 239's finding and is
+ * arithmetic on the boot args rather than a measurement of XNU:
+ *
+ *   `entry.ld` links the image at 0x00200000 and `stage90`'s `xnu_entry_jump.c:141` hands `_start`
+ *   `virtBase = physBase = 0x00200000`. From that, `arm_vm_init.c:496` computes
+ *   `vm_kernel_slide = gVirtBase - 0x80000000 = 0x80200000`, and `arm_vm_init.c:505` computes
+ *   `virtual_space_start = (gVirtBase + MEM_SIZE_MAX + 0x3FFFFF) & 0xFFC00000 = 0x40400000`, with
+ *   `MEM_SIZE_MAX = 0x40000000` (`arm_vm_init.c:134`). `pmap_kernel_va` wants
+ *   `[0x80000000, 0xFFFEFFFF]` (`osfmk/arm/pmap.h:371`). 0x40400000 is not in it.
+ *
+ * So the first `free_to_zone` on the boot path - `vm_map_init+0x260`'s
+ * `zcram(vm_map_zone, map_data, map_data_size)`, cramming the 4096 bytes `vm_map_steal_memory` stole
+ * at `virtual_space_start` - panics, and the element it hands the check is around 0x40400000. Any
+ * later free would do the same. The fix is not another object; it is a base at or above
+ * 0x80000000, which is where the device's RAM starts (`RAM_PHYS_BASE`, `stage90.h:21`).
  */
+extern uint32_t zone_map_max_address;
+extern uint32_t zone_map_min_address;
+
+static uint32_t
+entry_word_at(uintptr_t p)
+{
+    return (uint32_t)*(const volatile unsigned char *)(p)
+         | ((uint32_t)*(const volatile unsigned char *)(p + 1u) << 8)
+         | ((uint32_t)*(const volatile unsigned char *)(p + 2u) << 16)
+         | ((uint32_t)*(const volatile unsigned char *)(p + 3u) << 24);
+}
+
+/* A pointer worth dereferencing: inside the entry image, where every string in it lives. */
+static int
+entry_image_ptr(uintptr_t p)
+{
+    return (p >= 0x00200000u) && (p < 0x04000000u);
+}
+
 void fleh_undef(void)
 {
     uint32_t lr_undef, spsr;
+    uint32_t r_fmt, r_args, r_caller;
+    uint32_t arg0, arg1;
+    uintptr_t str;
 
     __asm__ volatile ("mov %0, lr" : "=r"(lr_undef));
     __asm__ volatile ("mrs %0, spsr" : "=r"(spsr));
@@ -759,6 +847,81 @@ void fleh_undef(void)
     entry_kv("xnu_entry_undef_lr", lr_undef);
     entry_kv("xnu_entry_undef_pc", lr_undef - 4);
     entry_kv("xnu_entry_undef_spsr", spsr);
+
+    entry_kv("xnu_entry_panic_str", (uint32_t)(uintptr_t)debugger_panic_str);
+    entry_kv("xnu_entry_panic_caller", (uint32_t)debugger_panic_caller);
+    entry_kv("xnu_entry_panic_message", (uint32_t)(uintptr_t)debugger_message);
+
+    __asm__ volatile ("mov %0, r9" : "=r"(r_fmt));
+    __asm__ volatile ("mov %0, r8" : "=r"(r_args));
+    __asm__ volatile ("mov %0, r10" : "=r"(r_caller));
+
+    entry_kv("xnu_entry_trap_r9_fmt", r_fmt);
+    entry_kv("xnu_entry_trap_r8_args", r_args);
+    entry_kv("xnu_entry_trap_sl_caller", r_caller);
+
+    entry_kv("xnu_entry_zone_map_min", zone_map_min_address);
+    entry_kv("xnu_entry_zone_map_max", zone_map_max_address);
+    /*
+     * **Both read zero on the device, and that is not a missing object.** `zone_init` is the only
+     * writer of either (`zalloc.c:2958-2959`, against the zero-initialized declarations at
+     * `zalloc.c:340-341`), its only caller is `vm_mem_bootstrap+0x204`, and the path to that call
+     * goes through two 12-byte stubs first - `kmem_init` at `+0x074` and `kext_alloc_init` at
+     * `+0x1a4` - while `zone_init`'s own first call is `kmem_suballoc`, also a stub. A stub ends
+     * the run, so `zone_init` has never executed in this image. The image's `zone_init` really does
+     * store them (`str r1, [r0]` at `+0x94` and `str r2, [r0]` at `+0xac`), so a non-zero reading
+     * was possible and the zero is the boot's answer.
+     *
+     * What that means is in `is_sane_zone_ptr` (`zalloc.c:1071-1077`): with
+     * `zone_map_min_address == zone_map_max_address == 0` the range test cannot pass for any
+     * non-zero element. But in this image it is not the range test that fires - it is the one
+     * *before* it, `pmap_kernel_va`, which is `[0x80000000, 0xFFFEFFFF]` at compile time and false
+     * for every address this image uses. See the module comment above `fleh_undef`, and experiment
+     * 239 for the arithmetic.
+     */
+
+    /*
+     * Two words out of the `va_list`. **This is one dereference short and experiment 239 measured
+     * it**: `r_args` is a `va_list *`, so word 0 here is the list's `__ap` - a pointer to the first
+     * argument - and word 1 is not an argument at all. The run reported `0x0029be94` and
+     * `0x00000020`; the first is 12 bytes past `r_args`, which is exactly where `panic` puts `__ap`
+     * (its frame has the list at `sp+16` and the three varargs at `sp+28`), and the second is
+     * outside the image, which is why the six-word dump below fell through to the format string.
+     * The element and the zone name are one dereference further on; experiment 240 reads them there
+     * and widens `entry_image_ptr` first, because the element is expected at `0x40400000`.
+     */
+    arg0 = 0u;
+    arg1 = 0u;
+    if (entry_image_ptr((uintptr_t)r_args)) {
+        arg0 = entry_word_at((uintptr_t)r_args);
+        arg1 = entry_word_at((uintptr_t)r_args + 4u);
+    }
+    entry_kv("xnu_entry_panic_arg0", arg0);
+    entry_kv("xnu_entry_panic_arg1", arg1);
+
+    if (entry_image_ptr((uintptr_t)arg1)) {
+        static const char *const words[6] = {
+            "xnu_entry_zone_w0", "xnu_entry_zone_w1", "xnu_entry_zone_w2",
+            "xnu_entry_zone_w3", "xnu_entry_zone_w4", "xnu_entry_zone_w5",
+        };
+        uint32_t i;
+
+        for (i = 0u; i < 6u; i++) {
+            entry_kv(words[i], entry_word_at((uintptr_t)arg1 + (i * 4u)));
+        }
+    } else if (entry_image_ptr((uintptr_t)r_fmt)) {
+        static const char *const words[6] = {
+            "xnu_entry_fmt_w0", "xnu_entry_fmt_w1", "xnu_entry_fmt_w2",
+            "xnu_entry_fmt_w3", "xnu_entry_fmt_w4", "xnu_entry_fmt_w5",
+        };
+        uint32_t i;
+
+        str = (uintptr_t)r_fmt;
+        for (i = 0u; i < 6u; i++) {
+            entry_kv(words[i], entry_word_at(str + (i * 4u)));
+        }
+    }
+
     entry_epilogue("exception: undefined instruction");
 }
 void fleh_swi(void) { entry_epilogue("exception: svc/swi"); }

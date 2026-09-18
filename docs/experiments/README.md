@@ -250,6 +250,9 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-234](experiment-234-snprintf-the-runtime-flag-no-walk-can-read.md) | `snprintf` for `kmem_alloc_kobject` — a Runtime Flag No Walk Can Read, and the Guard Rule Wrong in the Other Direction |
 | stage90 | [experiment-235](experiment-235-no-stub-at-all-an-undefined-instruction-and-the-two-udfs.md) | No Stub at All — an Undefined Instruction, and the Image's Exactly Two `udf`s |
 | stage90 | [experiment-236](experiment-236-the-trap-named-xnu-panicked-and-the-message-is-in-dram.md) | the Trap Named — `xnu_entry_undef_pc=0x0022d1a8` Is `DebuggerTrapWithState`, so **XNU Panicked** |
+| stage90 | [experiment-237](experiment-237-the-panic-state-three-globals-and-why-all-three-are-zero.md) | the Panic State — Three Globals, All Zero, and `handle_debugger_trap`'s Restore That Predicts It |
+| stage90 | [experiment-238](experiment-238-the-panic-registers-and-the-string-they-point-at.md) | the Panic Registers — `"zfree: freeing invalid "` Out of the `va_list`, and `zalloc.c:1208` |
+| stage90 | [experiment-239](experiment-239-zero-zone-map-bounds-and-an-element-that-cannot-be-a-kernel-address.md) | Zero Zone-Map Bounds — an Element That Cannot Be a Kernel Address, and the Frontier Ends at the Image's Base |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
