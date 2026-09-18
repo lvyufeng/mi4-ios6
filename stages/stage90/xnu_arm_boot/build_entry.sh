@@ -2255,6 +2255,48 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # references, 58 definitions) - and that same object also defines `memory_object_control_bootstrap`,
     # the *next* stub in `vm_mem_bootstrap` (`+0x254`), so one object may close two stops.
     OSFMK_VM_VM_FAULT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_FAULT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_fault.o}
+    # 252: `osfmk_vm_memory_object.o` - 9508 bytes of text, 58 references, 58 definitions: the
+    # memory-object and memory-object-control layer, and (because the frontier asked for it) **both** of
+    # the next two stops in `vm_mem_bootstrap`, `memory_manager_default_init` (`+0x244`) and
+    # `memory_object_control_bootstrap` (`+0x254`).
+    #
+    # Resolved 18, added 1 (`ipc_port_make_send`) - the reverse of 251's shape, and all 18 are names this
+    # image had been stubbing since it started: memory_object_init/_terminate/_deallocate/_map, the
+    # `_data_*` family, memory_object_control_allocate/_collapse/_disable/_to_vm_object,
+    # memory_object_to_vm_object, vm_object_sync, vm_object_update. 622 -> 605 undefined, 540 -> 523
+    # function stubs, storage unchanged at 82. Text 671505 -> 680369 (+8864).
+    #
+    # Both target functions are short and neither calls a stub:
+    #   memory_manager_default_init      str r1,[r0] (memory_manager_default = NULL) then `b lck_mtx_init`
+    #   memory_object_control_bootstrap  bl zinit(8, 0x10000, 4096, "mem_obj_control"),
+    #                                    bl zone_change(zone, Z_CALLERACCT=5, 0),
+    #                                    `b zone_change(zone, Z_NOENCRYPT=6, 1)`
+    # `xnu_entry_callwalk.py` found no stub on either closure, so the prediction was that the run passes
+    # **two** stops in one step and lands on `device_pager_bootstrap` (`+0x264`).
+    #
+    # Device: **`stub_hit=device_pager_bootstrap`, `xnu_entry_stub_caller=0x80040564`** =
+    # `vm_mem_bootstrap+0x268`, whose `caller - 4` is `80040560: bl 80091a08 <device_pager_bootstrap>`.
+    # `kv_written == kv_in_dram == 0x43`. Both completed: `memory_manager_default` set to
+    # MEMORY_OBJECT_DEFAULT_NULL and `lck_mtx_init(&memory_manager_default_lock, &vm_object_lck_grp,
+    # &vm_object_lck_attr)` tail-called; `mem_obj_control_zone` created by `zinit` (the immediate 8 is
+    # `sizeof(struct memory_object_control)`, so the maxmem argument is the source's `8192*i`) and the
+    # two `zone_change` calls made - Z_CALLERACCT FALSE and **Z_NOENCRYPT TRUE**, this zone never being
+    # written to disk during hibernation.
+    #
+    # Note both functions END IN A TAIL CALL (`b lck_mtx_init`, `b zone_change`) - the shape 246
+    # identified. Had either callee been a stub, the caller key would have named `vm_mem_bootstrap` and
+    # `caller - 4` would have pointed at `bl memory_manager_default_init`: a different symbol. The rule
+    # stands - resolve `caller - 4` against the image the run used and compare its target with the stub
+    # that was hit.
+    #
+    # Image moved for the **fourth** step in a row (248, 250, 251, 252): image 785456 (+16384), `.bss`
+    # 0x800bf500-0x800ee548, layout args 966656 -> 983040, headroom **1120952** bytes below
+    # topOfKernelData. Payload text 1277674. `persistent_write_attempted=0x00000000` in all 25
+    # contracts, `failure_mask=0x00000000` in all 87.
+    #
+    # Next: `device_pager_bootstrap` is in `osfmk_vm_device_vm.o` - 1536 bytes of text, 28 references, 22
+    # definitions - small enough to read in full. `vm_paging_map_init` (`+0x274`) is already real.
+    OSFMK_VM_MEMORY_OBJECT_OBJ=${STAGE90_ENTRY_OSFMK_VM_MEMORY_OBJECT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_memory_object.o}
     OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
@@ -2338,6 +2380,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_VM_VM_USER_OBJ"       "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KALLOC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_FAULT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_VM_MEMORY_OBJECT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2347,7 +2390,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

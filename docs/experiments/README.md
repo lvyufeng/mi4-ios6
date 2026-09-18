@@ -265,6 +265,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-249](experiment-249-zone-init-runs-and-the-stop-is-kalloc-init.md) | `osfmk_kern_kext_alloc.o` — Fifteen Instructions With No Calls, **`zone_init` Runs** (Answering Experiment 239's Zero Bounds), and the Stop Is `kalloc_init` |
 | stage90 | [experiment-250](experiment-250-kalloc-init-completes-and-the-allocator-is-live.md) | `osfmk_kern_kalloc.o` — **`kalloc_init` Completes**: the kalloc map, 28 zones, the lookup table and the allocator's locks; stop `vm_fault_init`; the image moves again |
 | stage90 | [experiment-251](experiment-251-vm-fault-init-completes-and-the-stop-is-memory-manager-default-init.md) | `osfmk_vm_vm_fault.o` (30392 B of text) — **`vm_fault_init` Completes**: the throttle threshold formula and the compressor boot-arg paths; stop `memory_manager_default_init`; the image moves a third time |
+| stage90 | [experiment-252](experiment-252-two-stops-in-one-object-and-the-stop-is-device-pager-bootstrap.md) | `osfmk_vm_memory_object.o` — **Two Stops in One Object**: `memory_manager_default_init` and `memory_object_control_bootstrap` both complete; stop `device_pager_bootstrap` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
