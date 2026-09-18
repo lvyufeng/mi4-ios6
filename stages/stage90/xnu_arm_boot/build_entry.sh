@@ -3047,6 +3047,67 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 276: `mac_labelzone_init`, and the stop two functions further on - inside `ipc_init`.
+    # 275's stop was `mac_labelzone_init`, and the object that defines it is `security/mac_label.c`
+    # (manifest:669), `security_mac_label.o` - **358 bytes of text, 0 of data, 4 of bss, 8 definitions
+    # and 7 references**, and every one of the seven is already real (`bzero`, `panic`, `zalloc`,
+    # `zalloc_noblock`, `zfree`, `zinit`, `zone_change`). **1 resolved, 0 added.** Four of the five
+    # functions the object defines (`mac_labelzone_alloc`, `mac_labelzone_free`, `mac_label_get`,
+    # `mac_label_set`) are referenced by nothing in this image and so are not even stubs.
+    #
+    # The function is a `zinit` and three `zone_change`s, and it ends in a tail call of its own:
+    #
+    #     0000: push {r4, lr}
+    #     0018: bl zinit(16, 0x20000, 16, "MAC Labels")   ; sizeof(struct label) = 16, a 128 KB ceiling
+    #     0030: bl zone_change(zone, Z_EXPAND = 3, TRUE)
+    #     0040: bl zone_change(zone, Z_EXHAUST = 1, FALSE)
+    #     0050: pop {r4, lr}
+    #     0054: b zone_change                            ; Z_CALLERACCT = 5, FALSE
+    #
+    # so `mac_labelzone_init` completes, and because it was entered by `mac_policy_init`'s tail call,
+    # the `pop {r4, lr}` in it carries `kernel_bootstrap+0x248` straight through: control lands back in
+    # `kernel_bootstrap` at `8000e148`, exactly where 274's and 275's stops were reported from.
+    #
+    # **Prediction: `stub_hit=ipc_host_init`, with the caller at `ipc_init+0xe4`.** From `+0x248` the
+    # line is one debug string, then `8000e154: bl ipc_init`, and `ipc_init` is real code this image
+    # has carried since 265 - but 265 never ran it, because `ipc_bootstrap` stopped before
+    # `ipc_bootstrap` returned. Its compiled body calls exactly three things:
+    #
+    #     bl kmem_suballoc(kernel_map, &min, ipc_kernel_map_size, ...)        ; real (244)
+    #     bl panic                                                           ; only on failure
+    #     bl kmem_suballoc(kernel_map, &min, ipc_kernel_copy_map_size, ...)   ; real
+    #     bl panic                                                           ; only on failure
+    #     ... the `msg_ool_size_small` clamp against `kalloc_max_prerounded` (an immediate 8192 and a
+    #         `subls r2, r1, #20` for `cpy_kdata_hdr_sz`), and the two `ipc_kernel_copy_map` flags
+    #         `no_zero_fill` / `wait_for_space` (`orr r1, r3, #5`), all stores, no calls
+    #     800ac33c: bl ipc_host_init                                          ; A STUB
+    #     800ac340: add sp, #24 / pop {r4, r5, r6, r7, fp, pc}
+    #
+    # so the stop is **`ipc_host_init`**, and because that call is a `bl` and not a tail call, the
+    # caller key is the *return address inside `ipc_init`* - `ipc_init+0xe4` - and not
+    # `kernel_bootstrap`'s. That is the opposite of the last three steps, and it is the reason the
+    # prediction is written from the disassembly of the function that will be entered rather than from
+    # the one that was left. `ipc_host_init` is `osfmk/kern/ipc_host.c` (manifest:549) and is the step
+    # after this one.
+    #
+    # **276 measured it, and the prediction held in both halves - the step, and the two functions
+    # that ran behind it.** The build measured **1 resolved, 0 added**: 869 -> 868 undefined
+    # (792 function stubs, 76 storage), text 949572 -> 949860, and the image bytes, `.bss` and the
+    # layout all unchanged - the growth fitted the alignment padding again. The run stopped at
+    # **`stub_hit=ipc_host_init`** with `xnu_entry_stub_caller=0x800ac340` = **`ipc_init+0xe4`**,
+    # whose `caller-4` is `800ac33c bl 800cddac <ipc_host_init>`: the first time in four steps that
+    # the caller key is an address *inside* the function the run was in, which is what a `bl` does
+    # and a tail call does not. `_v`, `_a` and `_e` all agree; `kv_written=0x5e` (94 = a 24-byte stub
+    # record plus the 34- and 36-byte caller records), `kv_in_dram=0x82` (130 = 94 + 36),
+    # `kv_dropped=0`, `why_byte=0x61`, zero abort entries, and `_w0 = 0x61303038` / `_w1 = 0x30343363`
+    # = `800ac340` read back out of `g_kv_buf` from the first digit (`digits = 0x31` = 24 + 25).
+    #
+    # So three functions completed in this run that had never run before: `mac_labelzone_init` (the
+    # 128 KB zone and its three `zone_change` calls), and then `ipc_init` - **two `kmem_suballoc`
+    # calls that built `ipc_kernel_map` and `ipc_kernel_copy_map`**, the `msg_ool_size_small` clamp
+    # against `kalloc_max_prerounded`, and the two `ipc_kernel_copy_map` flags. 661 of 661 words of
+    # `entry_kv` through `entry_stub_hit` still match the linked ELF (fifth build running).
+    SECURITY_MAC_LABEL_OBJ=${STAGE90_ENTRY_SECURITY_MAC_LABEL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/security_mac_label.o}
     # 275: `mac_policy_init`, and the stop is a tail call that reports its caller's caller - again.
     # 274's stop was `mac_policy_init`, and the object that defines it is `security/mac_base.c`
     # (manifest:664), `security_mac_base.o` - **10087 bytes of text, 1280 of data, 2120 of bss, 115
@@ -3541,6 +3602,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_MK_TIMER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_HOST_NOTIFY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$SECURITY_MAC_BASE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$SECURITY_MAC_LABEL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -3553,7 +3615,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
