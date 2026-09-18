@@ -263,6 +263,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-247](experiment-247-kmem-init-completes-and-the-drbg-runs.md) | `osfmk_vm_vm_map_store_rb.o` — `kmem_init` Completes, `kernel_map` Gets Its First Gigabyte Region, the HMAC-SHA1 DRBG Produces a Seed, and the Stop Is `vm_allocate_kernel` |
 | stage90 | [experiment-248](experiment-248-vm-allocate-kernel-and-pmap-init-run.md) | `osfmk_vm_vm_user.o` — a Kernel Virtual Allocation and `pmap_init` Both Run, the Stop Is `kext_alloc_init`, and the Image Moves Again (`.bss` +0x4000, `end_kern` 0x800e3000) |
 | stage90 | [experiment-249](experiment-249-zone-init-runs-and-the-stop-is-kalloc-init.md) | `osfmk_kern_kext_alloc.o` — Fifteen Instructions With No Calls, **`zone_init` Runs** (Answering Experiment 239's Zero Bounds), and the Stop Is `kalloc_init` |
+| stage90 | [experiment-250](experiment-250-kalloc-init-completes-and-the-allocator-is-live.md) | `osfmk_kern_kalloc.o` — **`kalloc_init` Completes**: the kalloc map, 28 zones, the lookup table and the allocator's locks; stop `vm_fault_init`; the image moves again |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

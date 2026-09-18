@@ -2171,6 +2171,46 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # Next: `kalloc_init` is in `osfmk_kern_kalloc.o` - 4472 bytes of text, 33 references, defining the
     # whole `kalloc`/`kfree`/`kalloc_canblock` family, so the next stop is more likely to be one of its
     # still-stubbed references than another whole function.
+    # 250: `osfmk_kern_kalloc.o` - 4472 bytes of text, 33 references, 35 global definitions, and the
+    # whole `kalloc`/`kfree`/`kalloc_canblock`/`OSMalloc` family. Six times 249's object, and the first
+    # time since 248 that the build is likely to *add* stubs as well as resolve them.
+    #
+    # Resolved 6, added 0 - measured by building the step twice, once with the object and once with an
+    # empty stand-in in its place (the stand-in build reproduces 249's 622 / 538 / 84 exactly):
+    #   resolved (functions) kalloc_canblock  kalloc_init  kfree
+    #   resolved (storage)   kalloc_large_total  kalloc_map  kfree_nop_count
+    # Only 6 of the object's 35 definitions had been stubs - the rest were never referenced by
+    # anything in the image. 622 -> 616 undefined, 538 -> 535 function and 84 -> 81 storage stubs.
+    #
+    # `kalloc_init` is 210 bytes and every call in it is real (`kmem_suballoc`, `panic`, `zinit`,
+    # `zone_change` x2, `lck_grp_init`, `lck_mtx_init`, `lck_grp_alloc_init`), and
+    # `xnu_entry_callwalk.py --root kalloc_init` found no stub on its straight-line path, so the
+    # prediction was that it *completes* and the stop moves to the next stub in `vm_mem_bootstrap`:
+    # `+0x234 vm_fault_init` (STUB), with `+0x244 memory_manager_default_init`,
+    # `+0x254 memory_object_control_bootstrap` and `+0x264 device_pager_bootstrap` also stubs.
+    #
+    # Device: **`stub_hit=vm_fault_init`, `xnu_entry_stub_caller=0x80040534`** =
+    # `vm_mem_bootstrap+0x238`, whose `caller - 4` is `80040530: bl 8008a3f4 <vm_fault_init>`.
+    # `kv_written == kv_in_dram == 0x3a`. **`kalloc_init` completed**, so on this hardware: the kalloc
+    # map was created by `kmem_suballoc(kernel_map, ...)` and the `panic` on its failure was not taken;
+    # `kalloc_max = 16384`, `kalloc_max_prerounded = 8193`, `kalloc_kernmap_size =
+    # kalloc_largest_allocated = 0x40001` were stored; the `zinit` loop created 28 zones (the ARM
+    # `k_zone_size` table at `kalloc.c:192-205` reaches 8192 below `kalloc_max`, and 16384 stops it) -
+    # 28 `zinit` and 56 `zone_change` calls on top of the zone system `zone_init` had just built; the
+    # 256-entry `k_zone_dlut` was built and `k_zindex_start` set; and `kalloc_lck_grp`/`kalloc_lock`
+    # were initialised, with `OSMalloc_init()` **inlined** at the end (the self-linked queue head, then
+    # `lck_grp_alloc_init` stored into `OSMalloc_tag_lck_grp`).
+    #
+    # Image: text 634321 -> 639953 (+5632), image 736192 -> 752648 (+16456) so **the image moved for
+    # the second step in a row**: `.bss` 0x800e2248 -> 0x800e64c8, `__entry_image_end`/`end_kern`
+    # 0x800e64c8/0x800e7000, layout args 933888 -> 950272, headroom 1153848. Payload text 1244866.
+    # `persistent_write_attempted=0x00000000` in all 25 contracts, `failure_mask=0x00000000` in all 87.
+    #
+    # Next: `vm_fault_init` is in `osfmk_vm_vm_fault.o` - 30392 bytes of text and 156 references, the
+    # largest object in this sequence and twice 248's `vm_user.o`, so its closure cannot be read in
+    # full from the disassembly the way 244-250 were; the prediction for 251 is about `vm_fault_init`'s
+    # own closure rather than the fault path whose name the object carries.
+    OSFMK_KERN_KALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kalloc.o}
     OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
@@ -2252,6 +2292,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_USER_OBJ"       "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_KALLOC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2261,7 +2302,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
