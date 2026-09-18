@@ -2093,6 +2093,50 @@ the smallest distances and leaves the count unread. The true figure is **14**, r
 rebuilding that exact image, and experiment-162's table now says so. Eighth instance of the class
 `docs/status/roadmap.md` keeps meeting — the tool was right and the reading was not.
 
+**THE WHOLE OF `task.c` WAS BEHIND ONE `#ifdef`** (2026-09-18,
+[`experiment-164`](../experiments/experiment-164-an-off-option-has-two-spellings.md)). Twelve of the
+twenty-three boot-path stubs were `osfmk/kern/task.c`, and that file failed to compile for one
+error: `task_collect_crash_info`'s `crash_label` argument is guarded by `#if CONFIG_MACF` in
+`osfmk/kern/task.h:635` and by `#ifdef CONFIG_MACF` in `osfmk/kern/task.c:1600`. Apple's
+configurations all set `CONFIG_MACF=1`, where the two spellings agree — and upstream `main` still has
+the `#ifdef` a decade later — so this is latent in Apple's own tree, and the project's minimal
+configuration is the one that turns MACF off and finds it.
+
+`mkheaders.c` writes `#define <MACRO> 0` for every option a configuration does not select, which is
+faithful and is reproduced faithfully here, but `#if X` reads an undefined `X` as 0 while `#ifdef X`
+does not. With the option off there is no value that satisfies both spellings, so no flag can fix it:
+the prototype and the definition differ by one argument either way. The fix is one `#undef` line
+appended to the generated `meta_features.h` — and it has to be **global**, because
+`osfmk/kern/task.h:241` guards `struct task`'s own `crash_label` field with a third spelling of the
+same option, so a per-file `-D` would give one translation unit a differently-shaped `struct task`
+than the rest of the kernel.
+
+The obvious generalisation was implemented first and measured, and it is a trap: undefining *every*
+off option also undefines `NFSCLIENT`, and `bsd/sys/mount_internal.h:243` guards the **definition**
+of `MNTK_TYPENAME_OVERRIDE` with `#ifdef NFSCLIENT` while six uses of it in
+`bsd/vfs/vfs_syscalls.c` are unguarded — so Apple's tree compiles with NFS off only because
+`#define NFSCLIENT 0` makes that `#ifdef` true. Two macros, two opposite dependencies on the same
+spelling. A count that came out the same either way (419 of 426) hid a file swapped for a file; the
+file list is what showed it. `GPROF` is the next candidate on the same evidence and is deliberately
+not taken: it is off in `RELEASE` too, so its cost would land in four files there and has not been
+measured.
+
+`STAGE90_BOOT`: undefined **220 → 114**, boot-path stubs from `arm_init` **23 → 11**, the
+"file that fails to compile" category **14 → 2**. 106 symbols closed, 0 opened, all from task.c —
+the task interface entire, and `task_init` itself, which was the boot path's second-nearest stub at
+distance 3. `RELEASE` is provably unchanged: the regenerated option headers `diff -r` empty, since
+the line is only written for a macro that is off and CONFIG_MACF is on there. No line of XNU's source
+was changed, no configuration option was turned on, and no compiler flag was added — the whole change
+is one `#undef` in a generated header, which is the cheapest thing this project has done since it
+started counting.
+
+The largest remaining category is now **"a file not in the manifest"**: `libkern/crypto/corecrypto_md5.c`
+(three stubs at distance 7), `san/memintrinsics.h`'s `__nosan_bzero` (7) and
+`osfmk/chud/chud_xnu.h`'s `chudxnu_thread_get_callstack64_kperf` (9). The nearest thing a boot now
+hits is `bsd_scale_setup` at distance 3, from `bsd/dev/unix_startup.c`, and its error is a different
+class: `bsd/netinet/in_pcb.h` reached without `<netinet/in.h>`. The firehose port, which experiments
+162 and 163 both ranked first, is now behind two smaller things.
+
 **XNU'S REAL `arm_init` RAN ON THE DEVICE** (2026-09-18,
 [`experiment-159`](../experiments/experiment-159-the-real-arm-init-ran.md)). The entry image no
 longer stubs `arm_init`: it links XNU's own `osfmk_arm_arm_init.o`, plus XNU's own `data.o`

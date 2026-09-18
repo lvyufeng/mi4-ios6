@@ -177,6 +177,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-161](experiment-161-the-target-abi.md) | The Target ABI: an ELF Triple with Darwin's Type Widths — 132 → 97 |
 | stage90 | [experiment-162](experiment-162-the-firehose-seam-is-a-component.md) | The Firehose Seam Is a Component, Not a Value — `FIREHOSE_BUFFER_KERNEL_CHUNK_COUNT` Is 16, 97 → 72 |
 | stage90 | [experiment-163](experiment-163-the-nearest-blocker-was-not-xnu-s.md) | The Nearest Blocker Was Not XNU's: the EABI Runtime, 72 → 63, and a Figure of Mine That Was Wrong |
+| stage90 | [experiment-164](experiment-164-an-off-option-has-two-spellings.md) | An Off Option Has Two Spellings, and the Tree Depends on Both — `task.c` Compiles, 220 → 114 |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
