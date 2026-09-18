@@ -2,10 +2,22 @@
 #
 # The headers Apple's config(8) generates from `device` / `pseudo-device` declarations.
 #
-#   ./tools/gen_device_headers.sh
+#   XNU_KERNEL_CONFIG=RELEASE ./tools/gen_device_headers.sh
+#   XNU_KERNEL_CONFIG=STAGE90_BOOT ./tools/gen_device_headers.sh
 #
 # This is the third generator, alongside the `OPTIONS/` macros (gen_option_headers.py) and
-# `libkern/version.h` (gen_libkern_version.sh), and there is exactly one header in it today.
+# `libkern/version.h` (gen_libkern_version.sh), and it writes **four** headers — `loop.h`, `pty.h`,
+# `ptmx.h`, `bpfilter.h` — one per device-table entry a configuration needs and 4570 does not
+# publish.
+#
+# **It is per configuration**, into `out/xnu_device/$CONFIG`, for the same reason the `OPTIONS/`
+# headers are: a device table is a property of the configuration, and `bpfilter.h` is 0 here and
+# would be a count in one that sets `bpfilter`. And `build_xnu_arm_kernel.sh` now refuses to start
+# without this configuration's directory, because the absence of one is **not an error** — a header
+# missing from the include path falls through to the *host's*, which is what happened while only
+# `RELEASE` had one: `bsd/dev/arm/conf.c:111`'s `#include <pty.h>` resolved to `/usr/include/pty.h`
+# and the file died in glibc's `features-time64.h`, naming neither XNU nor the absent header
+# (experiment-166).
 #
 # `bsd/kern/bsd_init.c:875` is `#include <loop.h>` — inside the function, with
 # `#if NLOOP > 0 / loopattach();` on the next lines. `bsd/netinet6/ip6_input.c:154` says "we need it

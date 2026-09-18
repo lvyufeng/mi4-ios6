@@ -263,12 +263,27 @@ GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
 # values - which is what happened, and it surfaced as a duplicate-symbol error in the link.
 OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
 LIBSA_EXPORT=${XNU_LIBSA_EXPORT:-$REPO_ROOT/out/xnu_libsa_export}
-# The third generator: `device`/`pseudo-device` headers from config(8). One file today (loop.h).
+# The third generator: `device`/`pseudo-device` headers from config(8) - `loop.h`, `pty.h`,
+# `ptmx.h`, `bpfilter.h`.
 DEVICE_HEADERS=${XNU_DEVICE_HEADERS_OUT:-$REPO_ROOT/out/xnu_device}/$CONFIG
 [[ -d $OPTION_HEADERS ]] || {
     echo "no option headers for $CONFIG at $OPTION_HEADERS - run:" >&2
     echo "  XNU_KERNEL_CONFIG=$CONFIG ./tools/gen_option_headers.py" >&2
     echo "  (the other configuration's directory must not be used: they disagree on 20 macros)" >&2
+    exit 2
+}
+# Required for the same reason the option headers are, and it is worth spelling out why this check
+# is not a formality: **a header that is missing from the include path is not an error here, it is
+# the host's header**. `bsd/dev/arm/conf.c:111`'s `#include <pty.h>` with no `pty.h` anywhere on the
+# path resolved to `/usr/include/pty.h` - the target is an ELF triple whose driver sysroot is `/`,
+# so glibc's headers are reachable - and the file died in
+# `features-time64.h:20: 'bits/wordsize.h' file not found`, naming neither XNU nor the header that
+# was really absent. That is how a missing generated directory stayed invisible for as long as it
+# did (experiment-166). The check is per configuration because a device table is: `bpfilter.h` is
+# 0 in one configuration and would be a count in another.
+[[ -n $(compgen -G "$DEVICE_HEADERS/*.h") ]] || {
+    echo "no device headers for $CONFIG at $DEVICE_HEADERS - run:" >&2
+    echo "  XNU_KERNEL_CONFIG=$CONFIG ./tools/gen_device_headers.sh" >&2
     exit 2
 }
 
