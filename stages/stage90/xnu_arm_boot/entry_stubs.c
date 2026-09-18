@@ -912,6 +912,28 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
          * two addresses from the linked image's own `ResetHandlerData` and `ExceptionLowVectorsBase`
          * rather than from anything written down here - the same one-value-two-definitions defect the
          * project already has a memory about, caught this time by the instrument it disabled.
+         *
+         * --------------------------------------------------------- the pad's job, given to entry.ld
+         *
+         * **Experiment 291 ended the treadmill, and this pad is no longer where XNU's writes go.**
+         * The derived check was right and the pad was the wrong shape of fix: the difference between
+         * the two symbols is a difference between two *stub positions*, so it moves by 0x18 for every
+         * stub name entering or leaving the alphabetically-ordered stub object between "E" and "R",
+         * and the five measured values walk up and down - 0x2404 (281), 0x24a8 (288), 0x24c0 (289),
+         * 0x2448 (290), and 0x2358 (291), which is **0x7c below this pad's start** and made the build
+         * refuse the step. Widening cannot fix that; re-aiming would have to happen again next step.
+         *
+         * `entry.ld` now defines both names - `ExceptionLowVectorsBase` as the image base and
+         * `ResetHandlerData` four bytes below a sixteen-byte reserved slot in `.bss` - so the two
+         * writes land in zeroed, never-executed memory that no stub's position can move. See the note
+         * there; it also makes `cpu.c`'s page copy from `&ExceptionLowVectorsBase` a page copied onto
+         * itself, where before it took 4096 bytes of stub bodies over page zero.
+         *
+         * **This block stays.** It is a skipped 512-byte region between the cache sweep and the
+         * geometry: it is never executed whatever it decodes to, `build_entry.sh` still checks that
+         * the branch really skips exactly those bytes, and it costs image bytes and nothing else. It
+         * is a second line of defence now rather than the first, which is how a region that once
+         * absorbed XNU's writes should end up.
          */
         __asm__ volatile ("\n"
                           ".global entry_skip_pad\n"

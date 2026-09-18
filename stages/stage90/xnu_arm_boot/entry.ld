@@ -60,8 +60,59 @@ SECTIONS
         *(.bss .bss.*)
         *(COMMON)
         . = ALIGN(8);
+        /*
+         * The slot XNU's `cpu_init` writes into - see the note below the sections.
+         */
+        __entry_reset_handler_data = .;
+        . += 16;
+        . = ALIGN(8);
     }
     __bss_end = .;
+
+    /*
+     * **The two symbols XNU does arithmetic on, pinned here rather than stubbed.**
+     *
+     * `osfmk/arm/cpu.c:562-580` copies a page from `&ExceptionLowVectorsBase` to a fresh mapping of
+     * physical `gPhysBase`, and then writes four bytes each to
+     *
+     *     gPhysBase + ((unsigned int)&ResetHandlerData.boot_args       - (unsigned int)&ExceptionLowVectorsBase)
+     *     gPhysBase + ((unsigned int)&ResetHandlerData.cpu_data_entries - (unsigned int)&ExceptionLowVectorsBase)
+     *
+     * In XNU's own image both symbols live in the low-vector area at the base of the kernel, so the
+     * copy is page zero onto itself and the two writes land in the vector area's `ResetHandlerData`
+     * struct, which is where the trampoline reads them. `locore.s` is not linked here, so *nothing*
+     * defined them: the stub generator gave both a 24-byte function body inside the stub object, and
+     * that made every one of those three addresses an accident of where the stub object landed:
+     *
+     *   - the page copy took 4096 bytes of stub bodies over page zero, i.e. over start.s's own code;
+     *   - the two writes landed wherever `ResetHandlerData - ExceptionLowVectorsBase` happened to be,
+     *     which is a difference between two positions *inside the generated stub object*. Experiment
+     *     281 measured it as 0x2404 and the entry code was arranged so that a 128-byte never-executed
+     *     pad at 0x80002404 absorbed them; 288 found it at 0x24a8 (0x58 past the pad's end, back
+     *     inside `entry_epilogue`, five silent runs) and widened the pad to 512 bytes; 290 saw 0x2448
+     *     and 291 saw 0x2358 - below the pad's start - and **the build refused it**, which is the
+     *     check 288 built doing exactly its job.
+     *
+     * The difference is a difference of two *stub positions*, so it moves by 0x18 for every stub name
+     * that enters or leaves the alphabetically-ordered stub object between "E" and "R". Chasing it
+     * with a pad is a treadmill. Both names are therefore defined here instead, at values chosen so
+     * that cpu.c's arithmetic does the harmless thing by construction:
+     *
+     *   - `ExceptionLowVectorsBase` is the image base, so the page copy is page zero onto itself -
+     *     a no-op through two mappings of the same physical page, and strictly better than copying
+     *     stub bodies over start.s's code;
+     *   - `ResetHandlerData` is four bytes below `__entry_reset_handler_data`, so `boot_args` (at +8)
+     *     and `cpu_data_entries` (at +4) - i.e. the two write addresses - are exactly the sixteen
+     *     bytes of that reserved `.bss` slot. Zeroed by the payload, never executed, nothing reads it.
+     *
+     * `build_entry.sh`'s `verify_pad` checks both write addresses against that slot in every build,
+     * so the property is a check and not a comment. And because these are script symbols and the
+     * script is what pass 1 links with, the generator never sees them as undefined and never stubs
+     * them: there is one definition of each, where before there were two (a stub body and a
+     * written-down number).
+     */
+    ExceptionLowVectorsBase = ENTRY_BASE;
+    ResetHandlerData = __entry_reset_handler_data - 4;
 
     /*
      * The numbers entry_macho.s puts into the Mach-O header it defines. They are computed here

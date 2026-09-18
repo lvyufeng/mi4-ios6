@@ -3098,6 +3098,188 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 291: `ipc_tt.o`, and a prediction that does not depend on which branch is taken
+    #
+    # **The 290 run reported** `stub_hit=ipc_task_init` at `task_create_internal + 0x224`. The object
+    # that defines it is `osfmk/kern/ipc_tt.c`, `osfmk_kern_ipc_tt.o` - the largest step since 288:
+    # **12676 bytes of `.text`, 60 definitions, 53 references**, and the object whose whole port-name
+    # conversion surface this walk has been calling through since 278.
+    #
+    #     resolved  37   the fifteen `convert_*` names, `ipc_task_init`/`enable`/`disable`/`reset`/
+    #                    `terminate`, the four `ipc_thread_*`, `mach_ports_lookup`/`_register`,
+    #                    `port_name_to_thread`, `space_deallocate`, `space_inspect_deallocate`,
+    #                    the five `task_*_special_port`/`*_exception_ports` and the five `thread_*`
+    #                    - every one of them already a *stub* in this image, so this step retires 37
+    #                    names, the second-largest retirement of the walk after 277's 16-name host
+    #                    surface (and the largest by count)
+    #     added      2   mac_exc_free_action_label, mac_exc_inherit_action_label
+    #                    - both functions, both from the same unlinked `security/mac_exc.c`
+    #
+    # Eight of the 53 references (`io_free`, `ipc_object_copyin`, `ipc_object_translate` and five
+    # `mac_exc_*`) are already stubs and 43 are already real, so `added` is 2 and not 45 - the
+    # counting rule 288 had to correct. The fifty-fifth name in the object's `.text` is `ipc_task_init`
+    # itself, at **object offset 0**, so unlike 284 this time the object offsets *are* function offsets
+    # and no adjustment is needed.
+    #
+    # **The prediction, read off the object's own call list in address order.** Every `bl` in
+    # `ipc_task_init`'s 0x2e8 bytes, with its status in the current image:
+    #
+    #     +0x020  ipc_space_create          real    (ipc_space.o, linked long before this walk)
+    #     +0x034  panic                     real
+    #     +0x04c  ipc_port_alloc_special    real    (ipc_port.o, linked in 278 - it was 277's stop)
+    #     +0x064  panic                     real
+    #     +0x06c  ipc_port_alloc_special    real
+    #     +0x084  panic                     real
+    #     +0x09c  lck_mtx_init              real
+    #     +0x0c4  ipc_port_make_send        real
+    #     +0x0d8  mac_exc_create_label      ***STUB***   <- the stop, return address +0x0dc
+    #     +0x0e4..+0x1a4  the other twelve unrolled MACF iterations (create_label +
+    #                    associate_action_label, both stubs)
+    #     +0x1b8  lck_mtx_lock              real
+    #     +0x1c0..+0x264  the `parent != TASK_NULL` arm: eight ipc_port_copy_send,
+    #                    mac_exc_inherit_action_label, lck_mtx_unlock
+    #     +0x2a8  host_priv_self            real
+    #     +0x2b8  host_get_special_port     real    (the `parent == TASK_NULL` arm)
+    #
+    # **The stop is at +0x0d8 whichever branch is taken**, which is worth stating because it is the
+    # first prediction of the walk that does not depend on a branch: the `CONFIG_MACF` loop
+    # (`for (i = FIRST_EXCEPTION; i < EXC_TYPES_COUNT; i++)`, thirteen iterations, fully unrolled)
+    # sits *above* `if (parent == TASK_NULL)` in the source and above both arms in the text. The one
+    # thing the parent value would decide is which arm runs *after* the stop, which is the next step's
+    # business.
+    #
+    # **What has to return before it, and why each one does.** Eight real calls stand between the
+    # entry and the stop, and three of them have a stub somewhere inside them - the same trap 285-290
+    # kept meeting, so each guard was read rather than assumed:
+    #
+    #     ipc_space_create   calls zalloc, ipc_table_alloc, memset, lck_spin_init, zfree - all real.
+    #                        The `zfree` is in the `if (table == IE_NULL)` arm, i.e. only when
+    #                        `it_entries_alloc` fails, which needs kalloc to be out of memory.
+    #     ipc_table_alloc    is `return kalloc(size)` - `VM_ALLOC_SITE_STATIC(0, 0)`, **flags 0**,
+    #                        so `kalloc_canblock`'s `vm_tag_alloc(site)` reaches `vm_tag_bt` only if
+    #                        `VM_TAG_BT` is set, and it is set only by the `*_tag_bt` macro variants
+    #                        (kalloc.h:100-139). So `OSKextGetAllocationSiteForCaller` - a stub, and
+    #                        the deepest thing under this path - is not reached.
+    #     kmem_alloc_flags   has exactly one stub call, `trace_backtrace` at +0x50, behind
+    #                        `ldr r0, [0x8012a1ac] / cmp r0, #0 / beq +0x54`. That word is `log_leaks`,
+    #                        in `.bss` (so zeroed by the payload) and set only by the sysctl of that
+    #                        name. Closed.
+    #     lck_spin_unlock    is a four-byte tail call into `hw_lock_unlock` -> `_enable_preemption`,
+    #                        whose one stub call `ast_taken_kernel` sits behind
+    #                        `thread->machine.CpuDatap->cpu_pending_ast & AST_URGENT`
+    #                        (locks_arm.c:319). Nothing has posted an AST this early. Closed.
+    #     zfree              has four stub calls - `trace_backtrace`, `btlog_add_entry`,
+    #                        `OSBacktrace`, `btlog_remove_entries_for_element` - all in the zone
+    #                        logging paths, which 287 already measured as needing a `zlog` boot-arg
+    #                        this payload does not carry, and `zfree` is not on this path anyway.
+    #
+    # Predicted report: **`stub_hit=mac_exc_create_label`**, `xnu_entry_stub_caller` = the return
+    # address of the `bl` at function offset +0x0d8, i.e. **`ipc_task_init + 0x0dc`**. **Falsifiers,
+    # named in advance:** `ast_taken_kernel` (an urgent AST is pending at boot), `log_leaks` being
+    # non-zero, `OSKextGetAllocationSiteForCaller` (a `VM_TAG_BT` allocation site), or one of
+    # `zfree`'s four - each would mean one of the guards above is open, and each is a measurement
+    # about a boot-arg or a global rather than about this step.
+    #
+    # **Predicted build deltas:** 864 -> **829** undefined (37 out, 2 in), 770 -> **735** function
+    # stubs (37 out, 2 in), 94 -> **94** storage (nothing in). Text is the uncertain one for 290's
+    # reason - the stub object's name strings live inside `.text` and thirty-seven of them leave the
+    # image while two arrive - so: text 1082456 + 12676 (object) - 888 (37 retired bodies) + 48 (2
+    # new bodies) - the retired names' bytes, i.e. roughly **+11.0 KB**. Read-only content is
+    # therefore about 12.6 KB against **15268 bytes of slack** (the read-only region ends at
+    # 0x8010845c and `.data` sits at 0x8010c000), so `.data` should **not** move, the image should
+    # grow by only the object's 48 bytes of `__DATA,__data`, and `__bss_start`, bss end and the
+    # headroom should all be unchanged. Worth flagging now: **that leaves about 2.6 KB of slack, so
+    # the step after this one probably crosses the boundary.**
+    #
+    # ================================================================== and then the build refused it
+    #
+    # **The step's prediction was never tested, because the instrument failed first - correctly.**
+    # `verify_pad` stopped the build:
+    #
+    #     FAIL: entry_skip_pad is at 0x800023d4, which puts the branch itself on or above
+    #           0x8000235c, one of the addresses XNU writes
+    #
+    # Thirty-seven retired stubs moved `&ResetHandlerData - &ExceptionLowVectorsBase` from 290's
+    # 0x2448 down to **0x2358** - 0x7c bytes *below* the 512-byte pad's start - so XNU's two writes
+    # were about to land in `entry_epilogue`'s own code again, 282's and 288's failure a third time.
+    # The check 288 built caught it before the device was touched: the third defect this project has
+    # had stopped by a build rather than by a run, and the first one stopped *before* it cost a
+    # single silent run.
+    #
+    # **The treadmill is the point.** The difference is a difference between the addresses of two
+    # *generated stub bodies*, 0x18 bytes apart each, so it moves by 0x18 for every stub name that
+    # enters or leaves the alphabetically-ordered stub object between "E" and "R". The five values
+    # that have been measured are 0x2404 (281), 0x24a8 (288), 0x24c0 (289), 0x2448 (290) and
+    # 0x2358 (291): a pad can be re-aimed at each of them, and the next step moves it again. So the
+    # pad was not widened and not moved - **the value was given one definition**, in `entry.ld`:
+    #
+    #     ExceptionLowVectorsBase = ENTRY_BASE;                        /* the image base */
+    #     ResetHandlerData = __entry_reset_handler_data - 4;           /* a reserved .bss slot */
+    #
+    # which is the same fix - one value, one definition - that 288 applied to the *check* and that
+    # this step applies to the *value*. Two consequences, both of them measured in the linked image:
+    # the two writes land in the sixteen reserved bytes at 0x8015a448 (zeroed by the payload, never
+    # executed, read by nothing), and `cpu.c:565`'s `bcopy(&ExceptionLowVectorsBase, LowExceptionVectorsAddr,
+    # 0x90)` plus the page-long copy that follows it become a page copied onto itself through two
+    # mappings of the same physical page - where before, with the base being a stub address, they
+    # took 4096 bytes of stub bodies over page zero, i.e. over start.s's own code. That second
+    # consequence had been latent since the beginning and is worth stating: **nothing was copying the
+    # vectors anywhere; it was copying the stub object onto page zero.**
+    #
+    # Both names are script symbols and pass 1 links with the same script, so the generator never
+    # sees them as undefined and never stubs them: two fewer stubs, and the corrected prediction is
+    # 864 -> **827** undefined and 770 -> **733** function stubs, 94 storage. `verify_pad` now checks
+    # the two write addresses against the reserved slot - and still checks that `ExceptionLowVectorsBase`
+    # is the image base, and that the pad is a real skipped range, since a skipped 512-byte region
+    # between the sweep and the geometry costs image bytes and nothing else.
+    #
+    # **The build:** 827 undefined, 733 function stubs, 94 storage - the corrected prediction to the
+    # unit. Text 1082328 -> **1093400**, image 1198056 -> **1198104**: **+48 bytes, exactly the
+    # object's `__DATA,__data`**, because `ipc_tt.o`'s 12.5 KB of text fitted inside the 15268 bytes
+    # of slack, so `.data` did not move and `__bss_start` is unchanged at **0x80123c08**. bss end
+    # 0x8015a408 -> 0x8015a458 (+16 for the reserved slot, +64 of alignment inside the stub object's
+    # storage), headroom 1727480 -> 1727400. The two writes:
+    #
+    #     entry_skip_pad at 0x800023d4 branches over 512 bytes to 0x800025d4
+    #     XNU writes 0x8015a448 and 0x8015a44c (ResetHandlerData - ExceptionLowVectorsBase = 0x15a444),
+    #     both inside the reserved slot at 0x8015a448
+    #
+    # **And `ipc_task_init` is where the run now goes**, with the prediction below unchanged by any of
+    # the above: the stop is at function offset +0x0d8 whichever branch is taken.
+    #
+    # **The run - and it is the first one that measured the pinned instrument:**
+    #
+    #     stub_hit=mac_exc_create_label        xnu_entry_stub_caller=0x800c8d1c
+    #
+    # `0x800c8d1c` is `ipc_task_init + 0x0dc`: the function links at 0x800c8c40 and the image's own
+    # instruction stream has `bl mac_exc_create_label` at 0x800c8d18. So the longest chain of calls
+    # this walk has had to clear - eight real calls before the stop, including two
+    # `ipc_port_alloc_special`s, `ipc_space_create` with its `kalloc_canblock` underneath and
+    # `ipc_port_make_send` - all returned, and none of the three guards named as falsifiers was open:
+    # no `ast_taken_kernel`, no `trace_backtrace`, no `OSKextGetAllocationSiteForCaller`. The `parent`
+    # value never mattered, which is what made this prediction branch-independent.
+    #
+    # **The instrument change is measured too, and that is the more important half of this run.**
+    # The report arrived normally with XNU's two writes aimed at the reserved `.bss` slot instead of
+    # at a skipped pad in the entry's text: the report path is intact, `kernel_entry ok`,
+    # `loader_xnu_entry_stub_status=0x90000001`, `high_va_data_verified=0x00000001`. So the treadmill
+    # is over - the two addresses are now a property of the link script rather than of where the stub
+    # object's alphabetically-ordered bodies happen to sit, and they cannot drift again.
+    #
+    # Preflight clean, log 301121 bytes, no `exception:` line.
+    #
+    # **Safety:** non-persistent `fastboot boot` only, nothing flashed,
+    # `persistent_write_attempted=0x00000000` x25, `failure_mask=0x00000000` x87,
+    # `xnu_entry_failures=0x00000000`, and the device returned to Android on its own
+    # (`getprop ro.build.version.release` = 10).
+    #
+    # **Next:** experiment 292 - `security/mac_exc.c` for `mac_exc_create_label` and its
+    # `mac_exc_associate_action_label` partner, the two names this step itself added and the thirteen
+    # unrolled loop iterations that call them. After that the frontier is `ipc_task_init`'s remaining
+    # real work - the two arms of `if (parent == TASK_NULL)`, whose `host_get_special_port` arm is
+    # real and whose `parent != TASK_NULL` arm is eight `ipc_port_copy_send`s - and then the nine
+    # further stub calls `task_create_internal` makes at +0x300 and up.
+    OSFMK_KERN_IPC_TT_OBJ=${STAGE90_ENTRY_OSFMK_KERN_IPC_TT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_ipc_tt.o}
     # 290: `machine_task.o`, and an object whose whole function is empty
     #
     # **The 289 run reported** `stub_hit=machine_task_init` at `task_create_internal + 0x200`. The
@@ -6507,6 +6689,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_TASK_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_TASK_POLICY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_ARM_MACHINE_TASK_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_IPC_TT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_EVENT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
@@ -6520,7 +6703,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
@@ -6735,34 +6918,37 @@ verify_pad() {
     [[ $addr -eq $end ]] ||
         layout_fail "the branch at entry_skip_pad targets $(printf '0x%08x' $addr), not entry_skip_pad_end ($(printf '0x%08x' $end))"
 
-    # **The two addresses XNU writes are derived here, not written down.** `cpu.c:570-580` writes to
-    # `gPhysBase + (&ResetHandlerData.cpu_data_entries - &ExceptionLowVectorsBase)` and the same with
-    # `boot_args`, so both are functions of the *linked* image - and the difference between those two
-    # symbols spans the generated stub object, which grows with every step of this walk. Experiment
-    # 281 measured the difference as 0x2404/0x2408 and this check compared against those two literals
-    # for six experiments; by 288 the difference had grown to 0x24A8 and the writes were landing at
-    # 0x800024AC/0x800024B0, outside the pad, so every report was silent and this check said the
-    # layout was fine. That is this project's one-value-two-definitions defect, so the value now has
-    # exactly one definition: the linked `ResetHandlerData` and `ExceptionLowVectorsBase`, whose
-    # struct offsets (_assist_reset_handler, _cpu_data_entries, _boot_args) are 0, 4 and 8.
-    local low rhd
+    # **The two addresses XNU writes are derived here rather than written down, and since experiment
+    # 291 they are pinned to a reserved slot instead of being absorbed by the pad below.** `cpu.c:570-580`
+    # writes to `gPhysBase + (&ResetHandlerData.cpu_data_entries - &ExceptionLowVectorsBase)` and the
+    # same with `boot_args`, so both addresses are functions of the *linked* image - and while both
+    # names were stub bodies, that difference was a difference of two positions inside the generated
+    # stub object. Experiment 281 measured it as 0x2404, this check compared against those literals
+    # for six experiments, and 288 found it at 0x24A8 - outside the pad, with every report silent and
+    # this check saying the layout was fine. That is this project's one-value-two-definitions defect,
+    # and the fix with one definition per value is `entry.ld`, which now defines both names: the
+    # image base, and four bytes below `__entry_reset_handler_data`. So the two addresses must come
+    # out as the first two words of that sixteen-byte `.bss` slot - zeroed by the payload, never
+    # executed, read by nothing. 281 (0x2404), 288 (0x24a8), 289 (0x24c0), 290 (0x2448) and 291
+    # (0x2358, below the pad's start, which is what failed the build and ended the treadmill) are the
+    # five values that made this a pin instead of a pad.
+    local low rhd slot
     low=$(sym_addr ExceptionLowVectorsBase) || layout_fail "ExceptionLowVectorsBase is not in the linked image"
     rhd=$(sym_addr ResetHandlerData)        || layout_fail "ResetHandlerData is not in the linked image"
-    [[ $rhd -gt $low ]] ||
-        layout_fail "ResetHandlerData ($(printf '0x%08x' $rhd)) is not above ExceptionLowVectorsBase ($(printf '0x%08x' $low)), so the difference cpu.c writes is negative"
+    slot=$(sym_addr __entry_reset_handler_data) || layout_fail "__entry_reset_handler_data is not in the linked image - entry.ld reserves it"
+    [[ $low -eq $ENTRY_BASE ]] ||
+        layout_fail "ExceptionLowVectorsBase is $(printf '0x%08x' $low), not the image base ($(printf '0x%08x' $ENTRY_BASE)) - cpu.c copies a page from it, so anything else copies whatever is there over page zero"
 
     local targets=() t
     targets+=("$((ENTRY_BASE + rhd + 4 - low))")
     targets+=("$((ENTRY_BASE + rhd + 8 - low))")
 
     for t in "${targets[@]}"; do
-        [[ $((start + 4)) -le $t ]] ||
-            layout_fail "entry_skip_pad is at $(printf '0x%08x' $start), which puts the branch itself on or above $(printf '0x%08x' $t), one of the addresses XNU writes"
-        [[ $t -ge $((start + 4)) && $t -lt $end ]] ||
-            layout_fail "$(printf '0x%08x' $t) is outside the skipped range [$(printf '0x%08x' $((start + 4))), $(printf '0x%08x' $end)) - the report would execute XNU's data as an instruction"
+        [[ $t -ge $slot && $t -lt $((slot + 16)) ]] ||
+            layout_fail "$(printf '0x%08x' $t) is outside the 16-byte reserved slot at $(printf '0x%08x' $slot) that entry.ld pins XNU's two writes to - ResetHandlerData ($(printf '0x%08x' $rhd)) and ExceptionLowVectorsBase ($(printf '0x%08x' $low)) no longer agree with it"
     done
     say "  entry_skip_pad at $(printf '0x%08x' $start) branches over $((end - start)) bytes to $(printf '0x%08x' $end)"
-    say "  XNU writes $(printf '0x%08x' ${targets[0]}) and $(printf '0x%08x' ${targets[1]}) (ResetHandlerData - ExceptionLowVectorsBase = $(printf '0x%x' $((rhd - low)))), and both land inside what it skips"
+    say "  XNU writes $(printf '0x%08x' ${targets[0]}) and $(printf '0x%08x' ${targets[1]}) (ResetHandlerData - ExceptionLowVectorsBase = $(printf '0x%x' $((rhd - low)))), both inside the reserved slot at $(printf '0x%08x' $slot)"
 }
 verify_pad
 
