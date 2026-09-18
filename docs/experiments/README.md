@@ -279,6 +279,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-263](experiment-263-ltable-bootstrap-completes-and-adds-nothing.md) | **`ltable_bootstrap` completes and the link adds nothing** — `osfmk/kern/ltable.o`, 19 references all already satisfied, 1 resolved; stop `waitq_bootstrap` at `kernel_bootstrap+0x224` |
 | stage90 | [experiment-264](experiment-264-waitq-bootstrap-completes-and-the-frontier-closes-on-names-262-created.md) | **`waitq_bootstrap` completes, and the frontier closes on names 262 created** — `osfmk/kern/waitq.o`, 49 references of which 48 were already satisfied; the seven `waitq_*` boundaries the scheduler link added resolved; 12 resolved, 1 added; stop `ipc_bootstrap` at `kernel_bootstrap+0x234` |
 | stage90 | [experiment-265](experiment-265-the-stop-moves-inside-the-object-ipc-space-create-special.md) | **The stop moves inside the object** — `osfmk/ipc/ipc_init.o` linked, 8 resolved and **16 added** (the whole Mach IPC init surface); the stop is `ipc_space_create_special` at **`ipc_bootstrap+0x168`**, not the next line of `kernel_bootstrap` |
+| stage90 | [experiment-266](experiment-266-ipc-space-create-special-completes-and-the-stop-is-mig-init.md) | **`ipc_space_create_special` completes and the stop is `mig_init`** — `osfmk/ipc/ipc_space.o`, 4 resolved and 4 added (all off the path), a true no-op in the derived layout; ninth prediction in a row, at `ipc_bootstrap+0x178` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
