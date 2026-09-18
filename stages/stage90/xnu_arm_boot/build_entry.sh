@@ -2507,6 +2507,43 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # the first inside `kernel_bootstrap`'s own body since 253's `cs_init`.
     LIBKERN_OS_LOG_OBJ=${STAGE90_ENTRY_LIBKERN_OS_LOG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_os_log.o}
     FIREHOSE_CONFIG_OBJ=${STAGE90_ENTRY_FIREHOSE_CONFIG_OBJ:-$REPO_ROOT/out/xnu_firehose_obj/firehose_kernel_config.o}
+    # 259: the stop 258 predicted, linked. `telemetry_init` is `osfmk/kern/telemetry.c:120`, the
+    # object is `out/xnu_kernel_obj/osfmk_kern_telemetry.o` (5482 bytes of text, 28 of data, 744 of
+    # bss, 30 definitions, 57 references), and it is in the manifest at `out/xnu_arm_manifest.txt:595`
+    # - so this is 258's method again, one object.
+    #
+    # Measured before the run, because the object is larger than the last few: 40 of its 57 references
+    # are already satisfied, and the **17 new ones** are `get_task_dispatchqueue_serialno_offset`,
+    # `host_get_special_port`, `kperf_ucallstack_sample`, `proc_did_throttle`,
+    # `proc_get_darwinbgstate`, `proc_get_effective_task_policy`, `proc_pid`, `proc_uniqueid`,
+    # `proc_was_throttled`, `stack_snapshot_from_kernel`, `task_did_exec`, `task_grab_latency_qos`,
+    # `telemetry_notification` and the four `vm_shared_region_*` - almost all BSD-layer, and none of
+    # them on this call's path (below). Four of its definitions exist here as stubs today
+    # (`telemetry_init`, `telemetry_task_ctl`, `bootprofile_init`, `bootprofile_wake_from_sleep`) and
+    # linking the object replaces them.
+    #
+    # **The prediction.** `telemetry_init` calls only `lck_grp_init`, `lck_mtx_init`,
+    # `PE_parse_boot_argn`, `kmem_alloc`, `bzero` and the `kprintf` helper - **all six already real in
+    # this image** - so it completes, and what it does on the way is a real 16384-byte
+    # `kmem_alloc(kernel_map, ..., VM_KERN_MEMORY_DIAG)` (the boot arg is absent, so the size is
+    # `TELEMETRY_DEFAULT_BUFFER_SIZE`, 16 KB: the second real kernel allocation this frontier has
+    # made, after 255's 73728-byte guarded one). It returns to `kernel_bootstrap+0x19c`, and the
+    # straight line from there is `PE_i_can_has_debugger` (real), `PE_parse_boot_argn` (real, both
+    # taken only if the debugger is present), `kernel_debug_string_early` (real) and then
+    # `0x8000dc24: bl console_init` - a stub. So:
+    # **`stub_hit=console_init`, `xnu_entry_stub_caller=0x8000dc28`** (`caller - 4` = `0x8000dc24` =
+    # `kernel_bootstrap+0x1e4`). Device: **`stub_hit=console_init`,
+    # `xnu_entry_stub_caller=0x8000dc28`** = `kernel_bootstrap+0x1e8` - the prediction, again address
+    # for address. So `telemetry_init` completed, with its 16 KB `kmem_alloc` inside it.
+    #
+    # Measured: resolved 4 (`telemetry_init`, `telemetry_task_ctl`, `bootprofile_init`,
+    # `bootprofile_wake_from_sleep`), added 17; 592 -> 605 undefined, 514 -> 527 function stubs,
+    # storage stubs unchanged at 78; text 702564 -> 708644; image 802248 -> **818656** (+16408, a
+    # 16 KB alignment block: the image moves again for the first time since 255); bss end 0x800f6b88;
+    # headroom 1086584; payload text 1294466 -> 1310874. `kv_written == kv_in_dram == 0x39`, two
+    # bytes shorter than 258's 0x3b because `telemetry_init` is two characters shorter than
+    # `console_init` and the stub name is recorded verbatim.
+    OSFMK_KERN_TELEMETRY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_TELEMETRY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_telemetry.o}
     OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
@@ -2597,6 +2634,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$FIREHOSE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_OS_LOG_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$FIREHOSE_CONFIG_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_TELEMETRY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2606,7 +2644,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
