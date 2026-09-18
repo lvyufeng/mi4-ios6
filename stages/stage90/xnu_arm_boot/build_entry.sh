@@ -1671,6 +1671,42 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # normally loads (`0x80008000`). That is `ENTRY_BASE`, the payload's mapping of the window, and
     # `physBase`/`virtBase` in the boot_args - with the entry epilogue's identity trick as the thing
     # to re-derive rather than assume.
+    #
+    # **240 read the frame and the two arguments, and the diagnosis is closed.** Three of the four
+    # things it measured were predicted to the byte before the run:
+    #
+    #   frame_r4 = 0, frame_sl = 0     the two halves of db_panic_options
+    #   frame_r6 = 0, frame_r7 = 0     ctx and reason
+    #   frame_r8 = 0x0029be88          panic_args, the same value exp-238 and exp-239 read live
+    #   frame_lr = 0x0022d40c          the instruction after the udf
+    #   frame_r9 = trap_r9_fmt         the format string - equality with the live read is the
+    #                                  prediction that holds across builds, not a constant address
+    #   panic_ap = 0x0029be94          the va_list's __ap, exp-239's word, one dereference in
+    #   panic_element = 0x40401f20     in the 0x4040xxxx chunk
+    #   zone_name_w0 = 0x7370616d      "maps"
+    #
+    # The element is read as a *value* out of the va_list and never dereferenced, so `entry_image_ptr`
+    # is deliberately NOT widened for it: 0x40400000 is outside the image, may well be unmapped, and a
+    # data abort inside the abort handler says nothing at all. `ap` and the zone-name pointer are both
+    # inside the image, so the guard that was already here covers every read that happens.
+    #
+    # **`frame_r5 = 1`, and it is not the caller.** exp-239 said r5 = db_panic_caller, which is true of
+    # `panic_trap_to_debugger` (`ldr r5, [sp, #64]`) and false of the function the trap is actually in:
+    # `DebuggerTrapWithState` reloads r5 from its own stack argument (`ldr r5, [sp, #40]` at 22d3ec),
+    # which is `db_proceed_on_sync_failure` - a boolean the call site sets with `mov r0, #1`. The
+    # caller goes into `lr` there, and `lr` is destroyed by the `bl DebuggerSaveState` one instruction
+    # before the `udf`, so the caller is not in any register at the trap. It does not need to be: the
+    # condition is settled by the two arguments, and `free_to_zone` has exactly one `bl panic` in the
+    # image (0x26fe80), so the caller is free_to_zone+0x148 whatever the trace.
+    #
+    # The element is not the chunk's first byte because `zcram` hands its elements to
+    # `random_free_to_zone` - the function is named for what it does - so which element the check sees
+    # first is a draw. What the region, the zone and the condition say is unaffected.
+    #
+    # Cost: 64 bytes of entry text (592689 -> 592753), 0 bytes of image, 645 undefined, the stub set
+    # unchanged. `ENTRY_KV_BUF` 1024 -> 2048 takes the run to 25 keys and 831 bytes, which moves the
+    # image's `.bss` end and with it the *derived* boot_args offset (897024 -> 901120) - the layout
+    # block working, not a hazard. And the payload was rebuilt from the regenerated header.
     BSD_KERN_SUBR_PRF_OBJ=${STAGE90_ENTRY_BSD_KERN_SUBR_PRF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_subr_prf.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"

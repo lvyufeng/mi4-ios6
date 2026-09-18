@@ -253,6 +253,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-237](experiment-237-the-panic-state-three-globals-and-why-all-three-are-zero.md) | the Panic State — Three Globals, All Zero, and `handle_debugger_trap`'s Restore That Predicts It |
 | stage90 | [experiment-238](experiment-238-the-panic-registers-and-the-string-they-point-at.md) | the Panic Registers — `"zfree: freeing invalid "` Out of the `va_list`, and `zalloc.c:1208` |
 | stage90 | [experiment-239](experiment-239-zero-zone-map-bounds-and-an-element-that-cannot-be-a-kernel-address.md) | Zero Zone-Map Bounds — an Element That Cannot Be a Kernel Address, and the Frontier Ends at the Image's Base |
+| stage90 | [experiment-240](experiment-240-the-frame-db-proceed-on-sync-failure-and-the-zone-named-maps.md) | the Frame and the Two Arguments — `db_proceed_on_sync_failure` in `r5`, the Zone Named `"maps"` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
