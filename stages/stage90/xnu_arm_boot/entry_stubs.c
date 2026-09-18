@@ -361,74 +361,128 @@ void entry_stub_hit(const char *name)
 
 #ifdef STAGE90_ENTRY_REAL_ARM_INIT
 /*
- * `timer_call_get_priority_params()` - `osfmk/kern/timer_call.c`, the first statement of
- * `timer_call_init_abstime` and so the first thing `timer_call_init` asks for after its three lock
- * calls.
+ * `do_cpuid()` - `osfmk/arm/cpuid.c:85`, and the first symbol `cpu_init` asks for.
  *
- * This is the probe experiment 185 wrote and experiment 185's run never reached: `lck_mod_init`
- * stops at its own `strncpy` four statements in, and `timer_call_init` is two lines further down
- * `kernel_early_bootstrap` than that. exp-186 moved the stop to `lck_mtx_init_ext`, and
- * `osfmk/arm/locks_arm.o` is linked now, so this call is the next symbol in the image that nothing
- * defines.
+ * Experiment 187 stopped at `timer_call_get_priority_params`, the first statement of
+ * `timer_call_init_abstime`. This run links the object that defines it, so the whole of that
+ * function is real now - including the loop that converts every threshold in arm_timer.c's table
+ * from nanoseconds to `rtclock_sec_divisor` ticks - and `timer_call_init` and
+ * `kernel_early_bootstrap` return, `arm_init` continues, and the next thing it asks for is
+ * `cpu_init()`.
  *
- * What the run establishes by stopping here, without any probe at all: the whole of real
- * `lck_mod_init` - including its `lck_mtx_init_ext`, which is the mutex implementation itself -
- * ran to completion; so did `timer_call_init`'s `lck_attr_setdefault`, `lck_grp_attr_setdefault`
- * and `lck_grp_init`, and so did `timer_longterm_init`, which is in `timer_call.c` and does its own
- * group initialization.
+ * That is what makes this probe one function further out than the last one rather than one symbol
+ * further along. The last three probes were placed inside the function the frontier lived in.
+ * This one cannot be: `timer_call_init_abstime` ends with the loop, `timer_call_init` ends with it,
+ * and `kernel_early_bootstrap` (`startup.c:225`) ends with `timer_call_init()` - its caller is
+ * `arm_init` (`arm_init.c:269`), whose next statement is `cpu_init()`. So the frontier moved from
+ * "a function in `timer_call.c`" to "the first line of the next function in `arm_init`", and the
+ * rule that finds it is still the same: read the function the frontier is in, and take the next
+ * symbol in it that nothing defines.
  *
- * The probe's three values are that last sentence turned into something checkable, because
- * `lck_grp_init` enqueues each group it initializes onto one global list and writes the name it
- * was handed into the group:
+ * `cpu_init` (`cpu.c:198`) is `cdp = getCpuDatap(); if (cdp->cpu_type != CPU_TYPE_ARM) { ... }`,
+ * and `getCpuDatap` is `current_thread()->machine.CpuDatap` (`cpu_data.h:79`) - which `arm_init`
+ * set to `&BootCpuData` at `arm_init.c:250`, four statements before it called
+ * `kernel_early_bootstrap`. So the condition is true on this CPU and the branch taken is the one
+ * containing `do_cpuid`, `do_cacheid` and `do_mvfpid`. `pmap_cpu_data_init` is the *other*
+ * branch's first call, defined here too so that the run reports which one was taken instead of
+ * taking one and silently reaching the other; both are `void f(void)`, so neither can disagree
+ * with the declaration the linker sees.
  *
- *     lck_grp_init(&timer_call_lck_grp,     "timer_call",     &timer_call_lck_grp_attr);
- *     lck_grp_init(&timer_longterm_lck_grp, "timer_longterm", &timer_longterm_lck_grp_attr);
+ * The eight values are arm_timer.o's table and `timer_call.c`'s arithmetic over it, read back
+ * through the two structs - which is the first time in this sequence that a newly linked object's
+ * work can be checked against *its own source* rather than against the run continuing past it:
  *
- * `lck_grp_queue` is `static` in `locks.c` and cannot be named from here, but the list is circular
- * and `LockCompatGroup` is its first element (`enqueue_tail`, `queue.h:274`, links each new element
- * at `que->prev` with `elt->next = que`), so walking `next` from the group this file already reads
- * reaches the other two without ever needing the head.
+ *   - `timer_call_get_priority_params()` is now the real one, so calling it is itself the check
+ *     that `arm_timer.o` displaced the stub: a stub returns 0 and every read below faults.
+ *   - `tcoal_prio_params_init` is `static` in `arm_timer.c` and cannot be named from here. Its
+ *     four members are read at their offsets through the returned pointer instead.
+ *   - `tcoal_prio_params` is the *destination*, and it is a global in `timer_call.c`
+ *     (`timer_call.h:173`), which the image already links, so it is named directly.
  *
- *   - offset 0 is `lck_grp_link.next`, the first member of `lck_grp_t` (`locks.h:108`);
- *   - offset 32 is `lck_grp_name` + 4, which is characters 4 to 7 of the name - `atib` for
- *     `Compatibility APIs`, `r_ca` for `timer_call`, `r_lo` for `timer_longterm`.
+ * Every offset below is one the compiler used, read out of this image's own
+ * `osfmk_kern_timer_call.o` rather than from the header - `timer_call_init_abstime` is `static` and
+ * was inlined into `timer_call_init`, and its disassembly stores exactly these:
  *
- * Three different words, and only real `lck_grp_init` calls with those two strings can produce
- * them. `enqueue_tail`'s offsets are visible in the compiled `lck_grp_init` as `ldrd r8, [r6]`
- * (next at 0, prev at 4) and `lck_grp_name`'s is the measured `add r0, r4, #28` of exp-186, which
- * is what makes 32 `lck_grp_name + 4` rather than a guess.
+ *     ldr r0, [r4]        -> str r1, [r6, #4]      source 0   dest 4    (idle)
+ *     ldr r0, [r4, #8]    -> str r1, [r6, #12]     source 8   dest 12   (resort)
+ *     add r0, r4, #12     -> add r1, r6, #16       shifts, 5 words, 12->16
+ *     ldrd r8, [r4, #32]  -> add r2, r6, #40       rt_ns_max 32 -> 40
+ *     ldr r0, [r4, #72]   -> str r0, [r6, #80]     scale 72 -> 80
+ *     ldrd r8, [r4, #96]  -> add r2, r6, #104      qos[0] 96 -> 104
+ *     ldr r2, [r4, #144]  -> str r2, [r6, #152]    rate_limited 144 -> 152
+ *
+ * where r4 is the ns struct and r6 the abstime one, and `str r4`/`r6` are the two MOVW/MOVT pairs
+ * of `timer_call_get_priority_params` and `tcoal_prio_params`. The two layouts differ by exactly
+ * the `powergate_latency_abstime` word the abstime struct has in front (`timer_call.h:151`), which
+ * is why the same member is four bytes further along in r6 than in r4.
+ *
+ * The numbers they should hold, from the two sources:
+ *
+ *   ns[0]            5000 * NSEC_PER_USEC        = 5,000,000   = 0x004c4b40
+ *   ns[96]           1 * NSEC_PER_MSEC           = 1,000,000   = 0x000f4240
+ *   ab[4]   5,000,000 ns   x 19200000 / 1e9      =    96,000   = 0x00017700
+ *   ab[12]  50,000,000 ns  x 19200000 / 1e9      =   960,000   = 0x000ea600
+ *   ab[20]  tcoal_prio_params_init.timer_coalesce_bg_shift = -5 = 0xfffffffb
+ *   ab[128] 75,000,000 ns  x 19200000 / 1e9      = 1,440,000   = 0x0015f900
+ *   ab[136] 10,000,000,000 ns x 19200000 / 1e9   = 192,000,000 = 0x0b71b000
+ *
+ * 19200000 is the timebase `nanoseconds_to_absolutetime` divides by, measured from both directions
+ * in exp-184 and exp-186. The five ns numbers are `timer_coalescing_priority_params_ns_t` in
+ * `timer_queue.h:114` and the last two are `timer_coalescing_priority_params_t` in `timer_call.h:150`;
+ * the ns struct is 168 bytes and `arm_timer.o`'s data section is 168 bytes, which is the check
+ * that the table linked and the struct read are the same shape.
+ *
+ * `ab[20]` is worth its own line: the five shift fields are copied as one 20-byte block by
+ * `vld1.32 {d16-d17}`/`vst1.32`, not field by field, and `timer_coalesce_bg_shift` is `-5`, so it is
+ * the one value in that block that cannot be produced by zeroed memory or by a stale copy of the
+ * wrong member. `ab[136]` is 10 seconds' worth of ticks - 192,000,000 - which is the largest number
+ * in the table and the one furthest from any alignment padding.
  */
 typedef struct timer_coalescing_priority_params_ns timer_coalescing_priority_params_ns_t;
+
+/* Both real now: `timer_call_get_priority_params` from `arm_timer.o`, the other from `timer_call.o`. */
 timer_coalescing_priority_params_ns_t *timer_call_get_priority_params(void);
+extern uint8_t tcoal_prio_params[];
+extern uint8_t past_deadline_timer_adjustment[];
 
-/* The first group on the global list, bootstrapped by `lck_mod_init`; typed here as bytes. */
-extern uint8_t LockCompatGroup[];
+/* Source = `timer_queue.h:114`; dest = `timer_call.h:150`. Offsets measured from the compiled code. */
+#define NS_SRC_IDLE_OFF      0u
+#define NS_SRC_QOS0_MAX_OFF  96u
+#define AB_DST_IDLE_OFF      4u
+#define AB_DST_RESORT_OFF    12u
+#define AB_DST_BG_SHIFT_OFF  20u
+#define AB_DST_QOS3_MAX_OFF  128u
+#define AB_DST_QOS4_MAX_OFF  136u
 
-#define GROUP_NEXT_OFFSET   0u    /* lck_grp_link.next */
-#define GROUP_MID_OFFSET   32u    /* lck_grp_name + 4 */
-
-static uintptr_t group_next(uintptr_t group)
+static uint32_t rd32(const volatile uint8_t *base, uint32_t off)
 {
-    return *(const volatile uintptr_t *)(const void *)group;
+    return *(const volatile uint32_t *)(const void *)(base + off);
 }
 
-static uint32_t group_mid(uintptr_t group)
+static void tcoal_probe(const char *hit)
 {
-    return *(const volatile uint32_t *)(const void *)(group + GROUP_MID_OFFSET);
+    timer_coalescing_priority_params_ns_t *src = timer_call_get_priority_params();
+
+    entry_kv("xnu_entry_tcoal_src_idle_ns",      rd32((const volatile uint8_t *)src, NS_SRC_IDLE_OFF));
+    entry_kv("xnu_entry_tcoal_src_qos0_ns",      rd32((const volatile uint8_t *)src, NS_SRC_QOS0_MAX_OFF));
+    entry_kv("xnu_entry_tcoal_idle_abstime",     rd32(tcoal_prio_params, AB_DST_IDLE_OFF));
+    entry_kv("xnu_entry_tcoal_resort_abstime",   rd32(tcoal_prio_params, AB_DST_RESORT_OFF));
+    entry_kv("xnu_entry_tcoal_bg_shift",         rd32(tcoal_prio_params, AB_DST_BG_SHIFT_OFF));
+    entry_kv("xnu_entry_tcoal_qos3_abstime_max", rd32(tcoal_prio_params, AB_DST_QOS3_MAX_OFF));
+    entry_kv("xnu_entry_tcoal_qos4_abstime_max", rd32(tcoal_prio_params, AB_DST_QOS4_MAX_OFF));
+    entry_kv("xnu_entry_past_deadline_adj",      rd32(past_deadline_timer_adjustment, 0u));
+
+    entry_stub_hit(hit);
 }
 
-timer_coalescing_priority_params_ns_t *timer_call_get_priority_params(void)
+void do_cpuid(void)
 {
-    uintptr_t g1 = (uintptr_t)LockCompatGroup;
-    uintptr_t g2 = group_next(g1);
-    uintptr_t g3 = group_next(g2);
+    tcoal_probe("do_cpuid");
+}
 
-    entry_kv("xnu_entry_lock_grp1_mid", group_mid(g1));
-    entry_kv("xnu_entry_lock_grp2_mid", group_mid(g2));
-    entry_kv("xnu_entry_lock_grp3_mid", group_mid(g3));
-
-    entry_stub_hit("timer_call_get_priority_params");
-    return (timer_coalescing_priority_params_ns_t *)0;   /* not reached */
+void pmap_cpu_data_init(void)
+{
+    tcoal_probe("pmap_cpu_data_init");
 }
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */
 

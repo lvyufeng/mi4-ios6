@@ -201,6 +201,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-185](experiment-185-lck-mod-init-ran-for-real-and-the-frontier-is-strncpy.md) | `lck_mod_init` Ran for Real, and the Frontier Is `strncpy` |
 | stage90 | [experiment-186](experiment-186-the-lock-group-read-back-as-its-own-bytes-and-the-frontier-is-lck-mtx-init-ext.md) | The Lock Group Read Back as Its Own Bytes, and the Frontier Is `lck_mtx_init_ext` |
 | stage90 | [experiment-187](experiment-187-three-lock-groups-read-out-of-xnus-own-list-and-the-frontier-is-timer-call-get-priority-params.md) | Three Lock Groups Read Out of XNU's Own List, and the Frontier Is `timer_call_get_priority_params` |
+| stage90 | [experiment-188](experiment-188-the-timer-table-converted-into-ticks-and-the-frontier-is-do-cpuid.md) | The Timer Table Converted into Ticks, and the Frontier Is `do_cpuid` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
