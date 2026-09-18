@@ -203,6 +203,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-187](experiment-187-three-lock-groups-read-out-of-xnus-own-list-and-the-frontier-is-timer-call-get-priority-params.md) | Three Lock Groups Read Out of XNU's Own List, and the Frontier Is `timer_call_get_priority_params` |
 | stage90 | [experiment-188](experiment-188-the-timer-table-converted-into-ticks-and-the-frontier-is-do-cpuid.md) | The Timer Table Converted into Ticks, and the Frontier Is `do_cpuid` |
 | stage90 | [experiment-189](experiment-189-the-cpu-identified-itself-and-the-frontier-is-processor-bootstrap.md) | The CPU Identified Itself, and the Frontier Is `processor_bootstrap` |
+| stage90 | [experiment-190](experiment-190-the-schedulers-own-processor-checked-pointer-by-pointer-and-the-frontier-is-processor-data-init.md) | The Scheduler's Own Processor, Checked Pointer by Pointer, and the Frontier Is `processor_data_init` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
