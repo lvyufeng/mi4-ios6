@@ -72,6 +72,28 @@ ARGS_BYTES=0x00001000          # one page, which is what `boot_args` needs to fi
 REAL_ARM_INIT=${STAGE90_ENTRY_REAL_ARM_INIT:-0}
 STUB_DEFINES=()
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES=(-DSTAGE90_ENTRY_REAL_ARM_INIT=1)
+# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s five functions - `kalloc_canblock`,
+# `lck_grp_alloc_init`, `kernel_memory_allocate`, `vm_page_wait`, `thread_block` - so a run that
+# hangs inside real XNU code says which frame it stopped in and why. It is a *diagnostic*, not a
+# stage: the traced image runs the same code, but it is not the image a stage is judged on, so this
+# is off by default and the stage that experiment 268 measured is built without it. The wrappers
+# change no argument - the first version forced `canblock` to FALSE and the report it produced was
+# about the forcing rather than about the run; that is written up in `entry_trace.c`.
+#
+# What the trace bought, since the stage it was built for did not need it: 268's run was never a
+# hang - 267's "silent hang" was a payload built before the step's object was in the image - and the
+# frontier moved on its own. But the trace turned "the ipc tables are built" from an inference into
+# a reading, and it caught the comment above calling the two allocations 512 bytes when they are
+# 256. Its own first run then produced a *wrong negative*: `g_kv_buf` was 2048 bytes, filled at
+# 2038, and `entry_kv` dropped the rest in silence, which is why this run's buffer is 8192 and why
+# the epilogue now reports `xnu_entry_kv_dropped`. Both are in `entry_stubs.c`.
+ENTRY_TRACE=${STAGE90_ENTRY_TRACE:-0}
+TRACE_LDFLAGS=()
+TRACE_OBJS=()
+if [[ $ENTRY_TRACE -eq 1 ]]; then
+    TRACE_LDFLAGS=(--wrap=kalloc_canblock --wrap=lck_grp_alloc_init
+                   --wrap=kernel_memory_allocate --wrap=vm_page_wait --wrap=thread_block)
+fi
 # `osfmk_arm_pmap.o` is linked in every real-`arm_init` build, so `pmap_bootstrap` is defined by
 # XNU's own object and the probe that used to stand on it - a second definition - is compiled out
 # here rather than left to be a link error. Same mechanism as `arm_init`'s stand-in above, and the
@@ -133,6 +155,15 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
     -c "$BOOT_DIR/entry_stubs.c" -o "$OUT/xnu_arm_entry_stubs.o"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
+
+# The hang tracer, only when asked for. Compiled here rather than in the link block because it is a
+# translation unit like the two above, and linked into `LINK_OBJS` at the bottom.
+if [[ $ENTRY_TRACE -eq 1 ]]; then
+    run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
+        -O2 -Wall -Wextra -Werror -std=gnu11 \
+        -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
+    say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
+fi
 
 # The part of the entry image that runs XNU's own code. clang, because the XNU objects it links
 # against were built by clang (see xnu_arm_assemble.sh for why that is not a preference), and with
@@ -2708,6 +2739,49 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # payload text 1376490. `kv_written == kv_in_dram == 0x3c`, one below 262's 0x3d because
     # `waitq_bootstrap` is one character shorter than `ltable_bootstrap` - both are 9 characters of
     # `_bootstrap`, so the difference is `ltable` (6) against `waitq` (5).
+    # 268: `ipc_table_init`, and the first object since 260 whose every reference is already paid
+    # for. 267's stop was `ipc_table_init`; the object that defines it is `osfmk/ipc/ipc_table.c`
+    # (manifest:521), `osfmk_ipc_ipc_table.o` - **544 bytes of text, 80 of data, 8 of bss, ten
+    # definitions and exactly two references**, `kalloc_canblock` and `kfree`, both made real by 250
+    # (`osfmk_kern_kalloc.o`). So the link resolves and adds **nothing**, the 258/260/263/266 shape:
+    # an object the manifest has been building all along, waiting for the image to link it.
+    #
+    # Two of the ten definitions were already in hand from 266 - `ipc_table_alloc` (0x28 bytes) and
+    # `ipc_table_free` (0x10), both thin wrappers over `kalloc`/`kfree` - and they are what 266's link
+    # added; this step is the third caller of the file. The other seven are `ipc_table_init` itself
+    # (0x1e8 = 488 bytes, the whole `.text` of the function), the four table globals
+    # (`ipc_table_entries`/`ipc_table_requests` are `B`, zeroed; `ipc_table_entries_size` =
+    # `ipc_table_requests_size` = 0x40 = 64, read straight out of `.data`), and three `*.site` records
+    # - gcc's caller-site data, which is the third argument `kalloc_canblock(size, canblock, site)`
+    # takes, loaded with `movw`/`movt` before each call rather than a symbol this step must satisfy.
+    #
+    # `ipc_table_init` is **two `kalloc_canblock` calls and two `ipc_table_fill` loops**, with no
+    # `panic` call anywhere in it: this build has `MACH_ASSERT` off, so the two
+    # `assert(... != ITS_NULL)` lines are compiled out and the disassembly shows only the two `bl`s.
+    # Each loop is 64 iterations of a doubling-fill (`16` elems of `struct ipc_entry` for the entries
+    # table, `2` of `struct ipc_port_request` for the requests table), **256 bytes allocated per
+    # call** - `sizeof(struct ipc_table_size) * 64` = 4 * 64, for *both* tables, because
+    # `ipc_table.c:138` multiplies `ipc_table_requests_size` by `sizeof(struct ipc_table_size)` and
+    # not by the element it fills with. (268's first write-up of this comment said 512. The
+    # measurement corrected it: see the traced run below. This is the kalloc path 250 made real, over
+    # the kalloc map 250 created.) **Prediction: `stub_hit=ipc_voucher_init`,
+    # `xnu_entry_stub_caller=0x800abd88`** (`caller - 4` = `0x800abd84` = `bl <ipc_voucher_init>`).
+    # Device: **`stub_hit=ipc_voucher_init`, `xnu_entry_stub_caller=0x800abe28`** (`caller - 4` =
+    # `0x800abe24` = `ipc_bootstrap+0x180` = `bl 800c3974 <ipc_voucher_init>`, the call right after
+    # `bl ipc_table_init` at `ipc_bootstrap+0x17c`) - the prediction, an eleventh time. The address is
+    # 0xa0 above the prediction's and both are right: `ipc_bootstrap` was at `0x800abc04` in 267's
+    # image and is at `0x800abca4` in 268's, so the prediction was the right *offset* - `+0x184`, the
+    # next `bl` after the one that had just returned - written in the previous step's coordinate
+    # system. An absolute caller address does not carry across a step that grows the image; resolve
+    # against the ELF that made the run, which is what `tools/host_resolve_entry_addr.sh --elf` is
+    # for. 267's `+0x17c` for `bl ipc_table_init` is the same offset 268 measures.
+    #
+    # Measured: resolved **3** (`ipc_table_init`, `ipc_table_alloc`, `ipc_table_free`), added **0**;
+    # 863 -> 860 undefined, 787 -> 784 function stubs, storage unchanged at 76. The trace below is
+    # what turned "the ipc tables are built" from an inference into a reading: both calls succeed,
+    # `t268_kalloc_size` = `t268_kalloc_actual` = 0x100 for each, callers `ipc_table_init+0x34` and
+    # `ipc_table_init+0x120`, returning 256 bytes apart.
+    OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
     # 267: `mig_init`, and **the step is 18 objects, because the datum it reads has 17 entries.**
     # 266's stop was `mig_init`. `osfmk/kern/ipc_kobject.c` (manifest:551) is the object that
     # defines it - 2404 bytes of text, 68 of data, 12376 of bss, six functions - and it is one
@@ -2979,6 +3053,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_IPC_IPC_INIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_SPACE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_IPC_KOBJECT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_IPC_IPC_TABLE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -2991,7 +3066,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
@@ -3098,8 +3173,10 @@ fi
 say "== linking at $ENTRY_BASE =="
 # start.o first, so `_start` is the first thing in .text and the image base is the entry point -
 # not required (the payload jumps to an explicit address) but it makes the map readable.
+[[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_trace.o")
 run arm-none-eabi-ld -T "$BOOT_DIR/entry.ld" --defsym=ENTRY_BASE=$ENTRY_BASE \
     -nostdlib -Map "$OUT/xnu_arm_entry.map" \
+    ${TRACE_LDFLAGS[@]+"${TRACE_LDFLAGS[@]}"} \
     -o "$OUT/xnu_arm_entry.elf" \
     "${LINK_OBJS[@]}" \
     --start-group "$LIBGCC" --end-group

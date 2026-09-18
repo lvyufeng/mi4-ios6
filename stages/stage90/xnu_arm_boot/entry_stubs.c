@@ -239,25 +239,50 @@ extern uint8_t ExceptionVectorsBase[];
  * entirely: by the time anything reads this, it is the exact characters that will be written, in
  * one contiguous block, with no pointers to be wrong.
  *
- * The size is a real limit and it fails **silently**: `entry_kv` returns without writing when the
- * buffer is nearly full, so a run with too many keys reports fewer of them and says nothing about
- * it. Experiment 237 grew this 768 -> 1024 for that reason, and experiment 240 grows it 1024 ->
+ * The size is a real limit, and until experiment 268 it failed **silently**: `entry_kv` returning
+ * without writing left the caller with no way to tell "this key was never set" from "this key was
+ * dropped", and the log then reads as if the code that would have set it never ran. Experiment 268
+ * lost the second half of a trace that way and very nearly concluded that `ipc_table_init`'s two
+ * `kalloc` calls never happened, when the last record it wrote was simply the last one that fit.
+ * The counter below is the repair: every dropped record increments `g_kv_dropped`, and the epilogue
+ * reports it as `xnu_entry_kv_dropped` next to `xnu_entry_kv_written`, so a full buffer is a number
+ * in the log rather than an absence.
+ *
+ * Experiment 237 grew the buffer 768 -> 1024 for the same reason, and experiment 240 grew it 1024 ->
  * 2048, which is what experiment 240's 25 keys need at the 40 bytes each call reserves - the run
- * wrote 831 bytes for those 25, and the reserve is deliberately pessimistic. It costs `.bss` only -
- * the buffer is zero-initialized - and the headroom below `topOfKernelData` is over 1.2 MB. What it
- * moves is the image's `.bss` end, and with it the *derived* `boot_args` offset, so the payload has
- * to be rebuilt from the regenerated header; that is the layout block working, not a hazard, because
- * nothing in it is hard-coded.
+ * wrote 831 bytes for those 25, and the reserve is deliberately pessimistic. Experiment 269 grows it
+ * 2048 -> 8192: 268's instrument writes five records per allocation and the boot reaches
+ * `ipc_voucher_init` with far more allocations than 2048 bytes hold (268 measured 2038 bytes for the
+ * first six `kalloc` calls and nine `kernel_memory_allocate` calls, and the region it needed to
+ * observe was still ahead of it). It costs `.bss` only - the buffer is zero-initialized - and the
+ * headroom below `topOfKernelData` is over 1.2 MB. What it moves is the image's `.bss` end, and with
+ * it the *derived* `boot_args` offset, so the payload has to be rebuilt from the regenerated header;
+ * that is the layout block working, not a hazard, because nothing in it is hard-coded.
+ *
+ * One layout property is *not* free, and has to be re-checked whenever this grows: the exception
+ * handlers run on `entry_vectors_stack`, whose top `entry_vectors.s` defines as the end of its own
+ * `.space`, and that top must stay at or below this buffer's first byte or a handler frame would
+ * land inside the results. It held for 268 and 269 (stack top and `g_kv_buf` both at 0x800f8f00 -
+ * `nm` on the image is the check), but it is adjacency the linker script happens to produce, not a
+ * guarantee it makes, so `tools/host_resolve_entry_addr.sh` is not the tool for it: compare
+ * `entry_vectors_stack_top` against `g_kv_buf` in `nm -n` output.
  */
-#define ENTRY_KV_BUF 2048
+#define ENTRY_KV_BUF 8192
 static char g_kv_buf[ENTRY_KV_BUF];
 static uint32_t g_kv_len;
+
+/*
+ * Counts records `entry_kv` refused for want of room. Read by the epilogue, never by the boot path,
+ * so it costs the run one store per dropped line and nothing else.
+ */
+static uint32_t g_kv_dropped;
 
 void entry_kv(const char *key, uint32_t value)
 {
     static const char hex[] = "0123456789abcdef";
 
     if (g_kv_len + 40u >= ENTRY_KV_BUF) {
+        g_kv_dropped++;
         return;
     }
     g_kv_buf[g_kv_len++] = ' ';
@@ -324,8 +349,16 @@ static void entry_putc(volatile uint8_t *data, uint32_t *size_p, uint32_t max, c
  *
  * `key` must be a string in this image; `.rodata` lands inside `.text`, inside the window, so
  * reading it with the MMU off is a physical read of this image, which is where it is.
+ *
+ * Non-static since experiment 268, and for one caller only: `entry_trace.c`, which uses it to say
+ * which allocator frame a *hang* stopped in - a case where no stub is hit and the epilogue never
+ * runs, so the stub path's own report is the one thing that cannot be used. The *declaration* has
+ * to be non-static too, and that is not a detail: a function declared `static` once keeps internal
+ * linkage no matter what the definition says, which is what the first link of this instrument
+ * reported as "undefined reference to `entry_write_kv`" from an object file both the tracer and the
+ * stubs were in.
  */
-static void entry_write_kv(const char *key, uint32_t value)
+void entry_write_kv(const char *key, uint32_t value)
 {
     static const char hex[] = "0123456789abcdef";
     volatile uint32_t *sig = (volatile uint32_t *)(uintptr_t)RAM_CONSOLE_BASE;
@@ -362,7 +395,11 @@ static void entry_write_kv(const char *key, uint32_t value)
  * The one exit. `why` must be in read-only memory inside the window, which everything in this
  * image is.
  */
-__attribute__((noreturn, noinline)) static void entry_epilogue(const char *why)
+/* Non-static since experiment 268, for `entry_trace.c`: an instrument that converts a hang into
+ * the report this function exists to write has to be able to reach it. No static declaration
+ * above it, deliberately - a `static` on either the declaration or the definition keeps internal
+ * linkage, which is what the first link of this instrument reported as an undefined reference. */
+__attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
 {
     uint32_t sctlr;
 
@@ -380,8 +417,16 @@ __attribute__((noreturn, noinline)) static void entry_epilogue(const char *why)
     register uint32_t csselr_before __asm__("r9");
     register uint32_t ccsidr_before __asm__("r10");
     register uint32_t ccsidr_l1 __asm__("r11");
+    /*
+     * Records `entry_kv` refused for want of room. Reported for the same reason and from a register
+     * for the same reason as `kv_len_written` above: "the buffer was full" and "the code that would
+     * have written the key never ran" produce the identical log otherwise, and experiment 268 spent
+     * a measurement on that ambiguity.
+     */
+    register uint32_t kv_dropped_written __asm__("r7");
 
     kv_len_written = g_kv_len;
+    kv_dropped_written = g_kv_dropped;
 
     /*
      * CCSIDR describes whichever cache CSSELR selects, and *nothing here ever selected one*.
@@ -415,8 +460,28 @@ __attribute__((noreturn, noinline)) static void entry_epilogue(const char *why)
      * the bits below the line. This is what makes the results arrive; the sweep stays as the
      * backstop that covers every *other* line this image wrote.
      */
-    for (uintptr_t p = (uintptr_t)&g_kv_len; p < (uintptr_t)&g_kv_buf[ENTRY_KV_BUF]; p += 32u) {
-        __asm__ volatile ("mcr p15, 0, %0, c7, c10, 1" :: "r"(p) : "memory");
+    {
+        /*
+         * The range is taken over the objects that hold results rather than trusting the order the
+         * compiler chose for them in `.bss`. `g_kv_dropped` was added by experiment 269, and a
+         * fixed lower bound of `&g_kv_len` would leave it out of the clean if the compiler placed it
+         * below - and a line left dirty in a cache that is about to be switched off reads back as
+         * the zeroes `.bss` was filled with, which is the exact failure this loop exists to prevent.
+         * Here, "which addresses hold the answer" must not be a guess.
+         */
+        uintptr_t lo = (uintptr_t)&g_kv_len;
+        uintptr_t hi = (uintptr_t)&g_kv_buf[ENTRY_KV_BUF];
+
+        if ((uintptr_t)&g_kv_dropped < lo) {
+            lo = (uintptr_t)&g_kv_dropped;
+        }
+        if ((uintptr_t)&g_kv_dropped + sizeof g_kv_dropped > hi) {
+            hi = (uintptr_t)&g_kv_dropped + sizeof g_kv_dropped;
+        }
+
+        for (uintptr_t p = lo; p < hi; p += 32u) {
+            __asm__ volatile ("mcr p15, 0, %0, c7, c10, 1" :: "r"(p) : "memory");
+        }
     }
     __asm__ volatile ("dsb sy" ::: "memory");
 
@@ -481,12 +546,15 @@ __attribute__((noreturn, noinline)) static void entry_epilogue(const char *why)
      * `xnu_entry_kv_written` is what the probes recorded, read from a register, so it is right even
      * if the transfer to DRAM was not. `xnu_entry_kv_in_dram` is what the transfer actually
      * produced - they differ only when it failed, and an empty results buffer with a non-zero
-     * `kv_written` is a failed transfer rather than a probe that never ran. The three cache values
+     * `kv_written` is a failed transfer rather than a probe that never ran. `xnu_entry_kv_dropped`
+     * is the third of that family - the number of records the buffer was too full to hold, so that
+     * a truncated probe set is a count in the log instead of an absence. The three cache values
      * are the inputs the sweep runs on: what CSSELR was, what CCSIDR said through it, and what it
      * says once the level 1 data cache is selected.
      */
     entry_write_kv("xnu_entry_kv_written", kv_len_written);
     entry_write_kv("xnu_entry_kv_in_dram", g_kv_len);
+    entry_write_kv("xnu_entry_kv_dropped", kv_dropped_written);
     entry_write_kv("xnu_entry_csselr_before", csselr_before);
     entry_write_kv("xnu_entry_ccsidr_before", ccsidr_before);
     entry_write_kv("xnu_entry_ccsidr_l1", ccsidr_l1);
