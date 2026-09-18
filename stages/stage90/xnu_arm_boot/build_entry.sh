@@ -2683,6 +2683,21 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `kv_written == kv_in_dram == 0x3d`, six above 261's 0x37.
     OSFMK_KERN_SCHED_PRIM_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SCHED_PRIM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_sched_prim.o}
     OSFMK_KERN_SCHED_MULTIQ_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SCHED_MULTIQ_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_sched_multiq.o}
+    # 263: `ltable_bootstrap`, and the cheap shape again - 262's `osfmk_kern_ltable.o` measure:
+    # `osfmk/kern/ltable.c` (manifest:567), 5175 bytes of text, 272 of bss, **19 references and all 19
+    # already satisfied by this image**, so the link resolves `ltable_bootstrap` itself and **adds
+    # nothing**. `ltable_bootstrap` calls only `lck_grp_init` and `PE_parse_boot_argn`, both real, so it
+    # completes. **Prediction: `stub_hit=waitq_bootstrap`, `xnu_entry_stub_caller=0x8000dc68`**
+    # (`caller - 4` = `0x8000dc64` = `kernel_bootstrap+0x224`). Device: **`stub_hit=waitq_bootstrap`,
+    # `xnu_entry_stub_caller=0x8000dc68`** = `kernel_bootstrap+0x228` - the prediction, a sixth time.
+    #
+    # Measured: resolved **1** (`ltable_bootstrap` itself), added **0**; 631 -> 630 undefined,
+    # 555 -> 554 function stubs, storage unchanged at 76; text 768836 -> 773988 (+5152), image
+    # 867888 -> 884272 (another 16 KB block), bss end 0x80107208, args +1085440, headroom 2067960,
+    # payload text 1376490. `kv_written == kv_in_dram == 0x3c`, one below 262's 0x3d because
+    # `waitq_bootstrap` is one character shorter than `ltable_bootstrap` - both are 9 characters of
+    # `_bootstrap`, so the difference is `ltable` (6) against `waitq` (5).
+    OSFMK_KERN_LTABLE_OBJ=${STAGE90_ENTRY_OSFMK_KERN_LTABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_ltable.o}
     OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
@@ -2778,6 +2793,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_SCHED_PRIM_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_LTABLE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2787,7 +2803,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
