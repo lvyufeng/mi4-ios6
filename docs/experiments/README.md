@@ -192,6 +192,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-176](experiment-176-pe-init-platform-returned-and-the-soc-base-came-from-the-tree.md) | `PE_init_platform` Returned, and the SoC Base Came Out of the Tree |
 | stage90 | [experiment-177](experiment-177-xnu-counted-four-cpus-and-the-frontier-is-cpu-processor-alloc.md) | XNU Counted Four CPUs in This Project's Tree, and the Frontier Is `cpu_processor_alloc` |
 | stage90 | [experiment-178](experiment-178-the-two-halves-of-cpudataentries-agree-and-the-frontier-is-thread-bootstrap.md) | The Two Halves of `CpuDataEntries` Agree, and the Frontier Is `thread_bootstrap` |
+| stage90 | [experiment-179](experiment-179-thread-bootstrap-ran-and-the-frontier-is-timer-init.md) | `thread_bootstrap` Ran Its Assignments, and the Frontier Is `timer_init` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

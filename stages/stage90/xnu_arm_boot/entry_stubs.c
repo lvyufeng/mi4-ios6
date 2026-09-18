@@ -341,51 +341,23 @@ void entry_stub_hit(const char *name)
 
 #ifdef STAGE90_ENTRY_REAL_ARM_INIT
 /*
- * `thread_bootstrap()` - `osfmk/arm/arm_init.c:240`, the first call after `cpu_processor_alloc`
- * (`:234`) and the two assignments that record where the boot CPU's data is (`:236`, `:237`). The
- * probe prints the three addresses those lines are about, then names itself.
+ * There is no probe here now.
  *
- * `cpu_processor_alloc`'s probe stood here for experiment 177, and `osfmk/arm/cpu_common.o` is now
- * linked because that run named it - so it is real code and the hand-written definition that stood
- * here is gone, the same way `DTInit`'s went in experiment 170 and `ml_parse_cpu_topology`'s in
- * experiment 177. One edge further on is this.
+ * A hand-written definition in this file exists to take a symbol the image does not have and turn
+ * it into a report - `DTInit` in experiments 169-170, `ml_parse_cpu_topology` in 171-177,
+ * `cpu_processor_alloc` in 177, `thread_bootstrap` in 178. The link is what ends each one: the
+ * object that defines it for real arrives, `multiple definition` is reported, and the definition
+ * comes out of this file. `thread_bootstrap`'s went when `osfmk/kern/thread.o` was linked for
+ * experiment 179, and nothing replaced it.
  *
- * Why these numbers rather than "it returned a pointer". `arm_init` writes the same address into
- * both halves of `CpuDataEntries[master_cpu]`:
- *
- *   :236   CpuDataEntries[master_cpu].cpu_data_vaddr = &BootCpuData;
- *   :237   CpuDataEntries[master_cpu].cpu_data_paddr = (void *)((uintptr_t)(args->physBase)
- *                                                     + ((uintptr_t)&BootCpuData
- *                                                     - (uintptr_t)(args->virtBase)));
- *
- * With `physBase == virtBase` - the whole trick `xnu_entry_jump.c` plays, and the reason `_start`
- * can convert its own addresses - the second collapses to the first. So the two words agreeing is
- * a *measured* statement that both lines ran and that the identity held. If they differ, the
- * identity did not hold and the difference between them is `physBase - virtBase`, which is the most
- * valuable single number this image could produce.
- *
- * `cpu_data_entry_t` (`osfmk/arm/cpu_data_internal.h:80`) is two pointers followed by two `uint32_t`
- * on arm32, so reading `CpuDataEntries` as an array of words takes the two halves without
- * reproducing a struct. The declaration says two words because two words is all this reads - the
- * real object is `MAX_CPUS` of these (`cpu_data_internal.h:285`), and declaring it `extern` with
- * the real extent would only be a second copy of `MAX_CPUS` to keep in step.
- *
- * `BootProcessor` is `cpu_common.o`'s own `B 0x18` - the thing `cpu_processor_alloc(TRUE)` returns,
- * `cpu_common.c:472` being `if (is_boot_cpu) return &BootProcessor;`. Its address shows where that
- * object's bss landed in the image.
+ * Nothing replaced it because a probe is for printing something the generated stubs cannot, and at
+ * this edge there is nothing of that kind left to print. `thread_bootstrap` is a long sequence of
+ * assignments to the global `thread_template` followed by calls; the generated stub mechanism
+ * reports the first call by name, which is the same information the probe would have given, one
+ * line shorter. The last three probes each printed a number XNU's own code had computed -
+ * `ranges[1]` out of `arm-io`, the CPU count out of `/cpus`, and the physBase/virtBase identity.
+ * When there is another such number, this is where its probe goes.
  */
-extern uint32_t CpuDataEntries[2];
-extern uint8_t BootCpuData[];
-extern uint8_t BootProcessor[];
-
-void thread_bootstrap(void)
-{
-    entry_kv("xnu_entry_cpu_data_vaddr", CpuDataEntries[0]);
-    entry_kv("xnu_entry_cpu_data_paddr", CpuDataEntries[1]);
-    entry_kv("xnu_entry_boot_cpu_data_va", (uint32_t)(uintptr_t)BootCpuData);
-    entry_kv("xnu_entry_boot_processor", (uint32_t)(uintptr_t)BootProcessor);
-    entry_stub_hit("thread_bootstrap");
-}
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */
 
 /*
