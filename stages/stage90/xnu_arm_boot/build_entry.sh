@@ -3047,6 +3047,87 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 274: `host_notify_init`, and the walk comes *back out* of `ipc_bootstrap` for the first time.
+    # 273's stop was `host_notify_init`, and the object that defines it is `osfmk/kern/host_notify.c`
+    # (manifest:548), `osfmk_kern_host_notify.o` - **1616 bytes of text, 0 of data, 364 of bss, 18
+    # definitions and 15 references**. **3 resolved** (`host_notify_init`, `host_notify_port_destroy`,
+    # `host_request_notification`), **0 added**: the 258/260/263/266/268 shape, and the cheapest kind
+    # of step. Thirteen of the fifteen references are already real (`lck_grp_attr_setdefault`,
+    # `lck_grp_init`, `lck_attr_setdefault`, `lck_mtx_init_ext`, `lck_mtx_lock`, `lck_mtx_unlock`,
+    # `lck_spin_lock`, `lck_spin_unlock`, `ipc_kobject_set_atomically`, `panic`, `zalloc`, `zfree`,
+    # `zinit`) and the two that are not (`ipc_port_release_sonce`,
+    # `mach_msg_send_from_kernel_proper` - the latter added by 273 one step ago) are already stubs.
+    # Five of the definitions matter to the link and two of those (`host_notify_calendar_change`,
+    # `host_notify_calendar_set`) are referenced by nothing in this image: 250's shape, again - what
+    # an object *defines* is not what the link *needs*.
+    #
+    # The function is one inlined loop and five calls, and **not one of them can stop**:
+    #
+    #     queue_init(&host_notify_queue[0]) and [1]    ; inlined, four instructions, no call
+    #     bl lck_grp_attr_setdefault(&host_notify_lock_grp_attr)
+    #     bl lck_grp_init(&host_notify_lock_grp, "host_notify", &host_notify_lock_grp_attr)
+    #     bl lck_attr_setdefault(&host_notify_lock_attr)
+    #     bl lck_mtx_init_ext(&host_notify_lock, &host_notify_lock_ext, ...)
+    #     bl zinit(16, 65536, 256, "host_notify")      ; 16 = sizeof(struct host_notify_entry)
+    #
+    # The object has no branch at all in it, so there is nothing to be surprised by: `host_notify_init`
+    # completes. The two stubs it does reference are inside `host_notify_calendar_change` and
+    # `host_notify_all`, which nothing calls. Its `zinit` ceiling is 64 KB, the third this walk has
+    # computed from a `sizeof` it read itself (271's 1.4 MB `semaphore_max`, 273's 416 KB `mk_timer`).
+    #
+    # **Prediction: `stub_hit=mac_policy_init`, with the caller at `kernel_bootstrap+0x248`.** This is
+    # the step where the walk *leaves* `ipc_bootstrap`: `mk_timer_init` was its last call in source
+    # order, the tail `b host_notify_init` was reached with `ipc_bootstrap`'s own return address in
+    # `lr` (273 measured it: `0x8000e138` = `kernel_bootstrap+0x238`), so when `host_notify_init`
+    # returns, control lands **in `kernel_bootstrap`**, not in `ipc_bootstrap`. From there the line is
+    #
+    #     8000e138: movw/movt r0, <a debug string>
+    #     8000e140: bl kernel_debug_string_early      ; real code, and 273's run already passed it
+    #     8000e144: bl mac_policy_init                ; a stub
+    #
+    # so the stop is `mac_policy_init` at `kernel_bootstrap+0x248`, **offset first** - four steps in a
+    # row have moved the absolutes and none has moved an offset, and this step moves one too if the
+    # new object is laid down before `startup.o` rather than after it. `ipc_bootstrap` returning is
+    # the milestone: the whole Mach IPC bootstrap - `ipc_space_create_special` twice, `mig_init`'s 17
+    # descriptors, the table, the voucher and importance subsystems, the semaphore, the timer - will
+    # have run on this device from end to end.
+    #
+    # `mac_policy_init` is `security/mac_base.c` (manifest:664), `security_mac_base.o` - **10087 bytes
+    # of text, 1280 of data, 2120 of bss, 115 definitions and 72 references** - and it is the next
+    # step's subject, not this one's.
+    #
+    # **274 measured it, and the prediction held to the offset.** Resolved 3 (`host_notify_init`,
+    # `host_notify_port_destroy`, `host_request_notification`), added 0, 843 -> 840 undefined, 768 ->
+    # 765 function stubs and 75 storage (unchanged), text 936996 -> 938308, image bytes 1048440
+    # (**unchanged** - the growth fitted the alignment padding, the 258/260/263/266/268 shape), bss
+    # `0x800ff6c8` .. `0x80134808`. The run stopped at `stub_hit=mac_policy_init` with
+    # `xnu_entry_stub_caller_v=0x8000e148` = **`kernel_bootstrap+0x248`**, `kv_written=0x60`,
+    # `kv_in_dram=0x84`, `kv_dropped=0`, `why_byte=0x61`, zero abort entries, and a second run
+    # byte-identical in every report line (only timebase stamps differ). So `ipc_bootstrap` **returned**
+    # and the whole Mach IPC bootstrap - `ipc_space_create_special` twice, `mig_init`'s 17 descriptors,
+    # the table, the voucher and importance subsystems, the semaphore, the timer, the host notify -
+    # ran on this device end to end. The walk is in `kernel_bootstrap` again, where `ipc_init` is real
+    # since 265 and the next boundary after it is `mapping_free_prime`.
+    #
+    # **And the run's buffer echo is mangled, in a new way.** The last block of the report is
+    # `entry_write(g_kv_buf)`, and it reads `real XNU entry8000e148t=mac_policy_init` followed by
+    # ` xnu_entry_stub_caller=0x` and nothing else: the eight digits of this run's caller overwrote
+    # ` stub_hit=`'s first eight characters *in place* at `g_kv_buf[0..7]` - `t=mac_policy_init` is
+    # exactly ` stub_hit=mac_policy_init` from byte 8 - and the offset where those digits belong
+    # (`g_kv_buf[51..58]`, `g_stub_caller_digits = 0x33` measured) was never written, so the C-string
+    # echo ended at the first zero byte there. Three roads agree on that: the echoed text, the echo
+    # stopping at 51, and `_w0`/`_w1` (the epilogue's word reads of `&g_kv_buf[51]` and `[55]`) both
+    # reading 0 - where 273's build read the stored digits there. The instructions that do this are
+    # in memory exactly as the linker wrote them (661 of 661 words of `entry_kv` through
+    # `entry_stub_hit` match the ELF again, in this build's own addresses), and `kv_written`/
+    # `kv_in_dram` are index values the code *computes* rather than accumulates, so they are 96 and
+    # 132 either way. Which instruction's effect differs from what memory says is **not measured and
+    # not claimed** - it is 271's open question with a third face: there the digit *arithmetic* was
+    # wrong and the address right, here the arithmetic is right (`8000e148` is correct, in order) and
+    # the address is not. The frontier result does not depend on it: the stop is named by the stub's
+    # own write and the caller by `_v`, and `mac_policy_init` is what `kernel_bootstrap+0x248` says it
+    # must be.
+    OSFMK_KERN_HOST_NOTIFY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_HOST_NOTIFY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_host_notify.o}
     # 273: `mk_timer_init`, and the frontier leaves its function - the prediction is a tail call's.
     # 272's stop was `mk_timer_init`, and the object that defines it is `osfmk/kern/mk_timer.c`
     # (manifest:572), `osfmk_kern_mk_timer.o` - **1577 bytes of text, 8 of data, 4 of bss, 12
@@ -3386,6 +3467,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_SYNC_SEMA_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_MK_TIMER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_HOST_NOTIFY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -3398,7 +3480,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
