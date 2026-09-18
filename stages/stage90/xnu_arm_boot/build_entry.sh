@@ -3458,6 +3458,133 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # and **is the context switch itself**: it does not return, so that is the step where this walk
     # stops being a walk.
     OSFMK_KERN_MACHINE_OBJ=${STAGE90_ENTRY_OSFMK_KERN_MACHINE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_machine.o}
+    # 302: the commpage, and the walk arrives at the context switch itself
+    #
+    # **The 301 run reported** `stub_hit=commpage_update_active_cpus` at `processor_up + 0xac`. One
+    # object defines it: `osfmk/arm/commpage/commpage.c` (manifest:433), built all along as
+    # `osfmk_arm_commpage_commpage.o` - `.text` 0x5B0, `.bss` 0xC, `.rodata.str1.1` 0x13.
+    #
+    #      resolved 10   commpage_set_memory_pressure, commpage_set_timestamp,
+    #                    commpage_update_active_cpus, commpage_update_atm_diagnostic_config,
+    #                    commpage_update_boottime, commpage_update_kdebug_state,
+    #                    commpage_update_mach_approximate_time,
+    #                    commpage_update_mach_continuous_time, commpage_update_multiuser_config,
+    #                    commpage_update_timebase - ten functions, **no storage at all**
+    #      added     0   all 18 of the object's references (21 minus three versuffix duplicates) are
+    #                    symbols this image already carries, and **none of them is a stub**
+    #
+    # Five of the object's definitions are not stubs and have no reference yet: `commpage_populate`,
+    # `commpage_set_spin_count`, and the three storage names `commPagePtr` (`B 0x4`),
+    # `_cpu_capabilities` (`B 0x4`) and `sharedpage_rw_addr` (`B 0x4`). `commpage_populate` is the
+    # one worth naming: it is the function that *installs* the shared page, and the callers that will
+    # reach it are in `arm_vm_init`/`pmap`, which the walk has not touched. So this step links the
+    # commpage's updaters while nothing has created the commpage - and that is safe in exactly the
+    # way `commpage_update_active_cpus` itself shows: its first two instructions are a `commPagePtr`
+    # guard, and `commPagePtr` is a storage **stand-in of four zero bytes** in the same object, so
+    # the function returns after loading it.
+    #
+    # **The stop this step leaves is decided by `load_context`, not by the object** - and this is the
+    # first step in the whole walk whose prediction had to be closed against *two* reachable stubs the
+    # path does not take.
+    #
+    #     after the stop, in `processor_up`:
+    #       0x800e6668  lck_spin_unlock(&pset->pset_lock)   -> b hw_lock_unlock, real
+    #       0x800e666c  ml_cpu_up()                         real: two hw_atomic_add
+    #       0x800e6670  mov r0, r4 / pop / b ml_set_interrupts_enabled     <- splx(s), and **closed
+    #                                                                        below**
+    #     then, in `load_context` from 0x8000e73c:
+    #       0x8000e73c  if (thread->kernel_stack) ... else stack_alloc_try + panic   **closed below**
+    #       0x8000e764  thread->state & TH_IDLE ? skip : sched_run_incr(thread)
+    #                   - `kernel_bootstrap` set `thread->state = TH_RUN`, so it **is** called; real
+    #                   (priority.o, 300), two hw_atomic_add, no stub in its 0x38 bytes
+    #       0x8000e788  processor->active_thread = thread
+    #       0x8000e78c  thread_get_perfcontrol_class(thread)   real, 0x7C bytes, no stub branch
+    #       0x8000e7a4  processor_state_update_explicit(...)   real: str, add, ldr, stm, bx lr
+    #       0x8000e7ac  processor->starting_pri, ->deadline = UINT64_MAX, ->last_processor
+    #       0x8000e7c0  mach_absolute_time()                   real: `b ml_get_timebase`, which is real
+    #       0x8000e7d8  timer_start(&thread->system_timer, ...) real: four stores and bx lr
+    #       0x8000e7f0  timer_start(&PROCESSOR_DATA(...system_state), ...)   same
+    #       0x8000e7fc  mov lr, pc / b machine_load_context    ***the stop***
+    #
+    # **Falsifier 1 - `splx(s)`, and the only stub in `ml_set_interrupts_enabled`.** Its body has one
+    # `bl` into the stub object, `ast_taken_kernel` at 0x80016fd8 (`machine_routines_common.c:529`),
+    # and it is behind `if (enable) ... if (get_preemption_level() == 0) ... while
+    # (thread->machine.CpuDatap->cpu_pending_ast & AST_URGENT)`. `splx` passes the value the *first*
+    # `ml_set_interrupts_enabled` returned, so whether the AST arm is even reachable turns on the
+    # interrupt state `processor_up` was entered in. **It is disabled, and the boot order is where
+    # that is read rather than assumed**: `kernel_bootstrap` (`osfmk/kern/startup.c:252-411`), the
+    # function that calls `load_context`, contains **no interrupt-enabling statement at all**, while
+    # `assert(ml_get_interrupts_enabled() == FALSE)` (startup.c:548) and `(void) spllo(); /* Allow
+    # interruptions */` (startup.c:560) are both inside `kernel_bootstrap_thread`
+    # (startup.c:413-660) - that is, on the far side of the context switch this step stops at. So
+    # `ml_set_interrupts_enabled(0)` returns 0, and `splx(0)` takes the `cmp r0,#0 / beq 0x80016fa8`
+    # arm: `cpsid if`, `pop`, return. The `AST_URGENT` loop cannot be entered because `enable` is
+    # FALSE, whatever the thread's pending-AST bit happens to be.
+    #
+    # **Falsifier 2 - `stack_alloc_try`.** Its guard is `if (!thread->kernel_stack)`, and the thread
+    # came from `kernel_thread_create`, which calls `stack_alloc(thread)` two statements later with
+    # `assert(thread->kernel_stack != 0)` (`osfmk/kern/thread.c:1644-1645`) - and that function had
+    # already run to completion in 300, since 300's stop is past it. So the guard is taken at
+    # 0x8000e744 and neither `stack_alloc_try` nor `panic("load_context")` at 0x8000e760 is reached.
+    #
+    # **_Predicted stop: `stub_hit=machine_load_context`, `xnu_entry_stub_caller=0x8000e804`._**
+    # 0x8000e804 is read off the image, not computed: the call is not a `bl` but
+    # `mov lr, pc` at 0x8000e7fc followed by `b machine_load_context` at 0x8000e800, and on ARM
+    # reading `pc` as a source operand gives instruction + 8, so that one instruction **sets the
+    # caller key**. `load_context` is in `startup.o`, which links far below this step's object
+    # (0x8000e71c against 0x800e...), so appending an object cannot move it.
+    #
+    # **The build.**
+    #
+    #                   predicted        measured
+    #     undefined     745              745
+    #     function      658              658
+    #     storage        87               87
+    #     .data         0x80118000       0x80118000   (the object has none)
+    #     __bss_start   0x80130a00       0x80130a00   (unchanged)
+    #     __bss_end     0x80167798       0x80167798   <- unchanged, **third step running**, and this
+    #                                                   time the mechanism is visible in the map:
+    #                                                   commpage.o's `.bss` (0xC) is placed at
+    #                                                   0x801660c8, inside the existing 0x38 `*fill*`
+    #                                                   in front of `realstubs.o`'s 64-aligned arrays
+    #                                                   (0x801660c8 -> 0x80166100), so the section's
+    #                                                   total is unmoved and `realstubs.o`'s own
+    #                                                   0x1684 does not shrink either
+    #     .text         0x1176C0 -> ~0x117A60   0x117AA0   (predicted 0x40 low)
+    #     image         1247700          1247700      (unchanged, as predicted)
+    #
+    # All three counts exact and all three layout lines exact; `.text` missed by 0x40 and the four
+    # named terms are each **exact in the map, to the byte in both directions**:
+    #
+    #     commpage.o `.text`            +0x5B0   placed 0x5B0 at 0x800e6ba8 (after machine.o's 0x5F0)
+    #     commpage.o `.rodata.str1.1`   +0x13    placed 0x13 at 0x80112248 - **not relaxed this time**,
+    #                                            unlike 301's, which is why 301's lesson is a *warning*
+    #                                            about an upper bound and not a rule that it always bites
+    #     realstubs.o `.text`           -0xF0    0x3EA0 -> 0x3DB0: ten function stubs retired, none
+    #                                            added, 10 x 24 exactly
+    #     realstubs.o `.rodata.str1.4`  -0x148   0x34D4 -> 0x338C, and 0x148 is the number measured
+    #                                            out of the stub object *before* the build by reading
+    #                                            the ten names out of that section one at a time
+    #                                  -----
+    #                                  +0x38B   against a measured section delta of +0x3E0
+    #
+    # **So the fifth term - the fill the linker inserts in front of aligned inputs - is +0x55, and the
+    # step's prediction was 0x40 low because its band gave that term 0..0x1F.** The term is a sum over
+    # *every* aligned input from the insertion point to the end of the section, and each one is
+    # governed by a modular arithmetic the step can compute: this object's `.text` is 0x5B0, which is
+    # 0x30 short of a multiple of 64, so every 64-aligned read-only input after it moves from fill f
+    # to (f + 0x30) mod 64 - **+0x30 where f < 0x10 and -0x10 otherwise**; every 32-aligned one moves
+    # by 0x10 the same way; and the inputs after `realstubs.o`'s string section have shifted back by
+    # 0x378 instead, which is 0x18 mod 32 and 0x38 mod 64 and moves *their* fills the other way. 301's
+    # +0x12 measured this same term on a step that inserted 0x5F0 where this one inserts 0x5B0. The
+    # band for the next step is 0..+0x60 for an insertion of this size, not 0..+0x20.
+    #
+    # **Next:** 303 - `osfmk/arm/cswitch.s` (manifest:438, built as `out/xnu_asm_obj/cswitch.o`) for
+    # `machine_load_context`. This is the step where the walk stops being a walk: `machine_load_context`
+    # switches stacks and `eret`s into `kernel_bootstrap_thread`, so it **does not return**, the
+    # caller-key idiom ends here, and what follows is not a stub to resolve but the first thread
+    # actually running - and the first thing that thread does is `idle_thread_create`.
+    OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ=${STAGE90_ENTRY_OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_commpage_commpage.o}
     # 298: the orphan sections get names, and `__DATA,__sysctl_set` gets a segment
     #
     # **297 fixed what the orphans broke; this step stops them being orphans.** The same build output
@@ -8188,6 +8315,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_KPC_THREAD_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_PRIORITY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_MACHINE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -8200,7 +8328,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
