@@ -172,6 +172,11 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `ranges`, and returns `ranges[1]` - so this is the object that turns "the reader is present"
     # into "the reader read this project's device tree".
     ARM_PE_IDENTIFY_OBJ=${STAGE90_ENTRY_PE_IDENTIFY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_arm_pe_identify_machine.o}
+    # `osfmk/device/subrs.c`, named by experiment-171's `stub_hit=strcmp`. The reader above compares
+    # property names and values to walk a node (`device_tree.c:375` and `:144`) and `pe_identify_machine`
+    # compares the SoC device type against Apple's board names (`:58` onward), so either of the two
+    # ways that run could have got there needs this object to get any further.
+    ARM_SUBRS_OBJ=${STAGE90_ENTRY_SUBRS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_device_subrs.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -182,9 +187,10 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$ARM_STRLEN_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_DEVICE_TREE_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_PE_IDENTIFY_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$ARM_SUBRS_OBJ"        "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
-                "$ARM_PE_IDENTIFY_OBJ")
+                "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
