@@ -231,6 +231,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-215](experiment-215-four-bytes-and-the-frontier-is-ccdigest-update.md) | the Smallest Object There Is, `cchmac_update` Resolves and Adds Nothing, and the Frontier Is `ccdigest_update` |
 | stage90 | [experiment-216](experiment-216-ccdigest-update-runs-to-completion-and-the-frontier-is-cchmac-final.md) | `ccdigest_update` Runs to Completion, the First Generic Digest Helper on the Device, and the Frontier Is `cchmac_final` |
 | stage90 | [experiment-217](experiment-217-cchmac-final-resolves-and-the-frontier-is-ccdigest-final-64be.md) | `cchmac_final` Resolves, Nothing New Executes, and the Frontier Is `ccdigest_final_64be` |
+| stage90 | [experiment-218](experiment-218-the-whole-hmac-finalisation-runs-and-the-frontier-is-cchmac.md) | the Whole HMAC Finalisation Runs on the Device, the Text Arithmetic Gets Three Terms, and the Frontier Is `cchmac` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

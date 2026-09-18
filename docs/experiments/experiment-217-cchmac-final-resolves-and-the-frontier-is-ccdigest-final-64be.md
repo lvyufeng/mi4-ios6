@@ -87,9 +87,15 @@ Both directions link, taken by standing an empty object in for the new object. T
 | payload text | 880090 B | 880090 B |
 
 120 bytes of object replace a 12-byte generated stub, so the symbol arithmetic says +108 and `.text`
-grows by 96 - the same 16-byte section-tail rounding experiment 216 named, checked the same way
-(`nm -S` says exactly one symbol changed size, `cchmac_final`, `0x0000000c` -> `0x00000078`, and none
-was added or removed).
+grows by 96 - the same 16-byte difference experiment 216 reported.
+
+**Correction, added after the run (experiment 218).** The sentence above originally attributed the 12
+bytes to the section's tail being rounded up to 16, which experiment 216 had proposed. That
+explanation is wrong; experiment 218's step, where the symbol sizes grew by 488 and `.text` by 448,
+is the counterexample. `.text` ends with an unsymbolized, aligned region holding the generated stubs'
+name strings and the kernel's section-name table, and the measured difference here is that region
+shrinking by 16 (plus its own alignment slack) - not rounding. The decomposition is in experiment
+218's document, which is also where the corrected rule is stated.
 
 ## What is next: `ccdigest_final_64be`, and the prediction is `cchmac`
 

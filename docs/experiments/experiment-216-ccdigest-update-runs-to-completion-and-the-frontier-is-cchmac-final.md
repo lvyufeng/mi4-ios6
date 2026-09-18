@@ -91,25 +91,34 @@ symbol was added or removed.
 
 **The text arithmetic is named rather than rounded.** 280 bytes of real text replace a 12-byte
 generated stub, so the sum of the symbol sizes grows by 268, and it does: summing every symbol size
-in the two ELFs gives 366280 -> 366548 exactly. But `.text` grows by 256, not 268. The 12 bytes are
-the section's tail padding, and the same padding explains every other step in this sequence: **every
-`.text` size observed here is a multiple of 16** (287712, 287728, 287760, 287968), so the section
-grows by the *rounded* content change rather than by the content change itself, and the difference
-between the two ways of counting is never more than 15 bytes. Measurements:
+in the two ELFs gives 366280 -> 366548 exactly. But `.text` grows by 256, not 268. Measurements:
 
 ```
                                     A          B     delta
-sum of all symbol sizes          366280     366548     +268    (the object minus the stub)
-.text section size (ELF)         287712     287968     +256    (rounded up to 16)
+sum of all symbol sizes          366280     366548     +268
+everything after the last
+  symbolized byte of .text         6284       6276       -8
+.text section size (ELF)         287712     287968     +256
 "text size" as build_entry.sh
-reports it                       287728     287984     +256    (the above, plus a constant 16)
+reports it                       287728     287984     +256
 ```
 
 No symbol was added or removed and `nm -S` says exactly one changed size - `ccdigest_update`,
-`0x0000000c` -> `0x00000118` - so there is no third symbol for the 12 bytes to belong to. The two
-ways of counting differ here for the first time in this sequence, which is why it is worth writing
-down which one is which rather than picking the one that looks tidier: the next step's table will
-quote `build_entry.sh`'s number, as every previous one did.
+`0x0000000c` -> `0x00000118` - so the 12 bytes are in the unsymbolized part of `.text`, not in a
+third symbol.
+
+**Correction, added after the run (experiment 218).** This section originally said that every `.text`
+size here is a multiple of 16, so the section grows by the *rounded* content change and the 12 bytes
+are the section's tail padding. That is wrong, and experiment 218's step is what falsified it: there
+the symbol sizes grew by 488 while `.text` grew by 448, a difference of 40, which no rounding to 16
+can produce. `.text` does not end with the last symbol; `objdump -s` over its tail shows
+NUL-terminated strings - `zinit`, `zone_change`, `zone_free_count`, and `__TEXT`/`__DATA` section
+descriptors - i.e. the generated stubs' own name pool and the kernel's section-name table. That
+unsymbolized region shrinks when a stub is removed, and it is *aligned*, so the distance from the
+last symbolized byte to its start also changes with the symbol region; the -8 above is the two of
+those together, not the length of `ccdigest_update`. The decomposition measured for the three steps
+of this stretch is in experiment 218's document. What survives from the original paragraph is only
+the part that was measured: the two ways of counting differ, and both are stated here.
 
 ## What is next: `cchmac_final`, and the prediction is `ccdigest_final_64be`
 
