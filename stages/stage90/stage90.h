@@ -3987,8 +3987,12 @@ struct stage90_xnu_macho_loader_result {
  * cause. The device tree is validated in two places and only one of them was covered by the
  * host-side checks; a single named constant is what makes the second place impossible to
  * forget.
+ *
+ * 21 since experiment 193 added `/defaults`. The root child count is checked in two
+ * places (`mmu.c`'s high-root summary and the bootstrap state block) and both read this
+ * constant, which is the point of it existing.
  */
-#define STAGE90_APPLE_DT_ROOT_CHILDREN 20u
+#define STAGE90_APPLE_DT_ROOT_CHILDREN 21u
 
 /*
  * Dead-man reset.

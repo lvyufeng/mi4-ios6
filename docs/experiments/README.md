@@ -206,6 +206,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-190](experiment-190-the-schedulers-own-processor-checked-pointer-by-pointer-and-the-frontier-is-processor-data-init.md) | The Scheduler's Own Processor, Checked Pointer by Pointer, and the Frontier Is `processor_data_init` |
 | stage90 | [experiment-191](experiment-191-processor-data-init-ran-the-interrupt-state-and-the-frontier-is-ml-set-interrupts-enabled.md) | `processor_data_init` Ran, the Interrupt State, and the Frontier Is `ml_set_interrupts_enabled` |
 | stage90 | [experiment-192](experiment-192-the-interrupt-state-ran-for-real-and-the-frontier-is-a-device-tree-node-not-an-object.md) | The Interrupt State Ran for Real, and the Frontier Is a Device-Tree Node, Not an Object |
+| stage90 | [experiment-193](experiment-193-defaults-was-the-missing-node-and-the-f-bit-does-not-read-1.md) | `/defaults` Was the Missing Node, and the F Bit Does Not Read 1 on This Device |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

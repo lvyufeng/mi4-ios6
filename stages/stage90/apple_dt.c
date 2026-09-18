@@ -222,6 +222,12 @@ int apple_dt_selftest_and_log(const void *dt, uint32_t len)
 
     int ok = 1;
     ok &= expect_child(root, end, "chosen");
+    /*
+     * Experiment 192's run stopped at `stub_hit=IODTGetDefault` because this node was
+     * missing - `PE_get_default` looks for it and does not find it (arm_init.c:282). Named
+     * here so a hardware run confirms it the same way it confirms the nodes below.
+     */
+    ok &= expect_child(root, end, "defaults");
     ok &= expect_child(root, end, "memory");
     ok &= expect_child(root, end, "cpus");
     /*

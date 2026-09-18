@@ -667,6 +667,32 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
     apple_dt_prop_u32_array(b, "ram-console-reg", ram_console_reg, ARRAY_SIZE(ram_console_reg));
 #endif
 
+    /*
+     * /defaults
+     *
+     * Experiment 192's run stopped at `stub_hit=IODTGetDefault`, one symbol before the probe
+     * at `arm_vm_init`. The stop was not a missing object but a missing node: `arm_init` asks
+     * for `hw.memsize` through `PE_get_default` (`arm_init.c:282`), `PE_get_default`
+     * (`pexpert/gen/bootargs.c:386`) looks for a `/defaults` node first, and this tree had
+     * none - so control reached its fallback, `IODTGetDefault`, which is undefined here and
+     * is defined in `iokit/Kernel/IODeviceTreeSupport.cpp`, 11303 bytes with 57 mostly-C++
+     * references. Both paths want the same node; this is the node.
+     *
+     * The value is the same expression `boot_args.c:11` and the /memory node's `reg` already
+     * use, so it introduces no new number. It is a 4-byte machine-order word because
+     * `DTGetProperty` does not swap and `PE_get_default` `memcpy`s into a `uint32_t` - the
+     * way every numeric property in this tree is already written and read
+     * (`pe_serial.c:744` reads `reg` as a native word; `ml_parse_cpu_topology` reads ours).
+     *
+     * `arm_vm_init`'s first statement clamps the kernel's own `mem_size` down to this value
+     * only if this value is *smaller*, and it is larger than the 8 MB window this image maps,
+     * so the number cannot change the memory map - which is what makes it safe to add before
+     * the run that measures what XNU actually received.
+     */
+    apple_dt_node_begin(b, 2, 0);
+    apple_dt_prop_str(b, "name", "defaults");
+    apple_dt_prop_u32(b, "hw.memsize", RAM_CONSOLE_BASE - RAM_PHYS_BASE);
+
     /* /memory */
     apple_dt_node_begin(b, 4, 0);
     apple_dt_prop_str(b, "name", "memory");
