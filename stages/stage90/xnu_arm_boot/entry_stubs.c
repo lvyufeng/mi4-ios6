@@ -341,34 +341,37 @@ void entry_stub_hit(const char *name)
 
 #ifdef STAGE90_ENTRY_REAL_ARM_INIT
 /*
- * `ml_parse_cpu_topology()` - the statement `arm_init` executes next, after `PE_init_platform`
- * returns (`osfmk/arm/arm_init.c:217`, the first call after the arm64-only block that follows
- * `:159`). It is a stub here, and like `DTInit` before it, not one that only names itself.
+ * `cpu_processor_alloc()` - `osfmk/arm/arm_init.c:233`, the first call after the CPU count is
+ * known. The probe prints that count and then names itself.
  *
- * By the time it fires, `pe_identify_machine` has run - the real one, `pexpert/arm/pe_identify_machine.c`,
- * whose *first act* is `pe_arm_get_soc_base_phys()`: find the `arm-io` node with `DTFindEntry`,
- * read its `device_type` and its `ranges` property, keep `ranges[1]`, and return that; a zero return
- * makes `pe_identify_machine` give up before reading `/cpus` at all. So calling it again from here
- * - it is exported, and the second call returns the cached value without touching the tree - prints
- * the number XNU's own reader took out of `arm-io`'s `ranges` property in the device tree this
- * project built. Non-zero means the walk found the node and read the property; zero means it did
- * not, and the two are the experiment.
+ * `ml_parse_cpu_topology()` runs just before it (`:217`) and is now *real* XNU code: experiment
+ * 176's run named it, so `osfmk/arm/machine_routines.o` is linked, and the link immediately
+ * reported what that costs this file - "multiple definition of `ml_parse_cpu_topology'". The
+ * hand-written definition that stood here for experiments 171 through 176 is therefore gone, the
+ * same way `DTInit`'s went in experiment 170, and for the same reason: this file defines a symbol
+ * only while nothing else does, and the link is what says when that stops being true.
  *
- * The `arm-io` requirement is not new - `tools/xnu_dt_requirements.py` found it by reading XNU - but
- * this is the first time the value XNU gets from it is measured on the hardware rather than
- * predicted from the source.
+ * What `ml_parse_cpu_topology` does is `DTLookupEntry(NULL, "/cpus")`, iterate the children, and
+ * `++avail_cpus` for each - then `panic("No cpus found!")` if the count came out zero. So the
+ * number is the whole question about `/cpus` in the tree this project builds, and `avail_cpus` is
+ * `static`, which is why the probe asks the exported accessor instead. `ml_get_cpu_count()` is
+ * three instructions out of `machine_routines.o` - now in the image - returning that same counter.
  *
- * `DTInit` used to be hand-written here for the same purpose, in experiments 169 and 170. Linking
- * `pexpert/gen/device_tree.o` below defined it for real and the link reported the duplicate, which
- * is the mechanism this file's header describes; the definition is gone and this one takes its
- * place, one edge further on.
+ * A count of zero means XNU's own walk found no cpu children in our tree and the run stopped in
+ * `panic`; a count of one or more means the walk succeeded, and `cpu_processor_alloc` is the next
+ * thing `arm_init` asks for. The two outcomes are one line apart in the log either way.
+ *
+ * `ml_parse_cpu_topology`'s probe printed `xnu_entry_soc_base_phys=0xf9000000` in experiment 176 -
+ * `*(ranges_prop + 1)` out of the `arm-io` node, checked against `stage90_main.c`'s `io_ranges`.
+ * That measurement is spent; the accessor caches its answer after the first call, so asking again
+ * would only print the same number.
  */
-uint32_t pe_arm_get_soc_base_phys(void);   /* vm_offset_t, and 32-bit on this target */
+unsigned int ml_get_cpu_count(void);
 
-void ml_parse_cpu_topology(void)
+void cpu_processor_alloc(void)
 {
-    entry_kv("xnu_entry_soc_base_phys", pe_arm_get_soc_base_phys());
-    entry_stub_hit("ml_parse_cpu_topology");
+    entry_kv("xnu_entry_avail_cpus", ml_get_cpu_count());
+    entry_stub_hit("cpu_processor_alloc");
 }
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */
 
