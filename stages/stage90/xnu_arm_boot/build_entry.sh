@@ -3047,7 +3047,79 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
-    # 274: `host_notify_init`, and the walk comes *back out* of `ipc_bootstrap` for the first time.
+    # 275: `mac_policy_init`, and the stop is a tail call that reports its caller's caller - again.
+    # 274's stop was `mac_policy_init`, and the object that defines it is `security/mac_base.c`
+    # (manifest:664), `security_mac_base.o` - **10087 bytes of text, 1280 of data, 2120 of bss, 115
+    # definitions and 72 references**, the first object this walk has taken out of `osfmk/` and `bsd/`
+    # into `security/`, and the largest single step since 267. **3 resolved** (`mac_policy_init`,
+    # `mac_policy_initbsd`, `mac_policy_initmach` - the only three of its definitions the image
+    # references), **32 added**, of which the largest groups are the `sbuf_*` family (`sbuf_new`,
+    # `sbuf_setpos`, `sbuf_putc`, `sbuf_printf`, `sbuf_len`, `sbuf_finish`), the MAC label surface
+    # (`mac_cred_label_*`, `mac_vnode_label_*`, `mac_mount_label_externalize`,
+    # `mac_file_check_get`/`_set`), the `kauth_*` credentials, `namei`/`nameidone`/`vn_setlabel`,
+    # `sysctl__children`, `strsep`, `vfs_context_current`, `act_set_astmacf`, `bsd_exception`,
+    # `_FREE` and `mac_labelzone_init`. 28 of the 72 references are already real and 12 already stubs.
+    # **Every one of the 32 is defined by an object the build has already compiled** (`security_*.o`
+    # among them), so the generator can size each stand-in from its own definition - the check that
+    # has failed the build rather than guess a size since 244.
+    #
+    # The built function is data setup and nine calls, and the data half is the first thing this walk
+    # has linked that says `CONFIG_EMBEDDED` is on: `mac_policy_list.entries` is `mac_policy_static_entries`,
+    # not a `kalloc`, and this object defines that array itself (`SECURITY_READ_ONLY_LATE(static struct
+    # mac_policy_list_element) mac_policy_static_entries[MAC_POLICY_LIST_CHUNKSIZE]`, `mac_base.c:273`),
+    # so it needs no stand-in and no size decision.
+    #
+    #     00f4: vld1.64 {d16-d17}, [pc, #0xb4]   ; a 32-byte .rodata constant for the list header:
+    #     011c: vst1.32 {d16-d17}, [r1 :128]!    ;   numloaded 0, max 0x200, maxindex 0, staticmax 0,
+    #                                             ;   freehint 0, chunks 1
+    #     0128: bl bzero(mac_policy_static_entries, 0x800)   ; 512 * 4 bytes
+    #     0144: bl lck_grp_attr_alloc_init     \  nine calls, all real, all already in this image
+    #     014c: bl lck_grp_attr_setstat        |  (269 linked `locks.o`; 273 and 274 have been
+    #     015c: bl lck_grp_alloc_init          |  calling into it on every run since)
+    #     0164: bl lck_attr_alloc_init         |
+    #     016c: bl lck_attr_setdefault         |
+    #     0178: bl lck_mtx_alloc_init          |
+    #     018c: bl lck_attr_free               |
+    #     0194: bl lck_grp_attr_free           |
+    #     019c: bl lck_grp_free                /
+    #     01a0: pop {r4, r5, r6, lr}
+    #     01a4: b mac_labelzone_init           ; a tail call, and a new undefined name
+    #
+    # **Prediction: `stub_hit=mac_labelzone_init`, with the caller at `kernel_bootstrap+0x248` - the
+    # same offset 274 measured, and that is the point of writing it down.** `mac_policy_init` is
+    # entered by `bl mac_policy_init` from `kernel_bootstrap` at `+0x244`, so its own `lr` is
+    # `+0x248`; the prologue pushes that `lr` and the epilogue pops it back, and the tail call then
+    # leaves *that* value in `lr` for the stub. So **the caller key alone cannot tell this stop from
+    # the previous one** - `caller-4` resolves to the same `bl mac_policy_init` either way, and the
+    # *name* is what says which function the run has reached. This is 246's and 252's shape for the
+    # third step in a row, and the first time the ambiguity is between two consecutive stops of the
+    # same walk.
+    #
+    # `mac_labelzone_init` is `security/mac_label.c` (manifest:669) and is the step after this one.
+    #
+    # **275 measured it, and both halves of the prediction held - including the half that says the
+    # caller key is not enough.** The build measured exactly what was predicted of the link: **3
+    # resolved, 32 added** (31 functions and one storage name, `sysctl__children`, 4 bytes, sized from
+    # its own definition), 840 -> 869 undefined, 765 -> 793 function stubs, 75 -> 76 storage, text
+    # 938308 -> 949572, image bytes 1048440 -> 1049720, `.bss` `0x800ffa00` .. `0x801355c8`, headroom
+    # 1878584. The run stopped at **`stub_hit=mac_labelzone_init`** with
+    # `xnu_entry_stub_caller=0x8000e148` - **`kernel_bootstrap+0x248`, the same value 274 measured**,
+    # because the tail call leaves `mac_policy_init`'s own return address in `lr`. So `caller-4`
+    # resolves to the same `bl mac_policy_init` for both stops, and the *name* is what says which
+    # function the walk reached: `_v`, `_a` and `_e` all agree, `kv_written=0x63` (99 = the 29-byte
+    # stub record plus two 34/36-byte caller records), `kv_in_dram=0x87` (135 = 99 + 36),
+    # `kv_dropped=0`, `why_byte=0x61`, zero abort entries. `mac_policy_init` ran: the 32-byte
+    # constant into the list header, the 2048-byte `bzero` of `mac_policy_static_entries`, both
+    # `LIST_INIT`s, and all nine lock calls.
+    #
+    # Two things this run settles beyond the step. **The digits window reads from the first digit
+    # again**: `_w0 = 0x30303038` and `_w1 = 0x38343165` are `8000e148` read back out of `g_kv_buf`,
+    # with `xnu_entry_stub_caller_digits = 0x36` = 54 = 29 + 25 - 273's off-by-one fix, verified on
+    # hardware. And **the report's echo is intact in this build** (`real XNU entry stub_hit=mac_labelzone_init`
+    # as three clean lines), where 274's was mangled twice identically - the same source-level
+    # reporter, two consecutive builds, two different outcomes, which is 272's caution arriving once
+    # more: the entry image's report is not a function of its source either.
+    SECURITY_MAC_BASE_OBJ=${STAGE90_ENTRY_SECURITY_MAC_BASE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/security_mac_base.o}    # 274: `host_notify_init`, and the walk comes *back out* of `ipc_bootstrap` for the first time.
     # 273's stop was `host_notify_init`, and the object that defines it is `osfmk/kern/host_notify.c`
     # (manifest:548), `osfmk_kern_host_notify.o` - **1616 bytes of text, 0 of data, 364 of bss, 18
     # definitions and 15 references**. **3 resolved** (`host_notify_init`, `host_notify_port_destroy`,
@@ -3468,6 +3540,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_SYNC_SEMA_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_MK_TIMER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_HOST_NOTIFY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$SECURITY_MAC_BASE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -3480,7 +3553,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
