@@ -41,8 +41,8 @@
  * this project will ever get evidence out of XNU's own entry path, and the constraints on it are
  * unusual:
  *
- *   - It runs with XNU's page tables live, which map only the 2 MB window. `ram_console` is at
- *     0xde500000, far outside it, so it cannot be written yet.
+ *   - It runs with XNU's page tables live, which map only [physBase, physBase + memSize) - 8 MB
+ *     here. `ram_console` is at 0xde500000, far outside it, so it cannot be written yet.
  *   - Therefore the epilogue first turns the caches and the MMU **off**. After that every address
  *     is physical, so `ram_console` becomes reachable at its own address - and so does this code,
  *     because the window is an identity mapping.
@@ -219,6 +219,66 @@ static void entry_write(const char *s)
 }
 
 /*
+ * One character into the same buffer `entry_write` appends to. Split out because the callers below
+ * build a string a character at a time from a value in a register, and there is no room in this
+ * image's `.bss` for a formatting buffer that would survive the teardown anyway.
+ */
+static void entry_putc(volatile uint8_t *data, uint32_t *size_p, uint32_t max, char c)
+{
+    if (*size_p < max) {
+        data[*size_p] = (uint8_t)c;
+        *size_p = *size_p + 1u;
+    }
+}
+
+/*
+ * ` key=0xvalue` straight into the ram_console, one character at a time.
+ *
+ * The difference between this and `entry_write` is not the destination, it is where the characters
+ * come from. `entry_write` takes a string, so a *value* would have to be formatted into memory
+ * first - and the only memory reachable before the teardown is this image's own `.bss`, which is
+ * cacheable, which makes the formatting subject to exactly the cache problem the teardown exists to
+ * solve. This takes the value as a *register* argument and never stores it anywhere, so it survives
+ * the teardown by construction. That is what makes it usable for reporting on the teardown itself,
+ * and it is why experiment 195's log could not say what it was supposed to say.
+ *
+ * `key` must be a string in this image; `.rodata` lands inside `.text`, inside the window, so
+ * reading it with the MMU off is a physical read of this image, which is where it is.
+ */
+static void entry_write_kv(const char *key, uint32_t value)
+{
+    static const char hex[] = "0123456789abcdef";
+    volatile uint32_t *sig = (volatile uint32_t *)(uintptr_t)RAM_CONSOLE_BASE;
+    volatile uint32_t *size_p = (volatile uint32_t *)(uintptr_t)(RAM_CONSOLE_BASE + 8u);
+    volatile uint8_t *data = (volatile uint8_t *)(uintptr_t)(RAM_CONSOLE_BASE + 12u);
+    const uint32_t max = 0x00200000u - 12u;
+    uint32_t size;
+
+    if (*sig != RAM_CONSOLE_SIG) {
+        /* Nothing sane to append to; start a fresh buffer so the line is not lost. */
+        *sig = RAM_CONSOLE_SIG;
+        size = 0u;
+    } else {
+        size = *size_p;
+    }
+
+    entry_putc(data, &size, max, ' ');
+    while (*key != '\0') {
+        entry_putc(data, &size, max, *key++);
+    }
+    entry_putc(data, &size, max, '=');
+    entry_putc(data, &size, max, '0');
+    entry_putc(data, &size, max, 'x');
+    for (unsigned i = 0; i < 8u; i++) {
+        entry_putc(data, &size, max, hex[(value >> (28u - (i * 4u))) & 0xfu]);
+    }
+    entry_putc(data, &size, max, '\n');
+
+    *size_p = size;
+    __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
+}
+
+/*
  * The one exit. `why` must be in read-only memory inside the window, which everything in this
  * image is.
  */
@@ -226,7 +286,59 @@ __attribute__((noreturn, noinline)) static void entry_epilogue(const char *why)
 {
     uint32_t sctlr;
 
+    /*
+     * Read the state of the results buffer *before* anything is torn down, and hold it in
+     * callee-saved registers rather than in memory.
+     *
+     * This is what experiment 195 cost. `g_kv_len` and `g_kv_buf` live in this image's `.bss`, which
+     * is cacheable, so everything the probes record sits in the D-cache until this function gets it
+     * to DRAM. When that transfer fails the log shows an *empty* buffer, and an empty buffer cannot
+     * be told apart from a probe that never ran - which is exactly the ambiguity that run produced.
+     * A value in a register cannot be lost that way, so it is the honest report of what was written.
+     */
+    register uint32_t kv_len_written __asm__("r8");
+    register uint32_t csselr_before __asm__("r9");
+    register uint32_t ccsidr_before __asm__("r10");
+    register uint32_t ccsidr_l1 __asm__("r11");
+
+    kv_len_written = g_kv_len;
+
+    /*
+     * CCSIDR describes whichever cache CSSELR selects, and *nothing here ever selected one*.
+     *
+     * Experiment 195 measured what that costs. The sweep below enumerates the D-cache by set and
+     * way from CCSIDR, and the value it was handed - `cssidr_before` below, 0xf0ffe03b on this
+     * device - decodes to 4096 sets of 8 ways of 128-byte lines, four megabytes. That is not a
+     * 16-or-32 KB L1, so the sweep was enumerating an L1-shaped address space from a description of
+     * something else, and the results buffer did not reach DRAM: the log came out with an empty
+     * buffer and no way to say whether the probe had run. `cache_ops.c` states the same assumption
+     * ("which defaults to the L1 data cache") and gets away with it because the payload is the only
+     * thing that has run when it does this.
+     *
+     * So CSSELR is now written rather than assumed. The two readings are kept and printed because
+     * the pair is the evidence: what the sweep would have used, and what the L1 actually is.
+     */
+    __asm__ volatile ("mrc p15, 2, %0, c0, c0, 0" : "=r"(csselr_before));
+    __asm__ volatile ("mrc p15, 1, %0, c0, c0, 0" : "=r"(ccsidr_before));
+    __asm__ volatile ("mcr p15, 2, %0, c0, c0, 0" :: "r"(0u) : "memory");   /* level 1 data */
+    __asm__ volatile ("mrc p15, 1, %0, c0, c0, 0" : "=r"(ccsidr_l1));
+
     __asm__ volatile ("cpsid if" ::: "memory");
+
+    /*
+     * Clean the results buffer BY ADDRESS, before the sweep by set and way below.
+     *
+     * The sweep is only as right as the geometry it enumerates, and experiment 195 is what a sweep
+     * that misses the buffer's lines costs: they stay dirty, the log reads back the zeroes `.bss`
+     * was filled with, and the measurement is lost. A clean by MVA names the lines directly and
+     * cannot miss them; 32-byte steps cover any line size this core has, since the hardware ignores
+     * the bits below the line. This is what makes the results arrive; the sweep stays as the
+     * backstop that covers every *other* line this image wrote.
+     */
+    for (uintptr_t p = (uintptr_t)&g_kv_len; p < (uintptr_t)&g_kv_buf[ENTRY_KV_BUF]; p += 32u) {
+        __asm__ volatile ("mcr p15, 0, %0, c7, c10, 1" :: "r"(p) : "memory");
+    }
+    __asm__ volatile ("dsb sy" ::: "memory");
 
     /*
      * Clean and invalidate the D-cache by set and way, BEFORE touching SCTLR.
@@ -238,13 +350,16 @@ __attribute__((noreturn, noinline)) static void entry_epilogue(const char *why)
      * cannot survive the cache being turned off - and here is a second place it bites, in an image
      * that had not read them.
      *
-     * Geometry from CCSIDR rather than assumed, same as cache_ops.c: a wrong set or way count
-     * leaves lines behind, and the failure looks like partial corruption rather than loss.
+     * Geometry from CCSIDR read with the L1 selected, and the operand built the way XNU builds
+     * it: the set field starts at the line size and the *way* is right-justified at bit 31, which is
+     * what `MMU_I7WAY` means in `osfmk/arm/proc_reg.h` (30 for a 4-way cache, 31 for 2, 29 for the
+     * L2's 8). Putting the way at `line_log2 + log2(ways)` instead - where this loop used to put it -
+     * lands it inside the set field, so no way is ever selected.
      */
     {
         uint32_t ccsidr, line_log2, ways, sets, way_shift, way, set, n, w;
 
-        __asm__ volatile ("mrc p15, 1, %0, c0, c0, 0" : "=r"(ccsidr));
+        ccsidr = ccsidr_l1;
         line_log2 = (ccsidr & 0x7u) + 4u;
         ways = ((ccsidr >> 3) & 0x3ffu) + 1u;
         sets = ((ccsidr >> 13) & 0x7fffu) + 1u;
@@ -252,7 +367,7 @@ __attribute__((noreturn, noinline)) static void entry_epilogue(const char *why)
         for (w = ways; w > 1u; w >>= 1) {
             n++;
         }
-        way_shift = line_log2 + n;
+        way_shift = 32u - n;
 
         for (way = 0u; way < ways; way++) {
             for (set = 0u; set < sets; set++) {
@@ -279,6 +394,22 @@ __attribute__((noreturn, noinline)) static void entry_epilogue(const char *why)
     entry_write("\nMI4IOS6_STAGE90_XNU real XNU entry: ");
     entry_write(why);
     entry_write("\n");
+
+    /*
+     * Printed unconditionally, and that is the point of them.
+     *
+     * `xnu_entry_kv_written` is what the probes recorded, read from a register, so it is right even
+     * if the transfer to DRAM was not. `xnu_entry_kv_in_dram` is what the transfer actually
+     * produced - they differ only when it failed, and an empty results buffer with a non-zero
+     * `kv_written` is a failed transfer rather than a probe that never ran. The three cache values
+     * are the inputs the sweep runs on: what CSSELR was, what CCSIDR said through it, and what it
+     * says once the level 1 data cache is selected.
+     */
+    entry_write_kv("xnu_entry_kv_written", kv_len_written);
+    entry_write_kv("xnu_entry_kv_in_dram", g_kv_len);
+    entry_write_kv("xnu_entry_csselr_before", csselr_before);
+    entry_write_kv("xnu_entry_ccsidr_before", ccsidr_before);
+    entry_write_kv("xnu_entry_ccsidr_l1", ccsidr_l1);
 
     if (g_kv_len != 0u) {
         entry_write("MI4IOS6_STAGE90_XNU real XNU entry");
@@ -414,70 +545,77 @@ void _consume_kprintf_args(int a, ...)
 }
 
 /*
- * `patch_low_glo()` - `osfmk/arm/lowmem_vectors.c:74`, in `osfmk_arm_lowmem_vectors.o`, and the
- * first symbol `arm_init` reaches after `arm_vm_init` returns.
+ * `pmap_bootstrap()` - `osfmk/arm/pmap.c:2764`, the first symbol `arm_vm_init` reaches after
+ * `vm_set_page_size`.
  *
- * Experiment 193 stopped at `arm_vm_init` itself. This run links `osfmk/arm/arm_vm_init.o` and the
- * Mach-O section readers it calls (`libkern/kernel_mach_header.o`), so the probe moves along
- * `arm_init`'s body to the next thing nothing defines. The move is named by the source rather than
- * by a run: `arm_init:322-326` reads `debug` and tests
- * `(debugmode & MIN_LOW_GLO_MASK) == MIN_LOW_GLO_MASK`, `MIN_LOW_GLO_MASK` is `0x144`
- * (`arm_init.c:127`), and this payload's own cmdline contains `debug=0x144` - so the test is true
- * and `patch_low_glo()` is called, not skipped.
+ * Experiment 194 stopped at `vm_set_page_size` (`osfmk/vm/vm_resident.c:480`) because that object
+ * was not in the image. This run links `osfmk_vm_vm_resident.o`, so `vm_set_page_size` runs - it is
+ * twelve statements with no calls in it - and the front of `arm_vm_init` continues through
+ * `set_mmu_ttb`, `set_mmu_ttb_alternate` and `flush_mmu_tlb`, all real, and the block of `vm_*`
+ * stores that follows them, which are stores into this object's own globals.
  *
- * It is one statement: `lowGlo.lgStext = (uint32_t)vm_kernel_stext;`. What the probe reports is
- * therefore not this function but the state `arm_vm_init` left behind, which is the only place in
- * the sequence where the kernel's own memory map is visible as numbers:
+ * So this is the first probe in a while that fires, and the values below are the whole of
+ * `arm_vm_init`'s arithmetic read back out of the globals it wrote. `arm_vm_init` is where the
+ * kernel decides what memory it has, and every number here is derived from the boot_args the
+ * payload built and the Mach-O header exp-194 added:
  *
- *   `cpu_ttep` is where `arm_vm_init` put the system translation table - `boot_ttep + 4 pages`,
- *   after `bcopy`ing the boot table there and clearing out the V=P entries for the region the
- *   kernel is giving back. `phystokv` is an identity here, so the value doubles as a physical
- *   address.
+ *   `avail_start` is `args->topOfKernelData + 4 pages + 6 pages` - the boot translation table
+ *   copied to the page after `boot_tte`, then six pages reserved - and `avail_end` is
+ *   `gPhysBase + mem_size`, where `mem_size` is `args->memSize` clamped against the `xmaxmem` that
+ *   exp-193 measured as 0x5e500000 and therefore left alone.
  *
- *   `avail_start` is where the next free byte is after that copy plus the six reserved pages;
- *   `avail_end` is `gPhysBase + mem_size`, the end of the memory this image declares. The gap
- *   between them is what `sane_size` and `max_mem` are computed from.
+ *   `sane_size` is `mem_size - (avail_start - gPhysBase)`, the memory left after the kernel's own
+ *   tables, and `end_kern` is `round_page(getlastaddr())` - the end of the image **as the Mach-O
+ *   header describes it**, which is the number exp-194's `entry_macho.s` exists to make true.
  *
- *   `gVirtBase`/`gPhysBase`/`gPhysSize` are the boot_args the payload built, read back through the
- *   kernel's own globals, and `static_memory_end` is `gVirtBase + mem_size` with `mem_size` clamped
- *   against the `xmaxmem` that exp-193 measured. `mem_size = 0x00800000` here and `xmaxmem =
- *   0x5e500000`, so the clamp is a no-op; `end_kern` is `round_page(getlastaddr())`, the end of the
- *   image as the Mach-O header describes it, and the first value in this sequence that comes out of
- *   `entry_macho.s` rather than out of the boot_args.
+ *   `next_paddr` is the argument. `pmap_bootstrap` is called as
+ *   `pmap_bootstrap((gVirtBase + MEM_SIZE_MAX + 0x3FFFFF) & 0xFFC00000)` with
+ *   `MEM_SIZE_MAX = 0x40000000` (`arm_vm_init.c:134`), so it is the first physical address above a
+ *   1 GB window rounded to a 4 MB boundary: `(0x00200000 + 0x40000000 + 0x3FFFFF) & 0xFFC00000`.
+ *   This is the value the pmap is told it may start allocating from, so it is worth having measured
+ *   before the object that uses it is linked.
  *
- * `CPSR` is recorded for continuity with exp-191 and exp-193, where the F bit turned out not to be
- * a usable check. It is not expected to distinguish anything here either.
+ * `vm_kernel_slide` is `gVirtBase - 0x80000000`, which underflows in a 32-bit `vm_offset_t` and is
+ * reported as measured for that reason: the field exists because a real kernel is linked at
+ * 0x80000000 and this one is linked at 0x00200000, so the "slide" is negative and the value is what
+ * that does to an unsigned word.
+ *
+ * `CPSR` is recorded for the same continuity as the last two experiments: the F bit is not a usable
+ * check on this device (exp-193), so nothing here depends on it.
  */
-void patch_low_glo(void);
+void pmap_bootstrap(uint32_t next_paddr);
 
 extern uint32_t cpu_ttep;
 extern uint32_t avail_start;
 extern uint32_t avail_end;
 extern uint32_t gVirtBase;
-extern uint32_t gPhysBase;
 extern uint32_t gPhysSize;
 extern uint32_t mem_size;
 extern uint32_t static_memory_end;
 extern uint32_t end_kern;
+extern uint32_t sane_size;
+extern uint32_t vm_kernel_slide;
 
-void patch_low_glo(void)
+void pmap_bootstrap(uint32_t next_paddr)
 {
     uint32_t cpsr;
 
     __asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr));
 
-    entry_kv("xnu_entry_plg_cpsr",            cpsr);
-    entry_kv("xnu_entry_plg_cpu_ttep",        cpu_ttep);
-    entry_kv("xnu_entry_plg_avail_start",     avail_start);
-    entry_kv("xnu_entry_plg_avail_end",       avail_end);
-    entry_kv("xnu_entry_plg_gvirtbase",       gVirtBase);
-    entry_kv("xnu_entry_plg_gphysbase",       gPhysBase);
-    entry_kv("xnu_entry_plg_gphyssize",       gPhysSize);
-    entry_kv("xnu_entry_plg_mem_size",        mem_size);
-    entry_kv("xnu_entry_plg_static_mem_end",  static_memory_end);
-    entry_kv("xnu_entry_plg_end_kern",        end_kern);
+    entry_kv("xnu_entry_pmb_next_paddr",     next_paddr);
+    entry_kv("xnu_entry_pmb_cpsr",           cpsr);
+    entry_kv("xnu_entry_pmb_cpu_ttep",       cpu_ttep);
+    entry_kv("xnu_entry_pmb_avail_start",    avail_start);
+    entry_kv("xnu_entry_pmb_avail_end",      avail_end);
+    entry_kv("xnu_entry_pmb_gvirtbase",      gVirtBase);
+    entry_kv("xnu_entry_pmb_gphyssize",      gPhysSize);
+    entry_kv("xnu_entry_pmb_mem_size",       mem_size);
+    entry_kv("xnu_entry_pmb_static_mem_end", static_memory_end);
+    entry_kv("xnu_entry_pmb_end_kern",       end_kern);
+    entry_kv("xnu_entry_pmb_sane_size",      sane_size);
+    entry_kv("xnu_entry_pmb_kernel_slide",   vm_kernel_slide);
 
-    entry_stub_hit("patch_low_glo");
+    entry_stub_hit("pmap_bootstrap");
 }
 
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */

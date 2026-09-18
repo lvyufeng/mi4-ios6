@@ -208,6 +208,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-192](experiment-192-the-interrupt-state-ran-for-real-and-the-frontier-is-a-device-tree-node-not-an-object.md) | The Interrupt State Ran for Real, and the Frontier Is a Device-Tree Node, Not an Object |
 | stage90 | [experiment-193](experiment-193-defaults-was-the-missing-node-and-the-f-bit-does-not-read-1.md) | `/defaults` Was the Missing Node, and the F Bit Does Not Read 1 on This Device |
 | stage90 | [experiment-194](experiment-194-the-image-describes-itself-in-a-mach-o-header-and-the-frontier-is-vm-set-page-size.md) | The Image Describes Itself in a Mach-O Header, and the Frontier Is `vm_set_page_size` |
+| stage90 | [experiment-195](experiment-195-the-vm-object-runs-and-the-flush-was-reading-the-wrong-cache.md) | The VM's Own Object Runs, `pmap_bootstrap` Is Reached, and the Flush That Carries the Evidence Was Reading the Wrong Cache |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
