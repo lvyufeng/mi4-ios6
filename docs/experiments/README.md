@@ -269,6 +269,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-253](experiment-253-vm-mem-bootstrap-returns-and-the-stop-leaves-it.md) | `osfmk_vm_device_vm.o` — **`vm_mem_bootstrap` Returns**, and the stop leaves it for the first time since 247: `cs_init` from `kernel_bootstrap` |
 | stage90 | [experiment-254](experiment-254-the-stop-is-ledger-credit-inside-the-pmaps-page-table-expansion.md) | `bsd_kern_kern_cs.o` — a wrong prediction and what it measured: the stop is **`ledger_credit` inside the pmap's page-table expansion**, the first runtime-allocation frontier |
 | stage90 | [experiment-255](experiment-255-the-ledger-is-live-and-the-frontier-leaves-the-tree.md) | `osfmk_kern_ledger.o` — the ledger is live, a 73728-byte guarded `kernel_map` allocation completes, and the stop is **`__firehose_buffer_create` — the first frontier symbol with no implementation anywhere in the tree** |
+| stage90 | [experiment-256](experiment-256-the-firehose-port-opens-and-its-first-missing-header-is-from-a-newer-xnu.md) | host-only: the firehose **port opens** — the source is in the tree, and its first missing header (`os/atomic_private.h`) is from a **newer XNU** than the one this project builds |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
