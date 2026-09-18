@@ -404,59 +404,74 @@ void _consume_kprintf_args(int a, ...)
 }
 
 /*
- * `ml_set_interrupts_enabled()` - `osfmk/arm/machine_routines_common.c:507`, and the first symbol
- * `processor_init` reaches after `processor_data_init`.
+ * `arm_vm_init()` - `osfmk/arm/arm_vm_init.c:339`, and the first symbol `arm_init` reaches once it
+ * has finished with the CPU and the scheduler.
  *
- * Experiment 190 stopped at `processor_data_init`, the first symbol in that function that nothing
- * defines. This run links `osfmk/kern/processor_data.o`, which is 72 bytes of text with two
- * references (`memset` and `timer_init`, both already satisfied here), so the whole of
- * `processor_data_init` runs - three `timer_init` calls into the `processor_data_t` at the end of
- * `struct processor` - and `processor_init` continues to its next statement group:
+ * Experiment 191 stopped at `ml_set_interrupts_enabled`, `processor_init`'s `splsched()`. This run
+ * links `osfmk/arm/machine_routines_common.o`, which defines it, and the probe moves here. The
+ * probe *had* to move first: that object defines the symbol the last probe defined, and a link
+ * that sees two definitions is the failure that produced exp-190's wrong measurement - so the
+ * object cannot be measured while the probe still stands on it.
  *
- *     processor->processor_list = NULL;
- *     s = splsched();                     -> ml_set_interrupts_enabled(FALSE), undefined -> the stop
- *     pset_lock(pset);
- *     bit_set(pset->cpu_bitmask, cpu_id);
- *     if (pset->cpu_set_count++ == 0) ...
+ * `ml_set_interrupts_enabled` is called twice by `processor_init` and both calls pass 0. The first
+ * is `splsched()`'s explicit `FALSE`; the second is `splx(s)` where `s` is the first call's return
+ * value, `(state & PSR_IRQF) == 0`, which is 0 because exp-191 measured CPSR's I bit already set.
+ * So the compiled `cpsid if` at `machine_routines_common.o+0x24` runs twice and the enable path
+ * never is entered. That path is unsafe here, and it is worth saying why: it reads the per-CPU base
+ * out of TPIDRPRW and dereferences it, and it takes the AST-drain branch whenever
+ * `get_preemption_level()` returns 0 - which in this image is a stub that always returns 0. It is
+ * skipped because `enable` is 0, and `enable` is 0 because exp-191 measured the CPSR that decides
+ * it.
  *
- * `splsched()` is a macro over `ml_set_interrupts_enabled(FALSE)` and `splx(s)` over
- * `ml_set_interrupts_enabled(s)`; the compiled `processor_init` calls it twice, once with r0 = 0
- * (`mov r0, #0` then `bl ml_set_interrupts_enabled`, saving the result in r8) and once with r8
- * (`mov r0, r8` before the second call, at `processor_init+0x174`). The probe stops at the first,
- * so this is the interrupt state at the top of `processor_init`'s critical section, and the
- * argument must be **0**.
+ * What the stop is worth checking, in the order the probe reads it:
  *
- * This probe reports less than the last few, and that is the shape of the step rather than a
- * shortfall: `processor_data_init` is four statements with no observable output, and what is worth
- * checking is where the run has got to. The two zeros below are the check - `pset->cpu_set_count`
- * and `processor_count` are incremented *after* the locked region, so at this point they must
- * still be 0, exactly as they were at exp-190's stop. Same two values, same two zeros, and now
- * from an earlier statement in the same function, which is what makes them evidence about the
- * position rather than about the values.
+ *   `args` is `arm_init`'s own argument, the `boot_args` pointer the payload handed XNU. `arm_init`
+ *   copies it into `const_boot_args` with `__aeabi_memcpy4` and points `BootArgs` at the copy; `r2`
+ *   here is still the original, so it must be the address exp-175's layout checks put after `.bss`.
  *
- * `CPSR` is read because this is the one probe in the sequence placed at an interrupt-state
- * transition, so the I bit here is the state XNU's `_start` left: `start.s` never enables
- * interrupts, so the expectation is that they are already masked and `splsched` is recording that
- * rather than changing it. The value is reported rather than predicted because nothing in this
- * image has read CPSR before - and because it is the first value in this sequence that comes from
- * the *program status register* rather than from a system register XNU named.
+ *   `xmaxmem` is the argument `arm_init` computed a few statements before, and it is the value this
+ *   experiment is really about. `PE_parse_boot_argn("maxmem", ...)` cannot find it - the cmdline the
+ *   payload writes has no `maxmem=` - so the value comes from `PE_get_default("hw.memsize",
+ *   &memsize, 4)`, and that call is not the one it looks like. `PE_get_default`
+ *   (`pexpert/gen/bootargs.c:386`) first looks for a `/defaults` node in the device tree, which this
+ *   payload does not build, and then returns `IODTGetDefault(...) ? FALSE : TRUE`. `IODTGetDefault`
+ *   is undefined here, so it is a generated stub returning 0, so `PE_get_default` returns TRUE while
+ *   writing nothing into `memsize`. `memsize` is an uninitialised local at `sp+8`, and `arm_init`'s
+ *   compiled code reads it with `ldrne r7, [sp, #8]`. So `xmaxmem` is whatever was on the stack.
+ *   This probe measures it before `arm_vm_init` uses it, because `arm_vm_init` opens with
+ *   `if ((memory_size != 0) && (mem_size > memory_size)) mem_size = memory_size;` and a value below
+ *   `args->memSize` would silently shrink the kernel's own memory map.
  *
- * The declaration is the real signature, `boolean_t ml_set_interrupts_enabled(boolean_t enable)`,
- * one `int` in r0 and one `int` out - `machine_routines_common.c:507`. It is the function that
- * decides whether to call `get_preemption_level` and `current_thread` on the way out, none of
- * which is reached here, which is the reason this step links the object rather than standing in
- * for it: `ml_set_interrupts_enabled` is not a register access, it is twenty lines of scheduler
- * state inspection with an `#if INTERRUPT_MASKED_DEBUG` in the middle.
+ *   `CPSR` is the one value here that must have *changed* during this step. Exp-191 read
+ *   `0x60000093` - I set, F clear - at the top of the critical section; the real
+ *   `ml_set_interrupts_enabled(FALSE)` executes `cpsid if`, which sets F as well, so the low byte
+ *   here must be `0xd3`. A stub in its place would leave F where `start.s` left it, so this is the
+ *   evidence that the object not only linked but ran.
+ *
+ *   `current_thread()` is a real two-instruction function in this image - `mrc p15, 0, r0, c13,
+ *   c0, 4`, then `bx lr` - and what it returns is compared against `&BootCpuData`. Equal means
+ *   TPIDRPRW still holds what experiment-180's `machine_set_current_thread` put there, one
+ *   scheduler and seven steps later.
+ *
+ *   `pset0.cpu_bitmask`, `pset0.cpu_set_count` and `processor_count` are the values exp-191
+ *   measured as 0 and said would become live inside the locked region this step now runs through:
+ *   `bit_set(pset->cpu_bitmask, cpu_id)` for `cpu_id = 0`, then `pset->cpu_set_count++` and
+ *   `processor_count++`. The bitmask must be 1 and both counters must be 1. These three are the
+ *   only values in the probe that are supposed to *differ* from the last run, which is what makes
+ *   them the check that the run did not stop early.
+ *
+ * The declaration is the real signature, `void arm_vm_init(uint64_t memory_size, boot_args *args)`,
+ * with the second parameter left as `void *` because this file has no `boot_args`: the probe needs
+ * the pointer's value and nothing behind it, and the real definition is not linked.
  */
-int ml_set_interrupts_enabled(int enable);
+void arm_vm_init(uint64_t memory_size, void *args);
 
+extern void *current_thread(void);
 extern uint8_t pset0[];
-extern uint8_t BootProcessor[];
+extern uint8_t BootCpuData[];
 extern uint32_t processor_count;
 extern void *master_processor;
 
-#define PROC_STATE_OFF          8u    /* exp-190: `str r9, [r4, #8]`, PROCESSOR_OFF_LINE */
-#define PROC_SET_OFF           32u    /* exp-190: `str r6, [r4, #32]`, &pset0 */
 #define PSET_CPU_SET_COUNT_OFF 52u    /* exp-190: the `ldr`/`str` pair inside the locked region */
 #define PSET_CPU_BITMASK_OFF   56u    /* `add r0, r2, #56`, the `bit_set` target */
 
@@ -465,24 +480,24 @@ static uint32_t rd32(const volatile uint8_t *base, uint32_t off)
     return *(const volatile uint32_t *)(const void *)(base + off);
 }
 
-int ml_set_interrupts_enabled(int enable)
+void arm_vm_init(uint64_t memory_size, void *args)
 {
-    const volatile uint8_t *p = (const volatile uint8_t *)master_processor;
     uint32_t cpsr;
 
     __asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr));
 
-    entry_kv("xnu_entry_mlsie_enable",        (uint32_t)enable);
-    entry_kv("xnu_entry_mlsie_cpsr",          cpsr);
-    entry_kv("xnu_entry_mlsie_master_ptr",    (uint32_t)(uintptr_t)master_processor);
-    entry_kv("xnu_entry_mlsie_proc_state",    rd32(p, PROC_STATE_OFF));
-    entry_kv("xnu_entry_mlsie_proc_set",      rd32(p, PROC_SET_OFF));
-    entry_kv("xnu_entry_mlsie_pset0_bitmask", rd32(pset0, PSET_CPU_BITMASK_OFF));
-    entry_kv("xnu_entry_mlsie_pset0_count",   rd32(pset0, PSET_CPU_SET_COUNT_OFF));
-    entry_kv("xnu_entry_mlsie_proc_count",    processor_count);
+    entry_kv("xnu_entry_avm_xmaxmem_lo",    (uint32_t)memory_size);
+    entry_kv("xnu_entry_avm_xmaxmem_hi",    (uint32_t)(memory_size >> 32));
+    entry_kv("xnu_entry_avm_args",          (uint32_t)(uintptr_t)args);
+    entry_kv("xnu_entry_avm_cpsr",          cpsr);
+    entry_kv("xnu_entry_avm_current",       (uint32_t)(uintptr_t)current_thread());
+    entry_kv("xnu_entry_avm_bootcpu",       (uint32_t)(uintptr_t)BootCpuData);
+    entry_kv("xnu_entry_avm_master_ptr",    (uint32_t)(uintptr_t)master_processor);
+    entry_kv("xnu_entry_avm_pset0_bitmask", rd32(pset0, PSET_CPU_BITMASK_OFF));
+    entry_kv("xnu_entry_avm_pset0_count",   rd32(pset0, PSET_CPU_SET_COUNT_OFF));
+    entry_kv("xnu_entry_avm_proc_count",    processor_count);
 
-    entry_stub_hit("ml_set_interrupts_enabled");
-    return 0;   /* not reached */
+    entry_stub_hit("arm_vm_init");
 }
 
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */

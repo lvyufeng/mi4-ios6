@@ -205,6 +205,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-189](experiment-189-the-cpu-identified-itself-and-the-frontier-is-processor-bootstrap.md) | The CPU Identified Itself, and the Frontier Is `processor_bootstrap` |
 | stage90 | [experiment-190](experiment-190-the-schedulers-own-processor-checked-pointer-by-pointer-and-the-frontier-is-processor-data-init.md) | The Scheduler's Own Processor, Checked Pointer by Pointer, and the Frontier Is `processor_data_init` |
 | stage90 | [experiment-191](experiment-191-processor-data-init-ran-the-interrupt-state-and-the-frontier-is-ml-set-interrupts-enabled.md) | `processor_data_init` Ran, the Interrupt State, and the Frontier Is `ml_set_interrupts_enabled` |
+| stage90 | [experiment-192](experiment-192-the-interrupt-state-ran-for-real-and-the-frontier-is-a-device-tree-node-not-an-object.md) | The Interrupt State Ran for Real, and the Frontier Is a Device-Tree Node, Not an Object |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
