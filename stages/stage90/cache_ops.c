@@ -22,7 +22,8 @@
  *
  * The by-set/way operation reads its geometry from CCSIDR rather than assuming a line size or an
  * associativity, because assuming either is the kind of thing that works on the first board and
- * silently disagrees with the next one.
+ * silently disagrees with the next one. It also *selects* the cache before reading - CCSIDR
+ * describes whichever level CSSELR points at, and XNU leaves that pointing at the L2.
  */
 
 #include "stage90.h"
@@ -40,11 +41,21 @@ static uint32_t cache_line_bytes(void)
     return 4u << (ctr & 0xfu);
 }
 
-/* CCSIDR for the level CSSELR selects, which defaults to the L1 data cache. */
+/*
+ * CCSIDR for the level CSSELR selects, and CSSELR is therefore selected rather than assumed.
+ *
+ * It does not default to the L1 data cache, which is what this function used to say. On a core XNU
+ * has run `cpu_init` on, `do_cacheid()` (`osfmk/arm/cpuid.c:222-265`) selects L1, reads CCSIDR, and
+ * then selects **L2** and reads it again, and never selects L1 back - so anything of ours that runs
+ * after XNU inherits CSSELR = 2 and reads the L2's geometry out of it. That is measured, not
+ * inferred: experiment 195's entry image read `CSSELR = 2` and a 4096-set, 8-way, 128-byte
+ * description (4 MB) on this device, where the L1 is 64 sets, 4 ways, 64 bytes (16 KB).
+ */
 static void cache_dcache_geometry(uint32_t *line_log2, uint32_t *ways, uint32_t *sets)
 {
     uint32_t ccsidr;
 
+    __asm__ volatile ("mcr p15, 2, %0, c0, c0, 0" :: "r"(0u) : "memory");   /* level 1 data */
     __asm__ volatile ("mrc p15, 1, %0, c0, c0, 0" : "=r"(ccsidr));
 
     /* LineSize is log2(words per line) - 2, so bytes per line is 2^(LineSize + 4). */
@@ -71,13 +82,20 @@ static uint32_t cache_log2_u32(uint32_t v)
  * hold lines from whatever ran before us. Cleaning first cannot lose data; invalidating first can.
  *
  * Also used by platform_reboot, which is the one path that must not assume anything else worked.
+ *
+ * The operand's layout is XNU's, not an obvious one. The set field starts at the line size -
+ * `1 << MMU_I7SET` in `osfmk/arm/caches_asm.s:245-257` increments exactly that - and the way is
+ * right-justified at bit 31, which is what `MMU_I7WAY` is in `osfmk/arm/proc_reg.h`: 30 for a
+ * 4-way cache, 31 for 2, 29 for the L2's 8 ways. This loop used to put the way at
+ * `line_log2 + log2(ways)` - bit 8 for this device's L1 - which is inside the set field, so it
+ * never selected a way and the flush was not a flush. Experiment 195 is where that showed.
  */
 void cache_clean_invalidate_dcache_all(void)
 {
     uint32_t line_log2, ways, sets, way_shift, way, set;
 
     cache_dcache_geometry(&line_log2, &ways, &sets);
-    way_shift = line_log2 + cache_log2_u32(ways);
+    way_shift = 32u - cache_log2_u32(ways);
 
     for (way = 0u; way < ways; way++) {
         for (set = 0u; set < sets; set++) {
