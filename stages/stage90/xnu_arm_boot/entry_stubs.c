@@ -128,7 +128,7 @@ uint32_t kdebug_enable;
  *
  * That left both symbols undefined, and `build_entry.sh`'s generator takes a storage symbol's size
  * from `nm -S` over this project's object pool - where neither name appears at all. Its `case` falls
- * through to the function branch and emits `void version(void) { entry_stub_hit("version"); }`,
+ * through to the function branch and emits `void version(void) { entry_stub_hit("version", <lr>); }`,
  * which links, and which nothing here would ever trip over, because the only thing in this image
  * that touches either name is `osfmk/arm/lowmem_vectors.c:37-41`, taking their *addresses* for a
  * structure a debugger reads. It is still a stand-in that lies about what it is: a reader of the
@@ -576,8 +576,23 @@ void arm_init_idle_cpu(void) { entry_epilogue("arm_init_idle_cpu (unexpected)");
  *
  * `panic` is deliberately NOT among the generated ones: it is real here, and a device-tree or an
  * assertion failure reaching it should say so by name rather than looking like a missing symbol.
+ *
+ * **Experiment 244 adds the second argument, and it is the one thing the name cannot say.** From
+ * 243's stop onwards the frontier is a stub *somewhere*, and experiment 206's lesson is that
+ * `stub_hit=<symbol>` names a symbol and never a caller - 243's own log said "real arm_init reached
+ * a symbol this image does not provide" about `kmem_init`, which is four frames below `arm_init`
+ * (`arm_init` -> `machine_startup` -> `kernel_bootstrap` -> `vm_mem_bootstrap` -> `kmem_init`). The
+ * value is `lr` as the stub was entered with it, which for a `bl` is the address of the instruction
+ * after it - so the call site is `caller - 4`, and `tools/host_resolve_entry_addr.sh` resolves it
+ * that way against this image and prints `function+0xNN`.
+ *
+ * It is read with `__builtin_return_address(0)` **inside the generated one-liner**, where it is a
+ * read of `lr` before the function has done anything: the compilation of both shapes this build
+ * produces was checked with the build's own flags and the disassembly says `mov r1, lr` ahead of the
+ * tail call (and, for the shape with calls before it, `mov r5, lr` in the prologue). A stub is still
+ * 16 bytes rather than 12 - which is the whole cost of this, times 559 of them.
  */
-void entry_stub_hit(const char *name)
+void entry_stub_hit(const char *name, uint32_t caller)
 {
     static const char prefix[] = " stub_hit=";
 
@@ -592,7 +607,9 @@ void entry_stub_hit(const char *name)
         g_kv_buf[g_kv_len] = '\0';
     }
 
-    entry_epilogue("real arm_init reached a symbol this image does not provide");
+    entry_kv("xnu_entry_stub_caller", caller);
+
+    entry_epilogue("a symbol this image does not provide was called");
 }
 
 #ifdef STAGE90_ENTRY_REAL_ARM_INIT
@@ -725,7 +742,7 @@ void pmap_bootstrap(uint32_t next_paddr)
     entry_kv("xnu_entry_pmb_sane_size",      sane_size);
     entry_kv("xnu_entry_pmb_kernel_slide",   vm_kernel_slide);
 
-    entry_stub_hit("pmap_bootstrap");
+    entry_stub_hit("pmap_bootstrap", (uint32_t)(uintptr_t)__builtin_return_address(0));
 }
 #endif /* !STAGE90_ENTRY_REAL_PMAP_BOOTSTRAP */
 
@@ -932,11 +949,21 @@ void fleh_undef(void)
      * **Both read zero on the device, and that is not a missing object.** `zone_init` is the only
      * writer of either (`zalloc.c:2958-2959`, against the zero-initialized declarations at
      * `zalloc.c:340-341`), its only caller is `vm_mem_bootstrap+0x204`, and the path to that call
-     * goes through two 12-byte stubs first - `kmem_init` at `+0x074` and `kext_alloc_init` at
-     * `+0x1a4` - while `zone_init`'s own first call is `kmem_suballoc`, also a stub. A stub ends
-     * the run, so `zone_init` has never executed in this image. The image's `zone_init` really does
-     * store them (`str r1, [r0]` at `+0x94` and `str r2, [r0]` at `+0xac`), so a non-zero reading
-     * was possible and the zero is the boot's answer.
+     * goes through two stubs first - `kmem_init` at `+0x074` and `kext_alloc_init` at `+0x1a4` -
+     * while `zone_init`'s own first call is `kmem_suballoc`, also a stub. A stub ends the run, so
+     * `zone_init` has never executed in this image. The image's `zone_init` really does store them
+     * (`str r1, [r0]` at `+0x94` and `str r2, [r0]` at `+0xac`), so a non-zero reading was possible
+     * and the zero is the boot's answer.
+     *
+     * **Experiment 244 makes `kmem_init` real and `kmem_suballoc` with it** - both are in
+     * `osfmk_vm_vm_kern.o`, so the first of the two stubs above is gone and `zone_init`'s own first
+     * call is answered too. What is left in the path is `kext_alloc_init`, whose object is not
+     * linked yet. The two readings above are therefore expected to stay zero for one more run, and
+     * the run after that is the one that could change them.
+     *
+     * (The stub sizes in this comment read "12-byte" before 244 and "16-byte" after it: the
+     * generated stubs gained a `mov r1, lr` for the caller argument. The count of stubs on the path,
+     * which is what the sentence is about, did not change.)
      *
      * What that means is in `is_sane_zone_ptr` (`zalloc.c:1071-1077`): with
      * `zone_map_min_address == zone_map_max_address == 0` the range test cannot pass for any

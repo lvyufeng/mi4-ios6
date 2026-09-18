@@ -1870,6 +1870,89 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # grew, so `__DATA`'s front moved up 64 bytes and it is 64 bytes shorter, with its *end* where it
     # was - which is why the payload needed no rebuild beyond reading the new `.bin`.
     BSD_KERN_SUBR_PRF_OBJ=${STAGE90_ENTRY_BSD_KERN_SUBR_PRF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_subr_prf.o}
+    # `osfmk/vm/vm_kern.c` -> **9132 bytes of text, 674 of `.rodata.str1.1`, 8 of `.bss`, no
+    # `.data`, 26 global definitions, 79 references**. The object 243's stop named: `kmem_init` is
+    # 0x1ac bytes of it at offset 0x1e54, and the three that follow it in the boot are all here too -
+    # `kmem_alloc_kobject` (0x24 bytes, `vm_object_bootstrap`'s second statement and the call 234
+    # predicted for that step), `kmem_suballoc` (0x1bc, `zone_init`'s first call) and `kmem_alloc`
+    # (0x60). So one object stands behind three of the next four stops, and that is why this is the
+    # step rather than another probe: the frontier is a function, not an address - `vm_kernel_slide`
+    # is 0 under experiment 241's base, so nothing here can be rejected by the compile-time constant
+    # that `is_sane_zone_ptr` applies. (That constant is the whole reason 239 ended the
+    # one-object-per-run method; the memory `mi4-kernel-base-is-a-compile-time-constant` is the one
+    # to read before proposing an object for a boot-path failure, and this run is the case where
+    # reading it says the method is usable again.)
+    #
+    # Two collisions are impossible and one is worth stating. Impossible: nothing else in this
+    # project's object pool defines any of the 26 (`nm -A --defined-only` over
+    # `out/xnu_kernel_obj/*.o out/xnu_asm_obj/*.o` names only this file for every one of them), and
+    # `entry_stubs.c` has no hand-written definition of any `kmem_*`, `kernel_memory_*`,
+    # `kernel_map` or `vm_kernel_addr*` name. Worth stating: 21 of the 24 *storage* symbols this
+    # object references are already defined by objects the image links - `sane_size`, `max_mem`,
+    # `vm_kernel_slide`, `kernel_pmap`, `vm_page_locks`, `vm_page_free_target` and the rest - so they
+    # will not become stubs, and the three that will (`vm_global_no_user_wire_amount`,
+    # `vm_global_user_wire_limit`, `vm_user_wire_limit`) already are, at 4 bytes each. The generator
+    # fails the build rather than guess a storage size, so this is a prediction the build checks.
+    #
+    # **The prediction, written before the build.** `kmem_init` is 0x1e54 bytes into the object and
+    # its ARM-specific body is
+    #
+    #     kernel_map = vm_map_create(pmap_kernel(), VM_MIN_KERNEL_AND_KEXT_ADDRESS,
+    #                                                    VM_MAX_KERNEL_ADDRESS, FALSE);
+    #     while (pmap_virtual_region(region_select, &region_start, &region_size)) {
+    #             ... vm_map_enter(kernel_map, &map_addr, ..., VM_OBJECT_NULL, ...);
+    #     }
+    #
+    # so the first thing it calls is `vm_map_create` (defined - `osfmk_vm_vm_map.o` is linked since
+    # experiment 239, which is where 239's `vm_map_init+0x260` panic came from) and the first thing
+    # it *loops* on is `pmap_virtual_region` (defined - `osfmk_arm_pmap.o`). Which stub it reaches
+    # first is therefore a question about `vm_map_create`'s own body, and the answer is not something
+    # to guess: it is read off the disassembly of the linked image, by walking the calls and asking
+    # which of them is a stub. That walk is the prediction, and the device is what checks it.
+    #
+    # **And the reporting fix travels with it**, because of where the stop now is: `entry_stub_hit`
+    # gains a second argument, the `lr` the stub was entered with (a generated stub is a one-liner,
+    # so `__builtin_return_address(0)` is that register read before anything can clobber it -
+    # verified by compiling the two shapes with this build's own flags and reading the disassembly:
+    # `mov r1, lr` before the tail call). The run then reports `xnu_entry_stub_caller`, which names
+    # the *call site* rather than the symbol, and `tools/host_resolve_entry_addr.sh` turns that
+    # address back into `function+0xNN` against the image. The stop line's own text said "real
+    # arm_init reached a symbol" about a stub four frames below `arm_init`; with the caller reported
+    # the sentence no longer has to carry that, and it becomes what it can be exact about - it now
+    # reads "a symbol this image does not provide was called".
+    #
+    # **244 measured it, and both halves landed.** The build resolved 12 and added 3 - `copyinmap`,
+    # `kernel_map`, `kernel_memory_allocate/depopulate/populate`, `kmem_alloc`, `kmem_alloc_flags`,
+    # `kmem_alloc_kobject`, `kmem_alloc_pageable`, `kmem_free`, `kmem_init`, `kmem_suballoc` against
+    # `SHA256_Init/Update/Final` - so 645 -> 636 undefined, 559 -> 551 function stubs and 86 -> 85
+    # storage. Text 594065 -> 610225, and the split is worth having: **the reporting change alone
+    # costs 6720 bytes**, measured by building with this object replaced by an empty one (600785,
+    # with exp-243's 645-symbol stub set), of which 6708 is 559 stubs going from 12 bytes to 24 -
+    # `movw/movt` + `b` becomes `movw/movt` + `mov r1, lr` + `push`/`pop {lr}`, because gcc has to
+    # restore `lr` so the tail-called `entry_stub_hit` still returns to the original caller. The
+    # caller argument is therefore not free, and it is bought once for every stub in the image.
+    #
+    # The device's run: **`stub_hit=vm_map_store_init`, `xnu_entry_stub_caller=0x8004651c`**, which
+    # resolves to `vm_map_create+0x5c` - the return address of `80046518: bl 80083604
+    # <vm_map_store_init>` in the disassembly the prediction was made from. No exception, no abort
+    # key, `kv_written == kv_in_dram == 0x3e` (62 bytes: the two lines, 28 + 34). And the stop is
+    # one instruction past `bl zalloc` / `cmp r0, #0` / `bne`, with the object's own `panic` for the
+    # NULL case *not* taken: a real zone allocation out of `vm_map_zone` returned on this hardware.
+    # `zone_init` (`vm_mem_bootstrap+0x204`) is still ahead, so 239's zero zone-map bounds are
+    # unchanged; `kmem_suballoc`, its first call, is answered by this same object.
+    #
+    # Cost: 9132 bytes of text in the object, 674 of `.rodata.str1.1`, 8 of `.bss` (all linked), 636
+    # undefined, entry text 610225, image 703352 -> 719736, `.bss` end 0x800da248 -> 0x800de208,
+    # `__entry_image_end` 0x800de208 and `end_kern` 0x800df000, the derived `boot_args` offset
+    # 901120 -> 917504 with topOfKernelData/tree/window unmoved, 1187320 bytes of headroom, and the
+    # payload rebuilt from the regenerated header (its text grows by exactly the entry image's
+    # 16384). `persistent_write_attempted=0x00000000` in all 25 contracts that report it.
+    #
+    # Next: `vm_map_store_init` is in `osfmk_vm_vm_map_store.o` (908 bytes of text, 12 definitions,
+    # 14 references) - already built. It is a dispatcher: it calls `vm_map_store_init_ll` and
+    # `vm_map_store_init_rb`, which are in `osfmk_vm_vm_map_store_ll.o` (776) and
+    # `osfmk_vm_vm_map_store_rb.o` (5808), both built as well.
+    OSFMK_VM_VM_KERN_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_KERN_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_kern.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -1945,13 +2028,15 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_THREAD_CALL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_OBJECT_OBJ"     "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_SUBR_PRF_OBJ"      "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_VM_VM_KERN_OBJ"       "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
                 "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "$OSFMK_CCHMAC_OBJ" "$OSFMK_CC_CLEAR_OBJ" "$OSFMK_MEMSET_S_OBJ" "$OSFMK_CC_CMP_SAFE_OBJ" "$OSFMK_BSD_DEV_UNIX_STARTUP_OBJ" "$BSD_KERN_BSD_INIT_OBJ" "$BSD_KERN_KDEBUG_OBJ" "$OSFMK_VM_VM_INIT_OBJ" "$OSFMK_VM_VM_COMPRESSOR_OBJ" "$OSFMK_VM_VM_MAP_OBJ"
     "$LIBKERN_GEN_OSATOMICOPERATIONS_OBJ" "$BSD_KERN_KERN_MEMORYSTATUS_OBJ"
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
-    "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ")
+    "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
+    "$OSFMK_VM_VM_KERN_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
@@ -2012,7 +2097,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
         echo ' */'
         echo '#include <stdint.h>'
         echo
-        echo 'void entry_stub_hit(const char *name);'
+        echo 'void entry_stub_hit(const char *name, uint32_t caller);'
         echo
         : > "$OUT/xnu_arm_entry_stubnames.txt"
         n_data=0
@@ -2039,7 +2124,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
                     n_data=$((n_data + 1))
                     ;;
                 *)
-                    echo "void $sym(void) { entry_stub_hit(\"$sym\"); }"
+                    echo "void $sym(void) { entry_stub_hit(\"$sym\", (uint32_t)(uintptr_t)__builtin_return_address(0)); }"
                     printf 'func %s %s\n' "$sym" "${t:--}" >> "$OUT/xnu_arm_entry_stubnames.txt"
                     n_func=$((n_func + 1))
                     ;;
