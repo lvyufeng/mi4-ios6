@@ -69,7 +69,7 @@ it is XNU's page tables landing on this image's data.
 ```
   bss          0x00218008 .. 0x00219788 (6016 bytes, zeroed by the payload)
   limit        0x00220000
-  headroom     26760 bytes
+  headroom     26744 bytes
 ```
 
 `build_entry.sh` checks it (`ENTRY_DATA_LIMIT`), which is how the number above is quotable rather

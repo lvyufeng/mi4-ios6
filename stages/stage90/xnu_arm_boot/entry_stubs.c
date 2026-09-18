@@ -339,6 +339,39 @@ void entry_stub_hit(const char *name)
     entry_epilogue("real arm_init reached a symbol this image does not provide");
 }
 
+#ifdef STAGE90_ENTRY_REAL_ARM_INIT
+/*
+ * `DTInit(void *base)` - the one stub in this image that reports more than its own name.
+ *
+ * It is called from `PE_init_platform` (`pexpert/arm/pe_init.c:310`), and this image links
+ * `pexpert/arm/pe_init.o` and nothing else, so it is a stub here. But its single argument *is*
+ * `PE_state.deviceTreeHead`, which the statement above it copied out of `boot_args->deviceTreeP`
+ * (`:293`), so printing r0 prints XNU's own view of where the device tree is: the address this
+ * project's payload chose, read back out of XNU's structure by XNU's own function. That is a value
+ * XNU's boot path produced, not one this project put in a log line of its own.
+ *
+ * **It did not fire in experiment-169, and the reason is worth keeping here.** The experiment
+ * predicted this would be the next edge, from reading `PE_init_platform`; the device said
+ * `stub_hit=strlcpy` instead, because the `PE_state.video.v_pixelFormat` assignment at `:302`
+ * comes *before* the `DTInit` call at `:310` and `strlcpy` is the first thing in the function that
+ * is not in the image. So this definition is the instrument for the run after that one - the one
+ * that links `osfmk/arm/strlcpy.o` - and it is written now, ahead of the edge, so that the run
+ * that reaches it reports a value rather than only a name.
+ *
+ * Hand-written rather than generated for the same reason `panic` is: this file defines it, so
+ * pass 1 never sees it undefined and the generator never emits a version of it. When a later
+ * experiment links the object that really defines `DTInit` (`pexpert/gen/device_tree.o`, XNU
+ * 4570's own reader), the link will report a duplicate symbol and this definition is what goes.
+ */
+void entry_stub_hit(const char *name) __attribute__((noreturn));
+
+int DTInit(void *base)
+{
+    entry_kv("xnu_entry_dtinit_base", (uint32_t)(uintptr_t)base);
+    entry_stub_hit("DTInit");
+}
+#endif /* STAGE90_ENTRY_REAL_ARM_INIT */
+
 /*
  * The exception vector targets. `_start` installs these addresses in ExceptionVectorsTable and
  * turns on SCTLR.HIGHVEC, so if XNU's entry path takes any exception before reaching `arm_init`,

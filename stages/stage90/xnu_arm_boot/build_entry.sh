@@ -39,12 +39,27 @@ ENTRY_BASE=0x00200000
 # so this is the only window XNU's own tables map.
 ENTRY_SIZE=0x00200000
 
-# `topOfKernelData` is where `_start` puts its own page tables, and the payload sets it to
-# ENTRY_BASE + 0x20000 (`xnu_entry_jump.c`, which also refuses to jump if the image's bss would
-# reach past it). Everything this image owns therefore has to end below 0x00220000, and that is a
-# tighter limit than ENTRY_SIZE - checked below, because the failure mode is XNU's page tables
-# landing on our data rather than a build error.
-ENTRY_DATA_LIMIT=0x00020000
+# The two numbers that bound the image, read out of stage90.h rather than repeated here, because
+# the boot_args the payload hands `_start` are built from the same macros and a disagreement
+# between the two is a defect this project has a name for. `topOfKernelData` is where `_start`
+# puts its own page tables (`osfmk/arm/start.s:149`); everything this image owns has to end below
+# it, and `_start` then writes 40 KB (ten pages) of table entries starting at it. The device tree
+# is copied in above that, at ENTRY_DT_OFFSET. So there are two ways to fail and both are checked:
+# an image reaching past the limit is overwritten by XNU's tables, and a limit set so high that
+# the tables reach the tree is the same corruption from the other end.
+stage90_macro() {
+    arm-none-eabi-gcc -E -dM -I"$STAGE_DIR" -include stage90.h - </dev/null |
+        awk -v n="$1" '$1 == "#define" && $2 == n {print $3}' | sed 's/[uUlL]$//'
+}
+ENTRY_DATA_LIMIT=$(stage90_macro STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET)
+ENTRY_DT_OFFSET=$(stage90_macro STAGE90_XNU_ENTRY_DT_OFFSET)
+if [[ -z $ENTRY_DATA_LIMIT || -z $ENTRY_DT_OFFSET ]]; then
+    echo "could not read the entry limits out of stage90.h - expected" >&2
+    echo "STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET and STAGE90_XNU_ENTRY_DT_OFFSET" >&2
+    exit 2
+fi
+# What `start.s`'s invalidation loop covers, in bytes: `(PGBYTES/4 + PGBYTES/4*4) * 2` words.
+ENTRY_TABLE_BYTES=0x0000A000
 
 # `STAGE90_ENTRY_REAL_ARM_INIT=1` links XNU's own compiled objects - `arm_init.o`, `data.o`,
 # `bcopy.o`, `bzero.o` - in place of the stand-ins that name themselves and return, and generates a
@@ -64,7 +79,7 @@ say "  osfmk/arm/start.s: $(grep -c . "$OUT/xnu_arm_assemble.log") lines of repo
 
 say "== compiling the symbols start.s needs =="
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
-    -O2 -Wall -Wextra -Werror -std=gnu11 $STUB_DEFINES \
+    -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
     -c "$BOOT_DIR/entry_stubs.c" -o "$OUT/xnu_arm_entry_stubs.o"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
@@ -114,12 +129,22 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # stubbed as usual: the closure of `arm_init` is the whole kernel, so the image grows one object
     # at a time and each run reports the next edge.
     ARM_CPU_OBJ=${STAGE90_ENTRY_CPU_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_cpu.o}
+    # `pexpert/arm/pe_init.c`, again named by the previous run rather than by inspection:
+    # experiment-168's `stub_hit=PE_init_platform` is `arm_init.c:159`, and this object defines it.
+    # It is not a leaf the way `cpu.o` is - `PE_init_platform` pulls in `DTInit` and the rest of
+    # XNU's device-tree reader, which is the point of the run: it makes XNU's own tree reader walk
+    # the tree this project built, from inside XNU's own `arm_init`, with XNU's own page tables.
+    # It is also 34927 bytes of text against experiment-168's 26744 bytes of headroom, which is why
+    # `topOfKernelData` moved in the same experiment.
+    ARM_PE_INIT_OBJ=${STAGE90_ENTRY_PE_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_arm_pe_init.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BZERO_OBJ" "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_CPU_OBJ"   "run ./tools/build_xnu_arm_kernel.sh first"
-    LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ")
+    require "$ARM_PE_INIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
+                "$ARM_PE_INIT_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
@@ -234,7 +259,17 @@ fi
 if (( bss_end - ENTRY_BASE > ENTRY_DATA_LIMIT )); then
     say "FAIL: the image ends at $((bss_end - ENTRY_BASE)) bytes from the base, past the" >&2
     say "      $ENTRY_DATA_LIMIT bytes where _start puts its page tables" >&2
-    say "      (topOfKernelData, set in xnu_entry_jump.c). Shrink the image or raise it there." >&2
+    say "      (STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET in stage90.h). Shrink the image or raise" >&2
+    say "      it there - and if you raise it, mind the check below." >&2
+    exit 1
+fi
+# The other end of the same window. Raising the limit is how an image grows, so the number that
+# must not move is the device tree's: the tables occupy ENTRY_TABLE_BYTES above the limit, and the
+# tree sits at ENTRY_DT_OFFSET. A limit that leaves no gap produces the same corruption as an
+# oversized image, and would do it to the tree rather than to the image.
+if (( ENTRY_DATA_LIMIT + ENTRY_TABLE_BYTES > ENTRY_DT_OFFSET )); then
+    say "FAIL: a limit of $ENTRY_DATA_LIMIT leaves the $((ENTRY_DATA_LIMIT + ENTRY_TABLE_BYTES))" >&2
+    say "      bytes of tables _start writes overlapping the device tree at $ENTRY_DT_OFFSET." >&2
     exit 1
 fi
 
@@ -254,6 +289,9 @@ say "entry point  $entry"
 say "text size    $text_end bytes"
 say "image bytes  $bin_size"
 say "bss          $bss_start .. $bss_end ($bss_bytes bytes, zeroed by the payload)"
+say "data limit   $ENTRY_DATA_LIMIT (topOfKernelData - base, from stage90.h)"
+say "headroom     $((ENTRY_BASE + ENTRY_DATA_LIMIT - bss_end)) bytes below topOfKernelData"
+say "above it     $ENTRY_TABLE_BYTES bytes of page tables, then the tree at ENTRY_BASE + $ENTRY_DT_OFFSET"
 # The blob the payload embeds. Same shape as the Mach-O fixture's generated header: a plain byte
 # array, so the payload build needs no objcopy step of its own.
 {

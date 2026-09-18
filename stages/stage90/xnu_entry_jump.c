@@ -68,11 +68,13 @@ extern const uint32_t stage90_xnu_entry_blob_size;
 
 /*
  * Where the device tree goes. Inside the window, past the image and its BSS (which the link
- * reports), and past topOfKernelData (0x00220000) plus the ~40 KB of page tables `_start` writes
- * there. The tree is 0x7294 bytes today and the buffer below is sized for four times that, so a
- * growing tree fails a check rather than silently overlapping the tables.
+ * reports), and past topOfKernelData plus the 40 KB of page tables `_start` writes there. The
+ * distance is checked rather than assumed - build_entry.sh refuses to link an image whose data
+ * limit plus those 40 KB would reach this offset. The tree is 0x7294 bytes today and the buffer
+ * below is sized for four times that, so a growing tree fails a check rather than silently
+ * overlapping the tables.
  */
-#define ENTRY_DT_OFFSET     0x00080000u
+#define ENTRY_DT_OFFSET     STAGE90_XNU_ENTRY_DT_OFFSET
 #define ENTRY_DT_PA         (STAGE90_XNU_ENTRY_BASE + ENTRY_DT_OFFSET)
 #define ENTRY_DT_MAX        0x00020000u
 
@@ -137,8 +139,12 @@ static void xnu_entry_build_args(const struct boot_args *src)
     a->physBase = STAGE90_XNU_ENTRY_BASE;
     /* 2 MB: the whole window, so `_start`'s section loop covers the image and the tables. */
     a->memSize = STAGE90_XNU_ENTRY_SIZE;
-    /* 16 KB aligned, above the image and its BSS, inside the span, with room for L1+L2+HIGH pages. */
-    a->topOfKernelData = STAGE90_XNU_ENTRY_BASE + 0x00020000u;
+    /*
+     * Above the image and its BSS - build_entry.sh checks that against the same macro - inside the
+     * 2 MB span, and with the 40 KB `start.s` writes here kept clear of the device tree above it.
+     * The value lives in stage90.h so that the build and this boot_args cannot disagree about it.
+     */
+    a->topOfKernelData = STAGE90_XNU_ENTRY_BASE + STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET;
     a->machineType = 0x00009074u;
     /* The tree, copied in. `_start` does not read it; `arm_init` and everything after does. */
     a->deviceTreeP = (void *)(uintptr_t)ENTRY_DT_PA;
@@ -170,7 +176,7 @@ int stage90_xnu_entry_run(const struct boot_args *args)
     r->bss_start = STAGE90_XNU_ENTRY_BSS_START;
     r->bss_end = STAGE90_XNU_ENTRY_BSS_END;
     r->args_pa = ENTRY_ARGS_PA;
-    r->top_of_kernel_data = STAGE90_XNU_ENTRY_BASE + 0x00020000u;
+    r->top_of_kernel_data = STAGE90_XNU_ENTRY_BASE + STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET;
 
     xnu_log_puts("stage90 xnu_entry: entering XNU - this is the last thing the payload does\n");
 
@@ -182,7 +188,8 @@ int stage90_xnu_entry_run(const struct boot_args *args)
     if (stage90_xnu_entry_blob_size == 0u ||
         STAGE90_XNU_ENTRY_ENTRY < STAGE90_XNU_ENTRY_BASE ||
         STAGE90_XNU_ENTRY_ENTRY >= STAGE90_XNU_ENTRY_BASE + STAGE90_XNU_ENTRY_SIZE ||
-        STAGE90_XNU_ENTRY_BSS_END > STAGE90_XNU_ENTRY_BASE + 0x00020000u) {
+        STAGE90_XNU_ENTRY_BSS_END >
+        STAGE90_XNU_ENTRY_BASE + STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET) {
         xnu_log_puts("xnu_entry: the linked image does not match the window it is copied to\n");
         r->status = STAGE90_STATUS_BASE;
         r->checksum = stage90_xnu_entry_checksum(r);
