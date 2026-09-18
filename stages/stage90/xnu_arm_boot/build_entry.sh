@@ -2338,6 +2338,53 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `vnode_pager_cs_check_validation_bitmap`, `panic_on_cs_killed`) are finally wanted from. Past it
     # in `kernel_bootstrap`: `vm_mem_init` (real), `oslog_init` (real), `telemetry_init` (STUB).
     OSFMK_VM_DEVICE_VM_OBJ=${STAGE90_ENTRY_OSFMK_VM_DEVICE_VM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_device_vm.o}
+    # 254: `bsd_kern_kern_cs.o` - 2120 bytes of text, 21 references - the code-signing subsystem
+    # (`cs_init`, `cs_enforcement`, `cs_invalid_page`, `cs_debug`, `panic_on_cs_killed`, the trust-cache
+    # machinery). Resolved 5, added 13 - and the 13 arrive together, which is what entering `bsd/kern`
+    # for the first time looks like:
+    #   resolved cs_debug  cs_enforcement  cs_init  cs_invalid_page  panic_on_cs_killed
+    #   added    csblob_find_blob csblob_get_entitlements cs_hash_type osobject_retain proc_lock
+    #            proc_unlock sysctl__vm_children threadsignal ubc_cs_blob_get UBCINFOEXISTS
+    #            vn_getpath vnode_lock vnode_unlock
+    # 605 -> 613 undefined, 523 -> 532 function and 82 -> 81 storage stubs, text 684993 (+2640).
+    #
+    # **The prediction was WRONG, and the reason matters.** `cs_init` is short and calls no stub
+    # (`PE_parse_boot_argn`, `lck_grp_attr_alloc_init`, `lck_grp_alloc_init`, tail `lck_grp_attr_free`)
+    # so it should complete; the prediction for what follows came from `xnu_entry_callwalk.py --root
+    # oslog_init`, which names `__firehose_buffer_create` - and it was written as
+    # `stub_hit=__firehose_buffer_create, caller oslog_init+0x70`. Two causes: (1) the walker's output
+    # was read through `head -3`, so its conditional-alternatives paragraph - the one that mattered -
+    # was never on screen; (2) the walker's closure is not the executed path, because it treats
+    # `kmem_alloc_flags` (oslog_init's call at `+0x3c`, *before* the firehose call at `+0x70`) as clean
+    # while the real path goes through it into the pmap. "No stub on the straight-line path" is a
+    # statement about the model, not about the run.
+    #
+    # Device: **`stub_hit=ledger_credit`, `xnu_entry_stub_caller=0x80029cfc`**, whose `caller - 4` is
+    # `80029cf8: bl 80093454 <ledger_credit>` - inside the function starting at 0x800298ac, which nm
+    # labels `pmap_expand`. The three inlined `pmap_tt_ledger_credit` sites from `pmap.c:3631/3639/3647`
+    # are at 0x80029cd0/0x80029ce4/0x80029cf8 and the `beq` at `+0x410` was **taken**, skipping the
+    # first two - a measured fact, since `ledger_credit` is a stub and the run could not have passed the
+    # first. `kv_written == kv_in_dram == 0x3a`.
+    #
+    # Caution: nm -S reports `pmap_expand` as 538 bytes while the stop is 0x450 bytes into it, and the
+    # disassembly shows no `pop {..., pc}` between 0x80029a00 and 0x80029d40 - one function runs
+    # through all of it, so the symbol's size field is not the function's extent. Identify the function
+    # by address-minus-base, not by the size column.
+    #
+    # What it means: `cs_init` completed; `vm_mem_init` is a single `b vm_object_init` and
+    # **`vm_object_init` is `bx lr`** (four bytes); `oslog_init` ran and its `kmem_alloc_flags` call is
+    # where the run went - allocating the OS-log buffer is the first kernel-map allocation that has ever
+    # needed *new page tables*, so it entered the pmap's expansion path. **The frontier has changed
+    # character**: for thirty-odd steps the stop was the next *initialisation* function; this one is
+    # inside a runtime memory allocation several frames deep in the ARM pmap.
+    #
+    # Image did not move: 785648 (+192), layout args 983040 unchanged, headroom 1120504, payload text
+    # 1277866. `persistent_write_attempted=0x00000000` in all 25 contracts,
+    # `failure_mask=0x00000000` in all 87.
+    #
+    # Next: `ledger_credit` is in `osfmk_kern_ledger.o` - 8324 bytes of text, 35 references - a
+    # *runtime* object, which fits where the frontier now is. Read the WHOLE callwalk output for 255.
+    BSD_KERN_KERN_CS_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_CS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_cs.o}
     OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
@@ -2423,6 +2470,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_VM_VM_FAULT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_MEMORY_OBJECT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_DEVICE_VM_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_KERN_CS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2432,7 +2480,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
