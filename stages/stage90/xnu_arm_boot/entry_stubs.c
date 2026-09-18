@@ -341,37 +341,50 @@ void entry_stub_hit(const char *name)
 
 #ifdef STAGE90_ENTRY_REAL_ARM_INIT
 /*
- * `cpu_processor_alloc()` - `osfmk/arm/arm_init.c:233`, the first call after the CPU count is
- * known. The probe prints that count and then names itself.
+ * `thread_bootstrap()` - `osfmk/arm/arm_init.c:240`, the first call after `cpu_processor_alloc`
+ * (`:234`) and the two assignments that record where the boot CPU's data is (`:236`, `:237`). The
+ * probe prints the three addresses those lines are about, then names itself.
  *
- * `ml_parse_cpu_topology()` runs just before it (`:217`) and is now *real* XNU code: experiment
- * 176's run named it, so `osfmk/arm/machine_routines.o` is linked, and the link immediately
- * reported what that costs this file - "multiple definition of `ml_parse_cpu_topology'". The
- * hand-written definition that stood here for experiments 171 through 176 is therefore gone, the
- * same way `DTInit`'s went in experiment 170, and for the same reason: this file defines a symbol
- * only while nothing else does, and the link is what says when that stops being true.
+ * `cpu_processor_alloc`'s probe stood here for experiment 177, and `osfmk/arm/cpu_common.o` is now
+ * linked because that run named it - so it is real code and the hand-written definition that stood
+ * here is gone, the same way `DTInit`'s went in experiment 170 and `ml_parse_cpu_topology`'s in
+ * experiment 177. One edge further on is this.
  *
- * What `ml_parse_cpu_topology` does is `DTLookupEntry(NULL, "/cpus")`, iterate the children, and
- * `++avail_cpus` for each - then `panic("No cpus found!")` if the count came out zero. So the
- * number is the whole question about `/cpus` in the tree this project builds, and `avail_cpus` is
- * `static`, which is why the probe asks the exported accessor instead. `ml_get_cpu_count()` is
- * three instructions out of `machine_routines.o` - now in the image - returning that same counter.
+ * Why these numbers rather than "it returned a pointer". `arm_init` writes the same address into
+ * both halves of `CpuDataEntries[master_cpu]`:
  *
- * A count of zero means XNU's own walk found no cpu children in our tree and the run stopped in
- * `panic`; a count of one or more means the walk succeeded, and `cpu_processor_alloc` is the next
- * thing `arm_init` asks for. The two outcomes are one line apart in the log either way.
+ *   :236   CpuDataEntries[master_cpu].cpu_data_vaddr = &BootCpuData;
+ *   :237   CpuDataEntries[master_cpu].cpu_data_paddr = (void *)((uintptr_t)(args->physBase)
+ *                                                     + ((uintptr_t)&BootCpuData
+ *                                                     - (uintptr_t)(args->virtBase)));
  *
- * `ml_parse_cpu_topology`'s probe printed `xnu_entry_soc_base_phys=0xf9000000` in experiment 176 -
- * `*(ranges_prop + 1)` out of the `arm-io` node, checked against `stage90_main.c`'s `io_ranges`.
- * That measurement is spent; the accessor caches its answer after the first call, so asking again
- * would only print the same number.
+ * With `physBase == virtBase` - the whole trick `xnu_entry_jump.c` plays, and the reason `_start`
+ * can convert its own addresses - the second collapses to the first. So the two words agreeing is
+ * a *measured* statement that both lines ran and that the identity held. If they differ, the
+ * identity did not hold and the difference between them is `physBase - virtBase`, which is the most
+ * valuable single number this image could produce.
+ *
+ * `cpu_data_entry_t` (`osfmk/arm/cpu_data_internal.h:80`) is two pointers followed by two `uint32_t`
+ * on arm32, so reading `CpuDataEntries` as an array of words takes the two halves without
+ * reproducing a struct. The declaration says two words because two words is all this reads - the
+ * real object is `MAX_CPUS` of these (`cpu_data_internal.h:285`), and declaring it `extern` with
+ * the real extent would only be a second copy of `MAX_CPUS` to keep in step.
+ *
+ * `BootProcessor` is `cpu_common.o`'s own `B 0x18` - the thing `cpu_processor_alloc(TRUE)` returns,
+ * `cpu_common.c:472` being `if (is_boot_cpu) return &BootProcessor;`. Its address shows where that
+ * object's bss landed in the image.
  */
-unsigned int ml_get_cpu_count(void);
+extern uint32_t CpuDataEntries[2];
+extern uint8_t BootCpuData[];
+extern uint8_t BootProcessor[];
 
-void cpu_processor_alloc(void)
+void thread_bootstrap(void)
 {
-    entry_kv("xnu_entry_avail_cpus", ml_get_cpu_count());
-    entry_stub_hit("cpu_processor_alloc");
+    entry_kv("xnu_entry_cpu_data_vaddr", CpuDataEntries[0]);
+    entry_kv("xnu_entry_cpu_data_paddr", CpuDataEntries[1]);
+    entry_kv("xnu_entry_boot_cpu_data_va", (uint32_t)(uintptr_t)BootCpuData);
+    entry_kv("xnu_entry_boot_processor", (uint32_t)(uintptr_t)BootProcessor);
+    entry_stub_hit("thread_bootstrap");
 }
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */
 
