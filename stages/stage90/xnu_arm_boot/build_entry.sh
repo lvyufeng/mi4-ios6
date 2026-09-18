@@ -2577,6 +2577,42 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `kv_written == kv_in_dram == 0x3b`, two bytes above 259's 0x39 - `stackshot_init` is two
     # characters longer than `console_init`, recorded verbatim as always.
     OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ=${STAGE90_ENTRY_OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_console_serial_console.o}
+    # 261: `stackshot_init`, and the first step in a while that is not cheap. The symbol is
+    # `osfmk/kern/kern_stackshot.c` - **`kern_stackshot.o`, not `stackshot.o`**: `bsd/kern/stackshot.c`
+    # (manifest line 79) is the syscall half, and the initialiser lives in the osfmk half (manifest
+    # line 559). Note that the spelling matters here in the way `mi4-one-value-two-definitions`
+    # warns about: both files are in the manifest, both compile, and only one defines `stackshot_init`.
+    #
+    # The object: 17737 bytes of text, 136 of bss, **116 references** - 76 already satisfied, and
+    # **40 new**, the largest block this frontier has added since 254. They are the stackshot
+    # machinery's own dependencies and they cluster: the `kcdata_*` writers
+    # (`kcdata_memory_alloc_init`, `kcdata_add_*_with_description`, `kcdata_write_buffer_end`, ...),
+    # the coalition surface (`coalition_id`, `coalition_type`, `coalition_iterate_stackshot`, ...),
+    # the kdp debugger readers (`kdp_vtophys`, `kdp_pthread_find_owner`, ...), the machine-trace pair
+    # (`machine_trace_thread`, `machine_trace_thread64`), `mt_stackshot_thread`/`_task`,
+    # `gLoadedKextSummaries`, and a handful of `*_kdp` name helpers. Three of its definitions exist
+    # here as stubs and become real: `stackshot_init`, `do_stackshot` and
+    # `stack_snapshot_from_kernel` - the last of which **259 added**, so this is the frontier closing
+    # on a name it introduced two steps ago.
+    #
+    # **The prediction.** `stackshot_init` is 120 bytes and calls six things - `lck_grp_attr_alloc_init`
+    # (`0x80010e44`), `lck_grp_alloc_init` (`0x80010ec8`), `lck_attr_alloc_init` (`0x80011274`),
+    # `lck_mtx_init` (`0x80013604`), `clock_timebase_info` (`0x8000d44c`, real: five instructions that
+    # `ldrd` the timebase out of `0x800b0a30` and `bx lr`) and `__aeabi_uldivmod` (the EABI runtime) -
+    # and **all six are real**. So it completes: it allocates a lock group and its attribute, a mutex,
+    # reads the timebase and computes `sfs_system_max_fault_time`. It returns to
+    # `kernel_bootstrap+0x1fc`, where the straight line is `kernel_debug_string_early` (real) and then
+    # `0x8000dc44: bl sched_init` - a stub. So: **`stub_hit=sched_init`,
+    # `xnu_entry_stub_caller=0x8000dc48`** (`caller - 4` = `0x8000dc44` = `kernel_bootstrap+0x204`).
+    # Device: **`stub_hit=sched_init`, `xnu_entry_stub_caller=0x8000dc48`** = `kernel_bootstrap+0x208`
+    # - the prediction, a fourth time. `stackshot_init` completed, lock group and all.
+    #
+    # Measured: resolved 3, added 40; 596 -> 633 undefined, 520 -> 554 function stubs, 78 -> 79
+    # storage; text 711044 -> 730436 (+19392), image 818696 -> **835080** (another 16 KB block),
+    # bss end 0x800facc8, args +1032192, headroom 1069880; payload text 1327298 (+16384).
+    # `kv_written == kv_in_dram == 0x37`, four below 260's 0x3b - `sched_init` is four characters
+    # shorter than `stackshot_init`, recorded verbatim as always.
+    OSFMK_KERN_KERN_STACKSHOT_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KERN_STACKSHOT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kern_stackshot.o}
     OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
@@ -2669,6 +2705,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$FIREHOSE_CONFIG_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_TELEMETRY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2678,7 +2715,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
