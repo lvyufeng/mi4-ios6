@@ -116,6 +116,26 @@ uint32_t fiqstack_top = (uint32_t)(uintptr_t)&g_fiqstack[ENTRY_STACK_BYTES];
 uint32_t ExceptionVectorsTable[8] __attribute__((aligned(32)));
 
 /*
+ * The stack the exception handlers run on, and why they need one of their own.
+ *
+ * `_start` sets the SVC stack to `intstack_top - SS_SIZE` (`start.s:310-311`) and does not touch
+ * the banked stack pointers at all. So when an exception is taken, SP becomes whatever that mode
+ * was left with - set by the bootloader or by the payload for *its* page tables, not for XNU's.
+ * XNU's tables map `[physBase, physBase + memSize)` = `[0x00200000, 0x00a00000)` and nothing else,
+ * and the payload is at 0x00008000, so an inherited stack pointer is outside the map.
+ *
+ * The consequence is not a wrong answer, it is the loss of the answer. The handler's first push
+ * data-aborts, the abort is taken again in the same mode with the same stack, and the CPU recurses
+ * on itself until the watchdog resets the device. Nothing reaches the log, and a fault inside
+ * `arm_init` - the one thing this image exists in order to report - looks exactly like a hang.
+ *
+ * `entry_vectors.s` therefore loads SP from `entry_vectors_stack_top` before branching to a
+ * handler. The stack is defined there rather than here because the literal needs the address, not
+ * a variable holding it; it lives in `.bss`, inside the window, which is the only other place
+ * XNU's page tables map.
+ */
+
+/*
  * The vector code page, defined in entry_vectors.s: eight branches into eight trampolines that
  * load the fleh_* addresses. It is a separate file because an ARM vector slot is four bytes and
  * the handler addresses are far out of `b` range, which needs assembly rather than C.
@@ -341,59 +361,118 @@ void entry_stub_hit(const char *name)
 
 #ifdef STAGE90_ENTRY_REAL_ARM_INIT
 /*
- * `kernel_early_bootstrap()` - `osfmk/arm/arm_init.c:268`, the first statement after
- * `rtclock_early_init` returns. The probe prints the thread pointer and one number derived from it,
- * then names itself.
+ * `lck_mod_init()` - `osfmk/kern/locks.c:140`, the first call `kernel_early_bootstrap`
+ * (`osfmk/kern/startup.c:226`) makes, after one `PE_parse_boot_argn("serverperfmode", ...)`. The
+ * probe prints what the timebase came out as, then names itself.
  *
- * The measurement is the TPIDRPRW round trip, made into an equality instead of an inference.
- * Experiment 181 got twelve lines of `arm_init` further than the run before it without faulting,
- * and the reason it could not fault is that `arm_init.c:247` writes through the pointer
- * `current_thread()` returned - address ~0 if TPIDRPRW had held a residual, which XNU's page tables
- * do not map. That is evidence from an absence, which is the weakest kind this project has.
+ * `kernel_early_bootstrap`'s probe stood here for experiment 183 - it printed
+ * `current_thread() = 0x0022a8d0`, which is `init_thread` in the same image, and `cpu_number() = 0`,
+ * turning the TPIDRPRW round trip from an inference into a measurement. `osfmk/kern/startup.o` is
+ * now linked because that run named it, so the definition that stood here is gone and is not
+ * replaced by another hand-written definition of the same name.
  *
- * `current_thread()` is real code (`osfmk/arm/machine_routines.c:1139`, in the image since
- * experiment 177) and is one instruction: `__builtin_arm_mrc(15, 0, 13, 0, 4)`. The thread that
- * `thread_bootstrap` handed to `machine_set_current_thread` is `&init_thread`, and `init_thread` is
- * `static` (`osfmk/kern/thread.c:184`: `static struct thread thread_template, init_thread;`), so
- * this file cannot name it and the comparison is made against the image's own symbol table instead -
- * `arm-none-eabi-nm out/stage90/xnu_arm_entry.elf | grep init_thread`. Printing the pointer is what
- * makes that comparison possible; printing a literal here would be a second copy of a number the
- * link owns.
+ * What is worth printing here is the one thing experiment 183 could not reach. `timebase_callback`
+ * ran to completion in that run - the image was past `rtclock_early_init` - and it wrote
+ * `rtclock_timebase_const` and `rtclock_sec_divisor`, but both are macros onto `RTClockData`
+ * (`osfmk/arm/rtclock.h:74,76`) and this file cannot lay that struct out without XNU's headers.
+ * The values are reachable indirectly instead, because `mach_absolute_time()` and
+ * `absolutetime_to_nanoseconds()` are now real code and divide by exactly those constants.
  *
- * `cpu_number()` is the second, self-contained half. It is real (`osfmk/arm/cpu_common.o`) and is
- * `getCpuDatap()->cpu_number`, where `getCpuDatap()` is `current_thread()->machine.CpuDatap`
- * (`osfmk/arm/cpu_data.h:79`). So it reads the same register, follows the pointer `arm_init.c:249`
- * stored, and returns the field `arm_init.c:222` set from `ml_get_boot_cpu_number()`. Three real XNU
- * functions and two structure fields, and the answer should be 0 - a value that is checkable in the
- * log without any symbol table.
+ * So the probe asks the timebase a question with a known answer. `absolutetime_to_nanoseconds` is
+ * `abstime * numer / denom` with the reduced constants, and `stage90_main.c:692` advertises
+ * `timebase-frequency = 19200000` on the cpu nodes. If XNU read that value, the constants are
+ * 625/12 and 19200000 ticks is exactly one second:
  *
- * `ml_get_cpu_count()` is repeated from experiment 177 as a control: it should still be 4, and if it
- * is not, this image is not the one that measured it.
+ *     19200000 * 625 / 12 = 1000000000
+ *
+ * `19200000` below is the *input*, not the answer - it is a second copy of a device-tree value, and
+ * that is deliberate, because making the input the tree's number and the output a fixed expectation
+ * is what turns this into a check rather than a reading. If XNU took a different frequency the
+ * output will say so by not being 1000000000, and the two halves printed below will show what it
+ * was. A wrong constant cannot produce this number by accident.
+ *
+ * `mach_absolute_time()` is printed beside it as the raw tick count - non-zero means the counter it
+ * reads is running, which is a fact about the hardware rather than about XNU's arithmetic.
+ *
+ * The declarations here are the real ones (`osfmk/kern/clock.h:174,244`): both conversions return
+ * `void` and write their answers through out-parameters. The first version of this probe declared
+ * them as `uint64_t`-returning, which is not a mistake the compiler can see - the caller and the
+ * callee disagree about r1, the caller puts the high half of `abstime` there, and the callee stores
+ * its answer through it. That is a store to address 0 followed by a store through the high half of
+ * the tick count, and it is what the run before this one did instead of printing: no output, no
+ * `stub_hit`, no exception message, and the device resetting on its own. A function whose
+ * signature is only in a hand-written prototype is a place where a wrong answer is a memory write,
+ * not a wrong number.
  */
-uint32_t current_thread(void);      /* thread_t, and a pointer on this target */
-int cpu_number(void);
-unsigned int ml_get_cpu_count(void);
+uint64_t mach_absolute_time(void);
+void absolutetime_to_nanoseconds(uint64_t abstime, uint64_t *result);
+void absolutetime_to_microtime(uint64_t abstime, uint32_t *secs, uint32_t *microsecs);
 
-void kernel_early_bootstrap(void)
+void lck_mod_init(void)
 {
-    entry_kv("xnu_entry_current_thread", current_thread());
-    entry_kv("xnu_entry_cpu_number", (uint32_t)cpu_number());
-    entry_kv("xnu_entry_avail_cpus", ml_get_cpu_count());
-    entry_stub_hit("kernel_early_bootstrap");
+    uint64_t ticks;
+    uint64_t ns = 0u;
+    uint32_t secs = 0u;
+    uint32_t usecs = 0u;
+
+    ticks = mach_absolute_time();
+
+    entry_kv("xnu_entry_mach_absolute_time_lo", (uint32_t)ticks);
+    entry_kv("xnu_entry_mach_absolute_time_hi", (uint32_t)(ticks >> 32));
+
+    absolutetime_to_nanoseconds(19200000ull, &ns);
+    entry_kv("xnu_entry_ns_per_tree_timebase_lo", (uint32_t)ns);
+    entry_kv("xnu_entry_ns_per_tree_timebase_hi", (uint32_t)(ns >> 32));
+
+    absolutetime_to_microtime(ticks, &secs, &usecs);
+    entry_kv("xnu_entry_uptime_secs", secs);
+    entry_kv("xnu_entry_uptime_usecs", usecs);
+
+    entry_stub_hit("lck_mod_init");
 }
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */
 
 /*
- * The exception vector targets. `_start` installs these addresses in ExceptionVectorsTable and
- * turns on SCTLR.HIGHVEC, so if XNU's entry path takes any exception before reaching `arm_init`,
- * it lands in one of these - and each one names itself, because which vector fired is the whole
- * diagnostic.
+ * The exception vector targets. The trampolines in `entry_vectors.s` branch here after loading SP
+ * from `__entry_vectors_stack_top` - without that this code cannot run at all, because the banked
+ * stack pointer the exception inherited is outside XNU's page tables. `_start` turns on
+ * SCTLR.HIGHVEC, so if XNU's entry path takes any exception before reaching `arm_init` it lands in
+ * one of these, and each one names itself, because which vector fired is the whole diagnostic.
+ *
+ * The two abort handlers also read the fault registers, which are only valid in the handler: DFAR
+ * says which address was touched and DFSR says how, IFAR/IFSR the same for instruction fetches.
+ * "Data abort" alone says a fault happened somewhere; `dfar=0x00000000` says the image stored
+ * through a pointer it set to zero, and `dfar=0x0020xxxx` says the code was jumped to rather than
+ * reached. The distance between those two diagnoses is the whole reason these four lines exist.
  */
 void fleh_reset(void) { entry_epilogue("exception: reset"); }
 void fleh_undef(void) { entry_epilogue("exception: undefined instruction"); }
 void fleh_swi(void) { entry_epilogue("exception: svc/swi"); }
-void fleh_prefabt(void) { entry_epilogue("exception: prefetch abort"); }
-void fleh_dataabt(void) { entry_epilogue("exception: data abort"); }
+
+void fleh_prefabt(void)
+{
+    uint32_t ifar, ifsr;
+
+    __asm__ volatile ("mrc p15, 0, %0, c6, c0, 2" : "=r"(ifar));
+    __asm__ volatile ("mrc p15, 0, %0, c5, c0, 1" : "=r"(ifsr));
+
+    entry_kv("xnu_entry_prefetch_abort_ifar", ifar);
+    entry_kv("xnu_entry_prefetch_abort_ifsr", ifsr);
+    entry_epilogue("exception: prefetch abort");
+}
+
+void fleh_dataabt(void)
+{
+    uint32_t dfar, dfsr;
+
+    __asm__ volatile ("mrc p15, 0, %0, c6, c0, 0" : "=r"(dfar));
+    __asm__ volatile ("mrc p15, 0, %0, c5, c0, 0" : "=r"(dfsr));
+
+    entry_kv("xnu_entry_data_abort_dfar", dfar);
+    entry_kv("xnu_entry_data_abort_dfsr", dfsr);
+    entry_epilogue("exception: data abort");
+}
+
 void fleh_addrexc(void) { entry_epilogue("exception: address exception"); }
 void fleh_irq(void) { entry_epilogue("exception: irq"); }
 void fleh_decirq(void) { entry_epilogue("exception: decrementer irq"); }

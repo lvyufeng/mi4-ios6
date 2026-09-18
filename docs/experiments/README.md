@@ -197,6 +197,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-181](experiment-181-the-tpidrprw-round-trip-held-and-the-frontier-is-rtclock-early-init.md) | The TPIDRPRW Round Trip Held, and the Frontier Is `rtclock_early_init` |
 | stage90 | [experiment-182](experiment-182-the-timebase-callback-ran-and-the-frontier-is-the-toolchains-aeabi-uldivmod.md) | The Timebase Callback Ran, and the Frontier Is the Toolchain's `__aeabi_uldivmod` |
 | stage90 | [experiment-183](experiment-183-the-thread-pointer-round-tripped-and-the-frontier-is-kernel-early-bootstrap.md) | The Thread Pointer Round-Tripped Through TPIDRPRW, and the Frontier Is `kernel_early_bootstrap` |
+| stage90 | [experiment-184](experiment-184-the-timebase-came-out-as-the-trees-19-2-mhz-and-a-wrong-prototype-wrote-to-address-zero.md) | The Timebase Came Out as the Tree's 19.2 MHz, and a Hand-Written Prototype Wrote to Address 0 |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
