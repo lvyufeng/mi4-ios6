@@ -554,6 +554,93 @@ void entry_write_kv(const char *key, uint32_t value)
 }
 
 /*
+ * Experiment 272's reading: the instruction words that are *in memory* over the whole report path,
+ * printed as one line, written from the epilogue, where the caches and the mmu are both off and a
+ * read is a read of memory.
+ *
+ * Experiment 271 left one question open and this measurement closed it. That run's `entry_kv`
+ * computed `0x30 + d` for the non-decimal nibbles where its own instruction says `0x57 + d`, and the
+ * same function, run from the epilogue with SCTLR.C and SCTLR.I clear and the mmu off, computed it
+ * correctly. `entry_kv`'s digit loop is three instructions - `cmp r3, #9`, then the unconditional
+ * `add r4, r3, #0x57`, then the conditional `addls r4, r3, #0x30` - and the corrupted digits are
+ * exactly what executing the *conditional* instruction with the wrong flags produces: `:` for `a`,
+ * `<` for `c`, every decimal digit right. There are only two ways that happens:
+ *
+ *   - the words *in memory* at that address are not the words in the file, or
+ *   - the words in memory are right and the core fetched or executed something else - which on
+ *     ARMv7-A is what an instruction fetch from Strongly-ordered memory is, and this stage maps
+ *     every page of the window Strongly-ordered (`STAGE90_PMAP_ATTR_MODE_SO_ONLY`).
+ *
+ * **The answer is the second.** In the run this probe was built for, all 661 words - `entry_kv`,
+ * `entry_write_kv`, `entry_epilogue` and `entry_stub_hit`, 2644 bytes, the whole path that produces
+ * the report - matched `out/stage90/xnu_arm_entry.elf`'s `.text` byte for byte, read back here with
+ * the mmu and the caches off. In that same run `entry_kv` wrote `800:<254` into `g_kv_buf` while
+ * `entry_kv` called from *this* epilogue wrote `800ac254` for the same value: the right bytes were
+ * in memory and the run's execution of them was not. Memory is ruled out; what is left is the
+ * window's fetch.
+ *
+ * **The address is a symbol and the dump is the region, deliberately.** The first version took the
+ * digit loop's address with GCC's `&&label` inside `entry_kv`; that build ran and then, three times
+ * in a row, produced no report at all - the payload reached `jumping to XNU's _start` and the entry
+ * image never wrote another byte, while the *unmodified* 271 image on the same device and the same
+ * payload reached `stub_hit=mk_timer_init` as its prediction said. The only two instructions that
+ * version added to a run-time path were the `adr` that takes the label and the `str` that keeps it,
+ * both inside `entry_kv`, which runs while XNU's page tables are live - the same window and the same
+ * function 271 watched misbehave. So this version adds nothing to `entry_kv`, and takes the base
+ * from `&entry_kv`, which the linker fixes rather than a constant a later link would invalidate.
+ *
+ * **The 88-word version of *this* probe is the caution that comes with the reading.** It dumped
+ * `entry_kv` alone, had the same `.text` size as this one, and its two runs were identical to each
+ * other and wrong: `g_kv_len` read 1 where the register captured before the teardown held 0x5e,
+ * `g_why` read 0x800e3d00 (the linker's `__entry_text_end`) where the caller passed 0x800ce9f4, and
+ * the `g_first_abort_*` block read a stretch of `.rodata` string bytes. This build reads all of them
+ * correctly and repeats. Same source, same size, one constant apart - so the entry image's *own
+ * report* is not a function of its source either, and every field in it wants a second road before
+ * it is believed. The fields that come from registers, from `g_kv_buf`, and from the stopped stub
+ * have all survived every build so far; the ones that come from the small `.bss` globals are the
+ * ones that have not.
+ *
+ * A word outside the image prints as `eeeeeeee` rather than `00000000`: zero is a legitimate
+ * instruction word, and a sentinel that can be mistaken for one is the defect this sequence is
+ * about.
+ */
+static void
+entry_probe_dump_kv_words(const char *key, uint32_t base, uint32_t words)
+{
+    static const char hex[] = "0123456789abcdef";
+    volatile uint32_t *sig = (volatile uint32_t *)(uintptr_t)RAM_CONSOLE_BASE;
+    volatile uint32_t *size_p = (volatile uint32_t *)(uintptr_t)(RAM_CONSOLE_BASE + 8u);
+    volatile uint8_t *data = (volatile uint8_t *)(uintptr_t)(RAM_CONSOLE_BASE + 12u);
+    const uint32_t max = 0x00200000u - 12u;
+    uint32_t size;
+
+    if (*sig != RAM_CONSOLE_SIG) {
+        *sig = RAM_CONSOLE_SIG;
+        size = 0u;
+    } else {
+        size = *size_p;
+    }
+
+    entry_putc(data, &size, max, ' ');
+    while (*key != '\0') {
+        entry_putc(data, &size, max, *key++);
+    }
+    entry_putc(data, &size, max, '=');
+    for (uint32_t i = 0; i < words; i++) {
+        uint32_t addr = base + (i * 4u);
+        uint32_t w = entry_image_ptr((uintptr_t)addr) ? entry_word_at((uintptr_t)addr)
+                                                      : 0xEEEEEEEEu;
+        for (unsigned j = 0; j < 8u; j++) {
+            entry_putc(data, &size, max, hex[(w >> (28u - (j * 4u))) & 0xfu]);
+        }
+    }
+    entry_putc(data, &size, max, '\n');
+
+    *size_p = size;
+    __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
+}
+
+/*
  * The one exit. `why` must be in read-only memory inside the window, which everything in this
  * image is.
  */
@@ -794,6 +881,13 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     entry_write_kv("xnu_entry_abort_first_hex_page", g_first_abort_hex_page);
     entry_write_kv("xnu_entry_abort_first_hex_used", g_first_abort_hex_used);
     entry_write_kv("xnu_entry_abort_first_hex_arg", g_first_abort_hex_arg);
+    /*
+     * Experiment 272. Runs here, after the first line of the report is already in the console, so
+     * that a fault in this dump cannot cost the report that says which stub was hit - which is
+     * exactly what the `&&label` version of this probe did, silently and three times.
+     */
+    entry_probe_dump_kv_words("xnu_entry_kv_words", (uint32_t)(uintptr_t)entry_kv, 661u);
+
     entry_write_kv("xnu_entry_csselr_before", csselr_before);
     entry_write_kv("xnu_entry_ccsidr_before", ccsidr_before);
     entry_write_kv("xnu_entry_ccsidr_l1", ccsidr_l1);
