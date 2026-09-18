@@ -492,6 +492,51 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # XNU code to ask this project's device tree for a serial device, and the answer it gets is the
     # one that decides `PE_kputc` (`serial_putc` or `cnputc`).
     PEXPERT_PE_SERIAL_OBJ=${STAGE90_ENTRY_PE_SERIAL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_arm_pe_serial.o}
+    # `osfmk/console/video_console.c`, named by experiment-204's `stub_hit=initialize_screen`.
+    # 27079 bytes of text, 4376 of data, 1360 of `.bss` and 31 references - the largest step since
+    # `pmap.o`, and the object the goal statement puts out of scope ("ignore graphics for now").
+    # It is linked anyway, because XNU's console *is* the video console until something replaces it:
+    # `PE_create_console` (`pe_init.c:379`) calls `PE_initialize_console(info, kPETextMode)`, whose
+    # `default:` case calls `initialize_screen(info, op)` unconditionally, and `initialize_screen`
+    # lives only here. The console is a basic driver and it is on the boot path; the *graphics* the
+    # goal defers are the framebuffer, not this.
+    #
+    # What should run is one branch of it. `initialize_screen`'s first act, with `boot_vinfo`
+    # non-null, is to look for a framebuffer, and this payload's `boot_args` leaves `Video` zeroed
+    # (`boot_args.c` sets twelve fields and `Video` is not among them), so:
+    #
+    #     if (!newVideoVirt && !new_vinfo.v_physaddr) {
+    #         kprintf("initialize_screen: No video - forcing serial mode\n");
+    #         new_vinfo.v_depth = 0;
+    #         (void)switch_to_serial_console();      <-- the stop
+    #         ...
+    #
+    # which is the same symbol experiment 204 predicted and did not get, one call frame deeper and
+    # by a different route. Which of the two routes is worth being explicit about: if the stop is
+    # `switch_to_serial_console`, XNU has decided this device has no framebuffer.
+    OSFMK_CONSOLE_VIDEO_OBJ=${STAGE90_ENTRY_VIDEO_CONSOLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_console_video_console.o}
+    # `osfmk/console/serial_general.c`, named by experiment-205's `stub_hit=switch_to_serial_console`.
+    # 824 bytes of text and 14 references - but `switch_to_serial_console` itself is three statements
+    # and calls nothing at all:
+    #
+    #     int old_cons_ops = cons_ops_index;
+    #     cons_ops_index = SERIAL_CONS_OPS;
+    #     return old_cons_ops;
+    #
+    # (`osfmk/console/serial_general.c` - it is the whole function.) So this step does not stop
+    # inside the function it exists for: `initialize_screen`'s no-video branch calls it, it runs, it
+    # returns the old console index, and `initialize_screen` finishes the branch
+    # (`gc_graphics_boot = FALSE; disableConsoleOutput = FALSE; gc_acquired = TRUE;`). `cons_ops_index`
+    # is the one new obligation and it is storage (4 bytes, `osfmk_console_serial_console.o`).
+    #
+    # The frontier therefore moves to `arm_init`'s tail, and the prediction is written in
+    # experiment 206's log rather than here: the calls after PE_create_console are `PE_init_printf`
+    # (a tail call to `vcattach`, which video_console.o provides), `cpu_machine_idle_init`,
+    # `PE_init_platform(TRUE, &BootCpuData)`, `cpu_timebase_init`, `fiq_context_init`, `early_random`
+    # (still a stub) and `machine_startup` - and `PE_init_platform`'s TRUE branch calls
+    # `pe_arm_init_interrupts(args)`, which is Phase 3's own function and whose body ends in
+    # `ml_io_map(...) -> io_map`, which is a stub.
+    OSFMK_CONSOLE_SERIAL_GENERAL_OBJ=${STAGE90_ENTRY_SERIAL_GENERAL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_console_serial_general.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -536,10 +581,12 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$PEXPERT_PE_KPRINTF_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$PEXPERT_PE_SERIAL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_CONSOLE_VIDEO_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ")
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

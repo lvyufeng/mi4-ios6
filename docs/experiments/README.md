@@ -218,6 +218,8 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-202](experiment-202-the-smallest-object-so-far-and-the-frontier-is-pe-init-kprintf.md) | The Smallest Object So Far, a Prediction That Depended on a Payload Switch, and the Frontier Is `PE_init_kprintf` |
 | stage90 | [experiment-203](experiment-203-pe-init-kprintf-runs-to-serial-init.md) | `PE_init_kprintf` Runs Its Whole Body Up to `serial_init`, and Two Storage Stubs Become Real Variables |
 | stage90 | [experiment-204](experiment-204-serial-init-runs-and-a-prediction-that-was-wrong-because-there-are-two-command-lines.md) | `serial_init` Runs, a Step With No Cost, and a Prediction That Was Wrong Because There Are Two Command Lines |
+| stage90 | [experiment-205](experiment-205-initialize-screen-runs-its-no-video-branch-and-the-frontier-is-switch-to-serial-console.md) | `initialize_screen` Runs Its No-Video Branch, XNU Decides There Is No Framebuffer, and the Frontier Is `switch_to_serial_console` |
+| stage90 | [experiment-206](experiment-206-arm-inits-tail-runs-and-the-frontier-is-io-map.md) | `arm_init`'s Tail Runs, XNU's Own Platform Interrupt Mapping Is Reached, and the Frontier Is `io_map` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
