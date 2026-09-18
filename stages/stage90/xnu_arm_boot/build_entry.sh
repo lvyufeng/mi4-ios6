@@ -2385,6 +2385,46 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # Next: `ledger_credit` is in `osfmk_kern_ledger.o` - 8324 bytes of text, 35 references - a
     # *runtime* object, which fits where the frontier now is. Read the WHOLE callwalk output for 255.
     BSD_KERN_KERN_CS_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_CS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_cs.o}
+    # 255: `osfmk_kern_ledger.o` - 8324 bytes of text, 35 references - the ledger subsystem.
+    # Resolved **19**, added 1 (`thread_block_reason`):
+    #   resolved ledger_credit ledger_debit ledger_dereference ledger_disable_callback ledger_entry_add
+    #            ledger_entry_setactive ledger_get_entry_info ledger_get_limit ledger_get_period
+    #            ledger_init ledger_instantiate ledger_reference ledger_rollup ledger_set_action
+    #            ledger_set_callback ledger_set_limit ledger_set_period ledger_template_complete
+    #            ledger_template_create
+    # 613 -> 595 undefined, 532 -> 514 function stubs, text 692865 (+7872).
+    #
+    # With the ledger real, every direct call in `pmap_expand` after 254's stop (`ptd_alloc`,
+    # `lck_spin_lock`, `lck_spin_unlock`, `pmap_tt_deallocate`) and in `pmap_enter_options` is real, so
+    # the allocation should complete and `oslog_init` should reach the call 254 could not:
+    # **prediction `stub_hit=__firehose_buffer_create`, caller `oslog_init+0x70`** - the same name as
+    # 254's wrong answer but for the opposite reason (the call in between is now linked).
+    #
+    # Device: **`stub_hit=__firehose_buffer_create`, `xnu_entry_stub_caller=0x8002cd5c`** =
+    # `oslog_init+0x70`, `caller - 4` = `8002cd58: bl 80094a30 <__firehose_buffer_create>`.
+    # `kv_written == kv_in_dram == 0x45`. **The allocation completed**: `oslog_init`'s compiled
+    # constants say so - `mov r2, #73728` (`size + 2*PAGE_SIZE`, size = 65536 = 16 chunks x 4096),
+    # `r3 = 19` (`VM_KERN_MEMORY_LOG`), stack arg 48 (`KMA_GUARD_FIRST|KMA_GUARD_LAST`) - so this run
+    # made a **73728-byte guarded allocation from `kernel_map`**, the first kernel-memory allocation
+    # this kernel has made for a purpose rather than to initialise itself. It went into the pmap (254's
+    # `ledger_credit`), page tables were expanded, the ledger accounted for it, `__bzero` cleared it,
+    # and the `panic("Failed to allocate memory for firehose logging buffer")` at `+0x48` was not taken.
+    #
+    # **THE FINDING: `__firehose_buffer_create` is not implemented anywhere in this source tree.** It is
+    # called at `bsd/kern/subr_log.c:874` and defined nowhere - not osfmk, not bsd, not libkern.
+    # `libkern/firehose/` ships headers with **`KERNELFILES =` empty** in its Makefile: Apple's firehose
+    # is a closed kernel library/kext, and `FIREHOSE_BUFFER_KERNEL_CHUNK_COUNT` is not in the tree
+    # either (the compiled constant says 16). This is the first frontier symbol in the whole sequence
+    # whose implementation does not exist in the tree, so 256 is a **decision, not another link**:
+    # (1) provide it from the entry image - it cannot be a stop-on-call stub, because `oslog_init` uses
+    # its return value as `kernel_firehose_addr` and the kernel logs there from then on, so it needs a
+    # minimal real implementation or a handoff returning the already-allocated buffer; or (2) build it
+    # from the shipped headers against the in-tree `libkern/os/log.c`, which does know the chunk layout.
+    #
+    # Image moved: 802176 (+16528), `.bss` 0x800c35c0-0x800f28c8, layout args 983040 -> 999424,
+    # headroom **1103672** bytes, payload text 1294394. `persistent_write_attempted=0x00000000` in all
+    # 25 contracts, `failure_mask=0x00000000` in all 87.
+    OSFMK_KERN_LEDGER_OBJ=${STAGE90_ENTRY_OSFMK_KERN_LEDGER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_ledger.o}
     OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
@@ -2471,6 +2511,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_VM_MEMORY_OBJECT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_DEVICE_VM_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_CS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_LEDGER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2480,7 +2521,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
