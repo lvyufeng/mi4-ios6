@@ -2006,6 +2006,49 @@ in XNU, in the measurement link or in the entry image reads them, and that is wh
 `.text` went. Verified unchanged: `build_xnu_arm_layer.sh` at 32 of 32 and 445 undefined,
 `gen_assym.sh`'s `assym.s` byte-identical at 266 defines.
 
+**THE FIREHOSE SEAM IS A COMPONENT, NOT A VALUE** (2026-09-18,
+[`experiment-162`](../experiments/experiment-162-the-firehose-seam-is-a-component.md)). The largest
+remaining block was 24 symbols from `bsd/kern/subr_log.c` plus 6 from `libkern/os/log.c` — the
+`/dev/log` and `/dev/oslog` device entry points, `log_putc`, `msgbufp`, `oslog_init`,
+`_os_log_internal` — both `standard` in their `conf/files`, both held shut by one undeclared
+identifier. Four earlier experiments (132, 148, 151, 153) recorded it as *a value with no evidence in
+the tarball*. That is true of the tarball and false of Apple's published sources: `os/firehose_buffer_private.h`
+is a **libdispatch** file (`apple-oss-distributions/libdispatch`), and its `#ifdef KERNEL` block
+declares the four functions no file in the tarball defines, with the signatures `log.c:426`,
+`log.c:462`, `subr_log.c:874` and `subr_log.c:813` call, argument for argument. **The interface is
+published; only the implementation is not.**
+
+The value itself is published twice over: `libdispatch-913.30.4`'s copy has
+`#define FIREHOSE_BUFFER_KERNEL_CHUNK_COUNT 16`, and the next generation (from
+`libdispatch-1008.200.78`, `OS_FIREHOSE_SPI_VERSION 20180226`) turned it into a runtime variable while
+keeping 16 as both `MIN` and `DEFAULT`. So the shim header the project already had — the one whose
+own comment called its contents *derived* — is a real file, and its `#ifdef KERNEL` half is what the
+two files were missing.
+
+| | before | after |
+| --- | --- | --- |
+| `RELEASE`, C | 610 of 615 | **612 of 615** |
+| `RELEASE`, C++ | 82 of 83 | 82 of 83 |
+| `RELEASE`, undefined | 97 | **72** |
+| `RELEASE`, boot-path stubs from `arm_init` | 12 of 97 | **7 of 72** |
+| `STAGE90_BOOT`, C | 416 of 426 | **418 of 426** |
+| `STAGE90_BOOT`, undefined | 238 | **229** |
+| `STAGE90_BOOT`, boot-path stubs | 24 | **27** |
+
+30 closed and 5 opened, and the 5 are the four `__firehose_*` functions plus `OSKextKextForAddress`,
+which `log.c:59` declares. **`STAGE90_BOOT`'s boot-path stub count goes up**, 24 to 27, and that is
+the measurement to keep: a whole-kernel link leaves fewer undefined symbols while a *boot* now reaches
+the code that entered the image, and `kprintf` reaches `_os_log_to_log_internal` for the first time.
+The three new ones are `__firehose_buffer_create` at distance 4 (`oslog_init <- kernel_bootstrap`) and
+the reserve/flush pair at 5. They are safe in the measurement image — every stub returns 0, `reserve`'s
+0 is `NULL` and `log.c:427-447` already has a `NULL` branch that falls back to `firehose_boot_chunk`,
+`flush` is only reached on a non-`NULL` reservation, `merge_updates` is only called from the
+`/dev/oslog` ioctl, and `create`'s 0 lands in a global `__firehose_allocate` tests before use and that
+has no caller in the tree — which is what makes the next stage a **port** rather than a repair:
+`libdispatch/src/firehose/firehose_buffer.c`, 1188 lines at `libdispatch-913.30.4`, with a
+`#ifdef KERNEL` half. Verified unchanged: the ARM layer at 32 of 32 and 445 undefined, and both link
+routes agreeing (72 and 72; 229 and 229).
+
 **XNU'S REAL `arm_init` RAN ON THE DEVICE** (2026-09-18,
 [`experiment-159`](../experiments/experiment-159-the-real-arm-init-ran.md)). The entry image no
 longer stubs `arm_init`: it links XNU's own `osfmk_arm_arm_init.o`, plus XNU's own `data.o`
