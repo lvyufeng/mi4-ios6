@@ -571,11 +571,21 @@ void entry_stub_hit(const char *name)
 /*
  * `osfmk/kern/printf.c:197`, an empty variadic function. The `(void)a` is for `-Wunused-parameter`;
  * the body stays empty so the compiled code is the `bx lr` the real one is.
+ *
+ * **Compiled out by experiment 199**, which links `osfmk_kern_printf.o` for `printf_init`. The
+ * argument above - that the object costs 5607 bytes and 24 obligations to obtain four - is still
+ * true and is no longer the deciding fact: `printf_init` is `osfmk/arm/arm_init.c:328`, it is the
+ * next statement the device reaches, and it lives in this object and nowhere else. The four bytes
+ * were the whole question when this stand-in was written (experiment 189); they are not when the
+ * object is the step. Kept under its own switch so the decision is one variable, the way every
+ * other probe and stand-in here is.
  */
+#ifndef STAGE90_ENTRY_REAL_KPRINTF
 void _consume_kprintf_args(int a, ...)
 {
     (void)a;
 }
+#endif /* !STAGE90_ENTRY_REAL_KPRINTF */
 
 /*
  * `pmap_bootstrap()` - `osfmk/arm/pmap.c:2764`. **Retired as a probe by experiment 197**, which
