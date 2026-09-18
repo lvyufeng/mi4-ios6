@@ -3098,6 +3098,88 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 284: `clock_oldconfig`, and the first frontier that is *inside* the function it links
+    #
+    # **The 283 run reported** `stub_hit=clock_config` with `xnu_entry_stub_caller=0x800076c4`, which
+    # is `machine_init + 0xc`; `machine_init` is the first of the twelve init functions
+    # `kernel_bootstrap` calls after `ipc_init` returns, and `clock_config` is the first thing it
+    # calls. So the object to link is the one that defines `clock_config` - `osfmk/kern/clock.c`,
+    # `osfmk_kern_clock.o` - and this is the first step in the walk where the symbol the run stopped
+    # at is defined in an object whose *body* still needs something: `clock_config` is where the
+    # frontier resumes, not where it ends.
+    #
+    # **The object, measured.** `osfmk_kern_clock.o` is **6316 bytes of text, 4 of data, 176 of bss,
+    # 12 of rodata, 48 definitions and 41 references**. Against this image it resolves **17** -
+    # fifteen function stubs and two *storage* stand-ins, and for those two the check that matters is
+    # that the sizes agree byte for byte, which they do (`hz_tick_interval` is `D` size 4 in the
+    # object and 0x4 in the generated stand-in; `mach_absolutetime_asleep` is `B` size 8 and 0x8):
+    #
+    #     absolutetime_to_continuoustime      clock_absolutetime_interval_to_deadline
+    #     clock_config                        clock_continuoustime_interval_to_deadline
+    #     clock_deadline_for_periodic_event   clock_get_calendar_microtime
+    #     clock_get_calendar_nanotime         clock_get_uptime
+    #     clock_init                          clock_interval_to_deadline
+    #     clock_timebase_init                 continuoustime_to_absolutetime
+    #     delay                               mach_continuous_approximate_time
+    #     mach_continuous_time                hz_tick_interval (D, 4)
+    #     mach_absolutetime_asleep (B, 8)
+    #
+    # and adds **8** new obligations, every one of them a *function* this project has already
+    # compiled, so each stand-in's size still comes from a definition rather than from a guess:
+    #
+    #     clock_oldconfig   clock_oldinit                        (osfmk_kern_clock_oldops.o)
+    #     ntp_init          ntp_update_second                    (bsd_kern_kern_ntptime.o)
+    #     commpage_update_boottime        commpage_update_mach_continuous_time
+    #                                        (osfmk_arm_commpage_commpage.o)
+    #     PEGetUTCTimeOfDay               PESetUTCTimeOfDay
+    #                                        (iokit_Kernel_IOPlatformExpert.o)
+    #
+    # The remaining 24 of the object's 48 definitions are names nothing in this image has referenced
+    # yet (`clock_gettimeofday`, `delay_for_interval`, `clock_update_calendar`, `clock_lock`, ...),
+    # and none of them collides: each is defined exactly once in the pool - by this object - and the
+    # pass-1 image does not define it. So the step introduces no duplicate definition; it only makes
+    # 24 more names available to whatever comes next.
+    #
+    # **Prediction: a report, with the name predicted as well, because the body was read before the
+    # build.** `clock_config` is not a wrapper. Its calls in *function-relative* order, each checked
+    # against this image's definitions. The one trap in reading the object this way is that the
+    # object's `.text` begins with another function - `kdp_clock_is_locked`, 0xc bytes - so an
+    # object-section offset is a function offset plus 0xc, and the first version of this table was
+    # written with the raw offsets and was wrong by exactly that much:
+    #
+    #     +0x10  arm_usimple_lock_init         real (osfmk_arm_locks_arm.o, linked long ago)
+    #     +0x14  lck_grp_attr_alloc_init       real (osfmk_kern_locks.o)
+    #     +0x30  lck_grp_alloc_init            real
+    #     +0x40  lck_attr_alloc_init           real
+    #     +0x60  lck_mtx_init                  real
+    #     +0x64  clock_oldconfig              *NEW STUB*  <- the stop, return address +0x68
+    #     +0x68  ntp_init                     *NEW STUB*
+    #     +0x84  nanoseconds_to_absolutetime   real (tail call, osfmk_arm_rtclock.o)
+    #
+    # Five of the eight calls in `clock_config` are things this image has had for a long time, which
+    # is why the stop is at the sixth. The run should therefore report `stub_hit=clock_oldconfig`
+    # with `xnu_entry_stub_caller` = `clock_config + 0x68`, from inside `machine_init`, with no
+    # `exception:` line. If it stops on `ntp_init` instead, that is not a wrong object: it would mean
+    # `clock_oldconfig` came back, which is a measurement of the same step.
+    #
+    # **The build, which is where the offsets above were checked:** 909 -> **900** undefined,
+    # 813 -> **806** function stubs, 96 -> **94** storage - all three exactly as predicted - text
+    # 1019088 -> 1025040, `__bss_start` 0x80113b50 -> 0x80113b58, bss end 0x80149dc8 -> 0x80149e08,
+    # headroom 1794616 -> 1794552 bytes. `clock_config` links at **0x800b977c** and
+    # `clock_oldconfig`'s stub at **0x800de9d4**, so the predicted caller is **0x800b97e4**, and the
+    # `bl` at 0x800b97e0 really is the sixth of the eight calls in address order.
+    #
+    # One thing did *not* follow the naive arithmetic, and it is worth writing down because it will
+    # mislead again: the image grew by **8 bytes**, not by the 6316 the object's text suggests. The
+    # entry image's `.bin` ends at the end of `__DATA,__data`, and `.data` is placed 16 KB-aligned
+    # after the read-only region (0x800fc000 both before and after this step). The read-only region
+    # now ends at 0x800fa41c, so there are 0x1be4 bytes of slack before `.data` has to move, and
+    # within that slack the image's *size* grows only by what `.data` itself grew - 4 bytes for
+    # `hz_tick_interval` here, plus 4 of alignment. A step that crosses the boundary shows a jump of
+    # 16 KB and a step that does not shows almost nothing; `text size` and `__bss_start` are the
+    # numbers that move monotonically, and they are the ones to predict with. 0x1be4 is also the
+    # distance to the next step that will have to be read carefully.
+    OSFMK_KERN_CLOCK_OBJ=${STAGE90_ENTRY_OSFMK_KERN_CLOCK_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_clock.o}
     # 283: `kernel_set_special_port`, and the frontier 280 first predicted - read at last
     #
     # **The plain run reported.** With the pad no longer executed - no checkpoint, no `--wrap`, just
@@ -5852,6 +5934,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_IPC_IPC_PORT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_MQUEUE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_HOST_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_CLOCK_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_EVENT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
@@ -5865,7 +5948,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
