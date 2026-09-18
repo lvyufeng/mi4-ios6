@@ -1806,16 +1806,69 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # not an observation.
     #
     # So the fault is this image's Mach-O, not XNU's pmap: the header is one segment short of the one
-    # `arm_vm_init` does arithmetic with. **243 adds `__PRELINK_TEXT` to `entry_macho.s` with its end
-    # at `end_kern`** (vmaddr `__entry_image_end`, vmsize `end_kern - __entry_image_end` = 0xdb8
-    # today), which makes the call zero-size and leaves `arm_vm_prot_init` with four allocations, all
-    # of them after the last call has already re-protected [0x8020A000, 0x80400000) as RWNX. The
-    # prediction to check: the run gets past `arm_vm_prot_init` and into `arm_vm_init`'s
-    # pre-initialization loop at `virtual_space_start = 0xC0000000`.
+    # `arm_vm_init` does arithmetic with. **243 adds `__PRELINK_TEXT` to `entry_macho.s`** - and the
+    # result is two blocks below, because it is the experiment that changes the frontier.
     #
     # Cost: 1056 bytes of text (592785 -> 593841), fleh_prefabt 204 B and fleh_dataabt 368 B, 0 bytes
     # of image (703352), layout unchanged, 645 undefined, stub set unchanged. The four globals it
     # reads are read-only and `ENTRY_KV_BUF` 2048 was already enough for the 14 keys (552 bytes).
+    #
+    # **243 added the third segment, and with it the fault is gone and the frontier is a function
+    # again.** The segment is *empty*: `vmaddr = __entry_image_end`, `vmsize = 0`, `fileoff` and
+    # `filesize` 0, `maxprot`/`initprot` 0 - which is the honest description of a kernel with no
+    # kexts, and which also happens to be the arithmetic that matters, because `getsegdatafromheader`
+    # returns `sc->vmaddr` and stores `sc->vmsize`. So
+    # `segPRELINKTEXTB + segSizePRELINKTEXT` is 0x800da248, a real address, and the call is
+    # `RWNX(0x800da248, 0xdb8)` - the round-up slop of the image's last page - instead of
+    # `RWNX(0, 0x800db000)`. The plan one block above said `vmsize = end_kern - __entry_image_end`;
+    # the segment as built says 0. Both bound the call (`end_kern` is `round_page(__entry_image_end)`,
+    # so the two ranges end at the same address) and the built one is the better description, because
+    # the slop of the final page is memory the pmap should map. 0xdb8 < 0x1000 in either case.
+    #
+    # **The check that matters is in `tools/host_entry_macho_check.sh`, and it is about the range, not
+    # the segment.** The old header passed for fifty experiments while wrong for the reason that made
+    # it pass: every field matched the linker's own symbols. So the check now computes
+    # `end_kern - (segPRELINKTEXTB + segSizePRELINKTEXT)` from the decoded commands and fails unless
+    # it is non-negative and smaller than a page - 0xdb8 today - and the second half is not
+    # decoration: a `__PRELINK_TEXT` ending past `end_kern` makes the subtraction negative and the
+    # `unsigned long size` enormous, a worse failure than the one being fixed. It was tested by
+    # breaking it (vmaddr temporarily `__entry_text_start`): two FAIL lines, exit 1, and clean again
+    # after restoring. `fleh_dataabt` also reports `end_kern`, `segPRELINKTEXTB` and
+    # `segSizePRELINKTEXT`, so a run that *does* abort again still shows whether the header reached the
+    # code; the prediction was that they are never printed, and the absence is the result.
+    #
+    # **The result: no exception at all, and the run stops at `stub_hit=kmem_init`.** `kv_written ==
+    # kv_in_dram == 0x14` (20 bytes, five keys): the abort handler did not run and wrote nothing, the
+    # three new keys included. The chain is `arm_init+0x340` -> `machine_startup+0xe8` ->
+    # `kernel_bootstrap+0x120` -> `vm_mem_bootstrap+0x074` -> `kmem_init`, and `vm_mem_bootstrap` is
+    # straight-line from its first instruction to that call (`kernel_debug_string_early`,
+    # `vm_page_bootstrap`, `zone_bootstrap`, `vm_object_bootstrap`, `vm_map_init`, `kmem_init`, all
+    # `bl` with no conditional branch between them). So reaching `kmem_init` says every call before it
+    # returned - the EVB special case, `arm_vm_init`'s pre-initialization loop for
+    # `virtual_space_start = 0xC0000000`, `patch_low_glo_static_region`, the rest of `arm_init`,
+    # `machine_startup`, `kernel_bootstrap` and the first five calls of `vm_mem_bootstrap`. In
+    # particular 239's `vm_map_init+0x260` free passed, which is what the base move was for.
+    # `zone_init` is still ahead at `vm_mem_bootstrap+0x204`, so `zone_map_min_address` and
+    # `zone_map_max_address` are still zero and 239's second finding is unchanged - it simply is not
+    # in the way any more. **The one-object-per-run method is back**: what is missing here is a
+    # function, not an address, and the next object answers it.
+    #
+    # One thing the run did not show, kept because it is the shape of every remaining stop: the
+    # device's line is `real arm_init reached a symbol this image does not provide`, a label written
+    # when the only interesting stub was inside `arm_init`. `entry_stub_hit` is handed a name and
+    # nothing else, so it cannot be more specific (206's lesson: `stub_hit=<symbol>` names a symbol,
+    # never a caller), and with the stop this far from `arm_init` the label is now wrong about where.
+    # The fix is one argument - a generated stub can pass `__builtin_return_address(0)`, which is in
+    # `lr` for the instruction after its `bl` - and it belongs in 244 with the object link, because
+    # from here every stop is a stub somewhere far from `arm_init`.
+    #
+    # Cost: `ncmds` 2 -> 3, `sizeofcmds` 180 -> 236, `__TEXT` vmsize 0x906c0 -> 0x90700, `__DATA`
+    # vmaddr/vmsize 0x800906c0/0x49b88 -> 0x80090700/0x49b48, text 593841 -> 594065 (+224, and 64 of
+    # them the load command itself), fleh_dataabt 368 -> 440 (the three keys), 0 bytes of image
+    # (703352), `.bss` 0x800ab4f0..0x800da248 unchanged, layout unchanged, 645 undefined, stub set
+    # unchanged. `__entry_image_end` and therefore `getlastaddr()`/`end_kern` do not move: the header
+    # grew, so `__DATA`'s front moved up 64 bytes and it is 64 bytes shorter, with its *end* where it
+    # was - which is why the payload needed no rebuild beyond reading the new `.bin`.
     BSD_KERN_SUBR_PRF_OBJ=${STAGE90_ENTRY_BSD_KERN_SUBR_PRF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_subr_prf.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"

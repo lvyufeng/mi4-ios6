@@ -138,6 +138,8 @@ expect("__TEXT vmaddr", segs.get("__TEXT", (None, None))[0], sym["__entry_text_s
 expect("__TEXT vmsize", segs.get("__TEXT", (None, None))[1], sym["__entry_text_size"])
 expect("__DATA vmaddr", segs.get("__DATA", (None, None))[0], sym["__entry_data_start"])
 expect("__DATA vmsize", segs.get("__DATA", (None, None))[1], sym["__entry_data_size"])
+expect("__PRELINK_TEXT vmaddr", segs.get("__PRELINK_TEXT", (None, None))[0], sym["__entry_image_end"])
+expect("__PRELINK_TEXT vmsize", segs.get("__PRELINK_TEXT", (None, None))[1], 0)
 
 # ------------------------------------------------------------------ XNU's own comparisons
 
@@ -181,6 +183,42 @@ for name, (vmaddr, vmsize) in segs.items():
     last_addr = max(last_addr, vmaddr + vmsize)
 print("  getlastaddr()                  -> 0x%08x  (end_kern = round_page of this)" % last_addr)
 expect("getlastaddr", last_addr, sym["__entry_image_end"])
+
+# ------------------------------------------- the one call `arm_vm_init` sizes by subtraction
+#
+# `arm_vm_prot_init`'s PreLinkInfoDictionary call is
+#
+#     arm_vm_page_granular_RWNX(segPRELINKTEXTB + segSizePRELINKTEXT,
+#                                 end_kern - (segPRELINKTEXTB + segSizePRELINKTEXT), ...)
+#
+# and experiment 242 is what happens when the first term is an absence rather than a number: with no
+# `__PRELINK_TEXT`, `getsegdatafromheader` returns NULL *and* sets the size to 0, the range became
+# `[0, end_kern)` - the whole address space below the kernel - and the protection pass took a
+# page-table page from `avail_start` once per 4 MB of it until one landed on a page it had itself
+# written read-only. So the property to hold is about the *range*, not about the segment: it is the
+# round-up slop of the image's last page, so it is smaller than one page and never negative. Both
+# halves are checked because the second failure mode is worse than the first - an unsigned size that
+# wraps is a range nobody has bounded at all.
+#
+# This is the check that would have caught 242 on the host, which is why it is here and not in the
+# document.
+
+end_kern = (last_addr + 0xfff) & ~0xfff
+pl = segs.get("__PRELINK_TEXT")
+if pl is None:
+    fail.append("no __PRELINK_TEXT segment: the PreLinkInfoDictionary call is drawn from the whole "
+                "address space below end_kern (0x%08x bytes) - see experiment 242" % end_kern)
+else:
+    prelink_start = pl[0] + pl[1]
+    prelink_size = end_kern - prelink_start
+    print("  PreLinkInfoDictionary range    -> RWNX(0x%08x, 0x%08x)  [0x%08x, 0x%08x)"
+          % (prelink_start, prelink_size, prelink_start, prelink_start + prelink_size))
+    if prelink_size < 0:
+        fail.append("PreLinkInfoDictionary size is negative (%d): __PRELINK_TEXT ends past end_kern "
+                    "and the unsigned size wraps" % prelink_size)
+    elif prelink_size >= 0x1000:
+        fail.append("PreLinkInfoDictionary range is 0x%x bytes, not the slop of one page"
+                    % prelink_size)
 
 if ("__DATA", "__const") not in [(s[0], s[1]) for s in sects]:
     fail.append("no __DATA,__const section: arm_vm_init:427 dereferences a NULL section")

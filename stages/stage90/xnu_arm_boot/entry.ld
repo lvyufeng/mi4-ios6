@@ -70,6 +70,10 @@ SECTIONS
      *
      * `__DATA` spans the whole writable region, `.data` through the end of `.bss`, which is what a
      * Mach-O segment's `vmsize` means; `filesize` stops where the zero-initialized part begins.
+     * `__entry_image_end` is also the empty `__PRELINK_TEXT` segment's address in the header, which
+     * is what makes `arm_vm_init`'s `end_kern - (segPRELINKTEXTB + segSizePRELINKTEXT)` the round-up
+     * slop of the last page rather than the whole address space - see `entry_macho.s` and
+     * experiment 242.
      */
     __entry_image_end = .;
     __entry_data_size = __entry_image_end - __entry_data_start;

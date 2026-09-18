@@ -1057,11 +1057,37 @@ void fleh_swi(void) { entry_epilogue("exception: svc/swi"); }
  *
  * Every one of these is read the same way the rest of this file reads: a register, or a word in the
  * image, which is mapped because the handlers could not have run otherwise.
+ *
+ * Experiment 242 answered that question from the same two registers - `lr_abt - 8` was
+ * `pmap_init_pte_static_page`'s first PTE store, into a page-table page that routine had itself
+ * filled with read-only entries - and named a cause that is *not* an object and *not* XNU's pmap:
+ * this image's Mach-O has no `__PRELINK_TEXT`, so `arm_vm_prot_init`'s call
+ * `RWNX(segPRELINKTEXTB + segSizePRELINKTEXT, end_kern - (segPRELINKTEXTB + segSizePRELINKTEXT), ...)`
+ * became `RWNX(0, end_kern)` - a 1024-iteration loop taking a page-table page from `avail_start`
+ * each time, until one landed on a page the protection pass had already made read-only.
+ *
+ * **So experiment 243 adds the three lives that call is computed from** - `end_kern`,
+ * `segPRELINKTEXTB` and `segSizePRELINKTEXT` - and the header grew the empty `__PRELINK_TEXT`
+ * segment that makes the second of them a real address (`entry_macho.s`). The values to expect are
+ * in the build's own report and in `tools/host_entry_macho_check.sh`, which now fails on any header
+ * for which that range is not the round-up slop of the image's last page:
+ *
+ *   host         getsegdatafromheader("__PRELINK_TEXT") -> 0x800da248, size 0
+ *                getlastaddr() -> 0x800da248, so end_kern = round_page(...) = 0x800db000
+ *                the call is RWNX(0x800da248, 0xdb8) - [0x800da248, 0x800db000)
+ *
+ * so the device should report exactly those three numbers if it aborts again, which would also be
+ * the evidence that the header change reached the code. If it does not abort, the keys are never
+ * printed and the *absence* of the fault is the result - which is why they are here rather than a
+ * claim in a document.
  */
 extern uint32_t cpu_ttep;
 extern uint32_t avail_start;
 extern uint32_t gPhysBase;
 extern uint32_t mem_size;
+extern uint32_t end_kern;
+extern uint32_t segPRELINKTEXTB;
+extern uint32_t segSizePRELINKTEXT;
 
 void fleh_prefabt(void)
 {
@@ -1124,6 +1150,10 @@ void fleh_dataabt(void)
     entry_kv("xnu_entry_data_abort_avail_start", avail_start);
     entry_kv("xnu_entry_data_abort_gphysbase", gPhysBase);
     entry_kv("xnu_entry_data_abort_mem_size", mem_size);
+    /* The three lives `arm_vm_prot_init`'s PreLinkInfoDictionary call is computed from. */
+    entry_kv("xnu_entry_data_abort_end_kern", end_kern);
+    entry_kv("xnu_entry_data_abort_prelink_text_b", segPRELINKTEXTB);
+    entry_kv("xnu_entry_data_abort_prelink_text_size", segSizePRELINKTEXT);
     entry_epilogue("exception: data abort");
 }
 
