@@ -275,6 +275,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-259](experiment-259-telemetry-init-completes-and-the-stop-is-console-init.md) | **`telemetry_init` completes** — one more already-built object (`osfmk/kern/telemetry.o`, +17 boundaries) and a real 16 KB `kmem_alloc`; stop `console_init` at `kernel_bootstrap+0x1e4`; the image moves again |
 | stage90 | [experiment-260](experiment-260-console-init-completes-with-no-new-boundaries.md) | **`console_init` completes, and the link adds nothing** — `osfmk/console/serial_console.o`, 27 references *all* already satisfied, 9 stand-ins become real; a real 16 KB console ring; stop `stackshot_init`; layout unchanged for the first time since 257 |
 | stage90 | [experiment-261](experiment-261-stackshot-init-completes-and-the-scheduler-is-next.md) | **`stackshot_init` completes** — `osfmk/kern/kern_stackshot.o` (not `stackshot.o`), the largest new block since 254 (+40 boundaries, the kcdata/coalition/kdp machinery) and 3 resolved; stop `sched_init` at `kernel_bootstrap+0x204`; the image moves a 16 KB block again |
+| stage90 | [experiment-262](experiment-262-the-scheduler-is-two-objects.md) | **The scheduler is two objects** — `sched_prim.o` + the `sched_multiq_dispatch` table it calls through (a NULL stand-in would have jumped to 0); 30 resolved, 28 added; a five-function chain predicted from the linked table and confirmed; stop `ltable_bootstrap` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

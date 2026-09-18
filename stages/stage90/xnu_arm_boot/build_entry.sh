@@ -2613,6 +2613,76 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `kv_written == kv_in_dram == 0x37`, four below 260's 0x3b - `sched_init` is four characters
     # shorter than `stackshot_init`, recorded verbatim as always.
     OSFMK_KERN_KERN_STACKSHOT_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KERN_STACKSHOT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kern_stackshot.o}
+    # 262: the scheduler, and **two objects rather than one** - the first time this frontier has linked
+    # more than one, and the reason is a real one rather than convenience.
+    #
+    # `sched_init` is `osfmk/kern/sched_prim.c:357` (`out/xnu_arm_kernel_obj/osfmk_kern_sched_prim.o`,
+    # 31296 bytes of text, 107 references, 83 satisfied, **24 new**). But `sched_init`'s calls into the
+    # scheduler are **indirect**: it loads the address of the `sched_multiq_dispatch` table and reads
+    # its slots as function pointers -
+    #
+    #     78: movw r6, #:lower16:sched_multiq_dispatch      ; a *data* symbol
+    #     84: ldr  r4, [r6]                                 ; slot 0  = the name string
+    #    12c: ldr  r0, [r6, #4]                             ; slot 1  = SCHED(init)
+    #    130: ldr  r7, [r6, #12]                            ; slot 3  = SCHED(processor_init)
+    #    134: ldr  r5, [r6, #16]                            ; slot 4  = SCHED(pset_init)
+    #    138: ldr  r6, [r6, #140]                           ; slot 35 = SCHED(rt_init)
+    #    13c: blx  r0 ... 14c: blx r6 ... 184: blx r5 ... 19c: bx r1
+    #
+    # - so `sched_prim.o` alone is not a measurable step: `sched_multiq_dispatch` is currently a
+    # **storage stand-in** in this image (zeros at `0x800f9d40`), which would make slot 0 a NULL string,
+    # `strlcpy(sched_string, NULL, 48)` a NULL dereference, and `blx r0` a jump to 0. That stops the run
+    # and measures *this step's omission*, not the frontier. The table is therefore linked with it:
+    # `osfmk_kern_sched_multiq.o` (`osfmk/kern/sched_multiq.c`, manifest:580), 7418 bytes of text,
+    # 52 references, 25 satisfied and 27 new (`run_queue_*`, `sched_timeshare_*`,
+    # `sched_compute_timeshare_priority`, `update_priority`, `choose_processor`, ...), and its
+    # `sched_multiq_dispatch` is **statically initialised in `.rodata`** (172 bytes of slots), so the
+    # indirect targets become real addresses - and where a slot names a symbol this image does not have,
+    # the `blx` lands on that symbol's *stub* and stops the run cleanly.
+    #
+    # `SCHED()` is the multiq scheduler here, which is what `SCHED(sched_name)` in the dispatch table's
+    # first slot decides, and it is the reason `sched_multiq.o` is the second object and not
+    # `sched_traditional.o` or `sched_dualq.o` - all three are in the manifest
+    # (`out/xnu_arm_manifest.txt:579-582`) and exactly one is the one this build's config selects.
+    #
+    # **The prediction, and it is a chain rather than a symbol.** Resolving the table in the linked
+    # image (`sched_multiq_dispatch` -> `0x800b82e8`, and its slots read out of the image) says which
+    # functions `sched_init` will call, and each of them is followed one level:
+    #
+    #   slot 1  (0x04) = `sched_multiq_init`      - real; its calls are PE_parse_boot_argn, the printf
+    #                                               helper, zinit, zone_change, lck_* - all real - and
+    #                                               it **tail-calls `sched_timeshare_init`**
+    #   slot 35 (0x8c) = `sched_rtglobal_init`    - real; calls `sched_rtglobal_runq` through the table
+    #                                               and `arm_usimple_lock_init`, both real, and tails
+    #                                               into `memset`
+    #   slot 4  (0x10) = `sched_multiq_pset_init` - real, two instructions, a tail call to
+    #                                               `run_queue_init` (real)
+    #   slot 3  (0x0c) = `sched_multiq_processor_init` - likewise, tail into `run_queue_init`
+    #
+    # and `sched_timeshare_init`, `sched_rtglobal_init`, `sched_rtglobal_runq` and `run_queue_init`
+    # were each **checked for the stub body** (a `movw r0, #<name>` followed by `push {lr}`) and none
+    # of them has it. Note that `sched_timeshare_init` and `sched_rtglobal_init` appear in **neither**
+    # the resolved nor the added list, and that is not an error: nothing in the image referenced either
+    # name before this step, so neither was in the previous `undef` file to be subtracted. A name that
+    # was absent from the frontier entirely is invisible to a delta of two undefined sets.
+    #
+    # So `sched_init` completes, and the stop should be **past it**, at the next stub in
+    # `kernel_bootstrap`'s line: `0x8000dc54: bl 800a71a0 <ltable_bootstrap>`, still a stub. So:
+    # **`stub_hit=ltable_bootstrap`, `xnu_entry_stub_caller=0x8000dc58`** (`caller - 4` =
+    # `0x8000dc54` = `kernel_bootstrap+0x214`). Device: **`stub_hit=ltable_bootstrap`,
+    # `xnu_entry_stub_caller=0x8000dc58`** = `kernel_bootstrap+0x218` - the prediction, a fifth time,
+    # and this one was a chain of four functions reached indirectly through a data table. `sched_init`
+    # completed: the multiq scheduler is initialised.
+    #
+    # Measured: resolved 30, added 28; 633 -> 631 undefined, 554 -> 555 function stubs, 79 -> 76
+    # storage; text 730436 -> 768836 (+38400), image 835080 -> 867888 (+32808), bss end 0x80103108,
+    # args +1069056, topOfKernelData +3145728 (it is derived at megabyte granularity), headroom
+    # 2084600; payload text 1360106 (+32808). The 30 resolved are the thread and scheduling API -
+    # `thread_block`, `thread_setrun`, `sched_tick`, `assert_wait`, `idle_thread`, `sched_startup` and
+    # the rest - which had been stand-ins since this image first referenced them.
+    # `kv_written == kv_in_dram == 0x3d`, six above 261's 0x37.
+    OSFMK_KERN_SCHED_PRIM_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SCHED_PRIM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_sched_prim.o}
+    OSFMK_KERN_SCHED_MULTIQ_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SCHED_MULTIQ_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_sched_multiq.o}
     OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
@@ -2706,6 +2776,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_TELEMETRY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_SCHED_PRIM_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2715,7 +2787,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
