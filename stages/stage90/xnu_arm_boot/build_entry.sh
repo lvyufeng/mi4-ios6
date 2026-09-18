@@ -3098,6 +3098,160 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 293: `bsd_kern.o`, a function that returns a constant, and the pad's first real test
+    #
+    # **The 292 run reported** `stub_hit=get_task_uniqueid` at `coalitions_adopt_task + 0x0dc`. The
+    # object that defines it is `osfmk/kern/bsd_kern.c`, `osfmk_kern_bsd_kern.o` - and it also defines
+    # `get_task_crash_label`, one of the three names 292 obliged, so this step is again worth two
+    # names for the price of one.
+    #
+    # **The object, measured.** 4488 bytes of `.text` plus 16 of `.rodata.str1.1`, 61 definitions and
+    # 34 references:
+    #
+    #     resolved  23   get_task_uniqueid, get_task_crash_label, get_bsdtask_info/set_bsdtask_info,
+    #                    get_bsdthread_info, get_threadtask, get_task_map, get_task_page_table,
+    #                    get_task_internal(_compressed), get_task_phys_footprint(+_recent_max),
+    #                    get_task_purgeable_nonvolatile(_compressed), get_task_purgeable_size,
+    #                    get_task_resident_max, get_task_iokit_mapped, get_task_alternate_accounting
+    #                    (+_compressed), get_task_cpu_time, get_task_dispatchqueue_serialno_offset,
+    #                    current_thread_aborted, task_act_iterate_wth_args
+    #     added      5   bank_billed_balance_safe, bank_serviced_balance_safe, bsd_threadcdir,
+    #                    get_dispatchqueue_serialno_offset_from_proc, proc_pidversion
+    #     under      7   act_set_astbsd, bsd_getthreadname, mt_core_supported, mt_fixed_task_counts,
+    #                    proc_uniqueid, psignal, thread_update_qos_cpu_time
+    #     real      29
+    #
+    # Thirty-eight more definitions are referenced by nothing - `fill_task_rusage` and its six
+    # siblings, `get_task_frozen`, `get_task_pmap`, `swap_task_map` and the rest of the BSD task
+    # accessor surface. They arrive as dead code, as in 292, and none of the 38 collides with a
+    # symbol the image already has.
+    #
+    # **The prediction, and its centre is a function whose body is four instructions.** `get_task_uniqueid`
+    # is:
+    #
+    #     ldr  r0, [r0, #568]      ; task->bsd_info
+    #     cmp  r0, #0
+    #     beq  1f
+    #     b    proc_uniqueid       ; tail call, only when bsd_info is set
+    #   1: mvn  r0, #0
+    #     mvn  r1, #0              ; UINT64_MAX
+    #     bx   lr
+    #
+    # `task_create_internal` sets `new_task->bsd_info = NULL` (task.c:1045, and the image has
+    # `str r5, [r4, #152]` among the other zero stores at 0x800bfe6c), and nothing in the boot path
+    # so far has run any BSD code. So **the new body takes the `beq` and returns UINT64_MAX without
+    # calling anything** - it does not reach `proc_uniqueid`, which is one of the seven `under` names
+    # and is still a stub. Three call sites in `coalitions_adopt_task` (`+0x1b4`, `+0x220`, `+0x254`)
+    # all take it, and all three are followed by `and r0, r0, r1 / cmn r0, #1 / beq`, which the
+    # constant satisfies.
+    #
+    # So this step **overshoots the symbol it links**, as 290 did, and the second half of the
+    # prediction is what makes it interesting: `get_task_uniqueid` was the *last* stub on the whole
+    # path from `task_create_internal` back out through `task_init`. What remains is measured, not
+    # assumed, and every guard was read:
+    #
+    #   * the rest of the coalition adopt, for both types. `COALITION_NUM_TYPES` is 2 (RESOURCE and
+    #     JETSAM, both `has_default = 1`), so the loop runs twice; the second op is
+    #     `i_coal_jetsam_adopt_task` (0x800bf060), and a depth-3 scan from it finds only hits behind
+    #     `panic`.
+    #   * the two `kernel_debug` calls in `coalitions_adopt_task` (+0x244, +0x278) - the `KDBG_RELEASE`
+    #     of the coalescing path - are each behind `ldr r0, [0x80130f20] / mvn r1, #8 / tst r0, r1`,
+    #     and 0x80130f20 is `kdebug_enable`, a **`.bss`** symbol this payload zeroes. They are not
+    #     reached, so `kernel_debug -> kernel_debug_internal -> current_proc` is not either.
+    #   * `coalition_remove_task_internal` (+0x204) is in the `kr != KERN_SUCCESS` cleanup arm only.
+    #   * `task->coalition[RESOURCE] == COALITION_NULL` -> `panic` at +0x638 is not taken: the store
+    #     `str r7, [r0, #936]` happens before `get_task_uniqueid`, which is exactly why the first
+    #     stop was where it was.
+    #   * `place_task_hold` at +0x724 is guarded by `kernel_task != TASK_NULL`, and `kernel_task` is
+    #     still NULL - it is written from the out-parameter at +0x73c, at the very end.
+    #   * `task_init`'s tail is `vm_map_deallocate` and a **tail call** to `lck_spin_init`, both real.
+    #   * `kernel_bootstrap`'s `kernel_debug_string_early` (76 bytes) has no stub within three calls.
+    #   * `thread_init`'s first nine calls are `zinit` x2, `zone_change` x4,
+    #     `lck_grp_attr_setdefault`, `lck_grp_init`, `lck_attr_setdefault`. The only stub reachable
+    #     from them is `zinit -> btlog_create` at `zinit + 0x950`, behind two `.bss` guards
+    #     (`zone_btlog_enabled` and `z->z_btlog == NULL`) - and `task_init` itself already called
+    #     `zinit` at `+0x90` in every run since 289, so that path is settled empirically as well as
+    #     by reading.
+    #
+    # **Predicted stop:**
+    #
+    #     stub_hit=stack_init    xnu_entry_stub_caller=0x800092ac   (thread_init + 0xd8, r12 0x800091d4)
+    #
+    # `stack_init`, `thread_policy_init` and `machine_thread_init` are `thread_init`'s tenth, eleventh
+    # and twelfth calls, at +0xd4, +0xd8 and +0xdc - three stubs in a row with nothing between them.
+    #
+    # **The build, and this is the step where the 16 KB boundary finally moves.** `.data` is
+    # 16 KB-aligned and currently at 0x8010c000; the last thing before it, `__TEXT,initcode`, ends at
+    # **0x8010babc**, leaving **1348 bytes**. The object brings 4504 bytes of `.text` and `.rodata`,
+    # retires 23 stub names and obliges 5. At 292's measured ~62 bytes per retired name that is
+    # `4504 - 23*62 + 5*62` = **+3388**, which is 2040 bytes more than the room available. So:
+    #
+    #                   predicted        measured
+    #     undefined     800
+    #     function      706
+    #     storage        94
+    #     .data         0x8010c000 -> **0x80110000** (16 KB further on)
+    #     __bss_start   0x80123c08 -> **0x80127c08**
+    #     bss end       0x8015a458 -> **0x8015e458** (`.bss` size unchanged: the storage set is)
+    #     image         1198104  -> **1214488** (+16384, the `*fill*` the map file has always shown)
+    #     text          1096376  -> ~1099764 (the soft number; the name cost is 52-65 bytes measured
+    #                    across 290, 291 and 292, so the band is 1097100-1097400 - either way, past
+    #                    the boundary)
+    #
+    # The falsifier is a `.data` still at 0x8010c000 with an image of 1198104, which would mean the
+    # per-name cost is under 20 bytes and the 292 figure is not reusable.
+    #
+    # **The build, every count exact.**
+    #
+    #                   predicted        measured
+    #     undefined     800              800
+    #     function      706              706
+    #     storage        94               94
+    #     .data         0x80110000       0x80110000
+    #     __bss_start   0x80127c08       0x80127c08
+    #     bss end       0x8015e458       0x8015e458
+    #     image         1214488          1214488
+    #     text          ~1099764         1099960      (band 1097100-1097400 at 52-65 bytes a name;
+    #                                                  the measured cost is **51.1**, `(4504-3584)/18`,
+    #                                                  just under the band's floor)
+    #
+    # So the 16 KB boundary moved for the first time in four experiments, and the prediction that it
+    # would was right where the step-292 arithmetic was not. `.data` is at 0x80110000, `__bss_start`
+    # follows it, and the image gained exactly the 16384 bytes of `*fill*` the map file has shown at
+    # that seam since the walk began. Headroom 1727400 -> 1711016.
+    #
+    # The pin tracked the move without being asked to: the writes are now 0x8015e448 and 0x8015e44c,
+    # 0x4000 further on, `ResetHandlerData - ExceptionLowVectorsBase` = 0x15e444 - and the reserved
+    # slot moved by the same 0x4000 (`__bss_start` 0x80123c08 -> 0x80127c08). That is the whole point
+    # of the 291 fix, measured for the second time.
+    #
+    # **The run.**
+    #
+    #     stub_hit=stack_init     xnu_entry_stub_caller=0x800092ac
+    #
+    # `0x800092ac` is `thread_init + 0xd8`, the return address of the `bl` at 0x800092a8, with
+    # `thread_init` at 0x800091d4. So `get_task_uniqueid`'s new body took the `beq` and returned
+    # UINT64_MAX at all three of its call sites without reaching `proc_uniqueid`, the coalition loop
+    # ran for both types, `task_create_internal` and `task_init` both returned, and
+    # `kernel_bootstrap` reached `thread_init` - **the first XNU function in this walk that is about
+    # creating a thread rather than filling in a structure.** The three stubs at +0xd4, +0xd8 and
+    # +0xdc are now the frontier, and they are three in a row with nothing between them.
+    #
+    # Preflight clean (`loader_xnu_entry_stub_status=0x90000001`,
+    # `high_va_data_verified=0x00000001`), log 301111 bytes, no `exception:` line.
+    #
+    # **Safety:** non-persistent `fastboot boot` only, nothing flashed,
+    # `persistent_write_attempted=0x00000000` x25, `failure_mask=0x00000000` x87,
+    # `xnu_entry_failures=0x00000000`, and the device returned to Android on its own
+    # (`getprop ro.build.version.release` = 10).
+    #
+    # **Next:** experiment 294 - `osfmk/kern/stack.c`, `thread_policy.c` and `osfmk/arm/machine_thread.c`
+    # for `stack_init`, `thread_policy_init` and `machine_thread_init`, three consecutive
+    # unconditional calls with nothing between them, so a single step can take all three. After that
+    # `kernel_bootstrap`'s own tail: `atm_init`, `bank_init`, `ipc_pthread_priority_init`,
+    # `corpses_init`, then `kernel_thread_create` and `load_context` - the first point in this whole
+    # walk where XNU starts a thread rather than filling in a structure.
+    OSFMK_KERN_BSD_KERN_OBJ=${STAGE90_ENTRY_OSFMK_KERN_BSD_KERN_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_bsd_kern.o}
     # 292: `mac_mach.o`, and a prediction that leaves two functions entirely
     #
     # **The 291 run reported** `stub_hit=mac_exc_create_label` at `ipc_task_init + 0x0dc`. The object
@@ -6904,6 +7058,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_TASK_POLICY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_ARM_MACHINE_TASK_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_IPC_TT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$SECURITY_MAC_MACH_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_BSD_KERN_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_EVENT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
@@ -6917,7 +7073,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
