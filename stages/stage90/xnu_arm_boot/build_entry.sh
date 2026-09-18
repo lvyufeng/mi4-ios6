@@ -967,6 +967,49 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `di->final` real; its stop will be past itself rather than inside itself, so its prediction will
     # come from `hmac_dbrg_update` again.
     OSFMK_CCHMAC_FINAL_OBJ=${STAGE90_ENTRY_CCHMAC_FINAL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_cchmac_src_cchmac_final.o}
+    # `osfmk/corecrypto/ccsha1/src/ccdigest_final_64be.c`, named by experiment-217's
+    # `stub_hit=ccdigest_final_64be` - the object that finally makes `di->final` real. **500 bytes of
+    # text, no data, no `.bss`, 1 definition, 0 undefined symbols, 2 indirect calls** (0xb4 and 0x19c),
+    # both through `di->compress`, which is `sha1_compress`.
+    #
+    # It lives in the `ccsha1` directory although what it defines is a generic digest helper; the
+    # frontier rule names the object, not the directory, which is why the object name is spelled out
+    # here rather than derived.
+    #
+    # The step that got here was the first in this sequence with **nothing new executing**: with
+    # `cchmac_final` real and `ccdigest_final_64be` still a stub, the run stopped five instructions
+    # into `cchmac_final` - its `blx r3` at 0x24, with `r3 = [di + 28]` - so that step's measurement
+    # was its own accounting and nothing else. Worth remembering when reading a future cost table: a
+    # clean stub hit one symbol further along does not by itself mean anything new ran.
+    #
+    # **The prediction is `stub_hit=cchmac`.** After `cchmac_final` returns, `hmac_dbrg_update`
+    # resumes at 0x4b8 or 0x4c4, and the two arms differ - but they call the *same* symbol, so this
+    # prediction needs the arm analysis and does not care what its outcome is:
+    #
+    #     4b4: bl   cchmac_final      ; real now, returns
+    #     4b8: b    4d0               ; ---- arm A ----
+    #     4c0: bl   cchmac_final      ; real now, returns
+    #     4c4: orr  r0, r6, r9        ; ---- arm B: (da_len | db_len)
+    #     4c8: cmp  r0, #1
+    #     4cc: bne  578               ; if not 1 -> arm B's own path
+    #     4f8: bl   cchmac            ; <-- STUB, arm A's stop
+    #     578: mov  r7, #0
+    #     5a8: bl   cchmac            ; <-- STUB, arm B's stop
+    #
+    # `cchmac` is the one-shot init/update/final wrapper (`osfmk_corecrypto_cchmac_src_cchmac.o`, 128
+    # bytes), still a 12-byte stub at 0x0023967c. This is the only kind of "safe" that is not the same
+    # as experiment 216's: there, both arms converged and the arm did not matter; here the arms are
+    # different code and happen to end at the same symbol. If this prediction is wrong, the mistake is
+    # in reading the disassembly, not in a guess about an argument.
+    #
+    # The step after this one is the one that matters more: with `ccdigest_final_64be` real,
+    # `cchmac_final` runs to completion for the first time - its `memcpy`, its arithmetic block, and
+    # both of its calls through `di->final`, the second a tail call that returns straight to
+    # `hmac_dbrg_update`. That is the first time the whole HMAC finalisation executes on this device.
+    # The qualifier from experiment 214 still stands: the state it finalises started from
+    # `ccsha1_initial_state`, still a zeroed stub, so the *machinery* completes and the *value* is not
+    # SHA-1's.
+    OSFMK_CCDIGEST_FINAL_64BE_OBJ=${STAGE90_ENTRY_CCDIGEST_FINAL_64BE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_ccsha1_src_ccdigest_final_64be.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -1024,10 +1067,11 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_CCHMAC_UPDATE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_CCDIGEST_UPDATE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_CCHMAC_FINAL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ")
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
