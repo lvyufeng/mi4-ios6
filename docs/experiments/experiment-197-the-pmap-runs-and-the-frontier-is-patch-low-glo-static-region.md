@@ -154,7 +154,7 @@ thirty-five symbols and adds sixteen obligations looks like. `.bss` ends at 0x00
 `topOfKernelData`; `tools/host_entry_macho_check.sh` reads `getlastaddr()` back out of the Mach-O
 header as 0x00250088 and every segment `arm_vm_init` asks for is either right or absent.
 
-## What is next: `lowmem_vectors.o`, with its two decisions already named
+## What is next: `lowmem_vectors.o`, and the one stand-in of the wrong kind
 
 The frontier is `osfmk/arm/lowmem_vectors.c`, and the object is `osfmk_arm_lowmem_vectors.o`: **72
 bytes of text, 988 of data, 0 of `.bss`, 6 references.** It defines `lowGlo` - the low-globals
@@ -164,21 +164,35 @@ the offsets into `vm_page` it describes) - plus `patch_low_glo`, `patch_low_glo_
 `patch_low_glo_vm_page_info`.
 
 It is another object whose value is its data, and this time the data is *initialized*, so the
-`nm -S` route cannot stand in for it at all. Two of its six references also need a decision before
-the build will agree to make the image:
+`nm -S` route cannot stand in for it at all. Its six references are four the image will resolve on
+its own and two it will not:
 
-- **`kmod` is `B` with `nm -S` size 0.** `build_entry.sh` refuses a storage stand-in whose size it
-  cannot read, on purpose ("a stand-in of the wrong size is overwritten by the first real user of
-  it, so this has to be a decision"). So this step either links the object that defines `kmod` or
-  writes a definition with the size taken from source.
-- **`version` and `osversion` are not defined anywhere in the project's pool**, so the generator's
-  `case` falls through to the function branch and emits `void version(void)` - the wrong *kind* of
-  symbol for something `lowGlo` stores the address of. Harmless for a structure nothing in this
-  image reads, but it is a stand-in that lies about what it is, and the honest fix is a sized
-  definition.
+| reference | where it comes from |
+| --- | --- |
+| `pmap_object_store` | 0xa0 bytes, `osfmk_arm_pmap.o` - resolved by this experiment's own step |
+| `vm_kernel_stext` | 4 bytes, `osfmk_arm_arm_vm_init.o` - resolved |
+| `kdp_trans_off`, `kmod` | both `B` size 4; sized from the pool like any other storage |
+| `version`, `osversion` | **in no object in this project's pool at all** |
 
-Both are named here, before the run, for the same reason every other obstacle in this sequence has
-been: so that the step either works or reports which of two known things went wrong.
+`version` and `osversion` are `libkern/libkern/version.h.template:105-109`'s
+`extern const char version[]` and `extern char osversion[]` (`OSVERSIZE` 256), defined by
+`config/version.c` - which is a *template* whose strings carry Apple's `###KERNEL_VERSION_LONG###`
+and `###KERNEL_BUILD_DATE###` placeholders, substituted by a build step this project does not run
+and therefore never compiled here. So the generator's `case` falls through to the function branch
+and emits `void version(void) { entry_stub_hit("version"); }`: it links, nothing in this image trips
+over it, and it is still a stand-in that lies about what it is. The fix is a definition of the right
+kind, and it is experiment 198's, because the symbol only becomes reachable when this object is
+linked.
+
+**This section named the wrong obstacle before experiment 198 ran, and the correction is the more
+useful paragraph.** It said `kmod` was `B` with `nm -S` size 0, and that `build_entry.sh` would
+therefore refuse the build. Both halves were wrong, and they were wrong for one reason: `nm -S -P`
+prints `name type value size`, so `$4` is the size - but the check that produced the claim read
+`$3`, which is the **value**. `kmod`'s value is 0 and its size is 4; `kdp_trans_off`'s value is 8 and
+its size is 4. A column off by one produced a confident statement about what a build would do, and
+the build's own generator - which reads `$4` and is right - would have handled both without comment.
+It is the same shape as everything in `mi4-measurement-defects`: reading a number out of a tool's
+output in a format the tool does not print.
 
 ## A correction to experiment 195's reproduce block
 
@@ -219,9 +233,16 @@ grep -n "kernel_pmap = \|kernel_pmap_store" external/xnu-4570.1.46/osfmk/arm/pma
 # the tail call the tool could not see, now followed
 python3 tools/entry_frontier.py --from arm_init --list 12 "$S" $(cat /tmp/objpaths.txt)
 
-# and the next step's two decisions, before they are a run
+# and the next step, before it is a run: which of its six references the pool cannot size.
+# `-S -P` prints `name type value size`, so the size is $4 - the column-off-by-one that made the
+# paragraph above wrong the first time is worth re-running rather than remembering.
 arm-none-eabi-size out/xnu_kernel_obj/osfmk_arm_lowmem_vectors.o
 arm-none-eabi-nm -u out/xnu_kernel_obj/osfmk_arm_lowmem_vectors.o
+arm-none-eabi-nm -A -S -P --defined-only out/xnu_kernel_obj/*.o out/xnu_asm_obj/*.o |
+  sed 's/^[^:]*: //' | awk 'NF>=2 {print $1, $2, ($4 == "" ? "-" : $4)}' | sort -u > /tmp/kernsyms.txt
+for s in kdp_trans_off kmod osversion pmap_object_store version vm_kernel_stext; do
+  printf '%-22s ' "$s"; awk -v n="$s" '$1==n {print "type="$2" size="$3}' /tmp/kernsyms.txt; echo
+done
 ```
 
 Nothing was flashed: `persistent_write_attempted=0x00000000` in all 25 contracts that report it,

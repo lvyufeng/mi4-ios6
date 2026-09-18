@@ -92,6 +92,39 @@ unsigned long gVirtBase = 0x00200000ul;
 
 uint32_t kdebug_enable;
 
+/* ------------------------------------------------------------------ the version strings */
+
+/*
+ * `version` and `osversion` - two symbols whose object this project does not compile, and the only
+ * two the entry image has ever held as the wrong *kind* of stand-in.
+ *
+ * `libkern/libkern/version.h.template:105-109` declares them
+ *
+ *     extern const char version[];
+ *     #define OSVERSIZE 256
+ *     extern char osversion[];
+ *
+ * and `config/version.c:3,17` defines them - but that file is a *template*: its strings carry
+ * Apple's `###KERNEL_VERSION_LONG###` / `###KERNEL_BUILD_DATE###` placeholders, substituted by a
+ * build step this project does not run, so it is never compiled here.
+ *
+ * That left both symbols undefined, and `build_entry.sh`'s generator takes a storage symbol's size
+ * from `nm -S` over this project's object pool - where neither name appears at all. Its `case` falls
+ * through to the function branch and emits `void version(void) { entry_stub_hit("version"); }`,
+ * which links, and which nothing here would ever trip over, because the only thing in this image
+ * that touches either name is `osfmk/arm/lowmem_vectors.c:37-41`, taking their *addresses* for a
+ * structure a debugger reads. It is still a stand-in that lies about what it is: a reader of the
+ * linker map would find two functions where the kernel has two strings, and if anything ever
+ * printed `version` it would print code.
+ *
+ * So they are defined here, at the size and of the type `version.h.template` states. The string is a
+ * placeholder and is written to look like one, because XNU's real value is assembled from the build
+ * date and builder of a build this project does not perform - a plausible-looking date here would be
+ * a number no measurement produced, which is the one thing this project does not ship.
+ */
+const char version[] = "Darwin Kernel Version ###not-built-by-apple###";
+char osversion[256];
+
 /*
  * 68 bytes, not `uint64_t[2]` (16). The real thing is `entropy_data_t`:
  *
