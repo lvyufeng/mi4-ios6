@@ -1966,6 +1966,31 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #
     # Nothing here is storage, so the generator has no size to get wrong: all 14 references are
     # `panic` (real, `osfmk_kern_debug.o`) and the twelve `_ll`/`_rb` implementations.
+    #
+    # **245 measured it, and the object moved no address.** The build resolved 10 and added 13 - the
+    # portable entry points in, the two implementations out, net 636 -> 639 undefined and 551 -> 554
+    # function stubs with the storage count unchanged at 85. Text 610225 -> 611345 (+1120 = the
+    # object's 908 plus three 24-byte stubs and their names), and **the image, `.bss`, layout,
+    # headroom, `__entry_image_end` and the payload's own size are all unchanged** - the growth fitted
+    # inside the linker script's alignment padding, so the payload was rebuilt only to carry a new
+    # copy of a same-sized `.bin`. First step in this sequence where linking an object cost nothing in
+    # layout, and worth having measured rather than assumed.
+    #
+    # The prediction was read off the disassembly, because this file is a *dispatcher* and the
+    # source's program order is not the answer: `vm_map_store_init`'s first statement is
+    # `vm_map_store_init_ll(hdr)`, unconditional, and only behind `vm_map_store_has_RB_support(hdr)` -
+    # compiled to `cmp r0, #0xbaadc0d1` (`SKIP_RB_TREE`, `vm_map_store.h:126`) / `popeq` - does it
+    # tail-call `vm_map_store_init_rb`. The device said **`stub_hit=vm_map_store_init_ll`,
+    # `xnu_entry_stub_caller=0x8008070c`** = `vm_map_store_init+0xc`, the return address of
+    # `80080708: bl 800839f0 <vm_map_store_init_ll>`: the stop is before the `cmp` at `+0x18`, so the
+    # RB decision has still not been taken on this device. No exception, `kv_written == kv_in_dram ==
+    # 0x41` (65 bytes: 31 + 34).
+    #
+    # Next: `vm_map_store_init_ll` is in `osfmk_vm_vm_map_store_ll.o` - 776 bytes of text, 8
+    # definitions, and two references (`_consume_printf_args`, `OSCompareAndSwapPtr`) that **are both
+    # already defined** by objects the image links. So 246's stop will be inside one of the eight
+    # definitions or deeper, which is a prediction for its own disassembly rather than for an object
+    # list.
     OSFMK_VM_VM_MAP_STORE_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_STORE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_map_store.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
