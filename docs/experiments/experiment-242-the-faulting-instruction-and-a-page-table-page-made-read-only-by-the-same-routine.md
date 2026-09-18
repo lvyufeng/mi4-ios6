@@ -199,11 +199,22 @@ bits of `pa` to `0x612`, while the helper's own base is `0x412` (or `0x413` when
 
 The eight calls between them are the whole of `arm_vm_prot_init`. Five of them are **no-ops in this
 image for the same reason**: our synthetic Mach-O has two `LC_SEGMENT`s (`__TEXT`, `__DATA`), so
-`getsegdatafromheader` returns NULL for `__KLD`, `__LAST`, `__PRELINK_TEXT` — and `segPRELINKTEXTB`
-and `segSizePRELINKTEXT` are *globals* (`arm_vm_init.c:109-110`), zero-initialised, which
-`getsegdatafromheader` leaves untouched when the segment is absent. `segKLDB`, `segLASTB` and
-`segPRELINKTEXTB` are therefore 0 and three of the calls are `RWNX(NULL, 0, ...)` — zero size, no loop,
-nothing.
+`getsegbynamefromheader` finds nothing for `__KLD`, `__LAST`, `__PRELINK_TEXT` — and
+`getsegdatafromheader` says so explicitly rather than leaving the size alone:
+
+```c
+	sc = getsegbynamefromheader(mhp, segname);
+	if (sc == (kernel_segment_command_t *)0) {
+		*size = 0;
+		return ((char *)0);
+	}
+	*size = sc->vmsize;
+	result = (void *)sc->vmaddr;
+```
+
+so `segKLDB`, `segLASTB` and `segPRELINKTEXTB` are 0 *and* their sizes are 0, and three of the calls
+are `RWNX(NULL, 0, ...)` — zero size, no loop, nothing. (Both are globals,
+`arm_vm_init.c:109-110`, so a NULL return and a zero are the same value twice.)
 
 **But one of them is not, and it is the one whose size is computed by subtraction:**
 

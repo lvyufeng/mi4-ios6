@@ -1783,11 +1783,13 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # [0x80091000, 0x80400000), and after the __DATA call it is [0x800db000, 0x80400000).
     #
     # **Why this image reaches an allocation inside that residue at all is the finding.** Our
-    # synthetic Mach-O has two segments, so `segPRELINKTEXTB` and `segSizePRELINKTEXT` - globals, so
-    # zero - make `RWNX(segPRELINKTEXTB + segSizePRELINKTEXT, end_kern - (segPRELINKTEXTB +
-    # segSizePRELINKTEXT), force_coarse_physmap)` become `RWNX(0, end_kern)`: not the small
-    # PreLinkInfoDictionary range a real kernel has, but 1024 iterations of the 4 MB alignment loop,
-    # each taking a page-table page from `avail_start`. And `avail_start` is inside the residue.
+    # synthetic Mach-O has two segments, and `getsegdatafromheader` sets `*size = 0` and returns NULL
+    # when a segment is absent (`libkern/kernel_mach_header.c`), so `segPRELINKTEXTB` and
+    # `segSizePRELINKTEXT` are both zero - which makes `RWNX(segPRELINKTEXTB + segSizePRELINKTEXT,
+    # end_kern - (segPRELINKTEXTB + segSizePRELINKTEXT), force_coarse_physmap)` become
+    # `RWNX(0, end_kern)`: not the small PreLinkInfoDictionary range a real kernel has, but 1024
+    # iterations of the 4 MB alignment loop, each taking a page-table page from `avail_start`. And
+    # `avail_start` is inside the residue.
     #
     # **Why the fault is at 0x80300000 rather than at the second allocation, 0x80223000, is the TLB.**
     # `avail_start`'s first page is 0x80222000, not 0x8020A000: `pmap_bootstrap`'s table allocation
