@@ -239,6 +239,8 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-223](experiment-223-bsds-unix-startup-links-and-the-frontier-is-a-group.md) | BSD's `unix_startup` Links, the Frontier's First Group, and the Next Stop Is `kernel_debug_string_early` |
 | stage90 | [experiment-224](experiment-224-bsd-init-links-a-hundred-stubs-and-the-frontier-is-kernel-debug-string-early.md) | `bsd_init` Links, a Hundred Stubs Arrive, and the Frontier Is `kernel_debug_string_early` |
 | stage90 | [experiment-225](experiment-225-the-first-neon-runs-and-the-frontier-is-vm-mem-bootstrap.md) | the First NEON Executes, `kernel_debug_string_early` Runs, and the Frontier Is `vm_mem_bootstrap` |
+| stage90 | [experiment-226](experiment-226-the-prediction-was-wrong-and-why.md) | the Prediction Was Wrong — `vm_compressor_init_locks` for `zone_bootstrap` — and Why |
+| stage90 | [experiment-227](experiment-227-the-tools-first-prediction-and-vm-map-steal-memory.md) | the Tool's First Prediction, `vm_map_steal_memory`, and the NEON That Waited Two Experiments |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

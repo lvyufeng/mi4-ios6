@@ -1303,23 +1303,27 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # return and print nothing:
     #
     #     10: bl kernel_debug_string_early
-    #     1c: bl vm_page_bootstrap(sp+12, sp+8)   <-- real: 888 bytes at 0x00218b50
+    #     1c: bl vm_page_bootstrap(sp+12, sp+8)   <-- real, from osfmk_vm_vm_resident.o (exp 195)
     #     28: bl kernel_debug_string_early
     #     2c: bl zone_bootstrap                   <-- ABSENT, and not referenced by the image
     #     ...
     #
-    # **The prediction is `stub_hit=zone_bootstrap`**, and one step deeper than the last few
-    # predictions, because `vm_page_bootstrap` is *already* in the image (it came in with
-    # `osfmk_vm_vm_resident.o` in experiment 195) and is therefore part of the path:
+    # **Correction, recorded after experiment 226. The prediction below was `zone_bootstrap` and it
+    # was wrong; the stop was `vm_compressor_init_locks`.** The reasoning that follows is kept in
+    # place because of how it fails, which is twice over:
     #
-    #   - `vm_page_bootstrap` has **no stubbed dependency at all**. Its whole body is five calls -
-    #     `__bzero`, `vm_page_init_lck_grp`, and `lck_mtx_init_ext` three times - every one of them
-    #     already real, and it has **no indirect call** (`grep -c 'blx\|ldr pc'` is 0). Its only
-    #     branches are one `b` and one `bne`, both forming a NEON loop that skips no call.
-    #   - `zone_bootstrap` is **absent from the image *and* currently unreferenced by it**, which is
-    #     stronger than "undefined": `vm_mem_bootstrap` is a generated stub today, so the object that
-    #     calls `zone_bootstrap` is not linked at all. Linking this object creates the reference, the
-    #     stub generator creates the stub, and the run stops on it.
+    #   - **`vm_page_bootstrap` is `0x888` = 2184 bytes, not 888.** `nm -S -P` prints sizes in
+    #     hexadecimal with no prefix, and that was read as decimal - so the disassembly window used
+    #     was `0x00218b50..0x00218ec8`, the first 40% of the function. It has **27 direct calls, not
+    #     five**, and `vm_map_steal_memory`, which experiment 227 is about, was outside the window.
+    #   - Even with all 27 in hand, "the callee is real" is not "the callee has nothing missing".
+    #     `vm_page_init_lck_grp` is real; its last instruction is `R_ARM_JUMP24 vm_compressor_init_locks`,
+    #     a tail call into an object the image did not have. The reading was one level down and the
+    #     path was two.
+    #
+    # Both of those are now what `tools/xnu_entry_callwalk.py` does instead of a hand. The paragraph
+    # below about the NEON is still right, and the NEON in question ran in experiment 227 rather than
+    # in 226 or 225 - 226 stopped at `0x00241330`, which is before the first `vld1.64` at `0x00218c30`.
     #
     # `vm_page_bootstrap` is also where the second batch of NEON executes - `vld1.64 {d16-d17},
     # [r1 :128]`, `vdup.32`, `vshl.s32` and an aligning `vst2.32 {d24-d27}, [r1 :64]!` in a loop.
@@ -1329,6 +1333,47 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # (the `:128` load is the 16-byte-aligned literal table at 0x00218dc0; the `:64` store base is
     # 0x0026c038 + r7 stepping by 64).
     OSFMK_VM_VM_INIT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_init.o}
+    # `osfmk/vm/vm_compressor.c`, named by experiment-226's `stub_hit=vm_compressor_init_locks`.
+    # **23260 bytes of text, 144 of data, 16248 of `.bss`, 206 definitions, 100 references** - the
+    # largest object this link has taken on, and almost all of it arrived unused the last time a step
+    # this size happened.
+    #
+    # **Experiment 226's prediction was `zone_bootstrap` and it was wrong.** The stop was
+    # `vm_compressor_init_locks`. The reasoning that had predicted `zone_bootstrap` is in the
+    # `OSFMK_VM_VM_INIT_OBJ` block above, along with what was wrong with it.
+    #
+    # `tools/xnu_entry_callwalk.py` now does that transitive walk over the linked ELF, and it is what
+    # found this: run against experiment 226's own image it names `vm_compressor_init_locks`, and
+    # against that experiment's empty-object image it names `vm_mem_bootstrap`, which is what
+    # experiment 225 actually printed. Both are cases with known answers, so the tool is checked
+    # against the device rather than against itself.
+    #
+    # **The walk was run before the device was touched, it said `stub_hit=vm_map_steal_memory`, and
+    # the device printed exactly that.** The path this step has to get through first is
+    # `vm_compressor_init_locks` itself: 88 bytes, `lck_grp_attr_setdefault`, `lck_grp_init`,
+    # `lck_attr_setdefault` and a tail `lck_rw_init` - every one of them already real in the image.
+    # The build measured 2 resolved, 36 added, 519 -> 553 undefined.
+    OSFMK_VM_VM_COMPRESSOR_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_COMPRESSOR_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_compressor.o}
+    # `osfmk/vm/vm_map.c`, named by experiment-227's `stub_hit=vm_map_steal_memory`. **76439 bytes of
+    # text, 52 of data, 416 of `.bss`, 202 definitions, 162 references** - nearly three times the
+    # largest object linked so far. `vm_map_steal_memory` itself is 120 bytes and its three calls are
+    # all `pmap_steal_memory`, which is already real, so it runs to completion.
+    #
+    # **The prediction is whatever `tools/xnu_entry_callwalk.py` says after this object is linked**,
+    # and it is taken before the device is touched. Experiment 227 is the first step whose prediction
+    # came from the tool rather than from a hand reading, and it held - and the two experiments before
+    # it are why: 225 read `vm_page_bootstrap` as 888 bytes (it is `0x888` = 2184) and 226 then read
+    # the call graph one level too shallow, so the stop was `vm_compressor_init_locks` where the
+    # prediction said `zone_bootstrap`. A transitive closure over a 1744-function image is not
+    # something to compute by hand.
+    #
+    # **The walk on the image with this object linked says `stub_hit=zone_bootstrap`**, and it is the
+    # same destination experiment 226 predicted by hand - reached this time by walking the whole of
+    # `vm_page_bootstrap` (all 27 of its calls) and every call inside every callee, rather than by
+    # stopping at the first one. No call on that path is inside a conditional block, which the walk
+    # reports separately and which is what makes the answer a prediction rather than an upper bound.
+    # `zone_bootstrap` is defined by `osfmk_kern_zalloc.o`, so the step after this one is that object.
+    OSFMK_VM_VM_MAP_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_map.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -1395,10 +1440,12 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$BSD_KERN_BSD_INIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KDEBUG_OBJ"   "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_VM_VM_COMPRESSOR_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_VM_VM_MAP_OBJ"        "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "$OSFMK_CCHMAC_OBJ" "$OSFMK_CC_CLEAR_OBJ" "$OSFMK_MEMSET_S_OBJ" "$OSFMK_CC_CMP_SAFE_OBJ" "$OSFMK_BSD_DEV_UNIX_STARTUP_OBJ" "$BSD_KERN_BSD_INIT_OBJ" "$BSD_KERN_KDEBUG_OBJ" "$OSFMK_VM_VM_INIT_OBJ")
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "$OSFMK_CCHMAC_OBJ" "$OSFMK_CC_CLEAR_OBJ" "$OSFMK_MEMSET_S_OBJ" "$OSFMK_CC_CMP_SAFE_OBJ" "$OSFMK_BSD_DEV_UNIX_STARTUP_OBJ" "$BSD_KERN_BSD_INIT_OBJ" "$BSD_KERN_KDEBUG_OBJ" "$OSFMK_VM_VM_INIT_OBJ" "$OSFMK_VM_VM_COMPRESSOR_OBJ" "$OSFMK_VM_VM_MAP_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

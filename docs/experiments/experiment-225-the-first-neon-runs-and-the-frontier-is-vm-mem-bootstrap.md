@@ -262,3 +262,40 @@ arm-none-eabi-objdump -d --start-address=0x00218b50 --stop-address=0x00218ec8 ou
 
 Nothing was flashed: `persistent_write_attempted=0x00000000` in all 25 contracts that report it,
 and the device returned to Android on its own.
+
+## Correction, added after the run (experiments 226 and 227)
+
+Two claims below are wrong, and the second is wrong because of the first. They are left in place
+above and corrected here, because the failure is more instructive than the correction.
+
+**`vm_page_bootstrap` is 2184 bytes, not 888.** `arm-none-eabi-nm -S -P` prints sizes in
+**hexadecimal without a prefix**, so its `888` is `0x888`. Everything downstream of that misreading
+is wrong: the disassembly quoted above covers `0x00218b50` to `0x00218ec8`, which is 0x378 of 0x888 -
+the first 40% of the function. `vm_page_bootstrap` has **27 direct calls**, not five, and the ones
+past the truncation point (`PE_parse_boot_argn`, four `__bzero`, `kernel_debug_string_early`,
+`vm_map_steal_memory`, `pmap_free_pages`, `pmap_steal_memory` twice, three `lck_spin_init`,
+`pmap_startup`, `arm_usimple_lock_init`) were never seen. It has no indirect call, which the
+truncated window suggested and the full function confirms.
+
+**So `vm_page_bootstrap` has a stubbed dependency, and the prediction `zone_bootstrap` was wrong.**
+Experiment 226's run stopped on `vm_compressor_init_locks`: `vm_page_bootstrap` calls
+`vm_page_init_lck_grp` (220 bytes, real, and inside the window that *was* read), whose last
+instruction is `R_ARM_JUMP24 vm_compressor_init_locks` - a tail call into an object the image did not
+have. Checking `vm_page_bootstrap`'s five visible calls and finding them all real was not enough,
+for two reasons that compound: the callee's own callees were not checked, and a third of the caller
+had not been read.
+
+**The NEON in `vm_page_bootstrap` did not run in experiment 226** - the stop was in
+`vm_page_init_lck_grp`, called at `0x218bb8`, which is before the first `vld1.64`. It ran in
+experiment 227, whose stop is at `0x2190c0`, past every NEON instruction in the function, and whose
+log has no `exception:` line either. The paragraph above about alignment by construction stands and
+is now measured; the sentence "it is on the very next step's path" was a guess about timing that
+turned out to be one experiment early.
+
+**What came out of all this is a tool**, `tools/xnu_entry_callwalk.py`, which walks the transitive
+call graph of the linked ELF in call order and names the first stub on it - skipping calls inside
+conditional blocks, because an initialisation path does not take its assertion branches. Checked
+against two cases with known answers: run on experiment 226's own image it names
+`vm_compressor_init_locks`, and run on that experiment's empty-object image it names
+`vm_mem_bootstrap`, which is what this experiment printed. Experiment 227 is its first prediction,
+and it held.
