@@ -19,6 +19,7 @@ ENTRY(_start)
 SECTIONS
 {
     . = 0x00200000;
+    __entry_text_start = .;
 
     .text : {
         KEEP(*(.text._start))     /* start.s's _start, entered first */
@@ -26,7 +27,10 @@ SECTIONS
         *(.rodata .rodata.*)
         . = ALIGN(32);
     }
+    __entry_text_end = .;
+    __entry_text_size = __entry_text_end - __entry_text_start;
 
+    __entry_data_start = .;
     .data : {
         *(.data .data.*)
         . = ALIGN(8);
@@ -39,6 +43,19 @@ SECTIONS
         . = ALIGN(8);
     }
     __bss_end = .;
+
+    /*
+     * The numbers entry_macho.s puts into the Mach-O header it defines. They are computed here
+     * rather than in the assembly because the sizes are differences of two linker symbols, which
+     * gas cannot fold into a single word; a script expression can.
+     *
+     * `__DATA` spans the whole writable region, `.data` through the end of `.bss`, which is what a
+     * Mach-O segment's `vmsize` means; `filesize` stops where the zero-initialized part begins.
+     */
+    __entry_image_end = .;
+    __entry_data_size = __entry_image_end - __entry_data_start;
+    __entry_data_filesize = __bss_start - __entry_data_start;
+    __entry_data_fileoff = __entry_data_start - __entry_text_start;
 
     /DISCARD/ : {
         *(.comment)

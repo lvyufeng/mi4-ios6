@@ -75,10 +75,20 @@
  * real code to write one faults into the read-only section instead of setting a variable, and a
  * `uint32_t` one is half the size XNU's own type says. The values below are the boot_args this
  * payload hands `_start`, which is what XNU would have computed from the same arguments.
+ *
+ * They are stand-ins only while `arm_vm_init` is not in the image. Experiment 194 linked
+ * `osfmk/arm/arm_vm_init.o`, which defines all three, so with `STAGE90_ENTRY_REAL_ARM_INIT=1` the
+ * definitions here are a duplicate and are removed - and the values then come from
+ * `arm_vm_init:351-353`, which assigns them from the boot_args rather than from a constant. That
+ * is also the reason these three were never allowed to be `const`: the real definitions are
+ * assigned to, in place, and a stand-in that cannot be written would fault the moment
+ * `arm_vm_init` ran.
  */
+#ifndef STAGE90_ENTRY_REAL_ARM_INIT
 unsigned long gPhysBase = 0x00200000ul;
 unsigned long gPhysSize = 0x00200000ul;
 unsigned long gVirtBase = 0x00200000ul;
+#endif
 
 uint32_t kdebug_enable;
 
@@ -404,100 +414,70 @@ void _consume_kprintf_args(int a, ...)
 }
 
 /*
- * `arm_vm_init()` - `osfmk/arm/arm_vm_init.c:339`, and the first symbol `arm_init` reaches once it
- * has finished with the CPU and the scheduler.
+ * `patch_low_glo()` - `osfmk/arm/lowmem_vectors.c:74`, in `osfmk_arm_lowmem_vectors.o`, and the
+ * first symbol `arm_init` reaches after `arm_vm_init` returns.
  *
- * Experiment 191 stopped at `ml_set_interrupts_enabled`, `processor_init`'s `splsched()`. This run
- * links `osfmk/arm/machine_routines_common.o`, which defines it, and the probe moves here. The
- * probe *had* to move first: that object defines the symbol the last probe defined, and a link
- * that sees two definitions is the failure that produced exp-190's wrong measurement - so the
- * object cannot be measured while the probe still stands on it.
+ * Experiment 193 stopped at `arm_vm_init` itself. This run links `osfmk/arm/arm_vm_init.o` and the
+ * Mach-O section readers it calls (`libkern/kernel_mach_header.o`), so the probe moves along
+ * `arm_init`'s body to the next thing nothing defines. The move is named by the source rather than
+ * by a run: `arm_init:322-326` reads `debug` and tests
+ * `(debugmode & MIN_LOW_GLO_MASK) == MIN_LOW_GLO_MASK`, `MIN_LOW_GLO_MASK` is `0x144`
+ * (`arm_init.c:127`), and this payload's own cmdline contains `debug=0x144` - so the test is true
+ * and `patch_low_glo()` is called, not skipped.
  *
- * `ml_set_interrupts_enabled` is called twice by `processor_init` and both calls pass 0. The first
- * is `splsched()`'s explicit `FALSE`; the second is `splx(s)` where `s` is the first call's return
- * value, `(state & PSR_IRQF) == 0`, which is 0 because exp-191 measured CPSR's I bit already set.
- * So the compiled `cpsid if` at `machine_routines_common.o+0x24` runs twice and the enable path
- * never is entered. That path is unsafe here, and it is worth saying why: it reads the per-CPU base
- * out of TPIDRPRW and dereferences it, and it takes the AST-drain branch whenever
- * `get_preemption_level()` returns 0 - which in this image is a stub that always returns 0. It is
- * skipped because `enable` is 0, and `enable` is 0 because exp-191 measured the CPSR that decides
- * it.
+ * It is one statement: `lowGlo.lgStext = (uint32_t)vm_kernel_stext;`. What the probe reports is
+ * therefore not this function but the state `arm_vm_init` left behind, which is the only place in
+ * the sequence where the kernel's own memory map is visible as numbers:
  *
- * What the stop is worth checking, in the order the probe reads it:
+ *   `cpu_ttep` is where `arm_vm_init` put the system translation table - `boot_ttep + 4 pages`,
+ *   after `bcopy`ing the boot table there and clearing out the V=P entries for the region the
+ *   kernel is giving back. `phystokv` is an identity here, so the value doubles as a physical
+ *   address.
  *
- *   `args` is `arm_init`'s own argument, the `boot_args` pointer the payload handed XNU. `arm_init`
- *   copies it into `const_boot_args` with `__aeabi_memcpy4` and points `BootArgs` at the copy; `r2`
- *   here is still the original, so it must be the address exp-175's layout checks put after `.bss`.
+ *   `avail_start` is where the next free byte is after that copy plus the six reserved pages;
+ *   `avail_end` is `gPhysBase + mem_size`, the end of the memory this image declares. The gap
+ *   between them is what `sane_size` and `max_mem` are computed from.
  *
- *   `xmaxmem` is the argument `arm_init` computed a few statements before, and it is the value this
- *   experiment is really about. `PE_parse_boot_argn("maxmem", ...)` cannot find it - the cmdline the
- *   payload writes has no `maxmem=` - so the value comes from `PE_get_default("hw.memsize",
- *   &memsize, 4)`, and that call is not the one it looks like. `PE_get_default`
- *   (`pexpert/gen/bootargs.c:386`) first looks for a `/defaults` node in the device tree, which this
- *   payload does not build, and then returns `IODTGetDefault(...) ? FALSE : TRUE`. `IODTGetDefault`
- *   is undefined here, so it is a generated stub returning 0, so `PE_get_default` returns TRUE while
- *   writing nothing into `memsize`. `memsize` is an uninitialised local at `sp+8`, and `arm_init`'s
- *   compiled code reads it with `ldrne r7, [sp, #8]`. So `xmaxmem` is whatever was on the stack.
- *   This probe measures it before `arm_vm_init` uses it, because `arm_vm_init` opens with
- *   `if ((memory_size != 0) && (mem_size > memory_size)) mem_size = memory_size;` and a value below
- *   `args->memSize` would silently shrink the kernel's own memory map.
+ *   `gVirtBase`/`gPhysBase`/`gPhysSize` are the boot_args the payload built, read back through the
+ *   kernel's own globals, and `static_memory_end` is `gVirtBase + mem_size` with `mem_size` clamped
+ *   against the `xmaxmem` that exp-193 measured. `mem_size = 0x00800000` here and `xmaxmem =
+ *   0x5e500000`, so the clamp is a no-op; `end_kern` is `round_page(getlastaddr())`, the end of the
+ *   image as the Mach-O header describes it, and the first value in this sequence that comes out of
+ *   `entry_macho.s` rather than out of the boot_args.
  *
- *   `CPSR` is the one value here that must have *changed* during this step. Exp-191 read
- *   `0x60000093` - I set, F clear - at the top of the critical section; the real
- *   `ml_set_interrupts_enabled(FALSE)` executes `cpsid if`, which sets F as well, so the low byte
- *   here must be `0xd3`. A stub in its place would leave F where `start.s` left it, so this is the
- *   evidence that the object not only linked but ran.
- *
- *   `current_thread()` is a real two-instruction function in this image - `mrc p15, 0, r0, c13,
- *   c0, 4`, then `bx lr` - and what it returns is compared against `&BootCpuData`. Equal means
- *   TPIDRPRW still holds what experiment-180's `machine_set_current_thread` put there, one
- *   scheduler and seven steps later.
- *
- *   `pset0.cpu_bitmask`, `pset0.cpu_set_count` and `processor_count` are the values exp-191
- *   measured as 0 and said would become live inside the locked region this step now runs through:
- *   `bit_set(pset->cpu_bitmask, cpu_id)` for `cpu_id = 0`, then `pset->cpu_set_count++` and
- *   `processor_count++`. The bitmask must be 1 and both counters must be 1. These three are the
- *   only values in the probe that are supposed to *differ* from the last run, which is what makes
- *   them the check that the run did not stop early.
- *
- * The declaration is the real signature, `void arm_vm_init(uint64_t memory_size, boot_args *args)`,
- * with the second parameter left as `void *` because this file has no `boot_args`: the probe needs
- * the pointer's value and nothing behind it, and the real definition is not linked.
+ * `CPSR` is recorded for continuity with exp-191 and exp-193, where the F bit turned out not to be
+ * a usable check. It is not expected to distinguish anything here either.
  */
-void arm_vm_init(uint64_t memory_size, void *args);
+void patch_low_glo(void);
 
-extern void *current_thread(void);
-extern uint8_t pset0[];
-extern uint8_t BootCpuData[];
-extern uint32_t processor_count;
-extern void *master_processor;
+extern uint32_t cpu_ttep;
+extern uint32_t avail_start;
+extern uint32_t avail_end;
+extern uint32_t gVirtBase;
+extern uint32_t gPhysBase;
+extern uint32_t gPhysSize;
+extern uint32_t mem_size;
+extern uint32_t static_memory_end;
+extern uint32_t end_kern;
 
-#define PSET_CPU_SET_COUNT_OFF 52u    /* exp-190: the `ldr`/`str` pair inside the locked region */
-#define PSET_CPU_BITMASK_OFF   56u    /* `add r0, r2, #56`, the `bit_set` target */
-
-static uint32_t rd32(const volatile uint8_t *base, uint32_t off)
-{
-    return *(const volatile uint32_t *)(const void *)(base + off);
-}
-
-void arm_vm_init(uint64_t memory_size, void *args)
+void patch_low_glo(void)
 {
     uint32_t cpsr;
 
     __asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr));
 
-    entry_kv("xnu_entry_avm_xmaxmem_lo",    (uint32_t)memory_size);
-    entry_kv("xnu_entry_avm_xmaxmem_hi",    (uint32_t)(memory_size >> 32));
-    entry_kv("xnu_entry_avm_args",          (uint32_t)(uintptr_t)args);
-    entry_kv("xnu_entry_avm_cpsr",          cpsr);
-    entry_kv("xnu_entry_avm_current",       (uint32_t)(uintptr_t)current_thread());
-    entry_kv("xnu_entry_avm_bootcpu",       (uint32_t)(uintptr_t)BootCpuData);
-    entry_kv("xnu_entry_avm_master_ptr",    (uint32_t)(uintptr_t)master_processor);
-    entry_kv("xnu_entry_avm_pset0_bitmask", rd32(pset0, PSET_CPU_BITMASK_OFF));
-    entry_kv("xnu_entry_avm_pset0_count",   rd32(pset0, PSET_CPU_SET_COUNT_OFF));
-    entry_kv("xnu_entry_avm_proc_count",    processor_count);
+    entry_kv("xnu_entry_plg_cpsr",            cpsr);
+    entry_kv("xnu_entry_plg_cpu_ttep",        cpu_ttep);
+    entry_kv("xnu_entry_plg_avail_start",     avail_start);
+    entry_kv("xnu_entry_plg_avail_end",       avail_end);
+    entry_kv("xnu_entry_plg_gvirtbase",       gVirtBase);
+    entry_kv("xnu_entry_plg_gphysbase",       gPhysBase);
+    entry_kv("xnu_entry_plg_gphyssize",       gPhysSize);
+    entry_kv("xnu_entry_plg_mem_size",        mem_size);
+    entry_kv("xnu_entry_plg_static_mem_end",  static_memory_end);
+    entry_kv("xnu_entry_plg_end_kern",        end_kern);
 
-    entry_stub_hit("arm_vm_init");
+    entry_stub_hit("patch_low_glo");
 }
 
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */
