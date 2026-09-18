@@ -262,6 +262,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-246](experiment-246-an-empty-function-a-tail-call-and-what-the-caller-key-names.md) | `osfmk_vm_vm_map_store_ll.o` — the Empty Function Returns, the RB Branch Is Taken, and a Tail Call Makes `xnu_entry_stub_caller` Name the Caller of the Caller |
 | stage90 | [experiment-247](experiment-247-kmem-init-completes-and-the-drbg-runs.md) | `osfmk_vm_vm_map_store_rb.o` — `kmem_init` Completes, `kernel_map` Gets Its First Gigabyte Region, the HMAC-SHA1 DRBG Produces a Seed, and the Stop Is `vm_allocate_kernel` |
 | stage90 | [experiment-248](experiment-248-vm-allocate-kernel-and-pmap-init-run.md) | `osfmk_vm_vm_user.o` — a Kernel Virtual Allocation and `pmap_init` Both Run, the Stop Is `kext_alloc_init`, and the Image Moves Again (`.bss` +0x4000, `end_kern` 0x800e3000) |
+| stage90 | [experiment-249](experiment-249-zone-init-runs-and-the-stop-is-kalloc-init.md) | `osfmk_kern_kext_alloc.o` — Fifteen Instructions With No Calls, **`zone_init` Runs** (Answering Experiment 239's Zero Bounds), and the Stop Is `kalloc_init` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

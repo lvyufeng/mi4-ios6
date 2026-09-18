@@ -2134,6 +2134,44 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `mach_vm_allocate_kernel` and `mach_vm_deallocate` are still stubs and `mach_vm_allocate_kernel`
     # is in the object this step links.
     OSFMK_VM_VM_USER_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_USER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_user.o}
+    # `osfmk/kern/kext_alloc.c` -> **344 bytes of text, four definitions, four references**. The
+    # object 248's stop named: `kext_alloc_init` is the function `vm_mem_bootstrap+0x1a4` calls, and
+    # it is small enough that its whole closure can be read off the disassembly before the run.
+    #
+    # Its references are `_consume_printf_args` (real), `kernel_map` (real, a storage definition in
+    # `osfmk_vm_vm_kern.o` since 244) and `mach_vm_allocate_kernel` / `mach_vm_deallocate` - still
+    # stubs, and the first of them is in the very object 248 linked. So unlike 245 to 248 this step can
+    # be answered by its own predecessor's object, and the two `mach_vm_*` names are the candidates.
+    #
+    # What it is for, from the source: it carves `g_kext_map` out of `kernel_map` with
+    # `kmem_suballoc`-style arithmetic and panics if the region does not fit ("kext_alloc_init:
+    # kmem_suballoc failed"), which makes it the first function on this path whose *purpose* is to
+    # reserve address space for something that does not exist yet in this kernel - there are no kexts
+    # in this image at all.
+    # **249 measured it, and the object is not the source's function.** The built `kext_alloc_init` is
+    # fifteen instructions with **not one call** - two `.bss` flags set to 1 and one word copied -
+    # because the whole 2 GB-reservation body is inside `#if CONFIG_KEXT_BASEMENT`, which is x86-only.
+    # So the build resolved 1 (`kext_alloc_init`) and added 0 (623 -> 622 undefined, 539 -> 538
+    # function stubs, storage 84), text 634033 -> 634321 (+288), and the stop had to move again.
+    #
+    # Which it did, twice: `zone_init` (`+0x204`) and `vm_page_module_init` (`+0x214`) are real, and
+    # `zone_init` was walked as well (no stub on its straight-line closure), so the prediction was
+    # `kalloc_init` at `+0x224`. Device: **`stub_hit=kalloc_init`, `xnu_entry_stub_caller=0x80040524`**
+    # = `vm_mem_bootstrap+0x228`, whose `caller - 4` is `80040520: bl 800873d4 <kalloc_init>`.
+    # `kv_written == kv_in_dram == 0x38`. **`zone_init` ran** - the largest thing this sequence has
+    # executed, the function that creates the zone map and every zone in it, and the only writer of the
+    # two globals (`zone_map_min_address`, `zone_map_max_address`) that experiment 239 read as zero and
+    # explained with "`zone_init` has never executed in this image". Its first call, `kmem_suballoc`, is
+    # answered by 244's object.
+    #
+    # Image unchanged (`.bss` end 0x800e2208 -> 0x800e2248, `__entry_image_end`/`end_kern`/layout
+    # unmoved, headroom 1170872), payload text unchanged, `persistent_write_attempted=0x00000000` in
+    # all 25 contracts.
+    #
+    # Next: `kalloc_init` is in `osfmk_kern_kalloc.o` - 4472 bytes of text, 33 references, defining the
+    # whole `kalloc`/`kfree`/`kalloc_canblock` family, so the next stop is more likely to be one of its
+    # still-stubbed references than another whole function.
+    OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -2214,6 +2252,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_USER_OBJ"       "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
@@ -2222,7 +2261,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
