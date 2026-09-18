@@ -63,6 +63,23 @@ REAL_ARM_INIT=${STAGE90_ENTRY_REAL_ARM_INIT:-0}
 STUB_DEFINES=()
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES=(-DSTAGE90_ENTRY_REAL_ARM_INIT=1)
 
+# The one thing in this image that is neither XNU's nor this project's: the compiler's own runtime.
+# Experiment 182's run stopped at `__aeabi_uldivmod`, which is the ARM EABI helper for 64-bit
+# division and comes from libgcc - measured then, not assumed: no file in the XNU tree mentions the
+# symbol, no compiled XNU object defines it, and no compiled XNU object defines any `__aeabi_*`
+# symbol at all. So there is nothing here for `entry_arm_rtabi.s` to alias it to, the way it aliases
+# `__aeabi_memcpy` to XNU's own `bcopy`.
+#
+# libgcc rather than a hand-written division routine, deliberately. `__aeabi_uldivmod` in libgcc is
+# a tested implementation of a fiddly algorithm, and a second one written here would be a number
+# this project cannot check against anything - the shape of mistake the probe mechanism exists to
+# avoid. `--start-group` because `__aeabi_uldivmod` in that archive references `__udivmoddi4` in the
+# same archive, and a single pass over an archive can miss a member it pulls late.
+#
+# The group is added at the *end* of the link, so it supplies only what nothing else did; whatever
+# it brings beyond the named symbol shows up in the undefined list the same way any object's would.
+LIBGCC=${STAGE90_ENTRY_LIBGCC:-$(arm-none-eabi-gcc -print-libgcc-file-name)}
+
 say() { printf '%s\n' "$*"; }
 run() { [[ $VERBOSE -eq 1 ]] && printf '  %s\n' "$*"; "$@"; }
 
@@ -268,9 +285,17 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
         -c "$BOOT_DIR/entry_arm_rtabi.s" -o "$OUT/xnu_arm_entry_rtabi.o"
     LINK_OBJS+=("$OUT/xnu_arm_entry_rtabi.o")
 
+    require "$LIBGCC" "install the arm-none-eabi toolchain (arm-none-eabi-gcc -print-libgcc-file-name)"
+
     say "== pass 1: which symbols do XNU's own objects need? =="
+    # The library group is in *this* link as well as the final one, and that is not a detail: pass 1
+    # is what produces the undefined set the stubs are generated from, so a symbol libgcc can supply
+    # is only left un-stubbed if pass 1 can see libgcc. Adding the group to the final link alone
+    # changes nothing - the stub is an ordinary object definition and the linker never looks in the
+    # archive for a symbol something already defines. Experiment 183 found that by doing it.
     arm-none-eabi-ld -T "$BOOT_DIR/entry.ld" -nostdlib --no-demangle \
-        -o "$OUT/xnu_arm_entry_pass1.elf" "${LINK_OBJS[@]}" 2> "$OUT/xnu_arm_entry_pass1.err" || true
+        -o "$OUT/xnu_arm_entry_pass1.elf" "${LINK_OBJS[@]}" \
+        --start-group "$LIBGCC" --end-group 2> "$OUT/xnu_arm_entry_pass1.err" || true
     grep -o "undefined reference to \`[^']*'" "$OUT/xnu_arm_entry_pass1.err" |
         sed "s/.*\`//; s/'//" | sort -u > "$OUT/xnu_arm_entry_undef.txt"
     undef=$(wc -l < "$OUT/xnu_arm_entry_undef.txt")
@@ -348,12 +373,14 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     LINK_OBJS+=("$OUT/xnu_arm_entry_realstubs.o")
 fi
 
+
 say "== linking at $ENTRY_BASE =="
 # start.o first, so `_start` is the first thing in .text and the image base is the entry point -
 # not required (the payload jumps to an explicit address) but it makes the map readable.
 run arm-none-eabi-ld -T "$BOOT_DIR/entry.ld" -nostdlib -Map "$OUT/xnu_arm_entry.map" \
     -o "$OUT/xnu_arm_entry.elf" \
-    "${LINK_OBJS[@]}"
+    "${LINK_OBJS[@]}" \
+    --start-group "$LIBGCC" --end-group
 
 entry=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="_start"{print "0x"$1}')
 bss_start=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="__bss_start"{print "0x"$1}')
