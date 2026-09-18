@@ -3098,6 +3098,117 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 290: `machine_task.o`, and an object whose whole function is empty
+    #
+    # **The 289 run reported** `stub_hit=machine_task_init` at `task_create_internal + 0x200`. The
+    # object that defines it is `osfmk/arm/machine_task.c`, `osfmk_arm_machine_task.o` - and it is the
+    # smallest step this walk has taken in a hundred experiments.
+    #
+    # **The object, measured.** 324 bytes of `.text` for five functions, five definitions and six
+    # references - and `machine_task_init` sits at object offset 0x140, the **last four bytes** of that
+    # text, because its body is empty (`machine_task.c:171-175`: three `__unused` parameters and not one
+    # statement). A `bx lr` and nothing else. So the prediction is that this step overshoots, the way
+    # 285's did.
+    #
+    #     resolved   5   machine_task_set_state   machine_task_get_state   machine_task_init
+    #                    machine_task_terminate   machine_thread_inherit_taskwide
+    #                    - all five are already *stubs* in this image, so the object retires all five
+    #     added      2   ads_zone            (osfmk/arm/pcb.c:58   - storage, 4 bytes)
+    #                    copy_debug_state    (osfmk/arm/pcb.c:361  - function)
+    #
+    # Three of the six references (`bzero`, `zalloc`, `zfree`) are real, and the fourth
+    # (`machine_thread_set_state`) is already a stub - so under the rule `under = (stub list ∪ undefined
+    # list)` it is not new, which is the counting rule 288 had to correct. **Both added names come from
+    # the same object**, `osfmk/arm/pcb.c`, which is not linked: this step *also* obliges its successor,
+    # and the ledger should say so now rather than have the next step discover it. `ads_zone` is a
+    # storage stand-in and it is worth noting what kind of value it is - four zero bytes standing for a
+    # `zone_t` - because `machine_task_set_state` and `machine_task_terminate` pass it to `zalloc` and
+    # `zfree`; nothing on this boot's path calls either, but the first `task_terminate` will.
+    #
+    # **The prediction is about a place rather than a name.** `task_create_internal` is the object 288
+    # linked, and 289's ledger listed its stub calls in address order. The call this step makes real
+    # returns immediately, so the frontier is the *next* one on that list:
+    #
+    #     +0x1fc  machine_task_init     ***this object*** - an empty body, returns at once
+    #     +0x220  ipc_task_init         <- the stop, return address +0x224
+    #     +0x300  vm_shared_region_get  +0x30c  vm_shared_region_set
+    #     +0x348  task_affinity_create  +0x360  task_is_marked_importance_donor
+    #
+    # and the eight instructions between the two calls are `add`, `mov` and `str` only - measured in the
+    # linked image, so `bl` appears nowhere among them and nothing can stop in between:
+    #
+    #     800bfdc4  add r0, r4, #504   800bfdc8  mov r5, #0           800bfdcc  str r0, [r4,#504]
+    #     800bfdd0  mov r1, sl         800bfdd4  str r0, [r4,#508]    800bfdd8  mov r0, r4
+    #     800bfddc  str r5, [r4,#512]  800bfde0  str r5, [r4,#524]    800bfde4  bl ipc_task_init
+    #
+    # Predicted report: `stub_hit=ipc_task_init`, `xnu_entry_stub_caller` = **0x800bfde8** =
+    # `task_create_internal + 0x224`. **Falsifier, named in advance:** a report naming any of the five
+    # names this object defines would mean `machine_task_init` faulted or called something - impossible
+    # for a `bx lr`, so it would be a statement about the stub generator or the pad rather than about
+    # this step; and a report naming `copy_debug_state` or `ads_zone` would mean one of the object's
+    # other three functions was entered, and nothing on this path calls them.
+    #
+    # **Predicted build deltas:** 867 -> **864** undefined (5 out, 2 in), 774 -> **770** function stubs
+    # (5 out, 1 in), 93 -> **94** storage (one in). Text 1082328 -> about 1082652 (+324) - and this is
+    # the first step in three where `.data` should **not** move, because 324 bytes of read-only content
+    # is well inside the slack the read-only region now has.
+    # **The build and the run.** 864 undefined, 770 function stubs, 94 storage - all three exactly as
+    # predicted (5 out, 2 in). `__bss_start` unchanged at **0x80123c08**, `.data` unchanged at
+    # 0x8010c000, bss end 0x8015a3c8 -> 0x8015a408, headroom 1727544 -> 1727480, and **the image
+    # unchanged at 1198056 bytes** - the prediction that `.data` would not move for the first time in
+    # three steps. Text 1082328 -> **1082456**, i.e. **+128, not the +324 the object's own sizes
+    # suggest**, and the reason is worth recording because it applies to every future step: `entry.ld:46`
+    # places `*(.rodata .rodata.*)` **inside the `.text` output section**, and the generated stub
+    # object's symbol-name strings live there. This step retires five stub bodies (5 x 0x18 = 0x78) and
+    # five symbol *names*, and adds one of each plus `ads_zone`'s name, so the object's 324 bytes of
+    # `.text` arrive net of a name-string region that also shrank. The byte split is not asserted here;
+    # the measured 128 is. The lesson: `text size` grows by the object's `.text` plus or minus the
+    # names entering and leaving the stub object, so a name-retiring step always undershoots a
+    # body-only prediction.
+    #
+    # **`verify_pad` moved down for the first time**, which is the whole reason its derived form exists:
+    #
+    #     entry_skip_pad at 0x800023d4 branches over 512 bytes to 0x800025d4
+    #     XNU writes 0x8000244c and 0x80002450 (ResetHandlerData - ExceptionLowVectorsBase = 0x2448),
+    #     and both land inside what it skips
+    #
+    # 0x2448 against 289's 0x24c0 - down 0x78, and the interval can be read exactly: `nm` says **386
+    # symbols at 0x18 bytes apart** sit between `ExceptionLowVectorsBase` (0x800ecbf4) and
+    # `ResetHandlerData` (0x800ef03c), i.e. the interval *is* the generated stub object, so it shrinks
+    # when stubs are retired, exactly as it grew when they were added. The observed range across the
+    # experiments that have printed it is 0x2404 (281) .. 0x24c0 (289) .. 0x2448 (290), inside a pad
+    # spanning 0x23d4 .. 0x25d4. The check fails the build if a future value leaves that window, which
+    # is what makes this safe; the day it fails, the fix is to *move* the pad rather than widen it.
+    #
+    # **The run:**
+    #
+    #     stub_hit=ipc_task_init        xnu_entry_stub_caller=0x800bfde8
+    #
+    # `0x800bfde8` is `task_create_internal + 0x224`, the return address of the `bl ipc_task_init` at
+    # 0x800bfde4 - predicted before the device was touched, and the eight instructions between the two
+    # calls are the `add`/`mov`/`str` the ledger listed. The image also shows this step's own effect
+    # directly: `machine_task_init` was a stub at 0x800ede1c and is now real at **0x800c8c3c**. So one
+    # run measured that the empty function was entered and returned, that nothing in
+    # `task_create_internal` between the two calls can stop, and that the frontier is the second of the
+    # ten stub calls that function makes.
+    #
+    # Preflight clean (`loader_xnu_entry_stub_status=0x90000001`,
+    # `high_va_data_verified=0x00000001`), log 301114 bytes, no `exception:` line.
+    #
+    # **Safety:** non-persistent `fastboot boot` only, nothing flashed,
+    # `persistent_write_attempted=0x00000000` x25, `failure_mask=0x00000000` x87,
+    # `xnu_entry_failures=0x00000000`, and the device returned to Android on its own
+    # (`getprop ro.build.version.release` = 10).
+    #
+    # **Next:** experiment 291 - `osfmk/kern/ipc_tt.c` (`osfmk_kern_ipc_tt.o`) for `ipc_task_init`. A
+    # first reading, before the build: **12676 bytes of `.text`, 60 definitions and 53 references** -
+    # the largest step since 288, and one that should retire a block of `ipc_*` stubs rather than one.
+    # Two names this step obliged are still waiting and are *not* in this object: `ads_zone` and
+    # `copy_debug_state`, both from `osfmk/arm/pcb.c` (`osfmk_arm_pcb.o`, 1132 bytes of `.text`, 17
+    # definitions - the two of them plus the whole `machine_*` context-switch surface). They are only
+    # reached by `machine_task_set_state` and `machine_task_terminate`, which nothing on this path
+    # calls, so `pcb.o` can wait until a `task_terminate` does.
+    OSFMK_ARM_MACHINE_TASK_OBJ=${STAGE90_ENTRY_OSFMK_ARM_MACHINE_TASK_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_machine_task.o}
     # 289: `task_policy.o`, and two new names that both turn out to be reachable
     #
     # **The 288 run reported** `stub_hit=task_watch_init` at `task_init+0xb0`, once the pad's
@@ -6395,6 +6506,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_COALITION_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_TASK_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_TASK_POLICY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_ARM_MACHINE_TASK_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_EVENT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
@@ -6408,7 +6520,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
