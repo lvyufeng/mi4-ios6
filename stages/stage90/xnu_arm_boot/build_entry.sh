@@ -3098,6 +3098,147 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 294: three objects for three stubs in a row, and the walk reaches the scheduler's door
+    #
+    # **The 293 run reported** `stub_hit=stack_init` at `thread_init + 0xd8`. That step also settled
+    # that the object it linked was the last stub on the path back out of `task_init`, so the frontier
+    # is now three calls in `thread_init` with nothing between them:
+    #
+    #     +0x0d4  stack_init             osfmk/kern/stack.c               osfmk_kern_stack.o
+    #     +0x0d8  thread_policy_init     osfmk/kern/thread_policy.c       osfmk_kern_thread_policy.o
+    #     +0x0dc  machine_thread_init    osfmk/arm/pcb.c                  osfmk_arm_pcb.o
+    #
+    # Three consecutive unconditional calls is the one shape where a multi-object step costs nothing
+    # in prediction quality: whichever of the three bodies stops first, the answer is one of them, and
+    # each was read rather than assumed.
+    #
+    # **The objects, measured together.** 2544 + 12864 + 1132 bytes of `.text`, 570 of `.rodata`, and
+    # 76 + 8 + 4 of `.bss`:
+    #
+    #     resolved  39   34 functions and 5 storage
+    #     added     15   machine_stack_attach/detach/handoff (security/mac_stack.c's neighbours in
+    #                    stack.c's own header), rethrottle_thread, sched_set_thread_mode,
+    #                    sched_thread_mode_undemote, sfi_reevaluate, thread_affinity_get/
+    #                    is_supported/set, Call_continuation, Switch_context, kpc_off_cpu_active,
+    #                    kpc_off_cpu_internal, machine_thread_state_initialize
+    #     under     16   including `kernel_stack_size` again, which `stack.o` now defines
+    #
+    # **The five storage names this retires** are worth their own line, because they are the reason
+    # `.bss` moves at all (see the 292 note - only the storage set can move it):
+    # `kernel_stack_size`, `stack_total`, `allow_qos_policy_set`, `thread_qos_policy_params` and
+    # `ads_zone`. `ads_zone` is the one 290 added; this step is what finally gives it a real
+    # definition, in `machine_thread_init`'s two instructions of `str`.
+    #
+    # **The prediction, and the three bodies are small enough to quote.**
+    #
+    #   * `stack_init` - five calls, all real: `arm_usimple_lock_init`, `PE_parse_boot_argn`,
+    #     `_consume_printf_args` and `panic` twice (both behind the `stack_pages` boot-arg check, which
+    #     a payload with no such argument does not take). It writes `kernel_stack_size = 16384`,
+    #     `kernel_stack_pages = 4`, `kernel_stack_mask = 0xffffc000`, `kernel_stack_depth_max = 0`.
+    #   * `thread_policy_init` - **one call**, `PE_parse_boot_argn`. Nothing else at all.
+    #   * `machine_thread_init` - `ads_zone = zinit(256, 16384, 16384, "arm debug state")` and a
+    #     return. The nine other calls a `-dr` dump of `pcb.o` seems to attribute to it belong to
+    #     `machine_switch_context` and its neighbours; the real body is five instructions between the
+    #     `push` and the `pop`. `zinit` is real and its one stub, `btlog_create`, is behind the `.bss`
+    #     guards that `task_init` has satisfied in every run since 289.
+    #
+    # Then `thread_init`'s own tail - `PE_parse_boot_argn` x2, `ledger_template_create`,
+    # `ledger_entry_add`, `ledger_set_callback`, `ledger_template_complete` - all real, and **all four
+    # of the ledger calls already ran on the device in 287**, when `coalitions_init` -> `init_task_ledgers`
+    # was the step. Their only reachable stubs are the three known no-ops: `trace_backtrace` behind
+    # `log_leaks` (zero, `.bss`), `ast_taken_kernel` behind the AST flags nothing has set this early,
+    # and `zinit -> btlog_create` again. So:
+    #
+    # **Predicted stop:**
+    #
+    #     stub_hit=atm_init    xnu_entry_stub_caller=0x8000e3d8   (kernel_bootstrap + 0x2d8)
+    #
+    # The image has `bl thread_init` at 0x8000e3c4, `kernel_debug_string_early` at 0x8000e3d0 and
+    # `bl atm_init` at 0x8000e3d4, with `atm_init` at 0x800f146c. `kernel_bootstrap` is the function
+    # this walk started in; reaching its own tail means every one of its "bring a subsystem up" calls
+    # before `task_init` and `thread_init` has run.
+    #
+    # **The build.** 39 retired and 15 obliged, of which 34 and 15 are function names and 5 are
+    # storage:
+    #
+    #                   predicted        measured
+    #     undefined     776
+    #     function      687
+    #     storage        89
+    #     .data         0x80110000 -> **0x80114000** (the boundary moves a second time)
+    #     __bss_start   0x80127c08 -> **0x8012bc08**
+    #     image         1214488  -> **1230872**
+    #     text          1099960  -> ~1116100
+    #
+    # `__TEXT,initcode` now ends at 0x8010c8bc, leaving 14148 bytes, and the estimate at 51 bytes a
+    # name is 16141 - over by about 2000, so `.data` should move. **The band is wide enough to matter
+    # here in a way it was not in 293**: the name cost has measured between 51 and 65, and 65 makes the
+    # need *larger*, not smaller (15875 vs 14148 - still over). Only a cost above about 150 bytes a
+    # name would keep `.data` at 0x80110000, which is well outside everything measured so far. So the
+    # falsifier - `.data` still at 0x80110000, image 1214488 - is a genuine one this time.
+    #
+    # **The build, and it found a real defect in this ledger's own arithmetic.**
+    #
+    #                   predicted        measured
+    #     undefined     776              773
+    #     function      687              683
+    #     storage        89               90
+    #     .data         0x80114000       0x80114000
+    #     __bss_start   0x8012bc08       0x8012bc08
+    #     bss end       0x80162398       0x80162398
+    #     image         1230872          1230896
+    #     text          ~1116100         1115928
+    #
+    # The prediction that `.data` moves a second time was right, and so were `0x80114000` and
+    # `__bss_start`. The counts are the interesting part, because they are off by exactly the number of
+    # names **satisfied inside the step**: `machine_stack_attach`, `machine_stack_detach` and
+    # `machine_stack_handoff` are undefined references in `stack.o` but **are defined by `pcb.o`**,
+    # which this step links at the same time. A per-object measurement cannot see that - it lists them
+    # as obligations of the step, and the link settles them without ever making a stub. So the rule the
+    # per-object method has been using all along needs a qualifier, and this is the first step where it
+    # could bite:
+    #
+    #     for a *single*-object step, added = refs - (stub u undef u image nm)
+    #     for a *multi*-object step, an added name must then be removed again if another object in
+    #     the same step defines it
+    #
+    # and the classification of an added name as function or storage must come from the generated stub
+    # object rather than from the reference site - `kpc_off_cpu_active` is a `B 0x4` in
+    # `spawn_private`-style storage, not a function, which is the remaining 1 in both directions. With
+    # 12 added (11 functions and 1 storage) instead of 15, `706 - 34 + 11 = 683` and `94 - 5 + 1 = 90`
+    # are exact.
+    #
+    # The image's +24 over the prediction is `stack.o`'s `__DATA,__data`, which `.data` had room for
+    # without moving: `.data` grew from 0x17c08 to 0x17c20.
+    #
+    # **The run.**
+    #
+    #     stub_hit=atm_init    xnu_entry_stub_caller=0x8000e3d8
+    #
+    # `0x8000e3d8` is `kernel_bootstrap + 0x2d8`, the return address of the `bl` at 0x8000e3d4, with
+    # the image's `bl thread_init` at 0x8000e3c4 and `kernel_debug_string_early` at 0x8000e3d0
+    # between them. So one run measured that `stack_init`, `thread_policy_init` and
+    # `machine_thread_init` all ran to completion - `machine_thread_init`'s single `zinit` included -
+    # and that `thread_init`'s own tail, the four ledger calls that 287 had already exercised, is
+    # clean. `kernel_bootstrap` is the function this walk started in, and its remaining calls are its
+    # own tail.
+    #
+    # Preflight clean (`loader_xnu_entry_stub_status=0x90000001`,
+    # `high_va_data_verified=0x00000001`), log 301109 bytes, no `exception:` line.
+    #
+    # **Safety:** non-persistent `fastboot boot` only, nothing flashed,
+    # `persistent_write_attempted=0x00000000` x25, `failure_mask=0x00000000` x87,
+    # `xnu_entry_failures=0x00000000`, and the device returned to Android on its own
+    # (`getprop ro.build.version.release` = 10).
+    #
+    # **Next:** experiment 295 - `osfmk/atm/atm.c` for `atm_init`, and then `bank_init`
+    # (`osfmk/bank/bank.c`), `ipc_pthread_priority_init` (`osfmk/voucher/ipc_pthread_priority.c`) and
+    # `corpses_init` (`osfmk/corpses/corpse.c`) - four consecutive stubs in `kernel_bootstrap`'s tail,
+    # the same shape as this step. After them: `kernel_thread_create` and `load_context`, the point
+    # where XNU stops initialising structures and starts a thread.
+    OSFMK_KERN_STACK_OBJ=${STAGE90_ENTRY_OSFMK_KERN_STACK_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_stack.o}
+    OSFMK_KERN_THREAD_POLICY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_THREAD_POLICY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_thread_policy.o}
+    OSFMK_ARM_PCB_OBJ=${STAGE90_ENTRY_OSFMK_ARM_PCB_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_pcb.o}
     # 293: `bsd_kern.o`, a function that returns a constant, and the pad's first real test
     #
     # **The 292 run reported** `stub_hit=get_task_uniqueid` at `coalitions_adopt_task + 0x0dc`. The
@@ -7060,6 +7201,9 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_IPC_TT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$SECURITY_MAC_MACH_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_BSD_KERN_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_STACK_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_THREAD_POLICY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_ARM_PCB_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_EVENT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
@@ -7073,7 +7217,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
