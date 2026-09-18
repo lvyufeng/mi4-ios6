@@ -162,6 +162,19 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # - the one whose call the `DTInit` probe in entry_stubs.c is waiting for - would still not be
     # reached. So both are here: the edge the device named, and the one symbol that edge needs.
     ARM_STRLEN_OBJ=${STAGE90_ENTRY_STRLEN_OBJ:-$REPO_ROOT/out/xnu_asm_obj/strlen.o}
+    # `osfmk/arm/strncpy.c`, named by experiment-185's `stub_hit=strncpy` - which is `locks.c:169`,
+    # the fourth statement of `lck_mod_init`, reached now that the lock subsystem's own code runs.
+    # 104 bytes of text, and its `nm -u` is `memcpy`, `memset` and `strnlen`: `memcpy` and `memset`
+    # are already in the image (bcopy.o/bzero.o, aliased by entry_arm_rtabi.s), so it is a leaf
+    # apart from `strnlen`, which is in the assembly pool. Same shape as the strlcpy/strlen pair
+    # above and linked the same way - the edge the device named, plus the one symbol that edge needs.
+    #
+    # It is also worth noting what this symbol is: it has been in the undefined list since the image
+    # was first assembled and only became the *edge* when the code calling it became real. The
+    # closure is not a queue.
+    ARM_STRNCPY_OBJ=${STAGE90_ENTRY_STRNCPY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_strncpy.o}
+    # `osfmk/arm/strnlen.s`, the leaf `strncpy.c` needs - 184 bytes of text, no undefined references.
+    ARM_STRNLEN_OBJ=${STAGE90_ENTRY_STRNLEN_OBJ:-$REPO_ROOT/out/xnu_asm_obj/strnlen.o}
     # XNU 4570's own device-tree reader, `pexpert/gen/device_tree.c`, and this is the object whose
     # *absence* made `DTInit` a symbol experience-170's probe reported. It defines `DTInit`,
     # `DTFindEntry`, `DTGetProperty`, `DTLookupEntry`, `DTInitEntryIterator` and `DTIterateEntries`
@@ -286,6 +299,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$ARM_PE_INIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_STRLCPY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_STRLEN_OBJ"  "run ./tools/assemble_arm_layer.sh first"
+    require "$ARM_STRNCPY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$ARM_STRNLEN_OBJ" "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_DEVICE_TREE_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_PE_IDENTIFY_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_SUBRS_OBJ"        "run ./tools/build_xnu_arm_kernel.sh first"
@@ -303,7 +318,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$ARM_KERN_TIMER_CALL_OBJ"   "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_KERN_LOCKS_OBJ"        "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
-                "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
+                "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
                 "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ")
 

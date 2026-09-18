@@ -361,47 +361,42 @@ void entry_stub_hit(const char *name)
 
 #ifdef STAGE90_ENTRY_REAL_ARM_INIT
 /*
- * `timer_call_get_priority_params()` - `osfmk/kern/timer_call.c`, the first thing
- * `timer_call_init` asks the rest of the kernel for (`timer_call.c:211`).
+ * `lck_mtx_init_ext()` - `osfmk/arm/locks_arm.c:2292`, the **last** statement of real
+ * `lck_mod_init` (`locks.c:175`) and the first statement of the lock subsystem every other object
+ * will use.
  *
- * Two things are different at this edge, and both are why the definition that stood here is gone.
+ * The probe written for experiment 185 was on `timer_call_get_priority_params`, one function
+ * further along, and did not fire: `lck_mod_init` stops at its own `strncpy` first, and a symbol
+ * that has been in the closure since the image was assembled became the edge only because the code
+ * calling it became real. `strncpy.o` and its leaf `strnlen.o` are linked now, so the frontier has
+ * moved to here - three statements later in the same function, and this time the probe's position
+ * is chosen from the code rather than from the call graph: everything between `strncpy` and this
+ * call is `lck_grp_attr_setdefault` and `lck_attr_setdefault`, both of which `locks.o` defines.
  *
- * `lck_mod_init` was the symbol experiment 184's run named, so `osfmk/kern/locks.o` is linked and
- * defines it for real - a hand-written version would be a duplicate definition and the link would
- * say so. That is the sixth time the link has said which definition had to go: `DTInit` (exp-170),
- * `ml_parse_cpu_topology` (exp-177), `cpu_processor_alloc` (exp-178), `thread_bootstrap` (exp-179),
- * `kernel_early_bootstrap` (exp-183), and now `lck_mod_init`. It takes the probe with it, which is
- * the mechanism working rather than a loss: a probe exists to print what the generated stubs
- * cannot, and the symbol it stood on is now real code that runs.
- *
- * So the first thing this run establishes is established by *where the run stops* rather than by a
- * printed value: the image is past real `lck_mod_init`, past `lck_attr_setdefault` and
- * `lck_grp_attr_setdefault` and `lck_grp_init` for `timer_call_lck_grp`, past `timer_longterm_init`
- * - which is in `timer_call.c`, not `timer.c`, and initializes a second lock group - and inside
- * `timer_call_init_abstime`, whose first statement is this function.
- *
- * What a probe can add is evidence that those calls wrote what they say they wrote, because
- * `lck_mod_init` ends by writing through two pointers and a call that runs without faulting is an
- * absence, not a measurement. `LockCompatGroup` is the group it bootstraps in place instead of
- * calling `lck_grp_init` on it, and the two fields the probe reads out of it are both checkable:
+ * Which makes this the first point at which the two values below are readable, and they are the
+ * measurement experiment 185 wrote the probe for. `lck_mod_init` ends by writing through two
+ * pointers, and a call that runs without faulting is an absence rather than a measurement:
  *
  *   - `lck_grp_refcnt` is set to 1 (`locks.c:172`);
  *   - `lck_grp_name` is `strncpy`d from `"Compatibility APIs"` (`locks.c:169`), so its first four
  *     bytes spell `Comp` - 0x706d6f43 little-endian.
  *
- * The offsets are 8 and 28, and they are not read off `locks.h` and hoped for. `lck_grp_init` in
- * the same object is compiled code that writes both fields, and it does it as `str r5, [r4, #8]`
- * with r5 = 1 and `add r0, r4, #28` before the `strlcpy`. So a right answer cannot be an accident
- * of a wrong offset, and a wrong offset cannot produce these two values by accident either - the
- * same property as the 1000000000 in experiment 184.
+ * The second of those is now a measurement of the *new* code as well as of the old: the value is
+ * whatever `strncpy.o` wrote, so it says that the real implementation of `strncpy` copied the
+ * string `lck_mod_init` handed it, character for character, into a struct field this file cannot
+ * see. A stub that returned without copying would leave the field at the `bzero`'d zero.
  *
- * The third value is that measurement's inverse. `nanoseconds_to_absolutetime` (`rtclock.c:443`)
- * is real code that has not run yet, and it divides by the same `rtclock_sec_divisor` the forward
- * direction multiplies by, so asking it what a second is in ticks should give back 19200000 - the
- * tree's frequency, approached from the other side.
+ * The offsets are 8 and 28, and they are not read off `locks.h` and hoped for: the `lck_grp_init`
+ * compiled into `locks.o` writes both fields, and does it as `str r5, [r4, #8]` with r5 = 1 and
+ * `add r0, r4, #28` before the `strlcpy`. A right answer here cannot come from a wrong offset, and
+ * a wrong offset cannot produce this value by accident.
+ *
+ * The third value is the inverse of experiment 184's. `nanoseconds_to_absolutetime`
+ * (`rtclock.c:443`) divides by the same `rtclock_sec_divisor` the forward direction multiplies by,
+ * so asking it what a second is in ticks should give back 19200000 - the tree's frequency, from the
+ * other side.
  */
-typedef struct timer_coalescing_priority_params_ns timer_coalescing_priority_params_ns_t;
-timer_coalescing_priority_params_ns_t *timer_call_get_priority_params(void);
+void lck_mtx_init_ext(void *lck, void *lck_ext, void *grp, void *attr);
 
 void nanoseconds_to_absolutetime(uint64_t nanosecs, uint64_t *result);
 
@@ -416,9 +411,14 @@ static uint32_t group_read(uint32_t offset)
     return *(const volatile uint32_t *)(const void *)(LockCompatGroup + offset);
 }
 
-timer_coalescing_priority_params_ns_t *timer_call_get_priority_params(void)
+void lck_mtx_init_ext(void *lck, void *lck_ext, void *grp, void *attr)
 {
     uint64_t ticks = 0u;
+
+    (void)lck;
+    (void)lck_ext;
+    (void)grp;
+    (void)attr;
 
     entry_kv("xnu_entry_lock_compat_refcnt", group_read(GROUP_REFCNT_OFFSET));
     entry_kv("xnu_entry_lock_compat_name_head", group_read(GROUP_NAME_OFFSET));
@@ -427,8 +427,7 @@ timer_coalescing_priority_params_ns_t *timer_call_get_priority_params(void)
     entry_kv("xnu_entry_tree_timebase_lo", (uint32_t)ticks);
     entry_kv("xnu_entry_tree_timebase_hi", (uint32_t)(ticks >> 32));
 
-    entry_stub_hit("timer_call_get_priority_params");
-    return (timer_coalescing_priority_params_ns_t *)0;   /* not reached */
+    entry_stub_hit("lck_mtx_init_ext");
 }
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */
 
