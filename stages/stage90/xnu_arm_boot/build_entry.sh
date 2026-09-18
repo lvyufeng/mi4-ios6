@@ -3098,6 +3098,78 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 285: `ntp_init`, and a step that is predicted to overshoot the symbol it links
+    #
+    # **The 284 run reported** `stub_hit=clock_oldconfig` at `clock_config+0x68`. The object that
+    # defines it is `osfmk/kern/clock_oldops.c`, `osfmk_kern_clock_oldops.o` - and the interesting
+    # thing about this step is that linking it should *not* move the frontier to the symbol it
+    # defines.
+    #
+    # **The object, measured.** 3128 bytes of text, 52 of rodata, 29 of `rodata.str1.1`, 172 of bss,
+    # 32 definitions and 25 references. It resolves **10**, every one a function (no storage, so no
+    # size to get wrong), four of which are the Mach clock-server entry points this object is
+    # actually for:
+    #
+    #     clock_oldconfig   clock_oldinit        clock_alarm          clock_get_attributes
+    #     clock_get_time    clock_service_create clock_set_attributes clock_set_time
+    #     host_get_clock_control                 host_get_clock_service
+    #
+    # and adds **6**: four functions (`clock_alarm_reply`, `ipc_clock_enable`, `ipc_clock_init`,
+    # `port_name_to_clock`) and two *storage* variables - `clock_count` (D, 4) and `clock_list`
+    # (D, 0x18=24), both from `osfmk_arm_conf.o`, which is not in this link. `clock_list` is 24 bytes
+    # because it is `struct clock_list_entry clock_list[CLOCK_COUNT]` with CLOCK_COUNT 2 (two 12-byte
+    # entries: a pointer and a function pointer), and its size comes from that definition.
+    #
+    # **The prediction, and it is the whole point of the step: the run should stop on `ntp_init`, not
+    # on anything in this object.** `clock_oldconfig`'s body - 0xf4 to 0x1a8, 0xb4 bytes - calls
+    # exactly three things directly:
+    #
+    #     +0x14  arm_usimple_lock_init    real
+    #     +0x2c  thread_call_setup        real (osfmk_kern_thread_call.o, linked long ago); its own
+    #                                     body is a `bl __bzero` and a tail call, no stub
+    #     +0x44  timer_call_setup         real (osfmk_kern_timer_call.o); its own body calls
+    #                                     arm_usimple_lock_init, lck_spin_lock and
+    #                                     lck_mtx_lock_spin_always, all real
+    #
+    # and then an *indirect* `blx r0` in a loop over `clock_list` - which this link walks zero times,
+    # because it is guarded by `clock_count`, and `clock_count` arrives as a storage stand-in: four
+    # zero bytes. `ldr r0, [r5]; cmp r0, #1; blt +0xa4` skips the whole loop. So `clock_oldconfig`
+    # runs to completion, returns to `clock_config`, and `clock_config`'s next call is `ntp_init` -
+    # which 284 added as a stub and this object does not define.
+    #
+    # Predicted report: `stub_hit=ntp_init`, `xnu_entry_stub_caller` = **`clock_config + 0x6c`**
+    # (`bl ntp_init` is at +0x68, so the return address is 0x800b97e8). The caveats, stated because
+    # they are real: `thread_call_setup` and `timer_call_setup` are real but have **never been
+    # executed** by this image, so a stop inside one of them would be this step's measurement rather
+    # than a defect; and `clock_oldinit` - the other symbol this object resolves - is what
+    # `clock_config`'s `clock_init` neighbour tail-calls, so it is not on this path at all.
+    #
+    # **Predicted build deltas:** 900 -> **896** undefined (10 out, 6 in), 806 -> **800** function
+    # stubs, 94 -> **96** storage, text 1025040 -> 1028168 (+3128). The image itself should grow by
+    # almost nothing: the read-only region ends at 0x800fa41c with 0x1be4 bytes of slack, and this
+    # object's 3209 bytes of read-only content fit inside it, so `.data` - and therefore `.bin`,
+    # which ends at `__DATA,__data` - should not move at all. What moves is `.bss`: `+172` for the
+    # object's own `alarm_lock`, `alarm_zone`, `alrmdone`, ... and `+28` for the two new stand-ins,
+    # so bss end 0x80149e08 -> about 0x80149ed0, and `__bss_start` unchanged at 0x80113b58.
+    #
+    # **The build, and the run.** `896` undefined, `800` function stubs, `96` storage, `__bss_start`
+    # unchanged at 0x80113b58, bss end 0x80149f48, headroom 1794552 -> 1794232 - all three counts and
+    # both invariants exactly as predicted; text 1025040 -> **1027984**, which is 184 bytes less than
+    # the arithmetic above, the object's `.text` being 3128 and the rest of its read-only content
+    # landing partly in sections that were already aligned. `clock_oldconfig` links at `0x800bb110`,
+    # `ntp_init`'s stub at `0x800e16a4`, so the predicted caller is `0x800b97e8`. And the run:
+    #
+    #     stub_hit=ntp_init        xnu_entry_stub_caller=0x800b97e8
+    #
+    # **The prediction held, and this is the first time a step's report came from a *later* call in
+    # the function that stopped the previous step than the symbol it linked.** The run measured that
+    # `clock_oldconfig` completes: `arm_usimple_lock_init`, `thread_call_setup` (with its `__bzero`)
+    # and `timer_call_setup` (with `arm_usimple_lock_init`, `lck_spin_lock` and
+    # `lck_mtx_lock_spin_always` inside it) all execute and return, and the `clock_list` walk is
+    # taken zero times because `clock_count` is a storage stand-in of four zero bytes. So two of the
+    # 25 references this object added to the image - the two that are *storage* - are the ones that
+    # decided the shape of the step, by being zero.
+    OSFMK_KERN_CLOCK_OLDOPS_OBJ=${STAGE90_ENTRY_OSFMK_KERN_CLOCK_OLDOPS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_clock_oldops.o}
     # 284: `clock_oldconfig`, and the first frontier that is *inside* the function it links
     #
     # **The 283 run reported** `stub_hit=clock_config` with `xnu_entry_stub_caller=0x800076c4`, which
@@ -5935,6 +6007,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_IPC_IPC_MQUEUE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_HOST_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_CLOCK_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_EVENT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
@@ -5948,7 +6021,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
