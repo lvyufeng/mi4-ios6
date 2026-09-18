@@ -268,8 +268,8 @@ cp out/stage90/xnu_arm_entry_undef.txt /tmp/A.txt
 (cd stages/stage90/xnu_arm_boot && STAGE90_ENTRY_REAL_ARM_INIT=1 \
    STAGE90_ENTRY_VM_RESIDENT_OBJ=/tmp/empty.o ./build_entry.sh)
 cp out/stage90/xnu_arm_entry_undef.txt /tmp/B.txt
-comm -13 <(sort /tmp/A.txt) <(sort /tmp/B.txt)   # 7 resolved
-comm -23 <(sort /tmp/A.txt) <(sort /tmp/B.txt)   # 61 added
+comm -23 <(sort /tmp/A.txt) <(sort /tmp/B.txt)   # 7 resolved  (unique to the first file)
+comm -13 <(sort /tmp/A.txt) <(sort /tmp/B.txt)   # 61 added    (unique to the second)
 
 (cd stages/stage90 && STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' ./build.sh)
 (cd stages/stage90 && ./run_and_capture.sh --allow-xnu-entry)

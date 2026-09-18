@@ -545,16 +545,20 @@ void _consume_kprintf_args(int a, ...)
 }
 
 /*
- * `pmap_bootstrap()` - `osfmk/arm/pmap.c:2764`, the first symbol `arm_vm_init` reaches after
- * `vm_set_page_size`.
+ * `pmap_bootstrap()` - `osfmk/arm/pmap.c:2764`. **Retired as a probe by experiment 197**, which
+ * links `osfmk_arm_pmap.o`: the real function now defines this symbol, so this one is compiled out
+ * and the twelve values below cannot be taken again. They are kept, and kept compiling under their
+ * own switch, because they are the record of what `arm_vm_init`'s arithmetic produced on this
+ * device - and because the same twelve names are the ones to compare against if this probe is ever
+ * needed again on a different boot_args.
  *
  * Experiment 194 stopped at `vm_set_page_size` (`osfmk/vm/vm_resident.c:480`) because that object
- * was not in the image. This run links `osfmk_vm_vm_resident.o`, so `vm_set_page_size` runs - it is
- * twelve statements with no calls in it - and the front of `arm_vm_init` continues through
+ * was not in the image. Experiment 195 linked `osfmk_vm_vm_resident.o`, so `vm_set_page_size` ran -
+ * it is twelve statements with no calls in it - and the front of `arm_vm_init` continued through
  * `set_mmu_ttb`, `set_mmu_ttb_alternate` and `flush_mmu_tlb`, all real, and the block of `vm_*`
  * stores that follows them, which are stores into this object's own globals.
  *
- * So this is the first probe in a while that fires, and the values below are the whole of
+ * So this was the first probe in a while that fired, and the values below are the whole of
  * `arm_vm_init`'s arithmetic read back out of the globals it wrote. `arm_vm_init` is where the
  * kernel decides what memory it has, and every number here is derived from the boot_args the
  * payload built and the Mach-O header exp-194 added:
@@ -572,8 +576,8 @@ void _consume_kprintf_args(int a, ...)
  *   `pmap_bootstrap((gVirtBase + MEM_SIZE_MAX + 0x3FFFFF) & 0xFFC00000)` with
  *   `MEM_SIZE_MAX = 0x40000000` (`arm_vm_init.c:134`), so it is the first physical address above a
  *   1 GB window rounded to a 4 MB boundary: `(0x00200000 + 0x40000000 + 0x3FFFFF) & 0xFFC00000`.
- *   This is the value the pmap is told it may start allocating from, so it is worth having measured
- *   before the object that uses it is linked.
+ *   It is the value the pmap is told it may start allocating from, and the object that uses it is
+ *   now linked.
  *
  * `vm_kernel_slide` is `gVirtBase - 0x80000000`, which underflows in a 32-bit `vm_offset_t` and is
  * reported as measured for that reason: the field exists because a real kernel is linked at
@@ -583,6 +587,7 @@ void _consume_kprintf_args(int a, ...)
  * `CPSR` is recorded for the same continuity as the last two experiments: the F bit is not a usable
  * check on this device (exp-193), so nothing here depends on it.
  */
+#ifndef STAGE90_ENTRY_REAL_PMAP_BOOTSTRAP
 void pmap_bootstrap(uint32_t next_paddr);
 
 extern uint32_t cpu_ttep;
@@ -617,6 +622,7 @@ void pmap_bootstrap(uint32_t next_paddr)
 
     entry_stub_hit("pmap_bootstrap");
 }
+#endif /* !STAGE90_ENTRY_REAL_PMAP_BOOTSTRAP */
 
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */
 

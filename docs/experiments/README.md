@@ -210,6 +210,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-194](experiment-194-the-image-describes-itself-in-a-mach-o-header-and-the-frontier-is-vm-set-page-size.md) | The Image Describes Itself in a Mach-O Header, and the Frontier Is `vm_set_page_size` |
 | stage90 | [experiment-195](experiment-195-the-vm-object-runs-and-the-flush-was-reading-the-wrong-cache.md) | The VM's Own Object Runs, `pmap_bootstrap` Is Reached, and the Flush That Carries the Evidence Was Reading the Wrong Cache |
 | stage90 | [experiment-196](experiment-196-the-payloads-whole-cache-flush-was-reading-the-l2-and-selecting-no-way.md) | The Payload's Whole-Cache Flush Was Reading the L2's Geometry and Selecting No Way |
+| stage90 | [experiment-197](experiment-197-the-pmap-runs-and-the-frontier-is-patch-low-glo-static-region.md) | The pmap Runs, `arm_vm_init` Reaches Its Last Instruction, and the Frontier Is `patch_low_glo_static_region` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
