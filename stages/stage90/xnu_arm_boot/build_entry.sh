@@ -3098,6 +3098,97 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 287: `init_task_ledgers`, and the step where the 16 KB boundary finally moves
+    #
+    # **The 286 run reported** `stub_hit=coalitions_init` at `kernel_bootstrap+0x1a8`. The object that
+    # defines it is `osfmk/kern/coalition.c`, `osfmk_kern_coalition.o` - and `coalitions_init` is one
+    # of the two functions in this walk whose body is worth reading *completely* before the build,
+    # because two of its calls are the kind that decide everything:
+    #
+    #     zinit(&coalition_zone, 0x2c, 0, "coalition")       real, but 0x97c bytes long
+    #     zone_change                                        real, 0 calls of its own
+    #     PE_parse_boot_argn x2                              real
+    #     lck_grp_attr_setdefault / lck_grp_init / lck_attr_setdefault / lck_mtx_init   all real
+    #     init_task_ledgers                                  ***STUB***  <- the stop
+    #     coalition_create_internal x4                       real (defined in this object)
+    #     panic                                                              real
+    #
+    # `zinit` is the one that had to be read rather than assumed, and this is the third step in a row
+    # where the answer came from the *boot args*. `zinit` is 0x97c bytes - three times the size the
+    # name suggests - because GCC inlines its zone-logging setup into it, and that setup contains the
+    # **only** stub call in the whole of `zinit`:
+    #
+    #     8006e550: bl btlog_create
+    #
+    # `btlog_create` is a stub in this image, so if the run reached it the frontier would be there
+    # instead. It does not. Every `bl` in `zinit`'s extent, with its own status:
+    #
+    #     real  lck_spin_lock x2   strcmp   lck_attr_setdefault   lck_mtx_init_ext
+    #           lck_spin_unlock x3  panic x2  strlen x2  _consume_printf_args x3
+    #           kmem_alloc_kobject  __bzero   strlcpy   snprintf   PE_parse_boot_argn x3
+    #     STUB  btlog_create x1
+    #
+    # and the code that guards it is `zalloc.c:2259-2360`, which is entered on every `zinit` but
+    # reaches the btlog loop only when `log_records_init == FALSE && zone_logging_enabled == TRUE`.
+    # `zone_logging_enabled` is set by `track_this_zone(z->zone_name, zone_name_to_log)` where
+    # `zone_name_to_log` comes from `PE_parse_boot_argn("zlog1".."zlog10")` and then
+    # `PE_parse_boot_argn("zlog")` - and this payload's boot-args line contains no `zlog` of any
+    # spelling (`zinit` does make those eleven `PE_parse_boot_argn` calls, and they are three of the
+    # three the census above counts: two for `zlog`-family lookups, one elsewhere). So the loop is
+    # skipped, `btlog_create` is never called, and `zinit` returns.
+    #
+    # **The other thing this step is for: the 16 KB boundary finally moves.** Experiment 284 found
+    # that the entry image's `.bin` ends at the end of `__DATA,__data`, that `.data` is placed
+    # 16 KB-aligned after the read-only region, and that within the slack a step's text growth is
+    # invisible in the image size. The slack was 0x1be4 bytes after 285 and this object carries
+    # **11312 bytes of text**, so this step crosses. `.data` should move from 0x800fc000 to
+    # 0x80100000, and with it `__bss_start` and the whole of `.bss`: the image should jump by a full
+    # 16 KB block plus the 8 bytes of `.data` this object adds - the first time in this sequence that
+    # a prediction of that shape has had to be made, and the reason `text size` and `__bss_start` are
+    # the numbers to read.
+    #
+    # **The object, measured.** 11312 bytes of text, 8 of data, 332 of bss, 72 of rodata, 881 of
+    # `rodata.str1.1`, 47 definitions and 44 references. It resolves **13**, every one a function:
+    #
+    #     coalition_get_page_count  coalition_get_pid_list  coalition_id     coalition_is_leader
+    #     coalition_is_privileged   coalition_is_reaped     coalition_is_terminated
+    #     coalition_iterate_stackshot   coalitions_init     coalition_term_requested
+    #     coalition_type            kdp_coalition_get_leader
+    #     task_coalition_update_gpu_stats
+    #
+    # and adds **5**: four functions and one storage, all from objects this build has compiled:
+    #
+    #     coalition_notification   mach_coalition_notification_user.o  T 0x64
+    #     init_task_ledgers        osfmk_kern_task.o                  T 0x5bc
+    #     task_cpu_ptime           osfmk_kern_task.o                  T 0xc
+    #     task_energy              osfmk_kern_task.o                  T 0x8c
+    #     task_ledger_template     osfmk_kern_task.o                  B 4
+    #
+    # Note that four of the five come from `osfmk_kern_task.o` and **the storage one is a pointer**
+    # (`task_ledger_template`), which is zero here for the same reason `clock_count` was in 285: it
+    # is a stand-in, and nothing in this image has ever set it.
+    #
+    # **Predicted build deltas:** 896 -> **888** undefined (13 out, 5 in), 800 -> **791** function
+    # stubs, 96 -> **97** storage, text 1031088 -> **1042400** (+11312), image 1132136 -> about
+    # **1148544** (+16 KB and 8), and `__bss_start` 0x80113b60 -> about 0x80117b68.
+    #
+    # Predicted report: `stub_hit=init_task_ledgers`, `xnu_entry_stub_caller` = the return address of
+    # the `bl init_task_ledgers` in `coalitions_init` - object offset 0x1638, so the caller is
+    # `coalitions_init + 0xe8` once the linked address is known.
+    #
+    # **The build and the run.** 888 undefined, 791 function stubs, 97 storage, text 1031088 ->
+    # **1042736**, image 1132136 -> **1148528**, `__bss_start` 0x80113b60 -> **0x80117b68** - the
+    # boundary prediction was exact to the byte, including the 16 KB jump, and the counts were exact
+    # to the unit. bss end 0x8014a008 -> 0x8014e188, headroom 1794040 -> 1777272. `coalitions_init`
+    # links at 0x800bdda4, `init_task_ledgers`'s stub at 0x800e383c, and the run:
+    #
+    #     stub_hit=init_task_ledgers        xnu_entry_stub_caller=0x800bde8c
+    #
+    # `0x800bde8c` is `coalitions_init + 0xe8`, the instruction after the `bl` at +0xe4 - so `zinit`
+    # was executed for the first time in this boot and returned, with `btlog_create` never called,
+    # and `zone_change`, both `PE_parse_boot_argn` calls, `lck_grp_attr_setdefault`, `lck_grp_init`,
+    # `lck_attr_setdefault` and `lck_mtx_init` all returned after it.
+    OSFMK_KERN_COALITION_OBJ=${STAGE90_ENTRY_OSFMK_KERN_COALITION_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_coalition.o}
     # 286: `coalitions_init`, and the first prediction that is a *chain* rather than a name
     #
     # **The 285 run reported** `stub_hit=ntp_init` at `clock_config+0x6c`. Linking `ntptime.o` makes
@@ -6077,6 +6168,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_CLOCK_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_NTPTIME_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_COALITION_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_EVENT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
@@ -6090,7 +6182,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
