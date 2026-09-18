@@ -3098,6 +3098,74 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 286: `coalitions_init`, and the first prediction that is a *chain* rather than a name
+    #
+    # **The 285 run reported** `stub_hit=ntp_init` at `clock_config+0x6c`. Linking `ntptime.o` makes
+    # that call real, so the frontier moves again - and this time the prediction has to follow four
+    # functions past the stop, because the next eight calls in `kernel_bootstrap` include three that
+    # are already real. Written out in order, with each one's disposition measured in the image:
+    #
+    #     ntp_init        (this step)  calls lck_grp_attr_alloc_init, lck_grp_alloc_init,
+    #                                  lck_attr_alloc_init, lck_spin_alloc_init,
+    #                                  nanoseconds_to_absolutetime, timer_call_setup - ALL real
+    #     clock_config                 after ntp_init, one tail call: nanoseconds_to_absolutetime,
+    #                                  real -> completes
+    #     machine_init                 `is_clock_configured = TRUE; if (debug_enabled) pmap_map_globals();`
+    #                                  and `debug_enabled` is 0 - see below -> returns
+    #     clock_init                   `b clock_oldinit`, real since 285; clock_oldinit references
+    #                                  only `clock_count` and `clock_list` and makes no calls at all
+    #                                  -> completes
+    #     ledger_init                  5 instructions, tail call `b lck_grp_init`; lck_grp_init calls
+    #                                  __bzero, strlcpy and lck_mtx_lock, all real -> completes
+    #     coalitions_init              ***STUB***  <- the stop
+    #
+    # **`debug_enabled` is the hinge of the whole prediction**, so it is measured rather than
+    # assumed. It is `SECURITY_READ_ONLY_SPECIAL_SECTION(volatile uint32_t, "__TEXT,__const")
+    # debug_enabled = FALSE;` (pe_init.c:39) and the only writer in the tree is pe_init.c:350, which
+    # copies it out of the device tree property `/chosen/debug-enabled`. The payload's synthetic
+    # `/chosen` carries name, boot-args, stdout-path, ram-console-reg, random-seed and (when the
+    # consistent-debug switch is on) consistent-debug-root, and no `debug-enabled`. `PE_init_platform`
+    # is real in this image, so the lookup does run and finds nothing. And the linked word agrees:
+    # `debug_enabled` is at 0x800fa640, the first four bytes of `__TEXT,__const`, and the image
+    # contains 0x00000000 there. So `machine_init` returns at its fourth instruction.
+    #
+    # The one thing that would falsify the prediction cheaply is `pmap_map_globals` being reached -
+    # it is real, and it has no `bl` in its first 0x60 bytes - so a report naming it would mean
+    # `debug_enabled` was set somewhere this reading did not find, which is a measurement about the
+    # device tree rather than about this step.
+    #
+    # **The object, measured.** 3068 bytes of text, 12 of data, 172 of bss, 35 of `rodata.str1.1`,
+    # 8 definitions and 24 references. It resolves **2** - `ntp_init` and `ntp_update_second`, both
+    # functions - and adds **2**, both functions: `mac_system_check_settime`
+    # (security_mac_system.o, 0xf0) and `nanotime` (bsd_kern_kern_time.o, 0x2c). The other six
+    # definitions (`adjtime`, `ntp_adjtime`, `ntp_get_freq`, `ntp_gettime`, `time_esterror`,
+    # `time_status`) are names nothing has referenced yet; `time_esterror` and `time_status` are the
+    # object's own `.data`, 4 bytes each, which is why the image should grow by 12 and not by 0.
+    #
+    # **Predicted build deltas:** 896 -> **896** undefined (2 out, 2 in), 800 -> **800** function
+    # stubs, 96 -> **96** storage, text 1027984 -> 1031052 (+3068), image 1132128 -> **1132140**.
+    # This is the first step in a while whose *counts* are all predicted to be unchanged, which makes
+    # the run the only evidence that the object landed at all - another reason to have the caller
+    # address predicted to the byte.
+    #
+    # Predicted report: `stub_hit=coalitions_init`, `xnu_entry_stub_caller` = **0x8000e228**, the
+    # return address of `bl coalitions_init` at 0x8000e224 in `kernel_bootstrap`.
+    #
+    # **The build and the run.** 896 undefined, 800 function stubs, 96 storage, `__bss_start`
+    # 0x80113b58 -> 0x80113b60, bss end 0x80149f48 -> 0x8014a008, headroom 1794232 -> 1794040 - all
+    # three counts and both invariants exactly as predicted. Text 1027984 -> **1031088** and image
+    # 1132128 -> **1132136**; the arithmetic said 1031052 and 1132140, so text came out 36 bytes
+    # larger and the image 4 bytes smaller than the sum of the object's sections suggested. And:
+    #
+    #     stub_hit=coalitions_init        xnu_entry_stub_caller=0x8000e228
+    #
+    # **The chain held.** One run measured that `ntp_init` completes with all six of its lock and
+    # timer calls real; that `clock_config` completes; that `machine_init` takes its `debug_enabled`
+    # branch the way the linked word at 0x800fa640 said it would and returns without reaching
+    # `pmap_map_globals`; that `clock_init`'s tail call into `clock_oldinit` returns; and that
+    # `ledger_init`'s tail call into `lck_grp_init` returns. Seven functions, four of them named in
+    # advance as things that would *not* stop the run, and the stop came exactly one call later.
+    BSD_KERN_KERN_NTPTIME_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_NTPTIME_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_ntptime.o}
     # 285: `ntp_init`, and a step that is predicted to overshoot the symbol it links
     #
     # **The 284 run reported** `stub_hit=clock_oldconfig` at `clock_config+0x68`. The object that
@@ -6008,6 +6076,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_HOST_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_CLOCK_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_KERN_NTPTIME_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_EVENT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
@@ -6021,7 +6090,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
