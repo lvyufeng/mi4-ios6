@@ -221,6 +221,14 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # last call in `thread_bootstrap`, and the one that writes the TPIDRPRW that `current_thread()`
     # reads back at `arm_init.c:241`.
     ARM_KERN_TIMER_OBJ=${STAGE90_ENTRY_KERN_TIMER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_timer.o}
+    # `osfmk/arm/machine_routines_asm.s`, named by experiment-180's `stub_hit=machine_set_current_thread` -
+    # the last statement of `thread_bootstrap`. Assembled rather than compiled (`tools/assemble_arm_layer.sh`),
+    # because it is Apple's assembly. It is where the thread really becomes current: the first
+    # instruction of `machine_set_current_thread` writes TPIDRPRW, which is the register
+    # `current_thread()` (`osfmk/arm/cpu_data.h:52`) reads back - so linking this object is what makes
+    # `arm_init.c:241`'s `thread = current_thread()` return the thread `thread_bootstrap` just made.
+    # 2280 bytes of text, 76 symbols, 12 references of which 4 are new.
+    ARM_MACHINE_ROUTINES_ASM_OBJ=${STAGE90_ENTRY_MACHINE_ROUTINES_ASM_OBJ:-$REPO_ROOT/out/xnu_asm_obj/machine_routines_asm.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -240,10 +248,11 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$ARM_CPU_COMMON_OBJ"       "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_KERN_THREAD_OBJ"      "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_KERN_TIMER_OBJ"       "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$ARM_MACHINE_ROUTINES_ASM_OBJ" "run ./tools/assemble_arm_layer.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ")
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

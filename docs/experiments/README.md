@@ -194,6 +194,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-178](experiment-178-the-two-halves-of-cpudataentries-agree-and-the-frontier-is-thread-bootstrap.md) | The Two Halves of `CpuDataEntries` Agree, and the Frontier Is `thread_bootstrap` |
 | stage90 | [experiment-179](experiment-179-thread-bootstrap-ran-and-the-frontier-is-timer-init.md) | `thread_bootstrap` Ran Its Assignments, and the Frontier Is `timer_init` |
 | stage90 | [experiment-180](experiment-180-thread-bootstrap-ran-to-its-last-statement-and-the-frontier-is-machine-set-current-thread.md) | `thread_bootstrap` Ran to Its Last Statement, and the Frontier Is `machine_set_current_thread` |
+| stage90 | [experiment-181](experiment-181-the-tpidrprw-round-trip-held-and-the-frontier-is-rtclock-early-init.md) | The TPIDRPRW Round Trip Held, and the Frontier Is `rtclock_early_init` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
