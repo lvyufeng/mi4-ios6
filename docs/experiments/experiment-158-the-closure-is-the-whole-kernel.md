@@ -58,9 +58,14 @@ arm-none-eabi-ld -r -o /tmp/xnu_all_objs.o out/xnu_kernel_obj/*.o out/xnu_asm_ob
 arm-none-eabi-nm -u /tmp/xnu_all_objs.o | wc -l     # 189
 ```
 
-**703 objects — every one this project builds — leave 189 symbols unresolved.** All 189 are
-referenced by an object that is in the pool; none is a reference from nowhere. They fall into
-three groups.
+**703 objects — every one this project builds — leave 189 symbols unresolved.** The *count* is not
+new: `tools/measure_link.sh` reported 189 in experiment-156, by a different route (a final ELF link
+with weak stubs). Two independent measurements agreeing is worth having, and it is the reason to
+trust the number — but what this experiment adds is the **attribution**, which the count alone does
+not carry.
+
+All 189 are referenced by an object that is in the pool; none is a reference from nowhere. They fall
+into three groups.
 
 ### 1. Composition failures: 118 symbols (62%)
 
@@ -162,6 +167,10 @@ That list explains a second set of the 189 by name, and it is measurable:
 # the whole pool's unresolved set
 arm-none-eabi-ld -r -o /tmp/xnu_all_objs.o out/xnu_kernel_obj/*.o out/xnu_asm_obj/*.o
 arm-none-eabi-nm -u /tmp/xnu_all_objs.o | wc -l          # 189
+./tools/measure_link.sh --keep-stubs                     # 189, by the other route
+
+# which object references each of them (one nm pass, one symbol at a time not needed)
+arm-none-eabi-nm -A -u out/xnu_kernel_obj/*.o out/xnu_asm_obj/*.o | awk '{print $NF"\t"$1}'
 
 # the manifest's optional sources
 grep -c "bsd/net/bpf.c$" out/xnu_arm_manifest.txt        # 0
