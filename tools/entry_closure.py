@@ -74,7 +74,12 @@ def nm_defs(paths):
 
 def link(objs, script, out_elf):
     """Link; return (undefined symbols, duplicate-definition diagnostics)."""
+    # entry.ld takes its base as a `--defsym` symbol rather than defining one, so that the base is
+    # written down in exactly one place (build_entry.sh's ENTRY_BASE). This tool discovers which
+    # symbols a set of objects leaves undefined, and that answer does not depend on where the image
+    # lands - so it links at zero, deliberately a value no build uses.
     r = subprocess.run([LD, "-T", script, "-nostdlib", "--no-demangle",
+                        "--defsym=ENTRY_BASE=0",
                         "-o", out_elf, *objs],
                        capture_output=True, text=True)
     undef = set(re.findall(r"undefined reference to `([^']+)'", r.stderr))

@@ -34,7 +34,17 @@ mkdir -p "$OUT"
 VERBOSE=0
 [[ ${1:-} == --verbose ]] && VERBOSE=1
 
-ENTRY_BASE=0x00200000
+# **Where the image is linked and run, and the one place this value is written down.** The linker
+# script takes it as a `--defsym` symbol rather than defining it itself (entry.ld's header says why),
+# so a link that forgets to pass this fails loudly instead of landing at zero.
+#
+# Experiment 241 moved it 0x00200000 -> 0x80000000. `is_sane_zone_ptr`'s first test is
+# `pmap_kernel_va` = [0x80000000, 0xFFFEFFFF], a compile-time constant, and it is false for every
+# address an image below `VM_MIN_KERNEL_ADDRESS` produces - so `free_to_zone` panicked on the
+# boot path (experiments 236 to 240). 0x80000000 is where this device's RAM starts (`RAM_PHYS_BASE`)
+# and where its kernel normally loads. Nothing above the image moved relative to it: every offset in
+# the layout below is derived from the image's own size.
+ENTRY_BASE=0x80000000
 
 # The image's own size decides everything that sits above it, so the layout is *computed* after the
 # link and written into xnu_arm_entry.h, rather than being a constant here that the payload repeats.
@@ -1707,6 +1717,36 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # unchanged. `ENTRY_KV_BUF` 1024 -> 2048 takes the run to 25 keys and 831 bytes, which moves the
     # image's `.bss` end and with it the *derived* boot_args offset (897024 -> 901120) - the layout
     # block working, not a hazard. And the payload was rebuilt from the regenerated header.
+    #
+    # **241 moved the base to 0x80000000, and the zfree panic is gone.** The five runs before it
+    # (236-240) all ended at the same `udf` inside `DebuggerTrapWithState`, reached through
+    # `panic_trap_to_debugger`, because `is_sane_zone_ptr`'s first test - `pmap_kernel_va` =
+    # [0x80000000, 0xFFFEFFFF], a compile-time constant - is false for every address an image at
+    # 0x00200000 produces: `virtual_space_start` came out at 0x40400000 and `vm_kernel_slide` at
+    # 0x80200000. At 0x80000000 the two become 0xC0000000 and 0, and the mandatory-path free passes
+    # the check it was failing.
+    #
+    # What it stops at instead is a **data abort at 0x80300000 with DFSR = 0x0000080f**: bit 11 set,
+    # so it was a *write*, and FS = 0b01111, a **permission fault on a level-2 page**. That is a
+    # fact about the mapping and not about the instruction: everything `_start` installs in this
+    # window is a 1 MB *section* with AP_RWNA (memSize is 8 MB, so `mapveqp` and not `mapveqpL2`),
+    # and a section cannot produce a page permission fault. So XNU's own pmap was live and had
+    # mapped 0x80300000 read-only, and the writer is not named yet - `fleh_dataabt` still reports
+    # only DFAR and DFSR. Experiment 242 gives it `lr_abt - 8` and the MMU registers
+    # (TTBR0/TTBR1/TTBCR/SCTLR), which is the same treatment `fleh_undef` got in 236.
+    #
+    # Also in 241, and the reason the move was this small: the base is now written down in exactly
+    # one place. `entry.ld` used to carry its own `. = 0x00200000` while this file carried
+    # ENTRY_BASE - the one-value-two-definitions defect - and it now takes the base from a
+    # `--defsym` this file injects, so a link that forgets it fails with `undefined symbol
+    # ENTRY_BASE' referenced in expression` rather than producing an image at zero. `entry_image_ptr`
+    # likewise stopped testing the literals [0x00200000, 0x04000000) and now tests the linker's own
+    # `__entry_text_start` .. `__entry_image_end`: the move would otherwise have turned every guarded
+    # read in fleh_undef into a *skipped* one, silently. Everything above the image needed nothing:
+    # the layout is derived from the image's size, so the build reports the same offsets at either
+    # base, and the payload's window loop, its boot_args and start.s are all macros or boot_args
+    # reads. Cost: 32 bytes of text (592753 -> 592785), 0 bytes of image, 645 undefined, stub set
+    # unchanged.
     BSD_KERN_SUBR_PRF_OBJ=${STAGE90_ENTRY_BSD_KERN_SUBR_PRF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_subr_prf.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
@@ -1811,7 +1851,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # is only left un-stubbed if pass 1 can see libgcc. Adding the group to the final link alone
     # changes nothing - the stub is an ordinary object definition and the linker never looks in the
     # archive for a symbol something already defines. Experiment 183 found that by doing it.
-    arm-none-eabi-ld -T "$BOOT_DIR/entry.ld" -nostdlib --no-demangle \
+    arm-none-eabi-ld -T "$BOOT_DIR/entry.ld" --defsym=ENTRY_BASE=$ENTRY_BASE \
+        -nostdlib --no-demangle \
         -o "$OUT/xnu_arm_entry_pass1.elf" "${LINK_OBJS[@]}" \
         --start-group "$LIBGCC" --end-group 2> "$OUT/xnu_arm_entry_pass1.err" || true
     grep -o "undefined reference to \`[^']*'" "$OUT/xnu_arm_entry_pass1.err" |
@@ -1895,7 +1936,8 @@ fi
 say "== linking at $ENTRY_BASE =="
 # start.o first, so `_start` is the first thing in .text and the image base is the entry point -
 # not required (the payload jumps to an explicit address) but it makes the map readable.
-run arm-none-eabi-ld -T "$BOOT_DIR/entry.ld" -nostdlib -Map "$OUT/xnu_arm_entry.map" \
+run arm-none-eabi-ld -T "$BOOT_DIR/entry.ld" --defsym=ENTRY_BASE=$ENTRY_BASE \
+    -nostdlib -Map "$OUT/xnu_arm_entry.map" \
     -o "$OUT/xnu_arm_entry.elf" \
     "${LINK_OBJS[@]}" \
     --start-group "$LIBGCC" --end-group

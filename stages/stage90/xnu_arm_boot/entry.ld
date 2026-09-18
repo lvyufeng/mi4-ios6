@@ -1,13 +1,32 @@
 /*
  * Linker script for the XNU entry image.
  *
- * The image is linked at VA 0x00200000, and the boot_args handed to `_start` say
- * physBase = virtBase = 0x00200000. That makes every `LOAD_PHYS_ADDR` conversion in start.s an
- * identity, and it makes the page tables `_start` builds identity tables - which is what lets the
- * epilogue disable the MMU and keep executing, since its own address is the same either way.
+ * **This script does not know its own base, and does not define one.** `ENTRY_BASE` is a symbol the
+ * build injects with `--defsym`, from the one place the base is written down -
+ * `build_entry.sh`'s `ENTRY_BASE` - and a link that forgets it fails with
+ * `undefined symbol `ENTRY_BASE' referenced in expression` rather than producing an image at zero.
+ * That is deliberate: this value used to live here *and* in build_entry.sh, which is the
+ * one-value-two-definitions defect this project has a memory about, and which is exactly what
+ * experiments 168 and 169 cost.
  *
- * The whole image must fit inside [physBase, physBase + memSize) = 2 MB, because that is the only
- * window XNU's own page tables map, and everything that runs after the switch lives here.
+ * The image is linked at ENTRY_BASE and the boot_args handed to `_start` say
+ * physBase = virtBase = ENTRY_BASE. That makes every `LOAD_PHYS_ADDR` conversion in start.s an
+ * identity, and it makes the page tables `_start` builds identity tables - which is what lets the
+ * epilogue disable the MMU and keep executing, since its own address and its physical address are
+ * the same number either way. It is also why the payload can physically *copy* the image to
+ * ENTRY_BASE and enter it there with no relocation step.
+ *
+ * **Experiment 241 moved the base from 0x00200000 to 0x80000000**, which is where the device's RAM
+ * starts (`RAM_PHYS_BASE`) and where this SoC's kernel normally loads - because
+ * `is_sane_zone_ptr`'s first test, `pmap_kernel_va`, is `[0x80000000, 0xFFFEFFFF]` at compile time,
+ * so an image below `VM_MIN_KERNEL_ADDRESS` has every address XNU's own allocator hands out
+ * rejected by XNU's own kernel-address test. See experiment 241 and the module comment above
+ * `fleh_undef` in entry_stubs.c. Nothing else in this script changed with it: every offset above
+ * the image is derived from the image's own size, so moving the base moves the whole layout.
+ *
+ * The whole image must fit inside [physBase, physBase + memSize), because that is the only window
+ * XNU's own page tables map, and everything that runs after the switch lives here. `memSize` is
+ * 8 MB as of experiment 175; it is the window the payload computes, and `_start` walks it.
  *
  * Layout: code and read-only data first (they are tens of KB), then the stacks and the vector
  * table. `topOfKernelData` is placed above all of it by the payload's boot_args, not here, since
@@ -18,7 +37,7 @@ ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x00200000;
+    . = ENTRY_BASE;    /* --defsym, from build_entry.sh; see the header */
     __entry_text_start = .;
 
     .text : {

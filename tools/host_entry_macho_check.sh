@@ -63,7 +63,9 @@ sym = {n: nm(n) for n in (
     "__entry_data_size", "__entry_data_filesize", "__entry_data_fileoff", "__entry_image_end")}
 
 # objcopy -O binary lays the loadable sections out from the lowest address, which is .text at
-# 0x00200000 - the first symbol the linker script defines, and the image's own base.
+# `__entry_text_start` - the first symbol the linker script defines, and the image's own base. It is
+# read from the ELF rather than written down here, which is why this check followed experiment 241's
+# base move (0x00200000 -> 0x80000000) without an edit.
 base = nm("__entry_text_start")
 img = open(binpath, "rb").read()
 

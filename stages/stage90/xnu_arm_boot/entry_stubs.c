@@ -190,14 +190,19 @@ uint32_t fiqstack_top = (uint32_t)(uintptr_t)&g_fiqstack[ENTRY_STACK_BYTES];
 /* The vector table `_start` fills in with the fleh_* addresses below. */
 uint32_t ExceptionVectorsTable[8] __attribute__((aligned(32)));
 
+/* The image's own extent, defined by `entry.ld` and used to decide what is worth dereferencing. */
+extern char __entry_text_start[];
+extern char __entry_image_end[];
+
 /*
  * The stack the exception handlers run on, and why they need one of their own.
  *
  * `_start` sets the SVC stack to `intstack_top - SS_SIZE` (`start.s:310-311`) and does not touch
  * the banked stack pointers at all. So when an exception is taken, SP becomes whatever that mode
  * was left with - set by the bootloader or by the payload for *its* page tables, not for XNU's.
- * XNU's tables map `[physBase, physBase + memSize)` = `[0x00200000, 0x00a00000)` and nothing else,
- * and the payload is at 0x00008000, so an inherited stack pointer is outside the map.
+ * XNU's tables map `[physBase, physBase + memSize)` and nothing else, and the payload is at
+ * 0x00008000, so an inherited stack pointer is outside the map. (Under experiment 241's base that
+ * window is `[0x80000000, 0x80800000)`; before it, `[0x00200000, 0x00a00000)`.)
  *
  * The consequence is not a wrong answer, it is the loss of the answer. The handler's first push
  * data-aborts, the abort is taken again in the same mode with the same stack, and the CPU recurses
@@ -820,18 +825,38 @@ extern unsigned long debugger_panic_caller;
  * false for every address this image uses** - experiment 239's finding, and arithmetic on the boot
  * args rather than a measurement of XNU:
  *
- *   `entry.ld` links the image at 0x00200000 and `stage90`'s `xnu_entry_jump.c:141` hands `_start`
- *   `virtBase = physBase = 0x00200000`. From that, `arm_vm_init.c:496` computes
+ *   `entry.ld` links the image at `ENTRY_BASE` and `stage90`'s `xnu_entry_jump.c:141` hands `_start`
+ *   `virtBase = physBase = ENTRY_BASE`, which was 0x00200000 through experiment 240. From that,
+ *   `arm_vm_init.c:496` computes
  *   `vm_kernel_slide = gVirtBase - 0x80000000 = 0x80200000`, and `arm_vm_init.c:505` computes
  *   `virtual_space_start = (gVirtBase + MEM_SIZE_MAX + 0x3FFFFF) & 0xFFC00000 = 0x40400000`, with
  *   `MEM_SIZE_MAX = 0x40000000` (`arm_vm_init.c:134`). `pmap_kernel_va` wants
  *   `[0x80000000, 0xFFFEFFFF]` (`osfmk/arm/pmap.h:371`). 0x40400000 is not in it.
  *
  * So the first `free_to_zone` on the boot path - `vm_map_init+0x260`'s
- * `zcram(vm_map_zone, map_data, map_data_size)`, cramming the 4096 bytes `vm_map_steal_memory` stole
- * at `virtual_space_start` - panics, and the element it hands the check is around 0x40400000. Any
- * later free would do the same. The fix is not another object; it is a base at or above
+ * `zcram(vm_map_zone, map_data, map_data_size)`, cramming the page `vm_map_steal_memory` stole
+ * at `virtual_space_start` - panics, and the element it hands the check is in the 0x4040xxxx
+ * chunk. Any later free would do the same. The fix is not another object; it is a base at or above
  * 0x80000000, which is where the device's RAM starts (`RAM_PHYS_BASE`, `stage90.h:21`).
+ *
+ * ## The base, and what experiment 241 changed about the arithmetic
+ *
+ * Everything above was true of an image linked at 0x00200000, and experiment 241 moved the base to
+ * **0x80000000**. The two derived values become:
+ *
+ *   `vm_kernel_slide = gVirtBase - 0x80000000` = **0** - which is what this field means on a real
+ *   device and what it was invented for; the underflow to 0x80200000 was this image's, not XNU's.
+ *
+ *   `virtual_space_start = (gVirtBase + MEM_SIZE_MAX + 0x3FFFFF) & 0xFFC00000` = **0xC0000000**,
+ *   inside `pmap_kernel_va`'s `[0x80000000, 0xFFFEFFFF]` - so `is_sane_zone_ptr`'s first test now
+ *   passes for the addresses XNU's own allocator hands out, and the zfree panic on the boot path
+ *   is gone.
+ *
+ * What is *not* claimed here is that the boot proceeds. `zone_init` still never runs in this image
+ * (the three stubs still stand in front of it), the pmap still bootstraps from a base it was never
+ * run at, and the frontier method resumes with whatever the next run's `stub_hit=` or exception
+ * names. The claim this change supports is the narrow one: the base is no longer the reason a
+ * mandatory-path free cannot pass, and `vm_kernel_slide` is no longer reported as 0x80200000.
  */
 extern uint32_t zone_map_max_address;
 extern uint32_t zone_map_min_address;
@@ -845,11 +870,22 @@ entry_word_at(uintptr_t p)
          | ((uint32_t)*(const volatile unsigned char *)(p + 3u) << 24);
 }
 
-/* A pointer worth dereferencing: inside the entry image, where every string in it lives. */
+/*
+ * A pointer worth dereferencing: inside the entry image, where every string in it lives.
+ *
+ * The bounds are the **linker's**, not constants. This function used to test `[0x00200000,
+ * 0x04000000)` - two magic numbers that had to be edited whenever the base or the image grew - and
+ * experiment 241 moved the base, which would have turned every guarded read in this file into a
+ * skipped one *silently*, because a guard that says "not worth dereferencing" and a guard that is
+ * wrong about where the image is look identical in a log. `__entry_text_start` is the first symbol
+ * `entry.ld` defines and `__entry_image_end` is its end, so the range is the image's real extent
+ * whatever the base is. It is the same reason the layout above the image is derived rather than
+ * written down twice.
+ */
 static int
 entry_image_ptr(uintptr_t p)
 {
-    return (p >= 0x00200000u) && (p < 0x04000000u);
+    return (p >= (uintptr_t)__entry_text_start) && (p < (uintptr_t)__entry_image_end);
 }
 
 void fleh_undef(void)

@@ -253,7 +253,8 @@ case "$(value_of STAGE90_XNU_ENTRY)" in
   *)
     [[ $ALLOW_XNU_ENTRY -eq 1 ]] || fail "this build jumps into XNU's _start and never returns; needs --allow-xnu-entry"
     echo "ENTERING XNU: the payload copies a linked image containing XNU's real osfmk/arm/start.s"
-    echo "          to PA 0x00200000, hands it a boot_args (physBase == virtBase), and jumps."
+    echo "          to PA 0x80000000 (experiment 241's base; 0x00200000 before it), hands it a"
+    echo "          boot_args (physBase == virtBase), and jumps."
     echo "          Nothing after that jump is the payload's: the page tables, vectors, caches"
     echo "          and MMU state are XNU's, and the payload never runs again."
     echo

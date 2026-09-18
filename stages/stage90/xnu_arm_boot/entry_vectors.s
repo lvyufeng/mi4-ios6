@@ -10,8 +10,10 @@
  * Two constraints shape it:
  *
  *   - An ARM vector slot is four bytes, which fits a `b` and not an absolute load. Our handlers
- *     are ~1.5 GB away from 0xffff0000, far outside `b`'s ±32 MB, so each slot branches to a
- *     trampoline inside this same page (a few hundred bytes, comfortably in range).
+ *     are in the entry window at 0x80000000 and this page is mapped at 0xffff0000 - 2.14 GB away,
+ *     far outside `b`'s ±32 MB - so each slot branches to a trampoline inside this same page (a few
+ *     hundred bytes, comfortably in range). Before experiment 241's base move the handlers were at
+ *     0x00200000 and the distance was 4.28 GB; either way it is out of range, which is the point.
  *   - The trampoline needs an absolute address for the handler, so it loads one from a literal in
  *     this page. The literal holds the handler's link address, which is correct at runtime because
  *     XNU's page tables map the entry window identically.
