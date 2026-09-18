@@ -3047,6 +3047,69 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 273: `mk_timer_init`, and the frontier leaves its function - the prediction is a tail call's.
+    # 272's stop was `mk_timer_init`, and the object that defines it is `osfmk/kern/mk_timer.c`
+    # (manifest:572), `osfmk_kern_mk_timer.o` - **1577 bytes of text, 8 of data, 4 of bss, 12
+    # definitions and 20 references**. **2 resolved, 1 added.** The two resolved are `mk_timer_init`
+    # itself and `mk_timer_port_destroy`; the one added is `mach_msg_send_from_kernel_proper`, the
+    # first new undefined name since 270 and again a syscall surface rather than an init-path call.
+    # Fifteen of the twenty references are already real (`zinit`, `zone_change`, `lck_spin_lock`,
+    # `lck_spin_unlock`, `zalloc`, `zfree`, `mach_absolute_time`, `copyout`, `OSCompareAndSwap`,
+    # `arm_usimple_lock_init`, `ipc_kobject_set_atomically`, `thread_call_setup`, `thread_call_cancel`,
+    # `thread_call_enter1`, `thread_call_enter_delayed_with_leeway`) and four are already stubs
+    # (`ipc_object_translate`, `ipc_port_release_send`, `mach_port_allocate_qos`, `mach_port_destroy`),
+    # and all four are in trap handlers - `mk_timer_arm_trap` and its siblings - not on this path.
+    # Ten of the twelve definitions are names the image has never heard of (the `*_trap` syscall
+    # surface, `mk_timer_expire`, `mk_timer_qos`, `mk_timer_zone`, one string), which is 250's and
+    # 270's shape again: what an object defines is not what the link needs.
+    #
+    # The function is `sizeof`, a no-op assert, and two calls:
+    #
+    #     mov r0, #104        ; s = sizeof(mk_timer_data_t)
+    #     mov r1, #0x68000    ; 4096 * s  = 425984
+    #     mov r2, #0x680      ; 16 * s    = 1664
+    #     bl zinit("mk_timer") -> mk_timer_zone
+    #     mov r1, #6          ; Z_NOENCRYPT
+    #     b zone_change       ; a tail call of its own
+    #
+    # `assert(!(mk_timer_zone != NULL))` leaves no instruction at all - the object has no undefined
+    # reference to `panic` or to an assert helper - so there is nothing between the `push` and the
+    # `zinit` that could stop. **Both calls are real, and the run has already proved it**: 271's run
+    # *passed* `semaphore_init` and stopped at `mk_timer_init`, and `semaphore_init`'s body is
+    # `zinit` + `zone_change` too, so both callees returned on the device once. `mk_timer_init`
+    # therefore completes, and the request it makes is `zinit(104, 425984, 1664, "mk_timer")` - a
+    # 416 KB ceiling, the largest `max_mem` of any step so far.
+    #
+    # **Prediction: `stub_hit=host_notify_init`, and for the first time the caller is not in the
+    # function the walk was following.** `mk_timer_init` is `ipc_bootstrap`'s last call, and the
+    # compiled `ipc_bootstrap` ends with a tail call:
+    #
+    #     800ac250: bl mk_timer_init       ; return +0x190
+    #     800ac254: pop {r4, r5, fp, lr}
+    #     800ac258: b host_notify_init     ; a tail call, so no lr is set for it
+    #
+    # so the stub for `host_notify_init` sees `lr` = whatever that `pop` restored, which is
+    # `ipc_bootstrap`'s own return address - the instruction after `bl ipc_bootstrap` in
+    # `kernel_bootstrap`, and **not anything inside `ipc_bootstrap`**. In this image that is
+    # `8000e134: bl ipc_bootstrap` -> return `0x8000e138`, and `kernel_bootstrap` is at `0x8000df00`,
+    # so the prediction is **`kernel_bootstrap+0x238`**: offset first, because four steps in a row
+    # have moved the absolute address and none has moved an offset. This is the 252 shape met from
+    # the other side - 252 was a tail call *into* a function the walk had already left - and the
+    # prediction has to be written against the caller's caller for the same reason.
+    #
+    # `host_notify_init` is a stub (`out/stage90/xnu_arm_entry_realstubs.c:233`), so the run should
+    # stop there with an `lr` that `host_ipc_init` and `ipc_bootstrap` do not appear in at all.
+    #
+    # **273 measured it, and the prediction held to the offset.** Resolved 2, added 1, 844 -> 843
+    # undefined, text 935012 -> 936996, image bytes 1048432 -> 1048440, bss `0x800ff6c8` ..
+    # `0x801346c8`. The run stopped at `stub_hit=host_notify_init` with
+    # `xnu_entry_stub_caller=0x8000e138` - **`kernel_bootstrap+0x238`**, the caller of the tail call
+    # and not an address inside `ipc_bootstrap` - with all three roads (`_v`, `_a`, `_e`) agreeing,
+    # `kv_written=0x61`, `kv_in_dram=0x85`, `kv_dropped=0`, `why_byte=0x61`, zero abort entries, and
+    # `_w0=0x65303030` / `_w1=0x0a383331` = `000e138\n`, the two words 271's probe reads out of
+    # `g_kv_buf`. The fifteenth consecutive prediction to hold, and the first whose answer lies in a
+    # different function from the call under test.
+    OSFMK_KERN_MK_TIMER_OBJ=${STAGE90_ENTRY_OSFMK_KERN_MK_TIMER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_mk_timer.o}
     # 267: `mig_init`, and **the step is 18 objects, because the datum it reads has 17 entries.**
     # 266's stop was `mig_init`. `osfmk/kern/ipc_kobject.c` (manifest:551) is the object that
     # defines it - 2404 bytes of text, 68 of data, 12376 of bss, six functions - and it is one
@@ -3322,6 +3385,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_IPC_IPC_VOUCHER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_SYNC_SEMA_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_MK_TIMER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -3334,7 +3398,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

@@ -1008,7 +1008,15 @@ void entry_stub_hit(const char *name, uint32_t caller)
         g_kv_buf[g_kv_len] = '\0';
     }
 
-    g_stub_caller_digits = g_kv_len + 26u;   /* " " + "xnu_entry_stub_caller" (22) + "=0x" */
+    /* `" " + "xnu_entry_stub_caller" (21) + "=0x"`, so the first hex digit is at `g_kv_len + 25`.
+     * The `26` this line carried through experiment 273 was a miscount of the key's length - 22 for
+     * a 21-character name - and it is visible in that run's own report: `_w0` reads `0x65303030`,
+     * four bytes of `000e138`, for a value whose digits are `8000e138`. So `_w0`/`_w1` have always
+     * covered digits *two* through nine, which is where 271's corruption was anyway (`a` and `c`,
+     * digits four and five of `800ac0b4`), and nothing either experiment concluded depended on the
+     * first digit. Corrected here; a run that shows `_w0` beginning `0x38` has the corrected
+     * window. */
+    g_stub_caller_digits = g_kv_len + 25u;
     g_stub_caller = caller;
     entry_kv("xnu_entry_stub_caller", caller);
     /* The same value through the same call site, one call later: two records in the same machine
