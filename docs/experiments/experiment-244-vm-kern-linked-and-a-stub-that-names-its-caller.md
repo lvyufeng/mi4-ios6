@@ -161,11 +161,11 @@ own first call, is answered by this same object.
 
 ## What is next
 
-`vm_map_store_init` is defined by `out/xnu_kernel_obj/osfmk_vm_vm_map_store.o` (908 bytes of text, 12
-definitions, 14 references) — already built, so the frontier method continues unchanged. Note what
-that step's own next stop will be, because the object is a dispatcher rather than an implementation:
-it calls `vm_map_store_init_ll` and `vm_map_store_init_rb`, which live in
-`osfmk_vm_vm_map_store_ll.o` (776 bytes) and `osfmk_vm_vm_map_store_rb.o` (5808 bytes). Both are
+`vm_map_store_init` is defined by `out/xnu_kernel_obj/osfmk_vm_vm_map_store.o` (908 bytes of text, 41
+of `.rodata.str1.1`, 11 global definitions, 14 references) — already built, so the frontier method
+continues unchanged. Note what that step's own next stop will be, because the object is a dispatcher
+rather than an implementation: it calls `vm_map_store_init_ll` and `vm_map_store_init_rb`, which live
+in `osfmk_vm_vm_map_store_ll.o` (776 bytes) and `osfmk_vm_vm_map_store_rb.o` (5808 bytes). Both are
 already built too.
 
 ## Reproduce

@@ -1948,11 +1948,25 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # payload rebuilt from the regenerated header (its text grows by exactly the entry image's
     # 16384). `persistent_write_attempted=0x00000000` in all 25 contracts that report it.
     #
-    # Next: `vm_map_store_init` is in `osfmk_vm_vm_map_store.o` (908 bytes of text, 12 definitions,
+    # Next: `vm_map_store_init` is in `osfmk_vm_vm_map_store.o` (908 bytes of text, 11 definitions,
     # 14 references) - already built. It is a dispatcher: it calls `vm_map_store_init_ll` and
     # `vm_map_store_init_rb`, which are in `osfmk_vm_vm_map_store_ll.o` (776) and
     # `osfmk_vm_vm_map_store_rb.o` (5808), both built as well.
     OSFMK_VM_VM_KERN_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_KERN_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_kern.o}
+    # `osfmk/vm/vm_map_store.c` -> **908 bytes of text, 41 of `.rodata.str1.1`, 11 definitions, 14
+    # references, no storage at all**. The object 244's stop named: `vm_map_store_init` is the
+    # definition `vm_map_create` calls, and the answer to it is this file rather than a probe.
+    #
+    # **It is a dispatcher, and that shapes the prediction.** Its definitions come in three layers -
+    # the portable ones (`vm_map_store_init`, `vm_map_store_entry_link`, `vm_map_store_lookup_entry`,
+    # `vm_map_store_update`, `vm_map_store_copy_insert`, `vm_map_store_copy_reset`) and the two
+    # implementations they select between, `vm_map_store_*_ll` (in `osfmk_vm_vm_map_store_ll.o`) and
+    # `vm_map_store_*_rb` (in `osfmk_vm_vm_map_store_rb.o`). In 4570 both stores are live: the RB
+    # tree is the lookup structure and the "ll" store is the hole list.
+    #
+    # Nothing here is storage, so the generator has no size to get wrong: all 14 references are
+    # `panic` (real, `osfmk_kern_debug.o`) and the twelve `_ll`/`_rb` implementations.
+    OSFMK_VM_VM_MAP_STORE_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_STORE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_map_store.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -2029,6 +2043,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_VM_VM_OBJECT_OBJ"     "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_SUBR_PRF_OBJ"      "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_KERN_OBJ"       "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_VM_VM_MAP_STORE_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
@@ -2036,7 +2051,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$LIBKERN_GEN_OSATOMICOPERATIONS_OBJ" "$BSD_KERN_KERN_MEMORYSTATUS_OBJ"
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
-    "$OSFMK_VM_VM_KERN_OBJ")
+    "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
