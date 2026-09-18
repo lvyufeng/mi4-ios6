@@ -73,6 +73,12 @@ STUB_DEFINES=()
 # equivalent to it. See entry_stubs.c.
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_ENTRY_REAL_KPRINTF=1)
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_ENTRY_REAL_PANIC=1)
+# ...and for `EntropyData`, which `osfmk_prng_random.o` defines as an *initialized* struct -
+# `entropy_data_t EntropyData = { .index_ptr = EntropyData.buffer }`, which is why that object's
+# `.data` is 488 bytes rather than empty. The stand-in here was the right size and the wrong value;
+# experiment 211 is what linked the object and found out, and the link error that said so was
+# `multiple definition of 'EntropyData'`, not any measurement of the value.
+[[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_ENTRY_REAL_ENTROPY_DATA=1)
 
 # The one thing in this image that is neither XNU's nor this project's: the compiler's own runtime.
 # Experiment 182's run stopped at `__aeabi_uldivmod`, which is the ARM EABI helper for 64-bit
@@ -654,6 +660,78 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `cpu-debug-interface` lookup. So the run after this one should be the first where **Phase 3's
     # `pe_arm_init_interrupts` is entered by XNU itself**.
     OSFMK_ARM_CACHES_OBJ=${STAGE90_ENTRY_CACHES_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_caches.o}
+    # `osfmk/prng/random.c`, named by experiment-210's `stub_hit=early_random`. 2488 bytes of text,
+    # 488 of data, 20 of `.bss`, 26 references, 17 definitions - and two of the definitions are
+    # *storage stand-ins being retired*: `EntropyData` and `erandom`. Both are the
+    # right-size-wrong-value kind this project has now met five times
+    # ([[mi4-stand-in-size-is-not-value]]): `entropy_data_t EntropyData = { .index_ptr =
+    # EntropyData.buffer }` is an initialized struct and `erandom.seedset` is the flag `early_random`
+    # branches on, so a zero-filled array is not a neutral substitute for either.
+    #
+    # **The prediction is `ccdrbg_factory_nisthmac`, and it is a *clean* stub hit.**
+    # `early_random`'s disassembly, read rather than the source's statement order, is:
+    #
+    #       ldr  r0, [r4, #16]      ; erandom.seedset
+    #       cmp  r0, #0
+    #       beq  <slow path>        ; TAKEN - BSS is zero
+    #       mov  r1, #64            ; sizeof(EntropyData.buffer)
+    #       bl   PE_get_random_seed
+    #       cmp  r0, #63
+    #       bhi  <carry on>         ; NOT TAKEN
+    #       bl   panic              ; "EntropyData needed %lu bytes, but got %u.\n"
+    #
+    # and `PE_get_random_seed` (`pexpert/gen/pe_gen.c:119`, real here since experiment 173) returns 0
+    # unless `/chosen` has a `random-seed` property - this project's tree had none until this
+    # experiment added one. So the *first* version of this step, which linked the object without
+    # touching the tree, walked straight into the panic.
+    #
+    # **Where that panic actually goes was written down wrongly the first time and is corrected
+    # here, because the wrong version would have made the run unreadable.** It was predicted as
+    # `stub_hit=PEHaltRestart` on the reasoning that `panic`'s path is all real until
+    # `PEHaltRestart(kPEPanicBegin)` in `iokit_Kernel_PlatformExpert.o`. Disassembling
+    # `panic_trap_to_debugger` rather than reading `debug.c` top to bottom says otherwise:
+    #
+    #       96c: bl   ml_wants_panic_trap_to_debugger     ; returns FALSE, the `beq` is taken
+    #       9a0: bl   current_processor                   ; CPUDEBUGGERCOUNT++ -> 1
+    #       9b8: cmp  r0, #6
+    #       9bc: bcc  a14                                 ; TAKEN - 1 < NESTEDDEBUGGERENTRYMAX+1
+    #       9c4: bl   PEHaltRestart                       ; NOT REACHED
+    #
+    # `PEHaltRestart` sits behind `CPUDEBUGGERCOUNT > NESTEDDEBUGGERENTRYMAX`, and that count is
+    # `PROCESS_DATA(...).db_entry_count` - zeroed `.bss`, so 1 after the increment, so the guard
+    # skips it. `write_trace_on_panic` and `kdebug_enable` are both `B` in this image - zero - so
+    # `kdbg_dump_trace_to_file`, the other stub on the path, is skipped too, and
+    # `PE_arm_debug_panic_hook` is `B` - NULL - so its branch is not taken either. `panic` passes
+    # `ctx = NULL` (`mov r3, #0` at 0x244), so the `handle_debugger_trap` branch is skipped. What
+    # is left on the path is `DebuggerTrapWithState`, which after `DebuggerSaveState` executes
+    # `TRAP_DEBUGGER` - `debug.c:121`, `#define TRAP_DEBUGGER __asm__ volatile("trap")`, an ARM
+    # `udf` - and then `panic_stop()`.
+    #
+    # `panic_stop()` is `panic_spin_forever()` on ARM, not `pmCPUHalt`: `debug.c:133-137` defines
+    # the `pmCPUHalt` form only `#if defined(__i386__) || defined(__x86_64__)` and everything else
+    # gets `#define panic_stop() panic_spin_forever()`. Both it and `paniclog_append_noflush` are
+    # real in this image - `for (;;) { }` after one write into the panic log.
+    #
+    # **So there is no undefined symbol anywhere on the panic path, and no stub could have been
+    # hit.** The trap would have gone through VBAR - installed by the payload's `start.S` and not
+    # affected by MMU state - into the payload's own `stage90_undef_c_handler`, which logs
+    # `MI4IOS6_STAGE90 undef: addr=... lr=...` and returns to the next instruction, after which
+    # XNU spins in `panic_spin_forever` forever. That is a hang, not a stub hit: the run would have
+    # produced no `stub_hit` line at all, and the log's last XNU-side entry would have been the
+    # `undef` breadcrumb. The device would have been recovered by the payload's watchdog and
+    # dead-man, which are armed whether or not the boot is expected to hang.
+    #
+    # That is the reason this experiment does two things and says so plainly. The object is linked
+    # because that is the rule - the previous run named `early_random` and this object defines it -
+    # and the `/chosen` `random-seed` property is added in the *same* step because the object's own
+    # code path is designed to be fatal without it: `random.c` says "Insufficient entropy is fatal.
+    # We must fill the entire entropy buffer during initialization." Aiming a device run at a branch
+    # whose stated purpose is to stop the machine is not a measurement, and the forward version
+    # settles it just as well - if the run reports a stub past `early_random`, then
+    # `PE_get_random_seed` returned 64 and `entropy_readall` ran, which is only possible if the seed
+    # was there. The finding behind it is a gap in the *simulated handoff contract*, the third of
+    # its kind after `state` on the cpu nodes (experiment 193) and `device_type = "timer"`.
+    OSFMK_PRNG_RANDOM_OBJ=${STAGE90_ENTRY_PRNG_RANDOM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_random.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -704,10 +782,11 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_ARM_LOOSE_ENDS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_ARM_CACHES_ASM_OBJ" "run ./tools/assemble_arm_layer.sh first"
     require "$OSFMK_ARM_CACHES_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_PRNG_RANDOM_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ")
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

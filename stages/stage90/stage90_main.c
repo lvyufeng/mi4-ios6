@@ -3,6 +3,43 @@
 static struct boot_args g_boot_args;
 static uint8_t g_apple_dt[32768] __attribute__((aligned(4)));
 
+/*
+ * `/chosen`'s `random-seed` - the boot entropy a real iBoot supplies and this payload did not,
+ * until experiment 211.
+ *
+ * `arm_init` (`osfmk/arm/arm_init.c:390`) sets `__stack_chk_guard` from `early_random()`, which
+ * asks `PE_get_random_seed` (`pexpert/gen/pe_gen.c:119`) for `sizeof(EntropyData.buffer)` = 64
+ * bytes and treats fewer as fatal - "Insufficient entropy is fatal. We must fill the entire
+ * entropy buffer during initialization." (random.c:315). `PE_get_random_seed` reads the bytes from
+ * `/chosen`'s `random-seed`, zeroes them in the tree so they cannot be read twice, and returns 0
+ * both when the property is missing and when every byte it copied was null (`null_count == size`).
+ * This tree had no such property, so nothing past `arm_init`'s fifth statement could run.
+ *
+ * This project cannot obtain the device's real iBoot entropy from a `fastboot boot` payload, so
+ * the value is *simulated*, and the whole of the rule is written down here so that two runs of the
+ * same image produce the same seed and nothing about it is a number that looks measured:
+ *
+ *     seed[i] = (uint8_t)(("mi4ios6-cancro-stage90"[i % 22]) ^ (uint8_t)(i * 31))
+ *
+ * Twenty-two ASCII bytes is what makes it reproducible; `i * 31` is what keeps the sixty-four
+ * bytes from being those twenty-two repeated three times - `null_count` would not reject a
+ * repeated cycle, but a DRBG seeded with one is a weaker stand-in than it needs to be. Exactly one
+ * of the sixty-four bytes comes out zero, which is worth stating rather than glossing: the test
+ * `PE_get_random_seed` applies is a *count* of nulls against the whole length, not a presence
+ * check, so one null byte in sixty-four is not the condition it rejects.
+ */
+#define STAGE90_CHOSEN_RANDOM_SEED_BYTES 64u
+static const char stage90_chosen_random_seed_rule[] = "mi4ios6-cancro-stage90";
+
+static void build_chosen_random_seed(uint8_t *out, uint32_t len)
+{
+    const uint32_t rule_len = (uint32_t)sizeof(stage90_chosen_random_seed_rule) - 1u;
+
+    for (uint32_t i = 0; i < len; i++) {
+        out[i] = (uint8_t)((uint8_t)stage90_chosen_random_seed_rule[i % rule_len] ^ (uint8_t)(i * 31u));
+    }
+}
+
 static void build_stage90_apple_dt(struct apple_dt_builder *b)
 {
     static const uint32_t memory_reg[] = {
@@ -30,6 +67,9 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
     static const uint32_t cpu_service_reg[] = {
         0u, 1u, 2u, 3u,
     };
+    uint8_t chosen_random_seed[STAGE90_CHOSEN_RANDOM_SEED_BYTES];
+
+    build_chosen_random_seed(chosen_random_seed, sizeof(chosen_random_seed));
 
     apple_dt_begin(b, g_apple_dt, sizeof(g_apple_dt));
 
@@ -653,18 +693,20 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
      * address. Present only when the switch is on, because the region it points at is part of the
      * same change.
      */
+    apple_dt_node_begin(b, 6, 0);
+    apple_dt_prop_str(b, "name", "chosen");
+    apple_dt_prop_str(b, "boot-args", "debug=0x144 serial=0x1 mi4ios6.stage=83 xnu-early-init xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm live-pmap ttbr-live tlb-live pmap-restore prevm-pexpert dtinit-facts peid-machine pexpert-hook-ready pmap-ref st83dt=0x83");
+    apple_dt_prop_str(b, "stdout-path", "ram-console");
+    apple_dt_prop_u32_array(b, "ram-console-reg", ram_console_reg, ARRAY_SIZE(ram_console_reg));
+    apple_dt_prop(b, "random-seed", chosen_random_seed, sizeof(chosen_random_seed));
+    apple_dt_prop_u32(b, "consistent-debug-root", stage90_xnu_consistent_debug_region_init());
+#else
     apple_dt_node_begin(b, 5, 0);
     apple_dt_prop_str(b, "name", "chosen");
     apple_dt_prop_str(b, "boot-args", "debug=0x144 serial=0x1 mi4ios6.stage=83 xnu-early-init xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm live-pmap ttbr-live tlb-live pmap-restore prevm-pexpert dtinit-facts peid-machine pexpert-hook-ready pmap-ref st83dt=0x83");
     apple_dt_prop_str(b, "stdout-path", "ram-console");
     apple_dt_prop_u32_array(b, "ram-console-reg", ram_console_reg, ARRAY_SIZE(ram_console_reg));
-    apple_dt_prop_u32(b, "consistent-debug-root", stage90_xnu_consistent_debug_region_init());
-#else
-    apple_dt_node_begin(b, 4, 0);
-    apple_dt_prop_str(b, "name", "chosen");
-    apple_dt_prop_str(b, "boot-args", "debug=0x144 serial=0x1 mi4ios6.stage=83 xnu-early-init xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm live-pmap ttbr-live tlb-live pmap-restore prevm-pexpert dtinit-facts peid-machine pexpert-hook-ready pmap-ref st83dt=0x83");
-    apple_dt_prop_str(b, "stdout-path", "ram-console");
-    apple_dt_prop_u32_array(b, "ram-console-reg", ram_console_reg, ARRAY_SIZE(ram_console_reg));
+    apple_dt_prop(b, "random-seed", chosen_random_seed, sizeof(chosen_random_seed));
 #endif
 
     /*
@@ -1030,6 +1072,26 @@ void stage90_main(void)
     build_stage90_apple_dt(&b);
     dt_len = apple_dt_finish(&b);
     log_kv32("built_apple_dt_len", dt_len);
+    {
+        /*
+         * The seed is a simulated input, so the run's log says which one it was. `sum` and
+         * `zero_bytes` are what `build_chosen_random_seed`'s rule produces; they are printed
+         * rather than asserted, because the point is to make the value auditable against the
+         * rule in the source, not to claim the rule is right.
+         */
+        uint8_t seed[STAGE90_CHOSEN_RANDOM_SEED_BYTES];
+        uint32_t sum = 0;
+        uint32_t zero_bytes = 0;
+
+        build_chosen_random_seed(seed, sizeof(seed));
+        for (uint32_t i = 0; i < sizeof(seed); i++) {
+            sum += seed[i];
+            zero_bytes += (seed[i] == 0u) ? 1u : 0u;
+        }
+        log_kv32("chosen_random_seed_bytes", (uint32_t)sizeof(seed));
+        log_kv32("chosen_random_seed_sum", sum);
+        log_kv32("chosen_random_seed_zero_bytes", zero_bytes);
+    }
 
     if (!dt_len) {
         log_puts("MI4IOS6_STAGE90 apple_dt build failed\n");

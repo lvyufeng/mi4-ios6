@@ -60,6 +60,51 @@ if depth != 0:
 body = src[m.start():j + 1]
 # The function is static in the payload; the harness lives in another unit.
 body = body.replace("static void build_stage90_apple_dt", "void build_stage90_apple_dt", 1)
+
+# --- and the /chosen random-seed rule it calls --------------------------------------
+#
+# Experiment 211 added a `/chosen` `random-seed` property, which `build_stage90_apple_dt`
+# produces through `build_chosen_random_seed`. That is a second shipping function the
+# extracted builder depends on, so it is extracted the same way and with the same
+# loud-failure rule: if it is renamed or made non-static, this aborts rather than compiling a
+# shim that quietly produces a different tree from the payload's.
+m = re.search(r'\nstatic void build_chosen_random_seed\(uint8_t \*out, uint32_t len\)\n\{', src)
+if not m:
+    sys.exit("host_dt_check: cannot find build_chosen_random_seed in %s - the extracted "
+             "builder calls it, so the harness would not reproduce the payload's tree. "
+             "Fix the extraction rather than the harness." % src_path)
+i = m.end() - 1
+depth, j = 0, i
+while j < len(src):
+    if src[j] == '{':
+        depth += 1
+    elif src[j] == '}':
+        depth -= 1
+        if depth == 0:
+            break
+    j += 1
+if depth != 0:
+    sys.exit("host_dt_check: unbalanced braces while extracting build_chosen_random_seed")
+
+seed_fn = src[m.start():j + 1]
+seed_fn = seed_fn.replace("static void build_chosen_random_seed",
+                          "void build_chosen_random_seed", 1)
+
+m = re.search(r'\n#define STAGE90_CHOSEN_RANDOM_SEED_BYTES \d+u\n', src)
+if not m:
+    sys.exit("host_dt_check: cannot find STAGE90_CHOSEN_RANDOM_SEED_BYTES in %s" % src_path)
+seed_define = m.group(0).strip()
+
+# The rule string is the seed's whole content, so it comes across verbatim rather than being
+# restated here - a shim that spelled its own rule would test itself.
+m = re.search(r'\nstatic const char stage90_chosen_random_seed_rule\[\] = "[^"]*";\n', src)
+if not m:
+    sys.exit("host_dt_check: cannot find stage90_chosen_random_seed_rule in %s" % src_path)
+seed_rule = m.group(0).strip()
+
+body = seed_define + "\n" + seed_rule + "\n" + seed_fn + "\n" + body
+print("extracted build_chosen_random_seed: %d lines" % seed_fn.count("\n"))
+
 # And it is compiled outside the payload, so it needs the shim header itself.
 body = '#include "stage90_dt_shim.h"\n' + body
 open(out_path, "w").write(body + "\n")

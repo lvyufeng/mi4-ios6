@@ -229,6 +229,24 @@ int main(void)
     expected_absent("/chosen/memory-map",
                     "pe_init.c reads it behind a kSuccess check; absent is fine");
 
+    /*
+     * `random-seed` is the third property this project added because XNU reads it and the tree
+     * did not have it, after `state` on the cpu nodes and `device_type = "timer"` on /arm-io.
+     * The 64-byte size is not decorative: `early_random` panics when `PE_get_random_seed`
+     * returns fewer than `sizeof(EntropyData.buffer)`, so a short-but-present property would
+     * look correct here and still stop the boot.
+     */
+    {
+        DTEntry chosen = NULL;
+        if (DTLookupEntry(NULL, "/chosen", &chosen) != kSuccess) {
+            fail("/chosen:random-seed", "/chosen itself is missing");
+        } else {
+            check_prop(chosen, "/chosen", "random-seed",
+                       "PE_get_random_seed returns 0 without it and early_random panics "
+                       "'Insufficient entropy is fatal'", 64);
+        }
+    }
+
     printf("\nnodes XNU locates by (property, value):\n");
     check_find("name", "device-tree", "PE_init_platform reads target-type/model from it");
     check_find("name", "arm-io", "pe_arm_get_soc_base_phys returns 0 without it");

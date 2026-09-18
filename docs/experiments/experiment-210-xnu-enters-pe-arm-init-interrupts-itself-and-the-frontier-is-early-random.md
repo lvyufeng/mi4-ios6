@@ -250,3 +250,32 @@ grep -qx PEHaltRestart out/stage90/xnu_arm_entry_undef.txt && echo "PEHaltRestar
 
 Nothing was flashed: `persistent_write_attempted=0x00000000` in all 25 contracts that report it,
 and the device returned to Android on its own.
+
+## Correction, added after the run (experiment 211)
+
+Two claims in the "What is next" section above are wrong, and experiment 211's run is what settled
+them. Neither changes the result - `stub_hit=early_random` was the right stop - but both would have
+misled the step after it, so they are corrected here rather than left standing.
+
+**1. "`EntropyData` and `erandom` are *currently generated storage stubs* in this image."** Neither
+was. `EntropyData` was the hand-written `uint8_t EntropyData[68]` at `entry_stubs.c:140` - which is
+why retiring it did not move the generator's storage count - and `erandom` was not a stand-in of any
+kind: `grep -c '^erandom$'` against experiment 211's A-side undefined list is 0, because nothing in
+the image referenced it while `early_random` was a stub. The real thing is `entropy_data_t
+EntropyData = { .index_ptr = EntropyData.buffer }`, initialized, which is what makes
+`osfmk_prng_random.o`'s `.data` 488 bytes.
+
+**2. "The prediction is `stub_hit=PEHaltRestart`."** There is no stub anywhere on the panic path, so
+no stub could have been hit. `PEHaltRestart` sits behind `CPUDEBUGGERCOUNT > NESTEDDEBUGGERENTRYMAX`
+and the count is `db_entry_count` - zeroed `.bss`, so 1 after the increment. The other candidates are
+skipped for reasons measurable in the image (`PE_arm_debug_panic_hook`, `write_trace_on_panic`,
+`kdebug_enable` are all `B`, so NULL and 0; `panic` passes `ctx = NULL`). What remains is
+`TRAP_DEBUGGER` - an ARM `udf` - and then `panic_stop()`, which on ARM is `panic_spin_forever()`
+(`debug.c:136`; the `pmCPUHalt` form is x86-only), real, ending in `for (;;) { }`. The `udf` would
+have gone through the payload's VBAR-installed vectors into `stage90_undef_c_handler` and returned,
+so the run would have produced an `undef` breadcrumb from inside XNU and then hung, with no
+`stub_hit` line at all.
+
+That is why experiment 211 added the `/chosen` `random-seed` property in the same step that linked
+the object: aiming a device run at a branch whose stated purpose is to stop the machine is not a
+measurement. See experiment 211's doc for the full disassembly.

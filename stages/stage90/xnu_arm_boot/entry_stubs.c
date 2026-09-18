@@ -136,8 +136,22 @@ char osversion[256];
  * past 16 bytes - `early_random` - is a stub in this image. Sizing a stand-in from the symbol it
  * stands for is the general rule; see the storage sizing in build_entry.sh, which fails the build
  * rather than guess.
+ *
+ * Retired by experiment 211, the step that linked `osfmk_prng_random.o`. That is the fifth
+ * stand-in this project has retired under its own switch, after `arm_init` (198), the
+ * `pmap_bootstrap` probe (200), `_consume_kprintf_args` (201) and `panic` (201) - and the second
+ * whose replacement is an *initialized* value rather than zero, after the four regions of
+ * `data.s` (196). `entropy_data_t EntropyData = { .index_ptr = EntropyData.buffer }` is why that
+ * object's `.data` is 488 bytes rather than empty: this stand-in was the right size and the wrong
+ * value, which is a class of defect a size check cannot catch.
+ *
+ * The guard is not incidental. Without it the link reports `multiple definition of 'EntropyData'`
+ * - the same signal that ends every probe in this project, arriving here from a stand-in that had
+ * been left unguarded because nothing had ever linked its object.
  */
+#ifndef STAGE90_ENTRY_REAL_ENTROPY_DATA
 uint8_t EntropyData[68] __attribute__((aligned(8)));
+#endif /* !STAGE90_ENTRY_REAL_ENTROPY_DATA */
 
 /*
  * `_start` loads SP from intstack_top, so this must be real, writable, and in the window - but only

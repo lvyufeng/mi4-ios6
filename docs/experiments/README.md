@@ -224,6 +224,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-208](experiment-208-bcopy-phys-runs-and-the-frontier-is-clean-dcache.md) | `bcopy_phys` Runs, the Secondary-CPU Handshake Is Written Into the Low-Vectors Page, and the Frontier Is `CleanPoC_DcacheRegion` |
 | stage90 | [experiment-209](experiment-209-caches-asm-links-and-the-frontier-is-clean-dcache.md) | The Cache-Maintenance Surface Links, `cpu_machine_idle_init` Reaches Its Last Call, and the Frontier Is `clean_dcache` |
 | stage90 | [experiment-210](experiment-210-xnu-enters-pe-arm-init-interrupts-itself-and-the-frontier-is-early-random.md) | XNU Enters `pe_arm_init_interrupts` Itself, `cpu_machine_idle_init` Returns, and the Frontier Is `early_random` |
+| stage90 | [experiment-211](experiment-211-the-prng-links-the-handoff-tree-gets-boot-entropy-and-the-frontier-is-ccdrbg-factory-nisthmac.md) | The PRNG Links, the Handoff Tree Grows Boot Entropy, and the Frontier Is `ccdrbg_factory_nisthmac` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
