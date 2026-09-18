@@ -26,55 +26,76 @@ No errors detected
 to Android on its own.
 
 `io_map` is the prediction written down before the run, and the reason it is not `early_random` -
-the next *stub* in `arm_init`'s source order - is the whole content of this experiment. Six
-statements ran, and the sixth is the one this project has been building toward from the other side:
+the next *stub* in `arm_init`'s source order - is most of the content of this experiment. Three
+statements ran past the previous frontier:
 
 ```
-	PE_create_console()                  returns
-	PE_init_printf(FALSE)                -> vcattach (a tail call), which ran
-	cpu_machine_idle_init(TRUE)          ran
-	if (arm_diag & 0x8000) ...           not taken
-	PE_init_platform(TRUE, &BootCpuData) -> pe_arm_init_interrupts(args)  <-- PHASE 3'S FUNCTION
-	cpu_timebase_init(TRUE)              not reached
+	PE_create_console()          returns (its initialize_screen -> switch_to_serial_console branch)
+	PE_init_printf(FALSE)        -> vcattach, a tail call, which ran
+	cpu_machine_idle_init(TRUE)  -> cpu.c:562
+	                                ml_io_map(ml_vtophys((vm_offset_t)gPhysBase), PAGE_SIZE)
+	                                -> ml_io_map is a tail call to io_map. Stop.
 ```
 
-Inside `pe_arm_init_interrupts(NULL-checked, args)`, with `args` = `&BootCpuData` so non-NULL:
+**The symbol was predicted and the route was not.** The prediction written into experiment 205's doc
+says the stop would be `io_map` reached through `PE_init_platform(TRUE, &BootCpuData)` ->
+`pe_arm_init_interrupts` -> `pe_arm_map_interrupt_controller`. The stop is `io_map`, and it is six
+statements earlier in the same function, in `cpu_machine_idle_init`. The correction is the rest of
+this section, and it is worth the space because the wrong route was arrived at by reading source
+order for the *interesting* caller instead of reading the object for the *reachable* one.
+
+## Which caller, settled on the host
+
+The argument is four measurements, and the first two alone close it.
+
+1. **`io_map` has exactly one caller in this image.** `nm -u` over all 46 linked objects has one hit:
+   `osfmk_arm_machine_routines.o`, whose `ml_io_map` is `mov r2, #7` then `b io_map` - a tail call.
+   So the stop is one of `ml_io_map`'s three callers (also measured the same way):
+   `osfmk_arm_cpu.o`, `pexpert_arm_pe_identify_machine.o`, `pexpert_arm_pe_serial.o`.
+2. **A stub hit is terminal, and `cpu_machine_idle_init` precedes `PE_init_platform`.**
+   `entry_stub_hit` writes the name and calls `entry_epilogue`, which never returns. The linked
+   `arm_init` (`out/stage90/xnu_arm_entry.elf`) calls `PE_init_printf` (0x206268), then
+   `cpu_machine_idle_init` (0x2036f0), then `PE_init_platform` (0x203e38) - and
+   `cpu.c:562` is reached unconditionally inside that second call, because the two statements before
+   it are a `jtag`/`wfi` boot-arg parse and neither name is on this project's command line
+   (`boot_args.c:19`), so `wfi` defaults to 1 and both `if (wfi == …)` bodies are skipped. XNU
+   therefore hit the `io_map` stub on the way *into* `cpu_machine_idle_init` and never reached
+   `PE_init_platform`. Nothing after call 34 in that sequence ran.
+3. `pexpert_arm_pe_serial.o` cannot be it: experiment 204 measured `serial_init` returning 0 through
+   the `else` at `pe_serial.c:803`, before any `ml_io_map` - the three serial-node lookups all fail.
+4. `pexpert_arm_pe_identify_machine.o` cannot be it either: its `ml_io_map` is inside
+   `pe_arm_map_interrupt_controller`'s `if (DTFindEntry("interrupt-controller", "master", ...) ==
+   kSuccess)` block, and **this project's tree has no such node**. `DTFindEntry` matches a property's
+   *string value* (`device_tree.c:200`), the tree carries `interrupt-controller` as a `u32` of 1
+   (`stage90_main.c:765`), and `tools/host_dt_harness.c:236` asserts the absence on purpose - with
+   the reason written next to it: the interrupt controller is deliberately not findable until Phase 3
+   resolves the `reg` model, because finding it today would map `0xf2000000`. `tools/host_dt_check.sh`
+   prints it as `absent* DTFindEntry("interrupt-controller", "master")`. So
+   `pe_arm_map_interrupt_controller` returns 0 at its `gPicBase == 0` check and `pe_arm_init_interrupts`
+   returns 0 without calling `ml_io_map` at all. It was never reached anyway, by (2).
+
+## So what the frontier actually is
+
+`cpu_machine_idle_init` is `osfmk/arm/cpu.c:537`, and the statement it stops at is the one that maps
+the kernel's own first physical page and copies the low exception vectors into it:
 
 ```c
-	if (!pe_arm_map_interrupt_controller()) return 0;
-	return pe_arm_init_timer(args);
+	LowExceptionVectorsAddr = (void *)ml_io_map(ml_vtophys((vm_offset_t)gPhysBase), PAGE_SIZE);
+	bcopy((void *)&ExceptionLowVectorsBase, (void *)LowExceptionVectorsAddr, 0x90);
+	bcopy((...)+0xA0, (...)+0xA0, ARM_PGBYTES - 0xA0);
 ```
 
-and `pe_arm_map_interrupt_controller()` did, in order:
+`gPhysBase` is this project's entry-image base, `0x00200000` (the payload logs
+`xnu_entry_args_physBase`), and `virBase == physBase` by construction, so `ml_vtophys` is the
+identity here and the call is `ml_io_map(0x00200000, 4096)`. `kernel_map` is still the generated
+4-byte zero-filled stand-in, which is the *correct* value at this point in the boot - XNU creates
+`kernel_map` in `kmem_init`, long after `arm_init` - so `io_map` takes its "VM is not initialized"
+branch: carve `round_page(size)` off `virtual_space_start` (set by `pmap_bootstrap` in experiment
+197) and `pmap_map_bd` it.
 
-- `kprintf("pe_arm_init_interrupts: args: %p\n", args)` - a no-op through `_consume_kprintf_args`,
-  because this kernel is built with `CONFIG_NO_KPRINTF_STRINGS=1`;
-- `gSocPhys = pe_arm_get_soc_base_phys()` - **it found `arm-io` in this project's device tree and
-  read `ranges[1]` out of it**;
-- `DTFindEntry(<name>, <interrupt-controller>)` - **it found the interrupt-controller node in this
-  project's device tree**;
-- `DTGetProperty(entry, "reg", &reg_prop, &prop_size)` - it read the node's `reg`;
-- `ml_io_map(soc_base + reg[0], reg[1])` - and `ml_io_map` is a **tail call to `io_map`**, which is a
-  stub. Stop.
-
-## Why this is the two lines of the project meeting
-
-`pe_arm_init_interrupts` is not incidental to this project - it is the subject of **Phase 3**. The
-phase note says it "must *replace* that function, not configure it", that "its historical
-`map`/`dispatch` path has a caller and works" (experiment 134), and that `pe_arm_init_interrupts` is
-"now fully accounted for: map (replaced), dispatch (replaced), `tbd_ops` (run), FIQ (measured
-unavailable)" (experiment 147). All of that was measured by the *payload calling it*, because XNU
-was not running.
-
-XNU is now running enough to call it itself, and the thing that stops the boot is the stock mapping
-call - `ml_io_map(soc_phys + reg[0], reg[1])`, the line experiment 134 measured as
-`map_apple_pic_base=0xf2000000` where the hardware's interrupt controller is at `0xf9000000`,
-because it takes Apple's `soc_phys + reg[0]` from the device tree's `ranges` rather than the address
-this SoC actually uses.
-
-So the frontier is no longer "which object does XNU need next"; it is the same question as before
-with a much better answer available: **the next symbol is `io_map`, and this project already knows
-what the code calling it is for and why it cannot succeed.**
+The Phase 3 meeting point is still ahead, two calls later - `PE_init_platform(TRUE, &BootCpuData)`
+is call 37 and has not run yet. Linking `io_map` is what lets `cpu_machine_idle_init` finish and the
+run get there.
 
 ## The object that does not stop
 
@@ -118,25 +139,65 @@ tail. The one new obligation it needed is `cons_ops_index`: storage, 4 bytes,
 | headroom below `topOfKernelData` | 1625720 B | 1625656 B |
 | payload text | 862830 B | 862830 B |
 
-## What is next: `io_map`, and the question of *which* io_map semantics
+## What is next: `osfmk/arm/io_map.o`, and the first mapping this kernel creates for itself
 
-The frontier is `io_map`, and the object is `osfmk/arm/io_map.c`. Before it is linked there is a
-question worth settling on the host, because the answer decides what the next run means:
+The frontier is `io_map` and the object is `osfmk_arm_io_map.o`: **360 bytes of text, no data, no
+`.bss`, seven references, and it defines two symbols** - `io_map` and `io_map_spec` (both currently
+generated stubs). Five of the seven references are already real - `panic` (experiment 201),
+`pmap_map` / `pmap_map_bd` / `pmap_map_bd_with_options` (pmap.o, experiment 197),
+`virtual_space_start` (vm_resident.o, experiment 195) - and the other two, `kernel_map` and
+`kmem_alloc_pageable`, are *already undefined names in this image*, so linking the object introduces
+no new obligation at all. The measured cost is therefore 2 resolved / 0 added.
 
-- `ml_io_map` is `osfmk/arm/machine_routines.c`'s tail call to `io_map`, and `io_map` on this ARM
-  layer is the **kernel-map** version: it takes `kernel_map` and the pmap and creates a mapping. Its
-  object will therefore pull in `pmap`/`vm_map` obligations that this image already has - `pmap.o`,
-  `vm_resident.o`, `vm_map` pieces - and possibly new ones.
-- The address it is asked to map is the *stock* one, `soc_phys + reg[0]`. Experiment 134's
-  measurement says that is `0xf2000000`, not `0xf9000000`. Whether a successful mapping of the wrong
-  address is better or worse than a stop here is a decision to make with the next run's result
-  rather than in advance - but it is the first time in this sequence that the frontier's real
-  question is not "is this object present" but "is this call the right thing to do at all".
+What will run is the branch `kernel_map == VM_MAP_NULL` takes, and on this device that is the right
+branch - `kernel_map` is still the generated 4-byte zero stand-in, and XNU creates the real one in
+`kmem_init`, long after `arm_init`. So `io_map(0x00200000, 4096, VM_WIMG_IO)`:
 
-That is Phase 3's question, and it now has a device-side answer available: the payload's replacement
-for this step is `stage90_xnu_msm8974_shim.c` behind `STAGE90_XNU_MSM8974_SHIM`, which maps
-`0xf9000000` and `0xf9020000` and was measured working in experiment 134. What it has never had is a
-caller inside XNU. It has one now.
+```c
+	start = virtual_space_start;                 /* 0x40000000, see below */
+	virtual_space_start += round_page(size);
+	(void) pmap_map_bd(start, phys_addr, phys_addr + round_page(size), VM_PROT_READ|VM_PROT_WRITE);
+	return (start + start_offset);
+```
+
+Two details are worth having measured before the run rather than after it.
+
+- **`virtual_space_start` is `0x40000000`.** `pmap_bootstrap` sets it to
+  `(gVirtBase + MEM_SIZE_MAX + 0x3FFFFF) & 0xFFC00000` (`arm_vm_init.c:505`) with `gVirtBase` =
+  `0x00200000` and `MEM_SIZE_MAX` = `0x40000000` (`:134`), and `arm_vm_init.c:517` builds the page
+  tables for exactly that VA with the same expression - the 1280-page loop of experiment 197. So
+  `pmap_pte(kernel_pmap, 0x40000000)` finds a real PT entry and `pmap_map_bd` writes one PTE into it.
+- **Flags are 7, so the `pmap_map_bd` leg runs, not the `WCOMB` leg.** `ml_io_map` is `mov r2, #7`
+  and `io_map` tests `cmp r9, #6` for `VM_WIMG_WCOMB`. Seven is `VM_WIMG_IO`
+  (`VM_MEM_COHERENT | VM_MEM_NOT_CACHEABLE | VM_MEM_GUARDED`, `pmap.h:294`). The
+  `assert(flags == VM_WIMG_WCOMB || flags == VM_WIMG_IO)` is compiled out - this is RELEASE, where
+  `assert(ex)` is `((void)0)` (`assert.h:106`) - so the only `panic` calls left in the compiled
+  `io_map` are the `round_page` overflow checks.
+
+The write that follows lands on this image's own first page, and that is intended rather than
+accidental: `ml_vtophys(gPhysBase)` is `0x00200000` because `gVirtBase == gPhysBase` here, so XNU
+maps PA `0x00200000` and copies its low exception vectors into it. In a real ARM kernel that page
+*is* the low-vectors page. Here it is `_start` and the Mach-O header `entry_macho.s` writes, both
+already consumed (experiment 201 read the header; `_start` returned long ago), so the cost is
+nil - and it is the first time in this sequence that XNU creates a kernel VA mapping at runtime.
+
+**The prediction is `bcopy_phys`.** Reading the object's call order rather than the source's, the
+statements after `ml_io_map` are two `bcopy`s into the new mapping (real, `osfmk_arm_bcopy.o`), three
+`ml_static_vtop` calls (real), and then:
+
+```
+ 9e0:	bl	bcopy_phys          <-- a generated stub. Stop.
+```
+
+`bcopy_phys` is `osfmk/arm/loose_ends.c` (`osfmk_arm_loose_ends.o`), which is not linked. It is
+reached before `CleanPoC_DcacheRegion` (`caches_asm.s`), which is also still a stub, and before the
+`bcopy(running_signature, IOS_STATE, 8)` that would write into the new mapping at
+`LowExceptionVectorsAddr + 0x80`. So the run should stop one call short of finishing
+`cpu_machine_idle_init`, having done the mapping and the vector copy for real.
+
+If it stops somewhere else - a `panic` leg reporting `PEHaltRestart`, or a `pmap_pte` returning NULL -
+that is a finding about `virtual_space_start` or the PT pages, not about `io_map`, and the doc for
+the next experiment should say which.
 
 ## Reproduce
 
@@ -157,20 +218,25 @@ comm -13 <(sort /tmp/A.txt) <(sort /tmp/B.txt)   # 5 added    (unique to B)
 sed -n '/jumping to XNU/,$p' /tmp/cancro-last_kmsg.txt | head -20
 #   ... stub_hit=io_map
 
-# the six statements that ran, and the sixth
-sed -n '318,400p' external/xnu-4570.1.46/osfmk/arm/arm_init.c
-sed -n '/^PE_init_platform(/,/^}/p' external/xnu-4570.1.46/pexpert/arm/pe_init.c | sed -n '18,30p'
+# the statements that ran, and the one after them
+sed -n '369,382p' external/xnu-4570.1.46/osfmk/arm/arm_init.c
+sed -n '558,566p' external/xnu-4570.1.46/osfmk/arm/cpu.c
 
-# the function this run reached, which is Phase 3's subject
-sed -n '/^pe_arm_init_interrupts/,/^}/p' external/xnu-4570.1.46/pexpert/arm/pe_identify_machine.c
-sed -n '/^pe_arm_map_interrupt_controller/,/^}/p' external/xnu-4570.1.46/pexpert/arm/pe_identify_machine.c
-arm-none-eabi-nm -A --defined-only out/xnu_kernel_obj/*.o | grep -E " pe_arm_init_interrupts$"
+# which caller: the whole call graph between arm_init's stop and ml_io_map
+arm-none-eabi-nm -A --defined-only out/xnu_kernel_obj/*.o | grep -E " io_map$"
+for f in out/xnu_kernel_obj/*.o; do arm-none-eabi-nm -u "$f" | grep -qE "U io_map$" && echo "$f"; done
+for f in out/xnu_kernel_obj/*.o; do arm-none-eabi-nm -u "$f" | grep -qE "U ml_io_map$" && echo "$f"; done
+arm-none-eabi-objdump -dr out/xnu_kernel_obj/osfmk_arm_machine_routines.o | sed -n '/<ml_io_map>:/,+3p'
 
-# the tail call that makes io_map the frontier
-arm-none-eabi-objdump -dr out/xnu_kernel_obj/osfmk_arm_machine_routines.o | sed -n '/<ml_io_map>:/,+4p'
+# the terminal stop, and the order of the two call sites (34: cpu_machine_idle_init, 37: PE_init_platform)
+sed -n '/^void entry_stub_hit/,/^}/p' stages/stage90/xnu_arm_boot/entry_stubs.c | tail -5
+arm-none-eabi-objdump -d out/stage90/xnu_arm_entry.elf | sed -n '/<arm_init>:/,/^$/p' \
+  | grep -oE "bl\s+[0-9a-f]+ <(PE_init_printf|cpu_machine_idle_init|PE_init_platform)>"
 
-# and the mapping call Phase 3 exists to replace, measured in experiment 134
-grep -rn "map_apple_pic_base\|0xf9000000" stages/stage90/xnu_msm8974_shim.c | head -5
+# why pe_arm_map_interrupt_controller cannot be it: the tree has no interrupt-controller/master
+./tools/host_dt_check.sh | grep -A1 'interrupt-controller'
+grep -n "interrupt-controller" tools/host_dt_harness.c | sed -n '1,3p'
+sed -n '781,790p' stages/stage90/stage90_main.c
 ```
 
 Nothing was flashed: `persistent_write_attempted=0x00000000` in all 25 contracts that report it,

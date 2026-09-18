@@ -147,6 +147,21 @@ now reached the function the Phase 3 platform shim exists to replace, and what s
 *stock* mapping call - the one experiment 134 measured as unable to succeed on MS8974
 (`soc_phys + reg[0]` gives `0xf2000000` where the hardware is at `0xf9000000`).
 
+### Correction, added after the run (experiment 206)
+
+The paragraph above names the right symbol by the wrong route, and the run is what showed it. The
+stop was `io_map`, and it was reached six statements earlier in the same function - in
+`cpu_machine_idle_init(TRUE)` at `osfmk/arm/cpu.c:562`, which calls
+`ml_io_map(ml_vtophys((vm_offset_t)gPhysBase), PAGE_SIZE)` unconditionally, and which `arm_init`
+calls at `arm_init.c:371` *before* `PE_init_platform` at `:379`. `pe_arm_init_interrupts` was never
+reached, and `pe_arm_map_interrupt_controller` could not have reached `ml_io_map` in any case: this
+project's tree deliberately has no node matching `DTFindEntry("interrupt-controller", "master")`
+(`tools/host_dt_harness.c:236`, `stage90_main.c:781`), so it returns 0 at the `gPicBase` check.
+
+The mistake was reading the source for the caller that was interesting rather than the object for the
+caller that is reachable - `arm_init` has two paths to `ml_io_map` and this doc picked one. The
+correction is worked out in experiment 206's doc; `io_map` was still the right prediction.
+
 ## Reproduce
 
 ```bash

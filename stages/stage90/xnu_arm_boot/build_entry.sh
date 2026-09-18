@@ -531,12 +531,46 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #
     # The frontier therefore moves to `arm_init`'s tail, and the prediction is written in
     # experiment 206's log rather than here: the calls after PE_create_console are `PE_init_printf`
-    # (a tail call to `vcattach`, which video_console.o provides), `cpu_machine_idle_init`,
-    # `PE_init_platform(TRUE, &BootCpuData)`, `cpu_timebase_init`, `fiq_context_init`, `early_random`
-    # (still a stub) and `machine_startup` - and `PE_init_platform`'s TRUE branch calls
-    # `pe_arm_init_interrupts(args)`, which is Phase 3's own function and whose body ends in
-    # `ml_io_map(...) -> io_map`, which is a stub.
+    # (a tail call to `vcattach`, which video_console.o provides), `cpu_machine_idle_init` (whose
+    # `cpu.c:562` maps the low vectors and calls `ml_io_map`), `PE_init_platform(TRUE, &BootCpuData)`,
+    # `cpu_timebase_init`, `fiq_context_init`, `early_random` (still a stub) and `machine_startup`.
+    # Experiment 206's run stopped at `stub_hit=io_map` - inside `cpu_machine_idle_init`, NOT inside
+    # `PE_init_platform`'s `pe_arm_init_interrupts`, which `arm_init.c` calls two calls later and
+    # which that run never reached. `pe_arm_map_interrupt_controller` could not have got there in any
+    # case: the tree has no `interrupt-controller`/`master` node on purpose.
     OSFMK_CONSOLE_SERIAL_GENERAL_OBJ=${STAGE90_ENTRY_SERIAL_GENERAL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_console_serial_general.o}
+    # `osfmk/arm/io_map.c`, named by experiment-206's `stub_hit=io_map`. 360 bytes of text, no data
+    # and no `.bss`, seven references, two definitions (`io_map` and `io_map_spec`). Five of the
+    # seven are already real here - `panic` (exp-201), `pmap_map` / `pmap_map_bd` /
+    # `pmap_map_bd_with_options` (pmap.o, exp-197), `virtual_space_start` (vm_resident.o, exp-195) -
+    # and the other two, `kernel_map` and `kmem_alloc_pageable`, are already undefined names in this
+    # image, so the step introduces no new obligation: 2 resolved, 0 added.
+    #
+    # This is the first time this kernel creates a mapping for itself. `ml_io_map` is called from
+    # `cpu.c:562` with `ml_vtophys(gPhysBase)` and `PAGE_SIZE`, and `gVirtBase == gPhysBase ==
+    # 0x00200000` here, so the call is `io_map(0x00200000, 4096, VM_WIMG_IO)`. `kernel_map` is still
+    # the generated 4-byte zero stand-in - which is the *right* value: XNU creates the real one in
+    # `kmem_init`, long after `arm_init` - so `io_map` takes its "VM is not initialized" branch and
+    # carves the page off `virtual_space_start`.
+    #
+    # `virtual_space_start` is `0x40000000`: `pmap_bootstrap` sets it to
+    # `(gVirtBase + MEM_SIZE_MAX + 0x3FFFFF) & 0xFFC00000` (`arm_vm_init.c:505`, with
+    # `MEM_SIZE_MAX` = `0x40000000` at `:134`), and `arm_vm_init.c:517` builds the page tables for
+    # that same VA with the same expression - the 1280-page loop of experiment 197. So
+    # `pmap_pte(kernel_pmap, 0x40000000)` finds a real PT entry and `pmap_map_bd` writes one PTE
+    # into it. `flags` is 7, which is `VM_WIMG_IO`, not the 6 (`VM_WIMG_WCOMB`) that selects the
+    # `pmap_map_bd_with_options` leg; the `assert` that would have checked that is `((void)0)` in
+    # this RELEASE kernel (`assert.h:106`), so the only `panic`s left in the compiled `io_map` are
+    # `round_page`'s overflow checks.
+    #
+    # The write that follows lands on this image's own first physical page, and that is XNU's design
+    # rather than an accident: PA `0x00200000` is `gPhysBase`, in a real kernel that page *is* the
+    # low-vectors page, and here it holds `_start` and the Mach-O header `entry_macho.s` writes -
+    # both already consumed. So the prediction, read off the object's call order rather than the
+    # source's, is `bcopy_phys` (`osfmk/arm/loose_ends.c`, not linked): two real `bcopy`s into the
+    # new mapping and three real `ml_static_vtop` calls come first, and `CleanPoC_DcacheRegion` and
+    # the `bcopy(running_signature, IOS_STATE, 8)` come after it.
+    OSFMK_ARM_IO_MAP_OBJ=${STAGE90_ENTRY_IO_MAP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_io_map.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -583,10 +617,11 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$PEXPERT_PE_SERIAL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_CONSOLE_VIDEO_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_ARM_IO_MAP_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ")
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
