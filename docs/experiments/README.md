@@ -273,6 +273,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-257](experiment-257-the-firehose-is-ported-and-it-runs.md) | **The firehose is ported and it runs** — Apple's implementation compiled for armv7 and linked in, `__firehose_buffer_create` real; stop `__firehose_allocate` inside it |
 | stage90 | [experiment-258](experiment-258-the-firehose-kernel-side-is-in-the-tree.md) | **The firehose's kernel side is in the tree** — the four functions are one already-built object (`libkern/os/log.o`), the two data names come from the port (`16`/`8`); `oslog_init` returns and the stop is `telemetry_init` in `kernel_bootstrap` |
 | stage90 | [experiment-259](experiment-259-telemetry-init-completes-and-the-stop-is-console-init.md) | **`telemetry_init` completes** — one more already-built object (`osfmk/kern/telemetry.o`, +17 boundaries) and a real 16 KB `kmem_alloc`; stop `console_init` at `kernel_bootstrap+0x1e4`; the image moves again |
+| stage90 | [experiment-260](experiment-260-console-init-completes-with-no-new-boundaries.md) | **`console_init` completes, and the link adds nothing** — `osfmk/console/serial_console.o`, 27 references *all* already satisfied, 9 stand-ins become real; a real 16 KB console ring; stop `stackshot_init`; layout unchanged for the first time since 257 |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

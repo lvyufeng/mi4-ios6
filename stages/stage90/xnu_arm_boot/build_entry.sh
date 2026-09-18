@@ -2544,6 +2544,39 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # bytes shorter than 258's 0x3b because `telemetry_init` is two characters shorter than
     # `console_init` and the stub name is recorded verbatim.
     OSFMK_KERN_TELEMETRY_OBJ=${STAGE90_ENTRY_OSFMK_KERN_TELEMETRY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_telemetry.o}
+    # 260: `console_init`, the first target in `kernel_bootstrap`'s line that is not an allocator or
+    # a lock group. It is `osfmk/console/serial_console.c:166` - note the directory: this is
+    # `osfmk/console/`, which the manifest has listed all along
+    # (`out/xnu_arm_manifest.txt:477-480`: `serial_console.c`, `serial_general.c`, `video_console.c`,
+    # `video_scroll.c`) - and the object is `out/xnu_kernel_obj/osfmk_console_serial_console.o`.
+    #
+    # **The cheapest step in a long time, and the measurement that makes it so: 2646 bytes of text,
+    # 36 of data, 52 of bss, 27 references - and *every one* of the 27 is already satisfied by this
+    # image, so the link adds nothing at all.** Nine of the object's definitions exist here as stubs
+    # (`console_init`, `console_write`, `console_cpu_alloc`, `cngetc`, `cnputc`, `cnputc_unbuffered`,
+    # `_serial_getc`, `cons_ops_index`, `nconsops`) and become real. Added: zero.
+    #
+    # **The prediction.** `console_init` calls only `OSCompareAndSwap` (real - `ldrex` at
+    # `0x80057ec4`), `kmem_alloc` (real), `panic` (real) and `arm_usimple_lock_init` (real, the ARM
+    # layer), plus `console_ring_lock_init`/`hw_lock_init` which are inline; so it completes, and what
+    # it does is the third real kernel allocation of this frontier -
+    # `kmem_alloc(kernel_map, &console_ring.buffer, KERN_CONSOLE_BUF_SIZE, VM_KERN_MEMORY_OSFMK)`,
+    # guarded by `OSCompareAndSwap(0, KERN_CONSOLE_RING_SIZE, &console_ring.len)` so that the first
+    # caller wins and later ones return early. It returns to `kernel_bootstrap+0x1e8`, where the
+    # straight line is `kernel_debug_string_early` (real) and then
+    # `0x8000dc34: bl stackshot_init` - a stub. So:
+    # **`stub_hit=stackshot_init`, `xnu_entry_stub_caller=0x8000dc38`** (`caller - 4` = `0x8000dc34` =
+    # `kernel_bootstrap+0x1f4`). Device: **`stub_hit=stackshot_init`,
+    # `xnu_entry_stub_caller=0x8000dc38`** = `kernel_bootstrap+0x1f8` - the prediction, a third time.
+    # `console_init` completed, and the 16 KB console ring is real memory.
+    #
+    # Measured: resolved **9**, added **0** - the first step in a long time with no new boundaries at
+    # all. 605 -> 596 undefined, 527 -> 520 function stubs, 78 -> 76 storage; text 708644 -> 711044
+    # (+2400), image 818656 -> 818696 (+40), and `.bss` end, the derived `args` offset (+1015808),
+    # `topOfKernelData` and the headroom are all **unchanged** for the first time since 257.
+    # `kv_written == kv_in_dram == 0x3b`, two bytes above 259's 0x39 - `stackshot_init` is two
+    # characters longer than `console_init`, recorded verbatim as always.
+    OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ=${STAGE90_ENTRY_OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_console_serial_console.o}
     OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
@@ -2635,6 +2668,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$LIBKERN_OS_LOG_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$FIREHOSE_CONFIG_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_TELEMETRY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2644,7 +2678,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
