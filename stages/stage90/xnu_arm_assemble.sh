@@ -53,6 +53,22 @@ done
 OUT_DIR=$REPO_ROOT/out/stage90
 mkdir -p "$OUT_DIR"
 
+# The generated `OPTIONS/` headers for one configuration. `start.s` includes `<mach_kdp.h>`, which
+# is one of the 91 headers `tools/gen_option_headers.py` generates - nothing in XNU's tree provides
+# it, and neither did this script's include list, so the entry image could not be reassembled from
+# the committed tree. (It was built once with copies of ten of them dropped in by hand, which is why
+# the gap survived: the artifact existed, so nothing failed.)
+#
+# RELEASE by default because that is the configuration the kernel objects this image links against
+# are built with; `XNU_KERNEL_CONFIG` overrides it, the same variable the kernel build reads.
+CONFIG=${XNU_KERNEL_CONFIG:-RELEASE}
+OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
+if [[ ! -f $OPTION_HEADERS/mach_kdp.h ]]; then
+  echo "no $OPTION_HEADERS/mach_kdp.h - run ./tools/gen_option_headers.py first" >&2
+  echo "(XNU_KERNEL_CONFIG=$CONFIG; start.s includes <mach_kdp.h> unconditionally)" >&2
+  exit 2
+fi
+
 CC_CMD=(clang --target=armv7-none-eabi)
 if ! command -v clang >/dev/null 2>&1; then
   echo "clang not found - it is required, see the header comment" >&2
@@ -90,6 +106,9 @@ DEFINES=(
 INCLUDES=(
   # assym.s first: start.s and locore.s both do #include "assym.s".
   -I$STAGE_DIR/xnu_arm_boot
+  # The generated OPTIONS headers. `<mach_kdp.h>` is one of them and start.s includes it
+  # unconditionally, so without this the entry image does not assemble at all.
+  -I$OPTION_HEADERS
   -I$XNU/osfmk
   -I$XNU/bsd
   -I$XNU/libkern

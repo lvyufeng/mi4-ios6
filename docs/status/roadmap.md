@@ -33,6 +33,7 @@ recovered through `/proc/last_kmsg`, under the safety rules in the root `README.
 | Conforming `boot_args` checked on the device | ✅ | `experiment-99` (`xnu_ba_checks=10`, `failures=0`) |
 | Public-XNU code executing on the device | ✅ | **all five** pexpert objects by `experiment-105` |
 | **XNU's real `_start` executing, with its own page tables and MMU** | ✅ | `experiment-106` — the entry sequence ran to completion and branched to `arm_init` |
+| **XNU's real `arm_init` executing on the device** | ✅ | `experiment-159` — `osfmk/arm/arm_init.c` compiled, linked, run; it stopped at `cpu_data_init`, which the image does not contain |
 | A public-XNU subsystem doing work, not just observing | ✅ | `experiment-102`: the consistent-debug registry inherits, enables, allocates and writes a record |
 | XNU console output landing in the device's crash log | ✅ | `experiment-105`: 62 bytes through `PE_putc`, read back from `/proc/last_kmsg` |
 | XNU acting on this payload's boot arguments | ✅ | `experiment-105`: `pe_init_debug` parses `debug=0x144`, `PE_enter_debugger` acts on it |
@@ -57,10 +58,15 @@ SCTLR with TEX remap and high vectors, enables the MMU, flushes the TLB, enables
 to `arm_init`. The log's last line is written by the entry image with the MMU off, because
 `ram_console` is outside the 2 MB window XNU maps.
 
-**What that does not mean:** `arm_init` is a Stage-owned stub, so everything after it in a real
-kernel — `arm_vm_init`, `machine_startup`, the scheduler — does not exist here. **XNU's entry point
-runs; XNU does not run.** The next thing needed is the symbol *after* `arm_init`, which is a much
-larger body of code than the entry path was.
+**What that does not mean:** when this paragraph was written, `arm_init` was a Stage-owned stub, so
+everything after it in a real kernel — `arm_vm_init`, `machine_startup`, the scheduler — did not
+exist here. **XNU's entry point runs; XNU does not run.** That has moved once since:
+[`experiment-159`](../experiments/experiment-159-the-real-arm-init-ran.md) replaced the stub with
+XNU's own `arm_init.o`, and the real function now executes on the device until it calls
+`cpu_data_init` — the first thing the image does not contain. **XNU's first real function runs; XNU
+still does not run**, because the image is deliberately the size of one function's needs. How big it
+has to be is the open question, and `experiment-158` is the answer to the neighbouring one: the
+closure of `arm_init` is the whole kernel, so the image has to grow by the kernel or not at all.
 
 **And before that, the whole of this section was true — for the record:** The object
 manifests said so themselves, from Stage76 through Stage90 — e.g.
@@ -1894,6 +1900,74 @@ null pointer constant in C++, so every `return NULL;` in a `.cpp` was an error; 
 `#ifdef __cplusplus` now. The *cause* of the C++ failures came from the private flag list; that defect
 came from a `.cpp` the flag list could not stop from being compiled. A measurement can be an artifact
 and still have something real inside it.
+
+**XNU'S REAL `arm_init` RAN ON THE DEVICE** (2026-09-18,
+[`experiment-159`](../experiments/experiment-159-the-real-arm-init-ran.md)). The entry image no
+longer stubs `arm_init`: it links XNU's own `osfmk_arm_arm_init.o`, plus XNU's own `data.o`
+(`osfmk/arm/data.s` — the real `intstack`, `fiqstack`, `CpuDataEntries`, `BootCpuData`, `RTClockData`,
+48 KB of it) and `bcopy.o`/`bzero.o`, and generates a self-naming stub for everything they still need.
+On the device the jump went through, and the image's own line says what happened:
+
+```
+Stage84 Mach-O/XNU loader preflight ok
+stage90 xnu_entry: jumping to XNU's _start
+real XNU entry: real arm_init reached a symbol this image does not provide
+real XNU entry stub_hit=cpu_data_init
+```
+
+So the real function ran its prologue — including the 320-byte `const_boot_args = *args` copy, which
+clang lowers to `bl __aeabi_memcpy4` and which now resolves to XNU's own `memcpy` in `bcopy.s` (the
+`stub_hit` line is `cpu_data_init`, not `__aeabi_memcpy4`, which is what says the copy completed) —
+and then called `cpu_data_init()` in `osfmk/arm/cpu.c`, which this image does not carry. **The next
+thing to link is `cpu.c`'s object; the thing to decide is how large the image can be.**
+
+Four defects came out of making it run, all of them the same shape — a stand-in that was not what it
+stood for. Storage stubs were a flat 64 bytes (real sizes: `EntropyData` 68, `UNDReply_subsystem` 68,
+and `BootCpuData` classified as a *function* because the map that decides that only looked in
+`out/xnu_kernel_obj/`, not `out/xnu_asm_obj/`); `gPhysBase`/`gVirtBase`/`gPhysSize` were `const
+uint32_t` while `arm_vm_init.c:80` declares `unsigned long` and *assigns* them at `:351-353`; and
+`intstack_top` was a *variable* holding a stack address when `start.s:310`'s `LOAD_ADDR` and
+`arm_init.c:226`'s `& intstack_top` both mean the symbol's own address *is* the stack top — so the
+old image's `sp` was the address of a 4-byte variable and the stack descended into image data. The
+generator now sizes every storage stub from the object that defines it and fails the build when the
+size is not knowable.
+
+And one defect that was not in the image at all: the payload's dry-run pmap mapped a **hardcoded 1 MB**
+high-VA window while the probe it checks lives in the payload's own `.bss`. The entry image growing by
+0x14000 moved that probe from 0x000EC0B4 to 0x001000B4 — past the window's end — and the preflight
+failed with `HIGH_VA_DATA` on the *first* device run of this stage, before the jump. The window is now
+derived from `__stage90_image_end`, which is the value `boot_args.c` already uses for
+`topOfKernelData`. The payload will keep growing; the check had to stop assuming it would not.
+
+**THE CLOSURE OF `arm_init` IS THE WHOLE KERNEL, AND THE MANIFEST OMITS 126 `optional` SOURCES**
+(2026-09-18, [`experiment-158`](../experiments/experiment-158-the-closure-is-the-whole-kernel.md)).
+`tools/entry_closure.py` was written to answer "what does the compile graph have to grow by next":
+link, read the undefined set, add whatever object defines those symbols, repeat. It does not
+converge. The chain is real — `arm_init` → `cpu_init` → scheduler/thread/task → IPC →
+`bsd/kern/kern_proc.c` → vnode → devfs → tty line disciplines — and at 400 objects it was still 405
+symbols short. **A static kernel is one connected component through its data, so no entry point has a
+smaller closure than the kernel.** The staging question changes with it: a kernel is linked whole, and
+what matters is the *count* of symbols a whole-kernel link leaves.
+
+That count is **189**, for all 703 objects this project builds, every one of them referenced by an
+object in the pool. They split three ways:
+
+- **118 (62%)** name a symbol that appears in one of the **ten sources that do not compile**, and 58
+  of those are `osfmk/vm/vm_object.c` alone (referenced by `vm_map.o`, `vm_pageout.o`,
+  `memory_object.o`, `bsd_vm.o` — the biggest names in the kernel).
+- **14** are compiler runtime and ABI: `__aeabi_*` (9), `__cxa_atexit`, `__cxa_pure_virtual`,
+  `__dso_handle`, `__nosan_bzero`, `__nosan_strncpy`. Not XNU's to define; Apple links `libcc_kext`.
+- The rest are sources **the manifest does not contain**, and that is the finding that matters more
+  than the ten files. `bsd/net/bpf.c` and `bsd/net/ether_if_module.c` are in Apple's `bsd/conf/files`
+  as `optional bpfilter` / `optional ether` and are absent from `out/xnu_arm_manifest.txt`
+  (`grep -c` = 0 for both). Counting every `optional`-tagged `.c`/`.cpp` in the five `conf/files`
+  this project reads: **301 are in the manifest and 126 are not** — all 18 `libkern/kxld/*` (the
+  kext-linking machinery behind `OSKext.cpp`'s compile failure), ten `bsd/net/*.c` including
+  `if_loop.c` and `if_vlan.c`, all of `bsd/security/audit/*`, all of `bsd/dev/dtrace/*`, all of
+  `bsd/nfs/*`, `osfmk/kdp/kdp.c` (why `kdp_init` is undefined), `osfmk/kern/xpr.c`. So a
+  configuration question — which options this kernel is — is silently deciding which files exist, and
+  the refcounts of the 189 (`bpf_*` referenced by `iptap.o`/`pktap.o`, `ether_*` by `if_fake.o`,
+  `lo_ifp` by whoever wants a loopback) are all downstream of it.
 
 **AND ONE FORCE-INCLUDE WAS REWRITING DECLARATIONS** (2026-09-18,
 [`experiment-157`](../experiments/experiment-157-the-force-include-was-rewriting-declarations.md)).

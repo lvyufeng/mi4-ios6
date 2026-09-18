@@ -171,6 +171,8 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-155](experiment-155-the-translator-wrote-into-the-tree.md) | The Assembler Translator Was Writing Into Apple's Tree, Through a Symlink |
 | stage90 | [experiment-156](experiment-156-the-mig-run-was-missing-kernel.md) | The MIG Run Was Missing `-DKERNEL` — 13 Symbols, and Every Routine Name |
 | stage90 | [experiment-157](experiment-157-the-force-include-was-rewriting-declarations.md) | `-include kern/queue.h` Was Rewriting Declarations Before the Compiler Saw Them |
+| stage90 | [experiment-158](experiment-158-the-closure-is-the-whole-kernel.md) | `arm_init`'s Closure Is the Whole Kernel; the Manifest Omits 126 `optional` Sources |
+| stage90 | [experiment-159](experiment-159-the-real-arm-init-ran.md) | The Real `arm_init` Ran on the Device, and Named `cpu_data_init` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

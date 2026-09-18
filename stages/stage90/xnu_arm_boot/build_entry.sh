@@ -39,6 +39,21 @@ ENTRY_BASE=0x00200000
 # so this is the only window XNU's own tables map.
 ENTRY_SIZE=0x00200000
 
+# `topOfKernelData` is where `_start` puts its own page tables, and the payload sets it to
+# ENTRY_BASE + 0x20000 (`xnu_entry_jump.c`, which also refuses to jump if the image's bss would
+# reach past it). Everything this image owns therefore has to end below 0x00220000, and that is a
+# tighter limit than ENTRY_SIZE - checked below, because the failure mode is XNU's page tables
+# landing on our data rather than a build error.
+ENTRY_DATA_LIMIT=0x00020000
+
+# `STAGE90_ENTRY_REAL_ARM_INIT=1` links XNU's own compiled objects - `arm_init.o`, `data.o`,
+# `bcopy.o`, `bzero.o` - in place of the stand-ins that name themselves and return, and generates a
+# reporting stub for everything still missing. Default off, so the proven image stays the default
+# and the two are one variable apart.
+REAL_ARM_INIT=${STAGE90_ENTRY_REAL_ARM_INIT:-0}
+STUB_DEFINES=()
+[[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES=(-DSTAGE90_ENTRY_REAL_ARM_INIT=1)
+
 say() { printf '%s\n' "$*"; }
 run() { [[ $VERBOSE -eq 1 ]] && printf '  %s\n' "$*"; "$@"; }
 
@@ -49,7 +64,7 @@ say "  osfmk/arm/start.s: $(grep -c . "$OUT/xnu_arm_assemble.log") lines of repo
 
 say "== compiling the symbols start.s needs =="
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
-    -O2 -Wall -Wextra -Werror -std=gnu11 \
+    -O2 -Wall -Wextra -Werror -std=gnu11 $STUB_DEFINES \
     -c "$BOOT_DIR/entry_stubs.c" -o "$OUT/xnu_arm_entry_stubs.o"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
@@ -61,12 +76,133 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
 say "== compiling the in-kernel probe (XNU's own DT and boot-arg code) =="
 XNU=$REPO_ROOT/external/xnu-4570.1.46
 
+LINK_OBJS=(
+    "$OUT/xnu_arm_start.o"
+    "$OUT/xnu_arm_entry_vectors.o"
+    "$OUT/xnu_arm_entry_stubs.o"
+)
+
+if [[ $REAL_ARM_INIT -eq 1 ]]; then
+    # --- XNU's own objects, and a generated stub for everything they still need -------------------
+    #
+    # Each object below is the *compiled* XNU object, taken from the same builds that produced the
+    # measurement image - so this is XNU's own code and data, at the same optimization, with the
+    # same flags, not a recompilation. They link into this image because the objects are
+    # relocatable and the addresses are fixed by this link, which is what makes the 0x00200000 base
+    # a parameter rather than a recompile.
+    #
+    # Every path is checked, because each one is produced by a different tool and a missing file
+    # would otherwise be a link error naming a symbol rather than a build that says which step to
+    # run. The choice of *which* objects is deliberate and small: `data.o` is the per-CPU data and
+    # the boot stacks, and `bcopy.o`/`bzero.o` are the memory routines the compiler's EABI calls
+    # are aliased to (see entry_arm_rtabi.s). Nothing is added "because it looks relevant" - the
+    # closure of `arm_init` is the whole kernel (see tools/entry_closure.py, experiment-158), so a
+    # rule like that would not stop anywhere.
+    require() {
+        [[ -f $1 ]] || { say "no $1 - $2" >&2; exit 2; }
+    }
+    ARM_INIT_OBJ=${STAGE90_ENTRY_ARM_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_arm_init.o}
+    ARM_DATA_OBJ=${STAGE90_ENTRY_DATA_OBJ:-$REPO_ROOT/out/xnu_asm_obj/data.o}
+    ARM_BCOPY_OBJ=${STAGE90_ENTRY_BCOPY_OBJ:-$REPO_ROOT/out/xnu_asm_obj/bcopy.o}
+    ARM_BZERO_OBJ=${STAGE90_ENTRY_BZERO_OBJ:-$REPO_ROOT/out/xnu_asm_obj/bzero.o}
+    require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
+    require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
+    require "$ARM_BZERO_OBJ" "run ./tools/assemble_arm_layer.sh first"
+    LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ")
+
+    # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
+    # since it is plain ARM with no XNU macros in it.
+    run arm-none-eabi-gcc -mcpu=cortex-a15 -marm \
+        -c "$BOOT_DIR/entry_arm_rtabi.s" -o "$OUT/xnu_arm_entry_rtabi.o"
+    LINK_OBJS+=("$OUT/xnu_arm_entry_rtabi.o")
+
+    say "== pass 1: which symbols do XNU's own objects need? =="
+    arm-none-eabi-ld -T "$BOOT_DIR/entry.ld" -nostdlib --no-demangle \
+        -o "$OUT/xnu_arm_entry_pass1.elf" "${LINK_OBJS[@]}" 2> "$OUT/xnu_arm_entry_pass1.err" || true
+    grep -o "undefined reference to \`[^']*'" "$OUT/xnu_arm_entry_pass1.err" |
+        sed "s/.*\`//; s/'//" | sort -u > "$OUT/xnu_arm_entry_undef.txt"
+    undef=$(wc -l < "$OUT/xnu_arm_entry_undef.txt")
+    if (( undef == 0 )); then
+        say "  XNU's own objects link with nothing missing - no stubs needed"
+    else
+        say "  $undef symbol(s) undefined - see $OUT/xnu_arm_entry_undef.txt"
+    fi
+
+    # Data or function, and how much data, decided by the kernel objects rather than by a
+    # hand-written list: `nm -S` over the pool gives each symbol's type and its real size.
+    #
+    # The size is the part that is worth this much trouble. A stand-in for a symbol has to be at
+    # least as big as the thing it stands for, and the first version of this generator gave every
+    # storage symbol 64 bytes - while `EntropyData` is 68 (`entropy_data_t`, random.h:47) and
+    # `BootCpuData` is a whole per-CPU data area (data.s). Neither is a size this image may guess:
+    # an undersized stand-in is silently overwritten by the first real code that uses it, and what
+    # it overwrites is whatever the linker put next. So: size from the object that defines the
+    # symbol, and if that size is not knowable, fail the build and make it a decision.
+    arm-none-eabi-nm -A -S -P --defined-only \
+        "$REPO_ROOT"/out/xnu_kernel_obj/*.o "$REPO_ROOT"/out/xnu_asm_obj/*.o 2>/dev/null |
+        sed 's/^[^:]*: //' | awk 'NF>=2 {print $1, $2, ($4 == "" ? "-" : $4)}' |
+        sort -u > "$OUT/xnu_arm_entry_kernsyms.txt"
+
+    {
+        echo '/*'
+        echo ' * Generated by xnu_arm_boot/build_entry.sh from pass 1'"'"'s undefined set.'
+        echo ' *'
+        echo ' * One stub per symbol XNU'"'"'s own objects need and this image does not provide.'
+        echo ' * Reaching any of them stops the run and writes its name, which is the measurement.'
+        echo ' * Storage is sized from the defining object (`nm -S`), never guessed.'
+        echo " * $undef symbol(s), from: ${LINK_OBJS[*]##*/}"
+        echo ' */'
+        echo '#include <stdint.h>'
+        echo
+        echo 'void entry_stub_hit(const char *name);'
+        echo
+        : > "$OUT/xnu_arm_entry_stubnames.txt"
+        n_data=0
+        n_func=0
+        while IFS= read -r sym; do
+            [[ -n $sym ]] || continue
+            t=$(awk -v n="$sym" '$1==n {print $2}' "$OUT/xnu_arm_entry_kernsyms.txt" | head -1)
+            sz=$(awk -v n="$sym" '$1==n {print $3}' "$OUT/xnu_arm_entry_kernsyms.txt" | head -1)
+            case "$t" in
+                D|B|R|S|G|C)
+                    if [[ -z $sz || $sz == - || $sz == 0 ]]; then
+                        say "FAIL: '$sym' is storage (nm says '$t') and its size is not in the" >&2
+                        say "      objects this project builds. A stand-in of the wrong size is" >&2
+                        say "      overwritten by the first real user of it, so this has to be a" >&2
+                        say "      decision: add a hand-written definition with the size taken from" >&2
+                        say "      its source, or link the object that defines it. See entry_stubs.c" >&2
+                        say "      for how EntropyData and the stacks are handled." >&2
+                        exit 1
+                    fi
+                    echo "/* storage: nm says '$t', size 0x$sz from the object that defines it */"
+                    echo "uint8_t $sym[0x$sz] __attribute__((aligned(64)));"
+                    echo
+                    printf 'data %s %s 0x%s\n' "$sym" "$t" "$sz" >> "$OUT/xnu_arm_entry_stubnames.txt"
+                    n_data=$((n_data + 1))
+                    ;;
+                *)
+                    echo "void $sym(void) { entry_stub_hit(\"$sym\"); }"
+                    printf 'func %s %s\n' "$sym" "${t:--}" >> "$OUT/xnu_arm_entry_stubnames.txt"
+                    n_func=$((n_func + 1))
+                    ;;
+            esac
+        done < "$OUT/xnu_arm_entry_undef.txt"
+    } > "$OUT/xnu_arm_entry_realstubs.c"
+
+    say "  stubs: $n_func function(s), $n_data storage"
+    run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
+        -O2 -Wall -Wextra -Werror -std=gnu11 \
+        -c "$OUT/xnu_arm_entry_realstubs.c" -o "$OUT/xnu_arm_entry_realstubs.o"
+    LINK_OBJS+=("$OUT/xnu_arm_entry_realstubs.o")
+fi
+
 say "== linking at $ENTRY_BASE =="
 # start.o first, so `_start` is the first thing in .text and the image base is the entry point -
 # not required (the payload jumps to an explicit address) but it makes the map readable.
 run arm-none-eabi-ld -T "$BOOT_DIR/entry.ld" -nostdlib -Map "$OUT/xnu_arm_entry.map" \
     -o "$OUT/xnu_arm_entry.elf" \
-    "$OUT/xnu_arm_start.o" "$OUT/xnu_arm_entry_vectors.o" "$OUT/xnu_arm_entry_stubs.o"
+    "${LINK_OBJS[@]}"
 
 entry=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="_start"{print "0x"$1}')
 bss_start=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="__bss_start"{print "0x"$1}')
@@ -79,6 +215,16 @@ bin_size=$(stat -c%s "$OUT/xnu_arm_entry.bin")
 bss_bytes=$((bss_end - bss_start))
 if (( bin_size + bss_bytes > ENTRY_SIZE )); then
     say "FAIL: image ($bin_size) + bss ($bss_bytes) does not fit in $ENTRY_SIZE" >&2
+    exit 1
+fi
+# The tighter limit, and the one that matters: `_start` places its page tables at topOfKernelData,
+# which the payload sets to ENTRY_BASE + ENTRY_DATA_LIMIT. An image that reaches past it is
+# overwritten by XNU's own tables a few instructions into the boot, which looks like corruption
+# with no cause in the log.
+if (( bss_end - ENTRY_BASE > ENTRY_DATA_LIMIT )); then
+    say "FAIL: the image ends at $((bss_end - ENTRY_BASE)) bytes from the base, past the" >&2
+    say "      $ENTRY_DATA_LIMIT bytes where _start puts its page tables" >&2
+    say "      (topOfKernelData, set in xnu_entry_jump.c). Shrink the image or raise it there." >&2
     exit 1
 fi
 

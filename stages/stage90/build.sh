@@ -67,6 +67,27 @@ fi
   --symbol-prefix stage90 \
   --metadata-file $REPO_ROOT/out/stage90/xnu-link-macho-metadata.txt
 
+# The entry image is linked by xnu_arm_boot/build_entry.sh into out/stage90/, and the payload
+# compiles a *copy* of it from this directory. Two copies of one image is exactly the shape of
+# mistake this project keeps finding, and the silent version of it is the expensive one: the
+# payload would embed an older entry image than out/ describes, the run would report the old
+# image's behaviour, and nothing in the log would say so. out/ is the producer, so if it holds an
+# image that differs from the committed one, stop and say which command fixes it.
+#
+# Absent out/ (a fresh clone, or a tree where nothing has been built yet) is not a mismatch: the
+# committed copy is then the only one there is, and the payload builds against it as before.
+ENTRY_BLOB_SRC=$STAGE_DIR/xnu_arm_entry_blob.c
+ENTRY_BLOB_OUT=$REPO_ROOT/out/stage90/xnu_arm_entry_blob.c
+if [[ -f $ENTRY_BLOB_OUT ]] && ! cmp -s "$ENTRY_BLOB_SRC" "$ENTRY_BLOB_OUT"; then
+  echo "FAIL: $ENTRY_BLOB_SRC and $ENTRY_BLOB_OUT are different entry images." >&2
+  echo "      The payload embeds the first; the build just produced the second." >&2
+  echo "      Install the image that was just built:" >&2
+  echo "        cp $ENTRY_BLOB_OUT $ENTRY_BLOB_SRC" >&2
+  echo "      ...or rebuild the entry image, which is:" >&2
+  echo "        (cd stages/stage90/xnu_arm_boot && STAGE90_ENTRY_REAL_ARM_INIT=1 ./build_entry.sh)" >&2
+  exit 1
+fi
+
 CC=${CC:-arm-none-eabi-gcc}
 OBJCOPY=${OBJCOPY:-arm-none-eabi-objcopy}
 OBJDUMP=${OBJDUMP:-arm-none-eabi-objdump}

@@ -327,19 +327,46 @@ int stage90_xnu_arm_vm_init_full_pmap_run(
     map_l1_section_dram(stage90_candidate_l1, 0x00000000u, 0x00000000u);  /* Stage84 image */
     map_l1_section_dram(stage90_candidate_l1, 0x00100000u, 0x00100000u);  /* Extra safety */
 
-    /* Phase 2: High kernel image mapping via L2 pages (4KB granularity) */
-    /* VA 0x80000000 - 0x800fffff maps to PA 0x00000000 - 0x000fffff */
-    uint32_t *l2_kernel = alloc_l2_table();
-    if (!l2_kernel) {
-        r->failure_mask |= STAGE90_XNU_ARM_VM_INIT_FULL_PMAP_FAIL_L2_ALLOC;
-        goto finish;
-    }
-    map_l1_page_table(stage90_candidate_l1, STAGE90_VIRT_BASE, l2_kernel);
-    /* Map 1MB (256 pages) starting at virtBase */
-    for (uint32_t page = 0; page < 256; page++) {
-        uint32_t va = STAGE90_VIRT_BASE + (page * L2_PAGE_SIZE);
-        uint32_t pa = 0x00000000u + (page * L2_PAGE_SIZE);
-        map_l2_page(l2_kernel, va, pa);
+    /*
+     * Phase 2: High kernel image mapping via L2 pages (4KB granularity).
+     *
+     * The window is derived from the image, not fixed at 1 MB, and that is a correction rather
+     * than a preference. The check further down writes and reads `stage90_full_pmap_probe_word`
+     * through `STAGE90_VIRT_BASE + its physical address`, so the window has to contain that word:
+     * with 256 pages it covered PA [0, 1 MB) and the word sat at 0x000EC0B4, which is why this
+     * passed for months. Embedding a larger XNU entry image moved a .bss variable to 0x001000B4 -
+     * 148 bytes past the end of the window - and the read came back through the L1 slot for
+     * 0x80100000, which maps PA 0x80100000, so the check reported HIGH_VA_DATA and nothing said
+     * the mapping was simply too small.
+     *
+     * `__stage90_image_end` is the same value `boot_args.c` uses for topOfKernelData, so the
+     * window follows the payload's own layout: one 1 MB L2 table per megabyte of image, from
+     * PA 0 upward, identity-mapped at STAGE90_VIRT_BASE. The pool holds 128 tables, so this
+     * stops being viable at a 128 MB payload, which is far past anything the payload can be.
+     */
+    {
+        uint32_t image_end = (uint32_t)(uintptr_t)__stage90_image_end;
+        uint32_t windows = (image_end + L1_SECTION_SIZE - 1u) / L1_SECTION_SIZE;
+
+        if (windows == 0u) {
+            windows = 1u;
+        }
+        for (uint32_t w = 0u; w < windows; w++) {
+            uint32_t base = w * L1_SECTION_SIZE;
+            uint32_t *l2_kernel = alloc_l2_table();
+
+            if (!l2_kernel) {
+                r->failure_mask |= STAGE90_XNU_ARM_VM_INIT_FULL_PMAP_FAIL_L2_ALLOC;
+                goto finish;
+            }
+            map_l1_page_table(stage90_candidate_l1, STAGE90_VIRT_BASE + base, l2_kernel);
+            for (uint32_t page = 0u; page < STAGE90_XNU_TTE_L2_ENTRY_COUNT; page++) {
+                uint32_t off = base + (page * L2_PAGE_SIZE);
+                map_l2_page(l2_kernel, STAGE90_VIRT_BASE + off, off);
+            }
+        }
+        xnu_log_kv32("stage90_xnu_arm_vm_init_full_pmap_l2_image_end", image_end);
+        xnu_log_kv32("stage90_xnu_arm_vm_init_full_pmap_l2_image_windows", windows);
     }
 
     /* Phase 3: Physical RAM direct map (1MB sections for efficiency) */

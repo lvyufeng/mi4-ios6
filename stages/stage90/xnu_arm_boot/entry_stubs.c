@@ -22,6 +22,15 @@
  *   _kdebug_enable / _EntropyData         the same.
  *   _arm_init, _arm_init_cpu, _arm_init_idle_cpu  `_start` sets lr to arm_init and branches to it.
  *
+ * **What changes when the real XNU objects are linked (`STAGE90_ENTRY_REAL_ARM_INIT=1`).** Three
+ * names above are then no longer this file's business, because the objects that own them are in the
+ * image: `osfmk/arm/data.s` (`out/xnu_asm_obj/data.o`) carries the real `intstack`, `fiqstack`,
+ * `CpuDataEntries`, `BootCpuData` and `RTClockData`, and `osfmk/arm/bcopy.s` + `bzero.s` carry the
+ * real `memcpy`/`memmove`/`memset`/`bzero` that the compiler's `__aeabi_mem*` calls are aliased to.
+ * Whatever this file still defines that one of those objects also defines is a link error, not a
+ * silent override: the definitions here shrink as the real objects join, and the link is what says
+ * which ones had to go.
+ *
  * Every one of these is reachable *after* `_start` has switched to its own page tables, which map
  * exactly [physBase, physBase + memSize). So all of this code and data must live in that window,
  * which is what the linker script arranges.
@@ -57,19 +66,51 @@
 
 /* ------------------------------------------------------------------ storage XNU expects */
 
-/* Told to XNU through boot_args; `_start` does not read them, but its callers do. */
-const uint32_t gPhysBase = 0x00200000u;
-const uint32_t gPhysSize = 0x00200000u;
-const uint32_t gVirtBase = 0x00200000u;
+/*
+ * Told to XNU through boot_args; `_start` does not read them, but its callers do.
+ *
+ * `unsigned long`, not `const uint32_t`, and both halves of that matter. XNU declares these in
+ * `osfmk/arm/arm_vm_init.c:80` as `unsigned long gVirtBase, gPhysBase, gPhysSize;` and **assigns**
+ * them at `:351-353` from the boot_args; a `const` stand-in puts them in `.rodata`, so the first
+ * real code to write one faults into the read-only section instead of setting a variable, and a
+ * `uint32_t` one is half the size XNU's own type says. The values below are the boot_args this
+ * payload hands `_start`, which is what XNU would have computed from the same arguments.
+ */
+unsigned long gPhysBase = 0x00200000ul;
+unsigned long gPhysSize = 0x00200000ul;
+unsigned long gVirtBase = 0x00200000ul;
 
 uint32_t kdebug_enable;
-uint64_t EntropyData[2];   /* opaque to start.s: only its address is taken */
 
-/* `_start` loads SP from intstack_top, so this must be real, writable, and in the window. */
+/*
+ * 68 bytes, not `uint64_t[2]` (16). The real thing is `entropy_data_t`:
+ *
+ *     struct entropy_data { uint32_t *index_ptr; uint32_t buffer[ENTROPY_BUFFER_SIZE]; };
+ *
+ * - `osfmk/prng/random.h:47` - and `nm -S --defined-only out/xnu_kernel_obj/osfmk_prng_random.o`
+ * reports its definition as `EntropyData D 0 44`, 0x44 = 68. The earlier 16-byte stand-in was
+ * undersized by a factor of four, which nothing noticed because the only code that would write
+ * past 16 bytes - `early_random` - is a stub in this image. Sizing a stand-in from the symbol it
+ * stands for is the general rule; see the storage sizing in build_entry.sh, which fails the build
+ * rather than guess.
+ */
+uint8_t EntropyData[68] __attribute__((aligned(8)));
+
+/*
+ * `_start` loads SP from intstack_top, so this must be real, writable, and in the window - but only
+ * when XNU's own `osfmk/arm/data.s` is not in the image. With `STAGE90_ENTRY_REAL_ARM_INIT=1` it
+ * is, and it defines the real `intstack` (4 pages), `fiqstack` (1 page), `excepstack`,
+ * `CpuDataEntries`, `BootCpuData`, `RTClockData` and `kd_early_buffer` - 48 KB of the layout XNU
+ * expects, at the sizes `data.s` states. Defining them here as well is a duplicate definition, so
+ * these two stacks are removed rather than left to collide.
+ */
+#ifndef STAGE90_ENTRY_REAL_ARM_INIT
+#define ENTRY_STACK_BYTES  0x8000u
 static uint8_t g_intstack[ENTRY_STACK_BYTES] __attribute__((aligned(8)));
 static uint8_t g_fiqstack[ENTRY_STACK_BYTES] __attribute__((aligned(8)));
 uint32_t intstack_top = (uint32_t)(uintptr_t)&g_intstack[ENTRY_STACK_BYTES];
 uint32_t fiqstack_top = (uint32_t)(uintptr_t)&g_fiqstack[ENTRY_STACK_BYTES];
+#endif /* !STAGE90_ENTRY_REAL_ARM_INIT */
 
 /* The vector table `_start` fills in with the fleh_* addresses below. */
 uint32_t ExceptionVectorsTable[8] __attribute__((aligned(32)));
@@ -233,12 +274,20 @@ __attribute__((noreturn, noinline)) static void entry_epilogue(const char *why)
  * flushed, DACR/PRRR/NMRR set, SCTLR programmed with TEX remap and high vectors, VFP enabled -
  * and then branched to a function that does not exist in XNU, which is why the line it writes
  * says so.
+ *
+ * **With `STAGE90_ENTRY_REAL_ARM_INIT=1` this definition is gone and the real `arm_init.o` from
+ * the compiled kernel is linked in its place.** Then the interesting line is no longer this one but
+ * the *first* one from `entry_stub_hit` below: the name of the first thing XNU's own `arm_init`
+ * calls that this image does not provide. That is the measurement - it is what says which part of
+ * the compile graph to build next, from the device rather than from a call-graph tool.
  */
+#ifndef STAGE90_ENTRY_REAL_ARM_INIT
 void arm_init(void *boot_args)
 {
     (void)boot_args;   /* outside the post-switch window; deliberately not dereferenced */
     entry_epilogue("_start ran to completion and branched to arm_init");
 }
+#endif
 
 /*
  * `panic`. 4570's device_tree.c calls it on a malformed tree, which is a real assertion and the
@@ -255,8 +304,40 @@ void panic(const char *fmt, ...)
 }
 
 /* The secondary-CPU entry points. Unused on a single-core bring-up; present so the link closes. */
+#ifndef STAGE90_ENTRY_REAL_ARM_INIT
 void arm_init_cpu(void) { entry_epilogue("arm_init_cpu (unexpected)"); }
 void arm_init_idle_cpu(void) { entry_epilogue("arm_init_idle_cpu (unexpected)"); }
+#endif
+
+/*
+ * Every symbol the real `arm_init` needs that this image does not provide lands here, one
+ * generated function per name (see build_entry.sh - the list is read off the link, not written by
+ * hand). Reaching any of them is the result: it stops the run and writes the name.
+ *
+ * The name goes into the same flat buffer `entry_kv` uses, for the same reason - it is written with
+ * XNU's caches on and read back after the epilogue has cleaned them and turned the MMU off, so it
+ * has to be characters in one contiguous block inside the window, with no pointers to be wrong.
+ *
+ * `panic` is deliberately NOT among the generated ones: it is real here, and a device-tree or an
+ * assertion failure reaching it should say so by name rather than looking like a missing symbol.
+ */
+void entry_stub_hit(const char *name)
+{
+    static const char prefix[] = " stub_hit=";
+
+    if (g_kv_len + sizeof prefix + 1u < ENTRY_KV_BUF) {
+        for (const char *p = prefix; *p != '\0'; p++) {
+            g_kv_buf[g_kv_len++] = *p;
+        }
+        while (*name != '\0' && g_kv_len + 1u < ENTRY_KV_BUF) {
+            g_kv_buf[g_kv_len++] = *name++;
+        }
+        g_kv_buf[g_kv_len++] = '\n';
+        g_kv_buf[g_kv_len] = '\0';
+    }
+
+    entry_epilogue("real arm_init reached a symbol this image does not provide");
+}
 
 /*
  * The exception vector targets. `_start` installs these addresses in ExceptionVectorsTable and
