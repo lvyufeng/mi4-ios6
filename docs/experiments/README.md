@@ -186,6 +186,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-170](experiment-170-xnu-own-pe-state-named-the-device-tree.md) | XNU's Own `PE_state` Named the Device Tree: `xnu_entry_dtinit_base=0x00280000` |
 | stage90 | [experiment-171](experiment-171-the-reader-ran-and-stopped-at-strcmp.md) | XNU's Own Reader Ran Against This Project's Tree, and Stopped at `strcmp` |
 | stage90 | [experiment-172](experiment-172-the-reader-reached-a-cpu-nodes-state.md) | The Reader Walked to a CPU Node's `state` Property — Six Claims from `stub_hit=strncmp` |
+| stage90 | [experiment-173](experiment-173-pe-init-platform-reached-its-last-statement.md) | `PE_init_platform` Reached Its Last Statement, `pe_init_debug` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
