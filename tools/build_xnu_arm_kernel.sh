@@ -489,6 +489,39 @@ while read -r src; do
     BSD_FORCE=()
     [[ $SRC_COMPONENT == bsd ]] && BSD_FORCE=(-include sys/types.h)
 
+    # `bsd/dev/unix_startup.c` includes `<netinet/tcp_var.h>`, which includes `<netinet/in_pcb.h>`,
+    # and **in 4570 `in_pcb.h` is not self-contained**: it uses `struct in_addr`, `struct in6_addr`,
+    # `struct route` and `struct sockaddr_in` at `:114,176,185,295` and includes `<netinet/in.h>`,
+    # `<netinet6/in6.h>` and `<net/route.h>` nowhere. It does not have to be self-contained, because
+    # Apple's configurations all set `IPSEC=1`, and `in_pcb.h:84`'s `#if IPSEC` then includes
+    # `<netinet6/ipsec.h>` → `<net/if.h>` → `<net/if_var.h>` → **`<net/route.h>`** →
+    # `<net/radix.h>` → `<net/if_llatbl.h>` → `<netinet/in.h>`. Every one of those four headers is
+    # defined by a chain that starts at `net/route.h`. Newer xnu fixed it in the header rather than
+    # in the configuration — `in_pcb.h` now opens with `#include <netinet/in.h>` and
+    # `#include <sys/socketvar.h>` — which is the same fix, in the other file.
+    #
+    # So this is not a new dependency; it is the one Apple's build supplies, named directly. Measured
+    # on `STAGE90_BOOT`, where `IPSEC` is off and nothing else in `unix_startup.c`'s closure reaches
+    # it: one error, `netinet/in_pcb.h:114:17: field has incomplete type 'struct in_addr'`, and
+    # `-include net/route.h` is the whole difference. Three other files in the same manifest also
+    # reach `in_pcb.h` — `kern_malloc.c`, `sys_generic.c`, `audit_syscalls.c` — and all three compile
+    # today because their own closure reaches `net/route.h` anyway (`kern_malloc.c` through
+    # `<sys/kpi_mbuf.h>`), which is the control that says the header is the missing piece and not a
+    # symptom.
+    ROUTE_FORCE=()
+    [[ ${src#"$XNU"/} == "bsd/dev/unix_startup.c" ]] && ROUTE_FORCE=(-include net/route.h)
+
+    # `libkern/OSKextLib.cpp` and one declaration that disagrees with itself. `kext_request` is a
+    # `friend` of `OSKext` (`OSKext.h:189`) and its definition sits inside the file's
+    # `extern "C" {` block (`:38`), so clang reads the friend as C++ linkage and the definition as C
+    # linkage. Two of the three errors that follow are not about linkage at all —
+    # `'loadFromMkext' is a private member of 'OSKext'` and the same for `handleRequest` — because a
+    # `friend` declaration grants access to *that function* and clang does not believe this is it.
+    # One `extern "C"` declaration ahead of everything fixes all three, and it is the smallest
+    # possible statement of what Apple's source already means; see the header's own comment.
+    KEXT_FORCE=()
+    [[ ${src#"$XNU"/} == "libkern/OSKextLib.cpp" ]] && KEXT_FORCE=(-include kext_request_c.h)
+
     # `clock_t`, per component, and this is the `-D_CLOCK_T` question arriving from the other side.
     # experiment-126 removed that flag because the per-component defines made both halves agree:
     # a BSD file gets `bsd/sys/_types/_clock_t.h`'s `__darwin_clock_t`, and `kern_types.h`'s
@@ -578,7 +611,7 @@ while read -r src; do
     # did, for 45 minutes, because this had no timeout and its output was buffered behind a pipe.
     # A timeout is reported as its own outcome rather than as a compile failure, because "clang
     # hung" and "XNU does not compile" are different findings.
-    if timeout "$PER_FILE_TIMEOUT" "${CXX_EXTRA[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${FILE_DEFINES[@]}" "${BSD_FORCE[@]}" "${ONE_FILE[@]}" "${CPP_FORCE[@]}" "${EXTRA_DEFINES[@]}" "${FILE_INCLUDES[@]}" \
+    if timeout "$PER_FILE_TIMEOUT" "${CXX_EXTRA[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${COMP_DEFINES[@]}" "${FILE_DEFINES[@]}" "${BSD_FORCE[@]}" "${ROUTE_FORCE[@]}" "${KEXT_FORCE[@]}" "${ONE_FILE[@]}" "${CPP_FORCE[@]}" "${EXTRA_DEFINES[@]}" "${FILE_INCLUDES[@]}" \
          -c "$src" -o "$OUT/$key.o" 2>"$OUT/$key.log"; then
         ok=$((ok + 1))
         [[ $is_cpp == 1 ]] && cpp_ok=$((cpp_ok + 1))

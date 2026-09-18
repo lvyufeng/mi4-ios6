@@ -2137,6 +2137,53 @@ hits is `bsd_scale_setup` at distance 3, from `bsd/dev/unix_startup.c`, and its 
 class: `bsd/netinet/in_pcb.h` reached without `<netinet/in.h>`. The firehose port, which experiments
 162 and 163 both ranked first, is now behind two smaller things.
 
+**TWO FILES, ONE LINE EACH: THE C++ BLOCK IS COMPLETE** (2026-09-18,
+[`experiment-165`](../experiments/experiment-165-two-files-one-line-each.md)). The last of the 83
+`.cpp` was `libkern/OSKextLib.cpp`, with three errors and one cause. `kext_request` is a `friend` of
+`OSKext` (`OSKext.h:189`) and is *defined* inside `OSKextLib.cpp:39`'s `extern "C" {` block; with no
+earlier declaration clang reads the friend as C++ linkage and the definition as C, and the two
+follow-on errors about `OSKext`'s private statics are consequences — a `friend` declaration grants
+access to *that function*, so a `kext_request` clang does not believe is the friend has no access
+either. A function's linkage is fixed by its first declaration, so a shim that declares Apple's own
+signature `extern "C"`, spelled out in full, makes the two spellings meet at compile time instead of
+diverging silently. Seven symbols closed, and **the C++ block is now 83 of 83 in both
+configurations**.
+
+The second file was `bsd/dev/unix_startup.c`, and its cause is latent upstream: in 4570
+`bsd/netinet/in_pcb.h` is not self-contained — `struct in_addr`, `struct route`, `struct sockaddr_in`
+at `:114,176,185,295` and no `<netinet/in.h>` — because Apple's configurations all set `IPSEC=1`,
+and `in_pcb.h:84`'s `#if IPSEC` then pulls `<netinet6/ipsec.h>` → `<net/if.h>` → `<net/if_var.h>` →
+`<net/route.h>` → `<net/radix.h>` → `<net/if_llatbl.h>` → `<netinet/in.h>`. Upstream `main` fixed it
+in the header (`in_pcb.h:74-75` now opens with `<netinet/in.h>` and `<sys/socketvar.h>`), which is
+not an edit this project makes; `-include net/route.h` for that one file is. The three other files
+that reach `in_pcb.h` compile because their own closures arrive at `net/route.h` anyway, which is
+what says the header is the missing piece and not a symptom.
+
+`STAGE90_BOOT`: undefined **114 → 102**, boot-path stubs **11 → 9**, C **419 → 420 of 426**, and
+thirteen symbols closed against one opened — `bsd_exec_setup`, and its direction is the point:
+`unix_startup.c` now compiles further, defines more, and one of the functions it contains calls into
+`bsd/kern/bsd_init.c`, which still does not compile. `RELEASE` undefined **63 → 56**, boot path
+**9 → 8**. **The boot path no longer reaches any stub whose blocker is a compile failure**:
+`stub_blockers.py --min` now prints two categories and no third (5 "not in the manifest", 4 "no
+source in the tree"), so the nearest remaining blocker is four edges in and is a missing component
+rather than a broken file.
+
+That `__nosan_bzero` row is itself misattributed, and the correction is the next thing to act on: the
+symbol is not missing from the tarball and the header is not really "not in the manifest". Nothing
+declares it in `osfmk/kern/zalloc.c`'s translation unit at all, and its one definition in the tree —
+`static inline`, `san/memintrinsics.h:40` — is reached through `osfmk/libsa/string.h:97-99`'s
+`#ifdef PRIVATE`, which in Apple's build *is* the kernel's `<string.h>`. Here `<string.h>` resolves to
+`stages/stage90/shims_arm/string.h`, our own replacement, which declares the same functions and
+dropped that block. The fix belongs in the shim, not in the manifest. Four of the six remaining
+`STAGE90_BOOT` failures are one cause of the same local kind — the config(8)-generated device headers
+exist only for `RELEASE` (`out/xnu_device/RELEASE/{bpfilter,loop,ptmx,pty}.h`), so `conf.c:111`'s and
+`tty_ptmx.c:67`/`tty_pty.c:67`'s `#include <pty.h>` falls through to the **host's**
+`/usr/include/pty.h` and dies in glibc, and `bsd_init.c:875` does the same with `loop.h`. The two
+failures both configurations share are `subr_prof.c` (`STATIC`, line 160) and `kperfbsd.c`
+(`ffs`/`fls`/`copyinstr`, the `MACH_KERNEL_PRIVATE`-per-component set); `bsd_init.c` has a second,
+`STAGE90_BOOT`-only error that is the experiment-164 shape again
+(`bsd/netinet/mptcp_var.h:465: no member named 't_mptcb' in 'struct tcpcb'`).
+
 **XNU'S REAL `arm_init` RAN ON THE DEVICE** (2026-09-18,
 [`experiment-159`](../experiments/experiment-159-the-real-arm-init-ran.md)). The entry image no
 longer stubs `arm_init`: it links XNU's own `osfmk_arm_arm_init.o`, plus XNU's own `data.o`
