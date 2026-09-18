@@ -2268,6 +2268,36 @@ so a data symbol's address is non-zero and the NULL test is false. That is the n
 improvement: classify by relocation (`CALL`/`JUMP24` is a function, `ABS32` is data and belongs in
 `.bss` as a zero word), which is the difference between "the image links" and "the image behaves".
 
+**THE SECOND REAL XNU OBJECT RAN ON THE DEVICE** (2026-09-18,
+[`experiment-168`](../experiments/experiment-168-cpu-data-init-ran-and-named-pe-init-platform.md)).
+The entry image now links `osfmk/arm/cpu.c` — one object more than experiment-159, chosen by that
+run's own measurement rather than by inspection — and on hardware the log says:
+
+```
+real XNU entry: real arm_init reached a symbol this image does not provide
+real XNU entry stub_hit=PE_init_platform
+No errors detected
+```
+
+`cpu_data_init` is not the hit any more: XNU's own field-by-field initialization of `BootCpuData`
+(`cpu.c:332-401`) executed, and `arm_init` moved on to the next statement in its own source
+(`arm_init.c:159`, after `:157`'s `cpu_data_init(&BootCpuData)`) — which is what the source predicted
+and the run confirmed. `cpu.c` was the right first object because it is a **leaf**: `cpu_data_init`
+references nothing outside `ExceptionVectorsTable` and `RTClockData`, both already in the image, so it
+cannot pull the closure in with it (and the closure of `arm_init` is the whole kernel,
+experiment-158). Nothing was flashed, `persistent_write_attempted = 0` in every contract that reports
+it, the device returned on its own, and the hardware watchdog was the only net across the jump.
+
+**The size limit experiment-159 left open is now measured rather than argued**: everything this image
+owns must end below `topOfKernelData = 0x00220000` because that is where `_start` builds its own page
+tables, and exceeding it is not a build error — it is XNU's page tables landing on this image's data.
+The image ends at `0x00219788`, so the **headroom is 26760 bytes**; `pexpert/arm/pe_init.o`, the next
+object (40 KB, already compiled and in both manifests), is close enough to that ceiling that the step
+after it will have to move the base or the limit rather than merely add a file. Linking `pe_init.o`
+makes `PE_init_platform(FALSE, args)` — `DTInit` and `pe_identify_machine`, then device-tree lookups
+for `target-type`, `model` and `/chosen` — run **XNU's own device-tree reader on the hardware**
+against the tree `tools/xnu_dt_requirements.py` validates.
+
 **XNU'S REAL `arm_init` RAN ON THE DEVICE** (2026-09-18,
 [`experiment-159`](../experiments/experiment-159-the-real-arm-init-ran.md)). The entry image no
 longer stubs `arm_init`: it links XNU's own `osfmk_arm_arm_init.o`, plus XNU's own `data.o`

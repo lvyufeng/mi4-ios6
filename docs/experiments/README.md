@@ -181,6 +181,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-165](experiment-165-two-files-one-line-each.md) | Two Files, One Line Each: the C++ Block Is Complete, and No Boot-Path Stub Is Behind a Compile Failure (114 → 102) |
 | stage90 | [experiment-166](experiment-166-the-generated-inputs-existed-for-one-configuration.md) | The Generated Inputs Existed for One Configuration Only — `pty.h`/`loop.h` Fell Through to the Host's (102 → 94) |
 | stage90 | [experiment-167](experiment-167-the-string-h-shim-was-one-block-short.md) | The `<string.h>` Shim Was One Block Short, and the Measurement Was Reading an Older Directory (94 → 92) |
+| stage90 | [experiment-168](experiment-168-cpu-data-init-ran-and-named-pe-init-platform.md) | The Second Real XNU Object Ran on the Device, and Named `PE_init_platform` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

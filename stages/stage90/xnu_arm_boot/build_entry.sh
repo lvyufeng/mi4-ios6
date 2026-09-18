@@ -105,11 +105,21 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     ARM_DATA_OBJ=${STAGE90_ENTRY_DATA_OBJ:-$REPO_ROOT/out/xnu_asm_obj/data.o}
     ARM_BCOPY_OBJ=${STAGE90_ENTRY_BCOPY_OBJ:-$REPO_ROOT/out/xnu_asm_obj/bcopy.o}
     ARM_BZERO_OBJ=${STAGE90_ENTRY_BZERO_OBJ:-$REPO_ROOT/out/xnu_asm_obj/bzero.o}
+    # `osfmk/arm/cpu.c`, and it is here because the device named it rather than because it looked
+    # relevant: experiment-159's run reached `cpu_data_init()` and stopped there, and that function
+    # is a field-by-field initialization of a `cpu_data_t` (`cpu.c:332-401`) whose only references
+    # outside itself are the storage symbols `ExceptionVectorsTable` and `RTClockData` - both of
+    # which this image already carries. So it is a leaf, and linking it is what turns the measured
+    # `stub_hit=cpu_data_init` into the *next* thing `arm_init` asks for. The rest of `cpu.o` is
+    # stubbed as usual: the closure of `arm_init` is the whole kernel, so the image grows one object
+    # at a time and each run reports the next edge.
+    ARM_CPU_OBJ=${STAGE90_ENTRY_CPU_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_cpu.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BZERO_OBJ" "run ./tools/assemble_arm_layer.sh first"
-    LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ")
+    require "$ARM_CPU_OBJ"   "run ./tools/build_xnu_arm_kernel.sh first"
+    LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
