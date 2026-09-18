@@ -213,6 +213,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-197](experiment-197-the-pmap-runs-and-the-frontier-is-patch-low-glo-static-region.md) | The pmap Runs, `arm_vm_init` Reaches Its Last Instruction, and the Frontier Is `patch_low_glo_static_region` |
 | stage90 | [experiment-198](experiment-198-patch-low-glo-runs-arm-vm-init-returns-and-the-frontier-is-printf-init.md) | `patch_low_glo` Runs, `arm_vm_init` Returns, and the Frontier Is `printf_init` |
 | stage90 | [experiment-199](experiment-199-printf-init-runs-and-the-frontier-is-bsd-log-init.md) | `printf_init` Runs, the Four Bytes Are Now the Object, and the Frontier Is `bsd_log_init` |
+| stage90 | [experiment-200](experiment-200-an-empty-function-is-a-whole-object-and-the-frontier-is-panic-init.md) | An Empty Function Is a Whole Object, `arm_init` Walks Back Into `osfmk/`, and the Frontier Is `panic_init` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
