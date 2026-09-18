@@ -894,15 +894,30 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
          * the NOPs the branch skips - and a word that is never executed cannot break anything,
          * whatever it decodes to. That holds regardless of the D-cache, the I-cache, the prefetcher
          * and the flags at the time of the write, which is precisely the property the first two
-         * versions lacked. The branch is at the pad's *first* word, four or more bytes below
-         * 0x80002404, so it is never one of the words XNU corrupts, and `build_entry.sh` checks that
-         * and the two addresses' enclosure in every build, against the two labels below.
+         * versions lacked. The branch is at the pad's *first* word, four or more bytes below both of
+         * XNU's addresses, so it is never one of the words XNU corrupts, and `build_entry.sh` checks
+         * that and the two addresses' enclosure in every build, against the two labels below.
+         *
+         * ------------------------------------------------------------------ the pad, one more time
+         *
+         * **Experiment 288 found the pad's own contract broken by a constant.** The two addresses XNU
+         * writes are `gPhysBase + (&ResetHandlerData.cpu_data_entries - &ExceptionLowVectorsBase)` and
+         * `gPhysBase + (&ResetHandlerData.boot_args - &ExceptionLowVectorsBase)`; 281 measured that
+         * difference as 0x2404/0x2408 and `build_entry.sh` compared against those two *literals* ever
+         * since. The difference is not a constant: it spans the generated stub object, whose size
+         * grows with every step of this walk, and by 288 it had grown to 0x24AC/0x24B0 - **0x58 bytes
+         * past the end of a 128-byte pad**, back inside `entry_epilogue`'s code. Every report was
+         * silent again, for 282's reason exactly, and the build's check passed because it was
+         * checking the wrong number. The pad is therefore **512 bytes** now, and the check derives the
+         * two addresses from the linked image's own `ResetHandlerData` and `ExceptionLowVectorsBase`
+         * rather than from anything written down here - the same one-value-two-definitions defect the
+         * project already has a memory about, caught this time by the instrument it disabled.
          */
         __asm__ volatile ("\n"
                           ".global entry_skip_pad\n"
                           "entry_skip_pad:\n\t"
                           "b 1f\n\t"
-                          ".rept 31\n\t"
+                          ".rept 127\n\t"
                           "nop\n\t"
                           ".endr\n"
                           "1:\n"

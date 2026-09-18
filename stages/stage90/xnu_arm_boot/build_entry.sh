@@ -3098,6 +3098,114 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 288: `task.o`, and the object the walk has been circling since 285
+    #
+    # **The 287 run reported** `stub_hit=init_task_ledgers` at `coalitions_init+0xe8`. The object
+    # that defines it is `osfmk/kern/task.o`, `osfmk_kern_task.o` - the largest single step this walk
+    # has taken since `kern_event.o` in 280, and the object 285's census, 287's four new obligations
+    # and the pending list have all been pointing at. **23504 bytes of text, 496 of bss, 104 of data,
+    # 1094 of `rodata.str1.1`, 144 of `__DATA,__data`, 264 of `__TEXT,__os_log`, 146 definitions and
+    # 224 references.**
+    #
+    #     resolved   60   (54 functions and 6 storage stand-ins: dead_task_statistics, kernel_task,
+    #                      max_task_footprint_mb, task_ledgers, task_ledger_template, task_max -
+    #                      every one of them a *generated* stand-in, checked against the stub list)
+    #     added      59   (56 functions and 3 storage: default_task_effective_policy,
+    #                      default_task_requested_policy, exc_via_corpse_forking)
+    #
+    # The resolved set is the largest of the walk and it includes `task_init` itself and `task_max` -
+    # the two names the pending list has carried for several steps - so this step retires a whole
+    # block of adjacent stubs rather than one. **The `added` count is worth a warning**, because a
+    # first pass at it said 66: that pass checked each reference against the *image's* symbol table
+    # without subtracting the generated stubs, so seven names that are already stand-ins in this
+    # image (`task_watch_init`, `proc_init_cpumon_params`, ...) were counted as new. The rule is
+    # `under = (stub list ∪ undefined list)`, not `the image's nm output`.
+    #
+    # **Predicted build deltas:** 888 -> **887** undefined (60 out, 59 in - the count barely moves),
+    # 791 -> **793** function stubs, 97 -> **94** storage. Text 1042736 -> 1066240 (+23504), and
+    # **`.data` should jump a whole 32 KB block**: the read-only region ends at 0x800fe93c with
+    # 0x16c4 bytes of slack, and this object's read-only content is 24862 bytes (text + `str1.1` +
+    # `os_log`), so `.data` goes 0x80100000 -> **0x80108000**, `__bss_start` 0x80117b68 -> about
+    # 0x8011fc60, and the image 1148528 -> about **1165176**.
+    #
+    # **The prediction, read off the bodies the way 285-287 were.** Two functions have to run before
+    # `task_init` is reached, and both were scanned for stub calls in the linked image first:
+    #
+    #     init_task_ledgers      24 x ledger_entry_add, 11 x ledger_track_credit_only,
+    #                            4 x ledger_set_callback, ledger_track_maximum,
+    #                            ledger_template_create, ledger_template_complete, panic
+    #                            - ALL real, and each of those was scanned in turn: no stub anywhere
+    #     coalition_create_internal   9 calls, all real
+    #
+    # So `coalitions_init` completes and `task_init` - now real, because this object defines it -
+    # begins. Its calls in address order, with statuses taken from the *stub list*:
+    #
+    #     1 lck_grp_attr_setdefault  real      2 lck_grp_init  real       3 lck_attr_setdefault  real
+    #     4 lck_mtx_init  real                 5 lck_mtx_init  real       6 zinit  real
+    #     7 zone_change  real                  8 task_watch_init  ***NEW STUB***  <- the stop
+    #
+    # `zinit` is called again here, and 287's measurement covers it: the only stub inside it is
+    # `btlog_create`, behind the `zlog` boot-arg guard that this payload does not trip.
+    #
+    # Predicted report: `stub_hit=task_watch_init`, the caller being the `bl task_watch_init` in
+    # `task_init`. **The offset was derived wrong and the build corrected it** - the first draft said
+    # object offset 0x3fc (`task_init + 0x1b0`), read off a list of relocation addresses that
+    # included non-call entries. The linked pair settles it: `task_init` at 0x800bf6d0 and
+    # `bl task_watch_init` at 0x800bf77c, so the object offset is 0x2fc, the function offset is
+    # **+0xac**, and the predicted caller is **0x800bf780**. This is 284's (a) again - an offset read
+    # from the wrong frame - and it is the second time the build has caught one before the device
+    # was touched, which is the point of writing predictions down first.
+    #
+    # **The build:** 887 undefined, 793 function stubs, 94 storage - all three exactly as predicted.
+    # Text 1042736 -> **1067704**, image 1148528 -> **1181584**, `__bss_start` 0x80117b68 ->
+    # **0x8011fbf8**, bss end 0x8014e188 -> 0x80156388, headroom 1794040 -> 1743992. The 32 KB jump
+    # was right: `.data` moved 0x80100000 -> 0x80108000, and the image grew by 33056 bytes.
+    #
+    # **And then the run was silent - for the instrument's reason, a third time, by a mechanism
+    # nothing had looked at since 281.** The log came back at exactly 294042 bytes, the silent-log
+    # size, with no `stub_hit` and no `exception:` line. A checkpoint at `task_init` was silent too,
+    # and a checkpoint at `machine_init` - which 286 and 287 both reported from *past* - was silent
+    # as well, which is what said the fault was not the boot's.
+    #
+    # It is 282 again, reached a different way. `cpu.c:570-580` writes to
+    # `gPhysBase + (&ResetHandlerData.cpu_data_entries - &ExceptionLowVectorsBase)` and the same with
+    # `boot_args`; 281 measured that difference as 0x2404/0x2408 and **`verify_pad` compared against
+    # those two literals ever since**, while the difference itself is not a constant - it spans the
+    # *generated stub object*, whose size grows with every step of this walk. Read out of this
+    # image's own instruction stream, at `cpu_machine_idle_init+0x1a8`:
+    #
+    #     80004294: movw r2, #0xb494 ; movt r2, #0x800e   ->  r2 = ResetHandlerData  = 0x800eb494
+    #     800042a4: sub  r5, r2, r5                        r5 = ExceptionLowVectorsBase = 0x800e8fec
+    #                                                      -> r5 = the difference = **0x24a8**
+    #     800042b4: add  r2, r1, #8    (r1 = gPhysBase)    -> boot_args       target = 0x800024b0
+    #     800042f0: add  r2, r1, #4                        -> cpu_data_entries target = 0x800024ac
+    #
+    # The gap of 0x24a8 is 152 generated stub bodies at 0x18 bytes apart, sitting between
+    # `ExceptionLowVectorsBase` (0x800e8fec) and `ResetHandlerData` (0x800eb494) in the linked `.text`
+    # - so the difference grows as this walk adds objects. **The two writes were landing at
+    # 0x800024AC/0x800024B0, 0x58 bytes past the end of the 128-byte pad, back inside
+    # `entry_epilogue`'s own code**, and `verify_pad` passed every build because it was checking
+    # 0x2404/0x2408. Every report was silent for 282's reason; the boot may have run any distance.
+    #
+    # **The fix, in two parts, both of them about the value having one definition.** The pad is 512
+    # bytes now (`b 1f` over 127 NOPs), and `verify_pad` **derives the two addresses from the linked
+    # image** - `ResetHandlerData` and `ExceptionLowVectorsBase` at the struct's own field offsets,
+    # 4 and 8 - instead of comparing against anything written down. Every build now prints them:
+    #
+    #     entry_skip_pad at 0x800023d4 branches over 512 bytes to 0x800025d4
+    #     XNU writes 0x800024ac and 0x800024b0 (ResetHandlerData - ExceptionLowVectorsBase = 0x24a8),
+    #     and both land inside what it skips
+    #
+    # **The run, with the instrument working again:**
+    #
+    #     stub_hit=task_watch_init        xnu_entry_stub_caller=0x800bf900
+    #
+    # which is `task_init + 0xb0` - `task_init` links at 0x800bf850 in the rebuilt image, and the
+    # 0x180 that 0x800bf900 sits past the pre-fix 0x800bf780 is exactly the 384 bytes the wider pad
+    # added above it. So the prediction held where it was a prediction, and the five calls before the
+    # stop - the two `lck_mtx_init`s, `zinit` (again, with 287's measurement covering its one stub),
+    # `zone_change` and the four `lck_*` setup calls - all returned.
+    OSFMK_KERN_TASK_OBJ=${STAGE90_ENTRY_OSFMK_KERN_TASK_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_task.o}
     # 287: `init_task_ledgers`, and the step where the 16 KB boundary finally moves
     #
     # **The 286 run reported** `stub_hit=coalitions_init` at `kernel_bootstrap+0x1a8`. The object that
@@ -6169,6 +6277,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_NTPTIME_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_COALITION_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_TASK_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_EVENT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
@@ -6182,7 +6291,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
@@ -6386,8 +6495,8 @@ verify_pad() {
     start=$(sym_addr entry_skip_pad)   || layout_fail "entry_skip_pad is not in the linked image"
     end=$(sym_addr entry_skip_pad_end) || layout_fail "entry_skip_pad_end is not in the linked image"
 
-    [[ $((end - start)) -ge 128 ]] ||
-        layout_fail "the skip pad is $((end - start)) bytes; it has to cover 0x2404 and 0x2408 with room to spare"
+    [[ $((end - start)) -ge 256 ]] ||
+        layout_fail "the skip pad is $((end - start)) bytes; it has to cover both of XNU's addresses with room to spare"
 
     # ARM `b <label>` is 0xEA in the top byte and a signed 24-bit word offset in the rest.
     branch=0x$(sym_word $start)
@@ -6397,13 +6506,34 @@ verify_pad() {
     [[ $addr -eq $end ]] ||
         layout_fail "the branch at entry_skip_pad targets $(printf '0x%08x' $addr), not entry_skip_pad_end ($(printf '0x%08x' $end))"
 
-    [[ $((start + 4)) -le $((ENTRY_BASE + 0x2404)) ]] ||
-        layout_fail "entry_skip_pad is at $(printf '0x%08x' $start), which puts the branch itself on one of the addresses XNU writes"
-    for addr in $((ENTRY_BASE + 0x2404)) $((ENTRY_BASE + 0x2408)); do
-        [[ $addr -ge $((start + 4)) && $addr -lt $end ]] ||
-            layout_fail "$(printf '0x%08x' $addr) is outside the skipped range [$(printf '0x%08x' $((start + 4))), $(printf '0x%08x' $end)) - the report would execute XNU's data as an instruction"
+    # **The two addresses XNU writes are derived here, not written down.** `cpu.c:570-580` writes to
+    # `gPhysBase + (&ResetHandlerData.cpu_data_entries - &ExceptionLowVectorsBase)` and the same with
+    # `boot_args`, so both are functions of the *linked* image - and the difference between those two
+    # symbols spans the generated stub object, which grows with every step of this walk. Experiment
+    # 281 measured the difference as 0x2404/0x2408 and this check compared against those two literals
+    # for six experiments; by 288 the difference had grown to 0x24A8 and the writes were landing at
+    # 0x800024AC/0x800024B0, outside the pad, so every report was silent and this check said the
+    # layout was fine. That is this project's one-value-two-definitions defect, so the value now has
+    # exactly one definition: the linked `ResetHandlerData` and `ExceptionLowVectorsBase`, whose
+    # struct offsets (_assist_reset_handler, _cpu_data_entries, _boot_args) are 0, 4 and 8.
+    local low rhd
+    low=$(sym_addr ExceptionLowVectorsBase) || layout_fail "ExceptionLowVectorsBase is not in the linked image"
+    rhd=$(sym_addr ResetHandlerData)        || layout_fail "ResetHandlerData is not in the linked image"
+    [[ $rhd -gt $low ]] ||
+        layout_fail "ResetHandlerData ($(printf '0x%08x' $rhd)) is not above ExceptionLowVectorsBase ($(printf '0x%08x' $low)), so the difference cpu.c writes is negative"
+
+    local targets=() t
+    targets+=("$((ENTRY_BASE + rhd + 4 - low))")
+    targets+=("$((ENTRY_BASE + rhd + 8 - low))")
+
+    for t in "${targets[@]}"; do
+        [[ $((start + 4)) -le $t ]] ||
+            layout_fail "entry_skip_pad is at $(printf '0x%08x' $start), which puts the branch itself on or above $(printf '0x%08x' $t), one of the addresses XNU writes"
+        [[ $t -ge $((start + 4)) && $t -lt $end ]] ||
+            layout_fail "$(printf '0x%08x' $t) is outside the skipped range [$(printf '0x%08x' $((start + 4))), $(printf '0x%08x' $end)) - the report would execute XNU's data as an instruction"
     done
-    say "  entry_skip_pad at $(printf '0x%08x' $start) branches over $((end - start)) bytes to $(printf '0x%08x' $end), and XNU's two writes ($(printf '0x%08x' $((ENTRY_BASE + 0x2404))), $(printf '0x%08x' $((ENTRY_BASE + 0x2408)))) land inside what it skips"
+    say "  entry_skip_pad at $(printf '0x%08x' $start) branches over $((end - start)) bytes to $(printf '0x%08x' $end)"
+    say "  XNU writes $(printf '0x%08x' ${targets[0]}) and $(printf '0x%08x' ${targets[1]}) (ResetHandlerData - ExceptionLowVectorsBase = $(printf '0x%x' $((rhd - low)))), and both land inside what it skips"
 }
 verify_pad
 
