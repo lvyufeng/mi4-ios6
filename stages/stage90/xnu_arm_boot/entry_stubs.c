@@ -489,13 +489,28 @@ void arm_init(void *boot_args)
  * built, that is the finding, and it should reach the log by the same route as everything else.
  * The variadic arguments are ignored - the message this project can act on is which call failed,
  * and the tree is already the thing under test.
+ *
+ * **Compiled out by experiment 201**, which links `osfmk_kern_debug.o` for `panic_init` - and this
+ * is the first retired stand-in in this sequence whose replacement is *not* equivalent to it. The
+ * message above is a diagnosis this project chose; XNU's own `panic` is
+ * `panic_trap_to_debugger(...)`, and the first thing on its path that this image does not have is
+ * `PEHaltRestart(kPEPanicBegin)` in `iokit_Kernel_PlatformExpert.o`. So a panic from here on
+ * reports `stub_hit=PEHaltRestart`, which does not say that a panic happened.
+ *
+ * That cost is paid deliberately and it is paid once: the bespoke message was a stand-in for an
+ * image that had no panic at all, and an image that runs XNU's own code should panic the way XNU
+ * panics. It is kept here, under its switch, so that it can be brought back by one build variable
+ * if the trade turns out to run the other way - which is the same reason every other retired
+ * stand-in in this file is kept rather than deleted.
  */
+#ifndef STAGE90_ENTRY_REAL_PANIC
 void panic(const char *fmt, ...);
 void panic(const char *fmt, ...)
 {
     (void)fmt;
     entry_epilogue("panic() - XNU rejected something; see which call precedes this line");
 }
+#endif /* !STAGE90_ENTRY_REAL_PANIC */
 
 /* The secondary-CPU entry points. Unused on a single-core bring-up; present so the link closes. */
 #ifndef STAGE90_ENTRY_REAL_ARM_INIT

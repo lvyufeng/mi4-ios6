@@ -214,6 +214,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-198](experiment-198-patch-low-glo-runs-arm-vm-init-returns-and-the-frontier-is-printf-init.md) | `patch_low_glo` Runs, `arm_vm_init` Returns, and the Frontier Is `printf_init` |
 | stage90 | [experiment-199](experiment-199-printf-init-runs-and-the-frontier-is-bsd-log-init.md) | `printf_init` Runs, the Four Bytes Are Now the Object, and the Frontier Is `bsd_log_init` |
 | stage90 | [experiment-200](experiment-200-an-empty-function-is-a-whole-object-and-the-frontier-is-panic-init.md) | An Empty Function Is a Whole Object, `arm_init` Walks Back Into `osfmk/`, and the Frontier Is `panic_init` |
+| stage90 | [experiment-201](experiment-201-xnu-reads-this-images-mach-o-header-and-the-frontier-is-pe-consistent-debug-inherit.md) | XNU Reads This Image's Mach-O Header, the Panic Stand-In Is Retired, and the Frontier Is `PE_consistent_debug_inherit` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
