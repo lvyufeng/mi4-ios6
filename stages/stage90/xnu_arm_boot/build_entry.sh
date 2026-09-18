@@ -2724,6 +2724,41 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # +8), bss end 0x8010b2c8, args +1101824, topOfKernelData unchanged at +3145728, headroom
     # 2051384, payload text 1392882. `kv_written == kv_in_dram == 0x3a`, two below 263's 0x3c:
     # `ipc_bootstrap` is two characters shorter than `waitq_bootstrap`.
+    # 265: `ipc_bootstrap`, and the stop moves *inside* the new object. 264's stop was
+    # `ipc_bootstrap`; `osfmk/ipc/ipc_init.c` (manifest:512), `osfmk_ipc_ipc_init.o`, is the object
+    # that defines it - 804 bytes of text, 24 of data, 300 of bss, three definitions
+    # (`ipc_bootstrap`, `ipc_init`, `ipc_thread_call_init`) and 27 references. Eleven of the 27 are
+    # already satisfied and all eleven are real code; the **16 new** names are the whole IPC
+    # subsystem's init surface (`mig_init`, `ipc_table_init`, `ipc_voucher_init`,
+    # `ipc_importance_init`, `semaphore_init`, `mk_timer_init`, `host_notify_init`, `ipc_host_init`,
+    # `ipc_space_create_special`, the two `ipc_space_*` statics, the five zone/data statics).
+    #
+    # So this step does **not** stop at the next line of `kernel_bootstrap` - it stops one call
+    # *inside* the object it just linked. `ipc_bootstrap` is 22 calls - 21 `bl`s and a tail `b` - with
+    # 14 distinct targets; everything before
+    # `ipc_space_create_special` is satisfied (`lck_grp_attr_setdefault`, `lck_grp_init`,
+    # `lck_attr_setdefault`, `lck_spin_init`, `zinit` x4, `zone_change` x5), and the first new name
+    # is reached at `ipc_bootstrap+0x168`. **Prediction: `stub_hit=ipc_space_create_special`** with
+    # `caller - 4` = that `bl`, i.e. `caller = ipc_bootstrap+0x16c`. Device:
+    # **`stub_hit=ipc_space_create_special`, `xnu_entry_stub_caller=0x800abd70`** =
+    # `ipc_bootstrap+0x16c` - the prediction, an eighth time, and the first stop that is *inside* the
+    # object the step linked rather than at the next line of `kernel_bootstrap`.
+    #
+    # Measured: resolved **8** (`ipc_bootstrap`, `ipc_init`, `ipc_thread_call_init` plus five of the
+    # object's own statics - `ipc_kernel_map`, `ipc_port_max`, `ipc_pset_max`, `ipc_space_max`,
+    # `msg_ool_size_small`), added **16** (10 functions, 6 statics); 619 -> 627 undefined,
+    # 543 -> 550 function stubs, 76 -> 77 storage; text 794436 -> 795556 (+1120), image 900664 ->
+    # 900688 (+24), bss end 0x8010b488, args unchanged at +1101824, headroom 2050936, payload text
+    # 1392906. `kv_written == kv_in_dram == 0x45`, above every previous stop because the KV buffer
+    # holds a fixed 45-byte prefix followed by the stub's name verbatim, and
+    # `ipc_space_create_special` (24 characters) is the longest name this frontier has stopped at.
+    #
+    # Note for a later step: `ipc_space_kernel` and `ipc_space_reply` are passed *by address* here
+    # and today are function stubs; they are `B` symbols in `osfmk_ipc_ipc_space.o`, which is also
+    # the object that defines `ipc_space_create_special` - so the step that makes the callee real
+    # makes the address operands real in the same move, and no struct is ever written into a stub's
+    # text.
+    OSFMK_IPC_IPC_INIT_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_init.o}
     OSFMK_KERN_WAITQ_OBJ=${STAGE90_ENTRY_OSFMK_KERN_WAITQ_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_waitq.o}
     OSFMK_KERN_LTABLE_OBJ=${STAGE90_ENTRY_OSFMK_KERN_LTABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_ltable.o}
     OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
@@ -2823,6 +2858,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_LTABLE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_WAITQ_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_IPC_IPC_INIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2832,7 +2868,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
