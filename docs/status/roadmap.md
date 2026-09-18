@@ -2030,7 +2030,7 @@ two files were missing.
 | `RELEASE`, C | 610 of 615 | **612 of 615** |
 | `RELEASE`, C++ | 82 of 83 | 82 of 83 |
 | `RELEASE`, undefined | 97 | **72** |
-| `RELEASE`, boot-path stubs from `arm_init` | 12 of 97 | **7 of 72** |
+| `RELEASE`, boot-path stubs from `arm_init` | 12 of 97 | **14 of 72** |
 | `STAGE90_BOOT`, C | 416 of 426 | **418 of 426** |
 | `STAGE90_BOOT`, undefined | 238 | **229** |
 | `STAGE90_BOOT`, boot-path stubs | 24 | **27** |
@@ -2048,6 +2048,50 @@ has no caller in the tree — which is what makes the next stage a **port** rath
 `libdispatch/src/firehose/firehose_buffer.c`, 1188 lines at `libdispatch-913.30.4`, with a
 `#ifdef KERNEL` half. Verified unchanged: the ARM layer at 32 of 32 and 445 undefined, and both link
 routes agreeing (72 and 72; 229 and 229).
+
+**THE NEAREST BLOCKER WAS NOT XNU'S** (2026-09-18,
+[`experiment-163`](../experiments/experiment-163-the-nearest-blocker-was-not-xnu-s.md)). On the image
+experiment-162 left, `stub_reach.py --from arm_init` put `__aeabi_memcpy4` at **distance 1** — the
+closest missing symbol in the whole image, called by `arm_init`'s first aggregate copy. Five of the
+fourteen boot-path stubs were `__aeabi_*`, and `stub_blockers.py` had been filing all five under its
+own "compiler runtime, not source" heading since the first ELF link without anything acting on it.
+
+They are the price of the ELF path: `armv7-apple-ios` lowers an aggregate copy to `bl memcpy` and an
+EABI target lowers the same source to `bl __aeabi_memcpy4` — `grep -rn "__aeabi"` over the whole
+tarball is empty because Apple's target is not EABI, and the Mach-O target was closed by
+experiment-150. So the cost belongs to experiment-150's decision and not to experiment-161's table
+of three.
+
+The four memory intrinsics are now `stages/stage90/xnu_aeabi_runtime.c` — twelve tail calls, **108
+bytes of `.text`**, with `__aeabi_memset`'s EABI `(dst, n, c)` argument order written as specified
+rather than as it looks. The five arithmetic helpers are **`libgcc.a`**, linked rather than copied:
+the ARM-state multilib is chosen deliberately (`thumb/v7ve+simd/softfp` matches the build's
+`-mfpu=neon-vfpv4` and is **Thumb**, where the whole image is ARM), and the FP-ABI check that makes
+that safe is measured by disassembly — the `__aeabi_*` helpers take their `double` arguments in
+**r0:r1** under both `soft` and `softfp`, so a `softfp` caller and a `soft` callee agree.
+
+| | before | after |
+| --- | --- | --- |
+| `RELEASE`, undefined | 72 | **63** |
+| `RELEASE`, compiler runtime among them | 9 | **0** |
+| `RELEASE`, boot-path stubs from `arm_init` | 14 of 72 | **9 of 63** |
+| `RELEASE`, `.text` | 4908480 | 4911088 |
+| `STAGE90_BOOT`, undefined | 229 | **220** |
+| `STAGE90_BOOT`, boot-path stubs | 27 of 229 | **23 of 220** |
+| `STAGE90_BOOT`, `stub_blockers.py`'s compiler-runtime row | 4 | **0** |
+
+9 closed and 0 opened in both, and both link routes still agree (63/63 and 220/220). Two measured
+costs: 40 symbols enter the image for the 9 asked for (the closure is soft-float double arithmetic
+the ARM-state libgcc builds `_fixunsdfdi.o` in terms of — +2608 bytes), and ld warns twice that
+`_fixunsdfdi.o`/`_udivmoddi4.o` use variable-size enums, which is inert because neither member's
+interface is an enum.
+
+**This stage also corrected a figure of its own**: experiment-162's `RELEASE` boot-path row said
+7 of 72, and 7 was the number of rows a `tail -20` showed. `stub_reach.py` prints the count in a
+header and up to `--list` (15) rows nearest the entry **first**, so truncating from the top hides
+the smallest distances and leaves the count unread. The true figure is **14**, re-measured by
+rebuilding that exact image, and experiment-162's table now says so. Eighth instance of the class
+`docs/status/roadmap.md` keeps meeting — the tool was right and the reading was not.
 
 **XNU'S REAL `arm_init` RAN ON THE DEVICE** (2026-09-18,
 [`experiment-159`](../experiments/experiment-159-the-real-arm-init-ran.md)). The entry image no

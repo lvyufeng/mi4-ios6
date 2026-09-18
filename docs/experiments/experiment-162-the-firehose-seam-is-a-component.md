@@ -9,7 +9,7 @@ Artifacts: `stages/stage90/shims_arm/os/firehose_buffer_private.h` (the one file
 | C | 610 of 615 | **612 of 615** |
 | C++, unchanged | 82 of 83 | 82 of 83 |
 | undefined after a whole-kernel link | 97 | **72** |
-| boot-path stubs, from `arm_init` | 12 of 97 | **7 of 72** |
+| boot-path stubs, from `arm_init` | 12 of 97 | **14 of 72** (first written as 7 — see the note below) |
 | `.text` in the measurement image | 4896304 bytes | 4908480 bytes |
 
 | `STAGE90_BOOT` | before | after |
@@ -177,6 +177,18 @@ than a repair. Every stub `measure_link.sh` emits is `mov r0, #0; bx lr`, and:
 Two of the four therefore coincide with a branch the OSS source already contains and the other two
 are unreachable in this image. That is a claim about safety, not about correctness.
 
+## A number in this log that was wrong
+
+The `RELEASE` boot-path count above was first written as **7 of 72**, and 7 was the number of rows
+visible in a `tail -20` of `stub_reach.py`'s output. The tool prints the count in a header line and
+then up to `--list` (15 by default) rows nearest the entry first, so truncating the output from the
+*top* removes the rows with the smallest distance and leaves the count unread. The true figure is
+**14**, measured again in experiment-163 by rebuilding this exact image, and the seven rows that a
+`tail` showed are the seven *furthest* ones. `--list 40` is the fix, and the header is the number.
+
+This is the eighth instance of the project's measurement-defect class (memory:
+`mi4-measurement-defects`): not a wrong tool, but a right tool read through a truncation.
+
 ## Verified, not assumed
 
 - **`build_xnu_arm_layer.sh` unchanged**: 32 of 32, 445 undefined symbols — the same two numbers,
@@ -205,7 +217,7 @@ measurement, and the answer is allowed to be no.
 ```bash
 ./tools/build_xnu_arm_kernel.sh                  # C 612 of 615, C++ 82 of 83
 ./tools/measure_link.sh --keep-stubs             # 72 undefined, 72 stubs
-./tools/stub_reach.py --from arm_init            # 7 of 72
+./tools/stub_reach.py --from arm_init --list 40  # 14 of 72
 ./tools/build_xnu_arm_layer.sh                   # 32 of 32, 445 undefined
 
 XNU_KERNEL_CONFIG=STAGE90_BOOT XNU_MASTER_LOCAL=$PWD/tools/xnu_config/minimal/STAGE90_BOOT.local \

@@ -56,6 +56,22 @@ SCRIPT=$TOOLS_DIR/xnu_measure_link.ld
 STUBS=$OUT/$CONFIG-stubs.s
 ELF=$OUT/$CONFIG-measure.elf
 
+# The EABI runtime and the compiler runtime. Both are link inputs and neither is in the manifest, so
+# the measurement has to name them and then say whether it had them: a number that silently depends
+# on whether a directory exists is the defect this project keeps meeting (memory:
+# mi4-one-value-two-definitions). `-lgcc` is the ARM-state multilib of the host's arm-none-eabi-gcc
+# - `-marm -mfloat-abi=soft` selects it - and the reason it is compatible with this build's
+# `-mfloat-abi=softfp` callers is measured in experiment-163.
+RT_OBJ=${XNU_RT_OBJ_OUT:-$REPO_ROOT/out/xnu_rt_obj}
+RTOBJS=()
+if [[ -d $RT_OBJ ]]; then
+    mapfile -t RTOBJS < <(ls "$RT_OBJ"/*.o 2>/dev/null | sort)
+fi
+LIBGCC=()
+if command -v arm-none-eabi-gcc >/dev/null 2>&1; then
+    LIBGCC=(-L"$(dirname "$(arm-none-eabi-gcc -marm -mfloat-abi=soft -print-libgcc-file-name)")" -lgcc)
+fi
+
 [[ -d $OBJ ]] || { echo "no objects in $OBJ" >&2; exit 2; }
 mkdir -p "$OUT"
 
@@ -104,7 +120,7 @@ emit_stubs() {   # $1 = undefined-symbol list, $2 = output .s
 # even with every undefined symbol stubbed" with no undefined references under it, which is what
 # that message means and why it reads as impossible. The names a linker is given are the names it
 # must be read back in; this prints and consumes the same spelling the objects contain.
-"$LD" --no-demangle -T "$SCRIPT" "${OBJS[@]}" "${ASMOBJS[@]}" -o "$ELF" 2>"$OUT/$CONFIG-measure.err"
+"$LD" --no-demangle -T "$SCRIPT" "${OBJS[@]}" "${ASMOBJS[@]}" "${RTOBJS[@]}" "${LIBGCC[@]}" -o "$ELF" 2>"$OUT/$CONFIG-measure.err"
 {
     grep -oE "undefined reference to ['\`][^'\`]*" "$OUT/$CONFIG-measure.err" | sed "s/.*['\`]//"
     grep -oE "hidden symbol ['\`][^'\`]*" "$OUT/$CONFIG-measure.err" | sed "s/.*['\`]//"
@@ -115,12 +131,17 @@ emit_stubs "$OUT/$CONFIG-measure-undef.txt" "$STUBS"
 "$AS" -o "$OUT/$CONFIG-stubs.o" "$STUBS" || { echo "stub assembly failed" >&2; exit 2; }
 
 # Pass 2: link with them.
-"$LD" --no-demangle -T "$SCRIPT" "${OBJS[@]}" "${ASMOBJS[@]}" "$OUT/$CONFIG-stubs.o" -o "$ELF" 2>"$OUT/$CONFIG-measure.err"
+"$LD" --no-demangle -T "$SCRIPT" "${OBJS[@]}" "${ASMOBJS[@]}" "${RTOBJS[@]}" "${LIBGCC[@]}" "$OUT/$CONFIG-stubs.o" -o "$ELF" 2>"$OUT/$CONFIG-measure.err"
 rc=$?
+
+# `libgcc` and the EABI runtime are supposed to leave nothing behind in this class. If one survives,
+# it is a runtime the host toolchain does not have and the count below is not "what XNU still needs".
+nrt=$(grep -cE '^(__aeabi_|__div|__udiv|__mod|__umod|__mul|__clz|__float|__fix|__trunc|__extend|_Unwind|__stack_chk)' "$OUT/$CONFIG-measure-undef.txt" || true)
 
 echo "== $CONFIG measurement link =="
 echo "  objects:           ${#OBJS[@]} compiled + ${#ASMOBJS[@]} assembled"
-echo "  undefined (pass 1): $n1"
+echo "  EABI runtime:      ${#RTOBJS[@]} object(s) from $RT_OBJ, plus ${#LIBGCC[@]} libgcc flag(s)"
+echo "  undefined (pass 1): $n1, of which compiler runtime: $nrt"
 echo "  exit (pass 2):      $rc"
 
 if [[ $rc -ne 0 ]]; then

@@ -61,6 +61,22 @@ MIG_KSERVER=${MIG_KSERVER_OUT:-$REPO_ROOT/out/mach_headers/kserver}
 OUT=${XNU_KERNEL_OBJ_OUT:-$REPO_ROOT/out/xnu_kernel_obj}
 MANIFEST=${MANIFEST:-$REPO_ROOT/out/xnu_arm_manifest.txt}
 
+# Apple's COMPONENT_LIST, `makedefs/MakeInc.def:46`. It is named once here because it is read in
+# two places - the per-file import roots below, and the runtime block after the loop - and a second
+# copy of it is how `-I$XNU/bsd` went missing for 68 libkern files once already. The error that
+# produced was `sys/_types/_u_int.h not found`, from a force-include, naming neither the component
+# nor the missing root.
+COMPONENT_LIST=(osfmk bsd libkern iokit pexpert security san)
+
+# The EABI runtime, which is not in the manifest and is not Apple's. `armv7-unknown-netbsd-eabi`
+# (and `armv7-none-eabi` before it) lowers an aggregate copy to `__aeabi_memcpy4`, where a Darwin
+# target lowers it to `memcpy` - so the ELF path needs four symbols Apple's tree never mentions.
+# They are compiled here, with the loop's own flags, because a second flag list is this project's
+# most repeated defect: the target triple used to be spelled out in four scripts before
+# experiment-161. See stages/stage90/xnu_aeabi_runtime.c.
+RUNTIME_SOURCES=("$REPO_ROOT/stages/stage90/xnu_aeabi_runtime.c")
+RT_OUT=${XNU_RT_OBJ_OUT:-$REPO_ROOT/out/xnu_rt_obj}
+
 # The configuration to build. `RELEASE` is Apple's full iOS kernel; `STAGE90_BOOT` is the minimal
 # one declared in tools/xnu_config/minimal/STAGE90_BOOT.local, and its manifest is built by passing
 # the same XNU_MASTER_LOCAL to list_sources.py. Default is the full one, because the full one is
@@ -438,7 +454,7 @@ while read -r src; do
     # the three type headers Apple actually exports, and only those).
     SRC_COMPONENT=$(printf '%s' "${src#"$XNU"/}" | cut -d/ -f1)
     COMP_IMPORT=()
-    for _c in osfmk bsd libkern iokit pexpert security san; do
+    for _c in "${COMPONENT_LIST[@]}"; do
         [[ $_c == "$SRC_COMPONENT" ]] && continue
         COMP_IMPORT+=(-I"$XNU/$_c")
     done
@@ -579,6 +595,37 @@ while read -r src; do
     fi
 done < "$MANIFEST"
 
+# The EABI runtime. Outside the loop because it is not in the manifest and gets no component
+# defines - it is this project's file, and the only thing it may read is what the loop's `INCLUDES`
+# and `CC_ARGS` already give it. The `COMP_FIRST_PLACEHOLDER` in `INCLUDES` is per-file in the loop;
+# for this one it is `osfmk`, the same default `component_of` uses, and `osfmk` is the right answer
+# for a file that includes nothing from the tree.
+mkdir -p "$RT_OUT"
+RT_INCLUDES=()
+for _inc in "${INCLUDES[@]}"; do
+    if [[ $_inc == COMP_FIRST_PLACEHOLDER ]]; then
+        RT_INCLUDES+=(-I"$XNU/osfmk")
+        for _c in "${COMPONENT_LIST[@]}"; do
+            [[ $_c == osfmk ]] && continue
+            RT_INCLUDES+=(-I"$XNU/$_c")
+        done
+    else
+        RT_INCLUDES+=("$_inc")
+    fi
+done
+rt_fail=0
+for _src in "${RUNTIME_SOURCES[@]}"; do
+    _o="$RT_OUT/$(basename "${_src%.c}").o"
+    if "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${RT_INCLUDES[@]}" \
+           -c "$_src" -o "$_o" 2>"$RT_OUT/$(basename "${_src%.c}").log"; then
+        rm -f "$RT_OUT/$(basename "${_src%.c}").log"
+    else
+        echo "runtime: $(basename "$_src") FAILED - $RT_OUT/$(basename "${_src%.c}").log" >&2
+        rt_fail=$((rt_fail + 1))
+    fi
+done
+[[ $rt_fail -eq 0 ]] || exit 4
+
 # The key check the loop's comment promises. Two sources, one object path, whichever compiled last
 # wins - and it would show up as nothing at all: a build that reports success and an object that
 # belongs to a different file. It is the same defect as `-D_CLOCK_T` and the shadowed headers
@@ -602,6 +649,7 @@ echo "  C++ compile:          $cpp_ok"
 echo "  C++ fail:             $cpp_fail"
 echo "  skipped (.s):         $skipped"
 echo "  objects in $OUT"
+echo "  EABI runtime:         ${#RUNTIME_SOURCES[@]} file(s) -> $RT_OUT (not in the manifest)"
 
 if [[ $SHOW_BLOCKERS -gt 0 ]]; then
     echo
