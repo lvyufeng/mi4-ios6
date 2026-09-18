@@ -2958,6 +2958,92 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # stream is exactly the one whose other factor, `task_max`, is a zero stand-in, and this step
     # makes that stand-in the second place it silently shrinks a zone rather than the first. The
     # repair remains `osfmk/kern/task.o`, which is its own step.
+    # 271: `semaphore_init`, and a zone whose ceiling is *live* arithmetic rather than a constant.
+    # 270's stop was `semaphore_init`, and its object is `osfmk/kern/sync_sema.c` (manifest:587),
+    # `osfmk_kern_sync_sema.o` - **4567 bytes of text, 0 of data, 12 of bss, 32 definitions and 36
+    # references**. **5 resolved, 3 added.** The five are `semaphore_init`, `semaphore_create`,
+    # `semaphore_destroy`, `kdp_sema_find_owner` and - the interesting one - **`semaphore_max`**,
+    # which the image has been carrying as a *storage stand-in*. The three added
+    # (`port_name_to_semaphore`, `port_name_to_thread`, `thread_syscall_return`) are the syscall
+    # surface, none of them on the init path.
+    #
+    # `semaphore_init` is three instructions of substance and two calls, both real since 250:
+    #
+    #     ldr semaphore_max ; mov r0, #64 ; mov r2, #64 ; lsl r1, r0_max, #6 ; bl zinit
+    #     str -> semaphore_zone ; bl zone_change(Z_NOENCRYPT, TRUE)
+    #
+    # So it completes, and the prediction is the next call in `ipc_bootstrap`.
+    #
+    # `semaphore_max` is worth the paragraph, because it is **not** a constant and it is **not**
+    # zero at this point in the boot. `sync_sema.c:67` declares `unsigned int semaphore_max;` with no
+    # initializer, so this object contributes a `.bss` variable holding zero - and linking it changes
+    # nothing about the *value*, because the image's stand-in was also zero-initialized. What makes
+    # the value non-zero is a **writer**: `scale_setup()` in `osfmk/kern/startup.c` (called by
+    # `kernel_bootstrap` as its first substantive act, long before `ipc_bootstrap`) ends with
+    #
+    #     ipc_space_max = SPACE_MAX;  ipc_port_max = PORT_MAX;
+    #     ipc_pset_max = SET_MAX;     semaphore_max = SEMAPHORE_MAX;
+    #
+    # and it is real code in this image - `scale_setup` is a function of its own at 0x8000e004, and
+    # its last store is `str r0, [r1]` with `r1 = 0x8012f780`, which `nm` on the image says is
+    # `semaphore_max`. So the read in `semaphore_init` sees `PORT_MAX >> 1`, computed a moment
+    # earlier by that same function - **and `PORT_MAX` is `task_max * 3 + thread_max * 3 + 40000`,
+    # which is `task_max` again.** With the stand-in at zero that is 44608 and `semaphore_max` is
+    # 22304; with the real 512 it would be 46144 and 23072. Fourth consumer of the same stand-in,
+    # after 269's voucher zone, 270's two importance zones, and the three `*_max` globals here.
+    #
+    # That also means the `zinit` in `semaphore_init` sizes a **1.4 MB zone** (22304 * 64), which is
+    # the largest single `max_mem` any of these steps has asked for - a number worth having on the
+    # record before the run, because if `zinit` were to fail it would fail loudly here.
+    #
+    # **Prediction: `stub_hit=mk_timer_init`, `xnu_entry_stub_caller = ipc_bootstrap+0x190`** - the
+    # return address of `bl mk_timer_init`, the call after `bl semaphore_init` (`ipc_init.c:213`),
+    # which in the 270 image is `800abfd0: bl semaphore_init` -> return +0x18c, then
+    # `800abfd4: bl mk_timer_init` -> return +0x190. Offset first, absolute address second.
+    #
+    # Measured: **`stub_hit=mk_timer_init`**, `xnu_entry_stub_caller=0x800ac0b4` =
+    # `ipc_bootstrap+0x190` - the fourteenth prediction in a row. Resolved 5, added 3; 846 -> 844
+    # undefined, 770 -> 769 function stubs, 76 -> 75 storage; text 930244 -> 935012, image
+    # 1032048 -> 1048432, bss end 0x801306c8 -> 0x801346c8, args +1253376 -> +1269760, headroom
+    # 1898808 -> 1882424, payload 1526504 -> 1542888.
+    #
+    # And the run found the third reporter defect in three steps, this one **state-dependent**.
+    # `entry_stub_hit`'s caller record came out ` xnu_entry_stub_caller=0x800:<0;4` where the
+    # prediction is 0x800ac0b4. The wrong characters are not noise: `entry_kv` writes a non-decimal
+    # digit as 0x57 + d and a decimal one as 0x30 + d, and 0x30 + 0xa = ':', 0x30 + 0xc = '<',
+    # 0x30 + 0xb = ';' - so the string says the conditional add took the decimal branch for every
+    # non-decimal nibble, and `:<;` decodes back to a, c, b, i.e. **the true value is recoverable
+    # from the corruption**. The compiled code cannot do that: the whole image holds exactly one
+    # `add rN, rN, #87` (so there is no second copy of the loop), and the ELF bytes at 0x8000211c
+    # are `cmp r3,#9 / add r4,r3,#0x57 / addls r4,r3,#0x30`.
+    #
+    # So the step made the value travel three roads, and the second run read:
+    #
+    #     xnu_entry_stub_caller_v=0x800ac0b4    value, via entry_write_kv (a .rodata table read)
+    #     xnu_entry_stub_caller_w0=0x3c3a3030   the bytes entry_kv stored: '0','0',':','<'
+    #     xnu_entry_stub_caller_w1=0x0a343b30   ... '0',';','4','\n'
+    #     xnu_entry_stub_caller  =0x800:<0;4    written by entry_kv during the run
+    #     xnu_entry_stub_caller_a=0x800:<0;4    the same value, same call site, one call later
+    #     xnu_entry_stub_caller_e=0x800ac0b4    the same value, written by entry_kv from the epilogue
+    #
+    # (1) the bias is in `g_kv_buf` itself, so neither the value nor the transfer is at fault;
+    # (2) two calls in the same machine state give the same wrong answer, so it is not a
+    # per-invocation hazard; (3) **the same instruction at the same address in the same image gives
+    # the right answer from the epilogue**, where SCTLR.C and SCTLR.I are clear and the mmu is off.
+    # The epilogue's copy is a real `bl entry_kv` (0x800024ac -> 0x80002024), not an inlined second
+    # copy - which the `#87` count settles independently.
+    #
+    # The measurable statement is therefore about *fetch*, not about arithmetic: the entry window's
+    # instructions are not executed as the memory says while the I-cache is on and XNU's page tables
+    # are live, and they are executed as the memory says when both are off. On ARMv7-A instruction
+    # fetches from Strongly-ordered or Device memory are unpredictable, and this configuration is
+    # `SO_ONLY`. **The mechanism is not measured and is not claimed**: two candidates fit equally
+    # (XNU's own descriptors for the window, which this image already has stubs queued to read; or
+    # I-cache lines left over for those physical addresses by something else that executed there,
+    # which an invalidate before the jump would settle). The step's own result does not depend on
+    # the corrupt characters - the caller is confirmed by `+0x190`, by `_v`, by `_e`, and by the two
+    # words read out of the buffer.
+    OSFMK_KERN_SYNC_SEMA_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SYNC_SEMA_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_sync_sema.o}
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
@@ -3235,6 +3321,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_IPC_IPC_TABLE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_VOUCHER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_SYNC_SEMA_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -3247,7 +3334,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

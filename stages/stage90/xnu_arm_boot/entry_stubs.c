@@ -340,8 +340,7 @@ static uint32_t g_kv_hex_in_use;
 static uint32_t g_kv_hex_arg;
 
 /*
- * `entry_epilogue`'s `why` string, copied out of the parameter and into `.bss` on entry.
- *
+ * `entry_epilogue`'s `why` string, copied out of the parameter and into `.bss` on entry. *
  * The parameter is correct and the compiler does the right thing with it - `entry_epilogue` stores
  * it at `[sp, #4]` on entry and reloads it from there for the report (`ldr r0, [sp, #4]` at
  * 0x80002458 in the 269 image). What the run says is that the *slot* is wrong by the time it is
@@ -353,6 +352,29 @@ static uint32_t g_kv_hex_arg;
  * the two readings the next run should trust.
  */
 static const char *g_why;
+
+/*
+ * Where `entry_stub_hit` put the caller's hex digits in `g_kv_buf`, so the epilogue can read those
+ * bytes back out and print them as words. Added by experiment 271, which is the third time this
+ * project has had a *report* that was the wrong thing rather than the code it was reporting on.
+ *
+ * That run's caller record came out as ` xnu_entry_stub_caller=0x800:;?=4` where the prediction was
+ * 0x800abfd4. The four wrong characters are not noise: ':' is 0x3a, and `entry_kv` writes a
+ * non-decimal digit as `'a' + (d - 10)` = 0x57 + d, while a decimal digit is `'0' + d` = 0x30 + d.
+ * 0x30 + 0xa = 0x3a ✓, 0x30 + 0xb = 0x3b ';' ✓, 0x30 + 0xf = 0x3f '?' ✓, 0x30 + 0xd = 0x3d '=' ✓ -
+ * so the strings says the *conditional* add (`addls r4, r3, #0x30`, after `cmp r3, #9` and
+ * `add r4, r3, #0x57`) took the decimal branch for all four non-decimal nibbles, and the true value
+ * is recoverable from the corruption: `:;?=` decodes to a, b, f, d, which is 0x800abfd4 exactly.
+ *
+ * Reading the buffer back is what separates the three places the fault could be - the value, the
+ * bytes `entry_kv` stored in `.bss`, or the transfer to the ram console - and the value itself is
+ * printed a second time through `entry_write_kv`, whose digit path is a table read in `.rodata` and
+ * has produced a correct letter on every line of every report so far. **Carrying the same value by
+ * two independent routes and reporting both is the defence this project keeps having to relearn**
+ * (see mi4-measurement-defects): a single writer's output cannot be checked against itself.
+ */
+static uint32_t g_stub_caller_digits;
+static uint32_t g_stub_caller;
 static uint32_t g_first_abort_dfsr;
 static uint32_t g_first_abort_lr;
 static uint32_t g_first_abort_insn;
@@ -434,6 +456,14 @@ void entry_kv(const char *key, uint32_t value)
 /* ------------------------------------------------------------------ the evidence path */
 
 static void entry_write(const char *s);
+
+/*
+ * Both are defined far below, beside the exception handlers that read fault addresses; experiment
+ * 271's caller probe uses them from `entry_epilogue`, which is above them, so they are declared
+ * here rather than moved.
+ */
+static uint32_t entry_word_at(uintptr_t p);
+static int entry_image_ptr(uintptr_t p);
 
 static void entry_write(const char *s)
 {
@@ -691,11 +721,36 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      * are the inputs the sweep runs on: what CSSELR was, what CCSIDR said through it, and what it
      * says once the level 1 data cache is selected.
      */
+    /*
+     * The caller again, from *here* - after the caches are off, the mmu is off, and this image is
+     * executing with SCTLR.I and SCTLR.C clear, where every fetch and every store goes straight to
+     * memory. Paired with the two records `entry_stub_hit` wrote during the run, this is the third
+     * road to the same eight characters, and the three differ in exactly the thing that is in doubt:
+     * `entry_kv` ran then with XNU's caches and page tables live, and runs now without either.
+     */
+    entry_kv("xnu_entry_stub_caller_e", g_stub_caller);
+
     entry_write_kv("xnu_entry_kv_written", kv_len_written);
     entry_write_kv("xnu_entry_kv_in_dram", g_kv_len);
     entry_write_kv("xnu_entry_kv_dropped", kv_dropped_written);
     entry_write_kv("xnu_entry_why", (uint32_t)(uintptr_t)g_why);
     entry_write_kv("xnu_entry_why_byte", (uint32_t)(uint8_t)g_why[0]);
+    /*
+     * The caller, three ways, because experiment 271's run reported it as `0x800:;?=4` where the
+     * prediction was `0x800abfd4`. `_v` is the value itself through the ram-console path, whose
+     * digits are a `.rodata` table read; `_w0`/`_w1` are the eight bytes `entry_kv` actually stored
+     * in `g_kv_buf`, read back as words. If `_v` is right and the words show 0x3a-style bytes, the
+     * fault is in `entry_kv`'s arithmetic; if the words are right and `_v` is right, the fault is in
+     * the transfer. See `g_stub_caller_digits`.
+     */
+    entry_write_kv("xnu_entry_stub_caller_v", g_stub_caller);
+    entry_write_kv("xnu_entry_stub_caller_digits", g_stub_caller_digits);
+    entry_write_kv("xnu_entry_stub_caller_w0",
+                   entry_image_ptr((uintptr_t)&g_kv_buf[g_stub_caller_digits])
+                       ? entry_word_at((uintptr_t)&g_kv_buf[g_stub_caller_digits]) : 0u);
+    entry_write_kv("xnu_entry_stub_caller_w1",
+                   entry_image_ptr((uintptr_t)&g_kv_buf[g_stub_caller_digits + 4u])
+                       ? entry_word_at((uintptr_t)&g_kv_buf[g_stub_caller_digits + 4u]) : 0u);
     /*
      * Experiment 269's reading of a full results buffer, in four numbers. They are read from `.bss`
      * here rather than from registers because they are written long before the teardown and the
@@ -859,7 +914,12 @@ void entry_stub_hit(const char *name, uint32_t caller)
         g_kv_buf[g_kv_len] = '\0';
     }
 
+    g_stub_caller_digits = g_kv_len + 26u;   /* " " + "xnu_entry_stub_caller" (22) + "=0x" */
+    g_stub_caller = caller;
     entry_kv("xnu_entry_stub_caller", caller);
+    /* The same value through the same call site, one call later: two records in the same machine
+     * state say whether a bias is systematic per invocation or a per-call hazard. */
+    entry_kv("xnu_entry_stub_caller_a", caller);
 
     entry_epilogue("a symbol this image does not provide was called");
 }
