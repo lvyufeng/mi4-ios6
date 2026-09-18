@@ -2093,6 +2093,47 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `vm_map_remove`, `vm_map_wire_kernel`, the `upl_*` family, and new `ipc_port_*` and
     # `memory_object_*` stubs).
     OSFMK_VM_VM_MAP_STORE_RB_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_STORE_RB_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_map_store_rb.o}
+    # `osfmk/vm/vm_user.c` -> **16196 bytes of text, 25856 bytes of file, 91 references** - the object
+    # `vm_allocate_kernel` is in, and the largest step since this sequence began in earnest. Unlike
+    # 245, 246 and 247 it brings a great deal with it: `vm_map_copy_discard`, `vm_map_copy_extract`,
+    # `vm_map_copyin_common`, `vm_map_copyout`, `vm_map_copy_overwrite`, `vm_map_protect`,
+    # `vm_map_remove`, `vm_map_wire_kernel`, `vm_map_msync`, the `upl_*` family, and references to
+    # `ipc_port_*`, `memory_object_*`, `vm_object_*` and `vm_page_*` that will mostly be new stubs.
+    #
+    # The stop it answers is `vm_mem_bootstrap+0xf4`: `vm_allocate_kernel(kernel_map, &kmapoff_kaddr,
+    # kmapoff_pgcnt * PAGE_SIZE_64, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_OSFMK)`, called because
+    # `PE_parse_boot_argn("kmapoff", ...)` returned FALSE and `early_random() & 0x1ff` was non-zero.
+    #
+    # Its text is more than twice anything linked since 239, so this is the step where the entry
+    # image may finally move an address again: 245, 246 and 247 fitted inside the linker script's
+    # alignment padding, and 16 KB is more than three times what those three took between them.
+    #
+    # **248 measured it: it does, and it stops where the source says it should.** Resolved 9, added 6
+    # (`ipc_kobject_set`, `ipc_port_alloc_special`, `ipc_port_copy_send`, `ipc_port_nsrequest`,
+    # `ipc_space_kernel`, `vm_fault` - the Mach IPC port the memory-entry path needs and the page-fault
+    # entry) so 626 -> 623 undefined, 541 -> 539 function and 85 -> 84 storage stubs, `log_executable_mem_entry`
+    # being the storage one. Text 617809 -> 634033 (+16224) **did not fit**: the image grew 719736 ->
+    # 736192, `.bss` moved 0x800af4f0..0x800de208 -> 0x800b34f0..0x800e2208, `__entry_image_end` 0x800de208
+    # -> 0x800e2208 with `end_kern` 0x800df000 -> 0x800e3000, the derived `boot_args` offset 917504 ->
+    # 933888, headroom 1187320 -> 1170936, and the payload was rebuilt from the regenerated header. The
+    # three preceding steps had all fitted in the alignment padding; this is where those "unchanged"
+    # rows end, which is what the layout block exists for.
+    #
+    # Device: **`stub_hit=kext_alloc_init`, `xnu_entry_stub_caller=0x800404a4`** = `vm_mem_bootstrap+0x1a8`,
+    # whose `caller - 4` is `800404a0: bl 800873e4 <kext_alloc_init>` - one call past a platform pmap
+    # initialisation, exactly as predicted. `kv_written == kv_in_dram == 0x3c`. What ran, in order, by
+    # *completing*: `vm_allocate_kernel` returned KERN_SUCCESS (its argument checks passed and its one
+    # call, `vm_map_enter`, entered `kmapoff_pgcnt * 4096` bytes into `kernel_map` - a real kernel
+    # virtual allocation through the map code 247 created); `PE_parse_boot_argn("log_executable_mem_entry")`
+    # ran; **`pmap_init()` ran**; `kmem_alloc_ready = TRUE` was stored; and
+    # `PE_parse_boot_argn("zsize")` returned FALSE so `zsize = sane_size >> 2` and its clamps ran.
+    # `zone_init` (`+0x204`) is real and is the step after this stub.
+    #
+    # Next: `kext_alloc_init` is in `osfmk_kern_kext_alloc.o` - 344 bytes of text, four definitions
+    # (`kext_alloc_init`, `kext_alloc`, `kext_free`, `g_kext_map`) and four references, of which
+    # `mach_vm_allocate_kernel` and `mach_vm_deallocate` are still stubs and `mach_vm_allocate_kernel`
+    # is in the object this step links.
+    OSFMK_VM_VM_USER_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_USER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_user.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -2172,6 +2213,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_VM_VM_MAP_STORE_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_VM_VM_USER_OBJ"       "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
@@ -2180,7 +2222,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
