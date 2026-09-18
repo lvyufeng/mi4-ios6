@@ -1895,6 +1895,36 @@ null pointer constant in C++, so every `return NULL;` in a `.cpp` was an error; 
 came from a `.cpp` the flag list could not stop from being compiled. A measurement can be an artifact
 and still have something real inside it.
 
+**AND ONE FORCE-INCLUDE WAS REWRITING DECLARATIONS** (2026-09-18,
+[`experiment-157`](../experiments/experiment-157-the-force-include-was-rewriting-declarations.md)).
+`-include kern/queue.h` was in both build scripts' force-include lists, for `mpqueue_head_t`. What it
+also did is pull two **function-like macros** into every translation unit —
+`osfmk/kern/queue.h:224-225` is `#define enqueue(queue,elt) enqueue_tail(queue, elt)` and the same for
+`dequeue`. `iokit/IOKit/IODataQueue.h:131` declares `virtual Boolean enqueue(void *data, UInt32
+dataSize);`, and a function-like macro fires on `name(`, so the declaration became `enqueue_tail(...)`
+while the definition at `IODataQueue.cpp:157` kept its own name — the file `#undef`s the macro at
+`:47`, four lines after the include that needed it. Two IOKit files failed with "out-of-line
+definition of 'enqueue' does not match any declaration", a message that names neither the macro nor
+the header.
+
+Removing the line: C++ **78 → 80 of 83** in both configurations, C unchanged at 608/615 and 414/426,
+objects 686 → 688, and **all 686 shared objects byte-identical**, with the undefined lists identical
+(`RELEASE` 189, `STAGE90_BOOT` 330) and the boot path unmoved at 42 / 50. The `mpqueue_head_t`
+justification was obsolete — `cpu_data_internal.h` reaches it another way. The layer script had the
+same line for the same reason: **32 of 32, all 32 objects byte-identical, 445-symbol undefined list
+identical**, so it is gone from both and the two scripts still describe one configuration.
+
+**Third time a force-include has cost more than it bought** (a `stdatomic.h` that reached `ptrdiff_t`
+and broke eight zlib files, and a `stdbool.h` shim that fixed one file and broke 78 — both
+experiment-151). The shape is the same each time: a force-include is a global edit to every
+translation unit, and the damage surfaces somewhere else entirely. Each entry in that list now carries
+a **measurement** rather than a reason it might help — three of them had a reason and no measurement.
+
+**The C++ block is at 80 of 83, three files left, no two alike**: `OSKext.cpp` on
+`kxld_create_context`'s signature, `OSKextLib.cpp` on `kext_request`'s language linkage, and
+`OSRuntime.cpp` on `operator new[]`'s `size_t` (the target triple). The seven C failures are unchanged
+and both configurations fail the same three.
+
 **AND THE MIG RUN WAS MISSING ONE WORD FROM APPLE'S DEFINE LIST** (2026-09-18,
 [`experiment-156`](../experiments/experiment-156-the-mig-run-was-missing-kernel.md)).
 `gen_mach_headers.sh` preprocesses each `.defs` before MIG, with a hand-written flag list — four

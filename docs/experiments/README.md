@@ -170,6 +170,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-154](experiment-154-cpp-entered-the-build.md) | The C++ Block Entered the Build at 75 of 83 — and the Line Blocking It Was Mine |
 | stage90 | [experiment-155](experiment-155-the-translator-wrote-into-the-tree.md) | The Assembler Translator Was Writing Into Apple's Tree, Through a Symlink |
 | stage90 | [experiment-156](experiment-156-the-mig-run-was-missing-kernel.md) | The MIG Run Was Missing `-DKERNEL` — 13 Symbols, and Every Routine Name |
+| stage90 | [experiment-157](experiment-157-the-force-include-was-rewriting-declarations.md) | `-include kern/queue.h` Was Rewriting Declarations Before the Compiler Saw Them |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

@@ -135,10 +135,23 @@ rm -f "$OUT"/*.o
 # worked out and where each one's reason is recorded. Duplicated here rather than factored out
 # because the two scripts want to stay independently runnable; if they drift, this comment is the
 # pointer back.
+#
+# **`-include kern/queue.h` was in both lists and is gone from both.** `kern/queue.h:224-225` defines
+# two *function-like* macros —
+#
+#     #define enqueue(queue,elt)  enqueue_tail(queue, elt)
+#     #define dequeue(queue)      dequeue_head(queue)
+#
+# — so `iokit/IOKit/IODataQueue.h:131`'s `virtual Boolean enqueue(void *data, UInt32 dataSize);` was
+# rewritten to `enqueue_tail(...)` on the way through the preprocessor, while the out-of-line
+# definition at `IODataQueue.cpp:157` (which `#undef`s the macro at `:47`, too late) kept its own
+# name. Two IOKit files failed with "out-of-line definition of 'enqueue' does not match any
+# declaration", a message that names neither the macro nor the header. Removing the force-include
+# leaves **every other object byte-identical** and takes C++ from 78 to 80 of 83. Apple force-includes
+# nothing; see experiment-157.
 FORCE_INCLUDES=(
     -include sys/_types/_u_int.h
     -include arm/simple_lock.h
-    -include kern/queue.h
     -include kern/ast.h
     -include mach/task_policy.h
     -include mach/thread_policy.h

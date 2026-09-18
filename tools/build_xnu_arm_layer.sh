@@ -70,7 +70,7 @@ rm -f "$OUT"/*.o
 #   sys/_types/_u_int.h     kern/sched.h uses `u_int` without including sys/types.h, and the whole
 #                           of sys/types.h collides with kern_types.h (both define clock_t).
 #   arm/simple_lock.h       defines decl_simple_lock_data and is included by NOTHING in the tree.
-#   kern/queue.h, kern/ast.h  carry mpqueue_head_t and ast_t, which cpu_data_internal.h uses.
+#   kern/ast.h              carries ast_t, which cpu_data_internal.h uses.
 #   stdatomic.h             with -ffreestanding this is XNU's own, which defines the
 #                           `enum memory_order` its atomics name.
 #   mach/task_policy.h, mach/thread_policy.h  the QoS *_policy structs are members of task_t and
@@ -78,11 +78,25 @@ rm -f "$OUT"/*.o
 #                           kern/thread.h includes.
 #   mi4ios6_build_config.h  the declarations this configuration supplies (currently `uint_t`) -
 #                           see the file, it is not a stand-in for a missing header.
+#
+# **`kern/queue.h` used to be in this list and is deliberately not.** It was here for
+# `mpqueue_head_t`; the measurement says `cpu_data_internal.h` reaches that type another way, since
+# dropping it leaves all 32 objects **byte-identical** and the undefined list identical at 445. What
+# it did cost is a pair of *function-like macros* — `kern/queue.h:224-225` is
+#
+#     #define enqueue(queue,elt)  enqueue_tail(queue, elt)
+#     #define dequeue(queue)      dequeue_head(queue)
+#
+# — force-included into every translation unit, where `iokit/IOKit/IODataQueue.h:131` declares
+# `virtual Boolean enqueue(void *data, UInt32 dataSize);`. A function-like macro expands on `name(`,
+# so the declaration became `enqueue_tail(...)` while the out-of-line definition in
+# `IODataQueue.cpp:157` kept its name, and the file failed with "out-of-line definition of 'enqueue'
+# does not match any declaration" — a message that names neither the macro nor the header. Two files,
+# both IOKit. Apple force-includes nothing; see experiment-157.
 # ---------------------------------------------------------------------------------------------
 FORCE_INCLUDES=(
     -include sys/_types/_u_int.h
     -include arm/simple_lock.h
-    -include kern/queue.h
     -include kern/ast.h
     -include stdatomic.h
     -include mach/task_policy.h
