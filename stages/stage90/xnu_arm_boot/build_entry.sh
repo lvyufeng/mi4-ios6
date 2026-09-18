@@ -151,6 +151,27 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # - the one whose call the `DTInit` probe in entry_stubs.c is waiting for - would still not be
     # reached. So both are here: the edge the device named, and the one symbol that edge needs.
     ARM_STRLEN_OBJ=${STAGE90_ENTRY_STRLEN_OBJ:-$REPO_ROOT/out/xnu_asm_obj/strlen.o}
+    # XNU 4570's own device-tree reader, `pexpert/gen/device_tree.c`, and this is the object whose
+    # *absence* made `DTInit` a symbol experience-170's probe reported. It defines `DTInit`,
+    # `DTFindEntry`, `DTGetProperty`, `DTLookupEntry`, `DTInitEntryIterator` and `DTIterateEntries`
+    # - five of which are also in `nm -u` on the object below, so it is named twice over.
+    #
+    # It is XNU 4570's, not the 2050 reader the *payload* links behind `STAGE90_XNU_REAL_DT`
+    # (`out/stage90/xnu-objects/device_tree.o`, 3880 bytes, `DTCreateEntryIterator`). Exp-106 found
+    # from the other side that the two are not interchangeable; this is the side where it matters,
+    # because the caller here is 4570's own `pe_init.o` and the iterator API it uses
+    # (`DTInitEntryIterator`) does not exist in 2050.
+    ARM_DEVICE_TREE_OBJ=${STAGE90_ENTRY_DEVICE_TREE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_gen_device_tree.o}
+    # `pexpert/arm/pe_identify_machine.c`. Strictly this is the call `PE_init_platform` makes after
+    # `DTInit` (`pe_init.c:311`), and the one this project's method would let a run name - but the
+    # object above cannot produce a run worth doing on its own: 4570's `DTInit` is
+    # `DTRootNode = base; DTInitialized = (DTRootNode != 0);`, two statements with no calls in them,
+    # so the only outcome of linking it alone is the stub for this object's function firing. It is
+    # linked here because it is what makes the reader above do something measurable: its first act
+    # is `pe_arm_get_soc_base_phys()`, which finds `arm-io` in the tree, reads `device_type` and
+    # `ranges`, and returns `ranges[1]` - so this is the object that turns "the reader is present"
+    # into "the reader read this project's device tree".
+    ARM_PE_IDENTIFY_OBJ=${STAGE90_ENTRY_PE_IDENTIFY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/pexpert_arm_pe_identify_machine.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -159,8 +180,11 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$ARM_PE_INIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_STRLCPY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_STRLEN_OBJ"  "run ./tools/assemble_arm_layer.sh first"
+    require "$ARM_DEVICE_TREE_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$ARM_PE_IDENTIFY_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
-                "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ")
+                "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
+                "$ARM_PE_IDENTIFY_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

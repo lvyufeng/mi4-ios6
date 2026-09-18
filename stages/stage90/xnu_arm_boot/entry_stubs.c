@@ -341,34 +341,34 @@ void entry_stub_hit(const char *name)
 
 #ifdef STAGE90_ENTRY_REAL_ARM_INIT
 /*
- * `DTInit(void *base)` - the one stub in this image that reports more than its own name.
+ * `ml_parse_cpu_topology()` - the statement `arm_init` executes next, after `PE_init_platform`
+ * returns (`osfmk/arm/arm_init.c:217`, the first call after the arm64-only block that follows
+ * `:159`). It is a stub here, and like `DTInit` before it, not one that only names itself.
  *
- * It is called from `PE_init_platform` (`pexpert/arm/pe_init.c:310`), and this image links
- * `pexpert/arm/pe_init.o` and nothing else, so it is a stub here. But its single argument *is*
- * `PE_state.deviceTreeHead`, which the statement above it copied out of `boot_args->deviceTreeP`
- * (`:293`), so printing r0 prints XNU's own view of where the device tree is: the address this
- * project's payload chose, read back out of XNU's structure by XNU's own function. That is a value
- * XNU's boot path produced, not one this project put in a log line of its own.
+ * By the time it fires, `pe_identify_machine` has run - the real one, `pexpert/arm/pe_identify_machine.c`,
+ * whose *first act* is `pe_arm_get_soc_base_phys()`: find the `arm-io` node with `DTFindEntry`,
+ * read its `device_type` and its `ranges` property, keep `ranges[1]`, and return that; a zero return
+ * makes `pe_identify_machine` give up before reading `/cpus` at all. So calling it again from here
+ * - it is exported, and the second call returns the cached value without touching the tree - prints
+ * the number XNU's own reader took out of `arm-io`'s `ranges` property in the device tree this
+ * project built. Non-zero means the walk found the node and read the property; zero means it did
+ * not, and the two are the experiment.
  *
- * **It did not fire in experiment-169, and the reason is worth keeping here.** The experiment
- * predicted this would be the next edge, from reading `PE_init_platform`; the device said
- * `stub_hit=strlcpy` instead, because the `PE_state.video.v_pixelFormat` assignment at `:302`
- * comes *before* the `DTInit` call at `:310` and `strlcpy` is the first thing in the function that
- * is not in the image. So this definition is the instrument for the run after that one - the one
- * that links `osfmk/arm/strlcpy.o` - and it is written now, ahead of the edge, so that the run
- * that reaches it reports a value rather than only a name.
+ * The `arm-io` requirement is not new - `tools/xnu_dt_requirements.py` found it by reading XNU - but
+ * this is the first time the value XNU gets from it is measured on the hardware rather than
+ * predicted from the source.
  *
- * Hand-written rather than generated for the same reason `panic` is: this file defines it, so
- * pass 1 never sees it undefined and the generator never emits a version of it. When a later
- * experiment links the object that really defines `DTInit` (`pexpert/gen/device_tree.o`, XNU
- * 4570's own reader), the link will report a duplicate symbol and this definition is what goes.
+ * `DTInit` used to be hand-written here for the same purpose, in experiments 169 and 170. Linking
+ * `pexpert/gen/device_tree.o` below defined it for real and the link reported the duplicate, which
+ * is the mechanism this file's header describes; the definition is gone and this one takes its
+ * place, one edge further on.
  */
-void entry_stub_hit(const char *name) __attribute__((noreturn));
+uint32_t pe_arm_get_soc_base_phys(void);   /* vm_offset_t, and 32-bit on this target */
 
-int DTInit(void *base)
+void ml_parse_cpu_topology(void)
 {
-    entry_kv("xnu_entry_dtinit_base", (uint32_t)(uintptr_t)base);
-    entry_stub_hit("DTInit");
+    entry_kv("xnu_entry_soc_base_phys", pe_arm_get_soc_base_phys());
+    entry_stub_hit("ml_parse_cpu_topology");
 }
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */
 
