@@ -102,6 +102,21 @@ fi
 # variable is the symbol name; `entry_checkpoint.c` carries the argument. Unset - which is the
 # default and every stage image - the file is not compiled and the link is unchanged.
 ENTRY_CHECKPOINT=${STAGE90_ENTRY_CHECKPOINT:-}
+# `STAGE90_ENTRY_CHECKPOINT_SKIP=<n>` makes that checkpoint non-terminal: the first `n` calls go
+# through to the real function and the (n+1)th reports. It exists because a `--wrap` redirects
+# *every* reference, and a name whose first executed site is already behind the frontier - which is
+# most of `cpu_machine_idle_init`'s twenty calls, `ml_static_vtop` eight times among them - can
+# otherwise not be probed at a later site at all. Only meaningful with `STAGE90_ENTRY_CHECKPOINT`.
+ENTRY_CHECKPOINT_SKIP=${STAGE90_ENTRY_CHECKPOINT_SKIP:-}
+# `STAGE90_ENTRY_CHECKPOINT_AFTER=1` makes that checkpoint terminal *after* the call instead of at
+# it: the wrapper calls the real function, records `cp_ret` - its return value - and then reports.
+# It answers the one question neither of the other two variants can: what a function *did* rather
+# than where it was called from. A report is a returned value; a silence is a function that does not
+# return, which is a finding rather than an absence because the plain checkpoint on the same symbol
+# has already proved the call site is reached. It composes with `_SKIP`: the first `n` calls pass
+# through and the `n+1`th is the one run for real. `AFTER` alone is `SKIP=0`. Its one limitation is
+# in `entry_checkpoint.c` and applies to callees with stack arguments, `bcopy_phys` among them.
+ENTRY_CHECKPOINT_AFTER=${STAGE90_ENTRY_CHECKPOINT_AFTER:-}
 CHECKPOINT_LDFLAGS=()
 if [[ -n $ENTRY_CHECKPOINT ]]; then
     CHECKPOINT_LDFLAGS=(--wrap=$ENTRY_CHECKPOINT)
@@ -181,11 +196,24 @@ fi
 # three lines; the symbol name arrives as a bare token so the wrapper's own name can be built from
 # it with `##` and the string it reports with `#`.
 if [[ -n $ENTRY_CHECKPOINT ]]; then
+    CHECKPOINT_DEFINES=(-DSTAGE90_ENTRY_CHECKPOINT_SYM="$ENTRY_CHECKPOINT")
+    if [[ -n $ENTRY_CHECKPOINT_SKIP ]]; then
+        CHECKPOINT_DEFINES+=(-DSTAGE90_ENTRY_CHECKPOINT_SKIP="$ENTRY_CHECKPOINT_SKIP")
+    fi
+    if [[ -n $ENTRY_CHECKPOINT_AFTER ]]; then
+        CHECKPOINT_DEFINES+=(-DSTAGE90_ENTRY_CHECKPOINT_AFTER=1)
+    fi
     run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
         -O2 -Wall -Wextra -Werror -std=gnu11 \
-        -DSTAGE90_ENTRY_CHECKPOINT_SYM="$ENTRY_CHECKPOINT" \
+        "${CHECKPOINT_DEFINES[@]}" \
         -c "$BOOT_DIR/entry_checkpoint.c" -o "$OUT/xnu_arm_entry_checkpoint.o"
-    say "  STAGE90_ENTRY_CHECKPOINT=$ENTRY_CHECKPOINT: stopping there"
+    if [[ -n $ENTRY_CHECKPOINT_AFTER ]]; then
+        say "  STAGE90_ENTRY_CHECKPOINT=$ENTRY_CHECKPOINT: running call $(( ${ENTRY_CHECKPOINT_SKIP:-0} + 1 )) for real and reporting its return value"
+    elif [[ -n $ENTRY_CHECKPOINT_SKIP ]]; then
+        say "  STAGE90_ENTRY_CHECKPOINT=$ENTRY_CHECKPOINT: stopping at call $((ENTRY_CHECKPOINT_SKIP + 1))"
+    else
+        say "  STAGE90_ENTRY_CHECKPOINT=$ENTRY_CHECKPOINT: stopping there"
+    fi
 fi
 
 # The part of the entry image that runs XNU's own code. clang, because the XNU objects it links
@@ -3070,6 +3098,85 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 283: `kernel_set_special_port`, and the frontier 280 first predicted - read at last
+    #
+    # **The plain run reported.** With the pad no longer executed - no checkpoint, no `--wrap`, just
+    # the image - the run came back at 301124 bytes with
+    #
+    #     stub_hit=kernel_set_special_port        xnu_entry_stub_caller=0x800b7648
+    #
+    # and 0x800b7648 is the return address of the `bl kernel_set_special_port` at 0x800b7644, inside
+    # `ipc_host_init` (`0x800b75d0`, linked in 277). This is the symbol the 280-era ledger named from
+    # reading `ipc_host.c` - "`ipc_host_init` runs `bl ipc_kobject_set` (+0x5c) and
+    # `bl ipc_port_make_send` (+0x64), both real and neither ever executed, and then
+    # `bl kernel_set_special_port` (+0x74), which **is** a stub - so the run has to report from
+    # there" - and the run it was written for could not produce it, because that run's silence was
+    # the instrument's. Four experiments later the same prediction is measured: the run executes
+    # `ipc_kobject_set` and `ipc_port_make_send` (both real, both new since 277) and stops three
+    # instructions later on the one symbol in the body that is still a stub.
+    #
+    # The call is the `HOST_SECURITY_PORT` one: the disassembly of `ipc_host_init` is a three-fold
+    # repetition of `ipc_port_alloc_special` / `ipc_kobject_set` / `ipc_port_make_send` /
+    # `kernel_set_special_port`, and at the reporting site `r1` is `mov r1, #0` - `HOST_SECURITY_PORT`
+    # - which matches `ipc_host.c:113`, the first of the three.
+    #
+    # **What makes this step worth predicting carefully: `kernel_set_special_port` is the only stub
+    # in the whole reachable body.** Measured rather than argued, by listing every `bl` in
+    # `ipc_host_init` (16 calls) and in `ipc_init` (5) and checking each target against the image's
+    # own undefined list:
+    #
+    #     ipc_host_init      lck_mtx_init, ipc_port_alloc_special, ipc_kobject_set,
+    #                        ipc_port_make_send  x3, kernel_set_special_port x3  <- the only stubs
+    #     ipc_init           kmem_suballoc x2 (panic-guarded), ipc_host_init   <- ipc_host_init is last
+    #     kernel_bootstrap   every one of its calls is real, 0 of 46 stubs
+    #
+    # So this step cannot stop anywhere in `ipc_host_init`, `ipc_init` or `kernel_bootstrap`: all
+    # three run to completion once `host.o` is linked, and the next report must come from *deeper* -
+    # from inside one of the init functions `kernel_bootstrap` calls after `ipc_init` returns
+    # (`mapping_free_prime`, `machine_init`, `clock_init`, `ledger_init`, `coalitions_init`,
+    # `task_init`, `thread_init`, `atm_init`, `mach_init_activity_id`, `bank_init`,
+    # `ipc_pthread_priority_init`, `corpses_init`) or from something they reach. None of those twelve
+    # calls a stub directly - measured the same way - so the next frontier is *transitive*, which is
+    # the first time in this walk that it is.
+    #
+    # **The object, measured.** `osfmk_kern_host.o` is 4920 bytes of text, 48 of data, 452 of bss, 26
+    # definitions and 60 references. Against this image it resolves **19** - eighteen function stubs
+    # plus `realhost`, which is a *storage* stand-in of 0x194 bytes whose real definition this object
+    # carries:
+    #
+    #     host_get_io_master   host_get_special_port      host_info          host_kernel_version
+    #     host_page_size       host_priv_self             host_priv_statistics  host_processor_info
+    #     host_processors      host_processor_set_priv    host_processor_sets   host_self
+    #     host_set_atm_diagnostic_flag   host_set_multiuser_config_flags
+    #     host_set_special_port          host_statistics     host_statistics64
+    #     kernel_set_special_port        realhost
+    #
+    # and adds **7** new obligations, each a function or variable this build has already compiled, so
+    # each stand-in's size still comes from its own definition rather than from a guess - the rule
+    # since 244:
+    #
+    #     atm_set_diagnostic_config   avenrun   commpage_update_multiuser_config
+    #     dead_task_statistics        mach_factor   mac_task_check_set_host_special_port
+    #     vm_purgeable_stats
+    #
+    # `realhost` is the interesting one. 277 sized the stand-in at 0x194 bytes and `ipc_host_init`
+    # wrote every byte of it - the run measured that - and this step replaces the stand-in with the
+    # real definition, so the two sizes can now be compared for the first time. The three
+    # `kernel_set_special_port` calls go on to write `realhost.special[id] = port` at offsets 0x94,
+    # 0x98 and 0x9c of it (`host.c:896`), which is inside the part 277's stand-in also covered.
+    #
+    # **Prediction: a report, and not a silence.** The instrument is fixed and the last three runs
+    # before this one - `CleanPoC_DcacheRegion`, `machine_startup`, and the plain run - each reported
+    # from further along. The three `kernel_set_special_port` calls are the only stub calls in
+    # `ipc_host_init`, so all three return and the function completes; `ipc_init` completes with it,
+    # since `ipc_host_init` is its last call; and `kernel_bootstrap` has no stubs at all, so the run
+    # leaves the whole of XNU's `kernel_bootstrap` behind and reports from inside `task_init`,
+    # `thread_init`, `machine_init`, `clock_init` or whatever they reach. The *name* is not predicted
+    # - it is the first stub on a transitive path - but the shape is: `stub_hit=<name>` with
+    # `xnu_entry_stub_caller` inside one of those functions or their callees, and no `exception:`
+    # line. A silence here would mean a real hang at the first stub-free stretch of the boot, which
+    # would be a result in its own right and would be the first trustworthy one of those.
+    OSFMK_KERN_HOST_OBJ=${STAGE90_ENTRY_OSFMK_KERN_HOST_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_host.o}
     # 280: `klist_init`, and a step that needed a size decision before it could be built.
     # 279's stop was `klist_init`, and the object that defines it is `bsd/kern/kern_event.c`
     # (manifest:34), `bsd_kern_kern_event.o` - the largest step this walk has taken by a wide margin:
@@ -3208,6 +3315,1724 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # 280 is therefore a step that is **built, predicted, instrumented and not finished**: the walk
     # stands one object short of the frontier it reached in 279, and the next move is not another
     # object. `docs/experiments/experiment-280-*.md` carries the whole record.
+    #
+    # ---------------------------------------------------------------- 280, continued: the bisect
+    #
+    # The checkpoint instrument (`entry_checkpoint.c`, `STAGE90_ENTRY_CHECKPOINT=<symbol>`) bisects
+    # the silence. Three runs, all on the 280 configuration, all with `persistent_write_attempted`
+    # clean in every place and `failure_mask=0x00000000` in every contract:
+    #
+    #   cpu_data_init   (step 1,  `arm_init+0x40`)  -> **reports**, `caller_v=0x80002fc8`
+    #   arm_vm_init     (step 18, `arm_init+0x1d4`) -> **reports**, `caller_v=0x80003160`
+    #   machine_startup (step 19, `arm_init+0x340`) -> **silent**
+    #
+    # The first two are what makes the third a measurement rather than another silence: the report
+    # path works in this image (two independent reports) and `_start`, `arm_init` and everything the
+    # ladder reaches before `arm_vm_init` all execute. So the silence is not at the frontier 279
+    # stopped at, and it is not the instrument.
+    #
+    # The middle one has to be read carefully, and the careless reading is wrong: `--wrap` *replaces*
+    # the function, so a checkpoint at `arm_vm_init` proves the run reaches the call site at
+    # `8000315c` and says nothing at all about `arm_vm_init`'s 0x790 bytes. The interval the silence
+    # lives in is therefore
+    #
+    #     [arm_init+0x1d8, arm_init+0x340)  =  arm_vm_init's body  +  the eighteen real calls after it
+    #
+    # and in 279 *both* halves ran: 279's run reported from `klist_init`, which is reached through
+    # `machine_startup` -> `kernel_bootstrap` -> `ipc_init` -> `ipc_host_init` -> `ipc_port_alloc_
+    # special` -> `ipc_mqueue_init`. Every one of those eighteen calls is real code below
+    # `0x800bb000`, in the address band 279 and 280 are instruction-identical across, so what kills
+    # the 280 run is a layout-dependent difference in *data*, not in code - and the first question is
+    # which half of the interval it is in.
+    #
+    # **Prediction, before the device is touched. `STAGE90_ENTRY_CHECKPOINT=patch_low_glo_static_
+    # region` reports, with the caller at `0x80003160`, `cp_arg0=0x80300000` and `cp_arg1=0x00006000`.**
+    #
+    # `patch_low_glo_static_region` is the last thing `arm_vm_init` does and the *only* thing in the
+    # image that references it is `arm_vm_init`'s own tail branch:
+    #
+    #     80018b0c  bl pmap_bootstrap                     ; +0x63c
+    #     80018b14  bl arm_vm_prot_init                   ; +0x644  (the granular mappings)
+    #     80018bc0  bl pmap_init_pte_page                 ; +0x6f0  (the pte loop)
+    #     80018c20  movw r2, #0xfff / ldr r1, [sl]
+    #     80018c28  add r1, r1, r2 / bfc r1, #0, #12      ; avail_start = round_page(avail_start)
+    #     80018c34  ldr r0, [r0, #16]                     ; args->topOfKernelData
+    #     80018c44  sub r1, r1, r0                        ; the size argument
+    #     80018c4c  pop {r4, r5, r6, r7, r8, r9, sl, fp, lr}
+    #     80018c50  b 8002ade8 <patch_low_glo_static_region>   ; a TAIL CALL - and its one reference
+    #
+    # So a report here says `arm_vm_init` ran to its last instruction: the 16 KB `bcopy` of the boot
+    # page table, the `tte` fault-clearing walk, all seven `getsegdatafromheader` lookups, the
+    # `getsectbynamefromheader(__DATA,__const)` and its `nextsect`, `getlastaddr`, `vm_set_page_
+    # size`, `set_mmu_ttb` + `set_mmu_ttb_alternate` + `flush_mmu_tlb` (the point the MMU starts
+    # walking XNU's own tables), `pmap_bootstrap`, `arm_vm_prot_init` with every `arm_vm_page_
+    # granular_*` call, and the `pmap_init_pte_page` loop. And because the branch is a `b` and not a
+    # `bl`, `lr` is still the value `arm_init` left at `80003160` - so the caller key is
+    # `arm_init+0x1d8`, which is the *same* key the `arm_vm_init` checkpoint reported, for a
+    # different reason, and a report here that reads anything else is a finding on its own.
+    #
+    # The two arguments are the second half of the prediction and they are checkable arithmetic:
+    # `args->topOfKernelData` is the payload's `0x80300000`, and `avail_start` is
+    # `cpu_ttep + ARM_PGBYTES*6` where `cpu_ttep = boot_ttep + ARM_PGBYTES*4` (`arm_vm_init.c:373,399`)
+    # - `0x80304000 + 0x6000 = 0x8030A000` - and then the 4 MB alignment loop takes one page per
+    # iteration for `off = 0` and `off = 4MB` against `off_end = (2 + mem_segments*3) << 20 = 5 MB`
+    # (`arm_vm_init.c:514,517,523`), so `avail_start` is `0x8030C000` by the tail call and the size
+    # is `0x8030C000 - 0x80300000 = 0xC000`.
+    #
+    # **The run was silent.** `STAGE90_ENTRY_CHECKPOINT=patch_low_glo_static_region`, built and run
+    # on the same device through the same capture: the payload's ladder completes, the jump line is
+    # written, and after it not one byte - `stub_hit` count 0, no `cp_arg*` record, no `exception:`,
+    # `xnu_entry_abort_entries=0x0`. Safety counters clean in every place. So the last instruction of
+    # `arm_vm_init` is not reached either, and the silence is **inside `arm_vm_init`'s 0x790 bytes**,
+    # not in the eighteen calls after it. Note the asymmetry that produced the answer: this probe is
+    # a *tail branch*, so it can only be reached by a run that has already executed everything in
+    # `arm_vm_init` above it, and the two probes that reported (`cpu_data_init`, `arm_vm_init`) are
+    # both before the function's first byte.
+    #
+    # **A correction owed to the prediction, made after the run and not by it.** As first written
+    # that paragraph said `avail_start` is `0x80306000` and the size `0x6000`; `0x80304000 + 0x6000`
+    # is `0x8030A000`, so the sentence and the number were both wrong, and the two pages the loop
+    # takes are the rest of the difference. The run was silent, so the argument was never read and
+    # the slip measured nothing - but it was written down as a prediction, which is exactly the kind
+    # of claim this walk's prediction blocks exist to be checked against.
+    #
+    # The wrapper's own body is two stores to `lowGlo+0x3b4`/`+0x3b8` at `0x8010c3b4`/`0x8010c3b8`
+    # (`lgStaticAddr`, `lgStaticSize`), so replacing it changes nothing the boot goes on to do; and
+    # `entry_checkpoint.c` now records the four raw `r0`-`r3` registers, which is what makes the
+    # arguments readable at all - a terminal wrapper never needed the prototype, but it can always
+    # read what the caller put in the registers.
+    #
+    # **The next step, and its prediction.** The interval is `arm_vm_init`'s body, and the calls in
+    # it that the whole image references exactly once are usable steps: `getlastaddr` (+0x2f8, one
+    # reference), `vm_set_page_size` (+0x470, one), `set_mmu_ttb` (+0x480, one), `set_mmu_ttb_alternate`
+    # (+0x488, one), `pmap_bootstrap` (+0x63c, one), `arm_vm_prot_init` (+0x644, one) and `nextsect`
+    # (one). `bcopy` (+0xac) has thirteen and `flush_mmu_tlb` (+0x48c) has twenty-four, so neither is.
+    #
+    # **`STAGE90_ENTRY_CHECKPOINT=vm_set_page_size` reports, with the caller at `0x80018944`.** It is
+    # 0x470 into a 0x790-byte function, i.e. past the header work and short of the MMU switch, so a
+    # report splits what is left in two: the 16 KB `bcopy` of the boot page table, the `tte`
+    # fault-clearing walk, the seven `getsegdatafromheader` lookups, `getlastaddr`,
+    # `getsectbynamefromheader(__DATA,__const)` and its `nextsect` would all be exonerated, and the
+    # failure would be in `set_mmu_ttb`/`set_mmu_ttb_alternate`/`flush_mmu_tlb`, `pmap_bootstrap`,
+    # `arm_vm_prot_init` with its eleven `arm_vm_page_granular_*` ranges, or the two-iteration pte
+    # loop. Its own body is three stores of constants (`page_mask` 0xfff, `page_size` 0x1000,
+    # `page_shift` 12) to three globals, so it cannot be the thing that hangs, and `nm` says the
+    # image has exactly one reference to it - `80018940 bl 80019320 <vm_set_page_size>`. Its
+    # `cp_arg0`-`cp_arg3` are `void`'s registers and are recorded rather than interpreted.
+    #
+    # **The run reported, exactly as predicted: `stub_hit=vm_set_page_size`, `caller_v=0x80018944`.**
+    # So 55% of `arm_vm_init` is exonerated - the 16 KB `bcopy` of the boot page table, the `tte`
+    # fault-clearing walk, all seven `getsegdatafromheader` lookups, `getlastaddr`, the `__DATA,__const`
+    # section lookup and its `nextsect`, and the `doconstro` sanity block. `cp_arg0`-`cp_arg3` read
+    # `1 / 0x800f2da0 / 1 / 1`, which is what a `void` function's registers look like: recorded and
+    # not interpreted. Safety counters clean in every place, and the device came back on its own.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=pmap_bootstrap` reports, with the
+    # caller at `0x80018b10` and `cp_arg0=0x80000000`.** The interval left is `[+0x48c, +0x780)`, and
+    # `+0x63c` is the nearest thing to its midpoint. What is *between* the last probe and this one is
+    # worth stating because it bounds what a silence here would mean: `set_mmu_ttb(cpu_ttep)` at
+    # `+0x480` and `set_mmu_ttb_alternate(cpu_ttep)` at `+0x488` write `cpu_ttep | 0x4a` to TTBR0 and
+    # TTBR1 (`machine_routines_asm.s:333,347` - the `orr #0x4a` is in the callee, so the checkpoint
+    # would see the register before that), `flush_mmu_tlb` at `+0x48c`, and then 432 bytes that store
+    # `vm_prelink_*`, `sane_size`, `max_mem`, `vm_kernel_slide`, `vm_kernel_stext/_etext/_base/_top`,
+    # `vm_kext_base/_top` and `vm_kernel_slid_base/_top`. Those thirteen stores are the *only* things
+    # in the interval that are not a call, and none of them can loop - so a silence at `pmap_bootstrap`
+    # would say the image does not survive the page-table switch, which is the one failure mode in
+    # this function that reports nothing at all: a fault taken with no vector the CPU can fetch, which
+    # is not an abort the handler can describe but a lockup.
+    #
+    # `pmap_bootstrap`'s own single argument is checkable in the image: at `80018af8 add r0, r0, r4`
+    # and `80018b00 bfc r0, #0, #22` fold `(gVirtBase + MEM_SIZE_MAX + 0x3FFFFF) & 0xFFC00000` into
+    # that - `MEM_SIZE_MAX` is a 64-bit constant whose low 32 bits are zero, so the addition is
+    # `0x80000000 + 0x3FFFFF = 0x803FFFFF` and the mask leaves `0x80000000`.
+    #
+    # **The run reported: `stub_hit=pmap_bootstrap`, `caller_v=0x80018b10` - and `cp_arg0` read
+    # `0xc0000000`, not the `0x80000000` predicted above.** The measurement is the one that is right
+    # and the explanation is one line: `#define MEM_SIZE_MAX 0x40000000` (`arm_vm_init.c:134`, the arm
+    # define - `arm64/arm_vm_init.c:181` has the `0x100000000ULL` the prediction assumed), so the sum
+    # is `0x80000000 + 0x40000000 + 0x3FFFFF = 0xC03FFFFF` and the mask leaves `0xC0000000`. The
+    # `cp_arg1`-`cp_arg3` values (`0 / 0x80116cf0 / 0x80116cf8`) are the two `.bss` addresses the
+    # preceding stores were using, i.e. caller leftovers, recorded and not interpreted.
+    #
+    # Which means the page-table switch *is* survived: `set_mmu_ttb`, `set_mmu_ttb_alternate` and
+    # `flush_mmu_tlb` all ran, and so did the 432 bytes of `vm_*` stores after them. That removes the
+    # one failure mode that would have explained a silence here - an image that stops executing the
+    # moment the MMU walks its own tables - and it leaves the rest of `arm_vm_init` as the only
+    # candidate interval: `pmap_bootstrap`'s body (`+0x63c`), `arm_vm_prot_init` with its eleven
+    # `arm_vm_page_granular_*` ranges (`+0x644`), the two-iteration pte loop (`+0x6f0`), and the tail
+    # branch that the `patch_low_glo_static_region` run already showed is not reached.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=arm_vm_prot_init` reports, with
+    # the caller at `0x80018b18` and `cp_arg0=0x80147000`.** The gap between `bl pmap_bootstrap` and
+    # `bl arm_vm_prot_init` is two instructions that cannot fail (`80018b10 mov r0, r9` /
+    # `80018b14 bl`), so a report here says exactly one thing and says it sharply: **`pmap_bootstrap`
+    # returned**. A silence says `pmap_bootstrap` is the hang - and that function is `osfmk/arm/pmap.c`'s
+    # own, the one experiment 195 measured from a probe that has since been compiled out, and the one
+    # that builds `kernel_pmap`, the pv-head and attribute tables and the page-table pages out of
+    # `avail_start`/`sane_size`.
+    #
+    # `cp_arg0` is the boot_args pointer: `80018b10 mov r0, r9` and `r9` holds the argument
+    # `arm_init` passed to `arm_vm_init`, so it must read `0x80147000` - the value the payload's own
+    # ladder reports as `xnu_entry_args_pa`, which is what makes it a check that joins the two halves
+    # of the run rather than a prediction about one of them.
+    #
+    # **The run was silent. `arm_vm_prot_init` is not reached, so `pmap_bootstrap` is the hang.**
+    # `+0x63c` reported and `+0x644` did not, and the two instructions between them cannot fail - so
+    # `pmap_bootstrap` is entered and never returns. Everything above it in `arm_vm_init` is now
+    # measured rather than argued, and so is everything below it: `arm_vm_prot_init`'s eleven
+    # `arm_vm_page_granular_*` ranges, the two-iteration pte loop, the tail branch and the eighteen
+    # calls after `arm_vm_init` are all unreached, and the `patch_low_glo_static_region` run already
+    # said so from the other end.
+    #
+    # ---------------------------------------------------------------- the shape of the silence
+    #
+    # **A panic in this image is silent, and that is the first thing to establish because it changes
+    # what "silent" means.** `panic()` writes its message through `printf`, and in this build
+    # `printf` and `kprintf` are both redirected to libkern's no-op sinks: `printf.c:195` is
+    # `int _consume_printf_args(int a __unused, ...) { return 0; }` and `printf.c:197` is
+    # `void _consume_kprintf_args(int a __unused, ...) {}`, and the calls in `arm_init`'s disassembly
+    # are `mov r0, #0; bl _consume_kprintf_args` - the format string is not even loaded. So a panic
+    # prints nothing at all, then goes to `panic_trap_to_debugger` / `DebuggerWithContext` and never
+    # comes back. It is indistinguishable from a hang **from the log**, which is the same defect this
+    # walk has hit three times: a measurement that is the thing that is wrong. The earlier note that
+    # "a panic there would say so" assumed output; in this configuration it cannot.
+    #
+    # **And there are exactly two panic sites in `pmap_bootstrap`, both in `pmap_load_io_rgns`
+    # (`pmap.c:2710`), which the compiler inlined into it.** Read off the image rather than guessed:
+    # the two `bl panic` are at `0x80021d40` and `0x80021d74`, and the format strings they load are
+    # `"pmap I/O region %d is not aligned to I/O granularity!\n"` and
+    # `"pmap I/O region %d size is not a multiple of I/O granularity!\n"` (`pmap.c:2730,2732`). The
+    # checks around them are exact, and they are device-tree checks - which matters, because the tree
+    # in this boot is this project's own:
+    #
+    #     80021d0c  ldr   r1, [sl]                    ; io_rgn_start
+    #     80021d10  ldr   r0, [r9, r6, lsl #4]!       ; ranges[i].addr (a 16-byte packed entry)
+    #     80021d1c  subs r0, r0, r1 / sbc r1, r2, #0  ; the 64-bit difference
+    #     80021d24  mov   r2, r4 / mov r3, #0         ; and io_rgn_granule
+    #     80021d28  bl    __aeabi_uldivmod            ; quotient in r0:r1, remainder in r2:r3
+    #     80021d2c  orrs  r0, r2, r3 / beq +0x1c      ; both zero means divisible
+    #     80021d34  movw  r0, #0xa971 / movt r0, #0x800e
+    #     80021d40  bl    panic                       ; (addr - io_rgn_start) % granule != 0
+    #     ...
+    #     80021d58  udiv  r1, r0, r4 / mls r1, r1, r4, r0 / cmp r1, #0 / beq
+    #     80021d68  movw  r0, #0xa9ab / movt r0, #0x800e
+    #     80021d74  bl    panic                       ; len % granule != 0
+    #
+    # `pmap_compute_io_rgns` (`pmap.c:2665`) reads `pmap-io-granule` and `pmap-io-ranges` from
+    # `/defaults` in the device tree and returns 0 early - leaving `io_rgn_granule` at zero, which
+    # makes `pmap_load_io_rgns` return at its first line - when either property is absent. So the way
+    # to reach the two panics below is to *have* both properties and have them disagree: a
+    # `pmap-io-ranges` whose entries do not line up with `pmap-io-granule`. (A granule that is zero or
+    # not page-aligned has its own panic, `pmap.c:2685-2686`, in the earlier function; a range that
+    # overlaps physical memory has another, `pmap.c:2702-2704`.) That is a check on this project's own
+    # device tree, which is the one part of the boot this walk *wrote* rather than inherited.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=panic` reports.**
+    #
+    # A checkpoint at `panic` fires at the **first** panic anywhere in the boot, and that is exactly
+    # the question this run needs answered: no panic happens before `pmap_bootstrap` (a panic would
+    # have halted the run and the `+0x63c` checkpoint would have been silent, and it was not), so a
+    # report here is a panic inside `pmap_bootstrap` and the caller names the site. The prediction is
+    # `stub_hit=panic` with `caller_v` at `0x80021d44` or `0x80021d78` - the return addresses of the
+    # two `bl panic` above - with `cp_arg0` the format string (`0x800ea971` or `0x800ea9ab` in this
+    # build, and it moves with the image, so it is read rather than predicted) and `cp_arg1` the
+    # region index `i`. A silence would mean `pmap_bootstrap` loops without panicking, and the next
+    # probe would be a call inside it.
+    #
+    # There is one honest caveat: `panic` has 1014 references in this image, so the checkpoint
+    # redirects all of them. That is harmless for a terminal wrapper - it is one build, one run, and
+    # the first panic is the only one that will ever be reached - but it means this build is a
+    # diagnostic and not a stage image, exactly as the tracer is.
+    #
+    # **`STAGE90_ENTRY_CHECKPOINT=panic` was silent.** A checkpoint at `panic` fires at the first
+    # panic anywhere in the boot, so a silence says `pmap_bootstrap` reaches neither of the two
+    # inlined `pmap_load_io_rgns` panics nor any other, and it made `pmap_bootstrap`'s own body the
+    # frontier. The rest of this block is what was then read out of the image to find where in that
+    # body a run could stop. **The positive control at the end of the block refutes the frontier** -
+    # not the reading, which is sound, and which is what made the control worth running.
+    #
+    # **`pmap_bootstrap`, read whole before spending another run on it.** The function's `bl` list is
+    # complete - there is no `blx`, no `ldr pc`, no `pop {...pc}` above the epilogue - and every one
+    # of the eight callees is real code, verified by disassembling each entry point:
+    #
+    #     hw_atomic_add         8001165c  ldrex r2, [r0] ...
+    #     arm_usimple_lock_init 80012aa4  push {fp, lr} ...
+    #     memset                8000374c  mov r3, r2 ...
+    #     DTLookupEntry         800052d8  push {r4-r9, sl, fp, lr}
+    #     DTGetProperty         800056e4  push {r4-r9, sl, fp, lr}
+    #     cpu_number            80008d70  mrc 15, 0, r0, cr13, cr0, {4}
+    #     PE_parse_boot_argn    80006cf4  mov r3, #0 ...
+    #     panic                 8002dc34  sub sp, sp, #12 ...
+    #
+    # so `pmap_bootstrap` cannot report a `stub_hit` however far into it a run gets - there is no stub
+    # in it to stop at. Its 466 main-body instructions contain exactly **two** backward branches, and
+    # both are bounded:
+    #
+    #     8002176c  bne 80021730   `pmap_compute_io_rgns`' ranges walk, bounded by prop_size/16
+    #     800219e4  bne 800219cc   `ptd_bootstrap`, bounded by ptd_root_table_size/sizeof(pt_desc_t)
+    #
+    # and the third loop, the `pmap_load_io_rgns` body at `80021cc8`, is **cold code placed after the
+    # epilogue** (`80021cc4 pop {r4, r5, r6, r7, r8, r9, sl, fp, pc}`), reached only by `bcs 80021cc8`
+    # from `80021970`. It is entered only when `/defaults` has both `pmap-io-granule` and
+    # `pmap-io-ranges` with `prop_size >= 16`, and its first act would be a `prop_size`-bounded walk
+    # of at most two entries. That is the one place a wild `io_attr_table` write could live, and this
+    # project's device tree does not supply either property - `grep -rn 'pmap-io-granule\|pmap-io-ranges'
+    # stages/ tools/` returns only comments in this file - so `io_rgn_granule` stays 0,
+    # `pmap_compute_io_rgns` returns 0 through its `return 0` paths, `niorgns` is 0, and
+    # `pmap_load_io_rgns` returns at its first instruction at `80021930`. Confirmed in the image:
+    # `80021928 ldr r0, [fp]` / `cmp r0, #0` / `80021934 beq 80021974`, where `fp = &io_rgn_granule`
+    # (`0x80118578`).
+    #
+    # Two things that were candidates and are now ruled out by reading rather than by running:
+    #
+    #   - **The `DTEntry` passed to `DTGetProperty` is not uninitialised.** `DTLookupEntry` returns
+    #     `kError` *without* writing `*foundEntry` (`pexpert/gen/device_tree.c:220-260`), and
+    #     `pmap_compute_io_rgns` compiles its `assert(err == kSuccess)` out - `80021658` reads the
+    #     stack slot straight into `DTGetProperty` with no compare against `800052d8`'s return. Had
+    #     `/defaults` been absent that would have been a garbage `DTEntry` dereferenced by
+    #     `DTGetProperty`'s `entry->nProperties`. It is present: experiment 193 added it
+    #     (`stage90_main.c:735`, `apple_dt_prop_str(b, "name", "defaults")`, asserted by
+    #     `apple_dt.c:230 expect_child(root, end, "defaults")` and counted in
+    #     `STAGE90_APPLE_DT_ROOT_CHILDREN 21`), so the lookup succeeds and the node's two properties
+    #     simply do not match.
+    #   - **`avail_start` and `mem_size` are sane and identical in both configurations.** `mem_size`
+    #     is `args->memSize` = `STAGE90_XNU_ENTRY_SIZE`, and that macro is
+    #     `ENTRY_SIZE=0x00200000` doubled until it covers `ENTRY_DT_OFFSET + ENTRY_DT_MAX` - a
+    #     constant of the device-tree layout, **not** a function of how big the entry image came out,
+    #     so it is 8 MB in 279 and in 280 alike (`avail_end = 0x80800000`). `avail_start` at
+    #     `pmap_bootstrap` is `cpu_ttep + ARM_PGBYTES*6` (`arm_vm_init.c:399`) = `0x80304000 + 0x6000`
+    #     = `0x8030A000` in both, `cpu_ttep` being `topOfKernelData + 0x4000` and `topOfKernelData`
+    #     unmoved at `0x80300000`. With `mem_size = 8 MB`: `npages = 2048`, `ptd_root_table_size =
+    #     24 * (1<<12) = 0x18000`, `ptd_bootstrap` walks 4096 entries, the big `memset` covers about
+    #     0x21000 bytes, and the whole table region `[0x8030A000, 0x8032B000)` sits inside the
+    #     `arm_vm_page_granular_RWNX(topOfKernelData + ARM_PGBYTES*10, static_memory_end - ...)`
+    #     mapping from `arm_vm_init.c:301`, whose start is `0x8030A000` **exactly where
+    #     `avail_start` is** and whose end is `static_memory_end = 0x80800000`.
+    #
+    # Which leaves nothing in the body that can fail, and a measurement that says it does. That
+    # combination is this project's oldest defect in its purest form - a claim that is an artefact of
+    # how it was taken - and it is why the next step was a **positive control** rather than a finer
+    # probe inside `pmap_bootstrap`.
+    #
+    # **The control, and what it measured. `STAGE90_ENTRY_CHECKPOINT=pmap_init_pte_page` reports.**
+    #
+    # `pmap_init_pte_page` has two call sites in this image and the first to fire is inside
+    # `arm_vm_init`'s pre-init pte loop at `80018bc0` - **after** `bl arm_vm_prot_init` (`80018b14`)
+    # and after `pmap_bootstrap` returned. The host side read the wrap back out of the built image
+    # before the device was touched: `80018bc0 bl 800e06d4 <__wrap_pmap_init_pte_page>`, with
+    # `pmap_init_pte_page` still real at `800250dc`. The run reported
+    #
+    #     cp_arg0=0x801183d0   kernel_pmap - a value, not a predicted number
+    #     cp_arg1=0x80328000   phystokv(avail_start); the fifth argument is on the stack, unrecorded
+    #     cp_arg2=0xc0000000   va + off at off = 0, i.e. (gVirtBase+MEM_SIZE_MAX+0x3FFFFF)&0xFFC00000
+    #     cp_arg3=0x00000002   the size shift, the fourth argument
+    #     stub_hit=pmap_init_pte_page
+    #     xnu_entry_stub_caller=0x80018bc4
+    #
+    # - three of the four arguments exactly as predicted, from the loop's **first** iteration - and it
+    # settles the question the other way:
+    #
+    #   **`pmap_bootstrap` returned.** `avail_start` is `0x8030A000` when it is entered
+    #   (`arm_vm_init.c:399`, `cpu_ttep + ARM_PGBYTES*6`, and `cpu_ttep = 0x80304000` in this build,
+    #   which the build's own layout line confirms: "0x0000A000 bytes of page tables" above
+    #   `topOfKernelData`) and it is `0x80328000` here. So the whole table-carving block ran - the
+    #   five regions placed, the big `memset` done, `ptd_bootstrap`'s 4096-entry loop walked,
+    #   `pmap_cpu_data_array_init` and both `asid_bitmap` loops run - and `0x1E000` is within `0x2800`
+    #   of the size those regions add up to. A body that never returns does not advance `avail_start`
+    #   at all. **And `arm_vm_prot_init` returned**, two instructions before the call that reported.
+    #
+    # **So the `arm_vm_prot_init` silence was not a frontier, and neither were the two taken beside
+    # it.** The three empty quarters of this bisect - `patch_low_glo_static_region`,
+    # `arm_vm_prot_init` and `panic` - were built and run in one sitting and each produced a
+    # **294042-byte** log ending at the payload's `jumping to XNU's _start`, against 301195 and
+    # 301197 for the two that reported and 301199 for this one. They are three *different* logs (they
+    # differ at byte 1382 and byte 8135), so they are not one capture copied three times - but they
+    # are all 294042 bytes, and the payload records only `xnu_entry_image_bytes=0x00110628`, the
+    # entry image's size, which is **identical for every checkpoint build** because the wrapper fits
+    # in padding the image already had. Nothing in the log can tell those three images apart, and a
+    # silence that cannot be told apart from a stale image is not a measurement. The rule this leaves
+    # behind is the one the control applies: a checkpoint's silence counts only once the wrap has
+    # been read back out of the built image, and the entries it would have reported differ from the
+    # entries of the build before it.
+    #
+    # **The frontier, re-opened: `[arm_vm_init+0x6f0, ...)`.** Its tail was read out of the image as
+    # well. The loop is `for (off = 0; off < off_end; off += ARM_TT_L1_PT_SIZE)` with
+    # `off_end = (2 + mem_segments*3) << 20 = 5 MB` (`mem_size = 8 MB` gives `mem_segments = 1`) and
+    # `ARM_TT_L1_PT_SIZE = 0x400000` - **two** iterations, one `pmap_init_pte_page` and four
+    # `cpu_tte` writes each - and what follows is `avail_start = (avail_start + PAGE_MASK) &
+    # ~PAGE_MASK`, `first_avail`, and the tail branch to `patch_low_glo_static_region` at `80018c50`.
+    # All of it bounded, none of it able to fault: the writes are to `cpu_tte[0xc00..0xc03]`, the L1
+    # entries for `0xc0000000`, inside the table at `0x80304000` that is already the live TTB.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=machine_startup`.**
+    #
+    # `machine_startup` is called from exactly one site in the whole image - `arm_init+0x340`, the
+    # last step of the ladder - and it is real code (`80007524`, 0x100 bytes: four `PE_parse_boot_argn`
+    # then `bl kernel_bootstrap` at `8000760c`), so it is the one probe above `arm_vm_init` that no
+    # earlier call can pre-empt. **The prediction is that it reports**, with `caller_v = 0x800032cc`
+    # and no argument record for `machine_startup` itself - it takes none. A report means
+    # `arm_vm_init` returned into `arm_init` and `arm_init` ran all seventeen real calls between them
+    # (`PE_parse_boot_argn`, `patch_low_glo`, `printf_init`, `panic_init`,
+    # `PE_consistent_debug_inherit`, `PE_init_kprintf`, `kern_feature_override`,
+    # `switch_to_serial_console`, `PE_create_console`, `PE_init_printf`, `cpu_machine_idle_init`,
+    # `get_mmu_control`, `set_mmu_control`, `PE_init_platform`, `cpu_timebase_init`,
+    # `fiq_context_init`, `early_random`), and the frontier is inside `machine_startup` or
+    # `kernel_bootstrap`. A silence would put the run in `arm_vm_init`'s tail or in one of those
+    # seventeen, and the next probe is `patch_low_glo` (`8000318c`, one call site, the first of them).
+    #
+    # This run is also the check the three suspect silences are owed. `machine_startup` was one of
+    # them, taken in the same sitting, so a report here says that silence was an artefact of the
+    # sitting and not of the code - the same shape as the 279 control that made 280's silence a
+    # measurement in the first place. No inference should be drawn from any of those three until it
+    # reports or fails to.
+    #
+    # **The run was silent - and this one is verified.** `STAGE90_ENTRY_CHECKPOINT=machine_startup`,
+    # built and run on the 280 configuration with the wrap read back out of the image
+    # (`800032c8 bl 800e06d4 <__wrap_machine_startup>`, `machine_startup` still real at `80007524`)
+    # and the payload image checked byte-for-byte against the entry `.bin` it embeds before the
+    # device was touched. The log is 294042 bytes and ends at the payload's jump line, the same size
+    # as the three suspect silences - so those three are consistent with a real silence, and
+    # `machine_startup` joins them as a measured one. `arm_init`'s last step is not reached.
+    #
+    # **The interval, now with both ends measured: `[arm_vm_init+0x6f0, arm_init+0x340)`.** The lower
+    # end reports (`pmap_init_pte_page` at `80018bc4`); the upper end does not. Inside it:
+    #
+    #     arm_vm_init's tail       the pte loop's second iteration (off = 4 MB), the `avail_start`
+    #                              rounding, `first_avail`, and the tail branch to
+    #                              `patch_low_glo_static_region` at `80018c50`
+    #     arm_init+0x1d8 .. +0x340 `PE_parse_boot_argn`, `patch_low_glo`, `printf_init`, `panic_init`,
+    #                              `PE_consistent_debug_inherit`, `PE_init_kprintf`, then the
+    #                              `_consume_kprintf_args` triple, `kern_feature_override`,
+    #                              `switch_to_serial_console`, `PE_create_console`, `PE_init_printf`,
+    #                              `cpu_machine_idle_init`, `get_mmu_control`, `set_mmu_control`,
+    #                              `PE_init_platform`, `cpu_timebase_init`, `fiq_context_init`,
+    #                              `early_random`
+    #
+    # and the two functions this interval's lower end enters on the way - `pmap_init_pte_page`
+    # (`800250dc`) and `ptd_alloc` (`800251e0`, not inlined) - were read out of the image and are
+    # bounded: `pmap_init_pte_page` indexes `pv_head_table[pa_index(pte_p)]` at `80025134` and the
+    # index for `avail_start = 0x80328000` is 808 against a table of 2048 entries, then branches to
+    # `ptd_alloc` because the entry is NULL and `alloc_ptd` is TRUE, then `__bzero(pte_p, 4096)`;
+    # `ptd_alloc(kernel_pmap)` takes its fast path (`ptd_free_count` is 4096 from `ptd_bootstrap` and
+    # `ptd_free_list` is non-NULL) and its only loop, `800252e4 bcc 800252e4`, counts 0xA9 + 1 = 170
+    # iterations of linking a `pt_desc_t`. Its `ledger_credit` calls at `800253a0`/`800253b4` are
+    # behind `cmp r0, r4 / beq` on `kernel_pmap`, so the kernel pmap does not reach them at all.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=patch_low_glo`.**
+    #
+    # `patch_low_glo` is the first thing in the upper half and it has **one call site in the whole
+    # image**, `bl patch_low_glo` at `8000318c` from `arm_init`, so nothing earlier in the boot can
+    # pre-empt the report. It is the cleanest split available: it is nine instructions past
+    # `arm_vm_init`'s return (`80003160`) and one past `PE_parse_boot_argn` (`80003170`).
+    #
+    #   - **A report at `caller_v = 0x80003190`** means `arm_vm_init`'s tail ran to its end - the pte
+    #     loop's second iteration, the rounding, and the tail branch into
+    #     `patch_low_glo_static_region` - and the frontier is `arm_init`'s sixteen remaining calls
+    #     (or `patch_low_glo` itself, since a terminal wrapper never enters it). Both halves are then
+    #     bisectable the same way: everything from `printf_init` (`80003190`) to `early_random`
+    #     (`800032b0`) is a `bl` from `arm_init` with a known return address, so the caller key names
+    #     the step.
+    #   - **A silence** puts the run inside `arm_vm_init`'s pte loop, in `patch_low_glo_static_region`
+    #     (whose own checkpoint was silent, `80018c50`, one reference), or in the `avail_start`
+    #     arithmetic - and the next probe is the second loop iteration, which needs the
+    #     caller-selective instrument, since the only callable at `off = 4 MB` is the same
+    #     `pmap_init_pte_page` at the same site.
+    #
+    # **The run reported: `stub_hit=patch_low_glo`, `caller_v=0x80003190`.** The prediction held, and
+    # the call site is guarded:
+    #
+    #     8000317c  ldr r0, [sp, #4]
+    #     80003180  and r0, r0, #324      ; 0x144 = MIN_LOW_GLO_MASK
+    #     80003184  cmp r0, #324
+    #     80003188  bne 80003190          ; the `debug` boot arg gates it
+    #     8000318c  bl  __wrap_patch_low_glo
+    #
+    # and the boot-args this project builds do carry `debug=0x144`, so `(debugmode & 0x144) == 0x144`
+    # and the call is taken. `cp_arg0` is `0x00000144` - `patch_low_glo` takes no arguments, so the
+    # four words are the registers the caller happened to leave, which is what the instrument
+    # records and does not interpret - and `cp_arg1=0x800ed9bb`, `cp_arg2=0x0000000c`,
+    # `cp_arg3=0x0000006d` are the same leftovers. The log is 301194 bytes.
+    #
+    # **So `arm_vm_init`'s tail completed.** The pte loop's second iteration at `off = 4 MB`, the
+    # `(avail_start + PAGE_MASK) & ~PAGE_MASK` rounding, `first_avail`, and the tail branch into
+    # `patch_low_glo_static_region` all ran, and the run returned into `arm_init` - which retires
+    # that whole half of the interval along with the `pmap_bootstrap` frontier it replaced. The
+    # frontier is now **`[arm_init+0x204, arm_init+0x340)`**, the eighteen real calls from
+    # `patch_low_glo`'s call site to `bl machine_startup`, and every one of them is a `bl` from
+    # `arm_init` whose return address is a single value:
+    #
+    #     80003190  printf_init                    80003230  kern_feature_override
+    #     80003194  panic_init                     80003250  switch_to_serial_console   (3 sites)
+    #     80003198  PE_consistent_debug_inherit    80003264  PE_create_console
+    #     800031a4  PE_init_kprintf      (2 sites) 8000326c  PE_init_printf             (2 sites)
+    #     800031ac  _consume_kprintf_args  (58)     80003274  cpu_machine_idle_init      (2)
+    #     800031cc  PE_parse_boot_argn    (94)      80003284  get_mmu_control            (3)
+    #     800031e0  _consume_kprintf_args            8000328c  set_mmu_control            (3)
+    #     80003204  PE_parse_boot_argn              8000329c  PE_init_platform           (2)
+    #     80003228  _consume_kprintf_args            800032a4  cpu_timebase_init          (2)
+    #                                               800032ac  fiq_context_init           (4)
+    #                                               800032b0  early_random               (9)
+    #
+    # - the counts being image-wide, and the second site in each case belonging to a function that
+    # only runs later (`PE_init_iokit`, `arm_init_cpu`, `arm_init_idle_cpu`, `PE_initialize_console`,
+    # `vm_mem_bootstrap`, `zone_bootstrap`, `initialize_screen`), so `printf_init`, `panic_init`,
+    # `PE_consistent_debug_inherit`, `kern_feature_override` and `PE_create_console` are single-site
+    # and clean.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=panic` - re-run.**
+    #
+    # The silent `panic` result belongs to the sitting whose three silences the `pmap_init_pte_page`
+    # control refuted, so it carries no weight, and it is the single most informative probe left. A
+    # panic is the only mechanism this walk has found that stops a run with **no output at all**:
+    # `printf.c`'s `_consume_printf_args` and `_consume_kprintf_args` are the no-op bodies the build
+    # compiles `printf`/`kprintf` to, `panic`'s own disassembly references neither, and
+    # `panic_trap_to_debugger` with no debugger attached does not return - so a panic and a hang are
+    # the same picture in the log. The whole upper half of `arm_init`'s ladder is pexpert code with
+    # `assert`s in it (`PE_create_console`, `switch_to_serial_console`, `PE_init_printf`,
+    # `cpu_machine_idle_init`, `PE_init_platform` all reach device-tree and console paths), which is
+    # where such a panic would come from.
+    #
+    #   - **A report** names the site in `xnu_entry_stub_caller_v` and puts the format string in
+    #     `cp_arg0`, which is the message - and the frontier collapses from eighteen calls to one.
+    #   - **A silence, verified the same way as `machine_startup`** (wrap read back out of the image,
+    #     payload checked against the `.bin`), says there is no panic and the frontier stays the
+    #     ladder, to be split at `PE_create_console` (`80003264`, single-site, the middle).
+    #
+    # The prediction, stated so that it can be wrong: **a report.** The balance is that a silent
+    # panic is the only mechanism the image offers for a stop with no output, that the ladder is the
+    # first stretch of the boot with asserts in it, and that `cpu_machine_idle_init` at `80003274`
+    # calls `bcopy_phys` three times (`8000416c`, `8000423c`, `80004278`) into pexpert code this
+    # walk has never executed. A silence would be the second surprise in a row and would send the
+    # bisect back to `PE_create_console`.
+    #
+    # **The run was silent, and the prediction was wrong.** `STAGE90_ENTRY_CHECKPOINT=panic`, with
+    # the wrap read back out of the image (`__wrap_panic` at `800e06d4`, `panic` still real at
+    # `8002dc34`, 957 `bl panic` sites redirected) and the payload checked against the entry `.bin`:
+    # a 294042-byte log ending at the jump line, identical in size to `machine_startup`'s. **So there
+    # is no panic anywhere in the boot.** `panic` is silent-filled by design and `panic_trap_to_debugger`
+    # does not return, so this is a real negative, not a lost report: the run is not dying through
+    # `panic`, and the ladder is not failing an `assert`.
+    #
+    # That is worth having on the record by itself: it removes the one mechanism that could have
+    # explained a stop with no output, and the two remaining ones are a genuine unbounded loop and a
+    # fault whose vector table entry does not report - and 236-242 established that this image's
+    # faults do report their vector, DFAR/DFSR and faulting instruction. So the frontier is a loop,
+    # inside `[arm_init+0x204, arm_init+0x340)`.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=kern_feature_override`.**
+    #
+    # The ladder from the source (`arm_init.c:322-380`), in order, with the return address each `bl`
+    # gives and the image-wide site count from the disassembly:
+    #
+    #     80003190  printf_init                   1
+    #     80003194  panic_init                    1
+    #     80003198  PE_consistent_debug_inherit   1
+    #     800031a4  PE_init_kprintf(FALSE)        2   (the other is PE_init_iokit, later)
+    #     800031ac  kprintf -> _consume_kprintf_args (no-op)
+    #     800031cc  PE_parse_boot_argn("serial")  94
+    #     80003230  kern_feature_override(KF_SERIAL_OVRD)  1
+    #     80003250  switch_to_serial_console      3   (3 instructions: sets cons_ops_index)
+    #     80003264  PE_create_console             1
+    #     8000326c  PE_init_printf(FALSE)         2   (the other is PE_init_iokit, later)
+    #     80003274  cpu_machine_idle_init(TRUE)   2   (the other is arm_init_cpu, later)
+    #     80003284  get_mmu_control               3
+    #     8000328c  set_mmu_control               3
+    #     8000329c  PE_init_platform              2
+    #     800032a4  cpu_timebase_init             2
+    #     800032ac  fiq_context_init              4
+    #     800032b0  early_random                  9   (the others are zone_bootstrap/vm_mem_bootstrap)
+    #     800032c8  machine_startup               1   (measured: silent)
+    #
+    # `kern_feature_override` is the tenth step and the single-site probe nearest the middle: nine
+    # calls below it, seven above it before `machine_startup`. Its own body is a lookup in
+    # `kern_feature_table` against the `kern.features` boot-arg, bounded, and it returns a boolean the
+    # caller tests.
+    #
+    #   - **A report at `caller_v = 0x80003234`** means `printf_init`, `panic_init`,
+    #     `PE_consistent_debug_inherit`, `PE_init_kprintf`, the `kprintf` sink, the `serial` boot-arg
+    #     parse and the feature lookup all completed, and the loop is in the seven remaining calls -
+    #     where the next probe is `cpu_machine_idle_init` (`80003274`), the one with a `bcopy_phys`
+    #     into an idle-page template and the only step left that this walk has never run in any image.
+    #   - **A silence** puts the loop in the nine below, where the next probe is
+    #     `PE_consistent_debug_inherit` (`80003198`, single-site) - the first step that reads the
+    #     device tree, and therefore the first step whose behaviour this project's own DT controls.
+    #
+    # The prediction, stated so that it can be wrong: **a report.** `printf_init`, `panic_init`,
+    # `PE_init_kprintf` and `kern_feature_override` are all table-and-pointer setup with no loop over
+    # anything this project supplies, while `PE_create_console`, `PE_init_printf` and
+    # `cpu_machine_idle_init` all reach pexpert console and page paths. A silence would say the loop
+    # is in setup code after all, which would point at `PE_consistent_debug_inherit` and the DT.
+    #
+    # **The run reported: `stub_hit=kern_feature_override`, `caller_v=0x80003234`.** The prediction
+    # held, and `cp_arg0=0x00000002` is a real argument - `KF_SERIAL_OVRD`, the constant the source
+    # passes - which is the first checkpoint in this walk whose recorded registers are the callee's
+    # actual parameters rather than leftovers. So `printf_init`, `panic_init`,
+    # `PE_consistent_debug_inherit`, `PE_init_kprintf(FALSE)`, the `kprintf` sink, and the `serial`
+    # boot-arg parse all completed without stopping, and `kern_feature_override` was entered. Log
+    # 301202 bytes.
+    #
+    # **The frontier is now `[arm_init+0x2ac, arm_init+0x340)`** - ten calls, in this order:
+    #
+    #     80003250  switch_to_serial_console    3 insns: `cons_ops_index = SERIAL_CONS_OPS`
+    #     80003264  PE_create_console           1 site
+    #     8000326c  PE_init_printf(FALSE)       2   (the other is PE_init_iokit, later)
+    #     80003274  cpu_machine_idle_init(TRUE) 2   (the other is arm_init_cpu, later)
+    #     80003284  get_mmu_control             3   (the others are arm_init_cpu/_idle_cpu, later)
+    #     8000328c  set_mmu_control             3   (likewise)
+    #     8000329c  PE_init_platform            **2, and the first is at 0x80002fd4** - the early call
+    #                                               from arm_init's own early ladder, before
+    #                                               `arm_vm_init`, so a `--wrap` on this name reports
+    #                                               from there and says nothing about the tail
+    #     800032a4  cpu_timebase_init           2   (the other is arm_init_cpu, later)
+    #     800032ac  fiq_context_init            4   (the others are arm_init_cpu/_idle_cpu, later)
+    #     800032b0  early_random                9   (the others are zone_bootstrap/vm_mem_bootstrap,
+    #                                               all after machine_startup)
+    #
+    # `switch_to_serial_console` is three instructions (`osfmk/console/serial_general.c:111`) and
+    # cannot loop. `PE_init_platform` cannot be probed by name at all.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=cpu_machine_idle_init`.**
+    #
+    # It is the fourth of the ten and the single-site probe nearest the middle: three calls below it,
+    # six above it, and its own body is a `bcopy_phys` x3 into an idle-page template
+    # (`8000416c`, `8000423c`, `80004278`) - the only step left that no image in this walk has ever
+    # run. A terminal wrapper fires on entry, so a report says "reached", not "returned".
+    #
+    #   - **A report at `caller_v = 0x80003278` with `cp_arg0` non-zero** (`cpu_machine_idle_init(TRUE)`)
+    #     means the loop is inside it or in the six above: `get_mmu_control`, `set_mmu_control`,
+    #     `PE_init_platform`, `cpu_timebase_init`, `fiq_context_init`, `early_random`. The next probe
+    #     there is `cpu_timebase_init` (`800032a4`), which brackets `PE_init_platform` from above.
+    #   - **A silence** puts the loop in `PE_create_console` or `PE_init_printf` (`switch_to_serial_console`
+    #     cannot loop), and since both are pexpert console paths, the next probe is `PE_create_console`
+    #     (`80003264`, single-site) to separate them.
+    #
+    # The prediction: **a report.** `PE_init_platform` is the largest thing in the ten - it reaches
+    # `PE_init_iokit` and the IOKit match - and `early_random` gathers entropy, both of which are
+    # places a boot with a synthetic device tree can loop where a real one would not. Nothing in
+    # `PE_create_console`/`PE_init_printf` reads a project-supplied table.
+    #
+    # **The run reported: `stub_hit=cpu_machine_idle_init`, `caller_v=0x80003278`, and the prediction
+    # held on both keys at once.** `cp_arg0=0x00000001` is the literal `mov r0, #1` three instructions
+    # above the call, so this is the second checkpoint in the walk whose recorded registers are the
+    # callee's real arguments and not leftovers - `cpu_machine_idle_init(TRUE)`. `cp_arg1=0x80098644`
+    # and `cp_arg2=cp_arg3=0` are the registers that call site does not set, recorded and not
+    # interpreted. Log 301202 bytes.
+    #
+    # **The frontier is `[arm_init+0x2b8, arm_init+0x340)`** - and the interval's low end is now read
+    # from the image rather than inferred, because `cpu_machine_idle_init`'s body is the first thing
+    # this walk has ever entered that is not a table lookup:
+    #
+    #     80004090  cpu_machine_idle_init            0x258 bytes, 20 calls
+    #     800040b4  beq 800042a0                     ; r0 == 0 -> the epilogue tail. NOT taken: r0 = 1
+    #     800040d0  bl PE_parse_boot_argn            ; "..." -> [sp+12]
+    #     80004108  bl PE_parse_boot_argn            ; "..." -> [sp+8]
+    #     8000410c..80004134  the gate             ; not found -> [sp+8] = 1, b 8000418c
+    #     80004138..80004188  a block of ml_static_vtop + bcopy_phys, entered only when the boot arg
+    #                                               IS present and its value is 1 and not 2 - so with
+    #                                               this project's boot-args the first call of the body
+    #                                               that actually runs is 8000418c's
+    #     8000418c  (the block above is jumped over) -> r6 = &X, r0 = [r6]
+    #     80004198  bl ml_vtophys                    ; the first executed call after the two parses
+    #     800041a0  bl ml_io_map                     ; <= experiment 206 stopped HERE, when it was a stub
+    #     800041bc  bl bcopy     800041d0  bl bcopy
+    #     800041dc  bl ml_static_vtop   ... 80004298  bl ml_static_vtop   (six more, interleaved)
+    #     8000423c  bl bcopy_phys   80004278  bl bcopy_phys
+    #     8000428c  bl CleanPoC_DcacheRegion
+    #     800042c4  bl bcopy
+    #     800042dc  bl clean_dcache                 ; the LAST call of the body
+    #     800042a0  the epilogue tail: 800042a0..800042e8, stores into [r8] and friends, then return
+    #
+    # **Which of those 20 calls can be probed by name, computed from the call graph of this image and
+    # not from guesswork.** A `--wrap` redirects every reference to the name, so a symbol is usable
+    # only if no call site is reachable before the frontier - and the frontier's own reached set is
+    # now large enough that most of them are not:
+    #
+    #     name                   sites  reachable before 80003274?          usable
+    #     PE_parse_boot_argn      95    yes: arm_init itself at 800030c0     no
+    #     ml_vtophys               2    yes: cpu_data_register 80003e80     no
+    #     ml_io_map                5    yes: PE_init_kprintf -> serial_init 8002f17c, and
+    #                                   PE_init_platform -> pe_arm_init_interrupts 80004808  **no**
+    #     bcopy                   29    yes: PE_init_platform (6), arm_vm_init (1)          **no**
+    #     ml_static_vtop          16    **no**: 8 in this body, the other 8 in pmap_create,
+    #                                   pmap_map_globals (from machine_init, 8000766c),
+    #                                   pmap_pages_alloc, pmap_tt1_deallocate x2,
+    #                                   pmap_tt_deallocate x2, pmap_expand - all later   **yes**
+    #     bcopy_phys               7    **no**: 3 in this body, pmap_copy_page, pmap_copy_part_page,
+    #                                   kdp_copyin, and ml_nofault_copy - whose only nine callers
+    #                                   are panic_display_* - all later                    **yes**
+    #     clean_dcache             2    **no**: the other site is inside clean_dcache64, and
+    #                                   clean_dcache64 has ZERO callers in this image       **yes**
+    #
+    # Two of those are worth stating as facts rather than as arithmetic, because they close doors:
+    # **`ml_io_map` is unusable**, and it is the one symbol in the body with a prior stop on its
+    # record. `PE_init_kprintf` - which ran at 800031a4, before the frontier - loads
+    # `PE_state.initialized` at 8002eeb0 and takes `panic` when it is zero. **It did not panic**, so
+    # the early `PE_init_platform(FALSE, ...)` at 80002fd4 did complete its initialisation; and since
+    # `PE_init_kprintf(FALSE)` then falls through 8002eee0 to `bl serial_init` at 8002ef28 with no
+    # branch around it, `serial_init` ran before the frontier and its `bl ml_io_map` at 8002f17c is
+    # therefore on the reached path. That the run continued past it does not make the symbol
+    # probeable - a wrap on it would stop at 8002f180 and say nothing about 800041a0.
+    #
+    #    - and one that is not a contamination argument at all: `clean_dcache`'s own byte count is
+    #      immaterial, but the fact that its *other* reference sits in a function nothing calls means
+    #      that if the body hangs before 800042dc, `clean_dcache` will be silent, and if it does not,
+    #      `clean_dcache` reports. It is a clean read of "the body finished".
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=bcopy_phys`.** It is the middle
+    # of the three usable names: `ml_static_vtop`'s first *executed* site is 800041dc, `bcopy_phys`'s
+    # is 8000423c, `clean_dcache`'s is 800042dc - the last call in the body - so a report from
+    # `bcopy_phys` falsifies the whole upper half of the body and makes the remaining interval
+    # `[80004240, arm_init+0x340)`.
+    #
+    #   - **A report at `caller_v = 0x80004240`.** The `mov r1, #0` at 80004238 and `mov r3, #0` at
+    #     80004228 are two instructions apart from the call, so the pair of argument predictions is
+    #     firm: `cp_arg1 = 0x00000000`, `cp_arg3 = 0x00000000`. `cp_arg0` is the `r0` that
+    #     `ml_static_vtop` at 80004210 last left there - a physical address, so a value and not a
+    #     predicted number. `cp_arg2` is `r1 + 8` where `r1 = (0x800de8bc - 0x800dc4bc) + [0x80116c94]`
+    #     - computed from the body, and a number this walk can check.
+    #   - **A silence.** The stop is inside the body at or before 80004210, i.e. in `PE_parse_boot_argn`
+    #     (twice), `ml_vtophys`, `ml_io_map`, the two `bcopy`s, or the three `ml_static_vtop`s between
+    #     800041dc and 80004210 - and the next probe is `ml_static_vtop` itself (`caller_v` would be
+    #     `0x800041e0`), which is clean and which splits that stretch again, leaving only
+    #     `ml_io_map` and `bcopy` on the far side of it.
+    #
+    # The prediction: **a report.** Every one of those 20 calls is a leaf-ish primitive with no loop
+    # in it that this project's own ledger has not already run - `bcopy_phys` is `memcpy` over 4
+    # bytes, `CleanPoC_DcacheRegion` and `clean_dcache` are bounded cache walks, and `ml_io_map` is
+    # the one with a synthetic device tree in front of it. If the body is where the stop is, it is
+    # more likely to be at `ml_io_map` than at `bcopy_phys` - which is exactly why the probe is
+    # `bcopy_phys`: it is above `ml_io_map`'s site by one call and below the last one by nine.
+    #
+    # **The run reported, and every key in it was predicted.** `stub_hit=bcopy_phys`,
+    # **`caller_v=0x80004240`** - the site at 8000423c, exactly as predicted - with
+    # `cp_arg1=0x00000000` and `cp_arg3=0x00000000`, the two the `mov r1, #0` at 80004238 and the
+    # `mov r3, #0` at 80004228 put there. `cp_arg2=0x80002408` is the computed one and it verifies a
+    # number rather than a register: the body sets `r1 = (0x800de8bc - 0x800dc4bc) + [0x80116c94]` and
+    # `r2 = r1 + 8`, and `0x80002408 - 0x2400 - 8 = 0x80000000`, so `[0x80116c94]` - one of this
+    # object's own `BootArgs_paddr` / `CpuDataEntries_paddr` words - holds the physical base exactly.
+    # `cp_arg0=0x80114840` is the register `ml_static_vtop` at 80004210 last left, and it is the one
+    # value that is interesting on its own: **`ml_static_vtop(0x80114840)` returned `0x80114840`**, so
+    # the entry window's static table maps the image's own `.data` identity. Log 301191 bytes.
+    #
+    # **The frontier is `[arm_init+0x2bc, arm_init+0x340)`** - the eight calls that follow 8000423c -
+    # and the six that follow the body - thirteen sites in all, in execution order:
+    #
+    #     body tail, firm          conditional
+    #     80004248  ml_static_vtop  800042c4  bcopy   ; runs only when r4 == 0x80102000, and r4 is the
+    #     8000425c  ml_static_vtop                     boot CPU's CpuData, which arm_init stored into
+    #     80004278  bcopy_phys                         TPIDRPRW+0x5bc - so on CPU 0 it runs
+    #     8000428c  CleanPoC_DcacheRegion
+    #     80004298  ml_static_vtop  800042dc  clean_dcache  ; unconditional, the body's last call
+    #     800042e4  pop {r4,r5,r6,r7,r8,r9,fp,pc} -> arm_init+0x2b8
+    #
+    #     ladder after the body
+    #     80003278  ldrb r0,[r8,#1] / tst r0,#0x80 / beq 80003290   ; r8 = 0x8011482c, so this is a
+    #                                                                 byte of `arm_diag`-shaped state
+    #     80003284  get_mmu_control   8000328c  set_mmu_control      ; BOTH inside the same gate
+    #     8000329c  PE_init_platform(TRUE, 0x80102000)
+    #     800032a4  cpu_timebase_init(TRUE)
+    #     800032ac  fiq_context_init(TRUE)
+    #     800032b0  early_random
+    #     800032c8  machine_startup(boot_args)
+    #
+    # **The contamination tables came out cleaner than the last two frontiers', because two whole
+    # functions turn out to have no callers at all in this image.** `arm_init_cpu`, `arm_init_idle_cpu`,
+    # `clean_dcache64`, `PE_sync_panic_buffers`, `dcache_incoherent_io_flush64` and
+    # `dcache_incoherent_io_store64` **each have zero textual references** - so every call site they
+    # own is dead code, and a `--wrap` on a name they call, or that calls them, is as good as a wrap
+    # on a name with one site:
+    #
+    #     name                     sites  reachable before 80003274?                     usable
+    #     PE_init_platform           2    **yes: arm_init's own early call at 80002fd4**   no
+    #     get_mmu_control            3    2 of them in arm_init_cpu / _idle_cpu (dead)     yes
+    #     set_mmu_control            3    likewise                                        yes
+    #     cpu_timebase_init          2    the other in arm_init_cpu (dead)                yes
+    #     fiq_context_init           4    3 in arm_init_cpu / _idle_cpu (dead)            yes
+    #     early_random               9    the others in vm_mem_bootstrap and zone_bootstrap,
+    #                                     both far past machine_startup                   yes
+    #     machine_startup            1    -                                               yes
+    #     ml_static_vtop            16    the other 8 in pmap_create, pmap_map_globals (from
+    #                                     machine_init at 8000766c), pmap_pages_alloc, pmap_tt1_-
+    #                                     deallocate x2, pmap_tt_deallocate x2, pmap_expand   yes
+    #     clean_dcache               2    the other inside clean_dcache64, which no one calls   yes
+    #     CleanPoC_DcacheRegion     10    ml_arm_sleep, and clean_dcache - and each of the rest is
+    #                                     either dead (the dcache_incoherent_io_*64 pair,
+    #                                     PE_sync_panic_buffers) or the idle path
+    #                                     (platform_cache_idle_enter, from cpu_idle)       yes
+    #     bcopy                      29    yes: PE_init_platform (6) and arm_vm_init (1)    **no**
+    #
+    # `PE_init_platform` stays unusable to the end of this walk, and it is the largest of the thirteen
+    # by a wide margin: the `(TRUE, ...)` call is the one that reaches `pe_arm_init_interrupts`
+    # (`80004808`), which maps the interrupt controller and reads the device tree for it. It is the
+    # single most suspicious step in the interval and it is the one step a name-based probe cannot
+    # reach - which is the argument for the caller-selective trampoline sketched above, if the bisect
+    # lands on it.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=clean_dcache`.** Of the thirteen
+    # this is the seventh - the closest thing to a midpoint - and it is the one that answers the
+    # question the whole bisect exists to answer: `clean_dcache` at 800042dc is the body's last call,
+    # four instructions before the `pop`, so **a report proves the entire body of
+    # `cpu_machine_idle_init` ran**, and a silence puts the stop inside it. Nothing reaches
+    # `clean_dcache` through any other door: its only other reference is at `80036eb8`, eight bytes
+    # into `clean_dcache64`, and `clean_dcache64` has no callers.
+    #
+    # The three arguments are all firm, because the three instructions that set them are the three
+    # immediately above the call:
+    #
+    #   - `cp_arg0 = 0x80102000`. `mov r0, r4` at 800042d8, and r4 is `[TPIDRPRW + 0x5bc]` - the
+    #     per-CPU `CpuData *` that arm_init wrote at 80003054 with `str r5, [r0, #1468]` where
+    #     r5 was 0x80102000. This value is also what the `cmp r4, r0` at 800042a8 tests against, so
+    #     the prediction is checkable against the gate as well.
+    #   - `cp_arg1 = 0x00000330`: `mov r1, #816` at 800042cc.
+    #   - `cp_arg2 = 0x00000000`: `mov r2, #0` at 800042d0.
+    #
+    #   - **A report** narrows the stop to the six ladder calls, three of which (`get_mmu_control`,
+    #     `set_mmu_control` and the `PE_init_platform` that owns the interval's most suspicious
+    #     work) sit in one contiguous stretch, and the next probe is `cpu_timebase_init`
+    #     (`800032a4`, `caller_v` `0x800032a8`), which splits that stretch in two.
+    #   - **A silence** puts it in the body tail, and the next probe is `ml_static_vtop`
+    #     (`caller_v` `0x8000424c`), which is provably clean and which then leaves only
+    #     `CleanPoC_DcacheRegion` and `clean_dcache` itself below it.
+    #
+    # The prediction: **a report.** The body tail is five calls of `ml_static_vtop` and `bcopy_phys` -
+    # both already exercised this run and in the ten runs before it - plus one cache region clean of
+    # 4 KB and one of 0x330 bytes. The six ladder calls, by contrast, include the first
+    # `PE_init_platform(TRUE, ...)` this kernel has ever run, whose `pe_arm_init_interrupts` maps
+    # hardware from a device tree this project writes by hand.
+    #
+    # **`STAGE90_ENTRY_CHECKPOINT=clean_dcache` was SILENT** - 294042 bytes, the size every silent log
+    # in this walk has had, with no `stub_hit`, no `cp_arg*`, no `exception:` and none of the
+    # epilogue's own records. Read back before the run and again after: the image's only two
+    # references to the name are `bl __wrap_clean_dcache` at 800042dc and a `b` at 80036eb8, and the
+    # second is dead code - `clean_dcache64` is twelve bytes of `mov r1,r2 / mov r2,r3 / b
+    # clean_dcache` with **no callers at all**, and the `.word` slot `L_clean_dcache` at 80036f10,
+    # which also points at the wrapper, is read by nothing (a literal-pool scan of the whole image
+    # finds readers for exactly two slots in that island, `L_gPhysBase` and `L_gVirtBase`, both read
+    # by the `L_cond_extern_347_shim`). Image bytes 1115688 and text 1014800 in **both** the
+    # `bcopy_phys` and the `clean_dcache` builds, so this is a controlled A/B: same image size, same
+    # bss, one call site redirected, and the outcome flips from a report to no output at all.
+    #
+    # The stop is therefore in `[80004240, 800042dc)`. And that interval turned out to contain
+    # something this walk had not seen, because reading the two `bcopy_phys` calls as *writes* rather
+    # than as measurement points gives a second, independent explanation of the silence:
+    #
+    #     cpu.c:533  bcopy_phys(vtop(&BootArgs_paddr),     gPhysBase +
+    #                                   (unsigned)&ResetHandlerData.boot_args
+    #                                 - (unsigned)&ExceptionLowVectorsBase, 4)
+    #                bcopy_phys(vtop(&CpuDataEntries_paddr), gPhysBase +
+    #                                   (unsigned)&ResetHandlerData.cpu_data_entries
+    #                                 - (unsigned)&ExceptionLowVectorsBase, 4)
+    #
+    # In this image the link resolves that arithmetic to a destination this project owns:
+    #
+    #     ExceptionLowVectorsBase = 0x800dc4bc   ResetHandlerData = 0x800de8bc
+    #     delta = 0x2400, and gPhysBase = 0x80000000 (measured: cp_arg2 at 8000423c is
+    #     0x2400 + 8 + gPhysBase)
+    #     -> the two writes land at **0x80002404 and 0x80002408**
+    #
+    # and those two addresses are, in this image, **inside `entry_epilogue` at 0x80002348** - the
+    # function that writes every log line this walk has ever read. `nm` between 0x80002280 and
+    # 0x80002600 finds exactly one symbol, `entry_epilogue`, so there is no doubt about the
+    # enclosure. The two instructions destroyed are
+    #
+    #     80002404  rsb r5, r5, #32      ; the set-index shift, replaced by `andshi r1, r0, r0`
+    #     80002408  mov lr, #0           ; the way counter, replaced by `andshi r7, r4, r0`
+    #
+    # because the values written are *addresses* - `[0x80114844]` = `CpuDataEntries_paddr` =
+    # 0x80101000 and `[0x80114840]` = `BootArgs_paddr` = 0x80147000, both measured, the second one
+    # being the payload's own `xnu_entry_args_pa` - and an address decoded as an ARM data-processing
+    # instruction with `cond=HI` sets neither `r5` nor `lr`. The set/way D-cache flush loop that
+    # follows (`lsl r1, lr, r5 / orr r2, r1, r3, lsl r0 / mcr 15,0,r2,cr7,cr14,{2}`, outer loop
+    # `cmp r6, lr / add lr, lr, #1 / bne`) then counts ways from whatever `lr` already held, which is
+    # bounded but astronomically long, so `entry_epilogue` never reaches its ram-console write and
+    # the log stays empty. **A hang inside the reporting path looks exactly like a hang in the boot.**
+    #
+    # This is a *data*-dependent self-modification of this project's own code by XNU, on a boot path
+    # that has been reached in this image and the last one, and it is the first candidate mechanism
+    # this walk has found that explains a silence with **no frontier at all**. It also puts two
+    # earlier readings back in doubt, because both checkpoints sit after this code in the boot order:
+    # `machine_startup`'s silence and `panic`'s silence can no longer be read as "not reached" and
+    # "there is no panic" unless this is ruled out first. Nothing is retracted yet - the mechanism is
+    # derived, not measured - and the next probe is designed to measure it.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=ml_static_vtop`.** Its first
+    # *executed* call site is 80004248 - **above the first clobber at 8000423c and below the second
+    # at 80004278** - and it is provably clean: its other eight call sites are in `pmap_create`,
+    # `pmap_map_globals` (from `machine_init`), `pmap_pages_alloc`, `pmap_tt1_deallocate` x2,
+    # `pmap_tt_deallocate` x2 and `pmap_expand`, every one of them far past `machine_startup`.
+    #
+    # This makes the probe conclusive in **both** directions, which is the only reason to spend a run
+    # on a point twelve instructions past one that already reported:
+    #
+    #   - **A silence at `caller_v = 0x8000424c` proves the clobber.** Between the site that reported
+    #     in the `bcopy_phys` build (8000423c, four bytes of `movw`/`movt` and a call to a function
+    #     already proven to return) and 80004248 there is *no code that can hang* - so a silence can
+    #     only be the reporting path, and the only new event in between is the first `bcopy_phys`.
+    #   - **A report at `caller_v = 0x8000424c`, `cp_arg0 = 0x80101000`, `cp_arg1 = 0x80114844`**
+    #     kills the clobber theory outright - 279's own report from `klist_init`, which is downstream
+    #     of both writes, is evidence on this side - and puts the stop in
+    #     `[8000424c, 800042dc)`: `ml_static_vtop` again, `bcopy_phys` at 80004278,
+    #     `CleanPoC_DcacheRegion` at 8000428c, `ml_static_vtop` at 80004298, and the conditional
+    #     `bcopy` at 800042c4. The next probe would then be `CleanPoC_DcacheRegion` (`caller_v`
+    #     `0x80004290`, `cp_arg0` the value of `gVirtBase` and `cp_arg1 = 0x00001000`).
+    #
+    # The two arguments are read off the two instructions above the call: `80004240: movw r0,#0x1000`
+    # and `80004244: movt r0,#0x8010`, so `cp_arg0 = 0x80101000`; `8000424c`'s `movw r1,#0x4844 /
+    # movt r1,#0x8011` is *after* the call, so `cp_arg1` is whatever the caller of `arm_init` left -
+    # and the value measured at the same key in the `bcopy_phys` report was 0x80114844, which is the
+    # same register pair, so it is stated as a measurement and not as a prediction.
+    #
+    # The prediction: **a report.** 279 reported from `klist_init`, which runs after both writes, in
+    # an image whose first 0xbbbc0 bytes are instruction-identical to this one; on that evidence the
+    # clobber is survivable and the silence is a real stop. The clobber arithmetic is written down in
+    # full above precisely because that prediction could be wrong, and because if it is wrong this is
+    # the mechanism that was hiding under it.
+    #
+    # **The run reported, and it refuted the caller prediction while confirming the argument.**
+    # `stub_hit=ml_static_vtop` at **`caller_v=0x800041e0`** - not the 0x8000424c written above. The
+    # prediction was wrong because the probe was mis-chosen: `ml_static_vtop` is called **eight times
+    # inside the body**, and its first executed site is 800041dc (`caller_v` 800041e0), one call
+    # *above* the 80004248 site the prediction pointed at. The two sites skipped are 80004140 and
+    # 80004150, inside the `wfi` block that the `bcopy_phys` run had already proved is jumped over.
+    # So this run measured "the body reaches 800041dc" - which the `bcopy_phys` report at 80004240
+    # already implied - and it did **not** test the clobber at all, because 800041dc is above it.
+    # The argument prediction did hold, and it is the firmest one this walk has had:
+    # `cp_arg0=0x80000008` is exactly the `movw r0,#8 / movt r0,#0x8000` two instructions up, i.e.
+    # `ml_static_vtop((vm_offset_t)&start_cpu)`, and `start_cpu` is linked at 0x80000008. `cp_arg1`
+    # 0x800dd4bc and `cp_arg3` 0xe30406d8 are leftovers, recorded and not interpreted. Log 301195.
+    #
+    # **A rule this produces, worth more than the run: `ml_static_vtop`, `bcopy_phys`, `bcopy` and
+    # `PE_parse_boot_argn` are all called *earlier in the body* than the frontier they were meant to
+    # probe, so no wrap on them can ever report from a late site.** The instrument redirects every
+    # reference, and the report comes from whichever executes first. In `cpu_machine_idle_init`'s
+    # body exactly **two** names have their first executed site in the dark half:
+    # `CleanPoC_DcacheRegion` (8000428c, its other callers being `ml_arm_sleep`, `clean_dcache` and
+    # the idle path) and `clean_dcache` (800042dc, its other reference being dead). Every other call
+    # in the body is unusable as a late probe no matter how clean it looks.
+    #
+    # ## A defect found on the way, and the pad that removes it
+    #
+    # Reading the two `bcopy_phys` calls as *writes* rather than as probe points gives a second,
+    # independent candidate mechanism for a silence, and it is in this project's own code:
+    #
+    #     cpu.c:533  bcopy_phys(vtop(&BootArgs_paddr),       gPhysBase + &ResetHandlerData.boot_args
+    #                                                        - &ExceptionLowVectorsBase, 4)
+    #                bcopy_phys(vtop(&CpuDataEntries_paddr), gPhysBase + &ResetHandlerData.cpu_data_entries
+    #                                                        - &ExceptionLowVectorsBase, 4)
+    #
+    # with `ExceptionLowVectorsBase = 0x800dc4bc`, `ResetHandlerData = 0x800de8bc` (delta 0x2400) and
+    # `gPhysBase = 0x80000000` (measured: `cp_arg2` at 8000423c was `0x2400 + 8 + gPhysBase`). The
+    # arithmetic assumes the vectors blob is linked at the kernel's physical base - true in Apple's
+    # own armv7 link and false here - so the two writes land at **0x80002404 and 0x80002408**, and
+    # `nm` between 0x80002280 and 0x80002600 finds exactly one symbol there, **`entry_epilogue`** at
+    # 0x80002348, on the instructions `rsb r5, r5, #32` (the set shift) and `mov lr, #0` (the way
+    # counter) of its set/way D-cache sweep. The values written are addresses (0x80101000 and
+    # 0x80147000 - the second is this run's own `xnu_entry_args_pa`), and an address decoded as an
+    # ARM data-processing instruction with `cond=HI` sets neither register, so `way` would never be
+    # zeroed and the way loop would count from whatever `lr` held.
+    #
+    # **A pad now covers those eight bytes, in `entry_stubs.c`, immediately before the code that was
+    # at 0x80002404** - 32 `nop`s, emitted where the old addresses were, so the pad occupies exactly
+    # the two addresses XNU writes and the sweep moves up behind it. NOPs are the right content
+    # because a NOP overwritten by an `ands` is still a NOP. Verified in the linked image:
+    #
+    #     80002404: e320f000  nop {0}        (was: rsb r5, r5, #32)
+    #     80002408: e320f000  nop {0}        (was: mov lr, #0)
+    #
+    # ## The control that says the clobber was not the cause
+    #
+    # **The same `--allow-xnu-entry` run, plain, with the pad in place and no checkpoint, is still
+    # silent** - 294042 bytes, ending at the jump line. So the eight bytes were a real defect and are
+    # worth having fixed, but they are **not** what silences this configuration: the plain 280 run
+    # stops for its original reason, which is still unfound.
+    #
+    # What that control does buy is the removal of a confound. Before it, every checkpoint at or
+    # after 8000423c was unreadable - "silent" could have meant "not reached" *or* "the report path
+    # was broken by the write". The pad separates those two, and every silence from here on is a
+    # measurement again.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=CleanPoC_DcacheRegion`**, which
+    # is one of the two usable names in the dark half. In the padded image the addresses have all
+    # moved by the pad's 0x80: `arm_init` 0x80003008, `cpu_machine_idle_init` 0x80004110, and the
+    # site this probe reports from is
+    #
+    #     800042fc: movw r0, #0x6c50   80004300: mov r1, #4096   80004304: movt r0, #0x8011
+    #     80004308: ldr r0, [r0]      8000430c: bl __wrap_CleanPoC_DcacheRegion
+    #
+    # so `caller_v = 0x80004310`. The other eight sites are `ml_arm_sleep`'s (0x800040d8, the idle
+    # path), three inside `clean_dcache` (0x800370e4, 0x8003714c, 0x80037188 - reachable only through
+    # 0x8000435c), three inside `dcache_incoherent_io_flush64` / `_store64` (0x80037570, 0x80037640,
+    # 0x800376bc - both functions have zero callers) and one in `platform_cache_idle_enter`
+    # (0x80037908, from `cpu_idle`). None can run before the frontier.
+    #
+    #   - `cp_arg0` = the value of **`gVirtBase`** at 0x80116c50, predicted **0x80000000**. This is a
+    #     derived prediction and not a guess: `ml_static_vtop(0x80114840)` returned 0x80114840 and
+    #     `cp_arg2` at 8000423c fixed `gPhysBase = 0x80000000`, and `ml_static_vtop` is `v - gVirtBase
+    #     + gPhysBase` on a static address - identity only if the two are equal.
+    #   - `cp_arg1 = 0x00001000`, from the `mov r1, #4096` at 80004300.
+    #   - `cp_arg2`, `cp_arg3`: leftovers.
+    #   - **A report** cuts the remaining window to `[0x80004310, 0x8000435c)`: this call's own body,
+    #     `ml_static_vtop` at 0x80004318, the conditional `bcopy` at 0x80004344, and the
+    #     `clean_dcache` at 0x8000435c that the unpadded run said is not reached.
+    #   - **A silence** puts the stop in `[0x800042c0, 0x8000430c)` - `ml_static_vtop` at 0x800042c8
+    #     and 0x800042dc, and `bcopy_phys` at 0x800042f8 - three calls to two functions that have
+    #     both already returned in this image, which would be a result worth having.
+    #
+    # The prediction: **a report.** The clobber is out of the way, so a silence here would have no
+    # mechanism behind it that this walk has not already excluded.
+    #
+    # **`STAGE90_ENTRY_CHECKPOINT=CleanPoC_DcacheRegion` was SILENT** - 294042 bytes again, in the
+    # padded image, with the wrap verified at 0x8000430c before the run. So the run does not reach
+    # `CleanPoC_DcacheRegion`, and combined with the point the `bcopy_phys` build measured
+    # (0x8000423c unpadded = 0x800042bc padded, reached) the stop is inside
+    #
+    #     0x800042bc  bcopy_phys        src = vtop(&BootArgs_paddr) = 0x80114840,
+    #                                   dst = gPhysBase + 0x2408 = 0x80002408, len 4
+    #     0x800042c8  ml_static_vtop(0x80101000)      -> [0x80114844] = CpuDataEntries_paddr
+    #     0x800042dc  ml_static_vtop(0x80114844)
+    #     0x800042f8  bcopy_phys        src = vtop(&CpuDataEntries_paddr) = 0x80114844,
+    #                                   dst = gPhysBase + 0x2404 = 0x80002404, len 4
+    #
+    # **Two of those three are now excluded by reading them rather than by running them.**
+    # `ml_static_vtop` is twelve instructions long (0x80007f08..0x80007f5c):
+    #
+    #     80007f20: ldr r0, [&gVirtBase]      ldr r1, [&gPhysSize]
+    #     80007f28: sub r0, r4, r0            ; arg - gVirtBase
+    #     80007f2c: cmp r0, r1
+    #     80007f30: bcc 80007f4c              ; in range -> fall through to the identity add
+    #     80007f40: bl  panic                 ; OUT OF RANGE -> panic  **and a panic is silent**
+    #     80007f4c: ... add r0, r0, [&gPhysBase] ... pop {r4,r5,fp,pc}
+    #
+    # There is no loop in it: it either adds or panics. So it hangs only by panicking, and the panic
+    # needs `arg - gVirtBase >= gPhysSize`. **That cannot happen for either call here**, because the
+    # `bcopy_phys` checkpoint build reported from 0x80004240 - past call 3 of the sequence, which is
+    # `ml_static_vtop(0x80147000)` with `arg - gVirtBase = 0x147000` - so `gPhysSize > 0x147000` was
+    # already established, and 0x101000 and 0x114844 are both smaller. The bound is measured, not
+    # assumed, and it is what makes the next probe unambiguous.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=bcopy_phys` with
+    # `STAGE90_ENTRY_CHECKPOINT_SKIP=1`** - the new skipped variant of the instrument, which passes
+    # the first call through to the real function and reports on the second. Call 1 is the site at
+    # 0x800042bc, whose *call site* is already known to be reached; call 2 is 0x800042f8.
+    #
+    #   - **A silence proves the stop is inside `bcopy_phys`.** With call 1 going through for real,
+    #     the only calls between the last measured point and call 2 are the two `ml_static_vtop`s,
+    #     both excluded above - so a silence cannot be anything but the body of the first
+    #     `bcopy_phys`, and the frontier stops being a missing symbol and becomes a real XNU
+    #     function that does not return.
+    #   - **A report at `caller_v = 0x800042fc`, `cp_calls = 0x00000002`** proves call 1 returned and
+    #     puts the stop inside the second `bcopy_phys` - the one whose destination is 0x80002404,
+    #     the other half of the pair the pad was built for.
+    #
+    # The prediction: **a silence**, and the reason is in `bcopy_phys`'s own body (0x80035ff0), which
+    # is not the `memcpy` its name suggests:
+    #
+    #     80036010: bl pmap_cache_attributes(page_of_src)
+    #     80036024: bl pmap_cache_attributes(page_of_dst)
+    #     80036038..0x8003604c: bl mmu_kvtop_wpreflight(dst - gPhysSize + gVirtBase)
+    #                              ^ for our identity-mapped image that argument is 0x7F802408 -
+    #                                *below* the kernel window - so the lookup fails and the fast
+    #                                path at 0x80036098 (`b bcopy` with both addresses translated)
+    #                                is not taken
+    #     800360a4..0x800360b4: the page-boundary check, with `bl panic` at 0x800360c0 if it fails
+    #     800360c4: _disable_preemption / cpu_number / pmap_map_cpu_windows_copy /
+    #               pmap_cpu_windows_copy_addr - the per-CPU pmap window path
+    #
+    # So the first `bcopy_phys` of this boot does not copy four bytes; it takes the per-CPU window
+    # path, which nothing in this walk has ever executed, and it contains a `panic` whose output this
+    # image cannot produce. Both a panic and a hang are the same measurement here, and this is the
+    # first time the walk has had a candidate that could be either.
+    #
+    # **The run was SILENT, and the prediction held.** `STAGE90_ENTRY_CHECKPOINT=bcopy_phys` with
+    # `SKIP=1`, built and run: the first call went through to the real `bcopy_phys` and the second
+    # was never reached. 294042 bytes, no `stub_hit`, no `cp_calls`, no `exception:`.
+    #
+    # That makes the conclusion a deduction rather than a reading, and it is worth setting out in
+    # full because it is the first frontier this walk has found that is not a missing symbol:
+    #
+    #     1. the call site at 0x800042bc is reached - measured by the `bcopy_phys` checkpoint
+    #        reporting `caller_v = 0x80004240` on the *unpadded* 282g image, where that same call
+    #        site is 0x8000423c (the 0x80 between the two is the NOP pad, verified on both sides);
+    #     2. the call site at 0x800042f8 is not - measured by this run's silence, in which call 1
+    #        ran and call 2 was never reached;
+    #     3. the only two calls in between are `ml_static_vtop(0x80101000)` at 0x800042c8 and
+    #        `ml_static_vtop(0x80114844)` at 0x800042dc - and `ml_static_vtop` cannot stop. Its body
+    #        is twelve instructions with no loop, and its only other exit is `panic`, which needs
+    #        `arg - gVirtBase >= gPhysSize`. `gPhysSize` is `args->memSize` (`arm_vm_init.c:353`) -
+    #        this project's `STAGE90_XNU_ENTRY_SIZE`, 8 MB - and the two arguments would need
+    #        0x101000 and 0x114844, both smaller than the 0x147000 the earlier `ml_static_vtop
+    #        (BootArgs)` call already carried past the same check;
+    #
+    #     therefore: **the stop is inside `bcopy_phys`'s first call.**
+    #
+    # ## What `bcopy_phys` actually does, from `loose_ends.c:58`
+    #
+    # It is not a `memcpy`, and the two paths it can take are the fork the next probe is aimed at:
+    #
+    #     wimg_bits_src = pmap_cache_attributes(src >> PAGE_SHIFT);   /* 0x80036010 */
+    #     wimg_bits_dst = pmap_cache_attributes(dst >> PAGE_SHIFT);   /* 0x80036024 */
+    #     if (mmu_kvtop_wpreflight(phystokv(dst)) &&                  /* 0x8003604c */
+    #         (wimg_bits_src & VM_WIMG_MASK) == VM_WIMG_DEFAULT &&
+    #         (wimg_bits_dst & VM_WIMG_MASK) == VM_WIMG_DEFAULT) {
+    #         bcopy(phystokv(src), phystokv(dst), bytes);             /* 0x80036098, tail */
+    #         return;
+    #     }
+    #     ... the per-CPU copy-window path: mp_disable_preemption, cpu_number,
+    #         pmap_map_cpu_windows_copy x2, pmap_cpu_windows_copy_addr x2, bcopy,
+    #         pmap_unmap_cpu_windows_copy x2, mp_enable_preemption
+    #
+    # `mmu_kvtop_wpreflight` has **exactly one call site in this image** - 0x8003604c, this one -
+    # which makes it the cleanest probe the walk has ever had, and `phystokv(dst)` is 0x80002408, a
+    # kernel VA inside the image, so whether it succeeds depends on that page being mapped writable
+    # by the entry window. The two attribute words decide the rest.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=pmap_map_cpu_windows_copy`.**
+    #
+    # Predicted in symbol-relative terms, because addresses drift between checkpoint builds and one
+    # pair of them is already known to have been mis-recorded because of it: the 32-NOP pad moved the
+    # whole of `cpu_machine_idle_init` by exactly 0x80 (282g's unpadded first `bcopy_phys` call site
+    # 0x8000423c is this build's 0x800042bc, and 282i's unpadded `ml_static_vtop` report
+    # `caller_v = 0x800041e0` is this build's 0x8000425c, the `ml_static_vtop(&start_cpu)` call -
+    # both confirmed against the disassembly of the *padded* image). So: **a report is expected at
+    # `caller_v = bcopy_phys + 0xf0`**, the return address of the call at `bcopy_phys + 0xec`, which
+    # is this build's 0x800360e0.
+    #
+    # The site census was measured, not assumed: `__wrap_pmap_map_cpu_windows_copy` has 25 call
+    # sites in this image and they are exactly - `bcopy_phys` 2 (0x800360dc, 0x800360f0),
+    # `bzero_phys` 1, the twenty `ml_phys_read/write*` wrappers 20, and the two functions this walk
+    # already knows are dead (`dcache_incoherent_io_flush64`, `dcache_incoherent_io_store64`, zero
+    # textual references) 2. The two `bcopy_phys` sites are the first in the image and the only two
+    # this boot can reach: `bcopy_phys` is the frontier.
+    #
+    # So a report here is not just a position, it is a *verdict* on which of the two paths
+    # `bcopy_phys` took - and it is worth setting out because the branch is not the one this ledger
+    # first assumed. **The earlier claim that this configuration's `SO_ONLY` entry window forces the
+    # slow path is wrong, and is left standing above only as the refuted prediction it is.** The
+    # mechanism: `pmap_cache_attributes` (pmap.c:8364) does not read the hardware descriptors at all.
+    # It reads XNU's own software tables, and the only lines that matter at this point in the boot
+    # are
+    #
+    #     if ((paddr >= io_rgn_start) && (paddr < io_rgn_end)) return IO_ATTR... or VM_WIMG_IO;
+    #     if (!pmap_initialized) {
+    #         if ((paddr >= gPhysBase) && (paddr < gPhysBase + gPhysSize)) return VM_WIMG_DEFAULT;
+    #         else return VM_WIMG_IO;
+    #     }
+    #
+    # `pmap_initialized` is FALSE here, and that is a measured-layout fact rather than a reading:
+    # `pmap_init` has exactly ONE call site in this image - `80040970: bl pmap_init`, inside
+    # `vm_mem_bootstrap + 0x134` - and `vm_mem_bootstrap` is reached through `kernel_bootstrap`,
+    # which is reached through `machine_startup` (arm_init.c:437), which is 61 lines *below* the
+    # `cpu_machine_idle_init(TRUE)` call at arm_init.c:376 that this whole frontier sits inside. And
+    # the two page numbers are both DRAM: `pn_src = 0x80114`, `pn_dst = 0x80002`, both inside
+    # `[gPhysBase, gPhysBase + gPhysSize) = [0x80000000, 0x80800000)` with `gPhysSize` = the 8 MB this
+    # project passes. Neither is in an I/O range: `io_rgn_start`/`io_rgn_end` are 0/0 (pmap.c:351-352)
+    # unless the device tree has a `pmap-io-ranges` property, and if it does, the ranges are the
+    # peripheral windows, not DRAM.
+    #
+    # **Both attribute words are therefore `VM_WIMG_DEFAULT` (= `VM_MEM_COHERENT` = 0x2) with the
+    # fast path's second and third conditions true by construction.** The entire decision collapses
+    # onto the first condition, `mmu_kvtop_wpreflight(phystokv(dst))`, and `phystokv` is the identity
+    # here (`gVirtBase == gPhysBase`, measured - see above), so the address it asks about is
+    # `0x80002408` itself: a kernel VA in this image's own text, four bytes of `entry_epilogue`.
+    # `mmu_kvtop_wpreflight` (machine_routines_asm.s:476) is `mcr p15,0,r1,c7,c8,1` / `mrc
+    # p15,0,r0,c7,c4,0` - it asks the *hardware*, and what the hardware answers depends on the
+    # descriptor the payload built, not on XNU's tables. That descriptor is `stages/stage85/mmu.c:8`,
+    # `L1_DESC_SECTION_SO = 0x00010c02`: bits[11:10] = 0b11, "domain 0, **AP full access**", S=1,
+    # XN=0. A privileged write to a full-access section in domain 0 translates, so PAR reports no
+    # abort, `bics r0, r0, r2` leaves the section base 0x80000000 (nonzero, so the sanity check
+    # passes), and the preflight returns **nonzero**.
+    #
+    # **The prediction: SILENCE.** With the preflight succeeding and both attribute words DEFAULT, the
+    # fast path is taken, `bcopy(0x80114840, 0x80002408, 4)` runs, `bcopy_phys` returns, and
+    # `pmap_map_cpu_windows_copy` is never called - the copy-window machinery stays unreachable and
+    # this probe reports nothing. **A report would refute one of the four measured links above**, and
+    # the most valuable one it could refute is the last: it would mean the descriptor the hardware
+    # holds at 0x80002408 is not `L1_DESC_SECTION_SO` - the section is not mapped there at all, or it
+    # is mapped read-only - which is a fact about the *live* mapping that no probe in this walk has
+    # ever been able to see, since `mmu_kvtop_wpreflight` is the only instrument in the image that
+    # asks the hardware and this is the first time it has ever been reached. In that case `cp_arg2`
+    # would carry `wimg_bits_src` = 0x00000002 as the proof that the collapse above was right and the
+    # descriptor was wrong.
+    #
+    # **And whichever way it goes, it closes an assumption the ledger has been carrying unexamined
+    # since the pad.** The pad replaced `rsb r5, r5, #32` and `mov lr, #0` at 0x80002404/0x80002408
+    # with NOPs *because* this `bcopy_phys` writes 4 bytes to 0x80002408. If the fast path is what
+    # runs, then that write is the first thing the boot does to those addresses - and the plain
+    # padded control (282j) was still silent, which places the plain run's stop *at or after* the end
+    # of the first `bcopy_phys`, not before it. Every silence this session has been reading as "the
+    # frontier is the call site at the top of the interval" is therefore compatible with a stop
+    # anywhere in the interval, and the probes that were silent for other reasons - `clean_dcache`,
+    # `CleanPoC_DcacheRegion`, `machine_startup`, `panic` - are the ones that need re-reading on the
+    # padded image, not re-running.
+    #
+    # ## The run: SILENT at 294042 bytes, and the fast path is confirmed - with a caveat that matters
+    #
+    # `STAGE90_ENTRY_CHECKPOINT=pmap_map_cpu_windows_copy`, built, byte-verified (the entry image is
+    # embedded exactly once in the payload, at 0x7868c, and `xnu_entry_image_bytes` still reports
+    # 0x00110628), and run: zero lines matching `stub_hit=`, `cp_arg`, `cp_calls` or `exception:`,
+    # and the log ends where every silent log ends, at `jumping to XNU's _start`. Safety counters
+    # clean on all 25 and all 87: `persistent_write_attempted=0x00000000`, `failure_mask=0x00000000`,
+    # `xnu_entry_failures=0x00000000`, no abort outside the deliberate 0xdeadc000 self-test, and the
+    # device returned to Android by itself.
+    #
+    # **So `pmap_map_cpu_windows_copy` is not called, which means the copy-window path is not taken,
+    # which means `mmu_kvtop_wpreflight` succeeded.** But the caveat is the whole value of this run:
+    # a silence only says the *report* did not happen. It is equally consistent with the fast path
+    # running, with the preflight returning zero and the slow path dying before its first call, and
+    # with the stop being inside one of the two `pmap_cache_attributes` calls - three different
+    # worlds. What the run *does* establish is the negative it was built for: nothing this boot does
+    # reaches the copy-window machinery, so `pmap_map_cpu_windows_copy`, `pmap_cpu_windows_copy_addr`
+    # and `pmap_unmap_cpu_windows_copy` - 25 contamination-prone sites each - are off the table and
+    # can be retired from the candidate list rather than probed.
+    #
+    # ## Bisecting the inside of `bcopy_phys`, and why it is now cheap
+    #
+    # The interval is `bcopy_phys`'s own body: from the first `pmap_cache_attributes` call at
+    # 0x80036010 to the copy-window call at 0x800360dc. The wrappers that made this body unreadable
+    # in a bare walk are exactly the problem `--wrap` has with any well-connected symbol - but the
+    # site census fixes that, and it was measured rather than guessed:
+    #
+    #     pmap_cache_attributes   (29 sites)  2 bcopy_phys, 2 copypv, 1 bzero_phys,
+    #                                         20 ml_phys_read/write*, 1 kdp_find_phys,
+    #                                         2+1 in the two dead dcache_incoherent_io_* functions
+    #     mmu_kvtop_wpreflight     (1 site)   bcopy_phys+0x4c, and nowhere else in the image
+    #     bcopy                   (29 sites)  already executed twice, at 0x8000423c and 0x80004250
+    #
+    # Two of those need no `SKIP` at all. **`pmap_cache_attributes`'s first reached site is inside
+    # `bcopy_phys`** - the only other caller that is not either dead (`dcache_incoherent_io_*`), the
+    # KDP debugger (`kdp_find_phys`), or a `ml_phys_*`/`bzero_phys`/`copypv` function this boot has
+    # never entered - so a plain terminal checkpoint there fires at 0x80036010 and at nothing else.
+    # And `mmu_kvtop_wpreflight` has one site in the entire image.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=mmu_kvtop_wpreflight`.** It is
+    # the higher-information of the two, because it fires *after* both attribute calls and so splits
+    # the interval at its middle, and because the two registers it reads are two measurements this
+    # project has been carrying as owed:
+    #
+    #   - `cp_arg0` is `phystokv(dst)` - the arithmetic at 0x80036038-0x80036048 is `ldr r0,[gPhysBase]
+    #     / ldr r1,[gVirtBase] / sub r0, r4, r0 / add r0, r0, r1`, with `r4 = dst` from the caller. So
+    #     `cp_arg0 = 0x80002408 + (gVirtBase - gPhysBase)`: **0x80002408 means the two bases are
+    #     equal**, and anything else measures their difference directly.
+    #   - `cp_arg1` is `gVirtBase` itself, loaded at 0x80036040 and never overwritten before the call.
+    #     **The prediction is `0x80000000`** - and this is the one place where the dryrun logs and the
+    #     identity argument can be checked against each other, because those logs report
+    #     `stage90_xnu_pmap_gVirtBase=0x80008000` while `ml_static_vtop`'s measured identity on
+    #     `&BootArgs_paddr` says the two bases are equal. The resolution is that the dryrun value is
+    #     `contract->proposed_virtBase` (`xnu_pmap_bootstrap_contract.c:253`) - a *proposal* the
+    #     contract grades itself against, not a reading of XNU's global - so the prediction stands at
+    #     0x80000000 and a report of 0x80008000 would be a genuine surprise of the best kind.
+    #
+    # So: **a report at `caller_v = bcopy_phys + 0x50`** (this build 0x80036050, the return of the
+    # call at 0x8003604c) with `cp_arg0 = 0x80002408` and `cp_arg1 = 0x80000000`. That report says
+    # both `pmap_cache_attributes` calls returned and the preflight was entered, leaving exactly two
+    # places the stop can be: inside the preflight's own eight instructions, or at or past the fast
+    # path's `bcopy` - and those two are told apart by the same probe run again with
+    # `STAGE90_ENTRY_CHECKPOINT=bcopy STAGE90_ENTRY_CHECKPOINT_SKIP=2`, since exactly two `bcopy`
+    # calls (the two exception-vector copies at 0x8000423c and 0x80004250) are known to have returned
+    # before the frontier. **A silence means the stop is in `pmap_cache_attributes`** - the first
+    # XNU pmap software-table read this boot has ever made - and the probe for that is the same
+    # symbol without `SKIP`.
+    #
+    # ## The run: REPORTED, every key predicted to the digit, and one of them for free
+    #
+    # `STAGE90_ENTRY_CHECKPOINT=mmu_kvtop_wpreflight`, built (one site in the whole image, at
+    # 0x8003604c; the layout did not move, so the predicted `caller_v` was exact), byte-verified,
+    # run: **301201 bytes and `stub_hit=mmu_kvtop_wpreflight`**, at
+    #
+    #     cp_arg0=0x80002408   cp_arg1=0x80000000   cp_arg2=0x80800000   cp_arg3=0x00000000
+    #     xnu_entry_stub_caller=0x80036050  (= bcopy_phys + 0x50, predicted)
+    #
+    # `cp_arg0` and `cp_arg1` are the two predictions, and both landed:
+    #
+    #   - `cp_arg1 = 0x80000000` **is `gVirtBase`, read out of the global at 0x80036040**. This is a
+    #     direct measurement of a value the walk has been inferring, and it settles the conflict with
+    #     the dryrun logs: they report `stage90_xnu_pmap_gVirtBase=0x80008000` because that field is
+    #     assigned `contract->proposed_virtBase` (`xnu_pmap_bootstrap_contract.c:253`) - a proposal a
+    #     contract grades itself against - and not because XNU's global holds it. Second instance this
+    #     session of the project's "a measurement can be the thing that is wrong" class, after the
+    #     `SO_ONLY` reasoning that the last run refuted.
+    #   - `cp_arg0 = 0x80002408` is `phystokv(dst)`, so `gVirtBase - gPhysBase == 0` and the
+    #     `ml_static_vtop` identity on `&BootArgs_paddr` is confirmed by a second, independent route.
+    #
+    # `cp_arg2 = 0x80800000` was not predicted and is worth more than it looks: that is
+    # `gPhysBase + gPhysSize` = 0x80000000 + 8 MB, sitting in a register at a call site that never
+    # computes it. It is left there by `pmap_cache_attributes`, which reads `gPhysBase+gPhysSize` to
+    # decide its return value and then returns early - so the register's contents are **a
+    # measurement of which branch of `pmap_cache_attributes` ran**: the `!pmap_initialized` branch
+    # that returns `VM_WIMG_DEFAULT`, exactly as the collapse above predicted, times two calls.
+    #
+    # Safety counters clean on the same terms as every run before it: 25 ×
+    # `persistent_write_attempted=0x00000000`, 87 × `failure_mask=0x00000000`,
+    # `xnu_entry_failures=0x00000000`, no abort outside the deliberate 0xdeadc000 self-test, device
+    # returned to Android on its own.
+    #
+    # ## Where that leaves the frontier
+    #
+    # Both `pmap_cache_attributes` calls returned, and the preflight was entered. Everything else in
+    # `bcopy_phys`'s body before the copy-window call is register arithmetic that cannot stop, and
+    # the slow path is excluded by the run before this one (a preflight returning 0 would have taken
+    # it and reported at `pmap_map_cpu_windows_copy`; that run was silent). So the stop is in one of
+    # exactly two places:
+    #
+    #     1. inside `mmu_kvtop_wpreflight` - nine instructions, `mrs` / `cpsid if` / `mov` / `mcr
+    #        p15,0,r1,c7,c8,1` / `isb` / `mrc p15,0,r0,c7,c4,0` / `ands` / `bne` / `msr`;
+    #     2. at or past the fast path's `bcopy(0x80114840, 0x80002408, 4)`.
+    #
+    # Neither can be settled by wrapping a *call site*: the first is a leaf with one site already
+    # used up by the report above, and the second is `bcopy`, whose earlier calls are behind the
+    # frontier so a `SKIP` count would have to be guessed at (28 sites across `PE_init_platform`'s
+    # six, `arm_vm_init`'s one, and two already known inside `cpu_machine_idle_init`). So this is
+    # where the instrument needed to grow rather than the run to be repeated.
+    #
+    # ## `STAGE90_ENTRY_CHECKPOINT_AFTER=1`, the value variant
+    #
+    # Same one-symbol wrapper, but it calls the real function, records **`cp_ret`** - what it
+    # returned - and only then reports. That turns a single-site function from a position into a
+    # value, and it is the capability the walk has been missing since 280: a terminal checkpoint
+    # cannot say what a function did, a `SKIP` checkpoint can only say it from a *later* call, and a
+    # leaf does not have one. It is in `entry_checkpoint.c`, it is three lines of behaviour over the
+    # existing wrapper, and it is off unless asked for. `AFTER` and `SKIP` are mutually exclusive and
+    # the build refuses both at once, because they are two answers to one question.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=mmu_kvtop_wpreflight
+    # STAGE90_ENTRY_CHECKPOINT_AFTER=1`.**
+    #
+    #   - **A report** means the preflight *returned*, with `cp_ret` the value. It cannot be 0: a
+    #     zero return takes the copy-window path, which the previous run proved is never reported
+    #     from. So `cp_ret` is a physical address, and the body's own arithmetic (`ands r2, r0, #0x2`
+    #     for the super-section flag, else mask 0xFFF) picks between two forms for the 1 MB section
+    #     mapping at 0x80000000: **`0x80000408` if PAR bit 1 is clear** (mask 0xFFF, section base
+    #     0x80000000 | VA bits 11:0), or `0x80202408` if the core reports the section through the
+    #     super-section branch. The prediction is **`cp_ret = 0x80000408`** - a 1 MB section is not a
+    #     16 MB super section, so PAR[1] should be clear - and either way a nonzero `cp_ret` places
+    #     the stop in the fast path's four-byte `bcopy`, whose next probe is `bcopy` with a `SKIP`
+    #     count that can then be *measured* rather than guessed (the first `bcopy` report gives call
+    #     1's `caller_v`, and the count follows from the ladder between it and 0x800042c0).
+    #   - **A silence** means the preflight does **not** return - and because the plain checkpoint run
+    #     above proved the call site is reached, that is a positive finding, not an absence: the
+    #     frontier becomes an instruction rather than a symbol. The one instruction in those nine
+    #     with anything to refuse is `mcr p15, 0, r1, c7, c8, 1`, the address-translation op
+    #     `ATS1CPW`, which the architecture permits an implementation to leave UNDEFINED - and a
+    #     refused UNDEF taken with the payload's vectors is exactly the shape of a silent stop:
+    #     nothing reports, because the reporting path is the thing that was never reached.
+    #
+    # ## The run: REPORTED, and it is the first *value* this walk has ever read out of a function
+    #
+    # `STAGE90_ENTRY_CHECKPOINT=mmu_kvtop_wpreflight STAGE90_ENTRY_CHECKPOINT_AFTER=1`, built,
+    # byte-verified, run: **301220 bytes and `stub_hit=mmu_kvtop_wpreflight`** at
+    # `caller_v = 0x80036050` (predicted), with
+    #
+    #     cp_ret=0x80002408    cp_arg0=0x80002408   cp_arg1=0x80000000
+    #     cp_arg2=0x80800000   cp_arg3=0x00000000
+    #
+    # **The preflight returns.** That is the finding, and everything else follows from it. The
+    # prediction's *class* was right and its *detail* was wrong, which is worth recording rather than
+    # tidying: the two candidate forms were `0x80000408` (PAR bit 1 clear, mask 0xFFF) and
+    # `0x80202408` (super-section branch, mask 0x00FFFFFF), and the measured value is **neither of
+    # those two and yet both** - `0x80002408` is what the super-section branch produces for an
+    # identity-mapped address (`0x80000000 | 0x80002408 & 0x00FFFFFF`), and it is also what a 4 KB
+    # page descriptor would produce for PA 0x80002000 with the same low bits. So the value proves the
+    # translation succeeded and returned the identity mapping, and it does *not* distinguish a
+    # section from a page - which is exactly the kind of claim this walk must not make from a value
+    # that two different descriptors both produce. `cp_arg1 = 0x80000000` is `gVirtBase`, as
+    # predicted, and `cp_arg2 = 0x80800000` is `gPhysBase + gPhysSize` left in r2 by
+    # `pmap_cache_attributes`'s early return, as the previous run's copy of it was.
+    #
+    # Safety counters clean as always: 25 × `persistent_write_attempted=0x00000000`, 87 ×
+    # `failure_mask=0x00000000`, `xnu_entry_failures=0x00000000`, no abort outside the deliberate
+    # 0xdeadc000 self-test, device back in Android on its own.
+    #
+    # ## What it leaves: two measurements that disagree with the code
+    #
+    # The preflight returns nonzero, so `bcopy_phys` does not take its copy-window path, so the fast
+    # path runs `bcopy(phystokv(src), phystokv(dst), bytes)` = `bcopy(0x80114840, 0x80002408, 4)` -
+    # a *tail branch* to `bcopy`, which is `mov r3,r0 / mov r0,r1 / mov r1,r3` falling into
+    # `memmove` at 0x800034a4. And that `memmove`, read instruction by instruction for these
+    # arguments, is: `cmp r2,#0` taken as nonzero, `cmpne r0,r1` different, non-overlapping,
+    # both addresses 4-byte aligned, `cmp r2,#4` not less, `tst r1,#3` clean, `cmp r2,#16` less - so
+    # `Llessthan16_aligned`'s `lsl r2,r2,#28` / `msr CPSR_f,r2` selects exactly one `ldr r4,[r1],#4`
+    # and one `streq r4,[r0],#4`, then `b Lexit` → `pop {r0,r4,r5,r7,pc}`. **A four-byte copy with no
+    # loop, no indirect call, no cache maintenance and no lock cannot hang.**
+    #
+    # And 282m measured that it does not come back: `bcopy_phys` with `SKIP=1` - call 1 run for real
+    # and call 2 reporting when reached - was silent, and that instrument was checked rather than
+    # trusted, because a `SKIP` wrapper that pushes a frame would corrupt the callee's *stack*
+    # argument (`bytes` is bcopy_phys's fifth). The built wrapper's pass-through is a sibling call -
+    # `ldr lr,[sp,#20]` / `add sp,sp,#24` / `b 80035ff0 <bcopy_phys>` - so `sp` is the caller's again
+    # before the callee's prologue, `[sp+40]` is the caller's `str r7,[sp]` = 4, and the instrument
+    # is sound. The two measurements therefore disagree with the code, and this project has a
+    # memory about what that means: **a measurement can be the thing that is wrong** - seven times
+    # over - so the next move is to measure *inside* the disagreement rather than to argue about it.
+    #
+    # ## `AFTER` now composes with `SKIP`
+    #
+    # `AFTER` alone fires at call 1, and `SKIP` alone reports at call `n+1` *before* running it.
+    # Composed, they are the general probe: the first `n` calls pass through untouched and the
+    # `n+1`th is **run for real and its return value recorded**. That is what this frontier needs,
+    # because "does the fast path's `bcopy` return" is a question about one specific call of a
+    # symbol with 28 call sites. The mutual-exclusion guard the last build carried was wrong and is
+    # gone; the two variables answer different halves of one question.
+    #
+    # One limitation, measured in the built image rather than reasoned about, and it is why the
+    # obvious probe (`AFTER` on `bcopy_phys`) is the one probe that must not be used:
+    # `__wrap_mmu_kvtop_wpreflight` opens with `strd r4, [sp, #-32]!`, so at its `bl` the callee
+    # reads its *fifth* argument out of the wrapper's frame. A callee whose arguments fit in r0-r3 is
+    # unaffected; `bcopy_phys(addr64_t, addr64_t, vm_size_t)` puts `bytes` on the stack, so under
+    # `AFTER` it would read the caller's garbage as `bytes` and copy for gigabytes - turning the
+    # experiment into a longer silence. `bcopy` takes three register arguments.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=bcopy
+    # STAGE90_ENTRY_CHECKPOINT_SKIP=2 STAGE90_ENTRY_CHECKPOINT_AFTER=1`.** Skipping two is not a
+    # guess: `bcopy` has 28 call sites, and the two that have already completed in this boot are the
+    # exception-vector copies at 0x8000423c and 0x80004250 - both *before* 0x800042bc, which the
+    # 282g run measured as reached, so both returned. Call 3 is the fast path's.
+    #
+    #   - The report is expected at `cp_calls=3` with `cp_arg0=0x80114840`, `cp_arg1=0x80002408`,
+    #     `cp_arg2=0x00000004` and **`cp_ret=0x80002408`** (`memmove` returns its destination). And
+    #     the arguments are what make it self-verifying: if the report shows different ones, call 3
+    #     was some earlier site (`PE_init_platform` has six), the report says so, and the count is
+    #     measured rather than wrong. `caller_v` will be `0x800042c0` either way, because the call is
+    #     a tail branch and the wrapper sees `bcopy_phys`'s own return address.
+    #   - **A report settles it: the fast path's `bcopy` returns**, so the stop is in
+    #     `[0x800042c0, 0x800042f8)` - the second `bcopy_phys`'s *setup* - where the only instructions
+    #     are two `ml_static_vtop` calls and three stores, and where the previous `SKIP=1` silence
+    #     would then have to be explained rather than believed.
+    #   - **A silence means the fast path's `bcopy` is entered and does not return**, which puts the
+    #     frontier on a single `ldr`/`str` pair in `memmove` with the two arguments above - and a
+    #     finding that strange is exactly why the composed probe reports its arguments: a wrong call
+    #     count and a real hang look identical in a silent log, and the arguments tell them apart.
+    #
+    # ## The run that moved the count: call 3 is `arm_vm_init`'s, not the fast path's
+    #
+    # `STAGE90_ENTRY_CHECKPOINT=bcopy STAGE90_ENTRY_CHECKPOINT_SKIP=2 STAGE90_ENTRY_CHECKPOINT_AFTER=1`,
+    # built, byte-verified, run: **301226 bytes and `stub_hit=bcopy`** at `caller_v = 0x80018600` -
+    # `arm_vm_init + 0xb0`, the return of that function's single `bcopy` call - with
+    #
+    #     cp_calls=0x00000003   cp_ret=0x80304000
+    #     cp_arg0=0x80300000    cp_arg1=0x80304000    cp_arg2=0x00004000   cp_arg3=0x80300000
+    #
+    # So the prediction was wrong in its *identity* and right in its *design*: call 3 is not the fast
+    # path, and the log says so by itself, because the arguments name the call. `cp_arg0 = 0x80300000`
+    # is `topOfKernelData` and `cp_arg2 = 0x4000` is 16 KB, which is `arm_vm_init` copying its page
+    # tables - and it **returned** (`cp_ret` is `memmove`'s destination). What that refutes is the
+    # assumption behind `SKIP=2`: that the two calls before the fast path are `cpu_machine_idle_init`'s
+    # two exception-vector copies. They are not; there are calls earlier still (in `PE_init_platform`,
+    # `PE_init_iokit` or `STRDUP`, whose six-one-one sites the site map lists), which is why this
+    # ledger has stopped predicting `SKIP` counts and started reading them.
+    #
+    # ## The real finding: XNU's own writes corrupt the *report*, and the walk has been bisecting that
+    #
+    # Going back to the pad's own claim - "NOPs are the right content because a NOP overwritten by an
+    # `ands` is still a NOP" - it is false, and false in exactly the way that produced every silence
+    # this session has been reading as a hang. A NOP is still a NOP if nothing executes it after the
+    # write: true of the *boot* path (the pad is in `entry_epilogue`, which the boot never runs) and
+    # exactly false of the *report* path (every report runs through the pad with XNU's data in it).
+    # The two writes happen in `cpu_machine_idle_init`'s body; the report happens later; so from that
+    # instruction onwards the entry image's own logging path executes `andshi r7, r4, r0` and
+    # `andshi r0, r1, r0` in the middle of its set/way sweep. That is why `clean_dcache`,
+    # `CleanPoC_DcacheRegion`, `machine_startup` and 280's frontier were all silent, and why the
+    # session's careful bisect of `bcopy_phys` kept landing on a four-byte `memmove` that cannot hang.
+    #
+    # `entry_stubs.c` now restores the pad in the sweep, and it is placed *first* in `entry_epilogue`'s
+    # cache block - earlier in the function than the geometry - because the constraint is only that
+    # the pad *contain* the two addresses, so code added before it can only push it off them. The
+    # build check added with it reads the linked image back and refuses to build if 0x80002404 or
+    # 0x80002408 is not a `nop`: the check that did not exist when the pad was added, and whose
+    # absence is what made this defect invisible for a whole session of runs.
+    #
+    # ## The 282t run: the repair builds, the pad is verified, and it is still silent
+    #
+    # With the repair in place and both addresses verified as `nop`s (0x800023f4..0x80002473 is the
+    # pad, so they sit 16 and 12 bytes inside it), the first probe *after* the writes was run:
+    # `STAGE90_ENTRY_CHECKPOINT=machine_startup`, plain and terminal. **294042 bytes, no report.**
+    #
+    # That is a real result and not another instrument failure, and the argument is the same one that
+    # excluded the slow path: at the point `machine_startup` would be reported, the repair has already
+    # been installed on every path into `entry_epilogue` - the stubs and the `fleh_*` handlers alike,
+    # since the repair is inside the epilogue rather than inside `entry_stub_hit`. So the *report*
+    # would work, and its absence means the run does not reach `arm_init.c:437`.
+    #
+    # **It also re-opens `SKIP=1`.** The 282m silence was read as "`bcopy_phys` call 1 does not
+    # return", and at the time that call's report would have been the *first* one attempted after the
+    # first write - that is, exactly the report the corruption destroys. So the two readings of 282m
+    # - "call 1 does not return" and "call 1 returns, call 2 is reached, and call 2's report is
+    # corrupted" - were never distinguished, and the repair is what distinguishes them.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=bcopy
+    # STAGE90_ENTRY_CHECKPOINT_SKIP=5 STAGE90_ENTRY_CHECKPOINT_AFTER=1`**, on the repaired image.
+    #
+    # `SKIP=5` is a reading, not a guess: call 3 is `arm_vm_init`'s, and the two calls between it and
+    # the fast path are `cpu_machine_idle_init`'s own two exception-vector copies at +0x12c and +0x140,
+    # which are *known* to have returned - the 282g run reported from 0x800042bc, which is after them
+    # in a straight-line sequence. So call 6 should be the fast path's.
+    #
+    #   - **A report at `cp_calls=6` with `cp_arg0=0x80114840`, `cp_arg1=0x80002408`,
+    #     `cp_arg2=0x00000004` and `cp_ret=0x80002408`** means the fast path's `bcopy` is reached and
+    #     returns - and, because the fast path's `bcopy` happens *after* the first write, it also means
+    #     the boot survives the writes, which `machine_startup`'s silence just denied. Those two
+    #     cannot both be true, so this is the run that says which of the two is wrong.
+    #   - **A report with different arguments** names the true call and its caller, and the next build
+    #     takes the difference - the same self-correction as this run's.
+    #   - **A silence** now means the fast path's `bcopy` is entered and does not return, and the
+    #     ambiguity that has been carried since 282m is gone: with the repair in place, a silence is
+    #     the boot's and not the instrument's. That would put the frontier on the four instructions of
+    #     `Llessthan16_aligned` (`lsl r2,r2,#28` / `msr CPSR_f,r2` / `ldreq r4,[r1],#4` /
+    #     `streq r4,[r0],#4`), which no reading of the code can make hang - and the next instrument
+    #     for that is not a call-site probe at all, because `bcopy` reaches `memmove` by *falling
+    #     through* into it and a `--wrap` cannot rewrite a fall-through.
+    #
+    # ## The 282u run: `bcopy` call 6, silent, and the call numbering is *verified* this time
+    #
+    # `STAGE90_ENTRY_CHECKPOINT=bcopy STAGE90_ENTRY_CHECKPOINT_SKIP=5 STAGE90_ENTRY_CHECKPOINT_AFTER=1`
+    # was built, verified, and run: **294042 bytes, silent** - the same size as every silent log this
+    # walk has taken.
+    #
+    # Before reading anything into that, the call numbering was re-derived from the *linked image* at
+    # this exact configuration rather than from the census that produced the prediction, because the
+    # prediction was wrong once already. `cpu_machine_idle_init` is at 0x80004130 and its `bl`s in
+    # address order are: `PE_parse_boot_argn` x2, `ml_static_vtop` x2, `bcopy_phys` (the `wfi == 0`
+    # branch, not taken), `ml_vtophys`, `ml_io_map`, **`bcopy` at 0x8000425c**, **`bcopy` at
+    # 0x80004270** (`cpu.c:566-567`, the two exception-vector copies), `ml_static_vtop` x3,
+    # **`bcopy_phys` at 0x800042dc**, `ml_static_vtop` x2, **`bcopy_phys` at 0x80004318**,
+    # `CleanPoC_DcacheRegion` at 0x8000432c, `ml_static_vtop`, **`bcopy` at 0x80004364**
+    # (`cpu.c:589`, the running-signature copy), `clean_dcache` at 0x8000437c. And inside
+    # `bcopy_phys` there are exactly two wrapped `bcopy` references: the fast path's `b __wrap_bcopy`
+    # at 0x800360b8 and the slow path's `bl __wrap_bcopy` at 0x80036144.
+    #
+    # So with call 3 measured as `arm_vm_init`'s by 282s, the dynamic order is: 1 and 2 (the two
+    # `PE_init_platform` sites the site map lists), 3 `arm_vm_init`, 4 and 5 the vector copies at
+    # 0x8000425c/0x80004270, **6 the fast path of the first `bcopy_phys`**, 7 the fast path of the
+    # second, 8 the running-signature copy. Call 6 is what `SKIP=5` reports on, and it is the one the
+    # prediction named. Two things follow. The numbering was right. And the 282g report - from
+    # 0x80004240 in the unpadded image, which is the call site at 0x8000423c - had already proved
+    # calls 4 and 5 returned, so the silence is not the vector copies.
+    #
+    # ## What the silence is: `r7`, which is live across the pad, measured in the linked image
+    #
+    # The repair of 282t is in the built image exactly where it was meant to be: the two stores at
+    # 0x800023e4/0x800023e8, `r2 = 0xe320f000` and `r3 = 0x80002000` loaded by `movw`/`movt` over the
+    # two instructions before them, `dsb sy` / `isb sy` after, and both addresses reading back as
+    # `nop`. It ran, and the run was still silent. So the repair did not take effect, and the
+    # measurement that says why is in `entry_epilogue`'s own disassembly rather than in the log:
+    #
+    #     80002358: ldr r7, [r4, #4]        ; prologue, r4 = entry_vectors_stack
+    #     ...
+    #     800023f4: 32 nops                 ; the pad, at 0x80002404/0x80002408 = the two words XNU writes
+    #     ...
+    #     80002574: mov r1, r7              ; first use of r7, 0x180 bytes past the pad
+    #     800025b8: ldr r7, [r4, #32]       ; and it is not reloaded before then
+    #
+    # `r7` is a callee-saved register holding a value the epilogue loaded before the pad and does not
+    # touch again until well after it, where it is written into the kv buffer, added to as half of a
+    # pointer (`800025cc: add r0, r6, r7`, `800025fc: add r0, r7, #4`), and used as the base of a
+    # byte-table read. `0x80147000` decodes as `andshi r7, r4, r0` - `ANDS` with `cond=HI`, so it
+    # writes r7 exactly when C is set and Z is clear, and leaves the flags changed either way. Whether
+    # it fires depends on the flags at that instruction, which depend on the code before the pad,
+    # which is why this defect appears and disappears between builds while the code is instruction-
+    # identical - the corrupted *values* are addresses, and the addresses are the layout.
+    #
+    # The mechanism is therefore real and *erratic*, and the repair's failure has to be an I-side
+    # effect: the store puts `nop` in the D-cache and `dsb sy` publishes it, but the pad's line may
+    # already have been prefetched into the instruction cache carrying XNU's value, and this project
+    # has no instrument that can see the I-cache of a running kernel. An instrument whose correctness
+    # rests on an unmeasurable cache property is not an instrument, and the third fix is structural
+    # instead: **the pad is no longer anything, because it is no longer executed.**
+    #
+    # ## The fix, and the run it is for
+    #
+    # `entry_stubs.c`'s pad now opens with `b 1f` over 31 NOPs, so the whole 128 bytes is jumped over
+    # and the two words XNU corrupts are two words nothing ever fetches as instructions. The branch
+    # sits at 0x800023d4, twenty bytes below 0x80002404, so it is not one of the corrupted words
+    # either. This holds whatever the D-cache, the I-cache, the prefetcher and the flags do, and the
+    # build checks the structure rather than the content: `entry_skip_pad` and `entry_skip_pad_end`
+    # are linked labels, `verify_pad` decodes the branch at the first of them and refuses the build
+    # unless it targets the second, the pad is at least 128 bytes, the branch is at least four bytes
+    # below 0x80002404, and both of XNU's addresses are strictly inside the range it skips. This
+    # build says: `entry_skip_pad at 0x800023d4 branches over 128 bytes to 0x80002454, and XNU's two
+    # writes (0x80002404, 0x80002408) land inside what it skips`.
+    #
+    # **The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=CleanPoC_DcacheRegion`** - the
+    # nearest probe *after* both writes, at 0x8000432c, three instructions past the second
+    # `bcopy_phys`.
+    #
+    #   - **A report at `caller_v = 0x80004330`, `cp_arg0 = 0x80000000`, `cp_arg1 = 0x00001000`**
+    #     means the report path survives XNU's writes, and - because this call site is *after* both
+    #     `bcopy_phys` calls - that calls 6 and 7 returned too. That would refute the reading that
+    #     put the frontier inside `bcopy_phys`, take the instrument's own defect off the table for
+    #     good, and move the frontier past 0x8000432c in one step. `cpu.c:583` gives
+    #     the two arguments: `CleanPoC_DcacheRegion((vm_offset_t)phystokv((char *)(gPhysBase)),
+    #     PAGE_SIZE)` - `gPhysBase` was measured as 0x80000000 by 282g's `ml_static_vtop`, and the
+    #     PAGE_SIZE is the `mov r1, #4096` the earlier prediction already read off the instruction
+    #     above the call. Its first *executed* call site is this one: the eight others are in
+    #     `clean_dcache` (below it and after it), `ml_arm_sleep`, `dcache_incoherent_io_*` and the
+    #     panic path, none of which has run by this point.
+    #   - **A silence** is now the boot's, and it puts the stop in `[0x800042dc, 0x8000432c)` - the
+    #     two `bcopy_phys` calls and the three `ml_static_vtop`s between them. That would be the
+    #     first trustworthy silence this walk has had since 280, and it would be worth more than the
+    #     report.
+    #
+    # The prediction: **a report.** Not because of the code - 282m's silence still stands unexplained
+    # under the instrument's own defect, and the walk has no measurement of call 6 - but because
+    # every silence this walk has taken since 280 has turned out to be the instrument, three times in
+    # a row, and because the one report that *is* downstream of both writes and is not from this
+    # instrument at all - 279's, from `klist_init` - runs `klist_init` only after
+    # `cpu_machine_idle_init` has returned.
+    #
+    # **The run reported, and it is the first report this walk has had from after XNU's two writes.**
+    # 301202 bytes, `stub_hit=CleanPoC_DcacheRegion`, `xnu_entry_stub_caller=0x80004310`, and
+    #
+    #     cp_arg0 = 0x80000000    cp_arg1 = 0x00001000    cp_arg2 = 0x40000000   cp_arg3 = 0x00112440
+    #
+    # - the two arguments exactly as predicted (`cpu.c:583`'s `phystokv((char *)(gPhysBase))` is
+    # 0x80000000 because the two bases are equal, and its `PAGE_SIZE` is 0x1000), the other two
+    # leftovers. The caller reads 0x80004310 rather than the 0x80004330 the prediction named, and by
+    # exactly the size of what this build removed: the two repair stores, their `dsb`/`isb` and the
+    # pad's own branch arithmetic moved everything after the pad twenty bytes earlier, which the
+    # static listing confirms - `bl CleanPoC_DcacheRegion` is at 0x8000430c in this image and was at
+    # 0x8000432c in the one before it.
+    #
+    # Three things follow, and the third is worth more than the step.
+    #
+    #   - **The report path survives XNU's writes.** That was the open question the skip pad was
+    #     built to answer, and the answer is yes - with the caveat that a report cannot by itself
+    #     distinguish "the pad is skipped" from "the pad is executed and the corruption happens to be
+    #     inert on this run", which is exactly the errancy that made the NOP pad unreadable.
+    #   - **Both `bcopy_phys` calls returned**, and so did the two wrapped `bcopy`s inside them (calls
+    #     6 and 7 of the numbering above), because this call site is three instructions past the
+    #     second one. 282m's silence therefore cannot be read as "the stop is inside `bcopy_phys`'s
+    #     first call" - the reading the ledger has carried since - and the interval that silence
+    #     actually bounds is empty.
+    #   - **The frontier is not in `bcopy_phys` and never was.** Every silence between 280 and this
+    #     run was the instrument's: the walk has spent four experiments bisecting a four-byte
+    #     `memmove` and a `pmap_cache_attributes` call, both of which this run shows return. The
+    #     boot reached 0x8000430c on the *first* run after the pad stopped being executed.
+    #
+    # Safety on the run: 25 x `persistent_write_attempted=0x00000000`, 87 x
+    # `failure_mask=0x00000000`, `xnu_entry_failures=0x00000000`, no abort other than the
+    # `high_va_data_abort_handler` contract keys, and the device returned to Android on its own
+    # ("No errors detected" in its own log). Non-persistent `fastboot boot` only, nothing flashed.
+    #
+    # ## The next step, and its prediction. `STAGE90_ENTRY_CHECKPOINT=machine_startup`
+    #
+    # With the instrument trustworthy the walk can take the step it has wanted to take since 280:
+    # `machine_startup` (`0x800075c4`) is `arm_init`'s last act (`arm_init.c:437`) and the boundary
+    # between the ladder and XNU's own startup, so a report there proves the *whole* of
+    # `arm_init` ran - including the eighteen real calls after `arm_vm_init` that 280's own frontier
+    # could not reach.
+    #
+    #   - **A report at `caller_v = 0x8000xxxx` (inside `arm_init`), `cp_arg0 = 0x80147000`** - the
+    #     boot args pointer, which is the value `arm_vm_init`'s report carried at the same key
+    #     (`0x80018b18`'s `cp_arg0` in the 279-era ledger) - means `arm_init` is complete.
+    #   - **A silence** bounds the stop to `[0x8000430c, machine_startup)` - the rest of
+    #     `cpu_machine_idle_init` (`ml_static_vtop`, the conditional `bcopy` at `cpu.c:589`,
+    #     `clean_dcache`), the remainder of `arm_init`'s ladder, and the call itself - and unlike
+    #     every silence since 280 it would be the boot's, which is what makes it worth taking.
+    #
+    # The prediction: **a report.** Nothing between this call site and `machine_startup` is a stub
+    # that has not already been reported from later in a previous run - 279 reported from
+    # `klist_init`, which is *past* `machine_startup` - and the instrument is no longer in question.
+    #
+    # **The run reported again - `stub_hit=machine_startup` at `caller_v = 0x8000334c`, and the whole
+    # ladder is behind it.** 301196 bytes, `cp_arg0 = 0x80147000` exactly as predicted (the boot args
+    # pointer, the same value `arm_vm_init`'s report carried), `cp_arg1 = 0x801448c0`,
+    # `cp_arg2 = 0x8010e57c`, `cp_arg3 = 0x000000ff` recorded and not interpreted. The caller is
+    # inside `arm_init`, and the address is 0x8000334c where the previous image put the same call
+    # site at 0x8000336c - the same twenty-byte shift the pad's new shape introduced, which is the
+    # second independent reading of it.
+    #
+    # So `arm_init` reached `arm_init.c:437`, which means every step of the ladder before it ran:
+    # `cpu_machine_idle_init` in full - both `bcopy_phys` calls, `CleanPoC_DcacheRegion` (measured in
+    # the previous run), the conditional `bcopy` at `cpu.c:589` and `clean_dcache` - and the eighteen
+    # real calls `arm_init` makes after `arm_vm_init` returns. That is the interval 280's silence
+    # made unreachable and that four experiments were spent inside, and it is now behind the walk.
+    #
+    # Safety: 25 x `persistent_write_attempted=0x00000000`, 87 x `failure_mask=0x00000000`,
+    # `xnu_entry_failures=0x00000000`, the device returned to Android by itself. `fastboot boot`
+    # only; nothing was written to storage.
+    #
+    # ## The next step, and its prediction: a run with **no checkpoint at all**
+    #
+    # The instrument has been masking the boot's own frontier, and the way to find it is to stop
+    # asking the instrument questions and let the image answer the one it answers by itself: a plain
+    # build links every object resolved so far and reports `stub_hit=<first symbol it needs and does
+    # not have>`, or `exception: <vector>` if it faults first. That is the walk's normal mode - the
+    # one that produced 279 - and it has not been available since 280, because every plain run since
+    # then has been silent for the pad's reason.
+    #
+    #   - **A report naming a symbol** is the frontier: the next step links the object that defines
+    #     it, exactly as the walk has done 279 times.
+    #   - **An `exception:` line** is a fault, and its vector, DFAR/DFSR and instruction are the
+    #     frontier.
+    #   - **A silence now** would be real, and would have to be explained by the boot rather than by
+    #     the instrument - the state the walk has been trying to reach for four experiments.
+    #
+    # The prediction: **a report, and a `stub_hit` rather than an exception.** The two newest
+    # symbols on the path are `kern_event.o`'s (linked in 280, whose own run could not report), and
+    # the boot path through IPC init is the one 279's report came from, so the name is expected to be
+    # one of the callees that object's own code needs next; the *shape* is what is predicted here,
+    # not the name. If it is an exception instead, the walk has a fault to read rather than a symbol
+    # to link, and that is a different experiment than the ledger has ever planned for.
+    #
+    # **The run reported twice over: once through the preflight, and once from a stub two functions
+    # further on.** Two runs, because the first exposed a payload defect that this step's growth had
+    # triggered, and the second is the step's actual result.
+    #
+    # **Run one: the payload's own preflight refused the boot.** `loader_xnu_entry_stub_status`
+    # came back `0xd0008910` with `failure_mask=0x00008910` - the bits are `BAD_RETURN_STATUS`,
+    # `NO_OUTPUT`, `SAFETY_BOUNDARY` and `ARM_VM_INIT_FULL_PMAP` - and the *only* new log line was
+    #
+    #     stage90_xnu_arm_vm_init_full_pmap_high_va_data_verified=0x00000000
+    #
+    # against `0x00000001` in every previous run. `kernel_entry bad: Mach-O/XNU loader preflight`,
+    # `platform_reboot`, and the device came back on its own. This is the safety gate doing exactly
+    # its job: linking 4 KB more XNU code into the entry image grew the payload past an assumption
+    # of the Stage84 live-pmap rung, and the rung said so instead of letting the boot proceed on a
+    # pmap that disagrees with itself.
+    #
+    # The mechanism took two runs to get right, and both halves are in
+    # `stages/stage90/xnu_arm_vm_init_full_pmap.c`:
+    #
+    #   - The check writes and reads `stage90_full_pmap_probe_word` through *both* its own address
+    #     and `STAGE90_VIRT_BASE +` that address, so **two** mappings have to cover it - the low
+    #     identity sections (Phase 1) and the image's page-mapped window (Phase 2). Phase 1 was a
+    #     hardcoded pair of sections covering PA [0, 2 MB); the probe word sat at 0x001fc0b4 and
+    #     moved to 0x002000b4, one section past the end. **Phase 1 now loops over the image**, which
+    #     is what Phase 5 already does for the same reason.
+    #   - Fixing that alone changed nothing, because Phase 3 - the 256 MB RAM direct map that starts
+    #     at `STAGE90_VIRT_BASE + 0x200000` and writes *sections* - runs after Phase 2 and wins the
+    #     L1 entries the image's window had just claimed. The high-VA read then went to PA
+    #     0x802000b4 instead of PA 0x002000b4. **Phase 3 now skips the slots the image's window
+    #     covers**, and the image's window is what the check exists to test.
+    #
+    # Both are the same defect class the Phase 2 comment already records ("embedding a larger XNU
+    # entry image moved a .bss variable 148 bytes past the end of the window"), and both are now
+    # derived from `__stage90_image_end` rather than spelled out, so the next growth moves the
+    # mappings with it instead of past them. Also worth recording for the class: `HIGH_VA_DATA` is
+    # the bit that fires for a *failure in either half*, and in the second run it was the identity
+    # half that was broken - the name points at the wrong side of the comparison.
+    #
+    # **Run two: `stub_hit=clock_config`, `xnu_entry_stub_caller=0x800076c4`, 301113 bytes.**
+    # 0x800076c4 is `machine_init + 0xc`, and `machine_init` is the *first* of the twelve init
+    # functions `kernel_bootstrap` calls after `ipc_init` returns - exactly the "next frontier is
+    # transitive" shape this step predicted, resolved to a name by the run. So this step measured
+    # all of the following in one go:
+    #
+    #   - `ipc_host_init` completes, including all three `kernel_set_special_port` calls, and with
+    #     `realhost` now a real 0x194-byte object rather than a stand-in - the size 277 measured is
+    #     the size the real definition has, to the byte;
+    #   - `ipc_init` completes, which is `kmem_suballoc` twice and `ipc_host_init` once;
+    #   - `kernel_bootstrap` runs from `PE_parse_boot_argn` through `mapping_free_prime` and into
+    #     `machine_init`, with *no* stub left anywhere in its own body;
+    #   - and the first thing it needs that this image does not have is `clock_config`.
+    #
+    # Safety on both runs: 25 x `persistent_write_attempted=0x00000000`, 87 x
+    # `failure_mask=0x00000000`, `xnu_entry_failures=0x00000000`, and the device returned to Android
+    # by itself on both - on the first through the payload's own `platform_reboot`, on the second
+    # through the normal exit. `fastboot boot` only; nothing flashed.
+    #
+    # **The next step: `clock_config`.** It is `osfmk/kern/clock.c` (manifest), so the object is
+    # `osfmk_kern_clock.o`, and `machine_init` calls it at `+0xc` - before anything else it does.
+    #
     # 279: `ipc_mqueue_init`, and a stop that reports the caller key 278 already reported.
     # 278's stop was `ipc_mqueue_init`, and the object that defines it is `osfmk/ipc/ipc_mqueue.c`
     # (manifest:514), `osfmk_ipc_ipc_mqueue.o` - **5436 bytes of text, 8 of bss, 238 of rodata, 47
@@ -4026,6 +5851,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_IPC_HOST_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_PORT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_MQUEUE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_HOST_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_EVENT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
@@ -4039,7 +5865,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
@@ -4202,6 +6028,67 @@ layout_fail() { say "FAIL: $*" >&2; exit 1; }
     layout_fail "the $ENTRY_TABLE_BYTES bytes of tables at $ENTRY_DATA_LIMIT reach the tree at $ENTRY_DT_OFFSET"
 (( ENTRY_DT_OFFSET + ENTRY_DT_MAX <= ENTRY_SIZE )) ||
     layout_fail "the tree buffer at $ENTRY_DT_OFFSET (+$ENTRY_DT_MAX) is outside the $ENTRY_SIZE window"
+
+# --- the two addresses XNU's own boot path writes to -------------------------------------------
+#
+# `cpu_machine_idle_init` writes four bytes to each of `gPhysBase + 0x2408` and `gPhysBase + 0x2404`
+# (`osfmk/arm/cpu.c:570-580`, through two `bcopy_phys` calls whose destinations it computes from its
+# own link). On this image those are `ENTRY_BASE + 0x2408` and `ENTRY_BASE + 0x2404`, and what sits
+# there is the NOP pad in `entry_epilogue`'s cache sweep - which the *report* executes, after the
+# writes. `entry_stubs.c` explains why the pad is a branch over NOPs rather than NOPs; this check is
+# the other half of that contract, and it is what fails the build instead of the run.
+#
+# This is the check whose absence cost experiment 282 its bisect. The pad was added first and the
+# claim made for it was that "a NOP overwritten by data is still a NOP" - true for the boot path,
+# which never runs the epilogue, and false for the report path, which always does. The two
+# addresses were verified to be `nop`s in the build that added the pad and never again.
+#
+# The check is structural now, because the fix is. The pad is not a region of NOPs whose content has
+# to stay right; it is a region that is *never executed* - `entry_skip_pad` branches over it - so
+# what matters is that the branch is where it is and that the two addresses fall inside what it
+# skips. Content that is never fetched cannot be corrupted into meaning, which is a property no
+# arrangement of NOPs has and no run-time repair can be checked for.
+#
+# Three things have to hold, and each has failed in a different way already:
+#   1. `entry_skip_pad` begins with a branch whose target is `entry_skip_pad_end` - the pad is
+#      jumped over. If the compiler ever reorders the inline asm, or a `-O` level stops honouring
+#      the label pair, this is what catches it.
+#   2. `entry_skip_pad` is at least four bytes *below* 0x80002404, so the branch instruction itself
+#      is not one of the two words XNU overwrites. A branch at a corrupted address is a jump to
+#      nowhere, which is worse than the NOP it replaced.
+#   3. Both addresses XNU writes lie strictly inside the skipped range, so neither holds an
+#      instruction the report executes.
+verify_pad() {
+    local sym addr
+    local start end want branch
+
+    sym_addr() { arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk -v s="$1" '$3 == s { print "0x" $1; found = 1 } END { exit(found ? 0 : 1) }'; }
+    sym_word() { arm-none-eabi-objdump -d --start-address=$1 --stop-address=$(($1 + 4)) "$OUT/xnu_arm_entry.elf" \
+                     | awk -v a="$(printf '%x' "$1")" '$1 == a":" { print $2 }'; }
+
+    start=$(sym_addr entry_skip_pad)   || layout_fail "entry_skip_pad is not in the linked image"
+    end=$(sym_addr entry_skip_pad_end) || layout_fail "entry_skip_pad_end is not in the linked image"
+
+    [[ $((end - start)) -ge 128 ]] ||
+        layout_fail "the skip pad is $((end - start)) bytes; it has to cover 0x2404 and 0x2408 with room to spare"
+
+    # ARM `b <label>` is 0xEA in the top byte and a signed 24-bit word offset in the rest.
+    branch=0x$(sym_word $start)
+    [[ $(( (branch >> 24) & 0xff )) -eq 0xea ]] ||
+        layout_fail "the word at entry_skip_pad ($(printf '0x%08x' $start), $(printf '0x%08x' $branch)) is not a branch - the pad would be executed, not skipped"
+    addr=$(( start + 8 + ((((branch & 0xffffff) ^ 0x800000) - 0x800000) << 2) ))
+    [[ $addr -eq $end ]] ||
+        layout_fail "the branch at entry_skip_pad targets $(printf '0x%08x' $addr), not entry_skip_pad_end ($(printf '0x%08x' $end))"
+
+    [[ $((start + 4)) -le $((ENTRY_BASE + 0x2404)) ]] ||
+        layout_fail "entry_skip_pad is at $(printf '0x%08x' $start), which puts the branch itself on one of the addresses XNU writes"
+    for addr in $((ENTRY_BASE + 0x2404)) $((ENTRY_BASE + 0x2408)); do
+        [[ $addr -ge $((start + 4)) && $addr -lt $end ]] ||
+            layout_fail "$(printf '0x%08x' $addr) is outside the skipped range [$(printf '0x%08x' $((start + 4))), $(printf '0x%08x' $end)) - the report would execute XNU's data as an instruction"
+    done
+    say "  entry_skip_pad at $(printf '0x%08x' $start) branches over $((end - start)) bytes to $(printf '0x%08x' $end), and XNU's two writes ($(printf '0x%08x' $((ENTRY_BASE + 0x2404))), $(printf '0x%08x' $((ENTRY_BASE + 0x2408)))) land inside what it skips"
+}
+verify_pad
 
 cat > "$OUT/xnu_arm_entry.h" <<EOF
 /* Generated by xnu_arm_boot/build_entry.sh. The XNU entry image, as data for the payload.

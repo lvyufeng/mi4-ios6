@@ -324,9 +324,36 @@ int stage90_xnu_arm_vm_init_full_pmap_run(
     memset(stage90_candidate_l2_pool, 0, sizeof(stage90_candidate_l2_pool));
     stage90_l2_table_allocated_count = 0;
 
-    /* Phase 1: Low identity mappings (1MB sections, for current PC safety) */
-    map_l1_section_dram(stage90_candidate_l1, 0x00000000u, 0x00000000u);  /* Stage84 image */
-    map_l1_section_dram(stage90_candidate_l1, 0x00100000u, 0x00100000u);  /* Extra safety */
+    /*
+     * The image's own extent, used by three of the phases below: Phase 1 (the low identity map),
+     * Phase 2 (the high page-mapped window) and Phase 3 (which has to stay out of Phase 2's way).
+     * Derived here rather than three times, because the three have to agree - the failure that
+     * produced this comment was two of them disagreeing.
+     */
+    const uint32_t image_end = (uint32_t)(uintptr_t)__stage90_image_end;
+    uint32_t image_windows = (image_end + L1_SECTION_SIZE - 1u) / L1_SECTION_SIZE;
+
+    if (image_windows == 0u) {
+        image_windows = 1u;
+    }
+
+    /*
+     * Phase 1: Low identity mappings (1MB sections, for current PC safety).
+     *
+     * A loop over the payload's image, not two named sections - the same correction Phase 5
+     * already carries, needed here for the second time and for the same reason. The high-VA data
+     * check further down writes and reads `stage90_full_pmap_probe_word` through *both* its own
+     * address and `STAGE90_VIRT_BASE +` that address, so the identity half has to be mapped by
+     * these sections while the candidate table is installed. Two sections cover PA [0, 2 MB):
+     * that was enough while the word sat at 0x001fc0b4, and linking `osfmk_kern_host.o` into the
+     * entry image grew the payload's embedded image, moved the word to 0x002000b4 and put it one
+     * section past the last one. The check then reported `HIGH_VA_DATA`, which names the high-VA
+     * half of the comparison - the half that was working - and says nothing about the identity
+     * half that had just been left unmapped.
+     */
+    for (uint32_t ident_off = 0u; ident_off < image_end; ident_off += L1_SECTION_SIZE) {
+        map_l1_section_dram(stage90_candidate_l1, ident_off, ident_off);
+    }
 
     /*
      * Phase 2: High kernel image mapping via L2 pages (4KB granularity).
@@ -346,12 +373,8 @@ int stage90_xnu_arm_vm_init_full_pmap_run(
      * stops being viable at a 128 MB payload, which is far past anything the payload can be.
      */
     {
-        uint32_t image_end = (uint32_t)(uintptr_t)__stage90_image_end;
-        uint32_t windows = (image_end + L1_SECTION_SIZE - 1u) / L1_SECTION_SIZE;
+        uint32_t windows = image_windows;
 
-        if (windows == 0u) {
-            windows = 1u;
-        }
         for (uint32_t w = 0u; w < windows; w++) {
             uint32_t base = w * L1_SECTION_SIZE;
             uint32_t *l2_kernel = alloc_l2_table();
@@ -370,11 +393,26 @@ int stage90_xnu_arm_vm_init_full_pmap_run(
         xnu_log_kv32("stage90_xnu_arm_vm_init_full_pmap_l2_image_windows", windows);
     }
 
-    /* Phase 3: Physical RAM direct map (1MB sections for efficiency) */
-    /* Map 256MB starting at VA/PA 0x80200000 (example, cancro has ~1.5GB but we map subset) */
+    /*
+     * Phase 3: Physical RAM direct map (1MB sections for efficiency)
+     * Map 256MB starting at VA/PA 0x80200000 (example, cancro has ~1.5GB but we map subset)
+     *
+     * **Except where Phase 2 already claimed the L1 slot.** Phase 2 page-maps the image at
+     * `STAGE90_VIRT_BASE + off`, one L1 slot per megabyte of image, and this phase starts at
+     * `STAGE90_VIRT_BASE + 0x200000` and writes *sections* - so from the moment the image's
+     * window reaches 2 MB the two are writing the same L1 entries, and this phase, running later,
+     * wins. The high-VA data check then reads `STAGE90_VIRT_BASE + &stage90_full_pmap_probe_word`
+     * and gets PA 0x802000b4 instead of PA 0x002000b4, which is what `HIGH_VA_DATA` reported for a
+     * build whose only relevant change was that the probe word crossed 0x00200000. The image's
+     * window is the mapping the check exists to test, so the direct map yields to it here.
+     */
     for (uint32_t offset = 0; offset < (256 * 1024 * 1024); offset += L1_SECTION_SIZE) {
         uint32_t va = 0x80200000u + offset;
         uint32_t pa = 0x80200000u + offset;
+
+        if (va < STAGE90_VIRT_BASE + (image_windows * L1_SECTION_SIZE)) {
+            continue;
+        }
         map_l1_section_dram(stage90_candidate_l1, va, pa);
     }
 

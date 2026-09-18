@@ -312,6 +312,28 @@ static char g_kv_buf[ENTRY_KV_BUF];
 static uint32_t g_kv_len;
 
 /*
+ * The two addresses XNU's own boot path writes to, and the instruction used to put them back.
+ *
+ * These are constants because XNU's are. `cpu_machine_idle_init` (`osfmk/arm/cpu.c:570-580`) ends
+ * its `from_boot` branch with two `bcopy_phys` calls whose destinations it computes from its own
+ * link, not from anything this project chooses:
+ *
+ *     dst_boot_args       = gPhysBase + (&ResetHandlerData.boot_args       - &ExceptionLowVectorsBase)
+ *     dst_cpu_data_entries = gPhysBase + (&ResetHandlerData.cpu_data_entries - &ExceptionLowVectorsBase)
+ *
+ * and on this image that is 0x80000000 + 0x2408 and 0x80000000 + 0x2404. So the destinations are
+ * fixed for as long as XNU's `reset_handler_data_t` layout and `gPhysBase` are, which is the point:
+ * this image cannot move the target, it can only choose what sits there. What sits there is the NOP
+ * pad in `entry_epilogue`'s cache sweep, and because the *report* executes the pad after XNU has
+ * written to it, the pad is restored there before the sweep reaches it. `build_entry.sh` asserts in
+ * every build that both addresses really are `nop` in the linked image.
+ */
+/* The two addresses XNU writes into this image - 0x80002404 and 0x80002408 - are not named here,
+ * because nothing in this file may depend on their values: the pad below is *structure* rather than
+ * content, and the addresses live in `build_entry.sh`'s check, which is where they can fail a build.
+ * See experiment 282 for the arithmetic that produces them. */
+
+/*
  * Counts records `entry_kv` refused for want of room. Read by the epilogue, never by the boot path,
  * so it costs the run one store per dropped line and nothing else.
  */
@@ -795,6 +817,103 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     {
         uint32_t ccsidr, line_log2, ways, sets, way_shift, way, set, n, w;
 
+        /*
+         * A pad, because XNU writes eight bytes here - see experiment 282.
+         *
+         * `cpu_machine_idle_init` (`osfmk/arm/cpu.c:533`) ends its `from_boot` branch with two
+         * `bcopy_phys` calls that store `BootArgs_paddr` and `CpuDataEntries_paddr` into what XNU
+         * believes is `ResetHandlerData` inside the low exception vectors:
+         *
+         *     gPhysBase + (&ResetHandlerData.boot_args - &ExceptionLowVectorsBase)       -> 0x80002408
+         *     gPhysBase + (&ResetHandlerData.cpu_data_entries - &ExceptionLowVectorsBase) -> 0x80002404
+         *
+         * The arithmetic assumes the vectors blob is linked at the kernel's physical base - true in
+         * Apple's own armv7 link, where the blob *is* the first thing in the image, and false here,
+         * where `ExceptionLowVectorsBase` is at 0x800dc4bc and `gPhysBase` is 0x80000000. So the
+         * destination is not XNU's structure; it is 0x2404 and 0x2408 bytes into *this* image, which
+         * is `way_shift = 32u - n` and `way = 0` two lines below - the two instructions the sweep
+         * needs to be correct. The values written are addresses (0x80101000 and 0x80147000 on this
+         * build), and an address decoded as an ARM data-processing instruction with `cond=HI` sets
+         * neither register, so `way` is never zeroed and the way loop counts from whatever `lr` held.
+         *
+         * Four bytes overwritten in the middle of the only path that produces a log line is not
+         * something to leave in place on the strength of an argument that it is survivable, and the
+         * fix belongs on this side: an address XNU computes from its own link has no reason to be
+         * moved, but where this image puts its code is this image's business. So the pad is placed
+         * *first* in this block - as early in `entry_epilogue` as the function's own prologue allows
+         * - and it is deliberately wider than the eight bytes at risk so that a small change to the
+         * code before it cannot walk the two addresses off either end. Placing it first is not
+         * cosmetic: the requirement is only that the pad *contains* those addresses, so the earlier
+         * it starts the more room there is for the code that must follow it to grow, and sizing it
+         * correctly means moving code *after* it, never before.
+         *
+         * ------------------------------------------------------------------ what the pad must be
+         *
+         * Two earlier versions of this fix were wrong, and the pad's final shape is the shape that
+         * survives both of their failure modes, so it is worth recording what they were.
+         *
+         * **The first version was no pad at all**, and it lost the two instructions the sweep needs:
+         * with 0x80002404 and 0x80002408 holding `way_shift = 32u - n` and `way = 0`, XNU's two
+         * writes replace them with addresses - 0x80147000 decodes as `andshi r7, r4, r0`, 0x80101000
+         * as `andshi r1, r0, r0` - and a register-form `ands` with `cond=HI` sets its destination
+         * *conditionally*. The sweep then counts ways from whatever `lr` held, which is bounded but
+         * astronomically long, and the epilogue never reaches its ram-console write.
+         *
+         * **The second version was a pad of NOPs.** It said: "NOPs are the right content because a
+         * NOP overwritten by an `ands` is still a NOP". That is false, and it is false in the one way
+         * that mattered here: a NOP is only still a NOP if nothing *executes* it after the write,
+         * which is true of the boot path - the pad is inside this epilogue and the boot never runs
+         * the epilogue - and exactly false of the report path, because every report runs through the
+         * pad with XNU's data already in it. The two corrupted words still decode to `andshi r1, r0,
+         * r0` and `andshi r7, r4, r0`, and `r7` is **live across the pad**: measured in the linked
+         * image, `entry_epilogue` loads it in its prologue from `[entry_vectors_stack + 4]` and does
+         * not touch it again until well past the pad, where it is used as a kv value, as half of a
+         * pointer (`add r0, r7, #4`) and as the base of a byte-table read. A conditional write to a
+         * live register there is a garbage report or a fault inside the report, and a fault inside
+         * the report is indistinguishable from a hang in the boot. The consequence was that no probe
+         * placed *after* `cpu_machine_idle_init` ever reported: `clean_dcache`,
+         * `CleanPoC_DcacheRegion`, `machine_startup` and 280's own frontier were all silent for the
+         * instrument's reason rather than the boot's, and the walk spent a session bisecting
+         * `bcopy_phys`'s body to explain a silence that was its own. It is this project's "a
+         * measurement can be the thing that is wrong" defect for the eighth time, and this time the
+         * measurement was the *reporting path itself*.
+         *
+         * **The third version tried to repair the NOPs at run time** - store `nop` back over both
+         * addresses before the sweep reads them, `dsb`/`isb` after. It was built, verified in the
+         * linked image (the two stores precede the pad; both addresses read back as `nop`), and run:
+         * **still silent.** Self-modifying code is why, and this project has no way to measure the
+         * I-side of it from here: the store puts the new bytes in the D-cache and `dsb sy` makes them
+         * visible at the point of coherency, but whether the *fetch* of the pad's line sees them
+         * depends on whether that line was prefetched before the store, and no log line can say. An
+         * instrument whose correctness rests on an unmeasurable cache property is not an instrument.
+         *
+         * ------------------------------------------------------------------ the pad, finally
+         *
+         * So the pad carries no content that matters, because it is never executed: it opens with a
+         * branch over itself and the rest is NOPs. XNU's two writes still land inside it - on two of
+         * the NOPs the branch skips - and a word that is never executed cannot break anything,
+         * whatever it decodes to. That holds regardless of the D-cache, the I-cache, the prefetcher
+         * and the flags at the time of the write, which is precisely the property the first two
+         * versions lacked. The branch is at the pad's *first* word, four or more bytes below
+         * 0x80002404, so it is never one of the words XNU corrupts, and `build_entry.sh` checks that
+         * and the two addresses' enclosure in every build, against the two labels below.
+         */
+        __asm__ volatile ("\n"
+                          ".global entry_skip_pad\n"
+                          "entry_skip_pad:\n\t"
+                          "b 1f\n\t"
+                          ".rept 31\n\t"
+                          "nop\n\t"
+                          ".endr\n"
+                          "1:\n"
+                          ".global entry_skip_pad_end\n"
+                          "entry_skip_pad_end:\n" ::: "memory");
+
+        /*
+         * The geometry comes after the pad, not before it, for the reason above: everything this
+         * block does before the pad pushes the pad towards 0x80002404, and there is no room to be
+         * pushed.
+         */
         ccsidr = ccsidr_l1;
         line_log2 = (ccsidr & 0x7u) + 4u;
         ways = ((ccsidr >> 3) & 0x3ffu) + 1u;
@@ -803,6 +922,7 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
         for (w = ways; w > 1u; w >>= 1) {
             n++;
         }
+
         way_shift = 32u - n;
 
         for (way = 0u; way < ways; way++) {
