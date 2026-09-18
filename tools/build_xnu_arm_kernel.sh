@@ -683,7 +683,8 @@ done
 # project's most repeated defect, and this file reads the same kernel headers the loop's files do.
 # `portinc/` is not a shim - it is the newer tree's `libkern/os/` atomics surface, which this 10.13-era
 # tree does not ship, placed where `<os/...>` resolves (experiment 256).
-FIREHOSE_SOURCES=("$REPO_ROOT/stages/stage90/firehose/firehose_buffer.c")
+FIREHOSE_SOURCES=("$REPO_ROOT/stages/stage90/firehose/firehose_buffer.c" \
+                  "$REPO_ROOT/stages/stage90/firehose/firehose_kernel_config.c")
 FH_OUT=${XNU_FIREHOSE_OBJ_OUT:-$REPO_ROOT/out/xnu_firehose_obj}
 FIREHOSE_INCLUDES=(-I"$REPO_ROOT/stages/stage90/firehose/portinc" -I"$REPO_ROOT/stages/stage90/firehose" -I"$XNU/libkern/firehose")
 mkdir -p "$FH_OUT"

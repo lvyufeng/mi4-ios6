@@ -271,6 +271,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-255](experiment-255-the-ledger-is-live-and-the-frontier-leaves-the-tree.md) | `osfmk_kern_ledger.o` — the ledger is live, a 73728-byte guarded `kernel_map` allocation completes, and the stop is **`__firehose_buffer_create` — the first frontier symbol with no implementation anywhere in the tree** |
 | stage90 | [experiment-256](experiment-256-the-firehose-port-opens-and-its-first-missing-header-is-from-a-newer-xnu.md) | host-only: the firehose **port opens** — the source is in the tree, and its first missing header (`os/atomic_private.h`) is from a **newer XNU** than the one this project builds |
 | stage90 | [experiment-257](experiment-257-the-firehose-is-ported-and-it-runs.md) | **The firehose is ported and it runs** — Apple's implementation compiled for armv7 and linked in, `__firehose_buffer_create` real; stop `__firehose_allocate` inside it |
+| stage90 | [experiment-258](experiment-258-the-firehose-kernel-side-is-in-the-tree.md) | **The firehose's kernel side is in the tree** — the four functions are one already-built object (`libkern/os/log.o`), the two data names come from the port (`16`/`8`); `oslog_init` returns and the stop is `telemetry_init` in `kernel_bootstrap` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

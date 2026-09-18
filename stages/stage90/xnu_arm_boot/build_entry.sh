@@ -2462,6 +2462,51 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # remedy (a second entry in `FIREHOSE_SOURCES`). `libkern/os/log.c:580` is in the tree and defines
     # `__firehose_allocate`, so that one may come from the tarball.
     FIREHOSE_OBJ=${STAGE90_ENTRY_FIREHOSE_OBJ:-$REPO_ROOT/out/xnu_firehose_obj/firehose_buffer.o}
+    # 258: the firehose's **kernel side**, and with it the port is complete.
+    #
+    # 257's stop was `__firehose_allocate`, called from `firehose_buffer_create` - a call *inside*
+    # Apple's implementation, and the link then had six names it could not resolve. Four of them are
+    # defined **in the tree**, by an object the manifest already compiles and this entry image simply
+    # had not linked yet: `external/xnu-4570.1.46/libkern/os/log.c` is in
+    # `out/xnu_arm_manifest.txt:403`, and `out/xnu_kernel_obj/libkern_os_log.o` defines
+    # `__firehose_allocate` (`:577`), `__firehose_buffer_push_to_logd` (`:571`),
+    # `__firehose_critical_region_enter` (`:596`) and `__firehose_critical_region_leave` (`:602`).
+    # So this is the oldest method in this project - link the object that defines them - and not a
+    # second port. Experiment 162 had already found `__firehose_allocate` at `log.c:580`; the
+    # measurement here is that all four are in **one** object.
+    #
+    # Measured before the run: the object is 5551 bytes of text, 68 of data, 49 of bss, with 26
+    # definitions and **44 references, 40 of which this image already satisfies**. That is the number
+    # that makes this cheap: the four new ones are `atm_get_diagnostic_config`,
+    # `mach_continuous_approximate_time`, `OSKextKextForAddress` and `_os_trace_addr_in_text_segment`,
+    # all off the first-call path. Nine of its definitions currently exist here as stubs
+    # (`_os_log_internal`, `os_log_with_args`, `_os_log_default`, `startup_serial_logging_active`,
+    # `oslog_s_error_count`, and the four `__firehose_*` functions); linking the object replaces them,
+    # because the stub set is generated from the undefined list *after* the link attempt.
+    #
+    # The other two of the six are **not functions and not in the tree**:
+    # `portinc/os/firehose_buffer_private.h:60-61` declares both as `uint8_t`, and
+    # `firehose_buffer_create` reads them with `ldrb` - so a stub there is read as *data* and would not
+    # stop the run at all, it would hand the buffer `0x40 << 12` (257 recorded the byte). Their
+    # definitions are in Apple's closed `libfirehose_kernel` library, and are supplied by the port as
+    # `stages/stage90/firehose/firehose_kernel_config.c`: **16** chunks and **8** io pages, read from
+    # the newer header's `FIREHOSE_BUFFER_KERNEL_DEFAULT_CHUNK_COUNT` / `_IO_PAGES` and agreeing with
+    # the 16 this project's shim gave `oslog_init`, which is what sized the 73728-byte allocation 255
+    # measured. So the port is two files now: `firehose_buffer.c` (Apple's) and this one.
+    #
+    # **The prediction.** `firehose_buffer_create` has exactly one call - `__firehose_allocate` - so
+    # once it is real the whole create path completes: the header at `kernel_firehose_addr`, the
+    # 15-entry ring, the bank split (15 - 8 = 7), the write-back of `size`. `oslog_init` then returns
+    # to its caller, and its caller is **`kernel_bootstrap`, at `+0x188`** (`subr_log.c`'s
+    # `oslog_init` is called from `kernel_bootstrap`'s straight line, `bl 8002ccec <oslog_init>` at
+    # `0x8000dbc8`). The next instructions there are `kernel_debug_string_early` (real - it calls only
+    # `strlen` and `strncpy`), then `telemetry_init`, which is a **stub** at `0x80098a04`
+    # (`bl 80098a04 <telemetry_init>` at `0x8000dbd8`). So: **`stub_hit=telemetry_init`,
+    # `xnu_entry_stub_caller=0x8000dbdc`** - the stub hands `entry_stub_hit` its own `lr`, so
+    # `caller - 4` = `0x8000dbd8` = **`kernel_bootstrap+0x198`**: the first stop past the firehose, and
+    # the first inside `kernel_bootstrap`'s own body since 253's `cs_init`.
+    LIBKERN_OS_LOG_OBJ=${STAGE90_ENTRY_LIBKERN_OS_LOG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_os_log.o}
+    FIREHOSE_CONFIG_OBJ=${STAGE90_ENTRY_FIREHOSE_CONFIG_OBJ:-$REPO_ROOT/out/xnu_firehose_obj/firehose_kernel_config.o}
     OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
@@ -2550,6 +2595,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$BSD_KERN_KERN_CS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_LEDGER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$FIREHOSE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$LIBKERN_OS_LOG_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$FIREHOSE_CONFIG_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2559,7 +2606,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

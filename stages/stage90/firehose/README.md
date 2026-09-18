@@ -23,11 +23,21 @@ newer tree's `libkern/os/` atomics surface plus the newer firehose headers, plac
 resolves ahead of the tree's copies. `tools/build_xnu_arm_kernel.sh` compiles this directory in its
 `FIREHOSE_SOURCES` block, with the same flags as everything else it builds.
 
+`firehose_kernel_config.c` is the one file here that is **not** Apple's: the two configuration
+variables the ported code reads (`__firehose_buffer_kernel_chunk_count`,
+`__firehose_num_kernel_io_pages`) are defined in Apple's closed `libfirehose_kernel` library and
+nowhere published, so this project supplies them with the values Apple's own header publishes as the
+defaults. See that file's comment - the chunk count is not free, because `oslog_init` sized the
+allocation for it.
+
 Status: **it compiles and it runs.** Experiment 257 linked the object (4096 bytes of text, 12
 references) into the entry image — `__firehose_buffer_create` resolved, six kernel-side names added —
 and the device executed it: the stop moved from `__firehose_buffer_create` to `__firehose_allocate`,
-*i.e.* from a missing symbol to a call *inside* this implementation. See
-`docs/experiments/experiment-257-...` for the log.
+*i.e.* from a missing symbol to a call *inside* this implementation. Experiment 258 finished the
+kernel side - the four functions are defined in the tree, by `libkern/os/log.c`, and the two
+variables by `firehose_kernel_config.c` - and `oslog_init` then **returned**: the stop is past the
+firehose entirely, at `telemetry_init` in `kernel_bootstrap`. See
+`docs/experiments/experiment-257-...` and `-258-...` for the logs.
 
 `portinc/` is port material, unmodified, from `apple-oss-distributions/xnu` at `main`.
 
