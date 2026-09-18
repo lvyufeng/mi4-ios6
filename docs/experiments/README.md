@@ -229,6 +229,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-213](experiment-213-the-prediction-was-wrong-and-the-frontier-is-a-null-compress-pointer.md) | the Prediction Was Wrong, the Run Took a Prefetch Abort at Address Zero, and the Method That Predicted It Was Reading Only Half the Calls |
 | stage90 | [experiment-214](experiment-214-ccsha1-eay-di-gets-its-value-and-the-frontier-is-cchmac-update.md) | `ccsha1_eay_di` Gets Its Value, Real SHA-1 Compression Runs on the Device, and the Frontier Is `cchmac_update` |
 | stage90 | [experiment-215](experiment-215-four-bytes-and-the-frontier-is-ccdigest-update.md) | the Smallest Object There Is, `cchmac_update` Resolves and Adds Nothing, and the Frontier Is `ccdigest_update` |
+| stage90 | [experiment-216](experiment-216-ccdigest-update-runs-to-completion-and-the-frontier-is-cchmac-final.md) | `ccdigest_update` Runs to Completion, the First Generic Digest Helper on the Device, and the Frontier Is `cchmac_final` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
