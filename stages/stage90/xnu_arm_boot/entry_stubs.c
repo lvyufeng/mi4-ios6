@@ -90,7 +90,25 @@ unsigned long gPhysSize = 0x00200000ul;
 unsigned long gVirtBase = 0x00200000ul;
 #endif
 
+/*
+ * `bsd/sys/kdebug.h:1034` declares it, and `osfmk/arm/start.s` references `_kdebug_enable` by name -
+ * which is why a stand-in has been here since before `arm_init` was real, long before anything in the
+ * image could have cared what the variable *is*.
+ *
+ * **Retired by experiment 225**, which links `bsd_kern_kdebug.o` for `kernel_debug_string_early`. That
+ * object defines it (`bsd/kern/kdebug.c:310`, `unsigned int kdebug_enable = 0;`, `nm -S` says `B 0 4`),
+ * so the stand-in becomes a duplicate and is compiled out. It is the first collision in this file that
+ * the object list did not predict: nothing in the last three hundred experiments had linked the object
+ * that owns the name, and the link is what said so.
+ *
+ * The replacement is *equivalent* to the stand-in - same size, same type (a 32-bit unsigned), same
+ * zero initial value - which distinguishes it from `EntropyData` above, whose replacement is an
+ * initialized struct and where the stand-in was the right size and the wrong value. Nothing is
+ * discovered by retiring this one; there is no measurement here to have got wrong.
+ */
+#ifndef STAGE90_ENTRY_REAL_KDEBUG_ENABLE
 uint32_t kdebug_enable;
+#endif /* !STAGE90_ENTRY_REAL_KDEBUG_ENABLE */
 
 /* ------------------------------------------------------------------ the version strings */
 

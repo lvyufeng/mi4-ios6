@@ -79,6 +79,18 @@ STUB_DEFINES=()
 # experiment 211 is what linked the object and found out, and the link error that said so was
 # `multiple definition of 'EntropyData'`, not any measurement of the value.
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_ENTRY_REAL_ENTROPY_DATA=1)
+# `kdebug_enable`, which `bsd_kern_kdebug.o` defines. This is the first collision in this file that
+# was *not* predicted by the object list: the stand-in has been here since before `arm_init` was real,
+# because `osfmk/arm/start.s` declares `_kdebug_enable` and one of the first objects linked needed the
+# name to resolve. Nothing had ever linked the object that owns it, so nothing had ever said so - and
+# the link said it the moment experiment 225 did, as `multiple definition of 'kdebug_enable'`.
+#
+# The replacement is equivalent, which is not true of the last one: `bsd/kern/kdebug.c:310` is
+# `unsigned int kdebug_enable = 0;`, `nm -S` reports it `B 0 4`, and the stand-in is a zero-initialized
+# `uint32_t`. Same size, same type, same value - so unlike `EntropyData` there is nothing here for a
+# later experiment to discover. `bsd/sys/kdebug.h:1034` declares the same `unsigned int`, and
+# `osfmk/kern/debug.c:609` reads it.
+[[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_ENTRY_REAL_KDEBUG_ENABLE=1)
 
 # The one thing in this image that is neither XNU's nor this project's: the compiler's own runtime.
 # Experiment 182's run stopped at `__aeabi_uldivmod`, which is the ARM EABI helper for 64-bit
@@ -1193,6 +1205,130 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # file size moves for the first time since experiment 214. The undefined count goes **up**, which
     # is expected and is not a regression.
     OSFMK_BSD_DEV_UNIX_STARTUP_OBJ=${STAGE90_ENTRY_BSD_DEV_UNIX_STARTUP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_dev_unix_startup.o}
+    # `bsd/kern/bsd_init.c`, named by experiment-223's `stub_hit=bsd_exec_setup`. **3653 bytes of text,
+    # 80 of data, 2720 of `.bss`** - the largest single object this link has taken on - and the first
+    # step whose frontier is a *group*: it defines `bsd_exec_setup` (the symbol that stopped the last
+    # run) plus `bsd_init`, `bsd_early_init`, `bsd_autoconf`, `bsdinit_task` and `bsd_utaskbootstrap`,
+    # and `boothowto`, `cmask`, `domainname`, `dumpdev` and their neighbours as data. Only
+    # `bsd_exec_setup` is reached.
+    #
+    # **The prediction is `stub_hit=kernel_debug_string_early`**, and it rests on `bsd_exec_setup`
+    # being a **leaf** - it calls nothing at all:
+    #
+    #     c58: cmp  r0, #7
+    #     c5c: bhi  c7c                      ; r0 > 7 -> the default arm; `kernel_bootstrap` passes 0
+    #     c60: ...  two switch tables indexed by r0
+    #     c7c: movw r1, #0x2000 / movw r0, #0x201 / movt r1, #0x844
+    #     c88: str  r1, [bsd_pageable_map_size]
+    #     c94: str  r0, [bsd_simul_execs]
+    #     ca0: bx   lr
+    #
+    # Every arm writes two of this object's own `.bss` variables and returns. So control lands back in
+    # `kernel_bootstrap` at 0x20d608, where there is no call and no branch between it and the next
+    # call:
+    #
+    #     20d608-20d678: movw/movt/ldr/str/add/asr   ; the cluster and scale arithmetic, straight line
+    #     20d67c: bl kernel_debug_string_early       <-- STUB, the stop
+    #
+    # `kernel_debug_string_early` stays a stub: this object does not mention the symbol at all (`nm -u`
+    # is empty for it), so whatever defines it, this step does not.
+    #
+    # **This is the step where the ledger gets big.** `bsd_kern_bsd_init.o` references **132 symbols,
+    # of which 28 are already in the image and 104 are not**, so its build adds on the order of a
+    # hundred stubs at once - and `.bss` grows by 2720 bytes while the entry image's file size, which
+    # had been constant for nine steps, moves again. The headroom below `topOfKernelData` is large
+    # (1.6 MB), so there is room; but from here the image's size and `.bss` bounds are numbers to read
+    # in every table rather than to assume, because a single step can now move them.
+    BSD_KERN_BSD_INIT_OBJ=${STAGE90_ENTRY_BSD_KERN_BSD_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_bsd_init.o}
+    # `bsd/kern/kdebug.c`, named by experiment-224's `stub_hit=kernel_debug_string_early`. **21729 bytes
+    # of text, 312 of data, 136 of `.bss`, 112 definitions, 104 references** - much the largest object
+    # this link has taken on, and the only object in the build that defines the symbol.
+    #
+    # The whole of what is reached is four lines of C (bsd/kern/kdebug.c:1328) that stuff the message
+    # into four `uintptr_t`s and hand them to `KERNEL_DEBUG_EARLY`, which compiles to nothing in this
+    # configuration - there is no call after the `strncpy`, only `add sp, sp, #16` and `pop {r4, pc}`:
+    #
+    #     dc8: push  {r4, lr} / dcc: sub sp, sp, #16
+    #     dd0: vmov.i32 q8, #0                  <-- NEON
+    #     ddc: vst1.64 {d16-d17}, [r0]          <-- NEON
+    #     de4: bl    strlen                     ; real in this image (0x00204668)
+    #     df8: bl    strlen                     ; the MIN(sizeof(arg), strlen(message)) pair
+    #     e08: bl    strncpy                    ; real in this image (0x002046c4)
+    #     e10: pop   {r4, pc}
+    #
+    # So the function has no stubbed dependency of its own and cannot stop inside itself.
+    #
+    # **This is the first NEON code in this project's history that will execute**, and unlike
+    # `cc_cmp_safe`'s vector path - which needs a length of 32 and has never been taken - it is
+    # unconditional, the first instruction pair of the function. It will not trap: `osfmk/arm/start.s`'s
+    # `join_start` enables CP10/CP11 in CPACR and `join_start_1` sets `FPEXC.EN`, both on the path the
+    # run has already taken, and both present in this image:
+    #
+    #     200354: mrc p15, 0, r2, c1, c0, 2     ; read CPACR
+    #     20035c: orr r2, r2, r3, lsl #20       ; 0xF << 20: coprocessors 10 and 11
+    #     200360: mcr p15, 0, r2, c1, c0, 2
+    #     20036c: beq 2003a0 <join_start_1>     ; taken when invoked from _start
+    #     2003a0: vmrs r2, fpexc / orr r2, r2, #0x40000000 / vmsr fpexc, r2
+    #
+    # (`_start` reaches `join_start` by a direct branch, and `arm_init` is called from `start.s` after
+    # it returns - and experiment 222's run demonstrably reached `arm_init`.)
+    #
+    # **The prediction is `stub_hit=vm_mem_bootstrap`.** `kernel_debug_string_early` returns into
+    # `kernel_bootstrap`, whose very next statement is `bl vm_mem_bootstrap` with nothing in between,
+    # and `vm_mem_bootstrap` is undefined in this image while this object does not define it (a scan of
+    # its 104 references finds no mention of it) - so it stays a 12-byte stub. The argument the stub
+    # receives is a second, independent statement of the same prediction: `r0` at the stop is the string
+    # `"vm_mem_bootstrap"`, and `kernel_bootstrap`'s log strings sit in the object's own `.rodata` in
+    # call order - `"vm_mem_bootstrap"`, `"cs_init"`, `"vm_mem_init"`, `"telemetry_init"` - so the run
+    # prints the name of the routine it is about to call and then stops on that routine's stub.
+    #
+    # **The build measured: 9 resolved (8 function stubs and `kdebug_enable`), 43 added (42 function
+    # stubs and `kperf_kdebug_active`), 472 -> 506 undefined, stubs 392fn/80st -> 426fn/80st, text
+    # 296600 -> 319332, image 404464 -> 421240, `.bss` 105688 -> 105920, headroom 1588152 bytes, and
+    # the run stopped on `vm_mem_bootstrap` with kv 0x1b.** The one thing the object list did not
+    # predict is `kdebug_enable`: `bsd_kern_kdebug.o` defines it, and this file's stand-in for it - in
+    # `entry_stubs.c` since before `arm_init` was real, because `start.s` references the name - became
+    # a duplicate definition. Retiring it is why the *empty-object* build has 472 undefined rather than
+    # 471, and why 9 symbols resolve instead of 8. See `entry_stubs.c` for why the replacement is
+    # equivalent and why that is worth stating.
+    BSD_KERN_KDEBUG_OBJ=${STAGE90_ENTRY_BSD_KERN_KDEBUG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kdebug.o}
+    # `osfmk/vm/vm_init.c`, named by experiment-225's `stub_hit=vm_mem_bootstrap`. **994 bytes of text,
+    # no data, 24 of `.bss`, 29 definitions, 24 references.** It defines `vm_mem_bootstrap` (280 bytes)
+    # and `vm_mem_init`, plus `vm_kernel_ready`, `kmem_ready`, `kmem_alloc_ready`, `kmapoff_pgcnt`,
+    # `kmapoff_kaddr`, `zlog_ready`, `vm_min_kernel_address` and `vm_max_kernel_address`, none of which
+    # are in the image today.
+    #
+    # `vm_mem_bootstrap` is a straight run of initialisation calls, each preceded by
+    # `kernel_debug_string_early` of its own name - which experiment 225 made real, so those all
+    # return and print nothing:
+    #
+    #     10: bl kernel_debug_string_early
+    #     1c: bl vm_page_bootstrap(sp+12, sp+8)   <-- real: 888 bytes at 0x00218b50
+    #     28: bl kernel_debug_string_early
+    #     2c: bl zone_bootstrap                   <-- ABSENT, and not referenced by the image
+    #     ...
+    #
+    # **The prediction is `stub_hit=zone_bootstrap`**, and one step deeper than the last few
+    # predictions, because `vm_page_bootstrap` is *already* in the image (it came in with
+    # `osfmk_vm_vm_resident.o` in experiment 195) and is therefore part of the path:
+    #
+    #   - `vm_page_bootstrap` has **no stubbed dependency at all**. Its whole body is five calls -
+    #     `__bzero`, `vm_page_init_lck_grp`, and `lck_mtx_init_ext` three times - every one of them
+    #     already real, and it has **no indirect call** (`grep -c 'blx\|ldr pc'` is 0). Its only
+    #     branches are one `b` and one `bne`, both forming a NEON loop that skips no call.
+    #   - `zone_bootstrap` is **absent from the image *and* currently unreferenced by it**, which is
+    #     stronger than "undefined": `vm_mem_bootstrap` is a generated stub today, so the object that
+    #     calls `zone_bootstrap` is not linked at all. Linking this object creates the reference, the
+    #     stub generator creates the stub, and the run stops on it.
+    #
+    # `vm_page_bootstrap` is also where the second batch of NEON executes - `vld1.64 {d16-d17},
+    # [r1 :128]`, `vdup.32`, `vshl.s32` and an aligning `vst2.32 {d24-d27}, [r1 :64]!` in a loop.
+    # Experiment 225 proved the first NEON (in `kernel_debug_string_early`) does not trap, because
+    # `start.s`'s `join_start` sets CPACR's CP10/CP11 and `join_start_1` sets `FPEXC.EN`; this step
+    # exercises the same grant, including the alignment requirements, which are met by construction
+    # (the `:128` load is the 16-byte-aligned literal table at 0x00218dc0; the `:64` store base is
+    # 0x0026c038 + r7 stepping by 64).
+    OSFMK_VM_VM_INIT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_init.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -1256,10 +1392,13 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_MEMSET_S_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_CC_CMP_SAFE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_BSD_DEV_UNIX_STARTUP_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_BSD_INIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_KDEBUG_OBJ"   "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_VM_VM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "$OSFMK_CCHMAC_OBJ" "$OSFMK_CC_CLEAR_OBJ" "$OSFMK_MEMSET_S_OBJ" "$OSFMK_CC_CMP_SAFE_OBJ" "$OSFMK_BSD_DEV_UNIX_STARTUP_OBJ")
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "$OSFMK_CCHMAC_OBJ" "$OSFMK_CC_CLEAR_OBJ" "$OSFMK_MEMSET_S_OBJ" "$OSFMK_CC_CMP_SAFE_OBJ" "$OSFMK_BSD_DEV_UNIX_STARTUP_OBJ" "$BSD_KERN_BSD_INIT_OBJ" "$BSD_KERN_KDEBUG_OBJ" "$OSFMK_VM_VM_INIT_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
