@@ -1367,13 +1367,102 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # prediction said `zone_bootstrap`. A transitive closure over a 1744-function image is not
     # something to compute by hand.
     #
-    # **The walk on the image with this object linked says `stub_hit=zone_bootstrap`**, and it is the
-    # same destination experiment 226 predicted by hand - reached this time by walking the whole of
-    # `vm_page_bootstrap` (all 27 of its calls) and every call inside every callee, rather than by
-    # stopping at the first one. No call on that path is inside a conditional block, which the walk
-    # reports separately and which is what makes the answer a prediction rather than an upper bound.
-    # `zone_bootstrap` is defined by `osfmk_kern_zalloc.o`, so the step after this one is that object.
+    # **Experiment 228's prediction was `zone_bootstrap` and it was wrong.** The stop the device
+    # named was `OSCompareAndSwap16`, at `pmap_enter_options+0x1054`, inside a compare-and-swap retry
+    # loop. The prediction was the tool's, and the tool was wrong for a reason that turned out to be
+    # a bug in it and is now fixed - see `tools/xnu_entry_callwalk.py`'s `_guarded_addresses`.
+    #
+    # The bug: the tool called a call site guarded if it sat inside the span of a forward conditional
+    # branch, which is the rule that keeps `lck_mtx_lock`'s `bl panic` assertion out of the walk. A
+    # loop's exit test is also a forward conditional branch spanning the whole loop body, so the rule
+    # also threw away loop bodies - `pmap_steal_memory`'s whole page-allocation loop, including its
+    # `pmap_next_page_hi` and its trailing `pmap_enter`. The fix records whether an address was
+    # reached by an actual branch; a loop head reached by an explicit `b` is not conditional whatever
+    # span it sits in. `pmap_enter` and `pmap_next_page_hi` are now correctly unguarded, the
+    # assertion is still guarded, and the two earlier answers the tool is checked against still hold.
+    #
+    # The path the run took, and where the walk now stops honestly:
+    #   vm_page_bootstrap        unguarded   the walk reaches all of this
+    #   pmap_steal_memory        unguarded   loop body now correctly entered
+    #     -> pmap_enter          unguarded, and entered
+    #       -> pmap_enter_options unguarded, and entered
+    #         -> OSCompareAndSwap16  inside `pmap_enter_options`'s cold tail, at +0x1054
+    # `pmap_enter_options` is 0x1090 bytes and its entry block ends at +0x114; everything past that
+    # is behind a conditional branch, which is what `-O2` code of that size looks like. So the walk's
+    # straight-line answer is a *lower bound*, and the answer is behind a branch it cannot read. The
+    # tool's `--assume-taken CALLER+0xNNN` walks into such a site on request, and with the two this
+    # run passed through it names `OSCompareAndSwap16` exactly - its third check against an answer
+    # the device produced.
+    #
+    # `OSCompareAndSwap16` is defined by `libkern/gen/OSAtomicOperations.c`, and nothing else in the
+    # image references it except `bsd_kern_uipc_mbuf.o`, which is not linked - so the step after this
+    # one is that object, and it is a cheap one: the object defines 27 symbols and has no undefined
+    # reference at all.
     OSFMK_VM_VM_MAP_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_map.o}
+    # `libkern/gen/OSAtomicOperations.c`, named by experiment-228's `stub_hit=OSCompareAndSwap16`.
+    # **1104 bytes of text, no data, no `.bss`, 27 definitions, zero references** - the smallest
+    # object linked since the crypto ones, and the first with nothing undefined. Every symbol it
+    # defines is `T`: the eight widths of increment/decrement/add, the bit and/or/xor, the two
+    # test-and-set, and the eight compare-and-swap.
+    #
+    # **The prediction written here before the build was wrong, and the measurement is what it is.**
+    # It said "resolves one stub and adds twenty-six". The build measured **10 resolved and 0
+    # added**: the image had heard of only ten of the 27, and because the object has no undefined
+    # reference of its own, the other seventeen can add nothing - they arrive as new *definitions*
+    # the linker has no obligation to make, the `vm_kernel_ready` case from experiment 226 again.
+    # `0 added` is a first for this sequence. The ten that were undefined were all 12-byte function
+    # stubs: `OSAddAtomic`, `OSAddAtomic16`, `OSAddAtomic64`, `OSBitAndAtomic16`, `OSBitOrAtomic16`,
+    # `OSCompareAndSwap`, `OSCompareAndSwap16`, `OSCompareAndSwap64`, `OSCompareAndSwapPtr`,
+    # `OSIncrementAtomic` - 12 bytes each and nothing else, so the image had been linking stubs for
+    # names XNU 4570 does reference in full.
+    #
+    # Note what the object is *for* here: only `OSCompareAndSwap16` is on the path the run took. The
+    # other nine came along because the image's undefined set is a set, not a path.
+    LIBKERN_GEN_OSATOMICOPERATIONS_OBJ=${STAGE90_ENTRY_LIBKERN_GEN_OSATOMICOPERATIONS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_gen_OSAtomicOperations.o}
+    # `osfmk/vm/vm_resident.c`, by way of `memorystatus_pages_update` - named by experiment-229's
+    # `stub_hit=memorystatus_pages_update`. That symbol is `bsd/kern/kern_memorystatus.c`, but the
+    # *call* that reached it is not in pmap.c: `pmap_startup` is defined in `osfmk/vm/vm_resident.c`
+    # (line 1123), and its last call before the trailing `panic` is `VM_CHECK_MEMORYSTATUS`, the
+    # `vm_page.h` macro that expands to `memorystatus_pages_update(...)` under `CONFIG_JETSAM`. It is
+    # straight-line source - `for (i = pages_initialized; i > 0; i--) { ... } VM_CHECK_MEMORYSTATUS;`
+    # - and the walk still calls it guarded, because it is behind the loop's exit branch and the walk
+    # only follows fall-through and unconditional `b`. Third experiment running in which the answer
+    # was inside a large `-O2` function rather than on the walk's straight-line path.
+    #
+    # `osfmk/vm/vm_resident.o` is already linked, so the object that has to be added is the one that
+    # *defines* the symbol: `bsd/kern/kern_memorystatus.c` -> **31388 bytes of text plus a 1612-byte
+    # `initcode` section, 620 of data, 136 of `.rodata`, 712 of `.bss`, 1254 of `.rodata.str1.1`,
+    # 209 definitions, 110 references** - the largest object since `vm_map.o`, and the first with a
+    # section this build has not seen (`initcode`).
+    #
+    # **The prediction is `stub_hit=zone_bootstrap`.** `memorystatus_pages_update` is the only stub
+    # left inside `pmap_startup`, and it is the function's last call, so `pmap_startup` completes and
+    # returns to `vm_page_bootstrap`, which finishes after `arm_usimple_lock_init` (already real).
+    # `vm_mem_bootstrap` then calls `kernel_debug_string_early` (real) and, at `+0x2c`,
+    # `zone_bootstrap` - a stub, and the next call in the caller after `vm_page_bootstrap`. This is
+    # the same string experiment 228 predicted and missed; it is a different frontier with a much
+    # shorter argument this time, and the argument is the caller's own call list rather than a walk.
+    BSD_KERN_KERN_MEMORYSTATUS_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_MEMORYSTATUS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_memorystatus.o}
+    # **Experiment 230's prediction was `zone_bootstrap` and it was wrong - the fourth consecutive
+    # miss, and this one is instructive because the right answer was one question away.**
+    # `memorystatus_pages_update` is the first thing `bsd/kern/kern_memorystatus.c` runs, and its own
+    # second statement is `vm_pressure_response();` under `VM_PRESSURE_EVENTS`. So the stop was inside
+    # the object that had just been linked, not three calls past it. The rule that names it is now in
+    # the tool's header and is not a walk at all: **root the walk at the symbol the last run named**,
+    # because that symbol is where the run stopped and the function behind it is one level *down*.
+    # `python3 tools/xnu_entry_callwalk.py --root memorystatus_pages_update` prints
+    # `vm_pressure_response`, which is what the device printed - a retrodiction rather than a
+    # prediction, and the first one the tool has produced without `--assume-taken`.
+    #
+    # `osfmk/vm/vm_pageout.c` -> **54812 bytes of text, 152 of data (32 `.data` + 120 in a
+    # `__DATA, __data` section), 1992 of `.bss`, 2764 of `.rodata.str1.1`, 303 definitions, 219
+    # references** - the largest object by definition count this link has taken on, and the first
+    # with XNU's own Mach-O section spelling (`__DATA, __data`) alongside the ELF ones.
+    #
+    # **The prediction is `stub_hit=<whatever --root vm_pressure_response says after this object is
+    # linked>`**, taken before the device is touched, with the plain walk from `kernel_bootstrap`
+    # recorded beside it as the lower bound it is.
+    OSFMK_VM_VM_PAGEOUT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_PAGEOUT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_pageout.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -1442,10 +1531,15 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_VM_VM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_COMPRESSOR_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_MAP_OBJ"        "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$LIBKERN_GEN_OSATOMICOPERATIONS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_KERN_MEMORYSTATUS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_VM_VM_PAGEOUT_OBJ"    "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "$OSFMK_CCHMAC_OBJ" "$OSFMK_CC_CLEAR_OBJ" "$OSFMK_MEMSET_S_OBJ" "$OSFMK_CC_CMP_SAFE_OBJ" "$OSFMK_BSD_DEV_UNIX_STARTUP_OBJ" "$BSD_KERN_BSD_INIT_OBJ" "$BSD_KERN_KDEBUG_OBJ" "$OSFMK_VM_VM_INIT_OBJ" "$OSFMK_VM_VM_COMPRESSOR_OBJ" "$OSFMK_VM_VM_MAP_OBJ")
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "$OSFMK_CCHMAC_OBJ" "$OSFMK_CC_CLEAR_OBJ" "$OSFMK_MEMSET_S_OBJ" "$OSFMK_CC_CMP_SAFE_OBJ" "$OSFMK_BSD_DEV_UNIX_STARTUP_OBJ" "$BSD_KERN_BSD_INIT_OBJ" "$BSD_KERN_KDEBUG_OBJ" "$OSFMK_VM_VM_INIT_OBJ" "$OSFMK_VM_VM_COMPRESSOR_OBJ" "$OSFMK_VM_VM_MAP_OBJ"
+    "$LIBKERN_GEN_OSATOMICOPERATIONS_OBJ" "$BSD_KERN_KERN_MEMORYSTATUS_OBJ"
+    "$OSFMK_VM_VM_PAGEOUT_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

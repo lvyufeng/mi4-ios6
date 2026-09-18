@@ -241,6 +241,9 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-225](experiment-225-the-first-neon-runs-and-the-frontier-is-vm-mem-bootstrap.md) | the First NEON Executes, `kernel_debug_string_early` Runs, and the Frontier Is `vm_mem_bootstrap` |
 | stage90 | [experiment-226](experiment-226-the-prediction-was-wrong-and-why.md) | the Prediction Was Wrong — `vm_compressor_init_locks` for `zone_bootstrap` — and Why |
 | stage90 | [experiment-227](experiment-227-the-tools-first-prediction-and-vm-map-steal-memory.md) | the Tool's First Prediction, `vm_map_steal_memory`, and the NEON That Waited Two Experiments |
+| stage90 | [experiment-228](experiment-228-the-prediction-was-wrong-and-the-guard-rule-could-not-tell-two-loops-apart.md) | the Prediction Was Wrong — `OSCompareAndSwap16` for `zone_bootstrap` — and the Guard Rule That Could Not Tell Two Loops Apart |
+| stage90 | [experiment-229](experiment-229-ten-stubs-for-nothing-and-the-frontier-moved-two-levels-in.md) | Ten Stubs for Nothing, Zero Added, and the Tail Term Identified to the Byte |
+| stage90 | [experiment-230](experiment-230-the-stop-was-inside-the-object-just-linked.md) | the Stop Was Inside the Object Just Linked — and `--root <frontier>` Names It |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

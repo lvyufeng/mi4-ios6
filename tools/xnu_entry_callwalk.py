@@ -20,7 +20,7 @@ the symbol `entry_stub_hit` will name.
 
     ./tools/xnu_entry_callwalk.py                       # from kernel_bootstrap
     ./tools/xnu_entry_callwalk.py --root arm_init
-    ./tools/xnu_entry_callwalk.py --elf out/stage90/xnu_arm_entry.elf --json
+    ./tools/xnu_entry_callwalk.py --elf out/stage90/xnu_arm_entry.elf --list-stubs
 
 What it does and does not know:
 
@@ -33,12 +33,45 @@ What it does and does not know:
     guessing: an indirect call reached before any stub is reported as a
     limitation, because the callee is only known at run time.
   - Calls are visited in address order within a function, which is call order
-    for the straight-line initialisation code this image is made of. A call
-    inside a conditional block may be followed even when the run would skip it,
-    so the answer is "the first stub on the path as written", not "the first
-    stub that will certainly execute". When the two differ, reading the branch
-    is what decides - but the reading then starts from a named place instead of
-    from the whole image.
+    for the straight-line initialisation code this image is made of.
+  - **A run can stop earlier than this says, on a conditional branch that is
+    taken, and no static walk can know that.** So the report is two lists: the
+    straight-line answer, and the guarded call sites on that path in execution
+    order, which is what to read when the device disagrees. Experiment 228 is
+    that case - the answer was `zone_bootstrap`, the device printed
+    `OSCompareAndSwap16`, and the guard that was taken is
+    `pmap_steal_memory`'s on `pmap_enter`, which appears in the second list.
+  - Each entry in the second list is annotated with `guards_to_stub(callee)`:
+    **None** means a taken branch there reaches no symbol this image lacks, so
+    it cannot be the stop, and a number means the stop is that many conditional
+    branches further, which names it. The annotation is per-entry on purpose.
+    Sorting the list by it was tried and is worse: the cheapest entries are
+    guards in functions that never execute on this path at all - the whole of
+    `thread_deallocate`'s teardown, at zero or one branch from a `kfree` stub -
+    and ranking by graph distance put them first and the stop that happened
+    73rd of 90. Which guard is taken is a question about data, and the graph
+    does not carry it.
+
+**How to predict with it.** The answer that matters is usually not the walk
+from `kernel_bootstrap` - that walk enters every large `-O2` function on the
+path and then cannot leave its entry block. Three experiments running, the stop
+has been *inside* a function the previous step made real:
+
+    exp-229  linked OSAtomicOperations, stopped in memorystatus_pages_update
+    exp-230  linked kern_memorystatus,  stopped in vm_pressure_response
+    exp-228  linked vm_map,             stopped in OSCompareAndSwap16
+
+and the last two are named correctly by the simplest possible question, which is
+not a walk at all:
+
+    python3 tools/xnu_entry_callwalk.py --root <the symbol the last run named>
+
+The previous frontier is where the run stopped, so that function is where it
+*would* have gone next, and asking what *it* calls is one level down instead of
+one level up. `--root memorystatus_pages_update` names `vm_pressure_response`,
+which is what the device printed. When the frontier is a leaf - `vm_pressure_
+response` may be one, `OSCompareAndSwap16` was - the answer is in the caller
+after the return instead, and that is the case `--assume-taken` exists for.
 
 Exit status is 0 when a stub was found, 1 when the walk completed with none, and
 2 when it could not be completed (an indirect call with no stub before it).
@@ -69,8 +102,13 @@ SYM_RE = re.compile(r"^([0-9a-f]{8})\s+<([^>]+)>:\s*$")
 class Image:
     """The entry ELF, as functions and the direct calls between them."""
 
-    def __init__(self, path):
+    def __init__(self, path, forced=()):
         self.path = path
+        # Call sites to walk into even though a conditional branch guards them.
+        # A static walk cannot know which conditions hold; a *source reading* can
+        # ("vm_page_bucket_count == 0 on the first boot"), and this is where that
+        # reading is supplied so the rest of the walk stays mechanical.
+        self.forced = set(forced)
         self.symbols = self._read_symbols()
         self.by_addr = {value: (name, size) for name, size, value in self.symbols}
         self.by_name = {name: value for name, _size, value in self.symbols}
@@ -126,7 +164,7 @@ class Image:
         name = fn
         calls = []
         indirect = []
-        cold, spans = self._guarded_addresses(name)
+        cold, by_branch, spans = self._guarded_addresses(name)
         for addr, mnemonic, operands in self.functions[name]:
             if mnemonic in ("bl", "blx"):
                 target, _local = self._direct_target(operands, name)
@@ -134,7 +172,8 @@ class Image:
                     if mnemonic == "blx" or "pc" in operands:
                         indirect.append((addr, operands))
                     continue
-                calls.append((addr, target, self._is_guarded(addr, cold, spans)))
+                calls.append((addr, target,
+                              self._is_guarded(addr, cold, by_branch, spans)))
                 if target == STUB_TARGET:
                     self.stubs.add(name)
             elif mnemonic == "b":
@@ -145,48 +184,62 @@ class Image:
                     # That branch *is* the stub marker.
                     self.stubs.add(name)
                 elif target is not None and not local:
-                    calls.append((addr, target, self._is_guarded(addr, cold, spans)))
+                    calls.append((addr, target,
+                                  self._is_guarded(addr, cold, by_branch, spans)))
         self.calls[name] = calls
         self.indirect[name] = indirect
 
     def _guarded_addresses(self, fn):
-        """Addresses in `fn` that no straight-line path from its entry reaches.
+        """(cold, spans) for `fn`: what no straight-line path from its entry reaches.
 
-        Two ways a call ends up behind a condition, and both are needed:
-        `vm_page_init_lck_grp`'s tail call to `vm_compressor_init_locks` is
-        straight-line and must be walked into, while `lck_mtx_lock`'s `bl panic`
-        - an argument assertion, six instructions in - is fall-through reachable
-        and must not be.
+        Two ways a call ends up behind a condition:
 
-          - unreachable-without-taking-a-branch: follow fall-through and local
+          - unreachable without taking a branch. Follow fall-through and local
             `b`, stop at `bx`/`pop {..pc}`/a tail call. The contended path of a
             mutex is entered this way.
-          - inside a forward conditional branch's span: a `beq` that jumps over
-            the call runs the call only when the branch is not taken. An
-            assertion is entered this way.
+          - inside a forward conditional branch's span *and* only reachable by
+            falling into that span. `lck_mtx_lock`'s argument assertion is
+            entered this way: `beq` at +0x10 jumps the `bl panic` at +0x20.
 
-        A call that is neither runs whenever its caller does, which is the
-        assumption the prediction rests on.
+        The second rule is where this tool was wrong for experiment 228, and the
+        correction is one word. A loop's exit test is also a forward conditional
+        branch, and the loop *body* sits inside its span while being entered by
+        an explicit `b` back to the loop head:
+
+            bcs 21952c        <- the exit test, spanning the whole body
+              ...
+            b   2194cc        <- an unambiguous branch to the head
+        2194cc:
+            bl  pmap_next_page_hi     <- inside the span, and always executed
+
+        Calling that call guarded is what made the walk answer `zone_bootstrap`
+        where the device answered `OSCompareAndSwap16`, three calls further on.
+        An address reached by an actual branch is not conditional, whatever
+        span it happens to sit in, so the traversal now carries that fact.
         """
         insns = self.functions[fn]
         if not insns:
-            return set(), []
+            return set(), set(), []
         index = {addr: i for i, (addr, _m, _o) in enumerate(insns)}
 
         hot = set()
-        pending = [insns[0][0]]
+        by_branch = set()
+        pending = [(insns[0][0], False)]
         while pending:
-            addr = pending.pop()
-            while addr in index and addr not in hot:
+            addr, branched = pending.pop()
+            while addr in index:
+                if addr in hot and (not branched or addr in by_branch):
+                    break
                 hot.add(addr)
+                if branched:
+                    by_branch.add(addr)
                 i = index[addr]
                 mnemonic, operands = insns[i][1], insns[i][2]
                 if mnemonic == "b":
                     target, local = self._direct_target(operands, fn)
                     m = re.match(r"^([0-9a-f]+)\s", operands)
                     if local and m:
-                        addr = int(m.group(1), 16)
-                        continue
+                        pending.append((int(m.group(1), 16), True))
                     break
                 if mnemonic in ("bx", "blx"):
                     break
@@ -210,11 +263,14 @@ class Image:
                 spans.append((addr, int(m.group(1), 16)))
 
         cold = {addr for addr in index if addr not in hot}
-        return cold, spans
+        return cold, by_branch, spans
 
     @staticmethod
-    def _is_guarded(addr, cold, spans):
-        return addr in cold or any(frm < addr < to for frm, to in spans)
+    def _is_guarded(addr, cold, by_branch, spans):
+        """A call a straight-line path does not reach, or reaches only by falling in."""
+        if addr in cold:
+            return True
+        return addr not in by_branch and any(frm < addr < to for frm, to in spans)
 
     def _direct_target(self, operands, current=None):
         """(callee name, is_local) for `bl`/`b` operands, or (None, True) if not direct.
@@ -261,8 +317,8 @@ class Image:
             if name in seen:
                 return None
             seen.add(name)
-            for _addr, callee, is_guarded in self.calls.get(name, ()):
-                if is_guarded and not guarded:
+            for addr, callee, is_guarded in self.calls.get(name, ()):
+                if is_guarded and not guarded and (name, addr) not in self.forced:
                     continue
                 found = visit(callee, path + [name])
                 if found:
@@ -271,6 +327,92 @@ class Image:
 
         path = visit(root, [])
         return (path[-1] if path else None), (path or [])
+
+    @staticmethod
+    def parse_site(text):
+        """`pmap_steal_memory+0x130` -> (name, absolute address), using by_name."""
+        name, _, offset = text.partition("+")
+        return name, int(offset, 16) if offset else 0
+
+    def first_stub_beyond(self, name):
+        """First stub the *straight-line* walk from `name` reaches, or None.
+
+        Deliberately sound rather than eager. A looser walk - following every
+        conditional call - answers `PEHaltRestart` for almost everything, because
+        `panic` is reachable from nearly every function in this image through an
+        assertion. A sound `None` says "the guard was taken and what is behind it
+        is not a straight-line path", which is a smaller and more honest claim
+        than a sorted guess: it tells the reader to follow that one callee by
+        hand, and it says exactly which one.
+        """
+        return self.walk(name)[0]
+
+    def guards_to_stub(self, name):
+        """Fewest further conditional branches to take from `name` to reach a stub, or None.
+
+        This is the number that answers "which guard matters". Not every
+        conditional call is equally far from a stop, and a static walk cannot
+        know which condition holds - but it *can* know that one guard's callee
+        stands one branch away from an unprovided symbol while another's stands
+        behind seven.
+
+        Experiment 228 is why this exists. The walk answered `zone_bootstrap`;
+        the device printed `OSCompareAndSwap16`, reached through
+        `pmap_steal_memory`'s guard on `pmap_enter`, and every entry in the
+        guarded list had nothing to say beside it. A cost of 0 marks the entry
+        that leads somewhere; `None` marks the entry that leads nowhere this
+        image can name, and those cannot be the stop.
+
+        Uniform-cost search over the call graph: an unguarded edge costs 0, a
+        guarded edge costs 1, and the answer is the cheapest route to any stub.
+        """
+        if name in self.stubs:
+            return 0
+        index = {}
+        best = None
+        frontier = [(0, name)]
+        while frontier:
+            frontier.sort(key=lambda item: item[0])
+            cost, here = frontier.pop(0)
+            if here in index and index[here] <= cost:
+                continue
+            index[here] = cost
+            for _addr, callee, is_guarded in self.calls.get(here, ()):
+                step = cost + (1 if is_guarded else 0)
+                if callee in self.stubs:
+                    if best is None or step < best:
+                        best = step
+                    continue
+                if step < index.get(callee, 1 << 30):
+                    frontier.append((step, callee))
+        return best
+
+    def guarded_expansions(self, root):
+        """Guarded call sites on the straight-line path, in execution order, with what is behind them.
+
+        This is the answer to "the run stopped earlier than the walk said":
+        a conditional branch that is taken. The list is ordered by where each
+        site sits on the path, so it is read top-down in the order the kernel
+        would reach them, and the first entry whose condition holds is the stop.
+        Experiment 228's stop, `OSCompareAndSwap16`, is behind
+        `pmap_steal_memory`'s guard on `pmap_enter`, and it appears here.
+        """
+        seen = set()
+        found = []
+
+        def visit(name):
+            if name in seen or name in self.stubs:
+                return
+            seen.add(name)
+            for addr, callee, is_guarded in self.calls.get(name, ()):
+                if is_guarded:
+                    found.append((name, addr, callee,
+                                  callee if callee in self.stubs else self.first_stub_beyond(callee)))
+                else:
+                    visit(callee)
+
+        visit(root)
+        return found
 
     def guarded_calls_before(self, root, stop):
         """The guarded call sites the unguarded walk stepped over, so they are not hidden."""
@@ -305,16 +447,30 @@ class Image:
             print("  indirect call, which this walk cannot follow.")
             self.report_indirect(root)
 
-        skipped = self.guarded_calls_before(root, found)
-        if skipped:
+        expansions = self.guarded_expansions(root)
+        annotated = [(self.guards_to_stub(callee), name, addr, callee, beyond)
+                     for name, addr, callee, beyond in expansions]
+        if annotated:
             print()
-            print("  %d call(s) inside a conditional block were not followed;" % len(skipped))
-            print("  if one of them is taken, the stop is somewhere else:")
-            for name, addr, callee in skipped[:12]:
-                print("    %s+0x%x -> %s" % (name, addr - self.by_name.get(name, addr), callee))
-            if len(skipped) > 12:
-                print("    ... and %d more" % (len(skipped) - 12))
+            print("  if a conditional branch on that path is taken instead, the stop is")
+            print("  the first of these whose condition holds, in execution order:")
+            for cost, name, addr, callee, beyond in annotated[:16]:
+                print("    %s+0x%x -> %s%s" % (name, addr - self.by_name.get(name, addr),
+                                               callee, self._beyond(cost, callee, beyond)))
+            if len(annotated) > 16:
+                print("    ... and %d more" % (len(annotated) - 16))
+
         return 0 if found else 1
+
+    def _beyond(self, cost, callee, beyond):
+        """The tail of a guard entry: the symbol reached, and how many branches away."""
+        if beyond is None:
+            if cost is None:
+                return "   (leads nowhere this image can name)"
+            return "   (a stub %d guard%s further)" % (cost, "" if cost == 1 else "s")
+        if beyond == callee:
+            return "   STUB"
+        return " -> %s" % beyond
 
     def report_indirect(self, root):
         """Say where the walk was blind, so a 'no stub' answer is not read as 'all real'."""
@@ -348,9 +504,20 @@ def main():
     ap.add_argument("--root", default="kernel_bootstrap")
     ap.add_argument("--list-stubs", action="store_true",
                     help="print every stub in the image and exit")
+    ap.add_argument("--assume-taken", action="append", default=[],
+                    metavar="CALLER+0xNNN",
+                    help="walk into this guarded call site as if its branch were "
+                         "taken; repeatable, and the offsets are the ones the "
+                         "guard list prints")
     args = ap.parse_args()
 
     image = Image(args.elf)
+    for site in args.assume_taken:
+        name, offset = Image.parse_site(site)
+        if name not in image.functions:
+            print("no function named %r in %s" % (name, args.elf), file=sys.stderr)
+            return 2
+        image.forced.add((name, image.by_name.get(name, 0) + offset))
     if args.list_stubs:
         for name in sorted(image.stubs):
             print(name)
