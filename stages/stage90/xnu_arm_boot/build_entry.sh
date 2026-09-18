@@ -261,6 +261,23 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `kernel_early_bootstrap` itself (`startup.c:226`) is four statements: one boot-arg parse, then
     # `lck_mod_init()` and `timer_call_init()`.
     ARM_KERN_STARTUP_OBJ=${STAGE90_ENTRY_KERN_STARTUP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_startup.o}
+    # `osfmk/kern/timer_call.c`, named by experiment-184's `stub_hit=lck_mod_init` - not because
+    # `lck_mod_init` is in it, but because it is the *next* thing `kernel_early_bootstrap`
+    # (`startup.c:238`) asks for, one statement after the symbol the probe answered. 11321 bytes of
+    # text across 32 functions and 33 references, so this is the larger half of the same function.
+    # `timer_call_init` (`timer_call.c:248`) is five statements, and the first three are locks:
+    # `lck_attr_setdefault`, `lck_grp_attr_setdefault`, `lck_grp_init`, then `timer_longterm_init`
+    # and `timer_call_init_abstime`. It is the first edge in this image that lands in the lock
+    # subsystem - none of which has run - which is why the step is measured before it is taken.
+    ARM_KERN_TIMER_CALL_OBJ=${STAGE90_ENTRY_KERN_TIMER_CALL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_timer_call.o}
+    # `osfmk/kern/locks.c`, named by experiment-184's `stub_hit=lck_mod_init`. 5943 bytes of text
+    # across 47 functions. `lck_mod_init` (`locks.c:140`) is short and has no missing callees:
+    # one boot-arg parse, then `queue_init`, a `bzero`, a `strncpy` of "Compatibility APIs",
+    # `enqueue_tail`, and `lck_grp_attr_setdefault`/`lck_attr_setdefault`/`lck_mtx_init_ext` - all
+    # of which this object also defines. It is the first code in this image that initializes a lock,
+    # and it is linked with `timer_call.o` because the two are the same statement pair in
+    # `kernel_early_bootstrap` and each was sized on its own before either was added.
+    ARM_KERN_LOCKS_OBJ=${STAGE90_ENTRY_LOCKS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_locks.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -283,10 +300,12 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$ARM_MACHINE_ROUTINES_ASM_OBJ" "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_ARM_RTCLOCK_OBJ"       "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_KERN_STARTUP_OBJ"      "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$ARM_KERN_TIMER_CALL_OBJ"   "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$ARM_KERN_LOCKS_OBJ"        "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ")
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

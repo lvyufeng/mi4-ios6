@@ -198,6 +198,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-182](experiment-182-the-timebase-callback-ran-and-the-frontier-is-the-toolchains-aeabi-uldivmod.md) | The Timebase Callback Ran, and the Frontier Is the Toolchain's `__aeabi_uldivmod` |
 | stage90 | [experiment-183](experiment-183-the-thread-pointer-round-tripped-and-the-frontier-is-kernel-early-bootstrap.md) | The Thread Pointer Round-Tripped Through TPIDRPRW, and the Frontier Is `kernel_early_bootstrap` |
 | stage90 | [experiment-184](experiment-184-the-timebase-came-out-as-the-trees-19-2-mhz-and-a-wrong-prototype-wrote-to-address-zero.md) | The Timebase Came Out as the Tree's 19.2 MHz, and a Hand-Written Prototype Wrote to Address 0 |
+| stage90 | [experiment-185](experiment-185-lck-mod-init-ran-for-real-and-the-frontier-is-strncpy.md) | `lck_mod_init` Ran for Real, and the Frontier Is `strncpy` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

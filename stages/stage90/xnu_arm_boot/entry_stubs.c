@@ -361,74 +361,74 @@ void entry_stub_hit(const char *name)
 
 #ifdef STAGE90_ENTRY_REAL_ARM_INIT
 /*
- * `lck_mod_init()` - `osfmk/kern/locks.c:140`, the first call `kernel_early_bootstrap`
- * (`osfmk/kern/startup.c:226`) makes, after one `PE_parse_boot_argn("serverperfmode", ...)`. The
- * probe prints what the timebase came out as, then names itself.
+ * `timer_call_get_priority_params()` - `osfmk/kern/timer_call.c`, the first thing
+ * `timer_call_init` asks the rest of the kernel for (`timer_call.c:211`).
  *
- * `kernel_early_bootstrap`'s probe stood here for experiment 183 - it printed
- * `current_thread() = 0x0022a8d0`, which is `init_thread` in the same image, and `cpu_number() = 0`,
- * turning the TPIDRPRW round trip from an inference into a measurement. `osfmk/kern/startup.o` is
- * now linked because that run named it, so the definition that stood here is gone and is not
- * replaced by another hand-written definition of the same name.
+ * Two things are different at this edge, and both are why the definition that stood here is gone.
  *
- * What is worth printing here is the one thing experiment 183 could not reach. `timebase_callback`
- * ran to completion in that run - the image was past `rtclock_early_init` - and it wrote
- * `rtclock_timebase_const` and `rtclock_sec_divisor`, but both are macros onto `RTClockData`
- * (`osfmk/arm/rtclock.h:74,76`) and this file cannot lay that struct out without XNU's headers.
- * The values are reachable indirectly instead, because `mach_absolute_time()` and
- * `absolutetime_to_nanoseconds()` are now real code and divide by exactly those constants.
+ * `lck_mod_init` was the symbol experiment 184's run named, so `osfmk/kern/locks.o` is linked and
+ * defines it for real - a hand-written version would be a duplicate definition and the link would
+ * say so. That is the sixth time the link has said which definition had to go: `DTInit` (exp-170),
+ * `ml_parse_cpu_topology` (exp-177), `cpu_processor_alloc` (exp-178), `thread_bootstrap` (exp-179),
+ * `kernel_early_bootstrap` (exp-183), and now `lck_mod_init`. It takes the probe with it, which is
+ * the mechanism working rather than a loss: a probe exists to print what the generated stubs
+ * cannot, and the symbol it stood on is now real code that runs.
  *
- * So the probe asks the timebase a question with a known answer. `absolutetime_to_nanoseconds` is
- * `abstime * numer / denom` with the reduced constants, and `stage90_main.c:692` advertises
- * `timebase-frequency = 19200000` on the cpu nodes. If XNU read that value, the constants are
- * 625/12 and 19200000 ticks is exactly one second:
+ * So the first thing this run establishes is established by *where the run stops* rather than by a
+ * printed value: the image is past real `lck_mod_init`, past `lck_attr_setdefault` and
+ * `lck_grp_attr_setdefault` and `lck_grp_init` for `timer_call_lck_grp`, past `timer_longterm_init`
+ * - which is in `timer_call.c`, not `timer.c`, and initializes a second lock group - and inside
+ * `timer_call_init_abstime`, whose first statement is this function.
  *
- *     19200000 * 625 / 12 = 1000000000
+ * What a probe can add is evidence that those calls wrote what they say they wrote, because
+ * `lck_mod_init` ends by writing through two pointers and a call that runs without faulting is an
+ * absence, not a measurement. `LockCompatGroup` is the group it bootstraps in place instead of
+ * calling `lck_grp_init` on it, and the two fields the probe reads out of it are both checkable:
  *
- * `19200000` below is the *input*, not the answer - it is a second copy of a device-tree value, and
- * that is deliberate, because making the input the tree's number and the output a fixed expectation
- * is what turns this into a check rather than a reading. If XNU took a different frequency the
- * output will say so by not being 1000000000, and the two halves printed below will show what it
- * was. A wrong constant cannot produce this number by accident.
+ *   - `lck_grp_refcnt` is set to 1 (`locks.c:172`);
+ *   - `lck_grp_name` is `strncpy`d from `"Compatibility APIs"` (`locks.c:169`), so its first four
+ *     bytes spell `Comp` - 0x706d6f43 little-endian.
  *
- * `mach_absolute_time()` is printed beside it as the raw tick count - non-zero means the counter it
- * reads is running, which is a fact about the hardware rather than about XNU's arithmetic.
+ * The offsets are 8 and 28, and they are not read off `locks.h` and hoped for. `lck_grp_init` in
+ * the same object is compiled code that writes both fields, and it does it as `str r5, [r4, #8]`
+ * with r5 = 1 and `add r0, r4, #28` before the `strlcpy`. So a right answer cannot be an accident
+ * of a wrong offset, and a wrong offset cannot produce these two values by accident either - the
+ * same property as the 1000000000 in experiment 184.
  *
- * The declarations here are the real ones (`osfmk/kern/clock.h:174,244`): both conversions return
- * `void` and write their answers through out-parameters. The first version of this probe declared
- * them as `uint64_t`-returning, which is not a mistake the compiler can see - the caller and the
- * callee disagree about r1, the caller puts the high half of `abstime` there, and the callee stores
- * its answer through it. That is a store to address 0 followed by a store through the high half of
- * the tick count, and it is what the run before this one did instead of printing: no output, no
- * `stub_hit`, no exception message, and the device resetting on its own. A function whose
- * signature is only in a hand-written prototype is a place where a wrong answer is a memory write,
- * not a wrong number.
+ * The third value is that measurement's inverse. `nanoseconds_to_absolutetime` (`rtclock.c:443`)
+ * is real code that has not run yet, and it divides by the same `rtclock_sec_divisor` the forward
+ * direction multiplies by, so asking it what a second is in ticks should give back 19200000 - the
+ * tree's frequency, approached from the other side.
  */
-uint64_t mach_absolute_time(void);
-void absolutetime_to_nanoseconds(uint64_t abstime, uint64_t *result);
-void absolutetime_to_microtime(uint64_t abstime, uint32_t *secs, uint32_t *microsecs);
+typedef struct timer_coalescing_priority_params_ns timer_coalescing_priority_params_ns_t;
+timer_coalescing_priority_params_ns_t *timer_call_get_priority_params(void);
 
-void lck_mod_init(void)
+void nanoseconds_to_absolutetime(uint64_t nanosecs, uint64_t *result);
+
+/* The group `lck_mod_init` bootstraps in place; this file includes no XNU headers to type it. */
+extern uint8_t LockCompatGroup[];
+
+#define GROUP_REFCNT_OFFSET  8u
+#define GROUP_NAME_OFFSET   28u
+
+static uint32_t group_read(uint32_t offset)
 {
-    uint64_t ticks;
-    uint64_t ns = 0u;
-    uint32_t secs = 0u;
-    uint32_t usecs = 0u;
+    return *(const volatile uint32_t *)(const void *)(LockCompatGroup + offset);
+}
 
-    ticks = mach_absolute_time();
+timer_coalescing_priority_params_ns_t *timer_call_get_priority_params(void)
+{
+    uint64_t ticks = 0u;
 
-    entry_kv("xnu_entry_mach_absolute_time_lo", (uint32_t)ticks);
-    entry_kv("xnu_entry_mach_absolute_time_hi", (uint32_t)(ticks >> 32));
+    entry_kv("xnu_entry_lock_compat_refcnt", group_read(GROUP_REFCNT_OFFSET));
+    entry_kv("xnu_entry_lock_compat_name_head", group_read(GROUP_NAME_OFFSET));
 
-    absolutetime_to_nanoseconds(19200000ull, &ns);
-    entry_kv("xnu_entry_ns_per_tree_timebase_lo", (uint32_t)ns);
-    entry_kv("xnu_entry_ns_per_tree_timebase_hi", (uint32_t)(ns >> 32));
+    nanoseconds_to_absolutetime(1000000000ull, &ticks);
+    entry_kv("xnu_entry_tree_timebase_lo", (uint32_t)ticks);
+    entry_kv("xnu_entry_tree_timebase_hi", (uint32_t)(ticks >> 32));
 
-    absolutetime_to_microtime(ticks, &secs, &usecs);
-    entry_kv("xnu_entry_uptime_secs", secs);
-    entry_kv("xnu_entry_uptime_usecs", usecs);
-
-    entry_stub_hit("lck_mod_init");
+    entry_stub_hit("timer_call_get_priority_params");
+    return (timer_coalescing_priority_params_ns_t *)0;   /* not reached */
 }
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */
 
