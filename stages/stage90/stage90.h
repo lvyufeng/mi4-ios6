@@ -2932,7 +2932,13 @@ struct stage90_xnu_iokit_provider_callback_client_notification_readiness_dryrun_
 #define STAGE90_XNU_ENTRY_STUB_SAT_MAGIC              0x00000080u
 #define STAGE90_XNU_ENTRY_STUB_SAT_OUTPUT             0x00000100u
 #define STAGE90_XNU_ENTRY_STUB_SAT_MMU_UNCHANGED      0x00000200u
-#define STAGE90_XNU_ENTRY_STUB_SAT_NO_EXCEPTION       0x00000400u
+/* Renamed by the fix that followed experiment 213. This SAT bit is set unconditionally and
+ * its FAIL counterpart can never be set, because nothing in the payload can observe an
+ * exception inside XNU: the contract is emitted before the handoff, and the entry image
+ * reports by never returning. The entry image's own "exception: ..." line and the fault
+ * registers beside it are the real signal. The name is scoped to the pre-handoff phase so it
+ * does not read as a statement about XNU. */
+#define STAGE90_XNU_ENTRY_STUB_SAT_PREHANDOFF_NO_EXCEPTION 0x00000400u
 #define STAGE90_XNU_ENTRY_STUB_SAT_SAFETY_BOUNDARY    0x00000800u
 #define STAGE90_XNU_ENTRY_STUB_SAT_EARLY_INIT_OK      0x00001000u
 #define STAGE90_XNU_ENTRY_STUB_SAT_PE_INIT_PLATFORM_FALSE_OK 0x00002000u
@@ -2950,7 +2956,8 @@ struct stage90_xnu_iokit_provider_callback_client_notification_readiness_dryrun_
 #define STAGE90_XNU_ENTRY_STUB_FAIL_BAD_MAGIC             0x00000080u
 #define STAGE90_XNU_ENTRY_STUB_FAIL_NO_OUTPUT             0x00000100u
 #define STAGE90_XNU_ENTRY_STUB_FAIL_MMU_CHANGED           0x00000200u
-#define STAGE90_XNU_ENTRY_STUB_FAIL_EXCEPTION             0x00000400u
+/* See the SAT_PREHANDOFF_NO_EXCEPTION comment above: defined, and never set by anything. */
+#define STAGE90_XNU_ENTRY_STUB_FAIL_PREHANDOFF_EXCEPTION   0x00000400u
 #define STAGE90_XNU_ENTRY_STUB_FAIL_SAFETY_BOUNDARY       0x00000800u
 #define STAGE90_XNU_ENTRY_STUB_FAIL_EARLY_INIT             0x00001000u
 #define STAGE90_XNU_ENTRY_STUB_FAIL_PE_INIT_PLATFORM_FALSE 0x00002000u
@@ -2992,7 +2999,7 @@ struct stage90_xnu_entry_stub_result {
     uint32_t sctlr_before;
     uint32_t sctlr_after;
     uint32_t mmu_state_unchanged;
-    uint32_t no_exception_observed;
+    uint32_t prehandoff_no_exception_observed;   /* constant 1; see SAT_PREHANDOFF_NO_EXCEPTION */
     uint32_t public_xnu_start_executed;
     uint32_t public_arm_init_executed;
     uint32_t public_pmap_runtime_executed;

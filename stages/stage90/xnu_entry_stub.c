@@ -385,8 +385,22 @@ int stage90_xnu_entry_stub_run(struct boot_args *args)
         r->failure_mask |= STAGE90_XNU_ENTRY_STUB_FAIL_MMU_CHANGED;
     }
 
-    r->no_exception_observed = 1u;
-    r->satisfied_mask |= STAGE90_XNU_ENTRY_STUB_SAT_NO_EXCEPTION;
+    /*
+     * A constant, named so that it cannot be read as anything else.
+     *
+     * This has been `= 1u` since the field was introduced, and the contract is emitted
+     * *before* the handoff - so nothing that happens inside XNU can reach it. Experiment 213
+     * is the run that showed it: the log said `no_exception=0x00000001` for a run that took a
+     * prefetch abort inside XNU, and experiments 194 and 195 had cited the field as evidence
+     * that a run did not fault. What it records is that the *payload's own* pre-handoff phase
+     * did not except, which is true and is what its new name says.
+     *
+     * It cannot be made a measurement of XNU from here: the entry image reports by never
+     * returning, so the payload reads nothing back. The real signal already exists in the log,
+     * as `fleh_prefabt`/`fleh_dataabt`'s "exception: ..." line and the fault registers with it.
+     */
+    r->prehandoff_no_exception_observed = 1u;
+    r->satisfied_mask |= STAGE90_XNU_ENTRY_STUB_SAT_PREHANDOFF_NO_EXCEPTION;
 
     if (r->early_pmap_platform_init_called == 1u &&
         r->early_pmap_platform_init_returned == 1u &&
@@ -469,7 +483,8 @@ int stage90_xnu_entry_stub_run(struct boot_args *args)
     xnu_log_kv32("stage90_xnu_entry_stub_sctlr_before", r->sctlr_before);
     xnu_log_kv32("stage90_xnu_entry_stub_sctlr_after", r->sctlr_after);
     xnu_log_kv32("stage90_xnu_entry_stub_mmu_unchanged", r->mmu_state_unchanged);
-    xnu_log_kv32("stage90_xnu_entry_stub_no_exception", r->no_exception_observed);
+    xnu_log_kv32("stage90_xnu_entry_stub_prehandoff_no_exception",
+               r->prehandoff_no_exception_observed);
     xnu_log_kv32("stage90_xnu_entry_stub_early_init_called", r->early_pmap_platform_init_called);
     xnu_log_kv32("stage90_xnu_entry_stub_early_init_returned", r->early_pmap_platform_init_returned);
     xnu_log_kv32("stage90_xnu_entry_stub_early_init_status", r->early_pmap_platform_init_status);
