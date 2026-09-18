@@ -226,6 +226,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-210](experiment-210-xnu-enters-pe-arm-init-interrupts-itself-and-the-frontier-is-early-random.md) | XNU Enters `pe_arm_init_interrupts` Itself, `cpu_machine_idle_init` Returns, and the Frontier Is `early_random` |
 | stage90 | [experiment-211](experiment-211-the-prng-links-the-handoff-tree-gets-boot-entropy-and-the-frontier-is-ccdrbg-factory-nisthmac.md) | The PRNG Links, the Handoff Tree Grows Boot Entropy, and the Frontier Is `ccdrbg_factory_nisthmac` |
 | stage90 | [experiment-212](experiment-212-the-drbg-factory-runs-and-the-frontier-is-cchmac-init.md) | the DRBG Factory Runs, `early_random` Makes Its First Indirect Call, and the Frontier Is `cchmac_init` |
+| stage90 | [experiment-213](experiment-213-the-prediction-was-wrong-and-the-frontier-is-a-null-compress-pointer.md) | the Prediction Was Wrong, the Run Took a Prefetch Abort at Address Zero, and the Method That Predicted It Was Reading Only Half the Calls |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

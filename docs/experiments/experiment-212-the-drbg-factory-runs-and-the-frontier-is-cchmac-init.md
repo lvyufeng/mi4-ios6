@@ -249,3 +249,24 @@ done
 
 Nothing was flashed: `persistent_write_attempted=0x00000000` in all 25 contracts that report it,
 and the device returned to Android on its own.
+
+## Correction, added after the run (experiment 213)
+
+The "What is next" section above predicts `stub_hit=ccdigest_init`, and **experiment 213's run
+disproved it** - the run took a prefetch abort at address zero instead, and produced no stub hit at
+all. The error is worth keeping because of *how* it was made: the prediction was read out of
+`cchmac_init`'s relocation table (`objdump -dr | grep R_ARM_CALL`), and **an indirect call has no
+relocation**. `cchmac_init` has three (`blx r3` at 0x58, 0x130, 0x198) that this method cannot see.
+
+So the ordering argument in the paragraph above - `ccdigest_init` at 0x28 before `ccdigest_update` at
+0x3c, therefore `ccdigest_init` is the stop - is true about the *source order of two direct calls*
+and says nothing about which call control reaches, because neither is reached. Three instructions
+above them, `cmp r0, r2; bcs 0x94` compares `di->block_size` against `key_len`, and with the zeroed
+`ccsha1_eay_di` stand-in both are 0, so the branch is taken and the whole `ccdigest_*` pair is
+skipped. What runs instead is `blx r3` with `r3 = di->compress` = NULL.
+
+The paragraph about `ccdigest_init` being "safe to aim at" was right about that object - its 60 bytes
+were read in full and do contain no indirect call - but it was answering a question about a call the
+run never makes. See experiment 213's doc for the full trace and for the method fix: an object's call
+graph is `objdump -d` plus a grep for `blx`/`ldr pc`, and a prediction needs the register values
+feeding the branches as much as it needs the call list.

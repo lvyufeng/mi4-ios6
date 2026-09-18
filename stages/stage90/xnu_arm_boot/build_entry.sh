@@ -781,6 +781,52 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # that links `osfmk_corecrypto_ccsha1_src_ccsha1_eay.o` is the one that gives `ccsha1_eay_di` a
     # value, and until then every field read through it is zero.
     OSFMK_CCDRBG_NISTHMAC_OBJ=${STAGE90_ENTRY_CCDRBG_NISTHMAC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_ccdbrg_src_ccdrbg_nisthmac.o}
+    # `osfmk/corecrypto/cchmac/src/cchmac_init.c`, named by experiment-212's `stub_hit=cchmac_init`.
+    # 444 bytes of text, no data, no `.bss`, 4 references, 1 definition.
+    #
+    # **The prediction written here was `ccdigest_init`, and experiment 213's run disproved it.** It
+    # is left in place rather than deleted because the way it was wrong is the point - see below -
+    # and the run's actual result was a prefetch abort, not a stub hit:
+    #
+    #     exception: prefetch abort    ifar=0x00000000    ifsr=0x0000000f
+    #
+    # The old reasoning: `cchmac_init` calls `ccdigest_init` at 0x28 and `ccdigest_update` at 0x3c,
+    # both before anything else, and both are absent from the image, so whichever comes first is the
+    # stop. The *order* was right and the conclusion was still wrong, because neither call is
+    # reached. What decides it is three instructions at the top, and they read the zeroed
+    # `ccsha1_eay_di` - the stand-in this step's `di` argument still is:
+    #
+    #        8: ldr  r0, [r0, #8]   ; di->block_size = 0
+    #       18: cmp  r0, r2          ; r2 = key_len = state->keysize = di->output_size = 0
+    #       1c: bcs  94              ; TAKEN - 0 >= 0, so 0x28 and 0x3c are SKIPPED
+    #       ...
+    #      11c: ldr  r3, [r5, #24]   ; di->compress = NULL
+    #      130: blx  r3              ; -> jump to address 0
+    #
+    # `ccdigest_info` is `{output_size, state_size, block_size, oid_size, oid, initial_state,
+    # compress, final}`, so offset 24 is `compress` - and `di->initial_state` (offset 20) is NULL
+    # too, which is why the `memcpy` at 0x10c was handed a NULL source and survived on its zero
+    # length. `IFSR = 0x0F` is a *permission* fault at page granularity, not a translation fault, so
+    # VA 0 is mapped and not executable rather than unmapped; `IFAR = 0` is the branch target.
+    #
+    # **The reason the prediction could be made at all is a method defect, and it is the useful part
+    # of this step.** Every prediction in this project has come from an object's relocation table -
+    # `objdump -dr | grep R_ARM_CALL`, or `nm -u` - and an indirect call has **no relocation**, so it
+    # is invisible to both. This object has three (`blx r3` at 0x58, 0x130, 0x198) and they are not
+    # in the list that was read. Experiments 207-212 were not wrong because the objects' stops
+    # happened at direct calls reached first; `cchmac_init` is the first object where a call through
+    # a pointer was reachable before any direct call, and the gap showed. The object's call graph is
+    # `objdump -d` and a grep for `blx` / `ldr pc`, and - because this branch is taken on *data* -
+    # the register values feeding its branches have to be read too.
+    #
+    # **The frontier is therefore a value, not a symbol: `ccsha1_eay_di` needs its definition.**
+    # `osfmk_corecrypto_ccsha1_src_ccsha1_eay.o` - 4932 bytes, defining `ccsha1_eay_di` and
+    # `sha1_compress`, referencing `ccdigest_final_64be` and `ccsha1_initial_state` - is what turns
+    # the zeroed stand-in into an initialized `ccdigest_info`. That step is taken deliberately rather
+    # than reached, which is what experiment 212's doc said it should be, and it ends the stretch of
+    # runs that pass on empty parameters: three fields of the same stand-in have now been observed to
+    # be zero, one per experiment (`output_size`, `initial_state`, `compress`).
+    OSFMK_CCHMAC_INIT_OBJ=${STAGE90_ENTRY_CCHMAC_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_cchmac_src_cchmac_init.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -833,10 +879,11 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_ARM_CACHES_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_PRNG_RANDOM_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_CCDRBG_NISTHMAC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_CCHMAC_INIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ")
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
