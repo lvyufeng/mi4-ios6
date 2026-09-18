@@ -404,133 +404,87 @@ void _consume_kprintf_args(int a, ...)
 }
 
 /*
- * `processor_data_init()` - `osfmk/kern/processor_data.c:39`, and the first symbol the run reaches
- * after the two objects experiment-189 named are linked.
+ * `ml_set_interrupts_enabled()` - `osfmk/arm/machine_routines_common.c:507`, and the first symbol
+ * `processor_init` reaches after `processor_data_init`.
  *
- * Experiment 189 stopped at `processor_bootstrap`, the next symbol `arm_init` reaches. This run
- * links `osfmk/kern/processor.o`, which defines it, so `processor_bootstrap` (`processor.c:120`)
- * runs for real - and so does `processor_init` (`processor.c:135`), because it is in the same
- * object. That is what moves the frontier out of the object that was just linked: the last four
- * probes were each at the first undefined symbol *inside* a function the previous run had made
- * real, and this one is at the first undefined symbol inside `processor_init`, which this run is
- * what makes real.
+ * Experiment 190 stopped at `processor_data_init`, the first symbol in that function that nothing
+ * defines. This run links `osfmk/kern/processor_data.o`, which is 72 bytes of text with two
+ * references (`memset` and `timer_init`, both already satisfied here), so the whole of
+ * `processor_data_init` runs - three `timer_init` calls into the `processor_data_t` at the end of
+ * `struct processor` - and `processor_init` continues to its next statement group:
  *
- * `processor_init`'s body, statement by statement, until it reaches something nothing defines:
+ *     processor->processor_list = NULL;
+ *     s = splsched();                     -> ml_set_interrupts_enabled(FALSE), undefined -> the stop
+ *     pset_lock(pset);
+ *     bit_set(pset->cpu_bitmask, cpu_id);
+ *     if (pset->cpu_set_count++ == 0) ...
  *
- *     if (processor != master_processor)      - skipped: processor_bootstrap passes master_processor
- *         SCHED(processor_init)(processor);
- *     processor->state = PROCESSOR_OFF_LINE;  - and the ~20 field stores after it
- *     processor_state_update_idle(processor); - in processor.o
- *     timer_call_setup(&processor->quantum_timer, thread_quantum_expire, processor);
- *                                             - timer_call.o, real since exp-185
- *     processor_data_init(processor);         - processor_data.c, undefined -> the stop
+ * `splsched()` is a macro over `ml_set_interrupts_enabled(FALSE)` and `splx(s)` over
+ * `ml_set_interrupts_enabled(s)`; the compiled `processor_init` calls it twice, once with r0 = 0
+ * (`mov r0, #0` then `bl ml_set_interrupts_enabled`, saving the result in r8) and once with r8
+ * (`mov r0, r8` before the second call, at `processor_init+0x174`). The probe stops at the first,
+ * so this is the interrupt state at the top of `processor_init`'s critical section, and the
+ * argument must be **0**.
  *
- * `processor_bootstrap` runs first, and the two lines of it that matter here are
- * `master_processor = cpu_to_processor(master_cpu)` and `processor_init(master_processor,
- * master_cpu, &pset0)`. So the argument this probe receives is the processor pointer the
- * scheduler just built, and the probe is the first code in this sequence that gets to *check* a
- * pointer the kernel computed rather than one this file assumed.
+ * This probe reports less than the last few, and that is the shape of the step rather than a
+ * shortfall: `processor_data_init` is four statements with no observable output, and what is worth
+ * checking is where the run has got to. The two zeros below are the check - `pset->cpu_set_count`
+ * and `processor_count` are incremented *after* the locked region, so at this point they must
+ * still be 0, exactly as they were at exp-190's stop. Same two values, same two zeros, and now
+ * from an earlier statement in the same function, which is what makes them evidence about the
+ * position rather than about the values.
  *
- * The values are `struct processor` fields read at offsets taken from the compiled code - from
- * this image's own `osfmk_kern_processor.o`, in `processor_init`, where each store below is
- * visible with its offset. Reading the header instead would be reading a struct whose layout
- * depends on which `#if` blocks the configuration selected (`CONFIG_SCHED_TRADITIONAL`,
- * `CONFIG_SCHED_MULTIQ`), and the whole point of these offsets is that they are the ones the
- * compiler used.
+ * `CPSR` is read because this is the one probe in the sequence placed at an interrupt-state
+ * transition, so the I bit here is the state XNU's `_start` left: `start.s` never enables
+ * interrupts, so the expectation is that they are already masked and `splsched` is recording that
+ * rather than changing it. The value is reported rather than predicted because nothing in this
+ * image has read CPSR before - and because it is the first value in this sequence that comes from
+ * the *program status register* rather than from a system register XNU named.
  *
- *     str r9, [r4, #8]      offset    8 = state          r9 = 0  -> PROCESSOR_OFF_LINE (0)
- *     str r0, [r4, #16]     offset   16 = is_recommended bit cpu_id of pset0.recommended_bitmask
- *     str r6, [r4, #32]     offset   32 = processor_set  r6 = r2 = pset = &pset0
- *     str fp, [r4, #56]     offset   56 = cpu_id         fp = r1 = cpu_id
- *     str r0, [r4, #128]    offset  128 = quantum_end    r0 = -1, then [r4, #132] = -1 too
- *     str r0, [r4, #144]    offset  144 = deadline       r0 = -1
- *     str r4, [r4, #1236]   offset 1236 = processor_primary, storing the processor into itself
- *
- * `quantum_timer` is the `timer_call_setup` argument, `add r0, r4, #64`, which is what makes 128
- * the end of that struct and not some other field. `master_cpu`, `master_processor`, `pset0` and
- * `processor_count` are all defined in `processor.o`, which is linked this run, so they can be
- * named directly rather than read through a pointer.
- *
- * What each one is worth:
- *
- *   processor pointer       the probe's own argument. It should equal `master_processor`, which is
- *                           `cpu_to_processor(master_cpu)` - a function in `cpu_common.o` that
- *                           nothing had called before this run.
- *   &pset0 / processor_set  `processor_set` is a **non-zero** pointer and `pset0` is the address
- *                           the kernel handed `processor_init`. A stub `processor_init` cannot
- *                           produce either: `.bss` is zeroed by the payload, so a field a stub
- *                           left alone reads 0.
- *   quantum_end/deadline    0xffffffff twice each, i.e. `UINT64_MAX` - the value `processor_init`
- *                           stores. Also not reachable from zeroed memory, and it is the first
- *                           time an XNU timer field is set to a deadline in this image.
- *   cpu_id / master_cpu     equal to each other, and to whatever `arm_init` decided the boot CPU
- *                           is. It is the value that indexes `processor_array` in
- *                           `cpu_to_processor`, so the pair checks the pointer above twice.
- *   is_recommended          `(pset->recommended_bitmask & (1ULL << cpu_id)) ? TRUE : FALSE`, a
- *                           bit test on a `pset0` field `pset_init` wrote. Its being 0 or 1 says
- *                           something about the device rather than about the code, so it is
- *                           reported rather than predicted - and read from a nonzero `pset0` it is
- *                           still only meaningful if the other values came out right.
- *   processor_count         still **0**: `processor_init` increments it after
- *                           `processor_data_init` returns, which is what makes it the one value
- *                           here that must *not* have happened yet.
- *
- * Nothing is predicted about `processor_bootstrap`'s own body - `pset_init`, the four `queue_init`
- * calls and `simple_lock_init` - because it has to have run to completion for any of this to be
- * here at all, and `processor_init` has to have been called with the pointers it computed.
+ * The declaration is the real signature, `boolean_t ml_set_interrupts_enabled(boolean_t enable)`,
+ * one `int` in r0 and one `int` out - `machine_routines_common.c:507`. It is the function that
+ * decides whether to call `get_preemption_level` and `current_thread` on the way out, none of
+ * which is reached here, which is the reason this step links the object rather than standing in
+ * for it: `ml_set_interrupts_enabled` is not a register access, it is twenty lines of scheduler
+ * state inspection with an `#if INTERRUPT_MASKED_DEBUG` in the middle.
  */
+int ml_set_interrupts_enabled(int enable);
 
-/*
- * The return type and the parameter are the real ones, and the parameter is the reason this probe
- * is placed here rather than at `processor_bootstrap`: `processor_data_init` is
- * `void processor_data_init(processor_t)`, one pointer in r0, so a probe that takes that argument
- * gets the kernel's own value rather than having to guess it. A declaration that disagreed with
- * the callee - the defect that cost exp-184 a run - is not possible for a one-register pointer,
- * but it is worth saying that this probe *uses* the argument rather than only receiving it, which
- * is what turns the placement into a measurement.
- */
-void processor_data_init(void *processor);
-
-extern int master_cpu;
-extern void *master_processor;
 extern uint8_t pset0[];
+extern uint8_t BootProcessor[];
 extern uint32_t processor_count;
+extern void *master_processor;
 
-#define PROC_STATE_OFF           8u    /* `str r9, [r4, #8]`, r9 = PROCESSOR_OFF_LINE = 0 */
-#define PROC_IS_RECOMMENDED_OFF 16u    /* `str r0, [r4, #16]`, a bit test on pset0 */
-#define PROC_SET_OFF            32u    /* `str r6, [r4, #32]`, r6 = &pset0 */
-#define PROC_CPU_ID_OFF         56u    /* `str fp, [r4, #56]`, fp = the cpu_id argument */
-#define PROC_QUANTUM_END_OFF   128u    /* after `add r0, r4, #64` for timer_call_setup */
-#define PROC_DEADLINE_OFF      144u
-#define PROC_PRIMARY_OFF      1236u    /* `str r4, [r4, #1236]` - the self-pointer */
-#define PSET_CPU_SET_COUNT_OFF  52u    /* `ldr r0, [r6, #52]` ... `str r1, [r6, #52]` after the call */
+#define PROC_STATE_OFF          8u    /* exp-190: `str r9, [r4, #8]`, PROCESSOR_OFF_LINE */
+#define PROC_SET_OFF           32u    /* exp-190: `str r6, [r4, #32]`, &pset0 */
+#define PSET_CPU_SET_COUNT_OFF 52u    /* exp-190: the `ldr`/`str` pair inside the locked region */
+#define PSET_CPU_BITMASK_OFF   56u    /* `add r0, r2, #56`, the `bit_set` target */
 
 static uint32_t rd32(const volatile uint8_t *base, uint32_t off)
 {
     return *(const volatile uint32_t *)(const void *)(base + off);
 }
 
-void processor_data_init(void *processor)
+int ml_set_interrupts_enabled(int enable)
 {
-    const volatile uint8_t *p = (const volatile uint8_t *)processor;
+    const volatile uint8_t *p = (const volatile uint8_t *)master_processor;
+    uint32_t cpsr;
 
-    entry_kv("xnu_entry_proc_ptr",       (uint32_t)(uintptr_t)processor);
-    entry_kv("xnu_entry_master_processor", (uint32_t)(uintptr_t)master_processor);
-    entry_kv("xnu_entry_pset0_addr",     (uint32_t)(uintptr_t)pset0);
-    entry_kv("xnu_entry_master_cpu",     (uint32_t)master_cpu);
-    entry_kv("xnu_entry_proc_cpu_id",    rd32(p, PROC_CPU_ID_OFF));
-    entry_kv("xnu_entry_proc_state",     rd32(p, PROC_STATE_OFF));
-    entry_kv("xnu_entry_proc_set",       rd32(p, PROC_SET_OFF));
-    entry_kv("xnu_entry_proc_primary",   rd32(p, PROC_PRIMARY_OFF));
-    entry_kv("xnu_entry_proc_is_recommended", rd32(p, PROC_IS_RECOMMENDED_OFF));
-    entry_kv("xnu_entry_proc_quantum_end_lo", rd32(p, PROC_QUANTUM_END_OFF));
-    entry_kv("xnu_entry_proc_quantum_end_hi", rd32(p, PROC_QUANTUM_END_OFF + 4u));
-    entry_kv("xnu_entry_proc_deadline_lo",    rd32(p, PROC_DEADLINE_OFF));
-    entry_kv("xnu_entry_pset0_cpu_set_count", rd32(pset0, PSET_CPU_SET_COUNT_OFF));
-    entry_kv("xnu_entry_processor_count",     processor_count);
+    __asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr));
 
-    entry_stub_hit("processor_data_init");
+    entry_kv("xnu_entry_mlsie_enable",        (uint32_t)enable);
+    entry_kv("xnu_entry_mlsie_cpsr",          cpsr);
+    entry_kv("xnu_entry_mlsie_master_ptr",    (uint32_t)(uintptr_t)master_processor);
+    entry_kv("xnu_entry_mlsie_proc_state",    rd32(p, PROC_STATE_OFF));
+    entry_kv("xnu_entry_mlsie_proc_set",      rd32(p, PROC_SET_OFF));
+    entry_kv("xnu_entry_mlsie_pset0_bitmask", rd32(pset0, PSET_CPU_BITMASK_OFF));
+    entry_kv("xnu_entry_mlsie_pset0_count",   rd32(pset0, PSET_CPU_SET_COUNT_OFF));
+    entry_kv("xnu_entry_mlsie_proc_count",    processor_count);
+
+    entry_stub_hit("ml_set_interrupts_enabled");
+    return 0;   /* not reached */
 }
+
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */
 
 /*

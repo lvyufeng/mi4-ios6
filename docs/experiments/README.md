@@ -204,6 +204,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-188](experiment-188-the-timer-table-converted-into-ticks-and-the-frontier-is-do-cpuid.md) | The Timer Table Converted into Ticks, and the Frontier Is `do_cpuid` |
 | stage90 | [experiment-189](experiment-189-the-cpu-identified-itself-and-the-frontier-is-processor-bootstrap.md) | The CPU Identified Itself, and the Frontier Is `processor_bootstrap` |
 | stage90 | [experiment-190](experiment-190-the-schedulers-own-processor-checked-pointer-by-pointer-and-the-frontier-is-processor-data-init.md) | The Scheduler's Own Processor, Checked Pointer by Pointer, and the Frontier Is `processor_data_init` |
+| stage90 | [experiment-191](experiment-191-processor-data-init-ran-the-interrupt-state-and-the-frontier-is-ml-set-interrupts-enabled.md) | `processor_data_init` Ran, the Interrupt State, and the Frontier Is `ml_set_interrupts_enabled` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
