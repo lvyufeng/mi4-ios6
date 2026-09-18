@@ -661,12 +661,15 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `pe_arm_init_interrupts` is entered by XNU itself**.
     OSFMK_ARM_CACHES_OBJ=${STAGE90_ENTRY_CACHES_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_caches.o}
     # `osfmk/prng/random.c`, named by experiment-210's `stub_hit=early_random`. 2488 bytes of text,
-    # 488 of data, 20 of `.bss`, 26 references, 17 definitions - and two of the definitions are
-    # *storage stand-ins being retired*: `EntropyData` and `erandom`. Both are the
-    # right-size-wrong-value kind this project has now met five times
+    # 488 of data, 20 of `.bss`, 26 references.
+    #
+    # One of its definitions retires a *storage stand-in*, and it is the right-size-wrong-value kind
     # ([[mi4-stand-in-size-is-not-value]]): `entropy_data_t EntropyData = { .index_ptr =
-    # EntropyData.buffer }` is an initialized struct and `erandom.seedset` is the flag `early_random`
-    # branches on, so a zero-filled array is not a neutral substitute for either.
+    # EntropyData.buffer }` is an initialized struct, so a zero-filled array of the same 68 bytes is
+    # not a neutral substitute. `erandom` - the other half of the same `static struct` - is *not* a
+    # stand-in of any kind: `grep -c '^erandom$'` against the pre-step undefined list is 0, because
+    # nothing in this image referenced it while `early_random` was a stub. Both are the object's own
+    # symbols once the object is linked, at `EntropyData 0x0025e4f8` and `erandom 0x0025e53c`.
     #
     # **The prediction is `ccdrbg_factory_nisthmac`, and it is a *clean* stub hit.**
     # `early_random`'s disassembly, read rather than the source's statement order, is:

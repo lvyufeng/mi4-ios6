@@ -287,8 +287,10 @@ exist as a stub today and will arrive as a new one in exactly the step that make
 `ccsha1_eay_di` is, as of this experiment, a **storage stub** - one of the four obligations the step
 added. `init` reaches the digest through it: `state->custom->di`, then `di->output_size`, then
 `di->state_size` and `di->block_size` for `cchmac_ctx_decl`. A zeroed stand-in for a `ccdigest_info`
-reads 0 for all of those, which is the *right-size-and-wrong-value* class this project has now met
-six times, and it is worse than an ordinary missing symbol because nothing reports it: the pointer is
+reads 0 for all of those, which is the *right-size-and-wrong-value* class this project first named
+in experiment 197 (`kernel_pmap`, correctly sized at four bytes and zero) and met again in the step
+before this one (`EntropyData`). It is worse than an ordinary missing symbol because nothing reports
+it: the pointer is
 non-NULL, the fields read as zero, and the run's disassembly above shows the failure path being
 *skipped* because `di->output_size` is 0. What stops the boot is the next missing symbol, not this
 one. So linking `ccdrbg_nisthmac.o` is not by itself enough for a working DRBG, and the step that
