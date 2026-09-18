@@ -15,8 +15,20 @@ The files here are that implementation, ported rather than written:
 The one file this project already ships for this seam — `stages/stage90/shims_arm/os/firehose_buffer_private.h`,
 added by experiment 162 — is what lets `bsd/kern/subr_log.c` compile today.
 
-Status: **it does not compile yet**, and the blocker is a header from a *newer XNU* than the one this
-project builds. See `docs/experiments/experiment-256-...` for the measurement. Nothing in this
-directory is linked into any image.
+## The port, and its status
+
+Experiment 256 measured the blocker: the source includes `<os/atomic_private.h>`, which is not in this
+tree, not in libplatform, and not in `libdispatch-913` — it is in `xnu` at `main`. `portinc/` is that
+newer tree's `libkern/os/` atomics surface plus the newer firehose headers, placed where `<os/...>`
+resolves ahead of the tree's copies. `tools/build_xnu_arm_kernel.sh` compiles this directory in its
+`FIREHOSE_SOURCES` block, with the same flags as everything else it builds.
+
+Status: **it compiles and it runs.** Experiment 257 linked the object (4096 bytes of text, 12
+references) into the entry image — `__firehose_buffer_create` resolved, six kernel-side names added —
+and the device executed it: the stop moved from `__firehose_buffer_create` to `__firehose_allocate`,
+*i.e.* from a missing symbol to a call *inside* this implementation. See
+`docs/experiments/experiment-257-...` for the log.
+
+`portinc/` is port material, unmodified, from `apple-oss-distributions/xnu` at `main`.
 
 Licence: the sources here carry Apple's Apache-2.0 header; they are redistributed unmodified.

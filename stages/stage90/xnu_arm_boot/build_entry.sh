@@ -2425,6 +2425,43 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # headroom **1103672** bytes, payload text 1294394. `persistent_write_attempted=0x00000000` in all
     # 25 contracts, `failure_mask=0x00000000` in all 87.
     OSFMK_KERN_LEDGER_OBJ=${STAGE90_ENTRY_OSFMK_KERN_LEDGER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_ledger.o}
+    # 257: the firehose, **ported rather than linked**. 254 and 255 stopped at `__firehose_buffer_create`
+    # and 256 measured that no object in the tree defines it (`libkern/firehose/Makefile` has
+    # `KERNELFILES =` empty). The implementation is Apple's own, from
+    # `apple-oss-distributions/libdispatch` (`src/firehose/firehose_buffer.c`, Apache-2.0, unmodified),
+    # compiled for armv7 freestanding by `build_xnu_arm_kernel.sh`'s `FIREHOSE_SOURCES` block, with the
+    # newer tree's `os/` and firehose headers in `stages/stage90/firehose/portinc/` shadowing the tree's.
+    # **First time this project builds a component Apple ships outside the tree.**
+    #
+    # The object: 4096 bytes of text, 12 references. Resolved 2, added 6:
+    #   resolved __firehose_buffer_create  __firehose_merge_updates
+    #   added    __firehose_allocate  __firehose_buffer_kernel_chunk_count
+    #            __firehose_buffer_push_to_logd  __firehose_critical_region_enter
+    #            __firehose_critical_region_leave  __firehose_num_kernel_io_pages
+    # 595 -> 599 undefined, 514 -> 518 function stubs, text 697217 (+4352), image/layout/payload all
+    # unchanged (the +4352 fitted in the alignment padding).
+    #
+    # `__firehose_buffer_create` calls exactly one thing on the first-call path: `firehose_buffer_create`
+    # (in the same object), whose only call is `__firehose_allocate`. **Prediction: `stub_hit=__firehose_allocate`,
+    # caller `firehose_buffer_create+0x28`.** Device: **`stub_hit=__firehose_allocate`,
+    # `xnu_entry_stub_caller=0x8009411c`** = `firehose_buffer_create+0x28`, `caller - 4` =
+    # `80094118: bl 80095a30 <__firehose_allocate>`. `kv_written == kv_in_dram == 0x40`. **The ported code
+    # ran**: the stop moved *inside Apple's firehose implementation*, not to the next missing XNU symbol.
+    #
+    # Note one of the six: `__firehose_buffer_kernel_chunk_count` is **read as data** (`ldrb r1, [symbol]`),
+    # not called, so a stub there is *silent* - it would hand `oslog_init` a garbage size instead of
+    # stopping. The `mi4-stand-in-size-is-not-value` shape in a new place.
+    #
+    # Incident worth knowing: `build_xnu_arm_kernel.sh --limit 1` **truncates the object directory at the
+    # start** and then builds one file, so it emptied `out/xnu_kernel_obj` (695 objects -> 0) and cost a
+    # full rebuild (612/615 C, 83/83 C++ reproduce). `--limit` is not a dry run.
+    #
+    # Next: the six added names are the kernel's side of the interface; the four that are functions plus
+    # `__firehose_num_kernel_io_pages` are what the ported code calls next, and in a newer XNU they live in
+    # `osfmk/kern/firehose.c`, which 4570 does not have - the same port problem one layer down, same
+    # remedy (a second entry in `FIREHOSE_SOURCES`). `libkern/os/log.c:580` is in the tree and defines
+    # `__firehose_allocate`, so that one may come from the tarball.
+    FIREHOSE_OBJ=${STAGE90_ENTRY_FIREHOSE_OBJ:-$REPO_ROOT/out/xnu_firehose_obj/firehose_buffer.o}
     OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
@@ -2512,6 +2549,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_VM_DEVICE_VM_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_CS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_LEDGER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$FIREHOSE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2521,7 +2559,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

@@ -674,6 +674,36 @@ for _src in "${RUNTIME_SOURCES[@]}"; do
 done
 [[ $rt_fail -eq 0 ]] || exit 4
 
+# The firehose, which is not in the manifest and is not in the tarball at all. `osfmk/kern/firehose.c`
+# does not exist: Apple ships the implementation as a closed kernel library (`libkern/firehose/` in the
+# tarball has `KERNELFILES =` empty), and `bsd/kern/subr_log.c:874` calls `__firehose_buffer_create`
+# anyway - so experiment 255 stopped there. The source is libdispatch's `src/firehose/firehose_buffer.c`,
+# Apache-2.0, unmodified; see `stages/stage90/firehose/README.md` for its provenance. It is compiled
+# here, with the loop's own flags, for the same reason `RUNTIME_SOURCES` is: a second flag list is this
+# project's most repeated defect, and this file reads the same kernel headers the loop's files do.
+# `portinc/` is not a shim - it is the newer tree's `libkern/os/` atomics surface, which this 10.13-era
+# tree does not ship, placed where `<os/...>` resolves (experiment 256).
+FIREHOSE_SOURCES=("$REPO_ROOT/stages/stage90/firehose/firehose_buffer.c")
+FH_OUT=${XNU_FIREHOSE_OBJ_OUT:-$REPO_ROOT/out/xnu_firehose_obj}
+FIREHOSE_INCLUDES=(-I"$REPO_ROOT/stages/stage90/firehose/portinc" -I"$REPO_ROOT/stages/stage90/firehose" -I"$XNU/libkern/firehose")
+mkdir -p "$FH_OUT"
+fh_fail=0
+for _src in "${FIREHOSE_SOURCES[@]}"; do
+    _o="$FH_OUT/$(basename "${_src%.c}").o"
+    # The port's include roots go FIRST, ahead of the tree's: `portinc/` carries a newer tree's
+    # `os/base.h` (which has `OS_OPTIONS`) and newer `firehose_types_private.h`, and the 4570 tree's
+    # `libkern/os/base.h` would shadow them from further down the list.
+    if "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" "${FIREHOSE_INCLUDES[@]}" \
+           "${RT_INCLUDES[@]}" \
+           -c "$_src" -o "$_o" 2>"$FH_OUT/$(basename "${_src%.c}").log"; then
+        rm -f "$FH_OUT/$(basename "${_src%.c}").log"
+    else
+        echo "firehose: $(basename "$_src") FAILED - $FH_OUT/$(basename "${_src%.c}").log" >&2
+        fh_fail=$((fh_fail + 1))
+    fi
+done
+[[ $fh_fail -eq 0 ]] || exit 5
+
 # The key check the loop's comment promises. Two sources, one object path, whichever compiled last
 # wins - and it would show up as nothing at all: a build that reports success and an object that
 # belongs to a different file. It is the same defect as `-D_CLOCK_T` and the shadowed headers
