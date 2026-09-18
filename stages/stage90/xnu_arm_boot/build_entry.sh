@@ -1463,6 +1463,144 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # linked>`**, taken before the device is touched, with the plain walk from `kernel_bootstrap`
     # recorded beside it as the lower bound it is.
     OSFMK_VM_VM_PAGEOUT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_PAGEOUT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_pageout.o}
+    # **Experiment 231's prediction was `zone_bootstrap` and it held** - the first prediction to hold
+    # since experiment 227, after four consecutive misses, and the first in this sequence that was
+    # not made by walking the call graph at all. It was made by reading two branches out of the
+    # source, because the four misses before it had established that the walk cannot see past them:
+    #
+    #   vm_pressure_response's first instruction test is `if (vm_pressure_events_enabled == FALSE)
+    #   return;`, and `vm_pressure_events_enabled` is FALSE at its definition (vm_pageout.c:4089) and
+    #   set TRUE only at line 4572, so the whole of `vm_pressure_response` is skipped, including the
+    #   `thread_wakeup_prim` stub inside it;
+    #
+    #   `memorystatus_pages_update` next tests `memorystatus_available_pages <=
+    #   memorystatus_available_pages_pressure`, and that global is initialised to 0
+    #   (kern_memorystatus.c:658) against a few hundred thousand available pages, so that branch is
+    #   not taken either and the `thread_wakeup_prim` stub inside *it* is skipped.
+    #
+    # Everything between there and `zone_bootstrap` is real, and `zone_bootstrap` is `vm_mem_bootstrap`'s
+    # next call at +0x2c. Four predictions had aimed at this symbol; this is the one that arrived.
+    # The build measured 22 resolved, 35 added, 653 -> 666 undefined.
+    #
+    # `osfmk/kern/zalloc.c` -> **16672 bytes of text, 8 of data, 56280 of `.bss`, 1386 of
+    # `.rodata.str1.1`, 128 definitions, 72 references**. The `.bss` is the largest single
+    # contribution this link has taken - the zone table - and it is zeroed by the payload rather than
+    # stored, so it costs image bytes and not file bytes.
+    OSFMK_KERN_ZALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_ZALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_zalloc.o}
+    # **Experiment 232's prediction was `thread_call_setup` and it held** - two in a row, and the
+    # first step in which the plain walk from `kernel_bootstrap` and the frontier-rooted walk gave the
+    # *same* answer. They converged because the straight-line path is now real: `vm_mem_bootstrap`
+    # calls `kernel_debug_string_early`, `vm_page_bootstrap`, `kernel_debug_string_early` and
+    # `zone_bootstrap`, and all four are real code rather than 12-byte stubs. The lower bound and the
+    # rooted answer are the same number when there is nothing left to hide behind.
+    #
+    # The build measured 23 resolved, 10 added and **666 -> 653 undefined** - the count went down, by
+    # 13, which is more than it has moved in any direction since the entry image began growing. Eight
+    # of the 23 were storage stubs, including `zone_array` at 0xd800, so 55296 bytes of zero stopped
+    # being a stub and started being the zone table.
+    #
+    # `osfmk/kern/thread_call.c` -> **12600 bytes of text, 2432 of data, 61769 of `.bss`, 1451 of
+    # `.rodata.str1.1`, 77 definitions, 47 references**. The second-largest `.bss` contribution after
+    # `zalloc`'s, and like it, zeroed by the payload rather than stored.
+    #
+    # **The prediction is taken from the tool after this object is linked** - rooted at
+    # `thread_call_setup` and from `kernel_bootstrap` both, as experiment 232 was, and recorded here
+    # before the device is touched.
+    OSFMK_KERN_THREAD_CALL_OBJ=${STAGE90_ENTRY_OSFMK_KERN_THREAD_CALL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_thread_call.o}
+    # **Experiment 233's prediction was `vm_object_bootstrap` and it held** - three in a row. It is
+    # also the first stop since experiment 227 that is not inside one of four adjacent functions
+    # (`vm_page_bootstrap`, `pmap_startup`, `memorystatus_pages_update`, `zone_bootstrap`): this one
+    # is in `vm_mem_bootstrap` itself, the caller, which is the frame that has been quoted as "the
+    # next corner" in three consecutive documents. Seven of `vm_mem_bootstrap`'s calls now execute in
+    # real code. The build measured 6 resolved, 5 added, 653 -> 652 - the smallest step by undefined
+    # count since experiment 222, and 61769 bytes of `.bss` arrived with it, taking the headroom under
+    # `topOfKernelData` from 1588216 at experiment 224 to 1255224.
+    #
+    # `osfmk/vm/vm_object.c` -> **38320 bytes of text, 48 of data (24 in `.data` and 24 in a
+    # `__DATA, __data` section), 1568 of `.bss`, 972 of `.rodata.str1.1`, 152 definitions, 149
+    # references**.
+    #
+    # **The prediction written here before the build was `kmem_init`, taken from `vm_mem_bootstrap`'s
+    # call list - `zone_bootstrap` real, `vm_object_bootstrap` the stop, `vm_map_init` real,
+    # `kmem_init` the next stub. The rooted walk says otherwise and the rooted walk wins:**
+    #
+    #   walk from vm_object_bootstrap:
+    #     vm_object_bootstrap
+    #       zinit
+    #         kmem_alloc_kobject   STUB
+    #
+    # `vm_object_bootstrap` calls `zinit` on its second statement, and `zinit`'s allocation is
+    # `kmem_alloc_kobject`, so the stop is one level in and one level further down - the
+    # experiment-230 mistake, caught this time because the check was written down before the build
+    # rather than after. **The prediction is `stub_hit=kmem_alloc_kobject`**, and the plain walk from
+    # `kernel_bootstrap` agrees with it, which the plain walk could not do for either of the last two
+    # steps.
+    OSFMK_VM_VM_OBJECT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_OBJECT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_object.o}
+    # **Experiment 234's prediction was `kmem_alloc_kobject` and it was wrong.** The device named
+    # `snprintf`. Both are calls in `zinit`, 228 bytes apart, and what separates them is a runtime
+    # flag no walk can read:
+    #
+    #   if (kmem_alloc_ready) {                                            zalloc.c:2229
+    #           if (zone_names_start == 0 || (... + len) > PAGE_SIZE) {
+    #                   printf("zalloc: allocating memory for zone names buffer\n");
+    #                   kmem_alloc_kobject(kernel_map, &zone_names_start, ...);  zinit+0x5e4
+    #           }
+    #           ...
+    #   } else { z->zone_name = name; }
+    #   ...
+    #   if (num_zones_logged < max_num_zones_to_log) { ... snprintf(...); }      zinit+0x6c8
+    #
+    # `kmem_alloc_ready` is 0 when `zinit` runs, so the `else` branch is taken, the block - the
+    # allocation included - is skipped, and the run reaches `snprintf` *after* it. Not "probably 0":
+    # exactly three sites in the image build the address `0x002b6570`, two of them in `zinit` and
+    # both loads, and the one store in the whole image is later in the boot than the call -
+    #
+    #   vm_mem_bootstrap+0x02c  bl zone_bootstrap
+    #   vm_mem_bootstrap+0x03c  bl vm_object_bootstrap    <- zinit runs here, flag still 0
+    #   vm_mem_bootstrap+0x074  bl kmem_init              <- a stub; XNU sets the flag in here
+    #   vm_mem_bootstrap+0x148  str r1, [0x002b6570]      <- kmem_alloc_ready = 1, after both
+    #
+    # **The tool was also wrong about the control flow, and that part was a bug, now fixed.**
+    # `kmem_alloc_kobject` sits inside the span of `beq zinit+0x63c`, the guard on
+    # `kmem_alloc_ready`, so the span rule should have called it guarded - and calling it guarded is
+    # what would have made the walk answer `snprintf`. It did not, because `by_branch` was propagated
+    # along the whole straight-line run from one unconditional `b` to the next (`b zinit+0x254` to
+    # `b zinit+0x638`, 996 bytes), and `_is_guarded` consults `by_branch` before spans. The
+    # propagation now stops at the first conditional branch crossed; experiment 228's loop body is
+    # unaffected because its head-to-back-edge run is straight. Two earlier drafts of this comment
+    # blamed other mechanisms and both were wrong - measured, the rule change moves 778 call sites in
+    # the current image from unguarded to guarded and none the other way, and it changes no answer on
+    # any of the three archived images that experiments 228 to 231 were predicted from.
+    #
+    # `osfmk/vm/vm_object.c` -> **38320 bytes of text, 48 of data, 1568 of `.bss`, 972 of
+    # `.rodata.str1.1`, 152 definitions, 149 references**. The build measured 39 resolved, 26 added
+    # and **652 -> 639 undefined** - the second decrease in the sequence, 33 of the 39 being function
+    # stubs against 6 storage.
+    #
+    # **The prediction is no longer `kmem_alloc_kobject`** - the last run's answer was `snprintf`, and
+    # that is what the walk names now.
+    #
+    # `bsd/kern/subr_prf.c` -> **1996 bytes of text, 4 of data, 68 of `.rodata.str1.1`, 22
+    # definitions, 20 references** - the smallest object since `libkern_gen_OSAtomicOperations.o`,
+    # and it defines `snprintf`, `vsnprintf`, `kvprintf`, `tablefull`, `v_putc` - the console output
+    # pointer `putchar` calls - and the whole `tprintf` family.
+    #
+    # **The run did not stop on a stub at all.** It ended with `exception: undefined instruction`
+    # and `kv_written=0x00000000` - the first result of that kind in this sequence: no stub was
+    # reached, and real code was executing when the CPU refused an instruction. Experiment 236
+    # answered where, by making the undefined-instruction vector report its own address, and the
+    # answer is `xnu_entry_undef_pc=0x0022d1a8` - the `udf #65006` inside `DebuggerTrapWithState`,
+    # reached only through `panic_trap_to_debugger`, which is called only by `panic`,
+    # `panic_with_options` and `panic_context`. **XNU panicked.**
+    #
+    # The build measured 1 resolved, 7 added and **639 -> 645 undefined**: `snprintf` resolved, and
+    # the printf machinery's own tty layer arrived with it - `constty` as the one storage stub, plus
+    # `proc_session`, `session_rele`, `tputchar`, `tty_lock`, `tty_unlock` and `ttycheckoutq`.
+    #
+    # So the frontier is not an object any more. There is nothing left to link until the panic is
+    # named, and the next step is an instrument rather than a step: read what XNU said before it
+    # trapped, from the panic string pointer the trap is handed.
+    BSD_KERN_SUBR_PRF_OBJ=${STAGE90_ENTRY_BSD_KERN_SUBR_PRF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_subr_prf.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -1534,12 +1672,17 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$LIBKERN_GEN_OSATOMICOPERATIONS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_MEMORYSTATUS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_PAGEOUT_OBJ"    "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_ZALLOC_OBJ"      "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_THREAD_CALL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_VM_VM_OBJECT_OBJ"     "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_SUBR_PRF_OBJ"      "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
                 "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "$OSFMK_CCHMAC_OBJ" "$OSFMK_CC_CLEAR_OBJ" "$OSFMK_MEMSET_S_OBJ" "$OSFMK_CC_CMP_SAFE_OBJ" "$OSFMK_BSD_DEV_UNIX_STARTUP_OBJ" "$BSD_KERN_BSD_INIT_OBJ" "$BSD_KERN_KDEBUG_OBJ" "$OSFMK_VM_VM_INIT_OBJ" "$OSFMK_VM_VM_COMPRESSOR_OBJ" "$OSFMK_VM_VM_MAP_OBJ"
     "$LIBKERN_GEN_OSATOMICOPERATIONS_OBJ" "$BSD_KERN_KERN_MEMORYSTATUS_OBJ"
-    "$OSFMK_VM_VM_PAGEOUT_OBJ")
+    "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
+    "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

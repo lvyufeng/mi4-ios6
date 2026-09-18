@@ -41,6 +41,20 @@ What it does and does not know:
     that case - the answer was `zone_bootstrap`, the device printed
     `OSCompareAndSwap16`, and the guard that was taken is
     `pmap_steal_memory`'s on `pmap_enter`, which appears in the second list.
+  - It can also stop **later** than this says, and that is experiment 234: the
+    walk named `zinit`'s `kmem_alloc_kobject`, and the device printed `snprintf`,
+    the *next* stub in the same function, because
+    `if (kmem_alloc_ready) { ... kmem_alloc_kobject ... }` was false at the time.
+    `kmem_alloc_ready` is set by `vm_mem_bootstrap` at `+0x148`, which is *after*
+    its `vm_object_bootstrap` call at `+0x3c`, so when `zinit` runs the flag is
+    still 0 and the whole block is skipped. No walk can evaluate that flag; what
+    a walk can do is call the call guarded, which is what the guard rule now
+    does, and this file was wrong about it until then - `by_branch` was being
+    propagated along the entire straight-line segment that begins at an
+    unconditional `b`, so the `beq` guarding the allocation was invisible. It now
+    stops propagating at the first conditional branch crossed, which leaves
+    experiment 228's loop body alone (its head-to-back-edge run is straight) and
+    makes `--root vm_object_bootstrap` say `snprintf` on the exp-234 image.
   - Each entry in the second list is annotated with `guards_to_stub(callee)`:
     **None** means a taken branch there reaches no symbol this image lacks, so
     it cannot be the stop, and a number means the stop is that many conditional
@@ -54,12 +68,13 @@ What it does and does not know:
 
 **How to predict with it.** The answer that matters is usually not the walk
 from `kernel_bootstrap` - that walk enters every large `-O2` function on the
-path and then cannot leave its entry block. Three experiments running, the stop
+path and then cannot leave its entry block. Four experiments running, the stop
 has been *inside* a function the previous step made real:
 
     exp-229  linked OSAtomicOperations, stopped in memorystatus_pages_update
     exp-230  linked kern_memorystatus,  stopped in vm_pressure_response
     exp-228  linked vm_map,             stopped in OSCompareAndSwap16
+    exp-234  linked vm_object,          stopped in snprintf
 
 and the last two are named correctly by the simplest possible question, which is
 not a walk at all:
@@ -216,6 +231,16 @@ class Image:
         where the device answered `OSCompareAndSwap16`, three calls further on.
         An address reached by an actual branch is not conditional, whatever
         span it happens to sit in, so the traversal now carries that fact.
+
+        That fix was then wrong in the other direction, and experiment 234 is
+        how: the flag was propagated along the *whole* run from an unconditional
+        `b` to the next one, and a long run crosses conditional branches. In
+        `zinit` the run from `b zinit+0x254` to `b zinit+0x638` covers the
+        `beq zinit+0x63c` that guards `kmem_alloc_kobject`, so the guard was
+        invisible, the walk named that call, and the device printed `snprintf`
+        instead. The propagation now stops at the first conditional branch
+        crossed - after one, the span rule is the right question again. A loop
+        body is unaffected because its head-to-back-edge run is straight.
         """
         insns = self.functions[fn]
         if not insns:
@@ -245,6 +270,17 @@ class Image:
                     break
                 if (mnemonic.startswith("pop") or mnemonic.startswith("ldm")) and "pc" in operands:
                     break
+                if (mnemonic.startswith("b")
+                        and mnemonic not in ("b", "bl", "bx", "blx", "bic", "bfc", "bfi", "bkpt")):
+                    # A conditional branch. What follows it is reached by falling
+                    # past it, which is the span rule's case - so the branch that
+                    # got us here stops justifying the addresses after this one.
+                    # zinit's `kmem_alloc_kobject` is why this line exists: the
+                    # straight-line segment from `b zinit+0x254` to `b zinit+0x638`
+                    # was all marked `by_branch`, which made the `beq zinit+0x63c`
+                    # guarding the allocation invisible, and the walk named a call
+                    # the device skipped.
+                    branched = False
                 if i + 1 >= len(insns):
                     break
                 addr = insns[i + 1][0]

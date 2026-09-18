@@ -730,7 +730,37 @@ void pmap_bootstrap(uint32_t next_paddr)
  * reached. The distance between those two diagnoses is the whole reason these four lines exist.
  */
 void fleh_reset(void) { entry_epilogue("exception: reset"); }
-void fleh_undef(void) { entry_epilogue("exception: undefined instruction"); }
+/*
+ * The undefined-instruction vector reports where it fired, and it is the one vector that had no
+ * address at all until experiment 236. The two abort handlers read IFAR/DFAR, which are the fault
+ * *addresses*; there is no equivalent register for an undefined instruction, but there does not
+ * need to be one: **the vector trampoline branches here rather than calling**, so r14 still holds
+ * `LR_undef`, the preferred return address of the undefined instruction, and nothing has
+ * overwritten it by the time this function's first statement runs.
+ *
+ * ARM's preferred return address for an undefined instruction is the address of the instruction
+ * itself plus 4, on the same rule as a prefetch abort - so the faulting instruction is `LR_undef - 4`,
+ * and the entry is reported in both forms rather than one, because the +4 is a claim about the
+ * architecture and the raw register is not.
+ *
+ * Why it matters: experiment 235's run ended with `exception: undefined instruction` and no stub
+ * hit, and the entry image contains exactly two `udf` instructions - `DebuggerTrapWithState` and
+ * `DebuggerWithContext`, the deliberate debugger traps - so "undefined instruction" here most
+ * likely means "XNU called Debugger()", and the two possibilities are 0x22d168 and 0x22d3d8 until
+ * this reports which. A trap named is a bug found; a trap unnamed is a run spent guessing.
+ */
+void fleh_undef(void)
+{
+    uint32_t lr_undef, spsr;
+
+    __asm__ volatile ("mov %0, lr" : "=r"(lr_undef));
+    __asm__ volatile ("mrs %0, spsr" : "=r"(spsr));
+
+    entry_kv("xnu_entry_undef_lr", lr_undef);
+    entry_kv("xnu_entry_undef_pc", lr_undef - 4);
+    entry_kv("xnu_entry_undef_spsr", spsr);
+    entry_epilogue("exception: undefined instruction");
+}
 void fleh_swi(void) { entry_epilogue("exception: svc/swi"); }
 
 void fleh_prefabt(void)

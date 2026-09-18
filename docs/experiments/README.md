@@ -244,6 +244,12 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-228](experiment-228-the-prediction-was-wrong-and-the-guard-rule-could-not-tell-two-loops-apart.md) | the Prediction Was Wrong — `OSCompareAndSwap16` for `zone_bootstrap` — and the Guard Rule That Could Not Tell Two Loops Apart |
 | stage90 | [experiment-229](experiment-229-ten-stubs-for-nothing-and-the-frontier-moved-two-levels-in.md) | Ten Stubs for Nothing, Zero Added, and the Tail Term Identified to the Byte |
 | stage90 | [experiment-230](experiment-230-the-stop-was-inside-the-object-just-linked.md) | the Stop Was Inside the Object Just Linked — and `--root <frontier>` Names It |
+| stage90 | [experiment-231](experiment-231-the-prediction-holds-and-zone-bootstrap-at-last.md) | the Prediction Holds — `zone_bootstrap` at Last, on Two Source Branches Instead of a Walk |
+| stage90 | [experiment-232](experiment-232-two-in-a-row-and-the-walk-and-the-root-agreeing.md) | Two in a Row, `thread_call_setup`, and the Walk and the Root Agreeing |
+| stage90 | [experiment-233](experiment-233-three-in-a-row-and-vm-object-bootstrap.md) | Three in a Row, `vm_object_bootstrap`, and What the Walk Now Reaches |
+| stage90 | [experiment-234](experiment-234-snprintf-the-runtime-flag-no-walk-can-read.md) | `snprintf` for `kmem_alloc_kobject` — a Runtime Flag No Walk Can Read, and the Guard Rule Wrong in the Other Direction |
+| stage90 | [experiment-235](experiment-235-no-stub-at-all-an-undefined-instruction-and-the-two-udfs.md) | No Stub at All — an Undefined Instruction, and the Image's Exactly Two `udf`s |
+| stage90 | [experiment-236](experiment-236-the-trap-named-xnu-panicked-and-the-message-is-in-dram.md) | the Trap Named — `xnu_entry_undef_pc=0x0022d1a8` Is `DebuggerTrapWithState`, so **XNU Panicked** |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
