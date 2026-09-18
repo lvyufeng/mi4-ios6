@@ -255,6 +255,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-239](experiment-239-zero-zone-map-bounds-and-an-element-that-cannot-be-a-kernel-address.md) | Zero Zone-Map Bounds — an Element That Cannot Be a Kernel Address, and the Frontier Ends at the Image's Base |
 | stage90 | [experiment-240](experiment-240-the-frame-db-proceed-on-sync-failure-and-the-zone-named-maps.md) | the Frame and the Two Arguments — `db_proceed_on_sync_failure` in `r5`, the Zone Named `"maps"` |
 | stage90 | [experiment-241](experiment-241-the-base-moves-to-80000000-and-the-panic-becomes-a-permission-fault.md) | the Base Moves to 0x80000000 — the `zfree` Panic Is Gone, and `DFSR=0x80f` Is a Write to a Read-Only Page |
+| stage90 | [experiment-242](experiment-242-the-faulting-instruction-and-a-page-table-page-made-read-only-by-the-same-routine.md) | the Faulting Instruction — a Page-Table Page `pmap_init_pte_static_page` Had Already Made Read-Only, Reached Because This Mach-O Has No `__PRELINK_TEXT` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

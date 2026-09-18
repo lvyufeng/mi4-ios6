@@ -1747,6 +1747,73 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # base, and the payload's window loop, its boot_args and start.s are all macros or boot_args
     # reads. Cost: 32 bytes of text (592753 -> 592785), 0 bytes of image, 645 undefined, stub set
     # unchanged.
+    #
+    # **242's prediction, written before the run.** `fleh_dataabt` and `fleh_prefabt` now report
+    # `lr_abt` and `pc_abt` (LR minus 8 for a data abort, minus 4 for a prefetch abort - the
+    # architecture's own definitions), the word at `pc_abt`, and the mapping state. The four
+    # boundary globals have values this project can predict and check:
+    #
+    #   cpu_ttep   0x80204000   arm_vm_init.c:373, `boot_ttep + ARM_PGBYTES*4`, boot_ttep being
+    #                           args->topOfKernelData = 0x80200000
+    #   avail_start ~0x8020C000  arm_vm_init.c:399, `cpu_ttep + ARM_PGBYTES*6`, plus two pages
+    #                           from the pre-initialization loop (off_end = 5 MB for
+    #                           mem_segments = 1, step ARM_TT_L1_PT_SIZE = 4 MB)
+    #   gPhysBase   0x80000000   the boot_args, and now also the link address
+    #   mem_size    0x00800000   args->memSize, left alone against xmaxmem
+    #
+    # and `TTBR0` is the one that separates the two candidate causes: `set_mmu_ttb(cpu_ttep)` would
+    # leave 0x80204xxx there, so a `TTBR0` of 0x80204xxx means the fault is inside the boot tables'
+    # regime - `_start`'s, then whatever `pmap_bootstrap` and `arm_vm_prot_init` did to them - while
+    # anything else means the pmap has installed tables of its own and the fault is later still.
+    #
+    # **242 measured it: `ttbr0 = ttbr1 = 0x8020404a`, `cpu_ttep = 0x80204000`, and the writer is
+    # named.** `lr_abt - 8 = 0x80024f5c` is `str r5, [r0], #4` - the first PTE store of
+    # `pmap_init_pte_static_page` (0x80024f1c, 96 bytes), whose only caller in the whole image is
+    # 0x8001880c inside `arm_vm_page_granular_helper`'s allocate-a-coarse-table branch. The page it
+    # writes is the page it just took from `avail_start`: the built code keeps the pre-increment value
+    # in `ppte` (`ldr r3,[avail_start]` / `str r3+4096,[avail_start]` / `add r6,(r3-gPhysBase),gVirtBase`),
+    # `DFAR = 0x80300000` equals `ppte` exactly, and `avail_start` in the handler is `0x80301000` -
+    # one page above. So this is store number zero of 1024, into a page that is read-only.
+    #
+    # It is read-only because `pmap_init_pte_static_page` writes *all* 1024 entries with
+    # `ARM_PTE_AP(AP_RONA)` - a read-only fill of a whole 4 MB window - while its caller re-protects
+    # only the pages inside [start, _end). The two descriptors differ by one bit and it is visible in
+    # the two `bfi`s: the fill's is 0x612, the helper's own base is 0x412. So the residue of the first
+    # call (RWX over [0x80000000, 0x800906c0), window [0x80000000, 0x80400000)) is
+    # [0x80091000, 0x80400000), and after the __DATA call it is [0x800db000, 0x80400000).
+    #
+    # **Why this image reaches an allocation inside that residue at all is the finding.** Our
+    # synthetic Mach-O has two segments, so `segPRELINKTEXTB` and `segSizePRELINKTEXT` - globals, so
+    # zero - make `RWNX(segPRELINKTEXTB + segSizePRELINKTEXT, end_kern - (segPRELINKTEXTB +
+    # segSizePRELINKTEXT), force_coarse_physmap)` become `RWNX(0, end_kern)`: not the small
+    # PreLinkInfoDictionary range a real kernel has, but 1024 iterations of the 4 MB alignment loop,
+    # each taking a page-table page from `avail_start`. And `avail_start` is inside the residue.
+    #
+    # **Why the fault is at 0x80300000 rather than at the second allocation, 0x80223000, is the TLB.**
+    # `avail_start`'s first page is 0x80222000, not 0x8020A000: `pmap_bootstrap`'s table allocation
+    # (`pmap.c:2841-2850`) takes pp_attr 0x1000, io_attr 0 (our `/defaults` node has no
+    # pmap-io-ranges, so niorgns = 0), pv_lock 0x800, pv_head 0x2000 and
+    # ptd_root_table_size = sizeof(pt_desc_t) * 4096 = 20 * 4096 = 0x14000, ending at 0x80222000.
+    # Then `pmap_bootstrap`'s own `memset` of [0x8020A000, 0x80222000) runs while L1 index 0x802 is
+    # still the 1 MB section `start.s` installed, and nothing calls `flush_mmu_tlb()` between it and
+    # the fault (the last one is just before `pmap_bootstrap`, `arm_vm_init.c:491`). A cached section
+    # translation survives the L1 entry being turned into a coarse table, so all 222 allocations
+    # before the fault stay inside that megabyte and bypass the walk; the 223rd is 0x80300000, the
+    # first page of the next megabyte, whose L1 entry the first call had already replaced with a table
+    # of read-only PTEs. Hence DFAR = round_up_1MB(0x80222000) = 0x80300000, which is a prediction and
+    # not an observation.
+    #
+    # So the fault is this image's Mach-O, not XNU's pmap: the header is one segment short of the one
+    # `arm_vm_init` does arithmetic with. **243 adds `__PRELINK_TEXT` to `entry_macho.s` with its end
+    # at `end_kern`** (vmaddr `__entry_image_end`, vmsize `end_kern - __entry_image_end` = 0xdb8
+    # today), which makes the call zero-size and leaves `arm_vm_prot_init` with four allocations, all
+    # of them after the last call has already re-protected [0x8020A000, 0x80400000) as RWNX. The
+    # prediction to check: the run gets past `arm_vm_prot_init` and into `arm_vm_init`'s
+    # pre-initialization loop at `virtual_space_start = 0xC0000000`.
+    #
+    # Cost: 1056 bytes of text (592785 -> 593841), fleh_prefabt 204 B and fleh_dataabt 368 B, 0 bytes
+    # of image (703352), layout unchanged, 645 undefined, stub set unchanged. The four globals it
+    # reads are read-only and `ENTRY_KV_BUF` 2048 was already enough for the 14 keys (552 bytes).
     BSD_KERN_SUBR_PRF_OBJ=${STAGE90_ENTRY_BSD_KERN_SUBR_PRF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_subr_prf.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"

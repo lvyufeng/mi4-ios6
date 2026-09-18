@@ -1026,27 +1026,104 @@ void fleh_undef(void)
 }
 void fleh_swi(void) { entry_epilogue("exception: svc/swi"); }
 
+/*
+ * ------------------------------------------------------------------ the abort handlers, named
+ *
+ * Experiment 241 ended at `exception: data abort` with a decodable `DFSR` (a write, to a level-2
+ * page mapping that is not writable) and no way to say *which* instruction - and `DFAR` alone
+ * cannot say it, because two very different things are consistent with it: the protection code
+ * creating the read-only mapping, and a later write into a region it had already protected. Both
+ * are real, linked code in this image.
+ *
+ * So the abort handlers now report the same three kinds of thing `fleh_undef` does:
+ *
+ *   **the instruction** - `lr_abt` and `pc_abt`. `LR_abt` is set by the CPU for the abort's *own*
+ *   class: for a data abort it is the faulting instruction plus 8, for a prefetch abort plus 4, and
+ *   both are the architecture's definitions rather than a guess. `pc_abt` is what to look up in the
+ *   disassembly, and the word *at* `pc_abt` is reported too, so a `pc_abt` that is not an
+ *   instruction is visible as one.
+ *
+ *   **the mapping state** - `TTBR0`, `TTBR1`, `TTBCR` and `SCTLR`. These say which page tables were
+ *   live and, with `SCTLR`'s `TEX`/`XP`/`AFE` bits, whether the walk that produced this fault is the
+ *   one `_start` left or one XNU's pmap built. `TTBR0 == topOfKernelData` means the fault is inside
+ *   `_start`'s own tables - which, since those map this window with writable sections, would make a
+ *   page permission fault impossible and therefore points at the pmap having taken them over.
+ *
+ *   **the boundaries XNU computed** - `cpu_ttep`, `avail_start`, `gPhysBase`, `mem_size`. Exp-241's
+ *   fault address is 3 MB above the base, inside the range
+ *   `arm_vm_init.c:512-530`'s "2 MB + 3 MB per 256 MB segment" pre-initialization loop exists to
+ *   cover; these four are the numbers that say whether the address really is in the available range
+ *   or above it.
+ *
+ * Every one of these is read the same way the rest of this file reads: a register, or a word in the
+ * image, which is mapped because the handlers could not have run otherwise.
+ */
+extern uint32_t cpu_ttep;
+extern uint32_t avail_start;
+extern uint32_t gPhysBase;
+extern uint32_t mem_size;
+
 void fleh_prefabt(void)
 {
-    uint32_t ifar, ifsr;
+    uint32_t ifar, ifsr, lr_abt, spsr, ttbr0, ttbr1, ttbcr, sctlr;
 
     __asm__ volatile ("mrc p15, 0, %0, c6, c0, 2" : "=r"(ifar));
     __asm__ volatile ("mrc p15, 0, %0, c5, c0, 1" : "=r"(ifsr));
+    __asm__ volatile ("mov %0, lr" : "=r"(lr_abt));
+    __asm__ volatile ("mrs %0, spsr" : "=r"(spsr));
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 1" : "=r"(ttbr1));
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));
+    __asm__ volatile ("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
 
     entry_kv("xnu_entry_prefetch_abort_ifar", ifar);
     entry_kv("xnu_entry_prefetch_abort_ifsr", ifsr);
+    entry_kv("xnu_entry_prefetch_abort_lr", lr_abt);
+    /* LR_abt - 4 for a prefetch abort: the instruction that could not be fetched. */
+    entry_kv("xnu_entry_prefetch_abort_pc", lr_abt - 4u);
+    entry_kv("xnu_entry_prefetch_abort_spsr", spsr);
+    entry_kv("xnu_entry_prefetch_abort_ttbr0", ttbr0);
+    entry_kv("xnu_entry_prefetch_abort_ttbr1", ttbr1);
+    entry_kv("xnu_entry_prefetch_abort_ttbcr", ttbcr);
+    entry_kv("xnu_entry_prefetch_abort_sctlr", sctlr);
     entry_epilogue("exception: prefetch abort");
 }
 
 void fleh_dataabt(void)
 {
-    uint32_t dfar, dfsr;
+    uint32_t dfar, dfsr, lr_abt, spsr, ttbr0, ttbr1, ttbcr, sctlr;
+    uint32_t pc_abt, insn;
 
     __asm__ volatile ("mrc p15, 0, %0, c6, c0, 0" : "=r"(dfar));
     __asm__ volatile ("mrc p15, 0, %0, c5, c0, 0" : "=r"(dfsr));
+    __asm__ volatile ("mov %0, lr" : "=r"(lr_abt));
+    __asm__ volatile ("mrs %0, spsr" : "=r"(spsr));
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 1" : "=r"(ttbr1));
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));
+    __asm__ volatile ("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
 
     entry_kv("xnu_entry_data_abort_dfar", dfar);
     entry_kv("xnu_entry_data_abort_dfsr", dfsr);
+    entry_kv("xnu_entry_data_abort_lr", lr_abt);
+    /* LR_abt - 8 for a data abort: the instruction that could not complete. */
+    pc_abt = lr_abt - 8u;
+    entry_kv("xnu_entry_data_abort_pc", pc_abt);
+    /* The instruction itself, so a pc_abt that is not an instruction is visible as one. */
+    insn = 0u;
+    if (entry_image_ptr((uintptr_t)pc_abt)) {
+        insn = entry_word_at((uintptr_t)pc_abt);
+    }
+    entry_kv("xnu_entry_data_abort_insn", insn);
+    entry_kv("xnu_entry_data_abort_spsr", spsr);
+    entry_kv("xnu_entry_data_abort_ttbr0", ttbr0);
+    entry_kv("xnu_entry_data_abort_ttbr1", ttbr1);
+    entry_kv("xnu_entry_data_abort_ttbcr", ttbcr);
+    entry_kv("xnu_entry_data_abort_sctlr", sctlr);
+    entry_kv("xnu_entry_data_abort_cpu_ttep", cpu_ttep);
+    entry_kv("xnu_entry_data_abort_avail_start", avail_start);
+    entry_kv("xnu_entry_data_abort_gphysbase", gPhysBase);
+    entry_kv("xnu_entry_data_abort_mem_size", mem_size);
     entry_epilogue("exception: data abort");
 }
 
