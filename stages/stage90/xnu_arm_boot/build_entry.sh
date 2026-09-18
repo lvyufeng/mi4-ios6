@@ -3098,6 +3098,140 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 299: `kpc_thread_create` is a one-load function, and the stop moves one call down
+    #
+    # **The 298 run reported** `stub_hit=kpc_thread_create` at `thread_create_internal + 0x348`. One
+    # object defines it: `osfmk/kern/kpc_thread.c` (manifest:563), which this project has been
+    # building all along as `osfmk_kern_kpc_thread.o`.
+    #
+    # **It is the cheapest function this walk has stopped at, and that is the whole prediction.**
+    # Measured from the object, its body is eight instructions:
+    #
+    #     368: push  {r4, lr}
+    #     36c: mov   r4, r0
+    #     370: movw/movt r0, kpc_threads_counting     <- `B`, 4 bytes, *defined in this same object*
+    #     378: ldr   r0, [r0]
+    #     37c: cmp   r0, #0
+    #     380: popeq {r4, pc}                          <- the early return, taken
+    #     384: bl    kpc_counterbuf_alloc
+    #     388: str   r0, [r4, #760]                    <- thread->kpc_buf
+    #     38c: pop   {r4, pc}
+    #
+    # `kpc_threads_counting` is `int kpc_threads_counting = 0;` (`kpc_thread.c:51`) - so linking the
+    # object does not merely *stand in* for a zero, it defines the variable, and the branch at 0x380
+    # is taken. The one thing that can set it is `kpc_set_thread_counting`, which is reached from the
+    # sysctl tree and from nothing else. **So `kpc_thread_create` returns without doing anything, and
+    # the third of the three stubs 296 measured in this function is answered by a function that does
+    # not call anything.**
+    #
+    # Two things the object brings that are worth naming, because both are silent:
+    #
+    #   * `kpc_counterbuf_alloc`, `kpc_counterbuf_free`, `kpc_get_counter_count`,
+    #     `kpc_get_cpu_counters` and `act_set_kperf` are all in `kpc_common.c` (or kpc_arm.c), **not**
+    #     in this object - so they arrive as five new stubs, and none of them is reached. What
+    #     *is* reached is only the `cmp`/`popeq`.
+    #   * `kpc_thread_init` is in this object and nothing calls it, so `kpc_thread_lock` (8 bytes of
+    #     `.bss`, in this object) is a lock that is never initialised. That is safe here for a reason
+    #     worth stating: the function that does run, `kpc_thread_create`, does not take it. It is the
+    #     [[mi4-stand-in-size-is-not-value]] shape in a milder form - real storage whose initializer
+    #     has not run - and it stays harmless for exactly as long as nothing calls
+    #     `kpc_get_thread_counting` or `kpc_set_thread_counting`.
+    #
+    # **Predicted stop: `stub_hit=sched_set_thread_base_priority`, `xnu_entry_stub_caller=0x8000b090`.**
+    # `thread_create_internal` is in `osfmk_kern_thread.o`, which links before this step's object, so
+    # its address is `0x8000acec` before and after, and the two stubs after the `kpc` call are
+    # unconditional except for the third:
+    #
+    #     +0x348  return site of `bl kpc_thread_create`   (298's stop)
+    #     +0x350  SCHED(initial_thread_sched_mode) via `blx r1`, r1 = sched_multiq_dispatch + 0x4c
+    #             -> sched_multiq_initial_thread_sched_mode, real since 262
+    #     +0x3a4  sched_set_thread_base_priority          ***STUB***, unguarded   <- the stop
+    #     +0x3dc  sched_thread_mode_demote                ***STUB***, behind `cmp r1, #4 / bgt`
+    #
+    # and the guard is the same one 296 read before it ran: `ldr r1, [sl, #0x50]` is
+    # `parent_task->max_priority`, 95 for the kernel task, `bgt` over the call. So the prediction is
+    # not merely "the next stub in address order" - **there is one real indirect call between the two
+    # stubs and it is predicted to complete**, which is a fact about `sched_multiq_dispatch` staying
+    # the real table 262 linked.
+    #
+    # **The build.**
+    #
+    #                   predicted        measured
+    #     undefined     773              773
+    #     function      684              684
+    #     storage        89               89
+    #     .data         0x80118000       0x80118000   (the object has none)
+    #     __bss_start   0x80130a00       0x80130a00   (unchanged, as predicted)
+    #     __bss_end     0x801677b8       0x801677d8   <- the miss, and it is exact arithmetic
+    #     .text         0x116360 -> ~0x11678c   0x116780   (+0x420; the estimate was 12 bytes high)
+    #     image         ~1248768         1247700      (unchanged: the growth fitted the padding in
+    #                                                   front of the 16 KB-aligned `.data`)
+    #
+    # Four resolved and five added: the resolved are `kpc_thread_create`, `kpc_thread_destroy`,
+    # `kpc_off_cpu_internal` and the **storage** name `kpc_off_cpu_active` (`B 0x4`); the added are the
+    # five names above. The object defines ten more names that are not in the stub set at all, which
+    # is the 250/270 shape - what an object defines is not what the link needs.
+    #
+    # **`__bss_end` did not move, and it is worth the four lines because the two halves are equal
+    # exactly.** `.bss` is not a sum of sizes, it is a sum of *aligned slots*, and the map file shows
+    # both halves of the trade:
+    #
+    #     retired: `kpc_off_cpu_active`'s stand-in is `uint8_t [0x4] __attribute__((aligned(64)))`
+    #              (this script's generator, and the 64 is why every storage name costs a 64-byte
+    #              slot), so removing it shrinks `realstubs.o`'s `.bss` from **0x1744 to 0x1704** -
+    #              freed: 0x40, for a 4-byte array
+    #     added:   `osfmk_kern_kpc_thread.o`'s `.bss` is 0x20 (its four 4-byte words and the 8-byte
+    #              `kpc_thread_lock`), but `realstubs.o`'s arrays are 64-byte aligned, so it costs
+    #              0x20 of its own plus 0x20 of extra fill in front of them - **spent: 0x40**
+    #
+    # 0x40 freed and 0x40 spent, so `__bss_end` is 0x801677d8 before and after - the same address, from
+    # two independent 0x40s. The prediction of -0x20 came from subtracting sizes rather than slots, and
+    # the honest form of the rule is **a `.bss` change is a slot change**: a 4-byte storage name costs
+    # 64 bytes, and a new object's `.bss` costs its size rounded up to whatever the alignment of the
+    # input section that follows it demands.
+    #
+    # **What this step is, in one line:** the third of `thread_create_internal`'s three consecutive
+    # stubs is answered by a function whose first instruction is a load of a variable the same object
+    # defines, and the run measures that the load is zero, the early return happens, and the indirect
+    # scheduler call in between completes.
+    #
+    # **The run, and every line of it is the prediction.**
+    #
+    #     stub_hit=sched_set_thread_base_priority    xnu_entry_stub_caller=0x8000b090
+    #     xnu_entry_bss_start=0x80130a00              (unchanged)
+    #     xnu_entry_bss_bytes=0x00036dd8              (unchanged)
+    #     xnu_entry_copied_bytes=0x001309d4           (unchanged)
+    #
+    # `0x8000b090` is `thread_create_internal + 0x3a4`, the return address of the `bl` at 0x8000b08c -
+    # the first stub after the `kpc` call, exactly as the address table above predicted before the
+    # device was touched. **So three things that are not stubs were measured by completing**: the `bl
+    # kpc_thread_create` returned, `kpc_thread_create`'s `cmp`/`popeq` on `kpc_threads_counting` took
+    # the early return (the variable the object defines is zero at boot and the sysctl that writes it
+    # has no caller), and the `blx r1` through `sched_multiq_dispatch + 0x4c` in between entered and
+    # returned from the real `sched_multiq_initial_thread_sched_mode`. The third of 296's three stubs
+    # in this function is answered by a function that calls nothing - and the one after it is next.
+    #
+    # The guarded stub behind the stop was not reached, which is 296's argument re-measured rather
+    # than re-asserted: `sched_thread_mode_demote` sits behind `cmp r1, #4 / bgt` on
+    # `parent_task->max_priority`, and the `bgt` was taken.
+    #
+    # Preflight clean (`loader_xnu_entry_stub_status=0x90000001`,
+    # `high_va_data_verified=0x00000001`), log 301131 bytes, one `stub_hit=` line and no `exception:`
+    # line.
+    #
+    # **Safety:** non-persistent `fastboot boot` only, nothing flashed,
+    # `persistent_write_attempted=0x00000000` x25, `failure_mask=0x00000000` x87,
+    # `xnu_entry_failures=0x00000000`, and the device returned to Android on its own
+    # (`getprop ro.build.version.release` = 10).
+    #
+    # **Next:** 300 - `osfmk/kern/priority.c` for `sched_set_thread_base_priority` and
+    # `sched_thread_mode_demote`, which closes `thread_create_internal`'s own body; then
+    # `thread_policy_create` (real since 294) and the rest of the success path runs to `return
+    # new_thread`, and `kernel_thread_create` hands a real thread back to `kernel_bootstrap`, which
+    # calls `thread_deallocate` and branches to `load_context` at +0x380 - the first time this walk
+    # crosses into a context switch rather than a function call. And when the step that links
+    # `bsd/kern/kern_sysctl.c` arrives, the `__DATA,__sysctl_set` section entry in `entry_macho.s`.
+    OSFMK_KERN_KPC_THREAD_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KPC_THREAD_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kpc_thread.o}
     # 298: the orphan sections get names, and `__DATA,__sysctl_set` gets a segment
     #
     # **297 fixed what the orphans broke; this step stops them being orphans.** The same build output
@@ -7825,6 +7959,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$BSD_KERN_KERN_FORK_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_ARM_STATUS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_EVENT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_KPC_THREAD_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -7837,7 +7972,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
