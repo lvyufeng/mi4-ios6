@@ -107,7 +107,16 @@ summarise_log() {
   fi
   [[ $deadman -gt 0 ]] && say "  software dead-man: armed" \
                        || say "  software dead-man: not armed in this log"
-  [[ $abort -gt 0 ]] && say "  an abort was logged - see the 'exception'/'abort' lines above"
+  # `[[ ... ]] && say ...` was this function's last statement, and that is a defect, not a
+  # style choice: when `abort` is 0 the list's status is 1, the function returns 1, and with
+  # `set -e` the *caller* exits. The caller is `run_and_capture.sh`, which summarises the
+  # previous log **before** it boots anything - so a log without an abort line made the script
+  # print a summary and exit 1 without ever running the payload. Four consecutive exp-267
+  # "runs" re-summarised the same stale log and reported nothing, and the run that looked
+  # like a failed fix was a run that never happened. An `if` has status 0 on both branches.
+  if [[ $abort -gt 0 ]]; then
+    say "  an abort was logged - see the 'exception'/'abort' lines above"
+  fi
 }
 
 if [[ -n $SUMMARISE_ONLY ]]; then

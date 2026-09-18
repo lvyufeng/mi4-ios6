@@ -22,6 +22,27 @@
 #define RAM_TOP              0xde700000u
 #define RAM_CONSOLE_RESERVED 0x00200000u
 
+/*
+ * The high-VA alias of the payload's own image: `STAGE90_HIGH_ALIAS_BASE + off` maps to PA `off`,
+ * for the whole image. Two tables build it - `mmu.c`'s `build_identity_table()` (the one the payload
+ * runs under) and `xnu_arm_vm_init_full_pmap.c`'s Phase 5 (the one a handed-off kernel would run
+ * under) - so the base is defined here rather than twice, and each file loops over the image end
+ * rather than naming a section count.
+ *
+ * **The loop is the point, and experiment 267 is why it is not a fixed pair of sections.** The
+ * window was two sections (2 MB) from Stage86 until then; the payload's image grew past 2 MB when
+ * exp-267's entry image was linked into it, `g_boot_args` moved to PA 0x20c264, and the alias pointer
+ * `mmu_high_bootstrap_selftest` hands to XNU's real bootstrap became `0xc020c264` - above the last
+ * mapped section. The payload died at that first dereference with nothing in the log, which is the
+ * worst way for a window to be too small.
+ *
+ * `STAGE90_GIC_ALIAS_BASE` is above the image window and is therefore also its limit here; the full
+ * pmap table's limit is its own RAM-console alias at 0xc0300000. A payload that ever outgrows either
+ * is reported by the loop that maps it rather than by a fault.
+ */
+#define STAGE90_HIGH_ALIAS_BASE      0xc0000000u  /* Legacy high alias from Stage81/82 */
+#define STAGE90_GIC_ALIAS_BASE       0xc0400000u  /* was 0xc0200000; moved up for the image alias */
+
 #define BOOT_LINE_LENGTH     256u
 #define BOOT_ARGS_REVISION   2u
 #define BOOT_ARGS_VERSION    2u

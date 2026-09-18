@@ -166,6 +166,17 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require() {
         [[ -f $1 ]] || { say "no $1 - $2" >&2; exit 2; }
     }
+    # The MIG server objects live in the tree-object directory under a **flattened** name, because
+    # build_xnu_arm_kernel.sh keys an object by its source path with `$XNU/` removed and every `/`
+    # turned into `_` (line 443) - and the kserver sources are under `out/`, not under the tree, so
+    # for them nothing is removed and the whole absolute path is flattened. Deriving the name here
+    # rather than spelling it out keeps this correct if the repository moves; the alternative,
+    # `_mnt_data_mi4-ios6_out_mach_headers_kserver_mach_mach_vm_server.o`, is this project's own
+    # path baked into a file name.
+    kserver_obj() {
+        local p="$REPO_ROOT/out/mach_headers/kserver/$1"
+        printf '%s/%s.o\n' "$REPO_ROOT/out/xnu_kernel_obj" "$(printf '%s' "$p" | sed 's|/|_|g; s|\.c$||')"
+    }
     ARM_INIT_OBJ=${STAGE90_ENTRY_ARM_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_arm_init.o}
     ARM_DATA_OBJ=${STAGE90_ENTRY_DATA_OBJ:-$REPO_ROOT/out/xnu_asm_obj/data.o}
     ARM_BCOPY_OBJ=${STAGE90_ENTRY_BCOPY_OBJ:-$REPO_ROOT/out/xnu_asm_obj/bcopy.o}
@@ -2697,6 +2708,83 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # payload text 1376490. `kv_written == kv_in_dram == 0x3c`, one below 262's 0x3d because
     # `waitq_bootstrap` is one character shorter than `ltable_bootstrap` - both are 9 characters of
     # `_bootstrap`, so the difference is `ltable` (6) against `waitq` (5).
+    # 267: `mig_init`, and **the step is 18 objects, because the datum it reads has 17 entries.**
+    # 266's stop was `mig_init`. `osfmk/kern/ipc_kobject.c` (manifest:551) is the object that
+    # defines it - 2404 bytes of text, 68 of data, 12376 of bss, six functions - and it is one
+    # object. But `mig_init` walks `mig_e[]`, a 17-entry array of pointers to `struct mig_subsystem`
+    # defined **in that same object** (`.data`, 0x44 bytes, 17 `R_ARM_ABS32` relocations) and
+    # dereferences each entry with no NULL check:
+    #
+    #     4c: ldr r1, [r0, #4]        ; mig_e[i]->start
+    #     50: ldr r0, [r0, #8]        ; mig_e[i]->end
+    #     54: cmp r1, #0
+    #     5c: beq 68                  ; !start -> panic
+    #     68: panic("the msgh_ids in mig_e[] aren't valid!")   (ipc_kobject.c:213)
+    #
+    # and ids the 17 entries' objects are in the same tree (manifest:685-705,
+    # `out/mach_headers/kserver/**`): `mach_vm_server.c`, `mach_port_server.c`, `mach_host_server.c`,
+    # `host_priv_server.c`, `host_security_server.c`, `clock_server.c`, `clock_priv_server.c`,
+    # `processor_server.c`, `processor_set_server.c`, `device_server.c`, `lock_set_server.c`,
+    # `task_server.c`, `thread_act_server.c`, `vm32_map_server.c`, `UNDReplyServer.c`,
+    # `mach_voucher_server.c`, `mach_voucher_attr_control_server.c`.
+    #
+    # Linking `ipc_kobject.o` alone would therefore hand `mig_e[]` seventeen **storage stand-ins**,
+    # each a slot of zeros, so `mig_e[0]->start` would read 0 and the run would enter XNU's *real*
+    # `panic` at the first iteration. That is not a frontier stop: it is a measurement of this
+    # step's own omission, and `panic` is real code, not a stub, so it would not even report a
+    # `stub_hit` - it would print and spin. The **262 argument**, applied to a table of 17 rather
+    # than one of 16 bytes: link the table's contents with the object that reads it.
+    #
+    # The cost is a large addition - **238** names, the link's own delta against exp-266 (an earlier
+    # estimate of 256 in this comment counted the union before the link, not what the link after
+    # exp-266's image actually added) - and it is the honest size of the step, because the whole
+    # Mach IPC dispatch surface arrives with the table that indexes it.
+    #
+    # **Prediction: `stub_hit=ipc_table_init`** - the call after `bl mig_init` in `ipc_bootstrap`.
+    #
+    # Measured: resolved **2** (`mig_init`, `ipc_kobject_set`), added **238** (236 functions, 2
+    # statics); 627 -> 863 undefined, 553 -> 787 function stubs, 74 -> 76 storage; text 796676 ->
+    # 904036 (+107360), image 900688 -> **1015440** (+114752 = seven 16 KB blocks), bss end
+    # 0x8012a4c8, args +1228800, `topOfKernelData` unchanged at +3145728, headroom 1923896. Device:
+    # **`stub_hit=ipc_table_init`, `xnu_entry_stub_caller=0x800abd84`** = `ipc_bootstrap+0x180`,
+    # `caller - 4` = `0x800abd80` - the tenth prediction in a row.
+    #
+    # **This step also had to fix the payload, and that is the bigger finding.** Its first run died
+    # with no line after `mmu_high_bootstrap_collection_dependency_resolution_virt`: the entry
+    # image's +114752 bytes grew the *payload* past the 2 MB high-VA alias window that `mmu.c`'s
+    # `build_identity_table()` had mapped as two fixed sections since Stage86, and the alias pointer
+    # the bootstrap selftest hands XNU's real root (`g_boot_args`, PA 0x20c264) became `0xc020c264`,
+    # above the last mapped section. The window is now a loop over `__stage90_image_end`, the same
+    # shape as the identity map beside it; `STAGE90_GIC_ALIAS_BASE` moved from 0xc0200000 to
+    # 0xc0400000 to make room and is now defined once, in stage90.h; and
+    # `xnu_arm_vm_init_full_pmap.c`'s copy of the same two sections got the same loop.
+    #
+    # The host side had a defect too, and it cost four runs: `run_and_capture.sh` summarises the
+    # previous log *before* it boots, and `summarise_log`'s last statement was
+    # `[[ $abort -gt 0 ]] && say ...` - status 1 when the log has no abort line, which under `set -e`
+    # exited the script before `fastboot`. Four consecutive "runs" re-summarised the same stale log
+    # and reported nothing; the alias fix looked like it had failed when it had never been tried.
+    MIG_KSERVER_OBJS=(
+        "$(kserver_obj mach/mach_vm_server.c)"
+        "$(kserver_obj mach/mach_port_server.c)"
+        "$(kserver_obj mach/mach_host_server.c)"
+        "$(kserver_obj mach/host_priv_server.c)"
+        "$(kserver_obj mach/host_security_server.c)"
+        "$(kserver_obj mach/clock_server.c)"
+        "$(kserver_obj mach/clock_priv_server.c)"
+        "$(kserver_obj mach/processor_server.c)"
+        "$(kserver_obj mach/processor_set_server.c)"
+        "$(kserver_obj device/device_server.c)"
+        "$(kserver_obj mach/lock_set_server.c)"
+        "$(kserver_obj mach/task_server.c)"
+        "$(kserver_obj mach/thread_act_server.c)"
+        "$(kserver_obj mach/vm32_map_server.c)"
+        "$(kserver_obj UserNotification/UNDReplyServer.c)"
+        "$(kserver_obj mach/mach_voucher_server.c)"
+        "$(kserver_obj mach/mach_voucher_attr_control_server.c)"
+    )
+    OSFMK_KERN_IPC_KOBJECT_OBJ=${STAGE90_ENTRY_OSFMK_KERN_IPC_KOBJECT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_ipc_kobject.o}
+
     # 264: `waitq_bootstrap`, and the frontier closes on names 262 created. 263's stop was
     # `waitq_bootstrap`, and the seven `waitq_*` boundaries 262's scheduler link added
     # (`waitq_lock`, `waitq_unlock`, `waitq_assert_wait64_locked`, `waitq_pull_thread_locked`,
@@ -2890,6 +2978,10 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_WAITQ_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_INIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_SPACE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_IPC_KOBJECT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    for _o in "${MIG_KSERVER_OBJS[@]}"; do
+        require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
+    done
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2899,7 +2991,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

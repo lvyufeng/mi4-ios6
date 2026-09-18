@@ -27,9 +27,9 @@
 /* Stage84 virtual address space layout */
 #define STAGE90_VIRT_BASE              0x80000000u  /* Kernel virtual base */
 #define STAGE90_PHYS_BASE              0x00008000u  /* Kernel physical base */
-#define STAGE90_HIGH_ALIAS_BASE        0xc0000000u  /* Legacy high alias from Stage81/82 */
 #define STAGE90_RAM_CONSOLE_ALIAS_BASE 0xc0300000u  /* moved off 0xc0100000 - see below */
-#define STAGE90_GIC_ALIAS_BASE         0xc0200000u
+/* `STAGE90_HIGH_ALIAS_BASE` and `STAGE90_GIC_ALIAS_BASE` live in stage90.h: mmu.c's
+ * build_identity_table() builds the same image alias, and one base in two files drifts. */
 
 /*
  * The RAM-console alias used to live at 0xc0100000, which is also the second
@@ -47,8 +47,9 @@
  *
  * Moving the alias to a free VA keeps both mappings and both verifications, so
  * the candidate table now agrees with the identity table about the image alias.
- * 0xc0300000 is unused in either table (0xc0000000/0xc0100000 image alias,
- * 0xc0200000 GIC alias).
+ * 0xc0300000 is unused in either table (0xc0000000.. image alias, 0xc0400000 GIC
+ * alias since experiment 267 - the image alias itself now needs more than the two
+ * sections it had, so the GIC alias moved up to leave it room).
  */
 
 /* ARMv7 short-descriptor format constants */
@@ -385,9 +386,26 @@ int stage90_xnu_arm_vm_init_full_pmap_run(
     map_l1_section_mmio(stage90_candidate_l1, 0xfc400000u, 0xfc400000u);         /* PS_HOLD */
 
     /* Phase 5: Legacy high-alias mappings from Stage81/82 (extend to cover full image) */
-    /* Stage84 image ends at ~0x111000, need at least 2MB alias (0xc0000000-0xc01fffff) */
-    map_l1_section_dram(stage90_candidate_l1, STAGE90_HIGH_ALIAS_BASE, 0x00000000u);
-    map_l1_section_dram(stage90_candidate_l1, STAGE90_HIGH_ALIAS_BASE + L1_SECTION_SIZE, 0x00100000u);
+    /*
+     * A loop over the payload's image, not a named section count. The comment here said "Stage84
+     * image ends at ~0x111000, need at least 2MB alias"; experiment 267's image ends at 0x21a000,
+     * and a pair of sections silently mapped only the first 2 MB of it. This table is the one a
+     * handed-off kernel would run under, so it needs the whole image too.
+     *
+     * This table's limit is its own RAM-console alias at 0xc0300000, which sits where the image
+     * alias's fourth section would go; mmu.c's limit is the GIC alias instead. Both are checked
+     * rather than assumed.
+     */
+    for (uint32_t alias_off = 0u; alias_off < (uint32_t)(uintptr_t)__stage90_image_end;
+         alias_off += L1_SECTION_SIZE) {
+        if (STAGE90_HIGH_ALIAS_BASE + alias_off >= STAGE90_RAM_CONSOLE_ALIAS_BASE) {
+            xnu_log_kv32("pmap_image_alias_image_end", (uint32_t)(uintptr_t)__stage90_image_end);
+            xnu_log_kv32("pmap_image_alias_limit", STAGE90_RAM_CONSOLE_ALIAS_BASE);
+            xnu_log_puts("pmap image alias window is smaller than the image\n");
+            break;
+        }
+        map_l1_section_dram(stage90_candidate_l1, STAGE90_HIGH_ALIAS_BASE + alias_off, alias_off);
+    }
     /* RAM-console alias at its own VA, so it cannot shadow the image alias above. */
     map_l1_section_dram(stage90_candidate_l1, STAGE90_RAM_CONSOLE_ALIAS_BASE, RAM_CONSOLE_BASE);
     map_l1_section_mmio(stage90_candidate_l1, STAGE90_GIC_ALIAS_BASE, 0xf9000000u);

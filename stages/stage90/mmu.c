@@ -17,9 +17,9 @@
 #define L1_DESC_SECTION_RAM_CONSOLE STAGE90_PMAP_DESC_SECTION_RAM_CONSOLE
 
 #define SECTION_INDEX(addr)    (((uint32_t)(addr)) >> 20)
-#define STAGE90_HIGH_ALIAS_BASE        0xc0000000u
+/* `STAGE90_HIGH_ALIAS_BASE` and `STAGE90_GIC_ALIAS_BASE` are in stage90.h: this file and
+ * xnu_arm_vm_init_full_pmap.c both build the image alias, and a base defined twice drifts. */
 #define STAGE90_RAM_CONSOLE_ALIAS_BASE 0xc0100000u
-#define STAGE90_GIC_ALIAS_BASE         0xc0200000u
 
 #define STAGE90_BOOTSTRAP_STATUS_OK    0x90000001u
 #define STAGE90_BOOTSTRAP_STATUS_BASE  0x90000000u
@@ -5417,9 +5417,27 @@ static void build_identity_table(void)
         map_section_dram(image_off, image_off);
     }
 
-    /* First controlled XNU-like high aliases for selected low code/data and debug/MMIO windows. */
-    map_section_dram(STAGE90_HIGH_ALIAS_BASE, 0x00000000u);
-    map_section_dram(STAGE90_HIGH_ALIAS_BASE + L1_SECTION_SIZE, 0x00100000u);
+    /*
+     * The high alias of this payload's own image: `HIGH_ALIAS_BASE + off` -> PA `off`, for **the
+     * whole image** - the same loop and the same reason as the identity map above it. It was a fixed
+     * pair of sections until experiment 267, when the image grew past 2 MB and the bootstrap selftest
+     * handed XNU's real `arm_init` an alias pointer (`g_boot_args`, PA 0x20c264) above the last
+     * mapped section; the payload died there, silently, on the first dereference.
+     *
+     * The window ends where this table's next alias begins - the GIC alias, which moved up from
+     * 0xc0200000 to 0xc0400000 to make room. An image that ever reaches it is reported here rather
+     * than faulting later; the payload's own contracts then carry the failure.
+     */
+    for (uint32_t alias_off = 0u; alias_off < (uint32_t)(uintptr_t)__stage90_image_end;
+         alias_off += L1_SECTION_SIZE) {
+        if (STAGE90_HIGH_ALIAS_BASE + alias_off >= STAGE90_GIC_ALIAS_BASE) {
+            xnu_log_kv32("mmu_high_alias_image_end", (uint32_t)(uintptr_t)__stage90_image_end);
+            xnu_log_kv32("mmu_high_alias_limit", STAGE90_GIC_ALIAS_BASE);
+            xnu_log_puts("mmu high alias window is smaller than the image\n");
+            break;
+        }
+        map_section_dram(STAGE90_HIGH_ALIAS_BASE + alias_off, alias_off);
+    }
     /* Stage86: Comment out RAM_CONSOLE_ALIAS to avoid conflict with deviceTreeP high-alias at 0xc010c18c */
     /* map_section_dram(STAGE90_RAM_CONSOLE_ALIAS_BASE, RAM_CONSOLE_BASE); */
     map_section_mmio(STAGE90_GIC_ALIAS_BASE, 0xf9000000u);
@@ -5533,6 +5551,11 @@ int mmu_identity_selftest(void)
     xnu_log_kv32("mmu_entry_low", table_entry_for(0x00008000u));
     xnu_log_kv32("mmu_entry_high_alias", table_entry_for(STAGE90_HIGH_ALIAS_BASE));
     xnu_log_kv32("mmu_entry_high_alias_sec1", table_entry_for(STAGE90_HIGH_ALIAS_BASE + L1_SECTION_SIZE));
+    /* The image alias is a loop over the image since exp-267, so the entries above are not the
+     * whole window. This one is the entry for the section that the payload's own `g_boot_args`
+     * (PA 0x20c264) lives in - the section the fixed two-section window did not map. */
+    xnu_log_kv32("mmu_entry_high_alias_sec2", table_entry_for(STAGE90_HIGH_ALIAS_BASE + 2u * L1_SECTION_SIZE));
+    xnu_log_kv32("mmu_high_alias_sections", (uint32_t)(((uint32_t)(uintptr_t)__stage90_image_end + L1_SECTION_SIZE - 1u) / L1_SECTION_SIZE));
     xnu_log_kv32("mmu_entry_high_ram_console", table_entry_for(STAGE90_RAM_CONSOLE_ALIAS_BASE));
     xnu_log_kv32("mmu_entry_high_gic", table_entry_for(STAGE90_GIC_ALIAS_BASE));
     xnu_log_kv32("mmu_entry_high_gic", table_entry_for(STAGE90_GIC_ALIAS_BASE));
@@ -5808,7 +5831,19 @@ int mmu_high_bootstrap_selftest(void)
         return 0;
     }
 
+    xnu_log_kv32("mmu_high_bootstrap_alias_args_entry", table_entry_for((uint32_t)(uintptr_t)alias_args));
+    xnu_log_kv32("mmu_high_bootstrap_alias_pe_entry", table_entry_for((uint32_t)(uintptr_t)alias_pe));
+    xnu_log_kv32("mmu_high_bootstrap_alias_state_entry", table_entry_for((uint32_t)(uintptr_t)alias_state));
+    xnu_log_kv32("mmu_high_bootstrap_alias_fn_entry", table_entry_for((uint32_t)(uintptr_t)bootstrap_fn));
+    xnu_log_kv32("mmu_high_bootstrap_alias_dt_entry",
+                 table_entry_for((uint32_t)(uintptr_t)(STAGE90_HIGH_ALIAS_BASE +
+                                                       (uint32_t)(uintptr_t)
+                                                       ((struct boot_args *)(uintptr_t)args_phys)->deviceTreeP)));
+    xnu_log_puts("mmu high bootstrap: calling the root through the alias\n");
+
     result = bootstrap_fn(alias_args, alias_pe, alias_state);
+
+    xnu_log_puts("mmu high bootstrap: the root returned\n");
 
     expected = stage90_bootstrap_checksum(&stage90_bootstrap_state_block);
 
