@@ -41,6 +41,47 @@ KSERVER=${MIG_KSERVER_OUT:-$REPO_ROOT/out/mach_headers/kserver}
 [[ -x $MIG ]] || { echo "no MIG at $MIG - run tools/build_mig.sh first" >&2; exit 2; }
 [[ -d $XNU/osfmk/mach ]] || { echo "no .defs at $XNU/osfmk/mach" >&2; exit 2; }
 
+# Apple's `$(DEFINES)` — the first thing in `MIGFLAGS` (`makedefs/MakeInc.def:470`), so every `.defs`
+# Apple preprocesses for MIG is preprocessed with these in force:
+#
+#     DEFINES = -DAPPLE -DKERNEL -DKERNEL_PRIVATE -DXNU_KERNEL_PRIVATE \
+#               -DPRIVATE -D__MACHO__=1 -Dvolatile=__volatile $(CONFIG_DEFINES) $(SEED_DEFINES)
+#                                                                       (:78-80)
+#
+# **`-DKERNEL` was missing, and it is load-bearing.** `osfmk/mach/vm_map.defs:116,132,153` wraps
+# `vm_allocate`, `vm_deallocate` and `vm_protect` in
+#
+#     #if !KERNEL && !LIBSYSCALL_INTERFACE
+#     skip;
+#     #else
+#     routine PREFIX(vm_deallocate)(...)
+#     #endif
+#
+# — the `skip;` is the *userspace* side, where libsystem provides them. Without `-DKERNEL` the
+# kernel's own `<mach/vm_map.h>` did not declare the three functions `osfmk/vm/vm_user.c:336`
+# defines, and `grep -c deallocate out/mach_headers/mach/vm_map.h` was **0**. Measured cost:
+# `iokit/Kernel/IOUserClient.cpp` (2 sites) and `IOMaterial`-sized `IOMemoryDescriptor.cpp` (2) failed
+# on "use of undeclared identifier: vm_deallocate / mach_vm_deallocate", and 10 of the boot path's 46
+# stubs. See experiment-156.
+#
+# Kept as one list rather than four, because it was four hand-copied copies of one Apple value in this
+# file before — this project's most-repeated defect — and the copies are exactly how the omission
+# survived: three of them agreed with each other and none with Apple.
+#
+# `-DAPPLE` is left out because it appears in no `.defs` outside license comments; `-D__MACHO__=1` and
+# `-Dvolatile=__volatile` are referenced by no `.defs` in the tree; `$(CONFIG_DEFINES)` and
+# `$(SEED_DEFINES)` are per-configuration facts this build carries in its own `-D` table and in the
+# generated `OPTIONS/` headers. `-DPRIVATE` *is* used (`mach_host.defs:252-261` puts
+# `mach_zone_force_gc` behind `#ifdef PRIVATE`), so it is here.
+DEFS_DEFINES=(-DKERNEL=1 -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DPRIVATE=1)
+
+# `-DMACH_KERNEL_PRIVATE` is NOT in `$(DEFINES)`: it comes from MIGKUFLAGS/MIGKSFLAGS per rule
+# (`osfmk/mach/Makefile:247-248`). It is passed on every run here, including the export variant, and
+# that is a deliberate deviation recorded in experiment-144 — `mach_types.defs:606-615` needs it
+# *together with* `KERNEL_SERVER` for the eight `simport` lines, so it changes nothing for the export
+# variant and is harmless on the user one.
+MACH_KERNEL_PRIVATE_DEFINE=(-DMACH_KERNEL_PRIVATE=1)
+
 # `--all` used to mean "every .defs in osfmk/mach"; that is now the default, so it is accepted and
 # ignored rather than removed, in case a command line out there still spells it.
 [[ ${1:-} == --all ]] && shift
@@ -154,7 +195,7 @@ for rel in "${DEFS_FILES[@]}"; do
     # makes the generated server headers `#include <kern/ipc_kobject.h>` - which is where IKOT_* and
     # ipc_kobject_type_t come from for vm_user.c, memory_object.c, vm_map.c, mach_port.c and
     # mk_timer.c. Without it those files fail on 34 occurrences of names that are in the tree.
-    cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 -DKERNEL_SERVER=1 \
+    cc -E -x c "${DEFS_DEFINES[@]}" "${MACH_KERNEL_PRIVATE_DEFINE[@]}" -DKERNEL_SERVER=1 \
        -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" \
        "$defs" >"$OUT/$base.pp" 2>"$OUT/$base.cpp.log"
     if ! grep -qE '^[[:space:]]*subsystem' "$OUT/$base.pp"; then
@@ -256,7 +297,7 @@ for rel in "${DEFS_FILES[@]}"; do
     # build-dir variant goes to $OUT/kserver, which the build places first for osfmk files only.
     if [[ ",$kinds," == *,sheader,* || ",$kinds," == *,server,* ]]; then
         # (1) the export variant: MIGFLAGS only, exactly as the MIG_USHDRS rule.
-        cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 \
+        cc -E -x c "${DEFS_DEFINES[@]}" "${MACH_KERNEL_PRIVATE_DEFINE[@]}" \
            -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" "$defs" >"$OUT/$base.srv.pp" 2>>"$OUT/$base.cpp.log"
         # Header only. Apple's MIG_USHDRS rule asks for `-sheader $@` and nothing else, which is why
         # the export root carries no `_server.c`.
@@ -275,7 +316,7 @@ for rel in "${DEFS_FILES[@]}"; do
         # KERNEL_SERVER run defines. Apple has both in the build dir; so does this.
         if [[ ",$kinds," == *,sheader,* || ",$kinds," == *,server,* ]]; then
             mkdir -p "$KSERVER/$outdir"
-            cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 -DKERNEL_SERVER=1 \
+            cc -E -x c "${DEFS_DEFINES[@]}" "${MACH_KERNEL_PRIVATE_DEFINE[@]}" -DKERNEL_SERVER=1 \
                -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" "$defs" >"$OUT/$base.ksrv.pp" 2>>"$OUT/$base.cpp.log"
             server_out=/dev/null; ksrv_sheader=/dev/null
             [[ ",$kinds," == *,server,*  ]] && server_out="$KSERVER/$outdir/${base}${server_suffix_for_run}.c"
@@ -289,7 +330,7 @@ for rel in "${DEFS_FILES[@]}"; do
 
     # --- the user side: -DKERNEL_USER=1 ----------------------------------------------------
     if [[ ",$kinds," == *,header,* || ",$kinds," == *,user,* ]]; then
-        cc -E -x c -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 -DKERNEL_USER=1 \
+        cc -E -x c "${DEFS_DEFINES[@]}" "${MACH_KERNEL_PRIVATE_DEFINE[@]}" -DKERNEL_USER=1 \
            -I"$XNU/osfmk/mach" -I"$XNU/osfmk" -I"$XNU/bsd" "$defs" >"$OUT/$base.usr.pp" 2>>"$OUT/$base.cpp.log"
         header_out=/dev/null; user_out=/dev/null
         [[ ",$kinds," == *,header,* ]] && header_out="$OUT/$outdir/$base.h"

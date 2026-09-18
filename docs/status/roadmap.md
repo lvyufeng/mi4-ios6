@@ -1895,6 +1895,58 @@ null pointer constant in C++, so every `return NULL;` in a `.cpp` was an error; 
 came from a `.cpp` the flag list could not stop from being compiled. A measurement can be an artifact
 and still have something real inside it.
 
+**AND THE MIG RUN WAS MISSING ONE WORD FROM APPLE'S DEFINE LIST** (2026-09-18,
+[`experiment-156`](../experiments/experiment-156-the-mig-run-was-missing-kernel.md)).
+`gen_mach_headers.sh` preprocesses each `.defs` before MIG, with a hand-written flag list — four
+copies of it, in fact, three of which agreed with each other and none with Apple's `$(DEFINES)`
+(`makedefs/MakeInc.def:78-80`), which is the first thing in `MIGFLAGS` (`:470`). **`-DKERNEL` was
+not in any of them.**
+
+It is load-bearing in the `.defs` language. `osfmk/mach/vm_map.defs:75-79` is
+
+```
+#if !KERNEL && !LIBSYSCALL_INTERFACE
+#define PREFIX(NAME) CONCAT(_kernelrpc_, NAME)
+#else
+#define PREFIX(NAME) NAME
+#endif
+```
+
+and `:116,132,153` wrap `vm_allocate`, `vm_deallocate` and `vm_protect` in the same `#if … skip;
+#else routine PREFIX(…); #endif`. So the kernel's own `<mach/vm_map.h>` was generated with the
+**userspace** branch throughout: the three routines were skipped, and every `PREFIX(...)` routine
+carried the `_kernelrpc_` name — the one libsystem calls it by, not the one the kernel defines it
+under. `grep -c deallocate out/mach_headers/mach/vm_map.h` was **0**; it is 7.
+
+| | before | after |
+| --- | --- | --- |
+| generated MIG files that differ | — | **32 of 260** |
+| `RELEASE` / `STAGE90_BOOT`, C++ | 75 of 83 | **78 of 83** (both) |
+| undefined symbols, `RELEASE` | 448 | **189** |
+| undefined symbols, `STAGE90_BOOT` | 586 | **330** |
+| boot-path stubs, `RELEASE` / `STAGE90_BOOT` | 46 / 53 | **42 / 50** |
+
+Three C++ files closed, and they were three different problems that had been counted as one:
+`IOUserClient.cpp` and `IOMemoryDescriptor.cpp` on `vm_deallocate`/`mach_vm_deallocate` — **which have
+no other declaration anywhere in the tree** — and `IOService.cpp` on `thread_policy_set`, whose
+prototype at `osfmk/mach/thread_policy.h:54-66` is **inside a `/* … */` block**, which is why clang's
+suggestion was the next identifier down. All three are defined by the kernel
+(`osfmk/vm/vm_user.c:336`, `osfmk/kern/thread_policy.c:272`); only the declaration was missing.
+
+**Most of the 259-symbol drop is not the define.** The three files now compile, so their 829 defined
+symbols enter the image and **250 of them were undefined before**; 13 are the `PREFIX` change (12
+`_kernelrpc_*` plus `_host_page_size`); 4 are new references the new objects bring. 448 − 250 − 13 +
+4 = 189. And the C side is **unchanged at 608 of 615** — those 13 names were being stubbed silently
+in a C build that reported no problem at all, because a stub is not a diagnostic.
+
+The four hand-copied lists are now one array, `DEFS_DEFINES=(-DKERNEL=1 …)`. `-DAPPLE` is out (no
+`.defs` references it outside license comments), `-D__MACHO__=1` and `-Dvolatile=__volatile` are
+referenced by no `.defs`, and `-DMACH_KERNEL_PRIVATE` stays exactly where it was because
+experiment-144's export/`kserver` split depends on the arrangement — re-checked, not assumed
+(`exc_server.h` and `vm_map_server.h` still carry `ipc_kobject` in `kserver/` only). Eleventh
+instance of the one-value-two-definitions class. Nothing in XNU's source changed, both configurations
+build to exit 0, and the payload is byte-identical.
+
 **AND THE ASSEMBLY TRANSLATOR HAD BEEN WRITING INTO APPLE'S TREE** (2026-09-18,
 [`experiment-155`](../experiments/experiment-155-the-translator-wrote-into-the-tree.md)). Found
 because `stages/stage90/build.sh` stopped at its own gate:
