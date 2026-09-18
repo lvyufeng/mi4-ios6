@@ -2697,6 +2697,34 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # payload text 1376490. `kv_written == kv_in_dram == 0x3c`, one below 262's 0x3d because
     # `waitq_bootstrap` is one character shorter than `ltable_bootstrap` - both are 9 characters of
     # `_bootstrap`, so the difference is `ltable` (6) against `waitq` (5).
+    # 264: `waitq_bootstrap`, and the frontier closes on names 262 created. 263's stop was
+    # `waitq_bootstrap`, and the seven `waitq_*` boundaries 262's scheduler link added
+    # (`waitq_lock`, `waitq_unlock`, `waitq_assert_wait64_locked`, `waitq_pull_thread_locked`,
+    # `waitq_wakeup64_all`, `waitq_wakeup64_identify`, `waitq_wakeup64_thread`) said which object
+    # answers them: `osfmk/kern/waitq.c` (manifest:603), `osfmk_kern_waitq.o`. It is 21084 bytes of
+    # text, 8 of data, 172 of bss, and has **49 references - 48 of them already satisfied**, so the
+    # link adds exactly one name (`waitq_set__CALLING_PREPOST_HOOK__`, called from
+    # `waitq_wakeup64_identify`'s prepost-hook path, off the bootstrap path) and replaces twelve
+    # stand-ins. `waitq_bootstrap` itself is 13 calls with only eight distinct targets, and every
+    # one is already real: `PE_parse_boot_argn` (x4), `kernel_memory_allocate`, `panic`,
+    # `hw_lock_init`, `zinit`, `zone_change`, `_consume_printf_args` (x2) and `ltable_init` (x2) -
+    # the last one made real by 263, so this is the frontier resolving names the *last two* steps
+    # created. **Prediction:
+    # `stub_hit=ipc_bootstrap`, `xnu_entry_stub_caller=0x8000dc78`** (`caller - 4` = `0x8000dc74` =
+    # `kernel_bootstrap+0x234`). Device: **`stub_hit=ipc_bootstrap`,
+    # `xnu_entry_stub_caller=0x8000dc78`** = `kernel_bootstrap+0x238` - the prediction, a seventh
+    # time, and the four `waitq_*` calls 262 added resolved by the object that answers them.
+    #
+    # Measured: resolved **12** (the seven 262 created - `waitq_lock`, `waitq_unlock`,
+    # `waitq_assert_wait64_locked`, `waitq_pull_thread_locked`, `waitq_wakeup64_all`,
+    # `waitq_wakeup64_identify`, `waitq_wakeup64_thread` - plus `waitq_bootstrap`, `waitq_init`,
+    # `waitq_assert_wait64`, `waitq_wakeup64_one` and `_global_eventq`), added **1**
+    # (`waitq_set__CALLING_PREPOST_HOOK__`); 630 -> 619 undefined, 554 -> 543 function stubs,
+    # storage unchanged at 76; text 773988 -> 794436 (+20448), image 884272 -> 900664 (16 KB block
+    # +8), bss end 0x8010b2c8, args +1101824, topOfKernelData unchanged at +3145728, headroom
+    # 2051384, payload text 1392882. `kv_written == kv_in_dram == 0x3a`, two below 263's 0x3c:
+    # `ipc_bootstrap` is two characters shorter than `waitq_bootstrap`.
+    OSFMK_KERN_WAITQ_OBJ=${STAGE90_ENTRY_OSFMK_KERN_WAITQ_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_waitq.o}
     OSFMK_KERN_LTABLE_OBJ=${STAGE90_ENTRY_OSFMK_KERN_LTABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_ltable.o}
     OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
@@ -2794,6 +2822,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_SCHED_PRIM_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_LTABLE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_WAITQ_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2803,7 +2832,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

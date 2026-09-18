@@ -277,6 +277,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-261](experiment-261-stackshot-init-completes-and-the-scheduler-is-next.md) | **`stackshot_init` completes** — `osfmk/kern/kern_stackshot.o` (not `stackshot.o`), the largest new block since 254 (+40 boundaries, the kcdata/coalition/kdp machinery) and 3 resolved; stop `sched_init` at `kernel_bootstrap+0x204`; the image moves a 16 KB block again |
 | stage90 | [experiment-262](experiment-262-the-scheduler-is-two-objects.md) | **The scheduler is two objects** — `sched_prim.o` + the `sched_multiq_dispatch` table it calls through (a NULL stand-in would have jumped to 0); 30 resolved, 28 added; a five-function chain predicted from the linked table and confirmed; stop `ltable_bootstrap` |
 | stage90 | [experiment-263](experiment-263-ltable-bootstrap-completes-and-adds-nothing.md) | **`ltable_bootstrap` completes and the link adds nothing** — `osfmk/kern/ltable.o`, 19 references all already satisfied, 1 resolved; stop `waitq_bootstrap` at `kernel_bootstrap+0x224` |
+| stage90 | [experiment-264](experiment-264-waitq-bootstrap-completes-and-the-frontier-closes-on-names-262-created.md) | **`waitq_bootstrap` completes, and the frontier closes on names 262 created** — `osfmk/kern/waitq.o`, 49 references of which 48 were already satisfied; the seven `waitq_*` boundaries the scheduler link added resolved; 12 resolved, 1 added; stop `ipc_bootstrap` at `kernel_bootstrap+0x234` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
