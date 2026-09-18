@@ -2043,6 +2043,56 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # definitions, 4 references (`panic`, `vm_map_holes_zone`, `zalloc`, `zfree`) that are **all four
     # already defined**, so that step may also have nothing missing underneath it.
     OSFMK_VM_VM_MAP_STORE_LL_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_STORE_LL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_map_store_ll.o}
+    # `osfmk/vm/vm_map_store_rb.c` -> **5808 bytes of text, 24 global definitions, 4 references**
+    # (`panic`, `vm_map_holes_zone`, `zalloc`, `zfree`) - **all four already defined**, so this is the
+    # second step in a row whose object has nothing missing underneath it. It is the largest object
+    # since experiment 239's `vm_map.o`, and the one that brings the red-black tree
+    # (`rb_head_RB_INSERT`, `rb_head_RB_REMOVE`, `rb_head_RB_MINMAX`, `rb_node_compare`,
+    # `update_holes_on_entry_creation`, `update_holes_on_entry_deletion`, `vm_map_combine_hole`,
+    # `vm_map_delete_hole`) and the hole-list code that allocates from `vm_map_holes_zone` - which is a
+    # storage definition in the already-linked `osfmk_vm_vm_map.o`, so unlike most storage symbols in
+    # this sequence it is real data rather than a stand-in.
+    #
+    # The object 246's stop named: `vm_map_store_init_rb` is its first definition, and the call to it
+    # was a tail call - which is why 246's `xnu_entry_stub_caller` was `vm_map_create+0x5c` rather than
+    # an address inside `vm_map_store_init`.
+    #
+    # **247 measured it, and it is the step where a whole function finished.** `vm_map_store_init_rb`
+    # is three instructions (`mov r1, #0` / `str r1, [r0, #24]` / `bx lr`), so like 246's `bx lr` it
+    # moves the stop rather than resolving it - and this time out of the dispatcher, because
+    # `kmem_init`'s whole closure turned out to be real. Enumerated from the disassembly, call target
+    # by call target, before the run: `kmem_init` -> `vm_map_create`, `pmap_virtual_region`,
+    # `vm_map_enter`, `panic`, `__aeabi_uldivmod`; `vm_map_create` -> `zalloc` (twice),
+    # `vm_map_store_init`, `lck_rw_init`, `lck_mtx_init_ext`. So the prediction was that `kmem_init`
+    # completes and the stop moves to `vm_mem_bootstrap`'s next call after it, whose candidates are
+    # the `kmapoff`/`early_random` block: `vm_allocate_kernel` (`+0xf4`, a stub) when
+    # `early_random() & 0x1ff` is non-zero, `kext_alloc_init` (`+0x1a4`, a stub) when it is zero.
+    #
+    # Device: **`stub_hit=vm_allocate_kernel`, `xnu_entry_stub_caller=0x800403f4`** =
+    # `vm_mem_bootstrap+0xf8`, whose `caller - 4` is `800403f0: bl 80085030 <vm_allocate_kernel>` - the
+    # call site itself, this call being a `bl` (246's was a `b`, and that is how the two are told
+    # apart). `kv_written == kv_in_dram == 0x3f`. And the run measured four things by *completing*
+    # them rather than by predicting them: `kernel_map` was created by `vm_map_create` in full (zone
+    # allocation, both stores, the hole list, `lck_rw_init`, `lck_mtx_init_ext`);
+    # `pmap_virtual_region(0, ...)` returned TRUE for `[0x80000000, 0x40000000)` so `vm_map_enter`
+    # reserved a gigabyte in it and did not panic; `PE_parse_boot_argn("kmapoff")` returned FALSE (our
+    # boot args have no such key); and `early_random()` ran its whole first-call path - seed from
+    # `PE_get_random_seed`, `ccdrbg_factory_nisthmac`, `ccdrbg_init` with a `ml_get_timebase()` nonce,
+    # `ccdrbg_generate` - returning a value whose low nine bits are not zero. See the experiment
+    # document for the marker that makes each of those a measurement rather than an absence.
+    #
+    # Cost: text 611793 -> 617809 (+6016), resolved 7 and added 0 (`vm_map_store_lookup_entry_rb` was
+    # linked but was never a stub; `vm_map_store_has_RB_support` is still inlined into the dispatcher's
+    # `cmp`), 626 undefined, 541 function and 85 storage stubs, and **the image, `.bss`,
+    # `__entry_image_end`, the layout, the headroom and the payload's size are unchanged for the third
+    # step running** - the alignment padding has absorbed the 6464 bytes of text that 245, 246 and 247
+    # added between them.
+    #
+    # Next: `vm_allocate_kernel` is in `osfmk_vm_vm_user.o` - 16196 bytes of text, 91 references, so
+    # unlike the last three steps it brings a great deal with it (`vm_map_copy*`, `vm_map_protect`,
+    # `vm_map_remove`, `vm_map_wire_kernel`, the `upl_*` family, and new `ipc_port_*` and
+    # `memory_object_*` stubs).
+    OSFMK_VM_VM_MAP_STORE_RB_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_MAP_STORE_RB_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_map_store_rb.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -2121,6 +2171,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_VM_VM_KERN_OBJ"       "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_MAP_STORE_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
@@ -2128,7 +2179,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$LIBKERN_GEN_OSATOMICOPERATIONS_OBJ" "$BSD_KERN_KERN_MEMORYSTATUS_OBJ"
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
-    "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ")
+    "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
