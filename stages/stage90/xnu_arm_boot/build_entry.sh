@@ -3047,6 +3047,93 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 278: `ipc_port_alloc_special`, and the step that starts on the object XNU's own linkage makes
+    # the largest one on this path.
+    # 277's stop was `ipc_port_alloc_special`, and the object that defines it is `osfmk/ipc/ipc_port.c`
+    # (manifest:517), `osfmk_ipc_ipc_port.o` - **8924 bytes of text, 16 of bss, 81 of
+    # `.rodata.str1.1`, 48 definitions and 53 references**. The three strings are `"ipc port"`,
+    # `"ipc ports"` and a format string; the 16 bytes of bss are `ipc_port_timestamp_data` (4),
+    # `ipc_port_multiple_lock_data` (8) and `ipc_portbt` (4).
+    #
+    # **20 resolved, 19 added** - bigger than 277 on both sides. The 20 retired are 18 functions and
+    # **two storage stand-ins**:
+    #
+    #     ipc_port_alloc_special          ipc_port_dealloc_special       ipc_port_destroy
+    #     ipc_port_make_send              ipc_port_make_send_locked      ipc_port_make_sonce_locked
+    #     ipc_port_copy_send              ipc_port_copyout_send          ipc_port_release_send
+    #     ipc_port_release_sonce          ipc_port_nsrequest             ipc_port_check_circularity
+    #     ipc_port_impcount_delta         ipc_port_importance_delta      ipc_port_importance_delta_internal
+    #     ipc_port_sync_qos_delta         kdp_mqueue_send_find_owner     kdp_mqueue_recv_find_owner
+    #     ipc_port_multiple_lock_data     ipc_port_timestamp_data        <- storage, 8 and 4 bytes
+    #
+    # and the 19 added are all functions, each defined by an object the build has already compiled -
+    # the rule since 244:
+    #
+    #     ipc_object_alloc          ipc_object_alloc_name     ipc_object_copyout
+    #     ipc_mqueue_init           ipc_mqueue_deinit         ipc_mqueue_destroy_locked
+    #     ipc_mqueue_changed        ipc_mqueue_override_send  ipc_entry_lookup
+    #     ipc_pset_remove_from_all  ipc_notify_send_possible  ipc_notify_port_destroyed
+    #     ipc_notify_send_once      ipc_notify_no_senders     ipc_notify_dead_name
+    #     io_free                   ipc_kmsg_reap_delayed     task_is_importance_donor
+    #     knote_adjust_sync_qos
+    #
+    # The last two are the first names this walk has obliged out of `osfmk/kern/task_policy.o` and out
+    # of `bsd/`'s `kern_event.c` - but they are on the sync-QoS path, not on the allocation path, so
+    # they will be stubs this step does not reach.
+    #
+    # **Prediction: `stub_hit=ipc_mqueue_init`, with the caller at `ipc_port_alloc_special+0x94`.**
+    # `ipc_host_init` calls it first thing (`800b757c bl ipc_port_alloc_special`), and the object's own
+    # stream is short and entirely real until its last call:
+    #
+    #     1ec8: push {r4, r5, fp, lr}
+    #     1ed8: ldr r0, [ipc_object_zones]      ; IOT_PORT is 0 (`ipc_object.h:149`)
+    #     1edc: bl zalloc                       ; REAL - zalloc.o, and see below
+    #     1ee4: beq -> return IP_NULL           ; the only exit that is not the full one
+    #     1ef0: bl bzero(port, 128)             ; REAL, and `mov r1, #128` is sizeof(struct ipc_port)
+    #     1f08: bl lck_spin_init(port+8, ipc_lck_grp, ipc_lck_attr)   ; REAL
+    #     1f1c: strd r2, [r4]                   ; io_bits 0x80000000, ip_references 1
+    #     1f50: str r5, [r4, #72]               ; the space argument
+    #     1f58: bl ipc_mqueue_init(port+16)     ; A STUB  <- the stop
+    #     1f5c: mov r0, r4 / pop {r4, r5, fp, pc}
+    #
+    # (`ipc_port_init` is real in this object at +0x5c4 and is **inlined** here, which is why the
+    # source's `ipc_port_init(port, space, 1)` shows up as the stores above rather than as a call.)
+    # The caller key is `ipc_port_alloc_special+0x94`: a `bl`'s return address inside the function the
+    # call is in, the same shape 276 and 277 had.
+    #
+    # **The one thing this prediction depends on is that `zalloc` succeeds**, because a zone that
+    # cannot grow takes a real `panic` before the stub is reached - and the argument for it is a
+    # measurement, not a hope: `ipc_space_create_special` calls `zalloc` at `800ac520` from inside
+    # `ipc_bootstrap`, and 274 is the run in which `ipc_bootstrap` **returned**. So a `zalloc` from a
+    # zone `ipc_bootstrap` created with the same `scale_setup` numbers has already worked on this
+    # device, once. And `ipc_object_zones[IOT_PORT]` is the *same stand-in array* `ipc_bootstrap`
+    # filled with a real `zinit("ipc ports", 128, ipc_port_max*128, 128)` in that run - the stand-in is
+    # zeroed at payload start and written by real code before `ipc_port_alloc_special` ever sees it,
+    # which is why reading a zeroed stand-in here is not a null-zone panic.
+    OSFMK_IPC_IPC_PORT_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_PORT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_port.o}
+    #
+    # **278 measured it, and both halves held.** The build measured **20 resolved, 19 added**:
+    # 860 -> 859 undefined, 784 -> 785 function stubs, storage 76 -> 74, text 953220 -> 962244,
+    # image bytes unchanged at 1066104 (the growth fitted the padding again), `.bss`
+    # `0x80103a00` .. `0x80139548` (219976 bytes), headroom 1862328. `ipc_port_alloc_special` is real
+    # at `0x800ba26c` and the linked stream is the object's: `800ba280 bl zalloc`,
+    # `800ba294 bl __bzero`, `800ba2ac bl lck_spin_init`, `800ba2fc bl ipc_mqueue_init`.
+    #
+    # The run stopped at **`stub_hit=ipc_mqueue_init`** with `xnu_entry_stub_caller_v=0x800ba300` =
+    # **`ipc_port_alloc_special+0x94`**, whose `caller-4` is `800ba2fc bl 800d0e94 <ipc_mqueue_init>`;
+    # `_a` and `_e` agree, `_w0 = 0x62303038` / `_w1 = 0x30303361` = `800ba300` from the first digit
+    # (`digits = 0x33` = 26 + 25, a 15-character name), `kv_written=0x60` (96 = 26 + 34 + 36),
+    # `kv_in_dram=0x84` (132 = 96 + 36), `kv_dropped=0`, `why_byte=0x61`, zero abort entries, echo
+    # intact. 661 of 661 words of `entry_kv` through `entry_stub_hit` match the linked ELF (seventh
+    # build running).
+    #
+    # **So `zalloc` really allocated, on this device, from the zone `ipc_bootstrap` created four
+    # experiments ago** - and a real 128-byte port object came out of the "ipc ports" zone, was
+    # bzeroed, had its spin lock initialized with the real `ipc_lck_grp`/`ipc_lck_attr` that
+    # `ipc_bootstrap` filled in, and took `io_bits = 0x80000000` and `ip_references = 1`. That is the
+    # **first IPC port this kernel has ever allocated**, and the first time the walk has executed an
+    # allocation path rather than an initialization one. It stopped one instruction later, on
+    # `ipc_mqueue_init`, which is `osfmk/ipc/ipc_mqueue.c` and is the next step.
     # 277: `ipc_host_init`, and the largest stub retirement this walk has made.
     # 276's stop was `ipc_host_init`, and the object that defines it is `osfmk/kern/ipc_host.c`,
     # `osfmk_kern_ipc_host.o` - the manifest line is **550** in `out/xnu_arm_manifest.txt` (549 is
@@ -3705,6 +3792,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$SECURITY_MAC_BASE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$SECURITY_MAC_LABEL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_IPC_HOST_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_IPC_IPC_PORT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -3717,7 +3805,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
