@@ -6937,34 +6937,17 @@ static inline uint32_t stage90_xnu_real_dt_checksum(const struct stage90_xnu_rea
 #define STAGE90_XNU_ENTRY_VERSION 1u
 
 /*
- * Where `_start` builds its own page tables, as an offset from the entry base. The entry image may
- * own everything below it and nothing above it: `osfmk/arm/start.s:149-180` loads this value out of
- * boot_args into TTBR0 and TTBR1 and then writes table entries over the 40 KB (ten pages) that
- * begin there - four L1 pages for each of the two translation tables, the L2 page it steals for a
- * non-1MB-aligned end, and the page table for the high exception vectors at `+PGBYTES*9`. An image
- * that reaches past it is not a build error; it is XNU's own page tables landing on this image's
- * data a few instructions into the boot.
+ * Where `_start` builds its own page tables, where the boot_args and the device tree sit, and how
+ * big the window is, are all properties of the *linked image* - so they are computed by
+ * `xnu_arm_boot/build_entry.sh` after the link and written into the generated `xnu_arm_entry.h`,
+ * which the payload includes. They were constants here for two experiments (168, 169) and the
+ * second one was spent moving them by hand; deriving them instead is what experiment 175 is.
  *
- * It was 0x20000 while the image was five objects and 98688 bytes (experiment-168). Linking
- * `pexpert/arm/pe_init.o` adds 34927 bytes of text on its own, which does not fit under a 128 KB
- * ceiling, so this is the first time the image moves the ceiling rather than fitting under it.
- * 0x60000 rather than "just enough" because the alternative to headroom is another experiment
- * spent moving a number: it leaves 384 KB for the image and still ends 0x10000 below the device
- * tree at `ENTRY_DT_OFFSET` (0x80000), which is the one thing above it that must not be overlapped.
- *
- * The other side of the same limit is `xnu_arm_boot/build_entry.sh`, which refuses to link an
- * image that reaches past it and reads *this* macro (`-E -dM -include stage90.h`) rather than
- * repeating the number, so the two cannot drift.
+ * The image may own everything below `STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET` and nothing above it:
+ * `osfmk/arm/start.s:149` loads that value out of boot_args into TTBR0 and TTBR1 and then writes
+ * `STAGE90_XNU_ENTRY_TABLE_BYTES` (ten pages, 40 KB) of table entries starting there. See
+ * build_entry.sh for the four invariants between the image, the boot_args, the tables and the tree.
  */
-#define STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET 0x00060000u
-
-/*
- * Where the payload copies the device tree, as an offset from the entry base, and the size of the
- * buffer it checks the tree against. This is the one thing above the page tables, so it is what
- * bounds `STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET` from above: build_entry.sh fails the link if the
- * limit plus the 40 KB of tables would reach it.
- */
-#define STAGE90_XNU_ENTRY_DT_OFFSET 0x00080000u
 
 struct stage90_xnu_entry_result {
     uint32_t version;

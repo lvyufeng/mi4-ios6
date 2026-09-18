@@ -188,6 +188,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-172](experiment-172-the-reader-reached-a-cpu-nodes-state.md) | The Reader Walked to a CPU Node's `state` Property — Six Claims from `stub_hit=strncmp` |
 | stage90 | [experiment-173](experiment-173-pe-init-platform-reached-its-last-statement.md) | `PE_init_platform` Reached Its Last Statement, `pe_init_debug` |
 | stage90 | [experiment-174](experiment-174-pe-init-debug-ran-and-stopped-at-pe-boot-args.md) | `pe_init_debug` Ran, and the Frontier Is `PE_boot_args` |
+| stage90 | [experiment-175](experiment-175-the-entry-image-is-derived-not-written-down-twice.md) | The Entry Image Is Derived From the Link, Not Written Down Twice |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

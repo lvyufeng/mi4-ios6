@@ -63,20 +63,23 @@
 extern const uint8_t stage90_xnu_entry_blob[];
 extern const uint32_t stage90_xnu_entry_blob_size;
 
-#define ENTRY_ARGS_OFFSET   0x00007000u   /* boot_args copy, inside the window, below the tables */
-#define ENTRY_ARGS_PA       (STAGE90_XNU_ENTRY_BASE + ENTRY_ARGS_OFFSET)
-
 /*
- * Where the device tree goes. Inside the window, past the image and its BSS (which the link
- * reports), and past topOfKernelData plus the 40 KB of page tables `_start` writes there. The
- * distance is checked rather than assumed - build_entry.sh refuses to link an image whose data
- * limit plus those 40 KB would reach this offset. The tree is 0x7294 bytes today and the buffer
- * below is sized for four times that, so a growing tree fails a check rather than silently
- * overlapping the tables.
+ * Where everything above the image goes. All three offsets come from the generated
+ * `xnu_arm_entry.h`, which build_entry.sh writes after it links the image, and they were constants
+ * here until experiment 175 - which is one experiment after the second time two copies of one of
+ * them disagreed. Each is checked at build time against the one before it, so an image that grows
+ * moves them and nothing here has to be edited.
+ *
+ * The boot_args copy is the first page above the image; `topOfKernelData` is where `_start` builds
+ * its own page tables; the device tree is 2 MB above that, so it clears the 40 KB of tables
+ * `start.s` writes by more than any tree this project builds will need. The tree is 0x7294 bytes
+ * today and its buffer is sized for four times that.
  */
+#define ENTRY_ARGS_OFFSET   STAGE90_XNU_ENTRY_ARGS_OFFSET
+#define ENTRY_ARGS_PA       (STAGE90_XNU_ENTRY_BASE + ENTRY_ARGS_OFFSET)
 #define ENTRY_DT_OFFSET     STAGE90_XNU_ENTRY_DT_OFFSET
 #define ENTRY_DT_PA         (STAGE90_XNU_ENTRY_BASE + ENTRY_DT_OFFSET)
-#define ENTRY_DT_MAX        0x00020000u
+#define ENTRY_DT_MAX        STAGE90_XNU_ENTRY_DT_MAX
 
 static struct stage90_xnu_entry_result g_result;
 
@@ -137,12 +140,20 @@ static void xnu_entry_build_args(const struct boot_args *src)
      */
     a->virtBase = STAGE90_XNU_ENTRY_BASE;
     a->physBase = STAGE90_XNU_ENTRY_BASE;
-    /* 2 MB: the whole window, so `_start`'s section loop covers the image and the tables. */
+    /*
+     * The whole window, so `_start`'s section loop covers the image and the tables. It is 8 MB as
+     * of experiment 175 rather than the 2 MB it was through 168-174, because the layout above the
+     * image is now derived from the image: the tree sits at +4 MB and takes memSize at least that
+     * far. `_start` walks memSize in section-sized steps setting up the page tables for whatever
+     * it finds, so a value larger than what is populated only costs that walk.
+     */
     a->memSize = STAGE90_XNU_ENTRY_SIZE;
     /*
-     * Above the image and its BSS - build_entry.sh checks that against the same macro - inside the
-     * 2 MB span, and with the 40 KB `start.s` writes here kept clear of the device tree above it.
-     * The value lives in stage90.h so that the build and this boot_args cannot disagree about it.
+     * Above the image and its BSS, which is the invariant build_entry.sh checks against this same
+     * macro: `_start` writes 40 KB of table entries starting here, so anything the image owns must
+     * end below it. It sits one page above the boot_args, which is what keeps those tables off the
+     * boot_args page. The value comes from the generated `xnu_arm_entry.h` so that the build and
+     * this boot_args cannot disagree about it.
      */
     a->topOfKernelData = STAGE90_XNU_ENTRY_BASE + STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET;
     a->machineType = 0x00009074u;

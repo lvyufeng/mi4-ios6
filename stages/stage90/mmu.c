@@ -1,4 +1,5 @@
 #include "stage90.h"
+#include "xnu_arm_entry.h"   /* the entry image's base, size and layout - see the STAGE90_XNU_ENTRY bits */
 
 #define L1_SECTION_COUNT       4096u
 #define L1_SECTION_SIZE        0x00100000u
@@ -5403,17 +5404,18 @@ static void build_identity_table(void)
 {
     memset(stage90_l1_table, 0, sizeof(stage90_l1_table));
 
-    /* Low payload/code/data/BSS/stack/VBAR page-table area. */
-    map_section_dram(0x00000000u, 0x00000000u);
-
     /*
-     * Stage86: BSS (g_boot_args, g_apple_dt, stage90_candidate_l1) and the device
-     * tree grew past the 1MB section-0 boundary into section 1 (0x01000000-0x01ffffff).
-     * Stage86's image_end is 0x00115000, so this identity mapping is required for the
-     * loader preflight to dereference args/boot_args (e.g. 0x0010c04c) after the
-     * identity MMU is installed. Without it, the first args->Version read data-aborts.
+     * Low payload/code/data/BSS/stack/VBAR page-table area, sized by the payload's own link rather
+     * than by two hand-written sections. `__stage90_image_end` is the linker's end of everything
+     * this image owns (linker.ld:26), and the image grew past 1 MB in stage86 - which is why
+     * section 1 exists - so the loop is what keeps this map and the image in step. Without it the
+     * first byte past the last mapped section faults, and the first thing to fault would be the
+     * payload reading its own device tree, or its own arguments, after the identity MMU is on.
      */
-    map_section_dram(0x00100000u, 0x00100000u);
+    for (uint32_t image_off = 0u; image_off < (uint32_t)(uintptr_t)__stage90_image_end;
+         image_off += L1_SECTION_SIZE) {
+        map_section_dram(image_off, image_off);
+    }
 
     /* First controlled XNU-like high aliases for selected low code/data and debug/MMIO windows. */
     map_section_dram(STAGE90_HIGH_ALIAS_BASE, 0x00000000u);
@@ -5434,11 +5436,17 @@ static void build_identity_table(void)
 #if STAGE90_XNU_ENTRY
     /*
      * The window XNU's entry image is copied to and runs from. The identity table otherwise stops
-     * at 2 MB, so without this the copy itself would fault. Two sections, because the image's
-     * boot_args tell XNU `memSize` = 2 MB and its own tables will map exactly that much.
+     * at 2 MB, so without this the copy itself would fault.
+     *
+     * A loop, not a list of sections: the window is a property of the image (build_entry.sh
+     * computes it and writes it into xnu_arm_entry.h, and the payload's boot_args tell XNU the same
+     * `memSize`), so an image that outgrows one section count must not need an edit here. This was
+     * two hard-coded sections until experiment 175.
      */
-    map_section_dram(0x00200000u, 0x00200000u);
-    map_section_dram(0x00300000u, 0x00300000u);
+    for (uint32_t window_off = 0u; window_off < STAGE90_XNU_ENTRY_SIZE;
+         window_off += L1_SECTION_SIZE) {
+        map_section_dram(STAGE90_XNU_ENTRY_BASE + window_off, STAGE90_XNU_ENTRY_BASE + window_off);
+    }
 #endif
 
     /* MSM8974 GIC + ARM timer MMIO share the 0xf9000000 section in this stage. */

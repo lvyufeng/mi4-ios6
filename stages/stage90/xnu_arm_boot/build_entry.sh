@@ -35,31 +35,25 @@ VERBOSE=0
 [[ ${1:-} == --verbose ]] && VERBOSE=1
 
 ENTRY_BASE=0x00200000
-# 2 MB: the payload's boot_args hand XNU physBase = virtBase = 0x00200000 and memSize = 0x00200000,
-# so this is the only window XNU's own tables map.
-ENTRY_SIZE=0x00200000
 
-# The two numbers that bound the image, read out of stage90.h rather than repeated here, because
-# the boot_args the payload hands `_start` are built from the same macros and a disagreement
-# between the two is a defect this project has a name for. `topOfKernelData` is where `_start`
-# puts its own page tables (`osfmk/arm/start.s:149`); everything this image owns has to end below
-# it, and `_start` then writes 40 KB (ten pages) of table entries starting at it. The device tree
-# is copied in above that, at ENTRY_DT_OFFSET. So there are two ways to fail and both are checked:
-# an image reaching past the limit is overwritten by XNU's tables, and a limit set so high that
-# the tables reach the tree is the same corruption from the other end.
-stage90_macro() {
-    arm-none-eabi-gcc -E -dM -I"$STAGE_DIR" -include stage90.h - </dev/null |
-        awk -v n="$1" '$1 == "#define" && $2 == n {print $3}' | sed 's/[uUlL]$//'
-}
-ENTRY_DATA_LIMIT=$(stage90_macro STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET)
-ENTRY_DT_OFFSET=$(stage90_macro STAGE90_XNU_ENTRY_DT_OFFSET)
-if [[ -z $ENTRY_DATA_LIMIT || -z $ENTRY_DT_OFFSET ]]; then
-    echo "could not read the entry limits out of stage90.h - expected" >&2
-    echo "STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET and STAGE90_XNU_ENTRY_DT_OFFSET" >&2
-    exit 2
-fi
-# What `start.s`'s invalidation loop covers, in bytes: `(PGBYTES/4 + PGBYTES/4*4) * 2` words.
-ENTRY_TABLE_BYTES=0x0000A000
+# The image's own size decides everything that sits above it, so the layout is *computed* after the
+# link and written into xnu_arm_entry.h, rather than being a constant here that the payload repeats.
+# These numbers have moved twice already (experiments 168 and 169) and the second time it was
+# because two copies of one of them disagreed; from here the payload reads the same header, so a
+# disagreement is not expressible. In order, from the base:
+#
+#   [ENTRY_BASE        .. bss_end)             the image: text, data, bss, stacks
+#   [ENTRY_ARGS_OFFSET .. + one page)          the boot_args copy `_start` reads
+#   [DATA_LIMIT        .. + ENTRY_TABLE_BYTES) `_start`'s own page tables
+#   [ENTRY_DT_OFFSET   .. + ENTRY_DT_MAX)      the device tree
+#   [ENTRY_BASE        .. + ENTRY_SIZE)        the window, mapped by the payload and by XNU
+#
+# `topOfKernelData` is DATA_LIMIT: `osfmk/arm/start.s:149` loads it out of boot_args into TTBR0 and
+# TTBR1 and then writes ENTRY_TABLE_BYTES (ten pages) of entries starting there. So the image has to
+# end below it, the tree has to begin above it, and both are checked before anything is written.
+ENTRY_TABLE_BYTES=0x0000A000   # `(PGBYTES/4 + PGBYTES/4*4) * 2` words, from start.s's loop
+ENTRY_DT_MAX=0x00020000        # the tree buffer; the tree is 0x7294 today
+ARGS_BYTES=0x00001000          # one page, which is what `boot_args` needs to fit in
 
 # `STAGE90_ENTRY_REAL_ARM_INIT=1` links XNU's own compiled objects - `arm_init.o`, `data.o`,
 # `bcopy.o`, `bzero.o` - in place of the stand-ins that name themselves and return, and generates a
@@ -314,39 +308,63 @@ run arm-none-eabi-objcopy -O binary "$OUT/xnu_arm_entry.elf" "$OUT/xnu_arm_entry
 
 bin_size=$(stat -c%s "$OUT/xnu_arm_entry.bin")
 bss_bytes=$((bss_end - bss_start))
-if (( bin_size + bss_bytes > ENTRY_SIZE )); then
-    say "FAIL: image ($bin_size) + bss ($bss_bytes) does not fit in $ENTRY_SIZE" >&2
-    exit 1
-fi
-# The tighter limit, and the one that matters: `_start` places its page tables at topOfKernelData,
-# which the payload sets to ENTRY_BASE + ENTRY_DATA_LIMIT. An image that reaches past it is
-# overwritten by XNU's own tables a few instructions into the boot, which looks like corruption
-# with no cause in the log.
-if (( bss_end - ENTRY_BASE > ENTRY_DATA_LIMIT )); then
-    say "FAIL: the image ends at $((bss_end - ENTRY_BASE)) bytes from the base, past the" >&2
-    say "      $ENTRY_DATA_LIMIT bytes where _start puts its page tables" >&2
-    say "      (STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET in stage90.h). Shrink the image or raise" >&2
-    say "      it there - and if you raise it, mind the check below." >&2
-    exit 1
-fi
-# The other end of the same window. Raising the limit is how an image grows, so the number that
-# must not move is the device tree's: the tables occupy ENTRY_TABLE_BYTES above the limit, and the
-# tree sits at ENTRY_DT_OFFSET. A limit that leaves no gap produces the same corruption as an
-# oversized image, and would do it to the tree rather than to the image.
-if (( ENTRY_DATA_LIMIT + ENTRY_TABLE_BYTES > ENTRY_DT_OFFSET )); then
-    say "FAIL: a limit of $ENTRY_DATA_LIMIT leaves the $((ENTRY_DATA_LIMIT + ENTRY_TABLE_BYTES))" >&2
-    say "      bytes of tables _start writes overlapping the device tree at $ENTRY_DT_OFFSET." >&2
-    exit 1
-fi
+
+# --- the layout, derived from the image that was just linked ------------------------------------
+#
+# `_start`'s tables and the device tree go above the image, and the window has to cover all of it,
+# because the window is what the payload maps and what `memSize` tells XNU to map for itself. Each
+# of the four numbers below is the smallest value that satisfies the one before it, so growing the
+# image moves them and shrinking it moves them back - nothing here can drift out of step with the
+# link, which is the failure this whole block replaced.
+align_up() { local v=$1 a=$2; echo $(( ((v + a - 1) / a) * a )); }
+# The boot_args copy: the first page above the image, so it cannot overlap it however it grows.
+ENTRY_ARGS_OFFSET=$(align_up $((bss_end - ENTRY_BASE)) 4096)
+ENTRY_ARGS_OFFSET=$((ENTRY_ARGS_OFFSET + 0x1000))
+# topOfKernelData: 1 MB aligned, and at least 1 MB clear of the arguments so the image has room to
+# grow into before this number moves again.
+ENTRY_DATA_LIMIT=$(align_up $((ENTRY_ARGS_OFFSET + ARGS_BYTES + 0x100000)) 0x100000)
+# The tree: 2 MB above the tables, which is 50 times what they need and keeps the two apart in any
+# map or disassembly anyone reads.
+ENTRY_DT_OFFSET=$((ENTRY_DATA_LIMIT + 0x200000))
+# The window: the smallest power of two that covers the tree's whole buffer, and never smaller than
+# 2 MB - `_start` maps it as sections and a smaller window would put the tree outside its own map.
+ENTRY_SIZE=0x00200000
+while (( ENTRY_SIZE < ENTRY_DT_OFFSET + ENTRY_DT_MAX )); do ENTRY_SIZE=$((ENTRY_SIZE * 2)); done
+
+# --- the invariants that make the layout safe ---------------------------------------------------
+#
+# Both failure modes are silent corruption with no cause in the log, so both are refused here. An
+# image reaching past topOfKernelData is overwritten by XNU's own tables a few instructions into the
+# boot; a limit set so high that the tables reach the tree is the same corruption done to the tree.
+layout_fail() { say "FAIL: $*" >&2; exit 1; }
+(( bss_end - ENTRY_BASE <= ENTRY_DATA_LIMIT )) ||
+    layout_fail "the image ends $((bss_end - ENTRY_BASE)) bytes from the base, past topOfKernelData at $ENTRY_DATA_LIMIT"
+(( ENTRY_ARGS_OFFSET + ARGS_BYTES <= ENTRY_DATA_LIMIT )) ||
+    layout_fail "the boot_args at $ENTRY_ARGS_OFFSET do not fit below topOfKernelData at $ENTRY_DATA_LIMIT"
+(( ENTRY_DATA_LIMIT + ENTRY_TABLE_BYTES <= ENTRY_DT_OFFSET )) ||
+    layout_fail "the $ENTRY_TABLE_BYTES bytes of tables at $ENTRY_DATA_LIMIT reach the tree at $ENTRY_DT_OFFSET"
+(( ENTRY_DT_OFFSET + ENTRY_DT_MAX <= ENTRY_SIZE )) ||
+    layout_fail "the tree buffer at $ENTRY_DT_OFFSET (+$ENTRY_DT_MAX) is outside the $ENTRY_SIZE window"
 
 cat > "$OUT/xnu_arm_entry.h" <<EOF
-/* Generated by xnu_arm_boot/build_entry.sh. The XNU entry image, as data for the payload. */
+/* Generated by xnu_arm_boot/build_entry.sh. The XNU entry image, as data for the payload.
+ *
+ * Everything the payload needs to place, jump to and describe this image - including the layout
+ * above it, which used to be constants in stage90.h and in xnu_entry_jump.c that had to agree.
+ */
 #define STAGE90_XNU_ENTRY_BASE       $ENTRY_BASE
 #define STAGE90_XNU_ENTRY_SIZE       $ENTRY_SIZE
 #define STAGE90_XNU_ENTRY_ENTRY      $entry
 #define STAGE90_XNU_ENTRY_BSS_START  $bss_start
 #define STAGE90_XNU_ENTRY_BSS_END    $bss_end
 #define STAGE90_XNU_ENTRY_BIN_BYTES  $bin_size
+/* The layout above the image, as offsets from STAGE90_XNU_ENTRY_BASE. */
+#define STAGE90_XNU_ENTRY_ARGS_OFFSET             $ENTRY_ARGS_OFFSET
+#define STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET     $ENTRY_DATA_LIMIT
+#define STAGE90_XNU_ENTRY_DT_OFFSET               $ENTRY_DT_OFFSET
+#define STAGE90_XNU_ENTRY_TABLE_BYTES             $ENTRY_TABLE_BYTES
+#define STAGE90_XNU_ENTRY_DT_MAX                  $ENTRY_DT_MAX
+#define STAGE90_XNU_ENTRY_ARGS_BYTES              $ARGS_BYTES
 EOF
 
 say
@@ -355,19 +373,10 @@ say "entry point  $entry"
 say "text size    $text_end bytes"
 say "image bytes  $bin_size"
 say "bss          $bss_start .. $bss_end ($bss_bytes bytes, zeroed by the payload)"
-say "data limit   $ENTRY_DATA_LIMIT (topOfKernelData - base, from stage90.h)"
+say "layout       args +$ENTRY_ARGS_OFFSET, topOfKernelData +$ENTRY_DATA_LIMIT, tree +$ENTRY_DT_OFFSET, window $ENTRY_SIZE"
 say "headroom     $((ENTRY_BASE + ENTRY_DATA_LIMIT - bss_end)) bytes below topOfKernelData"
-say "above it     $ENTRY_TABLE_BYTES bytes of page tables, then the tree at ENTRY_BASE + $ENTRY_DT_OFFSET"
-# The blob the payload embeds. Same shape as the Mach-O fixture's generated header: a plain byte
-# array, so the payload build needs no objcopy step of its own.
-{
-    echo '/* Generated by xnu_arm_boot/build_entry.sh. XNU'"'"'s entry image, as bytes for the payload. */'
-    echo '#include <stdint.h>'
-    echo
-    echo 'const uint8_t stage90_xnu_entry_blob[] = {'
-    od -An -v -tu1 "$OUT/xnu_arm_entry.bin" | awk '{for (i=1;i<=NF;i++) printf "    0x%02xu,", $i; print ""}'
-    echo '};'
-    echo 'const uint32_t stage90_xnu_entry_blob_size = '"$bin_size"'u;'
-} > "$OUT/xnu_arm_entry_blob.c"
+say "above it     $ENTRY_TABLE_BYTES bytes of page tables, then the tree buffer at ENTRY_BASE + $ENTRY_DT_OFFSET"
 
-say "wrote $OUT/xnu_arm_entry.bin, .elf, .h, .map, _blob.c"
+say "wrote $OUT/xnu_arm_entry.bin, .elf, .h, .map"
+say "the payload build reads the .bin from there directly; nothing to install"
+
