@@ -1901,6 +1901,63 @@ null pointer constant in C++, so every `return NULL;` in a `.cpp` was an error; 
 came from a `.cpp` the flag list could not stop from being compiled. A measurement can be an artifact
 and still have something real inside it.
 
+**`vm_object.c` COMPILES, AND 58 OF THE 189 CLOSE WITH IT** (2026-09-18,
+[`experiment-160`](../experiments/experiment-160-vm-object-compiles.md)). experiment-158 put one file
+at the top of the work order — `osfmk/vm/vm_object.c`, 58 of the 189 undefined, referenced by
+`vm_map.o`, `vm_pageout.o`, `memory_object.o` and `bsd_vm.o`. experiment-127 had already examined that
+file and closed it: `*object = vm_object_template;` at `:355` assigns a whole struct whose
+`vm_object.h:174` member is `const`, C11 6.3.2.1p1 makes that a constraint violation, and "no flag,
+include order or macro on this host can make legal". **Both halves of that are still true** — the flag
+battery was re-run wider (`-fms-extensions`, `-fms-compatibility`, `-fno-strict-aliasing`, every
+`-std` from gnu89 to gnu17, `arm-none-eabi-gcc`) and none of it helps, because the diagnostic is an
+**error with no `[-W...]` group**. What experiment-127 did not have was the denominator: it measured
+`boot_closure.py`'s boot-path attribution, where the file is worth 2 symbols of 62, and wrote "a fair
+measure of how much it matters". Against a whole-kernel link it is worth 58 of 189.
+
+What does reach it is a macro named `const` with an empty body — `-Dconst=`. `nm --defined-only` on
+the object gives 152 symbols and exactly 58 of them are in the 189, which confirms experiment-158's
+attribution symbol by symbol. Two negative controls decided the shape, and both were run:
+
+- **Scoped to the header it fails.** A force-include that neutralizes `const` only while
+  `vm/vm_object.h` is read leaves the rest of the unit const-qualified, and a declaration reached
+  inside that window then disagrees with the same declaration reached outside it:
+  `stages/stage90/shims/kern/debug.h:6` and `osfmk/kern/debug.h:423` both declare `Debugger`, one
+  `const char *` and one `char *` — "conflicting types for 'Debugger'". Placed *first*, so that
+  everything would be inside the window, it fails earlier on `osfmk/kern/sched.h:214`'s `u_int`. So
+  the flag has to precede the first token, and it is an ordinary `-D`, not a header.
+- **Applied to the directory it costs two files.** `osfmk/vm/lz4.h:68` is `static const size_t
+  lz4_encode_scratch_size = lz4_hash_table_size;`, an initializer that *needs* `const` to be a
+  constant expression, and dropping it turns `vm_compressor_algorithms.c:52`'s array into a
+  variable-length one. `--dir vm`: 27 of 29 without the flag, 26 with it directory-wide, **28 with it
+  for `vm_object.c` alone**.
+
+| | before | after |
+| --- | --- | --- |
+| `RELEASE`, C | 608 of 615 | **609 of 615** |
+| undefined after a whole-kernel link | 189 | **132** |
+| boot-path stubs from `arm_init` | 42 of 189 | **15 of 132** |
+| reachable from `arm_init` without a stub | 2054 | **2119** |
+
+Both link routes agree on the after state (132 by `nm -u` and 132 by `measure_link.sh`), and the
+before state was re-measured the same way by moving the one new object out and re-linking, rather than
+being read off the previous experiment. 58 symbols closed and **one opened** —
+`vnode_pager_issue_reprioritize_io`, which `vm_object.c` references under `CONFIG_IOSCHED` and which
+`bsd/vm/vnode_pager.c` defines: a file entering the link brings its references with it.
+
+**And the next file is a different kind of problem.** `bsd/vm/vnode_pager.c` is the last failure in the
+directory, and preprocessing it shows the return types agree (`u_int32_t`, `uint32_t` and `__uint32_t`
+all `unsigned int`) while the **third parameter** does not: `unsigned long` in `vm_protos.h:224`
+against `size_t` in the definition. `size_t` is `unsigned int` here because `bsd/arm/_types.h:67-71`
+takes `__SIZE_TYPE__`, which clang defines per target — `long unsigned int` for `armv7-apple-ios`,
+`unsigned int` for `armv7-none-eabi`, which is this project's triple because experiment-150 closed the
+Mach-O path. So the remaining work has a component that is not a file at all but the **target's ABI**,
+and the C++ list already names it ("`operator new[]`'s `size_t`, the target triple, same as
+`vnode_pager.c`"). It is one command to measure:
+
+```bash
+XNU_KERNEL_EXTRA_DEFINES='-D__SIZE_TYPE__=long unsigned int' ./tools/build_xnu_arm_kernel.sh
+```
+
 **XNU'S REAL `arm_init` RAN ON THE DEVICE** (2026-09-18,
 [`experiment-159`](../experiments/experiment-159-the-real-arm-init-ran.md)). The entry image no
 longer stubs `arm_init`: it links XNU's own `osfmk_arm_arm_init.o`, plus XNU's own `data.o`

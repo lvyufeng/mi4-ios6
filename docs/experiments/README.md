@@ -173,6 +173,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-157](experiment-157-the-force-include-was-rewriting-declarations.md) | `-include kern/queue.h` Was Rewriting Declarations Before the Compiler Saw Them |
 | stage90 | [experiment-158](experiment-158-the-closure-is-the-whole-kernel.md) | `arm_init`'s Closure Is the Whole Kernel; the Manifest Omits 126 `optional` Sources |
 | stage90 | [experiment-159](experiment-159-the-real-arm-init-ran.md) | The Real `arm_init` Ran on the Device, and Named `cpu_data_init` |
+| stage90 | [experiment-160](experiment-160-vm-object-compiles.md) | `vm_object.c` Compiles at Last — 58 of the 189, and `-Dconst=` Is Per-File |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

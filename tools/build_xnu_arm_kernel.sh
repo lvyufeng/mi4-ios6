@@ -483,6 +483,56 @@ while read -r src; do
     CLOCK_FORCE=()
     [[ $SRC_COMPONENT == osfmk ]] && CLOCK_FORCE=(-D_CLOCK_T=1)
 
+    # The one file whose source cannot be compiled as written, and the switch that answers it.
+    #
+    # `osfmk/vm/vm_object.c:355` is `*object = vm_object_template;`, a whole-struct assignment, and
+    # `osfmk/vm/vm_object.h:174` gives that struct a `const` member:
+    #
+    #     const unsigned int wired_page_count;
+    #
+    # C11 6.3.2.1p1: a structure is not a modifiable lvalue if any member is const-qualified, so the
+    # assignment is a constraint violation. It is an **error**, not a warning, and it has no
+    # `[-W...]` group, so there is nothing to suppress — `-w`, `-Wno-error`, `-fms-extensions`,
+    # `-fms-compatibility` and `-fno-strict-aliasing` were each measured and each changes nothing,
+    # and so does every `-std` from gnu89 to gnu17, with clang *or* arm-none-eabi-gcc. No define,
+    # include order or target makes the construct legal. experiment-127 found exactly that and left
+    # the file failing.
+    #
+    # What makes it worth answering anyway is the price, which experiment-158 measured: `vm_object.o`
+    # defines **58 of the 189** symbols a whole-kernel link leaves undefined — the largest single
+    # block, and its referrers are `vm_map.o`, `vm_pageout.o`, `memory_object.o` and `bsd_vm.o`. The
+    # object this flag produces defines 152 symbols and exactly 58 of them are in that set.
+    #
+    # `-Dconst=` is a macro named `const` with an empty body, so every `const` in the translation
+    # unit evaporates. It is cruder than the defect and it is deliberate: **it has to be defined
+    # before the first token**, because the only other lever is the same trick scoped to
+    # `vm/vm_object.h`, and that was measured to fail. A scoped `#define const` around the include
+    # leaves the rest of the unit const-qualified, and a declaration reached inside the window then
+    # disagrees with the same declaration reached outside it — `stages/stage90/shims/kern/debug.h:6`
+    # and `osfmk/kern/debug.h:423` both declare `Debugger`, and reading one `const char *` and the
+    # other `char *` is "conflicting types for 'Debugger'". A unit-wide macro cannot produce that
+    # class of disagreement, because there is only one reading of every header.
+    #
+    # What it cannot do is change a struct's layout, a symbol's name or a calling convention, and in
+    # C, removing a `const` can only make the compiler *more* conservative about assuming a value's
+    # stability. The visible effect is that const objects defined by this unit land in `.data`
+    # rather than `.rodata`, which a flat ELF link does not distinguish.
+    #
+    # Scoped to this file by name, and the scope is load-bearing rather than tidy: applied to the
+    # whole `osfmk/vm` directory it *costs* two files. `osfmk/vm/lz4.c` and
+    # `osfmk/vm/vm_compressor_algorithms.c` compile today and fail under it — `lz4.h:68`'s
+    # `static const size_t lz4_encode_scratch_size = lz4_hash_table_size;` is an initializer that
+    # needs `const` to be a constant expression, and dropping it turns the array in
+    # `vm_compressor_algorithms.c:52` into a variable-length one. That is the one-value-two-
+    # definitions shape from the other side, and it is why this is a per-file switch.
+    #
+    # Apple's own source accommodates the same `const` a hundred lines below, at vm_object.c:469-470
+    # — `// vm_object_template.wired_page_count = 0;`, commented out with the note that static
+    # storage is already zero. The whole-struct copy at :355 is what is left.
+    CONST_RELAX=()
+    [[ ${src#"$XNU"/} == "osfmk/vm/vm_object.c" ]] &&
+        CONST_RELAX=(-Dconst=)
+
     FILE_INCLUDES=("${KSERVER_FIRST[@]}")
     for _inc in "${INCLUDES[@]}"; do
         if [[ $_inc == COMP_FIRST_PLACEHOLDER ]]; then
@@ -491,7 +541,7 @@ while read -r src; do
             FILE_INCLUDES+=("$_inc")
         fi
     done
-    FILE_DEFINES=("${CLOCK_FORCE[@]}")
+    FILE_DEFINES=("${CLOCK_FORCE[@]}" "${CONST_RELAX[@]}")
 
     # shellcheck disable=SC2207
     COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" "$(component_of "$src")") )
