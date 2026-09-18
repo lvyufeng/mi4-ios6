@@ -234,6 +234,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-218](experiment-218-the-whole-hmac-finalisation-runs-and-the-frontier-is-cchmac.md) | the Whole HMAC Finalisation Runs on the Device, the Text Arithmetic Gets Three Terms, and the Frontier Is `cchmac` |
 | stage90 | [experiment-219](experiment-219-a-whole-one-shot-hmac-runs-and-the-frontier-is-cc-clear.md) | a Whole One-Shot HMAC Runs, `cchmac` Resolves, and the Frontier Is `cc_clear` |
 | stage90 | [experiment-220](experiment-220-cc-clear-adds-memset-s-and-the-frontier-is-memset-s.md) | `cc_clear` Resolves and Adds `memset_s`, `.text` Does Not Move, and the Frontier Is `memset_s` |
+| stage90 | [experiment-221](experiment-221-the-whole-drbg-generate-path-runs-and-the-frontier-is-cc-cmp-safe.md) | the Whole DRBG Generate Path Runs to Its FIPS Compare, and the Frontier Is `cc_cmp_safe` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

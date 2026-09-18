@@ -1115,6 +1115,50 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #      be the first NEON code in this project's history to run, and whether CPACR/FPEXC permit it
     #      in this CPU state is a question nothing has asked yet.
     OSFMK_MEMSET_S_OBJ=${STAGE90_ENTRY_MEMSET_S_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_memset_s.o}
+    # `osfmk/corecrypto/cc/src/cc_cmp_safe.c`, named by experiment-221's `stub_hit=cc_cmp_safe`.
+    # **376 bytes of text, no data, no `.bss`, 1 definition, 0 undefined symbols** - so linking it
+    # leaves *nothing* missing anywhere in the DRBG, and this is the last object of the corecrypto
+    # stretch. It is a constant-time compare: the XOR-accumulate loop, then a single test of the
+    # accumulator, with NEON used only for lengths of 32 or more (`cmp r0,#32; bcc 0xc4`). Both calls
+    # in play pass `state->vsize` = 20, so the scalar path runs and no NEON instruction executes.
+    #
+    # The step that got here ran the whole HMAC_DRBG instantiate sequence up to this compare: five or
+    # more complete HMAC-SHA1 computations in one boot, with the stop one call past them. What is left
+    # of the DRBG after this is the compare, a return, and the same compare in `generate`.
+    #
+    # **The prediction is `stub_hit=bsd_scale_setup`** - the longest prediction in this sequence, and
+    # the first that says the PRNG is *finished*. Every step was read rather than assumed:
+    #
+    #   1. cc_cmp_safe returns non-zero -> 0x5ec bne 0x608
+    #   2. hmac_dbrg_update returns r7 = 0 (0x578 mov r7,#0; 0x60c mov r0,r7) = CCDRBG_STATUS_OK
+    #   3. `init` returns OK - 0xb8 is its last call, only a pop follows
+    #   4. early_random's two `if (rc != CCDRBG_STATUS_OK) panic(...)` checks pass
+    #   5. early_random -> ccdrbg_generate -> `generate`; addl_len = 0 so no hmac_dbrg_update, and
+    #      bytesLeft = 0, so 0x210 -> 0x254 -> 0x25c cchmac (real) -> 0x290 cc_cmp_safe (real now)
+    #      -> copies 8 bytes out -> 0x2b4 return
+    #   6. early_random returns the 8 bytes; arm_init stores them in `__stack_chk_guard`:
+    #          328: bl  early_random
+    #          330: bic r0, r0, #0xff00     ; the stack canary comes from early_random
+    #          338: str r0, [r1]            ; __stack_chk_guard
+    #          340: bl  machine_startup
+    #   7. machine_startup (real, 0x206b84): four PE_parse_boot_argn (real), then
+    #          206c6c: bl kernel_bootstrap - unconditional, the last thing it does
+    #   8. kernel_bootstrap (real, 0x20d560): _consume_printf_args (real, no calls),
+    #      PE_parse_boot_argn x4 and PE_parse_boot_arg_str (all real - the last calls DTLookupEntry
+    #      and DTGetProperty, both real), and then the first missing symbol:
+    #          20d604: bl bsd_scale_setup   <-- STUB at 0x00239900
+    #
+    # The only conditional branch between `kernel_bootstrap`'s entry and that call skips a store, not
+    # a call, so the stop is not data-dependent.
+    #
+    # **The caveat, and it is new: this prediction's alternative outcome is a panic.** Both FIPS
+    # compares branch to `cc_clear` + `cc_try_abort` on the *equal* result, and `cc_try_abort`'s single
+    # reference is `panic`, which is real in this image; XNU's ARM `panic` reaches `TRAP_DEBUGGER` (a
+    # `udf`) and then `panic_spin_forever`. So a run ending in an `exception:` line rather than a
+    # `stub_hit=` would mean the DRBG's own health check fired - a finding, not a defect - and a run
+    # stopping at some *other* symbol in the DRBG would mean the reading above is wrong, with the
+    # symbol naming where.
+    OSFMK_CC_CMP_SAFE_OBJ=${STAGE90_ENTRY_CC_CMP_SAFE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_corecrypto_cc_src_cc_cmp_safe.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -1176,10 +1220,11 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_CCHMAC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_CC_CLEAR_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_MEMSET_S_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_CC_CMP_SAFE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "$OSFMK_CCHMAC_OBJ" "$OSFMK_CC_CLEAR_OBJ" "$OSFMK_MEMSET_S_OBJ")
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "$OSFMK_CCHMAC_OBJ" "$OSFMK_CC_CLEAR_OBJ" "$OSFMK_MEMSET_S_OBJ" "$OSFMK_CC_CMP_SAFE_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
