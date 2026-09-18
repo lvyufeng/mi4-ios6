@@ -200,6 +200,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-184](experiment-184-the-timebase-came-out-as-the-trees-19-2-mhz-and-a-wrong-prototype-wrote-to-address-zero.md) | The Timebase Came Out as the Tree's 19.2 MHz, and a Hand-Written Prototype Wrote to Address 0 |
 | stage90 | [experiment-185](experiment-185-lck-mod-init-ran-for-real-and-the-frontier-is-strncpy.md) | `lck_mod_init` Ran for Real, and the Frontier Is `strncpy` |
 | stage90 | [experiment-186](experiment-186-the-lock-group-read-back-as-its-own-bytes-and-the-frontier-is-lck-mtx-init-ext.md) | The Lock Group Read Back as Its Own Bytes, and the Frontier Is `lck_mtx_init_ext` |
+| stage90 | [experiment-187](experiment-187-three-lock-groups-read-out-of-xnus-own-list-and-the-frontier-is-timer-call-get-priority-params.md) | Three Lock Groups Read Out of XNU's Own List, and the Frontier Is `timer_call_get_priority_params` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
