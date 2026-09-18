@@ -3047,6 +3047,107 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
+    # 277: `ipc_host_init`, and the largest stub retirement this walk has made.
+    # 276's stop was `ipc_host_init`, and the object that defines it is `osfmk/kern/ipc_host.c`,
+    # `osfmk_kern_ipc_host.o` - the manifest line is **550** in `out/xnu_arm_manifest.txt` (549 is
+    # `osfmk/kern/ipc_clock.c`), which corrects the 549 that 275's and 276's blocks carry: this walk
+    # has one manifest citation a line early, and it was made while predicting, not while measuring.
+    # The object is **3668 bytes of text, 53 of `.rodata.str1.1`, no data and no bss, 21 functions
+    # defined and 26 names referenced**, and the three strings in it are the three panics -
+    # `"ipc_host_init"`, `"ipc_processor_init"`, `"ipc_pset_init"`.
+    #
+    # **16 resolved, 8 added** - the largest single-step retirement in this walk, against a step
+    # count that has mostly been one or two. Of the 26 names the object references, 12 are already
+    # real code and 6 already have stand-ins (5 functions, plus `realhost`, which is a *storage*
+    # stand-in of 0x194 bytes rather than a function), so 18 need nothing. The 16 the object defines
+    # that this image currently *stubs* are the ones that retire:
+    #
+    #     convert_host_to_port          convert_port_to_host        convert_port_to_host_priv
+    #     convert_port_to_host_security convert_port_to_processor    convert_port_to_pset
+    #     convert_port_to_pset_name     convert_pset_name_to_port   convert_pset_to_port
+    #     host_get_exception_ports      host_set_exception_ports    host_swap_exception_ports
+    #     ipc_host_init                 ipc_processor_enable        ipc_processor_init
+    #     processor_set_default
+    #
+    # and the 8 that are new obligations are all functions, each defined by an object this build has
+    # already compiled - so each stand-in's *size* still comes from its own definition rather than
+    # from a guess, which is the rule since 244:
+    #
+    #     kernel_set_special_port                   osfmk_kern_host.o
+    #     ipc_port_copyout_send                     osfmk_ipc_ipc_port.o
+    #     mac_exc_associate_action_label            security_mac_mach.o
+    #     mac_exc_create_label                      security_mac_mach.o
+    #     mac_exc_create_label_for_current_proc     security_mac_mach.o
+    #     mac_exc_free_label                        security_mac_mach.o
+    #     mac_exc_update_action_label               security_mac_mach.o
+    #     mac_task_check_set_host_exception_ports   security_mac_mach.o
+    #
+    # The other half of the object, and the half this walk has not taken: five of its 21 functions
+    # (`convert_processor_to_port`, `host_self_trap`, `ipc_pset_enable`, `ipc_pset_init`,
+    # `ref_pset_port_locked`) are referenced by nothing in this image, so they are neither real nor
+    # stubs - they are absent, which is the shape 276's four unreferenced label functions had. A
+    # definition nothing references is invisible to a delta of two undefined sets.
+    #
+    # **Prediction: `stub_hit=ipc_port_alloc_special`, with the caller at `ipc_host_init+0x30`.**
+    # `ipc_host_init` is the function the walk is standing in, so this step runs it:
+    #
+    #     0000: push {r4, r5, r6, r7, fp, lr}
+    #     0004: movw/movt realhost, host_notify_lock_grp, host_notify_lock_attr
+    #     001c: bl lck_mtx_init(&realhost.lock, ...)          ; REAL - locks.o since 269
+    #     0028: ldr r0, [ipc_space_kernel]                    ; REAL (ipc_space.c, 265)
+    #     002c: bl ipc_port_alloc_special(ipc_space_kernel)   ; A STUB  <- `ipc_port_alloc_kernel()`
+    #     0030: mov r4, r0                                    ; the return address, and the stop
+    #
+    # so the run executes the lock init, reads `ipc_space_kernel`, and stops on the first instruction
+    # that becomes a stub again - `bl ipc_port_alloc_special`, which is what XNU's own
+    # `ipc_port_alloc_kernel()` macro expands to. The caller key is `ipc_host_init+0x30`: a `bl`'s
+    # return address *inside* the function entered, the same shape 276 had, and unlike the three
+    # tail-call steps before it.
+    #
+    # Two things about `realhost` are worth writing down before the run, because this step is the
+    # first time real XNU code *writes* to a storage stand-in rather than reading one. It is 0x194
+    # bytes, sized from `osfmk_kern_host.o` (which is not linked, which is why it is a stand-in at
+    # all), and `ipc_host_init` writes `realhost.lock` through `lck_mtx_init` and then 26 stores of
+    # IP_NULL/NULL at offsets 144 through 400 - whose last one, at 400, ends exactly at the stand-in's
+    # last byte. That is the case an undersized stand-in would fail, silently overwriting whatever the
+    # linker put next; the size is not a guess, and this run is where it stops being theoretical. The
+    # eight `mac_exc_*` calls are on the exception-port paths and are not reached here: the object
+    # itself defers label initialization (its own comment says so) so `realhost.exc_actions[i].label`
+    # is set to NULL, not to a MAC label.
+    OSFMK_KERN_IPC_HOST_OBJ=${STAGE90_ENTRY_OSFMK_KERN_IPC_HOST_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_ipc_host.o}
+    #
+    # **277 measured it, and the prediction held exactly - both halves, and the counts to the unit.**
+    # The build measured **16 resolved, 8 added**: 868 -> 860 undefined, 792 -> 784 function stubs,
+    # storage unchanged at 76, text 949860 -> 953220, image bytes 1049720 -> 1066104 (one 16 KB
+    # alignment step, and `.bss` moved with it: `0x80103a00` .. `0x801395c8`), headroom 1862200 bytes.
+    # `ipc_host_init` is real in the image at `0x800b7550`, and the linked disassembly is the object's
+    # instruction for instruction: `800b756c: bl lck_mtx_init`, `800b7578: ldr r0, [r6]`,
+    # `800b757c: bl ipc_port_alloc_special`, `800b7580: mov r4, r0`.
+    #
+    # The run stopped at **`stub_hit=ipc_port_alloc_special`** with
+    # `xnu_entry_stub_caller_v=0x800b7580` = **`ipc_host_init+0x30`**, whose `caller-4` is
+    # `800b757c bl 800ceb54 <ipc_port_alloc_special>`; `_a` and `_e` agree, `_w0 = 0x62303038` /
+    # `_w1 = 0x30383537` = `800b7580` read back out of `g_kv_buf` from the first digit
+    # (`digits = 0x3a` = 33 + 25, a 22-character name this time), `kv_written=0x67` (103),
+    # `kv_in_dram=0x8b` (139 = 103 + 36), `kv_dropped=0`, `why_byte=0x61`, zero abort entries, and
+    # the report's echo intact. What ran before the stop, read from its own instruction stream:
+    # `lck_mtx_init(&realhost.lock, &host_notify_lock_grp, &host_notify_lock_attr)` — every one of
+    # those three names was already in the image (`host_notify_lock_grp`/`_attr` are real code since
+    # 274, and `realhost` is the 404-byte storage stand-in), so the kernel's first act inside
+    # `ipc_host_init` is the one that finally initializes `realhost`'s lock, and the stand-in took a
+    # real write up to its last byte without clobbering its neighbour. Then `ldr r0, [ipc_space_kernel]`
+    # read the real special space 265 created. None of the 8 new obligations was reached. 661 of 661 words of `entry_kv` through `entry_stub_hit` match the linked ELF again
+    # (sixth build running) - *after* one correction on this side of the wire, which is worth writing
+    # down because it is a measurement defect and not a device one: the dump prints each word's *value*
+    # as eight hex digits, and the first comparison here read those digits against the image's raw
+    # little-endian bytes and reported 660 of 661 mismatched. The word at `0x80002024` is
+    # `0xe305c480`; the image holds `80 c4 05 e3`. Comparing the number to the number gives 0
+    # mismatches, and that is the fact.
+    #
+    # So `ipc_host_init` did not finish: it stops on its **second** call that is still a stub - the
+    # first, `lck_mtx_init`, is real - and `ipc_port_alloc_special` is `osfmk/ipc/ipc_port.c`, which is
+    # the next step. The five `mac_exc_*` / `mac_task_check_*` stubs it brought are on the
+    # exception-port paths and were not reached.
     # 276: `mac_labelzone_init`, and the stop two functions further on - inside `ipc_init`.
     # 275's stop was `mac_labelzone_init`, and the object that defines it is `security/mac_label.c`
     # (manifest:669), `security_mac_label.o` - **358 bytes of text, 0 of data, 4 of bss, 8 definitions
@@ -3603,6 +3704,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_HOST_NOTIFY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$SECURITY_MAC_BASE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$SECURITY_MAC_LABEL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_IPC_HOST_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -3615,7 +3717,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
