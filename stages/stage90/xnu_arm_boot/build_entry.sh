@@ -2211,6 +2211,50 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # full from the disassembly the way 244-250 were; the prediction for 251 is about `vm_fault_init`'s
     # own closure rather than the fault path whose name the object carries.
     OSFMK_KERN_KALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kalloc.o}
+    # 251: `osfmk_vm_vm_fault.o` - 30392 bytes of text (31667-byte object), 156 references, 58 global
+    # definitions: the fault path (`vm_fault`, `vm_fault_page`, `vm_fault_enter`, `vm_fault_wire`/
+    # `_unwire`, `vm_fault_copy`, `vm_pre_fault`, `kdp_lightweight_fault`, the `vm_page_validate_cs`/
+    # `vm_cs_*` code-signing validation) and the counters. Twice 248's `vm_user.o`.
+    #
+    # Resolved 9, added 15 - the first step since 248 that brings more new frontiers than it closes:
+    #   resolved vm_fault vm_fault_cleanup vm_fault_copy vm_fault_enter vm_fault_init vm_fault_page
+    #            vm_fault_unwire vm_fault_wire vm_page_validate_cs
+    #   added    cs_enforcement cs_invalid_page cs_validate_range current_thread_aborted
+    #            kcdata_estimate_required_buffer_size kcdata_get_memory_addr
+    #            os_reason_alloc_buffer_noblock panic_on_cs_killed set_thread_exit_reason
+    #            task_update_logical_writes throttle_lowpri_io vm_compressor_pager_get
+    #            vnode_pager_cs_check_validation_bitmap vnode_pager_get_object_mtime
+    #            vnode_pager_get_object_name
+    # 616 -> 622 undefined, 535 -> 540 function and 81 -> 82 storage stubs, text 639953 -> 671505
+    # (+31552). None of the added fifteen is reached by this run - the stop is earlier, in
+    # `vm_mem_bootstrap`; they are the code-signing/vnode-pager boundaries the fault path reaches out to.
+    #
+    # `vm_fault_init` is the short *bootstrap* half of the file: four calls, all real
+    # (`__aeabi_uldivmod`, `PE_parse_boot_argn("vm_compressor")`, `_consume_printf_args` on the
+    # "Ignoring" path, `PE_get_default("kern.vm_compressor")`), and `xnu_entry_callwalk.py --root
+    # vm_fault_init` found no stub on its straight-line path, so the prediction was that it completes
+    # and the stop moves to `memory_manager_default_init` (`+0x244`).
+    #
+    # Device: **`stub_hit=memory_manager_default_init`, `xnu_entry_stub_caller=0x80040544`** =
+    # `vm_mem_bootstrap+0x248`, whose `caller - 4` is `80040540: bl 80088dbc <memory_manager_default_init>`.
+    # `kv_written == kv_in_dram == 0x48`. **`vm_fault_init` completed**: `vm_hard_throttle_threshold =
+    # sane_size * (35 - MIN(sane_size / 1 GB, 25)) / 100` was computed and stored to 0x800e8d88 (the
+    # `cmp r0, #25 / rsblt r1, r0, #35` and the 64-bit `__aeabi_uldivmod` by 100 are both in the
+    # instruction stream); `PE_parse_boot_argn("vm_compressor")` returned FALSE so the
+    # `VM_PAGER_MAX_MODES` bit-test loop was *not* entered and `_consume_printf_args` was not called;
+    # the device-tree fallback `PE_get_default("kern.vm_compressor", &vm_compressor_mode, 4)` ran; and
+    # `PE_parse_boot_argn("vm_compressor_threads", &vm_compressor_thread_count, 4)` ran.
+    #
+    # Image moved for the third step (248, 250, 251): image 752648 -> 769072 (+16424), `.bss`
+    # 0x800bb500-0x800ea548, layout args 950272 -> 966656, headroom **1137336** bytes below
+    # topOfKernelData - a little over a megabyte, and the number to watch. Payload text 1261290
+    # (+16424). `persistent_write_attempted=0x00000000` in all 25 contracts, `failure_mask=0x00000000`
+    # in all 87.
+    #
+    # Next: `memory_manager_default_init` is in `osfmk_vm_memory_object.o` (9508 bytes of text, 58
+    # references, 58 definitions) - and that same object also defines `memory_object_control_bootstrap`,
+    # the *next* stub in `vm_mem_bootstrap` (`+0x254`), so one object may close two stops.
+    OSFMK_VM_VM_FAULT_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_FAULT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_fault.o}
     OSFMK_KERN_KEXT_ALLOC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KEXT_ALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kext_alloc.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
@@ -2293,6 +2337,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_USER_OBJ"       "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KALLOC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_VM_VM_FAULT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
@@ -2302,7 +2347,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
