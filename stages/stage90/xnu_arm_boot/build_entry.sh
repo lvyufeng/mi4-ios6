@@ -2859,8 +2859,12 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #
     # Device: **`stub_hit=ipc_importance_init`** - the prediction, a twelfth time - and the caller is
     # the return address of the `bl ipc_importance_init` in `ipc_bootstrap`, which the final image
-    # puts at `+0x188` (`bl ipc_table_init` +0x17c, `bl ipc_voucher_init` +0x184, `bl
-    # ipc_importance_init` +0x188). 268's lesson repeated exactly: the *offset* is the durable form
+    # puts at `+0x188`, i.e. the return address of the `bl` at `+0x184`. The whole run of calls, by
+    # their *return* addresses, is `ipc_table_init` +0x180, `ipc_voucher_init` +0x184,
+    # `ipc_importance_init` +0x188, `semaphore_init` +0x18c, and the final image has them as
+    # `800abfc0 bl ipc_table_init / 800abfc4 bl ipc_voucher_init / 800abfc8 bl ipc_importance_init /
+    # 800abfcc bl semaphore_init`, then `pop {r4, r5, fp, lr}` and a tail `b host_notify_init`.
+    # 268's lesson repeated exactly: the *offset* is the durable form
     # and the absolute address is not, because the link below grew again here - the diagnostics this
     # step ended up adding moved `ipc_bootstrap` from 0x800abe28 to 0x800abfcc.
     #
@@ -2889,6 +2893,72 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # removes the read entirely and takes the run to **zero aborts**, so the step is not blocked on
     # it - but "the page is not mapped" and "the address lost its high half" cannot both be true, and
     # the run that separates them is the next thing this thread needs.
+    # 270: `ipc_importance_init`, and the step that is *inside* a conditional.
+    # 269's stop was `ipc_importance_init`, and its object is `osfmk/ipc/ipc_importance.c`
+    # (manifest:511), `osfmk_ipc_ipc_importance.o` - **13312 bytes of text, 24 of data, 48 of bss,
+    # 72 definitions and 51 references**. It is large but shallow: 72 definitions, of which only
+    # **3** are names the image already carries (`ipc_importance_init`,
+    # `ipc_importance_thread_call_init`, `task_importance_list_pids` - all three current stubs), so
+    # this is a 3-resolved step rather than a 265- or 269-shaped one. That is the 250 shape: most of
+    # an object's definitions are names nothing in the image references, and what an object *defines*
+    # is not what the link *needs*.
+    #
+    # The seven names it adds are all off the path, and they are the QoS/boost surface the
+    # importance machinery reaches for at runtime rather than at init:
+    #
+    #     ipc_port_impcount_delta                      <- ipc_importance_send, _task_reference
+    #     ipc_port_importance_delta                    <- ipc_importance_hold/drop paths
+    #     ipc_port_importance_delta_internal           <- the *_internal_assertion paths
+    #     ipc_port_sync_qos_delta                      <- ipc_importance_send
+    #     task_importance_reset                        <- ipc_importance_disconnect_task
+    #     task_policy_update_complete_unlocked         <- ipc_importance_task_*_assertion
+    #     task_update_boost_locked                     <- ipc_importance_task_*_assertion
+    #
+    # `ipc_importance_init`'s body, disassembled from the object - and the reason this comment is
+    # short where 269's was long is that the function is *structurally* the same as
+    # `ipc_voucher_init`, which 269 already proved runs:
+    #
+    #     ldr thread_max ; ldr task_max ; add r1, r4, r5 ; add r4, r1, r1, lsl #1   ; (t + th) * 3
+    #     add r1, sp, #14 ; mov r2, #26 ; bl PE_parse_boot_argn
+    #     lsl r1, r4, #6  ; mov r0, #96 ; mov r2, #96 ; bl zinit   ; str -> ipc_importance_task_zone
+    #     bl zone_change(Z_NOENCRYPT)
+    #     lsl r1, r4, #5  ; mov r0, #48 ; mov r2, #48 ; bl zinit   ; str -> ipc_importance_inherit_zone
+    #     bl zone_change(Z_NOENCRYPT)
+    #     bl lck_spin_init(&ipc_importance_lock_data, &ipc_lck_grp, &ipc_lck_attr)   ; inlined lock init
+    #     bl ipc_register_well_known_mach_voucher_attr_manager(&ipc_importance_manager, 0, 2,
+    #                                                          &ipc_importance_control)
+    #     cmp r0, #0 ; beq done ; bl _consume_printf_args ; done: pop {r4, r5, fp, pc}
+    #
+    # Every one of those six calls is real in this image: `PE_parse_boot_argn`, `zinit` and
+    # `zone_change` have been real since 250, `lck_spin_init` since 262, and
+    # `ipc_register_well_known_mach_voucher_attr_manager` **since 269** - it is defined by
+    # `ipc_voucher.c`, and 269's run reached `ipc_importance_init`, which means `ipc_voucher_init`
+    # returned, which means that function and its `user_data_attr_manager_init` caller already ran
+    # on the device once. `_consume_printf_args` is real too (retired by 199), so even the error
+    # branch - `kr != KERN_SUCCESS` - is not a stub: it would print "Voucher importance manager
+    # register returned" and continue, which is a different outcome from this one and would be
+    # visible in the log as a kprintf rather than as a `stub_hit`.
+    #
+    # **Prediction: `stub_hit=semaphore_init`, `xnu_entry_stub_caller = ipc_bootstrap+0x18c`** - the
+    # return address of `bl semaphore_init`, the next call after `bl ipc_importance_init` in
+    # `ipc_bootstrap` (`ipc.c:206` -> `:211`, `ipc_init.c`'s source order matching the linked
+    # image's for once: `mig_init`, `ipc_table_init`, `ipc_voucher_init`, `ipc_importance_init`,
+    # then `semaphore_init`, `mk_timer_init`, and a tail `b host_notify_init`). Stated as an offset
+    # first, because 267/268/269 each moved the absolute address and none moved the offset.
+    #
+    # The one thing this step *cannot* see is the same thing 269 could not: `ipc_importance_max =
+    # (task_max + thread_max) * 2` reads `task_max`, which is still a storage stand-in whose value is
+    # 0, so it computes `(0 + 1536) * 2 = 3072` where the real kernel computes
+    # `(512 + 1536) * 2 = 4096`, and both `zinit` ceilings are a quarter smaller than they should be
+    # (3072 * 96 = 288 KB where 4096 * 96 = 384 KB; 3072 * 48 = 144 KB where 4096 * 48 = 192 KB).
+    # The image shows the arithmetic even though one input is invisible in it: `add r1, r4, r5` is
+    # `thread_max + task_max`, `add r4, r1, r1, lsl #1` is that sum times three, and the two `lsl`
+    # immediates are 6 and 5 - the compiler folded `* 2 * sizeof(struct ...)` into `* 3` then
+    # `<< 6` (96 = 3 * 32) and `<< 5` (48 = 3 * 16). So the ×2 that is *not* in the instruction
+    # stream is exactly the one whose other factor, `task_max`, is a zero stand-in, and this step
+    # makes that stand-in the second place it silently shrinks a zone rather than the first. The
+    # repair remains `osfmk/kern/task.o`, which is its own step.
+    OSFMK_IPC_IPC_IMPORTANCE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_IMPORTANCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_importance.o}
     OSFMK_IPC_IPC_VOUCHER_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_VOUCHER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_voucher.o}
     OSFMK_IPC_IPC_TABLE_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_TABLE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_table.o}
     # 267: `mig_init`, and **the step is 18 objects, because the datum it reads has 17 entries.**
@@ -3164,6 +3234,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_IPC_KOBJECT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_TABLE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_VOUCHER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -3176,7 +3247,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
