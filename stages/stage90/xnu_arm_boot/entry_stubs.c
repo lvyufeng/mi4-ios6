@@ -341,23 +341,46 @@ void entry_stub_hit(const char *name)
 
 #ifdef STAGE90_ENTRY_REAL_ARM_INIT
 /*
- * There is no probe here now.
+ * `kernel_early_bootstrap()` - `osfmk/arm/arm_init.c:268`, the first statement after
+ * `rtclock_early_init` returns. The probe prints the thread pointer and one number derived from it,
+ * then names itself.
  *
- * A hand-written definition in this file exists to take a symbol the image does not have and turn
- * it into a report - `DTInit` in experiments 169-170, `ml_parse_cpu_topology` in 171-177,
- * `cpu_processor_alloc` in 177, `thread_bootstrap` in 178. The link is what ends each one: the
- * object that defines it for real arrives, `multiple definition` is reported, and the definition
- * comes out of this file. `thread_bootstrap`'s went when `osfmk/kern/thread.o` was linked for
- * experiment 179, and nothing replaced it.
+ * The measurement is the TPIDRPRW round trip, made into an equality instead of an inference.
+ * Experiment 181 got twelve lines of `arm_init` further than the run before it without faulting,
+ * and the reason it could not fault is that `arm_init.c:247` writes through the pointer
+ * `current_thread()` returned - address ~0 if TPIDRPRW had held a residual, which XNU's page tables
+ * do not map. That is evidence from an absence, which is the weakest kind this project has.
  *
- * Nothing replaced it because a probe is for printing something the generated stubs cannot, and at
- * this edge there is nothing of that kind left to print. `thread_bootstrap` is a long sequence of
- * assignments to the global `thread_template` followed by calls; the generated stub mechanism
- * reports the first call by name, which is the same information the probe would have given, one
- * line shorter. The last three probes each printed a number XNU's own code had computed -
- * `ranges[1]` out of `arm-io`, the CPU count out of `/cpus`, and the physBase/virtBase identity.
- * When there is another such number, this is where its probe goes.
+ * `current_thread()` is real code (`osfmk/arm/machine_routines.c:1139`, in the image since
+ * experiment 177) and is one instruction: `__builtin_arm_mrc(15, 0, 13, 0, 4)`. The thread that
+ * `thread_bootstrap` handed to `machine_set_current_thread` is `&init_thread`, and `init_thread` is
+ * `static` (`osfmk/kern/thread.c:184`: `static struct thread thread_template, init_thread;`), so
+ * this file cannot name it and the comparison is made against the image's own symbol table instead -
+ * `arm-none-eabi-nm out/stage90/xnu_arm_entry.elf | grep init_thread`. Printing the pointer is what
+ * makes that comparison possible; printing a literal here would be a second copy of a number the
+ * link owns.
+ *
+ * `cpu_number()` is the second, self-contained half. It is real (`osfmk/arm/cpu_common.o`) and is
+ * `getCpuDatap()->cpu_number`, where `getCpuDatap()` is `current_thread()->machine.CpuDatap`
+ * (`osfmk/arm/cpu_data.h:79`). So it reads the same register, follows the pointer `arm_init.c:249`
+ * stored, and returns the field `arm_init.c:222` set from `ml_get_boot_cpu_number()`. Three real XNU
+ * functions and two structure fields, and the answer should be 0 - a value that is checkable in the
+ * log without any symbol table.
+ *
+ * `ml_get_cpu_count()` is repeated from experiment 177 as a control: it should still be 4, and if it
+ * is not, this image is not the one that measured it.
  */
+uint32_t current_thread(void);      /* thread_t, and a pointer on this target */
+int cpu_number(void);
+unsigned int ml_get_cpu_count(void);
+
+void kernel_early_bootstrap(void)
+{
+    entry_kv("xnu_entry_current_thread", current_thread());
+    entry_kv("xnu_entry_cpu_number", (uint32_t)cpu_number());
+    entry_kv("xnu_entry_avail_cpus", ml_get_cpu_count());
+    entry_stub_hit("kernel_early_bootstrap");
+}
 #endif /* STAGE90_ENTRY_REAL_ARM_INIT */
 
 /*
