@@ -623,6 +623,37 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # function to its final call - and the step after it is the one where it returns and `arm_init`
     # reaches `PE_init_platform(TRUE, &BootCpuData)`.
     OSFMK_ARM_CACHES_ASM_OBJ=${STAGE90_ENTRY_CACHES_ASM_OBJ:-$REPO_ROOT/out/xnu_asm_obj/caches_asm.o}
+    # `osfmk/arm/caches.c`, named by experiment-209's `stub_hit=clean_dcache` - which is the *last*
+    # call of `cpu_machine_idle_init` (`cpu.c:594`), so this is the object that lets that function
+    # return. 2744 bytes of text, no data, no `.bss`, 26 references, 17 definitions: the
+    # `platform_cache_*` family, `cache_xcall`/`cache_xcall_handler`/`cache_sync_page`,
+    # `dcache_incoherent_io_flush64`/`_store64`, `flush_dcache_syscall`, and `clean_dcache`/
+    # `flush_dcache` themselves.
+    #
+    # Cost: 11 resolved, 0 added - every one of its 26 references is already a real definition in
+    # this image (the cache-maintenance functions experiment 209 linked, the pmap and machine-routines
+    # symbols earlier steps paid for, and `kvtophys`/`flush_core_tlb`/`cpu_signal`/
+    # `up_style_idle_exit`, which the asm layer brings). A free step.
+    #
+    # What `clean_dcache` does when it runs: it is the `phys == FALSE` leg and `cpu_cache_dispatch` is
+    # still `(cache_dispatch_t) NULL` (`cpu_data_init` zeroed `BootCpuData` in experiment 168 and
+    # nothing has set that field), so it is one `CleanPoC_DcacheRegion(addr, length)` over the
+    # `cpu_data_t` `getCpuDatap()` returns from `TPIDRPRW`. No branch of it reaches `kvtophys` or the
+    # dispatch callback.
+    #
+    # **The prediction is not `clean_dcache` - it is `early_random`, four calls later.** With this
+    # object linked, `cpu_machine_idle_init` returns; `if (arm_diag & 0x8000)` is not taken
+    # (`arm_diag` is only assigned from the `diag` boot arg at `arm_init.c:278`, and the command line
+    # in `boot_args.c` has none); `PE_init_platform(TRUE, &BootCpuData)` runs *and completes*;
+    # `cpu_timebase_init` and `fiq_context_init` are both call-free and real; and
+    # `__stack_chk_guard = early_random()` is the first stub. That `PE_init_platform` completes is the
+    # part that matters: its `else` branch is `pe_arm_init_interrupts(args); pe_arm_init_debug(args);`
+    # and both bodies finish on this tree without a new symbol - `pe_arm_map_interrupt_controller`
+    # returns 0 at its `gPicBase == 0` check because this tree deliberately has no
+    # `interrupt-controller`/`master` node, and `pe_arm_init_debug` returns at its
+    # `cpu-debug-interface` lookup. So the run after this one should be the first where **Phase 3's
+    # `pe_arm_init_interrupts` is entered by XNU itself**.
+    OSFMK_ARM_CACHES_OBJ=${STAGE90_ENTRY_CACHES_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_caches.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -672,10 +703,11 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_ARM_IO_MAP_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_ARM_LOOSE_ENDS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_ARM_CACHES_ASM_OBJ" "run ./tools/assemble_arm_layer.sh first"
+    require "$OSFMK_ARM_CACHES_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ")
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

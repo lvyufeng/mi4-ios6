@@ -222,6 +222,8 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-206](experiment-206-arm-inits-tail-runs-and-the-frontier-is-io-map.md) | `arm_init`'s Tail Runs, XNU's Own Platform Interrupt Mapping Is Reached, and the Frontier Is `io_map` |
 | stage90 | [experiment-207](experiment-207-io-map-runs-and-the-frontier-is-bcopy-phys.md) | `io_map` Runs, XNU Creates a Kernel Mapping for Itself, and the Frontier Is `bcopy_phys` |
 | stage90 | [experiment-208](experiment-208-bcopy-phys-runs-and-the-frontier-is-clean-dcache.md) | `bcopy_phys` Runs, the Secondary-CPU Handshake Is Written Into the Low-Vectors Page, and the Frontier Is `CleanPoC_DcacheRegion` |
+| stage90 | [experiment-209](experiment-209-caches-asm-links-and-the-frontier-is-clean-dcache.md) | The Cache-Maintenance Surface Links, `cpu_machine_idle_init` Reaches Its Last Call, and the Frontier Is `clean_dcache` |
+| stage90 | [experiment-210](experiment-210-xnu-enters-pe-arm-init-interrupts-itself-and-the-frontier-is-early-random.md) | XNU Enters `pe_arm_init_interrupts` Itself, `cpu_machine_idle_init` Returns, and the Frontier Is `early_random` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,
