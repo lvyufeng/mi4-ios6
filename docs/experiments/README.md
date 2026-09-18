@@ -221,6 +221,7 @@ archived stage with `tools/stage-archive.sh`.
 | stage90 | [experiment-205](experiment-205-initialize-screen-runs-its-no-video-branch-and-the-frontier-is-switch-to-serial-console.md) | `initialize_screen` Runs Its No-Video Branch, XNU Decides There Is No Framebuffer, and the Frontier Is `switch_to_serial_console` |
 | stage90 | [experiment-206](experiment-206-arm-inits-tail-runs-and-the-frontier-is-io-map.md) | `arm_init`'s Tail Runs, XNU's Own Platform Interrupt Mapping Is Reached, and the Frontier Is `io_map` |
 | stage90 | [experiment-207](experiment-207-io-map-runs-and-the-frontier-is-bcopy-phys.md) | `io_map` Runs, XNU Creates a Kernel Mapping for Itself, and the Frontier Is `bcopy_phys` |
+| stage90 | [experiment-208](experiment-208-bcopy-phys-runs-and-the-frontier-is-clean-dcache.md) | `bcopy_phys` Runs, the Secondary-CPU Handshake Is Written Into the Low-Vectors Page, and the Frontier Is `CleanPoC_DcacheRegion` |
 
 Stage90's other notes live inside the snapshot directory:
 `../../stages/stage90/README.md`, `IMPLEMENTATION.md`,

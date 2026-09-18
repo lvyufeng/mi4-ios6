@@ -571,6 +571,58 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # new mapping and three real `ml_static_vtop` calls come first, and `CleanPoC_DcacheRegion` and
     # the `bcopy(running_signature, IOS_STATE, 8)` come after it.
     OSFMK_ARM_IO_MAP_OBJ=${STAGE90_ENTRY_IO_MAP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_io_map.o}
+    # `osfmk/arm/loose_ends.c`, named by experiment-207's `stub_hit=bcopy_phys`. 3671 bytes of text
+    # and one function of it is the step: `bcopy_phys` at offset 0. The rest is a grab bag this image
+    # gets for free - `bzero_phys`, the `ml_phys_read*`/`ml_phys_write*` family, `ml_probe_read`,
+    # `ffs`/`fls`/`bcmp`/`memcmp`, `setbit`/`clrbit`/`testbit`, `copypv`, `copyin_validate`/
+    # `copyout_validate`, `ml_thread_policy`.
+    #
+    # Cost: 7 resolved (`bcopy_phys bzero_phys copyin_validate copyout_validate ffs setbit testbit`)
+    # and 1 added - `flush_dcache64`, which is `osfmk/arm/caches_asm.s` and which only `copypv`
+    # references. Nothing on the boot path calls `copypv`, so the one new stub is a stub the run
+    # will not reach.
+    #
+    # The prediction, again read off the object's call order rather than the source's: with
+    # `bcopy_phys` real, `cpu_machine_idle_init` continues from call 13 to call 16 (the second
+    # `bcopy_phys`, for `CpuDataEntries_paddr`) and stops at call 17,
+    # `CleanPoC_DcacheRegion((vm_offset_t)phystokv((char *)gPhysBase), PAGE_SIZE)` - `caches_asm.s`
+    # too, and also not linked. The two calls after it are a real `ml_static_vtop` and
+    # `bcopy(running_signature, IOS_STATE, 8)` into the mapping experiment 207 created, so this
+    # should be the run that finishes `cpu_machine_idle_init`'s exception-vector work. Its last call
+    # is `clean_dcache`, which is `osfmk/arm/caches.o` (`osfmk_arm_caches.o`) - in the link *closure*
+    # but not in this link, which are different things and this comment blurred them once.
+    OSFMK_ARM_LOOSE_ENDS_OBJ=${STAGE90_ENTRY_LOOSE_ENDS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_loose_ends.o}
+    # `osfmk/arm/caches_asm.s`, named by experiment-208's `stub_hit=CleanPoC_DcacheRegion`. 596 bytes
+    # of text, ten references, and nineteen globals - the whole cache-maintenance surface:
+    # `CleanPoC_Dcache*`, `CleanPoU_Dcache*`, `FlushPoC_Dcache*`, `FlushPoU_Dcache`, `clean_dcache64`,
+    # `flush_dcache64`, `clean_mmu_dcache` and the `invalidate_*` / `InvalidatePoU_Icache*` family.
+    #
+    # Cost: 7 resolved (`CleanPoC_Dcache CleanPoC_DcacheRegion CleanPoC_DcacheRegion_Force
+    # CleanPoU_Dcache CleanPoU_DcacheRegion flush_dcache64 InvalidatePoU_Icache`) and 0 added. The
+    # object's ten references are `EntropyData ExceptionVectorsBase fiqstack_top gPhysBase gPhysSize
+    # gVirtBase intstack_top kdebug_enable` - all already real, from data.o and the asm layer - plus
+    # `clean_dcache` and `flush_dcache`, which are already undefined names in this image and
+    # therefore already stubs. This is assembled by the same clang pipeline as
+    # `machine_routines_asm.o`, so it links the same way.
+    #
+    # The one function in it that will execute is `CleanPoC_DcacheRegion`, and it is worth having
+    # read: its trip count comes from its `length` argument, not from `CTR`/`CCSIDR`:
+    #
+    #     mov  r1, r1, LSR #MMU_CLINE     // set cache line counter
+    # ccdr_loop:
+    #     mcr  p15, 0, r0, c7, c10, 1     // clean dcache line to PoC
+    #
+    # So with `CACHE_MODE = NONE` (caches off, as in every stage so far) it is 128 no-op `mcr`s. That
+    # matters because the alternative shape - a loop whose count comes from a cache-geometry register
+    # - is exactly experiment 196's defect. `phystokv((char *)gPhysBase)` is `0x00200000` here
+    # (`gVirtBase == gPhysBase`), so what it cleans is the low-vectors page the two `bcopy_phys`
+    # calls of experiment 208 just wrote.
+    #
+    # Prediction for the run: `clean_dcache`, which is `osfmk_arm/caches.o` and is not linked. It is
+    # the *last* call of `cpu_machine_idle_init` (`cpu.c:594`), so this is the step that takes that
+    # function to its final call - and the step after it is the one where it returns and `arm_init`
+    # reaches `PE_init_platform(TRUE, &BootCpuData)`.
+    OSFMK_ARM_CACHES_ASM_OBJ=${STAGE90_ENTRY_CACHES_ASM_OBJ:-$REPO_ROOT/out/xnu_asm_obj/caches_asm.o}
     require "$ARM_INIT_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
     require "$ARM_DATA_OBJ"  "run ./tools/assemble_arm_layer.sh first"
     require "$ARM_BCOPY_OBJ" "run ./tools/assemble_arm_layer.sh first"
@@ -618,10 +670,12 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_CONSOLE_VIDEO_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_ARM_IO_MAP_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_ARM_LOOSE_ENDS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_ARM_CACHES_ASM_OBJ" "run ./tools/assemble_arm_layer.sh first"
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ")
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
