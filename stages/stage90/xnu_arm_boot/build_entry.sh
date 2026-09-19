@@ -4106,6 +4106,143 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # **`ktrace_init`, caller key 0x8000E660** (`bl ktrace_init` at 0x8000e65c, the first stub after
     # `kpc_init` in the bootstrap thread's straight line).
     OSFMK_ARM_KPC_ARM_OBJ=${STAGE90_ENTRY_OSFMK_ARM_KPC_ARM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_kpc_arm.o}
+    # 314: `kpc_common.c` - the step whose `.text` closes exactly, and the first whose object has no
+    #      effect on the string section at all
+    #
+    # **The object that defines `kpc_common_init`, 313's stop, and the first step in four whose count
+    # prediction was right in both halves** (313 got the total and missed the split; 312 and 311 each
+    # missed it the same way). `osfmk_kern_kpc_common.o` (`osfmk/kern/kpc_common.c`, manifest:562) is
+    # `.text` **8072** / `.bss` 64 / `.rodata.str1.1` 4 / `__DATA,__data` **120**, with 45 defined
+    # symbols and 38 references (`tools/entry_frontier.py`), and the prediction was **23 resolved / 1
+    # added (`kperf_sample`)**. Measured: 726 undefined, 637 function stubs, 89 storage - resolved
+    # **23** and added **1** exactly.
+    #
+    #   | | base (313) | measured (314) | delta |
+    #   |---|---|---|---|
+    #   | undefined | 748 | **726** | -22 |
+    #   | function stubs | 658 | **637** | -21 |
+    #   | storage stubs | 90 | **89** | -1 |
+    #
+    # The split is exact too: of the 23 resolved, **22 are functions and one is storage** -
+    # `kpc_actionid`, which 313 had created as a storage stand-in and which this object defines as
+    # `uint8_t kpc_actionid[0x18] __attribute__((aligned(64)))` - and the one added, `kperf_sample`, is
+    # a function. So the two counters move by different amounts and the arithmetic closes.
+    #
+    # **`.text` closes exactly, and the term that closes it is a term that is not there.**
+    #
+    #   this object's .text                                  +0x1F88   (8072)
+    #   the stub object's .text, net                         -0x1F8   (22 bodies retired, 1 created)
+    #   the stub object's .rodata.str1.4, net                -0x1A8   (22 names retired = 0x1B8
+    #                                                                  padded, 1 created = 0x10)
+    #   .text-region alignment fill                          -0x008   (map total 0x88D0 -> 0x88C8)
+    #                                                       -------
+    #                                                        +0x1BE0
+    #
+    # 0x11F4C0 -> **0x1210A0** is +0x1BE0, so the four named terms *are* the answer - with no
+    # contribution at all from this object's own `.rodata.str1.1`, which the 313 block predicted would
+    # add 4 bytes. It adds zero, and the reason is a duplicate: the 4 bytes are the string `"kpc"`, and
+    # `bsd_kern_kern_kpc.o` - linked at 312 - already put the same four bytes in the same mergeable
+    # group. The image contains exactly **one** `kpc\0`, at **0x8011B622**, and the linked `kpc_init`
+    # loads that address as `lck_grp_alloc_init`'s first argument (`movw r0, #0xb622` / `movt r0,
+    # #0x8011` at 0x8010276c). **The map nevertheless prints a `0x4` contribution line for this object
+    # at 0x8011D402**, under a bare `.rodata.str1.1` header, followed by `*fill* 0x2` - a pre-relaxation
+    # address for bytes the linker dropped entirely. So the 301/312 lesson (a mergeable section's
+    # *size* is an upper bound) has a second half: **a mergeable input's contribution line is an upper
+    # bound too**, and it can be 4 bytes of a section that grew by none.
+    #
+    # **`.data` grows by exactly the object and then steps a whole 16 KB.** 0x18CA8 -> **0x18D20** is
+    # +0x78 = 120, which is the object's `__DATA,__data` to the byte: five 24-byte `site` records
+    # (`kpc_register_cpu.site`, `.site.1`, `.site.2`, `.site.3`, `kpc_counterbuf_alloc.site`). But the
+    # output section *start* moves 0x80120000 -> **0x80124000**, and that is the shape 304 recorded: the
+    # `.data` output section is 16 KB aligned, so it rounds up to the next 16 KB boundary, and this is
+    # the step where `.text`'s end crossed one (0x11F4C0 -> 0x1210A0 passes 0x80120000). The whole data
+    # block therefore moves a page-group, for a reason that has nothing to do with what was linked.
+    #
+    # | | base (313) | measured (314) | delta |
+    # |---|---|---|---|
+    # | `.text` | 0x11F4C0 | **0x1210A0** | +0x1BE0 |
+    # | `.data` | 0x80120000 | **0x80124000** | +0x4000 for the alignment, +0x78 for the object |
+    # | `.sysctl_set` | 0xDC | 0xDC | 0 |
+    # | image | 0x138D84 | **0x13CD3C** | +0x3FB8 |
+    # | `__bss_start` | 0x80138DC0 | **0x8013CE00** | +0x4040 |
+    # | `.bss` size | 0x36F58 | **0x36F58** | **0** |
+    # | `__bss_end` | 0x8016FD18 | **0x80173D58** | +0x4040 |
+    # | headroom | 1639144 | **1622696** | **-0x4040** |
+    #
+    # `__bss_start`'s +0x4040 is 0x4000 (the `.data` step) + 0x78 (the object) - 0x38 (the alignment
+    # after `.sysctl_set`, whose own size did not move, shrank from 0x3C to 0x4 because the 0x78
+    # changed the residue). `__bss_end` moves by the same amount because `.bss` itself does not move at
+    # all - and *that* is the step's real .bss story:
+    #
+    #   .bss  0x8016e4e8  0xb8  osfmk_arm_kpc_arm.o            <- 313's
+    #   .bss  0x8016e5a0  0x40  osfmk_kern_kpc_common.o        <- this object's 64 bytes
+    #   *fill* 0x8016e5e0 0x20
+    #   .bss  0x8016e600  0x1704 xnu_arm_entry_realstubs.o    <- 0x1744 - 0x40: one slot retired
+    #
+    # (offsets from the section start: 0x357E0 and 0x35840, against 0x357E0 and 0x35800 in 313's map).
+    # The gap in front of the 64-byte-aligned stand-ins is `align64(end) - end` = 0x20, and this object's
+    # 0x40 does **not** fit in it, so this is the **310-shaped case** rather than the 308/312 one: the
+    # stand-in block moves to the next 64-byte boundary, +0x40. What is new is that nothing downstream
+    # moves, because the slot the object displaces is the retired `kpc_actionid` stand-in - also 64
+    # bytes, because it too was `aligned(64)`. **Fourth data point of the rule, and the first where the
+    # insert and the retire are equal, so the section size is unmoved and only the two addresses inside
+    # it change.**
+    #
+    # **The run: `stub_hit=ktrace_init` at `xnu_entry_stub_caller=0x8000e660` = `kernel_bootstrap_thread
+    # + 0xe0`**, the `bl ktrace_init` at **0x8000e65c** - the first stub after `kpc_init` in that
+    # function's straight line, as the 313 block predicted. So `kpc_init` returned, which means its whole
+    # body ran: three lock calls, `kpc_arch_init` (313's two instructions), `kpc_common_init` (three lock
+    # calls and a tail branch to `lck_mtx_init`) and `kpc_thread_init` (real since `osfmk_kern_kpc_thread.o`
+    # entered `LINK_OBJS`). KPC's initialization is now complete in this image, and the three names that
+    # make it up - a lock group named `"kpc"` and a mutex over it (312), 184 bytes of PMU state (313),
+    # and now 64 more bytes of lock state, 120 bytes of `site` records and the whole `kpc_*` API as real
+    # code - all came from objects this walk linked.
+    #
+    # It also measures something it was not aimed at: **`bootprofile_init` returned.** Between 313's stop
+    # and this one, `kernel_bootstrap_thread` called `bootprofile_init` at 0x8000e64c and
+    # `kernel_debug_string_early` at 0x8000e658, so two more of that function's entries are consumed.
+    #
+    # **Next: `bsd/kern/kern_ktrace.c`** (`bsd_kern_kern_ktrace.o`, manifest:40) - the object that
+    # defines `ktrace_init`: `.text` **2564** (0xa04) / `.bss` 82 / `.rodata.str1.1` 250 / `.data` 288 /
+    # `__DATA,__sysctl_set` **24**, with 47 defined symbols and 25 references.
+    #
+    # Predicted **11 resolved, all functions** - `ktrace_init` (this stop) plus `ktrace_assert_lock_held`,
+    # `ktrace_configure`, `ktrace_end_single_threaded`, `ktrace_get_owning_pid`, `ktrace_kernel_configure`,
+    # `ktrace_lock`, `ktrace_read_check`, `ktrace_reset`, `ktrace_start_single_threaded`, `ktrace_unlock`
+    # - and **4 added**: `kperf_reset`, `kperf_sampling_disable`,
+    # `ktrace_background_available_notify_user` and `sysctl_handle_string`, none of which has a defining
+    # object in this pool, so all four are function stubs (the 304 rule for a name with no size to take).
+    # That is 726 -> **719** undefined and 637 -> **630** function stubs, storage unchanged at 89. Of the
+    # object's 25 references, 11 are already real in this image (`kdebug_reset`, `kernel_debug_disable`,
+    # the four `lck_*` calls `ktrace_init` makes, `lck_mtx_assert`, `lck_mtx_lock`, `lck_mtx_unlock`,
+    # `strlcpy`) and 10 are already stubs (`current_proc`, `kauth_cred_get`, `kauth_cred_issuser`,
+    # `priv_check_cred`, `proc_find`, `proc_name_address`, `proc_pid`, `proc_rele`, `proc_uniqueid`,
+    # `sysctl__children`, `sysctl_handle_int`).
+    #
+    # `ktrace_init`'s own body is four real lock calls plus `assert(ktrace_mtx != NULL)`, so like 310-314
+    # the stop is predicted to be *past* `ktrace_init`'s return - and this time past the straight line
+    # too. The image's own disassembly says why: the next call is `kdebug_init` at 0x8000e674, and
+    # `kdebug_init` is a **one-instruction trampoline** (`b kdebug_trace_start` at 0x8003fef8), and that
+    # target calls four of the eleven names this step resolves, at six call sites -
+    # `ktrace_start_single_threaded` (0x8003ff18), `ktrace_kernel_configure` (0x8003ff24),
+    # `ktrace_assert_lock_held` (0x80040020, 0x8004005c, 0x800402b0 - three call sites),
+    # `ktrace_end_single_threaded` (0x8004021c) - and a walk of this image from `kdebug_trace_start`
+    # stops on `ktrace_end_single_threaded`, one of them. So the frontier leaves
+    # `kernel_bootstrap_thread` for the first time in a long while and moves *into* the ktrace code.
+    #
+    # The predicted stop is therefore **`sysctl_early_init`, caller key 0x8000E6A4**, on the reasoning
+    # that the ktrace calls now all resolve and the straight line continues: `prng_cpu_init` has no stub
+    # call at all (its calls are `kalloc_canblock`, `panic`, `ml_get_timebase`, `cc_clear`, the four
+    # `lck_*`, `thread_wakeup_prim` and `cpu_datap`, all real), and `bsd_early_init` at 0x8000e6a0 is
+    # **another one-instruction trampoline** - `b sysctl_early_init` at 0x8003a9e0 - whose target is a
+    # stub. The caller key is 0x8000E6A4 and not 0x8003A9E4 for the reason 313's ledger noted about tail
+    # branches: a `b` does not set `lr`, so the `lr` the stub reports is the `bl bsd_early_init`'s return
+    # address in `kernel_bootstrap_thread`. The named alternatives are (a) that
+    # `kdebug_trace_start` reaches a stub inside the ktrace code that this step does not resolve,
+    # (b) that `bsd_early_init` is not reached because the run stops in `prng_cpu_init`'s one indirect
+    # call, and (c) `ktrace_init`'s own `assert` firing, which would be a panic rather than a stub and
+    # which the log would distinguish.
+    OSFMK_KERN_KPC_COMMON_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KPC_COMMON_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kpc_common.o}
     # 312: `kern_kpc.c` - the first step with `.data` and `__sysctl_set`, and four resolutions that
     #       were not in the undefined list to begin with
     #
@@ -9412,6 +9549,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KDP_KDP_UDP_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_KPC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_ARM_KPC_ARM_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_KPC_COMMON_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -9424,7 +9562,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
