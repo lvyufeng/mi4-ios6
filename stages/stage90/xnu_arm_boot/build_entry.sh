@@ -13557,6 +13557,11 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     IOKIT_BSDDEV_IOKITBSDINIT_OBJ=${STAGE90_ENTRY_IOKIT_BSDDEV_IOKITBSDINIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_bsddev_IOKitBSDInit.o}
     STAGE90_PTHREAD_FUNCTIONS_OBJ=${STAGE90_ENTRY_STAGE90_PTHREAD_FUNCTIONS_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_pthread_functions.o}
     STAGE90_CRYPTO_FUNCTIONS_OBJ=${STAGE90_ENTRY_STAGE90_CRYPTO_FUNCTIONS_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_crypto_functions.o}
+    # 439: `pseudo_inits[]`, generated per configuration by tools/gen_pseudo_inits.py and compiled by
+    # the same platform block as the two tables above - so the object's *name* is the generator's
+    # basename (`stage90_pseudo_inits.o`), while its *source* lives under the configuration that
+    # derived it. One object path and one configuration at a time, like every other object here.
+    STAGE90_PSEUDO_INITS_OBJ=${STAGE90_ENTRY_STAGE90_PSEUDO_INITS_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_pseudo_inits.o}
     BSD_NET_NWK_WQ_OBJ=${STAGE90_ENTRY_BSD_NET_NWK_WQ_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_nwk_wq.o}
     BSD_NET_DLIL_OBJ=${STAGE90_ENTRY_BSD_NET_DLIL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_dlil.o}
     BSD_NET_KPI_PROTOCOL_OBJ=${STAGE90_ENTRY_BSD_NET_KPI_PROTOCOL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_kpi_protocol.o}
@@ -26016,6 +26021,27 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$STAGE90_CRYPTO_FUNCTIONS_OBJ" "run ./tools/build_xnu_arm_kernel.sh --platform-only first (its platform block compiles stages/stage90/xnu_supply/stage90_crypto_functions.c)"
 
     # --------------------------------------------------------------------------------------------
+    # 439: `pseudo_inits`, supplied by this image - and it is *this* link line that has to carry it.
+    #
+    # 438's run stopped at `ifar=0xE52DE004`, the ARM encoding of `push {lr}`, coming out of
+    # `bsd_autoconf` (`bsd/kern/bsd_init.c:861`, from `bsd_init`) - which walks
+    #
+    #     for (pi = pseudo_inits; pi->ps_func; pi++) (*pi->ps_func) (pi->ps_count);
+    #
+    # over an array `bsd/dev/busvar.h:46` declares as `extern struct pseudo_init pseudo_inits[]`.
+    # The image supplied it as a **function** stand-in, so the array's second word - the walk's own
+    # termination test - was the stand-in's prologue: non-NULL, and `blx r1` at `bsd_autoconf+0x28`
+    # jumped to the value of `push {lr}`.
+    #
+    # The generator (`tools/gen_pseudo_inits.py`) derives the entries from the configuration, exactly
+    # as Apple's `SETUP/config/mkioconf.c:79-100` does, and the platform block compiles it with the
+    # bsd define set because it includes `<dev/busvar.h>`. It is required here rather than stubbed,
+    # and `tools/check_stub_kinds.py` runs below - on the undefined set this link produces - so that
+    # the *next* symbol of this kind cannot arrive the same way.
+    LINK_OBJS+=("$STAGE90_PSEUDO_INITS_OBJ")
+    require "$STAGE90_PSEUDO_INITS_OBJ" "run ./tools/build_xnu_arm_kernel.sh --platform-only first (its platform block compiles the array tools/gen_pseudo_inits.py derives from the configuration)"
+
+    # --------------------------------------------------------------------------------------------
     # 437: `g_crypto_funcs`, supplied by this image.
     #
     # 436's run stopped on `aes_encrypt_key128` (`libkern/crypto/corecrypto_aes.o`) loading
@@ -26309,6 +26335,27 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
         "$REPO_ROOT"/out/xnu_kernel_obj/*.o "$REPO_ROOT"/out/xnu_asm_obj/*.o 2>/dev/null |
         sed 's/^[^:]*: //' | awk 'NF>=2 {print $1, $2, ($4 == "" ? "-" : $4)}' |
         sort -u > "$OUT/xnu_arm_entry_kernsyms.txt"
+
+    # --------------------------------------------------------------------------------------------
+    # 439: the kind check, and it is the check that had to exist before this could be fixed rather
+    # than merely noticed.
+    #
+    # The generator below decides function-or-storage from `nm` over the object pool. When the pool
+    # defines the symbol that decision is *measured*; when the pool defines nothing it has no type
+    # information at all and falls through to a function stub. That is how `pseudo_inits` - declared
+    # `extern struct pseudo_init pseudo_inits[]` at bsd/dev/busvar.h:46 - became a function whose own
+    # prologue was the array's first `ps_func`. A function stand-in for an array is not a slightly
+    # wrong stand-in: it is a valid little table whose second word points into its own instructions.
+    #
+    # The undefined list gives names and never kinds, so the kind comes from the tree's own headers.
+    # Anything the pool does not define and a header declares as an **object** stops the build; the
+    # four that are latent today are in the check's `KNOWN_KINDS` with their measured causes, and
+    # that table is validated in both directions so it cannot outlive them.
+    "$REPO_ROOT/tools/check_stub_kinds.py" --undef "$OUT/xnu_arm_entry_undef.txt" \
+        --kernsyms "$OUT/xnu_arm_entry_kernsyms.txt" || {
+        say "  the stub kinds above are not safe - a function stand-in for an object is a table" >&2
+        exit 1
+    }
 
     {
         echo '/*'

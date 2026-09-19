@@ -145,9 +145,13 @@ stub, and the object that retires it is the one this step made compile:
 `#ifdef` structure, and "an object defines nothing" is a claim about a line range that was never
 checked.**
 
-**Miss (b): `.text` grew `0x4B4AC0 → 0x4B4B00`, +0x40, not −0x24 — and changed nothing else at all.**
+**Miss (b): `.text` grew `0x4B4AC0 → 0x4B4C00`, +0x140, not −0x24 — and changed nothing else at
+all.** (The hex endpoints in this heading and the `+0x40` in the block below are corrected here, by
+439: the build log's own `text size 4934656` is `0x4B4C00`, and `4934656 − 4934336 = 320 = 0x140`.
+`0x4B4B00` and `+0x40` were this doc's transcription of it, and the *conclusion* — that `.text`
+grew while everything else stayed — is unaffected. See `mi4-measurement-defects`.)
 
-    text size    4934656 (.text)      <- was 4934336: +0x40
+    text size    4934656 (.text)      <- was 4934336: +0x140 = 0x4B4C00
     image bytes  5141584              <- unmoved
     .data        0x804B8000 (0x2E360) <- unmoved, address and size
     .sysctl_set  0x804E6360 (0xFD8)   <- unmoved

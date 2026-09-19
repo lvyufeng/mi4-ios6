@@ -162,6 +162,22 @@ XO_MESSAGE=$("$TOOLS_DIR/check_option_headers.py" 2>&1) || {
     exit 2
 }
 
+# And the pseudo-device table's array (experiment-439). `bsd_autoconf()` walks `pseudo_inits` and
+# 438's run faulted fetching `0xE52DE004` - the ARM encoding of `push {lr}` - because that symbol had
+# been stubbed as a *function* and the walk read the stand-in's own prologue as the first entry's
+# `ps_func`. The array is generated rather than typed, from the same expanded configuration Apple's
+# `mkioconf.c` reads, and generated **into this configuration's own directory**: RELEASE keeps
+# `bpfilter` and `fsevents` and STAGE90_BOOT does not, so a shared path would let whichever
+# generation ran last decide for both.
+PI_MESSAGE=$(XNU_KERNEL_CONFIG=$CONFIG "$TOOLS_DIR/gen_pseudo_inits.py" --write 2>&1) || {
+    echo "$PI_MESSAGE" >&2
+    exit 2
+}
+# The path comes from the generator rather than being spelled again here: one value with two
+# definitions is this project's most-repeated defect, and a `$REPO_ROOT/out/...` written in two
+# places has nothing comparing them.
+PSEUDO_INITS_SRC=$(XNU_KERNEL_CONFIG=$CONFIG "$TOOLS_DIR/gen_pseudo_inits.py" --print-path)
+
 mkdir -p "$OUT"
 # Truncate every output. A build script that appends leaves the previous run's failures in the
 # list, and a count read from it is then a count of two runs - which is how a 397-file result
@@ -433,11 +449,11 @@ DEVICE_HEADERS=${XNU_DEVICE_HEADERS_OUT:-$REPO_ROOT/out/xnu_device}/$CONFIG
 # name is not its `#ifdef` structure, and "an object defines nothing" is a claim about a line range
 # that was never checked.** The '380 bytes' the new object carries is the measure of it.
 #
-# **Prediction miss (b): `.text` grew 0x4B4AC0 -> 0x4B4B00, +0x40, not -0x24.** Removing two stub
+# **Prediction miss (b): `.text` grew 0x4B4AC0 -> 0x4B4C00, +0x140, not -0x24.** Removing two stub
 # bodies and their name slots is not what sets Δ`.text` - the new real `addupc_task` body more than
 # pays for them - and the +0x40 then **changed nothing else at all**:
 #
-#     text size    4934656 (.text)      <- was 4934336: +0x40
+#     text size    4934656 (.text)      <- was 4934336: +0x140 = 0x4B4C00
 #     image bytes  5141584              <- unmoved
 #     .data        0x804B8000 (0x2E360) <- unmoved, address and size
 #     .sysctl_set  0x804E6360 (0xFD8)   <- unmoved
@@ -1103,8 +1119,28 @@ PL_COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" iokit) )
 # include is about. The AES implementation it points at is *not* here - `stage90_aes.c` includes
 # nothing from the tree at all, so `build_entry.sh` compiles it, for the reason written there: the
 # same translation unit has to be runnable on the host for its known-answer tests.
+# **And a fifth file in that list (439), which is generated rather than written.**
+#
+# `pseudo_inits` is the array `bsd_autoconf()` walks (`bsd/kern/bsd_init.c:1083`), and 438's run is
+# what named it: a prefetch abort fetching `0xE52DE004` - the ARM encoding of `push {lr}`, which is
+# the first word inside every one of that image's 42 stub bodies. The symbol had been stubbed as a
+# *function*, and `bsd/dev/busvar.h:46` declares it `extern struct pseudo_init pseudo_inits[]`, so
+# the walk's first `ps_func` was the stand-in's own prologue word and `blx r1` jumped to it.
+#
+# Apple generates this array too - `SETUP/config/mkioconf.c:79-100` writes one `{count, func}` per
+# `pseudo-device` line with an `init` word, in the configuration's order, terminated by `{0, 0}` -
+# and `tools/gen_pseudo_inits.py` reproduces that derivation from `tools/xnu_config/expand.sh`, which
+# is this project's own reproduction of doconf's `<feature>` filtering. So the content is measured
+# rather than typed, and it is **per configuration**: RELEASE keeps `bpfilter` and `fsevents`,
+# STAGE90_BOOT does not, which is why the generated file lives in its own configuration's directory.
+#
+# It is in *this* block for the same reason the pthread and crypto tables are: the file includes
+# `<dev/busvar.h>`, so `struct pseudo_init`'s layout is the kernel's own rather than a copy of it -
+# `-DDRIVER_PRIVATE=1` is in the bsd define set and is what exposes it. The component is **bsd**
+# because that is the header's component and because `bsd_autoconf` is the reader.
 PLATFORM_BSD_SOURCES=("$REPO_ROOT/stages/stage90/xnu_supply/stage90_pthread_functions.c"
-                      "$REPO_ROOT/stages/stage90/xnu_supply/stage90_crypto_functions.c")
+                      "$REPO_ROOT/stages/stage90/xnu_supply/stage90_crypto_functions.c"
+                      "$PSEUDO_INITS_SRC")
 PL_BSD_ROOTS=(-I"$XNU/bsd")
 for _c in "${COMPONENT_LIST[@]}"; do
     [[ $_c == bsd ]] && continue
