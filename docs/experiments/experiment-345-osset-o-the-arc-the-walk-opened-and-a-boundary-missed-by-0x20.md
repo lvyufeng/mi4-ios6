@@ -97,12 +97,17 @@ step — and it is why the string row stays a band.
 | | 344 | 345 measured | model |
 |---|---|---|---|
 | `.text` | 0x4440 | **0x43F8** | −0x48 exactly (three bodies) |
-| `.rodata.str1.4` | 0x414B | **0x40E7** | 0x40E8 — the ≤1-byte tail artifact, for the **fifth** time |
+| `.rodata.str1.4` | 0x414B | **0x40E7** | 0x40E8 — the ≤1-byte tail artifact, for the **fifth** time (**withdrawn by 346**: it measured the model exactly, so the rule is "model or model − 1") |
 | `.bss` | 0x1A04 | **0x19C4** | −0x40 exactly (one stand-in slot) |
 
 The `.rodata.str1.4` row is the first time that artifact was **predicted** rather than noticed: 338, 342, 343
 and 344 each recorded "measured = model − 1" on this section after the fact, so 345 wrote it down before the
-run as a constant. It was.
+run as a constant. It was — **and 346 showed the constant does not exist.** 346's `.rodata.str1.4` went
+0x40E7 → **0x40B3**, which is `0x40E7 − 0x1C − 0x18` to the byte: the model, with no artifact at all. Five
+samples of a ≤1-byte rounding that sometimes does not happen is a distribution, not a constant, and four of
+those five shared a construction (one retired name of the same shape) that did not make them independent.
+The claim was written one step before the control existed to falsify it, which is the same error this step's
+fill *model* made one row above.
 
 **The fill row is where the model failed, and the failure is the useful part.** Applying the 344 map's own
 `*fill*` rows to a uniform shift — the model 343's `.data` row and 344's `.bss` row were both argued from —
