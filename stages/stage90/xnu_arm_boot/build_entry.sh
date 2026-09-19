@@ -4355,6 +4355,90 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # lists the indirect calls it could not follow (`getval`, `panic_trap_to_debugger`, `__doprnt`, i.e. a
     # kprintf path), so a run that stops earlier is possible and the tool says so rather than guessing.
     BSD_KERN_KERN_KTRACE_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_KTRACE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_ktrace.o}
+    # 327: `libkern/c++/OSCollection.cpp` - the object that defines all seven of the names 325 created, and
+    #       the step whose stop is on the far side of four real calls
+    #
+    # **The object that defines all seven of the names 325 created.** `libkern/c++/OSCollection.cpp` is
+    # `libkern_c++_OSCollection.o` (manifest:364): `.text` **0x194** for 22 definitions, a 4-byte COMDAT
+    # `.text._ZN12OSCollection9MetaClassD0Ev`, `.bss` **0x18**, `.rodata` **0xB0** (176), `.rodata.str1.1`
+    # **0x6B** (107), `.init_array` **4**, **no `.data` and no `__DATA, __data` at all**, and **31
+    # references**. What it is: `OSCollection` - the base class of `OSDictionary`/`OSArray`/`OSSet` - with
+    # its `MetaClass`, the ctor (which is no more than `OSObject::OSObject` plus a vtable store), the dtor,
+    # `init` (which is no more than `OSObject::init` plus a flags store), `setOptions` (a leaf that masks a
+    # flag word), the two `gMetaClass`/`metaClass` stand-ins, `haveUpdated` and `copyCollection`.
+    #
+    # **Predicted: 8 resolved / 1 added.** Resolved are **six function** stubs - the constructor 326's run
+    # stopped in, `init`, `setOptions`, `haveUpdated`, `copyCollection` and the destructor - and **two
+    # storage** stand-ins (`OSCollection::gMetaClass` `B`, `OSCollection::metaClass` `R`). Added is **one
+    # function**, `OSReportWithBacktrace` - referenced only from `haveUpdated`'s "this must be overridden"
+    # path (`gIOKitDebug`, then `panic` and the backtrace), which nothing on the walk's path reaches:
+    #
+    #   so 800 -> **793** undefined, 689 -> **684** function stubs, 111 -> **109** storage.
+    #
+    # `.text` predicted **+0x114 .. +0x17F plus a fill band**:
+    #
+    #   this object's .text                                  +0x194   (exact)
+    #   its COMDAT `.text._ZN12OSCollection9MetaClassD0Ev`     +0x004
+    #   this object's .rodata                                +0x0B0   (176, exact)
+    #   this object's .rodata.str1.1                         +0x000..0x06B  (107 in the object; the pool
+    #                                                                       decides - the last two steps
+    #                                                                       placed 100%)
+    #   the stub object's .text, created                      +0x018   (1 body)
+    #   the stub object's name strings, created               +0x018   (`OSReportWithBacktrace`, 21 + NUL
+    #                                                                   padded to 24)
+    #   the stub object's .text, retired                     -0x090   (6 bodies)
+    #   the stub object's name strings, retired              -0x0D4   (the 6 function names' align4 sum;
+    #                                                                 the two retired storage stand-ins have
+    #                                                                 no name slots - 322)
+    #   .text-region alignment fill                          the band
+    #                                                       -------
+    #                                                        +0x114 .. +0x17F + band
+    #
+    # and with `.text` ending at most 0x8014169F the 16 KB boundary at 0x80144000 is not in play (**0x2961
+    # of slack**), so only the object's own data moves:
+    #
+    #   | | base (326) | predicted (327) | delta |
+    #   | .text | 0x141520 | 0x141634 .. 0x14169F | +0x114 .. +0x17F |
+    #   | .data | 0x80144000 (0x192D8) | **unmoved** (0x192D8) | 0 - the object has no `.data` and no
+    #                                                                    `__DATA, __data` |
+    #   | .sysctl_set | 0x8015D2D8 (0x10C) | unmoved | 0 |
+    #   | .init_array | 0x8015D3E4 (0x10) | **0x8015D3E4** (**0x14**) | +0x4 (a fifth entry nothing runs) |
+    #   | .bss | 0x8015D400 (0x37918) | ~0x8015D400 (**0x378B0**) | -0x68 before fill (0x18 object, **two**
+    #                                                                    retired 64-byte stand-ins -0x80) |
+    #   | image | 1430516 (0x15D3F4) | **1430520** | +0x4 - only `.init_array` grows |
+    #   | headroom | 1487592 | ~1487628 | up by whatever `.bss` loses |
+    #
+    # **Predicted stop: `_ZN8OSSymbol17withCStringNoCopyEPKc` at the caller key
+    # `_ZN11OSMetaClass11postModLoadEPv+0x108`.** This is the first step whose stop is *not* the name the
+    # step defines - the walk has to get through four real calls to reach it, and each one is checkable in
+    # advance:
+    #
+    #   1. `OSCollection::OSCollection(OSMetaClass*)` (the 326 stop) is `bl _ZN8OSObjectC2EPK11OSMetaClass`
+    #      (real since 326) plus a vtable store - no stub.
+    #   2. `withCapacity` then stores the vtable, calls `_ZNK11OSMetaClass19instanceConstructedEv` (real
+    #      since 324) and `blx`-es the vtable slot at +0x64, which is the real
+    #      `OSDictionary::initWithCapacity`.
+    #   3. `initWithCapacity`'s first instruction after its prologue is `bl _ZN12OSCollection4initEv` -
+    #      **real as of this step**, and itself `bl _ZN8OSObject4initEv` (real since 326) plus a store, so
+    #      it returns; the rest of the body is `kalloc_canblock`, `bzero`, `OSAddAtomic`, all real.
+    #   4. `withCapacity` returns the dictionary to `postModLoad`, which stores it and calls
+    #      `dict->setOptions(2, 2, 0)` **through the vtable** - the real `OSDictionary::setOptions`, whose
+    #      first call is `OSCollection::setOptions` (real as of this step, a leaf that masks a flag word and
+    #      returns the *old* flags). Its propagation loop is guarded by `(oldflags ^ 2) & 2` **and the
+    #      dictionary's count at `+0x10`**, and `initWithCapacity` left that count at 0, so the loop is not
+    #      entered and `setOptions` returns at its first branch.
+    #   5. `postModLoad` then loads `kmodInfo[0]` and calls `_ZN8OSSymbol17withCStringNoCopyEPKc`, which is a
+    #      **stub** in today's image (0x80124E90, the 24-byte caller-key shape) and stays one - nothing
+    #      links `libkern/c++/OSSymbol.cpp` yet.
+    #
+    # The named alternatives, in the order they would come first if any of the five arguments above is
+    # wrong: a failure return from `OSObject::init`/`init` would send `initWithCapacity` down its error path
+    # and `withCapacity` down its release path (`blx` at vtable+0x14), and a non-empty dictionary count
+    # would send `OSDictionary::setOptions` into its per-object loop, whose body is
+    # `_ZN15OSMetaClassBase12safeMetaCastEPKS_PK11OSMetaClass` (real since 324) plus a virtual call per
+    # member - so a stop inside `OSMetaClassBase::safeMetaCast` or a `blx` is the signal that the count was
+    # not zero. `OSReportWithBacktrace`, the one name this step adds, can only be reached from a
+    # `haveUpdated` call that nothing on this path makes.
     # 326: `libkern/c++/OSObject.cpp` - the object that defines 325's stop, and the second step in the walk
     #       whose added count is zero
     #
@@ -4999,6 +5083,106 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # reaches first. The counts and the `.text` terms are read the same way (by kind, created and retired
     # both written down), and `.text` now has 0x2AE0 of slack below the 16 KB boundary.
     LIBKERN_CXX_OSOBJECT_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSOBJECT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSObject.o}
+    #
+    # **Measured: all three counts exact, `.text` closing in three terms with the inputs exactly at the top
+    # of the predicted range for the second step running, `.data` unmoved to the byte - and the stop is the
+    # predicted name at the predicted key, five real calls further on.** Against a baseline built in this
+    # session with an empty stand-in in this slot, which reproduced 326's image to the byte (`800/689/111`,
+    # `.text` 0x141520, `.data` 0x80144000/0x192D8, `.sysctl_set` 0x8015D2D8/0x10C, `.init_array`
+    # 0x8015D3E4/0x10, `.bss` 0x8015D400/0x37918, `__bss_end` 0x80194D18, image 1430516, headroom 1487592):
+    #
+    #   | | predicted | measured |
+    #   | undefined | 793 | **793** |
+    #   | function stubs | 684 | **684** |
+    #   | storage stubs | 109 | **109** |
+    #   | resolved / added | 8 / 1 | **8 / 1** |
+    #
+    # and the kinds are right: six **function** stubs (the ctor, `init`, `setOptions`, `haveUpdated`,
+    # `copyCollection`, the dtor) and two **storage** stand-ins resolved, one **function** added.
+    #
+    # `.text` 0x141520 -> **0x1416A0** is +0x180, in three terms:
+    #
+    #   this object's contributions                          +0x2B3   = 0x194 `.text` + 0x004 COMDAT
+    #                                                                   `.text._ZN12OSCollection9MetaClassD0Ev`
+    #                                                                   + 0x0B0 `.rodata` + **0x06B of
+    #                                                                   0x06B** - all 107 string bytes
+    #                                                                   placed: the **third** dedup in a
+    #                                                                   row measured at zero
+    #   the stub object's .text + names                      -0x134   (6 bodies 0x90 + 6 names 0xD4 retired,
+    #                                                                 less 1 body 0x18 + 1 name 0x18
+    #                                                                 created - the created half counted this
+    #                                                                 time, and it is not zero)
+    #   .text-region alignment fill                          +0x001   (0xD2C -> 0xD2D; 58 -> 59 fills)
+    #                                                      -------
+    #                                                       +0x180   against a measured +0x180
+    #
+    # and the region identity agrees: S(placed inputs) 0x140813 -> 0x140992 = **+0x17F**, S(fill) +0x1, sum
+    # +0x180. The predicted range was `0x114 .. 0x17F + band`, so for the **second step running the inputs
+    # term came out at the range's top** - the range being only the uncertainty in how much of the object's
+    # 107 string bytes the pool would place, and the pool placed all of them.
+    #
+    # **`.data` did not move at all** - the first step in the walk whose object has neither a `.data` nor a
+    # `__DATA, __data` section - and the boundary stayed out of play with 0x2961 of slack:
+    #
+    #   | | base (326) | measured (327) | delta | predicted |
+    #   | .text | 0x141520 | **0x1416A0** | +0x180 | +0x114 .. +0x17F + band |
+    #   | .data | 0x80144000 (0x192D8) | **0x80144000** (0x192D8) | **0** | 0 - the object has no data
+    #                                                                                   section at all |
+    #   | .sysctl_set | 0x8015D2D8 (0x10C) | **0x8015D2D8** (0x10C) | 0 | 0 |
+    #   | .init_array | 0x8015D3E4 (0x10) | **0x8015D3E4** (**0x14**) | +0x4 | fifth entry |
+    #   | .bss | 0x8015D400 (0x37918) | **0x8015D400** (**0x37898**) | **-0x80** | -0x68 before fill |
+    #   | __bss_end | 0x80194D18 | **0x80194C98** | -0x80 | |
+    #   | image | 1430516 (0x15D3F4) | **1430520 (0x15D3F8)** | +0x4 | +0x4 - exact |
+    #   | headroom | 1487592 | **1487720** | +0x80 (follows `__bss_end`) | |
+    #
+    # `.bss` again beat the prediction by shrinking more than predicted, and by the same mechanism as 326:
+    # S(placed inputs) -0x68 (the object's 0x18 and **two** retired 64-byte stand-ins, `OSCollection::
+    # gMetaClass` and `OSCollection::metaClass`) with the fill **falling** a further 0x18 (0x115 -> 0xFD,
+    # 40 -> 39 fills) for a -0x80 section. Three steps, three signs of the fill's move: 324 -0x30 with the
+    # slot re-used, 325 +0x28 with the inputs pushed, 326 -0x1C and 327 -0x18 with the slot handed back.
+    # The prediction can name the inputs and must *read* the fill.
+    #
+    # **The run:**
+    #
+    #   MI4IOS6_STAGE90_XNU real XNU entry stub_hit=_ZN8OSSymbol17withCStringNoCopyEPKc
+    #    xnu_entry_stub_caller=0x8011e4a0   (also _a and _e)
+    #
+    # `tools/host_resolve_entry_addr.sh 0x8011e4a0` -> **`_ZN11OSMetaClass11postModLoadEPv+0x108`**,
+    # `caller-4` = `0x8011e49c: bl 80124e90 <_ZN8OSSymbol17withCStringNoCopyEPKc>`. This is **the first stop
+    # in the walk that is not the name the step defines**, and the chain that reaches it is the five-step
+    # argument the prediction wrote down: `OSCollection::OSCollection` returned (`bl _ZN8OSObjectC2E...`,
+    # real since 326, plus a vtable store), `withCapacity` stored the vtable and called the real
+    # `instanceConstructed`, the vtable call at +0x64 reached the real `OSDictionary::initWithCapacity`,
+    # whose first instruction is `bl _ZN12OSCollection4initEv` - real **this** step, and itself
+    # `OSObject::init` (real since 326) plus a store - and the real `OSDictionary::setOptions(2, 2, 0)` then
+    # returned **at its first branch**, which is the run's evidence that the dictionary's count was 0 (had
+    # it been non-zero the loop's `OSMetaClassBase::safeMetaCast` and a `blx` per member would have stopped
+    # the walk first). So one stop measures a whole chain of five calls, four of which the last two steps
+    # had made real, and the fifth of which - `setOptions`'s early return - is a *value* the run confirms
+    # indirectly: no stop occurred where the loop would have been.
+    #
+    # Preflight clean (`STAGE90_XNU_ENTRY 1`, `HARD_SKIP`, `STAGE90_HW_WATCHDOG ARMED`, software dead-man
+    # armed, no storage symbols in the payload), log **301647** bytes, one `stub_hit=` line, **no
+    # `exception:` line**.
+    #
+    # **Safety:** non-persistent `fastboot boot` only, nothing flashed,
+    # `persistent_write_attempted=0x00000000` x25, `failure_mask=0x00000000` x87,
+    # `xnu_entry_failures=0x00000000`, `xnu_entry_abort_entries=0x00000000`, and the device returned to
+    # Android on its own (`ro.build.version.release` = 10).
+    #
+    # **What this measures.** `postModLoad`'s fifth call and no more. Not measured: what
+    # `OSSymbol::withCStringNoCopy` would do (nothing links it), the rest of `OSCollection`'s 22
+    # definitions, `haveUpdated`'s `panic`/backtrace path, and the 0x14-byte `.init_array` - five entries
+    # now, still nothing running them.
+    #
+    # **Next: `libkern/c++/OSSymbol.cpp`** (`libkern_c++_OSSymbol.o`, manifest:380), which defines the
+    # current stop and also the `bsearch` that 325 created. Its shape is read the same way (by kind, with
+    # the created half of both stub-object terms written down), and the prediction after it is the next call
+    # in `postModLoad` - the body continues past this `bl` with `mov r5, r0`, a load of `kmodInfo[0]+0xc`,
+    # `beq` to +0x2D4, and `bl _ZN6OSKext24lookupKextWithIdentifierEP8OSString`, whose argument is the
+    # symbol this step makes real, so the symbol should be built, used to look the kext up, and the stop
+    # should be the first stub on that path.
+    LIBKERN_CXX_OSCOLLECTION_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSCOLLECTION_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSCollection.o}
     # 323: `libkern/c++/OSRuntime.cpp` - the object that defines `OSlibkernInit` (322's stop) and the C++
     #       runtime initialiser, the linker's `new`/`delete`, and the `__mod_init_func` scan
     #
@@ -11718,6 +11902,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$LIBKERN_CXX_OSMETACLASS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_CXX_OSDICTIONARY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_CXX_OSOBJECT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$LIBKERN_CXX_OSCOLLECTION_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -11730,7 +11915,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
