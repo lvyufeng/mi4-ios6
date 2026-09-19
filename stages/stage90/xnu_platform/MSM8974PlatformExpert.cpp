@@ -64,6 +64,7 @@
  * `"Xiaomi Mi 4 cancro Stage84"` (`stage90_main.c:79-82`) - the other two candidates.
  */
 #include <IOKit/IOPlatformExpert.h>
+#include <arm/machine_routines.h>
 
 class MSM8974PlatformExpert : public IODTPlatformExpert
 {
@@ -86,7 +87,38 @@ OSDefineMetaClassAndStructors(MSM8974PlatformExpert, IODTPlatformExpert);
 bool
 MSM8974PlatformExpert::start( IOService * provider )
 {
-    return( super::start( provider ));
+    if( !super::start( provider )) return( false );
+
+    /* Experiment 405. `ml_get_max_cpus` (`osfmk/arm/machine_routines.c:184`) is a wait, not a read:
+     * `if (max_cpus_initialized != MAX_CPUS_SET) { max_cpus_initialized = MAX_CPUS_WAIT;
+     * assert_wait(&max_cpus_initialized, THREAD_UNINT); thread_block(THREAD_CONTINUE_NULL); }`, and
+     * `commpage_populate` calls it with the comment `// NB: this call can block`
+     * (`osfmk/arm/commpage/commpage.c:222`). The only writer of that flag is `ml_init_max_cpus`
+     * (`machine_routines.c:163`), whose only caller in this image is
+     * `IOCPUInterruptController::initCPUInterruptController(int, int)+0x94` (`iokit/Kernel/IOCPU.cpp:765`)
+     * - and the platform-expert hook that would construct that controller,
+     * `createCPUInterruptController`, is not in the open-source tree at all: only Apple's closed-source
+     * platform experts implement it. Experiments 403 and 404 measured the consequence: the boot thread
+     * reaches the `bl ml_get_max_cpus` at `commpage_populate + 0x70` (key 0x800E6C98) and never returns,
+     * because nothing on this machine can announce a CPU count.
+     *
+     * This call is the smallest thing that can set it, and it is deliberately the *probe* rather than
+     * the faithful fix: Apple's own platforms set this fact from the CPU interrupt controller's
+     * constructor, which also allocates one lock per interrupt source and - through
+     * `enableCPUInterrupt` - installs the per-CPU interrupt handler the timer needs. This image
+     * instantiates no CPU driver at all, so the number announced here is what this payload actually
+     * brings up: one processor, the boot CPU, with no per-CPU interrupt handler installed. Nothing in
+     * the image can start a second CPU, and announcing four (the SoC's real core count) would size
+     * `cpu_data`, the scheduler's per-CPU arrays and the shared page's CPU count for processors that
+     * never register.
+     *
+     * Where the boot stops next is the measurement this step exists for: `ml_get_max_cpus` returns,
+     * `commpage_populate` completes its remaining 100+ instructions, and the walk continues in
+     * `kernel_bootstrap_thread`'s ladder - which, if every remaining frame is real, ends at the stub
+     * `throttle_init` (`bsd_init + 0x8`, key 0x8003A9FC). */
+    ml_init_max_cpus( 1 );
+
+    return( true );
 }
 
 /*
