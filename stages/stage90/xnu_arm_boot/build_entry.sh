@@ -4355,6 +4355,149 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # lists the indirect calls it could not follow (`getval`, `panic_trap_to_debugger`, `__doprnt`, i.e. a
     # kprintf path), so a run that stops earlier is possible and the tool says so rather than guessing.
     BSD_KERN_KERN_KTRACE_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_KTRACE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_ktrace.o}
+    # 318: `c++/OSKext.cpp` - the largest object in the walk, a build that refused the step, and a `B` symbol
+    #       that is not a stand-in
+    #
+    # **The object that defines `_ZN6OSKext14kextForAddressEPKv`, 317's stop, and all twelve other names 317
+    # created.** `libkern/c++/OSKext.cpp` (manifest:369) is by far the largest step this walk has taken:
+    # `.text` **74436** (0x122C4) plus a 4-byte COMDAT `.text._ZN6OSKext9MetaClassD0Ev`, `.rodata.str1.1`
+    # **15092** (0x3AF4), `.rodata` 424, `.data` 347, `.bss` **477**, `__DATA,__data` 216,
+    # `__DATA,__sysctl_set` 4, an **`.init_array` of 4 bytes**, **181 definitions** and **186 references**.
+    #
+    # **The build refused the step first, and that is half the result.** `entry.ld` matched none of the
+    # object's `.init_array`, so the linker made it a **fifth, orphan output section** and `verify_sections`
+    # failed the build by name:
+    #
+    #   FAIL: the allocated output sections are '.bss .data .init_array .sysctl_set .text ' and this script
+    #   names exactly '.bss .data .sysctl_set .text ' - a section the linker placed on its own has appeared
+    #
+    # That check was written after 297 and 298 for exactly this, and this is the first step it has refused
+    # since 291. `entry.ld` now names `.init_array` and places it between `.sysctl_set` and `.bss` - it is
+    # `WA`, so a `WA` input inside `.text` would put a writable section in the region `entry_macho.s`
+    # describes as read-only `__TEXT`, which is 298's whole point - and keeps the name rather than merging it
+    # into `.data` by wildcard, so the table stays visible in the map. The build's `want` list is now five
+    # names and a sixth is again a failure.
+    #
+    # **What is in that table, and the consequence.** One entry, an `R_ARM_TARGET1` relocation to
+    # `_GLOBAL__sub_I_OSKext.cpp`, and that function is not a no-op: it constructs
+    # `OSMetaClass::OSMetaClass("OSKext", &OSObject::gMetaClass, 96)` over `OSKext::gMetaClass`, installs
+    # `&_ZTVN6OSKext9MetaClassE + 8` as its vtable, and registers `OSMetaClass::~OSMetaClass` with
+    # `__cxa_atexit`. **Nothing runs it.** There is no C runtime in this image, and XNU's own initializer
+    # walk - `OSRuntimeInitializeCPP` (`libkern/c++/OSRuntime.cpp:364`) - finds constructors by *section
+    # name*, `sectionIsConstructor` (`OSRuntime.cpp:208`) accepting `__mod_init_func` or `__constructor`,
+    # neither of which `entry_macho.s` describes. So `OSKext::gMetaClass` is **96 bytes of this object's
+    # `.bss` that stay zero**, because the initializer that fills it is linked, correct and unreachable. That
+    # is [[mi4-stand-in-size-is-not-value]] in its sharpest form - the definition is present and the right
+    # size and zero because the *initializer* lives where nothing calls.
+    #
+    # Counts, measured against the image 317 built:
+    #
+    #   resolved  **18**  15 functions and 3 storage - the 13 names 317 created (`OSKextLog` and the twelve
+    #                     `_ZN6OSKext*`) plus five that were already stubs (`gLoadedKextSummaries` B 0x4,
+    #                     `gLoadedKextSummariesTimestamp` B 0x8, `kmod` B 0x4,
+    #                     `OSKextGetAllocationSiteForCaller`, `OSKextGetKmodIDForSite`)
+    #   added     **104** 86 functions (82 `T`; 4 with **no defining object anywhere**, `__cxa_atexit`,
+    #                     `osrelease`, the two `__llvm_profile_*`, which by the 304 rule still arrive as
+    #                     function stubs) and 18 storage stand-ins (7 `B`, 11 `R`)
+    #
+    # So 728 -> **814** undefined, 638 -> **709** function stubs, 90 -> **105** storage. All three exact.
+    # **104 new stubs in one step is the largest single jump in this walk**, in both directions at once.
+    #
+    # **Every section closes, and two of them are worth their arithmetic:**
+    #
+    # | | base (317) | measured (318) | delta |
+    # |---|---|---|---|
+    # | `.text` | 0x1243E0 | **0x13B060** | +0x16C80 |
+    # | `.data` | 0x80128000 (0x18F90) | **0x8013C000** (**0x191C8**) | +0x14000 start, +0x238 size |
+    # | `.sysctl_set` | 0x80140F90 (0x108) | **0x801551C8** (**0x10C**) | +0x4 |
+    # | `.init_array` | - | **0x801552D4** (**0x4**) | new |
+    # | `.bss` | 0x801410C0 (0x37018) | **0x80155300** (**0x37598**) | +0x14240 start, +0x580 size |
+    # | image | 0x141098 | **0x1552D8** | +0x14240 |
+    # | `__bss_end` | 0x801780D8 | **0x8018C898** | +0x147C0 |
+    # | headroom | 1605416 | **1521512** | -0x147C0 |
+    #
+    # `.text` +0x16C80, and the terms sum to 0x16CA3 - a **residual of 0x23, in the over-counting direction**:
+    #
+    #   this object's .text + COMDAT                          +0x122C8  (74436 + 4, exact)
+    #   this object's .rodata                                 +0x1A8    (424, exact - not mergeable)
+    #   this object's .rodata.str1.1, linked                  +0x3A22   (the map prints 0x3af4 beside it as
+    #                                                                     "size before relaxing", so 0xD2 was
+    #                                                                     relaxed inside the object)
+    #   the stub object's .text                               +0x6A8    (exact: -15 + 86 = +71 function
+    #                                                                     bodies at 0x18 each. This is 316's
+    #                                                                     rule again - the retired count is the
+    #                                                                     *function* resolutions, not the 18)
+    #   the stub object's name strings                        +0x76E    (0x32D1 -> 0x3A3F)
+    #   .text-region alignment fill                           -0x005    (0xD20 -> 0xD1B; 56 fills -> 54)
+    #                                                        -------
+    #                                                         +0x16CA3  against a measured +0x16C80
+    #
+    # The only term that can over-count is the mergeable string contribution (314's rule), and a scan of the
+    # object's 439 string constants finds **exactly 35 already present in the base image** - the same number as
+    # the residual, which is suggestive and is *not* claimed as the mechanism: dedup of a 51-byte string alone
+    # would save more than 35 bytes, so the coincidence is recorded rather than used.
+    #
+    # `.data` +0x238 is exactly its content and its fill: 0x15B (the object's `.data`) + 0xD8 (its
+    # `__DATA,__data`) = **0x233** of content, plus **+0x5** of fill (7 fills 0x7AA6 -> 9 fills 0x7AAB).
+    # `.sysctl_set` +0x4 is the object's `__DATA,__sysctl_set`. **`.bss` +0x580** is
+    # **0x1DD** (the object) **+ 0x3C0** (the stand-in block, 0x1744 -> 0x1B04) **- 0x1D** (fill, 0x123 ->
+    # 0x106): 18 storage stand-ins arrive and 3 retire, a net 15, and each takes a whole 64-byte slot because
+    # they all carry `aligned(64)`, so 15 x 0x40 = 0x3C0 exactly. And `.text`'s end crossed four more 16 KB
+    # boundaries, so `.data`'s start moves +0x14000 - the largest single step of 304's mechanism so far.
+    #
+    # **The stop went one frame deeper again, and the reason is a `B` symbol that is not a stand-in.** Measured
+    # **`stub_hit=_os_trace_addr_in_text_segment` at `xnu_entry_stub_caller=0x800962B0`** =
+    # `_os_log_to_log_internal+0x44`, the `bl` at 0x800962AC. Predicted was `StartIOKit` at 0x80004A20, and the
+    # prediction's reasoning was explicit: *"with `kextForAddress` real its body reads `vm_kernel_stext` and
+    # `vm_kernel_etext` (both zero - both are storage stand-ins) and so returns NULL with no call."*
+    #
+    # **That premise is wrong, and the way it is wrong is the step's real lesson.** `vm_kernel_stext` and
+    # `vm_kernel_etext` are indeed `B`, and they are indeed absent from the stub set - but absent from the stub
+    # set means a *real defining object*, and that object is `osfmk_arm_arm_vm_init.o`, which is in LINK_OBJS
+    # and has already run:
+    #
+    #   arm_vm_init.c:406   segTEXTB = (vm_offset_t) getsegdatafromheader(&_mh_execute_header, "__TEXT",
+    #                                                                     &segSizeTEXT);
+    #   arm_vm_init.c:496   vm_kernel_stext = segTEXTB;
+    #   arm_vm_init.c:497   vm_kernel_etext = segTEXTB + segSizeTEXT;
+    #
+    # So the two globals are non-zero at run time, `format` is a string constant inside this image's own
+    # `__TEXT`, and `kextForAddress` takes its **early return** - `return (void *)&_mh_execute_header` at
+    # 0x8011A36C - rather than the `if (!sKextSummariesLock) return NULL` path I reasoned about. `dso` is
+    # therefore non-NULL, and `_os_log_to_log_internal` proceeds to `_os_trace_addr_in_text_segment(dso,
+    # format)`, whose `bl` at 0x800962AC is the stop. Source and disassembly agree line for line:
+    #
+    #   80096284  cmp r6,#0; bne 800962a4        if (dso) skip
+    #   80096294  bl OSKextKextForAddress        dso = OSKextKextForAddress(format)   <- 316's stop
+    #   8009629c  cmp r0,#0; beq 800962bc        if (!dso) return
+    #   800962ac  bl _os_trace_addr_in_text_segment                                      <- 318's stop
+    #   800962b0  cmp r5,#0 / cmpne r0,#0 / bne 800962c4   if (addr && in_text) continue
+    #   800962c8  bl OSKextKextForAddress        dso_addr = OSKextKextForAddress(addr) <- the second call
+    #   800962cc  cmp r6,r0; bne 800962bc        if (dso != dso_addr) return
+    #
+    # **A `B` symbol in the linked image is not automatically a stand-in.** The stub-set test answers "does this
+    # image define the name", and a real defining object can *write* the name at run time; 305's "a predicate
+    # that is true of every function on a path is not a predicate about the path" has a value-shaped twin.
+    #
+    # **Next: `libkern/os/internal.c`** (`libkern_os_internal.o`, manifest:402) - the object that defines
+    # `_os_trace_addr_in_text_segment`, and the smallest step in a long time: `.text` **356**,
+    # `.rodata.str1.1` **7**, **1 definition**, **1 reference** (`strncmp`, already real). Predicted
+    # **1 resolved / 0 added**: 814 -> **813** undefined, 709 -> **708** function stubs, 105 -> **105**
+    # storage. Its body walks the `dso`'s Mach-O load commands looking for `LC_SEGMENT` with segname `__TEXT`
+    # and returns whether `addr` lies in `vmaddr..vmaddr+vmsize`; `dso` is `&_mh_execute_header` and `addr` is
+    # `format`, a string constant inside `__TEXT`, so it should return **true**, and then the second
+    # `OSKextKextForAddress(addr)` returns the same `&_mh_execute_header`, the equality test passes, and the
+    # function runs on into its real body.
+    #
+    # Predicted stop: **`StartIOKit`, caller key `0x80004A20`**. After this step,
+    # `tools/stub_calls_in_function.py _os_log_to_log_internal` reports **one** stub call in the function, and
+    # it is this one; the function's other 37 `bl`s are real. `tools/xnu_entry_callwalk.py --root
+    # _os_log_to_log_internal` agrees - no stub on the straight-line path - and names the gap explicitly this
+    # time: the indirect calls it cannot follow, nearly all of them inside the real `__doprnt`. So the named
+    # alternative is **`__doprnt`'s indirect dispatch** (the format-conversion path), which is the one place
+    # this walk is still blind, and the second alternative is that `addr` is NULL, which short-circuits to the
+    # same early return and the same outcome.
+    LIBKERN_CXX_OSKEXT_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSKEXT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSKext.o}
     # 317: `OSKextLib.cpp` - a 1424-byte object that closes the `printf` diversion, and the first step
     #       whose prediction is about a *frame chain* rather than a call site
     #
@@ -9955,6 +10098,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$BSD_KERN_KERN_KTRACE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_OSKEXTLIB_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$LIBKERN_CXX_OSKEXT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -9967,7 +10111,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
@@ -10202,7 +10346,13 @@ verify_bss
 # orphan, placed by the linker's own rules. Experiment 297 found the cost of one such placement: the
 # two `WA` names landed between `.data` and `__bss_start`, and the payload zeroes from `__bss_start`.
 #
-# 298 names all six, and this check is what keeps the list closed. It is deliberately a check on the
+# 298 names all six, and this check is what keeps the list closed.
+#
+# **318 is the check doing its job.** `libkern/c++/OSKext.o` carries a four-byte `.init_array`, which
+# no pattern in `entry.ld` matched, so the linker placed it on its own and this check failed the build
+# by name - the first time a step has been refused since 291. `entry.ld` now names it and places it
+# between `.sysctl_set` and `.bss` (it is `WA`, so it belongs in the writable region), with the reason
+# written there. The list below therefore has five names, and a *sixth* is again a build failure. It is deliberately a check on the
 # *output* sections rather than on the names, so it catches a seventh name arriving from a future
 # object whichever spelling it uses: if the new section is not one this script claims, it shows up
 # here as an extra allocated output section and the build fails by name instead of the linker
@@ -10216,7 +10366,7 @@ verify_sections() {
     got=$(arm-none-eabi-objdump -h "$OUT/xnu_arm_entry.elf" | awk '
         /^ *[0-9]+ +[^ ]+ +[0-9a-f]+ +[0-9a-f]+/ { name = $2; next }
         /ALLOC/ { print name }' | sort | tr '\n' ' ')
-    want=".bss .data .sysctl_set .text "
+    want=".bss .data .init_array .sysctl_set .text "
     [[ $got == "$want" ]] ||
         layout_fail "the allocated output sections are '$got' and this script names exactly '$want' - a section the linker placed on its own has appeared, and whatever it is will be inside the window the payload copies and zeroes"
     say "  the allocated output sections are exactly $got- nothing is where the linker put it"

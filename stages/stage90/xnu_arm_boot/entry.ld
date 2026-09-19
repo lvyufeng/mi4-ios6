@@ -118,6 +118,52 @@ SECTIONS
     __entry_sysctl_set_size = __entry_sysctl_set_end - __entry_sysctl_set;
 
     /*
+     * **`.init_array`, which experiment 318 made appear.** A C++ object linked into this image carries a
+     * four-byte table of static-constructor pointers, and `libkern_c++_OSKext.o` is the first one to have
+     * a non-empty one. Nothing here matched it, so it became an **orphan output section** - a fifth
+     * allocated section in a script that named four - and the build's `verify_sections` check refused the
+     * step by name, which is exactly what that check was written for after 297 and 298.
+     *
+     * It is placed here, between `.sysctl_set` and `.bss`, for three reasons and each is checkable:
+     *
+     *   - the section's flags are `WA` (writable, allocatable), so it belongs in the writable region. Its
+     *     contents are absolute addresses the link resolved, and nothing writes them at run time, but a
+     *     `WA` input inside `.text` would put a writable section inside the region `entry_macho.s`
+     *     describes as read-only `__TEXT` - which is 298's whole point;
+     *   - it sits with `.sysctl_set` because both are four-byte pointer tables laid out by the linker and
+     *     read by address, and keeping the two adjacent keeps the writable table area in one place;
+     *   - it keeps its **name** rather than being merged into `.data` by a `*(.init_array)` inside that
+     *     section, so the table stays visible in the map - the same argument 298 used for the six Mach-O
+     *     input-section names, applied to a named output section instead of a wildcard.
+     *
+     * **What is in it, and what it means that nothing calls it.** One entry, an `R_ARM_TARGET1`
+     * relocation to `_GLOBAL__sub_I_OSKext.cpp`, and that function is not a no-op:
+     *
+     *     OSMetaClass::OSMetaClass("OSKext", &OSObject::gMetaClass, 96)   // on OSKext::gMetaClass
+     *     OSKext::gMetaClass.vtable = &OSKext::MetaClass::vtable + 8
+     *     __cxa_atexit(OSMetaClass::~OSMetaClass, &OSKext::gMetaClass, __dso_handle)
+     *
+     * Nothing in this image runs it. There is no C runtime here, and XNU's own initializer walk
+     * (`OSRuntimeInitializeCPP`, `libkern/c++/OSRuntime.cpp:364`) finds constructors by *section name* -
+     * `sectionIsConstructor` at `OSRuntime.cpp:208` accepts `__mod_init_func` or `__constructor` - and
+     * `entry_macho.s` describes no section with either name.
+     *
+     * So the consequence to carry forward is stated here rather than discovered later: **`OSKext::gMetaClass`
+     * is 96 bytes of this object's `.bss` and stays zero**, because the initializer that would fill it is
+     * linked, correct, and unreachable. That is the stand-in hazard in its sharpest form - the definition is
+     * present and the right size, and zero because the *initializer* lives somewhere nothing calls. A step
+     * that runs `.init_array` (or describes this table to XNU's runtime) is a step of its own.
+     */
+    . = ALIGN(4);
+    .init_array : {
+        __entry_init_array = .;
+        KEEP(*(.init_array .init_array.*))
+        . = ALIGN(4);
+        __entry_init_array_end = .;
+    }
+    __entry_init_array_size = __entry_init_array_end - __entry_init_array;
+
+    /*
      * **`__bss_start` is the first byte of `.bss`, and it is placed *inside* the output section so that
      * this is true by construction** - which is what `stages/stage90/linker.ld:19` has always done for
      * the payload, and what this script did not do before experiment 297.
