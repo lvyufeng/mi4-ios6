@@ -13692,8 +13692,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # not even enter `vfsinit`; a `panic`. **And, added after the run because it is what actually
     # happened: a refusal by the loader preflight rather than a stop - which no walk-based falsifier
     # could have covered, since the walk models the call graph and not the tables the payload checks.
-    # The batch is linked and referenced, so its effect is measured; whose return it stops on is what
-    # the next step establishes, and that step's prediction is written before its build again.**
+    # The corrected run above is what settles this step: the fourteen bodies returned and the stop is
+    # `dqinit`, one call further along the same line.**
     # ---------------------------------------------------------------------------------------------
     BSD_VFS_VFS_CACHE_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_CACHE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_vfs_cache.o}
     # =============================================================================================

@@ -41,6 +41,20 @@ next two runs wrote the same `LOGFILE` — so the lines above are quoted from re
 rather than from a file that still exists; every number in the diagnosis below is re-derived from
 the image and the sources, which are both still here.)
 
+**And the same step's fix was then measured, on the same link:**
+
+    MI4IOS6_STAGE90_XNU kernel_entry ok
+    MI4IOS6_STAGE90_XNU real XNU entry stub_hit=dqinit
+     xnu_entry_stub_caller_v=0x801b3d20        # vfsinit is at 0x801B3880, so this is +0x4A0
+     xnu_entry_abort_entries=0x00000000
+     xnu_entry_checks=0x00000005   xnu_entry_failures=0x00000000
+
+with `loader_xnu_arm_vm_init_full_pmap_failure_mask=0x00000000`,
+`loader_xnu_arm_vm_init_full_pmap_high_alias_verified=0x00000001`, 301803 bytes / 3978 lines, ending
+`No errors detected`. **The prediction was wrong, for a second and independent reason** — `dqinit`,
+not `nwk_wq_init` — and that is the tool's defect rather than this step's, so it is written up at the
+end of this log as rule 426.
+
 ## The diagnosis: the candidate table's image-alias window was 3 MB and the image had just passed it
 
 The two masks decode to one failure each:
@@ -119,14 +133,47 @@ the IOKit work.
     bss          0x8023FEC0 .. 0x802813D8 (267544 bytes, zeroed by the payload)
     layout       args 0x80283000, topOfKernelData 0x80400000, tree 0x80600000, window 8388608
     headroom     1567784 bytes below topOfKernelData
-    payload      out/stage90/stage90-qcdt.img (the image that was refused), 5378048 bytes
+    payload      out/stage90/stage90-qcdt.img, 5378048 bytes — one link, run twice: refused
+                  first, then (after the window fix) entered and stopped at dqinit
 
 ## Where the frontier is now
 
-**Unmoved: `nspace_handler_init`.** The batch's thirteen objects are linked and referenced, but the
-run that would have walked through them never entered XNU, so this step's own effect is unmeasured
-until the window is fixed — which is 426, and it is a payload-layout change with no entry-image
-change at all: the link above is the one 426 runs.
+**`dqinit`** (`bsd/vfs/vfs_quota.c`, defined by `bsd_vfs_vfs_quota.o`), reached from
+`vfsinit + 0x4A0`, key `0x801b3d20`. It is a **one-object step — 1 resolved / 0 added** — and the
+first step after the batch, so its prediction is written before its build again. The batch's thirteen
+objects are linked and referenced and the corrected run walked through them: `nspace_handler_init`
+and the other thirteen init bodies returned, and the stop is the next call on the same line.
+
+## Rule 426 — the walk cannot see a call reached only by a loop exit, and the fix is reporting rather than classifying
+
+The prediction above came from `tools/xnu_entry_callwalk.py --root bsd_init`, and it answered one
+level up from where the device stopped. The reason is structural, not a bug in one table: the walk
+follows the straight line plus calls reachable by *taking a branch*, and a loop's **exit target** is
+the branch it does not model. `dqinit`'s call site is in `vfsinit`'s post-loop block, four bytes
+after the exit tests of the `for (i = 0; i < maxvfsslots; i++, vfsp++)` loop that fills the vnode
+table:
+
+    0x801b3d18   bl <vnode_authorize_init>
+    0x801b3d1c   bl <dqinit>                 # return address reported: 0x801b3d20 = vfsinit + 0x4A0
+
+so the block was classified cold and the walk continued to `vfsinit`'s caller.
+
+**The tempting fix does not work, and this is the part worth keeping.** Adding loop-exit targets to
+the reachable set makes the walk answer
+`zfree+0x5f8 → btlog_remove_entries_for_element` for `--root bsd_init` — a call that is
+*structurally identical* to this one (a `bl` in a post-loop block) and that is provably never
+executed, because `zfree`'s zone-check blocks make it unreachable; the device has disproved it
+hundreds of times. Classifying both as cold misses `dqinit`. **The discriminating question — "is
+this call site a loop exit?" — is not statically decidable**, so the tool cannot be fixed by
+classifying better; what it needed was to stop being the only witness.
+
+**The fix that was made.** `report_guarded_stub_sites()` prints, in execution order, the guarded
+sites whose callee is *itself a stub*: all such sites for fully-traversed functions, and only those
+before the descent call site for functions on the path to the answer. `--root bsd_init` prints
+`vfsinit+0x49c -> dqinit   STUB` eleventh of fifteen. The device's own execution history then decides
+which of them is the stop — the same division of labour 421 established for the guarded column, one
+list over. The change is verifiably additive: with the new call in place, **all 9649 functions answer
+exactly as they did before** (`/tmp/callwalk_old.py` diffed against the new tool, 0 differences).
 
 **Still owed and unchanged: the timer.** Nothing in this step's path takes a deadline either — the
 thirteen bodies are allocation, lock and queue initialisation — but they are the last of those: the
@@ -135,9 +182,17 @@ live.
 
 ## Safety
 
-Non-persistent `fastboot boot` only, through both gated scripts; nothing flashed. The refusal is the
-recovery design working: `stage90_loader_preflight_run` returned before the jump, `kernel_entry`
+Non-persistent `fastboot boot` only, through both gated scripts; nothing flashed. **The refusal** is
+the recovery design working: `stage90_loader_preflight_run` returned before the jump, `kernel_entry`
 returned 0, `platform_reboot` wrote the restart reason and `PS_HOLD=0`, and the hardware watchdog
 forced an immediate bite rather than waiting out its 25 s bark. No `exception:`, no `panic`, no
 persistent write — the refusal path cannot write to storage — and the device returned to Android on
 its own.
+
+**The corrected run** went through the same two scripts and its stop is the normal kind: 25 ×
+`persistent_write_attempted=0x00000000`, 87 × `failure_mask=0x00000000`, `abort_entries=0`,
+`checks=5`/`failures=0`, no `exception:`, no `panic`, 301803 bytes / 3978 lines ending
+`No errors detected`. The only net armed across the jump was the hardware watchdog
+(`hw_watchdog_counter_running=0x00000001`, `hw_watchdog_bite_truncated=0x00000000`) and it is what
+ended the run; the device returned to Android on its own and was confirmed there (`adb devices`
+shows `4a2fe00b`).
