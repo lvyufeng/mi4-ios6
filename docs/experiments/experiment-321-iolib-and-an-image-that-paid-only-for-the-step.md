@@ -62,7 +62,9 @@ two steps to.
                                                                 section is 0x12B = 299, see below)
   this object's .rodata                                +0x038   (56, exact)
   the stub object's .text                              +0x018   (4 bodies retired, 5 created)
-  the stub object's name strings                       +0x070   (0x3C77 -> 0x3CF7)
+  the stub object's name strings                       +0x070   (0x3C87 -> 0x3CF7; see the correction at
+                                                                the end of this document — the base was
+                                                                first written as 0x3C77, 320's pool *span*)
   .text-region alignment fill                          +0x005   (0xD28 -> 0xD2D; 56 fills in both)
                                                       -------
                                                        +0x1A80   against a measured +0x1A80
@@ -105,10 +107,48 @@ the copies this object brought were dropped. The four are `queue.h`'s `print_que
 `"overflow detected"`, already present from an earlier object.
 
 This is the **fifth sighting** of the rule 301, 312, 314, 319 and 320 established, the third *shown*
-rather than inferred, and by far the largest: **63% of the section**. The name term is the same rule at
-pool scale — the 832 names of this image sum **0x4458** by `align4(len+1)` and **0x3F98** by `len+1`
-against **0x3C77** in the map — so the string pool merges *shared tails* as well as whole duplicates, and
-neither model is the rule. A name term is an upper bound whichever way it is computed.
+rather than inferred, and by far the largest: **63% of the section**.
+
+*(The paragraph that stood here read the name term as the same rule at pool scale — 832 names summing
+0x4458 by `align4(len+1)` against a pool of 0x3C77, hence "the pool merges shared tails as well as whole
+duplicates, and a name term is an upper bound whichever way it is computed". **Experiment 322 withdraws
+that**: see the correction below. The 832 names include the 108 storage stand-ins, whose own `align4` sum
+is 0x810 — which is the whole of the gap — and the pool never holds a storage name at all.)*
+
+## Correction, from experiment 322: the name term, and where the 0x58 went
+
+322 measured the name pool directly on the three images the device ran, and the term is exact and has a
+closed form. **The pool holds one padded slot per *function* stub and nothing else**, so
+
+```
+name term = Σ align4(len+1) over the added function-stub names
+          − Σ align4(len+1) over the retired function-stub names
+```
+
+| image | function stubs | pool extent (first name → next input) |
+|---|---|---|
+| 320 | 724 | 0x3C87 |
+| 321 | 725 | **0x3CF7** (+0x70) |
+| 322 | 719 | **0x3C77** (−0x80) |
+
+and both deltas are byte-exact under that model. 321's **+0x70** is 0x98 (the five names it added:
+`IOMapPages` 12, `IOUnmapPages` 16, `getPhysicalAddress` 48, `inTaskWithPhysicalMask` 64, `proc_name` 12)
+minus 0x28 (the four it resolved: `IOFree` and `IOSleep` 8, `IOLibInit` and `IOMalloc` 12). `align4(len+1)`
+over *all* of an image's function names reproduces its pool's **span** to within one byte (0x3CE8 against
+0x3CE7 here), so no tail merging is happening.
+
+**So this experiment's 0x58 is not tail merging.** The prediction summed all seven added names —
+0xC8 = 0x98 of function names **+ 0x30 of storage names** — and left the retired 0x28 out of the sum, while
+the linker placed 0x98 − 0x28 = **0x70**. The 0x58 is exactly 0x30 + 0x28:
+
+* **0x30** = `debug_iomalloc_size` (20) + `debug_iomallocpageable_size` (28). Both are *storage* stand-ins,
+  so neither name enters the pool — neither is present anywhere in the image.
+* **0x28** = the four resolved names, already subtracted in the prediction's parenthetical and omitted from
+  its sum — the arithmetic slip recorded (307, 317) as this ledger's recurring one.
+
+One number in this document's closure table is corrected with it: the base of the name term was quoted as
+**0x3C77**, which is 320's pool *span*; 320's pool *extent*, the definition its end 0x3CF7 uses, is
+**0x3C87**. Same value, two definitions, and the +0x070 delta was right either way.
 
 ## The 16 KB boundary was crossed, and the image grew by 0x4048
 
