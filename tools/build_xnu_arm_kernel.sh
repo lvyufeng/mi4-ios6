@@ -366,6 +366,18 @@ if [[ -n ${XNU_KERNEL_EXTRA_DEFINES:-} ]]; then
     EXTRA_DEFINES=( ${XNU_KERNEL_EXTRA_DEFINES} )
 fi
 
+# Extra C++-only flags, for the same reason and with the same shape as the define hook above: a
+# controlled comparison has to be one command against the real build, not a hand-copied flag list.
+# Only `.cpp` files get these, so a measurement can change the C++ half and nothing else.
+#
+#   XNU_KERNEL_EXTRA_CXXFLAGS=-fapple-kext ./tools/build_xnu_arm_kernel.sh --dir libkern
+#
+EXTRA_CXX_FLAGS=()
+if [[ -n ${XNU_KERNEL_EXTRA_CXXFLAGS:-} ]]; then
+    # shellcheck disable=SC2206
+    EXTRA_CXX_FLAGS=( ${XNU_KERNEL_EXTRA_CXXFLAGS} )
+fi
+
 # The per-component define set. Apple's build compiles each component with its own
 # `<component>/conf/Makefile.template` CFLAGS rather than one global flag set, and the difference is
 # not cosmetic - see xnu_config/component_defines.sh, which holds the table and the citations.
@@ -619,7 +631,7 @@ while read -r src; do
     CPP_FORCE=()
     CXX_EXTRA=()
     case "$src" in
-        *.cpp) CXX_EXTRA=("${CXX_ARGS[@]}"); CPP_FORCE=("${CPP_FORCE[@]}") ;;
+        *.cpp) CXX_EXTRA=("${CXX_ARGS[@]}" "${EXTRA_CXX_FLAGS[@]}"); CPP_FORCE=("${CPP_FORCE[@]}") ;;
         *)     CXX_EXTRA=("${CC_ARGS[@]}") ;;
     esac
     # Bounded. A file that sends clang into a loop must cost seconds, not the whole session: one

@@ -4355,6 +4355,118 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # lists the indirect calls it could not follow (`getval`, `panic_trap_to_debugger`, `__doprnt`, i.e. a
     # kprintf path), so a run that stops earlier is possible and the tool says so rather than guessing.
     BSD_KERN_KERN_KTRACE_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_KTRACE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_ktrace.o}
+    # 330: `__cxa_atexit` and `__dso_handle` defined for real, and the whole constructor table runs
+    #
+    # **The step links nothing and changes no object.** 329 ended one instruction past the first of the
+    # six `_GLOBAL__sub_I_*.cpp` constructors, at a **tail branch into `__cxa_atexit`** - the last
+    # initializer's registration of its static destructor - and that name is defined **nowhere in XNU**
+    # (`grep -rn __cxa_atexit external/xnu-upstream/` returns nothing; `__dso_handle` with it), so no
+    # object can be linked to move it. What this step adds is two definitions in `entry_stubs.c`, and the
+    # argument for a no-op is the semantics and not the convenience: **a kernel never exits**, so a static
+    # destructor is never run and registering one is a successful nothing (the real `__cxa_atexit` returns
+    # 0 on success, which is what this returns). The signature is read off the call sites, not assumed -
+    # r0 the destructor, r1 the object, r2 the `__dso_handle` address.
+    #
+    # **And this is not the flag, which is a measurement rather than a preference.** 329's `Next` named
+    # `-fno-use-cxa-atexit`; 330 compiled all 83 C++ files with each candidate and read the objects back.
+    # Two findings, both worth the build:
+    #
+    #   - `-fno-use-cxa-atexit` **only renames the call**: `b atexit`, and a kernel has no `atexit` either
+    #     (nothing in libkern, bsd/kern or osfmk defines it). The stop would move one name and no distance.
+    #   - `-fapple-kext` - which is what Apple's own rules pass, `makedefs/MakeInc.def:371`,
+    #     `CXXFLAGS_GEN = -fapple-kext` - **removes the call entirely**, but it is not one call's worth of
+    #     change. It moves vtable emission to the key function's translation unit, so `OSCollection.o`,
+    #     `OSDictionary.o`, `OSObject.o`, `OSKext.o` and `OSSymbol.o` acquire references to `_ZTV8OSObject`,
+    #     `_ZTV12OSCollection` and **`_ZTV8OSString`** - and the last is defined by `OSString.cpp`, an object
+    #     this image does not link, so it would arrive as a *storage stand-in for a vtable*. It also grows
+    #     the linked C++ text by about 13 KB (OSKext.o alone 74436 -> 83272), which moves the 16 KB boundary
+    #     and every address above it, and re-baselines 324-329.
+    #
+    # So the flag is a step of its own with its own measurement, and the step that moves *this* frontier is
+    # the smaller one. `tools/build_xnu_arm_kernel.sh` grew `XNU_KERNEL_EXTRA_CXXFLAGS` for the comparison -
+    # the same shape as the `XNU_KERNEL_EXTRA_DEFINES` hook, C++-only, so the measurement is one command
+    # against the real build rather than a hand-copied flag list.
+    #
+    # **Predicted: two stubs retire and nothing else moves.** `__cxa_atexit` (a function stub) and
+    # `__dso_handle` (a *function* stub too - no kernel object defines it, so the generator's kind lookup
+    # finds nothing and it is classified as a function, which is how a name that is really 4 bytes of data
+    # was being passed as an address) both leave the undefined list: **801 -> 799 undefined, 692 -> 690
+    # function, 109 storage unmoved**. `.text` shrinks by the retired stub bodies and their name literals
+    # and grows by the two definitions; `.data` takes the real `__dso_handle` in its first four bytes; and
+    # because 0x142A00 and 0x1429A0 both round up to the same 16 KB boundary, `.data`, `.sysctl_set`,
+    # `.init_array`, `.bss`, `__bss_end`, the image and the headroom should all be **identical to the byte**.
+    #
+    # The prediction for the *run* is 328's own, now reachable: the six initializers run in table order,
+    # each calls `__cxa_atexit` and returns, the sixth is `_GLOBAL__sub_I_OSSymbol.cpp` whose second call is
+    # `OSSymbol::initialize()` - the pool's only writer - and then `OSRuntimeInitializeCPP` continues to
+    # `OSMetaClass::postModLoad` (+0x23C of the scan's function, `0x8011d808`), whose calls the walk already
+    # read in 324-327: `OSDictionary::withCapacity` (+0xCC), an indirect `blx` (+0xF8), and
+    # `OSSymbol::withCStringNoCopy` (+0x104). That body's first four calls are real
+    # (`lck_mtx_lock` +0x18, `OSSymbolPool::findSymbol` +0x24, `OSObject::operator new` +0x38) and the
+    # fifth is the stub 328 predicted:
+    #
+    #   stub_hit=_ZN8OSStringC2EPK11OSMetaClass
+    #    xnu_entry_stub_caller=0x80121cb4   = _ZN8OSSymbol17withCStringNoCopyEPKc+0x50
+    #                                       whose caller-4 is `bl _ZN8OSStringC2EPK11OSMetaClass` at +0x4c
+    #
+    # Named alternatives, in order: a stub inside `OSSymbol::initialize()` (its body's seven calls are
+    # `kalloc_canblock`, `OSAddAtomic`, `__bzero`, `kalloc_canblock`, `OSAddAtomic`, `__bzero`,
+    # `lck_mtx_alloc_init`, all real, so this one is measurable and excluded); a `data abort` in place of a
+    # stub, if `checkModLoad` returns false after the first constructor (then the pool stays null and the
+    # 328 fault recurs at `withCStringNoCopy+0x14` - `exception: data abort`, `first_dfar=0x10`, no
+    # `stub_hit=` line); and a stop inside `OSMetaClass::OSMetaClass`, whose eight callees 329 measured as
+    # real.
+    #
+    # **Measured: both halves exact.** Counts **799 undefined / 690 function / 109 storage** - two function
+    # stubs retired and storage unmoved, which is the classification finding above arriving as a number.
+    # `.text` 0x142A00 -> **0x1429A0** (**-0x60**, four terms, no residual): **+0x08** the two real
+    # definitions in `xnu_arm_entry_stubs.o` (`__cxa_atexit`'s twelve bytes and the alignment),
+    # **-0x30** the two retired stub bodies (0x18 each, measured by putting them back into a copy of the
+    # generated `xnu_arm_entry_realstubs.c` and compiling it), **-0x20** their two name literals in the
+    # merged pool (`xnu_arm_entry_realstubs.o`'s merged strings 0x390F -> **0x38EF**), and **-0x18** of
+    # `.text` fill (**0xD2D / 59 entries -> 0xD15 / 57**) - the same sign as 329's -0x004 and a larger
+    # magnitude, which is what a section that shrinks should do.
+    #
+    # Everything above the boundary is identical to the byte, and this time the proof is a *shrinking*
+    # `.text`: `.data` **0x80144000** (**0x19368**, fill 0x7AA7 -> **0x7AA3**), `.sysctl_set` **0x8015D368**,
+    # `.init_array` **0x8015D474** (0x18), `.bss` **0x8015D4C0** (0x378D8, fill unmoved at 0x121),
+    # `__bss_end` **0x80194D98**, image **1430668**, headroom **1487464**. And the symbol tables can be
+    # compared directly, because 329's image rebuilds byte-for-byte from the same sources: of 6875 symbols
+    # **none is added and none retired**, `__cxa_atexit` moves 0x801224D0 (a stub) -> **0x80002CD8**,
+    # `__dso_handle` moves 0x801225C0 (a stub function) -> **0x80144000** (a real 4-byte object, the first
+    # thing in `.data`), and **one data symbol in the whole image moves**: `pc_trace_cnt`
+    # 0x80144000 -> 0x80144004, displaced by those four bytes while the fill in front of it absorbs the
+    # rest. No `.bss` symbol moves at all. The rest of the diff is `.text`: 87 symbols after the new
+    # definitions **+0x8**, 768 after the two retired bodies **-0x30**, the 9 between them **-0x18**, and
+    # 11 beyond the string pool **-0x50**.
+    #
+    # **The run stops where 328 said it would, 0x38 later than 328 could reach**:
+    #
+    #   stub_hit=_ZN8OSStringC2EPK11OSMetaClass
+    #    xnu_entry_stub_caller=0x80121cb4   = _ZN8OSSymbol17withCStringNoCopyEPKc+0x50
+    #    xnu_entry_abort_entries=0x00000000
+    #
+    # and the key resolves against the new image to `caller-4` = 0x80121cb0: `bl 80126058
+    # <_ZN8OSStringC2EPK11OSMetaClass>` - a *direct* call, so this key names its call site exactly.
+    # **328's fault does not recur** (`abort_entries=0`), and its absence is the proof that the whole table
+    # ran: `withCStringNoCopy`'s second instruction is `ldr r0, [r0, #16]` on `_ZL4pool`, the instruction
+    # 328 faulted on with `r0 = 0`, and the walk cannot reach +0x50 unless that load succeeded - so the
+    # pool's only writer, `OSSymbol::initialize()`, the **sixth** entry of the table, has run. All six
+    # constructors ran, in table order, through `checkModLoad` between them: the C++ static-constructor
+    # machinery of this kernel is complete, and what stops the boot now is ordinary missing code.
+    # `kv_written=0x6f` (111 records, up from 329's 0x5d = 93), `kv_dropped=0`, `checks=5`, `failures=0`,
+    # image bytes 0x15d48c, `disarm_isenabler0 0x000c7fff -> 0x00007fff`, `disarm_cntp_ctl 5 -> 2`,
+    # `disarm_hw_watchdog_en=0x00000001`, log 301642 bytes.
+    #
+    # **Safety:** non-persistent `fastboot boot` only, nothing flashed; the hardware watchdog was armed
+    # across the jump and did not have to fire - the device returned to Android on its own
+    # (`ro.build.version.release` = 10); `persistent_write_attempted=0x00000000` x25,
+    # `failure_mask=0x00000000` x87.
+    #
+    # **Next: `libkern/c++/OSString.cpp`** (`libkern_c++_OSString.o`) - the object that defines this stop
+    # and the other two stubs in the same body (`OSString::initWithCStringNoCopy`, `OSString::free`), and
+    # whose vtable is the `_ZTV8OSString` the flag measurement above found would be needed under
+    # `-fapple-kext`. The step after that is the flag itself, as a deliberate re-baseline.
     # 329: the constructor table, described to XNU under the one name its runtime looks for
     #
     # **The step links nothing.** 328 ended in a `data abort` because `_ZL4pool` is zero, and the pool's

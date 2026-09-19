@@ -1308,6 +1308,72 @@ void _consume_kprintf_args(int a, ...)
 #endif /* !STAGE90_ENTRY_REAL_KPRINTF */
 
 /*
+ * ------------------------------------------------------------------ the C++ runtime's `__cxa_atexit`
+ *
+ * **Experiment 330.** Every `.cpp` in this image that has a static object needing destruction ends
+ * its `_GLOBAL__sub_I_<file>.cpp` with a **tail branch into `__cxa_atexit`** - the Itanium ABI's
+ * static-destructor registration - and experiment 329's run is what made that reachable: XNU's own
+ * `OSRuntimeInitializeCPP` now finds the `.init_array` table (`__DATA,__mod_init_func`), calls the
+ * first of its six entries, and stops there:
+ *
+ *     _GLOBAL__sub_I_OSKext.cpp:
+ *         ...
+ *         e1a01004   mov  r1, r4          ; arg  = the object
+ *         e3002000   movw r2, #0          ; dso  = &__dso_handle
+ *         e8bd4010   pop  {r4, lr}
+ *         eafffffe   b    __cxa_atexit    ; <- the stub 329 stopped in
+ *
+ * **It is defined nowhere in XNU** - `grep -rn __cxa_atexit external/xnu-upstream/` returns nothing
+ * at all, and `__dso_handle` with it - so this is the one stop in the whole walk that no link can
+ * move: there is no object to grow the image with.
+ *
+ * **And the flag is not this step, which is a measurement rather than a preference.** Experiment 330
+ * compiled all 83 C++ files with each candidate and read the objects back (`tools/
+ * build_xnu_arm_kernel.sh` grew `XNU_KERNEL_EXTRA_CXXFLAGS` for exactly this comparison, mirroring
+ * the define hook above):
+ *
+ *   - `-fno-use-cxa-atexit` - the flag experiment 329 predicted - only *renames* the call: `b atexit`,
+ *     and a kernel has no `atexit` either, so the stop would move one name and no distance.
+ *   - `-fapple-kext` removes the call entirely, and it is what Apple's own rules pass
+ *     (`makedefs/MakeInc.def:371`, `CXXFLAGS_GEN = -fapple-kext`). But it is not one call's worth of
+ *     change: it also moves vtable emission to the key function's translation unit, so `OSCollection.o`,
+ *     `OSDictionary.o`, `OSObject.o`, `OSKext.o` and `OSSymbol.o` acquire references to `_ZTV8OSObject`,
+ *     `_ZTV12OSCollection` and `_ZTV8OSString` - the last of which is defined by `OSString.cpp`, an
+ *     object this image does not link, so it would arrive as a *storage stand-in* for a vtable. It also
+ *     grows the linked C++ text by about 13 KB (OSKext.o alone 74436 -> 83272), which moves the 16 KB
+ *     boundary and every address above it and re-baselines the ledger's numbers for 324-329.
+ *
+ * So the flag is a step of its own, with its own measurement, and the step that moves *this* frontier
+ * is the smaller one: define the two symbols. The semantics are exactly right rather than convenient -
+ * **a kernel never exits**, so a static destructor is never run and the registration is a successful
+ * no-op; `0` is what the real `__cxa_atexit` returns on success. This is the same shape as
+ * `_consume_kprintf_args` above ("the real body is nothing to do") and as `printf` in an earlier
+ * experiment: a small real definition where the alternative is linking an object this image has no
+ * other reason to carry.
+ *
+ * `__dso_handle` is defined as its own address, which is what `crtbegin`'s definition is; it is passed
+ * as a *value* (the initializers load its address into r2) and nothing in this image reads its
+ * contents, so its size is the only property that could matter, and four bytes is what a `B` symbol in
+ * the kernel objects is.
+ */
+
+/*
+ * `__cxa_atexit(void (*func)(void *), void *arg, void *dso_handle)` - the signature read off the
+ * call sites in the linked objects, not assumed: r0 is the destructor (in `_GLOBAL__sub_I_OSKext.cpp`
+ * an address in the same object's `.text`), r1 the object, r2 the `__dso_handle` address. Registering
+ * nothing and reporting success is the whole function.
+ */
+int __cxa_atexit(void (*func)(void *), void *arg, void *dso_handle)
+{
+    (void)func;
+    (void)arg;
+    (void)dso_handle;
+    return 0;
+}
+
+void *__dso_handle = &__dso_handle;
+
+/*
  * `pmap_bootstrap()` - `osfmk/arm/pmap.c:2764`. **Retired as a probe by experiment 197**, which
  * links `osfmk_arm_pmap.o`: the real function now defines this symbol, so this one is compiled out
  * and the twelve values below cannot be taken again. They are kept, and kept compiling under their
