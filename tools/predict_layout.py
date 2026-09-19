@@ -36,6 +36,16 @@ against the *previous* input's end, and where a run contains a mergeable section
 a deduplicated contribution rather than the object's size, the replay drifts. So read a `.rodata`-run
 row as +/- 0x10 and a `.text` end as +/- 0x10, and prefer the rows it gets exactly (every `.text`
 placement, and every section start) as the ones to predict a build's success on.
+
+**The caveat that matters more than the fill term, found by experiment 364.** This model's input sizes
+come *from the map*, so it is exact only for a step that does not change what the map holds. Every
+step from 302 to 363 added one object and retired `k` names where `k` was accounted for elsewhere;
+364 retired two function stubs and one storage stand-in, and that changed `realstubs.o`'s own sections
+-- `.text` 0x3FF0 -> 0x3FC0, `.rodata.str1.4` 0x3AE4 -> 0x3A9C, `.bss` 0x27C4 -> 0x2784 -- which the
+model has no way to know. The result was a `.text` end 0x80 high and `.rodata`-run rows 0x38-0x48 low
+in the same link. So for a step that retires anything: predict the **bucket** rows instead -- where
+`.data` starts (`align_up(text_end, 0x4000)` lands in the next bucket for any small text error),
+`__bss_end` from the pad rule, the counts -- and treat the model's raw ends as +/- 0x80.
 """
 
 import argparse
