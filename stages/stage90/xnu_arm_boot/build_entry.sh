@@ -13490,6 +13490,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     BSD_KERN_KERN_MALLOC_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_MALLOC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_malloc.o}
     IOKIT_TESTS_TESTS_OBJ=${STAGE90_ENTRY_IOKIT_TESTS_TESTS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Tests_Tests.o}
     OSFMK_KERN_WORK_INTERVAL_OBJ=${STAGE90_ENTRY_OSFMK_KERN_WORK_INTERVAL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_work_interval.o}
+    BSD_KERN_SYS_REASON_OBJ=${STAGE90_ENTRY_BSD_KERN_SYS_REASON_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_sys_reason.o}
     # =============================================================================================
     # **369: `YarrowCoreLib/port/smf.c` - the step that moves `.data` for the first time in five, and
     # whose stop is three frames away from anything it touches.**
@@ -15378,6 +15379,281 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # lines, last line `No errors detected`; and the device came back to Android on its own
     # (`MI 4LTE`, release 10).**
     # =============================================================================================
+    # **379: `bsd/kern/sys_reason.c` - the object that retires 378's stop, whose frame has one more
+    # stub on the way out and whose `.bss` moves without moving anything below it.**
+    #
+    # 378's stop was `os_reason_free`, hit at key `0x800d69c4` - the `bl` at `0x800d69c0`, which is
+    # `uthread_cleanup + 0xD0`, in the teardown frame reached from `thread_apc_ast` through
+    # `thread_terminate_self`. `bsd_kern_sys_reason.o` is the pool's only definer of that name.
+    #
+    # **Predicted: 6 resolved (6 function, 0 storage) / 0 added - 748 -> **742** undefined, 650 ->
+    # **644** function, 98 -> **98** storage**; the object's `.text` **0x801802A0** (0x378), its
+    # `.rodata.str1.1` **0x801A6B49** (0x40), its `.bss` **0x801FCF2C** (0x10) and its
+    # `__DATA,__data` **0x801C6350** (0x30); platform expert `.text` **0x80180618** (0x150); rtabi
+    # **0x80180770** (0x54); `realstubs.o` `.text` **0x801807C4** (0x3C60 = 644 x 0x18) ending
+    # **0x80184424**; the `.rodata` run's start **0x801846D0**; `realstubs.o` `.rodata.str1.4`
+    # **0x801A7130 (0x3622)**; `__TEXT, initcode` **0x801AA760** (0x64C) behind a pad of **0x8**;
+    # `.text` raw end **0x801AB110**, which is *not* 32-aligned, so the closing `ALIGN(32)` adds **0x10**
+    # and the text size is **1749280** (0x1AB120); `.data` **0x801AC000 (0x1A380)**; `.sysctl_set`
+    # **0x801C6380 (0x158)**; `.init_array` **0x801C64D8 (0x90)**; `.bss` **0x801C6580 (0x39058)** with
+    # `realstubs.o`'s slot **0x801FCF80 (0x2644)** and the bucket's end **0x801FF5C4** both unmoved;
+    # `__bss_end` **0x801FF5D8**, args **0x80201000**, topOfKernelData **0x80400000**, headroom
+    # **2099752** and image **1860968** (0x1C6568); and the stop at
+    # **`proc_encode_exit_exception_code`** at key **`0x80009628`**.
+    #
+    # ### The object
+    #
+    # ```
+    # == bsd_kern_sys_reason.o
+    #    17 definitions, 17 references
+    #    resolved (6: 6 function, 0 storage)
+    #       os_reason_alloc_buffer                                     object T, stand-in was func T
+    #       os_reason_alloc_buffer_noblock                             object T, stand-in was func T
+    #       os_reason_create                                           object T, stand-in was func T
+    #       os_reason_free                                             object T, stand-in was func T
+    #       os_reason_init                                             object T, stand-in was func T
+    #       os_reason_ref                                              object T, stand-in was func T
+    #    added (0: 0 function, 0 storage)
+    #    of the 17 references, 17 are already satisfied
+    # ```
+    #
+    # Six names retired, none created, and all 17 of its references are already real - the fourth object
+    # in a row whose whole closure is satisfied. All six retired records are *function* records (indices
+    # 352..357 of `xnu_arm_entry_stubnames.txt`, contiguous, since the list is alphabetical), so **no data
+    # record retires**, which is what keeps `realstubs.o`'s `.bss` - and every address below it - where it
+    # is. Four sections, and one of them is the first `.bss` input this walk has linked in four steps:
+    #
+    # ```
+    # .text                           0x378  2**2  the six functions
+    # .rodata.str1.1                  0x040  2**0  three strings
+    # .bss                            0x010  2**2  os_reason_alloc_buffer_internal.site.3
+    # __DATA, __data                  0x030  2**3  group 2 of the .data output section; no `.data` at all
+    # .comment / .note.GNU-stack / .ARM.attributes
+    # ```
+    #
+    # ### The stop: the frame one level out, and the guarded site on the way to it
+    #
+    # 378's prediction was `proc_encode_exit_exception_code` - `thread_terminate_self + 0x1C8`, key
+    # `0x80009628` - and it failed because the frontier descended into `uthread_cleanup`, which reaches
+    # `os_reason_free`. With that entry stub retired, the same path continues, and the walk now sees it
+    # whole:
+    #
+    #     uthread_cleanup  0x800D68F0  103 instructions, 13 direct calls
+    #       +0xD0  bl <os_reason_free>                       <- 378's stop, retired by this step
+    #       +0xD4  cmp r4,#0 / beq +0x134                    r4 = thread->task; zero returns the frame
+    #       +0xDC  ldr r0,=kernel_task / cmp r0,r6 / beq     returning for kernel_task's own thread
+    #       +0xE4  ldrb r0,[r5,#0xF7] / tst #2 / beq         UT_VFORK in uu_flag - the guarded site
+    #       +0x110 bl <vfork_exit_internal>                  <- THE GUARDED ALTERNATIVE, key 0x800D6A04
+    #       +0x118 bl <get_bsdtask_info>                     real
+    #       +0x128 bl <task_is_exec_copy>                    real
+    #       +0x134 popne {r4,r5,r6,pc}                       bsd_info != task -> the frame returns here
+    #       +0x140 bl <lck_mtx_lock>                         real (its own walk reaches no stub)
+    #
+    # and the frame it returns into:
+    #
+    #     thread_terminate_self  +0x120  ldr r0,[r6,#0x238] / cmp #0 / beq
+    #                            +0x12C  bl <task_is_exec_copy>            real
+    #                            +0x15C  bl <hw_atomic_sub>                real
+    #                            +0x190  bl <kdbg_trace_string>            real
+    #                            +0x1C8  bl <proc_encode_exit_exception_code>  <- THE PREDICTED STOP
+    #
+    # **So the prediction is unchanged and is now one frame out on the return side**: every call between
+    # `+0x120` and `+0x1C8` is real, and `tools/first_stub_call.py thread_terminate_self --from 0x120`
+    # names `+0x1C8` as the first stub on that line. What this step adds is a *guarded* site **before** it,
+    # and the run's own log says which way the guard goes: 378's stop was the *first* stub on the path, so
+    # everything ahead of `+0xD0` was skipped - including `vnode_rele` at `+0x88` - and the fields those
+    # guards read (`[r5+0x140]`, `[r5+0x138]`, `[r5+0x170]`, `[r5+0xC8]`, `[r5+0x164]`, `[r5+0xEC]`) all
+    # read zero on this thread. A uthread that empty is not a `vfork` child, which is why the prediction
+    # is the straight-line one - and falsifier (d) records the alternative in its exact form.
+    #
+    # ### The layout: one 8-aligned delta, one `.bss` input, and two pads that take the residue
+    #
+    #     .text run content   = +0x378 - 6 x 0x18 = **+0x2E8**
+    #     .rodata-run content = +0x40 (new) - 0x7C (six retired name slots) = **-0x3C**
+    #     .data delta         = **+0x30**, group 2 only, because the object has no `.data` section
+    #     .bss                = **+0x40** at the bucket's start and **0x0** at its end
+    #
+    # **The 0x7C is measured, not banded.** `realstubs.o`'s `.rodata.str1.4` is exactly the **650
+    # function records' names in stub order** (the 98 data records are not in it - that was checked by
+    # extracting the section and comparing it with the name list, element for element), and the rule
+    # `Sigma align4(len+1)` over all but the *last* name plus the last name's raw `len+1` reproduces the
+    # section's 0x369E to the byte. The six retired names are interior, so the unpadded-final-name term is
+    # untouched and the row is `0x369E - 0x7C = **0x3622**`: `os_reason_alloc_buffer` 0x17 -> 0x18,
+    # `_noblock` 0x1F -> 0x20, `os_reason_create` 0x11 -> 0x14, `os_reason_free` 0xF -> 0x10,
+    # `os_reason_init` 0xF -> 0x10, `os_reason_ref` 0xE -> 0x10. **And the same shape was confirmed for the
+    # `.bss` table on the way past**: `Sigma align64(size)` over all but the last data record plus the
+    # last one's raw size is `0x2644`, which is `realstubs.o`'s `.bss` exactly - the second place where a
+    # table of records ends without a trailing pad (376's name rule was the first).
+    #
+    # **And the object's own `.rodata.str1.1` row is a number, not a band, for the second step running.**
+    # Its three strings - `os_reason_lock`, `os reasons` and `failed to initialize os_reason_zone` - were
+    # each checked against the image the device ran and none of them occurs in it, so there is nothing to
+    # merge into and nothing for an earlier chunk to share: the row is the object's own 0x40. That is also
+    # why this step's `.rodata` run is a clean two-term sum rather than 377's five-object subtraction.
+    #
+    # **The phase rule is the one 378 found, and this step is where it becomes checkable in both
+    # directions.** 0x2E8 is 8-aligned, but it is **4 mod 8's complement**: `0x2E8 mod 16 = 8` and
+    # `0x2E8 mod 32 = 8`, so a 16- or 32-aligned input *would* re-phase by 8. Measured against the map,
+    # none is downstream of the insertion point - every content row lands at a flat **+0x2E8** - and the
+    # residue therefore shows up in the two pads, which is exactly the accounting:
+    #
+    #     text size delta = +0x2E8 (text run) - 0x3C (rodata run) + 0x4 (initcode's pad, 0x4 -> 0x8)
+    #                       + 0x10 (the closing ALIGN(32), 0x0 -> 0x10)  = **+0x2C0**
+    #
+    # **The `initcode` pad and the tail pad are the terms a sum of section contents cannot represent**, and
+    # this is the first step in the walk where *both* of them move, in the same direction as the shift,
+    # while every printed row-level number stays a flat +0x2E8. 378's pad moved against its shift and hid
+    # a 0x4 miss; this step's pads move with theirs and the text size changes by 0x2C0 - so the two steps
+    # together are the rule's two signs.
+    #
+    # **And the `.bss` bucket is where the step's shape is decided.** `.bss` starts at
+    # `align64(.init_array` end)`: 0x801C6568 rounds to **0x801C6580**, which is 0x40 later than 378's
+    # 0x801C6540 - the first `.bss` start move in four steps, and it comes from `.data` growing by 0x30 and
+    # pushing everything below it. Inside the bucket the object's 0x10 (align 4) goes where the command line
+    # puts it - after `iokit_Kernel_IOPowerConnection.o`'s 0x18 at 0x801FCF14, so at **0x801FCF2C** - and
+    # moves `MSM8974PlatformExpert.o`'s `.bss` to 0x801FCF3C and `xnu_arm_entry_macho.o`'s 0x0 to
+    # 0x801FCF54. `realstubs.o`'s `.bss` is **64-aligned**, so `align64(0x801FCF54)` is **0x801FCF80** - the
+    # same address as before, with its pad absorbing the 0x10 - and the bucket's last byte is unmoved at
+    # 0x801FF5C4. So **the start moves by 0x40 and the end moves by 0**, `__bss_end` stays 0x801FF5D8, and
+    # the args page, `topOfKernelData`, the tree and the headroom are untouched. That is the pad rule
+    # (`new_pad = (old_pad - object_size) mod 64`) doing the opposite of what it did at 354 and 366.
+    #
+    # ### Measured, from the build
+    #
+    #     == pass 1: which symbols do XNU's own objects need? ==
+    #       742 symbol(s) undefined
+    #       stubs: 644 function(s), 98 storage
+    #
+    # **All three counts exact** - `xnu_arm_entry_stubnames.txt` reads 644 `func` records and 98 `data`
+    # records, and `xnu_arm_entry_undef.txt` reads 742 lines - and every `.text`-side row exact, including
+    # both of the pads this step's arithmetic turns on. What did *not* come out as written is the tail of
+    # the `.bss` bucket, and it is one row read against the wrong neighbour.
+    #
+    # | | 378 measured | 379 predicted | 379 measured |
+    # |---|---|---|---|
+    # | counts | 748 / 650 / 98 | 742 / 644 / 98 | **742 / 644 / 98** |
+    # | object `.text` | - | 0x801802A0 (0x378) | **0x801802A0 (0x378)** |
+    # | platform expert `.text` | 0x801802A0 (0x150) | 0x80180618 (0x150) | **0x80180618 (0x150)** |
+    # | rtabi `.text.eabi` | 0x801803F8 (0x54) | 0x80180770 (0x54) | **0x80180770 (0x54)** |
+    # | `realstubs.o` `.text` | 0x8018044C (0x3CF0 = 650 x 0x18) | 0x801807C4 (0x3C60 = 644 x 0x18) | **0x801807C4 (0x3C60)** |
+    # | `.rodata` run start | 0x801843E8 | 0x801846D0 | **0x801846D0** |
+    # | `kern_malloc` `.rodata.str1.1` | 0x801A61E6 (0x4CF) | +0x2E8 | **0x801A64CE (0x4CF)** |
+    # | `Tests` `.rodata.str1.1` | 0x801A66B5 (0x0A) | 0x801A699D (0x0A) | **0x801A699D (0x0A)** |
+    # | work_interval `.rodata.str1.1` | 0x801A66BF (0x1A2) | 0x801A69A7 (0x1A2) | **0x801A69A7 (0x1A2)** |
+    # | object `.rodata.str1.1` | - | 0x801A6B49 (0x40) | **0x801A6B49 (0x40)** |
+    # | `realstubs.o` `.rodata.str1.4` | 0x801A6E08 (0x369E) | 0x801A7130 (0x3622) | **0x801A7130 (0x3622)** |
+    # | `__TEXT,__const` / pad / `initcode` | 0x801AA4A8 / 0x4 / 0x801AA4B0 | 0x801AA754 / 0x8 / 0x801AA760 | **0x801AA754 / 0x8 / 0x801AA760** |
+    # | `.ARM.exidx` / fill / raw end | 0x801AAE58 / 0x8 / 0x801AAE60 | 0x801AB108 / 0x10 / 0x801AB110 | **0x801AB108 / 0x10 / 0x801AB110** |
+    # | text size | 1748576 (0x1AAE60) | 1749280 (0x1AB120) | **1749280 (0x1AB120)** |
+    # | `.data` | 0x801AC000 (0x1A350) | 0x801AC000 (0x1A380) | **0x801AC000 (0x1A380)** |
+    # | object `__DATA,__data` | - | group 2, 0x30 | **0x801C6350 (0x30)** |
+    # | `.sysctl_set` | 0x801C6350 (0x158) | 0x801C6380 (0x158) | **0x801C6380 (0x158)** |
+    # | `.init_array` / its end | 0x801C64A8 (0x90) / 0x801C6538 | 0x801C64D8 (0x90) / 0x801C6568 | **0x801C64D8 (0x90) / 0x801C6568** |
+    # | `.bss` start | 0x801C6540 | 0x801C6580 | **0x801C6580** |
+    # | it lands after `IOPowerConnection.o` | 0x801FCF14 (0x18) | 0x801FCF14, unmoved | **0x801FCF54 (0x18)** |
+    # | object `.bss` | - | 0x801FCF2C (0x10) | **0x801FCF6C (0x10)** |
+    # | `realstubs.o` `.bss` | 0x801FCF80 (0x2644) | 0x801FCF80, unmoved | **0x801FCFC0 (0x2644)** |
+    # | its pad | `*fill* 0x3C` | 0x2C | **`*fill* 0x2C`** |
+    # | `.bss` size | 0x39098 | 0x39058 | **0x39098** |
+    # | `__bss_end` | 0x801FF5D8 | 0x801FF5D8 | **0x801FF618** |
+    # | image | 1860920 (0x1C6538) | 1860968 (0x1C6568) | **1860968 (0x1C6568)** |
+    # | headroom | 2099752 | 2099752 | **2099688** |
+    # | args / topOfKernelData / tree | 0x80201000 / 0x80400000 / 0x80600000 | all unmoved | **all unmoved** |
+    #
+    # **The `.bss` block is where the prediction was wrong, and it is the shape of the arithmetic rather
+    # than the arithmetic itself: the bucket's start was moved by 0x40 and its *contents* were not.** Every
+    # `.bss` input is placed sequentially from the bucket's start, so the same 0x40 that carries
+    # 0x801C6540 to 0x801C6580 carries every address inside it too - and the block wrote 378's addresses
+    # for the entries it walked, `iokit_Kernel_IOPowerConnection.o` at 0x801FCF14 where the map says
+    # **0x801FCF54**. That is internally inconsistent on its face (a start that moves with a tail that does
+    # not), which is the tell to carry: **a prediction that moves a container has to move what is in it,
+    # and if it does not, the two halves are being read from different images.** From 0x801FCF54 the rule
+    # the block wrote holds exactly: the object's 0x10 begins where IOPowerConnection.o's 0x18 ends, at
+    # **0x801FCF6C**; `MSM8974PlatformExpert.o`'s 0x18 follows at 0x801FCF7C; `xnu_arm_entry_macho.o`'s
+    # 0x0 sits at 0x801FCF94; `align64` of that is **0x801FCFC0**, so `realstubs.o`'s slot moves and its
+    # pad gives up exactly the object's 0x10 (`*fill* 0x3C` -> **`*fill* 0x2C`**) and the input is
+    # unmoved *in shape*; `realstubs.o` ends 0x801FF604; `+0x4` (align 8) and `+0x10` put `__bss_end` at
+    # **0x801FF618**.
+    #
+    # **So the bucket's content span is unchanged at 0x39084** - start +0x40, content +0x10, pad -0x10 -
+    # and the size the map prints, which includes the trailing align-8 pad and the 0x10 past it, comes out
+    # **0x39098**, the very number 378 printed, for the opposite reason: 378's start and end both stood
+    # still, and this step's *both* moved by 0x40. Everything derived above `.bss` follows from that: the
+    # image is `.init_array` end - base and does not include `.bss` at all, so it is exact at **1860968**;
+    # `args` is `align_up(0x1FF618, 0x1000) + 0x1000` = **0x80201000**, still the page 0x1FEDD8's bucket
+    # gave; `topOfKernelData` 0x80400000, the tree 0x80600000 and the window 0x80800000 are unmoved; and
+    # only `headroom` changes, by exactly the 0x40 the bucket's end moved - 2099752 -> **2099688**.
+    #
+    # **And the phase rule of 378 read from its other side.** That step's delta was 4 mod 8 and re-phased
+    # every 8-aligned input; this step's `.bss` delta is 0x40, which is **0 mod 64**, and the one input
+    # that could have absorbed it (`realstubs.o`'s 64-aligned slot) therefore does not re-phase anything:
+    # the pad takes the object's 0x10 and *nothing else moves in kind*. A delta that is a multiple of the
+    # alignment survives a round of it invisibly - which is why this miss touched `.bss`'s size and every
+    # address below it and not a single `.text` row.
+    #
+    # **The one other defect is a transcription, and it is in the prediction rather than the build: the
+    # text size was written as 1753376 beside the hex 0x1AB120, and 0x1AB120 is 1749280.** The hex is the
+    # arithmetic (it is what the two pads produce) and it is what the map prints, so this is the
+    # hex-to-decimal class again - 370's and 377's - and the correction was made in place in the
+    # prediction above rather than recorded as a miss.
+    #
+
+    # ### The falsifiers, named before the run
+    #
+    # **(a) `proc_encode_exit_exception_code` at key `0x80009628`** - the prediction, and the key is the
+    # *return address*: `0x8000945C + 0x1C8 + 4`. 378 predicted this and missed it by one frame; the frame
+    # that missed it is the one this step empties.
+    # **(b) no stop at `os_reason_free`** - the name is gone from this image's stub list, and the counts are
+    # 742 / 644 / 98 with `xnu_arm_entry_stubnames.txt` reading 644 function records and 98 data records.
+    # **(c) the layout** - in particular `realstubs.o`'s `.rodata.str1.4` at **0x801A7130 (0x3622)** and the
+    # text size **1749280**, which is the row pair this step's two new pads are measured in; and
+    # `.bss` at **0x801C6580** with `realstubs.o`'s slot at **0x801FCF80** and `__bss_end` at
+    # **0x801FF5D8** - a start that moves and an end that does not.
+    # **(d) `vfork_exit_internal` at key `0x800D6A04`** - the guarded site inside `uthread_cleanup`, taken
+    # only if `[r5+0xF7]` has bit 2 (`UT_VFORK`) *and* the two guards before it fall through. This is a
+    # **state** the block cannot read statically, and it is the first guarded alternative this walk has seen
+    # that is *ahead of* the retired stop rather than behind it. If the run stops here, the frame is the same
+    # one and the object is the same one - `vfork_exit_internal` is defined by `bsd_kern_kern_exit.o` too -
+    # so the step's *choice* is unaffected and only the prediction's name is.
+    # **(e) the refcount leg** - `thread_terminate_self + 0x170` is `bl hw_atomic_sub` followed by
+    # `cmp r0,#0 / bne 0x80009684`, and that branch (the thread still has references) leads to a
+    # `timer_call_cancel`/`delay` loop whose next stub this block cannot name. A stop past 0x80009684 is a
+    # state, not a layout miss.
+    # **(f) the `lck_mtx_lock` leg** - reached only if `get_bsdtask_info(thread) == thread->task` *and*
+    # `task_is_exec_copy(thread) != 0`, i.e. if `bsd_info` is the task itself. `lck_mtx_lock`'s own walk
+    # reaches no stub on its straight line, so this leg can only be seen as "the run went somewhere the
+    # model did not name", never as a named stop.
+    #
+    # ### The next object, named before its run
+    #
+    # **Both candidate stops lead to the same object.** `proc_encode_exit_exception_code` (falsifier (a))
+    # and `vfork_exit_internal` (falsifier (d)) are both defined by **`bsd_kern_kern_exit.o`**
+    # (`bsd/kern/kern_exit.c`) and by nothing else in the pool, and it is the first incoming step this walk
+    # has faced that **grows** the undefined set: 128 references of which 90 are satisfied, measured
+    # **5 resolved (5 function, 0 storage) / 38 added (37 function, 1 storage)** - `748 -> 781 undefined,
+    # 650 -> 682 function, 98 -> 99 storage` - plus a 0x40 stand-in slot for `proc_shutdown_exitcount`
+    # (`pool B 4`). **The `128 - 90 = 38` check is the one that corrected an earlier draft of this table**,
+    # which had carried "1 resolved / 33 added" forward from an older image; a candidate table is a
+    # measurement of the image the block ran against and nothing else.
+    #
+    # **And the third name in sight is the one 377 recorded**: `throttle_lowpri_io`, the *guarded* call at
+    # `uthread_cleanup + 0x2C`, belongs to `bsd_miscfs_specfs_spec_vnops.o` - measured 4 resolved (3
+    # function, 1 storage) / **91 added (55 function, 36 storage)**, i.e. `748 -> 835 / 650 -> 702 /
+    # 98 -> 133` - the buffer-cache and vnode-operation face of VFS. Three candidates, all measured, none
+    # taken; the teardown this walk is standing in can reach any of them.
+    #
+    # ### Safety, before the run
+    #
+    # A non-persistent `fastboot boot` of `stage90-qcdt.img`; nothing is flashed, and the run goes through
+    # `preflight_boot_check.sh --allow-xnu-entry` and `run_and_capture.sh --allow-xnu-entry`. This step's
+    # own code is reason-pool bookkeeping (`os_reason_create`, `_init`, `_ref`, `_free` and the two
+    # buffer helpers) over storage the kernel has already allocated, and all 17 of its references are
+    # satisfied, so nothing new can fault at load; what it *unlocks* is the rest of `uthread_cleanup`'s
+    # exit path and, past it, a frame of `thread_terminate_self` the walk has never executed. The one new
+    # thing in the image is 0x10 of `.bss` that is now a real section rather than a stand-in slot, and it
+    # is only ever read by these six functions. The recovery nets (`sleepGate` returning under the hardware
+    # watchdog, and the software dead-man firing on a silent boot) are the ones that catch a stop that is
+    # not a stub.
     # **378: `osfmk/kern/work_interval.c` - the stub 377 stopped at, and the frame it stands in is a
     # thread teardown.**
     #
@@ -23089,6 +23365,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$BSD_KERN_KERN_MALLOC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$IOKIT_TESTS_TESTS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_WORK_INTERVAL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_SYS_REASON_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -23101,7 +23378,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$IOKIT_KERNEL_IOCOMMAND_OBJ" "$IOKIT_KERNEL_IOPOWERCONNECTION_OBJ" "$BSD_KERN_KERN_MALLOC_OBJ" "$IOKIT_TESTS_TESTS_OBJ" "$OSFMK_KERN_WORK_INTERVAL_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$IOKIT_KERNEL_IOCOMMAND_OBJ" "$IOKIT_KERNEL_IOPOWERCONNECTION_OBJ" "$BSD_KERN_KERN_MALLOC_OBJ" "$IOKIT_TESTS_TESTS_OBJ" "$OSFMK_KERN_WORK_INTERVAL_OBJ" "$BSD_KERN_SYS_REASON_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
