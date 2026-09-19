@@ -217,11 +217,23 @@ Everything else in `bsd_init`'s statement list is real code, and everything *aft
 `kernel_bootstrap_thread` — `OSKextRemoveKextBootstrap`, `kdebug_free_early_buf`,
 `serial_keyboard_init`, `vm_page_init_local_q`, `thread_bind`, `vm_pageout()` — has been real since
 435. **So the goal's minimum bar is one function away, and that function is not a link and not a
-value: it is `bsd/kern/subr_prof.c`, which does not compile.** It uses `STATIC`, which
-`bsd/kern/kern_sysctl.c` defines at its own line 204 and no header `subr_prof.c` includes, so
-`out/xnu_kernel_obj/bsd_kern_subr_prof.o` does not exist and `kmstartup` has been a stand-in since
-425. Giving the file that one macro is a stage-owned change to the build's include set, not a change
-to Apple's source — and it is 438.
+value: it is `bsd/kern/subr_prof.c`, which does not compile.**
+
+> **Corrected by 438 — the diagnosis above is wrong about the cause, and the measurement is
+> `libkern/conf/files`.** `subr_prof.c` *does* use `STATIC` (which only `bsd/kern/kern_sysctl.c`
+> defines, at its own line 204), but that is not what stopped it: the file's body is inside
+> `#ifdef GPROF` and the configuration has `gprof` off — except that `libkern/conf/files:5` is
+> `OPTIONS/gprof optional gprof`, and the *single flat* `meta_features.h` this build generated told
+> **every** translation unit `#define GPROF 0`, which `#ifdef` reads as *defined*. So a BSD file
+> called a profiler entry point whose definer is dead. Supplying `STATIC` would not have fixed it,
+> and neither would anything else in `subr_prof.c`: the call had to stop existing, which means the
+> option macro had to stop being visible to `bsd`. That is 438, and its subject is the per-component
+> `meta_features.h` — `mkheaders.c:71-79` and `MakeInc.def:466`.
+>
+> What survives from above: `out/xnu_kernel_obj/bsd_kern_subr_prof.o` did not exist, `kmstartup` had
+> been a stand-in since 425, and `kmstartup` at `+0x844`/key `0x8003B238` was the stop. What does not:
+> "giving the file that one macro" — and the claim that a compile error in one file was the whole
+> distance to the bar.
 
 **Still owed and unchanged: the timer** (`ml_init_timebase` plus an MSM8974 `tbd_ops_t` over the GPT
 at `0xf9020000`, and 405's `IOCPUInterruptController`). Nothing on the path from here to `vm_pageout`

@@ -153,6 +153,15 @@ fi
 }
 "$TOOLS_DIR/xnu_config/device_table.py" --write "$DEVICE_TABLE" >/dev/null
 
+# And the third table, for the same reason and with a sharper failure mode: which options a
+# translation unit sees is a property of its *component* (experiment-438), and the generator that
+# writes the per-component `meta_features.h` files was, until then, making a claim in a comment
+# instead of a check. Structural, so it fails in a second rather than after 680 files.
+XO_MESSAGE=$("$TOOLS_DIR/check_option_headers.py" 2>&1) || {
+    echo "$XO_MESSAGE" >&2
+    exit 2
+}
+
 mkdir -p "$OUT"
 # Truncate every output. A build script that appends leaves the previous run's failures in the
 # list, and a count read from it is then a count of two runs - which is how a 397-file result
@@ -303,6 +312,222 @@ DEVICE_HEADERS=${XNU_DEVICE_HEADERS_OUT:-$REPO_ROOT/out/xnu_device}/$CONFIG
     echo "  (the other configuration's directory must not be used: they disagree on 20 macros)" >&2
     exit 2
 }
+# ------------------------------------------------------------------------------------------------
+# 438: which options a file sees is a property of its COMPONENT, and the boot's last stub was a
+#      phantom of getting that wrong.
+#
+# 437's run stopped at `stub_hit=kmstartup`, caller key `0x8003B238` = `bsd_init + 0x848`. The walk
+# says `bsd_init` has 232 calls and that is the only one still a stub, so the goal's bar was one
+# function away - and that function turned out to be one no shipping configuration can define.
+#
+# `bsd_init.c:852` is `#ifdef GPROF` around `kmstartup();`, and `GPROF` is declared by **libkern**:
+# `libkern/conf/files:5` is `OPTIONS/gprof optional gprof`, so `tools/gen_option_headers.py` wrote
+# `gprof.h` with `#define GPROF 0` and the FLAT `meta_features.h` force-included it into **every**
+# translation unit. `#define GPROF 0` is not "off" to `#ifdef`; it is *defined*. So a BSD file called
+# a profiler entry point. Its only definer is `bsd/kern/subr_prof.c` - `standard` in
+# `bsd/conf/files:430`, so always compiled - and that file cannot compile: between
+# `#ifdef GPROF` (line 83) and `#endif /* GPROF */` (line 339) it uses the macro `STATIC` at line 160,
+# which nothing it includes defines. The two facts are the same fact. The body must be dead in every
+# build that ships, which means the call must be dead too - and it was not, because this build
+# aggregated all eight components' options into one header.
+#
+# That is not a fudge this project invented: `mkheaders.c` writes each OPTIONS header into the object
+# directory of the `conf/files` that declared it, and `MakeInc.def:466` puts **that** directory first
+# (`INCFLAGS_LOCAL = -I.`, with `-I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)` beside it) - so a component
+# sees its own options and no others. `scan_options()`'s comment asserted the membership did not
+# matter because "the value is the same whichever component declared it", and the value is; the
+# membership is not. See `mi4-generator-output-kinds` and `mi4-a-claim-in-a-comment-is-not-a-check`.
+#
+# **The membership rule alone is not enough, and the measurement is the reason.** Scanning every
+# manifest source and all 1411 component headers for `#ifdef`/`#ifndef`/`defined()` reads of an
+# option macro finds exactly TWO cross-component reads in the whole tree:
+#
+#     GPROF        declared by libkern, read by bsd/kern/{bsd_init,kern_clock,subr_prof,subr_xxx}.c
+#                  and bsd/sys/gmon.h - the profiler, and every one of those blocks is DEAD when the
+#                  option is off. Not shared: bsd simply stops seeing it, which is the only reading
+#                  under which Apple's own subr_prof.c compiles. `nm` over all 695 objects finds no
+#                  reference to `mcount`, `_gmonparam` or `cfreemem`; `kmstartup` is referenced only
+#                  by the call this step removes.
+#     CONFIG_MACF  declared by bsd and security, read by osfmk - `osfmk/kern/task.h:241` guards a
+#                  `struct task` field with `#ifdef CONFIG_MACF` and `task.c` guards the same
+#                  parameter with `#if CONFIG_MACF`. **Shared**: with the macro invisible to osfmk,
+#                  `struct task` would have two layouts in one kernel, and the bsd and security code
+#                  that allocates and reads it would use the other one. That is an ABI mismatch no
+#                  compiler can see, so the shared list keeps the value it has always had.
+#
+# So the change is: `tools/gen_option_headers.py` writes `<component>/meta_features.h` as well as the
+# flat one; this script puts the component's own directory ahead of the flat one for every manifest
+# file; and `tools/check_option_headers.py` makes both halves structural - the slices against
+# `conf/files`, and the reads against an explicit list (`SHARED` with a reason, or the inert ones
+# with a reason; anything else stops the build). The four out-of-manifest translation units (the EABI
+# runtime, firehose, the platform expert, the pthread and crypto tables) belong to no component and
+# keep the flat header, which is what they were measured with.
+#
+# **Prediction, written before the build and before the run.**
+#
+#   * `tools/check_option_headers.py` passes for RELEASE and STAGE90_BOOT, and fails when a slice is
+#     made to disagree (demonstrated while writing it: dropping `<gprof.h>` from libkern's slice
+#     reported `libkern: missing gprof.h`; the include parser's first version reported five
+#     components "missing" the header it had just written, because the shared entries carry a
+#     trailing comment).
+#   * pool: **695 objects -> 696, 3 failures -> 2.** `bsd_kern_subr_prof.o` is produced for the first
+#     time; the two that remain are `bsd_net_if_bridge.c` and `osfmk_kperf/kperfbsd.c`, which this
+#     step does not touch. `bsd/kern/subr_prof.c`'s body is inside `#ifdef GPROF`, so the object
+#     defines nothing - `kmstartup`, `mcount`, `sysctl_doprof` and `_gmonparam` all vanish with it.
+#   * `nm -u out/xnu_kernel_obj/bsd_kern_bsd_init.o` no longer lists `kmstartup`; `bsd_kern_subr_xxx.o`
+#     loses `cfreemem`; nothing anywhere references any of them.
+#   * **Every other object is byte-identical, and the reason is a property this step's whole design
+#     rests on:** the only thing membership changes for a file is which option macros are *defined*.
+#     `#if X` reads 0 either way, so only `#ifdef`/`#ifndef`/`defined()` can move - and those are the
+#     two reads above, one inert and one held by the shared list. So the expected diff is exactly
+#     four objects: `bsd_kern_bsd_init.o` (call gone), `bsd_kern_subr_xxx.o` (`cfreemem` gone),
+#     `bsd_kern_subr_prof.o` (new), and `bsd_kern_kern_clock.o` (its `#ifdef GPROF` wraps an
+#     `#include <sys/gmon.h>` and nothing else - identical is the prediction).
+#   * entry image: the stub set **44 -> 43** (`kmstartup` is a name nothing references any more),
+#     `.text` down by one stub body and one name slot - **0x24**, so 0x4B4AC0 -> 0x4B4A9C if no
+#     boundary moves - and the layout rows shift by that and no more.
+#   * the run: `bsd_init` runs past `+0x844`, and since 435 measured the rest of its statement list
+#     real it **returns** - the first time this boot has left `bsd_init` - and the stop moves into
+#     `kernel_bootstrap_thread`: `OSKextRemoveKextBootstrap`, `kdebug_free_early_buf`,
+#     `serial_keyboard_init`, `vm_page_init_local_q`, `thread_bind`, `vm_pageout()`.
+#
+# Falsifiers, named in advance: (1) a stop that is still `kmstartup` - the narrowing did not reach
+# `bsd_init.o`, which `nm -u` on the object decides in one line; (2) a new `data abort` naming a
+# profiler-era symbol - the narrowing removed a definition something did need, and the symbol says
+# which; (3) `bsd_init` still not returning, with the stop inside its own body - then "one stub left"
+# was a statement about the pre-438 image and something else on that statement list depends on the
+# GPROF path; (4) a `struct task` sized differently in two objects - what the shared list exists to
+# prevent, and visible as a fault on a task pointer rather than as a compile error.
+#
+# ------------------------------- measured, 2026-09-19 --------------------------------------------
+#
+# **None of the four falsifiers fired, and two of the predictions were wrong in a way worth keeping.**
+#
+# The pool: **695 objects -> 696, 3 failures -> 2**, exactly as predicted, and `bsd_kern_subr_prof.o`
+# is the new one. The byte comparison over all 695 before-hashes is the part that carries the design
+# argument: **exactly two objects changed, `bsd_kern_bsd_init.o` and `bsd_kern_subr_xxx.o`, and the
+# other 693 are byte-identical** - including `bsd_kern_kern_clock.o`, which the prediction called
+# identical and which is the one whose `#ifdef GPROF` wraps an `#include <sys/gmon.h>` with nothing
+# else in it. Two changed files out of 695 is what "membership only moves `#ifdef`" means when it is
+# measured rather than argued.
+#
+# The two symbols the step was aiming at are both gone:
+#
+#     nm -u bsd_kern_bsd_init.o   U kmstartup   -> nothing
+#     nm -u bsd_kern_subr_xxx.o   U cfreemem    -> nothing
+#
+# **Prediction miss (a), and it is the interesting one: the stub count went 44 -> 42, not 44 -> 43.**
+# The prediction said the new `subr_prof.o` "defines nothing - `kmstartup`, `mcount`, `sysctl_doprof`
+# and `_gmonparam` all vanish with it". That is wrong about the file, and the file says so: the
+# preprocessor structure is `#ifdef GPROF` at 83, `#endif /* GPROF */` at 339, and `addupc_task` at
+# line 370 is **outside it** (so are `PROFILE_LOCK`/`PROFILE_UNLOCK`/`PC_TO_INDEX` at 341-351).
+# `subr_prof.c` is not the profiler; it is the profiler *plus* `addupc_task`, which `resourcevar.h:124`
+# expands unguarded and `kern_clock.c:379` and `kern_sig.c:3346` call behind nothing but a runtime
+# `P_PROFIL`/`P_OWEUPC` flag test. So `addupc_task` was a stub before this step - the closure needed it
+# and nothing defined it - and the object that retires it is the one this step made compile:
+#
+#     nm out/stage90/xnu_arm_entry.elf   T addupc_task 0x8028bb7c
+#
+# Two stubs retired by one change, from two different directions: `kmstartup` because the caller
+# stopped existing, `addupc_task` because the definer started existing. The reading to keep: **a file's
+# name is not its `#ifdef` structure, and "an object defines nothing" is a claim about a line range
+# that was never checked.** The '380 bytes' the new object carries is the measure of it.
+#
+# **Prediction miss (b): `.text` grew 0x4B4AC0 -> 0x4B4B00, +0x40, not -0x24.** Removing two stub
+# bodies and their name slots is not what sets Δ`.text` - the new real `addupc_task` body more than
+# pays for them - and the +0x40 then **changed nothing else at all**:
+#
+#     text size    4934656 (.text)      <- was 4934336: +0x40
+#     image bytes  5141584              <- unmoved
+#     .data        0x804B8000 (0x2E360) <- unmoved, address and size
+#     .sysctl_set  0x804E6360 (0xFD8)   <- unmoved
+#     .init_array  0x804E7338 (0x118)   <- unmoved
+#     bss          0x804E7480 .. 0x805388F8 (332920)   <- unmoved
+#     entry bin    sha256 2e7354519b9ecf81573be3729a068de3cf1afb0faa5df3dc9e41d9eb1d99250a
+#
+# The whole of the growth sat in the `.text` section's own alignment slack, so the image is the same
+# 5141584 bytes with the same `.bss` boundary 48 bytes below its end - and the entry bin's hash still
+# moved, which is the point: **equal size is not equal layout.** This is `mi4-linker-fill-term` from
+# the other side: Δ`.text` was +0x40 and Δimage was 0.
+#
+# The closure went 423 -> 424 objects (`bsd_kern_subr_prof.o` joined it, since `addupc_task` is
+# referenced from two files the closure already had). `copyin` and `copyout`, the new object's only
+# unresolvable references, cost nothing because the image already defines both - `T copyin
+# 0x8000d3e4`, `T copyout 0x8000d4cc` - and `proc_is64bit` and `stopprofclock` are in the pool. The
+# 42 remaining stubs are the pre-437 set minus the two profiler entries, and the two *LLVM* profiler
+# stubs are untouched by this step and stay (`__llvm_profile_get_size_for_buffer_internal`,
+# `__llvm_profile_write_buffer_internal`) - a reminder that "the profiler" is two unrelated things in
+# this tree and only one of them is GPROF.
+#
+# **Miss (c), the hardware run, and it is the one that names the next step.** The prediction said
+# `bsd_init` would return and the stop would move into `kernel_bootstrap_thread`. It did not: the
+# result line has **no `stub_hit=` field for the first time**, and a fault block 436 and 437 never
+# printed:
+#
+#     real XNU entry: exception: prefetch abort
+#     xnu_entry_prefetch_abort_ifar = 0xE52DE004     xnu_entry_prefetch_abort_ifsr = 0x00000005
+#     xnu_entry_prefetch_abort_lr   = 0xE52DE008     xnu_entry_prefetch_abort_spsr = 0xA0000013
+#     xnu_entry_prefetch_abort_ttbr0 = ttbr1 = 0x8070404A   ttbcr = 1   sctlr = 0x30C5787D
+#     checks=5  failures=0  abort_entries=0  kv_dropped=0  kv_written = 0x226 -> 0x346
+#
+# `0x346 - 0x226 = 0x120 = 9 x 32`, exactly `fleh_prefabt`'s nine records and nothing else, so **no
+# stub was hit on this run at all** - and the reason 437 printed *nothing* for those keys rather than
+# zeros is that the handler writes them only when it runs.
+#
+# `0xE52DE004` is the ARM encoding of `push {lr}`, and `IFAR` and `LR_abt` are independent registers
+# that agree on it, so the processor really was fetching from that address. It appears in the image
+# as a code word in exactly 43 places - a search for the little-endian word, not a reading: 42 are
+# the `push {lr}` of the 42 stub bodies (laid out in `xnu_arm_entry_undef.txt`'s order, 0x18 bytes
+# apart, which is a second and independent measurement of the count) and the 43rd is the first
+# instruction of `inv_shift_rows`. Every stub is
+#
+#     movw r0,#name  push {lr}  mov r1,lr  movt r0,#name  pop {lr}  b entry_stub_hit
+#
+# **and that is the whole stop.** `bsd_init.c:861` is `bsd_autoconf();`, inside `bsd_init` itself, and
+# `bsd_autoconf` is `for (pi = pseudo_inits; pi->ps_func; pi++) (*pi->ps_func)(pi->ps_count);` over
+# `struct pseudo_init { int ps_count; int (*ps_func)(int); }` - which `bsd/dev/busvar.h:46` declares
+# **`extern struct pseudo_init pseudo_inits[]`**. The linked loop is `movw/movt r4,#0x80444e3c;
+# ldr r1,[r4,#4]; beq exit; ldr r0,[r4]; blx r1; ldr r1,[r4,#12]; add r4,#8`, and at `0x80444e3c` -
+# `pseudo_inits`, entry **28** of the alphabetical undefined list - the two words are `0xE3020928`
+# (`movw r0, #0x2928`, read as `ps_count`) and **`0xE52DE004`** (`push {lr}`, read as `ps_func`).
+#
+# **`pseudo_inits` is supplied as a *function* stub where the header says the symbol is an *array of
+# structs*.** The `0` that terminates the walk *is* the array's first `ps_func`, and this image put
+# its own prologue there - so `pi->ps_func` is non-NULL, the `blx r1` at `bsd_autoconf+0x28` jumps to
+# it, and the fault follows. `tools/xnu_entry_callwalk.py --root bsd_autoconf` says "reached no stub on
+# the straight-line path ... indirect calls the walk could not follow: bsd_autoconf+0x28: blx r1" -
+# **the walk's blindness and the device's fault are the same instruction.**
+#
+# **A third face of this instrument's symptom, and the first of its kind measured on hardware: the
+# stop is not a missing symbol, not an invented zero and not a boot-arg string - it is a stand-in of
+# the wrong *kind*.** The undefined list gives names and never kinds, so nothing host-side could have
+# said the symbol was declared an array; the `nm` view (`T pseudo_inits`) is wrong only relative to
+# `busvar.h:46`. The step that follows supplies it as the array, generated from the device table the
+# way `mkioconf.c:79-100` generates it (one `{count, func}` per `PSEUDO_DEVICE` with a `d_init`,
+# terminated by `{0,0}`), and the check that must stop the build is a kind check.
+# ------------------------------------------------------------------------------------------------
+
+# And the per-component slices, which the loop puts ahead of the flat header. Refused rather than
+# fallen back on: the loop *does* fall back when a component has no slice, and for the one file in
+# the manifest whose first path segment is not a component directory that is right. For the ones
+# that are, a missing slice would silently hand the file the whole kernel's option set - which is
+# the defect of experiment-438, whose effect was a boot that stopped on a symbol no shipping
+# configuration can define. A fallback that reproduces the bug it was written to fix has to be a
+# refusal, and this is the one place that can tell the two cases apart.
+#
+# The predicate is "declares options", read from the same `conf/files` the generator reads, rather
+# than "is in COMPONENT_LIST" - which the first version of this check used and it fired on `san`,
+# the one component with a `conf/files` and no `OPTIONS/` line. The measurement says the two agree
+# about san and agree for a reason: its `conf/Makefile.template` is also the only one of the eight
+# with no `-include meta_features.h`, so Apple's build gives san no option view either. A component
+# that sees nothing has no slice to be missing from.
+for _c in "${COMPONENT_LIST[@]}"; do
+    grep -q '^OPTIONS/' "$XNU/$_c/conf/files" 2>/dev/null || continue
+    [[ -f $OPTION_HEADERS/$_c/meta_features.h ]] && continue
+    echo "no per-component option headers for $CONFIG at $OPTION_HEADERS/$_c/meta_features.h - run:" >&2
+    echo "  XNU_KERNEL_CONFIG=$CONFIG ./tools/gen_option_headers.py" >&2
+    exit 2
+done
 # Required for the same reason the option headers are, and it is worth spelling out why this check
 # is not a formality: **a header that is missing from the include path is not an error here, it is
 # the host's header**. `bsd/dev/arm/conf.c:111`'s `#include <pty.h>` with no `pty.h` anywhere on the
@@ -339,6 +564,20 @@ DEVICE_HEADERS=${XNU_DEVICE_HEADERS_OUT:-$REPO_ROOT/out/xnu_device}/$CONFIG
 # this project that a broad include path has been the bug rather than the fix.
 INCLUDES=(
     -I"$GENERATED/bsd" -I"$GENERATED"
+    # The component's OWN option headers, ahead of the flat ones, so that `<meta_features.h>`
+    # resolves to this component's slice of them. That is the whole of experiment-438: `libkern`'s
+    # `conf/files` declares `gprof`, and a flat `meta_features.h` handed `#define GPROF 0` to a BSD
+    # translation unit, where `#ifdef GPROF` at `bsd/kern/bsd_init.c:852` is *defined* - so the boot
+    # called `kmstartup()`, which nothing in this image could define. Apple's build separates the two
+    # because each component compiles from its own object directory (`MakeInc.def:466`,
+    # `INCFLAGS_LOCAL = -I.`), which is what `tools/gen_option_headers.py` now reproduces.
+    #
+    # Per-file, like `COMP_FIRST_PLACEHOLDER` below, and for the same reason: which slice applies is
+    # a property of the file being compiled. The four other readers of this list (the EABI runtime,
+    # firehose, the platform block) resolve it to nothing and keep the flat header, which is the
+    # behaviour they were measured with - they are this project's own files and belong to no
+    # component.
+    OPTION_FIRST_PLACEHOLDER
     -I"$OPTION_HEADERS"
     -I"$DEVICE_HEADERS"
     -I"$MIG_HEADERS"
@@ -646,6 +885,16 @@ while read -r src; do
     for _inc in "${INCLUDES[@]}"; do
         if [[ $_inc == COMP_FIRST_PLACEHOLDER ]]; then
             FILE_INCLUDES+=("${COMP_ROOTS[@]}")
+        elif [[ $_inc == OPTION_FIRST_PLACEHOLDER ]]; then
+            # This component's slice of the option headers, or the flat set when this file's first
+            # path segment is not a component directory. The fallback is not a nicety: a manifest
+            # entry outside the eight component roots would otherwise get *no* option macro at all,
+            # and `#define X 0` and "undefined" read the same under `#if` but not under `#ifdef`.
+            if [[ -d $OPTION_HEADERS/$SRC_COMPONENT ]]; then
+                FILE_INCLUDES+=(-I"$OPTION_HEADERS/$SRC_COMPONENT")
+            else
+                FILE_INCLUDES+=(-I"$OPTION_HEADERS")
+            fi
         else
             FILE_INCLUDES+=("$_inc")
         fi
@@ -700,6 +949,8 @@ for _inc in "${INCLUDES[@]}"; do
             [[ $_c == osfmk ]] && continue
             RT_INCLUDES+=(-I"$XNU/$_c")
         done
+    elif [[ $_inc == OPTION_FIRST_PLACEHOLDER ]]; then
+        : # the flat option headers, which the next entry in the list already gives it (experiment-438)
     else
         RT_INCLUDES+=("$_inc")
     fi
@@ -791,6 +1042,8 @@ PL_INCLUDES=()
 for _inc in "${INCLUDES[@]}"; do
     if [[ $_inc == COMP_FIRST_PLACEHOLDER ]]; then
         PL_INCLUDES+=("${PL_ROOTS[@]}")
+    elif [[ $_inc == OPTION_FIRST_PLACEHOLDER ]]; then
+        : # the flat option headers, which the next entry in the list already gives it (experiment-438)
     else
         PL_INCLUDES+=("$_inc")
     fi
@@ -861,6 +1114,8 @@ PL_BSD_INCLUDES=()
 for _inc in "${INCLUDES[@]}"; do
     if [[ $_inc == COMP_FIRST_PLACEHOLDER ]]; then
         PL_BSD_INCLUDES+=("${PL_BSD_ROOTS[@]}")
+    elif [[ $_inc == OPTION_FIRST_PLACEHOLDER ]]; then
+        : # the flat option headers, which the next entry in the list already gives it (experiment-438)
     else
         PL_BSD_INCLUDES+=("$_inc")
     fi

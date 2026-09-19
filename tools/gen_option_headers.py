@@ -91,6 +91,34 @@ CONFIG = os.environ.get("XNU_KERNEL_CONFIG", "RELEASE")
 OFF_UNDEF_DEFAULT = "CONFIG_MACF"
 OFF_UNDEF = [m for m in os.environ.get("XNU_OPTION_OFF_UNDEF", OFF_UNDEF_DEFAULT).split(",") if m]
 
+# The options that every component sees, because a component that does not declare one reads it.
+#
+# Membership alone is not enough and this is the measurement that says so. Two option macros are read
+# by a component other than the one that declares them:
+#
+#   GPROF      declared by libkern, read by bsd/kern/{bsd_init,kern_clock,subr_prof,subr_xxx}.c and
+#              bsd/sys/gmon.h. Every one of those reads is *dead when it is off* - the blocks it
+#              guards are the profiler, `kmstartup` is unreferenced once `bsd_init`'s call goes, and
+#              `nm` over the 680-object pool finds no reference to `mcount`, `_gmonparam` or
+#              `cfreemem`. So this one is NOT shared: bsd simply does not see it, which is also the
+#              only reading under which Apple's own `bsd/kern/subr_prof.c` compiles.
+#
+#   CONFIG_MACF declared by bsd and security, read by osfmk - `osfmk/kern/task.h:241` guards a
+#              `struct task` field and a parameter with `#ifdef CONFIG_MACF` while
+#              `osfmk/kern/task.c` guards the same parameter with `#if CONFIG_MACF`. Sharing is the
+#              *safe* answer and it is worth saying why rather than waving at compatibility: with the
+#              macro invisible to osfmk, `struct task`'s layout would differ between osfmk
+#              translation units and the bsd/security ones that allocate and read it, which is an ABI
+#              mismatch the compiler cannot see. Keeping one value across components is what this
+#              build has always done and what the measurement supports; narrowing it would be a
+#              change to `struct task` disguised as an option-header change.
+#
+# So the rule is: a read of an option a component does not declare must be either *shared* here with
+# a reason, or *inert* and listed in tools/check_option_headers.py with a reason. Anything else stops
+# the build. See experiment-438.
+SHARED_DEFAULT = "config_macf"
+SHARED = [m for m in os.environ.get("XNU_OPTION_SHARED", SHARED_DEFAULT).split(",") if m]
+
 
 OFF_UNDEF_NOTE = """\
 /*
@@ -148,6 +176,65 @@ def scan_options():
     return found
 
 
+def scan_options_by_component():
+    """The same lines, kept per component: `{component: [(header, macro), ...]}` in file order.
+
+    This is the half `scan_options()` above cannot answer, and the comment in it says why it thought
+    the answer did not matter: the *value* of a macro is a property of the configuration, and the
+    *membership* - which files see it at all - is a property of the component. Apple's build makes
+    that explicit in two places: `headers()` (mkheaders.c:71-79) walks **the file table it was
+    given**, and each component runs the config tool over its own `conf/files` from its own object
+    directory (`makedefs/MakeInc.dir`), which is why `MakeInc.def:466` can say `INCFLAGS_LOCAL = -I.`
+    and have that find *this component's* `meta_features.h`.
+
+    Getting this wrong is not cosmetic. `libkern/conf/files:5` is `OPTIONS/gprof optional gprof`, so
+    a flat `meta_features.h` defines `GPROF 0` for every translation unit - and
+    `bsd/kern/bsd_init.c:852` is `#ifdef GPROF`, where `#define GPROF 0` is *defined*. The call it
+    guards is `kmstartup()`, whose only definer (`bsd/kern/subr_prof.c`, `standard` in
+    `bsd/conf/files:430`) has its whole body inside the same `#ifdef` and does not compile. See
+    experiment-438.
+    """
+    by_component = {}
+    for component in COMPONENTS:
+        path = os.path.join(XNU, component, "conf", "files")
+        if not os.path.isfile(path):
+            continue
+        rows = []
+        for line in open(path, encoding="utf-8", errors="replace"):
+            m = OPTION_RE.match(line.strip())
+            if not m:
+                continue
+            words = m.group(3).split()
+            if words and words[0] == "not":
+                words = words[1:]
+            if not words:
+                continue
+            rows.append((words[0] + ".h", words[0].upper()))
+        if rows:
+            by_component[component] = rows
+    return by_component
+
+
+PER_COMPONENT_NOTE = """\
+/*
+ * This component's slice of the option headers, which is what Apple's build gives each component:
+ * `mkheaders.c` writes the OPTIONS headers into the object directory of the `conf/files` that
+ * declared them, and `MakeInc.def:466` puts that directory first (`INCFLAGS_LOCAL = -I.`). A
+ * component therefore sees the options *its* file list declares and no others, which is the whole
+ * reason `bsd/kern/bsd_init.c`'s `#ifdef GPROF` is false in Apple's kernel even though
+ * `libkern/conf/files` declares `gprof`.
+ *
+ * The flat `meta_features.h` one directory up still exists and is still what this project's own
+ * out-of-manifest translation units (the platform expert, the pthread and crypto tables, the EABI
+ * runtime, firehose) are compiled with - they belong to no component, and are compiled with the
+ * whole option set as before.
+ *
+ * Generated by tools/gen_option_headers.py; the check that it matches `conf/files` is
+ * tools/check_option_headers.py, which the build runs.
+ */
+"""
+
+
 def main():
     if not os.path.isdir(XNU):
         print(f"no XNU tree at {XNU}", file=sys.stderr)
@@ -189,10 +276,64 @@ def main():
                 for macro in undef:
                     f.write(f"#undef {macro}\n")
 
+    # And the same accumulate side per component, which is the one Apple's build actually force
+    # includes: `MakeInc.def:466`'s `-I.` is the component's own object directory. The membership
+    # here is the point - `scan_options_by_component()` has the reason.
+    per_component = scan_options_by_component()
+    # The shared options are the ones a component reads without declaring them; see SHARED above.
+    # A component only gets a shared header if the header exists at all, so a configuration without
+    # the option still gets `#define X 0` (and its `#undef`, if OFF_UNDEF says so) rather than an
+    # unresolvable include.
+    all_headers = {}
+    for rows in per_component.values():
+        for header, macro in rows:
+            all_headers.setdefault(macro, header)
+    # `SHARED` names options the way `conf/files` does (`optional config_macf`); a header is found by
+    # the macro the line produces. The two spellings differ only in case here, and taking that for
+    # granted is how a shared option silently becomes no shared options.
+    shared_macros = {m.upper() for m in SHARED}
+    shared_headers = [all_headers[m] for m in sorted(shared_macros) if m in all_headers]
+    for component in COMPONENTS:
+        rows = per_component.get(component)
+        if not rows:
+            continue
+        directory = os.path.join(OUT, component)
+        os.makedirs(directory, exist_ok=True)
+        own = {macro for _, macro in rows}
+        macros = own | {m for m in shared_macros if m in all_headers}
+        with open(os.path.join(directory, "meta_features.h"), "w") as f:
+            f.write(PER_COMPONENT_NOTE)
+            seen = set()
+            for header, _ in rows:
+                if header in seen:
+                    continue
+                seen.add(header)
+                f.write(f"#include <{header}>\n")
+            for header in shared_headers:
+                if header in seen:
+                    continue
+                seen.add(header)
+                f.write(f"#include <{header}>   /* shared: read by a component that does not declare it */\n")
+            if off_macros:
+                off_here = [m for m in off_macros if m in macros]
+                undef = off_here if OFF_UNDEF == ["all"] else [m for m in off_here if m in OFF_UNDEF]
+                if undef:
+                    f.write(OFF_UNDEF_NOTE)
+                    for macro in undef:
+                        f.write(f"#undef {macro}\n")
+
     print(f"{CONFIG}: {len(written)} option headers, {on} on, {len(written) - on} off"
           f" ({len(OFF_UNDEF) if OFF_UNDEF != ['all'] else 'all'} of the off ones undefined)")
     print(f"  in {OUT}")
     print(f"  {len(options)} options in the configuration")
+    print(f"  shared with every component: {', '.join(shared_headers) if shared_headers else 'none'}")
+    for component in COMPONENTS:
+        rows = per_component.get(component)
+        if rows:
+            unique = len({h for h, _ in rows})
+            extra = len([h for h in shared_headers if h not in {h2 for h2, _ in rows}])
+            print(f"  {component}: {unique} option header(s) of its own"
+                  + (f" + {extra} shared" if extra else ""))
     return 0
 
 
