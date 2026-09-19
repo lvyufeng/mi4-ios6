@@ -15510,6 +15510,19 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # stop, and it is nameable without a stack: the continuation is fixed, and it contains two stubs
     # within four instructions of the return:
     #
+    # **Correction, measured in 382.** The enumeration above is not `ipc_port_dealloc_special`'s caller
+    # list. The linked image has **fifteen call sites in eleven functions** - `iv_dealloc + 0x9c`,
+    # `convert_voucher_to_port + 0x68`, `ivac_dealloc + 0xb4`,
+    # `convert_voucher_attr_control_to_port + 0x80`, `semaphore_dereference + 0x44`,
+    # `ipc_task_terminate + 0x284/+0x290/+0x2a4`, `ipc_task_reset + 0x29c`,
+    # `ipc_thread_terminate + 0x18c/+0x1b8`, `ipc_thread_reset + 0x70/+0x1d8`,
+    # `iokit_destroy_object_port + 0x40` and `work_interval_port_notify + 0xf4` - taken from
+    # `bl 800d9638` over the disassembly. And the run named the caller: 382's checkpoint reported
+    # `xnu_entry_stub_caller=0x800c9a0c` = **`ipc_thread_terminate + 0x18c`**. So the frame above the
+    # stop is a *thread* teardown, the elimination was made from one file's callers rather than from
+    # the link's, and the continuation below is no longer the only candidate - only the one the walk
+    # would run if it were in `ipc_task_terminate`.
+    #
     #     task_deallocate + 0x118  bl ipc_task_terminate
     #     task_deallocate + 0x120  bl iokit_task_terminate     (0x8013e964, real, no stub in its body)
     #     task_deallocate + 0x124  ldr r0, [r4, #52]           ; task->affinity_space
