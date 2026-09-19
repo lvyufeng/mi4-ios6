@@ -1676,6 +1676,44 @@ entry_panic_arg_word(uintptr_t args, uintptr_t p, uint32_t n)
     return 1;
 }
 
+/*
+ * One word at an address the *kernel* uses, or `0` and no read.
+ *
+ * The bound is `__entry_text_start`, which is the base `entry.ld` links this image at and the same
+ * number `xnu_entry_jump.c` hands `_start` as both `physBase` and `virtBase`. So "at or above the
+ * base the kernel was linked at" is derived from the linker rather than written down, and it is the
+ * weakest statement available: every address read below comes from `boot_args->deviceTreeP` or from
+ * `DTLookupEntry`'s own root, and neither can be under it.
+ *
+ * The residual risk is a pointer above that base which is unmapped, and it is accepted for the same
+ * reason the panic-argument reads accept it: everything above this point is already in `g_kv_buf`,
+ * `entry_epilogue` writes the whole buffer out, and a nested fault still runs that epilogue - so a
+ * bad address costs the rest of the keys and not the report.
+ */
+static int
+entry_kernel_ptr(uintptr_t p)
+{
+    return ((p & 0x3u) == 0u) && (p >= (uintptr_t)__entry_text_start);
+}
+
+static uint32_t
+entry_kernel_word(uintptr_t p)
+{
+    return entry_kernel_ptr(p) ? entry_word_at(p) : 0u;
+}
+
+/*
+ * XNU's own accessor for the root of the tree it is walking.
+ *
+ * `DTRootNode` is `static` in `pexpert/gen/device_tree.c`, so it cannot be named from here, and an
+ * `nm` literal for its address is exactly the kind of second definition of one value this file has
+ * spent three experiments removing. `DTLookupEntry(NULL, "/", &root)` reads it without either: with
+ * `searchPoint == NULL` the function takes `DTRootNode` (`:226-229`) and the path `"/"` returns it on
+ * the second statement (`*cp` is 0 after the separator, `:230-235`). One call, no walk, no
+ * allocation, no kalloc.
+ */
+extern int DTLookupEntry(const void *searchPoint, const char *pathName, void **foundEntry);
+
 void fleh_undef(void)
 {
     uintptr_t frame;
@@ -1684,6 +1722,7 @@ void fleh_undef(void)
     uint32_t ap, element, zone_name;
     uint32_t i;
     int args_ok;
+    uint32_t root;
 
     __asm__ volatile ("mov %0, sp" : "=r"(frame));
 
@@ -1847,6 +1886,69 @@ void fleh_undef(void)
     if (entry_image_ptr((uintptr_t)zone_name)) {
         entry_kv("xnu_entry_zone_name_w0", entry_word_at((uintptr_t)zone_name));
         entry_kv("xnu_entry_zone_name_w1", entry_word_at((uintptr_t)zone_name + 4u));
+    }
+
+    /*
+     * ------------------------------------------------------------------ what the walk was handed
+     *
+     * 441 measured the panic's two operands and they came back `prop = 0x8090cae0`,
+     * `length = 0xff000000` — a pointer 0x5788 bytes past the end of a 0x7358-byte tree, into the
+     * part of the buffer `xnu_entry_copy_device_tree` never wrote. That says the walk left the tree.
+     * It does not say **whether it left a correct tree, or started outside one**, because both leave
+     * the same pointer at the end: one is a walk that drifted inside a node, the other is a walk
+     * handed a root that is not the tree. 440's doc chose between them by *reachability* — it named
+     * `DTIterateProperties` because that function has exactly one caller in the image — and `prop`
+     * does not settle it either, because `next_prop`'s four inlined call sites all hand it the same
+     * kind of pointer.
+     *
+     * **The one number that separates them is what `DTInit` was given.**
+     */
+    root = 0u;
+    (void)DTLookupEntry((const void *)0, "/", (void **)&root);
+    entry_kv("xnu_entry_dt_root", root);
+    entry_kv("xnu_entry_dt_root_nprops", entry_kernel_word((uintptr_t)root));
+    entry_kv("xnu_entry_dt_root_nchildren", entry_kernel_word((uintptr_t)root + 4u));
+    /*
+     * A root of 0x80900000 whose own two words read 4 and 0x15 is the blob's root: the same two
+     * numbers `tools/xnu_dt_walk.py --verbose` prints for offset 0, and the same two the payload
+     * logged as `apple_dt_root_props` / `apple_dt_root_children`. Anything else and the walk was
+     * handed a different tree, which is the whole answer.
+     *
+     * The four words of the root's first property header are the check on top of the counts, because
+     * counts can coincide: the blob's first property name is a C string this project wrote, so these
+     * sixteen bytes are a byte-for-byte comparison against the host dump's own first header.
+     */
+    entry_kv("xnu_entry_dt_first_prop_w0", entry_kernel_word((uintptr_t)root + 8u));
+    entry_kv("xnu_entry_dt_first_prop_w1", entry_kernel_word((uintptr_t)root + 12u));
+    entry_kv("xnu_entry_dt_first_prop_w2", entry_kernel_word((uintptr_t)root + 16u));
+    entry_kv("xnu_entry_dt_first_prop_w3", entry_kernel_word((uintptr_t)root + 20u));
+
+    /*
+     * And the 36 bytes at `prop` itself — read **because they are known mapped**, not because a bound
+     * allows it. `next_prop` read `prop->length` at `prop + 32` before it panicked, so
+     * `prop .. prop + 35` has just been read by the kernel; the thirty-two below are a subset.
+     *
+     * A printable name followed by a small length is a property header that something walked to by
+     * mistake - which is the drift case, and the name says which property. Anything else is the
+     * arithmetic garbage of a pointer that has been adding lengths to itself for 0x5788 bytes, and
+     * then the drift started earlier than this address and the root above says where.
+     *
+     * `entry_kernel_ptr` is still the gate, for the one case the argument above does not cover: an
+     * `element` of zero, which is what a refused argument read leaves, and which would make the first
+     * of these a read of address 0. The refusal is not silent - `xnu_entry_panic_arg0` is logged
+     * above and is the same number.
+     */
+    if (entry_kernel_ptr((uintptr_t)element)) {
+        static const char *const pw[8] = {
+            "xnu_entry_panic_prop_w0", "xnu_entry_panic_prop_w1",
+            "xnu_entry_panic_prop_w2", "xnu_entry_panic_prop_w3",
+            "xnu_entry_panic_prop_w4", "xnu_entry_panic_prop_w5",
+            "xnu_entry_panic_prop_w6", "xnu_entry_panic_prop_w7",
+        };
+
+        for (i = 0u; i < 8u; i++) {
+            entry_kv(pw[i], entry_word_at((uintptr_t)element + (i * 4u)));
+        }
     }
 
     entry_epilogue("exception: undefined instruction");

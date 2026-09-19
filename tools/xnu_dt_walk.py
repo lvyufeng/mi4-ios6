@@ -6,6 +6,8 @@ whose `length` cannot be a length.
     tools/xnu_dt_walk.py                       # walks out/apple_dt_host/apple_dt.bin
     tools/xnu_dt_walk.py --blob P              # a different blob
     tools/xnu_dt_walk.py --verbose             # per-node table
+    tools/xnu_dt_walk.py --probe 0x8090cae0    # what XNU sees if `prop` points here
+    tools/xnu_dt_walk.py --probe 0x8090cae0 --landings   # and is it reachable at all
 
 Why this exists. Experiment 440's hardware run ended in a panic, and the message out of the trap's
 `r9` resolved it to exactly one source line:
@@ -283,6 +285,76 @@ def probe(blob, nodes, off, verbose):
     return 1 if (not printable or total > n) else 0
 
 
+def landings(blob, nodes, probe_off=None):
+    """Where `next_prop` can put the pointer, if the walk jumps off the list.
+
+    `next_prop` is called once per property from the second on, and the panic happens inside it, so
+    the address the device reports is one of its *outputs* - either a landing it returned and a later
+    iteration was handed, or the value it was in the middle of computing when `os_add3_overflow`
+    fired. Both are `prop + 36 + align4(prop->length)` for some `prop` on the list. So the question
+    "could a walk over this blob reach the device's address at all" is exactly the question "is that
+    address in this set", and this prints the set.
+
+    A landing is *expected* to be a node header, a property header, or the end of the tree: a node's
+    property list is followed by its first child (a node) or by its sibling's next node, and the last
+    property of the whole tree is followed by nothing. A landing that is none of those is a property
+    whose `length` sent the walk somewhere the tree does not have a boundary - the drift, located.
+    """
+    n = len(blob)
+    node_offs = {nd.off for nd in nodes}
+    prop_offs = set()
+    for nd in nodes:
+        for poff, _name, _length, _voff in node_props(blob, nd):
+            prop_offs.add(poff)
+
+    sites = []
+    for nd in nodes:
+        recs = node_props(blob, nd)
+        for i in range(1, len(recs)):
+            poff, name, length, _voff = recs[i]
+            landing = poff + PROP_HDR + align4(length)
+            if landing in node_offs:
+                kind = "node"
+            elif landing in prop_offs:
+                kind = "property"
+            elif landing == n:
+                kind = "end"
+            elif landing > n:
+                kind = "PAST THE END"
+            else:
+                kind = "NEITHER"
+            sites.append((nd.off, i, name, poff, length, landing, kind))
+
+    distinct = sorted({s[5] for s in sites})
+    bad = [s for s in sites if s[6] not in ("node", "property", "end")]
+    print()
+    print(f"next_prop landings: {len(sites)} over {len(nodes)} nodes "
+          f"({sum(nd.nprops for nd in nodes)} properties; the first property of each node never "
+          f"calls next_prop)")
+    print(f"  distinct landing addresses: {len(distinct)}")
+    print(f"  landings that are not a node header, a property header, or the tree end: {len(bad)}")
+    for s in bad:
+        print(f"    0x{s[5]:06x}  from 0x{s[3]:06x} ('{s[2]}' of node 0x{s[0]:06x}) "
+              f"length 0x{s[4]:x} - {s[6]}")
+    print(f"  the highest landing: 0x{distinct[-1]:x}; the tree ends at 0x{n:x}")
+
+    if probe_off is not None:
+        hits = [s for s in sites if s[5] == probe_off]
+        print()
+        if hits:
+            print(f"probe 0x{probe_off:x} IS a landing:")
+            for s in hits:
+                print(f"  from property {s[1]} ('{s[2]}') of node 0x{s[0]:06x} at 0x{s[3]:06x}, "
+                      f"length 0x{s[4]:x} - {s[6]}")
+        else:
+            print(f"probe 0x{probe_off:x} is NOT any next_prop landing over this blob - no walk "
+                  f"that starts at the root of these bytes and follows next_prop arrives there, "
+                  f"so the walk that died was working on a different set of bytes or was handed a "
+                  f"different pointer")
+        return 0 if hits else 1
+    return 0 if not bad else 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--blob", default=DEFAULT_BLOB)
@@ -292,6 +364,9 @@ def main():
                          "explain; repeatable")
     ap.add_argument("--probe-offset", action="store_true",
                     help="treat --probe values as offsets into the blob, not device addresses")
+    ap.add_argument("--landings", action="store_true",
+                    help="print every address next_prop can land on, and whether any is not a "
+                         "node/property boundary")
     args = ap.parse_args()
 
     if not os.path.isfile(args.blob):
@@ -370,8 +445,10 @@ def main():
     # The probes are a different question from the walk, so they run whatever the walk said: a tree
     # that walks clean and a `prop` the device reported are two facts, and the interesting case is
     # exactly the one where they disagree.
+    probe_offs = []
     if args.probe:
         by_offset = args.probe_offset
+        pa = None
         if not by_offset:
             pa = tree_pa(REPO_ROOT)
             if pa is None:
@@ -383,8 +460,7 @@ def main():
                   f"(STAGE90_XNU_ENTRY_BASE + STAGE90_XNU_ENTRY_DT_OFFSET, out/stage90/xnu_arm_entry.h)")
         for v in args.probe:
             off = int(v, 0)
-            if not by_offset:
-                pa = tree_pa(REPO_ROOT)
+            if pa is not None:
                 if off < pa:
                     print()
                     print(f"probe 0x{off:x} is below the tree's base 0x{pa:x} - it is not inside "
@@ -392,7 +468,13 @@ def main():
                     status = 1
                     continue
                 off = off - pa
-            status |= probe(blob, nodes, off, args.verbose)
+            probe_offs.append(off)
+
+    if args.landings:
+        status |= landings(blob, nodes, probe_offs[0] if probe_offs else None)
+
+    for off in probe_offs:
+        status |= probe(blob, nodes, off, args.verbose)
 
     return status
 
