@@ -102,7 +102,7 @@ linked, and every address downstream of `.data` moves with it:
 | `.text` | 0x11F4C0 | **0x1210A0** | +0x1BE0 |
 | `.data` | 0x80120000 | **0x80124000** | +0x4000 alignment, +0x78 object |
 | `.sysctl_set` | 0xDC | 0xDC | 0 |
-| image | 0x138D84 | **0x13CD3C** | +0x3FB8 |
+| image | 0x138D84 | **0x13CDFC** | +0x4078 |
 | `__bss_start` | 0x80138DC0 | **0x8013CE00** | +0x4040 |
 | `.bss` size | 0x36F58 | **0x36F58** | **0** |
 | `__bss_end` | 0x8016FD18 | **0x80173D58** | +0x4040 |
@@ -196,7 +196,7 @@ straight line than 313's, which is entirely explained by the image growing.
   *acquired*; the only one it called is `kpc_common_init`. `kpc_get_config`, `kpc_set_running` and the
   rest are linked and unreached, exactly as 313's PMU code is.
 * **Whether the `.data` step costs anything.** The 0x4000 is alignment, not content: the image grew
-  0x3FB8 and the headroom lost 0x4040, and the difference is address arithmetic, not bytes.
+  0x4078 and the headroom lost 0x4040, and the difference is address arithmetic, not bytes.
 * **That `kpc_actionid`'s initial value is right.** It is 24 bytes of zeroed `.bss` in both the
   stand-in and the real definition; the storage moved from one to the other unchanged.
 

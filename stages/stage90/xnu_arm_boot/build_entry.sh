@@ -4163,7 +4163,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # | `.text` | 0x11F4C0 | **0x1210A0** | +0x1BE0 |
     # | `.data` | 0x80120000 | **0x80124000** | +0x4000 for the alignment, +0x78 for the object |
     # | `.sysctl_set` | 0xDC | 0xDC | 0 |
-    # | image | 0x138D84 | **0x13CD3C** | +0x3FB8 |
+    # | image | 0x138D84 | **0x13CDFC** | +0x4078 |
     # | `__bss_start` | 0x80138DC0 | **0x8013CE00** | +0x4040 |
     # | `.bss` size | 0x36F58 | **0x36F58** | **0** |
     # | `__bss_end` | 0x8016FD18 | **0x80173D58** | +0x4040 |
@@ -4243,6 +4243,118 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # call, and (c) `ktrace_init`'s own `assert` firing, which would be a panic rather than a stub and
     # which the log would distinguish.
     OSFMK_KERN_KPC_COMMON_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KPC_COMMON_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kpc_common.o}
+    # 315: `kern_ktrace.c` - the prediction that named the key exactly, and the first step whose
+    #      caller key is the *bootstrap thread's own* `bl` because the callee is a tail branch
+    #
+    # **The object that defines `ktrace_init`, 314's stop, and the first step in a while whose stop is
+    # not the call the thread makes but the call two trampolines further on.** `bsd_kern_kern_ktrace.o`
+    # (`bsd/kern/kern_ktrace.c`, manifest:40) is `.text` **2564** / `.bss` 82 / `.rodata.str1.1` 250
+    # (linked **215**, 35 bytes relaxed as duplicates) / `.data` 288 / `__DATA,__sysctl_set` **24**, with
+    # 47 defined symbols and 25 references.
+    #
+    # Predicted and measured, exactly:
+    #
+    #   | | base (314) | measured (315) | delta |
+    #   |---|---|---|---|
+    #   | undefined | 726 | **719** | -7 (= -11 resolved + 4 added) |
+    #   | function stubs | 637 | **630** | -7 |
+    #   | storage stubs | 89 | **89** | 0 |
+    #
+    # (`undefined = -resolved + added` is `-11 + 4 = -7`.) **Resolved 11, all functions, and added 4** -
+    # both halves exact, for the second step running. The eleven are `ktrace_init` (this stop) plus
+    # `ktrace_assert_lock_held`, `ktrace_configure`, `ktrace_end_single_threaded`, `ktrace_get_owning_pid`,
+    # `ktrace_kernel_configure`, `ktrace_lock`, `ktrace_read_check`, `ktrace_reset`,
+    # `ktrace_start_single_threaded`, `ktrace_unlock`; the four are `kperf_reset`,
+    # `kperf_sampling_disable`, `ktrace_background_available_notify_user` and `sysctl_handle_string`, and
+    # all four are functions because none of them has a defining object in this pool (the 304 rule for a
+    # name with no size to take).
+    #
+    # **`.text` closes exactly again**: 0x1210A0 -> **0x121A60** is +0x9C0, and the terms are
+    #
+    #   this object's .text                                  +0xA04   (2564)
+    #   this object's .rodata.str1.1, linked                 +0x0D7   (0xFA in the object)
+    #   the stub object's .text, net                         -0x0A8   (11 bodies retired, 4 created)
+    #   the stub object's .rodata.str1.4, net                -0x080   (11 names retired = 0xE4 padded,
+    #                                                                 4 created = 0x64)
+    #   .text-region alignment fill                          +0x00D
+    #                                                       -------
+    #                                                        +0x9C0
+    #
+    # The map's own numbers agree at every step: `.text` non-fill 0x1203AB -> 0x120D5E (+0x9B3, which is
+    # the first four terms) and `.text` fill 0xD0D -> 0xD1A (+0xD). Note the fill sign - the *whole map's*
+    # fill total went **down** 0x5 (0x88C8 -> 0x88C3) while `.text`'s went up 0xD, because `.bss`'s fill
+    # went down 0x12. Reading the total instead of the region would have got the term wrong by 0x18.
+    #
+    # `.data` and `.sysctl_set` grow by exactly their sections and nothing steps: `.data` 0x18D20 ->
+    # **0x18E40** (+0x120 = 288) at the same start 0x80124000, `.sysctl_set` 0x8013CE40 size 0xDC ->
+    # **0xF4** (+0x18 = 24). `.bss` is the alignment rule again, and this time the input is *split across
+    # the gap*: the object's 0x52 lands at the offset where 314's 0x0-sized sections and 0x20 of fill were
+    # (0x35820 from the section start), its 0x52 overflows that by 0x32, and the 64-byte-aligned stand-in
+    # block moves +0x40 to the next boundary:
+    #
+    #   .bss   0x80172760  0x52  bsd_kern_kern_ktrace.o      <- this step's 82 bytes
+    #   .bss   0x801727b2  0x0   rtabi.o / macho.o
+    #   *fill* 0x801727b2  0xe
+    #   .bss   0x801727c0  0x1704 xnu_arm_entry_realstubs.o  <- 0x35880 from the section start,
+    #                                                              against 0x35840 in 314's map
+    #
+    # so the section grows by 0x52 - 0x12 = **0x40** (non-fill +0x52, fill -0x12), and the 0xE fill is
+    # exactly `align64(0x801727b2) - 0x801727b2`. No storage stand-in is retired - all eleven resolutions
+    # are functions - so unlike 314 nothing cancels and the +0x40 is real growth.
+    #
+    # | | base (314) | measured (315) | delta |
+    # |---|---|---|---|
+    # | `.text` | 0x1210A0 | **0x121A60** | +0x9C0 |
+    # | `.data` | 0x80124000 (0x18D20) | 0x80124000 (**0x18E40**) | +0x120 |
+    # | `.sysctl_set` | 0x8013CD20 (0xDC) | 0x8013CE40 (**0xF4**) | +0x18 |
+    # | `.bss` | 0x8013CE00 (0x36F58) | **0x8013CF40** (**0x36F98**) | +0x140 / +0x40 |
+    # | image | 0x13CDFC | **0x13CF34** | +0x138 |
+    # | `__bss_end` | 0x80173D58 | **0x80173ED8** | +0x180 |
+    # | headroom | 1622696 | **1622312** | -0x180 |
+    #
+    # **The run: `stub_hit=sysctl_early_init` at `xnu_entry_stub_caller=0x8000e6a4` =
+    # `kernel_bootstrap_thread + 0x124`** - the predicted name *and* the predicted key, including the part
+    # of the reasoning that is easy to get wrong. `caller - 4` is 0x8000e6a0, which is `bl bsd_early_init`;
+    # `bsd_early_init` is a **one-instruction tail branch** (`b sysctl_early_init` at 0x8003a9e0), and a `b`
+    # does not set `lr`, so the address the stub reports is the bootstrap thread's own call and not a site
+    # inside `bsd_early_init`. The stop being *two* trampolines past the straight line is the same shape:
+    # `kdebug_init` at 0x8000e674 is `b kdebug_trace_start`, and `kdebug_trace_start` calls four of the
+    # eleven names this step resolves at six call sites, so the frontier was predicted to move into the
+    # ktrace code and back out again.
+    #
+    # **What the run measures is more real code than any step since 302.** `ktrace_init` ran its four lock
+    # calls (`lck_grp_attr_alloc_init`, `lck_grp_alloc_init("ktrace", ...)`, `lck_grp_attr_free`,
+    # `lck_mtx_alloc_init`) and its `assert(ktrace_mtx != NULL)` did not fire; `kdebug_init` entered
+    # `kdebug_trace_start`, whose six call sites into the ktrace code now resolve, and *returned* - so
+    # `ktrace_start_single_threaded`, `ktrace_kernel_configure`, three `ktrace_assert_lock_held` calls and
+    # `ktrace_end_single_threaded` all ran and returned as well; `prng_cpu_init` ran (no stub in its body:
+    # `kalloc_canblock`, `ml_get_timebase`, `cc_clear`, four `lck_*` calls, `thread_wakeup_prim`,
+    # `cpu_datap`); and then `bsd_early_init`'s tail branch stopped on the first name this object does not
+    # provide.
+    #
+    # **Next: `bsd/kern/kern_newsysctl.c`** (`bsd_kern_kern_newsysctl.o`, manifest:46) - the object that
+    # defines `sysctl_early_init`: `.text` **8132** (0x1FC4) / `.bss` 28 / `__DATA,__data` 96 /
+    # `.rodata.str1.1` 71 / `.data` **240** / `__DATA,__sysctl_set` **20**, with 59 defined symbols and 35
+    # references.
+    #
+    # Predicted **6 resolved** - `sysctl_early_init` (this stop), `sysctl_handle_int`, `sysctl_handle_quad`,
+    # `sysctl_handle_string` (which 315 *added* and this object resolves), `sysctl_io_number`, and
+    # **`sysctl__children` as storage** - and **6 added**, of which only four are functions:
+    # `fuulong`, `suulong`, `mac_system_check_sysctlbyname` and `proc_suser` are `T` in this pool, while
+    # **`securelevel` and `sysctl__sysctl_children` are `B`** (4 bytes each), so they arrive as storage
+    # stand-ins - the 313 split, arriving as a prediction this time. That is 726 -> **719** undefined
+    # (unchanged), 637 -> **629** function stubs and 89 -> **90** storage.
+    #
+    # `sysctl_early_init`'s body is four calls and all four are real in this image:
+    # `lck_grp_alloc_init`, `lck_rw_alloc_init`, `lck_mtx_alloc_init`, and `sysctl_register_set` - which is
+    # *defined by this object* (0x24c), so it is not a reference that becomes a stub. So the stop is
+    # predicted past it, and the next candidate on the thread's straight line is `PE_init_iokit` at
+    # 0x8000e6b0, which contains exactly one stub call: a conditional `bl StartIOKit` at 0x80004a1c, caller
+    # key **0x80004A20**. The named alternative is that a conditional branch decides otherwise -
+    # `tools/xnu_entry_callwalk.py --root PE_init_iokit` reports **no stub on its straight-line path** and
+    # lists the indirect calls it could not follow (`getval`, `panic_trap_to_debugger`, `__doprnt`, i.e. a
+    # kprintf path), so a run that stops earlier is possible and the tool says so rather than guessing.
+    BSD_KERN_KERN_KTRACE_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_KTRACE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_ktrace.o}
     # 312: `kern_kpc.c` - the first step with `.data` and `__sysctl_set`, and four resolutions that
     #       were not in the undefined list to begin with
     #
@@ -9550,6 +9662,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$BSD_KERN_KERN_KPC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_ARM_KPC_ARM_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KPC_COMMON_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_KERN_KTRACE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -9562,7 +9675,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
