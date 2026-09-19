@@ -16,7 +16,12 @@
 #     entry_macho.s and entry.ld fails loudly;
 #   - it replays the walks and the comparisons `libkern/kernel_mach_header.c` performs
 #     (`strncmp(..., 16)` on NUL-padded names, `cmdsize` chaining, `LC_SEGMENT`-only, `vmsize`
-#     summation) and prints what `arm_vm_init` will receive.
+#     summation) and prints what `arm_vm_init` will receive;
+#   - and since experiment 329 it asserts the one section XNU's *C++ runtime* finds by name:
+#     `__DATA,__mod_init_func`, whose `addr` and `size` must be the linked `.init_array` table
+#     (`entry.ld`'s `__entry_init_array` / `__entry_init_array_size`), because
+#     `OSRuntimeInitializeCPP`'s `sectionIsConstructor` matches the section by name and then calls
+#     every pointer it holds. A right name with a wrong address is the failure that check exists for.
 #
 #   - it does NOT compile XNU's code. The structure layout is Apple's `mach-o/loader.h` for 32-bit
 #     architectures, transcribed here; the values and the walk are what is being tested. XNU's
@@ -60,7 +65,8 @@ def nm(name):
 
 sym = {n: nm(n) for n in (
     "_mh_execute_header", "__entry_text_start", "__entry_text_size", "__entry_data_start",
-    "__entry_data_size", "__entry_data_filesize", "__entry_data_fileoff", "__entry_image_end")}
+    "__entry_data_size", "__entry_data_filesize", "__entry_data_fileoff", "__entry_image_end",
+    "__entry_init_array", "__entry_init_array_size")}
 
 # objcopy -O binary lays the loadable sections out from the lowest address, which is .text at
 # `__entry_text_start` - the first symbol the linker script defines, and the image's own base. It is
@@ -224,6 +230,41 @@ if ("__DATA", "__const") not in [(s[0], s[1]) for s in sects]:
     fail.append("no __DATA,__const section: arm_vm_init:427 dereferences a NULL section")
 if not any(s[1] == "__const" for s in sects):
     fail.append("no section named __const")
+
+# --------------------------------------- the section XNU's C++ runtime finds its constructors by
+#
+# `OSRuntimeInitializeCPP` walks every segment's sections and calls `sectionIsConstructor`
+# (`libkern/c++/OSRuntime.cpp:246`), which accepts `__mod_init_func` or `__constructor` *by name*, and
+# then calls each pointer the section holds (`:458-481`). Until experiment 329 this header described
+# neither, so the six `_GLOBAL__sub_I_*.cpp` initializers the image links were correct and unreachable
+# - and 328 is what that cost: `OSSymbol::withCStringNoCopy` took a data abort on `_ZL4pool`, a
+# pointer whose only writer is one of those constructors.
+#
+# The section is only useful if it is the *linked table*: `addr` is what the runtime reads the
+# function pointers from and `size` is how many it reads (`size / sizeof(structor_t)`), so both are
+# asserted against `entry.ld`'s own symbols rather than against anything written here. A record with
+# the right name and the wrong address is the failure mode this check exists for - it would look
+# correct in the header and call whatever the address happens to be.
+
+modinit = [(s[0], s[1], s[2], s[3]) for s in sects if s[1] == "__mod_init_func"]
+if not modinit:
+    fail.append("no section named __mod_init_func: OSRuntimeInitializeCPP's sectionIsConstructor "
+                "matches by name, so the linked constructors are unreachable - see experiments 318, "
+                "328 and 329")
+elif len(modinit) > 1:
+    fail.append("%d sections are named __mod_init_func; the runtime breaks after the first match "
+                "and the rest would never run" % len(modinit))
+else:
+    sect_segname, _, addr, size = modinit[0]
+    print("  __mod_init_func               -> addr=0x%08x size=%d (%d constructors), segment %s"
+          % (addr, size, size // 4, repr(sect_segname)))
+    expect("__mod_init_func addr", addr, sym["__entry_init_array"])
+    expect("__mod_init_func size", size, sym["__entry_init_array_size"])
+    if size == 0:
+        fail.append("__mod_init_func has size 0: the runtime would find the section and call nothing")
+    if sect_segname != "__DATA":
+        fail.append("__mod_init_func is in segment %s; the writable constructor table belongs in "
+                    "__DATA (it holds relocated absolute addresses)" % repr(sect_segname))
 
 if fail:
     print()

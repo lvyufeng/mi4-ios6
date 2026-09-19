@@ -53,13 +53,29 @@
  * `f(B + S, C - (B + S))` before leaving a segment out**, because there an absence multiplies
  * rather than cancels.
  *
- * `__DATA` carries one section, `__const`, and it is empty: the image's read-only data lives in
- * `.text`, so there is no `__DATA,__const` to protect. `getsectbynamefromheader` returning a real
- * section with a zero size is what keeps `arm_vm_init:441`'s `round_page` and the `if (doconstro)`
- * block from dereferencing a null pointer, and the block's own sanity check
- * (`sectSizeCONST == 0` -> `doconstro = FALSE`) is what then makes `arm_vm_prot_init` map `__DATA`
- * as a single blob. A zero-size section is the honest answer; a fabricated one would claim a
- * region of read-only data that does not exist.
+ * `__DATA` carries two sections, and neither of them is a region of read-only data. The first is
+ * `__const`, and it is **empty**: the image's read-only data lives in `.text`, so there is no
+ * `__DATA,__const` to protect. `getsectbynamefromheader` returning a real section with a zero size is
+ * what keeps `arm_vm_init:441`'s `round_page` and the `if (doconstro)` block from dereferencing a
+ * null pointer, and the block's own sanity check (`sectSizeCONST == 0` -> `doconstro = FALSE`) is what
+ * then makes `arm_vm_prot_init` map `__DATA` as a single blob. A zero-size section is the honest
+ * answer; a fabricated one would claim a region of read-only data that does not exist.
+ *
+ * The second is **`__mod_init_func`, and it is the linked `.init_array` table itself** (experiment
+ * 329). It is here because XNU's own C++ runtime looks for its constructors **by section name**:
+ * `OSRuntimeInitializeCPP` (`libkern/c++/OSRuntime.cpp:403`) walks every segment's sections and calls
+ * `sectionIsConstructor` (`:246`), which accepts `SECT_MODINITFUNC` = `__mod_init_func` or
+ * `SECT_CONSTRUCTOR` = `__constructor`, and then calls each pointer the section holds (`:458-481`,
+ * `(*constructors[i])()`, with `OSMetaClass::checkModLoad(metaHandle)` gating the loop between
+ * entries). That code runs; experiment 324 watched it execute and match nothing, because until now
+ * this header described no section by either name, and the consequence was measured in 328: the
+ * constructors were linked, correct and unreachable, so `_ZL4pool` - written only by a static
+ * constructor - was still zero when the boot reached `OSSymbol::withCStringNoCopy`, which took a data
+ * abort on it. `addr` and `size` are exactly the two fields that call reads (`constructors =
+ * (structor_t *)addr`, `num_constructors = size / sizeof(structor_t)`), and both are linker symbols
+ * from `entry.ld`, so this record claims nothing the image does not already contain. `offset`,
+ * `align`, `reloff`, `nreloc` and `flags` are read by neither that code nor anything else on the boot
+ * path, and are zero rather than invented.
  *
  * `cputype`/`cpusubtype` are 12/12, `CPU_TYPE_ARM` and `CPU_SUBTYPE_ARM_V7K`, which are the values
  * exp-189 measured `cpu_init` derive from this device's MIDR.
@@ -75,7 +91,7 @@ _mh_execute_header:
     .long 12                             /* cpusubtype = CPU_SUBTYPE_ARM_V7K */
     .long 2                              /* filetype   = MH_EXECUTE */
     .long 3                              /* ncmds */
-    .long 236                            /* sizeofcmds = 56 + (56 + 68) + 56 */
+    .long 304                            /* sizeofcmds = 56 + (56 + 2*68) + 56 */
     .long 0                              /* flags */
 
     /* LC_SEGMENT, __TEXT - the executable and read-only part, no sections of its own. */
@@ -92,9 +108,10 @@ _mh_execute_header:
     .long 0                              /* nsects */
     .long 0                              /* flags */
 
-    /* LC_SEGMENT, __DATA - the writable region, with the empty __const section. */
+    /* LC_SEGMENT, __DATA - the writable region, with the empty __const section and the constructor
+     * table. */
     .long 0x1                            /* cmd = LC_SEGMENT */
-    .long 124                            /* cmdsize = 56 + 68 */
+    .long 192                            /* cmdsize = 56 + 2*68 */
     .ascii "__DATA"
     .zero 10
     .long __entry_data_start             /* vmaddr */
@@ -103,7 +120,7 @@ _mh_execute_header:
     .long __entry_data_filesize          /* filesize: the part that is not zero-filled */
     .long 7                              /* maxprot  = rwx */
     .long 3                              /* initprot = rw- */
-    .long 1                              /* nsects */
+    .long 2                              /* nsects */
     .long 0                              /* flags */
 
     /* struct section: __const, empty and at the end of the segment. */
@@ -113,6 +130,21 @@ _mh_execute_header:
     .zero 10
     .long __entry_image_end              /* addr */
     .long 0                              /* size */
+    .long 0                              /* offset */
+    .long 0                              /* align */
+    .long 0                              /* reloff */
+    .long 0                              /* nreloc */
+    .long 0                              /* flags */
+    .long 0                              /* reserved1 */
+    .long 0                              /* reserved2 */
+
+    /* struct section: __mod_init_func, the linked .init_array table; see the header comment. */
+    .ascii "__mod_init_func"
+    .zero 1                              /* `sectname` is 16 bytes; the name is 15 */
+    .ascii "__DATA"
+    .zero 10
+    .long __entry_init_array             /* addr */
+    .long __entry_init_array_size        /* size */
     .long 0                              /* offset */
     .long 0                              /* align */
     .long 0                              /* reloff */

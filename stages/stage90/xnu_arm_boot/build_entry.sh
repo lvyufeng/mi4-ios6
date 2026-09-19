@@ -4355,6 +4355,175 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # lists the indirect calls it could not follow (`getval`, `panic_trap_to_debugger`, `__doprnt`, i.e. a
     # kprintf path), so a run that stops earlier is possible and the tool says so rather than guessing.
     BSD_KERN_KERN_KTRACE_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_KTRACE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_ktrace.o}
+    # 329: the constructor table, described to XNU under the one name its runtime looks for
+    #
+    # **The step links nothing.** 328 ended in a `data abort` because `_ZL4pool` is zero, and the pool's
+    # only writer runs from a C++ static constructor: the six `_GLOBAL__sub_I_*.cpp` functions are in the
+    # image, correct and unreachable. What is missing is not a symbol but a *description* - XNU's
+    # `OSRuntimeInitializeCPP` finds constructors by **section name** (`sectionIsConstructor`,
+    # `libkern/c++/OSRuntime.cpp:246`, accepts `__mod_init_func` or `__constructor`) inside the segments of
+    # the kernel's `_mh_execute_header`, and this image's header describes the `__DATA` segment with one
+    # section, an empty `__const` (318). So this step is `entry_macho.s`, and it is the step `entry.ld`'s
+    # own comment called "a step of its own" when 318 found the orphan table.
+    #
+    # The change: a second `struct section` in `__DATA`, named **`__mod_init_func`**, with
+    # `addr = __entry_init_array` and `size = __entry_init_array_size` - the linker's own two symbols for
+    # the table - and the three numbers around it (`sizeofcmds` 236 -> 304, `__DATA`'s `cmdsize` 124 -> 192,
+    # its `nsects` 1 -> 2). `offset`, `align`, `reloff`, `nreloc` and `flags` stay zero because the call the
+    # runtime makes reads only `addr` and `size` (`constructors = (structor_t *)section->addr`,
+    # `num_constructors = section->size / sizeof(structor_t)`), and `tools/host_entry_macho_check.sh`
+    # asserts both against those linker symbols - a right name with a wrong address would look correct in
+    # the header and call whatever the address happened to be.
+    #
+    # **Predicted: no count moves** (801 undefined / 692 function stubs / 109 storage), because nothing is
+    # linked, and **not one byte of the image moves either** - the header sits in `.rodata.macho` inside
+    # the `.text` region at 0x8013E5E0, so its 68 new bytes grow the section *in place* and 0x142A00 is
+    # still 0x1600 below the 16 KB boundary at 0x80144000. Only `.text` moves, and only by the record:
+    #
+    #   this object's .rodata.macho (xnu_arm_entry_macho.o)   +0x044   (0x108 -> 0x14C: 28 + 236 -> 28 + 304
+    #                                                                  bytes of header, at the same address)
+    #   .text-region alignment fill                           -0x004   (0xD31 / 60 fills -> 0xD2D / 59)
+    #                                                        -------
+    #                                                         +0x040   predicted for a measured +0x040
+    #
+    #   | | base (328) | predicted (329) | delta |
+    #   | `.text` | 0x1429C0 | **0x142A00** | +0x40 |
+    #   | `.data` | 0x80144000 (0x19368) | **unmoved** | 0 |
+    #   | `.sysctl_set` | 0x8015D368 (0x10C) | **unmoved** | 0 |
+    #   | `.init_array` | 0x8015D474 (0x18) | **unmoved** | 0 - and the new section's `addr` is this exact
+    #                                                                 address, which is the point of the step |
+    #   | `.bss` | 0x8015D4C0 (0x378D8) | **unmoved** | 0 |
+    #   | `__bss_end` | 0x80194D98 | **unmoved** | 0 |
+    #   | image | 1430668 (0x15D48C) | **1430668** | 0 - the span's first term is align16K(text_end) and
+    #                                                                 both 0x1429C0 and 0x142A00 round to
+    #                                                                 0x144000 (304/318/319/321's rule) |
+    #   | headroom | 1487464 | **1487464** | 0 |
+    #
+    # **Predicted stop: `__cxa_atexit`, with the caller key inside XNU's own constructor loop.** The scan
+    # reaches `__DATA`'s section list, matches `__mod_init_func`, computes six constructors from the size,
+    # and calls the first - `_GLOBAL__sub_I_OSKext.cpp` at 0x8011AEF4 - through the `blx r0` at 0x8011D74C
+    # (its `checkModLoad` gate at 0x8011D760 is real, 324). That initializer's body is three statements:
+    # `OSMetaClass::OSMetaClass("OSKext", &OSObject::gMetaClass, 0x60)` at +0x24 (real, 0x8011DEE4, and all
+    # eight of its own callees are defined - `IOMalloc`, `__bzero`, `kalloc_canblock`, `memcpy`, `kfree`,
+    # `OSAddAtomic`, `OSKextLog`, `lck_mtx_lock`), the vtable store at +0x40, then **`b __cxa_atexit` at
+    # +0x50 - a tail branch, not a `bl`**. `__cxa_atexit` is a **function stub** (0x801224D0; it is in
+    # `out/stage90/xnu_arm_entry_undef.txt` line 54, and `__dso_handle`, passed as a *value* in the same
+    # statement, is the data-less `func` stub on line 70). Because the initializer's own transfer is a
+    # tail `b`, the `lr` the stub is entered with is the one the initializer *inherited* - the return
+    # address of the scan's `blx r0`:
+    #
+    #   stub_hit=__cxa_atexit
+    #    xnu_entry_stub_caller=0x8011d750   = OSRuntimeInitializeCPP+0x184, caller-4 = 0x8011d74c: blx r0
+    #
+    # so the key would name the constructor call in XNU's own scan loop rather than the address after a
+    # `bl` in the initializer, and `caller-4` is a `blx`, not a `bl` (`host_resolve_entry_addr.sh` prints
+    # both halves and says which). The named alternatives, in order: **a stub inside one of the
+    # constructor's eight real callees**, which would stop the walk *inside* `OSMetaClass::OSMetaClass`
+    # under that name instead; and **the pool fault of 328 recurring**, which it cannot, because
+    # `OSSymbol::initialize()` is called from the *sixth* initializer and the run stops in the first.
+    #
+    # The step after this one cannot be a link either: `__cxa_atexit` is defined **nowhere in XNU**
+    # (`grep -rn __cxa_atexit external/xnu-upstream/` returns nothing, and `__dso_handle` with it), so no
+    # object can resolve that stub. A kernel has no `atexit` - which is why Apple's own kernel objects do
+    # not call it - and these objects call it because they were compiled by `arm-none-eabi-gcc` without
+    # `-fno-use-cxa-atexit`, which is the flag Apple's `-fapple-kext` implies. So 329 makes the
+    # constructors *reachable* and the following step makes them *runnable*, and the two together are what
+    # the image's C++ runtime needs.
+    #
+    # **Measured: the prediction was exact, and the chain behind two numbers is five facts long.**
+    #
+    #   MI4IOS6_STAGE90_XNU real XNU entry stub_hit=__cxa_atexit
+    #    xnu_entry_stub_caller=0x8011d750
+    #    xnu_entry_stub_caller_w0=0x31313038 ("8011")   _w1=0x30353764 ("d750")   digits=0x30
+    #
+    # `host_resolve_entry_addr.sh 0x8011d750` -> **`OSRuntimeInitializeCPP+0x184`**, whose `caller-4` is
+    # `0x8011d74c: blx r0` - an *indirect* call, which is exactly what the key should name here and why the
+    # tool prints "the `bl`, if the call was one". **The predicted symbol and the predicted key are both
+    # right**, and unlike 328's record this one is real: `digits = 0x30` puts the two words at the caller
+    # record's own first hex digit, and they spell the key's eight digits.
+    #
+    # What that one key measures, in order: `OSRuntimeInitializeCPP`'s segment loop reached `__DATA`'s
+    # section list; `sectionIsConstructor`'s `strncmp(sectname, .., 15)` **matched** (324 had watched the
+    # same two comparisons fail); the size was divided by four into six constructors; the `blx r0` at
+    # 0x8011D74C called the **first** of them, `_GLOBAL__sub_I_OSKext.cpp` (0x8011AEF4); that initializer
+    # ran `OSMetaClass::OSMetaClass("OSKext", &OSObject::gMetaClass, 0x60)` (0x8011DEE4) to completion -
+    # every one of its eight callees is a real definition - stored the vtable, and then took its **tail
+    # branch** into `__cxa_atexit`. So the frontier is now **one instruction past the first C++ static
+    # constructor this kernel has ever run**, and the stop is a stub for a name no XNU object defines.
+    #
+    #   | | base (328) | measured (329) | delta | predicted |
+    #   | `.text` | 0x1429C0 | **0x142A00** | +0x40 | +0x40 |
+    #   | `.data` | 0x80144000 (0x19368) | **0x80144000** (0x19368) | 0 | 0 |
+    #   | `.sysctl_set` | 0x8015D368 (0x10C) | **0x8015D368** (0x10C) | 0 | 0 |
+    #   | `.init_array` | 0x8015D474 (0x18) | **0x8015D474** (0x18) | 0 | 0 |
+    #   | `.bss` | 0x8015D4C0 (0x378D8) | **0x8015D4C0** (0x378D8) | 0 | 0 |
+    #   | `__bss_end` | 0x80194D98 | **0x80194D98** | 0 | 0 |
+    #   | image | 1430668 (0x15D48C) | **1430668 (0x15D48C)** | 0 | 0 - the span's first term rounds both
+    #                                                                     0x1429C0 and 0x142A00 up to
+    #                                                                     0x144000 |
+    #   | headroom | 1487464 | **1487464** | 0 | 0 |
+    #
+    # `.text`'s +0x40 closes in two terms, measured: **+0x44** the header's own bytes
+    # (`xnu_arm_entry_macho.o`'s `.rodata.macho` 0x108 -> **0x14C**, 28 + 236 -> 28 + 304, and it is placed
+    # at the *same* address 0x8013E5E0 because the growth happens in place) and **-0x04** of `.text`-region
+    # fill (0xD31 / 60 fills -> 0xD2D / 59). The counts do not move at all: **801 undefined / 692 function
+    # stubs / 109 storage**, byte-for-byte the 328 image's stub set, because this step links nothing. The
+    # header's own derived fields moved with it and the check asserts them against the linker symbols:
+    # `__TEXT.vmsize` 0x1429C0 -> **0x142A00**, `__DATA.vmaddr` 0x801429C0 -> **0x80142A00**,
+    # `__DATA.vmsize` 0x523D8 -> **0x52398** (it is `__entry_image_end - __entry_data_start`, and its start
+    # is `__entry_text_end`, so it moves *against* `.text`'s growth), and `getlastaddr()` still 0x80194D98
+    # with the PreLinkInfoDictionary range still 0x268.
+    #
+    # **And the host check earned its keep on this step before the device was touched.** The first build
+    # emitted the new section record one byte short - `sectname` is 16 bytes and the name is 15, so
+    # `.ascii "__mod_init_func"` needed one more zero than the `__const` record's `.zero 9` pattern made
+    # obvious - and every field after it decoded one byte off:
+    #
+    #   section  '_DATA'  '__mod_init_func_' addr=0x188015d4 size=0  FAIL: load command 2 is not
+    #   LC_SEGMENT (cmd=0x38000000)   FAIL: sizeofcmds: got 304, expected 248   FAIL: no section named
+    #   __mod_init_func
+    #
+    # which is what `tools/host_entry_macho_check.sh` is for (the chain `cmdsize` walk catches a one-byte
+    # shift that a header dump would not), and it is checked before the image is embedded in a payload. The
+    # fixed build prints `__mod_init_func -> addr=0x8015d474 size=24 (6 constructors), segment '__DATA'` and
+    # exits 0, and that one line is the whole step: **the section XNU looks for by name now has the
+    # address of the table XNU is supposed to run.**
+    #
+    # Preflight clean (`STAGE90_XNU_ENTRY 1`, `HARD_SKIP`, hardware watchdog ARMED, software dead-man armed
+    # at 60 s, no storage symbols in the payload), log **301624** bytes, one `stub_hit=` line, **no
+    # `exception:` line and `xnu_entry_abort_entries=0x00000000`** - the clean stop of the ordinary kind, so
+    # 328's fault does not recur: `OSSymbol::initialize()` is called from the *sixth* initializer and this
+    # run ends inside the first. `xnu_entry_failures=0x00000000`, `xnu_entry_checks=0x00000005`,
+    # `xnu_entry_image_bytes=0x0015d48c`, `xnu_entry_bss_start=0x8015d4c0`,
+    # `xnu_entry_bss_end=0x80194d98`, `xnu_entry_kv_written=0x5d` with `xnu_entry_kv_dropped=0x00`,
+    # `disarm_isenabler0 0x000c7fff -> 0x00007fff`, `disarm_cntp_ctl 0x00000005 -> 0x00000002`,
+    # `disarm_hw_watchdog_en=0x00000001`.
+    #
+    # **Safety:** non-persistent `fastboot boot` only, nothing flashed, the hardware watchdog armed across
+    # the jump and not needed - the device returned to Android on its own
+    # (`ro.build.version.release` = 10) - `persistent_write_attempted=0x00000000` x25 and
+    # `failure_mask=0x00000000` x87.
+    #
+    # **What it measures, and what it does not.** Measured: the C++ static-constructor machinery of this
+    # kernel works end to end, from the section name XNU matches to the first constructor's own body; and
+    # `__cxa_atexit` is the *only* thing between the boot and the other five initializers. Not measured:
+    # what the other five do (`_GLOBAL__sub_I_OSMetaClass.cpp`, `OSDictionary.cpp`, `OSObject.cpp`,
+    # `OSCollection.cpp`, and `OSSymbol.cpp` whose `initialize()` writes `_ZL4pool`), whether any later
+    # initializer reaches a stub of its own, and `checkModLoad`'s re-check between constructors - real
+    # since 324, but this run stops before it is called a second time.
+    #
+    # **Next: `-fno-use-cxa-atexit`, a compile flag and not a link.** No XNU object can define
+    # `__cxa_atexit` - the name is nowhere in the tree - so the step is to stop emitting the call: the C++
+    # objects are built by `arm-none-eabi-gcc` (which supports the flag; Apple's `-fapple-kext` implies it)
+    # and the flag is added to the compile of every object that carries a `_GLOBAL__sub_I_*`, which today
+    # is the six libkern C++ objects of this image. That is a **re-baselining step**: every one of the six
+    # objects' `.init_array` entries shrinks by the call sequence (load, set up, `pop {r4, lr}`, `b`), so
+    # the counts, `.text` and `.init_array` all move and the ledger's numbers for 324-329 stop being
+    # comparable until they are re-measured. The prediction after it is the one 328 wrote and could not
+    # reach: the six initializers run in order, `OSSymbol::initialize()` is the sixth, `_ZL4pool` becomes
+    # non-null, the walk returns to `postModLoad`'s fifth call, and the stop is
+    # **`_ZN8OSStringC2EPK11OSMetaClass` at the caller key `_ZN8OSSymbol17withCStringNoCopyEPKc+0x50`** -
+    # the stub 328 predicted and faulted 0x38 before.
     # 328: `libkern/c++/OSSymbol.cpp` - the object that defines the current stop, and the step whose own
     #       body reaches for a name it creates
     #
