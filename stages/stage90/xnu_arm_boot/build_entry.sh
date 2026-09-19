@@ -13494,6 +13494,88 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_IPC_IPC_KMSG_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_KMSG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_kmsg.o}
     OSFMK_IPC_IPC_OBJECT_OBJ=${STAGE90_ENTRY_OSFMK_IPC_IPC_OBJECT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_ipc_ipc_object.o}
     BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ=${STAGE90_ENTRY_BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_miscfs_specfs_spec_vnops.o}
+    BSD_KERN_KERN_AUTHORIZATION_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_AUTHORIZATION_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_authorization.o}
+    BSD_KERN_KERN_CREDENTIAL_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_CREDENTIAL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_credential.o}
+    # =============================================================================================
+    # **408: `bsd/kern/kern_credential.c` - the object that empties `kauth_init`'s frame, and the
+    # frontier steps one call further into `bsd_init`.**
+    #
+    # 407's stop was `kauth_cred_init`, called from `kauth_init` at key `0x80188A38` - a stub 407
+    # itself created. The object is the pool's only definer of that name (`kern_credential.c:3499`)
+    # and measures **23 resolved (22 function, 1 storage) / 7 added (7 function, 0 storage)** - the
+    # largest resolution since 381, and it is what turns 407's newly created credential face real in
+    # one step: `kauth_cred_create`, `kauth_cred_get`, `kauth_cred_get_with_ref`, the whole
+    # `kauth_cred_get{u,g,sv,ru,rg,svg}id` family, `kauth_cred_init`, `kauth_cred_ismember_guid`,
+    # `kauth_cred_issuser`, `kauth_cred_proc_ref`, `kauth_cred_ref`, `kauth_cred_unref`,
+    # `kauth_getuid`/`kauth_getruid`, `kauth_guid_equal`, `kauth_null_guid` (the storage record),
+    # `kauth_proc_label_update`, `kauth_wellknown_guid`, `posix_cred_label`.
+    #
+    #   added (7): `mac_cred_label_associate`, `mac_cred_label_compare`, `mac_cred_label_destroy`,
+    #     `mac_cred_label_init`, `mac_cred_label_update`, `mac_cred_label_update_execve` - the MAC
+    #     hooks - and `proc_ucred`. **None is called anywhere inside the path this step runs**:
+    #     `kauth_cred_init`'s own body calls only `lck_mtx_alloc_init`, `__MALLOC` and `panic`, and
+    #     the intersection of the 7 with `bsd_init`'s call set is empty.
+    #
+    # **Prediction, written before the build: `stub_hit=procinit`, caller key = the linked address of
+    # the instruction after `bl kauth_init` in `bsd_init`** (`bsd_init + 0x1C4`), to be read out of
+    # the built image on the host before the device is touched. The reading:
+    #
+    #   * `kauth_cred_init`'s body: `lck_mtx_alloc_init` (real), `__MALLOC` (real since 377; walked -
+    #     no stub on its straight line), `panic` (real), then a fully unrolled `TAILQ_INIT` loop over
+    #     `KAUTH_CRED_TABLE_SIZE` with no calls at all. **No stub.**
+    #   * back in `kauth_init` after the call returns: `lck_mtx_alloc_init` (real),
+    #     `kauth_register_scope` x3 (defined in `kern_authorization.o`, linked at 407, so real), whose
+    #     own body calls `__MALLOC`, `lck_mtx_lock`, `strlen`, `strncmp`, `kauth_add_callback_to_scope`
+    #     (same object) and `lck_mtx_unlock`, all real; then `lck_grp_free` (real). **No stub.**
+    #   * so `kauth_init` returns, and `bsd_init`'s next statement - the `bl procinit` at `+0x1C4`,
+    #     which has been a stub since 406 - is the stop.
+    #
+    # Falsifiers, named in advance: the real `panic("startup: kauth_cred_init")` at object +0x60, taken
+    # iff the 0xC800-byte `MALLOC` for the credential hash table returns NULL (**the one kind-6 risk on
+    # this path, and the log distinguishes it from a stub in one line**); a stop inside `kauth_cred_init`
+    # (measurably stub-free); a stop inside `kauth_register_scope` (measurably stub-free); a stop on one
+    # of the 7 added names (measurably not called from this path).
+    # =============================================================================================
+    # =============================================================================================
+    # **407: `bsd/kern/kern_authorization.c` - the step whose stop is a name the step itself creates,
+    # one call into the function it makes real.**
+    #
+    # 406's stop was `kauth_init`, called from `bsd_init` at key `0x8003ABB4`. The object is the pool's
+    # only definer of that name (`kern_authorization.c:143`) and measures **1 resolved (1 function, 0
+    # storage) / 11 added (10 function, 1 storage)**:
+    #
+    #   resolved  kauth_init          object T, stand-in was func T     -> 406's stop, retired
+    #   added     cantrace, get_pathbuff, kauth_cred_getguid, kauth_cred_init, kauth_cred_ismember_guid,
+    #             kauth_guid_equal, kauth_null_guid (storage B 0x10), kauth_wellknown_guid,
+    #             release_pathbuff, vfs_authopaque, vnode_mount
+    #
+    # **342/348's shape, and this time it is unavoidable: the stop is one of the 11 names this step
+    # creates.** `kauth_cred_init` is the fourth call in `kauth_init`'s body and the first one that is
+    # not already real:
+    #
+    #   +0x28  bl lck_grp_attr_alloc_init   real (osfmk_kern_locks.o) - walked, no stub beneath it
+    #   +0x3C  bl lck_grp_alloc_init        real (osfmk_kern_locks.o) - walked, no stub beneath it
+    #   +0x50  bl lck_grp_attr_free         real (osfmk_kern_locks.o) - walked, no stub beneath it
+    #   +0x54  bl kauth_cred_init           **becomes a stub** (pool T 0x3E0, definer not linked)
+    #
+    # **Prediction, written before the build: `stub_hit=kauth_cred_init`, caller key = the linked
+    # address of `kauth_init + 0x58`** (the instruction after the `bl`), to be read out of the built
+    # image on the host before the device is touched - the key is a property of the link, and 360's
+    # rule is that the image prints it before the run.
+    #
+    # Falsifiers, named in advance: a stop inside one of the three lock-group calls above (all three
+    # walked to no stub on their straight lines); a stop on one of the 11 added names reached from
+    # `bsd_init` rather than from `kauth_init` (the intersection is *empty* - `bsd_init` calls none of
+    # them); a stop at `procinit` (+0x1C4) or `tty_init` (+0x1C8) instead, which would mean `kauth_init`
+    # was retired without being entered; a `panic` or a `data abort` in `kauth_init` (it allocates one
+    # lock-group attribute and one lock group, frees one and nulls it, and TAILQ_INITs two lists - all
+    # real code and real `.bss`).
+    #
+    # `.text` grows by the object's own code plus 1 retired stub body (0x18) and 1 retired name slot,
+    # against 10 new bodies (10 x 0x18) and 10 new names; `.bss` gains one storage stand-in
+    # (`kauth_null_guid`, `B 0x10`, costing `align64(0x10)`) plus 10 x 0x40 for the new function stubs'
+    # slots.
+    # =============================================================================================
     # =============================================================================================
     # **406: `bsd/miscfs/specfs/spec_vnops.c` - the step that retires `throttle_init`, and the
     # frontier leaves the kernel's start-up machinery for the BSD subsystem's own init.**
@@ -23908,6 +23990,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_IPC_IPC_KMSG_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_IPC_IPC_OBJECT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_KERN_AUTHORIZATION_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_KERN_CREDENTIAL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -23920,7 +24004,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$IOKIT_KERNEL_IOCOMMAND_OBJ" "$IOKIT_KERNEL_IOPOWERCONNECTION_OBJ" "$BSD_KERN_KERN_MALLOC_OBJ" "$IOKIT_TESTS_TESTS_OBJ" "$OSFMK_KERN_WORK_INTERVAL_OBJ" "$BSD_KERN_SYS_REASON_OBJ" "$OSFMK_IPC_IPC_KMSG_OBJ" "$OSFMK_IPC_IPC_OBJECT_OBJ" "$BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$IOKIT_KERNEL_IOCOMMAND_OBJ" "$IOKIT_KERNEL_IOPOWERCONNECTION_OBJ" "$BSD_KERN_KERN_MALLOC_OBJ" "$IOKIT_TESTS_TESTS_OBJ" "$OSFMK_KERN_WORK_INTERVAL_OBJ" "$BSD_KERN_SYS_REASON_OBJ" "$OSFMK_IPC_IPC_KMSG_OBJ" "$OSFMK_IPC_IPC_OBJECT_OBJ" "$BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ" "$BSD_KERN_KERN_AUTHORIZATION_OBJ" "$BSD_KERN_KERN_CREDENTIAL_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
