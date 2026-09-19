@@ -66,8 +66,9 @@
  *
  * What fills the table
  * --------------------
- * **Every named slot points at a stand-in that stops the run and names itself**, and this is the
- * rule the whole walk has used for missing symbols, applied to a table:
+ * **Every named slot points at a stand-in that stops the run and names itself** - with one exception,
+ * `pthread_init`, which 433 gives a body (see the section at the end of this header, and why it is the
+ * exception) - and this is the rule the whole walk has used for missing symbols, applied to a table:
  *
  *   - a **NULL** slot is a fault rather than a stop. It would be a data abort or a branch to 0,
  *     which this image reports as `abort_entries != 0` and a `first_dfar` - a shape that says
@@ -125,6 +126,75 @@
  * Compiled by `tools/build_xnu_arm_kernel.sh` (see its platform block) into
  * `out/xnu_platform_obj/stage90_pthread_functions.o`, and linked into the entry image by
  * `build_entry.sh` as `STAGE90_ENTRY_STAGE90_PTHREAD_FUNCTIONS_OBJ`.
+ *
+ * 433: the one slot with a body
+ * ----------------------------
+ * 432's run measured what the paragraph above says it would: it stopped at
+ * `stage90_pthread_functions.pthread_init` with the caller key `0x8003B1E8` - the return address of
+ * the `bl <pthread_init>` at `bsd_init + 0x7F4` - and **no panic**. The table therefore works, and
+ * from here on it is itself the frontier: `bsd_init` cannot get past that call while the slot stops,
+ * so *no object linked into `LINK_OBJS` can move the boot any further*, and the next name the walk
+ * answers (`nwk_wq_init`, `bsd_init + 0x808`) is unreachable until this slot returns.
+ *
+ * So 433 gives exactly **one** slot a body: `pthread_init`. Every other slot keeps its stand-in and
+ * its stop, and this is the rule the file is not breaking rather than the rule it is bending -
+ * "a silent no-op is the wrong-value hazard" is about *state*, and the hazard is a kernel that is
+ * told work happened when it did not, with nothing in the log to say so. The body below is not that:
+ *
+ *   - it **records** that it ran, with the one number that makes the record worth having - the value
+ *     of the kernel's own `pthread_functions` pointer, which must be the address of this table if the
+ *     registration of the step before this one reached the kernel;
+ *   - and it **stops** if that pointer is not this table, rather than returning into a boot whose
+ *     premise did not hold.
+ *
+ * What it does *not* do is pretend to be the kext's initializer: `pthread.kext`'s `pthread_init`
+ * builds the kext's own hash tables and workqueue state, and none of that exists here - there is no
+ * kext. The kernel-side contract of the call is `pthread_shims.c:277`, `pthread_functions->
+ * pthread_init()`, and the function's return type is `void`: nothing in this image consumes a value
+ * from it. The one kernel-side fact the call establishes is that the pthread subsystem is considered
+ * initialised, and the honest implementation of that in a kernel with no pthread kext is an empty
+ * body that says so in the log.
+ *
+ * **Prediction, written before the build: `stub_hit=nwk_wq_init`, caller key `0x8003B1FC`** - the
+ * return address of the `bl <nwk_wq_init>` at `bsd_init + 0x808`, one call after `pshm_cache_init`
+ * in the disassembly above. With the slot returning, the four calls between it and `nwk_wq_init` run
+ * for the first time in this walk - `pshm_cache_init` (`bsd_init + 0x7F8`), `psem_cache_init`
+ * (`+0x7FC`), `time_zone_slock_init` (`+0x800`), `select_waitq_init` (`+0x804`) - and all four are
+ * real since 423 and clean on their straight-line paths, so the stop is the *next* stub on the line,
+ * which is the name `--root bsd_init` has answered since 425.
+ *
+ * **And the count of what the run should *not* contain is the positive evidence**, in the same shape
+ * as 432's: no `panic`, no `exception:`, and no `stage90_pthread_functions.pthread_init` line.
+ *
+ * Falsifiers, named in advance: a stop still at `stage90_pthread_functions.pthread_init`, which would
+ * mean the slot is not the one the kernel reads - and is distinguishable from the constructor never
+ * having registered the table by whether `xnu_entry_stage90_pthread_functions_ptr` came out as the
+ * table's address; a stop at `stage90_pthread_functions.not_registered`, which would say the value in
+ * the kernel is not this table; a stop inside one of the four bodies above, which 432's stop never let
+ * run; a stop on `pshm_cache_init`'s or `psem_cache_init`'s own `hashinit`/`__MALLOC` guarded path
+ * (both objects carry one); a stop at `select_waitq_init`'s `waitq_init + 0x3C -> hw_lock_init`,
+ * which the walk cannot name; and a stop on a *different* stub entirely, which would mean the table's
+ * slot order and the kernel's disagree.
+ *
+ * **Measured on hardware: exactly as predicted.**
+ *
+ *     xnu_entry_stage90_pthread_functions_ptr=0x80231228      <- the table's own linked address
+ *     stub_hit=nwk_wq_init
+ *     xnu_entry_stub_caller=0x8003b1fc                        <- bsd_init + 0x80C
+ *
+ * `0x80231228` is what the host's `nm` says `stage90_pthread_functions` is, so the pointer the kernel
+ * holds is this table and `not_registered` did not fire - two routes to the same fact, the image's own
+ * read and the host's symbol table. Five calls of `bsd_init` were retired by the one word this step
+ * changed, and the run contains neither 431's `panic` nor 432's `stage90_pthread_functions.pthread_init`
+ * line. The other 38 slots keep their stand-ins and will stay a stop until this project implements
+ * them; nothing on the boot's path calls one yet, and `pthread_shims.c`'s shims are the call sites that
+ * will.
+ *
+ * **And the alternative was measured rather than assumed.** The other candidate - keep the stop and
+ * link the object that defines `nwk_wq_init` - was checked against the image and does not work:
+ * `bsd_init`'s `bl <pthread_init>` is four `bl`s *before* `bl <nwk_wq_init>`, so the run stops at the
+ * slot every time and the frontier never reaches `nwk_wq_init`. 432's write-up says what 433 links;
+ * this file is where that turns out to be wrong, and the reason is the one this paragraph is about.
  */
 
 #include <sys/eventvar.h>          /* first: see the circular-include note in the header comment */
@@ -141,6 +211,21 @@
  */
 extern void entry_stub_hit(const char *name, uint32_t caller);
 
+/*
+ * The entry image's own record writer, for the same reason and by the same mechanism: it is defined
+ * by `entry_stubs.c`, so pass 1 of `build_entry.sh` resolves it and no stub is generated for it.
+ */
+extern void entry_kv(const char *key, uint32_t value);
+
+/*
+ * **433: the only slot in this table with a body** - see the file header, and the definition below
+ * the table, which is where it has to be: it compares `pthread_functions` against the table, so the
+ * table has to be declared before it. It cannot dereference `pthread_functions` (a NULL or wrong
+ * pointer must be a stop, not a fault), so it reads the pointer and compares it, and it writes the
+ * pointer into the report as the evidence that the registration reached the kernel.
+ */
+static void stage90_pthread_functions_init(void);
+
 #define STAGE90_PTHREAD_SLOT_DEF(name)                                          \
     static void stage90_pthread_slot_##name(void)                               \
     {                                                                           \
@@ -150,8 +235,13 @@ extern void entry_stub_hit(const char *name, uint32_t caller);
 
 #define STAGE90_PTHREAD_SLOT_ENTRY(name) .name = (void *)&stage90_pthread_slot_##name,
 
-/* Every name below is a member of `struct pthread_functions_s`, in declaration order. */
-STAGE90_PTHREAD_SLOT_DEF(pthread_init)
+/*
+ * Every name below is a member of `struct pthread_functions_s`, in declaration order - **except
+ * `pthread_init`**, which is defined by hand below the table and set explicitly in it. The lists here
+ * therefore hold 38 of the table's 39 named slots, and the constructor's scan still covers all 40
+ * named words (39 slots plus `version`), so a slot missing from either place is still a stop that
+ * names its word index rather than a branch to zero.
+ */
 STAGE90_PTHREAD_SLOT_DEF(fill_procworkqueue)
 STAGE90_PTHREAD_SLOT_DEF(__unused1)
 STAGE90_PTHREAD_SLOT_DEF(__unused2)
@@ -193,7 +283,8 @@ STAGE90_PTHREAD_SLOT_DEF(workq_threadreq_modify)
 
 static const struct pthread_functions_s stage90_pthread_functions = {
     .version = PTHREAD_FUNCTIONS_TABLE_VERSION,
-    STAGE90_PTHREAD_SLOT_ENTRY(pthread_init)
+    /* 433: the one slot with a body - see the file header. Not a stand-in. */
+    .pthread_init = &stage90_pthread_functions_init,
     STAGE90_PTHREAD_SLOT_ENTRY(fill_procworkqueue)
     STAGE90_PTHREAD_SLOT_ENTRY(__unused1)
     STAGE90_PTHREAD_SLOT_ENTRY(__unused2)
@@ -233,6 +324,34 @@ static const struct pthread_functions_s stage90_pthread_functions = {
     STAGE90_PTHREAD_SLOT_ENTRY(workq_threadreq)
     STAGE90_PTHREAD_SLOT_ENTRY(workq_threadreq_modify)
 };
+
+/*
+ * **433: the only slot with a body.** Defined here, below the table, because it names the table.
+ *
+ * What it does is the whole of what this image can honestly do for `pthread_init`: record that the
+ * call arrived, with the one number that makes the record worth having - `pthread_functions`, the
+ * kernel's own pointer, which is the address of the table above exactly when the registration of the
+ * previous step reached the kernel. If it is not, the run stops rather than returning into a boot
+ * whose premise did not hold.
+ *
+ * It does not dereference the pointer. A NULL `pthread_functions` is a stop that names itself; a
+ * fault here would be `abort_entries != 0` and a `first_dfar`, which says something went wrong but
+ * not what was expected to be there - the same distinction every stand-in in this table is built on.
+ *
+ * `void` return, and nothing in the kernel consumes a value from the call (`pthread_shims.c:277` is
+ * `pthread_functions->pthread_init();` as a statement). The kext's own initializer builds the kext's
+ * hash tables and workqueue state; there is no kext here, so the honest implementation of "the
+ * pthread subsystem is initialised" is a body that says so in the log and returns.
+ */
+static void stage90_pthread_functions_init(void)
+{
+    entry_kv("xnu_entry_stage90_pthread_functions_ptr", (uint32_t)(uintptr_t)pthread_functions);
+
+    if (pthread_functions != &stage90_pthread_functions) {
+        /* The pointer is already in the report, one record above: 0 means it was never registered. */
+        entry_stub_hit("stage90_pthread_functions.not_registered", 0u);
+    }
+}
 
 /* Where `pthread_kext_register` writes the kernel's own callbacks table. Nothing here reads it. */
 static pthread_callbacks_t stage90_pthread_callbacks;

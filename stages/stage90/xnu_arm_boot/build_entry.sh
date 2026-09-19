@@ -13896,6 +13896,21 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # table this image has ever supplied rather than linked, and the step where `nwk_wq_init`
     # (`bsd_net_nwk_wq.o`, `bsd_init + 0x808`, key `0x8003B1FC`) stops being the next answer and
     # becomes the answer *after* the table.
+    #
+    # **And what 433 turned out to be is not what this block said, so the correction lives here.**
+    # The sentence above is right that `nwk_wq_init` becomes the answer after the table; it is wrong
+    # that 433 links its object. The run measured the stop at
+    # `stage90_pthread_functions.pthread_init` with caller key `0x8003B1E8` - and `bsd_init`'s
+    # `bl <pthread_init>` is four `bl`s *before* `bl <nwk_wq_init>`, so the boot stops at the slot
+    # every time and **no object appended to `LINK_OBJS` can move it one instruction further**.
+    # 433 is therefore an edit to `stages/stage90/xnu_supply/stage90_pthread_functions.c` and nothing
+    # else: the `pthread_init` slot gets a body that records the kernel's own `pthread_functions`
+    # pointer and stops if it is not this table, while the other 38 slots keep their stand-ins. The
+    # prediction was `stub_hit=nwk_wq_init` at key `0x8003B1FC` and the run reported exactly that,
+    # with `xnu_entry_stage90_pthread_functions_ptr=0x80231228` (the table's linked address) as the
+    # evidence the registration reached the kernel. **No `LINK_OBJS` line changes for 433** - there is
+    # nothing to add - and that is the point of the correction rather than an omission from it.
+    # See `docs/experiments/experiment-433-one-slot-gets-a-body-and-the-frontier-leaves-the-table.md`.
     # =============================================================================================
     # =============================================================================================
     # **430: `bsd/kern/decmpfs.c` - the object that retires `decmpfs_init`, the last stub call left
