@@ -1681,34 +1681,41 @@ void fleh_undef(void)
      */
 
     /*
-     * **The frame, in words.** `fleh_undef`'s prologue is `strd r4, [sp, #-24]!`, `strd r6,
-     * [sp, #8]`, `str r8, [sp, #16]`, so the trapping context's `r4`, `r5`, `r6`, `r7` and `r8` are
-     * all still in this function's own frame - `r5` included, which is the point: it is
-     * `db_panic_caller`, the address that names which call site panicked, and no live register
-     * holds it any more because the prologue's second instruction is `mrs r5, SPSR`.
+     * **The frame, in words - and the offsets this comment used to carry were another image's.**
+     * `fleh_undef`'s prologue in the image that ran experiment 362 is
      *
-     * The keys are named for the registers they are *predicted* to hold, which is the check: the
-     * offset was read out of the built function's disassembly before this run, not guessed. `mov r5,
-     * sp` lands immediately after the prologue's writeback, so the captured `sp` **is** the frame
-     * base and the block is at +0, +4, +8, +12, +16, +20, +24, +28 in that prologue's order:
+     *   80002cf4: strd r4, [sp, #-24]!     ; r4 at +0, r5 at +4
+     *   80002cf8: strd r6, [sp, #8]        ; r6 at +8, r7 at +12
+     *   80002cfc: str r8, [sp, #16]
+     *   80002d00: str lr, [sp, #20]        ; <- the sixth store, added since the table below was written
+     *   80002d04: mov r4, sp               ; the captured `sp` is the frame base
+     *   80002d08: mov r5, lr               ; not `mrs r5, SPSR`: that is `r6` two instructions later
      *
-     *   frame_r4   +0   0x00000000   the low half of `db_panic_options`
-     *   frame_r5   +4   0x0026fe84   `free_to_zone+0x148`, the instruction after the `bl panic`
-     *   frame_r6   +8   0x00000000   `ctx`
-     *   frame_r7   +12  0x00000000   `reason`
-     *   frame_r8   +16  0x0029be88   `panic_args`, which experiments 238 and 239 both measured live
-     *   frame_r9   +20  == `trap_r9_fmt`   `panic_format_str`, and equality with the live read is
-     *                                the prediction that holds: the literal's absolute address moves
-     *                                with this image's text size, so no constant here is stable
-     *                                across builds (it was 0x0028cc94 in the build this comment was
-     *                                written against and 0x0028cc33 in the build that ran).
-     *   frame_sl   +24  0x00000000   the options mask's high half
-     *   frame_lr   +28  0x0022d40c   the instruction after the `udf`, i.e. `undef_lr` over again
+     * so the block is the trapping context's `r4`, `r5`, `r6`, `r7`, `r8` and **`lr`**, and the words
+     * after them are this function's own uninitialized stack. What the keys mean, therefore:
      *
-     * A key that comes back with the wrong value is a shift in the block, and `frame_sp` plus the
-     * names say which shift. Reading the block is safe for the same reason everything else here is
-     * read: this is the boot stack, inside the image, and it is mapped. Only the *values* are
-     * reported; nothing in the block is dereferenced.
+     *   frame_r4   +0   `db_panic_options`'s low half (0 from `IOPanicPlatform::start`)
+     *   frame_r5   +4   `db_proceed_on_sync_failure` (1 from `panic`) - *not* the panic caller
+     *   frame_r6   +8   `ctx`
+     *   frame_r7   +12  `reason`
+     *   frame_r8   +16  `panic_args`, a `va_list *`
+     *   frame_r9   +20  the trapping context's `lr`, i.e. `undef_lr` over again
+     *   frame_sl   +24  uninitialized stack - the name is kept for log continuity and the value is junk
+     *   frame_lr   +28  uninitialized stack, likewise
+     *
+     * **The check is the values agreeing with each other, and in experiment 362 they did**: `frame_r9 =
+     * 0x8002dd8c` equal to `undef_lr`, `frame_r8 = 0xc80abeb0` equal to the live `trap_r8_args`,
+     * `frame_r4 = 0` the options mask, `frame_r5 = 1` `db_proceed_on_sync_failure`. The same run shows
+     * the cost of the stale names: `frame_sl` read `0x253`, and a reader who trusted the old table
+     * would have called that the options mask's high half while `trap_sl_options_hi` read 0. The caller
+     * of `panic` is *not* recoverable from this block in the current image - it was `frame_r5` when the
+     * prologue had five stores - and the trap's `r9` (the panic format) is what names the call site
+     * instead: in 362 it resolved to the literal `IOPanicPlatform::start` loads into `r0`.
+     *
+     * A key that comes back with the wrong value is a shift in the block, and `frame_sp` plus the names
+     * say which shift - but only while the names match the prologue. Reading the block is safe for the
+     * same reason everything else here is read: this is the boot stack, inside the image, and it is
+     * mapped. Only the *values* are reported; nothing in the block is dereferenced.
      */
     entry_kv("xnu_entry_frame_sp", (uint32_t)frame);
     {

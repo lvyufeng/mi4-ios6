@@ -11580,6 +11580,493 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `IOCommandGate::init`'s 4-byte thunk at 0x80175320, `IOMalloc` at 0x8011B5DC).
     #
 
+    # ## 360 measured (2026-09-19): the stop is the enclosing frame's next call, and every row exact
+    #
+    # **Result: all three counts exact, every row exact, and the predicted key fired to the byte.**
+    # `stub_hit=vm_shared_region_init` at `xnu_entry_stub_caller_v=0x8000e6cc` - the key the block wrote before
+    # the build - with `abort_entries=0`. The built image had already printed that `bl` at **0x8000E6C8** in a
+    # disassembly taken before the device was touched, the third step in a row where the map shows the key
+    # first, and the three stubs the block named are all there as 0x18-byte bodies in `realstubs.o`'s `.text`.
+    #
+    # **The step's object defines the whole family the 359 stop opened**, and that is why the stop left it: the
+    # constructor, `setAction`, `setWorkLoop`, `init` and the `gMetaClass` the base constructor is handed are all
+    # real after it, so the walk ran out of `IOCommandGate::commandGate`, out of `IOWorkLoop::init`, out of
+    # `PE_init_iokit` - the frame it had been inside since 355 - and into the *enclosing* frame's next call.
+    # `kernel_bootstrap_thread` calls `PE_init_iokit` at 0x8000E6B0 and the three stubs follow it at 0x8000E6C8,
+    # 0x8000E6CC and 0x8000E6D0; `ml_set_interrupts_enabled` between them is `spllo()`, inlined and real. That
+    # is the sixth frontier kind in its plainest form: **a step whose whole family is real, so the stop moves to
+    # the first stub the enclosing frame calls after the frame the walk has been sitting in returns.**
+    #
+    # **The layout: every row exact.**
+    #
+    #   | row              | 359 measured          | 360 predicted          | 360 measured           |
+    #   |------------------|-----------------------|------------------------|------------------------|
+    #   | `.text`          | 0x8019F5C0            | end 0x8019F440..0x8019F44E | **0x8019F460** (last placed input 0x8019F450, fill 0x10) |
+    #   | `.data`          | 0x801A0000 (0x19980)  | 0x801A0000 (unmoved)   | **0x801A0000** (0x19980) |
+    #   | `.sysctl_set`    | 0x801B9980 (0x150)    | 0x801B9980 (unmoved)   | **0x801B9980** (0x150) |
+    #   | `.init_array`    | 0x801B9AD0 (0x74, 29) | 0x801B9AD0 (**0x78**, 30) | **0x801B9AD0** (0x78, thirty) |
+    #   | its end          | 0x801B9B44            | **0x801B9B48**         | **0x801B9B48**         |
+    #   | `.bss`           | 0x801B9B80            | 0x801B9B80 (unmoved)   | **0x801B9B80**         |
+    #   | `.bss` size      | 0x39198               | **0x39198**            | **0x39198** (233880)   |
+    #   | `__bss_end`      | 0x801F2D18            | 0x801F2D18 (unmoved)   | **0x801F2D18**         |
+    #   | image            | 1809220               | **1809224**            | **1809224**            |
+    #   | headroom         | 1102568               | 1102568 (unmoved)      | **1102568**            |
+    #   | `args`           | +2048000              | +2048000 (unmoved)     | **+2048000**           |
+    #   | `topOfKernelData`| +3145728              | +3145728 (unmoved)     | **+3145728**           |
+    #
+    # The run's own build lines agree in both directions: `803 symbol(s) undefined` with the stub list holding
+    # 803 records in the same **694 function / 109 storage** split, `__bss_start 0x801b9b80 ... (233880 bytes to
+    # 0x801f2d18)`, `the copied image ends at 0x801b9b48, 56 bytes below __bss_start`, `image bytes 1809224`,
+    # `headroom 1102568`.
+    #
+    # **`.text` closes `-0x170` against a placed `-0x160`, and both of the 0x10 that separate them are
+    # structural:**
+    #
+    #   | term | bytes |
+    #   |---|---|
+    #   | this object's `.text` (0x801758D4, ending 0x80175B78) | **+0x2A4** |
+    #   | its one 4-byte `.text.*` COMDAT piece at 0x80175B78 | **+0x004** |
+    #   | its `.rodata` (0x8019AC70) | **+0xB4** |
+    #   | its string bytes, **placed 0xE of 0xE** (read from this map at 0x8019AD24 - nothing merged) | **+0x00E** |
+    #   | the align4 pad its string run closes with (0x8019AD32 -> 0x8019AD34) - **new this step** | **+0x002** |
+    #   | the 21 retired stub bodies | **-0x1F8** |
+    #   | the 21 retired name slots | **-0x2E4** |
+    #
+    # The sum is -0x170, and the section end moved -0x160 because `. = ALIGN(0x20)` adds **0x10** where 359 added
+    # none: 359's last placed input landed at 0x8019F5B5 with a 0xB fill, this step's lands at 0x8019F450 with a
+    # 0x10 fill. **The block's band said -0x180..-0x172 and it called the band the section end**, so it was 2
+    # bytes short of the closure (it did not know about the align4 pad that closes a mergeable string run) and
+    # 0x10 short of the section end (it did not carry the trailing `ALIGN(0x20)` term, which is a real term
+    # whenever the placed end is not already 32-aligned - as it is not here and was at 359). Both sub-terms are
+    # now measured, and the band is exact once they are in it: 0x8019F450 + 0x10 = 0x8019F460.
+    #
+    # `realstubs.o` is exact on all three of its closed forms: `.text` **0x4110** = 694 x 0x18 (at 0x80175BD4),
+    # `.rodata.str1.4` **0x3C10** = 0x3EF4 - 0x2E4 (at 0x8019AE80), `.bss` **0x2904** = 0x2944 - 0x40 (at
+    # 0x801F0400).
+    #
+    # **The pad rule's eighth confirmation is the wrap branch, and it came out exact.** The storage stand-in this
+    # step retires - `IOEventSource::gMetaClass`, `B 0x18` - occupied a whole 0x40 slot at 0x801F03C0, which is
+    # exactly where 359's map had `realstubs.o`'s `.bss` starting, and the object's own `.bss` definition lands
+    # there instead: 0x18 bytes at 0x801F03C0, ending 0x801F03D8. `realstubs.o`'s `.bss` then moves up one slot
+    # to 0x801F0400, and the map prints **`*fill* 0x801F03D8 0x28`** - `new_pad = (0x00 - 0x18) mod 64 = 0x28`,
+    # the rule entered from a pad of zero, which is where 359 left it. The row closes to the byte:
+    # `0x39198 - 0x40 (the retired stand-in) + 0x18 (the object) + 0x28 (the fill) = 0x39198`, which is why the
+    # size and `__bss_end` do not move at all. The `.bss` run's tail reads
+    # `IOWorkLoop.o` 0x801F0390 (0x18) / `IOCommandGate.o` 0x801F03A8 (0x18) / `IOEventSource.o` 0x801F03C0
+    # (0x18) / `*fill*` 0x28 / `realstubs.o` 0x801F0400 (0x2904).
+    #
+    # **The three falsifiers did not fire.** (a) The asynchronous `_IOServiceJob::startJob` job did not reach a
+    # virtual stub first - the walk left the IOKit start-up entirely and stopped in the frame *above*
+    # `PE_init_iokit`, which means every synchronous and asynchronous call the block walked ran real. (b) No
+    # stub hid behind the matching loop's virtuals. (c) No stop came earlier inside the step's own newly-real
+    # code: the constructor calls `OSObject::OSObject(OSMetaClass const*)` (0x80120DBC, real) and stores
+    # `_ZTV13IOEventSource + 8`; `init` is `OSObject::init()`, the virtual at `[vptr + 0x4C]` = `setAction`
+    # (0x8017970C in the 359 image, a stub this step made real) and `IOMalloc(4)`.
+    #
+    # **One field of the prediction was 359's, and arithmetic refutes it without a run.** The block wrote the
+    # three stops' addresses as 0x801790DC, 0x80178D4C and 0x80178D64 and called them "0x18-byte stubs in this
+    # image's realstubs region". This image's `realstubs.o` is based at **0x80175BD4**, so a stub body's address
+    # is `base + 0x18k`; `0x801790DC - 0x80175BD4 = 0x3508 = 565 x 0x18 + 0x10` and
+    # `0x80178D64 - 0x80175BD4 = 0x3190 = 528 x 0x18 + 0x10` are both **16 bytes past the grid** and cannot be
+    # stub bodies here, while 0x80178D4C happens to land on it. The first number is 359's: against *that*
+    # image's base 0x8017592C, `0x801790DC - 0x8017592C = 0x37B0` = **594 x 0x18** exactly. So the block had
+    # carried the 359 map's 594th stub forward while the base moved 0x2A8 under it - and the cheap check that
+    # catches this class, with no run and no map, is `(address - base) mod 0x18 == 0`. What the run actually
+    # tests is the *key* (the caller's return address), which was exact; a predicted stub address is a field
+    # this walk has never once verified.
+    #
+    # The run itself:
+    #
+    #   MI4IOS6_STAGE90_XNU real XNU entry: a symbol this image does not provide was called
+    #    xnu_entry_kv_written=0x00000066   xnu_entry_kv_in_dram=0x0000008a   xnu_entry_kv_dropped=0x00000000
+    #    xnu_entry_why=0x8017a4cc          xnu_entry_why_byte=0x00000061     'a'
+    #    xnu_entry_stub_caller_v=0x8000e6cc   (also _a and _e, all three agreeing)
+    #    xnu_entry_abort_entries=0x00000000   <- nothing faulted on the way
+    #   MI4IOS6_STAGE90_XNU real XNU entry stub_hit=vm_shared_region_init
+    #
+    # Safety, as every run: non-persistent `fastboot boot` of `stage90-qcdt.img`, nothing flashed, 25 records of
+    # `persistent_write_attempted=0x00000000` and 87 of `failure_mask=0x00000000` with no non-zero reading of
+    # either, `xnu_entry_checks=5` / `xnu_entry_failures=0`, log 301633 bytes whose last line is the kernel's own
+    # `No errors detected`, and the device back on Android on its own (`MI 4LTE`, release 10).
+    #
+    # ## 361: `osfmk/vm/vm_shared_region.c` -> `osfmk_vm_vm_shared_region.o`
+    #
+    # The only pool definer of this step's stop **and of the two stubs that follow it** - `vm_shared_region_init`
+    # (`T 0x78`), `vm_commpage_init` (`T 0x3C`) and `vm_commpage_text_init` (`T 0x3C`) are all one object's, and
+    # so are ten more `vm_shared_region_*` bodies: **13 resolved (12 function, 1 storage) / 0 added** - the
+    # storage being `shared_region_trace_level` (`D 0x4`) - for 803 -> **790** undefined, 694 -> **682
+    # function, 109 -> 108 storage**.
+    #
+    # **This is the first step of the walk whose object adds nothing and needs nothing.** All 50 of its
+    # references are already satisfied by the image, so it creates no stub at all - the walk's first step with
+    # `added = 0` and, at the same time, the largest retirement of *shape*: it is the object that turns the
+    # three-call sequence the boot runs next into real code *and* the frame that follows it into reachable code.
+    # The object: `.text` **0x3FFC** (16380) of 55 definitions, **no COMDAT and no `.group`**, `.data` **0x18**
+    # plus a `__DATA,__data` section of 0x18 (a `VM_ALLOC_SITE_STATIC` site, so **+0x30** to the `.data` output
+    # section before its `ALIGN(8)`), `.bss` **0x70**, `.rodata.str1.1` **0x85**, and **no `.init_array` and no
+    # `__sysctl_set`**.
+    #
+    # **This step moves the whole `__DATA` segment again - the walk's second `__DATA` step, and by the same
+    # mechanism as 357's.** The closure, taken from 360's last placed input (0x8019F450):
+    #
+    #   | term | bytes |
+    #   |---|---|
+    #   | the alignment pad the object's 16-byte `.text` needs at 0x80175B7C (0x80175B7C is 0xC-aligned) | **+0x004** |
+    #   | the object's `.text` (0x3FFC) | **+0x3FFC** |
+    #   | its string bytes placed and the align4 pad that closes the run (0x85 -> 0x88) | **+0x088** |
+    #   | the 12 retired stub bodies | **-0x1B0** |
+    #   | the 13 retired name slots | **-0x148** |
+    #
+    # = **+0x3D90**, so `.text` ends at **0x801A31E0** (the sum lands on the 32-byte boundary exactly, so this
+    # time `ALIGN(0x20)` adds nothing). That is **past `0x801A0000`**, so `.data` steps a whole `ALIGN(0x4000)`
+    # to **0x801A4000** and every row below it moves with it, exactly as 357's did on the table's other side.
+    #
+    #   | row              | 360 measured           | 361 predicted          |
+    #   |------------------|------------------------|------------------------|
+    #   | `.text`          | 0x8019F460             | end **0x801A31E0** (closure +0x3D90) |
+    #   | `.data`          | 0x801A0000 (0x19980)   | **0x801A4000** (0x199B0) |
+    #   | `.sysctl_set`    | 0x801B9980 (0x150)     | **0x801BD9B0** (0x150) |
+    #   | `.init_array`    | 0x801B9AD0 (0x78, 30)  | **0x801BDB00** (0x78, thirty) |
+    #   | its end          | 0x801B9B48             | **0x801BDB78**         |
+    #   | `.bss`           | 0x801B9B80             | **0x801BDB80** (`align64(0x801BDB78)`) |
+    #   | `.bss` size      | 0x39198                | **0x391D8** = 0x39198 + 0x70 (the object) - 0x40 (the retired stand-in) + 0x10 (the pad, 0x28 -> 0x38) |
+    #   | `__bss_end`      | 0x801F2D18             | **0x801F6D58**         |
+    #   | image            | 1809224                | **1825656**            |
+    #   | headroom         | 1102568                | **1086120**            |
+    #   | `args`           | +2048000               | **+2064384** (0x801F8000) |
+    #   | `topOfKernelData`| +3145728               | **+3145728** (unmoved) |
+    #
+    # The pad rule's ninth confirmation is the wrap branch again and it is a different number this time:
+    # `new_pad = (0x28 - 0x70) mod 64 = 0x38`, so the object's 0x70 at 0x801F03D8 ends at 0x801F0448 and
+    # `realstubs.o`'s `.bss` moves to the next 64-byte boundary, 0x801F0480. `realstubs.o` should print `.text`
+    # **0x3FF0** = 682 x 0x18, `.rodata.str1.4` **0x3AC8** = 0x3C10 - 0x148, `.bss` **0x28C4** = 0x2904 - 0x40.
+    #
+    # **Predicted stop: `ccdrbg_factory_yarrow`, called through a function pointer, at `read_random+0xA4`, key
+    # `0x8003827C`.** This is the walk's first stop that is not a `bl`, and the mechanism is worth writing down
+    # because it is the same stand-in address seen from the other side: `prng_cpu_init` (called by
+    # `kernel_bootstrap_thread` at 0x8000E690, before `PE_init_iokit`) does
+    # `prng_factory_register(ccdrbg_factory_yarrow)` and stores the factory's **address** into the variable
+    # `prng_ccdrbg_factory` at 0x801C5778 - and in this image that address is 0x80175D24, a 0x18-byte stub body
+    # in `realstubs.o`. The first `read_random` call after the three stubs is at 0x8000E704, and its inlined
+    # `prng_infop` reaches `blx r2` with `r2 = prng_ccdrbg_factory`:
+    #
+    #   80038228: ldr r0, [r6]      ; r6 = 0x801C5778 = prng_ccdrbg_factory (set by prng_cpu_init)
+    #   80038230: beq 80038314      ; taken only if the factory is still NULL - it is not
+    #   8003824c: bl 800871f0 <kalloc_canblock>   ; real: kalloc(sizeof(struct ccdrbg_info)) = 24
+    #   80038250-...: the NULL check and its panics (not taken: the walk has allocated since 356)
+    #   8003826c: ldr r2, [r6]      ; r2 = 0x80175D24, the stub's own address
+    #   80038278: blx r2            ; <- STUB, and the stop; the recorded lr is 0x8003827C
+    #
+    # `pp->infop` is zero at this point - `prng_cpu_init` writes it (`str r0, [r4]` with r0 = 0 at 0x80038184)
+    # and nothing else has touched it, because the walk has never before reached a `read_random` call.
+    #
+    # **The fallback, named in advance because it is the other side of the same question:** if `read_random`
+    # does not take the factory path, the stop is `throttle_init` at **`bsd_init+0x8`, key `0x8003A9FC`** -
+    # `bsd_init`'s first statement is `throttle_init();` (`bsd/kern/bsd_init.c:450`) and the `bl` is at
+    # 0x8003A9F8, and every call `kernel_bootstrap_thread` makes between the stop and `bsd_init` is real:
+    # `kernel_debug_string_early`, `mac_policy_initmach` (12 instructions, 0 stub calls), `arm_vm_prot_finalize`
+    # (232, 0), five `read_random` (163, 0), `vm_set_restrictions` (17, 0). `throttle_init` is a stub, and
+    # `bsd_init`'s remaining body calls 71 more of them.
+    #
+    # Three named falsifiers: (a) `read_random`'s factory path is not taken, or `pp->infop` is already set, in
+    # which case the walk goes on to `bsd_init` and stops at `throttle_init` - the fallback above; (b)
+    # `read_random` **panics** instead (`ccdrbg_generate` returning an error, or `prng_infop`'s 10-second
+    # registration timeout), which reaches `panic_trap_to_debugger` -> `PEHaltRestart`, itself a stub, so the
+    # record would name that frame rather than this one; (c) `mac_policy_initmach` or `arm_vm_prot_finalize`
+    # faults, which would end the run with a non-zero `abort_entries` and no `stub_hit` at all - the one
+    # outcome this instrument cannot report as a stop.
+    #
+    # Note that `read_random`'s 163 instructions contain **zero** `bl`-to-stub sites: its one stub is reached
+    # through the function pointer, which is why the direct-call walk of this image cannot find it and why the
+    # prediction is taken from `prng_cpu_init`'s store rather than from a call site.
+    #
+
+    # ## 361 measured (2026-09-19): a stop across a context switch, and three slips in one band
+    #
+    # **Result: all three counts exact, every row exact but one, and the stop is neither of the two the block
+    # named - it is a third outcome, and it is the most interesting one this walk has produced.**
+    # `stub_hit=compute_averages` at `xnu_entry_stub_caller_v=0x800a31f8` = the `bl` at 0x800A31F4 =
+    # `sched_timeshare_maintenance_continue+0x108`, `abort_entries=0`.
+    #
+    # **The walks's first stop that is not on a call chain.** `sched_timeshare_maintenance_continue`
+    # (`osfmk/kern/sched_prim.c:4755`) is the scheduler maintenance thread's body: it is entered by
+    # `thread_block((thread_continue_t)sched_timeshare_maintenance_continue)` at sched_prim.c:4855, and the
+    # thread itself is created by `sched_startup`'s `kernel_thread_start_priority(sched_init_thread, ...)` -
+    # which `kernel_bootstrap_thread` called at **0x8000E5AC**, before `PE_init_iokit`. So this stop has no
+    # calling frame above it at all: the instrument's `caller - 4` idiom still names the `bl` (`compute_averages`
+    # is called directly by that function), but the frame was entered by a **context switch**, not by a call,
+    # and the code that was running before it is the `kernel_bootstrap_thread` line the walk has been following
+    # since 355. **This is a seventh frontier kind: a stop the scheduler hands you** - and it says something the
+    # call-by-call record could not: the kernel dispatched a second thread. The preemption point is `spllo()`
+    # (0x8000E6C4, `ml_set_interrupts_enabled`, real and inlined): before it the walk ran with interrupts off;
+    # after it the boot is preemptible, and the maintenance thread the bootstrap had already created ran.
+    #
+    # Both of the block's predictions are therefore refuted, and *why* is the useful part. `ccdrbg_factory_yarrow`
+    # (predicted, key 0x8003827C) was not reached because the boot thread never got there before the switch; the
+    # fallback `throttle_init` (key 0x8003A9FC) was not reached because the boot thread had not got as far as
+    # `bsd_init` either. The block's error was structural rather than arithmetic: **it walked the boot thread's
+    # call chain as if nothing else could run**, at exactly the step where `spllo()` makes that assumption false.
+    # The question it should have asked is not "what does this code call next" but "what runs next".
+    #
+    # **The layout: every row but `.text` exact.**
+    #
+    #   | row              | 360 measured           | 361 predicted          | 361 measured           |
+    #   |------------------|------------------------|------------------------|------------------------|
+    #   | `.text`          | 0x8019F460             | end 0x801A31E0         | **0x801A3280** (+0xA0) |
+    #   | `.data`          | 0x801A0000 (0x19980)   | **0x801A4000**         | **0x801A4000** (0x199B0) |
+    #   | `.sysctl_set`    | 0x801B9980 (0x150)     | **0x801BD9B0**         | **0x801BD9B0** (0x150) |
+    #   | `.init_array`    | 0x801B9AD0 (0x78, 30)  | **0x801BDB00**         | **0x801BDB00** (0x78, thirty) |
+    #   | its end          | 0x801B9B48             | **0x801BDB78**         | **0x801BDB78**         |
+    #   | `.bss`           | 0x801B9B80             | **0x801BDB80**         | **0x801BDB80**         |
+    #   | `.bss` size      | 0x39198                | **0x391D8**            | **0x391D8** (233944)   |
+    #   | `__bss_end`      | 0x801F2D18             | **0x801F6D58**         | **0x801F6D58**         |
+    #   | image            | 1809224                | **1825656**            | **1825656**            |
+    #   | headroom         | 1102568                | **1086120**            | **1086120**            |
+    #   | `args`           | +2048000               | **+2064384**           | **+2064384**           |
+    #   | `topOfKernelData`| +3145728               | **+3145728** (unmoved) | **+3145728**           |
+    #
+    # The one row that missed missed by 0xA0, and **the band model had three separate slips, each of which is
+    # now a measured rule**:
+    #
+    #   | term | predicted | measured | why |
+    #   |---|---|---|---|
+    #   | 12 retired stub bodies | -0x1B0 | **-0x120** | arithmetic: 12 x 0x18 = 0x120, not 0x1B0 (which is 18 bodies) |
+    #   | 13 retired name slots | -0x148 | **-0x12C** | **a storage stand-in has no name slot**: the run is `sum(align4(len+1))` over the 682 *function* names, and `realstubs.o`'s `.rodata.str1.4` came out 0x3AE4 = 0x3C10 - 0x12C |
+    #   | the object's strings | +0x088 | **+0x084** | the net is its 0x85 *replacing* the 0x2 pad that used to sit between `IOEventSource.o`'s strings and `macho.o`'s piece, plus a 0x1 pad of its own - measured as `*fill* 0x8019EC97 0x1` |
+    #   | the tail's own fill | (not modelled) | **-0x008** | `__TEXT,__const`'s 0x4 bytes are followed by a fill that was 0xC at 360 and is 0x4 here, because the whole tail moved |
+    #
+    # With those four, the closure is exactly the measured **+0x3E30** from 360's placed end 0x8019F450, and the
+    # section ends at 0x801A3280 with `ALIGN(0x20)` adding nothing (the placed end lands on the boundary this
+    # time, where 360's did not and 361's prediction assumed it would). The block's own note that "the sum lands
+    # on the 32-byte boundary exactly" was true of its arithmetic and false of the image.
+    #
+    # Everything that mattered structurally was right: **`.text` ended above 0x801A0000 and below 0x801A4000**,
+    # so `.data` stepped a whole `ALIGN(0x4000)` to **0x801A4000** - the walk's second `__DATA` step, by the same
+    # mechanism as 357's - and every row below it, the image, the headroom, the boot args and `topOfKernelData`
+    # came out exactly as predicted. `realstubs.o` closed on two of its three forms (`.text` **0x3FF0** =
+    # 682 x 0x18 at 0x80179BD4, `.bss` **0x28C4** at 0x801F4480) and missed the third by exactly the name-slot
+    # slip (`.rodata.str1.4` **0x3AE4**, not 0x3AC8).
+    #
+    # **The pad rule's ninth confirmation, in the wrap branch, from a pad of 0x28.** The object's `.bss` is 0x70
+    # and it lands at 0x801F43D8, where `IOEventSource.o`'s 0x18 has just ended (0x801F43C0 + 0x18 = 0x801F43D8,
+    # no fill). The `.bss` run's tail then reads: `IOCommandGate.o` 0x801F43A8 (0x18) / `IOEventSource.o`
+    # 0x801F43C0 (0x18) / **this object 0x801F43D8 (0x70)** / the three shims at 0x801F4448, zero bytes each /
+    # **`*fill* 0x801F4448 0x38`** / `realstubs.o` 0x801F4480 (0x28C4). The fill is exactly
+    # `align64(0x801F4448) - 0x801F4448`, so `new_pad = (0x28 - 0x70) mod 64 = 0x38` on the nose. The row then
+    # closes to the byte: `0x39198 - 0x40 (the retired storage stand-in) + 0x70 (the object) + 0x10 (the pad,
+    # 0x28 -> 0x38) = 0x391D8`, which is the measured `.bss` size.
+    #
+    # The run itself:
+    #
+    #   MI4IOS6_STAGE90_XNU real XNU entry: a symbol this image does not provide was called
+    #    xnu_entry_kv_written=0x00000061   xnu_entry_kv_in_dram=0x00000085   xnu_entry_kv_dropped=0x00000000
+    #    xnu_entry_why=0x8017e3ac          xnu_entry_why_byte=0x00000061     'a'
+    #    xnu_entry_stub_caller_v=0x800a31f8   (also _a and _e, all three agreeing)
+    #    xnu_entry_abort_entries=0x00000000   <- nothing faulted on the way
+    #   MI4IOS6_STAGE90_XNU real XNU entry stub_hit=compute_averages
+    #
+    # Safety, as every run: non-persistent `fastboot boot` of `stage90-qcdt.img`, nothing flashed, 25 records of
+    # `persistent_write_attempted=0x00000000` and 87 of `failure_mask=0x00000000` with no non-zero reading of
+    # either, `xnu_entry_checks=5` / `xnu_entry_failures=0`, log 301628 bytes whose last line is the kernel's own
+    # `No errors detected`, and the device back on Android on its own (`MI 4LTE`, release 10).
+    #
+    # ## 362: `osfmk/kern/sched_average.c` -> `osfmk_kern_sched_average.o`
+    #
+    # The definer of this step's stop, and a small object with a large effect on one row: **5 resolved (1
+    # function, 4 storage) / 1 added** - `compute_averages` out, and **four storage stand-ins out**
+    # (`avenrun` `B 0xC`, `mach_factor` `B 0xC`, `sched_load_average` `B 0x4`, `sched_mach_factor` `B 0x4`), one
+    # function in (`compute_averunnable`, which becomes a new stub) - for 790 -> **786** undefined, 682 -> **682
+    # function, 108 -> 104 storage**. The object: `.text` **0x48C** of 8 definitions, `.data` **0xA8**, `.bss`
+    # **0x38**, and no `.rodata`, no strings, no COMDAT, no `.init_array` and no `__sysctl_set`.
+    #
+    # **Four storage stand-ins retired is -0x100 of `.bss` and the first step where that row moves for its own
+    # reason rather than the pad's.** The object's own 0x38 lands where 361's `*fill* 0x38` was, so
+    # `new_pad = (0x38 - 0x38) mod 64 = 0`: the object's `.bss` at 0x801F4448 ends at 0x801F4480 and
+    # `realstubs.o`'s begins there with **no fill at all** - the rule's tenth confirmation, and its third zero.
+    #
+    #   | row              | 361 measured           | 362 predicted          |
+    #   |------------------|------------------------|------------------------|
+    #   | `.text`          | 0x801A3280             | end **0x801A3720** (closure +0x48C..+0x490) |
+    #   | `.data`          | 0x801A4000 (0x199B0)   | **0x801A4000** (0x19A58, unmoved) |
+    #   | `.sysctl_set`    | 0x801BD9B0 (0x150)     | **0x801BDA58** (0x150) |
+    #   | `.init_array`    | 0x801BDB00 (0x78, 30)  | **0x801BDBA8** (0x78, thirty) |
+    #   | its end          | 0x801BDB78             | **0x801BDC20**         |
+    #   | `.bss`           | 0x801BDB80             | **0x801BDC40** (`align64(0x801BDC20)`) |
+    #   | `.bss` size      | 0x391D8                | **0x390D8** = 0x391D8 + 0x38 (the object) - 0x100 (four stand-ins) + (0x00 - 0x38) (no fill) |
+    #   | `__bss_end`      | 0x801F6D58             | **0x801F6D18**         |
+    #   | image            | 1825656                | **1825824**            |
+    #   | headroom         | 1086120                | **1086184**            |
+    #   | `args`           | +2064384               | **+2064384** (unmoved) |
+    #   | `topOfKernelData`| +3145728               | **+3145728** (unmoved) |
+    #
+    # `.text` stays inside the 0x801A0000..0x801A4000 band, so **no `__DATA` row moves**; the closure is the
+    # object's `.text` 0x48C with the stub list's one retirement and one creation cancelling (`-0x18 + 0x18` and
+    # `-0x14 + 0x14`, since `compute_averages` is 16 characters and `compute_averunnable` 18, and both slots are
+    # 0x14), plus the tail's own fill, which moves from 0x4 to 0x8 as the tail shifts 0x48C. `realstubs.o` should
+    # print `.text` **0x4008** = 683 x 0x18, `.rodata.str1.4` **0x3AE4** (unchanged: one name out, one in, both
+    # 0x14), `.bss` **0x27C4** = 0x28C4 - 4 x 0x40.
+    #
+    # **Predicted stop: `ccdrbg_factory_yarrow` again, at key `0x8003827C` - and this time the block says why it
+    # is the same prediction rather than a new one.** 361's stop was a thread the *scheduler* ran while the boot
+    # thread was elsewhere; the boot thread could not have been past `read_random`'s factory call, because that
+    # call is a stub and would have stopped the walk first. So the boot thread is at or before 0x80038278, and
+    # once `compute_averages` is real the maintenance thread's own remainder is stub-free - every direct call in
+    # `sched_timeshare_maintenance_continue` after 0x800A31F4 is real (`machine_max_runnable_latency`,
+    # `sched_update_recommended_cores` 174 instructions, `thread_setrun`, `lck_spin_lock`/`unlock`,
+    # `ml_set_interrupts_enabled`, `thread_block_reason`, `kernel_debug`), and its two indirect calls are
+    # `sched_multiq_thread_update_scan` (179 instructions, 0 stub calls) and the run-queue scan - so it reaches
+    # `assert_wait`/`thread_block`, blocks, and the boot thread resumes and walks to the factory call:
+    #
+    #   8003826c: ldr r2, [r6]      ; r2 = prng_ccdrbg_factory = 0x80175D24 + 0x48C = 0x8017A1B0 in the 362 image
+    #   80038278: blx r2            ; <- STUB, and the stop; the recorded lr is 0x8003827C
+    #
+    # Three named falsifiers: (a) the maintenance thread does not block first and instead reaches a stub through
+    # one of its scans - `sched_multiq_thread_update_scan`'s own calls were checked and are all real, so this
+    # would need a *virtual* dispatch inside it, which is the class of call 356 first named; (b) the boot thread
+    # was past `read_random` after all, which would mean a stub body executed without the instrument seeing it -
+    # refutable, since a stub body reports unconditionally; (c) the boot thread resumes into `bsd_init` first,
+    # which would need `read_random`'s factory path to be skipped, i.e. `pp->infop` non-NULL - and then the stop
+    # is `throttle_init` at `bsd_init+0x8`, key `0x8003A9FC`, which is 361's fallback unchanged.
+    #
+    # ### 362 measured: the walk is handed a *panic*, not a stop - and the machine has no platform driver
+    #
+    # Every count and every row above is exact. `786 symbol(s) undefined` in the `682 function(s), 104 storage`
+    # split, `.text` **0x801A3720** (end of its predicted band), `.data` **0x801A4000** (0x19A58),
+    # `.sysctl_set` **0x801BDA58** (0x150), `.init_array` **0x801BDBA8** (0x78, thirty) ending **0x801BDC20**,
+    # `.bss` **0x801BDC40** (0x0390D8), `__bss_end` **0x801F6D18**, image **1825824**, headroom **1086184**,
+    # `args` **+2064384**, `topOfKernelData` **+3145728**, `the copied image ends at 0x801bdc20, 32 bytes below
+    # __bss_start`. The pad rule's **tenth** confirmation is its **third zero**: `sched_average.o`'s 0x38 at
+    # 0x801F4508 ends at 0x801F4540 exactly where `realstubs.o`'s `.bss` (0x27C4) begins, and the `.bss` run
+    # reads as one unbroken chain (`IOEventSource.o` 0x801F4480 (0x18), `vm_shared_region.o` 0x801F4498 (0x70),
+    # `sched_average.o` 0x801F4508 (0x38), the three zero-size shims, `realstubs.o` 0x801F4540 (0x27C4)) with
+    # not a byte of fill anywhere in it.
+    #
+    # **The run did not stop. It panicked.** There is no `stub_hit` and no `stub_caller` (`_v`, `_a` and `_e`
+    # all zero), `abort_entries=0` - nothing faulted on the way - and the instrument's own classification is
+    #
+    #   MI4IOS6_STAGE90_XNU real XNU entry: exception: undefined instruction
+    #    xnu_entry_kv_written=0x000002f9   xnu_entry_kv_in_dram=0x0000031d   xnu_entry_kv_dropped=0x00000000
+    #    xnu_entry_why=0x8017ea20          xnu_entry_why_byte=0x00000065     'e'
+    #
+    # where every one of this walk's stops has read `why_byte=0x61` ('a', "a symbol this image does not
+    # provide was called"). `0x2f9`/`0x31d` are the largest counts this walk has reported and the first that
+    # belong to an event which is not a stub; the log is 302277 bytes, 3995 lines, last line the kernel's own
+    # `No errors detected`, and no panic text in it at all (the kernel's paniclog goes to its own ram_console,
+    # not to the loader's log).
+    #
+    # #### The trap, byte by byte
+    #
+    # `undef_lr=0x8002dd8c` and `undef_pc=0x8002dd88` (the instrument prints `lr - 4`, which is the ARM
+    # architectural return address of an undefined-instruction exception), `spsr=0x60000093`. The image's own
+    # disassembly of that address:
+    #
+    #   8002dd60 <DebuggerTrapWithState>:   push {r4, r5, fp, lr}; sub sp, sp, #16
+    #   8002dd68: ldr lr,[sp,#44] / ldr r5,[sp,#40] / ldr r4,[sp,#32] / ldr ip,[sp,#36]
+    #   8002dd78: stm sp, {r4, ip} / str r5,[sp,#8] / str lr,[sp,#12]
+    #   8002dd84: bl  8002ddc8 <DebuggerSaveState>
+    #   8002dd88: udf #65006  ; 0xfdee          <- the faulting instruction, and a deliberate one
+    #   8002dd8c: bl  80008e00 <current_processor>
+    #
+    # `udf #65006` is `TRAP_DEBUGGER` for `__arm__` (`osfmk/kern/debug.c:120-121`, `__asm__ volatile("trap")`),
+    # and the only instruction before it is the `bl DebuggerSaveState` that stores the op, message, panic string,
+    # args, options and caller (`debug.c:341-368`). So the trap is `debug.c:382`'s `TRAP_DEBUGGER` inside
+    # `DebuggerTrapWithState` - and of the four calls to that function in the tree (`debug.c:458` DBOP_DEBUGGER,
+    # `debug.c:645` DBOP_PANIC, `profile_runtime.c:116` DBOP_RESET_PGO_COUNTERS, `kern_stackshot.c:278`
+    # DBOP_STACKSHOT) **only `debug.c:645` carries a format string at all**:
+    # `DebuggerTrapWithState(DBOP_PANIC, "panic", panic_format_str, panic_args, panic_options_mask, TRUE,
+    # panic_caller)`. The trap frame agrees with that call on every field it can: `frame_r4 = 0` is
+    # `panic_options_mask`'s low half (the source passes `0` from `IOPanicPlatform::start`), `frame_r5 = 1` is
+    # `db_proceed_on_sync_failure` (`TRUE`), and `trap_sl_options_hi = 0` is the mask's high half.
+    #
+    # #### The format string names the call site, and it is read out of the image
+    #
+    # `xnu_entry_trap_r9_fmt=0x8019de16`, and the image's own disassembly of `IOPanicPlatform::start` names it:
+    #
+    #   80160458 <_ZN15IOPanicPlatform5startEP9IOService>:
+    #   8016045c: cmp r1, #0                        ; provider == NULL
+    #   80160460: beq 80160480
+    #   80160464: ldr r0, [r1] / ldr r2, [r0, #240] ; provider->getName(), vtable slot 60
+    #   80160474: blx r2 / mov r1, r0 / b 80160488   ; platform_name = provider->getName()
+    #   80160480: movw r1, #0xddfe / movt r1, #0x8019 ; r1 = 0x8019DDFE = "(unknown platform name)"
+    #   80160488: movw r0, #0xde16 / movt r0, #0x8019 ; r0 = 0x8019DE16 = the format, and the trap's r9
+    #   80160490: bl 8002deb4 <panic>
+    #
+    # r0 = 0x8019DE16 is the address the trap frame reports in r9, so the panicking call site is
+    # `IOPanicPlatform::start`, and `r9` is the panic *format*, not a return address. The bytes at 0x8019DE16:
+    #
+    #   8019de10 6e616d65 29002255 6e61626c 6520746f   name)."Unable to
+    #   8019de40 5c222573 5c222e5c 6e220022 48616c74   \"%s\".\n"."Halt
+    #
+    # i.e. `"Unable to find driver for this platform: \"%s\".\n"` - **with the quotes and the backslashes in
+    # the image**, because under `CONFIG_EMBEDDED` Apple's own `panic` macro stringifies its first argument:
+    # `osfmk/kern/debug.h:414-419` is `#define panic(ex, ...) (panic)(# ex, ## __VA_ARGS__)`. The literals in
+    # the image are therefore *source text*, and the trap's format field is a source-text address; reading it
+    # as the value a C compiler would have produced is the mistake this shape invites. The string occurs once
+    # in the image in that form and zero times in the unescaped form, and the neighbouring run of strings
+    # (`(unknown platform name)`, `"Halt/Restart Timed Out"` at `IOPlatformExpert.cpp:783`) is the same file's.
+    #
+    # #### Why the machine panics: the kernel's only personality is Apple's fallback
+    #
+    # `iokit/Kernel/IOStartIOKit.cpp:155` is `rootNub = new IOPlatformExpertDevice`, `:165` is
+    # `rootNub->registerService()` - and the kernel's catalogue of personalities is *one entry*:
+    #
+    #   iokit/KernelConfigTables.cpp:35  gIOKernelConfigTables = "( { 'IOClass' = IOPanicPlatform;
+    #                                     'IOProviderClass' = IOPlatformExpertDevice; 'IOProbeScore' = 0:32; } )"
+    #
+    # `IOCatalogue::initialize` parses that string with `OSUnserialize` (`IOCatalogue.cpp:98-102`), matching
+    # allocates the driver by *class name* out of the matched personality (`IOService.cpp:3296-3301`,
+    # `OSMetaClass::allocClassWithName(props->getObject(gIOClassKey))`), and `IOPanicPlatform::start`
+    # (`IOPlatformExpert.cpp:1725-1733`) is Apple's designed fallback - the class's own comment is "If no
+    # legitimate IOPlatformDevice matches, this one does and panics the kernel with a suitable message". So
+    # **the panic is correct XNU behaviour: this machine has no platform driver**, and every `PE_*` call and
+    # the whole DT device plane hang off the one that is missing.
+    #
+    # #### Why now, and which frontier kind this is
+    #
+    # `registerService` does not match inline; it enqueues `_IOServiceJob::startJob`, which is the *async*
+    # branch and the falsifier 360's own block named first. That job can only run once the boot is preemptible,
+    # which `spllo()` after `PE_init_iokit` (360's step) made true, and it can only *finish* the match once the
+    # objects the matching machinery calls are real (361 and 362). 361 answered the first event that hand-off
+    # produced with a *stub*; 362 answers the next one with a **kernel panic inside real code** - the walk's
+    # eighth frontier kind, and exactly the outcome 361's falsifier (c) said the instrument cannot report as a
+    # stop. The 362 prediction is refuted in its stop and correct in everything else: the walk never reached
+    # `read_random`'s factory call, because the thread that panicked got there first.
+    #
+    # #### One decode table in the instrument carries another image's offsets
+    #
+    # `fleh_undef`'s frame block was written against an image whose prologue saved five words. The 362 image's
+    # prologue saves six - `80002cf4: strd r4,[sp,#-24]!`, `80002cf8: strd r6,[sp,#8]`,
+    # `80002cfc: str r8,[sp,#16]`, **`80002d00: str lr,[sp,#20]`** - so the block's +20 word is now the
+    # trapping context's `lr`, printed under the name `frame_r9`, and the +24/+28 keys (`frame_sl`, `frame_lr`)
+    # read uninitialized stack. The run's own values say so in four places at once: `frame_r9 = 0x8002dd8c`
+    # equals `undef_lr`, `frame_r8 = 0xc80abeb0` equals `trap_r8_args`, `frame_r4 = 0` is the options mask's low
+    # half and `frame_r5 = 1` is `db_proceed_on_sync_failure` - the same three cross-checks the comment claims,
+    # one slot earlier. `frame_sl = 0x253` is therefore *not* the options mask's high half here (`trap_sl_options_hi`
+    # reads 0 and the source's mask is 0), and the older runs' reading of `frame_r5` as "the instruction after
+    # the `bl panic`" does not hold in this image either. The names are the check and the check moved.
+    #
+    # #### Frontier: 363 must supply the platform expert, because the tree has none
+    #
+    # Three facts, each read out of the tree rather than guessed:
+    #
+    #   * `IOPanicPlatform` is the only *concrete* platform expert in the link, and its `start` panics by design.
+    #   * `IODTPlatformExpert` - Apple's whole device-tree platform expert, `probe`, `configure`, `createNub`,
+    #     `createNubs`, `processTopLevel`, `getModelName`, `getMachineName`, `getNubResources`, `haltRestart`,
+    #     all of it in `iokit_Kernel_IOPlatformExpert.o`, real in this image since 355 - is refused by its own
+    #     metaclass: `IOPlatformExpert.cpp:1243` is `OSDefineMetaClassAndAbstractStructors(IODTPlatformExpert,
+    #     IOPlatformExpert)`, so `allocClassWithName` cannot instantiate it.
+    #   * `ApplePlatformExpert` (`IOKit/platform/ApplePlatformExpert.h:61`) is `OSDeclareAbstractStructors` *and*
+    #     has no implementation in the tree at all (`iokit/Kernel/` holds only `IOPlatformExpert.cpp`).
+    #
+    # So the missing piece is not an object to link but a class to *author*: a concrete subclass of
+    # `IODTPlatformExpert` whose entire content is its metaclass, inheriting Apple's implementation, plus a
+    # personality that names it ahead of the fallback. That is the step the Stage64..75 plane already modelled
+    # (`/msm8974-platform-driver` with `IOClass = MSM8974PlatformExpert` and `IOProbeScore = 0x00000650`, and
+    # "does not execute a Stage-owned platform driver" in every one of those contracts' boundaries): the
+    # scaffold's facts become the kernel's own driver, and Apple's `IOPanicPlatform` stays in the table behind
+    # it so that a failure to start is still a panic with a name rather than a silent no-driver boot.
+    #
+
     OSFMK_DEVICE_IOKIT_RPC_OBJ=${STAGE90_ENTRY_OSFMK_DEVICE_IOKIT_RPC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_device_iokit_rpc.o}
     IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOPlatformExpert.o}
     IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IODeviceTreeSupport.o}
@@ -11587,6 +12074,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     IOKIT_KERNEL_IOWORKLOOP_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOWORKLOOP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOWorkLoop.o}
     IOKIT_KERNEL_IOCOMMANDGATE_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOCOMMANDGATE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOCommandGate.o}
     IOKIT_KERNEL_IOEVENTSOURCE_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOEVENTSOURCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOEventSource.o}
+    OSFMK_VM_VM_SHARED_REGION_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_SHARED_REGION_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_shared_region.o}
+    OSFMK_KERN_SCHED_AVERAGE_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SCHED_AVERAGE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_sched_average.o}
     BSD_KERN_BSD_STUBS_OBJ=${STAGE90_ENTRY_BSD_KERN_BSD_STUBS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_bsd_stubs.o}
     IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOInterruptAccounting.o}
     IOKIT_KERNEL_IOKITDEBUG_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOKITDEBUG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOKitDebug.o}
@@ -18344,6 +18833,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_VM_VM_SHARED_REGION_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -18356,7 +18847,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
