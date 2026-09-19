@@ -3922,6 +3922,90 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # instead of finishing. That would be the first candidate in this walk that is a **panic**
     # rather than a stub, and the log distinguishes them: a panic prints its string, a stub prints
     # `stub_hit=`.
+    #
+    # 310: `device_init.c` - the stop ran to its end, and the port was real
+    #
+    # **The object that defines `device_service_create`, 309's stop, and the first step whose named
+    # alternative is a *panic* rather than a stub.** The prediction held on the name and the key and
+    # the alternative did not fire. Measured: `stub_hit=kdp_init` at
+    # `xnu_entry_stub_caller=0x8000e63c` = `kernel_bootstrap_thread + 0xbc`, which is the `bl` at
+    # `0x8000e638` - immediately after `bl device_service_create` at `0x8000e618`, which returned.
+    # The object's own `panic("can't allocate master device port")` at +0x30 was not taken: the log
+    # has no panic line and no `master device` string anywhere.
+    #
+    # The object is **188 bytes of `.text`**, 28 of `.bss`, 43 of `.rodata.str1.1`, with **9
+    # definitions and 11 references**, and the build measured exactly the prediction:
+    #
+    # | | predicted | measured |
+    # |---|---|---|
+    # | undefined / function / storage | 735 / 646 / 89 | 735 / 646 / 89 |
+    # | `.text` | 0x11D980 + 0xBC - 0x18 - 0x18 + 0x2B + fill | **0x11DA40** (+0xC0) |
+    # | `.data` | 0x80120000 | 0x80120000 |
+    # | `__bss_start` | 0x80138AC0 | 0x80138AC0 |
+    # | `__bss_end` | unmoved, 0x8016F8D8 | **0x8016F918** (moved +0x40) |
+    # | image | 0x138AAC | 0x138AAC |
+    # | headroom | 1640232 | **1640168** (-0x40) |
+    #
+    # `.text` is the arithmetic landing: +0xBC for the object, +0x2B for its `.rodata.str1.1`
+    # (merged into the `.text` output section), -0x18 for the retired stub body, -0x18 for the
+    # retired stub name string (`device_service_create` in the stub object's `.rodata.str1.4`,
+    # 0x3278 -> 0x3260), and **+0x9** of net alignment fill - the `.text` output section had 22
+    # `*fill*` entries before this step and has 24 after. The image is unchanged because `.text`
+    # ends well below the fixed `.data` at 0x80120000, so this step's 0xC0 is absorbed by slack.
+    #
+    # Resolved **1** (`device_service_create`, this stop), added **0**: all eleven references
+    # (`ipc_port_alloc_special` behind the `ipc_port_alloc_kernel` macro, `panic`, `ipc_kobject_set`,
+    # `host_priv_self`, `ipc_port_make_send`, `kernel_set_special_port`, `lck_grp_attr_alloc_init`,
+    # `lck_grp_alloc_init`, `lck_attr_alloc_init`, `lck_mtx_init`, `ipc_space_kernel`) were already
+    # resolved in this image, and `tools/stub_calls_in_function.py` reported no stub call inside any
+    # of their bodies - so the whole function was predictable from the host, and the run confirmed it.
+    #
+    # **The `.bss` prediction was wrong, and it is the mirror image of 308's.** 308 predicted movement
+    # and got none, because its object's 0x18 of `.bss` fitted inside the 0x2C of alignment fill that
+    # already separated `commpage.o` from the stub object. Here the prediction was "unmoved" and the
+    # measurement is +0x40:
+    #
+    #   .bss   0x8016e1b0  0x1c  osfmk_device_device_init.o   <- this step's 28 bytes
+    #   .bss   0x8016e1cc  0x0   xnu_arm_entry_rtabi.o
+    #   *fill* 0x8016e1cc  0x34
+    #   .bss   0x8016e200  0x1704 xnu_arm_entry_realstubs.o  <- the 89 stand-ins, 64-byte aligned
+    #
+    # The stub object's `.bss` is **64**-byte aligned, not 16: `readelf -S` says `al 64`, and the
+    # generator is the reason - all **89** stand-ins carry `__attribute__((aligned(64)))`, so the
+    # section inherits it. 308's note called it 16-byte aligned, which is true of the spacing it
+    # observed but is not the constraint, and this step is where the difference shows. The 0x10 of
+    # fill that existed in front of the stub object cannot hold 0x1C, so the whole 0x1704 moved to
+    # the next 64-byte boundary at 0x8016e200. The section grew by exactly that move, 0x40: **0x1C**
+    # of new input plus **0x24** more alignment fill (the fill in front of the stub object went from
+    # 0x10 to 0x34), and 0x1C + 0x24 = 0x40. The trailing fill after the stub object is 0x14 in both
+    # builds, which is why the end moves by the same 0x40. `__bss_end` is the end of the *padded*
+    # output section either way - 308 was the case where the padding absorbed the input, this is the
+    # case where the input pushed the padding along.
+    #
+    # What this step actually measures is not the count, it is a **port**. `device_service_create`
+    # called `ipc_port_alloc_special` and handed the result to `ipc_kobject_set`,
+    # `ipc_port_make_send` and `kernel_set_special_port` - the same three calls the image has been
+    # resolving since 278 - so a return means a real port object was allocated out of the real
+    # `ipc_space_kernel`, tagged `IKOT_MASTER_DEVICE` with `master_device_kobject` as its kobject,
+    # given a send right and installed at `HOST_IO_MASTER_PORT` on `host_priv_self()`. Its six
+    # globals - `master_device_port`, `master_device_kobject`, `dev_lck_grp_attr`, `dev_lck_grp`,
+    # `dev_lck_attr`, `iokit_obj_to_port_binding_lock` - are new names to this image rather than
+    # replacements for stand-ins: none appears in `xnu_arm_entry_realstubs.c`, because nothing
+    # referenced them before this step, so no zeroed stand-in was displaced. Its second
+    # `.rodata.str1.1` string is the lock group name `"device"`.
+    #
+    # **Next: `osfmk/kdp/kdp_udp.c`** (`osfmk_kdp_kdp_udp.o`, manifest:529) - the file that defines
+    # `kdp_init`, and a cheap step: **72 bytes of `.text`** and nothing else, 12 definitions and
+    # **1** reference (`panic_spin_forever`). This configuration compiles the KDP-disabled arm, so
+    # `kdp_init`, `kdp_register_send_receive`, `kdp_unregister_send_receive`,
+    # `kdp_set_ip_and_mac_addresses`, `kdp_set_gateway_mac`, `kdp_set_interface`, `kdp_register_link`
+    # and `kdp_unregister_link` are each a bare `bx lr`, and `kdp_get_interface` /
+    # `kdp_get_ip_address` are `mov r0, #0; bx lr`. It resolves **2** (`kdp_init` and
+    # `kdp_raise_exception`, both already undefined here) and adds **1** (`panic_spin_forever`, the
+    # target of `kdp_raise_exception`'s tail branch), so 735 -> 733 undefined and 646 -> 647 function
+    # stubs. Because `kdp_init` is one instruction, the stop is predicted to be the very next call
+    # the image makes: **`kpc_init` at caller key 0x8000E640** (`bl kpc_init` at `0x8000e63c`).
+    OSFMK_DEVICE_DEVICE_INIT_OBJ=${STAGE90_ENTRY_OSFMK_DEVICE_DEVICE_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_device_device_init.o}
     # 307: `ast.c` - 0x440 bytes, and the candidate is the first call `thread_invoke` makes
     #
     # **The object that defines the name 306 stopped on, and the first step whose prediction is a
@@ -9084,6 +9168,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_SFI_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_AST_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -9096,7 +9181,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
