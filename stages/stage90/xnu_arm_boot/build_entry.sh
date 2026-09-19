@@ -13526,6 +13526,160 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     BSD_VFS_VFS_QUOTA_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_QUOTA_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_vfs_quota.o}
     SECURITY_MAC_VFS_OBJ=${STAGE90_ENTRY_SECURITY_MAC_VFS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/security_mac_vfs.o}
     BSD_VFS_KPI_VFS_OBJ=${STAGE90_ENTRY_BSD_VFS_KPI_VFS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_kpi_vfs.o}
+    BSD_KERN_DECMPFS_OBJ=${STAGE90_ENTRY_BSD_KERN_DECMPFS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_decmpfs.o}
+    # =============================================================================================
+    # **430: `bsd/kern/decmpfs.c` - the object that retires `decmpfs_init`, the last stub call left
+    # in `vfsinit`, and the frontier becomes `IOServicePublishResource`: the first step whose caller
+    # key had to be *derived* rather than carried forward.**
+    #
+    # 429's run stopped at `decmpfs_init`, called from `vfsinit` at key `0x801b3e38`
+    # (`vfsinit + 0x5B8`) - the last stub call in that function. This object is the pool's only
+    # definer of that name and measures **1 resolved (1 function, 0 storage) / 3 added (3 function,
+    # 0 storage)**: `decmpfs_init` out; `IOServicePublishResource`, `IOServiceWaitForMatchingResource`
+    # and `IOCatalogueMatchingDriversPresent` in, as new function stubs this object's own read path
+    # references. Counts **771 -> 773** undefined, **619 -> 621** function, **152 -> 152** storage -
+    # and it is the *narrowest* step since 423 on the resolved side, because `vfsinit`'s line had
+    # exactly one stub left on it.
+    #
+    # **This is the first step whose caller key is not a name already in the image.** Every key since
+    # 422 has been `<function> + <offset>` where the function was linked long ago and therefore did
+    # not move - `vfsinit` has been at 0x801B3880 since 425 and is at 0x801B3880 again here, so 429's
+    # key was computable from the 428 map. This step's stop is *inside the object being linked*, so
+    # its address has to be derived from where the linker will put that object's `.text`, and that
+    # derivation is the one thing this block has to get right before the build rather than after it.
+    #
+    # **The derivation, and it is a chain the 425-429 maps already check.** `*(.text .text.*)` places
+    # each object's `.text` in command-line order with no gap beyond an input's own alignment, and
+    # the last four objects of `LINK_OBJS` ahead of the platform expert are contiguous to the byte in
+    # the 429 map:
+    #
+    #     bsd_kern_sys_generic.o   0x801ED620 + 0x3D64 = 0x801F1384   <- vfs_quota.o starts here
+    #     bsd_vfs_vfs_quota.o      0x801F1384 + 0x1900 = 0x801F2C84   <- mac_vfs.o starts here
+    #     security_mac_vfs.o       0x801F2C84 + 0x756C = 0x801FA1F0   <- kpi_vfs.o starts here
+    #     bsd_vfs_kpi_vfs.o        0x801FA1F0 + 0x53A0 = 0x801FF590   <- the platform expert, today
+    #
+    # so `bsd_kern_decmpfs.o` - inserted between `kpi_vfs.o` and `STAGE90_PLATFORM_EXPERT_OBJ` - takes
+    # **0x801FF590** as the start of its `.text` (its alignment is 16 and 0x801FF590 is 16-aligned, so
+    # the chain carries with no fill at all), and it pushes the platform expert and every stub after
+    # it up by its own 0x347C. The object has exactly one `.text` input section, and its mergeable
+    # `.rodata.str1.1` and its `.rodata` both land in the `.rodata` run *after* every `.text` input,
+    # so neither can move anything below them. Then, from the object's own `nm -S`:
+    #
+    #     decmpfs_init              0x801FF590 + 0x3294 = **0x80202824**
+    #     its `bl <IOServicePublishResource>` is at object +0x3370, i.e. +0xDC, so the return
+    #     address the stub reporter will record is +0xE0
+    #     caller key                0x80202824 + 0xE0  = **0x80202904**
+    #
+    # `register_decmpfs_decompressor` and `unregister_decmpfs_decompressor`, the object's other two
+    # exported names, land at **0x802006C0** and **0x80200760** by the same arithmetic - two more
+    # addresses in the new image that `nm` can check before anything is run.
+    #
+    # **The call is reached, and the reason is that the compiler folded the guards away.** The
+    # source's `decmpfs_init` (`bsd/kern/decmpfs.c:1858`) ends in
+    # `register_decmpfs_decompressor(CMP_Type1, &Type1Reg)`, and clang inlined that function *and its
+    # two tests*: `compression_type >= CMP_MAX` and `registration_valid(registration)`
+    # (`decmpfs.c:952`, a `static inline`) are both functions of compile-time constants, so neither
+    # survives in the code - the function's eleven calls and two conditional branches are the whole
+    # of it. What is left of the registration test at `decmpfs_init + 0xA0` is one runtime test:
+    #
+    #     +0xA0: ldr r1, [r0, #4]        r0 = decompressors, r1 = decompressors[CMP_Type1]
+    #     +0xA4: cmp r1, #0
+    #     +0xA8: bne +0xE0               skip the whole publish if one is already registered
+    #
+    # and the branch lands on exactly `decmpfs_init + 0xE0` - the instruction after the `bl` at
+    # `+0xDC` - which is why the skipped path and the returned path rejoin at the same address.
+    # `decompressors` is a `.bss` array this object defines itself (0x3FC = 255 x 4, matching
+    # `CMP_MAX = 255` at `bsd/sys/decmpfs.h:68`) which the payload zeroes - so the branch is not
+    # taken, and the store of `&Type1Reg`, the real `snprintf` and the `bl` all execute. The other
+    # conditional branch is the idempotence guard at the top, `decmpfs_init.done` (`.bss +0x410`,
+    # read at object +0x10), and it reads zero for the same reason. **Both branches in this function
+    # are guards on a word this object's own `.bss` holds, and the payload's `bzero` is what decides
+    # them** - which is the storage reading this walk has used since 342, here in its cleanest form.
+    #
+    # **Every other call on the line is real, and 429 is what made them real**: `vfs_context_kernel`
+    # (the previous step's own name), `vfs_context_create`, and the whole `lck_*` family -
+    # `lck_grp_attr_alloc_init`, `lck_grp_alloc_init`, `lck_grp_attr_free`, `lck_rw_alloc_init`,
+    # `lck_mtx_alloc_init`, `lck_rw_lock_exclusive`, `lck_rw_unlock_exclusive` - plus `snprintf`.
+    #
+    # **Prediction, written before the build: `stub_hit=IOServicePublishResource`, caller key
+    # `0x80202904`.**
+    #
+    # Falsifiers, named in advance: **a key in the 0x801FF5xx-0x801FF7xx range** - which would say the
+    # object's `.text` did not land at 0x801FF590 and the contiguous-chain reading above is wrong, and
+    # which is why the two `register_decmpfs_decompressor` addresses are checkable with `nm` first; a
+    # stop at `decmpfs_init` itself, key `0x801b3e38` again - the *same* key as 429's run, which is
+    # defect 130's case (a marker stable across a link change cannot confirm which image ran) and would
+    # mean the link did not take the object; a stop at `vfs_context_create` or any `lck_*` name, which
+    # would say the 429 link did not make them real after all; a stop at `snprintf`; a stop on
+    # `IOServiceWaitForMatchingResource` or `IOCatalogueMatchingDriversPresent`, the other two names
+    # this object makes undefined - both are referenced only from `_decmp_get_func`
+    # (`decmpfs.c:241`, calls at 259/267/271), the decompressor *lookup* the read path runs, so a stop
+    # there would mean a compressed file was opened before the frontier, which is a far larger
+    # statement than this step; a `panic`.
+    #
+    # **And 431 is already named.** `IOServicePublishResource` is defined by exactly one object in the
+    # 695-object pool - **`iokit_bsddev_IOKitBSDInit.o`** (`iokit/bsddev/IOKitBSDInit.cpp`) - which
+    # also defines all three of this step's added names plus `IOFindBSDRoot`, `IORamDiskBSDRoot`,
+    # `IOSecureBSDRoot`, `IOKitBSDInit`, `IOBSDNameMatching` and `IOBSDGetPlatformUUID`; measured
+    # against the 429 image it is 6 resolved / 4 added (`di_root_ramfile`, `mdevadd`, `mdevlookup`,
+    # `mdevremoveall`), and against *this* image it will be **9 resolved / 4 added** - 773 -> 768
+    # undefined - because the three names this step creates are three of the nine it retires. Its
+    # `.text` is 0x133C, 0x10 of `.bss` and 0x332 of mergeable `.rodata.str1.1`, and it has no
+    # `__DATA, __data` at all. **That is the first frontier in this walk whose definer is an I/O Kit
+    # object, and `IOFindBSDRoot` is inside it** - the root-mount layer the standing note about
+    # `ml_init_timebase` and `IOCPUInterruptController` has been about since 405. The timer stops
+    # being a footnote at exactly this point in the walk.
+    #
+    # **Measured, from the build - and the derived key is the part that was on trial.**
+    #
+    #     bsd_kern_decmpfs.o   1 resolved (decmpfs_init) / 3 added (the three IOService* names)
+    #     stubs: 773 (621 function, 152 storage)
+    #     map: .text 0x801FF590 (0x347C)   decmpfs_init 0x80202824
+    #          register_decmpfs_decompressor 0x802006C0   unregister_decmpfs_decompressor 0x80200760
+    #
+    # **All three addresses are the predicted ones to the byte.** The object's `.text` did land at
+    # 0x801FF590 - the contiguous chain of the four maps above is what said so, and it is now checked
+    # against a fifth - so `decmpfs_init` is at 0x801FF590 + 0x3294, and the two names the block
+    # predicted only as a cross-check came out at 0x801FF590 + 0x1130 and 0x801FF590 + 0x11D0. The
+    # stub counts are the effect tool's **773 / 621 / 152** exactly: 1 function stub retired, 3 added,
+    # no storage either way.
+    #
+    # **Measured, from the run: name and key exactly as predicted.**
+    #
+    #     MI4IOS6_STAGE90_XNU kernel_entry ok
+    #     MI4IOS6_STAGE90_XNU real XNU entry stub_hit=IOServicePublishResource
+    #      xnu_entry_stub_caller_v=0x80202904        # decmpfs_init + 0xE0, as predicted
+    #      xnu_entry_stub_caller_digits=0x0000003c   # spells "80202904" with _w0/_w1
+    #      xnu_entry_stub_caller_w0=0x30323038 ("8020")  w1=0x34303932 ("2904")
+    #      xnu_entry_abort_entries=0x00000000
+    #     MI4IOS6_STAGE90_XNU xnu_entry_checks=0x00000005   xnu_entry_failures=0x00000000
+    #     No errors detected
+    #
+    # **None of the falsifiers happened.** The key is not in the 0x801FF5xx range (the object's `.text`
+    # landed where the chain said it would), and it is not 429's key, which is the two-way reading that
+    # says this is a different image *and* that the link took the object. No `vfs_context_create`,
+    # `lck_*` or `snprintf` stop. Neither read-path name fired - `IOServiceWaitForMatchingResource`
+    # would have meant a compressed file was opened before the frontier, and it was not. The two `.bss`
+    # guards read zero as the payload's `bzero` says they must, and the inlined
+    # `register_decmpfs_decompressor` ran its whole publish path up to the one call this image does not
+    # provide.
+    #
+    # Layout, and the arithmetic here is a rule worth keeping. The whole run's markers differ from
+    # 429's: stubnames **773** (621 / 152), text **0x233F20** (2309920), image **0x2502AC** (2425516
+    # bytes), `.bss` **0x802502C0 .. 0x802921D8** (270104 bytes), args **0x80294000**, headroom
+    # **1498664**, `checksum=0x904061F1`, `entering_at=0x80000074`, payload sha256 `83b8e814...`
+    # (5445632 bytes), entry bin sha256 `d23e4d00...` (2425516 bytes).
+    #
+    # **`.text` grew by 0x36E0 and the image grew by only 0x3A8, and the difference is an alignment
+    # boundary rather than a mistake**: `.data` is placed at 0x80234000 in both images because both
+    # `.text` ends round up to that `ALIGN` - the gap between `.text` and `.data` was 0x37C0 in 429 and
+    # is 0xE0 here, so 0x36E0 of text growth was swallowed by the gap and **nothing below `.text` moved
+    # for it**. Everything the image did grow is `bsd_kern_decmpfs.o`'s own `__DATA, __data`, 0x3A8 at
+    # 0x8024FC70 - the image delta is that number to the byte, and `.bss`'s start moved by 0x380, which
+    # is 0x3A8 minus the 0x28 by which the `.init_array`-to-`.bss` alignment gap shrank. `.bss`'s
+    # *size* grew 0x400 (269080 -> 270104) against the object's own 0x411: **the 0x11 is the fill
+    # term, the same rule that made `.text`'s earlier predictions miss by 0x12 and 0x55.**
+    # =============================================================================================
     # =============================================================================================
     # **429: `bsd/vfs/kpi_vfs.c` - the object that retires `vfs_context_kernel` and 108 more names,
     # and the frontier becomes `decmpfs_init`: the last stub call left in `vfsinit`.**
@@ -13721,11 +13875,12 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # **Prediction, written before the build: `stub_hit=mac_mount_label_init`, caller key = the linked
     # address of `vfsinit + 0x59C`** - the return address of the `bl <mac_mount_label_init>` at
     # `vfsinit + 0x598`. Against the 425 link that is `0x801b3e1c`, and the address cannot move:
-    # this object is appended to `LINK_OBJS` after `bsd_kern_sys_generic.o`, so every object linked
-    # from 422 onward keeps its address, and `mac_mount_label_init` is a stand-in in the entry stubs
-    # object, which is linked third. The reading behind it is that the instructions between the
-    # `bl <dqinit>` at `+0x49C` and the `bl <mac_mount_label_init>` at `+0x598` contain **no
-    # conditional branch and no `b`** - only `bl <__MALLOC_ZONE>`, `bl <__bzero>`, three
+    # this object *was* appended to `LINK_OBJS` after `bsd_kern_sys_generic.o` - 428, 429 and 430
+    # have since been appended after *it*, which is the other half of the same rule - so every
+    # object linked from 422 onward keeps its address, and `mac_mount_label_init` is a stand-in in
+    # the entry stubs object, which is linked third. The reading behind it is that the instructions
+    # between the `bl <dqinit>` at `+0x49C` and the `bl <mac_mount_label_init>` at `+0x598` contain
+    # **no conditional branch and no `b`** - only `bl <__MALLOC_ZONE>`, `bl <__bzero>`, three
     # `bl <lck_mtx_init>` and `bl <lck_rw_init>`, all real - so the straight line reaches it.
     #
     # The walk agrees as a pair rather than as one answer, and that is the form 426 left the tool in:
@@ -25175,6 +25330,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$BSD_VFS_VFS_QUOTA_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$SECURITY_MAC_VFS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_VFS_KPI_VFS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_DECMPFS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -25187,7 +25343,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$IOKIT_KERNEL_IOCOMMAND_OBJ" "$IOKIT_KERNEL_IOPOWERCONNECTION_OBJ" "$BSD_KERN_KERN_MALLOC_OBJ" "$IOKIT_TESTS_TESTS_OBJ" "$OSFMK_KERN_WORK_INTERVAL_OBJ" "$BSD_KERN_SYS_REASON_OBJ" "$OSFMK_IPC_IPC_KMSG_OBJ" "$OSFMK_IPC_IPC_OBJECT_OBJ" "$BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ" "$BSD_KERN_KERN_AUTHORIZATION_OBJ" "$BSD_KERN_KERN_CREDENTIAL_OBJ" "$BSD_KERN_KERN_PROC_OBJ" "$BSD_CONF_PARAM_OBJ" "$BSD_KERN_KERN_SUBR_OBJ" "$BSD_KERN_TTY_OBJ" "$BSD_KERN_KERN_OVERRIDES_OBJ" "$BSD_KERN_SYS_ULOCK_OBJ" "$SECURITY_MAC_PROCESS_OBJ" "$BSD_KERN_KERN_DESCRIP_OBJ" "$BSD_VFS_VFS_BIO_OBJ" "$BSD_KERN_KERN_TIME_OBJ" "$BSD_VFS_VFS_CLUSTER_OBJ" "$BSD_KERN_KERN_SYNCH_OBJ" "$BSD_KERN_UBC_SUBR_OBJ" "$BSD_VFS_VFS_INIT_OBJ" "$BSD_VFS_VFS_SUBR_OBJ" "$BSD_VFS_VFS_CACHE_OBJ" "$BSD_VFS_VFS_SYSCALLS_OBJ" "$BSD_KERN_PROC_UUID_POLICY_OBJ" "$BSD_KERN_MCACHE_OBJ" "$BSD_KERN_UIPC_MBUF_OBJ" "$BSD_KERN_KPI_MBUF_OBJ" "$BSD_NET_NET_STR_ID_OBJ" "$BSD_KERN_SUBR_EVENTHANDLER_OBJ" "$BSD_KERN_KERN_AIO_OBJ" "$BSD_KERN_SYS_PIPE_OBJ" "$BSD_KERN_POSIX_SHM_OBJ" "$BSD_KERN_POSIX_SEM_OBJ" "$BSD_KERN_PTHREAD_SHIMS_OBJ" "$BSD_KERN_SYS_GENERIC_OBJ" "$BSD_VFS_VFS_QUOTA_OBJ" "$SECURITY_MAC_VFS_OBJ" "$BSD_VFS_KPI_VFS_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$IOKIT_KERNEL_IOCOMMAND_OBJ" "$IOKIT_KERNEL_IOPOWERCONNECTION_OBJ" "$BSD_KERN_KERN_MALLOC_OBJ" "$IOKIT_TESTS_TESTS_OBJ" "$OSFMK_KERN_WORK_INTERVAL_OBJ" "$BSD_KERN_SYS_REASON_OBJ" "$OSFMK_IPC_IPC_KMSG_OBJ" "$OSFMK_IPC_IPC_OBJECT_OBJ" "$BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ" "$BSD_KERN_KERN_AUTHORIZATION_OBJ" "$BSD_KERN_KERN_CREDENTIAL_OBJ" "$BSD_KERN_KERN_PROC_OBJ" "$BSD_CONF_PARAM_OBJ" "$BSD_KERN_KERN_SUBR_OBJ" "$BSD_KERN_TTY_OBJ" "$BSD_KERN_KERN_OVERRIDES_OBJ" "$BSD_KERN_SYS_ULOCK_OBJ" "$SECURITY_MAC_PROCESS_OBJ" "$BSD_KERN_KERN_DESCRIP_OBJ" "$BSD_VFS_VFS_BIO_OBJ" "$BSD_KERN_KERN_TIME_OBJ" "$BSD_VFS_VFS_CLUSTER_OBJ" "$BSD_KERN_KERN_SYNCH_OBJ" "$BSD_KERN_UBC_SUBR_OBJ" "$BSD_VFS_VFS_INIT_OBJ" "$BSD_VFS_VFS_SUBR_OBJ" "$BSD_VFS_VFS_CACHE_OBJ" "$BSD_VFS_VFS_SYSCALLS_OBJ" "$BSD_KERN_PROC_UUID_POLICY_OBJ" "$BSD_KERN_MCACHE_OBJ" "$BSD_KERN_UIPC_MBUF_OBJ" "$BSD_KERN_KPI_MBUF_OBJ" "$BSD_NET_NET_STR_ID_OBJ" "$BSD_KERN_SUBR_EVENTHANDLER_OBJ" "$BSD_KERN_KERN_AIO_OBJ" "$BSD_KERN_SYS_PIPE_OBJ" "$BSD_KERN_POSIX_SHM_OBJ" "$BSD_KERN_POSIX_SEM_OBJ" "$BSD_KERN_PTHREAD_SHIMS_OBJ" "$BSD_KERN_SYS_GENERIC_OBJ" "$BSD_VFS_VFS_QUOTA_OBJ" "$SECURITY_MAC_VFS_OBJ" "$BSD_VFS_KPI_VFS_OBJ" "$BSD_KERN_DECMPFS_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
