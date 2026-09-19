@@ -141,7 +141,7 @@ MI4IOS6_STAGE90_XNU real XNU entry: exception: data abort
 ```
 
 `xnu_entry_why_byte` is the first byte of the `why` string, which makes it a one-character telegraph of the
-stop's *kind*: `'s'` on every stub stop of this walk, and `'e'` here.
+stop's *kind*: **`'a'`** (the first byte of *"a symbol this image does not provide was called"*) on a stub stop, and `'e'` here — corrected at 341, which measured a stub stop's byte as 0x61 and made the pair `'a'`/`'e'` rather than the `'s'` guessed here from the wording of the `stub_hit=` line.
 
 `e5952000` is `ldr r2, [r5]`, and the instructions that load `r5` sit 0x1C bytes above it:
 
