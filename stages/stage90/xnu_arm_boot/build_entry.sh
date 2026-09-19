@@ -13524,6 +13524,78 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     BSD_KERN_PTHREAD_SHIMS_OBJ=${STAGE90_ENTRY_BSD_KERN_PTHREAD_SHIMS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_pthread_shims.o}
     BSD_KERN_SYS_GENERIC_OBJ=${STAGE90_ENTRY_BSD_KERN_SYS_GENERIC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_sys_generic.o}
     BSD_VFS_VFS_QUOTA_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_QUOTA_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_vfs_quota.o}
+    SECURITY_MAC_VFS_OBJ=${STAGE90_ENTRY_SECURITY_MAC_VFS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/security_mac_vfs.o}
+    # =============================================================================================
+    # **428: `security/mac_vfs.c` - the object that retires `mac_mount_label_init` and 54 more
+    # names with it, and the frontier becomes `vfs_context_kernel`.**
+    #
+    # 427's run stopped at `mac_mount_label_init`, called from `vfsinit` at key `0x801b3e1c`
+    # (`vfsinit + 0x59C`). This is the largest step since 423 and the widest single object in this
+    # run of steps: **55 resolved (55 function, 0 storage) / 2 added (2 function, 0 storage)** -
+    # every `mac_vnode_*`, `mac_mount_*`, `mac_vnode_notify_*` and `vn_setlabel` stand-in this walk
+    # has been walking past goes real at once. Counts **906 -> 853** undefined, **777 -> 724**
+    # function, **129 -> 129** storage.
+    #
+    # **`mac_mount_label_init`'s body cannot stop, and it is the first body in this run of steps whose
+    # argument is a real allocation.** From `bsd/vfs/vfs_init.c:505` it is called with the `mp` that
+    # line 479 allocated - `MALLOC_ZONE(mp, struct mount *, sizeof(struct mount), M_MOUNT, M_WAITOK)`,
+    # a real `__MALLOC_ZONE` call - and bzeroed at 480, so the `[r4, #2364]` store that ends the
+    # function lands inside a real `struct mount` rather than past a 4-byte stand-in. Its body is
+    # three **real** direct calls and two indirect ones:
+    #
+    #     mac_labelzone_alloc               real - security_mac_label.o, in LINK_OBJS since 274
+    #     mac_policy_list_conditional_busy  real - security_mac_base.o, in LINK_OBJS since 274
+    #     mac_policy_list_unbusy            real - the same object
+    #     blx r2  x2                        the policy vtable's hook at +380, entered only from a
+    #                                       non-empty `mac_policy_list` slot
+    #
+    # and `mac_policy_list` is real and zeroed (`security_mac_base.o`, a 0x1C-byte `.bss` object, and
+    # the image's `nm -S` agrees: 0x1C). Its count field is the word at `+12`, the first thing the
+    # function tests, so with no policy module linked the two loops are skipped and the function
+    # falls to `mac_policy_list_conditional_busy` and returns. **The indirect calls are the shape
+    # rule 426 cannot model at all** - a `blx` through a vtable is not a call site the walk can name -
+    # so they are closed here by the *storage* rather than by the graph: what selects the hook is a
+    # zeroed array in an object that has been in the link since 274.
+    #
+    # **The object's two created stubs are not reachable before the frontier** (342's trap, checked by
+    # ownership): `VNOP_SETLABEL` and `exec_spawnattr_getmacpolicyinfo` are referenced only by
+    # `mac_cred_check_label_update_execve`, `mac_cred_label_update_execve`, `mac_vnode_check_exec`
+    # and `vn_setlabel` - the exec and label-setting paths - and none of those is on `vfsinit`'s line.
+    #
+    # **Prediction, written before the build: `stub_hit=vfs_context_kernel`, caller key = the linked
+    # address of `vfsinit + 0x5A0`** - the return address of the `bl <vfs_context_kernel>` at
+    # `vfsinit + 0x59C`. Against the 427 link that is `0x801b3e20`. Note what this step does *not*
+    # stop on: it retires `mac_mount_label_associate` too, and that call sits four bytes *after*
+    # `vfs_context_kernel` on the same line (`+0x5A4`) - `mac_mount_label_associate(vfs_context_kernel(),
+    # mp)` is one source statement (`vfs_init.c:506`) compiled as two calls in argument order, so the
+    # object that supplies the second argument's callee is *not* the one that supplies the first.
+    #
+    # Falsifiers, named in advance: a stop inside `mac_mount_label_init` - any of its three direct
+    # calls - which would say one of them is not as real as its absence from the stub set says; a stop
+    # at the indirect `blx r2`, which cannot happen as a *stub* stop (the stub reporter needs a `bl`);
+    # a stop at `mac_mount_label_associate` (`+0x5A4`, key `0x801b3e28`), which would mean
+    # `vfs_context_kernel` is real in this link and the walk should have said so; a stop on
+    # `VNOP_SETLABEL` or `exec_spawnattr_getmacpolicyinfo`; a stop at `dqinit` (`+0x49C`) or
+    # `nspace_handler_init` (`+0x238`), both behind the frontier and both already real; a `panic`.
+    #
+    # **Measured on hardware: exactly that.**
+    #
+    #     MI4IOS6_STAGE90_XNU kernel_entry ok
+    #     MI4IOS6_STAGE90_XNU real XNU entry stub_hit=vfs_context_kernel
+    #      xnu_entry_stub_caller_v=0x801b3e20        # vfsinit + 0x5A0, as predicted
+    #      xnu_entry_stub_caller_digits=0x00000036    # spells "80b13e20" with _w0/_w1
+    #      xnu_entry_abort_entries=0x00000000
+    #     MI4IOS6_STAGE90_XNU xnu_entry_checks=0x00000005   xnu_entry_failures=0x00000000
+    #
+    # **None of the falsifiers happened**, including the one this step had a real chance of: the
+    # object *does* retire `mac_mount_label_associate` and the run still stopped at
+    # `vfs_context_kernel`, which is what says the two-calls-from-one-statement reading above is the
+    # right one. Layout: stubnames **853** (724 function, 129 storage - exactly the count the effect
+    # tool predicted), text **0x22C360**, image **0x24BEBC** (2408124 bytes), `.bss`
+    # **0x8024BEC0 .. 0x8028D418**, args **0x8028F000**, headroom **1518568**, payload sha256
+    # `accc9c0b...` (5427200 bytes), `checksum=0x90402421`, `entering_at=0x80000074`. Every marker
+    # differs from 427's.
+    # =============================================================================================
     # =============================================================================================
     # **427: `bsd/vfs/vfs_quota.c` - the object that retires `dqinit` and `munge_dqblk`, and the
     # frontier becomes `mac_mount_label_init`: the first one-object step after the batch.**
@@ -25014,6 +25086,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$BSD_KERN_PTHREAD_SHIMS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_SYS_GENERIC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_VFS_VFS_QUOTA_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$SECURITY_MAC_VFS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -25026,7 +25099,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$IOKIT_KERNEL_IOCOMMAND_OBJ" "$IOKIT_KERNEL_IOPOWERCONNECTION_OBJ" "$BSD_KERN_KERN_MALLOC_OBJ" "$IOKIT_TESTS_TESTS_OBJ" "$OSFMK_KERN_WORK_INTERVAL_OBJ" "$BSD_KERN_SYS_REASON_OBJ" "$OSFMK_IPC_IPC_KMSG_OBJ" "$OSFMK_IPC_IPC_OBJECT_OBJ" "$BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ" "$BSD_KERN_KERN_AUTHORIZATION_OBJ" "$BSD_KERN_KERN_CREDENTIAL_OBJ" "$BSD_KERN_KERN_PROC_OBJ" "$BSD_CONF_PARAM_OBJ" "$BSD_KERN_KERN_SUBR_OBJ" "$BSD_KERN_TTY_OBJ" "$BSD_KERN_KERN_OVERRIDES_OBJ" "$BSD_KERN_SYS_ULOCK_OBJ" "$SECURITY_MAC_PROCESS_OBJ" "$BSD_KERN_KERN_DESCRIP_OBJ" "$BSD_VFS_VFS_BIO_OBJ" "$BSD_KERN_KERN_TIME_OBJ" "$BSD_VFS_VFS_CLUSTER_OBJ" "$BSD_KERN_KERN_SYNCH_OBJ" "$BSD_KERN_UBC_SUBR_OBJ" "$BSD_VFS_VFS_INIT_OBJ" "$BSD_VFS_VFS_SUBR_OBJ" "$BSD_VFS_VFS_CACHE_OBJ" "$BSD_VFS_VFS_SYSCALLS_OBJ" "$BSD_KERN_PROC_UUID_POLICY_OBJ" "$BSD_KERN_MCACHE_OBJ" "$BSD_KERN_UIPC_MBUF_OBJ" "$BSD_KERN_KPI_MBUF_OBJ" "$BSD_NET_NET_STR_ID_OBJ" "$BSD_KERN_SUBR_EVENTHANDLER_OBJ" "$BSD_KERN_KERN_AIO_OBJ" "$BSD_KERN_SYS_PIPE_OBJ" "$BSD_KERN_POSIX_SHM_OBJ" "$BSD_KERN_POSIX_SEM_OBJ" "$BSD_KERN_PTHREAD_SHIMS_OBJ" "$BSD_KERN_SYS_GENERIC_OBJ" "$BSD_VFS_VFS_QUOTA_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$IOKIT_KERNEL_IOCOMMAND_OBJ" "$IOKIT_KERNEL_IOPOWERCONNECTION_OBJ" "$BSD_KERN_KERN_MALLOC_OBJ" "$IOKIT_TESTS_TESTS_OBJ" "$OSFMK_KERN_WORK_INTERVAL_OBJ" "$BSD_KERN_SYS_REASON_OBJ" "$OSFMK_IPC_IPC_KMSG_OBJ" "$OSFMK_IPC_IPC_OBJECT_OBJ" "$BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ" "$BSD_KERN_KERN_AUTHORIZATION_OBJ" "$BSD_KERN_KERN_CREDENTIAL_OBJ" "$BSD_KERN_KERN_PROC_OBJ" "$BSD_CONF_PARAM_OBJ" "$BSD_KERN_KERN_SUBR_OBJ" "$BSD_KERN_TTY_OBJ" "$BSD_KERN_KERN_OVERRIDES_OBJ" "$BSD_KERN_SYS_ULOCK_OBJ" "$SECURITY_MAC_PROCESS_OBJ" "$BSD_KERN_KERN_DESCRIP_OBJ" "$BSD_VFS_VFS_BIO_OBJ" "$BSD_KERN_KERN_TIME_OBJ" "$BSD_VFS_VFS_CLUSTER_OBJ" "$BSD_KERN_KERN_SYNCH_OBJ" "$BSD_KERN_UBC_SUBR_OBJ" "$BSD_VFS_VFS_INIT_OBJ" "$BSD_VFS_VFS_SUBR_OBJ" "$BSD_VFS_VFS_CACHE_OBJ" "$BSD_VFS_VFS_SYSCALLS_OBJ" "$BSD_KERN_PROC_UUID_POLICY_OBJ" "$BSD_KERN_MCACHE_OBJ" "$BSD_KERN_UIPC_MBUF_OBJ" "$BSD_KERN_KPI_MBUF_OBJ" "$BSD_NET_NET_STR_ID_OBJ" "$BSD_KERN_SUBR_EVENTHANDLER_OBJ" "$BSD_KERN_KERN_AIO_OBJ" "$BSD_KERN_SYS_PIPE_OBJ" "$BSD_KERN_POSIX_SHM_OBJ" "$BSD_KERN_POSIX_SEM_OBJ" "$BSD_KERN_PTHREAD_SHIMS_OBJ" "$BSD_KERN_SYS_GENERIC_OBJ" "$BSD_VFS_VFS_QUOTA_OBJ" "$SECURITY_MAC_VFS_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
