@@ -1,40 +1,42 @@
 #!/usr/bin/env python3
 """
-The conditions this build turns on that Apple's `MASTER` configuration does not carry.
+The conditions the manifest decides, derived from the configuration that declares them.
 
     ./tools/xnu_config/device_table.py                # the table, to stdout
     ./tools/xnu_config/device_table.py --write PATH
-    ./tools/xnu_config/device_table.py --unknown      # the conditions with no entry, and what needs them
+    ./tools/xnu_config/device_table.py --unknown      # conditions with no entry, and what they gate
 
-Why this exists. A `*/conf/files` line is `<path> optional <cond>`, and `cond` can come from three
-places in Apple's build:
+Why this exists. A `*/conf/files` line is `<path> optional <cond>`, and in Apple's build `cond` is
+answered by two separate mechanisms:
 
-1. an **option** — `config/MASTER`, expanded by doconf. `list_sources.py` reads these already.
-2. an **`OPTIONS/` line** — `SETUP/config/mkheaders.c` writes `<COND>.h` with a `0` or `1`, and the
-   same name is what `optional` matches against. `tools/gen_option_headers.py` reproduces it. These
-   agree with (1), so they need no separate handling.
-3. a **device** — `device` / `pseudo-device` in a kernel configuration file, which becomes
-   `#define NLOOP 1` in a generated header. **4570 publishes no `device` or `pseudo-device` lines at
-   all** (`grep -c '^pseudo-device' */conf/files` is 0 in every component), so this half of the
-   configuration is simply absent — the same gap `MONOTONIC` was (experiment-112) and the per-SoC
-   build definitions are (experiment-113).
+1. an **option** — an `options <NAME>` line in the configuration, which `config/MASTER` expanded by
+   doconf carries. `list_sources.py` reads these already, via `make_defines.sh`.
+2. a **device** — `device` / `pseudo-device` in the configuration. `parser.y:207-229` puts it in
+   `dtab`, and `condition_met`'s `optional <cond>` matches against dtab **as well as** the option
+   list. `bsd/net/if_loop.c` is `optional loop` and `loop` is a device; there is no `options LOOP`.
 
-Two consequences, and the second is a defect this table exists to fix:
+**This file used to say the second half was absent, and that was wrong.** It recorded
 
-  * `optional loop` and `optional pty` can never match, so `bsd/net/if_loop.c` and
-    `bsd/kern/tty_pty.c` are never compiled, and the `NLOOP`/`NPTY` values in the headers have to be
-    chosen to agree with that.
-  * **`optional monotonic` can never match either — and the build script defines `-DMONOTONIC=1` by
-    hand.** So `osfmk/kern/kern_monotonic.c`, the only file that implements what the macro turns on,
-    was excluded from the manifest while every user of it was compiled against `MONOTONIC 1`. That
-    is the project's recurring defect with a new mechanism: one value, two definitions, and the
-    build never compared them.
+    grep -c '^pseudo-device' */conf/files      # 0 in every component
 
-So the table is the place where "conditions this project chooses" live, and **both** the manifest and
-the compile flags read it, which is what stops them disagreeing again.
+and concluded "4570 publishes no `device` or `pseudo-device` lines at all ... so this half of the
+configuration is simply absent". The grep is right; the conclusion is not. `config/MASTER` publishes
+**24** of them, `expand.sh` already expands them — experiment 439 derived `pseudo_inits[]` from
+exactly those lines — and looking for the declaration in `*/conf/files` (where a condition is
+*tested*) instead of in `config/MASTER` (where it is *declared*) is
+[[mi4-not-absent-its-build-output]] once more: not absent, in the other file.
 
-`1` means the condition is on; `0` means off. A condition not in the table at all is reported by
-`--unknown` with the files that want it, so an omission is visible rather than silent.
+So the table is **derived** now: every device the configuration declares is in it at 1, with the
+value it needs for the manifest. What is left for a human is `OVERRIDES` — the places where this
+configuration deliberately does *not* follow the declaration — and each of those carries its reason
+and is checked, so an override that is no longer doing anything is reported rather than rotting.
+
+**This table is the manifest's half of one decision that has three halves**, and the other two are
+`tools/gen_device_headers.py` (`#define N<COND> <count>`) and `tools/gen_pseudo_inits.py` (the
+`{count, func}` array). All three read `tools/xnu_config/devices.py`. `tools/check_device_conditions.py`
+compares the three and stops the build on a disagreement, because for several stages they disagreed
+silently: the manifest said `bpfilter` was off while the array this image walks contained
+`{4, bpf_init}`, and the hand-written `bpfilter.h` said `NBPFILTER 0`.
 """
 
 import argparse
@@ -48,36 +50,48 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 XNU = os.environ.get("XNU_TREE", os.path.join(REPO_ROOT, "external", "xnu-4570.1.46"))
 
+sys.path.insert(0, HERE)
+import devices as devices_mod                                                     # noqa: E402
+
 COMPONENTS = ["osfmk", "bsd", "libkern", "iokit", "pexpert", "libsa", "security", "san"]
 
 # `path/to/file.c	optional <cond> [<cond> ...]`
 LINE = re.compile(r"^(\S+)\s+optional\s+(.*)$")
 
-# The table. Every entry is a decision with its reason, and each is checked against the build:
+# The places this configuration does not follow its own device declarations. An entry is a decision
+# with a reason, and the check in `main()` reports one that has stopped being needed, so this cannot
+# become a list of things that used to be true.
 #
-#   * `monotonic` 1 -- the build defines `-DMONOTONIC=1`, so the file must be built. Not a choice;
-#                      it is what makes the two halves agree.
-#   * `xpr_debug` 0 -- the build defines `-DXPR_DEBUG=0`; the file behind it is `kern/xpr.c`, which
-#                      the configuration does not build. Consistent, and stated rather than implied.
-#   * the rest     0 -- devices the tarball does not declare. `loop` is safe at 0 because
-#                      `gen_device_headers.sh` writes `NLOOP 0` to match; `pty` is NOT safe at 0
-#                      (measured: `conf.c` then fails on `ptsselect`, which exists nowhere in the
-#                      tree) and is left out of the table entirely so `--unknown` keeps reporting it.
-#   * `pty`, `ptmx` 1 -- measured, and the measurement is what decides it. `NPTY 0` does **not**
-#                      compile in 4570: `bsd/dev/arm/conf.c:112` has `#if NPTY > 0` and its `#else`
-#                      branch defines `ptcselect` but not `ptsselect`, which exists nowhere in the
-#                      tree (experiment-130). So the device has to be on, and that means all three
-#                      files behind it — `tty_dev.c optional ptmx pty`, `tty_ptmx.c optional ptmx`,
-#                      `tty_pty.c optional pty` — and `gen_device_headers.sh` writing `NPTY 1` and
-#                      `NPTMX 1` to match. `tty_pty.c:89-92` promotes NPTY 1 to 32 with a #warning,
-#                      which is why 1 is the value that both compiles the file and satisfies the
-#                      macro's own expectation.
-TABLE = {
-    "monotonic": 1,
-    "xpr_debug": 0,
-    "pty": 1,
-    "ptmx": 1,
+#   * `monotonic` 1 -- not a device at all. It is the per-SoC value experiment-112 identified as the
+#                      one genuinely absent from MASTER, and `build_xnu_arm_kernel.sh` defines
+#                      `-DMONOTONIC=1` by hand. It is here rather than derived because
+#                      `osfmk/kern/kern_monotonic.c` is `optional monotonic` and the build script is
+#                      what turns it on; the entry is what makes the two halves agree.
+#   * `xpr_debug` 0 -- also not a device. `-DXPR_DEBUG=0` means the condition is *off*, and the file
+#                      behind it (`osfmk/kern/xpr.c`) is not in the configuration. Consistent, and
+#                      stated rather than implied.
+#
+# There are no device overrides left, and that is the point of the step: `pty`, `ptmx`, `ether`,
+# `loop` and `bpfilter` were hand-written entries with hand-written reasons, and every one of them is
+# now what `config/MASTER` says it is. A device override belongs here only with a cause that is
+# measured, because the honest default is the declaration.
+OVERRIDES = {
+    "monotonic": (1, "the build script defines -DMONOTONIC=1; not a device"),
+    "xpr_debug": (0, "the build script defines -DXPR_DEBUG=0; not a device"),
 }
+
+
+def derived(config):
+    """condition -> 1, for every device the configuration declares — `dtab` membership."""
+    return {name.lower(): 1 for name, _number, _init, _kind in devices_mod.devices(config)}
+
+
+def table(config):
+    """The whole table: the derived devices plus the overrides."""
+    out = dict(derived(config))
+    for name, (value, _reason) in OVERRIDES.items():
+        out[name] = value
+    return out
 
 
 def conditions():
@@ -136,6 +150,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--write", metavar="PATH")
+    ap.add_argument("--config", default=os.environ.get("XNU_KERNEL_CONFIG", "RELEASE"))
     ap.add_argument("--unknown", action="store_true",
                     help="conditions with no entry, and the files that want them")
     args = ap.parse_args()
@@ -143,6 +158,9 @@ def main():
     conds = conditions()
     opts = config_options()
     hand = hand_set_defines()
+    decl = devices_mod.devices(args.config)
+    decl_names = {name.lower() for name, _n, _i, _k in decl}
+    TABLE = table(args.config)
 
     # The check that would have caught `monotonic`: any condition the build defines by hand must be
     # in the table, and agree with it.
@@ -154,22 +172,50 @@ def main():
             disagreements.append(f"{name}: the build script defines it =1, absent from this table")
         elif not TABLE[name]:
             disagreements.append(f"{name}: the build script defines it =1, table says 0")
-    # A condition the manifest builds (table 1) whose *file list* condition the compiler will see as
-    # off is the same defect in the other direction, so a table entry of 1 that the build does not
-    # define is reported. **A device's macro is its name upper-cased with an `N`** - the
-    # condition is `pty` and the header is `pty.h` containing `#define NPTY 1` - so the check accepts
-    # either spelling. Comparing the two names directly reported a disagreement for a pair that
-    # agreed, which is the same one-value-two-definitions shape this table exists to catch, one
-    # level up.
-    for name in sorted(TABLE):
-        if TABLE[name] and name in conds and not (hand.get(name) or hand.get("n" + name)):
+
+    # An override that names a device of the configuration is the derived value and an opinion about
+    # it, and the opinion would win silently. The configuration is the specification, so an override
+    # of a declared device is a disagreement unless it says 1, and a `1` override is redundant.
+    for name, (value, reason) in sorted(OVERRIDES.items()):
+        if name in decl_names:
             disagreements.append(
-                f"{name}: table says 1, the build defines neither -D{name.upper()}=1 "
-                f"nor -DN{name.upper()}=1")
+                f"{name}: this file overrides a device the {args.config} configuration declares "
+                f"(value {value}). The declaration is the answer; delete the override "
+                f"({reason}) or record why the declaration is not.")
+
+    # The same defect in the other direction: an override for a name no configuration declares and
+    # no file list tests. `xpr_debug`'s *file* list line is what keeps it alive, so a name with
+    # neither is dead weight that reads as a decision.
+    for name in sorted(OVERRIDES):
+        if name not in decl_names and name not in conds:
+            disagreements.append(f"{name}: an override for a name that is not a device of "
+                                 f"{args.config} and is not tested by any conf/files line - it "
+                                 f"decides nothing")
+
+    # A condition the manifest builds (table 1) whose name the build does define is fine; one it
+    # does not define is only fine when it is a device, because a device's value lives in the
+    # generated `<cond>.h` and not in the command line. **A device's macro is its name upper-cased
+    # with an `N`** — the condition is `pty` and the header is `pty.h` containing `#define NPTY 16`
+    # — so the check accepts either spelling. Comparing the two names directly reported a
+    # disagreement for a pair that agreed, which is the same one-value-two-definitions shape this
+    # file exists to catch, one level up.
+    for name in sorted(TABLE):
+        if not TABLE[name] or name not in conds:
+            continue
+        if name in decl_names or hand.get(name) or hand.get("n" + name):
+            continue
+        disagreements.append(
+            f"{name}: table says 1, but it is not a device of {args.config} and the build defines "
+            f"neither -D{name.upper()}=1 nor -DN{name.upper()}=1")
 
     lines = ["# condition\tvalue\treason"]
     for name in sorted(TABLE):
-        reason = ("the build script defines it" if name in hand else "chosen here")
+        if name in decl_names and name not in OVERRIDES:
+            reason = f"device of {args.config} (config/MASTER)"
+        elif name in OVERRIDES:
+            reason = OVERRIDES[name][1]
+        else:
+            reason = "the build script defines it" if name in hand else "chosen here"
         lines.append(f"{name}\t{TABLE[name]}\t{reason}")
     text = "\n".join(lines) + "\n"
 
@@ -187,11 +233,20 @@ def main():
         return 1
 
     if args.unknown:
+        # Two different reports, and the first is the one that used to crash: this mode raised
+        # `NameError: UNRESOLVED is not defined` from the day experiment-132 removed that set, so
+        # the mode whose whole purpose is to make an omission **visible** was the one thing nobody
+        # could run. Found while 440 scoped the device gap.
         rest = sorted(k for k in conds if k not in opts and k not in TABLE)
-        print(f"\n== {len(rest)} conditions with no entry ==")
+        print(f"\n== {len(rest)} condition(s) tested by a conf/files line with no entry ==")
         for name in rest:
-            mark = " (UNRESOLVED - needs a device table)" if name in UNRESOLVED else ""
-            print(f"  {name:32s} {len(conds[name])} file list(s){mark}")
+            print(f"  {name:32s} {len(conds[name])} file list(s)")
+        untested = sorted(decl_names - {k for k in conds})
+        print(f"\n== {len(untested)} device(s) the configuration declares that no conf/files line "
+              f"tests ==")
+        for name in untested:
+            print(f"  {name:32s} its sources are `standard`, so it is built unconditionally - "
+                  f"and N{name.upper()} is read by nothing")
     return 0
 
 

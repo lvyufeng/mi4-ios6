@@ -62,17 +62,24 @@ file on disk disagrees.
 
 import argparse
 import os
-import re
-import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 
+# The parse of the configuration's device lines is **shared**, in `tools/xnu_config/devices.py`, and
+# that is not tidiness. This file needs the `init` word and `mkioconf.c`'s count rule; the manifest's
+# table (`xnu_config/device_table.py`) needs `dtab` membership; `gen_device_headers.py` needs the
+# header's count rule. All three read the same lines of the same configuration, and while each had
+# its own parser they disagreed: the table said `bpfilter` was not a device at all, this file put
+# `{4, bpf_init}` in the array the image walks, and the hand-written header said `NBPFILTER 0`.
+sys.path.insert(0, os.path.join(HERE, "xnu_config"))
+import devices as devices_mod                                                     # noqa: E402
+
 CONFIG = os.environ.get("XNU_KERNEL_CONFIG", "RELEASE")
 # Per configuration, in its own directory, and for the reason `tools/gen_option_headers.py` records:
-# RELEASE and STAGE90_BOOT do not agree about this array (RELEASE keeps `bpfilter` and `fsevents`,
-# STAGE90_BOOT does not), and one shared path means whichever generation ran last wins for both
+# RELEASE and STAGE90_BOOT do not agree about this array (RELEASE declares eight devices and
+# STAGE90_BOOT three), and one shared path means whichever generation ran last wins for both
 # builds - silently, since a wrong entry set is six words rather than an error.
 OUT_ROOT = os.environ.get("XNU_PSEUDO_INITS_OUT", os.path.join(REPO_ROOT, "out", "xnu_pseudo_inits"))
 
@@ -87,53 +94,19 @@ def out_file(config):
     """
     return os.path.join(OUT_ROOT, config, "stage90_pseudo_inits.c")
 
-# `pseudo-device NAME [NUMBER] [init FUNC]` - the four alternatives `parser.y:207-229` accepts.
-# `d_init` is what `mkioconf.c` filters on, so a line with no `init` word contributes nothing:
-# `pseudo-device ether` and `pseudo-device loop` are in MASTER and are not in the array.
-DEVICE_RE = re.compile(r"^pseudo-device\s+(\S+)\s*(.*)$")
-COUNT_RE = re.compile(r"^(\d+)\s*(.*)$")
-INIT_RE = re.compile(r"^init\s+(\S+)\s*$")
-
-
-def configuration_lines(config):
-    """The expanded configuration's lines, from the same pipeline `make_defines.sh` reads."""
-    script = os.path.join(HERE, "xnu_config", "expand.sh")
-    proc = subprocess.run([script, config], capture_output=True, text=True)
-    if proc.returncode != 0:
-        sys.exit(f"expand.sh {config} failed:\n{proc.stderr}")
-    return proc.stdout.split("\n")
-
-
-def pseudo_devices(config):
-    """[(name, count, init_or_None)] in configuration order - `mkioconf.c`'s own ordering."""
-    out = []
-    for line in configuration_lines(config):
-        m = DEVICE_RE.match(line.strip())
-        if not m:
-            continue
-        name, rest = m.group(1), m.group(2).strip()
-        count = 0
-        cm = COUNT_RE.match(rest)
-        if cm:
-            count = int(cm.group(1))
-            rest = cm.group(2).strip()
-        init = None
-        if rest:
-            im = INIT_RE.match(rest)
-            if not im:
-                sys.exit(f"pseudo-device line this generator does not understand: {line!r}")
-            init = im.group(1)
-        out.append((name, count, init))
-    return out
-
 
 def array_entries(config):
-    """The entries `mkioconf.c` would emit - one per pseudo-device with a `d_init`."""
+    """The entries `mkioconf.c` would emit - one per pseudo-device with a `d_init`.
+
+    `init is None` is `d_init == 0`, and such a device is not in the array - `pseudo-device ether`
+    and `pseudo-device loop` are declared by the configuration and are not in the array, because
+    neither line carries an `init` word.
+    """
     entries = []
-    for name, count, init in pseudo_devices(config):
+    for name, number, init, _kind in devices_mod.devices(config):
         if init is None:
-            continue                      # `d_init == 0`: not in the array, and not in Apple's either
-        entries.append((init, count if count > 0 else 1))
+            continue
+        entries.append((init, devices_mod.array_count(number)))
     return entries
 
 

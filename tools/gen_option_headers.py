@@ -150,6 +150,40 @@ def configured_options():
     return names
 
 
+DEVICE_SET = None
+# The `OPTIONS/<word>` rows whose word is a device, collected so the run can report them.
+skipped_devices = set()
+
+
+def declared_devices():
+    """The device names this configuration declares, from the shared parse.
+
+    Used to keep the two header generators **disjoint**, which is not tidiness either. `do_count`
+    (mkheaders.c:85-101) is called for every `conf/files` need word, and when that word names a
+    device in `dtab` it writes `#define N<WORD> <d_slave>` into `<word>.h` - the `N` is kept because
+    `dev` is non-NULL. So for `OPTIONS/bpfilter optional bpfilter` in a configuration that declares
+    `pseudo-device bpfilter 4 init bpf_init`, Apple's build writes **one** `bpfilter.h` containing
+    `#define NBPFILTER 4`.
+
+    This generator also saw the line and wrote `<word>.h` containing `#define <WORD> 0`, because
+    `BPFILTER` is not among the configuration's *options* - it is a device, and `allCaps(word)` is
+    looked up in the option list only. Two files with one name in two directories, both on the
+    include path, and `-I` order decided which one a source got; `-I$OPTION_HEADERS` comes first in
+    this build, so the device header would have been shadowed and `#if NETHER > 0` would have stayed
+    silent zero while the manifest built `bsd/net/ether_if_module.c`. Nothing reads the bare macros
+    (measured: the only hits for `ETHER` and `BPFILTER` outside their `N` forms in the whole tree are
+    `bsd/kern/bsd_init.c:894`'s `#endif /* ETHER */` comment - which names the wrong macro for its
+    own guard - and prose in `ethernet.h`), so the device generator's file is the one to keep, and
+    these rows are dropped here with the count printed.
+    """
+    global DEVICE_SET
+    if DEVICE_SET is None:
+        sys.path.insert(0, os.path.join(HERE, "xnu_config"))
+        import devices as _devices
+        DEVICE_SET = {name.lower() for name, _n, _i, _k in _devices.devices(CONFIG)}
+    return DEVICE_SET
+
+
 def scan_options():
     """(header, macro, option) for every OPTIONS line, in a stable order."""
     found = {}
@@ -166,14 +200,64 @@ def scan_options():
                 words = words[1:]
             if not words:
                 continue
-            # The header takes its name from the first option word, and so does the macro.
+            # The header takes its name from the first option word, and so does the macro -
+            # unless that word is a device, in which case the device generator owns the header.
             option = words[0]
+            if option.lower() in declared_devices():
+                skipped_devices.add(option + ".h")
+                continue
             header = option + ".h"
             macro = option.upper()
             # First writer wins, and the value is the same whichever component declared it: what
             # `d_slave` holds is a property of the configuration, not of the conf/files line.
             found.setdefault(header, (macro, option))
     return found
+
+
+def device_headers_by_component():
+    """{component: [header, ...]} — the device headers that component's `conf/files` tests.
+
+    The same walk `scan_options_by_component()` does, over the non-`OPTIONS/` lines: for every
+    `<path> optional <cond> ...` whose first word is a **device of this configuration**, config(8)
+    writes `<cond>.h` and appends its include here. `tools/gen_device_headers.py` writes the headers
+    themselves (configuration-wide, because `d_slave` is), and this decides which component sees
+    which — Apple's own membership rule, per component, as in experiment 438.
+
+    A condition that is an *option* is not in here even when it is also a device: `do_count` is
+    called once per need word and the `OPTIONS/` line already produced its header, so the device
+    list would only add a duplicate include of the same file.
+    """
+    try:
+        sys.path.insert(0, os.path.join(HERE, "xnu_config"))
+        import devices as _devices
+        declared = {name.lower() for name, _n, _i, _k in _devices.devices(CONFIG)}
+    except Exception as exc:                                              # pragma: no cover
+        print(f"cannot read the configuration's devices: {exc}", file=sys.stderr)
+        return {}
+    out = {}
+    for component in COMPONENTS:
+        path = os.path.join(XNU, component, "conf", "files")
+        if not os.path.isfile(path):
+            continue
+        rows = []
+        for line in open(path, encoding="utf-8", errors="replace"):
+            line = line.split("#", 1)[0].strip()
+            if not line or line.startswith("OPTIONS/"):
+                continue
+            parts = line.split()
+            if len(parts) < 3 or parts[1] not in ("optional", "standard"):
+                continue
+            words = parts[2:]
+            if words and words[0] == "not":
+                words = words[1:]
+            if not words:
+                continue
+            cond = words[0].lower()
+            if cond in declared and f"{cond}.h" not in rows:
+                rows.append(f"{cond}.h")
+        if rows:
+            out[component] = rows
+    return out
 
 
 def scan_options_by_component():
@@ -208,6 +292,9 @@ def scan_options_by_component():
             if words and words[0] == "not":
                 words = words[1:]
             if not words:
+                continue
+            if words[0].lower() in declared_devices():
+                skipped_devices.add(words[0] + ".h")
                 continue
             rows.append((words[0] + ".h", words[0].upper()))
         if rows:
@@ -262,6 +349,14 @@ def main():
             f.write(f"#define {macro} {value}\n")
         written.append(header)
 
+    # A header left over from an earlier generation is found on the include path and believed, and
+    # this generator now writes *fewer* headers than it used to - `ether.h` and `bpfilter.h` moved to
+    # the device generator. Nothing else removes them.
+    for name in sorted(os.listdir(OUT)):
+        if name.endswith(".h") and name != "meta_features.h" and name not in written:
+            os.unlink(os.path.join(OUT, name))
+            print(f"  removed stale option header {name}")
+
     # meta_features.h is the accumulate side: every component force-includes it, and it is what
     # makes the option macros visible without an explicit include. Written from the same list so the
     # two cannot disagree.
@@ -280,6 +375,7 @@ def main():
     # includes: `MakeInc.def:466`'s `-I.` is the component's own object directory. The membership
     # here is the point - `scan_options_by_component()` has the reason.
     per_component = scan_options_by_component()
+    device_headers = device_headers_by_component()
     # The shared options are the ones a component reads without declaring them; see SHARED above.
     # A component only gets a shared header if the header exists at all, so a configuration without
     # the option still gets `#define X 0` (and its `#undef`, if OFF_UNDEF says so) rather than an
@@ -314,6 +410,19 @@ def main():
                     continue
                 seen.add(header)
                 f.write(f"#include <{header}>   /* shared: read by a component that does not declare it */\n")
+            # **And the device headers, which is the second half of `mkheaders.c`'s `do_header`.**
+            # `headers()` walks the file table and calls `do_count(fl->f_needs, ...)` for every entry
+            # with a need - not only for the `OPTIONS/` entries - so a line like
+            # `bsd/net/if_loop.c optional loop` produces `loop.h` *and* appends `#include <loop.h>` to
+            # **bsd's** `meta_features.h`. This generator wrote only the option half, so
+            # `bsd/kern/bsd_init.c:890`'s `#if NETHER > 0` had no `NETHER` in scope at all: an
+            # undefined identifier in `#if` is **0**, so the guard was off while the manifest built
+            # `bsd/net/ether_if_module.c`. Silent, and in the direction that looks like a decision.
+            for header in device_headers.get(component, []):
+                if header in seen:
+                    continue
+                seen.add(header)
+                f.write(f"#include <{header}>   /* device: this component's conf/files tests it */\n")
             if off_macros:
                 off_here = [m for m in off_macros if m in macros]
                 undef = off_here if OFF_UNDEF == ["all"] else [m for m in off_here if m in OFF_UNDEF]
@@ -327,6 +436,12 @@ def main():
     print(f"  in {OUT}")
     print(f"  {len(options)} options in the configuration")
     print(f"  shared with every component: {', '.join(shared_headers) if shared_headers else 'none'}")
+    if skipped_devices:
+        print(f"  {len(skipped_devices)} OPTIONS row(s) belong to the device generator, not this one: "
+              + ", ".join(sorted(skipped_devices)))
+    print(f"  device headers, per component: "
+          + ", ".join(f"{c}: {len(v)}" for c, v in sorted(device_headers.items()))
+          if device_headers else "  device headers, per component: none")
     for component in COMPONENTS:
         rows = per_component.get(component)
         if rows:

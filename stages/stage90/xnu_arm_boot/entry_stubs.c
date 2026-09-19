@@ -171,40 +171,31 @@ char osversion[256];
 uint8_t EntropyData[68] __attribute__((aligned(8)));
 #endif /* !STAGE90_ENTRY_REAL_ENTROPY_DATA */
 
-/* ------------------------------------------------------------------ bpfread_filtops */
+/* ------------------------------------------------------------------ bpfread_filtops - RETIRED */
 
 /*
- * `bpfread_filtops` - the first stand-in in this file whose defining source the manifest does not
- * contain **at all**.
+ * **This stand-in is gone, and it is the same retirement as `etherbroadcastaddr` and `lo_ifp` in the
+ * generated stubs - the cause was one row of a hand-written table.** It was written in experiment 279
+ * for exactly one reason: `bsd/net/bpf.c` is `optional bpfilter` in `bsd/conf/files:192`, the
+ * hand-written device table did not select `bpfilter`, so bpf.c was not in the manifest and no object
+ * in the pool defined `bpfread_filtops` - while `bsd/kern/kern_event.c:390` declares it and `:448`
+ * puts its address in `kern_event_filtops[]` at `EVFILTID_BPFREAD`.
  *
- * `bsd/kern/kern_event.c:390` declares it `extern const struct filterops bpfread_filtops;` and
- * `:448` puts its *address* in the `kern_event_filtops[]` table at index `EVFILTID_BPFREAD`. It is
- * defined in `bsd/net/bpf.c:2216` as `SECURITY_READ_ONLY_EARLY(struct filterops)`, and bpf.c is
- * `optional bpfilter` in `bsd/conf/files:192` - a flag the device table this project builds from
- * does not select, so the file is not in `out/xnu_arm_manifest.txt` and no object in the pool
- * defines the name. (It is the same omission class as the ~126 `optional` sources the manifest
- * skips; here it is the first one a *step* has needed.)
+ * Experiment 440 derived the device conditions from the configuration, which declares
+ * `pseudo-device bpfilter 4 init bpf_init`. `bsd/net/bpf.o` is now in the pool and defines
+ * `bpfread_filtops` as `SECURITY_READ_ONLY_EARLY(struct filterops)` - a real 0x28-byte `.rodata`
+ * table, and the *measurement* of the size this file had derived two ways (fifteen sibling filter
+ * tables at 0x28, and `struct filterops` = 2 + 2 padding + 9 * 4). Both roads were right; the value
+ * is no longer zero.
  *
- * The size is not a guess, and it has two independent roads to it:
+ * Leaving it in place does not compile the image: the link reports `multiple definition of
+ * 'bpfread_filtops'` between `bsd_net_bpf.o (.rodata+0x0)` and this file. **That link error is the
+ * check** - a hand-written stand-in that outlives its cause is otherwise silent in the one direction
+ * that matters, because a zero table and a real table are the same number of bytes.
  *
- *   - **Measured over the pool.** Fifteen sibling filter tables are compiled here and every one of
- *     them is 0x28: `fs_filtops` (`bsd_vfs_vfs_subr.o`), `machport_filtops` (`osfmk_ipc_ipc_pset.o`),
- *     `soread_filtops`/`sowrite_filtops`/`sock_filtops`/`soexcept_filtops`
- *     (`bsd_kern_uipc_socket.o`), `pipe_rfiltops`/`pipe_wfiltops` (`bsd_kern_sys_pipe.o`),
- *     `sig_filtops`, `ptsd_kqops` (`bsd_kern_tty_ptmx.o`), `vnode_filtops`, `spec_filtops`,
- *     `fsevent_filtops`, `necp_fd_rfiltops`, `tty_filtops`. `nm -S --defined-only` reports
- *     `R fsevent_filtops 00000028` and the same for the rest.
- *   - **Derived from the type.** `struct filterops` (`bsd/sys/event.h:939-951`) is two `bool`s and
- *     nine function pointers: 2 + 2 padding + 9 * 4 = 40 = 0x28 on armv7, which is the number the
- *     pool measured.
- *
- * Zero is the right *value* here in a way it would not be for `EntropyData` above: this is a table
- * of function pointers that only `kern_event_init` indexes and only a `kqfilter` call on a BPF file
- * descriptor dereferences, and neither is on this walk's path - the run stops at `klist_init`,
- * inside `ipc_mqueue_init`, long before any of it. A reader of the linker map will find 40 bytes of
- * zero where XNU has a filter table, and this comment is why.
+ * The 40 bytes this file used to place are gone from `.bss`; the object's own section is in the
+ * copied image, which is the one difference that is not a wash.
  */
-uint8_t bpfread_filtops[0x28] __attribute__((aligned(4)));
 
 /*
  * `_start` loads SP from intstack_top, so this must be real, writable, and in the window - but only

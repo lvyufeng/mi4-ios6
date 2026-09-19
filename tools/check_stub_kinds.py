@@ -55,14 +55,20 @@ DEFAULT_KERNSYMS = os.path.join(REPO_ROOT, "out", "stage90", "xnu_arm_entry_kern
 # All four are latent: nothing in this boot reaches them, which is why they are recorded rather than
 # fixed here. `pseudo_inits` is *not* in the table, because 439 supplies it - and if it were to come
 # back as an object-declared stub, the both-direction check is what would say so.
+# The wrong-kind stand-ins this build still ships, each with the *measured* cause and the step that
+# will remove it. The table is checked in both directions - an entry whose name is no longer an
+# object-declared stub fails the check - so it cannot rot into a list of things that used to be true,
+# and it is the same shape as `KNOWN_READS` in tools/check_option_headers.py.
+#
+# **The both-direction check earned its keep on its first re-run.** It listed four names when
+# experiment 439 wrote it, and experiment 440 derived the device conditions from the configuration -
+# which put `bsd/net/ether_if_module.c` and `bsd/net/if_loop.c` into the manifest. `etherbroadcastaddr`
+# and `lo_ifp` became real definitions, and this check *refused the entry build* rather than letting
+# the table report two exceptions that no longer existed. Both entries were deleted, not annotated.
+#
+# The two that remain are latent - nothing in this boot reaches them - which is why they are recorded
+# rather than fixed here.
 KNOWN_KINDS = {
-    "etherbroadcastaddr": "bsd/net/ether_if_module.c is `optional ether` and `ether` IS a "
-                          "pseudo-device of this configuration, but out/device_table.txt does not "
-                          "list it - so the file is not in the manifest and the array has no "
-                          "definer. The condition table has to come from config/MASTER, not from a "
-                          "hand-written list (see experiment 439's measurements).",
-    "lo_ifp": "the same cause: bsd/net/if_loop.c is `optional loop`, and `loop` is a pseudo-device "
-              "of this configuration that the hand-written condition table omits.",
     "osrelease": "defined by config/version.c, a **tree-root** source that no */conf/files lists, so "
                  "the manifest has never contained it.",
     "ostype": "the same file as osrelease - config/version.c declares all four of osrelease, ostype, "

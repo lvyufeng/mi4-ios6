@@ -70,7 +70,8 @@ pipeline in `tools/xnu_config/expand.sh CONFIG`, so the derivation is mechanical
     expand.sh <CONFIG> | the `pseudo-device` lines | those with an `init` word | in order
 
 The count rule (`count <= 0 -> 1`) and the `{0, 0}` terminator are `mkioconf.c`'s, not choices made
-here. RELEASE keeps `bpfilter` and `fsevents`; STAGE90_BOOT does not — which is why the generated
+here. RELEASE declares **eight** devices (`ether loop pty 16 ptmx 1 mdevdevice 1 bpfilter 4
+fsevents 1 random 1`); STAGE90_BOOT declares **three** (`ptmx 1 mdevdevice 1 random 1`) — which is why the generated
 source is **per configuration**, in its own path, and why `--check` refuses a stale one. Same reason
 as 438's per-component option headers: the array has to belong to the configuration whose objects
 are linked.

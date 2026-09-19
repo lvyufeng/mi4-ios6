@@ -123,6 +123,21 @@ if [[ $ONLY_PLATFORM -eq 1 ]]; then
     : > "$MANIFEST"
 fi
 
+# **The manifest is generated from the table, not required** (experiment 440). It was a hand-run
+# prerequisite and the table is written by this script, so the two could disagree — and they did: the
+# first 440 build wrote a table turning `ether`, `loop` and `bpfilter` on, compiled the *previous*
+# manifest that omits `bpf.c`, `bpf_if_loop.c`'s neighbours and four ethernet files, and reported
+# `615 tried / 614 compile / 1 fail` — a clean success that had not built anything the step was
+# about. A required input that a generated input determines has to be generated too, or the report is
+# about two different configurations.
+if [[ $ONLY_PLATFORM -eq 0 ]]; then
+    LS_MESSAGE=$("$TOOLS_DIR/xnu_config/list_sources.py" "$CONFIG" --write "$MANIFEST" 2>&1) || {
+        echo "$LS_MESSAGE" >&2
+        exit 2
+    }
+    [[ ${VERBOSE:-0} -eq 0 ]] || printf '%s\n' "$LS_MESSAGE"
+fi
+
 [[ -f $MANIFEST ]] || {
     echo "no manifest at $MANIFEST - run:" >&2
     echo "  ./tools/xnu_config/list_sources.py RELEASE --write $MANIFEST" >&2
@@ -153,6 +168,18 @@ fi
 }
 "$TOOLS_DIR/xnu_config/device_table.py" --write "$DEVICE_TABLE" >/dev/null
 
+# And the **device** headers, generated here rather than required, for the reason `gen_pseudo_inits.py`
+# is run here: the value has to belong to the configuration, and a stale one is not an error, it is a
+# wrong answer. `mkheaders.c:85-101` writes `#define N<COND> <count>` from the configuration's own
+# `d_slave`, and until experiment 440 four of these five headers were hand-written constants - with
+# values that disagreed with both the table and the generated `pseudo_inits[]`. The generator rewrites
+# the directory and removes headers for conditions the configuration no longer has.
+XD_MESSAGE=$("$TOOLS_DIR/gen_device_headers.py" 2>&1) || {
+    echo "$XD_MESSAGE" >&2
+    exit 2
+}
+[[ ${VERBOSE:-0} -eq 0 ]] || printf '%s\n' "$XD_MESSAGE"
+
 # And the third table, for the same reason and with a sharper failure mode: which options a
 # translation unit sees is a property of its *component* (experiment-438), and the generator that
 # writes the per-component `meta_features.h` files was, until then, making a claim in a comment
@@ -177,6 +204,17 @@ PI_MESSAGE=$(XNU_KERNEL_CONFIG=$CONFIG "$TOOLS_DIR/gen_pseudo_inits.py" --write 
 # definitions is this project's most-repeated defect, and a `$REPO_ROOT/out/...` written in two
 # places has nothing comparing them.
 PSEUDO_INITS_SRC=$(XNU_KERNEL_CONFIG=$CONFIG "$TOOLS_DIR/gen_pseudo_inits.py" --print-path)
+
+# And the check that compares the three halves of one device decision (experiment-440). "Is
+# `bpfilter` on?" is answered by the manifest's table, by the generated `NBPFILTER` header, and by
+# the `{4, bpf_init}` entry in the array above - and for several stages those three gave three
+# different answers with nothing comparing them, which is how the boot came to stop on `bpf_init`:
+# a symbol this image was simultaneously claiming, in a count taken from `config/MASTER`, and
+# refusing to compile. Run here, after all three exist and before any file is compiled.
+DC_MESSAGE=$("$TOOLS_DIR/check_device_conditions.py" 2>&1) || {
+    echo "$DC_MESSAGE" >&2
+    exit 2
+}
 
 mkdir -p "$OUT"
 # Truncate every output. A build script that appends leaves the previous run's failures in the
@@ -551,11 +589,15 @@ done
 # so glibc's headers are reachable - and the file died in
 # `features-time64.h:20: 'bits/wordsize.h' file not found`, naming neither XNU nor the header that
 # was really absent. That is how a missing generated directory stayed invisible for as long as it
-# did (experiment-166). The check is per configuration because a device table is: `bpfilter.h` is
-# 0 in one configuration and would be a count in another.
+# did (experiment-166).
+#
+# **Experiment 440 turned this from a requirement into a check on an invariant.** The headers are
+# written by `gen_device_headers.py` earlier in this script, so "does the directory exist" is no
+# longer a question about the operator's last command; what can still be wrong is a *missing*
+# directory (something deleted it between the two), which is what this catches.
 [[ -n $(compgen -G "$DEVICE_HEADERS/*.h") ]] || {
     echo "no device headers for $CONFIG at $DEVICE_HEADERS - run:" >&2
-    echo "  XNU_KERNEL_CONFIG=$CONFIG ./tools/gen_device_headers.sh" >&2
+    echo "  XNU_KERNEL_CONFIG=$CONFIG ./tools/gen_device_headers.py" >&2
     exit 2
 }
 

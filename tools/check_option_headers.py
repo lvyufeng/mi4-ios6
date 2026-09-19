@@ -137,11 +137,19 @@ def main():
     shared_macros = {m.upper() for m in gen.SHARED}
     shared_headers = [all_headers[m] for m in sorted(shared_macros) if m in all_headers]
 
+    # And the **device** half of the same file, which experiment 440 added to the generator and this
+    # check did not know about. `mkheaders.c`'s `headers()` walks the whole file table, so a line like
+    # `bsd/net/if_loop.c optional loop` produces `loop.h` *and* appends `#include <loop.h>` to bsd's
+    # `meta_features.h` - the file is not an option row and is not `shared`, and every one of these
+    # was reported as "not this component's" on the first run. The generator is the single source of
+    # which component tests which device, so this asks it rather than keeping a second list.
+    device_by_component = gen.device_headers_by_component()
+
     problems = []
     for component, rows in sorted(by_component.items()):
         path = os.path.join(out, component, "meta_features.h")
         own = order_preserving_unique([h for h, _ in rows])
-        want = order_preserving_unique(own + shared_headers)
+        want = order_preserving_unique(own + shared_headers + device_by_component.get(component, []))
         got = includes_of(path)
         if got is None:
             problems.append(f"{component}: no {path} - run ./tools/gen_option_headers.py")
