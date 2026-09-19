@@ -132,7 +132,7 @@ the name-slot term: `.text` stays at **0x4290** = 710 × 0x18; `.rodata.str1.4` 
 0x3E40 + 0x24, which is also `sum(align4(len + 1))` over the 710 names of the new stub list; `.bss` is **0x2944** =
 0x28C4 + 0x80, the two new stand-ins and no retirement.
 
-## The pad rule's sixth confirmation, and this time it predicts zero
+## The pad rule's sixth confirmation: 0x30 narrows to 0x18
 
 The object's `.bss` lands at **0x801F0350** — the exact address where 357's map printed `*fill* 0x801F0350 0x30` —
 its 0x18 ends at 0x801F0368, and this map prints **`*fill* 0x801F0368 0x18`**. That is
