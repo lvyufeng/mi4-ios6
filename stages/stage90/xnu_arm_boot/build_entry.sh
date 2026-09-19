@@ -4355,6 +4355,233 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # lists the indirect calls it could not follow (`getval`, `panic_trap_to_debugger`, `__doprnt`, i.e. a
     # kprintf path), so a run that stops earlier is possible and the tool says so rather than guessing.
     BSD_KERN_KERN_KTRACE_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_KTRACE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_ktrace.o}
+    # 321: `iokit/Kernel/IOLib.cpp` - the object that defines `IOLibInit`, and the step where IOKit's
+    #       allocator and thread wrappers become real
+    #
+    # **The object that defines 320's stop.** `iokit/Kernel/IOLib.cpp` (manifest:322) is
+    # `iokit_Kernel_IOLib.o`: `.text` **6476** (0x194C) holding **38 functions**, `.bss` **384** (0x180)
+    # holding 14, `.rodata` **56** (0x38) holding 11 read-only symbols, `.rodata.str1.1` **299** (0x12B),
+    # a `__DATA, __data` of **72** (0x48 - three 24-byte `VM_ALLOC_SITE_STATIC` sites), and **52
+    # references**. It is the largest step in `.text` since 316's `kern_newsysctl.o` (8132) and the
+    # largest closure since then, and what it makes real is IOKit's whole allocator and thread-wrapper
+    # layer: `IOCreateThread`, `IOExitThread`, `IOFree`, `IOFreeAligned`, `IOFreeContiguous`,
+    # `IOFreePageable`, `IOMalloc`, `IOMallocAligned`, `IOMallocContiguous`, `IOMallocPageable`,
+    # `IOKernelAllocateWithPhysicalRestrict`, `IOKernelFreePhysical`, `IOPageableMapForAddress`,
+    # `IOFlushProcessorCache`, `IOSetProcessorCacheMode`, `IOSizeToAlignment`, `IOAlignmentToSize`,
+    # `IODelay`, `IOPause`, `IOSleep`, `IOSleepWithLeeway`, `IOLog`, `IOLogv`, `IOPanic`,
+    # `IOKernelStackRemaining`, the `iopa_*` page allocator, and the
+    # `IOFindNameForValue`/`IOFindValueForName`/`IOCopyLogNameForPID` helpers.
+    #
+    # **Predicted: 4 resolved / 7 added.** Resolved are the four of its 66 definitions that are
+    # *currently stubs* - `IOLibInit` (this stop), `IOMalloc`, `IOFree` and `IOSleep` - and the other 62
+    # are definitions nothing references yet, which by 250/270's rule is not a count change at all.
+    # Stating that explicitly is 311/312's lesson: **absent from the undefined list has two meanings**,
+    # and a definition that resolves nothing moves no counter. Added are the 7 references nothing in this
+    # image defines yet - **5 functions and 2 storage**:
+    #
+    #   5 func T   IOMapPages, IOUnmapPages, IOMemoryDescriptor::getPhysicalAddress(),
+    #              IOBufferMemoryDescriptor::inTaskWithPhysicalMask(task*, u64, u64), proc_name
+    #   2 data B   debug_iomalloc_size 4, debug_iomallocpageable_size 4
+    #
+    # The other 45 of the 52 references move nothing: two (`IOLockAlloc`, `OSString::withCString`) are
+    # already stubs that stay stubs, and 43 are already real - `bzero`, `panic`, `kmem_suballoc`,
+    # `lck_grp_alloc_init`, `lck_mtx_alloc_init`, `lck_mtx_lock`/`lck_mtx_unlock`, `kernel_map`,
+    # `kernel_task`, `kernel_pmap`, `page_size`, `page_mask`, `kalloc_canblock`, `kmem_alloc_contig`,
+    # `kmem_alloc_pageable`, `kmem_free`, `kernel_memory_allocate`, `pmap_find_phys`, `current_thread`,
+    # `kernel_thread_start`, `thread_deallocate`, `thread_terminate`, `get_task_map`, `gPhysBase`,
+    # `gPhysSize`, `__doprnt`, `snprintf`, `strcmp`, `strlen`, `os_log_with_args`, `_os_log_default`,
+    # `ml_stack_remaining`, `flush_dcache64`, `vm_kernel_map_is_kernel`, `vm_tag_bt`, the two
+    # `OSAddAtomic`s, `delay_for_interval(_with_leeway)` and the three console-printbuf calls.
+    # So **832 -> 835 undefined, 724 -> 725 function stubs, 108 -> 110 storage**.
+    #
+    # `.text` predicted **+0x1B8F plus the band**, from six terms:
+    #
+    #   this object's .text                                  +0x194C   (6476, exact)
+    #   this object's .rodata.str1.1                         +0x12B   (299 - an upper bound: mergeable)
+    #   this object's .rodata                                +0x038   (56)
+    #   the stub object's .text                              +0x018   (4 bodies retired, 5 created)
+    #   the stub object's name strings                       ~+0x0C8  (4 retired names 0x28, 7 created
+    #                                                                 0xC8 by align4(len+1) - and this one
+    #                                                                 is an upper bound too, for the
+    #                                                                 same reason as the last two steps:
+    #                                                                 the 832 names of this image sum
+    #                                                                 0x4458 that way against 0x3C77 in
+    #                                                                 the map, because the pool tail-merges)
+    #   .text-region alignment fill                          the band  (-0x20..+0x60)
+    #                                                       -------
+    #                                                        +0x1B8F + band
+    #
+    # **And this step should cross one 16 KB boundary.** `.text` ends at 0x8013B960 with the boundary
+    # 0x6A0 away, and the step is worth ~0x1B8F - so for the first time since 318 the whole data block
+    # should step, by **+0x4000** (one boundary; 318 crossed four). The rest of the layout then follows
+    # arithmetically:
+    #
+    #   .text        0x13B960 -> ~0x13D4EF, ending near 0x8013D4EF
+    #   .data        0x8013C000 -> **0x80140000**, size 0x191C8 -> 0x19210 (+0x48)
+    #   .sysctl_set  0x801551C8 -> 0x80159210 (0x10C), .init_array 0x8015931C (0x4)
+    #   .bss         0x80155300 -> **0x80159340** (align64 of 0x80159320), size 0x37658 -> ~0x37818
+    #                (the object's 0x180 plus two 64-byte stand-in slots and no slot retired)
+    #   __bss_end    0x8018C958 -> ~0x80190B58, headroom 1521320 -> ~1504400
+    #   image        1397464 -> ~1420983 (0x15AFB7): +0x1B8F of text, +0x48 of data, +0x4000 of step
+    #
+    # **Predicted stop: `IOLockAlloc`, at the offset `IOLibInit+0x10C`.** `IOLibInit` is the *first*
+    # function in its object's `.text` (offset 0, length 0x14C), so unlike 320 there is no offset base to
+    # convert: the relocation offsets are the function's own. Read out of the object's relocation stream,
+    # the body is an initialization guard and then six distinct external calls, four of the real ones
+    # made twice:
+    #
+    #   0x02C  lck_grp_alloc_init      real
+    #   0x07C  kmem_suballoc           real
+    #   0x090  panic                   real (the only conditional call: taken if kmem_suballoc returns
+    #                                        nonzero, which it does not)
+    #   0x09C  lck_mtx_alloc_init      real
+    #   0x0C0  lck_mtx_alloc_init      real
+    #   0x100  bzero                   real
+    #   0x108  IOLockAlloc             <- THE PREDICTION: the first stub on the straight line
+    #   0x128  bzero                   real
+    #   0x12C  IOLockAlloc             a stub (not reached this run)
+    #   0x144  return
+    #
+    # The guard is a `ldrb` of the object's own one-byte `.bss` static `libInitialized` (`b 3c`, one byte)
+    # which this image starts at zero, so the body runs; and `IOLockAlloc` is the *only* call in the body
+    # that is not already real, so the straight line reaches it on the first pass. The alternative, if the
+    # guard were somehow nonzero, is `IOLibInit` returning without a call - there is no third case, and
+    # that alternative is testable in the same run: a returning `IOLibInit` stops the walk at
+    # `OSlibkernInit` (caller key `StartIOKit+0xC8`) instead.
+    #
+    # **Measured: every count exact, the stop is `IOLockAlloc` at `IOLibInit+0x10C`, `.text` closes with
+    # no residual - and the step cost the image 0x4048 while growing `.text` by 0x1A80.** Against a
+    # baseline built in this session with an empty stand-in in this slot, which reproduced 320's image to
+    # the byte (`.text` 0x13B960, image 1397464, `__bss_end` 0x8018C958, headroom 1521320):
+    #
+    #   | | predicted | measured |
+    #   | undefined | 835 | **835** |
+    #   | function stubs | 725 | **725** |
+    #   | storage stubs | 110 | **110** |
+    #   | resolved / added | 4 / 7 | **4 / 7** |
+    #
+    # and the split held too: 5 of the 7 added are functions and 2 storage, the two `B` names arriving as
+    # 4-byte stand-ins sized from the pool.
+    #
+    # `.text` 0x13B960 -> **0x13D3E0** is +0x1A80, and the six terms close **with no residual**:
+    #
+    #   this object's .text                                  +0x194C   (6476, exact)
+    #   this object's .rodata.str1.1                         +0x06F   (111 placed - the object's own
+    #                                                                 section is 0x12B = 299, see below)
+    #   this object's .rodata                                +0x038   (56, exact)
+    #   the stub object's .text                              +0x018   (4 bodies retired, 5 created)
+    #   the stub object's name strings                       +0x070   (0x3C77 -> 0x3CF7)
+    #   .text-region alignment fill                          +0x005   (0xD28 -> 0xD2D; 56 fills in both)
+    #                                                      -------
+    #                                                       +0x1A80   against a measured +0x1A80
+    #
+    # **The prediction missed by 0x10F, and all three reasons are measurable**: -0xBC because the string
+    # term was taken as the object's own section size (0x12B) instead of what the linker placed (0x6F),
+    # -0x58 because the name term was estimated at 0xC8 against 0x70 placed, and +0x5 of fill (inside the
+    # -0x20..+0x60 band, and the only one of the three the prediction had allowed for). The point estimate
+    # also carried an arithmetic slip of its own, worth recording because it is the third of its kind in
+    # this file: the name term was **written as 0xC8 while its own parenthetical gave created 0xC8 and
+    # retired 0x28**, i.e. a net of 0xA0 - the created-minus-retired subtraction was left out of the sum,
+    # so 0x28 of the miss is the ledger's own slip rather than the linker's.
+    #
+    # **188 of the 299 string bytes went away, and the four dropped strings can be pointed at.** The
+    # object's own `.rodata.str1.1` holds ten strings and the linker placed six:
+    #
+    #   placed (111 bytes, at 0x80138B7B, ending exactly where the next input starts)
+    #     IOKit, "failed to allocate iokit pageable map\n", "IOPageableMapForAddress: null",
+    #     "%s", 0x%x (UNDEFINED), "pid %d, "
+    #   dropped (188 bytes)
+    #     "overflow detected"                                     -> already at 0x8012A592
+    #     "Invalid queue element %p"                              -> already at 0x80129F8E
+    #     "Invalid queue element pointers for %p: next %p prev %p" -> already at 0x80129FA9
+    #     "Invalid queue element linkage for %p: next %p ..."      -> already at 0x80129FE2
+    #
+    # Each survives **exactly once** in the image and each address is *below* the object's placed range,
+    # so the copies this object brought were dropped - the four `queue.h` panic strings (`print_queue`)
+    # and `"overflow detected"` are already in the image from an earlier object. This is the **fifth
+    # sighting** of the 301/312/314/319/320 rule, the third *shown* rather than inferred, and by far the
+    # largest: 63% of the section. The name term is the same rule at pool scale - the 832 names sum 0x4458
+    # by `align4(len+1)` and 0x3F98 by `len+1` against 0x3C77 in the map, so the pool merges **shared
+    # tails** as well as whole duplicates and neither model is the rule; a name term is an upper bound
+    # whichever way it is computed.
+    #
+    # **The 16 KB boundary was crossed, and the image grew by 0x4048 while `.text` grew 0x1A80.** `.text`
+    # now ends at 0x8013D3E0, past 0x8013C000, so the whole data block stepped **+0x4000** (one boundary;
+    # 318 crossed four) and `.data` begins at 0x80140000. The image is the span [base, `.init_array`'s
+    # end] - base's is 0x8013C000 + 0x191C8 + 0x10C + 4, this one's is 0x80140000 + 0x19210 + 0x10C + 4 -
+    # so it grew by the **step** plus the object's own data, 0x4000 + 0x48 = **0x4048**, and the 0x1A80 of
+    # text cost the image nothing at all: it sat entirely inside the gap between the text's end and the
+    # next 16 KB boundary (which was 0x6A0 wide before the step and 0x2C20 after it). That is 304's rule
+    # stated for the third time - 318 moved the block +0x14000 for +0x16C80 of text, 319 moved nothing for
+    # +0x140, and this one pays a boundary for text that fitted under it - and it is why the image
+    # prediction of 0x15AFB7, which *added* the text growth to the step, was 0x1CF7 too high.
+    #
+    #   | | base (320) | measured (321) | delta |
+    #   | .text | 0x13B960 | **0x13D3E0** | +0x1A80 |
+    #   | .data | 0x8013C000 (0x191C8) | **0x80140000** (0x19210) | +0x4000 start, +0x48 size |
+    #   | .sysctl_set | 0x801551C8 (0x10C) | 0x80159210 (0x10C) | +0x4048 |
+    #   | .init_array | 0x801552D4 (0x4) | 0x8015931C (0x4) | +0x4048 |
+    #   | .bss | 0x80155300 (0x37658) | **0x80159340** (0x37858) | +0x4040 start, +0x200 size |
+    #   | __bss_end | 0x8018C958 | **0x80190B98** | +0x4240 |
+    #   | image | 1397464 (0x1552D8) | **1413920 (0x1592C0)** | +0x4048 |
+    #   | headroom | 1521320 | **1504360** | -0x4240 |
+    #
+    # `.bss` closes the way 321's kind of object should: the object's own **0x180** plus **two** 64-byte
+    # stand-in slots is **0x200**, and the section grew exactly 0x200 because the fill in front of the
+    # stand-ins did not move at all (0xFA / 38 fills in both maps). No stand-in is retired by this step -
+    # the four names it resolves are all functions - so nothing cancels and the section's arithmetic is
+    # the plain one. (The prediction's "~0x37818" was 0x40 short, an arithmetic slip in the quoted sum,
+    # not a mechanism.)
+    #
+    # **The run:**
+    #
+    #   MI4IOS6_STAGE90_XNU real XNU entry stub_hit=IOLockAlloc
+    #    xnu_entry_stub_caller=0x8011b528   (also _a and _e)
+    #
+    # `tools/host_resolve_entry_addr.sh 0x8011b528` -> `IOLibInit+0x10c`, `caller-4` = `0x8011b524: bl
+    # 8011d86c <IOLockAlloc>` - the predicted call at the predicted offset, and the first prediction in
+    # this walk whose offset base needed no conversion (because `IOLibInit` is the first function in its
+    # object's `.text`, the relocation offsets are the function's own). Preflight clean
+    # (`STAGE90_XNU_ENTRY 1`, `HARD_SKIP`, `STAGE90_HW_WATCHDOG ARMED`, software dead-man armed, no
+    # storage symbols in the payload), log **301623** bytes, one `stub_hit=` line, **no `exception:`
+    # line**.
+    #
+    # **Safety:** non-persistent `fastboot boot` only, nothing flashed,
+    # `persistent_write_attempted=0x00000000` x25, `failure_mask=0x00000000` x87,
+    # `xnu_entry_failures=0x00000000`, `xnu_entry_abort_entries=0x00000000`, and the device returned to
+    # Android on its own (`ro.build.version.release` = 10).
+    #
+    # **What it measures.** `IOLibInit` ran its real body from the guard to the end: the object's own
+    # one-byte static `libInitialized` was **zero** (it lives at 0x8018EDFC, inside the image's `.bss`, so
+    # the `ldrb`/`cmp`/`bne` at the top did not take the early return), and the body then allocated a lock
+    # group named `"IOKit"` and a mutex over it, carved the **96 MB pageable map** out of `kernel_map` with
+    # `kmem_suballoc` (its failure branch was *not* taken, so `panic` was not called and the 0x80138B81
+    # `"failed to allocate iokit pageable map\n"` string was not printed), initialised both page
+    # allocators - `gIOBMDPageAllocator` and the private pageable one, each `bzero`'d and given a real
+    # `IOLockAlloc`-shaped lock - and set `gIOPageAllocChunkBytes` to 64. `IOLibInit` is the first
+    # `kmem_suballoc` this boot has made. One detail of the disassembly worth keeping: the object's
+    # relocation for `bzero` resolved to **`__bzero`** (0x800039D8), gcc's builtin, not to the libkern
+    # `bzero` - so a "real" name in the ledger can still be an alias at link time.
+    #
+    # **What it does not measure.** `IOLockAlloc` - defined by `iokit/Kernel/IOLocks.cpp`, the next step.
+    # Nor the 38 functions of this object that nothing references yet (`IOFreeAligned`,
+    # `IOMallocContiguous`, `IOCreateThread`, `IOLog`, `IOPanic` and the rest): they are defined, correct
+    # and unreached, and their added-count of zero is the 250/270 rule, not a statement about the run. Nor
+    # whether the pageable map's 96 MB is ever touched: `iopa_alloc` and the pageable path are real from
+    # this step and nothing has called them.
+    #
+    # **Next: `iokit/Kernel/IOLocks.cpp`** (`iokit_Kernel_IOLocks.o`) - which defines `IOLockAlloc` and is
+    # the opposite shape: `.text` **820** for **26 functions** and **no `.bss`, no `.data`, no `.rodata`
+    # at all**, with **19 references** every one of which is already defined. So it is predicted to be
+    # **6 resolved / 0 added** (835 -> **829** undefined, 725 -> **719** function stubs, storage unchanged
+    # at 110) - the six being `IOLockAlloc` plus `IORecursiveLockAlloc`, `IORecursiveLockLock`,
+    # `IORecursiveLockSleep`, `IORecursiveLockUnlock`, `IORecursiveLockWakeup`, all of which something
+    # already stubs. **And the stop should leave `IOLibInit` entirely**: `IOLockAlloc` is 12 bytes - load
+    # `IOLockGroup`, `ldr`, then **`b lck_mtx_alloc_init`**, a tail branch to a real function - so the
+    # first `IOLockAlloc` returns, the second one at 0x12C is real too, `IOLibInit` runs off its epilogue,
+    # and `StartIOKit` continues to the call 320 created as a stub: **predicted stop `OSlibkernInit`, caller
+    # key `0x8011B268` = `StartIOKit+0xC8`**.
+    IOKIT_KERNEL_IOLIB_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOLIB_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOLib.o}
     # 320: `iokit/Kernel/IOStartIOKit.cpp` - the object that defines `StartIOKit`, the step that enters
     #       IOKit, and the first step where a mergeable contribution line that is *not* this object's moved
     #
@@ -10432,6 +10659,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$LIBKERN_CXX_OSKEXT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_OS_INTERNAL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$IOKIT_KERNEL_IOLIB_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -10444,7 +10672,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
