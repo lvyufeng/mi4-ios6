@@ -209,7 +209,7 @@ unlike a function name whose body and slot retire).
 ## What this step measures
 
 The frontier is `IORegistryEntry::initialize`, the **second** call of `iokit_post_constructor_init`, and so
-the second name `iokit/Kernel/IOStartIOKit.cpp` obliges. `iokit_Kernel_IORegistryEntry.o` (manifest:297) is
+the second name `iokit/Kernel/IOStartIOKit.cpp` obliges. `iokit_Kernel_IORegistryEntry.o` (manifest:339) is
 the only object in the pool that defines it — and it is the largest single step this walk has taken:
 
 ```

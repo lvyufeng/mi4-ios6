@@ -35,6 +35,20 @@ the one this file performs: count what you read, and compare it with what is the
 `nm` is read with `-S -P` for the object so a storage name's type is known, and the image's symbol table
 is read once. Nothing here links anything: the answer is a prediction, and the ledger records it before
 the build so the build can refute it.
+
+**And the second defect, which experiment 335 measured.** The *kind* of an **added** name cannot be read
+off the object being linked: that object only *references* it, so `nm` there says nothing about whether it
+is code or storage. The first version of this file therefore called every added name a function stub —
+while the build's generator classifies an undefined name by looking for it with `nm -S` **over the whole
+695-object pool**, where a name nothing has linked yet may still be defined. In 335 the two answers
+differed for one of five names: `_ZN10OSIterator10gMetaClassE` is referenced (and so "function") from
+`iokit_Kernel_IORegistryEntry.o`, but `libkern_c++_OSIterator.o` defines it `B 0x18` — so the build added
+a *storage stand-in* where this tool predicted a function stub, and both columns moved by one. That is a
+one-name error with a 0x40 consequence in `.bss`, because every storage stand-in occupies a 64-byte slot.
+
+Hence `read_pool()` below, and `--pool`: added names are classified the way the generator classifies them,
+by scanning the pool for a definition and taking its `nm -S` type and size. A name found nowhere in the
+pool is a function stub, which is right for a name only the C++ ABI mentions.
 """
 import argparse
 import subprocess
@@ -43,6 +57,7 @@ import sys
 NM = 'arm-none-eabi-nm'
 DEFAULT_IMAGE = 'out/stage90/xnu_arm_entry.elf'
 DEFAULT_STUBNAMES = 'out/stage90/xnu_arm_entry_stubnames.txt'
+DEFAULT_POOL_DIR = 'out/xnu_kernel_obj'
 
 # `nm -S` types that mean "this name occupies storage". The build's own generator uses the same set to
 # decide between a sized stand-in and a reporting stub body.
@@ -105,11 +120,40 @@ def read_object(path):
     return defined, undef
 
 
+def read_pool(paths):
+    """{name: (type, size)} for every name any object in the pool defines.
+
+    The generator classifies an undefined name by looking for a definition with `nm -S` over the pool, so
+    this is that lookup done once for all of them. One `nm` over every object at once is used rather than
+    one per object: with more than one file nm prints a bare `path:` header line before each file's
+    records and then `name type value size`, so the header lines are what delimit the files here. The
+    size is printed in **hex without a prefix** (333's defect), which is why nothing in this file
+    interprets it - it is reported beside the name, not arithmetic'd with.
+    """
+    out = nm(['-S', '-P', '--defined-only'] + list(paths))
+    table = {}
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) == 1 and f[0].endswith(':'):
+            continue                      # a `path:` file header, not a record
+        if len(f) >= 4 and f[1] != 'U':
+            table.setdefault(f[0], (f[1], f[3]))
+    return table
+
+
+def pool_paths(pool_dir):
+    import glob
+    return sorted(glob.glob(pool_dir + '/*.o'))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--against', default=DEFAULT_IMAGE, help='the image as it stands')
     ap.add_argument('--stubnames', default=DEFAULT_STUBNAMES, help="the build's stub-name list")
+    ap.add_argument('--pool', default=DEFAULT_POOL_DIR,
+                    help='the compiled object pool the generator classifies added names against '
+                         '(empty string to skip and call every added name a function stub)')
     ap.add_argument('objects', nargs='+')
     args = ap.parse_args()
 
@@ -120,6 +164,11 @@ def main():
     print('image %s: %d symbols' % (args.against, len(image)))
     print('stubs %s: %d records (%d func, %d data)'
           % (args.stubnames, nrec, n_func, n_data))
+    pool = {}
+    if args.pool:
+        paths = pool_paths(args.pool)
+        pool = read_pool(paths)
+        print('pool %s: %d objects, %d defined names' % (args.pool, len(paths), len(pool)))
     print()
 
     for obj in args.objects:
@@ -128,6 +177,15 @@ def main():
         added = sorted(n for n in undef if n not in image)
         storage = [n for n in resolved if defined[n] in STORAGE_TYPES]
         functions = [n for n in resolved if defined[n] not in STORAGE_TYPES]
+
+        def added_kind(n):
+            """How the generator will classify this reference: the pool's `nm -S` type, not the object's."""
+            ntype, size = pool.get(n, (None, None))
+            return 'storage' if ntype in STORAGE_TYPES else 'function', ntype, size
+
+        new_storage = [n for n in added if added_kind(n)[0] == 'storage']
+        new_funcs = [n for n in added if added_kind(n)[0] != 'storage']
+
         print('== %s' % obj)
         print('   %d definitions, %d references' % (len(defined), len(undef)))
         print('   resolved (%d: %d function, %d storage)'
@@ -136,19 +194,22 @@ def main():
             kind, ntype, size = stubs[n]
             print('      %-58s object %s, stand-in was %s %s%s'
                   % (n, defined[n], kind, ntype, '' if size is None else ' ' + size))
-        print('   added (%d):' % len(added))
+        print('   added (%d: %d function, %d storage)'
+              % (len(added), len(new_funcs), len(new_storage)))
         for n in added:
-            print('      %-58s becomes a %s stub'
-                  % (n, 'storage' if defined.get(n) in STORAGE_TYPES else 'function'))
+            kind, ntype, size = added_kind(n)
+            where = 'pool %s %s' % (ntype, size) if ntype else 'nowhere in the pool'
+            print('      %-58s becomes a %s stub  (%s)' % (n, kind, where))
         print('   of the %d references, %d are already satisfied'
               % (len(undef), len(undef) - len(added)))
         print()
         print('   predicted counts: %d -> %d undefined, %d -> %d function, %d -> %d storage'
               % (len(image), len(image) - len(resolved) + len(added),
-                 n_func, n_func - len(functions) + len([n for n in added
-                                                        if defined.get(n) not in STORAGE_TYPES]),
-                 n_data, n_data - len(storage) + len([n for n in added
-                                                      if defined.get(n) in STORAGE_TYPES])))
+                 n_func, n_func - len(functions) + len(new_funcs),
+                 n_data, n_data - len(storage) + len(new_storage)))
+        if new_storage:
+            print('   (the %d created storage stand-in(s) cost %d x 0x40 of `.bss`, not their own sizes)'
+                  % (len(new_storage), len(new_storage)))
         print()
 
 

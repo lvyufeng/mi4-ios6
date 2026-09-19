@@ -6570,6 +6570,318 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # whether the fill term can be negative in the same closed arithmetic the last four steps used.
     #
     LIBKERN_CXX_OSARRAY_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSARRAY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSArray.o}
+    # 335: `iokit/Kernel/IORegistryEntry.cpp` - the second call of `iokit_post_constructor_init`, the
+    #       largest single step of the walk so far, and **the first step whose `.text` should shrink**
+    #
+    # **A correction to 334's closing line, made before the build rather than after it.** 334 ended with
+    # "the first step whose `.text` should *shrink* - 67 retired bodies and name slots against 5 created".
+    # The 67 retirements are worth 0x648 of bodies plus 0xEBC of name slots = **0x1504**, and this object's
+    # own `.text` is **0x47AC** - so the retirements are barely a third of what arrives, and `.text`
+    # **grows**. The guess confused "many names retire" with "more is retired than added"; the arithmetic
+    # that refutes it is two sums, and it is written here, ahead of the build, because that is what the
+    # ledger is for.
+    #
+    # **The object named by the run.** 334 stopped at `_ZN15IORegistryEntry10initializeEv`, and
+    # `iokit_Kernel_IORegistryEntry.o` (manifest:339) is the only object in the pool that defines it -
+    # measured over all 695 objects, and the same object is the only one
+    # `iokit_Kernel_IOStartIOKit.o` references it from. Measured in the object:
+    #
+    # | `iokit_Kernel_IORegistryEntry.o` | |
+    # |---|---|
+    # | `.text` | **18348** (0x47AC), 95 functions |
+    # | `.text._ZN{15IORegistryEntry,15IORegistryPlane,18IORegistryIterator}9MetaClassD0Ev` | 4 each (0x00C, three COMDATs) |
+    # | `.rodata` | **696** (0x2B8: the three vtables, the three `metaClass`/`superClass` pairs, and the plane/key tables) |
+    # | `.rodata.str1.1` | **223** (0xDF, mergeable) |
+    # | `.data` | **8** |
+    # | `.bss` | **124** (0x7C: the registry statics, `gRegistryRoot`, `gIORegistryPlanes`, `gIORegistryGenerationCount`, ...) |
+    # | `.init_array` | 4 (`_GLOBAL__sub_I_IORegistryEntry.cpp`) |
+    # | definitions / references | 175 / 75 |
+    #
+    # **Predicted: 67 resolved / 5 added** - 67 function stubs and **no storage** - so **990 -> 928
+    # undefined, 878 -> 816 function, 112 -> 112 storage**. The 67 are the whole registry-entry API as the
+    # rest of the kernel sees it: `initialize`, `init`, `setName` (both overloads), `setProperty` (all seven),
+    # `copyProperty`/`getProperty` (both key kinds), `attachToParent`/`detachFromParent`/`attachToChild`/
+    # `detachFromChild`, the two `getParentIterator`/`getChildIterator` pairs, `inPlane`, `hasAlias`,
+    # `getPath`, `getLocation`, `compareNames`, `getRegistryEntryID`, `setProperties`, `removeProperty`, and
+    # the three `MetaClass` D0 destructors' names. The 5 added are all functions, because nothing in the pool
+    # defines any of them yet:
+    #
+    #   _ZN10OSIterator10gMetaClassE        _ZN10OSIteratorC2EPK11OSMetaClass   _ZN10OSIteratorD2Ev
+    #   _ZN9OSBoolean11withBooleanEb        strtouq
+    #
+    # (`OSIterator::gMetaClass` is *storage* by nature - it is a `gMetaClass` object - but the generator
+    # classifies an undefined name by looking for it with `nm -S` over the pool, and nothing defines it, so
+    # it falls through to the function branch. That is 330's defect read in the other direction, and it is
+    # why the storage column does not move while the function column takes all five.)
+    #
+    # `.text` predicted from the same seven terms as the last four steps, and this is the first of them whose
+    # retired half is larger than its created half while the object is larger still:
+    #
+    # | term | bytes |
+    # |---|---|
+    # | this object's `.text` | **+0x47AC** |
+    # | its three COMDAT `.text._ZN*9MetaClassD0Ev` | **+0x00C** |
+    # | its `.rodata`, placed whole | **+0x2B8** |
+    # | its string bytes, as placed | **+0x000 .. +0x0DF** (223 in the object; the pool places what it does not already hold) |
+    # | the 67 retired stub bodies | **-0x648** (67 x 0x18) |
+    # | their 67 name slots | **-0xEBC** (sum of `align4(len+1)` over the 67 names, computed name by name) |
+    # | the 5 created stub bodies | **+0x78** |
+    # | their 5 name slots | **+0x80** (`align4` over `strtouq` 7, `_ZN10OSIteratorC2EPK11OSMetaClass` 33, `_ZN10OSIterator10gMetaClassE` 28, `_ZN10OSIteratorD2Ev` 19, `_ZN9OSBoolean11withBooleanEb` 28) |
+    # | `.text` fill | read, not predicted |
+    #
+    # which sums to **+0x3664 plus up to 0xDF plus a band**, so `.text` ends somewhere between 0x8014CF44
+    # and 0x8014D043 - and that is **past the 0x8014C000 16 KB boundary**, so for the second time in three
+    # steps **`.data` moves**: 0x8014C000 -> **0x80150000**, +0x4000, and every section above it follows.
+    #
+    # | | 334 | 335 predicted |
+    # |---|---|---|
+    # | `.text` | 0x801498E0 (0x1498E0) | 0x8014CF44 .. 0x8014D043 |
+    # | `.data` | 0x8014C000 (0x193C8) | **0x80150000** (0x193D0, its own +0x8) |
+    # | `.sysctl_set` | 0x801653C8 (0x10C) | **0x801693D0** (0x10C) |
+    # | `.init_array` | 0x801654D4 (0x28) | **0x801694DC** (**0x2C**) |
+    # | `.bss` | 0x80165500 (0x37A58) | **0x80169540** (placed +0x7C, fill read) |
+    # | `__bss_end` | 0x8019CF58 | ~**0x801A1014** |
+    # | image | 1463548 | ~**1480000** |
+    # | headroom | 1454248 | ~**1437676** |
+    #
+    # `.init_array` grows to 0x2C - **eleven entries**, `_GLOBAL__sub_I_IORegistryEntry.cpp` at #10 and
+    # `last_kernel_constructor` still #11, which is again the order the step depends on. And `.bss`'s start
+    # moves this time by the alignment idiom 332 found rather than by the boundary: `.init_array`'s end is
+    # 0x80169508, whose `align64` is **0x80169540**.
+    #
+    # **Predicted stop: outside this object, three calls into its caller.**
+    #
+    # `IORegistryEntry::initialize` is reached from `iokit_post_constructor_init`'s **second** call, and the
+    # question this step turns on is whether it *returns*. Read off the object and the pool rather than
+    # assumed:
+    #
+    #   - the guard at the top is `if (!gRegistryRoot)` - `ldr r0, [r6]; cmp r0, #0; beq; pop` - and
+    #     `gRegistryRoot` is this object's own `.bss`, zeroed by the payload, so the body runs;
+    #   - the body makes **nine direct calls**, and every one is real in this image: the five
+    #     `lck_grp_attr_alloc_init`/`lck_grp_alloc_init`/`lck_attr_alloc_init`/`lck_attr_rw_shared_priority`/
+    #     `lck_rw_init` (IOLocks.o, 322), `OSObject::operator new` (325), `OSObject::OSObject` (333),
+    #     `OSMetaClass::instanceConstructed` (324), `IORecursiveLockAlloc`, and
+    #     `OSDictionary::withCapacity` (324) - and then four `OSSymbol::withCStringNoCopy` (330);
+    #   - it makes **three indirect calls**, each a vtable slot, and each resolves to a function *this object
+    #     defines*, so each is real after the link: slot 0x50 -> `IORegistryEntry::init(OSDictionary*)`,
+    #     slot 0x60 -> `setProperty(const char*, OSObject*)`, slot 0x104 -> `setName(const char*, const
+    #     IORegistryPlane*)`;
+    #   - those three in turn reach `setProperty(const OSSymbol*, OSObject*)` (slot 0x58) and
+    #     `setName(const OSSymbol*, const IORegistryPlane*)` (slot 0x100), both defined here; and the closure
+    #     of that set - **four functions, 1044 bytes** - makes **no call that is still a stub**: the
+    #     sixteen external names it reaches are `IOMalloc`, `IORecursiveLockAlloc`, `bzero`,
+    #     `OSDictionary::withCapacity`, `OSMetaClassBase::safeMetaCast`, `OSObject::init`, `OSObject::OSObject`,
+    #     `OSObject::operator new`, `OSSymbol::withString`, `OSSymbol::withCString`, `OSSymbol::withCStringNoCopy`,
+    #     `OSMetaClass::instanceConstructed`, `lck_attr_alloc_init`, `lck_attr_rw_shared_priority`,
+    #     `lck_grp_alloc_init`, `lck_grp_attr_alloc_init` and `lck_rw_init`, and every one of them is already
+    #     defined in the image.
+    #
+    # **The ten functions of this object that *do* still call a stub are all outside that closure** -
+    # `setProperty(const char*, void*, unsigned)` -> `OSData::withBytes`, `setProperty(const char*, ...)` ->
+    # `OSNumber::withNumber`, and eight that reach `OSCollectionIterator::withCollection`
+    # (`attachToParent`, `getNextObjectFlat`, `compareNames`, `getChildIterator`, `getParentIterator`,
+    # `inPlane`, `hasAlias`) or `OSOrderedSet::withCapacity` (`getNextObjectRecursive`). None is reachable
+    # from `initialize`, and that is a statement about the call graph, not about the run: the falsifier is a
+    # `stub_hit=` naming one of them.
+    #
+    # So `initialize` returns, and the walk returns to `iokit_post_constructor_init` and stops on its
+    # **third** call:
+    #
+    #     8011b0ec <iokit_post_constructor_init>:  push {r4, r5, fp, lr}
+    #      +0x04  8011b0f0  bl <_Z15IOCPUInitializev>               real since 333
+    #      +0x08  8011b0f4  bl <_ZN15IORegistryEntry10initializeEv>  real since 335
+    #      +0x0C  8011b0f8  mov r4, r0
+    #      +0x10  8011b0fc  bl <_ZN9IOService10initializeEv>         STUB   <- return address +0x14
+    #
+    #     stub_hit=_ZN9IOService10initializeEv   xnu_entry_stub_caller = iokit_post_constructor_init+0x14
+    #
+    # The key is the third call forward in the same frame (+0x0C -> +0x14), which is what 318's rule reads
+    # as progress inside a frame; and the function it names, `IOService::initialize`, is the next thing IOKit
+    # needs after its registry - so the object behind it, `iokit/Kernel/IOService.cpp`, is where 336 goes.
+    #
+    # The manifest line number of this step's object is **339**; 334's closing note said 297, which is a
+    # different line of the same manifest, and it is corrected here rather than left to be read as a fact.
+    #
+    # ## The build refuted one term, before the run
+    #
+    # **The undefined count is exact and the kind split is off by one in each direction.** The build printed
+    # `928 symbol(s) undefined` - the prediction to the name - and then
+    # `stubs: 815 function(s), 113 storage`, where the prediction was **816 / 112**. So one of the five added
+    # names arrived as **storage**, and the generated list says which and why:
+    #
+    #     data _ZN10OSIterator10gMetaClassE B 0x18
+    #
+    # **The cause is the population each side looked in.** The generator classifies an undefined name by
+    # looking for a definition with `nm -S` **over the whole 695-object pool**, and
+    # `libkern_c++_OSIterator.o` - compiled, in the pool, not in this link - defines
+    # `_ZN10OSIterator10gMetaClassE` as `B 0x18`: an `OSMetaClass` object, 24 bytes. The prediction used
+    # `tools/entry_object_effect.py`, whose `added` names are read off the object *being linked* - where
+    # this name is undefined, so `nm` there says nothing about its kind and the tool called it a function
+    # stub. Every added name came out "function" for that reason, which is right four times out of five
+    # here and would have been right every time so far, because this is the first step whose object
+    # references a name that some *other* unlinked object defines as storage.
+    #
+    # | | predicted | measured (build) |
+    # |---|---|---|
+    # | undefined | 928 | **928** |
+    # | function stubs | 816 | **815** |
+    # | storage stand-ins | 112 | **113** |
+    #
+    # **Both `.text` and `.bss` change with it.** The created half becomes four stub bodies (0x60) and four
+    # function name slots (`strtouq` 8, `_ZN10OSIteratorC2EPK11OSMetaClass` 36, `_ZN10OSIteratorD2Ev` 20,
+    # `_ZN9OSBoolean11withBooleanEb` 32 = 0x60) with **no body and no name slot for the storage name** -
+    # 322's rule, which is what makes the difference 0x38 rather than 0x40 - so the `.text` sum becomes
+    # **+0x362C plus its string bytes plus the fill band** rather than +0x3664, and the created storage
+    # stand-in adds **a full 0x40-byte slot to `.bss`**, which is where the fifth of a column becomes half
+    # a kilobyte of section.
+    #
+    # The tool is fixed rather than annotated: `read_pool()` now scans the pool once (one `nm` over all 695
+    # objects, 25176 defined names, 0.5 s) and classifies added names exactly as the generator does, and it
+    # prints the 0x40-per-stand-in cost so the `.bss` consequence is in the prediction rather than in the
+    # surprise. Verified against this step's own refutation: with `--against /dev/null`, so that all 75 of
+    # `iokit_Kernel_IORegistryEntry.o`'s references are "added", it now reports
+    #
+    #     _ZN10OSIterator10gMetaClassE   becomes a storage stub  (pool B 18)
+    #
+    # which is the line the build printed.
+    #
+    # ## Measured, against the build
+    #
+    # `.text` **+0x3700** (0x1498E0 -> **0x14CFE0**), which is the placed total's 0x148BC8 -> **0x14C2C0**
+    # (**+0x36F8**) plus the fill's 0xD18 -> **0xD20** (**+0x8**). The placed half closes in **eight** terms
+    # with no residual:
+    #
+    # | term | bytes |
+    # |---|---|
+    # | this object's `.text` | **+0x47AC** |
+    # | its three COMDATs | **+0x00C** |
+    # | its `.rodata`, placed whole | **+0x2B8** |
+    # | its string bytes, as placed | **+0x0CC** of 0x0DF (19 deduped; the map prints the line) |
+    # | the 67 retired stub bodies | **-0x648** |
+    # | their 67 name slots | **-0xEBC** |
+    # | the 4 created stub bodies | **+0x060** |
+    # | their 4 name slots | **+0x060** |
+    #
+    # and the four stub terms are measured a second time, independently, off `realstubs.o` - which is also
+    # where the kind defect shows up in a section rather than in a count: its `.text` 21072 -> **19560**
+    # (-0x5E8 = 0x18 x (67 - 4), which is 67 retired bodies less 4 created), its `.rodata.str1.4`
+    # 23675 -> **19999** (-0xE5C = -0xEBC + 0x60), and its `.bss` 7364 -> **7428** (+0x40 for the one
+    # *storage* stand-in this step created, whose body and name slot do not exist at all).
+    #
+    # ## The 16 KB boundary, crossed for the second time in three steps
+    #
+    # | | 334 | 335 | delta |
+    # |---|---|---|---|
+    # | `.text` | 0x801498E0 (0x1498E0) | **0x8014CFE0 (0x14CFE0)** | +0x3700 |
+    # | `.data` | 0x8014C000 (0x193C8) | **0x80150000 (0x193D8)** | **+0x4000, size +0x10** |
+    # | `.sysctl_set` | 0x801653C8 (0x10C) | **0x801693D8 (0x10C)** | +0x4010, size 0 |
+    # | `.init_array` | 0x801654D4 (0x28) | **0x801694E4 (0x2C)** | +0x4010, **+4** |
+    # | `.bss` | 0x80165500 (0x37A58) | **0x80169540 (0x37B18)** | **+0x4040, size +0xC0** |
+    # | `__bss_end` | 0x8019CF58 | **0x801A1058** | +0x4100 |
+    # | image | 1463548 | **1479952** | +0x4104 |
+    # | headroom | 1454248 | **1437608** | -0x4100 |
+    #
+    # The prediction's range for `.text`'s end was 0x8014CF44..0x8014D043 and the answer is 0x8014CFE0,
+    # inside it; `.data`'s move to **0x80150000** was predicted exactly, and so was `.bss`'s start
+    # (**0x80169540**, the `align64` of `.init_array`'s end 0x80169508 - 332's idiom, not the boundary).
+    # `.data`'s own `+0x10` is **both** halves moving: the object's `.data` placed 0x8 *and* its fill 0x8,
+    # 0x7AA3 -> **0x7AAB**, which is the one place in this walk where a `.data` contribution did not fit in
+    # the existing fill.
+    #
+    # `.bss`'s **+0xC0** is three measured parts and the middle one is the kind defect's:
+    #
+    # - **+0x7C** the object's own `.bss`, which the map prints as one line at 0x8019F2C0;
+    # - **+0x40** the created **storage stand-in**, `_ZN10OSIterator10gMetaClassE` (`B 0x18`), one full
+    #   64-aligned slot for its 24 bytes - 331's rule for the third time, and the reason a one-name kind
+    #   error is worth half a kilobyte of section;
+    # - **+0x04** fill, 0x101 -> **0x105**.
+    #
+    # `.init_array` is **0x2C - eleven entries**, and the order is again the whole point:
+    #
+    # ```
+    # 0x801694e4  _GLOBAL__sub_I_OSKext.cpp        0x80124248  _GLOBAL__sub_I_IOCPU.cpp
+    # 0x801694e8  _GLOBAL__sub_I_OSMetaClass.cpp   0x80124fe4  _GLOBAL__sub_I_OSArray.cpp
+    # 0x801694ec  _GLOBAL__sub_I_OSDictionary.cpp  0x80129704  _GLOBAL__sub_I_IORegistryEntry.cpp  <- #10, new
+    # 0x801694f0  _GLOBAL__sub_I_OSObject.cpp      0x801297f4  last_kernel_constructor            <- #11, still last
+    # 0x801694f4  _GLOBAL__sub_I_OSCollection.cpp
+    # 0x801694f8  _GLOBAL__sub_I_OSSymbol.cpp
+    # 0x801694fc  _GLOBAL__sub_I_OSString.cpp
+    # ```
+    #
+    # ## The run, and a prediction the run refuted
+    #
+    # ```
+    # MI4IOS6_STAGE90_XNU real XNU entry: a symbol this image does not provide was called
+    #  xnu_entry_why=0x8012ec9c
+    #  xnu_entry_why_byte=0x00000061                       <- 'a', the epilogue's stub-hit text
+    #  xnu_entry_stub_caller_v=0x80128680                   (also _w0=0x32313038 "8012", _w1=0x30383638 "8680")
+    #  xnu_entry_stub_caller_digits=0x0000005e
+    #  xnu_entry_stub_caller=0x80128680                     (also _a and _e, all three agreeing)
+    #  xnu_entry_abort_entries=0x00000000                   <- nothing faulted on the way
+    # MI4IOS6_STAGE90_XNU real XNU entry stub_hit=_ZN20OSCollectionIterator14withCollectionEPK12OSCollection
+    # ```
+    #
+    # `tools/host_resolve_entry_addr.sh 0x80128680` -> **`_ZNK15IORegistryEntry7inPlaneEPK15IORegistryPlane+0x4c`**,
+    # `caller-4` = `0x8012867c: bl 8012d584 <_ZN20OSCollectionIterator14withCollectionEPK12OSCollection>`.
+    #
+    # **The predicted key was `iokit_post_constructor_init+0x14` on `IOService::initialize`, and the run says
+    # `inPlane+0x4c`.** The prediction's claim was that `initialize`'s closure contains no stub, and it was
+    # wrong - but not about the object. The chain the run measures is
+    #
+    #     iokit_post_constructor_init
+    #       -> IORegistryEntry::initialize                    real since this step
+    #          -> setProperty("IORegistryPlanes", gIORegistryPlanes)      vtable slot 0x60
+    #             -> setProperty(const OSSymbol*, OSObject*)              vtable slot 0x58
+    #                -> inPlane(NULL)                                     vtable slot 0xd0
+    #                   -> OSCollectionIterator::withCollection(...)      STUB
+    #
+    # and each step of it is in the source, in order: `setProperty`'s body is
+    # `OSCollection *coll = OSDynamicCast(OSCollection, anObject); bool makeImmutable = (coll && inPlane());`
+    # (`IORegistryEntry.cpp:542-552`), and `gIORegistryPlanes` **is** an `OSCollection` - it is the
+    # `OSDictionary::withCapacity(1)` this same function made eleven calls earlier - so the cast succeeds and
+    # `inPlane()` is evaluated, with `plane` defaulted to NULL; and with a NULL plane `inPlane`'s first
+    # statement is `OSCollectionIterator::withCollection( registryTable())` (`:1595`), unconditionally.
+    #
+    # **What the prediction's closure walk got wrong is one line of its own output.** The walk followed
+    # `R_ARM_CALL` relocations only, so vtable-mediated edges were invisible to it; the patch was to pass
+    # the vtable targets in as extra roots, and that resolver returned `None` for **all five** of them (its
+    # `.rodata` relocation parse was broken), so the root list came out four long where it should have been
+    # nine. The script *printed* that root list and the prediction was written from the ledger anyway - the
+    # four functions it walked really do make no stub call, and the two it never entered,
+    # `setProperty(const OSSymbol*, OSObject*)` and `setName(const OSSymbol*, const IORegistryPlane*)`, are
+    # exactly where the stub was. The name the run stopped on was **on the ledger's own list of the ten
+    # functions of this object that still call a stub**, under a sentence that declared them all unreachable
+    # from `initialize`: the list was right and the reachability claim was not.
+    #
+    # The lesson is the one this file keeps relearning: **a walker that can silently drop edges cannot be
+    # made safe by printing what it kept** - count the roots against the number you asked for, the same way
+    # `read_stub_names()` counts records against lines. A closure claim in this walk has to be an
+    # enumeration of the *edges it followed*, not of the nodes it reached.
+    #
+    # Safety, as every run: non-persistent `fastboot boot` of `stage90-qcdt.img` (4394 KB), nothing flashed,
+    # `25` records of `persistent_write_attempted=0x00000000` and `87` of `failure_mask=0x00000000` with **no
+    # non-zero reading of either**, `xnu_entry_checks=5` / `xnu_entry_failures=0`, log 301670 bytes, and the
+    # device back on Android on its own (`MI 4LTE`, release 10).
+    #
+    # **What the one key measures beyond the stop.** Reaching `inPlane+0x4c` means `initialize` got past its
+    # `lck_*` block, its `new IORegistryEntry` (via `OSObject::operator new`), the
+    # `OSMetaClass::instanceConstructed` call, `IORecursiveLockAlloc`, `OSDictionary::withCapacity(1)`, the
+    # vtable call into `init(NULL)` **and `init`'s whole body** (`OSObject::init`, `IOMalloc`, `bzero`,
+    # `IORecursiveLockAlloc`, two `OSDictionary::withCapacity`, `safeMetaCast`, `OSSymbol::withString`), the
+    # `++gIORegistryLastID` store, four `OSSymbol::withCStringNoCopy`, the `setName("Root")` chain, and then
+    # `setProperty`'s own `safeMetaCast(anObject, OSCollection::gMetaClass)` - a successful dynamic cast in
+    # real XNU C++ at kernel level, which is the first of those this walk has run. `abort_entries=0`
+    # throughout.
+    #
+    # ## What this step measures
+    #
+    # The frontier is `_ZN20OSCollectionIterator14withCollectionEPK12OSCollection`, from
+    # `libkern/c++/OSCollectionIterator.cpp` (`libkern_c++_OSCollectionIterator.o`, manifest:365) - 27
+    # definitions, `.text` 1124, `.rodata` 148, `.bss` 24, one `__DATA, __data` of 48 and its own
+    # `.init_array` entry. It is the same name four other `IORegistryEntry` methods reach
+    # (`getChildIterator`, `getParentIterator`, `hasAlias`, `getNextObjectFlat`, `compareNames`,
+    # `attachToParent`), so it is a step that unblocks the whole iteration half of the registry API at once.
+        IOKIT_KERNEL_IOREGISTRYENTRY_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOREGISTRYENTRY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IORegistryEntry.o}
     # 323: `libkern/c++/OSRuntime.cpp` - the object that defines `OSlibkernInit` (322's stop) and the C++
     #       runtime initialiser, the linker's `new`/`delete`, and the `__mod_init_func` scan
     #
@@ -13294,6 +13606,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$LIBKERN_CXX_OSSTRING_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$IOKIT_KERNEL_IOCPU_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_CXX_OSARRAY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -13306,7 +13619,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
