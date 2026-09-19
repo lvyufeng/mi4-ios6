@@ -10,9 +10,11 @@ storage; `.text` +0x3BF to +0x3DA in six terms, ending past 0x8015C000 so `.data
 
 **Result:** the zero is cured and the stop landed exactly — `stub_hit=_ZN11IOCatalogue10initializeEv` at
 `xnu_entry_stub_caller_v=0x8011b104` = `iokit_post_constructor_init+0x18`, with **`abort_entries=0`**, i.e.
-`IOService::initialize` ran the 0x12C bytes past 340's fault and returned. The two kind columns are exact and
-the derived total was two low (842 − 4 + 1 = 839, not 841); the six-term table left out the created stub body
-and was 0x20 short because of it; and the run corrected this ledger's claim about the `why_byte` telegraph.
+`IOService::initialize` ran the 0x12C bytes past 340's fault and returned. The three kind columns are exact
+and the prediction's own three numbers did not add up (it printed `841 / 734 / 105`, and 734 + 105 = 839); the
+six-term table was 0x20 short because the retired body was written as −0x020 where every stub body in this
+project is exactly **0x18**, and the created one was left out at +0x018; and the run corrected this ledger's
+claim about the `why_byte` telegraph.
 
 ## The object
 
@@ -62,15 +64,18 @@ modes are *both* about data rather than about a call.
 | its COMDAT | +0x004 | **+0x004** |
 | its `.rodata`, placed whole | +0x09C | **+0x09C** |
 | its string bytes, as placed | +0x000 .. +0x01B | **+0x01B** (all 27 placed) |
-| one retired body (`withBoolean`) | −0x020 | **−0x020** |
-| **one created body (`binarySerialize`)** | **left out of the table** | **+0x020** |
+| one retired body (`withBoolean`) | −0x020 | **−0x018** |
+| **one created body (`binarySerialize`)** | **left out of the table** | **+0x018** |
 | the name slots: −0x020 + 0x038 | +0x018 | **+0x018** |
 
 Sum **+0x3DF**, the measured placed move (0x15B139 → **0x15B518**), with the fill 0xD27 → **0xD28** (+0x1), so
-`.text` is **+0x3E0** (0x15BE60 → **0x15C240**). The prose above the table said "one body in, one body out"
-about the *counts*, and the table then listed only the retirement — and the creation is exactly the 0x20 the
-placed move came in high by. `realstubs.o` measures the omission directly: its `.text` is **0x44D0, unchanged
-from 340**. Its other two sections confirm the terms that *were* written: `.rodata.str1.4` 0x4234 → **0x424C**
+`.text` is **+0x3E0** (0x15BE60 → **0x15C240**). The table was 0x20 short for two reasons at once, and both are
+about one term's size: the retirement was written as −0x020 where it is **−0x018**, and the creation was left
+out entirely where it is **+0x018** — so the prose's "one body in, one body out" was right and the rows under
+it did not say so. **Every stub body in this project is exactly 0x18**, measured rather than assumed:
+`arm-none-eabi-nm -S out/stage90/xnu_arm_entry_realstubs.o` reports the same size for all **734** of them, so a
+body term is ±0x18 and any other number in that row is a defect. `realstubs.o` measures the pair directly: its
+`.text` is **0x44D0, unchanged from 340**. Its other two sections confirm the terms that *were* written: `.rodata.str1.4` 0x4234 → **0x424C**
 (**+0x18** = −0x20 for `align4(28+1)` + 0x38 for `align4(53+1)`) and `.bss` 0x1BC4 → **0x1B04** (**−0xC0**,
 three stand-in slots given back, none created).
 
