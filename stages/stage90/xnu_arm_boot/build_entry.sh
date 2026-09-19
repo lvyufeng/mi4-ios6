@@ -25994,6 +25994,150 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
         -c "$BOOT_DIR/entry_macho.s" -o "$OUT/xnu_arm_entry_macho.o"
     LINK_OBJS+=("$OUT/xnu_arm_entry_macho.o")
 
+    # --------------------------------------------------------------------------------------------
+    # 436: the rest of the compiled kernel.
+    #
+    # Every object above this line was chosen one at a time, each because the walk had stopped on a
+    # name that object defines. That method has a measured cost and 435's own numbers price it:
+    # `dlil_init`'s first callee is a stub, the 22 objects of that step contain 889 `bl` sites
+    # covering 300 distinct stub names, and `tools/boot_closure.py` puts the whole boot path at 1056
+    # objects short 122 names. `mi4-a-kernel-entry-points-closure-is-the-kernel` recorded the same
+    # answer for `arm_init`: **the closure of a kernel entry point is the kernel.** So this step stops
+    # choosing object by object and links the pool.
+    #
+    # **The pool is `out/xnu_kernel_obj/` and `out/xnu_asm_obj/`** - every object
+    # `tools/build_xnu_arm_kernel.sh` produced - minus the objects already named above and minus the
+    # three that cannot be linked beside them. It is enumerated by glob rather than written out as a
+    # literal, and the reason is not that 423 paths are long: a glob has a property a hand-written
+    # list cannot have, which is that it cannot fall behind the build. What the list would have given
+    # that the glob does not - a statement of what is *in* - is given back twice over: the build
+    # prints how many objects it took, and `verify_sections` below still refuses any output section
+    # this script does not name.
+    #
+    # **The three refusals are collisions, not preferences.** A name that two linked objects both
+    # define is a link error, so an object defining a name the image already has cannot come in
+    # whole. There are **fifteen** of those names, and they fall in three places - counted with
+    # `nm --defined-only -g` over the eleven entry-side objects against all 712 pool objects:
+    #
+    #     out/xnu_asm_obj/start.o                         4 names
+    #         _start, start_cpu, resume_idle_cpu, arm_init_tramp - all four defined by
+    #         `xnu_arm_start.o`, which is this image's own entry and is what the payload jumps to.
+    #     out/xnu_asm_obj/locore.o                       10 names
+    #         ExceptionVectorsBase (also `xnu_arm_entry_vectors.o`), ExceptionVectorsTable, and the
+    #         eight `fleh_*` handlers (`reset`, `undef`, `swi`, `prefabt`, `dataabt`, `addrexc`,
+    #         `irq`, `decirq`) - the last nine are `entry_stubs.c`'s hand-written vector glue. This
+    #         is the largest refusal and it is the vector table: the image has its own.
+    #     out/xnu_kernel_obj/iokit_KernelConfigTables.o   1 name
+    #         gIOKernelConfigTables - defined by `stage90_platform_config_tables.o`, which is
+    #         MSM8974's config tables rather than Apple's.
+    #
+    # **And `locore.o` is also the pool's only definer of three names this image does *not* define**:
+    # `thread_bootstrap_return`, `thread_exception_return` and `thread_syscall_return`. Refusing the
+    # object does not lose them - they stay in the 44, which is where they were before this step -
+    # but it is why the refusal costs a name rather than only a duplicate, and it is visible in the
+    # stub list rather than inferred.
+    #
+    # Anything those three define and this image needs becomes a stub like any other name the pool
+    # does not provide - a visible number in `xnu_arm_entry_stubnames.txt` rather than a silent one.
+    #
+    # **Measured before this block was written, by running pass 1 by hand over exactly this object
+    # list**: 423 objects in, three out, and **44 names undefined** - down from 1038, so this one
+    # step retires **994** names, and all 194 storage stand-ins go with them (the list is 44
+    # functions and 0 storage). Zero multiple definitions, which is the check on the fifteen-name
+    # refusal list above rather than a hope. The hand run is not the build's run in one respect
+    # worth naming: it left `xnu_arm_entry_stubs.o` out, so it saw 60 undefined, the extra 16 being
+    # the names that object defines by hand (`entry_kv`, `entry_stub_hit`, the nine `fleh_*` and
+    # `ExceptionVectorsTable`, `version`/`osversion`). The build sees 44.
+    #
+    # The 44 are listed in `docs/experiments/experiment-436-*` with what each one is; this build's
+    # own "stubs: N function(s), M storage" line is the measurement of that prediction.
+    #
+    # **Prediction, written before the run and after the build**, from
+    # `tools/xnu_entry_callwalk.py --elf out/stage90/xnu_arm_entry.elf --root bsd_init`:
+    #
+    #     first stub on the straight-line path: kmstartup
+    #     the run should stop with stub_hit=kmstartup
+    #
+    # `kmstartup` is the twelfth `bl` in `bsd_init`'s last straight run - `nwk_wq_init` `+0x808`,
+    # `dlil_init` `+0x80C`, `proto_kpi_init` `+0x810`, `socketinit` `+0x814`, `domaininit` `+0x818`,
+    # `iptap_init` `+0x81C`, `flow_divert_init` `+0x820`, `memorystatus_init` `+0x82C`, `acct_init`
+    # `+0x830`, `kmstartup` `+0x834` - with no conditional branch between them, so the walk is a
+    # straight line and the answer is exact rather than probable. **The caller key is
+    # `0x8003B228`**, the return address of that `bl` (`bsd_init` is at `0x8003A9F0`).
+    #
+    # Falsifiers, named in advance: (1) the run stops on one of the other 43 stubs, which would mean
+    # a conditional branch inside `dlil_init`'s or `socketinit`'s transitive closure was taken - the
+    # walk prints those sites and they are the list to read if so; (2) the run stops on a name that
+    # is not a stub at all, which would mean the whole-kernel link broke something the 435 image
+    # had; (3) the run reaches `vm_pageout` (`0x80064950`), which would mean `kmstartup` is not on
+    # the executed path after all and the goal's minimum bar is met in one step.
+    #
+    # **Measured on hardware: none of the three, and the reason is a fourth kind of stop.** The run
+    # reports `xnu_entry_stub_caller_v=0x00000000` - **no stub was reached at all** - and instead
+    # `exception: data abort` with `xnu_entry_abort_first_pc=0x80409DB8`, `dfar=0x3C`,
+    # `insn=0xe590603c` (`ldr r6, [r0, #0x3c]` with `r0` = 0). The faulting function is
+    # `aes_encrypt_key128` (`0x80409DA0`, `libkern/crypto/corecrypto_aes.o`), whose third
+    # instruction loads `g_crypto_funcs` - a real `.bss` global at `0x8053381C` - and dereferences
+    # it. Its four call sites in this image are `tcp_init + 0x104`, `tcp_sysctl_fastopenkey + 0xDC`,
+    # `cpx_set_aes_iv_key + 0x10` and `cpx_iv_aes_ctx + 0x54`; the one the boot reaches is
+    # `tcp_init`'s, through the inlined `tcp_tfo_init()` (`read_frandom(key, 16)` at `+0xF4`, then
+    # the AES call), and `tcp_init` is reached from `bsd_init + 0x818` (`domaininit`). So the walk
+    # got **five calls further than 435's stop** - `dlil_init`, `proto_kpi_init`, `socketinit` and
+    # `domaininit` all ran - and stopped on a zeroed global rather than on a missing symbol.
+    #
+    # `g_crypto_funcs` is the crypto dispatch table. It is defined `B` (zero) by
+    # `libkern/crypto/register_crypto.o` and written only by `register_crypto_functions()`, whose
+    # only caller in the whole tree is Apple's **`com.apple.kec.corecrypto` kext** - the same shape
+    # as 432's `pthread_functions`, and the second table this boot needs that no object in the pool
+    # supplies. The walk cannot see it for 431's reason: both of its lists are built from the *stub*
+    # set, and `g_crypto_funcs` is not a stub, it is a definition with the wrong value. That is kind
+    # 2 in `mi4-stub-walk-frontier-kinds` - "an invented zero" - and **436 is the first step whose
+    # stop is one**, because before it every one of these names was a storage stand-in the generator
+    # sized from the object that defines it, and a stand-in that stops is not a zero that gets
+    # dereferenced.
+    # --------------------------------------------------------------------------------------------
+    declare -A _436_have=()
+    for _o in "${LINK_OBJS[@]}"; do _436_have["${_o#"$REPO_ROOT"/}"]=1; done
+    _436_refuse="start.o locore.o iokit_KernelConfigTables.o"
+    _436_refused=""
+    _436_already=0
+    POOL_OBJS=()
+    for _o in "$REPO_ROOT"/out/xnu_kernel_obj/*.o "$REPO_ROOT"/out/xnu_asm_obj/*.o; do
+        [[ -e $_o ]] || continue
+        _base=${_o##*/}
+        if [[ " $_436_refuse " == *" $_base "* ]]; then
+            _436_refused+=" $_base"
+            continue
+        fi
+        if [[ -n ${_436_have["${_o#"$REPO_ROOT"/}"]:-} ]]; then
+            _436_already=$((_436_already + 1))
+            continue
+        fi
+        POOL_OBJS+=("$_o")
+    done
+    # The three refusals are checked by name, because a refusal list that has fallen out of step
+    # with the pool would otherwise show up as a link error much later and read as something else.
+    for _base in $_436_refuse; do
+        [[ " $_436_refused " == *" $_base "* ]] ||
+            { say "FAIL: '$_base' is on the 436 refusal list and is not in the pool - the list is" >&2
+              say "      stale, and every name it was refusing for is now a link error." >&2
+              exit 1; }
+    done
+    # A floor and not a count: the point is to catch a pool that was never built, or built in part,
+    # which would otherwise produce a smaller image and a *smaller* stub list - a step that looks
+    # like progress and is the opposite. 423 was the number measured for the step; 300 is the trip
+    # wire, deliberately below it so that ordinary growth does not have to edit this line.
+    if (( ${#POOL_OBJS[@]} < 300 )); then
+        say "FAIL: the pool glob found ${#POOL_OBJS[@]} object(s) to add and at least 300 are" >&2
+        say "      expected (423 were measured for this step). Run" >&2
+        say "      ./tools/build_xnu_arm_kernel.sh and ./stages/stage90/xnu_arm_assemble.sh first." >&2
+        exit 1
+    fi
+    say "  the whole kernel: ${#POOL_OBJS[@]} object(s) added, $_436_already already named above,"
+    say "  refused by name:$_436_refused"
+    LINK_OBJS+=(${POOL_OBJS[@]+"${POOL_OBJS[@]}"})
+    unset -v _436_have
+
     require "$LIBGCC" "install the arm-none-eabi toolchain (arm-none-eabi-gcc -print-libgcc-file-name)"
 
     say "== pass 1: which symbols do XNU's own objects need? =="
