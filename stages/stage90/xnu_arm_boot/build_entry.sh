@@ -10705,7 +10705,187 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # previous image** - `initWithArgs` is inside the object being linked, so its address is this block's layout
     # arithmetic and cannot be read off the 354 map the way `StartIOKit+0x114` could.
     #
+    # ## 355: `iokit/Kernel/IOPlatformExpert.cpp` -> `iokit_Kernel_IOPlatformExpert.o`, the definer of the ctor
+    #
+    # The only pool definer of 354's stop `_ZN22IOPlatformExpertDeviceC1Ev`, sought under its mangled name per
+    # 352's correction. **8 resolved / 16 added** - 856 -> **864** undefined, **748 -> 753 function,
+    # 108 -> 111 storage** (753 + 111 = 864).
+    #
+    # - resolved (8): `PEGetUTCTimeOfDay`, `PEHaltRestart`, `PEReadNVRAMProperty`, `PERemoveNVRAMProperty`,
+    #   `PESetUTCTimeOfDay` and `_ZN22IOPlatformExpertDeviceC1Ev` (functions); `_ZN16IOPlatformDevice9metaClassE`
+    #   (`R 4`) and `gPlatformInterruptControllerName` (`B 4`) (storage).
+    # - added (16): eleven functions - `SHA1Init`, `SHA1Update`, `SHA1Final`, `_Z17IODeviceTreeAllocPv`,
+    #   `_Z18IODTCompareNubNamePK15IORegistryEntryP8OSStringPS3_`,
+    #   `_Z21IODTResolveAddressingP15IORegistryEntryPKcP14IODeviceMemory`,
+    #   `_Z23IODTFindMatchingEntriesP15IORegistryEntrymPKc`, `_ZN10IOWorkLoop8workLoopEv`,
+    #   `_ZN16IORangeAllocator9withRangeEmmmm`, `_ZN8IOMapper17setMapperRequiredEb`, `_ZN9IODTNVRAMC1Ev` - and
+    #   five storage stand-ins, `_ZN16IORangeAllocator9metaClassE`, `_ZN21IOInterruptController9metaClassE`,
+    #   `_ZN9IODTNVRAM9metaClassE`, `gIODTCompatibleKey`, `gIODTModelKey`. **All five are 4 bytes**, so this
+    #   is a step where the 0x40 model and `align64(size)` agree and 354's defect is not retested.
+    #
+    # The object is the largest of the IOKit steps: `.text` **0x2E74** of 228 definitions, five `.text.*`
+    # COMDAT pieces of 4 bytes (0x14) with five `.group`s, `.bss` 0x94, `.rodata` **0x13A4**, `.rodata.str1.1`
+    # **0x313**, `.rodata.cst16` **0x10**, `.init_array` 4 - and **no `.data`, no `__DATA,__data`, no
+    # `__DATA,__sysctl_set`**, so its only `__DATA` input is the 4-byte `.init_array`.
+    #
+    # | term | bytes |
+    # |---|---|
+    # | this object's `.text` | **+0x2E74** |
+    # | its five `.text.*` COMDAT pieces | **+0x014** |
+    # | its `.rodata` | **+0x13A4** |
+    # | its string bytes, as placed | **+0x000 .. +0x313** |
+    # | its `.rodata.cst16` | **+0x010** |
+    # | the six retired stub bodies | **-0x090** |
+    # | the six retired name slots (`align4(len + 1)`: 0x14 + 0x10 + 0x14 + 0x18 + 0x14 + 0x20) | **-0x084** |
+    # | the eleven created stub bodies | **+0x108** |
+    # | the eleven created name slots (0xC + 0xC + 0xC + 0x18 + 0x38 + 0x40 + 0x34 + 0x1C + 0x28 + 0x24 + 0x14) | **+0x164** |
+    #
+    # Sum **+0x4394 .. +0x46A7**, so the text end is `align32(0x801855A0 + Q)` = **0x80189940 .. 0x80189C60**
+    # - the first step in eleven whose band straddles a 0x4000 boundary, and it does: `ALIGN(0x4000)` sends
+    # **both** ends to the same place, so **`.data` steps 0x4000 to 0x8018C000`** and every row below it moves
+    # with it, by 0x4000 and not by a banded amount:
+    #
+    # | row | predicted |
+    # |---|---|
+    # | `.text` | 0x80189940 .. 0x80189C60 |
+    # | `.data` | **0x8018C000**, size 0x198B8 unmoved (the object brings no `.data`) |
+    # | `.sysctl_set` | **0x801A58B8** (0x140 unmoved) |
+    # | `.init_array` | **0x801A59F8**, size 0x64 + 4 = **0x68** (twenty-six entries), end **0x801A5A60** |
+    # | `.bss` | `align64(0x801A5A60)` = **0x801A5A80**, size 0x38E98 - 0x80 + 0x140 (+0x94 + fill) = **0x38F58 .. 0x38FEC** |
+    # | `__bss_end` | **0x801DE9D8 .. 0x801DEA6C** |
+    # | image | **0x1A5A60 = 1727072** |
+    # | headroom | **1185320 .. 1185172** |
+    #
+    # **Predicted stop: `_Z17IODeviceTreeAllocPv` at `IOPlatformExpertDevice::initWithArgs+0x18`, key
+    # `0x8015FF40`.** The path, read from the 354 image and from the object: `StartIOKit+0x114` is
+    # `ldr r0, [r0]` (the vptr the constructor stores), then `mov r1, r7; mov r2, r9; mov r3, r8;
+    # str r6, [sp]; ldr r5, [r0, #0x340]; blx r5` - and slot 0x340 is `initWithArgs`, because
+    # `_ZTV22IOPlatformExpertDevice` is at `.rodata` + 0x86C with size 0x34C and the reloc at `.rodata` + 0xBB4
+    # is `_ZN22IOPlatformExpertDevice12initWithArgsEPvS0_S0_S0_` (0x86C + 8 + 0x340 = 0xBB4 exactly, and it is
+    # the vtable's last slot). `pexpert/arm/pe_init.c:279` names the four arguments:
+    # `StartIOKit(PE_state.deviceTreeHead, PE_state.bootArgs, (void *)0, (void *)0)`, and both of the walk's
+    # boot-args builders set `deviceTreeP` to a real blob (`stages/stage90/boot_args.c:15`,
+    # `xnu_boot_args_conformant.c:181`, with a `NULL` check at 258), so p1 is non-zero and the `IOService::init`
+    # branch is not the one taken.
+    #
+    # `initWithArgs`'s body, read from the object as 348's rule requires, is 0x84 bytes: the `bl` at object
+    # +0x14 is `_Z17IODeviceTreeAllocPv`, so with the object's `.text` placed at **0x8015D788** (immediately
+    # after `bsd_kern_bsd_stubs.o`'s 0x980 at 0x8015CE08 ends, where the next input,
+    # `xnu_arm_entry_last_kernel_constructor.o`, is a 0x0 `.text` at that very address) `initWithArgs` is at
+    # 0x8015D788 + 0x27A0 = **0x8015FF28** and the recorded caller is object +0x18 = **0x8015FF40**.
+    #
+    # Named falsifier: if `PE_state.deviceTreeHead` is zero the other branch runs and the stop is
+    # `_ZN10IOWorkLoop8workLoopEv` at object +0x280C = **0x8015FF94**. Both stops are kind 1 and both are names
+    # this step creates. **The key is the first of the walk's predicted stops that does not exist in the
+    # previous image** - `initWithArgs` is inside the object being linked, so its address is this block's
+    # arithmetic rather than a reading of the 354 map.
+    #
+    # **Measured: all three counts exact, every derived row exact, and the predicted key exact - the first key
+    # of the walk that came from this block's arithmetic rather than from the previous image.** Measured
+    # 2026-09-19:
+    #
+    # ```
+    # MI4IOS6_STAGE90_XNU real XNU entry: a symbol this image does not provide was called
+    #  xnu_entry_kv_written=0x00000068   xnu_entry_kv_in_dram=0x0000008c   xnu_entry_kv_dropped=0x00000000
+    #  xnu_entry_why=0x801654e8          xnu_entry_why_byte=0x00000061     'a'
+    #  xnu_entry_stub_caller_v=0x8015ff40   (also _a and _e, all three agreeing)
+    #  xnu_entry_abort_entries=0x00000000
+    # MI4IOS6_STAGE90_XNU real XNU entry stub_hit=_Z17IODeviceTreeAllocPv
+    # ```
+    #
+    # `864 symbol(s) undefined` / `753 function(s), 111 storage`; `__bss_start 0x801a5a80 ... (233496 bytes to
+    # 0x801dea98)`; `the copied image ends at 0x801a5a60, 32 bytes below __bss_start`; `image bytes 1727072`;
+    # `headroom 1185128 bytes below topOfKernelData`.
+    #
+    # | | 354 | 355 measured | 355 predicted |
+    # |---|---|---|---|
+    # | `.text` | 0x801855A0 (0x1855A0) | **0x80189BA0** (0x189BA0) | 0x80189940..0x80189C60 ✓ (0xC0 below the top) |
+    # | `.data` | 0x80188000 (0x198B8) | **0x8018C000** (0x198B8, size **unmoved**) | **0x8018C000**, 0x198B8 ✓ |
+    # | `.sysctl_set` | 0x801A18B8 (0x140) | **0x801A58B8** (0x140) | **0x801A58B8**, 0x140 ✓ |
+    # | `.init_array` | 0x801A19F8 (0x64, 25) | **0x801A59F8** (**0x68**, twenty-six) | **0x801A59F8**, 0x68, 26 ✓ |
+    # | `.bss` | 0x801A1A80 (0x38E98) | **0x801A5A80** (start **exact**), size **0x39018** | 0x801A5A80 ✓, 0x38F58..0x38FEC (+0x2C) |
+    # | `__bss_end` | 0x801DA918 | **0x801DEA98** | 0x801DE9D8..0x801DEA6C (+0x2C) |
+    # | image | 1710684 | **1727072** | **1727072** ✓ |
+    # | headroom | 1201896 | **1185128** | 1185320..1185172 (-0x2C) |
+    #
+    # **The stop is where this block said, to the byte.** `caller-4 = 0x8015FF3C: bl 80164298
+    # <_Z17IODeviceTreeAllocPv>`, a `T 0x18` stub, and the recorded caller `0x8015FF40` is
+    # `initWithArgs+0x18` - derived here as `0x8015D788 + 0x27A0 + 0x18` from the object's placement, and **the
+    # object's `.text` is at 0x8015D788 in this step's map, exactly as the placement argument said**. The walk's
+    # stop moved through: the constructor (`T 0x38` at 0x8015FEEC, real now - its `bl IOService::IOService(
+    # OSMetaClass const*)`, its vptr store and `bl OSMetaClass::instanceConstructed` all ran), its return,
+    # `StartIOKit+0x114`'s `ldr r0, [r0]; ldr r5, [r0, #0x340]; blx r5` - the vtable dispatch this block read
+    # out of `.rodata` - and into `initWithArgs`, whose first call is this stub.
+    #
+    # **`abort_entries=0` is what makes that a chain of measurements**: `IOService::IOService`,
+    # `OSMetaClass::instanceConstructed`, the vptr load and `initWithArgs`'s prologue all ran without a fault.
+    # And the named falsifier did not fire - the p1 == 0 branch would have stopped on
+    # `_ZN10IOWorkLoop8workLoopEv` - so **this run is also the measurement that `PE_state.deviceTreeHead != 0`**:
+    # the payload's `deviceTreeP` reached `PE_state` through `PE_init_platform(FALSE, ...)`, which is the
+    # argument that made `IODeviceTreeAlloc` the first call rather than the last.
+    #
+    # **`.bss` missed by 0x2C, and this time it is the fill rather than a model.** The row is
+    # `0x38E98 + 0x180`: `+0xC0` is the net of the five created stand-in slots (0x140) and the two retired ones
+    # (0x80) - `realstubs.o`'s `.bss` measured **0x2984** = 0x28C4 + 0xC0 exactly, and all five new stand-ins
+    # are 4 bytes, so 354's `align64(size)` model is not retested by this step - and the other `+0xC0` is the
+    # object's own 0x94 placed at 0x801DC030 plus a **`*fill*` that grew 0x10 -> 0x3C**. The object's bytes were
+    # *not* absorbed this time: they end at 0x801DC0C4 and the 64-aligned slot at 0x801DC100 needs 0x3C more, so
+    # the section grew by 0x94 + 0x2C and the band's top - which assumed the fill stayed at 0x10 - is 0x2C low.
+    # The fill is the unmeasured term again, in its mildest form.
+    #
+    # `.text`'s closure: object `.text` **+0x2E74**, its five COMDAT pieces **+0x014**, `.rodata` **+0x13A4**,
+    # its strings **+0x254 placed of 0x313** (read from this map at 0x801848E0), `.rodata.cst16` **+0x010**,
+    # `realstubs.o`'s bodies **+0x78** and its name slots **+0xE0** (`.rodata.str1.4` 0x445C -> **0x453C**, and
+    # -0x84 + 0x164 = 0xE0 exactly) = **+0x45E8** against a measured closure of **+0x4600**, so the fill is
+    # **+0x18**. Both `realstubs.o` numbers are exact against the closed forms: `.text` **0x4698** = 753 x 0x18,
+    # `.rodata.str1.4` **0x453C**, `.bss` **0x2984**.
+    #
+    # **One tooling defect found and fixed in this step, with no number depending on it.**
+    # `tools/entry_object_effect.py` printed its first pair as `%d -> %d undefined` from `len(image)` - the
+    # image's *symbol* count, 10121 - where the quantity meant is the number of names the link needs and the
+    # image does not provide (this step's 864: the build's own `symbol(s) undefined` line, and the stub list's
+    # function-plus-storage record count). The deltas were right and every block's base was right, because each
+    # one takes the base from the build's line and only the delta from the tool, so nothing in the ledger moved;
+    # the tool now prints `864 -> 855 undefined` for 356's object and `864 -> 864` for the object this step
+    # linked.
+    #
+    # Safety, as every run: non-persistent `fastboot boot` of `stage90-qcdt.img`, nothing flashed, 25 records of
+    # `persistent_write_attempted=0x00000000` and 87 of `failure_mask=0x00000000` with no non-zero reading of
+    # either, `xnu_entry_checks=5` / `xnu_entry_failures=0`, log 301635 bytes, and the device back on Android on
+    # its own (`MI 4LTE`, release 10).
+    #
+    # ## 356: `iokit/Kernel/IODeviceTreeSupport.cpp` -> `iokit_Kernel_IODeviceTreeSupport.o`
+    #
+    # The only pool definer of this step's stop `_Z17IODeviceTreeAllocPv`: **11 resolved / 2 added** - seven
+    # functions (`IODTFreeLoaderInfo`, `IODTGetDefault`, `IODTGetLoaderInfo`, `_Z17IODeviceTreeAllocPv`,
+    # `_Z18IODTCompareNubNamePK15IORegistryEntryP8OSStringPS3_`,
+    # `_Z21IODTResolveAddressingP15IORegistryEntryPKcP14IODeviceMemory`,
+    # `_Z23IODTFindMatchingEntriesP15IORegistryEntrymPKc`) and **four storage stand-ins** (`gIODTCompatibleKey`,
+    # `gIODTModelKey`, `gIODTPlane`, `gIODTTargetTypeKey`, all `B 4`) out; `_ZN14IODeviceMemory12withSubRangeEPS_mm`
+    # (pool `T 8`) and `_ZN14IODeviceMemory9withRangeEmm` (pool `T 30`) in - for 864 -> **855** undefined,
+    # **753 -> 748 function, 111 -> 107 storage** (748 + 107 = 855).
+    #
+    # The object: `.text` **0x2920** of 82 definitions, `.bss` 0x58, `.rodata.str1.1` **0x307**, and **no
+    # `.rodata`, no `.init_array`, no COMDAT, no `.data`** - so its `.text` closure has four terms and its
+    # `__DATA` rows do not move at all except by the four storage retirements, which free `0x40` each.
+    #
+    # **Predicted stop: `_ZN10IOWorkLoop8workLoopEv` at `initWithArgs+0x6C`, key `0x8015FF94`** - the stub 355
+    # created, at the far end of the call this step retires. `IODeviceTreeAlloc`'s body was read from its object
+    # as 348's rule requires - **0x694 bytes, 41 direct calls** - and every one of them is real in this image,
+    # at both levels: the two local callees (`_ZL18MakeReferenceTableP13OpaqueDTEntryb`,
+    # `_ZL24IODTMapInterruptsSharingP15IORegistryEntryP12OSDictionary`) were walked too, and the object's other
+    # three locals are not on the path. So the function returns, `initWithArgs` calls the real
+    # `IOService::init(entry, gIODTPlane)`, and the success tail's `bl IOWorkLoop::workLoop` is the stop.
+    #
+    # Three named falsifiers: (a) one of **29 `blx` dispatches** inside `IODeviceTreeAlloc` - the class of call
+    # this walk's tooling has never been able to see, and 29 in one function is the largest count yet; (b) the
+    # real **`panic` at 0x8002DEB4**, which `IODeviceTreeAlloc` calls at object +0x4F0 on a failed lookup - kind
+    # 6, or kind 3 if the failure is a property this walk's simulated tree does not carry; (c) `IOService::init`
+    # returning zero, which sends `initWithArgs` to the failure branch and `StartIOKit` out through its `pop` -
+    # a stop in a different function entirely.
+    #
     OSFMK_DEVICE_IOKIT_RPC_OBJ=${STAGE90_ENTRY_OSFMK_DEVICE_IOKIT_RPC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_device_iokit_rpc.o}
+    IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOPlatformExpert.o}
     BSD_KERN_BSD_STUBS_OBJ=${STAGE90_ENTRY_BSD_KERN_BSD_STUBS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_bsd_stubs.o}
     IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOInterruptAccounting.o}
     IOKIT_KERNEL_IOKITDEBUG_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOKITDEBUG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOKitDebug.o}
@@ -17457,6 +17637,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_BSD_STUBS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -17469,7 +17650,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

@@ -203,8 +203,16 @@ def main():
         print('   of the %d references, %d are already satisfied'
               % (len(undef), len(undef) - len(added)))
         print()
+        # The base of the first pair is **the number of names the link needs and the image does not
+        # provide**, which is the build's own `N symbol(s) undefined` line and therefore exactly the
+        # stub list's function-plus-storage record count. It is *not* `len(image)`: the image's symbol
+        # table holds every symbol it has, and the stand-ins this tool counts are definitions in it
+        # (`T`/`B`) rather than undefined (`U`) names. Printing `len(image)` under the word "undefined"
+        # is what this line did until experiment 355, which is a mislabel rather than a wrong delta -
+        # the deltas below were always right, and the ledger's blocks were right because they take the
+        # base from the build's `symbol(s) undefined` line and only the delta from here.
         print('   predicted counts: %d -> %d undefined, %d -> %d function, %d -> %d storage'
-              % (len(image), len(image) - len(resolved) + len(added),
+              % (n_func + n_data, n_func + n_data - len(resolved) + len(added),
                  n_func, n_func - len(functions) + len(new_funcs),
                  n_data, n_data - len(storage) + len(new_storage)))
         if new_storage:
