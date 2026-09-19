@@ -4006,6 +4006,146 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # stubs. Because `kdp_init` is one instruction, the stop is predicted to be the very next call
     # the image makes: **`kpc_init` at caller key 0x8000E640** (`bl kpc_init` at `0x8000e63c`).
     OSFMK_DEVICE_DEVICE_INIT_OBJ=${STAGE90_ENTRY_OSFMK_DEVICE_DEVICE_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_device_device_init.o}
+    # 312: `kern_kpc.c` - the first step with `.data` and `__sysctl_set`, and four resolutions that
+    #       were not in the undefined list to begin with
+    #
+    # **The object that defines `kpc_init`, 311's stop, and the first step that moves a section other
+    # than `.text` and `.bss`.** `bsd_kern_kern_kpc.o` (`bsd/kern/kern_kpc.c`, manifest:39) is
+    # `.text` 1796 / `.bss` 24 / `.rodata.str1.1` 428 / `.data` 672 / `__DATA,__sysctl_set` 56, with
+    # 33 definitions and 28 references. It resolves **1** (`kpc_init`, this stop) and adds **15**.
+    #
+    # **The prediction said 19 added and the build said 15, and the four that were wrong are the
+    # interesting part.** All four are names the object references, that are defined by
+    # `osfmk_kern_kpc_thread.o` - an object that has been in `LINK_OBJS` since long before this walk
+    # reached `kpc_init`: `kpc_thread_init`, `kpc_get_curthread_counters`, `kpc_get_thread_counting`,
+    # `kpc_set_thread_counting`. I read "absent from the undefined list" as "this image has never
+    # heard of it, so linking the object will make it a stub", and absent-from-that-list actually has
+    # **two** meanings - defined by something already linked, or referenced by nothing yet - and only
+    # `nm` on the image or the `LINK_OBJS` list tells them apart. 311 made the same inference in
+    # miniature and got the same verdict from the build (`panic_spin_forever`, predicted +1, measured
+    # 0, because `osfmk/kern/debug.c`'s definition was already linked).
+    #
+    # Measured: 733 -> **747** undefined, 644 -> **658** function stubs, 89 storage unchanged.
+    #
+    # | | base (311) | measured (312) | delta |
+    # |---|---|---|---|
+    # | undefined / function / storage | 733 / 644 / 89 | **747 / 658 / 89** | +14 / +14 / 0 |
+    # | `.text` | 0x11DA40 | **0x11E500** | **+0xAC0** |
+    # | `.data` | 0x18A08 | **0x18CA8** | **+0x2A0** (the object's 672 bytes) |
+    # | `.sysctl_set` | 0xA4 | **0xDC** | **+0x38** (the object's 56 bytes) |
+    # | image | 0x138AAC | **0x138D84** | +0x2D8 |
+    # | `__bss_start` | 0x80138AC0 | **0x80138DC0** | +0x300 |
+    # | `.bss` size | 0x36E58 | **0x36E58** | **0** |
+    # | `__bss_end` | 0x8016F918 | **0x8016FC18** | +0x300 |
+    # | headroom | 1640168 | **1639400** | -0x300 |
+    #
+    # `.text` is the five named terms plus a residual, and it closes to within 0xC:
+    #
+    #   this object's .text                         +0x704
+    #   this object's .rodata.str1.1, **linked**    +0x181   (0x1AC in the object, relaxed on link)
+    #   the stub object's .text, net                +0x150   (1 stub body retired, 15 created)
+    #   the stub object's .rodata.str1.4, net       +0x100   (1 name string retired, 15 created)
+    #   .text-region alignment fill                 -0x021
+    #   residual, unattributed                      +0x00C
+    #
+    # and the `.rodata.str1.1` line is the 301 lesson arriving again: the map prints both numbers -
+    # `0x181` and `0x1ac (size before relaxing)` - so an object's mergeable-section size is an upper
+    # bound and 43 bytes of it were duplicate strings the linker dropped.
+    #
+    # **`.bss` did not grow at all, and this is the third case of the alignment rule.** The previous
+    # two: 308's 0x18 fitted in the 0x10 of fill in front of the stand-ins (nothing moved), 310's
+    # 0x1C did not (everything moved +0x40). Here the object's `.bss` is 0x18 and it consumed exactly
+    # 0x18 of that fill - the map's `*fill*` in front of the stand-ins goes `0x34 -> 0x1c` - so the
+    # stand-ins stayed at +0x300 *relative to the section start*, and the section's size is unchanged.
+    # That is the same rule read as arithmetic: `new_fill = align64(start + input) - (start + input)`.
+    #
+    # `__bss_start` moved +0x300 because `.data` and `.sysctl_set` grew and `.bss` is 64-byte aligned
+    # after them: 0x2D8 of growth plus the alignment turn (0xAC -> 0xC0 is 0x14, 0x84 -> 0xC0 is
+    # 0x3C) is 0x300. `__bss_end` follows by the same 0x300 with the section size unchanged, and
+    # headroom is `topOfKernelData - __bss_end`, so it loses the same 0x300.
+    #
+    # **What the run measures** is two subsystems that had never been reached. `kpc_init`'s first
+    # three statements are `lck_grp_attr_alloc_init`, `lck_grp_alloc_init("kpc", ...)` and
+    # `lck_mtx_init(&sysctl_lock, ...)` - all real, so they ran and returned - and the stop is the
+    # fourth, `kpc_arch_init`. So the KPC subsystem's own lock group exists, its sysctl tree exists,
+    # and `sysctl__kpc_children` was installed in the kernel's sysctl set (the 56 bytes of
+    # `__sysctl_set` are the 14 `__set___sysctl_set_sym_*` entries that register it).
+    #
+    # **Safety: 25 x `persistent_write_attempted=0x00000000`, 87 x `failure_mask=0x00000000`,
+    # `xnu_entry_failures=0x00000000`, `xnu_entry_abort_entries=0x00000000`, no `exception:` line,
+    # log 301625 bytes, device back on Android 10 on its own.**
+    #
+    # **Next: `osfmk/arm/kpc_arm.c`** (`osfmk_arm_kpc_arm.o`, manifest:442) - the object that defines
+    # `kpc_arch_init`, `.text` **3916** / `.rodata.str1.1` 42 / `.bss` **184**, 33 definitions and 19
+    # references. It resolves **6** (`kpc_arch_init`, this stop, plus `kpc_get_classes`,
+    # `kpc_get_pmu_version`, `kpc_idle`, `kpc_idle_exit`, `kpc_set_sw_inc`) and adds **7**
+    # (`kpc_actionid`, `kpc_controls_fixed_counters`, `kpc_get_curcpu_counters`, `kpc_popcount`,
+    # `kpc_sample_kperf`, `PE_cpu_perfmon_interrupt_enable`,
+    # `PE_cpu_perfmon_interrupt_install_handler`), so 747 -> **748** undefined and 658 -> **659**
+    # function stubs, storage unchanged. Of its 19 references 11 are already real
+    # (`_consume_kprintf_args`, `cpu_broadcast_xcall`, `cpu_datap`, `cpu_number`, `current_processor`,
+    # `hw_atomic_add`, `hw_atomic_sub`, `ml_set_interrupts_enabled`, `panic`, `real_ncpus`,
+    # `thread_wakeup_prim`) and one, `kpc_get_counter_count`, is already a stub. **And the stop is
+    # predicted one call further on rather than in the linked object**: `kpc_arch_init` is two
+    # instructions in the object - `mrc p15, 0, r0, cr9, cr12, {0}` then `bx lr` - so it returns, and
+    # the next call is **`kpc_common_init` at caller key 0x801027A0** (`bl kpc_common_init` at
+    # 0x8010279c, the instruction after the one this run stopped on).
+    BSD_KERN_KERN_KPC_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_KPC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_kpc.o}
+
+    # 311: `kdp_udp.c` - 72 bytes of `bx lr`, and the step whose `.text` did not move at all
+    #
+    # **The object that defines `kdp_init`, 310's stop, and the cheapest step in this walk.**
+    # `osfmk_kdp_kdp_udp.o` (`osfmk/kdp/kdp_udp.c`, manifest:529) is **72 bytes of `.text`** and
+    # nothing else at all - no `.data`, no `.bss`, no `.rodata` - with **12 definitions and 1
+    # reference** (`panic_spin_forever`). This configuration compiles the KDP-disabled arm, so
+    # `kdp_init`, `kdp_register_send_receive`, `kdp_unregister_send_receive`,
+    # `kdp_set_ip_and_mac_addresses`, `kdp_set_gateway_mac`, `kdp_set_interface`, `kdp_register_link`
+    # and `kdp_unregister_link` are each a bare `bx lr`, `kdp_get_interface` and `kdp_get_ip_address`
+    # are `mov r0, #0; bx lr`, and `kdp_raise_exception`'s whole body is
+    # `mov lr, pc; b panic_spin_forever`.
+    #
+    # **The prediction said 2 resolved / 1 added and the build said 2 resolved / 0 added.**
+    # `panic_spin_forever` is not a new name: `osfmk/kern/debug.c`'s definition of it has been linked
+    # all along, and nothing had ever referenced it - which is why it appeared neither in the
+    # undefined list nor in the image's stub set. I read "absent from the undefined list" as "will
+    # become a stub"; it also means "already defined by something linked", and one `nm` on the image
+    # settles which. 312 makes the same inference at four times the size and is corrected the same way.
+    #
+    # Measured: 735 -> **733** undefined, 646 -> **644** function stubs, 89 storage unchanged.
+    #
+    # | | base (310) | measured (311) | delta |
+    # |---|---|---|---|
+    # | undefined / function / storage | 735 / 646 / 89 | **733 / 644 / 89** | -2 / -2 / 0 |
+    # | `.text` | 0x11DA40 | **0x11DA40** | **0** |
+    # | image / `.data` / `__bss_start` / `__bss_end` / headroom | 0x138AAC / 0x80120000 / 0x80138AC0 / 0x8016F918 / 1640168 | unchanged | 0 |
+    #
+    # **`.text` did not move at all - the first step that linked an object and changed nothing about
+    # the section** - and the four terms say why: +0x48 of object text, -0x30 for the two retired stub
+    # bodies (`kdp_init` and `kdp_raise_exception`), -0x20 for their two name strings, +0x8 of
+    # alignment fill. 0x48 - 0x30 - 0x20 + 0x8 = 0. The map shows each: the stub object's `.text`
+    # 0x3C90 -> 0x3C60, its `.rodata.str1.4` 0x3260 -> 0x3240, and the total fill 35047 -> 35055.
+    # Nothing about `.bss` could move because the object has none.
+    #
+    # **What the run measures is one line**: `stub_hit=kpc_init` at
+    # `xnu_entry_stub_caller=0x8000e640` = `kernel_bootstrap_thread + 0xc0`. Since `kdp_init` is a
+    # single `bx lr`, the step's real content is negative and worth stating as such: it does not
+    # measure that KDP works, it measures that KDP is compiled out of this configuration - which is
+    # exactly what makes the frontier a name that can be removed for 72 bytes.
+    #
+    # **Safety: 25 x `persistent_write_attempted=0x00000000`, 87 x `failure_mask=0x00000000`,
+    # `xnu_entry_failures=0x00000000`, `xnu_entry_abort_entries=0x00000000`, no `exception:` line,
+    # log 301620 bytes, device back on Android 10 on its own.**
+    #
+    # **Next: `bsd/kern/kern_kpc.c`** (`bsd_kern_kern_kpc.o`, manifest:39) - the object that defines
+    # `kpc_init`, and a much larger step than 311: `.text` 1796, `.bss` 24, `.rodata.str1.1` 428,
+    # `.data` **672** and a 56-byte `__DATA,__sysctl_set`, with 33 definitions and 28 references.
+    # `kpc_init`'s body is three real lock calls and then `kpc_arch_init`, `kpc_common_init`,
+    # `kpc_thread_init`, so the stop is predicted at **`kpc_arch_init`, caller key 0x8010279C**
+    # (`bl kpc_arch_init` at 0x80102798, the fourth call in the linked body), with `kpc_common_init`
+    # at 0x801027A0 as the alternative if `osfmk/arm/kpc_arm.o` turns out to be linked already.
+    # `kpc_thread_init` is certainly not a stub and is not a candidate: `osfmk_kern_kpc_thread.o` has
+    # been in `LINK_OBJS` since long before this walk reached `kpc_init`.
+    OSFMK_KDP_KDP_UDP_OBJ=${STAGE90_ENTRY_OSFMK_KDP_KDP_UDP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kdp_kdp_udp.o}
     # 307: `ast.c` - 0x440 bytes, and the candidate is the first call `thread_invoke` makes
     #
     # **The object that defines the name 306 stopped on, and the first step whose prediction is a
@@ -9169,6 +9309,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_AST_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KDP_KDP_UDP_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_KERN_KPC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -9181,7 +9323,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
