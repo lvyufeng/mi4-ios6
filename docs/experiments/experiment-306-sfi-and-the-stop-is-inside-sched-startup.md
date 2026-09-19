@@ -179,8 +179,14 @@ the walk as a candidate list and say so, rather than promote one candidate to a 
 **`osfmk/kern/ast.c`** (`osfmk_kern_ast.o`, manifest:534) — the object that defines `ast_off`, the
 name this run stopped on. `.text` **0x440**, 11 definitions, 22 references; it resolves **6**
 (`ast_check`, `ast_context`, `ast_off`, `ast_on`, `ast_propagate`, `ast_taken_kernel`) and adds
-**2** (`bsd_ast`, `kperf_kpc_thread_ast`), so 745 → **743** undefined and 656 → **654** function
+**2** (`bsd_ast`, `kperf_kpc_thread_ast`), so 745 → **741** undefined and 656 → **652** function
 stubs.
+
+**Correction (2026-09-19).** That paragraph first said 743 and 654. 745 − 6 + 2 is **741** and
+656 − 6 + 2 is **652**, and experiment 307 measured exactly those by linking the object. The slip
+was copied forward into 307's own ledger block before its build and corrected there; it is the
+second time in this walk that a number was carried into the next step instead of recomputed from
+the current state (the first is 305's `.text` 0x11CAE0, which does not rebuild).
 
 The prediction, stated as a candidate rather than a claim: with `ast_off` real, `thread_block_reason`
 runs on into `thread_lock`, `thread_select` and `thread_invoke` — all real code in `sched_prim.o`
