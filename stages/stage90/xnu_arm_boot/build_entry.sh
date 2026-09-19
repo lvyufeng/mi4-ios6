@@ -4355,6 +4355,293 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # lists the indirect calls it could not follow (`getval`, `panic_trap_to_debugger`, `__doprnt`, i.e. a
     # kprintf path), so a run that stops earlier is possible and the tool says so rather than guessing.
     BSD_KERN_KERN_KTRACE_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_KTRACE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_ktrace.o}
+    # 328: `libkern/c++/OSSymbol.cpp` - the object that defines the current stop, and the step whose own
+    #       body reaches for a name it creates
+    #
+    # **The object that defines the current stop.** `libkern/c++/OSSymbol.cpp` is `libkern_c++_OSSymbol.o`
+    # (manifest:380): `.text` **0x10A4** for 60 definitions, a 4-byte COMDAT
+    # `.text._ZN8OSSymbol9MetaClassD0Ev`, `__DATA, __data` **0x90** (the static `OSSymbolPool` and the
+    # metaclass pointers), `.rodata` **0xC0** (192), `.rodata.str1.1` **0x25** (37), `.bss` **0x1C**,
+    # `.init_array` **4**, and **54 references**. What it is: `OSSymbol` - the interned-symbol class - with
+    # its `MetaClass`, the constructors and destructors, `withCString`/`withCStringNoCopy`/`withString`
+    # (all three going through the object's own `OSSymbolPool` under a lock), `bsearch`, `checkForPageUnload`
+    # and `serialize`.
+    #
+    # **Predicted: 6 resolved / 14 added.** Resolved are **five function** stubs - `withString`,
+    # `withCString`, `withCStringNoCopy` (**the current stop**), `checkForPageUnload` and `bsearch` (which
+    # 325 created) - and **one storage** stand-in, `OSSymbol::metaClass`. Added are **thirteen function**
+    # names and **one storage** stand-in, every one of them from `libkern/c++/OSString.cpp`, which is not
+    # being linked yet:
+    #
+    #   _ZN8OSString15initWithCStringEPKc        _ZN8OSString21initWithCStringNoCopyEPKc
+    #   _ZN8OSString4freeEv                      _ZN8OSString7setCharEcj
+    #   _ZN8OSStringC2EPK11OSMetaClass           _ZN8OSStringD2Ev
+    #   _ZNK8OSString16getCStringNoCopyEv        _ZNK8OSString7getCharEj
+    #   _ZNK8OSString9getLengthEv                _ZNK8OSString9isEqualToEPK6OSData
+    #   _ZNK8OSString9isEqualToEPKS_             _ZNK8OSString9isEqualToEPKc
+    #   _ZNK8OSString9serializeEP11OSSerialize   _ZN8OSString10gMetaClassE (storage)
+    #
+    #   so 793 -> **801** undefined, 684 -> **692** function stubs, and **109 -> 109 storage** - the
+    #   storage count is unmoved because one stand-in is resolved and another created.
+    #
+    # `.text` predicted **+0x1300 .. +0x1325 plus a fill band**:
+    #
+    #   this object's .text                                  +0x10A4   (exact)
+    #   its COMDAT `.text._ZN8OSSymbol9MetaClassD0Ev`          +0x004
+    #   this object's .rodata                                +0x0C0   (192, exact)
+    #   this object's .rodata.str1.1                         +0x000..0x025  (37 in the object; the pool
+    #                                                                       decides - the last three steps
+    #                                                                       placed 100%)
+    #   the stub object's .text, created                     +0x138   (13 bodies x 24)
+    #   the stub object's name strings, created              +0x18C   (the 13 function names' align4 sum)
+    #   the stub object's .text, retired                     -0x078   (5 bodies)
+    #   the stub object's name strings, retired              -0x0B4   (the 5 function names' align4 sum;
+    #                                                                 the retired storage stand-in has no
+    #                                                                 name slot - 322)
+    #   .text-region alignment fill                          the band
+    #                                                       -------
+    #                                                        +0x1300 .. +0x1325 + band
+    #
+    # **This is the first step in a while whose created half is larger than its retired half** (+0x2C4
+    # against -0x12C), because `OSSymbol.cpp` pulls in a whole class's worth of `OSString` surface as stubs.
+    # `.text` ends at most at 0x801429C5, and with the boundary at 0x80144000 (**0x2960 of slack**) it stays
+    # crossed-side: only the object's own data moves.
+    #
+    #   | | base (327) | predicted (328) | delta |
+    #   | .text | 0x1416A0 | 0x1429A0 .. 0x1429C5 | +0x1300 .. +0x1325 |
+    #   | .data | 0x80144000 (0x192D8) | 0x80144000 (~0x19368) | +0x90 (the object's `__DATA, __data` -
+    #                                                                    the static pool and the metaclass
+    #                                                                    pointers), or less if the fill takes
+    #                                                                    part of it (317) |
+    #   | .sysctl_set | 0x8015D2D8 (0x10C) | unmoved | 0 |
+    #   | .init_array | 0x8015D3E4 (0x14) | 0x8015D3E4 (**0x18**) | +0x4 (a sixth entry nothing runs) |
+    #   | .bss | 0x8015D400 (0x37898) | ~0x8015D400 (~0x378B4) | +0x1C before fill (0x1C object, one stand-in
+    #                                                                    created +0x40 and one retired -0x40) |
+    #   | image | 1430520 (0x15D3F8) | ~1430652 | +0x94 |
+    #   | headroom | 1487720 | ~1487704 | down by whatever `.bss` gains |
+    #
+    # **Predicted stop: `_ZN8OSStringC2EPK11OSMetaClass` at the caller key
+    # `_ZN8OSSymbol17withCStringNoCopyEPKc+0x50`** - the step's own body reaching for a name *it creates*,
+    # which is 317's shape (a stop one frame down inside the function the step made real). The body is
+    # readable in the object and its calls come in this order:
+    #
+    #   1. `bl lck_mtx_lock` on the object's static `_ZL4pool` - real since the first lock work in this walk.
+    #   2. `bl _ZNK12OSSymbolPool10findSymbolEPKc` - **defined in this same object** (object offset 0x67c),
+    #      so it is real the moment the object links.
+    #   3. not found (the pool is empty) -> `mov r0, #16` and `bl _ZN8OSObjectnwEm` - real since 326.
+    #   4. `bl _ZN8OSStringC2EPK11OSMetaClass` at object offset 0x0CE4, with `r1` = `&OSSymbol::gMetaClass` -
+    #      **a function stub this step creates**, and therefore the predicted stop. The `bl` is at
+    #      function+0x4C, so the key is **function+0x50**.
+    #
+    # The named alternatives, in order: if the constructor had been real (it is not - `OSString.cpp` is not
+    # linked), the next call is `bl _ZN8OSString21initWithCStringNoCopyEPKc` at function+0x70, also created
+    # by this step, so the key would be +0x74; and if `findSymbol` had *found* something - impossible on an
+    # empty pool, but it is the branch the body takes first - the function would release the lock and return
+    # without touching a stub at all, and the frontier would be back in `postModLoad`.
+    #
+    # **Measured: the counts and the layout exact, and the stop is not a stub at all.** The run reports
+    # **no `stub_hit=` line**: the walk went past every stub on its path - the three that stopped 325, 326
+    # and 327 - and took a **`data abort` at `_ZN8OSSymbol17withCStringNoCopyEPKc+0x14`**, the instruction
+    # `ldr r0, [r0, #16]` with `r0 = 0` and the faulting address 0x10. The null is **`_ZL4pool`, this
+    # object's own `static OSSymbolPool *`**: a four-byte `b` symbol at 0x80193158 in `.bss`, whose only
+    # writer in the image is `str r4, [r6]` at `OSSymbol::initialize()+0x88` - a function that is present,
+    # correct and correctly sized, and whose only two callers are `OSSymbol::MetaClass::MetaClass()+0x30`
+    # (which **nothing** calls) and `_GLOBAL__sub_I_OSSymbol.cpp+0x38`, the **sixth entry of `.init_array`,
+    # which nothing runs** (318). So the step went in with a *name* that is defined and came out with a
+    # *value* that is zero because the initializer that writes it is unreachable. That is the third kind of
+    # stop in its sharpest form: not a missing symbol and not a stand-in, but a real definition holding
+    # zero between its linker-assigned address and its first assignment.
+    #
+    # The baseline (an empty stand-in in this slot) reproduced 327's image to the byte - `793/684/109`,
+    # `.text` 0x1416A0, `.data` 0x80144000/0x192D8, `.sysctl_set` 0x8015D2D8/0x10C, `.init_array`
+    # 0x8015D3E4/0x14, `.bss` 0x8015D400/0x37898, `__bss_end` 0x80194C98, image 1430520, headroom
+    # 1487720 - so every delta below is this object's alone.
+    #
+    #   |  | predicted | measured |
+    #   | undefined | 801 | **801** |
+    #   | function stubs | 692 | **692** |
+    #   | storage stubs | 109 | **109** |
+    #   | resolved / added | 6 / 14 | **6 / 14** |
+    #
+    # `.text` closes in three terms, and the range's top was 9 bytes high because the pool decided so:
+    #
+    #   this object's contributions                          +0x1184   = 0x10A4 `.text` + 0x004 COMDAT
+    #                                                                   `.text._ZN8OSSymbol9MetaClassD0Ev`
+    #                                                                   + 0x0C0 `.rodata` + **0x01C of 0x025** -
+    #                                                                   the pool dropped 9 of this object's 37
+    #                                                                   string bytes, so the three steps of
+    #                                                                   100% placement end with a small drop
+    #                                                                   and the range's top (+0x1325) is 9
+    #                                                                   bytes high by exactly that; the object's
+    #                                                                   `.rodata` is at 0x8013E504 and its
+    #                                                                   `.rodata.str1.1` at 0x8013E5C4
+    #   the stub object's .text + names                      +0x198   (13 bodies 0x138 + 13 names 0x18C
+    #                                                                   created against 5 bodies 0x78 + 5 names
+    #                                                                   0xB4 retired - the created half larger
+    #                                                                   than the retired one for the first time
+    #                                                                   since 323, and counted on both sides)
+    #   .text-region alignment fill                          +0x004   (0xD2D -> 0xD31; 59 -> 60 fills)
+    #                                                       -------
+    #                                                        +0x1320   against a measured +0x1320
+    #
+    # The region identity agrees exactly: Sigma(placed inputs) +0x131C, Sigma(fill) +0x4, sum +0x1320. So
+    # the point estimate's 9-byte miss is the string pool and nothing else, and it went *down* this time.
+    #
+    #   | | base (327) | measured (328) | delta | predicted |
+    #   | `.text` | 0x1416A0 | **0x1429C0** | +0x1320 | +0x1300 .. +0x1325 + band |
+    #   | `.data` | 0x80144000 (0x192D8) | **0x80144000** (**0x19368**) | +0x90 | +0x90 - exact, and the
+    #                                                                                    fill is unmoved
+    #                                                                                    (0x7AA7 / 8 fills in
+    #                                                                                    both, the third step
+    #                                                                                    running) |
+    #   | `.sysctl_set` | 0x8015D2D8 (0x10C) | **0x8015D368** (0x10C) | +0x90 | follows `.data` |
+    #   | `.init_array` | 0x8015D3E4 (0x14) | **0x8015D474** (**0x18**) | +0x90 start, +0x4 size | a sixth
+    #                                                                                          entry nothing
+    #                                                                                          runs |
+    #   | `.bss` | 0x8015D400 (0x37898) | **0x8015D4C0** (**0x378D8**) | +0xC0 start, +0x40 size | +0x1C
+    #                                                                                              before fill |
+    #   | `__bss_end` | 0x80194C98 | **0x80194D98** | +0x100 | |
+    #   | image | 1430520 (0x15D3F8) | **1430668 (0x15D48C)** | +0x94 | ~1430652 |
+    #   | headroom | 1487720 | **1487464** | -0x100, follows `__bss_end` | |
+    #
+    # The arithmetic is checkable on its own: image = align16K(0x1429C0) + 0x19368 + 0x10C + 0x18 = 0x144000
+    # + 0x19368 + 0x10C + 0x18 = **0x15D48C**, and `__bss_end` = 0x8015D4C0 + 0x378D8 = **0x80194D98**.
+    #
+    # `.text` ends **0x1640 below the 16 KB boundary** - the second-tightest margin of the walk after 324's
+    # 0x580 - and holds, so only the object's own data moved.
+    #
+    # `.bss` grew **0x40** and closes on the two moves the object makes: Sigma(placed inputs) **+0x1C** (the
+    # object's own 0x1C, one 64-byte stand-in `OSSymbol::gMetaClass` retired and one created - net zero
+    # there) with the section's fill **rising** a further **0x24** (0xFD / 39 fills -> 0x121 / 40 fills).
+    # Its *start* moved +0xC0 for a reason with nothing to do with `.bss`: it is align64 of the preceding
+    # end, and `.data` +0x90 with `.init_array` +0x4 pushed that end from 0x8015D3F8 to 0x8015D48C, whose
+    # align64 is 0x8015D4C0. **Five steps now give five signs of the fill's move** - 324 -0x30 (slot
+    # re-used), 325 +0x28 (inputs pushed), 326 -0x1C, 327 -0x18 (slot handed back), 328 **+0x24** (pushed
+    # again) - and the rule this project carries is unchanged: the inputs are predicted, the fill's sign and
+    # size are *read*.
+    #
+    # ## The run
+    #
+    #   MI4IOS6_STAGE90_XNU real XNU entry: exception: data abort
+    #    xnu_entry_abort_entries=0x00000001
+    #    xnu_entry_abort_first_pc=0x80121c78      _ZN8OSSymbol17withCStringNoCopyEPKc+0x14
+    #    xnu_entry_abort_first_insn=0xe5900010    ldr r0, [r0, #16]
+    #    xnu_entry_abort_first_dfar=0x00000010    0 + 16: the faulting address
+    #    xnu_entry_abort_first_dfsr=0x00000005    a translation fault, not a permission fault
+    #    xnu_entry_abort_first_lr=0x80121c80      the *callee's* own return address, not a caller's
+    #    xnu_entry_failures=0x00000000   xnu_entry_image_bytes=0x0015d48c   xnu_entry_checks=0x00000005
+    #    xnu_entry_why=0x80126ce4 ("exception: data abort")   xnu_entry_why_byte=0x65 ('e')
+    #    xnu_entry_stub_caller_v=0x00000000   xnu_entry_stub_caller_digits=0x00000000
+    #    xnu_entry_abort_first_sp=0x8015e4a0   xnu_entry_abort_first_spsr=0x60000093
+    #    xnu_entry_abort_first_ttbr0=ttbr1=0x8030404a   xnu_entry_abort_first_ttbcr=0x00000001
+    #    xnu_entry_abort_first_sctlr=0x30c5787d   xnu_entry_abort_first_cpu_ttep=0x80304000
+    #    xnu_entry_abort_first_avail_start=0x8032a000   ..._gphysbase=0x80000000
+    #    xnu_entry_abort_first_mem_size=0x00800000   xnu_entry_abort_first_end_kern=0x80195000
+    #
+    # **The caller-key idiom has no `bl` to report here, and the record it leaves instead is what names the
+    # stop.** `digits = 0` says no stub was entered, and the two words that follow it are read at
+    # `g_kv_buf[0]` (entry_stubs.c:1062-1067), the *head of the key/value buffer* - they come out as
+    # `0x756e7820` / `0x746e655f`, i.e. ` xnu_ent`, which is this instrument's own first record and not a
+    # caller. What names the stop is `abort_first_pc` plus `abort_first_insn`, and the disassembly of the
+    # function it lands in:
+    #
+    #   80121c64 <_ZN8OSSymbol17withCStringNoCopyEPKc>:
+    #     80121c64  push {r4, r5, r6, r7, fp, lr}
+    #     80121c68  movw r7, #0x3158 ; movt r7, #0x8019        r7 = &_ZL4pool = 0x80193158
+    #     80121c6c  mov  r5, r0
+    #     80121c74  ldr  r0, [r7]                              r0 = pool = 0
+    #     80121c78  ldr  r0, [r0, #16]                         **the abort**: pool->lock, at 0x10
+    #     80121c7c  bl   lck_mtx_lock                          (real, 0x80013f34)
+    #     80121c80  ldr  r0, [r7]                              lr on entry to the fault, hence the record
+    #     80121c88  bl   _ZNK12OSSymbolPool10findSymbolEPKc    (real, in this object)
+    #     80121c9c  bl   _ZN8OSObjectnwEm                      (real since 326)
+    #     80121cb0  bl   _ZN8OSStringC2EPK11OSMetaClass        (a stub - the *predicted* stop, at +0x4C, so
+    #                                                          the key would have been +0x50)
+    #
+    # So the predicted stop was right about the call *and* right about the key - the `bl` is at +0x4C and the
+    # key is +0x50 - and the run never reached it: it faulted **one instruction into the body's second
+    # statement**, 0x38 before the predicted `bl`. **The body's first statement is `lck_mtx_lock(pool->lock)`
+    # and the prediction read it as an ordinary call**: it asked whether `lck_mtx_lock` was defined (it is)
+    # and never asked what `pool` would *hold*. `pool` is not a stand-in and not a stub - it is this step's
+    # own object, linked and correct - and it is zero because its writer is a constructor.
+    #
+    # What the walk's path proves by *not* stopping earlier is the same thing 326 and 327 proved, one step
+    # stronger: the three stubs that ended the last three runs are all real now, so `withCapacity` ran its
+    # whole body, `OSCollection::OSCollection` returned, `postModLoad` made it to its fifth call, and the
+    # entry into `withCStringNoCopy` is that same fifth call (327's key `_ZN11OSMetaClass11postModLoadEPv
+    # +0x108`) - which is why the frontier is 20 bytes into the function 327's run stopped at the door of.
+    #
+    # Preflight clean (`STAGE90_XNU_ENTRY 1`, `HARD_SKIP`, `STAGE90_HW_WATCHDOG ARMED`, software dead-man
+    # armed, no storage symbols in the payload), log **301505** bytes, **no `stub_hit=` line**, one
+    # `exception: data abort` line.
+    #
+    # **Safety:** this is the walk's first fault rather than a stop, and the nets held: the hardware watchdog
+    # was armed before the jump and is the only net across it, the device returned to Android on its own
+    # (`ro.build.version.release` = 10), nothing was flashed - `fastboot boot` only -
+    # `persistent_write_attempted=0x00000000` x25, `failure_mask=0x00000000` x87,
+    # `xnu_entry_failures=0x00000000`, and `disarm_hw_watchdog_en=0x00000001`.
+    #
+    # ## What it measures, and what it does not
+    #
+    # Measured: the frontier has left the undefined-symbol list. Every stub the walk has stopped at since 324
+    # is real, nothing on the walked path is undefined any more, and the boot is now stopped by a **value** -
+    # a pointer in `.bss` that the image never writes. Not measured: what `withCStringNoCopy` would do with a
+    # live pool (`findSymbol`, `insertSymbol`, `initWithCStringNoCopy`, the `OSString` constructor, the
+    # `blx` through the vtable at +0xA4), what the six constructors in `.init_array` would do, and whether
+    # `OSMetaClass::OSMetaClass("OSKext", &OSObject::gMetaClass, 96)` - real since 324 - would itself run
+    # clean, which is what the next step finds out.
+    #
+    # ## Next: `__mod_init_func` - the step that makes the initializer reachable, and why it is not an object
+    #
+    # No XNU object can fix this stop. `pool`'s writer is a *constructor*, the constructor is in the image
+    # and is correct, and what is missing is its caller. In a real XNU kernel the six
+    # `_GLOBAL__sub_I_*.cpp` in `.init_array` are run by XNU's own `OSRuntimeInitializeCPP`
+    # (`libkern/c++/OSRuntime.cpp:403`), which finds them by **section name** - `sectionIsConstructor`
+    # (`:246`) accepts `__mod_init_func` or `__constructor` - in the segment list of the kernel's
+    # `_mh_execute_header`. That scan **already runs** in this image and finds nothing (324 watched its
+    # `strncmp(sectname, .., 15)` / `13` pair execute), because `entry_macho.s` describes the `__DATA`
+    # segment with **one** section, an empty `__const`, and never describes the constructor table.
+    #
+    # So the step is a *header* change and not a link: describe `.init_array` - `addr = __entry_init_array`,
+    # `size = __entry_init_array_size`, both already exported by `entry.ld` - as a **`__mod_init_func`**
+    # section of `__DATA` (`nsects` 1 -> 2, `cmdsize` 124 -> 192, `sizeofcmds` 236 -> 304, the header 68
+    # bytes larger inside `.rodata.macho`, which shifts `.text`'s end +0x44 in the image), and extend
+    # `tools/host_entry_macho_check.sh` to assert the section's name and its addr/size against those two
+    # linker symbols - the check already walks `nsects`, validates `cmdsize` and `sizeofcmds`, and asserts
+    # the `__const` section by name, so this is a second section assertion in an existing check.
+    #
+    # Then the scan finds the table and calls the six entries in table order - `_GLOBAL__sub_I_OSKext.cpp`
+    # (0x8011AEF4), `OSMetaClass.cpp` (0x8011F3C8), `OSDictionary.cpp` (0x801209D0), `OSObject.cpp`
+    # (0x80120DE0), `OSCollection.cpp` (0x80120F74), `OSSymbol.cpp` (0x80122018) - and **the predicted stop
+    # is the first stub inside the first of them: `__cxa_atexit`**, whose kind is already written down in
+    # `out/stage90/xnu_arm_entry_undef.txt` (line 54, a function stub; `__dso_handle` is line 70).
+    # `_GLOBAL__sub_I_OSKext.cpp` is short and readable: `OSMetaClass::OSMetaClass("OSKext",
+    # &OSObject::gMetaClass, 0x60)` at +0x24, the vtable store at +0x40, then **`b __cxa_atexit` at +0x50 -
+    # a tail branch, not a `bl`**. The ctor is real (0x8011DEE4) and all eight of its own callees are
+    # defined (`IOMalloc`, `__bzero`, `kalloc_canblock`, `memcpy`, `kfree`, `OSAddAtomic`, `OSKextLog`,
+    # `lck_mtx_lock`). So the stop should be
+    #
+    #   stub_hit=__cxa_atexit
+    #    xnu_entry_stub_caller=0x8011d750   = OSRuntimeInitializeCPP+0x184, whose caller-4 is the
+    #                                      `blx r0` at 0x8011d74c - the constructor call in XNU's own scan
+    #
+    # **and that key is the second half of the prediction**: because the initializer's call to the C++
+    # runtime is a tail `b`, the `lr` the stub is entered with is not the initializer's but the one *it*
+    # inherited - the return address of `OSRuntimeInitializeCPP`'s `blx r0`, so the key would resolve to a
+    # site inside XNU's own constructor loop rather than to the address after a direct `bl` in the
+    # initializer. The named alternatives,
+    # in order: a stub inside one of the ctor's eight real callees, in which case the stop is inside
+    # `OSMetaClass::OSMetaClass` under its own name; and - if the table is described but the scan is
+    # reached before the segment loop has a section list to walk - a stop back in `postModLoad`, the
+    # pre-328 frontier, which would say the header's section list is still not what the scan reads.
+    #
+    # **And the step after that cannot be an object either.** `__cxa_atexit` is defined **nowhere in XNU**:
+    # `grep -rn __cxa_atexit external/xnu-upstream/` returns nothing at all, and neither does
+    # `__dso_handle`. A kernel has no `atexit`, which is why Apple's own kernel objects do not call it; the
+    # call is in these objects because they were compiled by `arm-none-eabi-gcc` without
+    # `-fno-use-cxa-atexit` (Apple's `-fapple-kext` implies it). So the defect behind this stop is a
+    # compile flag, and the two steps together are what the initializers need: the header makes them
+    # *reachable*, the flag makes them *runnable*.
     # 327: `libkern/c++/OSCollection.cpp` - the object that defines all seven of the names 325 created, and
     #       the step whose stop is on the far side of four real calls
     #
@@ -5183,6 +5470,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # symbol this step makes real, so the symbol should be built, used to look the kext up, and the stop
     # should be the first stub on that path.
     LIBKERN_CXX_OSCOLLECTION_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSCOLLECTION_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSCollection.o}
+    LIBKERN_CXX_OSSYMBOL_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSSYMBOL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSSymbol.o}
     # 323: `libkern/c++/OSRuntime.cpp` - the object that defines `OSlibkernInit` (322's stop) and the C++
     #       runtime initialiser, the linker's `new`/`delete`, and the `__mod_init_func` scan
     #
@@ -11903,6 +12191,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$LIBKERN_CXX_OSDICTIONARY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_CXX_OSOBJECT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_CXX_OSCOLLECTION_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$LIBKERN_CXX_OSSYMBOL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -11915,7 +12204,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
