@@ -403,6 +403,130 @@ uint32_t g_maxcpus_count;
 uint32_t g_initmax_cpus_caller;
 uint32_t g_initmax_cpus_count;
 uint32_t g_initmax_cpus_arg;
+
+/*
+ * Experiment 448. 447 measured `ml_init_max_cpus`'s count as **0**, and that number is a deduction
+ * rather than a guess: `MSM8974PlatformExpert::start` is
+ *
+ *     if (!super::start(provider)) return false;      // super = IODTPlatformExpert
+ *     IOService::publishResource("IORTC");
+ *     ml_init_max_cpus(1);
+ *
+ * and every link in that guard is unconditional in the source - `IOService::start` is
+ * `{ return true; }` (`IOService.cpp:513`), `IOPlatformExpert::start` ends `return configure(provider)`
+ * (`IOPlatformExpert.cpp:184`), `IOPlatformExpert::configure` ends `return true;` (`:213`), and
+ * `IODTPlatformExpert::configure` returns false only if that returns false (`:1269`). So if the
+ * platform expert's `start` is entered at all it reaches its third statement, and a zero count means
+ * **it was never entered** - the failure is before `start`, in `StartIOKit`'s first six statements.
+ *
+ * Of those, `registerService` is a virtual call and `initWithArgs` is the chain's other vtable slot
+ * (`[vtable+0x340]`), so neither can be `--wrap`ped; what can be, and what splits the space, is the
+ * direct call *inside* `initWithArgs` and the direct calls inside the one function that can make it
+ * return false. (**Not** `new IOPlatformExpertDevice`: 448's measurement corrected the prediction that
+ * had called it an `allocClassWithName` - `StartIOKit+0x104..+0x10c` is `mov r0,#0x60` /
+ * `bl OSObject::operator new` / `bl IOPlatformExpertDevice::IOPlatformExpertDevice()`, a direct
+ * allocation and constructor, so the class cannot fail to exist, and `allocClassWithName`'s two call
+ * sites in this image are both downstream of a match.)
+ *
+ *   - `IODeviceTreeAlloc` has **exactly one** call site in the whole image
+ *     (`initWithArgs+0x14`), so a count of 0 says the nub was never created and a count of 1 says
+ *     `initWithArgs` ran - with the tree pointer it was handed and the nub it built.
+ *   - `IOPlatformExpertDevice::initWithArgs` returns **false** by exactly one path, and the
+ *     disassembly is unambiguous about which: `r5` is set from `bl IOWorkLoop::workLoop` and nothing
+ *     else (`0x80160890`, `cmp r0,#0` / `movne r5,#1`). So `workLoop`'s return value *is* the answer
+ *     to "did the platform expert's nub come up".
+ *   - `IOWorkLoop::init` returns false at six guards, each a direct call whose result it tests, and
+ *     the four that can plausibly fail on a boot this young are wrapped here: `IORecursiveLockAlloc`,
+ *     `IOSimpleLockAlloc`, `IOCommandGate::commandGate(...)` and `kernel_thread_start`. (The other two
+ *     are `OSObject::init` and `IOMalloc`, both far too common to wrap without drowning the report.)
+ *
+ * For those four the slot kept is the **first non-zero return** and the site that got it, not the
+ * last: the question is "did one of them ever fail", and a later success would erase it. Zero is a
+ * legitimate success for all four, so a slot of 0 and a count of 0 are different readings - "no
+ * failure seen" against "never called".
+ */
+uint32_t g_dtalloc_caller;
+uint32_t g_dtalloc_arg;
+uint32_t g_dtalloc_ret;
+uint32_t g_dtalloc_count;
+uint32_t g_workloop_caller;
+uint32_t g_workloop_ret;
+uint32_t g_workloop_count;
+uint32_t g_rlock_bad;
+uint32_t g_rlock_caller;
+uint32_t g_rlock_count;
+uint32_t g_slock_bad;
+uint32_t g_slock_caller;
+uint32_t g_slock_count;
+uint32_t g_cgate_bad;
+uint32_t g_cgate_caller;
+uint32_t g_cgate_count;
+uint32_t g_kthread_bad;
+uint32_t g_kthread_caller;
+uint32_t g_kthread_count;
+
+/*
+ * 449 extends 448's `kernel_thread_start` record with the **continuation** of each of the first four
+ * calls. 448 counted two calls and could not say *which* two threads they were; the two candidates on
+ * this boot's path are `IOWorkLoop::init`'s (`ioworkloop.cpp:?)` and `_IOServiceJob::pingConfig`'s -
+ * the work loop and the async service-matching thread - and the whole "nothing matched" chain turns on
+ * whether the second of those was created. The entry pointer names it, and it is a value this project
+ * can resolve in the image, so the count becomes an identity.
+ */
+uint32_t g_kthread_cont[4];
+uint32_t g_kthread_site[4];
+
+/*
+ * Experiment 449. 448 left exactly one unmeasured step between a nub that came up and a driver that
+ * never started: the **catalogue**. `StartIOKit` was proved to reach `rootNub->registerService()`
+ * (because `IOPlatformExpertDevice::initWithArgs` returned a non-NULL work loop, which by the
+ * disassembly's arithmetic is that function's return value), and `MSM8974PlatformExpert::start` was
+ * proved never to be entered (because 447's writer count is 0 and every link of `start`'s own guard is
+ * unconditional in the source). Nothing matched and **nothing panicked**, and the two facts together
+ * put the empty match list in one place.
+ *
+ * The personalities come from one string through one call, so the question is bracketed by three
+ * counts and one return value:
+ *
+ *   - `iokit_post_constructor_init` has **exactly one** call site in the whole image and it is a *tail
+ *     branch* from `last_kernel_constructor` (`b 0x8011bc4c`), the `.init_array` entry this project
+ *     links last on purpose. A `b` and a `bl` are both relocations against the same symbol, so
+ *     `--wrap` catches both - and this count is the only direct reading of whether the `.init_array`
+ *     walk reached the entry whose whole job is to run after the others.
+ *   - `IOCatalogue::initialize` and `IOService::initialize` each have **one** call site too, both
+ *     inside `iokit_post_constructor_init` (`+0x18` and `+0x10`).
+ *   - `OSUnserialize(gIOKernelConfigTables, &errorString)` has **one** call site, inside
+ *     `IOCatalogue::initialize`, and its return is whether the two personalities were parsed at all.
+ *     A NULL there leaves `gIOCatalogue->init(NULL)` — and with `assert` compiled out in this
+ *     configuration nothing reports it, so the catalogue exists and is empty: no match, no fallback,
+ *     no panic, and no driver. That is the measured state exactly. The image has **three** call sites
+ *     for it in total (`IOCatalogue::initialize`, `IODTMatchNubWithKeys`, `IODTFindMatchingEntries`),
+ *     so this keeps three records rather than one: the first call in time is not necessarily the
+ *     catalogue's, and keeping only the first would trade a certain answer for an ordering
+ *     assumption.
+ *   - `OSMetaClass::allocClassWithName(OSSymbol *)` is what matching instantiates a class *by name*
+ *     with; a count of 0 means the match list was empty rather than that a candidate was skipped.
+ *     (It is *not* how `StartIOKit` makes the nub: that is `OSObject::operator new` plus a direct
+ *     constructor, then a virtual `initWithArgs`. The two call sites here are `probeCandidates` and
+ *     `newUserClient`, and both are downstream of a match.)
+ *   - `IOService::publishResource(const char *, OSObject *)` is the statement between
+ *     `MSM8974PlatformExpert::start`'s guard and its `ml_init_max_cpus(1)`, so any record at all
+ *     refutes the deduction instead of confirming it. Its nine call sites span more than one function
+ *     and more than one moment, so it keeps the first four (caller and key each) — one record would
+ *     have to assume that the platform expert's call is the first one in the boot.
+ */
+uint32_t g_postctor_caller;
+uint32_t g_postctor_count;
+uint32_t g_catinit_caller;
+uint32_t g_catinit_count;
+uint32_t g_unser_caller[3];
+uint32_t g_unser_ret[3];
+uint32_t g_unser_count;
+uint32_t g_alloc_name;
+uint32_t g_alloc_count;
+uint32_t g_pub2_caller[4];
+uint32_t g_pub2_key[4];
+uint32_t g_pub2_count;
 #endif
 
 /*
@@ -1172,6 +1296,68 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     entry_write_kv("xnu_entry_initmax_cpus_caller", g_initmax_cpus_caller);
     entry_write_kv("xnu_entry_initmax_cpus_count", g_initmax_cpus_count);
     entry_write_kv("xnu_entry_initmax_cpus_arg", g_initmax_cpus_arg);
+    /*
+     * Experiment 448. The chain `StartIOKit` -> `IOPlatformExpertDevice::initWithArgs` ->
+     * `IOWorkLoop::init`, read from the device. `_dtalloc_arg` is the tree `PE_state.deviceTreeHead`
+     * held - the first run since 444 that reads the moved tree's address back from the machine -
+     * and `_dtalloc_ret` is whether it parsed. `_workloop_ret` is `initWithArgs`'s return value by
+     * the disassembly's own arithmetic, and the four `_bad`/`_caller` pairs name which guard inside
+     * `IOWorkLoop::init` refused, if one did.
+     */
+    entry_write_kv("xnu_entry_dtalloc_caller", g_dtalloc_caller);
+    entry_write_kv("xnu_entry_dtalloc_arg", g_dtalloc_arg);
+    entry_write_kv("xnu_entry_dtalloc_ret", g_dtalloc_ret);
+    entry_write_kv("xnu_entry_dtalloc_count", g_dtalloc_count);
+    entry_write_kv("xnu_entry_workloop_caller", g_workloop_caller);
+    entry_write_kv("xnu_entry_workloop_ret", g_workloop_ret);
+    entry_write_kv("xnu_entry_workloop_count", g_workloop_count);
+    entry_write_kv("xnu_entry_rlock_bad", g_rlock_bad);
+    entry_write_kv("xnu_entry_rlock_caller", g_rlock_caller);
+    entry_write_kv("xnu_entry_rlock_count", g_rlock_count);
+    entry_write_kv("xnu_entry_slock_bad", g_slock_bad);
+    entry_write_kv("xnu_entry_slock_caller", g_slock_caller);
+    entry_write_kv("xnu_entry_slock_count", g_slock_count);
+    entry_write_kv("xnu_entry_cgate_bad", g_cgate_bad);
+    entry_write_kv("xnu_entry_cgate_caller", g_cgate_caller);
+    entry_write_kv("xnu_entry_cgate_count", g_cgate_count);
+    entry_write_kv("xnu_entry_kthread_bad", g_kthread_bad);
+    entry_write_kv("xnu_entry_kthread_caller", g_kthread_caller);
+    entry_write_kv("xnu_entry_kthread_count", g_kthread_count);
+    entry_write_kv("xnu_entry_kthread_cont0", g_kthread_cont[0]);
+    entry_write_kv("xnu_entry_kthread_site0", g_kthread_site[0]);
+    entry_write_kv("xnu_entry_kthread_cont1", g_kthread_cont[1]);
+    entry_write_kv("xnu_entry_kthread_site1", g_kthread_site[1]);
+    entry_write_kv("xnu_entry_kthread_cont2", g_kthread_cont[2]);
+    entry_write_kv("xnu_entry_kthread_site2", g_kthread_site[2]);
+    entry_write_kv("xnu_entry_kthread_cont3", g_kthread_cont[3]);
+    entry_write_kv("xnu_entry_kthread_site3", g_kthread_site[3]);
+    /*
+     * Experiment 449: the catalogue. `unserN_ret` is the Nth `OSUnserialize` return in the boot, so
+     * the catalogue's own (`IOCatalogue::initialize`) is named by its caller rather than assumed to be
+     * first; `alloc_count` is whether matching ever instantiated a class by name.
+     */
+    entry_write_kv("xnu_entry_postctor_caller", g_postctor_caller);
+    entry_write_kv("xnu_entry_postctor_count", g_postctor_count);
+    entry_write_kv("xnu_entry_catinit_caller", g_catinit_caller);
+    entry_write_kv("xnu_entry_catinit_count", g_catinit_count);
+    entry_write_kv("xnu_entry_unser_count", g_unser_count);
+    entry_write_kv("xnu_entry_unser0_caller", g_unser_caller[0]);
+    entry_write_kv("xnu_entry_unser0_ret", g_unser_ret[0]);
+    entry_write_kv("xnu_entry_unser1_caller", g_unser_caller[1]);
+    entry_write_kv("xnu_entry_unser1_ret", g_unser_ret[1]);
+    entry_write_kv("xnu_entry_unser2_caller", g_unser_caller[2]);
+    entry_write_kv("xnu_entry_unser2_ret", g_unser_ret[2]);
+    entry_write_kv("xnu_entry_alloc_name", g_alloc_name);
+    entry_write_kv("xnu_entry_alloc_count", g_alloc_count);
+    entry_write_kv("xnu_entry_pub2_count", g_pub2_count);
+    entry_write_kv("xnu_entry_pub20_caller", g_pub2_caller[0]);
+    entry_write_kv("xnu_entry_pub20_key", g_pub2_key[0]);
+    entry_write_kv("xnu_entry_pub21_caller", g_pub2_caller[1]);
+    entry_write_kv("xnu_entry_pub21_key", g_pub2_key[1]);
+    entry_write_kv("xnu_entry_pub22_caller", g_pub2_caller[2]);
+    entry_write_kv("xnu_entry_pub22_key", g_pub2_key[2]);
+    entry_write_kv("xnu_entry_pub23_caller", g_pub2_caller[3]);
+    entry_write_kv("xnu_entry_pub23_key", g_pub2_key[3]);
 #endif
     /*
      * Experiment 272. Runs here, after the first line of the report is already in the console, so
@@ -1246,6 +1432,116 @@ void entry_note_initmax_cpus(uint32_t caller, uint32_t max_cpus)
         g_initmax_cpus_arg = max_cpus;
     }
     g_initmax_cpus_count++;
+}
+
+/*
+ * Experiment 448's six. The first two record everything they are handed; the last four keep the
+ * **first non-zero return** and the site it came from, because for all four zero means success and
+ * the question is whether any call ever failed. A slot of 0 with a non-zero count is "called, never
+ * failed"; a count of 0 is "never called", which is a different reading.
+ */
+void entry_note_dtalloc(uint32_t caller, uint32_t arg, uint32_t ret)
+{
+    if (g_dtalloc_count == 0) {
+        g_dtalloc_caller = caller;
+        g_dtalloc_arg = arg;
+        g_dtalloc_ret = ret;
+    }
+    g_dtalloc_count++;
+}
+
+void entry_note_workloop(uint32_t caller, uint32_t ret)
+{
+    if (g_workloop_count == 0) {
+        g_workloop_caller = caller;
+        g_workloop_ret = ret;
+    }
+    g_workloop_count++;
+}
+
+/*
+ * One helper for the four guards, so the "first failure wins" rule is written once rather than four
+ * times - the class of defect this project has paid for repeatedly is one value with several
+ * definitions, and four copies of one rule is four chances to differ.
+ */
+void entry_note_guard(uint32_t *bad, uint32_t *bad_caller, uint32_t *count,
+                      uint32_t caller, uint32_t ret)
+{
+    if (ret != 0 && *bad == 0) {
+        *bad = ret;
+        *bad_caller = caller;
+    }
+    (*count)++;
+}
+
+void entry_note_rlock(uint32_t caller, uint32_t ret)
+{
+    entry_note_guard(&g_rlock_bad, &g_rlock_caller, &g_rlock_count, caller, ret);
+}
+
+void entry_note_slock(uint32_t caller, uint32_t ret)
+{
+    entry_note_guard(&g_slock_bad, &g_slock_caller, &g_slock_count, caller, ret);
+}
+
+void entry_note_cgate(uint32_t caller, uint32_t ret)
+{
+    entry_note_guard(&g_cgate_bad, &g_cgate_caller, &g_cgate_count, caller, ret);
+}
+
+void entry_note_kthread(uint32_t cont, uint32_t caller, uint32_t ret)
+{
+    if (g_kthread_count < 4) {
+        g_kthread_cont[g_kthread_count] = cont;
+        g_kthread_site[g_kthread_count] = caller;
+    }
+    entry_note_guard(&g_kthread_bad, &g_kthread_caller, &g_kthread_count, caller, ret);
+}
+
+/*
+ * Experiment 449's five. `postctor`, `catinit` and `allocname` have one call site each on this boot's
+ * path, so they keep the **first** call; `unser` (three sites) and `pub2` (nine) keep a short ring of
+ * the first three or four, because "the first call" is a claim about ordering and a ring does not have
+ * to make it. Every one of them also counts, so "called once, returned nothing" stays distinguishable
+ * from "never called".
+ */
+void entry_note_postctor(uint32_t caller)
+{
+    if (g_postctor_count == 0)
+        g_postctor_caller = caller;
+    g_postctor_count++;
+}
+
+void entry_note_catinit(uint32_t caller)
+{
+    if (g_catinit_count == 0)
+        g_catinit_caller = caller;
+    g_catinit_count++;
+}
+
+void entry_note_unser(uint32_t caller, uint32_t ret)
+{
+    if (g_unser_count < 3) {
+        g_unser_caller[g_unser_count] = caller;
+        g_unser_ret[g_unser_count] = ret;
+    }
+    g_unser_count++;
+}
+
+void entry_note_allocname(uint32_t name)
+{
+    if (g_alloc_count == 0)
+        g_alloc_name = name;
+    g_alloc_count++;
+}
+
+void entry_note_pub2(uint32_t caller, uint32_t key)
+{
+    if (g_pub2_count < 4) {
+        g_pub2_caller[g_pub2_count] = caller;
+        g_pub2_key[g_pub2_count] = key;
+    }
+    g_pub2_count++;
 }
 #endif /* STAGE90_ENTRY_TRACE */
 

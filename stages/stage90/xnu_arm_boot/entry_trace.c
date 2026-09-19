@@ -126,6 +126,183 @@ extern void entry_note_maxcpus(uint32_t caller);
 extern void entry_note_initmax_cpus(uint32_t caller, uint32_t max_cpus);
 
 /*
+ * 448's six, the chain `StartIOKit` -> `IOPlatformExpertDevice::initWithArgs` -> `IOWorkLoop::init`.
+ * Two of the calls in that chain are virtual and therefore out of `--wrap`'s reach - `initWithArgs`
+ * (`[vtable+0x340]`) and `registerService` (`IOService`'s slot) - because `--wrap` renames an
+ * *undefined reference*, and a vtable entry against a symbol defined in the same link resolves
+ * directly. `new IOPlatformExpertDevice` is **not** one of them, and treating it as one is the
+ * prediction error 448's measurement corrected: `StartIOKit+0x104..+0x10c` is `mov r0,#0x60` /
+ * `bl OSObject::operator new` / `bl IOPlatformExpertDevice::IOPlatformExpertDevice()`, a direct
+ * allocation and constructor for a class known at compile time. So the chain is read through the
+ * **direct** calls it contains, each of which is decisive on its own: `IODeviceTreeAlloc` has exactly
+ * one call site in the image (inside `initWithArgs`), and `initWithArgs`'s own return value is
+ * `IOWorkLoop::workLoop`'s, by the disassembly's arithmetic.
+ */
+extern void entry_note_dtalloc(uint32_t caller, uint32_t arg, uint32_t ret);
+extern void entry_note_workloop(uint32_t caller, uint32_t ret);
+extern void entry_note_rlock(uint32_t caller, uint32_t ret);
+extern void entry_note_slock(uint32_t caller, uint32_t ret);
+extern void entry_note_cgate(uint32_t caller, uint32_t ret);
+extern void entry_note_kthread(uint32_t cont, uint32_t caller, uint32_t ret);
+
+/* `iokit/Kernel/IODeviceTreeSupport.cpp:96`, called from `initWithArgs` and nowhere else. */
+void *__real__Z17IODeviceTreeAllocPv(void *dtTop);
+
+void *__wrap__Z17IODeviceTreeAllocPv(void *dtTop)
+{
+    void *r = __real__Z17IODeviceTreeAllocPv(dtTop);
+
+    entry_note_dtalloc((uint32_t)(uintptr_t)__builtin_return_address(0),
+                       (uint32_t)(uintptr_t)dtTop, (uint32_t)(uintptr_t)r);
+    return r;
+}
+
+/*
+ * `iokit/Kernel/IOWorkLoop.cpp:179`, a `static` member so there is no `this` to carry. Its return
+ * value is `IOPlatformExpertDevice::initWithArgs`'s: `0x80160890` is `bl IOWorkLoop::workLoop`
+ * followed by `cmp r0,#0` / `movne r5,#1`, and `r5` is what that function returns.
+ */
+void *__real__ZN10IOWorkLoop8workLoopEv(void);
+
+void *__wrap__ZN10IOWorkLoop8workLoopEv(void)
+{
+    void *r = __real__ZN10IOWorkLoop8workLoopEv();
+
+    entry_note_workloop((uint32_t)(uintptr_t)__builtin_return_address(0),
+                        (uint32_t)(uintptr_t)r);
+    return r;
+}
+
+/*
+ * The four guards inside `IOWorkLoop::init` (`iokit/Kernel/IOWorkLoop.cpp:117`) that can plausibly
+ * fail on a boot this young. Each is a direct call whose result the function tests on its way to
+ * `return false`, and all four answer 0 on success.
+ */
+void *__real_IORecursiveLockAlloc(void);
+
+void *__wrap_IORecursiveLockAlloc(void)
+{
+    void *r = __real_IORecursiveLockAlloc();
+
+    entry_note_rlock((uint32_t)(uintptr_t)__builtin_return_address(0), (uint32_t)(uintptr_t)r);
+    return r;
+}
+
+void *__real_IOSimpleLockAlloc(void);
+
+void *__wrap_IOSimpleLockAlloc(void)
+{
+    void *r = __real_IOSimpleLockAlloc();
+
+    entry_note_slock((uint32_t)(uintptr_t)__builtin_return_address(0), (uint32_t)(uintptr_t)r);
+    return r;
+}
+
+/* `static IOCommandGate *commandGate(OSObject *owner, Action action = 0)` - two arguments. */
+void *__real__ZN13IOCommandGate11commandGateEP8OSObjectPFiS1_PvS2_S2_S2_E(void *owner, void *action);
+
+void *__wrap__ZN13IOCommandGate11commandGateEP8OSObjectPFiS1_PvS2_S2_S2_E(void *owner, void *action)
+{
+    void *r = __real__ZN13IOCommandGate11commandGateEP8OSObjectPFiS1_PvS2_S2_S2_E(owner, action);
+
+    entry_note_cgate((uint32_t)(uintptr_t)__builtin_return_address(0), (uint32_t)(uintptr_t)r);
+    return r;
+}
+
+/*
+ * `kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *)` - the work loop's own
+ * thread, and `IOWorkLoop::init`'s last guard. 449 records the continuation of each of the first four
+ * calls as well, because a count of two says a matching thread *could* have been created and the entry
+ * pointer says which thread it was: `_IOServiceJob::pingConfig` (inlined `_IOConfigThread::configThread`)
+ * is the only creator of the async service-matching thread, and `IOWorkLoop::init` is the other.
+ */
+uint32_t __real_kernel_thread_start(void *continuation, void *parameter, void *new_thread);
+
+uint32_t __wrap_kernel_thread_start(void *continuation, void *parameter, void *new_thread)
+{
+    uint32_t kr = __real_kernel_thread_start(continuation, parameter, new_thread);
+
+    entry_note_kthread((uint32_t)(uintptr_t)continuation,
+                       (uint32_t)(uintptr_t)__builtin_return_address(0), kr);
+    return kr;
+}
+
+/*
+ * 449's five: the catalogue, and the last unmeasured step between a nub that came up and a driver that
+ * never started. Four of the five exist to *bracket* the fifth - `OSUnserialize`'s return over this
+ * project's `gIOKernelConfigTables` - because a single reading with no counts around it cannot
+ * distinguish "returned nothing" from "never called".
+ */
+extern void entry_note_postctor(uint32_t caller);
+extern void entry_note_catinit(uint32_t caller);
+extern void entry_note_unser(uint32_t caller, uint32_t ret);
+extern void entry_note_allocname(uint32_t name);
+extern void entry_note_pub2(uint32_t caller, uint32_t key);
+
+/*
+ * `libsa/lastkernelconstructor.c`'s only statement, and the image's only reference to it is a **tail
+ * branch** from `last_kernel_constructor` (`b 0x8011bc4c` in 448's image). `--wrap` works on the
+ * relocation rather than on the instruction, so a `b` is caught exactly as a `bl` is - which is what
+ * makes this the one direct reading of whether the `.init_array` walk reached the entry that is
+ * supposed to run after all the others.
+ */
+void __real_iokit_post_constructor_init(void);
+
+void __wrap_iokit_post_constructor_init(void)
+{
+    entry_note_postctor((uint32_t)(uintptr_t)__builtin_return_address(0));
+    __real_iokit_post_constructor_init();
+}
+
+/* `iokit/Kernel/IOCatalogue.cpp:92`, one call site, inside `iokit_post_constructor_init`. */
+void __real__ZN11IOCatalogue10initializeEv(void);
+
+void __wrap__ZN11IOCatalogue10initializeEv(void)
+{
+    entry_note_catinit((uint32_t)(uintptr_t)__builtin_return_address(0));
+    __real__ZN11IOCatalogue10initializeEv();
+}
+
+/*
+ * `iokit/Kernel/IOCatalogue.cpp:98`, one call site, inside `IOCatalogue::initialize`. Its return is
+ * the parsed array - or NULL, which with `assert` compiled out leaves the catalogue existing and
+ * empty, i.e. nothing matches, the fallback never runs, and no panic is reported.
+ */
+void *__real__Z13OSUnserializePKcPP8OSString(const char *inString, void *errorString);
+
+void *__wrap__Z13OSUnserializePKcPP8OSString(const char *inString, void *errorString)
+{
+    void *r = __real__Z13OSUnserializePKcPP8OSString(inString, errorString);
+
+    entry_note_unser((uint32_t)(uintptr_t)__builtin_return_address(0), (uint32_t)(uintptr_t)r);
+    return r;
+}
+
+/* `libkern/c++/OSMetaClass.cpp`, the instantiation-by-name that matching ends in. */
+void *__real__ZN11OSMetaClass18allocClassWithNameEPK8OSSymbol(void *name);
+
+void *__wrap__ZN11OSMetaClass18allocClassWithNameEPK8OSSymbol(void *name)
+{
+    void *r = __real__ZN11OSMetaClass18allocClassWithNameEPK8OSSymbol(name);
+
+    entry_note_allocname((uint32_t)(uintptr_t)name);
+    return r;
+}
+
+/*
+ * `iokit/Kernel/IOService.cpp:3532`, the statement between `MSM8974PlatformExpert::start`'s guard and
+ * its `ml_init_max_cpus(1)`. Any record at all - and `"IORTC"` especially - refutes 447's deduction
+ * rather than confirming it, which is why it is here.
+ */
+void __real__ZN9IOService15publishResourceEPKcP8OSObject(const char *key, void *value);
+
+void __wrap__ZN9IOService15publishResourceEPKcP8OSObject(const char *key, void *value)
+{
+    entry_note_pub2((uint32_t)(uintptr_t)__builtin_return_address(0), (uint32_t)(uintptr_t)key);
+    __real__ZN9IOService15publishResourceEPKcP8OSObject(key, value);
+}
+
+/*
  * XNU's own page-accounting global (`vm_page.h`), read rather than declared by this file's own idea
  * of it. It is a `B` symbol in the image, so if the object that owns it is not linked the read gets
  * the generated storage stand-in and reports 0 - which is a different claim ("no free pages") from
