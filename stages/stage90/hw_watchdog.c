@@ -328,3 +328,20 @@ const struct stage90_hw_watchdog_result *stage90_hw_watchdog_result(void)
 {
     return &g_result;
 }
+
+/*
+ * The watchdog's enable bit, read live, for a caller that is about to give up the recovery nets it
+ * *can* have and wants the record to say what is left.
+ *
+ * `stage90_disarm_deadman_timer` calls this immediately before the jump into the entry image. The
+ * software dead-man cannot cover that jump - it needs the payload's vector table and GIC, both of
+ * which the entry image replaces - so the hardware watchdog is the only net on the far side, and
+ * the step that removes the dead-man's interrupt source is exactly the step that must show the
+ * other net is still armed. Reading the SoC's own register rather than the cached
+ * `stage90_hw_watchdog_result()` is the point: a shadow copy would say what this project wrote,
+ * and the register says what the watchdog is.
+ */
+uint32_t stage90_hw_watchdog_enabled_readback(void)
+{
+    return hw_wdt_read(MSM8974_WDT_REG_EN);
+}

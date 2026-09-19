@@ -365,6 +365,21 @@ static uint32_t g_first_abort_pc;
 static uint32_t g_first_abort_kv_len;
 
 /*
+ * Set by the IRQ vector so the epilogue knows to name the interrupt it stopped on.
+ *
+ * Experiment 308's run ended on `exception: irq` and the report could not say *which* interrupt:
+ * the vector is the only place that has the GIC in front of it, and the GIC cannot be read from
+ * there - `fleh_irq` runs with XNU's page tables live, which map [physBase, physBase + memSize) and
+ * nothing at 0xf9002000. The epilogue is where the MMU comes off, so the read belongs there, and
+ * this flag is what carries the request across the teardown.
+ *
+ * Reading `GICC_IAR` acknowledges the interrupt as a side effect. That is deliberate: the machine
+ * is about to be stopped and reported, and acknowledging is what turns "an interrupt arrived" into
+ * "interrupt N arrived" - it does not change whether the report happens.
+ */
+static uint32_t g_irq_report_pending;
+
+/*
  * Where `entry_kv` was when the fault happened, and what it was about to store.
  *
  * Added by experiment 269 on the strength of its measured first abort alone. That measurement says
@@ -1008,6 +1023,26 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      * `entry_kv` ran then with XNU's caches and page tables live, and runs now without either.
      */
     entry_kv("xnu_entry_stub_caller_e", g_stub_caller);
+
+    /*
+     * If the vector that got here was the IRQ one, name the interrupt.
+     *
+     * This is the first thing in the report that reads hardware rather than this image, and it can
+     * only be done from here: the addresses below are physical, and this function is where the MMU
+     * stops translating. `GICC_IAR` returns the acknowledged interrupt id in its low 10 bits
+     * (`0x3ff` is the spurious value); `GICD_ISPENDR0` says what else was still asserted, which is
+     * how a second source is told from a re-assertion of the first.
+     *
+     * `stage90_disarm_deadman_timer` was added to the payload in the same step, so the most likely
+     * reading here is that this never runs at all. That is the point of keeping it: whether the
+     * disarm worked and whether some *other* interrupt ends the run are two different results, and
+     * without this they produce the identical log line.
+     */
+    if (g_irq_report_pending != 0u) {
+        entry_kv("xnu_entry_irq_iar", *(volatile uint32_t *)(uintptr_t)0xf900200cu);
+        entry_kv("xnu_entry_irq_ispendr0", *(volatile uint32_t *)(uintptr_t)0xf9000200u);
+        entry_kv("xnu_entry_irq_isenabler0", *(volatile uint32_t *)(uintptr_t)0xf9000100u);
+    }
 
     entry_write_kv("xnu_entry_kv_written", kv_len_written);
     entry_write_kv("xnu_entry_kv_in_dram", g_kv_len);
@@ -1832,5 +1867,15 @@ void fleh_dataabt(void)
 }
 
 void fleh_addrexc(void) { entry_epilogue("exception: address exception"); }
-void fleh_irq(void) { entry_epilogue("exception: irq"); }
+void fleh_irq(void)
+{
+    /*
+     * The one bit of work this vector does before reporting, and it is a request rather than the
+     * reading itself: the GIC is at 0xf9002000, XNU's page tables map only [physBase, physBase +
+     * memSize), and the MMU does not come off until `entry_epilogue` is inside. So the flag is set
+     * here and the read happens there.
+     */
+    g_irq_report_pending = 1u;
+    entry_epilogue("exception: irq");
+}
 void fleh_decirq(void) { entry_epilogue("exception: decrementer irq"); }

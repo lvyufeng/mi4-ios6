@@ -6,6 +6,7 @@
 #define GICD_ISENABLER0 0x100u
 #define GICD_ICENABLER0 0x180u
 #define GICD_ISPENDR0   0x200u
+#define GICD_ICPENDR0   0x280u
 #define GICD_IPRIORITY0 0x400u
 #define GICD_ITARGETS0  0x800u
 #define GICD_SGIR       0xf00u
@@ -580,4 +581,87 @@ void stage90_dump_pc_samples(void)
         xnu_log_kv32("pc_sample", stage90_irq_sample_ring[i]);
     }
     xnu_log_puts("stage90 pc-samples: end\n");
+}
+
+/*
+ * Turn the instrument's own interrupt source off, immediately before the entry image takes over.
+ *
+ * `stage90_arm_deadman_reset` arms the dead-man by calling `stage90_arm_pc_sampling_watchdog`,
+ * and that function does three things the *payload's* vector table is required to service: it
+ * enables the timer PPIs at the distributor, starts the physical timer, and unmasks IRQs at the
+ * CPU. Its IRQ path in this file is what records a sample and re-arms the window - and the moment
+ * `_start` switches tables, that path is gone. The entry image says so about its own net, in the
+ * header of its stub file:
+ *
+ *   "It does not arm the software dead-man across the jump. The dead-man needs the payload's GIC
+ *    and vector state, and both are gone the moment `_start` switches tables; leaving it armed
+ *    would be a claim that cannot be honoured."
+ *
+ * Experiment 308 is what leaving it armed actually costs, and the cost is worse than an
+ * unhonourable claim: the next timer tick lands on the entry image's `fleh_irq`, which reports one
+ * line and stops the machine. The run therefore ended three statements after the first real
+ * context switch - the first interrupt the payload's own timer produced, not anything XNU did -
+ * and the report could not say which interrupt it was.
+ *
+ * Disarming here removes nothing that was ever working. The dead-man is not a net across the jump
+ * and cannot be: it needs a vector table and a GIC that the entry image replaces. The net across
+ * the jump is the hardware watchdog, which is armed earlier in the same boot, is never touched
+ * here, and - as its own log line says when it arms - is "independent of GIC, timer and IRQ
+ * state". All this removes is an interrupt source belonging to *this project*, so that whatever
+ * the run stops on next is XNU's and not the instrument's.
+ *
+ * Three levels, because each alone leaves the tick a way in:
+ *
+ *   1. the timer's own control - `CNTP_CTL.ENABLE` cleared and `IMASK` set, so it stops asserting
+ *      at all (`generic_timer_shutdown` does this);
+ *   2. the distributor's enable bit - cleared, so a tick already asserted cannot be delivered;
+ *   3. the distributor's pending bit - cleared, so one latched before the timer stopped is not
+ *      delivered either.
+ *
+ * CPU-level IRQ delivery is masked as well, but that is the one level that *cannot* be relied on
+ * across the jump: the entry image's exception return restores the CPSR of the interrupted
+ * context, so the I bit comes back from XNU's own state rather than from anything set here. The
+ * first two levels are the ones that hold, which is why they are not optional.
+ *
+ * The before/after values are logged because "the interrupt stopped" and "the disarm did nothing"
+ * produce the same log line otherwise - the run's next line would say `exception: irq` either way.
+ */
+int stage90_disarm_deadman_timer(void)
+{
+    const uint32_t dist_base = GIC_state_stage90.distBase;
+    uint32_t enable_before;
+    uint32_t pending_before;
+    uint32_t cntp_before;
+
+    if (!dist_base) {
+        xnu_log_puts("stage90 disarm: no GIC distributor base; nothing to do\n");
+        return 0;
+    }
+
+    enable_before = mmio_read32(dist_base + GICD_ISENABLER0);
+    pending_before = mmio_read32(dist_base + GICD_ISPENDR0);
+    cntp_before = read_cntp_ctl();
+
+    /* 1. the timer itself, then 2 and 3 at the distributor. */
+    stage90_stop_pc_sampling_watchdog();
+    mmio_write32(dist_base + GICD_ICENABLER0, GIC_TIMER_PPI_MASK);
+    mmio_write32(dist_base + GICD_ICPENDR0, GIC_TIMER_PPI_MASK);
+    barrier_dsb_isb();
+
+    xnu_log_puts("stage90 disarm: the instrument's timer PPI is off before the jump\n");
+    xnu_log_kv32("disarm_ppi_mask", GIC_TIMER_PPI_MASK);
+    xnu_log_kv32("disarm_isenabler0_before", enable_before);
+    xnu_log_kv32("disarm_isenabler0_after", mmio_read32(dist_base + GICD_ISENABLER0));
+    xnu_log_kv32("disarm_ispendr0_before", pending_before);
+    xnu_log_kv32("disarm_ispendr0_after", mmio_read32(dist_base + GICD_ISPENDR0));
+    xnu_log_kv32("disarm_cntp_ctl_before", cntp_before);
+    xnu_log_kv32("disarm_cntp_ctl_after", read_cntp_ctl());
+    /*
+     * The hardware watchdog is the net that covers the jump, so whether it is still armed is part
+     * of this step's own record rather than an assumption. It lives at a fixed SoC address and
+     * `hw_watchdog.c` is what armed it; this reads its enable bit back through the same helper the
+     * payload used to arm it, so the value is the SoC's and not a shadow copy.
+     */
+    xnu_log_kv32("disarm_hw_watchdog_en", stage90_hw_watchdog_enabled_readback());
+    return 1;
 }

@@ -249,6 +249,21 @@ int stage90_xnu_entry_run(const struct boot_args *args)
     /*
      * 5. The jump. r0 = boot_args, r1 = entry. Nothing after this line executes in the payload.
      */
+    /*
+     * Before it, the instrument's own interrupt source goes off. Experiment 308 is the reason: the
+     * dead-man's timer was left armed and IRQ delivery left unmasked across the jump, so the first
+     * tick after `_start` landed on the entry image's `fleh_irq`, which reported one line and
+     * stopped the machine - three statements after the first real context switch. The dead-man
+     * cannot be serviced on the far side of the switch (the entry image's header says so in those
+     * words: it needs the payload's GIC and vector state, and `_start` replaces both), so arming it
+     * across the jump was never a net; it was an interrupt nothing could handle.
+     *
+     * This is also why the call is here rather than at the dead-man's own arming site: the payload
+     * runs *with* its own vectors for everything above this line, and the dead-man is a real net
+     * there. The disarm is the last thing done to the GIC on the last line the payload executes.
+     */
+    (void)stage90_disarm_deadman_timer();
+
     xnu_log_kv32("xnu_entry_entering_at", STAGE90_XNU_ENTRY_ENTRY);
     xnu_log_puts("stage90 xnu_entry: jumping to XNU's _start\n");
 

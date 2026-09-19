@@ -6578,6 +6578,13 @@ int stage90_arm_pc_sampling_watchdog(uint32_t interval_us, uint32_t max_samples)
 void stage90_stop_pc_sampling_watchdog(void);
 void stage90_dump_pc_samples(void);
 /*
+ * Turn the instrument's own interrupt source off immediately before the jump into the entry
+ * image. The dead-man's timer cannot be serviced once `_start` switches tables - that is in the
+ * entry image's own header - so leaving it armed only ends the run at its first tick (308). The
+ * hardware watchdog is untouched and is the net that covers the jump. Returns 1 if it ran.
+ */
+int stage90_disarm_deadman_timer(void);
+/*
  * Arm the dead-man reset. Idempotent and never disarmed: re-arming simply resets
  * the budget. Returns 1 if armed, 0 if STAGE90_DEADMAN_ENABLE is 0 or the GIC
  * bases are unavailable.
@@ -6824,6 +6831,8 @@ int stage90_hw_watchdog_arm(uint32_t timeout_s);
 void stage90_hw_watchdog_bite_now(void);
 void stage90_hw_watchdog_log(const struct stage90_hw_watchdog_result *r);
 const struct stage90_hw_watchdog_result *stage90_hw_watchdog_result(void);
+/* The SoC's own WDT0_EN, read live - what is left of the recovery nets after the disarm. */
+uint32_t stage90_hw_watchdog_enabled_readback(void);
 
 /*
  * Exclusive-monitor probe result. `status` says whether the probe ran and

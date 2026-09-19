@@ -3845,6 +3845,83 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # 87 x `failure_mask=0x00000000`, `xnu_entry_failures=0x00000000`, `xnu_entry_abort_entries`
     # 0x00000000, log 300987 bytes, and the device returned to Android on its own (release 10).
     OSFMK_KERN_KERN_MONOTONIC_OBJ=${STAGE90_ENTRY_OSFMK_KERN_KERN_MONOTONIC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_kern_monotonic.o}
+    # 309: **no object** - the instrument's own interrupt source, and the boot leaves the scheduler
+    #
+    # **The first step in this walk that links nothing, and it is the step that moved the frontier
+    # furthest.** 308's run ended on `exception: irq` with no `stub_hit` line, and the interrupt was
+    # this project's own: `stage90_arm_deadman_reset` arms the dead-man through
+    # `stage90_arm_pc_sampling_watchdog`, which enables the timer PPIs at the distributor, starts the
+    # physical timer and unmasks IRQs - all three of which the *payload's* vector table is what
+    # services. `_start` replaces that table, and the entry image's own header already said the
+    # dead-man cannot be honoured across the jump ("it needs the payload's GIC and vector state, and
+    # both are gone"). So the tick was not a net at all; it was an interrupt nothing could handle,
+    # and every run ended three statements after the first real context switch because of it.
+    #
+    # The change is `stage90_disarm_deadman_timer()` in `stages/stage90/gic.c`, called from
+    # `xnu_entry_jump.c` on the last line the payload executes, and it turns the source off at three
+    # levels - the timer's own `CNTP_CTL` (`generic_timer_shutdown`), the distributor's enable bit,
+    # and the distributor's pending bit - because the fourth (CPU-level IRQ masking) is the one that
+    # *cannot* hold across the jump: the entry image's exception return restores the CPSR of the
+    # interrupted context, so the I bit comes back from XNU's own state. It logs before and after at
+    # every level, and it reads the hardware watchdog's enable bit back from the SoC, because the
+    # step that removes one net has to show the other is still armed. The measured values:
+    #
+    #   disarm_isenabler0_before 0x000c7fff   after 0x00007fff   (the timer PPIs were enabled)
+    #   disarm_ispendr0_before   0x20480000   after 0x20400000   (one was already pending)
+    #   disarm_cntp_ctl_before   0x00000005   after 0x00000002   (ENABLE|ISTATUS -> IMASK only:
+    #                                                           the timer had already expired)
+    #   disarm_hw_watchdog_en    0x00000001                      (the net across the jump is armed)
+    #
+    # The entry image was changed in the same step, and only additively: `fleh_irq` now sets a flag
+    # and `entry_epilogue` reads `GICC_IAR`/`GICD_ISPENDR0`/`GICD_ISENABLER0` after the MMU comes
+    # off - it cannot be read from the vector, because `fleh_irq` runs with XNU's page tables live
+    # and they map nothing at 0xf9002000. That code **did not run**: `xnu_entry_irq_iar` appears
+    # zero times in the log, which is the disarm's own confirmation rather than a second claim.
+    # Its cost, and the step's only build number, is `.text` **0x11D980** (from 0x11D8C0, +0xC0);
+    # image **0x138AAC**, `.data` 0x80120000, bss 0x80138AC0..0x8016F8D8 and headroom 1640232 all
+    # unchanged, and 736 / 647 / 89 unchanged because no object moved.
+    #
+    # **Measured: `stub_hit=device_service_create` at caller key 0x8000E61C =
+    # `kernel_bootstrap_thread + 0x9c`** - the `bl` at 0x8000E618, immediately after
+    # `bl clock_service_create` at 0x8000E614, which *returned*. The log's `disarm:` block is
+    # followed by a `stub_hit` line and no `exception:` line at all.
+    #
+    # **What that measures, and it is the largest single advance in this walk.** The stop is in
+    # `kernel_bootstrap_thread` itself, twelve calls into its straight line, so everything before it
+    # ran and returned:
+    #
+    #   * `sched_startup()`  - **returned**. In 306 the run died three statements *inside* it, at
+    #     `thread_block`'s `ast_off`. For it to return, the bootstrap thread has to be blocked, the
+    #     scheduler has to choose a thread, `thread_select` and `thread_invoke` have to run to the
+    #     `machine_switch_context`, a *different* thread has to run, and the bootstrap thread has to
+    #     be selected and switched back to. That is the first time this kernel has taken a full
+    #     round trip through its own context switch on hardware.
+    #   * `idle_thread_create`, `thread_daemon_init`, `vm_kernel_reserved_entry_init`,
+    #     `thread_call_initialize`, `thread_bind`, `ipc_thread_call_init`, `mapping_adjust` - seven
+    #     entries of `kernel_bootstrap_thread` that had never executed before, all of them returning.
+    #   * `clock_service_create` - the clock subsystem.
+    #
+    # Note what is *not* claimed: 305 predicted `device_service_create` at 0x8000E59C, and this stop
+    # is the same call at 0x8000E618 - the difference is the image having grown 0x80 across four
+    # steps, not a different frontier. The prediction was right about the call and four experiments
+    # early about the step.
+    #
+    # **Next: `osfmk/device/device_init.c`** (`osfmk_device_device_init.o`, manifest:506) - the
+    # object that defines `device_service_create`. It
+    # is **188 bytes of `.text`**, 28 of `.bss` and 43 of `.rodata.str1.1`, with 9 definitions and 11
+    # references, and it resolves **1** name and adds **0**: every one of its eleven references
+    # (`ipc_port_alloc_special` behind the `ipc_port_alloc_kernel` macro, `panic`, `ipc_kobject_set`,
+    # `host_priv_self`, `ipc_port_make_send`, `kernel_set_special_port`, `lck_grp_attr_alloc_init`,
+    # `lck_grp_alloc_init`, `lck_attr_alloc_init`, `lck_mtx_init`, `ipc_space_kernel`) is already
+    # real in this image, and `tools/stub_calls_in_function.py` reports **no stub call inside any of
+    # their bodies**. So `device_service_create` is predicted to run to its end, and the stop is the
+    # next call `kernel_bootstrap_thread` makes - which the image puts at **`kdp_init`, caller key
+    # 0x8000E63C**. Its named falsifier is the body's own `panic("can't allocate master device
+    # port")` - the object's *second* call, `bl panic` at +0x30, taken when
+    # `ipc_port_alloc_special` returns `IP_NULL` - so the alternative is that the function panics
+    # instead of finishing. That would be the first candidate in this walk that is a **panic**
+    # rather than a stub, and the log distinguishes them: a panic prints its string, a stub prints
+    # `stub_hit=`.
     # 307: `ast.c` - 0x440 bytes, and the candidate is the first call `thread_invoke` makes
     #
     # **The object that defines the name 306 stopped on, and the first step whose prediction is a
