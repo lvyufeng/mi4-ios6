@@ -24,6 +24,19 @@ whose last statement is a call hands control on. A tail call was a blind spot un
 where it is exactly the frontier: `arm_vm_init`'s last instruction is
 `b patch_low_glo_static_region`, and the symbol is undefined, so the run stops there. An indirect
 call through a function pointer is still invisible here and is the one thing this cannot see.
+
+**A call to a symbol defined in the same object was a second blind spot until experiment 305.**
+`objdump -dr` prints such a call as `bl 94c <thread_unblock>` - the resolved local address and a
+relocation the disassembly text does not show as `0` - and this tool's pattern required the `0`, so
+it followed only *cross-object* calls. That is invisible while the frontier is reached through a
+chain of objects, which is most of the boot, and it is exactly wrong where a run of functions in one
+object sits between the probe and the stop: 305's stop, `sfi_thread_classify`, is reached from
+`sched_startup -> kernel_thread_start_priority` (two objects, followed) and then
+`thread_start -> clear_wait -> clear_wait_internal -> thread_setrun -> sfi_thread_classify`, of
+which the last four are all `osfmk_kern_sched_prim.o`, so the walk the run was predicted from
+reported "no stop in `clear_wait`'s closure" and the device stopped one intra-object hop later.
+The pattern now accepts any target address and skips local labels (`foo+0x10`, `.LBB1_2`), which are
+branches inside a function rather than calls.
 """
 
 import argparse
@@ -63,10 +76,14 @@ def calls(path):
             sym = m.group(2)
             continue
         # `bl` is a call; a bare `b` to a named symbol is a call the compiler made a tail call.
-        # Conditional branches (`bne`, `beq`, ...) and local labels are not followed: the first is
-        # a path this tool does not model, the second is not a cross-function edge.
-        m = re.match(r"^\s+([0-9a-f]+):\s+[0-9a-f ]+\s+b(?:l)?\s+0 <(\S+)>", line)
-        if m and sym:
+        # The target address is 0 for a symbol this object does not define and the resolved local
+        # address for one it does - both are edges, and the second kind is the 305 blind spot the
+        # module docstring describes.
+        # Conditional branches (`bne`, `beq`, ...) are not followed: that is a path this tool does
+        # not model. A target that is a local label (`foo+0x10`, `.LBB1_2`) is a branch inside a
+        # function, not a cross-function edge.
+        m = re.match(r"^\s+([0-9a-f]+):\s+[0-9a-f ]+\s+b(?:l)?\s+(?:0|[0-9a-f]+) <(\S+)>", line)
+        if m and sym and "+" not in m.group(2) and not m.group(2).startswith("."):
             per[sym].append((int(m.group(1), 16), m.group(2)))
     return per
 

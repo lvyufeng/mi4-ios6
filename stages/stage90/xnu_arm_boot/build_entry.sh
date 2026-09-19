@@ -3748,6 +3748,144 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # above. Any other stop means a real function on this path reaches a stub that reading did not
     # show, and the log will name it.
     BSD_KERN_PROC_INFO_OBJ=${STAGE90_ENTRY_BSD_KERN_PROC_INFO_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_proc_info.o}
+    # 305: `thread_act.c` - the straight line runs to `device_service_create`
+    #
+    # **The object that defines the name 304 stopped on, and the first step in a while whose
+    # prediction is the bootstrap thread's own straight line rather than a caller key reached
+    # through a scheduler dance.** `osfmk_kern_thread_act.o` (`osfmk/kern/thread_act.c`,
+    # manifest:597): `.text` 0x1288, `.rodata.str1.1` 0x34, no `.data` and no `.bss`; 38 definitions
+    # and 38 references. The object *is* where the name is this time - `thread_start` is in this
+    # file - which is worth stating because the previous two steps each cost a lookup:
+    # `bsd_setthreadname` is in `proc_info.c` and not `kern_prot.c` (304, the third time a name's
+    # directory was not its object's, after `mig_init`/261 and `stackshot_init`/267).
+    #
+    # **25 resolved, 5 added.** `undef ∩ defined(osfmk_kern_thread_act.o)` is the thread-state API
+    # this image has carried as stubs since `thread.o` arrived: `thread_start` (304's stop),
+    # `thread_start_in_assert_wait`, `thread_terminate` (the name 303's own "next" named as its
+    # falsifier - it was referenced by nine linked objects and stubbed by all of them),
+    # `thread_terminate_internal`, `thread_abort`, `thread_abort_safely`, `thread_hold`,
+    # `thread_release`, `thread_suspend`, `thread_resume`, `thread_get_state`,
+    # `thread_set_state_from_user`, `thread_depress_abort`, `thread_dup`, `thread_dup2`,
+    # `thread_info`, `thread_apc_ast`, `set_astledger` and the nine AST setters (`act_get_state`,
+    # `act_set_astbsd`, `act_set_astkevent`, `act_set_astmacf`, `act_set_kperf`,
+    # `act_set_io_telemetry_ast`, `act_set_state_from_user`). The 5 added are all **functions, no
+    # storage**: `nm -S --defined-only` over the built pool reports `T` for every one
+    # (`extmod_statistics_incr_thread_set_state` in `extmod_statistics.o`, `thread_affinity_dup` and
+    # `thread_affinity_terminate` in `affinity.o`, `thread_depress_abort_internal` in
+    # `syscall_subr.o`, `thread_exception_return` in `locore.o`), so the generator has no size to
+    # take from a defining object and none of the five costs one of the 64-byte storage slots.
+    # Counts: 767 -> **747** undefined, 678 -> **658** function stubs, 89 -> **89** storage.
+    #
+    # **The layout, from the object's own sections and this step's stub delta.** `.text`
+    # 0x11BB00 -> **0x11CABC plus the fill term**: +0x1288 + 0x34 for the object, -25 stub bodies
+    # (0x258) and their 25 name strings (0x1AC - the names plus their NULs), +5 bodies (0x78) and
+    # their 5 strings (0x8C), so +0xFBC. The last three fill terms were 0x12 (301), 0x55 (302) and
+    # 0x34 (304), so the expectation is a `.text` of 0x11CAC0..0x11CB00. `.data` **0x80120000** - a
+    # 0x4000 step, for 304's reason: `.text` crosses 0x11C000 and the `.data` output section is
+    # 16 KB aligned. `__bss_start` **0x80138AC0**: the file-backed data is unchanged (this object
+    # has none, and its `.rodata.str1.1` is placed inside `.text`), so the data block keeps 304's
+    # size 0x18AC0 and only the alignment step moves it. `__bss_end` **0x8016F8D8** - 89 storage
+    # stand-ins, unchanged, so the 0x36E18 of bss is too - image **0x138AAC = 1281452**, headroom
+    # **1640232**.
+    #
+    # **Pre-device prediction: the stop is `device_service_create`, caller key 0x8000e59c.**
+    # With `thread_start` real, `kernel_thread_start_priority` has nothing left to stop on - its
+    # body is `kernel_thread_create`, `lck_mtx_lock`, `bl thread_start` at 0x8000A09C,
+    # `lck_mtx_unlock` - so it returns into `sched_startup` at 0x800A2FF4, which then calls
+    # `thread_deallocate` and `thread_block(THREAD_CONTINUE_NULL)` and returns. **That
+    # `thread_block` does not yield**, and the reason is in `thread_select`: the current thread keeps
+    # the processor while
+    #
+    #     (rt_runq_count(pset) == 0) && SCHED(processor_queue_has_priority)(processor, sched_pri, TRUE) == FALSE
+    #
+    # i.e. while nobody is runnable at a *higher* priority - and the thread that call just started,
+    # `sched_init_thread`, is also MAXPRI_KERNEL, equal and not higher. `thread_block` does not set
+    # `TH_WAIT` either (only `assert_wait` does), so the bootstrap thread's state is exactly
+    # `TH_RUN`, which is what `still_running = ((state & (TH_TERMINATE|TH_IDLE|TH_WAIT|TH_RUN|TH_SUSP))
+    # == TH_RUN)` tests. And even in the other reading of the same code - that an equal priority
+    # does switch - `sched_init_thread`'s first act is a `thread_block(THREAD_CONTINUE_NULL)` of its
+    # own (`sched_prim.c:4907`, `bl thread_block_reason` at 0x800A303C, before its
+    # `thread_set_thread_name` at 0x800A3050), so it hands the processor straight back before its
+    # name is set and before its continuation runs. Both readings leave the bootstrap thread inside
+    # `sched_startup`'s tail, and it walks the rest of its own line, in this order:
+    #
+    #     thread_daemon_init            real; its three `thread_start` calls are real as of this step
+    #     vm_kernel_reserved_entry_init real -> zone_prio_refill_configure -> kernel_thread_start_priority
+    #     thread_call_initialize        real: zinit, zone_change x2, lck_grp_init, lck_mtx_init,
+    #                                   nanotime_to_absolutetime, waitq_init x2, timer_call_setup x3,
+    #                                   ml_set_interrupts_enabled, lck_mtx_lock_spin_always, ...
+    #     thread_bind                   four real calls (ml_set_interrupts_enabled, lck_spin pair)
+    #     ipc_thread_call_init          `bx lr` - four bytes
+    #     mapping_adjust                kernel_thread_start_priority (real) and a panic
+    #     clock_service_create          both of its stubs are *behind a gate*: see below
+    #     device_service_create         **a stub** - the `bl` at 0x8000E598 is unconditional
+    #
+    # **The two gates on the way, and neither is a reading of a branch this step made.** (1)
+    # `thread_call_initialize`'s `zinit` reaches `btlog_create` (`zalloc.c:2349`) only for a zone
+    # whose `zone_logging` is TRUE, and that flag is written in exactly two places in the whole
+    # tree (`zalloc.c:2272` and `:2291`), both inside `PE_parse_boot_argn("zlogN")` /
+    # `PE_parse_boot_argn("zlog")`. Experiment 287 already measured this guard as the reason the
+    # zone-logging paths stay shut, and this payload's boot-args line contains no `zlog` of any
+    # spelling. (2) `clock_service_create` reads `clock_count` at 0x800BB624 and branches
+    # `cmp r0, #1 / blt` *over* both `ipc_clock_init` (0x800BB660) and `ipc_clock_enable`
+    # (0x800BB668) - and `clock_count` is one of the 89 storage stand-ins: `osfmk/arm/conf.c`
+    # defines it (`D`, 4) and `osfmk_arm_conf.o` is not linked, so the generator's four zero bytes
+    # are what that `ldr` reads. Neither clock stub is reachable until the object that defines that
+    # counter is linked, which is a step of its own and not a detail of this one.
+    #
+    # **Falsifiers.** (1) `compute_averages` - a stub, and the first thing
+    # `sched_timeshare_maintenance_continue` does that this image does not define (`bl` at
+    # 0x800A3174, before that function's first `assert_wait`/`thread_block`). It is reachable only
+    # if `sched_startup`'s `thread_block` really switches away *and* `sched_init_thread` does not
+    # hand the processor back - which needs the bootstrap thread off the run queue while not
+    # waiting, and the two paragraphs above say it cannot be. (2) `clear_wait`, which is in
+    # `thread_start`'s body and stays real (`sched_prim.o`) - `entry_frontier.py` rooted at
+    # `thread_start` reports no stop in its closure. (3) the three `thread_create_internal` blocks
+    # in `thread_daemon_init` - no stop in their closures either. (4) `ast_taken_kernel` behind
+    # `ml_set_interrupts_enabled` - closed twice already (302 and 304) by the CPSR test at
+    # 0x80012968. (5) the `zfree`/`btlog_add_entry`/`trace_backtrace` set - closed by history
+    # (243-247) and unchanged by this step.
+    #
+    # **The run, and the prediction was one call short.** Measured 2026-09-19:
+    #
+    #     stub_hit        sfi_thread_classify
+    #     caller key      0x8009dc90 = thread_setrun + 0x3C (the `bl` at 0x8009DC8C)
+    #
+    # So 304's prediction and this one are both right about the *shape* - the bootstrap thread
+    # stayed in `sched_startup`, no thread was switched to, `compute_averages` (falsifier 1) was
+    # not reached - and wrong about there being no stop between `thread_start` and
+    # `device_service_create`. There is one, inside `thread_start`'s own closure, and the walk that
+    # said otherwise could not see it: `entry_frontier.py` followed only calls written `bl 0 <name>`
+    # in `objdump -dr` output, which is the form a call to a symbol *another object* defines takes.
+    # A call to a symbol the same object defines prints as `bl c24 <thread_setrun>` - the resolved
+    # local address - and was not followed, so every edge between two functions of one object was
+    # missing from the graph. The chain the device took is exactly the shape that hides:
+    #
+    #     sched_startup            sched_prim.o
+    #       -> kernel_thread_start_priority   thread.o        cross-object, visible
+    #         -> thread_start                 thread_act.o    cross-object, visible
+    #           -> clear_wait                 sched_prim.o    cross-object, visible
+    #             -> clear_wait_internal      sched_prim.o    intra-object, INVISIBLE
+    #               -> thread_go (inlined)    sched_prim.o    intra-object, INVISIBLE
+    #                 -> thread_setrun        sched_prim.o    intra-object, INVISIBLE
+    #                   -> sfi_thread_classify  sfi.o         the stop
+    #
+    # `sched_startup -> kernel_thread_start_priority` was visible in 304 only because those two
+    # functions are in different objects, which is why 304's prediction was exact and this one was
+    # not; the blind spot has been there for as long as the tool has. It is fixed in this step -
+    # the pattern now accepts any target address and skips local labels (`foo+0x10`, `.LBB1_2`) -
+    # and the same walk now reports `sfi_thread_classify` (with 371 stops instead of 133, because
+    # intra-object edges also reach the panic paths). The reading that survives is that
+    # `thread_start`'s body *ran*: `clear_wait` -> `clear_wait_internal` -> `thread_go` ->
+    # `thread_setrun(thread)` is what wakes a started thread and puts it on a run queue, and
+    # `thread_setrun`'s first act is `thread->sfi_class = sfi_thread_classify(thread)`. What
+    # `device_service_create` had in 305 is therefore not a refutation but a re-run: it is the same
+    # prediction one undefined name further along, and 306 (which links `osfmk_kern_sfi.o`, 2
+    # resolved, 0 added, 0x54 bytes, because `CONFIG_SCHED_SFI` is 0 and only sfi.c's `#else` arm
+    # compiles) is the run that tests it - with `ast_on` (0x8009E5D0, 0x8009E618) and
+    # `PE_cpu_signal_deferred` (behind `machine_signal_idle` at 0x8009E6D4) named as the
+    # alternatives, both behind gates that need a *higher* priority or an idle processor.
+    OSFMK_KERN_THREAD_ACT_OBJ=${STAGE90_ENTRY_OSFMK_KERN_THREAD_ACT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_thread_act.o}
     # 298: the orphan sections get names, and `__DATA,__sysctl_set` gets a segment
     #
     # **297 fixed what the orphans broke; this step stops them being orphans.** The same build output
@@ -8481,6 +8619,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_ARM_CSWITCH_OBJ" "run ./tools/assemble_arm_layer.sh first"
     require "$BSD_KERN_PROC_INFO_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_THREAD_ACT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -8493,7 +8632,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
