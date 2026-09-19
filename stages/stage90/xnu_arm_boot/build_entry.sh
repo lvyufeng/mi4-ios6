@@ -13484,6 +13484,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ=${STAGE90_ENTRY_YARROWCORELIB_COMP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_src_comp.o}
     OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ=${STAGE90_ENTRY_YARROWCORELIB_YARROWUTILS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_src_yarrowUtils.o}
     OSFMK_PRNG_FIPS_SHA1_OBJ=${STAGE90_ENTRY_FIPS_SHA1_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_fips_sha1.o}
+    IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOPMPowerStateQueue.o}
     # =============================================================================================
     # **369: `YarrowCoreLib/port/smf.c` - the step that moves `.data` for the first time in five, and
     # whose stop is three frames away from anything it touches.**
@@ -14653,6 +14654,386 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # Unlike the last five objects, it is 0x318 of `.text` *plus* `.rodata` 0xB4, `.rodata.str1.1` 0x14,
     # **`.bss` 0x18** and **`.init_array` 0x4** - a static constructor, so 374 is the step where
     # `.init_array` next grows (and the first since 364 with a `.bss` input).
+    #
+    # =============================================================================================
+    # **374: `iokit/Kernel/IOPMPowerStateQueue.cpp` - the object the walk has been stopped inside
+    # since 365, and whose stop is not in it.**
+    #
+    # 373's stop was `_ZN19IOPMPowerStateQueue17PMPowerStateQueueEP8OSObjectPFvS1_zE`, called from
+    # `IOPMrootDomain::start` at key `0x8014E6D0`. The object is `iokit_Kernel_IOPMPowerStateQueue.o`,
+    # and the effect tool against the 373 image is
+    #
+    #     resolved (2: 2 function, 0 storage)
+    #         _ZN19IOPMPowerStateQueue16submitPowerEventEjPvy               object T, stand-in was func T
+    #         _ZN19IOPMPowerStateQueue17PMPowerStateQueueEP8OSObjectPFvS1_zE object T, stand-in was func T
+    #     added (0: 0 function, 0 storage)
+    #     of the 47 references, 47 are already satisfied
+    #
+    # so **777 -> 775 undefined, 675 -> 673 function, 102 -> 102 storage**. Two names retired and nothing
+    # created: **the whole closure of this object is already real** - `OSObject::nw` (at 56 and at 112
+    # bytes), `IOEventSource::IOEventSource(OSMetaClass const *)`, `OSMetaClass::instanceConstructed`,
+    # `IOMalloc` (0x8011B5DC), `IOLockAlloc` (0x8011CD74, defined by `iokit_Kernel_IOLocks.o`),
+    # `lck_mtx_lock`/`lck_mtx_unlock`, `IOEventSource::signalWorkAvailable` and `OSObject::release` are
+    # every one of them definitions in this image and not stand-ins - so, as in 370 and 373, **nothing
+    # inside this object can stop the run**. It is also the pool definer of the *second* stub its own
+    # header names, `submitPowerEvent`, which `IOPMrootDomain::registerInterest` reaches later in the
+    # same frame, so one step retires both and the run goes straight past each.
+    #
+    # Sections (`objdump -h`, and the alignments are the ones the layout arithmetic needs):
+    #
+    #     .text                                         0x318  2**2
+    #     .text._ZN19IOPMPowerStateQueue9MetaClassD0Ev  0x004  2**2   a *separate* input of the same
+    #                                                                 object, matched by the `.text.*`
+    #                                                                 wildcard - 373's 0x5C gap in its
+    #                                                                 general form, and this time it is
+    #                                                                 derived rather than located
+    #     .rodata                                       0x0B4  2**2   two vtables, `metaClass`/
+    #                                                                 `superClass`, and `gMetaClass`
+    #     .rodata.str1.1                                0x014  2**0
+    #     .bss                                          0x018  2**2   `IOPMPowerStateQueue::gMetaClass`
+    #     .init_array                                   0x004  2**2   a static ctor,
+    #                                                                 `_GLOBAL__sub_I_IOPMPowerStateQueue.cpp`
+    #                                                                 at `.text`+0x2C4
+    #
+    # ### The stop: it is not in this object, and the object's own vtable is why it is reachable
+    #
+    # The constructor is entered at `IOPMrootDomain::start+0x780` and its body never leaves real code:
+    #
+    #     +0xE8  push {r4,r5,r6,r7,fp,lr}
+    #     +0xF8  bl OSObject::nw(0x38)                  real (kalloc_canblock / __bzero / OSAddAtomic)
+    #     +0x10C bl IOEventSource::IOEventSource(OSMetaClass const *)   real
+    #     +0x124 bl OSMetaClass::instanceConstructed    real
+    #     +0x13C blx r3 = vtable+0x38 = the queue's own `init(OSObject *, Action)`   real, in this object
+    #     +0x154 blx r1 = vtable+0x14 = OSObject::release               real, only if init returned 0
+    #
+    # and `init` itself (`+0x164`) is `IOEventSource::init(owner, action)` then `IOLockAlloc`, both real.
+    # The **indirect** pair matters: before this step the queue's vtable is *not* in the image, so those
+    # two `blx` would have gone through a storage stand-in of that size - zeros - and `blx r3` on a zero
+    # is a jump to 0. That is 365's kind 9, and it is the reason this step's stop is decided by a vtable
+    # that this step is what makes real. **(d)** below is the check that no *other* vtable in this image
+    # carries a stub address, so the same argument does not have to be repeated per slot.
+    #
+    # So the constructor returns the queue, `IOPMrootDomain::start` resumes at **`+0x784`**, and the first
+    # stub the resumed code can reach is nine frames away:
+    #
+    #   +0x788  blx  `[[gIOPMWorkLoop]]+0x4C` = `IOWorkLoop::addEventSource(queue)`
+    #                 (the vptr is `_ZTV10IOWorkLoop+8`; slot 0x4C resolves to
+    #                  `_ZN10IOWorkLoop14addEventSourceEP13IOEventSource`, 0x801747E4)
+    #             -> `controlG->runCommand(mAddEvent = 0, newEvent)` = `IOCommandGate::runCommand`
+    #             -> `IOCommandGate::runAction(action = 0, arg0 = queue, ...)`
+    #             -> `IOWorkLoop::closeGate`, `IOWorkLoop::onThread` (false: this is the boot thread),
+    #                `IOWorkLoop::sleepGate` - all four indirect sites resolve to real slots
+    #                (`_ZTV13IOCommandGate` / `_ZTV10IOWorkLoop`), and the PM work loop thread then runs
+    #                `IOWorkLoop::_maintRequest` (179 instructions, **zero direct calls** - every
+    #                `IOEventSource` access in it is inlined) whose 17 `blx` are all on the *queue's*
+    #                vtable, i.e. on the object this step makes real
+    #   +0x79C  `new IORootParent` (0x58), `IOService::IOService(OSMetaClass const *)`, vptr, and
+    #           `OSMetaClass::instanceConstructed` - real
+    #   +0x7E0  `patriarch->init(0)` = `IOService::init(OSDictionary *)` -> `IORegistryEntry::init`,
+    #           `IOMalloc`, `__bzero`, `IOLockAlloc` - real, no stub anywhere on its line
+    #   +0x7F4  `patriarch->attach(this)` = `IOService::attach(IOService *)`, whose nine indirect sites
+    #           are `IOService::lockForArbitration`/`unlockForArbitration`, `IORegistryEntry::
+    #           attachToParent`, `IOService::getProvider` and `IORegistryEntry::getName` - all real
+    #   +0x808  `patriarch->start(this)` = `IORootParent::start(IOService *)` (0x8015BA14):
+    #               `IOService::start(nub)`             = `mov r0,#1; bx lr`
+    #               `attachToParent(getRegistryRoot(), gIOPowerPlane)`   real
+    #               `PMinit()`                          sets `initialized = 1`, creates the `IOServicePM`
+    #               `registerPowerDriver(this, patriarchPowerStates, 2)` 0x80167290
+    #                   +0x30C  `IOService::acquirePMRequest(this, kIOPMRequestTypeRegisterPowerDriver)`
+    #                              0x801658A0, and `IOPMRequest::create()` is *inlined* into it:
+    #                              +0x20  `blx` `IOPMRequest::gMetaClass.alloc()`  real
+    #                              +0x30  `bl IOCommand::init`        <- THE STOP
+    #
+    # **Predicted: `stub_hit=_ZN9IOCommand4initEv`, at caller key `0x801658D4`.** The key is the return
+    # address of that `bl`, `0x801658A0 + 0x30 + 4`, and `acquirePMRequest` does not move: it is at a
+    # `.text` address below the insertion point, and so are `registerPowerDriver` (0x80167290),
+    # `IORootParent::start` (0x8015BA14) and `IOPMrootDomain::start` (0x8014DF4C) - the object is
+    # inserted between `osfmk_prng_fips_sha1.o` and `MSM8974PlatformExpert.o`, at the *end* of `LINK_OBJS`.
+    #
+    #     key = 0x801658D4     digits "801658d4"
+    #     w0 = 0x36313038 ("8016")   w1 = 0x34643835 ("58d4")
+    #
+    # **The three conditions between the constructor and that `bl` are all *data*, and all three hold.**
+    # `IOService::registerPowerDriver` returns early unless (i) `initialized` - which `PMinit()` sets
+    # (`strb r3 = 1, [r4, #0x44]`, the only store of that byte in the image, in `IOService::PMinit`);
+    # (ii) `powerStates && numberOfStates >= 2` - `patriarchPowerStates` is two `{1,0,ON_POWER,0,...}`
+    # entries in `.data` at 0x801C4588, read back as `[0x1,0x2,0,...]` at both 0x801C4588 and 0x801C45B8;
+    # (iii) `powerStates[0].version (1) <= kIOPMPowerStateVersion2 (2)`, and with version 1 the
+    # state-order loop takes `stateOrder = i`, so both `stateOrderToIndex` slots are written and the
+    # check loop does not break with `kIOReturnBadArgument`. Then `IONew(IOPMPSEntry, 2)` is `IOMalloc`,
+    # real, and the very next thing the function does is `acquirePMRequest`.
+    #
+    # ### The layout: two retirees, and the section arithmetic that carries them
+    #
+    # **The two retired stubs are indices 653 and 654 of the 675 function records.** The stub bodies are
+    # laid out in `stubnames.txt` order at `realstubs.o`'s `.text` start + 0x18k (verified: `IOCommand::
+    # init`, record 670, is at 0x8017F36C + 0x18 x 670 = 0x8018323C in the 373 image), and
+    # `_ZN17IOPowerConnectionC1Ev` is record 652 - *before* the pair. So every stub body keeps its index
+    # and simply moves with the section, while everything from `submitPowerEvent` (653) up shifts one
+    # pair down: **+0x2EC for the section, -0x30 for the two bodies, and the stub this step stops on
+    # moves from 0x8018323C to 0x8017F688 + 0x18 x 668 = 0x80183528.** The run reports stubs by *name*,
+    # so no reading in the log depends on that - but it is arithmetic the map can be checked against.
+    #
+    # | | 373 measured | 374 predicted |
+    # |---|---|---|
+    # | counts | 777 / 675 / 102 | **775 / 673 / 102** |
+    # | object `.text` | - | 0x8017F1C0 (0x318, no fill) |
+    # | its `MetaClassD0Ev` input | - | 0x8017F4D8 (0x4) |
+    # | platform expert `.text` | 0x8017F1C0 (0x150) | 0x8017F4DC (0x150) |
+    # | `realstubs.o` `.text` | 0x8017F36C (0x3F48) | 0x8017F688 (0x3F18 = 673 x 0x18) |
+    # | its end | 0x801832B4 | 0x801835A0 |
+    # | `.text` run end (= `.rodata` run start) | 0x80183560 | 0x8018364C |
+    # | object `.rodata` / `.rodata.str1.1` | - | 0x801A5174 (0xB4) / 0x801A5228 (0x14) |
+    # | `realstubs.o` `.rodata.str1.4` | 0x801A542C (0x3A28) | 0x801A57E0 (0x39B8) |
+    # | its end | 0x801A8E54 | 0x801A9198 |
+    # | `.text` end | 0x801A9820 | 0x801A9B60 |
+    # | text size | 1742880 | 1743712 |
+    # | `.data` | 0x801AC000 (0x19AB0) | unmoved |
+    # | `.sysctl_set` | 0x801C5AB0 (0x150) | unmoved |
+    # | `.init_array` | 0x801C5C00 (0x84) | 0x801C5C00 (0x88) |
+    # | its end | 0x801C5C84 | 0x801C5C88 |
+    # | `.bss` | 0x801C5CC0 (0x39118) | 0x801C5CC0 (0x39158) |
+    # | `__bss_end` | 0x801FEDD8 | 0x801FEE18 |
+    # | image | 1858692 | 1858696 (= 0x1C5C88) |
+    # | headroom | 2101800 | 2101736 (= 0x2011E8) |
+    # | args / topOfKernelData / tree / window | +2097152 / +4194304 / +6291456 / 8388608 | all unmoved |
+    #
+    # **The text size is two routes to one number, and both are written here because 373's one miss was
+    # a row placed by hand.** Route 1, position: the `.rodata` run starts where the `.text` run ends
+    # (0x8018364C, which is 0x80183560 + 0x2EC), the object's `.rodata` lands at align4(0x801A4E86 +
+    # 0x2EC) = 0x801A5174, and then the chain `+0xB4 +0x14 +0x440 (platform expert) +0x16 (its
+    # `.rodata.str1.1`) +fill 0x2 +0x14C (`.rodata.macho`)` reaches `realstubs.o`'s row at 0x801A57E0;
+    # the row's 0x39B8 ends at 0x801A9198, and the tail after it is a constant of this image:
+    #
+    #     0x801A9198 +0x4    `__TEXT,__const` (pexpert_arm_pe_init.o's `debug_enabled`)
+    #                fill 0x4 to the 2**4-aligned `__TEXT, initcode`
+    #                +0x64C  `initcode` (bsd_kern_kern_memorystatus.o, `memorystatus_init`)
+    #                +0x251 +0x3 +0x108   the three `__TEXT,__os_log` rows
+    #                +0x8    `.ARM.exidx`
+    #                ALIGN(0x20) -> **0x801A9B60**
+    #
+    # Route 2, delta: the content changes by `+0x318 + 0x4 (this object) - 0x30 (two stub bodies) +
+    # 0xB4 + 0x14 - 0x70 (two name slots: align4(62+1) + align4(47+1))` = **+0x340**, less the 0x4 the
+    # `initcode` fill gives back (0x8 -> 0x4 as the cursor moves 0x340 further into the 16-byte grid),
+    # so `0x801A9820 + 0x340 - 0x4 = 0x801A9B5C`... and the position route says the raw end is
+    # 0x801A9B50 and `ALIGN(0x20)` closes the section at 0x801A9B60. **The two routes agree on the
+    # section end and differ on the raw end by 0xC**, which is the alignment term the position route
+    # carries and the delta route does not; the section end is the number the map and `size` report, so
+    # the block's prediction is the one both routes produce, and the raw end is recorded as the
+    # unresolved half.
+    #
+    # **`.data` cannot move**: `align_up(0x801A9B60, 0x4000)` is still 0x801AC000 (0x2480 of room), and
+    # the object has no `.data` at all, so `.data`, `.sysctl_set` and every row derived from their end
+    # are exactly 373's.
+    #
+    # **`.init_array` grows 4 and `.bss` moves 0x40, and the pad rule *is* exercised this time.** The
+    # object's `.init_array` (0x4, 2**2) is a `KEEP(*(.init_array .init_array.*))` input, so the section
+    # goes 0x84 -> 0x88 and its end 0x801C5C84 -> 0x801C5C88; `.bss` starts at
+    # `align64(0x801C5C88)` = **0x801C5CC0, unmoved**. Inside `.bss` the object's 0x18 lands where the
+    # link order puts it - between `osfmk_prng_YarrowCoreLib_src_sha1mod.o`'s 0x40 at 0x801FC624 and
+    # `MSM8974PlatformExpert.o`'s 0x18 - so the platform expert's `gMetaClass` moves 0x801FC664 ->
+    # 0x801FC664 + 0x18 = 0x801FC67C and the 4-aligned pad in front of `realstubs.o`'s `.bss` goes from
+    # 0x4 to 0x2C (`align64(0x801FC694)`), which is `new_pad = (old_pad - object_size) mod 64` read in
+    # the other direction. `realstubs.o`'s 0x2744 ends at 0x801FEE04, `ALIGN(0x8)` + 0x10 for
+    # `__entry_reset_handler_data` gives `__bss_end` = **0x801FEE18**, and `.bss` is 0x39158 - the
+    # object's 0x18 plus the 0x28 the pad gives up, which is where 0x40 comes from.
+    #
+    # **The five derived numbers do not move**: `args` is `align_up(0x1FEE18, 0x1000) + 0x1000` = 0x80200000
+    # (still the same bucket as 0x1FEDD8), `topOfKernelData` 0x80400000, the tree 0x80600000, the window
+    # 0x80800000, and only `headroom` changes - by exactly the 0x40 `.bss` grew.
+    #
+    # ### Measured, from the build
+    #
+    #     == pass 1: which symbols do XNU's own objects need? ==
+    #       775 symbol(s) undefined
+    #       stubs: 673 function(s), 102 storage
+    #
+    # **All three counts exact**, and every `.text` placement exact - including the one row 373 missed,
+    # which was derived here rather than located:
+    #
+    # | | 373 measured | 374 predicted | 374 measured |
+    # |---|---|---|---|
+    # | counts | 777 / 675 / 102 | 775 / 673 / 102 | **775 / 673 / 102** |
+    # | object `.text` | - | 0x8017F1C0 (0x318, no fill) | **0x8017F1C0 (0x318)** |
+    # | its `MetaClassD0Ev` input | - | 0x8017F4D8 (0x4) | **0x8017F4D8 (0x4)** |
+    # | platform expert `.text` | 0x8017F1C0 (0x150) | 0x8017F4DC (0x150) | **0x8017F4DC (0x150)** |
+    # | `realstubs.o` `.text` | 0x8017F36C (0x3F48) | 0x8017F688 (0x3F18 = 673 x 0x18) | **0x8017F688 (0x3F18)** |
+    # | its end | 0x801832B4 | 0x801835A0 | **0x801835A0** |
+    # | `.text` run end (= `.rodata` run start) | 0x80183560 | 0x8018364C | **0x8018364C** |
+    # | object `.rodata` | - | 0x801A5174 (0xB4) | **0x801A5170 (0xB4)** |
+    # | object `.rodata.str1.1` | - | 0x801A5228 (0x14) | **0x801A5224 (0x14)** |
+    # | platform expert `.rodata` | 0x801A4E88 (0x440) | - | **0x801A5238 (0x440)** |
+    # | `realstubs.o` `.rodata.str1.4` | 0x801A542C (0x3A28) | 0x801A57E0 (0x39B8) | **0x801A57DC (0x39B8)** |
+    # | its end | 0x801A8E54 | 0x801A9198 | **0x801A9194** |
+    # | `.text` end | 0x801A9820 | 0x801A9B60 | **0x801A9B60** |
+    # | text size | 1742880 | 1743712 | **1743712 (= 0x1A9B60)** |
+    # | `.data` | 0x801AC000 (0x19AB0) | unmoved | **0x801AC000 (0x19AB0)** |
+    # | `.sysctl_set` | 0x801C5AB0 (0x150) | unmoved | **0x801C5AB0 (0x150)** |
+    # | `.init_array` | 0x801C5C00 (0x84) | 0x801C5C00 (0x88) | **0x801C5C00 (0x88)** |
+    # | its end | 0x801C5C84 | 0x801C5C88 | **0x801C5C88** |
+    # | `.bss` | 0x801C5CC0 (0x39118) | 0x801C5CC0 (0x39158) | **0x801C5CC0 (0x39158)** |
+    # | object `.bss` | - | 0x801FC664 (0x18) | **0x801FC664 (0x18)** |
+    # | `realstubs.o` `.bss` | 0x801FC680 (0x2744) | 0x801FC6C0 (0x2744) | **0x801FC6C0 (0x2744)** |
+    # | `__bss_end` | 0x801FEDD8 | 0x801FEE18 | **0x801FEE18** |
+    # | image | 1858692 | 1858696 (= 0x1C5C88) | **1858696** |
+    # | headroom | 2101800 | 2101736 (= 0x2011E8) | **2101736** |
+    # | args / topOfKernelData / tree / window | +2097152 / +4194304 / +6291456 / 8388608 | all unmoved | **all unmoved** |
+    #
+    # **One miss, of 0x4, and it is the boundary fill for the fifth time.** The object's `.rodata` is at
+    # 0x801A5170, not 0x801A5174: the `.text` run and the `.rodata` run do not meet exactly, and what the
+    # join absorbs is 0x4 on this step. The measured fill is not a property of this step - 368 read 0x4,
+    # 371 0x0, 372 0x4, 373 0x0, **374 0x4** - and everything below it moved with it exactly: the
+    # platform expert's `.rodata` to 0x801A5238, `realstubs.o`'s row to 0x801A57DC, both 0x4 low against
+    # the block's numbers and all three internally consistent (0x801A5170 + 0xB4 = 0x801A5224,
+    # 0x801A5224 + 0x14 + 0x440 + 0x16 + fill 0x2 + 0x14C = 0x801A57DC). **The `.text` end is unmoved by
+    # it**, which is the part worth keeping: the raw end goes 0x801A9194 + 0x4 + fill 0x4 + 0x64C + 0x251
+    # + 0x3 + 0x108 + 0x8 = 0x801A9B4C, and `ALIGN(0x20)` closes it at **0x801A9B60** - the same
+    # 32-byte line the block predicted from a raw end 0x4 higher. **A 4-byte boundary term that shifts a
+    # whole run can still leave a section end exact, because the section end is an `ALIGN`, and the
+    # `ALIGN` erases any shift smaller than its own granularity minus the fill.**
+    #
+    # **The `.bss` pad rule came out exact, and it is the first step since 364 that reads it.** The
+    # object's 0x18 lands at 0x801FC664 - immediately before the platform expert's `gMetaClass`, which
+    # moves 0x801FC664 -> 0x801FC67C - and the 4-aligned slot in front of `realstubs.o`'s `.bss` goes
+    # 0x4 -> 0x2C, so `realstubs.o`'s row moves 0x801FC680 -> 0x801FC6C0 with its size unmoved and
+    # `__bss_end` follows at 0x801FEE18. That is the `new_pad = (old_pad - object_size) mod 64` rule
+    # read *forward* for the first time; 367 read it backward as a retiree.
+    #
+    # **And route 2 in this block's own text was wrong, and route 1 was right** - the block said so
+    # before the build and is allowed to say it after: the delta route's `0x340 - 0x4` is a raw-end
+    # number and the raw end is not what `size` reports. **Tell, and it is 372's tell moved down one
+    # row: when a prediction has two routes and they disagree, the one that predicts the quantity the
+    # tool will print is the prediction, and the other one is arithmetic to be recorded rather than
+    # defended.** Here the position route predicted 0x801A9B60, the delta route 0x801A9B5C, and the map
+    # says 0x801A9B60.
+    #
+    # ### Measured, from the run
+    #
+    #     xnu_entry_checks=0x00000005              xnu_entry_failures=0x00000000
+    #     xnu_entry_stub_caller_v=0x8017302c       xnu_entry_abort_entries=0x00000000
+    #     xnu_entry_stub_caller_digits=0x00000043
+    #     xnu_entry_stub_caller_w0=0x37313038 ("8017")   w1=0x63323033 ("302c")
+    #     xnu_entry_abort_first_dfar=0x00000000    xnu_entry_abort_first_pc=0x00000000
+    #     xnu_entry_image_bytes=0x001c5c88         xnu_entry_bss_start=0x801c5cc0
+    #     xnu_entry_bss_end=0x801fee18             xnu_entry_args_pa=0x80200000
+    #     xnu_entry_top_of_kernel_data=0x80400000  xnu_entry_why_byte=0x00000061
+    #     MI4IOS6_STAGE90_XNU real XNU entry stub_hit=_ZN9IOCommandC2EPK11OSMetaClass
+    #     No errors detected
+    #
+    # **The frame is exactly the one this block derived, and the call inside it is not.** The stop is
+    # `_ZN9IOCommandC2EPK11OSMetaClass` - `IOCommand`'s own constructor - at caller key **0x8017302C**,
+    # which is `IOPMRequest::IOPMRequest(OSMetaClass const *)`+0x90 (0x80172F9C + 0x90), i.e. the base
+    # constructor call inside `IOPMRequest`'s constructor, which is itself what
+    # `IOPMRequest::MetaClass::alloc()` runs. **The whole path above it happened exactly as written**:
+    # the queue was built (both its `blx` found a real vtable this time), `IOWorkLoop::addEventSource`
+    # ran - so the command gate's `closeGate`/`onThread`/`sleepGate` sequence and the PM work loop
+    # thread's `_maintRequest` both completed - the new `IORootParent` was constructed, `init`ed,
+    # `attach`ed and `start`ed, `PMinit()` ran, and `registerPowerDriver` reached
+    # `IOService::acquirePMRequest` with all three of its data conditions satisfied, and then
+    # `IOPMRequest::create()` - inlined - got as far as **`blex` `gMetaClass.alloc()`**. So the block's
+    # *ordering* argument was right and its *last hop* was one call early.
+    #
+    # **The miss, and it is a distinct kind: a real callee is not a call that cannot stop.** The block
+    # resolved the `blx` at `acquirePMRequest+0x20` to `IOPMRequest::MetaClass::alloc` and wrote "real",
+    # which is true of the *symbol* - and then predicted the next thing in the caller's own
+    # disassembly, `bl IOCommand::init`. But `alloc` is not a leaf: it is
+    #
+    #     8017300C  push {r4, lr}
+    #     80173010+ bl OSObject::nw(0x38)                 real
+    #     80173028  bl IOCommand::IOCommand(OSMetaClass const *)   <- THE STOP, key 0x8017302C
+    #
+    # and the constructor it calls is a stub, because `iokit_Kernel_IOCommand.o` is not in the link.
+    # **The check that would have caught it is one command**, and the tool answers it with the measured
+    # key to the byte:
+    #
+    #     $ tools/first_stub_call.py _ZNK11IOPMRequest9MetaClass5allocEv --image out/stage90/xnu_arm_entry.elf
+    #     _ZNK11IOPMRequest9MetaClass5allocEv: 16 instructions, 0x8017300C..0x80173048
+    #     3 direct calls
+    #       +0x8     _ZN8OSObjectnwEm                      real
+    #     first stub call: +0x1C  _ZN9IOCommandC2EPK11OSMetaClass
+    #       the run should stop with stub_hit=_ZN9IOCommandC2EPK11OSMetaClass and the caller key at +0x20
+    #
+    # `0x8017300C + 0x20 = 0x8017302C`. The block ran this tool on nine functions on the path and not on
+    # this one, because it had already decided what this one was. **Tell: for every call the block
+    # describes - direct or indirect - the question is not "is the target real?" but "does the target's
+    # own straight line reach a stub?", and that question has a one-command answer that must be run for
+    # each target, including the ones that look like leaves.** The 365-era "kind 9" framing ("a stub
+    # hiding behind a vtable slot") is the same fact from the other side: a *real* slot is not a
+    # guarantee either, and this run is the first time the walk has stopped inside a constructor chain
+    # reached through a vtable.
+    #
+    # The falsifiers, checked one by one. **(a)** no `_ZN17IOPowerConnectionC1Ev` at 0x8016622C - the
+    # named alternative did not fire, which is the reading that says `registerPowerDriver` passed all
+    # three of its checks (`initialized`, two power states, `version 1 <= 2`) and reached
+    # `acquirePMRequest`, one call earlier as predicted. **(b)** no
+    # `_ZN19IOPMPowerStateQueue16submitPowerEventEjPvy` at `0x80157928`, so the object took and the walk
+    # never reached `registerInterest`. **(c)** no stop at any `blx` on the resumed path - so
+    # `IOWorkLoop::addEventSource`, `IOCommandGate::runAction` and `IOWorkLoop::_maintRequest` all ran to
+    # completion, which is the reading that certifies this step's real contribution: before it, the
+    # queue's vtable was a storage stand-in of zeros and any `blx` through it was a jump to 0. **(d) the
+    # scan's set is exact and its conclusion is not** - `_ZTV11IOPMRequest+0x38` (0x8018323C =
+    # `IOCommand::init`) and eight `_ZTV24IOCPUInterruptController` slots really are the only *function
+    # pointers* into the stub region; the error was inferring from that "no vtable on this path matters",
+    # when the stop did not need a function pointer at all: `_ZTV11IOPMRequest`'s **slot 0x30** is the
+    # constructor, and it is reached by the native `MetaClass::alloc()` straight line, not by a `blx`
+    # through the table. The scan answered the question it asked, and the question was the wrong one.
+    # **(e)** `abort_entries=0` with `abort_first_pc=0` and `abort_first_dfar=0` and no `panic` line - so
+    # the resumed `start` did not fault on `gIOPMWorkLoop` (the one thing the block could only argue from
+    # the source), `checks=5` / `failures=0`, and the log ends in the kernel's own `No errors detected`.
+    #
+    # **And the stop prediction, which is neither a falsifier nor a layout row: it named the right frame
+    # and one call too late.** The block predicted `_ZN9IOCommand4initEv` at key `0x801658D4`; the run
+    # reported `_ZN9IOCommandC2EPK11OSMetaClass` at key `0x8017302C` - the *constructor*, one `bl` before
+    # the `init` the block was looking at. Both names belong to the same object and both are retired by
+    # the same next step, so nothing derived here moved; but the block's own falsifier (d) is where the
+    # error was available to be caught, and the paragraph above says how.
+    #
+    # **What the machine did that no previous step had done**: it built an `IOWorkLoop` event source,
+    # entered `IOCommandGate::runAction` and took its `not on the work loop thread` branch - the boot
+    # thread called `IOWorkLoop::sleepGate` and the PM work loop thread ran
+    # `IOWorkLoop::_maintRequest` over the new queue's vtable. The walk came back from a *thread switch*
+    # for the first time: `IOPMrootDomain::start` resumed at +0x784 after 373's stop at +0x780, and
+    # reached `+0x838` (the `acquirePMRequest` frame) before the frontier moved.
+    #
+    # ### The falsifiers, named before the run
+    #
+    # **(a) `_ZN17IOPowerConnectionC1Ev` at key `0x8016622C`** - `IOService::addPowerChild(this)` is the
+    # *next* call after `patriarch->start` returns (0x8014E76C), and its `+0x204` is
+    # `bl IOPowerConnection::IOPowerConnection()` at 0x80166228, reached as soon as
+    # `child->getParentIterator(gIOPowerPlane)` yields nothing (the root domain has no power-plane parent
+    # yet). **This block predicts it does not fire**, because the patriarch's `registerPowerDriver` runs
+    # inside `patriarch->start` - one call earlier - and reaches `acquirePMRequest`; but it is the
+    # alternative reading, not an unnamed one, and if the run reports it the reason will be one of the
+    # three conditions above being false.
+    # **(b) `_ZN19IOPMPowerStateQueue16submitPowerEventEjPvy` at key `0x80157928`** -
+    # `IOPMrootDomain::registerInterest+0x15C`, which is *after* `addPowerChild` in the source. It is
+    # also retired by this step, so a stop on it would mean the link did not take the object.
+    # **(c) no stop at any `blx` on the resumed path** - `addEventSource`, `IOCommandGate::runCommand`,
+    # `runAction`, `_maintRequest`, `IOService::init`, `IOService::attach`, `IORootParent::start`. Each
+    # resolves to a real definition, and the object's own vtable is real as of this step.
+    # **(d) `_ZTV11IOPMRequest+0x38` and eight slots of `_ZTV24IOCPUInterruptController` are the only
+    # function pointers into the stub region in this image** (a whole-ELF scan for words inside
+    # `[realstubs .text start, +0x3F48)`): no vtable on this path - `IOWorkLoop`, `IOCommandGate`,
+    # `IOEventSource`, `IOService`, `IORootParent`, `IOPMrootDomain`, `IOServicePM`, `IOPMPowerStateQueue`
+    # - carries one. `IOPMRequest`'s stub slot is `IOCommand::init` itself, which is the name this step
+    # stops on, so 375 will have to retire it too.
+    # **(e) no `panic`, and `abort_entries=0`** - the resumed `start` dereferences `gIOPMWorkLoop`
+    # (`ldr r0,[r5]; ldr r2,[r0]` at `+0x78C`); a zero there would report as `abort_first_dfar=0` with
+    # `abort_first_pc=0x8014E6D8`. `PMinit` set it before 373's stop, so it is not zero - but that is
+    # the one thing in this block that has never been *read*, only argued from the source.
+    #
+    # ### The next object, named before its run
+    #
+    # The frontier is `IOCommand::init`, defined by **`iokit_Kernel_IOCommand.o`** - the only object in
+    # the 695-object pool that defines it, and the only one that defines `IOCommand::IOCommand(OSMetaClass
+    # const *)` and `~IOCommand()` either. Measured against this image: 20 definitions, 30 references
+    # (all satisfied), **5 resolved (3 function, 2 storage) / 0 added** - and in 374's image the counts
+    # are **775 -> 770 undefined, 673 -> 670 function, 102 -> 100 storage**, the walk's first step in a
+    # long time that retires *storage*: `IOCommand::gMetaClass` (0x18) and `IOCommand::metaClass` (0x4)
+    # are stand-ins, so `.bss` shrinks by 0x18 with the object's own 0x18 arriving, and `.rodata` gains
+    # its `metaClass`/`superClass` pair. `IOCommand::init` is also `_ZTV11IOPMRequest`'s slot 0x30, so
+    # 375 is the step that makes `IOPMRequest`'s vtable fully real - after which the PM request machinery
+    # `registerPowerDriver` was reaching for can actually be built.
     OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ=${STAGE90_ENTRY_YARROWCORELIB_PRNG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_src_prng.o}
     LIBKERN_UUID_UUID_OBJ=${STAGE90_ENTRY_LIBKERN_UUID_UUID_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_uuid_uuid.o}
     IOKIT_KERNEL_IOMAPPER_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOMAPPER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOMapper.o}
@@ -21434,6 +21815,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_PRNG_FIPS_SHA1_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -21446,7 +21828,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
