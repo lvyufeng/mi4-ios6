@@ -1603,6 +1603,79 @@ entry_image_ptr(uintptr_t p)
     return (p >= (uintptr_t)__entry_text_start) && (p < (uintptr_t)__entry_image_end);
 }
 
+/*
+ * ------------------------------------------------------------------ the second guard, and the
+ * address the first one is wrong about
+ *
+ * `entry_image_ptr` above answers "is this inside the image". It is the right question for a string
+ * or a table *this image* owns, and it was the right question for the panic's arguments too - while
+ * they were inside the image. **They are not any more, and the way it stopped being right is a
+ * number nobody would look at twice.**
+ *
+ * `panic()` keeps its `va_list` in its own frame, so `r8` - the trapping context's `r8`, which
+ * `DebuggerSaveState` preserves - is a pointer into the stack `panic` is running on. Experiment 239
+ * measured that stack at `0x0029be88` with the image linked at 0x00200000: inside
+ * `[__entry_text_start, __entry_image_end)`, so the guard passed and the whole chain was read -
+ * `ap = 0x0029be94`, `element = 0x40401f20`, `zonename = 0x0028b1b6`, all three in experiment 240's
+ * log. Experiment 241 moved the base to 0x80000000, and `arm_vm_init.c:505` derives
+ * `virtual_space_start = (gVirtBase + MEM_SIZE_MAX + 0x3FFFFF) & 0xFFC00000`, so the kernel's map
+ * moved from 0x40400000 to **0xC0000000** and the bootstrap thread's stack moved with it. Two runs
+ * since have read `r_args` at `0xc80abeb0` (362) and `0xc2113d80` (440) - outside the image, so the
+ * guard said no, `ap` stayed 0, and `xnu_entry_panic_element` and `xnu_entry_panic_zonename` were
+ * printed as `0x00000000`.
+ *
+ * **Zero is what makes this a measurement defect and not a missing reading.** A panic that names no
+ * arguments and an instrument that refused to look at them produce the same two keys, so two
+ * experiments recorded the zeros as a property of the panic - one of them writing, in its own doc,
+ * that the `va_list` read "is refused by the image guard", which is true and reads like the guard
+ * working.
+ *
+ * The guard's *purpose* is worth keeping: a wild pointer dereferenced inside the fault handler
+ * faults again, and a data abort inside `fleh_undef` costs the whole report. What replaces it is
+ * narrower and does not need to know where the image or the kernel map is, because the address is
+ * not a guess: `r_args` is `panic`'s live frame address and the CPU is executing on that stack, so
+ * the page holding it is mapped. The three words that follow it are `panic`'s own frame - the
+ * `va_list` at `sp+16`, its `__ap` at `sp+28`, the first two spilled varargs at `sp+32` and `sp+36`
+ * (experiment 239's arithmetic: `ap - r_args = 12`) - so the whole chain is 20 bytes wide and sits
+ * behind `r_args`.
+ *
+ * The rule is therefore: **read only inside `[r_args, r_args + 32)` and only if that window lies in
+ * one page.** The window's own size is what says the reads cannot walk off into a page the stack
+ * does not own; the single-page test is what says the one page they do use is the one the CPU is
+ * running on. Both are derived - 32 from the frame layout, 4096 from the page size - and neither is
+ * a base or an image size that a later experiment can move.
+ *
+ * The refusal is still *visible*, which is the part the old guard got wrong: `xnu_entry_panic_args_page`
+ * is the page base this window was accepted on, and zero there means the reads below did not
+ * happen. A reader who sees `element = 0` next to `args_page = 0` is looking at a refused read; next
+ * to a non-zero page, at a panic that really did pass a zero.
+ *
+ * `xnu_entry_panic_ap_delta` is the control, and it is the reason this can be believed rather than
+ * hoped for: the frame layout is a compiler decision and no promise makes it 12. Reporting
+ * `ap - r_args` means a layout that moved shows up as the number it moved by, next to the two
+ * arguments whose meaning depends on it.
+ */
+#define ENTRY_PANIC_ARG_BYTES 32u
+
+static int
+entry_panic_args_page(uintptr_t args)
+{
+    if ((args & 0x3u) != 0u) {
+        return 0;
+    }
+    /* One page, both ends: the window may not straddle a boundary. */
+    return (args & ~(uintptr_t)0xFFFu) == ((args + (ENTRY_PANIC_ARG_BYTES - 1u)) & ~(uintptr_t)0xFFFu);
+}
+
+static int
+entry_panic_arg_word(uintptr_t args, uintptr_t p, uint32_t n)
+{
+    if (p < args || ((p - args) + (uintptr_t)n) > (uintptr_t)ENTRY_PANIC_ARG_BYTES) {
+        return 0;
+    }
+    return 1;
+}
+
 void fleh_undef(void)
 {
     uintptr_t frame;
@@ -1610,6 +1683,7 @@ void fleh_undef(void)
     uint32_t r_fmt, r_args, r_sl;
     uint32_t ap, element, zone_name;
     uint32_t i;
+    int args_ok;
 
     __asm__ volatile ("mov %0, sp" : "=r"(frame));
 
@@ -1728,25 +1802,46 @@ void fleh_undef(void)
      * `r_args`, which is exactly where `panic`'s frame puts `__ap` (the list at `sp+16`, the three
      * spilled varargs at `sp+28`). So the first vararg is at `ap` and the second four bytes later:
      *
-     *   element   = *ap        expected in [0x40400000, 0x40401000)
-     *   zone_name = *(ap + 4)  expected to be a pointer to the literal "maps"
+     *   arg0 = *ap        for the panic that found this, `prop`  - a `DeviceTreeNodeProperty *`
+     *   arg1 = *(ap + 4)  the second one, `prop->length`
      *
      * **The element is reported and never dereferenced**, which is why `entry_image_ptr` is not
      * widened for it: `0x40400000` is outside the image and may be unmapped, and a data abort
      * inside the abort handler says nothing at all. `ap` and `zone_name` are both expected inside
      * the image, so the guard that is already here covers every read that happens.
+     *
+     * **That paragraph was written for `free_to_zone`, and it is the second thing 441 corrects.**
+     * The two keys below are named for the panic that first used them - a zone element and a zone
+     * name - and for any other panic they hold whatever its first two arguments are. For the one
+     * that stopped experiment 440 they are `prop` and `prop->length`, so **the answer was in the
+     * log all along, under two names that said it was about zones.** `xnu_entry_panic_arg0` and
+     * `xnu_entry_panic_arg1` are therefore logged first and under the generic names, and the two
+     * old keys are kept after them, with the values they always had, because three experiments
+     * quoted the pair and renaming a key is a discontinuity a reader has to be told about.
+     *
+     * The reads are gated by `entry_panic_*` rather than `entry_image_ptr`; see the guard's comment
+     * above for why the image bound is the wrong question for the stack these live on, and for what
+     * `xnu_entry_panic_args_page` means when it is zero.
      */
     ap = 0u;
     element = 0u;
     zone_name = 0u;
-    if (entry_image_ptr((uintptr_t)r_args)) {
+    args_ok = entry_panic_args_page((uintptr_t)r_args);
+    entry_kv("xnu_entry_panic_args_page",
+             args_ok ? (uint32_t)((uintptr_t)r_args & ~(uintptr_t)0xFFFu) : 0u);
+    if (entry_image_ptr((uintptr_t)r_args) ||
+        (args_ok && entry_panic_arg_word((uintptr_t)r_args, (uintptr_t)r_args, 4u))) {
         ap = entry_word_at((uintptr_t)r_args);
     }
     entry_kv("xnu_entry_panic_ap", ap);
-    if (entry_image_ptr((uintptr_t)ap)) {
+    entry_kv("xnu_entry_panic_ap_delta",
+             (ap >= r_args) ? (ap - r_args) : 0u);
+    if (args_ok && entry_panic_arg_word((uintptr_t)r_args, (uintptr_t)ap, 8u)) {
         element = entry_word_at((uintptr_t)ap);
         zone_name = entry_word_at((uintptr_t)ap + 4u);
     }
+    entry_kv("xnu_entry_panic_arg0", element);
+    entry_kv("xnu_entry_panic_arg1", zone_name);
     entry_kv("xnu_entry_panic_element", element);
     entry_kv("xnu_entry_panic_zonename", zone_name);
     if (entry_image_ptr((uintptr_t)zone_name)) {
