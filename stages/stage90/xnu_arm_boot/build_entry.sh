@@ -13480,6 +13480,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #
     OSFMK_PRNG_PRNG_YARROW_OBJ=${STAGE90_ENTRY_PRNG_YARROW_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_prng_yarrow.o}
     OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ=${STAGE90_ENTRY_YARROWCORELIB_SMF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_port_smf.o}
+    OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ=${STAGE90_ENTRY_YARROWCORELIB_SHA1MOD_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_src_sha1mod.o}
     # =============================================================================================
     # **369: `YarrowCoreLib/port/smf.c` - the step that moves `.data` for the first time in five, and
     # whose stop is three frames away from anything it touches.**
@@ -13684,6 +13685,271 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # retires it - so 370 reverts to the ordinary shape: predict the frontier by disassembling
     # `YSHA1Init` and taking its first non-real call, which is a name 370's own `added` column will
     # contain if the SHA-1 code bottoms out in the FIPS layer rather than in the kernel.
+    #
+    # =============================================================================================
+    # **370: `YarrowCoreLib/src/sha1mod.c` - the SHA-1 the FIPS layer has been waiting for, and the
+    # step that pushes `.data` off its bucket.**
+    #
+    # 369's stop was `YSHA1Init`, called from `prngInitialize` at key `0x8017BEF4`. The object is
+    # `osfmk/prng/YarrowCoreLib/src/sha1mod.c` -> `osfmk_prng_YarrowCoreLib_src_sha1mod.o`, and the
+    # effect tool against the 369 image is
+    #
+    #     resolved (3: 3 function, 0 storage)
+    #         YSHA1Final   YSHA1Init   YSHA1Update
+    #     added (0: 0 function, 0 storage)
+    #     of the 2 references, 2 are already satisfied
+    #
+    # so **786 -> 783 undefined, 684 -> 681 function, 102 -> 102 storage** - three retired, nothing
+    # created, and the references are `memcpy` and `memset`, both real. **This is the first object in
+    # the walk whose entire closure is already satisfied**: once it is linked, every call it makes is
+    # real, so nothing inside it can stop the run.
+    #
+    # It is also the largest single step of the last twenty: `.text` **0x14AC** (5292 bytes) for four
+    # definitions - `YSHA1Transform` 0x12A4, `YSHA1Init` 0x40, `YSHA1Update` 0xAC, `YSHA1Final` 0x110 -
+    # plus a `.bss` of **0x40** (`YSHA1Transform.workspace`, **2** align 16) and a 2-byte `.rodata`
+    # with a 2-byte `.rodata.str1.1` (the two `.L.str` blocks).
+    #
+    # `YSHA1Init` is the one worth reading, because the run enters it and it is where the NEON argument
+    # from 369 gets tested a second time:
+    #
+    #     12b0: add r2, pc, #40
+    #     12b8: vld1.64 {d16-d17}, [r2 :128]   <- a 128-BIT ALIGNED load of the SHA-1 IV
+    #     12c8: vst1.32 {d16-d17}, [r0]!
+    #     12d4: bx lr                          <- no call at all
+    #     12e0: .word 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476
+    #
+    # A `VLD1.64` with the `:128` alignment specifier faults if its address is not 16-byte aligned - so
+    # whether this step runs at all depends on where the *constant* lands, which is
+    # `object .text + 0x12E0`. That is a placement question with a real failure mode, and it is the
+    # reason the alignment row below is not bookkeeping.
+    #
+    # ### Prediction: the stop
+    #
+    # **`stub_hit=comp_init`, at key `xnu_entry_stub_caller_v=0x8017BF7C`.** All three `YSHA1*` names
+    # retire at once and this object creates nothing, so the run walks straight through the SHA-1 code
+    # and stops at the next stub on `prngInitialize`'s path - eight calls further on. In address order,
+    # with the keys inside `prngInitialize` (**identical to 369's, because `prng.o` sits before the
+    # object being inserted and does not move**):
+    #
+    #     +0x58 bl YSHA1Init    key 0x8017BEF4    now REAL (369's stop, passed through)
+    #     +0x64 bl YSHA1Init    key 0x8017BF00    real
+    #     +0x74 bl YSHA1Update  key 0x8017BF10    real
+    #     +0x88 bl YSHA1Update  key 0x8017BF24    real
+    #     +0x94 bl YSHA1Final   key 0x8017BF30    real
+    #     +0xa8 bl memcpy       -                 real
+    #     +0xb4 bl YSHA1Init    key 0x8017BF50    real
+    #     +0xc4 bl YSHA1Update  key 0x8017BF60    real
+    #     +0xd0 bl YSHA1Final   key 0x8017BF6C    real
+    #     +0xe0 bl comp_init    key 0x8017BF7C   <- THE STOP (YarrowCoreLib/src/comp.c)
+    #
+    # The falsifiers, in the order the run will read them: (a) `YSHA1Update` at `0x8017BF10` - which is
+    # what stops the run if the object does not take, and it is in this step's own `resolved` column;
+    # (b) `YSHA1Final` at `0x8017BF30`; (c) a **fault** (`abort_entries != 0`) inside `YSHA1Transform` -
+    # 0x12A4 bytes of real code over the 0xAC-byte context and the 0x40-byte workspace, all of which are
+    # allocated by now; (d) a fault at the `VLD1.64 [r2 :128]` in `YSHA1Init`, which is the alignment
+    # row below; (e) `mmInit` at `0x8017BEA8` or `YSHA1Init` at `0x8017BEF4` again, which would mean the
+    # object was not linked.
+    #
+    # ### Prediction: the layout, and the alignment defect the tool has
+    #
+    # **The object's `.text` is 16-byte aligned in the object file (`2**4`), and every object this walk
+    # has linked so far has been 4-byte aligned (`2**2`).** That makes this step the first where the
+    # incoming input's own alignment adds a fill, and it exposed a defect in `predict_layout.py`:
+    #
+    #     python3 tools/predict_layout.py --insert out/.../sha1mod.o:out/.../smf.o
+    #       -> 0x8017c694      WRONG - the object is 16-aligned, and 0x8017C694 is 4 mod 16
+    #     python3 tools/predict_layout.py --insert $PWD/out/.../sha1mod.o:$PWD/out/.../smf.o
+    #       -> 0x8017c6a0      right
+    #
+    # `section_align()` starts `if not path.startswith("/"): return 4` - a **relative** path is not
+    # "not found", it is "not a path I recognise", and the tool answers 4 without saying so. Every
+    # earlier invocation in this walk passed relative paths and every earlier object was 4-aligned, so
+    # the default was right by coincidence for twenty steps **(tell: a default that is correct for the
+    # whole population it has been used on is indistinguishable from a reading)**. With the object
+    # 16-aligned the placement is `align_up(0x8017C694, 16) = **0x8017C6A0**`, i.e. 0xC of fill.
+    #
+    # With that corrected, the `.text` run's delta is `+0x14AC` (the object) `+ 0xC` (its alignment
+    # fill) `- 0x48` (three fewer stub bodies: `681 x 0x18 = 0x3FD8` against `684 x 0x18 = 0x4020`) =
+    # **+0x1470**, and the `.rodata` run's is `-0x24` (the three retired names, 0xC each) `+0x4` (the
+    # object's own `.rodata` and `.rodata.str1.1`, 2 bytes each, both alignment 1 so no fill) =
+    # **-0x20**. So the output section grows `0x1450` from `0x801A6E40` to `0x801A8290`, which
+    # `ALIGN(32)` closes at **0x801A82A0**.
+    #
+    # **And that is past `.data`.** `.data` starts at `align_up(text_end, 0x4000)`, so 0x801A82A0 does
+    # not fit under 0x801A8000 and the section moves a whole `ALIGN(0x4000)` to **0x801AC000**. This is
+    # the *second* `.data` move in this walk (364 was the first) and the argument is not a margin this
+    # time, it is an overflow: `0x801A82A0 > 0x801A8000` by `0x2A0`. Everything below moves +0x4000.
+    #
+    # | | 369 measured | 370 predicted |
+    # |---|---|---|
+    # | counts | 786 / 684 / 102 | **783 / 681 / 102** |
+    # | object `.text` | - | **0x8017C6A0** (0x14AC, 16-aligned, 0xC fill before it) |
+    # | `realstubs.o` `.text` | 0x8017C840 (0x4020) | **0x8017DCF8 (0x3FD8 = 681 x 0x18)** |
+    # | platform expert `.text` | 0x8017C694 | **0x8017DB4C (0x150)** |
+    # | object `.bss` | - | **0x801F85E4 (0x40)** |
+    # | `realstubs.o` `.rodata.str1.4` | 0x801A29D0 (0x3AA0) | **0x801A3E38 (0x3A7C)** |
+    # | `.text` end | 0x801A6E40 | **0x801A82A0**, band 0x801A8280..0x801A82C0 |
+    # | text size | 1732160 | **1737376** |
+    # | `.data` | 0x801A8000 (0x19A70) | **0x801AC000 (0x19A70)** - a whole 0x4000 |
+    # | `.sysctl_set` | 0x801C1A70 (0x150) | **0x801C5A70** (0x150) |
+    # | `.init_array` | 0x801C1BC0 (0x84) | **0x801C5BC0 (0x84)** ending **0x801C5C44** |
+    # | `.bss` | 0x801C1C80 (0x390D8) | **0x801C5C80 (0x39118 = +0x40)** |
+    # | `__bss_end` | 0x801FAD58 | **0x801FED98** |
+    # | image | 1842244 | **1860676** |
+    # | args | +2080768 | **+2097152** (`align_up(0x1FED98, 0x1000) + 0x1000`) |
+    # | topOfKernelData | +3145728 | **+4194304** (`align_up(0x200000+0x1000+0x100000, 0x100000)`) |
+    # | tree | +5242880 | **+6291456** |
+    # | window | 8388608 | **8388608** - `0x620000` rounds to the same 8 MB |
+    # | headroom | 1069736 | **4199016** |
+    #
+    # The `.bss` row is the ordinary pad-rule case this time: the object's 0x40 goes in front of the
+    # platform expert's 0x18, and the pad in front of `realstubs.o` goes `(0x04 - 0x40) mod 64 = 0x04`
+    # - **unchanged, because 0x40 is a multiple of 64** - so `realstubs.o`'s `.bss` moves by exactly
+    # +0x40 and `__bss_end` with it (fifteenth confirmation, in the form where the pad does *not*
+    # move). The object's own `.bss` lands at 0x801F85E4, which is exactly where the platform expert's
+    # `.bss` is in 369.
+    #
+    # **Two rows the tool cannot derive and this block must**: `image` is `.init_array`'s end minus the
+    # base (the `.bin` ends there), and `args`/`topOfKernelData`/`tree` are the three derived layout
+    # numbers - `align_up(bss_end - base, 0x1000) + 0x1000`, then
+    # `align_up(args + 0x1000 + 0x100000, 0x100000)`, then `+ 0x200000`. `args` moves because
+    # `0x1FED98` crosses a 0x1000 boundary that `0x1FAD58` did not, and `topOfKernelData` then moves a
+    # whole megabyte with it. **Nothing in the image's own addresses depends on those three**, so they
+    # are prediction rows only - but they are the rows the payload's checks read.
+    #
+    # ### Measured, from the build
+    #
+    #     == pass 1: which symbols do XNU's own objects need? ==
+    #       783 symbol(s) undefined
+    #       stubs: 681 function(s), 102 storage
+    #
+    # **All three counts exact, every `.text` placement exact, the `.data` move exact, and all four rows
+    # it derives exact** - and four misses, three of them in this block's own arithmetic rather than in
+    # the model.
+    #
+    # | | 369 measured | 370 predicted | 370 measured |
+    # |---|---|---|---|
+    # | counts | 786 / 684 / 102 | 783 / 681 / 102 | **783 / 681 / 102** |
+    # | object `.text` | - | 0x8017C6A0 (0x14AC) | **0x8017C6A0 (0x14AC)** |
+    # | `realstubs.o` `.text` | 0x8017C840 (0x4020) | 0x8017DCF8 (0x3FD8) | **0x8017DCF8 (0x3FD8)** |
+    # | platform expert `.text` | 0x8017C694 | 0x8017DB4C (0x150) | **0x8017DB4C (0x150)** |
+    # | object `.bss` | - | 0x801F85E4 (0x40) | **0x801FC5E4 (0x40)** |
+    # | `realstubs.o` `.rodata.str1.4` | 0x801A29D0 (0x3AA0) | 0x801A3E38 (0x3A7C) | **0x801A3E44 (0x3A7C)** |
+    # | `.text` end | 0x801A6E40 | 0x801A82A0 | **0x801A8280** |
+    # | text size | 1732160 | 1737376 | **1737344** |
+    # | `.data` | 0x801A8000 (0x19A70) | 0x801AC000 (0x19A70) | **0x801AC000 (0x19A70)** |
+    # | `.sysctl_set` | 0x801C1A70 (0x150) | 0x801C5A70 (0x150) | **0x801C5A70** (0x150) |
+    # | `.init_array` | 0x801C1BC0 (0x84) | 0x801C5BC0 (0x84) | **0x801C5BC0 (0x84)** |
+    # | its end | 0x801C1C44 | 0x801C5C44 | **0x801C5C44** |
+    # | `.bss` | 0x801C1C80 (0x390D8) | 0x801C5C80 (0x39118) | **0x801C5C80 (0x39118)** |
+    # | `__bss_end` | 0x801FAD58 | 0x801FED98 | **0x801FED98** |
+    # | image | 1842244 | 0x1C5C44 | **1858628 (= 0x1C5C44)** |
+    # | args | +2080768 | +2097152 | **+2097152** |
+    # | topOfKernelData | +3145728 | +4194304 | **+4194304** |
+    # | tree | +5242880 | +6291456 | **+6291456** |
+    # | window | 8388608 | 8388608 | **8388608** |
+    # | headroom | 1069736 | 0x201268 | **2101864 (= 0x201268)** |
+    #
+    # **`.data` moved exactly as the overflow said it would** - `0x801AC000`, a whole `ALIGN(0x4000)` -
+    # and the four rows it drags (`0x801C5A70`, `0x801C5BC0`, `0x801C5C80`, `0x801FED98`) all landed, as
+    # did the three derived layout numbers and the window. This is the first `.data` move in this walk
+    # driven by an *overflow* rather than by a margin, and it is the argument 364 and 365 each got wrong
+    # once: this time it was `0x801A82A0 > 0x801A8000` by 0x2A0, which no rounding can absorb.
+    #
+    # **Miss 1: the object's own `.bss` row was left in the pre-move frame.** The block derived the move
+    # and then predicted the object's `.bss` at **0x801F85E4** - which is where the platform expert's
+    # `.bss` was in 369, i.e. the *old* frame. Measured **0x801FC5E4**, exactly +0x4000. The same block
+    # shifted `.bss`'s base and `__bss_end` correctly; it just did not shift this one. **Tell: when a
+    # prediction contains a section move, every row derived before the move has to be re-derived after
+    # it - a row carried across a +0x4000 is a row that was derived in the wrong frame.**
+    #
+    # **Miss 2: the `.rodata` row used two different values for one quantity, inside the one block.**
+    # The block derived the `.text` run's delta as `+0x14AC + 0xC - 0x48 = +0x1470` - and the `0xC` is
+    # the alignment fill this very step introduced - and then wrote the row as
+    # `0x801A29D0 + 0x1464 + 0x4`, i.e. with the fill left out. With the block's own number:
+    #
+    #     0x801A29D0 + 0x1470 + 0x4 = 0x801A3E44        = measured
+    #     0x801A29D0 + 0x1464 + 0x4 = 0x801A3E38        = written, 0xC low
+    #
+    # The *size* was exact (0x3A7C = 0x3AA0 - 0x24), so the row was right in one column and wrong in the
+    # other. **Tell: a quantity the block has derived must be used as derived; re-deriving it inline in
+    # a later row is how the two copies drift.**
+    #
+    # **Miss 3: three `hex <-> decimal` conversions by hand, two of them wrong.** `image` was written
+    # `1860676` where 0x1C5C44 is **1858628**, and `headroom` was written `4199016` where
+    # `0x400000 - 0x1FED98` is **2101864** (0x201268). Both rows' *hex* values were right, and both are
+    # on the two rows that have no hex column here. **Tell: these tables mix bases; state a row in the
+    # base it will be compared in, or compute the conversion rather than doing it in the head.**
+    #
+    # **Miss 4 is the model's, and it is the documented one.** The `.text` end came out **0x20 high**
+    # (0x801A8280 against 0x801A82A0). The `.rodata` run's own delta was **-0x30** rather than the
+    # modeled `-0x24 + 0x4 = -0x20`, the extra 0x10 being fill the run redistributes when two 2-byte
+    # inputs are inserted into it, plus the tail pad differing between the two ends. That is the
+    # `+/-0x10..0x40` caveat on the `.rodata` run this walk has carried since 320, not a new class - and
+    # it is the reason the `band` column exists.
+    #
+    # **And the tool defect this step is the first to expose**: `predict_layout.py`'s `section_align()`
+    # begins `if not path.startswith("/"): return 4`, so with the **relative** path this walk has always
+    # passed, the 16-aligned object was modelled as 4-aligned and placed at 0x8017C694. Re-run with
+    # `$PWD/...` it gives **0x8017C6A0**, which is what the linker did. Twenty steps of relative paths
+    # were correct because every object in them was 4-aligned - a default that is right for its whole
+    # sample is indistinguishable from a reading. The same defect is why the alignment row is in this
+    # block at all: the `VLD1.64 [r2 :128]` in `YSHA1Init` faults if its constant is not 16-byte
+    # aligned, and that constant is at object +0x12E0, i.e. 0x8017D980 - 16-aligned only because the
+    # input's own alignment was honoured. **The build is the measurement that settles it: 0x8017C6A0.**
+    #
+    # ### Measured, from the run
+    #
+    #     xnu_entry_checks=0x00000005              xnu_entry_failures=0x00000000
+    #     xnu_entry_stub_caller_v=0x8017bf7c       xnu_entry_abort_entries=0x00000000
+    #     xnu_entry_stub_caller_digits=0x0000002d
+    #     xnu_entry_stub_caller_w0=0x37313038 ("8017")   w1=0x63376662 ("bf7c")
+    #     xnu_entry_abort_first_dfar=0x00000000    xnu_entry_abort_first_pc=0x00000000
+    #     MI4IOS6_STAGE90_XNU real XNU entry stub_hit=comp_init
+    #     No errors detected
+    #
+    # **Name and key exactly as predicted, and no falsifier fired.** The stop is eight calls past the
+    # one 369 reported, and every one of the eight executed real code: the two `YSHA1Init` calls at
+    # +0x58 and +0x64 (the IV store, including the `VLD1.64 [r2 :128]`), `YSHA1Update` at +0x74 and
+    # +0x88, `YSHA1Final` at +0x94, the real `memcpy` at +0xa8, then `YSHA1Init` at +0xb4,
+    # `YSHA1Update` at +0xc4 and `YSHA1Final` at +0xd0. So **0x12A4 bytes of `YSHA1Transform` - the
+    # actual SHA-1 compression function - ran on this step's path**, twice.
+    #
+    # The falsifiers, checked one by one: **(a)** no `YSHA1Update` at 0x8017BF10 and **(b)** no
+    # `YSHA1Final` at 0x8017BF30 - so the object took and the whole chain is real; **(c)**
+    # `abort_entries=0` with `abort_first_pc=0` and `abort_first_dfar=0` - `YSHA1Transform` did not fault
+    # over the 0xAC-byte context or the 0x40-byte workspace; **(d)** no fault at the aligned NEON load,
+    # which is the row the alignment argument was about: the constant is at 0x8017D980, and it is
+    # 16-aligned only because the input's own 16-byte alignment was honoured - the tool's default would
+    # have placed it 0xC earlier and this falsifier would have fired; **(e)** no `mmInit` at 0x8017BEA8
+    # and no `YSHA1Init` at 0x8017BEF4, so neither of the previous two steps' stops recurred.
+    #
+    # ### The next object, named before its run - and the last one on this path
+    #
+    # The frontier is `comp_init`, whose pool definer is **`osfmk_prng_YarrowCoreLib_src_comp.o`**
+    # (`YarrowCoreLib/src/comp.c`) - the only object in the pool that defines `comp_init`, and the only
+    # one that defines `comp_end` and `comp_get_ratio` either. Measured against this image: 4
+    # definitions, **0 references**, **3 resolved (3 function) / 0 added** - **783 -> 780 undefined,
+    # 681 -> 678 function, 102 -> 102 storage**. `.text` is **0x28** and there is nothing else
+    # allocatable. The four bodies:
+    #
+    #     comp_init       0x8   mov r0, #0 ; bx lr
+    #     comp_add_data   0x8   mov r0, #0 ; bx lr
+    #     comp_get_ratio 0x10   mov r0, #0x3F800000 ; str r0, [r1] ; mov r0, #0 ; bx lr
+    #     comp_end        0x8   (returns zero)
+    #
+    # so `comp_get_ratio` writes **1.0f** through its out-parameter and returns success, and the other
+    # three are no-ops. **An object with no references at all is the shape to notice**: after 371, every
+    # call `prngInitialize` makes is real, and every call `yarrow_init` makes after it - `prngInput`
+    # (+0x314), `prngOutput` (+0x338), `prngForceReseed` (+0x34C), `fips_initialize` (+0x358) - is real
+    # too, because all four came in with `prng.o` at 368 and `prng_yarrow.o` at 367.
+    #
+    # **So 371 completes the yarrow PRNG subtree, and its stop will not be in `osfmk/prng/` at all.**
+    # The return path is `prngInitialize` -> `yarrow_init` -> `ccdrbg_init`'s `blx r6` -> `read_random`
+    # -> `uuid_generate` -> `IOPMrootDomain::start`, which is where 365's stop was at +0x5F0 - so the
+    # walk resumes **eleven steps' worth of frames back, at the instruction after the call it stopped on
+    # at 365**, and 371's block has to work out where that is. That is the honest statement of the next
+    # step's difficulty, and it is written here rather than discovered then.
     #
     OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ=${STAGE90_ENTRY_YARROWCORELIB_PRNG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_src_prng.o}
     LIBKERN_UUID_UUID_OBJ=${STAGE90_ENTRY_LIBKERN_UUID_UUID_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_uuid_uuid.o}
@@ -20462,6 +20728,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_PRNG_PRNG_YARROW_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -20474,7 +20741,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
