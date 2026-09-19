@@ -1792,7 +1792,27 @@ struct entry_dt_replay {
     uint32_t chunk_hash[8];
     uint32_t chunk_bytes;                /* ceil(end / 8), the chunk width both sides use */
     uint32_t map_base;                   /* gVirtBase, as the range check read it */
+    /*
+     * The trace, which is what the counts cannot say. `node_n` counts every node visited and the
+     * three arrays hold the first `ENTRY_DT_TRACE_N` of them with the header words **as read**; the
+     * ring holds the last `ENTRY_DT_TRACE_N` property reads as (header offset, length as read), in
+     * the order they happened.
+     *
+     * The totals bound where the device's walk diverges from the host's; the trace names it. A node
+     * whose recorded `nProperties` is not the host's says the clobber is that node's header; a ring
+     * entry whose offset is not a property header in the host's tree, or whose length is not the
+     * host's length there, says the clobber is that header - and either way the offset is exact.
+     */
+    uint32_t node_n;
+    uint32_t node_off[16];
+    uint32_t node_props[16];
+    uint32_t node_child[16];
+    uint32_t ring_n;
+    uint32_t ring_off[16];
+    uint32_t ring_len[16];
 };
+
+#define ENTRY_DT_TRACE_N 16u
 
 static uint32_t
 entry_dt_fnv(uint32_t h, uint32_t byte)
@@ -1835,6 +1855,12 @@ entry_dt_replay_node(uintptr_t base, uint32_t off, uint32_t depth, struct entry_
     nprops = entry_word_at(base + off);
     nchildren = entry_word_at(base + off + 4u);
     r->nodes++;
+    if (r->node_n < ENTRY_DT_TRACE_N) {
+        r->node_off[r->node_n] = off;
+        r->node_props[r->node_n] = nprops;
+        r->node_child[r->node_n] = nchildren;
+    }
+    r->node_n++;
 
     p = off + 8u;
     for (i = 0u; i < nprops; i++) {
@@ -1857,6 +1883,11 @@ entry_dt_replay_node(uintptr_t base, uint32_t off, uint32_t depth, struct entry_
 
         r->props++;
         length = entry_word_at(base + p + 32u);
+
+        /* Recorded before the check, so the pair that kills the walk is in the ring. */
+        r->ring_off[r->ring_n & (ENTRY_DT_TRACE_N - 1u)] = p;
+        r->ring_len[r->ring_n & (ENTRY_DT_TRACE_N - 1u)] = length;
+        r->ring_n++;
 
         a = base + p;
         t = a + length;
@@ -2185,8 +2216,17 @@ void fleh_undef(void)
     replay.hash = 0u;
     replay.chunk_bytes = 0u;
     replay.map_base = (uint32_t)gVirtBase;
+    replay.node_n = 0u;
+    replay.ring_n = 0u;
     for (c = 0u; c < 8u; c++) {
         replay.chunk_hash[c] = 0u;
+    }
+    for (c = 0u; c < ENTRY_DT_TRACE_N; c++) {
+        replay.node_off[c] = 0u;
+        replay.node_props[c] = 0u;
+        replay.node_child[c] = 0u;
+        replay.ring_off[c] = 0u;
+        replay.ring_len[c] = 0u;
     }
 
     if (entry_kernel_ptr((uintptr_t)root)) {
@@ -2213,6 +2253,75 @@ void fleh_undef(void)
 
         for (c = 0u; c < 8u; c++) {
             entry_kv(ck[c], replay.chunk_hash[c]);
+        }
+    }
+
+    /*
+     * The trace: the first sixteen nodes with their header words as read, and the last sixteen
+     * property reads as (offset, length). Both are compared against the tables `tools/xnu_dt_walk.py
+     * --verbose` prints; the totals above bound where the two walks part and this names it.
+     */
+    entry_kv("xnu_entry_dt_node_count", replay.node_n);
+    {
+        static const char *const no[ENTRY_DT_TRACE_N] = {
+            "xnu_entry_dt_node0_off", "xnu_entry_dt_node1_off", "xnu_entry_dt_node2_off",
+            "xnu_entry_dt_node3_off", "xnu_entry_dt_node4_off", "xnu_entry_dt_node5_off",
+            "xnu_entry_dt_node6_off", "xnu_entry_dt_node7_off", "xnu_entry_dt_node8_off",
+            "xnu_entry_dt_node9_off", "xnu_entry_dt_node10_off", "xnu_entry_dt_node11_off",
+            "xnu_entry_dt_node12_off", "xnu_entry_dt_node13_off", "xnu_entry_dt_node14_off",
+            "xnu_entry_dt_node15_off",
+        };
+        static const char *const np[ENTRY_DT_TRACE_N] = {
+            "xnu_entry_dt_node0_props", "xnu_entry_dt_node1_props", "xnu_entry_dt_node2_props",
+            "xnu_entry_dt_node3_props", "xnu_entry_dt_node4_props", "xnu_entry_dt_node5_props",
+            "xnu_entry_dt_node6_props", "xnu_entry_dt_node7_props", "xnu_entry_dt_node8_props",
+            "xnu_entry_dt_node9_props", "xnu_entry_dt_node10_props", "xnu_entry_dt_node11_props",
+            "xnu_entry_dt_node12_props", "xnu_entry_dt_node13_props", "xnu_entry_dt_node14_props",
+            "xnu_entry_dt_node15_props",
+        };
+        static const char *const nc[ENTRY_DT_TRACE_N] = {
+            "xnu_entry_dt_node0_child", "xnu_entry_dt_node1_child", "xnu_entry_dt_node2_child",
+            "xnu_entry_dt_node3_child", "xnu_entry_dt_node4_child", "xnu_entry_dt_node5_child",
+            "xnu_entry_dt_node6_child", "xnu_entry_dt_node7_child", "xnu_entry_dt_node8_child",
+            "xnu_entry_dt_node9_child", "xnu_entry_dt_node10_child", "xnu_entry_dt_node11_child",
+            "xnu_entry_dt_node12_child", "xnu_entry_dt_node13_child", "xnu_entry_dt_node14_child",
+            "xnu_entry_dt_node15_child",
+        };
+
+        for (c = 0u; c < ENTRY_DT_TRACE_N; c++) {
+            entry_kv(no[c], replay.node_off[c]);
+            entry_kv(np[c], replay.node_props[c]);
+            entry_kv(nc[c], replay.node_child[c]);
+        }
+    }
+    entry_kv("xnu_entry_dt_ring_count", replay.ring_n);
+    {
+        static const char *const ro[ENTRY_DT_TRACE_N] = {
+            "xnu_entry_dt_ring0_off", "xnu_entry_dt_ring1_off", "xnu_entry_dt_ring2_off",
+            "xnu_entry_dt_ring3_off", "xnu_entry_dt_ring4_off", "xnu_entry_dt_ring5_off",
+            "xnu_entry_dt_ring6_off", "xnu_entry_dt_ring7_off", "xnu_entry_dt_ring8_off",
+            "xnu_entry_dt_ring9_off", "xnu_entry_dt_ring10_off", "xnu_entry_dt_ring11_off",
+            "xnu_entry_dt_ring12_off", "xnu_entry_dt_ring13_off", "xnu_entry_dt_ring14_off",
+            "xnu_entry_dt_ring15_off",
+        };
+        static const char *const rl[ENTRY_DT_TRACE_N] = {
+            "xnu_entry_dt_ring0_len", "xnu_entry_dt_ring1_len", "xnu_entry_dt_ring2_len",
+            "xnu_entry_dt_ring3_len", "xnu_entry_dt_ring4_len", "xnu_entry_dt_ring5_len",
+            "xnu_entry_dt_ring6_len", "xnu_entry_dt_ring7_len", "xnu_entry_dt_ring8_len",
+            "xnu_entry_dt_ring9_len", "xnu_entry_dt_ring10_len", "xnu_entry_dt_ring11_len",
+            "xnu_entry_dt_ring12_len", "xnu_entry_dt_ring13_len", "xnu_entry_dt_ring14_len",
+            "xnu_entry_dt_ring15_len",
+        };
+
+        /*
+         * Oldest of the ring first: index `(ring_n + c) & 15` is the c-th oldest read, and with
+         * fewer than sixteen reads the ring is not yet wrapped and the offsets are still in order.
+         */
+        for (c = 0u; c < ENTRY_DT_TRACE_N; c++) {
+            uint32_t k = (replay.ring_n + c) & (ENTRY_DT_TRACE_N - 1u);
+
+            entry_kv(ro[c], replay.ring_off[k]);
+            entry_kv(rl[c], replay.ring_len[k]);
         }
     }
 

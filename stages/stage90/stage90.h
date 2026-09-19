@@ -7022,8 +7022,11 @@ static inline uint32_t stage90_xnu_real_dt_checksum(const struct stage90_xnu_rea
  *
  * The image may own everything below `STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET` and nothing above it:
  * `osfmk/arm/start.s:149` loads that value out of boot_args into TTBR0 and TTBR1 and then writes
- * `STAGE90_XNU_ENTRY_TABLE_BYTES` (ten pages, 40 KB) of table entries starting there. See
- * build_entry.sh for the four invariants between the image, the boot_args, the tables and the tree.
+ * `STAGE90_XNU_ENTRY_TABLE_BYTES` (ten pages, 40 KB) of table entries starting there. **The device
+ * tree is one of the things that must be below it** - XNU maps `[end_kern, topOfKernelData)` as the
+ * tree's own region and hands out everything above `topOfKernelData` plus ten pages as free memory
+ * (experiment 444). See build_entry.sh for the invariants between the image, the boot_args, the
+ * tables, the tree and the window.
  */
 
 struct stage90_xnu_entry_result {

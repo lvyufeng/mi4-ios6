@@ -414,6 +414,48 @@ def fnv_report(blob, nodes):
     return whole
 
 
+def read_order(blob, nodes):
+    """Every property read the walk performs, in the order it performs them.
+
+    The device's replay is depth-first pre-order - a node's properties, then its children - and the
+    host's `walk()` appends a node to its list after finishing that node's property loop and before
+    descending, so the list is in the same pre-order. Concatenating each node's properties in that
+    order therefore reproduces the device's read sequence, which is what the ring is a window onto.
+    """
+    out = []
+    for nd in nodes:
+        for poff, name, length, _voff in node_props(blob, nd):
+            out.append((poff, length))
+    return out
+
+
+TRACE_N = 16
+
+
+def trace_report(blob, nodes):
+    """The trace block `fleh_undef` prints, so the comparison is a `diff` and not an eye."""
+    reads = read_order(blob, nodes)
+    print()
+    print("and the trace, which is what the totals cannot say - the same block the device prints:")
+    print()
+    print(f"  xnu_entry_dt_node_count=0x{len(nodes):08x}")
+    for k in range(TRACE_N):
+        if k < len(nodes):
+            nd = nodes[k]
+            off, props, child = nd.off, nd.nprops, nd.nchildren
+        else:
+            off = props = child = 0
+        print(f"  xnu_entry_dt_node{k}_off=0x{off:08x}  "
+              f"xnu_entry_dt_node{k}_props=0x{props:08x}  "
+              f"xnu_entry_dt_node{k}_child=0x{child:08x}")
+    print(f"  xnu_entry_dt_ring_count=0x{len(reads):08x}")
+    last = reads[-TRACE_N:] if len(reads) >= TRACE_N else reads
+    pad = [(0, 0)] * (TRACE_N - len(last)) + list(last)
+    for k, (off, length) in enumerate(pad):
+        print(f"  xnu_entry_dt_ring{k}_off=0x{off:08x}  xnu_entry_dt_ring{k}_len=0x{length:08x}")
+    return reads
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--blob", default=DEFAULT_BLOB)
@@ -537,6 +579,7 @@ def main():
 
     if args.fnv:
         fnv_report(blob, nodes)
+        trace_report(blob, nodes)
 
     for off in probe_offs:
         status |= probe(blob, nodes, off, args.verbose)

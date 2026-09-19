@@ -54,13 +54,17 @@ ENTRY_BASE=0x80000000
 #
 #   [ENTRY_BASE        .. bss_end)             the image: text, data, bss, stacks
 #   [ENTRY_ARGS_OFFSET .. + one page)          the boot_args copy `_start` reads
-#   [DATA_LIMIT        .. + ENTRY_TABLE_BYTES) `_start`'s own page tables
 #   [ENTRY_DT_OFFSET   .. + ENTRY_DT_MAX)      the device tree
+#   [DATA_LIMIT        .. + ENTRY_TABLE_BYTES) `_start`'s own page tables
+#   [DATA_LIMIT + 10P  .. avail_end)           free physical memory, for XNU's bootstrap allocator
 #   [ENTRY_BASE        .. + ENTRY_SIZE)        the window, mapped by the payload and by XNU
 #
 # `topOfKernelData` is DATA_LIMIT: `osfmk/arm/start.s:149` loads it out of boot_args into TTBR0 and
-# TTBR1 and then writes ENTRY_TABLE_BYTES (ten pages) of entries starting there. So the image has to
-# end below it, the tree has to begin above it, and both are checked before anything is written.
+# TTBR1 and then writes ENTRY_TABLE_BYTES (ten pages) of entries starting there. The image must end
+# below it and **the tree must end below it as well** - XNU maps `[end_kern, DATA_LIMIT)` RWNX as the
+# device tree's own region (`arm_vm_init.c:286`) and treats everything above `DATA_LIMIT` plus ten
+# pages as free memory it will hand out, so a tree above the limit is a tree inside `avail_start`
+# (experiment 444). The tables are written *at* the limit, which is why args and tree sit below it.
 ENTRY_TABLE_BYTES=0x0000A000   # `(PGBYTES/4 + PGBYTES/4*4) * 2` words, from start.s's loop
 ENTRY_DT_MAX=0x00020000        # the tree buffer; the tree is 0x7294 today
 ARGS_BYTES=0x00001000          # one page, which is what `boot_args` needs to fit in
@@ -26457,12 +26461,26 @@ ENTRY_ARGS_OFFSET=$((ENTRY_ARGS_OFFSET + 0x1000))
 # topOfKernelData: 1 MB aligned, and at least 1 MB clear of the arguments so the image has room to
 # grow into before this number moves again.
 ENTRY_DATA_LIMIT=$(align_up $((ENTRY_ARGS_OFFSET + ARGS_BYTES + 0x100000)) 0x100000)
-# The tree: 2 MB above the tables, which is 50 times what they need and keeps the two apart in any
-# map or disassembly anyone reads.
-ENTRY_DT_OFFSET=$((ENTRY_DATA_LIMIT + 0x200000))
-# The window: the smallest power of two that covers the tree's whole buffer, and never smaller than
-# 2 MB - `_start` maps it as sections and a smaller window would put the tree outside its own map.
-ENTRY_SIZE=0x00200000
+# The tree: **the last ENTRY_DT_MAX bytes below topOfKernelData**, so it is inside the region XNU
+# reserves for it and cannot be reached by the tables above that limit or by the image below it.
+#
+# It used to be `ENTRY_DATA_LIMIT + 0x200000` - 2 MB ABOVE topOfKernelData - and that placement is a
+# defect the device measured (experiment 444). `arm_vm_init.c:370-399` sets
+# `boot_ttep = args->topOfKernelData`, `cpu_ttep = boot_ttep + ARM_PGBYTES * 4` and
+# `avail_start = cpu_ttep + ARM_PGBYTES * 6`, so **everything above topOfKernelData + ten pages is
+# free physical memory the bootstrap allocator hands out** (`first_avail = avail_start`, and
+# `pmap_steal_memory`/`ml_static_malloc` grow upward from it). Meanwhile `arm_vm_init.c:286` maps
+# `[end_kern, topOfKernelData)` RWNX with the comment "Device Tree, RAM Disk (if present),
+# bootArgs" - that region, and nothing above it, is where a device tree belongs on this platform.
+# A tree parked 2 MB above the limit is therefore inside XNU's own free memory, and the boot's
+# first allocations overwrite it: the device's walk read the tree's first 0x43d4 bytes correctly and
+# then diverged, which is the allocation frontier catching up with the walk.
+ENTRY_DT_OFFSET=$((ENTRY_DATA_LIMIT - ENTRY_DT_MAX))
+# The window: kept at 16 MB rather than derived, because it is also `boot_args->memSize`
+# (`xnu_entry_jump.c:150`) and therefore the kernel's view of physical memory. Its size must not move
+# as a side effect of where the tree sits - with the tree below the limit the minimal covering
+# power of two is 8 MB, and letting it shrink would silently halve XNU's `avail_end`.
+ENTRY_SIZE=0x01000000
 while (( ENTRY_SIZE < ENTRY_DT_OFFSET + ENTRY_DT_MAX )); do ENTRY_SIZE=$((ENTRY_SIZE * 2)); done
 
 # --- the invariants that make the layout safe ---------------------------------------------------
@@ -26475,8 +26493,10 @@ layout_fail() { say "FAIL: $*" >&2; exit 1; }
     layout_fail "the image ends $((bss_end - ENTRY_BASE)) bytes from the base, past topOfKernelData at $ENTRY_DATA_LIMIT"
 (( ENTRY_ARGS_OFFSET + ARGS_BYTES <= ENTRY_DATA_LIMIT )) ||
     layout_fail "the boot_args at $ENTRY_ARGS_OFFSET do not fit below topOfKernelData at $ENTRY_DATA_LIMIT"
-(( ENTRY_DATA_LIMIT + ENTRY_TABLE_BYTES <= ENTRY_DT_OFFSET )) ||
-    layout_fail "the $ENTRY_TABLE_BYTES bytes of tables at $ENTRY_DATA_LIMIT reach the tree at $ENTRY_DT_OFFSET"
+(( ENTRY_ARGS_OFFSET + ARGS_BYTES <= ENTRY_DT_OFFSET )) ||
+    layout_fail "the boot_args at $ENTRY_ARGS_OFFSET reach the tree at $ENTRY_DT_OFFSET"
+(( ENTRY_DT_OFFSET + ENTRY_DT_MAX <= ENTRY_DATA_LIMIT )) ||
+    layout_fail "the tree buffer at $ENTRY_DT_OFFSET (+$ENTRY_DT_MAX) reaches topOfKernelData at $ENTRY_DATA_LIMIT, where XNU writes its own boot page tables"
 (( ENTRY_DT_OFFSET + ENTRY_DT_MAX <= ENTRY_SIZE )) ||
     layout_fail "the tree buffer at $ENTRY_DT_OFFSET (+$ENTRY_DT_MAX) is outside the $ENTRY_SIZE window"
 
@@ -26683,7 +26703,7 @@ say "image bytes  $bin_size"
 say "bss          $bss_start .. $bss_end ($bss_bytes bytes, zeroed by the payload)"
 say "layout       args +$ENTRY_ARGS_OFFSET, topOfKernelData +$ENTRY_DATA_LIMIT, tree +$ENTRY_DT_OFFSET, window $ENTRY_SIZE"
 say "headroom     $((ENTRY_BASE + ENTRY_DATA_LIMIT - bss_end)) bytes below topOfKernelData"
-say "above it     $ENTRY_TABLE_BYTES bytes of page tables, then the tree buffer at ENTRY_BASE + $ENTRY_DT_OFFSET"
+say "above it     $ENTRY_TABLE_BYTES bytes of page tables at the limit, and free physical memory for XNU above those"
 
 say "wrote $OUT/xnu_arm_entry.bin, .elf, .h, .map"
 say "the payload build reads the .bin from there directly; nothing to install"
