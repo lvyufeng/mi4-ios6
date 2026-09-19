@@ -13483,6 +13483,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ=${STAGE90_ENTRY_YARROWCORELIB_SHA1MOD_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_src_sha1mod.o}
     OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ=${STAGE90_ENTRY_YARROWCORELIB_COMP_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_src_comp.o}
     OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ=${STAGE90_ENTRY_YARROWCORELIB_YARROWUTILS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_src_yarrowUtils.o}
+    OSFMK_PRNG_FIPS_SHA1_OBJ=${STAGE90_ENTRY_FIPS_SHA1_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_fips_sha1.o}
     # =============================================================================================
     # **369: `YarrowCoreLib/port/smf.c` - the step that moves `.data` for the first time in five, and
     # whose stop is three frames away from anything it touches.**
@@ -14401,6 +14402,257 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # differ. Because both sides now come from the same source, the expectation is that the test *passes* -
     # but it is the first time this walk has linked code whose own self-test runs, and it is the thing to read
     # first in the next run's log.
+    # =============================================================================================
+    # **373: `osfmk/prng/fips_sha1.c` - the object that ends the yarrow subtree, and the first step
+    # whose stop is outside `osfmk/prng/` altogether.**
+    #
+    # 372's stop was `FIPS_SHA1Init`, called from `random_block` at key `0x8017BB0C`. The object is
+    # `osfmk/prng/fips_sha1.c` -> `osfmk_prng_fips_sha1.o`, and the effect tool against the 372 image is
+    #
+    #     resolved (2: 2 function, 0 storage)
+    #         FIPS_SHA1Init
+    #         FIPS_SHA1Update
+    #     added (0: 0 function, 0 storage)
+    #     of the 2 references, 2 are already satisfied
+    #
+    # so **779 -> 777 undefined, 677 -> 675 function, 102 -> 102 storage**. Two names retired - both of
+    # them calls `random_block` already makes - and nothing created: **the whole closure of this object
+    # is already real**, so once it is linked nothing inside it can stop the run. That is 370's shape
+    # ("the first object whose entire closure is already satisfied"), and it is what makes this step's
+    # stop a name the walk has never been near.
+    #
+    # `.text` is **0x1600** - 5632 bytes, the largest single step since 370 - with **four** definitions
+    # and a **16-byte** alignment (`2**4`, the same alignment whose mishandling `predict_layout.py`'s
+    # relative-path default hid at 370):
+    #
+    #     +0x0000  FIPS_SHA1Init     0x40    no relocation at all: loads the SHA-1 IV with
+    #                                        `vld1.64 {d16-d17}, [r2 :128]` from object+0x30, stores it,
+    #                                        and returns - a leaf
+    #     +0x0040  FIPS_SHA1Update   0xE0    memcpy at +0xA0, the local `SHA1Transform` at +0xB4 and
+    #                                        +0xDC, and a tail `b memcpy` at +0x11C
+    #     +0x0120  SHA1Transform     0x1394  local; the second SHA-1 compression function this walk links
+    #     +0x14B4  FIPS_SHA1Final    0x14C   defined but referenced by nothing yet
+    #
+    # **and a `.data` of 0x40** - one object, `PADDING`, 64 bytes, alignment 1 - **the first `.data`
+    # input in eleven steps**, so 373 is where the `.data` section next moves.
+    #
+    # The `vld1.64 [r2 :128]` is the row that matters: it faults unless object+0x30 is 16-byte aligned,
+    # and the object's own `.text` alignment is the only thing that makes it so. If it were placed at a
+    # 4-aligned address the load would abort - and that is why the 0x8 of fill the placement needs is a
+    # functional row here, not bookkeeping (370's argument, on a second object).
+    #
+    # ### Prediction: the stop
+    #
+    # **`stub_hit=_ZN19IOPMPowerStateQueue17PMPowerStateQueueEP8OSObjectPFvS1_zE`**, at
+    # `xnu_entry_stub_caller_v=0x8014E6D0` - i.e. `IOPMrootDomain::start + 0x784`, with the `bl` at
+    # `IOPMrootDomain::start + 0x780` (`0x8014E6CC`, target `0x80181AE4`). **This is the first stop in
+    # this walk that is not a `osfmk/prng/` name and not even a C function**: it is a C++ constructor,
+    # `IOPMPowerStateQueue::PMPowerStateQueue(OSObject *, void (*)(OSObject *, ...))`.
+    #
+    # The path, in order, and every call on it is real after this step:
+    #
+    #     random_block+0x104  bl FIPS_SHA1Init      real now, and a leaf: it returns
+    #     random_block+0x114  bl FIPS_SHA1Update    real now (memcpy + the local SHA1Transform)
+    #     random_block+0x128  bl FIPS_SHA1Update    real now
+    #     random_block+0x19C  beq 1f8               TAKEN: `state->0x30` is 0 on the first call, so the
+    #                                               CRC comparison is skipped, the flag is set, and the
+    #                                               function returns to `fips_initialize` at +0x254
+    #     fips_initialize+0x264 bl memcmp           real; on a match `beq 0x27C` falls through to the
+    #                                               **tail call** `b random_block(state, state+0x18, 1)`
+    #     random_block+0x0D0  bl prngOutput         **the call 372's block said was skipped - now
+    #                                               executed**, because this second call passes `r2 = 1`
+    #     random_block+0x1A0  cmp r0, r1 / bne     the second CRC differs from the first, so the
+    #                                               function returns instead of taking the `panic` at +0x1EC
+    #     yarrow_init+0x35C                         returns r0 = prngForceReseed's 0
+    #     read_random+0x12C   bl cc_clear          real; read_random has been waiting at +0x128 since 367
+    #     read_random+0x238   blx r7                the ccdrbg record's **generate** slot = yarrow_generate
+    #     yarrow_generate+0x3D8 bl memmove          real; 16 bytes from state+0x18, then it returns 0
+    #     read_random+0x260   bl lck_mtx_unlock     real; read_random returns
+    #     uuid_generate+0x13C                       version/variant bits, then it returns
+    #     IOPMrootDomain::start+0x5F4  .. +0x77C    uuid_unparse_upper, memcpy, OSArray::withCapacity,
+    #                                               OSSymbol::withCString x5, IOLockAlloc,
+    #                                               OSDictionary::withCapacity, OSSet::withCapacity x2,
+    #                                               OSArray::withObjects x2, IOService::getIOPMWorkloop
+    #                                               - all real, and the walker agrees: no stub above any
+    #                                               of them
+    #     IOPMrootDomain::start+0x780 bl IOPMPowerStateQueue::PMPowerStateQueue   <- THE STOP
+    #
+    # **The check that makes this safe to predict**: `tools/first_stub_call.py` reads the function's own
+    # body from an offset and takes the first `bl` whose target name is a stub. On
+    # `_ZN14IOPMrootDomain5startEP9IOService` from `+0x5F4` it reports `+0x780` - and between `+0x5F4` and
+    # `+0x77C` there is **no return and no conditional branch at all** (the only branches are the four
+    # `blx` vtable calls), so the straight line is the executed line and the first stub it meets is this
+    # one. The three names that could have stopped it earlier - `uuid_generate` (365), `read_random`
+    # (366) and `yarrow_init`'s whole subtree (367..373) - are the walk's own recent history.
+    #
+    # Every earlier step in this subtree predicted a stop *inside* `osfmk/prng/`. This one predicts the
+    # walk leaving it: `yarrow_init` returns for the first time, `read_random` runs its whole tail,
+    # `uuid_generate` finishes, and `IOPMrootDomain::start` - which stopped at its `bl uuid_generate` in
+    # 365 - resumes at `+0x5F4` and runs 100 instructions of real C++ before it needs a name that is not
+    # in the image.
+    #
+    # The falsifiers, in the order the run reads them: **(a)** a `panic` with the string
+    # `FIPS random self test failed` (`.L.str.1` at object+0x20, no hyphen) - `fips_initialize`'s
+    # known-answer `memcmp` at +0x264 disagreed, which would mean the FIPS SHA-1 this step links does
+    # not reproduce `kKnownAnswer`; **(b)** a `panic` with `FIPS random self-test failed.` (`.L.str`,
+    # **with** the hyphen) - `random_block`'s repeated-CRC test at +0x1EC, i.e. `prngOutput` did not
+    # change the block it hashes twice; **(c)** a `panic` with `Couldn't initialize Yarrow, ...` or
+    # `Couldn't seed Yarrow.` - `yarrow_init`'s guards at +0x2E8 and +0x31C, which need one of this
+    # step's two names to return nonzero; **(d)** `FIPS_SHA1Init` again at `0x8017BB0C` (the object did
+    # not take) or `FIPS_SHA1Update` at `0x8017BB48` (only `Init` took); **(e)** a stop at one of the
+    # four `blx` vtable calls in `IOPMrootDomain::start`'s tail instead of at `+0x780` - 365's kind 9,
+    # a stub reached through a vtable slot, which no name-level tool can rule out; **(f)**
+    # `abort_entries != 0` - the new code is 0x1600 bytes of SHA-1 over a 0xAC-byte context and the
+    # 16-byte aligned `vld1.64`, and a misaligned placement would show here rather than as a wrong stop.
+    #
+    # ### Prediction: the layout
+    #
+    #     .text run:   +0x1600 (the object) + 0x8 (its 16-byte alignment, against a cursor at 0x8017DBB8)
+    #                  - 0x30 (two fewer stub bodies, 677 -> 675 x 0x18)                    = +0x15D8
+    #     .rodata run: -0x20  (two retired name slots: FIPS_SHA1Init align4(13 + 1) = 0x10,
+    #                          FIPS_SHA1Update align4(15 + 1) = 0x10)
+    #
+    #     .data:       +0x40, and the bucket does not move this time: `.data` starts at
+    #                  align_up(text_end, 0x4000), and 0x801A9818 is still below 0x801AC000
+    #
+    # | | 372 measured | 373 predicted |
+    # |---|---|---|
+    # | counts | 779 / 677 / 102 | **777 / 675 / 102** |
+    # | object `.text` | - | **0x8017DBC0 (0x1600, after an 0x8 fill)** |
+    # | platform expert `.text` | 0x8017DBB8 (0x150) | **0x8017F1C0 (0x150)** |
+    # | `realstubs.o` `.text` | 0x8017DD64 (0x3F78) | **0x8017F310 (0x3F48 = 675 x 0x18)** |
+    # | its end | 0x80181CDC | **0x80183258** |
+    # | `realstubs.o` `.rodata.str1.4` | 0x801A3E54 (0x3A48) | **0x801A542C (0x3A28)**, band +0x10 |
+    # | `.text` end | 0x801A8260 | **0x801A9820** (band 0x801A9820..0x801A9840) |
+    # | text size | 1737312 | **1742880 (= 0x1A9820)** |
+    # | `.data` | 0x801AC000 (0x19A70) | **0x801AC000 (0x19AB0)** - unmoved, +0x40 of input |
+    # | `.sysctl_set` | 0x801C5A70 (0x150) | **0x801C5AB0 (0x150)** |
+    # | `.init_array` | 0x801C5BC0 (0x84) | **0x801C5C00 (0x84)**, ending **0x801C5C84** |
+    # | `.bss` | 0x801C5C80 (0x39118) | **0x801C5CC0 (0x39118)** |
+    # | `__bss_end` | 0x801FED98 | **0x801FEDD8** |
+    # | image | 1858628 | **1858692 (= 0x1C5C84)** |
+    # | headroom | 2101864 | **2101800 (= 0x201228)** |
+    # | args / topOfKernelData / tree / window | +2097152 / +4194304 / +6291456 / 8388608 | **all unmoved** |
+    #
+    # **The `.data` derivation, because this is the section 364, 365, 369 and 370 all cost a step each.**
+    # The map says the section's last input is `osfmk_prng_YarrowCoreLib_port_smf.o`'s `__DATA, __data`
+    # at 0x801C5A58 (0x18), ending on 0x801C5A70, and the `. = ALIGN(0x8)` after it is already
+    # satisfied. The new object is inserted **after** every other `.data` producer in `LINK_OBJS`, its
+    # `.data` alignment is **1**, so its 0x40 lands exactly at 0x801C5A70 and pushes `.sysctl_set` and
+    # everything below it by +0x40. `.data`'s *size* grows 0x19A70 -> 0x19AB0 and its *address* does not
+    # move, because align_up(0x801A9820, 0x4000) is still 0x801AC000.
+    #
+    # **The `.bss` pad rule is not exercised**: the object has no `.bss`, and `.bss`'s start moves by
+    # +0x40 - a multiple of 64 - so every pad inside it is unchanged and the section is a copy in size
+    # (0x39118) and a move in place (368's case, not 367's).
+    #
+    # **And the derived numbers do not move even though the image grows**: `args` is
+    # `align_up(bss_end - ENTRY_BASE, 0x1000) + 0x1000`, and align_up(0x1FEDD8, 0x1000) is still
+    # 0x1FF000, so `args`, `topOfKernelData`, the tree, the window and the payload's whole layout are
+    # 372's - only `headroom` changes, by exactly the 0x40 the image grew.
+    # ### Measured, from the build
+    #
+    #     == pass 1: which symbols do XNU's own objects need? ==
+    #       777 symbol(s) undefined
+    #       stubs: 675 function(s), 102 storage
+    #
+    # **All three counts exact, the text size exact to the byte (1742880), the image exact (1858692),
+    # and every row of the `.data` derivation - the section, `.sysctl_set`, `.init_array`, `.bss`,
+    # `__bss_end`, `headroom` - exact.** The `.rodata` row is exact in **both** its parts this time
+    # (0x801A542C and 0x3A28), so the boundary fill the `.text` run hands to the `.rodata` run measured
+    # **0x0** again - the fourth reading of that term (368: 0x4, 371: 0x0, 372: 0x4, 373: 0x0).
+    #
+    # **One miss, of 0x5C, and it is a row registered from a position rather than from the delta.**
+    #
+    # | | 372 measured | 373 predicted | 373 measured |
+    # |---|---|---|---|
+    # | counts | 779 / 677 / 102 | 777 / 675 / 102 | **777 / 675 / 102** |
+    # | object `.text` | - | 0x8017DBC0 (0x1600, after an 0x8 fill) | **0x8017DBC0 (0x1600)** |
+    # | platform expert `.text` | 0x8017DBB8 (0x150) | 0x8017F1C0 (0x150) | **0x8017F1C0 (0x150)** |
+    # | `realstubs.o` `.text` | 0x8017DD64 (0x3F78) | 0x8017F310 (0x3F48 = 675 x 0x18) | **0x8017F36C (0x3F48)** |
+    # | its end | 0x80181CDC | 0x80183258 | **0x801832B4** |
+    # | `realstubs.o` `.rodata.str1.4` | 0x801A3E54 (0x3A48) | 0x801A542C (0x3A28) | **0x801A542C (0x3A28)** |
+    # | `.text` end | 0x801A8260 | 0x801A9820 | **0x801A9820** |
+    # | text size | 1737312 | 1742880 | **1742880 (= 0x1A9820)** |
+    # | `.data` | 0x801AC000 (0x19A70) | 0x801AC000 (0x19AB0) | **0x801AC000 (0x19AB0)** |
+    # | `.sysctl_set` | 0x801C5A70 (0x150) | 0x801C5AB0 (0x150) | **0x801C5AB0 (0x150)** |
+    # | `.init_array` | 0x801C5BC0 (0x84) | 0x801C5C00 (0x84) | **0x801C5C00 (0x84)** |
+    # | its end | 0x801C5C44 | 0x801C5C84 | **0x801C5C84** |
+    # | `.bss` | 0x801C5C80 (0x39118) | 0x801C5CC0 (0x39118) | **0x801C5CC0 (0x39118)** |
+    # | `__bss_end` | 0x801FED98 | 0x801FEDD8 | **0x801FEDD8** |
+    # | image | 1858628 | 1858692 | **1858692 (= 0x1C5C84)** |
+    # | headroom | 2101864 | 2101800 | **2101800 (= 0x201228)** |
+    # | args / topOfKernelData / tree / window | +2097152 / +4194304 / +6291456 / 8388608 |
+    #   all unmoved | **all unmoved** |
+    #
+    # **The 0x5C is not a size error, it is a row I placed by hand between two sections.** `realstubs.o`'s
+    # `.text` does not begin where the platform expert's `.text` row ends; three more inputs sit between
+    # them, all of them constants of this image:
+    #
+    #     0x8017F310  0x4   MSM8974PlatformExpert.o's .text._ZN21MSM8974PlatformExpert9MetaClassD0Ev
+    #                       (a separate input of the same object, matched by the `.text.*` wildcard)
+    #     0x8017F314  0x4   xnu_arm_entry_last_kernel_constructor.o's .text.startup
+    #     0x8017F318  0x54  xnu_arm_entry_rtabi.o's .text.eabi (the __aeabi_mem* family)
+    #     -----------------------------------------------------------------------------------
+    #     0x8017F36C        -> realstubs.o's .text
+    #
+    # The 372 map has the same gap and the same size (0x8017DD08 + 0x5C = 0x8017DD64), so this is a
+    # constant that has to be carried into the row rather than a property of this step. **Tell: a
+    # prediction's *derived* rows must be derived, and a row that is instead located relative to a
+    # neighbouring object has to name the objects in between** - the same shape as 366's `.rodata` row,
+    # which was also a position and also came out wrong until it was turned into arithmetic. Nothing
+    # derived from it moved: the text size, the section end and every layout number below are the sums,
+    # and the sums were right.
+    # ### Measured, from the run
+    #
+    #     xnu_entry_checks=0x00000005              xnu_entry_failures=0x00000000
+    #     xnu_entry_stub_caller_v=0x8014e6d0       xnu_entry_abort_entries=0x00000000
+    #     xnu_entry_stub_caller_digits=0x00000062
+    #     xnu_entry_stub_caller_w0=0x34313038 ("8014")   w1=0x30643665 ("e6d0")
+    #     xnu_entry_abort_first_dfar=0x00000000    xnu_entry_abort_first_pc=0x00000000
+    #     xnu_entry_image_bytes=0x001c5c84         xnu_entry_bss_start=0x801c5cc0
+    #     xnu_entry_bss_end=0x801fedd8             xnu_entry_args_pa=0x80200000
+    #     xnu_entry_top_of_kernel_data=0x80400000  xnu_entry_why_byte=0x00000061
+    #     MI4IOS6_STAGE90_XNU real XNU entry stub_hit=_ZN19IOPMPowerStateQueue17PMPowerStateQueueEP8OSObjectPFvS1_zE
+    #     No errors detected
+    #
+    # **Name and key exactly as predicted** - and this is the first stop in the walk that is a C++
+    # constructor, and the first that is not in `osfmk/prng/`. `FIPS_SHA1Init` and `FIPS_SHA1Update`
+    # returned, `fips_initialize`'s known-answer `memcmp` **agreed**, `random_block`'s second call took
+    # the `prngOutput` branch 372's block said was skipped, the CRC differed from the first, `yarrow_init`
+    # returned 0, `read_random` ran its whole tail including the `yarrow_generate` call, `uuid_generate`
+    # finished, and `IOPMrootDomain::start` - stopped at its `bl uuid_generate` since 365 - resumed at
+    # `+0x5F4` and ran 100 instructions of real C++ before it needed a name the image does not define.
+    #
+    # The falsifiers, checked one by one: **(a)** no `panic` with `FIPS random self test failed` - the
+    # FIPS SHA-1 this step links reproduces `kKnownAnswer`, so the self-test passed; **(b)** no `panic`
+    # with `FIPS random self-test failed.` - the second CRC differed from the first; **(c)** no
+    # `panic` with `Couldn't initialize Yarrow, ...` or `Couldn't seed Yarrow.` - `yarrow_init`'s guards
+    # saw zeros; **(d)** no `FIPS_SHA1Init` at `0x8017BB0C` and no `FIPS_SHA1Update` at `0x8017BB48`, so
+    # both names took; **(e)** no stop at any of the four vtable `blx` sites, so no stub is hiding behind
+    # a slot of `IOPMrootDomain`'s vtable; **(f)** `abort_entries=0` with `abort_first_pc=0` and
+    # `abort_first_dfar=0` - the 0x1600 bytes of SHA-1 ran, and the `vld1.64 {d16-d17}, [r2 :128]` in
+    # `FIPS_SHA1Init` did **not** fault, which is the reading that certifies the object's 16-byte
+    # alignment was honoured (the 0x8 fill was a functional row, not bookkeeping). No `exception:` line,
+    # `xnu_entry_checks=5` / `failures=0`, and the log ends in the kernel's own `No errors detected`.
+    #
+    # **What the step adds to the machine**: a working FIPS SHA-1 (a second `SHA1Transform`, 0x1394
+    # bytes) whose self-test *ran*, and - for the first time in this walk - a frontier outside the PRNG.
+    # The yarrow subtree is complete: every name `yarrow_init`, `read_random` and `uuid_generate` reach
+    # is real, which is why the walk walked clean out of three frames and back into `IOPMrootDomain`.
+    #
+    # ### The next object, named before its run
+    #
+    # The frontier is `osfmk/prng/`'s last stop and a `iokit/Kernel/IOPMPowerStateQueue.cpp` name:
+    # `_ZN19IOPMPowerStateQueue17PMPowerStateQueueEP8OSObjectPFvS1_zE` is defined by
+    # **`iokit_Kernel_IOPMPowerStateQueue.o`** - the only object in the pool that defines it, and the
+    # only one that defines `_ZN19IOPMPowerStateQueue16submitPowerEventEjPvy` either (which is the
+    # *other* stub this object's own header names, and the one `IOPMrootDomain::start` reaches later).
+    # Measured against this image: 23 definitions, 47 references (all satisfied), **2 resolved
+    # (2 function) / 0 added** - **777 -> 775 undefined, 675 -> 673 function, 102 -> 102 storage**.
+    # Unlike the last five objects, it is 0x318 of `.text` *plus* `.rodata` 0xB4, `.rodata.str1.1` 0x14,
+    # **`.bss` 0x18** and **`.init_array` 0x4** - a static constructor, so 374 is the step where
+    # `.init_array` next grows (and the first since 364 with a `.bss` input).
     OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ=${STAGE90_ENTRY_YARROWCORELIB_PRNG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_prng_YarrowCoreLib_src_prng.o}
     LIBKERN_UUID_UUID_OBJ=${STAGE90_ENTRY_LIBKERN_UUID_UUID_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_uuid_uuid.o}
     IOKIT_KERNEL_IOMAPPER_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOMAPPER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOMapper.o}
@@ -21181,6 +21433,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_PRNG_FIPS_SHA1_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -21193,7 +21446,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
