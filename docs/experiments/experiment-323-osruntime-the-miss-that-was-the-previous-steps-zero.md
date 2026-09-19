@@ -115,7 +115,7 @@ just measured is not a term that is zero.**
 | `.init_array` | 0x8015931C (0x4) | **0x8015934C** (0x4) | +0x30 |
 | `.bss` | 0x80159340 (0x37858) | **0x80159380** (0x37898) | +0x40 start, +0x40 size |
 | `__bss_end` | 0x80190B98 | **0x80190C18** | +0x80 |
-| image | 1413920 (0x1592C0) | **1413968 (0x1592D0)** | +0x30 |
+| image | 1413920 (0x159320) | **1413968 (0x159350)** | +0x30 |
 | headroom | 1504360 | **1504232** | −0x80 |
 
 Two places where the arithmetic is not the plain one, and both are rules this ledger already had:

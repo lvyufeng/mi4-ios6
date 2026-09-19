@@ -175,7 +175,7 @@ prediction of 0x15AFB7 — which *added* the text growth to the step — was 0x1
 | `.init_array` | 0x801552D4 (0x4) | 0x8015931C (0x4) | +0x4048 |
 | `.bss` | 0x80155300 (0x37658) | **0x80159340** (0x37858) | +0x4040 start, +0x200 size |
 | `__bss_end` | 0x8018C958 | **0x80190B98** | +0x4240 |
-| image | 1397464 (0x1552D8) | **1413920 (0x1592C0)** | +0x4048 |
+| image | 1397464 (0x1552D8) | **1413920 (0x159320)** | +0x4048 |
 | headroom | 1521320 | **1504360** | −0x4240 |
 
 `.bss` closes the plain way: the object's **0x180** plus **two** 64-byte stand-in slots is **0x200**, and

@@ -140,7 +140,7 @@ This is the first step in four where the object brings no storage, so `.bss` had
 | `.init_array` | 0x8015931C (0x4) | 0x8015931C (0x4) | 0 |
 | `.bss` | 0x80159340 (0x37858) | 0x80159340 (0x37858) | 0 |
 | `__bss_end` | 0x80190B98 | **0x80190B98** | 0 |
-| image | 1413920 (0x1592C0) | **1413920 (0x1592C0)** | 0 |
+| image | 1413920 (0x159320) | **1413920 (0x159320)** | 0 |
 | headroom | 1504360 | **1504360** | 0 |
 
 `.text` now ends at 0x8013D600, 0x2A00 below the 16 KB boundary at 0x80140000 — so the step had 0x2A00 of

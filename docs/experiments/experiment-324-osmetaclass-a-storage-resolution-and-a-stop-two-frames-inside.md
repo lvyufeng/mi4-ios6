@@ -112,7 +112,7 @@ by 5 while wrong twice.
 | `.init_array` | 0x8015934C (0x4) | **0x8015939C** (**0x8**) | +0x50 start, +0x4 size |
 | `.bss` | 0x80159380 (0x37898) | **0x801593C0** (0x378D8) | +0x40 start, +0x40 size |
 | `__bss_end` | 0x80190C18 | **0x80190C98** | +0x80 |
-| image | 1413968 (0x1592D0) | **1414052 (0x159324)** | +0x54 |
+| image | 1413968 (0x159350) | **1414052 (0x1593A4)** | +0x54 |
 | headroom | 1504232 | **1504104** | −0x80 |
 
 * **`.data` +0x50 is exactly the object's own data** — 8 (`.data`) + 72 (`__DATA, __data`) — moved in
