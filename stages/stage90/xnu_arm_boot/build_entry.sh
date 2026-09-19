@@ -4355,6 +4355,221 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # lists the indirect calls it could not follow (`getval`, `panic_trap_to_debugger`, `__doprnt`, i.e. a
     # kprintf path), so a run that stops earlier is possible and the tool says so rather than guessing.
     BSD_KERN_KERN_KTRACE_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_KTRACE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_ktrace.o}
+    # 320: `iokit/Kernel/IOStartIOKit.cpp` - the object that defines `StartIOKit`, the step that enters
+    #       IOKit, and the first step where a mergeable contribution line that is *not* this object's moved
+    #
+    # **The object that defines 319's stop.** `iokit/Kernel/IOStartIOKit.cpp` (manifest:346) is
+    # `iokit_Kernel_IOStartIOKit.o`: `.text` **876** (0x36C), `.bss` **12**, `.rodata.str1.1` **142** (0x8E),
+    # **5 functions** (`StartIOKit` 0x184, `IOKitInitializeTime` 0x3C, `iokit_post_constructor_init` 0xB4,
+    # `IORecordProgressBackbuffer` 0xA8, `IORegistrySetOSBuildVersion` 0x50), **3 `B` storage**
+    # (`gIOProgressBackbufferKey` 4, `gIORemoveOnReadProperties` 4, `record_startup_extensions_function` 4)
+    # and **29 references**.
+    #
+    # **Predicted: 2 resolved / 21 added.**
+    #
+    # Resolved are the two of its five functions that are currently *stubs* - `StartIOKit` (this stop) and
+    # `IOKitInitializeTime`. The other three (`iokit_post_constructor_init`, `IORecordProgressBackbuffer`,
+    # `IORegistrySetOSBuildVersion`) and the three `B` definitions are **defined but referenced by nothing
+    # yet**, which by 250/270's rule is not a count change at all.
+    #
+    # Added are the 21 references that nothing in this image defines yet - **18 functions** (every one a `T`
+    # in the pool, so each arrives as a function stub) and **3 storage stand-ins**:
+    #
+    #   18 func T   IOLibInit, OSlibkernInit, devsw_init, IOCPUInitialize, interruptAccountingInit,
+    #               IOCatalogue::initialize, IORootParent::initialize, IOUserClient::initialize,
+    #               IORegistryEntry::initialize, IORegistryEntry::fromPath, IOKitDiagnostics::diagnostics,
+    #               IOPMinformeeList::getSharedRecursiveLock, IOMemoryDescriptor::initialize,
+    #               IOPlatformExpertDevice's constructor, OSSet::withObjects, IOService::initialize,
+    #               IOService::waitForService, IOService::resourceMatching
+    #    3 data B   gCanSleepTimeout 4, gIOKitDebug 8, gIOKitTrace 8   (the 304 rule: sized from the pool)
+    #
+    # The other four references are already resolved-or-stubbed and do not move: `PE_parse_boot_argn`,
+    # `version`, `clock_initialize_calendar` and `OSKext::initialize` are real; `OSSymbol::withCStringNoCopy`,
+    # `OSObject::operator new`, `OSString::withCString` and `IORegistryEntry::getRegistryRoot` are stubs that
+    # stay stubs. So **813 -> 832 undefined, 708 -> 724 function stubs, 105 -> 108 storage**.
+    #
+    # `.text` predicted **+0x7D2**, from five terms:
+    #
+    #   this object's .text                                  +0x36C   (876, exact)
+    #   this object's .rodata.str1.1                         +0x08E   (142 - an upper bound: mergeable)
+    #   the stub object's .text                              +0x180   (2 bodies retired, 18 created:
+    #                                                                 16 x 0x18)
+    #   the stub object's name strings                       +0x258   (632 of new names - the padded
+    #                                                                 lengths of the 18 - less the 0x20 of
+    #                                                                 the two retired, `StartIOKit` 12 +
+    #                                                                 `IOKitInitializeTime` 20)
+    #   .text-region alignment fill                          the band  (-0x20..+0x60; 319 measured +0x14)
+    #                                                       -------
+    #                                                        +0x7D2 + band
+    #
+    # and **the 16 KB boundary should not be crossed**: `.text` now ends at 0x8013B1A0, the prediction puts
+    # it near 0x8013B972, and 0x8013C000 is 0xE60 away - so `.data`, `.sysctl_set`, `.init_array` and the
+    # *starts* of `.bss` should all be unmoved, the image should stay 1397464, and this step should be the
+    # second in a row that costs only `.text`. `.bss` itself grows by the object's 12 bytes plus three
+    # 64-byte stand-in slots (`align64(4)` and `align64(8)` both being 0x40, and `.bss` slot count rather
+    # than size is what moves the block), so `__bss_end` should move **+0xCC plus or minus fill** and the
+    # headroom should lose that much.
+    #
+    # **Predicted stop: `IOLibInit`, at the offset `StartIOKit+0x1B4`.** Read out of the object's own
+    # relocation stream, `StartIOKit`'s body calls exactly eleven things, in this order:
+    #
+    #   0x118  PE_parse_boot_argn("io", …)        real
+    #   0x14C  PE_parse_boot_argn("iotrace", …)   real
+    #   0x198  PE_parse_boot_argn("pmtimeout", …) real
+    #   0x1B0  IOLibInit                          <- THE PREDICTION: the first stub on the straight line
+    #   0x1B4  OSlibkernInit                      new
+    #   0x1B8  devsw_init                         new
+    #   0x1C4  OSSymbol::withCStringNoCopy        a stub that stays a stub
+    #   0x1E0  OSSet::withObjects                 new
+    #   0x1F0  interruptAccountingInit            new
+    #   0x1F8  OSObject::operator new             a stub that stays a stub
+    #   0x200  IOPlatformExpertDevice's ctor      new
+    #
+    # All three `PE_parse_boot_argn` calls are *unconditional* in the instruction stream (their results are
+    # only used by `if`s whose bodies store the value), so nothing branches over them and `IOLibInit` is
+    # reached on every path. The caller key is quoted as an offset because the absolute address depends on
+    # where the linker places an 876-byte function; the alternative, if `IOLibInit` somehow were not a stub,
+    # is the next call in that list that is one.
+    #
+    # **Measured: every count exact, the stop is `IOLibInit`, and the `.text` closure needed a term that
+    # nobody predicted - another object's string line.** Against a baseline built in this session with an
+    # empty stand-in in this slot, which reproduced 319's image to the byte (`.text` 0x13B1A0):
+    #
+    #   | | predicted | measured |
+    #   | undefined | 832 | **832** |
+    #   | function stubs | 724 | **724** |
+    #   | storage stubs | 108 | **108** |
+    #   | resolved / added | 2 / 21 | **2 / 21** |
+    #
+    # (832 is `wc -l out/stage90/xnu_arm_entry_undef.txt`; 724 `T` and 108 `B` are the stub object's own
+    # symbol table, `nm -P out/stage90/xnu_arm_entry_realstubs.o`.) The three `B` stand-ins arrived sized
+    # from the pool as predicted - `gCanSleepTimeout` 0x8018C500 (`4`), `gIOKitDebug` and `gIOKitTrace`.
+    #
+    # `.text` 0x13B1A0 -> **0x13B960** is +0x7C0, and it closes **with no residual** - but only after a
+    # term that is not this object's at all:
+    #
+    #   this object's .text                                  +0x36C   (876, exact)
+    #   this object's .rodata.str1.1                         +0x08B   (139 placed - the object's own
+    #                                                                 section is 0x8E, see below)
+    #   pexpert_arm_pe_init.o's .rodata.str1.1               -0x008   (446 -> 438, **NOT this object's**)
+    #   the stub object's .text                              +0x180   (2 bodies retired, 18 created)
+    #   the stub object's name strings                       +0x258   (0x3A1F -> 0x3C77, exact)
+    #   .text-region alignment fill                          -0x007   (0xD2F -> 0xD28; 55 -> 56 fills)
+    #                                                      -------
+    #                                                       +0x7C0   against a measured +0x7C0
+    #
+    # **The string term is 139, not 142, and the three missing bytes can be pointed at.** The object's own
+    # `.rodata.str1.1` is
+    #
+    #   IORTC\0 IOKitBuildVersion\0 IOKitDiagnostics\0 io\0 iotrace\0 pmtimeout\0
+    #   IOProgressBackbuffer\0 OS Build Version\0 IODeviceTree:/chosen\0 IOProgressColorTheme\0
+    #
+    # and the 139 bytes the linker placed at 0x80137188 (the next input starts at 0x80137213 = 0x80137188 +
+    # 0x8B, so the printed contribution is *consumed*, not merely printed) are that string with **`io\0`
+    # removed**. The reference resolves to **0x80127FC7**, where the image holds `io\0/cpus\0running\0tim…` -
+    # loaded by `movw r0, #0x7fc7 / movt r0, #0x8012` at 0x8011B1AC for the first `PE_parse_boot_argn`. This
+    # is the **fourth sighting** of 301/312/314/319's rule (an object's mergeable section size is an upper
+    # bound, and so is the map's contribution line), and like 319 it is *shown* rather than inferred.
+    #
+    # **The eight bytes are the new part.** `pexpert_arm_pe_init.o`'s `.rodata.str1.1` contribution line
+    # *fell* from 446 to 438: an object this step does not link, whose section shrank because the string pool
+    # redistributed around the insertion. So a mergeable contribution line is not a property of the object
+    # that owns the section - it is an allocation out of a pool, and an insertion anywhere in the pool can
+    # move *any* line. The identity over the whole `.text` output section is what makes that visible, and it
+    # is exact:
+    #
+    #   Sigma(placed inputs)   0x13A490 -> 0x13AC57   = +0x7C7
+    #   Sigma(fill in .text)   0xD2F    -> 0xD28      = -0x007
+    #                                                 -------
+    #                                                  +0x7C0   = the section's own delta
+    #
+    # and the *only* contribution lines that changed are the five above. That was established by a
+    # whole-region multiset diff of every input line in the two maps - necessary, because **the mergeable
+    # contribution lines are two-line records** (a section name on a line of its own, then one line per
+    # input), so a parser that wants the section name and the input on the same line silently drops every
+    # mergeable input. The first version of this measurement did exactly that, reported the inputs as moving
+    # +0x4EC rather than +0x7C7, and would have hidden the pe_init line entirely. (A measurement defect of
+    # the 301/298 family, and the reason the closure is quoted from the region sums rather than from a
+    # per-object table.)
+    #
+    # **So the five-term prediction missed by 0x12, and all three reasons are named and measured**: +3
+    # because the string term was taken as the object's own section size (0x8E) rather than what the linker
+    # placed (0x8B), +8 because the pool took eight bytes back out of another object's line, and +7 of fill
+    # that the point estimate did not carry. The 0x12 is *downward* and inside nothing the prediction
+    # quoted - the band it carried was for the fill term alone - so the honest statement is: the four named
+    # terms were each right to the byte, and the miss is entirely in the mergeable accounting, which is
+    # where this project's `.text` predictions have missed since 301.
+    #
+    # **The predicted stop landed, and the offset in the prediction was quoted against the wrong base.**
+    # The relocation-stream offsets (0x118, 0x14C, 0x198, 0x1B0 ...) are relative to the object's `.text`,
+    # and the two functions before `StartIOKit` in that section are 0xF0 bytes (0x3C + 0xB4). So the `bl`
+    # that calls `IOLibInit` is at `StartIOKit+0xC0`, not +0x1B0, and the run's caller key is
+    # **`StartIOKit+0xC4`**:
+    #
+    #   StartIOKit       0x8011B1A0   (IOKitInitializeTime 0x8011B0B0, iokit_post_constructor_init 0x8011B0EC)
+    #   caller key       0x8011B264   = StartIOKit+0xC4
+    #   caller-4         0x8011B260   bl 8011BF38 <IOLibInit>   <- the instruction the prediction named
+    #
+    # The immediate successor is `bl 8011D378 <OSlibkernInit>` at 0x8011B264, and the three
+    # `PE_parse_boot_argn` calls are unconditional `bl`s with `cmp`/`strne` pairs after them, so the
+    # straight-line claim held: `IOLibInit` is reached on every path.
+    #
+    # **Everything except `.text` and `.bss` is unchanged, to the byte** - the second step in a row that
+    # crosses no 16 KB boundary:
+    #
+    #   | | base (319) | measured (320) | delta |
+    #   | .text | 0x13B1A0 | **0x13B960** | +0x7C0 |
+    #   | .data | 0x8013C000 (0x191C8) | 0x8013C000 (0x191C8) | 0 |
+    #   | .sysctl_set | 0x801551C8 (0x10C) | 0x801551C8 (0x10C) | 0 |
+    #   | .init_array | 0x801552D4 (0x4) | 0x801552D4 (0x4) | 0 |
+    #   | .bss | 0x80155300 (0x37598) | 0x80155300 (0x37658) | +0xC0 |
+    #   | __bss_end | 0x8018C898 | **0x8018C958** | +0xC0 |
+    #   | image | 1397464 (0x1552D8) | **1397464 (0x1552D8)** | 0 |
+    #   | headroom | 1521512 | **1521320** | -0xC0 |
+    #
+    # `.bss` closes the same way it did at 312: the object's **12** bytes plus **three** 64-byte stand-in
+    # slots is 0xCC, and the section grew 0xC0 because the fill in front of the stand-ins fell by exactly
+    # 0xC (0x106 -> 0xFA). The prediction said "+0xCC plus or minus fill"; the fill took all of it.
+    #
+    # **The run:**
+    #
+    #   MI4IOS6_STAGE90_XNU real XNU entry stub_hit=IOLibInit
+    #    xnu_entry_stub_caller=0x8011b264   (also _a and _e)
+    #
+    # Preflight clean (`STAGE90_XNU_ENTRY 1`, `HARD_SKIP`, `STAGE90_HW_WATCHDOG ARMED`, software dead-man
+    # armed, no storage symbols in the payload), log **301621** bytes - one fewer than 319's, because the
+    # payload records the stub's name verbatim and `IOLibInit` is one byte shorter than `StartIOKit`. One
+    # `stub_hit=` line, **no `exception:` line**.
+    #
+    # **Safety:** non-persistent `fastboot boot` only, nothing flashed,
+    # `persistent_write_attempted=0x00000000` x25, `failure_mask=0x00000000` x87,
+    # `xnu_entry_failures=0x00000000`, `xnu_entry_abort_entries=0x00000000`, and the device returned to
+    # Android on its own (`ro.build.version.release` = 10).
+    #
+    # **What this measures.** `StartIOKit` is real for the first time, and it is the first IOKit function
+    # this boot has ever run: its three `PE_parse_boot_argn` calls are real (and the third writes
+    # `pmtimeout`'s value into `gCanSleepTimeout` at 0x8018C500, a `.bss` **stand-in** that arrived in this
+    # same step - the value is stored into a slot nothing reads, and that is the stand-in hazard stated
+    # rather than discovered), and then it reaches IOKit's initialiser chain. `IOLibInit` is where the walk
+    # stops, and it is the first of the eighteen new function stubs in the order the linker laid the body
+    # out.
+    #
+    # **What it does not measure.** `IOLibInit` - defined by `iokit/Kernel/IOLib.cpp` (manifest:322), the
+    # next step. Nor the other three functions of this object (`iokit_post_constructor_init`,
+    # `IORecordProgressBackbuffer`, `IORegistrySetOSBuildVersion`): all three are defined now and referenced
+    # by nothing, which by 250/270's rule is not a count change, so nothing calls them yet. Nor the 18 new
+    # function stubs and 3 storage stand-ins beyond the fact that they exist. Nor whether
+    # `OSKext::gMetaClass` - whose `.init_array` initialiser 318 found linked and unreachable - has been
+    # read by anything: `OSKext::initialize` is a stub that stays a stub, and `IOLibInit` is the next call,
+    # so the answer is still no.
+    #
+    # **Next: `iokit/Kernel/IOLib.cpp`** (`iokit_Kernel_IOLib.o`, manifest:322), which defines `IOLibInit` -
+    # the largest single object since 318: `.text` **6476**, `.bss` **384**, `.rodata.str1.1` **299**, a
+    # `__DATA,__data` of 72, a `.rodata` of 56 and **52 references**, with `IOCreateThread`, `IOFree`,
+    # `IOFreeAligned`, `IOFreeContiguous`, `IOKernelAllocateWithPhysicalRestrict`, `IODelay` and
+    # `IOAlignmentToSize` among its definitions. It is the object that makes IOKit's allocator and thread
+    # wrappers real, and it is where the frontier moves into the IORegistry.
+    IOKIT_KERNEL_IOSTARTIOKIT_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOSTARTIOKIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOStartIOKit.o}
     # 319: `os/internal.c` - the object that defines `_os_trace_addr_in_text_segment`, and the step where
     #       the frame chain 316 entered five deep unwinds all the way back into `PE_init_iokit`
     #
@@ -10216,6 +10431,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$LIBKERN_OSKEXTLIB_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_CXX_OSKEXT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_OS_INTERNAL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -10228,7 +10444,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
