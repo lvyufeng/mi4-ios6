@@ -8,6 +8,7 @@ whose `length` cannot be a length.
     tools/xnu_dt_walk.py --verbose             # per-node table
     tools/xnu_dt_walk.py --probe 0x8090cae0    # what XNU sees if `prop` points here
     tools/xnu_dt_walk.py --probe 0x8090cae0 --landings   # and is it reachable at all
+    tools/xnu_dt_walk.py --fnv                 # the block the device's own replay prints
 
 Why this exists. Experiment 440's hardware run ended in a panic, and the message out of the trap's
 `r9` resolved it to exactly one source line:
@@ -355,6 +356,64 @@ def landings(blob, nodes, probe_off=None):
     return 0 if not bad else 1
 
 
+FNV_BASIS = 2166136261
+FNV_PRIME = 16777619
+MASK32 = 0xFFFFFFFF
+
+
+def fnv1a(h, byte):
+    return ((h ^ byte) * FNV_PRIME) & MASK32
+
+
+def fnv_block(blob):
+    """The numbers the entry image's `entry_dt_hash` prints, over the same range.
+
+    Same width rule (`ceil(n / 8)`, last chunk ending exactly at `n`), same single pass, same FNV-1a
+    32 - so the device's block and this one are comparable by diff rather than by reading a hex
+    literal twice. That is the whole point of the flag: 442 left the question "are the bytes in
+    memory the bytes in the file" between two runs, and a comparison of two printed blocks is what
+    answers it.
+    """
+    n = len(blob)
+    chunk_bytes = (n + 7) >> 3
+    whole = FNV_BASIS
+    chunks = [FNV_BASIS] * 8
+    off = 0
+    for c in range(8):
+        end = min((c + 1) * chunk_bytes, n)
+        while off < end:
+            whole = fnv1a(whole, blob[off])
+            chunks[c] = fnv1a(chunks[c], blob[off])
+            off += 1
+    return whole, chunks, chunk_bytes
+
+
+def fnv_report(blob, nodes):
+    """The device's own key block, so the comparison is `diff` and not an eye."""
+    whole, chunks, chunk_bytes = fnv_block(blob)
+    props = sum(nd.nprops for nd in nodes)
+    print()
+    print("the entry image's `fleh_undef` prints these; a device run that agrees with this block is a")
+    print("run whose tree in memory is the blob, byte for byte:")
+    print()
+    print(f"  xnu_entry_dt_map_base=0x{0x80000000:08x}   (gVirtBase, the range the replay bounded "
+          f"its reads by)")
+    print(f"  xnu_entry_dt_replay_nodes=0x{len(nodes):08x}")
+    print(f"  xnu_entry_dt_replay_props=0x{props:08x}")
+    print(f"  xnu_entry_dt_replay_steps=0x{len(nodes) + props:08x}")
+    print(f"  xnu_entry_dt_replay_end=0x{len(blob):08x}")
+    print(f"  xnu_entry_dt_replay_stop=0x{0:08x}")
+    print(f"  xnu_entry_dt_replay_stop_kind=0x{0:08x}")
+    print(f"  xnu_entry_dt_checksum=0x{whole:08x}")
+    print(f"  xnu_entry_dt_chunk_bytes=0x{chunk_bytes:08x}")
+    for c in range(8):
+        print(f"  xnu_entry_dt_chunk{c}=0x{chunks[c]:08x}")
+    print()
+    print(f"  (replay_steps is nodes + properties: {len(nodes)} + {props} = {len(nodes) + props},"
+          f" which is what the step counter counts)")
+    return whole
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--blob", default=DEFAULT_BLOB)
@@ -367,6 +426,9 @@ def main():
     ap.add_argument("--landings", action="store_true",
                     help="print every address next_prop can land on, and whether any is not a "
                          "node/property boundary")
+    ap.add_argument("--fnv", action="store_true",
+                    help="print the key block the entry image's own replay and hash produce, over "
+                         "the blob - comparing the two blocks is the comparison")
     args = ap.parse_args()
 
     if not os.path.isfile(args.blob):
@@ -472,6 +534,9 @@ def main():
 
     if args.landings:
         status |= landings(blob, nodes, probe_offs[0] if probe_offs else None)
+
+    if args.fnv:
+        fnv_report(blob, nodes)
 
     for off in probe_offs:
         status |= probe(blob, nodes, off, args.verbose)

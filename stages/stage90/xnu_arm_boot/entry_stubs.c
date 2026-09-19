@@ -1703,6 +1703,215 @@ entry_kernel_word(uintptr_t p)
 }
 
 /*
+ * ------------------------------------------------------- the tree, replayed on the device's bytes
+ *
+ * 442 established two things and left one address between them. The walk **had** the blob — its root
+ * read `0x80900000` with 4 properties, 0x15 children and a first property named `"name"` — and the
+ * address it died on, `0x8090cae0`, is **not** one `next_prop` can produce over the blob's own bytes
+ * (`tools/xnu_dt_walk.py --landings`: 603 landings, every one of them a node header, a property
+ * header or the tree's end, the highest exactly the tree's `0x7358`, and none at `0xcae0`). Both
+ * readings are about the file. Neither is about the memory the walk was reading, and the host dump
+ * cannot see the difference.
+ *
+ * So this replays XNU's walk on the device's own bytes and hashes them in the same pass:
+ *
+ *   **the replay** is a walk that ends where the host's walk ends (0x7358, 26 nodes, 629 properties)
+ *   or records the offset where it stopped and which of XNU's conditions stopped it. A walk that
+ *   ends at the same offset having seen the same counts **is** the host's walk, on the same bytes;
+ *
+ *   **the hash** is what makes "the same bytes" a statement rather than an inference, because a
+ *   replay can agree on structure while a value inside a property differs, and a `length` is a value
+ *   inside a property;
+ *
+ *   and the two together are what separates the two explanations 442 left: equal structure and equal
+ *   hash and the bytes are the file's, so the panicking walk was handed a pointer off this tree and
+ *   the frontier is the **caller**; anything else and the first chunk that differs bounds where the
+ *   **writer** worked.
+ *
+ * The hash is FNV-1a 32 — offset basis 2166136261, prime 16777619 — over exactly the bytes the
+ * replay consumed, `[root, root + end)`, and then over each eighth of that same range: a whole-range
+ * mismatch says *that* the bytes differ and the chunk hashes say *where*, and both come out of one
+ * pass. `tools/xnu_dt_walk.py --fnv` computes the identical numbers over the blob, so the comparison
+ * is a diff of two blocks of text rather than a number checked by eye.
+ *
+ * Three choices worth stating, because each of them is a way this could have been wrong:
+ *
+ *   **The reads are bounded by the linear map, and the bound is derived** — see the block below.
+ *
+ *   **The overflow test is on absolute addresses, not offsets.** XNU's check is
+ *   `os_add3_overflow(prop, prop->length, sizeof(DeviceTreeNodeProperty))` on the pointer.
+ *   `0xff000000` added to an offset of `0x1234` does not carry and added to `0x80901234` does, so an
+ *   offset-space test would walk straight past 442's own panic and report a clean tree.
+ *
+ *   **The property loop is the host tool's, step for step** — the advance runs for every property,
+ *   the overflow test only from the second on, because `DTInitPropertyIterator` sets the first
+ *   property as `entry + 1` and `next_prop` is never called for it. A replay that used its own
+ *   arithmetic would be comparing the host against a second implementation of the walk instead of
+ *   against the device's memory.
+ */
+#define ENTRY_DT_REPLAY_CAP 0x4000u      /* nodes + properties; the blob's tree has 655 */
+#define ENTRY_DT_REPLAY_DEPTH 16u        /* the blob's tree is 3 deep */
+#define ENTRY_DT_MEM_SIZE_MAX 0x40000000ul   /* `arm_vm_init.c`'s MEM_SIZE_MAX */
+
+#define ENTRY_DT_STOP_NONE     0u        /* the walk finished */
+#define ENTRY_DT_STOP_OVERFLOW 1u        /* XNU's os_add3_overflow: the panic, at `stop` */
+#define ENTRY_DT_STOP_CAP      2u        /* the step cap */
+#define ENTRY_DT_STOP_DEPTH    3u        /* the depth cap */
+#define ENTRY_DT_STOP_RANGE    4u        /* a read below gVirtBase or above the linear map */
+
+#define ENTRY_FNV_BASIS 2166136261u
+#define ENTRY_FNV_PRIME 16777619u
+
+/*
+ * The reads are bounded by the linear map, and the bound is derived rather than written down.
+ *
+ * The host tool can refuse a landing past `len(blob)`; the device cannot, because it does not have a
+ * `len(blob)` — but it does not need one. Within `[gVirtBase, gVirtBase + MEM_SIZE_MAX)` every
+ * address is XNU's own linear map of physical memory and therefore readable, which is the same fact
+ * that lets this file read the kernel's bootstrap stack at `0xc2013000`. `MEM_SIZE_MAX` is
+ * `0x40000000` in `osfmk/arm/arm_vm_init.c` — the same constant `:505` turns into
+ * `virtual_space_start`, which is why 441's bootstrap stack moved to `0xc0000000` and above.
+ *
+ * A bound here has to exist for one case the overflow check does not cover: the **first** property of
+ * a node is set by `DTInitPropertyIterator` as `entry + 1` and never passes through `next_prop`, so
+ * on the host the `limit` is what refuses a first property whose `length` is enormous, and XNU's own
+ * overflow check only sees it one iteration later. Outside the map the replay stops with
+ * `ENTRY_DT_STOP_RANGE`, and `xnu_entry_dt_map_base` beside it says which range it was using — so a
+ * refusal is a reading rather than a silence.
+ */
+extern unsigned long gVirtBase;
+
+struct entry_dt_replay {
+    uint32_t nodes;
+    uint32_t props;
+    uint32_t steps;
+    uint32_t end;                        /* where the walk finished, relative to `root` */
+    uint32_t stop;                       /* the offset a condition fired at */
+    uint32_t stop_kind;
+    uint32_t hash;                       /* FNV-1a over [root, root + end) */
+    uint32_t chunk_hash[8];
+    uint32_t chunk_bytes;                /* ceil(end / 8), the chunk width both sides use */
+    uint32_t map_base;                   /* gVirtBase, as the range check read it */
+};
+
+static uint32_t
+entry_dt_fnv(uint32_t h, uint32_t byte)
+{
+    h ^= byte & 0xFFu;
+    return h * ENTRY_FNV_PRIME;
+}
+
+static int
+entry_dt_addr_ok(uintptr_t p)
+{
+    return (p >= (uintptr_t)gVirtBase) && ((p - (uintptr_t)gVirtBase) < ENTRY_DT_MEM_SIZE_MAX);
+}
+
+static uint32_t
+entry_dt_replay_node(uintptr_t base, uint32_t off, uint32_t depth, struct entry_dt_replay *r)
+{
+    uint32_t nprops, nchildren, p, i;
+
+    if (r->stop_kind != ENTRY_DT_STOP_NONE) {
+        return off;
+    }
+    if (depth > ENTRY_DT_REPLAY_DEPTH) {
+        r->stop_kind = ENTRY_DT_STOP_DEPTH;
+        r->stop = off;
+        return off;
+    }
+
+    if (++r->steps > ENTRY_DT_REPLAY_CAP) {
+        r->stop_kind = ENTRY_DT_STOP_CAP;
+        r->stop = off;
+        return off;
+    }
+    if (!entry_dt_addr_ok(base + off + 7u)) {
+        r->stop_kind = ENTRY_DT_STOP_RANGE;
+        r->stop = off;
+        return off;
+    }
+
+    nprops = entry_word_at(base + off);
+    nchildren = entry_word_at(base + off + 4u);
+    r->nodes++;
+
+    p = off + 8u;
+    for (i = 0u; i < nprops; i++) {
+        uintptr_t a, t;
+        uint32_t length;
+
+        if (r->stop_kind != ENTRY_DT_STOP_NONE) {
+            return p;
+        }
+        if (++r->steps > ENTRY_DT_REPLAY_CAP) {
+            r->stop_kind = ENTRY_DT_STOP_CAP;
+            r->stop = p;
+            return p;
+        }
+        if (!entry_dt_addr_ok(base + p + 35u)) {
+            r->stop_kind = ENTRY_DT_STOP_RANGE;
+            r->stop = p;
+            return p;
+        }
+
+        r->props++;
+        length = entry_word_at(base + p + 32u);
+
+        a = base + p;
+        t = a + length;
+        if ((i > 0u) && ((t < a) || ((t + 36u) < t))) {
+            r->stop_kind = ENTRY_DT_STOP_OVERFLOW;
+            r->stop = p;
+            return p;
+        }
+
+        p = p + 36u + ((length + 3u) & ~3u);
+    }
+
+    for (i = 0u; i < nchildren; i++) {
+        p = entry_dt_replay_node(base, p, depth + 1u, r);
+        if (r->stop_kind != ENTRY_DT_STOP_NONE) {
+            return p;
+        }
+    }
+
+    return p;
+}
+
+/*
+ * FNV-1a over `[base, base + n)`, whole and in eighths, in one pass and with no division: the chunk
+ * width is `ceil(n / 8)` and the last chunk ends exactly at `n`. `tools/xnu_dt_walk.py --fnv` uses
+ * the same width, which is the only thing that has to agree for the two blocks to be comparable.
+ */
+static void
+entry_dt_hash(uintptr_t base, uint32_t n, struct entry_dt_replay *r)
+{
+    uint32_t c, off;
+
+    r->chunk_bytes = (n + 7u) >> 3;
+    r->hash = ENTRY_FNV_BASIS;
+    for (c = 0u; c < 8u; c++) {
+        r->chunk_hash[c] = ENTRY_FNV_BASIS;
+    }
+
+    off = 0u;
+    for (c = 0u; c < 8u; c++) {
+        uint32_t end = (c + 1u) * r->chunk_bytes;
+
+        if (end > n) {
+            end = n;
+        }
+        for (; off < end; off++) {
+            uint32_t b = (uint32_t)*(const volatile unsigned char *)(base + off);
+
+            r->hash = entry_dt_fnv(r->hash, b);
+            r->chunk_hash[c] = entry_dt_fnv(r->chunk_hash[c], b);
+        }
+    }
+}
+
+/*
  * XNU's own accessor for the root of the tree it is walking.
  *
  * `DTRootNode` is `static` in `pexpert/gen/device_tree.c`, so it cannot be named from here, and an
@@ -1723,6 +1932,8 @@ void fleh_undef(void)
     uint32_t i;
     int args_ok;
     uint32_t root;
+    uint32_t c;
+    struct entry_dt_replay replay;
 
     __asm__ volatile ("mov %0, sp" : "=r"(frame));
 
@@ -1948,6 +2159,60 @@ void fleh_undef(void)
 
         for (i = 0u; i < 8u; i++) {
             entry_kv(pw[i], entry_word_at((uintptr_t)element + (i * 4u)));
+        }
+    }
+
+    /*
+     * ------------------------------------------------- the tree, replayed on the device's own bytes
+     *
+     * The two questions 442 left are about the *memory* and not about the file, so the answer has to
+     * be taken here: a walk over the bytes at `root`, with XNU's formula, and a hash of the bytes it
+     * consumed. The keys are printed unconditionally, zeros included, because a walk that did not run
+     * has to be distinguishable from one that ran and found nothing — `xnu_entry_dt_root` is logged
+     * above and is the gate's own report.
+     *
+     * `xnu_entry_dt_replay_end` is where the walk stopped, so it is the tree's length **only** when
+     * `xnu_entry_dt_replay_stop_kind` is 0. The host's values to compare against come from
+     * `tools/xnu_dt_walk.py --fnv`: 26 nodes, 629 properties, end `0x7358`, and the same nine hashes
+     * over the same range.
+     */
+    replay.nodes = 0u;
+    replay.props = 0u;
+    replay.steps = 0u;
+    replay.end = 0u;
+    replay.stop = 0u;
+    replay.stop_kind = ENTRY_DT_STOP_NONE;
+    replay.hash = 0u;
+    replay.chunk_bytes = 0u;
+    replay.map_base = (uint32_t)gVirtBase;
+    for (c = 0u; c < 8u; c++) {
+        replay.chunk_hash[c] = 0u;
+    }
+
+    if (entry_kernel_ptr((uintptr_t)root)) {
+        replay.end = entry_dt_replay_node((uintptr_t)root, 0u, 0u, &replay);
+        entry_dt_hash((uintptr_t)root, replay.end, &replay);
+    }
+
+    entry_kv("xnu_entry_dt_map_base", replay.map_base);
+    entry_kv("xnu_entry_dt_replay_nodes", replay.nodes);
+    entry_kv("xnu_entry_dt_replay_props", replay.props);
+    entry_kv("xnu_entry_dt_replay_steps", replay.steps);
+    entry_kv("xnu_entry_dt_replay_end", replay.end);
+    entry_kv("xnu_entry_dt_replay_stop", replay.stop);
+    entry_kv("xnu_entry_dt_replay_stop_kind", replay.stop_kind);
+    entry_kv("xnu_entry_dt_checksum", replay.hash);
+    entry_kv("xnu_entry_dt_chunk_bytes", replay.chunk_bytes);
+    {
+        static const char *const ck[8] = {
+            "xnu_entry_dt_chunk0", "xnu_entry_dt_chunk1",
+            "xnu_entry_dt_chunk2", "xnu_entry_dt_chunk3",
+            "xnu_entry_dt_chunk4", "xnu_entry_dt_chunk5",
+            "xnu_entry_dt_chunk6", "xnu_entry_dt_chunk7",
+        };
+
+        for (c = 0u; c < 8u; c++) {
+            entry_kv(ck[c], replay.chunk_hash[c]);
         }
     }
 
