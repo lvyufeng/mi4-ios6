@@ -89,6 +89,64 @@ MSM8974PlatformExpert::start( IOService * provider )
 {
     if( !super::start( provider )) return( false );
 
+    /* Experiment 420. `bsd_init` calls `IOKitInitializeTime()` between `bsd_bufferinit()` and
+     * `ubc_init()` (`bsd/kern/bsd_init.c:727-728`, and the disassembly agrees: `bl IOKitInitializeTime`
+     * at `0x8003B1B0`, `bl ubc_init` at `0x8003B1B4`), and that function is a wait, not a read
+     * (`iokit/Kernel/IOStartIOKit.cpp:67-77`):
+     *
+     *     mach_timespec_t t; t.tv_sec = 30; t.tv_nsec = 0;
+     *     IOService::waitForService( IOService::resourceMatching("IORTC"), &t );
+     *     clock_initialize_calendar();
+     *
+     * Experiment 419 measured what its absence costs: `waitForMatchingService` finds nothing, takes the
+     * notify lock and sleeps on a deadline, and the run reports *nothing at all* - the log stops at
+     * `jumping to XNU's _start`, with no `stub_hit`, no `abort_entries`, no `exception:` and no `panic`,
+     * while the link is demonstrably the new one. Both ways out of that sleep are closed on this
+     * machine: the 30 s deadline cannot fire, because nothing here arms a hardware timer
+     * (`ml_set_decrementer` takes the `!__ARM_TIME__` branch and only stores to per-CPU memory, since
+     * `cpu_set_decrementer_func` is NULL - `ml_init_timebase`'s only caller is `pe_identify_machine`'s
+     * Apple-SoC `strcmp` chain, which `return 0`s for MSM8974), and the net cannot outlive it either
+     * (the bark register is 20 bits at 32765 Hz: 29 s is the largest bark it can hold).
+     *
+     * **`IORTC` is a closed-source driver's resource, and this machine's RTC is a platform device.**
+     * Nothing in the open-source tree publishes it: the only `publishResource` calls in the tree are
+     * `"IONVRAM"` and `kIOPlatformUUIDKey` (`iokit/Kernel/IOPlatformExpert.cpp:1204-1209`, in
+     * `registerNVRAMController`), `"IOKit"` (`IOService.cpp:1212`, in `setPlatform`), `"IOBSD"`
+     * (`iokit/bsddev/IOKitBSDInit.cpp:95`) and `"boot-uuid"`. `IORTCController`
+     * (`iokit/IOKit/rtc/IORTCController.h:37`) is an abstract `IOService` with no implementation in the
+     * tree at all - so the publisher is Apple's closed-source RTC driver, and on this SoC the clock it
+     * would drive is the platform's own: the GPT at `0xf9020000` (19.2 MHz), which the payload's own
+     * interrupt handler already counts. Stating it from the platform expert is the same idiom XNU uses
+     * for the resources the platform owns, not a shortcut around one.
+     *
+     * The match is a property test, not a class test: `resourceMatching("IORTC")` sets the table's
+     * `IOResourceMatch` key to `"IORTC"`, and `IOResources::matchPropertyTable`
+     * (`IOService.cpp:5083-5091`) answers `0 != getProperty("IORTC")` on the resource nub.
+     * `IOService::publishResource(key, 0)` sets that property and `registerService()`s the nub
+     * (`IOService.cpp:3532-3544`), which is exactly what `publishResource("IONVRAM")` does two
+     * functions earlier in Apple's own code. With it, `waitForService` returns the resource
+     * immediately - the wait needs no timer, which is why this step is worth taking before the timer
+     * work rather than after it.
+     *
+     * **Prediction, written before the build: `stub_hit=ubc_init`, caller key `0x8003B1B8`** - the
+     * return address of the `bl <ubc_init>` at `0x8003B1B4`, `bsd_init + 0x7C4`. `bsd_init`'s own
+     * addresses cannot move: the statement this step adds is in an object linked after `bsd_init.c`'s.
+     * Between this call and that stub: `clock_initialize_calendar` (real, 0x1E0 bytes, walked clean in
+     * both directions - its only indirect is `PEGetUTCTimeOfDay`'s `if (gIOPlatform)`-guarded virtual
+     * call, `IOPlatformExpert.cpp:1096-1105`).
+     *
+     * Falsifiers, named in advance: **the same silence** - which would mean the match still failed or
+     * something faulted inside the publish or the waiter, and is the outcome that would say this
+     * analysis is wrong; a stop inside `waitForService`, `resourceMatching`, `copyExistingServices`,
+     * `IOService::setNotification` or `IORecursiveLockSleepDeadline`; a stop at `ast_taken_kernel` (a
+     * stub three guards deeper in `clock_initialize_calendar`'s guarded list, reachable only if an AST
+     * is pending when interrupts are enabled); a stop at `CURSIG` (419's name, for a signalled thread);
+     * a `panic`; a stop at `vfsinit` (`+0x7C8`, key `0x8003B1BC`), which would mean `ubc_init` had
+     * already been retired. Note also that this step adds **no symbols** - the stub set is untouched
+     * and the payload's marker set may be byte-identical to 419's (defect 130); what will prove the new
+     * image ran is the stop. */
+    IOService::publishResource( "IORTC" );
+
     /* Experiment 405. `ml_get_max_cpus` (`osfmk/arm/machine_routines.c:184`) is a wait, not a read:
      * `if (max_cpus_initialized != MAX_CPUS_SET) { max_cpus_initialized = MAX_CPUS_WAIT;
      * assert_wait(&max_cpus_initialized, THREAD_UNINT); thread_block(THREAD_CONTINUE_NULL); }`, and
