@@ -245,6 +245,40 @@ $OBJDUMP -d $REPO_ROOT/out/stage90/stage90.elf > $REPO_ROOT/out/stage90/stage90.
 $NM -n $REPO_ROOT/out/stage90/stage90.elf > $REPO_ROOT/out/stage90/stage90.symbols
 $SIZE $REPO_ROOT/out/stage90/stage90.elf > $REPO_ROOT/out/stage90/stage90.size
 
+# The high alias of the payload's own image has to cover the whole image, and both tables that
+# build it loop until they reach either the image's end or `STAGE90_IMAGE_ALIAS_LIMIT`. When the
+# image wins that race, nothing faults: the alias simply stops early, and whatever reads through it
+# resolves into the next alias instead and returns that device's contents. Experiment 425 spent a
+# hardware run on exactly this - the probe moved past a window that was 3 MB while the other table's
+# was 4 MB - and the only symptom was a verification reporting a mismatch.
+#
+# Checked here, after the link and before the images are packed: this is the first point at which
+# the image's size exists, and a build that cannot run is worth stopping. The limit is read out of
+# the header rather than repeated, so there is still one definition of the window - the compiler
+# expands it into an array bound, which goes to the shell as arithmetic and has no second copy to
+# drift. (`-dM` would print the macro's replacement text symbolically, not its value.)
+ALIAS_LIMIT_EXPR=$($CC "${CFLAGS[@]}" -E -P -include stage90.h -x c - \
+    <<< 'char stage90_alias_limit_probe[STAGE90_IMAGE_ALIAS_LIMIT];' \
+  | sed -n 's/^char stage90_alias_limit_probe\[\(.*\)\];$/\1/p' | tr -d 'u')
+ALIAS_LIMIT=$(( ALIAS_LIMIT_EXPR ))
+IMAGE_END=$($NM -n $REPO_ROOT/out/stage90/stage90.elf \
+  | awk '$3 == "__stage90_image_end" { print $1 }')
+if [[ -z $IMAGE_END ]]; then
+  echo "error: __stage90_image_end is not in stage90.elf; the image-alias check cannot run" >&2
+  exit 1
+fi
+IMAGE_END=$(( 16#$IMAGE_END ))
+if (( IMAGE_END > ALIAS_LIMIT )); then
+  printf 'error: the image ends at 0x%x, past the image-alias window limit 0x%x\n' \
+    "$IMAGE_END" "$ALIAS_LIMIT" >&2
+  echo "       the high alias (STAGE90_HIGH_ALIAS_BASE) would stop before the end of the image," >&2
+  echo "       and a reader of that alias would get the next device alias's contents instead" >&2
+  echo "       - widen STAGE90_IMAGE_ALIAS_WINDOW in stage90.h, or shrink the image" >&2
+  exit 1
+fi
+printf 'image alias window: image ends at 0x%x, limit 0x%x, %d MB of headroom\n' \
+  "$IMAGE_END" "$ALIAS_LIMIT" "$(( (ALIAS_LIMIT - IMAGE_END) / (1024 * 1024) ))"
+
 : > $REPO_ROOT/out/stage90/empty-ramdisk
 
 # The kernel cmdline is a claim about what this payload does, so the cache token has to follow

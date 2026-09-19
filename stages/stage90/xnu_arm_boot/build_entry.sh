@@ -13510,6 +13510,246 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     BSD_KERN_KERN_SYNCH_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_SYNCH_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_synch.o}
     BSD_KERN_UBC_SUBR_OBJ=${STAGE90_ENTRY_BSD_KERN_UBC_SUBR_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_ubc_subr.o}
     BSD_VFS_VFS_INIT_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_INIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_vfs_init.o}
+    BSD_VFS_VFS_SYSCALLS_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_SYSCALLS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_vfs_syscalls.o}
+    BSD_KERN_PROC_UUID_POLICY_OBJ=${STAGE90_ENTRY_BSD_KERN_PROC_UUID_POLICY_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_proc_uuid_policy.o}
+    BSD_KERN_MCACHE_OBJ=${STAGE90_ENTRY_BSD_KERN_MCACHE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_mcache.o}
+    BSD_KERN_UIPC_MBUF_OBJ=${STAGE90_ENTRY_BSD_KERN_UIPC_MBUF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_uipc_mbuf.o}
+    BSD_KERN_KPI_MBUF_OBJ=${STAGE90_ENTRY_BSD_KERN_KPI_MBUF_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kpi_mbuf.o}
+    BSD_NET_NET_STR_ID_OBJ=${STAGE90_ENTRY_BSD_NET_NET_STR_ID_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_net_str_id.o}
+    BSD_KERN_SUBR_EVENTHANDLER_OBJ=${STAGE90_ENTRY_BSD_KERN_SUBR_EVENTHANDLER_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_subr_eventhandler.o}
+    BSD_KERN_KERN_AIO_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_AIO_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_aio.o}
+    BSD_KERN_SYS_PIPE_OBJ=${STAGE90_ENTRY_BSD_KERN_SYS_PIPE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_sys_pipe.o}
+    BSD_KERN_POSIX_SHM_OBJ=${STAGE90_ENTRY_BSD_KERN_POSIX_SHM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_posix_shm.o}
+    BSD_KERN_POSIX_SEM_OBJ=${STAGE90_ENTRY_BSD_KERN_POSIX_SEM_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_posix_sem.o}
+    BSD_KERN_PTHREAD_SHIMS_OBJ=${STAGE90_ENTRY_BSD_KERN_PTHREAD_SHIMS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_pthread_shims.o}
+    BSD_KERN_SYS_GENERIC_OBJ=${STAGE90_ENTRY_BSD_KERN_SYS_GENERIC_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_sys_generic.o}
+    # ---------------------------------------------------------------------------------------------
+    # **425 is the first *batch* step: thirteen objects in one link.** (The first draft had twelve;
+    # `bsd_vfs_vfs_syscalls.o` was added to it after the build described below - see the paragraph on
+    # `nspace_handler_init` near the end of this block.)
+    #
+    # 424's stop was `nspace_handler_init`, the third of the four stubs 422 created four bytes apart in
+    # `vfsinit`. The remaining distance from there to `vfs_mountroot` is no longer inside `vfsinit`'s
+    # body - it is **`bsd_init`'s own statement list**, and it was measured rather than estimated:
+    # intersecting the destination names of every `bl` in `bsd_init` with the stub set gives 45 names,
+    # and each one is defined by a *different* pool object. So the path from here to the root mount is
+    # roughly thirty-five more one-object steps at the rate of 415-424.
+    #
+    # This step takes thirteen of them at once. **The shape of the evidence changes with the batch, and
+    # that is deliberate rather than sloppy:** a single-object step can state its prediction before the
+    # build, because the stub set it produces is arithmetic on the current one; a batch changes the
+    # stub set by construction, and the only reliable way to say where a batched link stops is to read
+    # the linked image. So for this step the prediction is written **after the build and before the
+    # device run**, from `xnu_entry_callwalk.py --root bsd_init` against the image that was actually
+    # linked - which is a stronger check than an arithmetic one, not a weaker one, because it follows
+    # the real call graph including the bodies this step makes real. What is given up is the
+    # *ordering* of the two acts, not the falsifiability of the claim.
+    #
+    # The thirteen objects, in `bsd_init`'s order, each measured against the 424 image:
+    #
+    #     bsd_kern_proc_uuid_policy.o   retires proc_uuid_policy_init            1 resolved / 0 added
+    #     bsd_kern_mcache.o             retires mcache_init (+ assfail)          2 resolved / 1 added
+    #     bsd_kern_uipc_mbuf.o          retires mbinit and the mbuf core         8 resolved / 36 added
+    #     bsd_kern_kpi_mbuf.o           retires mbuf_get_mlen and the KPI face   1 resolved / 51 added
+    #     bsd_net_net_str_id.o          retires net_str_id_init                  3 resolved / 1 added
+    #     bsd_kern_subr_eventhandler.o  retires eventhandler_init               1 resolved / 0 added
+    #     bsd_kern_kern_aio.o           retires aio_init                        2 resolved / 2 added
+    #     bsd_kern_sys_pipe.o           retires pipeinit                        5 resolved / 11 added
+    #     bsd_kern_posix_shm.o          retires pshm_lock_init, pshm_cache_init 4 resolved / 10 added
+    #     bsd_kern_posix_sem.o          retires psem_lock_init, psem_cache_init 3 resolved / 9 added
+    #     bsd_kern_pthread_shims.o      retires pthread_init and nine more      11 resolved / 0 added
+    #     bsd_kern_sys_generic.o        retires select_waitq_init               7 resolved / 9 added
+    #     bsd_vfs_vfs_syscalls.o        retires nspace_handler_init             14 resolved / 85 added
+    #
+    # **Every one of the thirteen init bodies was read against the object's own disassembly, and every
+    # call it makes was checked against the stub set the batch produces.** The bodies are short and
+    # uniform - `lck_grp_attr_alloc_init` / `lck_grp_alloc_init` / `lck_attr_alloc_init` /
+    # `lck_mtx_init` (all real, the same family 415-424 have gone through), `hashinit` (real since
+    # 409), `zinit` and `zone_change` (real, and 421's rule applies - they have already returned many
+    # times on this machine), `waitq_init`, `kernel_thread_start` + `thread_deallocate`, and
+    # `_consume_printf_args`. Three specific checks that a per-object reading would have missed:
+    #
+    #   * **`mbinit` is the one body with real work in it** - 0x700 bytes, three `mbuf_*` sizing calls,
+    #     `read_random` x3, seven `snprintf`s, `mcache_create`/`mcache_create_ext`/`mcache_getflags`/
+    #     `mcache_cache_line_size` and two `kernel_thread_start`s. **Its `mbuf_*` and `mcache_*` calls
+    #     are the reason `bsd_kern_kpi_mbuf.o` and `bsd_kern_mcache.o` are in this batch and not in a
+    #     later one**: `mbuf_get_minclsize`, `mbuf_get_mlen` and `mbuf_get_mhlen` live in
+    #     `kpi_mbuf.o`, and the four `mcache_*` names live in `mcache.o`, so without both of them
+    #     `mbinit` would stop inside itself on its first sizing call and the batch would have bought
+    #     two stubs rather than fourteen.
+    #   * **`freelist_populate`**, called by `mbinit`, is in no stub set and in no object's definition
+    #     list: it is a local/static helper inside `uipc_mbuf.o` itself, inlined or emitted privately.
+    #     The check that says so is the pool-wide `nm` lookup coming up empty *and* the name not being
+    #     a stub - a name that is both is a private symbol, not a missing one.
+    #   * **`IOMapperIOVMAlloc`**, also called by `mbinit`, is defined by `iokit_Kernel_IOMapper.o`,
+    #     which has been in `LINK_OBJS` since the IOKit work - so it is real, and it is real *because*
+    #     of an object this batch does not touch.
+    #
+    # **`nspace_handler_init` had to be in the batch and was not in the first draft of it** — it is the
+    # fourth of 422's four consecutive stubs, it is called from *inside* `vfsinit`, and it therefore
+    # blocks every one of the other twelve objects from being reached at all. The first build of this
+    # step linked the twelve without it, and `walk from bsd_init` came back `nspace_handler_init` — the
+    # frontier unmoved, one step's worth of reading spent to learn that `bsd_init`'s line is a *chain of
+    # nested calls*, not a flat list: `mcache_init` and `mbinit` sit on `bsd_init`'s own line but *behind*
+    # `vfsinit`'s return, so an object that retires one of them buys nothing until `vfsinit` completes.
+    # **The batch's membership is therefore ordered by the call graph, not by the statement list.**
+    #
+    # The batch also creates a great many new stubs - the net is **817 -> 906** names, 777 function and
+    # 129 storage against 687 and 130, the mbuf KPI face and the VFS syscall surface being the largest
+    # contributors - and **that is the risk this step accepts**: a created stub is only dangerous if it
+    # is reachable before the frontier, and the post-link walk is what checks that rather than an
+    # assumption.
+    #
+    # **Prediction, written after the link of the batch and before the device run** (see above for why
+    # the order is reversed for a batch step): `stub_hit=nwk_wq_init`, caller key `0x8003B1FC` - the
+    # return address of the `bl <nwk_wq_init>` at `0x8003B1F8`, `bsd_init + 0x808`. The walk from
+    # `bsd_init` answers `nwk_wq_init` on the straight-line path, having traversed `vfsinit`'s whole
+    # body and the fourteen init calls between it and there.
+    #
+    # **The device did not get there, and it stopped for a reason no walk can see: the run was refused
+    # before the jump, by the loader's own preflight.** Measured, on the image this batch linked:
+    #
+    #     MI4IOS6_STAGE90_XNU loader_xnu_arm_vm_init_full_pmap_failure_mask=0x80000040
+    #     MI4IOS6_STAGE90_XNU loader_xnu_entry_stub_failure_mask=0x00008910
+    #     MI4IOS6_STAGE90_XNU kernel_entry bad: Mach-O/XNU loader preflight
+    #     MI4IOS6_STAGE90_XNU kernel_entry returned failure
+    #
+    # `xnu_entry_stub_caller_v` was never printed because the stub was never entered. The two masks
+    # decode to one *measured* failure each: `0x40` is `FAIL_HIGH_ALIAS`, and the `0x80000000` / `0x800`
+    # bits are `FAIL_SAFETY_BOUNDARY`, which the full-pmap check *derives* from its own final
+    # `failure_mask == 0` test rather than measuring - so the run's one real failure is the high-alias
+    # probe: `high_alias_verified=0x00000000`, everything around it satisfied.
+    #
+    # **Root cause, and it is this step's own doing: the image grew past the candidate table's
+    # image-alias window, and that window's size was a side effect of where an unrelated alias
+    # happened to sit.** `xnu_arm_vm_init_full_pmap.c`'s Phase 5 builds the high alias of the payload's
+    # own image (`STAGE90_HIGH_ALIAS_BASE + off -> PA off`) in a loop that stops early when the next
+    # alias would collide with the next device alias. In the *candidate* table that limit was that
+    # file's own local `STAGE90_RAM_CONSOLE_ALIAS_BASE` at `0xc0300000` - 3 MB - while `mmu.c`'s
+    # identity table, the one the payload actually runs under, stops at its GIC alias `0xc0400000` -
+    # 4 MB. **One window with two limits, in two files, and nothing compared them.** The batch then
+    # moved the word the check reads over the smaller one:
+    #
+    #     stage90_full_pmap_probe_word   424 image  PA 0x002FC0B4   (0x3F4C below the 3 MB limit)
+    #                                    425 image  PA 0x0032C0B4   (0x2C0B4 past it)
+    #
+    # so Phase 5 stopped after three sections, `*alias_probe` became `0xc032c0b4` - not the image
+    # alias's fourth section but the *RAM-console* alias's second kilobyte, PA `0xde52c0b4` - and the
+    # read returned ramoops content instead of `0x11223344`. Nothing faulted; the mapped VA simply
+    # belonged to another device. The one log line naming the cause was inside the branch that runs
+    # only when it is already too late (`pmap_image_alias_image_end=0x00362000`,
+    # `pmap_image_alias_limit=0xc0300000`, `pmap image alias window is smaller than the image`).
+    #
+    # **The identity table was never at risk**, which is why this is a gate failure and not a crash:
+    # its window is 4 MB, `mmu_high_alias_sections=0x00000004` with no "smaller than the image" line,
+    # so the payload's own map was complete and the boot would have run under it. What refused the jump
+    # was the full-pmap *dry-run* failing a check the real table would have passed - the preflight
+    # working as designed, and a cheap refusal instead of a jump into a table that was not what the
+    # model said. `candidate_l2_pool_checksum=0x00000000` is **not** part of this: `candidate_l1_checksum`
+    # XORs words, and with four L2 tables mapping VA `0x80000000+off` to PA `off` every descriptor is
+    # PA-sensitive and the pairs cancel. The healthy 424 run recorded the same zero.
+    #
+    # **Fixed in this step, and the fix is one definition instead of two.** `stage90.h` now holds
+    # `STAGE90_IMAGE_ALIAS_WINDOW` (64 MB: `0xc0000000` to `0xc4000000`) as the sole definition; the GIC
+    # and RAM-console alias bases are derived from it and moved above it; `mmu.c` and
+    # `xnu_arm_vm_init_full_pmap.c` both lost their local copies and read the header; `#error` guards
+    # make an alias inside the window - or a window reaching `RAM_CONSOLE_BASE` at `0xde500000` - a
+    # build failure; and `build.sh` grew a post-link gate comparing `__stage90_image_end` (from the
+    # linked ELF) against the limit (read out of the header by compiling it into an array bound, so
+    # there is still exactly one definition and no second copy to drift). The gate prints `image alias
+    # window: image ends at 0x362000, limit 0xc4000000, 3132 MB of headroom`. The two alias log lines
+    # are now unconditional rather than only in the too-late branch, so the next occurrence names itself.
+    #
+    # **The corrected run measured this instead:**
+    #
+    #     MI4IOS6_STAGE90_XNU kernel_entry ok
+    #     MI4IOS6_STAGE90_XNU real XNU entry stub_hit=dqinit
+    #      xnu_entry_stub_caller_v=0x801b3d20        # vfsinit is at 0x801B3880, so this is +0x4A0
+    #
+    # `dqinit` is defined by `bsd_vfs_vfs_quota.o` and is called from `vfsinit`'s *post-loop* block,
+    # four bytes after the `for (i = 0; i < maxvfsslots; i++, vfsp++)` loop's exit tests:
+    # `bl <vnode_authorize_init>` at `0x801B3D18`, `bl <dqinit>` at `0x801B3D1C`. **So the prediction was
+    # wrong for a second, independent reason, and the defect is in the tool rather than in the reading:**
+    # `xnu_entry_callwalk.py` follows the straight-line path plus calls reachable by taking a branch, and
+    # a loop's *exit target* is such a branch - so the block after a loop was classified cold and the
+    # walk answered one level up. That is **rule 426**. The discriminator that would be right - "is this
+    # call site a loop exit?" - is *not* statically decidable: `zfree+0x5f8 -> btlog_remove_entries_for_element`
+    # and `vfsinit+0x49c -> dqinit` are structurally identical, and the former is provably never executed
+    # (its zone-check blocks make it unreachable). Classifying both as reachable makes `--root bsd_init`
+    # answer `btlog_remove_entries_for_element`; classifying both as cold misses this. **So the fix is
+    # reporting, not classification**: the tool now prints, in execution order, the guarded sites whose
+    # callee is itself a stub, and the device's own history decides which of them is the stop.
+    # `--root bsd_init` prints `vfsinit+0x49c -> dqinit   STUB` eleventh of fifteen.
+    #
+    # Falsifiers, named in advance: a stop inside any of the fourteen init functions this batch makes
+    # real - `nspace_handler_init`, `proc_uuid_policy_init`, `mcache_init`, `mbinit`, `net_str_id_init`,
+    # `eventhandler_init`, `aio_init`, `pipeinit`, `pshm_lock_init`, `pshm_cache_init`, `psem_lock_init`,
+    # `psem_cache_init`, `pthread_init`, `select_waitq_init` - which would say one of those bodies was
+    # read wrong; a stop on one of the created names, in particular the `mbuf_*`/`m_tag_*`/`mcl_*` family
+    # `mbinit` and the KPI object bring in; a stop at `dlil_init` (`+0x80C`, key `bsd_init + 0x80C`),
+    # which would mean `nwk_wq_init` is real - it is defined by `bsd_net_nwk_wq.o`, which is not linked;
+    # a stop at `proc_uuid_policy_init`'s own successor slot (`+0x7D0`), which would mean the chain did
+    # not even enter `vfsinit`; a `panic`. **And, added after the run because it is what actually
+    # happened: a refusal by the loader preflight rather than a stop - which no walk-based falsifier
+    # could have covered, since the walk models the call graph and not the tables the payload checks.
+    # The batch is linked and referenced, so its effect is measured; whose return it stops on is what
+    # the next step establishes, and that step's prediction is written before its build again.**
+    # ---------------------------------------------------------------------------------------------
+    BSD_VFS_VFS_CACHE_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_CACHE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_vfs_cache.o}
+    # =============================================================================================
+    # **424: `bsd/vfs/vfs_cache.c` - the object that retires `nchinit`, and the frontier becomes
+    # `nspace_handler_init`: the third of 422's four consecutive new stubs.**
+    #
+    # 423's stop was `nchinit`, called from `vfsinit` at key `0x801B3AB8` (`vfsinit + 0x238`). The
+    # object is the pool's only definer of that name (`bsd/vfs/vfs_cache.c:2105`) and measures
+    # **12 resolved (11 function, 1 storage) / 4 added (3 function, 1 storage)**: `nchinit`,
+    # `build_path`, `build_path_with_parent`, `cache_enter_create`, `vfs_addname`,
+    # `vnode_cache_authorized_action`, `vnode_cache_is_authorized`, `vnode_getname_printable`,
+    # `vnode_getparent`, `vnode_putname_printable`, `vnode_update_identity` out, and the **storage**
+    # stand-in `nc_disabled` (`B 0x4`) with them; `VFS_VGET`, `VNOP_LOOKUP`,
+    # `mac_vnode_check_lookup` and the storage stand-in `mount_generation` (`B 4`) in. Counts
+    # **825 -> 817** undefined, **695 -> 687** function, **130 -> 130** storage.
+    #
+    # **`nchinit` has no stub for its own body to reach, and the evidence is the object's own call
+    # list rather than the walk's.** The linked image still carries `nchinit` as a stand-in, so
+    # `xnu_entry_callwalk.py --root nchinit` can see nothing inside it - it answers `nchinit STUB`
+    # and an *empty* guarded list, because a stand-in has no body to expand. Read from the object
+    # instead, `nchinit` makes eight distinct calls and every one is satisfied:
+    #
+    #     hashinit x2 (object +0x2CFC, +0x2D34)   real since 409
+    #     lck_grp_attr_alloc_init, lck_grp_alloc_init, lck_attr_alloc_init, lck_rw_alloc_init x2,
+    #     lck_mtx_init                            all real, the same family 415-423 have gone through
+    #
+    # and its two remaining callees, `init_crc32` (`vfs_cache.c:2074`) and `init_string_table`
+    # (`:2427`), are **`static` and inlined into it** - their only trace in the object is the data
+    # they fill (`crc32tab` in `.bss`, `string_table_mask` in `.bss`), with no separate symbol and no
+    # relocation of their own. So there is no fourth call site hiding behind them.
+    #
+    # **The object's six remaining stub references are not on this path.** They are
+    # `vfs_context_issuser`, `vfs_context_proc`, `vfs_context_ucred`, `vnode_getattr`, `vnode_isdir`
+    # and `vnode_vid`, and they belong to the name-cache *lookup* functions this object also defines
+    # (`cache_lookup`, `cache_enter_create`, `vnode_update_identity`, ...) - none of which `nchinit`
+    # calls. That is the check 342's trap asks for, done by intersecting the object's undefined list
+    # with the stub set and then asking which function owns each name.
+    #
+    # Next on `vfsinit`'s line is `nspace_handler_init` at `+0x238`, and **this step does not touch
+    # it**: it is defined by `bsd_vfs_vfs_syscalls.o`, which is not linked, so it is still the
+    # stand-in 422 created. This is the third of 422's four consecutive new stubs: `vntblinit` went
+    # at 423, `vfs_event_init` went with it (same object), and `nchinit` goes here.
+    #
+    # **Prediction, written before the build: `stub_hit=nspace_handler_init`, caller key = the linked
+    # address of `vfsinit + 0x23C`** - the return address of the `bl <nspace_handler_init>` at
+    # `vfsinit + 0x238`. Against 423's link that is `0x801B3ABC`; `vfsinit`'s own address cannot move
+    # because this object is appended to `LINK_OBJS` after `vfs_init.o` and `vfs_subr.o`.
+    #
+    # Falsifiers, named in advance: a stop inside `nchinit` - `hashinit` (twice), any of the seven
+    # `lck_*` calls, or the inlined `init_crc32`/`init_string_table` - which would say this object
+    # reading is wrong; a stop on one of the six name-cache lookup names above, which would mean the
+    # walk had left `nchinit` and entered a function `bsd_init`'s line does not call; a stop at
+    # `vfs_opv_init` (`+0x2C4`), which is real and defined by `vfs_init.o`; a stop at
+    # `proc_uuid_policy_init` (`+0x7CC`, key `0x8003B1C0`), which would mean `vfsinit` had returned;
+    # a stop on one of the four added names; a `panic`.
+    # =============================================================================================
     BSD_VFS_VFS_SUBR_OBJ=${STAGE90_ENTRY_BSD_VFS_VFS_SUBR_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_vfs_subr.o}
     # =============================================================================================
     # **423: `bsd/vfs/vfs_subr.c` - the object that retires `vntblinit`, and the frontier becomes
@@ -24671,6 +24911,20 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$BSD_KERN_UBC_SUBR_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_VFS_VFS_INIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_VFS_VFS_SUBR_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_VFS_VFS_CACHE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_VFS_VFS_SYSCALLS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_PROC_UUID_POLICY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_MCACHE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_UIPC_MBUF_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_KPI_MBUF_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_NET_NET_STR_ID_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_SUBR_EVENTHANDLER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_KERN_AIO_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_SYS_PIPE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_POSIX_SHM_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_POSIX_SEM_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_PTHREAD_SHIMS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$BSD_KERN_SYS_GENERIC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -24683,7 +24937,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$IOKIT_KERNEL_IOCOMMAND_OBJ" "$IOKIT_KERNEL_IOPOWERCONNECTION_OBJ" "$BSD_KERN_KERN_MALLOC_OBJ" "$IOKIT_TESTS_TESTS_OBJ" "$OSFMK_KERN_WORK_INTERVAL_OBJ" "$BSD_KERN_SYS_REASON_OBJ" "$OSFMK_IPC_IPC_KMSG_OBJ" "$OSFMK_IPC_IPC_OBJECT_OBJ" "$BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ" "$BSD_KERN_KERN_AUTHORIZATION_OBJ" "$BSD_KERN_KERN_CREDENTIAL_OBJ" "$BSD_KERN_KERN_PROC_OBJ" "$BSD_CONF_PARAM_OBJ" "$BSD_KERN_KERN_SUBR_OBJ" "$BSD_KERN_TTY_OBJ" "$BSD_KERN_KERN_OVERRIDES_OBJ" "$BSD_KERN_SYS_ULOCK_OBJ" "$SECURITY_MAC_PROCESS_OBJ" "$BSD_KERN_KERN_DESCRIP_OBJ" "$BSD_VFS_VFS_BIO_OBJ" "$BSD_KERN_KERN_TIME_OBJ" "$BSD_VFS_VFS_CLUSTER_OBJ" "$BSD_KERN_KERN_SYNCH_OBJ" "$BSD_KERN_UBC_SUBR_OBJ" "$BSD_VFS_VFS_INIT_OBJ" "$BSD_VFS_VFS_SUBR_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$IOKIT_KERNEL_IOCOMMAND_OBJ" "$IOKIT_KERNEL_IOPOWERCONNECTION_OBJ" "$BSD_KERN_KERN_MALLOC_OBJ" "$IOKIT_TESTS_TESTS_OBJ" "$OSFMK_KERN_WORK_INTERVAL_OBJ" "$BSD_KERN_SYS_REASON_OBJ" "$OSFMK_IPC_IPC_KMSG_OBJ" "$OSFMK_IPC_IPC_OBJECT_OBJ" "$BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ" "$BSD_KERN_KERN_AUTHORIZATION_OBJ" "$BSD_KERN_KERN_CREDENTIAL_OBJ" "$BSD_KERN_KERN_PROC_OBJ" "$BSD_CONF_PARAM_OBJ" "$BSD_KERN_KERN_SUBR_OBJ" "$BSD_KERN_TTY_OBJ" "$BSD_KERN_KERN_OVERRIDES_OBJ" "$BSD_KERN_SYS_ULOCK_OBJ" "$SECURITY_MAC_PROCESS_OBJ" "$BSD_KERN_KERN_DESCRIP_OBJ" "$BSD_VFS_VFS_BIO_OBJ" "$BSD_KERN_KERN_TIME_OBJ" "$BSD_VFS_VFS_CLUSTER_OBJ" "$BSD_KERN_KERN_SYNCH_OBJ" "$BSD_KERN_UBC_SUBR_OBJ" "$BSD_VFS_VFS_INIT_OBJ" "$BSD_VFS_VFS_SUBR_OBJ" "$BSD_VFS_VFS_CACHE_OBJ" "$BSD_VFS_VFS_SYSCALLS_OBJ" "$BSD_KERN_PROC_UUID_POLICY_OBJ" "$BSD_KERN_MCACHE_OBJ" "$BSD_KERN_UIPC_MBUF_OBJ" "$BSD_KERN_KPI_MBUF_OBJ" "$BSD_NET_NET_STR_ID_OBJ" "$BSD_KERN_SUBR_EVENTHANDLER_OBJ" "$BSD_KERN_KERN_AIO_OBJ" "$BSD_KERN_SYS_PIPE_OBJ" "$BSD_KERN_POSIX_SHM_OBJ" "$BSD_KERN_POSIX_SEM_OBJ" "$BSD_KERN_PTHREAD_SHIMS_OBJ" "$BSD_KERN_SYS_GENERIC_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

@@ -193,6 +193,16 @@ the identity table is untouched, so nothing that works today depends on the old 
 **Confirms it:** `stage90_xnu_arm_vm_init_full_pmap_status=0x90000001` with no
 `FAIL_RAM_CONSOLE` bit, and `..._ram_console_verified=0x00000001`.
 
+**Postscript, 2026-09-19 (experiment 425): the risk this section bounded was not the one the
+change carried.** Moving this alias was safe for the verification, as predicted — and it also
+moved the *limit* of the image-alias window, because the candidate table's alias loop stops one
+section before the next device alias. `0xc0100000` had put the window at 1 MB, `0xc0300000` at
+3 MB, and neither figure was stated anywhere; the identity table's window was 4 MB at the same
+time. Eleven steps later the image outgrew the smaller one and the loader preflight refused the
+run. The window is now `STAGE90_IMAGE_ALIAS_WINDOW` in `stage90.h`, with a `#error` guard and a
+post-link build gate. See F-AM5 in
+[`../reference/pmap-attribute-map.md`](../reference/pmap-attribute-map.md).
+
 ## 5a. The recovery paths have 9x stack headroom — measured, not estimated
 
 Every path that must work for a hang to be *recoverable* runs on a 1 KB banked stack

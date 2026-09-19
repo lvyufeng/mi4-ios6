@@ -27,29 +27,21 @@
 /* Stage84 virtual address space layout */
 #define STAGE90_VIRT_BASE              0x80000000u  /* Kernel virtual base */
 #define STAGE90_PHYS_BASE              0x00008000u  /* Kernel physical base */
-#define STAGE90_RAM_CONSOLE_ALIAS_BASE 0xc0300000u  /* moved off 0xc0100000 - see below */
-/* `STAGE90_HIGH_ALIAS_BASE` and `STAGE90_GIC_ALIAS_BASE` live in stage90.h: mmu.c's
- * build_identity_table() builds the same image alias, and one base in two files drifts. */
-
 /*
- * The RAM-console alias used to live at 0xc0100000, which is also the second
- * megabyte of the high image alias (0xc0000000 -> PA 0, 0xc0100000 -> PA 1MB).
- * One L1 slot, two callers, and this file and mmu.c's build_identity_table()
- * resolved it in opposite directions: mmu.c keeps the image alias there (its
- * comment cites the conflict with deviceTreeP's alias at 0xc010c18c), while this
- * file kept the RAM-console alias.
+ * `STAGE90_HIGH_ALIAS_BASE`, `STAGE90_IMAGE_ALIAS_LIMIT`, `STAGE90_GIC_ALIAS_BASE` and
+ * `STAGE90_RAM_CONSOLE_ALIAS_BASE` all live in stage90.h now: mmu.c's `build_identity_table()`
+ * builds the same image alias and the same pair of device aliases, and a base defined twice drifts.
  *
- * The identity table is the one the payload actually runs under, so the device
- * tree is reachable today. But the candidate table is what a handed-off kernel
- * would run under, and there boot_args->deviceTreeP at 0xc010c18c would resolve
- * into the RAM console buffer instead - presenting as a garbage device tree
- * rather than a mapping fault, which is the worst way for it to fail.
- *
- * Moving the alias to a free VA keeps both mappings and both verifications, so
- * the candidate table now agrees with the identity table about the image alias.
- * 0xc0300000 is unused in either table (0xc0000000.. image alias, 0xc0400000 GIC
- * alias since experiment 267 - the image alias itself now needs more than the two
- * sections it had, so the GIC alias moved up to leave it room).
+ * This file's copy was the last one to move, and it was the one that broke. It kept the RAM-console
+ * alias at 0xc0300000 and used *that* as the image-alias loop's limit, so this table's window was
+ * 3 MB while mmu.c's was 4 MB - one window, two limits. The RAM console alias used to live at
+ * 0xc0100000, which is also the second megabyte of the image alias; it was moved because that
+ * collided with the deviceTreeP alias (0xc010c18c would have resolved into the ramoops buffer,
+ * presenting as a garbage device tree rather than a fault). The move fixed the collision and left
+ * the window silently smaller than the other table's, which is what experiment 425 found: the alias
+ * loop stopped at 0xc0300000, `stage90_full_pmap_probe_word` had just moved to PA 0x32C0B4, and the
+ * probe read ramoops content through the RAM-console alias at 0xc032c0b4. See stage90.h for the
+ * window's size and the build-time check that keeps both aliases outside it.
  */
 
 /* ARMv7 short-descriptor format constants */
@@ -430,20 +422,31 @@ int stage90_xnu_arm_vm_init_full_pmap_run(
      * and a pair of sections silently mapped only the first 2 MB of it. This table is the one a
      * handed-off kernel would run under, so it needs the whole image too.
      *
-     * This table's limit is its own RAM-console alias at 0xc0300000, which sits where the image
-     * alias's fourth section would go; mmu.c's limit is the GIC alias instead. Both are checked
-     * rather than assumed.
+     * This table's limit is `STAGE90_IMAGE_ALIAS_LIMIT` - the same expression mmu.c's
+     * build_identity_table() stops at, so the two tables can no longer disagree about how big the
+     * window is. That is the correction 425 made: this loop's limit used to be *this file's*
+     * RAM-console alias, i.e. a constant that exists for another purpose, and when the alias moved
+     * from 0xc0100000 to 0xc0300000 to stop colliding with the deviceTreeP alias, the window
+     * silently shrank from 4 MB to 3 MB while the other table's stayed at 4.
      */
     for (uint32_t alias_off = 0u; alias_off < (uint32_t)(uintptr_t)__stage90_image_end;
          alias_off += L1_SECTION_SIZE) {
-        if (STAGE90_HIGH_ALIAS_BASE + alias_off >= STAGE90_RAM_CONSOLE_ALIAS_BASE) {
+        if (STAGE90_HIGH_ALIAS_BASE + alias_off >= STAGE90_IMAGE_ALIAS_LIMIT) {
             xnu_log_kv32("pmap_image_alias_image_end", (uint32_t)(uintptr_t)__stage90_image_end);
-            xnu_log_kv32("pmap_image_alias_limit", STAGE90_RAM_CONSOLE_ALIAS_BASE);
+            xnu_log_kv32("pmap_image_alias_limit", STAGE90_IMAGE_ALIAS_LIMIT);
             xnu_log_puts("pmap image alias window is smaller than the image\n");
             break;
         }
         map_l1_section_dram(stage90_candidate_l1, STAGE90_HIGH_ALIAS_BASE + alias_off, alias_off);
     }
+    /*
+     * Logged unconditionally, not only when the window is too small. 425's whole difficulty was
+     * that the run said `FAIL_HIGH_ALIAS` - the probe - while the cause was this window, and the
+     * only line that named it was inside the branch that is taken precisely when it is too late.
+     */
+    xnu_log_kv32("pmap_image_alias_limit", STAGE90_IMAGE_ALIAS_LIMIT);
+    xnu_log_kv32("pmap_image_alias_sections",
+        ((uint32_t)(uintptr_t)__stage90_image_end + L1_SECTION_SIZE - 1u) / L1_SECTION_SIZE);
     /* RAM-console alias at its own VA, so it cannot shadow the image alias above. */
     map_l1_section_dram(stage90_candidate_l1, STAGE90_RAM_CONSOLE_ALIAS_BASE, RAM_CONSOLE_BASE);
     map_l1_section_mmio(stage90_candidate_l1, STAGE90_GIC_ALIAS_BASE, 0xf9000000u);

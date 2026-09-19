@@ -79,10 +79,10 @@ which is which.
 | GIC identity | `0xf9000000` | `0xf9000000` | 1 MB | section SO |
 | MSM IMEM identity | `0xfa000000` | `0xfa000000` | 1 MB | section SO |
 | PS_HOLD identity | `0xfc400000` | `0xfc400000` | 1 MB | section SO |
-| High alias of image | `0xc0000000` | `0x00000000` | 1 MB | section SO |
-| High alias, 2nd MB | `0xc0100000` | `0x00100000` | 1 MB | section SO |
-| RAM-console alias | `0xc0300000` | `RAM_CONSOLE_BASE` | 1 MB | section SO — as above *(candidate table only)* |
-| GIC alias | `0xc0200000` | `0xf9000000` | 1 MB | section SO |
+| High alias of image | `0xc0000000`–`0xc3ffffff` | `0x00000000`–`0x003fffff` | 1 MB × 64, as many as the image needs | section SO — **the window is one definition, in `stage90.h`** |
+| Image-alias limit | `0xc4000000` | — | — | `STAGE90_IMAGE_ALIAS_LIMIT` = `STAGE90_HIGH_ALIAS_BASE` + 64 MB: the first VA the image alias may not use |
+| GIC alias | `0xc4000000` | `0xf9000000` | 1 MB | section SO |
+| RAM-console alias | `0xc4100000` | `RAM_CONSOLE_BASE` | 1 MB | section SO — as above *(candidate table only)* |
 | IMEM low alias | `0x0fa00000` | `0x0fa00000` | 1 MB | section SO |
 | Candidate L1 self-map | `candidate_l1_base` | same | 1 MB | section SO *(candidate table only)* |
 | L2 pool self-map | `l2_pool_base` | same | 1 MB | section SO *(candidate table only)* |
@@ -144,6 +144,35 @@ the Normal/Device distinction. See `stages/stage90/exclusive_probe.c` for the me
 note that it measures rather than asserts precisely because its first version asserted a
 discriminator that turned out to be false on this implementation.
 
+**F-AM5 — the image-alias window's size was a side effect of an unrelated alias's position, and
+the two tables disagreed about it. FIXED in experiment 425.** Both tables build the high alias of
+the payload's own image in a loop that stops one section before the next device alias, so the
+*window* was whatever distance separated `0xc0000000` from whatever came next — and the two tables
+put different things next. The identity table stopped at its GIC alias (then `0xc0400000`, 4 MB);
+the candidate table stopped at its RAM-console alias (then `0xc0300000`, 3 MB), which F-AM1 had
+*moved there* without noticing it was also the window. Eleven steps were built with the smaller
+figure stated nowhere.
+
+425's thirteen-object batch then spent the margin. It moved `stage90_full_pmap_probe_word` — the
+word the high-alias check reads back — from PA `0x002FC0B4`, which is `0x3F4C` below the 3 MB
+limit, to PA `0x0032C0B4`, `0x2C0B4` past it. The candidate table's loop stopped after three
+sections, so `*alias_probe` at `0xc032c0b4` was not the image alias's fourth section at all but the
+**RAM-console alias's second kilobyte**, PA `0xde52c0b4`; the check read ramoops content instead of
+the probe's `0x11223344`, set `FAIL_HIGH_ALIAS`, and the loader's preflight refused to jump. Nothing
+faulted, and the identity table was never at risk — its 4 MB window was complete — so this was a
+gate refusal rather than a crash: `stage90_loader_preflight_run` returned before the jump and the
+device rebooted itself to Android.
+
+The window is now one definition: `STAGE90_IMAGE_ALIAS_WINDOW` = 64 MB in `stage90.h`,
+`STAGE90_IMAGE_ALIAS_LIMIT` derived from it, both device aliases derived *above* it, `#error` guards
+in the header for an alias that lands inside the window or a window that reaches
+`RAM_CONSOLE_BASE`, and a post-link gate in `build.sh` that reads the limit out of the header
+(compiled into an array bound, so there is no second copy to drift) and compares it against
+`__stage90_image_end` from the linked ELF. The two alias log lines are now printed unconditionally
+rather than only in the branch that runs when it is already too late. **The shape to watch for, on
+this page and off it: a limit that is derived from something else's position is a value nobody
+chose.**
+
 ## ARMv7 short-descriptor encodings used above
 
 TEX[2:0] / C / B select the memory type:
@@ -174,12 +203,12 @@ the RAM-console alias and the self-maps — but for the PAs they share they agre
 
 | PA region | What it is | VAs that map it | Classification |
 | --- | --- | --- | --- |
-| `0x00000000`–`0x001fffff` | payload image: code, `.data`, `.bss`, **and both page tables** | `0x00000000`, `0x80000000`–`0x800fffff` (L2, first MB only), `0xc0000000`, `0xc0100000`, plus each table's self-map | DRAM |
+| `0x00000000`–`0x003fffff` | payload image: code, `.data`, `.bss`, **and both page tables** | `0x00000000`, `0x80000000`–`0x800fffff` (L2, first MB only), `0xc0000000`+ (as many sections as the image needs), plus each table's self-map | DRAM |
 | `0x00200000`–`0x801fffff` | not mapped | — | — |
 | `0x80200000`–`0x901fffff` | DRAM direct map (candidate table only) | `0x80200000`+ (VA = PA) | DRAM |
-| `0xde500000`–`0xde6fffff` | Android ram_console window (ramoops) | `0xde500000`, `0xde600000`, `0xc0300000` | DRAM |
+| `0xde500000`–`0xde6fffff` | Android ram_console window (ramoops) | `0xde500000`, `0xde600000`, `0xc4100000` | DRAM |
 | `0x0fa00000` | MSM IMEM (restart reason) | `0x0fa00000`, `0x0fa00000` | **MMIO** |
-| `0xf9000000` | GIC distributor + CPU interface + ARM timer | `0xf9000000`, `0xc0200000` | **MMIO** |
+| `0xf9000000` | GIC distributor + CPU interface + ARM timer | `0xf9000000`, `0xc4000000` | **MMIO** |
 | `0xfc400000` | MSM8974 PS_HOLD | `0xfc400000` | **MMIO** |
 
 DRAM and MMIO are disjoint PA sets, so the split is clean: no PA is wanted as both. That is

@@ -36,12 +36,48 @@
  * mapped section. The payload died at that first dereference with nothing in the log, which is the
  * worst way for a window to be too small.
  *
- * `STAGE90_GIC_ALIAS_BASE` is above the image window and is therefore also its limit here; the full
- * pmap table's limit is its own RAM-console alias at 0xc0300000. A payload that ever outgrows either
- * is reported by the loop that maps it rather than by a fault.
+ * **The window's size is now stated here rather than left implicit in where the next alias sits,
+ * and experiment 425 is why.** Until then the two tables had *different* limits: `mmu.c` stopped at
+ * `STAGE90_GIC_ALIAS_BASE` (0xc0400000, 4 MB), and the full pmap table stopped at its own
+ * RAM-console alias (0xc0300000, 3 MB). The 425 batch linked thirteen objects into the entry image,
+ * the payload's image grew to 0x362000 (3.38 MB), and `stage90_full_pmap_probe_word` moved from PA
+ * ~0x254xxx to PA 0x32C0B4 - across 0x300000, which is exactly where the *smaller* of the two
+ * windows ended. Only the full pmap table truncated, so the live map was fine and the device ran;
+ * but the alias read of that word resolved into the RAM-console alias section instead (0xc032c0b4
+ * -> PA 0xde52c0b4) and came back as ramoops content, so `high_alias_verified` was 0, the loader
+ * preflight refused the jump, and the run ended in `kernel_error bad` / `platform_reboot`. The
+ * misleading part is that the failure named `FAIL_HIGH_ALIAS` - the probe - while the cause was a
+ * window 0x60000 bytes too small.
+ *
+ * So: one window, sized here, wide enough that nothing this project links can reach it, and both
+ * aliases that used to define its limit are placed *outside* it with a build-time check that says
+ * so. The check is the part that matters - a window is only safe if being too small is a build
+ * error rather than a probe that reads the wrong device.
  */
 #define STAGE90_HIGH_ALIAS_BASE      0xc0000000u  /* Legacy high alias from Stage81/82 */
-#define STAGE90_GIC_ALIAS_BASE       0xc0400000u  /* was 0xc0200000; moved up for the image alias */
+/* 64 MB, i.e. L1 indices 768..831 - inside XNU's own unused space above its kernel VA range
+ * (`arm_vm_init` ends its high region at 0xc0000000) and below the ram_console window at
+ * 0xde500000, so it can overlap neither. */
+#define STAGE90_IMAGE_ALIAS_WINDOW   (64u * 0x00100000u)
+#define STAGE90_IMAGE_ALIAS_LIMIT    (STAGE90_HIGH_ALIAS_BASE + STAGE90_IMAGE_ALIAS_WINDOW)
+/* Both aliases are above the image window, which is what keeps them from truncating it. */
+#define STAGE90_GIC_ALIAS_BASE       STAGE90_IMAGE_ALIAS_LIMIT                        /* was 0xc0200000, then 0xc0400000 */
+#define STAGE90_RAM_CONSOLE_ALIAS_BASE (STAGE90_IMAGE_ALIAS_LIMIT + 0x00100000u)      /* was 0xc0100000, then 0xc0300000 */
+
+/*
+ * The check the comment above promises. An alias that lands inside the image window would silently
+ * steal a section from it, and the only symptom would be a verification reading the wrong device -
+ * which is how 425 presented. This fires at build time instead.
+ */
+#if STAGE90_GIC_ALIAS_BASE < STAGE90_IMAGE_ALIAS_LIMIT
+#error "STAGE90_GIC_ALIAS_BASE is inside the image alias window"
+#endif
+#if STAGE90_RAM_CONSOLE_ALIAS_BASE < STAGE90_IMAGE_ALIAS_LIMIT
+#error "STAGE90_RAM_CONSOLE_ALIAS_BASE is inside the image alias window"
+#endif
+#if STAGE90_IMAGE_ALIAS_LIMIT > RAM_CONSOLE_BASE
+#error "the image alias window reaches the ram_console window"
+#endif
 
 #define BOOT_LINE_LENGTH     256u
 #define BOOT_ARGS_REVISION   2u

@@ -241,6 +241,31 @@ class Image:
         instead. The propagation now stops at the first conditional branch
         crossed - after one, the span rule is the right question again. A loop
         body is unaffected because its head-to-back-edge run is straight.
+
+        **A third case is known and is deliberately not modelled here: code that
+        follows a loop.** Experiment 425 is it - the walk answered `nwk_wq_init`
+        and the device printed `dqinit`. In `vfsinit` the `for (i = 0;
+        i < maxvfsslots; i++, vfsp++)` loop's exit tests are conditional forward
+        branches to `+0x488`, so `+0x488` and the block after it are reached only
+        by *taking* a branch, and the fall-through traversal never enters them:
+
+            3b94: b    3be4          <- into the loop head
+            3be0: beq  3d08          <- the exit test
+            3bec: beq  3d08          <- and the second one
+            ...
+            3d08: ...  bl vnode_authorize_init   <- the post-loop block
+            3d1c:      bl dqinit                 <- the stop the device printed
+
+        Unlike the two cases above, knowing that a branch is a loop's exit test
+        does not make its target *unconditional*: `zfree` reaches its zone-check
+        blocks the same way (`beq 80070694` at `+0x530`, from inside the
+        element-scan loop) and those calls do not run in this configuration. So
+        the cold set keeps calling all of them guarded, the walk keeps skipping
+        them, and the answer stays one level up - which is why `report()` prints
+        the **stub-callee sites** separately: the guarded calls whose callee is
+        itself a stub are the only ones that can be the stop at their own site,
+        and there were 33 of them behind `bsd_init`'s answer and 175 in the full
+        guarded list. Reading that short list is how this case is caught.
         """
         insns = self.functions[fn]
         if not insns:
@@ -331,7 +356,7 @@ class Image:
         """A `b` to `name+0x18` is a loop, not a tail call into `name`."""
         return target_name in self.functions and self.by_name.get(target_name, 0) == 0
 
-    def walk(self, root, guarded=False):
+    def walk(self, root, guarded=False, visited=None):
         """First stub on the path from `root`, in call order.
 
         A depth-first walk in call order, which is execution order for the
@@ -344,8 +369,16 @@ class Image:
         prediction: an initialisation path does not take its assertion branches.
         `guarded=True` follows them too, which is an upper bound - what the run
         would stop on if one of those branches were taken.
+
+        `visited` is an optional list the caller passes in; every function the
+        walk enters is appended to it in visit order, whichever way the walk
+        ends. `report()` needs it because the functions the walk *left* are not
+        in the returned path, and those are where a skipped guarded call can hide
+        the real stop (experiment 425, see `_guarded_addresses`).
         """
         seen = set()
+        if visited is None:
+            visited = []
 
         def visit(name, path):
             if name in self.stubs:
@@ -353,6 +386,8 @@ class Image:
             if name in seen:
                 return None
             seen.add(name)
+            if not path or visited[-1:] != [name]:
+                visited.append(name)
             for addr, callee, is_guarded in self.calls.get(name, ()):
                 if is_guarded and not guarded and (name, addr) not in self.forced:
                     continue
@@ -469,7 +504,8 @@ class Image:
         return found
 
     def report(self, root):
-        found, path = self.walk(root)
+        visited = []
+        found, path = self.walk(root, visited=visited)
         if found:
             print("walk from %s:" % root)
             for depth, name in enumerate(path):
@@ -483,6 +519,8 @@ class Image:
             print("  indirect call, which this walk cannot follow.")
             self.report_indirect(root)
 
+        self.report_guarded_stub_sites(visited, found, path)
+
         expansions = self.guarded_expansions(root)
         annotated = [(self.guards_to_stub(callee), name, addr, callee, beyond)
                      for name, addr, callee, beyond in expansions]
@@ -495,6 +533,57 @@ class Image:
                                                callee, self._beyond(cost, callee, beyond)))
             if len(annotated) > 16:
                 print("    ... and %d more" % (len(annotated) - 16))
+
+    def report_guarded_stub_sites(self, visited, found, path=(), limit=40):
+        """The guarded sites the walk skipped whose callee is itself a stub.
+
+        The full guarded list runs to hundreds of entries and is truncated at 16,
+        which buries the entries that matter most: a guarded call whose callee is
+        a stub needs no further walking to be decisive - if that branch is taken,
+        the stop is *there*, and the walk's answer - reached by leaving that
+        function - is one level too high. Experiment 425's `vfsinit+0x49c ->
+        dqinit` was 5th of these behind `bsd_init` but ~400th line of the full
+        list, and it was the stop.
+
+        Only sites the run reaches before the answer are listed, and that is
+        decided rather than assumed:
+
+          - a function the walk entered and left without descending towards the
+            answer was fully traversed, so *every* site in it is earlier;
+          - a function on the path towards the answer was left at one particular
+            call - the one whose callee is the next name on the path - and only
+            the sites before that call count.
+
+        Listed in visit order: the functions the walk entered, in the order it
+        entered them, and within each one the sites in address order, which is
+        execution order for the straight-line code this image is made of.
+        """
+        descent = {}
+        for i, name in enumerate(path[:-1]):
+            for addr, callee, is_guarded in self.calls.get(name, ()):
+                if callee == path[i + 1] and (not is_guarded or (name, addr) in self.forced):
+                    descent[name] = addr
+                    break
+        sites = []
+        for name in visited:
+            for addr, callee, is_guarded in self.calls.get(name, ()):
+                if not is_guarded or callee not in self.stubs:
+                    continue
+                if (name, addr) in self.forced:
+                    continue
+                if name in descent and addr > descent[name]:
+                    continue
+                sites.append((name, addr, callee))
+        if not sites:
+            return
+        print()
+        print("  and these guarded call sites have a stub for a callee, so if one of")
+        print("  their branches is taken the stop is there, not at %s - in execution" % (found or "the answer"))
+        print("  order, and each one is reached before that answer:")
+        for name, addr, callee in sites[:limit]:
+            print("    %s+0x%x -> %s   STUB" % (name, addr - self.by_name.get(name, addr), callee))
+        if len(sites) > limit:
+            print("    ... and %d more" % (len(sites) - limit))
 
         return 0 if found else 1
 

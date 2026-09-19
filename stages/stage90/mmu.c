@@ -17,9 +17,10 @@
 #define L1_DESC_SECTION_RAM_CONSOLE STAGE90_PMAP_DESC_SECTION_RAM_CONSOLE
 
 #define SECTION_INDEX(addr)    (((uint32_t)(addr)) >> 20)
-/* `STAGE90_HIGH_ALIAS_BASE` and `STAGE90_GIC_ALIAS_BASE` are in stage90.h: this file and
- * xnu_arm_vm_init_full_pmap.c both build the image alias, and a base defined twice drifts. */
-#define STAGE90_RAM_CONSOLE_ALIAS_BASE 0xc0100000u
+/* `STAGE90_HIGH_ALIAS_BASE`, `STAGE90_IMAGE_ALIAS_LIMIT`, `STAGE90_GIC_ALIAS_BASE` and
+ * `STAGE90_RAM_CONSOLE_ALIAS_BASE` are all in stage90.h: this file and
+ * xnu_arm_vm_init_full_pmap.c both build the image alias, and a base defined twice drifts - which
+ * is what experiment 425 was, in the form of two *different* limits for one window. */
 
 #define STAGE90_BOOTSTRAP_STATUS_OK    0x90000001u
 #define STAGE90_BOOTSTRAP_STATUS_BASE  0x90000000u
@@ -5424,22 +5425,33 @@ static void build_identity_table(void)
      * handed XNU's real `arm_init` an alias pointer (`g_boot_args`, PA 0x20c264) above the last
      * mapped section; the payload died there, silently, on the first dereference.
      *
-     * The window ends where this table's next alias begins - the GIC alias, which moved up from
-     * 0xc0200000 to 0xc0400000 to make room. An image that ever reaches it is reported here rather
-     * than faulting later; the payload's own contracts then carry the failure.
+     * The window ends at `STAGE90_IMAGE_ALIAS_LIMIT`, which is where this table's next alias (the
+     * GIC alias) begins. It used to end where the *GIC alias's address* happened to fall, which made
+     * the window's size a side effect of a constant that exists for another reason; experiment 425
+     * showed what that costs when the other table's limit was a third constant and the two
+     * disagreed. An image that ever reaches the limit is reported here rather than faulting later.
      */
     for (uint32_t alias_off = 0u; alias_off < (uint32_t)(uintptr_t)__stage90_image_end;
          alias_off += L1_SECTION_SIZE) {
-        if (STAGE90_HIGH_ALIAS_BASE + alias_off >= STAGE90_GIC_ALIAS_BASE) {
+        if (STAGE90_HIGH_ALIAS_BASE + alias_off >= STAGE90_IMAGE_ALIAS_LIMIT) {
             xnu_log_kv32("mmu_high_alias_image_end", (uint32_t)(uintptr_t)__stage90_image_end);
-            xnu_log_kv32("mmu_high_alias_limit", STAGE90_GIC_ALIAS_BASE);
+            xnu_log_kv32("mmu_high_alias_limit", STAGE90_IMAGE_ALIAS_LIMIT);
             xnu_log_puts("mmu high alias window is smaller than the image\n");
             break;
         }
         map_section_dram(STAGE90_HIGH_ALIAS_BASE + alias_off, alias_off);
     }
-    /* Stage86: Comment out RAM_CONSOLE_ALIAS to avoid conflict with deviceTreeP high-alias at 0xc010c18c */
-    /* map_section_dram(STAGE90_RAM_CONSOLE_ALIAS_BASE, RAM_CONSOLE_BASE); */
+    /*
+     * The RAM-console alias is deliberately *not* in this table, and the reason it is absent has
+     * changed rather than gone away. Stage86 left it out because 0xc0100000 was also the second
+     * megabyte of the image alias, so the deviceTreeP alias (0xc010c18c) resolved into the ramoops
+     * buffer instead of the tree. That conflict is gone now that
+     * `STAGE90_RAM_CONSOLE_ALIAS_BASE` is above `STAGE90_IMAGE_ALIAS_LIMIT`, and it is still absent
+     * for a different reason: nothing under this table reads it. The ram_console is mapped identity
+     * at `RAM_CONSOLE_BASE` and that is what the payload uses, and the candidate table in
+     * xnu_arm_vm_init_full_pmap.c is where the alias is verified. Keeping this table to what the
+     * boot actually dereferences is what its own checks are about.
+     */
     map_section_mmio(STAGE90_GIC_ALIAS_BASE, 0xf9000000u);
 
     /* IMEM restart reason. */
