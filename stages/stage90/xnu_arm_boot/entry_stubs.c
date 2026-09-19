@@ -356,6 +356,32 @@ static uint32_t g_first_abort_pc;
 static uint32_t g_first_abort_kv_len;
 
 /*
+ * The tracer's terminal record, and why it is not an `entry_kv` record.
+ *
+ * Experiment 445 ran the hang tracer and got the line it was built for - `t268: thread_block was
+ * called` - and not the call site that line is useless without. The wrapper's two `entry_kv` records
+ * are written **after** everything the boot recorded, so they are the first records a full buffer
+ * refuses: `xnu_entry_kv_dropped` read 16269 against 280 records that fitted. The drop counter made
+ * the refusal visible, which is 269's repair, and nothing made the record *survive*. The terminal
+ * wrapper's answer is the newest thing a run produces, and a collector that keeps the oldest refuses
+ * exactly that one.
+ *
+ * So these are `.bss` slots, written by the wrapper and printed by the epilogue **outside** the dump -
+ * the mechanism the abort slots above already use, for the same reason. `g_block_kv_len` is the
+ * position the refused records would have had, so a report can say how deep into the run the block
+ * was. They exist only when the tracer is built (`STAGE90_ENTRY_TRACE`, passed to this file's compile
+ * by `build_entry.sh`), so their presence in a report means the tracer was in the image, and a value
+ * of 0 means the wrapper never ran.
+ */
+#ifdef STAGE90_ENTRY_TRACE
+uint32_t g_block_caller;
+uint32_t g_block_continuation;
+uint32_t g_block_kv_len;
+uint32_t g_vmwait_caller;
+uint32_t g_vmwait_count;
+#endif
+
+/*
  * Set by the IRQ vector so the epilogue knows to name the interrupt it stopped on.
  *
  * Experiment 308's run ended on `exception: irq` and the report could not say *which* interrupt:
@@ -1099,6 +1125,18 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     entry_write_kv("xnu_entry_abort_first_hex_page", g_first_abort_hex_page);
     entry_write_kv("xnu_entry_abort_first_hex_used", g_first_abort_hex_used);
     entry_write_kv("xnu_entry_abort_first_hex_arg", g_first_abort_hex_arg);
+#ifdef STAGE90_ENTRY_TRACE
+    /*
+     * The tracer's terminal record, printed here rather than from `g_kv_buf` - see the slots'
+     * comment. `_caller` is the return address of the `bl` that reached the wrapper, so the call site
+     * is `caller - 4`, this project's usual convention for a stub's report.
+     */
+    entry_write_kv("xnu_entry_block_caller", g_block_caller);
+    entry_write_kv("xnu_entry_block_continuation", g_block_continuation);
+    entry_write_kv("xnu_entry_block_kv_len", g_block_kv_len);
+    entry_write_kv("xnu_entry_vmwait_caller", g_vmwait_caller);
+    entry_write_kv("xnu_entry_vmwait_count", g_vmwait_count);
+#endif
     /*
      * Experiment 272. Runs here, after the first line of the report is already in the console, so
      * that a fault in this dump cannot cost the report that says which stub was hit - which is
@@ -1124,6 +1162,33 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
         __asm__ volatile ("wfe");
     }
 }
+
+#ifdef STAGE90_ENTRY_TRACE
+/*
+ * The two ways `entry_trace.c` reaches this file, and both go around `entry_kv`.
+ *
+ * `entry_epilogue_block` is the terminal one: it stores the wrapper's two numbers in the `.bss` slots
+ * and runs the same epilogue every other report runs, so the report's own header line carries what
+ * the buffer could not. `why` is a literal in this image, as every other caller's is.
+ *
+ * `entry_note_vmwait` is not terminal - `vm_page_wait`'s wrapper calls the real one afterwards - and
+ * it keeps the **last** caller and a count, because the question it answers is "was the allocator
+ * waiting when the run ended", not "was it ever waiting".
+ */
+void entry_epilogue_block(const char *why, uint32_t caller, uint32_t continuation)
+{
+    g_block_caller = caller;
+    g_block_continuation = continuation;
+    g_block_kv_len = g_kv_len;
+    entry_epilogue(why);
+}
+
+void entry_note_vmwait(uint32_t caller)
+{
+    g_vmwait_caller = caller;
+    g_vmwait_count++;
+}
+#endif /* STAGE90_ENTRY_TRACE */
 
 /*
  * `_start` branches here (via lr) once its page tables are live and the MMU is on.

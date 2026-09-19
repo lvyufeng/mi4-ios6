@@ -155,6 +155,15 @@ fi
 # `osfmk/kern/debug.c:609` reads it.
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_ENTRY_REAL_KDEBUG_ENABLE=1)
 
+# The tracer reaches `entry_stubs.c` for two symbols that exist only in a traced build, and
+# `entry_stubs.c` has to know whether to define them and whether to print their slots. One flag for
+# both sides, and it is the same flag the link uses: experiment 445's report named the block and not
+# its call site because the terminal record was an `entry_kv` record, i.e. the last thing written into
+# a buffer that had already refused 16269; 446's slots are `.bss` and the epilogue prints them outside
+# the dump. Compiled out entirely when the tracer is not, so the *presence* of the keys is a statement
+# about the image rather than a zero that could mean either thing.
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_ENTRY_TRACE=1)
+
 # The one thing in this image that is neither XNU's nor this project's: the compiler's own runtime.
 # Experiment 182's run stopped at `__aeabi_uldivmod`, which is the ARM EABI helper for 64-bit
 # division and comes from libgcc - measured then, not assumed: no file in the XNU tree mentions the

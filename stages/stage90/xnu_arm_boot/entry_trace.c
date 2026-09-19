@@ -109,6 +109,15 @@ extern void entry_kv(const char *key, uint32_t value);
 extern void entry_epilogue(const char *why) __attribute__((noreturn));
 
 /*
+ * `entry_stubs.c`'s terminal record, outside `g_kv_buf`. 446's change: a report written as a run's
+ * last act must not depend on a collector that keeps the oldest records - it carries its numbers to
+ * the epilogue instead, which prints them beside the abort slots.
+ */
+extern void entry_epilogue_block(const char *why, uint32_t caller,
+                                 uint32_t continuation) __attribute__((noreturn));
+extern void entry_note_vmwait(uint32_t caller);
+
+/*
  * XNU's own page-accounting global (`vm_page.h`), read rather than declared by this file's own idea
  * of it. It is a `B` symbol in the image, so if the object that owns it is not linked the read gets
  * the generated storage stand-in and reports 0 - which is a different claim ("no free pages") from
@@ -214,7 +223,10 @@ uint32_t __real_vm_page_wait(uint32_t wait_type);
 
 uint32_t __wrap_vm_page_wait(uint32_t wait_type)
 {
-    entry_kv("t268_vm_page_wait_caller", (uint32_t)(uintptr_t)__builtin_return_address(0));
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+
+    entry_kv("t268_vm_page_wait_caller", caller);
+    entry_note_vmwait(caller);
     return __real_vm_page_wait(wait_type);
 }
 
@@ -223,12 +235,18 @@ uint32_t __wrap_vm_page_wait(uint32_t wait_type)
  * `void thread_block(thread_continue_t continuation)`. Reporting here rather than returning is the
  * point: this boot has one thread, so a block is not a delay, it is the end of the run. The
  * epilogue's cache work and the teardown are what get the record out.
+ *
+ * **The record goes through `entry_epilogue_block`, not through `entry_kv`.** Experiment 445 wrote
+ * these two numbers with `entry_kv` and they are the two numbers the report could not show: a record
+ * written as the *last* act of a run is the first one a full buffer refuses, and 445's buffer refused
+ * 16269 of them. So they travel as arguments to the epilogue and land in the `.bss` slots the
+ * epilogue prints outside the dump.
  */
 void __real_thread_block(void *continuation);
 
 void __wrap_thread_block(void *continuation)
 {
-    entry_kv("t268_thread_block_caller", (uint32_t)(uintptr_t)__builtin_return_address(0));
-    entry_kv("t268_thread_block_continuation", (uint32_t)(uintptr_t)continuation);
-    entry_epilogue("t268: thread_block was called");
+    entry_epilogue_block("t268: thread_block was called",
+                         (uint32_t)(uintptr_t)__builtin_return_address(0),
+                         (uint32_t)(uintptr_t)continuation);
 }
