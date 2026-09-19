@@ -6,6 +6,8 @@
 #   ./tools/build_xnu_arm_kernel.sh --limit 50      # the first 50, for a quick look
 #   ./tools/build_xnu_arm_kernel.sh --dir osfmk     # one component
 #   ./tools/build_xnu_arm_kernel.sh --blockers 25   # the distinct things blocking the rest
+#   ./tools/build_xnu_arm_kernel.sh --platform-only # only the three out-of-manifest blocks, whose
+#                                                   # objects the pool's own `rm -f *.o` would eat
 #
 # The manifest is both halves of the kernel: `.c` compiled with `clang` and `.cpp` with `clang++`,
 # through one pipeline and one per-component define table, reported separately. `.s` is still
@@ -87,14 +89,38 @@ DEVICE_TABLE=${XNU_DEVICE_TABLE:-$REPO_ROOT/out/device_table.txt}
 LIMIT=0
 ONLY_DIR=""
 SHOW_BLOCKERS=0
+ONLY_PLATFORM=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --limit)    LIMIT=$2; shift 2 ;;
         --dir)      ONLY_DIR=$2; shift 2 ;;
         --blockers) SHOW_BLOCKERS=${2:-25}; shift 2 ;;
+        # `--platform-only`: compile the three out-of-manifest blocks and nothing else.
+        #
+        # It exists so that the one file in this build that is *this project's* - the platform expert
+        # in `stages/stage90/xnu_platform/`, whose every edit needs a compile to check - can be
+        # iterated on without recompiling 698 Apple objects to reach it. Measured cost of the
+        # alternative: a full run is minutes, and the first version of that file failed on one
+        # undeclared identifier.
+        #
+        # Two things make it safe rather than a second build path:
+        #   * the manifest is emptied, so the loop body cannot run - not skipped by a branch, but
+        #     given nothing to read. Every counter stays 0 and the per-file machinery above is
+        #     untouched.
+        #   * the `rm -f "$OUT"/*.o` truncation is skipped, because the objects it would delete are
+        #     the pool's, which the entry link needs and this mode is not going to rebuild.
+        # It still checks the component table, the device table and the generated roots, so a
+        # platform-only run is a real build of those three blocks under the same conditions.
+        --platform-only) ONLY_PLATFORM=1; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+if [[ $ONLY_PLATFORM -eq 1 ]]; then
+    # An empty regular file rather than `/dev/null`: the check above asks `[[ -f $MANIFEST ]]`, which
+    # is false for a character device, and the first version of this mode stopped there.
+    MANIFEST=$REPO_ROOT/out/.platform_only_manifest.txt
+    : > "$MANIFEST"
+fi
 
 [[ -f $MANIFEST ]] || {
     echo "no manifest at $MANIFEST - run:" >&2
@@ -143,7 +169,11 @@ rm -f "$OUT"/*.log
 # the manifest no longer names**. That is how this was found: the measurement link failed on
 # `multiple definition of iokit_server_routine` between `mach_headers/device_device_server.o` and
 # `mach_headers/kserver_device_device_server.o`, one of which was stale.
-rm -f "$OUT"/*.o
+#
+# **Not in `--platform-only` mode**, where the manifest is empty and these objects are exactly the
+# ones the entry link is holding on to: deleting them would leave the project with no pool until a
+# full run, which is the run the mode exists to avoid.
+[[ $ONLY_PLATFORM -eq 1 ]] || rm -f "$OUT"/*.o
 : > "$OUT/all.log"
 : > "$OUT/failed.txt"
 
@@ -717,6 +747,82 @@ for _src in "${FIREHOSE_SOURCES[@]}"; do
 done
 [[ $fh_fail -eq 0 ]] || exit 5
 
+# The platform expert, which is not in the manifest because no configuration of Apple's has it. The
+# open-source tree contains no concrete platform expert at all (experiment 362 measured the
+# consequence: `IOStartIOKit.cpp:155`'s `IOPlatformExpertDevice` matches the kernel catalogue's one
+# personality, `IOPanicPlatform`, and Apple designed that one to panic), so this stage authors the
+# missing class - a concrete `IODTPlatformExpert` subclass whose whole content is its metaclass and
+# the two pure virtuals the base leaves - and compiles it here.
+#
+# Here, and with the loop's own flags, for the reason `RUNTIME_SOURCES` and `FIREHOSE_SOURCES` are
+# both compiled here rather than in a stage script: a second flag list is this project's most
+# repeated defect, and this file is a C++ IOKit translation unit that must be ABI-identical to the
+# 83 the loop compiles. Two things are stated rather than derived, and both are stated because
+# `component_of` cannot answer them for a file outside the tree:
+#
+#   * the component is **iokit**, so the per-component defines are iokit's (`component_defines.sh`)
+#     and the import roots are COMPONENT_LIST minus iokit, in Apple's order - which is exactly what
+#     the loop's `COMP_ROOTS` computes for `$XNU/iokit/Kernel/IOPlatformExpert.cpp`, the file this
+#     one subclasses.
+#   * `-fapple-kext` is NOT passed, and must not be: the loop's C++ flags do not have it (it was
+#     only ever *measured* through `XNU_KERNEL_EXTRA_CXXFLAGS`, experiment-330), so the kernel's
+#     `OSObject` vtable is emitted by the class's own key translation unit rather than as a
+#     kernel-kext weak definition, and an object built with the flag would disagree with the 83
+#     about which vtable that is.
+#
+# And beside it, one C file: the kernel's personality table with this machine's platform expert in
+# front of Apple's fallback (`gIOKernelConfigTables`, `iokit/KernelConfigTables.cpp:35`), which the
+# same step replaces one object for one object. It is compiled with `CC_ARGS` - clang - and the
+# compiler is load-bearing rather than incidental: clang puts the table string in `.rodata.str1.1`,
+# which is where the stock object's table text lives, while gcc puts an identical source in
+# `.rodata`, a different input section placed at a different point of the `.text` output section's
+# `.rodata` run. It includes nothing, so the component defines and the force-include set cannot
+# affect it; the compiler, the target triple and `-O2` are the whole of its configuration.
+PLATFORM_SOURCES=("$REPO_ROOT/stages/stage90/xnu_platform/MSM8974PlatformExpert.cpp")
+PLATFORM_C_SOURCES=("$REPO_ROOT/stages/stage90/xnu_platform/stage90_platform_config_tables.c")
+PL_OUT=${XNU_PLATFORM_OBJ_OUT:-$REPO_ROOT/out/xnu_platform_obj}
+PL_ROOTS=(-I"$XNU/iokit")
+for _c in "${COMPONENT_LIST[@]}"; do
+    [[ $_c == iokit ]] && continue
+    PL_ROOTS+=(-I"$XNU/$_c")
+done
+PL_INCLUDES=()
+for _inc in "${INCLUDES[@]}"; do
+    if [[ $_inc == COMP_FIRST_PLACEHOLDER ]]; then
+        PL_INCLUDES+=("${PL_ROOTS[@]}")
+    else
+        PL_INCLUDES+=("$_inc")
+    fi
+done
+# shellcheck disable=SC2207
+PL_COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" iokit) )
+mkdir -p "$PL_OUT"
+pl_fail=0
+for _src in "${PLATFORM_SOURCES[@]}"; do
+    _o="$PL_OUT/$(basename "${_src%.cpp}").o"
+    if timeout "$PER_FILE_TIMEOUT" "${CXX_ARGS[@]}" "${EXTRA_CXX_FLAGS[@]}" "${FORCE_INCLUDES[@]}" \
+           "${DEFINES[@]}" "${PL_COMP_DEFINES[@]}" "${EXTRA_DEFINES[@]}" "${PL_INCLUDES[@]}" \
+           -c "$_src" -o "$_o" 2>"$PL_OUT/$(basename "${_src%.cpp}").log"; then
+        rm -f "$PL_OUT/$(basename "${_src%.cpp}").log"
+    else
+        echo "platform: $(basename "$_src") FAILED - $PL_OUT/$(basename "${_src%.cpp}").log" >&2
+        pl_fail=$((pl_fail + 1))
+    fi
+done
+# The C one: no component defines, no force-includes, no import roots - it includes nothing, and the
+# only thing that has to match the objects around it is the compiler and the target triple.
+for _src in "${PLATFORM_C_SOURCES[@]}"; do
+    _o="$PL_OUT/$(basename "${_src%.c}").o"
+    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" -c "$_src" -o "$_o" \
+           2>"$PL_OUT/$(basename "${_src%.c}").log"; then
+        rm -f "$PL_OUT/$(basename "${_src%.c}").log"
+    else
+        echo "platform: $(basename "$_src") FAILED - $PL_OUT/$(basename "${_src%.c}").log" >&2
+        pl_fail=$((pl_fail + 1))
+    fi
+done
+[[ $pl_fail -eq 0 ]] || exit 6
+
 # The key check the loop's comment promises. Two sources, one object path, whichever compiled last
 # wins - and it would show up as nothing at all: a build that reports success and an object that
 # belongs to a different file. It is the same defect as `-D_CLOCK_T` and the shadowed headers
@@ -741,6 +847,7 @@ echo "  C++ fail:             $cpp_fail"
 echo "  skipped (.s):         $skipped"
 echo "  objects in $OUT"
 echo "  EABI runtime:         ${#RUNTIME_SOURCES[@]} file(s) -> $RT_OUT (not in the manifest)"
+echo "  platform expert:      ${#PLATFORM_SOURCES[@]} C++ and ${#PLATFORM_C_SOURCES[@]} C file(s) -> $PL_OUT (not in the manifest)"
 
 if [[ $SHOW_BLOCKERS -gt 0 ]]; then
     echo

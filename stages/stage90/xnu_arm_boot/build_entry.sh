@@ -195,6 +195,25 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
     -O2 -Wall -Wextra -Werror -std=gnu11 \
     -c "$BOOT_DIR/entry_last_kernel_constructor.c" -o "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ"
 
+# **The personality table (363).** The stock `iokit_KernelConfigTables.o` defines one symbol,
+# `gIOKernelConfigTables`, and the table it points at has exactly one entry: Apple's `IOPanicPlatform`,
+# whose `start` panics because nothing better matched. Experiment 362 measured that fallback firing on
+# this machine. The replacement - `stages/stage90/xnu_platform/stage90_platform_config_tables.c` -
+# keeps Apple's entry and puts this machine's platform expert in front of it, and it is *that* file's
+# object, not the stock one, that the entry link uses (`IOKIT_KERNEL_CONFIGTABLES_OBJ`'s default
+# below), one object for one object so that the link's accounting does not move for a reason that is
+# not the table.
+#
+# It is compiled by `tools/build_xnu_arm_kernel.sh`'s platform block, with **clang**, and that is not
+# a preference: the object it replaces is one of the manifest's 83 C++ files' neighbours and clang
+# puts the table string in `.rodata.str1.1` (1-byte stride, which is where the stock object's 0x82
+# bytes of table text live), while gcc puts an identical source in `.rodata` - or, with
+# `__attribute__((aligned(1)))`, in `.rodata` as well - which is a *different input section*, placed
+# at a different point of the `.text` output section's `.rodata` run, and that difference is visible
+# in every address above it. Same source, same size, different section: the shape of the object is
+# part of the step.
+STAGE90_CONFIG_TABLES_OBJ=${STAGE90_ENTRY_PLATFORM_CONFIG_TABLES_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_platform_config_tables.o}
+
 # The hang tracer, only when asked for. Compiled here rather than in the link block because it is a
 # translation unit like the two above, and linked into `LINK_OBJS` at the bottom.
 if [[ $ENTRY_TRACE -eq 1 ]]; then
@@ -8639,7 +8658,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # stop naming anything else at all means a call this disassembly read as real did not return, with the caller
     # key saying which one.
     LIBKERN_CXX_OSUNSERIALIZE_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSUNSERIALIZE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSUnserialize.o}
-    IOKIT_KERNEL_CONFIGTABLES_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_CONFIGTABLES_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_KernelConfigTables.o}
+    IOKIT_KERNEL_CONFIGTABLES_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_CONFIGTABLES_OBJ:-$STAGE90_CONFIG_TABLES_OBJ}
     # **Measured: every count exact, a stop that is the predicted name *and* the predicted key, and the first
     # `.data` delta in the walk that the fill absorbed whole.** `831 symbol(s) undefined` /
     # `729 function(s), 102 storage` - all three exactly as predicted, and 729 + 102 = 831 as the prediction
@@ -12076,6 +12095,289 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     IOKIT_KERNEL_IOEVENTSOURCE_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOEVENTSOURCE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOEventSource.o}
     OSFMK_VM_VM_SHARED_REGION_OBJ=${STAGE90_ENTRY_OSFMK_VM_VM_SHARED_REGION_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_vm_vm_shared_region.o}
     OSFMK_KERN_SCHED_AVERAGE_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SCHED_AVERAGE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_sched_average.o}
+    # =============================================================================================
+    # **363: the platform expert. The first step in this walk whose object Apple's tree does not
+    # contain at all, and the first whose change is not "one more real implementation" but "a class
+    # that was missing".**
+    #
+    # 362 ended in a panic inside real code, with no `stub_hit` at all: `IOPanicPlatform::start`'s
+    # `Unable to find driver for this platform: "%s"`, reached because the kernel's catalogue of
+    # personalities has exactly one entry and that entry is Apple's designed fallback. The piece that
+    # is missing is not a symbol the link cannot resolve - it is a *concrete* `IOPlatformExpert`.
+    # `IODTPlatformExpert` is the whole device-tree platform expert and is real in this image
+    # (experiment 355 linked `iokit_Kernel_IOPlatformExpert.o`), but `IOPlatformExpert.cpp:1243` makes
+    # its metaclass abstract, so `OSMetaClass::allocClassWithName` - which is how matching
+    # instantiates a driver (`IOService.cpp:3296-3301`) - refuses it.
+    #
+    # ## The two objects, and what each is for
+    #
+    # `stages/stage90/xnu_platform/MSM8974PlatformExpert.cpp` (clang, iokit flags, by
+    # `tools/build_xnu_arm_kernel.sh`'s platform block) is the class: a concrete `IODTPlatformExpert`
+    # whose content is its metaclass, the two pure virtuals the base leaves (`deleteList`,
+    # `excludeList`), and a `start` that calls `super::start`. Nothing else - `probe`, `configure`,
+    # `createNub`, `createNubs`, `processTopLevel`, `getModelName`, `getMachineName`,
+    # `getNubResources` and `haltRestart` are Apple's and already linked.
+    #
+    # `stages/stage90/xnu_platform/stage90_platform_config_tables.c` (clang, by the same block)
+    # *replaces* the pool's `iokit_KernelConfigTables.o` - one object for one object - with the same
+    # Apple entry plus this machine's, so the fallback is still there behind ours. Without the
+    # `IONameMatch` in it the probe fails: `IODTPlatformExpert::probe` requires
+    # `provider->compareNames(getProperty("IONameMatch"))`, and a missing property makes
+    # `IORegistryEntry::compareNames(0)` return false (`IORegistryEntry.cpp:903-928`), which puts the
+    # machine straight back on the panic. Its value, `qcom,msm8974-xnu-stage90`, is the root node's
+    # `compatible` as this machine's DT writes it (`stage90_main.c:80`).
+    #
+    # ## Prediction (written before the build)
+    #
+    # **The stub set does not move at all**: `tools/entry_object_effect.py` against the 362 image
+    # reports 22 definitions, 267 references, **0 resolved and 0 added**, 267 already satisfied - so
+    # 786 undefined stays **786** (682 function, 104 storage), `realstubs.o` keeps all three of its
+    # closed forms (`.text` 0x3FF0 = 682 x 0x18, `.rodata.str1.4` 0x3AE4, `.bss` 0x27C4). The 267
+    # references are the class's vtable: one entry per virtual of `IOService`, `IORegistryEntry`,
+    # `IOPlatformExpert` and `IODTPlatformExpert`, and every one of them is already real in the
+    # image, which 355-362 is what made true.
+    #
+    # | | 362 measured | 363 predicted |
+    # |---|---|---|
+    # | `.text` end | 0x801A3720 | **0x801A3D80** |
+    # | `.data` | 0x801A4000 (0x19A58) | **0x801A4000 (0x19A58)** |
+    # | `.sysctl_set` | 0x801BDA58 (0x150) | **0x801BDA58 (0x150)** |
+    # | `.init_array` | 0x801BDBA8 (0x78) | **0x801BDBA8 (0x7C, thirty-one)** |
+    # | its end | 0x801BDC20 | **0x801BDC24** |
+    # | `.bss` | 0x801BDC40 (0x390D8) | **0x801BDC40 (0x39118)** |
+    # | `__bss_end` | 0x801F6D18 | **0x801F6D58** |
+    # | image | 1825824 | **1825828** |
+    # | headroom | 1086184 | **1086120** |
+    # | `args` | +2064384 | **+2064384** |
+    # | `topOfKernelData` | +3145728 | **+3145728** |
+    #
+    # Each row is arithmetic over the two new objects and the map of the 362 link, and the four that
+    # are not simply sizes are the interesting ones:
+    #
+    #   * **`.init_array` grows by one entry, 0x78 -> 0x7C, and 332's contract holds.** The class's
+    #     `OSDefineMetaClassAndStructors` defines `MSM8974PlatformExpert::gMetaClass`, a static with a
+    #     constructor, so it emits a `.init_array` entry (`libkern/c++/OSMetaClass.h:1778-1796`) - and
+    #     because the object is linked after `sched_average.o` and before
+    #     `xnu_arm_entry_last_kernel_constructor.o`, that entry is the table's **second to last**, so
+    #     the last-kernel-constructor entry moves from 0x801BDC1C to 0x801BDC20 and is still last.
+    #   * **`__bss_end` moves by 0x40, not by the object's 0x18.** `new_pad = (0 - 0x18) mod 64 =
+    #     0x28`: the object's `.bss` lands at 0x801F4540 - where 362's `.bss` run had no fill at all -
+    #     and `realstubs.o`'s 64-byte-aligned `.bss` is pushed to 0x801F4580. That is the eighth
+    #     confirmation of the pad rule and the first one where the pad *grows*.
+    #   * **`.data`, `.sysctl_set` and the two offsets do not move.** The replaced table keeps a
+    #     4-byte `.data` word in the same 64-byte slot (331's rule) and its string moves inside the
+    #     `.text` output section, not `.data`; `args` = `align_up(bss_end - base, 0x1000) + 0x1000`
+    #     still rounds 0x1F6D58 to 0x1F7000, and `topOfKernelData` still rounds to 0x00300000.
+    #   * **the `.text` end, and it is the only row whose arithmetic is not just a sum.** The two
+    #     objects add 0x667 of inputs - 0x154 in the `.text` run (0x150 for the class plus the 0x4
+    #     `MetaClassD0Ev` thunk) and 0x513 in the `.rodata` run (0x440 of vtables, 0x16 of strings,
+    #     0xBD for the table's own string growing 0x82 -> 0x13F where the stock object put it) - and
+    #     the raw end moves **+0x670**, the extra 9 being the per-input alignment reshuffle that
+    #     `mi4-linker-fill-term` is about. The last input is libgcc's `.ARM.exidx` (8 bytes, ending at
+    #     0x801A3710 in the 362 map and 0x801A3D80 here), so the delta of `__entry_text_end` is
+    #     0x660 and not 0x670: `.text` closes with `ALIGN(32)` and 0x801A3710 needed 0x10 of it while
+    #     0x801A3D80 does not. That is the whole of this row, and it comes from `tools/predict_layout.py`,
+    #     which models the two runs as `align_up(old + shift, alignment)` per input - and that model has a
+    #     measured limit: replaying the 362 map *backwards* (removing
+    #     `sched_average.o`) reproduces `realstubs.o`'s `.text` to the byte at 0x80179BD4 but puts the
+    #     raw end 0x20 high, because the map's `.rodata.str1.1` sizes are deduplicated contributions
+    #     and the model must reuse a step's sizes for its predecessor's question. The forward
+    #     direction is not exposed to that slip, but the honest form of this row is **0x801A3D80 +/- a
+    #     few alignment bytes**, and the falsifier with teeth is the next row: `.data` stays at
+    #     0x801A4000 only while the text end stays below it, with 0x280 to spare.
+    #
+    # Where the new code and data land (from the same arithmetic, and each is checkable in the new
+    # map): the class's `.text` 0x150 at **0x8017A008**, its `.text._ZN21MSM8974PlatformExpert9MetaClassD0Ev`
+    # 0x4 at 0x8017A158, its `.rodata` (two vtables, 0x440) at **0x8019F338**, its `.rodata.str1.1` 0x16
+    # at 0x8019F778, its `.bss` 0x18 at **0x801F4540**, its `.init_array` 0x4 at 0x801BDC1C; and
+    # `realstubs.o` moves to `.text` **0x8017A1B4**, `.rodata.str1.4` **0x8019F8DC**, `.bss`
+    # **0x801F4580**.
+    #
+    # ## The stop, which is now a different question
+    #
+    # Every step of this walk so far predicted a `stub_hit` by asking what the *previous* stop's
+    # function calls next. 362's stop has no name to ask about, so the question is the one 362's
+    # frontier left: with the class in the image, what does the machine do *first* that it could not
+    # do before? The answer is the whole match sequence, and it is all real code until it is not:
+    #
+    #   `registerService`'s job -> `probeCandidates` (`IOService.cpp:3176`) -> the personality with the
+    #   higher score -> `allocClassWithName("MSM8974PlatformExpert")` -> `MetaClass::alloc` -> `new` ->
+    #   `IOService::init(props)` -> `attach` -> `inst->probe(this, &score)` =
+    #   `IODTPlatformExpert::probe` (`IOPlatformExpert.cpp:1256`, three lines, all real) ->
+    #   `startCandidate` -> `service->start(this)` = **our** start -> `IOPlatformExpert::start`
+    #   (real, `IOPlatformExpert.cpp:108`) -> `IOService::start` (trivial, `IOService.cpp:513`) ->
+    #   `PE_parse_boot_argn("dart", ...)` (real) -> `removeProperty` (virtual, real) -> `getProperty`
+    #   (virtual, real) -> and then the first thing on this path that is *not* in the image.
+    #
+    # **`IOMapper::setMapperRequired(bool)`**, called from `IOPlatformExpert::start` at 0x8015D8F8
+    # (`IOPlatformExpert.cpp:133`, `IOMapper::setMapperRequired(0 != getProperty(kIOPlatformMapperPresentKey))`).
+    # `tools/xnu_entry_callwalk.py --root _ZN16IOPlatformExpert5startEP9IOService` against the 362
+    # image names exactly that call site, and says why its straight-line scan did not: the two virtual
+    # dispatches before it (`blx r2` at +0x60 and at +0x78, which is `getProperty(kIOPlatformMapperPresentKey)`)
+    # are indirect, so the linear walk ends there and reports "no stub on the straight-line path" - the
+    # site is in the instrument's *conditional-branch* table, as
+    # `_ZN16IOPlatformExpert5startEP9IOService+0x84 -> _ZN8IOMapper17setMapperRequiredEb   STUB`.
+    # The prediction in the instrument's own words is therefore
+    #
+    #   `stub_hit=_ZN8IOMapper17setMapperRequiredEb`, `xnu_entry_stub_caller_v=0x8015D8FC`
+    #
+    # and the `bl` is at `caller - 4` = 0x8015D8F8, inside `IOPlatformExpert::start`, which is
+    # *unchanged in address* because both new objects are linked after it (the table's `.data` word is
+    # in `.data` and its string in the `.rodata` run, which follows the whole `.text` run).
+    #
+    # Three falsifiers, in the order this walk would read them:
+    #
+    #   * **`_ZN16IORangeAllocator9withRangeEmmmm` at caller 0x8015D98C** - the second stub on the same
+    #     straight line (`IOPlatformExpert.cpp:143`), reached if the two virtual calls before the first
+    #     one return differently than the source says (the first is inside
+    #     `if (PE_parse_boot_argn("dart", ...) && (debugFlags == 0))`, so a `dart=0` in the boot args
+    #     would take it).
+    #   * **a stop with a name this block never mentioned, at a caller inside one of the 167 indirect
+    #     calls the walk could not follow** - `getProperty` is real, but its closure is not the walk's
+    #     to know, and `IORegistryEntry::getProperty` reaching a stub would be reported with *its*
+    #     caller.
+    #   * **another panic, and this one is the step failing rather than the machine being incomplete.**
+    #     If the run traps again in `DebuggerTrapWithState` with `stub_caller_v`, `stub_hit` and
+    #     `abort_entries` all zero, the match did not happen: either `IONameMatch` did not match the
+    #     root nub's `name`/`compatible`/`device_type`/`model`, or the class name did not resolve. The
+    #     check that distinguishes it from 362 is cheap and exact: the panic format string
+    #     `"Unable to find driver for this platform: \"%s\".\n"` was at 0x8019DE16 in the 362 image and
+    #     moves by +0x670 with this step, so a second panic must report **`trap_r9_fmt=0x8019E486`**.
+    #     (0x8019DE16 is in `IOPlatformExpert.o`'s `.rodata.str1.1` input, whose section starts at
+    #     0x8019DC10 in 362 and 0x8019E280 here - both shifted by the table string's 0xBD and by the
+    #     class's 0x440 + 0x154 before it.)
+    #
+    # ## Safety, and what this step can and cannot reach
+    #
+    # Nothing here is new hardware access: the new code is a class hierarchy, a plist string and a
+    # `.init_array` entry, and the code it *enables* (`IOPlatformExpert::start` and, behind it,
+    # `configure` -> `processTopLevel` -> DT nubs) is Apple's, already linked, and does no I/O. The
+    # run is still a non-persistent `fastboot boot` of `stage90-qcdt.img`, the instrument's
+    # `persistent_write_attempted` and `failure_mask` counters are still read from every record, and
+    # the two recovery nets are unchanged. The one thing this step changes about the machine's
+    # behaviour on a *failed* run is that the panic is no longer guaranteed: if the driver starts, the
+    # run continues into IOKit's platform plane and stops at whatever it cannot call next - which is
+    # the point, and is also why the run is bounded by the same watchdog as every step before it.
+    # =============================================================================================
+    # =============================================================================================
+    # **363 measured, and it is the step the walk has been building towards: the machine's own
+    # platform expert started.** The run reported
+    #
+    #    xnu_entry_why=0x8017e98c          xnu_entry_why_byte=0x00000061     'a'
+    #    xnu_entry_stub_caller_v=0x8015d8fc
+    #    xnu_entry_abort_entries=0x00000000     xnu_entry_kv_dropped=0x00000000
+    #    real XNU entry stub_hit=_ZN8IOMapper17setMapperRequiredEb
+    #
+    # **Name and caller key exactly as predicted** - 0x8015D8FC is `caller-4` = 0x8015D8F8, the `bl`
+    # inside `IOPlatformExpert::start`, at the same address it had in the 362 image because both new
+    # objects are linked after it. `why` is the message string `a symbol this image does not provide was
+    # called` (`xnu_arm_entry_stubs.o`'s `.rodata.str1.4`, 0x8017E450 + 0x53C in this image, first byte
+    # 0x61), so the record is the stub-hit path and not the exception one - and **there is no panic**:
+    # 362's `Unable to find driver for this platform` did not recur. That is the whole content of the
+    # step. `allocClassWithName("MSM8974PlatformExpert")` found the class, the personality's
+    # `IONameMatch` matched the root nub, `IODTPlatformExpert::probe` returned the object,
+    # `startCandidate` called **our** `start`, that called Apple's `IOPlatformExpert::start`, and Apple's
+    # code ran: `PE_parse_boot_argn("dart", ...)`, two virtual `getProperty`s, and then the first thing
+    # on the path the image cannot call. The frontier is now *inside the platform expert Apple cannot
+    # give this machine* rather than at the fallback that says it has none.
+    #
+    # **Counts, all three exact, and the first step of the walk where nothing is retired and nothing is
+    # created**: `xnu_arm_entry_stubnames.txt` holds `682 func` + `104 data` = **786**, as in 362 - the
+    # class's 267 references are all satisfied and it defines nothing the image was stubbing - and
+    # `realstubs.o` keeps all three closed forms to the byte: `.text` **0x3FF0** = 682 x 0x18,
+    # `.rodata.str1.4` **0x3AE4**, `.bss` **0x27C4**. The 21 definitions the class brings (its vtable,
+    # metaclass vtable, `gMetaClass`, `metaClass`, `superClass`, the four methods, the two ctors and the
+    # `_GLOBAL__sub_I_` initialiser) and the table's one (`gIOKernelConfigTables`, `D 0x4`) are all new
+    # *names* with no stand-in behind them, which is what "0 resolved, 0 added" looks like from the
+    # linker's side.
+    #
+    # **Layout: every section boundary below `.text` came out exactly as predicted, and the two
+    # `.rodata`-run rows are 8 low.**
+    #
+    # | | predicted | measured |
+    # |---|---|---|
+    # | class `.text` | 0x8017A008 (0x150) | **0x8017A008 (0x150)** |
+    # | class `.text.<MetaClass>D0Ev` | 0x8017A158 (0x4) | **0x8017A158 (0x4)** |
+    # | `realstubs.o` `.text` | 0x8017A1B4 (0x3FF0) | **0x8017A1B4 (0x3FF0)** |
+    # | class `.rodata` | 0x8019F338 (0x440) | **0x8019F330 (0x440)** |
+    # | class `.rodata.str1.1` | 0x8019F778 (0x16) | **0x8019F770 (0x16)** |
+    # | table `.rodata.str1.1` | +0xBD where the stock one was | **0x8019984B (0x13F)**, 0x801996F3 + 0x158 |
+    # | `realstubs.o` `.rodata.str1.4` | 0x8019F8DC (0x3AE4) | **0x8019F8D4 (0x3AE4)** |
+    # | `__entry_text_end` | 0x801A3D80 | **0x801A3D80** (text size 1719680) |
+    # | `.data` | 0x801A4000 (0x19A58) | **0x801A4000 (0x19A58)** |
+    # | table `.data` word | 0x801BC2A0 (0x4) | **0x801BC2A0 (0x4)** |
+    # | `.sysctl_set` | 0x801BDA58 (0x150) | **0x801BDA58 (0x150)** |
+    # | `.init_array` | 0x801BDBA8 (0x7C) | **0x801BDBA8 (0x7C)** |
+    # | class `.init_array` entry | 0x801BDC1C | **0x801BDC1C**, `last_kernel_constructor` to 0x801BDC20 |
+    # | `.bss` | 0x801BDC40 (0x39118) | **0x801BDC40 (0x39118)** |
+    # | class `.bss` / `realstubs.o` `.bss` | 0x801F4540 (0x18) / 0x801F4580 | **0x801F4540 (0x18) / 0x801F4580** |
+    # | `__bss_end` | 0x801F6D58 | **0x801F6D58** |
+    # | image | 1825828 | **1825828** |
+    # | headroom | 1086120 | **1086120** |
+    # | `args` / `topOfKernelData` / `dt` | +2064384 / +3145728 / +5242880 | **all three unmoved** |
+    #
+    # The `__bss_end` row is the eighth confirmation of the pad rule and the first where the pad grows:
+    # the class's 0x18 of `.bss` lands at 0x801F4540, `realstubs.o`'s 64-byte-aligned `.bss` is pushed
+    # from 0x801F4540 to 0x801F4580 - `(0 - 0x18) mod 64` = 0x28 of fill - and the end is
+    # 0x801F6D04 + align8 + the 0x10 `__entry_reset_handler_data` slot = 0x801F6D58. The `.init_array`
+    # row is 332's contract holding for the thirty-first time: the class's static `gMetaClass` puts its
+    # constructor at 0x801BDC1C, the last-kernel-constructor sentinel moves to 0x801BDC20 and is still
+    # last, and `__entry_init_array_size` is 0x7C.
+    #
+    # **Three misses, each worth keeping.**
+    #
+    #   * **The `.rodata`-run rows are 8 low** (0x8019F330 / 0x8019F770 / 0x8019F8D4 against
+    #     0x8019F338 / 0x8019F778 / 0x8019F8DC). One cause covers all three: the shift model replays
+    #     each input's alignment across the whole run, and in the `.rodata` run it comes out 0x8 above
+    #     the link at that point. The `.text` run is unaffected - every `.text` row is exact - so this
+    #     is the fill term again, now measured on the `.rodata` side as **0x8**.
+    #   * **The raw `.text` end moved +0x660 (0x801A3710 -> 0x801A3D70) where the model said +0x670,
+    #     and the prediction's explanation of the +0x660 was wrong even though its value was right.**
+    #     `.text` closes with `ALIGN(32)`: 0x801A3710 needed 0x10 of it and 0x801A3D70 needs 0x10 too,
+    #     so `__entry_text_end` gains the same 0x660 the raw end does, and the "0x10 no longer needed"
+    #     sentence in the prediction above is not how it works. So in one link the same model is 0x10
+    #     high at the raw end of `.text` and 0x8 low inside the `.rodata` run - which is the honest
+    #     size of this step's fill term, and the reason the ledger's rule is "+/- a few alignment bytes"
+    #     and not "exact".
+    #   * **The `trap_r9_fmt` falsifier's expected value was wrong, and the reason is the useful part.**
+    #     The panic string is at **0x8019E02B** here, not 0x8019E486: the `.rodata` run has **two shift
+    #     regimes** in this step, and the boundary is the class's own `.rodata` insertion point near the
+    #     end of the run. Inputs placed before it move by the shift in force where they sit -
+    #     `IOPlatformExpert.o`'s `.rodata.str1.1` by **+0x215** (the +0x158 the table's string position
+    #     sees, which is the class's 0x154 plus 4 of alignment, and then the table's own 0xBD) - while
+    #     inputs after it (class `.rodata`, class `.rodata.str1.1`, `realstubs.o`'s) move by **+0x670**.
+    #     A prediction that lifts the end-of-section shift onto an input in the middle of the run is
+    #     wrong by exactly the difference: 0x670 - 0x215 = 0x45B, which is precisely the error above.
+    #     The falsifier itself never fired - there was no panic - so what this costs is a value the next
+    #     run can use: if a later step ever traps in `IOPanicPlatform`, the format string it reports is
+    #     whichever address that step's own map gives, and for this image it is 0x8019E02B.
+    #
+    # **None of the three falsifiers fired.** The stop is not `IORangeAllocator::withRange` (the two
+    # virtual calls before `setMapperRequired` returned what the source says), it is not a name this
+    # block never mentioned, and it is not a second panic - `abort_entries=0x0` and the log's own last
+    # line is the kernel's `No errors detected`.
+    #
+    # **Safety, as every run**: a non-persistent `fastboot boot` of `stage90-qcdt.img`, nothing flashed,
+    # 25 records of `persistent_write_attempted=0x00000000` and 87 of `failure_mask=0x00000000` with no
+    # non-zero reading of either, `xnu_entry_checks=5` / `xnu_entry_failures=0`, a 301645-byte log, and
+    # the device back on Android on its own (`MI 4LTE`, release 10).
+    #
+    # **What the next step is, and it is a different shape from every step before it.** The stop is
+    # `IOMapper::setMapperRequired(bool)` - `iokit/Kernel/IOMapper.cpp:110`, a one-line setter on the
+    # `IOMapper` class, whose object is not in the link. The step that follows is not "retire a stub the
+    # frontier reached"; it is the object that owns `IOMapper` itself, and the frontier the run after it
+    # reaches will be decided by whatever `IOPlatformExpert::start` does next - `OSDictionary::withCapacity`,
+    # `IOLockAlloc`, `OSData::withBytesNoCopy`, `OSSymbol::withCStringNoCopy`, `IORangeAllocator::withRange`,
+    # `PMInstantiatePowerDomains`, in that source order - which the ledger will name from *that* address
+    # table rather than from this prediction's.
+    # =============================================================================================
+    # **363's object, and the first one in this walk that Apple's tree does not contain at all.**
+    # It is compiled by `tools/build_xnu_arm_kernel.sh`'s platform block - a `.cpp`, so it needs that
+    # script's `CXX_ARGS`, its per-component defines for `iokit` and its 83-object flag set - and it
+    # lands in `out/xnu_platform_obj/`, beside the EABI runtime and the firehose, which are the two
+    # other things in this image that are not Apple's. `stage90/xnu_platform/MSM8974PlatformExpert.cpp`
+    # is the source and holds the argument for why the class has to exist.
+    STAGE90_PLATFORM_EXPERT_OBJ=${STAGE90_ENTRY_PLATFORM_EXPERT_OBJ:-$REPO_ROOT/out/xnu_platform_obj/MSM8974PlatformExpert.o}
     BSD_KERN_BSD_STUBS_OBJ=${STAGE90_ENTRY_BSD_KERN_BSD_STUBS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_bsd_stubs.o}
     IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOInterruptAccounting.o}
     IOKIT_KERNEL_IOKITDEBUG_OBJ=${STAGE90_ENTRY_IOKIT_KERNEL_IOKITDEBUG_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_Kernel_IOKitDebug.o}
@@ -18815,7 +19117,14 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$LIBKERN_CXX_OSBOOLEAN_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_CXX_IOCATALOGUE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
-    require "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    # 363 replaced the table, so this object is no longer the pool's `iokit_KernelConfigTables.o` but
+    # `$STAGE90_CONFIG_TABLES_OBJ` (default `out/xnu_platform_obj/stage90_platform_config_tables.o`,
+    # set at the top of this script from `stages/stage90/xnu_platform/`), which
+    # `tools/build_xnu_arm_kernel.sh`'s platform block compiles with clang - the compiler is part of
+    # the step, not a detail: see the block at the top of this script. The require stays because the
+    # assignment below is a *default*: `STAGE90_ENTRY_IOKIT_KERNEL_CONFIGTABLES_OBJ` can still point
+    # it back at the pool's stock object, and then that object really does have to be built first.
+    require "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "run ./tools/build_xnu_arm_kernel.sh first, or unset STAGE90_ENTRY_IOKIT_KERNEL_CONFIGTABLES_OBJ (whose default is now $STAGE90_CONFIG_TABLES_OBJ, built by that script's platform block)"
     require "$LIBKERN_CXX_OSNUMBER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_CXX_OSSET_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_OSKEXTVERSION_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
@@ -18835,6 +19144,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_SHARED_REGION_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$STAGE90_PLATFORM_EXPERT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first (its platform block compiles stages/stage90/xnu_platform/MSM8974PlatformExpert.cpp)"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -18847,7 +19157,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
