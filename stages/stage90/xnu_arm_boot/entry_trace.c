@@ -118,6 +118,14 @@ extern void entry_epilogue_block(const char *why, uint32_t caller,
 extern void entry_note_vmwait(uint32_t caller);
 
 /*
+ * 447's two, and they are the *non*-terminal pair: `ml_get_max_cpus` blocks and returns, so the
+ * wrapper records and calls through, and the block that ends the run still happens inside the real
+ * function - which is what makes the site it names the site of the block and not of a return.
+ */
+extern void entry_note_maxcpus(uint32_t caller);
+extern void entry_note_initmax_cpus(uint32_t caller, uint32_t max_cpus);
+
+/*
  * XNU's own page-accounting global (`vm_page.h`), read rather than declared by this file's own idea
  * of it. It is a `B` symbol in the image, so if the object that owns it is not linked the read gets
  * the generated storage stand-in and reports 0 - which is a different claim ("no free pages") from
@@ -249,4 +257,36 @@ void __wrap_thread_block(void *continuation)
     entry_epilogue_block("t268: thread_block was called",
                          (uint32_t)(uintptr_t)__builtin_return_address(0),
                          (uint32_t)(uintptr_t)continuation);
+}
+
+/* ------------------------------------------------------- ml_get_max_cpus / ml_init_max_cpus */
+/*
+ * Experiment 447. 446 named the frame the run ends in - `ml_get_max_cpus`'s own `thread_block` - and
+ * the six `bl ml_get_max_cpus` sites in the image are `vm_page_init_local_q`,
+ * `waitq_alloc_prepost_reservation`, `commpage_populate`, `mcache_init`, `mbinit` and
+ * `sysctl_mib_init`; a terminal wrapper cannot tell them apart, because the call it reports is the
+ * one *inside* the function it wrapped.
+ *
+ * These two are the frame above. Neither is terminal, and neither changes its argument or its result:
+ * the caller's return address goes into a `.bss` slot the epilogue prints outside the buffer, and the
+ * real function runs exactly as it would have. `ml_get_max_cpus` keeps the **first** caller (the call
+ * that blocks is the first one to find the flag unset); `ml_init_max_cpus` keeps the first caller and
+ * the number announced, and its count is the reading that says whether the writer ran at all - 0 would
+ * mean the platform expert's `start` never reached experiment 405's `ml_init_max_cpus(1)`, which is
+ * the one thing that can leave `ml_get_max_cpus` waiting forever on this machine.
+ */
+uint32_t __real_ml_get_max_cpus(void);
+
+uint32_t __wrap_ml_get_max_cpus(void)
+{
+    entry_note_maxcpus((uint32_t)(uintptr_t)__builtin_return_address(0));
+    return __real_ml_get_max_cpus();
+}
+
+void __real_ml_init_max_cpus(uint32_t max_cpus);
+
+void __wrap_ml_init_max_cpus(uint32_t max_cpus)
+{
+    entry_note_initmax_cpus((uint32_t)(uintptr_t)__builtin_return_address(0), max_cpus);
+    __real_ml_init_max_cpus(max_cpus);
 }

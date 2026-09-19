@@ -76,8 +76,9 @@ ARGS_BYTES=0x00001000          # one page, which is what `boot_args` needs to fi
 REAL_ARM_INIT=${STAGE90_ENTRY_REAL_ARM_INIT:-0}
 STUB_DEFINES=()
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES=(-DSTAGE90_ENTRY_REAL_ARM_INIT=1)
-# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s five functions - `kalloc_canblock`,
-# `lck_grp_alloc_init`, `kernel_memory_allocate`, `vm_page_wait`, `thread_block` - so a run that
+# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s seven functions - `kalloc_canblock`,
+# `lck_grp_alloc_init`, `kernel_memory_allocate`, `vm_page_wait`, `thread_block`, and (447)
+# `ml_get_max_cpus`, `ml_init_max_cpus` - so a run that
 # hangs inside real XNU code says which frame it stopped in and why. It is a *diagnostic*, not a
 # stage: the traced image runs the same code, but it is not the image a stage is judged on, so this
 # is off by default and the stage that experiment 268 measured is built without it. The wrappers
@@ -96,7 +97,8 @@ TRACE_LDFLAGS=()
 TRACE_OBJS=()
 if [[ $ENTRY_TRACE -eq 1 ]]; then
     TRACE_LDFLAGS=(--wrap=kalloc_canblock --wrap=lck_grp_alloc_init
-                   --wrap=kernel_memory_allocate --wrap=vm_page_wait --wrap=thread_block)
+                   --wrap=kernel_memory_allocate --wrap=vm_page_wait --wrap=thread_block
+                   --wrap=ml_get_max_cpus --wrap=ml_init_max_cpus)
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
 # every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that

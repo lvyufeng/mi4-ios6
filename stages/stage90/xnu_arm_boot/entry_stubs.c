@@ -379,6 +379,30 @@ uint32_t g_block_continuation;
 uint32_t g_block_kv_len;
 uint32_t g_vmwait_caller;
 uint32_t g_vmwait_count;
+/*
+ * Experiment 447. 446 resolved the block to `ml_get_max_cpus` and the run could not say *which* of
+ * that function's six callers it was, so the next reading is the caller itself - and the second is
+ * whether anything ever set the flag the function waits on.
+ *
+ * `ml_get_max_cpus` **returns** once `max_cpus_initialized` is `MAX_CPUS_SET`, so unlike
+ * `thread_block` it can be wrapped *non*-terminally: the wrapper records and calls through, and the
+ * block that ends the run still happens inside the real function. What has to be kept is therefore
+ * the **first** caller and not the last - the first call is the one that finds the flag unset, since
+ * the only thing that sets it is `ml_init_max_cpus` and a call that found it set would not block - so
+ * `entry_note_maxcpus` keeps the first site and counts, while `entry_note_vmwait` keeps the last.
+ * The count is what distinguishes "the flag was never set" from "it was set after an earlier call".
+ *
+ * `ml_init_max_cpus` is the writer, `void` and non-blocking, and its two in-image callers are two
+ * different stories: `IOCPUInterruptController::initCPUInterruptController(int,int)` is Apple's path
+ * and does not run here (its platform hook, `createCPUInterruptController`, is not in this tree),
+ * while `MSM8974PlatformExpert::start` is this project's own experiment-405 probe. `_arg` is the
+ * number announced, and a count of 0 is the reading that the probe never ran.
+ */
+uint32_t g_maxcpus_caller;
+uint32_t g_maxcpus_count;
+uint32_t g_initmax_cpus_caller;
+uint32_t g_initmax_cpus_count;
+uint32_t g_initmax_cpus_arg;
 #endif
 
 /*
@@ -1136,6 +1160,18 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     entry_write_kv("xnu_entry_block_kv_len", g_block_kv_len);
     entry_write_kv("xnu_entry_vmwait_caller", g_vmwait_caller);
     entry_write_kv("xnu_entry_vmwait_count", g_vmwait_count);
+    /*
+     * Experiment 447, the same slots-versus-buffer argument one frame up: the site that called
+     * `ml_get_max_cpus` and whether the flag's writer ran at all. `_maxcpus_count` is 0 only if the
+     * function was never called; a non-zero count with the run ending in its `thread_block` means the
+     * *first* call found the flag unset, since the writer is the only thing that sets it. `- 4` of
+     * `_caller` is the `bl`, as everywhere else in this report.
+     */
+    entry_write_kv("xnu_entry_maxcpus_caller", g_maxcpus_caller);
+    entry_write_kv("xnu_entry_maxcpus_count", g_maxcpus_count);
+    entry_write_kv("xnu_entry_initmax_cpus_caller", g_initmax_cpus_caller);
+    entry_write_kv("xnu_entry_initmax_cpus_count", g_initmax_cpus_count);
+    entry_write_kv("xnu_entry_initmax_cpus_arg", g_initmax_cpus_arg);
 #endif
     /*
      * Experiment 272. Runs here, after the first line of the report is already in the console, so
@@ -1187,6 +1223,29 @@ void entry_note_vmwait(uint32_t caller)
 {
     g_vmwait_caller = caller;
     g_vmwait_count++;
+}
+
+/*
+ * Experiment 447. `ml_get_max_cpus` returns, so this one is called *before* the real function and
+ * must keep the first caller rather than the last: the first call is the one that blocks, because
+ * `ml_init_max_cpus` is the only writer of the flag and a call that found it set would not have
+ * blocked. Keeping the last would name the site of the call that *returned*, which is the one site
+ * that cannot be the one the run ended in.
+ */
+void entry_note_maxcpus(uint32_t caller)
+{
+    if (g_maxcpus_count == 0)
+        g_maxcpus_caller = caller;
+    g_maxcpus_count++;
+}
+
+void entry_note_initmax_cpus(uint32_t caller, uint32_t max_cpus)
+{
+    if (g_initmax_cpus_count == 0) {
+        g_initmax_cpus_caller = caller;
+        g_initmax_cpus_arg = max_cpus;
+    }
+    g_initmax_cpus_count++;
 }
 #endif /* STAGE90_ENTRY_TRACE */
 
