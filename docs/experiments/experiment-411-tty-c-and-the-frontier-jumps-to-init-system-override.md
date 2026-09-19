@@ -31,8 +31,8 @@ state `averunnable` — all sized stand-ins, none read on this path.
 `lck_attr_alloc_init` — every one of them real since the lock objects went in, so the frame returns
 immediately and `bsd_init` resumes at `+0x1CC`.
 
-**But the next stub on that line is not the next call.** `ulock_initialize` sits at `+0x1D8`, and
-`init_system_override` sits at `+0x1B0` — *before* the pointer `bsd_init` is already past — because the
+**But the next stub on that line is not the next call.** `ulock_initialize` sits at `+0x3B4`, and
+`init_system_override` sits at `+0x3B0` — the very next call site, 4 bytes after it — because the
 compiler ordered the call sites by its own schedule, not by source order. So from `tty_init`'s return the
 walk runs **22 calls** before it reaches a stub, and the whole reading depends on none of those 22 being
 one or containing one.
@@ -53,7 +53,7 @@ And the second half of 342's rule holds too: the intersection of this step's 21 
 `bsd_init`'s call set is empty. A stop cannot arrive from the caller as one of this step's own creations.
 
 **Falsifiers, named in advance and all silent:** a stop on one of the 21 added names; a stop inside
-`tty_init` (its three callees are real and stub-free); a stop at `ulock_initialize` (`+0x1D8`), which
+`tty_init` (its three callees are real and stub-free); a stop at `ulock_initialize` (`+0x3B4`), which
 would mean `init_system_override` had stopped being a stub without this step touching it; a `panic` or
 `data abort` from the three new lock groups.
 
