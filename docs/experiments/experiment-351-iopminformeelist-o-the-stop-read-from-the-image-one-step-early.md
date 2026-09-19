@@ -137,8 +137,17 @@ and its list of calls reads the same way: `PE_parse_boot_argn` three times (real
 `OSlibkernInit` (real), **`devsw_init` 0x18 STUB**, `OSSymbol::withCStringNoCopy` (real),
 `OSSet::withObjects` (real), **`interruptAccountingInit` 0x18 STUB**, `OSObject::operator new` (real),
 **`IOPlatformExpertDevice::IOPlatformExpertDevice()` 0x18 STUB**, then four `blx` dispatches. `devsw_init` is
-defined by `bsd_kern_bsd_stubs.o` in the pool, and `IOPlatformExpertDevice`'s constructor is defined **nowhere
-in the 695-object pool** — 329's and 348's shape, one step deeper.
+defined by `bsd_kern_bsd_stubs.o` in the pool.
+
+**[CORRECTED BY 352, BEFORE 352'S BUILD.]** This paragraph first went on to say that
+`IOPlatformExpertDevice`'s constructor "is defined **nowhere in the 695-object pool**". It is defined there:
+`iokit_Kernel_IOPlatformExpert.o`, `T 0x38` at 0x2764, and the 352 image still carries the symbol as a stub
+(`T 0x18` at 0x80160b34) only because that object is not linked. What the sweep actually looked for was the
+**C name** — `nm --defined-only *.o | grep -w IOPlatformExpertDevice` matches nothing, because the pool holds
+`_ZN22IOPlatformExpertDeviceC1Ev`. So this is 348's rule one turn further out: a body is an object fact, a
+stub is an image fact, and **a definition is a mangled-name fact**. The frontier tool itself never had the
+bug — it compares the image's undefined list against the pool's defined list, both mangled — the ad-hoc sweep
+around it did, which is where 352 found it and why it is written down rather than deleted.
 
 **The falsifiers are the interesting part**: (a) a stub reached through one of the `blx` dispatches inside
 `postModLoad`'s metaclass walk — the one class of call this walk's tooling has never been able to see, and
