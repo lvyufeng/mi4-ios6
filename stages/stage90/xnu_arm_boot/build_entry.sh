@@ -7791,6 +7791,253 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # What is worth carrying forward is that after 340 the run will be inside the container-construction path,
     # where the next stop is as likely to be `OSDictionary`/`OSSet`/`OSArray` internals - all real since
     # 330/334 - as it is to be a new name.
+    LIBKERN_CXX_OSDATA_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSDATA_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSData.o}
+    # 340: `libkern/c++/OSOrderedSet.cpp` - the first step whose stop is *not* in the object it links,
+    #      and a stop one frame up that the straight-line tool names
+    #
+    # **The object 339's stop names.** `libkern_c++_OSOrderedSet.o` defines
+    # `_ZN12OSOrderedSet12withCapacityEjPFlPK15OSMetaClassBaseS2_PvES3_` and `OSOrderedSet::metaClass`:
+    #
+    # | `libkern_c++_OSOrderedSet.o` | |
+    # |---|---|
+    # | `.text` | **2676** (0xA74), 30 functions |
+    # | `.text._ZN12OSOrderedSet9MetaClassD0Ev` | 4 (COMDAT) |
+    # | `.rodata` | **232** (0xE8) |
+    # | `.rodata.str1.1` | **13** (0x0D) |
+    # | `__DATA, __data` | **48** (0x30) |
+    # | `.bss` | **24** (0x18 - `OSOrderedSet::gMetaClass`) |
+    # | `.init_array` | 4 (`_GLOBAL__sub_I_OSOrderedSet.cpp`) |
+    # | definitions / references | 49 / 42 |
+    #
+    # **Predicted: 2 resolved / 0 added** - one function and one storage stand-in - for **844 -> 842
+    # undefined, 735 -> 734 function, 109 -> 108 storage**. All 42 references are satisfied, and *every one
+    # of them is real rather than a stub*, which is the check that makes this step's stop prediction possible:
+    # `withCapacity` calls only `OSObject::operator new` (326), `OSCollection::OSCollection(metaClass)` (326)
+    # and `OSMetaClass::instanceConstructed` (324); `initWithCapacity` calls `OSCollection::init`,
+    # `kalloc_canblock`, `bzero` and `OSAddAtomic`; `_GLOBAL__sub_I_OSOrderedSet.cpp` calls
+    # `OSMetaClass::OSMetaClass(char const*, OSMetaClass const*, unsigned int)` and `__cxa_atexit`, both real.
+    # Note what "already satisfied" does *not* mean in `tools/entry_object_effect.py`: a name the image
+    # provides **as a stub** is in the image too, so 0 added says nothing about whether the object will run.
+    # The check is against `xnu_arm_entry_stubnames.txt`, and it was done for all 42.
+    #
+    # `.text` predicted **+0xB00 to +0xB0D plus a fill band**, in six terms:
+    #
+    # | term | bytes |
+    # |---|---|
+    # | this object's `.text` | **+0xA74** |
+    # | its COMDAT | **+0x004** |
+    # | its `.rodata`, placed whole | **+0x0E8** |
+    # | its string bytes, as placed | **+0x000 .. +0x00D** |
+    # | the one retired stub body | **-0x018** |
+    # | its one name slot | **-0x044** (`align4(64+1)`, the longest stub name the walk has retired - **counted**) |
+    #
+    # so `.text` ends between **0x8015BE60** and **0x8015BE6D** - which is **inside 0x193 of the 0x8015C000
+    # boundary**, and that margin is the whole of this step's risk. `.text` would have to grow another 0x193
+    # past the top of the predicted range for `.data` to step to **0x80160000**; as predicted it stays, and
+    # the object does bring `.data` of its own this time - **0x30**: the section 339's table dropped, and the
+    # reason that row is checked first here.
+    #
+    # | | 339 | 340 predicted |
+    # |---|---|---|
+    # | `.text` | 0x8015B360 (0x15B360) | 0x8015BE60 .. 0x8015BE6D |
+    # | `.data` | 0x8015C000 (0x19408) | **0x8015C000** (**0x19438**, +0x30) |
+    # | `.sysctl_set` | 0x80175468 (0x10C) | **0x80175438** (0x10C, +0x30) |
+    # | `.init_array` | 0x80175574 (0x3C) | **0x80175544** (**0x40**, sixteen entries) |
+    # | `.bss` | 0x801755C0 (0x37CD8) | **0x801755C0** (placed 0x37B70, fill read) |
+    # | `__bss_end` | 0x801AD298 | ~**0x801AD270** |
+    # | image | 1529264 | **1529220** |
+    # | headroom | 1387880 | ~**1387920** |
+    #
+    # **`.bss`'s start does not move even though everything above `.data` does**, and the arithmetic is worth
+    # writing down: `.data`'s +0x30 pushes `.sysctl_set` to 0x80175438 and `.init_array` to 0x80175544, whose
+    # end is 0x80175584 - and `align64` of that is still **0x801755C0**, the address `.bss` already starts at.
+    # The round-up absorbs the whole 0x30 plus the 0x0C it already had. Placed is **-0x28** for the fourth
+    # step running: one retired stand-in gives back its 0x40 slot and `OSOrderedSet::gMetaClass` (0x18)
+    # arrives in its place.
+    #
+    # **Predicted stop: `_ZN11IOCatalogue10initializeEv` at `iokit_post_constructor_init+0x18` - in the frame
+    # *above* the one that stopped 339.** `OSOrderedSet::withCapacity`'s whole body is
+    #
+    #     790 <_ZN12OSOrderedSet12withCapacityEjPFlPK15OSMetaClassBaseS2_PvES3_>:  push {r4, r5, r6, lr}
+    #      +0x10  bl <_ZN8OSObjectnwEm>                            real since 326
+    #      +0x24  bl <_ZN12OSCollectionC2EPK11OSMetaClass>         real since 326
+    #      +0x3C  bl <_ZNK11OSMetaClass19instanceConstructedEv>    real since 324
+    #      +0x54  blx r3   [vptr+0x40 -> OSOrderedSet::initWithCapacity]   this object
+    #
+    # and `IOService::initialize` has **no stub call at all** on its straight line after 339's stop:
+    #
+    #     $ ./tools/first_stub_call.py _ZN9IOService10initializeEv --from 0x540
+    #     _ZN9IOService10initializeEv: 446 instructions, 0x8012A4D8..0x8012ABCC
+    #     70 direct calls
+    #     no stub call anywhere on the straight line from +0x540
+    #
+    # so both the callee and the rest of the caller run and unwind, and the next stub is two frames up:
+    #
+    #     8011b0ec <iokit_post_constructor_init>:
+    #      +0x10  8011b0fc  bl <_ZN9IOService10initializeEv>          real since this step
+    #      +0x14  8011b100  bl <_ZN11IOCatalogue10initializeEv>       STUB   <- return address +0x18
+    #
+    #     stub_hit=_ZN11IOCatalogue10initializeEv   xnu_entry_stub_caller = iokit_post_constructor_init+0x18
+    #
+    # and that is `IOStartIOKit.cpp:92`, the fourth of the eight `*::initialize` calls the constructor makes
+    # (`IOStartIOKit.cpp:88-97`). This is the first step of the walk whose stop is **two frames above the
+    # object it links**, and the first whose key is not the return of the call that was resolved but the
+    # *next* call in that same frame - which is the same forward move in a frame that 337 and 339 both
+    # measured, continued once more.
+    #
+    # The falsifier is sharp: any `stub_hit=` naming something inside `OSOrderedSet` or inside
+    # `IOService::initialize`'s remaining 0x1B4 bytes means a call the straight-line tool called real did not
+    # return, and any `abort_entries=` non-zero means one of the four `blx` vtable dispatches in that range
+    # faulted instead of stopping on a stub. `xnu_entry_callwalk.py` and `first_stub_call.py` are both run
+    # against the built image before the device.
+    LIBKERN_CXX_OSORDEREDSET_OBJ=${STAGE90_ENTRY_LIBKERN_CXX_OSORDEREDSET_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_c++_OSOrderedSet.o}
+    # **Measured: the counts and the layout's `.text` are exact, one derived row has a sign error, and the
+    # run did not stop on a stub at all - eight stub stops after 331, the walk leaves the idiom again on a
+    # data abort at a zero it had written down in advance.** `842
+    # symbol(s) undefined` / `734 function(s), 108 storage` - the predicted 844 -> 842, 735 -> 734,
+    # 109 -> 108 exactly, with the 2 resolved being `withCapacity` and `OSOrderedSet::metaClass`.
+    #
+    # `.text` in six terms, all closing, **+0xB00** (0x15B360 -> **0x15BE60**):
+    #
+    # | term | predicted | measured |
+    # |---|---|---|
+    # | this object's `.text` | +0xA74 | **+0xA74** |
+    # | its COMDAT | +0x004 | **+0x004** |
+    # | its `.rodata`, placed whole | +0x0E8 | **+0x0E8** |
+    # | its string bytes, as placed | +0x000 .. +0x00D | **+0x00D** - all 13 placed, no dedup |
+    # | the one retired stub body | -0x018 | **-0x018** |
+    # | its one name slot | -0x044 | **-0x044** |
+    #
+    # Sum **+0xB11**, the measured placed move (0x15A628 -> **0x15B139**), with the fill 0xD38 -> **0xD27**
+    # (-0x11): placed +0xB11 and fill -0x11 give the section's +0xB00, and `.text` ends at **0x8015BE60**,
+    # the *bottom* of the predicted range 0x8015BE60 .. 0x8015BE6D. `realstubs.o` confirms all three retired
+    # terms by section, to the byte: `.text` 0x44E8 -> **0x44D0** (exactly -0x18), `.rodata.str1.4` 0x4278 ->
+    # **0x4234** (exactly **-0x44**, the counted `align4(64+1)` slot for the longest stub name the walk has
+    # retired) and `.bss` 0x1C04 -> **0x1BC4** (exactly -0x40).
+    #
+    # | | 339 | 340 measured | 340 predicted |
+    # |---|---|---|---|
+    # | `.text` | 0x8015B360 (0x15B360) | **0x8015BE60** (0x15BE60) | 0x8015BE60 .. 0x8015BE6D |
+    # | `.data` | 0x8015C000 (0x19468) | **0x8015C000 (0x19498)** | +0x30 |
+    # | `.sysctl_set` | 0x80175468 (0x10C) | **0x80175498** (0x10C) | 0x80175438 **wrong** |
+    # | `.init_array` | 0x80175574 (0x3C) | **0x801755A4** (**0x40**, 16) | 0x80175544 **wrong** |
+    # | `.bss` | 0x801755C0 (0x37CD8) | **0x80175600** (**0x37C98**) | 0x801755C0 **wrong** |
+    # | `__bss_end` | 0x801AD298 | **0x801AD298** | ~0x801AD270 **wrong** |
+    # | image | 1529264 | **1529316** | 1529220 **wrong** |
+    # | headroom | 1387880 | **1387880** | ~1387920 **wrong** |
+    #
+    # **Every wrong row is wrong in the same direction, and it is a sign.** `.data` grew by 0x30, so every
+    # section the linker places *after* it starts 0x30 **later** - `.sysctl_set` and `.init_array` at +0x30,
+    # and `.bss` at +0x40 - and the table moved them 0x30 and 0x40 **earlier** instead. This is 338's
+    # defect class (a derived row written as a number rather than as an expression) with the delta's *sign*
+    # wrong, and the same tell applies: a row computed from an opinion about which way something moves is
+    # not measured. The `.bss` row is the one that carries an argument, and the argument was right while the
+    # delta was reversed: `.init_array` ends at 0x801755A4 + 0x40 = **0x801755E4**, `align64` of that is
+    # **0x80175600**, i.e. the same round-up idiom - applied to the *case that did not happen*. `.bss`'s own
+    # arithmetic: placed 0x37B98 -> **0x37B70** (-0x28, the fifth step running on one retired stand-in's
+    # 0x40 slot given back with `OSOrderedSet::gMetaClass`'s 0x18 arriving in its place) and fill 0x140 ->
+    # **0x128** (-0x18) for a size of 0x37CD8 -> **0x37C98** = -0x40. Unlike 339, the two halves did *not*
+    # cancel this time: the filled bytes are the alignment gaps *inside* `.bss`, and retiring a 64-byte
+    # aligned stand-in changes them, so 339's "the size is a worse progress indicator than the placed bytes"
+    # holds here too, in the other direction - the size moved by exactly the stand-in count, nothing more.
+    #
+    # `.init_array` is **0x40 - sixteen entries**, `.sysctl_set` unmoved in size at 0x10C, and
+    # `_GLOBAL__sub_I_OSOrderedSet.cpp` is the new entry before `last_kernel_constructor` at its usual last.
+    #
+    # ## The run: the walk leaves the stub idiom again, eight steps later
+    #
+    # **The predicted stop did not happen.** The run reports an exception, not a `stub_hit`:
+    #
+    # ```
+    # MI4IOS6_STAGE90_XNU real XNU entry: exception: data abort
+    #  xnu_entry_why=0x8013ca58
+    #  xnu_entry_why_byte=0x00000065                             'e' - the first byte of "exception: ..."
+    #  xnu_entry_stub_caller_v=0x00000000                        no stub was entered at all
+    #  xnu_entry_abort_entries=0x00000001
+    #  xnu_entry_abort_first_dfar=0x00000000                     <- the faulting address is *zero*
+    #  xnu_entry_abort_first_pc=0x8012aaa0
+    #  xnu_entry_abort_first_dfsr=0x00000005                     section translation fault
+    #  xnu_entry_abort_first_lr=0x8012aaa8
+    #  xnu_entry_abort_first_insn=0xe5952000
+    #  xnu_entry_abort_first_sp=0x801765e0
+    #  xnu_entry_abort_first_spsr=0x60000093
+    #  xnu_entry_abort_first_end_kern=0x801ae000
+    #  xnu_entry_abort_first_prelink_b=0x801ad298
+    # ```
+    #
+    # `xnu_entry_why_byte` is the first byte of the `why` string, which is why it is a one-character
+    # telegraph of the stop's *kind*: 's' on every stub stop of this walk and **'e'** here.
+    #
+    # `e5952000` is `ldr r2, [r5]`, and the two instructions that load `r5` are 0x1C bytes above it:
+    #
+    #     8012aa7c: movw r1, #51520        ; movt r1, #32794   ->  r1 = 0x801AC940
+    #     8012aa84: ldr  r5, [r1]                             ->  r5 = *(0x801AC940) = 0   <- the zero
+    #     8012aa94: bl   801253c0 <_ZN15IORegistryEntry15getRegistryRootEv>
+    #     8012aa98: ldr  r3, [r0]                              ; the root's vptr
+    #     8012aaa0: ldr  r2, [r5]                              ; FAULT, DFAR = 0
+    #     8012aaa4: ldr  r3, [r3, #88]                         ; vtable slot 0x58 = setProperty
+    #     8012aaa8: blx  r3                                    ; <- the saved lr
+    #
+    # `0x801AC940` is **`kOSBooleanTrue`**, and `arm-none-eabi-nm` reports it `B` - it is one of the 108
+    # storage stand-ins, `data kOSBooleanTrue R 0x4` in `xnu_arm_entry_stubnames.txt`, one 0x40-byte slot with
+    # `kOSBooleanFalse` next at 0x801AC980. Two loads for one name because of how `OSBoolean.cpp` declares it:
+    #
+    #     static OSBoolean * gOSBooleanTrue  = 0;               // the pointer
+    #     OSBoolean * const & kOSBooleanTrue = gOSBooleanTrue;  // a *reference* to that pointer
+    #
+    # so the symbol is the *reference variable*: the first load fetches its referent (a word holding the
+    # address of `gOSBooleanTrue`) and the second fetches the `OSBoolean *` itself. **A stand-in gives that
+    # variable its right address and its right 4 bytes and no value whatever**, so the first load returns 0
+    # and the second - the load that dereferences the boolean - faults at address 0. The source is
+    # `IOService.cpp:427`, the line after the `thread_call_allocate` the `str` above it performs:
+    #
+    #     IORegistryEntry::getRegistryRoot()->setProperty(gIOConsoleLockedKey, kOSBooleanTrue);
+    #
+    # **This is the first stop that is not a stub in eight steps** - every run from 332 to 339 ended on a
+    # `stub_hit` - and it is the second of the three frontier kinds: an *invented zero*. `kOSBooleanTrue` is
+    # not a missing symbol, it is a present one with a zero value, and no amount of growing the link object
+    # list changes that; only the object that defines it can. **And this zero was written down in advance.**
+    # 332 read this same declaration out of the disassembly while measuring `OSKext::initialize`'s body and
+    # recorded the hazard as a prediction rather than a surprise: "at `+0x2C4` the code does `ldr r2, [r1]`
+    # where `r1` was loaded from `kOSBooleanTrue` ... `extern OSBoolean * const & kOSBooleanTrue`, a
+    # **reference** ... so a zeroed stand-in is dereferenced twice and the fault is `dfar = 0x0` at
+    # `OSKext::initialize+0x2C4` with `insn = 0xe5912000`". The prediction is now a measurement, and at a
+    # **different** site: **twelve places in this image load `kOSBooleanTrue`** (the disassembly scanned for
+    # the `movw #0xc940` / `movt #0x801a` pair) - one in `OSKext::initialize` (332's), five in other `OSKext`
+    # methods, five in `IOService` and one in `_OSKextConsiderUnloads` - and `iokit_post_constructor_init`
+    # reaches the four `*::initialize` stubs *before* `OSKext::initialize`, so the site that fires first is
+    # `IOService::initialize+0x5C8` (`insn = 0xe5952000`, one register number different from 332's because the
+    # compiler picked `r5` here and `r1` there). 332's written site is still ahead with a measured precedent
+    # behind it, and so are the other ten: on this evidence the same zero stops the boot at **each** of the
+    # twelve until `OSBoolean.cpp` is linked. The prediction's own falsifier fired and was
+    # wrong in the informative way: it said "any `abort_entries=` non-zero means one of the four `blx`
+    # vtable dispatches in that range faulted instead of stopping on a stub", and the fault is not a `blx`,
+    # it is a **global load**, the one instruction class the straight-line tools treat as free because the
+    # symbol is in the image as a stand-in. Stated plainly as their blind spot: `xnu_entry_callwalk.py` and
+    # `first_stub_call.py` answer "is this name in the image", and a zero-valued stand-in *is* in the image.
+    #
+    # Safety, as every run: non-persistent `fastboot boot` of `stage90-qcdt.img`, nothing flashed, `25`
+    # records of `persistent_write_attempted=0x00000000` and `87` of `failure_mask=0x00000000` with **no
+    # non-zero reading of either**, `xnu_entry_checks=5` / `xnu_entry_failures=0`, log 301505 bytes, and the
+    # device back on Android on its own (`MI 4LTE`, release 10). The abort is an instrument outcome, not a
+    # hang: it takes the same exit the stub stops take.
+    #
+    # ## 341:
+    #
+    # `libkern/c++/OSBoolean.cpp` (`libkern_c++_OSBoolean.o`) - the object that defines the zero. It defines
+    # `kOSBooleanTrue` and `kOSBooleanFalse` (both of them `R 0x4` stand-ins today) and `OSBoolean::metaClass`
+    # (a `data R 0x4` stand-in), and - the point - its constructor `_GLOBAL__sub_I_OSBoolean.cpp` runs
+    # `OSBoolean::initialize()`, which allocates the two instances and stores them into `gOSBooleanTrue` and
+    # `gOSBooleanFalse`; that store is what makes the reference non-zero and the *second* load legal. Its
+    # sections, by `tools/obj_sections.py` (written for 339's dropped row): `.text` **0x30C**,
+    # `COMDAT` 0x004, `.bss` **0x20** (the two statics), `.rodata` **0x9C**, `.rodata.str1.1` **0x1B**,
+    # `.init_array` **0x4** - so the `.bss` term is +0x20 in for 0x40 out, and the `.text` term is a
+    # 0x30C+0x004 in for a retired 0x18 body and one name slot. `tools/entry_object_effect.py` reads 36
+    # definitions, 29 references: **4 resolved** (1 function `OSBoolean::withBoolean`, a stub since 335, and 3
+    # storage - `kOSBooleanTrue`, `kOSBooleanFalse` and `OSBoolean::metaClass`, all of them stand-ins today)
+    # and **1 added** (`_ZN11OSSerialize15binarySerializeEPK15OSMetaClassBase`, which is **not** in
+    # `xnu_arm_entry_stubnames.txt` today - checked, not assumed - so this step creates one stand-in while
+    # retiring three), for 842 -> **841** undefined, 734 -> **734** function, 108 -> **105** storage.
     # 323: `libkern/c++/OSRuntime.cpp` - the object that defines `OSlibkernInit` (322's stop) and the C++
     #       runtime initialiser, the linker's `new`/`delete`, and the `__mod_init_func` scan
     #
@@ -14520,6 +14767,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$LIBKERN_CXX_OSITERATOR_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$IOKIT_KERNEL_IOSERVICE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_CXX_OSDATA_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$LIBKERN_CXX_OSORDEREDSET_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -14532,7 +14780,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
