@@ -3748,6 +3748,141 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # above. Any other stop means a real function on this path reaches a stub that reading did not
     # show, and the log will name it.
     BSD_KERN_PROC_INFO_OBJ=${STAGE90_ENTRY_BSD_KERN_PROC_INFO_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_proc_info.o}
+    # 306: `sfi.c` - 0x54 bytes, and the stop is `ast_on` rather than the straight line
+    #
+    # **The object that defines the name 305 stopped on, and the first step in this walk whose
+    # prediction is a hand-reading of the scheduler rather than the walker's own output.**
+    # `osfmk_kern_sfi.o` (`osfmk/kern/sfi.c`, manifest:583) is **84 bytes of `.text`** and nothing
+    # else: `CONFIG_SCHED_SFI` is 0 in this configuration, `#if CONFIG_SCHED_SFI` wraps lines
+    # 53-1091, and only the `#else` arm compiles - eight functions (`sfi_set_window`,
+    # `sfi_window_cancel`, `sfi_get_window`, `sfi_set_class_offtime`, `sfi_class_offtime_cancel`,
+    # `sfi_get_class_offtime` returning `KERN_NOT_SUPPORTED`, `sfi_reevaluate` returning void, and
+    # `sfi_thread_classify` comparing `thread->task` with `kernel_task`). `nm -u` is **one**
+    # reference: `kernel_task`. So the arithmetic is the reverse of 305's - **2 resolved**
+    # (`sfi_thread_classify`, this stop, and `sfi_reevaluate`), **0 added**, and the six other
+    # definitions are names nothing in the image references yet: 747 -> **745** undefined, 658 ->
+    # **656** function stubs, 89 storage unchanged. A step whose object is 0x54 bytes is the honest
+    # shape of this frontier: the walk has arrived at the run-queue insertion, and what this kernel
+    # is missing there is small.
+    #
+    # **The prediction is `stub_hit=ast_on` at caller key 0x8009E61C** (= `thread_setrun + 0x9C8`,
+    # the `bl ast_on` at 0x8009E618), and it *replaces* 305's closing prediction of
+    # `device_service_create` at 0x8000E59C. 305's reasoning was that `ast_on` (0x8009E5D0 and
+    # 0x8009E618) is reached only when `preempt != AST_NONE`, and that `preempt` is `AST_NONE` here
+    # because the thread being set running is not more urgent than the one running. The first half
+    # is right and the second half is wrong: **`thread_go` calls `thread_setrun(thread, SCHED_PREEMPT
+    # | SCHED_TAILQ)`** (`sched_prim.c`; the disassembly says `mov r1, #5` at both call sites -
+    # 0x8009D964 in `clear_wait_internal`'s inlined `thread_go`, and 0x8009DC44 in the standalone
+    # `thread_go`) - and the last arm of `processor_setrun`'s preempt chain is
+    # `preempt = (options & SCHED_PREEMPT) ? AST_PREEMPT : AST_NONE`, so `preempt` is `AST_PREEMPT`
+    # for a **fixed-mode** kernel thread whatever the priorities are. The compiled evidence is in
+    # this image: after `SCHED(priority_is_urgent)` (0x8009DF88, table offset 60) and the
+    # eager-preemption byte test on `processor->active_thread` (0x8009DFB8, offset 109), the
+    # timeshare arm is *skipped* for this thread (`ldr r0, [r5, #88]` / `cmp r0, #3` / `bne` at
+    # 0x8009DFC8 - `sched_mode` is `TH_MODE_FIXED`, which is what
+    # `sched_multiq_initial_thread_sched_mode` returns for `kernel_task`), and the net is
+    # `ubfx r2, r6, #2, #1` at 0x8009E044: bit 2 of `options`, which is 5. `preempt = AST_PREEMPT`.
+    #
+    # The rest of the chain is three reads of state that are all one value:
+    #
+    # 1. The direct-dispatch-to-idle early return does not apply - `processor->state` is
+    #    `PROCESSOR_RUNNING` (6), not `PROCESSOR_IDLE` (4) (`cmp r1, #4` at 0x8009DDF8; `processor_up`
+    #    sets it, `machine.c:130`) - and the gate in front of it is the dispatch table's own
+    #    `.direct_dispatch_to_idle_processors`, which for multiq is **FALSE** (word at
+    #    0x80114990 + 112 is 0, against `sched_multiq.c`'s initializer).
+    # 2. `ipi_action` becomes `eInterruptRunning`: `processor->state == PROCESSOR_RUNNING &&
+    #    thread->sched_pri >= processor->current_pri`, and both are **95** - the new thread's from
+    #    `sched_set_thread_base_priority(thread, MAXPRI_KERNEL)` in `thread_create_internal`
+    #    (with `thread_recompute_sched_pri` giving `sched_pri = base_pri` for a non-timeshare
+    #    thread), and the processor's from `load_context`'s
+    #    `processor_state_update_explicit(processor, thread->sched_pri, ...)`, which is the bootstrap
+    #    thread's. The comparison is `cmp r1, r0` / `ble` at 0x8009E14C.
+    # 3. `processor == current_processor()` is true (there is one processor), so the inlined
+    #    `csw_check_locked` runs where the else branch would have sent an IPI.
+    #
+    # And `csw_check_locked` returns non-`AST_NONE`, which is the last gate: `rt_runq_count(pset)` is
+    # `*SCHED(rt_runq)(pset)`, i.e. `*sched_rtglobal_runq(pset)` - real code at 0x8009D730, four
+    # instructions returning the address of a zero `.bss` count, not a stub - so it is 0 and the
+    # result comes from `SCHED(processor_csw_check)` = `sched_multiq_processor_csw_check`
+    # (0x800A51E8). There `pri = MAX(main_entryq->highq, bound_runq->highq)` is 95: the enqueue that
+    # just ran is `sched_group_enqueue_thread` -> `entry_queue_enqueue_entry`, which sets
+    # `main_entryq->highq = entry->sched_pri` and `sched_group_create` sets
+    # `entries[i].sched_pri = i`. Then `processor->first_timeslice` decides which comparison is
+    # used - `pri > current_pri` or `pri >= current_pri` - and it is **FALSE** here
+    # (`processor_init`, `processor.c:166`; the only two writes of TRUE are in `thread_invoke`, on
+    # the idle and the wake path, and the first thread reached the processor through `load_context`'s
+    # `machine_load_context`, not through `thread_invoke`). `95 >= 95`, the entryq and bound-runq
+    # urgencies are 0, and it returns `AST_PREEMPT`.
+    #
+    # Falsifiers, in the order the log would show them: `sched_rtglobal_runq` (if it were a stub
+    # rather than real code - it is defined in the linked objects and `nm -u` does not name it);
+    # `sched_multiq_processor_csw_check` (same test, and its own body is call-free); `panic` at
+    # 0x8002DE34 (the RT/urgency arms, if an RT thread existed or `first_timeslice` were TRUE - the
+    # `sched_pri >= BASEPRI_RTQUEUES` branch is not taken because 95 < 97); `device_service_create`
+    # at 0x8000E59C (305's prediction, which this run now tests as the *alternative*: it is taken
+    # only if `has_higher` is false, i.e. if `main_entryq->highq < processor->current_pri`); and
+    # `machine_signal_idle` / `PE_cpu_signal_deferred` (behind `processor != current_processor()`,
+    # which one processor makes impossible). Any other name means a real function on this path
+    # reaches a stub that this reading did not show, and the log will name it.
+    #
+    # **Measured: `stub_hit=ast_off` at caller key 0x800A04C4 = `thread_block_reason + 0x44`** - the
+    # `bl ast_off` at 0x800A04C0 with `r0 = 31` (`AST_SCHEDULING`), which in `sched_prim.c` is the
+    # *fifth* statement of `thread_block_reason` and the first thing `sched_startup`'s
+    # `thread_block(THREAD_CONTINUE_NULL)` does (`thread_block` is a macro for
+    # `thread_block_reason(continuation, NULL, AST_NONE)`). **So the prediction above is falsified,
+    # and so is 305's:** the next stop is neither `ast_on` nor `device_service_create`, it is a call
+    # *inside `sched_startup`'s own body*, three statements after the thread was put on a run queue.
+    # That the run reached `thread_block_reason` at all is the measurement: it means `thread_setrun`
+    # *returned* - through `clear_wait_internal`, `clear_wait`, `thread_start`,
+    # `kernel_thread_start_priority` and `thread_deallocate` - and it means `ast_on` was never
+    # called, i.e. **this enqueue did not preempt the running bootstrap thread**.
+    #
+    # What the run does *not* say is which gate in the inlined `processor_setrun`/`csw_check_locked`
+    # closed, and the prediction above named only one of the three. `preempt` *is* `AST_PREEMPT`
+    # (`options` is 5 from `thread_go`, and `sched_multiq_initial_thread_sched_mode` returns
+    # `TH_MODE_FIXED` for `kernel_task`, so the timeshare arm is skipped), so the surviving readings
+    # are: (a) `processor->state` is not 1/4/5/6 - the preempt jump table sends states 2 and 3
+    # straight to the exit; (b) `processor->state == PROCESSOR_DISPATCHING` (5), whose arm tests
+    # `processor->next_thread == THREAD_NULL` first and then `current_pri < sched_pri`, and returns
+    # without an AST either way; (c) the state is `RUNNING` but `csw_check_locked` returns
+    # `AST_NONE`, which needs `MAX(main_entryq->highq, bound_runq->highq) < processor->current_pri`
+    # or `processor->first_timeslice == TRUE` (which flips `>=` to `>` in
+    # `sched_multiq_processor_csw_check`, and at equal priority 95 > 95 is false). `state`, `highq`,
+    # `current_pri` and `first_timeslice` are four values this instrument does not print, so the run
+    # measures the *branch* and not the variable. Settling it needs a probe (a checkpoint that
+    # prints the four at `thread_setrun`'s entry), not another object - and the frontier does not
+    # need it: the object the run named is `ast.c`.
+    #
+    # **Why both readings missed it.** The chain is `kernel_bootstrap_thread -> sched_startup ->
+    # thread_block -> thread_block_reason -> ast_off`, and its last hop is *intra-object*
+    # (`sched_startup`, `thread_block_reason` and `ast_off`'s call site are all in `sched_prim.o`
+    # except `ast_off` itself) - which is exactly 305's blind spot, now fixed. The fixed walker
+    # *does* reach `ast_off`, but it does not report it as the frontier: its visited set is global
+    # and first-visit-wins, so a chain through `panic -> panic_trap_to_debugger ->
+    # kdbg_dump_trace_to_file -> ... -> thread_block -> thread_block_reason` claims
+    # `thread_block_reason` before the legitimate chain gets there, and `ast_off` is then attributed
+    # to the panic chain and lands 40th in the list (`device_service_create` is 313th, reached as a
+    # *direct* call of `kernel_bootstrap_thread`). Pruning the panic subtree was tried and is not
+    # enough: 567 stops become 243 and `ast_off` moves to 9th, but the list is then led by
+    # `ast_taken_kernel`, `ast_on`, `PE_cpu_signal_deferred`, ... - branches the tool's own docstring
+    # says it walks without modelling. **The lesson is the docstring's line "the answer is a
+    # candidate, and the run is what decides", applied one level up**: the tool chose the object
+    # (it had `ast_off` in the list), the run named the call, and the hand-reading that replaced the
+    # tool's ordering with a derivation from `preempt`/`has_higher` is what was wrong.
+    #
+    # Numbers, all measured in this step and each against a baseline built in the same session (an
+    # empty stand-in object in this slot reproduces 305's stub set: 747 / 658 / 89, `.text` 0x11CAA0,
+    # image 0x138AAC): undefined 747 -> **745**, function stubs 658 -> **656**, storage 89
+    # **unchanged**, `.text` **0x11CAA0**, `.data` **0x80120000**, `__bss_start` **0x80138AC0**,
+    # `__bss_end` **0x8016F8D8**, image **0x138AAC**, headroom **1640232** - and the on-device
+    # `xnu_entry_bss_start`/`xnu_entry_bss_end`/`xnu_entry_copied_bytes` pairs are those three
+    # numbers exactly. `.text` is *unchanged*, and it is worth writing why: +0x54 for this object
+    # minus 2 stub bodies (0x30) minus the 2 stub name strings (`sfi_thread_classify` 20 bytes +
+    # `sfi_reevaluate` 16, both 4-aligned in `.rodata.str1.4`, which this link places inside `.text`)
+    # is **exactly zero**. That equality is also the reason to distrust 305's recorded `.text`
+    # 0x11CAE0: the same stub set rebuilt here measures 0x11CAA0, 0x40 lower, and a configuration
+    # whose delta is exactly zero cannot have differed from it.
+    OSFMK_KERN_SFI_OBJ=${STAGE90_ENTRY_OSFMK_KERN_SFI_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_kern_sfi.o}
     # 305: `thread_act.c` - the straight line runs to `device_service_create`
     #
     # **The object that defines the name 304 stopped on, and the first step in a while whose
@@ -8620,6 +8755,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_ARM_CSWITCH_OBJ" "run ./tools/assemble_arm_layer.sh first"
     require "$BSD_KERN_PROC_INFO_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_THREAD_ACT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_KERN_SFI_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -8632,7 +8768,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
