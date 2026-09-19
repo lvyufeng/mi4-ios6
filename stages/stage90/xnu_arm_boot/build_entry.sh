@@ -13528,6 +13528,180 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     BSD_VFS_KPI_VFS_OBJ=${STAGE90_ENTRY_BSD_VFS_KPI_VFS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_vfs_kpi_vfs.o}
     BSD_KERN_DECMPFS_OBJ=${STAGE90_ENTRY_BSD_KERN_DECMPFS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_decmpfs.o}
     IOKIT_BSDDEV_IOKITBSDINIT_OBJ=${STAGE90_ENTRY_IOKIT_BSDDEV_IOKITBSDINIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_bsddev_IOKitBSDInit.o}
+    STAGE90_PTHREAD_FUNCTIONS_OBJ=${STAGE90_ENTRY_STAGE90_PTHREAD_FUNCTIONS_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_pthread_functions.o}
+    # =============================================================================================
+    # **432: `struct pthread_functions_s`, supplied by this image - the first step in this walk
+    # whose object is a table rather than a name, and the only one so far whose effect on the link's
+    # accounting is nothing at all.**
+    #
+    # 431's run left `vfsinit`, went ten calls down `bsd_init`'s statement list, and stopped on a
+    # `panic` at `bsd_init + 0x7F4` with the message
+    # `"pthread kernel extension not loaded (function table is NULL)."` (`pthread_shims.c:275`). The
+    # value that guard tests is `pthread_functions` (`pthread_shims.c:703`), a real 4-byte `.bss`
+    # pointer whose only writer is `pthread_kext_register` (`:712`) and whose only caller in the
+    # whole tree is `pthread.kext`. **No object in the pool can move that frontier**, because there
+    # is no object to link: nothing in this tree defines or calls `pthread_kext_register`, and
+    # nothing could - the kext is an Apple binary the tarball does not contain.
+    #
+    # So this step is a different *shape* from every one before it. It is not a `BSD_*_OBJ` out of
+    # `out/xnu_kernel_obj/`; it is this project's own source, `stages/stage90/xnu_supply/`
+    # `stage90_pthread_functions.c`, compiled by `tools/build_xnu_arm_kernel.sh`'s platform block
+    # (a third list there, added for this step) and linked into the entry image here - not for any
+    # symbol this project links into the image, because it has none.
+    #
+    # **_It has none_: the two references this object makes are both already satisfied.**
+    # `pthread_kext_register` is real since 425 (`bsd_kern_pthread_shims.o`) and `entry_stub_hit` is
+    # defined by this image's own `entry_stubs.o` - **a reference from the pool into the entry
+    # image, the first in this walk**, and it is resolved in pass 1 rather than stubbed, because
+    # `entry_stubs.o` is in `LINK_OBJS` before pass 1 runs (which is also why `panic` is
+    # deliberately never generated). Measured:
+    #
+    #     stage90_pthread_functions.o   82 definitions, 2 references
+    #     resolved (0: 0 function, 0 storage)   added (0: 0 function, 0 storage)
+    #     of the 2 references, 2 are already satisfied
+    #     predicted counts: 768 -> 768 undefined, 616 -> 616 function, 152 -> 152 storage
+    #
+    # so **768 / 616 / 152 do not move**, exactly as 431 left them. That is the honest reading
+    # rather than a disappointment: the stub accounting counts *names*, and what this step supplies
+    # is a **value**. The frontier it moves is a guard on a `.bss` word, and a word is not a symbol.
+    # The first step in 432 steps whose object retires nothing and creates nothing.
+    #
+    # **The layout comes from Apple's header, and that is the whole reason it is compiled there.**
+    # The file includes `<sys/pthread_shims.h>`, so the table's size and the offsets of its slots are
+    # the ones the kernel was compiled against rather than a copy of them - one definition, which is
+    # this project's rule about one value with two definitions (`mi4-one-value-two-definitions`). A
+    # second copy of the layout would not fail loudly: it would call a function through the wrong
+    # offset, with the wrong arguments. The layout was measured before the file was written and
+    # checked a second time against the kernel's own compiled code:
+    #
+    #     sizeof(struct pthread_functions_s)        508 = 0x1FC = (1 + 39 + 87) words
+    #     offsetof(version)                         0
+    #     offsetof(pthread_init)                    4    <- and the kernel loads this one
+    #     offsetof(_pad)                            160, i.e. 40 words of named members
+    #     PTHREAD_FUNCTIONS_TABLE_VERSION           1    (from the header, not written as a literal)
+    #
+    #     bsd_kern_pthread_shims.o, pthread_init:   28:  ldr r0, [r0, #4]   the slot
+    #                                               2c:  pop {r4, lr}
+    #                                               30:  bx  r0            a tail branch
+    #
+    # and Apple's own static assert in that same file checks the tail the same way
+    # (`sizeof(...) - offsetof(..., psynch_rw_yieldwrlock) - sizeof(void *)` is 100 pointers, and
+    # 508 - 104 - 4 is 400). Two readings of one layout, from opposite directions.
+    #
+    # **One property of the source is load-bearing and not obvious.** `<sys/eventvar.h>` must be
+    # included *before* `<sys/pthread_shims.h>`, because the tree has a circular include there:
+    # `pthread_shims.h:40` -> `user.h:89` -> `eventvar.h:71` -> `pthread_shims.h` again, a no-op
+    # because its guard is already set - and then `eventvar.h:175` uses `workq_threadreq_t`, which
+    # only `pthread_shims.h:56` defines and which therefore does not exist yet. The other order
+    # fails with "field has incomplete type 'struct workq_threadreq_s'" at `eventvar.h:175`; the
+    # file's own header comment has the measurement.
+    #
+    # **The two design rules, both stated in the source with their reasons.** Every named slot -
+    # all 39, including Apple's three `__unused*` reservations - points at a stand-in that stops the
+    # run and names itself (`stub_hit=stage90_pthread_functions.<slot>`), because a **NULL** slot is
+    # a fault rather than a stop and a **silent no-op** would tell the kernel that work nobody did
+    # had been done. And before registering, the constructor walks the table's 40 named words and
+    # stops on any NULL, reporting the **word index** in the caller field: that is the check for the
+    # one mistake the file cannot see at compile time - **a slot forgotten in the list**, which C
+    # silently zeroes - so a forgotten slot becomes a stop at registration that names its index,
+    # rather than a branch to zero at whatever point the kernel first uses that slot.
+    #
+    # **Where the table is registered.** From an `.init_array` constructor, which is how Apple's own
+    # kernel runs this class of work: `kernel_bootstrap` -> `PE_init_iokit` -> `StartIOKit` ->
+    # `OSlibkernInit` -> `OSRuntimeInitializeCPP` walks `.init_array` in link order, long before
+    # `bsd_init` calls `pthread_init`. This object is placed **before**
+    # `ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ` so that it runs before `last_kernel_constructor()`, and so
+    # before `iokit_post_constructor_init()` - which nothing here needs, since the only thing the
+    # constructor does is write one pointer.
+    #
+    # **Prediction, written before the build: `stub_hit=stage90_pthread_functions.pthread_init`,
+    # caller key `0x8003B1E8`.** The derivation is one tail branch and one address that cannot move:
+    # `bsd_init` is at `0x8003A9F0` (`bsd_kern_bsd_init.o`, linked far ahead of this object), it
+    # calls `pthread_init` at `bsd_init + 0x7F4`, and `pthread_init` reaches the slot with
+    # `pop {r4, lr}; bx r0` - so the stand-in is entered with `pthread_init`'s own caller in `lr` and
+    # records the return address of the `bl`, `bsd_init + 0x7F8`. **Note what that key does and does
+    # not name: it names the call site, not the slot** - any slot called from `pthread_init` would
+    # report the same number, which is why the stub's name carries the table's name and the slot's.
+    #
+    # Falsifiers, named in advance: **`stage90_pthread_functions.null_slot`** with a small caller
+    # value, which is the constructor's own scan and would mean the source's slot list is
+    # incomplete; **a different slot's stand-in** (`fill_procworkqueue`, `workqueue_exit`, ...) -
+    # the table's layout disagrees with the kernel's, the one defect including the header is meant to
+    # make impossible; **431's panic again** (`xnu_entry_undef_pc=0x8002DD88`, `r9` the same format
+    # string) - the table is not registered, so the constructor did not run (`OSRuntimeInitializeCPP`
+    # does not walk this image's `.init_array`, or the linker dropped the entry); **a stop earlier
+    # than `bsd_init`** - the constructor's own path, whose only call is `pthread_kext_register`;
+    # **`abort_entries != 0`** - a fault, and the only write this step makes is `*callbacks = ...`
+    # into this object's own `.bss`; and **`stub_hit=nwk_wq_init`** (key `0x8003B1FC`) - that would
+    # mean `pthread_init`'s slot was called and *returned*, which no stand-in does, so it would be
+    # the next step's answer arriving one step early, i.e. a link that did not take this object.
+    #
+    # **Measured, from the link: every address the reading predicted, and a fill term of 7 bytes.**
+    #
+    #     stage90_pthread_functions.o  .text          0x80203D48 (0x2CC)
+    #                                  .rodata        0x802311E8 (0x1FC)   <- the table; its word 1,
+    #                                  .rodata.str1.1 0x802313E4 (0x6F1)      the pthread_init slot,
+    #                                  .bss           0x80292C60 (0x4)        is 0x802311EC
+    #                                  .init_array    0x802542A4 (0x4)
+    #
+    # `.text` output grows by the object's own three inputs - 0x2CC + 0x1FC + 0x6F1 = **0xBB9** - and
+    # the measured growth is **0xBC0**, so the fill term this step is **7 bytes**: the same rule that
+    # made earlier steps miss by 0x12 and 0x55 and 0x11. And the object's `.text` landed on
+    # **0x80203D48**, which is `0x80202A0C + 0x133C` - the sixth consecutive check of the
+    # contiguous-chain reading, and the first time that reading has placed an object that is not
+    # Apple's.
+    #
+    # The `.init_array` entry is at 0x802542A4, i.e. **third from the end**: before the platform
+    # expert's constructor and before `last_kernel_constructor`'s, which is where this object was
+    # placed so that the table exists before `iokit_post_constructor_init()` runs. And the build's own
+    # pass 1 agrees with the effect tool: `768 symbol(s) undefined - stubs: 616 function(s), 152
+    # storage`, the same three numbers 431 left.
+    #
+    # **Layout, and the `.data` boundary swallowing the whole of the text growth - for the third step
+    # running, and this time to the byte:**
+    #
+    #     entry text   0x235FA0 (2318240)     <- was 0x2353E0
+    #     entry image  0x2542B0 (2441904)     <- was 0x2542AC: **four bytes**, and they are this
+    #     .init_array  0x8025421C .. 0x802542B0 (0x94)      object's own .init_array word
+    #     bss          0x802542C0 .. 0x802961D8 (270104 bytes)   <- start, end and size all unmoved
+    #     headroom     1482280 bytes below topOfKernelData
+    #     payload      out/stage90/stage90-qcdt.img, sha256
+    #                  4ee629f47520b7d82416dc3194ecfc8d2744e89d4283987ea3799b570913989e (5462016 bytes)
+    #     entry bin    2441904 bytes; sha256
+    #                  b43b7c4de7ec96ba6a1ccd4f5a901c8f02a85ba22d225a1f737a6f046757ac1c
+    #
+    # `.text` now ends at 0x80235FA0 and `.data` is placed at 0x80238000 in both images, so the gap
+    # between them shrank from 0x2C20 to 0x2060 and **the whole 0xBC0 of text growth is inside it** -
+    # not one byte of it reached the image. What the image did grow is the object's `.init_array`
+    # word, and what it did *not* grow is `.bss`: the object's 4 bytes
+    # (`stage90_pthread_callbacks`, where `pthread_kext_register` writes `&pthread_callbacks`) landed
+    # at 0x80292C60 inside the run's own alignment padding and every number the checks compare came
+    # out identical to the byte.
+    #
+    # **Measured, from the run: the prediction to the byte, and no panic.**
+    #
+    #     line 3932: MI4IOS6_STAGE90_XNU real XNU entry: a symbol this image does not provide was called
+    #     line 3936:  xnu_entry_stub_caller_v=0x8003b1e8
+    #     line 3938:  xnu_entry_stub_caller_w0=0x33303038      <- "8003", the key spelled back
+    #     line 3939:  xnu_entry_stub_caller_w1=0x38653162      <- "b1e8"
+    #     line 3942:  xnu_entry_abort_entries=0x00000000
+    #     line 3973: MI4IOS6_STAGE90_XNU real XNU entry stub_hit=stage90_pthread_functions.pthread_init
+    #     line 3978: No errors detected
+    #
+    # `xnu_entry_checks=0x00000005`, `xnu_entry_failures=0x00000000`, no `exception:` line and no
+    # `panic:` line - **431's panic is gone**, and what replaced it is the walk's ordinary stop: a
+    # stub with a name and a key. `tools/host_resolve_entry_addr.sh 0x8003b1e8` answers
+    # `bsd_init+0x7f8` and `caller-4 = 0x8003b1e4  bsd_init+0x7f4`, and the linked image says that
+    # instruction is `bl <pthread_init>` - with `bl <pshm_cache_init>` at the key itself and
+    # `bl <nwk_wq_init>` four bytes further on, which is the next step's frontier.
+    #
+    # Every run marker differs from 431's, `xnu_entry_checksum` included (`0x9040E1ED` against
+    # `0x9040E1F1`), and `xnu_entry_kv_words` - the word-for-word dump of the vector table - differs
+    # with it. That is the check that the image that ran is the image that was built, and it is worth
+    # more than usual on this step: what changed is a *table*, which is exactly the kind of thing a
+    # stale image would hide, since a wrong table and the right one look the same until something
+    # calls through them.
+    # =============================================================================================
     # =============================================================================================
     # **431: `iokit/bsddev/IOKitBSDInit.cpp` - the first I/O Kit object, the object that retires
     # `IOServicePublishResource` and eight more names, and the step that takes the walk out of
@@ -25528,6 +25702,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$BSD_VFS_KPI_VFS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_DECMPFS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$IOKIT_BSDDEV_IOKITBSDINIT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$STAGE90_PTHREAD_FUNCTIONS_OBJ" "run ./tools/build_xnu_arm_kernel.sh --platform-only first (its platform block compiles stages/stage90/xnu_supply/stage90_pthread_functions.c)"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -25540,7 +25715,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$IOKIT_KERNEL_IOCOMMAND_OBJ" "$IOKIT_KERNEL_IOPOWERCONNECTION_OBJ" "$BSD_KERN_KERN_MALLOC_OBJ" "$IOKIT_TESTS_TESTS_OBJ" "$OSFMK_KERN_WORK_INTERVAL_OBJ" "$BSD_KERN_SYS_REASON_OBJ" "$OSFMK_IPC_IPC_KMSG_OBJ" "$OSFMK_IPC_IPC_OBJECT_OBJ" "$BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ" "$BSD_KERN_KERN_AUTHORIZATION_OBJ" "$BSD_KERN_KERN_CREDENTIAL_OBJ" "$BSD_KERN_KERN_PROC_OBJ" "$BSD_CONF_PARAM_OBJ" "$BSD_KERN_KERN_SUBR_OBJ" "$BSD_KERN_TTY_OBJ" "$BSD_KERN_KERN_OVERRIDES_OBJ" "$BSD_KERN_SYS_ULOCK_OBJ" "$SECURITY_MAC_PROCESS_OBJ" "$BSD_KERN_KERN_DESCRIP_OBJ" "$BSD_VFS_VFS_BIO_OBJ" "$BSD_KERN_KERN_TIME_OBJ" "$BSD_VFS_VFS_CLUSTER_OBJ" "$BSD_KERN_KERN_SYNCH_OBJ" "$BSD_KERN_UBC_SUBR_OBJ" "$BSD_VFS_VFS_INIT_OBJ" "$BSD_VFS_VFS_SUBR_OBJ" "$BSD_VFS_VFS_CACHE_OBJ" "$BSD_VFS_VFS_SYSCALLS_OBJ" "$BSD_KERN_PROC_UUID_POLICY_OBJ" "$BSD_KERN_MCACHE_OBJ" "$BSD_KERN_UIPC_MBUF_OBJ" "$BSD_KERN_KPI_MBUF_OBJ" "$BSD_NET_NET_STR_ID_OBJ" "$BSD_KERN_SUBR_EVENTHANDLER_OBJ" "$BSD_KERN_KERN_AIO_OBJ" "$BSD_KERN_SYS_PIPE_OBJ" "$BSD_KERN_POSIX_SHM_OBJ" "$BSD_KERN_POSIX_SEM_OBJ" "$BSD_KERN_PTHREAD_SHIMS_OBJ" "$BSD_KERN_SYS_GENERIC_OBJ" "$BSD_VFS_VFS_QUOTA_OBJ" "$SECURITY_MAC_VFS_OBJ" "$BSD_VFS_KPI_VFS_OBJ" "$BSD_KERN_DECMPFS_OBJ" "$IOKIT_BSDDEV_IOKITBSDINIT_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$IOKIT_KERNEL_IOCOMMAND_OBJ" "$IOKIT_KERNEL_IOPOWERCONNECTION_OBJ" "$BSD_KERN_KERN_MALLOC_OBJ" "$IOKIT_TESTS_TESTS_OBJ" "$OSFMK_KERN_WORK_INTERVAL_OBJ" "$BSD_KERN_SYS_REASON_OBJ" "$OSFMK_IPC_IPC_KMSG_OBJ" "$OSFMK_IPC_IPC_OBJECT_OBJ" "$BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ" "$BSD_KERN_KERN_AUTHORIZATION_OBJ" "$BSD_KERN_KERN_CREDENTIAL_OBJ" "$BSD_KERN_KERN_PROC_OBJ" "$BSD_CONF_PARAM_OBJ" "$BSD_KERN_KERN_SUBR_OBJ" "$BSD_KERN_TTY_OBJ" "$BSD_KERN_KERN_OVERRIDES_OBJ" "$BSD_KERN_SYS_ULOCK_OBJ" "$SECURITY_MAC_PROCESS_OBJ" "$BSD_KERN_KERN_DESCRIP_OBJ" "$BSD_VFS_VFS_BIO_OBJ" "$BSD_KERN_KERN_TIME_OBJ" "$BSD_VFS_VFS_CLUSTER_OBJ" "$BSD_KERN_KERN_SYNCH_OBJ" "$BSD_KERN_UBC_SUBR_OBJ" "$BSD_VFS_VFS_INIT_OBJ" "$BSD_VFS_VFS_SUBR_OBJ" "$BSD_VFS_VFS_CACHE_OBJ" "$BSD_VFS_VFS_SYSCALLS_OBJ" "$BSD_KERN_PROC_UUID_POLICY_OBJ" "$BSD_KERN_MCACHE_OBJ" "$BSD_KERN_UIPC_MBUF_OBJ" "$BSD_KERN_KPI_MBUF_OBJ" "$BSD_NET_NET_STR_ID_OBJ" "$BSD_KERN_SUBR_EVENTHANDLER_OBJ" "$BSD_KERN_KERN_AIO_OBJ" "$BSD_KERN_SYS_PIPE_OBJ" "$BSD_KERN_POSIX_SHM_OBJ" "$BSD_KERN_POSIX_SEM_OBJ" "$BSD_KERN_PTHREAD_SHIMS_OBJ" "$BSD_KERN_SYS_GENERIC_OBJ" "$BSD_VFS_VFS_QUOTA_OBJ" "$SECURITY_MAC_VFS_OBJ" "$BSD_VFS_KPI_VFS_OBJ" "$BSD_KERN_DECMPFS_OBJ" "$IOKIT_BSDDEV_IOKITBSDINIT_OBJ" "$STAGE90_PTHREAD_FUNCTIONS_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

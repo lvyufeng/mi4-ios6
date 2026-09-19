@@ -95,13 +95,14 @@ while [[ $# -gt 0 ]]; do
         --limit)    LIMIT=$2; shift 2 ;;
         --dir)      ONLY_DIR=$2; shift 2 ;;
         --blockers) SHOW_BLOCKERS=${2:-25}; shift 2 ;;
-        # `--platform-only`: compile the three out-of-manifest blocks and nothing else.
+        # `--platform-only`: compile the four out-of-manifest blocks and nothing else.
         #
-        # It exists so that the one file in this build that is *this project's* - the platform expert
-        # in `stages/stage90/xnu_platform/`, whose every edit needs a compile to check - can be
-        # iterated on without recompiling 698 Apple objects to reach it. Measured cost of the
-        # alternative: a full run is minutes, and the first version of that file failed on one
-        # undeclared identifier.
+        # It exists so that the files in this build that are *this project's* - the platform expert
+        # in `stages/stage90/xnu_platform/` and the pthread function table in
+        # `stages/stage90/xnu_supply/`, whose every edit needs a compile to check - can be iterated
+        # on without recompiling 698 Apple objects to reach them. Measured cost of the alternative: a
+        # full run is minutes, and the first version of that file failed on one undeclared
+        # identifier; measured cost of this mode, at the platform block alone: 0.9 seconds.
         #
         # Two things make it safe rather than a second build path:
         #   * the manifest is emptied, so the loop body cannot run - not skipped by a branch, but
@@ -110,7 +111,7 @@ while [[ $# -gt 0 ]]; do
         #   * the `rm -f "$OUT"/*.o` truncation is skipped, because the objects it would delete are
         #     the pool's, which the entry link needs and this mode is not going to rebuild.
         # It still checks the component table, the device table and the generated roots, so a
-        # platform-only run is a real build of those three blocks under the same conditions.
+        # platform-only run is a real build of those four blocks under the same conditions.
         --platform-only) ONLY_PLATFORM=1; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -796,6 +797,51 @@ for _inc in "${INCLUDES[@]}"; do
 done
 # shellcheck disable=SC2207
 PL_COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" iokit) )
+
+# **And a third list (432): the one stage source in this block that includes an XNU header.**
+#
+# `stages/stage90/xnu_supply/stage90_pthread_functions.c` supplies `struct pthread_functions_s` -
+# the table `bsd/kern/pthread_shims.c:275` guards on, whose only writer in Apple's tree is
+# `pthread.kext`, a binary that is not in the tarball and that no object in the pool stands in for.
+# 431's run is what named it: the boot reached `bsd_init + 0x7F4` and panicked with
+# "pthread kernel extension not loaded (function table is NULL)."
+#
+# It is here, rather than compiled by `build_entry.sh`'s own toolchain, for one reason: **the file
+# includes `<sys/pthread_shims.h>`**, and the whole value of that is that the table's layout is the
+# layout the kernel was compiled against rather than a copy of it. A second compiler, a second
+# include order or a second define set is a second definition of the struct's layout - the defect
+# class this project has a memory about - and it would not fail loudly: it would call a function
+# through the wrong offset.
+#
+# So the flags are the loop's own, with two things named rather than derived, for the same reason
+# the platform expert's block names them (`component_of` cannot answer them for a file outside the
+# tree):
+#
+#   * the component is **bsd**, because `<sys/pthread_shims.h>` is a BSD header and the file that
+#     reads the table (`bsd/kern/pthread_shims.c`) is compiled under `bsd/conf/Makefile.template`'s
+#     defines. The import roots are therefore COMPONENT_LIST with `bsd` in front and dropped from
+#     the tail, which is what the loop's `COMP_ROOTS` computes for that file.
+#   * **the force-includes stay exactly as they are** - the same `FORCE_INCLUDES` the loop's 698
+#     files get, plus `-w`. Nothing extra is added for this file, and that is measured rather than
+#     assumed: with `eventvar.h` included first inside the source (see its header comment for the
+#     circular include that makes the order load-bearing) it compiles under the plain set, under
+#     `-include sys/types.h` and under those two plus `sys/kernel_types.h` alike.
+PLATFORM_BSD_SOURCES=("$REPO_ROOT/stages/stage90/xnu_supply/stage90_pthread_functions.c")
+PL_BSD_ROOTS=(-I"$XNU/bsd")
+for _c in "${COMPONENT_LIST[@]}"; do
+    [[ $_c == bsd ]] && continue
+    PL_BSD_ROOTS+=(-I"$XNU/$_c")
+done
+PL_BSD_INCLUDES=()
+for _inc in "${INCLUDES[@]}"; do
+    if [[ $_inc == COMP_FIRST_PLACEHOLDER ]]; then
+        PL_BSD_INCLUDES+=("${PL_BSD_ROOTS[@]}")
+    else
+        PL_BSD_INCLUDES+=("$_inc")
+    fi
+done
+# shellcheck disable=SC2207
+PL_BSD_COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" bsd) )
 mkdir -p "$PL_OUT"
 pl_fail=0
 for _src in "${PLATFORM_SOURCES[@]}"; do
@@ -815,6 +861,20 @@ for _src in "${PLATFORM_C_SOURCES[@]}"; do
     _o="$PL_OUT/$(basename "${_src%.c}").o"
     if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" -c "$_src" -o "$_o" \
            2>"$PL_OUT/$(basename "${_src%.c}").log"; then
+        rm -f "$PL_OUT/$(basename "${_src%.c}").log"
+    else
+        echo "platform: $(basename "$_src") FAILED - $PL_OUT/$(basename "${_src%.c}").log" >&2
+        pl_fail=$((pl_fail + 1))
+    fi
+done
+# The BSD-rooted C one, and the only difference from the loop above is which defines and which
+# roots it gets: the BSD half's, because the header it includes is read by BSD code. Same compiler,
+# same `-O2`, same force-include set - `-w` is in `CC_ARGS` for every file in this build.
+for _src in "${PLATFORM_BSD_SOURCES[@]}"; do
+    _o="$PL_OUT/$(basename "${_src%.c}").o"
+    if timeout "$PER_FILE_TIMEOUT" "${CC_ARGS[@]}" "${FORCE_INCLUDES[@]}" "${DEFINES[@]}" \
+           "${PL_BSD_COMP_DEFINES[@]}" "${EXTRA_DEFINES[@]}" "${PL_BSD_INCLUDES[@]}" \
+           -c "$_src" -o "$_o" 2>"$PL_OUT/$(basename "${_src%.c}").log"; then
         rm -f "$PL_OUT/$(basename "${_src%.c}").log"
     else
         echo "platform: $(basename "$_src") FAILED - $PL_OUT/$(basename "${_src%.c}").log" >&2
@@ -848,6 +908,7 @@ echo "  skipped (.s):         $skipped"
 echo "  objects in $OUT"
 echo "  EABI runtime:         ${#RUNTIME_SOURCES[@]} file(s) -> $RT_OUT (not in the manifest)"
 echo "  platform expert:      ${#PLATFORM_SOURCES[@]} C++ and ${#PLATFORM_C_SOURCES[@]} C file(s) -> $PL_OUT (not in the manifest)"
+echo "  pthread table:        ${#PLATFORM_BSD_SOURCES[@]} C file(s) -> $PL_OUT (not in the manifest)"
 
 if [[ $SHOW_BLOCKERS -gt 0 ]]; then
     echo
