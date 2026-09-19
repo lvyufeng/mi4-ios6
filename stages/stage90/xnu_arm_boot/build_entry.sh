@@ -195,6 +195,33 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
     -O2 -Wall -Wextra -Werror -std=gnu11 \
     -c "$BOOT_DIR/entry_last_kernel_constructor.c" -o "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ"
 
+# **AES-128 (437).** `stage90_aes.c` is FIPS-197's own algorithm in plain C, and it is here rather
+# than in the platform block for the reason that block exists the other way round: it includes
+# nothing from the tree - no XNU header, no corecrypto header, two `stdint.h` types - so there is no
+# layout to keep in step with a kernel object, and the same translation unit can be compiled by this
+# script's cross compiler *and* by the host compiler below. That second compilation is the point.
+#
+# 436's run died on `aes_encrypt_key128` dereferencing a NULL `g_crypto_funcs`, and 437's answer is
+# to put a real key schedule there. **A real key schedule is a value, and a wrong value in this image
+# is the one failure mode with nothing to report it** - `mi4-stand-in-size-is-not-value`, and 436's
+# own stop, which was a zero no stub named. So the algorithm is checked against FIPS-197's published
+# vectors *before* the object is linked, by running the very same source natively; a wrong S-box, a
+# wrong `Rcon` or a wrong `ShiftRows` direction fails the build instead of reaching the device. The
+# table's constructor then runs the same Appendix C.1 vector *in the image*, which is what covers the
+# compiler and the target.
+#
+# The sources are in `stages/stage90/xnu_supply/`, which is this project's out-of-manifest directory
+# - the same place 432's pthread table lives - and `stage90_aes.c`'s `STAGE90_AES_SELFTEST` build is
+# its `main()`.
+STAGE90_AES_OBJ="$OUT/xnu_arm_entry_aes.o"
+run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
+    -O2 -Wall -Wextra -Werror -std=gnu11 \
+    -c "$REPO_ROOT/stages/stage90/xnu_supply/stage90_aes.c" -o "$STAGE90_AES_OBJ"
+say "== AES-128 known-answer tests, on the host, against the same source =="
+run "${HOST_CC:-cc}" -O2 -Wall -Wextra -Werror -std=gnu11 -DSTAGE90_AES_SELFTEST \
+    "$REPO_ROOT/stages/stage90/xnu_supply/stage90_aes.c" -o "$OUT/stage90_aes_kat"
+"$OUT/stage90_aes_kat"
+
 # **The personality table (363).** The stock `iokit_KernelConfigTables.o` defines one symbol,
 # `gIOKernelConfigTables`, and the table it points at has exactly one entry: Apple's `IOPanicPlatform`,
 # whose `start` panics because nothing better matched. Experiment 362 measured that fallback firing on
@@ -13529,6 +13556,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     BSD_KERN_DECMPFS_OBJ=${STAGE90_ENTRY_BSD_KERN_DECMPFS_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_decmpfs.o}
     IOKIT_BSDDEV_IOKITBSDINIT_OBJ=${STAGE90_ENTRY_IOKIT_BSDDEV_IOKITBSDINIT_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/iokit_bsddev_IOKitBSDInit.o}
     STAGE90_PTHREAD_FUNCTIONS_OBJ=${STAGE90_ENTRY_STAGE90_PTHREAD_FUNCTIONS_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_pthread_functions.o}
+    STAGE90_CRYPTO_FUNCTIONS_OBJ=${STAGE90_ENTRY_STAGE90_CRYPTO_FUNCTIONS_OBJ:-$REPO_ROOT/out/xnu_platform_obj/stage90_crypto_functions.o}
     BSD_NET_NWK_WQ_OBJ=${STAGE90_ENTRY_BSD_NET_NWK_WQ_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_nwk_wq.o}
     BSD_NET_DLIL_OBJ=${STAGE90_ENTRY_BSD_NET_DLIL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_dlil.o}
     BSD_NET_KPI_PROTOCOL_OBJ=${STAGE90_ENTRY_BSD_NET_KPI_PROTOCOL_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_net_kpi_protocol.o}
@@ -25980,7 +26008,115 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$IOKIT_KERNEL_IOCOMMAND_OBJ" "$IOKIT_KERNEL_IOPOWERCONNECTION_OBJ" "$BSD_KERN_KERN_MALLOC_OBJ" "$IOKIT_TESTS_TESTS_OBJ" "$OSFMK_KERN_WORK_INTERVAL_OBJ" "$BSD_KERN_SYS_REASON_OBJ" "$OSFMK_IPC_IPC_KMSG_OBJ" "$OSFMK_IPC_IPC_OBJECT_OBJ" "$BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ" "$BSD_KERN_KERN_AUTHORIZATION_OBJ" "$BSD_KERN_KERN_CREDENTIAL_OBJ" "$BSD_KERN_KERN_PROC_OBJ" "$BSD_CONF_PARAM_OBJ" "$BSD_KERN_KERN_SUBR_OBJ" "$BSD_KERN_TTY_OBJ" "$BSD_KERN_KERN_OVERRIDES_OBJ" "$BSD_KERN_SYS_ULOCK_OBJ" "$SECURITY_MAC_PROCESS_OBJ" "$BSD_KERN_KERN_DESCRIP_OBJ" "$BSD_VFS_VFS_BIO_OBJ" "$BSD_KERN_KERN_TIME_OBJ" "$BSD_VFS_VFS_CLUSTER_OBJ" "$BSD_KERN_KERN_SYNCH_OBJ" "$BSD_KERN_UBC_SUBR_OBJ" "$BSD_VFS_VFS_INIT_OBJ" "$BSD_VFS_VFS_SUBR_OBJ" "$BSD_VFS_VFS_CACHE_OBJ" "$BSD_VFS_VFS_SYSCALLS_OBJ" "$BSD_KERN_PROC_UUID_POLICY_OBJ" "$BSD_KERN_MCACHE_OBJ" "$BSD_KERN_UIPC_MBUF_OBJ" "$BSD_KERN_KPI_MBUF_OBJ" "$BSD_NET_NET_STR_ID_OBJ" "$BSD_KERN_SUBR_EVENTHANDLER_OBJ" "$BSD_KERN_KERN_AIO_OBJ" "$BSD_KERN_SYS_PIPE_OBJ" "$BSD_KERN_POSIX_SHM_OBJ" "$BSD_KERN_POSIX_SEM_OBJ" "$BSD_KERN_PTHREAD_SHIMS_OBJ" "$BSD_KERN_SYS_GENERIC_OBJ" "$BSD_VFS_VFS_QUOTA_OBJ" "$SECURITY_MAC_VFS_OBJ" "$BSD_VFS_KPI_VFS_OBJ" "$BSD_KERN_DECMPFS_OBJ" "$IOKIT_BSDDEV_IOKITBSDINIT_OBJ" "$BSD_NET_NWK_WQ_OBJ" "$BSD_NET_DLIL_OBJ" "$BSD_NET_KPI_PROTOCOL_OBJ" "$BSD_KERN_UIPC_SOCKET_OBJ" "$BSD_KERN_UIPC_DOMAIN_OBJ" "$BSD_NET_IPTAP_OBJ" "$BSD_NETINET_FLOW_DIVERT_OBJ" "$BSD_KERN_KERN_ACCT_OBJ" "$BSD_KERN_KERN_MIB_OBJ" "$BSD_DEV_ARM_KM_OBJ" "$BSD_NET_INIT_OBJ" "$BSD_NET_CONTENT_FILTER_OBJ" "$BSD_NET_NECP_OBJ" "$BSD_NET_NETWORK_AGENT_OBJ" "$BSD_NET_IF_UTUN_OBJ" "$BSD_NET_IF_IPSEC_OBJ" "$BSD_NET_NETSRC_OBJ" "$BSD_NET_NTSTAT_OBJ" "$BSD_NETINET_TCP_CC_OBJ" "$BSD_NETINET_MPTCP_SUBR_OBJ" "$OSFMK_VM_BSD_VM_OBJ" "$BSD_MISCFS_DEVFS_DEVFS_VFSOPS_OBJ" "$BSD_KERN_KERN_SIG_OBJ" "$STAGE90_PTHREAD_FUNCTIONS_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ" "$LIBKERN_CXX_OSKEXT_OBJ" "$LIBKERN_OS_INTERNAL_OBJ" "$IOKIT_KERNEL_IOSTARTIOKIT_OBJ" "$IOKIT_KERNEL_IOLIB_OBJ" "$IOKIT_KERNEL_IOLOCKS_OBJ" "$LIBKERN_CXX_OSRUNTIME_OBJ" "$LIBKERN_CXX_OSMETACLASS_OBJ" "$LIBKERN_CXX_OSDICTIONARY_OBJ" "$LIBKERN_CXX_OSOBJECT_OBJ" "$LIBKERN_CXX_OSCOLLECTION_OBJ" "$LIBKERN_CXX_OSSYMBOL_OBJ" "$LIBKERN_CXX_OSSTRING_OBJ" "$IOKIT_KERNEL_IOCPU_OBJ" "$LIBKERN_CXX_OSARRAY_OBJ" "$IOKIT_KERNEL_IOREGISTRYENTRY_OBJ" "$LIBKERN_CXX_OSCOLLECTIONITERATOR_OBJ" "$LIBKERN_CXX_OSITERATOR_OBJ" "$IOKIT_KERNEL_IOSERVICE_OBJ" "$LIBKERN_CXX_OSDATA_OBJ" "$LIBKERN_CXX_OSORDEREDSET_OBJ" "$LIBKERN_CXX_OSBOOLEAN_OBJ" "$LIBKERN_CXX_IOCATALOGUE_OBJ" "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "$IOKIT_KERNEL_CONFIGTABLES_OBJ" "$LIBKERN_CXX_OSNUMBER_OBJ" "$LIBKERN_CXX_OSSET_OBJ" "$LIBKERN_OSKEXTVERSION_OBJ" "$IOKIT_KERNEL_IOUSERCLIENT_OBJ" "$IOKIT_KERNEL_IOMEMORYDESCRIPTOR_OBJ" "$OSFMK_DEVICE_IOKIT_RPC_OBJ" "$IOKIT_KERNEL_IOPMROOTDOMAIN_OBJ" "$IOKIT_KERNEL_IOPMINFORMEE_LIST_OBJ" "$IOKIT_KERNEL_IOKITDEBUG_OBJ" "$IOKIT_KERNEL_IOINTERRUPTACCOUNTING_OBJ" "$BSD_KERN_BSD_STUBS_OBJ" "$IOKIT_KERNEL_IOPLATFORMEXPERT_OBJ" "$IOKIT_KERNEL_IODEVICETREESUPPORT_OBJ" "$IOKIT_KERNEL_IOSERVICEPM_OBJ" "$IOKIT_KERNEL_IOWORKLOOP_OBJ" "$IOKIT_KERNEL_IOCOMMANDGATE_OBJ" "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "$OSFMK_VM_VM_SHARED_REGION_OBJ" "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "$IOKIT_KERNEL_IOMAPPER_OBJ" "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "$LIBKERN_UUID_UUID_OBJ" "$OSFMK_PRNG_PRNG_YARROW_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_PRNG_OBJ" "$OSFMK_PRNG_YARROWCORELIB_PORT_SMF_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_SHA1MOD_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_COMP_OBJ" "$OSFMK_PRNG_YARROWCORELIB_SRC_YARROWUTILS_OBJ" "$OSFMK_PRNG_FIPS_SHA1_OBJ" "$IOKIT_KERNEL_IOPMPOWERSTATEQUEUE_OBJ" "$IOKIT_KERNEL_IOCOMMAND_OBJ" "$IOKIT_KERNEL_IOPOWERCONNECTION_OBJ" "$BSD_KERN_KERN_MALLOC_OBJ" "$IOKIT_TESTS_TESTS_OBJ" "$OSFMK_KERN_WORK_INTERVAL_OBJ" "$BSD_KERN_SYS_REASON_OBJ" "$OSFMK_IPC_IPC_KMSG_OBJ" "$OSFMK_IPC_IPC_OBJECT_OBJ" "$BSD_MISCFS_SPECFS_SPEC_VNOPS_OBJ" "$BSD_KERN_KERN_AUTHORIZATION_OBJ" "$BSD_KERN_KERN_CREDENTIAL_OBJ" "$BSD_KERN_KERN_PROC_OBJ" "$BSD_CONF_PARAM_OBJ" "$BSD_KERN_KERN_SUBR_OBJ" "$BSD_KERN_TTY_OBJ" "$BSD_KERN_KERN_OVERRIDES_OBJ" "$BSD_KERN_SYS_ULOCK_OBJ" "$SECURITY_MAC_PROCESS_OBJ" "$BSD_KERN_KERN_DESCRIP_OBJ" "$BSD_VFS_VFS_BIO_OBJ" "$BSD_KERN_KERN_TIME_OBJ" "$BSD_VFS_VFS_CLUSTER_OBJ" "$BSD_KERN_KERN_SYNCH_OBJ" "$BSD_KERN_UBC_SUBR_OBJ" "$BSD_VFS_VFS_INIT_OBJ" "$BSD_VFS_VFS_SUBR_OBJ" "$BSD_VFS_VFS_CACHE_OBJ" "$BSD_VFS_VFS_SYSCALLS_OBJ" "$BSD_KERN_PROC_UUID_POLICY_OBJ" "$BSD_KERN_MCACHE_OBJ" "$BSD_KERN_UIPC_MBUF_OBJ" "$BSD_KERN_KPI_MBUF_OBJ" "$BSD_NET_NET_STR_ID_OBJ" "$BSD_KERN_SUBR_EVENTHANDLER_OBJ" "$BSD_KERN_KERN_AIO_OBJ" "$BSD_KERN_SYS_PIPE_OBJ" "$BSD_KERN_POSIX_SHM_OBJ" "$BSD_KERN_POSIX_SEM_OBJ" "$BSD_KERN_PTHREAD_SHIMS_OBJ" "$BSD_KERN_SYS_GENERIC_OBJ" "$BSD_VFS_VFS_QUOTA_OBJ" "$SECURITY_MAC_VFS_OBJ" "$BSD_VFS_KPI_VFS_OBJ" "$BSD_KERN_DECMPFS_OBJ" "$IOKIT_BSDDEV_IOKITBSDINIT_OBJ" "$BSD_NET_NWK_WQ_OBJ" "$BSD_NET_DLIL_OBJ" "$BSD_NET_KPI_PROTOCOL_OBJ" "$BSD_KERN_UIPC_SOCKET_OBJ" "$BSD_KERN_UIPC_DOMAIN_OBJ" "$BSD_NET_IPTAP_OBJ" "$BSD_NETINET_FLOW_DIVERT_OBJ" "$BSD_KERN_KERN_ACCT_OBJ" "$BSD_KERN_KERN_MIB_OBJ" "$BSD_DEV_ARM_KM_OBJ" "$BSD_NET_INIT_OBJ" "$BSD_NET_CONTENT_FILTER_OBJ" "$BSD_NET_NECP_OBJ" "$BSD_NET_NETWORK_AGENT_OBJ" "$BSD_NET_IF_UTUN_OBJ" "$BSD_NET_IF_IPSEC_OBJ" "$BSD_NET_NETSRC_OBJ" "$BSD_NET_NTSTAT_OBJ" "$BSD_NETINET_TCP_CC_OBJ" "$BSD_NETINET_MPTCP_SUBR_OBJ" "$OSFMK_VM_BSD_VM_OBJ" "$BSD_MISCFS_DEVFS_DEVFS_VFSOPS_OBJ" "$BSD_KERN_KERN_SIG_OBJ" "$STAGE90_PTHREAD_FUNCTIONS_OBJ" "$STAGE90_CRYPTO_FUNCTIONS_OBJ" "$STAGE90_PLATFORM_EXPERT_OBJ" "$ENTRY_LAST_KERNEL_CONSTRUCTOR_OBJ")
+
+    # The AES object, compiled by this script rather than by the platform block because it includes
+    # nothing from the tree; see where it is built. Linked beside the table that points into it.
+    LINK_OBJS+=("$STAGE90_AES_OBJ")
+    require "$STAGE90_CRYPTO_FUNCTIONS_OBJ" "run ./tools/build_xnu_arm_kernel.sh --platform-only first (its platform block compiles stages/stage90/xnu_supply/stage90_crypto_functions.c)"
+
+    # --------------------------------------------------------------------------------------------
+    # 437: `g_crypto_funcs`, supplied by this image.
+    #
+    # 436's run stopped on `aes_encrypt_key128` (`libkern/crypto/corecrypto_aes.o`) loading
+    # `g_crypto_funcs` - a real `.bss` global at `0x8053381C` in that image, NULL - from `tcp_init`'s
+    # inlined `tcp_tfo_init()` at `tcp_init + 0x104`, reached from `bsd_init + 0x818` (`domaininit`).
+    # Its only writer, `register_crypto_functions()`, has exactly one caller in the whole tree: the
+    # `com.apple.kec.corecrypto` kext, which the tarball does not contain. **Nothing to link and
+    # nothing to stub - a value that has to be written**, which is 432's shape and the reason this
+    # step supplies a table rather than an object.
+    #
+    # **The AES entries are real and everything else is a self-naming stand-in**, and the split is
+    # the load-bearing decision. `aes_encrypt_key128` reads `cbc->size` and calls `cbc->init(cbc,
+    # ctx, 16, key)` and nothing else, and it does so *unconditionally* inside `tcp_init` - so a
+    # stand-in there cannot stop without stopping `domaininit` and therefore `bsd_init`, and one that
+    # returned without writing would leave `tfo_ctx` uninitialized, which is 436's own defect
+    # (a wrong value with nothing to report it). Real AES is the only option that is both honest and
+    # survivable, and it is the only one that can be *measured*: `stage90_aes.c` is checked against
+    # FIPS-197 and SP 800-38A on the host by this script, and the table's constructor re-runs
+    # FIPS-197's Appendix C.1 vector in the image, which covers the compiler and the target. Every
+    # other member of the 47-word table - the 28 that eleven linked objects actually read, and the
+    # rest - points at a body that stops and names the field it was called through, so a callback
+    # this image does not implement reports `stub_hit=g_crypto_funcs.<field>` with a caller key
+    # instead of faulting on a NULL, which is what 436's stop was.
+    #
+    # **Prediction, written before the build and before the run.** The build: the stub set does not
+    # move - the new objects' references (`entry_kv`, `entry_stub_hit`, `register_crypto_functions`,
+    # the `stage90_aes128_*` functions) are all already satisfied - so `pass 1 undefined` stays 44
+    # and `stubs: 44 function(s), 0 storage`.
+    #
+    # The constructor, which runs from the `.init_array` walk (`OSRuntimeInitializeCPP`, inside
+    # `PE_init_iokit`, long before `bsd_init`), should write these records and *no* `stub_hit`:
+    #
+    #     xnu_entry_stage90_crypto_funcs_ptr  = 0x8047939C   the table's linked address, read back
+    #     xnu_entry_stage90_crypto_table_addr = 0x8047939C
+    #     xnu_entry_stage90_crypto_words      = 0x0000002F   47 members
+    #     xnu_entry_stage90_crypto_nulls      = 0x00000000   every one set
+    #     xnu_entry_stage90_crypto_cbc_desc   = the real descriptor's address
+    #     xnu_entry_stage90_crypto_cbc_size   = 0x000000C0   sizeof(struct stage90_aes_cbc_ctx), 192
+    #     xnu_entry_stage90_crypto_aes_ctx_size = 0x00000120 sizeof(aes_encrypt_ctx), 288
+    #     xnu_entry_stage90_crypto_kat        = 0x00000001   FIPS-197 C.1 matched in the image
+    #     xnu_entry_stage90_crypto_kat_w0     = 0x69C4E0D8   the vector's first four bytes
+    #
+    # The run: **`stub_hit=kmstartup`, caller key `0x8003B238`** - `bsd_init + 0x848`, the return
+    # address of the `bl <kmstartup>` at `bsd_init + 0x844`, which is the next stub on `bsd_init`'s
+    # statement list and the one 435 identified as the only remaining boot-path stub
+    # (`bsd/kern/subr_prof.c`, which does not compile for want of a `STATIC` macro).
+    #
+    # **And that key is the step's attribution, which is why it is worth more than the absence of an
+    # abort.** `kmstartup` is at `bsd_init + 0x844`; the AES call is inside `tcp_init`, which
+    # `domaininit` (`bsd_init + 0x818`) calls. **So the key `0x8003B238` cannot be reached unless
+    # `tcp_init` returned, and `tcp_init` cannot return unless `aes_encrypt_key128` completed.** The
+    # stop is a positive measurement of the crypto table working, not merely a run that did not
+    # fault.
+    #
+    # Falsifiers, named in advance: (1) a `stub_hit` from the constructor itself - `kat_failed`,
+    # `null_word`, `cbc_size_too_large`, `not_registered` or `wrong_table` - each of which names a
+    # different failure of this file; (2) `stub_hit=g_crypto_funcs.<field>`, which would mean
+    # something on the boot path calls a mode this image supplies only as a stand-in, and would name
+    # which one; (3) a `data abort` at `aes_encrypt_key128` again, which would mean the constructor
+    # did not run or did not win; (4) a stop *before* `kmstartup`, which would mean the table broke
+    # something `bsd_init` had already done.
+    #
+    # **Measured on hardware 2026-09-19: none of the four. The stop is `stub_hit=kmstartup` at caller
+    # key `0x8003B238`, and eight of the nine records are the predicted values to the byte** -
+    # `table_addr=0x8047939C`, `words=0x2F`, `nulls=0x00000000`, `cbc_desc=0x80479518`,
+    # `cbc_size=0x000000C0`, `kat=0x00000001`, `kat_w0=0x69C4E0D8`, `abort_entries=0`,
+    # `checks=5`/`failures=0`, `kv_dropped=0`, no `exception:` and no `panic:` line. Two records
+    # missed, and both misses are worth more than the hits:
+    #
+    # (a) `xnu_entry_stage90_crypto_funcs_ptr` is **0x00000000**, not `0x8047939C`. The record is read
+    #     at the top of the constructor, before `register_crypto_functions()` is called, and the
+    #     `.init_array` walk runs it *before* Apple's own `OSKext::initialize()` - because
+    #     `last_kernel_constructor.o`'s `.init_array` word is linked last by construction. So
+    #     `g_crypto_funcs` is legitimately still NULL at that instant, and the reading is the
+    #     measurement of 436's central fact taken from inside the image: nothing else in this kernel
+    #     writes the table. The constructor's closing `if (g_crypto_funcs != &stage90_crypto_functions)`
+    #     did not fire (no `wrong_table`), so `ptr = 0 at entry` and `no wrong_table at exit` bracket
+    #     the registration between them.
+    #
+    # (b) `xnu_entry_stage90_crypto_aes_ctx_size` is **0x000007C0** (1984), not `0x00000120` (288).
+    #     That is a wrong record and not a wrong step: the value is `sizeof(aes_encrypt_ctx)`, which
+    #     is built from `AES_CBC_CTX_MAX_SIZE` in `libkern/libkern/crypto/aes.h`, and that macro has
+    #     two branches. This build takes the `__ARM_NEON__` one - `-mfpu=neon-vfpv4` in this script's
+    #     flags makes `clang -dM` print `#define __ARM_NEON__ 1` - and the prediction read the branch
+    #     for a build *without* NEON. The arithmetic, all from the tree's own headers:
+    #
+    #         cc_config.h:190    __arm__ and not __arm64__  ->  CCN_UNIT_SIZE 4, sizeof(cc_unit) == 4
+    #         ccn.h:104          ccn_sizeof_size(n) = sizeof(cc_unit) * ceil(n / CCN_UNIT_SIZE)
+    #         aes.h:44           the NEON branch adds (14-1)*128 + 32 = 1696 - the bit-sliced schedule
+    #         ccmode_impl.h:68   cc_aligned_struct(16) cccbc_ctx  ->  sizeof(cccbc_ctx) == 16
+    #         cc.h:37            cc_ctx_n(T, n) = ceil(n / sizeof(T)), and the declaration is an array
+    #
+    #         NEON:     4 + 16 + 256 + 1696 = 1972  ->  ceil(1972/16) = 124  ->  1984  (0x7C0)
+    #         no NEON:  4 + 16 + 256        =  276  ->  ceil( 276/16) =  18  ->   288  (0x120)
+    #
+    #     **0x120 is exactly the predicted number, so the miss is located in the `#if` and not in the
+    #     arithmetic** - and the correction is `stage90_crypto_functions.c`'s new pair of
+    #     `_Static_assert`s on `sizeof(aes_encrypt_ctx)`, one per branch, which makes this a check that
+    #     stops the build rather than a paragraph that has to be re-derived. `cbc->size` (0xC0) is far
+    #     below either value, so `aes_encrypt_key`'s panic guard never had a reason to fire.
+    # --------------------------------------------------------------------------------------------
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.

@@ -826,7 +826,32 @@ PL_COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" iokit) )
 #     assumed: with `eventvar.h` included first inside the source (see its header comment for the
 #     circular include that makes the order load-bearing) it compiles under the plain set, under
 #     `-include sys/types.h` and under those two plus `sys/kernel_types.h` alike.
-PLATFORM_BSD_SOURCES=("$REPO_ROOT/stages/stage90/xnu_supply/stage90_pthread_functions.c")
+# **And a fourth file in that list (437): the crypto dispatch table.**
+#
+# `stages/stage90/xnu_supply/stage90_crypto_functions.c` supplies `g_crypto_funcs` - the table
+# `aes_encrypt_key128` reads through, whose only writer `register_crypto_functions()` is called by
+# nothing in this tree. 436's whole-kernel run is what named it: `tcp_init`'s inlined `tcp_tfo_init`
+# called `aes_encrypt_key128` unconditionally, and it faulted on `g_crypto_funcs` being NULL.
+#
+# It is in this block for the same reason the pthread table is, and the reason is the *structs*:
+# `crypto_functions_t` and the six descriptor types it is made of come from
+# `<libkern/crypto/register_crypto.h>` and `<corecrypto/ccmode.h>`, so the table's member offsets and
+# each descriptor's method offsets are the kernel's own rather than a copy. A mirror of any of these
+# layouts would not fail loudly - it would call a method through the wrong offset.
+#
+# The component is **bsd**, the same one the pthread table and `bsd/netinet/flow_divert.c` get: that
+# file includes `libkern/crypto/crypto_internal.h` and reads this very table, so the BSD define set is
+# *measured* to be sufficient for these headers rather than assumed - and the include roots are
+# COMPONENT_LIST with the component in front and dropped from the tail, which reaches
+# `$XNU/libkern/libkern/crypto/register_crypto.h` through `-I$XNU/libkern`.
+#
+# Unlike the pthread table it needs no special treatment of the force-include set: it includes only
+# libkern and corecrypto headers, none of which reach a BSD header that `eventvar.h`'s circular
+# include is about. The AES implementation it points at is *not* here - `stage90_aes.c` includes
+# nothing from the tree at all, so `build_entry.sh` compiles it, for the reason written there: the
+# same translation unit has to be runnable on the host for its known-answer tests.
+PLATFORM_BSD_SOURCES=("$REPO_ROOT/stages/stage90/xnu_supply/stage90_pthread_functions.c"
+                      "$REPO_ROOT/stages/stage90/xnu_supply/stage90_crypto_functions.c")
 PL_BSD_ROOTS=(-I"$XNU/bsd")
 for _c in "${COMPONENT_LIST[@]}"; do
     [[ $_c == bsd ]] && continue
@@ -908,7 +933,7 @@ echo "  skipped (.s):         $skipped"
 echo "  objects in $OUT"
 echo "  EABI runtime:         ${#RUNTIME_SOURCES[@]} file(s) -> $RT_OUT (not in the manifest)"
 echo "  platform expert:      ${#PLATFORM_SOURCES[@]} C++ and ${#PLATFORM_C_SOURCES[@]} C file(s) -> $PL_OUT (not in the manifest)"
-echo "  pthread table:        ${#PLATFORM_BSD_SOURCES[@]} C file(s) -> $PL_OUT (not in the manifest)"
+echo "  tables this image supplies: ${#PLATFORM_BSD_SOURCES[@]} C file(s) -> $PL_OUT (not in the manifest)"
 
 if [[ $SHOW_BLOCKERS -gt 0 ]]; then
     echo
