@@ -4355,6 +4355,156 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # lists the indirect calls it could not follow (`getval`, `panic_trap_to_debugger`, `__doprnt`, i.e. a
     # kprintf path), so a run that stops earlier is possible and the tool says so rather than guessing.
     BSD_KERN_KERN_KTRACE_OBJ=${STAGE90_ENTRY_BSD_KERN_KERN_KTRACE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/bsd_kern_kern_ktrace.o}
+    # 317: `OSKextLib.cpp` - a 1424-byte object that closes the `printf` diversion, and the first step
+    #       whose prediction is about a *frame chain* rather than a call site
+    #
+    # **The object that defines `OSKextKextForAddress`, 316's stop** - and it is a *small* one, which is
+    # worth saying because the name invites the wrong file. `libkern/OSKextLib.cpp` (manifest:360) is
+    # `.text` **1424**, `.rodata.str1.1` **474**, `.data` 4 (`gOSKextUnresolved`), with **17 definitions**
+    # and **25 references**. The large object of similar name, `libkern/c++/OSKext.cpp` (manifest:369,
+    # `.text` 74436), defines the C++ methods that this shim calls; it is the step *after* this one.
+    #
+    # Of the 25 references, **12 are already defined in this image** and none is currently undefined:
+    #
+    #   g_kext_map  kernel_map  kmem_free  panic  paniclog_append_noflush  printf
+    #   segPRELINKTEXTB  segSizePRELINKTEXT  vm_deallocate  vm_map_copy_discard
+    #   vm_map_copyin  vm_map_copyout
+    #
+    # Predicted **4 resolved** - `OSKextKextForAddress` (this stop; `_os_log_to_log_internal` calls it at
+    # two sites, 0x80096294 and 0x800962C8), `kext_request`, `kext_dump_panic_lists`,
+    # `OSKextRemoveKextBootstrap` - and **13 added**, every one of them a *function*, because every one is
+    # defined by `libkern_c++_OSKext.o`: `OSKextLog` plus the twelve `_ZN6OSKext*` methods
+    # (`kextForAddress`, `loadKextWithIdentifier`, `lookupKextWithIdentifier`, `lookupKextWithLoadTag`,
+    # `removeKextWithLoadTag`, `cancelRequest`, `handleRequest`, `requestResource`, `considerUnloads`,
+    # `printKextPanicLists`, `printKextsInBacktrace`, `removeKextBootstrap`). So 719 -> **728** undefined,
+    # 629 -> **638** function stubs, and storage **unchanged at 90** - and the first draft of this
+    # prediction wrote 642 by adding the 13 without subtracting the 4, which is 307's count defect in
+    # miniature: the counter is rebuilt from resolved/added, not nudged by the added count alone.
+    #
+    # `.text` 0x123A00 -> predicted **~0x1243A0**, from the five terms:
+    #
+    #   this object's .text                                  +0x590   (1424)
+    #   this object's .rodata.str1.1, linked                 <=+0x1DA  (mergeable: the object's 0x1DA is an
+    #                                                                   upper bound - 301, 312, 314)
+    #   the stub object's .text, net                         +0x0D8   (4 bodies retired at ~0x18 each,
+    #                                                                   13 created: 9 x 0x18)
+    #   the stub object's name strings, net                  +0x1A4   (4 retired names = 0x5C 4-aligned,
+    #                                                                   13 created = 0x200)
+    #   .text-region alignment fill                          +/- 0x40 (the band: 314's -0x8, 31x's +0xD)
+    #                                                       -------
+    #                                                        +0x9A0 +/- 0x40
+    #
+    # **4 bodies retire and 13 are created**, so both the body term and the name term are positive together
+    # - a net +9 bodies and +9 names - and the 13 added names are long C++ mangled ones: 0x200 of padded
+    # string against 0x5C retired. `.data` +0x4 (`gOSKextUnresolved`), and `.bss`
+    # **unchanged** - this object has no `.bss`, retires no storage stand-in and creates none, so for the
+    # first time in eight steps the alignment rule has nothing to say.
+    #
+    # **Predicted stop: `StartIOKit`, caller key `0x80004A20`** - the prediction 316 made and the run did not
+    # reach. It should land now, and the reason is the step's real subject: with `OSKextKextForAddress` real,
+    # **the frame chain that diverted 316 has no stub left anywhere on it**.
+    # `tools/stub_calls_in_function.py` reports zero stub calls in `printf`, `vprintf_internal` and
+    # `os_log_with_args`, and in `_os_log_to_log_internal` the only stub sites are the two
+    # `OSKextKextForAddress` calls this step resolves. So `printf` returns into `PE_init_iokit`, and that
+    # function runs on to its one stub call - which is on the *common* path, not a corner: the guard at
+    # 0x800048E4 loads 0x801497A0 and `beq 80004A0C` sends a zero straight to the `bl StartIOKit` block,
+    # and the non-zero path re-tests at 0x800049FC and falls through to the same block. The named
+    # alternative is the debug branch at 0x80004A28, taken only when `kdebug_debugid_enabled(0x535)` is
+    # true *and* the variable's low bits are set.
+    #
+    # **The lesson 316 paid for, applied:** a per-function stub list is one level deep, so it is a statement
+    # about the function's own body and not about the path through it. This block's prediction is therefore
+    # about the *chain* - every caller between the stop and the bootstrap thread was checked for stubs, not
+    # just the function that contains the expected stop.
+    #
+    # **Measured. Counts exact, all three columns and the split:** 719 -> **728** undefined, 629 -> **638**
+    # function stubs, 90 -> **90** storage; resolved 4 (`kext_dump_panic_lists`, `kext_request`,
+    # `OSKextKextForAddress`, `OSKextRemoveKextBootstrap`) and added 13, every one a function - the twelve
+    # `_ZN6OSKext*` and `OSKextLog`. The build's own listing agrees: `realstubs.o`'s `.text` grows
+    # 0x3AF8 -> **0x3BD0** (+0xD8 = 9 x 0x18) and its name group 0x3130 -> **0x32D1** (+0x1A1).
+    #
+    # **`.text` 0x123A00 -> 0x1243E0 (+0x9E0)**, predicted +0x9A0 +/- 0x40 - the band's top edge, and the
+    # closure has a 2-byte residual:
+    #
+    #   this object's .text                                  +0x590   (1424, exact)
+    #   this object's .rodata.str1.1, linked                 +0x1C6   (the map's line; the object's 0x1DA,
+    #                                                                   so 20 bytes relaxed - and per 314
+    #                                                                   even this line is an upper bound)
+    #   the stub object's .text                              +0x0D8   (predicted 0xD8 exactly: 4 bodies out,
+    #                                                                   13 in, 9 x 0x18)
+    #   the stub object's name strings                       +0x1A1   (predicted 0x1A4; names are not
+    #                                                                   4-aligned, so the estimate was 3 high)
+    #   .text-region alignment fill                          +0x013   (0xD0D -> 0xD20, 54 -> 56 fills)
+    #                                                        -------
+    #                                                         +0x9E2   against a measured +0x9E0
+    #
+    # **`.data` gains this object's 4 bytes and the output section does not grow at all.** `gOSKextUnresolved`
+    # lands at 0x80140128, in the slot the empty stand-in had, immediately before
+    # `osfmk_arm_arm_init.o`'s `const_boot_args`; the `__DATA,__const` block that follows moves +4 relative to
+    # the section, and the 4-byte `*fill*` that used to sit at its end disappears - the section's fill total
+    # falls by exactly 4 (8 fills / 0x7AAA -> 7 fills / 0x7AA6). So everything from `osfmk_arm_cpu.o` onward
+    # keeps its offset and `.data` stays **0x18F90**. It is 312's `.bss` case ("the fill absorbed it") arriving
+    # in `.data`, and it is the second time a 4-byte insertion has been free.
+    #
+    # **And `.text`'s end crossed another 16 KB boundary**, so the whole data block steps a page-group again -
+    # 304's mechanism, last seen at 314:
+    #
+    # | | base (316) | measured (317) | delta |
+    # |---|---|---|---|
+    # | `.text` | 0x123A00 | **0x1243E0** | +0x9E0 |
+    # | `.data` | 0x80124000 (0x18F90) | **0x80128000** (**0x18F90**) | +0x4000 start, **size 0** |
+    # | `.sysctl_set` | 0x8013CF90 (0x108) | **0x80140F90** (**0x108**) | +0x4000, size 0 |
+    # | `.bss` | 0x8013D0C0 (0x37018) | **0x801410C0** (**0x37018**) | +0x4000, **size 0** |
+    # | image | 0x13D098 | **0x141098** | +0x4000 |
+    # | `__bss_end` | 0x801740D8 | **0x801780D8** | +0x4000 |
+    # | headroom | 1621800 | **1605416** | -0x4000 |
+    #
+    # **`.bss` is the first step in eight where the alignment rule has nothing to say**: this object has no
+    # `.bss`, retires no storage stand-in and creates none, so the section's size is unchanged to the byte and
+    # its start moves only because `.data` did.
+    #
+    # **The stop did not advance along `kernel_bootstrap_thread` at all.** Measured
+    # **`stub_hit=_ZN6OSKext14kextForAddressEPKv` at `xnu_entry_stub_caller=0x80096298`** - the *same caller
+    # key as 316*, and predicted was `StartIOKit` at 0x80004A20. The reason is one instruction:
+    #
+    #   80108c7c <OSKextKextForAddress>:  b 8010c7b8 <_ZN6OSKext14kextForAddressEPKv>
+    #
+    # `OSKextKextForAddress` is a **tail branch** into the C++ method - and that method is one of the thirteen
+    # names *this step itself created as stubs*. A `b` does not set `lr`, so the stub that fired reports the
+    # `bl` five frames up (0x80096294 in `_os_log_to_log_internal`), which is 315's trampoline idiom producing
+    # a new shape: **resolving a name can move the frontier one level *down* into the function the step just
+    # linked, rather than forward.** The walk is not in a different place; it is one frame deeper in the same
+    # place, and the caller key is identical by construction.
+    #
+    # **What the run measures.** `OSKextKextForAddress` is now real and was entered and branched from - so the
+    # body of `libkern/OSKextLib.cpp` ran, all 1424 bytes of it, and it did exactly what its source says: read
+    # the address, tail-branch to the lookup. Nothing else changed: the 13 new stubs are linked and unreached,
+    # and `kext_request`/`kext_dump_panic_lists`/`OSKextRemoveKextBootstrap` are real and unreached.
+    #
+    # **Next: `libkern/c++/OSKext.cpp`** (`libkern_c++_OSKext.o`, manifest:369) - now not optional, because it
+    # is the object that defines `_ZN6OSKext14kextForAddressEPKv` *and* all twelve other names this step
+    # created. Recomputed against *this* image rather than against 316's: **18 resolved / 104 added**, so
+    # 728 -> **814** undefined, 638 -> **709** function stubs, 90 -> **105** storage. The 18 resolved are the
+    # 13 this step added plus five that were already stubs (`gLoadedKextSummaries`, `kmod`,
+    # `gLoadedKextSummariesTimestamp` as `B`, and `OSKextGetAllocationSiteForCaller`,
+    # `OSKextGetKmodIDForSite`); of the 104 added, 86 are functions (82 with a defining object, 4 without:
+    # `__cxa_atexit`, `osrelease`, the two `__llvm_profile_*`) and 18 are storage stand-ins (7 `B`, 11 `R`).
+    # It also brings an `.init_array` that this image's `entry.ld` does not name, which would be an orphan
+    # output section - the build's layout report is written to catch that.
+    #
+    # Predicted stop for 318: **`StartIOKit`, caller key `0x80004A20`** - the prediction 316 and 317 both made
+    # and neither reached, and it is now backed by a *walk of the chain* rather than by a stub list. With
+    # `kextForAddress` real, its body reads `vm_kernel_stext` and `vm_kernel_etext` (both 0 in this image,
+    # because both are storage stand-ins) and so **returns NULL without a single call** - the first test
+    # `addr >= 0 && addr < 0` is false and the second `if (!sKextSummariesLock)` is true, since that static
+    # is 4 zero bytes in this object's `.bss`. `_os_log_to_log_internal` then takes its `cmp r0,#0; beq`
+    # straight to the return, unwinding `os_log_with_args`, `vprintf_internal` and `printf` - none of which
+    # has a stub - back into `PE_init_iokit`. And **every path of `PE_init_iokit` ends at the same call**: the
+    # guard at 0x800048E4 tests `kdebug_enable` (a real 0x88-byte object in `bsd_kern_kdebug.o`, not a
+    # stand-in) and `beq 80004A0C` sends a zero straight to the `bl StartIOKit`; the nonzero path does its
+    # DT lookups and `bl kernel_debug` and then `b 80004A0C`; and the function's own extent is 0x378, so
+    # 0x80004A28 is inside it, not a neighbour. Four branches, one destination.
+    LIBKERN_OSKEXTLIB_OBJ=${STAGE90_ENTRY_LIBKERN_OSKEXTLIB_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/libkern_OSKextLib.o}
     # 316: `kern_newsysctl.c` - counts exact, and a stop prediction that named a call the run never reached
     #
     # **The object that defines `sysctl_early_init`, 315's stop.** `bsd_kern_kern_newsysctl.o`
@@ -9804,6 +9954,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_KPC_COMMON_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_KTRACE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$LIBKERN_OSKEXTLIB_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -9816,7 +9967,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "$BSD_KERN_PROC_INFO_OBJ" "$OSFMK_KERN_THREAD_ACT_OBJ" "${MIG_KSERVER_OBJS[@]}" "$OSFMK_KERN_SFI_OBJ" "$OSFMK_KERN_AST_OBJ" "$OSFMK_KERN_KERN_MONOTONIC_OBJ" "$OSFMK_DEVICE_DEVICE_INIT_OBJ" "$OSFMK_KDP_KDP_UDP_OBJ" "$BSD_KERN_KERN_KPC_OBJ" "$OSFMK_ARM_KPC_ARM_OBJ" "$OSFMK_KERN_KPC_COMMON_OBJ" "$BSD_KERN_KERN_KTRACE_OBJ" "$BSD_KERN_KERN_NEWSYSCTL_OBJ" "$LIBKERN_OSKEXTLIB_OBJ")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
