@@ -141,8 +141,8 @@ Where the new code and data landed, all inside the sections above:
 
 Three of these rows are worth reading as rules rather than as arithmetic:
 
-* **`__bss_end` moved by 0x40 and not by the object's 0x18** — the pad rule's eighth confirmation, and the first
-  one where the pad *grows*. `realstubs.o`'s `.bss` is 64-byte-aligned; `(0 - 0x18) mod 64` = 0x28 of fill, so
+* **`__bss_end` moved by 0x40 and not by the object's 0x18** — the pad rule's **eleventh** confirmation (359's
+  was the seventh, 360's the eighth, 361's the ninth, 362's the tenth), and the first one where the pad *grows*. `realstubs.o`'s `.bss` is 64-byte-aligned; `(0 - 0x18) mod 64` = 0x28 of fill, so
   it moves from 0x801F4540 to 0x801F4580, and the end is 0x801F6D04 + `ALIGN(8)` + the 0x10
   `__entry_reset_handler_data` slot = 0x801F6D58.
 * **`.init_array` grows by one entry and 332's contract holds for the thirty-first time.** `gMetaClass` is a

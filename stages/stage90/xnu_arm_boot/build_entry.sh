@@ -12162,8 +12162,9 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #     the last-kernel-constructor entry moves from 0x801BDC1C to 0x801BDC20 and is still last.
     #   * **`__bss_end` moves by 0x40, not by the object's 0x18.** `new_pad = (0 - 0x18) mod 64 =
     #     0x28`: the object's `.bss` lands at 0x801F4540 - where 362's `.bss` run had no fill at all -
-    #     and `realstubs.o`'s 64-byte-aligned `.bss` is pushed to 0x801F4580. That is the eighth
-    #     confirmation of the pad rule and the first one where the pad *grows*.
+    #     and `realstubs.o`'s 64-byte-aligned `.bss` is pushed to 0x801F4580. That is the **eleventh**
+    #     confirmation of the pad rule - 359's was the seventh, 360's the eighth, 361's the ninth, 362's
+    #     the tenth - and the first one where the pad *grows*.
     #   * **`.data`, `.sysctl_set` and the two offsets do not move.** The replaced table keeps a
     #     4-byte `.data` word in the same 64-byte slot (331's rule) and its string moves inside the
     #     `.text` output section, not `.data`; `args` = `align_up(bss_end - base, 0x1000) + 0x1000`
@@ -12316,7 +12317,8 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # | headroom | 1086120 | **1086120** |
     # | `args` / `topOfKernelData` / `dt` | +2064384 / +3145728 / +5242880 | **all three unmoved** |
     #
-    # The `__bss_end` row is the eighth confirmation of the pad rule and the first where the pad grows:
+    # The `__bss_end` row is the **eleventh** confirmation of the pad rule (362's was the tenth) and the first
+# where the pad grows:
     # the class's 0x18 of `.bss` lands at 0x801F4540, `realstubs.o`'s 64-byte-aligned `.bss` is pushed
     # from 0x801F4540 to 0x801F4580 - `(0 - 0x18) mod 64` = 0x28 of fill - and the end is
     # 0x801F6D04 + align8 + the 0x10 `__entry_reset_handler_data` slot = 0x801F6D58. The `.init_array`
