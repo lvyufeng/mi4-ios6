@@ -278,15 +278,56 @@ therefore gives up exactly `align64(4)` = 0x40 — and the 15 added names are `i
 `ipc_right_copyin`, `ipc_right_copyin_check`, `ipc_right_copyin_two`, `ipc_right_copyout`,
 `ipc_right_reverse` — the entry-rights face of IPC, all of them already compiled in the pool.
 
-**The prediction this step can make is short and it is the frame's own loop**: with `ipc_kmsg_dequeue`
-real, the next stub the walk can reach is `ipc_kmsg_delayed_destroy` at **key `0x800dad44`** — the `bl`
-at `+0x64`, the loop body — and it is reached only if the queue the port is tearing down is
-**non-empty**; if it is empty the `while` exits on the first call, `waitq_invalidate_locked` and
-`waitq_clear_prepost_locked` are real, and the frame returns into one of the two port callers above,
-where the next stub is not nameable from the image. So 380's prediction carries a state it cannot read:
-**(a) `ipc_kmsg_delayed_destroy` at key `0x800dad44`**, or **(b) no stop in this frame at all**, the walk
-returning to the port teardown and leaving the frontier one frame up. Falsifier (b) is *not* a miss —
+**The prediction this step can make is short, and it is not the frame's own loop — and that is the one
+thing in this section that was written wrong.** *Corrected in place before 380's build, when the
+contradiction was noticed; the prediction as first written is quoted at the end of this section.* The
+section's own first sentence says `ipc_kmsg_dequeue` **and** `ipc_kmsg_delayed_destroy` are both defined
+by `osfmk_ipc_ipc_kmsg.o`; the prediction then said that with `ipc_kmsg_dequeue` real the next stop the
+walk can reach is `ipc_kmsg_delayed_destroy` at key `0x800dad44`. That is the other symbol of the same
+object, retired by the same link. **A prediction that names a stop its own step retires is empty, and
+the state it hung on — "only if the queue is non-empty" — does not rescue it: the frame cannot stop in
+either state.**
+
+Disassembled, `ipc_mqueue_destroy_locked` is `0xa0` bytes (`0x800dacdc`..`0x800dad7c`) with exactly
+three stub calls, all three inside the loop and all three in the object 380 links —
+`ipc_kmsg_dequeue` at keys `0x800dad30` and `0x800dad54`, `ipc_kmsg_delayed_destroy` at `0x800dad44` —
+and everything after the loop is real: `strh r7, [r4, #44]`, `waitq_invalidate_locked` (`0x800a8d14`,
+a four-instruction leaf that ends `bx lr`), `waitq_clear_prepost_locked` (`0x800a9274`), `pop
+{r4, r5, r6, r7, fp, pc}`. Both queue states run that tail, and the frame returns.
+
+**What the walk does next is therefore decided by which of the two callers it returns into — and that
+is the state the log cannot read**, because the frame was reached through a context switch, so no
+caller sits on the stack to name. The two are nameable anyway, and so is their continuation:
+
+* **`ipc_port_clear_receiver + 0x60`** (`bl` at `0x800d7c78`): `imq_unlock`, then `return reap_messages`.
+  `ipc_port_clear_receiver`'s only stub call is the `ipc_pset_remove_from_all` at `+0x24`
+  (`0x800d7c3c`), which **precedes** the call the run is in and is guarded by `ip_in_pset != 0`, so
+  there is no stop left anywhere in it; and its own caller is not in the image (the literal-pointer
+  search below). **No nameable stop.**
+* **`ipc_port_destroy + 0x1C4`** (`bl` at `0x800d81e4`, on the arm taken when `pdrequest == IP_NULL` —
+  which this run must have taken, since the `ipc_notify_port_destroyed` stub at `0x800d8134` precedes
+  the call and was not hit): the walk continues at `0x800d81e8`, `waitq_unlock`, the `io_bits & 0x8000`
+  test, `lck_spin_unlock`, and rejoins the common tail at `0x800d828c`. The stub calls still reachable
+  from there, in address order, are `ipc_kmsg_free` at key **`0x800d828C`** and `ipc_kmsg_reap_delayed`
+  at key **`0x800d82CC`** — *both retired by this same link* — and then the three this image really
+  still lacks: `ipc_notify_send_once` at key **`0x800d82C0`** (guarded by `port->ip_nsrequest !=
+  IP_NULL`), `ipc_notify_dead_name` at key **`0x800d8330`** (inside the `ip_dead_names` scan), and
+  `io_free` at key **`0x800d8380`** (guarded by the port's last reference, `io_references == 1`).
+
+So 380's prediction is **(a) `ipc_notify_send_once` at key `0x800d82C0`**, **(b) `ipc_notify_dead_name`
+at key `0x800d8330`**, **(c) `io_free` at key `0x800d8380`**, or **(d) no nameable stop at all** — and
+in no case a stop in the frame the run is standing in. Falsifier: a stop inside
+`ipc_mqueue_destroy_locked`'s own frame, or at either of the two retired keys. **(d) is not a miss** —
 it is the answer to the question the previous two steps could not ask, and it names the caller.
+
+*The prediction as first written, kept because the defect is the point:* "with `ipc_kmsg_dequeue` real,
+the next stub the walk can reach is `ipc_kmsg_delayed_destroy` at key `0x800dad44` — the `bl` at `+0x64`,
+the loop body — and it is reached only if the queue the port is tearing down is non-empty; if it is
+empty the `while` exits on the first call … and the frame returns into one of the two port callers
+above, where the next stub is not nameable from the image." The falsifier it named, "no stop in this
+frame at all", is the right answer; what is wrong is (i) the first branch, which the link it describes
+retires, and (ii) the claim that the caller's continuation is unnameable, which the disassembly above
+names three deep.
 
 ## Safety
 
