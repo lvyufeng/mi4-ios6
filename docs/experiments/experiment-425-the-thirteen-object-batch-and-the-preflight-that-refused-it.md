@@ -133,8 +133,11 @@ the IOKit work.
     bss          0x8023FEC0 .. 0x802813D8 (267544 bytes, zeroed by the payload)
     layout       args 0x80283000, topOfKernelData 0x80400000, tree 0x80600000, window 8388608
     headroom     1567784 bytes below topOfKernelData
-    payload      out/stage90/stage90-qcdt.img, 5378048 bytes — one link, run twice: refused
-                  first, then (after the window fix) entered and stopped at dqinit
+    payload      out/stage90/stage90-qcdt.img, sha256
+                 806708b8122152a9563f8b8c754c3be7a44c88c7d34db71580746393d8f3f895
+                 (5378048 bytes) — one link, run twice: refused first, then (after the
+                 window fix) entered and stopped at dqinit. The entry image is
+                 2358924 bytes, `out/stage90/xnu_arm_entry.bin`.
 
 ## Where the frontier is now
 
@@ -174,6 +177,10 @@ before the descent call site for functions on the path to the answer. `--root bs
 which of them is the stop — the same division of labour 421 established for the guarded column, one
 list over. The change is verifiably additive: with the new call in place, **all 9649 functions answer
 exactly as they did before** (`/tmp/callwalk_old.py` diffed against the new tool, 0 differences).
+
+**426 is this change and not a hardware step**, which is why there is no `experiment-426-*.md`: the
+number is used here the way 415 and 421 are — to name the lesson — and the next device step takes the
+next number.
 
 **Still owed and unchanged: the timer.** Nothing in this step's path takes a deadline either — the
 thirteen bodies are allocation, lock and queue initialisation — but they are the last of those: the
