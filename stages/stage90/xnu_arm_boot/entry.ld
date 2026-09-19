@@ -249,6 +249,36 @@ SECTIONS
     ResetHandlerData = __entry_reset_handler_data - 4;
 
     /*
+     * **`last_kernel_symbol`, the end of xnu, and the third symbol that is a position rather than a
+     * value.**
+     *
+     * `osfmk/arm/arm_vm_init.c` declares it `extern void *last_kernel_symbol` (`:57`, under the
+     * comment "Denotes the end of xnu") and stores it as `vm_kernel_top = (vm_offset_t)
+     * &last_kernel_symbol` (`:499`). Apple defines it in `libsa/lastkernelconstructor.c` with
+     *
+     *     __asm__(".zerofill __LAST, __last, _last_kernel_symbol, 0");
+     *
+     * - a zero-sized symbol in a segment the linker places last, which is how a Mach-O build asks for
+     * "wherever the end is". Two things about that do not carry to this image, and experiment 332
+     * measured both: the four-operand `.zerofill` is Darwin-assembler syntax the ELF assembler
+     * rejects ("unknown directive"), and `_last_kernel_symbol` is Mach-O's spelling of the C
+     * identifier while the reference in `arm_vm_init.o` carries the ELF spelling
+     * `last_kernel_symbol` - so a definition under the Darwin name would satisfy nothing.
+     *
+     * What the symbol *means* is available here without either: the end of xnu is the end of the
+     * image's last output section, and the line above the script's final block already computes it
+     * as `__bss_end`. Defining it in the script is the same mechanism the two symbols above use, and
+     * it has the same consequence: pass 1 links with this script, so the name is defined before the
+     * stub generator runs and the 24-byte function body and name slot this image has been carrying
+     * for it are retired rather than stood in for.
+     *
+     * Nothing this image has run reads `vm_kernel_top` again after `arm_vm_init`, so the value is a
+     * correctness of the image's description rather than of this step's behaviour - which is exactly
+     * the standing of `__entry_data_filesize` below.
+     */
+    last_kernel_symbol = __bss_end;
+
+    /*
      * The numbers entry_macho.s puts into the Mach-O header it defines. They are computed here
      * rather than in the assembly because the sizes are differences of two linker symbols, which
      * gas cannot fold into a single word; a script expression can.
