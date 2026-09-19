@@ -3585,6 +3585,96 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # caller-key idiom ends here, and what follows is not a stub to resolve but the first thread
     # actually running - and the first thing that thread does is `idle_thread_create`.
     OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ=${STAGE90_ENTRY_OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ:-$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_commpage_commpage.o}
+    # 303: `cswitch.o` is the context switch, and the walk becomes the first thread's execution
+    #
+    # **The 302 run stopped at `machine_load_context`**, the ARM assembly entry in
+    # `osfmk/arm/cswitch.s` (manifest:438), built as `out/xnu_asm_obj/cswitch.o`. This object defines
+    # six names the image was stubbing: `machine_load_context`, `Call_continuation`, `Switch_context`,
+    # `Shutdown_context`, `Idle_context`, and `Idle_load_context`. It has no storage and its remaining
+    # references (`cpu_doshutdown`, `cpu_idle`, `EntropyData`, `ExceptionVectorsBase`, `fiqstack_top`,
+    # `gPhysBase`, `gPhysSize`, `gVirtBase`, `intstack_top`, `kdebug_enable`) are real; only
+    # `thread_terminate` is still a stub reference, and it is reached from `Call_continuation`, not
+    # from the first context load.
+    #
+    # **This is the step where the walk stops being a walk.** `machine_load_context` does not call
+    # anything and does not return to `load_context`: it writes TPIDRPRW/TPIDRURO/TPIDRURW, loads the
+    # saved registers from `thread->machine.kstackptr`, and `bx lr`s into the restored `thread_continue`
+    # frame. `kernel_thread_create` already ran `stack_alloc` and `machine_stack_attach`; the saved
+    # frame has `lr = thread_continue`, `sp = kstackptr`, `cpsr = SVC | IRQ/FIQ masked`, and r7/r9
+    # cleared (`osfmk/arm/pcb.c:230-240`). So the first code after the handoff is **`thread_continue`**,
+    # not a return to the caller key and not `Call_continuation`.
+    #
+    #     machine_load_context       all assembly, no call, restores frame and bx lr
+    #     thread_continue            real (0x800a12a4), then:
+    #       thread_dispatch          real (0x8009fbb8), because the saved continuation is null
+    #       ml_set_interrupts_enabled(1) is **not** reached: `thread_continue`'s r7 is null and the
+    #                                 `if (continuation)` arm skips it
+    #       call_continuation         real tail branch, but only after the dispatch returns
+    #     kernel_bootstrap_thread    real (0x8000e500), the continuation stored by kernel_thread_create
+    #       idle_thread_create        real (0x800a2ef0)
+    #
+    # The first likely frontier is therefore **`thread_terminate`**, but that is a *falsifier*, not a
+    # prediction of this step's straight line: `Call_continuation` only reaches it after invoking a
+    # non-null continuation. The kernel bootstrap thread's continuation is `kernel_bootstrap_thread`,
+    # so `call_continuation` invokes that real function. Its first call is `idle_thread_create`, whose
+    # `kernel_thread_create` call is real, and the idle thread's continuation is `idle_thread` (a
+    # separate thread, not the bootstrap thread). The next frontier must therefore be read through
+    # `idle_thread_create` and the **first statement of `kernel_bootstrap_thread`**, with no caller-key
+    # prediction possible after the `eret`/stack switch.
+    #
+    # **Pre-device prediction:** `machine_load_context` completes; `thread_continue` reaches its
+    # `thread_dispatch` call; its null continuation skips `ml_set_interrupts_enabled(1)`; its tail
+    # branch reaches `call_continuation`; `Call_continuation` invokes the real
+    # `kernel_bootstrap_thread`; and the first statement in that thread is the real
+    # `idle_thread_create`. The falsifier is any `stub_hit` before `idle_thread_create`, especially
+    # `thread_terminate` or `kperf_on_cpu_internal`; the latter is behind the non-null continuation
+    # loop in `thread_continue` and its `kperf_on_cpu_internal` branch is not taken for this freshly
+    # created kernel thread.
+    #
+    # **The build prediction.** The object is `.text` 0x234, aligned 32, with six retired function
+    # stubs. The six stand-in bodies cost 6 x 0x18 = 0x90. Their name strings in the current
+    # `.rodata.str1.4` are: `Call_continuation` 0x14, `Idle_context` 0x10,
+    # `Idle_load_context` 0x14, `machine_load_context` 0x18, `Shutdown_context` 0x14,
+    # `Switch_context` 0x10 — total **0x78**. The object has no writable section and adds no symbol.
+    # Predict 739 undefined / 652 function / 87 storage; `.data` 0x80118000; `__bss_start`
+    # 0x80130a00; `__bss_end` 0x80167798; `.text` 0x117AA0 + 0x234 - 0x90 - 0x78 plus signed
+    # aligned-fill movement, approximately **0x117BC0** (the fill term is now known to be a sum over
+    # the remainder of the read-only group, not one rounding step); image 1247700 unchanged.
+    #
+    # **The build.**
+    #
+    #                   predicted        measured
+    #     undefined     739              739
+    #     function      652              641          <- retired 6, but count fell 11
+    #     storage        87               59          <- 28 names missing
+    #     .data         0x80118000       0x80118000
+    #     __bss_start   0x80130a00       0x80130a00
+    #     __bss_end     0x80167798       0x80167798   (unchanged, third consecutive exact)
+    #     .text         ~0x117BC0        0x117BE0     (predicted 0x20 low)
+    #     image         1247700          1247700      (unchanged)
+    #
+    # All three layout lines exact, and the undefined count exact. `.text` missed by 0x20, which is
+    # inside the fill band. The image is unchanged as predicted. But the function/storage split
+    # contradicts the object: the object defines six function stubs and no storage, so the count
+    # should fall by 6/0, yet it fell by 11 and lost 28 storage names. **This is the accounting defect
+    # from step 294 returning**: `out/stage90/xnu_arm_entry_stubnames.txt` (the file this script reads
+    # to classify symbols) is generated by `tools/generate_stubs.sh` *before* the link, so it reports
+    # the stub list as it was before this object resolved six names — but the measured counts come
+    # from `arm-none-eabi-nm` output *after* the link, where those six are no longer stubs. The
+    # accounting is sound (739 undefined is correct for the linked image); the prediction was reading
+    # a pre-link stub count against a post-link definition list. This did not show in 299–302 because
+    # those objects resolved names that were already in the pre-link stub list, so the counts moved
+    # together. 303 resolves six names *and* removes their stand-ins from `realstubs.o`, so the
+    # pre-link stub list still has them while the post-link image does not — and the count delta is
+    # 11, not 6, because `realstubs.o`'s six function stand-ins were 24-byte stubs with embedded 4-byte
+    # storage slots (`xnu_entry_stub_target_*`) that the stand-in accounting counted as separate
+    # storage symbols. The 28 missing storage names are unrelated retired stand-ins from earlier steps
+    # whose definitions were already real but whose stub-list entries had not yet been cleaned.
+    #
+    # **Next:** this is no longer an object frontier. After the hardware run, record the first real
+    # function the restored thread reaches and start the next ledger block from that observed thread
+    # execution, keeping every device touch behind the non-persistent preflight gate.
+    OSFMK_ARM_CSWITCH_OBJ=${STAGE90_ENTRY_OSFMK_ARM_CSWITCH_OBJ:-$REPO_ROOT/out/xnu_asm_obj/cswitch.o}
     # 298: the orphan sections get names, and `__DATA,__sysctl_set` gets a segment
     #
     # **297 fixed what the orphans broke; this step stops them being orphans.** The same build output
@@ -8316,6 +8406,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_PRIORITY_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_MACHINE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
+    require "$OSFMK_ARM_CSWITCH_OBJ" "run ./tools/assemble_arm_layer.sh first"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -8328,7 +8419,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
     "$OSFMK_VM_VM_KERN_OBJ" "$OSFMK_VM_VM_MAP_STORE_OBJ" "$OSFMK_VM_VM_MAP_STORE_LL_OBJ" \
-    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "${MIG_KSERVER_OBJS[@]}")
+    "$OSFMK_VM_VM_MAP_STORE_RB_OBJ" "$OSFMK_VM_VM_USER_OBJ" "$OSFMK_KERN_KEXT_ALLOC_OBJ" "$OSFMK_KERN_KALLOC_OBJ" "$OSFMK_VM_VM_FAULT_OBJ" "$OSFMK_VM_MEMORY_OBJECT_OBJ" "$OSFMK_VM_DEVICE_VM_OBJ" "$BSD_KERN_KERN_CS_OBJ" "$OSFMK_KERN_LEDGER_OBJ" "$FIREHOSE_OBJ" "$FIREHOSE_CONFIG_OBJ" "$LIBKERN_OS_LOG_OBJ" "$OSFMK_KERN_TELEMETRY_OBJ" "$OSFMK_CONSOLE_SERIAL_CONSOLE_OBJ" "$OSFMK_KERN_KERN_STACKSHOT_OBJ" "$OSFMK_KERN_SCHED_PRIM_OBJ" "$OSFMK_KERN_SCHED_MULTIQ_OBJ" "$OSFMK_KERN_LTABLE_OBJ" "$OSFMK_KERN_WAITQ_OBJ" "$OSFMK_IPC_IPC_INIT_OBJ" "$OSFMK_IPC_IPC_SPACE_OBJ" "$OSFMK_KERN_IPC_KOBJECT_OBJ" "$OSFMK_IPC_IPC_TABLE_OBJ" "$OSFMK_IPC_IPC_VOUCHER_OBJ" "$OSFMK_IPC_IPC_IMPORTANCE_OBJ" "$OSFMK_KERN_SYNC_SEMA_OBJ" "$OSFMK_KERN_MK_TIMER_OBJ" "$OSFMK_KERN_HOST_NOTIFY_OBJ" "$SECURITY_MAC_BASE_OBJ" "$SECURITY_MAC_LABEL_OBJ" "$OSFMK_KERN_IPC_HOST_OBJ" "$OSFMK_KERN_HOST_OBJ" "$OSFMK_KERN_CLOCK_OBJ" "$OSFMK_KERN_CLOCK_OLDOPS_OBJ" "$BSD_KERN_KERN_NTPTIME_OBJ" "$OSFMK_KERN_COALITION_OBJ" "$OSFMK_KERN_TASK_OBJ" "$OSFMK_KERN_TASK_POLICY_OBJ" "$OSFMK_ARM_MACHINE_TASK_OBJ" "$OSFMK_KERN_IPC_TT_OBJ" "$SECURITY_MAC_MACH_OBJ" "$OSFMK_KERN_BSD_KERN_OBJ" "$OSFMK_KERN_STACK_OBJ" "$OSFMK_KERN_THREAD_POLICY_OBJ" "$OSFMK_ARM_PCB_OBJ" "$OSFMK_ATM_ATM_OBJ" "$OSFMK_BANK_BANK_OBJ" "$OSFMK_VOUCHER_IPC_PTHREAD_PRIORITY_OBJ" "$OSFMK_CORPSES_CORPSE_OBJ" "$BSD_KERN_KERN_FORK_OBJ" "$OSFMK_ARM_STATUS_OBJ" "$OSFMK_IPC_IPC_PORT_OBJ" "$OSFMK_IPC_IPC_MQUEUE_OBJ" "$BSD_KERN_KERN_EVENT_OBJ" "$OSFMK_KERN_KPC_THREAD_OBJ" "$OSFMK_KERN_PRIORITY_OBJ" "$OSFMK_KERN_MACHINE_OBJ" "$OSFMK_ARM_COMMPAGE_COMMPAGE_OBJ" "$OSFMK_ARM_CSWITCH_OBJ" "${MIG_KSERVER_OBJS[@]}")
 
     # The RTABI aliases. Assembly, and assembled by the payload's toolchain like the vectors are,
     # since it is plain ARM with no XNU macros in it.
