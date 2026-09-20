@@ -1003,6 +1003,84 @@ uint32_t g_alloc_count;
 uint32_t g_pub2_caller[4];
 uint32_t g_pub2_key[4];
 uint32_t g_pub2_count;
+
+/* ------------------------------------------------- 467: what the kernel's own abort handler did */
+/*
+ * **The record of a data abort that is no longer this instrument's to stop.**
+ *
+ * Until 466 the vector page's slot 4 branched to `fleh_dataabt` in this file, whose design is to
+ * record into `.bss` and leave - which is what a fault deserves when the fault *is* the end of the
+ * run. 466's run produced the other kind: `copyout`'s first store to the page `load_init_program`
+ * had just allocated (`dfar = 0x1000`, `dfsr = 0x805`), i.e. the demand fault XNU pages in and
+ * retries. 467 installs Apple's own first-level handler in that slot (`locore_fleh_dataabt`, linked
+ * by 466), so after this step a data abort is the *kernel's decision* and not a stop, and these are
+ * the slots that record the decision.
+ *
+ * The place every path through that handler passes is `sleh_abort` (`osfmk/arm/trap.c:274`), which
+ * `locore.s:1140` calls once per abort: it either **returns** - the page was paged in and the
+ * faulting instruction is retried - or does not return at all, because it panicked (`trap.c:313`
+ * "at interrupt context", `:393` prefetch in kernel mode, `:464` a failed `vm_fault` with no recover
+ * handler) or because it re-entered itself. So the pair below is the reading:
+ *
+ *   - `g_sleh_seq` counts entries into the second-level handler, `g_sleh_back` counts returns from
+ *     it. A handler entered and never returned is a *gap* between them, which is what makes "it
+ *     panicked" distinguishable from "it serviced the fault and the boot went on".
+ *   - `g_sleh_dfsr`/`g_sleh_dfar` are the **latest** entry's, which is what makes a retry loop
+ *     readable: a fault that is serviced advances the boot and the next fault is a different
+ *     address, while one that is retried forever repeats `0x805`/`0x1000`.
+ *   - `g_sleh_type` is `T_DATA_ABT` (4, `osfmk/arm/trap.h:70`) by construction here - the other
+ *     abort vectors are still
+ *     this file's - and it is recorded anyway, because a slot that changes should move a number
+ *     rather than a sentence.
+ *   - `g_sleh_storm` is non-zero only if the live cap below was reached, and it is the only place
+ *     the number past the cap appears.
+ *
+ * **`.bss` and the live channel, both, because neither alone can carry this run.** The `.bss` half
+ * needs an epilogue and a serviced fault may never produce one; the live half needs nothing but the
+ * ram console mapping, and it is what a boot that continues leaves behind. The record is written to
+ * the live channel *after* the counters are updated, and only for the first `SLEH_LIVE_MAX`
+ * entries: this is the one record whose own failure can re-enter it (269's storm was a fault inside
+ * a reporting path), and a cap is what turns "the machine is looping" into four records and a
+ * counter instead of an unbounded stream.
+ */
+uint32_t g_sleh_seq;
+uint32_t g_sleh_back;
+uint32_t g_sleh_type;
+uint32_t g_sleh_dfsr;
+uint32_t g_sleh_dfar;
+uint32_t g_sleh_storm;
+
+#define SLEH_LIVE_MAX 4u
+
+void entry_live_write(const char *key, uint32_t value);
+
+void entry_note_sleh(uint32_t type, uint32_t dfsr, uint32_t dfar, uint32_t thread)
+{
+    g_sleh_seq++;
+    g_sleh_type = type;
+    g_sleh_dfsr = dfsr;
+    g_sleh_dfar = dfar;
+
+    if (g_sleh_seq <= SLEH_LIVE_MAX) {
+        entry_live_write("xnu_live_sleh_seq", g_sleh_seq);
+        entry_live_write("xnu_live_sleh_type", type);
+        entry_live_write("xnu_live_sleh_dfsr", dfsr);
+        entry_live_write("xnu_live_sleh_dfar", dfar);
+        entry_live_write("xnu_live_sleh_thr", thread);
+    } else if (g_sleh_seq == SLEH_LIVE_MAX + 1u) {
+        g_sleh_storm = g_sleh_seq;
+        entry_live_write("xnu_live_sleh_storm", g_sleh_storm);
+    }
+}
+
+void entry_note_sleh_back(void)
+{
+    g_sleh_back++;
+    if (g_sleh_seq <= SLEH_LIVE_MAX) {
+        entry_live_write("xnu_live_sleh_back", g_sleh_back);
+        entry_live_write("xnu_live_sleh_at_back", g_sleh_seq);
+    }
+}
 #endif
 
 /*
@@ -1945,6 +2023,62 @@ entry_probe_dump_kv_words(const char *key, uint32_t base, uint32_t words)
  * recorded as the next step's problem rather than done here, because the epilogue runs only when the
  * boot *returns* to the payload and cannot be exercised by any run of this frontier.
  */
+/*
+ * Experiment 269's abort readings, moved out of `entry_epilogue` by 467 for the reason given at
+ * `entry_write_455_kv`: these twenty-five `entry_write_kv` calls, appended to that function, put its
+ * constant pool past PC-relative range and the assembler refused the whole object with
+ * `bad immediate value for offset (4096)` against `ldr r0, .L277`, a load from `entry_epilogue`'s own
+ * pool 4096 bytes after it. The keys and the comment above them are unchanged; only the function that
+ * holds them is, and the helper is called at exactly the position they used to occupy, so the order
+ * of the records in the buffer is identical.
+ */
+__attribute__((noinline)) static void entry_write_269_kv(void)
+{
+    /*
+     * Experiment 269's reading of a full results buffer, in four numbers. They are read from `.bss`
+     * here rather than from registers because they are written long before the teardown and the
+     * teardown's set/way sweep covers the whole D-cache - the same reason `xnu_entry_kv_in_dram`
+     * works. `_entries` says whether the data-abort handler re-entered itself and how often;
+     * `_first_dfar`/`_first_pc` say what the first fault actually was; `_first_kv_len` says how much
+     * of the buffer was already written when it started.
+     */
+    entry_write_kv("xnu_entry_abort_entries", g_abort_entries);
+    entry_write_kv("xnu_entry_abort_first_dfar", g_first_abort_dfar);
+    entry_write_kv("xnu_entry_abort_first_pc", g_first_abort_pc);
+    entry_write_kv("xnu_entry_abort_first_kv_len", g_first_abort_kv_len);
+    /*
+     * The second group, which is the one that decides between the two readings of the first. `_dfsr`
+     * is the fault status word - bits 3:0 the fault type, bit 10 whether it was a write - and `_insn`
+     * is the word at `pc_abt`, so a `pc_abt` that is not an instruction is visible as one rather than
+     * assumed to be. `_step`/`_step_addr` come from `entry_kv` itself and say what it believed it was
+     * about to store and where, `_kvbuf` is the address the *code* has for the buffer, and `_sp` is
+     * the exception stack pointer at entry.
+     */
+    entry_write_kv("xnu_entry_abort_first_dfsr", g_first_abort_dfsr);
+    entry_write_kv("xnu_entry_abort_first_lr", g_first_abort_lr);
+    entry_write_kv("xnu_entry_abort_first_insn", g_first_abort_insn);
+    entry_write_kv("xnu_entry_abort_first_step", g_first_abort_step);
+    entry_write_kv("xnu_entry_abort_first_step_addr", g_first_abort_step_addr);
+    entry_write_kv("xnu_entry_abort_first_kvbuf", g_first_abort_kvbuf);
+    entry_write_kv("xnu_entry_abort_first_sp", g_first_abort_sp);
+    entry_write_kv("xnu_entry_abort_first_spsr", g_first_abort_spsr);
+    entry_write_kv("xnu_entry_abort_first_ttbr0", g_first_abort_ttbr0);
+    entry_write_kv("xnu_entry_abort_first_ttbr1", g_first_abort_ttbr1);
+    entry_write_kv("xnu_entry_abort_first_ttbcr", g_first_abort_ttbcr);
+    entry_write_kv("xnu_entry_abort_first_sctlr", g_first_abort_sctlr);
+    entry_write_kv("xnu_entry_abort_first_cpu_ttep", g_first_abort_cpu_ttep);
+    entry_write_kv("xnu_entry_abort_first_avail_start", g_first_abort_avail_start);
+    entry_write_kv("xnu_entry_abort_first_gphysbase", g_first_abort_gphysbase);
+    entry_write_kv("xnu_entry_abort_first_mem_size", g_first_abort_mem_size);
+    entry_write_kv("xnu_entry_abort_first_end_kern", g_first_abort_end_kern);
+    entry_write_kv("xnu_entry_abort_first_prelink_b", g_first_abort_prelink_b);
+    entry_write_kv("xnu_entry_abort_first_prelink_size", g_first_abort_prelink_size);
+    entry_write_kv("xnu_entry_abort_first_hex", g_first_abort_hex);
+    entry_write_kv("xnu_entry_abort_first_hex_page", g_first_abort_hex_page);
+    entry_write_kv("xnu_entry_abort_first_hex_used", g_first_abort_hex_used);
+    entry_write_kv("xnu_entry_abort_first_hex_arg", g_first_abort_hex_arg);
+}
+
 __attribute__((noinline)) static void entry_write_455_kv(void)
 {
     entry_write_kv("xnu_entry_match_calls", g_match_calls);
@@ -2139,6 +2273,35 @@ __attribute__((noinline)) static void entry_write_463_kv(void)
     entry_write_kv("xnu_entry_wcls_state2", g_wcls_state[2]);
     entry_write_kv("xnu_entry_wcls_state3", g_wcls_state[3]);
     entry_write_kv("xnu_entry_wls_seen", g_wls_seen);
+}
+
+/*
+ * 467's keys, in a function of their own for 455's reason - and this one is not a precaution: adding
+ * these six to `entry_epilogue` **measured** the limit. The compile failed with
+ * `Assembler messages: bad immediate value for offset (4188)`, i.e. a `ldr rX, .Lpool+N` whose
+ * distance had just crossed 4095, and the message names a line of compiler output and not the
+ * function that grew; removing only these six lines and rebuilding is the control that identifies
+ * them. 463's comment above says the same thing about the same function, which is what makes this a
+ * defect of method rather than of the toolchain (see `mi4-measurement-defects`, 190).
+ *
+ * The reading itself: `_seq` and `_back` are the pair that separates a fault the kernel *serviced* -
+ * the page was paged in and the faulting instruction retried - from a handler that was entered and
+ * never came back, which is a panic or a re-entry. `_dfsr`/`_dfar` are the latest entry's, so a
+ * retry of the same address is visible as a repetition, and `_type` moves if a later step hands a
+ * different abort vector to the kernel. `_storm` is non-zero only if the live cap cut the live
+ * records short, and it carries the entry count the cap stopped at.
+ *
+ * `.bss` here and live records during the run, both, deliberately: a serviced fault means the boot
+ * goes on and may never reach this epilogue, and a panic means it does.
+ */
+__attribute__((noinline)) static void entry_write_467_kv(void)
+{
+    entry_write_kv("xnu_entry_sleh_seq", g_sleh_seq);
+    entry_write_kv("xnu_entry_sleh_back", g_sleh_back);
+    entry_write_kv("xnu_entry_sleh_type", g_sleh_type);
+    entry_write_kv("xnu_entry_sleh_dfsr", g_sleh_dfsr);
+    entry_write_kv("xnu_entry_sleh_dfar", g_sleh_dfar);
+    entry_write_kv("xnu_entry_sleh_storm", g_sleh_storm);
 }
 
 __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
@@ -2533,49 +2696,9 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     entry_write_kv("xnu_entry_stub_caller_w1",
                    (g_stub_caller_in_buf != 0u) && entry_image_ptr((uintptr_t)&g_kv_buf[g_stub_caller_digits + 4u])
                        ? entry_word_at((uintptr_t)&g_kv_buf[g_stub_caller_digits + 4u]) : 0u);
-    /*
-     * Experiment 269's reading of a full results buffer, in four numbers. They are read from `.bss`
-     * here rather than from registers because they are written long before the teardown and the
-     * teardown's set/way sweep covers the whole D-cache - the same reason `xnu_entry_kv_in_dram`
-     * works. `_entries` says whether the data-abort handler re-entered itself and how often;
-     * `_first_dfar`/`_first_pc` say what the first fault actually was; `_first_kv_len` says how much
-     * of the buffer was already written when it started.
-     */
-    entry_write_kv("xnu_entry_abort_entries", g_abort_entries);
-    entry_write_kv("xnu_entry_abort_first_dfar", g_first_abort_dfar);
-    entry_write_kv("xnu_entry_abort_first_pc", g_first_abort_pc);
-    entry_write_kv("xnu_entry_abort_first_kv_len", g_first_abort_kv_len);
-    /*
-     * The second group, which is the one that decides between the two readings of the first. `_dfsr`
-     * is the fault status word - bits 3:0 the fault type, bit 10 whether it was a write - and `_insn`
-     * is the word at `pc_abt`, so a `pc_abt` that is not an instruction is visible as one rather than
-     * assumed to be. `_step`/`_step_addr` come from `entry_kv` itself and say what it believed it was
-     * about to store and where, `_kvbuf` is the address the *code* has for the buffer, and `_sp` is
-     * the exception stack pointer at entry.
-     */
-    entry_write_kv("xnu_entry_abort_first_dfsr", g_first_abort_dfsr);
-    entry_write_kv("xnu_entry_abort_first_lr", g_first_abort_lr);
-    entry_write_kv("xnu_entry_abort_first_insn", g_first_abort_insn);
-    entry_write_kv("xnu_entry_abort_first_step", g_first_abort_step);
-    entry_write_kv("xnu_entry_abort_first_step_addr", g_first_abort_step_addr);
-    entry_write_kv("xnu_entry_abort_first_kvbuf", g_first_abort_kvbuf);
-    entry_write_kv("xnu_entry_abort_first_sp", g_first_abort_sp);
-    entry_write_kv("xnu_entry_abort_first_spsr", g_first_abort_spsr);
-    entry_write_kv("xnu_entry_abort_first_ttbr0", g_first_abort_ttbr0);
-    entry_write_kv("xnu_entry_abort_first_ttbr1", g_first_abort_ttbr1);
-    entry_write_kv("xnu_entry_abort_first_ttbcr", g_first_abort_ttbcr);
-    entry_write_kv("xnu_entry_abort_first_sctlr", g_first_abort_sctlr);
-    entry_write_kv("xnu_entry_abort_first_cpu_ttep", g_first_abort_cpu_ttep);
-    entry_write_kv("xnu_entry_abort_first_avail_start", g_first_abort_avail_start);
-    entry_write_kv("xnu_entry_abort_first_gphysbase", g_first_abort_gphysbase);
-    entry_write_kv("xnu_entry_abort_first_mem_size", g_first_abort_mem_size);
-    entry_write_kv("xnu_entry_abort_first_end_kern", g_first_abort_end_kern);
-    entry_write_kv("xnu_entry_abort_first_prelink_b", g_first_abort_prelink_b);
-    entry_write_kv("xnu_entry_abort_first_prelink_size", g_first_abort_prelink_size);
-    entry_write_kv("xnu_entry_abort_first_hex", g_first_abort_hex);
-    entry_write_kv("xnu_entry_abort_first_hex_page", g_first_abort_hex_page);
-    entry_write_kv("xnu_entry_abort_first_hex_used", g_first_abort_hex_used);
-    entry_write_kv("xnu_entry_abort_first_hex_arg", g_first_abort_hex_arg);
+    /* The abort readings moved into a function of their own by 467 - see `entry_write_269_kv` -
+     * for the constant-pool reason recorded there. Same position, so the same key order. */
+    entry_write_269_kv();
 #ifdef STAGE90_ENTRY_TRACE
     /*
      * The tracer's terminal record, printed here rather than from `g_kv_buf` - see the slots'
@@ -2791,6 +2914,12 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     entry_write_kv("xnu_entry_pub22_key", g_pub2_key[2]);
     entry_write_kv("xnu_entry_pub23_caller", g_pub2_caller[3]);
     entry_write_kv("xnu_entry_pub23_key", g_pub2_key[3]);
+    /* 467: the kernel's own second-level abort handler - entered how many times, returned how many
+     * times, and what the latest fault was. In a function of its own for `entry_write_463_kv`'s
+     * reason: six keys written here put `entry_epilogue`'s constant pool past PC-relative range and
+     * the *C compile* fails (`bad immediate value for offset (4188)`), with nothing in the message
+     * naming the function that grew. See `entry_write_467_kv`. */
+    entry_write_467_kv();
 #endif
     /*
      * Experiment 272. Runs here, after the first line of the report is already in the console, so

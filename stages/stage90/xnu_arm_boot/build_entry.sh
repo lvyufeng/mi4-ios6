@@ -130,7 +130,8 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=vcputc --wrap=uart_putc
                    --wrap=_ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_
                    --wrap=mdevadd --wrap=mdevlookup
-                   --wrap=_ZN9IOService22waitForMatchingServiceEP12OSDictionaryy)
+                   --wrap=_ZN9IOService22waitForMatchingServiceEP12OSDictionaryy
+                   --wrap=sleh_abort)
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
 # every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that
@@ -27114,6 +27115,78 @@ verify_trace_symbols() {
         layout_fail "these --wrap'd symbols have no branch to their wrapper anywhere in the linked image, so the wrapper can never run: ${dead[*]} - a same-object call is resolved by the linker and is invisible to --wrap. Add it to this check's same-object, never-called or by-address list with a reason, or drop the flag"
     fi
     say "  xnu_entry_455: ${#TRACE_LDFLAGS[@]} --wrap'd symbols: $(( ${#TRACE_LDFLAGS[@]} - ${#only[@]} - ${#uncalled[@]} - ${#addr[@]} )) reached by a branch in this image, ${#only[@]} same-object-only (${only[*]:-none}), ${#uncalled[@]} never called here (${uncalled[*]:-none}), ${#addr[@]} by address only (${addr[*]:-none})"
+
+    # **467: which handler each vector slot actually carries, read out of the linked image.** The
+    # sentence `entry_vectors.s` writes - seven slots are this image's handlers and the fourth is
+    # Apple's - is one `.macro` argument away from being false, and the two ways it can be false are
+    # both invisible in a run: a slot that quietly kept the instrument's `fleh_dataabt` looks exactly
+    # like a kernel that refused to service the fault (the abort is recorded and the boot stops, which
+    # is what every step before this one produced), and a slot that lost *another* handler to Apple's
+    # would turn a fault this image can report into one it cannot. So the reference is read from the
+    # image: each trampoline loads its handler from a literal the assembler emitted for that
+    # `VECTOR_TRAMP` argument, so the four bytes at `vec_tramp_N_handler` are the slot's target, and
+    # they are compared with `nm`'s address for the symbol the slot is supposed to carry.
+    #
+    # Slot 4 is checked in both directions - it must be `locore_fleh_dataabt` and must **not** be this
+    # file's `fleh_dataabt` - because the failure this step exists to remove is the second one.
+    # The helper picks one word out of `objdump -s`'s output by index rather than by assuming the
+    # line starts at the word: `objdump -s` prints whole 16-byte lines, and `vec_tramp_4_handler` is
+    # 4-byte aligned, not 16 - so a check that matched `$1 == address` would fail to find its line and
+    # (with the guard below) stop the build for a reason that is about the tool's layout.
+    {
+        local vbase vpair i veclit want got bad=0
+        x467_addr_of() { arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk -v s="$1" '$3 == s && !seen { print $1; seen = 1 }'; }
+        # $1 = address of a 4-byte word; prints it as the value the image holds (little-endian).
+        x467_word_at() {
+            local a=$1 base bline idx
+            local -a g
+            base=$(printf '%08x' $(( 0x$a & 0xfffffff0 )))
+            idx=$(( (0x$a - 0x$base) / 4 ))
+            bline=$(arm-none-eabi-objdump -s --start-address=0x$base \
+                        --stop-address=0x$(printf '%08x' $(( 0x$base + 16 ))) "$OUT/xnu_arm_entry.elf" |
+                    awk -v b="$base" '$1 == b && !seen { print $2, $3, $4, $5; seen = 1 }')
+            [[ -n $bline ]] || return 1
+            read -r -a g <<<"$bline"
+            [[ $idx -lt ${#g[@]} ]] || return 1
+            printf '%s' "${g[$idx]:6:2}${g[$idx]:4:2}${g[$idx]:2:2}${g[$idx]:0:2}"
+        }
+        # The eight pairs, in vector order: the trampoline's handler literal and the symbol it must
+        # hold. The seventh and eighth are `fleh_irq`/`fleh_decirq`; `fleh_decirq` is this image's
+        # because `__ARM_TIME__` is off and locore's slot for it is `mov pc, r9`.
+        local -a x467_want=(
+            "0 fleh_reset" "1 fleh_undef" "2 fleh_swi" "3 fleh_prefabt"
+            "4 locore_fleh_dataabt" "5 fleh_addrexc" "6 fleh_irq" "7 fleh_decirq" )
+        vbase=$(x467_addr_of ExceptionVectorsBase)
+        [[ -n $vbase ]] || layout_fail "the image has no ExceptionVectorsBase, so the vector page cannot be checked"
+        vpair=""
+        for (( i = 0; i < ${#x467_want[@]}; i++ )); do
+            read -r n sym <<<"${x467_want[$i]}"
+            veclit=$(x467_addr_of "vec_tramp_${n}_handler")
+            [[ -n $veclit ]] ||
+                layout_fail "the image has no vec_tramp_${n}_handler literal, so slot $n's target cannot be read - fix the check rather than deleting it"
+            # The literal must be inside the one page that is mapped at 0xffff0000.
+            (( 0x$veclit >= 0x$vbase && 0x$veclit < 0x$(printf '%08x' $(( 0x$vbase + 0x1000 ))) )) ||
+                layout_fail "vec_tramp_${n}_handler is at 0x$veclit, outside the vector page (0x$vbase..+0x1000), so reading it does not read the slot this check is about"
+            want=$(x467_addr_of "$sym")
+            [[ -n $want ]] || layout_fail "the image has no '$sym', so slot $n's intended handler cannot be resolved"
+            got=$(x467_word_at "$veclit") ||
+                layout_fail "the 4 bytes at vec_tramp_${n}_handler (0x$veclit) could not be read out of the ELF"
+            if [[ $got != "$want" ]]; then
+                bad=1
+                say "FAIL: vector slot $n carries 0x$got and not $sym (0x$want)" >&2
+            fi
+            vpair+=" slot$n=$sym"
+        done
+        if (( bad == 1 )); then
+            layout_fail "a vector slot's handler literal is not the handler it is written to be - the vector page is not what entry_vectors.s says it is, and no run can show that"
+        fi
+        got=$(x467_addr_of fleh_dataabt)
+        [[ -n $got ]] || layout_fail "the image has no fleh_dataabt, so the one-slot claim below cannot be checked"
+        if [[ "$(x467_word_at "$(x467_addr_of vec_tramp_4_handler)")" == "$got" ]]; then
+            layout_fail "vector slot 4 still carries this image's fleh_dataabt (0x$got): the data abort is being recorded and dropped again, which is exactly the stop 466's run measured"
+        fi
+        say "  xnu_entry_467: the vector page carries the handlers it says it does:$vpair; slot 4 is Apple's locore_fleh_dataabt and not this image's fleh_dataabt (0x$got), and slot 1 (fleh_undef) is still this image's - so a fault the kernel cannot service still reaches the trap's own buffer through panic()'s udf"
+    }
     # **The by-address claim, read out of the image.** The table is
     # `struct console_ops { void (*putc)(int,int,int); int (*getc)(int,int,boolean_t,boolean_t); }`
     # (`osfmk/console/serial_protos.h:63-66`), `cons_ops[]` is

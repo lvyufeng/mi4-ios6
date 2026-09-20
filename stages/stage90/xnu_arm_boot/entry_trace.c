@@ -1448,3 +1448,51 @@ void *__wrap__ZN9IOService22waitForMatchingServiceEP12OSDictionaryy(void *matchi
                       (uint32_t)(uintptr_t)r);
     return r;
 }
+
+/* --------------------------------------------------- 467: the kernel's own abort handler */
+/*
+ * `void sleh_abort(struct arm_saved_state *regs, int type)` - `osfmk/arm/trap.c:274`, the second
+ * level of XNU's abort path, called once per abort from `locore.s:1140` (`dataabt_from_kernel`) and
+ * from the three other abort entries. 467 is the step that gave slot 4 of the vector page to Apple's
+ * own first-level handler (`locore_fleh_dataabt`, `entry_vectors.s`), so this call is where the
+ * kernel *decides* what a data abort means: return - the page was paged in and the faulting
+ * instruction is retried - or do not return, because it panicked or re-entered itself.
+ *
+ * **`regs` is taken as an opaque pointer, and the two fault numbers are read from cp15 instead of from
+ * the frame.** Neither file on this side of the image has an XNU header (`<stdint.h>` is the whole
+ * include list of both `entry_stubs.c` and this one), so `struct arm_saved_state`'s layout is not a
+ * thing either can name, and a locally re-declared copy of it would be the "one value, two
+ * definitions" hazard this project has paid for twenty-four times over. It is not needed: DFSR and
+ * FAR are still what they were when the abort was taken - `locore.s` reads them with `mrc` and
+ * nothing between that and this call writes either register - so the two numbers `sleh_abort` itself
+ * is about to read are available without knowing anything about the frame. What that costs is the
+ * faulting PC, which this record does not carry; a fault at the same address is the same fault, and
+ * FAR is what says so.
+ *
+ * `type` is `T_DATA_ABT` (1) for every entry that can reach here, because the other abort vectors are
+ * still the instrument's handlers - recorded anyway, so that a later step that gives away another
+ * slot moves a number in the log rather than a sentence in a document.
+ *
+ * Nothing is changed: the real handler runs with the same arguments. The record is written before it,
+ * so a handler that never returns has still reported what it was given, and `_back` afterwards is
+ * what makes "returned" a separate reading from "entered".
+ */
+extern void entry_note_sleh(uint32_t type, uint32_t dfsr, uint32_t dfar, uint32_t thread);
+extern void entry_note_sleh_back(void);
+
+void __real_sleh_abort(void *regs, int type);
+
+void __wrap_sleh_abort(void *regs, int type)
+{
+    uint32_t dfsr, dfar, thread;
+
+    __asm__ volatile ("mrc p15, 0, %0, c5, c0, 0" : "=r"(dfsr));
+    __asm__ volatile ("mrc p15, 0, %0, c6, c0, 0" : "=r"(dfar));
+    __asm__ volatile ("mrc p15, 0, %0, c13, c0, 4" : "=r"(thread));
+
+    entry_note_sleh((uint32_t)type, dfsr, dfar, thread);
+
+    __real_sleh_abort(regs, type);
+
+    entry_note_sleh_back();
+}

@@ -74,7 +74,35 @@ ExceptionVectorsBase:
     VECTOR_TRAMP vec_tramp_1, fleh_undef
     VECTOR_TRAMP vec_tramp_2, fleh_swi
     VECTOR_TRAMP vec_tramp_3, fleh_prefabt
-    VECTOR_TRAMP vec_tramp_4, fleh_dataabt
+/*
+ * **467: the data abort slot is XNU's own handler, and it is the one slot that is not this file's.**
+ *
+ * The other seven branch to `entry_stubs.c`'s handlers, whose design is to record and leave - which
+ * is what a fault deserves when the fault *is* the end of the run, and what every step since 236 has
+ * used them for. 466's run produced the other kind. Its stop was `copyout`'s first store to the page
+ * `load_init_program` had just allocated (`dfar=0x1000`, `dfsr=0x805`), which is the demand fault
+ * `vm_fault` exists to answer: XNU's own `fleh_dataabt` (`osfmk/arm/locore.s:992`) reads the fault,
+ * calls `sleh_abort(regs, T_DATA_ABT)` and - when the page is paged in - returns through
+ * `load_and_go_sys`, which **retries the instruction**. Recording that fault instead of answering it
+ * is what stopped the boot one statement into `load_init_program_at_path`.
+ *
+ * So this slot is `locore_fleh_dataabt`, the renamed copy of Apple's handler that 466 linked
+ * (`locore_` because the twelve names it collides with are this image's own vector glue), and the
+ * consequence is deliberate: a data abort in this image is now the kernel's decision and not a stop.
+ *
+ * **What keeps the report is that XNU's fatal paths end in an undefined instruction.** A `sleh_abort`
+ * that cannot answer the fault panics (`trap.c:313`, `:393`, `:464`), and `panic()` reaches
+ * `DebuggerTrapWithState`'s `udf`, which is slot 1 - still this file's handler, still writing the
+ * trap's own buffer. That is the route 461 measured when it named the trap it was stuck on, and it
+ * is why this slot can change without the image going silent about a fault that is genuinely fatal.
+ * The measurement of what the kernel *decided* is `--wrap=sleh_abort` (`entry_trace.c`), one record
+ * per entry and one per return.
+ *
+ * The stack load above is kept even though XNU's handler switches to SVC mode on both of its paths
+ * and never dereferences this banked SP: it costs two words, and a slot whose trampoline is
+ * different from the other seven is a slot that will be misread the next time this file is edited.
+ */
+    VECTOR_TRAMP vec_tramp_4, locore_fleh_dataabt
     VECTOR_TRAMP vec_tramp_5, fleh_addrexc
     VECTOR_TRAMP vec_tramp_6, fleh_irq
     VECTOR_TRAMP vec_tramp_7, fleh_decirq
