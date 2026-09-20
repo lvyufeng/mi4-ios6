@@ -66,6 +66,23 @@ fi
 
 CONFIG=${1:-${XNU_KERNEL_CONFIG:-RELEASE}}
 
+# **The list is read once, into a variable, and the loop below iterates over that (488).** The form
+# this replaces was `done < <("$HERE/make_defines.sh" "$CONFIG")`, which is the defect class this
+# project keeps meeting in a new place: when the expansion *fails*, a process substitution hands the
+# loop nothing, the loop runs zero times, and the script exits 0 having printed no defines - so the
+# caller assembles a whole ARM layer with none of the configuration's options and nothing says so.
+# Reading it once also makes the emptiness testable, and the exit status of the expansion is now seen
+# rather than discarded.
+if ! defines=$("$HERE/make_defines.sh" "$CONFIG"); then
+    echo "arm_asm_defines.sh: make_defines.sh failed for $CONFIG" >&2
+    exit 1
+fi
+if [[ -z $defines ]]; then
+    echo "arm_asm_defines.sh: $CONFIG expanded to no options at all" >&2
+    echo "  assembling with an empty list is a wrong-options build that no later stage reports" >&2
+    exit 1
+fi
+
 while IFS= read -r d; do
     [[ -n $d ]] || continue
     skip=0
@@ -73,11 +90,10 @@ while IFS= read -r d; do
         [[ $d == -D$e=* || $d == -D$e ]] && skip=1
     done
     [[ $skip -eq 0 ]] && printf '%s\n' "$d"
-done < <("$HERE/make_defines.sh" "$CONFIG")
+done <<<"$defines"
 
 # The exceptions are a claim about the configuration, so it is checked here: dropping a name that
 # the configuration no longer sets would silently stop the filter from doing anything.
-defines=$("$HERE/make_defines.sh" "$CONFIG")
 for e in "${ARM_ASM_EXCEPTIONS[@]}"; do
     if ! grep -q -- "-D$e=" <<<"$defines" && ! grep -qw -- "-D$e" <<<"$defines"; then
         echo "arm_asm_defines.sh: exception '$e' is not an option of $CONFIG" >&2

@@ -329,10 +329,23 @@ FORCE_INCLUDES=(
 # The configuration's own options, expanded from MASTER via the doconf pipeline. These are the
 # values Apple's build would have; the block below is only the flags that configure the *toolchain*
 # and the two that resolve collisions the config cannot express.
+# **488: read once, with the status seen.** The form this replaces was `done < <(...)`, and a process
+# substitution hides its command's failure: the loop then runs zero times and the whole kernel is
+# compiled with none of the configuration's options, silently. This script was the *lucky* caller - it
+# passes `XNU_MASTER_LOCAL` through, so its expansion did not fail - and the three that were not are
+# what experiment 488 is about. The ordinary `while read` over a here-string is the house form now.
 CONFIG_DEFINES=()
+if ! defines=$("$TOOLS_DIR/xnu_config/make_defines.sh" "$CONFIG"); then
+    echo "build_xnu_arm_kernel.sh: make_defines.sh failed for $CONFIG" >&2
+    exit 1
+fi
+if [[ -z $defines ]]; then
+    echo "build_xnu_arm_kernel.sh: $CONFIG expanded to no options - refusing to compile without them" >&2
+    exit 1
+fi
 while IFS= read -r d; do
     [[ -n $d ]] && CONFIG_DEFINES+=("$d")
-done < <("$TOOLS_DIR/xnu_config/make_defines.sh" "$CONFIG")
+done <<<"$defines"
 
 DEFINES=(
     "${CONFIG_DEFINES[@]}"

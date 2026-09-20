@@ -67,10 +67,20 @@ CONFIG=${XNU_KERNEL_CONFIG:-RELEASE}
 # assembler the toolchain flags only - so `#if CONFIG_TELEMETRY` and friends in the tree's `.s` files
 # were false while the same macros were 1 in every C object. The one source for them is
 # `tools/xnu_config/arm_asm_defines.sh`; see it for the measurements and for the one exception.
+# **488: read once, with the status seen**, for the reason `tools/assemble_arm_layer.sh` records at its
+# own copy of this loop: a process substitution hides the failure that matters most here.
 CONFIG_DEFINES=()
+if ! defines=$("$REPO_ROOT/tools/xnu_config/arm_asm_defines.sh" "$CONFIG"); then
+    echo "xnu_arm_assemble.sh: arm_asm_defines.sh failed for $CONFIG" >&2
+    exit 1
+fi
+if [[ -z $defines ]]; then
+    echo "xnu_arm_assemble.sh: $CONFIG expanded to no options - refusing to assemble without them" >&2
+    exit 1
+fi
 while IFS= read -r d; do
     [[ -n $d ]] && CONFIG_DEFINES+=("$d")
-done < <("$REPO_ROOT/tools/xnu_config/arm_asm_defines.sh" "$CONFIG")
+done <<<"$defines"
 OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
 if [[ ! -f $OPTION_HEADERS/mach_kdp.h ]]; then
   echo "no $OPTION_HEADERS/mach_kdp.h - run ./tools/gen_option_headers.py first" >&2

@@ -44,10 +44,23 @@ CONFIG=${XNU_KERNEL_CONFIG:-RELEASE}
 # The configuration's own options, which this script did not use to pass at all - see
 # `tools/xnu_config/arm_asm_defines.sh` for what that cost and for the one exception. The toolchain
 # flags below are the assembler's; these are the kernel's.
+# **488: read once, with the status seen.** The form this replaces was `done < <(...)`, and a process
+# substitution hides its command's failure: when the expansion fails, the loop runs zero times, the
+# script assembles every file with none of the configuration's options, and nothing says so. That is
+# exactly the defect 488 chased into `locore.o` - the object that stopped the boot - so both consumers
+# of this list now fail loudly instead of quietly getting `CONFIG_DEFINES=()`.
 CONFIG_DEFINES=()
+if ! defines=$("$REPO_ROOT/tools/xnu_config/arm_asm_defines.sh" "$CONFIG"); then
+    echo "assemble_arm_layer.sh: arm_asm_defines.sh failed for $CONFIG" >&2
+    exit 1
+fi
+if [[ -z $defines ]]; then
+    echo "assemble_arm_layer.sh: $CONFIG expanded to no options - refusing to assemble without them" >&2
+    exit 1
+fi
 while IFS= read -r d; do
     [[ -n $d ]] && CONFIG_DEFINES+=("$d")
-done < <("$REPO_ROOT/tools/xnu_config/arm_asm_defines.sh" "$CONFIG")
+done <<<"$defines"
 OUT=${XNU_ASM_OBJ:-$REPO_ROOT/out/xnu_asm_obj}
 ASSYM=${XNU_ASSYM_OUT:-$REPO_ROOT/out/xnu_assym}/$CONFIG
 OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG

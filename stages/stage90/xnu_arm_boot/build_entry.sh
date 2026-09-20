@@ -28118,5 +28118,25 @@ run python3 "$REPO_ROOT/tools/check_driver_plane_census.py" --image "$OUT/xnu_ar
     || exit 1
 run python3 "$REPO_ROOT/tools/check_driver_plane_census.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
     || exit 1
+
+#
+# **And 488's, which is about the one thing a build like this cannot see: whether the ARM assembly was
+# given the configuration the C was.** `locore.s` consults `CONFIG_SKIP_PRECISE_USER_KERNEL_TIME` at nine
+# sites; with it unset `return_to_user_now` calls `timer_state_event_kernel_to_user`, and this
+# configuration's value keeps that function out of `machine_routines.c`, so the call becomes an undefined
+# symbol that this build's generated stub answers - terminally, at the first return to user mode. The
+# symptom is a log byte-identical to a good one up to `attempting to load /sbin/launchd`, with process 1
+# never running and nothing saying why (experiment 487's run). The cause was that `XNU_MASTER_LOCAL` was
+# the caller's business: without it an undeclared configuration expands to ten always-on options, and the
+# ARM layer got those ten while the C got 110. Three layers now refuse it (`select_master.sh` finds the
+# fragment by convention, `expand.sh` refuses an undeclared name, `arm_asm_defines.sh` refuses an empty
+# list instead of handing its caller nothing), and this check is the one that reads the *result*: the
+# expansion is the declaration it is composed from, the assembly's flag list is the configuration's minus
+# the names `--exceptions` prints and nothing else, and neither assembled `locore.o` - the kernel layer's
+# and this image's own - calls either guarded function while both take the telemetry branch the same
+# `#if` selects. It reads the kernel layer's object, which `tools/assemble_arm_layer.sh` writes, so it
+# fails on a build whose step 2 predates the fix rather than quietly linking that object.
+run python3 "$REPO_ROOT/tools/check_asm_config.py" --verbose || exit 1
+run python3 "$REPO_ROOT/tools/check_asm_config.py" --selftest || exit 1
 say "the payload build reads the .bin from there directly; nothing to install"
 

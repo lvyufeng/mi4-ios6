@@ -54,10 +54,21 @@ MIG_HEADERS=${MIG_HEADERS:-$REPO_ROOT/out/mach_headers}
 
 mkdir -p "$OUT"
 
+# **488: read once, with the status seen.** `done < <(...)` hides the expansion's failure and leaves an
+# empty list, which assembles the whole ARM layer with none of the configuration's options - the defect
+# this step exists to not reproduce. See `tools/xnu_config/arm_asm_defines.sh`.
 CONFIG_DEFINES=()
+if ! defines=$("$TOOLS_DIR/xnu_config/make_defines.sh" "$CONFIG"); then
+    echo "gen_assym.sh: make_defines.sh failed for $CONFIG" >&2
+    exit 2
+fi
+if [[ -z $defines ]]; then
+    echo "gen_assym.sh: $CONFIG expanded to no options - refusing to generate constants without them" >&2
+    exit 2
+fi
 while IFS= read -r d; do
     [[ -n $d ]] && CONFIG_DEFINES+=("$d")
-done < <("$TOOLS_DIR/xnu_config/make_defines.sh" "$CONFIG")
+done <<<"$defines"
 
 # The same values build_xnu_arm_kernel.sh uses, and for the same reasons — see that script. Kept in
 # step by intent rather than by construction, which is the one place in this pipeline where a
