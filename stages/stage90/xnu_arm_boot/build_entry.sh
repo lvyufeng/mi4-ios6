@@ -129,7 +129,8 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=_ZN11IOCatalogue11findDriversEP9IOServicePl
                    --wrap=vcputc --wrap=uart_putc
                    --wrap=_ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_
-                   --wrap=mdevadd --wrap=mdevlookup)
+                   --wrap=mdevadd --wrap=mdevlookup
+                   --wrap=_ZN9IOService22waitForMatchingServiceEP12OSDictionaryy)
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
 # every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that
@@ -25991,6 +25992,41 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$STAGE90_PLATFORM_EXPERT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first (its platform block compiles stages/stage90/xnu_platform/MSM8974PlatformExpert.cpp)"
     require "$STAGE90_ROOT_RESOURCE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first (its platform block compiles stages/stage90/xnu_platform/MSM8974RootResource.cpp)"
+    # =============================================================================================
+    # **463: an object this link consumes is *compiled somewhere else*, so `require` is not enough.**
+    #
+    # `require` above proves the platform objects exist; it says nothing about whether they are the
+    # ones this checkout's sources describe. They are the only inputs to this link that this script
+    # does not compile - `tools/build_xnu_arm_kernel.sh`'s platform block does - so editing
+    # `MSM8974PlatformExpert.cpp` and running this script alone links the *previous* object, and the
+    # run that follows reports on the source you did not build. That is what happened here: 463's
+    # first run had no `xnu_live_pexpert_self` record at all, which read as "the end of `start` was
+    # never reached" and was in fact "the edit was never compiled" - the same shape as 460's stale
+    # blob, where a tool that reads a generated input answered confidently about the old one.
+    #
+    # So the two ends are compared, and this is the same rule 460 put into `tools/xnu_dt_walk.py`:
+    # **a build that reads an input it does not produce must compare ages with it.** It fails rather
+    # than warns, because the failure mode is silent and the run costs a device boot.
+    platform_obj_fresh() {
+        local obj="$1" src="$2"
+        [[ $obj -nt $src ]] && return 0
+        say "  $obj is not newer than $src" >&2
+        say "  the platform block compiles it - run:" >&2
+        say "    XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local ./tools/build_xnu_arm_kernel.sh --platform-only" >&2
+        exit 2
+    }
+    platform_obj_fresh "$STAGE90_PLATFORM_EXPERT_OBJ" "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974PlatformExpert.cpp"
+    platform_obj_fresh "$STAGE90_ROOT_RESOURCE_OBJ" "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974RootResource.cpp"
+    platform_obj_fresh "$REPO_ROOT/out/xnu_platform_obj/stage90_platform_config_tables.o" \
+                       "$REPO_ROOT/stages/stage90/xnu_platform/stage90_platform_config_tables.c"
+    # **What this rule does not cover, said rather than left to look complete.** The other three
+    # objects in that directory are `stages/stage90/xnu_supply/stage90_pthread_functions.c`,
+    # `.../stage90_crypto_functions.c` - sources in a *different* directory, which this check could be
+    # extended to with one more path each - and `stage90_pseudo_inits.o`, whose source
+    # `tools/gen_pseudo_inits.py` *generates*, so its freshness is a question about the generator's own
+    # inputs (`config/MASTER`, the device tables) and is answered by 439's disagreement check, not by
+    # an `-nt` comparison against a file that is itself output.
+    say "  xnu_entry_463: the three out/xnu_platform_obj inputs this script links are newer than the sources that describe them"
     require "$IOKIT_KERNEL_IOMAPPER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$IOKIT_KERNEL_IORANGEALLOCATOR_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$LIBKERN_UUID_UUID_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
@@ -26841,11 +26877,32 @@ verify_trace_symbols() {
              _ZN15IORegistryEntry15getRegistryRootEv \
              _ZNK15IORegistryEntry13getChildEntryEPK15IORegistryPlane \
              _ZNK15IORegistryEntry20getChildSetReferenceEPK15IORegistryPlane \
-             _ZNK15IORegistryEntry13getChildCountEPK15IORegistryPlane; do
+             _ZNK15IORegistryEntry13getChildCountEPK15IORegistryPlane \
+             _ZNK12OSDictionary9getObjectEPKc \
+             _ZN11OSMetaClass20getMetaClassWithNameEPK8OSSymbol \
+             _ZN11OSMetaClass27applyToInstancesOfClassNameEPK8OSSymbolPFbPK8OSObjectPvES6_ \
+             _ZNK11OSMetaClass12getClassNameEv \
+             _ZNK9IOService8getStateEv _ZN9IOService18getResourceServiceEv; do
         grep -qx "$s" "$OUT/xnu_arm_entry_undef.txt" &&
             layout_fail "the instrument calls $s and the pass-1 undefined set contains it - nothing in this image defines that name, so the generator stubbed it and the probe would call the stub instead of XNU's own function. Check the spelling against \`nm\` on the image (a mangled name that is one character wrong links, silently)"
     done
-    say "  xnu_entry_461/462: getProperty, getBytesNoCopy, fromPath, getRegistryRoot, getChildEntry, getChildSetReference and getChildCount are defined by this image rather than stubbed for it"
+    say "  xnu_entry_461/462/463: getProperty, getBytesNoCopy, fromPath, getRegistryRoot, getChildEntry, getChildSetReference, getChildCount, OSDictionary::getObject, getMetaClassWithName, applyToInstancesOfClassName, OSMetaClass::getClassName, IOService::getState and getResourceService are defined by this image rather than stubbed for it"
+
+    # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls
+    # `_ZNK9IOService8getStateEv` by mangled name on objects whose dynamic type this file cannot know -
+    # whatever the `IOPlatformExpert` metaclass's instance walk yields. That is only correct if
+    # `IOService::getState` is the *only* implementation, because a subclass that overrode it would
+    # mean the instrument reads the base's `__state[0]` on an object where the override meant
+    # something else. The source says one: `grep -rn 'getState( void ) const'` over the whole tree
+    # finds `iokit/IOKit/IOService.h:499` and nothing else. The image is what says it *linked* that way,
+    # and a name that is one character wrong would be a defined-but-different symbol, which the loop
+    # above already rejects on membership; this one rejects a *second* definition, which membership
+    # cannot see.
+    local nstate
+    nstate=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | grep -c '8getStateEv$' || true)
+    [[ ${nstate:-0} == 1 ]] ||
+        layout_fail "the image defines ${nstate:-0} symbols ending in '8getStateEv'; 463's instance walk calls IOService::getState by mangled name on objects of unknown dynamic type, so a second implementation (a subclass override) would make the recorded __state[0] the base's field while the override decided the match - fix the check or the call, do not delete it"
+    say "  xnu_entry_463: exactly one getState implementation in the image, so the walk's recorded state word is the one the match's own test reads"
 
 
     # **Every `--wrap=` has to be reachable, and that is a property of the linked image.**
@@ -26874,8 +26931,14 @@ verify_trace_symbols() {
     # <__wrap_iokit_post_constructor_init>`), and the first version of this check counted only `bl`,
     # so it called a reachable wrapper unreachable - a check is an instrument too.
     local dis wrap sym n dead=() only=() uncalled=() addr=()
+    # `copyExistingServices` was on this list from 455 to 462, and 463 is what moved it off: the OS's
+    # own call to it is inside `IOService.cpp` and can never be wrapped, so the wrapper was dead by
+    # construction for eight steps - and 463's probe calls the same mangled name from `entry_trace.c`,
+    # which *is* an undefined reference. It is removed rather than left here, because a name on this
+    # list is exempt from the check below: leaving it would make the next relink that loses the branch
+    # silent about the predicate records this step reads. `matchPassive` stays - the plane search still
+    # reaches it only from inside `IOService.cpp`.
     local same_object=(
-        _ZN9IOService20copyExistingServicesEP12OSDictionarymm
         _ZN9IOService12matchPassiveEP12OSDictionaryj )
     local never_called=( sleep )
     # The fourth reading, added by 458 and **checked rather than listed**: a symbol the image

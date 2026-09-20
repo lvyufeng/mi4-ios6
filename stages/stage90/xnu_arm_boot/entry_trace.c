@@ -1196,3 +1196,255 @@ int __wrap_mdevlookup(int devid)
     entry_note_mdevlookup(caller, (uint32_t)devid, (uint32_t)r);
     return r;
 }
+
+/* ------------------------------------------------- the wait's own predicate (463) */
+/*
+ * 462 ended with a proof and two candidates. The proof: `IOSecureBSDRoot` (`IOKitBSDInit.cpp:664`) is
+ * the first statement after `bsd_init`'s mount loop breaks, so reaching it *is* `vfs_mountroot()`
+ * returning 0 - and the boot reaches it, prints `BSD root: md0, major 1, minor 0` and stops there.
+ * The candidates, both consistent with the source, neither ruled out: the registry set that
+ * `OSMetaClass::applyToInstancesOfClassName` walks, and the
+ * `inState == (service->__state[0] & inState)` bit test `IOService::instanceMatch` applies to every
+ * instance that walk yields.
+ *
+ * `waitForMatchingService` names its own predicate in its first four lines:
+ *
+ *     LOCKWRITENOTIFY();
+ *     result = (IOService *) copyExistingServices( matching, kIOServiceMatchedState, kIONotifyOnce );
+ *     if (result) break;
+ *     notify = IOService::setNotification( gIOMatchedNotification, matching, ... );
+ *
+ * and `copyExistingServices` (`IOService.cpp:4264`) is where the two candidates live, in this order:
+ *
+ *     1. `obj = matching->getObject(gIOProviderClassKey)` - the dictionary's class name.
+ *     2. `str = OSDynamicCast(OSString, obj)`; if that holds,
+ *        `OSMetaClass::applyToInstancesOfClassName(OSSymbol::withString(str), instanceMatch, &ctx)`
+ *        and *nothing at all* happens if the registry has no metaclass under that name or that
+ *        metaclass's `reserved->instances` set is empty - `applyToInstancesOfClassName` returns
+ *        before it calls the applier once (`OSMetaClass.cpp:919-936`).
+ *     3. `IOService::instanceMatch` (`IOService.cpp:4222`), the applier, which rejects an instance
+ *        first on `state == (state & service->__state[0])` and only then on `matchInternal`.
+ *     4. `ctx->done == ctx->count` - with `kIONotifyOnce` the *only* way the service is returned
+ *        instead of an `OSSet`.
+ *
+ * Five readings separate all of that, and each is XNU's own function called with the OS's own values:
+ *
+ *   `p4`/`p0`  the predicate itself, twice. The first is the wait's own call, argument for argument
+ *              (`inState = kIOServiceMatchedState = 0x4`). The second is the *same call* with
+ *              `inState = 0`, which disables exactly one clause: `instanceMatch`'s
+ *              `state == (state & __state[0])` is true for any state when `state` is 0, while the
+ *              `matchInternal` clause below it is untouched. So `p4 = 0, p0 != 0` **is** the state
+ *              bit, and `p4 = 0, p0 = 0` is somewhere upstream of it, with no reading of the states
+ *              needed to say which mechanism it was.
+ *   `sym`/`meta`  the dictionary's own `IOProviderClass` object, read out of the dictionary by
+ *              `OSDictionary::getObject(const char *)` so that the walk below uses **the OS's own
+ *              interned symbol** and not a string this file re-spells, and then
+ *              `OSMetaClass::getMetaClassWithName(sym)`. `meta = 0` is "the name is not in the
+ *              metaclass registry"; `sym = 0` is "the dictionary has no `IOProviderClass` key at
+ *              all", which would send `copyExistingServices` down its `IOService::gMetaClass.apply-
+ *              ToInstances` branch instead - the whole of `IOService` rather than one class.
+ *   `seen`/`inst`/`state`  `applyToInstancesOfClassName` called by the instrument with **its own**
+ *              applier, which counts every instance, records the first `ENTRY_WCLS_MAX` of them with
+ *              `IOService::getState()` - `__state[0]` through the tree's only implementation of
+ *              `getState` (`IOService.h:499`, one `ldr r0, [r0, #36]`, a fact `build_entry.sh` already
+ *              checks) - and returns false so the walk is not stopped early. `seen = 0` with a
+ *              non-zero `meta` is the reading that is *neither* of 462's two candidates: the metaclass
+ *              exists and has no instances, and `OSMetaClass::addInstance` has exactly one caller in
+ *              this tree, `IOService::registerService` (`IOService.cpp:3694`).
+ *
+ * **The instrument calls `copyExistingServices` without `gNotificationLock`**, and that is a
+ * deviation from the function's own contract ("internal - call with gNotificationLock",
+ * `IOService.cpp:4262`) which the real path honours: `waitForMatchingService` takes it two lines
+ * above. It is taken deliberately and the reason is stated rather than implied. First, the lock cannot
+ * be named here at all: `gNotificationLock` is `static` in `IOService.cpp:178`, so the only route
+ * would be to abandon the measurement. Second, what the lock buys at that point is the atomicity of
+ * *check then register* - `copyExistingServices` reads the instance registry, which is protected by
+ * `sAllClassesLock`/`sInstancesLock` inside `applyToInstancesOfClassName` and by nothing to do with
+ * `gNotificationLock` - and the probe does not register anything. Third, the probe cannot be
+ * interleaved by another thread on this image, because it has no blocking point: there is no timer in
+ * it (the step list still owes `ml_init_timebase`), so nothing preempts, and a thread switch needs an
+ * explicit block, of which the two reads and the walk have none on a *failing* predicate. Fourth and
+ * last, the probe's only side effect when the predicate *succeeds* is one `retain` on the object it
+ * found - which `copyExistingServices` does itself, in the same place, for the same reason.
+ *
+ * The duplicate call does not change what the boot measures, and that is structural rather than
+ * argued: the real call is made two instructions later with the same dictionary and the same
+ * arguments, so any answer the probe gets the real call gets too. **The probe cannot make the wait
+ * succeed** - it would have to change `__state[0]`, and nothing here writes it.
+ */
+extern void entry_note_wmatch(uint32_t ent, uint32_t caller, uint32_t dict, uint32_t to_lo,
+                              uint32_t to_hi, uint32_t ret);
+extern void entry_note_wsvc(uint32_t dict, uint32_t sym, uint32_t p4, uint32_t p0);
+extern void entry_note_wcls_begin(uint32_t sym, uint32_t meta, uint32_t rsvc, uint32_t name0,
+                                  uint32_t name1);
+extern void entry_note_winst(uint32_t inst, uint32_t state);
+extern void entry_note_wcls_end(void);
+
+/* XNU's own functions under their mangled names - declarations, not wrappers: nothing in this file
+ * changes what they do. `getState` is `virtual` (`IOService.h:499`) and `getObject(const char *)` and
+ * `getMetaClassWithName` are members of classes whose vtable or static dispatch a C file cannot spell,
+ * so being *called* by mangled name is the only way in - 455's measurement, 461's method.
+ *
+ * Every one of them is checked against the image's pass-1 undefined list by `build_entry.sh`: a
+ * mangled name is a spelling, the generator synthesises a stand-in for anything undefined, and a
+ * misspelling therefore links and then reports a hit that looks like a finding about the device. */
+extern void *entry_xnu_dict_get_object(const void *dict, const char *key)
+    __asm__("_ZNK12OSDictionary9getObjectEPKc");
+extern void *entry_xnu_metaclass_with_name(const void *sym)
+    __asm__("_ZN11OSMetaClass20getMetaClassWithNameEPK8OSSymbol");
+extern unsigned int entry_xnu_get_state(const void *service)
+    __asm__("_ZNK9IOService8getStateEv");
+extern void *entry_xnu_get_resource_service(void)
+    __asm__("_ZN9IOService18getResourceServiceEv");
+
+/*
+ * `OSMetaClass::getClassName()`, **non-virtual** (`OSMetaClass.h:1606`) and therefore safe to call on a
+ * metaclass whose dynamic type this file does not know - which is what turns `meta`, a pointer, into
+ * the name of a class *in the log*: a metaclass pointer alone is a number a reader has to go and look
+ * up in the image with `nm`, and this project's rule since 461 is that a pointer in the log is worth
+ * nothing unless the log also says what it is. The implementation is
+ * `return className->getCStringNoCopy();` (`OSMetaClass.cpp:526`), so the string is the *interned*
+ * symbol the registry was keyed by, and it is NULL only when the metaclass has no class name.
+ */
+extern const char *entry_xnu_metaclass_name(const void *meta)
+    __asm__("_ZNK11OSMetaClass12getClassNameEv");
+
+/*
+ * `OSMetaClass::applyToInstancesOfClassName(const OSSymbol *, OSMetaClassInstanceApplierFunction,
+ * void *)`, called by mangled name with **this file's** function as the applier - which is what makes
+ * the walk a reading rather than a re-derivation: the set walked, the lock taken around it and the
+ * recursion into nested subclass sets are XNU's, and all this adds is what to do with each instance.
+ *
+ * The applier's return type is `unsigned char` and not `int`, and that is the ABI rather than a style.
+ * XNU's `OSMetaClassInstanceApplierFunction` is `bool (*)(const OSObject *, void *)`
+ * (`OSMetaClass.h:828`), and XNU's `applyToInstances` assigns the call's result to a `bool` to decide
+ * whether to stop. AAPCS returns a `bool` zero-extended in r0, which is what an `unsigned char` return
+ * does as well and what an `int` return also does *for the two values this function returns* - so the
+ * two are the same call here, and `unsigned char` is the one that says so without a caveat. Returning
+ * `true` would stop the walk at the first instance, which is why the return is written as a literal
+ * `0u` with this comment next to it.
+ */
+typedef unsigned char (*entry_applier_t)(const void *instance, void *context);
+extern void entry_xnu_class_instances(const void *sym, entry_applier_t applier, void *context)
+    __asm__("_ZN11OSMetaClass27applyToInstancesOfClassNameEPK8OSSymbolPFbPK8OSObjectPvES6_");
+
+/* 455's wrapper, and this is the first step that reaches it: `copyExistingServices` is called *inside*
+ * `IOService.cpp`, so the OS's own call can never be wrapped (455's negative result, measured), and it
+ * is this file's reference to the mangled name that is undefined and therefore renamed - which is how
+ * the two predicate records get their `in_state` and their answer for free. */
+extern void *entry_xnu_copy_existing(const void *matching, uint32_t in_state, uint32_t options)
+    __asm__("_ZN9IOService20copyExistingServicesEP12OSDictionarymm");
+
+/* The dictionary key the OS's own matcher reads the class name from (`IOService.cpp:4285`). */
+static const char entry_kProviderClassKey[] = "IOProviderClass";
+
+/*
+ * Up to eight bytes of a string as two words, **stopping at the terminator** - so, unlike
+ * `entry_str_word` above, this one is safe on a string it did not size, which the class name is:
+ * `getClassName` hands back an interned symbol's own storage, whose length this file cannot know, and
+ * a four-byte read on a three-letter class name would read past it. The bytes after the terminator are
+ * left zero, which makes a short name read as itself in the log rather than as a truncation.
+ */
+static void entry_str8(const char *s, uint32_t *w0, uint32_t *w1)
+{
+    uint32_t lo = 0u;
+    uint32_t hi = 0u;
+    unsigned i;
+
+    for (i = 0u; s != 0 && i < 8u && s[i] != '\0'; i++) {
+        if (i < 4u) {
+            lo |= (uint32_t)(unsigned char)s[i] << (i * 8u);
+        } else {
+            hi |= (uint32_t)(unsigned char)s[i] << ((i - 4u) * 8u);
+        }
+    }
+    *w0 = lo;
+    *w1 = hi;
+}
+
+static unsigned char entry_wcls_applier(const void *instance, void *context)
+{
+    (void)context;
+    entry_note_winst((uint32_t)(uintptr_t)instance,
+                     (uint32_t)entry_xnu_get_state(instance));
+    return 0u;   /* false: keep walking - `true` would stop the walk at the first instance */
+}
+
+/*
+ * The predicate and the class lookup, for one dictionary. Called once per `waitForMatchingService`
+ * entry, before the real call, so every reading is of the state that call is about to see.
+ *
+ * The two `copyExistingServices` calls come first, in that order, because the pair is the step's
+ * result and the walk below is what says *where* in the chain the failure sits. `p0`'s answer may be
+ * non-NULL - that is the finding, not a fault - and when it is, the instance it found has been
+ * retained once by XNU's own code path (*not* by this file), which is exactly what the real call does
+ * with an instance it returns.
+ */
+static void entry_probe_wait(void *matching)
+{
+    void *sym;
+    void *meta = 0;
+    void *p4;
+    void *p0;
+    uint32_t name0 = 0u;
+    uint32_t name1 = 0u;
+
+    p4 = entry_xnu_copy_existing(matching, 4u /* kIOServiceMatchedState */, 1u /* kIONotifyOnce */);
+    p0 = entry_xnu_copy_existing(matching, 0u, 1u);
+
+    sym = entry_xnu_dict_get_object(matching, entry_kProviderClassKey);
+    entry_note_wsvc((uint32_t)(uintptr_t)matching, (uint32_t)(uintptr_t)sym,
+                    (uint32_t)(uintptr_t)p4, (uint32_t)(uintptr_t)p0);
+
+    if (sym == 0) {
+        return;
+    }
+
+    meta = entry_xnu_metaclass_with_name(sym);
+    if (meta != 0) {
+        entry_str8(entry_xnu_metaclass_name(meta), &name0, &name1);
+    }
+    entry_note_wcls_begin((uint32_t)(uintptr_t)sym, (uint32_t)(uintptr_t)meta,
+                          (uint32_t)(uintptr_t)entry_xnu_get_resource_service(), name0, name1);
+    if (meta != 0) {
+        entry_xnu_class_instances(sym, entry_wcls_applier, 0);
+    }
+    entry_note_wcls_end();
+}
+
+/*
+ * The wait. `IOService::waitForMatchingService(OSDictionary *, uint64_t)` is `IOService.h:792` - the
+ * argument list and types are the source's own, so the AAPCS register assignment is the same on both
+ * sides of the wrapper with nothing to spell differently: the pointer in r0, and the 64-bit timeout in
+ * **r2:r3**, because r1 is consumed and an eight-byte argument takes an even-numbered pair. The image
+ * confirms it rather than the rule being quoted: `IOSecureBSDRoot`'s call site builds
+ * `movw r2, #0xac00; movt r2, #0xfc23; mov r3, #6`, i.e. `0x6fc23ac00` = 30000000000 ns = the 30 s of
+ * `30ULL * kSecondScale`, and `waitForMatchingService` itself reads the pair from there.
+ *
+ * Two records per call and not one, for 454's reason: `ent = 0` is written before the real call and
+ * `ent = 1` after it, and this boot's last live record is an `ent = 0` - which is how "the wait began
+ * and never returned" becomes a line in the log instead of an absence of one.
+ *
+ * Nothing is changed: the real function runs with the same arguments and its result is returned as it
+ * came. The probe runs *before* it and not after, because a reading taken after a call that does not
+ * return is a reading that never happens.
+ */
+void *__real__ZN9IOService22waitForMatchingServiceEP12OSDictionaryy(void *matching, uint64_t timeout);
+void *__wrap__ZN9IOService22waitForMatchingServiceEP12OSDictionaryy(void *matching, uint64_t timeout)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    uint32_t to_lo = (uint32_t)timeout;
+    uint32_t to_hi = (uint32_t)(timeout >> 32);
+    void *r;
+
+    entry_note_wmatch(0u, caller, (uint32_t)(uintptr_t)matching, to_lo, to_hi, 0u);
+    if (matching != 0) {
+        entry_probe_wait(matching);
+    }
+
+    r = __real__ZN9IOService22waitForMatchingServiceEP12OSDictionaryy(matching, timeout);
+
+    entry_note_wmatch(1u, caller, (uint32_t)(uintptr_t)matching, to_lo, to_hi,
+                      (uint32_t)(uintptr_t)r);
+    return r;
+}

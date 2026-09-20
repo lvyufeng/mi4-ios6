@@ -237,6 +237,29 @@ MSM8974PlatformExpert::start( IOService * provider )
      * `throttle_init` (`bsd_init + 0x8`, key 0x8003A9FC). */
     ml_init_max_cpus( 1 );
 
+    /* Experiment 463. **This object's own identity and its state word, read at the end of `start`** -
+     * the two numbers the instance walk in the tracer compares against, and the reason that walk can
+     * name an instance without ever naming a class: `IOService::getState()`'s one implementation
+     * (`IOService.h:499`) returns `__state[0]`, and a walk over the `IOPlatformExpert` metaclass's
+     * instances that shows *this* pointer is a walk that found this object.
+     *
+     * The value is a **moment** and not a verdict, and the difference is the whole point of taking it
+     * here rather than anywhere else: `kIOServiceMatchedState` (0x4, `IOService.h:74`) is written by
+     * `copyNotifiers( gIOMatchedNotification, kIOServiceMatchedState, 0xffffffff )`
+     * (`IOService.cpp:3754`, whose body ends `__state[0] = (__state[0] | orNewState) & andNewState`),
+     * i.e. in `doServiceMatch` *after* `start` returns - so this reading is expected to *lack* bit 2
+     * even on a boot where the wait succeeds, and it is `kIOServiceRegisteredState` (0x2) that is the
+     * discriminating bit here: it is set inside `registerService` (`IOService.cpp:3702`), in the same
+     * two statements as `getMetaClass()->addInstance(this)` (`:3694`) - so **bit 1 set here would
+     * prove registration happened before this object's own start returned, and bit 1 clear with the
+     * walk's `seen` = 0 is the third candidate 462 did not name**: nothing in this tree registers an
+     * `IOPlatformExpert` (the only `registerService` callers are `IOStartIOKit.cpp:167`'s root nub -
+     * an `IOPlatformExpertDevice`, whose superclass is `IOService`, not `IOPlatformExpert` - the
+     * platform nubs at `IOPlatformExpert.cpp:205`/`:1306`, the NVRAM controller at `:1340`, and
+     * `gIOResources` at `IOService.cpp:3543`). */
+    entry_live_write( "xnu_live_pexpert_self", (uint32_t)(uintptr_t) this );
+    entry_live_write( "xnu_live_pexpert_state", (uint32_t) this->getState() );
+
     return( true );
 }
 

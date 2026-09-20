@@ -858,6 +858,76 @@ uint32_t g_walk_t2_first;
 uint32_t g_walk_t2_set;
 uint32_t g_walk_t2_kids;
 uint32_t g_walk_t2_control;
+
+/*
+ * 463's readings of the wait that does not return, and the four links of the chain its predicate runs
+ * before it fails. `IOSecureBSDRoot` (`iokit/bsddev/IOKitBSDInit.cpp:664`) asks
+ * `waitForMatchingService(serviceMatching("IOPlatformExpert"), 30ULL * kSecondScale)` and never comes
+ * back; the wait's predicate is the *first* thing it does, before it takes `gNotificationLock` or
+ * sleeps:
+ *
+ *     result = copyExistingServices( matching, kIOServiceMatchedState, kIONotifyOnce );
+ *
+ * and 462 left two candidate mechanisms for its failure that the source allows and the run could not
+ * separate - `OSMetaClass::applyToInstancesOfClassName`'s registry set, and the
+ * `inState == (service->__state[0] & inState)` bit test that `IOService::instanceMatch` applies to
+ * every instance the set yields. Every value below is read by the instrument *calling XNU's own
+ * functions*; `entry_trace.c` holds the calls and the wrapper they are taken from, and its comment
+ * carries the derivation of why each one is a link of this chain and not a proxy for it.
+ *
+ *   `wmatch_*`  the wait itself: its caller, its dictionary, its timeout in nanoseconds, and - when it
+ *               comes back at all - its answer. `ent = 0` is the record written on entry and `ent = 1`
+ *               the one written after the real call, so **a boot that hangs in the wait shows the
+ *               former and nothing else**, which is what makes "waited and never woke" a reading
+ *               rather than an absence.
+ *   `wsvc_*`    the predicate by the wait's own arguments (`p4`: `inState = kIOServiceMatchedState`)
+ *               and then the *same call* with the state test disabled (`p0`: `inState = 0`, which
+ *               `instanceMatch`'s `state == (state & __state[0])` makes true by construction). The
+ *               pair is the separation 462's doc named as the next step's object: `p4 = 0` with
+ *               `p0 != 0` is the state bit, `p4 = 0` with `p0 = 0` is upstream of it.
+ *   `wcls_*`    the class-name lookup behind the general path. `sym` is the dictionary's own
+ *               `IOProviderClass` object - the OS's own symbol, read out of the dictionary rather
+ *               than re-spelled here - `meta` is `OSMetaClass::getMetaClassWithName(sym)`, `rsvc` is
+ *               `IOService::getResourceService()` (so one instance in the walk can be *named* by
+ *               value), and `seen`/`shown` are how many instances XNU's own
+ *               `applyToInstancesOfClassName` yielded to the instrument's applier, and how many of
+ *               them had room in the record. **`seen = 0` with a non-zero `meta` is the third reading
+ *               under the two 462 named, and neither of them: the metaclass exists and has no
+ *               instances**, because `OSMetaClass::addInstance` has exactly one caller in this tree
+ *               (`IOService::registerService`, `IOService.cpp:3694`).
+ *   `wcls_inst/_state[]`  the first `ENTRY_WCLS_MAX` of those instances and each one's
+ *               `IOService::getState()` - i.e. `__state[0]`, the word the state test reads, taken
+ *               through the only implementation of `getState` in the tree (`IOService.h:499`).
+ */
+#define ENTRY_WCLS_MAX 4u
+uint32_t g_wmatch_calls;
+uint32_t g_wmatch_last_ent;
+uint32_t g_wmatch_last_caller;
+uint32_t g_wmatch_last_dict;
+uint32_t g_wmatch_last_to_lo;
+uint32_t g_wmatch_last_to_hi;
+uint32_t g_wmatch_last_ret;
+uint32_t g_wsvc_calls;
+uint32_t g_wsvc_last_dict;
+uint32_t g_wsvc_last_sym;
+uint32_t g_wsvc_last_p4;
+uint32_t g_wsvc_last_p0;
+uint32_t g_wcls_calls;
+uint32_t g_wcls_last_sym;
+uint32_t g_wcls_last_meta;
+uint32_t g_wcls_last_rsvc;
+uint32_t g_wcls_last_name0;
+uint32_t g_wcls_last_name1;
+uint32_t g_wcls_seen;
+uint32_t g_wcls_shown;
+uint32_t g_wcls_inst[ENTRY_WCLS_MAX];
+uint32_t g_wcls_state[ENTRY_WCLS_MAX];
+/*
+ * The walk in progress. `entry_note_wcls_begin` zeroes it, the applier counts into it, and
+ * `entry_note_wcls_end` publishes it - the applier cannot publish its own total, because the total is
+ * only known once `applyToInstancesOfClassName` has returned.
+ */
+uint32_t g_wls_seen;
 uint32_t g_rlock_bad;
 uint32_t g_rlock_caller;
 uint32_t g_rlock_count;
@@ -2017,6 +2087,49 @@ __attribute__((noinline)) static void entry_write_462_kv(void)
     entry_write_kv("xnu_entry_walk_t2_control", g_walk_t2_control);
 }
 
+/*
+ * 463's keys, in a function of their own for 455's reason - the epilogue's constant pool is at the
+ * PC-relative edge, and each new key costs code in whichever function holds it.
+ *
+ * Twenty-eight keys, and the group is one chain read end to end: the wait, its timeout, the predicate
+ * twice, the class lookup, and the instances the lookup yielded with each one's `__state[0]`. The
+ * `_calls` and `_seq` counters are the reason an all-zero group is readable - a `wsvc_last_p4 = 0`
+ * next to `wsvc_calls = 0` says the probe never ran, and the same zero next to `wsvc_calls = 4` says
+ * the predicate answered with nothing four times.
+ */
+__attribute__((noinline)) static void entry_write_463_kv(void)
+{
+    entry_write_kv("xnu_entry_wmatch_calls", g_wmatch_calls);
+    entry_write_kv("xnu_entry_wmatch_last_ent", g_wmatch_last_ent);
+    entry_write_kv("xnu_entry_wmatch_last_caller", g_wmatch_last_caller);
+    entry_write_kv("xnu_entry_wmatch_last_dict", g_wmatch_last_dict);
+    entry_write_kv("xnu_entry_wmatch_last_to_lo", g_wmatch_last_to_lo);
+    entry_write_kv("xnu_entry_wmatch_last_to_hi", g_wmatch_last_to_hi);
+    entry_write_kv("xnu_entry_wmatch_last_ret", g_wmatch_last_ret);
+    entry_write_kv("xnu_entry_wsvc_calls", g_wsvc_calls);
+    entry_write_kv("xnu_entry_wsvc_last_dict", g_wsvc_last_dict);
+    entry_write_kv("xnu_entry_wsvc_last_sym", g_wsvc_last_sym);
+    entry_write_kv("xnu_entry_wsvc_last_p4", g_wsvc_last_p4);
+    entry_write_kv("xnu_entry_wsvc_last_p0", g_wsvc_last_p0);
+    entry_write_kv("xnu_entry_wcls_calls", g_wcls_calls);
+    entry_write_kv("xnu_entry_wcls_last_sym", g_wcls_last_sym);
+    entry_write_kv("xnu_entry_wcls_last_meta", g_wcls_last_meta);
+    entry_write_kv("xnu_entry_wcls_last_rsvc", g_wcls_last_rsvc);
+    entry_write_kv("xnu_entry_wcls_last_name0", g_wcls_last_name0);
+    entry_write_kv("xnu_entry_wcls_last_name1", g_wcls_last_name1);
+    entry_write_kv("xnu_entry_wcls_seen", g_wcls_seen);
+    entry_write_kv("xnu_entry_wcls_shown", g_wcls_shown);
+    entry_write_kv("xnu_entry_wcls_inst0", g_wcls_inst[0]);
+    entry_write_kv("xnu_entry_wcls_inst1", g_wcls_inst[1]);
+    entry_write_kv("xnu_entry_wcls_inst2", g_wcls_inst[2]);
+    entry_write_kv("xnu_entry_wcls_inst3", g_wcls_inst[3]);
+    entry_write_kv("xnu_entry_wcls_state0", g_wcls_state[0]);
+    entry_write_kv("xnu_entry_wcls_state1", g_wcls_state[1]);
+    entry_write_kv("xnu_entry_wcls_state2", g_wcls_state[2]);
+    entry_write_kv("xnu_entry_wcls_state3", g_wcls_state[3]);
+    entry_write_kv("xnu_entry_wls_seen", g_wls_seen);
+}
+
 __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
 {
     uint32_t sctlr;
@@ -2548,6 +2661,10 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      * the OS asks for `/chosen` - the pair that says what changed in between, and the group a reader
      * will look for first. */
     entry_write_462_kv();
+    /* 463: the wait `IOSecureBSDRoot` hangs in, its predicate's two answers, and the instances the
+     * class-name lookup yielded with each one's `__state[0]` - the group that says which of the two
+     * mechanisms 462 left open the wait dies of, and whether it is neither. */
+    entry_write_463_kv();
     /*
      * Experiment 451's live console, printed here as well so a run that *does* report says whether
      * the live channel was working and, if it was refused, which check refused it. `_records` counts
@@ -3417,6 +3534,99 @@ void entry_note_dtwalk(uint32_t t1, uint32_t root, uint32_t count, uint32_t firs
     entry_live_write("xnu_live_walk_set", set);
     entry_live_write("xnu_live_walk_kids", kids);
     entry_live_write("xnu_live_walk_control", control);
+}
+
+/*
+ * 463. Four notes, one per link of the wait's predicate chain, and every one of them writes live first
+ * for 462's reason: this boot ends *inside* the thing being measured, so the run that matters is the
+ * one that never reaches `entry_epilogue`. See the block above `g_wmatch_calls` for what each number
+ * is and which failure it separates.
+ *
+ * The order the records appear in the log is the order the links run in, and it is the reading: on one
+ * wait the sequence is `wmatch_seq`/`_ent`/`_caller`/`_dict`/`_to_lo`/`_to_hi`, then `wsvc_seq`/`_p4`/
+ * `_p0`, then `wcls_seq`/`_sym`/`_meta`/`_rsvc`, then one `winst_seq`/`_inst`/`_state` per instance,
+ * then `wcls_seen`/`_shown`. A run whose last record is `wmatch_ent = 0` never got as far as calling
+ * the predicate; a run whose last record is a `winst_state` died inside the walk. The two are
+ * different logs, which is the property 268 spent a measurement on.
+ */
+void entry_note_wmatch(uint32_t ent, uint32_t caller, uint32_t dict, uint32_t to_lo, uint32_t to_hi,
+                       uint32_t ret)
+{
+    g_wmatch_calls++;
+    g_wmatch_last_ent = ent;
+    g_wmatch_last_caller = caller;
+    g_wmatch_last_dict = dict;
+    g_wmatch_last_to_lo = to_lo;
+    g_wmatch_last_to_hi = to_hi;
+    g_wmatch_last_ret = ret;
+    entry_live_write("xnu_live_wmatch_seq", g_wmatch_calls);
+    entry_live_write("xnu_live_wmatch_ent", ent);
+    entry_live_write("xnu_live_wmatch_caller", caller);
+    entry_live_write("xnu_live_wmatch_dict", dict);
+    entry_live_write("xnu_live_wmatch_to_lo", to_lo);
+    entry_live_write("xnu_live_wmatch_to_hi", to_hi);
+    entry_live_write("xnu_live_wmatch_ret", ret);
+}
+
+void entry_note_wsvc(uint32_t dict, uint32_t sym, uint32_t p4, uint32_t p0)
+{
+    g_wsvc_calls++;
+    g_wsvc_last_dict = dict;
+    g_wsvc_last_sym = sym;
+    g_wsvc_last_p4 = p4;
+    g_wsvc_last_p0 = p0;
+    entry_live_write("xnu_live_wsvc_seq", g_wsvc_calls);
+    entry_live_write("xnu_live_wsvc_dict", dict);
+    entry_live_write("xnu_live_wsvc_sym", sym);
+    entry_live_write("xnu_live_wsvc_p4", p4);
+    entry_live_write("xnu_live_wsvc_p0", p0);
+}
+
+void entry_note_wcls_begin(uint32_t sym, uint32_t meta, uint32_t rsvc, uint32_t name0,
+                           uint32_t name1)
+{
+    g_wls_seen = 0u;
+    g_wcls_calls++;
+    g_wcls_last_sym = sym;
+    g_wcls_last_meta = meta;
+    g_wcls_last_rsvc = rsvc;
+    g_wcls_last_name0 = name0;
+    g_wcls_last_name1 = name1;
+    entry_live_write("xnu_live_wcls_seq", g_wcls_calls);
+    entry_live_write("xnu_live_wcls_sym", sym);
+    entry_live_write("xnu_live_wcls_meta", meta);
+    entry_live_write("xnu_live_wcls_rsvc", rsvc);
+    entry_live_write("xnu_live_wcls_name0", name0);
+    entry_live_write("xnu_live_wcls_name1", name1);
+}
+
+/*
+ * One instance from the walk, with `__state[0]` read through `IOService::getState()`.
+ *
+ * The count is taken for **every** instance and only the first `ENTRY_WCLS_MAX` are recorded, which is
+ * what keeps a walk over a large set from filling the console: `wcls_seen` carries the total, so a
+ * report with `shown < seen` says the walk was longer than the record and not that it was shorter.
+ */
+void entry_note_winst(uint32_t inst, uint32_t state)
+{
+    uint32_t seq = g_wls_seen;
+
+    g_wls_seen++;
+    if (seq >= ENTRY_WCLS_MAX)
+        return;
+    g_wcls_inst[seq] = inst;
+    g_wcls_state[seq] = state;
+    entry_live_write("xnu_live_winst_seq", seq);
+    entry_live_write("xnu_live_winst_inst", inst);
+    entry_live_write("xnu_live_winst_state", state);
+}
+
+void entry_note_wcls_end(void)
+{
+    g_wcls_seen = g_wls_seen;
+    g_wcls_shown = (g_wls_seen < ENTRY_WCLS_MAX) ? g_wls_seen : ENTRY_WCLS_MAX;
+    entry_live_write("xnu_live_wcls_seen", g_wcls_seen);
+    entry_live_write("xnu_live_wcls_shown", g_wcls_shown);
 }
 #endif /* STAGE90_ENTRY_TRACE */
 
