@@ -112,6 +112,23 @@
  * The mapping and the descriptor are both recorded, and the probe returns without touching a single
  * GIC register if the slot was occupied - because a slot this instrument may not clobber is a slot
  * whose contents it cannot vouch for.
+ *
+ * ------------------------------------------------------------------------------------------------
+ * 484: the table this section goes into is read *at the install*, and the probe says which it was
+ * ------------------------------------------------------------------------------------------------
+ *
+ * 482's mapper wrote its descriptor into the table the console had latched at its first live write.
+ * For the console that latch is sound - its sections are installed before `arm_vm_init` copies the
+ * boot table into the system table four pages higher (`arm_vm_init.c:370-380`), so the copy carries
+ * them across - but for this probe, which runs *after* that copy, it is a table the MMU has stopped
+ * walking: the write lands, the read-back of the slot agrees, and the next load from
+ * `0xf9000000` is a translation fault. 484's first run is exactly that fault - `sleh_abort` at
+ * interrupt context, `pc = gicd_read+4`, `far = 0xf9000000`, with `xnu_live_l1` reading
+ * `0x80700000` where 483 read `0x80704000` - and it was triggered by this step's own instrument,
+ * whose first live write (`timer_call_setup`, earlier in the boot than 483's `ml_init_timebase`)
+ * pulled the console's latch back onto the boot table. The mapper now re-reads `TTBR0`/`TTBR1` for
+ * every install; the four numbers it used are published here, and `_l1_moved` is the reading that
+ * says the latch and the live table are not the same one.
  */
 #include <stdint.h>
 
@@ -130,6 +147,11 @@
 #if STAGE90_ENTRY_GIC_TRACED
 extern void entry_live_write(const char *key, uint32_t value);
 extern uint32_t g_live_state;
+/* 484: the table `entry_mmio_section` read at the install, and whether it was the console's latch. */
+extern uint32_t g_live_mmio_l1;
+extern uint32_t g_live_mmio_l1_moved;
+extern uint32_t g_live_mmio_ttbr0;
+extern uint32_t g_live_mmio_ttbr1;
 #define GIC_LIVE(key, value) entry_live_write((key), (uint32_t)(value))
 #else
 #define GIC_LIVE(key, value) do { (void)(key); (void)(value); } while (0)
@@ -341,6 +363,17 @@ void entry_gic_probe(void)
     GIC_LIVE("xnu_live_gic_map", mapped);
     GIC_LIVE("xnu_live_gic_slot_before", slot_before);
     GIC_LIVE("xnu_live_gic_desc", desc);
+    /*
+     * 484: **which table the section went into**, and whether that was the table the console latched.
+     * The mapper re-reads `TTBR0`/`TTBR1` for every install, so these four numbers are a reading of
+     * the live state and not a copy of `xnu_live_l1`: a `_l1_moved` of 1 means the console's latch
+     * (`xnu_live_l1`) and the live table disagree, and before 484 the install would have gone into
+     * the latch - a table the MMU no longer walks - and the first GIC read would have faulted.
+     */
+    GIC_LIVE("xnu_live_gic_l1", g_live_mmio_l1);
+    GIC_LIVE("xnu_live_gic_l1_moved", g_live_mmio_l1_moved);
+    GIC_LIVE("xnu_live_gic_ttbr0", g_live_mmio_ttbr0);
+    GIC_LIVE("xnu_live_gic_ttbr1", g_live_mmio_ttbr1);
     if (mapped == 0u)
         return;
 

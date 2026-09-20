@@ -135,7 +135,11 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=sleh_abort --wrap=sleh_undef
                    --wrap=getpid --wrap=mmap
                    --wrap=setPop
-                   --wrap=PE_init_platform --wrap=fiq_context_init)
+                   --wrap=PE_init_platform --wrap=fiq_context_init
+                   --wrap=timer_call_enter
+                   --wrap=timer_call_enter_with_leeway
+                   --wrap=timer_call_quantum_timer_enter
+                   --wrap=timer_call_setup --wrap=thread_quantum_expire)
     # The last three are 481's, and all three are *in the traced build only*, which is a property of
     # the step rather than an oversight: the registration and the read-back **are** the instrument.
     # `setPop` records the kernel's own deadline arithmetic, `PE_init_platform` is the hook that
@@ -145,6 +149,32 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
     # nothing to read it with, so wrapping those two would change the image - a wrapper is a real
     # function call in the middle of `arm_init` - without adding a reading. `entry_timebase.c`
     # compiles in both cases and only its report is compiled out.
+    #
+    # **484's five are the same kind of thing and are traced-only for a stronger version of the same
+    # reason.** They do not measure *whether* the decrementer was armed - 483's `setPop` wrapper
+    # already does that - they name the *caller* of the arming, and the name only exists in a log; an
+    # untraced build has no log to put it in, so a wrapper there would be five real function calls in
+    # the middle of the scheduler and the timer queue that change what the image does and record
+    # nothing. `timer_call_setup` and the two `timer_call_enter` forms are also the reason the
+    # *namespace* of the wrap list matters here rather than only its contents: `timer_call_enter*` is
+    # on the syscall return path, so an untraced build that kept them would add work to every one of
+    # this boot's eight million `getpid` calls.
+    #
+    # **Five and not six, and the sixth is a finding rather than a simplification.**
+    # `timer_call_enter1` - the family's second member - was wrapped in this step's first draft and the
+    # build refused it: its callers in this tree are `sfi.c` (not compiled for ARM) and
+    # `dtrace_glue.c` (not in this configuration), so nothing in this image references it and the
+    # wrapper below would have had no branch to it anywhere. `tools/check_timer_sources.py` now reads
+    # those call sites and fails the build if the family ever gains a caller here, which is the event
+    # that would make the omission wrong.
+    #
+    # The one whose reachability is a property of the *link* rather than of the source is
+    # `thread_quantum_expire`: the only reference to it in Apple's tree is the address handed to
+    # `timer_call_setup` (`processor.c:163`), i.e. a function pointer and not a call. `entry_trace.c`
+    # carries the argument for why the rewrite still reaches it, and it is on the reachability check's
+    # `by_address` list below rather than this one - with `tools/check_timer_sources.py` reading the
+    # address out of the linked image's own `movw`/`movt` pair, which is the half a `by_address` entry
+    # on its own cannot say.
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
 # every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that
@@ -27358,7 +27388,20 @@ verify_trace_symbols() {
     # *reference* and the only reference to `mmap` outside `kern_mman.c` is that table word. A census
     # that counted "a call to `mmap`" would pass whether or not the wrapper is in the slot, which is
     # precisely the failure `tools/check_sysent_table.py` exists to refuse.
-    local by_address=( vcputc getpid mmap )
+    local by_address=( vcputc getpid mmap thread_quantum_expire )
+    # 484 adds `thread_quantum_expire`, and it is the *third* shape of this category rather than a
+    # fourth copy of the second. `vcputc`, `getpid` and `mmap` are all referenced by taking an address
+    # that lands in a *table* - `cons_ops[1].putc`, `sysent[20].sy_call`, `sysent[197].sy_call` - so
+    # the address is a word in a data section and `tools/check_sysent_table.py` reads it there.
+    # `thread_quantum_expire`'s one reference is also an address, but it is an *argument* to
+    # `timer_call_setup` inside `processor_init`, so the compiler materialises it as a `movw`/`movt`
+    # pair across two instructions and there is no word anywhere to read - this step's first attempt to
+    # find one looked for an aligned 32-bit word and found neither the wrapper's address nor the
+    # original's, in an image where the pair is four instructions before the `bl`. The half that would
+    # otherwise be taken on trust is read out of the disassembly by `tools/check_timer_sources.py`,
+    # which reconstructs every `movw`/`movt` pair in this image and requires the wrapper's address to be
+    # among them and the unwrapped function's not to be - the same standard the three names above are
+    # held to, against the form this reference actually takes.
     in_list() {
         local needle=$1 s
         shift
@@ -27972,6 +28015,25 @@ run python3 "$REPO_ROOT/tools/check_gic_routing.py" --image "$OUT/xnu_arm_entry.
 run python3 "$REPO_ROOT/tools/check_irq_routing.py" --image "$OUT/xnu_arm_entry.elf" --verbose \
     || exit 1
 run python3 "$REPO_ROOT/tools/check_irq_routing.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
+    || exit 1
+
+# **484's six claims, about the instrument rather than about the machine.** 483's census counted the
+# armings of the decrementer; this step names their caller, and every way that can go wrong is a way
+# this check can see before a device is touched: a wrapper that passes a source number no reader can map
+# to a timer, a prototype that spells Apple's `uint64_t deadline` as one word (AAPCS then shifts every
+# argument after it, which is a *reading* error and not a compile error), a `--wrap` whose target the
+# generator stubbed, the one wrapper in this step whose only reference in Apple's tree is a function
+# pointer - so whether the rewrite reaches it is a property of the link, read out of the image - a
+# sampled setup table (which would leave `call` pointers nothing can resolve), and a bound that drops
+# records silently instead of counting them.
+#
+# It is a `--selftest` run too, and its selftest is the first in this project to refuse to run on a
+# failing baseline: 483's own selftest accepted four mutations before its first good build, because each
+# of those was refused for a reason that was already there. The baseline is checked first here for that
+# reason, and the failure it prints says so.
+run python3 "$REPO_ROOT/tools/check_timer_sources.py" --image "$OUT/xnu_arm_entry.elf" --verbose \
+    || exit 1
+run python3 "$REPO_ROOT/tools/check_timer_sources.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
     || exit 1
 say "the payload build reads the .bin from there directly; nothing to install"
 

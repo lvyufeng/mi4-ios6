@@ -160,6 +160,17 @@ extern void entry_note_mmap(uint32_t caller, const uint32_t *args, uint32_t erro
  * `entry_timebase.c` was handed. See the wrapper below. */
 extern void entry_timebase_note_setpop(uint64_t deadline, uint32_t returned);
 
+/* 484: the arm-er, named at the entry to the field it writes. The three sources are the two
+ * `timer_call_enter` forms this kernel reaches and the quantum timer's own entry point; the numbers
+ * are the ones `entry_timebase.c` documents above its state, and `check_timer_sources.py` asserts that
+ * the wrappers below pass exactly `1`, `2` and `3`, that the note function reads all three, and that
+ * the family's fourth member - `timer_call_enter1`, whose only callers in this tree are SFI and dtrace
+ * and which is therefore not wrapped - still has none. */
+extern void entry_timebase_note_timer_setup(uint32_t call, uint32_t func, uint32_t param0);
+extern void entry_timebase_note_timer_enter(uint32_t source, uint32_t call, uint64_t deadline,
+                                            uint32_t flags);
+extern void entry_timebase_note_quantum_expire(uint32_t thread);
+
 /*
  * 453's one, called by the six sleep wrappers below with the frame they were entered from. `ent` is
  * the entry point's id in the table in `entry_stubs.c` - the fifth argument means something
@@ -753,6 +764,120 @@ int __wrap_setPop(uint64_t time)
 
     entry_timebase_note_setpop(time, (uint32_t)decr);
     return decr;
+}
+
+/* ------------------------------------------------- 484: the arm-er, in four forms and one table */
+/*
+ * The census in `entry_timebase.c` counts *what* the kernel armed. These wrappers say *who* asked,
+ * and the reason that has to be a separate instrument is in `entry_timebase.c`'s comment above the
+ * four source numbers: `setPop` receives an absolute time, not its provenance, and the same number
+ * means "the scheduler is preempting a thread that is running" or "a thread is waiting for a deadline"
+ * depending on which of the three fields in `struct cpu_data` it came out of.
+ *
+ * **The prototypes below are transcriptions, and the transcription is the fragile part.** None of
+ * these files can include `osfmk/kern/timer_call.h` - it needs the kernel's include path, the same
+ * reason `entry_timebase.c` spells `tbd_ops_t` out - so each of the six declarations here is a claim
+ * about Apple's, and `tools/check_timer_sources.py` asserts that claim against the header for argument
+ * *count*, argument *width* and return width. The widths matter more than they look: on AAPCS a
+ * `uint64_t` occupies an even-numbered register *pair*, so a prototype that spelled `deadline` as
+ * `uint32_t` would shift every later argument by one register and the log would carry a `flags` word
+ * read out of the middle of a deadline - `__wrap_mdevadd`'s comment above records the same hazard
+ * costing this project a run once already. `timer_call_param_t` is `void *` (`timer_call.h:66`) and
+ * `timer_call_t` is `struct timer_call *`, both one word here, which is why they are spelled as
+ * pointers rather than as integers.
+ *
+ * **What each wrapper records, and the one it deliberately does not.** Sources 1, 2 and 3 are the
+ * three ways a timer queue entry is made; source 4 is `timer_call_quantum_timer_enter`, which is the
+ * only caller of `quantum_timer_set_deadline` (`timer_call.c:732`; the cancel path at `:762` passes
+ * zero and so never becomes a deadline). All four pass the *requested* deadline, not the field it will
+ * end up in - the field is written inside the real function. The `flags` word is recorded because
+ * `TIMER_CALL_LOCAL` is one of its bits and a local timer never reaches `timer_resync_deadlines` at
+ * all, so a reading of the flags is what separates "this timer was armed and ignored" from "this timer
+ * was armed and became the decrementer".
+ *
+ * **`timer_call_setup` is published in full and unconditionally**, which is the opposite of the
+ * budget discipline the counters use: it is called once per timer (about fifteen times in the whole
+ * kernel) and its second argument is the callback, so the sequence of these records *is* the table
+ * that lets the `call` pointers in the enter records be resolved to names. A sampled version of it
+ * would be a table with holes in it.
+ *
+ * **`thread_quantum_expire` is the fifth wrapper and the one with the interesting risk.** Its only
+ * reference in the tree is `processor.c:163`, where the *address* is handed to `timer_call_setup` -
+ * so this is not a call site but a function pointer, and whether `--wrap` reaches it is a property of
+ * the link rather than of the source. It does: `--wrap` redirects an undefined *reference*, and
+ * taking a symbol's address is one. The consequence is worth writing down because it changes what the
+ * setup table holds - the func word published for the quantum timer will be `__wrap_thread_quantum_expire`'s
+ * address and not `thread_quantum_expire`'s, which is why `check_timer_sources.py` reads that pair out
+ * of the linked image instead of assuming either address.
+ */
+int __real_timer_call_enter(void *call, uint64_t deadline, uint32_t flags);
+
+int __wrap_timer_call_enter(void *call, uint64_t deadline, uint32_t flags)
+{
+    int r = __real_timer_call_enter(call, deadline, flags);
+
+    entry_timebase_note_timer_enter(1u, (uint32_t)(uintptr_t)call, deadline, flags);
+    return r;
+}
+
+/* **There is no `__wrap_timer_call_enter1` here, and its absence is the first build's finding.**
+ * `timer_call_enter1` is the family's second member and its callers in this tree are `sfi.c`'s seven
+ * and `dtrace_glue.c`'s three - Selective Forced Idle, which is not compiled for ARM, and dtrace,
+ * which is not in this configuration. So the wrap was written, the build refused it, and rightly:
+ * `build_entry.sh`'s reachability check found no branch to the wrapper anywhere in the linked image,
+ * because a `--wrap` on a name nothing references produces a wrapper nothing can call. Adding it to
+ * that check's `never-called` list would have made the refusal quiet for every later step, so the
+ * wrapper is gone and what replaced it is a claim in `tools/check_timer_sources.py`: it reads this
+ * tree's callers of `timer_call_enter1` and refuses the build if the family ever gains one here, which
+ * is the event that would make this omission wrong. */
+int __real_timer_call_enter_with_leeway(void *call, void *param1, uint64_t deadline,
+                                        uint64_t leeway, uint32_t flags, uint32_t ratelimited);
+
+int __wrap_timer_call_enter_with_leeway(void *call, void *param1, uint64_t deadline,
+                                        uint64_t leeway, uint32_t flags, uint32_t ratelimited)
+{
+    int r = __real_timer_call_enter_with_leeway(call, param1, deadline, leeway, flags, ratelimited);
+
+    entry_timebase_note_timer_enter(2u, (uint32_t)(uintptr_t)call, deadline, flags);
+    return r;
+}
+
+int __real_timer_call_quantum_timer_enter(void *call, void *param1, uint64_t deadline,
+                                          uint64_t ctime);
+
+int __wrap_timer_call_quantum_timer_enter(void *call, void *param1, uint64_t deadline,
+                                          uint64_t ctime)
+{
+    int r = __real_timer_call_quantum_timer_enter(call, param1, deadline, ctime);
+
+    /* `flags` is sent as zero rather than read: this entry point is the one that does *not* take a
+     * flags argument - it hard-codes `TIMER_CALL_SYS_CRITICAL | TIMER_CALL_LOCAL` for itself
+     * (`timer_call.c:715`) - so a recorded zero here is the absence of the argument and not a reading
+     * of it, and the note function's own documentation says so. */
+    entry_timebase_note_timer_enter(3u, (uint32_t)(uintptr_t)call, deadline, 0u);
+    return r;
+}
+
+void __real_timer_call_setup(void *call, void *func, void *param0);
+
+void __wrap_timer_call_setup(void *call, void *func, void *param0)
+{
+    __real_timer_call_setup(call, func, param0);
+
+    entry_timebase_note_timer_setup((uint32_t)(uintptr_t)call, (uint32_t)(uintptr_t)func,
+                                    (uint32_t)(uintptr_t)param0);
+}
+
+void __real_thread_quantum_expire(void *param0, void *param1);
+
+void __wrap_thread_quantum_expire(void *param0, void *param1)
+{
+    __real_thread_quantum_expire(param0, param1);
+
+    /* `param1` is the thread and `param0` the processor: `priority.c:99` names the two
+     * `processor = p0; thread = p1;` in its first two statements, and `processor.c:163` sets the timer
+     * up with the processor as `param0`, so the thread arrives in the second argument. */
+    entry_timebase_note_quantum_expire((uint32_t)(uintptr_t)param1);
 }
 
 /* ------------------------------------------------------------ the IOKit deadline sleeps (454) */

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Check the six things 482's routing measurement rests on - and the two facts about this image's vector
-slots that say what 483 has to change, before anything is enabled.
+Check the seven things 482's routing measurement rests on - and the two facts about this image's
+vector slots that say what 483 has to change, before anything is enabled.
 
 482 answers one question without enabling anything: **which INTID does the line this kernel programs
 appear on**. The question only exists because of what the vector page currently does, so the check
@@ -57,6 +57,18 @@ run would report as an error:
      the whole window and restored bit by bit. Those are source-order properties, so they are checked
      as source order - a reordered restore is a probe that works until it does not.
 
+  7. **the table this mapping goes into is read at the moment it is written.** 484's own first run
+     faulted here, and the fault was the instrument's: the mapper installed into the table the console
+     had latched at its *first* live write - which was the boot table in that run, because 484's own
+     `timer_call_setup` wrapper fired earlier than 483's first live write had - and by the time the
+     probe ran, `arm_vm_init` had replaced that table with the system one four pages higher. The claim
+     is that the mapper re-reads `TTBR0`/`TTBR1` for every install, that the rule answering "which
+     table" is spelled once in the image (the console's init and the mapper both call
+     `entry_live_ttb_base`), and that the probe's four readings land *before* the return a refused
+     mapping takes. Apple's side of the argument - that the system table is a *copy* of the boot
+     table, which is why the console's latch is sound for the console and not for a later caller - is
+     read out of `arm_vm_init.c` rather than assumed.
+
     ./tools/check_gic_routing.py --image out/stage90/xnu_arm_entry.elf
     ./tools/check_gic_routing.py --image out/stage90/xnu_arm_entry.elf --selftest
 
@@ -67,7 +79,9 @@ Which candidate INTID the virtual timer actually asserts. That is the run's read
 the whole point of the step is that the answer is not derivable from any file - the device tree lists
 two lines, 143 measured one of them to be `CNTP`'s, and which sibling `CNTV` is on is a fact about
 this silicon. Every number the check *can* pin is pinned here so that the run's answer is the only
-unknown left in it.
+unknown left in it. And since 484: **which table the MMU was walking when the probe mapped the GIC**.
+The check can only say that the mapper asks the live state rather than a latch; the answer is the
+run's reading (`xnu_live_gic_l1` beside `xnu_live_l1`, with `xnu_live_gic_l1_moved` as the comparison).
 """
 
 import argparse
@@ -87,6 +101,7 @@ ENTRY_IRQ_C = os.path.join(BOOT_DIR, "entry_irq.c")
 PAYLOAD_GIC_C = os.path.join(REPO_ROOT, "stages/stage90/gic.c")
 PAYLOAD_FIQ_PROBE_C = os.path.join(REPO_ROOT, "stages/stage90/xnu_msm8974_fiq_probe.c")
 ASSYM = os.path.join(REPO_ROOT, "out/xnu_assym/STAGE90_XNU/assym.s")
+ARM_VM_INIT_C = os.path.join(REPO_ROOT, "external/xnu-4570.1.46/osfmk/arm/arm_vm_init.c")
 
 OBJDUMP = "arm-none-eabi-objdump"
 NM = "arm-none-eabi-nm"
@@ -273,6 +288,7 @@ def gather(image):
         "irq_text": read(ENTRY_IRQ_C),
         "payload_fiq_text": read(PAYLOAD_FIQ_PROBE_C),
         "assym_text": read(ASSYM),
+        "vm_init_text": read(ARM_VM_INIT_C),
     }
     facts["header"] = defines(facts["header_text"])
     facts["irq_text"] = strip_comments(facts["irq_text"])
@@ -687,6 +703,105 @@ def claim_guards(facts, failures, notes):
                         "a span that is not the two windows" % (t_a, first_probe, t_b, elapsed))
 
 
+def claim_live_table(facts, failures, notes):
+    """
+    484's own finding, and the one that stopped its first run: **the table a device mapping goes into
+    is the table the MMU walks now, and there is exactly one spelling of which table that is.**
+
+    482's mapper installed into `g_live_l1` - the answer the console read out of `TTBR0`/`TTBR1` at
+    its *first* live write, latched forever. The console survives that because its sections go in
+    before XNU copies the boot table into the system table (`arm_vm_init.c`'s
+    `cpu_ttep = boot_ttep + ARM_PGBYTES * 4` and the `bcopy` beside it), so the copy carries them; a
+    caller that runs *after* the copy - this probe - writes into a table the MMU has stopped walking,
+    and the next load from that VA is a translation fault, which is what 484's first run recorded
+    (`sleh_abort` at interrupt context, `pc = gicd_read+4`, `far = 0xf9000000`). The claim has three
+    parts, and each is a property of a different file:
+
+      1. the mapper re-reads the table and installs into *that*, and never mentions the latch;
+      2. the rule "which table answers for an address above the `TTBCR` boundary" is spelled exactly
+         once in the image and both callers use it - a second spelling is 206's "one value, two
+         definitions" with a faulting load as the failure;
+      3. the probe publishes the table it used and whether it was the console's latch, *before* the
+         early return that a refused mapping takes, so a refusal cannot hide which table was live.
+
+    The justification for (1) is Apple's own code, so it is read too: if the system table stops being
+    a copy of the boot table taken four pages higher, the console's latch is no longer sound by this
+    argument and this claim's reason has to be re-derived rather than assumed.
+    """
+    stubs = facts["stubs_text"]
+    probe = facts["probe_text"]
+
+    vm = facts["vm_init_text"]
+    if "cpu_ttep = boot_ttep + ARM_PGBYTES * 4;" not in vm \
+            or "bcopy(boot_tte, cpu_tte, ARM_PGBYTES * 4);" not in vm:
+        failures.append("arm_vm_init.c no longer computes the system table as `boot_ttep + "
+                        "ARM_PGBYTES * 4` and copies the boot table into it: the reason the console's "
+                        "latched table is sound for the console is gone, so this claim's premise has "
+                        "to be re-derived")
+    else:
+        notes.append("arm_vm_init.c: the system table is `boot_ttep + ARM_PGBYTES * 4` and is a copy "
+                     "of the boot table, which is why the console's latch reaches the live table and "
+                     "a later install into it does not")
+
+    body = function_body(stubs, "entry_mmio_section")
+    if body is None:
+        failures.append("entry_stubs.c no longer defines entry_mmio_section, so the table a device "
+                        "mapping goes into is not checked at all")
+    else:
+        if "entry_live_ttb_base(" not in body:
+            failures.append("entry_stubs.c's entry_mmio_section no longer reads the table: it installs "
+                            "into a table read once, at the console's first live write, and 484's run "
+                            "is what that costs - a section written into the boot table after XNU's "
+                            "system table replaced it, and a translation fault on the first GIC read")
+        if "entry_section_install(va, pa, g_live_l1," in body:
+            failures.append("entry_stubs.c's entry_mmio_section installs into g_live_l1: the console's "
+                            "latched table is not the table a later install may use, and a mapper "
+                            "that writes into the latch is 484's fault exactly")
+        if "entry_section_install(va, pa, l1, g_live_attr, slot_before_out, desc_out)" not in body:
+            failures.append("entry_stubs.c's entry_mmio_section does not install through the shared "
+                            "recipe with the shared attribute and the table it read, so the mapping "
+                            "this probe reads through is not the one the check describes")
+        if "g_live_mmio_l1_moved = (l1 != g_live_l1)" not in body or "g_live_mmio_l1 = l1" not in body:
+            failures.append("entry_stubs.c's entry_mmio_section no longer records which table it used "
+                            "or compares it with the console's latch, so the drift this step exists to "
+                            "measure would be invisible in the log")
+        if "l1 < 0x80000000u" not in body:
+            failures.append("entry_stubs.c's entry_mmio_section installs into any table it reads: the "
+                            "window and alignment test the console's init makes is what keeps a write "
+                            "out of a table this image cannot vouch for")
+
+    if stubs.count("0xffffc000u") != 1:
+        failures.append("entry_stubs.c spells the `TTBR` base rule %d time(s): the answer to \"which "
+                        "table answers for this address\" is one value, and a second spelling is the "
+                        "defect family this project has recorded twenty-four times"
+                        % stubs.count("0xffffc000u"))
+    init = function_body(stubs, "entry_live_init")
+    if init is None or "entry_live_ttb_base(" not in init:
+        failures.append("entry_stubs.c's entry_live_init no longer uses entry_live_ttb_base, so the "
+                        "console and the mapper do not share one spelling of the rule")
+    for key in ("xnu_entry_live_mmio_l1", "xnu_entry_live_mmio_l1_moved"):
+        if '"%s"' % key not in stubs:
+            failures.append("entry_stubs.c no longer publishes %s in its kv dump, so the table a "
+                            "device mapping went into is a live-log-only reading" % key)
+
+    desc = probe.find('GIC_LIVE("xnu_live_gic_desc"')
+    early = probe.find("if (mapped == 0u)")
+    if desc < 0 or early < 0:
+        failures.append("entry_gic.c no longer publishes the mapping's descriptor and then returns "
+                        "on a refused mapping, so this claim cannot tell where a reading lands")
+    else:
+        for key in ("xnu_live_gic_l1", "xnu_live_gic_l1_moved",
+                    "xnu_live_gic_ttbr0", "xnu_live_gic_ttbr1"):
+            at = probe.find('GIC_LIVE("%s"' % key)
+            if at < 0:
+                failures.append("entry_gic.c does not publish %s: the probe's mapping would then be "
+                                "reported without the table it went into" % key)
+            elif not (desc < at < early):
+                failures.append("entry_gic.c publishes %s outside the window between the descriptor "
+                                "and the refusal return: a refused mapping would then hide which "
+                                "table was live" % key)
+
+
 def compare(facts, mutate=None):
     if mutate:
         facts = mutate_facts(facts, mutate)
@@ -697,6 +812,7 @@ def compare(facts, mutate=None):
     claim_vector(facts, failures, notes)
     claim_dispatch(facts, failures, notes)
     claim_guards(facts, failures, notes)
+    claim_live_table(facts, failures, notes)
     return failures, notes
 
 
@@ -831,6 +947,45 @@ def mutate_facts(facts, mutate):
         facts["probe_text"] = _bump(
             facts["probe_text"], "    added18 = gic_probe_candidate(",
             "    t_b = stage90_cntvct_read();\n    added18 = gic_probe_candidate(")
+    elif mutate == "the_mapper_uses_the_console_latch":
+        # 482's mapper, exactly: the table the console latched at its first live write, and no reading
+        # of the live table anywhere. This is the state 484's first run faulted in.
+        facts["stubs_text"] = _bump(
+            facts["stubs_text"], "entry_live_ttb_base(&g_live_mmio_ttbr0, &g_live_mmio_ttbr1)",
+            "g_live_l1")
+    elif mutate == "the_table_rule_is_spelled_again":
+        # A second spelling of "which table answers for this address above the boundary", inline, in
+        # the console's init - the shape 206's family says is a defect even when both agree today.
+        facts["stubs_text"] = _bump(
+            facts["stubs_text"], "    l1 = entry_live_ttb_base(0, 0);",
+            "    { uint32_t n2 = ttbcr & 7u;\n"
+            "      l1 = ((n2 == 0u) ? ttbr0 : ttbr1) & 0xffffc000u; }")
+    elif mutate == "the_probe_keeps_the_table_to_itself":
+        facts["probe_text"] = _bump(
+            facts["probe_text"], '    GIC_LIVE("xnu_live_gic_l1", g_live_mmio_l1);\n',
+            "")
+    elif mutate == "the_moved_flag_is_never_written":
+        facts["stubs_text"] = _bump(
+            facts["stubs_text"], "g_live_mmio_l1_moved = (l1 != g_live_l1)",
+            "g_live_mmio_l1_moved = 0u; g_live_mmio_l1_was_compared = (l1 != g_live_l1)")
+    elif mutate == "the_mapper_guard_is_dropped":
+        facts["stubs_text"] = _bump(
+            facts["stubs_text"], "    if (l1 < 0x80000000u || (l1 & 0x3fffu) != 0u)\n",
+            "    if (0u)\n")
+    elif mutate == "the_table_is_published_after_the_refusal":
+        facts["probe_text"] = _bump(
+            facts["probe_text"], '    GIC_LIVE("xnu_live_gic_l1", g_live_mmio_l1);\n',
+            "")
+        facts["probe_text"] = _bump(
+            facts["probe_text"], "    if (mapped == 0u)\n        return;",
+            "    if (mapped == 0u) {\n"
+            '        GIC_LIVE("xnu_live_gic_l1", g_live_mmio_l1);\n'
+            "        return;\n    }")
+    elif mutate == "the_justification_is_gone":
+        # Apple's side of the argument: the console's latch is sound because the copy happens after
+        # its sections go in. Without the copy, the premise this step's fix rests on is not there.
+        facts["vm_init_text"] = facts["vm_init_text"].replace(
+            "bcopy(boot_tte, cpu_tte, ARM_PGBYTES * 4);", "/* the copy is gone */", 1)
     elif mutate == "iar_acknowledged":
         facts["probe_text"] = _bump(
             facts["probe_text"], "    dist_ctlr = gicd_read(STAGE90_GICD_CTLR);",
@@ -862,6 +1017,10 @@ MUTATIONS = (
     "iar_acknowledged", "mask_without_cpsid", "restore_without_msr", "mask_declared_but_unused",
     "ctl_read_before_spin", "clears_own_bit_only", "intid_is_a_literal",
     "probe_windows_unbracketed",
+    "the_mapper_uses_the_console_latch", "the_table_rule_is_spelled_again",
+    "the_probe_keeps_the_table_to_itself", "the_moved_flag_is_never_written",
+    "the_mapper_guard_is_dropped", "the_table_is_published_after_the_refusal",
+    "the_justification_is_gone",
 )
 
 
@@ -919,6 +1078,10 @@ def main():
         "the source in the order that makes them guards"
         % (header["STAGE90_GIC_TIMER_PPI0"], header["STAGE90_GIC_TIMER_PPI1"], slot6,
            header["STAGE90_CPU_INTERRUPT_HANDLER"]))
+    say("  xnu_entry_484: the table a device mapping goes into is read at the install rather than "
+        "latched at the console's first live write, the rule that answers \"which table\" is spelled "
+        "once in the image and both callers use it, and the probe publishes the table it used - and "
+        "whether it was the console's latch - before the return a refused mapping takes")
     return 0
 
 

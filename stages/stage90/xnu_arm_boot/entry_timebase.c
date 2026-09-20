@@ -224,6 +224,45 @@ static uint32_t g_dec_first_ctl;
  * first pop of the boot saturates to `DECREMENTER_MAX`; this is how the run says whether anything
  * nearer followed, i.e. whether an interrupt was *due* inside the window at all. */
 static uint32_t g_dec_min_value = 0xFFFFFFFFu;
+/*
+ * **484: the other half of `g_dec_min_value`, and why the other half is not a maximum.** 483's
+ * write-up says the kernel's clock "runs": `dec_min` fell to `0x4ab8` and stayed there for four
+ * thousand armings. The write-up then states the consequence in its own words - "`dec_min` never left
+ * `0x4ab6`-`0x4ab9` across 4096 calls" - and that sentence is a claim about the *range* of the 4096
+ * values, which the instrument that produced the number cannot support: `dec_min` only ever falls, so
+ * "every arming was `0x4ab8`" and "every arming was *at least* `0x4ab8`, and most were far more" print
+ * the same log. The obvious repair - publish the maximum too - does not work either, and the reason is
+ * in the first call: call 1 carries `EndOfAllTime` and `deadline_to_decrementer` saturates it to
+ * `DECREMENTER_MAX`, so the maximum over the run is `0x7FFFFFFF` by construction and separating it out
+ * would only move the same defect to the other end.
+ *
+ * What separates "a clock nothing waits on" from "a fixture that never asks to wait" is neither bound.
+ * It is **repetition**: whether the value the kernel arms is the *same number* on every call, and if
+ * not, which numbers ever appeared and on which call. So call 2's value is taken as the reference -
+ * call 1 is the saturated one and is excluded for the reason above - every later call is counted as a
+ * repeat of that reference or as something else, and the first `STAGE90_DEC_SHOWN` *distinct*
+ * something-elses are published with the call number they first appeared on. A run whose census ends
+ * with `other == 0` armed one number, `g_dec_ref_value`, on every call from the second onwards: a
+ * metronome, and `xnu_live_dec_new_value` never appears in the log at all. A run that armed two or
+ * three numbers has the first non-repeating deadline in the log by construction, at `_new_call`.
+ *
+ * The counts and the table are separate because they answer different questions and only one of them
+ * needs to be bounded: `same`/`other` are running totals over all 4096 calls, and the table holds the
+ * first eight *distinct* values so that a metronome with drift cannot fill the log with one record per
+ * call. Once the table is full a further distinct value is counted in `g_dec_other_more` and only the
+ * first of those is published - the census stays finite whether the kernel armed two values or four
+ * thousand, which is the property the log's size depends on.
+ */
+#define STAGE90_DEC_SHOWN 8u
+static uint32_t g_dec_ref_value;
+static uint32_t g_dec_ref_valid;
+static uint32_t g_dec_same;
+static uint32_t g_dec_other;
+static uint32_t g_dec_distinct;
+static uint32_t g_dec_other_more;
+static uint32_t g_dec_shown_value[STAGE90_DEC_SHOWN];
+static uint32_t g_dec_shown_call[STAGE90_DEC_SHOWN];
+static uint32_t g_dec_shown_count[STAGE90_DEC_SHOWN];
 /* 483: 0 until `entry_irq_arm()` has said the line is enabled and the installer's read-back agreed.
  * Non-zero is the permission to write `CNTV_CTL` without `IMASK`. */
 static uint32_t g_irq_unmasked;
@@ -337,6 +376,68 @@ static void stage90_tbd_set_decrementer(uint32_t dec_value)
         g_dec_min_value = dec_value;
         TB_LIVE("xnu_live_dec_min", g_dec_min_value);
         TB_LIVE("xnu_live_dec_min_count", g_dec_writes);
+    }
+
+    /*
+     * 484: the census, on the same call and after the minimum so that the two readings of a run are
+     * ordered in the log the way they are derived here. `g_dec_writes` has already been incremented,
+     * so this is call number `g_dec_writes` and the guard below is what excludes call 1 - the
+     * saturated `DECREMENTER_MAX` arming that `deadline_to_decrementer` produces from `EndOfAllTime`
+     * and that would otherwise become the reference every real deadline was measured against.
+     */
+    if (g_dec_writes >= 2u) {
+        if (g_dec_ref_valid == 0u) {
+            g_dec_ref_valid = 1u;
+            g_dec_ref_value = dec_value;
+            TB_LIVE("xnu_live_dec_ref", g_dec_ref_value);
+            TB_LIVE("xnu_live_dec_ref_call", g_dec_writes);
+        } else if (dec_value == g_dec_ref_value) {
+            g_dec_same++;
+            if ((g_dec_same & (g_dec_same - 1u)) == 0u) {
+                TB_LIVE("xnu_live_dec_same", g_dec_same);
+                TB_LIVE("xnu_live_dec_other", g_dec_other);
+            }
+        } else {
+            uint32_t i;
+
+            g_dec_other++;
+
+            for (i = 0u; i < g_dec_distinct; i++) {
+                if (g_dec_shown_value[i] == dec_value) {
+                    break;
+                }
+            }
+
+            if (i < g_dec_distinct) {
+                /* A value already in the table, armed again. The count is published on its own powers
+                 * of two, which is what turns "there were two values" into "and here is how often the
+                 * second one recurred" - the difference between a metronome that drifted once and a
+                 * clock that alternates. */
+                g_dec_shown_count[i]++;
+                if ((g_dec_shown_count[i] & (g_dec_shown_count[i] - 1u)) == 0u) {
+                    TB_LIVE("xnu_live_dec_seen_value", dec_value);
+                    TB_LIVE("xnu_live_dec_seen_count", g_dec_shown_count[i]);
+                }
+            } else if (g_dec_distinct < STAGE90_DEC_SHOWN) {
+                /* **The record this whole step exists for.** The first arming of a value the kernel
+                 * had not armed before, with the call it happened on - which is the log's answer to
+                 * "which deadline was not a repeat" and the only place a reader can see it. */
+                g_dec_shown_value[g_dec_distinct] = dec_value;
+                g_dec_shown_call[g_dec_distinct] = g_dec_writes;
+                g_dec_shown_count[g_dec_distinct] = 1u;
+                g_dec_distinct++;
+                TB_LIVE("xnu_live_dec_new_value", dec_value);
+                TB_LIVE("xnu_live_dec_new_call", g_dec_writes);
+                TB_LIVE("xnu_live_dec_distinct", g_dec_distinct);
+            } else {
+                g_dec_other_more++;
+                if (g_dec_other_more == 1u) {
+                    TB_LIVE("xnu_live_dec_more_value", dec_value);
+                    TB_LIVE("xnu_live_dec_more_call", g_dec_writes);
+                    TB_LIVE("xnu_live_dec_more", g_dec_other_more);
+                }
+            }
+        }
     }
 }
 
@@ -481,6 +582,180 @@ void entry_timebase_note_setpop(uint64_t deadline, uint32_t returned)
 }
 
 /* --------------------------------------------------------------------------------------------- */
+/* 484: who arms the decrementer                                                                  */
+/* --------------------------------------------------------------------------------------------- */
+
+/*
+ * **The census above says *what* the kernel armed. This says *who* asked for it.**
+ *
+ * `setPop` (`osfmk/arm/rtclock.c:344`) is one function with two callers - `timer_resync_deadlines`
+ * (`arm_timer.c:190`, which is every timer interrupt plus every re-arming) and `ClearIdlePop`
+ * (`rtclock.c:415`) - and the deadline it is handed is the *result* of a decision made in the caller:
+ * `timer_resync_deadlines` picks the nearest of three absolute times held in `struct cpu_data`
+ * (`rtclock_timer.deadline`, `idle_timer_deadline`, `quantum_timer_deadline`), each with a `> 0`
+ * guard, and only calls `setPop` at all if the winner is non-zero or `EndOfAllTime`. The winner's
+ * *identity* is therefore not in the value `setPop` receives, and it is the identity that decides how
+ * 484 is read: `quantum_timer_deadline` is the scheduler's preemption timer, which a compute-bound
+ * thread re-arms on every quantum expiry and which nothing *waits* on; the other two are real
+ * deadline requests from the kernel's timer queue, which something waits on. The same number - a
+ * quarter of a millisecond, a millisecond, ten - means opposite things depending on which field it
+ * came out of.
+ *
+ * **Two ways to read the field, and why this is the other one.** The direct way is to read the three
+ * fields out of `BootCpuData` at the moment of the arming and publish all four numbers. It needs the
+ * three offsets in `struct cpu_data`, and those are not generated for this image: the `assym.s` this
+ * project builds carries only the names Apple's own assembly references, and none of the three is one
+ * of them. A hand-computed offset is exactly the defect this project has recorded most often - a
+ * wrong offset reads a *neighbouring* field and publishes a plausible wrong number - so it would have
+ * to be verified against `arm_timer.o`'s displacements before it could be believed, which is a
+ * generator and a check of its own.
+ *
+ * The way taken instead names the arm-er at the *entry* to the field each time, which needs no offset
+ * at all because each setter is a function with a name of its own:
+ *
+ *     1 `timer_call_enter`            - a timer queue entry, the deadline it was given
+ *     2 `timer_call_enter_with_leeway`- the same, with a leeway
+ *     3 `timer_call_quantum_timer_enter` - the one caller of `quantum_timer_set_deadline`
+ *
+ * **The family has four members and this list has three, and the missing one is a finding rather than
+ * an omission.** `timer_call_enter1` is declared beside the other three in `osfmk/kern/timer_call.h`,
+ * and its callers in this tree are `osfmk/kern/sfi.c` (seven sites) and `bsd/dev/dtrace/dtrace_glue.c`
+ * (three) - Selective Forced Idle, which is not compiled for ARM, and dtrace, which is not in this
+ * configuration. So the symbol is *defined* in this image (`osfmk/kern/timer_call.c` defines it) and
+ * nothing references it, which the linker reports in the one way that matters: a `--wrap` on a name
+ * with no reference produces no reachable wrapper, and `build_entry.sh`'s own reachability check
+ * refuses the build for exactly that reason (it did, on this step's first build, listing
+ * `timer_call_enter1` and `thread_quantum_expire`). The number 2 is kept as the leeway form's rather
+ * than renumbering, because these numbers are what a *log* says and a reader comparing this step's
+ * comment with its records should not have to know that one was removed.
+ *
+ * Sources 1 and 2 are the etimer queue - everything that ends up in `rtclock_timer.deadline`, since
+ * `timer_set_deadline` itself has no caller anywhere in this tree (grep the source: the only
+ * references are its definition, its declaration in `timer_queue.h`, and the i386 copy) and
+ * `timer_queue_expire` is the only writer of that field. Source 3 is the quantum. The third field,
+ * `idle_timer_deadline`, has no setter at all on this machine: it is written only by `timer_intr`'s
+ * own idle notify, and nothing registers one, so a run in which it is ever the winner would have to
+ * be explained by something this list does not contain.
+ *
+ * **`timer_call_setup` is here to make the entries *nameable*, and it is the reason the join is
+ * possible at all.** The `call` pointer is the identity of a timer, but three of the four families
+ * are embedded in structures that the heap allocates (`thread->wait_timer`, `thread->depress_timer`,
+ * a thread_call group's `delayed_timers`), so the pointer resolves to no symbol in the image and the
+ * log entry would say only "something was armed". `timer_call_setup` is called exactly once per timer,
+ * at initialization, with the callback as its second argument - so publishing *every* `setup` call
+ * (there are about fifteen) gives the reader a table to join the `call` pointers against, and the
+ * function that gets armed is then a name. The publication is unconditional for that reason and not on
+ * the powers of two the counters use: a `setup` that was not published is a `call` pointer that can
+ * never be resolved, so a sampled table would be a table with holes in it.
+ *
+ * **The bounds are the other half of the design.** `entry_timer_enter` can be on the per-syscall path
+ * (`syscall_subr.c`'s depress timer is armed from the syscall return), and a run of this boot makes
+ * eight million `getpid` calls; an instrument that published each one would put millions of records
+ * into a log whose interesting part is four thousand armings, and one that *did* work per call would
+ * perturb what it measures. So the first `STAGE90_TMR_ENTER_SHOWN` events are published in full and
+ * the rest are counted, on the powers of two, into an overflow key - the census is complete as a
+ * *count* at any volume and complete as a *record* for the window that contains the metronome, which
+ * starts at arming 15 of the run and is therefore inside the window by construction.
+ */
+#define STAGE90_TMR_SETUP_SHOWN   24u
+#define STAGE90_TMR_ENTER_SHOWN   64u
+#define STAGE90_TMR_QEXPIRE_SHOWN 16u
+#define STAGE90_TMR_SRC_MAX       8u
+static uint32_t g_tmr_setup_n;
+static uint32_t g_tmr_setup_over;
+static uint32_t g_tmr_enter_n;
+static uint32_t g_tmr_enter_over[STAGE90_TMR_SRC_MAX];
+static uint32_t g_tmr_enter_over_all;
+static uint32_t g_tmr_src_calls[STAGE90_TMR_SRC_MAX];
+static uint32_t g_tmr_qexp_n;
+static uint32_t g_tmr_qexp_over;
+
+/* Called from `entry_trace.c`'s `--wrap=timer_call_setup`, once per timer in the kernel. `func` is
+ * the callback that will run when that timer fires and `param0` is the object it was set up for -
+ * which for three of the four families is the thread or the processor the timer belongs to, so the
+ * pair names both the code and the owner. */
+void entry_timebase_note_timer_setup(uint32_t call, uint32_t func, uint32_t param0)
+{
+    g_tmr_setup_n++;
+
+    if (g_tmr_setup_n <= STAGE90_TMR_SETUP_SHOWN) {
+        TB_LIVE("xnu_live_tmr_setup_seq", g_tmr_setup_n);
+        TB_LIVE("xnu_live_tmr_setup_call", call);
+        TB_LIVE("xnu_live_tmr_setup_func", func);
+        TB_LIVE("xnu_live_tmr_setup_param", param0);
+    } else {
+        g_tmr_setup_over++;
+        if (g_tmr_setup_over == 1u) {
+            TB_LIVE("xnu_live_tmr_setup_over", g_tmr_setup_over);
+        }
+    }
+}
+
+/* Called from the three `timer_call_enter` wrappers and from the quantum timer's own entry point.
+ * `source` is the number documented above the state; `deadline` is the absolute time the caller asked
+ * for, and `now` is read here rather than in the wrapper so that the delta and the timestamp are the
+ * same instant. */
+void entry_timebase_note_timer_enter(uint32_t source, uint32_t call, uint64_t deadline,
+                                     uint32_t flags)
+{
+    uint32_t now;
+
+    g_tmr_enter_n++;
+
+    if (source < STAGE90_TMR_SRC_MAX) {
+        g_tmr_src_calls[source]++;
+    }
+
+    if (g_tmr_enter_n <= STAGE90_TMR_ENTER_SHOWN) {
+        now = (uint32_t)stage90_cntvct_read();
+        TB_LIVE("xnu_live_tmr_enter_seq", g_tmr_enter_n);
+        TB_LIVE("xnu_live_tmr_enter_src", source);
+        TB_LIVE("xnu_live_tmr_enter_call", call);
+        TB_LIVE("xnu_live_tmr_enter_flags", flags);
+        TB_LIVE("xnu_live_tmr_enter_deadline_lo", (uint32_t)deadline);
+        TB_LIVE("xnu_live_tmr_enter_deadline_hi", (uint32_t)(deadline >> 32));
+        TB_LIVE("xnu_live_tmr_enter_now", now);
+        TB_LIVE("xnu_live_tmr_enter_delta", (uint32_t)(deadline - (uint64_t)now));
+    } else {
+        g_tmr_enter_over_all++;
+        if (source < STAGE90_TMR_SRC_MAX) {
+            g_tmr_enter_over[source]++;
+        }
+        if ((g_tmr_enter_over_all & (g_tmr_enter_over_all - 1u)) == 0u) {
+            TB_LIVE("xnu_live_tmr_enter_over", g_tmr_enter_over_all);
+        }
+    }
+
+    if ((g_tmr_enter_n & (g_tmr_enter_n - 1u)) == 0u) {
+        TB_LIVE("xnu_live_tmr_src0", g_tmr_src_calls[0]);
+        TB_LIVE("xnu_live_tmr_src1", g_tmr_src_calls[1]);
+        TB_LIVE("xnu_live_tmr_src2", g_tmr_src_calls[2]);
+        TB_LIVE("xnu_live_tmr_src3", g_tmr_src_calls[3]);
+        TB_LIVE("xnu_live_tmr_src4", g_tmr_src_calls[4]);
+    }
+}
+
+/* Called from `entry_trace.c`'s `--wrap=thread_quantum_expire`, whose second argument is the thread
+ * whose quantum ran out - the identity `quantum_timer_expire` reads out of the `timer_call` it is
+ * firing, and therefore the thread the scheduler was preempting when the 1 ms arming in the census
+ * above was produced. If the metronome turns out to be the quantum timer, this is the record that
+ * says *whose* it was. */
+void entry_timebase_note_quantum_expire(uint32_t thread)
+{
+    g_tmr_qexp_n++;
+
+    if (g_tmr_qexp_n <= STAGE90_TMR_QEXPIRE_SHOWN) {
+        TB_LIVE("xnu_live_tmr_qexp_seq", g_tmr_qexp_n);
+        TB_LIVE("xnu_live_tmr_qexp_thread", thread);
+    } else {
+        g_tmr_qexp_over++;
+        if ((g_tmr_qexp_over & (g_tmr_qexp_over - 1u)) == 0u) {
+            TB_LIVE("xnu_live_tmr_qexp_over", g_tmr_qexp_over);
+        }
+    }
+}
+
+/* --------------------------------------------------------------------------------------------- */
 /* The report                                                                                     */
 /* --------------------------------------------------------------------------------------------- */
 
@@ -505,6 +780,33 @@ __attribute__((noinline)) void entry_timebase_write_kv(void)
     entry_write_kv("xnu_entry_setpop_deadline_lo", g_setpop_first_deadline_lo);
     entry_write_kv("xnu_entry_setpop_deadline_hi", g_setpop_first_deadline_hi);
     entry_write_kv("xnu_entry_setpop_returned", g_setpop_first_returned);
+    /* 484: the census of armed values and the armer's count. Every one of these is zero at the
+     * epilogue, because the epilogue is inside `arm_init`'s own window and the first arming is later -
+     * so a *non-zero* here would be the finding and a zero is the expected reading. They are in the
+     * report as well as the live channel because the report is what a run that stops early carries,
+     * and a reader comparing the two channels should not have to guess which keys the earlier one
+     * could never have. */
+    entry_write_kv("xnu_entry_dec_ref", g_dec_ref_value);
+    entry_write_kv("xnu_entry_dec_same", g_dec_same);
+    entry_write_kv("xnu_entry_dec_other", g_dec_other);
+    entry_write_kv("xnu_entry_dec_distinct", g_dec_distinct);
+    entry_write_kv("xnu_entry_dec_other_more", g_dec_other_more);
+    entry_write_kv("xnu_entry_dec_shown0", g_dec_shown_value[0]);
+    entry_write_kv("xnu_entry_dec_shown0_call", g_dec_shown_call[0]);
+    entry_write_kv("xnu_entry_dec_shown0_count", g_dec_shown_count[0]);
+    entry_write_kv("xnu_entry_dec_shown1", g_dec_shown_value[1]);
+    entry_write_kv("xnu_entry_dec_shown1_call", g_dec_shown_call[1]);
+    entry_write_kv("xnu_entry_dec_shown1_count", g_dec_shown_count[1]);
+    entry_write_kv("xnu_entry_tmr_setup_n", g_tmr_setup_n);
+    entry_write_kv("xnu_entry_tmr_setup_over", g_tmr_setup_over);
+    entry_write_kv("xnu_entry_tmr_enter_n", g_tmr_enter_n);
+    entry_write_kv("xnu_entry_tmr_enter_over", g_tmr_enter_over_all);
+    entry_write_kv("xnu_entry_tmr_src1", g_tmr_src_calls[1]);
+    entry_write_kv("xnu_entry_tmr_src2", g_tmr_src_calls[2]);
+    entry_write_kv("xnu_entry_tmr_src3", g_tmr_src_calls[3]);
+    entry_write_kv("xnu_entry_tmr_src4", g_tmr_src_calls[4]);
+    entry_write_kv("xnu_entry_tmr_qexp_n", g_tmr_qexp_n);
+    entry_write_kv("xnu_entry_tmr_qexp_over", g_tmr_qexp_over);
     entry_write_kv("xnu_entry_dec_writes", g_dec_writes);
     entry_write_kv("xnu_entry_dec_first_value", g_dec_first_value);
     entry_write_kv("xnu_entry_dec_first_readback", g_dec_first_readback);

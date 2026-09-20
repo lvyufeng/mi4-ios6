@@ -705,6 +705,13 @@ uint32_t g_live_alias_read;
 uint32_t g_live_sctlr;
 uint32_t g_live_prrr;
 uint32_t g_live_attr;
+/* 484: the table the last `entry_mmio_section` installed into, read at the install rather than
+ * latched at the console's first write, and whether that table was the one the console latched. */
+uint32_t g_live_mmio_l1;
+uint32_t g_live_mmio_l1_moved;
+uint32_t g_live_mmio_ttbr0;
+uint32_t g_live_mmio_ttbr1;
+uint32_t g_live_mmio_calls;
 /*
  * Experiment 453. 452's frontier is the one record after `publishResource("IOBSD")` - a block at
  * `lck_mtx_sleep_deadline+0x88` that never returns - and `entry_note_block` cannot say who asked for
@@ -1724,6 +1731,33 @@ static uint32_t entry_live_map(uint32_t va, uint32_t pa, uint32_t l1, uint32_t b
 }
 
 /*
+ * **Which table answers for an address above the `TTBCR` boundary, read now.** `TTBCR.N` is the
+ * boundary: N == 0 means every address goes through TTBR0, and N >= 1 sends the upper window to
+ * TTBR1 - and both the console and every device this instrument maps are above 0x80000000, so those
+ * are the only two cases. The low 14 bits of a TTBR are the walk attribute, not part of the base.
+ *
+ * There is exactly one spelling of this rule in the image, and both callers use it: the console's
+ * init, which latches the answer as `g_live_l1`, and `entry_mmio_section`, which must *not* latch it
+ * (see the comment there). 484 split it out after a run in which the two answers differed.
+ */
+static uint32_t entry_live_ttb_base(uint32_t *ttbr0_out, uint32_t *ttbr1_out)
+{
+    uint32_t ttbr0, ttbr1, ttbcr, n;
+
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 1" : "=r"(ttbr1));
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));
+
+    if (ttbr0_out != 0)
+        *ttbr0_out = ttbr0;
+    if (ttbr1_out != 0)
+        *ttbr1_out = ttbr1;
+
+    n = ttbcr & 7u;
+    return ((n == 0u) ? ttbr0 : ttbr1) & 0xffffc000u;
+}
+
+/*
  * **482: one device-register section for a caller outside this file.** It is the live channel's own
  * mapping - same L1, same attribute, same recipe - and it is deliberately unavailable before the
  * live channel exists: `g_live_attr` is computed once, from this machine's `PRRR` and `SCTLR.TRE`,
@@ -1735,19 +1769,60 @@ static uint32_t entry_live_map(uint32_t va, uint32_t pa, uint32_t l1, uint32_t b
  * with a Normal attribute is a peripheral whose registers read as the last value a cache line held.
  * That failure has no symptom until it has a wrong one, which is why this function does not take an
  * attribute argument.
+ *
+ * ------------------------------------------------------------------------------------------------
+ * 484: **which table, read at the moment of the install** - the one thing this function got wrong
+ * ------------------------------------------------------------------------------------------------
+ *
+ * 482's mapper installed into `g_live_l1`, the table the console read out of `TTBR0`/`TTBR1` at its
+ * *first* live write and has kept ever since. That was sound for the console and wrong for everyone
+ * else, and the two cases differ by *when* the caller runs:
+ *
+ *   - The console's own sections go in before XNU's `arm_vm_init` copies the boot table: it computes
+ *     `cpu_ttep = topOfKernelData + ARM_PGBYTES * 4` and `bcopy(boot_tte, cpu_tte, ARM_PGBYTES * 4)`
+ *     (`osfmk/arm/arm_vm_init.c:370-380`), and the copy is what carries the console's descriptors
+ *     into the table the MMU walks afterwards. So the console's latch stays valid *because* its
+ *     install happened first.
+ *   - A caller that runs after that copy - 482's GIC probe - writes its descriptor into a table the
+ *     MMU has already stopped walking. The write succeeds, the read-back succeeds, and the *next*
+ *     load from that VA is a translation fault, which is what 484's run recorded: `sleh_abort` at
+ *     interrupt context, `pc = gicd_read+4`, `far = 0xf9000000`, with the console's `xnu_live_l1` at
+ *     `0x80700000` (the boot table) where 483 had read `0x80704000` (the system one). 483's run was
+ *     not right either - it was *lucky*: its first live write came from `ml_init_timebase`, which runs
+ *     after the copy, so the latch happened to name the live table.
+ *
+ * So the table is not a latched answer any more; it is a reading, taken here, every time. The one
+ * definition of "which table answers for an address above the boundary" is `entry_live_ttb_base`,
+ * used by the console's init and by this mapper both - a second spelling is the twenty-four "one
+ * value, two definitions" defects with a faulting load as the failure mode. The readings are kept in
+ * `g_live_mmio_*` so a log can say *which* table a device mapping went into and whether it was the
+ * one the console latched.
  */
 uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_before_out,
                             uint32_t *desc_out)
 {
+    uint32_t l1;
+
     if (g_live_state != 1u)
         return 0u;
-    return entry_section_install(va, pa, g_live_l1, g_live_attr, slot_before_out, desc_out);
+
+    l1 = entry_live_ttb_base(&g_live_mmio_ttbr0, &g_live_mmio_ttbr1);
+    g_live_mmio_l1 = l1;
+    g_live_mmio_l1_moved = (l1 != g_live_l1) ? 1u : 0u;
+    g_live_mmio_calls++;
+
+    /* The same window and alignment test the console's init makes, for the same reason: a table
+     * outside the kernel's window is a reason to refuse, not a reason to write to it. */
+    if (l1 < 0x80000000u || (l1 & 0x3fffu) != 0u)
+        return 0u;
+
+    return entry_section_install(va, pa, l1, g_live_attr, slot_before_out, desc_out);
 }
 
 static void entry_live_init(void)
 {
     const uint32_t retry_limit = 8u;
-    uint32_t ttbr0, ttbr1, ttbcr, dacr, sctlr, prrr, l1, n, i, attr, installed;
+    uint32_t ttbr0, ttbr1, ttbcr, dacr, sctlr, prrr, l1, i, attr, installed;
 
     g_live_attempts++;
 
@@ -1765,13 +1840,12 @@ static void entry_live_init(void)
     g_live_prrr = prrr;
 
     /*
-     * Which table answers for the console's address. `TTBCR.N` is the boundary: N == 0 means every
-     * address goes through TTBR0, and N >= 1 sends the upper window to TTBR1 - and the console is
-     * above 0x80000000, so those are the only two cases. The low 14 bits are the walk attribute, not
-     * part of the base.
+     * Which table answers for the console's address - the same reader the mapper uses, so the two
+     * cannot disagree about the rule. `g_live_l1` is this init's *latch* of that answer, valid for the
+     * console (whose sections are installed before `arm_vm_init` copies the boot table) and not to be
+     * used as the table a later install goes into: `entry_mmio_section` re-reads it for that.
      */
-    n = ttbcr & 7u;
-    l1 = (((n == 0u) ? ttbr0 : ttbr1)) & 0xffffc000u;
+    l1 = entry_live_ttb_base(0, 0);
     g_live_l1 = l1;
 
     /*
@@ -3294,6 +3368,16 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     entry_write_kv("xnu_entry_live_sctlr", g_live_sctlr);
     entry_write_kv("xnu_entry_live_prrr", g_live_prrr);
     entry_write_kv("xnu_entry_live_attr", g_live_attr);
+    /*
+     * 484: the table a *device* mapping went into - read at the install, not latched - and whether it
+     * was the table the console latched. `_moved` of 1 is the reading that says the console's latch
+     * and the live table were not the same, which is the state 484's run faulted in.
+     */
+    entry_write_kv("xnu_entry_live_mmio_l1", g_live_mmio_l1);
+    entry_write_kv("xnu_entry_live_mmio_l1_moved", g_live_mmio_l1_moved);
+    entry_write_kv("xnu_entry_live_mmio_ttbr0", g_live_mmio_ttbr0);
+    entry_write_kv("xnu_entry_live_mmio_ttbr1", g_live_mmio_ttbr1);
+    entry_write_kv("xnu_entry_live_mmio_calls", g_live_mmio_calls);
     entry_write_kv("xnu_entry_vmwait_caller", g_vmwait_caller);
     entry_write_kv("xnu_entry_vmwait_count", g_vmwait_count);
     /*
