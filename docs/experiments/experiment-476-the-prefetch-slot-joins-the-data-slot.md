@@ -126,6 +126,17 @@ statement after the block in `ipc_mqueue_receive` is `ipc_mqueue_receive_results
 `wresult` was is not in this log** — the trap frame is `DebuggerTrapWithState`'s own (`r4` to `r9` all
 zero) — and that is 477's frontier, not a gap in this record.
 
+**478 retracts the reading of this section's first sentence, and the site was right.** The panic *was*
+at `ipc_mqueue_receive`'s switch - `0x800e9f44`'s `cmp r0, #3` / `bhi panic` in this image - but the
+value it switched on was **not** `thread_block`'s. This image's wrapper was declared
+`void __wrap_thread_block(void *)` against a `wait_result_t`-returning function, so every `r0` the
+switch read was garbage the instrument had left there. `wresult` was not missing from the log; it was
+missing from the machine. See `experiment-478`, whose run does not stop here at all: with the ABI fixed
+the boot reaches process 1's death and panics in `launchd_crashed_panic` instead. The measurements
+*above* are unaffected - the fifth abort, `frame_ok = 1`, the class-dependent pair, the `lr`-derivation
+argument and the two-block trap record all stand, and the two `xnu_entry_trap_r9_fmt` values this doc
+compares are format strings either way.
+
 **Measured:** gate passed, exit 0, device back on Android by itself, log 487314 bytes / 5689 lines,
 entry image `.text` 5224416, image bytes 5438068, `.bss` 0x8052fa80..0x80587500, 43 `--wrap`ped symbols
 (40 reached, 1 same-object-only, 1 never called, 1 by address), undefined 26, console

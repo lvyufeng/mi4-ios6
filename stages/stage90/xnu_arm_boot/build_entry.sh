@@ -271,6 +271,16 @@ run python3 "$REPO_ROOT/tools/check_saved_state_offsets.py" --verbose || exit 1
 # the refusal.
 run python3 "$REPO_ROOT/tools/check_undef_handler.py" --guard --source "$BOOT_DIR/entry_stubs.c" || exit 1
 
+# **And the value 478 records must be read against Apple's own set (478).** `thread_block`'s return is
+# `self->wait_result`, the argument of the panic 476's and 477's runs stop on, and the image decides
+# what it is by comparing it with six `THREAD_*` values it writes out by hand - as `case` labels in
+# `entry_block_result_slot`, each with the member's *name* in a comment beside it. The name is the
+# claim, and until now nothing checked it: a case labelled `/* THREAD_RESTART */` holding 10 would
+# publish a slot the enum does not have and the log would read exactly as convincingly. `--selftest`
+# breaks each claim in turn - a case's value, a case's name, a member's absence, a slot's order, the
+# array's size, a slot's key name, a hand-written report - and requires the refusal.
+run python3 "$REPO_ROOT/tools/check_block_result_slots.py" --verbose || exit 1
+
 
 say "== compiling the symbols start.s needs =="
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \

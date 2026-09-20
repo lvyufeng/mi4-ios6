@@ -173,3 +173,13 @@ every thread's `wait_result` to). The two readings are different claims about th
 receive path was entered with a wait that could not happen, -1 says the wake never came — and with no
 timer and no interrupt controller in this image, "the wake never came" is the reading that has an
 already-owed fix behind it.
+
+**478 did the capture and the answer is neither value, because the wrapper discarded more than the
+number.** The "one line" above was the whole defect: `void __wrap_thread_block(void *)` against a
+`wait_result_t`-returning function means the `r0` `ipc_mqueue_receive` switches on was whatever the
+wrapper's tail call left there — so the panic this section's last paragraph reasons about, and the two
+candidates above, are about a number the kernel never produced. With the declaration corrected the value
+is `0` (`THREAD_AWAKENED`) on every one of the fifteen returns, and the run does not stop here at all.
+See `experiment-478`; everything else this doc measured — the split, `SS_LR` vs `LR_und`, the absent
+`type = 3` — stands, and the two paragraphs above are kept because *why* they looked right is the
+lesson.

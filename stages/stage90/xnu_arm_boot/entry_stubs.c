@@ -498,6 +498,64 @@ uint32_t g_block_ring_thread[8];
  */
 uint32_t g_block_first_now;
 uint32_t g_block_last_now;
+/*
+ * Experiment 478. `thread_block` returns `self->wait_result` and **that value is the argument of the
+ * panic 476 and 477 both stop on**: `ipc_mqueue_receive`'s tail is `ipc_mqueue_receive_results(wresult)`
+ * and its `default:` arm panics for anything outside `THREAD_AWAKENED` (0), `THREAD_TIMED_OUT` (1),
+ * `THREAD_INTERRUPTED` (2) and `THREAD_RESTART` (3). Until this step the wrapper threw the value away,
+ * so the run could name the site and not the number.
+ *
+ * `g_block_results[]` is the histogram of every return with the enum's members as their own slots -
+ * `ENTRY_BLOCK_RESULT_SLOTS` of them, the last one for a value the enum does not have, which is the
+ * one that matters. A *slot* rather than six named counters because the mapping from `wait_result_t`
+ * to slot is `entry_block_result_slot` and the report names the slots in an array of key names, the
+ * arrangement the device-tree walk's report already uses; the alternative is six counters written out
+ * by hand in three places.
+ *
+ * `g_block_first_odd_*` is the one that has to survive a run that dies: the first return the receive
+ * path could not accept, with its caller, its sequence number and the thread, written to the *live*
+ * channel as well as to `.bss` - because the read this step exists for is the one immediately before
+ * the panic, and a panic is not a place to be waiting for an epilogue.
+ */
+#define ENTRY_BLOCK_RESULT_SLOTS 7u
+uint32_t g_block_results[ENTRY_BLOCK_RESULT_SLOTS];
+uint32_t g_block_last_result;
+uint32_t g_block_last_result_caller;
+uint32_t g_block_first_odd_result;
+uint32_t g_block_first_odd_caller;
+uint32_t g_block_first_odd_seq;
+uint32_t g_block_ring_result[8];
+
+/* `osfmk/kern/kern_types.h:76-81` by name and value: 0..3 keep their numbers, 10 and -1 get the two
+ * slots after them, and everything else is the last one. A function and not a table so the values are
+ * written where a reader can compare them with the header. */
+static unsigned entry_block_result_slot(uint32_t result)
+{
+    switch (result) {
+    case 0u:          return 0u;          /* THREAD_AWAKENED     */
+    case 1u:          return 1u;          /* THREAD_TIMED_OUT    */
+    case 2u:          return 2u;          /* THREAD_INTERRUPTED  */
+    case 3u:          return 3u;          /* THREAD_RESTART      */
+    case 10u:         return 4u;          /* THREAD_NOT_WAITING  */
+    case 0xFFFFFFFFu: return 5u;          /* THREAD_WAITING      */
+    default:          return 6u;          /* not one of them     */
+    }
+}
+
+/* The slot's key name, so the seven literals exist once: `entry_write_478_kv` writes the histogram
+ * from `.bss` at the epilogue and `entry_note_block_return` writes it live at the first unusable
+ * return, and the two reports have to name the same slots the same way or the pair is unreadable. */
+static const char *entry_block_result_key(unsigned slot)
+{
+    static const char *const names[ENTRY_BLOCK_RESULT_SLOTS] = {
+        "xnu_entry_block_results_k0", "xnu_entry_block_results_k1",
+        "xnu_entry_block_results_k2", "xnu_entry_block_results_k3",
+        "xnu_entry_block_results_k4", "xnu_entry_block_results_k5",
+        "xnu_entry_block_results_k6"
+    };
+
+    return names[slot < ENTRY_BLOCK_RESULT_SLOTS ? slot : ENTRY_BLOCK_RESULT_SLOTS - 1u];
+}
 uint32_t g_vmwait_caller;
 uint32_t g_vmwait_count;
 /*
@@ -2484,6 +2542,50 @@ __attribute__((noinline)) static void entry_write_474_kv(void)
     entry_write_kv("xnu_entry_sleh_user", g_sleh_user_mode);
 }
 
+/*
+ * 478's keys, in a function of their own for 455's reason - the epilogue's constant pool is at the
+ * PC-relative edge and each new key costs code in whichever function holds it.
+ *
+ * Sixteen keys, and the group answers one question three ways, because the run this step is for may
+ * die at the panic and only the **live** channel survives that:
+ *
+ *   - `_result`/`_result_caller` are the last return, which is the value `ipc_mqueue_receive`'s
+ *     `switch` was handed - the argument of the panic 476 and 477 both stopped on.
+ *   - `_results_k0 .. _results_k6` are the histogram, one slot per enum member. Slot 6 is "not one of
+ *     them" and slots 4 and 5 are the two candidates the 477 doc named, `THREAD_NOT_WAITING` (10) and
+ *     `THREAD_WAITING` (-1), so **a run whose counts are all in slots 0..3 has no explanation to
+ *     give** and the reading has to be looked for elsewhere rather than read off the histogram.
+ *   - `_first_odd_*` is the first return outside 0..3 with its caller and its place in the sequence.
+ *     It exists because the histogram alone cannot say *when* the bad value appeared: the last result
+ *     before a panic and the first unusable one are the same event only if the panic followed it
+ *     immediately, and that is an assumption this key makes unnecessary.
+ *
+ * The slot names come from `entry_block_result_key` and not from a table here for the reason 478's
+ * slot comment gives: `entry_block_result_slot` is the mapping, and writing it out again in the
+ * report is the "one value, two definitions" shape. `_results_k%d` keeps the suffix convention the
+ * sleep and iolock counters use.
+ */
+__attribute__((noinline)) static void entry_write_478_kv(void)
+{
+    entry_write_kv("xnu_entry_block_result", g_block_last_result);
+    entry_write_kv("xnu_entry_block_result_caller", g_block_last_result_caller);
+    for (unsigned i = 0; i < ENTRY_BLOCK_RESULT_SLOTS; i++)
+        entry_write_kv(entry_block_result_key(i), g_block_results[i]);
+    entry_write_kv("xnu_entry_block_first_odd_seq", g_block_first_odd_seq);
+    entry_write_kv("xnu_entry_block_first_odd_result", g_block_first_odd_result);
+    entry_write_kv("xnu_entry_block_first_odd_caller", g_block_first_odd_caller);
+    for (unsigned i = 0; i < 8u; i++) {
+        static const char *const br[8] = {
+            "xnu_entry_block0_result", "xnu_entry_block1_result",
+            "xnu_entry_block2_result", "xnu_entry_block3_result",
+            "xnu_entry_block4_result", "xnu_entry_block5_result",
+            "xnu_entry_block6_result", "xnu_entry_block7_result"
+        };
+
+        entry_write_kv(br[i], g_block_ring_result[i]);
+    }
+}
+
 __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
 {
     uint32_t sctlr;
@@ -3103,6 +3205,10 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     /* 474: the same handler's *frame* - the faulting instruction, the mode it was running in, and
      * the two numbers that say whether the offsets this image read it at are the kernel's. */
     entry_write_474_kv();
+    /* 478: what `thread_block` returned - the value the panic 476 and 477 both stopped on is the
+     * argument of. Last in this list because it is the newest, and live as well as here because the
+     * run it is for may never reach this line. */
+    entry_write_478_kv();
 #endif
     /*
      * Experiment 272. Runs here, after the first line of the report is already in the console, so
@@ -3188,9 +3294,16 @@ void entry_epilogue_block(const char *why, uint32_t caller, uint32_t continuatio
  * read here because the read belongs where the `lr` is read - in the wrapper, which is the only place
  * that knows the value was taken between two context switches - and because this file must stay
  * callable from a build without `entry_trace.c`.
+ *
+ * Experiment 478 makes it return the index it used. The wrapper hands that back to
+ * `entry_note_block_return`, which is what lets `block<N>_result` and `block<N>_caller` be the same
+ * block: blocks are not nested one per stack, so a return's own ordinal and its entry's are two
+ * numbers as soon as a block does not come back - see that function.
  */
-void entry_note_block(uint32_t caller, uint32_t continuation, uint32_t thread, uint32_t now)
+uint32_t entry_note_block(uint32_t caller, uint32_t continuation, uint32_t thread, uint32_t now)
 {
+    uint32_t seq = g_block_count;
+
     if (g_block_count == 0) {
         g_block_caller = caller;
         g_block_continuation = continuation;
@@ -3213,16 +3326,60 @@ void entry_note_block(uint32_t caller, uint32_t continuation, uint32_t thread, u
     entry_live_write("xnu_live_block_now", now);
     g_block_count++;
     entry_live_write("xnu_live_block_seq", g_block_count);
+
+    return seq;
 }
 
-void entry_note_block_return(uint32_t caller)
+void entry_note_block_return(uint32_t caller, uint32_t result, uint32_t seq)
 {
+    unsigned slot = entry_block_result_slot(result);
+
     if (g_block_returned == 0)
         g_block_first_return_caller = caller;
+    /*
+     * `seq` is the index `entry_note_block` wrote this block into, **not** this return's ordinal.
+     * They are different numbers as soon as one block does not come back - and the block that never
+     * comes back is the only block this instrument has ever been asked about (447, 476, 477). Writing
+     * the return into `g_block_returned`'s slot would put an N-th *return* beside an N-th *entry*'s
+     * caller in the same `block<N>_*` group and label two different blocks with one index, which is
+     * the misreading 476's `sort -u` incident was made of.
+     */
+    if (seq < 8u)
+        g_block_ring_result[seq] = result;
     g_block_last_return_caller = caller;
+    g_block_last_result = result;
+    g_block_last_result_caller = caller;
+    g_block_results[slot]++;
     g_block_returned++;
     entry_live_write("xnu_live_block_return", caller);
+    entry_live_write("xnu_live_block_result", result);
     entry_live_write("xnu_live_block_returns", g_block_returned);
+    /*
+     * 478: the one record that has to exist before the panic does. The first return the receive path
+     * cannot accept is written to the live channel *and* to `.bss`, with its caller and its place in
+     * the sequence, so the run names the number even if it never reaches the epilogue - which is the
+     * case 476 and 477 were both in, one statement away from the panic this value is the argument of.
+     *
+     * The test is `result > 3u` and not a slot number: 0..3 are `THREAD_AWAKENED` through
+     * `THREAD_RESTART`, which is the set `ipc_mqueue_receive_results`'s switch accepts, and both
+     * candidates the 477 doc named - 10 and -1 - are above 3. Written this way the condition is the
+     * property rather than a restatement of the slot table, so adding a member to the enum cannot
+     * silently widen it.
+     */
+    if (result > 3u && g_block_first_odd_seq == 0u) {
+        g_block_first_odd_seq = g_block_returned;
+        g_block_first_odd_result = result;
+        g_block_first_odd_caller = caller;
+        entry_live_write("xnu_live_block_odd_seq", g_block_first_odd_seq);
+        entry_live_write("xnu_live_block_odd_result", result);
+        entry_live_write("xnu_live_block_odd_caller", caller);
+        /* The histogram, once, on the one event that makes it worth the channel's budget - written
+         * here rather than on every return for the reason `entry_live_write`'s own comment gives:
+         * the channel is a 4096-record budget and the records this step must not lose are the ones
+         * immediately around the panic. */
+        for (unsigned i = 0; i < ENTRY_BLOCK_RESULT_SLOTS; i++)
+            entry_write_kv(entry_block_result_key(i), g_block_results[i]);
+    }
 }
 
 /* Experiment 456's probe, defined below its first caller; the declaration is here because

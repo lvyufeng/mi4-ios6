@@ -136,8 +136,12 @@ extern void entry_note_vmwait(uint32_t caller);
  * non-terminal block needs both and why the ring is eight deep. 453 added the thread to the first,
  * which is the value `entry_thread()` returns below.
  */
-extern void entry_note_block(uint32_t caller, uint32_t continuation, uint32_t thread, uint32_t now);
-extern void entry_note_block_return(uint32_t caller);
+extern uint32_t entry_note_block(uint32_t caller, uint32_t continuation, uint32_t thread,
+                                 uint32_t now);
+/* 478: the second argument is `thread_block`'s own return value, `self->wait_result`, and the third
+ * is the index `entry_note_block` wrote this block into - passed through so that a block's entry and
+ * its return carry the same number even when the block in between never came back. */
+extern void entry_note_block_return(uint32_t caller, uint32_t result, uint32_t seq);
 
 /*
  * 453's one, called by the six sleep wrappers below with the frame they were entered from. `ent` is
@@ -545,16 +549,39 @@ uint32_t __wrap_vm_page_wait(uint32_t wait_type)
  * step's run is expected to stop at a *stub* or a *fault*, and why the recovery nets are the answer
  * to the other case. A live channel from inside XNU is its own step; the candidates are named in
  * `docs/experiments/experiment-450-*.md`.
+ *
+ * ----- 478: the return value, which is the one thing this wrapper used to throw away
+ *
+ * **`thread_block` returns `self->wait_result`** (`osfmk/kern/sched_prim.c`, the last statement of
+ * `thread_block_reason`), and 476's and 477's runs both stop inside `ipc_mqueue_receive` **one
+ * statement after a block returned there**: that function's tail is `ipc_mqueue_receive_results(wresult)`
+ * and its `default:` arm is `panic("ipc_mqueue_receive_results: strange wait_result")`
+ * (`osfmk/ipc/ipc_mqueue.c:871`). The switch accepts exactly `THREAD_AWAKENED` (0), `THREAD_TIMED_OUT`
+ * (1), `THREAD_INTERRUPTED` (2) and `THREAD_RESTART` (3), so *the value this function returns is the
+ * panic's argument*, and until now the wrapper called through and ignored it - the run could name the
+ * site and not the number.
+ *
+ * So the value is captured (and returned unchanged, which is the whole ABI of a `--wrap`) and handed
+ * to `entry_note_block_return`, which writes it live for every block and keeps a first-of-each-kind
+ * record for the ones the receive path cannot accept. **The reading it decides**: `10`
+ * (`THREAD_NOT_WAITING`, `osfmk/kern/kern_types.h:81`) means the wait was refused before it started,
+ * and `0xFFFFFFFF` (`THREAD_WAITING`) is what a thread that blocked and was never woken still holds -
+ * it is also what `thread.c:250` initialises every thread's `wait_result` to - which is the reading
+ * the missing timer and interrupt controller would explain.
  */
-void __real_thread_block(void *continuation);
+int __real_thread_block(void *continuation);
 
-void __wrap_thread_block(void *continuation)
+int __wrap_thread_block(void *continuation)
 {
     uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    uint32_t seq;
+    int result;
 
-    entry_note_block(caller, (uint32_t)(uintptr_t)continuation, entry_thread(), entry_counter());
-    __real_thread_block(continuation);
-    entry_note_block_return(caller);
+    seq = entry_note_block(caller, (uint32_t)(uintptr_t)continuation, entry_thread(),
+                           entry_counter());
+    result = __real_thread_block(continuation);
+    entry_note_block_return(caller, (uint32_t)result, seq);
+    return result;
 }
 
 /* ------------------------------------------------------------ the IOKit deadline sleeps (454) */
