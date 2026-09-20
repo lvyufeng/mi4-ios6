@@ -276,7 +276,12 @@ watchdog. 8 holds: `ostext_chars = ostext_total = 0x399` (921, "in the hundreds"
 held in the 8 KB `.bss` tank before the live channel's tables were installed — the tank earning its
 place a second run in a row).
 
-**Next**, and it is two instruments and one question. (1) The question is where the property went
+**Next**, and it is two instruments and one question. (0) The cheapest thing to do first is host-side
+and needs no device: `tools/xnu_dt_walk.py` already replays XNU's own walk over the blob, and what it
+has never replayed is `IODeviceTreeAlloc`'s *stack* loop (`IODeviceTreeSupport.cpp:167-186`, the
+`OSArray` stack with `DTIterateEntries`/`DTEnterEntry`/`DTExitEntry`), which is the layer that decides
+which entry is whose parent in the plane. A node that XNU's reader finds by path can still be attached
+to the wrong parent, and `fromPath` walks parents. (1) The question is where the property went
 between the DT blob and the IODT plane. Two names can be wrapped and would answer it without leaning
 on the OS's print path at all: `IORegistryEntry::fromPath` (the lookup itself, with its path
 argument and its return value) and `mdevadd`/`mdevlookup` (plain C, defined in `memdev.c`, so both
