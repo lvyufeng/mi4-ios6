@@ -55,6 +55,12 @@
 #ifndef STAGE90_ENTRY_TIMEBASE_H
 #define STAGE90_ENTRY_TIMEBASE_H
 
+/* The five accesses at the bottom of this file are declared with fixed-width types, so the header
+ * carries its own. It is not freestanding decoration: `entry_timebase.c` includes `<stdint.h>` at
+ * the top and worked, and `entry_gic.c` - which includes this header first - did not, so the
+ * dependency was real and invisible until a second file included it. */
+#include <stdint.h>
+
 /* `struct cpu_data` (`osfmk/arm/cpu_data.h`) - via genassym's `CPU_*` (see above). */
 #define STAGE90_CPU_DECREMENTER            104
 #define STAGE90_CPU_GET_DECREMENTER_FUNC   108
@@ -120,5 +126,21 @@
  * something that can be observed rather than something that would stop the boot.
  */
 #define STAGE90_CNTV_ARM_MASK   (STAGE90_CNTV_CTL_ENABLE | STAGE90_CNTV_CTL_IMASK)
+
+/*
+ * The five instructions themselves, as five functions rather than as five copies.
+ *
+ * 482's GIC probe arms and masks the same countdown this file owns, so it needs the same five
+ * accesses - and the alternative was a second set of `mcr`/`mrc` lines in `entry_gic.c`, which is
+ * this project's most repeated defect (two definitions of one value, neither compared). The triples
+ * are compared against Apple's own source by `tools/check_timebase_registration.py` on the strength
+ * of being **these** lines, which is a property a copy would not inherit: that check reads them out
+ * of this file, and a second spelling would be a spelling nothing reads.
+ */
+uint32_t stage90_cntv_tval_read(void);
+void     stage90_cntv_tval_write(uint32_t value);
+uint32_t stage90_cntv_ctl_read(void);
+void     stage90_cntv_ctl_write(uint32_t value);
+uint64_t stage90_cntvct_read(void);
 
 #endif /* STAGE90_ENTRY_TIMEBASE_H */

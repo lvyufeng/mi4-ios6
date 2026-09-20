@@ -309,6 +309,15 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
     -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
     -DSTAGE90_ENTRY_TIMEBASE_TRACED="$ENTRY_TRACE" \
     -c "$BOOT_DIR/entry_timebase.c" -o "$OUT/xnu_arm_entry_timebase.o"
+# **482: the routing measurement.** Compiled and linked beside `entry_timebase.c` and on the same
+# condition, because it is the same kind of object: a measurement whose numbers only exist in a traced
+# build, reached from the timer's own first `ml_set_decrementer`. It includes `entry_timebase.h` for the
+# five `CNTV` accesses rather than spelling them a second time, which is why the two objects also share
+# `tools/check_timebase_registration.py`'s reading of those five lines.
+run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
+    -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
+    -DSTAGE90_ENTRY_GIC_TRACED="$ENTRY_TRACE" \
+    -c "$BOOT_DIR/entry_gic.c" -o "$OUT/xnu_arm_entry_gic.o"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
 
@@ -450,6 +459,13 @@ LINK_OBJS=(
 # (`entry_stubs.c`), and nothing else in the image names it. Linking it untraced would add two
 # `__real_*` references with no `--wrap` to resolve them, i.e. two stubs the generator invented.
 [[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_timebase.o")
+
+# 482: the GIC probe, on the same condition and for the same reason - and with one of its own. It
+# names `entry_mmio_section` (`entry_stubs.c`) and the five `CNTV` accessors (`entry_timebase.c`), so
+# it must follow both in this list; and it is the object that reads the *distributor*, so the link is
+# where a build that forgot it would still produce a kernel that boots with the timer masked - which
+# is exactly 481's state, and not a difference a log could show.
+[[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_gic.o")
 
 if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # --- XNU's own objects, and a generated stub for everything they still need -------------------
@@ -27898,5 +27914,19 @@ run python3 "$REPO_ROOT/tools/check_timebase_registration.py" --image "$OUT/xnu_
     --verbose || exit 1
 run python3 "$REPO_ROOT/tools/check_timebase_registration.py" --image "$OUT/xnu_arm_entry.elf" \
     --selftest || exit 1
+
+# **482's six claims, and the four that only the linked image can answer.** The GIC numbers, the two
+# candidate PPIs and the payload's own assertions are read from source; what has to be read out of the
+# image is the vector page itself - which handler slot 6 and slot 7 point at today, that Apple's
+# `locore_fleh_irq` is linked in and in no slot, and above all the shape of Apple's dispatch:
+# `fleh_irq_handler` loading the five `assym.s` `INTERRUPT_*` words out of `cpu_data` into r0..r3 and
+# r5 in that order, then `blx r5`. That last one is the reason the routing decision cannot be made
+# blind - `r5` is read from `cpu_data`+180, and this image has never stored a handler there. A wrapper
+# or a slot change cannot be seen before the link, and neither can a body that no longer has that
+# shape.
+run python3 "$REPO_ROOT/tools/check_gic_routing.py" --image "$OUT/xnu_arm_entry.elf" --verbose \
+    || exit 1
+run python3 "$REPO_ROOT/tools/check_gic_routing.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
+    || exit 1
 say "the payload build reads the .bin from there directly; nothing to install"
 

@@ -118,6 +118,7 @@
 #include <stdint.h>
 
 #include "entry_timebase.h"
+#include "entry_gic.h"
 
 /* Set by `build_entry.sh` from `STAGE90_ENTRY_TRACE`; the live channel exists only in a traced
  * build, and `xnu_entry_timebase_traced` carries the value into the report so a reader never has to
@@ -177,7 +178,7 @@ extern void __real_fiq_context_init(uint32_t enable_fiq);
  * counter, `mrrc p15, 1, lo, hi, c14` - the same instruction Apple's `ml_get_timebase` uses for
  * `CNTPCT` with opc1 0, and the mirror is the check: the two counters differ in that one field.
  */
-static uint32_t stage90_cntv_tval_read(void)
+uint32_t stage90_cntv_tval_read(void)
 {
     uint32_t value;
 
@@ -185,12 +186,12 @@ static uint32_t stage90_cntv_tval_read(void)
     return value;
 }
 
-static void stage90_cntv_tval_write(uint32_t value)
+void stage90_cntv_tval_write(uint32_t value)
 {
     __asm__ volatile ("mcr p15, 0, %0, c14, c3, 0" :: "r" (value) : "memory");
 }
 
-static uint32_t stage90_cntv_ctl_read(void)
+uint32_t stage90_cntv_ctl_read(void)
 {
     uint32_t value;
 
@@ -198,12 +199,12 @@ static uint32_t stage90_cntv_ctl_read(void)
     return value;
 }
 
-static void stage90_cntv_ctl_write(uint32_t value)
+void stage90_cntv_ctl_write(uint32_t value)
 {
     __asm__ volatile ("mcr p15, 0, %0, c14, c3, 1" :: "r" (value) : "memory");
 }
 
-static uint64_t stage90_cntvct_read(void)
+uint64_t stage90_cntvct_read(void)
 {
     uint32_t lo, hi;
 
@@ -255,6 +256,16 @@ static void stage90_tbd_set_decrementer(uint32_t dec_value)
         TB_LIVE("xnu_live_cntvct_a", g_cntvct_a_lo);
         TB_LIVE("xnu_live_cntvct_b", g_cntvct_b_lo);
         TB_LIVE("xnu_live_dec_ctl", g_dec_first_ctl);
+
+        /*
+         * 482: and then the question this sample cannot answer - *which* interrupt line the countdown
+         * that just demonstrably ran appears on. The call is here rather than at the registration
+         * because it needs a countdown it has measured itself, and here rather than after the write
+         * below because the probe parks `CNTV_TVAL` and `CNTV_CTL` and the kernel's own deadline must
+         * be the last thing programmed. `entry_gic.c` carries the three reasons nothing can be
+         * delivered while it runs.
+         */
+        entry_gic_probe();
     }
 
     stage90_cntv_tval_write(dec_value);

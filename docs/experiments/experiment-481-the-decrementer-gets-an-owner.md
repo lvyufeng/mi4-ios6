@@ -4,7 +4,7 @@
 MSM8974 `tbd_ops_t` over the GPT at `0xf9020000` (19.2 MHz, IRQ 19), and `IOCPUInterruptController`
 behind it." The GPT and the interrupt controller are 482's; the registration is this step's, and it went
 in at the one point Apple's own armv7 kernel registers a timebase — inside `PE_init_platform`, from
-`arm_init_cpu`, with `args` = `BootCpuData`.
+`arm_init`, with `args` = `BootCpuData`.
 
 Four kinds of reading are in the log for the first time, and they are of four different kinds:
 
@@ -69,23 +69,33 @@ reports a plausible *pointer* that is some other word of the structure. `tools/c
 now compares both sets against `out/xnu_assym/$CONFIG/assym.s` in both directions and refuses the link when
 they disagree.
 
-## The registration, read out of `arm_init_cpu`'s own order
+## The registration, read out of `arm_init`'s own order
 
-**Where the call has to go is `osfmk/arm/arm_init.c:443-469`, and the order there is the whole argument:**
+**Where the call has to go is `osfmk/arm/arm_init.c:383-385`, and the order there is the whole
+argument:**
 
-    cpu_timebase_init(FALSE);          /* :443 - copies rtclock_timebase_func into cpu_data  */
-    serial_init();                     /*       - which is why this file says "before serial_init" */
-    PE_init_platform(TRUE, NULL);      /* :456 - the registering call, vm_initialized TRUE, args NULL */
-    commpage_update_timebase();        /* :461 */
-    fiq_context_init(TRUE);            /* :467 - loads cpu_data's handler and programs CNTV_CTL */
-    cpu_data_ptr->rtcPop = EndOfAllTime;
-    timer_resync_deadlines();          /* :469 - the first setPop */
+    PE_init_platform(TRUE, &BootCpuData);   /* :383 - the registering call, args = BootCpuData  */
+    cpu_timebase_init(TRUE);                /* :384 - copies rtclock_timebase_func into cpu_data */
+    fiq_context_init(TRUE);                 /* :385 - loads cpu_data's handler, programs CNTV_CTL */
 
-so a registration that has to be *seen* by `cpu_timebase_init`'s copy must happen after the copy and
-before `fiq_context_init`; the only hook between them is `PE_init_platform`. `arm_init`'s own call to
-`PE_init_platform` is the `vm_initialized = FALSE` one and is call 1; the wrapper fires on call **2**,
-which is this one, and the log says so: `xnu_live_timebase_seq = 0x00000002`, with
-`xnu_live_timebase_args = 0x8050a000` = `BootCpuData`.
+so the registration lands **one call before the copy that has to see it** — which is the property the
+hook needs, and the reason `PE_init_platform` is the only place it can be: `ml_init_timebase`'s own
+guard reads `rtclock_timebase_func.tbd_fiq_handler == NULL`, `cpu_timebase_init`'s copy is guarded on
+`cpu_get_fiq_handler == NULL` and is a *struct copy*, and both are satisfied only between line 383 and
+line 384. `arm_init`'s first call to `PE_init_platform` is `(FALSE, args)` at `:159` and is call 1; the
+wrapper fires on call **2**, which is this one, and the log says so:
+`xnu_live_timebase_seq = 0x00000002`, with `xnu_live_timebase_args = 0x8050a000` = `BootCpuData`.
+
+**The near-miss is worth the paragraph, because it is the same shape as the step's own defect.** There
+is a *second* `PE_init_platform` call site with `vm_initialized == TRUE`: `arm_init_cpu`
+(`osfmk/arm/arm_init.c:410`, the **secondary-CPU** path, reached only from `start.s`'s `start_cpu` and
+`resume_idle_cpu`) has `cpu_timebase_init(FALSE)` at `:452` … `PE_init_platform(TRUE, NULL)` at `:463` …
+`fiq_context_init(TRUE)` at `:467` — the same three calls in a different order and with `args == NULL`,
+which the predicate rejects and which this boot never reaches at all. `entry_timebase.c`'s own header
+had the right site from the start, and the first draft of this document read the other one out of the
+tree and argued the hook from *its* order; defect 214 records it. The discriminator that would have
+caught it in one line is the predicate itself — `args == BootCpuData` is false of `:463` by inspection,
+and the run's `xnu_live_timebase_args` is the measurement that makes it false on the machine.
 
 The instrument is `__wrap_PE_init_platform` (`stages/stage90/xnu_arm_boot/entry_timebase.c`), whose
 predicate is `g_registered == 0 && vm_initialized != 0 && args == (void *)BootCpuData` — the three facts
@@ -100,7 +110,7 @@ trusting. The measured table:
 
     xnu_live_timebase_registered = 0x00000001     the predicate fired
     xnu_live_timebase_args       = 0x8050a000     BootCpuData, checked against the symbol
-    xnu_live_timebase_seq        = 0x00000002     the TRUE call, i.e. arm_init_cpu's
+    xnu_live_timebase_seq        = 0x00000002     the `TRUE` call whose `args` is `BootCpuData`
     xnu_live_timebase_get_dec    = 0x80007840
     xnu_live_timebase_set_dec    = 0x80007868
     xnu_live_timebase_fiq        = 0x80007848

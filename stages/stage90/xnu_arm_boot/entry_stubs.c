@@ -1660,11 +1660,19 @@ static void entry_live_refuse(uint32_t why)
 #define LIVE_CONSOLE_ALIAS_BASE (RAM_CONSOLE_BASE + 0x01000000u)
 
 /*
- * One descriptor into one slot, with the checks that make the write safe. Returns the bit it stands
- * for on success and 0 if the slot was already occupied - an occupied slot is *skipped*, not
- * clobbered, because whatever put something there is not this instrument's to overwrite.
+ * One descriptor into one slot, with the checks that make the write safe. Returns 1 on success and 0
+ * if the slot was already occupied - an occupied slot is *skipped*, not clobbered, because whatever
+ * put something there is not this instrument's to overwrite.
+ *
+ * It takes the attribute as an argument and writes no key of its own: the caller owns both, so the
+ * numbers a log records are the numbers this function used, and there is exactly **one** spelling of
+ * the descriptor recipe and exactly one of the attribute. 482 split this out of `entry_live_map`
+ * instead of writing a second mapper for the GIC, because a second spelling that differs in one bit
+ * is a mapping that works until it does not - the twenty-four "one value, two definitions" defects,
+ * with a silently wrong memory type as the failure instead of a wrong number.
  */
-static uint32_t entry_live_map(uint32_t va, uint32_t pa, uint32_t l1, uint32_t bit)
+static uint32_t entry_section_install(uint32_t va, uint32_t pa, uint32_t l1, uint32_t attr,
+                                      uint32_t *slot_before_out, uint32_t *desc_out)
 {
     uint32_t index = va >> 20;
     volatile uint32_t *slot;
@@ -1674,14 +1682,14 @@ static uint32_t entry_live_map(uint32_t va, uint32_t pa, uint32_t l1, uint32_t b
         return 0u;
     slot = (volatile uint32_t *)(uintptr_t)(l1 + 4u * index);
     before = *slot;
-    if (g_live_slot_before == 0u)
-        g_live_slot_before = before;
+    *slot_before_out = before;
     if ((before & LIVE_TTE_TYPE_MASK) != 0u)
         return 0u;
 
     desc = (pa & LIVE_TTE_PA_MASK) | LIVE_TTE_TYPE_BLOCK | LIVE_TTE_BLOCK_AF | LIVE_TTE_BLOCK_SH |
-           g_live_attr;
+           attr;
     *slot = desc;
+    *desc_out = desc;
 
     /*
      * Caches are on by the time this runs (`start.s` sets SCTLR.C and SCTLR.I), so the modified
@@ -1693,12 +1701,47 @@ static uint32_t entry_live_map(uint32_t va, uint32_t pa, uint32_t l1, uint32_t b
     __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
     __asm__ volatile ("mcr p15, 0, %0, c8, c7, 1" :: "r"(va) : "memory");
     __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
+    return 1u;
+}
+
+static uint32_t entry_live_map(uint32_t va, uint32_t pa, uint32_t l1, uint32_t bit)
+{
+    uint32_t before = 0u, desc = 0u;
+    uint32_t ok = entry_section_install(va, pa, l1, g_live_attr, &before, &desc);
+
+    /* The `before` of the *first* call is recorded even when that call was refused - it is the one
+     * number that says what was already in the slot this instrument wanted. */
+    if (g_live_slot_before == 0u)
+        g_live_slot_before = before;
+    if (ok == 0u)
+        return 0u;
 
     if (g_live_desc == 0u)
         g_live_desc = desc;
     else
         g_live_desc2 = desc;
     return bit;
+}
+
+/*
+ * **482: one device-register section for a caller outside this file.** It is the live channel's own
+ * mapping - same L1, same attribute, same recipe - and it is deliberately unavailable before the
+ * live channel exists: `g_live_attr` is computed once, from this machine's `PRRR` and `SCTLR.TRE`,
+ * by the descriptor a console write has already proved, so a caller that asked earlier would be
+ * asking for an attribute nobody has read yet. A live state of 1 *is* that proof.
+ *
+ * The attribute is the thing that must not be re-derived here. `g_live_attr` is 0xc on this device -
+ * `PRRR`'s first strongly-ordered encoding, read out of PRRR rather than guessed - and a GIC mapped
+ * with a Normal attribute is a peripheral whose registers read as the last value a cache line held.
+ * That failure has no symptom until it has a wrong one, which is why this function does not take an
+ * attribute argument.
+ */
+uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_before_out,
+                            uint32_t *desc_out)
+{
+    if (g_live_state != 1u)
+        return 0u;
+    return entry_section_install(va, pa, g_live_l1, g_live_attr, slot_before_out, desc_out);
 }
 
 static void entry_live_init(void)
