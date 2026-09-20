@@ -261,6 +261,17 @@ run python3 "$REPO_ROOT/tools/check_assym_cswitch.py" || exit 1
 # `entry_stubs.c`'s `xnu_live_sleh_frame_ok`.
 run python3 "$REPO_ROOT/tools/check_saved_state_offsets.py" --verbose || exit 1
 
+# **And the two promises the `udf` handler now makes (475), both of them things 474's run turned from
+# prose into failures.** The panic-argument guard's answer for `args = 0` was the read of address 0
+# inside the fault handler; the sentence that permitted it claimed a refused read and an accepted NULL
+# publish different keys, and they published the same one. So the guard's two functions are compiled
+# from this file and run against a case table on the host (`--guard`, here), and the forward a user-mode
+# `udf` makes is read out of the *linked* image (`--forward`, below the link, because the image does not
+# exist yet): `fleh_undef` and Apple's `locore_fleh_undef` must be distinct, and the `bl` inside the
+# handler must compute to Apple's body and not to the handler itself, which would be a recursion inside
+# the fault handler. `tools/check_undef_handler.py --selftest` mutates both and requires the refusal.
+run python3 "$REPO_ROOT/tools/check_undef_handler.py" --guard --source "$BOOT_DIR/entry_stubs.c" || exit 1
+
 
 say "== compiling the symbols start.s needs =="
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
@@ -27699,5 +27710,8 @@ say "headroom     $((ENTRY_BASE + ENTRY_DATA_LIMIT - bss_end)) bytes below topOf
 say "above it     $ENTRY_TABLE_BYTES bytes of page tables at the limit, and free physical memory for XNU above those"
 
 say "wrote $OUT/xnu_arm_entry.bin, .elf, .h, .map"
+
+# The forward, now that the image exists (`--guard` ran above the compile; see its comment).
+run python3 "$REPO_ROOT/tools/check_undef_handler.py" --forward --elf "$OUT/xnu_arm_entry.elf" || exit 1
 say "the payload build reads the .bin from there directly; nothing to install"
 

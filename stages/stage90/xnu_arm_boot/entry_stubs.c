@@ -4577,10 +4577,17 @@ entry_image_ptr(uintptr_t p)
  * running on. Both are derived - 32 from the frame layout, 4096 from the page size - and neither is
  * a base or an image size that a later experiment can move.
  *
- * The refusal is still *visible*, which is the part the old guard got wrong: `xnu_entry_panic_args_page`
- * is the page base this window was accepted on, and zero there means the reads below did not
- * happen. A reader who sees `element = 0` next to `args_page = 0` is looking at a refused read; next
- * to a non-zero page, at a panic that really did pass a zero.
+ * The refusal is still *visible*, which is the part the old guard got wrong - and **474 is the run that
+ * shows the sentence that used to stand here was false.** It read "zero there means the reads below did
+ * not happen", and `entry_panic_args_page(0)` returns 1: zero is 4-aligned and the window `[0, 32)`
+ * lies in one page, so an *accepted* NULL published the same `0 & ~0xFFF` as a refusal and the key
+ * could not tell the two apart. `xnu_entry_panic_args_ok` is that decision as a key of its own (1 =
+ * accepted, 0 = refused), and the page key keeps its name and its value beside it. The deeper
+ * correction is in the paragraph above: this guard tests *shape*, and the sentence that made it read
+ * like a *mapping* test - "the address is not a guess: `r_args` is `panic`'s live frame address" - has a
+ * premise 474 falsified, because the pointer can come from a user-mode `udf`, where the CPU is not on
+ * that stack at all. The zero test is a necessary condition and not that proof; a page-table walk, or a
+ * probe read under a recoverable abort, is what would be, and neither is here.
  *
  * `xnu_entry_panic_ap_delta` is the control, and it is the reason this can be believed rather than
  * hoped for: the frame layout is a compiler decision and no promise makes it 12. Reporting
@@ -4592,6 +4599,16 @@ entry_image_ptr(uintptr_t p)
 static int
 entry_panic_args_page(uintptr_t args)
 {
+    /*
+     * 475: zero is not a frame, and both tests below are trivially true for it. This is the one
+     * comparison 474's run asks for: `args = 0` means no panic frame was recorded - the `udf` is not
+     * `panic`'s - and the read it used to permit was of address 0, inside the fault handler, which is
+     * the fault this handler must not take (269). The result is `xnu_entry_panic_args_ok` in the log
+     * rather than a convention about a page number.
+     */
+    if (args == 0u) {
+        return 0;
+    }
     if ((args & 0x3u) != 0u) {
         return 0;
     }
@@ -4886,6 +4903,22 @@ entry_dt_hash(uintptr_t base, uint32_t n, struct entry_dt_replay *r)
  */
 extern int DTLookupEntry(const void *searchPoint, const char *pathName, void **foundEntry);
 
+/*
+ * Apple's own undefined-instruction vector body, which this image's `fleh_undef` replaces in the
+ * vector table (`entry_vectors.s`'s slot 1; the check in `build_entry.sh` reports both addresses).
+ *
+ * 475 forwards a *user-mode* `udf` to it, and the hazard that makes this declaration worth a sentence
+ * is that the two names are one character of prefix apart: if this ever resolved to the function below
+ * it would be an infinite recursion inside the fault handler, which is the same shape as 474's storm
+ * and just as invisible. `tools/check_undef_handler.py --forward` reads the linked image and fails the
+ * build if the two symbols are equal, or if the `bl` this function makes does not target Apple's body.
+ */
+extern void locore_fleh_undef(void);
+
+/* 475: the mode decision and its count - see the block in `fleh_undef`. */
+static uint32_t g_undef_user;
+static uint32_t g_undef_user_seq;
+
 void fleh_undef(void)
 {
     uintptr_t frame;
@@ -4918,6 +4951,73 @@ void fleh_undef(void)
     entry_panic_kv("xnu_entry_undef_lr", lr_undef);
     entry_panic_kv("xnu_entry_undef_pc", lr_undef - 4);
     entry_panic_kv("xnu_entry_undef_spsr", spsr);
+
+    /*
+     * ---------------------------------------------------------------- 475: which `udf` is this
+     *
+     * **The mode first, because it is the one number that separates `panic`'s `udf` from every other
+     * one - and 474 is the run in which that mattered.** 474's fifth data abort was this handler
+     * faulting at address 0: `pc = 0x80002088` (`entry_word_at`), `cpsr = 0x9b` (UND mode), `far = 0`,
+     * and `lr = 0x10e0` - the user `pc` that `return_to_user_now` had loaded into `lr` before
+     * `movs pc, lr`, i.e. the RAM disk Mach-O's `udf #0`. Process 1 *did* reach user mode; what failed
+     * was this report. The walk below is `panic`'s - `r_args` is the trapped context's `r8`, which for
+     * `panic`'s `udf` is its live `va_list *` - and for a **user** `udf` it is the user's `r8`, which
+     * was 0. The guard accepted the NULL (both of its tests are trivially true at 0: it tests shape,
+     * not mapping), the read faulted in UND mode, and locore's `dataabt_from_kernel` ->
+     * `sleh_abort` -> `map->pmap` with `thread->map = 0` then recursed until the kernel stack ran out.
+     *
+     * **The discriminator is derived, not a heuristic.** `panic`'s `udf` is executed by
+     * `DebuggerTrapWithState` and every route to it is kernel code: `sleh_undef` for an undefined
+     * *kernel* instruction ends in `panic_context` (`osfmk/arm/trap.c`, the `!PSR_USER_MODE` arm),
+     * while the user arm ends in `exception_triage(EXC_BAD_INSTRUCTION, ...)` and never returns. So a
+     * `udf` that reaches this handler with the interrupted mode = user cannot be `panic`'s, and
+     * Apple's own body makes the same test as its *first* two instructions: `mrs sp, SPSR` then
+     * `tst sp, #15; bne undef_from_kernel` at `locore_fleh_undef` + 0x10. This handler has read the
+     * SPSR since 461 and never tested it.
+     *
+     * **What the user branch does is forward to Apple's body rather than report.** `sp` here is the
+     * UND bank's, which `locore_fleh_undef`'s user path does not use (`undef_from_user` takes the
+     * frame from `TPIDRPRW` and the stack from `TH_KSTACKPTR`), so entering it from here is the same
+     * entry the vector would have made in every way that matters. The kernel then handles its own
+     * `udf` as it would have without this image: `sleh_undef`'s user arm reads the instruction with
+     * `COPYIN` and calls `exception_triage(EXC_BAD_INSTRUCTION, ...)`, so process 1 takes its signal
+     * and the boot goes on. That is the point - the instrument must not decide what a user `udf`
+     * means.
+     *
+     * **What the forward does perturb, said plainly, because the first draft of this comment claimed
+     * otherwise.** `r0`-`r12` at this point hold *this function's* values, not the interrupted
+     * context's: `r0`-`r3` are scratch and `r4`-`r11` were pushed by the prologue only so that a
+     * *return* would restore them, which never happens. So the frame `undef_from_user` writes into the
+     * thread's PCB carries the handler's registers. That is acceptable for the one case it happens in -
+     * the thread is about to take a fatal signal - but it is a difference from a vector entry, and a
+     * step that needs the user's registers intact would have to do this test in assembly ahead of the
+     * C body (the vector table's slot 1 would branch to `locore_fleh_undef` directly for user mode).
+     *
+     * **The evidence is written before the forward, and to the live channel.** `entry_panic_kv` goes
+     * into `g_panic_buf`, which only `entry_epilogue` prints - and this path forwards instead of
+     * reaching it, so those four keys would be written and never seen. The live channel is captured by
+     * the payload whether or not the epilogue runs (474's entire `xnu_live_sleh_*` group arrived that
+     * way), so the user's `udf` is reported there, once, in its own keys.
+     *
+     * **The new hazard is a loop, and it is counted rather than argued.** If anything in that path
+     * ever returned to the user thread without retiring its `udf`, the thread would re-execute it and
+     * re-enter this handler forever - 474's lesson is that a loop inside this handler is invisible
+     * unless something counts it. `xnu_live_undef_user_seq` is that count, so a climbing number is the
+     * falsifier. And if Apple's body does *return* (`exception_triage` is `NOTREACHED` by its own
+     * comment, so this should be unreachable), the run ends here with the report rather than falling
+     * into the panic walk with a user frame.
+     */
+    g_undef_user = ((spsr & STAGE90_PSR_MODE_MASK) == STAGE90_PSR_USER_MODE) ? 1u : 0u;
+    entry_panic_kv("xnu_entry_undef_user", g_undef_user);
+    if (g_undef_user != 0u) {
+        g_undef_user_seq++;
+        entry_live_write("xnu_live_undef_user_seq", g_undef_user_seq);
+        entry_live_write("xnu_live_undef_pc", lr_undef - 4u);
+        entry_live_write("xnu_live_undef_lr", lr_undef);
+        entry_live_write("xnu_live_undef_spsr", spsr);
+        locore_fleh_undef();
+        entry_epilogue("exception: undefined instruction in user mode (Apple's handler returned)");
+    }
 
     entry_panic_kv("xnu_entry_panic_str", (uint32_t)(uintptr_t)debugger_panic_str);
     entry_panic_kv("xnu_entry_panic_caller", (uint32_t)debugger_panic_caller);
@@ -5052,6 +5152,8 @@ void fleh_undef(void)
     element = 0u;
     zone_name = 0u;
     args_ok = entry_panic_args_page((uintptr_t)r_args);
+    /* 475: the decision, so that a refusal and an accepted NULL cannot publish the same number. */
+    entry_panic_kv("xnu_entry_panic_args_ok", args_ok ? 1u : 0u);
     entry_panic_kv("xnu_entry_panic_args_page",
              args_ok ? (uint32_t)((uintptr_t)r_args & ~(uintptr_t)0xFFFu) : 0u);
     if (entry_image_ptr((uintptr_t)r_args) ||
