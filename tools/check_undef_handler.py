@@ -17,13 +17,15 @@ ways - one silently, one catastrophically:
     the case table on the host**, so the answer for zero is a build failure and not a sentence a reader
     has to trust. It is the AES check's shape (the same source, on the host) for the same reason: the
     property is about the code and not about the hardware;
-  - **the forward's target.** 475 forwards a user-mode `udf` to Apple's own `locore_fleh_undef`, whose
-    name is one prefix away from this image's `fleh_undef`. If the two ever resolve to the same address
-    - a rename, a prefix macro, a `#define` - the handler calls itself from inside the fault handler
-    and recurses until the stack is gone, which is 474's storm with a different first cause and just as
-    invisible from the log. So the check reads the *linked image*: the two symbols must be distinct, the
-    bytes inside `fleh_undef` must contain a `bl` whose computed target is Apple's body, and they must
-    contain no `bl` to `fleh_undef` itself.
+  - **where the user case is routed.** 475 routed it *from C* - record the user's `udf`, then `bl
+    locore_fleh_undef` - and 476's run measured the cost: `locore_fleh_undef` derives the saved PC from
+    `lr` (`subeq lr, lr, #4`), so a call from this image resumes the user thread at the `bl`'s own
+    address, in user mode, where the fetch permission-faults and the kernel panics (the run's fifth
+    abort is a user fetch of `0x80006d04`, which *is* that `bl`). 477 moves the split into the vector
+    page, and this half of the check reads the *linked image* for both halves of that statement: the
+    trampoline's user-mode literal must be Apple's `locore_fleh_undef` and its kernel-mode literal must
+    be this image's `fleh_undef`, **and `fleh_undef` must contain no `bl` to either handler** - so the
+    arrangement that crashed 476's boot cannot come back by an edit that looks innocuous.
 
 Where each side of each comparison comes from
 ---------------------------------------------
@@ -40,12 +42,18 @@ Where each side of each comparison comes from
     a comment nor a symbol table can make this agree.
 
 `--selftest` runs both halves against mutated inputs: the guard with `args == 0u` rewritten to
-`args == 1u` (the case table must then reject it), and the forward with the two addresses made equal.
-Every mutation must be refused.
+`args == 1u` (the case table must then reject it); the split with the two handler symbols made
+identical (the literal cannot be Apple's body if the body is this one), with slot 1's user literal
+pointed back at this image's handler, and with a call to the handler inserted inside the handler's own
+body; and the call scan pointed at a function that *does* call a handler, which must be refused. The
+**unmutated** inputs are controls and are required to pass - the split's source half needs that one
+specifically, because its first version refused the real source (see `calls_at_body_depth`). Every
+mutation must be refused.
 
 Usage:
-    tools/check_undef_handler.py --guard   --source stages/stage90/xnu_arm_boot/entry_stubs.c
-    tools/check_undef_handler.py --forward --elf out/stage90/xnu_arm_entry.elf
+    tools/check_undef_handler.py --guard --source stages/stage90/xnu_arm_boot/entry_stubs.c
+    tools/check_undef_handler.py --split --elf out/stage90/xnu_arm_entry.elf \
+        --source stages/stage90/xnu_arm_boot/entry_stubs.c
     tools/check_undef_handler.py --selftest
 """
 
@@ -58,6 +66,16 @@ import tempfile
 
 HANDLER = "fleh_undef"
 APPLE_HANDLER = "locore_fleh_undef"
+# The trampoline's two literals, in `entry_vectors.s`. The kernel one is the slot's target that
+# `build_entry.sh`'s table compares; the user one is 477's whole change and is checked here as well,
+# because the two checks are about different things (which handler the page names, and whether the C
+# handler can still call across).
+VEC_KERNEL_LIT = "vec_tramp_1_handler"
+VEC_USER_LIT = "vec_tramp_1_user_handler"
+# Every other first-level handler of this image. A `bl` from the C trap handler to any of these is the
+# shape 476's run died of: `locore_*` because their bodies derive the saved PC from `lr`, and
+# `fleh_undef` itself because that is a recursion inside the fault handler.
+FORBIDDEN_CALLEES = ("fleh_undef", "locore_fleh_undef", "locore_fleh_prefabt", "locore_fleh_dataabt")
 WINDOW_DEFINE = "ENTRY_PANIC_ARG_BYTES"
 WINDOW = 32
 
@@ -105,13 +123,25 @@ def extract_define(text, name):
     return int(match.group(1))
 
 
-def extract_function(text, name):
-    """The whole text of `static ... name(...) { ... }`, comments included, brace- and quote-aware."""
-    # The definition may be on one line (`static int entry_x(...)`) or, as this file writes them, with
-    # the return type on its own line - so the signature is allowed exactly one line break.
-    match = re.search(r"^static\b[^\n]*(?:\n[^\n]*)?%s\s*\(" % re.escape(name), text, flags=re.M)
+def strip_comments(text):
+    """Comments and string literals blanked - for asking what the *code* names, not what it says."""
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", " ", text)
+    return re.sub(r'"(?:[^"\\]|\\.)*"', '""', text)
+
+
+def extract_function(text, name, static=True):
+    """The whole text of a `name(...) { ... }` definition, comments included, brace/quote-aware.
+
+    `static=True` (the default) is how `entry_stubs.c` writes the two guard functions - return type on
+    its own line - and `static=False` is how it writes `fleh_undef` (`void fleh_undef(void)`).
+    """
+    # The signature is allowed exactly one line break, because this file's guard functions put the
+    # return type on the line above the name.
+    pattern = r"^static\b[^\n]*(?:\n[^\n]*)?%s\s*\(" if static else r"^void\s+%s\s*\("
+    match = re.search(pattern % re.escape(name), text, flags=re.M)
     if not match:
-        fail("no `static ... %s(` definition in the source" % name)
+        fail("no definition of `%s` in the source" % name)
     index = text.index("{", match.end() - 1)
     start = match.start()
     depth = 0
@@ -190,7 +220,27 @@ def run_guard_cases(source_text, mutate=None):
     return problems, len(rows)
 
 
-# ---------------------------------------------------------------- the forward, in the linked image
+# ------------------------------------------------- the split, in the linked image and in the source
+def elf_words(path):
+    """(vaddr -> value) for every word in an allocated section, read from the file's own bytes."""
+    with open(path, "rb") as handle:
+        data = handle.read()
+    if data[:4] != b"\x7fELF":
+        fail("%s is not an ELF file" % path)
+    import struct
+    shoff, = struct.unpack_from("<I", data, 0x20)
+    shentsize, shnum, _shstrndx = struct.unpack_from("<HHH", data, 0x2e)
+    words = {}
+    for index in range(shnum):
+        base = shoff + index * shentsize
+        _name, _type, _flags, addr, offset, size = struct.unpack_from("<IIIIII", data, base)
+        if addr == 0:
+            continue
+        for at in range(0, size - 3, 4):
+            words[addr + at] = struct.unpack_from("<I", data, offset + at)[0]
+    return words
+
+
 def elf_symbols(path):
     out = subprocess.run(["arm-none-eabi-nm", "-S", "--defined-only", path],
                          check=True, capture_output=True, text=True).stdout
@@ -213,16 +263,28 @@ def elf_symbols(path):
 
 
 def handler_range(symbols, name):
+    """`(start, size)` for a function whose size `nm` knows.
+
+    **A size of zero is refused rather than guessed at, and that is 477's third defect.** The first
+    version took "the nearest symbol above the start" as a size, on the reasoning that a symbol with no
+    `.size` is followed by the next function. For Apple's ARM assembly it is not: `nm` gives
+    `locore_fleh_dataabt` (0x800146d0) no size because `locore.s` emits no `.size` directives, and the
+    nearest symbol above it is a label *inside* the same body - so the range came out 16 bytes and a
+    scan of it read **zero** `bl`s. The control that pointed at it therefore failed with "the call scan
+    found no `bl` in a function that has one", which is the honest failure of a control that proves
+    nothing; a check that had pointed at it in earnest would have cleared it. A range that cannot be
+    read is not a range, so this refuses and says which symbols are affected.
+    """
     if name not in symbols:
         fail("the image defines no `%s`, so there is nothing to check" % name)
     start, size = symbols[name]
     if start == 0:
         fail("`%s` is defined at 0" % name)
     if size == 0:
-        above = [addr for addr, _s in symbols.values() if addr > start]
-        if not above:
-            fail("`%s` has no size and no symbol above it, so its range is unknown" % name)
-        size = min(above) - start
+        fail("`%s` has no size in this image's symbol table, so its range is unknown and a `bl` scan"
+             " over a guessed one reads nothing and looks clean - Apple's `locore_*` handlers are the"
+             " symbols this happens to (`nm` shows a label inside the body as the next symbol above);"
+             " point the scan at a function with a size, or derive the extent from source" % name)
     return start, size
 
 
@@ -244,34 +306,93 @@ def bl_targets(path, start, size):
         if immediate & 0x00800000:
             immediate -= 0x01000000
         targets.append((address, address + 8 + (immediate << 2)))
-    if not targets:
-        fail("no `bl` at all inside `%s`'s %u bytes: the handler cannot be forwarding anywhere"
-             % (HANDLER, size))
     return targets
 
 
-def check_forward(elf, mutate=None):
-    symbols = elf_symbols(elf)
+def check_calls_no_handler(path, symbols, name=HANDLER, forbidden=FORBIDDEN_CALLEES, mutate=None):
+    """`name` must not call any of `forbidden` - each one is a way the frame's PC is destroyed."""
+    start, size = handler_range(symbols, name)
     if mutate is not None:
-        symbols = mutate(symbols)
-    start, size = handler_range(symbols, HANDLER)
-    apple_start, _apple_size = handler_range(symbols, APPLE_HANDLER)
+        start, size = mutate(start, size)
+    targets = set(target for _addr, target in bl_targets(path, start, size))
     problems = []
-    if apple_start == start:
-        problems.append("`%s` and `%s` are both at 0x%08x: the forward would be a call to this handler"
-                        % (HANDLER, APPLE_HANDLER, start))
-        return problems, start, apple_start
-    targets = bl_targets(elf, start, size)
-    to_apple = [addr for addr, target in targets if target == apple_start]
-    to_self = [addr for addr, target in targets if target == start]
-    if not to_apple:
-        problems.append("no `bl` inside 0x%08x..0x%08x targets `%s` at 0x%08x, so the user-mode `udf`"
-                        " is not forwarded to Apple's body (%d `bl`s were read)"
-                        % (start, start + size, APPLE_HANDLER, apple_start, len(targets)))
-    if to_self:
-        problems.append("`%s` calls itself at 0x%08x, which is a recursion inside the fault handler"
-                        % (HANDLER, to_self[0]))
-    return problems, start, apple_start
+    for callee in forbidden:
+        if callee not in symbols:
+            continue
+        if symbols[callee][0] in targets:
+            problems.append("`%s` contains a `bl` to `%s` (0x%08x): a handler entered from this image's"
+                            " C code gets the saved PC derived from `lr`, which is this image's own"
+                            " return address - 476's run measured that as a user-mode fetch of the `bl`"
+                            " itself and a kernel panic"
+                            % (name, callee, symbols[callee][0]))
+    return problems, len(targets)
+
+
+def calls_at_body_depth(body, name):
+    """Where `name(` appears *inside* `body` rather than in its own signature.
+
+    The distinction is the whole of experiment 477's second defect. `extract_function` returns a
+    definition **including its signature**, so `void fleh_undef(void)` contains the text `fleh_undef(`
+    - at brace depth zero, because the body's `{` comes after it. A plain search for "does this file
+    mention `fleh_undef(`" therefore answers *yes* for every file that defines `fleh_undef`, and it did:
+    477's first build printed `the split is wrong: fleh_undef's source calls fleh_undef` **after** the
+    image and the header had been written, so the run that followed used an image whose build had
+    reported a failure, and the failure was a property of the pattern and not of the code. The
+    control that says so is in `--selftest`: the real source must pass this, and a call inserted
+    inside the body must not.
+
+    A call inside a function is always at depth >= 1, so the depth is what separates the two - and it
+    is computed over the *comment- and string-blanked* text (`strip_comments`), so a brace or a name in
+    prose cannot move it. The text is expected to be a single definition, so its braces balance within
+    it; a `}` before a `{` would not crash this, it would only make an earlier position look shallower.
+    """
+    pattern = re.compile(r"([{}])|\b%s\s*\(" % re.escape(name))
+    depth = 0
+    found = []
+    for match in pattern.finditer(body):
+        brace = match.group(1)
+        if brace == "{":
+            depth += 1
+        elif brace == "}":
+            depth -= 1
+        elif depth >= 1:
+            found.append(match.start())
+    return found
+
+
+def check_split(elf, symbols=None, source_text=None, user_lit_mutation=None, call_mutation=None):
+    words = elf_words(elf)
+    if symbols is None:
+        symbols = elf_symbols(elf)
+    problems = []
+    if HANDLER not in symbols or APPLE_HANDLER not in symbols:
+        fail("the image is missing %s or %s, so nothing can be compared" % (HANDLER, APPLE_HANDLER))
+    here = symbols[HANDLER][0]
+    apple = symbols[APPLE_HANDLER][0]
+    if here == apple:
+        problems.append("`%s` and `%s` are both at 0x%08x, so the two halves of the split cannot be"
+                        " told apart" % (HANDLER, APPLE_HANDLER, here))
+    for literal, want, want_name in ((VEC_KERNEL_LIT, here, HANDLER),
+                                     (VEC_USER_LIT, apple, APPLE_HANDLER)):
+        if literal not in symbols:
+            fail("the image has no `%s` literal, so the vector page's split cannot be read" % literal)
+        got = words.get(symbols[literal][0])
+        if got is None:
+            fail("no word of the image covers 0x%08x, so `%s`'s value cannot be read"
+                 % (symbols[literal][0], literal))
+        if user_lit_mutation is not None and literal == VEC_USER_LIT:
+            got = user_lit_mutation(got)
+        if got != want:
+            problems.append("`%s` holds 0x%08x and not %s (0x%08x): the vector page is not routing that"
+                            " mode where this step says it does" % (literal, got, want_name, want))
+    problems += check_calls_no_handler(elf, symbols, mutate=call_mutation)[0]
+    if source_text is not None:
+        body = strip_comments(extract_function(source_text, HANDLER, static=False))
+        for callee in FORBIDDEN_CALLEES:
+            if calls_at_body_depth(body, callee):
+                problems.append("`%s`'s source calls `%s`: the image's own code would be entering a"
+                                " handler whose frame arithmetic assumes a vector entry" % (HANDLER, callee))
+    return problems, here, apple
 
 
 def main():
@@ -280,15 +401,17 @@ def main():
     parser.add_argument("--source", default="stages/stage90/xnu_arm_boot/entry_stubs.c")
     parser.add_argument("--elf", default="out/stage90/xnu_arm_entry.elf")
     parser.add_argument("--guard", action="store_true", help="run the guard's case table on the host")
-    parser.add_argument("--forward", action="store_true", help="check the forward in the linked image")
+    parser.add_argument("--split", action="store_true",
+                        help="check the vector page's slot-1 split and that the C handler calls no handler")
     parser.add_argument("--selftest", action="store_true")
     args = parser.parse_args()
-    if not (args.guard or args.forward or args.selftest):
-        parser.error("one of --guard, --forward or --selftest is required")
+    if not (args.guard or args.split or args.selftest):
+        parser.error("one of --guard, --split or --selftest is required")
+
+    with open(args.source) as handle:
+        text = handle.read()
 
     if args.selftest:
-        with open(args.source) as handle:
-            text = handle.read()
         problems, rows = run_guard_cases(text)
         if problems:
             fail("the source's own guard does not answer the case table: %s" % "; ".join(problems))
@@ -300,21 +423,77 @@ def main():
         if not any("0x00000000" in problem for problem in problems):
             fail("--selftest: `args == 0u` rewritten to `args == 1u` was still accepted")
 
+        # (1) the two handlers made one address: the user literal cannot be Apple's body then.
         def merge(symbols):
             merged = dict(symbols)
             merged[APPLE_HANDLER] = symbols[HANDLER]
             return merged
 
-        problems, _start, _apple = check_forward(args.elf, mutate=merge)
+        problems, _here, _apple = check_split(args.elf, symbols=merge(elf_symbols(args.elf)),
+                                              source_text=None)
         if not any("both at" in problem for problem in problems):
             fail("--selftest: the two handler addresses made equal were not refused")
-        print("check_undef_handler: --selftest ok (the guard's %d rows, and both mutations refused)"
-              % rows)
+
+        # (2) the user literal pointed back at this image's handler.
+        def point_home(value):
+            return elf_symbols(args.elf)[HANDLER][0]
+
+        problems, _here, _apple = check_split(args.elf, user_lit_mutation=point_home, source_text=None)
+        if not any(VEC_USER_LIT in problem for problem in problems):
+            fail("--selftest: slot 1's user literal pointed at this image's handler was not refused")
+
+        # (3) the call scan pointed at a function that *does* call something - `fleh_irq` is
+        # `entry_epilogue("exception: irq")` and nothing else - which the scan must refuse when the
+        # name it calls is forbidden. **`fleh_irq` and not Apple's `locore_fleh_dataabt`**, which is
+        # where this control pointed until 477's own build: that one has no size, `handler_range`
+        # guessed 16 bytes from the label inside its body, and the control read zero `bl`s and failed
+        # for the wrong reason. A function whose size `nm` knows is what makes the control mean
+        # something, and the `scanned >= 1` below is the second half - a scan that read nothing must
+        # never be able to look like a clean one.
+        problems, scanned = check_calls_no_handler(args.elf, elf_symbols(args.elf),
+                                                  name="fleh_irq",
+                                                  forbidden=("entry_epilogue",))
+        if not problems or scanned < 1:
+            fail("--selftest: the call scan cleared a function that does call its forbidden name"
+                 " (%d `bl`s were read)" % scanned)
+
+        # (4) and the same scan over the real handler must be clean, so (3) is a positive control.
+        problems, scanned = check_calls_no_handler(args.elf, elf_symbols(args.elf))
+        if problems:
+            fail("--selftest: the real handler fails the call scan: %s" % "; ".join(problems))
+
+        # (5) the source half's own control, both directions, because the first version of it answered
+        # a question about the *definition* and refused the real source. The real source must pass; a
+        # call added inside the body must not. The mutation asserts it changed the text, for the reason
+        # every mutation here does: a rewrite that matched nothing would leave the control silently
+        # testing the unmutated input.
+        def add_call(source):
+            signature = "void %s(void)\n{" % HANDLER
+            if signature not in source:
+                fail("--selftest: the source has no `%s` signature to insert a call after, so the"
+                     " mutation below cannot be built" % signature.replace("\n", "\\n"))
+            return source.replace(signature, signature + "\n    %s(0);" % HANDLER, 1)
+
+        problems, _here, _apple = check_split(args.elf, source_text=text)
+        if problems:
+            fail("--selftest: the real source fails the split check: %s" % "; ".join(problems))
+
+        mutated = add_call(text)
+        if mutated == text:
+            fail("--selftest: the source mutation did not change the text")
+        problems, _here, _apple = check_split(args.elf, source_text=mutated)
+        if not any("source calls" in problem for problem in problems):
+            fail("--selftest: a call to `%s` inserted inside its own body was not refused - the depth"
+                 " rule is not separating a call from the definition" % HANDLER)
+
+        print("check_undef_handler: --selftest ok (the guard's %d rows; the split refused three"
+              " mutations - the two handler addresses made equal, slot 1's user literal pointed home,"
+              " and a call inserted into the handler's own body - and cleared the unmutated source; the"
+              " call scan refused a function that does call its forbidden name and cleared the %d `bl`s"
+              " of the real handler)" % (rows, scanned))
         return
 
     if args.guard:
-        with open(args.source) as handle:
-            text = handle.read()
         problems, rows = run_guard_cases(text)
         if problems:
             fail("the guard's case table fails:\n  " + "\n  ".join(problems))
@@ -322,13 +501,14 @@ def main():
               " is refused, the window that fits a page is accepted and the one that straddles it is not"
               % rows)
 
-    if args.forward:
-        problems, start, apple_start = check_forward(args.elf)
+    if args.split:
+        problems, here, apple = check_split(args.elf, source_text=text)
         if problems:
-            fail("the forward is wrong:\n  " + "\n  ".join(problems))
-        print("  xnu_entry_475: `%s` at 0x%08x forwards to `%s` at 0x%08x - distinct symbols, and the"
-              " `bl` inside the handler computes to Apple's body"
-              % (HANDLER, start, APPLE_HANDLER, apple_start))
+            fail("the split is wrong:\n  " + "\n  ".join(problems))
+        print("  xnu_entry_477: the vector page's slot 1 holds %s (0x%08x) for kernel mode and %s"
+              " (0x%08x) for user mode, and `%s` calls no handler - so a user udf is entered with the"
+              " interrupted registers intact"
+              % (HANDLER, here, APPLE_HANDLER, apple, HANDLER))
 
 
 if __name__ == "__main__":

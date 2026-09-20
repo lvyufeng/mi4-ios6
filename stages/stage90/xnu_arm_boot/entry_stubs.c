@@ -1074,13 +1074,19 @@ uint32_t g_pub2_count;
  *   - `g_sleh_seq` counts entries into the second-level handler, `g_sleh_back` counts returns from
  *     it. A handler entered and never returned is a *gap* between them, which is what makes "it
  *     panicked" distinguishable from "it serviced the fault and the boot went on".
- *   - `g_sleh_dfsr`/`g_sleh_dfar` are the **latest** entry's, which is what makes a retry loop
+ *   - `g_sleh_fsr`/`g_sleh_far` are the **latest** entry's, which is what makes a retry loop
  *     readable: a fault that is serviced advances the boot and the next fault is a different
- *     address, while one that is retried forever repeats `0x805`/`0x1000`.
- *   - `g_sleh_type` is `T_DATA_ABT` (4, `osfmk/arm/trap.h:70`) by construction here - the other
- *     abort vectors are still
- *     this file's - and it is recorded anyway, because a slot that changes should move a number
- *     rather than a sentence.
+ *     address, while one that is retried forever repeats `0x805`/`0x1000`. **476 renamed these from
+ *     `g_sleh_dfsr`/`g_sleh_dfar`, and the keys with them** (`xnu_live_sleh_fsr`/`_far` and
+ *     `xnu_entry_sleh_fsr`/`_far`): the pair that fills them is chosen by the abort class
+ *     (`STAGE90_T_PREFETCH_ABT` reads IFSR/IFAR, everything else DFSR/DFAR), so a name that said
+ *     "data" would be false on the prefetch path - and a false name on a fault register is the kind
+ *     of claim this project has had to retract before. Runs before 476 print the old two names.
+ *   - `g_sleh_type` is `T_DATA_ABT` (4, `osfmk/arm/trap.h:70`) **or, since 476, `T_PREFETCH_ABT`
+ *     (3)** - that sentence used to end "by construction here, the other abort vectors are still this
+ *     file's", which 476 makes false: the prefetch slot went to Apple's handler the way 467 gave away
+ *     the data slot. Both are recorded, which is why giving away a slot moved a number in the log
+ *     rather than requiring a sentence in a document to be believed.
  *   - `g_sleh_storm` is non-zero only if the live cap below was reached, and it is the only place
  *     the number past the cap appears.
  *
@@ -1089,7 +1095,7 @@ uint32_t g_pub2_count;
  * ram console mapping, and it is what a boot that continues leaves behind. The record is written to
  * the live channel *after* the counters are updated, and only for the first `SLEH_LIVE_MAX`
  * entries: this is the one record whose own failure can re-enter it (269's storm was a fault inside
- * a reporting path), and a cap is what turns "the machine is looping" into four records and a
+ * a reporting path), and a cap is what turns "the machine is looping" into eight records and a
  * counter instead of an unbounded stream.
  *
  * ------------------------------------------------------- 474: the frame, and the three bands
@@ -1099,18 +1105,24 @@ uint32_t g_pub2_count;
  * cut. So the cap is now three caps, each one bounding a different question, and the entry takes
  * `struct arm_saved_state *` so that the two numbers it has never carried are in the record.
  *
- *   - `SLEH_LIVE_MAX` (4, unchanged) - the entries whose `DFSR`/`DFAR`/`TPIDRPRW` are recorded.
- *     Unchanged deliberately: 473's `xnu_live_sleh_storm = 5` is a reading of the *cap*, and moving
- *     the cap would move that number and make the two runs incomparable.
- *   - `SLEH_LIVE_FRAMES` (8) - the entries whose saved state is recorded: `pc` (the faulting
- *     instruction - the vector has already applied its `sub lr, lr, #8`), `lr`, `sp`, `cpsr` (whose
- *     mode bits are Apple's own user/kernel test), and the frame's own `fsr`/`far`. Twice the first
- *     band, because the storm's head is entry 5 and the question is not only what it was but whether
- *     entries 5, 6, 7 and 8 are the same address repeating or a walk.
- *   - `SLEH_LIVE_SEEN` (64) - one record per entry, a running count. This is the band that separates
- *     "the handler was entered five times and then the machine stopped asking it" from "the handler
- *     is being entered forever": the first leaves `_seen` at 5, the second takes it to 64, and the
- *     473 log could not tell those apart because past the cap it recorded nothing at all.
+ *   - `SLEH_LIVE_MAX` (4 in 474, **8 since 476**) - the entries whose fault pair and `TPIDRPRW` are
+ *     recorded. 474 kept it at 4 deliberately, so that `xnu_live_sleh_storm = 5` would be comparable
+ *     with 473's, and 476 moves it for a reason 474's own run produced: **with both abort slots now
+ *     the kernel's, an abort is a normal event and not a stop** - the boot's early demand faults
+ *     consume the head of the list, and 475's run is exactly the case where the record that mattered
+ *     would have been the ninth. The cost is named: `_storm` is now the entry *past eight*, so a later
+ *     run's `_storm = 9` and 473's `= 5` are readings of different caps, and the two numbers are not
+ *     comparable even though the key is the same.
+ *   - `SLEH_LIVE_FRAMES` (8 in 474, **16 since 476**) - the entries whose saved state is recorded:
+ *     `pc` (the faulting instruction - the vector has already applied its `sub lr, lr, #8`), `lr`,
+ *     `sp`, `cpsr` (whose mode bits are Apple's own user/kernel test), and the frame's own fault pair.
+ *     474 set it to twice the first band, because the storm's head is entry 5 and the question is not
+ *     only what it was but whether entries 5, 6, 7 and 8 are the same address repeating or a walk;
+ *     476 doubles it again for the same reason one band further out.
+ *   - `SLEH_LIVE_SEEN` (64, unchanged) - one record per entry, a running count. This is the band that
+ *     separates "the handler was entered five times and then the machine stopped asking it" from "the
+ *     handler is being entered forever": the first leaves `_seen` at 5, the second takes it to 64, and
+ *     the 473 log could not tell those apart because past the cap it recorded nothing at all.
  *
  * **`xnu_live_sleh_frame_ok` is the instrument checking itself, in the log, before the frontier.**
  * The vector stored the same `cp15` numbers 467's record reads into `SS_STATUS`/`SS_VADDR`, so a
@@ -1133,8 +1145,8 @@ uint32_t g_pub2_count;
 uint32_t g_sleh_seq;
 uint32_t g_sleh_back;
 uint32_t g_sleh_type;
-uint32_t g_sleh_dfsr;
-uint32_t g_sleh_dfar;
+uint32_t g_sleh_fsr;
+uint32_t g_sleh_far;
 uint32_t g_sleh_storm;
 uint32_t g_sleh_pc;
 uint32_t g_sleh_lr;
@@ -1145,21 +1157,21 @@ uint32_t g_sleh_far_frame;
 uint32_t g_sleh_frame_ok;
 uint32_t g_sleh_user_mode;
 
-#define SLEH_LIVE_MAX 4u
-#define SLEH_LIVE_FRAMES 8u
+#define SLEH_LIVE_MAX 8u
+#define SLEH_LIVE_FRAMES 16u
 #define SLEH_LIVE_SEEN 64u
 
 void entry_live_write(const char *key, uint32_t value);
 
-void entry_note_sleh(uint32_t type, uint32_t dfsr, uint32_t dfar, uint32_t thread,
+void entry_note_sleh(uint32_t type, uint32_t fsr, uint32_t far_, uint32_t thread,
                      const uint32_t *frame)
 {
     uint32_t sp = 0u, lr = 0u, pc = 0u, cpsr = 0u, fsr_frame = 0u, far_frame = 0u;
 
     g_sleh_seq++;
     g_sleh_type = type;
-    g_sleh_dfsr = dfsr;
-    g_sleh_dfar = dfar;
+    g_sleh_fsr = fsr;
+    g_sleh_far = far_;
 
     /*
      * A word index into `struct arm_saved_state`, from `entry_saved_state.h`. The six offsets are
@@ -1182,14 +1194,14 @@ void entry_note_sleh(uint32_t type, uint32_t dfsr, uint32_t dfar, uint32_t threa
     g_sleh_cpsr = cpsr;
     g_sleh_fsr_frame = fsr_frame;
     g_sleh_far_frame = far_frame;
-    g_sleh_frame_ok = ((fsr_frame == dfsr) && (far_frame == dfar)) ? 1u : 0u;
+    g_sleh_frame_ok = ((fsr_frame == fsr) && (far_frame == far_)) ? 1u : 0u;
     g_sleh_user_mode = ((cpsr & STAGE90_PSR_MODE_MASK) == STAGE90_PSR_USER_MODE) ? 1u : 0u;
 
     if (g_sleh_seq <= SLEH_LIVE_MAX) {
         entry_live_write("xnu_live_sleh_seq", g_sleh_seq);
         entry_live_write("xnu_live_sleh_type", type);
-        entry_live_write("xnu_live_sleh_dfsr", dfsr);
-        entry_live_write("xnu_live_sleh_dfar", dfar);
+        entry_live_write("xnu_live_sleh_fsr", fsr);
+        entry_live_write("xnu_live_sleh_far", far_);
         entry_live_write("xnu_live_sleh_thr", thread);
     } else if (g_sleh_seq == SLEH_LIVE_MAX + 1u) {
         g_sleh_storm = g_sleh_seq;
@@ -2438,8 +2450,8 @@ __attribute__((noinline)) static void entry_write_467_kv(void)
     entry_write_kv("xnu_entry_sleh_seq", g_sleh_seq);
     entry_write_kv("xnu_entry_sleh_back", g_sleh_back);
     entry_write_kv("xnu_entry_sleh_type", g_sleh_type);
-    entry_write_kv("xnu_entry_sleh_dfsr", g_sleh_dfsr);
-    entry_write_kv("xnu_entry_sleh_dfar", g_sleh_dfar);
+    entry_write_kv("xnu_entry_sleh_fsr", g_sleh_fsr);
+    entry_write_kv("xnu_entry_sleh_far", g_sleh_far);
     entry_write_kv("xnu_entry_sleh_storm", g_sleh_storm);
 }
 
@@ -4903,19 +4915,8 @@ entry_dt_hash(uintptr_t base, uint32_t n, struct entry_dt_replay *r)
  */
 extern int DTLookupEntry(const void *searchPoint, const char *pathName, void **foundEntry);
 
-/*
- * Apple's own undefined-instruction vector body, which this image's `fleh_undef` replaces in the
- * vector table (`entry_vectors.s`'s slot 1; the check in `build_entry.sh` reports both addresses).
- *
- * 475 forwards a *user-mode* `udf` to it, and the hazard that makes this declaration worth a sentence
- * is that the two names are one character of prefix apart: if this ever resolved to the function below
- * it would be an infinite recursion inside the fault handler, which is the same shape as 474's storm
- * and just as invisible. `tools/check_undef_handler.py --forward` reads the linked image and fails the
- * build if the two symbols are equal, or if the `bl` this function makes does not target Apple's body.
- */
-extern void locore_fleh_undef(void);
-
-/* 475: the mode decision and its count - see the block in `fleh_undef`. */
+/* 475: the mode decision, kept as a reading - 477 makes the vector page do the branching, and this
+ * global is what says whether the split fired. See the block in `fleh_undef`. */
 static uint32_t g_undef_user;
 static uint32_t g_undef_user_seq;
 
@@ -4953,70 +4954,52 @@ void fleh_undef(void)
     entry_panic_kv("xnu_entry_undef_spsr", spsr);
 
     /*
-     * ---------------------------------------------------------------- 475: which `udf` is this
+     * ------------------------------------------------- 477: the mode is a reading, not a branch
      *
-     * **The mode first, because it is the one number that separates `panic`'s `udf` from every other
-     * one - and 474 is the run in which that mattered.** 474's fifth data abort was this handler
-     * faulting at address 0: `pc = 0x80002088` (`entry_word_at`), `cpsr = 0x9b` (UND mode), `far = 0`,
-     * and `lr = 0x10e0` - the user `pc` that `return_to_user_now` had loaded into `lr` before
-     * `movs pc, lr`, i.e. the RAM disk Mach-O's `udf #0`. Process 1 *did* reach user mode; what failed
-     * was this report. The walk below is `panic`'s - `r_args` is the trapped context's `r8`, which for
-     * `panic`'s `udf` is its live `va_list *` - and for a **user** `udf` it is the user's `r8`, which
-     * was 0. The guard accepted the NULL (both of its tests are trivially true at 0: it tests shape,
-     * not mapping), the read faulted in UND mode, and locore's `dataabt_from_kernel` ->
-     * `sleh_abort` -> `map->pmap` with `thread->map = 0` then recursed until the kernel stack ran out.
+     * **This function is now reached by the kernel's `udf` only, and the test below is what says so
+     * rather than what decides it.** 475 branched here: a user-mode `udf` was recorded on the live
+     * channel and then handed to Apple's `locore_fleh_undef` by a `bl`. 476's run measured what that
+     * costs, and it cost the boot:
      *
-     * **The discriminator is derived, not a heuristic.** `panic`'s `udf` is executed by
-     * `DebuggerTrapWithState` and every route to it is kernel code: `sleh_undef` for an undefined
-     * *kernel* instruction ends in `panic_context` (`osfmk/arm/trap.c`, the `!PSR_USER_MODE` arm),
-     * while the user arm ends in `exception_triage(EXC_BAD_INSTRUCTION, ...)` and never returns. So a
-     * `udf` that reaches this handler with the interrupted mode = user cannot be `panic`'s, and
-     * Apple's own body makes the same test as its *first* two instructions: `mrs sp, SPSR` then
-     * `tst sp, #15; bne undef_from_kernel` at `locore_fleh_undef` + 0x10. This handler has read the
-     * SPSR since 461 and never tested it.
+     *   - the fifth abort is a **user-mode instruction fetch of `0x80006d04`**, with `cpsr = 0x10`
+     *     and `lr = 0`, `IFSR = 0xd` (permission fault, section - a user fetch of a supervisor-only
+     *     section);
+     *   - `0x80006d04` is the `bl locore_fleh_undef` *in this file*, and the reason the resumed PC is
+     *     that address and not the `bl`'s return address is Apple's own first instruction:
+     *     `locore_fleh_undef` does `mrs sp, SPSR`, `tst sp, #32`, `subeq lr, lr, #4`
+     *     (`0x8001402c`), and `undef_from_user` stores that `lr` into `SS_PC`. On a vector entry `lr`
+     *     is `pc + 4` and the subtraction recovers the trapping instruction; on a `bl` from C it is
+     *     this image's return address, one past the `bl` itself.
      *
-     * **What the user branch does is forward to Apple's body rather than report.** `sp` here is the
-     * UND bank's, which `locore_fleh_undef`'s user path does not use (`undef_from_user` takes the
-     * frame from `TPIDRPRW` and the stack from `TH_KSTACKPTR`), so entering it from here is the same
-     * entry the vector would have made in every way that matters. The kernel then handles its own
-     * `udf` as it would have without this image: `sleh_undef`'s user arm reads the instruction with
-     * `COPYIN` and calls `exception_triage(EXC_BAD_INSTRUCTION, ...)`, so process 1 takes its signal
-     * and the boot goes on. That is the point - the instrument must not decide what a user `udf`
-     * means.
+     * So the kernel resumed process 1 *at this image's own instruction*, in user mode, and the
+     * prefetch abort that followed was the instrument's fault and not the kernel's. **A user `udf`
+     * cannot be reached by a call at all** - `lr` is the one register Apple's entry depends on - and
+     * the split now happens in the vector page, before any C code runs: `vec_tramp_1` in
+     * `entry_vectors.s` tests the interrupted mode with `mrs sp, spsr` (the banked register, so
+     * nothing of the interrupted context is touched) and branches to `locore_fleh_undef` for user
+     * mode and to this function for kernel mode.
      *
-     * **What the forward does perturb, said plainly, because the first draft of this comment claimed
-     * otherwise.** `r0`-`r12` at this point hold *this function's* values, not the interrupted
-     * context's: `r0`-`r3` are scratch and `r4`-`r11` were pushed by the prologue only so that a
-     * *return* would restore them, which never happens. So the frame `undef_from_user` writes into the
-     * thread's PCB carries the handler's registers. That is acceptable for the one case it happens in -
-     * the thread is about to take a fatal signal - but it is a difference from a vector entry, and a
-     * step that needs the user's registers intact would have to do this test in assembly ahead of the
-     * C body (the vector table's slot 1 would branch to `locore_fleh_undef` directly for user mode).
+     * **The mode is still recorded, and now it is a falsifier.** This handler should never see a user
+     * `udf` again; if `xnu_entry_undef_user` reads 1 in a later run, the trampoline's test did not
+     * fire (a vector page that is not this file's, an `SPSR` this image does not expect) and the run
+     * says so rather than proceeding into the panic walk as if the frame were `panic`'s. What it does
+     * *not* do is forward: the walk below is written for `panic`'s frame and 474 measured what it does
+     * with a user's, so a user mode here reports and stops, which is the least that can be said about
+     * a state this image is not supposed to be in.
      *
-     * **The evidence is written before the forward, and to the live channel.** `entry_panic_kv` goes
-     * into `g_panic_buf`, which only `entry_epilogue` prints - and this path forwards instead of
-     * reaching it, so those four keys would be written and never seen. The live channel is captured by
-     * the payload whether or not the epilogue runs (474's entire `xnu_live_sleh_*` group arrived that
-     * way), so the user's `udf` is reported there, once, in its own keys.
-     *
-     * **The new hazard is a loop, and it is counted rather than argued.** If anything in that path
-     * ever returned to the user thread without retiring its `udf`, the thread would re-execute it and
-     * re-enter this handler forever - 474's lesson is that a loop inside this handler is invisible
-     * unless something counts it. `xnu_live_undef_user_seq` is that count, so a climbing number is the
-     * falsifier. And if Apple's body does *return* (`exception_triage` is `NOTREACHED` by its own
-     * comment, so this should be unreachable), the run ends here with the report rather than falling
-     * into the panic walk with a user frame.
+     * **The reading the forward used to produce now comes from `sleh_undef` itself** -
+     * `entry_trace.c`'s `__wrap_sleh_undef`, which sees every undefined instruction the kernel is
+     * about to handle, user or kernel, with the frame in hand, and writes the same four live keys
+     * (`xnu_live_undef_user_seq`, `_pc`, `_lr`, `_spsr`). It is 467's arrangement for `sleh_abort`
+     * applied to the other trap, and it does not need the handler to be this image's.
      */
     g_undef_user = ((spsr & STAGE90_PSR_MODE_MASK) == STAGE90_PSR_USER_MODE) ? 1u : 0u;
     entry_panic_kv("xnu_entry_undef_user", g_undef_user);
     if (g_undef_user != 0u) {
         g_undef_user_seq++;
         entry_live_write("xnu_live_undef_user_seq", g_undef_user_seq);
-        entry_live_write("xnu_live_undef_pc", lr_undef - 4u);
-        entry_live_write("xnu_live_undef_lr", lr_undef);
-        entry_live_write("xnu_live_undef_spsr", spsr);
-        locore_fleh_undef();
-        entry_epilogue("exception: undefined instruction in user mode (Apple's handler returned)");
+        entry_epilogue("exception: undefined instruction in user mode reached this handler, so the"
+                       " vector page's slot-1 split did not fire");
     }
 
     entry_panic_kv("xnu_entry_panic_str", (uint32_t)(uintptr_t)debugger_panic_str);
@@ -5438,6 +5421,29 @@ extern uint32_t end_kern;
 extern uint32_t segPRELINKTEXTB;
 extern uint32_t segSizePRELINKTEXT;
 
+/*
+ * **476: this handler is no longer in the vector table.** The prefetch slot now carries Apple's
+ * `locore_fleh_prefabt` (`entry_vectors.s`), which reads the fault, calls
+ * `sleh_abort(regs, T_PREFETCH_ABT)` and - when the page is paged in - returns through the mode's own
+ * `thread_bootstrap_return`, which **retries the fetch**. That is 467's change one slot over, and the
+ * reason is 475's run: it entered user mode, had its `udf` handled by the kernel, and then stopped on
+ * a prefetch abort that this handler could only record - and the record was refused by the full trace
+ * channel, so the run has a stop and no address.
+ *
+ * **The function is kept, and the build check asserts it is not installed.** Kept because
+ * `fleh_dataabt` below has been uninstalled since 467 and is kept for the same reason: the body
+ * documents which registers identify a fault of this class and what the page-table state was, and a
+ * future step that needs a handler back wants it beside its sibling rather than in a git history.
+ * Asserted-not-installed because the failure this replaces is *silent*: a slot that quietly kept the
+ * instrument's handler looks exactly like a kernel that refused to service the fault.
+ *
+ * **What its eleven keys no longer say, named rather than left to be missed.** The live record the
+ * kernel's own path produces carries five of the nine numbers (`pc`/`lr`/`cpsr` and the fault pair,
+ * read from the instruction-side coprocessor registers by `entry_trace.c`'s wrapper) plus the thread;
+ * **TTBR0, TTBR1, TTBCR and SCTLR are not in it**, and 241/242 needed them to tell which page tables
+ * were live. A step that needs the mapping state must add it to the wrapper - the keys
+ * `xnu_entry_prefetch_abort_*` are now produced by no path at all.
+ */
 void fleh_prefabt(void)
 {
     uint32_t ifar, ifsr, lr_abt, spsr, ttbr0, ttbr1, ttbcr, sctlr;

@@ -46,9 +46,13 @@ The four pairs are this run's, not 473's — the addresses move between runs (47
 `0xc8146000`, this run's is `0xc813e000`) and *that is the point*: the control is the two numbers
 agreeing **inside one run**, not any particular value. The four `pc`/`lr` pairs are the exec's own
 copyout path — `Lcopyout_wordwise_loop` (`machine_routines_asm.o`) with `load_init_program_at_path`
-above it, `L64loop` (`bcopy.o`) with `copypv`, `L_64loop` (`bzero.o`) with `exec_save_path`, and
+above it, `L_64loop` (`bzero.o`) with `exec_save_path`, `L64loop` (`bcopy.o`) with `copypv`, and
 `Lcopyout_wordwise_loop` again with `exec_copyout_strings` — with `cpsr` = SVC in all four, i.e. the
-kernel path.
+kernel path. (**Corrected in 477**: this sentence first listed the two middle pairs one position apart
+from the table above it. Which loop goes with which caller was right and which *entry* each pair belongs
+to was not; the table's own `lr`s — 0x8028a680 = `exec_save_path` on seq 2, 0x8003f4a0 = `copypv` on
+seq 3 — and the two loops' source files (`bzero.s:104` is `L_64loop`, `bcopy.s:88` is `L64loop`) settle
+it, and 476's and 477's runs read the same two pairs in that order.)
 
 **One derived detail is what makes `pc` mean "the faulting instruction".** `dataabt_from_kernel`
 stores `lr` twice: once into `SS_LR` while still in SVC mode (the aborting context's `lr`, which is why

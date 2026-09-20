@@ -71,9 +71,96 @@ ExceptionVectorsBase:
 .endm
 
     VECTOR_TRAMP vec_tramp_0, fleh_reset
-    VECTOR_TRAMP vec_tramp_1, fleh_undef
+/*
+ * **477: slot 1 splits on the interrupted mode, here, before any C code has run.**
+ *
+ * 475 gave the user case to Apple's handler *from inside* this image's `fleh_undef` - record the
+ * user's `udf`, then `bl locore_fleh_undef` - and 476's run measured what that costs, so this slot no
+ * longer does it in C.
+ *
+ * **The defect is one register and it is in Apple's own code.** `locore_fleh_undef` derives the saved
+ * program counter from `lr`: `mrs sp, SPSR`, `tst sp, #32`, then `subeq lr, lr, #4` / `subne lr, lr,
+ * #2` (`0x8001402c`/`0x80014030` in 476's image), and `undef_from_user` stores that `lr` into
+ * `SS_PC`. On a vector entry that is right - the hardware leaves `lr_und = pc + 4`, so the
+ * subtraction recovers the trapping instruction. On a `bl` from C it is wrong in both halves: `lr`
+ * is the *return address* (so the subtraction points one instruction before it), and it is this
+ * function's own address, not the user's. 476's run measured exactly that: the fifth abort is a
+ * **user-mode instruction fetch of `0x80006d04`**, which is the `bl locore_fleh_undef` in 475's
+ * `fleh_undef` (`IFSR = 0xd`, permission fault, section - a user fetch of a supervisor-only
+ * section), with `lr = 0` and `cpsr = 0x10`. The kernel had resumed process 1 at this image's own
+ * instruction, and process 1 could not execute it. So the user case cannot be reached by a call: it
+ * has to be reached by a branch, with the interrupted registers untouched.
+ *
+ * **The test is Apple's own, and so is the register it uses.** `mrs sp, spsr` puts the interrupted
+ * `SPSR` into the *banked* stack pointer - the one register an exception both saves and banks, so
+ * nothing of the interrupted context is lost, and Apple's own first-level bodies do the same thing
+ * (`mrs sp, SPSR` is `fleh_undef`'s first instruction and the second of both abort handlers, after
+ * their `sub lr, lr, #8` and `sub lr, lr, #4`). `PSR_MODE_MASK` and `PSR_USER_MODE` are
+ * `osfmk/arm/proc_reg.h`'s; `and`/`cmp` cannot carry a symbol, so the two numbers are written here
+ * and checked where they can be: `entry_saved_state.h` holds the same pair for the C side, and
+ * `build_entry.sh` requires this trampoline's two literals to be the two handlers.
+ *
+ * **The kernel branch keeps the stack load the macro does**, because this image's handler is C code
+ * and needs a stack; the user branch does not, because Apple's `undef_from_user` re-derives `sp` from
+ * `TPIDRPRW` and the thread's `kstackptr` and never reads this one. That asymmetry is the reason this
+ * slot is written out rather than passed to `VECTOR_TRAMP`.
+ */
+vec_tramp_1:
+    mrs     sp, spsr
+    and     sp, sp, #0x1f
+    cmp     sp, #0x10
+    beq     vec_tramp_1_user
+    ldr     sp, vec_tramp_1_stack
+    ldr     pc, vec_tramp_1_handler
+vec_tramp_1_user:
+    ldr     pc, vec_tramp_1_user_handler
+    .align  2
+vec_tramp_1_stack:
+    .word   entry_vectors_stack_top
+vec_tramp_1_handler:
+    .word   fleh_undef
+vec_tramp_1_user_handler:
+    .word   locore_fleh_undef
+    .size vec_tramp_1, . - vec_tramp_1
+
     VECTOR_TRAMP vec_tramp_2, fleh_swi
-    VECTOR_TRAMP vec_tramp_3, fleh_prefabt
+/*
+ * **476: the prefetch slot joins the data slot, and the reason is 475's run.** The other six branch to
+ * `entry_stubs.c`'s handlers, whose design is to record and leave - which is what a fault deserves
+ * when the fault *is* the end of the run, and what every step since 236 has used them for.
+ *
+ * 475's run entered user mode, had its `udf` handled by the kernel, and then stopped on a prefetch
+ * abort - recorded, and nothing else. That record was refused by the full trace channel, so the run
+ * has a stop and no address: `xnu_entry_kv_written = 8170` of 8192 with 33292 refusals. Two questions
+ * were riding on one slot, and this step answers both by handing the slot to the kernel:
+ *
+ *   - **is the fault serviceable?** 466's data-abort stop was the demand fault `vm_fault` exists to
+ *     answer, and 467's fix - Apple's own first-level handler in the slot - is what carried the boot
+ *     through the whole exec path. A prefetch abort on an instruction fetch is the same kind of event,
+ *     and the instrument cannot tell a demand fault from a fatal one: it can only record and stop.
+ *   - **and if it is not serviceable, the record must survive the fault.** It does, and it does not
+ *     need a new buffer: XNU's handler calls `sleh_abort(regs, T_PREFETCH_ABT)`, which 467 already
+ *     wraps, and that wrapper's record goes to the **live channel** - the one 474 and 475 both arrived
+ *     through, and the one that is captured whether or not the epilogue runs. It carries the fault
+ *     class, the two fault numbers, the thread, and (since 474) the frame's `pc`, `lr`, `sp`, `cpsr`
+ *     and its own copy of the fault pair.
+ *
+ * **What is given up is named rather than dropped**: this image's `fleh_prefabt` reported IFAR, IFSR,
+ * LR_abt, PC, SPSR, TTBR0, TTBR1, TTBCR and SCTLR, and the live record carries five of those nine
+ * outright (`pc`/`lr`/`cpsr` and the fault pair, read from the instruction-side coprocessor registers -
+ * see `entry_trace.c`'s wrapper, which was reading the *data* pair until this step) plus the thread.
+ * **TTBR0, TTBR1, TTBCR and SCTLR are not in it** - 241 and 242 read them to tell which page tables
+ * were live - so a future step that needs the mapping state again has to add it to the wrapper rather
+ * than expect it from a handler that is no longer installed. `fleh_prefabt` is kept in
+ * `entry_stubs.c` beside `fleh_dataabt` (uninstalled since 467) and the build check asserts that
+ * neither is in the table: a slot that quietly kept the old handler looks exactly like a kernel that
+ * refused to service the fault.
+ *
+ * The stack load is kept for 467's reason: XNU's handler switches to SVC mode on both of its paths and
+ * never dereferences this banked SP, but a slot whose trampoline differs from the other seven is a
+ * slot that will be misread the next time this file is edited.
+ */
+    VECTOR_TRAMP vec_tramp_3, locore_fleh_prefabt
 /*
  * **467: the data abort slot is XNU's own handler, and it is the one slot that is not this file's.**
  *

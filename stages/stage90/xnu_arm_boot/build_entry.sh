@@ -132,7 +132,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=mdevadd --wrap=mdevlookup
                    --wrap=_ZN9IOService22waitForMatchingServiceEP12OSDictionaryy
                    --wrap=os_reason_create --wrap=load_machfile
-                   --wrap=sleh_abort)
+                   --wrap=sleh_abort --wrap=sleh_undef)
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
 # every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that
@@ -261,15 +261,14 @@ run python3 "$REPO_ROOT/tools/check_assym_cswitch.py" || exit 1
 # `entry_stubs.c`'s `xnu_live_sleh_frame_ok`.
 run python3 "$REPO_ROOT/tools/check_saved_state_offsets.py" --verbose || exit 1
 
-# **And the two promises the `udf` handler now makes (475), both of them things 474's run turned from
+# **And the two promises the `udf` handler makes (475, 477), both of them things a run turned from
 # prose into failures.** The panic-argument guard's answer for `args = 0` was the read of address 0
 # inside the fault handler; the sentence that permitted it claimed a refused read and an accepted NULL
 # publish different keys, and they published the same one. So the guard's two functions are compiled
-# from this file and run against a case table on the host (`--guard`, here), and the forward a user-mode
-# `udf` makes is read out of the *linked* image (`--forward`, below the link, because the image does not
-# exist yet): `fleh_undef` and Apple's `locore_fleh_undef` must be distinct, and the `bl` inside the
-# handler must compute to Apple's body and not to the handler itself, which would be a recursion inside
-# the fault handler. `tools/check_undef_handler.py --selftest` mutates both and requires the refusal.
+# from this file and run against a case table on the host (`--guard`, here), and how the user case is
+# routed is read out of the *linked* image (`--split`, below the link, because the image does not exist
+# yet) - see its own comment. `tools/check_undef_handler.py --selftest` mutates all of it and requires
+# the refusal.
 run python3 "$REPO_ROOT/tools/check_undef_handler.py" --guard --source "$BOOT_DIR/entry_stubs.c" || exit 1
 
 
@@ -27257,7 +27256,10 @@ verify_trace_symbols() {
     # they are compared with `nm`'s address for the symbol the slot is supposed to carry.
     #
     # Slot 4 is checked in both directions - it must be `locore_fleh_dataabt` and must **not** be this
-    # file's `fleh_dataabt` - because the failure this step exists to remove is the second one.
+    # file's `fleh_dataabt` - because the failure this step exists to remove is the second one. **476
+    # makes slot 3 the same pair of statements**, for the same reason and with the same failure mode:
+    # the prefetch slot is now Apple's `locore_fleh_prefabt`, and a slot that quietly kept this image's
+    # `fleh_prefabt` would record-and-stop, which is what 475's run did.
     # The helper picks one word out of `objdump -s`'s output by index rather than by assuming the
     # line starts at the word: `objdump -s` prints whole 16-byte lines, and `vec_tramp_4_handler` is
     # 4-byte aligned, not 16 - so a check that matched `$1 == address` would fail to find its line and
@@ -27283,7 +27285,7 @@ verify_trace_symbols() {
         # hold. The seventh and eighth are `fleh_irq`/`fleh_decirq`; `fleh_decirq` is this image's
         # because `__ARM_TIME__` is off and locore's slot for it is `mov pc, r9`.
         local -a x467_want=(
-            "0 fleh_reset" "1 fleh_undef" "2 fleh_swi" "3 fleh_prefabt"
+            "0 fleh_reset" "1 fleh_undef" "2 fleh_swi" "3 locore_fleh_prefabt"
             "4 locore_fleh_dataabt" "5 fleh_addrexc" "6 fleh_irq" "7 fleh_decirq" )
         vbase=$(x467_addr_of ExceptionVectorsBase)
         [[ -n $vbase ]] || layout_fail "the image has no ExceptionVectorsBase, so the vector page cannot be checked"
@@ -27309,12 +27311,47 @@ verify_trace_symbols() {
         if (( bad == 1 )); then
             layout_fail "a vector slot's handler literal is not the handler it is written to be - the vector page is not what entry_vectors.s says it is, and no run can show that"
         fi
-        got=$(x467_addr_of fleh_dataabt)
-        [[ -n $got ]] || layout_fail "the image has no fleh_dataabt, so the one-slot claim below cannot be checked"
-        if [[ "$(x467_word_at "$(x467_addr_of vec_tramp_4_handler)")" == "$got" ]]; then
-            layout_fail "vector slot 4 still carries this image's fleh_dataabt (0x$got): the data abort is being recorded and dropped again, which is exactly the stop 466's run measured"
-        fi
-        say "  xnu_entry_467: the vector page carries the handlers it says it does:$vpair; slot 4 is Apple's locore_fleh_dataabt and not this image's fleh_dataabt (0x$got), and slot 1 (fleh_undef) is still this image's - so a fault the kernel cannot service still reaches the trap's own buffer through panic()'s udf"
+        # The two uninstalled handlers, each asserted *absent* from the slot it used to own. The
+        # addresses are read for the message, and a missing symbol is a failure rather than a skip:
+        # if `fleh_prefabt` ever disappears from the image the claim below is about nothing.
+        local gone=""
+        for pair in "4 fleh_dataabt" "3 fleh_prefabt"; do
+            read -r n sym <<<"$pair"
+            got=$(x467_addr_of "$sym")
+            [[ -n $got ]] || layout_fail "the image has no $sym, so the not-installed claim for slot $n cannot be checked"
+            if [[ "$(x467_word_at "$(x467_addr_of "vec_tramp_${n}_handler")")" == "$got" ]]; then
+                layout_fail "vector slot $n still carries this image's $sym (0x$got): that fault is being recorded and dropped again, which is exactly the stop that motivated giving the slot away"
+            fi
+            gone+="$sym (0x$got, not installed) "
+        done
+        # **477: slot 1's split, read out of the page in both directions.** The trampoline has two
+        # literals - user mode and kernel mode - and the *user* one is the whole of 477's change: it
+        # must be Apple's `locore_fleh_undef`, because that body derives the saved PC from `lr` and a
+        # call from C resumes the user thread at the `bl`'s own address (476's run: a user fetch of
+        # 0x80006d04, permission fault, panic). The kernel literal is in the table above. Both
+        # directions are checked because the failure is silent in one of them - a slot that kept
+        # routing user mode to this image's handler looks exactly like a user `udf` this image
+        # reported, which is what 475 did.
+        {
+            local kuser kapple khere ulit
+            kuser=$(x467_addr_of fleh_undef)
+            kapple=$(x467_addr_of locore_fleh_undef)
+            [[ -n $kuser && -n $kapple ]] ||
+                layout_fail "the image is missing fleh_undef or locore_fleh_undef, so slot 1's split cannot be checked"
+            ulit=$(x467_addr_of vec_tramp_1_user_handler)
+            [[ -n $ulit ]] ||
+                layout_fail "the image has no vec_tramp_1_user_handler literal, so slot 1's user-mode target cannot be read - fix the check rather than deleting it"
+            khere=$(x467_word_at "$ulit") ||
+                layout_fail "the 4 bytes at vec_tramp_1_user_handler (0x$ulit) could not be read out of the ELF"
+            if [[ $khere != "$kapple" ]]; then
+                layout_fail "slot 1's user-mode literal is 0x$khere and not locore_fleh_undef (0x$kapple): a user udf would be reported by this image's handler and then handed to Apple's from C, which is 475's defect - the run measures it as a user-mode fetch of this image's own bl"
+            fi
+            if [[ $khere == "$kuser" ]]; then
+                layout_fail "slot 1's user-mode literal is this image's fleh_undef (0x$kuser): the split does not exist"
+            fi
+            say "  xnu_entry_477: slot 1 splits on the interrupted mode in the vector page - user -> locore_fleh_undef (0x$kapple), kernel -> fleh_undef (0x$kuser) - so a user udf is entered with the interrupted registers intact and the saved PC is the udf, not this image's return address"
+        }
+        say "  xnu_entry_467: the vector page carries the handlers it says it does:$vpair; slots 3 and 4 are Apple's own locore_fleh_prefabt and locore_fleh_dataabt and not this image's $gone- so a fault the kernel can service is serviced and retried, and slot 1 (fleh_undef) is still this image's for the kernel case, so a fault it cannot service still reaches the trap's own buffer through panic()'s udf"
     }
     # **The by-address claim, read out of the image.** The table is
     # `struct console_ops { void (*putc)(int,int,int); int (*getc)(int,int,boolean_t,boolean_t); }`
@@ -27711,7 +27748,12 @@ say "above it     $ENTRY_TABLE_BYTES bytes of page tables at the limit, and free
 
 say "wrote $OUT/xnu_arm_entry.bin, .elf, .h, .map"
 
-# The forward, now that the image exists (`--guard` ran above the compile; see its comment).
-run python3 "$REPO_ROOT/tools/check_undef_handler.py" --forward --elf "$OUT/xnu_arm_entry.elf" || exit 1
+# The split, now that the image exists (`--guard` ran above the compile; see its comment). **477's
+# half**: the vector page's slot 1 must send user mode to Apple's `locore_fleh_undef` and kernel mode
+# to this image's `fleh_undef`, and this image's handler must call *neither* - because a handler
+# entered from C gets the saved PC derived from `lr`, which 476's run measured as a user-mode fetch of
+# the `bl` itself followed by a kernel panic.
+run python3 "$REPO_ROOT/tools/check_undef_handler.py" --split --elf "$OUT/xnu_arm_entry.elf" \
+    --source "$BOOT_DIR/entry_stubs.c" || exit 1
 say "the payload build reads the .bin from there directly; nothing to install"
 

@@ -110,6 +110,12 @@
 
 #include <stdint.h>
 
+/* 476: `STAGE90_T_PREFETCH_ABT`/`STAGE90_T_DATA_ABT`, the two abort classes that reach the wrapper
+ * below. This file used to need nothing from that header - it took `regs` as an opaque pointer and
+ * never indexed it, which is still true - but the number that says *which* fault pair is the fault
+ * pair is the same number `entry_stubs.c`'s comment reasons about, so it is written once. */
+#include "entry_saved_state.h"
+
 /* entry_stubs.c. Records into `g_kv_buf`, which only an epilogue writes out - see above. */
 extern void entry_kv(const char *key, uint32_t value);
 extern void entry_epilogue(const char *why) __attribute__((noreturn));
@@ -1449,6 +1455,75 @@ void *__wrap__ZN9IOService22waitForMatchingServiceEP12OSDictionaryy(void *matchi
     return r;
 }
 
+/* --------------------------------------------------- 477: the trap's other half, wrapped */
+/*
+ * `void sleh_undef(struct arm_saved_state *regs, struct arm_vfpsaved_state *vfp_ss)` -
+ * `osfmk/arm/trap.c:118`, the second level of XNU's undefined-instruction path, called once per `udf`
+ * from `locore.s`'s `handle_undef`/`handle_undef2` (two `bl sleh_undef` sites in this image,
+ * `0x800140b8` and `0x80014170`), with `regs` pointing at the thread's PCB frame the vector filled.
+ *
+ * **Why this wrapper exists at all: 475's handler was taken out of this path, and this is where the
+ * reading went.** 475 reported a user-mode `udf` from this image's own `fleh_undef`, and 476's run
+ * showed that entering Apple's handler *from C* is unsafe - `locore_fleh_undef` derives the saved PC
+ * from `lr` (`subeq lr, lr, #4`), so a `bl` from this image resumes the user thread at the `bl`'s own
+ * address, in user mode, where the fetch permission-faults and the kernel panics. 477 moves the
+ * user/kernel split into the vector page (`entry_vectors.s`'s `vec_tramp_1`), which means this image's
+ * handler no longer sees a user `udf` - and with it, no longer produces the milestone reading
+ * `xnu_live_undef_pc = 0x10e0`. This wrapper is where that reading now comes from: the kernel's own
+ * call, once per undefined instruction, with the frame in hand.
+ *
+ * It is 467's arrangement for `sleh_abort` applied to the other trap, and the two differences are
+ * worth naming. **The frame is read, not the coprocessors**: an undefined instruction has no fault
+ * pair to read (`IFSR`/`DFSR` are whatever the last abort left), so the numbers here are the frame's
+ * own - `pc` (the instruction that trapped), `cpsr` (the mode it ran in, Apple's user/kernel test),
+ * `lr` - at the offsets `entry_saved_state.h` holds and `check_saved_state_offsets.py` checks. And
+ * **the record goes to the live channel and not to `g_panic_buf`**, because the interesting entry -
+ * a user `udf` - is one after which `sleh_undef` may never return: its user arm ends in
+ * `exception_triage(EXC_BAD_INSTRUCTION, ...)` and its kernel arm in `panic_context`, and 474 is the
+ * experiment that showed a report which needs the epilogue is a report a hang can eat.
+ *
+ * **The cap is a count, because this path can be entered by a looping process.** `UNDEF_LIVE_MAX`
+ * entries get the four detail keys; every entry advances `xnu_live_undef_seq`, and every *user* entry
+ * advances `xnu_live_undef_user_seq`, which keeps 475's key meaning what it meant there ("how many
+ * user `udf`s the kernel was asked to handle"). A number climbing without the detail keys reappearing
+ * is a program re-executing an undefined instruction, which is a reading and not a missing one.
+ */
+#define UNDEF_LIVE_MAX 4u
+
+static uint32_t g_undef_seq;
+static uint32_t g_undef_user_seq_trace;
+
+extern void entry_live_write(const char *key, uint32_t value);
+extern void __real_sleh_undef(void *regs, void *vfp_ss);
+
+void __wrap_sleh_undef(void *regs, void *vfp_ss)
+{
+    const uint32_t *frame = (const uint32_t *)regs;
+    uint32_t pc = 0u, lr = 0u, cpsr = 0u;
+
+    g_undef_seq++;
+    entry_live_write("xnu_live_undef_seq", g_undef_seq);
+
+    if (frame != 0) {
+        pc = frame[STAGE90_SS_PC / 4];
+        lr = frame[STAGE90_SS_LR / 4];
+        cpsr = frame[STAGE90_SS_CPSR / 4];
+    }
+    if ((cpsr & STAGE90_PSR_MODE_MASK) == STAGE90_PSR_USER_MODE) {
+        g_undef_user_seq_trace++;
+        entry_live_write("xnu_live_undef_user_seq", g_undef_user_seq_trace);
+    }
+    if (g_undef_seq <= UNDEF_LIVE_MAX) {
+        entry_live_write("xnu_live_undef_pc", pc);
+        entry_live_write("xnu_live_undef_lr", lr);
+        entry_live_write("xnu_live_undef_spsr", cpsr);
+        entry_live_write("xnu_live_undef_user", (cpsr & STAGE90_PSR_MODE_MASK) == STAGE90_PSR_USER_MODE
+                                                     ? 1u : 0u);
+    }
+
+    __real_sleh_undef(regs, vfp_ss);
+}
+
 /* --------------------------------------------------- 467: the kernel's own abort handler */
 /*
  * `void sleh_abort(struct arm_saved_state *regs, int type)` - `osfmk/arm/trap.c:274`, the second
@@ -1469,9 +1544,18 @@ void *__wrap__ZN9IOService22waitForMatchingServiceEP12OSDictionaryy(void *matchi
  * faulting PC, which this record does not carry; a fault at the same address is the same fault, and
  * FAR is what says so.
  *
- * `type` is `T_DATA_ABT` (1) for every entry that can reach here, because the other abort vectors are
- * still the instrument's handlers - recorded anyway, so that a later step that gives away another
- * slot moves a number in the log rather than a sentence in a document.
+ * `type` was `T_DATA_ABT` (4, `osfmk/arm/trap.h:70` - not the 1 an earlier revision of this sentence
+ * said) for every entry that could reach here, because the other abort vectors were still the
+ * instrument's handlers. **476 makes that false in the way this wrapper was built for**: the prefetch
+ * slot went to Apple's `locore_fleh_prefabt` the way 467 gave away the data slot, so `T_PREFETCH_ABT`
+ * (3) now reaches here too - and with it a real defect in this function, which read DFSR and DFAR
+ * (the *data* fault pair, `c5,c0,0`/`c6,c0,0`) for both classes. On a prefetch abort those two
+ * registers are whatever the last data abort left there, and worse, the check that reads them back
+ * would have gone false: the vector fills `SS_STATUS`/`SS_VADDR` from **IFSR/IFAR** on that path
+ * (`locore.s`'s `prefabt_from_user`, `str r5,[sp,#68]` / `str r1,[sp,#72]`, from `c5,c0,1`/`c6,c0,2`),
+ * so `xnu_live_sleh_frame_ok` would read 0 on every prefetch abort and a reader would conclude the
+ * offsets had moved. **The class decides the pair, so the class selects it here** - one branch, and
+ * the offset control goes back to meaning what it says.
  *
  * Nothing is changed: the real handler runs with the same arguments. The record is written before it,
  * so a handler that never returns has still reported what it was given, and `_back` afterwards is
@@ -1508,13 +1592,26 @@ void __real_sleh_abort(void *regs, int type);
 
 void __wrap_sleh_abort(void *regs, int type)
 {
-    uint32_t dfsr, dfar, thread;
+    uint32_t fsr, far_, thread;
 
-    __asm__ volatile ("mrc p15, 0, %0, c5, c0, 0" : "=r"(dfsr));
-    __asm__ volatile ("mrc p15, 0, %0, c6, c0, 0" : "=r"(dfar));
+    /*
+     * **476: the class selects the coprocessor pair, because the class is what says which pair is the
+     * fault pair.** `STAGE90_T_PREFETCH_ABT` (3) is the instruction side - IFSR `c5,c0,1`, IFAR
+     * `c6,c0,2` - and everything else is the data side (`c5,c0,0`, `c6,c0,0`), which is what this
+     * function read unconditionally until the prefetch slot became Apple's. The two constants and the
+     * reasoning for them are in `entry_saved_state.h`; the short form is that reading the wrong pair
+     * reports two stale numbers and turns `xnu_live_sleh_frame_ok` into a class indicator.
+     */
+    if ((uint32_t)type == STAGE90_T_PREFETCH_ABT) {
+        __asm__ volatile ("mrc p15, 0, %0, c5, c0, 1" : "=r"(fsr));
+        __asm__ volatile ("mrc p15, 0, %0, c6, c0, 2" : "=r"(far_));
+    } else {
+        __asm__ volatile ("mrc p15, 0, %0, c5, c0, 0" : "=r"(fsr));
+        __asm__ volatile ("mrc p15, 0, %0, c6, c0, 0" : "=r"(far_));
+    }
     __asm__ volatile ("mrc p15, 0, %0, c13, c0, 4" : "=r"(thread));
 
-    entry_note_sleh((uint32_t)type, dfsr, dfar, thread, (const uint32_t *)regs);
+    entry_note_sleh((uint32_t)type, fsr, far_, thread, (const uint32_t *)regs);
 
     __real_sleh_abort(regs, type);
 

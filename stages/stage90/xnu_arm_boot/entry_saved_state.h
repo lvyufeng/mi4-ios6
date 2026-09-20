@@ -49,6 +49,12 @@
  * the *control*: if the offsets were wrong, the run says so before the frontier is reported, on
  * aborts whose answer is already in hand. `xnu_live_sleh_frame_ok` carries that comparison into the
  * log, one per entry, so the reading does not depend on a reader noticing two numbers agree.
+ *
+ * **476 adds two more numbers here, and they are a different kind**: `STAGE90_T_PREFETCH_ABT` and
+ * `STAGE90_T_DATA_ABT`, the two abort classes whose vectors now belong to Apple's own handlers. They
+ * are not offsets, but they decide **which coprocessor pair fills two of the six** - see the comment
+ * on them at the bottom - and a header about the frame is the right place for the number that says
+ * which class of fault the frame is a frame of.
  */
 #ifndef STAGE90_ENTRY_SAVED_STATE_H
 #define STAGE90_ENTRY_SAVED_STATE_H
@@ -69,5 +75,18 @@
  * `cpsr` is that same `spsr`. So the mode the fault was taken in is the same expression here. */
 #define STAGE90_PSR_MODE_MASK   0x0000001Fu
 #define STAGE90_PSR_USER_MODE   0x00000010u
+
+/* `osfmk/arm/trap.h:69-74`, the two abort classes this image can see once 467 and 476 have given
+ * slots 4 and 3 to Apple's own first-level handlers. **The class is what says which coprocessor pair
+ * is the fault pair** - a prefetch abort's is IFSR (`c5,c0,1`) and IFAR (`c6,c0,2`), a data abort's
+ * is DFSR (`c5,c0,0`) and DFAR (`c6,c0,0`) - so the wrapper that reads them (`entry_trace.c`) has to
+ * know it, and the frame's own `SS_STATUS`/`SS_VADDR` are filled from the same pair by the vector
+ * (`locore.s`'s `dataabt_from_*` and `prefabt_from_*`). Reading the other class's pair would report
+ * two stale numbers and make `xnu_live_sleh_frame_ok` false on every abort - i.e. turn the offset
+ * control into a class indicator. These two constants are here rather than in `entry_trace.c` because
+ * `entry_stubs.c`'s comment names them too, and because a value two files reason about is written
+ * once. */
+#define STAGE90_T_PREFETCH_ABT  3u
+#define STAGE90_T_DATA_ABT      4u
 
 #endif /* STAGE90_ENTRY_SAVED_STATE_H */
