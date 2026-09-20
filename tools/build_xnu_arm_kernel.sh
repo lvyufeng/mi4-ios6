@@ -110,6 +110,9 @@ while [[ $# -gt 0 ]]; do
         #     untouched.
         #   * the `rm -f "$OUT"/*.o` truncation is skipped, because the objects it would delete are
         #     the pool's, which the entry link needs and this mode is not going to rebuild.
+        #   * the pool's `config.stamp` is **read and not written**, and this mode stops if the pool is
+        #     not the configuration it would compile the platform blocks with - see the 492 block at
+        #     the end of this script for what a stamp written by a mode that builds no pool cost.
         # It still checks the component table, the device table and the generated roots, so a
         # platform-only run is a real build of those four blocks under the same conditions.
         --platform-only) ONLY_PLATFORM=1; shift ;;
@@ -1211,7 +1214,18 @@ done
 # requirement the platform expert does not: its `start` calls the entry image's `entry_live_write`,
 # declared `extern "C"` rather than included, so `out/xnu_arm_boot/build_entry.sh` is what must link it
 # (the object is not in the manifest, so nothing else ever will).
+#
+# **And 492's `MSM8974Timer.cpp` is the third, which is the first one whose personality names a
+# *device* class.** Nothing about the compilation changes - it is the same kind of iokit translation
+# unit as the other two and its `start` calls `entry_live_write` for the same reason - but the entry
+# it is matched by is filed under `IOPlatformDevice`, the class `IODTPlatformExpert::createNub` builds
+# (`IOPlatformExpert.cpp:1283`), so it is the first driver here whose provider is a nub the *device
+# tree* produced rather than an object the kernel itself creates. `tools/check_driver_catalogue.py`
+# reads this list to check that the class each personality names exists in the link: a personality
+# naming a class no object defines is `OSMetaClass::allocClassWithName` failing at match time, which
+# prints nothing and starts nothing.
 PLATFORM_SOURCES=("$REPO_ROOT/stages/stage90/xnu_platform/MSM8974PlatformExpert.cpp"
+                  "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974Timer.cpp"
                   "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974RootResource.cpp")
 
 # And the two answers the platform expert above gives `IODTPlatformExpert::processTopLevel`, checked
@@ -1397,14 +1411,47 @@ fi
 # nothing recorded that. A pool built for one configuration and an image linked expecting another is
 # the "one value, two definitions" defect with a build in the middle of it, and it shows up as
 # nothing at all - the image links, the checks pass, and the kernel is a different kernel.
-{
-    printf 'config %s\n' "$CONFIG"
-    printf 'master_local %s\n' "${XNU_MASTER_LOCAL:-}"
-    printf 'objects %s\n' "$(ls "$OUT"/*.o 2>/dev/null | wc -l)"
-    printf 'defines %s\n' "$(printf '%s\n' "${DEFINES[@]}" | grep -c .)"
-    printf 'pool_printf_shim %s\n' "$(grep -l 'U _consume_printf_args' "$OUT"/*.o 2>/dev/null | wc -l)"
-    printf 'pool_mockfs_objects %s\n' "$(ls "$OUT"/bsd_miscfs_mockfs_*.o 2>/dev/null | wc -l)"
-} > "$OUT/config.stamp"
+#
+# **And under `--platform-only` it is read rather than written (492).** This mode builds the
+# out-of-manifest blocks and *not* the pool, so a stamp from it would be a fact about a build that did
+# not happen: the pool objects stay whatever they were while `config` becomes this run's - and the
+# first time that happened it was a `--platform-only` run without `XNU_KERNEL_CONFIG`, which stamped
+# `config RELEASE` over a `STAGE90_XNU` pool whose 708 objects were never touched. `build_entry.sh`'s
+# `verify_root_device` refused the next link for it, which is the guard working and the *writer* being
+# wrong. So the mode now compares the stamp instead: the pool has to be the configuration this run
+# would compile the platform blocks with, and a mode that cannot say so stops before building them.
+if [[ $ONLY_PLATFORM -eq 1 ]]; then
+    stamp=$OUT/config.stamp
+    if [[ ! -f $stamp ]]; then
+        {
+            echo "ERROR: --platform-only has no $stamp to compare against, so it cannot tell which"
+            echo "       configuration the pool in $OUT is. Build the pool first:"
+            echo "         XNU_KERNEL_CONFIG=$CONFIG XNU_MASTER_LOCAL=<fragment> ./tools/build_xnu_arm_kernel.sh"
+        } >&2
+        exit 3
+    fi
+    pool_config=$(awk '$1 == "config" { print $2 }' "$stamp")
+    if [[ $pool_config != "$CONFIG" ]]; then
+        {
+            echo "ERROR: --platform-only would compile the out-of-manifest blocks with $CONFIG's"
+            echo "       defines, and the kernel pool in $OUT is the '$pool_config' kernel. Set"
+            echo "       XNU_KERNEL_CONFIG=$pool_config (and the same XNU_MASTER_LOCAL the pool was"
+            echo "       built with) and re-run. It is not a warning: the blocks are linked into the"
+            echo "       image beside that pool."
+        } >&2
+        exit 3
+    fi
+    echo "  platform-only: the pool in $OUT is the '$pool_config' kernel, and the stamp is left alone"
+else
+    {
+        printf 'config %s\n' "$CONFIG"
+        printf 'master_local %s\n' "${XNU_MASTER_LOCAL:-}"
+        printf 'objects %s\n' "$(ls "$OUT"/*.o 2>/dev/null | wc -l)"
+        printf 'defines %s\n' "$(printf '%s\n' "${DEFINES[@]}" | grep -c .)"
+        printf 'pool_printf_shim %s\n' "$(grep -l 'U _consume_printf_args' "$OUT"/*.o 2>/dev/null | wc -l)"
+        printf 'pool_mockfs_objects %s\n' "$(ls "$OUT"/bsd_miscfs_mockfs_*.o 2>/dev/null | wc -l)"
+    } > "$OUT/config.stamp"
+fi
 
 echo
 echo "== $CONFIG manifest for arm, compiled =="

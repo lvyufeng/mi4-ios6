@@ -61,9 +61,45 @@
  * `IOService::setPlatform` and is already registered when the catalogue is first consulted, which is
  * what makes the match a property of the *catalogue* rather than of the device tree.
  *
- * The entry is placed **before** Apple's fallback, and after the platform expert, so that the file's
- * own reading order is the boot's: the platform expert that names this machine, the driver that makes
- * its resource root match, and Apple's designed fallback last as it was.
+ * The entries are placed **before** Apple's fallback, and in the boot's own order after that: the
+ * platform expert that names this machine, the driver for the first device node it publishes (492),
+ * the driver that makes its resource root match, and Apple's designed fallback last as it was. The
+ * order is not what makes the matching work - `addPersonality` buckets each entry by its
+ * `IOProviderClass`, so the array's order only decides the *scores* of entries that share one bucket -
+ * but it is what makes this file readable as the boot it describes.
+ *
+ * **And a third entry (492), the driver for this machine's first device node.** 491's census
+ * measured what the driver layer looks like without it: 26 nubs under the platform expert, every one
+ * of them registered, and **not one service-plane child under any of them** - no driver attached to a
+ * device node at all. The reason is in the catalogue rather than in the matching code:
+ * `IOService::doServiceMatch` decides on `matches = gIOCatalogue->findDrivers(this, &generation)`
+ * (`IOService.cpp:3688`) and `findDrivers(IOService *, SInt32 *)` looks personalities up **by the
+ * service's own class chain** (`IOCatalogue.cpp:199-231`), because `addPersonality` files them under
+ * their `IOProviderClass` value (`:124-132`). The nubs this machine's tree produces are
+ * `IOPlatformDevice` - `IODTPlatformExpert::createNub` is `nub = new IOPlatformDevice`
+ * (`IOPlatformExpert.cpp:1283`) - and no entry here named that class, so every nub was answered with
+ * an empty set and `probeCandidates` never ran for one.
+ *
+ * So the third entry's `IOProviderClass` is `IOPlatformDevice`, read out of Apple's own `createNub`
+ * rather than guessed: the *root* nub the platform expert's entry names is
+ * `IOPlatformExpertDevice`, a different class, and a personality filed under it can never be found by
+ * the chain `IOPlatformDevice` -> `IOService` that a nub's lookup walks.
+ *
+ * `IONameMatch` is what the candidate test asks for afterwards, and its value comes from the device
+ * tree the payload builds (`stage90_main.c`'s `/timer` node): an `IOPlatformDevice`'s `compareName` is
+ * `((IOPlatformExpert *)getProvider())->compareNubName(this, ...)` (`IOPlatformExpert.cpp:1688-1693`),
+ * which is `IODTCompareNubName` over the provider nub's `name`, `compatible`, `device_type` and
+ * `model` (`IODeviceTreeSupport.cpp:799-865`). The two names below are that node's `name` and its
+ * `compatible`, listed as an OSUnserialize array so the driver's own record can say *which* of them
+ * matched (`kIONameMatchedKey`, `IOService.cpp:5443-5448`) instead of only that something did.
+ * `MSM8974Timer.cpp` holds both names as well, and `tools/check_driver_catalogue.py` compares the two
+ * lists - one value, two definitions, and this time compared.
+ *
+ * No `CFBundleIdentifier`, deliberately: `probeCandidates` stalls on
+ * `gIOCatalogue->isModuleLoaded(match)` (`IOService.cpp:3253`) and that function's answer is "true" for
+ * exactly the personalities that carry no bundle id, "assumed to be an in-kernel driver"
+ * (`IOCatalogue.cpp:475-496`) - which this is, linked into the entry image by
+ * `tools/build_xnu_arm_kernel.sh`'s `PLATFORM_SOURCES`.
  *
  * Compiled as C by this stage's own toolchain and linked as data. The symbol is a modifiable
  * pointer in C, so it lands in `.data` exactly where the stock object's does; the string is
@@ -75,6 +111,12 @@ const char * gIOKernelConfigTables =
     "     'IOClass'         = MSM8974PlatformExpert;"
     "     'IOProviderClass' = IOPlatformExpertDevice;"
     "     'IONameMatch'     = \"qcom,msm8974-xnu-stage90\";"
+    "     'IOProbeScore'    = 1616:32;"
+    "   },"
+    "   {"
+    "     'IOClass'         = MSM8974Timer;"
+    "     'IOProviderClass' = IOPlatformDevice;"
+    "     'IONameMatch'     = (timer, \"qcom,msm-timer\");"
     "     'IOProbeScore'    = 1616:32;"
     "   },"
     "   {"

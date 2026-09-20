@@ -908,6 +908,24 @@ uint32_t g_finddrv_site;
 uint32_t g_finddrv_svc;
 uint32_t g_finddrv_set;
 uint32_t g_finddrv_count;
+uint32_t g_finddrv_gen;
+uint32_t g_finddrv_res;
+/*
+ * 492's three tallies and its high-water mark, and they are what makes the *whole* stream a reading
+ * rather than a list. Every service that registers calls `findDrivers` once per `doServiceMatch`
+ * iteration, so with the filter gone the per-call record says which service was answered and the
+ * tallies say the shape of the answer over the whole boot: `some` counts the calls that came back
+ * with at least one candidate, `none` the calls whose set was real and empty (the ordinary case - a
+ * service no personality names), and `null` the calls where `findDrivers` returned nothing at all,
+ * which is the sentinel `0xffffffff` and not a count. `max` is the largest count any one service's
+ * candidate set had, and it is the number a "did the driver match" question can be read off without
+ * walking the stream. `some + none + null == calls` is an identity the run can be checked against,
+ * which is why all three are kept rather than one with a comment.
+ */
+uint32_t g_finddrv_some;
+uint32_t g_finddrv_none;
+uint32_t g_finddrv_null;
+uint32_t g_finddrv_max;
 /*
  * Experiment 447. 446 resolved the block to `ml_get_max_cpus` and the run could not say *which* of
  * that function's six callers it was, so the next reading is the caller itself - and the second is
@@ -1354,7 +1372,13 @@ uint32_t g_svc_state1[ENTRY_SVC_SHOWN];
  * is a different finding from a subtree with nothing in it.
  */
 #define ENTRY_PEX_ROOT 8u
-#define ENTRY_PEX_DEEP 24u
+/* 24 in 491, and its run is why this is 40: the inner loop's room is `ENTRY_PEX_DEEP - ENTRY_PEX_ROOT`
+ * and the expert has **26** service children, so 16 rows recorded the first sixteen and cut the ten
+ * that follow - the *tail* of the child set, where the machine's device nodes are. A driver attached
+ * to a device node shows up as that node's `kids_of`, so the rows the cap cut are exactly the rows
+ * this step's reading needs. `STAGE90_PEX_DEEP` in `entry_trace.c` is the other half of this cap and
+ * `check_driver_plane_census.py` claim 4 is what keeps them equal. */
+#define ENTRY_PEX_DEEP 40u
 uint32_t g_pex_calls;
 uint32_t g_pex_plane;
 uint32_t g_pex_root;
@@ -3198,6 +3222,36 @@ __attribute__((noinline)) static void entry_write_485_kv(void)
     entry_write_kv("xnu_entry_pex_state10", g_pex_state0[1]);
     entry_write_kv("xnu_entry_pex_state11", g_pex_state1[1]);
     entry_write_kv("xnu_entry_pex_kids_of1", g_pex_kids_of[1]);
+
+    /*
+     * 492's catalogue tallies and the last call's own numbers, at the end of this function rather than
+     * in one of their own: it is already `noinline` and it already writes the readings this one
+     * summarises (the third census's rows are the services these records are about), and the note
+     * above about the 4095-byte literal pool is the reason to add keys here rather than to grow the
+     * caller again.
+     *
+     * They are *also* on the live channel, written where they change (457's rule) - and that is the
+     * reading, because this epilogue has not run since the boot reached `vm_pageout` (490 measured it).
+     * The keys exist in both places for the reason 485's do: a reading that is only live cannot be
+     * read by a report, and a reading that is only in the report is not read by this boot at all.
+     *
+     * The set is the live set, one key at a time and in the same order, so the two channels can be
+     * compared without a mapping: five tallies, then the last call's service, candidate set, count,
+     * generation and the `is this the resource service` bit. That last one is what makes the record
+     * readable at all - `findDrivers` is asked about two very different populations, the boot's
+     * services and `gIOResources`, and a count of zero means something different for each.
+     */
+    entry_write_kv("xnu_entry_finddrv_calls", g_finddrv_calls);
+    entry_write_kv("xnu_entry_finddrv_some", g_finddrv_some);
+    entry_write_kv("xnu_entry_finddrv_none", g_finddrv_none);
+    entry_write_kv("xnu_entry_finddrv_null", g_finddrv_null);
+    entry_write_kv("xnu_entry_finddrv_max", g_finddrv_max);
+    entry_write_kv("xnu_entry_finddrv_site", g_finddrv_site);
+    entry_write_kv("xnu_entry_finddrv_svc", g_finddrv_svc);
+    entry_write_kv("xnu_entry_finddrv_set", g_finddrv_set);
+    entry_write_kv("xnu_entry_finddrv_count", g_finddrv_count);
+    entry_write_kv("xnu_entry_finddrv_gen", g_finddrv_gen);
+    entry_write_kv("xnu_entry_finddrv_res", g_finddrv_res);
 }
 
 /*
@@ -4593,31 +4647,57 @@ void entry_note_dict(uint32_t site, uint32_t name, uint32_t table_in, uint32_t t
 }
 
 /*
- * Experiment 457. One call per `IOCatalogue::findDrivers(IOService *, SInt32 *)` whose `service` is
- * the resource root, from the one wrapper in `entry_trace.c`. The argument that matters is the last:
- * `doServiceMatch` fills `resourceKeys` - and so sets the `IOResourceMatched` array the whole wait
- * turns on - only `if (keepGuessing && matches->getCount() && ...)` (`IOService.cpp:3724`), and
- * `matches` is exactly this call's return value. So the count *is* the measurement 456 could not
- * make, and the set pointer it is read from is kept beside it in case the count is right for the
- * wrong reason (a personality filed under `IOService` rather than `IOResources` would show up here
- * too, and `xnu_live_finddrv_svc` is what would say the reading was about the resource root at all).
+ * Experiment 457, opened to every service in 492. One call per `IOCatalogue::findDrivers(IOService *,
+ * SInt32 *)`, from the one wrapper in `entry_trace.c` - and since 492 that is every registration of
+ * every service and not only the resource root's, because "which services the catalogue answered, and
+ * with how many candidates" is the goal's driver question and a writer-side filter keeps the one
+ * service it was written for.
  *
- * Live only, like every reading since 454: a boot that hangs at this frontier never reaches the
- * epilogue, so the five keys go to the live console in the order that makes the record readable -
- * ordinal, site, service, set, count.
+ * The argument that matters is still the count: `doServiceMatch` fills `resourceKeys` - and so sets
+ * the `IOResourceMatched` array the whole wait turns on - only `if (keepGuessing && matches->getCount()
+ * && ...)` (`IOService.cpp:3724`), and `matches` is exactly this call's return value. So the count *is*
+ * the measurement 456 could not make, and the set pointer it is read from is kept beside it in case
+ * the count is right for the wrong reason. `res` is 457's filter as a *value*: the reader of a total
+ * stream can select the resource root's records, and a record that says what it is can be checked.
+ * `gen` is the catalogue's own generation, stored through the caller's out-parameter by the real call
+ * - the other conjunct of `keepGuessing` (`catalogGeneration != getGenerationCount()`), so it is what
+ * says whether a second call for one service is the loop's second iteration or a new generation.
+ *
+ * The tallies are written on every record rather than once at the end, for the reason every reading
+ * since 454 is: a boot that stops here never reaches any epilogue. `some` + `none` + `null` == `calls`
+ * is the identity a reader can check the stream against, and `max` is the largest candidate set any
+ * one service was answered with - the number the goal's "did a driver match" question reduces to.
  */
-void entry_note_finddrivers(uint32_t site, uint32_t service, uint32_t set, uint32_t count)
+void entry_note_finddrivers(uint32_t site, uint32_t service, uint32_t set, uint32_t count,
+                            uint32_t gen, uint32_t res)
 {
     g_finddrv_calls++;
     g_finddrv_site = site;
     g_finddrv_svc = service;
     g_finddrv_set = set;
     g_finddrv_count = count;
+    g_finddrv_gen = gen;
+    g_finddrv_res = res;
+    if (count == 0xffffffffu)
+        g_finddrv_null++;
+    else if (count == 0u)
+        g_finddrv_none++;
+    else {
+        g_finddrv_some++;
+        if (count > g_finddrv_max)
+            g_finddrv_max = count;
+    }
     entry_live_write("xnu_live_finddrv_seq", g_finddrv_calls);
     entry_live_write("xnu_live_finddrv_site", site);
     entry_live_write("xnu_live_finddrv_svc", service);
     entry_live_write("xnu_live_finddrv_set", set);
     entry_live_write("xnu_live_finddrv_count", count);
+    entry_live_write("xnu_live_finddrv_gen", gen);
+    entry_live_write("xnu_live_finddrv_res", res);
+    entry_live_write("xnu_live_finddrv_some", g_finddrv_some);
+    entry_live_write("xnu_live_finddrv_none", g_finddrv_none);
+    entry_live_write("xnu_live_finddrv_null", g_finddrv_null);
+    entry_live_write("xnu_live_finddrv_max", g_finddrv_max);
 }
 
 /*

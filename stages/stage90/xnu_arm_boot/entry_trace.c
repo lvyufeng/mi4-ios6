@@ -371,8 +371,12 @@ extern void entry_note_mpass(uint32_t site, uint32_t dict, uint32_t options, uin
 extern void entry_note_dict(uint32_t site, uint32_t name, uint32_t table_in, uint32_t table_out);
 /* 457's one, called by the wrapper at the end of this file, and the reason it is a *separate*
  * function from `entry_note_dict`'s family is that its argument is not a dictionary but a set: the
- * count it carries is the reading `doServiceMatch` branches on. */
-extern void entry_note_finddrivers(uint32_t site, uint32_t service, uint32_t set, uint32_t count);
+ * count it carries is the reading `doServiceMatch` branches on. 492 adds two more arguments and no
+ * more call sites - the generation the real call stored through the caller's out-parameter, and
+ * whether the service is the resource root, which is 457's filter moved from the writer to the
+ * reader. */
+extern void entry_note_finddrivers(uint32_t site, uint32_t service, uint32_t set, uint32_t count,
+                                   uint32_t gen, uint32_t res);
 
 /*
  * `libsa/lastkernelconstructor.c`'s only statement, and the image's only reference to it is a **tail
@@ -1152,17 +1156,32 @@ void *__wrap__ZN9IOService16resourceMatchingEPKcP12OSDictionary(const char *name
  * `IOCatalogue.cpp` and called from `IOService.cpp`, so a `--wrap=` reaches it: the image's whole
  * call graph has one `bl` to it, at `0x80134378`, inside `doServiceMatch`.
  *
- * It is called once per registration of *every* service, so the wrapper filters on `this`-equivalent
- * ground the same way 455's `matchPassive` wrapper does: only the call whose `service` is
- * `gIOResources` is recorded, and the pointer is taken from `IOService::getResourceService()` rather
- * than from an address in this file, which the next relink would move. Without the filter the run
- * would spend five records per registered service and the frontier's own record would be somewhere
- * inside a stream of `IOWorkLoop`s.
+ * **492 removes the filter and makes the record total, because the filter was a claim about the
+ * question the goal asks.** 457 recorded only the call whose `service` is `gIOResources`, taken from
+ * `IOService::getResourceService()`, on the ground that the run would otherwise "spend five records
+ * per registered service and the frontier's own record would be somewhere inside a stream of
+ * `IOWorkLoop`s". That was the right trade for one reading and the wrong shape for the goal's:
+ * *which* services the catalogue answered and how many candidates each one got *is* the second half
+ * of "把基础驱动跑起来", and a filter that keeps one service cannot say how many others got none. The
+ * run is one record per `doServiceMatch` iteration - two per registration, so about sixty for this
+ * machine's thirty services - against a 2 MB ram console that 491's run filled to 533 KB, so the
+ * stream is affordable and the reading it carries is the count of *registrations*, which is what the
+ * `_seq` slot has been documented as since 457.
+ *
+ * The resource root is not lost by removing the filter: every record carries a `res` flag, tested
+ * with the same `getResourceService()` call the filter used, so 457's reading is the subset of
+ * records whose `res` is 1 - a filter the *reader* applies to a total stream rather than one the
+ * *writer* applies to it, which is the same move as naming `_matchpass` instead of `_matched`: a
+ * record that says what it is beats a record that was selected for a purpose nobody can check.
  *
  * Nothing is changed: the real function runs with the same arguments and its result is returned
  * unchanged. The count is `0xffffffff` when `findDrivers` returned nothing at all, which cannot be
  * confused with a real empty set - the reason `entry_note_finddrivers`'s sentinel is the extreme
- * value rather than 0, since `0` is exactly what an empty candidate set looks like.
+ * value rather than 0, since `0` is exactly what an empty candidate set looks like. The generation
+ * is the value the real call stored through the caller's own out-parameter (`*generationCount =
+ * getGenerationCount()`, `IOCatalogue.cpp:230`), read here because it is the catalogue's own answer
+ * to "have personalities been added since matching started" - the other conjunct of the loop's
+ * `keepGuessing` (with `reRegistered`) and therefore the reason a second call happens at all.
  */
 extern void *_ZN9IOService18getResourceServiceEv(void);
 extern uint32_t _ZNK12OSOrderedSet8getCountEv(const void *set);
@@ -1173,11 +1192,13 @@ void *__wrap__ZN11IOCatalogue11findDriversEP9IOServicePl(void *self, void *servi
     uint32_t site = (uint32_t)(uintptr_t)__builtin_return_address(0);
     void *result = __real__ZN11IOCatalogue11findDriversEP9IOServicePl(self, service, generation);
 
-    if (service && service == _ZN9IOService18getResourceServiceEv()) {
+    if (service != 0) {
         uint32_t count = result ? _ZNK12OSOrderedSet8getCountEv(result) : 0xffffffffu;
+        uint32_t gen = generation ? *(volatile uint32_t *)generation : 0u;
+        uint32_t res = (service == _ZN9IOService18getResourceServiceEv()) ? 1u : 0u;
 
         entry_note_finddrivers(site, (uint32_t)(uintptr_t)service, (uint32_t)(uintptr_t)result,
-                               count);
+                               count, gen, res);
     }
 
     return result;
@@ -2636,7 +2657,15 @@ extern void entry_note_pexchild(uint32_t seq, uint32_t depth, uint32_t child, ui
 extern void entry_note_pexend(void);
 
 #define STAGE90_PEX_ROOT 8u
-#define STAGE90_PEX_DEEP 24u
+/* 491's cap was 24 and its run recorded 19 of the expert's children, because the inner loop's room
+ * (`STAGE90_PEX_DEEP - STAGE90_PEX_ROOT` = 16) is what bounds the second level and the expert has
+ * **26** service children: four `cpu@N` nubs, twenty-one top-level nubs and `IODTNVRAM`
+ * (`processTopLevel`'s two `createNubs` calls and its own `dtNVRAM->attach( this )`). The ten rows
+ * that fell off the end were the *tail* of that set, which is where the device nodes are - the very
+ * rows a driver attached to one of them would appear under - so the cap is raised until the room
+ * covers the set: 40 - 8 = 32 rows for a level the run counted 26 in. `ENTRY_PEX_DEEP` is the table's
+ * own size and the two have to move together (`check_driver_plane_census.py` claim 4). */
+#define STAGE90_PEX_DEEP 40u
 
 void entry_probe_service_tree(void)
 {

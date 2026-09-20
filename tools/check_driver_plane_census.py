@@ -176,6 +176,14 @@ LIVE_KEYS = (
     "xnu_live_pex_registered", "xnu_live_pex_seq", "xnu_live_pex_depth", "xnu_live_pex_child",
     "xnu_live_pex_name0", "xnu_live_pex_name1", "xnu_live_pex_class0", "xnu_live_pex_class1",
     "xnu_live_pex_state0", "xnu_live_pex_state1", "xnu_live_pex_kids_of",
+    # 492's: the catalogue's own answer, which is the reading the third census's `kids_of` column is
+    # about. `_gen` is the generation the call was made with and `_res` says whether the service asked
+    # about was `gIOResources` - `findDrivers` is asked about two populations and a zero means
+    # something different in each.
+    "xnu_live_finddrv_seq", "xnu_live_finddrv_site", "xnu_live_finddrv_svc",
+    "xnu_live_finddrv_set", "xnu_live_finddrv_count", "xnu_live_finddrv_gen", "xnu_live_finddrv_res",
+    "xnu_live_finddrv_some", "xnu_live_finddrv_none", "xnu_live_finddrv_null",
+    "xnu_live_finddrv_max",
 )
 # And the report keys, which are written in 485's group beside the rest of the census.
 REPORT_KEYS = (
@@ -197,6 +205,11 @@ REPORT_KEYS = (
     "xnu_entry_pex_depth1", "xnu_entry_pex_child1", "xnu_entry_pex_name10", "xnu_entry_pex_name11",
     "xnu_entry_pex_class10", "xnu_entry_pex_class11", "xnu_entry_pex_state10",
     "xnu_entry_pex_state11", "xnu_entry_pex_kids_of1",
+    # 492's, written in the same group and in the same order as their live twins.
+    "xnu_entry_finddrv_calls", "xnu_entry_finddrv_some", "xnu_entry_finddrv_none",
+    "xnu_entry_finddrv_null", "xnu_entry_finddrv_max", "xnu_entry_finddrv_site",
+    "xnu_entry_finddrv_svc", "xnu_entry_finddrv_set", "xnu_entry_finddrv_count",
+    "xnu_entry_finddrv_gen", "xnu_entry_finddrv_res",
 )
 
 # The names the prediction is written in, and which the run's reading will confirm or falsify.
@@ -1062,9 +1075,23 @@ def mutate_facts(facts, mutate):
     elif mutate == "a_service_tree_reason_is_dropped":
         src("pex_census", "entry_note_pexnone(2u);", "entry_note_pexnone(1u);")
     elif mutate == "the_pex_caps_disagree":
-        src("trace", "#define STAGE90_PEX_DEEP 24u", "#define STAGE90_PEX_DEEP 4u")
+        # Both needles are read out of the file rather than spelled here. They used to be the literal
+        # `24u` of 491's census, and 492 raised the cap to 40: a mutation whose needle is a *value*
+        # stops mutating the day that value moves, and `_bump`'s assertion is the only thing that
+        # says so - the selftest would have gone from "refused" to "crashed", which is a different
+        # statement about the check. The replacement is derived too: the point of this mutation is
+        # that the deep cap and the root cap must not cross, so it puts the deep cap one below the
+        # root cap whatever the two currently are (defect 275).
+        deep = define(facts["trace"], PEX_DEEP_CAP)
+        root = define(facts["trace"], PEX_ROOT_CAP)
+        assert deep is not None and root is not None
+        src("trace", "#define %s %du" % (PEX_DEEP_CAP, deep),
+            "#define %s %du" % (PEX_DEEP_CAP, root - 1))
     elif mutate == "the_pex_array_is_smaller_than_its_cap":
-        src("stubs", "#define ENTRY_PEX_DEEP 24u", "#define ENTRY_PEX_DEEP 23u")
+        array = define(facts["stubs"], PEX_ARRAY)
+        assert array is not None
+        src("stubs", "#define %s %du" % (PEX_ARRAY, array),
+            "#define %s %du" % (PEX_ARRAY, array - 1))
     elif mutate == "the_inner_loop_bound_is_a_literal":
         src("pex_census", "j < (STAGE90_PEX_DEEP - STAGE90_PEX_ROOT)", "j < 24u")
     elif mutate == "the_old_matched_name_comes_back":
