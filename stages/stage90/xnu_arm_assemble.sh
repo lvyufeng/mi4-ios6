@@ -62,6 +62,15 @@ mkdir -p "$OUT_DIR"
 # RELEASE by default because that is the configuration the kernel objects this image links against
 # are built with; `XNU_KERNEL_CONFIG` overrides it, the same variable the kernel build reads.
 CONFIG=${XNU_KERNEL_CONFIG:-RELEASE}
+# **466: the configuration's own options, which this script did not use to pass either.** `start.s`
+# is assembled here and `locore.s` by `tools/assemble_arm_layer.sh`, and both were giving the
+# assembler the toolchain flags only - so `#if CONFIG_TELEMETRY` and friends in the tree's `.s` files
+# were false while the same macros were 1 in every C object. The one source for them is
+# `tools/xnu_config/arm_asm_defines.sh`; see it for the measurements and for the one exception.
+CONFIG_DEFINES=()
+while IFS= read -r d; do
+    [[ -n $d ]] && CONFIG_DEFINES+=("$d")
+done < <("$REPO_ROOT/tools/xnu_config/arm_asm_defines.sh" "$CONFIG")
 OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
 if [[ ! -f $OPTION_HEADERS/mach_kdp.h ]]; then
   echo "no $OPTION_HEADERS/mach_kdp.h - run ./tools/gen_option_headers.py first" >&2
@@ -129,8 +138,8 @@ INCLUDES=(
 
 assemble_one() {
   local src=$1 out=$2
-  [[ $VERBOSE -eq 1 ]] && echo "${CC_CMD[*]} ${TARGET_FLAGS[*]} ${DEFINES[*]} ... -c $src -o $out"
-  "${CC_CMD[@]}" "${TARGET_FLAGS[@]}" "${DEFINES[@]}" "${INCLUDES[@]}" -c "$src" -o "$out"
+  [[ $VERBOSE -eq 1 ]] && echo "${CC_CMD[*]} ${TARGET_FLAGS[*]} ${DEFINES[*]} ${CONFIG_DEFINES[*]} ... -c $src -o $out"
+  "${CC_CMD[@]}" "${TARGET_FLAGS[@]}" "${DEFINES[@]}" "${CONFIG_DEFINES[@]}" "${INCLUDES[@]}" -c "$src" -o "$out"
 }
 
 report() {

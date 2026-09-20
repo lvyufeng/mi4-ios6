@@ -41,6 +41,13 @@ XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
 SHIMS=$REPO_ROOT/stages/stage90/shims
 SHIMS_ARM=$REPO_ROOT/stages/stage90/shims_arm
 CONFIG=${XNU_KERNEL_CONFIG:-RELEASE}
+# The configuration's own options, which this script did not use to pass at all - see
+# `tools/xnu_config/arm_asm_defines.sh` for what that cost and for the one exception. The toolchain
+# flags below are the assembler's; these are the kernel's.
+CONFIG_DEFINES=()
+while IFS= read -r d; do
+    [[ -n $d ]] && CONFIG_DEFINES+=("$d")
+done < <("$REPO_ROOT/tools/xnu_config/arm_asm_defines.sh" "$CONFIG")
 OUT=${XNU_ASM_OBJ:-$REPO_ROOT/out/xnu_asm_obj}
 ASSYM=${XNU_ASSYM_OUT:-$REPO_ROOT/out/xnu_assym}/$CONFIG
 OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
@@ -146,7 +153,7 @@ while read -r src; do
         use=$OUT/translated/$rel
         translated=$((translated + 1))
     fi
-    if ! clang "${ASFLAGS[@]}" "${INCLUDES[@]}" -c "$use" -o "$OUT/$name.o" 2>"$OUT/$name.log"; then
+    if ! clang "${ASFLAGS[@]}" "${INCLUDES[@]}" "${CONFIG_DEFINES[@]}" -c "$use" -o "$OUT/$name.o" 2>"$OUT/$name.log"; then
         fail=$((fail + 1))
         printf '  FAIL %-24s %s\n' "$name" \
             "$(grep -m1 -aE 'error|fatal' "$OUT/$name.log" | sed 's|.*xnu-4570.1.46/||' | cut -c1-64)"

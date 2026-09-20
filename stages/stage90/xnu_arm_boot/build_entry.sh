@@ -26111,10 +26111,95 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
     require "$OSFMK_KERN_KEXT_ALLOC_OBJ"  "run ./tools/build_xnu_arm_kernel.sh first"
+
+    # --------------------------------------------------------------------------------------------
+    # 466: the object that defines the frontier symbol, and the twelve names it defines twice.
+    #
+    # 465's run stopped at `thread_bootstrap_return`: process 1's thread was created, released by
+    # `task_clear_return_wait`, and `task_wait_to_return`'s last statement is a **tail branch** to
+    # it (`800c3458: b 8045a104`), which is where the generated stand-in sits. The object that
+    # defines that symbol is Apple's own `osfmk/arm/locore.s` - `thread_bootstrap_return` falls
+    # through into `load_and_go_user`, the return-to-user path, and the same object defines
+    # `thread_exception_return` and `thread_syscall_return`, both of which the image stubs too.
+    #
+    # It is also where this image's *other* exception machinery comes from in Apple's build, and
+    # this image has its own of both: `xnu_arm_entry_vectors.o` supplies `ExceptionVectorsBase` and
+    # the `fleh_*` handlers (the trap path experiment 461 gave `g_panic_buf`, and the handlers the
+    # vectors are patched with), and `entry.ld:249` computes `ResetHandlerData` from the image's own
+    # reset handler data. Twelve of the seventeen names locore.o defines are therefore names the
+    # image already defines, and linking the object unchanged is a duplicate definition error - which
+    # is why the pool glob below has refused `locore.o` *by name* since 436, and why that refusal
+    # must stay: this block adds a **renamed copy** under a path of its own.
+    #
+    # The rule is the rename, not a list: **every global locore.o defines except the three the image
+    # is currently stubbing** gets a `locore_` prefix - the twelve that collide and the five that
+    # only locore.o has (`ExceptionVectorsEnd`, `ExceptionLowVectorsEnd`, `ExceptionVectorPanic`,
+    # `fleh_dec`, `fleh_fiq_generic`), because a name in this object should say which copy it is
+    # rather than leave the reader to work out whether the vectors above it are the image's or
+    # Apple's. The three are named because they are the object of the step, and what "the object of
+    # the step" means is two measurements that neither can be taken from the other's output: the
+    # names must be **defined by this object** - checked here, or the skip rule below would be
+    # skipping names locore.o does not have - and **referenced by some other object in this link** -
+    # checked below, after pass 1's link array is complete, because keeping a name nothing calls buys
+    # nothing and would mean the step is about a different symbol than it says. An earlier version of
+    # this block asked instead whether the names were in the *previous* build's undefined list, which
+    # is a check whose input is its own output - `xnu_arm_entry_undef.txt` is written by this build -
+    # so it passed once and failed the second time on this step's own success. 465's premise lives in
+    # the run's report; the question the build can answer is where the names are referenced from.
+    #
+    # The renamed set is asserted too, name for name, against the seventeen this step measured: a new
+    # collision must be looked at before it is renamed, not hidden by the rule that happens to cover
+    # it. What the renames buy is not only a link: locore.o's copy of the vectors and of the reset
+    # handler data is then reachable by nothing at all, which pass 1's own undefined list checks
+    # below (`locore_*` must appear there exactly never - a reference to one would have to come from
+    # another object).
+    ARM_LOCORE_OBJ=${STAGE90_ENTRY_LOCORE_OBJ:-$REPO_ROOT/out/xnu_asm_obj/locore.o}
+    require "$ARM_LOCORE_OBJ" "run ./tools/assemble_arm_layer.sh first - 466 is also the step that assembles the ARM layer with the configuration's own options, which is what stops locore.o calling two functions the configuration does not compile"
+    ENTRY_LOCORE_OBJ="$OUT/xnu_arm_entry_locore.o"
+    LOCORE_KEEP=(thread_bootstrap_return thread_exception_return thread_syscall_return)
+    LOCORE_RENAME_EXPECTED=(ExceptionLowVectorsBase ExceptionLowVectorsEnd ExceptionVectorPanic \
+                            ExceptionVectorsBase ExceptionVectorsEnd ExceptionVectorsTable \
+                            fleh_addrexc fleh_dataabt fleh_dec fleh_decirq fleh_fiq_generic fleh_irq \
+                            fleh_prefabt fleh_reset fleh_swi fleh_undef ResetHandlerData)
+    locore_defined=$(arm-none-eabi-nm --defined-only "$ARM_LOCORE_OBJ" | awk '$2 ~ /^[TDBR]$/ {print $3}')
+    keep_args=()
+    for k in "${LOCORE_KEEP[@]}"; do
+        if ! grep -qx "$k" <<<"$locore_defined"; then
+            say "FAIL: '$k' is not defined by $ARM_LOCORE_OBJ, so the rule below would be skipping a" >&2
+            say "      name this object does not have. The three are the frontier 465's run stopped at," >&2
+            say "      which this step exists to retire - re-derive them from the run's own report" >&2
+            say "      before linking this object." >&2
+            exit 1
+        fi
+        keep_args+=("$k")
+    done
+    rename_args=()
+    renamed=()
+    while IFS= read -r sym; do
+        [[ -n $sym ]] || continue
+        skip=0
+        for k in "${keep_args[@]}"; do [[ $sym == "$k" ]] && skip=1; done
+        [[ $skip -eq 1 ]] && continue
+        rename_args+=(--redefine-sym "$sym=locore_$sym")
+        renamed+=("$sym")
+    done < <(printf '%s\n' "$locore_defined" | sort)
+    if [[ "${renamed[*]}" != "${LOCORE_RENAME_EXPECTED[*]}" ]]; then
+        say "FAIL: the globals locore.o defines are not the seventeen this step measured." >&2
+        say "      expected: ${LOCORE_RENAME_EXPECTED[*]}" >&2
+        say "      found:    ${renamed[*]}" >&2
+        say "      A name in the first list and not the second has stopped colliding; a name in the" >&2
+        say "      second and not the first is a new collision, and which object should own it is a" >&2
+        say "      decision this build must not make by renaming." >&2
+        exit 1
+    fi
+    cp -f "$ARM_LOCORE_OBJ" "$ENTRY_LOCORE_OBJ"
+    run arm-none-eabi-objcopy "${rename_args[@]}" "$ENTRY_LOCORE_OBJ"
+    say "  locore.o: ${#renamed[@]} duplicate name(s) renamed, $(arm-none-eabi-size "$ENTRY_LOCORE_OBJ" | awk 'NR==2 {print $1}') bytes of text"
+
     LINK_OBJS+=("$ARM_INIT_OBJ" "$ARM_DATA_OBJ" "$ARM_BCOPY_OBJ" "$ARM_BZERO_OBJ" "$ARM_CPU_OBJ" \
                 "$ARM_PE_INIT_OBJ" "$ARM_STRLCPY_OBJ" "$ARM_STRLEN_OBJ" "$ARM_STRNCPY_OBJ" "$ARM_STRNLEN_OBJ" "$ARM_DEVICE_TREE_OBJ" \
                 "$ARM_PE_IDENTIFY_OBJ" "$ARM_SUBRS_OBJ" "$ARM_STRNCMP_OBJ" "$ARM_PE_GEN_OBJ" \
-                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "$OSFMK_CCHMAC_OBJ" "$OSFMK_CC_CLEAR_OBJ" "$OSFMK_MEMSET_S_OBJ" "$OSFMK_CC_CMP_SAFE_OBJ" "$OSFMK_BSD_DEV_UNIX_STARTUP_OBJ" "$BSD_KERN_BSD_INIT_OBJ" "$BSD_KERN_KDEBUG_OBJ" "$OSFMK_VM_VM_INIT_OBJ" "$OSFMK_VM_VM_COMPRESSOR_OBJ" "$OSFMK_VM_VM_MAP_OBJ"
+                "$ARM_BOOTARGS_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_MACHINE_ROUTINES_OBJ" "$ARM_CPU_COMMON_OBJ" "$ARM_KERN_THREAD_OBJ" "$ARM_KERN_TIMER_OBJ" "$ARM_MACHINE_ROUTINES_ASM_OBJ" "$ENTRY_LOCORE_OBJ" "$ARM_ARM_RTCLOCK_OBJ" "$ARM_KERN_STARTUP_OBJ" "$ARM_KERN_TIMER_CALL_OBJ" "$ARM_KERN_LOCKS_OBJ" "$ARM_LOCKS_ARM_OBJ" "$ARM_ARM_TIMER_OBJ" "$ARM_ARM_CPUID_OBJ" "$ARM_ARM_MACHINE_CPUID_OBJ" "$ARM_KERN_PROCESSOR_OBJ" "$ARM_KERN_PROCESSOR_DATA_OBJ" "$ARM_MACHINE_ROUTINES_COMMON_OBJ" "$ARM_ARM_VM_INIT_OBJ" "$LIBKERN_KERNEL_MACH_HEADER_OBJ" "$VM_VM_RESIDENT_OBJ" "$ARM_PMAP_OBJ" "$ARM_LOWMEM_VECTORS_OBJ" "$ARM_KERN_PRINTF_OBJ" "$BSD_KERN_SUBR_LOG_OBJ" "$ARM_KERN_DEBUG_OBJ" "$PEXPERT_PE_CONSISTENT_DEBUG_OBJ" "$PEXPERT_PE_KPRINTF_OBJ" "$PEXPERT_PE_SERIAL_OBJ" "$OSFMK_CONSOLE_VIDEO_OBJ" "$OSFMK_CONSOLE_SERIAL_GENERAL_OBJ" "$OSFMK_ARM_IO_MAP_OBJ" "$OSFMK_ARM_LOOSE_ENDS_OBJ" "$OSFMK_ARM_CACHES_ASM_OBJ" "$OSFMK_ARM_CACHES_OBJ" "$OSFMK_PRNG_RANDOM_OBJ" "$OSFMK_CCDRBG_NISTHMAC_OBJ" "$OSFMK_CCHMAC_INIT_OBJ" "$OSFMK_CCSHA1_EAY_OBJ" "$OSFMK_CCHMAC_UPDATE_OBJ" "$OSFMK_CCDIGEST_UPDATE_OBJ" "$OSFMK_CCHMAC_FINAL_OBJ" "$OSFMK_CCDIGEST_FINAL_64BE_OBJ" "$OSFMK_CCHMAC_OBJ" "$OSFMK_CC_CLEAR_OBJ" "$OSFMK_MEMSET_S_OBJ" "$OSFMK_CC_CMP_SAFE_OBJ" "$OSFMK_BSD_DEV_UNIX_STARTUP_OBJ" "$BSD_KERN_BSD_INIT_OBJ" "$BSD_KERN_KDEBUG_OBJ" "$OSFMK_VM_VM_INIT_OBJ" "$OSFMK_VM_VM_COMPRESSOR_OBJ" "$OSFMK_VM_VM_MAP_OBJ"
     "$LIBKERN_GEN_OSATOMICOPERATIONS_OBJ" "$BSD_KERN_KERN_MEMORYSTATUS_OBJ"
     "$OSFMK_VM_VM_PAGEOUT_OBJ" "$OSFMK_KERN_ZALLOC_OBJ"
     "$OSFMK_KERN_THREAD_CALL_OBJ" "$OSFMK_VM_VM_OBJECT_OBJ" "$BSD_KERN_SUBR_PRF_OBJ" \
@@ -26368,6 +26453,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     for _o in "${LINK_OBJS[@]}"; do _436_have["${_o#"$REPO_ROOT"/}"]=1; done
     _436_refuse="start.o locore.o iokit_KernelConfigTables.o"
     _436_refused=""
+    _436_scratch=""
     _436_already=0
     POOL_OBJS=()
     for _o in "$REPO_ROOT"/out/xnu_kernel_obj/*.o "$REPO_ROOT"/out/xnu_asm_obj/*.o; do
@@ -26377,6 +26463,22 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
             _436_refused+=" $_base"
             continue
         fi
+        # 466: and an object in the *assembly* directory that the assembler did not write is not an
+        # object of this kernel. `tools/assemble_arm_layer.sh` writes a `<name>.log` beside every
+        # `<name>.o` it builds, success or failure, so an `.o` with no log beside it was put there by
+        # something else - a hand-run clang, an experiment - and the glob adopting it is how a scratch
+        # object built for a measurement becomes part of the image. It did: a stale
+        # `out/xnu_asm_obj/xnu_arm_start.o`, assembled by hand before this step's change and therefore
+        # *without* the configuration's options, was in the pool, and the link failed three steps later
+        # on `_start` being defined twice, with nothing in that message to say which of the two copies
+        # was not the build's. The name is now reported and skipped instead of adopted.
+        case "$_o" in
+            "$REPO_ROOT"/out/xnu_asm_obj/*)
+                if [[ ! -f ${_o%.o}.log ]]; then
+                    _436_scratch+=" $_base"
+                    continue
+                fi ;;
+        esac
         if [[ -n ${_436_have["${_o#"$REPO_ROOT"/}"]:-} ]]; then
             _436_already=$((_436_already + 1))
             continue
@@ -26402,7 +26504,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
         exit 1
     fi
     say "  the whole kernel: ${#POOL_OBJS[@]} object(s) added, $_436_already already named above,"
-    say "  refused by name:$_436_refused"
+    say "  refused by name:$_436_refused${_436_scratch:+; in the assembly directory but not written by the assembler (no .log beside it):$_436_scratch}"
     LINK_OBJS+=(${POOL_OBJS[@]+"${POOL_OBJS[@]}"})
     unset -v _436_have
 
@@ -26426,6 +26528,44 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     else
         say "  $undef symbol(s) undefined - see $OUT/xnu_arm_entry_undef.txt"
     fi
+    # 466: and the claim the renames make, checked rather than stated: a `locore_` name in this list
+    # would mean some *other* object references locore.o's renamed copy of the vectors or of
+    # `ResetHandlerData`, i.e. that the code under it is reachable. It must be unreachable - the
+    # image's own vectors are what runs - and this is the one place where that is visible before
+    # the link rather than argued after it.
+    if grep -q '^locore_' "$OUT/xnu_arm_entry_undef.txt"; then
+        say "FAIL: something references a renamed locore.o symbol:" >&2
+        grep '^locore_' "$OUT/xnu_arm_entry_undef.txt" >&2
+        say "      locore.o's vectors and reset handler data are renamed so that nothing can reach" >&2
+        say "      them; a reference means this image is about to run two copies of the trap path." >&2
+        exit 1
+    fi
+    # 466: and the other half of what "the object of the step" means, which cannot be asked of the
+    # list above: the three names locore.o is allowed to keep must be *referenced by something else
+    # in this link*. A name nothing calls would mean locore.o now defines a frontier symbol that is
+    # not on any live path - the rename rule would be keeping a name for no reason, and the step
+    # would be about a different symbol than its report says. This is a property of the objects, so
+    # it is measured over the objects (`nm -u` on every link object except locore.o's own copy, one
+    # process, in command-line order) rather than over the undefined set the link just produced,
+    # which does not contain the names precisely because locore.o now defines them - that list is
+    # the *success* the sentence above checks, and it cannot also be the evidence for the premise.
+    locore_others=()
+    for o in "${LINK_OBJS[@]}"; do
+        [[ $o == "$ENTRY_LOCORE_OBJ" ]] && continue
+        locore_others+=("$o")
+    done
+    arm-none-eabi-nm -u ${locore_others[@]+"${locore_others[@]}"} 2>/dev/null |
+        awk 'NF > 1 {print $NF}' | sort -u > "$OUT/xnu_arm_entry_locore_refs.txt"
+    for k in "${LOCORE_KEEP[@]}"; do
+        if ! grep -qx "$k" "$OUT/xnu_arm_entry_locore_refs.txt"; then
+            say "FAIL: nothing in this link references '$k', so locore.o defining it retires nothing." >&2
+            say "      The three kept names are the frontier this step exists to retire; the objects" >&2
+            say "      that reference them are the live paths to it. The other objects' undefined names" >&2
+            say "      are in $OUT/xnu_arm_entry_locore_refs.txt." >&2
+            exit 1
+        fi
+    done
+    say "  locore.o's three kept names are each referenced by another object in this link"
 
     # Data or function, and how much data, decided by the kernel objects rather than by a
     # hand-written list: `nm -S` over the pool gives each symbol's type and its real size.
