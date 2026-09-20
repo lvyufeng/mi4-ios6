@@ -218,13 +218,97 @@ extern void entry_stub_hit(const char *name, uint32_t caller);
 extern void entry_kv(const char *key, uint32_t value);
 
 /*
- * **433: the only slot in this table with a body** - see the file header, and the definition below
- * the table, which is where it has to be: it compares `pthread_functions` against the table, so the
- * table has to be declared before it. It cannot dereference `pthread_functions` (a NULL or wrong
- * pointer must be a stop, not a fault), so it reads the pointer and compares it, and it writes the
- * pointer into the report as the evidence that the registration reached the kernel.
+ * The live channel, which is the ram console itself. Declared through `entry_note_live` rather than
+ * `entry_live_write` because the latter is inside `entry_stubs.c`'s `STAGE90_ENTRY_TRACE` guard and
+ * this object is compiled by `tools/build_xnu_arm_kernel.sh` with flags that do not set it; the
+ * wrapper is defined outside the guard and is a no-op when the trace is not compiled in.
+ */
+extern void entry_note_live(const char *key, uint32_t value);
+
+/*
+ * ================================================================================================
+ * **465: the second slot with a body - `pth_proc_hashinit`, which is the slot 464's run stopped in.**
+ *
+ * 464 ended at `forkproc+0x5a4`'s `bl <pth_proc_hashinit>` (`bsd/kern/kern_fork.c:1393`, under
+ * `#if PSYNCH`), reached from `bsd_init`'s last statement through `bsd_utaskbootstrap` ->
+ * `cloneproc` -> `forkproc`. The shim is Apple's own twenty bytes, `pthread_shims.c:358-360` -
+ * `movw`/`movt` of `pthread_functions`, `ldr r1, [r1]`, **`ldr r1, [r1, #32]`**, `bx r1` - so the
+ * slot is table word **8** and the entry below is the one the kernel reads.
+ *
+ * **464's write-up reads that same instruction as `[r1, #0x18]` and calls it "word 6". It is wrong,
+ * and it is worth naming the way it is wrong rather than quietly fixing it**: word 6 is
+ * `workqueue_mark_exiting`, so the stated evidence contradicted the stated conclusion, and the
+ * conclusion was right for a different reason - `nm` names `0x801f0a5c` `pth_proc_hashinit`, and the
+ * caller is the `#if PSYNCH` line of `forkproc`. The offset is read off the disassembly by eye; the
+ * identification is not. Recorded in the defects ledger.
+ *
+ * **What the real slot does, and what this image can honestly answer.** The kext's
+ * `pth_proc_hashinit` builds the per-process psynch waitqueue hash - `hashinit()`-backed storage
+ * reached through the proc's `p_pthhash` field via the *kernel's* half of the table
+ * (`proc_set_pthhash`) - and the only readers of that storage are psynch's own syscalls, which are
+ * seven more slots in the table above and are unreachable in a boot with no userland. There is no
+ * kext here, so:
+ *
+ *   - the body **does not dereference `p`** (433's rule, and the reason is the same: a NULL or
+ *     wrong pointer must be a stop that names itself, not a fault), it records the pointer;
+ *   - it **does not call the callbacks table**: `proc_set_pthhash(p, NULL)` would write NULL over a
+ *     field that `forkproc`'s own `bzero` has already made NULL, and every call into the kernel is a
+ *     new way for this step to fault;
+ *   - and it leaves `p->p_pthhash` NULL, which is the value the psynch slots would find anyway.
+ *
+ * **The record goes to the live channel as well as to the buffer, and that is a measurement rather
+ * than a preference.** 464's report reads `xnu_entry_kv_written = xnu_entry_kv_in_dram = 0x2000`
+ * (8192 of 8192) with `xnu_entry_kv_dropped = 0x8080` (32896 refusals), and the buffer's own
+ * content is *early-boot* allocations only - `t268_kalloc_ret` from `0xc05c0520` to `0xc05d9800`,
+ * against the frontier's own objects at `0xc06062e8`/`0xc06088c0`. So the tracer's 8 KB buffer has
+ * been full since the IOKit bring-up, and **the `entry_kv` record 433 wrote for `pthread_init`
+ * (`bsd_init.c:798`) is absent from 464's report for that reason and no other** - not because
+ * `pthread_init` did not run. A body whose only record is an `entry_kv` record is a body nothing
+ * will see in a boot this long, which is why the live records are written first here and kept.
+ *
+ * **Prediction, written before the build.** The live channel carries five new records at the slot:
+ * `xnu_live_pth_hashinit_seq = 1`, `xnu_live_pth_hashinit_p` a `0xc0...` pointer in the band
+ * `forkproc`'s other allocations occupy, `xnu_live_pth_hashinit_tbl` equal to whatever `nm` says
+ * `stage90_pthread_functions` is **in the build that runs** (it was `0x80499670` in 464's image, and
+ * the table moves with the image - the number to compare against is the new link's, `0x80499978`),
+ * and then, because this slot is now retired, **no**
+ * `stub_hit=stage90_pthread_functions.pth_proc_hashinit` anywhere in the log. The walk
+ * (`tools/xnu_entry_callwalk.py --root forkproc`, and the same for `cloneproc` and
+ * `bsd_utaskbootstrap`, against 464's ELF) answers **no stub on the straight-line path** from any of
+ * the three, so the next stop - if the boot stops at all - is either a guarded branch the walk lists
+ * (`forkproc+0x98 -> thread_call_allocate`, `forkproc+0xdc -> lck_mtx_lock`) or an indirect call it
+ * cannot follow. The path the source gives is `bsd_utaskbootstrap`'s tail (`proc_find(1)`,
+ * `proc_signalend`, `proc_transend`, `get_bsdthread_info`, `act_set_astbsd`,
+ * `task_clear_return_wait`), then `bsd_init`'s tail (`pal_kernel_announce`, `mountroot_post_hook`),
+ * then - on the AST that `act_set_astbsd` sets - `bsd_ast`'s `if (!bsd_init_done) bsdinit_task();`
+ * (`kern_sig.c:3443-3446`), whose `load_init_program(p)` (`kern_exec.c:5119`) is the first place
+ * this boot could print **new OS console text**: `load_init_program: attempting to load %s`
+ * (`kern_exec.c:5141`), the line 464's own document named as "the next print on this path".
+ *
+ * Falsifiers, named in advance:
+ *
+ *   (a) a stop still at `stage90_pthread_functions.pth_proc_hashinit` - the slot is not the one the
+ *       kernel reads, or the table was not relinked;
+ *   (b) no `xnu_live_pth_hashinit_seq` **and** no `stub_hit` - the shim's `bx r1` went somewhere that
+ *       is neither this slot nor a stand-in (which is what a wrong offset would look like);
+ *   (c) an XNU `panic()` with no `stub_hit` at all - the fourth kind of stop, the one that names its
+ *       own cause, which is what a body that returned into a broken caller would produce;
+ *   (d) `xnu_live_capped` in the log, or `xnu_live_pth_hashinit_seq` absent with the boot otherwise
+ *       continuing - the live channel is capped at 4096 records and 464's run wrote ~756, so this is
+ *       the *instrument* failing rather than the step;
+ *   (e) and, for the record this whole section exists for: the terminal `stub_hit` record naming a
+ *       *truncated* symbol again - `xnu_live_stub_hit_name_w0`/`_w1` and `..._seq` are the fix, and a
+ *       run that stops with a cut name and no live name words would say the fix did not take.
+ */
+/*
+ * **The two slots with bodies, declared here and defined below the table**, which is where they have
+ * to be: both name `pthread_functions` or the table itself. 433's is `pthread_init`, and its
+ * contract is in this file's header; 465's is `pth_proc_hashinit`, whose section is above. Neither
+ * body dereferences the pointer it is given - a NULL or wrong pointer must be a stop that names
+ * itself, not a fault - and 465's keeps 433's rule for its own argument.
  */
 static void stage90_pthread_functions_init(void);
+static void stage90_pthread_slot_pth_proc_hashinit(proc_t p);
 
 #define STAGE90_PTHREAD_SLOT_DEF(name)                                          \
     static void stage90_pthread_slot_##name(void)                               \
@@ -248,7 +332,8 @@ STAGE90_PTHREAD_SLOT_DEF(__unused2)
 STAGE90_PTHREAD_SLOT_DEF(workqueue_exit)
 STAGE90_PTHREAD_SLOT_DEF(workqueue_mark_exiting)
 STAGE90_PTHREAD_SLOT_DEF(workqueue_thread_yielded)
-STAGE90_PTHREAD_SLOT_DEF(pth_proc_hashinit)
+/* 465: `pth_proc_hashinit` is *not* defined by the macro - it has a hand-written body below, the
+ * way `pthread_init` does, because its slot is the one this step retires. */
 STAGE90_PTHREAD_SLOT_DEF(pth_proc_hashdelete)
 STAGE90_PTHREAD_SLOT_DEF(bsdthread_create)
 STAGE90_PTHREAD_SLOT_DEF(bsdthread_register)
@@ -283,15 +368,17 @@ STAGE90_PTHREAD_SLOT_DEF(workq_threadreq_modify)
 
 static const struct pthread_functions_s stage90_pthread_functions = {
     .version = PTHREAD_FUNCTIONS_TABLE_VERSION,
-    /* 433: the one slot with a body - see the file header. Not a stand-in. */
+    /* 433: the first slot with a body - see the file header. Not a stand-in. */
     .pthread_init = &stage90_pthread_functions_init,
+    /* 465: the second - see the section above the table. Not a stand-in either. The initializer is
+     * type-correct (`void (*)(proc_t)`), so no cast is needed here, unlike the macro's entries. */
+    .pth_proc_hashinit = &stage90_pthread_slot_pth_proc_hashinit,
     STAGE90_PTHREAD_SLOT_ENTRY(fill_procworkqueue)
     STAGE90_PTHREAD_SLOT_ENTRY(__unused1)
     STAGE90_PTHREAD_SLOT_ENTRY(__unused2)
     STAGE90_PTHREAD_SLOT_ENTRY(workqueue_exit)
     STAGE90_PTHREAD_SLOT_ENTRY(workqueue_mark_exiting)
     STAGE90_PTHREAD_SLOT_ENTRY(workqueue_thread_yielded)
-    STAGE90_PTHREAD_SLOT_ENTRY(pth_proc_hashinit)
     STAGE90_PTHREAD_SLOT_ENTRY(pth_proc_hashdelete)
     STAGE90_PTHREAD_SLOT_ENTRY(bsdthread_create)
     STAGE90_PTHREAD_SLOT_ENTRY(bsdthread_register)
@@ -346,11 +433,37 @@ static const struct pthread_functions_s stage90_pthread_functions = {
 static void stage90_pthread_functions_init(void)
 {
     entry_kv("xnu_entry_stage90_pthread_functions_ptr", (uint32_t)(uintptr_t)pthread_functions);
+    /* 465: and on the live channel, because 464 measured the `entry_kv` record above to be
+     * *invisible* in a boot this long - see the section above the table, and the buffer's own
+     * `kv_dropped = 0x8080`. The value is the same one; the channel is the one that survives. */
+    entry_note_live("xnu_live_pthread_init_ptr", (uint32_t)(uintptr_t)pthread_functions);
 
     if (pthread_functions != &stage90_pthread_functions) {
         /* The pointer is already in the report, one record above: 0 means it was never registered. */
         entry_stub_hit("stage90_pthread_functions.not_registered", 0u);
     }
+}
+
+/*
+ * **465: the body of `pth_proc_hashinit`.** What it does, what it deliberately does not do, and why
+ * the record goes to two channels is in the section above the table; this is the code.
+ *
+ * `entry_kv` is kept as well as the live records because the epilogue prints `g_kv_buf` as a block:
+ * in a boot short enough for the tracer not to have filled it, the dump is where this call appears.
+ * Neither channel's record dereferences `p`, and the call itself cannot change what the boot does -
+ * `forkproc` ignores the return (`void`) and the statement has no error path (`kern_fork.c:1393`),
+ * which is what makes a body here safe to add at all.
+ */
+static uint32_t stage90_pth_hashinit_calls;
+
+static void
+stage90_pthread_slot_pth_proc_hashinit(proc_t p)
+{
+    stage90_pth_hashinit_calls++;
+    entry_note_live("xnu_live_pth_hashinit_seq", stage90_pth_hashinit_calls);
+    entry_note_live("xnu_live_pth_hashinit_p", (uint32_t)(uintptr_t)p);
+    entry_note_live("xnu_live_pth_hashinit_tbl", (uint32_t)(uintptr_t)pthread_functions);
+    entry_kv("xnu_entry_pth_hashinit_p", (uint32_t)(uintptr_t)p);
 }
 
 /* Where `pthread_kext_register` writes the kernel's own callbacks table. Nothing here reads it. */

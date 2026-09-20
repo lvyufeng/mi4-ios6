@@ -1088,6 +1088,17 @@ static const char *g_why;
  */
 static uint32_t g_stub_caller_digits;
 static uint32_t g_stub_caller;
+/*
+ * 465. How many times a stand-in has been entered, and whether the caller record that `_w0`/`_w1`
+ * read back was actually *written*. Both are needed to read the pair above correctly: 464's run had
+ * `g_kv_len = 0x2000` when the stub hit, so `g_stub_caller_digits` was `0x2019` - 25 bytes **past**
+ * the end of the 8192-byte buffer, because the two `entry_kv` caller records were refused - and
+ * `entry_image_ptr` passed, so `_w0`/`_w1` printed bytes of the kernel's own neighbouring data
+ * (`ExceptionVectorsTable`, at `0x80558000`) as if they were digits. `_in_buf` says which case a
+ * run is in; a run with `_in_buf = 0` has no caller record in the buffer to read.
+ */
+static uint32_t g_stub_hit_count;
+static uint32_t g_stub_caller_in_buf;
 static uint32_t g_first_abort_dfsr;
 static uint32_t g_first_abort_lr;
 static uint32_t g_first_abort_insn;
@@ -2504,11 +2515,23 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      */
     entry_write_kv("xnu_entry_stub_caller_v", g_stub_caller);
     entry_write_kv("xnu_entry_stub_caller_digits", g_stub_caller_digits);
+    /*
+     * 465: `_in_buf` first, because it decides how `_w0`/`_w1` are to be read - and 464's run is the
+     * reason. There `g_kv_len` was `0x2000` when the stub was hit, so `_digits` was `0x2019`: 25
+     * bytes past the end of `g_kv_buf`, where the caller record *would* have started had
+     * `entry_kv_into` accepted it. `entry_image_ptr` passed (the address is inside the image), so
+     * the two words printed bytes of whatever `nm -n` puts above the buffer, which is the kernel's
+     * `ExceptionVectorsTable` - a plausible-looking pair of numbers that is not a reading of
+     * anything. With the flag, a run says which of the two it is; and with the gate, a run whose
+     * caller record was refused prints zero rather than a neighbour's bytes.
+     */
+    entry_write_kv("xnu_entry_stub_hit_count", g_stub_hit_count);
+    entry_write_kv("xnu_entry_stub_caller_in_buf", g_stub_caller_in_buf);
     entry_write_kv("xnu_entry_stub_caller_w0",
-                   entry_image_ptr((uintptr_t)&g_kv_buf[g_stub_caller_digits])
+                   (g_stub_caller_in_buf != 0u) && entry_image_ptr((uintptr_t)&g_kv_buf[g_stub_caller_digits])
                        ? entry_word_at((uintptr_t)&g_kv_buf[g_stub_caller_digits]) : 0u);
     entry_write_kv("xnu_entry_stub_caller_w1",
-                   entry_image_ptr((uintptr_t)&g_kv_buf[g_stub_caller_digits + 4u])
+                   (g_stub_caller_in_buf != 0u) && entry_image_ptr((uintptr_t)&g_kv_buf[g_stub_caller_digits + 4u])
                        ? entry_word_at((uintptr_t)&g_kv_buf[g_stub_caller_digits + 4u]) : 0u);
     /*
      * Experiment 269's reading of a full results buffer, in four numbers. They are read from `.bss`
@@ -3716,15 +3739,78 @@ void arm_init_idle_cpu(void) { entry_epilogue("arm_init_idle_cpu (unexpected)");
  * tail call (and, for the shape with calls before it, `mov r5, lr` in the prologue). A stub is still
  * 16 bytes rather than 12 - which is the whole cost of this, times 559 of them.
  */
+
+/*
+ * **465: the live channel, for a caller that does not know how this file was compiled.**
+ * `entry_live_write` is inside the `STAGE90_ENTRY_TRACE` guard, and `entry_stub_hit` is not
+ * (`build_entry.sh` compiles the trace only when `STAGE90_ENTRY_TRACE=1`, which is the canonical
+ * build but not the only one). This wrapper is defined outside that guard, so the pthread table's
+ * own body - a platform object, compiled by `tools/build_xnu_arm_kernel.sh` with flags this file
+ * does not choose - can call it in either configuration and the trace-off build still links. With
+ * the trace off there is no live channel and the call is a no-op, which is the truthful answer:
+ * there is nothing to write the record to, and `entry_kv`'s buffer copy is still there.
+ */
+void entry_note_live(const char *key, uint32_t value)
+{
+#ifdef STAGE90_ENTRY_TRACE
+    entry_live_write(key, value);
+#else
+    (void)key;
+    (void)value;
+#endif
+}
+
 void entry_stub_hit(const char *name, uint32_t caller)
 {
     static const char prefix[] = " stub_hit=";
 
+    /*
+     * **465: the terminal record goes to the live channel first, and this is 461's lesson one
+     * channel over.** 464's run stopped with `kv_written = kv_in_dram = 0x2000` - the 8 KB buffer
+     * full, 32896 writes refused - and the only reason the log names the stop at all is that a
+     * *record-sized* write is refused at `g_kv_len + 40 >= ENTRY_KV_BUF` while this function's own
+     * guard is `g_kv_len + 12 < ENTRY_KV_BUF`: eleven characters of the name fitted in the last
+     * bytes that no `entry_kv` record could reach, and the name that survived is
+     * ` stub_hit=stage90_pth`, which is not a symbol. The caller survived only because it is in
+     * `.bss` - the two `entry_kv` records for it were refused. So the one record that names a stop
+     * was the one record a full buffer could cut, which is 461's trap failure exactly.
+     *
+     * The name is written here **twice, in two forms**, because the live channel carries 32-bit
+     * values and not strings: as a pointer into the image (which `nm`/`tools/read_elf_string.py`
+     * resolve from the ELF, the way `t268_lckgrp_name` is resolved) and as the first eight bytes of
+     * the string itself, so a log with no ELF beside it names the stop on its own. The sequence
+     * number is what makes a *second* stop distinguishable from a repeat of the first - 464's run
+     * had no such counter, and "one `stub_hit`" was a count taken by reading the log by eye.
+     *
+     * These are terminal records: nothing later can be lost by writing them early, and nothing
+     * later can be *gained* by writing them late.
+     */
+    g_stub_hit_count++;
+    entry_note_live("xnu_live_stub_hit_seq", g_stub_hit_count);
+    entry_note_live("xnu_live_stub_hit_name_ptr", (uint32_t)(uintptr_t)name);
+    entry_note_live("xnu_live_stub_hit_name_w0",
+                    entry_image_ptr((uintptr_t)name) ? entry_word_at((uintptr_t)name) : 0u);
+    entry_note_live("xnu_live_stub_hit_name_w1",
+                    entry_image_ptr((uintptr_t)name + 4u)
+                        ? entry_word_at((uintptr_t)name + 4u) : 0u);
+    entry_note_live("xnu_live_stub_hit_caller", caller);
+
+    /*
+     * The buffer copy is kept as the *dump's* record - the epilogue prints the whole buffer, and a
+     * run whose live channel was capped wants the name in the dump too - and its bound is
+     * `+ 2u`, not `+ 1u`. **The `+ 1u` was an off-by-one that 464's run paid for out of the
+     * kernel's own data**: the loop could fill to `g_kv_len = 8191`, the `'\n'` took the length to
+     * exactly `ENTRY_KV_BUF` (8192), and `g_kv_buf[g_kv_len] = '\0'` therefore stored at
+     * `&g_kv_buf + 8192` = `0x80558000`, which `nm -n` puts at the first byte of the kernel's
+     * `ExceptionVectorsTable` (an 8-word table of exception handler addresses that `start.s` fills
+     * in during boot, so it is not a zero byte that was overwritten). Reserving both the `'\n'` and
+     * the `'\0'` in the loop's own bound keeps the last write inside the array.
+     */
     if (g_kv_len + sizeof prefix + 1u < ENTRY_KV_BUF) {
         for (const char *p = prefix; *p != '\0'; p++) {
             g_kv_buf[g_kv_len++] = *p;
         }
-        while (*name != '\0' && g_kv_len + 1u < ENTRY_KV_BUF) {
+        while (*name != '\0' && g_kv_len + 2u < ENTRY_KV_BUF) {
             g_kv_buf[g_kv_len++] = *name++;
         }
         g_kv_buf[g_kv_len++] = '\n';
@@ -3741,6 +3827,12 @@ void entry_stub_hit(const char *name, uint32_t caller)
      * window. */
     g_stub_caller_digits = g_kv_len + 25u;
     g_stub_caller = caller;
+    /* 465: whether the two records below will be written at all. The test is `entry_kv_into`'s own
+     * refusal test (`len + 40 >= max`), so it cannot disagree with it, and `_in_buf = 0` is what
+     * tells the report that `_digits` is an offset into a record that is not there - and in 464's
+     * run an offset past the buffer's end, which is how `_w0`/`_w1` came to print bytes of the
+     * kernel's `ExceptionVectorsTable`. */
+    g_stub_caller_in_buf = (g_kv_len + 40u < ENTRY_KV_BUF) ? 1u : 0u;
     entry_kv("xnu_entry_stub_caller", caller);
     /* The same value through the same call site, one call later: two records in the same machine
      * state say whether a bias is systematic per invocation or a per-call hazard. */

@@ -146,9 +146,13 @@ and the target is the pthread subsystem, one indirection deep:
 ```
 
 Every link but the last is Apple's own code and is in the image: `pth_proc_hashinit` at `0x801f0a5c` is
-twenty bytes — `movw`/`movt` of `pthread_functions`, `ldr [r1]`, `ldr [r1, #0x18]`, `bx r1` — so the slot
-it reaches is word 6 of the table, and `nm` puts this project's stand-in for exactly that slot at
-`0x80269f4c` (`stage90_pthread_slot_pth_proc_hashinit`, 16 bytes). `bsd_init`'s last statement is
+twenty bytes — `movw`/`movt` of `pthread_functions`, `ldr [r1]`, `ldr [r1, #0x20]`, `bx r1` — so the slot
+it reaches is **word 8** of the table (offset `0x20`, which is `pth_proc_hashinit`'s own offset in
+`struct pthread_functions_s`), and `nm` puts this project's stand-in for exactly that slot at
+`0x80269f4c` (`stage90_pthread_slot_pth_proc_hashinit`, 16 bytes). *Corrected by 465: this line read
+`ldr [r1, #0x18]`, "word 6", which is `workqueue_mark_exiting`; the offset is read off the disassembly and
+the identification rests on `nm` naming `0x801f0a5c` `pth_proc_hashinit` and on the caller being
+`forkproc`'s `#if PSYNCH` line. Defect 185.* `bsd_init`'s last statement is
 `bsd_utaskbootstrap` and `cloneproc`'s only caller in a boot with no userland is that statement
 (`kern_fork.c:578`'s other call site is inside `fork1`'s vfork path, which needs a syscall), so this is the
 bootstrapping of process 1: **the whole of `bsd_init` ran** — the mount, `IOSecureBSDRoot`, `VFS_ROOT`,
@@ -193,9 +197,11 @@ and `build_entry.sh`'s `platform_obj_fresh()` check passed. The entry image's `.
 `IOPlatformExpert`'s own address `0x8058b4f0` identical to 463's — the extra text is the registration, the
 count and the two records. 40 wraps, unchanged: **37 reached by a branch, 1 same-object-only, 1 never
 called here (`sleep`), 1 by address only (`vcputc`), none dead**; pass 1 = 27 undefined; 463's `getState`
-uniqueness and the twelve mangled-name checks all pass. The payload is 8327168 bytes, md5
-`84acb13641eeb3fe5ea63c8cbea7f3ba3b86383e36da6399de851128718979df` (the entry blob it embeds changed,
-its own sources did not). The entry blob rebuilt after the run is **byte-identical**
+uniqueness and the twelve mangled-name checks all pass. The payload is 8327168 bytes, sha256
+`84acb13641eeb3fe5ea63c8cbea7f3ba3b86383e36da6399de851128718979df` (*corrected by 465: this line said
+"md5", and the value is the build's `sha256sum` output — 64 hex digits — so anyone who checked it with
+`md5sum` would have seen a mismatch and concluded the artifact had changed. Defect 186.*; the entry blob
+it embeds changed, its own sources did not). The entry blob rebuilt after the run is **byte-identical**
 (`cmp` clean, md5 `4806a0a6f0aa186824e78202a56ce1cb`), so the artifact that booted is the tree that is
 being committed.
 
