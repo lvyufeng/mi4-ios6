@@ -1503,6 +1503,23 @@ uint32_t g_pub2_count;
  * say in every case whether it happens once or forever. What is *not* predicted to appear at all is
  * `pc = 0x10e0`: that is the RAM disk's `udf #0`, an undefined instruction, which reaches
  * `sleh_undef` and never this function.
+ *
+ * --------------------------------------------------- 490: the recovery address, and why 473's split
+ *
+ * The paragraph above says `pc` and `cpsr` separate a kernel `copyin` of an unmapped user address
+ * from the process's own thread faulting. **They separate the two *places* and not the two
+ * *kinds***: a copy of address `0x102000` and the fixture's own load of `0x102000` have the same
+ * `far`, and the `pc` only says which instruction was executing. 489's document ended by reading two
+ * `Lcopyin_wordwise_loop` records at `far = 0` as the frontier, on the inference that `copyin`
+ * "faults rather than returning `EFAULT`" - and the source says the opposite: `copyin` **arms a
+ * recovery address and thereby converts the fault into an `EFAULT` return**.
+ *
+ * So the record carries that address. `thread->recover` at `STAGE90_TH_RECOVER`, read by
+ * `entry_trace.c`'s wrapper before the handler consumes it, gives the run a number that no `far`/`pc`
+ * pair can: **a non-zero recovery address means the fault was one the kernel had a plan for.** The
+ * key is per entry in the `SLEH_LIVE_MAX` band, the count of such entries is written to the live
+ * channel whenever it changes, and both are in the epilogue report as well. The three bands stay as
+ * they are - this adds a field to the first and a counter beside it, not a fourth band.
  */
 uint32_t g_sleh_seq;
 uint32_t g_sleh_back;
@@ -1518,6 +1535,9 @@ uint32_t g_sleh_fsr_frame;
 uint32_t g_sleh_far_frame;
 uint32_t g_sleh_frame_ok;
 uint32_t g_sleh_user_mode;
+uint32_t g_sleh_recover;
+uint32_t g_sleh_armed;
+uint32_t g_sleh_redirected;
 
 #define SLEH_LIVE_MAX 8u
 #define SLEH_LIVE_FRAMES 16u
@@ -1526,7 +1546,7 @@ uint32_t g_sleh_user_mode;
 void entry_live_write(const char *key, uint32_t value);
 
 void entry_note_sleh(uint32_t type, uint32_t fsr, uint32_t far_, uint32_t thread,
-                     const uint32_t *frame)
+                     const uint32_t *frame, uint32_t recover)
 {
     uint32_t sp = 0u, lr = 0u, pc = 0u, cpsr = 0u, fsr_frame = 0u, far_frame = 0u;
 
@@ -1534,6 +1554,27 @@ void entry_note_sleh(uint32_t type, uint32_t fsr, uint32_t far_, uint32_t thread
     g_sleh_type = type;
     g_sleh_fsr = fsr;
     g_sleh_far = far_;
+    g_sleh_recover = recover;
+
+    /*
+     * **490: how many of the aborts this run took were ones the kernel had a plan for.** The count
+     * is written where it changes rather than once per entry, and it is the number that turns "ten
+     * `Lcopyin_wordwise_loop` records" into "ten of the run's N aborts were inside a copy path" - a
+     * distinction the records' `far` and `pc` cannot make on their own, because a copy of an
+     * unmapped user address and the process's own thread faulting on the same address produce the
+     * same pair.
+     *
+     * The name is `_armed` and not `_recovered` because this counts the word being *non-zero at
+     * entry*, which is not the same event as the handler spending it: `sleh_abort` reaches the
+     * recovery arm only after `arm_fast_fault` **and** `vm_fault` have both failed, so a `copyout`
+     * that faulted on a page the kernel then paged in and retried has an armed word and no
+     * redirection at all. `entry_note_sleh_back` is where the second reading is taken, from the
+     * frame's `pc` after the call, and this file keeps the two counts apart.
+     */
+    if (recover != 0u) {
+        g_sleh_armed++;
+        entry_live_write("xnu_live_sleh_armed", g_sleh_armed);
+    }
 
     /*
      * A word index into `struct arm_saved_state`, from `entry_saved_state.h`. The six offsets are
@@ -1565,6 +1606,9 @@ void entry_note_sleh(uint32_t type, uint32_t fsr, uint32_t far_, uint32_t thread
         entry_live_write("xnu_live_sleh_fsr", fsr);
         entry_live_write("xnu_live_sleh_far", far_);
         entry_live_write("xnu_live_sleh_thr", thread);
+        /* 490: the recovery address as the handler *receives* it - see `entry_trace.c`'s wrapper,
+         * which reads it before `sleh_abort` zeroes it. */
+        entry_live_write("xnu_live_sleh_recover", recover);
     } else if (g_sleh_seq == SLEH_LIVE_MAX + 1u) {
         g_sleh_storm = g_sleh_seq;
         entry_live_write("xnu_live_sleh_storm", g_sleh_storm);
@@ -1586,11 +1630,27 @@ void entry_note_sleh(uint32_t type, uint32_t fsr, uint32_t far_, uint32_t thread
     }
 }
 
-void entry_note_sleh_back(void)
+void entry_note_sleh_back(uint32_t redirected)
 {
     g_sleh_back++;
+
+    /*
+     * **490: the word was armed, or it was spent - and this is the second of the two.** The wrapper
+     * passes 1 here when the frame's `pc`, read after the handler returned, is the armed address
+     * with bit 0 cleared, which is the only write `sleh_abort` makes on that path (`trap.c:456-461`).
+     * So a non-zero `xnu_live_sleh_redirected` says the run's faults were converted into `EFAULT`
+     * returns, and a run whose armed count is high and whose redirected count is zero says the
+     * kernel paged those copies in and retried them - which is what 488's and 489's own console
+     * shows for the exec path, whose copies succeeded.
+     */
+    if (redirected != 0u) {
+        g_sleh_redirected++;
+        entry_live_write("xnu_live_sleh_redirected", g_sleh_redirected);
+    }
+
     if (g_sleh_seq <= SLEH_LIVE_MAX) {
         entry_live_write("xnu_live_sleh_back", g_sleh_back);
+        entry_live_write("xnu_live_sleh_redirect", redirected);
         entry_live_write("xnu_live_sleh_at_back", g_sleh_seq);
     }
 }
@@ -3086,6 +3146,35 @@ __attribute__((noinline)) static void entry_write_474_kv(void)
 }
 
 /*
+ * 490's two keys, in a function of their own for 455's reason - each new key costs code in whichever
+ * epilogue function holds it, and the pool is at the PC-relative edge.
+ *
+ * `_recover` is the *last* abort's recovery address, `_armed` is how many of the run's aborts had one,
+ * and `_redirected` is how many of those the handler actually spent. Together they are the answer to
+ * the question 489's document got wrong: whether a fault inside `copyin`/`copyout` on an unmapped user
+ * address is the frontier or Apple's own designed path. A non-zero `_recover` says the kernel had a
+ * plan for that fault - `copyin` armed `copyio_error` before it entered its loop
+ * (`entry_saved_state.h`'s `STAGE90_TH_RECOVER` has the four instructions and the four `trap.c` line
+ * numbers) - `_armed` says how many aborts in the whole run were of that kind rather than being the
+ * process's own, and `_redirected` says how many of them the handler gave up on: it reaches the
+ * recovery arm only after `arm_fast_fault` **and** `vm_fault` have both failed, so a `copyout` that
+ * faulted on a page the kernel then paged in and retried is armed and *not* redirected. The two
+ * counts are published under two names for that reason, and neither name is the other's.
+ *
+ * **The three are deliberately readable when the run dies somewhere else**: the live channel carries
+ * the same numbers per entry, and this one survives to the epilogue. A run whose `_recover` is
+ * zero on the `Lcopyin_wordwise_loop` record and non-zero on nothing would mean the copy path was
+ * *not* armed, which is a different and much worse reading than the one this step expects - so the
+ * key is here to be able to be zero.
+ */
+__attribute__((noinline)) static void entry_write_490_kv(void)
+{
+    entry_write_kv("xnu_entry_sleh_recover", g_sleh_recover);
+    entry_write_kv("xnu_entry_sleh_armed", g_sleh_armed);
+    entry_write_kv("xnu_entry_sleh_redirected", g_sleh_redirected);
+}
+
+/*
  * 478's keys, in a function of their own for 455's reason - the epilogue's constant pool is at the
  * PC-relative edge and each new key costs code in whichever function holds it.
  *
@@ -3813,6 +3902,11 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      * and these words are read *together*, and the address the word in `arg0`..`arg4` describes says
      * whether the syscall was reached at all. */
     entry_write_480_kv();
+    /* 490: the two words that say whether the run's aborts were planned. Placed here with 480's for
+     * the same reason - they are read together with the trap record above, and `_recover` is the one
+     * that says whether the record's `far`/`pc` pair describes a copy that had a recovery address
+     * armed or a fault nothing had a plan for. */
+    entry_write_490_kv();
     /* 481: the timer's owner. Unlike the three above this one is *inside* `arm_init`'s own window -
      * the registering `PE_init_platform` call is five instructions before the `arm_init` return that
      * reaches this epilogue - so these keys are expected to be non-zero here, and `_registered = 0`

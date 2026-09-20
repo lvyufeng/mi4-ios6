@@ -2095,16 +2095,48 @@ void __wrap_sleh_undef(void *regs, void *vfp_ss)
  *
  * Nothing else changes: the pointer is passed, not dereferenced here, and the real handler still runs
  * with the same arguments.
+ *
+ * **490: the record takes `thread->recover` as well, and it is read *before* the real handler
+ * because the real handler consumes it.** The word is Apple's recovery address for a fault-driven
+ * copy (`entry_saved_state.h`'s `STAGE90_TH_RECOVER`): `copyin`/`copyout` arm it with an `adr` to
+ * their own error label, `sleh_abort`'s second statement is `thread->recover = 0`, and when the page
+ * cannot be paged in the handler points `regs->pc` at it so the copy returns `EFAULT` instead of the
+ * instruction being retried forever. A non-zero value here therefore says, in the log, that the
+ * fault was one the kernel had a plan for - which is the difference between a `far = 0` inside
+ * `Lcopyin_wordwise_loop` being a frontier and being the designed path. Reading it *after*
+ * `__real_sleh_abort` would report 0 on every entry, and a zero that means "nothing was armed" is
+ * the same number as a zero that means "the handler already spent it" - which is the kind of thing
+ * this project has had to retract before. `TPIDRPRW` is in hand for the `thread` field already, so
+ * this is one load and no new register class.
+ *
+ * **And the word being armed is not the same reading as the word being spent, so the wrapper takes
+ * the second one too.** `sleh_abort` reaches the recovery arm only when *both* `arm_fast_fault` and
+ * `vm_fault` failed (`trap.c:446-461`), and the run's own first four aborts are exactly that
+ * distinction: the two with the word armed are the two that go through `copyout` and the two without
+ * it go through `memset` and `bcopy`, which have no such contract. Reading the word *alone* would
+ * make one number out of two different outcomes - `copyout` faulting on a user page the kernel then
+ * paged in and retried, and `copyout` faulting on a user page the kernel gave up on and converted
+ * into an `EFAULT` return. The first of those is 488's and 489's own log (the console is silent
+ * after `attempting to load /sbin/launchd`, so the exec's copies *succeeded*); the second is what a
+ * `copyin` of a null pointer does. So the frame is read again **after** the call: the handler's only
+ * way to take the arm is `regs->pc = (register_t)(recover & ~0x1)`, so a post-call `pc` equal to the
+ * armed word with bit 0 cleared *is* the arm having been taken, and nothing else in `sleh_abort`
+ * writes `pc`. One comparison, and the count it feeds states which of the two happened.
+ *
+ * The name of the counter matters as much as its value, which is why the armed-at-entry count is
+ * published as `..._armed` and not as `..._recovered`: a key named for the outcome it does not
+ * measure is the same defect as a comment that asserts a property nothing checks. `..._redirected`
+ * is the one that says the copy returned `EFAULT`.
  */
 extern void entry_note_sleh(uint32_t type, uint32_t dfsr, uint32_t dfar, uint32_t thread,
-                            const uint32_t *frame);
-extern void entry_note_sleh_back(void);
+                            const uint32_t *frame, uint32_t recover);
+extern void entry_note_sleh_back(uint32_t redirected);
 
 void __real_sleh_abort(void *regs, int type);
 
 void __wrap_sleh_abort(void *regs, int type)
 {
-    uint32_t fsr, far_, thread;
+    uint32_t fsr, far_, thread, recover, redirected;
 
     /*
      * **476: the class selects the coprocessor pair, because the class is what says which pair is the
@@ -2123,11 +2155,28 @@ void __wrap_sleh_abort(void *regs, int type)
     }
     __asm__ volatile ("mrc p15, 0, %0, c13, c0, 4" : "=r"(thread));
 
-    entry_note_sleh((uint32_t)type, fsr, far_, thread, (const uint32_t *)regs);
+    /* Before the real handler, which zeroes it (`trap.c:290-291`). See the comment above. */
+    recover = ((const uint32_t *)(uintptr_t)thread)[STAGE90_TH_RECOVER / 4];
+
+    entry_note_sleh((uint32_t)type, fsr, far_, thread, (const uint32_t *)regs, recover);
 
     __real_sleh_abort(regs, type);
 
-    entry_note_sleh_back();
+    /*
+     * Did the handler *spend* the word? `sleh_abort`'s only way to take the recovery arm writes
+     * `regs->pc = (register_t)(recover & ~0x1)` (`trap.c:456-461`), so the frame's `pc` after the
+     * call is the whole question - and it is asked here rather than inferred from the copy's return
+     * value, which the wrapper never sees. The mask is Apple's: bit 0 of the armed word is the state
+     * bit the handler moves into `PSR_TF` (`trap.c:459`), so the address it writes into `pc` is the
+     * word with that bit cleared and the comparison has to clear it too.
+     */
+    redirected = 0u;
+    if ((recover != 0u) && (regs != 0)) {
+        if (((const uint32_t *)(uintptr_t)regs)[STAGE90_SS_PC / 4] == (recover & ~0x1u))
+            redirected = 1u;
+    }
+
+    entry_note_sleh_back(redirected);
 }
 
 /* ------------------------------------------------- what the exec said when it gave up (471) */

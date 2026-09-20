@@ -100,6 +100,30 @@
 #define STAGE90_ACT_MAP        692
 #define STAGE90_MAP_PMAP       40
 
+/*
+ * **490 adds the word that says whether a fault was a copy's designed fault or a fault the kernel
+ * had no plan for**, and it is the same kind of number as the two above: an `offsetof(struct thread,
+ * ...)` out of the generated `assym.s`, transcribed here because the image cannot include Apple's
+ * header.
+ *
+ * `thread->recover` is the *recovery address* of Apple's fault-driven copy: `COPYIO_SET_RECOVER`
+ * (`osfmk/arm/machine_routines_asm.s:542-550`) arms it with an `adr` to the copy's own error label
+ * before entering the copy loop, `sleh_abort` (`trap.c:290-291`) reads it and **zeroes it** before
+ * doing anything else, and if the page cannot be paged in it points `regs->pc` at it
+ * (`trap.c:456-461`) - so the faulting instruction is replaced by the copy's error exit and the
+ * caller sees `EFAULT` instead of the instruction being retried forever or the kernel panicking.
+ *
+ * **So a non-zero value here at the moment of a fault is the reading that the fault was planned.**
+ * 489's document closed by calling the two `Lcopyin_wordwise_loop` faults at `far = 0` the
+ * frontier, and inferred from `far` and the faulting function that "copyin faults rather than
+ * returning EFAULT" - which is the opposite of what the code does: it faults *in order that* it can
+ * return EFAULT. Publishing this word turns that from an inference about the source into a number
+ * the run prints, and it is read in the wrapper *before* `__real_sleh_abort` because the handler
+ * consumes it - a read after the call would report 0 for every entry, which is a value a reader
+ * would believe.
+ */
+#define STAGE90_TH_RECOVER     664
+
 /* `osfmk/arm/trap.h:69-74`, the two abort classes this image can see once 467 and 476 have given
  * slots 4 and 3 to Apple's own first-level handlers. **The class is what says which coprocessor pair
  * is the fault pair** - a prefetch abort's is IFSR (`c5,c0,1`) and IFAR (`c6,c0,2`), a data abort's

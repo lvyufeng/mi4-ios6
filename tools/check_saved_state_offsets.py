@@ -265,7 +265,8 @@ def compare(header_text, assym_text, defines_text, proc_reg_text, boot_assym_tex
     # would fault at an address derived from a wrong offset instead of servicing the fault - which is
     # 474's stop, and is not something a run can distinguish from a zero.
     assym_for_thread = read_assym(assym_text)
-    for key, name in (("STAGE90_ACT_MAP", "ACT_MAP"), ("STAGE90_MAP_PMAP", "MAP_PMAP")):
+    for key, name in (("STAGE90_ACT_MAP", "ACT_MAP"), ("STAGE90_MAP_PMAP", "MAP_PMAP"),
+                      ("STAGE90_TH_RECOVER", "TH_RECOVER")):
         if key not in local:
             failures.append("entry_saved_state.h defines no %s, so the offset the abort handler "
                             "dereferences to choose a map is missing from the image" % key)
@@ -409,12 +410,13 @@ def selftest(header_text, assym_text, defines_text, proc_reg_text, boot_assym_te
         value = int(match.group(2), 0) + 4
         return text[:match.start()] + "%s%d%s" % (match.group(1), value, match.group(3)) + text[match.end():]
 
-    for key in ("STAGE90_SS_PC", "STAGE90_SS_SP", "STAGE90_ACT_MAP", "STAGE90_MAP_PMAP"):
+    for key in ("STAGE90_SS_PC", "STAGE90_SS_SP", "STAGE90_ACT_MAP", "STAGE90_MAP_PMAP",
+                "STAGE90_TH_RECOVER"):
         mutated = mutate_define(defines_text, key)
         if mutated:
             mutations.append(("entry_saved_state.h's %s moved by one word" % key,
                               dict(defines_text=mutated)))
-    for name in ("SS_PC", "SS_SP", "ACT_MAP", "MAP_PMAP"):
+    for name in ("SS_PC", "SS_SP", "ACT_MAP", "MAP_PMAP", "TH_RECOVER"):
         mutated = re.sub(r"^(#define\s+%s\s+#)(\d+)\s*$" % name,
                          lambda m: "%s%d" % (m.group(1), int(m.group(2)) + 4),
                          assym_text, count=1, flags=re.M)

@@ -28154,5 +28154,30 @@ run python3 "$REPO_ROOT/tools/check_asm_config.py" --selftest || exit 1
 # interpreted against source the image was not built from.
 run python3 "$REPO_ROOT/tools/check_os_entry.py" --image "$OUT/xnu_arm_entry.elf" --verbose || exit 1
 run python3 "$REPO_ROOT/tools/check_os_entry.py" --image "$OUT/xnu_arm_entry.elf" --selftest || exit 1
+#
+# **And 490's, which corrects the frontier 489 named.** 489 closed by calling the two `copyin` faults at
+# `far = 0` the frontier, because "`copyin` faults rather than returning `EFAULT`". Apple's ARM `copyin`
+# does the opposite: it arms a recovery address (`COPYIO_SET_RECOVER`, `machine_routines_asm.s:542-550`)
+# before entering its copy loop, `sleh_abort` consumes it and - only after `arm_fast_fault` and
+# `vm_fault` have both failed - points `regs->pc` at it, so the faulting instruction is replaced by the
+# copy's own `mov r0, #EFAULT` exit. A non-zero `thread->recover` at a fault is therefore the reading
+# that says the kernel had a plan for it, and this build now publishes it (the wrapper reads it *before*
+# `__real_sleh_abort`, which zeroes the field). **Armed is not spent**, and the run reports both: the
+# handler reaches the recovery arm only after `arm_fast_fault` *and* `vm_fault` failed, so a `copyout`
+# that faulted on a page the kernel then paged in and retried is armed and not redirected - which is
+# what 488's and 489's own console shows, its exec path's copies having succeeded. So the wrapper reads
+# the frame's `pc` again *after* the call and compares it with the armed word with bit 0 cleared, which
+# is the only write the handler makes on that path, and the two counts have two names - `_armed` for
+# the entry-time test and `_redirected` for the post-call one - because a key named for the outcome it
+# does not measure is the same defect as a comment that asserts a property nothing checks.
+# This check states seven properties of the result: the
+# recovery label is an EFAULT exit that nothing branches to, the image's `copyin` and `copyout` each arm
+# it with that label's own address - decoded out of the linked instructions, not trusted from the
+# assembly - nothing else in the image stores a computed address there, the handler's recovery arm is
+# gated and ordered as above, the offset is materialised by `osfmk_arm_trap.o`'s own compiled
+# `sleh_abort`, the instrument reads it before the call that spends it, and the instrument reads the
+# frame after that call and publishes what it found under its own name.
+run python3 "$REPO_ROOT/tools/check_fault_recovery.py" --image "$OUT/xnu_arm_entry.elf" --verbose || exit 1
+run python3 "$REPO_ROOT/tools/check_fault_recovery.py" --image "$OUT/xnu_arm_entry.elf" --selftest || exit 1
 say "the payload build reads the .bin from there directly; nothing to install"
 

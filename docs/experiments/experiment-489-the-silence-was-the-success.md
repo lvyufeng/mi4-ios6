@@ -179,18 +179,27 @@ because of it.
 - **New, from this step's fault records:** after the two user aborts the run takes two more published
   faults, both at `Lcopyin_wordwise_loop` with `far = 0`, `lr = 0x800a8d34` =
   `telemetry_take_sample+0x158` (whose instruction before the call is `ldr r0, [r0]` then
-  `bl copyin`, 176 bytes to a stack buffer), on thread `0xc0464690` — the fixture's own thread. `copyin`
-  faults rather than returning `EFAULT`, which is a property of this image's `copyin`/`copyout` on a user
-  pointer that is not mapped. **Process 1 is alive while this happens**: that thread's `getpid_count`
-  keeps doubling to `0x8000` after the second abort, `sleh_seen` reaches `0x20` and `sleh_storm = 9`.
+  `bl copyin`, 176 bytes to a stack buffer), on thread `0xc0464690` — the fixture's own thread.
+  **Process 1 is alive while this happens**: that thread's `getpid_count`
+  keeps doubling to `0x800000` after the second abort, `sleh_seen` reaches `0x20` and `sleh_storm = 9`.
   And it is not new. 486's run D has the **same eight published records in the same order and on the same
   two threads**: the same four kernel copies, the same two user aborts with the same two addresses and
   the same `far`, and the same recurring `Lcopyin_wordwise_loop` fault with the same `lr` `0x800a8d34`
   and `far = 0`, reaching `sleh_seen = 0x20` / `sleh_storm = 9` as well. Only the four copy-loop pcs
   differ, and they differ because the rebuild moved them (`Lcopyin_wordwise_loop` and the copy loops sit
-  0x560-0x570 higher in this image) — every `lr` in the two runs is the same address. So the frontier
-  this step opens is the telemetry sampling path's `copyin`, and it predates 488's fix rather than
-  following from it.
+  0x560-0x570 higher in this image) — every `lr` in the two runs is the same address.
+
+  **Corrected by 490, which is the step that measured it.** The sentence that stood here — "`copyin`
+  faults rather than returning `EFAULT`, which is a property of this image's `copyin`/`copyout` on a user
+  pointer that is not mapped … so the frontier this step opens is the telemetry sampling path's
+  `copyin`" — is the inverse of what the source and the run say. `copyin` arms `thread->recover` with
+  `copyio_error` before it touches user memory (`COPYIO_SET_RECOVER`, `machine_routines_asm.s:542-550`)
+  and `sleh_abort` re-points `pc` at that address when the page cannot be paged in (`trap.c:456-461`), so
+  `far = 0` inside `Lcopyin_wordwise_loop` is a call the kernel answered, not a stop: 490's run reports
+  28 of its 32 aborts armed and 26 of those redirected, and the two `far = 0` records are two of the 26.
+  The `0x8000` in the sentence above was also a slip for the value the log actually ends on, `0x800000`.
+  Nothing else in this document depends on either: the four readings the exec succeeded are unaffected,
+  and the `0x560-0x570` and same-`lr` observations are what 490's own five-build table re-measures.
 
 ## The build
 
