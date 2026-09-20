@@ -306,6 +306,19 @@ extern void entry_note_allocname(uint32_t name);
 extern void entry_note_pub2(uint32_t caller, uint32_t key);
 
 /*
+ * 455's three, called by the six wrappers near the end of this file. `entry_note_match` is called
+ * *after* the real `copyExistingServices` so that the record carries its answer, and `entry_note_mpass`
+ * gets the `this` the matcher was asked on, which is what tells the resource-root query apart from the
+ * plane search. `entry_note_dict` records the dictionary a factory built, and its return value is the
+ * pointer the match records carry.
+ */
+extern void entry_note_match(uint32_t site, uint32_t dict, uint32_t in_state, uint32_t options,
+                             uint32_t result);
+extern void entry_note_mpass(uint32_t site, uint32_t dict, uint32_t options, uint32_t result,
+                             uint32_t self);
+extern void entry_note_dict(uint32_t site, uint32_t name, uint32_t table_in, uint32_t table_out);
+
+/*
  * `libsa/lastkernelconstructor.c`'s only statement, and the image's only reference to it is a **tail
  * branch** from `last_kernel_constructor` (`b 0x8011bc4c` in 448's image). `--wrap` works on the
  * relocation rather than on the instruction, so a `b` is caught exactly as a `bl` is - which is what
@@ -687,4 +700,96 @@ void __wrap_ml_init_max_cpus(uint32_t max_cpus)
 {
     entry_note_initmax_cpus((uint32_t)(uintptr_t)__builtin_return_address(0), max_cpus);
     __real_ml_init_max_cpus(max_cpus);
+}
+
+/* ------------------------------------------------------------ the registry query (455) */
+/*
+ * Six wrappers. The first two are the step: `copyExistingServices` is what `waitForMatchingService`
+ * asks before it sleeps, and its return value is the answer - a `bl` from six places in the image,
+ * one of them `waitForMatchingService+0x3c`. `matchPassive` is the verdict the fast path asks the
+ * resource root for; it is non-virtual too (`bl` from six places, two inside `copyExistingServices`)
+ * and its `this` is the filter that matters - the plane search calls it on *candidates*, never on
+ * `gIOResources`, which is why the filter is a pointer comparison and not a call site (which the next
+ * relink would move).
+ *
+ * The other four are the dictionary factories. A match record on its own says *that* a dictionary
+ * found nothing; these say *what was asked for*, because each returns the `OSDictionary *` it built
+ * and that pointer pairs the two records by value. `IOFindBSDRoot` builds its dictionary with the
+ * `OSString *` overload (`serviceMatching(gIOResourcesKey)`, `IOKitBSDInit.cpp:377`) and
+ * `IOKitInitializeTime` with the `const char *` one (`resourceMatching("IORTC")`,
+ * `IOStartIOKit.cpp:74`), so the two overloads are both on this path and both are wrapped.
+ *
+ * Nothing here changes an argument or a return value, and `copyExistingServices` is the first wrapper
+ * in this file whose recorded value *is* the measurement: the filesystem's answer of "nothing
+ * matched" is the thing being measured, not a side effect of it.
+ */
+void *__real__ZN9IOService20copyExistingServicesEP12OSDictionarymm(void *matching, uint32_t in_state,
+                                                                   uint32_t options);
+void *__wrap__ZN9IOService20copyExistingServicesEP12OSDictionarymm(void *matching, uint32_t in_state,
+                                                                   uint32_t options)
+{
+    uint32_t site = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    void *result = __real__ZN9IOService20copyExistingServicesEP12OSDictionarymm(matching, in_state,
+                                                                               options);
+
+    entry_note_match(site, (uint32_t)(uintptr_t)matching, in_state, options,
+                     (uint32_t)(uintptr_t)result);
+    return result;
+}
+
+int __real__ZN9IOService12matchPassiveEP12OSDictionaryj(void *self, void *table, uint32_t options);
+int __wrap__ZN9IOService12matchPassiveEP12OSDictionaryj(void *self, void *table, uint32_t options)
+{
+    uint32_t site = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    int result = __real__ZN9IOService12matchPassiveEP12OSDictionaryj(self, table, options);
+
+    entry_note_mpass(site, (uint32_t)(uintptr_t)table, options, (uint32_t)result,
+                     (uint32_t)(uintptr_t)self);
+    return result;
+}
+
+void *__real__ZN9IOService15serviceMatchingEPK8OSStringP12OSDictionary(const void *name,
+                                                                       void *table);
+void *__wrap__ZN9IOService15serviceMatchingEPK8OSStringP12OSDictionary(const void *name, void *table)
+{
+    uint32_t site = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    void *result = __real__ZN9IOService15serviceMatchingEPK8OSStringP12OSDictionary(name, table);
+
+    entry_note_dict(site, (uint32_t)(uintptr_t)name, (uint32_t)(uintptr_t)table,
+                    (uint32_t)(uintptr_t)result);
+    return result;
+}
+
+void *__real__ZN9IOService15serviceMatchingEPKcP12OSDictionary(const char *name, void *table);
+void *__wrap__ZN9IOService15serviceMatchingEPKcP12OSDictionary(const char *name, void *table)
+{
+    uint32_t site = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    void *result = __real__ZN9IOService15serviceMatchingEPKcP12OSDictionary(name, table);
+
+    entry_note_dict(site, (uint32_t)(uintptr_t)name, (uint32_t)(uintptr_t)table,
+                    (uint32_t)(uintptr_t)result);
+    return result;
+}
+
+void *__real__ZN9IOService16resourceMatchingEPK8OSStringP12OSDictionary(const void *name,
+                                                                        void *table);
+void *__wrap__ZN9IOService16resourceMatchingEPK8OSStringP12OSDictionary(const void *name, void *table)
+{
+    uint32_t site = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    void *result = __real__ZN9IOService16resourceMatchingEPK8OSStringP12OSDictionary(name, table);
+
+    entry_note_dict(site, (uint32_t)(uintptr_t)name, (uint32_t)(uintptr_t)table,
+                    (uint32_t)(uintptr_t)result);
+    return result;
+}
+
+void *__real__ZN9IOService16resourceMatchingEPKcP12OSDictionary(const char *name, void *table);
+void *__wrap__ZN9IOService16resourceMatchingEPKcP12OSDictionary(const char *name, void *table)
+{
+    uint32_t site = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    void *result = __real__ZN9IOService16resourceMatchingEPKcP12OSDictionary(name, table);
+
+    entry_note_dict(site, (uint32_t)(uintptr_t)name, (uint32_t)(uintptr_t)table,
+                    (uint32_t)(uintptr_t)result);
+    return result;
 }

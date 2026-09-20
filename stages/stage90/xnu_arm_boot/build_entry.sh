@@ -76,16 +76,19 @@ ARGS_BYTES=0x00001000          # one page, which is what `boot_args` needs to fi
 REAL_ARM_INIT=${STAGE90_ENTRY_REAL_ARM_INIT:-0}
 STUB_DEFINES=()
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES=(-DSTAGE90_ENTRY_REAL_ARM_INIT=1)
-# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s twenty-seven functions - `kalloc_canblock`,
+# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s thirty-three functions - `kalloc_canblock`,
 # `lck_grp_alloc_init`, `kernel_memory_allocate`, `vm_page_wait`, `thread_block`, (447)
 # `ml_get_max_cpus`, `ml_init_max_cpus`, (448) `IODeviceTreeAlloc`, `IOWorkLoop::workLoop`,
 # `IORecursiveLockAlloc`, `IOSimpleLockAlloc`, `IOCommandGate::commandGate`, `kernel_thread_start`,
 # (449) `iokit_post_constructor_init`, `IOCatalogue::initialize`, `OSUnserialize`,
 # `OSMetaClass::allocClassWithName`, `IOService::publishResource`, (453) the seven global entries
 # into `_sleep` - `sleep`, `msleep`, `msleep0`, `msleep1`, `tsleep`, `tsleep0`, `tsleep1`, which are
-# the whole family because `_sleep` itself is `static` - and (454) the two IOKit deadline sleeps,
+# the whole family because `_sleep` itself is `static` - (454) the two IOKit deadline sleeps,
 # `IOLockSleepDeadline` and `IORecursiveLockSleepDeadline`, which are the other two of the three
-# in-image callers of `lck_mtx_sleep_deadline` - so a run that
+# in-image callers of `lck_mtx_sleep_deadline`, and (455) the registry query - `copyExistingServices`
+# (whose return value *is* the measurement), `matchPassive` (the verdict, filtered on its `this`), and
+# the four `serviceMatching`/`resourceMatching` factories, whose returned dictionary pairs a match
+# record with the name that was asked for - so a run that
 # hangs inside real XNU code says which frame it stopped in and why. It is a *diagnostic*, not a
 # stage: the traced image runs the same code, but it is not the image a stage is judged on, so this
 # is off by default and the stage that experiment 268 measured is built without it. The wrappers
@@ -116,7 +119,13 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=_ZN9IOService15publishResourceEPKcP8OSObject
                    --wrap=sleep --wrap=msleep --wrap=msleep0 --wrap=msleep1
                    --wrap=tsleep --wrap=tsleep0 --wrap=tsleep1
-                   --wrap=IOLockSleepDeadline --wrap=IORecursiveLockSleepDeadline)
+                   --wrap=IOLockSleepDeadline --wrap=IORecursiveLockSleepDeadline
+                   --wrap=_ZN9IOService20copyExistingServicesEP12OSDictionarymm
+                   --wrap=_ZN9IOService12matchPassiveEP12OSDictionaryj
+                   --wrap=_ZN9IOService15serviceMatchingEPK8OSStringP12OSDictionary
+                   --wrap=_ZN9IOService15serviceMatchingEPKcP12OSDictionary
+                   --wrap=_ZN9IOService16resourceMatchingEPK8OSStringP12OSDictionary
+                   --wrap=_ZN9IOService16resourceMatchingEPKcP12OSDictionary)
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
 # every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that
@@ -26702,6 +26711,136 @@ verify_pad() {
     say "  XNU writes $(printf '0x%08x' ${targets[0]}) and $(printf '0x%08x' ${targets[1]}) (ResetHandlerData - ExceptionLowVectorsBase = $(printf '0x%x' $((rhd - low)))), both inside the reserved slot at $(printf '0x%08x' $slot)"
 }
 verify_pad
+
+# The two properties of the *linked* image the 455 instrument depends on, checked here rather than
+# asserted in a comment. `entry_rs_state` in `entry_stubs.c` calls `IOService::getResourceService()`
+# from the report path to read `gIOResources` - `_ZL12gIOResources` is a *local* symbol, so the
+# accessor is the only way another object can reach it at all - and that is only safe if the function
+# is a leaf: no call, no `push`, nothing that assumes the stack is its own. It then reads
+# `__state[0]`/`__state[1]` at `+36`/`+40`, and those offsets are derived from
+# `IOService::getState()`'s own load rather than written down twice, so a change to the class layout
+# stops this build instead of silently reading the wrong word - which is the difference between a
+# reported state bit and a reported neighbour.
+verify_trace_symbols() {
+    [[ $ENTRY_TRACE -eq 1 ]] || return 0
+
+    local addr next body off
+    sym_addr() { arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk -v s="$1" '$3 == s { print "0x" $1; found = 1 } END { exit(found ? 0 : 1) }'; }
+    # The address of the symbol after this one, so the window is the function and not the function
+    # plus the two instructions that follow it. The first version of this check used a fixed 24-byte
+    # window and failed the build on `IOResources::init`'s `push` - a defect in the check, caught by
+    # the check, which is the cheapest place for it to happen.
+    #
+    # **This reader must not exit early, and that is not a style preference.** The first version was
+    # `awk '$1 == s { p = 1; next } p { print "0x" $1; exit }'`, which stops reading at the first
+    # match - so `nm` is still writing a symbol table of ninety-odd thousand lines into a pipe
+    # nobody is reading, is killed by SIGPIPE, and the *pipeline's* status becomes 141. Under this
+    # script's `set -euo pipefail` that turns `next=$(sym_next ...)` into an abort: the build stopped
+    # dead after `verify_pad` with **no message at all**, which is how it was found (the log ends
+    # after the layout lines and the status is 141). A check that dies silently on success is worse
+    # than no check - so every reader in this function reads its input to the end and selects after
+    # the fact. The same trap sits in the `| head -1` idiom, which is only safe while the writer's
+    # output fits in the pipe buffer.
+    sym_next() { arm-none-eabi-nm -n "$OUT/xnu_arm_entry.elf" | awk -v s="${1#0x}" '$1 == s { p = 1; next } p && !d { print "0x" $1; d = 1 }'; }
+
+    addr=$(sym_addr _ZN9IOService18getResourceServiceEv) ||
+        layout_fail "the traced image has no IOService::getResourceService, which is how entry_rs_state reaches the resource root"
+    next=$(sym_next "$addr")
+    [[ -n $next ]] ||
+        layout_fail "nothing follows IOService::getResourceService in the linked image, so the window this check disassembles has no end"
+    body=$(arm-none-eabi-objdump -d --start-address=$addr --stop-address=$next "$OUT/xnu_arm_entry.elf")
+    body=$(awk '!f { print } /bx[ \t]+lr/ { f = 1 }' <<<"$body")
+    grep -q 'bx[[:space:]]*lr' <<<"$body" ||
+        layout_fail "IOService::getResourceService does not return with 'bx lr'; the payload calls it from the report path and needs it to be a plain leaf"
+    grep -qE '[[:space:]](bl|blx)[[:space:]]' <<<"$body" &&
+        layout_fail "IOService::getResourceService calls something; the payload calls it from the report path, where the live registers and the stack are not its own"
+    grep -qE '[[:space:]]push[[:space:]]' <<<"$body" &&
+        layout_fail "IOService::getResourceService pushes a register; the payload calls it from the report path"
+
+    addr=$(sym_addr _ZNK9IOService8getStateEv) ||
+        layout_fail "the traced image has no IOService::getState, whose own load is where 455's __state offsets come from"
+    # `head -1` was the second early-exit reader; the first line is selected from the captured
+    # output instead, so nothing in this function can abort the build with SIGPIPE.
+    off=$(arm-none-eabi-objdump -d --start-address=$addr --stop-address=$((addr + 8)) "$OUT/xnu_arm_entry.elf" |
+          sed -n 's/.*ldr[[:space:]]*r0, \[r0, #\([0-9]*\)\].*/\1/p')
+    off=${off%%$'\n'*}
+    [[ -n $off ]] ||
+        layout_fail "IOService::getState is not a single 'ldr r0, [r0, #N]'; 455's __state offsets come from that instruction"
+    [[ $off == 36 ]] ||
+        layout_fail "IOService::getState reads __state[0] at +$off, not +36 - entry_rs_state indexes the object with w[9]/w[10] and would read the wrong words"
+    say "  xnu_entry_455: getResourceService is a leaf, and __state[0]/__state[1] are the words at +36/+40 that getState itself loads"
+
+    # A mangled name with one underscore too many. `entry_stubs.c` names `IOService::getResourceService`
+    # by its mangled name, because that is the only way a C translation unit can call a C++ member this
+    # project does not have the class for - and the first draft wrote `__ZN9IOService18getResourceServiceEv`
+    # instead of `_ZN9IOService18getResourceServiceEv`. It linked: the generator invents a stub for
+    # anything undefined, so the link succeeded, the check above passed (it looks the *correct* name up,
+    # which is a real leaf), and the image carried both symbols - the real function at 0x8012eb3c and a
+    # generated stub at 0x804553bc that the instrument would have called. Itanium mangling always starts
+    # with exactly one `_Z`, so any `__Z...` in this image is that mistake and nothing else.
+    grep -q '^[0-9a-f]* [A-Za-z] __Z' < <(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf") &&
+        layout_fail "the image defines a symbol named $(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 ~ /^__Z/ && !d { print $3; d = 1 }'): a mangled name written with one underscore too many, which links as a generated stub and is called instead of the real function"
+    say "  xnu_entry_455: no '__Z' symbol in the image, i.e. no mangled name with a doubled leading underscore"
+
+    # **Every `--wrap=` has to be reachable, and that is a property of the linked image.**
+    # `ld --wrap` rewrites an *undefined* reference: it cannot touch a call site that the linker
+    # resolves inside the object that also defines the symbol. This is the whole of experiment 455's
+    # negative result. Two of its eleven new wrappers - `copyExistingServices` and `matchPassive` -
+    # produced zero records on the device, and the reason is in this image rather than in the run:
+    # `IOService::waitForMatchingService`, `getMatchingServices` and `copyMatchingService` all call
+    # `copyExistingServices` from *`IOService.cpp`*, the object that defines it, so all eleven `bl`s
+    # went to the real function (0x8012e18c) and not one to `__wrap_` (0x80455c4c) - while the four
+    # `serviceMatching`/`resourceMatching` wrappers, whose callers are in `IOKitBSDInit.cpp`,
+    # `IOStartIOKit.cpp` and `IOPMRootDomain.cpp`, fired three times in the same run. A wrapper links
+    # whether or not anything reaches it: the symbol is defined, the undefined-symbol count does not
+    # move, and a run that reports nothing looks exactly like a run where the measured thing did not
+    # happen. So the reachability is checked here, from the disassembly, instead of being assumed
+    # from the link line.
+    #
+    # Zero sites has three honest readings and they are listed separately rather than conflated:
+    #   * XNU calls the symbol only from the object that defines it, so no reference is left
+    #     undefined and `--wrap` cannot see it - the tracer has to supply the call site itself;
+    #   * nothing in *this image* calls it at all - `sleep` is the KPI entry to `_sleep`, reached by
+    #     kexts, and 453 wrapped the whole seven-name family because `_sleep` itself is `static`;
+    #   * a mistake in the flag list, which stops the build.
+    # The branch pattern has to be `b` as well as `bl`: `last_kernel_constructor` is three
+    # instructions, `movw/movt` plus a *tail* branch to the wrapper (`80268960: b 8045551c
+    # <__wrap_iokit_post_constructor_init>`), and the first version of this check counted only `bl`,
+    # so it called a reachable wrapper unreachable - a check is an instrument too.
+    local dis wrap sym n dead=() only=() uncalled=()
+    local same_object=(
+        _ZN9IOService20copyExistingServicesEP12OSDictionarymm
+        _ZN9IOService12matchPassiveEP12OSDictionaryj )
+    local never_called=( sleep )
+    in_list() {
+        local needle=$1 s
+        shift
+        for s in "$@"; do
+            [[ $s == "$needle" ]] && return 0
+        done
+        return 1
+    }
+    dis="$OUT/xnu_arm_entry.dis"
+    arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" > "$dis"
+    for wrap in "${TRACE_LDFLAGS[@]}"; do
+        sym=${wrap#--wrap=}
+        # A *branch* to the wrapper, not the wrapper's own definition: the first draft matched
+        # `<__wrap_symbol>` anywhere in the disassembly and so counted the `<__wrap_symbol>:` label,
+        # which every wrapper has by construction - all thirty-three "reachable", including the two
+        # the device had just proved unreachable.
+        n=$(grep -cE "[[:space:]](b|bl|blx)[[:space:]]+[0-9a-f]+ <__wrap_$sym>" "$dis" || true)
+        [[ ${n:-0} -gt 0 ]] && continue
+        if in_list "$sym" "${same_object[@]}"; then only+=("$sym")
+        elif in_list "$sym" "${never_called[@]}"; then uncalled+=("$sym")
+        else dead+=("$sym"); fi
+    done
+    rm -f "$dis"
+    if [[ ${#dead[@]} -gt 0 ]]; then
+        layout_fail "these --wrap'd symbols have no branch to their wrapper anywhere in the linked image, so the wrapper can never run: ${dead[*]} - a same-object call is resolved by the linker and is invisible to --wrap. Add it to this check's same-object or never-called list with a reason, or drop the flag"
+    fi
+    say "  xnu_entry_455: ${#TRACE_LDFLAGS[@]} --wrap'd symbols: $(( ${#TRACE_LDFLAGS[@]} - ${#only[@]} - ${#uncalled[@]} )) reached by a branch in this image, ${#only[@]} same-object-only (${only[*]:-none}), ${#uncalled[@]} never called here (${uncalled[*]:-none})"
+}
+verify_trace_symbols
 
 cat > "$OUT/xnu_arm_entry.h" <<EOF
 /* Generated by xnu_arm_boot/build_entry.sh. The XNU entry image, as data for the payload.

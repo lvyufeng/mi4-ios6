@@ -578,6 +578,86 @@ uint32_t g_iolock_last_dl_lo;
 uint32_t g_iolock_last_dl_hi;
 uint32_t g_iolock_last_now;
 /*
+ * Experiment 455. 454 named the wait and closed the clock question; what is left is *why the match
+ * never comes*, and there is exactly one place in the source to look:
+ *
+ *     OSObject * IOService::copyExistingServices(OSDictionary * matching, IOOptionBits inState,
+ *                                                IOOptionBits options)        // IOService.cpp:4264
+ *     {
+ *         if((obj = matching->getObject(gIOProviderClassKey))
+ *           && gIOResourcesKey && gIOResourcesKey->isEqualTo(obj)
+ *           && (service = gIOResources))
+ *         {
+ *             if( (inState == (service->__state[0] & inState))              // (a) the fast path
+ *               && (0 == (service->__state[0] & kIOServiceInactiveState))
+ *               &&  service->matchPassive(matching, options))               // (b) the verdict
+ *             { ... return the service ... }
+ *         }
+ *         else { ... search the plane for a candidate in `inState` ... }
+ *     }
+ *
+ * `IOFindBSDRoot`'s dictionary is `serviceMatching(gIOResourcesKey)` plus
+ * `IOResourceMatched = "IOBSD"`, so it takes that fast path, and `waitForMatchingService` sleeps only
+ * when the call returns 0. Two questions decide everything after that, and both are answerable from
+ * the wrappers alone - no frame pointer, no virtual call, nothing the instrument has to guess:
+ *
+ *   (a) is `gIOResources` in the state the query asks for? `waitForMatchingService` passes
+ *       `kIOServiceMatchedState` (bit 4) and the test is `inState == (__state[0] & inState)`, so bit 4
+ *       of `__state[0]` decides whether the fast path is taken **at all** - the general path looks for
+ *       a candidate in the same state, so a clear bit 4 fails both. The two words are readable through
+ *       `IOService::getResourceService()` plus the offsets `IOService::getState()` itself uses:
+ *       `ldr r0, [r0, #36]` is `__state[0]` and `registerService` loads `[r4, #36]`/`[r4, #40]` as the
+ *       pair `__state[0]`/`__state[1]`, and the build checks both against this image.
+ *   (b) if the state is right, `matchPassive` is asked and returns 0 or 1. It is non-virtual - the
+ *       image calls it with a plain `bl` from six places, two of them inside `copyExistingServices` -
+ *       so it can be wrapped, and the one call that matters is **the one whose `this` is
+ *       `gIOResources`**: the plane search calls the same function on *candidates*, never on the
+ *       resource root. Filtering on that pointer instead of on a call site keeps this step free of
+ *       absolute addresses, which the next relink would invalidate.
+ *
+ * The pointer is taken from the image's own accessor rather than from an address written here:
+ * `IOService::getResourceService()` is `movw r0,#0xdc88 / movt r0,#0x8052 / ldr r0,[r0] / bx lr` - a
+ * leaf with no call and no push, which the build asserts - because `_ZL12gIOResources` is a *local*
+ * symbol and cannot be named from another object at all.
+ */
+extern void *_ZN9IOService18getResourceServiceEv(void);
+#define ENTRY_MATCH_MAX 6u
+#define ENTRY_DICT_MAX 8u
+uint32_t g_match_calls;
+uint32_t g_match_hits;
+uint32_t g_match_site[ENTRY_MATCH_MAX];
+uint32_t g_match_dict[ENTRY_MATCH_MAX];
+uint32_t g_match_in[ENTRY_MATCH_MAX];
+uint32_t g_match_opts[ENTRY_MATCH_MAX];
+uint32_t g_match_res[ENTRY_MATCH_MAX];
+uint32_t g_match_last_site;
+uint32_t g_match_last_dict;
+uint32_t g_match_last_in;
+uint32_t g_match_last_opts;
+uint32_t g_match_last_res;
+uint32_t g_mpass_calls;
+uint32_t g_mpass_rs_calls;
+uint32_t g_mpass_rs_site;
+uint32_t g_mpass_rs_dict;
+uint32_t g_mpass_rs_opts;
+uint32_t g_mpass_rs_res;
+uint32_t g_mpass_rs_this;
+uint32_t g_mpass_last_site;
+uint32_t g_mpass_last_dict;
+uint32_t g_mpass_last_res;
+uint32_t g_mpass_last_this;
+uint32_t g_dict_calls;
+uint32_t g_dict_site[ENTRY_DICT_MAX];
+uint32_t g_dict_name[ENTRY_DICT_MAX];
+uint32_t g_dict_out[ENTRY_DICT_MAX];
+uint32_t g_dict_last_site;
+uint32_t g_dict_last_name;
+uint32_t g_dict_last_in;
+uint32_t g_dict_last_out;
+uint32_t g_rs_ptr;
+uint32_t g_rs_state0;
+uint32_t g_rs_state1;
+/*
  * Experiment 447. 446 resolved the block to `ml_get_max_cpus` and the run could not say *which* of
  * that function's six callers it was, so the next reading is the caller itself - and the second is
  * whether anything ever set the flag the function waits on.
@@ -1325,6 +1405,64 @@ entry_probe_dump_kv_words(const char *key, uint32_t base, uint32_t words)
  * the report this function exists to write has to be able to reach it. No static declaration
  * above it, deliberately - a `static` on either the declaration or the definition keeps internal
  * linkage, which is what the first link of this instrument reported as an undefined reference. */
+/*
+ * Experiment 455's keys, written from a function of their own - and the reason is a build failure
+ * rather than taste. Adding these twenty-seven `entry_write_kv` calls to `entry_epilogue` moved that
+ * function's constant pool past PC-relative range: the assembler refused the whole object with
+ * `bad immediate value for offset (4508)` against `ldr r1, .L192`, where `.L192` is `entry_epilogue`'s
+ * own pool at the end of its body and the first use of it is a few instructions in. `entry_epilogue`
+ * is ~4.4 KB of `movw`/`movt`/`ldr`/`bl` per key and was already at the 4095-byte edge; the split
+ * gives this block a pool of its own and the next experiment's keys the same room. The categorical fix
+ * - one table of `{name, &value}` walked by a loop, so that adding a key costs data and no code - is
+ * recorded as the next step's problem rather than done here, because the epilogue runs only when the
+ * boot *returns* to the payload and cannot be exercised by any run of this frontier.
+ */
+__attribute__((noinline)) static void entry_write_455_kv(void)
+{
+    entry_write_kv("xnu_entry_match_calls", g_match_calls);
+    entry_write_kv("xnu_entry_match_hits", g_match_hits);
+    entry_write_kv("xnu_entry_match_last_site", g_match_last_site);
+    entry_write_kv("xnu_entry_match_last_dict", g_match_last_dict);
+    entry_write_kv("xnu_entry_match_last_in", g_match_last_in);
+    entry_write_kv("xnu_entry_match_last_opts", g_match_last_opts);
+    entry_write_kv("xnu_entry_match_last_res", g_match_last_res);
+    entry_write_kv("xnu_entry_mpass_calls", g_mpass_calls);
+    entry_write_kv("xnu_entry_mpass_rs_calls", g_mpass_rs_calls);
+    entry_write_kv("xnu_entry_mpass_rs_site", g_mpass_rs_site);
+    entry_write_kv("xnu_entry_mpass_rs_dict", g_mpass_rs_dict);
+    entry_write_kv("xnu_entry_mpass_rs_opts", g_mpass_rs_opts);
+    entry_write_kv("xnu_entry_mpass_rs_res", g_mpass_rs_res);
+    entry_write_kv("xnu_entry_mpass_rs_this", g_mpass_rs_this);
+    entry_write_kv("xnu_entry_mpass_last_site", g_mpass_last_site);
+    entry_write_kv("xnu_entry_mpass_last_dict", g_mpass_last_dict);
+    entry_write_kv("xnu_entry_mpass_last_res", g_mpass_last_res);
+    entry_write_kv("xnu_entry_mpass_last_this", g_mpass_last_this);
+    entry_write_kv("xnu_entry_dict_calls", g_dict_calls);
+    entry_write_kv("xnu_entry_dict_last_site", g_dict_last_site);
+    entry_write_kv("xnu_entry_dict_last_name", g_dict_last_name);
+    entry_write_kv("xnu_entry_dict_last_in", g_dict_last_in);
+    entry_write_kv("xnu_entry_dict_last_out", g_dict_last_out);
+    entry_write_kv("xnu_entry_rs_ptr", g_rs_ptr);
+    entry_write_kv("xnu_entry_rs_state0", g_rs_state0);
+    entry_write_kv("xnu_entry_rs_state1", g_rs_state1);
+    /* Experiment 454's two IOKit deadline waits, moved here for the same reason as 455's keys. */
+    entry_write_kv("xnu_entry_iolock_calls", g_iolock_calls);
+    entry_write_kv("xnu_entry_iolock_c0", g_iolock_count[0]);
+    entry_write_kv("xnu_entry_iolock_c1", g_iolock_count[1]);
+    entry_write_kv("xnu_entry_iolock_first_ent", g_iolock_first_ent);
+    entry_write_kv("xnu_entry_iolock_first_site", g_iolock_first_site);
+    entry_write_kv("xnu_entry_iolock_first_thread", g_iolock_first_thread);
+    entry_write_kv("xnu_entry_iolock_last_ent", g_iolock_last_ent);
+    entry_write_kv("xnu_entry_iolock_last_site", g_iolock_last_site);
+    entry_write_kv("xnu_entry_iolock_last_thread", g_iolock_last_thread);
+    entry_write_kv("xnu_entry_iolock_last_lock", g_iolock_last_lock);
+    entry_write_kv("xnu_entry_iolock_last_event", g_iolock_last_event);
+    entry_write_kv("xnu_entry_iolock_last_inter", g_iolock_last_inter);
+    entry_write_kv("xnu_entry_iolock_last_dl_lo", g_iolock_last_dl_lo);
+    entry_write_kv("xnu_entry_iolock_last_dl_hi", g_iolock_last_dl_hi);
+    entry_write_kv("xnu_entry_iolock_last_now", g_iolock_last_now);
+}
+
 __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
 {
     uint32_t sctlr;
@@ -1806,21 +1944,10 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      */
     entry_write_kv("xnu_entry_block_first_now", g_block_first_now);
     entry_write_kv("xnu_entry_block_last_now", g_block_last_now);
-    entry_write_kv("xnu_entry_iolock_calls", g_iolock_calls);
-    entry_write_kv("xnu_entry_iolock_c0", g_iolock_count[0]);
-    entry_write_kv("xnu_entry_iolock_c1", g_iolock_count[1]);
-    entry_write_kv("xnu_entry_iolock_first_ent", g_iolock_first_ent);
-    entry_write_kv("xnu_entry_iolock_first_site", g_iolock_first_site);
-    entry_write_kv("xnu_entry_iolock_first_thread", g_iolock_first_thread);
-    entry_write_kv("xnu_entry_iolock_last_ent", g_iolock_last_ent);
-    entry_write_kv("xnu_entry_iolock_last_site", g_iolock_last_site);
-    entry_write_kv("xnu_entry_iolock_last_thread", g_iolock_last_thread);
-    entry_write_kv("xnu_entry_iolock_last_lock", g_iolock_last_lock);
-    entry_write_kv("xnu_entry_iolock_last_event", g_iolock_last_event);
-    entry_write_kv("xnu_entry_iolock_last_inter", g_iolock_last_inter);
-    entry_write_kv("xnu_entry_iolock_last_dl_lo", g_iolock_last_dl_lo);
-    entry_write_kv("xnu_entry_iolock_last_dl_hi", g_iolock_last_dl_hi);
-    entry_write_kv("xnu_entry_iolock_last_now", g_iolock_last_now);
+    /* Experiment 454's IOKit waits and experiment 455's registry query: see `entry_write_455_kv`,
+     * which holds both because adding them *here* put this function's constant pool past
+     * PC-relative range. */
+    entry_write_455_kv();
     /*
      * Experiment 451's live console, printed here as well so a run that *does* report says whether
      * the live channel was working and, if it was refused, which check refused it. `_records` counts
@@ -2066,6 +2193,129 @@ void entry_note_iolock(uint32_t ent, uint32_t site, uint32_t thread, uint32_t lo
     entry_live_write("xnu_live_iolock_dl_lo", dl_lo);
     entry_live_write("xnu_live_iolock_dl_hi", dl_hi);
     entry_live_write("xnu_live_iolock_now", now);
+}
+
+/*
+ * Experiment 455. The resource root and its two state words, taken from the image's own accessor.
+ * `+36` and `+40` are `__state[0]`/`__state[1]`: `IOService::getState()` reads the first with
+ * `ldr r0, [r0, #36]` and `registerService` loads the pair with `ldr r2, [r4, #36]` /
+ * `ldr r5, [r4, #40]`, which is what the build checks - this comment is not the check. Called before
+ * every match record so the report carries the state *at the call*: bit 4
+ * (`kIOServiceMatchedState`) may be set later than the query that needed it, and that difference is
+ * exactly the kind of thing a single end-of-run reading would hide.
+ */
+uint32_t entry_rs_state(uint32_t *state1_out)
+{
+    void *svc = _ZN9IOService18getResourceServiceEv();
+    uint32_t *w = (uint32_t *)svc;
+
+    if (w) {
+        g_rs_ptr = (uint32_t)(uintptr_t)svc;
+        g_rs_state0 = w[9];              /* __state[0], +36 - IOService::getState()'s own load */
+        g_rs_state1 = w[10];             /* __state[1], +40 - registerService's second load */
+    }
+    if (state1_out)
+        *state1_out = g_rs_state1;
+    return g_rs_state0;
+}
+
+/*
+ * One call per `copyExistingServices`, recorded **after** the call so the record carries the answer:
+ * `res` is the pointer the query returned, and `0` is what makes `waitForMatchingService` sleep.
+ * `dict` is the matching dictionary - the same pointer the dictionary factories below returned - so
+ * the report can say which query found nothing, and `rs0`/`rs1` are the resource root's state words
+ * as they were when the query ran.
+ */
+void entry_note_match(uint32_t site, uint32_t dict, uint32_t in_state, uint32_t options,
+                      uint32_t result)
+{
+    uint32_t state1;
+
+    entry_rs_state(&state1);
+    if (g_match_calls < ENTRY_MATCH_MAX) {
+        g_match_site[g_match_calls] = site;
+        g_match_dict[g_match_calls] = dict;
+        g_match_in[g_match_calls] = in_state;
+        g_match_opts[g_match_calls] = options;
+        g_match_res[g_match_calls] = result;
+    }
+    g_match_calls++;
+    if (result)
+        g_match_hits++;
+    g_match_last_site = site;
+    g_match_last_dict = dict;
+    g_match_last_in = in_state;
+    g_match_last_opts = options;
+    g_match_last_res = result;
+    entry_live_write("xnu_live_match_site", site);
+    entry_live_write("xnu_live_match_dict", dict);
+    entry_live_write("xnu_live_match_in", in_state);
+    entry_live_write("xnu_live_match_opts", options);
+    entry_live_write("xnu_live_match_res", result);
+    entry_live_write("xnu_live_match_rs0", g_rs_state0);
+    entry_live_write("xnu_live_match_rs1", g_rs_state1);
+    entry_live_write("xnu_live_match_mpass", g_mpass_calls);
+    entry_live_write("xnu_live_match_seq", g_match_calls);
+}
+
+/*
+ * One call per `IOService::matchPassive`, with the `this` it was called on - which is the filter.
+ * The plane search calls this function on *candidates*, the fast path in `copyExistingServices` calls
+ * it on the resource root, and only the second is the question `IOFindBSDRoot` is asking. So the
+ * sequence that matters is recorded live and the rest is only counted, which keeps a search over
+ * many candidates from filling the console with records that answer nothing.
+ */
+void entry_note_mpass(uint32_t site, uint32_t dict, uint32_t options, uint32_t result, uint32_t self)
+{
+    entry_rs_state(0);
+
+    g_mpass_calls++;
+    g_mpass_last_site = site;
+    g_mpass_last_dict = dict;
+    g_mpass_last_res = result;
+    g_mpass_last_this = self;
+    if (self != 0u && self == g_rs_ptr) {
+        g_mpass_rs_calls++;
+        g_mpass_rs_site = site;
+        g_mpass_rs_dict = dict;
+        g_mpass_rs_opts = options;
+        g_mpass_rs_res = result;
+        g_mpass_rs_this = self;
+        entry_live_write("xnu_live_mpass_site", site);
+        entry_live_write("xnu_live_mpass_dict", dict);
+        entry_live_write("xnu_live_mpass_opts", options);
+        entry_live_write("xnu_live_mpass_res", result);
+        entry_live_write("xnu_live_mpass_this", self);
+        entry_live_write("xnu_live_mpass_all", g_mpass_calls);
+        entry_live_write("xnu_live_mpass_seq", g_mpass_rs_calls);
+    }
+}
+
+/*
+ * One call per matching dictionary built by the four factory overloads in `entry_trace.c`. `name` is
+ * the `const char *` for the two char* overloads - a literal in the image, so it resolves host-side -
+ * and the `OSSymbol *` for the two `OSString *` ones, which is *not* dereferenced here: the site plus
+ * the source line names it (`IOFindBSDRoot+0x28` passes `gIOResourcesKey`), and a read of an
+ * unverified heap layout is a fault this instrument does not need to risk. `out` is the dictionary,
+ * which is the pointer the match records carry, so builder and query pair up by value.
+ */
+void entry_note_dict(uint32_t site, uint32_t name, uint32_t table_in, uint32_t table_out)
+{
+    if (g_dict_calls < ENTRY_DICT_MAX) {
+        g_dict_site[g_dict_calls] = site;
+        g_dict_name[g_dict_calls] = name;
+        g_dict_out[g_dict_calls] = table_out;
+    }
+    g_dict_calls++;
+    g_dict_last_site = site;
+    g_dict_last_name = name;
+    g_dict_last_in = table_in;
+    g_dict_last_out = table_out;
+    entry_live_write("xnu_live_dict_site", site);
+    entry_live_write("xnu_live_dict_name", name);
+    entry_live_write("xnu_live_dict_in", table_in);
+    entry_live_write("xnu_live_dict_out", table_out);
+    entry_live_write("xnu_live_dict_seq", g_dict_calls);
 }
 
 /*
