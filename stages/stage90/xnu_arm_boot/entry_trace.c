@@ -941,6 +941,8 @@ extern void entry_note_dtprop(uint32_t entry, uint32_t key0, uint32_t key1, uint
 extern void entry_note_mdevadd(uint32_t caller, uint32_t devid, uint32_t base, uint32_t size,
                                uint32_t phys, uint32_t ret);
 extern void entry_note_mdevlookup(uint32_t caller, uint32_t devid, uint32_t ret);
+extern void entry_note_dtwalk(uint32_t t1, uint32_t root, uint32_t count, uint32_t first,
+                              uint32_t set, uint32_t kids, uint32_t control);
 
 /* `IODeviceTreeSupport.cpp:64`, `.bss`, non-zero exactly when `makePlane` succeeded. */
 extern const void *gIODTPlane;
@@ -951,6 +953,22 @@ extern void *entry_xnu_get_property(const void *self, const char *key)
     __asm__("_ZNK15IORegistryEntry11getPropertyEPKc");
 extern void *entry_xnu_get_bytes(const void *self)
     __asm__("_ZNK6OSData14getBytesNoCopyEv");
+
+/*
+ * 462's four, the walk `fromPath` takes from the registry root. `getRegistryRoot` is a static member
+ * (`IORegistryEntry.h:232`) and the other three are `const` members of `IORegistryEntry`
+ * (`IORegistryEntry.cpp:1505`, `:1518`, `:1536`); all four are the same code the OS's own walk runs,
+ * which is what makes them safe to call from here - `fromPath` itself calls three of them, so a
+ * table these would fault on is a table the OS's own call would have faulted on first.
+ */
+extern void *entry_xnu_registry_root(void)
+    __asm__("_ZN15IORegistryEntry15getRegistryRootEv");
+extern void *entry_xnu_child_entry(const void *self, const void *plane)
+    __asm__("_ZNK15IORegistryEntry13getChildEntryEPK15IORegistryPlane");
+extern void *entry_xnu_child_set(const void *self, const void *plane)
+    __asm__("_ZNK15IORegistryEntry20getChildSetReferenceEPK15IORegistryPlane");
+extern unsigned int entry_xnu_child_count(const void *self, const void *plane)
+    __asm__("_ZNK15IORegistryEntry13getChildCountEPK15IORegistryPlane");
 
 void *__real__ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_(
         const char *path, const void *plane, char *buf, int *len, void *from);
@@ -1015,6 +1033,76 @@ static void entry_probe_property(void *entry)
 }
 
 /*
+ * The walk itself, read at the two moments the boot has them (462).
+ *
+ * 461 measured the two ends of this and left the middle open: the instrument's own
+ * `fromPath("/chosen/memory-map", gIODTPlane)` returned the node when it was called from inside the
+ * `IODeviceTreeAlloc` wrapper - i.e. *before* `IOPlatformExpertDevice::initWithArgs` initializes from
+ * that root and before the platform expert is started - and the OS's own two `fromPath` calls in
+ * `IOFindBSDRoot` returned 0 in the same boot. Something between those two moments changed the
+ * registry, and `fromPath`'s own code says the change can only be in one of four places: the meta
+ * root, the entry the walk starts from, that entry's child set, or its children's names.
+ *
+ * `fromPath` (`IORegistryEntry.cpp:1232-1325`) starts at
+ * `gRegistryRoot->getChildEntry(plane)`, names the first component against
+ * `entry->getChildFromComponent`, and its failure at the *first* component leaves no other candidate.
+ * So this reads the same four objects by the same calls:
+ *
+ *   `root`   `IORegistryEntry::getRegistryRoot()`, the object `fromPath` walks from.
+ *   `count`  its `getChildCount(plane)`, how many entries the walk can start at.
+ *   `first`  its `getChildEntry(plane)`, the entry the walk *does* start at - and the one number
+ *            that says whether the registry changed (`getChildEntry` is `copyChildEntry` plus a
+ *            release, `:1536-1546`, so the entry is retained by the registry, not by this call).
+ *   `set`    that entry's `getChildSetReference(plane)`: **NULL means the child-set key is not in
+ *            its registry table at all**, which is a different failure from a child set that is
+ *            present and holds no matching name, and `kids` is the second half of that pair.
+ *   `kids`   that entry's `getChildCount(plane)`: 0 with a non-NULL `set` is "the names do not
+ *            match"; 0 with `set` NULL is "the child set is gone".
+ *   `control` `fromPath(path, plane, 0, 0, 0)` through `__real_fromPath` - the same call the OS is
+ *            about to make, by the instrument, at the same moment. A control that answers while the
+ *            OS's own call does not would say the two calls differ; both answering the same way says
+ *            the registry is what changed.
+ *
+ * `t1` marks the reading taken at the earlier moment (the probe below, once); every later reading
+ * overwrites the `t2` slots, so the report carries the first and the last of them and the live
+ * `xnu_live_walk_seq` records carry their order.
+ *
+ * The control's entry is **not** released, for 461's reason: releasing it would mean calling
+ * `OSObject::release` by mangled name, i.e. another name to get wrong, for no reading. At most two
+ * entries are leaked for the life of the boot.
+ */
+static void entry_probe_walk(const void *plane, const char *path, uint32_t t1)
+{
+    void *root = 0;
+    void *first = 0;
+    void *set = 0;
+    void *control = 0;
+    unsigned int count = 0u;
+    unsigned int kids = 0u;
+
+    if (plane == 0) {
+        return;
+    }
+
+    root = entry_xnu_registry_root();
+    if (root != 0) {
+        count = entry_xnu_child_count(root, plane);
+        first = entry_xnu_child_entry(root, plane);
+    }
+    if (first != 0) {
+        set = entry_xnu_child_set(first, plane);
+        kids = entry_xnu_child_count(first, plane);
+    }
+    if (path != 0) {
+        control = __real__ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_(
+                      path, plane, 0, 0, 0);
+    }
+
+    entry_note_dtwalk(t1, (uint32_t)(uintptr_t)root, (uint32_t)count, (uint32_t)(uintptr_t)first,
+                      (uint32_t)(uintptr_t)set, (uint32_t)kids, (uint32_t)(uintptr_t)control);
+}
+
+/*
  * The plane, as built. Called from the `IODeviceTreeAlloc` wrapper and from nowhere else.
  *
  * `map_ret` is this file's own `fromPath("/chosen/memory-map", gIODTPlane)`, the OS's reader called
@@ -1028,6 +1116,7 @@ void entry_probe_plane(void *dtTop, void *root)
     void *map = 0;
 
     if (plane != 0) {
+        entry_probe_walk(plane, 0, 1u);
         map = __real__ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_(
                   "/chosen/memory-map", plane, 0, 0, 0);
     }
@@ -1041,8 +1130,17 @@ void entry_probe_plane(void *dtTop, void *root)
 void *__wrap__ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_(
         const char *path, const void *plane, char *buf, int *len, void *from)
 {
-    void *r = __real__ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_(
-                  path, plane, buf, len, from);
+    void *r;
+
+    /*
+     * 462: read the registry *before* the OS's own call runs, so what is recorded is the state that
+     * call is about to see rather than what it left behind - and with the OS's own path as the
+     * control, so the instrument's call and the OS's differ in nothing at all at that instant.
+     */
+    entry_probe_walk(plane, path, 0u);
+
+    r = __real__ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_(
+            path, plane, buf, len, from);
 
     /*
      * The path words are read only when there is a path. `fromPath` handles a NULL path itself

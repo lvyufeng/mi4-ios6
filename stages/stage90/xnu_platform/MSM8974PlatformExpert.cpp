@@ -29,7 +29,10 @@
  * whose entire content is what the abstraction barrier requires - the metaclass, and the two pure
  * virtuals `IODTPlatformExpert` leaves for its subclasses (`deleteList` and `excludeList`,
  * `IOPlatformExpert.h:229-230`). Everything the machine then does is Apple's own code, already in
- * the link.
+ * the link. **Both of those virtuals were wrong until 462** - they answered NULL, which in
+ * `IODTFindMatchingEntries` means "every entry" rather than "no names" and made `processTopLevel`
+ * detach the device tree's top-level nodes from the IODT plane; the section above the two
+ * definitions carries the reading, and `start` below carries the count that measures it.
  *
  * `start` is overridden to call `super::start` and for one structural reason besides: this walk's
  * rule 358 is that an object which owns a vtable is not accounted for by its reference list, and a
@@ -64,7 +67,15 @@
  * `"Xiaomi Mi 4 cancro Stage84"` (`stage90_main.c:79-82`) - the other two candidates.
  */
 #include <IOKit/IOPlatformExpert.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <arm/machine_routines.h>
+
+/* The entry instrument's own entry point, declared here rather than included from it because this
+ * file is compiled by the tree's own build (`PLATFORM_SOURCES` in `tools/build_xnu_arm_kernel.sh`),
+ * the same way `MSM8974RootResource.cpp` declares it for the same reason. The symbol exists in every
+ * configuration this project builds (the canonical entry build sets `STAGE90_ENTRY_TRACE=1`); a
+ * build that left it out would be an undefined symbol and a loud link failure, not a silent zero. */
+extern "C" void entry_live_write(const char *key, uint32_t value);
 
 class MSM8974PlatformExpert : public IODTPlatformExpert
 {
@@ -84,10 +95,60 @@ public:
 
 OSDefineMetaClassAndStructors(MSM8974PlatformExpert, IODTPlatformExpert);
 
+static uint32_t g_pexpert_starts;
+static uint32_t g_delete_list_calls;
+static uint32_t g_exclude_list_calls;
+
+/* `deleteList`/`excludeList` are asked for a C string in the OSUnserialize list grammar, and this
+ * is its length - read from the string itself, one byte at a time and bounded, so that the record
+ * says what was *answered* rather than what this file meant to answer. `strlen` would do the same
+ * thing by name; a loop cannot be the wrong function. */
+static uint32_t
+MSM8974_list_len( const char * list )
+{
+    uint32_t n = 0;
+
+    if( list != 0 ) {
+        while( n < 64u && list[n] != '\0' ) n++;
+    }
+    return n;
+}
+
 bool
 MSM8974PlatformExpert::start( IOService * provider )
 {
-    if( !super::start( provider )) return( false );
+    uint32_t kids_before = 0u;
+    uint32_t kids_after  = 0u;
+    bool     ok;
+
+    /* Experiment 462. `processTopLevel` runs inside `super::start` (`IOPlatformExpert::start` ends
+     * in `configure(provider)`, `IOPlatformExpert.cpp:184`, which for this class is
+     * `IODTPlatformExpert::configure` -> `processTopLevel`, `:1269-1276`), and its first statement
+     * detaches `IODTFindMatchingEntries(provider, 0, deleteList())` from the IODT plane. `provider`
+     * is the root nub, and in the IODT plane its children are the device tree's top-level nodes -
+     * `IORegistryEntry::init(old, plane)` moves them there from the tree's own root when
+     * `IOPlatformExpertDevice::initWithArgs` initializes from it (`IORegistryEntry.cpp:356-380`,
+     * `IOPlatformExpert.cpp:1557-1575`), which is why the walk to `/chosen` goes through it.
+     *
+     * So the count on either side of `super::start` is the infanticide measured rather than argued:
+     * non-zero before and the same value after is a plane that kept its nodes, and zero after is the
+     * `(const char *)0` this file answered with until 462. `_prov` is recorded beside it because the
+     * tracer's own walk reading carries the pointer its walk starts from - the two are the same
+     * object if the reading above is of the right entry, which is a check rather than a comment. */
+    g_pexpert_starts++;
+    if( provider != 0 && gIODTPlane != 0 )
+        kids_before = provider->getChildCount( gIODTPlane );
+    entry_live_write( "xnu_live_pexpert_seq", g_pexpert_starts );
+    entry_live_write( "xnu_live_pexpert_prov", (uint32_t)(uintptr_t) provider );
+    entry_live_write( "xnu_live_pexpert_kids_before", kids_before );
+
+    ok = super::start( provider );
+
+    if( provider != 0 && gIODTPlane != 0 )
+        kids_after = provider->getChildCount( gIODTPlane );
+    entry_live_write( "xnu_live_pexpert_kids_after", kids_after );
+
+    if( !ok ) return( false );
 
     /* Experiment 420. `bsd_init` calls `IOKitInitializeTime()` between `bsd_bufferinit()` and
      * `ubc_init()` (`bsd/kern/bsd_init.c:727-728`, and the disassembly agrees: `bl IOKitInitializeTime`
@@ -180,18 +241,63 @@ MSM8974PlatformExpert::start( IOService * provider )
 }
 
 /*
- * The two lists IOKit's kext loading asks a platform expert for. This kernel loads no kexts and
- * has none to exclude, so both answers are the empty one - the same `(const char *)0`
- * `IOPlatformExpert`'s own methods answer with when they are reached.
+ * The two lists IOKit's platform bring-up asks a platform expert for, and neither of them is NULL
+ * (experiment 462).
+ *
+ * Both answered `(const char *)0` from 363 to 461, on the reading that NULL means "no names". It does
+ * not mean that to the one caller that matters:
+ *
+ *     IODTFindMatchingEntries( from, options, keys )             IODeviceTreeSupport.cpp:886
+ *         ...
+ *         if( keys) { cmp = IODTMatchNubWithKeys( next, keys ); ... }
+ *         else result->setObject( next);
+ *
+ * A NULL key list is not "match nothing" - it is the *else* branch, "collect every entry" - and
+ * `processTopLevel`'s call does not set `kIODTExclusive` either:
+ *
+ *     kids = IODTFindMatchingEntries( rootEntry, 0, deleteList() );      IOPlatformExpert.cpp:1322
+ *     while( (next = kids->getNextObject())) next->detachAll( gIODTPlane);
+ *
+ * so with `deleteList()` answering NULL, that loop detaches **every child the root entry has in the
+ * IODT plane**, `chosen` among them - and `/chosen` is the node `IOFindBSDRoot` roots this machine
+ * from (`iokit/bsddev/IOKitBSDInit.cpp:404`, `:440`). Apple's own subclasses answer with the few
+ * nodes that deserve deleting, as quoted names in the OSUnserialize list grammar:
+ *
+ *     AppleMacIO.cpp:108            "('sd', 'st', 'disk', 'tape', 'pram', 'rtc', 'mouse')"
+ *     ApplePlatformExpert.cpp:86    "('packages', 'psuedo-usb', 'psuedo-hid', 'multiboot', 'rtas')"
+ *
+ * `"()"` is that answer with the set empty. `OSUnserialize.y:168` is `array: '(' ')' { $$ = NULL; }`,
+ * so it parses to an empty `OSArray` - non-NULL, which is the only thing `IODTMatchNubWithKeys`
+ * checks - and comparing each entry's name against nothing answers false, so the loop detaches
+ * nothing. For `excludeList()` it is the same answer NULL gave - `kIODTExclusive` *is* set there, so
+ * "false != cmp" holds for every entry and every child is still published - which is the point: one
+ * spelling for both, and the spelling is the one the grammar defines.
+ *
+ * **The records below are what says whether this was the frontier.** `_seq` counts the asks (zero
+ * means `processTopLevel` never reached them, and 461's run is the state to compare against), `_ptr`
+ * and `_len` are the answer as string, and `_len` is read from the bytes rather than from this
+ * comment - an empty list is two bytes and a NUL, a NULL is zero bytes and no pointer.
  */
 const char *
 MSM8974PlatformExpert::deleteList( void )
 {
-    return( (const char *)0 );
+    static const char kEmptyList[] = "()";
+
+    g_delete_list_calls++;
+    entry_live_write( "xnu_live_deletelist_seq", g_delete_list_calls );
+    entry_live_write( "xnu_live_deletelist_ptr", (uint32_t)(uintptr_t) kEmptyList );
+    entry_live_write( "xnu_live_deletelist_len", MSM8974_list_len( kEmptyList ) );
+    return( kEmptyList );
 }
 
 const char *
 MSM8974PlatformExpert::excludeList( void )
 {
-    return( (const char *)0 );
+    static const char kEmptyList[] = "()";
+
+    g_exclude_list_calls++;
+    entry_live_write( "xnu_live_excludelist_seq", g_exclude_list_calls );
+    entry_live_write( "xnu_live_excludelist_ptr", (uint32_t)(uintptr_t) kEmptyList );
+    entry_live_write( "xnu_live_excludelist_len", MSM8974_list_len( kEmptyList ) );
+    return( kEmptyList );
 }

@@ -1131,6 +1131,21 @@ done
 # (the object is not in the manifest, so nothing else ever will).
 PLATFORM_SOURCES=("$REPO_ROOT/stages/stage90/xnu_platform/MSM8974PlatformExpert.cpp"
                   "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974RootResource.cpp")
+
+# And the two answers the platform expert above gives `IODTPlatformExpert::processTopLevel`, checked
+# against the *same list* the loop below compiles rather than against a path repeated here - one
+# value, one definition. Experiment 462's defect was a `return( (const char *)0 );` in
+# `deleteList`, which is not "no names" to `IODTFindMatchingEntries` but "every entry", so the
+# infanticide detached the device tree's whole top level - `chosen` among them - and `IOFindBSDRoot`
+# could not root this machine. Apple's own subclasses answer with an OSUnserialize name list; this
+# check refuses anything that is not one, including NULL, and refuses a file where only one of the
+# two methods is defined (the stub generator would supply the other one, so it would link).
+PL_MESSAGE=$("$TOOLS_DIR/check_platform_lists.py" --file "${PLATFORM_SOURCES[@]}" 2>&1) || {
+    echo "$PL_MESSAGE" >&2
+    exit 2
+}
+[[ ${VERBOSE:-0} -eq 0 ]] || printf '%s\n' "$PL_MESSAGE"
+
 PLATFORM_C_SOURCES=("$REPO_ROOT/stages/stage90/xnu_platform/stage90_platform_config_tables.c")
 PL_OUT=${XNU_PLATFORM_OBJ_OUT:-$REPO_ROOT/out/xnu_platform_obj}
 PL_ROOTS=(-I"$XNU/iokit")

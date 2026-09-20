@@ -26821,23 +26821,32 @@ verify_trace_symbols() {
         layout_fail "the image defines a symbol named $(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 ~ /^__Z/ && !d { print $3; d = 1 }'): a mangled name written with one underscore too many, which links as a generated stub and is called instead of the real function"
     say "  xnu_entry_455: no '__Z' symbol in the image, i.e. no mangled name with a doubled leading underscore"
 
-    # **461's two mangled names have to be the *real* functions, and the undefined list is what
-    # says so.** `entry_trace.c` calls XNU's `IORegistryEntry::getProperty(const char *) const` and
-    # `OSData::getBytesNoCopy() const` by their mangled names, because both are `virtual` and a
+    # **461's and 462's mangled names have to be the *real* functions, and the undefined list is what
+    # says so.** `entry_trace.c` calls XNU's `IORegistryEntry::getProperty(const char *) const`,
+    # `OSData::getBytesNoCopy() const`, `IORegistryEntry::getRegistryRoot()`,
+    # `getChildEntry(plane) const`, `getChildSetReference(plane) const` and
+    # `getChildCount(plane) const` by their mangled names, because the first two are `virtual` and a
     # vtable reference is a *defined* symbol in the object that defines them, which `--wrap` does not
-    # rename (455's measurement). A C translation unit calling a C++ member is a spelling, not a
-    # check: get the spelling wrong and the link *succeeds*, because the stub generator synthesises a
-    # stand-in for anything undefined - the image then carries the real function and a generated stub
-    # of the mistaken name, and the instrument calls the stub, which stops the run and reports a hit
-    # that looks like a finding about the device. 455's `__Z` check was the same defect caught by its
-    # spelling rule; this one is the general form and it needs no rule: a name that the pass-1
-    # undefined set contains is a name **nothing in this image defines**, so it can only be a stub.
+    # rename (455's measurement) - and 462's four are the walk `fromPath` itself takes, called by the
+    # instrument so that the reading is of the same objects at the same moment. A C translation unit
+    # calling a C++ member is a spelling, not a check: get the spelling wrong and the link
+    # *succeeds*, because the stub generator synthesises a stand-in for anything undefined - the image
+    # then carries the real function and a generated stub of the mistaken name, and the instrument
+    # calls the stub, which stops the run and reports a hit that looks like a finding about the
+    # device. 455's `__Z` check was the same defect caught by its spelling rule; this one is the
+    # general form and it needs no rule: a name that the pass-1 undefined set contains is a name
+    # **nothing in this image defines**, so it can only be a stub.
     for s in _ZNK15IORegistryEntry11getPropertyEPKc _ZNK6OSData14getBytesNoCopyEv \
-             _ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_; do
+             _ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_ \
+             _ZN15IORegistryEntry15getRegistryRootEv \
+             _ZNK15IORegistryEntry13getChildEntryEPK15IORegistryPlane \
+             _ZNK15IORegistryEntry20getChildSetReferenceEPK15IORegistryPlane \
+             _ZNK15IORegistryEntry13getChildCountEPK15IORegistryPlane; do
         grep -qx "$s" "$OUT/xnu_arm_entry_undef.txt" &&
-            layout_fail "461's instrument calls $s and the pass-1 undefined set contains it - nothing in this image defines that name, so the generator stubbed it and the probe would call the stub instead of XNU's own function. Check the spelling against \`nm\` on the image (a mangled name that is one character wrong links, silently)"
+            layout_fail "the instrument calls $s and the pass-1 undefined set contains it - nothing in this image defines that name, so the generator stubbed it and the probe would call the stub instead of XNU's own function. Check the spelling against \`nm\` on the image (a mangled name that is one character wrong links, silently)"
     done
-    say "  xnu_entry_461: getProperty, getBytesNoCopy and fromPath are defined by this image rather than stubbed for it"
+    say "  xnu_entry_461/462: getProperty, getBytesNoCopy, fromPath, getRegistryRoot, getChildEntry, getChildSetReference and getChildCount are defined by this image rather than stubbed for it"
+
 
     # **Every `--wrap=` has to be reachable, and that is a property of the linked image.**
     # `ld --wrap` rewrites an *undefined* reference: it cannot touch a call site that the linker

@@ -832,6 +832,32 @@ uint32_t g_mdevlookup_calls;
 uint32_t g_mdevlookup_caller;
 uint32_t g_mdevlookup_devid;
 uint32_t g_mdevlookup_ret;
+
+/*
+ * 462's reading of the walk from the registry root, and it is a *pair* of moments in one run: `t1` is
+ * the reading taken from the `IODeviceTreeAlloc` wrapper, which is the moment 461's successful probe
+ * was taken at, and `t2` is the reading taken as the OS's own `fromPath` is entered - the frontier
+ * itself. The four numbers in each are the four places `fromPath`'s first component can fail (the
+ * meta root, the entry the walk starts from, that entry's child set, and how many children it has),
+ * and `g_walk_control` is the instrument's own call with the OS's own path at the same instant.
+ *
+ * `g_walk_probes` counts the readings, which is what tells a run where the walk was read to the end
+ * from a run where the probe site was never reached; the `t2` slots hold the **last** reading, so a
+ * boot that makes more `fromPath` calls than 461's two keeps the last one rather than the first.
+ */
+uint32_t g_walk_probes;
+uint32_t g_walk_t1_root;
+uint32_t g_walk_t1_count;
+uint32_t g_walk_t1_first;
+uint32_t g_walk_t1_set;
+uint32_t g_walk_t1_kids;
+uint32_t g_walk_t1_control;
+uint32_t g_walk_t2_root;
+uint32_t g_walk_t2_count;
+uint32_t g_walk_t2_first;
+uint32_t g_walk_t2_set;
+uint32_t g_walk_t2_kids;
+uint32_t g_walk_t2_control;
 uint32_t g_rlock_bad;
 uint32_t g_rlock_caller;
 uint32_t g_rlock_count;
@@ -1962,6 +1988,35 @@ __attribute__((noinline)) static void entry_write_461_kv(void)
     entry_write_kv("xnu_entry_mdevlookup_ret", g_mdevlookup_ret);
 }
 
+/*
+ * 462's keys, in a function of their own for 455's reason - the epilogue's constant pool is at the
+ * PC-relative edge and each new key costs code in whichever function holds it.
+ *
+ * Thirteen keys, and they are one reading taken twice: the walk from the registry root at the moment
+ * `IODeviceTreeAlloc` returned (`t1`) and at the moment the OS's own `fromPath` was entered (`t2`).
+ * `walk_probes` is what makes an all-zero `t2` readable - one probe and a zero `t2` is "the walk was
+ * read once", while two probes and a zero `t2` would be "the second reading found nothing", and the
+ * two cases must not look alike. `control` is the instrument's own `fromPath` with the OS's own path
+ * at that instant: non-zero while the OS's own call returns zero says the two calls differ, and both
+ * zero says the registry does.
+ */
+__attribute__((noinline)) static void entry_write_462_kv(void)
+{
+    entry_write_kv("xnu_entry_walk_probes", g_walk_probes);
+    entry_write_kv("xnu_entry_walk_t1_root", g_walk_t1_root);
+    entry_write_kv("xnu_entry_walk_t1_count", g_walk_t1_count);
+    entry_write_kv("xnu_entry_walk_t1_first", g_walk_t1_first);
+    entry_write_kv("xnu_entry_walk_t1_set", g_walk_t1_set);
+    entry_write_kv("xnu_entry_walk_t1_kids", g_walk_t1_kids);
+    entry_write_kv("xnu_entry_walk_t1_control", g_walk_t1_control);
+    entry_write_kv("xnu_entry_walk_t2_root", g_walk_t2_root);
+    entry_write_kv("xnu_entry_walk_t2_count", g_walk_t2_count);
+    entry_write_kv("xnu_entry_walk_t2_first", g_walk_t2_first);
+    entry_write_kv("xnu_entry_walk_t2_set", g_walk_t2_set);
+    entry_write_kv("xnu_entry_walk_t2_kids", g_walk_t2_kids);
+    entry_write_kv("xnu_entry_walk_t2_control", g_walk_t2_control);
+}
+
 __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
 {
     uint32_t sctlr;
@@ -2489,6 +2544,10 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      * Same reason again, and one more: this is the group of keys that says which link of the chain
      * 459 stopped in, so it is the group a reader will look for first. */
     entry_write_461_kv();
+    /* 462: the walk from the registry root, read at the moment the plane was built and at the moment
+     * the OS asks for `/chosen` - the pair that says what changed in between, and the group a reader
+     * will look for first. */
+    entry_write_462_kv();
     /*
      * Experiment 451's live console, printed here as well so a run that *does* report says whether
      * the live channel was working and, if it was refused, which check refused it. `_records` counts
@@ -3324,6 +3383,40 @@ void entry_note_mdevlookup(uint32_t caller, uint32_t devid, uint32_t ret)
     entry_live_write("xnu_live_mdevlookup_caller", caller);
     entry_live_write("xnu_live_mdevlookup_devid", devid);
     entry_live_write("xnu_live_mdevlookup_ret", ret);
+}
+
+/*
+ * 462. The walk from the registry root, read at two moments in one boot - see `entry_probe_walk` in
+ * `entry_trace.c` for what each number is and which failure of `fromPath`'s first component it
+ * separates. `t1` selects the slot pair; the live records are written for every reading so that a
+ * run which never reaches the epilogue still says how many readings there were and in what order.
+ */
+void entry_note_dtwalk(uint32_t t1, uint32_t root, uint32_t count, uint32_t first, uint32_t set,
+                       uint32_t kids, uint32_t control)
+{
+    g_walk_probes++;
+    if (t1 != 0u) {
+        g_walk_t1_root = root;
+        g_walk_t1_count = count;
+        g_walk_t1_first = first;
+        g_walk_t1_set = set;
+        g_walk_t1_kids = kids;
+        g_walk_t1_control = control;
+    } else {
+        g_walk_t2_root = root;
+        g_walk_t2_count = count;
+        g_walk_t2_first = first;
+        g_walk_t2_set = set;
+        g_walk_t2_kids = kids;
+        g_walk_t2_control = control;
+    }
+    entry_live_write("xnu_live_walk_seq", g_walk_probes);
+    entry_live_write("xnu_live_walk_root", root);
+    entry_live_write("xnu_live_walk_count", count);
+    entry_live_write("xnu_live_walk_first", first);
+    entry_live_write("xnu_live_walk_set", set);
+    entry_live_write("xnu_live_walk_kids", kids);
+    entry_live_write("xnu_live_walk_control", control);
 }
 #endif /* STAGE90_ENTRY_TRACE */
 
