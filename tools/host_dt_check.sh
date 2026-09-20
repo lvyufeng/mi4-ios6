@@ -30,86 +30,25 @@ PYTHON=${PYTHON:-python3}
 mkdir -p "$WORK"
 
 # --- 1. extract build_stage90_apple_dt verbatim -----------------------------------
-"$PYTHON" - "$STAGE_DIR/stage90_main.c" "$WORK/stage90_dt_extract.c" <<'PY'
-import re
-import sys
-
-src_path, out_path = sys.argv[1], sys.argv[2]
-src = open(src_path).read()
-
-m = re.search(r'\nstatic void build_stage90_apple_dt\(struct apple_dt_builder \*b\)\n\{', src)
-if not m:
-    sys.exit("host_dt_check: cannot find build_stage90_apple_dt in %s - "
-             "was it renamed or made non-static? The harness must test the shipping "
-             "function, so fix the extraction rather than the harness." % src_path)
-
-i = m.end() - 1
-depth = 0
-j = i
-while j < len(src):
-    if src[j] == '{':
-        depth += 1
-    elif src[j] == '}':
-        depth -= 1
-        if depth == 0:
-            break
-    j += 1
-if depth != 0:
-    sys.exit("host_dt_check: unbalanced braces while extracting build_stage90_apple_dt")
-
-body = src[m.start():j + 1]
-# The function is static in the payload; the harness lives in another unit.
-body = body.replace("static void build_stage90_apple_dt", "void build_stage90_apple_dt", 1)
-
-# --- and the /chosen random-seed rule it calls --------------------------------------
 #
-# Experiment 211 added a `/chosen` `random-seed` property, which `build_stage90_apple_dt`
-# produces through `build_chosen_random_seed`. That is a second shipping function the
-# extracted builder depends on, so it is extracted the same way and with the same
-# loud-failure rule: if it is renamed or made non-static, this aborts rather than compiling a
-# shim that quietly produces a different tree from the payload's.
-m = re.search(r'\nstatic void build_chosen_random_seed\(uint8_t \*out, uint32_t len\)\n\{', src)
-if not m:
-    sys.exit("host_dt_check: cannot find build_chosen_random_seed in %s - the extracted "
-             "builder calls it, so the harness would not reproduce the payload's tree. "
-             "Fix the extraction rather than the harness." % src_path)
-i = m.end() - 1
-depth, j = 0, i
-while j < len(src):
-    if src[j] == '{':
-        depth += 1
-    elif src[j] == '}':
-        depth -= 1
-        if depth == 0:
-            break
-    j += 1
-if depth != 0:
-    sys.exit("host_dt_check: unbalanced braces while extracting build_chosen_random_seed")
+# The extent and the extraction both come from `tools/apple_dt_extract.py`, which finds each piece by
+# its declaration and closes it by matching braces - because this script and the *other* consumer of
+# this builder (`tools/apple_dt_host_dump.sh`) used to find it two different ways, and the line-number
+# one stopped following `stage90_main.c` at 459 while leaving a stale blob on disk for its readers.
+# One extractor, so the builder's extent has one definition. It de-`static`s the buffer and both
+# functions (the harness is a different unit), and its `--facts` file carries the buffer's declared
+# bound, which is where the shim's `extern` and this harness's `sizeof` now both come from.
+"$PYTHON" "$TOOLS_DIR/apple_dt_extract.py" \
+    --src "$STAGE_DIR/stage90_main.c" \
+    --out "$WORK/stage90_dt_extract.c" \
+    --include stage90_dt_shim.h \
+    --facts "$WORK/apple_dt_extent.facts"
 
-seed_fn = src[m.start():j + 1]
-seed_fn = seed_fn.replace("static void build_chosen_random_seed",
-                          "void build_chosen_random_seed", 1)
-
-m = re.search(r'\n#define STAGE90_CHOSEN_RANDOM_SEED_BYTES \d+u\n', src)
-if not m:
-    sys.exit("host_dt_check: cannot find STAGE90_CHOSEN_RANDOM_SEED_BYTES in %s" % src_path)
-seed_define = m.group(0).strip()
-
-# The rule string is the seed's whole content, so it comes across verbatim rather than being
-# restated here - a shim that spelled its own rule would test itself.
-m = re.search(r'\nstatic const char stage90_chosen_random_seed_rule\[\] = "[^"]*";\n', src)
-if not m:
-    sys.exit("host_dt_check: cannot find stage90_chosen_random_seed_rule in %s" % src_path)
-seed_rule = m.group(0).strip()
-
-body = seed_define + "\n" + seed_rule + "\n" + seed_fn + "\n" + body
-print("extracted build_chosen_random_seed: %d lines" % seed_fn.count("\n"))
-
-# And it is compiled outside the payload, so it needs the shim header itself.
-body = '#include "stage90_dt_shim.h"\n' + body
-open(out_path, "w").write(body + "\n")
-print("extracted build_stage90_apple_dt: %d lines" % body.count("\n"))
-PY
+grep -q '^STAGE90_APPLE_DT_BYTES=' "$WORK/apple_dt_extent.facts" || {
+  echo "host_dt_check: the extractor wrote no STAGE90_APPLE_DT_BYTES - the harness cannot size the" >&2
+  echo "               tree buffer from a missing reading. Aborting rather than assuming a size." >&2
+  exit 2
+}
 
 # --- 1b. extract align4 from runtime.c, for the same reason ------------------------
 "$PYTHON" - "$STAGE_DIR/runtime.c" "$WORK/align4_extract.c" <<'PY'
@@ -187,10 +126,13 @@ echo "RAM disk, from $ENTRY_HEADER: $(tr '\n' ' ' <<<"$RAMDISK_DEFINES")"
   echo "void apple_dt_prop_u32_array(struct apple_dt_builder *b, const char *name, const uint32_t *values, uint32_t count);"
   echo "uint32_t apple_dt_finish(struct apple_dt_builder *b);"
   echo "void build_stage90_apple_dt(struct apple_dt_builder *b);"
-  echo "/* The payload keeps its device-tree buffer in stage90_main.c's .bss; the harness"
-  echo "   owns it instead, with the same size and alignment so \`sizeof\` in the extracted"
-  echo "   builder means the same thing in both. */"
-  echo "extern uint8_t g_apple_dt[32768];"
+  echo "/* The payload keeps its device-tree buffer in stage90_main.c's .bss. Since 460 the storage is"
+  echo "   that declaration verbatim, de-\`static\`d by tools/apple_dt_extract.py into the extracted"
+  echo "   unit, and the bound below is that declaration's own - one reading, so the harness's"
+  echo "   \`sizeof\` and the payload's buffer cannot disagree. */"
+  grep '^STAGE90_APPLE_DT_BYTES=' "$WORK/apple_dt_extent.facts" \
+    | sed 's/^STAGE90_APPLE_DT_BYTES=/#define STAGE90_APPLE_DT_BYTES /; s/$/u/'
+  echo "extern uint8_t g_apple_dt[STAGE90_APPLE_DT_BYTES];"
   echo "void log_puts(const char *s);"
   echo "void log_kv32(const char *key, uint32_t value);"
   echo

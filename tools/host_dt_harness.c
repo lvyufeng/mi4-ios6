@@ -36,8 +36,14 @@
 /* The extracted builder and the constants it uses. */
 #include "stage90_dt_shim.h"
 
-/* The payload's DT buffer, defined here instead of in stage90_main.c. */
-uint8_t g_apple_dt[32768] __attribute__((aligned(4)));
+/*
+ * The payload's DT buffer is **not** defined here. It used to be - `uint8_t g_apple_dt[32768]` in
+ * this file, while `stage90_main.c` has its own `static uint8_t g_apple_dt[32768]` and the shim
+ * declared a third copy of the bound - three definitions of one number with nothing comparing them,
+ * which is the defect class this project has paid for twenty-four times. Since 460 the storage comes
+ * out of `stage90_main.c` verbatim (`tools/apple_dt_extract.py` de-`static`s the declaration) and
+ * both the shim's `extern` and this harness's `sizeof` take the bound from that one reading.
+ */
 
 /*
  * device_tree.c's iterator allocation. In the kernel these are kalloc/kfree; here they are

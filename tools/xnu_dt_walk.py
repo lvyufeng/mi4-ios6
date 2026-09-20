@@ -456,6 +456,233 @@ def trace_report(blob, nodes):
     return reads
 
 
+def node_registry_name(blob, node):
+    """`MakeReferenceTable`'s name for this node: the `name` property, or nothing at all.
+
+    iokit/Kernel/IODeviceTreeSupport.cpp:344-... builds one `IOService` per node, copies every
+    property in, and calls `regEntry->setName(sym)` **only if the node has a `name` property**
+    (`if nameKey == gIODTNameKey`, after the property loop's own copy). A node without one keeps the
+    default name its class gives it, and `IORegistryEntry::getChildFromComponent` matches children by
+    name - so a nameless node is a node no path can reach. Returns (name or None, terminated).
+    """
+    for _off, name, length, voff in node_props(blob, node):
+        if name == "name":
+            raw = blob[voff:voff + length]
+            nul = raw.find(b"\0")
+            return (raw[:nul] if nul >= 0 else raw).decode("latin-1"), nul >= 0
+    return None, False
+
+
+def alloc_plane(blob, nodes):
+    """Replay `IODeviceTreeAlloc`'s stack loop and report where each node lands in the IODT plane.
+
+    The C++ (iokit/Kernel/IODeviceTreeSupport.cpp:167-186) walks the blob with **one** iterator and an
+    explicit stack of registry entries:
+
+        parent = stack top; pop;
+        while (DTIterateEntries gives dtChild) {
+            child = ref(dtChild); child->attachToParent(parent, gIODTPlane);
+            if (kSuccess == DTEnterEntry(dtChild)) { stack->setObject(parent); parent = child; }
+        }
+        while (stack nonempty && DTExitEntry succeeds);
+
+    `DTEnterEntry` (pexpert/gen/device_tree.c:283-302) returns kSuccess for any non-NULL child, so
+    **every** child is entered, leaves included: exactly one push per node, and the `attachToParent`
+    above it is what fixes the parent. `DTExitEntry` (:305-322) restores the scope, its current entry
+    and its index, one saved scope per outer iteration - so the stack holds exactly the ancestors of
+    the iterator's current scope, and the model below is that loop literally, with each scope's own
+    index carried through enter and exit.
+
+    Returns (parent_of, names, pushed) where parent_of maps a node offset to the offset it was
+    attached to (None for the tree root, which the loop attaches to the registry root at :204).
+    """
+    children = {n.off: [] for n in nodes}
+    for n in nodes:
+        if n.parent is not None:
+            children[n.parent.off].append(n.off)
+
+    root = nodes[0].off if nodes else None
+    names = {n.off: node_registry_name(blob, n)[0] for n in nodes}
+    parent_of = {root: None}
+    pushes = 0
+
+    stack = [root]      # the OSArray of registry entries: one per level descended into
+    saved = []          # the iterator's DTSavedScope chain: the same levels, with their indices
+    scope, index = root, 0
+    while True:
+        parent = stack.pop()
+        while index < len(children[scope]):     # DTIterateEntries
+            dtchild = children[scope][index]
+            index += 1
+            parent_of[dtchild] = parent         # attachToParent - the whole parent assignment
+            # DTEnterEntry: kSuccess for any non-NULL child, so the push always happens, and a node
+            # with no children is entered and exited in the same iteration.
+            saved.append((scope, index))
+            stack.append(parent)
+            pushes += 1
+            scope, index = dtchild, 0
+            parent = dtchild
+        # DTIterateEntries returned kIterationDone for this scope: the outer loop leaves it, and
+        # DTExitEntry restores the scope it came from *with the index that scope had reached*.
+        if not stack or not saved:
+            break
+        scope, index = saved.pop()
+
+    return parent_of, names, pushes
+
+
+def plane_resolve(blob, nodes, names, path):
+    """`IORegistryEntry::fromPath(path, gIODTPlane)` over the replayed plane: the node it returns.
+
+    The walk (iokit/Kernel/IORegistryEntry.cpp:1232-1325 plus `getChildFromComponent` at :1105-1150)
+    starts at the registry root's child in the plane - the tree root the loop attached - then takes
+    one component at a time and asks each entry for a child whose name is that component. First match
+    wins, and the match is exact: `getChildFromComponent` compares the child's name for its whole
+    length and then requires the next character to be end-of-component, `/` or `:`, or an `@`
+    location suffix. Returns (node, where-it-stopped, the-component-that-failed).
+    """
+    return _resolve(nodes, names, path)
+
+
+def blob_resolve(blob, nodes, names, path):
+    """`DTLookupEntry`'s own answer for the same path: `FindChild`, which also matches by `name`."""
+    return _resolve(nodes, names, path)[0]
+
+
+def _resolve(nodes, names, path):
+    children = {n.off: [] for n in nodes}
+    for n in nodes:
+        if n.parent is not None:
+            children[n.parent.off].append(n.off)
+
+    cur = nodes[0].off if nodes else None
+    for comp in path.strip("/").split("/"):
+        if not comp:
+            continue
+        found = None
+        for off in children[cur]:
+            nm = names.get(off)
+            if nm == comp or (nm and nm.startswith(comp + "@")):
+                found = off
+                break
+        if found is None:
+            return None, cur, comp
+        cur = found
+    return cur, None, None
+
+
+# The paths the boot resolves **in the DT plane**, taken from the source rather than invented, and
+# split by whether our tree is supposed to answer them. `fromPath(path, gIODTPlane)` and
+# `childFromPath(component, gIODTPlane)` are the two call shapes; the sites:
+#
+#   /chosen            IOPlatformExpert.cpp:1125 (createNub's provider), :1419, IONVRAM.cpp:90,
+#                      IOStartIOKit.cpp:200 (`IORecordProgressBackbuffer`, with the plane named in
+#                      the path), and - the one 459 needs - IOFindBSDRoot's own first lookup
+#   /chosen/memory-map IOFindBSDRoot, iokit/bsddev/IOKitBSDInit.cpp:431 - the RAMDisk property
+#   /cpus              IOPlatformExpert.cpp:1347 (`childFromPath`), the topology walk
+#   /arm-io            the timer and interrupt nubs' provider
+#   /device-tree       pe_identify_machine's target-type and model
+#   /memory            the physical memory the platform expert hands out
+PLANE_PATHS = [
+    "/chosen",
+    "/chosen/memory-map",
+    "/cpus",
+    "/arm-io",
+    "/device-tree",
+    "/memory",
+]
+
+# XNU asks for these and our tree deliberately does not provide them; a failure here is a report,
+# not a defect. Kept in the table because "the plane does not answer this either" is a different
+# statement from "the plane answers what it should".
+PLANE_PATHS_ABSENT_BY_DESIGN = [
+    "/options",
+    "/efi/platform",
+]
+
+
+def plane_report(blob, nodes):
+    """Is the IODT plane the blob's own tree, and can the paths the boot uses be resolved in it?
+
+    This is the host-side half of 459's open question. The run showed `IOFindBSDRoot` reaching the
+    `rd=md0` branch and panicking because `mdevlookup` found no device, which means
+    `IORegistryEntry::fromPath("/chosen/memory-map", gIODTPlane)` returned NULL over a blob whose
+    `/chosen/memory-map` the reader finds. So either the plane's *shape* differs from the blob's (a
+    parent assigned elsewhere, or a node the plane's name matching cannot select), or the plane is not
+    there at all (`gIODTPlane` NULL, which is one read of one symbol in the image and is not this
+    tool's question). This tool answers the first.
+    """
+    status = 0
+    parent_of, names, pushes = alloc_plane(blob, nodes)
+    print()
+    print("the IODT plane IODeviceTreeAlloc builds, node by node:")
+    print(f"  nodes {len(nodes)}, attachToParent calls {len(nodes) - 1} "
+          f"(every node but the root), DTEnterEntry pushes {pushes}")
+
+    wrong_parent = []
+    nameless = []
+    for n in nodes:
+        want = n.parent.off if n.parent is not None else None
+        got = parent_of.get(n.off)
+        if want != got:
+            wrong_parent.append((n.off, want, got))
+        if names.get(n.off) is None:
+            nameless.append(n.off)
+
+    if wrong_parent:
+        status = 1
+        print(f"  MISMATCH: {len(wrong_parent)} node(s) are attached to a parent the blob does not "
+              f"give them:")
+        for off, want, got in wrong_parent[:10]:
+            print(f"    0x{off:06x}: blob parent 0x{(want or 0):06x}, plane parent "
+                  f"0x{(got or 0):06x}")
+    else:
+        print("  ok        every node is attached to the parent the blob's own walk gives it, so "
+              "the plane's shape is the blob's shape")
+
+    if nameless:
+        status = 1
+        print(f"  NOTE: {len(nameless)} node(s) have no `name` property, so MakeReferenceTable never "
+              f"names them and no path can select them:")
+        for off in nameless[:10]:
+            print(f"    0x{off:06x}")
+    else:
+        print("  ok        every node carries a `name`, so every node is reachable by path")
+
+    print()
+    print("the paths the boot resolves in that plane:")
+    for path in PLANE_PATHS + PLANE_PATHS_ABSENT_BY_DESIGN:
+        by_design = path in PLANE_PATHS_ABSENT_BY_DESIGN
+        plane_off, _at, missing = plane_resolve(blob, nodes, names, path)
+        blob_off = blob_resolve(blob, nodes, names, path)
+        if plane_off is None:
+            if by_design:
+                print(f"  absent*   {path:24} our tree has no '{missing}' and the boot does not "
+                      f"need it - XNU asks, the plane says no, and that is by design")
+            else:
+                status = 1
+                print(f"  FAIL      {path:24} the plane has no such path (no child '{missing}')")
+        elif blob_off is None:
+            status = 1
+            print(f"  odd       {path:24} the plane resolves it to 0x{plane_off:06x}, the blob's "
+                  f"own DTLookupEntry does not")
+        else:
+            print(f"  ok        {path:24} plane 0x{plane_off:06x}, DTLookupEntry 0x{blob_off:06x}"
+                  f"{'' if plane_off == blob_off else '   <-- DIFFERENT NODES'}")
+            if plane_off != blob_off:
+                status = 1
+
+    print()
+    if status == 0:
+        print("RESULT: the plane is the blob's tree with the blob's names, so a lookup that fails "
+              "in the plane and succeeds in the blob is not a shape difference - the plane is the "
+              "runtime's to explain (gIODTPlane itself, or the values in it).")
+    else:
+        print("RESULT: the plane does NOT reproduce the blob's tree - the failure above is "
+              "host-side and is the frontier.")
+    return status
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--blob", default=DEFAULT_BLOB)
@@ -471,10 +698,29 @@ def main():
     ap.add_argument("--fnv", action="store_true",
                     help="print the key block the entry image's own replay and hash produce, over "
                          "the blob - comparing the two blocks is the comparison")
+    ap.add_argument("--plane", action="store_true",
+                    help="replay IODeviceTreeAlloc's stack loop over the blob and report the IODT "
+                         "plane it builds, and whether the paths the boot resolves in it resolve")
     args = ap.parse_args()
 
     if not os.path.isfile(args.blob):
         sys.exit(f"no {args.blob} - run tools/apple_dt_host_dump.sh first")
+
+    # Is the blob current? This tool reads a *generated* file, and the generator's own inputs are the
+    # payload's builder, the tree format and the generated entry header whose two RAM-disk words the
+    # builder now writes into the tree. Experiment 459 walked a blob from *before* its own edit and got
+    # a confident, self-consistent, wrong tree out of it - `/chosen` with no `memory-map` child - which
+    # is the shape of the defect the step was hunting. A stale input is not a measurement of anything,
+    # so this refuses rather than printing a table.
+    blob_mtime = os.path.getmtime(args.blob)
+    for src in ("stages/stage90/stage90_main.c", "stages/stage90/apple_dt.c",
+                "out/stage90/xnu_arm_entry.h"):
+        path = os.path.join(REPO_ROOT, src)
+        if os.path.isfile(path) and os.path.getmtime(path) > blob_mtime:
+            sys.exit(f"{os.path.relpath(args.blob, REPO_ROOT)} is older than {src} - the tree it "
+                     f"holds is from before that file changed. Run tools/apple_dt_host_dump.sh to "
+                     f"rebuild it; a walk over a stale blob answers a question about an older tree.")
+
     blob = open(args.blob, "rb").read()
     print(f"blob {os.path.relpath(args.blob, REPO_ROOT)}  {len(blob)} bytes "
           f"(0x{len(blob):x})")
@@ -580,6 +826,9 @@ def main():
     if args.fnv:
         fnv_report(blob, nodes)
         trace_report(blob, nodes)
+
+    if args.plane:
+        status |= plane_report(blob, nodes)
 
     for off in probe_offs:
         status |= probe(blob, nodes, off, args.verbose)

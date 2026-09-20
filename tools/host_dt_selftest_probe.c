@@ -27,7 +27,11 @@ int apple_dt_selftest_and_log(const void *dt, uint32_t len);
 const void *apple_dt_find_child(const void *dt, uint32_t len, const void *node,
                                 const char *name);
 
-uint8_t g_apple_dt[32768] __attribute__((aligned(4)));
+/*
+ * The payload's DT buffer is defined by the extracted `stage90_main.c` text, not here - see the
+ * harness's note. This file declares nothing; the shim's `extern` (bounded by the extractor's own
+ * reading of the declaration) is the only declaration, so there is one copy of the size.
+ */
 
 static int loud;
 void log_puts(const char *s) { if (loud) fputs(s, stdout); }
