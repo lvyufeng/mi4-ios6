@@ -554,6 +554,71 @@ uint32_t g_getpid_first_change_value;
 uint32_t g_getpid_first_change_seq;
 uint32_t g_getpid_first_change_error;
 
+/*
+ * Experiment 480. Process 1's second syscall is `mmap`, and what this instrument keeps is not just
+ * the address the kernel returned but the **argument buffer** the armv7k munger produced:
+ * `g_mmap_args[0..7]` are the eight words that were in `uthread->uu_arg` when `mmap` was called, in
+ * the order the wrapper read them (`r0..r5`, `r6`, `r8`).
+ *
+ * **Why the eight words and not the six the syscall declares.** `struct mmap_args` is five words plus
+ * an 8-byte `off_t`, so words 0..4 are `addr, len, prot, flags, fd` and words 6..7 are `pos` - and
+ * word 5 is the *padding* the compiler's alignment of `off_t` leaves between them, which the munger
+ * writes from `r5` and `mmap` never reads. The fixture deliberately puts `0x5a5a` in `r5`, so word 5
+ * is a marker: the layout claim is a *reading* in the log, `arg4` and `arg6` are what would move if
+ * the munge were not the one this build believes, and the call itself would have worked either way,
+ * because `MAP_ANON` makes `fd` and `pos` inoperative. A run that shows these eight words is the only
+ * evidence this image has that its argument path takes the registers the ABI says it takes.
+ *
+ * The initialiser is `0xFFFFFFFF` rather than the `.bss` zero every stand-in in this image starts
+ * with: zero is a value the munger could legitimately have produced (words 0, 6 and 7 are all zero
+ * here), and "nothing wrote this" has to be distinguishable from "the argument was zero".
+ */
+uint32_t g_mmap_calls;
+uint32_t g_mmap_first_caller;
+uint32_t g_mmap_first_error;
+uint32_t g_mmap_first_value = 0xFFFFFFFFu;
+uint32_t g_mmap_args[8] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+                            0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
+/*
+ * **And the three words the fault handler itself will read**, taken in the same wrapper, on the same
+ * thread, one syscall before the fixture touches the page `mmap` just entered into it.
+ *
+ * `sleh_abort` services every fault through exactly two dereferences of the current thread's state:
+ * `map = thread->map` for an address below the kernel's range (`osfmk/arm/trap.c:446`) and then
+ * `arm_fast_fault(map->pmap, ...)` (`:449`). **474's run stopped on those two with the map pointer
+ * zero**: the record's own fault was at `far 0x00000028` - `MAP_PMAP`, a load through a NULL map - and
+ * each re-entry took the same path 0x250 bytes further down the kernel stack until the stack ran out
+ * and nothing wrote a report. That was a fault in the *kernel*, on the exec's `copyin`; 480 makes
+ * process 1 fault **in user mode**, where the map choice is `thread->map` and not `kernel_map`, so the
+ * same two words are on the path again and 474's question ("why is it zero") has never been answered.
+ *
+ * These three numbers make it a reading. `g_mmap_thread` is `TPIDRPRW`, so the log's thread can be
+ * compared with 474's `0xc0495480`; `g_mmap_map` is `thread->map` at offset `STAGE90_ACT_MAP`;
+ * `g_mmap_pmap` is `map->pmap` at `STAGE90_MAP_PMAP`. A zero in `_map`, or a fault reported at
+ * `far 0x28` immediately after this record, is then the answer rather than a mystery.
+ *
+ * **`_pmap` is read only when `_map` is a kernel address.** Dereferencing a map pointer to report
+ * whether dereferencing it is safe would be this instrument taking the fault it exists to predict -
+ * and taking it here, in the syscall, on the same path 474 died on. The kernel's own range is what
+ * the choice of map is about (`pmap_kernel_va` = `[0x80000000, 0xFFFEFFFF]`, the constant this
+ * project has paid for before), so anything else is reported as `0xFFFFFFFF` - "not read" - and the
+ * wrapper's own `_map` record says what it was.
+ */
+uint32_t g_mmap_thread = 0xFFFFFFFFu;
+uint32_t g_mmap_map = 0xFFFFFFFFu;
+uint32_t g_mmap_pmap = 0xFFFFFFFFu;
+
+/* `current_thread()` on ARMv7, one instruction: `mrc p15, 0, r, c13, c0, 4` is TPIDRPRW
+ * (`osfmk/arm/cpu_data.h:58`) and `cswitch.s` writes it on every switch, so a read taken between two
+ * switches is the thread running there. It cannot fault, reads no memory and holds no lock. */
+static inline uint32_t entry_stubs_thread_pointer(void)
+{
+    uint32_t t;
+
+    __asm__ volatile ("mrc p15, 0, %0, c13, c0, 4" : "=r"(t));
+    return t;
+}
+
 /* `osfmk/kern/kern_types.h:76-81` by name and value: 0..3 keep their numbers, 10 and -1 get the two
  * slots after them, and everything else is the last one. A function and not a table so the values are
  * written where a reader can compare them with the header. */
@@ -2626,6 +2691,27 @@ __attribute__((noinline)) static void entry_write_479_kv(void)
     entry_write_kv("xnu_entry_getpid_change_error", g_getpid_first_change_error);
 }
 
+__attribute__((noinline)) static void entry_write_480_kv(void)
+{
+    static const char *const arg[8] = {
+        "xnu_entry_mmap_arg0", "xnu_entry_mmap_arg1",
+        "xnu_entry_mmap_arg2", "xnu_entry_mmap_arg3",
+        "xnu_entry_mmap_arg4", "xnu_entry_mmap_arg5",
+        "xnu_entry_mmap_arg6", "xnu_entry_mmap_arg7"
+    };
+    unsigned i;
+
+    entry_write_kv("xnu_entry_mmap_calls", g_mmap_calls);
+    entry_write_kv("xnu_entry_mmap_caller", g_mmap_first_caller);
+    entry_write_kv("xnu_entry_mmap_error", g_mmap_first_error);
+    entry_write_kv("xnu_entry_mmap_value", g_mmap_first_value);
+    entry_write_kv("xnu_entry_mmap_thread", g_mmap_thread);
+    entry_write_kv("xnu_entry_mmap_map", g_mmap_map);
+    entry_write_kv("xnu_entry_mmap_pmap", g_mmap_pmap);
+    for (i = 0u; i < 8u; i++)
+        entry_write_kv(arg[i], g_mmap_args[i]);
+}
+
 __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
 {
     uint32_t sctlr;
@@ -3255,6 +3341,14 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      * statement that the kernel's own bring-up never asked, and every call the live channel records
      * after this line belongs to the fixture. */
     entry_write_479_kv();
+    /* 480: the words process 1's second syscall was handed, and the address it got back. Written here
+     * for the same reason 479's is and with the same expectation - this epilogue runs at the end of
+     * `arm_init`, before the process exists, so a `_calls` of 0 is the statement that the boot's own
+     * bring-up never called `mmap` - but its real value is on a path the report cannot reach: if the
+     * fixture's access to the fresh page faults in a way the kernel cannot service, the trap report
+     * and these words are read *together*, and the address the word in `arg0`..`arg4` describes says
+     * whether the syscall was reached at all. */
+    entry_write_480_kv();
 #endif
     /*
      * Experiment 272. Runs here, after the first line of the report is already in the console, so
@@ -3483,6 +3577,78 @@ void entry_note_getpid(uint32_t caller, uint32_t error, uint32_t value)
     }
 
     g_getpid_last_value = value;
+}
+
+/*
+ * Experiment 480. One call per `mmap` from the wrapper in `entry_trace.c`, with `args` pointing at the
+ * eight words the wrapper copied out of `uap` *before* the real call, `error` the syscall's own return
+ * and `value` the address it wrote into the caller's `retval`. The wrapper passes all four through
+ * unchanged; nothing here decides anything about the call.
+ *
+ * **Why every word is written, once.** The live channel is the only one a running user-mode process
+ * has (see `entry_note_getpid`), and this is the one call whose *contents* are the reading, so all
+ * eight words go out on the first call - the argument layout claim in `entry_stubs.c`'s globals above
+ * has no other way to be measured. Unlike `getpid` this syscall is **not** in the fixture's loop: it
+ * is called once, outside it, so the second record never comes and the count's job is to say that.
+ * The powers-of-two form is kept for the case it does come - a fixture that leaked a page per
+ * iteration would fill the ring, and `entry_live_write`'s 4096-record cap is a bound the boot's own
+ * report depends on - so an unexpected flood costs eleven records and not four thousand.
+ *
+ * **A second call is a finding, not a detail.** `g_mmap_args` is kept as first-call-only for the same
+ * reason `g_getpid_first_value` is: after a second call the buffer holds the second call's words, and
+ * a report that could not tell which call it was describing would be a measurement that destroyed its
+ * own subject.
+ *
+ * **And it takes the three readings on the fault path itself** - the thread, `thread->map` and
+ * `map->pmap` - because this call is the last thing that happens on this thread before user mode
+ * touches the new page. See the globals above; the reason they are read *here* rather than in the
+ * abort wrapper is that they have to be taken while the answer is still the one the fault will use.
+ */
+void entry_note_mmap(uint32_t caller, const uint32_t *args, uint32_t error, uint32_t value)
+{
+    unsigned i;
+
+    g_mmap_calls++;
+
+    if (g_mmap_calls == 1u) {
+        static const char *const key[8] = {
+            "xnu_live_mmap_arg0", "xnu_live_mmap_arg1",
+            "xnu_live_mmap_arg2", "xnu_live_mmap_arg3",
+            "xnu_live_mmap_arg4", "xnu_live_mmap_arg5",
+            "xnu_live_mmap_arg6", "xnu_live_mmap_arg7"
+        };
+
+        g_mmap_first_caller = caller;
+        g_mmap_first_error = error;
+        g_mmap_first_value = value;
+        if (args != 0) {
+            for (i = 0u; i < 8u; i++)
+                g_mmap_args[i] = args[i];
+        }
+
+        /* The map the first user-mode fault of this walk will be serviced in - see the globals above
+         * for why these three exist and why `_pmap` is conditional. */
+        g_mmap_thread = entry_stubs_thread_pointer();
+        if (g_mmap_thread != 0u) {
+            g_mmap_map = *(volatile uint32_t *)(g_mmap_thread + STAGE90_ACT_MAP);
+            if (g_mmap_map >= 0x80000000u && g_mmap_map <= 0xFFFEFFFFu) {
+                g_mmap_pmap = *(volatile uint32_t *)(g_mmap_map + STAGE90_MAP_PMAP);
+            }
+        }
+
+        entry_live_write("xnu_live_mmap_seq", 1u);
+        entry_live_write("xnu_live_mmap_caller", caller);
+        entry_live_write("xnu_live_mmap_error", error);
+        entry_live_write("xnu_live_mmap_value", value);
+        entry_live_write("xnu_live_mmap_thread", g_mmap_thread);
+        entry_live_write("xnu_live_mmap_map", g_mmap_map);
+        entry_live_write("xnu_live_mmap_pmap", g_mmap_pmap);
+        for (i = 0u; i < 8u; i++)
+            entry_live_write(key[i], g_mmap_args[i]);
+    } else if ((g_mmap_calls & (g_mmap_calls - 1u)) == 0u) {
+        entry_live_write("xnu_live_mmap_count", g_mmap_calls);
+        entry_live_write("xnu_live_mmap_last", value);
+    }
 }
 
 /* Experiment 456's probe, defined below its first caller; the declaration is here because

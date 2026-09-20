@@ -133,7 +133,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=_ZN9IOService22waitForMatchingServiceEP12OSDictionaryy
                    --wrap=os_reason_create --wrap=load_machfile
                    --wrap=sleh_abort --wrap=sleh_undef
-                   --wrap=getpid)
+                   --wrap=getpid --wrap=mmap)
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
 # every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that
@@ -27234,7 +27234,15 @@ verify_trace_symbols() {
     # requires the word in that slot to be `__wrap_getpid` and *not* `getpid`, which is the half a run
     # could not show: a slot holding the real function writes no records, and no records looks exactly
     # like an instrument that is not there.
-    local by_address=( vcputc getpid )
+    #
+    # 480 adds `mmap`, which is the same fact one slot over - `sysent[197].sy_call`, the same
+    # initialiser in the same file - and *almost* the same shape, with one difference worth stating:
+    # `mmap` is an ordinary function with many callers, so a branch to it certainly exists in this
+    # image; what does not exist is a branch to `__wrap_mmap`, because `--wrap` rewrites the
+    # *reference* and the only reference to `mmap` outside `kern_mman.c` is that table word. A census
+    # that counted "a call to `mmap`" would pass whether or not the wrapper is in the slot, which is
+    # precisely the failure `tools/check_sysent_table.py` exists to refuse.
+    local by_address=( vcputc getpid mmap )
     in_list() {
         local needle=$1 s
         shift

@@ -76,6 +76,30 @@
 #define STAGE90_PSR_MODE_MASK   0x0000001Fu
 #define STAGE90_PSR_USER_MODE   0x00000010u
 
+/*
+ * **480 adds two words that are not frame offsets, and they are the two the abort handler
+ * dereferences on its way to servicing a fault.** They are here for the same reason the six are: the
+ * image cannot include Apple's header, so the numbers are transcribed, and a transcribed number is
+ * the defect this project has paid for repeatedly.
+ *
+ * `ACT_MAP` is `offsetof(struct thread, map)` from the same generated `assym.s` - `genassym.c:148`
+ * declares it - and `MAP_PMAP` is `offsetof(struct vm_map, pmap)` (`genassym.c`'s `MAP_PMAP`).
+ * `sleh_abort` reads them in exactly this order: `trap.c:446` picks the map a fault is serviced in
+ * (`map = thread->map` for a user address, `kernel_map` otherwise) and `trap.c:449` hands
+ * `map->pmap` to `arm_fast_fault`.
+ *
+ * **Why 480 reads them rather than trusting them.** 474's run stopped on those two loads with the
+ * pointer *zero*: the record's fault was at `far 0x00000028`, which is `MAP_PMAP` - a load through a
+ * NULL map - and the same fault re-entered the handler 0x250 bytes further down the kernel stack
+ * until the stack ran out and the boot stopped without writing a report. That happened in the
+ * *kernel*, on the exec's own `copyin`. 480 makes process 1 fault **in user mode** on a page of its
+ * own, so the same two words are on the path, and this image now measures `thread->map` and
+ * `map->pmap` immediately before the fixture's first access. A zero is then a reading in the log
+ * instead of a silent recursion - and `entry_stubs.c` says what the run does with it.
+ */
+#define STAGE90_ACT_MAP        692
+#define STAGE90_MAP_PMAP       40
+
 /* `osfmk/arm/trap.h:69-74`, the two abort classes this image can see once 467 and 476 have given
  * slots 4 and 3 to Apple's own first-level handlers. **The class is what says which coprocessor pair
  * is the fault pair** - a prefetch abort's is IFSR (`c5,c0,1`) and IFAR (`c6,c0,2`), a data abort's

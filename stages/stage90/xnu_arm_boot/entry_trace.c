@@ -148,6 +148,13 @@ extern void entry_note_block_return(uint32_t caller, uint32_t result, uint32_t s
  * `retval` - `p->p_pid` - which is the process's identity rather than a status. */
 extern void entry_note_getpid(uint32_t caller, uint32_t error, uint32_t value);
 
+/* 480: what the kernel was *handed* for process 1's second syscall. `args` is the eight words the
+ * munger left in `uap` - `r0..r5`, `r6`, `r8` in that order, see the wrapper below - and `value` is
+ * `*retval`, the address `mmap` entered into the process's map. The eight words are a pointer rather
+ * than eight arguments because they are one claim about one layout, and a reading of them is worth
+ * more together than apart. */
+extern void entry_note_mmap(uint32_t caller, const uint32_t *args, uint32_t error, uint32_t value);
+
 /*
  * 453's one, called by the six sleep wrappers below with the frame they were entered from. `ent` is
  * the entry point's id in the table in `entry_stubs.c` - the fifth argument means something
@@ -625,6 +632,75 @@ int __wrap_getpid(void *proc, void *uap, int *retval)
 
     entry_note_getpid(caller, (uint32_t)error,
                       (retval != 0) ? (uint32_t)*retval : 0xFFFFFFFFu);
+    return error;
+}
+
+/* ---------------------------------------------------- the process's own memory (480) */
+/*
+ * 479 gave process 1 a syscall whose answer is a register. 480 gives it one whose effect is on the
+ * machine - `mmap` of one anonymous page, then a read of it and a write of it - and this wrapper
+ * exists for the **arguments**, not for the return. The return is already legible from the fixture: an
+ * address that is not a page faults on the load, an errno takes the `bcs`. The arguments are a claim
+ * about the ABI that no run could otherwise falsify.
+ *
+ * **The claim, and why it needs an instrument.** `arm_get_syscall_args`
+ * (`bsd/dev/arm/systemcalls.c:337`) is the *munging* one on this target - the file's
+ * `#if __arm__ && (__BIGGEST_ALIGNMENT__ > 4)` is on, because the configuration is
+ * `CPU_SUBTYPE_ARM_V7K` - so before the call `arm_get_u32_syscall_args` runs
+ * `sysent[197].sy_arg_munge32`, which is `munge_wwwwwl`. With `r12 != 0` that takes kDirect
+ * (`SS_TO_STYLE`, `bsd/dev/arm/munge.c:54`) and reduces to `munge_wlll`, which is `munge_wll`'s
+ * `memcpy(args, regs, 6 * sizeof(uint32_t))` followed by `uu_args[6] = ss->r[6]` and
+ * `uu_args[7] = ss->r[8]` (`munge.c:347-373`). `regs` is the saved state, and `struct arm_saved_state`
+ * begins with `uint32_t r[13]` (`osfmk/mach/arm/thread_status.h:223`), so the eight words in `uap` are
+ * **r0..r5 in order, then r6 and r8** - and the generated `struct mmap_args`
+ * (`out/xnu_generated/bsd/sys/sysproto.h:671`) is `addr, len, prot, flags, fd`, five words, followed
+ * by an 8-byte-aligned `off_t pos` at word six. **Word five is therefore the struct's padding**: the
+ * munger writes `r5` into it and `mmap` never reads it, which is why the fixture puts `0x5a5a` there.
+ * A wrapper that found that marker in word four, or in word six, would say the munge is not the one
+ * this build believes - and the syscall would have worked anyway, because `MAP_ANON` makes `fd` and
+ * `pos` inoperative. **A swapped argument is invisible in the call's own behaviour and visible only
+ * here**, which is what makes this wrapper the reading rather than a restatement.
+ *
+ * **The words are read before the call, not after.** They are the caller's buffer
+ * (`uthread->uu_arg`) and `mmap` reads them; reading afterwards would be a claim about what the
+ * syscall left there rather than about what it was handed, and the two are the same only as long as
+ * nothing in `mmap` writes `uap`. Captured after the call are the two things the call decides: its
+ * `int` return, which is the errno (`0` on the run this is for), and `*retval`, which is
+ * `_SYSCALL_RET_ADDR_T`'s `uu_rval[0]` - the address - written by `arm_prepare_u32_syscall_return`
+ * (`systemcalls.c:293`).
+ *
+ * **It is called exactly once**, because `entry_ramdisk.s` calls `mmap` outside its loop. A call per
+ * iteration would enter a page per iteration and end with `mmap` returning ENOMEM, which the fixture's
+ * `bcs` would then take to `udf #1` - a leak that ends in the panic 478 measured.
+ * `entry_note_mmap` writes every word live and counts, and the count is a reading of that decision
+ * rather than a guard against a storm.
+ *
+ * The declaration is `sysproto.h`'s `int mmap(struct proc *, struct mmap_args *, user_addr_t *)` in
+ * the types this file can spell: on this target `user_addr_t` is `u_int32_t` (`bsd/arm/types.h:82`),
+ * so the third argument is a `uint32_t *` and `*retval` is the address. The kernel's indirect call is
+ * `(*(callp->sy_call)) (proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]))` (`systemcalls.c:174`),
+ * which is that shape.
+ */
+int __real_mmap(void *proc, void *uap, uint32_t *retval);
+
+int __wrap_mmap(void *proc, void *uap, uint32_t *retval)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    const uint32_t *given = (const uint32_t *)uap;
+    uint32_t args[8];
+    unsigned i;
+    int error;
+
+    /* The eight words as the munger left them, before anything else can touch them. A `uap` of 0 is
+     * recorded as eight 0xFFFFFFFF words rather than dereferenced: the kernel never calls the slot
+     * that way, and an instrument that faults on a state it was told cannot happen costs the run. */
+    for (i = 0u; i < 8u; i++)
+        args[i] = (given != 0) ? given[i] : 0xFFFFFFFFu;
+
+    error = __real_mmap(proc, uap, retval);
+
+    entry_note_mmap(caller, args, (uint32_t)error,
+                    (retval != 0) ? *retval : 0xFFFFFFFFu);
     return error;
 }
 

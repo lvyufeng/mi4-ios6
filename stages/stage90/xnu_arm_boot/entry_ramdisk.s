@@ -115,25 +115,48 @@
  * The program, and what it proves
  * ------------------------------------------------------------------------------------------------
  *
- * Five instructions, and they are the first thing `/sbin/launchd` runs:
+ * Twenty-seven instructions, and they are the first thing `/sbin/launchd` runs:
  *
- *     entry_code:  svc  #0x80        ; getpid() - a *Unix* syscall, r12 = +20
- *                  cmp  r0, #1       ; the pid the kernel assigned this process?
- *                  bne  entry_failed
- *                  b    entry_code   ; ask again
- *     entry_failed: udf #1          ; the kernel answered something else
+ *     entry_code:  svc  #0x80                ; +0   getpid() - a *Unix* syscall, r12 = +20
+ *                  cmp  r0, #EXPECTED_PID    ; +4   the pid the kernel assigned this process?
+ *                  bne  entry_failed         ; +8
+ *                  mov  r0, #0               ; +12  mmap(0, 0x1000, PROT_READ|PROT_WRITE,
+ *                  movw r1, #MMAP_LENGTH     ; +16                MAP_PRIVATE|MAP_ANON, -1, 0)
+ *                  mov  r2, #MMAP_PROT       ; +20
+ *                  movw r3, #MMAP_FLAGS      ; +24
+ *                  mvn  r4, #0               ; +28  fd = -1
+ *                  movw r5, #MMAP_PAD_MARKER ; +32  the word between fd and the off_t, unread
+ *                  mov  r6, #0               ; +36  the 64-bit off_t's low word (r6, r8 - see below)
+ *                  mov  r8, #0               ; +40  ... and its high word
+ *                  mov  r12, #SYS_MMAP       ; +44
+ *                  svc  #0x80                ; +48
+ *                  bcs  entry_failed         ; +52  the *carry* is the errno convention, not a sign
+ *                  ldr  r3, [r0]             ; +56  <- the read: a page nothing has touched
+ *                  cmp  r3, #0               ; +60      ... a page the kernel never wrote is zero
+ *                  bne  entry_failed         ; +64
+ *                  str  r0, [r0]             ; +68  <- the write: the read mapped it read-only
+ *                  ldr  r1, [r0]             ; +72
+ *                  cmp  r1, r0               ; +76      ... and now the process owns it, writable
+ *                  bne  entry_failed         ; +80
+ *     spin:        mov  r12, #SYS_GETPID     ; +84
+ *                  svc  #0x80                ; +88  ask again, so the loop's liveness is a record
+ *                  cmp  r0, #EXPECTED_PID    ; +92
+ *                  bne  entry_failed         ; +96
+ *                  b    spin                 ; +100
+ *     entry_failed: udf #1                   ; +104 the kernel answered something else
  *
- * Until 479 this word was `udf #0`, and the address it named was the whole measurement: an undefined
- * instruction taken in **User mode** reaches slot 1 of this image's vector page, whose report gives
- * `undef_pc = lr_und - 4`, `_lr` and `_spsr` (474, 475, 477). That worked - 475 measured
- * `xnu_live_undef_pc = 0x000010e0` with `_spsr = 0x10` and `_user = 1` - and it ended the boot:
- * 478's run shows the kernel triaging the bad instruction, killing pid 1 with SIGILL
+ * **The first three are 479's five minus its loop, unchanged, and they are why this program does not
+ * end in a fault.** Until 479 the first instruction was `udf #0`, and the address it named was the
+ * whole measurement: an undefined instruction taken in **User mode** reaches slot 1 of this image's
+ * vector page, whose report gives `undef_pc = lr_und - 4`, `_lr` and `_spsr` (474, 475, 477). That
+ * worked - 475 measured `xnu_live_undef_pc = 0x000010e0` with `_spsr = 0x10` and `_user = 1` - and it
+ * ended the boot: 478's run shows the kernel triaging the bad instruction, killing pid 1 with SIGILL
  * (`pid 1 exited -- exit reason namespace 2 subcode 0x4`) and panicking in `launchd_crashed_panic`,
  * which `proc_prepareexit` makes unconditional for `initproc`. **So the marker had to go, and what
  * replaced it had to be something the kernel can *service*.**
  *
  * **`getpid` is that something, and it is chosen because it answers the process instead of parking
- * it.** The first draft of this step took the 478 doc's own suggestion - `thread_switch`
+ * it.** The first draft of 479 took the 478 doc's own suggestion - `thread_switch`
  * (`mach_trap_table[61]`, `osfmk/kern/syscall_sw.c:166`), "the one user-visible primitive whose
  * effect is to give the CPU up" - and reading `thread_switch` in
  * `osfmk/kern/syscall_subr.c:238-380` is what rules it out: every option it accepts ends in a
@@ -162,25 +185,80 @@
  * namespace 2 subcode 0x4`. So `getpid` returning 1 says all of: the trap reached the kernel's own
  * *Unix* dispatcher, `sysent[20]` is `getpid`, the call ran on *this* proc, and the ABI wrote the
  * value into the register the *caller* reads. A wrong answer cannot pass silently either: `cmp r0,
- * #1` sends the fixture to `udf #1`, and 478 proved that instruction reaches slot 1's report and then
- * `launchd_crashed_panic` with the trap record's format string in `r9`.
+ * #EXPECTED_PID` sends the fixture to `udf #1`, and 478 proved that instruction reaches slot 1's
+ * report and then `launchd_crashed_panic` with the trap record's format string in `r9`.
  *
  * `r12 = +20` is a **Unix** syscall, and that is the other half of the ABI this step measures.
  * `fleh_swi` computes `r5 = -r12` and calls `fleh_swi_unix` when that is `<= 0`, so a positive number
  * in r12 is BSD and a negative one is a mach trap: 478's run measured the mach side of that branch
- * (`thread_block`'s fifteen returns) and this one measures the BSD side. `SYS_getpid` = 20 is
+ * (`thread_block`'s fifteen returns) and 479's measures the BSD side. `SYS_getpid` = 20 is
  * `bsd/kern/syscalls.master`'s line `20 AUE_GETPID ALL { int getpid(void); }`, which
  * `tools/host_ramdisk_macho_check.py` reads back out of that file, and the entry the kernel will look
  * up is read back out of the **linked image** by `tools/check_sysent_table.py` - the same 20, the same
  * `getpid`, plus the neighbouring entries that make the stride a checked fact rather than a
- * convention. `getpid` takes no arguments (`sy_narg == 0`, so `arm_get_syscall_args` is not even
- * called), which is why every argument register below is zero.
+ * convention.
  *
- * What the program deliberately does not do is end in a fault. `r0 != 1` is the only path to `udf`,
- * and it is the path that means the syscall path is broken - so the run that reaches it is a *reading*
- * rather than a repeat of 478's stop. Everything else in this file is unchanged: the header, the three
- * load commands, `sizeofcmds` 0xC4, and the `.if` assertions below, one of which now also requires the
- * whole program to be inside `__TEXT`'s file range.
+ * ------------------------------------------------------------------------------------------------
+ * What 480 adds: process 1's own memory, and the first *user* data abort this walk has ever taken
+ * ------------------------------------------------------------------------------------------------
+ *
+ * **The second syscall is `mmap`, and the two instructions after it are the step's whole object.**
+ * Every `xnu_live_sleh_*` record this project has ever read - four of them, in 479's run - is
+ * `_user = 0`: the kernel's *own* data aborts, serviced and retried, which is what made the exec
+ * work. The user side of that handler has never run, because the only user-mode exception this image
+ * has taken is a *trap* (`udf`, slot 1, split by 477) and never an *abort* (slot 4). It cannot run
+ * until the process has a page of its own that is not resident, and no fixture so far has had one:
+ * the exec's stack is the kernel's, and its own memory is the image, which is `R|X`.
+ *
+ * So `mmap(0, 0x1000, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0)` asks the kernel for one
+ * page, and the fixture then does the two accesses that page's life consists of:
+ *
+ *   - `ldr r3, [r0]` - a **read of a page nothing has touched**, so it faults. `vm_fault` resolves
+ *     it against the anonymous map entry `mmap` just entered, and for a read the classic answer is
+ *     the zero-filled page mapped read-only, so the retry reads 0 and `cmp r3, #0` holds;
+ *   - `str r0, [r0]` - a **write to a page that is now mapped read-only**, so it faults *again*, by a
+ *     different route (`vm_fault` has to give the process its own writable page), and the value it
+ *     writes is the address `mmap` returned, so `ldr`/`cmp` afterwards prove the page is the
+ *     process's. Two faults, two `slot 4` entries, two records where there were none - and a third
+ *     reading on top of them: the getpid loop keeps running afterwards, which says the fault was
+ *     *serviced and retried* rather than fatal.
+ *
+ * **The arguments are the other half of what this step measures, and they are why the program is
+ * twenty-seven instructions rather than five.** On this target `arm_get_syscall_args`
+ * (`bsd/dev/arm/systemcalls.c:337`) is the *munging* one - the file's
+ * `#if __arm__ && (__BIGGEST_ALIGNMENT__ > 4)` is on, because the host is `CPU_SUBTYPE_ARM_V7K` - so
+ * a BSD syscall's arguments are marshalled out of the saved state by `sysent[197].sy_arg_munge32`,
+ * which is `munge_wwwwwl`: in **direct** style (`r12 != 0`) it takes `munge_wlll`, which copies six
+ * words from `r[0..5]` and then takes words six and seven from `r[6]` and `r[8]`. The generated
+ * `struct mmap_args` (`out/xnu_generated/bsd/sys/sysproto.h`) is `addr, len, prot, flags, fd` - five
+ * words - and then `off_t pos`, 8-byte aligned, at word six, so **the word between them is the
+ * struct's padding and r5 lands in it unread**. `r6` and `r8` are the ABI's 64-bit register pair: a
+ * 64-bit argument sits at an even index of the register sequence `r0..r6, r8` (r7 is the frame
+ * pointer on this target), and after five word arguments the pair is index 6 and 7, i.e. `r6` and
+ * `r8`. `getpid`'s `sy_arg_bytes` is zero (`{ int getpid(void); }`), which is why 479 could ignore
+ * all of this and why its fixture is argument-free.
+ *
+ * **And the error path is not a sign.** `unix_syscall` calls the syscall and then
+ * `arm_prepare_u32_syscall_return` (`systemcalls.c:279`), which on error puts the errno in `save_r0`
+ * *and sets the carry bit* of the saved CPSR (`regs->cpsr |= PSR_CF`) - the convention libc's
+ * `cerror` reads. So the instruction after `svc` is `bcs`, not `cmp`/`blt`: a `cmp` here would
+ * overwrite the flag it is supposed to test, and a failed `mmap` would be read as a valid address.
+ * (The positive return of a *successful* call is `_SYSCALL_RET_ADDR_T`'s `uu_rval[0]`, written by the
+ * same function.)
+ *
+ * **What the program deliberately does not do is end in a fault, call `mmap` twice, or pass silently.**
+ * `udf #1` is behind four independent checks - the pid, the errno, the fresh page's zero, and the
+ * read-back - so a wrong answer cannot be mistaken for a right one. `mmap` is called **once**,
+ * outside the loop: calling it every iteration would allocate a page per iteration, and after a few
+ * million the map would be full, `mmap` would start returning an errno, and the fixture's own error
+ * path would kill process 1 - a leak that ends in 478's panic. The loop keeps only the syscall that
+ * cannot fill anything. Everything else in this file is unchanged: the header, the three load
+ * commands, `sizeofcmds` 0xC4 (this step adds no load command), and `r[12]`'s initial value, which is
+ * still the first syscall's number.
+ *
+ * The `.if` assertions below read those claims back out of the bytes rather than out of this prose:
+ * the program's length, `sizeofcmds`, that the entry point is inside `__TEXT`, and that no branch in
+ * the program leaves the file range it is loaded from.
  */
 
     .syntax unified
@@ -201,17 +279,29 @@
     .equ ARM_THREAD_STATE,       1
     .equ ARM_THREAD_STATE_COUNT, 17
 
-/* The syscall the program makes, from the headers rather than from a disassembly: `SYS_getpid` is
- * the number in `bsd/kern/syscalls.master`'s own line for `getpid`, and the *sign* is the ABI and not
- * a convention - `fleh_swi` computes `r5 = -r12` and branches to the unix path when that is `<= 0`,
- * so a positive number in r12 is a BSD syscall and a negative one is a mach trap. `EXPECTED_PID` is
- * the identity this image's own boot gave the process: `bsd_utaskbootstrap` holds the init process by
- * name (`initproc = proc_find(1)`, `bsd/kern/bsd_init.c:1147`) and 478's console printed `pid 1
- * exited`. `tools/host_ramdisk_macho_check.py` reads both numbers back - the syscall from the master,
- * the pid from the sentence above it - and decodes the five words below to check they are the program
- * this comment describes. */
+/* The two syscalls the program makes, from the headers rather than from a disassembly: each number is
+ * the one in `bsd/kern/syscalls.master`'s own line for that name, and the *sign* is the ABI and not a
+ * convention - `fleh_swi` computes `r5 = -r12` and branches to the unix path when that is `<= 0`, so a
+ * positive number in r12 is a BSD syscall and a negative one is a mach trap. `EXPECTED_PID` is the
+ * identity this image's own boot gave the process: `bsd_utaskbootstrap` holds the init process by name
+ * (`initproc = proc_find(1)`, `bsd/kern/bsd_init.c:1147`) and 478's console printed `pid 1 exited`.
+ * `MMAP_LENGTH`/`MMAP_PROT`/`MMAP_FLAGS` are the kernel's own numbers for the one page this fixture
+ * asks for: `PROT_READ|PROT_WRITE` and `MAP_PRIVATE|MAP_ANON` from `bsd/sys/mman.h`, with the length
+ * being `1 << ARM_PGSHIFT` (`osfmk/arm/proc_reg.h`), `fd` -1 and offset 0, so the mapping needs no
+ * vnode at all. `tools/host_ramdisk_macho_check.py` reads every one of them back out of those files -
+ * the two syscall numbers from the master, the pid from the sentence above it, the page size from the
+ * kernel's own page shift, `prot` and `flags` from `mman.h` - and decodes the twenty-seven words below
+ * to check they are the program this comment describes, *including* the comparisons that use them. */
     .equ SYS_GETPID,             20
     .equ EXPECTED_PID,           1
+    .equ SYS_MMAP,               197
+    .equ MMAP_LENGTH,            0x1000
+    .equ MMAP_PROT,              0x3    /* PROT_READ | PROT_WRITE */
+    .equ MMAP_FLAGS,             0x1002 /* MAP_PRIVATE | MAP_ANON */
+    .equ MMAP_PAD_MARKER,        0x5a5a /* r5, which the munger copies into the padding word of
+                                         * `struct mmap_args` and `mmap` never reads - so a marker
+                                         * here changes nothing about the call, and the wrapper
+                                         * reading it back is what measures the layout */
 
 /* The shape of the three load commands, and the two numbers derived from them. Neither
  * `sizeofcmds` nor the entry point is written down: the first is an expression over the label the
@@ -284,17 +374,22 @@ g_stage90_ramdisk:
     .long ARM_THREAD_STATE              /* +148 flavor: the only one thread_entrypoint takes */
     .long ARM_THREAD_STATE_COUNT        /* +152 count: 17, the least thread_userstack takes */
     .long 0                             /* +156 r[0]: getpid's first argument register. `sy_narg`
-                                         *      is 0 for this syscall, so `arm_get_syscall_args` is
-                                         *      never called and no register is read as an argument -
-                                         *      they are zero because a zero is unreadable and a
-                                         *      stale value would be a second, silent definition */
+                                         *      is 0 for the *first* syscall, so `arm_get_syscall_args`
+                                         *      is never called for it and no register is read as an
+                                         *      argument - they are zero because a zero is unreadable
+                                         *      and a stale value would be a second, silent
+                                         *      definition. The program sets every register the mmap
+                                         *      below needs from inside itself */
     .long 0                             /* +160 r[1] */
     .long 0                             /* +164 r[2] */
     .rept 9                             /* +168 r[3..11] */
     .long 0
     .endr
-    .long SYS_GETPID                    /* +204 r[12]: the syscall number, read by `fleh_swi` and
-                                         *      then by `arm_get_syscall_number` */
+    .long SYS_GETPID                    /* +204 r[12]: the *first* syscall's number, read by
+                                         *      `fleh_swi` and then by `arm_get_syscall_number`. It is
+                                         *      also the register that decides the argument *style*
+                                         *      for the munger - nonzero is direct - so the program
+                                         *      reloads it before every `svc` that is not this one */
     .long 0                             /* +208 sp: zero, so the kernel picks USRSTACK and
                                          *      allocates the stack itself */
     .long 0                             /* +212 lr: zero; the thread never returns */
@@ -313,14 +408,57 @@ load_commands_end:
 
 /* Everything above is the load commands, and this is where the code they describe begins. The
  * header's `pc` is this label's file offset plus `__TEXT`'s `vmaddr`, so the address in the header
- * and the address in the image are one expression and cannot disagree. */
+ * and the address in the image are one expression and cannot disagree. Every offset below is the
+ * offset of the instruction inside this label, which is what the header comment's listing and the
+ * check tool's five-word decode both count from. */
 entry_code:
     svc     #0x80                       /* +0: getpid() - the syscall number is r12 */
     cmp     r0, #EXPECTED_PID           /* +4: the pid the kernel reports for this process? */
     bne     entry_failed                /* +8 */
-    b       entry_code                  /* +12: ask again */
+
+/* mmap(0, 0x1000, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0). The direct style means the
+ * syscall number is in r12, not r0, and the armv7k munger takes the arguments from r0..r5 plus the
+ * 64-bit pair r6/r8 - see the ABI note in the header. r5 is not written here on purpose: the munger
+ * copies it into the word of `struct mmap_args` that the compiler's alignment of `off_t` leaves as
+ * padding, and `mmap` never reads it. */
+    mov     r0, #0                      /* +12: addr = NULL - the kernel chooses the address */
+    movw    r1, #MMAP_LENGTH            /* +16: len */
+    mov     r2, #MMAP_PROT              /* +20: prot */
+    movw    r3, #MMAP_FLAGS             /* +24: flags */
+    mvn     r4, #0                      /* +28: fd = -1 - MAP_ANON needs no vnode */
+    movw    r5, #MMAP_PAD_MARKER        /* +32: the word the munger puts between fd and the
+                                         *      8-byte-aligned off_t, which `mmap` never reads -
+                                         *      a marker here is free, and reading it back is how
+                                         *      the layout below is measured rather than assumed */
+    mov     r6, #0                      /* +36: offset, low word of the 64-bit off_t */
+    mov     r8, #0                      /* +40: offset, high word */
+    mov     r12, #SYS_MMAP              /* +44 */
+    svc     #0x80                       /* +48 */
+    bcs     entry_failed                /* +52: the carry bit is the errno convention - see above */
+
+/* The page the kernel has just entered into this process's map, and the two accesses that page's
+ * life consists of. The read faults because nothing has touched it; the write faults again because
+ * the read mapped it read-only. `str r0, [r0]` writes the address into the address it names, so the
+ * load-and-compare after it is the whole proof that the page is the process's own and writable. */
+    ldr     r3, [r0]                    /* +56: <- the read: a page nothing has touched */
+    cmp     r3, #0                      /* +60: ... and a page the kernel never wrote is zero */
+    bne     entry_failed                /* +64 */
+    str     r0, [r0]                    /* +68: <- the write: the read mapped it read-only */
+    ldr     r1, [r0]                    /* +72 */
+    cmp     r1, r0                      /* +76: ... and now the process owns it */
+    bne     entry_failed                /* +80 */
+
+/* And the syscall that cannot fill anything, so that the loop is alive after the fault and the log
+ * says so: r12 has to be reloaded because the mmap above left 197 in it. */
+spin:
+    mov     r12, #SYS_GETPID            /* +84 */
+    svc     #0x80                       /* +88: getpid() again */
+    cmp     r0, #EXPECTED_PID           /* +92 */
+    bne     entry_failed                /* +96 */
+    b       spin                        /* +100 */
+
 entry_failed:
-    udf     #1                          /* +16: the kernel answered something else */
+    udf     #1                          /* +104: the kernel answered something else */
 entry_code_end:
 
     .equ sizeofcmds_value, (load_commands_end - g_stage90_ramdisk) - 28
@@ -340,10 +478,12 @@ entry_code_end:
     .if ((entry_pc_value < TEXT_VMADDR) || (entry_pc_value >= (TEXT_VMADDR + TEXT_VMSIZE)))
     .error "the entry point is outside the segment it is loaded from"
     .endif
-/* And the addresses the program's two branches name are inside the same file range, because a
- * `b` that left it would raise a fault instead of an answer. */
-    .if (entry_code_end - entry_code) != 20
-    .error "the program is not the five instructions the header describes"
+/* And what the program's length is, because every branch in it is relative: a `b` that left the file
+ * range would raise a fault instead of making a syscall, and the check tool decodes all 27 words by
+ * offset. 27 words is the 5 of the getpid call, the 11 of the mmap call and its argument registers,
+ * the 7 of the two faults, and the 4 of the loop. */
+    .if (entry_code_end - entry_code) != 108
+    .error "the program is not the twenty-seven instructions the header describes"
     .endif
 
 /* The rest of the segment is zeros, and they are *file* bytes rather than a `.bss` tail: the whole

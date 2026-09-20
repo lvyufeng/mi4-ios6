@@ -235,6 +235,26 @@ def compare(header_text, assym_text, defines_text, proc_reg_text, boot_assym_tex
             failures.append("%s is 0x%08x and %s says 0x%08x"
                             % (key, local[key], name, proc_reg[name]))
 
+    # --- 480: the two words the abort handler dereferences through the thread -----------------
+    # Not frame offsets, and compared the same way: `entry_saved_state.h` against the generated
+    # `assym.s`, which is where `genassym.c`'s own `offsetof` expressions land. `sleh_abort` reads
+    # them in this order for every fault it services (`trap.c:446` picks the map, `trap.c:449` hands
+    # `map->pmap` to `arm_fast_fault`), so a build whose image disagreed with Apple about either one
+    # would fault at an address derived from a wrong offset instead of servicing the fault - which is
+    # 474's stop, and is not something a run can distinguish from a zero.
+    assym_for_thread = read_assym(assym_text)
+    for key, name in (("STAGE90_ACT_MAP", "ACT_MAP"), ("STAGE90_MAP_PMAP", "MAP_PMAP")):
+        if key not in local:
+            failures.append("entry_saved_state.h defines no %s, so the offset the abort handler "
+                            "dereferences to choose a map is missing from the image" % key)
+        elif name not in assym_for_thread:
+            failures.append("this configuration's assym.s declares no %s, so there is nothing for %s "
+                            "to be compared with - the generated file is where the offset comes from"
+                            % (name, key))
+        elif local[key] != assym_for_thread[name]:
+            failures.append("%s is %d and %s is %d"
+                            % (key, local[key], name, assym_for_thread[name]))
+
     # --- 1 vs 2: Apple's declaration against this configuration's generated assym.s -----------
     assym = read_assym(assym_text)
     assym_names = {"SP": "SS_SP", "LR": "SS_LR", "PC": "SS_PC", "CPSR": "SS_CPSR",
@@ -329,21 +349,17 @@ def selftest(header_text, assym_text, defines_text, proc_reg_text, boot_assym_te
         value = int(match.group(2), 0) + 4
         return text[:match.start()] + "%s%d%s" % (match.group(1), value, match.group(3)) + text[match.end():]
 
-    for key in ("STAGE90_SS_PC", "STAGE90_SS_SP"):
+    for key in ("STAGE90_SS_PC", "STAGE90_SS_SP", "STAGE90_ACT_MAP", "STAGE90_MAP_PMAP"):
         mutated = mutate_define(defines_text, key)
         if mutated:
             mutations.append(("entry_saved_state.h's %s moved by one word" % key,
                               dict(defines_text=mutated)))
-    mutated = re.sub(r"^(#define\s+SS_PC\s+#)(\d+)\s*$",
-                     lambda m: "%s%d" % (m.group(1), int(m.group(2)) + 4),
-                     assym_text, count=1, flags=re.M)
-    if mutated != assym_text:
-        mutations.append(("assym.s's SS_PC moved by one word", dict(assym_text=mutated)))
-    mutated = re.sub(r"^(#define\s+SS_SP\s+#)(\d+)\s*$",
-                     lambda m: "%s%d" % (m.group(1), int(m.group(2)) + 4),
-                     assym_text, count=1, flags=re.M)
-    if mutated != assym_text:
-        mutations.append(("assym.s's SS_SP moved by one word", dict(assym_text=mutated)))
+    for name in ("SS_PC", "SS_SP", "ACT_MAP", "MAP_PMAP"):
+        mutated = re.sub(r"^(#define\s+%s\s+#)(\d+)\s*$" % name,
+                         lambda m: "%s%d" % (m.group(1), int(m.group(2)) + 4),
+                         assym_text, count=1, flags=re.M)
+        if mutated != assym_text:
+            mutations.append(("assym.s's %s moved by one word" % name, dict(assym_text=mutated)))
 
     # Apple's declaration, with `pc` and `cpsr` swapped. Both keep their width, so a comparison that
     # looked at the *set* of offsets would accept this - and it is what a wrong assym.s produces when

@@ -4,20 +4,25 @@ The ARM syscall table, read out of the linked image and against Apple's own `sys
 
 Why this is a check and not a comment
 -------------------------------------
-Experiment 479 makes the RAM disk's five instructions a `svc #0x80` asking for Unix syscall 20, and it
-puts `--wrap=getpid`'s wrapper in that syscall's slot. Two things can be true of the *image* while the
-device still runs the program `entry_ramdisk.s` describes:
+Experiment 479 makes the RAM disk's first instructions a `svc #0x80` asking for Unix syscall 20, and
+it puts `--wrap=getpid`'s wrapper in that syscall's slot; experiment 480 adds a second `svc` asking
+for 197, with `--wrap=mmap`'s wrapper in *that* slot and six words of arguments marshalled into it by
+the armv7k munger. Two things can be true of the *image* while the device still runs the program
+`entry_ramdisk.s` describes:
 
   - `--wrap` rewrites an *address reference* exactly as it rewrites a call - 458 read that fact out of
-    `cons_ops[1].putc` and 463 out of `IOService::getState`'s name - so `bd/kern/init_sysent.c`'s
-    initialiser is what has to end up holding `__wrap_getpid`. If it holds `getpid`, the wrapper is
-    never entered, no record is written, and a run in which process 1 loops on `getpid` looks exactly
-    like a run in which the instrument is not there. Nothing else in the build can see that: the symbol
-    is defined either way, the undefined-symbol count does not move, and the census in
-    `build_entry.sh` counts `getpid` as reachable *by address* - which is a statement about a reference
-    existing, not about which address it holds.
-  - and the *index* is a second, independent claim: the fixture puts 20 in `r12`, `fleh_swi` routes a
-    positive number to the unix path, and `arm_get_syscall_number` hands that same word to
+    `cons_ops[1].putc` and 463 out of `IOService::getState`'s name - so `bsd/kern/init_sysent.c`'s
+    initialiser is what has to end up holding `__wrap_getpid` and `__wrap_mmap`. If either slot holds
+    the function instead, the wrapper is never entered, no record is written, and a run in which
+    process 1 calls that syscall looks exactly like a run in which the instrument is not there.
+    Nothing else in the build can see that: the symbol is defined either way, the undefined-symbol
+    count does not move, and the census in `build_entry.sh` counts both as reachable *by address* -
+    which is a statement about a reference existing, not about which address it holds. For `mmap` the
+    distinction is sharper than for `getpid`: `mmap` is an ordinary function with callers, so an
+    image with the wrapper linked and *not* in the slot is byte-for-byte a working kernel whose
+    fixture silently says nothing.
+  - and the *index* is a second, independent claim: the fixture puts 20 and 197 in `r12`, `fleh_swi`
+    routes a positive number to the unix path, and `arm_get_syscall_number` hands that same word to
     `sysent[code]`. A table whose stride or whose numbering is not the one this project believes would
     make the fixture call a different syscall than the one this step documents - silently, because
     every slot in the table is a real function.
@@ -30,18 +35,25 @@ Where each side of the comparison comes from
   - the addresses and the bytes come from the image itself: symbols from `nm`, and the table read
     through the section table rather than scraped out of `objdump -s`'s text, so a formatting change
     cannot silently change what is compared;
-  - and the stride is not asserted anywhere. It is *proved* by the witness list: eight entries spread
-    from 0 to 128, each checked against the master's line for that index. A stride that were not 16
-    bytes, or a table that were indexed from a different base, cannot satisfy eight of them at once -
-    which is what makes "entry 20 is `getpid`" a reading rather than a restatement of this file.
+  - and the stride is not asserted anywhere. It is *proved* by the witness list: nine entries spread
+    from 0 to 197, each checked against the master's line for that index. A stride that were not 16
+    bytes, or a table that were indexed from a different base, cannot satisfy nine of them at once -
+    which is what makes "entry 197 is `mmap`" a reading rather than a restatement of this file;
+  - and for the one slot that has one, a fourth claim: `sysent[197].sy_arg_munge32` must be
+    `munge_wwwwwl`, the munger Apple's generation derives from `mmap`'s prototype. That word is what
+    decides which register lands in which word of the argument struct, so it is the fact 480's
+    argument reading stands on - and it is invisible everywhere else in the image, because a build
+    with a different munger there is a working kernel that answers the call with different numbers.
 
 The witnesses are not decoration: `fork` at 2, `read` at 3, `open` at 5 and `rename` at 128 are four
 different points of the same table, and `enosys` at 8 is the one Apple's own generation turns argument
-mismatches into - so a build whose table had moved would have to move all of them consistently.
+mismatches into - so a build whose table had moved would have to move all of them consistently. 20 and
+197 are the two the fixture reaches, and they are the pair whose *distance* matters: 177 entries apart,
+which no off-by-one in the stride survives.
 
-`--selftest` mutates a copy of the table **in memory** - swapping two entries, zeroing the wrapper's
-slot, putting the real `getpid` back, and truncating `nsysent` - and requires each mutation to be
-refused, which is what says the comparison is a comparison and not a restatement.
+`--selftest` mutates a copy of the table **in memory** - swapping two entries, zeroing a wrapper's
+slot, putting a real function back, moving the mmap munger, and truncating `nsysent` - and requires
+each mutation to be refused, which is what says the comparison is a comparison and not a restatement.
 
     ./tools/check_sysent_table.py --selftest
     ./tools/check_sysent_table.py                        # out/stage90/xnu_arm_entry.elf
@@ -62,17 +74,23 @@ DEFAULT_MASTER = os.path.join(REPO_ROOT, "external/xnu-4570.1.46/bsd/kern/syscal
 TABLE_SYMBOL = "sysent"
 COUNT_SYMBOL = "nsysent"
 
-# The syscall the fixture calls, and the one whose slot the wrapper has to occupy.
-SYSCALL_INDEX = 20          # the number in the fixture's `r12`, claimed by `entry_ramdisk.s`
-SYSCALL_NAME = "getpid"
+# The syscalls the fixture makes, and the slot each one's wrapper has to occupy. The first is the one
+# the program's `r12` starts with; the second is the call whose *arguments* the armv7k munger marshals,
+# and the one whose slot has to hold a wrapper for a function this image also calls from elsewhere.
+WRAPPED = [
+    (20, "getpid"),         # 479
+    (197, "mmap"),          # 480
+]
+SYSCALL_INDEX, SYSCALL_NAME = WRAPPED[0]
 
 # `sizeof(struct sysent)` on this target. Nothing here *relies* on the number: it is the stride the
 # witnesses below either satisfy or do not, and a build that changed it would have to satisfy them at
 # the new stride.
 SYSENT_STRIDE = 16
 
-# (index, name) pairs, from `syscalls.master`'s own lines. Eight of them, so that the stride and the
-# numbering are both over-determined rather than assumed.
+# (index, name) pairs, from `syscalls.master`'s own lines. Nine of them, so that the stride and the
+# numbering are both over-determined rather than assumed - and the last two are the pair the fixture
+# reaches, 177 entries apart so that no small error in the stride can leave both of them satisfied.
 WITNESSES = [
     (0, "nosys"),
     (1, "exit"),
@@ -82,10 +100,34 @@ WITNESSES = [
     (8, "enosys"),
     (20, "getpid"),
     (128, "rename"),
+    (197, "mmap"),
 ]
+
+# The munger each wrapped slot has to name, where it has one. **This is the word the whole argument
+# reading rests on**: `arm_get_u32_syscall_args` (`bsd/dev/arm/systemcalls.c:337`) calls
+# `callp->sy_arg_munge32`, and *which* munger it is decides which registers land in which word of the
+# argument struct - so an image whose slot named a different munger would put the fixture's arguments
+# somewhere else, and the syscall would still work, because `MAP_ANON` makes `fd` and `pos`
+# inoperative. `munge_wwwwwl` is Apple's generated name for `mmap`'s prototype (five 4-byte arguments
+# and one 8-byte `off_t`, `bsd/kern/syscalls.master`), it is what
+# `out/xnu_generated/init_sysent.c`'s own line for 197 writes, and `entry_ramdisk.s`'s header derives
+# the register order from it. `getpid` has none: its argument list is empty, so its slot's munger word
+# is NULL and there is nothing to name.
+MUNGERS = {
+    197: "munge_wwwwwl",
+}
+
+# `struct sysent` (`bsd/sys/sysent.h:45`) on this target, where the armv7k `#if` is on:
+# `sy_call`, `sy_arg_munge32`, `sy_return_type`, `sy_narg`, `sy_arg_bytes`. The munger is the second
+# word, and the stride above agrees with the five members because the first three are 4 bytes each.
+MUNGER_WORD_OFFSET = 4
 
 failures = []
 notes = []
+# The `ok:` line, assembled by `collect` from the slots it read back. A module-level list and not
+# `notes[-1]` (207): the witness read-back and the selftest each append a note after the readings, so
+# "the last note is the summary" named the wrong entry twice before this was made explicit.
+summary = []
 
 
 def fail(msg):
@@ -168,9 +210,13 @@ def master_entries(path):
 def collect(elf, master, mutate=None):
     """Every way the image's table can disagree with the master and with the wrapper, as sentences."""
     symbols = elf.symbols()
-    for symbol in (TABLE_SYMBOL, COUNT_SYMBOL, SYSCALL_NAME, "__wrap_" + SYSCALL_NAME):
+    wanted = [TABLE_SYMBOL, COUNT_SYMBOL]
+    for _index, name in WRAPPED:
+        wanted += [name, "__wrap_" + name]
+    wanted += list(MUNGERS.values())
+    for symbol in wanted:
         if symbol not in symbols:
-            fail("the image defines no %s, so the table this check reads (or the wrapper it looks for) "
+            fail("the image defines no %s, so the table this check reads (or a wrapper it looks for) "
                  "is not in it under that name" % symbol)
     if failures:
         return
@@ -195,10 +241,11 @@ def collect(elf, master, mutate=None):
     say("sysent at 0x%08x, nsysent at 0x%08x = %d, stride %d, %d witnesses"
         % (table_va, count_va, count, SYSENT_STRIDE, len(WITNESSES)))
 
-    if count <= SYSCALL_INDEX:
-        fail("nsysent is %d, so the kernel's own bound puts index %d outside the table it dispatches "
-             "through - the fixture's `r12` would reach sysent[SYS_invalid] instead of %s"
-             % (count, SYSCALL_INDEX, SYSCALL_NAME))
+    for index, name in WRAPPED:
+        if count <= index:
+            fail("nsysent is %d, so the kernel's own bound puts index %d outside the table it "
+                 "dispatches through - the fixture's `r12` would reach sysent[SYS_invalid] instead of "
+                 "%s" % (count, index, name))
 
     for index, name in WITNESSES:
         want = master.get(index)
@@ -221,26 +268,47 @@ def collect(elf, master, mutate=None):
                  "not name the function this step documents"
                  % (index, at, got, expected, symbols[expected]))
 
-    # **The wrapper's slot, which is the reading this step's device run depends on.** `--wrap=getpid`
-    # rewrites the address reference in `init_sysent.c`, so the word has to be the wrapper and must not
-    # be the function. Both halves are stated, because the failure mode this replaces is the silent
-    # one: a slot holding `getpid` produces no records at all.
-    got, = struct.unpack_from("<I", raw, SYSCALL_INDEX * SYSENT_STRIDE)
-    wrapper = symbols["__wrap_" + SYSCALL_NAME]
-    real = symbols[SYSCALL_NAME]
-    if got == real:
-        fail("sysent[%d] holds the real %s (0x%08x) and not __wrap_%s (0x%08x): `--wrap` rewrites the "
-             "initialiser in init_sysent.c, so this means the flag is not in the link line (or the "
-             "table is not the one the dispatcher indexes) and the wrapper would never run - and a run "
-             "with no getpid records looks exactly like a wrapper that is not there"
-             % (SYSCALL_INDEX, SYSCALL_NAME, real, SYSCALL_NAME, wrapper))
-    elif got != wrapper:
-        fail("sysent[%d] is 0x%08x, which is neither __wrap_%s (0x%08x) nor %s (0x%08x)"
-             % (SYSCALL_INDEX, got, SYSCALL_NAME, wrapper, SYSCALL_NAME, real))
-    else:
-        say("sysent[%d] = 0x%08x = __wrap_%s (%s is at 0x%08x), so the kernel dispatches the "
-            "fixture's syscall into the wrapper" % (SYSCALL_INDEX, got, SYSCALL_NAME, SYSCALL_NAME,
-                                                    real))
+    # **The wrappers' slots, which are the readings this step's device run depends on.** `--wrap=X`
+    # rewrites the address reference in `init_sysent.c`, so each word has to be the wrapper and must
+    # not be the function. Both halves are stated, because the failure mode this replaces is the
+    # silent one: a slot holding the real function produces no records at all.
+    for index, name in WRAPPED:
+        got, = struct.unpack_from("<I", raw, index * SYSENT_STRIDE)
+        wrapper = symbols["__wrap_" + name]
+        real = symbols[name]
+        if got == real:
+            fail("sysent[%d] holds the real %s (0x%08x) and not __wrap_%s (0x%08x): `--wrap` rewrites "
+                 "the initialiser in init_sysent.c, so this means the flag is not in the link line (or "
+                 "the table is not the one the dispatcher indexes) and the wrapper would never run - "
+                 "and a run with no %s records looks exactly like a wrapper that is not there"
+                 % (index, name, real, name, wrapper, name))
+        elif got != wrapper:
+            fail("sysent[%d] is 0x%08x, which is neither __wrap_%s (0x%08x) nor %s (0x%08x)"
+                 % (index, got, name, wrapper, name, real))
+        else:
+            summary.append("sysent[%d] = 0x%08x = __wrap_%s (%s is at 0x%08x)"
+                           % (index, got, name, name, real))
+
+        # **And the munger word beside it, for the slot that has one.** The wrapper's presence says
+        # the call reaches this file; the munger says which registers the call is *handed* - and that
+        # is a claim about the ABI that lives in the image and in nothing else. The name is checked
+        # against `nm`, not written into a message: an image whose slot named `munge_wwwww` or
+        # `munge_wwwwl` would dispatch a call whose arguments the fixture's own header comment does
+        # not describe, and the device run would show a zero where `0x5a5a` is expected.
+        if index in MUNGERS:
+            want = MUNGERS[index]
+            at = index * SYSENT_STRIDE + MUNGER_WORD_OFFSET
+            got, = struct.unpack_from("<I", raw, at)
+            if got != symbols[want]:
+                fail("sysent[%d].sy_arg_munge32 at 0x%08x is 0x%08x and `%s` is at 0x%08x: the "
+                     "munger this slot names is not the one Apple's generation put there for this "
+                     "prototype, so the fixture's argument registers are not the words this step "
+                     "documents - and the syscall would still work, because MAP_ANON makes fd and "
+                     "pos inoperative, so nothing else would show it"
+                     % (index, table_va + at, got, want, symbols[want]))
+            else:
+                summary.append("sysent[%d].sy_arg_munge32 = 0x%08x = %s, the munger the fixture's "
+                               "registers are read by" % (index, got, want))
 
     # Every witness read back, for the log: an eight-line agreement is what makes the stride a reading.
     for index, name in WITNESSES:
@@ -276,10 +344,13 @@ def main():
         # Each mutation is a way the image could be wrong that the checks above have an opinion about.
         # If one survives, the check is decorative and this is the only place that can say so.
         offset = SYSCALL_INDEX * SYSENT_STRIDE
+        mmap_offset = WRAPPED[1][0] * SYSENT_STRIDE   # 197's slot, 177 entries away
         other = 24 * SYSENT_STRIDE         # another entry's slot, inside the checked span
         symbols = elf.symbols()
         wrapper = symbols["__wrap_" + SYSCALL_NAME]
         real = symbols[SYSCALL_NAME]
+        mmap_wrapper = symbols["__wrap_" + WRAPPED[1][1]]
+        mmap_real = symbols[WRAPPED[1][1]]
 
         def word(state, where):
             return struct.unpack_from("<I", state["table"], where)[0]
@@ -293,6 +364,27 @@ def main():
         def the_real_function(state):
             put(state, offset, real)
 
+        def the_real_mmap(state):
+            # 480's half of the same defect, and the one no other check in this tree can see: the
+            # image still calls the wrapper from nowhere, so a slot holding `mmap` is a correct kernel
+            # whose fixture writes one record fewer than a run that has no instrument at all.
+            put(state, mmap_offset, mmap_real)
+
+        def each_wrapper_in_the_other_slot(state):
+            # The plausible mistake this replaces is an off-by-one in the wrapped list: two `--wrap`s
+            # that swapped slots still leave a *working* kernel, and the fixture's two calls would
+            # reach the wrong wrapper - `mmap`'s registers read by the getpid wrapper, and a `getpid`
+            # counted as a mapping. Slot 197 + 1 is outside the range this check reads, so the swap is
+            # the shape of "somewhere else" that is testable here.
+            put(state, offset, mmap_wrapper)
+            put(state, mmap_offset, wrapper)
+
+        def zero_the_munger(state):
+            put(state, mmap_offset + MUNGER_WORD_OFFSET, 0)
+
+        def the_wrapper_in_the_munger_slot(state):
+            put(state, mmap_offset + MUNGER_WORD_OFFSET, mmap_wrapper)
+
         def one_entry_late(state):
             put(state, offset, 0)
             put(state, offset + SYSENT_STRIDE, wrapper)
@@ -304,27 +396,40 @@ def main():
 
         def shifted_one_word(state):
             # A stride that is not 16 bytes moves every witness at once, which is the property the
-            # witness list exists to over-determine.
+            # witness list exists to over-determine. 197 is the witness that makes this mutation
+            # expensive: at the wrong stride it is not 177 entries away from 20 but some other slot.
             state["table"] = bytearray(b"\0\0\0\0") + state["table"][:-4]
 
         mutations = [
             ("the wrapper's slot zeroed", zero_the_slot),
             ("the real getpid in the slot", the_real_function),
+            ("the real mmap in its slot", the_real_mmap),
+            ("the mmap wrapper in each other's slot", each_wrapper_in_the_other_slot),
+            ("197's munger word zeroed", zero_the_munger),
+            ("the wrapper in 197's munger word", the_wrapper_in_the_munger_slot),
             ("the wrapper one entry late", one_entry_late),
             ("entries 20 and 24 swapped", swapped_with_24),
             ("the table shifted by one word (any other stride)", shifted_one_word),
             ("nsysent equal to the fixture's index", lambda s: s.__setitem__("nsysent", SYSCALL_INDEX)),
+            ("nsysent below the mmap witness", lambda s: s.__setitem__("nsysent", 128)),
             ("nsysent below the last witness", lambda s: s.__setitem__("nsysent", 1)),
         ]
         survived = []
         for name, mutation in mutations:
             del failures[:]
-            kept = len(notes)
+            del notes[:]
+            del summary[:]
             collect(elf, master, mutate=mutation)
-            del notes[kept:]
             if not failures:
                 survived.append(name)
+        # **The table is read once more, unmutated, before anything is printed.** The mutations above
+        # work on a copy and each one stops as soon as it is refused, so whatever the last of them left
+        # in `notes` and `summary` describes a table that does not exist - and with `--verbose` that
+        # would be this check printing a wrong reading of a correct image.
         del failures[:]
+        del notes[:]
+        del summary[:]
+        collect(elf, master)
         if survived:
             fail("--selftest: these mutations were accepted, so the checks above do not see them: "
                  + ", ".join(survived))
@@ -340,11 +445,12 @@ def main():
         for item in notes:
             print(item)
     else:
-        # The success line is the wrapper's slot, and not `notes[-1]`: the witness read-back and the
-        # selftest each append a note after it, so a "the last note is the summary" spelling made this
-        # check's own `ok:` line name sysent[128] (and, with --selftest, only the selftest). The
-        # reading the step is built on is `notes[1]` whatever else ran.
-        print("ok: %s" % (notes[1] if len(notes) > 1 else "the syscall table reads as built"))
+        # The success line is what was read back out of the image - each wrapper's slot, and the
+        # munger word beside the mmap one - and it is assembled in `summary` rather than taken from the
+        # end of `notes`: the witness read-back and the selftest each append after the readings, so
+        # "the last note is the summary" named sysent[128] on a correct build and, with --selftest, only
+        # the selftest (207).
+        print("ok: %s" % ("; ".join(summary) if summary else "the syscall table reads as built"))
     return 0
 
 
