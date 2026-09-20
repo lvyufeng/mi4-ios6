@@ -143,6 +143,11 @@ extern uint32_t entry_note_block(uint32_t caller, uint32_t continuation, uint32_
  * its return carry the same number even when the block in between never came back. */
 extern void entry_note_block_return(uint32_t caller, uint32_t result, uint32_t seq);
 
+/* 479: what the kernel answered process 1's first syscall with. The second argument is `getpid`'s own
+ * return value (0 for a call that worked) and the third is the word it wrote into the caller's
+ * `retval` - `p->p_pid` - which is the process's identity rather than a status. */
+extern void entry_note_getpid(uint32_t caller, uint32_t error, uint32_t value);
+
 /*
  * 453's one, called by the six sleep wrappers below with the frame they were entered from. `ent` is
  * the entry point's id in the table in `entry_stubs.c` - the fifth argument means something
@@ -582,6 +587,45 @@ int __wrap_thread_block(void *continuation)
     result = __real_thread_block(continuation);
     entry_note_block_return(caller, (uint32_t)result, seq);
     return result;
+}
+
+/* ------------------------------------------------------- the process's first syscall (479) */
+/*
+ * 478's run left process 1 with one requirement - it must keep running - and `entry_ramdisk.s`'s
+ * program meets it with `svc #0x80` asking for Unix syscall 20, `getpid`. That call reaches
+ * `sysent[20].sy_call`, and `--wrap=getpid` puts this function in the slot: `ld`'s `--wrap` renames an
+ * address reference exactly as it renames a call (458's finding about `cons_ops[1].putc`, 463's about
+ * `getState`), and the reference here is `bsd/kern/init_sysent.c`'s initialiser. That is why the
+ * reachability census below in `build_entry.sh` counts `getpid` as *by address*, and why
+ * `tools/check_sysent_table.py` reads the word back out of the linked image instead of trusting the
+ * link line.
+ *
+ * **The declaration is the ABI, and it has to be the caller's.** `unix_syscall` calls the slot as
+ * `(*(callp->sy_call))(proc, &uthread->uu_arg[0], &uthread->uu_rval[0])`
+ * (`bsd/dev/arm/systemcalls.c:174`), so the wrapper takes the process, the argument buffer and the
+ * return-value pair - and it returns `getpid`'s own `int` **unchanged**. A `void` shape would end in a
+ * tail call and leave the caller's `r0` holding whatever ran last, which is exactly the defect 478
+ * found in this file's own `__wrap_thread_block`; the fixture's `cmp r0, #1` is what makes that defect
+ * loud rather than silent, and the value here is what makes it readable.
+ *
+ * **What it records is the answer the kernel wrote for the user**, not a status of its own: `*retval`
+ * is `p->p_pid`, the identity `bsd_utaskbootstrap` gave this process
+ * (`initproc = proc_find(1)`, `bsd/kern/bsd_init.c:1147`), and the error is the syscall's own return.
+ * Neither is touched. `entry_note_getpid` writes the first call in full and then only powers of two,
+ * because this loop runs as fast as the CPU allows: the live channel's 4096-record cap is a *bound*
+ * the boot's own report depends on, and 461's defect was the report path's buffer being the tracer's
+ * and full when the report was written.
+ */
+int __real_getpid(void *proc, void *uap, int *retval);
+
+int __wrap_getpid(void *proc, void *uap, int *retval)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    int error = __real_getpid(proc, uap, retval);
+
+    entry_note_getpid(caller, (uint32_t)error,
+                      (retval != 0) ? (uint32_t)*retval : 0xFFFFFFFFu);
+    return error;
 }
 
 /* ------------------------------------------------------------ the IOKit deadline sleeps (454) */

@@ -107,6 +107,164 @@ def hdr_define(path, name, base=0):
     sys.exit(f"{path} does not define {name} - the header this check reads has moved")
 
 
+def syscall_getpid():
+    """The fixture's syscall, from the place XNU writes it down.
+
+    `bsd/kern/syscalls.master`'s own line - `20 AUE_GETPID ALL { int getpid(void); }` - is the number
+    the BSD dispatcher indexes `sysent` with, and the prototype is what makes `sy_narg` zero:
+    `unix_syscall` only calls `arm_get_syscall_args` when `callp->sy_narg != 0`
+    (`bsd/dev/arm/systemcalls.c:117`), so the program's argument registers are read by nothing at all.
+    The *sign* is the ABI and it is checked here: `osfmk/arm/locore.s`'s `fleh_swi` computes
+    `r5 = -r12` and branches to `fleh_swi_unix` when that is `<= 0`, so a positive number in r12 is the
+    unix path and a negative one is a mach trap - 478's fixture called the mach side (`-61`,
+    `thread_switch`), and this one calls the BSD side.
+
+    The other end of the same decision is the image's own table, and it is checked where it can be:
+    `tools/check_sysent_table.py` reads `sysent[20].sy_call` out of the linked image and requires it to
+    be `--wrap=getpid`'s wrapper on `getpid`. A number here that disagreed with the image's table would
+    otherwise be a fixture calling a syscall the image does not dispatch where this file says.
+    """
+    master = open(os.path.join(XNU, "bsd/kern/syscalls.master"), encoding="utf-8",
+                  errors="replace").read()
+    m = re.search(r"^(\d+)\s+AUE_GETPID\s+ALL\s+\{\s*int\s+getpid\s*\(\s*void\s*\)\s*;", master,
+                  re.M)
+    if not m:
+        sys.exit("bsd/kern/syscalls.master no longer has an `AUE_GETPID ALL { int getpid(void); }` "
+                 "line - the fixture's syscall number cannot be checked against the master")
+    number = int(m.group(1))
+    if number <= 0:
+        sys.exit(f"syscalls.master puts getpid at {number}: with a non-positive number `fleh_swi` "
+                 f"routes it to the mach path, so the fixture would not be calling a BSD syscall")
+    return number
+
+
+def init_pid():
+    """The pid the kernel gives the process the RAM disk is exec'd into, from Apple's own source.
+
+    `bsd_utaskbootstrap` clones the init process out of `kernproc` and then holds it by name:
+    `initproc = proc_find(1)` (`bsd/kern/bsd_init.c`), with a `panic("bsd_utaskbootstrap: initproc not
+    set")` in the same block for the case where it is not there. `load_init_program(p)` in
+    `bsd_do_post` execs this Mach-O into that process. The number is read out of the source rather
+    than written here because the fixture's `cmp r0, #N` *is* the claim, and a literal in this file
+    would be a second definition of it with nothing comparing the two - the shape this project's
+    check-everything rule exists for. 478's console measured the same identity from the other side
+    (`pid 1 exited -- exit reason namespace 2 subcode 0x4`).
+    """
+    src = open(os.path.join(XNU, "bsd/kern/bsd_init.c"), encoding="utf-8", errors="replace").read()
+    m = re.search(r"initproc\s*=\s*proc_find\(\s*(\d+)\s*\)", src)
+    if not m:
+        sys.exit("bsd/kern/bsd_init.c no longer has an `initproc = proc_find(N)` line - the pid the "
+                 "fixture requires getpid to return cannot be checked against the kernel's own source")
+    return int(m.group(1))
+
+
+def sign24(word):
+    """The 24-bit branch offset of an ARM `b`/`bl`, sign-extended and scaled."""
+    imm = word & 0xFFFFFF
+    if imm & 0x800000:
+        imm -= 0x1000000
+    return imm * 4
+
+
+def check_program(blob, fpc, pc, reg, K):
+    """The five words of `entry_ramdisk.s`'s program, decoded against what they are for.
+
+    This is the assertion experiment 468 wrote for one word, applied to the program 479 replaced it
+    with. The one-word version asked "is the entry point a `udf #0`", which measured only that the
+    user's mapping was where the file said it was; a five-instruction program has four more ways to be
+    wrong, and every one of them is a *silent* difference - a `cmp` against the wrong register or the
+    wrong pid, a branch that lands one instruction away, a syscall number in the wrong register - whose
+    only symptom on the device would be a process that runs when it should have stopped, or an init
+    death where 478 already had one.
+    """
+    p = f"{pc:#x}: "
+    svc, cmpw, bne_w, b_w, udf_w = (u32(blob, fpc + i * 4) for i in range(5))
+
+    # `svc #0x80` - `cond 1111 imm24`, the immediate Darwin's userland uses. Apple's `fleh_swi` never
+    # reads it, so what makes this the load-bearing word is that it is the *only* instruction in the
+    # program that enters the kernel. 478's fixture was a `udf` here and that ended the boot: the
+    # kernel triaged the bad instruction, killed pid 1 with SIGILL and panicked in
+    # `launchd_crashed_panic`, which `proc_prepareexit` makes unconditional for `initproc`.
+    if svc != 0xEF000080:
+        fail(f"{p}the first instruction is 0x{svc:08x}, not `svc #0x80` (0xef000080) - process 1 "
+             f"would never reach the kernel, and the program's job is to ask it something")
+        return
+
+    # `cmp r0, #N` - `cond 0011 0101 0000 Rn imm12`. r0 is where a *unix* syscall's return value goes
+    # (`arm_prepare_u32_syscall_return`'s `_SYSCALL_RET_INT_T` arm: `regs->save_r0 = uthread->uu_rval[0]`),
+    # so this compares the pid the kernel returned with the one it gave this process. The immediate is
+    # read out of the word and compared with Apple's own `proc_find(N)`, not with a literal: the
+    # fixture's claim and the kernel's source are the two definitions of that number.
+    #
+    # **The mask is `0xFFFFF000` and not `0xFFF00000`.** The word's nibbles are `cond`, `I`/opcode,
+    # opcode/`S`, **`Rn`**, `Rd`, then `imm12` - so masking only the top twelve bits *excludes* `Rn`,
+    # which is bits 19:16, and the first version of this check accepted `cmp r1, #1`. The selftest's
+    # "the compare's register" mutation was the thing that said so; a check is an instrument, and this
+    # one was reading a mask that did not cover the field it was checking. `Rd` stays in the mask
+    # because `cmp`'s `Rd` is 0000 and a word with a target register is some other instruction.
+    if cmpw & 0xFFFFF000 != 0xE3500000:
+        fail(f"{p}the second instruction is 0x{cmpw:08x}, not `cmp r0, #imm` (0xe3500000 | imm) - the "
+             f"check on what the kernel answered is not the one the file describes, or it is against "
+             f"another register, so a wrong answer would loop and a right one would fall into the "
+             f"`udf`")
+    elif (cmpw >> 8) & 0xF:
+        fail(f"{p}`cmp r0, #imm` has a nonzero rotate field (0x{cmpw:08x}), so the value it compares "
+             f"with is not the bare immediate this check reads")
+    else:
+        want, got = K["INIT_PID"], cmpw & 0xFF
+        if got != want:
+            fail(f"{p}the program compares getpid's answer with {got}, and bsd/kern/bsd_init.c holds "
+                 f"the init process by name at {want} (`initproc = proc_find({want})`): the fixture "
+                 f"would accept an answer that says it is some other process")
+
+    for name, word, register in (("bne", bne_w, 0x1), ("b", b_w, 0xE)):
+        if word >> 28 != register:
+            fail(f"{p}the `{name}` is 0x{word:08x}: its condition field is {word >> 28:#x}, not "
+                 f"{register:#x} - a branch that does not branch is a program that does something "
+                 f"other than what this file's comment says")
+        elif (word >> 24) & 0xF != 0xA:
+            fail(f"{p}0x{word:08x} is not an ARM `b` (bits 27:24 are {(word >> 24) & 0xF:#x}, not "
+                 f"0xa) - this is the instruction the file describes as a branch")
+
+    # The targets, computed from the words rather than read from a label: an ARM `b` is
+    # `address_of_the_branch + 8 + imm24 * 4`, and the two branches are the third and fourth words.
+    # `bne` must land on the `udf` and `b` must land back on the `svc`, and those are the two edges
+    # that make the program a loop that keeps asking rather than one that asks once.
+    bne_target = pc + 16 + sign24(bne_w)
+    b_target = pc + 20 + sign24(b_w)
+    if bne_target != pc + 16:
+        fail(f"{p}the `bne` targets 0x{bne_target:x}, not the `udf` at 0x{pc + 16:x} - a wrong answer "
+             f"would not reach the instruction that names it")
+    if b_target != pc:
+        fail(f"{p}the `b` targets 0x{b_target:x}, not the `svc` at 0x{pc:x} - a right answer would "
+             f"not ask again, so process 1 would fall into the `udf` after one syscall")
+
+    # `udf #1` - `cond 0111 1111 imm12 1111 0000`. The immediate is what makes this marker a
+    # *different* instruction from 478's `udf #0`: the trap report prints the PC and not the
+    # immediate, and two markers at two addresses would still be one reading if the second were a
+    # copy of the first.
+    if udf_w != 0xE7F000F1:
+        fail(f"{p}the instruction at 0x{pc + 16:x} is 0x{udf_w:08x}, not `udf #1` (0xe7f000f1) - "
+             f"the failure path has to be a marker this image does not already use (478's run read "
+             f"`udf #0` at 0x10e0 as the init death)")
+
+    # The syscall vector, which is the one register of the twelve the kernel reads: `fleh_swi` turns it
+    # into the index (`-r12`) and `arm_get_syscall_number` reads the same word back out of the saved
+    # state as the `sysent` index. `getpid` takes no arguments - `sy_narg` is 0, so
+    # `arm_get_syscall_args` is never called and r0..r11 are read by nothing, which is why they are
+    # zero rather than, say, meaningful: a stale value there would be an unreadable second definition
+    # of the call.
+    number = K["SYSCALL_GETPID"]
+    if reg[12] != number:
+        fail(f"{p}r12 is {reg[12]}, not {number} (SYS_getpid, from bsd/kern/syscalls.master) - "
+             f"`fleh_swi` computes `-r12` = {number} and takes the *unix* path for it, so a different "
+             f"number here is a different syscall or the mach path")
+    for k in range(13):
+        if k != 12 and reg[k] != 0:
+            notes.append(f"{p}r{k} is {reg[k]}, which the kernel reads as no argument at all "
+                         f"(sy_narg is 0 for getpid)")
+
+
 def arm_thread_state_count():
     """sizeof(arm_thread_state_t)/4, from the struct rather than from a number here.
 
@@ -363,6 +521,7 @@ def parse(blob, K, size, label=""):
             fail(f"{p}the thread state's {count} words run past the command's own cmdsize")
         else:
             # struct arm_thread_state: r[13], sp, lr, pc, cpsr.
+            reg = [u32(blob, o + THREAD_STATE + 8 + k * 4) for k in range(13)]
             sp = u32(blob, o + THREAD_STATE + 8 + 13 * 4)
             pc = u32(blob, o + THREAD_STATE + 8 + 15 * 4)
             cpsr = u32(blob, o + THREAD_STATE + 8 + 16 * 4)
@@ -379,24 +538,18 @@ def parse(blob, K, size, label=""):
                 fo = u32(blob, o2 + SEG["fileoff"])
                 fs = u32(blob, o2 + SEG["filesize"])
                 fpc = fo + (pc - vmaddr)
-                if fpc + 4 > fo + fs:
-                    fail(f"{p}pc 0x{pc:x} is at file offset 0x{fpc:x}, past __TEXT's filesize")
+                if fpc + 20 > fo + fs:
+                    fail(f"{p}pc 0x{pc:x} is at file offset 0x{fpc:x}, past __TEXT's filesize: the "
+                         f"program is five instructions and this leaves room for fewer")
                 else:
-                    word = u32(blob, fpc)
-                    # `udf #0`: the ARMv7 encoding of the undefined instruction, `cond 0111 1111
-                    # imm12 1111 0000` with imm12 = 0 and cond = AL.
-                    if word != 0xE7F000F0:
-                        fail(f"{p}the word at the entry point is 0x{word:08x}, not udf #0 "
-                             f"(0xe7f000f0) - the process would execute whatever this is")
-                    else:
-                        notes.append(f"{p}__TEXT's file [{fo}, {fo + fs}) maps to "
-                                     f"[0x{vmaddr:x}, 0x{vmaddr + vmsize:x}); "
-                                     f"pc 0x{pc:x} is file offset 0x{fpc:x}, and the word there is "
-                                     f"`udf #0`")
-                        notes.append(f"{p}cpsr 0x{cpsr:x} - machine_thread_set_state keeps only the "
-                                     f"flags from this word and takes the mode from PSR_USERDFLT "
-                                     f"(0x10), so the thread runs in User mode whatever it says; the "
-                                     f"SPSR of the fault should read back as 0x{cpsr:x}")
+                    check_program(blob, fpc, pc, reg, K)
+                    notes.append(f"{p}__TEXT's file [{fo}, {fo + fs}) maps to "
+                                 f"[0x{vmaddr:x}, 0x{vmaddr + vmsize:x}); "
+                                 f"pc 0x{pc:x} is file offset 0x{fpc:x}, and the five words there "
+                                 f"are the program this file describes")
+                    notes.append(f"{p}cpsr 0x{cpsr:x} - machine_thread_set_state keeps only the flags "
+                                 f"from this word and takes the mode from PSR_USERDFLT (0x10), so "
+                                 f"the thread starts in User mode whatever it says")
 
     return len(seen)
 
@@ -458,13 +611,19 @@ def main():
         "ARM_THREAD_STATE": hdr_define(os.path.join(XNU, "osfmk/mach/arm/thread_status.h"),
                                        "ARM_THREAD_STATE"),
         "ARM_THREAD_STATE_COUNT": arm_thread_state_count(),
+        # 479: the program's syscall number and the pid it compares the answer with - each read out of
+        # the file that defines it, never written here. See `syscall_getpid` and `init_pid`.
+        "SYSCALL_GETPID": syscall_getpid(),
+        "INIT_PID": init_pid(),
     }
     notes.append("from the headers: MH_MAGIC=0x%(MH_MAGIC)x MH_EXECUTE=%(MH_EXECUTE)d "
                  "MH_PIE=0x%(MH_PIE)x MH_DYLDLINK=0x%(MH_DYLDLINK)x "
                  "LC_SEGMENT=0x%(LC_SEGMENT)x LC_UNIXTHREAD=0x%(LC_UNIXTHREAD)x "
                  "CPU_TYPE_ARM=%(CPU_TYPE_ARM)d CPU_SUBTYPE_ARM_V7K=%(CPU_SUBTYPE_ARM_V7K)d "
                  "VM_PROT=R|X=0x5 ARM_THREAD_STATE=%(ARM_THREAD_STATE)d "
-                 "ARM_THREAD_STATE_COUNT=%(ARM_THREAD_STATE_COUNT)d" % K)
+                 "ARM_THREAD_STATE_COUNT=%(ARM_THREAD_STATE_COUNT)d "
+                 "SYSCALL_GETPID=%(SYSCALL_GETPID)d (bsd/kern/syscalls.master) "
+                 "INIT_PID=%(INIT_PID)d (bsd/kern/bsd_init.c's `initproc = proc_find(N)`)" % K)
 
     blob, size = load(args.elf)
     if blob is None:
@@ -503,7 +662,19 @@ def main():
             ("thread flavor", STATE - 8, 2),
             ("thread count", STATE - 4, 4),
             ("entry pc", STATE + 15 * 4, PAGE),
+            # 479's program: the five words at the entry point, one at a time, and the register the
+            # syscall number lives in. A mutation that survived any of these would mean the device run
+            # could differ from the program `entry_ramdisk.s` describes without this check saying so.
             ("the instruction", 0xE0, 0xE1A00000),
+            ("the syscall immediate", 0xE0, 0xEF000081),
+            ("the compare's register", 0xE4, 0xE3510001),
+            ("the compare's pid", 0xE4, 0xE3500002),
+            ("the compare with a rotated immediate", 0xE4, 0xE3500101),
+            ("the failure branch's condition", 0xE8, 0x0A000000),
+            ("the failure branch's target", 0xE8, 0x1A000001),
+            ("the loop branch's target", 0xEC, 0xEAFFFFFA),
+            ("the failure marker", 0xF0, 0xE7F000F2),
+            ("r12: the syscall number", STATE + 12 * 4, K["SYSCALL_GETPID"] + 1),
         ]
         survived = []
         for name, off, value in mutations:

@@ -525,6 +525,34 @@ uint32_t g_block_first_odd_result;
 uint32_t g_block_first_odd_caller;
 uint32_t g_block_first_odd_seq;
 uint32_t g_block_ring_result[8];
+/*
+ * Experiment 479. The first syscall process 1 makes is `getpid`, and the wrapper on `sysent[20]`
+ * records what the kernel answered: `g_getpid_first_value` is `p->p_pid` as the kernel wrote it into
+ * the process's own return slot, `g_getpid_first_error` is the syscall's return value beside it, and
+ * `g_getpid_first_caller` is the `bl` site in the kernel's dispatcher the answer came back through.
+ *
+ * `g_getpid_calls` counts, and it is the only number here that grows without bound - which is why the
+ * count is written to the live channel on powers of two and not on every call: the loop in
+ * `entry_ramdisk.s` runs as fast as the CPU allows, and `entry_live_write`'s 4096-record cap is a
+ * bound that the boot's own report depends on (461: the report path's buffer was the tracer's and was
+ * full when the report was written). A power-of-two record is a *monotone* reading - the last one in
+ * the log is the count rounded down, and the count only ever doubles - so nothing is lost by not
+ * writing the odd numbers.
+ *
+ * `g_getpid_first_change` is the first answer that was not the first answer. It is deliberately not
+ * "the first answer that is not 1": the expected pid is the *fixture's* statement about the kernel
+ * (`EXPECTED_PID` in `entry_ramdisk.s`, where the `cmp` that acts on it lives) and writing it again
+ * here would be the second, uncompared definition this project keeps meeting. What the instrument
+ * can say without repeating it is that the answer *moved*.
+ */
+uint32_t g_getpid_calls;
+uint32_t g_getpid_first_value = 0xFFFFFFFFu;
+uint32_t g_getpid_first_error;
+uint32_t g_getpid_first_caller;
+uint32_t g_getpid_last_value = 0xFFFFFFFFu;
+uint32_t g_getpid_first_change_value;
+uint32_t g_getpid_first_change_seq;
+uint32_t g_getpid_first_change_error;
 
 /* `osfmk/kern/kern_types.h:76-81` by name and value: 0..3 keep their numbers, 10 and -1 get the two
  * slots after them, and everything else is the last one. A function and not a table so the values are
@@ -2586,6 +2614,18 @@ __attribute__((noinline)) static void entry_write_478_kv(void)
     }
 }
 
+__attribute__((noinline)) static void entry_write_479_kv(void)
+{
+    entry_write_kv("xnu_entry_getpid_calls", g_getpid_calls);
+    entry_write_kv("xnu_entry_getpid_value", g_getpid_first_value);
+    entry_write_kv("xnu_entry_getpid_error", g_getpid_first_error);
+    entry_write_kv("xnu_entry_getpid_caller", g_getpid_first_caller);
+    entry_write_kv("xnu_entry_getpid_last", g_getpid_last_value);
+    entry_write_kv("xnu_entry_getpid_change_seq", g_getpid_first_change_seq);
+    entry_write_kv("xnu_entry_getpid_change_value", g_getpid_first_change_value);
+    entry_write_kv("xnu_entry_getpid_change_error", g_getpid_first_change_error);
+}
+
 __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
 {
     uint32_t sctlr;
@@ -3209,6 +3249,12 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      * argument of. Last in this list because it is the newest, and live as well as here because the
      * run it is for may never reach this line. */
     entry_write_478_kv();
+    /* 479: what the kernel answered `getpid` with. Last for the same reason, and here for a reading
+     * the live channel cannot give: this epilogue runs at the end of `arm_init`, *before*
+     * `load_init_program` creates the process whose syscalls 479 measures - so a zero here is the
+     * statement that the kernel's own bring-up never asked, and every call the live channel records
+     * after this line belongs to the fixture. */
+    entry_write_479_kv();
 #endif
     /*
      * Experiment 272. Runs here, after the first line of the report is already in the console, so
@@ -3380,6 +3426,63 @@ void entry_note_block_return(uint32_t caller, uint32_t result, uint32_t seq)
         for (unsigned i = 0; i < ENTRY_BLOCK_RESULT_SLOTS; i++)
             entry_write_kv(entry_block_result_key(i), g_block_results[i]);
     }
+}
+
+/*
+ * Experiment 479. One call per `getpid` from the wrapper in `entry_trace.c`, which is where the
+ * kernel's answer is read: `value` is `*retval` - `p_pid` - and `error` is the syscall's own return,
+ * both *after* the real `getpid` and both passed through unchanged by the wrapper.
+ *
+ * **Why the live channel and not only `.bss`.** The epilogue runs at the end of `arm_init`, which is
+ * before `load_init_program` has created the process whose syscalls this instrument is for, so the
+ * report keys written there can only ever be the *boot's* own calls. Everything this step measures
+ * happens afterwards, when the fixture is running in user mode, and the only channel that survives
+ * that - a loop with nothing in it to reach an epilogue - is the live one.
+ *
+ * **Why the count is written on powers of two.** The first call is written in full, because it is the
+ * reading that ties the instrument to the fixture's first instruction, and after that only
+ * `g_getpid_calls & (g_getpid_calls - 1) == 0` is written. The loop in `entry_ramdisk.s` runs as fast
+ * as the CPU allows, and `entry_live_write`'s 4096-record cap is a *bound* the boot's own report
+ * depends on - 461's defect was the report path's buffer being the tracer's and full when the report
+ * was written. A doubling count loses nothing a reading needs: the last record in the log says the
+ * loop ran at least that many times, and each earlier one says half as much.
+ *
+ * **What a *change* means, and what it deliberately does not.** `g_getpid_first_change_*` is the first
+ * answer that was not the first answer, or the first call whose return value moved. It is not "the
+ * first answer that is not the expected pid": the expected pid is the fixture's own statement about
+ * the kernel - `EXPECTED_PID` in `entry_ramdisk.s`, where the `cmp` that acts on it lives - and
+ * writing the number again here would be a second definition with nothing comparing it. What this
+ * instrument can say without repeating it is that the answer stopped being constant, which is the
+ * reading that a run reaching the fixture's `udf #1` cannot give on its own.
+ */
+void entry_note_getpid(uint32_t caller, uint32_t error, uint32_t value)
+{
+    g_getpid_calls++;
+
+    if (g_getpid_calls == 1u) {
+        g_getpid_first_value = value;
+        g_getpid_first_error = error;
+        g_getpid_first_caller = caller;
+        entry_live_write("xnu_live_getpid_seq", 1u);
+        entry_live_write("xnu_live_getpid_value", value);
+        entry_live_write("xnu_live_getpid_error", error);
+        entry_live_write("xnu_live_getpid_caller", caller);
+    } else if ((g_getpid_calls & (g_getpid_calls - 1u)) == 0u) {
+        entry_live_write("xnu_live_getpid_count", g_getpid_calls);
+        entry_live_write("xnu_live_getpid_last", value);
+    }
+
+    if (g_getpid_first_change_seq == 0u &&
+        (value != g_getpid_first_value || error != g_getpid_first_error)) {
+        g_getpid_first_change_seq = g_getpid_calls;
+        g_getpid_first_change_value = value;
+        g_getpid_first_change_error = error;
+        entry_live_write("xnu_live_getpid_change_seq", g_getpid_calls);
+        entry_live_write("xnu_live_getpid_change_value", value);
+        entry_live_write("xnu_live_getpid_change_error", error);
+    }
+
+    g_getpid_last_value = value;
 }
 
 /* Experiment 456's probe, defined below its first caller; the declaration is here because
@@ -5513,6 +5616,23 @@ void fleh_undef(void)
 
     entry_epilogue("exception: undefined instruction");
 }
+/*
+ * **479: this handler is no longer installed, and it is kept for the same reason the two below it
+ * are.** `entry_vectors.s`'s slot 2 is Apple's `locore_fleh_swi`, because process 1's first
+ * instruction is now a `svc` (`entry_ramdisk.s`'s five words, Unix syscall 20) and a handler whose only
+ * behaviour is to stop the run would stop the boot at that instruction and measure nothing else about
+ * it. The one line this function has always been - record that an exception happened, and not even
+ * where - is exactly what a syscall must not hit: `fleh_swi` takes no register readings, so neither
+ * the syscall vector in `r12` nor the caller would be in the record. The syscall path's own report
+ * therefore comes from *inside* Apple's path instead: `--wrap=getpid` puts `entry_trace.c`'s wrapper in
+ * `sysent[20].sy_call`, where it sees the answer the kernel wrote into the process's own return slot -
+ * see `entry_note_getpid` for the readings and `tools/check_sysent_table.py` for the check that the
+ * wrapper really is in the slot.
+ *
+ * The build check asserts that this address is **not** in the vector table's slot 2, because the
+ * failure it guards is silent: a slot that quietly kept this handler looks exactly like a `svc` this
+ * image reported and left, and the run's stop would be a perfectly plausible one.
+ */
 void fleh_swi(void) { entry_epilogue("exception: svc/swi"); }
 
 /*

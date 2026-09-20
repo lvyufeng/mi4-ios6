@@ -112,28 +112,75 @@
  * User mode is that user thread's CPSR, so the report should print `spsr = 0x10`.
  *
  * ------------------------------------------------------------------------------------------------
- * The one instruction, and what it proves
+ * The program, and what it proves
  * ------------------------------------------------------------------------------------------------
  *
- * `udf #0` (0xe7f000f0). An undefined instruction taken in **User mode** reaches slot 1 of this
- * image's vector page - `fleh_undef` in `entry_stubs.c`, still this image's handler - which reports
- * `xnu_entry_undef_pc = lr_und - 4`, `xnu_entry_undef_lr` and `xnu_entry_undef_spsr` through
- * `entry_panic_kv`, the buffer experiment 461 gave that handler precisely because the shared one was
- * full by then. 467 measured that route working: its `udf` in `DebuggerTrapWithState` came back as
- * `undef_pc = 0x800355ac` with `_dropped = 0`.
+ * Five instructions, and they are the first thing `/sbin/launchd` runs:
  *
- * So the instruction is the measurement, and it is a *two-sided* one: the address the report names
- * and the address this file enters at are the same number, computed here by the assembler from where
- * the word actually is. If the user's `__TEXT` mapping is not the physical page this object
- * occupies, or the fetch executes zeros, the report says so differently - a page of zeros from the
- * entry point to the segment's end would run off the end of `__TEXT` and raise a *prefetch abort* at
- * 0x2000 (`fleh_prefabt`), whose `ifar` and `spsr` are in the same report.
+ *     entry_code:  svc  #0x80        ; getpid() - a *Unix* syscall, r12 = +20
+ *                  cmp  r0, #1       ; the pid the kernel assigned this process?
+ *                  bne  entry_failed
+ *                  b    entry_code   ; ask again
+ *     entry_failed: udf #1          ; the kernel answered something else
  *
- * What the instruction deliberately does not do is call the kernel: `svc` is slot 2, which is
- * `entry_stubs.c`'s own handler, and `fleh_swi` records that an exception happened and *not* where
- * (it takes no register readings), while XNU's `sleh_swi` - the real syscall path - is not reachable
- * from this vector page at all. Experiment 468's object is to prove the exec reached user mode and
- * to name the address it reached it at; the syscall path is the step after.
+ * Until 479 this word was `udf #0`, and the address it named was the whole measurement: an undefined
+ * instruction taken in **User mode** reaches slot 1 of this image's vector page, whose report gives
+ * `undef_pc = lr_und - 4`, `_lr` and `_spsr` (474, 475, 477). That worked - 475 measured
+ * `xnu_live_undef_pc = 0x000010e0` with `_spsr = 0x10` and `_user = 1` - and it ended the boot:
+ * 478's run shows the kernel triaging the bad instruction, killing pid 1 with SIGILL
+ * (`pid 1 exited -- exit reason namespace 2 subcode 0x4`) and panicking in `launchd_crashed_panic`,
+ * which `proc_prepareexit` makes unconditional for `initproc`. **So the marker had to go, and what
+ * replaced it had to be something the kernel can *service*.**
+ *
+ * **`getpid` is that something, and it is chosen because it answers the process instead of parking
+ * it.** The first draft of this step took the 478 doc's own suggestion - `thread_switch`
+ * (`mach_trap_table[61]`, `osfmk/kern/syscall_sw.c:166`), "the one user-visible primitive whose
+ * effect is to give the CPU up" - and reading `thread_switch` in
+ * `osfmk/kern/syscall_subr.c:238-380` is what rules it out: every option it accepts ends in a
+ * *block*, and in this image a block is a hang.
+ *
+ *   - `SWITCH_OPTION_WAIT` (2) calls `assert_wait_timeout(..., option_time = 0, ...)` first, and
+ *     `clock_interval_to_deadline(0, ...)` makes the deadline *now* -
+ *     `assert_wait_timeout` arms `thread->wait_timer` and marks the thread `TH_WAIT`. The only thing
+ *     that fires a waitq timer is the timer interrupt, and this image has no timer (it is still
+ *     owed), so the timer never fires and nothing else ever wakes an event that has no sender.
+ *   - `SWITCH_OPTION_NONE` (0) is worse, not better: it reaches
+ *     `thread_block_reason(thread_switch_continue, NULL, AST_YIELD)` with **no wait asserted at
+ *     all**. `thread_select` then finds the thread *"eligible to keep running"* only while
+ *     `(state & (TH_TERMINATE|TH_IDLE|TH_WAIT|TH_RUN|TH_SUSP)) == TH_RUN`; with no other runnable
+ *     thread of equal priority it returns the idle thread and the blocked thread is on no run queue,
+ *     so no later `thread_setrun` can ever name it. A block is defined by what wakes it, and this
+ *     fixture has nobody to be woken by.
+ *
+ * What is left is a syscall that **returns a value**, and `getpid` is the smallest one: it reads
+ * `p->p_pid` and hands it back, touching no lock that can wait, no port, no timer and no scheduler.
+ *
+ * **The answer is the reading, because the kernel is what chose it.** `bsd_utaskbootstrap` clones
+ * the init process out of `kernproc` and then holds it by name - `initproc = proc_find(1)`
+ * (`bsd/kern/bsd_init.c:1147`) - and `load_init_program(p)` (`:1079`) is what execs this Mach-O into
+ * it; 478's run measured the same identity from the other side, `pid 1 exited -- exit reason
+ * namespace 2 subcode 0x4`. So `getpid` returning 1 says all of: the trap reached the kernel's own
+ * *Unix* dispatcher, `sysent[20]` is `getpid`, the call ran on *this* proc, and the ABI wrote the
+ * value into the register the *caller* reads. A wrong answer cannot pass silently either: `cmp r0,
+ * #1` sends the fixture to `udf #1`, and 478 proved that instruction reaches slot 1's report and then
+ * `launchd_crashed_panic` with the trap record's format string in `r9`.
+ *
+ * `r12 = +20` is a **Unix** syscall, and that is the other half of the ABI this step measures.
+ * `fleh_swi` computes `r5 = -r12` and calls `fleh_swi_unix` when that is `<= 0`, so a positive number
+ * in r12 is BSD and a negative one is a mach trap: 478's run measured the mach side of that branch
+ * (`thread_block`'s fifteen returns) and this one measures the BSD side. `SYS_getpid` = 20 is
+ * `bsd/kern/syscalls.master`'s line `20 AUE_GETPID ALL { int getpid(void); }`, which
+ * `tools/host_ramdisk_macho_check.py` reads back out of that file, and the entry the kernel will look
+ * up is read back out of the **linked image** by `tools/check_sysent_table.py` - the same 20, the same
+ * `getpid`, plus the neighbouring entries that make the stride a checked fact rather than a
+ * convention. `getpid` takes no arguments (`sy_narg == 0`, so `arm_get_syscall_args` is not even
+ * called), which is why every argument register below is zero.
+ *
+ * What the program deliberately does not do is end in a fault. `r0 != 1` is the only path to `udf`,
+ * and it is the path that means the syscall path is broken - so the run that reaches it is a *reading*
+ * rather than a repeat of 478's stop. Everything else in this file is unchanged: the header, the three
+ * load commands, `sizeofcmds` 0xC4, and the `.if` assertions below, one of which now also requires the
+ * whole program to be inside `__TEXT`'s file range.
  */
 
     .syntax unified
@@ -153,6 +200,18 @@
     .equ VM_PROT_EXECUTE,        0x4
     .equ ARM_THREAD_STATE,       1
     .equ ARM_THREAD_STATE_COUNT, 17
+
+/* The syscall the program makes, from the headers rather than from a disassembly: `SYS_getpid` is
+ * the number in `bsd/kern/syscalls.master`'s own line for `getpid`, and the *sign* is the ABI and not
+ * a convention - `fleh_swi` computes `r5 = -r12` and branches to the unix path when that is `<= 0`,
+ * so a positive number in r12 is a BSD syscall and a negative one is a mach trap. `EXPECTED_PID` is
+ * the identity this image's own boot gave the process: `bsd_utaskbootstrap` holds the init process by
+ * name (`initproc = proc_find(1)`, `bsd/kern/bsd_init.c:1147`) and 478's console printed `pid 1
+ * exited`. `tools/host_ramdisk_macho_check.py` reads both numbers back - the syscall from the master,
+ * the pid from the sentence above it - and decodes the five words below to check they are the program
+ * this comment describes. */
+    .equ SYS_GETPID,             20
+    .equ EXPECTED_PID,           1
 
 /* The shape of the three load commands, and the two numbers derived from them. Neither
  * `sizeofcmds` nor the entry point is written down: the first is an expression over the label the
@@ -224,9 +283,18 @@ g_stage90_ramdisk:
     .long THREAD_CMD_SIZE               /* +144 cmdsize */
     .long ARM_THREAD_STATE              /* +148 flavor: the only one thread_entrypoint takes */
     .long ARM_THREAD_STATE_COUNT        /* +152 count: 17, the least thread_userstack takes */
-    .rept 13                            /* +156 r[0..12]: all zero, nothing reads them */
+    .long 0                             /* +156 r[0]: getpid's first argument register. `sy_narg`
+                                         *      is 0 for this syscall, so `arm_get_syscall_args` is
+                                         *      never called and no register is read as an argument -
+                                         *      they are zero because a zero is unreadable and a
+                                         *      stale value would be a second, silent definition */
+    .long 0                             /* +160 r[1] */
+    .long 0                             /* +164 r[2] */
+    .rept 9                             /* +168 r[3..11] */
     .long 0
     .endr
+    .long SYS_GETPID                    /* +204 r[12]: the syscall number, read by `fleh_swi` and
+                                         *      then by `arm_get_syscall_number` */
     .long 0                             /* +208 sp: zero, so the kernel picks USRSTACK and
                                          *      allocates the stack itself */
     .long 0                             /* +212 lr: zero; the thread never returns */
@@ -246,25 +314,36 @@ load_commands_end:
 /* Everything above is the load commands, and this is where the code they describe begins. The
  * header's `pc` is this label's file offset plus `__TEXT`'s `vmaddr`, so the address in the header
  * and the address in the image are one expression and cannot disagree. */
-entry_udf:
-    .word 0xe7f000f0                    /* udf #0 - see the header */
+entry_code:
+    svc     #0x80                       /* +0: getpid() - the syscall number is r12 */
+    cmp     r0, #EXPECTED_PID           /* +4: the pid the kernel reports for this process? */
+    bne     entry_failed                /* +8 */
+    b       entry_code                  /* +12: ask again */
+entry_failed:
+    udf     #1                          /* +16: the kernel answered something else */
+entry_code_end:
 
     .equ sizeofcmds_value, (load_commands_end - g_stage90_ramdisk) - 28
-    .equ entry_pc_value,   TEXT_VMADDR + (entry_udf - g_stage90_ramdisk)
+    .equ entry_pc_value,   TEXT_VMADDR + (entry_code - g_stage90_ramdisk)
 
-/* The two assertions that make the rest of this file checkable rather than merely commented.
+/* The assertions that make the rest of this file checkable rather than merely commented.
  * `sizeofcmds` is the number `parse_machfile` reads the commands with, and a value that disagreed
- * with the bytes would be a load command the kernel never sees; the instruction has to be inside
+ * with the bytes would be a load command the kernel never sees; the program has to be inside
  * `__TEXT`'s **file** range, because `pc` outside the segment it is loaded from is `validentry` = 0
  * and `LOAD_FAILURE` at `parse_machfile`'s pass 3. */
     .if sizeofcmds_value != 0xC4
     .error "sizeofcmds is not 0xC4 - the load commands are not the three this file describes"
     .endif
-    .if ((entry_udf - g_stage90_ramdisk) >= TEXT_FILESIZE)
-    .error "the instruction is outside __TEXT's filesize, so validentry would be 0"
+    .if ((entry_code_end - g_stage90_ramdisk) >= TEXT_FILESIZE)
+    .error "the program is outside __TEXT's filesize, so validentry would be 0"
     .endif
     .if ((entry_pc_value < TEXT_VMADDR) || (entry_pc_value >= (TEXT_VMADDR + TEXT_VMSIZE)))
     .error "the entry point is outside the segment it is loaded from"
+    .endif
+/* And the addresses the program's two branches name are inside the same file range, because a
+ * `b` that left it would raise a fault instead of an answer. */
+    .if (entry_code_end - entry_code) != 20
+    .error "the program is not the five instructions the header describes"
     .endif
 
 /* The rest of the segment is zeros, and they are *file* bytes rather than a `.bss` tail: the whole

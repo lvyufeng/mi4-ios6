@@ -132,7 +132,8 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=mdevadd --wrap=mdevlookup
                    --wrap=_ZN9IOService22waitForMatchingServiceEP12OSDictionaryy
                    --wrap=os_reason_create --wrap=load_machfile
-                   --wrap=sleh_abort --wrap=sleh_undef)
+                   --wrap=sleh_abort --wrap=sleh_undef
+                   --wrap=getpid)
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
 # every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that
@@ -27225,7 +27226,15 @@ verify_trace_symbols() {
     # rewrites an address reference exactly as it rewrites a call, so `cons_ops[1].putc` ends up
     # holding `__wrap_vcputc` - and that is a fact about the linked image, so it is read out of the
     # image below instead of being asserted here.
-    local by_address=( vcputc )
+    #
+    # 479 adds `getpid` to the same category for a different table: this image's only reference to it
+    # is `bsd/kern/init_sysent.c`'s initialiser for `sysent[20].sy_call`, so no branch to
+    # `__wrap_getpid` exists anywhere and the census cannot see the wrapper at all. As with `vcputc`,
+    # the fact is read out of the image rather than taken on trust - `tools/check_sysent_table.py`
+    # requires the word in that slot to be `__wrap_getpid` and *not* `getpid`, which is the half a run
+    # could not show: a slot holding the real function writes no records, and no records looks exactly
+    # like an instrument that is not there.
+    local by_address=( vcputc getpid )
     in_list() {
         local needle=$1 s
         shift
@@ -27295,7 +27304,7 @@ verify_trace_symbols() {
         # hold. The seventh and eighth are `fleh_irq`/`fleh_decirq`; `fleh_decirq` is this image's
         # because `__ARM_TIME__` is off and locore's slot for it is `mov pc, r9`.
         local -a x467_want=(
-            "0 fleh_reset" "1 fleh_undef" "2 fleh_swi" "3 locore_fleh_prefabt"
+            "0 fleh_reset" "1 fleh_undef" "2 locore_fleh_swi" "3 locore_fleh_prefabt"
             "4 locore_fleh_dataabt" "5 fleh_addrexc" "6 fleh_irq" "7 fleh_decirq" )
         vbase=$(x467_addr_of ExceptionVectorsBase)
         [[ -n $vbase ]] || layout_fail "the image has no ExceptionVectorsBase, so the vector page cannot be checked"
@@ -27321,11 +27330,15 @@ verify_trace_symbols() {
         if (( bad == 1 )); then
             layout_fail "a vector slot's handler literal is not the handler it is written to be - the vector page is not what entry_vectors.s says it is, and no run can show that"
         fi
-        # The two uninstalled handlers, each asserted *absent* from the slot it used to own. The
+        # The uninstalled handlers, each asserted *absent* from the slot it used to own. The
         # addresses are read for the message, and a missing symbol is a failure rather than a skip:
         # if `fleh_prefabt` ever disappears from the image the claim below is about nothing.
+        # **479 adds slot 2's**, and it is the pair whose failure mode is the quietest of the three:
+        # a slot that kept this image's `fleh_swi` records-and-stops, so the boot's first syscall
+        # would look exactly like a syscall this image reported and the fixture's `svc` would never
+        # reach the kernel's dispatcher at all.
         local gone=""
-        for pair in "4 fleh_dataabt" "3 fleh_prefabt"; do
+        for pair in "4 fleh_dataabt" "3 fleh_prefabt" "2 fleh_swi"; do
             read -r n sym <<<"$pair"
             got=$(x467_addr_of "$sym")
             [[ -n $got ]] || layout_fail "the image has no $sym, so the not-installed claim for slot $n cannot be checked"
@@ -27361,7 +27374,7 @@ verify_trace_symbols() {
             fi
             say "  xnu_entry_477: slot 1 splits on the interrupted mode in the vector page - user -> locore_fleh_undef (0x$kapple), kernel -> fleh_undef (0x$kuser) - so a user udf is entered with the interrupted registers intact and the saved PC is the udf, not this image's return address"
         }
-        say "  xnu_entry_467: the vector page carries the handlers it says it does:$vpair; slots 3 and 4 are Apple's own locore_fleh_prefabt and locore_fleh_dataabt and not this image's $gone- so a fault the kernel can service is serviced and retried, and slot 1 (fleh_undef) is still this image's for the kernel case, so a fault it cannot service still reaches the trap's own buffer through panic()'s udf"
+        say "  xnu_entry_467: the vector page carries the handlers it says it does:$vpair; slots 2, 3 and 4 are Apple's own locore_fleh_swi, locore_fleh_prefabt and locore_fleh_dataabt and not this image's $gone- so a fault the kernel can service is serviced and retried and a syscall reaches the kernel's own dispatcher, and slots 0, 1, 5, 6 and 7 are still this image's, so a fault it cannot service still reaches the trap's own buffer through panic()'s udf"
     }
     # **The by-address claim, read out of the image.** The table is
     # `struct console_ops { void (*putc)(int,int,int); int (*getc)(int,int,boolean_t,boolean_t); }`
@@ -27420,6 +27433,19 @@ verify_trace_symbols() {
     # the check has no second definition of the layout to drift from. Its `--selftest` swaps and zeroes
     # words in a copy of the table and requires every mutation to be refused.
     run python3 "$REPO_ROOT/tools/check_pthread_table_slots.py" --elf "$OUT/xnu_arm_entry.elf" || exit 1
+
+    # **479: the syscall the fixture makes, and the slot the wrapper has to be in.** The fixture's
+    # `svc #0x80` carries 20 in r12 and `getpid` at `sysent[20]` is what `unix_syscall` looks up; the
+    # wrapper that records the kernel's answer reaches the device through `ld --wrap`'s rewrite of
+    # `init_sysent.c`'s initialiser, which is a *data* reference and therefore invisible to the census
+    # above (it counts `getpid` as by-address) and to every run (a slot holding the real function
+    # produces no records, which is indistinguishable from an instrument that was never reached). The
+    # tool reads the table out of the image and compares eight of its entries with
+    # `bsd/kern/syscalls.master`'s own numbering, so the stride is a reading rather than a constant
+    # this build restates; its `--selftest` requires every mutation - the real function in the slot,
+    # the wrapper one entry late, two entries swapped, the table shifted a word, `nsysent` truncated -
+    # to be refused.
+    run python3 "$REPO_ROOT/tools/check_sysent_table.py" --elf "$OUT/xnu_arm_entry.elf" || exit 1
 
     # **The panic route, read out of the image.** `PE_init_kprintf` stores a `movw`/`movt` pair - a
     # same-object address reference - into `PE_kputc`, and the census above cannot see that: it only

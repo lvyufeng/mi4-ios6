@@ -123,7 +123,54 @@ vec_tramp_1_user_handler:
     .word   locore_fleh_undef
     .size vec_tramp_1, . - vec_tramp_1
 
-    VECTOR_TRAMP vec_tramp_2, fleh_swi
+/*
+ * **479: the SWI slot is XNU's own handler, and the reason is that process 1 now asks the kernel for
+ * something.** 478's run stopped because the RAM disk Mach-O's first instruction was `udf #0`: the
+ * kernel triaged the bad instruction, killed pid 1 with SIGILL and panicked in
+ * `launchd_crashed_panic`, which `proc_prepareexit` makes unconditional for `initproc`
+ * (`bsd/kern/kern_exit.c:846`) - so no init exit is survivable and the fixture's first instruction has
+ * to be one the kernel can *answer*.
+ *
+ * That instruction is a `svc` (`entry_ramdisk.s`'s five words, `getpid`), and this is the slot it
+ * arrives through. Until now the slot was this image's `fleh_swi` - record and stop, the shape every
+ * one of these handlers had before 467 - which would have stopped the boot at process 1's *first*
+ * syscall and measured nothing else about it. So the slot goes to Apple's `locore_fleh_swi` (the
+ * renamed copy of `osfmk/arm/locore.s:483`, `locore_` for the same reason 466 renamed the two abort
+ * handlers: the twelve names it collides with are this image's own vector glue), exactly as 467 moved
+ * slots 3 and 4 and 477 moved slot 1.
+ *
+ * **What that handler does with r12 decides which half of the syscall ABI a run measures.** It
+ * computes `r5 = -r12` and branches to `fleh_swi_unix` when that is `<= 0`, so a *positive* r12 is a
+ * BSD syscall - `bl unix_syscall`, which takes the state, the thread, the uthread and the process, and
+ * never returns (it ends in `thread_exception_return`) - and a negative one is a mach trap looked up in
+ * `mach_trap_table`. The fixture's r12 is `+20` (`SYS_getpid`), so this step measures the BSD side,
+ * whose entry is the one `--wrap=getpid` is installed on: the wrapper sits in `sysent[20].sy_call`
+ * and records the number the kernel wrote back into the process's own return slot. `getpid` is the
+ * smallest syscall that *returns* instead of blocking - the alternative this step rejected,
+ * `thread_switch` (mach trap 61), ends in `thread_block_reason` on every option and has no timer and
+ * no sender to wake it in this image.
+ *
+ * **The call is not a leap, and the names it needs are the evidence.** All five of the names
+ * `fleh_swi` calls - `mach_kauth_cred_uthread_update`, `mach_trap_table`, `kern_invalid`,
+ * `throttle_lowpri_io`, `thread_exception_return` - are real definitions in this image, and so are the
+ * ones the unix arm adds: `unix_syscall` is `0x8027d148`, `sysent` `0x804ef44c`, `nsysent` a data word
+ * at `0x80527078`, and `getpid` `0x80292154`. `tools/check_sysent_table.py` reads the table itself:
+ * entry 20 must be `getpid`, the entries around it must be the master's own numbering, and the
+ * wrapper must be in the slot.
+ *
+ * **What is given up is the report this image's handler wrote.** `fleh_swi` published the syscall
+ * number, the caller and the mode; the replacement publishes the *answer* instead (the wrapper on
+ * `sysent[20]`), which is the value the fixture's `cmp r0, #1` tests. `fleh_swi` is kept in
+ * `entry_stubs.c` beside `fleh_dataabt` and `fleh_prefabt`, and the build check asserts that none of
+ * the three is in this table: a slot that quietly kept the old handler looks exactly like a kernel
+ * that refused the syscall.
+ *
+ * The stack load the macro does is kept for 467's reason. On the user path Apple's handler reads
+ * `TPIDRPRW` into `sp` itself and never dereferences this one; on the kernel path - `swi_from_kernel`,
+ * which panics - it uses the banked ABT stack as a scratch register, so this SP is not read there
+ * either. Keeping all eight slots the same shape is what 476's own last paragraph asked for.
+ */
+    VECTOR_TRAMP vec_tramp_2, locore_fleh_swi
 /*
  * **476: the prefetch slot joins the data slot, and the reason is 475's run.** The other six branch to
  * `entry_stubs.c`'s handlers, whose design is to record and leave - which is what a fault deserves
