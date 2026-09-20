@@ -1,0 +1,22 @@
+#
+# The kernel the entry image boots: Apple's RELEASE kernel plus the one filesystem that can be root
+# on a device with no storage driver.
+#
+# Experiment 459 needs two things of this configuration and nothing else, and both are *words* in
+# a configuration file rather than code:
+#
+#   mockfs    - `bsd/miscfs/mockfs/` is the only filesystem in the tree whose `vfc_mountroot` is
+#               non-NULL (`bsd/vfs/vfs_conf.c`'s `vfstbllist`; devfs and routefs have neither a
+#               mountroot nor VFC_VFSCANMOUNTROOT, and NFSCLIENT is off in this configuration).
+#               `vfs_mountroot` therefore skips every other entry and mounts mockfs over whatever
+#               `rootdev` names - which is how a kernel with no HFS, no BlockStorage and no eMMC
+#               driver gets a root filesystem at all. Apple's own comment for the option in
+#               `config/MASTER:123` says what it is for: "Boot from an executable".
+#
+# This is `RELEASE` by *composition*, not by copy: a configuration's attributes may themselves be
+# configuration names (tools/xnu_config/expand.sh), so `[ RELEASE mockfs ]` reuses MASTER.arm's own
+# RELEASE attribute list rather than restating it, and one option is added to it. A second copy of
+# that list here would be the "one value, two definitions" defect this project has recorded
+# twenty times.
+#
+#  STAGE90_XNU = [ RELEASE mockfs ]

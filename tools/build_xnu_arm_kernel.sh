@@ -346,6 +346,38 @@ DEFINES=(
     # one experiment-118 was about: it was a workaround for MACH_KERNEL_PRIVATE being global. With
     # the per-component defines, kern_types.h's definition is only reachable from osfmk and iokit
     # files, bsd files get _clock_t.h's, and the two no longer meet. Removing it is 560 -> 564.
+    #
+    # ---------------------------------------------------------------------------------------------
+    # 459: the configuration's `no_printf_str`, cancelled - and `-U` rather than `-D...=0`.
+    #
+    # `STAGE90_XNU` inherits RELEASE, and RELEASE's `BSD_RELEASE` attribute carries `no_printf_str`
+    # (`config/MASTER.arm:24`), which `options CONFIG_NO_PRINTF_STRINGS` (`config/MASTER:302`) turns
+    # into -DCONFIG_NO_PRINTF_STRINGS=1. `bsd/libkern/libkern.h:171-178` and
+    # `osfmk/kern/misc_protos.h:150-157` then make `printf` a *macro* -
+    # `printf(x, ...) -> _consume_printf_args(0, ## __VA_ARGS__)` - so the format string is not only
+    # unprinted, it is not in the object. 458 measured both halves of that: `bsd_init`'s
+    # `printf(copyright)` is `mov r0,#0; bl _consume_printf_args` in the image, and
+    # `arm-none-eabi-strings out/xnu_kernel_obj/bsd_kern_bsd_init.o` does not contain
+    # `"cannot mount root, errno = %d\n"` at all.
+    #
+    # The flag has to be *cancelled*, not set to 0: two of the three readers are `#if CONFIG_...`,
+    # which reads 0 either way, but the macro's other spelling is `#ifdef` - and "an off option has
+    # two spellings" is a defect this project has recorded (mi4-off-option-two-spellings,
+    # experiment-164). `-U` after the configuration's own `-D` leaves the macro undefined for every
+    # reader, which is the same reading Apple's macOS builds get. Measured both ways on the two
+    # compilers in this build before it was written here: with `-DCONFIG_NO_PRINTF_STRINGS=1` ahead
+    # of it, `arm-none-eabi-gcc` and `clang` both leave the macro undefined, and the control (no
+    # `-U`) fails on `#error DEFINED_TRUTHY`.
+    #
+    # What it buys: the class of message `bsd_init.c` and `load_init_program` print about the root
+    # device can reach the console. What it costs: the strings themselves, which Apple's own comment
+    # prices at "around 45K of kernel footprint" (`config/MASTER:300`). `no_kprintf_str` stays ON:
+    # `kprintf`'s call sites are macro'd away in the same way (`pexpert/pexpert/pexpert.h:204`), it is
+    # *also* gated at run time by `disable_serial_output` (`pexpert/arm/pe_kprintf.c:66`, TRUE unless
+    # `debug & DB_KPRT`), and nothing on this step's path prints through it - including `panic()`,
+    # which routes to the debugger's own printer. That is why a panic in this configuration is
+    # silent, and it is written down here rather than discovered.
+    -UCONFIG_NO_PRINTF_STRINGS
 )
 
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
@@ -1261,6 +1293,21 @@ if [[ -n $dupes ]]; then
     printf '%s\n' "$dupes" | sed 's/^/  /' >&2
     exit 3
 fi
+
+# Which configuration this pool *is*. It is read back by the entry link, and it exists because the
+# entry image's objects are a **glob** over this directory (`build_entry.sh`'s 436 block):
+# whichever build ran last decides what the whole kernel in the image is made of, and until 459
+# nothing recorded that. A pool built for one configuration and an image linked expecting another is
+# the "one value, two definitions" defect with a build in the middle of it, and it shows up as
+# nothing at all - the image links, the checks pass, and the kernel is a different kernel.
+{
+    printf 'config %s\n' "$CONFIG"
+    printf 'master_local %s\n' "${XNU_MASTER_LOCAL:-}"
+    printf 'objects %s\n' "$(ls "$OUT"/*.o 2>/dev/null | wc -l)"
+    printf 'defines %s\n' "$(printf '%s\n' "${DEFINES[@]}" | grep -c .)"
+    printf 'pool_printf_shim %s\n' "$(grep -l 'U _consume_printf_args' "$OUT"/*.o 2>/dev/null | wc -l)"
+    printf 'pool_mockfs_objects %s\n' "$(ls "$OUT"/bsd_miscfs_mockfs_*.o 2>/dev/null | wc -l)"
+} > "$OUT/config.stamp"
 
 echo
 echo "== $CONFIG manifest for arm, compiled =="

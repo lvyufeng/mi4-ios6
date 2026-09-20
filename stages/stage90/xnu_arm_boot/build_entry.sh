@@ -26506,6 +26506,17 @@ bss_end=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="__bss_end"{print
 # about, so the report quotes the section.
 text_end=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="__entry_text_size"{print "0x"$1}')
 
+# 459: the RAM disk's own address and size, read out of the image that owns it. They are the two
+# words `/chosen/memory-map`'s `RAMDisk` property carries (`stage90_main.c`), and the only place they
+# can come from is here: `mdevadd` is handed a *virtual* address in this image's page tables
+# (`ml_static_ptovirt` is the identity in this build), so the value is a symbol in this link and not
+# a constant anyone can write down. The payload compiles these in from the generated header, which is
+# why the property and the array cannot disagree.
+ramdisk_va=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3=="g_stage90_ramdisk"{print "0x"$1}')
+ramdisk_size=$(arm-none-eabi-nm -S "$OUT/xnu_arm_entry.elf" | awk '$4=="g_stage90_ramdisk"{print "0x"$2}')
+[[ -n $ramdisk_va && -n $ramdisk_size ]] ||
+    layout_fail "the linked image has no g_stage90_ramdisk - the root device's memory (entry_stubs.c) is not in this link"
+
 run arm-none-eabi-objcopy -O binary "$OUT/xnu_arm_entry.elf" "$OUT/xnu_arm_entry.bin"
 
 bin_size=$(stat -c%s "$OUT/xnu_arm_entry.bin")
@@ -27002,26 +27013,218 @@ verify_console_state() {
 verify_console_state
 verify_trace_symbols
 
-cat > "$OUT/xnu_arm_entry.h" <<EOF
+# ---------------------------------------------------------------------------------------------------
+# 459: the root device, checked out of the image before it is ever booted.
+#
+# The step makes four things true at once - a device, a filesystem, the strings that report it, and
+# the pool they are all compiled from - and each of them fails *silently* if it is wrong: `mdevadd`
+# is reached only through a device-tree property, `vfs_mountroot` picks the filesystem with no
+# message when there are none, the messages themselves are absent from an object compiled with
+# `no_printf_str`, and the whole kernel is a glob over a pool whose configuration nothing recorded.
+# So each is read back here, from the image and from the pool, and the build stops if one is missing.
+#
+# `layout_fail` for all of it, deliberately: none of these is a warning. A missing `mockfs_mountroot`
+# makes the boot fall into `bsd_init`'s `while (TRUE)` mount loop, which leaks the 640-byte root
+# buffer and a vnode per iteration and prints `cannot mount root, errno = 19` until the watchdog
+# returns the device - a run that measures the *absence* of the step rather than the step.
+verify_root_device() {
+    local sym type s w
+    local stamp pool_config pool_shim pool_mockfs
+
+    # --- the pool this image's whole kernel comes from -------------------------------------------------
+    #
+    # `build_entry.sh`'s 436 block adds every `out/xnu_kernel_obj/*.o` to the link. Whichever build
+    # ran last decides what the kernel *is*, and until 459 nothing recorded which build that was.
+    stamp=$REPO_ROOT/out/xnu_kernel_obj/config.stamp
+    [[ -f $stamp ]] ||
+        layout_fail "no $stamp, so this image's kernel came from a pool build that recorded nothing - the pool has to be rebuilt (see the 459 section of tools/build_xnu_arm_kernel.sh)"
+    pool_config=$(awk '$1 == "config" { print $2 }' "$stamp")
+    pool_shim=$(awk '$1 == "pool_printf_shim" { print $2 }' "$stamp")
+    pool_mockfs=$(awk '$1 == "pool_mockfs_objects" { print $2 }' "$stamp")
+    [[ $pool_config == STAGE90_XNU ]] ||
+        layout_fail "the object pool is the '$pool_config' kernel; this image links all of it and this step needs STAGE90_XNU (RELEASE + mockfs) - the configuration is worth two words and nothing else"
+    [[ ${pool_shim:-1} == 0 ]] ||
+        layout_fail "$pool_shim object(s) in the pool still reference _consume_printf_args, so the pool was compiled with no_printf_str and the messages this step reads are not in it - the guard in tools/build_xnu_arm_kernel.sh's DEFINES is what removes them"
+    [[ ${pool_mockfs:-0} == 3 ]] ||
+        layout_fail "the pool has ${pool_mockfs:-0} of the 3 bsd_miscfs_mockfs_*.o objects - a pool built without the mockfs option"
+    say "  xnu_entry_459: the pool is the STAGE90_XNU kernel ($(awk '$1 == "objects" { print $2 }' "$stamp") objects), no object in it calls _consume_printf_args, and mockfs is in it"
+
+    # --- the names the root-device path is made of -----------------------------------------------------
+    #
+    # Defined *in this image* and not resolved to a generated stand-in. The stand-in would be a
+    # function that returns, so a missing one reads as a boot that proceeds one step and stops
+    # somewhere else entirely - 455's doubled-underscore defect and the reason both halves are read.
+    for sym in mdevadd mdevlookup bdevsw_add devfs_make_node mockfs_vfsops mockfs_mountroot \
+               vfs_mountroot vfstbllist load_init_program execve g_stage90_ramdisk; do
+        type=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
+               awk -v s="$sym" '$3 == s { print $2; found = 1 } END { exit(found ? 0 : 1) }') ||
+            layout_fail "the root-device path needs $sym and the linked image does not define it - it would resolve to a generated stand-in"
+        grep -qx "$sym" "$OUT/xnu_arm_entry_undef.txt" &&
+            layout_fail "$sym is in the undefined list and defined in the image at the same time - the doubled-name shape 455 found, where the image reads a stand-in instead of the real thing"
+    done
+    say "  xnu_entry_459: the root-device path's eleven names are defined in this image, none of them stubbed"
+
+    # --- the text this step exists to make readable ------------------------------------------------------
+    #
+    # These four strings are in the image *only* if the pool was compiled without
+    # `CONFIG_NO_PRINTF_STRINGS`: with it, `printf` is a macro that drops its first argument, so the
+    # literal is not merely unprinted, it is absent (measured in 458: `_consume_printf_args` in the
+    # image, `"cannot mount root"` not in the object). Each is a line this run's reading depends on,
+    # and the first is the *only* proof `mdevadd` ran at all.
+    #
+    # `strings` is read to the end into a variable and selected after the fact, and that is not
+    # style: `strings ... | grep -q` exits **141** under this file's `pipefail`, because `grep -q`
+    # stops reading at the first match and `strings` is then killed by SIGPIPE. The first draft of
+    # this check did exactly that and refused a build whose image had all four strings in it - the
+    # defect experiment 455 recorded ("a check that dies silently on success"), in the direction
+    # that looks like a real finding.
+    local elf_text
+    elf_text=$(arm-none-eabi-strings "$OUT/xnu_arm_entry.elf")
+    for s in "Added memory device md" "load_init_program: attempting to load" \
+             "cannot mount root, errno = " "vfs_mountroot: can't setup bdevvp"; do
+        [[ $elf_text == *"$s"* ]] ||
+            layout_fail "the image has no \"$s\" - the printf class is still compiled out, so this step could not report what it did"
+    done
+    say "  xnu_entry_459: the four printf strings this step reads are in the image (the md device's own line, load_init_program's two, and vfs_mountroot's bdevvp failure)"
+
+    # --- the filesystem table, read out of the image ------------------------------------------------------
+    #
+    # `vfs_mountroot` (bsd/vfs/vfs_subr.c:1070-1079) walks `vfsconf` and calls the *first* entry with a
+    # non-NULL `vfc_mountroot` (or VFC_VFSCANMOUNTROOT). `vfsconf` is `vfstbllist`
+    # (bsd/vfs/vfs_conf.c:165), whose entries are initialised `{ &vfsops, "name", ... }` - so the
+    # first word of an entry is the address of its `vfsops` and its name starts four bytes in, both
+    # of which are readable from the linked image without knowing the struct's size.
+    #
+    # mockfs is the only filesystem in this configuration with a `vfc_mountroot` (devfs and routefs
+    # are NULL, and NFSCLIENT is off), and that is the whole reason this step can have a root
+    # filesystem at all - so it is not asserted from the source but read back from the table: find
+    # the entry whose ops vector is `mockfs_vfsops`, derive which word inside it holds
+    # `mockfs_mountroot`, and then require that the *same* word is zero in the devfs and routefs
+    # entries. The offset is derived rather than written down because `struct vfstable`'s layout is
+    # the header's business (`vfc_name[15]` puts `vfc_mountroot` at byte 32 as this tree stands).
+    {
+        local tab_va words t i j n mname_off dev_i rt_i m_off
+        tab_va=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "vfstbllist" { print $1; found = 1 } END { exit(found ? 0 : 1) }') ||
+            layout_fail "the image has no vfstbllist symbol, so the filesystem table cannot be read"
+        tab_va=$((0x$tab_va))
+        # The table is four or five 64-byte entries and two terminators; 0x180 covers it whole.
+        words=$(arm-none-eabi-objdump -s --start-address=$tab_va --stop-address=$((tab_va + 0x180)) \
+                    "$OUT/xnu_arm_entry.elf" |
+                awk '/^ [0-9a-f]+ / { print $2; print $3; print $4; print $5 }')
+        n=$(printf '%s\n' "$words" | grep -c .)
+        (( n >= 32 )) || layout_fail "the filesystem table read back as $n words, which cannot hold the entries this step needs"
+        rev_word() { echo "${1:6:2}${1:4:2}${1:2:2}${1:0:2}"; }
+        sym_addr() { arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk -v s="$1" '$3 == s { print $1; found = 1 } END { exit(found ? 0 : 1) }'; }
+        word_at() { printf '%s\n' "$words" | sed -n "$1p"; }
+        # `find_ops <vfsops-symbol>` -> the word index of the table entry that names it
+        find_ops() {
+            local want v i
+            want=$(rev_word "$(sym_addr "$1")")
+            for (( i = 1; i <= n; i++ )); do
+                v=$(word_at $i)
+                [[ $v == "$want" ]] && { echo $i; return 0; }
+            done
+            return 1
+        }
+        j=$(find_ops mockfs_vfsops) ||
+            layout_fail "no entry in vfstbllist has mockfs's ops vector - mockfs is not registered, so vfs_mountroot would find no filesystem with a mountroot and bsd_init would spin in its mount loop"
+        # The name is the second field: `mock` then `fs\0\0`, as objdump prints bytes in address order.
+        [[ "$(word_at $((j + 1)))" == "6d6f636b" && "$(word_at $((j + 2)))" == "66730000" ]] ||
+            layout_fail "the table entry whose ops vector is mockfs_vfsops does not name itself \"mockfs\" (its bytes are $(word_at $((j+1))) $(word_at $((j+2)))) - the entries and the ops vectors do not line up"
+        m_off=-1
+        for (( i = j + 3; i <= j + 16 && i <= n; i++ )); do
+            if [[ "$(word_at $i)" == "$(rev_word "$(sym_addr mockfs_mountroot)")" ]]; then m_off=$((i - j)); break; fi
+        done
+        (( m_off > 0 )) ||
+            layout_fail "the mockfs entry does not hold mockfs_mountroot's address - the filesystem would be mounted with the generic VFS_MOUNT path instead of mockfs_mountroot"
+        dev_i=$(find_ops devfs_vfsops) || layout_fail "devfs is not in vfstbllist"
+        rt_i=$(find_ops routefs_vfsops) || layout_fail "routefs is not in vfstbllist"
+        [[ "$(word_at $((dev_i + m_off)))" == "00000000" ]] ||
+            layout_fail "devfs's entry has a mountroot at word +$m_off; the first filesystem with one is the one vfs_mountroot mounts, so it would not be mockfs"
+        [[ "$(word_at $((rt_i + m_off)))" == "00000000" ]] ||
+            layout_fail "routefs's entry has a mountroot at word +$m_off - vfs_mountroot would mount it instead of mockfs"
+        say "  xnu_entry_459: vfstbllist names mockfs with ops at 0x$(sym_addr mockfs_vfsops) and mountroot $(sym_addr mockfs_mountroot) at word +$m_off, and devfs and routefs have no mountroot at that word - so vfs_mountroot mounts mockfs"
+    }
+
+    # --- the RAM disk's own two numbers -------------------------------------------------------------------
+    #
+    # They are what `/chosen/memory-map`'s `RAMDisk` carries, so they have to be a mapped address in
+    # this window, inside the region the payload zeroes, and clear of the boot_args page - which is
+    # the page immediately above `.bss` and is what `_start` reads. `ramdisk_size` comes from `nm -S`
+    # because it is the *linker* that decides it; a wrong value here would be a device whose size
+    # does not match its array.
+    (( ramdisk_size == 0x40000 )) ||
+        layout_fail "g_stage90_ramdisk is $ramdisk_size bytes and 0x40000 (256 KB) was designed for - see entry_stubs.c's ENTRY_RAMDISK_SIZE, and the headroom check below"
+    (( ramdisk_va % 4096 == 0 )) ||
+        layout_fail "g_stage90_ramdisk is not page aligned (0x$ramdisk_va): mdevadd takes its base in pages, and a misaligned base rounds down to memory this image does not own"
+    (( ramdisk_va >= bss_start )) && (( ramdisk_va + ramdisk_size <= bss_end )) ||
+        layout_fail "g_stage90_ramdisk (0x$ramdisk_va + $ramdisk_size) is outside the image's .bss (0x$bss_start..0x$bss_end) - the payload zeroes exactly that range, so a disk outside it would hold whatever the copy left"
+    (( ramdisk_va + ramdisk_size <= ENTRY_BASE + ENTRY_ARGS_OFFSET )) ||
+        layout_fail "g_stage90_ramdisk reaches the boot_args page at +$ENTRY_ARGS_OFFSET, which _start reads - the disk would overwrite the boot args"
+    (( ramdisk_va + ramdisk_size <= ENTRY_BASE + ENTRY_DATA_LIMIT )) ||
+        layout_fail "g_stage90_ramdisk is above topOfKernelData at +$ENTRY_DATA_LIMIT, where XNU hands memory out"
+    say "  xnu_entry_459: the RAM disk is $ramdisk_va +0x$(printf '%x' $ramdisk_size) - page aligned, inside .bss, and below both the boot_args page and topOfKernelData"
+}
+verify_root_device
+
+# The generated header. **The heredoc is quoted, and that is the fix for a defect 459's own build
+# printed and did not stop on**: the body names symbols in backticks in its comments, and with an
+# unquoted heredoc every one of them is a command substitution - the word `verify_root_device` in
+# the last comment line *ran that function again* and substituted its output into the file being
+# written, so the header's comment held this script's own say-lines. Nothing in a quoted body is
+# expanded, so every value is a named placeholder here and they are substituted by name below, where
+# a name that is added to one list and not to the other stops the build instead of reaching the
+# payload as `@NAME@`. This is 455's rule - a check that stops the build - applied to the generator
+# itself, and the backticks stay in the comment because they are now inert.
+cat > "$OUT/xnu_arm_entry.h" <<'EOF'
 /* Generated by xnu_arm_boot/build_entry.sh. The XNU entry image, as data for the payload.
  *
  * Everything the payload needs to place, jump to and describe this image - including the layout
  * above it, which used to be constants in stage90.h and in xnu_entry_jump.c that had to agree.
  */
-#define STAGE90_XNU_ENTRY_BASE       $ENTRY_BASE
-#define STAGE90_XNU_ENTRY_SIZE       $ENTRY_SIZE
-#define STAGE90_XNU_ENTRY_ENTRY      $entry
-#define STAGE90_XNU_ENTRY_BSS_START  $bss_start
-#define STAGE90_XNU_ENTRY_BSS_END    $bss_end
-#define STAGE90_XNU_ENTRY_BIN_BYTES  $bin_size
+#define STAGE90_XNU_ENTRY_BASE       @ENTRY_BASE@
+#define STAGE90_XNU_ENTRY_SIZE       @ENTRY_SIZE@
+#define STAGE90_XNU_ENTRY_ENTRY      @ENTRY@
+#define STAGE90_XNU_ENTRY_BSS_START  @BSS_START@
+#define STAGE90_XNU_ENTRY_BSS_END    @BSS_END@
+#define STAGE90_XNU_ENTRY_BIN_BYTES  @BIN_BYTES@
 /* The layout above the image, as offsets from STAGE90_XNU_ENTRY_BASE. */
-#define STAGE90_XNU_ENTRY_ARGS_OFFSET             $ENTRY_ARGS_OFFSET
-#define STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET     $ENTRY_DATA_LIMIT
-#define STAGE90_XNU_ENTRY_DT_OFFSET               $ENTRY_DT_OFFSET
-#define STAGE90_XNU_ENTRY_TABLE_BYTES             $ENTRY_TABLE_BYTES
-#define STAGE90_XNU_ENTRY_DT_MAX                  $ENTRY_DT_MAX
-#define STAGE90_XNU_ENTRY_ARGS_BYTES              $ARGS_BYTES
+#define STAGE90_XNU_ENTRY_ARGS_OFFSET             @ARGS_OFFSET@
+#define STAGE90_XNU_TOP_OF_KERNEL_DATA_OFFSET     @DATA_LIMIT@
+#define STAGE90_XNU_ENTRY_DT_OFFSET               @DT_OFFSET@
+#define STAGE90_XNU_ENTRY_TABLE_BYTES             @TABLE_BYTES@
+#define STAGE90_XNU_ENTRY_DT_MAX                  @DT_MAX@
+#define STAGE90_XNU_ENTRY_ARGS_BYTES              @ARGS_BYTES@
+/* 459: the root device's memory. These two words are `/chosen/memory-map`'s `RAMDisk` property, and
+ * they are read out of this link rather than written anywhere: `mdevadd` receives a virtual address
+ * in *this* image's page tables (`ml_static_ptovirt` is the identity here), so the value can only be
+ * the address of the array in `entry_stubs.c` - see `verify_root_device` above. */
+#define STAGE90_XNU_RAMDISK_VA       @RAMDISK_VA@
+#define STAGE90_XNU_RAMDISK_SIZE     @RAMDISK_SIZE@
 EOF
+
+for pair in \
+    ENTRY_BASE=$ENTRY_BASE ENTRY_SIZE=$ENTRY_SIZE ENTRY=$entry \
+    BSS_START=$bss_start BSS_END=$bss_end BIN_BYTES=$bin_size \
+    ARGS_OFFSET=$ENTRY_ARGS_OFFSET DATA_LIMIT=$ENTRY_DATA_LIMIT DT_OFFSET=$ENTRY_DT_OFFSET \
+    TABLE_BYTES=$ENTRY_TABLE_BYTES DT_MAX=$ENTRY_DT_MAX ARGS_BYTES=$ARGS_BYTES \
+    RAMDISK_VA=$ramdisk_va RAMDISK_SIZE=$ramdisk_size; do
+    sed -i "s/@${pair%%=*}@/${pair#*=}/g" "$OUT/xnu_arm_entry.h"
+done
+
+left=$(grep -o '@[A-Z0-9_]*@' "$OUT/xnu_arm_entry.h" | sort -u | tr '\n' ' ' || true)
+[[ -z "$left" ]] ||
+    layout_fail "the generated header still has the placeholder(s) $left - a name in the substitution list above does not match the body"
+macros=$(grep -c '^#define STAGE90_XNU_' "$OUT/xnu_arm_entry.h" || true)
+[[ "$macros" == 14 ]] ||
+    layout_fail "the generated header has $macros STAGE90_XNU_ definitions and 459's payload needs 14 - a value was dropped from the body"
+# Both `|| true`s are load-bearing, and they are 455's defect class exactly: `grep` exits 1 when it
+# matches nothing, this script runs under `set -e` and `pipefail`, and the *success* case - no
+# placeholder left in the header - would end the build with status 1 and nothing printed. The first
+# draft of this check did that. The say-line below is the other half: it makes the check visible when
+# it passes, which is how the next defect in this pair gets found by reading the build instead of by
+# noticing that a run is missing.
+say "  xnu_entry_459: the generated header carries all 14 STAGE90_XNU_ definitions and no @NAME@ placeholder, so the payload's layout numbers are this link's"
 
 say
 say "entry base   $ENTRY_BASE"

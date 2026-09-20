@@ -1454,7 +1454,7 @@ static void entry_os_state_record(void)
  */
 static uint32_t entry_os_reserve(void)
 {
-    static const char marker[] = "\n[os-console-458]\n";
+    static const char marker[] = "\n[os-console-459]\n";
     volatile uint32_t *sig = (volatile uint32_t *)(uintptr_t)RAM_CONSOLE_BASE;
     volatile uint32_t *size_p = (volatile uint32_t *)(uintptr_t)(RAM_CONSOLE_BASE + 8u);
     volatile uint8_t *data = (volatile uint8_t *)(uintptr_t)(RAM_CONSOLE_BASE + 12u);
@@ -1564,8 +1564,74 @@ void entry_os_console_char(int ch, uint32_t which)
             *size_p = g_os_end;
         __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
         entry_write_kv("xnu_live_ostext_heals", g_os_chunks);
+        /*
+         * 459: 458's owed gap, closed. The counters above existed but nothing wrote them unless the
+         * block *filled*, so 458's own log has no `ostext_chars` in it and the count had to be taken
+         * from the block's bytes by hand. A step whose whole product is a count should publish it,
+         * and this is the place: the heal already has to write a record every kilobyte of text, so
+         * the two counts ride along with it for two more keys. It also makes the *volume* a reading
+         * rather than an inference from the block's length - which is what says whether the boot's
+         * own text would have overflowed the 128 KB block.
+         */
+        entry_write_kv("xnu_live_ostext_chars", g_os_chars);
+        entry_write_kv("xnu_live_ostext_total", g_os_total);
     }
 }
+
+/*
+ * ------------------------------------------------------------------------------------------------
+ * 459: the root device's memory - one RAM disk, in this image's `.bss`.
+ * ------------------------------------------------------------------------------------------------
+ *
+ * 457 and 458 left the boot inside `IOFindBSDRoot`, in
+ * `do { service = IOService::waitForService(matching, &t); } while (!service)` for an `IOMedia` with
+ * `Content = Apple_HFS` (`iokit/bsddev/IOKitBSDInit.cpp:552-569`) - a device this machine cannot
+ * have, because nothing in this image drives the eMMC. There is a second way out of that function
+ * and it is *not* a device: the same function, a few lines earlier, turns a `/chosen/memory-map`
+ * `RAMDisk` property into a memory device and returns as soon as the boot-arg `rd=md0` names it
+ * (`:436-490`, `goto iofrootx`).
+ *
+ * The chain, from the source rather than from the name:
+ *
+ *   `/chosen/memory-map`'s `RAMDisk` is two machine words, {base, size}
+ *   (`:445-447`), and `mdevadd(-1, ml_static_ptovirt(word0) >> 12, word1 >> 12, 0)` is called with
+ *   them. `ml_static_ptovirt` is `phystokv` (`osfmk/arm/machine_routines.c:730-734`) and this
+ *   image's boot_args have `physBase == virtBase` (`stages/stage90/xnu_entry_jump.c:131-141`), so
+ *   the identity: **word0 is a virtual address in this image's own window and word1 is a byte
+ *   count.** `mdevadd` stores base>>12 and size>>12 in pages (`bsd/dev/memdev.c:624-628`), adds a
+ *   block and a character device through `bdevsw_add`/`cdevsw_add_with_bdev`, and makes `/dev/md0`
+ *   and `/dev/rmd0` in the devfs tree (`:606-622`). `mdevlookup(0)` then returns that device
+ *   number to `IOFindBSDRoot`, which sets `*root`, prints `BSD root: md0, major .., minor ..` and
+ *   jumps past the 60-second wait.
+ *
+ * **The disk is this image's own `.bss`, and that is the point rather than a convenience.** The
+ * memory device reads its contents through `mdBase` as a *virtual* address in this kernel's
+ * address space (`phys = 0` in the `mdevadd` call), so the only regions it can name are ones this
+ * image maps: the payload's `.bss` is at a different base and is not in these page tables. An array
+ * here is therefore the smallest thing that can be a root device, and `build_entry.sh` reads its
+ * address and its size out of the linked image and writes them into the generated header the
+ * payload builds the device tree from - so the property and the symbol cannot disagree, which is
+ * this project's oldest defect class and the reason the value is not a constant anywhere.
+ *
+ * The array is zero-filled and **empty of meaning on purpose**: 459's question is whether the boot
+ * gets past the root device at all, and what it finds there is 460's. What consumes it is
+ * `mockfs` - Apple's own root-mountable filesystem, whose `mockfs_mountroot`
+ * (`bsd/miscfs/mockfs/mockfs_vfsops.c:66`) asks the device for `DKIOCGETMEMDEVINFO`
+ * (`bsd/dev/memdev.c:419-425` answers it) and points its one file node's pager at that memory
+ * (`mockfs_fsnode.c:333-344`), whose lookup resolves `/sbin/launchd` to exactly that node
+ * (`mockfs_vnops.c:105-130`). So this array is where the first userland process's executable will
+ * come from, and the empty disk is what says so in the log.
+ *
+ * 256 KB rather than the smallest legal size: one page would satisfy `mdevadd` and prove nothing
+ * about the path, and 460 needs room for an executable. It is `.bss`, so it costs nothing in the
+ * file-backed image and 256 KB of the layout's remaining headroom; `build_entry.sh` reads its
+ * address and size back out of the link and checks that it ends below `ENTRY_BASE +
+ * ENTRY_ARGS_OFFSET`, the boot_args page `_start` reads, and below `ENTRY_BASE + ENTRY_DATA_LIMIT`,
+ * which is this image's `topOfKernelData`.
+ */
+#define ENTRY_RAMDISK_SIZE (256u * 1024u)
+
+uint8_t g_stage90_ramdisk[ENTRY_RAMDISK_SIZE] __attribute__((aligned(4096)));
 
 /*
  * Experiment 272's reading: the instruction words that are *in memory* over the whole report path,
@@ -1718,6 +1784,31 @@ __attribute__((noinline)) static void entry_write_455_kv(void)
     entry_write_kv("xnu_entry_iolock_last_dl_lo", g_iolock_last_dl_lo);
     entry_write_kv("xnu_entry_iolock_last_dl_hi", g_iolock_last_dl_hi);
     entry_write_kv("xnu_entry_iolock_last_now", g_iolock_last_now);
+}
+
+/*
+ * 459: the OS's own console text, counted, at the one place that always runs.
+ *
+ * 458's run is why this exists and why it is not in the capture path. The counters were already
+ * there (`g_os_chars`, `g_os_total`, `g_os_lines`, `g_os_limited`) but only the *rare* exits
+ * published them - the block filling, or a refusal - so a run whose captured text is a few hundred
+ * bytes, which is every run so far, has none of them in its log and the count has to be taken from
+ * the block's bytes by hand. The heal above publishes them every kilobyte, which is the right
+ * cadence for a *long* run and still silent for a short one.
+ *
+ * The epilogue is the other end: it runs on every run that returns to the payload at all, which is
+ * every run of this frontier, and it is where the rest of the entry's `xnu_entry_*` state is
+ * already written. A function of its own for the same reason `entry_write_455_kv` is one - the
+ * epilogue's constant pool is at the ±4095-byte PC-relative edge and each new key costs code in
+ * whichever function holds it.
+ */
+__attribute__((noinline)) static void entry_write_459_kv(void)
+{
+    entry_write_kv("xnu_entry_ostext_chars", g_os_chars);
+    entry_write_kv("xnu_entry_ostext_total", g_os_total);
+    entry_write_kv("xnu_entry_ostext_lines", g_os_lines);
+    entry_write_kv("xnu_entry_ostext_heals", g_os_chunks);
+    entry_write_kv("xnu_entry_ostext_limited", g_os_limited);
 }
 
 __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
@@ -2205,6 +2296,9 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      * which holds both because adding them *here* put this function's constant pool past
      * PC-relative range. */
     entry_write_455_kv();
+    /* 459: the OS's own console text, counted, for the same reason - and this is the count that
+     * 458's log had to be taken by hand. */
+    entry_write_459_kv();
     /*
      * Experiment 451's live console, printed here as well so a run that *does* report says whether
      * the live channel was working and, if it was refused, which check refused it. `_records` counts

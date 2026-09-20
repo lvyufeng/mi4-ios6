@@ -80,7 +80,6 @@ static void informational(const char *what)
 }
 
 /* --- XNU's entry points, exactly as pe_identify_machine.c calls them --- */
-
 static void check_lookup(const char *path, const char *why)
 {
     DTEntry entry;
@@ -97,6 +96,94 @@ static DTEntry lookup(const char *path)
     (void)DTLookupEntry(NULL, path, &entry);
     return entry;
 }
+
+/*
+ * 459: `/chosen/memory-map` - the root device, read back with XNU's own reader.
+ *
+ * This node used to be reported as `expected_absent` ("pe_init.c reads it behind a kSuccess
+ * check; absent is fine"), and it was: nothing in the boot *needed* it until this step. What
+ * needs it now is `IOFindBSDRoot`, which looks this exact path up in the DT plane and is the
+ * only thing in the kernel that turns a device-tree property into a root device
+ * (`iokit/bsddev/IOKitBSDInit.cpp:436-490`): the property is two machine words handed to
+ * `mdevadd` as {base, size}, and the boot-arg `rd=md0` then selects the device they made.
+ * Without the node the function never reaches the `rd` check, `mdevlookup(0)` returns -1 and it
+ * panics; without the property it skips the `mdevadd` call and panics the same way. Neither is
+ * visible on the host except here, and both are one lookup away from being visible.
+ *
+ * The two words are checked against the *entry image's* own link - `STAGE90_XNU_RAMDISK_VA` and
+ * `_SIZE` arrive from `out/stage90/xnu_arm_entry.h` through the shim header, so this is the
+ * payload's value and not a restatement of it. A size mismatch is worth catching here because
+ * `DTGetProperty` hands back `length` from the property header: a property of the wrong length
+ * is read by XNU as `uintptr_t[2]` regardless, so a 4-byte `RAMDisk` would make `size` whatever
+ * the next property's bytes happen to be.
+ */
+static void check_memory_map(void)
+{
+    const uint32_t want[2] = { STAGE90_XNU_RAMDISK_VA, STAGE90_XNU_RAMDISK_SIZE };
+    DTEntry mm = lookup("/chosen/memory-map");
+    DTEntry chosen = NULL;
+    void *value = NULL;
+    unsigned int size = 0;
+    char detail[160];
+    char args[256];
+
+    if (!mm) {
+        fail("/chosen/memory-map",
+             "IOFindBSDRoot reads this path for the RAMDisk property; without the node the boot "
+             "waits 60 s for an IOMedia that cannot exist on this machine");
+        return;
+    }
+    if (DTGetProperty(mm, "RAMDisk", &value, &size) != kSuccess) {
+        fail("/chosen/memory-map:RAMDisk",
+             "without this property IOFindBSDRoot never calls mdevadd, mdevlookup(0) returns -1, "
+             "and the same function panics 'specified root memory device, md0, has not been configured'");
+        return;
+    }
+    if (size != sizeof(want)) {
+        snprintf(detail, sizeof(detail), "size %u, expected %u - XNU reads it as uintptr_t[2]",
+                 size, (unsigned)sizeof(want));
+        fail("/chosen/memory-map:RAMDisk", detail);
+    } else {
+        const uint32_t *words = (const uint32_t *)value;
+        if (words[0] != want[0] || words[1] != want[1]) {
+            snprintf(detail, sizeof(detail),
+                     "0x%08x/0x%08x, expected the entry image's 0x%08x/0x%08x - mdevadd would "
+                     "register memory that is not the RAM disk",
+                     words[0], words[1], want[0], want[1]);
+            fail("/chosen/memory-map:RAMDisk", detail);
+        } else {
+            snprintf(detail, sizeof(detail), "0x%08x +0x%x, the entry image's g_stage90_ramdisk",
+                     want[0], want[1]);
+            ok(detail);
+        }
+    }
+
+    /*
+     * The boot args, in the tree's own copy of them. `PE_parse_boot_argn` reads the *boot_args
+     * struct*'s CommandLine and not this property (`pexpert/arm/pe_bootargs.c:11`), which is
+     * written in stage90_main.c to agree with it - and that agreement is the thing checked here,
+     * because a `rd=` that lives in only one of the two copies is exactly the shape of the
+     * `serial=0x1` that sat in this property doing nothing for a hundred experiments.
+     */
+    if (DTLookupEntry(NULL, "/chosen", &chosen) != kSuccess) {
+        fail("/chosen:boot-args", "/chosen itself is missing");
+        return;
+    }
+    if (size >= sizeof(args) || DTGetProperty(chosen, "boot-args", &value, &size) != kSuccess) {
+        fail("/chosen:boot-args", "no boot-args property on /chosen");
+        return;
+    }
+    memcpy(args, value, size);
+    args[size] = '\0';
+    if (!strstr(args, "rd=md0")) {
+        fail("/chosen:boot-args",
+             "the tree's copy of the boot args does not name md0, so the two copies disagree "
+             "about the root device");
+        return;
+    }
+    ok("/chosen:boot-args carries rd=md0");
+}
+
 
 static void check_find(const char *prop, const char *value, const char *why)
 {
@@ -226,8 +313,7 @@ int main(void)
     printf("paths XNU looks up with DTLookupEntry:\n");
     check_lookup("/chosen", "PE_init_platform reads /chosen before anything else");
     check_lookup("/cpus", "ml_parse_cpu_topology asserts, then panics 'No cpus found!'");
-    expected_absent("/chosen/memory-map",
-                    "pe_init.c reads it behind a kSuccess check; absent is fine");
+    check_memory_map();
 
     /*
      * `random-seed` is the third property this project added because XNU reads it and the tree
