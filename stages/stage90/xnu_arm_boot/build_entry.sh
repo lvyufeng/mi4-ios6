@@ -131,6 +131,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=_ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_
                    --wrap=mdevadd --wrap=mdevlookup
                    --wrap=_ZN9IOService22waitForMatchingServiceEP12OSDictionaryy
+                   --wrap=os_reason_create --wrap=load_machfile
                    --wrap=sleh_abort)
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
@@ -224,12 +225,42 @@ run "$STAGE_DIR/xnu_arm_assemble.sh" > "$OUT/xnu_arm_assemble.log" 2>&1 || {
     tail -5 "$OUT/xnu_arm_assemble.log"; exit 1; }
 say "  osfmk/arm/start.s: $(grep -c . "$OUT/xnu_arm_assemble.log") lines of report"
 
+# **And the one prerequisite of this build that is a hand-run step, checked rather than trusted
+# (471).** `out/xnu_asm_obj/` is written by `tools/assemble_arm_layer.sh`, which reads
+# `out/xnu_assym/$XNU_KERNEL_CONFIG/assym.s`, which `tools/gen_assym.sh` writes - and neither script
+# is run from anywhere. A configuration change could therefore move the C objects without moving the
+# ARM layer, and experiment 468's device run is what that costs: `machine_load_context` read
+# `struct thread` at RELEASE's `[r0,#1464]` for `TH_CTH_SELF`, so TPIDRURO and TPIDRURW got the
+# kernel-stack pointer and the neighbouring word, `ldm r3!` walked off the stack, and the boot died
+# five times in `sleh_abort` with `pc = machine_load_context+0x30` before the OS console had printed
+# twelve lines. The check is over the *assembled object*, not over this script's command line, and it
+# is run here rather than in `xnu_arm_assemble.sh` because a stale object is what this build would
+# otherwise link: the offsets in the object are what the image will execute.
+run python3 "$REPO_ROOT/tools/check_assym_cswitch.py" || exit 1
+
 say "== compiling the symbols start.s needs =="
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
     -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
     -c "$BOOT_DIR/entry_stubs.c" -o "$OUT/xnu_arm_entry_stubs.o"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
+
+# **468: the first process's executable.** `entry_ramdisk.s` assembles the Mach-O that `/sbin/launchd`
+# reads - the bytes `g_stage90_ramdisk` *is* - and it is a `.s` file rather than C for the reason
+# `entry_macho.s` is: the layout is the interface, the numbers in it are Apple's `mach-o/loader.h`'s,
+# and the two fields that must not be transcribed (the commands' extent and the entry point) are
+# expressions over labels in the same file. `tools/host_ramdisk_macho_check.py` decodes what comes out
+# of the link and asserts it against the rules `parse_machfile` and `load_machfile` apply - the
+# offsets and the numbers both, since it reads the emitted bytes and not the source.
+run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
+    -c "$BOOT_DIR/entry_ramdisk.s" -o "$OUT/xnu_arm_entry_ramdisk.o"
+
+# Checked here, on the object, as well as on the linked image in `verify_root_device`: this link has
+# ended in a `--wrap` or undefined-symbol stop many times, and a Mach-O field that is wrong costs a
+# device run to find out. `--selftest` is not passed here - it mutates a copy of the same bytes and
+# the image below is the artifact that matters, so it runs once, there.
+run python3 "$REPO_ROOT/tools/host_ramdisk_macho_check.py" "$OUT/xnu_arm_entry_ramdisk.o" \
+    || { say "the RAM disk Mach-O (entry_ramdisk.s) is not what parse_machfile reads"; exit 1; }
 
 # **The last kernel constructor (332).** Apple's `libsa/lastkernelconstructor.c` is a translation unit
 # like the ones above rather than an XNU object this project links: it is not in Apple's ARM manifest,
@@ -333,6 +364,11 @@ LINK_OBJS=(
     "$OUT/xnu_arm_start.o"
     "$OUT/xnu_arm_entry_vectors.o"
     "$OUT/xnu_arm_entry_stubs.o"
+    # 468: `g_stage90_ramdisk`, which is the first process's executable - see entry_ramdisk.s and the
+    # RAM disk checks in `verify_root_device` below. It is in this list, before pass 1 runs, for the
+    # same reason `entry_stubs.o` is: pass 1 decides what is undefined by linking this list with the
+    # script, so a name defined here is never handed to the stub generator.
+    "$OUT/xnu_arm_entry_ramdisk.o"
 )
 
 if [[ $REAL_ARM_INIT -eq 1 ]]; then
@@ -26568,6 +26604,50 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     done
     say "  locore.o's three kept names are each referenced by another object in this link"
 
+    # --------------------------------------------------------------------------------------------
+    # 470: and the array the boot walks, checked against the undef set it is built from.
+    #
+    # `pseudo_inits` is generated from the **configuration** (`tools/gen_pseudo_inits.py` over
+    # `expand.sh`, experiment 438) while the undef set is measured over the **pool**, and the two
+    # are generated by two different scripts. Nothing compared them, and experiment 468's device run
+    # is what that costs: `tools/build_xnu_arm_kernel.sh` wrote the device table *after* the manifest
+    # that reads it, so the pool was built from the previous configuration's table - which did not
+    # have `pseudo-device vndevice 4 init vndevice_init` (`config/MASTER:436`). The array therefore
+    # named `vndevice_init`, no object in the pool defined it, the generator below supplied a
+    # function stand-in, and the boot stopped at the first stand-in it has entered in four hundred
+    # experiments - inside `bsd_autoconf`, having walked six entries of this array successfully.
+    #
+    # The check is `nm -u` on the array's own object, and it is *the array's targets by
+    # construction*: `stage90_pseudo_inits.o`'s undefined names are exactly the function pointers
+    # `gen_pseudo_inits.py` wrote into its `.data` relocations (`R_ARM_ABS32` at +4, +0xc, ...), so
+    # this reads the pointers the kernel will call rather than a list of names re-derived from the
+    # configuration - which is the thing that had already drifted. Any name of theirs that is in
+    # pass 1's undef set is a name the generator below stubbed, i.e. a `ps_func` that points at a
+    # report instead of at the driver's init.
+    #
+    # It is stated over *every* undefined name of that object rather than over a filtered list,
+    # because the object's other undefined names are the same hazard: the generator is per symbol,
+    # not per file, and anything it stubs on this object's behalf is a value the walk reads.
+    if [[ -f $STAGE90_PSEUDO_INITS_OBJ ]]; then
+        arm-none-eabi-nm -u "$STAGE90_PSEUDO_INITS_OBJ" | awk '{print $NF}' | sort -u \
+            > "$OUT/xnu_arm_entry_pseudo_init_refs.txt"
+        pi_stubbed=$(comm -12 "$OUT/xnu_arm_entry_pseudo_init_refs.txt" "$OUT/xnu_arm_entry_undef.txt")
+        if [[ -n $pi_stubbed ]]; then
+            say "FAIL: pseudo_inits[] names symbols this image does not define:" >&2
+            printf '%s\n' "$pi_stubbed" | sed 's/^/        /' >&2
+            say "      $STAGE90_PSEUDO_INITS_OBJ references them and pass 1 has them undefined, so the" >&2
+            say "      generator below stubs each one and \`bsd_autoconf\` blx's into a stand-in. The" >&2
+            say "      array comes from the configuration and the undef set from the pool, so a name" >&2
+            say "      here means the pool was built for a different configuration than this array:" >&2
+            say "      check that out/xnu_arm_manifest.txt lists the file that defines it." >&2
+            exit 1
+        fi
+        say "  pseudo_inits[]'s $(wc -l < "$OUT/xnu_arm_entry_pseudo_init_refs.txt") target(s) are all defined by this link's own objects"
+    else
+        say "FAIL: no $STAGE90_PSEUDO_INITS_OBJ - the array \`bsd_autoconf\` walks is not in this link" >&2
+        exit 1
+    fi
+
     # Data or function, and how much data, decided by the kernel objects rather than by a
     # hand-written list: `nm -S` over the pool gives each symbol's type and its real size.
     #
@@ -27029,6 +27109,20 @@ verify_trace_symbols() {
     done
     say "  xnu_entry_461/462/463: getProperty, getBytesNoCopy, fromPath, getRegistryRoot, getChildEntry, getChildSetReference, getChildCount, OSDictionary::getObject, getMetaClassWithName, applyToInstancesOfClassName, OSMetaClass::getClassName, IOService::getState and getResourceService are defined by this image rather than stubbed for it"
 
+    # 471's two names, by the same rule and for the same reason. These are called by *name* rather
+    # than by mangled name, so a typo is a link error rather than a silent stub - but the wrap itself
+    # needs the symbol to be undefined in the object that calls it and defined somewhere else, and
+    # what it must not be is a name the *generator* had to stand in for. `--wrap` on a symbol the
+    # generator stubbed rewrites the reference to `__wrap_`, the wrapper calls `__real_`, and `__real_`
+    # resolves to the generated stand-in: the reading would then be a fact about the stand-in. Both
+    # are defined in this pool (`bsd/kern/sys_reason.c`, `bsd/kern/mach_loader.c`), which is what
+    # makes the pair a reading of XNU's own exec path.
+    for s in os_reason_create load_machfile; do
+        grep -qx "$s" "$OUT/xnu_arm_entry_undef.txt" &&
+            layout_fail "471's instrument wraps $s and the pass-1 undefined set contains it - nothing in this image defines that name, so the generator stubbed it and \`__real_$s\` would call the stand-in. The reading would then be about the stand-in rather than about the exec path"
+    done
+    say "  xnu_entry_471: os_reason_create and load_machfile are defined by this image rather than stubbed for it, so both wrappers record the real exec path"
+
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls
     # `_ZNK9IOService8getStateEv` by mangled name on objects whose dynamic type this file cannot know -
     # whatever the `IOPlatformExpert` metaclass's instance walk yields. That is only correct if
@@ -27233,6 +27327,17 @@ verify_trace_symbols() {
             layout_fail "cons_ops[1].putc is 0x$w2 and not __wrap_vcputc (0x$(addr_of __wrap_vcputc)): the video entry kept the real vcputc (0x$(addr_of vcputc)), so the ring's drain calls the sink and not the console capture"
         say "  xnu_entry_458: the console ops table reads exactly as built - [0].putc=0x$w0 (_serial_putc), [0].getc=0x$w1, [1].putc=0x$w2 (__wrap_vcputc), [1].getc=0x$w3, nconsops at 0x$hi"
     fi
+
+    # **473: `struct pthread_functions_s` is read by word index, so a slot that points at the wrong
+    # body is a call that arrives and names the wrong member - invisible to the constructor's NULL
+    # scan (two swapped slots are two non-NULL words) and to every run, because the body that runs is
+    # a real body that names itself correctly. 473 retires two more slots by hand, so there are four
+    # hand-written bodies and four designators to get right; `tools/check_pthread_table_slots.py` reads
+    # the 40 named words out of the *image* and compares each against the symbol its member name
+    # implies, with the names, their order, `_pad` and `version` taken from Apple's own header - so
+    # the check has no second definition of the layout to drift from. Its `--selftest` swaps and zeroes
+    # words in a copy of the table and requires every mutation to be refused.
+    run python3 "$REPO_ROOT/tools/check_pthread_table_slots.py" --elf "$OUT/xnu_arm_entry.elf" || exit 1
 
     # **The panic route, read out of the image.** `PE_init_kprintf` stores a `movw`/`movt` pair - a
     # same-object address reference - into `PE_kputc`, and the census above cannot see that: it only
@@ -27454,21 +27559,49 @@ verify_root_device() {
     # --- the RAM disk's own two numbers -------------------------------------------------------------------
     #
     # They are what `/chosen/memory-map`'s `RAMDisk` carries, so they have to be a mapped address in
-    # this window, inside the region the payload zeroes, and clear of the boot_args page - which is
-    # the page immediately above `.bss` and is what `_start` reads. `ramdisk_size` comes from `nm -S`
-    # because it is the *linker* that decides it; a wrong value here would be a device whose size
-    # does not match its array.
-    (( ramdisk_size == 0x40000 )) ||
-        layout_fail "g_stage90_ramdisk is $ramdisk_size bytes and 0x40000 (256 KB) was designed for - see entry_stubs.c's ENTRY_RAMDISK_SIZE, and the headroom check below"
+    # this window, **in the part of the image the payload copies rather than the part it zeroes**, and
+    # clear of the boot_args page - which is the page immediately above `.bss` and is what `_start`
+    # reads. `ramdisk_size` comes from `nm -S` because it is the *linker* that decides it; a wrong
+    # value here would be a device whose size does not match its array.
+    #
+    # **468 moved this object from `.bss` to `.data`, and the check that matters is the one below
+    # that says so.** Until 468 the disk was 256 KB of zeros and zeroing it again cost nothing; now
+    # the disk *is* the first process's executable, and the payload zeroes `[__bss_start, __bss_end)`
+    # after copying the image in (`stage90_xnu_entry_run`). A disk inside that range would be erased
+    # between the copy and the jump, so the assertion is not "inside `.bss`" but "ends at or below
+    # `__bss_start`" - and, one step stronger, "inside the bytes `objcopy` produces", which is the
+    # file the payload actually copies. Both are arithmetic over the two numbers the payload uses.
+    #
+    # `ramdisk_size % 512 == 0` is the third thing `si_devsize` needs: the device's size is
+    # `((mdSize << 12) + mdSecsize - 1) / mdSecsize` sectors of 512 bytes (`bsd/dev/memdev.c:407-410`
+    # answering `DKIOCGETBLOCKCOUNT`, which `spec_open` turns back into bytes at
+    # `bsd/miscfs/specfs/spec_vnops.c:435`), so a disk that is not a whole number of sectors would be
+    # a file whose size is *not* its array's size - and `mockfs_fsnode_create` takes the file's size
+    # from exactly that number.
+    (( ramdisk_size == 0x2000 )) ||
+        layout_fail "g_stage90_ramdisk is $ramdisk_size bytes and 0x2000 was designed for - see entry_ramdisk.s's RAMDISK_BYTES, and the headroom check below"
+    (( ramdisk_size % 512 == 0 )) ||
+        layout_fail "g_stage90_ramdisk is $ramdisk_size bytes, not a whole number of 512-byte sectors: DKIOCGETBLOCKCOUNT is computed in sectors, so the file mockfs serves would not be the size of this array"
     (( ramdisk_va % 4096 == 0 )) ||
         layout_fail "g_stage90_ramdisk is not page aligned (0x$ramdisk_va): mdevadd takes its base in pages, and a misaligned base rounds down to memory this image does not own"
-    (( ramdisk_va >= bss_start )) && (( ramdisk_va + ramdisk_size <= bss_end )) ||
-        layout_fail "g_stage90_ramdisk (0x$ramdisk_va + $ramdisk_size) is outside the image's .bss (0x$bss_start..0x$bss_end) - the payload zeroes exactly that range, so a disk outside it would hold whatever the copy left"
+    (( ramdisk_va + ramdisk_size <= bss_start )) ||
+        layout_fail "g_stage90_ramdisk (0x$ramdisk_va + $ramdisk_size) reaches into .bss (which starts at 0x$bss_start) - the payload zeroes exactly that range after copying the image in, so the first process's executable would be erased before it is ever read"
+    (( ramdisk_va + ramdisk_size <= ENTRY_BASE + bin_size )) ||
+        layout_fail "g_stage90_ramdisk (0x$ramdisk_va + $ramdisk_size) is above the end of the image objcopy produces (0x$(printf '%x' $((ENTRY_BASE + bin_size)))) - it is not file-backed, so the bytes would be whatever the copy left rather than this image's"
     (( ramdisk_va + ramdisk_size <= ENTRY_BASE + ENTRY_ARGS_OFFSET )) ||
         layout_fail "g_stage90_ramdisk reaches the boot_args page at +$ENTRY_ARGS_OFFSET, which _start reads - the disk would overwrite the boot args"
     (( ramdisk_va + ramdisk_size <= ENTRY_BASE + ENTRY_DATA_LIMIT )) ||
         layout_fail "g_stage90_ramdisk is above topOfKernelData at +$ENTRY_DATA_LIMIT, where XNU hands memory out"
-    say "  xnu_entry_459: the RAM disk is $ramdisk_va +0x$(printf '%x' $ramdisk_size) - page aligned, inside .bss, and below both the boot_args page and topOfKernelData"
+    say "  xnu_entry_468: the RAM disk is $ramdisk_va +0x$(printf '%x' $ramdisk_size) - page aligned, a whole number of sectors, inside the copied image and below .bss, the boot_args page and topOfKernelData"
+
+    # **And the bytes themselves**, in the image that goes to the device rather than in the object
+    # checked at compile time: the section they landed in is what the two address checks above are
+    # about, and whether they are still a Mach-O after the link is a separate question from whether
+    # they were one before it. `--selftest` runs here and only here - it mutates a copy of these bytes
+    # one field at a time and requires every mutation to be refused, because a check that cannot fail
+    # proves nothing about the twenty-two ways this file can be wrong.
+    python3 "$REPO_ROOT/tools/host_ramdisk_macho_check.py" --selftest "$OUT/xnu_arm_entry.elf" ||
+        layout_fail "the RAM disk's bytes are not a Mach-O parse_machfile would load - the reasons are above, and 468's whole object is process 1's exec, which dies inside the loader without a message"
 }
 verify_root_device
 

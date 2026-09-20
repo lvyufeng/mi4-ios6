@@ -1,6 +1,6 @@
 #
 # The kernel the entry image boots: Apple's RELEASE kernel plus the one filesystem that can be root
-# on a device with no storage driver.
+# on a device with no storage driver, plus the one attribute that lets a process be exec'd at all.
 #
 # Experiment 459 needs two things of this configuration and nothing else, and both are *words* in
 # a configuration file rather than code:
@@ -13,10 +13,43 @@
 #               driver gets a root filesystem at all. Apple's own comment for the option in
 #               `config/MASTER:123` says what it is for: "Boot from an executable".
 #
-# This is `RELEASE` by *composition*, not by copy: a configuration's attributes may themselves be
-# configuration names (tools/xnu_config/expand.sh), so `[ RELEASE mockfs ]` reuses MASTER.arm's own
-# RELEASE attribute list rather than restating it, and one option is added to it. A second copy of
-# that list here would be the "one value, two definitions" defect this project has recorded
-# twenty times.
+# Experiment 468 adds the second word, and its reason is a wall 467's run measured rather than a
+# preference. With process 1's exec reaching the image activators for the first time, the file it
+# reads is claimed by none of them (`ENOEXEC`, `kern_exec.c:2803-2805`) - and the obvious next step,
+# a real Mach-O on the RAM disk, cannot be loaded by *any* configuration of `parse_machfile` in
+# this tree:
 #
-#  STAGE90_XNU = [ RELEASE mockfs ]
+#   - a **static** executable (`MH_EXECUTE` without `MH_DYLDLINK`) is refused outright at
+#     `bsd/kern/mach_loader.c:631-636`, whose comment is the answer: "Check properties of static
+#     executables (disallowed except for development)" - `#if !(DEVELOPMENT || DEBUG) return
+#     (LOAD_FAILURE)`. A static binary is legal in exactly the two configurations the comment
+#     names.
+#   - a **dynamic** one (`MH_DYLDLINK`) needs both a dylinker vnode (`:1155`, and mockfs has one
+#     regular file) and `CS_DYLD_PLATFORM` in its code-signing flags (`:1173`), which is set only
+#     for a *platform binary* (`:2326-2327`) - i.e. it needs Apple's signature.
+#
+# So this configuration takes the branch Apple's own comment names. `development` - the attribute
+# `config/MASTER:611`'s `options DEVELOPMENT # dev kernel # <development>` is tagged with - is
+# spelled in lower case *because that is how the tag names a configuration*, and it is the narrow
+# spelling: measured, it differs from `[ RELEASE mockfs ]` by exactly two `-D` flags -
+# `-DDEVELOPMENT=1` added, and `CONFIG_MSG_BSIZE` switched from `CONFIG_MSG_BSIZE_REL` to
+# `CONFIG_MSG_BSIZE_DEV`, whose values `config/MASTER:288-289` both give as 4096. `DEVELOPMENT`
+# (upper case) is a different thing: the *dev attribute list* (`KERNEL_DEV BSD_DEV FILESYS_DEV
+# NFS SKYWALK_DEV ...`, `MASTER.arm:66`), which adds twenty-two more macros (`MACH_ASSERT`,
+# `CONFIG_DTRACE`, `CONFIG_ZLEAKS`, `CONFIG_VNGUARD`, `INTERRUPT_MASKED_DEBUG`, ...) and is not
+# this step.
+#
+# **And the value has to come from here rather than from the command line.** Every component's
+# `meta_features.h` includes `development.h`, which `tools/gen_option_headers.py` writes as
+# `#define DEVELOPMENT 0` or `1` from *this* configuration; a `-DDEVELOPMENT=1` on the compile line
+# is overridden by it, so with the flag alone `#ifdef DEVELOPMENT` is true while `#if DEVELOPMENT`
+# is false -- the "an off option has two spellings" class this project has recorded, measured here
+# as a `.data` change in `mach_loader.o` with a byte-identical `.text`.
+#
+# This is `RELEASE` by *composition*, not by copy: a configuration's attributes may themselves be
+# configuration names (tools/xnu_config/expand.sh), so `[ RELEASE mockfs development ]` reuses
+# MASTER.arm's own RELEASE attribute list rather than restating it, and two options are added to
+# it. A second copy of that list here would be the "one value, two definitions" defect this project
+# has recorded twenty times.
+#
+#  STAGE90_XNU = [ RELEASE mockfs development ]

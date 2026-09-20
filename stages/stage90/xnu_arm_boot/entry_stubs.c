@@ -171,6 +171,34 @@ char osversion[256];
 uint8_t EntropyData[68] __attribute__((aligned(8)));
 #endif /* !STAGE90_ENTRY_REAL_ENTROPY_DATA */
 
+/*
+ * `kperf_pending_ipis` - the counter experiment 468's configuration change made undefined, supplied
+ * as the object rather than as a stand-in.
+ *
+ * `osfmk/kperf/kperf.h:139` declares it `extern _Atomic long long kperf_pending_ipis;`, and the only
+ * definition in the tree is `osfmk/kperf/kperfbsd.c:77`. That file is the one source file in this
+ * configuration that does not compile - `bsd/libkern/libkern.h:145` declares `ffs(int)` where
+ * `osfmk/kern/misc_protos.h:70` declares `ffs(unsigned int)`, and the two meet in that file's
+ * include set - so `osfmk/kperf/arm/kperf_mp.c:90`'s
+ * `atomic_fetch_add_explicit(&kperf_pending_ipis, 1, ...)` had nothing to resolve to once
+ * `development` put that object's code on the link's undefined list. It was not undefined before,
+ * which is why this is 468's and not an older step's.
+ *
+ * **The object and not a stand-in, and the reason is the one `tools/check_stub_kinds.py` exists
+ * for.** The generator decides function-or-storage from `nm` over the object pool, and a name no
+ * object defines has no type information at all, so it falls through to a *function* stand-in. A
+ * function stand-in that is *written to* - which is what `atomic_fetch_add_explicit` does - is a
+ * store into `.text`. The undefined list gives names and never kinds; this is the kind, and the
+ * check refuses the build rather than shipping one.
+ *
+ * What is written here is the definition rather than an approximation of one: the type is the
+ * header's `_Atomic long long`, and 0 is what a count of pending kperf IPIs is before any have been
+ * sent. Nothing in this boot schedules kperf - the kperf syscall is unreachable and its file is not
+ * linked - so the counter is touched by no one, and its job is to be a real 8-byte object at the
+ * address that one IPI handler would use.
+ */
+_Atomic long long kperf_pending_ipis = 0;
+
 /* ------------------------------------------------------------------ bpfread_filtops - RETIRED */
 
 /*
@@ -832,6 +860,23 @@ uint32_t g_mdevlookup_calls;
 uint32_t g_mdevlookup_caller;
 uint32_t g_mdevlookup_devid;
 uint32_t g_mdevlookup_ret;
+/*
+ * 471's two readings, and each is a *pair* of moments around one call - see `entry_trace.c` for why
+ * the exec failure and not the panic is the frontier. `g_osr_*` is the exit reason the exec path
+ * created (`os_reason_create`'s two arguments, and the caller that named it); `g_lmf_*` is
+ * `load_machfile`'s return, recorded so that "our Mach-O loaded" is a reading and not an inference
+ * from the reason code. Both keep the last call only, because the one that matters is the last one
+ * before the panic; `_calls` is what says whether there was more than one.
+ */
+uint32_t g_osr_calls;
+uint32_t g_osr_caller;
+uint32_t g_osr_ns;
+uint32_t g_osr_code;
+uint32_t g_osr_ret;
+uint32_t g_lmf_calls;
+uint32_t g_lmf_caller;
+uint32_t g_lmf_header;
+uint32_t g_lmf_ret;
 
 /*
  * 462's reading of the walk from the registry root, and it is a *pair* of moments in one run: `t1` is
@@ -1896,25 +1941,16 @@ void entry_os_console_char(int ch, uint32_t which)
  * payload builds the device tree from - so the property and the symbol cannot disagree, which is
  * this project's oldest defect class and the reason the value is not a constant anywhere.
  *
- * The array is zero-filled and **empty of meaning on purpose**: 459's question is whether the boot
- * gets past the root device at all, and what it finds there is 460's. What consumes it is
- * `mockfs` - Apple's own root-mountable filesystem, whose `mockfs_mountroot`
- * (`bsd/miscfs/mockfs/mockfs_vfsops.c:66`) asks the device for `DKIOCGETMEMDEVINFO`
- * (`bsd/dev/memdev.c:419-425` answers it) and points its one file node's pager at that memory
- * (`mockfs_fsnode.c:333-344`), whose lookup resolves `/sbin/launchd` to exactly that node
- * (`mockfs_vnops.c:105-130`). So this array is where the first userland process's executable will
- * come from, and the empty disk is what says so in the log.
- *
- * 256 KB rather than the smallest legal size: one page would satisfy `mdevadd` and prove nothing
- * about the path, and 460 needs room for an executable. It is `.bss`, so it costs nothing in the
- * file-backed image and 256 KB of the layout's remaining headroom; `build_entry.sh` reads its
- * address and size back out of the link and checks that it ends below `ENTRY_BASE +
- * ENTRY_ARGS_OFFSET`, the boot_args page `_start` reads, and below `ENTRY_BASE + ENTRY_DATA_LIMIT`,
- * which is this image's `topOfKernelData`.
+ * **Experiment 468 moved the array out of this file and into `entry_ramdisk.s`, and gave it
+ * contents.** It is no longer `.bss` and no longer empty: the disk now holds the Mach-O of the first
+ * userland process, at offset 0, because 467's run measured that the exec reaches the image
+ * activators and that every one of them declines a file whose first four bytes are zero. The reasons
+ * for the new shape - the segment layout `parse_machfile` requires, the one instruction the process
+ * runs, and why the object is padded to two pages so that the device's `si_devsize` is exactly its
+ * size - are at the top of that file. The symbol, its 4096-byte alignment, its 0x2000-byte size and
+ * its page-aligned `mdevadd` base are all still checked here, by `build_entry.sh`, over the linked
+ * image rather than over this file.
  */
-#define ENTRY_RAMDISK_SIZE (256u * 1024u)
-
-uint8_t g_stage90_ramdisk[ENTRY_RAMDISK_SIZE] __attribute__((aligned(4096)));
 
 /*
  * Experiment 272's reading: the instruction words that are *in memory* over the whole report path,
@@ -2201,6 +2237,15 @@ __attribute__((noinline)) static void entry_write_461_kv(void)
     entry_write_kv("xnu_entry_mdevlookup_caller", g_mdevlookup_caller);
     entry_write_kv("xnu_entry_mdevlookup_devid", g_mdevlookup_devid);
     entry_write_kv("xnu_entry_mdevlookup_ret", g_mdevlookup_ret);
+    entry_write_kv("xnu_entry_osr_calls", g_osr_calls);
+    entry_write_kv("xnu_entry_osr_caller", g_osr_caller);
+    entry_write_kv("xnu_entry_osr_ns", g_osr_ns);
+    entry_write_kv("xnu_entry_osr_code", g_osr_code);
+    entry_write_kv("xnu_entry_osr_ret", g_osr_ret);
+    entry_write_kv("xnu_entry_lmf_calls", g_lmf_calls);
+    entry_write_kv("xnu_entry_lmf_caller", g_lmf_caller);
+    entry_write_kv("xnu_entry_lmf_header", g_lmf_header);
+    entry_write_kv("xnu_entry_lmf_ret", g_lmf_ret);
 }
 
 /*
@@ -3652,6 +3697,41 @@ void entry_note_mdevlookup(uint32_t caller, uint32_t devid, uint32_t ret)
     entry_live_write("xnu_live_mdevlookup_caller", caller);
     entry_live_write("xnu_live_mdevlookup_devid", devid);
     entry_live_write("xnu_live_mdevlookup_ret", ret);
+}
+
+/*
+ * 471. The exit reason the exec path created, which is the frontier's *name*: the code is one of
+ * `EXEC_EXIT_REASON_*` (`bsd/sys/reason.h:222-233`), or `CODESIGNING_EXIT_REASON_*` (`:190-193`)
+ * when the namespace says so, and the caller is the `bl os_reason_create` that chose it - so the
+ * pair answers "which of the eight `badtoolate` sites" without a guessing game about which failure
+ * the console's silence hides.
+ *
+ * `entry_live_write` as well as the slots, for 459's reason: a run that never reaches the epilogue
+ * still says how many reasons were created and what the last one was, because the live records are
+ * written to the ram console as they happen.
+ */
+void entry_note_osreason(uint32_t caller, uint32_t ns, uint32_t code, uint32_t ret)
+{
+    g_osr_calls++;
+    g_osr_caller = caller;
+    g_osr_ns = ns;
+    g_osr_code = code;
+    g_osr_ret = ret;
+    entry_live_write("xnu_live_osr_caller", caller);
+    entry_live_write("xnu_live_osr_ns", ns);
+    entry_live_write("xnu_live_osr_code", code);
+    entry_live_write("xnu_live_osr_ret", ret);
+}
+
+void entry_note_loadmachfile(uint32_t caller, uint32_t header, uint32_t ret)
+{
+    g_lmf_calls++;
+    g_lmf_caller = caller;
+    g_lmf_header = header;
+    g_lmf_ret = ret;
+    entry_live_write("xnu_live_lmf_caller", caller);
+    entry_live_write("xnu_live_lmf_header", header);
+    entry_live_write("xnu_live_lmf_ret", ret);
 }
 
 /*

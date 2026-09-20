@@ -1496,3 +1496,83 @@ void __wrap_sleh_abort(void *regs, int type)
 
     entry_note_sleh_back();
 }
+
+/* ------------------------------------------------- what the exec said when it gave up (471) */
+/*
+ * Experiment 470's run is the first that reaches `load_init_program`: the OS console reads
+ *
+ *   Added memory device md0/rmd0 (02000000/0D000000) at 00000000804FD000 for 0000000000002000
+ *   BSD root: md0, major 2, minor 0
+ *   load_init_program: attempting to load /usr/local/sbin/launchd.development
+ *   load_init_program: failed loading /usr/local/sbin/launchd.development: errno 2
+ *   load_init_program: attempting to load /sbin/launchd
+ *
+ * and then stops - **with no `failed loading /sbin/launchd` line**, which 467's zeros-image run did
+ * print (`errno 8`). The image then reports one trap, in kernel mode, at the `udf` inside
+ * `DebuggerTrapWithState` (`xnu_entry_undef_pc = 0x800364c0`, `spsr = 0x60000093`), and
+ * `xnu_entry_panic_entered = 1` - exactly one entry, so there was no user-mode fault first and the
+ * Mach-O never ran its first instruction.
+ *
+ * The name is in the log's one format-string reading, `xnu_entry_trap_r9_fmt = 0x804b291b`:
+ * `"unexpected SIGKILL of %s %s with reason -- namespace %d code 0x%llx description %.800s"`, which
+ * is `bsd/kern/kern_sig.c:2138` - `psignal_internal`'s `if (signum == SIGKILL && p == initproc)`
+ * panic. So the boot did not fault and did not hit a stub: **it killed `initproc` and then panicked
+ * about having done so.**
+ *
+ * That panic is downstream of the missing `failed loading` line, not the frontier. `kern_exec.c`'s
+ * `badtoolate` label is reached from eight failures *after* the image has been activated, and it
+ * ends with `error = 0` under the comment "We can't stop this system call at this point, so just
+ * pretend we succeeded" - so `load_init_program` prints nothing whether the exec succeeded or
+ * failed there, and the two are indistinguishable from the console alone.
+ *
+ * What *is* recorded, at every one of those eight sites and at the two inside `check_for_signature`,
+ * is an exit reason: `exec_failure_reason = os_reason_create(OS_REASON_EXEC, <code>)`, where the
+ * code is one of `EXEC_EXIT_REASON_*` (`bsd/sys/reason.h:222-233`, 1 = `BAD_MACHO` through 12 =
+ * `UPX`). So the instrument is one wrap on `os_reason_create` - and it reads the **arguments**, not
+ * the returned struct: `os_reason_create(uint32_t osr_namespace, uint64_t osr_code)` passes both in
+ * registers, while reading them back off the `os_reason_t` would mean reproducing
+ * `struct os_reason`'s layout, which begins with `decl_lck_mtx_data(, osr_lock)` and is therefore a
+ * private-layout question this file has no business answering. The caller of the *last*
+ * `os_reason_create` before the panic is the failing site, by the same argument every stub report
+ * uses: a call names its call site.
+ *
+ * The second wrap is the direct reading rather than the inferred one. `load_machfile`'s
+ * `load_return_t` is what separates "our Mach-O was refused" (`LOAD_BADARCH` 1, `LOAD_BADMACHO` 2,
+ * `LOAD_FAILURE` 4, `LOAD_NOSPACE` 5) from "it loaded and something after it failed" - and
+ * `EXEC_EXIT_REASON_BAD_MACHO` on the first wrap says the same thing only by way of the code. When
+ * both readings agree the frontier is named twice over; when they disagree, the disagreement is the
+ * finding.
+ *
+ * Both are non-terminal: the real function runs with the same arguments and the run continues. A
+ * terminal instrument here would stop at the first exit reason the boot creates, which is not
+ * necessarily the one that killed `initproc` - the 470 log's own `t268_*` records show how much work
+ * happens between two adjacent calls.
+ */
+extern void entry_note_osreason(uint32_t caller, uint32_t ns, uint32_t code, uint32_t ret);
+extern void entry_note_loadmachfile(uint32_t caller, uint32_t header, uint32_t ret);
+
+void *__real_os_reason_create(uint32_t osr_namespace, uint64_t osr_code);
+void *__wrap_os_reason_create(uint32_t osr_namespace, uint64_t osr_code)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    void *r = __real_os_reason_create(osr_namespace, osr_code);
+
+    entry_note_osreason(caller, osr_namespace, (uint32_t)osr_code, (uint32_t)(uintptr_t)r);
+    return r;
+}
+
+/* `load_machfile(struct image_params *, struct mach_header *, thread_t, vm_map_t *, load_result_t *)`
+ * - five pointers, so no register-pair question and every argument is a word. The third is reported
+ * rather than the second because `header` is `imgp->ip_header`, a pointer into the parser's own
+ * scratch, while `thread` is the thread the load is being done for; and `mapp`/`result` are outputs
+ * whose contents are the load's business.
+ */
+int __real_load_machfile(void *imgp, void *header, void *thread, void *mapp, void *result);
+int __wrap_load_machfile(void *imgp, void *header, void *thread, void *mapp, void *result)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    int r = __real_load_machfile(imgp, header, thread, mapp, result);
+
+    entry_note_loadmachfile(caller, (uint32_t)(uintptr_t)header, (uint32_t)r);
+    return r;
+}

@@ -66,9 +66,11 @@
  *
  * What fills the table
  * --------------------
- * **Every named slot points at a stand-in that stops the run and names itself** - with one exception,
- * `pthread_init`, which 433 gives a body (see the section at the end of this header, and why it is the
- * exception) - and this is the rule the whole walk has used for missing symbols, applied to a table:
+ * **Every named slot points at a stand-in that stops the run and names itself** - with four exceptions,
+ * each given a body by the step whose device run stopped in that slot and each with its own section
+ * below: `pthread_init` (433), `pth_proc_hashinit` (465), and `workqueue_mark_exiting` with
+ * `workqueue_exit` (473) - and this is the rule the whole walk has used for missing symbols, applied to
+ * a table:
  *
  *   - a **NULL** slot is a fault rather than a stop. It would be a data abort or a branch to 0,
  *     which this image reports as `abort_entries != 0` and a `first_dfar` - a shape that says
@@ -300,15 +302,144 @@ extern void entry_note_live(const char *key, uint32_t value);
  *       *truncated* symbol again - `xnu_live_stub_hit_name_w0`/`_w1` and `..._seq` are the fix, and a
  *       run that stops with a cut name and no live name words would say the fix did not take.
  */
+
 /*
- * **The two slots with bodies, declared here and defined below the table**, which is where they have
- * to be: both name `pthread_functions` or the table itself. 433's is `pthread_init`, and its
- * contract is in this file's header; 465's is `pth_proc_hashinit`, whose section is above. Neither
- * body dereferences the pointer it is given - a NULL or wrong pointer must be a stop that names
- * itself, not a fault - and 465's keeps 433's rule for its own argument.
+ * ================================================================================================
+ * **473: the third and fourth slots with bodies - the exec path's two workqueue notifications, which
+ * 472's run stopped in and which are the last thing between this boot and process 1 running in User
+ * mode.**
+ *
+ * What 472 changed and what it measured
+ * -------------------------------------
+ * 472 cancelled `SECURE_KERNEL` (`-USECURE_KERNEL` in `build_xnu_arm_kernel.sh`'s cancellation list),
+ * which 471 had identified as the reason `load_machfile` refused the RAM disk's Mach-O: `cs_enforcement`
+ * is `const int cs_enforcement_enable = 1` in a secure kernel and that kernel cannot activate a file
+ * with no `LC_CODE_SIGNATURE`. The rebuild moved that object from `R` to `B` (the build now checks it:
+ * `cs_enforcement_enable is B (writable) and cs_enforcement_disable is a boot arg`), and the run moved
+ * with it:
+ *
+ *     xnu_entry_stub_hit_count = 0x00000001
+ *     xnu_live_stub_hit_name_ptr = 0x804b3da9
+ *     xnu_live_stub_hit_name_w0/_w1 = 0x67617473 / 0x5f303965     "stag" / "e90_" -> the string below
+ *     xnu_live_stub_hit_caller   = 0x8029e764
+ *     xnu_entry_stub_caller_v    = 0x8029e764
+ *
+ * and `0x804b3da9` reads out of `out/stage90/xnu_arm_entry.elf`'s `.text` as
+ * **`stage90_pthread_functions.workqueue_mark_exiting`**. The caller resolves in the same ELF to
+ * `load_machfile + 0x354` (471's `0x80284bb4` was the same instruction in 471's shorter image, which is
+ * why the key is an address and never a name).
+ *
+ * **The caller is `load_machfile` and not this table's own shim, because the shim is a tail branch.**
+ * `bsd/kern/pthread_shims.c:337-340` is
+ *
+ *     void workqueue_mark_exiting(struct proc *p) { pthread_functions->workqueue_mark_exiting(p); }
+ *
+ * which the compiler emits as a load of the table then `bx` - no `bl`, so nothing writes `lr` and the
+ * stand-in is entered with `load_machfile`'s return address still in it. 433 measured the same shape
+ * for `pthread_init`'s slot (`pop {r4, lr}; bx r0`, so the caller key is `bsd_init`'s return address).
+ *
+ * Where in the exec that is, and why it is the measurement that matters
+ * ------------------------------------------------------------------
+ * The call site is `bsd/kern/mach_loader.c:511`, inside the block that begins with the comment "If this
+ * is an exec, then we are going to destroy the old task, and it's correct to halt it; if it's spawn,
+ * the task is not yet running, and it makes no sense" and reads
+ *
+ *     if (in_exec) { ... task_start_halt(task); proc_transcommit(p, 0);
+ *                     workqueue_mark_exiting(p); task_complete_halt(task); workqueue_exit(p);
+ *                     task_rollup_accounting_info(get_threadtask(thread), task); }
+ *     *mapp = map;
+ *     return (LOAD_SUCCESS);
+ *
+ * (`:493-519`) - **the block immediately before `load_machfile` returns `LOAD_SUCCESS`.** 471's run
+ * returned `LOAD_FAILURE` from inside `parse_machfile` and never reached this code: its `lmf_ret` was
+ * `0x04` with `lmf_caller` set. In 472 the two `load_machfile` keys are **both zero**, and that is not
+ * `LOAD_SUCCESS` - it is the wrapper's record never happening, because the run stopped inside the
+ * function the wrapper wraps. The distinction is the one the keys cannot make on their own and the
+ * stub report makes instead: with `lmf_caller = 0` there is no call to read, and
+ * `stub_hit = ...workqueue_mark_exiting` at `load_machfile + 0x354` is the evidence that the call
+ * arrived. **So the file was accepted**: the magic, the segments, the thread state and the signature
+ * gate all passed, and the exec got as far as the transition that replaces the old task.
+ *
+ * **And nothing else on that path is a generated stub.** `tools/xnu_entry_callwalk.py --root
+ * load_machfile` reports "reached no stub on the straight-line path", and so do `--root bsd_ast` and
+ * `--root load_init_program`; the calls after the two workqueue slots in `exec_mach_imgact` are
+ * `cpu_type`, `vm_map_exec`, `fdexec`, `exec_handle_sugid`, `swap_task_map`, `activate_exec_state`,
+ * `thread_set_mach_voucher`, `create_unix_stack`, `exec_add_apple_strings`, `exec_copyout_strings`,
+ * `thread_setuserstack` and `copyoutptr`, every one of them real. The calls *between* the two slots -
+ * `task_complete_halt` and, after them, `get_threadtask` and `task_rollup_accounting_info` - are real
+ * too, and none of the remaining 26 names in `out/stage90/xnu_arm_entry_undef.txt` is on this path.
+ * The only stops left in front of user mode are these two words of this table.
+ *
+ * What the two real slots do, and why a body here is the honest answer
+ * --------------------------------------------------------------------
+ * `workqueue_mark_exiting(p)` and `workqueue_exit(p)` are the kernel's *notifications* to libpthread's
+ * workqueue bookkeeping: the first tells it that no new work should be queued for `p`, the second that
+ * it may drop what is left. Both return `void`, both are reached by name through the table above, and
+ * their callers in this kernel are `mach_loader.c:511/:513` and `kern_exit.c:1067/:1081` as statements
+ * with no error path and no value read back. The state they are supposed to touch - the per-proc
+ * workqueue lists libpthread owns - does not exist in this image, because the kext that owns it does
+ * not exist, which is the whole reason this file exists (432). So the honest implementation of "there
+ * is no workqueued work to mark or to release" is a body that records the call and returns, exactly as
+ * 433's is for `pthread_init` and 465's for `pth_proc_hashinit`.
+ *
+ * Neither body dereferences `p`, for 433's reason: a NULL or a wrong pointer must be a stop that names
+ * itself rather than a fault, and a fault here would be `abort_entries != 0` with a `first_dfar`, which
+ * says something went wrong but not what was expected to be there.
+ *
+ * **Both words, not one, and here is why this is one step rather than two.** `workqueue_mark_exiting`
+ * and `workqueue_exit` are two calls in one basic block with only real code between them: retiring the
+ * first would stop the boot at the second, one device run later, having measured nothing new - the
+ * sibling is already named by the disassembly above and by the same `xnu_live_*` records. The records
+ * are per-slot and counted, so the log still says which of the two was entered and how many times, and
+ * a run that stops at either is still named by name. (The one thing this step does *not* do is retire
+ * the other 33 slots: `workqueue_thread_yielded`, `fill_procworkqueue`,
+ * `thread_qos_from_pthread_priority`, `pthread_priority_canonicalize` and
+ * `workqueue_get_sched_callback` all have call sites in the pool - measured with `objdump -r` over
+ * `out/xnu_kernel_obj/*.o` - but none of them is in `osfmk/kern/syscall_subr.c`'s, `kern_event.c`'s or
+ * `ipc_pthread_priority.c`'s code on this path, and a slot retired before its call site is reached is
+ * a body nothing measures.)
+ *
+ * **Prediction, written before the build: the two live records appear and the run does not stop on
+ * either slot.**
+ *
+ *     xnu_live_pth_wqmark_seq = 1        (then, with the block completed, ...)
+ *     xnu_live_pth_wqmark_p   = a 0xc0... pointer, the process 1 proc
+ *     xnu_live_pth_wqmark_tbl = whatever `nm` says `stage90_pthread_functions` is in the new link
+ *     xnu_live_pth_wqexit_seq = 1
+ *     xnu_live_pth_wqexit_p   = the same pointer
+ *
+ * **and then, if nothing else stops, process 1 runs its `udf #0` in User mode** - the two-sided
+ * measurement `entry_ramdisk.s` was written for, reported as `xnu_entry_undef_pc = 0x10e0` with
+ * `xnu_entry_undef_spsr = 0x10`, where `0x10e0` is the Mach-O's entry point and `0x10` is
+ * `PSR_USERDFLT`. The OS console's next line would be the one `load_init_program` prints after a
+ * *successful* exec - nothing, because `kern_exec.c:5146` only prints `failed loading` on failure -
+ * and the process-1 `udf` is then the trap rather than the panic.
+ *
+ * Falsifiers, named in advance:
+ *
+ *   (a) a stop whose `xnu_live_stub_hit_name_ptr` reads back as one of these two names - the slot is
+ *       not the word the kernel reads, or the table was not relinked;
+ *   (b) no `xnu_live_pth_wqmark_seq` **and** no `stub_hit` at all - the shim's `bx` went somewhere that
+ *       is neither a body nor a stand-in, which is what a wrong slot offset looks like;
+ *   (c) an XNU `panic()` with no `stub_hit` - the fourth kind of stop, the one that names its own
+ *       cause, which is what a body that returned into a broken caller would produce;
+ *   (d) `xnu_live_pth_wqmark_seq` present but `xnu_live_pth_wqexit_seq` absent with the run continuing
+ *       - `task_complete_halt` between them returning without a trap would be the interesting finding,
+ *       and the live channel is capped at 4096 records with ~756 written by 464's run, so a missing
+ *       record is not the cap.
+ */
+/*
+ * **The four slots with bodies, declared here and defined below the table**, which is where they have
+ * to be: every one of them names `pthread_functions` or the table itself. 433's is `pthread_init` and
+ * its contract is in this file's header; 465's is `pth_proc_hashinit`, whose section is above; 473's are
+ * `workqueue_mark_exiting` and `workqueue_exit`, whose section is above as well. None of the four bodies
+ * dereferences the pointer it is given - a NULL or wrong pointer must be a stop that names itself, not
+ * a fault - and 465's and 473's keep 433's rule for their own arguments.
  */
 static void stage90_pthread_functions_init(void);
 static void stage90_pthread_slot_pth_proc_hashinit(proc_t p);
+static void stage90_pthread_slot_workqueue_mark_exiting(proc_t p);
+static void stage90_pthread_slot_workqueue_exit(proc_t p);
 
 #define STAGE90_PTHREAD_SLOT_DEF(name)                                          \
     static void stage90_pthread_slot_##name(void)                               \
@@ -320,17 +451,26 @@ static void stage90_pthread_slot_pth_proc_hashinit(proc_t p);
 #define STAGE90_PTHREAD_SLOT_ENTRY(name) .name = (void *)&stage90_pthread_slot_##name,
 
 /*
- * Every name below is a member of `struct pthread_functions_s`, in declaration order - **except
- * `pthread_init`**, which is defined by hand below the table and set explicitly in it. The lists here
- * therefore hold 38 of the table's 39 named slots, and the constructor's scan still covers all 40
- * named words (39 slots plus `version`), so a slot missing from either place is still a stop that
- * names its word index rather than a branch to zero.
+ * Every name below is a member of `struct pthread_functions_s`, in declaration order - **except the
+ * four slots that have bodies of their own** (`pthread_init`, 433; `pth_proc_hashinit`, 465;
+ * `workqueue_mark_exiting` and `workqueue_exit`, 473), which are defined by hand below the table and set
+ * explicitly in it. The two lists below therefore hold **35** of the table's 39 named slots, and the
+ * constructor's scan still covers all 40 named words (39 slots plus `version`), so a slot missing from
+ * either place is a stop that names its word index rather than a branch to zero.
+ *
+ * (This paragraph said "38 ... except `pthread_init`" between 465 and 473, which was wrong in one word
+ * for two steps: 465 stopped defining `pth_proc_hashinit` by the macro and did not move the number. The
+ * constructor's NULL scan is what makes the error harmless - a slot in neither list is NULL and named
+ * at registration - and the count is written out here so that the next step does not have to re-derive
+ * it from the 39 members.)
  */
 STAGE90_PTHREAD_SLOT_DEF(fill_procworkqueue)
 STAGE90_PTHREAD_SLOT_DEF(__unused1)
 STAGE90_PTHREAD_SLOT_DEF(__unused2)
-STAGE90_PTHREAD_SLOT_DEF(workqueue_exit)
-STAGE90_PTHREAD_SLOT_DEF(workqueue_mark_exiting)
+/* 473: `workqueue_exit` and `workqueue_mark_exiting` are *not* defined by the macro either - they have
+ * hand-written bodies below, the way `pthread_init` and `pth_proc_hashinit` do, because their slots are
+ * the two this step retires. They stay in this position in the list as comments so the file still reads
+ * as Apple's declaration order. */
 STAGE90_PTHREAD_SLOT_DEF(workqueue_thread_yielded)
 /* 465: `pth_proc_hashinit` is *not* defined by the macro - it has a hand-written body below, the
  * way `pthread_init` does, because its slot is the one this step retires. */
@@ -373,11 +513,13 @@ static const struct pthread_functions_s stage90_pthread_functions = {
     /* 465: the second - see the section above the table. Not a stand-in either. The initializer is
      * type-correct (`void (*)(proc_t)`), so no cast is needed here, unlike the macro's entries. */
     .pth_proc_hashinit = &stage90_pthread_slot_pth_proc_hashinit,
+    /* 473: the third and fourth - see the section above the table. Both are type-correct
+     * (`void (*)(struct proc *)`) and so are written the same way as 465's. */
+    .workqueue_mark_exiting = &stage90_pthread_slot_workqueue_mark_exiting,
+    .workqueue_exit = &stage90_pthread_slot_workqueue_exit,
     STAGE90_PTHREAD_SLOT_ENTRY(fill_procworkqueue)
     STAGE90_PTHREAD_SLOT_ENTRY(__unused1)
     STAGE90_PTHREAD_SLOT_ENTRY(__unused2)
-    STAGE90_PTHREAD_SLOT_ENTRY(workqueue_exit)
-    STAGE90_PTHREAD_SLOT_ENTRY(workqueue_mark_exiting)
     STAGE90_PTHREAD_SLOT_ENTRY(workqueue_thread_yielded)
     STAGE90_PTHREAD_SLOT_ENTRY(pth_proc_hashdelete)
     STAGE90_PTHREAD_SLOT_ENTRY(bsdthread_create)
@@ -464,6 +606,41 @@ stage90_pthread_slot_pth_proc_hashinit(proc_t p)
     entry_note_live("xnu_live_pth_hashinit_p", (uint32_t)(uintptr_t)p);
     entry_note_live("xnu_live_pth_hashinit_tbl", (uint32_t)(uintptr_t)pthread_functions);
     entry_kv("xnu_entry_pth_hashinit_p", (uint32_t)(uintptr_t)p);
+}
+
+/*
+ * **473: the bodies of `workqueue_mark_exiting` and `workqueue_exit`.** What the two real slots do, what
+ * these deliberately do not do, and why retiring both words in one step is one step, is in the section
+ * above the table; this is the code, and it is 465's shape with 465's reasons.
+ *
+ * The one thing worth repeating here is that neither of these bodies changes what the exec does.
+ * `mach_loader.c:511/:513` are statements in the `in_exec` block and both slots return `void`; the
+ * `task_start_halt`/`task_complete_halt` pair around them is what actually halts the old task, and both
+ * of those are real XNU functions in this image. The workqueue state the real slots maintain belongs to
+ * `pthread.kext`, which does not exist here, so "there is nothing queued for `p`" is the true value and
+ * an empty body is the honest way to say it - with the record, so the log says the call arrived.
+ */
+static uint32_t stage90_pth_wqmark_calls;
+static uint32_t stage90_pth_wqexit_calls;
+
+static void
+stage90_pthread_slot_workqueue_mark_exiting(proc_t p)
+{
+    stage90_pth_wqmark_calls++;
+    entry_note_live("xnu_live_pth_wqmark_seq", stage90_pth_wqmark_calls);
+    entry_note_live("xnu_live_pth_wqmark_p", (uint32_t)(uintptr_t)p);
+    entry_note_live("xnu_live_pth_wqmark_tbl", (uint32_t)(uintptr_t)pthread_functions);
+    entry_kv("xnu_entry_pth_wqmark_p", (uint32_t)(uintptr_t)p);
+}
+
+static void
+stage90_pthread_slot_workqueue_exit(proc_t p)
+{
+    stage90_pth_wqexit_calls++;
+    entry_note_live("xnu_live_pth_wqexit_seq", stage90_pth_wqexit_calls);
+    entry_note_live("xnu_live_pth_wqexit_p", (uint32_t)(uintptr_t)p);
+    entry_note_live("xnu_live_pth_wqexit_tbl", (uint32_t)(uintptr_t)pthread_functions);
+    entry_kv("xnu_entry_pth_wqexit_p", (uint32_t)(uintptr_t)p);
 }
 
 /* Where `pthread_kext_register` writes the kernel's own callbacks table. Nothing here reads it. */

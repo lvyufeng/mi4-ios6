@@ -215,6 +215,36 @@ else
   sudo adb -s "$SERIAL" exec-out 'cat /proc/last_kmsg' > "$LOGFILE" || \
     die "could not read /proc/last_kmsg"
   say "wrote $(wc -c < "$LOGFILE") bytes to $LOGFILE"
+
+  # --- the capture is checked before the run is read as a result ------------------------
+  #
+  # The payload's own lines are the only thing that says this log is *this* run's. Experiment
+  # 473's first capture was 455596 bytes whose first 41 characters were the payload's banner
+  # and whose remaining 455525 were binary: a stale region that held nothing this payload ever
+  # wrote, and whose *length* was the same as the valid capture's - so neither the byte count
+  # nor the presence of the banner's first characters tells the two apart. The count of lines
+  # the payload owns does: an early death still writes dozens of them, because the banner and
+  # the payload's first report are the same code path.
+  #
+  # Reading /proc/last_kmsg is a read, so repeating it touches nothing and cannot cost a run;
+  # and if it is still suspect after three reads the log is *named* suspect rather than read.
+  for _attempt in 1 2 3; do
+    _payload_lines=$(grep -a -c '^MI4IOS6_STAGE90' "$LOGFILE" || true)
+    if (( _payload_lines >= 8 )); then
+      break
+    fi
+    say "  WARNING: $LOGFILE holds $_payload_lines line(s) of the payload's own output, fewer"
+    say "           than any run of this payload produces - re-reading /proc/last_kmsg"
+    sleep 5
+    sudo adb -s "$SERIAL" exec-out 'cat /proc/last_kmsg' > "$LOGFILE" || \
+      die "could not read /proc/last_kmsg"
+    say "  re-read $(wc -c < "$LOGFILE") bytes"
+  done
+  if (( $(grep -a -c '^MI4IOS6_STAGE90' "$LOGFILE" || true) < 8 )); then
+    say "  WARNING: after three reads $LOGFILE still holds fewer than 8 payload lines. Read"
+    say "           this as 'the payload wrote almost nothing', NOT as 'the payload ran and"
+    say "           produced this' - and repeat the run before drawing a conclusion from it."
+  fi
 fi
 
 # The marker table is the part that decides what a run *meant*, so it is a function with

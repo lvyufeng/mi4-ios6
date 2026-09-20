@@ -123,6 +123,31 @@ if [[ $ONLY_PLATFORM -eq 1 ]]; then
     : > "$MANIFEST"
 fi
 
+# And the same check for the conditions this script defines by hand: each must agree with
+# xnu_config/device_table.py, which is what the manifest reads. They disagreed for several stages -
+# `-DMONOTONIC=1` was defined here while the manifest excluded the only file implementing it - and
+# nothing compared them, so it is compared here now.
+# Check first, write second: the tool does the comparison and exits 1 on a disagreement, so writing
+# before checking would overwrite the very file the check is about.
+#
+# **And this block runs before the manifest, not after it (470).** It used to sit forty lines below,
+# and the manifest - which *reads* `$DEVICE_TABLE` - was therefore written from the table the
+# *previous* build left behind. The comment above says the property in words ("A required input that
+# a generated input determines has to be generated too, or the report is about two different
+# configurations") and the order contradicted it, which cost one device run: experiment 468's
+# configuration selects three lines the previous one did not, one of them
+# `pseudo-device vndevice 4 init vndevice_init` (`config/MASTER:436`), the table gained `vndevice 1`,
+# and the manifest written from the old table omitted `bsd/dev/vn/vn.c` and `shadow.c` - so
+# `pseudo_inits[]` (generated from the *configuration*, which was current) named `vndevice_init` and
+# no object in the pool defined it. The run stopped there, at the first stand-in the boot has entered
+# in four hundred experiments.
+"$TOOLS_DIR/xnu_config/device_table.py" >/dev/null || {
+    echo "the conditions this script defines disagree with xnu_config/device_table.py:" >&2
+    "$TOOLS_DIR/xnu_config/device_table.py" >/dev/null
+    exit 2
+}
+"$TOOLS_DIR/xnu_config/device_table.py" --write "$DEVICE_TABLE" >/dev/null
+
 # **The manifest is generated from the table, not required** (experiment 440). It was a hand-run
 # prerequisite and the table is written by this script, so the two could disagree — and they did: the
 # first 440 build wrote a table turning `ether`, `loop` and `bpfilter` on, compiled the *previous*
@@ -155,19 +180,6 @@ fi
     exit 2
 }
 
-# And the same check for the conditions this script defines by hand: each must agree with
-# xnu_config/device_table.py, which is what the manifest reads. They disagreed for several stages -
-# `-DMONOTONIC=1` was defined here while the manifest excluded the only file implementing it - and
-# nothing compared them, so it is compared here now.
-# Check first, write second: the tool does the comparison and exits 1 on a disagreement, so writing
-# before checking would overwrite the very file the check is about.
-"$TOOLS_DIR/xnu_config/device_table.py" >/dev/null || {
-    echo "the conditions this script defines disagree with xnu_config/device_table.py:" >&2
-    "$TOOLS_DIR/xnu_config/device_table.py" >/dev/null
-    exit 2
-}
-"$TOOLS_DIR/xnu_config/device_table.py" --write "$DEVICE_TABLE" >/dev/null
-
 # And the **device** headers, generated here rather than required, for the reason `gen_pseudo_inits.py`
 # is run here: the value has to belong to the configuration, and a stale one is not an error, it is a
 # wrong answer. `mkheaders.c:85-101` writes `#define N<COND> <count>` from the configuration's own
@@ -184,8 +196,29 @@ XD_MESSAGE=$("$TOOLS_DIR/gen_device_headers.py" 2>&1) || {
 # translation unit sees is a property of its *component* (experiment-438), and the generator that
 # writes the per-component `meta_features.h` files was, until then, making a claim in a comment
 # instead of a check. Structural, so it fails in a second rather than after 680 files.
-XO_MESSAGE=$("$TOOLS_DIR/check_option_headers.py" 2>&1) || {
+#
+# **And it is generated here, not merely checked (471).** Until this step `gen_option_headers.py` was
+# a hand-run prerequisite and only `check_option_headers.py` ran below - and that check compares the
+# generated files against `conf/files` (membership and reads), not against the *configuration*
+# (values), so it passed over a header set that was one configuration out of date. The cost is
+# measured: the STAGE90_XNU headers on disk from 10:42 spelled `#define DEVELOPMENT 0`, the 468
+# configuration selects `options DEVELOPMENT` (`config/MASTER:611`, and
+# `xnu_config/make_defines.sh STAGE90_XNU` says `-DDEVELOPMENT=1`), so `mach_loader.c:634`'s
+# `#if !(DEVELOPMENT || DEBUG) return (LOAD_FAILURE);` - the static-executable refusal Apple's own
+# comment calls "disallowed except for development" - refused the RAM disk's Mach-O. The device run
+# reported `xnu_entry_lmf_ret = 0x04` (`LOAD_FAILURE`) and the exec path's reason
+# `namespace 9 code 1` (`OS_REASON_EXEC`, `EXEC_EXIT_REASON_BAD_MACHO`), then killed `initproc` and
+# panicked about it. One regenerated header is the whole of the fix; the *ordering* is what was
+# wrong, which is 440's defect (the manifest generated from a stale device table) in the one input
+# whose staleness the check below cannot see.
+XO_MESSAGE=$(XNU_KERNEL_CONFIG=$CONFIG XNU_MASTER_LOCAL=${XNU_MASTER_LOCAL:-} \
+             "$TOOLS_DIR/gen_option_headers.py" 2>&1) || {
     echo "$XO_MESSAGE" >&2
+    exit 2
+}
+[[ ${VERBOSE:-0} -eq 0 ]] || printf '%s\n' "$XO_MESSAGE"
+XOC_MESSAGE=$("$TOOLS_DIR/check_option_headers.py" 2>&1) || {
+    echo "$XOC_MESSAGE" >&2
     exit 2
 }
 
@@ -378,6 +411,42 @@ DEFINES=(
     # which routes to the debugger's own printer. That is why a panic in this configuration is
     # silent, and it is written down here rather than discovered.
     -UCONFIG_NO_PRINTF_STRINGS
+    # ---------------------------------------------------------------------------------------------
+    # 472: the configuration's `secure_kernel`, cancelled - for the same reason and by the same
+    # mechanism.
+    #
+    # `RELEASE` inherits `BSD_RELEASE`, which is `[ BSD_BASE no_printf_str no_kprintf_str
+    # secure_kernel ]` (`config/MASTER.arm:24`), so `options SECURE_KERNEL # <secure_kernel>`
+    # (`config/MASTER:101`) is on in every configuration this project composes from RELEASE -
+    # `xnu_config/make_defines.sh RELEASE` and `... STAGE90_XNU` both print `-DSECURE_KERNEL=1`. What
+    # that costs is measured, and it is the whole of experiment 471's frontier:
+    # `bsd/kern/kern_cs.c:82-84` is `#if SECURE_KERNEL` / `const int cs_enforcement_enable = 1;`, and
+    # `arm-none-eabi-nm out/xnu_kernel_obj/bsd_kern_kern_cs.o` reports it **`R`** - read-only, the
+    # `const` - while the `cs_enforcement_disable` boot-arg string is absent from the same object,
+    # because `cs_init`'s `#if !SECURE_KERNEL` block (`:133-155`) that reads it is compiled out. So
+    # `cs_enforcement(NULL)` returns 1 unconditionally, and `mach_loader.c:1126-1130`
+    #
+    #     if (!got_code_signatures) { if (cs_enforcement(NULL)) { ret = LOAD_FAILURE; } ... }
+    #
+    # refuses **any executable without an embedded code signature**. The RAM disk's Mach-O has three
+    # load commands and no `LC_CODE_SIGNATURE`, so `load_machfile` returns `LOAD_FAILURE` (4), and
+    # 471's wrappers measured the rest of that path on the device: `xnu_entry_lmf_ret = 0x04`,
+    # `xnu_entry_osr_ns = 9` (`OS_REASON_EXEC`) with `xnu_entry_osr_code = 1`
+    # (`EXEC_EXIT_REASON_BAD_MACHO`), and then `kern_exec.c`'s `badtoolate` arms
+    # `psignal_with_reason(p, SIGKILL, reason)` - which `kern_sig.c:2132-2142` answers with
+    # `panic_plain("unexpected SIGKILL of %s %s with reason -- ...")` because `p == initproc`.
+    #
+    # Undefined rather than 0, and that is not a style choice. **Twenty-four files read this macro
+    # and they use all four spellings** - `#if SECURE_KERNEL` (`kern_cs.c:82`, `vfs_syscalls.c:491`),
+    # `#if !SECURE_KERNEL` (`kern_exec.c:563`, `cprotect.h:59`), `#ifdef SECURE_KERNEL`
+    # (`OSKextLib.cpp:263`, `kern_core.c:121`, `kern_sysctl.c:2284`), `#ifndef SECURE_KERNEL`
+    # (`vm_unix.c:307`) - and for `#define SECURE_KERNEL 0` only two of the four flip. `-U` after the
+    # configuration's own `-D` is the one spelling that leaves every reader reading "off", which is
+    # the defect `mi4-off-option-two-spellings` recorded and what the cancellation above says in
+    # general. The check that it took is over the object rather than the flag list: this script fails
+    # the build if `cs_enforcement_enable` is still read-only in `bsd_kern_kern_cs.o`, because that
+    # is the one measured consequence the whole frontier turns on.
+    -USECURE_KERNEL
 )
 
 # Generated headers that are not MIG output: bsd/sys/sysproto.h comes from
@@ -1339,6 +1408,41 @@ echo "  objects in $OUT"
 echo "  EABI runtime:         ${#RUNTIME_SOURCES[@]} file(s) -> $RT_OUT (not in the manifest)"
 echo "  platform expert:      ${#PLATFORM_SOURCES[@]} C++ and ${#PLATFORM_C_SOURCES[@]} C file(s) -> $PL_OUT (not in the manifest)"
 echo "  tables this image supplies: ${#PLATFORM_BSD_SOURCES[@]} C file(s) -> $PL_OUT (not in the manifest)"
+
+# 472: and the one measured consequence of `-USECURE_KERNEL`, checked over the object rather than
+# over the flag list. `kern_cs.c:82-84` is `#if SECURE_KERNEL` / `const int cs_enforcement_enable = 1;`
+# and `:94` is `SECURE_READ_ONLY_LATE(int) cs_enforcement_enable = DEFAULT_CS_ENFORCEMENT_ENABLE;`
+# for the other branch, so **the symbol's `nm` type is the reading**: `R` means the `const` was
+# compiled (a secure kernel, and `cs_enforcement(NULL)` is unconditionally 1), `D`/`B` means it was
+# not. Nothing else about this build reports which of the two happened - the flag is one word in a
+# command line that carries hundreds, and a `-U` swallowed by a later `-D` looks exactly like a `-U`
+# that worked. The second half is the boot-arg string: `cs_init`'s `PE_parse_boot_argn
+# ("cs_enforcement_disable", ...)` is inside `#if !SECURE_KERNEL` (`:133-155`), so the string's
+# presence in the object is the same reading from the other end.
+#
+# It runs only when the object exists, so a `--dir` or a partial run does not fail on it.
+if [[ -f $OUT/bsd_kern_kern_cs.o ]]; then
+    _cs_type=$(arm-none-eabi-nm "$OUT/bsd_kern_kern_cs.o" 2>/dev/null |
+                   awk '$3=="cs_enforcement_enable"{print $2}' | head -1)
+    if [[ $_cs_type == R ]]; then
+        echo "ERROR: bsd_kern_kern_cs.o has cs_enforcement_enable read-only ($_cs_type), i.e. the" >&2
+        echo "       SECURE_KERNEL branch of kern_cs.c:82-84 was compiled: this is a secure kernel," >&2
+        echo "       cs_enforcement(NULL) is 1 unconditionally, and mach_loader.c:1127 refuses any" >&2
+        echo "       binary without an embedded code signature with LOAD_FAILURE - so 'execve' of the" >&2
+        echo "       RAM disk's Mach-O cannot succeed. The '-USECURE_KERNEL' in the cancellation list" >&2
+        echo "       above is not taking effect (a later -D, or a header defining it)." >&2
+        exit 2
+    fi
+    if ! arm-none-eabi-strings "$OUT/bsd_kern_kern_cs.o" | grep -qx "cs_enforcement_disable"; then
+        echo "ERROR: bsd_kern_kern_cs.o does not carry the 'cs_enforcement_disable' boot-arg string," >&2
+        echo "       so cs_init's !SECURE_KERNEL block is compiled out and the kernel has no run-time" >&2
+        echo "       route to enforcement at all - the same finding as the check above, seen from the" >&2
+        echo "       reader that consumes it." >&2
+        exit 2
+    fi
+    echo "  cs_enforcement_enable is $_cs_type (writable) and cs_enforcement_disable is a boot arg:"
+    echo "    SECURE_KERNEL is undefined, so an unsigned executable can be activated"
+fi
 
 if [[ $SHOW_BLOCKERS -gt 0 ]]; then
     echo
