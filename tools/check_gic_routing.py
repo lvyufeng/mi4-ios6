@@ -25,11 +25,17 @@ run would report as an error:
      timer is on" is a decision two files answer; a header that said 19 for both candidates would
      measure nothing, and the check requires the two to be different *and* to be the payload's.
 
-  3. **what slot 6 and slot 7 hold today.** The vector page's literals are in the image and the check
-     reads them: slot 6 holds **this image's** `fleh_irq` (`entry_stubs.c:6055`, which sets
-     `g_irq_report_pending` and calls `entry_epilogue`), not Apple's `locore_fleh_irq` - which is in
-     the image at 0x80015954 and in no slot. An interrupt today ends the run with a report; that is
-     the state 308 measured, and it is *not* a dispatch.
+  3. **what slot 6 and slot 7 hold.** The vector page's literals are in the image and the check reads
+     them. Slot 7 has held this image's `fleh_decirq` since 308 and still does: an interrupt on the
+     decrementer's slot ends the run with a report, and that is *not* a dispatch. Slot 6 is the one that
+     moved - **483 changed it from this image's `fleh_irq` to Apple's `locore_fleh_irq`** - and it moved
+     in *both* of this step's runs, because the slot is not part of the switch: what
+     `STAGE90_IRQ_ENABLE_LINE` switches is one bit at the distributor, and a build that also moved the
+     vector page would differ from the measured run in two places at once. So the claim is the fixed
+     pair - slot 6 holds Apple's entry and not the reporting stub - and the flag is only required to
+     *exist* here, because it is the value `tools/check_irq_routing.py` reads for the enable. 482's own
+     version of this claim said "Apple's `locore_fleh_irq` is in no slot" - true then, false now, and
+     replaced rather than deleted.
 
   4. **what Apple's handler would do if 483 put it in slot 6.** `fleh_irq_handler`'s first six
      instructions load the five `assym.s` `INTERRUPT_*` words out of `cpu_data` and `blx r5` the
@@ -37,10 +43,11 @@ run would report as an error:
      is an indirect branch to 0 - which is why the routing is decided before it is enabled.
 
   5. **the two ARM paths differ in exactly that.** `fleh_decirq_handler` calls `rtclock_intr`
-     directly and never loads `cpu_data->interrupt_handler`, so the FIQ route would not need 483's
-     work even if 143 had not measured it dead. The check asserts the *absence* in one and the
-     presence in the other, because "which of the two paths needs a handler" is the routing decision
-     stated as code.
+     directly and never loads `cpu_data->interrupt_handler`, so the FIQ route would not need a handler
+     even if 143 had not measured it dead - which is why slot 7 is still the reporting stub and why
+     the handler 483 installs is reached only through slot 6. The check asserts the *absence* in one
+     and the presence in the other, because "which of the two paths needs a handler" is the routing
+     decision stated as code.
 
   6. **the probe cannot deliver anything, in the three places it claims.** The CPU interface is
      written with both group enables clear and `PMR` 0 *before* the first countdown is armed; the
@@ -76,6 +83,7 @@ BOOT_DIR = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot")
 ENTRY_GIC_C = os.path.join(BOOT_DIR, "entry_gic.c")
 ENTRY_GIC_H = os.path.join(BOOT_DIR, "entry_gic.h")
 ENTRY_STUBS_C = os.path.join(BOOT_DIR, "entry_stubs.c")
+ENTRY_IRQ_C = os.path.join(BOOT_DIR, "entry_irq.c")
 PAYLOAD_GIC_C = os.path.join(REPO_ROOT, "stages/stage90/gic.c")
 PAYLOAD_FIQ_PROBE_C = os.path.join(REPO_ROOT, "stages/stage90/xnu_msm8974_fiq_probe.c")
 ASSYM = os.path.join(REPO_ROOT, "out/xnu_assym/STAGE90_XNU/assym.s")
@@ -262,10 +270,12 @@ def gather(image):
         "probe_text": read(ENTRY_GIC_C),
         "stubs_text": read(ENTRY_STUBS_C),
         "payload_text": read(PAYLOAD_GIC_C),
+        "irq_text": read(ENTRY_IRQ_C),
         "payload_fiq_text": read(PAYLOAD_FIQ_PROBE_C),
         "assym_text": read(ASSYM),
     }
     facts["header"] = defines(facts["header_text"])
+    facts["irq_text"] = strip_comments(facts["irq_text"])
     facts["payload"] = defines(facts["payload_text"])
     facts["payload_fiq"] = defines(facts["payload_fiq_text"])
     facts["assym"] = defines(facts["assym_text"])
@@ -310,6 +320,14 @@ DISPATCH_CALL_REGS = ("r0", "r1", "r2", "r3", "r5")
 DISPATCH_WINDOW = 0x100
 
 LOAD_RE = re.compile(r"^(r\d+), \[(r\d+), #(\d+)\]$")
+
+
+def irq_enable_line(text):
+    """483's one switch, read out of `entry_irq.c`. `None` when the file no longer declares it, which
+    is a failure rather than a default: the slot this check polices depends on the value, so a value
+    it cannot read is a claim it cannot make."""
+    match = re.search(r"^#define\s+STAGE90_IRQ_ENABLE_LINE\s+(\d+)", strip_comments(text), re.M)
+    return int(match.group(1)) if match else None
 
 
 def dispatch_window(dispatch, expected):
@@ -430,8 +448,26 @@ def claim_vector(facts, failures, notes):
     if not symbols:
         failures.append("no image was read, so what the vector page holds today is uncompared")
         return
-    for slot, reporting, apple in ((6, "fleh_irq", "locore_fleh_irq"),
-                                   (7, "fleh_decirq", "locore_fleh_decirq")):
+
+    # **Slot 6 stopped being the reporting stub on purpose, and the slot is not part of the switch.**
+    # 482 asserted "slot 6 holds this image's `fleh_irq` and Apple's `locore_fleh_irq` is in no slot",
+    # because that was the risk statement of *that* step: pointing the slot at a dispatcher whose callee
+    # word had never been written is a branch to address 0. 483 writes that word
+    # (`entry_irq.c`'s `entry_irq_arm` calls `ml_install_interrupt_handler`) and moves the slot.
+    #
+    # The tempting coupling - slot 6 holds Apple's entry only when `STAGE90_IRQ_ENABLE_LINE` is 1 - is
+    # **wrong**, and 483's own first run is why: the switch decides one bit at the distributor, and the
+    # two runs of this step exist to differ in exactly that bit. A build that also moved the vector
+    # page would differ from run B in two places, and "the interrupt arrived" would have two candidate
+    # causes. So the slot is asserted unconditionally and the flag is only required to *exist* here -
+    # what it switches is `entry_irq.c`'s `#if`, and `tools/check_irq_routing.py` is where that is
+    # checked. `entry_irq.c` also defines the flag, which is what lets the two checks read one value.
+    flag = irq_enable_line(facts["irq_text"])
+    if flag is None:
+        failures.append("entry_irq.c no longer defines STAGE90_IRQ_ENABLE_LINE, so the source of the "
+                        "one bit that separates this step's two runs cannot be read")
+
+    for slot, reporting, apple in ((7, "fleh_decirq", "locore_fleh_decirq"),):
         word = facts["slot_words"].get(slot)
         want = symbols.get(reporting)
         apple_addr = symbols.get(apple)
@@ -451,11 +487,39 @@ def claim_vector(facts, failures, notes):
                             "with it every claim about what an interrupt does today"
                             % (slot, apple, apple_addr))
 
-    # And the property that makes them *reporting* handlers rather than dispatchers: the source of
-    # each is one call into the epilogue. Comments are stripped first - `fleh_irq`'s own body
+    # Slot 6, in every state of the switch. Both directions, because the two failures are different: a
+    # slot that kept `fleh_irq` records an interrupt and stops on it - which reads in the log exactly
+    # like a machine that never took one - and a slot that holds neither is a branch to whatever the
+    # linker put there.
+    word = facts["slot_words"].get(6)
+    want = symbols.get("locore_fleh_irq")
+    reporting = symbols.get("fleh_irq")
+    if word is None or want is None:
+        failures.append("slot 6's trampoline literal or the image's locore_fleh_irq is missing, so the "
+                        "slot that decides what an IRQ does cannot be named")
+    else:
+        if word != want:
+            failures.append("slot 6 holds 0x%08x and Apple's locore_fleh_irq is 0x%08x: STAGE90_IRQ_"
+                            "ENABLE_LINE is %s, and the slot is not part of the switch - it holds "
+                            "Apple's entry in both of this step's runs, so the two differ in the "
+                            "distributor's one bit and nowhere else"
+                            % (word, want, "unset" if flag is None else str(flag)))
+        if reporting is not None and word == reporting:
+            failures.append("slot 6 holds this image's fleh_irq (0x%08x): an interrupt would be "
+                            "recorded and stopped on instead of reaching the handler "
+                            "ml_install_interrupt_handler installed, and the log cannot tell that "
+                            "apart from a machine that never took one" % reporting)
+
+    # And the property that makes the *reporting* handlers reporting rather than dispatching ones: the
+    # source of each is one call into the epilogue. Comments are stripped first - `fleh_irq`'s own body
     # *mentions* `entry_epilogue` in prose ("the MMU does not come off until `entry_epilogue` is
     # inside"), so a test on the raw body is satisfied by the comment that describes the call. The
     # first version of this check was, and its mutation was accepted.
+    #
+    # `fleh_irq` is in this list in both states: with the line armed it is still defined, still a
+    # report-and-stop, and still the thing `entry_stubs.c` would be if the flag went back to 0 - and
+    # a build that quietly turned it into a dispatcher as well would leave two dispatchers and no
+    # report path at all.
     for name in ("fleh_irq", "fleh_decirq"):
         body = function_body(facts["stubs_text"], name)
         if body is None:
@@ -682,6 +746,18 @@ def mutate_facts(facts, mutate):
         facts["payload"]["GIC_TIMER_PPI0_ID"] = 34
     elif mutate == "slot6_moved":
         facts["slot_words"][6] = facts["image_symbols"]["fleh_decirq"]
+    elif mutate == "slot6_is_the_reporting_stub":
+        # The state 482 shipped, produced in a build that installs a handler. Without the slot in the
+        # claim this mutation is invisible in a *run*: an interrupt that is recorded and stopped on
+        # leaves the same log as one that never arrived, which is why the slot is a failure and not a
+        # note.
+        facts["slot_words"][6] = facts["image_symbols"]["fleh_irq"]
+    elif mutate == "slot6_is_neither":
+        facts["slot_words"][6] = 0
+    elif mutate == "flag_removed":
+        facts["irq_text"] = re.sub(r"^#define\s+STAGE90_IRQ_ENABLE_LINE\s+\d+",
+                                   "/* the switch is gone */", facts["irq_text"],
+                                   count=1, flags=re.M)
     elif mutate == "slot7_is_apples":
         facts["slot_words"][7] = facts["image_symbols"]["locore_fleh_decirq"]
     elif mutate == "reporting_handler_dispatches":
@@ -778,7 +854,7 @@ MUTATIONS = (
     "gicd_offset_moved", "gicc_offset_moved", "base_moved", "cpu_if_not_the_second_pair",
     "payload_offset_moved", "payload_assertion_moved", "payload_name_renamed",
     "payload_names_disagree", "candidates_the_same", "candidate_not_the_payloads",
-    "candidate_is_an_spi", "slot6_moved", "slot7_is_apples", "reporting_handler_dispatches",
+    "candidate_is_an_spi", "slot6_moved", "slot6_is_the_reporting_stub", "slot6_is_neither", "flag_removed", "slot7_is_apples", "reporting_handler_dispatches",
     "reporting_handler_stops_reporting", "assym_handler_moved", "header_handler_moved",
     "dispatch_load_dropped", "dispatch_blx_dropped", "dispatch_window_short",
     "dispatch_order_swapped", "decrementer_path_reads_the_handler",
@@ -832,12 +908,16 @@ def main():
             print("      " + failure, file=sys.stderr)
         return 1
     header = facts["header"]
-    say("  xnu_entry_482: the GIC offsets this probe reads are the payload's own (both of this "
-        "repository's files, compared), the two candidates are the payload's timer PPIs (%d and %d, "
-        "distinct), slot 6 holds this image's reporting `fleh_irq` while Apple's `locore_fleh_irq` "
-        "sits in no slot, Apple's handler would dispatch through `cpu_data`+%d with nothing ever "
-        "stored - and the probe's three guards are in the source in the order that makes them guards"
-        % (header["STAGE90_GIC_TIMER_PPI0"], header["STAGE90_GIC_TIMER_PPI1"],
+    flag = irq_enable_line(facts["irq_text"])
+    slot6 = ("slot 6 holds Apple's `locore_fleh_irq` and this image's reporting `fleh_irq` is in no "
+             "slot, in both states of the switch (`STAGE90_IRQ_ENABLE_LINE` is %s here), so the slot "
+             "and the enable move independently" % ("unset" if flag is None else str(flag)))
+    say("  xnu_entry_482/483: the GIC offsets the probe and the handler both read are the payload's "
+        "own (both of this repository's files, compared), the two candidate lines are the payload's "
+        "timer PPIs (%d and %d, distinct) and the line the handler arms is neither of them, %s, "
+        "Apple's dispatcher loads `cpu_data`+%d and `blx`es it - and the probe's three guards are in "
+        "the source in the order that makes them guards"
+        % (header["STAGE90_GIC_TIMER_PPI0"], header["STAGE90_GIC_TIMER_PPI1"], slot6,
            header["STAGE90_CPU_INTERRUPT_HANDLER"]))
     return 0
 

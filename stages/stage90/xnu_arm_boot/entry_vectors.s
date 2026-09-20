@@ -238,7 +238,27 @@ vec_tramp_1_user_handler:
  */
     VECTOR_TRAMP vec_tramp_4, locore_fleh_dataabt
     VECTOR_TRAMP vec_tramp_5, fleh_addrexc
-    VECTOR_TRAMP vec_tramp_6, fleh_irq
+/*
+ * **483: slot 6 moves from this image's reporting stub to Apple's own IRQ entry.**
+ *
+ * From 308 until 482 the IRQ vector ended in `entry_stubs.c`'s `fleh_irq`, which sets a flag and
+ * calls `entry_epilogue("exception: irq")` - a report and a stop, chosen because there was nothing
+ * to dispatch *to*: the dispatcher `fleh_irq_handler` reads `cpu_data->interrupt_handler` and
+ * `blx`es it, and this image had never stored one, so Apple's entry would branch to address 0.
+ * `entry_irq.c` now stores one, and this slot is what makes it reachable.
+ *
+ * `locore_fleh_irq` is Apple's vector entry, not the dispatcher: it splits on the interrupted mode
+ * (`fleh_irq_user` saves into the thread's PCB, `fleh_irq_kernel` onto the interrupted stack), swaps
+ * `sp` to `cpu_data->istackptr` for the second level, and falls through into `fleh_irq_handler`.
+ * `LEXT` is why the symbol carries a `locore_` prefix in the image while the source says
+ * `fleh_irq` - and why `fleh_irq` here is this image's own and not a clash.
+ *
+ * The trampoline's `ldr sp` above stays even though it is no longer load-bearing for the *handler*:
+ * it loads `sp_irq`, which Apple's entry overwrites with the SVC bank before it touches a stack, so
+ * for this slot it is a dead store - and it is left in place because the macro is shared with the
+ * seven slots that still need it.
+ */
+    VECTOR_TRAMP vec_tramp_6, locore_fleh_irq
     VECTOR_TRAMP vec_tramp_7, fleh_decirq
 
     .size ExceptionVectorsBase, . - ExceptionVectorsBase

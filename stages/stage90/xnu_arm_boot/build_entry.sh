@@ -318,6 +318,17 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
     -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
     -DSTAGE90_ENTRY_GIC_TRACED="$ENTRY_TRACE" \
     -c "$BOOT_DIR/entry_gic.c" -o "$OUT/xnu_arm_entry_gic.o"
+# **483: the handler, the line, and the one switch that decides whether a countdown may become an
+# interrupt.** Compiled and linked on the same condition as the two above, for a reason of its own:
+# this object no longer *only* records - it defines the four GIC accesses the probe also uses and it
+# installs a second-level handler - so a build that left it out would be a different machine and not
+# a quieter one. `STAGE90_IRQ_ENABLE_LINE` is *not* a flag on this command line, and deliberately:
+# it is a `#define` in the source, because it selects what the image does and the check has to be
+# able to read the same value the linker did.
+run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
+    -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
+    -DSTAGE90_IRQ_TRACED="$ENTRY_TRACE" \
+    -c "$BOOT_DIR/entry_irq.c" -o "$OUT/xnu_arm_entry_irq.o"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
 
@@ -466,6 +477,14 @@ LINK_OBJS=(
 # where a build that forgot it would still produce a kernel that boots with the timer masked - which
 # is exactly 481's state, and not a difference a log could show.
 [[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_gic.o")
+
+# 483: the interrupt's handler, on the same condition - and with the one dependency of its own that
+# decides where it goes in this list. It *defines* the four GIC accesses (`gicd_read`, `gicd_write`,
+# `gicc_read`, `gicc_write`) that `entry_gic.o` above now uses, so it must come **before** that
+# object here. It also names `BootCpuData`, `ml_install_interrupt_handler` and `rtclock_intr`, all of
+# which the kernel objects define; nothing in it needs the stub generator to invent a name, which is
+# the property the comment on `entry_timebase.o` states for the two above.
+[[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_irq.o")
 
 if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # --- XNU's own objects, and a generated stub for everything they still need -------------------
@@ -27406,11 +27425,14 @@ verify_trace_symbols() {
             printf '%s' "${g[$idx]:6:2}${g[$idx]:4:2}${g[$idx]:2:2}${g[$idx]:0:2}"
         }
         # The eight pairs, in vector order: the trampoline's handler literal and the symbol it must
-        # hold. The seventh and eighth are `fleh_irq`/`fleh_decirq`; `fleh_decirq` is this image's
-        # because `__ARM_TIME__` is off and locore's slot for it is `mov pc, r9`.
+        # hold. The eighth is `fleh_decirq`; `fleh_decirq` is this image's because `__ARM_TIME__` is
+        # off and locore's slot for it is `mov pc, r9`. **483 makes slot 6 Apple's `locore_fleh_irq`**,
+        # for the same reason 467/476/477/479 moved slots 4/3/1/2: the reporting stub there is this
+        # image's own handler, and a report-and-stop in the IRQ slot is a step that cannot be reached.
+        # The pair for that slot is therefore stated in both directions below, in `gone`.
         local -a x467_want=(
             "0 fleh_reset" "1 fleh_undef" "2 locore_fleh_swi" "3 locore_fleh_prefabt"
-            "4 locore_fleh_dataabt" "5 fleh_addrexc" "6 fleh_irq" "7 fleh_decirq" )
+            "4 locore_fleh_dataabt" "5 fleh_addrexc" "6 locore_fleh_irq" "7 fleh_decirq" )
         vbase=$(x467_addr_of ExceptionVectorsBase)
         [[ -n $vbase ]] || layout_fail "the image has no ExceptionVectorsBase, so the vector page cannot be checked"
         vpair=""
@@ -27442,8 +27464,13 @@ verify_trace_symbols() {
         # a slot that kept this image's `fleh_swi` records-and-stops, so the boot's first syscall
         # would look exactly like a syscall this image reported and the fixture's `svc` would never
         # reach the kernel's dispatcher at all.
+        # **483 adds slot 6's**, and it is the one whose failure mode is a *run who does nothing*: a
+        # slot that kept this image's `fleh_irq` records the interrupt and stops on it, so
+        # `cpu_data->interrupt_handler` would be installed, the line would be enabled, the countdown
+        # would be unmasked, and the only thing the log would show is the stop - which is
+        # indistinguishable from a machine that never took an interrupt at all.
         local gone=""
-        for pair in "4 fleh_dataabt" "3 fleh_prefabt" "2 fleh_swi"; do
+        for pair in "4 fleh_dataabt" "3 fleh_prefabt" "2 fleh_swi" "6 fleh_irq"; do
             read -r n sym <<<"$pair"
             got=$(x467_addr_of "$sym")
             [[ -n $got ]] || layout_fail "the image has no $sym, so the not-installed claim for slot $n cannot be checked"
@@ -27479,7 +27506,7 @@ verify_trace_symbols() {
             fi
             say "  xnu_entry_477: slot 1 splits on the interrupted mode in the vector page - user -> locore_fleh_undef (0x$kapple), kernel -> fleh_undef (0x$kuser) - so a user udf is entered with the interrupted registers intact and the saved PC is the udf, not this image's return address"
         }
-        say "  xnu_entry_467: the vector page carries the handlers it says it does:$vpair; slots 2, 3 and 4 are Apple's own locore_fleh_swi, locore_fleh_prefabt and locore_fleh_dataabt and not this image's $gone- so a fault the kernel can service is serviced and retried and a syscall reaches the kernel's own dispatcher, and slots 0, 1, 5, 6 and 7 are still this image's, so a fault it cannot service still reaches the trap's own buffer through panic()'s udf"
+        say "  xnu_entry_467: the vector page carries the handlers it says it does:$vpair; slots 2, 3, 4 and 6 are Apple's own locore_fleh_swi, locore_fleh_prefabt, locore_fleh_dataabt and locore_fleh_irq and not this image's $gone- so a fault the kernel can service is serviced and retried, a syscall reaches the kernel's own dispatcher, and an interrupt reaches the second-level handler 483 installs; and slots 0, 1, 5 and 7 are still this image's, so a fault it cannot service still reaches the trap's own buffer through panic()'s udf"
     }
     # **The by-address claim, read out of the image.** The table is
     # `struct console_ops { void (*putc)(int,int,int); int (*getc)(int,int,boolean_t,boolean_t); }`
@@ -27927,6 +27954,24 @@ run python3 "$REPO_ROOT/tools/check_timebase_registration.py" --image "$OUT/xnu_
 run python3 "$REPO_ROOT/tools/check_gic_routing.py" --image "$OUT/xnu_arm_entry.elf" --verbose \
     || exit 1
 run python3 "$REPO_ROOT/tools/check_gic_routing.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
+    || exit 1
+
+# **483's six claims, and the one boundary they share with the block above.** This check is about the
+# chain and not about the numbers: that the second-level handler is installed through Apple's own
+# `ml_install_interrupt_handler` and read back before anything is enabled, that the `ICFGR` word and
+# field are derived from the intid, that the handler's three cases are three and that the unexpected
+# one stops, that the enable is one write inside the source's own switch, and that the countdown's mask
+# comes off only after the arming said the line is enabled - in that order, in two files.
+#
+# It deliberately does **not** re-assert 482's claims. The GIC register offsets, the two candidate PPIs,
+# the five `cpu_data` interrupt words and the shape of Apple's dispatch are
+# `tools/check_gic_routing.py`'s above, and the one thing the two share is
+# `STAGE90_IRQ_ENABLE_LINE` - which is why it is a `#define` in `entry_irq.c` and not a `-D` on either
+# compile line: two checks read it, and a value they could disagree with the image about would make
+# both of them reports rather than gates.
+run python3 "$REPO_ROOT/tools/check_irq_routing.py" --image "$OUT/xnu_arm_entry.elf" --verbose \
+    || exit 1
+run python3 "$REPO_ROOT/tools/check_irq_routing.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
     || exit 1
 say "the payload build reads the .bin from there directly; nothing to install"
 

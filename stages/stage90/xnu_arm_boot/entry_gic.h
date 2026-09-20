@@ -38,11 +38,31 @@
 #define STAGE90_GICD_IPRIORITY0 0x400u   /* one byte per intid; +16 is the word holding 16..19  */
 #define STAGE90_GICD_ITARGETSR0 0x800u   /* banked for PPIs: per-CPU, and 0 means "this CPU"     */
 
+/*
+ * `GICD_ICFGR<n>`, one two-bit field per intid, and **the one offset in this header with no second
+ * source in this repository**: `gic.c` does not name it and neither does 143's probe, so unlike every
+ * other number here it cannot be compared against the payload. Its source is the architecture
+ * (`GICD_ICFGR<n>` at `0xC00 + 4n`, field `2 * (intid mod 16)`) and the check therefore asserts the
+ * *arithmetic* instead of the value: `entry_irq.c` must pick the word as
+ * `STAGE90_GICD_ICFGR0 + (STAGE90_GIC_TIMER_INTID / 16) * 4` and the shift as
+ * `(STAGE90_GIC_TIMER_INTID % 16) * 2`, so 483 cannot hardcode `0xC04` and `8` as a second definition
+ * of a derivation. 482 read `ISPENDR0` twice and inferred from the pair that the line behaves as
+ * **edge**-configured (the pending bit did not follow the line back down); this register is what
+ * settles it, and this step reads it and records it rather than writing it.
+ */
+#define STAGE90_GICD_ICFGR0     0xc00u
+
 /* CPU interface (`GICC`). */
 #define STAGE90_GICC_CTLR       0x000u
 #define STAGE90_GICC_PMR        0x004u
 #define STAGE90_GICC_IAR        0x00cu   /* a read *acknowledges* - 482 deliberately never reads */
 #define STAGE90_GICC_EOIR       0x010u   /* 483's handler writes it; 482 has nothing to ack     */
+
+/* `IAR`'s payload: the intid in the low ten bits, and `0x3ff` is also the spurious value a CPU
+ * interface returns when there is nothing to acknowledge. Both are `gic.c`'s own
+ * (`GICC_IAR_INTID_MASK`, `GICC_SPURIOUS_ID`), which is why the check compares them. */
+#define STAGE90_GICC_IAR_INTID_MASK 0x3ffu
+#define STAGE90_GICC_SPURIOUS_ID    0x3ffu
 
 /*
  * `GICC_CTLR`'s two enable bits. Bit 0 is `EnableGrp0` and bit 1 is `EnableGrp1`; the CPU interface
@@ -73,6 +93,25 @@
 #define STAGE90_GIC_TIMER_PPI1  19u
 
 /*
+ * **The line the virtual timer is actually on, and it is neither of the two above.**
+ *
+ * 483's handler arms exactly this intid, and the number is not a reading of the tree or of Apple's
+ * source: it is 482's measurement, and the four keys that carry it are
+ * `xnu_live_gic_pend_added18 = xnu_live_gic_pend_added19 = xnu_live_gic_pend_added = 0x00100000`
+ * and `xnu_live_gic_timer_intid = 0x00000014`. `0x100000` is bit 20, each candidate raised it under
+ * its own countdown and raised nothing under its own masked control, and 19 is *not* free - the
+ * payload's own IRQ path acknowledged it earlier in the same boot (`gic_timer_last_iar = 0x13` with
+ * `gic_timer_last_timer_ctl = 0x5`), so 19 is `CNTP`'s line and the virtual timer has one of its own.
+ *
+ * **So this constant and the two above disagree on purpose, and the disagreement is the step.** The
+ * check refuses the link unless the two candidates are still distinct and this number is neither of
+ * them, because the failure this guards against is a build that quietly goes back to the device
+ * tree's pair - which was measured wrong for `CNTV` - or to a "one of the two, whichever fires"
+ * handler, which cannot distinguish a line from a coincidence.
+ */
+#define STAGE90_GIC_TIMER_INTID 20u
+
+/*
  * `struct cpu_data`'s interrupt words, and the reason they are here rather than in
  * `entry_saved_state.h`: `fleh_irq_handler` loads all five and calls the fourth as a function
  * pointer (`ldr r0, [r4, #192]` / `ldr r1, [r4, #196]` / `ldr r2, [r4, #184]` / `ldr r3, [r4, #188]`
@@ -87,6 +126,23 @@
 #define STAGE90_CPU_INTERRUPT_SOURCE    188
 #define STAGE90_CPU_INTERRUPT_TARGET    192
 #define STAGE90_CPU_INTERRUPT_REFCON    196
+
+/*
+ * Four more `cpu_data` words 483 reads, and the reason they are in this header rather than a third
+ * offset file: `fleh_irq_kernel` and `fleh_irq_handler` are the code that will run, and these are the
+ * words *they* load - the interrupt stack the second-level handler runs on (`ldr sp, [sp,
+ * CPU_ISTACKPTR]`, `locore.s:1377`), the saved context it can be handed (`str r5, [r4,
+ * CPU_INT_STATE]`, `:1407`), and the two statistics words it increments on the way in (`:1409`/`:1413`).
+ * The first of them is a **precondition and not a reading**: an interrupt stack pointer of 0 is a
+ * `ldr sp, [r0]` from address 0 the moment an interrupt arrives, which is the one failure mode this
+ * step cannot see from the source and can see from the link. `tools/check_irq_routing.py` compares all
+ * four against the generated `assym.s`, and the run records the value of `ISTACKPTR` before the line
+ * is enabled.
+ */
+#define STAGE90_CPU_ISTACKPTR           4
+#define STAGE90_CPU_INT_STATE           176
+#define STAGE90_CPU_STAT_IRQ            376
+#define STAGE90_CPU_STAT_IRQ_WAKE       380
 
 /*
  * How long the probe gives the countdown to reach zero before it reads the distributor, and the
@@ -126,5 +182,30 @@
  * twice or a machine whose L1 slot is already occupied cannot make it a fault.
  */
 void entry_gic_probe(void);
+
+/*
+ * The four accesses both of this window's users go through, and **483's reason for exporting them is
+ * 482's reason for exporting the `CNTV` five**: the handler in `entry_irq.c` reads `GICC_IAR`, writes
+ * `GICC_EOIR` and reads the distributor, and the alternative was a second set of `volatile` pointer
+ * arithmetic in a second file - this project's most repeated defect, and one that a check on either
+ * file alone would not catch. They live in `entry_irq.c` because that is the object this step's step
+ * is in; in a build with `STAGE90_IRQ_ENABLE_LINE` off they are the only thing that file defines and
+ * the only thing `entry_gic.c` uses from it.
+ */
+uint32_t gicd_read(uint32_t off);
+void     gicd_write(uint32_t off, uint32_t value);
+uint32_t gicc_read(uint32_t off);
+void     gicc_write(uint32_t off, uint32_t value);
+
+/* The second-level handler `ml_install_interrupt_handler` is handed, in Apple's own ABI - the four
+ * registers `fleh_irq_handler` loads out of `cpu_data` before `blx r5` are r0..r3, and this signature
+ * is that call. Declared here so the installation and the definition cannot drift. */
+void entry_irq_handler(void *target, void *refCon, void *nub, int source);
+
+/* The one ordered arming sequence, called once from the end of the first `ml_set_decrementer`. It
+ * returns 1 **only when the line was enabled at the distributor and a countdown is therefore able to
+ * become an interrupt**, which is the value that decides whether the caller may stop masking. A 0
+ * means the machine is exactly as 482 left it. */
+uint32_t entry_irq_arm(void);
 
 #endif /* STAGE90_ENTRY_GIC_H */

@@ -143,32 +143,14 @@ extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_befo
 /* --------------------------------------------------------------------------------------------- */
 
 /*
- * Read with `volatile` and write followed by `dsb sy`, because a peripheral register write that is
- * still in the write buffer when the next instruction reads the same block is a read of the old
- * value. `gicd_write(ISENABLER0, ...)` followed by `gicd_read(ISENABLER0)` is the one place in this
- * file where that would silently turn a reading into a claim.
+ * **483 moved the four accesses into `entry_irq.c`**, which is the object that also reads `GICC_IAR`
+ * and writes `GICC_EOIR`: one definition of "how this image talks to the GIC", used by the probe here
+ * and by the handler there, and compared against the payload's own two sources by
+ * `tools/check_gic_routing.py` for the numbers rather than for the accessors. The `volatile` and the
+ * `dsb sy` after every write are still the property that matters and still stated once, at the
+ * definition: a peripheral register write that is still in the write buffer when the next instruction
+ * reads the same block is a read of the old value.
  */
-static uint32_t gicd_read(uint32_t off)
-{
-    return *(volatile uint32_t *)(uintptr_t)(STAGE90_GIC_DIST_BASE + off);
-}
-
-static void gicd_write(uint32_t off, uint32_t value)
-{
-    *(volatile uint32_t *)(uintptr_t)(STAGE90_GIC_DIST_BASE + off) = value;
-    __asm__ volatile ("dsb sy" ::: "memory");
-}
-
-static uint32_t gicc_read(uint32_t off)
-{
-    return *(volatile uint32_t *)(uintptr_t)(STAGE90_GIC_CPU_BASE + off);
-}
-
-static void gicc_write(uint32_t off, uint32_t value)
-{
-    *(volatile uint32_t *)(uintptr_t)(STAGE90_GIC_CPU_BASE + off) = value;
-    __asm__ volatile ("dsb sy" ::: "memory");
-}
 
 /* --------------------------------------------------------------------------------------------- */
 /* The exception mask, and the two bits it is made of                                             */

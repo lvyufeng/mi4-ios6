@@ -280,7 +280,17 @@ The routing decision is now made of measurements rather than of a quotation, and
   4. **Lift `STAGE90_CNTV_ARM_MASK`** only after 1-3, and keep the ordering the probe's guards already
      have: candidates disabled and cleared before the CPU interface is restored.
 
-Still owed from earlier steps, unchanged: which of `arm_fast_fault`/`vm_fault` serviced 480's write
+**483 did all four, and one of them came back negative.** Items 1, 2 and 4 are as written: the handler
+is installed on 20 through Apple's own `ml_install_interrupt_handler`, the line is enabled at the
+distributor, and the countdown's mask comes off last — measured by an interrupt actually arriving
+(`first_iar = 0x14`, `timer_count` past 2048, `setpop_count` 16 → 4096). Item 3's premise was that the
+register could settle edge-versus-level, and it cannot: `GICD_ICFGR1` (INTID 20's word, `0xc04`) reads
+**`0xffffffff`**, and no GICv2 configuration field is `0b11` — the bits are not storage on this SoC.
+Also corrected here rather than there: the four GIC accessors this step put in `entry_gic.c` moved to
+`entry_irq.c` in 483, so that the probe and the handler address the GIC through one definition, and the
+claim this document's check made about slot 6 turned out to be about a *coupling* the machine does not
+have — `entry_vectors.s` moves the slot unconditionally in 483, and the flag switches one distributor
+bit. Still owed from earlier steps, unchanged: which of `arm_fast_fault`/`vm_fault` serviced 480's write
 fault; why the `VM_FLAGS_FIXED` stack allocation at `0x26E00000` is refused; 474's `thread->map = 0`
 moment; 448's `_bad` slots as a named pair; the pthread table's other ~34 slots;
 `osfmk/kperf/kperfbsd.c`; the untraced build's `entry_stubs.c` compile errors; and

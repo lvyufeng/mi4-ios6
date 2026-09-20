@@ -220,6 +220,13 @@ static uint32_t g_dec_writes;             /* every call `ml_set_decrementer` mad
 static uint32_t g_dec_first_value = 0xFFFFFFFFu;
 static uint32_t g_dec_first_readback;
 static uint32_t g_dec_first_ctl;
+/* 483: the nearest deadline the kernel ever armed, in decrementer counts, and on which call. The
+ * first pop of the boot saturates to `DECREMENTER_MAX`; this is how the run says whether anything
+ * nearer followed, i.e. whether an interrupt was *due* inside the window at all. */
+static uint32_t g_dec_min_value = 0xFFFFFFFFu;
+/* 483: 0 until `entry_irq_arm()` has said the line is enabled and the installer's read-back agreed.
+ * Non-zero is the permission to write `CNTV_CTL` without `IMASK`. */
+static uint32_t g_irq_unmasked;
 static uint32_t g_cntv_tval_a, g_cntv_tval_b;
 static uint32_t g_cntvct_a_lo, g_cntvct_b_lo;
 static uint32_t g_cntv_spin = STAGE90_CNTV_SPIN;
@@ -278,6 +285,58 @@ static void stage90_tbd_set_decrementer(uint32_t dec_value)
         TB_LIVE("xnu_live_dec_readback", g_dec_first_readback);
     } else if ((g_dec_writes & (g_dec_writes - 1u)) == 0u) {
         TB_LIVE("xnu_live_dec_count", g_dec_writes);
+    }
+
+    /*
+     * **483: the arming and the unmask, both after `g_dec_writes++` - and that order is the point.**
+     *
+     * `entry_irq_arm()` installs the second-level handler into `cpu_data`, reads `GICD_ICFGR` for the
+     * line 482 measured, clears its pending bit and (when the switch says so) enables it at the
+     * distributor; it returns 1 only if the installer's read-back agreed, and 0 leaves the countdown
+     * masked, which is 482's state exactly - so "the machine was not ready" cannot be confused with
+     * "the step did not run" in the log.
+     *
+     * **Why the call cannot be earlier.** `ml_install_interrupt_handler` ends in
+     * `initialize_screen(NULL, kPEAcquireScreen)` (`osfmk/arm/machine_routines.c:420`), and that is
+     * not a store: it walks the video-console path, which can reach `setPop` and so this function
+     * again. If that re-entrant call arrived while `g_dec_writes` was still 0, its first-call branch
+     * would be open and it would run **482's probe** - inside the arming, with this image's handler
+     * already installed and `g_irq_armed` already set. `entry_gic_probe` drives its own countdowns and
+     * rewrites the CPU interface's control and priority registers before restoring them, which is a
+     * second definition of the state `entry_irq_arm` is in the middle of establishing. One increment
+     * earlier and the branch is closed: `g_dec_writes == 1` on re-entry, no sample, no probe.
+     *
+     * `g_irq_armed` is the second guard for the same shape - a re-entrant `entry_irq_arm` returns
+     * `g_irq_enabled_line`, which is still 0 at that point, so it cannot unmask either. Two guards for
+     * one window, because the window is the step's whole risk.
+     */
+    if (g_irq_unmasked == 0u)
+        g_irq_unmasked = entry_irq_arm();
+
+    if (g_irq_unmasked != 0u) {
+        /*
+         * `ENABLE` without `IMASK`, which is the whole change 483 makes to the timer: the same
+         * countdown, the same compare value, and the one bit that lets it reach the CPU interface.
+         * It is written **after** `CNTV_TVAL` above - the deadline is programmed while the line is
+         * still masked and the mask comes off with the deadline already loaded, so the shortest
+         * possible window between "this deadline is armed" and "this deadline can fire" is the
+         * distance between two stores rather than between a store and the kernel's next call.
+         */
+        stage90_cntv_ctl_write(STAGE90_CNTV_CTL_ENABLE);
+    }
+
+    /*
+     * How near the nearest deadline ever was, on every call and not only on the powers of two. This
+     * is the number that decides whether a run can *see* an interrupt at all: the first `setPop` of
+     * the boot carries `EndOfAllTime` and saturates to `DECREMENTER_MAX` (~112 s at 19.2 MHz), so if
+     * every later pop is also far, "armed and no interrupt arrived" is a fact about the kernel's
+     * deadlines and not about the handler - and the two are only distinguishable if the minimum and
+     * the call it happened on are in the log.
+     */
+    if (dec_value < g_dec_min_value) {
+        g_dec_min_value = dec_value;
+        TB_LIVE("xnu_live_dec_min", g_dec_min_value);
+        TB_LIVE("xnu_live_dec_min_count", g_dec_writes);
     }
 }
 
