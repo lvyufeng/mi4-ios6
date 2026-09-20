@@ -28138,5 +28138,21 @@ run python3 "$REPO_ROOT/tools/check_driver_plane_census.py" --image "$OUT/xnu_ar
 # fails on a build whose step 2 predates the fix rather than quietly linking that object.
 run python3 "$REPO_ROOT/tools/check_asm_config.py" --verbose || exit 1
 run python3 "$REPO_ROOT/tools/check_asm_config.py" --selftest || exit 1
+#
+# **And 489's, which is about a reading rather than a build.** For three steps the console's last line -
+# `load_init_program: attempting to load /sbin/launchd` and then nothing - was read as "`execve` is still
+# running, process 1 never started", and 487's next step was aimed at the exec. It is the opposite:
+# `load_init_program` prints on every failure and on nothing else, so silence after the last name is
+# *success*. That turns a log that looked like a stop into four independent readings that the boot reached
+# the OS: `lmf_ret = 0`, the five `tail_seq` records emitted from inside `__wrap_vm_pageout` (which only
+# runs after `bsd_init` returned), `getpid`'s first answer with its caller, and the fixture's own
+# `mmap` result. The claim is over the *file*, not over the log: the chain `bsd_ast` -> `bsdinit_task` ->
+# `load_init_program` -> `execve`, the exhaustion of `load_init_program`'s printing and the silence of
+# every success arm, `bsd_init()` before all five tail calls with the censuses wrapped inside the last,
+# and the RAM disk's own two fault sites read out of this image's bytes as the one load and one store
+# through `r0` that the run's two user-mode aborts must be. It reads the linked image, so a log is never
+# interpreted against source the image was not built from.
+run python3 "$REPO_ROOT/tools/check_os_entry.py" --image "$OUT/xnu_arm_entry.elf" --verbose || exit 1
+run python3 "$REPO_ROOT/tools/check_os_entry.py" --image "$OUT/xnu_arm_entry.elf" --selftest || exit 1
 say "the payload build reads the .bin from there directly; nothing to install"
 

@@ -129,9 +129,12 @@ Two runs, through the gate, exit 0, device back on Android on its own: 515 332 /
 
 The console block is byte-identical to 486's and 487's — `load_init_program: attempting to load
 /usr/local/sbin/launchd.development`, `failed loading … errno 2`, `attempting to load /sbin/launchd`,
-and then nothing, which is Apple's own control flow saying the exec is still running
-(`bsd/kern/kern_exec.c:5119-5168`: neither the "failed loading" line nor the `panic("Process 1 exec of
-%s failed")` exists in either log).
+and then nothing. **That silence is the success reading, and this document first called it the
+opposite** (`bsd/kern/kern_exec.c:5119-5173`: `load_init_program` prints on every failure, panics after
+the loop, and has no success arm that prints, so a console with no failure line and no panic after a
+`load` line is a console whose exec of that name worked). 489 corrects the reading and shows the four
+records above it in this run that say the same thing — `lmf_ret = 0`, the five `tail_seq` records, and
+the fixture's own `getpid` and `mmap` answers.
 
 **And the artefacts are the ones the runs are of.** The four-step build was re-run end to end *after*
 every script edit — step 1 (3 m 53 s, 703 objects, C++ 83/83), step 2 (`gen_assym.sh` now completes:
@@ -148,5 +151,7 @@ Entry image `.elf` sha256
 `959b0a6932a75f1675decb1614fc4f2ed5e6d7b2a221a1a564d87850177e785d`; payload `stage90-qcdt.img` 8491008
 bytes; `kernel_size = 5964890`, `dt_size = 2521088`.
 
-**489:** the third census of the platform expert instance's service children; the release as a reading;
-and, owed since 480, `vm_fault` as the wrapper that attributes the exec path's copies.
+**489** took the console's silence rather than the exec: it is the success reading, and `tools/check_os_entry.py`
+states the chain, the rule and the two fault sites the RAM disk's own bytes predict. What is still owed is
+the third census of the platform expert instance's service children, the release as a reading, and — owed
+since 480 — `vm_fault` as the wrapper that attributes the exec path's copies.
