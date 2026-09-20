@@ -668,6 +668,23 @@ uint32_t g_reg_rm;
 uint32_t g_reg_count;
 uint32_t g_reg_idx;
 /*
+ * Experiment 457: the candidate set, live only. 456 named this as the one ingredient it could not
+ * see from where it stood - `doServiceMatch` decides everything on `matches->getCount()`, and
+ * `matches` *is* `gIOCatalogue->findDrivers(this, &generation)` (`IOService.cpp:3688`) - and
+ * `findDrivers(IOService *, SInt32 *)` is in another object from its only caller (one `bl` in the
+ * whole image, at `IOService.cpp`'s `doServiceMatch`), so unlike `copyExistingServices` it can be
+ * wrapped. Five slots: the ordinal (it is called once per registration of every service, so the
+ * count says how many registrations the boot got through), the site, the service, the set the
+ * catalogue returned, and the set's own `getCount()` - where `0xffffffff` is not a count but the
+ * sentinel for "`findDrivers` returned nothing at all", which 455's rule about a refusal having to
+ * be visible makes the honest value for the one case that has no count.
+ */
+uint32_t g_finddrv_calls;
+uint32_t g_finddrv_site;
+uint32_t g_finddrv_svc;
+uint32_t g_finddrv_set;
+uint32_t g_finddrv_count;
+/*
  * Experiment 447. 446 resolved the block to `ml_get_max_cpus` and the run could not say *which* of
  * that function's six callers it was, so the next reading is the caller itself - and the second is
  * whether anything ever set the flag the function waits on.
@@ -2428,6 +2445,34 @@ void entry_note_dict(uint32_t site, uint32_t name, uint32_t table_in, uint32_t t
     entry_live_write("xnu_live_dict_in", table_in);
     entry_live_write("xnu_live_dict_out", table_out);
     entry_live_write("xnu_live_dict_seq", g_dict_calls);
+}
+
+/*
+ * Experiment 457. One call per `IOCatalogue::findDrivers(IOService *, SInt32 *)` whose `service` is
+ * the resource root, from the one wrapper in `entry_trace.c`. The argument that matters is the last:
+ * `doServiceMatch` fills `resourceKeys` - and so sets the `IOResourceMatched` array the whole wait
+ * turns on - only `if (keepGuessing && matches->getCount() && ...)` (`IOService.cpp:3724`), and
+ * `matches` is exactly this call's return value. So the count *is* the measurement 456 could not
+ * make, and the set pointer it is read from is kept beside it in case the count is right for the
+ * wrong reason (a personality filed under `IOService` rather than `IOResources` would show up here
+ * too, and `xnu_live_finddrv_svc` is what would say the reading was about the resource root at all).
+ *
+ * Live only, like every reading since 454: a boot that hangs at this frontier never reaches the
+ * epilogue, so the five keys go to the live console in the order that makes the record readable -
+ * ordinal, site, service, set, count.
+ */
+void entry_note_finddrivers(uint32_t site, uint32_t service, uint32_t set, uint32_t count)
+{
+    g_finddrv_calls++;
+    g_finddrv_site = site;
+    g_finddrv_svc = service;
+    g_finddrv_set = set;
+    g_finddrv_count = count;
+    entry_live_write("xnu_live_finddrv_seq", g_finddrv_calls);
+    entry_live_write("xnu_live_finddrv_site", site);
+    entry_live_write("xnu_live_finddrv_svc", service);
+    entry_live_write("xnu_live_finddrv_set", set);
+    entry_live_write("xnu_live_finddrv_count", count);
 }
 
 /*

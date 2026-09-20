@@ -1088,7 +1088,17 @@ done
 # `.rodata`, a different input section placed at a different point of the `.text` output section's
 # `.rodata` run. It includes nothing, so the component defines and the force-include set cannot
 # affect it; the compiler, the target triple and `-O2` are the whole of its configuration.
-PLATFORM_SOURCES=("$REPO_ROOT/stages/stage90/xnu_platform/MSM8974PlatformExpert.cpp")
+#
+# **457's second class is the second entry of `PLATFORM_SOURCES`, and it is the same kind of thing for
+# a different reason.** `MSM8974RootResource.cpp` is an `IOService` subclass whose personality
+# (`IOProviderClass = IOResources`) is what makes `gIOCatalogue->findDrivers(gIOResources)` non-empty -
+# so it is an iokit translation unit with an `OSMetaClass` and a vtable exactly as the platform expert
+# is, compiled by the loop below with the same flags, into the same directory. It carries one extra
+# requirement the platform expert does not: its `start` calls the entry image's `entry_live_write`,
+# declared `extern "C"` rather than included, so `out/xnu_arm_boot/build_entry.sh` is what must link it
+# (the object is not in the manifest, so nothing else ever will).
+PLATFORM_SOURCES=("$REPO_ROOT/stages/stage90/xnu_platform/MSM8974PlatformExpert.cpp"
+                  "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974RootResource.cpp")
 PLATFORM_C_SOURCES=("$REPO_ROOT/stages/stage90/xnu_platform/stage90_platform_config_tables.c")
 PL_OUT=${XNU_PLATFORM_OBJ_OUT:-$REPO_ROOT/out/xnu_platform_obj}
 PL_ROOTS=(-I"$XNU/iokit")

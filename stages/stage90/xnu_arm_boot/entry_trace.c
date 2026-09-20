@@ -317,6 +317,10 @@ extern void entry_note_match(uint32_t site, uint32_t dict, uint32_t in_state, ui
 extern void entry_note_mpass(uint32_t site, uint32_t dict, uint32_t options, uint32_t result,
                              uint32_t self);
 extern void entry_note_dict(uint32_t site, uint32_t name, uint32_t table_in, uint32_t table_out);
+/* 457's one, called by the wrapper at the end of this file, and the reason it is a *separate*
+ * function from `entry_note_dict`'s family is that its argument is not a dictionary but a set: the
+ * count it carries is the reading `doServiceMatch` branches on. */
+extern void entry_note_finddrivers(uint32_t site, uint32_t service, uint32_t set, uint32_t count);
 
 /*
  * `libsa/lastkernelconstructor.c`'s only statement, and the image's only reference to it is a **tail
@@ -791,5 +795,47 @@ void *__wrap__ZN9IOService16resourceMatchingEPKcP12OSDictionary(const char *name
 
     entry_note_dict(site, (uint32_t)(uintptr_t)name, (uint32_t)(uintptr_t)table,
                     (uint32_t)(uintptr_t)result);
+    return result;
+}
+
+/* ------------------------------------------------------------ the candidate set (457) */
+/*
+ * One wrapper, and it is the reading 456's doc named as the one the next experiment that is not the
+ * timer had to take: **what `gIOCatalogue->findDrivers(gIOResources)` returns on this boot.**
+ *
+ * The call is in `IOService::doServiceMatch` and its result *is* `matches`, which the same function
+ * branches on one screen later (`IOService.cpp:3688` then `:3724`) - so the count is not a proxy for
+ * the decision, it is the decision's operand. `findDrivers` is non-virtual, defined in
+ * `IOCatalogue.cpp` and called from `IOService.cpp`, so a `--wrap=` reaches it: the image's whole
+ * call graph has one `bl` to it, at `0x80134378`, inside `doServiceMatch`.
+ *
+ * It is called once per registration of *every* service, so the wrapper filters on `this`-equivalent
+ * ground the same way 455's `matchPassive` wrapper does: only the call whose `service` is
+ * `gIOResources` is recorded, and the pointer is taken from `IOService::getResourceService()` rather
+ * than from an address in this file, which the next relink would move. Without the filter the run
+ * would spend five records per registered service and the frontier's own record would be somewhere
+ * inside a stream of `IOWorkLoop`s.
+ *
+ * Nothing is changed: the real function runs with the same arguments and its result is returned
+ * unchanged. The count is `0xffffffff` when `findDrivers` returned nothing at all, which cannot be
+ * confused with a real empty set - the reason `entry_note_finddrivers`'s sentinel is the extreme
+ * value rather than 0, since `0` is exactly what an empty candidate set looks like.
+ */
+extern void *_ZN9IOService18getResourceServiceEv(void);
+extern uint32_t _ZNK12OSOrderedSet8getCountEv(const void *set);
+
+void *__real__ZN11IOCatalogue11findDriversEP9IOServicePl(void *self, void *service, void *generation);
+void *__wrap__ZN11IOCatalogue11findDriversEP9IOServicePl(void *self, void *service, void *generation)
+{
+    uint32_t site = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    void *result = __real__ZN11IOCatalogue11findDriversEP9IOServicePl(self, service, generation);
+
+    if (service && service == _ZN9IOService18getResourceServiceEv()) {
+        uint32_t count = result ? _ZNK12OSOrderedSet8getCountEv(result) : 0xffffffffu;
+
+        entry_note_finddrivers(site, (uint32_t)(uintptr_t)service, (uint32_t)(uintptr_t)result,
+                               count);
+    }
+
     return result;
 }

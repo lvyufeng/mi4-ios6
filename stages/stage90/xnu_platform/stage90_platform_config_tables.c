@@ -41,6 +41,30 @@
  * It is **quoted** on purpose: the old-style plist lexer's unquoted-string rule accepts
  * `[A-Za-z0-9-]` only (`OSUnserialize.y:298-317`), and this value has a comma in it.
  *
+ * **And a second entry (457), which is the machine's first driver rather than its platform expert.**
+ * Experiment 456 derived, and `MSM8974RootResource.cpp`'s header re-derives from the source, that
+ * `IOFindBSDRoot`'s 30-second wait cannot end until `gIOResources` carries an `IOResourceMatched`
+ * array containing `"IOBSD"` - and that the array is written only when `doServiceMatch`'s
+ * `matches->getCount()` is non-empty, where `matches` is `gIOCatalogue->findDrivers(gIOResources)`.
+ * `findDrivers` looks personalities up by **`IOProviderClass`** along the service's class chain
+ * (`IOCatalogue.cpp:199-231`) - the key `addDrivers` files them under
+ * (`IOCatalogue.cpp:124-132`, `arrayForPersonality`) - and the resource root's chain is
+ * `IOResources` then `IOService`. So this entry's provider class is the whole of its effect on the
+ * boot, and `IOResourceMatch` is what its own candidate test asks for: the resource the driver that
+ * will own this machine's root device needs, which is why `IOKitBSDInit` publishes `"IOBSD"` before
+ * it waits.
+ *
+ * Unlike the platform expert's, this entry carries **no `IOProbeScore`**, and that is a statement
+ * rather than an omission: a score ranks *siblings in one provider-class array* (`IOServiceOrdering`
+ * over `gIOProbeScoreKey`), and this array has exactly one member. It is also the only entry here
+ * whose provider class is not a nub this image creates at boot - `IOResources` is built by
+ * `IOService::setPlatform` and is already registered when the catalogue is first consulted, which is
+ * what makes the match a property of the *catalogue* rather than of the device tree.
+ *
+ * The entry is placed **before** Apple's fallback, and after the platform expert, so that the file's
+ * own reading order is the boot's: the platform expert that names this machine, the driver that makes
+ * its resource root match, and Apple's designed fallback last as it was.
+ *
  * Compiled as C by this stage's own toolchain and linked as data. The symbol is a modifiable
  * pointer in C, so it lands in `.data` exactly where the stock object's does; the string is
  * read-only data.
@@ -52,6 +76,11 @@ const char * gIOKernelConfigTables =
     "     'IOProviderClass' = IOPlatformExpertDevice;"
     "     'IONameMatch'     = \"qcom,msm8974-xnu-stage90\";"
     "     'IOProbeScore'    = 1616:32;"
+    "   },"
+    "   {"
+    "     'IOClass'         = MSM8974RootResource;"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOResourceMatch' = IOBSD;"
     "   },"
     "   {"
     "     'IOClass'         = IOPanicPlatform;"
