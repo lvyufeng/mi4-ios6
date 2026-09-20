@@ -133,7 +133,18 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=_ZN9IOService22waitForMatchingServiceEP12OSDictionaryy
                    --wrap=os_reason_create --wrap=load_machfile
                    --wrap=sleh_abort --wrap=sleh_undef
-                   --wrap=getpid --wrap=mmap)
+                   --wrap=getpid --wrap=mmap
+                   --wrap=setPop
+                   --wrap=PE_init_platform --wrap=fiq_context_init)
+    # The last three are 481's, and all three are *in the traced build only*, which is a property of
+    # the step rather than an oversight: the registration and the read-back **are** the instrument.
+    # `setPop` records the kernel's own deadline arithmetic, `PE_init_platform` is the hook that
+    # registers the timebase before `cpu_timebase_init` copies it into `cpu_data` (see
+    # `entry_timebase.c`, which carries the reasoning and the linked order it hangs off), and
+    # `fiq_context_init` is the one place the copy can be read *at*. In an untraced build there is
+    # nothing to read it with, so wrapping those two would change the image - a wrapper is a real
+    # function call in the middle of `arm_init` - without adding a reading. `entry_timebase.c`
+    # compiles in both cases and only its report is compiled out.
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
 # every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that
@@ -287,6 +298,17 @@ say "== compiling the symbols start.s needs =="
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
     -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
     -c "$BOOT_DIR/entry_stubs.c" -o "$OUT/xnu_arm_entry_stubs.o"
+# **481: the timer's owner.** Compiled in every build rather than only in a traced one, because the
+# registration it performs is not instrumentation - it is the step - and because a build with
+# `STAGE90_ENTRY_TRACE=0` would then have a kernel with no decrementer and an epilogue that could not
+# say so. The one flag is the *tracer's*, and it only decides whether the live-channel calls inside
+# the file are compiled to calls or to nothing; `xnu_entry_timebase_traced` carries the value into
+# the report so that a zero `setPop` count is never ambiguous between "never armed" and "not
+# instrumented".
+run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
+    -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
+    -DSTAGE90_ENTRY_TIMEBASE_TRACED="$ENTRY_TRACE" \
+    -c "$BOOT_DIR/entry_timebase.c" -o "$OUT/xnu_arm_entry_timebase.o"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
 
@@ -415,6 +437,19 @@ LINK_OBJS=(
     # script, so a name defined here is never handed to the stub generator.
     "$OUT/xnu_arm_entry_ramdisk.o"
 )
+
+# 481: the decrementer's owner, and the three wrappers that put it in place. Before pass 1 runs, for
+# a reason the two above do not have - see `PASS1_LDFLAGS` below, which is what this object's presence
+# here *requires*: it defines `__wrap_PE_init_platform` and `__wrap_fiq_context_init` and references
+# `__real_PE_init_platform` and `__real_fiq_context_init`, and `__real_`'s rewrite is a property of
+# the *link*, so pass 1 must be given the same `--wrap` flags as the final one or it measures a
+# different link.
+#
+# Traced-only, because that is what this object's contents are when `ENTRY_TRACE=0`: the registration
+# and the read-back are the instrument, the epilogue's call into it is compiled out
+# (`entry_stubs.c`), and nothing else in the image names it. Linking it untraced would add two
+# `__real_*` references with no `--wrap` to resolve them, i.e. two stubs the generator invented.
+[[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_timebase.o")
 
 if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # --- XNU's own objects, and a generated stub for everything they still need -------------------
@@ -26593,6 +26628,23 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$LIBGCC" "install the arm-none-eabi toolchain (arm-none-eabi-gcc -print-libgcc-file-name)"
 
     say "== pass 1: which symbols do XNU's own objects need? =="
+    # **The wraps whose `__wrap_` is defined by a pre-pass-1 object have to be on pass 1 too, and
+    # 481's first build is what measured that.** `--wrap=X` makes the linker resolve an *undefined*
+    # `X` to `__wrap_X` and an undefined `__real_X` to `X`; the second half only happens while
+    # `__real_X` is undefined. If pass 1 runs without the wrap and an object in this list references
+    # `__real_X`, pass 1 reports it undefined, the generator below emits an ordinary definition of
+    # `__real_X`, and that definition *beats* the rewrite in the final link - so `__wrap_X` calls a
+    # stub that stops the run instead of the function it was written to wrap.
+    #
+    # The two names here are exactly the wraps whose wrapper lives in a pre-pass-1 object
+    # (`entry_timebase.o`). Every other wrap in `TRACE_LDFLAGS` has its `__wrap_` in
+    # `entry_trace.o`, which is added *after* this link - putting those on pass 1 would instead make
+    # pass 1 report `__wrap_X` undefined and generate a stub that then collides with the real
+    # definition. The guard below keeps both halves of that rule honest.
+    PASS1_LDFLAGS=()
+    if [[ $ENTRY_TRACE -eq 1 ]]; then
+        PASS1_LDFLAGS=(--wrap=PE_init_platform --wrap=fiq_context_init)
+    fi
     # The library group is in *this* link as well as the final one, and that is not a detail: pass 1
     # is what produces the undefined set the stubs are generated from, so a symbol libgcc can supply
     # is only left un-stubbed if pass 1 can see libgcc. Adding the group to the final link alone
@@ -26600,6 +26652,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # archive for a symbol something already defines. Experiment 183 found that by doing it.
     arm-none-eabi-ld -T "$BOOT_DIR/entry.ld" --defsym=ENTRY_BASE=$ENTRY_BASE \
         -nostdlib --no-demangle \
+        ${PASS1_LDFLAGS[@]+"${PASS1_LDFLAGS[@]}"} \
         -o "$OUT/xnu_arm_entry_pass1.elf" "${LINK_OBJS[@]}" \
         --start-group "$LIBGCC" --end-group 2> "$OUT/xnu_arm_entry_pass1.err" || true
     grep -o "undefined reference to \`[^']*'" "$OUT/xnu_arm_entry_pass1.err" |
@@ -26609,6 +26662,34 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
         say "  XNU's own objects link with nothing missing - no stubs needed"
     else
         say "  $undef symbol(s) undefined - see $OUT/xnu_arm_entry_undef.txt"
+    fi
+
+    # **And the rule above, as a check rather than as a paragraph.** For every wrap this build makes,
+    # neither the wrapped name nor its `__real_` stand-in may be in pass 1's undefined set: the first
+    # means the generator invented the function the wrapper wraps, the second means it invented the
+    # one the wrapper *calls*. Both are silent - the image links and the reading is about a stand-in -
+    # which is why this stops the build rather than printing a note. 471's check below catches the
+    # first half for its own two names; this one covers both halves for all of them.
+    if [[ $ENTRY_TRACE -eq 1 ]]; then
+        for wrap in "${TRACE_LDFLAGS[@]}"; do
+            s=${wrap#--wrap=}
+            for name in "$s" "__real_$s"; do
+                if grep -qx -- "$name" "$OUT/xnu_arm_entry_undef.txt"; then
+                    say "FAIL: '$name' is in pass 1's undefined set and this image wraps $s. The" >&2
+                    say "      generator below emits an ordinary definition for every undefined" >&2
+                    say "      name, and an ordinary definition beats the linker's \`__real_\`" >&2
+                    say "      rewrite - so the wrapper would call the stand-in, or the stand-in" >&2
+                    say "      would be the function, and the reading would be about neither." >&2
+                    say "      If the wrapper is defined by an object that pass 1 links, add its" >&2
+                    say "      \`--wrap\` to PASS1_LDFLAGS; if it is not, the object it lives in is" >&2
+                    say "      in LINK_OBJS too early." >&2
+                    exit 1
+                fi
+            done
+        done
+        # One string rather than three: `say "a" "b"` passes two arguments and they are printed
+        # space-joined, so a message split across lines grows a doubled space at every seam.
+        say "  xnu_entry_481: none of ${#TRACE_LDFLAGS[@]} wrapped name(s) nor any \`__real_\` stand-in is in pass 1's undefined set, so every wrapper in this image calls the function it names"
     fi
     # 466: and the claim the renames make, checked rather than stated: a `locore_` name in this list
     # would mean some *other* object references locore.o's renamed copy of the vectors or of
@@ -27799,5 +27880,23 @@ say "wrote $OUT/xnu_arm_entry.bin, .elf, .h, .map"
 # the `bl` itself followed by a kernel panic.
 run python3 "$REPO_ROOT/tools/check_undef_handler.py" --split --elf "$OUT/xnu_arm_entry.elf" \
     --source "$BOOT_DIR/entry_stubs.c" || exit 1
+
+# **481's five claims, and the one of them that only the linked image can answer.** The check reads
+# Apple's `struct tbd_ops`, the assembled `machine_routines_asm.o` and this image, and the last of its
+# five comparisons is the one that has to run *here*: that the linker put `--wrap=PE_init_platform` on
+# `arm_init`'s own registering call and that the three calls are still
+# `PE_init_platform -> cpu_timebase_init -> fiq_context_init` in that order, with the registering call
+# passing `r0 = 1` and `r1 = &BootCpuData`. Nothing before the link can see which call the wrapper
+# landed on, and a wrapper on the wrong one of `arm_init`'s two `PE_init_platform` calls would leave
+# the table zero with every source-level reading intact.
+#
+# `--selftest` runs here rather than in the pre-link pass for the same reason: three of its mutations
+# are mutations of the linked image's own disassembly, and a selftest that cannot construct them is
+# reported as a failure rather than skipped - so a run of this line against an image built before 481
+# says so instead of passing quietly.
+run python3 "$REPO_ROOT/tools/check_timebase_registration.py" --image "$OUT/xnu_arm_entry.elf" \
+    --verbose || exit 1
+run python3 "$REPO_ROOT/tools/check_timebase_registration.py" --image "$OUT/xnu_arm_entry.elf" \
+    --selftest || exit 1
 say "the payload build reads the .bin from there directly; nothing to install"
 

@@ -1619,6 +1619,11 @@ static void entry_write(const char *s)
  */
 void entry_write_kv(const char *key, uint32_t value);
 
+/* 481's own block of keys, defined in `entry_timebase.c` along with the state they read - the
+ * registering wrapper, the `cpu_data` copy and the countdown sample all live in that file, because
+ * the step they belong to is one object and its readings should be readable in one place. */
+void entry_timebase_write_kv(void);
+
 /*
  * Experiment 451's live console, corrected by 452. See the slots' comment for the whole story; this
  * is the mechanism.
@@ -3349,6 +3354,13 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      * and these words are read *together*, and the address the word in `arg0`..`arg4` describes says
      * whether the syscall was reached at all. */
     entry_write_480_kv();
+    /* 481: the timer's owner. Unlike the three above this one is *inside* `arm_init`'s own window -
+     * the registering `PE_init_platform` call is five instructions before the `arm_init` return that
+     * reaches this epilogue - so these keys are expected to be non-zero here, and `_registered = 0`
+     * would be the statement that the wrapper never saw the call it was written for. The rest of
+     * 481's readings (`setPop`, the countdown sample) belong to later threads and are in
+     * `entry_timebase.c`'s own keys and the live channel. */
+    entry_timebase_write_kv();
 #endif
     /*
      * Experiment 272. Runs here, after the first line of the report is already in the console, so

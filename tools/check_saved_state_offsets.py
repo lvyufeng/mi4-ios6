@@ -17,7 +17,13 @@ is worse than a missing one, because a missing one stops the assembler with the 
 
     ./tools/check_saved_state_offsets.py                       # this configuration, this image
     ./tools/check_saved_state_offsets.py --selftest             # mutate each source, require refusal
-    XNU_KERNEL_CONFIG=STAGE90_XNU ./tools/check_saved_state_offsets.py --verbose
+    ./tools/check_saved_state_offsets.py --config STAGE90_XNU --verbose
+
+**The configuration is part of the comparison, and it defaults to the one this image is built with.**
+`CPU_DECREMENTER` is 104 in `STAGE90_XNU` and 88 in `RELEASE` - `struct cpu_data` is a different size
+in the two - so a run that compared the RELEASE file would be reading a *different structure* while
+saying nothing about it. The FAIL line names the file it read for that reason: a comparison against the
+wrong configuration is a fact about the path, and a reader cannot see it in the numbers.
 
 Why this exists
 ---------------
@@ -64,6 +70,19 @@ checked a third time **on the device**: the vector stored the same `cp15` number
 `SS_STATUS`/`SS_VADDR`, so the record's `xnu_live_sleh_frame_ok` says whether the frame it read
 carried back the `DFSR`/`DFAR` it had just read for itself. Entries 1 to 4 of a run are aborts whose
 two numbers are already known from 472's and 473's logs, so that comparison has a control.
+
+481 added a second transcribed file and a fifth site for the same comparison
+----------------------------------------------------------------------------
+The timer step reads four words of `struct cpu_data` - the software decrementer and the three function
+pointers `cpu_timebase_init` copies out of `rtclock_timebase_func` - and it reads them at a place
+(inside `arm_init`, at the first `fiq_context_init`) where there is no frame to check them against. So
+they are transcribed into `stages/stage90/xnu_arm_boot/entry_timebase.h` and compared here against the
+same generated `assym.s`'s `CPU_*`, in both directions, plus one property the four numbers have to
+have jointly: they are **four consecutive words**, in that order. That last one is what makes the read
+a read of one block, and it is the property a per-value comparison cannot see. The failure it guards
+against is specific to this step: `ml_get_decrementer` and `ml_set_decrementer` `blx`/`bxne` the word
+they load out of `cpu_data`, so an offset a word off does not give a wrong timer reading - it calls a
+data word.
 """
 
 import argparse
@@ -81,6 +100,9 @@ DEFINES = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot/entry_saved_state
 # The hand-written stand-in the entry image's own `start.s` is assembled against (see above).
 BOOT_ASSYM = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot/assym.s")
 START_S = os.path.join(XNU, "osfmk/arm/start.s")
+# 481's four `cpu_data` offsets. A separate file from `DEFINES` because it is a separate decision -
+# the timer, not the saved-state frame - and compared the same way, against the same generated assym.s.
+TIMEBASE = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot/entry_timebase.h")
 
 # The struct this image reads, and the members in the order the header declares them. `.` is a member
 # whose width is one word; a name with a `[N]` is N words. Both are Apple's `uint32_t`s, so the
@@ -190,7 +212,7 @@ def read_proc_reg(text):
 
 
 def compare(header_text, assym_text, defines_text, proc_reg_text, boot_assym_text,
-            start_s_text=None):
+            start_s_text=None, timebase_text=None):
     """
     Returns `(failures, notes)`. `failures` is empty when every arrangement holds. Every source is
     text, so `--selftest` can mutate one and re-run this exact comparison.
@@ -254,6 +276,44 @@ def compare(header_text, assym_text, defines_text, proc_reg_text, boot_assym_tex
         elif local[key] != assym_for_thread[name]:
             failures.append("%s is %d and %s is %d"
                             % (key, local[key], name, assym_for_thread[name]))
+
+    # --- 481: the four `cpu_data` words the timebase registration fills and this image reads -----
+    # `entry_timebase.h` transcribes them for the reason `entry_saved_state.h` transcribes the frame:
+    # the image cannot include Apple's headers. A wrong offset here is worse than a wrong frame
+    # offset in one way - `ml_get_decrementer`/`ml_set_decrementer` `bxne` the word they load, so an
+    # offset that is off by one word turns a data pointer into a call target and the boot jumps into
+    # whatever `cpu_data` holds there. The comparison is the only thing that can refuse that at build
+    # time, because on the device a wrong pointer and a working one both leave a plausible number.
+    timebase = read_local_defines(timebase_text or "")
+    timebase_names = (("STAGE90_CPU_DECREMENTER", "CPU_DECREMENTER"),
+                      ("STAGE90_CPU_GET_DECREMENTER_FUNC", "CPU_GET_DECREMENTER_FUNC"),
+                      ("STAGE90_CPU_SET_DECREMENTER_FUNC", "CPU_SET_DECREMENTER_FUNC"),
+                      ("STAGE90_CPU_GET_FIQ_HANDLER", "CPU_GET_FIQ_HANDLER"))
+    for key, name in timebase_names:
+        if key not in timebase:
+            failures.append("entry_timebase.h defines no %s, so one of the four `cpu_data` words the "
+                            "timebase registration is read back through is missing from the image" % key)
+        elif name not in assym_for_thread:
+            failures.append("this configuration's assym.s declares no %s, so there is nothing for %s "
+                            "to be compared with - `struct cpu_data` moved, or genassym no longer "
+                            "emits it" % (name, key))
+        elif timebase[key] != assym_for_thread[name]:
+            failures.append("%s is %d and %s is %d"
+                            % (key, timebase[key], name, assym_for_thread[name]))
+    if all(name in assym_for_thread for _k, name in timebase_names):
+        # The four are one table read as a block, which is only true if they are adjacent and in this
+        # order - `cpu_decrementer`, then the three pointers `cpu_timebase_init` copies out of
+        # `rtclock_timebase_func`. Asserting the spacing catches the case where the two numbers above
+        # agree with each other and the block is not a block.
+        previous = None
+        for key, name in timebase_names:
+            value = assym_for_thread[name]
+            if previous is not None and value != previous + 4:
+                failures.append("assym.s puts %s at %d and the word before it at %d, so these four "
+                                "are not four consecutive words of `struct cpu_data` - the step reads "
+                                "them as one block at the first fiq_context_init" % (name, value, previous))
+            previous = value
+        notes.append("assym.s: " + ", ".join("%s %d" % (n, assym_for_thread[n]) for _k, n in timebase_names))
 
     # --- 1 vs 2: Apple's declaration against this configuration's generated assym.s -----------
     assym = read_assym(assym_text)
@@ -333,7 +393,7 @@ def compare(header_text, assym_text, defines_text, proc_reg_text, boot_assym_tex
 
 
 def selftest(header_text, assym_text, defines_text, proc_reg_text, boot_assym_text,
-             start_s_text=None):
+             start_s_text=None, timebase_text=None):
     """
     Each source is mutated in memory, one at a time, and the comparison must refuse each one. Moving
     a value by one word is the smallest change that is still a change; swapping two adjacent members
@@ -355,6 +415,23 @@ def selftest(header_text, assym_text, defines_text, proc_reg_text, boot_assym_te
             mutations.append(("entry_saved_state.h's %s moved by one word" % key,
                               dict(defines_text=mutated)))
     for name in ("SS_PC", "SS_SP", "ACT_MAP", "MAP_PMAP"):
+        mutated = re.sub(r"^(#define\s+%s\s+#)(\d+)\s*$" % name,
+                         lambda m: "%s%d" % (m.group(1), int(m.group(2)) + 4),
+                         assym_text, count=1, flags=re.M)
+        if mutated != assym_text:
+            mutations.append(("assym.s's %s moved by one word" % name, dict(assym_text=mutated)))
+
+    # 481: the same two directions for the four `cpu_data` words - the header moved, and assym.s
+    # moved. The second is the one that matters with the wrong sign: `CPU_GET_FIQ_HANDLER` at the
+    # software decrementer's offset would make `ml_get_decrementer` call an integer.
+    if timebase_text:
+        for key in ("STAGE90_CPU_DECREMENTER", "STAGE90_CPU_GET_FIQ_HANDLER"):
+            mutated = mutate_define(timebase_text, key)
+            if mutated:
+                mutations.append(("entry_timebase.h's %s moved by one word" % key,
+                                  dict(timebase_text=mutated)))
+    for name in ("CPU_DECREMENTER", "CPU_GET_DECREMENTER_FUNC", "CPU_SET_DECREMENTER_FUNC",
+                 "CPU_GET_FIQ_HANDLER"):
         mutated = re.sub(r"^(#define\s+%s\s+#)(\d+)\s*$" % name,
                          lambda m: "%s%d" % (m.group(1), int(m.group(2)) + 4),
                          assym_text, count=1, flags=re.M)
@@ -389,7 +466,7 @@ def selftest(header_text, assym_text, defines_text, proc_reg_text, boot_assym_te
     for name, replacement in mutations:
         arguments = dict(header_text=header_text, assym_text=assym_text, defines_text=defines_text,
                          proc_reg_text=proc_reg_text, boot_assym_text=boot_assym_text,
-                         start_s_text=start_s_text)
+                         start_s_text=start_s_text, timebase_text=timebase_text)
         arguments.update(replacement)
         failures, _notes = compare(**arguments)
         if failures:
@@ -412,19 +489,26 @@ def main():
     parser.add_argument("--defines", default=DEFINES)
     parser.add_argument("--boot-assym", default=BOOT_ASSYM)
     parser.add_argument("--start-s", default=START_S)
+    parser.add_argument("--timebase", default=TIMEBASE)
     parser.add_argument("--assym", default=None,
                         help="defaults to out/xnu_assym/$XNU_KERNEL_CONFIG/assym.s")
+    parser.add_argument("--config", default=None,
+                        help="the XNU configuration whose assym.s to compare against; defaults to "
+                             "$XNU_KERNEL_CONFIG, then STAGE90_XNU (the configuration this image is "
+                             "built with). The four `CPU_*` offsets differ between configurations, so "
+                             "the chosen file is named in the FAIL line.")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
-    config = os.environ.get("XNU_KERNEL_CONFIG", "RELEASE")
+    config = args.config or os.environ.get("XNU_KERNEL_CONFIG") or "STAGE90_XNU"
     assym = args.assym or os.path.join(REPO_ROOT, "out", "xnu_assym", config, "assym.s")
 
     texts = {}
     for key, path in (("header_text", args.header), ("proc_reg_text", args.proc_reg),
                       ("defines_text", args.defines), ("assym_text", assym),
-                      ("boot_assym_text", args.boot_assym), ("start_s_text", args.start_s)):
+                      ("boot_assym_text", args.boot_assym), ("start_s_text", args.start_s),
+                      ("timebase_text", args.timebase)):
         if not os.path.exists(path):
             fail("no %s" % path)
         with open(path, "r", errors="replace") as handle:
@@ -438,7 +522,8 @@ def main():
         for note in notes:
             say("    " + note)
     if failures:
-        print("FAIL: the frame this image reads is not the frame this kernel built:", file=sys.stderr)
+        print("FAIL: the frame this image reads is not the frame this kernel built (assym.s read: %s):"
+              % os.path.relpath(assym, REPO_ROOT), file=sys.stderr)
         for failure in failures:
             print("      " + failure, file=sys.stderr)
         return 1
@@ -449,6 +534,15 @@ def main():
         " the faulting instruction and its cpsr is the mode it ran in"
         % (local["STAGE90_SS_PC"], local["STAGE90_SS_CPSR"], local["STAGE90_SS_STATUS"],
            local["STAGE90_SS_VADDR"]))
+    if texts.get("timebase_text"):
+        tb = read_local_defines(texts["timebase_text"])
+        say("  xnu_entry_481: the four `struct cpu_data` words the timebase registration is read back"
+            " through are this configuration's own (DECREMENTER = %d, GET_DECREMENTER_FUNC = %d,"
+            " SET_DECREMENTER_FUNC = %d, GET_FIQ_HANDLER = %d, four consecutive words), so"
+            " `ml_get_decrementer`/`ml_set_decrementer` load the pointers Apple's assembler would have"
+            " them load and `bxne` a function and not a data word"
+            % (tb["STAGE90_CPU_DECREMENTER"], tb["STAGE90_CPU_GET_DECREMENTER_FUNC"],
+               tb["STAGE90_CPU_SET_DECREMENTER_FUNC"], tb["STAGE90_CPU_GET_FIQ_HANDLER"]))
     return 0
 
 

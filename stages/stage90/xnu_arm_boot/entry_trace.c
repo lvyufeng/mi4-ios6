@@ -155,6 +155,11 @@ extern void entry_note_getpid(uint32_t caller, uint32_t error, uint32_t value);
  * more together than apart. */
 extern void entry_note_mmap(uint32_t caller, const uint32_t *args, uint32_t error, uint32_t value);
 
+/* 481: the kernel's end of the timer chain - the deadline `timer_resync_deadlines` chose and the
+ * decrementer value the real `setPop` computed for it, recorded beside what the writer in
+ * `entry_timebase.c` was handed. See the wrapper below. */
+extern void entry_timebase_note_setpop(uint64_t deadline, uint32_t returned);
+
 /*
  * 453's one, called by the six sleep wrappers below with the frame they were entered from. `ent` is
  * the entry point's id in the table in `entry_stubs.c` - the fifth argument means something
@@ -702,6 +707,52 @@ int __wrap_mmap(void *proc, void *uap, uint32_t *retval)
     entry_note_mmap(caller, args, (uint32_t)error,
                     (retval != 0) ? *retval : 0xFFFFFFFFu);
     return error;
+}
+
+/* ---------------------------------------------------- the kernel's own timer deadline (481) */
+/*
+ * **481's reading is a chain with two ends, and this is the kernel's end of it.**
+ *
+ * `setPop` (`osfmk/arm/rtclock.c:344`) is where the machine-independent timer queue becomes a
+ * machine-dependent one: `timer_resync_deadlines` (`osfmk/arm/arm_timer.c`) picks the nearest of the
+ * three deadlines `struct cpu_data` holds and calls it, and `setPop` converts that absolute time into
+ * a decrementer countdown (`deadline_to_decrementer`) and hands it to `ml_set_decrementer`. So the
+ * wrapper's `time` is the deadline the kernel chose and its return value is the only number in the
+ * system that says what the kernel believes it programmed.
+ *
+ * The other end is `entry_timebase.c`'s `stage90_tbd_set_decrementer`, which records the value it was
+ * *handed*. **The two are the same number and that is the reading** - one is computed by the kernel's
+ * own arithmetic from an absolute deadline and the other is what arrived in the writer's register, so
+ * a chain of two independent records joins the timer queue to the hardware. Before 481 that second
+ * end did not exist: `ml_set_decrementer` stored the value into `cpu_data` and programmed nothing,
+ * because `CPU_SET_DECREMENTER_FUNC` was NULL for the whole boot (see `entry_timebase.c`).
+ *
+ * **Why the return value and not a second computation.** Recomputing `deadline_to_decrementer` here
+ * would make the instrument agree with itself. `__real_setPop` is called and its return recorded, so
+ * the number in the log is the kernel's own.
+ *
+ * `setPop` is called from `timer_resync_deadlines`, which is called from `timer_intr` on every timer
+ * interrupt, from `timer_set_deadline`, and from `arm_init`. That is a bounded set of sites but an
+ * unbounded number of calls, so this records the first call's three numbers and then only powers of
+ * two - the same channel budget discipline as `xnu_live_getpid_count` and `xnu_live_mmap_*`.
+ *
+ * **The return type is `int` because Apple's is** (`int setPop(uint64_t time)`,
+ * `osfmk/arm/rtclock.c:343`). It is one register either way, so this is not a behaviour - it is that
+ * `__wrap_`/`__real_` are a *linker* substitution of one symbol for another, and a declaration that
+ * disagreed with the definition would be this project's "one value, two definitions" applied to a
+ * function's *type*, where the compiler cannot see the disagreement because the definition is in
+ * another object. The bits are handed to the record as an unsigned word because that is what the
+ * writer receives (`ml_set_decrementer(uint32_t dec_value)`), and the two ends are compared as bits
+ * rather than as values.
+ */
+int __real_setPop(uint64_t time);
+
+int __wrap_setPop(uint64_t time)
+{
+    int decr = __real_setPop(time);
+
+    entry_timebase_note_setpop(time, (uint32_t)decr);
+    return decr;
 }
 
 /* ------------------------------------------------------------ the IOKit deadline sleeps (454) */
