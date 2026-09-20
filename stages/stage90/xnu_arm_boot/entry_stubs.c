@@ -303,6 +303,40 @@ static char g_kv_buf[ENTRY_KV_BUF];
 static uint32_t g_kv_len;
 
 /*
+ * ---------------------------------------------------------------- 461: the trap's own buffer
+ *
+ * **The record of the trap was written into the tracer's buffer, and the tracer had filled it.**
+ * That is the whole of why 459's run could not say what it stopped on: its log carries
+ * `xnu_entry_kv_written = xnu_entry_kv_in_dram = 0x1fea` - 8170 of these 8192 bytes, with
+ * `xnu_entry_kv_dropped = 0x66bb` (26299) refusals - and `fleh_undef`, whose report is the trap's
+ * PC and the panic's `%s`, writes through `entry_kv` like everything else. So the keys went in and
+ * were *dropped in silence*, and the run ended with a trap nobody could name. It is this project's
+ * ledger entry 170 ("the report path's buffer was the tracer's and was full when the report was
+ * written") and 167's rule after it: a refusal has to be visible, and a report has to have a place
+ * of its own.
+ *
+ * The place of its own is this buffer. `entry_panic_kv` is the *same writer* as `entry_kv` - one
+ * `entry_kv_into`, two callers, because "one value, two definitions" is this project's most
+ * expensive defect class and two copies of "how a record is spelled" would be exactly that - and it
+ * is bounded by its own `ENTRY_PANIC_BUF`. The epilogue prints it under its own heading, so the
+ * trap's record is in the log whatever the tracer did.
+ *
+ * 8192 because the record has to fit *empty*: `fleh_undef` has 47 `entry_kv` call sites and four of
+ * them are loops (the eight frame words, the `replay.node_n` ring times three keys, the chunk
+ * hashes), so a bad tree walks the record up past 5 KB. A buffer that could refuse the trap is the
+ * defect this exists to remove. The `.bss` cost is checked by 459's own device check, which refuses
+ * a build whose RAM disk is not inside the image's bounds.
+ */
+#define ENTRY_PANIC_BUF 8192u
+static char g_panic_buf[ENTRY_PANIC_BUF];
+static uint32_t g_panic_len;
+static uint32_t g_panic_dropped;
+/* How many times the trap handler entered the writer. Zero says the trap never happened at all,
+ * which an empty `g_panic_len` cannot say on its own - a handler that ran and wrote nothing and a
+ * handler that never ran produce the same log otherwise. */
+static uint32_t g_panic_entered;
+
+/*
  * The two addresses XNU's own boot path writes to, and the instruction used to put them back.
  *
  * These are constants because XNU's are. `cpu_machine_idle_init` (`osfmk/arm/cpu.c:570-580`) ends
@@ -757,6 +791,47 @@ uint32_t g_dtalloc_count;
 uint32_t g_workloop_caller;
 uint32_t g_workloop_ret;
 uint32_t g_workloop_count;
+
+/*
+ * 461's four readings - see `entry_note_dtpath` below for what each one is for. Every one of them is
+ * a "last" slot beside a live record and a count, and the counts are kept apart deliberately: a
+ * `g_dtprop_hits` of 0 with `g_dtprop_calls` of 3 is "the plane was asked three times and never had
+ * the property", while 0/0 is "the question was never reached" - the two readings 459's run could
+ * not tell apart, because it had neither number.
+ */
+uint32_t g_dtplane;
+uint32_t g_dtplane_dt_top;
+uint32_t g_dtplane_root;
+uint32_t g_dtplane_map_ret;
+uint32_t g_dtplane_count;
+uint32_t g_dtpath_count;
+uint32_t g_dtpath_caller;
+uint32_t g_dtpath_w0;
+uint32_t g_dtpath_w1;
+uint32_t g_dtpath_w2;
+uint32_t g_dtpath_plane;
+uint32_t g_dtpath_ret;
+uint32_t g_dtpath_null;
+uint32_t g_dtprop_calls;
+uint32_t g_dtprop_hits;
+uint32_t g_dtprop_entry;
+uint32_t g_dtprop_key0;
+uint32_t g_dtprop_key1;
+uint32_t g_dtprop_obj;
+uint32_t g_dtprop_w0;
+uint32_t g_dtprop_w1;
+uint32_t g_dtprop_bytes;
+uint32_t g_mdevadd_calls;
+uint32_t g_mdevadd_caller;
+uint32_t g_mdevadd_devid;
+uint32_t g_mdevadd_base;
+uint32_t g_mdevadd_size;
+uint32_t g_mdevadd_phys;
+uint32_t g_mdevadd_ret;
+uint32_t g_mdevlookup_calls;
+uint32_t g_mdevlookup_caller;
+uint32_t g_mdevlookup_devid;
+uint32_t g_mdevlookup_ret;
 uint32_t g_rlock_bad;
 uint32_t g_rlock_caller;
 uint32_t g_rlock_count;
@@ -950,27 +1025,35 @@ static uint32_t g_first_abort_hex_arg;
  */
 static const char g_hex[] = "0123456789abcdef";
 
-void entry_kv(const char *key, uint32_t value)
+/*
+ * The writer, once. `entry_kv` and `entry_panic_kv` below are the two callers and differ only in
+ * which buffer, which counter and which bound they hand it - so "how a record is spelled" has one
+ * definition and the trap's record cannot drift away from the tracer's. Experiment 461 split this
+ * out; the body is `entry_kv`'s own, with the globals it used to close over replaced by its
+ * arguments.
+ */
+static void entry_kv_into(char *buf, uint32_t *len_p, uint32_t *dropped_p, uint32_t max,
+                          const char *key, uint32_t value)
 {
-    if (g_kv_len + 40u >= ENTRY_KV_BUF) {
-        g_kv_dropped++;
+    if (*len_p + 40u >= max) {
+        (*dropped_p)++;
         return;
     }
     g_kv_step = 1u;
-    g_kv_step_addr = (uint32_t)(uintptr_t)&g_kv_buf[g_kv_len];
-    g_kv_buf[g_kv_len++] = ' ';
+    g_kv_step_addr = (uint32_t)(uintptr_t)&buf[*len_p];
+    buf[(*len_p)++] = ' ';
     g_kv_step = 2u;
-    g_kv_step_addr = (uint32_t)(uintptr_t)&g_kv_buf[g_kv_len];
-    while (*key != '\0' && g_kv_len + 20u < ENTRY_KV_BUF) {
-        g_kv_buf[g_kv_len++] = *key++;
+    g_kv_step_addr = (uint32_t)(uintptr_t)&buf[*len_p];
+    while (*key != '\0' && *len_p + 20u < max) {
+        buf[(*len_p)++] = *key++;
     }
     g_kv_step = 3u;
-    g_kv_step_addr = (uint32_t)(uintptr_t)&g_kv_buf[g_kv_len];
-    g_kv_buf[g_kv_len++] = '=';
-    g_kv_buf[g_kv_len++] = '0';
-    g_kv_buf[g_kv_len++] = 'x';
+    g_kv_step_addr = (uint32_t)(uintptr_t)&buf[*len_p];
+    buf[(*len_p)++] = '=';
+    buf[(*len_p)++] = '0';
+    buf[(*len_p)++] = 'x';
     g_kv_step = 4u;
-    g_kv_step_addr = (uint32_t)(uintptr_t)&g_kv_buf[g_kv_len];
+    g_kv_step_addr = (uint32_t)(uintptr_t)&buf[*len_p];
     /*
      * `g_kv_hex_in_use` is the address this function has for the digit table, written into `.bss`
      * immediately before the loop that reads it, and `g_kv_hex_arg` is the first index that will be
@@ -986,13 +1069,28 @@ void entry_kv(const char *key, uint32_t value)
     g_kv_hex_arg = (value >> 28u) & 0xfu;
     for (unsigned i = 0; i < 8u; i++) {
         unsigned d = (value >> (28u - (i * 4u))) & 0xfu;
-        g_kv_buf[g_kv_len++] = (char)(d < 10u ? ('0' + d) : ('a' + (d - 10u)));
+        buf[(*len_p)++] = (char)(d < 10u ? ('0' + d) : ('a' + (d - 10u)));
     }
     g_kv_step = 5u;
-    g_kv_step_addr = (uint32_t)(uintptr_t)&g_kv_buf[g_kv_len + 11];
-    g_kv_buf[g_kv_len++] = '\n';
-    g_kv_buf[g_kv_len] = '\0';
+    g_kv_step_addr = (uint32_t)(uintptr_t)&buf[*len_p + 11];
+    buf[(*len_p)++] = '\n';
+    buf[*len_p] = '\0';
     g_kv_step = 0u;
+}
+
+void entry_kv(const char *key, uint32_t value)
+{
+    entry_kv_into(g_kv_buf, &g_kv_len, &g_kv_dropped, ENTRY_KV_BUF, key, value);
+}
+
+/* The trap's own channel - see the buffer's comment. Used by `fleh_undef` for every key it writes
+ * and by the three keys the epilogue writes after the MMU is off, i.e. by every writer on a path
+ * that runs *because* the run has stopped. Nothing else may use it: the point of a second buffer is
+ * that the trap's record cannot be crowded out by the trace, and a trace that wrote here would put
+ * it back in the same competition. */
+void entry_panic_kv(const char *key, uint32_t value)
+{
+    entry_kv_into(g_panic_buf, &g_panic_len, &g_panic_dropped, ENTRY_PANIC_BUF, key, value);
 }
 
 /* ------------------------------------------------------------------ the evidence path */
@@ -1811,6 +1909,59 @@ __attribute__((noinline)) static void entry_write_459_kv(void)
     entry_write_kv("xnu_entry_ostext_limited", g_os_limited);
 }
 
+/*
+ * 461's keys, in a function of their own for 455's reason - the epilogue's constant pool is at the
+ * PC-relative edge and each new key costs code in whichever function holds it.
+ *
+ * Three groups. The **panic buffer's** three, which say whether the trap record in this report is
+ * complete or was refused (`_dropped`), and whether the handler ran at all (`_entered`, which an
+ * empty buffer cannot say). The **plane's** four, which are the object 459's frontier left
+ * unmeasured: `dtplane` is `gIODTPlane` after `IODeviceTreeAlloc` returned, and `dtplane_map` is
+ * `fromPath("/chosen/memory-map", gIODTPlane)` called at that moment - a non-zero reading is the
+ * plane holding the node *before* BSD init ever asks for it. The **chain's** own counts, which are
+ * what turn a missing key into a named one: `dtpath_count` with `dtpath_null`, then `dtprop_calls`
+ * against `dtprop_hits`, then `mdevadd_calls`.
+ */
+__attribute__((noinline)) static void entry_write_461_kv(void)
+{
+    entry_write_kv("xnu_entry_panic_entered", g_panic_entered);
+    entry_write_kv("xnu_entry_panic_len", g_panic_len);
+    entry_write_kv("xnu_entry_panic_dropped", g_panic_dropped);
+    entry_write_kv("xnu_entry_dtplane", g_dtplane);
+    entry_write_kv("xnu_entry_dtplane_dt_top", g_dtplane_dt_top);
+    entry_write_kv("xnu_entry_dtplane_root", g_dtplane_root);
+    entry_write_kv("xnu_entry_dtplane_map", g_dtplane_map_ret);
+    entry_write_kv("xnu_entry_dtplane_count", g_dtplane_count);
+    entry_write_kv("xnu_entry_dtpath_count", g_dtpath_count);
+    entry_write_kv("xnu_entry_dtpath_caller", g_dtpath_caller);
+    entry_write_kv("xnu_entry_dtpath_w0", g_dtpath_w0);
+    entry_write_kv("xnu_entry_dtpath_w1", g_dtpath_w1);
+    entry_write_kv("xnu_entry_dtpath_w2", g_dtpath_w2);
+    entry_write_kv("xnu_entry_dtpath_plane", g_dtpath_plane);
+    entry_write_kv("xnu_entry_dtpath_ret", g_dtpath_ret);
+    entry_write_kv("xnu_entry_dtpath_null", g_dtpath_null);
+    entry_write_kv("xnu_entry_dtprop_calls", g_dtprop_calls);
+    entry_write_kv("xnu_entry_dtprop_hits", g_dtprop_hits);
+    entry_write_kv("xnu_entry_dtprop_entry", g_dtprop_entry);
+    entry_write_kv("xnu_entry_dtprop_key0", g_dtprop_key0);
+    entry_write_kv("xnu_entry_dtprop_key1", g_dtprop_key1);
+    entry_write_kv("xnu_entry_dtprop_obj", g_dtprop_obj);
+    entry_write_kv("xnu_entry_dtprop_w0", g_dtprop_w0);
+    entry_write_kv("xnu_entry_dtprop_w1", g_dtprop_w1);
+    entry_write_kv("xnu_entry_dtprop_bytes", g_dtprop_bytes);
+    entry_write_kv("xnu_entry_mdevadd_calls", g_mdevadd_calls);
+    entry_write_kv("xnu_entry_mdevadd_caller", g_mdevadd_caller);
+    entry_write_kv("xnu_entry_mdevadd_devid", g_mdevadd_devid);
+    entry_write_kv("xnu_entry_mdevadd_base", g_mdevadd_base);
+    entry_write_kv("xnu_entry_mdevadd_size", g_mdevadd_size);
+    entry_write_kv("xnu_entry_mdevadd_phys", g_mdevadd_phys);
+    entry_write_kv("xnu_entry_mdevadd_ret", g_mdevadd_ret);
+    entry_write_kv("xnu_entry_mdevlookup_calls", g_mdevlookup_calls);
+    entry_write_kv("xnu_entry_mdevlookup_caller", g_mdevlookup_caller);
+    entry_write_kv("xnu_entry_mdevlookup_devid", g_mdevlookup_devid);
+    entry_write_kv("xnu_entry_mdevlookup_ret", g_mdevlookup_ret);
+}
+
 __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
 {
     uint32_t sctlr;
@@ -1899,6 +2050,35 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
         }
 
         for (uintptr_t p = lo; p < hi; p += 32u) {
+            __asm__ volatile ("mcr p15, 0, %0, c7, c10, 1" :: "r"(p) : "memory");
+        }
+
+        /*
+         * 461: the trap's buffer, cleaned the same way and **separately**, not by widening the range
+         * above. Widening it would clean everything the linker happened to place between the two
+         * buffers - and that neighbourhood is the payload's 256 KB RAM disk (`g_stage90_ramdisk`),
+         * which has nothing to do with the report and would be 8192 pointless cache operations on a
+         * path that only runs once the machine has already stopped. The same min/max rule as above
+         * for the same reason: which addresses hold the trap's record is the linker's choice, and a
+         * dirty line in a cache that is about to be switched off reads back as zeroes.
+         */
+        uintptr_t plo = (uintptr_t)&g_panic_len;
+        uintptr_t phi = (uintptr_t)&g_panic_buf[ENTRY_PANIC_BUF];
+
+        if ((uintptr_t)&g_panic_dropped < plo) {
+            plo = (uintptr_t)&g_panic_dropped;
+        }
+        if ((uintptr_t)&g_panic_dropped + sizeof g_panic_dropped > phi) {
+            phi = (uintptr_t)&g_panic_dropped + sizeof g_panic_dropped;
+        }
+        if ((uintptr_t)&g_panic_entered < plo) {
+            plo = (uintptr_t)&g_panic_entered;
+        }
+        if ((uintptr_t)&g_panic_entered + sizeof g_panic_entered > phi) {
+            phi = (uintptr_t)&g_panic_entered + sizeof g_panic_entered;
+        }
+
+        for (uintptr_t p = plo; p < phi; p += 32u) {
             __asm__ volatile ("mcr p15, 0, %0, c7, c10, 1" :: "r"(p) : "memory");
         }
     }
@@ -2111,9 +2291,15 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      * executing with SCTLR.I and SCTLR.C clear, where every fetch and every store goes straight to
      * memory. Paired with the two records `entry_stub_hit` wrote during the run, this is the third
      * road to the same eight characters, and the three differ in exactly the thing that is in doubt:
-     * `entry_kv` ran then with XNU's caches and page tables live, and runs now without either.
+     * `entry_panic_kv` ran then with XNU's caches and page tables live, and runs now without either.
+     *
+     * 461 moved these four from `entry_kv` to `entry_panic_kv`, and it is not a tidy-up: the trap's
+     * record is the whole point of this part of the report, and in 459's run the buffer these were
+     * appended to was at 8170 of 8192 bytes, so they were *refused* too. That is why 459's log has
+     * neither `xnu_entry_stub_caller_e` nor the IRQ words: the report path was writing to a full
+     * buffer, which is the same defect as the trap handler's own writes.
      */
-    entry_kv("xnu_entry_stub_caller_e", g_stub_caller);
+    entry_panic_kv("xnu_entry_stub_caller_e", g_stub_caller);
 
     /*
      * If the vector that got here was the IRQ one, name the interrupt.
@@ -2130,9 +2316,9 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      * without this they produce the identical log line.
      */
     if (g_irq_report_pending != 0u) {
-        entry_kv("xnu_entry_irq_iar", *(volatile uint32_t *)(uintptr_t)0xf900200cu);
-        entry_kv("xnu_entry_irq_ispendr0", *(volatile uint32_t *)(uintptr_t)0xf9000200u);
-        entry_kv("xnu_entry_irq_isenabler0", *(volatile uint32_t *)(uintptr_t)0xf9000100u);
+        entry_panic_kv("xnu_entry_irq_iar", *(volatile uint32_t *)(uintptr_t)0xf900200cu);
+        entry_panic_kv("xnu_entry_irq_ispendr0", *(volatile uint32_t *)(uintptr_t)0xf9000200u);
+        entry_panic_kv("xnu_entry_irq_isenabler0", *(volatile uint32_t *)(uintptr_t)0xf9000100u);
     }
 
     entry_write_kv("xnu_entry_kv_written", kv_len_written);
@@ -2299,6 +2485,10 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     /* 459: the OS's own console text, counted, for the same reason - and this is the count that
      * 458's log had to be taken by hand. */
     entry_write_459_kv();
+    /* 461: the trap record's state, the IODT plane, and the three calls of the root-device chain.
+     * Same reason again, and one more: this is the group of keys that says which link of the chain
+     * 459 stopped in, so it is the group a reader will look for first. */
+    entry_write_461_kv();
     /*
      * Experiment 451's live console, printed here as well so a run that *does* report says whether
      * the live channel was working and, if it was refused, which check refused it. `_records` counts
@@ -2417,6 +2607,22 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     if (g_kv_len != 0u) {
         entry_write("MI4IOS6_STAGE90_XNU real XNU entry");
         entry_write(g_kv_buf);
+    }
+
+    /*
+     * 461: the trap's own record, from its own buffer, under a heading of its own.
+     *
+     * Printed unconditionally when the handler ran, and separately from the trace above, because the
+     * two are written by different writers for different reasons: `g_kv_buf` holds what the probes
+     * recorded while the machine was running, `g_panic_buf` holds what `fleh_undef` recorded once it
+     * had stopped. One heading per buffer is also what makes the *absence* of one of them readable -
+     * a report with no `trap record:` line and a non-zero `xnu_entry_panic_entered` is a trap whose
+     * buffer did not reach DRAM, and a report with neither is a run that never trapped at all.
+     */
+    if (g_panic_entered != 0u) {
+        entry_write("\nMI4IOS6_STAGE90_XNU trap record:");
+        entry_write(g_panic_buf);
+        entry_write("\n");
     }
 
     *(volatile uint32_t *)(uintptr_t)RESTART_REASON = RESTART_NORMAL;
@@ -2980,6 +3186,144 @@ void entry_note_pub2(uint32_t caller, uint32_t key)
     }
     g_pub2_count++;
     entry_live_write("xnu_live_pub2_key", key);
+}
+
+/*
+ * ------------------------------------------------- 461: the plane, the path, the property, the device
+ *
+ * 459 stopped inside `IOFindBSDRoot` with the tree's `RAMDisk` property apparently absent, and it
+ * left a gap exactly one link wide. The tree is not in doubt - the payload's blob answers XNU's own
+ * reader on the host, node by node and word by word (`tools/host_dt_check.sh`) - and neither is
+ * `IODeviceTreeAlloc`'s call, which 448's records show running with the tree's own physical address
+ * (`0x806e0000`) and returning a nub. What is not measured is the object in the middle: the IODT
+ * *plane*, the registry tree `IORegistryEntry::fromPath` walks and `getProperty` reads.
+ *
+ * The source says the chain has exactly three NULLs in it (`iokit/bsddev/IOKitBSDInit.cpp:440-450`):
+ *
+ *     if ((regEntry = IORegistryEntry::fromPath("/chosen/memory-map", gIODTPlane))) {
+ *         data = (OSData *) regEntry->getProperty("RAMDisk");
+ *         if (data) { ramdParms = data->getBytesNoCopy();
+ *                     mdevadd(-1, ml_static_ptovirt(ramdParms[0]) >> 12, ramdParms[1] >> 12, 0); }
+ *     }
+ *
+ * so `mdevadd` not being called means one of `fromPath`, `getProperty` or `getBytesNoCopy` answered
+ * NULL - and 459's log cannot say which, because it has no reading from any of the three. These four
+ * functions are that reading.
+ *
+ * `entry_note_dtplane` is taken from the `IODeviceTreeAlloc` wrapper once the real function has
+ * returned, which is the only moment the plane exists and the tree is complete: the plane is
+ * `makePlane`'d on that function's first statement (`IODeviceTreeSupport.cpp:120`) and the tree is
+ * attached to the registry root as its last (`:216`). `map_ret` is the wrapper's own
+ * `fromPath("/chosen/memory-map", gIODTPlane)` - the OS's own reader, called by the instrument
+ * rather than inferred, and the one reading that separates "the plane does not have the node" from
+ * "the node does not have the property".
+ *
+ * `entry_note_dtpath` is every `fromPath` call the image makes, wrapped. The caller is the important
+ * half: the OS's own call lives at `IOKitBSDInit.cpp:440`, and a record from it whose return is 0 is
+ * `fromPath`'s answer to the OS, not to the instrument. `w0`/`w1`/`w2` are the path's first twelve
+ * bytes as words, so `"/chosen/memo"` is readable in the log without a pointer that could be wrong
+ * by the time it is read.
+ *
+ * `entry_note_dtprop` is XNU's own `getProperty`, called by the instrument with the entry `fromPath`
+ * returned. It is *not* a wrapper and cannot be one: `getProperty` is virtual, and `--wrap` renames
+ * an undefined reference while a vtable entry is a defined one in the same object - 455's negative
+ * result, which cost it eleven wrappers' worth of silence. Calling `IORegistryEntry`'s own
+ * definition by its mangled name is the same code the vtable slot holds (`IOService` does not
+ * override it), so the answer is the answer the OS would have got; `obj` non-zero means the property
+ * *is* in the plane, and then `getBytesNoCopy` on it gives the two words the OS would have handed
+ * `mdevadd`. A non-zero `obj` with the OS still not calling `mdevadd` would move the gap inside
+ * `getProperty`'s own lookup, which is a different experiment.
+ *
+ * `entry_note_mdevadd`/`entry_note_mdevlookup` are the two calls at the end of the chain. 459
+ * established that `mdevadd` is not called - it prints on all five of its outcomes
+ * (`bsd/dev/memdev.c:560-635`) and none is in the log - so what the wrapper adds is not *whether* but
+ * *what*: its arguments are the two words the OS read, `unsigned long long` in r1:r2 and `unsigned
+ * int` in r3 by the AAPCS, which is why the C prototype here spells the widths out rather than
+ * taking `uint32_t` for everything.
+ */
+void entry_note_dtplane(uint32_t plane, uint32_t dt_top, uint32_t root, uint32_t map_ret)
+{
+    g_dtplane = plane;
+    g_dtplane_dt_top = dt_top;
+    g_dtplane_root = root;
+    g_dtplane_map_ret = map_ret;
+    g_dtplane_count++;
+    entry_live_write("xnu_live_dtplane", plane);
+    entry_live_write("xnu_live_dtplane_root", root);
+    entry_live_write("xnu_live_dtplane_map", map_ret);
+}
+
+void entry_note_dtpath(uint32_t caller, uint32_t w0, uint32_t w1, uint32_t w2, uint32_t plane,
+                       uint32_t ret)
+{
+    g_dtpath_count++;
+    g_dtpath_caller = caller;
+    g_dtpath_w0 = w0;
+    g_dtpath_w1 = w1;
+    g_dtpath_w2 = w2;
+    g_dtpath_plane = plane;
+    g_dtpath_ret = ret;
+    if (ret == 0u) {
+        g_dtpath_null++;
+    }
+    entry_live_write("xnu_live_path_caller", caller);
+    entry_live_write("xnu_live_path_w0", w0);
+    entry_live_write("xnu_live_path_w1", w1);
+    entry_live_write("xnu_live_path_w2", w2);
+    entry_live_write("xnu_live_path_plane", plane);
+    entry_live_write("xnu_live_path_ret", ret);
+}
+
+void entry_note_dtprop(uint32_t entry, uint32_t key0, uint32_t key1, uint32_t obj, uint32_t w0,
+                       uint32_t w1, uint32_t bytes)
+{
+    g_dtprop_calls++;
+    if (obj != 0u) {
+        g_dtprop_hits++;
+    }
+    g_dtprop_entry = entry;
+    g_dtprop_key0 = key0;
+    g_dtprop_key1 = key1;
+    g_dtprop_obj = obj;
+    g_dtprop_w0 = w0;
+    g_dtprop_w1 = w1;
+    g_dtprop_bytes = bytes;
+    entry_live_write("xnu_live_prop_entry", entry);
+    entry_live_write("xnu_live_prop_key0", key0);
+    entry_live_write("xnu_live_prop_key1", key1);
+    entry_live_write("xnu_live_prop_obj", obj);
+    entry_live_write("xnu_live_prop_w0", w0);
+    entry_live_write("xnu_live_prop_w1", w1);
+    entry_live_write("xnu_live_prop_bytes", bytes);
+}
+
+void entry_note_mdevadd(uint32_t caller, uint32_t devid, uint32_t base, uint32_t size,
+                        uint32_t phys, uint32_t ret)
+{
+    g_mdevadd_calls++;
+    g_mdevadd_caller = caller;
+    g_mdevadd_devid = devid;
+    g_mdevadd_base = base;
+    g_mdevadd_size = size;
+    g_mdevadd_phys = phys;
+    g_mdevadd_ret = ret;
+    entry_live_write("xnu_live_mdevadd_caller", caller);
+    entry_live_write("xnu_live_mdevadd_devid", devid);
+    entry_live_write("xnu_live_mdevadd_base", base);
+    entry_live_write("xnu_live_mdevadd_size", size);
+    entry_live_write("xnu_live_mdevadd_phys", phys);
+    entry_live_write("xnu_live_mdevadd_ret", ret);
+}
+
+void entry_note_mdevlookup(uint32_t caller, uint32_t devid, uint32_t ret)
+{
+    g_mdevlookup_calls++;
+    g_mdevlookup_caller = caller;
+    g_mdevlookup_devid = devid;
+    g_mdevlookup_ret = ret;
+    entry_live_write("xnu_live_mdevlookup_caller", caller);
+    entry_live_write("xnu_live_mdevlookup_devid", devid);
+    entry_live_write("xnu_live_mdevlookup_ret", ret);
 }
 #endif /* STAGE90_ENTRY_TRACE */
 
@@ -3829,20 +4173,32 @@ void fleh_undef(void)
     __asm__ volatile ("mov %0, lr" : "=r"(lr_undef));
     __asm__ volatile ("mrs %0, spsr" : "=r"(spsr));
 
-    entry_kv("xnu_entry_undef_lr", lr_undef);
-    entry_kv("xnu_entry_undef_pc", lr_undef - 4);
-    entry_kv("xnu_entry_undef_spsr", spsr);
+    /*
+     * 461: the count, then every key below through `entry_panic_kv` rather than `entry_kv`.
+     *
+     * This is the trap's report and it must not share a buffer with the trace: 459's run had the
+     * tracer's 8192 bytes full at 8170 when this handler ran, so all 47 of the keys that follow were
+     * written into a full buffer and dropped, and the run ended without naming the instruction it
+     * had stopped on (`xnu_entry_kv_dropped = 0x66bb` is that silence, counted). The buffer this
+     * writes to is `g_panic_buf`, sized for the whole record, and the epilogue prints it under a
+     * heading of its own.
+     */
+    g_panic_entered++;
 
-    entry_kv("xnu_entry_panic_str", (uint32_t)(uintptr_t)debugger_panic_str);
-    entry_kv("xnu_entry_panic_caller", (uint32_t)debugger_panic_caller);
-    entry_kv("xnu_entry_panic_message", (uint32_t)(uintptr_t)debugger_message);
+    entry_panic_kv("xnu_entry_undef_lr", lr_undef);
+    entry_panic_kv("xnu_entry_undef_pc", lr_undef - 4);
+    entry_panic_kv("xnu_entry_undef_spsr", spsr);
+
+    entry_panic_kv("xnu_entry_panic_str", (uint32_t)(uintptr_t)debugger_panic_str);
+    entry_panic_kv("xnu_entry_panic_caller", (uint32_t)debugger_panic_caller);
+    entry_panic_kv("xnu_entry_panic_message", (uint32_t)(uintptr_t)debugger_message);
 
     __asm__ volatile ("mov %0, r9" : "=r"(r_fmt));
     __asm__ volatile ("mov %0, r8" : "=r"(r_args));
     __asm__ volatile ("mov %0, r10" : "=r"(r_sl));
 
-    entry_kv("xnu_entry_trap_r9_fmt", r_fmt);
-    entry_kv("xnu_entry_trap_r8_args", r_args);
+    entry_panic_kv("xnu_entry_trap_r9_fmt", r_fmt);
+    entry_panic_kv("xnu_entry_trap_r8_args", r_args);
     /*
      * **`sl` is not the caller, and the old key name said it was.** `panic_trap_to_debugger` loads
      * `r4` and `sl` from `[sp+56]` and `[sp+60]` and hands both to `DebuggerTrapWithState` as the
@@ -3852,10 +4208,10 @@ void fleh_undef(void)
      * the frame below, which is the only way to get it: `fleh_undef`'s own prologue destroys `r5`
      * with `mrs r5, SPSR`.
      */
-    entry_kv("xnu_entry_trap_sl_options_hi", r_sl);
+    entry_panic_kv("xnu_entry_trap_sl_options_hi", r_sl);
 
-    entry_kv("xnu_entry_zone_map_min", zone_map_min_address);
-    entry_kv("xnu_entry_zone_map_max", zone_map_max_address);
+    entry_panic_kv("xnu_entry_zone_map_min", zone_map_min_address);
+    entry_panic_kv("xnu_entry_zone_map_max", zone_map_max_address);
     /*
      * **Both read zero on the device, and that is not a missing object.** `zone_init` is the only
      * writer of either (`zalloc.c:2958-2959`, against the zero-initialized declarations at
@@ -3921,7 +4277,7 @@ void fleh_undef(void)
      * same reason everything else here is read: this is the boot stack, inside the image, and it is
      * mapped. Only the *values* are reported; nothing in the block is dereferenced.
      */
-    entry_kv("xnu_entry_frame_sp", (uint32_t)frame);
+    entry_panic_kv("xnu_entry_frame_sp", (uint32_t)frame);
     {
         static const char *const fr[8] = {
             "xnu_entry_frame_r4", "xnu_entry_frame_r5", "xnu_entry_frame_r6",
@@ -3930,7 +4286,7 @@ void fleh_undef(void)
         };
 
         for (i = 0u; i < 8u; i++) {
-            entry_kv(fr[i], entry_word_at(frame + (i * 4u)));
+            entry_panic_kv(fr[i], entry_word_at(frame + (i * 4u)));
         }
     }
 
@@ -3966,26 +4322,26 @@ void fleh_undef(void)
     element = 0u;
     zone_name = 0u;
     args_ok = entry_panic_args_page((uintptr_t)r_args);
-    entry_kv("xnu_entry_panic_args_page",
+    entry_panic_kv("xnu_entry_panic_args_page",
              args_ok ? (uint32_t)((uintptr_t)r_args & ~(uintptr_t)0xFFFu) : 0u);
     if (entry_image_ptr((uintptr_t)r_args) ||
         (args_ok && entry_panic_arg_word((uintptr_t)r_args, (uintptr_t)r_args, 4u))) {
         ap = entry_word_at((uintptr_t)r_args);
     }
-    entry_kv("xnu_entry_panic_ap", ap);
-    entry_kv("xnu_entry_panic_ap_delta",
+    entry_panic_kv("xnu_entry_panic_ap", ap);
+    entry_panic_kv("xnu_entry_panic_ap_delta",
              (ap >= r_args) ? (ap - r_args) : 0u);
     if (args_ok && entry_panic_arg_word((uintptr_t)r_args, (uintptr_t)ap, 8u)) {
         element = entry_word_at((uintptr_t)ap);
         zone_name = entry_word_at((uintptr_t)ap + 4u);
     }
-    entry_kv("xnu_entry_panic_arg0", element);
-    entry_kv("xnu_entry_panic_arg1", zone_name);
-    entry_kv("xnu_entry_panic_element", element);
-    entry_kv("xnu_entry_panic_zonename", zone_name);
+    entry_panic_kv("xnu_entry_panic_arg0", element);
+    entry_panic_kv("xnu_entry_panic_arg1", zone_name);
+    entry_panic_kv("xnu_entry_panic_element", element);
+    entry_panic_kv("xnu_entry_panic_zonename", zone_name);
     if (entry_image_ptr((uintptr_t)zone_name)) {
-        entry_kv("xnu_entry_zone_name_w0", entry_word_at((uintptr_t)zone_name));
-        entry_kv("xnu_entry_zone_name_w1", entry_word_at((uintptr_t)zone_name + 4u));
+        entry_panic_kv("xnu_entry_zone_name_w0", entry_word_at((uintptr_t)zone_name));
+        entry_panic_kv("xnu_entry_zone_name_w1", entry_word_at((uintptr_t)zone_name + 4u));
     }
 
     /*
@@ -4005,9 +4361,9 @@ void fleh_undef(void)
      */
     root = 0u;
     (void)DTLookupEntry((const void *)0, "/", (void **)&root);
-    entry_kv("xnu_entry_dt_root", root);
-    entry_kv("xnu_entry_dt_root_nprops", entry_kernel_word((uintptr_t)root));
-    entry_kv("xnu_entry_dt_root_nchildren", entry_kernel_word((uintptr_t)root + 4u));
+    entry_panic_kv("xnu_entry_dt_root", root);
+    entry_panic_kv("xnu_entry_dt_root_nprops", entry_kernel_word((uintptr_t)root));
+    entry_panic_kv("xnu_entry_dt_root_nchildren", entry_kernel_word((uintptr_t)root + 4u));
     /*
      * A root of 0x80900000 whose own two words read 4 and 0x15 is the blob's root: the same two
      * numbers `tools/xnu_dt_walk.py --verbose` prints for offset 0, and the same two the payload
@@ -4018,10 +4374,10 @@ void fleh_undef(void)
      * counts can coincide: the blob's first property name is a C string this project wrote, so these
      * sixteen bytes are a byte-for-byte comparison against the host dump's own first header.
      */
-    entry_kv("xnu_entry_dt_first_prop_w0", entry_kernel_word((uintptr_t)root + 8u));
-    entry_kv("xnu_entry_dt_first_prop_w1", entry_kernel_word((uintptr_t)root + 12u));
-    entry_kv("xnu_entry_dt_first_prop_w2", entry_kernel_word((uintptr_t)root + 16u));
-    entry_kv("xnu_entry_dt_first_prop_w3", entry_kernel_word((uintptr_t)root + 20u));
+    entry_panic_kv("xnu_entry_dt_first_prop_w0", entry_kernel_word((uintptr_t)root + 8u));
+    entry_panic_kv("xnu_entry_dt_first_prop_w1", entry_kernel_word((uintptr_t)root + 12u));
+    entry_panic_kv("xnu_entry_dt_first_prop_w2", entry_kernel_word((uintptr_t)root + 16u));
+    entry_panic_kv("xnu_entry_dt_first_prop_w3", entry_kernel_word((uintptr_t)root + 20u));
 
     /*
      * And the 36 bytes at `prop` itself — read **because they are known mapped**, not because a bound
@@ -4047,7 +4403,7 @@ void fleh_undef(void)
         };
 
         for (i = 0u; i < 8u; i++) {
-            entry_kv(pw[i], entry_word_at((uintptr_t)element + (i * 4u)));
+            entry_panic_kv(pw[i], entry_word_at((uintptr_t)element + (i * 4u)));
         }
     }
 
@@ -4092,15 +4448,15 @@ void fleh_undef(void)
         entry_dt_hash((uintptr_t)root, replay.end, &replay);
     }
 
-    entry_kv("xnu_entry_dt_map_base", replay.map_base);
-    entry_kv("xnu_entry_dt_replay_nodes", replay.nodes);
-    entry_kv("xnu_entry_dt_replay_props", replay.props);
-    entry_kv("xnu_entry_dt_replay_steps", replay.steps);
-    entry_kv("xnu_entry_dt_replay_end", replay.end);
-    entry_kv("xnu_entry_dt_replay_stop", replay.stop);
-    entry_kv("xnu_entry_dt_replay_stop_kind", replay.stop_kind);
-    entry_kv("xnu_entry_dt_checksum", replay.hash);
-    entry_kv("xnu_entry_dt_chunk_bytes", replay.chunk_bytes);
+    entry_panic_kv("xnu_entry_dt_map_base", replay.map_base);
+    entry_panic_kv("xnu_entry_dt_replay_nodes", replay.nodes);
+    entry_panic_kv("xnu_entry_dt_replay_props", replay.props);
+    entry_panic_kv("xnu_entry_dt_replay_steps", replay.steps);
+    entry_panic_kv("xnu_entry_dt_replay_end", replay.end);
+    entry_panic_kv("xnu_entry_dt_replay_stop", replay.stop);
+    entry_panic_kv("xnu_entry_dt_replay_stop_kind", replay.stop_kind);
+    entry_panic_kv("xnu_entry_dt_checksum", replay.hash);
+    entry_panic_kv("xnu_entry_dt_chunk_bytes", replay.chunk_bytes);
     {
         static const char *const ck[8] = {
             "xnu_entry_dt_chunk0", "xnu_entry_dt_chunk1",
@@ -4110,7 +4466,7 @@ void fleh_undef(void)
         };
 
         for (c = 0u; c < 8u; c++) {
-            entry_kv(ck[c], replay.chunk_hash[c]);
+            entry_panic_kv(ck[c], replay.chunk_hash[c]);
         }
     }
 
@@ -4119,7 +4475,7 @@ void fleh_undef(void)
      * property reads as (offset, length). Both are compared against the tables `tools/xnu_dt_walk.py
      * --verbose` prints; the totals above bound where the two walks part and this names it.
      */
-    entry_kv("xnu_entry_dt_node_count", replay.node_n);
+    entry_panic_kv("xnu_entry_dt_node_count", replay.node_n);
     {
         static const char *const no[ENTRY_DT_TRACE_N] = {
             "xnu_entry_dt_node0_off", "xnu_entry_dt_node1_off", "xnu_entry_dt_node2_off",
@@ -4147,12 +4503,12 @@ void fleh_undef(void)
         };
 
         for (c = 0u; c < ENTRY_DT_TRACE_N; c++) {
-            entry_kv(no[c], replay.node_off[c]);
-            entry_kv(np[c], replay.node_props[c]);
-            entry_kv(nc[c], replay.node_child[c]);
+            entry_panic_kv(no[c], replay.node_off[c]);
+            entry_panic_kv(np[c], replay.node_props[c]);
+            entry_panic_kv(nc[c], replay.node_child[c]);
         }
     }
-    entry_kv("xnu_entry_dt_ring_count", replay.ring_n);
+    entry_panic_kv("xnu_entry_dt_ring_count", replay.ring_n);
     {
         static const char *const ro[ENTRY_DT_TRACE_N] = {
             "xnu_entry_dt_ring0_off", "xnu_entry_dt_ring1_off", "xnu_entry_dt_ring2_off",
@@ -4178,8 +4534,8 @@ void fleh_undef(void)
         for (c = 0u; c < ENTRY_DT_TRACE_N; c++) {
             uint32_t k = (replay.ring_n + c) & (ENTRY_DT_TRACE_N - 1u);
 
-            entry_kv(ro[c], replay.ring_off[k]);
-            entry_kv(rl[c], replay.ring_len[k]);
+            entry_panic_kv(ro[c], replay.ring_off[k]);
+            entry_panic_kv(rl[c], replay.ring_len[k]);
         }
     }
 

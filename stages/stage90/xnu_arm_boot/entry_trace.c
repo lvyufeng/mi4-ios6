@@ -214,12 +214,26 @@ extern void entry_note_kthread(uint32_t cont, uint32_t caller, uint32_t ret);
 /* `iokit/Kernel/IODeviceTreeSupport.cpp:96`, called from `initWithArgs` and nowhere else. */
 void *__real__Z17IODeviceTreeAllocPv(void *dtTop);
 
+/* 461's plane reading, defined with the rest of 461's instruments at the end of this file - the
+ * declaration is here because this wrapper is the one place it is taken. */
+void entry_probe_plane(void *dtTop, void *root);
+
 void *__wrap__Z17IODeviceTreeAllocPv(void *dtTop)
 {
     void *r = __real__Z17IODeviceTreeAllocPv(dtTop);
 
     entry_note_dtalloc((uint32_t)(uintptr_t)__builtin_return_address(0),
                        (uint32_t)(uintptr_t)dtTop, (uint32_t)(uintptr_t)r);
+    /*
+     * 461: and immediately, while the plane is complete and nothing else has touched it.
+     *
+     * This is the first moment the plane exists at all: `makePlane` is `IODeviceTreeAlloc`'s first
+     * statement and the tree is attached to the registry root as its last, so this call is the only
+     * place in the boot where the IODT plane can be read without also reading whatever BSD init did
+     * to it afterwards. 459's frontier is *inside* that afterwards, so the reading has to be taken
+     * before it to be a reading of the plane rather than of the run.
+     */
+    entry_probe_plane(dtTop, r);
     return r;
 }
 
@@ -884,4 +898,203 @@ void __wrap_uart_putc(char c)
 {
     entry_os_console_char((int)(unsigned char)c, 2u);
     __real_uart_putc(c);
+}
+
+/* ----------------------------------------------------- the IODT plane, and the root-device chain (461) */
+/*
+ * 459 stopped in `IOFindBSDRoot` with the tree's `RAMDisk` property apparently gone, and it left a
+ * gap one link wide: the payload's blob is proved right on the host by XNU's own reader and
+ * `IODeviceTreeAlloc` is proved to have run with the tree's own physical address, so what was never
+ * measured is the object in between - the IODT *plane*, the registry tree that
+ * `IORegistryEntry::fromPath` walks. The derivation of the four readings below, and of why
+ * `getProperty` cannot be wrapped and has to be *called* instead, is in `entry_stubs.c` above
+ * `entry_note_dtplane`. What this file adds is where each reading is taken.
+ *
+ * The three call sites, in the order the boot reaches them:
+ *
+ *   1. `entry_probe_plane`, from the `IODeviceTreeAlloc` wrapper above, the moment the plane
+ *      exists. It reads `gIODTPlane` and asks the plane for `/chosen/memory-map` through XNU's own
+ *      `fromPath`, then reads the property off whatever came back. This is the instrument's own
+ *      call and not the OS's, which is the point: it is a reading of the plane *as built*, before
+ *      BSD init has done anything, so a failure here is upstream of 459's frontier.
+ *   2. `__wrap_...fromPath`, every call the image makes. The OS's own call for `/chosen/memory-map`
+ *      is one of them (`IOKitBSDInit.cpp:440`), and its record carries the caller, so "the OS asked
+ *      and got nothing" and "the OS never asked" are different lines in the log.
+ *   3. `__wrap_mdevadd`/`__wrap_mdevlookup`, the two calls the property is supposed to lead to.
+ *
+ * `getProperty` is **virtual**, and a vtable entry is a reference to a symbol defined in the same
+ * object - which `--wrap` does not rename, as 455 measured at a cost of eleven silent wrappers. So
+ * it is called here by its mangled name, with `this` in r0 exactly as the vtable slot would pass it:
+ * `_ZNK15IORegistryEntry11getPropertyEPKc` is `IORegistryEntry`'s own definition of
+ * `getProperty(const char *) const` (`IORegistryEntry.cpp:631`), no subclass overrides it, and the
+ * body is the same code the OS's call reaches - `OSSymbol::withCString` (which finds the interned
+ * symbol `MakeReferenceTable` created with `withCStringNoCopy`), the virtual `getProperty(symbol)`,
+ * and the release. `build_entry.sh` checks that both mangled names are *defined in this image*
+ * rather than invented as stubs by the generator, which is the shape of 455's typo defect: a
+ * misspelled name links, because the generator synthesises a stand-in for anything undefined.
+ */
+extern void entry_note_dtplane(uint32_t plane, uint32_t dt_top, uint32_t root, uint32_t map_ret);
+extern void entry_note_dtpath(uint32_t caller, uint32_t w0, uint32_t w1, uint32_t w2,
+                              uint32_t plane, uint32_t ret);
+extern void entry_note_dtprop(uint32_t entry, uint32_t key0, uint32_t key1, uint32_t obj,
+                              uint32_t w0, uint32_t w1, uint32_t bytes);
+extern void entry_note_mdevadd(uint32_t caller, uint32_t devid, uint32_t base, uint32_t size,
+                               uint32_t phys, uint32_t ret);
+extern void entry_note_mdevlookup(uint32_t caller, uint32_t devid, uint32_t ret);
+
+/* `IODeviceTreeSupport.cpp:64`, `.bss`, non-zero exactly when `makePlane` succeeded. */
+extern const void *gIODTPlane;
+
+/* XNU's own readers. These are *declarations* of XNU's functions under their mangled names, not
+ * wrappers: nothing in this file changes what they do. */
+extern void *entry_xnu_get_property(const void *self, const char *key)
+    __asm__("_ZNK15IORegistryEntry11getPropertyEPKc");
+extern void *entry_xnu_get_bytes(const void *self)
+    __asm__("_ZNK6OSData14getBytesNoCopyEv");
+
+void *__real__ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_(
+        const char *path, const void *plane, char *buf, int *len, void *from);
+
+/*
+ * Four bytes of a string as a word, little-endian, so a path or a key is *readable in the log*
+ * without a pointer that may be stale by the time anyone looks at it. The caller guarantees the four
+ * bytes are inside the literal: every path here is longer than twelve characters and every key here
+ * is `"RAMDisk"`, whose eighth byte is its terminator. Nothing is dereferenced - the argument is a
+ * `.rodata` string in this image, and this reads it while the image's own tables are live, on the
+ * path the wrapper was entered on.
+ */
+static uint32_t entry_str_word(const char *s, unsigned off)
+{
+    uint32_t w = 0u;
+
+    for (unsigned i = 0u; i < 4u; i++) {
+        w |= (uint32_t)(unsigned char)s[off + i] << (i * 8u);
+    }
+    return w;
+}
+
+static int entry_str_eq(const char *a, const char *b)
+{
+    while (*a != '\0' && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+/*
+ * Ask the plane for the property the OS is about to ask it for.
+ *
+ * `entry` is what `fromPath` returned, so the property table being read is the one the OS's own call
+ * will read four statements later. Both answers are recorded in one record - the object and, when
+ * there is one, the two words the object holds and `getBytesNoCopy` would have handed `mdevadd` -
+ * because the second is only meaningful when the first is non-zero, and one record cannot be read as
+ * a pair with a record that was never written. Reading the two words is safe for the same reason
+ * every other read on this path is: the OS dereferences exactly this pointer on the next line of its
+ * own code, so if it is bad the run was already over.
+ *
+ * The entry is *not* released. `fromPath` retains what it returns (`IORegistryEntry.cpp:1320`) and
+ * the OS's own call releases it at `:449`; this one leaves the count one higher. The node is a
+ * permanent member of the device-tree registry - nothing frees it before shutdown - and releasing it
+ * would mean calling `OSObject::release` by mangled name, i.e. another name to get wrong, for no
+ * reading.
+ */
+static void entry_probe_property(void *entry)
+{
+    static const char key[] = "RAMDisk";
+    void *obj = entry_xnu_get_property(entry, key);
+    void *bytes = obj ? entry_xnu_get_bytes(obj) : 0;
+    uint32_t w0 = 0u, w1 = 0u;
+
+    if (bytes) {
+        w0 = ((const uint32_t *)bytes)[0];
+        w1 = ((const uint32_t *)bytes)[1];
+    }
+    entry_note_dtprop((uint32_t)(uintptr_t)entry, entry_str_word(key, 0u), entry_str_word(key, 4u),
+                      (uint32_t)(uintptr_t)obj, w0, w1, (uint32_t)(uintptr_t)bytes);
+}
+
+/*
+ * The plane, as built. Called from the `IODeviceTreeAlloc` wrapper and from nowhere else.
+ *
+ * `map_ret` is this file's own `fromPath("/chosen/memory-map", gIODTPlane)`, the OS's reader called
+ * by the instrument. A zero `xnu_entry_dtplane_map` with a non-zero `xnu_entry_dtplane` says the
+ * plane exists and does not answer for the node - which is the reading that separates "the registry
+ * tree is wrong" from "the OS never asked".
+ */
+void entry_probe_plane(void *dtTop, void *root)
+{
+    const void *plane = gIODTPlane;
+    void *map = 0;
+
+    if (plane != 0) {
+        map = __real__ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_(
+                  "/chosen/memory-map", plane, 0, 0, 0);
+    }
+    entry_note_dtplane((uint32_t)(uintptr_t)plane, (uint32_t)(uintptr_t)dtTop,
+                       (uint32_t)(uintptr_t)root, (uint32_t)(uintptr_t)map);
+    if (map != 0) {
+        entry_probe_property(map);
+    }
+}
+
+void *__wrap__ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_(
+        const char *path, const void *plane, char *buf, int *len, void *from)
+{
+    void *r = __real__ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_(
+                  path, plane, buf, len, from);
+
+    /*
+     * The path words are read only when there is a path. `fromPath` handles a NULL path itself
+     * (`IORegistryEntry.cpp:1250`) and returns 0, so a NULL here is a real call the OS made, and it
+     * is recorded as three zero words rather than as a fault in the instrument.
+     */
+    if (path != 0) {
+        entry_note_dtpath((uint32_t)(uintptr_t)__builtin_return_address(0),
+                          entry_str_word(path, 0u), entry_str_word(path, 4u),
+                          entry_str_word(path, 8u), (uint32_t)(uintptr_t)plane,
+                          (uint32_t)(uintptr_t)r);
+    } else {
+        entry_note_dtpath((uint32_t)(uintptr_t)__builtin_return_address(0), 0u, 0u, 0u,
+                          (uint32_t)(uintptr_t)plane, (uint32_t)(uintptr_t)r);
+    }
+
+    /*
+     * And when the OS's own call is the memory-map one, read the property off what it got - before
+     * it does, so the reading is of the same object and not of whatever its own read left behind.
+     */
+    if (r != 0 && path != 0 && entry_str_eq(path, "/chosen/memory-map")) {
+        entry_probe_property(r);
+    }
+    return r;
+}
+
+/*
+ * `bsd/dev/memdev.c:561`, and its arguments are the measurement: the first is the device id the OS
+ * chose (`-1`, "pick one"), the second and third are the RAM disk's base and size *in pages*, and
+ * the fourth is `phys`. The widths are the source's own - `int`, `uint64_t`, `unsigned int`, `int` -
+ * because the AAPCS puts the 64-bit one in an aligned register pair (r1:r2) and the fourth argument
+ * on the stack, so a prototype that spelled everything `uint32_t` would read the low half of the
+ * base as the size and report a device that was never asked for.
+ */
+int __real_mdevadd(int devid, unsigned long long base, unsigned int size, int phys);
+int __wrap_mdevadd(int devid, unsigned long long base, unsigned int size, int phys)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    int r = __real_mdevadd(devid, base, size, phys);
+
+    entry_note_mdevadd(caller, (uint32_t)devid, (uint32_t)base, (uint32_t)size, (uint32_t)phys,
+                       (uint32_t)r);
+    return r;
+}
+
+/* `bsd/dev/memdev.c:635`: `mdevlookup(0)` is the call whose negative return reaches the panic. */
+int __real_mdevlookup(int devid);
+int __wrap_mdevlookup(int devid)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    int r = __real_mdevlookup(devid);
+
+    entry_note_mdevlookup(caller, (uint32_t)devid, (uint32_t)r);
+    return r;
 }
