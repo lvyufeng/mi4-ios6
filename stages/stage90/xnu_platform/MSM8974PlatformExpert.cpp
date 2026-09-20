@@ -96,6 +96,7 @@ public:
 OSDefineMetaClassAndStructors(MSM8974PlatformExpert, IODTPlatformExpert);
 
 static uint32_t g_pexpert_starts;
+static uint32_t g_pexpert_registers;
 static uint32_t g_delete_list_calls;
 static uint32_t g_exclude_list_calls;
 
@@ -259,6 +260,86 @@ MSM8974PlatformExpert::start( IOService * provider )
      * `gIOResources` at `IOService.cpp:3543`). */
     entry_live_write( "xnu_live_pexpert_self", (uint32_t)(uintptr_t) this );
     entry_live_write( "xnu_live_pexpert_state", (uint32_t) this->getState() );
+
+    /* Experiment 464. **The registration.** 463 measured that `IOSecureBSDRoot`'s
+     * `waitForMatchingService(serviceMatching("IOPlatformExpert"), 30 s)` cannot be satisfied on this
+     * boot: `OSMetaClass::applyToInstancesOfClassName` resolves the name to the metaclass
+     * (`0x8058b4f0`) and then walks its `instances` set, which holds nothing - `wcls_seen = 0` - so
+     * the two mechanisms 462 named (the `__state[0]` bit test in `instanceMatch` and the
+     * `matchInternal` clause of `matchPassive`) are filters over an *empty* set rather than failing
+     * tests. The one caller of `OSMetaClass::addInstance` in the whole tree is
+     * `IOService::doServiceMatch` (`IOService.cpp:3694`), which is reached from `registerService` ->
+     * `startMatching` - and **nothing in this tree registers an `IOPlatformExpert`**. The
+     * `registerService()` callers the tree does have are `IOStartIOKit.cpp:167`'s root nub (an
+     * `IOPlatformExpertDevice`, i.e. a *sibling* of this class, `IOPlatformExpert.h:290`), the
+     * platform nubs (`IOPlatformExpert.cpp:205`, `:1306`), the NVRAM controller (`:1340`) and
+     * `gIOResources` (`IOService.cpp:3543`) - so this object is the missing one, and this statement
+     * is what Apple's closed-source platform experts do at the end of their own `start`: it is the
+     * documented idiom, not a shortcut (`IOService.h:510-515`).
+     *
+     * **What the call does, and the reason it is not the same thing as "the registration happens
+     * here".** `registerService` (`IOService.cpp:751`) is a registry-membership check, then
+     * `gIOPlatform->platformAdjustService` (this object, which answers true -
+     * `IOPlatformExpert.cpp:413`), then `IOInstallServicePlatformActions(this)`, then
+     * `startMatching(options)` with `options = 0`. `startMatching` (`:805`) computes
+     * `sync = (options & kIOServiceSynchronous) || (provider && (provider->__state[1] &
+     * kIOServiceSynchronousState))`; `getProvider()` here is the root nub, whose own
+     * `registerService()` was called with no options (`IOStartIOKit.cpp:167`), so its synchronous
+     * bit was *cleared* - `sync` is false and the call takes the branch
+     * `!sync || (kIOServiceAsynchronous & options)`:
+     *
+     *     ok = (0 != _IOServiceJob::startJob( this, kMatchNubJob, options ));      IOService.cpp:857
+     *
+     * so the match is **enqueued as a job**, not run inline: `pingConfig` (`:4175`) queues it on
+     * `gJobs` and signals `gJobsSemaphore`, a config thread picks it up and calls
+     * `nub->doServiceMatch(job->options)` (`:4103`). The boot thread returns from
+     * `registerService()` with nothing set yet.
+     *
+     * That is why the two records below are a *pair* and not one: `xnu_live_pexpert_state` (written
+     * immediately above, at the same moment as 463's) is the state **before**, and
+     * `xnu_live_pexpert_state_reg` is the state **immediately after the call**. The prediction,
+     * written before the build: `_reg_seq = 1` and `_state_reg = 0` - the async path - and the
+     * registration itself visible later, at wait 2's `wcls` record, as `wcls_seen = 1` with
+     * `winst_inst = 0xc04bf800` and both bit 1 (`kIOServiceRegisteredState`, set at `:3702`) and bit
+     * 2 (`kIOServiceMatchedState`, set by `copyNotifiers(gIOMatchedNotification,
+     * kIOServiceMatchedState, 0xffffffff)` at `:3753`) set, i.e. `0x1e` - the same reading the
+     * resource root carries (`addInstance` also sets bit 3 at `:3695` and bit 4 at `:3756`, so
+     * "0x1e" rather than "0x06" is the full expectation for a first, successful `doServiceMatch`).
+     *
+     * **Why no driver will be instantiated by this registration.** `doServiceMatch` opens with
+     * `matches = gIOCatalogue->findDrivers(this, &catalogGeneration)` (`:3687`), and `findDrivers`
+     * (`IOCatalogue.cpp:198-222`) walks `service->getMetaClass()` up the chain - here
+     * `MSM8974PlatformExpert`, `IODTPlatformExpert`, `IOPlatformExpert`, `IOService` - collecting
+     * personalities filed under each of those names, where filing is by **`IOProviderClass`**
+     * (`arrayForPersonality`, `:124-132`, called from `addPersonality`, `:134-149`). This image's
+     * three personalities are filed under `IOPlatformExpertDevice` (two: this class's and
+     * `IOPanicPlatform`'s) and `IOResources` (one: `MSM8974RootResource`'s), and none of those names
+     * is on this object's class chain - `IOPlatformExpertDevice` is a subclass of `IOService`, not of
+     * `IOPlatformExpert` - so `matches` is an empty set. `probeCandidates` is therefore skipped
+     * (`matches->getCount()` is 0 at `:3720`), which is also what keeps 362's panic out of reach: the
+     * catalogue's `IOPanicPlatform` entry would match an `IOPlatformExpertDevice` provider, and this
+     * object is not one.
+     *
+     * Falsifiers, named in advance. (a) `_state_reg` **non-zero** would mean `sync` was true and the
+     * inline `doServiceMatch` branch ran (`:859-884`), whose `waitAgain = (prevBusy <
+     * (__state[1] & kIOServiceBusyStateMask))` would then `assert_wait` + `thread_block` with no
+     * timer on this machine to wake it: a non-zero `_state_reg` followed by silence in `start` is the
+     * signature, and the fix would be `kIOServiceAsynchronous`. (b) `_reg_seq = 1` with `_state_reg =
+     * 0` and *no* `wcls_seen = 1` at wait 2 is the same third sleep 463 measured, now with the
+     * enqueue known to have happened - which would put the frontier in the job machinery
+     * (`pingConfig`'s `create` decision, the config thread's existence under `kernel_thread_start`,
+     * or `doServiceMatch` itself). (c) `wcls_seen = 1` with `wsvc_p4 = 0` is 463's own falsifier and
+     * would move the cause to the filter; (d) a *new* console line, `"MSM8974PlatformExpert: not
+     * registry member at registerService()"` (`IOService.cpp:769-772`), would mean the walk to the
+     * registry root through `gIOServicePlane` failed and the call returned before `startMatching`
+     * (`state_reg` would be 0 in that case too, so the console is the distinguishing reading); and
+     * (e) a stop at `IOLog`, `IOMalloc`/`IOFree` (the `kIOLogRegister` block is compiled in but
+     * `gIOKitDebug` does not have that bit, so it should not run), `_adjustBusy`, `IOLockLock` or
+     * `semaphore_signal`. */
+    g_pexpert_registers++;
+    entry_live_write( "xnu_live_pexpert_reg_seq", g_pexpert_registers );
+    this->registerService();
+    entry_live_write( "xnu_live_pexpert_state_reg", (uint32_t) this->getState() );
 
     return( true );
 }
