@@ -1270,6 +1270,29 @@ void entry_live_write(const char *key, uint32_t value)
 #endif /* STAGE90_ENTRY_TRACE */
 
 /*
+ * **The ram console carries two writers, and these are the numbers that keep them apart.** Records
+ * append at the buffer's size field, which *is* their cursor - and so it was for three other writers
+ * before 458 (this function, and the two `entry_write` forms below). Experiment 458's console
+ * capture is the fourth, and a second cursor cannot be added to that field: two readers would take
+ * the same value and space-fill over each other, and because every one of these writers puts its
+ * characters down *before* the size field covers them, a record in flight would be written over by a
+ * chunk and a chunk by a record.
+ *
+ * The console capture therefore does **not** take a cursor of its own. It takes one *block*, once:
+ * on its first character it reads the size field, publishes `size + ENTRY_OS_BLOCK` into it, and
+ * space-fills that block - so from then on the records are above the whole block and cannot reach
+ * into it, whatever order they run in, and the block cannot reach up into them. **One** read-modify-
+ * write on the shared field replaces one per kilobyte, and it is self-healing: every kilobyte of
+ * text re-publishes the block's end if the field has fallen below it, which is the only thing a
+ * collision at that instant can do. The residual exposure is stated rather than fixed - a record
+ * whose own read-modify-write window straddles the reservation instant can leave the field short by
+ * one record - and it is small enough to leave alone: the alternative is `ldrex`/`strex` on this
+ * region's mapping, which is unpredictable on ARMv7 and would be a new fault site on the path every
+ * reading depends on.
+ */
+#define ENTRY_OS_BLOCK   0x00020000u   /* 128 KB, reserved once and space-filled in full */
+
+/*
  * One character into the same buffer `entry_write` appends to. Split out because the callers below
  * build a string a character at a time from a value in a register, and there is no room in this
  * image's `.bss` for a formatting buffer that would survive the teardown anyway.
@@ -1335,6 +1358,213 @@ void entry_write_kv(const char *key, uint32_t value)
 
     *size_p = size;
     __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
+}
+
+/* ------------------------------------------- Experiment 458: the OS's own console into the log */
+/*
+ * 457 read the OS's IOKit state through wrappers, but every word of it was *this* instrument's: the
+ * OS's own `printf`/`IOLog` output goes to a sink this image cannot see. The source says where, and
+ * it is one place:
+ *
+ *   `printf`  (`osfmk/kern/printf.c:861`, `vprintf_internal`) -> `console_printbuf_putc`
+ *   `IOLog`   (`iokit/Kernel/IOLib.cpp:1153` -> `_IOLogv`)     -> the same printbuf
+ *   `kprintf` (`:851`, gated by `disable_serial_output`)       -> `_doprnt_log(..., PE_kputc, 16)`
+ *
+ * and the printbuf ends in `console_write` (`osfmk/console/serial_console.c:450`), which puts every
+ * character into `console_ring`; `console_ring_try_empty` (`:361`) drains it through
+ * `cons_ops[cons_ops_index].putc` (`:300`) - entry 0 is `_serial_putc` (`:620`), entry 1 `vcputc`.
+ * So the two sinks are `vcputc` and, under it, `uart_putc`, and the wrappers in `entry_trace.c` sit
+ * in front of both. `vcputc` is reached only through the ops table, i.e. through a *reference that
+ * is an address* - `--wrap` rewrites that too, and `build_entry.sh` checks the effect in the linked
+ * image rather than trusting it (`cons_ops[1].putc` must hold `__wrap_vcputc`). The serial side is
+ * wrapped at `uart_putc` rather than at `serial_putc` for a reason only the image gives:
+ * `PE_init_kprintf` (`pexpert/arm/pe_kprintf.c:24-42`) stores `serial_putc` into `PE_kputc` with a
+ * `movw`/`movt` pair against a symbol its own object defines, which `--wrap` cannot reach, so a
+ * wrapper on `serial_putc` would miss the one sink `kprintf` and `panic` print through;
+ * `serial_putc` is a tail call into `uart_putc` (`pe_serial.c:813`), and that call is cross-object,
+ * so wrapping `uart_putc` captures the console route, kdp's two `pal_serial_*` and the stored
+ * pointer alike, with nothing counted twice. `build_entry.sh` reads that tail call out of the image
+ * as well.
+ *
+ * Both sinks are also *gates* in this build, which is why nothing the OS has printed has ever been
+ * visible: `uart_putc` returns unless the *local* `uart_initted` is 1, and `vcputc` returns unless
+ * `gc_initialized` is 1. A wrapper in front of them therefore captures text the OS produced and then
+ * discarded in silence - which is exactly the text worth having.
+ *
+ * The characters go into the *same* ram console the live records use, and the way the two writers
+ * are kept apart is the block reservation described above `ENTRY_OS_BLOCK`: one 128 KB block, taken
+ * contiguously out of the shared cursor on the first character and space-filled in full, so the
+ * records are above it from then on and the block is a single self-contained run of text below them.
+ * Each capture is bounded and counted, and the counters are in the log (`xnu_live_ostext_*`),
+ * including what was refused and what the `.bss` holding tank had to drop before the live channel's
+ * page tables were installed - the console is up, and printing, before this instrument's first live
+ * record, so the tank is not a nicety.
+ *
+ * Live only, like every reading taken inside XNU: the boot that hangs at the frontier never reaches
+ * `entry_epilogue`, which is 455's whole lesson.
+ */
+#define ENTRY_OS_TANK    8192u
+#define ENTRY_OS_HEAL    1024u        /* characters between re-publishings of the block's end */
+
+uint32_t g_os_calls;          /* calls into the two sinks */
+uint32_t g_os_vc_calls;       /* of those, vcputc - the video console the ring drains through */
+uint32_t g_os_ser_calls;      /* of those, uart_putc - every serial route, kprintf's included */
+uint32_t g_os_chars;          /* characters offered by the OS */
+uint32_t g_os_lines;          /* of those, '\n' */
+uint32_t g_os_total;          /* characters stored */
+uint32_t g_os_chunks;         /* heal re-publishings of the block's end, one per kilobyte of text */
+uint32_t g_os_tank_dropped;
+uint32_t g_os_limited;        /* 1 the block filled, 2 the buffer had no room */
+uint32_t g_os_first;
+
+static uint8_t  g_os_tank[ENTRY_OS_TANK];
+static uint32_t g_os_tank_n;
+static uint32_t g_os_at;      /* the next character's data offset; 0 until the block is reserved */
+static uint32_t g_os_end;     /* one past the block's last byte */
+static uint32_t g_os_at_base; /* the offset the last heal published from */
+
+/*
+ * The console's own state, read **by name** so that a misspelling is a build failure rather than a
+ * generated stub that reads zero - 455's defect twice over and 456's rule. `uart_initted`,
+ * `gc_initialized`, `gc_enabled` and `console_suspended` are *local* symbols in this image (`nm`
+ * says `b`), so no other object can read them at all; they are deliberately not in this list, and
+ * what they would have said is reproducible from the two sinks' counters instead.
+ */
+extern uint32_t cons_ops_index;               /* `D`, serial_console.c:130 */
+extern uint32_t disable_serial_output;        /* `D`, pexpert/arm/pe_kprintf.c:20 */
+extern int      disableConsoleOutput;         /* `B`, bsd/dev/arm/km.c:46 */
+extern void   (*PE_kputc)(char c);            /* `B`, pexpert/arm/pe_kprintf.c:17 */
+extern uint32_t kernel_debugger_entry_count;  /* `B`, osfmk/kern/debug.c */
+
+static void entry_os_state_record(void)
+{
+    entry_write_kv("xnu_live_console_opsidx", cons_ops_index);
+    entry_write_kv("xnu_live_console_kputc", (uint32_t)(uintptr_t)PE_kputc);
+    entry_write_kv("xnu_live_console_noserial", disable_serial_output);
+    entry_write_kv("xnu_live_console_noconout", (uint32_t)disableConsoleOutput);
+    entry_write_kv("xnu_live_console_dbgcnt", kernel_debugger_entry_count);
+}
+
+/*
+ * Take the block, once, on the first character of text: read the size field, publish
+ * `size + ENTRY_OS_BLOCK` into it, and space-fill the block in full. Publishing *before* filling is
+ * the point - from the publish onward the records append above the block, so the fill cannot be
+ * written over by a record, and the block cannot be written over by one either since its own writes
+ * stay inside it. Returns 1 on success, 0 on either refusal, which it records once.
+ */
+static uint32_t entry_os_reserve(void)
+{
+    static const char marker[] = "\n[os-console-458]\n";
+    volatile uint32_t *sig = (volatile uint32_t *)(uintptr_t)RAM_CONSOLE_BASE;
+    volatile uint32_t *size_p = (volatile uint32_t *)(uintptr_t)(RAM_CONSOLE_BASE + 8u);
+    volatile uint8_t *data = (volatile uint8_t *)(uintptr_t)(RAM_CONSOLE_BASE + 12u);
+    const uint32_t max = 0x00200000u - 12u;
+    const char *m;
+    uint32_t base, i;
+
+    if (*sig != RAM_CONSOLE_SIG || *size_p + ENTRY_OS_BLOCK > max) {
+        g_os_limited = 2u;
+        entry_write_kv("xnu_live_ostext_limited", g_os_limited);
+        entry_write_kv("xnu_live_ostext_chars", g_os_chars);
+        return 0u;
+    }
+    base = *size_p;
+    *size_p = base + ENTRY_OS_BLOCK;
+    for (i = 0u; i < ENTRY_OS_BLOCK; i++)
+        data[base + i] = (uint8_t)' ';
+    __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
+    g_os_at = base;
+    g_os_end = base + ENTRY_OS_BLOCK;
+    g_os_at_base = base;
+
+    entry_write_kv("xnu_live_ostext_at", base);
+    entry_write_kv("xnu_live_ostext_block", ENTRY_OS_BLOCK);
+    for (m = marker; *m != '\0'; m++)
+        data[g_os_at++] = (uint8_t)*m;
+    return 1u;
+}
+
+/*
+ * Every character the OS offers its console, from the two sink wrappers in `entry_trace.c`. Nothing
+ * here takes a lock, allocates or calls into XNU: `_cnputs` runs with preemption disabled and its
+ * caller may hold interrupts off, and a console wrapper that behaved like a thread would be a new
+ * fault site on the one path every later reading depends on.
+ */
+void entry_os_console_char(int ch, uint32_t which)
+{
+    volatile uint8_t *data = (volatile uint8_t *)(uintptr_t)(RAM_CONSOLE_BASE + 12u);
+    volatile uint32_t *size_p = (volatile uint32_t *)(uintptr_t)(RAM_CONSOLE_BASE + 8u);
+    uint32_t n, i;
+
+    g_os_calls++;
+    if (which == 1u)
+        g_os_vc_calls++;
+    else
+        g_os_ser_calls++;
+    g_os_chars++;
+    if (ch == '\n')
+        g_os_lines++;
+
+    if (g_live_state != 1u) {
+        /* The live channel's tables are not installed yet: hold the text in this image's `.bss`. */
+        if (g_os_tank_n < ENTRY_OS_TANK)
+            g_os_tank[g_os_tank_n++] = (uint8_t)ch;
+        else
+            g_os_tank_dropped++;
+        return;
+    }
+
+    if (g_os_first == 0u) {
+        g_os_first = 1u;
+        entry_os_state_record();
+        entry_write_kv("xnu_live_ostext_tank", g_os_tank_n);
+    }
+
+    if (g_os_at == 0u && entry_os_reserve() == 0u) {
+        g_os_tank_dropped += g_os_tank_n;
+        g_os_tank_n = 0u;
+        return;
+    }
+
+    if (g_os_tank_n != 0u) {
+        n = g_os_tank_n;
+        g_os_tank_n = 0u;
+        for (i = 0u; i < n; i++) {
+            if (g_os_at >= g_os_end) {
+                g_os_tank_dropped += (n - i);
+                return;
+            }
+            data[g_os_at++] = g_os_tank[i];
+            g_os_total++;
+        }
+    }
+
+    if (g_os_at >= g_os_end) {
+        if (g_os_limited == 0u) {
+            g_os_limited = 1u;
+            entry_write_kv("xnu_live_ostext_limited", g_os_limited);
+            entry_write_kv("xnu_live_ostext_chars", g_os_chars);
+            entry_write_kv("xnu_live_ostext_lines", g_os_lines);
+        }
+        return;
+    }
+    data[g_os_at++] = (uint8_t)ch;
+    g_os_total++;
+
+    /*
+     * The heal. A record whose own read-modify-write on the size field straddles the reservation
+     * instant can leave the field below the block's end, which would cut the block out of the host's
+     * dump - so every kilobyte of text puts the block's end back if it has fallen below it. It only
+     * ever raises, so it cannot undo a record written above the block.
+     */
+    if (g_os_at - g_os_at_base >= ENTRY_OS_HEAL) {
+        g_os_at_base = g_os_at;
+        g_os_chunks++;
+        if (*size_p < g_os_end)
+            *size_p = g_os_end;
+        __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
+        entry_write_kv("xnu_live_ostext_heals", g_os_chunks);
+    }
 }
 
 /*

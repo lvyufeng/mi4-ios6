@@ -839,3 +839,49 @@ void *__wrap__ZN11IOCatalogue11findDriversEP9IOServicePl(void *self, void *servi
 
     return result;
 }
+
+/* ------------------------------------------------------- the OS's own console (458) */
+/*
+ * The two sinks the OS's console text leaves through, wrapped so that the text is captured instead
+ * of discarded. The derivation is in `entry_stubs.c`'s 458 block, under `entry_os_console_char`, and
+ * the two readings it rests on are in this image rather than in the source: `cons_ops_index` selects
+ * the ops-table entry the ring's drain calls (`0` = `_serial_putc`, `1` = `vcputc`, whose reference
+ * is the table's *address*, rewritten by `--wrap` exactly as a call is - `build_entry.sh` checks
+ * that the image's `cons_ops[1].putc` holds `__wrap_vcputc`), and both sinks return immediately on
+ * their own local gates (`uart_initted`, `gc_initialized`), which is why the OS's output has never
+ * been visible anywhere.
+ *
+ * **The serial side is wrapped one level further down than the first design had it, and the reason
+ * is a reading, not a preference.** That design wrapped `serial_putc`; the image then showed three
+ * branches to `__wrap_serial_putc` (`_serial_putc`'s tail call, and kdp's two `pal_serial_*`), and
+ * `PE_init_kprintf` (`pexpert/arm/pe_kprintf.c:34-42`, `80031ad0`) storing
+ * `0x80031af8 = serial_putc` **unwrapped** into `PE_kputc` - a `movw`/`movt` pair against a symbol
+ * its own object defines, which is exactly the same-object case `--wrap` cannot reach. `PE_kputc` is
+ * the sink `kprintf` and the panic banner print through, so with `serial_putc` wrapped the one text
+ * this instrument most needs on the next steps - a panic - would have been the one it missed.
+ * `uart_putc` (`pexpert/arm/pe_serial.c:813`, in `pexpert_arm_pe_serial.o`) is cross-object from
+ * every caller, is the single function every serial route ends in, and carries the `uart_initted`
+ * gate the text dies at - so wrapping it captures `_serial_putc`, kdp's two, *and* the pointer
+ * `PE_init_kprintf` stored, with no path counted twice.
+ *
+ * Nothing is changed: the wrapper appends to the ram console and then calls the real sink with the
+ * same arguments. `vcputc`'s signature is the source's own three `int`s
+ * (`osfmk/console/video_console.c`, `vcputc(__unused int l, __unused int u, int c)`) and
+ * `uart_putc`'s is `void uart_putc(char c)` (`pexpert/arm/pe_serial.c:813`), which is what
+ * `serial_putc` calls it with.
+ */
+void entry_os_console_char(int ch, uint32_t which);
+
+void __real_vcputc(int l, int u, int c);
+void __wrap_vcputc(int l, int u, int c)
+{
+    entry_os_console_char(c, 1u);
+    __real_vcputc(l, u, c);
+}
+
+void __real_uart_putc(char c);
+void __wrap_uart_putc(char c)
+{
+    entry_os_console_char((int)(unsigned char)c, 2u);
+    __real_uart_putc(c);
+}

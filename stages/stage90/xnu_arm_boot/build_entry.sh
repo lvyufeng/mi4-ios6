@@ -126,7 +126,8 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=_ZN9IOService15serviceMatchingEPKcP12OSDictionary
                    --wrap=_ZN9IOService16resourceMatchingEPK8OSStringP12OSDictionary
                    --wrap=_ZN9IOService16resourceMatchingEPKcP12OSDictionary
-                   --wrap=_ZN11IOCatalogue11findDriversEP9IOServicePl)
+                   --wrap=_ZN11IOCatalogue11findDriversEP9IOServicePl
+                   --wrap=vcputc --wrap=uart_putc)
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
 # every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that
@@ -26832,11 +26833,17 @@ verify_trace_symbols() {
     # instructions, `movw/movt` plus a *tail* branch to the wrapper (`80268960: b 8045551c
     # <__wrap_iokit_post_constructor_init>`), and the first version of this check counted only `bl`,
     # so it called a reachable wrapper unreachable - a check is an instrument too.
-    local dis wrap sym n dead=() only=() uncalled=()
+    local dis wrap sym n dead=() only=() uncalled=() addr=()
     local same_object=(
         _ZN9IOService20copyExistingServicesEP12OSDictionarymm
         _ZN9IOService12matchPassiveEP12OSDictionaryj )
     local never_called=( sleep )
+    # The fourth reading, added by 458 and **checked rather than listed**: a symbol the image
+    # references only by taking its *address*, because the reference is a table entry. `--wrap`
+    # rewrites an address reference exactly as it rewrites a call, so `cons_ops[1].putc` ends up
+    # holding `__wrap_vcputc` - and that is a fact about the linked image, so it is read out of the
+    # image below instead of being asserted here.
+    local by_address=( vcputc )
     in_list() {
         local needle=$1 s
         shift
@@ -26857,13 +26864,83 @@ verify_trace_symbols() {
         [[ ${n:-0} -gt 0 ]] && continue
         if in_list "$sym" "${same_object[@]}"; then only+=("$sym")
         elif in_list "$sym" "${never_called[@]}"; then uncalled+=("$sym")
+        elif in_list "$sym" "${by_address[@]}"; then addr+=("$sym")
         else dead+=("$sym"); fi
     done
-    rm -f "$dis"
     if [[ ${#dead[@]} -gt 0 ]]; then
-        layout_fail "these --wrap'd symbols have no branch to their wrapper anywhere in the linked image, so the wrapper can never run: ${dead[*]} - a same-object call is resolved by the linker and is invisible to --wrap. Add it to this check's same-object or never-called list with a reason, or drop the flag"
+        layout_fail "these --wrap'd symbols have no branch to their wrapper anywhere in the linked image, so the wrapper can never run: ${dead[*]} - a same-object call is resolved by the linker and is invisible to --wrap. Add it to this check's same-object, never-called or by-address list with a reason, or drop the flag"
     fi
-    say "  xnu_entry_455: ${#TRACE_LDFLAGS[@]} --wrap'd symbols: $(( ${#TRACE_LDFLAGS[@]} - ${#only[@]} - ${#uncalled[@]} )) reached by a branch in this image, ${#only[@]} same-object-only (${only[*]:-none}), ${#uncalled[@]} never called here (${uncalled[*]:-none})"
+    say "  xnu_entry_455: ${#TRACE_LDFLAGS[@]} --wrap'd symbols: $(( ${#TRACE_LDFLAGS[@]} - ${#only[@]} - ${#uncalled[@]} - ${#addr[@]} )) reached by a branch in this image, ${#only[@]} same-object-only (${only[*]:-none}), ${#uncalled[@]} never called here (${uncalled[*]:-none}), ${#addr[@]} by address only (${addr[*]:-none})"
+    # **The by-address claim, read out of the image.** The table is
+    # `struct console_ops { void (*putc)(int,int,int); int (*getc)(int,int,boolean_t,boolean_t); }`
+    # (`osfmk/console/serial_protos.h:63-66`), `cons_ops[]` is
+    # `{{_serial_putc, _serial_getc}, {vcputc, vcgetc}}` and `cons_ops_index` starts at
+    # `VC_CONS_OPS` (`osfmk/console/serial_console.c:117-128`) - so the word the ring's drain calls,
+    # `cons_ops[cons_ops_index].putc`, is **the third word of the table** (offset 8), not the first:
+    # a check that read the first word would read the *serial* entry and pass or fail for the wrong
+    # reason. `--wrap=vcputc` rewrites an address reference exactly as it rewrites a call, so that
+    # word should be `__wrap_vcputc`; if it is `vcputc` the wrapper never runs, which no run would
+    # show, because the OS's console text is discarded either way. All four words are checked against
+    # `nm`, because the pair also states *why* the serial route works: `cons_ops[0].putc` is still
+    # `_serial_putc` - a static, so nothing in the table can be wrapped by name - and the capture gets
+    # the serial text two levels in, at `_serial_putc`'s call to `serial_putc`
+    # (`osfmk/console/serial_console.c:620`, cross-object) and then at `serial_putc`'s tail call into
+    # `uart_putc` (`pexpert/arm/pe_serial.c:813`, cross-object too, which is why the wrapper is on
+    # `uart_putc` and not on `serial_putc`). `nconsops` sits immediately after
+    # the table (`:129`), which is what makes "the table is these 16 bytes" checkable rather than
+    # assumed, and the four-byte-per-word read is byte-reversed because the image is little-endian.
+    if [[ ${#addr[@]} -gt 0 ]]; then
+        local co hi line at w0 w1 w2 w3
+        # `awk ... exit` on a pipe is not usable here: the writer gets SIGPIPE, `pipefail` makes the
+        # pipeline's status that signal, and `set -e` then ends the build with 141 and *no* message -
+        # which is how this check's first version failed, looking like a link failure. Both helpers
+        # therefore read their input to the end and pick the first match with a flag.
+        addr_of() { arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk -v s="$1" '$3 == s && !seen { print $1; seen = 1 }'; }
+        # `objdump -s` prints bytes, not words, so each 8-hex-digit group has to be reversed to be
+        # the value the image holds and comparable with `nm`'s.
+        rev() { echo "${1:6:2}${1:4:2}${1:2:2}${1:0:2}"; }
+        co=$(addr_of cons_ops)
+        [[ -n $co ]] || layout_fail "the linked image has no cons_ops, so the console ops table cannot be checked"
+        hi=$(printf '%08x' $(( 0x$co + 16 )))
+        [[ "$(addr_of nconsops)" == "$hi" ]] ||
+            layout_fail "nconsops is not 16 bytes after cons_ops (cons_ops 0x$co), so cons_ops is not the two-entry table this check reads - fix the check rather than deleting it"
+        line=$(arm-none-eabi-objdump -s --start-address=0x$co --stop-address=0x$hi "$OUT/xnu_arm_entry.elf" |
+               awk -v a="$co" '$1 == a && !seen { print $1, $2, $3, $4, $5; seen = 1 }')
+        [[ -n $line ]] ||
+            layout_fail "objdump -s printed no 16-byte line starting at cons_ops (0x$co), so this check cannot read the table - fix the check rather than deleting it"
+        read -r at w0 w1 w2 w3 <<<"$line"
+        [[ $at == "$co" ]] || layout_fail "the objdump line starts at $at and not at cons_ops (0x$co)"
+        w0=$(rev "$w0"); w1=$(rev "$w1"); w2=$(rev "$w2"); w3=$(rev "$w3")
+        [[ $w0 == "$(addr_of _serial_putc)" ]] ||
+            layout_fail "cons_ops[0].putc is 0x$w0 and not _serial_putc (0x$(addr_of _serial_putc)): the serial entry of the table moved, and the serial half of the capture is not the call inside _serial_putc"
+        [[ $w2 == "$(addr_of __wrap_vcputc)" ]] ||
+            layout_fail "cons_ops[1].putc is 0x$w2 and not __wrap_vcputc (0x$(addr_of __wrap_vcputc)): the video entry kept the real vcputc (0x$(addr_of vcputc)), so the ring's drain calls the sink and not the console capture"
+        say "  xnu_entry_458: the console ops table reads exactly as built - [0].putc=0x$w0 (_serial_putc), [0].getc=0x$w1, [1].putc=0x$w2 (__wrap_vcputc), [1].getc=0x$w3, nconsops at 0x$hi"
+    fi
+
+    # **The panic route, read out of the image.** `PE_init_kprintf` stores a `movw`/`movt` pair - a
+    # same-object address reference - into `PE_kputc`, and the census above cannot see that: it only
+    # asks whether *some* branch reaches `__wrap_uart_putc`, which is true for the console routes and
+    # says nothing about the pointer `kprintf` and `panic` print through. What makes that route
+    # captured is `serial_putc`'s own tail call, and it is one instruction, so it is read here: if
+    # `serial_putc`'s body branches anywhere other than to `__wrap_uart_putc`, the stored pointer
+    # leads to the sink's gate and the panic banner is discarded as before. The body comes out of the
+    # disassembly file the census already wrote, read whole - an `awk` that exits early would
+    # SIGPIPE the writer, and `pipefail` would then end the build with no message at all.
+    if grep -qx -- "--wrap=uart_putc" <<<"$(printf '%s\n' "${TRACE_LDFLAGS[@]}")"; then
+        local sp body
+        sp=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "serial_putc" && !seen { print $1; seen = 1 }')
+        [[ -n $sp ]] ||
+            layout_fail "--wrap=uart_putc is set for the kprintf/panic route but the image has no serial_putc, so PE_kputc leads somewhere this check cannot follow - fix the check rather than deleting it"
+        body=$(awk -v t="<serial_putc>:" 'index($0, t) { f = 1 } f { print } f && $0 == "" { exit }' "$dis")
+        [[ -n $body && $body == *"$sp"* ]] ||
+            layout_fail "the disassembly has no body for serial_putc ($sp), so this check cannot read its call - fix the check rather than deleting it"
+        case "$body" in
+            *__wrap_uart_putc*) say "  xnu_entry_458: serial_putc branches to __wrap_uart_putc, so the pointer PE_init_kprintf stores in PE_kputc reaches the capture" ;;
+            *) layout_fail "serial_putc ($sp) does not branch to __wrap_uart_putc, so the text kprintf and panic print through PE_kputc is not captured: $(printf '%s' "$body" | tail -3 | tr '\n' ' ')" ;;
+        esac
+    fi
+    rm -f "$dis"
 }
 
 # Experiment 456's probe calls three XNU member functions and reads two XNU globals **by mangled
@@ -26899,6 +26976,30 @@ verify_registry_probe() {
     say "  xnu_entry_456: the registry probe's five names are real symbols in the image and none of them is in the undefined list"
 }
 verify_registry_probe
+
+# Experiment 458's console capture reads five XNU globals **by name** - the console's own state, so
+# that the run can say *why* it captured what it did rather than only that it did. The same rule as
+# 456's probe applies and for the same reason: a name misspelled or local to its object resolves to
+# a generated storage stand-in, the link succeeds, the count goes up by one, and the reading is a
+# silent zero. So each name must be a *storage* symbol in the linked image and not a line in the
+# undefined list. The four globals that would have been worth having most - `uart_initted`,
+# `gc_initialized`, `gc_enabled`, `console_suspended` - are local symbols (`nm` says `b`) and cannot
+# be read from another object at all, which is why they are absent here rather than in a list.
+verify_console_state() {
+    local sym type
+    for sym in cons_ops_index disable_serial_output disableConsoleOutput PE_kputc \
+               kernel_debugger_entry_count; do
+        type=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
+               awk -v s="$sym" '$3 == s { print $2; found = 1 } END { exit(found ? 0 : 1) }') ||
+            layout_fail "the console capture reads $sym, which the linked image does not define - it would resolve to a generated stand-in and the reading would be zero"
+        [[ $type == B || $type == b || $type == D || $type == d ]] ||
+            layout_fail "the console capture reads $sym, which the image defines as '$type' and not as storage"
+        grep -qx "$sym" "$OUT/xnu_arm_entry_undef.txt" &&
+            layout_fail "$sym is in the undefined list *and* defined in the image - the doubled-underscore shape 455 found, where the instrument reads a generated stand-in instead of the real global"
+    done
+    say "  xnu_entry_458: the console capture's five names are real storage symbols in the image and none of them is in the undefined list"
+}
+verify_console_state
 verify_trace_symbols
 
 cat > "$OUT/xnu_arm_entry.h" <<EOF
