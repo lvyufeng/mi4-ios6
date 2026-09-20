@@ -909,8 +909,11 @@ def mutate(facts, name):
         rederive_timebase(_bump(timebase, "            TB_LIVE(\"xnu_live_dec_ref\", g_dec_ref_value);",
                                 "            ;"))
     elif name == "wrap_removed_from_the_build":
-        rederive_build(_bump(build, "                   --wrap=timer_call_setup --wrap=thread_quantum_expire)",
-                             "                   --wrap=timer_call_setup)"))
+        # The anchor is the wrap *pair* and not the line's last character: 485 appended its own wraps
+        # after `thread_quantum_expire` and this mutation broke on the closing parenthesis the old
+        # anchor carried, which is a selftest asserting a neighbour rather than the property.
+        rederive_build(_bump(build, "--wrap=timer_call_setup --wrap=thread_quantum_expire",
+                             "--wrap=thread_quantum_expire"))
     elif name == "wrap_moved_to_pass_one":
         rederive_build(_bump(build, "        PASS1_LDFLAGS=(--wrap=PE_init_platform --wrap=fiq_context_init)",
                              "        PASS1_LDFLAGS=(--wrap=PE_init_platform --wrap=fiq_context_init"

@@ -1135,6 +1135,82 @@ uint32_t g_wcls_state[ENTRY_WCLS_MAX];
  * only known once `applyToInstancesOfClassName` has returned.
  */
 uint32_t g_wls_seen;
+/*
+ * ------------------------------------------------------------------------------------------------
+ * 485: the boot thread's tail, and the device tree the driver layer is handed
+ * ------------------------------------------------------------------------------------------------
+ *
+ * **The first of these two is the reading this project has never taken, and it is the one the
+ * minimum bar is a statement about.** `kernel_bootstrap_thread` (`osfmk/kern/startup.c:558`) is the
+ * kernel's own main thread: it runs `PE_init_iokit()`, then `bsd_init()` (`:628`), and then five more
+ * calls - `OSKextRemoveKextBootstrap()`, `kdebug_free_early_buf()`, `serial_keyboard_init()`,
+ * `vm_page_init_local_q()`, `thread_bind(PROCESSOR_NULL)` - before `vm_pageout()` (`:646`), which
+ * never returns. `vm_pageout` being entered is therefore the *end of the kernel's boot*, and it
+ * cannot be entered unless `bsd_init` returned. Every previous run of this walk has been read
+ * through what the boot printed and what process 1 did; **this is the first reading of the boot
+ * thread's own position**, and it is taken by wrapping the five calls in the order Apple's source has
+ * them, so the log says which of them ran and which did not.
+ *
+ * The second is the same question one layer up, and it is the one the goal's "basic drivers" half
+ * turns on. The device tree the kernel is handed becomes a registry subtree - `IODeviceTreeAlloc`
+ * builds it out of **`new IOService`** nodes (`iokit/Kernel/IODeviceTreeSupport.cpp:359`) and attaches
+ * them to the root nub - and the *second* stage, the one that turns a node into a matched, driven
+ * device, is `IOPlatformExpert`'s own nub pass. So the census walks the root nub's children and
+ * publishes each one's **name** and its **`__state[0]`/`__state[1]`** pair (`+36`/`+40`, the words
+ * `IOService::getState` and `registerService` load). A child with `Registered|Matched` is a device
+ * IOKit has both published and driven; a child with `Registered` alone is published and unmatched;
+ * `0` is a node that never reached `registerService` at all. That is "which basic drivers are
+ * running" as a table rather than as an inference from the absence of console output.
+ *
+ * The names are read as bytes rather than as pointers, for 484's reason - a pointer names nothing in
+ * a report - and the reader is `IORegistryEntry::getName(plane)`, XNU's own, the same one its
+ * matching uses to name a nub.
+ */
+/* How many calls Apple's tail has, and it is a `#define` because two places need it and neither can
+ * read the other's: the array that counts each call, and the guard that keeps a ninth index out of it.
+ * A literal in both is this project's oldest defect class - one value with two definitions, neither
+ * compared - and the failure it would produce here is a store past the end of a `.bss` array in the
+ * kernel's own boot thread. `tools/check_boot_completion.py` fails the build if either stops reading
+ * this name, and if the number stops matching the wrappers `entry_trace.c` defines. */
+#define ENTRY_TAIL_CALLS 5u
+#define ENTRY_DTK_SHOWN 24u
+uint32_t g_boot_tail_calls;
+uint32_t g_boot_tail_last_site;
+uint32_t g_boot_tail_seen[ENTRY_TAIL_CALLS];
+uint32_t g_dtk_calls;
+uint32_t g_dtk_count;
+uint32_t g_dtk_shown;
+uint32_t g_dtk_ok;
+/*
+ * **The two roots, and the reason this group is not one number.** 461 recorded the object
+ * `IODeviceTreeAlloc` returned and named it the tree's root; 485's first run read 0 children of it at
+ * `vm_pageout` while the OS's own walk of the registry root, in the same log and a few records later,
+ * found a *different* entry with 21 - so "which object is the tree root" is a question this project has
+ * now answered two ways, and the census publishes both rather than choosing. `recorded` is 461's
+ * reading (`g_dtplane_root`), `root` is what the registry root's child in `gIODTPlane` is *now*, and
+ * `same` is whether they agree; `set` is that root's child set and `kids`/`count` are its child count
+ * by two different accessors (`IORegistryEntry::getChildCount` and `OSArray::getCount` on the set),
+ * which is the same pair-of-definitions rule one level down. `none` names the reason no reading was
+ * taken at all - a NULL plane or a NULL root - because "the census did not run" and "the tree is empty"
+ * must not print the same record.
+ */
+uint32_t g_dtk_plane;
+uint32_t g_dtk_recorded;
+uint32_t g_dtk_root;
+uint32_t g_dtk_same;
+uint32_t g_dtk_set;
+uint32_t g_dtk_kids;
+uint32_t g_dtk_none;
+/* Three tallies over the same children, so the table is a count and not only a sample: how many had
+ * a name at all, how many had `Matched` set, and how many had `Registered` set. `IOService.h:72-76`
+ * is the enum - Inactive 1, Registered 2, Matched 4, FirstPublish 8, FirstMatch 16. */
+uint32_t g_dtk_named;
+uint32_t g_dtk_matched;
+uint32_t g_dtk_registered;
+uint32_t g_dtk_name0[ENTRY_DTK_SHOWN];
+uint32_t g_dtk_name1[ENTRY_DTK_SHOWN];
+uint32_t g_dtk_state0[ENTRY_DTK_SHOWN];
+uint32_t g_dtk_state1[ENTRY_DTK_SHOWN];
 uint32_t g_rlock_bad;
 uint32_t g_rlock_caller;
 uint32_t g_rlock_count;
@@ -2700,6 +2776,60 @@ __attribute__((noinline)) static void entry_write_463_kv(void)
 }
 
 /*
+ * 485's keys, in a function of their own for 455's reason - the epilogue's constant pool sits at the
+ * PC-relative edge and each new key costs code in whichever function holds it.
+ *
+ * The first six are the boot thread's tail: `calls` against the five `seen[]` counters says *which*
+ * of Apple's five calls ran and how often, and `last_site` names the last of them by address. The
+ * reading the group exists for is `seen[4] != 0` - `vm_pageout` entered, which cannot happen unless
+ * `bsd_init` returned, i.e. the kernel's own boot completed. `seen[0..3]` beside it is the control:
+ * a build with the same wrappers and `seen[0] == 0` would say the wrappers were not reached rather
+ * than that the boot stopped.
+ *
+ * The rest is the device tree census. `count` is `IORegistryEntry::getChildCount` on the root nub -
+ * what the tree *has* - and `shown` is how many of them the record had room for, so the two together
+ * say whether the table is complete. `ok` counts children whose callback was reached with a non-NULL
+ * name, which is the reading that separates "the node has no name" from "the walk stopped".
+ */
+__attribute__((noinline)) static void entry_write_485_kv(void)
+{
+    entry_write_kv("xnu_entry_tail_calls", g_boot_tail_calls);
+    entry_write_kv("xnu_entry_tail_last_site", g_boot_tail_last_site);
+    entry_write_kv("xnu_entry_tail_seen0", g_boot_tail_seen[0]);
+    entry_write_kv("xnu_entry_tail_seen1", g_boot_tail_seen[1]);
+    entry_write_kv("xnu_entry_tail_seen2", g_boot_tail_seen[2]);
+    entry_write_kv("xnu_entry_tail_seen3", g_boot_tail_seen[3]);
+    entry_write_kv("xnu_entry_tail_seen4", g_boot_tail_seen[4]);
+    entry_write_kv("xnu_entry_dtk_calls", g_dtk_calls);
+    entry_write_kv("xnu_entry_dtk_count", g_dtk_count);
+    entry_write_kv("xnu_entry_dtk_shown", g_dtk_shown);
+    entry_write_kv("xnu_entry_dtk_ok", g_dtk_ok);
+    entry_write_kv("xnu_entry_dtk_dt_root", g_dtplane_root);
+    entry_write_kv("xnu_entry_dtk_plane", g_dtk_plane);
+    entry_write_kv("xnu_entry_dtk_recorded", g_dtk_recorded);
+    entry_write_kv("xnu_entry_dtk_root", g_dtk_root);
+    entry_write_kv("xnu_entry_dtk_same", g_dtk_same);
+    entry_write_kv("xnu_entry_dtk_set", g_dtk_set);
+    entry_write_kv("xnu_entry_dtk_kids", g_dtk_kids);
+    entry_write_kv("xnu_entry_dtk_none", g_dtk_none);
+    entry_write_kv("xnu_entry_dtk_name00", g_dtk_name0[0]);
+    entry_write_kv("xnu_entry_dtk_name01", g_dtk_name1[0]);
+    entry_write_kv("xnu_entry_dtk_name10", g_dtk_name0[1]);
+    entry_write_kv("xnu_entry_dtk_name11", g_dtk_name1[1]);
+    entry_write_kv("xnu_entry_dtk_name20", g_dtk_name0[2]);
+    entry_write_kv("xnu_entry_dtk_name21", g_dtk_name1[2]);
+    entry_write_kv("xnu_entry_dtk_state00", g_dtk_state0[0]);
+    entry_write_kv("xnu_entry_dtk_state01", g_dtk_state1[0]);
+    entry_write_kv("xnu_entry_dtk_state10", g_dtk_state0[1]);
+    entry_write_kv("xnu_entry_dtk_state11", g_dtk_state1[1]);
+    entry_write_kv("xnu_entry_dtk_state20", g_dtk_state0[2]);
+    entry_write_kv("xnu_entry_dtk_state21", g_dtk_state1[2]);
+    entry_write_kv("xnu_entry_dtk_named", g_dtk_named);
+    entry_write_kv("xnu_entry_dtk_matched", g_dtk_matched);
+    entry_write_kv("xnu_entry_dtk_registered", g_dtk_registered);
+}
+
+/*
  * 467's keys, in a function of their own for 455's reason - and this one is not a precaution: adding
  * these six to `entry_epilogue` **measured** the limit. The compile failed with
  * `Assembler messages: bad immediate value for offset (4188)`, i.e. a `ldr rX, .Lpool+N` whose
@@ -3341,6 +3471,10 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      * class-name lookup yielded with each one's `__state[0]` - the group that says which of the two
      * mechanisms 462 left open the wait dies of, and whether it is neither. */
     entry_write_463_kv();
+    /* 485: the boot thread's own position in `kernel_bootstrap_thread`'s tail, and the device tree's
+     * children with each one's `__state[0]`/`__state[1]` - the group that says whether the kernel's
+     * boot completed and which of the tree's nodes IOKit has published and driven. */
+    entry_write_485_kv();
     /*
      * Experiment 451's live console, printed here as well so a run that *does* report says whether
      * the live channel was working and, if it was refused, which check refused it. `_records` counts
@@ -4562,6 +4696,111 @@ void entry_note_wcls_end(void)
     g_wcls_shown = (g_wls_seen < ENTRY_WCLS_MAX) ? g_wls_seen : ENTRY_WCLS_MAX;
     entry_live_write("xnu_live_wcls_seen", g_wcls_seen);
     entry_live_write("xnu_live_wcls_shown", g_wcls_shown);
+}
+
+/*
+ * 485: one record per call of `kernel_bootstrap_thread`'s tail, written *before* the wrapped call
+ * runs - so a tail call that never returns still says it was entered, which is the only way the last
+ * of the five can be reported at all. `site` is the function's own address (the wrapper passes
+ * `__real_<name>`'s address), so the record names which of the five it is without a numbering
+ * scheme, and `seen[]` counts each one so a repeated call is visible as a count rather than hidden
+ * by the last-value slot.
+ */
+void entry_note_boot_tail(uint32_t index, uint32_t site)
+{
+    g_boot_tail_calls++;
+    g_boot_tail_last_site = site;
+    if (index < ENTRY_TAIL_CALLS)
+        g_boot_tail_seen[index]++;
+    entry_live_write("xnu_live_tail_seq", g_boot_tail_calls);
+    entry_live_write("xnu_live_tail_idx", index);
+    entry_live_write("xnu_live_tail_site", site);
+}
+
+/*
+ * 485: the two ways to name the tree's root, published together. `recorded` is 461's reading of
+ * `IODeviceTreeAlloc`'s return; `root` is the registry root's child in the IODT plane, which is the
+ * entry the OS's own walk starts from; `same` is whether they are the same object. The first run of
+ * this step is why the pair exists: it published neither, the report path was never reached (the kernel
+ * took the CPU and reached `vm_pageout`, which never returns), and the two readings it did publish -
+ * `dtk_count = 0` here and `walk_first` with 21 children from 462's walk - disagreed with no way to tell
+ * from the log which object each was about.
+ */
+void entry_note_dtbegin(uint32_t plane, uint32_t recorded, uint32_t root, uint32_t same)
+{
+    g_dtk_calls++;
+    g_dtk_plane = plane;
+    g_dtk_recorded = recorded;
+    g_dtk_root = root;
+    g_dtk_same = same;
+    entry_live_write("xnu_live_dtk_calls", g_dtk_calls);
+    entry_live_write("xnu_live_dtk_plane", plane);
+    entry_live_write("xnu_live_dtk_recorded", recorded);
+    entry_live_write("xnu_live_dtk_root", root);
+    entry_live_write("xnu_live_dtk_same", same);
+}
+
+/*
+ * The root's child set, its child count as the *entry* answers it (`getChildCount`), and - in
+ * `entry_note_dtcount` - the same children counted by the *array* (`OSArray::getCount` on the set). Two
+ * accessors, one number, both published: if they ever disagree, one of them is not measuring what the
+ * keys say it measures.
+ */
+void entry_note_dtset(uint32_t set, uint32_t kids)
+{
+    g_dtk_set = set;
+    g_dtk_kids = kids;
+    entry_live_write("xnu_live_dtk_set", set);
+    entry_live_write("xnu_live_dtk_kids", kids);
+}
+
+void entry_note_dtcount(uint32_t count)
+{
+    g_dtk_count = count;
+    entry_live_write("xnu_live_dtk_count", count);
+}
+
+/* No reading at all, and why: 0 = no IODT plane, 1 = the registry root has no child in it. */
+void entry_note_dtnone(uint32_t why)
+{
+    g_dtk_none = why;
+    entry_live_write("xnu_live_dtk_none", why);
+}
+
+void entry_note_dtok(void)
+{
+    g_dtk_ok++;
+}
+
+/*
+ * 485: one child of the root's child set. The two name words are `IORegistryEntry::getName`'s first
+ * eight bytes - a *node* name, "chosen", "cpus", "interrupt-controller" - and the two state words are
+ * `__state[0]`/`__state[1]` at `+36`/`+40`: the first is the word `IOService::getState` loads and the
+ * bits `registerService` and the match pipeline set (Inactive, Registered, Matched, FirstPublish,
+ * FirstMatch), the second the publish and termination machinery beside it. A node of this tree is
+ * `new IOService` (`IODeviceTreeSupport.cpp:359`), so the pair is the service's own state for every
+ * child and not an unverified word.
+ */
+void entry_note_dtchild(uint32_t seq, uint32_t child, uint32_t name0, uint32_t name1,
+                        uint32_t state0, uint32_t state1)
+{
+    if (name0 != 0u || name1 != 0u)
+        g_dtk_named++;
+    if ((state0 & 0x4u) != 0u)
+        g_dtk_matched++;
+    if ((state0 & 0x2u) != 0u)
+        g_dtk_registered++;
+    g_dtk_shown++;
+    g_dtk_name0[seq] = name0;
+    g_dtk_name1[seq] = name1;
+    g_dtk_state0[seq] = state0;
+    g_dtk_state1[seq] = state1;
+    entry_live_write("xnu_live_dtk_seq", seq);
+    entry_live_write("xnu_live_dtk_child", child);
+    entry_live_write("xnu_live_dtk_name0", name0);
+    entry_live_write("xnu_live_dtk_name1", name1);
+    entry_live_write("xnu_live_dtk_state0", state0);
+    entry_live_write("xnu_live_dtk_state1", state1);
 }
 #endif /* STAGE90_ENTRY_TRACE */
 

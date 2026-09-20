@@ -2020,3 +2020,199 @@ int __wrap_load_machfile(void *imgp, void *header, void *thread, void *mapp, voi
     entry_note_loadmachfile(caller, (uint32_t)(uintptr_t)header, (uint32_t)r);
     return r;
 }
+
+/*
+ * ================================================================================================
+ * 485: the boot thread's tail, and the device tree the driver layer is handed
+ * ================================================================================================
+ *
+ * `kernel_bootstrap_thread` (`osfmk/kern/startup.c:558`) is the kernel's own main thread. Its last
+ * seven calls are Apple's, in Apple's order: `PE_init_iokit()` (`:544`), `bsd_init()` (`:628`), and
+ * then `OSKextRemoveKextBootstrap()`, `kdebug_free_early_buf()`, `serial_keyboard_init()`,
+ * `vm_page_init_local_q()`, `thread_bind(PROCESSOR_NULL)` and `vm_pageout()` (`:633-646`).
+ *
+ * Five of those are wrapped here, and *which* five is the design decision this step makes:
+ *
+ *   - `bsd_init` is not wrapped: it is where the boot's own console output comes from, so its
+ *     completion is already readable in the text, and a wrapper on it would be a second, uncompared
+ *     definition of "the boot got to BSD".
+ *   - `thread_bind` is not wrapped either, and for the opposite reason: it is called from all over
+ *     the kernel, and twice inside this very body - the earlier call binds the thread to `processor`
+ *     (`startup.c:452`) and only the last one is the tail's - so a record of it would name no position
+ *     and would fire away from the tail. `tools/check_boot_completion.py` fails the build if that
+ *     stops being true in either direction (one caller, or a call that moves into the tail).
+ *   - the remaining five are called from exactly one place in the whole kernel, this tail, so a
+ *     record of one of them is a position. **`vm_pageout` entered is the end of the kernel's own
+ *     boot**, and it cannot be entered unless `bsd_init` returned: `vm_pageout` never returns, so
+ *     nothing after it runs, which is why the record is written *before* the wrapped call rather
+ *     than after it - a wrapper that recorded on return would record nothing for the one call this
+ *     step exists to prove.
+ *
+ * Each wrapper publishes its index as well as its address, because the index is Apple's order and
+ * the address is only a pointer; the pair is what lets the log say *which* of the five ran without a
+ * reader having to resolve an address first. The index is also what `tail_seen[]` counts, so a tail
+ * that ran out of order or twice is a count rather than a last-value slot.
+ */
+extern void entry_note_boot_tail(uint32_t index, uint32_t site);
+
+void __real_OSKextRemoveKextBootstrap(void);
+void __wrap_OSKextRemoveKextBootstrap(void)
+{
+    entry_note_boot_tail(0u, (uint32_t)(uintptr_t)__real_OSKextRemoveKextBootstrap);
+    __real_OSKextRemoveKextBootstrap();
+}
+
+void __real_kdebug_free_early_buf(void);
+void __wrap_kdebug_free_early_buf(void)
+{
+    entry_note_boot_tail(1u, (uint32_t)(uintptr_t)__real_kdebug_free_early_buf);
+    __real_kdebug_free_early_buf();
+}
+
+void __real_serial_keyboard_init(void);
+void __wrap_serial_keyboard_init(void)
+{
+    entry_note_boot_tail(2u, (uint32_t)(uintptr_t)__real_serial_keyboard_init);
+    __real_serial_keyboard_init();
+}
+
+void __real_vm_page_init_local_q(void);
+void __wrap_vm_page_init_local_q(void)
+{
+    entry_note_boot_tail(3u, (uint32_t)(uintptr_t)__real_vm_page_init_local_q);
+    __real_vm_page_init_local_q();
+}
+
+/*
+ * The device tree census.
+ *
+ * **The root is read the way the OS reads it, and 461's root is published beside it.** The first run of
+ * this step walked `g_dtplane_root` - 461's reading of what `IODeviceTreeAlloc` returned, which the
+ * comment above used to call "the tree's root nub" - and found no children at `vm_pageout`, while the
+ * same log's 462 walk of the *registry* root found a different entry with 21. So the census now starts
+ * where the OS's own walk starts: `IORegistryEntry::getRegistryRoot()`, then that entry's child in
+ * `gIODTPlane` (`getChildEntry`, the same accessor `fromPath` uses), and it publishes both pointers and
+ * whether they agree. That is not a fallback: one of the two is the tree the driver layer is handed, and
+ * a census that does not know which one it read is a census of an object nobody can name.
+ *
+ * The children are read with `getChildSetReference` - the OS's own non-virtual accessor,
+ * `IORegistryEntry.h:824` - and each one's name with `getName(plane)` (`IORegistryEntry.h:1505`), so
+ * every read here is a call the OS's own matching makes about the same objects. The count is taken
+ * twice, `getChildCount(plane)` on the entry and `OSArray::getCount` on the set it returns (the header
+ * shows the first is written in terms of the second), because a number that appears once is a number
+ * with nothing to compare it against.
+ *
+ * **Nothing is released and nothing is retained.** `getChildSetReference` is documented as returning a
+ * reference (*not* a copy), `getChildEntry` copies and releases inside itself, and `OSArray::getObject`
+ * does not retain - so the census is a read of the live tree with no effect on its reference counts,
+ * which matters because the object that reads the console is not entitled to change the object that owns
+ * the drivers. 461's rule about `release` on a borrowed entry applies here too.
+ *
+ * The two state words are `__state[0]`/`__state[1]` at `+36`/`+40`. `__state` is a two-word array
+ * (`IOService.h:328`), `__state[0]` holds the bits this census counts - `Registered` and `Matched`
+ * are set there by `registerService` and by the match pipeline - and `__state[1]` holds the publish
+ * and termination machinery (`kIOServiceNeedConfigState`, `kIOServiceSyncPubState`, the busy mask)
+ * that the same calls maintain as they go. The first is read through `IOService::getState()` - the
+ * tree's one implementation, which `build_entry.sh` pins by disassembly and by counting definitions -
+ * and the second by offset, because there is no accessor for it. The offset is
+ * `STAGE90_DTK_STATE0_OFF`, which is 455's layout reading of `getState`'s own `ldr r0, [r0, #36]`
+ * plus the one word the array declares; `tools/check_boot_completion.py` compares it against the
+ * number `build_entry.sh` fails the build on. A node of this tree is `new IOService`
+ * (`IODeviceTreeSupport.cpp:359`), so both words are the service's own for every child.
+ */
+extern void entry_note_dtbegin(uint32_t plane, uint32_t recorded, uint32_t root, uint32_t same);
+extern void entry_note_dtset(uint32_t set, uint32_t kids);
+extern void entry_note_dtcount(uint32_t count);
+extern void entry_note_dtnone(uint32_t why);
+extern void entry_note_dtok(void);
+extern void entry_note_dtchild(uint32_t seq, uint32_t child, uint32_t name0, uint32_t name1,
+                               uint32_t state0, uint32_t state1);
+extern uint32_t g_dtplane_root;
+/* `entry_xnu_registry_root`, `entry_xnu_child_entry`, `entry_xnu_child_set` and `entry_xnu_child_count`
+ * are declared by 462's block above, with the mangled names of the same four functions the OS's own
+ * `fromPath` calls - one spelling of each in this file, which is what makes this census the same walk
+ * the OS does. */
+extern unsigned int entry_xnu_array_count(const void *set)
+    __asm__("_ZNK7OSArray8getCountEv");
+extern void *entry_xnu_array_object(const void *set, unsigned int index)
+    __asm__("_ZNK7OSArray9getObjectEj");
+extern const char *entry_xnu_entry_name(const void *self, const void *plane)
+    __asm__("_ZNK15IORegistryEntry7getNameEPK15IORegistryPlane");
+extern uint32_t entry_xnu_entry_state(const void *self)
+    __asm__("_ZNK9IOService8getStateEv");
+
+#define STAGE90_DTK_MAX 24u
+#define STAGE90_DTK_STATE0_OFF 36u
+
+void entry_probe_dt_children(void)
+{
+    const void *plane = gIODTPlane;
+    void *recorded = (void *)(uintptr_t)g_dtplane_root;
+    void *root;
+    void *set;
+    unsigned int n, kids, i;
+
+    if (plane == 0) {
+        entry_note_dtnone(0u);
+        return;
+    }
+
+    root = entry_xnu_child_entry(entry_xnu_registry_root(), plane);
+    if (root == 0) {
+        entry_note_dtnone(1u);
+        return;
+    }
+
+    entry_note_dtbegin((uint32_t)(uintptr_t)plane, (uint32_t)(uintptr_t)recorded,
+                       (uint32_t)(uintptr_t)root, (root == recorded) ? 1u : 0u);
+
+    kids = entry_xnu_child_count(root, plane);
+    set = entry_xnu_child_set(root, plane);
+    entry_note_dtset((uint32_t)(uintptr_t)set, (uint32_t)kids);
+    if (set == 0)
+        return;
+
+    n = entry_xnu_array_count(set);
+    entry_note_dtcount((uint32_t)n);
+
+    for (i = 0u; i < n && i < STAGE90_DTK_MAX; i++) {
+        void *child = entry_xnu_array_object(set, i);
+        const char *name;
+        uint32_t name0 = 0u, name1 = 0u;
+        uint32_t state0 = 0u, state1 = 0u;
+
+        if (child == 0)
+            continue;
+        name = entry_xnu_entry_name(child, plane);
+        if (name != 0) {
+            entry_str8(name, &name0, &name1);
+            entry_note_dtok();
+        }
+        state0 = entry_xnu_entry_state(child);
+        state1 = *(volatile uint32_t *)((const char *)child + STAGE90_DTK_STATE0_OFF + 4u);
+        entry_note_dtchild(i, (uint32_t)(uintptr_t)child, name0, name1, state0, state1);
+    }
+}
+
+/*
+ * `vm_pageout` is the fifth and last, and the census above runs inside its wrapper - at the one
+ * moment that is downstream of everything the boot does and upstream of the loop that never ends.
+ * Reading the registry there rather than earlier is the point: the platform expert's nub pass and
+ * every matching attempt have already happened by then, so the table is the *settled* state of the
+ * driver layer and not a snapshot of it mid-flight.
+ */
+extern void entry_probe_dt_children(void);
+
+void __real_vm_pageout(void);
+void __wrap_vm_pageout(void)
+{
+    entry_note_boot_tail(4u, (uint32_t)(uintptr_t)__real_vm_pageout);
+    entry_probe_dt_children();
+    __real_vm_pageout();
+    /*
+     * Nothing is recorded after the call and that is itself the reading: `vm_pageout` is followed by
+     * Apple's own NOTREACHED marker (`startup.c:647`), so a record written here would mean the
+     * function returned, which the kernel says cannot happen. The `tail_seen[4]` count written before
+     * the call is the whole measurement.
+     */
+}

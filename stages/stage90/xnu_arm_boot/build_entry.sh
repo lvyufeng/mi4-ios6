@@ -139,7 +139,10 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=timer_call_enter
                    --wrap=timer_call_enter_with_leeway
                    --wrap=timer_call_quantum_timer_enter
-                   --wrap=timer_call_setup --wrap=thread_quantum_expire)
+                   --wrap=timer_call_setup --wrap=thread_quantum_expire
+                   --wrap=OSKextRemoveKextBootstrap --wrap=kdebug_free_early_buf
+                   --wrap=serial_keyboard_init --wrap=vm_page_init_local_q
+                   --wrap=vm_pageout)
     # The last three are 481's, and all three are *in the traced build only*, which is a property of
     # the step rather than an oversight: the registration and the read-back **are** the instrument.
     # `setPop` records the kernel's own deadline arithmetic, `PE_init_platform` is the hook that
@@ -175,6 +178,19 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
     # `by_address` list below rather than this one - with `tools/check_timer_sources.py` reading the
     # address out of the linked image's own `movw`/`movt` pair, which is the half a `by_address` entry
     # on its own cannot say.
+    #
+    # **485's five are the kernel's own boot tail, and they are all `by branch` on purpose.**
+    # `OSKextRemoveKextBootstrap`, `kdebug_free_early_buf`, `serial_keyboard_init`,
+    # `vm_page_init_local_q` and `vm_pageout` are each called from exactly one place in the whole
+    # kernel - `kernel_bootstrap_thread` (`startup.c:633-646`) - so a record of one of them is a
+    # *position*, and `tail_seen[4] != 0` says `vm_pageout` was entered, which cannot happen unless
+    # `bsd_init` returned. `bsd_init` and `thread_bind` sit between them in Apple's source and are
+    # deliberately not wrapped: the first is already audible in the console text, the second is called
+    # from all over the kernel - and twice inside this very function, the earlier time to `processor`
+    # rather than to `PROCESSOR_NULL` - so a record of it would name no position and would fire away
+    # from the tail. `entry_trace.c` carries the argument; `tools/check_boot_completion.py` reads
+    # Apple's own order out of `startup.c` and fails the build if the wrappers' order, the position of
+    # either exclusion, or the exclusivity of those five call sites stops matching it.
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
 # every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that
@@ -28034,6 +28050,32 @@ run python3 "$REPO_ROOT/tools/check_irq_routing.py" --image "$OUT/xnu_arm_entry.
 run python3 "$REPO_ROOT/tools/check_timer_sources.py" --image "$OUT/xnu_arm_entry.elf" --verbose \
     || exit 1
 run python3 "$REPO_ROOT/tools/check_timer_sources.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
+    || exit 1
+
+# **485's six claims, about the instrument the boot's completion is read with.** This step adds no
+# behaviour to the kernel and no device state; what it adds is a *reading*, and every way the reading can
+# be wrong is a way this check can see before a device is touched: an index the wrappers publish that is
+# not the position Apple's `startup.c` calls that function at (the log would attribute a call that ran to
+# a call that did not), a wrapper that records after the call it wraps (`vm_pageout` never returns, so
+# that record can never be written), a site published as the wrapper's own address (all five wrappers are
+# the same kind of function, so the log could not tell them apart), a census whose cap does not fit the
+# table the notes store into, a `Matched`/`Registered` bit spelled as a literal where `IOService.h` has an
+# enum member, a count whose key is not written (a missing key reads as zero, i.e. as "the tail was never
+# reached"), and - the one no source can state - a `--wrap` whose reference at the tail was not rewritten,
+# which is a fact about the link and is read out of the image's own disassembly.
+#
+# It reads Apple's order out of `startup.c` and the exclusivity of the five call sites out of the object
+# pool, so a change to Apple's tail or to who calls one of the five fails the build here rather than
+# relabelling the log. The two calls in the same tail that are deliberately *not* wrapped are claimed in
+# both directions: `bsd_init` must still be before the five, and `thread_bind` - which Apple's own body
+# calls twice - must still have more than one caller in this kernel, because that is the argument for
+# leaving it alone. And because the last of the five is compiled as a tail branch (`vm_pageout` is
+# `noreturn`, so `-O2` emits `b __wrap_vm_pageout` and not `bl`), the image claim counts both: a check
+# that looked only for `bl` would report that the fifth wrapper is never reached, which is the one
+# reading the step exists to take.
+run python3 "$REPO_ROOT/tools/check_boot_completion.py" --image "$OUT/xnu_arm_entry.elf" --verbose \
+    || exit 1
+run python3 "$REPO_ROOT/tools/check_boot_completion.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
     || exit 1
 say "the payload build reads the .bin from there directly; nothing to install"
 
