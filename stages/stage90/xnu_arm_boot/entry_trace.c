@@ -1271,7 +1271,8 @@ extern void entry_note_mdevadd(uint32_t caller, uint32_t devid, uint32_t base, u
                                uint32_t phys, uint32_t ret);
 extern void entry_note_mdevlookup(uint32_t caller, uint32_t devid, uint32_t ret);
 extern void entry_note_dtwalk(uint32_t t1, uint32_t root, uint32_t count, uint32_t first,
-                              uint32_t set, uint32_t kids, uint32_t control);
+                              uint32_t set, uint32_t kids, uint32_t class0, uint32_t class1,
+                              uint32_t control);
 
 /* `IODeviceTreeSupport.cpp:64`, `.bss`, non-zero exactly when `makePlane` succeeded. */
 extern const void *gIODTPlane;
@@ -1362,6 +1363,183 @@ static void entry_probe_property(void *entry)
 }
 
 /*
+ * 486: the *class* of an entry, by name - and the way there is through the vtable.
+ *
+ * 485 established that the entry the OS's own walk starts from is one object inside the
+ * `IODeviceTreeAlloc` wrapper and a different one at the first `fromPath` of `bsd_init`, with the same
+ * children and the same child set. The class name is what turns that pair of addresses into a sentence:
+ * a device tree root is `new IOService` (`IODeviceTreeSupport.cpp:359`), and the entry that adopts its
+ * children is the platform expert device `StartIOKit` makes (`new IOPlatformExpertDevice`,
+ * `IOStartIOKit.cpp:156`).
+ *
+ * **`getMetaClass` is virtual, and this step's first run is why that matters.** A virtual reached by its
+ * mangled name - the road 461 took to `IOService::getProperty`, which is not overridden away from its
+ * base - calls the *base* implementation: `OSObject::getMetaClass` is
+ * `{ return &gMetaClass; }` (`libkern/c++/OSObject.cpp:57-58`), so run A printed `OSObject` for the tree
+ * root *and* for the entry that adopted it, a correct answer to a question nobody asked. The call has to
+ * go through the object's own vtable, which is what C++ would have compiled, and the slot is the ABI's:
+ * the primary vtable is `[offset-to-top][typeinfo][fn0][fn1]...`, and in this image `_ZTV8OSObject` and
+ * `_ZTV9IOService` both hold their **own** `getMetaClass` at index 9 - two classes, one slot, which is
+ * what makes the index a number read from the image rather than a choice of this file.
+ * `tools/check_registry_adoption.py` reads both vtables out of the linked image, requires that index to
+ * equal `STAGE90_VTABLE_META_CLASS`, requires the preamble word to be the zero of a primary vtable, and
+ * fails the build if the mangled *base* name is called directly anywhere in this file. Apple's own
+ * `getClassName(OSObject *)` (`OSObject.cpp:84-88`) is the same two calls in C++.
+ *
+ * The second call, `getClassName`, is **non-virtual** (`OSMetaClass.h`), and it is already declared in
+ * this file for the metaclass walk of an earlier step (`entry_xnu_metaclass_name`, below) and used from
+ * here rather than declared a second time: two declarations of one call are this project's oldest defect
+ * class, and a selftest that mutates one of them would leave the other standing and report a blind spot
+ * that is not there (240). It returns the class's own `const char *`, which lives as long as the class
+ * does - the whole boot - so copying eight bytes of it into a record is safe.
+ *
+ * Zero words mean no name could be read: a NULL object, a NULL vtable, a NULL slot or a NULL name. That
+ * is a record of its own, and it is deliberately not spelled as a name, so "the class is empty" and "the
+ * class was not read" cannot be confused.
+ *
+ * ------------------------------------------------------------------- 486's run B: the object, not the slot
+ *
+ * **The ungated version of this call faulted on the device, and the fault is a finding.** Run B called
+ * `vtable[9](obj)` on the entry the walk starts from and the kernel took a data abort at the *first*
+ * instruction of `OSMetaClass::getClassName` - `ldr r0, [r0, #12]` - with `DFSR = 0x5` (section
+ * translation fault) and `DFAR = 0x0d`, i.e. the metaclass pointer it was handed was **1**. So the call
+ * at slot 9 returned 1: whatever object the walk was holding, its first word is not a vtable of this
+ * image, because **218 vtables in the linked image hold a `getMetaClass` at index 9** (all of them except
+ * `_ZTV8OSSymbol`, whose own `operator delete` sits there, and one holding `__cxa_pure_virtual`), and both
+ * `OSObject::getMetaClass` and `IOService::getMetaClass` in this image are two instructions returning a
+ * `.bss` address (`0x80574390` and `0x80574570`), never 1. The abort could not be serviced: the handler
+ * was entered 64 times and `xnu_live_sleh_at_back` was written **zero** times, against run A's twelve,
+ * and the run's own records stop at that call - the census, the `IODeviceTreeAlloc` plane record and the
+ * OS's two `fromPath` records are all missing from the log because the boot never got there.
+ *
+ * So the read now has a **precondition it publishes and checks before it calls**, rather than a
+ * dereference of whatever the registry happens to hand it. An object of a class in this image has a
+ * primary vtable at index 9 - offset-to-top 0, no RTTI pointer - and the function there is in this
+ * image's text, below `__bss_start`. Both are properties the image itself states: the 218 preambles are
+ * 0/0, and a code address in this link is `[0x80000000, __bss_start)`. When the precondition does not
+ * hold, `xnu_live_cls_took` is 0 and the six numbers are published anyway - the object, its first word,
+ * that word's two preamble words, slot 9 and the metaclass - which is what names the object instead of
+ * calling it: a slot-9 word that is not any class's `getMetaClass` is readable in the log beside the
+ * pointer it came from, and the boot goes on to the records this experiment is actually for.
+ *
+ * This is the same rule 485's `entry_note_dtwalk` and the 474 frame check follow: a number the instrument
+ * cannot use is published, not dereferenced.
+ *
+ * ------------------------------------------------------- 486's run C: the guard reads the right words
+ *
+ * **Run C's guard refused every object, and the numbers it published say why - which is the finding.**
+ * Every call came back `cls_took = 0` with `pre0`/`pre1` non-zero, and the three objects' words name
+ * their own classes without any call being made at all:
+ *
+ *   call 1, the tree root:       `vptr = 0x804999ac`, `pre0 = 0x8013cfb0`, `pre1 = 0x8013cfb4`
+ *   calls 2..N, the adopter:     `vptr = 0x8049f990`, `pre0 = 0x801754a8`, `pre1 = 0x801754ac`
+ *
+ * and `nm` on the same image says `pre0`/`pre1` are **the class's own destructors**:
+ * `0x8013cfb0 = IOService::~IOService()` with `0x8013cfb4 = IOService::~IOService()` (complete object
+ * deleting), `0x801754a8 = IOPlatformExpertDevice::~IOPlatformExpertDevice()` with `0x801754ac` the
+ * deleting form. So the object's first word is **the vtable's first function slot** - the Itanium ABI's
+ * vptr, which points *past* the two-word preamble - and the two words the guard read as a preamble are
+ * that vtable's slots 0 and 1. `0x804999ac` is `_ZTV9IOService` **+ 8** and `0x8049f990` is
+ * `_ZTV22IOPlatformExpertDevice` **+ 8**, and `nm` names both classes: **the object the walk starts from
+ * inside the `IODeviceTreeAlloc` wrapper is an `IOService`, and the object at the later moments is an
+ * `IOPlatformExpertDevice`** - the two classes 485's question needed, and exactly the pair the prediction
+ * named.
+ *
+ * The same arithmetic explains run B's fault. `getMetaClass` is at the **vtable's** index 9, which is the
+ * object's table index **9 − 2 = 7**; index 9 of the object's table is `OSObject::taggedRetain(const
+ * void *)` (`0x80133d38`, the value run C published as `fn` and the same address run B called). That
+ * function returns nothing, so the metaclass the instrument passed on was its leftover `r0` - and the log
+ * says that value was 1. **The tool that was wrong is the check**: `claim_slot` read
+ * `_ZTV8OSObject`/`_ZTV9IOService` from the image, found each class's own `getMetaClass` at index 9 of
+ * the *label*, and required the code's `#define` to equal 9 - while the code indexed the *object's*
+ * table. One index, two tables, nothing comparing them: this project's oldest defect, in the one place
+ * the whole step depended on it. The preamble constant below is now a second `#define`, the code
+ * subtracts it, and the check reads both from the image and requires the arithmetic.
+ *
+ * Nothing is called through slot 7 unless the two words *before* the vptr are zero - they are, for both
+ * classes: `_ZTV9IOService[0]/[1]` and `_ZTV22IOPlatformExpertDevice[0]/[1]` are `0/0`, which is what a
+ * primary vtable with no RTTI looks like and what makes the offset-to-top position a *reading*.
+ */
+#define STAGE90_VTABLE_PREAMBLE 2u
+
+/* The vtable's own index of the class's `getMetaClass` (`[offset-to-top][typeinfo][slot 0]...`), and the
+ * object's table index is this minus `STAGE90_VTABLE_PREAMBLE`. Read out of the linked image by
+ * `tools/check_registry_adoption.py`, which requires both vtables to hold their own `getMetaClass` here
+ * and requires the preamble words to be zero. */
+#define STAGE90_VTABLE_META_CLASS 9u
+
+/* This image's own bounds: `pmap_kernel_va` starts at 0x80000000, and `entry.ld` puts `__bss_start` at
+ * the first byte of `.bss`, i.e. past the whole of `.text` and `.data`. A vtable slot is a code address
+ * only if it is inside them. */
+#define STAGE90_IMAGE_BASE 0x80000000u
+extern uint32_t __bss_start;
+
+typedef const void *(*entry_meta_class_fn)(const void *);
+
+/* Declared here because both are defined further down this file: `entry_xnu_metaclass_name` with the
+ * mangled name of Apple's `OSMetaClass::getClassName` in the block that explains it, and `entry_str8`
+ * beside the other string readers. One declaration each - the defect this project keeps paying for is
+ * two declarations of one call. */
+extern const char *entry_xnu_metaclass_name(const void *meta);
+static void entry_str8(const char *s, uint32_t *w0, uint32_t *w1);
+
+extern void entry_note_class(uint32_t site, uint32_t obj, uint32_t vptr, uint32_t pre0, uint32_t pre1,
+                             uint32_t fn, uint32_t meta, uint32_t took);
+
+/* The three callers, spelled so the log says which one a record belongs to rather than leaving the
+ * reader to count records. `entry_class_words` is one function and these are its three sites. */
+#define STAGE90_CLS_WALK     1u
+#define STAGE90_CLS_ROOT     2u
+#define STAGE90_CLS_RECORDED 3u
+
+static const void *entry_object_meta(uint32_t site, const void *obj)
+{
+    const void *vptr;
+    const void *meta = 0;
+    entry_meta_class_fn fn;
+    uint32_t pre0 = 0u, pre1 = 0u, fnw = 0u, took = 0u;
+
+    if (obj == 0) {
+        entry_note_class(site, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
+        return 0;
+    }
+
+    vptr = *(const void *const *)obj;
+    if (vptr != 0) {
+        /* `vptr[-2]`/`vptr[-1]` are the vtable's offset-to-top and typeinfo, and the slot is the
+         * vtable's index less that preamble - see the arithmetic at the head of this block. */
+        pre0 = ((const uint32_t *)vptr)[-(int)STAGE90_VTABLE_PREAMBLE];
+        pre1 = ((const uint32_t *)vptr)[1 - (int)STAGE90_VTABLE_PREAMBLE];
+        fn = ((const entry_meta_class_fn *)vptr)[STAGE90_VTABLE_META_CLASS - STAGE90_VTABLE_PREAMBLE];
+        fnw = (uint32_t)(uintptr_t)fn;
+
+        if (pre0 == 0u && pre1 == 0u && fnw >= STAGE90_IMAGE_BASE &&
+            fnw < (uint32_t)(uintptr_t)&__bss_start) {
+            took = 1u;
+            meta = fn(obj);
+        }
+    }
+
+    entry_note_class(site, (uint32_t)(uintptr_t)obj, (uint32_t)(uintptr_t)vptr, pre0, pre1, fnw,
+                     (uint32_t)(uintptr_t)meta, took);
+    return meta;
+}
+
+static void entry_class_words(uint32_t site, const void *obj, uint32_t *w0, uint32_t *w1)
+{
+    *w0 = 0u;
+    *w1 = 0u;
+    if (obj != 0) {
+        const void *meta = entry_object_meta(site, obj);
+        if (meta != 0) {
+            const char *name = entry_xnu_metaclass_name(meta);
+            if (name != 0)
+                entry_str8(name, w0, w1);
+        }
+    }
+}
+
+/*
  * The walk itself, read at the two moments the boot has them (462).
  *
  * 461 measured the two ends of this and left the middle open: the instrument's own
@@ -1387,6 +1565,8 @@ static void entry_probe_property(void *entry)
  *            present and holds no matching name, and `kids` is the second half of that pair.
  *   `kids`   that entry's `getChildCount(plane)`: 0 with a non-NULL `set` is "the names do not
  *            match"; 0 with `set` NULL is "the child set is gone".
+ *   `class`  (486) that entry's *runtime class name*, eight bytes of it, so the reading names its own
+ *            object at every moment instead of being a pointer the reader has to match up by hand.
  *   `control` `fromPath(path, plane, 0, 0, 0)` through `__real_fromPath` - the same call the OS is
  *            about to make, by the instrument, at the same moment. A control that answers while the
  *            OS's own call does not would say the two calls differ; both answering the same way says
@@ -1408,6 +1588,7 @@ static void entry_probe_walk(const void *plane, const char *path, uint32_t t1)
     void *control = 0;
     unsigned int count = 0u;
     unsigned int kids = 0u;
+    uint32_t class0 = 0u, class1 = 0u;
 
     if (plane == 0) {
         return;
@@ -1421,6 +1602,7 @@ static void entry_probe_walk(const void *plane, const char *path, uint32_t t1)
     if (first != 0) {
         set = entry_xnu_child_set(first, plane);
         kids = entry_xnu_child_count(first, plane);
+        entry_class_words(STAGE90_CLS_WALK, first, &class0, &class1);
     }
     if (path != 0) {
         control = __real__ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_(
@@ -1428,7 +1610,8 @@ static void entry_probe_walk(const void *plane, const char *path, uint32_t t1)
     }
 
     entry_note_dtwalk(t1, (uint32_t)(uintptr_t)root, (uint32_t)count, (uint32_t)(uintptr_t)first,
-                      (uint32_t)(uintptr_t)set, (uint32_t)kids, (uint32_t)(uintptr_t)control);
+                      (uint32_t)(uintptr_t)set, (uint32_t)kids, class0, class1,
+                      (uint32_t)(uintptr_t)control);
 }
 
 /*
@@ -2127,6 +2310,10 @@ extern void entry_note_dtnone(uint32_t why);
 extern void entry_note_dtok(void);
 extern void entry_note_dtchild(uint32_t seq, uint32_t child, uint32_t name0, uint32_t name1,
                                uint32_t state0, uint32_t state1);
+extern void entry_note_dtclass(uint32_t obj, uint32_t class0, uint32_t class1, uint32_t kids,
+                               uint32_t set);
+extern void entry_note_dtrec(uint32_t obj, uint32_t class0, uint32_t class1, uint32_t kids,
+                             uint32_t set);
 extern uint32_t g_dtplane_root;
 /* `entry_xnu_registry_root`, `entry_xnu_child_entry`, `entry_xnu_child_set` and `entry_xnu_child_count`
  * are declared by 462's block above, with the mangled names of the same four functions the OS's own
@@ -2151,6 +2338,7 @@ void entry_probe_dt_children(void)
     void *root;
     void *set;
     unsigned int n, kids, i;
+    uint32_t class0 = 0u, class1 = 0u;
 
     if (plane == 0) {
         entry_note_dtnone(0u);
@@ -2169,6 +2357,29 @@ void entry_probe_dt_children(void)
     kids = entry_xnu_child_count(root, plane);
     set = entry_xnu_child_set(root, plane);
     entry_note_dtset((uint32_t)(uintptr_t)set, (uint32_t)kids);
+
+    /*
+     * 486: the walked entry, named by its runtime class, with the children and child set it answers -
+     * and beside it the entry `IODeviceTreeAlloc` returned, named the same way and asked for the same
+     * two things *now*. The pair is the whole answer to 485's open question: if the two classes differ
+     * and the second object's children and set are zero, then the registry slot holds one tree's
+     * *adopter* and the tree root it was built from has had its child-set key taken away from it
+     * (`IORegistryEntry::init`, `IORegistryEntry.cpp:356-380`) rather than there being two trees.
+     */
+    entry_class_words(STAGE90_CLS_ROOT, root, &class0, &class1);
+    entry_note_dtclass((uint32_t)(uintptr_t)root, class0, class1, (uint32_t)kids,
+                       (uint32_t)(uintptr_t)set);
+
+    if (recorded != 0) {
+        uint32_t rclass0 = 0u, rclass1 = 0u;
+        unsigned int rkids = entry_xnu_child_count(recorded, plane);
+        void *rset = entry_xnu_child_set(recorded, plane);
+
+        entry_class_words(STAGE90_CLS_RECORDED, recorded, &rclass0, &rclass1);
+        entry_note_dtrec((uint32_t)(uintptr_t)recorded, rclass0, rclass1, (uint32_t)rkids,
+                         (uint32_t)(uintptr_t)rset);
+    }
+
     if (set == 0)
         return;
 

@@ -28077,5 +28077,32 @@ run python3 "$REPO_ROOT/tools/check_boot_completion.py" --image "$OUT/xnu_arm_en
     || exit 1
 run python3 "$REPO_ROOT/tools/check_boot_completion.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
     || exit 1
+
+# **486's claims, about who owns the device tree and about how the instrument says so.** 485 left one
+# question open - the registry slot holds one entry inside the `IODeviceTreeAlloc` wrapper and a
+# different one at the first `fromPath` of `bsd_init`, with the same 21 children and the same child-set
+# pointer - and the answer is four statements in `IORegistryEntry::init(old, plane)` that this check reads
+# out of Apple's own file: the *shallow* copy of `old`'s property table (which is why the child set is
+# the same `OSArray` for both objects), the removal of the child-set key from `old`'s table (which is why
+# `old` answers no children afterwards), and the two loops that move every parent link and every child
+# link from `old` to `this`. The classes the run publishes are what makes that readable at a distance:
+# the tree root is `new IOService`, the adopting entry is an `IOPlatformExpertDevice`, and the check
+# refuses a build in which either class name stopped being resolvable in the linked image or in which the
+# census stopped reading them.
+#
+# **And 486's own run B, which the instrument now carries as a precondition.** The class was read through
+# slot 9 of the object's first word, the call returned 1, and `getClassName(1)` took a data abort
+# (`DFSR = 0x5`, `DFAR = 0x0d`) that the kernel could not service - the handler was entered 64 times and
+# returned zero, against run A's twelve returns - so the run's records stop at that call and the census
+# this experiment exists for never happened. The read therefore publishes the object, its first word, that
+# word's two preamble words, slot 9 and the metaclass *before and after* the call, and makes the call only
+# when both preamble words are zero, as all 218 vtables in this image are, and slot 9 is inside
+# `[0x80000000, __bss_start)`. `cls_took = 0` is then a reading - "the registry handed this pointer whose
+# first word is not a vtable" - instead of the end of the run, and the check refuses a build that dropped
+# either half of the guard or the record.
+run python3 "$REPO_ROOT/tools/check_registry_adoption.py" --image "$OUT/xnu_arm_entry.elf" --verbose \
+    || exit 1
+run python3 "$REPO_ROOT/tools/check_registry_adoption.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
+    || exit 1
 say "the payload build reads the .bin from there directly; nothing to install"
 

@@ -1051,6 +1051,13 @@ uint32_t g_lmf_ret;
  * `g_walk_probes` counts the readings, which is what tells a run where the walk was read to the end
  * from a run where the probe site was never reached; the `t2` slots hold the **last** reading, so a
  * boot that makes more `fromPath` calls than 461's two keeps the last one rather than the first.
+ *
+ * **486 adds the class of `first` to every reading** (`class0`/`class1` are its runtime class name's
+ * first eight bytes), because 485 established *that* the entry changes between the first reading and the
+ * second and left *what* it changes into open. The same call at every moment, in one log, is what makes
+ * the sequence readable: the object the walk starts from is one class inside the `IODeviceTreeAlloc`
+ * wrapper and another class at the first `fromPath` of `bsd_init`. Zero words mean no class name could be
+ * read, which is a record of its own rather than a name.
  */
 uint32_t g_walk_probes;
 uint32_t g_walk_t1_root;
@@ -1058,12 +1065,16 @@ uint32_t g_walk_t1_count;
 uint32_t g_walk_t1_first;
 uint32_t g_walk_t1_set;
 uint32_t g_walk_t1_kids;
+uint32_t g_walk_t1_class0;
+uint32_t g_walk_t1_class1;
 uint32_t g_walk_t1_control;
 uint32_t g_walk_t2_root;
 uint32_t g_walk_t2_count;
 uint32_t g_walk_t2_first;
 uint32_t g_walk_t2_set;
 uint32_t g_walk_t2_kids;
+uint32_t g_walk_t2_class0;
+uint32_t g_walk_t2_class1;
 uint32_t g_walk_t2_control;
 
 /*
@@ -1211,6 +1222,73 @@ uint32_t g_dtk_name0[ENTRY_DTK_SHOWN];
 uint32_t g_dtk_name1[ENTRY_DTK_SHOWN];
 uint32_t g_dtk_state0[ENTRY_DTK_SHOWN];
 uint32_t g_dtk_state1[ENTRY_DTK_SHOWN];
+/*
+ * 486's two records about *which object* the registry slot holds, and they exist because 485 answered
+ * "the registry's child is the root the OS walks" without answering "what is it". 462's walk reads one
+ * entry per moment and 485's census reads one; 486 adds a **class name** to each reading, taken from the
+ * object itself (`OSObject::getMetaClass` then `OSMetaClass::getClassName`, two calls by mangled name -
+ * the road 461 used for `getProperty`), and for the entry `IODeviceTreeAlloc` returned it adds the child
+ * set and child count that entry answers *now*.
+ *
+ * The answer is one function in Apple's sources: `IORegistryEntry::init(old, plane)`
+ * (`iokit/Kernel/IORegistryEntry.cpp:333-385`) copies `old`'s property table **shallowly**
+ * (`old->dictionaryWithProperties()`, `:356`), removes the child-set key from `old`'s own table
+ * (`:362-363`), appends `this` to every parent's child set and removes `old` from it (`:365-371`), and
+ * appends `this` to every child's parent set while removing `old` from it (`:373-380`). So the "second
+ * root" is not a second tree: it is the entry that *adopts* the first one's children and, because the
+ * copy is shallow, *the same OSArray* as its child set - which is exactly the pair 485's log could not
+ * tell apart. `IOPlatformExpertDevice::initWithArgs` (`iokit/Kernel/IOPlatformExpert.cpp:1547-1575`) is
+ * the caller: it builds the tree (`IODeviceTreeAlloc(dtTop)`) and then initializes *from* it
+ * (`super::init(dt, gIODTPlane)`), and `StartIOKit` (`iokit/Kernel/IOStartIOKit.cpp:156-157`) is where
+ * the object that adopts it is made (`new IOPlatformExpertDevice`).
+ *
+ * The class names are what make that readable from a log at this distance: the tree root is
+ * `new IOService` (`IODeviceTreeSupport.cpp:359`), so its class name is `IOService`, and the adopting
+ * entry is an `IOPlatformExpertDevice` - two names, no address arithmetic. `_calls` is the control: a run
+ * where the pair was never read says so, and a class name that could not be read is zero words rather
+ * than a name. **`kids`/`set` of `recorded` are the other half of 485's pair**: after `init` removes the
+ * child-set key from the tree root's own table, that object answers *no children* - which is what 485's
+ * first run measured (`dtk_count = 0`) by reading the wrong object, and what 486 now measures as the
+ * mechanism instead of the mistake.
+ */
+uint32_t g_dtc_calls;
+uint32_t g_dtc_obj;
+uint32_t g_dtc_class0;
+uint32_t g_dtc_class1;
+uint32_t g_dtc_kids;
+uint32_t g_dtc_set;
+uint32_t g_dtrec_calls;
+uint32_t g_dtrec_obj;
+uint32_t g_dtrec_class0;
+uint32_t g_dtrec_class1;
+uint32_t g_dtrec_kids;
+uint32_t g_dtrec_set;
+
+/*
+ * 486's run B, answered as a record: **the object, read before it is called.**
+ *
+ * The class read is done through slot 9 of the object's first word, and run B called it on an object the
+ * walk was holding whose first word is not a vtable of this image - the call returned 1 and
+ * `getClassName(1)` took an unserviceable data abort, which cost the run every record after it. So the
+ * read now publishes the six numbers it is about to use - the object, its first word, that word's two
+ * preamble words, slot 9 and the metaclass - together with `took`, which is 1 only when the
+ * precondition held and the call was made.
+ *
+ * `site` says which of the three callers this record belongs to (`STAGE90_CLS_WALK` / `_ROOT` /
+ * `_RECORDED`), because the three records are otherwise indistinguishable in a log that carries several
+ * passes of the same walk. `took = 0` with `obj != 0` is a *reading*: it is "the registry handed the
+ * instrument a pointer whose first word is not a vtable", and the numbers beside it say which word it was
+ * - a slot-9 value that is not any class's `getMetaClass` is readable in `nm` output.
+ */
+uint32_t g_cls_calls;
+uint32_t g_cls_site;
+uint32_t g_cls_obj;
+uint32_t g_cls_vptr;
+uint32_t g_cls_pre0;
+uint32_t g_cls_pre1;
+uint32_t g_cls_fn;
+uint32_t g_cls_meta;
+uint32_t g_cls_took;
 uint32_t g_rlock_bad;
 uint32_t g_rlock_caller;
 uint32_t g_rlock_count;
@@ -2723,12 +2801,16 @@ __attribute__((noinline)) static void entry_write_462_kv(void)
     entry_write_kv("xnu_entry_walk_t1_first", g_walk_t1_first);
     entry_write_kv("xnu_entry_walk_t1_set", g_walk_t1_set);
     entry_write_kv("xnu_entry_walk_t1_kids", g_walk_t1_kids);
+    entry_write_kv("xnu_entry_walk_t1_class0", g_walk_t1_class0);
+    entry_write_kv("xnu_entry_walk_t1_class1", g_walk_t1_class1);
     entry_write_kv("xnu_entry_walk_t1_control", g_walk_t1_control);
     entry_write_kv("xnu_entry_walk_t2_root", g_walk_t2_root);
     entry_write_kv("xnu_entry_walk_t2_count", g_walk_t2_count);
     entry_write_kv("xnu_entry_walk_t2_first", g_walk_t2_first);
     entry_write_kv("xnu_entry_walk_t2_set", g_walk_t2_set);
     entry_write_kv("xnu_entry_walk_t2_kids", g_walk_t2_kids);
+    entry_write_kv("xnu_entry_walk_t2_class0", g_walk_t2_class0);
+    entry_write_kv("xnu_entry_walk_t2_class1", g_walk_t2_class1);
     entry_write_kv("xnu_entry_walk_t2_control", g_walk_t2_control);
 }
 
@@ -2827,6 +2909,42 @@ __attribute__((noinline)) static void entry_write_485_kv(void)
     entry_write_kv("xnu_entry_dtk_named", g_dtk_named);
     entry_write_kv("xnu_entry_dtk_matched", g_dtk_matched);
     entry_write_kv("xnu_entry_dtk_registered", g_dtk_registered);
+    /*
+     * 486's twelve, in the same group because they are read at the same moment by the same census: the
+     * class of the entry the OS's own walk starts from (`dtc_*`) and the class, child count and child
+     * set of the entry `IODeviceTreeAlloc` returned, as it answers *now* (`dtrec_*`). `dtc_kids`/`dtc_set`
+     * are that same walked entry's children, repeated here beside its class so one record names an object
+     * and its shape together; `dtrec_set` is expected to be zero - the key was removed from that object's
+     * table by `IORegistryEntry::init` - and the pair is what separates "one tree and its adopter" from
+     * "two trees".
+     */
+    entry_write_kv("xnu_entry_dtc_obj", g_dtc_obj);
+    entry_write_kv("xnu_entry_dtc_class0", g_dtc_class0);
+    entry_write_kv("xnu_entry_dtc_class1", g_dtc_class1);
+    entry_write_kv("xnu_entry_dtc_kids", g_dtc_kids);
+    entry_write_kv("xnu_entry_dtc_set", g_dtc_set);
+    entry_write_kv("xnu_entry_dtrec_obj", g_dtrec_obj);
+    entry_write_kv("xnu_entry_dtrec_class0", g_dtrec_class0);
+    entry_write_kv("xnu_entry_dtrec_class1", g_dtrec_class1);
+    entry_write_kv("xnu_entry_dtrec_kids", g_dtrec_kids);
+    entry_write_kv("xnu_entry_dtrec_set", g_dtrec_set);
+    entry_write_kv("xnu_entry_dtc_calls", g_dtc_calls);
+    entry_write_kv("xnu_entry_dtrec_calls", g_dtrec_calls);
+    /*
+     * 486's run B, and the nine that make its fault a reading instead of a stop: the object the class
+     * read was about, its first word, that word's two preamble words, slot 9, the metaclass, and whether
+     * the call was made. Written after the twelve above because they are all read at the same three
+     * moments - `entry_note_class` runs *inside* the class read, so its record precedes the caller's.
+     */
+    entry_write_kv("xnu_entry_cls_calls", g_cls_calls);
+    entry_write_kv("xnu_entry_cls_site", g_cls_site);
+    entry_write_kv("xnu_entry_cls_obj", g_cls_obj);
+    entry_write_kv("xnu_entry_cls_vptr", g_cls_vptr);
+    entry_write_kv("xnu_entry_cls_pre0", g_cls_pre0);
+    entry_write_kv("xnu_entry_cls_pre1", g_cls_pre1);
+    entry_write_kv("xnu_entry_cls_fn", g_cls_fn);
+    entry_write_kv("xnu_entry_cls_meta", g_cls_meta);
+    entry_write_kv("xnu_entry_cls_took", g_cls_took);
 }
 
 /*
@@ -4576,9 +4694,11 @@ void entry_note_loadmachfile(uint32_t caller, uint32_t header, uint32_t ret)
  * `entry_trace.c` for what each number is and which failure of `fromPath`'s first component it
  * separates. `t1` selects the slot pair; the live records are written for every reading so that a
  * run which never reaches the epilogue still says how many readings there were and in what order.
+ * **486 adds `class0`/`class1`**: the runtime class name of the entry the walk started from, so every
+ * reading names its own object instead of being a bare pointer the reader has to remember.
  */
 void entry_note_dtwalk(uint32_t t1, uint32_t root, uint32_t count, uint32_t first, uint32_t set,
-                       uint32_t kids, uint32_t control)
+                       uint32_t kids, uint32_t class0, uint32_t class1, uint32_t control)
 {
     g_walk_probes++;
     if (t1 != 0u) {
@@ -4587,6 +4707,8 @@ void entry_note_dtwalk(uint32_t t1, uint32_t root, uint32_t count, uint32_t firs
         g_walk_t1_first = first;
         g_walk_t1_set = set;
         g_walk_t1_kids = kids;
+        g_walk_t1_class0 = class0;
+        g_walk_t1_class1 = class1;
         g_walk_t1_control = control;
     } else {
         g_walk_t2_root = root;
@@ -4594,6 +4716,8 @@ void entry_note_dtwalk(uint32_t t1, uint32_t root, uint32_t count, uint32_t firs
         g_walk_t2_first = first;
         g_walk_t2_set = set;
         g_walk_t2_kids = kids;
+        g_walk_t2_class0 = class0;
+        g_walk_t2_class1 = class1;
         g_walk_t2_control = control;
     }
     entry_live_write("xnu_live_walk_seq", g_walk_probes);
@@ -4602,7 +4726,102 @@ void entry_note_dtwalk(uint32_t t1, uint32_t root, uint32_t count, uint32_t firs
     entry_live_write("xnu_live_walk_first", first);
     entry_live_write("xnu_live_walk_set", set);
     entry_live_write("xnu_live_walk_kids", kids);
+    entry_live_write("xnu_live_walk_class0", class0);
+    entry_live_write("xnu_live_walk_class1", class1);
     entry_live_write("xnu_live_walk_control", control);
+}
+
+/*
+ * 486: the entry the OS's own walk starts from, named by class, with the child set and count it
+ * answers - the *adopted* half of the pair. Called once, from the census inside the fifth tail wrapper,
+ * so its keys hold one reading rather than the last of several, and it is a separate function from
+ * `entry_note_dtrec` rather than one function with a selector: two subjects, two records, and no key
+ * set that could overwrite the other's.
+ */
+void entry_note_dtclass(uint32_t obj, uint32_t class0, uint32_t class1, uint32_t kids, uint32_t set)
+{
+    g_dtc_calls++;
+    g_dtc_obj = obj;
+    g_dtc_class0 = class0;
+    g_dtc_class1 = class1;
+    g_dtc_kids = kids;
+    g_dtc_set = set;
+    entry_live_write("xnu_live_dtc_calls", g_dtc_calls);
+    entry_live_write("xnu_live_dtc_obj", obj);
+    entry_live_write("xnu_live_dtc_class0", class0);
+    entry_live_write("xnu_live_dtc_class1", class1);
+    entry_live_write("xnu_live_dtc_kids", kids);
+    entry_live_write("xnu_live_dtc_set", set);
+}
+
+/*
+ * 486: the entry `IODeviceTreeAlloc` returned - 461's `g_dtplane_root`, 485's `recorded` - named by
+ * class and asked, *now*, for the children and the child set it has.
+ *
+ * **The prediction this function carried was written before the build and the run falsified it, which is
+ * what makes this record worth having.** It said: class `IOService`, zero children, no child set,
+ * because `IORegistryEntry::init` removed the child-set key from the tree root's own table. The run
+ * answers `IORootParent` - and the seven other numbers in the same log say why. The address held an
+ * `IOService` at the one moment the instrument read it while `IODeviceTreeAlloc` was still on the stack
+ * (`cls_calls = 1`, `cls_site = 1`), and by the census it holds an object whose vtable is
+ * `_ZTV12IORootParent + 8`: the power-management root domain's patriarch, whose only `new` in this kernel is
+ * `IOPMrootDomain.cpp:1247`. **The tree root's block was released and reused**, and the release is in
+ * Apple's own file: `init`'s parent loop does `next->breakLink(old, kChildSetIndex, plane)` on the meta
+ * root, and that child array was the one reference holding the nub (`attachToParent` put it there and
+ * `IODeviceTreeAlloc`'s own `parent->release()` left count 1). So the zero children and the NULL set
+ * below are the *patriarch's*, not the tree root's, and 485's reading of them said nothing about the
+ * tree root - the two mechanisms print the same two zeros.
+ *
+ * The record's name is now the honest one: it is the class and shape of **the object at the address
+ * `IODeviceTreeAlloc` returned**, whatever occupies it now. The instrument that would watch the moment
+ * is named in the step's doc and not built here: read the class of this pointer at every walk, so the
+ * log brackets the change, and catch the allocation that receives the block.
+ */
+void entry_note_dtrec(uint32_t obj, uint32_t class0, uint32_t class1, uint32_t kids, uint32_t set)
+{
+    g_dtrec_calls++;
+    g_dtrec_obj = obj;
+    g_dtrec_class0 = class0;
+    g_dtrec_class1 = class1;
+    g_dtrec_kids = kids;
+    g_dtrec_set = set;
+    entry_live_write("xnu_live_dtrec_calls", g_dtrec_calls);
+    entry_live_write("xnu_live_dtrec_obj", obj);
+    entry_live_write("xnu_live_dtrec_class0", class0);
+    entry_live_write("xnu_live_dtrec_class1", class1);
+    entry_live_write("xnu_live_dtrec_kids", kids);
+    entry_live_write("xnu_live_dtrec_set", set);
+}
+
+/*
+ * 486's precondition, published whichever way it comes out. One writer for the six numbers, called from
+ * the one place that reads them (`entry_object_meta`), so the record and the read cannot disagree.
+ *
+ * The order of the keys is the order of the reading: `site`, `obj`, `vptr`, the two preamble words, the
+ * slot, the metaclass, and `took` last - so a log cut off in the middle of this record still shows the
+ * object whose call it was about to make.
+ */
+void entry_note_class(uint32_t site, uint32_t obj, uint32_t vptr, uint32_t pre0, uint32_t pre1,
+                      uint32_t fn, uint32_t meta, uint32_t took)
+{
+    g_cls_calls++;
+    g_cls_site = site;
+    g_cls_obj = obj;
+    g_cls_vptr = vptr;
+    g_cls_pre0 = pre0;
+    g_cls_pre1 = pre1;
+    g_cls_fn = fn;
+    g_cls_meta = meta;
+    g_cls_took = took;
+    entry_live_write("xnu_live_cls_calls", g_cls_calls);
+    entry_live_write("xnu_live_cls_site", site);
+    entry_live_write("xnu_live_cls_obj", obj);
+    entry_live_write("xnu_live_cls_vptr", vptr);
+    entry_live_write("xnu_live_cls_pre0", pre0);
+    entry_live_write("xnu_live_cls_pre1", pre1);
+    entry_live_write("xnu_live_cls_fn", fn);
+    entry_live_write("xnu_live_cls_meta", meta);
+    entry_live_write("xnu_live_cls_took", took);
 }
 
 /*
