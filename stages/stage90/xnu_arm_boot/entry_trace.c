@@ -127,10 +127,34 @@ extern void entry_note_vmwait(uint32_t caller);
 /*
  * 450's pair, one on each side of the real `thread_block`: the first records the site and the
  * continuation, the second whether the block ever came back. See `entry_stubs.c` for why a
- * non-terminal block needs both and why the ring is eight deep.
+ * non-terminal block needs both and why the ring is eight deep. 453 added the thread to the first,
+ * which is the value `entry_thread()` returns below.
  */
-extern void entry_note_block(uint32_t caller, uint32_t continuation);
+extern void entry_note_block(uint32_t caller, uint32_t continuation, uint32_t thread);
 extern void entry_note_block_return(uint32_t caller);
+
+/*
+ * 453's one, called by the six sleep wrappers below with the frame they were entered from. `ent` is
+ * the entry point's id in the table in `entry_stubs.c` - the fifth argument means something
+ * different for each, so the id is what says which reading `tmo` is.
+ */
+extern void entry_note_sleep(uint32_t ent, uint32_t site, uint32_t thread, uint32_t chan,
+                             uint32_t wmsg, uint32_t pri, uint32_t tmo);
+
+/*
+ * Experiment 453. The current thread, in one instruction: on ARMv7 `current_thread()` is a read of
+ * TPIDRPRW (`osfmk/arm/cpu_data.h:58`), and `cswitch.s` writes that register on every context switch
+ * - so a read taken anywhere between two switches is the thread running there, with no frame pointer
+ * and no per-CPU lookup needed. This is the same read the kernel's own macro does, which is why it is
+ * safe to take it from a wrapper: it cannot fault, it reads no memory, and it holds no lock.
+ */
+static inline uint32_t entry_thread(void)
+{
+    uint32_t t;
+
+    __asm__ volatile ("mrc p15, 0, %0, c13, c0, 4" : "=r"(t));
+    return t;
+}
 
 /*
  * 447's two, and they are the *non*-terminal pair: `ml_get_max_cpus` blocks and returns, so the
@@ -464,9 +488,107 @@ void __wrap_thread_block(void *continuation)
 {
     uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
 
-    entry_note_block(caller, (uint32_t)(uintptr_t)continuation);
+    entry_note_block(caller, (uint32_t)(uintptr_t)continuation, entry_thread());
     __real_thread_block(continuation);
     entry_note_block_return(caller);
+}
+
+/* --------------------------------------------------------------- the sleep family (453) */
+/*
+ * `_sleep` is `static` in `bsd/kern/kern_synch.c` and `lck_mtx_lock_contended` is a local symbol
+ * (`nm` says `t`), so neither can be wrapped however the link is spelled - `--wrap` renames an
+ * undefined reference, and a call inside the defining object, or to a local symbol, is neither. What
+ * *can* be wrapped is the seven global entries into `_sleep`, and a `grep -n '_sleep('` over that
+ * file finds exactly seven call sites beside `_sleep`'s own definition (151) and the two calls
+ * inside it (199 is `lck_mtx_sleep`, which is not `_sleep` at all): 311, 328, 346, 357, 371, 386 and
+ * 397. All seven are global, and all seven are in the image as `T` - `sleep`, `msleep`, `msleep0`,
+ * `msleep1`, `tsleep`, `tsleep0`, `tsleep1`. Wrapping them is therefore complete for the whole
+ * family, and each wrapper's own `lr` is the frame `entry_note_block` cannot reach: the function that
+ * asked to sleep, one call above `_sleep`.
+ *
+ * Nothing here changes an argument or a return value. The `panic` `lck_mtx_sleep_deadline` contains
+ * is on its own validation path, two calls below this one, and is reached exactly as before.
+ *
+ * The argument spellings are the source's own (`bsd/kern/kern_synch.c`), which is what keeps the
+ * wrappers ABI-identical: `msleep` takes a `struct timespec *` while `msleep0`, `tsleep` and
+ * `tsleep0` take an `int` timeout in seconds, and `msleep1`/`tsleep1` a `u_int64_t` deadline - so
+ * they are declared as such rather than all as `void *`. The last argument of `msleep0`, `tsleep0`
+ * and `tsleep1` is a continuation and is *not* recorded: it is a code address only for the sleeps
+ * that ask to be resumed, and `chan`/`wmsg` already name the wait.
+ */
+int __real_sleep(void *chan, int pri);
+int __wrap_sleep(void *chan, int pri)
+{
+    entry_note_sleep(0u, (uint32_t)(uintptr_t)__builtin_return_address(0), entry_thread(),
+                     (uint32_t)(uintptr_t)chan, 0u, (uint32_t)pri, 0u);
+    return __real_sleep(chan, pri);
+}
+
+int __real_msleep(void *chan, void *mtx, int pri, const char *wmsg, void *ts);
+int __wrap_msleep(void *chan, void *mtx, int pri, const char *wmsg, void *ts)
+{
+    entry_note_sleep(1u, (uint32_t)(uintptr_t)__builtin_return_address(0), entry_thread(),
+                     (uint32_t)(uintptr_t)chan, (uint32_t)(uintptr_t)wmsg, (uint32_t)pri,
+                     (uint32_t)(uintptr_t)ts);
+    return __real_msleep(chan, mtx, pri, wmsg, ts);
+}
+
+int __real_msleep0(void *chan, void *mtx, int pri, const char *wmsg, int timo, void *continuation);
+int __wrap_msleep0(void *chan, void *mtx, int pri, const char *wmsg, int timo, void *continuation)
+{
+    entry_note_sleep(2u, (uint32_t)(uintptr_t)__builtin_return_address(0), entry_thread(),
+                     (uint32_t)(uintptr_t)chan, (uint32_t)(uintptr_t)wmsg, (uint32_t)pri,
+                     (uint32_t)timo);
+    return __real_msleep0(chan, mtx, pri, wmsg, timo, continuation);
+}
+
+/*
+ * `msleep1` and `tsleep1` take the deadline as a `u_int64_t`, which on this ABI is a register pair -
+ * so the wrapper's last parameter is `uint64_t` and the report carries its **low half**, which is
+ * what a `.bss` word can hold. Read it with that in mind: a deadline whose low half is 0 and whose
+ * high half is not would be 2^32 ticks away rather than "no deadline", and `mach_absolute_time`'s
+ * counter on a 19.2 MHz timebase would have to run for years to get there, so a 0 in this slot is a
+ * 0 in the argument.
+ *
+ * `tsleep0` is *not* one of those: the source passes `int timo`, a timeout in seconds, and computes
+ * the deadline itself (`kern_synch.c:375-386`). Its shape is `msleep0`'s, not `msleep1`'s, and the
+ * first draft of this step got that wrong from the name - which is why the table in `entry_stubs.c`
+ * lists each id's fifth argument beside its source lines rather than by analogy.
+ */
+int __real_msleep1(void *chan, void *mtx, int pri, const char *wmsg, uint64_t abstime);
+int __wrap_msleep1(void *chan, void *mtx, int pri, const char *wmsg, uint64_t abstime)
+{
+    entry_note_sleep(3u, (uint32_t)(uintptr_t)__builtin_return_address(0), entry_thread(),
+                     (uint32_t)(uintptr_t)chan, (uint32_t)(uintptr_t)wmsg, (uint32_t)pri,
+                     (uint32_t)abstime);
+    return __real_msleep1(chan, mtx, pri, wmsg, abstime);
+}
+
+int __real_tsleep(void *chan, int pri, const char *wmsg, int timo);
+int __wrap_tsleep(void *chan, int pri, const char *wmsg, int timo)
+{
+    entry_note_sleep(4u, (uint32_t)(uintptr_t)__builtin_return_address(0), entry_thread(),
+                     (uint32_t)(uintptr_t)chan, (uint32_t)(uintptr_t)wmsg, (uint32_t)pri,
+                     (uint32_t)timo);
+    return __real_tsleep(chan, pri, wmsg, timo);
+}
+
+int __real_tsleep0(void *chan, int pri, const char *wmsg, int timo, void *continuation);
+int __wrap_tsleep0(void *chan, int pri, const char *wmsg, int timo, void *continuation)
+{
+    entry_note_sleep(5u, (uint32_t)(uintptr_t)__builtin_return_address(0), entry_thread(),
+                     (uint32_t)(uintptr_t)chan, (uint32_t)(uintptr_t)wmsg, (uint32_t)pri,
+                     (uint32_t)timo);
+    return __real_tsleep0(chan, pri, wmsg, timo, continuation);
+}
+
+int __real_tsleep1(void *chan, int pri, const char *wmsg, uint64_t abstime, void *continuation);
+int __wrap_tsleep1(void *chan, int pri, const char *wmsg, uint64_t abstime, void *continuation)
+{
+    entry_note_sleep(6u, (uint32_t)(uintptr_t)__builtin_return_address(0), entry_thread(),
+                     (uint32_t)(uintptr_t)chan, (uint32_t)(uintptr_t)wmsg, (uint32_t)pri,
+                     (uint32_t)abstime);
+    return __real_tsleep1(chan, pri, wmsg, abstime, continuation);
 }
 
 /* ------------------------------------------------------- ml_get_max_cpus / ml_init_max_cpus */

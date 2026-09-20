@@ -405,6 +405,23 @@ uint32_t g_block_last_caller;
 uint32_t g_block_last_continuation;
 uint32_t g_block_ring_caller[8];
 uint32_t g_block_ring_continuation[8];
+/*
+ * Experiment 453. 450's ring says *where* a thread blocked and never *which thread*, and 452's trace
+ * has four live at once by the time it publishes `IOBSD` - the boot thread, `_IOConfigThread::main`,
+ * `IOWorkLoop::threadMain` and the pool threads - so a flat sequence mixes them: `lck_mtx_sleep_
+ * deadline+0x88` (the last record) could be the boot thread waiting for `bsd_autoconf`'s work or a
+ * worker parking, and nothing in the log says which.
+ *
+ * The thread is free to read on this target. `current_thread()` on ARMv7 is one instruction -
+ * `mrc p15, 0, r, c13, c0, 4`, TPIDRPRW (`osfmk/arm/cpu_data.h:58`) - and `cswitch.s` writes that
+ * register on every context switch, so a thread pointer read at any instruction between two switches
+ * is the thread that is running there. The wrapper reads it and carries it with the caller, which
+ * makes every block record a triple: `(thread, caller, continuation)`.
+ */
+uint32_t g_block_thread;            /* the thread current at the last block */
+uint32_t g_block_first_thread;      /* ... at the first, which is the boot thread */
+uint32_t g_block_last_thread;
+uint32_t g_block_ring_thread[8];
 uint32_t g_vmwait_caller;
 uint32_t g_vmwait_count;
 /*
@@ -461,6 +478,54 @@ uint32_t g_live_alias_read;
 uint32_t g_live_sctlr;
 uint32_t g_live_prrr;
 uint32_t g_live_attr;
+/*
+ * Experiment 453. 452's frontier is the one record after `publishResource("IOBSD")` - a block at
+ * `lck_mtx_sleep_deadline+0x88` that never returns - and `entry_note_block` cannot say who asked for
+ * it, because it records the address the wrapper was called from: that names the *primitive* that
+ * slept, and the primitive has no way to name its caller.
+ *
+ * One frame up is not reachable by walking: this tree compiles C with `-fomit-frame-pointer` (only 9
+ * functions in the whole image set `fp` from `sp` - `backtrace`, `m_devget`, `inet_pton4` and six
+ * others - and none of them is on this path: `msleep`'s prologue is `push {r4-r9, fp, lr}`, where the
+ * `fp` is in the list for 8-byte stack alignment and is never written), so `__builtin_return_address(1)`
+ * and an r11 chain are both fiction here. It *is* reachable by wrapping, and the wrap set is
+ * exactly the family that can be wrapped: `_sleep` is `static` and `lck_mtx_lock_contended` is a
+ * local symbol (`nm` says `t`), so neither can be intercepted - but a `grep -n '_sleep('` over
+ * `bsd/kern/kern_synch.c` finds exactly **seven** call sites (311, 328, 346, 357, 371, 386, 397)
+ * beside `_sleep`'s own definition and the `lck_mtx_sleep` inside it, and all seven are global
+ * functions, all seven `T` in the image (`sleep`, `msleep`, `msleep0`, `msleep1`, `tsleep`,
+ * `tsleep0`, `tsleep1`). Wrapping those seven wraps *every* entry into `_sleep`, and therefore every
+ * sleep in the BSD boot, without a frame pointer and without touching a line of XNU.
+ *
+ * So each wrapper records what its own `lr` was on entry - the function that asked to sleep, one
+ * frame above `_sleep` - plus the arguments the source's own branch tests use, so a report can name
+ * the wait in the site's own words: `chan` is the channel, `wmsg` the message string (`NULL` for the
+ * callers that pass none), `pri` the priority, and `tmo` the fifth argument, whose *shape* the
+ * entry's own id gives:
+ *
+ *     id  function   fifth argument
+ *     0   sleep      -
+ *     1   msleep     struct timespec *   (absolute time, 0 = no timeout)
+ *     2   msleep0    int timo in seconds (0 = no timeout)
+ *     3   msleep1    u_int64_t abstime   (absolute deadline, 0 = none)
+ *     4   tsleep     int timo in seconds
+ *     5   tsleep0    int timo in seconds
+ *     6   tsleep1    u_int64_t abstime
+ *
+ * The last call is kept in `.bss` for the epilogue and every call goes to the live console in order,
+ * which matters more here than for the block ring: a boot that hangs inside a sleep never reaches the
+ * epilogue, so the live sequence is the only channel that can say which site asked last.
+ */
+#define ENTRY_SLEEP_MAX 7u
+uint32_t g_sleep_calls;
+uint32_t g_sleep_count[ENTRY_SLEEP_MAX];
+uint32_t g_sleep_last_ent;
+uint32_t g_sleep_last_site;
+uint32_t g_sleep_last_thread;
+uint32_t g_sleep_last_chan;
+uint32_t g_sleep_last_wmsg;
+uint32_t g_sleep_last_pri;
+uint32_t g_sleep_last_tmo;
 /*
  * Experiment 447. 446 resolved the block to `ml_get_max_cpus` and the run could not say *which* of
  * that function's six callers it was, so the next reading is the caller itself - and the second is
@@ -1619,6 +1684,15 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     entry_write_kv("xnu_entry_block_last_caller", g_block_last_caller);
     entry_write_kv("xnu_entry_block_last_continuation", g_block_last_continuation);
     /*
+     * Experiment 453's thread identities. `block_thread` is the thread that ran the last block and
+     * `block_first_thread` the one that ran the first - the boot thread, since the first block is
+     * `ml_get_max_cpus` on the only thread that exists at that point - so the pair says whether the
+     * trace's last record is the same thread as its first.
+     */
+    entry_write_kv("xnu_entry_block_thread", g_block_thread);
+    entry_write_kv("xnu_entry_block_first_thread", g_block_first_thread);
+    entry_write_kv("xnu_entry_block_last_thread", g_block_last_thread);
+    /*
      * The first eight blocks in order. `block0_caller` is the site 446/447 resolved
      * (`ml_get_max_cpus+0x3c`), and `block1_caller` is the reading this step adds: the first site the
      * boot blocks at *after* a real block has switched the CPU away and something has woken it.
@@ -1637,12 +1711,42 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
             "xnu_entry_block4_continuation", "xnu_entry_block5_continuation",
             "xnu_entry_block6_continuation", "xnu_entry_block7_continuation"
         };
+        static const char *const bt[8] = {
+            "xnu_entry_block0_thread", "xnu_entry_block1_thread",
+            "xnu_entry_block2_thread", "xnu_entry_block3_thread",
+            "xnu_entry_block4_thread", "xnu_entry_block5_thread",
+            "xnu_entry_block6_thread", "xnu_entry_block7_thread"
+        };
 
         for (unsigned i = 0; i < 8u; i++) {
             entry_write_kv(bc[i], g_block_ring_caller[i]);
             entry_write_kv(bq[i], g_block_ring_continuation[i]);
+            entry_write_kv(bt[i], g_block_ring_thread[i]);
         }
     }
+    /*
+     * Experiment 453's sleep family. `_calls` counts every entry into `_sleep`'s seven global callers
+     * and `_c0 .. _c6` the per-entry counts in the id order the slot comment gives, so a report can
+     * say which of the seven the boot used without reading the live sequence. The `_ent/_site/_thr/
+     * _chan/_wmsg/_pri/_tmo` group is the **last** call before the epilogue ran, which is the
+     * frontier whenever a boot does reach the epilogue, and `_site` is the whole point of the step:
+     * `_sleep`'s caller, which is the function that asked to wait.
+     */
+    entry_write_kv("xnu_entry_sleep_calls", g_sleep_calls);
+    entry_write_kv("xnu_entry_sleep_c0", g_sleep_count[0]);
+    entry_write_kv("xnu_entry_sleep_c1", g_sleep_count[1]);
+    entry_write_kv("xnu_entry_sleep_c2", g_sleep_count[2]);
+    entry_write_kv("xnu_entry_sleep_c3", g_sleep_count[3]);
+    entry_write_kv("xnu_entry_sleep_c4", g_sleep_count[4]);
+    entry_write_kv("xnu_entry_sleep_c5", g_sleep_count[5]);
+    entry_write_kv("xnu_entry_sleep_c6", g_sleep_count[6]);
+    entry_write_kv("xnu_entry_sleep_ent", g_sleep_last_ent);
+    entry_write_kv("xnu_entry_sleep_site", g_sleep_last_site);
+    entry_write_kv("xnu_entry_sleep_thr", g_sleep_last_thread);
+    entry_write_kv("xnu_entry_sleep_chan", g_sleep_last_chan);
+    entry_write_kv("xnu_entry_sleep_wmsg", g_sleep_last_wmsg);
+    entry_write_kv("xnu_entry_sleep_pri", g_sleep_last_pri);
+    entry_write_kv("xnu_entry_sleep_tmo", g_sleep_last_tmo);
     /*
      * Experiment 451's live console, printed here as well so a run that *does* report says whether
      * the live channel was working and, if it was refused, which check refused it. `_records` counts
@@ -1810,21 +1914,31 @@ void entry_epilogue_block(const char *why, uint32_t caller, uint32_t continuatio
  * The ring keeps the first eight pairs rather than the first or the last one: the first is the
  * frontier 446/447 named and the second is the site the boot blocks at *after* a real switch, and
  * neither is the other's summary.
+ *
+ * Experiment 453 added the third element of each record, the thread. It is a parameter rather than a
+ * read here because the read belongs where the `lr` is read - in the wrapper, which is the only place
+ * that knows the value was taken between two context switches - and because this file must stay
+ * callable from a build without `entry_trace.c`.
  */
-void entry_note_block(uint32_t caller, uint32_t continuation)
+void entry_note_block(uint32_t caller, uint32_t continuation, uint32_t thread)
 {
     if (g_block_count == 0) {
         g_block_caller = caller;
         g_block_continuation = continuation;
+        g_block_first_thread = thread;
     }
     if (g_block_count < 8) {
         g_block_ring_caller[g_block_count] = caller;
         g_block_ring_continuation[g_block_count] = continuation;
+        g_block_ring_thread[g_block_count] = thread;
     }
     g_block_last_caller = caller;
     g_block_last_continuation = continuation;
+    g_block_last_thread = thread;
+    g_block_thread = thread;
     g_block_kv_len = g_kv_len;
     entry_live_write("xnu_live_block_enter", caller);
+    entry_live_write("xnu_live_block_thr", thread);
     g_block_count++;
     entry_live_write("xnu_live_block_seq", g_block_count);
 }
@@ -1837,6 +1951,38 @@ void entry_note_block_return(uint32_t caller)
     g_block_returned++;
     entry_live_write("xnu_live_block_return", caller);
     entry_live_write("xnu_live_block_returns", g_block_returned);
+}
+
+/*
+ * Experiment 453. One call per entry into the sleep family, from the six wrappers in `entry_trace.c`,
+ * and the whole point is the first argument: `site` is the wrapper's own `lr`, so it names the
+ * function that asked to sleep - the frame `entry_note_block` cannot reach, because the block it
+ * records happens two calls below this one and the primitive in between is not the site.
+ *
+ * The five records per call go to the live console and only the last call's values are kept in
+ * `.bss`, because a boot that hangs inside a sleep never reaches the epilogue: what has to survive is
+ * the *sequence*, in order, on the channel that survives a hang.
+ */
+void entry_note_sleep(uint32_t ent, uint32_t site, uint32_t thread, uint32_t chan, uint32_t wmsg,
+                      uint32_t pri, uint32_t tmo)
+{
+    g_sleep_calls++;
+    if (ent < ENTRY_SLEEP_MAX)
+        g_sleep_count[ent]++;
+    g_sleep_last_ent = ent;
+    g_sleep_last_site = site;
+    g_sleep_last_thread = thread;
+    g_sleep_last_chan = chan;
+    g_sleep_last_wmsg = wmsg;
+    g_sleep_last_pri = pri;
+    g_sleep_last_tmo = tmo;
+    entry_live_write("xnu_live_sleep_ent", ent);
+    entry_live_write("xnu_live_sleep_site", site);
+    entry_live_write("xnu_live_sleep_thr", thread);
+    entry_live_write("xnu_live_sleep_chan", chan);
+    entry_live_write("xnu_live_sleep_wmsg", wmsg);
+    entry_live_write("xnu_live_sleep_pri", pri);
+    entry_live_write("xnu_live_sleep_tmo", tmo);
 }
 
 void entry_note_vmwait(uint32_t caller)

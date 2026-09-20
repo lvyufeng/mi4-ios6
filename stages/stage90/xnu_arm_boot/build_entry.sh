@@ -76,12 +76,14 @@ ARGS_BYTES=0x00001000          # one page, which is what `boot_args` needs to fi
 REAL_ARM_INIT=${STAGE90_ENTRY_REAL_ARM_INIT:-0}
 STUB_DEFINES=()
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES=(-DSTAGE90_ENTRY_REAL_ARM_INIT=1)
-# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s eighteen functions - `kalloc_canblock`,
+# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s twenty-five functions - `kalloc_canblock`,
 # `lck_grp_alloc_init`, `kernel_memory_allocate`, `vm_page_wait`, `thread_block`, (447)
 # `ml_get_max_cpus`, `ml_init_max_cpus`, (448) `IODeviceTreeAlloc`, `IOWorkLoop::workLoop`,
 # `IORecursiveLockAlloc`, `IOSimpleLockAlloc`, `IOCommandGate::commandGate`, `kernel_thread_start`,
-# and (449) `iokit_post_constructor_init`, `IOCatalogue::initialize`, `OSUnserialize`,
-# `OSMetaClass::allocClassWithName`, `IOService::publishResource` - so a run that
+# (449) `iokit_post_constructor_init`, `IOCatalogue::initialize`, `OSUnserialize`,
+# `OSMetaClass::allocClassWithName`, `IOService::publishResource`, and (453) the seven global entries
+# into `_sleep` - `sleep`, `msleep`, `msleep0`, `msleep1`, `tsleep`, `tsleep0`, `tsleep1`, which are
+# the whole family because `_sleep` itself is `static` - so a run that
 # hangs inside real XNU code says which frame it stopped in and why. It is a *diagnostic*, not a
 # stage: the traced image runs the same code, but it is not the image a stage is judged on, so this
 # is off by default and the stage that experiment 268 measured is built without it. The wrappers
@@ -109,7 +111,9 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=iokit_post_constructor_init --wrap=_ZN11IOCatalogue10initializeEv
                    --wrap=_Z13OSUnserializePKcPP8OSString
                    --wrap=_ZN11OSMetaClass18allocClassWithNameEPK8OSSymbol
-                   --wrap=_ZN9IOService15publishResourceEPKcP8OSObject)
+                   --wrap=_ZN9IOService15publishResourceEPKcP8OSObject
+                   --wrap=sleep --wrap=msleep --wrap=msleep0 --wrap=msleep1
+                   --wrap=tsleep --wrap=tsleep0 --wrap=tsleep1)
 fi
 # `STAGE90_ENTRY_CHECKPOINT=<symbol>` turns one function into a terminal stop: the link redirects
 # every reference to it through a wrapper that calls `entry_stub_hit`, so the run reports at that
