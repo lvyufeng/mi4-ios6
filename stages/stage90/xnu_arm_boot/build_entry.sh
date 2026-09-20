@@ -26840,6 +26840,40 @@ verify_trace_symbols() {
     fi
     say "  xnu_entry_455: ${#TRACE_LDFLAGS[@]} --wrap'd symbols: $(( ${#TRACE_LDFLAGS[@]} - ${#only[@]} - ${#uncalled[@]} )) reached by a branch in this image, ${#only[@]} same-object-only (${only[*]:-none}), ${#uncalled[@]} never called here (${uncalled[*]:-none})"
 }
+
+# Experiment 456's probe calls three XNU member functions and reads two XNU globals **by mangled
+# name**, and in this image a mangled name typed wrong is not a link error: the generator invents a
+# stub for anything undefined, so it links, the undefined-symbol count goes *up* by one, and the call
+# lands in a stub - which stops the boot at the instrument that was meant to observe it silently.
+# 455 hit exactly that twice in one `extern` and one call (the doubled-underscore `__ZN9IOService…`).
+# So the five names are checked against the linked image and against the undefined list, which is
+# where a misspelling shows up as a new line. This runs in every entry build, not only traced ones,
+# because the probe is compiled into `entry_stubs.c` unconditionally - only its caller is traced.
+verify_registry_probe() {
+    local sym type
+    for sym in _ZN9IOService18getResourceServiceEv \
+               _ZNK15IORegistryEntry12copyPropertyEPK8OSSymbol \
+               _ZNK7OSArray8getCountEv \
+               _ZNK7OSArray20getNextIndexOfObjectEPK15OSMetaClassBasej \
+               _ZNK8OSObject7releaseEv; do
+        type=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
+               awk -v s="$sym" '$3 == s { print $2; found = 1 } END { exit(found ? 0 : 1) }') ||
+            layout_fail "entry_registry_probe calls $sym, which the linked image does not define - it would resolve to a generated stub that stops the boot at the instrument"
+        [[ $type == T || $type == t ]] ||
+            layout_fail "entry_registry_probe calls $sym, which the image defines as '$type' and not as a function"
+        grep -qx "$sym" "$OUT/xnu_arm_entry_undef.txt" &&
+            layout_fail "$sym is in the undefined list *and* defined in the image - the doubled-underscore shape 455 found, where the instrument calls a generated stub instead of the real function"
+    done
+    for sym in gIOResourceMatchedKey gIOBSDKey; do
+        type=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" |
+               awk -v s="$sym" '$3 == s { print $2; found = 1 } END { exit(found ? 0 : 1) }') ||
+            layout_fail "entry_registry_probe reads $sym, which the linked image does not define"
+        [[ $type == B || $type == b || $type == D || $type == d ]] ||
+            layout_fail "entry_registry_probe reads $sym, which the image defines as '$type' and not as storage"
+    done
+    say "  xnu_entry_456: the registry probe's five names are real symbols in the image and none of them is in the undefined list"
+}
+verify_registry_probe
 verify_trace_symbols
 
 cat > "$OUT/xnu_arm_entry.h" <<EOF

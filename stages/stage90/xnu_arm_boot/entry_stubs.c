@@ -657,6 +657,16 @@ uint32_t g_dict_last_out;
 uint32_t g_rs_ptr;
 uint32_t g_rs_state0;
 uint32_t g_rs_state1;
+/* Experiment 456: the registry reading, live only (see `entry_registry_probe`). Seven slots because
+ * the reading is a triple - the state pair, the property's array, and the array's own answer - and the
+ * run has to be able to tell "no array" from "array without `IOBSD`" from "asked and got index 0". */
+uint32_t g_reg_calls;
+uint32_t g_reg_ptr;
+uint32_t g_reg_state0;
+uint32_t g_reg_state1;
+uint32_t g_reg_rm;
+uint32_t g_reg_count;
+uint32_t g_reg_idx;
 /*
  * Experiment 447. 446 resolved the block to `ml_get_max_cpus` and the run could not say *which* of
  * that function's six callers it was, so the next reading is the caller itself - and the second is
@@ -2157,6 +2167,10 @@ void entry_note_block_return(uint32_t caller)
     entry_live_write("xnu_live_block_returns", g_block_returned);
 }
 
+/* Experiment 456's probe, defined below its first caller; the declaration is here because
+ * `entry_note_iolock` is where the reading is taken (see `entry_registry_probe`). */
+__attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);
+
 /*
  * Experiment 454. One call per entry into the two IOKit deadline sleeps, from their wrappers. `site`
  * is the wrapper's own `lr` - the function that asked IOKit to wait - and `now` is the counter read in
@@ -2193,6 +2207,9 @@ void entry_note_iolock(uint32_t ent, uint32_t site, uint32_t thread, uint32_t lo
     entry_live_write("xnu_live_iolock_dl_lo", dl_lo);
     entry_live_write("xnu_live_iolock_dl_hi", dl_hi);
     entry_live_write("xnu_live_iolock_now", now);
+    /* 456: the registry reading, taken in the wait itself - see `entry_registry_probe`. After the
+     * records above, so the wait's own identity stays the first thing the log says about this call. */
+    entry_registry_probe(g_iolock_calls, site);
 }
 
 /*
@@ -2289,6 +2306,101 @@ void entry_note_mpass(uint32_t site, uint32_t dict, uint32_t options, uint32_t r
         entry_live_write("xnu_live_mpass_all", g_mpass_calls);
         entry_live_write("xnu_live_mpass_seq", g_mpass_rs_calls);
     }
+}
+
+/*
+ * Experiment 456. The registry's own answer, read *at the frontier*, from the one wrapper on this
+ * boot's path whose call site the linker can see: `IORecursiveLockSleepDeadline`, entered by
+ * `waitForMatchingService` from `IOService.cpp` - another object than `IOLib.cpp`, so this one is
+ * reached (455's finding: a `--wrap` rewrites an *undefined* reference, and every call to
+ * `copyExistingServices` is issued from the object that defines it). The reading is therefore taken
+ * inside the wait that never returns, rather than by asking the query the boot does not get to ask.
+ *
+ * Three values, and they are the three the source's own branch tests:
+ *
+ *   state0/state1  `gIOResources`' `__state[0]`/`__state[1]`. The fast path in `copyExistingServices`
+ *                  tests `(inState == (service->__state[0] & inState))` with
+ *                  `inState = kIOServiceMatchedState = 0x4` and `0 == (__state[0] &
+ *                  kIOServiceInactiveState)`, *before* the matcher is reached - and the only writer of
+ *                  bit 0x4 is `copyNotifiers`' `orNewState` argument, called from `doServiceMatch`'s
+ *                  tail behind `0 == (__state[1] & kIOServiceModuleStallState)` (`IOService.cpp:3748`).
+ *                  So a clear 0x4 with a clear stall bit says the tail was skipped for another reason,
+ *                  and a clear 0x4 with the stall bit set names the reason.
+ *   rm_ptr         `copyProperty(gIOResources, gIOResourceMatchedKey)` - exactly the call
+ *                  `IOResources::matchPropertyTable` makes (`IOService.cpp:5109`) - or NULL.
+ *   rm_count/idx   `getCount()` on it and `getNextIndexOfObject(gIOBSDKey, 0)`: `0` means the array
+ *                  exists *and* holds the `"IOBSD"` symbol, any other small value means it exists
+ *                  without it, and NULL above means the resource root has no `IOResourceMatched`
+ *                  property at all. That property is written from one place only, the same tail
+ *                  (`if (resourceKeys) setProperty(...)`, `:3751`), where `resourceKeys` is a local
+ *                  set in the `this == gIOResources` branch of
+ *                  `if (keepGuessing && matches->getCount() && kIOReturnSuccess == getResources())`.
+ *
+ * Three things make this call safe here rather than merely convenient, and none of them is a guess.
+ * `copyProperty` takes `IORecursiveLockLock(reserved->fLock)` (`IORegistryEntry.cpp:119`), the lock
+ * `IORegistryEntry` already uses with `IORecursiveLockHaveLock`, and the matcher calls the very same
+ * function from the very same context this probe runs in (`copyExistingServices` under
+ * `gNotificationLock`), so this adds no lock order that the boot does not already take;
+ * `IORegistryEntry::copyProperty(const OSSymbol *)` is called directly and not through a vtable
+ * because nothing between `IOResources` and `IORegistryEntry` overrides it - the image defines one
+ * `copyProperty(OSSymbol*)` under those two names and no `IOResources` one; and the object it returns
+ * is retained, so it is released here with `OSObject::release`, which is the *only* `release` the
+ * image defines and therefore cannot be the wrong override.
+ *
+ * The three mangled names are checked against the undefined-symbol list by the build, because a typo
+ * in one of them is not a link error in this image: the generator invents a stub, and the probe would
+ * stop the boot at its own instrument - the defect 455 found twice.
+ *
+ * Live only, and that is deliberate: 455's run is the demonstration that a boot which hangs at the
+ * frontier never reaches `entry_epilogue`, so a key written into the final buffer is a key no run
+ * this instrument exists for will ever print.
+ */
+extern void *_ZNK15IORegistryEntry12copyPropertyEPK8OSSymbol(void *, const void *);
+extern uint32_t _ZNK7OSArray8getCountEv(void *);
+extern uint32_t _ZNK7OSArray20getNextIndexOfObjectEPK15OSMetaClassBasej(void *, const void *, uint32_t);
+extern void _ZNK8OSObject7releaseEv(void *);
+extern void *gIOResourceMatchedKey;
+extern void *gIOBSDKey;
+
+__attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site)
+{
+    void *svc = _ZN9IOService18getResourceServiceEv();
+    void *keys = 0;
+    uint32_t state0 = 0, state1 = 0, count = 0, idx = 0xffffffffu;
+
+    if (svc) {
+        uint32_t *w = (uint32_t *)svc;
+
+        state0 = w[9];                   /* __state[0], +36 - getState()'s own load */
+        state1 = w[10];                  /* __state[1], +40 - registerService's second load */
+    }
+    if (svc && gIOResourceMatchedKey) {
+        keys = _ZNK15IORegistryEntry12copyPropertyEPK8OSSymbol(svc, gIOResourceMatchedKey);
+        if (keys) {
+            count = _ZNK7OSArray8getCountEv(keys);
+            idx = gIOBSDKey
+                      ? _ZNK7OSArray20getNextIndexOfObjectEPK15OSMetaClassBasej(keys, gIOBSDKey, 0)
+                      : 0xfffffffeu;
+        }
+    }
+    g_reg_calls++;
+    g_reg_ptr = (uint32_t)(uintptr_t)svc;
+    g_reg_state0 = state0;
+    g_reg_state1 = state1;
+    g_reg_rm = (uint32_t)(uintptr_t)keys;
+    g_reg_count = count;
+    g_reg_idx = idx;
+    entry_live_write("xnu_live_reg_seq", seq);
+    entry_live_write("xnu_live_reg_site", site);
+    entry_live_write("xnu_live_reg_ptr", g_reg_ptr);
+    entry_live_write("xnu_live_reg_state0", state0);
+    entry_live_write("xnu_live_reg_state1", state1);
+    entry_live_write("xnu_live_reg_rm", g_reg_rm);
+    entry_live_write("xnu_live_reg_count", count);
+    entry_live_write("xnu_live_reg_idx", idx);
+    entry_live_write("xnu_live_reg_calls", g_reg_calls);
+    if (keys)
+        _ZNK8OSObject7releaseEv(keys);
 }
 
 /*
