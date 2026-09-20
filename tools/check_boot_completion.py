@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Check the six things 485's reading of the kernel's *own* completion depends on, before the device is
+Check the seven things 485's reading of the kernel's *own* completion depends on, before the device is
 asked.
 
 484 read the log of a run and named the clock's owner; this step wraps five calls in the kernel's boot
@@ -51,7 +51,16 @@ than an error, so each is a claim here:
      and the payload never gets its report path back (459's defect was a report buffer that filled up;
      this is the same lesson one step further on).
 
-  6. **the instrument is in the linked image, at the tail's own call sites.** The five wrappers and their
+  6. **the `Matched` bit is set by registration, so no tally may be named for a match.** 491 read the
+     bit's *setter* instead of its name: `IOService::doServiceMatch` writes `kIOServiceMatchedState`
+     through `copyNotifiers(gIOMatchedNotification, ...)` from a block guarded only on the service not
+     being `Inactive` and not `ModuleStalled`, *outside* the `while( keepGuessing )` loop whose only
+     consumer of `findDrivers`'s answer is the `matches->getCount()` gate - so a service no driver
+     matched reaches the write by the same path as one that is matched. The claim is the four links of
+     that, each read out of Apple's file, plus the consequence for the key: `_matched` is gone and
+     `_matchpass` with `_inactive` are in its place, in the report and in the live channel.
+
+  7. **the instrument is in the linked image, at the tail's own call sites.** The five wrappers and their
      reals are separate symbols; `kernel_bootstrap_thread`'s own text transfers to each wrapper, in
      Apple's order and to no other wrapper; and each wrapper materialises its site as a `movw`/`movt`
      pair equal to the real function's address. A `--wrap` is a property of a *reference*, and whether
@@ -84,6 +93,7 @@ ENTRY_STUBS_C = os.path.join(BOOT_DIR, "entry_stubs.c")
 BUILD_ENTRY_SH = os.path.join(BOOT_DIR, "build_entry.sh")
 STARTUP_C = os.path.join(REPO_ROOT, "external/xnu-4570.1.46/osfmk/kern/startup.c")
 IOSERVICE_H = os.path.join(REPO_ROOT, "external/xnu-4570.1.46/iokit/IOKit/IOService.h")
+IOSERVICE_CPP = os.path.join(REPO_ROOT, "external/xnu-4570.1.46/iokit/Kernel/IOService.cpp")
 OBJECT_POOL = os.path.join(REPO_ROOT, "out/xnu_kernel_obj")
 
 NM = "arm-none-eabi-nm"
@@ -126,7 +136,8 @@ DTK_KEYS = (
     "xnu_entry_dtk_name20", "xnu_entry_dtk_name21",
     "xnu_entry_dtk_state00", "xnu_entry_dtk_state01", "xnu_entry_dtk_state10", "xnu_entry_dtk_state11",
     "xnu_entry_dtk_state20", "xnu_entry_dtk_state21",
-    "xnu_entry_dtk_named", "xnu_entry_dtk_matched", "xnu_entry_dtk_registered",
+    "xnu_entry_dtk_named", "xnu_entry_dtk_matchpass", "xnu_entry_dtk_inactive",
+    "xnu_entry_dtk_registered",
 )
 
 
@@ -376,11 +387,14 @@ def gather(image):
     stubs_text = read(ENTRY_STUBS_C)
     build_text = read(BUILD_ENTRY_SH)
     ioservice = read(IOSERVICE_H)
+    ioservice_cpp_text = read(IOSERVICE_CPP)
     facts = {
         "trace_text": trace_text,
         "stubs_text": stubs_text,
         "build_text": build_text,
         "ioservice": ioservice,
+        "ioservice_cpp_text": ioservice_cpp_text,
+        "ioservice_cpp": strip_comments(ioservice_cpp_text),
         "image": image,
         "startup_text": startup_text,
         "startup": startup,
@@ -745,11 +759,12 @@ def claim_census(facts, failures, notes):
         return
 
     masks = {}
-    for member in ("kIOServiceRegisteredState", "kIOServiceMatchedState"):
+    for member in ("kIOServiceRegisteredState", "kIOServiceMatchedState", "kIOServiceInactiveState"):
         match = re.search(r"\b%s\s*=\s*(0x[0-9a-fA-F]+|\d+)" % member, ioservice)
         masks[member] = int(match.group(1), 0) if match else None
     for member, tally in (("kIOServiceRegisteredState", "g_dtk_registered"),
-                          ("kIOServiceMatchedState", "g_dtk_matched")):
+                          ("kIOServiceMatchedState", "g_dtk_matchpass"),
+                          ("kIOServiceInactiveState", "g_dtk_inactive")):
         value = masks[member]
         if value is None:
             failures.append("IOService.h no longer declares %s, so the bit this census counts has no "
@@ -899,8 +914,164 @@ def claim_census(facts, failures, notes):
                      "report")
 
 
+def _flat(text):
+    """The text with every run of whitespace collapsed to one space and the space-only artefacts of
+    `strip_comments` dropped - so a claim about a statement is not a claim about its indentation."""
+    return " ".join(text.split())
+
+
+def claim_the_bit_registration_sets(facts, failures, notes):
+    """6. The `Matched` bit is set by registration, so a tally named for a match has no test behind it.
+
+    485 read the tree's 21 children and published how many carried `Matched`; 487 published the same
+    tally for the service plane. Both numbers are `state0 & kIOServiceMatchedState`, and 491's source
+    read is that **that bit says nothing about a driver**. `IOService::doServiceMatch`
+    (`IOService.cpp:3653`), called from `registerService` (`:751`), writes it through
+    `copyNotifiers(gIOMatchedNotification, kIOServiceMatchedState, 0xffffffff)` (`:3754`) from a block
+    guarded only on this service not being `Inactive` and not `ModuleStalled` (`:3748`) - and the block
+    sits *after* the `while( keepGuessing )` loop, whose only consumer of `findDrivers`'s answer is
+    `matches->getCount()` at `:3730`, whose else-arm is `matches->release()` at `:3736`. A service no
+    driver matches therefore reaches the write by the same path as one that is matched, and the run's own
+    table is the control: `chosen`, `defaults`, `memory` and `cpus` are nodes no driver can match and
+    every one of them carries the bit.
+
+    The claim is the four links of that, each read from Apple's file rather than from the instrument's
+    comment, plus the consequence for the name the instrument publishes the tally under - because a key
+    named for an outcome it does not measure is the same defect as a comment that asserts a property
+    nothing checks, and 490 paid for exactly that with `_recovered`.
+    """
+    cpp = facts["ioservice_cpp"]
+    stubs = facts["stubs"]
+
+    setter = function_body(cpp, "copyNotifiers")
+    if setter is None:
+        failures.append("IOService.cpp no longer defines copyNotifiers, so the statement that writes the "
+                        "Matched bit has no source - and the census's tallies are read as facts about "
+                        "matching on the strength of that statement")
+    elif "__state[0] = (__state[0] | orNewState) & andNewState;" not in _flat(setter):
+        failures.append("IOService.cpp's copyNotifiers no longer performs "
+                        "`__state[0] = (__state[0] | orNewState) & andNewState;`, so the bit the census "
+                        "counts is no longer written by the function the census's comment names")
+
+    body = function_body(cpp, "doServiceMatch")
+    if body is None:
+        failures.append("IOService.cpp no longer defines doServiceMatch, the function that turns every "
+                        "registered service's Matched bit on")
+    else:
+        call = _flat("copyNotifiers(gIOMatchedNotification, kIOServiceMatchedState, 0xffffffff)")
+        flat = _flat(body)
+        write_text = "copyNotifiers(gIOMatchedNotification"
+        loop_at = body.index("while( keepGuessing )")
+        loop_brace = body.index("{", loop_at)
+        loop_end = _matching(body, loop_brace, "{", "}")
+        if call not in flat:
+            failures.append("doServiceMatch no longer writes kIOServiceMatchedState through "
+                            "copyNotifiers(gIOMatchedNotification, ...): this step's whole reading is "
+                            "that the bit is set by registration, and it is read off this statement")
+        elif loop_end is None:
+            failures.append("doServiceMatch's `while( keepGuessing )` loop no longer has a balanced "
+                            "body, so where the Matched write sits relative to the match loop cannot be "
+                            "read - and 'outside the loop' is the whole claim")
+        elif body.count(write_text) != 1:
+            failures.append("doServiceMatch writes kIOServiceMatchedState through copyNotifiers %d times "
+                            "and not once: one write outside the loop is Apple's, and a second one is "
+                            "somewhere this reading has not looked"
+                            % body.count(write_text))
+        elif body.index(write_text) < loop_end:
+            failures.append("doServiceMatch's copyNotifiers(gIOMatchedNotification, ...) is inside the "
+                            "`while( keepGuessing )` loop, where the match list is still being "
+                            "consulted - so the Matched bit *is* a match result there and the census's "
+                            "tally may be named for one")
+        else:
+            # The window between the loop's close and the write. A `getCount`, a `findDrivers` or any
+            # other use of the match list in it is the one thing that would make the write conditional
+            # on a match - so its absence is the claim, and it is measured over the *text*, not
+            # asserted about the source.
+            write_at = body.index(write_text)
+            window = body[loop_end:write_at]
+            for token in ("getCount", "findDrivers", "matches->"):
+                if token in window:
+                    failures.append("doServiceMatch consults the match list (`%s`) after its "
+                                    "`while( keepGuessing )` loop has closed and before it writes "
+                                    "kIOServiceMatchedState - so the bit is a match result after all "
+                                    "and the census's tally may be named for one" % token)
+            # The guard members, read over the same window: the two conditions whose absence is what
+            # lets a never-matched service reach the write.
+            for member in ("kIOServiceInactiveState", "kIOServiceModuleStallState"):
+                if member not in window:
+                    failures.append("kIOServiceMatchedState is written in doServiceMatch without "
+                                    "`%s` in the enclosing condition any more, so the test the census's "
+                                    "`_inactive` tally mirrors has changed and the two numbers are no "
+                                    "longer the same condition read from two sides" % member)
+
+    # The chain from the service to the write, and it is longer than a reader would guess - which is
+    # the reason this is written as links instead of as a sentence. `registerService` ends in
+    # `startMatching( options )` (`:803`); `startMatching` reaches `doServiceMatch` directly on the
+    # synchronous branch (`:862`) and through `_IOServiceJob::startJob` (`:838`) on the asynchronous
+    # one; `startJob` calls `pingConfig( job )` (`:956`), which queues the job; and the consumer that
+    # runs it is `_IOConfigThread::main`, whose `nub->doServiceMatch( job->options )` is the *second*
+    # and last call site of the function (`:4103`). Two earlier drafts of this claim said
+    # `registerService` calls `doServiceMatch` and then that `pingConfig` does; the check refused both,
+    # which is why the links are measured rather than described.
+    register = function_body(cpp, "registerService")
+    if register is None:
+        failures.append("IOService.cpp no longer defines registerService, so nothing links the service "
+                        "the census reads to the function that sets its bits")
+    elif "startMatching( options )" not in register:
+        failures.append("registerService no longer ends in startMatching( options ), so the path from a "
+                        "registered service to doServiceMatch - and therefore to the Matched bit - is "
+                        "not the path this claim reads")
+    matching = function_body(cpp, "startMatching")
+    if matching is None:
+        failures.append("IOService.cpp no longer defines startMatching, the call registerService makes")
+    else:
+        for token, why in (("doServiceMatch( options )",
+                            "the synchronous branch, which writes the bit in the registering "
+                            "service's own thread"),
+                           ("_IOServiceJob::startJob",
+                            "the asynchronous branch, which reaches the same write on the config "
+                            "thread")):
+            if token not in matching:
+                failures.append("startMatching no longer reaches doServiceMatch through `%s`: %s"
+                                % (token, why))
+    main = function_body(cpp, "_IOConfigThread::main")
+    if main is None or "doServiceMatch" not in main:
+        failures.append("_IOConfigThread::main no longer calls nub->doServiceMatch, so the asynchronous "
+                        "half of startMatching never reaches the write and a service registered "
+                        "asynchronously would not carry `Matched` at all")
+    sites = len(re.findall(r"(?<![\w])doServiceMatch\s*\(", cpp)) - 1  # less the definition
+    if sites != 2:
+        failures.append("IOService.cpp calls doServiceMatch from %d places and not two: a third site is "
+                        "a route to the Matched write that this claim does not cover, and the bit would "
+                        "then be set on a path nothing here has read" % sites)
+
+    # And the consequence for the instrument: the old name is gone, the honest pair is present, and the
+    # live channel carries them - the run that takes the census never reaches the report (490).
+    for stale in ("g_dtk_matched", "g_svc_matched", "xnu_entry_dtk_matched", "xnu_entry_svc_matched"):
+        if stale in stubs:
+            failures.append("entry_stubs.c still spells `%s`: the bit it counts is set by registration "
+                            "for every service that is not Inactive, so a key named for a match states "
+                            "an outcome the kernel does not test for" % stale)
+    for tally, why in (("g_dtk_matchpass", "the IODT census's"),
+                        ("g_svc_matchpass", "the service census's"),
+                        ("g_pex_matchpass", "the service tree's"),
+                        ("g_pex_inactive", "the service tree's")):
+        if tally not in stubs:
+            failures.append("entry_stubs.c no longer has %s `%s`" % (why, tally))
+    if 'entry_live_write("xnu_live_pex_matchpass"' not in stubs:
+        failures.append("the service tree's tallies are not published on the live channel, and the run "
+                        "that takes that census - inside vm_pageout's wrapper, which never returns - "
+                        "reaches nothing else")
+
+    if not failures:
+        notes.append("the Matched bit is written by copyNotifiers from a block guarded only on "
+                     "Inactive/ModuleStall, with no use of the match list between the loop's last "
+                     "decision and the write; the instrument names the tally `_matchpass` and carries "
+                     "`_inactive` beside it")
+
+
 def claim_image(facts, failures, notes):
-    """6. The instrument is in the image, at the tail's own call sites, in Apple's order."""
+    """7. The instrument is in the image, at the tail's own call sites, in Apple's order."""
     symbols = facts["symbols"]
     functions = facts["functions"]
 
@@ -968,7 +1139,8 @@ def claim_image(facts, failures, notes):
                      "function's address")
 
 
-CLAIMS = (claim_apple_order, claim_exclusive, claim_wrappers, claim_bounds, claim_census, claim_image)
+CLAIMS = (claim_apple_order, claim_exclusive, claim_wrappers, claim_bounds, claim_census,
+          claim_the_bit_registration_sets, claim_image)
 
 
 def compare(facts, mutate=None):
@@ -1041,7 +1213,48 @@ def mutate_facts(facts, mutate):
         facts["build_text"] = text
         facts["layout_state0_offset"] = layout_state0_offset(text)
 
-    if mutate == "apple_reorders_the_tail":
+    def rederive_cpp(text):
+        facts["ioservice_cpp_text"] = text
+        facts["ioservice_cpp"] = strip_comments(text)
+
+    if mutate == "the_matched_bit_is_a_match_again":
+        rederive_stubs(_bump(facts["stubs_text"], "xnu_live_dtk_matchpass", "xnu_live_dtk_matched"))
+        rederive_stubs(_bump(facts["stubs_text"], "g_dtk_matchpass", "g_dtk_matched"))
+    elif mutate == "the_inactive_tally_is_dropped":
+        rederive_stubs(_bump(facts["stubs_text"], "        g_dtk_inactive++;\n", ""))
+    elif mutate == "the_setter_stops_writing_the_bit":
+        rederive_cpp(_bump(facts["ioservice_cpp_text"],
+                           "__state[0] = (__state[0] | orNewState) & andNewState;",
+                           "__state[1] = (__state[1] | orNewState) & andNewState;"))
+    elif mutate == "the_matched_write_moves_inside_the_match_gate":
+        rederive_cpp(_bump(facts["ioservice_cpp_text"],
+                           "                probeCandidates( matches );\n",
+                           "                notifiers[0] = copyNotifiers(gIOMatchedNotification,\n"
+                           "\t\tkIOServiceMatchedState, 0xffffffff);\n"
+                           "                probeCandidates( matches );\n"))
+    elif mutate == "the_guard_gains_a_match_test":
+        rederive_cpp(_bump(facts["ioservice_cpp_text"],
+                           "    if( (0 == (__state[0] & kIOServiceInactiveState))\n"
+                           "     && (0 == (__state[1] & kIOServiceModuleStallState)) ) {",
+                           "    if( (0 == (__state[0] & kIOServiceInactiveState))\n"
+                           "     && (0 == (__state[1] & kIOServiceModuleStallState))\n"
+                           "     && matches && matches->getCount() ) {"))
+    elif mutate == "startMatching_stops_calling_doServiceMatch":
+        rederive_cpp(_bump(facts["ioservice_cpp_text"], "                doServiceMatch( options );\n",
+                           "                (void)options;\n"))
+    elif mutate == "the_config_thread_loses_the_match":
+        rederive_cpp(_bump(facts["ioservice_cpp_text"], "\t\tnub->doServiceMatch( job->options );\n",
+                           "\t\tbreak;\n"))
+    elif mutate == "a_third_route_to_the_write":
+        rederive_cpp(_bump(facts["ioservice_cpp_text"], "    startMatching( options );\n",
+                           "    doServiceMatch( 0 );\n    startMatching( options );\n"))
+    elif mutate == "registerService_leaves_the_chain":
+        rederive_cpp(_bump(facts["ioservice_cpp_text"], "    startMatching( options );\n",
+                           "    (void)options;\n"))
+    elif mutate == "the_service_tree_tallies_leave_the_live_channel":
+        rederive_stubs(_bump(facts["stubs_text"],
+                             '    entry_live_write("xnu_live_pex_matchpass", g_pex_matchpass);\n', ""))
+    elif mutate == "apple_reorders_the_tail":
         rederive_startup(_bump(facts["startup_text"],
                                "\tserial_keyboard_init();\t\t/* Start serial keyboard if wanted */\n",
                                "\tvm_page_init_local_q();\n"))
@@ -1177,7 +1390,7 @@ def mutate_facts(facts, mutate):
                              '    entry_live_write("xnu_live_tail_seq", g_boot_tail_calls);\n', ""))
     elif mutate == "a_key_is_dropped":
         rederive_stubs(_bump(facts["stubs_text"],
-                             '    entry_write_kv("xnu_entry_dtk_matched", g_dtk_matched);\n', ""))
+                             '    entry_write_kv("xnu_entry_dtk_matchpass", g_dtk_matchpass);\n', ""))
     elif mutate == "the_kv_writer_is_not_called":
         rederive_stubs(_bump(facts["stubs_text"], "    entry_write_485_kv();\n", ""))
     elif mutate == "the_five_gain_a_second_caller":
@@ -1259,6 +1472,12 @@ MUTATIONS = (
     "the_tail_call_is_not_rewritten", "the_tail_calls_are_out_of_order",
     "the_last_transfer_goes_to_the_function", "a_tail_transfer_moves_out_of_the_thread",
     "the_site_word_is_not_the_function",
+    "the_matched_bit_is_a_match_again", "the_inactive_tally_is_dropped",
+    "the_setter_stops_writing_the_bit", "the_matched_write_moves_inside_the_match_gate",
+    "the_guard_gains_a_match_test", "startMatching_stops_calling_doServiceMatch",
+    "registerService_leaves_the_chain", "the_config_thread_loses_the_match",
+    "a_third_route_to_the_write",
+    "the_service_tree_tallies_leave_the_live_channel",
 )
 
 
@@ -1296,7 +1515,7 @@ def main():
     args = parser.parse_args()
 
     if not args.image:
-        print("FAIL: --image is required: three of the six claims are about the linked image - the "
+        print("FAIL: --image is required: three of the seven claims are about the linked image - the "
               "wrappers' addresses, the tail's own call sites and the constant each wrapper publishes as "
               "its site - and there is no default that can stand in for it", file=sys.stderr)
         return 1

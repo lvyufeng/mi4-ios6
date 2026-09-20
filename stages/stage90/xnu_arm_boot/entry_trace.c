@@ -1497,6 +1497,10 @@ extern void entry_note_class(uint32_t site, uint32_t obj, uint32_t vptr, uint32_
  * make the log unable to say which of them a class word came from. */
 #define STAGE90_CLS_CHILD    4u
 #define STAGE90_CLS_SVCCHILD 5u
+/* 491: the third census's rows, both levels. One site and not two, because the two levels answer one
+ * question ("what is attached below the platform expert") and the record already carries `depth`; a
+ * second site would be a second name for a distinction the table already makes. */
+#define STAGE90_CLS_PEXCHILD 6u
 
 static const void *entry_object_meta(uint32_t site, const void *obj)
 {
@@ -2591,6 +2595,132 @@ void entry_probe_service_plane(const void *iokit_root)
 }
 
 /*
+ * ------------------------------------------------- 491: the level nothing has read
+ *
+ * **The two censuses above read one plane each, at one level each, and the driver layer's own nodes are
+ * one level below both of them.** 487's reading is that `attach(provider)` links a service to its
+ * provider in `gIOServicePlane` and that `StartIOKit`'s `rootNub->attach(0)` makes the platform expert
+ * device the root of that plane - so the root's children are "the services attached to it". The
+ * platform expert's *driver* is one of those children and not the root, and `IODTPlatformExpert::
+ * processTopLevel` is where the nubs are made: `createNubs( this, ... )` (`IOPlatformExpert.cpp:1360`,
+ * `:1363`) with `this` being the expert, and `createNubs` does `nub->attach( parent )` followed by
+ * `nub->registerService()` on every nub it builds (`:1310-1311`). So `createNubs`'s 21 `attach` calls
+ * put the 21 nubs under the *expert*, and 487 - which walked the root - measured the level the nubs are
+ * **not** at.
+ *
+ * 487's own owed list names the missing reading ("the platform expert instance's own service
+ * children"), and 490's log is the first that could have shown it: the service census there read
+ * `svc_kids = 2` with the two rows `MSM8974P` and `IOResources` on the *live* channel. Two is not 21,
+ * and no build before this one could tell "the nub pass did not run" from "the nub pass ran one level
+ * below where the census looked".
+ *
+ * The walk is two levels and it does not decide in advance which child is the expert: it records
+ * **every** child of the root at `depth = 1`, and for each of the first `ENTRY_PEX_ROOT` of them every
+ * child of *its* child set at `depth = 2`, each row carrying its own `kids_of` so that the object the
+ * nubs hang from is the row with children rather than a pointer this file chose. `deep_l1` is how many
+ * depth-1 rows were descended into, because a census that walked one of two must not read as a census
+ * of the subtree.
+ *
+ * Every accessor is one the two censuses above already use, on the same kind of object: a child of a
+ * service-plane child set was put there by `attachToParent`, so it is an `IOService` and answers all
+ * four calls. The class read is the one that *calls* into the object (486's run B), and it is guarded
+ * inside `entry_object_meta` by the vtable test that step added - a `took = 0` record is the reading
+ * for an object whose first word is not a vtable of this image.
+ */
+extern void entry_note_pexbegin(uint32_t plane, uint32_t root, uint32_t set, uint32_t kids);
+extern void entry_note_pexnone(uint32_t why);
+extern void entry_note_pexdeep(uint32_t l1);
+extern void entry_note_pexchild(uint32_t seq, uint32_t depth, uint32_t child, uint32_t name0,
+                                uint32_t name1, uint32_t class0, uint32_t class1, uint32_t state0,
+                                uint32_t state1, uint32_t kids_of);
+extern void entry_note_pexend(void);
+
+#define STAGE90_PEX_ROOT 8u
+#define STAGE90_PEX_DEEP 24u
+
+void entry_probe_service_tree(void)
+{
+    const void *plane = gIOServicePlane;
+    void *root;
+    void *set;
+    unsigned int n, i, j;
+    unsigned int seq = 0u;
+    unsigned int l1 = 0u;
+
+    if (plane == 0) {
+        entry_note_pexnone(0u);
+        return;
+    }
+
+    root = entry_xnu_service_root();
+    if (root == 0) {
+        entry_note_pexnone(1u);
+        return;
+    }
+
+    set = entry_xnu_child_set(root, plane);
+    entry_note_pexbegin((uint32_t)(uintptr_t)plane, (uint32_t)(uintptr_t)root,
+                        (uint32_t)(uintptr_t)set, (uint32_t)entry_xnu_child_count(root, plane));
+
+    if (set == 0) {
+        entry_note_pexnone(2u);
+        entry_note_pexdeep(0u);
+        entry_note_pexend();
+        return;
+    }
+
+    n = entry_xnu_array_count(set);
+    for (i = 0u; i < n && i < STAGE90_PEX_ROOT; i++) {
+        void *child = entry_xnu_array_object(set, i);
+        void *cset;
+        unsigned int m;
+        const char *name;
+        uint32_t name0 = 0u, name1 = 0u, class0 = 0u, class1 = 0u;
+        uint32_t state0 = 0u, state1 = 0u;
+        unsigned int kids_of;
+
+        if (child == 0)
+            continue;
+        kids_of = entry_xnu_child_count(child, plane);
+        name = entry_xnu_entry_name(child, plane);
+        if (name != 0)
+            entry_str8(name, &name0, &name1);
+        entry_class_words(STAGE90_CLS_PEXCHILD, child, &class0, &class1);
+        state0 = entry_xnu_entry_state(child);
+        state1 = *(volatile uint32_t *)((const char *)child + STAGE90_DTK_STATE0_OFF + 4u);
+        entry_note_pexchild(seq++, 1u, (uint32_t)(uintptr_t)child, name0, name1, class0, class1,
+                            state0, state1, (uint32_t)kids_of);
+
+        cset = entry_xnu_child_set(child, plane);
+        if (cset == 0)
+            continue;
+        m = entry_xnu_array_count(cset);
+        l1++;
+        for (j = 0u; j < m && j < (STAGE90_PEX_DEEP - STAGE90_PEX_ROOT); j++) {
+            void *grand = entry_xnu_array_object(cset, j);
+            uint32_t gname0 = 0u, gname1 = 0u, gclass0 = 0u, gclass1 = 0u;
+            uint32_t gstate0 = 0u, gstate1 = 0u;
+            const char *gname;
+
+            if (grand == 0)
+                continue;
+            gname = entry_xnu_entry_name(grand, plane);
+            if (gname != 0)
+                entry_str8(gname, &gname0, &gname1);
+            entry_class_words(STAGE90_CLS_PEXCHILD, grand, &gclass0, &gclass1);
+            gstate0 = entry_xnu_entry_state(grand);
+            gstate1 = *(volatile uint32_t *)((const char *)grand + STAGE90_DTK_STATE0_OFF + 4u);
+            entry_note_pexchild(seq++, 2u, (uint32_t)(uintptr_t)grand, gname0, gname1, gclass0,
+                                gclass1, gstate0, gstate1,
+                                (uint32_t)entry_xnu_child_count(grand, plane));
+        }
+    }
+
+    entry_note_pexdeep(l1);
+    entry_note_pexend();
+}
+
+/*
  * `vm_pageout` is the fifth and last, and the census above runs inside its wrapper - at the one
  * moment that is downstream of everything the boot does and upstream of the loop that never ends.
  * Reading the registry there rather than earlier is the point: the platform expert's nub pass and
@@ -2602,6 +2732,7 @@ void entry_probe_service_plane(const void *iokit_root)
  */
 extern void *entry_probe_dt_children(void);
 extern void entry_probe_service_plane(const void *iokit_root);
+extern void entry_probe_service_tree(void);
 
 void __real_vm_pageout(void);
 void __wrap_vm_pageout(void)
@@ -2611,6 +2742,13 @@ void __wrap_vm_pageout(void)
     entry_note_boot_tail(4u, (uint32_t)(uintptr_t)__real_vm_pageout);
     iokit_root = entry_probe_dt_children();
     entry_probe_service_plane(iokit_root);
+    /*
+     * 491: and then one level below the root that census just read, which is where `createNubs` put the
+     * nubs. It runs after the service census and takes nothing from it, deliberately: the expert is a
+     * child of that root *at runtime*, not by construction this file can name, so the walk finds it by
+     * reading rather than by being handed it.
+     */
+    entry_probe_service_tree();
     __real_vm_pageout();
     /*
      * Nothing is recorded after the call and that is itself the reading: `vm_pageout` is followed by

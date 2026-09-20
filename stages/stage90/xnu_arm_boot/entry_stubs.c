@@ -1214,9 +1214,23 @@ uint32_t g_dtk_kids;
 uint32_t g_dtk_none;
 /* Three tallies over the same children, so the table is a count and not only a sample: how many had
  * a name at all, how many had `Matched` set, and how many had `Registered` set. `IOService.h:72-76`
- * is the enum - Inactive 1, Registered 2, Matched 4, FirstPublish 8, FirstMatch 16. */
+ * is the enum - Inactive 1, Registered 2, Matched 4, FirstPublish 8, FirstMatch 16.
+ *
+ * **491 renamed the middle one, and the rename is the finding.** `_matched` said "the kernel matched a
+ * driver to this service"; the kernel sets that bit for every service that *registers*.
+ * `IOService::doServiceMatch` (`IOService.cpp:3653`), which `registerService` calls (`:751`), writes
+ * `kIOServiceMatchedState` through `copyNotifiers(gIOMatchedNotification, kIOServiceMatchedState,
+ * 0xffffffff)` (`:3754`) from a block guarded only by `!(__state[0] & kIOServiceInactiveState) &&
+ * !(__state[1] & kIOServiceModuleStallState)` (`:3748`) - and that block sits *after* the
+ * `while(keepGuessing)` loop whose `matches->getCount()` gate releases the match list when it is empty
+ * (`:3730-3736`). Nothing on the path tests a match result. So the bit means "this service ran its
+ * match pass and is not inactive", the honest name is `_matchpass`, and the run's own table is the
+ * control: `chosen`, `defaults`, `memory` and `cpus` are nodes no driver can match, and every one of
+ * them carries the bit. A tally named for an outcome it does not measure is 490's `_recovered`
+ * recurring one layer up, and `_inactive` is beside it because the bit's *absence* is the gate. */
 uint32_t g_dtk_named;
-uint32_t g_dtk_matched;
+uint32_t g_dtk_matchpass;
+uint32_t g_dtk_inactive;
 uint32_t g_dtk_registered;
 uint32_t g_dtk_name0[ENTRY_DTK_SHOWN];
 uint32_t g_dtk_name1[ENTRY_DTK_SHOWN];
@@ -1304,7 +1318,8 @@ uint32_t g_svc_count;
 uint32_t g_svc_shown;
 uint32_t g_svc_none;
 uint32_t g_svc_named;
-uint32_t g_svc_matched;
+uint32_t g_svc_matchpass;
+uint32_t g_svc_inactive;
 uint32_t g_svc_registered;
 uint32_t g_svc_child[ENTRY_SVC_SHOWN];
 uint32_t g_svc_name0[ENTRY_SVC_SHOWN];
@@ -1313,6 +1328,55 @@ uint32_t g_svc_class0[ENTRY_SVC_SHOWN];
 uint32_t g_svc_class1[ENTRY_SVC_SHOWN];
 uint32_t g_svc_state0[ENTRY_SVC_SHOWN];
 uint32_t g_svc_state1[ENTRY_SVC_SHOWN];
+
+/*
+ * 491's group, and it is the one that answers the goal's second half rather than describing the tree.
+ *
+ * 487 walked `getServiceRoot()`'s children and found two by reading only the *live* channel of a run
+ * that never reaches the report. Two is not what `createNubs` produces: `IODTPlatformExpert::
+ * processTopLevel` calls `createNubs( this, ... )` (`IOPlatformExpert.cpp:1360`, `:1363`) and
+ * `createNubs` does `nub->attach( parent )` on every nub it makes (`:1310`) - and the `parent` it
+ * passes is **`this`, the platform expert instance**, not the root nub the service census starts from.
+ * So the nubs are that instance's service-plane children, one level below the only place this project
+ * has ever looked, and "how many services are attached to the platform expert" has never been
+ * measured.
+ *
+ * This census walks **two levels**: every child of the service root (what 487 read) and every child of
+ * each of those (what nothing has read). `depth` is on each record, so one table carries both and the
+ * reader does not have to know which level a row came from. `kids` per row is that object's own child
+ * count in the service plane, which is what names the platform expert inside the table - it is the row
+ * with children - without a hard-coded pointer and without this instrument deciding in advance which
+ * object is which.
+ *
+ * The caps are per level and the `shown`/`count` pair is kept for the reason 485's was: a table that
+ * stopped at the cap and a table that was complete must not read the same. `none` is the reason no
+ * reading was taken (0 = no service plane, 1 = no service root, 2 = the root has no child set), which
+ * is a different finding from a subtree with nothing in it.
+ */
+#define ENTRY_PEX_ROOT 8u
+#define ENTRY_PEX_DEEP 24u
+uint32_t g_pex_calls;
+uint32_t g_pex_plane;
+uint32_t g_pex_root;
+uint32_t g_pex_set;
+uint32_t g_pex_kids;
+uint32_t g_pex_deep_l1;
+uint32_t g_pex_none;
+uint32_t g_pex_named;
+uint32_t g_pex_matchpass;
+uint32_t g_pex_inactive;
+uint32_t g_pex_registered;
+uint32_t g_pex_seen;
+uint32_t g_pex_shown;
+uint32_t g_pex_depth[ENTRY_PEX_DEEP];
+uint32_t g_pex_child[ENTRY_PEX_DEEP];
+uint32_t g_pex_kids_of[ENTRY_PEX_DEEP];
+uint32_t g_pex_name0[ENTRY_PEX_DEEP];
+uint32_t g_pex_name1[ENTRY_PEX_DEEP];
+uint32_t g_pex_class0[ENTRY_PEX_DEEP];
+uint32_t g_pex_class1[ENTRY_PEX_DEEP];
+uint32_t g_pex_state0[ENTRY_PEX_DEEP];
+uint32_t g_pex_state1[ENTRY_PEX_DEEP];
 
 /*
  * 486's run B, answered as a record: **the object, read before it is called.**
@@ -3017,7 +3081,16 @@ __attribute__((noinline)) static void entry_write_485_kv(void)
     entry_write_kv("xnu_entry_dtk_state20", g_dtk_state0[2]);
     entry_write_kv("xnu_entry_dtk_state21", g_dtk_state1[2]);
     entry_write_kv("xnu_entry_dtk_named", g_dtk_named);
-    entry_write_kv("xnu_entry_dtk_matched", g_dtk_matched);
+    /*
+     * 491: `_matched` is gone and `_matchpass` is in its place, with `_inactive` beside it. The bit was
+     * never a match - `IOService::doServiceMatch` sets `kIOServiceMatchedState` through `copyNotifiers`
+     * from a block gated only on this service not being Inactive and not ModuleStalled, after the
+     * `matches->getCount()` gate has already released an empty match list. Runs before 491 print
+     * `xnu_entry_dtk_matched` / `xnu_entry_svc_matched` and those two keys are the same number under a
+     * name that claimed an outcome the kernel does not test for.
+     */
+    entry_write_kv("xnu_entry_dtk_matchpass", g_dtk_matchpass);
+    entry_write_kv("xnu_entry_dtk_inactive", g_dtk_inactive);
     entry_write_kv("xnu_entry_dtk_registered", g_dtk_registered);
     /*
      * 486's twelve, in the same group because they are read at the same moment by the same census: the
@@ -3076,7 +3149,8 @@ __attribute__((noinline)) static void entry_write_485_kv(void)
     entry_write_kv("xnu_entry_svc_shown", g_svc_shown);
     entry_write_kv("xnu_entry_svc_none", g_svc_none);
     entry_write_kv("xnu_entry_svc_named", g_svc_named);
-    entry_write_kv("xnu_entry_svc_matched", g_svc_matched);
+    entry_write_kv("xnu_entry_svc_matchpass", g_svc_matchpass);
+    entry_write_kv("xnu_entry_svc_inactive", g_svc_inactive);
     entry_write_kv("xnu_entry_svc_registered", g_svc_registered);
     entry_write_kv("xnu_entry_svc_child0", g_svc_child[0]);
     entry_write_kv("xnu_entry_svc_name00", g_svc_name0[0]);
@@ -3085,6 +3159,45 @@ __attribute__((noinline)) static void entry_write_485_kv(void)
     entry_write_kv("xnu_entry_svc_class01", g_svc_class1[0]);
     entry_write_kv("xnu_entry_svc_state00", g_svc_state0[0]);
     entry_write_kv("xnu_entry_svc_state01", g_svc_state1[0]);
+    /*
+     * 491's, in the same group for the same reason: read at the same moment, by the third census, off
+     * the same two planes. `deep_l1` is how many of the root's children the second level was walked
+     * for, so a run that walked one of two says so rather than leaving `seen` to be read as the whole
+     * subtree; `kids_of0..3` are each row's own child count, which is what names the object the nubs
+     * hang from inside the table; and the four bit tallies are repeated here because the live channel
+     * carries the last value written rather than a summary (`entry_live_write` writes as it goes).
+     */
+    entry_write_kv("xnu_entry_pex_calls", g_pex_calls);
+    entry_write_kv("xnu_entry_pex_plane", g_pex_plane);
+    entry_write_kv("xnu_entry_pex_root", g_pex_root);
+    entry_write_kv("xnu_entry_pex_set", g_pex_set);
+    entry_write_kv("xnu_entry_pex_kids", g_pex_kids);
+    entry_write_kv("xnu_entry_pex_deep_l1", g_pex_deep_l1);
+    entry_write_kv("xnu_entry_pex_none", g_pex_none);
+    entry_write_kv("xnu_entry_pex_seen", g_pex_seen);
+    entry_write_kv("xnu_entry_pex_shown", g_pex_shown);
+    entry_write_kv("xnu_entry_pex_named", g_pex_named);
+    entry_write_kv("xnu_entry_pex_matchpass", g_pex_matchpass);
+    entry_write_kv("xnu_entry_pex_inactive", g_pex_inactive);
+    entry_write_kv("xnu_entry_pex_registered", g_pex_registered);
+    entry_write_kv("xnu_entry_pex_depth0", g_pex_depth[0]);
+    entry_write_kv("xnu_entry_pex_child0", g_pex_child[0]);
+    entry_write_kv("xnu_entry_pex_name00", g_pex_name0[0]);
+    entry_write_kv("xnu_entry_pex_name01", g_pex_name1[0]);
+    entry_write_kv("xnu_entry_pex_class00", g_pex_class0[0]);
+    entry_write_kv("xnu_entry_pex_class01", g_pex_class1[0]);
+    entry_write_kv("xnu_entry_pex_state00", g_pex_state0[0]);
+    entry_write_kv("xnu_entry_pex_state01", g_pex_state1[0]);
+    entry_write_kv("xnu_entry_pex_kids_of0", g_pex_kids_of[0]);
+    entry_write_kv("xnu_entry_pex_depth1", g_pex_depth[1]);
+    entry_write_kv("xnu_entry_pex_child1", g_pex_child[1]);
+    entry_write_kv("xnu_entry_pex_name10", g_pex_name0[1]);
+    entry_write_kv("xnu_entry_pex_name11", g_pex_name1[1]);
+    entry_write_kv("xnu_entry_pex_class10", g_pex_class0[1]);
+    entry_write_kv("xnu_entry_pex_class11", g_pex_class1[1]);
+    entry_write_kv("xnu_entry_pex_state10", g_pex_state0[1]);
+    entry_write_kv("xnu_entry_pex_state11", g_pex_state1[1]);
+    entry_write_kv("xnu_entry_pex_kids_of1", g_pex_kids_of[1]);
 }
 
 /*
@@ -5180,10 +5293,27 @@ void entry_note_dtchild(uint32_t seq, uint32_t child, uint32_t name0, uint32_t n
     if (name0 != 0u || name1 != 0u)
         g_dtk_named++;
     if ((state0 & 0x4u) != 0u)
-        g_dtk_matched++;
+        g_dtk_matchpass++;
+    if ((state0 & 0x1u) != 0u)
+        g_dtk_inactive++;
     if ((state0 & 0x2u) != 0u)
         g_dtk_registered++;
     g_dtk_shown++;
+    /*
+     * **491: the tallies go to the live channel as well, and that is not a convenience.** The run that
+     * took this census - 490's - never reached the report: the last thing its log holds is
+     * `xnu_live_sleh_seen = 0x20` and the console's midline, because the payload's own nets bring the
+     * phone back at the watchdog's deadline. Every one of the six tallies above existed only in a
+     * channel that run could not reach, while the per-child records they are the sum of were all in the
+     * channel it did. A reader could still get them, by adding the rows up by hand - which is exactly
+     * what 490 had to do for its unnamed tail, and the reason that step wrote down that an arithmetic
+     * identity is not a record.
+     */
+    entry_live_write("xnu_live_dtk_named", g_dtk_named);
+    entry_live_write("xnu_live_dtk_matchpass", g_dtk_matchpass);
+    entry_live_write("xnu_live_dtk_inactive", g_dtk_inactive);
+    entry_live_write("xnu_live_dtk_registered", g_dtk_registered);
+    entry_live_write("xnu_live_dtk_shown", g_dtk_shown);
     g_dtk_name0[seq] = name0;
     g_dtk_name1[seq] = name1;
     g_dtk_state0[seq] = state0;
@@ -5271,10 +5401,17 @@ void entry_note_svcchild(uint32_t seq, uint32_t child, uint32_t name0, uint32_t 
     if (name0 != 0u || name1 != 0u)
         g_svc_named++;
     if ((state0 & 0x4u) != 0u)
-        g_svc_matched++;
+        g_svc_matchpass++;
+    if ((state0 & 0x1u) != 0u)
+        g_svc_inactive++;
     if ((state0 & 0x2u) != 0u)
         g_svc_registered++;
     g_svc_shown++;
+    entry_live_write("xnu_live_svc_named", g_svc_named);
+    entry_live_write("xnu_live_svc_matchpass", g_svc_matchpass);
+    entry_live_write("xnu_live_svc_inactive", g_svc_inactive);
+    entry_live_write("xnu_live_svc_registered", g_svc_registered);
+    entry_live_write("xnu_live_svc_shown", g_svc_shown);
     if (seq < ENTRY_SVC_SHOWN) {
         g_svc_child[seq] = child;
         g_svc_name0[seq] = name0;
@@ -5292,6 +5429,102 @@ void entry_note_svcchild(uint32_t seq, uint32_t child, uint32_t name0, uint32_t 
     entry_live_write("xnu_live_svc_class1", class1);
     entry_live_write("xnu_live_svc_state0", state0);
     entry_live_write("xnu_live_svc_state1", state1);
+}
+
+/*
+ * 491: the service tree below the root, in the same five parts the two censuses above use, and the
+ * reason it exists is the shape of what 487 read.
+ *
+ * 487 asked "what is attached to the thing that owns the tree" and walked `getServiceRoot()`'s
+ * children. `createNubs( this, ... )` attaches the nubs to **`this`, the platform expert instance** -
+ * a *child* of that root, not the root - so the nubs are one level below the deepest place this
+ * project has read, and 487's own owed list names this census. `depth` is on the record rather than in
+ * the key so that one table carries both levels: the root's children at depth 1 and their children at
+ * depth 2. `kids_of` is each row's own child count in the service plane, which is what makes the table
+ * self-describing - the row the nubs hang from is the one with a non-zero `kids_of` - instead of the
+ * instrument carrying a pointer it decided about before the fact.
+ */
+void entry_note_pexbegin(uint32_t plane, uint32_t root, uint32_t set, uint32_t kids)
+{
+    g_pex_calls++;
+    g_pex_plane = plane;
+    g_pex_root = root;
+    g_pex_set = set;
+    g_pex_kids = kids;
+    entry_live_write("xnu_live_pex_calls", g_pex_calls);
+    entry_live_write("xnu_live_pex_plane", plane);
+    entry_live_write("xnu_live_pex_root", root);
+    entry_live_write("xnu_live_pex_set", set);
+    entry_live_write("xnu_live_pex_kids", kids);
+}
+
+/* No reading at all, and why: 0 = no service plane, 1 = no service root, 2 = the root has no child
+ * set. Three reasons and not one, because "the tree below the root is empty" and "the census could not
+ * look" must not print the same record. */
+void entry_note_pexnone(uint32_t why)
+{
+    g_pex_none = why;
+    entry_live_write("xnu_live_pex_none", why);
+}
+
+void entry_note_pexdeep(uint32_t l1)
+{
+    g_pex_deep_l1 = l1;
+    entry_live_write("xnu_live_pex_deep_l1", l1);
+}
+
+/*
+ * One row. `seen` counts every row the walk hands over and `shown` how many the table had room for, so
+ * `count`/`shown` says whether the table is complete - a subtree that stopped at the cap and a small
+ * subtree must not read the same. The tallies are the same three bits as above, under the same
+ * corrected name, and they are the *driver layer's* tallies rather than the tree's: a row here is a
+ * service that something attached to a provider.
+ */
+void entry_note_pexchild(uint32_t seq, uint32_t depth, uint32_t child, uint32_t name0, uint32_t name1,
+                         uint32_t class0, uint32_t class1, uint32_t state0, uint32_t state1,
+                         uint32_t kids_of)
+{
+    if (name0 != 0u || name1 != 0u)
+        g_pex_named++;
+    if ((state0 & 0x4u) != 0u)
+        g_pex_matchpass++;
+    if ((state0 & 0x1u) != 0u)
+        g_pex_inactive++;
+    if ((state0 & 0x2u) != 0u)
+        g_pex_registered++;
+    g_pex_seen++;
+    if (seq < ENTRY_PEX_DEEP) {
+        g_pex_depth[seq] = depth;
+        g_pex_child[seq] = child;
+        g_pex_kids_of[seq] = kids_of;
+        g_pex_name0[seq] = name0;
+        g_pex_name1[seq] = name1;
+        g_pex_class0[seq] = class0;
+        g_pex_class1[seq] = class1;
+        g_pex_state0[seq] = state0;
+        g_pex_state1[seq] = state1;
+    }
+    entry_live_write("xnu_live_pex_seq", seq);
+    entry_live_write("xnu_live_pex_depth", depth);
+    entry_live_write("xnu_live_pex_child", child);
+    entry_live_write("xnu_live_pex_name0", name0);
+    entry_live_write("xnu_live_pex_name1", name1);
+    entry_live_write("xnu_live_pex_class0", class0);
+    entry_live_write("xnu_live_pex_class1", class1);
+    entry_live_write("xnu_live_pex_state0", state0);
+    entry_live_write("xnu_live_pex_state1", state1);
+    entry_live_write("xnu_live_pex_kids_of", kids_of);
+}
+
+void entry_note_pexend(void)
+{
+    g_pex_shown = (g_pex_seen < ENTRY_PEX_DEEP) ? g_pex_seen : ENTRY_PEX_DEEP;
+    entry_live_write("xnu_live_pex_seen", g_pex_seen);
+    entry_live_write("xnu_live_pex_shown", g_pex_shown);
+    entry_live_write("xnu_live_pex_named", g_pex_named);
+    entry_live_write("xnu_live_pex_matchpass", g_pex_matchpass);
+    entry_live_write("xnu_live_pex_inactive", g_pex_inactive);
+    entry_live_write("xnu_live_pex_registered", g_pex_registered);
 }
 #endif /* STAGE90_ENTRY_TRACE */
 
