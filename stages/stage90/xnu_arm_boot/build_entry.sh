@@ -236,7 +236,31 @@ say "  osfmk/arm/start.s: $(grep -c . "$OUT/xnu_arm_assemble.log") lines of repo
 # twelve lines. The check is over the *assembled object*, not over this script's command line, and it
 # is run here rather than in `xnu_arm_assemble.sh` because a stale object is what this build would
 # otherwise link: the offsets in the object are what the image will execute.
+#
+# **474: the configuration is named rather than defaulted, because both checks here read a
+# per-configuration artifact.** `tools/gen_assym.sh` and `tools/build_xnu_arm_kernel.sh` both
+# default `XNU_KERNEL_CONFIG` to RELEASE, and so does `tools/check_assym_cswitch.py` - so an entry
+# build run without the variable in the environment would compare *RELEASE's* `assym.s` against an
+# object the pool assembled for STAGE90_XNU, which is 469/471's defect class wearing the check's
+# clothes. The default here is the configuration this project builds, and the value in use is
+# printed, so which file was read is a line of the log rather than an inference from the caller's
+# shell.
+XNU_KERNEL_CONFIG=${XNU_KERNEL_CONFIG:-STAGE90_XNU}
+export XNU_KERNEL_CONFIG
+say "  configuration: XNU_KERNEL_CONFIG=$XNU_KERNEL_CONFIG"
 run python3 "$REPO_ROOT/tools/check_assym_cswitch.py" || exit 1
+
+# **And the frame the abort record reads, from four sources at once (474).** `struct arm_saved_state`
+# is Apple's layout and this image cannot include Apple's header, so the six offsets it indexes
+# `regs` at are six numbers in `entry_saved_state.h`; the check compares them against Apple's own
+# declaration, against this configuration's generated `assym.s`, against the hand-written stand-in
+# `assym.s` in this directory that `osfmk/arm/start.s` is assembled with, and against the PCB's own
+# `ACT_PCBDATA_PC - ACT_PCBDATA`. A wrong offset here would not stop anything - it would report a
+# plausible `pc` that is some other word of the frame - which is why it is a build failure and not a
+# comment. The same six numbers are checked a third time on the device, by the record itself: see
+# `entry_stubs.c`'s `xnu_live_sleh_frame_ok`.
+run python3 "$REPO_ROOT/tools/check_saved_state_offsets.py" --verbose || exit 1
+
 
 say "== compiling the symbols start.s needs =="
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \

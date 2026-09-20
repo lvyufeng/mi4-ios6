@@ -13,6 +13,20 @@
  *        plain offsetof()s, so if the structs agree the offsets agree.
  * SS_* - offsets into struct arm_saved_state (osfmk/mach/arm/thread_status.h:221-233): r[13] then
  *        sp, lr, pc, cpsr, fsr, far, exception. Countable by hand; also 4-byte aligned throughout.
+ *        **This is a second copy of a layout the generated `assym.s` also carries, and this file is
+ *        first on the entry build's include path** (`xnu_arm_assemble.sh` passes
+ *        `-I$STAGE_DIR/xnu_arm_boot` before the option headers, while `assemble_arm_layer.sh` puts
+ *        the generated directory first). So every constant below is compared against the generated
+ *        one by `tools/check_saved_state_offsets.py`, which runs in `build_entry.sh`: two files
+ *        mirroring one struct is the "one value, two definitions" shape, and it is now a build
+ *        failure rather than a comment. `SS_SIZE` is the one that is load-bearing here - start.s's
+ *        two `sub sp, sp, SS_SIZE` - and the other five are the same mirror, held to the same
+ *        numbers.
+ *        **`VSS_SIZE` used to be declared here as 0**, a placeholder nothing in this file's readers
+ *        needs (`start.s` never mentions it, and no entry-side file names it). It is gone rather
+ *        than corrected: a stand-in whose value is a placeholder is worse than a missing constant,
+ *        because the missing one stops the assembler with the name in the message and the
+ *        placeholder one assembles into a wrong size. The general rule this project keeps meeting.
  * CPU_* - offsets into cpu_data_t. NOT derivable by hand: cpu_data_t's layout depends on
  *        __ARM_SMP__, the cache configuration and a dozen CONFIG_* macros. The values below are
  *        placeholders, and they are load-bearing only for resume_idle_cpu/start_cpu - the
@@ -34,7 +48,6 @@
 #define SS_PC 60
 #define SS_CPSR 64
 #define SS_SIZE 80
-#define VSS_SIZE 0
 
 /* genassym.c declares PGBYTES; ARMv7 small pages are 4 KB. */
 #define PGBYTES 4096

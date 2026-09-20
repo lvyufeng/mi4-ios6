@@ -1476,8 +1476,32 @@ void *__wrap__ZN9IOService22waitForMatchingServiceEP12OSDictionaryy(void *matchi
  * Nothing is changed: the real handler runs with the same arguments. The record is written before it,
  * so a handler that never returns has still reported what it was given, and `_back` afterwards is
  * what makes "returned" a separate reading from "entered".
+ *
+ * **474: the record takes the frame as well, and that is the whole of what was missing.** 473's run
+ * is served four aborts and returns from all four, and then records a fifth and nothing else - an
+ * abort whose `DFAR` the log never names, because `SLEH_LIVE_MAX` cut the record that would have
+ * carried it. `DFSR`/`DFAR` from `cp15` are the two numbers this wrapper can read *without* knowing
+ * anything about `struct arm_saved_state`; the third number it needs is `regs->pc`, the instruction
+ * that faulted, and the fourth is `regs->cpsr`, which says whether that instruction was in user mode
+ * or kernel mode. That is precisely the distinction 473's run could not make: a kernel `copyin` /
+ * `copyout` of an unmapped user address and the process-1 thread faulting on its own account have the
+ * same `DFSR` class and a `DFAR` that is a user address either way.
+ *
+ * The offsets are in `entry_saved_state.h`, one definition for the two files that need them, checked
+ * against Apple's header, against this configuration's generated `assym.s`, and against
+ * `ACT_PCBDATA_PC - ACT_PCBDATA`, by `tools/check_saved_state_offsets.py` in this build. **And they
+ * are checked again at run time, on the device**: the vector stored the same `cp15` numbers into
+ * `SS_STATUS`/`SS_VADDR`, so a frame read at the right offsets must report the `DFSR`/`DFAR` this
+ * function's own `mrc`s just read - and entries 1 to 4 are aborts whose two numbers are already known
+ * from 472's and 473's logs, which makes them a control rather than a sample. If the offsets are
+ * wrong, `xnu_live_sleh_frame_ok` is 0 on those entries and the run says so *before* it names a
+ * frontier.
+ *
+ * Nothing else changes: the pointer is passed, not dereferenced here, and the real handler still runs
+ * with the same arguments.
  */
-extern void entry_note_sleh(uint32_t type, uint32_t dfsr, uint32_t dfar, uint32_t thread);
+extern void entry_note_sleh(uint32_t type, uint32_t dfsr, uint32_t dfar, uint32_t thread,
+                            const uint32_t *frame);
 extern void entry_note_sleh_back(void);
 
 void __real_sleh_abort(void *regs, int type);
@@ -1490,7 +1514,7 @@ void __wrap_sleh_abort(void *regs, int type)
     __asm__ volatile ("mrc p15, 0, %0, c6, c0, 0" : "=r"(dfar));
     __asm__ volatile ("mrc p15, 0, %0, c13, c0, 4" : "=r"(thread));
 
-    entry_note_sleh((uint32_t)type, dfsr, dfar, thread);
+    entry_note_sleh((uint32_t)type, dfsr, dfar, thread, (const uint32_t *)regs);
 
     __real_sleh_abort(regs, type);
 

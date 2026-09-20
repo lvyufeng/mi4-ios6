@@ -1,0 +1,73 @@
+/*
+ * The six words of `struct arm_saved_state` the abort record reads - and the one number in this
+ * image that is neither Apple's nor this project's but the build's own.
+ *
+ * Why a header and not six numbers inside `entry_stubs.c`. One reason is the layout itself: the frame
+ * is `struct arm_saved_state`, and the one place in this image that says so should be a file that is
+ * about `struct arm_saved_state` and nothing else. The other is that the numbers have to be
+ * *compared* against two sources this project does not own -
+ * `tools/check_saved_state_offsets.py` reads them, Apple's own header, and this configuration's
+ * generated `assym.s` - and a check wants one stable place to read a definition from, not a regex
+ * into the middle of a four-thousand-line file. So: one definition, and a build step that refuses to
+ * link the image if it disagrees with either source. (`entry_trace.c` needs none of them - it hands
+ * the pointer over and never dereferences it.)
+ *
+ * **Where these numbers come from.** Not from a copy of Apple's struct: from
+ * `out/xnu_assym/$XNU_KERNEL_CONFIG/assym.s`, which `tools/gen_assym.sh` writes by compiling
+ * Apple's own `osfmk/arm/genassym.c` against Apple's own `osfmk/mach/arm/thread_status.h`. That file
+ * declares exactly these, and this is what it gives for this configuration:
+ *
+ *     #define SS_R0      0     #define SS_SP     52     #define SS_PC     60
+ *     #define SS_CPSR   64     #define SS_STATUS 68     #define SS_VADDR  72
+ *     #define SS_LR     56     #define SS_EXC    76     #define SS_SIZE   80
+ *
+ * - i.e. `uint32_t r[13]` (thirteen words, 0..48), then `sp`, `lr`, `pc`, `cpsr`, `fsr`, `far`,
+ * `exception`. `tools/check_saved_state_offsets.py` parses that header, this file and the generated
+ * `assym.s`, and refuses the build if any of the three disagrees - including the *cross-derivation*
+ * `ACT_PCBDATA_PC - ACT_PCBDATA == SS_PC`, which is the same statement reached from the thread's
+ * PCB instead of from the stack frame.
+ *
+ * **Why reading the frame is worth six offsets at all (474).** Experiment 473's run is served four
+ * data aborts and returns from all four, and then records a fifth and nothing more: an abort whose
+ * `DFAR` the log never names, because the record that would have carried it was cut by
+ * `SLEH_LIVE_MAX`. 467's record reads `DFSR`/`DFAR` out of `cp15`, and those two numbers are the
+ * only part of the frame it can name without a layout. The other part is the one that answers the
+ * question: `regs->pc` is the *instruction* that faulted, and `regs->cpsr` says which mode it was
+ * running in - which is exactly the distinction 473 could not make between a kernel `copyin` of a
+ * user address and the process-1 thread faulting in user mode.
+ *
+ * The vector code fills all six, on both paths (`osfmk/arm/locore.s`): `dataabt_from_kernel` builds
+ * the frame on the kernel stack and `dataabt_from_user` uses the current thread's PCB, and both do
+ * `str lr, [., SS_PC]` (with the `sub lr, lr, #8` the abort vector has already applied, so `SS_PC`
+ * is the *faulting* instruction and not the next one), `mrs r4, spsr` into `SS_CPSR`, and
+ * `mrc p15,0,r5,c5,c0` / `mrc p15,0,r6,c6,c0` into `SS_STATUS`/`SS_VADDR`.
+ *
+ * **That last pair is the check.** Those two instructions read the same two coprocessor registers
+ * 467's record reads for itself, so a frame read at the right offsets must report the same `DFSR` and
+ * `DFAR` - and 472's and 473's first four entries are aborts whose two numbers are already known
+ * (`0x805/0x1000`, `0x807/0xc8105000`, `0x807/0xc8146000`, `0x805/0x00101f28`). So entries 1 to 4 are
+ * the *control*: if the offsets were wrong, the run says so before the frontier is reported, on
+ * aborts whose answer is already in hand. `xnu_live_sleh_frame_ok` carries that comparison into the
+ * log, one per entry, so the reading does not depend on a reader noticing two numbers agree.
+ */
+#ifndef STAGE90_ENTRY_SAVED_STATE_H
+#define STAGE90_ENTRY_SAVED_STATE_H
+
+/* `struct arm_saved_state`, `osfmk/mach/arm/thread_status.h` - via genassym's `SS_*` (see above). */
+#define STAGE90_SS_SP      52
+#define STAGE90_SS_LR      56
+#define STAGE90_SS_PC      60
+#define STAGE90_SS_CPSR    64
+#define STAGE90_SS_STATUS  68
+#define STAGE90_SS_VADDR   72
+
+/* `sizeof(struct arm_saved_state)` (`SS_SIZE`), for the word count the frame is indexed in. */
+#define STAGE90_SS_SIZE    80
+
+/* `osfmk/arm/proc_reg.h`: `cpsr & PSR_MODE_MASK == PSR_USER_MODE` is Apple's own test, in
+ * `sleh_abort` (`osfmk/arm/trap.c`: `if ((spsr & PSR_MODE_MASK) != PSR_USER_MODE)`), and the frame's
+ * `cpsr` is that same `spsr`. So the mode the fault was taken in is the same expression here. */
+#define STAGE90_PSR_MODE_MASK   0x0000001Fu
+#define STAGE90_PSR_USER_MODE   0x00000010u
+
+#endif /* STAGE90_ENTRY_SAVED_STATE_H */

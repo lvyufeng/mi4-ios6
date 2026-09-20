@@ -56,6 +56,10 @@
 
 #include <stdint.h>
 
+/* `struct arm_saved_state`'s six offsets, one definition for the image and for the check that
+ * compares them against Apple's header and this configuration's generated `assym.s`. See the file. */
+#include "entry_saved_state.h"
+
 #define RAM_CONSOLE_BASE   0xde500000u
 #define RAM_CONSOLE_SIG    0x43474244u  /* 'DBGC' */
 #define RESTART_REASON     0x0fa0065cu
@@ -1087,6 +1091,44 @@ uint32_t g_pub2_count;
  * entries: this is the one record whose own failure can re-enter it (269's storm was a fault inside
  * a reporting path), and a cap is what turns "the machine is looping" into four records and a
  * counter instead of an unbounded stream.
+ *
+ * ------------------------------------------------------- 474: the frame, and the three bands
+ *
+ * 473's run was served four aborts, returned from all four, recorded a fifth and then wrote nothing
+ * else at all - and the record that would have named the fifth's address was the one `SLEH_LIVE_MAX`
+ * cut. So the cap is now three caps, each one bounding a different question, and the entry takes
+ * `struct arm_saved_state *` so that the two numbers it has never carried are in the record.
+ *
+ *   - `SLEH_LIVE_MAX` (4, unchanged) - the entries whose `DFSR`/`DFAR`/`TPIDRPRW` are recorded.
+ *     Unchanged deliberately: 473's `xnu_live_sleh_storm = 5` is a reading of the *cap*, and moving
+ *     the cap would move that number and make the two runs incomparable.
+ *   - `SLEH_LIVE_FRAMES` (8) - the entries whose saved state is recorded: `pc` (the faulting
+ *     instruction - the vector has already applied its `sub lr, lr, #8`), `lr`, `sp`, `cpsr` (whose
+ *     mode bits are Apple's own user/kernel test), and the frame's own `fsr`/`far`. Twice the first
+ *     band, because the storm's head is entry 5 and the question is not only what it was but whether
+ *     entries 5, 6, 7 and 8 are the same address repeating or a walk.
+ *   - `SLEH_LIVE_SEEN` (64) - one record per entry, a running count. This is the band that separates
+ *     "the handler was entered five times and then the machine stopped asking it" from "the handler
+ *     is being entered forever": the first leaves `_seen` at 5, the second takes it to 64, and the
+ *     473 log could not tell those apart because past the cap it recorded nothing at all.
+ *
+ * **`xnu_live_sleh_frame_ok` is the instrument checking itself, in the log, before the frontier.**
+ * The vector stored the same `cp15` numbers 467's record reads into `SS_STATUS`/`SS_VADDR`, so a
+ * frame read at the right offsets must report them back. Entries 1 to 4 are aborts whose `DFSR`/
+ * `DFAR` are already known from 472's and 473's logs (`0x805/0x1000`, `0x807/0xc8105000`,
+ * `0x807/0xc8146000`, `0x805/0x00101f28`), which makes them a control and not a sample: if the
+ * offsets are wrong the run says so on four known aborts, and every `pc` and `cpsr` beside them is
+ * named as unreliable in the same breath.
+ *
+ * The prediction, written before the build. Entry 5's frame will separate the readings 473 could not:
+ * (a) `cpsr` in supervisor mode (`& 0x1F != 0x10`) with `pc` in the kernel's text (`>= 0x80000000`) -
+ * a kernel load or store of an unmapped user address, i.e. a `copyin`/`copyout` on the exec path, and
+ * `far` will be a user address; (b) `cpsr` in user mode with `pc` a low address - the process-1
+ * thread taken a fault on its own account; (c) `pc` inside this image's own `entry_*` code (the
+ * symbols are in the entry ELF) - a fault inside the reporting path, 269's storm; and the count will
+ * say in every case whether it happens once or forever. What is *not* predicted to appear at all is
+ * `pc = 0x10e0`: that is the RAM disk's `udf #0`, an undefined instruction, which reaches
+ * `sleh_undef` and never this function.
  */
 uint32_t g_sleh_seq;
 uint32_t g_sleh_back;
@@ -1094,17 +1136,54 @@ uint32_t g_sleh_type;
 uint32_t g_sleh_dfsr;
 uint32_t g_sleh_dfar;
 uint32_t g_sleh_storm;
+uint32_t g_sleh_pc;
+uint32_t g_sleh_lr;
+uint32_t g_sleh_sp;
+uint32_t g_sleh_cpsr;
+uint32_t g_sleh_fsr_frame;
+uint32_t g_sleh_far_frame;
+uint32_t g_sleh_frame_ok;
+uint32_t g_sleh_user_mode;
 
 #define SLEH_LIVE_MAX 4u
+#define SLEH_LIVE_FRAMES 8u
+#define SLEH_LIVE_SEEN 64u
 
 void entry_live_write(const char *key, uint32_t value);
 
-void entry_note_sleh(uint32_t type, uint32_t dfsr, uint32_t dfar, uint32_t thread)
+void entry_note_sleh(uint32_t type, uint32_t dfsr, uint32_t dfar, uint32_t thread,
+                     const uint32_t *frame)
 {
+    uint32_t sp = 0u, lr = 0u, pc = 0u, cpsr = 0u, fsr_frame = 0u, far_frame = 0u;
+
     g_sleh_seq++;
     g_sleh_type = type;
     g_sleh_dfsr = dfsr;
     g_sleh_dfar = dfar;
+
+    /*
+     * A word index into `struct arm_saved_state`, from `entry_saved_state.h`. The six offsets are
+     * all word-aligned by construction, so the division is exact; `frame` is only dereferenced when
+     * it is not NULL, because a NULL here would mean the abort vector changed shape and a fault
+     * inside the record is the one fault this function must not take (269).
+     */
+    if (frame != 0) {
+        sp        = frame[STAGE90_SS_SP     / 4];
+        lr        = frame[STAGE90_SS_LR     / 4];
+        pc        = frame[STAGE90_SS_PC     / 4];
+        cpsr      = frame[STAGE90_SS_CPSR   / 4];
+        fsr_frame = frame[STAGE90_SS_STATUS / 4];
+        far_frame = frame[STAGE90_SS_VADDR  / 4];
+    }
+
+    g_sleh_sp = sp;
+    g_sleh_lr = lr;
+    g_sleh_pc = pc;
+    g_sleh_cpsr = cpsr;
+    g_sleh_fsr_frame = fsr_frame;
+    g_sleh_far_frame = far_frame;
+    g_sleh_frame_ok = ((fsr_frame == dfsr) && (far_frame == dfar)) ? 1u : 0u;
+    g_sleh_user_mode = ((cpsr & STAGE90_PSR_MODE_MASK) == STAGE90_PSR_USER_MODE) ? 1u : 0u;
 
     if (g_sleh_seq <= SLEH_LIVE_MAX) {
         entry_live_write("xnu_live_sleh_seq", g_sleh_seq);
@@ -1115,6 +1194,21 @@ void entry_note_sleh(uint32_t type, uint32_t dfsr, uint32_t dfar, uint32_t threa
     } else if (g_sleh_seq == SLEH_LIVE_MAX + 1u) {
         g_sleh_storm = g_sleh_seq;
         entry_live_write("xnu_live_sleh_storm", g_sleh_storm);
+    }
+
+    if (g_sleh_seq <= SLEH_LIVE_SEEN) {
+        entry_live_write("xnu_live_sleh_seen", g_sleh_seq);
+    }
+
+    if (g_sleh_seq <= SLEH_LIVE_FRAMES) {
+        entry_live_write("xnu_live_sleh_pc", pc);
+        entry_live_write("xnu_live_sleh_lr", lr);
+        entry_live_write("xnu_live_sleh_sp", sp);
+        entry_live_write("xnu_live_sleh_cpsr", cpsr);
+        entry_live_write("xnu_live_sleh_fsr_frame", fsr_frame);
+        entry_live_write("xnu_live_sleh_far_frame", far_frame);
+        entry_live_write("xnu_live_sleh_frame_ok", g_sleh_frame_ok);
+        entry_live_write("xnu_live_sleh_user", g_sleh_user_mode);
     }
 }
 
@@ -2349,6 +2443,35 @@ __attribute__((noinline)) static void entry_write_467_kv(void)
     entry_write_kv("xnu_entry_sleh_storm", g_sleh_storm);
 }
 
+/*
+ * 474's keys, in a function of their own - 455's and 463's lesson about the epilogue's constant
+ * pool, which is at the PC-relative edge: six more `entry_write_kv` calls in `entry_write_467_kv`
+ * is exactly the edit that overflowed it once already (`bad immediate value for offset (4188)`),
+ * and the failure names a line of compiler output rather than the function that grew.
+ *
+ * These are the reading the *epilogue* channel can carry, and they are the same eight numbers the
+ * live channel records per entry - except that `.bss` holds only the latest entry's, so this
+ * channel answers "what was the last abort" and the live channel answers "what were aborts 1
+ * through 8". The two are not redundant in the runs this step is for: a boot that reaches this
+ * epilogue has already said, by getting here, that the abort path was entered and left.
+ *
+ * There is deliberately no `_seen` key here. It is the live channel's, and it means "the entry
+ * count as of this abort" - bounded, so that its *stopping* at 64 is a reading. In `.bss` the same
+ * number is `xnu_entry_sleh_seq`, written six lines above, and a second key carrying one value
+ * would be the "one value, two definitions" shape this project keeps meeting.
+ */
+__attribute__((noinline)) static void entry_write_474_kv(void)
+{
+    entry_write_kv("xnu_entry_sleh_pc", g_sleh_pc);
+    entry_write_kv("xnu_entry_sleh_lr", g_sleh_lr);
+    entry_write_kv("xnu_entry_sleh_sp", g_sleh_sp);
+    entry_write_kv("xnu_entry_sleh_cpsr", g_sleh_cpsr);
+    entry_write_kv("xnu_entry_sleh_fsr_frame", g_sleh_fsr_frame);
+    entry_write_kv("xnu_entry_sleh_far_frame", g_sleh_far_frame);
+    entry_write_kv("xnu_entry_sleh_frame_ok", g_sleh_frame_ok);
+    entry_write_kv("xnu_entry_sleh_user", g_sleh_user_mode);
+}
+
 __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
 {
     uint32_t sctlr;
@@ -2965,6 +3088,9 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      * the *C compile* fails (`bad immediate value for offset (4188)`), with nothing in the message
      * naming the function that grew. See `entry_write_467_kv`. */
     entry_write_467_kv();
+    /* 474: the same handler's *frame* - the faulting instruction, the mode it was running in, and
+     * the two numbers that say whether the offsets this image read it at are the kernel's. */
+    entry_write_474_kv();
 #endif
     /*
      * Experiment 272. Runs here, after the first line of the report is already in the console, so
