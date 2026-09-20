@@ -377,8 +377,90 @@ static uint32_t g_first_abort_kv_len;
 uint32_t g_block_caller;
 uint32_t g_block_continuation;
 uint32_t g_block_kv_len;
+/*
+ * Experiment 450. 446-448 wrote "the run ends in `ml_get_max_cpus`'s `thread_block`" and built a
+ * frontier model on it, and 449 measured that the sentence is true of the *report* and false of the
+ * *boot*: `__wrap_thread_block` had been terminal since experiment 268, so every run since then
+ * stopped at the first `thread_block`, which is one instruction before the scheduler would hand the
+ * CPU to the matching thread `registerService` had already created. These four slots are what a
+ * **non**-terminal block needs to stay legible:
+ *
+ *   - `g_block_count` counts the calls, and `g_block_returned` counts the ones that came back. The
+ *     pair separates three outcomes a single caller cannot: the boot thread blocked and was woken
+ *     (count and returned both rise), it blocked and never came back (count rises, returned does not
+ *     - the match ran but nothing set `max_cpus_initialized`), or the run never reached a block at
+ *     all (both 0).
+ *   - `g_block_ring_*` is the first **eight** `(caller, continuation)` pairs in order. The first is
+ *     `ml_get_max_cpus+0x3c` if the frontier is still where 447 put it; the next ones are the sites
+ *     the boot blocks at *after* the scheduler has run, which is the reading this step exists for.
+ *     A ring rather than a single slot because the interesting call is not the first one any more.
+ *   - `g_block_last_*` is the site the run was in when it stopped, and `g_block_kv_len` the position
+ *     of the boot's own record at that moment.
+ */
+uint32_t g_block_count;
+uint32_t g_block_returned;
+uint32_t g_block_first_return_caller;
+uint32_t g_block_last_return_caller;
+uint32_t g_block_last_caller;
+uint32_t g_block_last_continuation;
+uint32_t g_block_ring_caller[8];
+uint32_t g_block_ring_continuation[8];
 uint32_t g_vmwait_caller;
 uint32_t g_vmwait_count;
+/*
+ * Experiment 451's live console, and experiment 452's correction of it. 450 retired the terminal
+ * block so the boot could proceed, and the run came back with **nothing at all**: every record this
+ * instrument keeps lives in `g_kv_buf` (or in these `.bss` slots) and only the epilogue writes them
+ * out, so a boot that hangs after the jump takes the whole measurement with it. The ram console is
+ * the one thing that survives - it is where every log this project has read came from - but
+ * `entry_write_kv` writes it at VA 0xde500000, and that address has no translation while XNU's page
+ * tables are live (268's `exception: data abort`, `dfar=0xde500000`, `pc` inside `entry_write_kv`).
+ *
+ * So the channel is one section descriptor written into XNU's live L1. **451 wrote that descriptor
+ * too and the run was still silent, because the descriptor's protection bits were derived from a
+ * neighbour section that does not exist.** 451 assumed XNU maps up to the console and searched for
+ * the BLOCK whose PA field is `RAM_CONSOLE_BASE - 1 MB`; the boot_args actually declare
+ * `memSize = 0x01000000` - the entry window, not the console's address (`xnu_entry_jump.c`) - so
+ * `start.s`'s section loop covers VA/PA `[0x80000000, 0x81000000)` and nothing else, the scan ran
+ * all 4096 entries without a match, and it refused with 1. The refusal lived in `.bss` and only the
+ * epilogue prints `.bss`, so *the channel's own failure was the silence it was built to remove* -
+ * 441's rule with the instrument on the wrong side of it.
+ *
+ * 452 derives no bits from an anchor. The protection bits are XNU's own section template
+ * (`ARM_TTE_TYPE_BLOCK | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_SH`, proc_reg.h - `AF` is AP[0], i.e.
+ * privileged read-write and user no access, and XNU sets the same two on every kernel section),
+ * the *memory type* is derived at runtime from `SCTLR.TRE` and `PRRR` because that is the one thing
+ * that must not be inherited (`CACHE_ATTRINDX_DEFAULT` is write-back, and a console whose writes
+ * live in a cache is a console a hang erases), the table base comes from `TTBCR.N` rather than from
+ * assuming TTBR1, the slot is required to be invalid, domain 0 is checked against DACR, and the
+ * console's own signature read back *through the new descriptor* is the acceptance test.
+ *
+ * Two more things 452 knows that 451 had to learn: nothing the payload plants in the boot table
+ * before the jump can survive, because `start.s`'s `invalidate_tte` writes FAULT over 10240 entries
+ * starting at `topOfKernelData` - the whole 16 KB boot table plus more - at `_start`; and the
+ * address being one section past the end of the mapped window is not special, it is simply the
+ * console's address. The install is therefore a runtime act, and the only visibility a *refusal*
+ * can ever have is the next experiment's reading of these slots.
+ */
+uint32_t g_live_state;      /* 0 = not tried, 1 = live, 2 = refused */
+uint32_t g_live_attempts;   /* init calls, so a retry and a refusal can be told apart */
+uint32_t g_live_records;
+uint32_t g_live_refusals;
+uint32_t g_live_refuse;     /* 1 no usable table, 2 slot in use, 3 domain fault, 4 no signature,
+                             * 5 no uncached encoding */
+uint32_t g_live_ttbr0;
+uint32_t g_live_ttbr1;
+uint32_t g_live_ttbcr;
+uint32_t g_live_dacr;
+uint32_t g_live_l1;
+uint32_t g_live_installed;  /* bitmask: 1 the console's own MB, 2 the next MB, 4 the alias VA */
+uint32_t g_live_slot_before;
+uint32_t g_live_desc;
+uint32_t g_live_desc2;
+uint32_t g_live_alias_read;
+uint32_t g_live_sctlr;
+uint32_t g_live_prrr;
+uint32_t g_live_attr;
 /*
  * Experiment 447. 446 resolved the block to `ml_get_max_cpus` and the run could not say *which* of
  * that function's six callers it was, so the next reading is the caller itself - and the second is
@@ -721,6 +803,248 @@ static void entry_write(const char *s)
     *size_p = size;
     __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
 }
+
+#ifdef STAGE90_ENTRY_TRACE
+/*
+ * Defined below, in the block that has always owned it: the live console appends through the same
+ * function the epilogue uses - one writer, one size field, one place a record can be refused.
+ */
+void entry_write_kv(const char *key, uint32_t value);
+
+/*
+ * Experiment 451's live console, corrected by 452. See the slots' comment for the whole story; this
+ * is the mechanism.
+ *
+ * `entry_live_refuse` records the *first* refusal, not the last: the interesting one is the check
+ * that failed on the attempt that was made, and a later retry cannot un-make it.
+ */
+static void entry_live_refuse(uint32_t why)
+{
+    if (g_live_refuse == 0u)
+        g_live_refuse = why;
+    g_live_state = 2u;
+}
+
+/*
+ * The section descriptor's bit fields, spelled with the tree's own names in the comments. `AF` is
+ * AP[0] and `SH` is the shareable bit - they are what `start.s` sets on every kernel section
+ * (`ARM_TTE_BLOCK_AF`, `ARM_TTE_BLOCK_SH`), and `AP_RWNA` contributes nothing because it is AP[2:0]
+ * = 0b001 with AP[2] in bit 15 clear. The domain field is bits [8:5] and is left at 0, which is the
+ * domain `ARM_DAC_SETUP = 0x1` enables and the one XNU's own sections use.
+ */
+#define LIVE_TTE_TYPE_MASK  0x00000003u
+#define LIVE_TTE_TYPE_BLOCK 0x00000002u
+#define LIVE_TTE_PA_MASK    0xfff00000u
+#define LIVE_TTE_BLOCK_AF   0x00000400u   /* AP[0]: privileged RW, user no access */
+#define LIVE_TTE_BLOCK_SH   0x00010000u   /* shared (SMP) mapping */
+
+/*
+ * The second VA the console is mapped at, so the mapping can be confirmed through a *different*
+ * descriptor and the log can say which of the two carried the records. 1 MB past the console is
+ * inside the console's own 2 MB window and is an address XNU's 16 MB window does not reach, which is
+ * the only property that matters: it has to be a VA nothing else in the boot wants.
+ */
+#define LIVE_CONSOLE_ALIAS_BASE (RAM_CONSOLE_BASE + 0x01000000u)
+
+/*
+ * One descriptor into one slot, with the checks that make the write safe. Returns the bit it stands
+ * for on success and 0 if the slot was already occupied - an occupied slot is *skipped*, not
+ * clobbered, because whatever put something there is not this instrument's to overwrite.
+ */
+static uint32_t entry_live_map(uint32_t va, uint32_t pa, uint32_t l1, uint32_t bit)
+{
+    uint32_t index = va >> 20;
+    volatile uint32_t *slot;
+    uint32_t before, desc;
+
+    if (index >= 4096u)
+        return 0u;
+    slot = (volatile uint32_t *)(uintptr_t)(l1 + 4u * index);
+    before = *slot;
+    if (g_live_slot_before == 0u)
+        g_live_slot_before = before;
+    if ((before & LIVE_TTE_TYPE_MASK) != 0u)
+        return 0u;
+
+    desc = (pa & LIVE_TTE_PA_MASK) | LIVE_TTE_TYPE_BLOCK | LIVE_TTE_BLOCK_AF | LIVE_TTE_BLOCK_SH |
+           g_live_attr;
+    *slot = desc;
+
+    /*
+     * Caches are on by the time this runs (`start.s` sets SCTLR.C and SCTLR.I), so the modified
+     * descriptor is cleaned to the point of unification before the TLB is told to forget the address
+     * - belt and braces for a walk that is itself cacheable and coherent, and the reason the
+     * invalidate cannot be the only step.
+     */
+    __asm__ volatile ("mcr p15, 0, %0, c7, c10, 1" :: "r"(slot) : "memory");
+    __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
+    __asm__ volatile ("mcr p15, 0, %0, c8, c7, 1" :: "r"(va) : "memory");
+    __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
+
+    if (g_live_desc == 0u)
+        g_live_desc = desc;
+    else
+        g_live_desc2 = desc;
+    return bit;
+}
+
+static void entry_live_init(void)
+{
+    const uint32_t retry_limit = 8u;
+    uint32_t ttbr0, ttbr1, ttbcr, dacr, sctlr, prrr, l1, n, i, attr, installed;
+
+    g_live_attempts++;
+
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 1" : "=r"(ttbr1));
+    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));
+    __asm__ volatile ("mrc p15, 0, %0, c3, c0, 0" : "=r"(dacr));
+    __asm__ volatile ("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
+    __asm__ volatile ("mrc p15, 0, %0, c10, c2, 0" : "=r"(prrr));
+    g_live_ttbr0 = ttbr0;
+    g_live_ttbr1 = ttbr1;
+    g_live_ttbcr = ttbcr;
+    g_live_dacr = dacr;
+    g_live_sctlr = sctlr;
+    g_live_prrr = prrr;
+
+    /*
+     * Which table answers for the console's address. `TTBCR.N` is the boundary: N == 0 means every
+     * address goes through TTBR0, and N >= 1 sends the upper window to TTBR1 - and the console is
+     * above 0x80000000, so those are the only two cases. The low 14 bits are the walk attribute, not
+     * part of the base.
+     */
+    n = ttbcr & 7u;
+    l1 = (((n == 0u) ? ttbr0 : ttbr1)) & 0xffffc000u;
+    g_live_l1 = l1;
+
+    /*
+     * The base is a *physical* address and this code reads it as a virtual one, which is sound only
+     * because the entry image's premise is `physBase == virtBase` (`xnu_entry_jump.c` sets both to
+     * 0x80000000) - the same premise 444 relies on for the instrument's own memory. A table outside
+     * the kernel's window is a reason to wait rather than a reason to guess: the first live write can
+     * fire before XNU has switched tables at all, and a retry later in the boot is free.
+     */
+    if (l1 < 0x80000000u || (l1 & 0x3fffu) != 0u) {
+        if (g_live_attempts < retry_limit)
+            return;                       /* state stays 0: try again on the next record */
+        entry_live_refuse(1u);
+        return;
+    }
+
+    /*
+     * The memory type, and the one thing here that must not be inherited: `CACHE_ATTRINDX_DEFAULT`
+     * is write-back, and a console whose writes live in a cache is a console a hang erases. With
+     * `SCTLR.TRE` set the encoding is remapped through PRRR, and the Strongly-ordered encodings are
+     * exactly those whose two-bit PRRR field is 0 - read out of PRRR rather than guessed (236's era
+     * measured `sctlr = 0x30c5787d`, so TRE is set on this device). Without TRE remap, the
+     * architecture itself makes `TEX=000 C=0 B=0` Strongly-ordered, which is `attr = 0`.
+     */
+    attr = 0u;
+    if ((sctlr & 0x10000000u) != 0u) {            /* SCTLR.TRE */
+        for (i = 0u; i < 8u; i++) {
+            if (((prrr >> (2u * i)) & 3u) == 0u)
+                break;
+        }
+        if (i == 8u) {
+            /* Every encoding this machine has is Normal: no uncached section is available. */
+            entry_live_refuse(5u);
+            return;
+        }
+        /* ARM_TTE_BLOCK_ATTRINDX(i): B = i[0], C = i[1], TEX[2] = i[2]. */
+        attr = (((i >> 1) & 1u) << 3) | ((i & 1u) << 2) | (((i >> 2) & 1u) << 12);
+    }
+    g_live_attr = attr;
+
+    /* Domain 0 is the domain this section is placed in, so DACR has to permit *that* one. */
+    if ((dacr & 3u) == 0u) {
+        entry_live_refuse(3u);
+        return;
+    }
+
+    /*
+     * Three descriptors: the console's own MB, the MB after it (the buffer is 2 MB), and one VA well
+     * clear of both as a second, independent path to the same first MB. The console's own VA is the
+     * one that must take - `entry_write_kv` writes there and nowhere else.
+     */
+    installed = entry_live_map(RAM_CONSOLE_BASE, RAM_CONSOLE_BASE, l1, 1u);
+    installed |= entry_live_map(RAM_CONSOLE_BASE + 0x00100000u, RAM_CONSOLE_BASE + 0x00100000u, l1,
+                                2u);
+    installed |= entry_live_map(LIVE_CONSOLE_ALIAS_BASE, RAM_CONSOLE_BASE, l1, 4u);
+    g_live_installed = installed;
+
+    if ((installed & 1u) == 0u) {
+        /* Every candidate was already mapped: the address is someone else's and the console is off. */
+        entry_live_refuse(2u);
+        return;
+    }
+
+    /* The proof that the descriptor works is the console's own signature through it. */
+    if (*(volatile uint32_t *)(uintptr_t)RAM_CONSOLE_BASE != RAM_CONSOLE_SIG) {
+        entry_live_refuse(4u);
+        return;
+    }
+
+    /* And the same word through the second VA, when the second VA took. */
+    if ((installed & 4u) != 0u)
+        g_live_alias_read = *(volatile uint32_t *)(uintptr_t)LIVE_CONSOLE_ALIAS_BASE;
+
+    g_live_state = 1u;
+    g_live_records = 0u;
+    entry_write_kv("xnu_live_console", 1u);
+    entry_write_kv("xnu_live_attempts", g_live_attempts);
+    entry_write_kv("xnu_live_ttbr0", ttbr0);
+    entry_write_kv("xnu_live_ttbr1", ttbr1);
+    entry_write_kv("xnu_live_ttbcr", ttbcr);
+    entry_write_kv("xnu_live_dacr", dacr);
+    entry_write_kv("xnu_live_l1", l1);
+    entry_write_kv("xnu_live_installed", installed);
+    entry_write_kv("xnu_live_slot_before", g_live_slot_before);
+    entry_write_kv("xnu_live_desc", g_live_desc);
+    entry_write_kv("xnu_live_desc2", g_live_desc2);
+    entry_write_kv("xnu_live_alias_read", g_live_alias_read);
+    entry_write_kv("xnu_live_sctlr", sctlr);
+    entry_write_kv("xnu_live_prrr", prrr);
+    entry_write_kv("xnu_live_attr", attr);
+}
+
+/*
+ * Every record the instrument wants to survive a run that never reaches the epilogue goes through
+ * here. The first call pays for the mapping and writes the mapping's own numbers, so a log that
+ * contains the header and nothing else still says how far XNU's tables allowed the instrument to go.
+ *
+ * The cap is a *bound*, not a budget: the ram console holds 2 MB and `entry_write_kv` refuses
+ * silently past it, so a run that recorded without bound would lose the end of its own trace - the
+ * part that says where it stopped. 4096 records is ~200 KB, comfortably inside, and the one record
+ * written when the cap is reached says so, which is 441's rule about a refusal having to be visible.
+ *
+ * A state of 0 means "not installed yet", and 452 keeps it that way for one case only: the live
+ * table not being the one this address needs yet, which is what the very first calls of a boot can
+ * see before XNU has switched tables. Every other refusal is final, because every other refusal is a
+ * property of the machine rather than of the moment. `_attempts` in the report is what tells a
+ * retried success from a first-try one.
+ */
+void entry_live_write(const char *key, uint32_t value)
+{
+    if (g_live_state == 0u)
+        entry_live_init();
+
+    if (g_live_state != 1u) {
+        g_live_refusals++;
+        return;
+    }
+
+    if (g_live_records >= 4096u) {
+        if (g_live_records == 4096u)
+            entry_write_kv("xnu_live_capped", g_live_records);
+        g_live_records++;
+        return;
+    }
+
+    g_live_records++;
+    entry_write_kv(key, value);
+}
+#endif /* STAGE90_ENTRY_TRACE */
 
 /*
  * One character into the same buffer `entry_write` appends to. Split out because the callers below
@@ -1278,10 +1602,74 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      * The tracer's terminal record, printed here rather than from `g_kv_buf` - see the slots'
      * comment. `_caller` is the return address of the `bl` that reached the wrapper, so the call site
      * is `caller - 4`, this project's usual convention for a stub's report.
+     *
+     * Experiment 450: the block is no longer terminal, so what is printed is the whole sequence of
+     * blocks - the first pair (the frontier 447 named), the last pair (where the run stopped), how
+     * many there were, how many came back, and the first and last callers that *did* come back. A
+     * `_count` well above `_returned` is the boot thread blocking without a wakeup; `_returned`
+     * rising with `_count` is the scheduler working.
      */
     entry_write_kv("xnu_entry_block_caller", g_block_caller);
     entry_write_kv("xnu_entry_block_continuation", g_block_continuation);
     entry_write_kv("xnu_entry_block_kv_len", g_block_kv_len);
+    entry_write_kv("xnu_entry_block_count", g_block_count);
+    entry_write_kv("xnu_entry_block_returned", g_block_returned);
+    entry_write_kv("xnu_entry_block_first_return_caller", g_block_first_return_caller);
+    entry_write_kv("xnu_entry_block_last_return_caller", g_block_last_return_caller);
+    entry_write_kv("xnu_entry_block_last_caller", g_block_last_caller);
+    entry_write_kv("xnu_entry_block_last_continuation", g_block_last_continuation);
+    /*
+     * The first eight blocks in order. `block0_caller` is the site 446/447 resolved
+     * (`ml_get_max_cpus+0x3c`), and `block1_caller` is the reading this step adds: the first site the
+     * boot blocks at *after* a real block has switched the CPU away and something has woken it.
+     * `caller - 4` is the `bl`, as everywhere else.
+     */
+    {
+        static const char *const bc[8] = {
+            "xnu_entry_block0_caller", "xnu_entry_block1_caller",
+            "xnu_entry_block2_caller", "xnu_entry_block3_caller",
+            "xnu_entry_block4_caller", "xnu_entry_block5_caller",
+            "xnu_entry_block6_caller", "xnu_entry_block7_caller"
+        };
+        static const char *const bq[8] = {
+            "xnu_entry_block0_continuation", "xnu_entry_block1_continuation",
+            "xnu_entry_block2_continuation", "xnu_entry_block3_continuation",
+            "xnu_entry_block4_continuation", "xnu_entry_block5_continuation",
+            "xnu_entry_block6_continuation", "xnu_entry_block7_continuation"
+        };
+
+        for (unsigned i = 0; i < 8u; i++) {
+            entry_write_kv(bc[i], g_block_ring_caller[i]);
+            entry_write_kv(bq[i], g_block_ring_continuation[i]);
+        }
+    }
+    /*
+     * Experiment 451's live console, printed here as well so a run that *does* report says whether
+     * the live channel was working and, if it was refused, which check refused it. `_records` counts
+     * the records that went out live, so a report with `_records = 0` and `_refusals > 0` is a run
+     * whose progress was not in the console while it was happening. 452 added `_attempts` (how many
+     * times the install was tried, since a retry is legal), `_installed` (which of the three
+     * descriptors took) and `_alias_read` (the console's signature word read through the second VA,
+     * so `0x43474244` there is the mapping confirmed twice).
+     */
+    entry_write_kv("xnu_entry_live_state", g_live_state);
+    entry_write_kv("xnu_entry_live_attempts", g_live_attempts);
+    entry_write_kv("xnu_entry_live_records", g_live_records);
+    entry_write_kv("xnu_entry_live_refusals", g_live_refusals);
+    entry_write_kv("xnu_entry_live_refuse", g_live_refuse);
+    entry_write_kv("xnu_entry_live_ttbr0", g_live_ttbr0);
+    entry_write_kv("xnu_entry_live_ttbr1", g_live_ttbr1);
+    entry_write_kv("xnu_entry_live_ttbcr", g_live_ttbcr);
+    entry_write_kv("xnu_entry_live_dacr", g_live_dacr);
+    entry_write_kv("xnu_entry_live_l1", g_live_l1);
+    entry_write_kv("xnu_entry_live_installed", g_live_installed);
+    entry_write_kv("xnu_entry_live_slot_before", g_live_slot_before);
+    entry_write_kv("xnu_entry_live_desc", g_live_desc);
+    entry_write_kv("xnu_entry_live_desc2", g_live_desc2);
+    entry_write_kv("xnu_entry_live_alias_read", g_live_alias_read);
+    entry_write_kv("xnu_entry_live_sctlr", g_live_sctlr);
+    entry_write_kv("xnu_entry_live_prrr", g_live_prrr);
+    entry_write_kv("xnu_entry_live_attr", g_live_attr);
     entry_write_kv("xnu_entry_vmwait_caller", g_vmwait_caller);
     entry_write_kv("xnu_entry_vmwait_count", g_vmwait_count);
     /*
@@ -1387,15 +1775,22 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
 
 #ifdef STAGE90_ENTRY_TRACE
 /*
- * The two ways `entry_trace.c` reaches this file, and both go around `entry_kv`.
+ * The ways `entry_trace.c` reaches this file, and all of them go around `entry_kv`.
  *
  * `entry_epilogue_block` is the terminal one: it stores the wrapper's two numbers in the `.bss` slots
  * and runs the same epilogue every other report runs, so the report's own header line carries what
- * the buffer could not. `why` is a literal in this image, as every other caller's is.
+ * the buffer could not. `why` is a literal in this image, as every other caller's is. **Since
+ * experiment 450 nothing calls it**: it was `thread_block`'s report, and a block that reports is a
+ * block that does not switch, which is what 449 found had been truncating every run since 268. It
+ * stays because a *terminal* wrapper is still the right shape when the thing being wrapped is the
+ * end of the run by definition - 451 or later will want it - and because deleting it would hide
+ * which step retired it.
  *
  * `entry_note_vmwait` is not terminal - `vm_page_wait`'s wrapper calls the real one afterwards - and
  * it keeps the **last** caller and a count, because the question it answers is "was the allocator
- * waiting when the run ended", not "was it ever waiting".
+ * waiting when the run ended", not "was it ever waiting". 450's `entry_note_block` and
+ * `entry_note_block_return` are the same shape, split across the call: the first says where the block
+ * was entered from, the second whether it ever came back.
  */
 void entry_epilogue_block(const char *why, uint32_t caller, uint32_t continuation)
 {
@@ -1403,6 +1798,45 @@ void entry_epilogue_block(const char *why, uint32_t caller, uint32_t continuatio
     g_block_continuation = continuation;
     g_block_kv_len = g_kv_len;
     entry_epilogue(why);
+}
+
+/*
+ * Experiment 450. `thread_block` calls this *before* the real block and `entry_note_block_return`
+ * after it returns, so the two of them together say whether the block switched and whether the boot
+ * thread was ever woken. The slots are in `.bss` inside the window and the epilogue prints them
+ * outside the dump, which is 446's mechanism and the reason they survive a run whose record buffer is
+ * full (445's `entry_kv` pair did not).
+ *
+ * The ring keeps the first eight pairs rather than the first or the last one: the first is the
+ * frontier 446/447 named and the second is the site the boot blocks at *after* a real switch, and
+ * neither is the other's summary.
+ */
+void entry_note_block(uint32_t caller, uint32_t continuation)
+{
+    if (g_block_count == 0) {
+        g_block_caller = caller;
+        g_block_continuation = continuation;
+    }
+    if (g_block_count < 8) {
+        g_block_ring_caller[g_block_count] = caller;
+        g_block_ring_continuation[g_block_count] = continuation;
+    }
+    g_block_last_caller = caller;
+    g_block_last_continuation = continuation;
+    g_block_kv_len = g_kv_len;
+    entry_live_write("xnu_live_block_enter", caller);
+    g_block_count++;
+    entry_live_write("xnu_live_block_seq", g_block_count);
+}
+
+void entry_note_block_return(uint32_t caller)
+{
+    if (g_block_returned == 0)
+        g_block_first_return_caller = caller;
+    g_block_last_return_caller = caller;
+    g_block_returned++;
+    entry_live_write("xnu_live_block_return", caller);
+    entry_live_write("xnu_live_block_returns", g_block_returned);
 }
 
 void entry_note_vmwait(uint32_t caller)
@@ -1423,6 +1857,7 @@ void entry_note_maxcpus(uint32_t caller)
     if (g_maxcpus_count == 0)
         g_maxcpus_caller = caller;
     g_maxcpus_count++;
+    entry_live_write("xnu_live_maxcpus_caller", caller);
 }
 
 void entry_note_initmax_cpus(uint32_t caller, uint32_t max_cpus)
@@ -1432,6 +1867,8 @@ void entry_note_initmax_cpus(uint32_t caller, uint32_t max_cpus)
         g_initmax_cpus_arg = max_cpus;
     }
     g_initmax_cpus_count++;
+    entry_live_write("xnu_live_initmax_cpus_caller", caller);
+    entry_live_write("xnu_live_initmax_cpus_arg", max_cpus);
 }
 
 /*
@@ -1448,6 +1885,8 @@ void entry_note_dtalloc(uint32_t caller, uint32_t arg, uint32_t ret)
         g_dtalloc_ret = ret;
     }
     g_dtalloc_count++;
+    entry_live_write("xnu_live_dtalloc_arg", arg);
+    entry_live_write("xnu_live_dtalloc_ret", ret);
 }
 
 void entry_note_workloop(uint32_t caller, uint32_t ret)
@@ -1457,6 +1896,7 @@ void entry_note_workloop(uint32_t caller, uint32_t ret)
         g_workloop_ret = ret;
     }
     g_workloop_count++;
+    entry_live_write("xnu_live_workloop_ret", ret);
 }
 
 /*
@@ -1496,6 +1936,8 @@ void entry_note_kthread(uint32_t cont, uint32_t caller, uint32_t ret)
         g_kthread_site[g_kthread_count] = caller;
     }
     entry_note_guard(&g_kthread_bad, &g_kthread_caller, &g_kthread_count, caller, ret);
+    entry_live_write("xnu_live_kthread_cont", cont);
+    entry_live_write("xnu_live_kthread_ret", ret);
 }
 
 /*
@@ -1526,6 +1968,8 @@ void entry_note_unser(uint32_t caller, uint32_t ret)
         g_unser_ret[g_unser_count] = ret;
     }
     g_unser_count++;
+    entry_live_write("xnu_live_unser_caller", caller);
+    entry_live_write("xnu_live_unser_ret", ret);
 }
 
 void entry_note_allocname(uint32_t name)
@@ -1533,6 +1977,7 @@ void entry_note_allocname(uint32_t name)
     if (g_alloc_count == 0)
         g_alloc_name = name;
     g_alloc_count++;
+    entry_live_write("xnu_live_alloc_name", name);
 }
 
 void entry_note_pub2(uint32_t caller, uint32_t key)
@@ -1542,6 +1987,7 @@ void entry_note_pub2(uint32_t caller, uint32_t key)
         g_pub2_key[g_pub2_count] = key;
     }
     g_pub2_count++;
+    entry_live_write("xnu_live_pub2_key", key);
 }
 #endif /* STAGE90_ENTRY_TRACE */
 

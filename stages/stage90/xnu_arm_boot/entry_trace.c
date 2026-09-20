@@ -81,15 +81,21 @@
  *     `kernel_memory_allocate(zone_map, ..., KMA_KOBJECT|KMA_NOPAGEWAIT)`, and with `KMA_NOPAGEWAIT`
  *     a shortage of free pages is *not* waited for - it is returned as `KERN_RESOURCE_SHORTAGE`
  *     (`kern_return.h:98` = 6) - after which `zalloc_internal` calls `VM_PAGE_WAIT()`, which is
- *     `vm_page_wait(THREAD_UNINT)` (`vm_page.h:1499`) and ends in `thread_block`. With one thread
- *     and no scheduler, that is forever: the silent hang this whole instrument exists to name.
+ *     `vm_page_wait(THREAD_UNINT)` (`vm_page.h:1499`) and ends in `thread_block`. 268 read that as a
+ *     silent hang - "with one thread and no scheduler, a block is forever" - and 449 corrected the
+ *     premise: the boot has two kernel threads by the time it blocks and the scheduler is real, so a
+ *     block is a switch. The sentence survives here because it is why the wrapper existed; 450 is
+ *     where it stops being the wrapper's behaviour.
  *   - `kernel_memory_allocate`: the size, the flags, and **the return value**. This is the datum that
  *     says *why* the expansion did not happen - `KERN_RESOURCE_SHORTAGE` (6) is "no free pages right
  *     now", `KERN_NO_SPACE` (3) is "the map has no room", and anything else is a different story.
  *   - `vm_page_wait`: its caller, which is `zalloc_internal` if the plain run stops where the code
  *     says it does.
- *   - `thread_block`: its caller and its continuation, reported *and terminal* - the epilogue runs
- *     instead of the block, so a block that would have hung becomes a line in the log.
+ *   - `thread_block`: its caller and its continuation, **non-terminally since 450** - the wrapper
+ *     records and calls through, so a block that used to end the run now switches the CPU the way
+ *     XNU intends. The slots carry the first eight `(caller, continuation)` pairs, how many blocks
+ *     there were and how many returned, because with the halt retired the question is no longer
+ *     *where* the first block is but what the boot does *after* it.
  *
  * `lck_grp_alloc_init` is wrapped as well, and only for its caller: it is the code that makes the
  * boot's first `kalloc` call cheap to identify (`kalloc(264)` for a `struct lck_grp`), and the
@@ -111,11 +117,20 @@ extern void entry_epilogue(const char *why) __attribute__((noreturn));
 /*
  * `entry_stubs.c`'s terminal record, outside `g_kv_buf`. 446's change: a report written as a run's
  * last act must not depend on a collector that keeps the oldest records - it carries its numbers to
- * the epilogue instead, which prints them beside the abort slots.
+ * the epilogue instead, which prints them beside the abort slots. Since 450 nothing calls it: the
+ * block it was written for is no longer terminal, and 450's `entry_note_block` pair replaces it.
  */
 extern void entry_epilogue_block(const char *why, uint32_t caller,
                                  uint32_t continuation) __attribute__((noreturn));
 extern void entry_note_vmwait(uint32_t caller);
+
+/*
+ * 450's pair, one on each side of the real `thread_block`: the first records the site and the
+ * continuation, the second whether the block ever came back. See `entry_stubs.c` for why a
+ * non-terminal block needs both and why the ring is eight deep.
+ */
+extern void entry_note_block(uint32_t caller, uint32_t continuation);
+extern void entry_note_block_return(uint32_t caller);
 
 /*
  * 447's two, and they are the *non*-terminal pair: `ml_get_max_cpus` blocks and returns, so the
@@ -417,23 +432,41 @@ uint32_t __wrap_vm_page_wait(uint32_t wait_type)
 
 /* -------------------------------------------------------------------- thread_block */
 /*
- * `void thread_block(thread_continue_t continuation)`. Reporting here rather than returning is the
- * point: this boot has one thread, so a block is not a delay, it is the end of the run. The
- * epilogue's cache work and the teardown are what get the record out.
+ * `void thread_block(thread_continue_t continuation)`.
  *
- * **The record goes through `entry_epilogue_block`, not through `entry_kv`.** Experiment 445 wrote
- * these two numbers with `entry_kv` and they are the two numbers the report could not show: a record
- * written as the *last* act of a run is the first one a full buffer refuses, and 445's buffer refused
- * 16269 of them. So they travel as arguments to the epilogue and land in the `.bss` slots the
- * epilogue prints outside the dump.
+ * **Experiment 450 retired the halt.** From 268 to 449 this wrapper was *terminal*: it recorded the
+ * caller and the continuation and ran `entry_epilogue_block` instead of calling through, on the
+ * reasoning that this boot has one thread and a block is therefore the end of the run. 449 measured
+ * what that reasoning cost: the first `thread_block` is `ml_get_max_cpus+0x3c`, and the matching
+ * thread `registerService` had already created (`_IOConfigThread::main`, from `pingConfig`) was
+ * waiting to be dispatched at exactly that instruction. So the terminal report did not name the end
+ * of the boot, it *made* the end of the boot - and 446/447/448 each built a frontier on top of it
+ * ("the flag's writer never ran, so `start` was never entered"). The untraced runs say the same
+ * thing from the other side: 439 and 440, built without this file, reached `bsd_init+0x870` and
+ * `bsd_init+0x880`, which is only reachable if the block in `ml_get_max_cpus` was passed and
+ * `ml_init_max_cpus` - `MSM8974PlatformExpert::start`'s third statement - ran.
+ *
+ * So the wrapper calls through, and the reading moves to the `.bss` slots: the sequence of blocks,
+ * how many returned, and the pairs around them. `entry_epilogue_block` stays in `entry_stubs.c` for
+ * the record of what the halt was and for a later step that needs a terminal stop on purpose.
+ *
+ * One thing it does *not* do is report live. `entry_write_kv` writes the ram console at VA
+ * 0xde500000, and that address has no translation while XNU's own page tables are live (the first
+ * build of this instrument turned exactly that into `exception: data abort`, `dfar=0xde500000`,
+ * `pc=inside entry_write_kv`), so a boot that now hangs reports nothing at all - which is why this
+ * step's run is expected to stop at a *stub* or a *fault*, and why the recovery nets are the answer
+ * to the other case. A live channel from inside XNU is its own step; the candidates are named in
+ * `docs/experiments/experiment-450-*.md`.
  */
 void __real_thread_block(void *continuation);
 
 void __wrap_thread_block(void *continuation)
 {
-    entry_epilogue_block("t268: thread_block was called",
-                         (uint32_t)(uintptr_t)__builtin_return_address(0),
-                         (uint32_t)(uintptr_t)continuation);
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+
+    entry_note_block(caller, (uint32_t)(uintptr_t)continuation);
+    __real_thread_block(continuation);
+    entry_note_block_return(caller);
 }
 
 /* ------------------------------------------------------- ml_get_max_cpus / ml_init_max_cpus */
