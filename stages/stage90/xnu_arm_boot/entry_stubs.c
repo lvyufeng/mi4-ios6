@@ -422,6 +422,16 @@ uint32_t g_block_thread;            /* the thread current at the last block */
 uint32_t g_block_first_thread;      /* ... at the first, which is the boot thread */
 uint32_t g_block_last_thread;
 uint32_t g_block_ring_thread[8];
+/*
+ * Experiment 454 adds the clock to the same record, for one comparison: `g_block_first_now` and
+ * `g_block_last_now` are the low words of the counter `ml_get_timebase` reads (`mrrc p15, 0, .., c14`),
+ * taken in the wrapper at the first and last block. With 454's `_dl_lo`/`_now` from the IOKit wait,
+ * the pair says whether the trace's **last** record is later than the deadline that wait was given -
+ * and a last record that is *past* a deadline that never fired is a measurement of "no timer
+ * interrupt", not an argument for it.
+ */
+uint32_t g_block_first_now;
+uint32_t g_block_last_now;
 uint32_t g_vmwait_caller;
 uint32_t g_vmwait_count;
 /*
@@ -526,6 +536,47 @@ uint32_t g_sleep_last_chan;
 uint32_t g_sleep_last_wmsg;
 uint32_t g_sleep_last_pri;
 uint32_t g_sleep_last_tmo;
+/*
+ * Experiment 454. 453's negative result is that the boot thread's deadline wait did not come through
+ * any of the seven sleep entries, and the image says what it did come through:
+ * `lck_mtx_sleep_deadline` has exactly three callers there - `_sleep`, `IOLockSleepDeadline` and
+ * `IORecursiveLockSleepDeadline` - so wrapping the two IOKit ones wraps the *whole* remaining path,
+ * the same argument 453 made for the sleep family and one level further out. Both are global (`T`),
+ * both are `int (lock, event, AbsoluteTime deadline, UInt32 interType)`, and the deadline is a
+ * register pair (`r2:r3`), which the disassembly of both confirms: each stores `{r2, r3}` to the stack
+ * and loads `interType` from `[sp, #16]` / `[sp, #24]` - so a wrapper with a `uint64_t` third
+ * parameter is ABI-identical, and `__OSAbsoluteTime` is the identity here (the pair goes through
+ * unmodified).
+ *
+ * Two readings come out of one call, and they are the reason this step is not only a name:
+ *
+ *   - `_site` names the function that asked IOKit to wait (the wrapper's own `lr`), which is the site
+ *     the whole of 452 and 453 walked down to;
+ *   - `_dl_lo`/`_dl_hi` are the deadline the caller passed and `_now` is the **counter the deadline is
+ *     compared against**, read in the same wrapper with one `mrrc p15, 0, lo, hi, c14` - the same
+ *     read `ml_get_timebase` makes (`0x8000f374`, whose `mach_absolute_time` is a four-byte tail
+ *     branch to it). The deadline is only ever delivered by a *timer interrupt*
+ *     (`assert_wait_deadline` -> the thread's own timer, `locks.c:892`), and this boot has no timer
+ *     driver at all - so if the counter is not advancing, or the deadline is behind it and nothing
+ *     woke the thread, the wait is one that *cannot* end by time and can only end by `thread_wakeup`.
+ *     Recording both ends of that comparison is what turns "waiting" into either "waiting for a
+ *     timer that does not exist" or "waiting for a publisher that never came".
+ */
+#define ENTRY_IOLOCK_MAX 2u
+uint32_t g_iolock_calls;
+uint32_t g_iolock_count[ENTRY_IOLOCK_MAX];
+uint32_t g_iolock_first_ent;
+uint32_t g_iolock_first_site;
+uint32_t g_iolock_first_thread;
+uint32_t g_iolock_last_ent;
+uint32_t g_iolock_last_site;
+uint32_t g_iolock_last_thread;
+uint32_t g_iolock_last_lock;
+uint32_t g_iolock_last_event;
+uint32_t g_iolock_last_inter;
+uint32_t g_iolock_last_dl_lo;
+uint32_t g_iolock_last_dl_hi;
+uint32_t g_iolock_last_now;
 /*
  * Experiment 447. 446 resolved the block to `ml_get_max_cpus` and the run could not say *which* of
  * that function's six callers it was, so the next reading is the caller itself - and the second is
@@ -1748,6 +1799,29 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
     entry_write_kv("xnu_entry_sleep_pri", g_sleep_last_pri);
     entry_write_kv("xnu_entry_sleep_tmo", g_sleep_last_tmo);
     /*
+     * Experiment 454's clock, and the IOKit deadline waits. `block_first_now`/`block_last_now` are the
+     * counter at the first and last block, and `iolock_dl_lo`/`_now` are the two ends of the comparison
+     * the last IOKit wait will make: a `_block_last_now` at or past `_iolock_dl_lo` (and a `_dl_hi`
+     * matching `_now`'s, or zero) is a deadline that came and went without waking the waiter.
+     */
+    entry_write_kv("xnu_entry_block_first_now", g_block_first_now);
+    entry_write_kv("xnu_entry_block_last_now", g_block_last_now);
+    entry_write_kv("xnu_entry_iolock_calls", g_iolock_calls);
+    entry_write_kv("xnu_entry_iolock_c0", g_iolock_count[0]);
+    entry_write_kv("xnu_entry_iolock_c1", g_iolock_count[1]);
+    entry_write_kv("xnu_entry_iolock_first_ent", g_iolock_first_ent);
+    entry_write_kv("xnu_entry_iolock_first_site", g_iolock_first_site);
+    entry_write_kv("xnu_entry_iolock_first_thread", g_iolock_first_thread);
+    entry_write_kv("xnu_entry_iolock_last_ent", g_iolock_last_ent);
+    entry_write_kv("xnu_entry_iolock_last_site", g_iolock_last_site);
+    entry_write_kv("xnu_entry_iolock_last_thread", g_iolock_last_thread);
+    entry_write_kv("xnu_entry_iolock_last_lock", g_iolock_last_lock);
+    entry_write_kv("xnu_entry_iolock_last_event", g_iolock_last_event);
+    entry_write_kv("xnu_entry_iolock_last_inter", g_iolock_last_inter);
+    entry_write_kv("xnu_entry_iolock_last_dl_lo", g_iolock_last_dl_lo);
+    entry_write_kv("xnu_entry_iolock_last_dl_hi", g_iolock_last_dl_hi);
+    entry_write_kv("xnu_entry_iolock_last_now", g_iolock_last_now);
+    /*
      * Experiment 451's live console, printed here as well so a run that *does* report says whether
      * the live channel was working and, if it was refused, which check refused it. `_records` counts
      * the records that went out live, so a report with `_records = 0` and `_refusals > 0` is a run
@@ -1920,12 +1994,13 @@ void entry_epilogue_block(const char *why, uint32_t caller, uint32_t continuatio
  * that knows the value was taken between two context switches - and because this file must stay
  * callable from a build without `entry_trace.c`.
  */
-void entry_note_block(uint32_t caller, uint32_t continuation, uint32_t thread)
+void entry_note_block(uint32_t caller, uint32_t continuation, uint32_t thread, uint32_t now)
 {
     if (g_block_count == 0) {
         g_block_caller = caller;
         g_block_continuation = continuation;
         g_block_first_thread = thread;
+        g_block_first_now = now;
     }
     if (g_block_count < 8) {
         g_block_ring_caller[g_block_count] = caller;
@@ -1936,9 +2011,11 @@ void entry_note_block(uint32_t caller, uint32_t continuation, uint32_t thread)
     g_block_last_continuation = continuation;
     g_block_last_thread = thread;
     g_block_thread = thread;
+    g_block_last_now = now;
     g_block_kv_len = g_kv_len;
     entry_live_write("xnu_live_block_enter", caller);
     entry_live_write("xnu_live_block_thr", thread);
+    entry_live_write("xnu_live_block_now", now);
     g_block_count++;
     entry_live_write("xnu_live_block_seq", g_block_count);
 }
@@ -1951,6 +2028,44 @@ void entry_note_block_return(uint32_t caller)
     g_block_returned++;
     entry_live_write("xnu_live_block_return", caller);
     entry_live_write("xnu_live_block_returns", g_block_returned);
+}
+
+/*
+ * Experiment 454. One call per entry into the two IOKit deadline sleeps, from their wrappers. `site`
+ * is the wrapper's own `lr` - the function that asked IOKit to wait - and `now` is the counter read in
+ * the same wrapper, so the report carries both ends of the comparison `assert_wait_deadline` will make
+ * on the device: `dl_lo`/`dl_hi` against `now`. Every record goes live, so a boot that hangs in the
+ * wait still says where it entered and what it was waiting until.
+ */
+void entry_note_iolock(uint32_t ent, uint32_t site, uint32_t thread, uint32_t lock, uint32_t event,
+                       uint32_t inter, uint32_t dl_lo, uint32_t dl_hi, uint32_t now)
+{
+    if (g_iolock_calls == 0) {
+        g_iolock_first_ent = ent;
+        g_iolock_first_site = site;
+        g_iolock_first_thread = thread;
+    }
+    g_iolock_calls++;
+    if (ent < ENTRY_IOLOCK_MAX)
+        g_iolock_count[ent]++;
+    g_iolock_last_ent = ent;
+    g_iolock_last_site = site;
+    g_iolock_last_thread = thread;
+    g_iolock_last_lock = lock;
+    g_iolock_last_event = event;
+    g_iolock_last_inter = inter;
+    g_iolock_last_dl_lo = dl_lo;
+    g_iolock_last_dl_hi = dl_hi;
+    g_iolock_last_now = now;
+    entry_live_write("xnu_live_iolock_ent", ent);
+    entry_live_write("xnu_live_iolock_site", site);
+    entry_live_write("xnu_live_iolock_thr", thread);
+    entry_live_write("xnu_live_iolock_lock", lock);
+    entry_live_write("xnu_live_iolock_event", event);
+    entry_live_write("xnu_live_iolock_inter", inter);
+    entry_live_write("xnu_live_iolock_dl_lo", dl_lo);
+    entry_live_write("xnu_live_iolock_dl_hi", dl_hi);
+    entry_live_write("xnu_live_iolock_now", now);
 }
 
 /*

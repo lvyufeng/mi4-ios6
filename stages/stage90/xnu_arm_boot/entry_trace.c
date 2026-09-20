@@ -130,7 +130,7 @@ extern void entry_note_vmwait(uint32_t caller);
  * non-terminal block needs both and why the ring is eight deep. 453 added the thread to the first,
  * which is the value `entry_thread()` returns below.
  */
-extern void entry_note_block(uint32_t caller, uint32_t continuation, uint32_t thread);
+extern void entry_note_block(uint32_t caller, uint32_t continuation, uint32_t thread, uint32_t now);
 extern void entry_note_block_return(uint32_t caller);
 
 /*
@@ -140,6 +140,14 @@ extern void entry_note_block_return(uint32_t caller);
  */
 extern void entry_note_sleep(uint32_t ent, uint32_t site, uint32_t thread, uint32_t chan,
                              uint32_t wmsg, uint32_t pri, uint32_t tmo);
+
+/*
+ * 454's one, called by the two IOKit deadline wrappers. `dl_lo`/`dl_hi` and `now` are the two ends of
+ * the comparison the wait will make; see `entry_stubs.c`.
+ */
+extern void entry_note_iolock(uint32_t ent, uint32_t site, uint32_t thread, uint32_t lock,
+                              uint32_t event, uint32_t inter, uint32_t dl_lo, uint32_t dl_hi,
+                              uint32_t now);
 
 /*
  * Experiment 453. The current thread, in one instruction: on ARMv7 `current_thread()` is a read of
@@ -154,6 +162,25 @@ static inline uint32_t entry_thread(void)
 
     __asm__ volatile ("mrc p15, 0, %0, c13, c0, 4" : "=r"(t));
     return t;
+}
+
+/*
+ * Experiment 454. The counter `ml_get_timebase` reads - `mrrc p15, 0, lo, hi, c14`, which is the ARM
+ * generic timer's virtual count on this target and the third instruction pair of that function's own
+ * body (`0x8000f380`), behind a `mach_absolute_time` that is a four-byte tail branch to it. Read
+ * directly rather than by calling `mach_absolute_time` for the same reason the thread is read
+ * directly: the wrapper then depends on one instruction and no memory, and it cannot be affected by
+ * anything the boot has or has not initialised - which is the point, because whether this counter is
+ * *moving* is the question. Only the low word is kept (`now` in the report): at 19.2 MHz it wraps
+ * every 3.7 minutes and the waits here are seconds apart, while the high word would cost a second
+ * record per call to say nothing.
+ */
+static inline uint32_t entry_counter(void)
+{
+    uint32_t lo, hi;
+
+    __asm__ volatile ("mrrc p15, 0, %0, %1, c14" : "=r"(lo), "=r"(hi));
+    return lo;
 }
 
 /*
@@ -488,9 +515,48 @@ void __wrap_thread_block(void *continuation)
 {
     uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
 
-    entry_note_block(caller, (uint32_t)(uintptr_t)continuation, entry_thread());
+    entry_note_block(caller, (uint32_t)(uintptr_t)continuation, entry_thread(), entry_counter());
     __real_thread_block(continuation);
     entry_note_block_return(caller);
+}
+
+/* ------------------------------------------------------------ the IOKit deadline sleeps (454) */
+/*
+ * 453 ended with a negative - the boot thread's `lck_mtx_sleep_deadline` wait came through none of the
+ * seven sleep entries - and with the image's own answer to what it did come through:
+ * `lck_mtx_sleep_deadline` has exactly three callers there (`_sleep+0x21c`, `IOLockSleepDeadline+0x20`,
+ * `IORecursiveLockSleepDeadline+0x38`), so wrapping these two wraps the whole remaining path, exactly
+ * as wrapping the seven wrapped the whole sleep family. Both are global, both are
+ * `int (lock, event, AbsoluteTime deadline, UInt32 interType)`, and the disassembly fixes the ABI: each
+ * stores the `{r2, r3}` pair - the `AbsoluteTime` - straight to the stack for the call below and loads
+ * `interType` from `[sp, #16]` (or `[sp, #24]`, with one more saved register), so a `uint64_t` third
+ * parameter is the same function as far as the calling convention is concerned, and nothing here
+ * changes an argument or a return value.
+ *
+ * What the wrapper adds is the *other* end of the wait: the deadline it was given, and the counter it
+ * will be compared against (`entry_counter()`). `assert_wait_deadline` arms the thread's own timer
+ * with that deadline (`osfmk/kern/locks.c:892`), and a thread timer is delivered by a timer interrupt,
+ * of which this boot has none - so the pair `(deadline, now)` is what tells a boot that is waiting for
+ * a timer that cannot exist from one waiting for a publisher that never came.
+ */
+int __real_IOLockSleepDeadline(void *lock, void *event, uint64_t deadline, uint32_t interType);
+int __wrap_IOLockSleepDeadline(void *lock, void *event, uint64_t deadline, uint32_t interType)
+{
+    entry_note_iolock(0u, (uint32_t)(uintptr_t)__builtin_return_address(0), entry_thread(),
+                      (uint32_t)(uintptr_t)lock, (uint32_t)(uintptr_t)event, interType,
+                      (uint32_t)deadline, (uint32_t)(deadline >> 32), entry_counter());
+    return __real_IOLockSleepDeadline(lock, event, deadline, interType);
+}
+
+int __real_IORecursiveLockSleepDeadline(void *lock, void *event, uint64_t deadline,
+                                        uint32_t interType);
+int __wrap_IORecursiveLockSleepDeadline(void *lock, void *event, uint64_t deadline,
+                                        uint32_t interType)
+{
+    entry_note_iolock(1u, (uint32_t)(uintptr_t)__builtin_return_address(0), entry_thread(),
+                      (uint32_t)(uintptr_t)lock, (uint32_t)(uintptr_t)event, interType,
+                      (uint32_t)deadline, (uint32_t)(deadline >> 32), entry_counter());
+    return __real_IORecursiveLockSleepDeadline(lock, event, deadline, interType);
 }
 
 /* --------------------------------------------------------------- the sleep family (453) */
