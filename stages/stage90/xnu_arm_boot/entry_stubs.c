@@ -1265,6 +1265,56 @@ uint32_t g_dtrec_kids;
 uint32_t g_dtrec_set;
 
 /*
+ * 487's two groups, and they are the ones that turn "the driver layer" from a phrase into a count.
+ *
+ * **The first is the class of each of the tree's own children.** 485 named the 21 and read each one's
+ * state; 486 named the root and the registry slot. Neither named *what the 21 are*, and the class is
+ * the one reading that decides whether Apple's driver layer ran: a device-tree entry is `new IOService`
+ * (`IODeviceTreeSupport.cpp:359`), and the object `IODTPlatformExpert::createNub` puts in its place is
+ * `new IOPlatformDevice` (`IOPlatformExpert.cpp:1283`) - created by `createNubs` (`:1310`), which
+ * `configure` calls through `processTopLevel` (`:1271`, `:1314`) at the end of the platform expert's
+ * own start. So `IOService` at these 21 addresses means the raw tree, and `IOPlatformDevice` means the
+ * OS replaced each node with a nub, attached it to the platform expert (`nub->attach(parent)`,
+ * `IOService` plane) and registered it for matching.
+ *
+ * **The second is the plane that attachment lives in.** `attach(provider)` links a service to its
+ * provider in `gIOServicePlane` (`IOService.cpp:639`), and `StartIOKit`'s `rootNub->attach(0)` makes
+ * that object the *root of the service plane* (`gIOServiceRoot = this; attachToParent(
+ * getRegistryRoot(), gIOServicePlane )`, `IOService.cpp:663-666`). So `getServiceRoot()`'s children in
+ * `gIOServicePlane` are precisely the services attached to the platform expert - the nubs a driver
+ * layer would have made - and the census of that set is a count of the driver layer's *links*, taken by
+ * the same four accessors the IODT census uses. `same` compares `getServiceRoot()` with the object the
+ * IODT walk started from: Apple's code says they are one object, so a disagreement is a reading of
+ * something else and the two pointers side by side say which.
+ */
+uint32_t g_dtcc_calls;
+uint32_t g_dtcc_named;
+uint32_t g_dtcc_class0[ENTRY_DTK_SHOWN];
+uint32_t g_dtcc_class1[ENTRY_DTK_SHOWN];
+/* 487's own cap, and it is compared with 485's by `tools/check_driver_plane_census.py` rather than
+ * assumed equal: two censuses of one shape are only comparable if they stop at the same place. */
+#define ENTRY_SVC_SHOWN 24u
+uint32_t g_svc_calls;
+uint32_t g_svc_plane;
+uint32_t g_svc_root;
+uint32_t g_svc_same;
+uint32_t g_svc_set;
+uint32_t g_svc_kids;
+uint32_t g_svc_count;
+uint32_t g_svc_shown;
+uint32_t g_svc_none;
+uint32_t g_svc_named;
+uint32_t g_svc_matched;
+uint32_t g_svc_registered;
+uint32_t g_svc_child[ENTRY_SVC_SHOWN];
+uint32_t g_svc_name0[ENTRY_SVC_SHOWN];
+uint32_t g_svc_name1[ENTRY_SVC_SHOWN];
+uint32_t g_svc_class0[ENTRY_SVC_SHOWN];
+uint32_t g_svc_class1[ENTRY_SVC_SHOWN];
+uint32_t g_svc_state0[ENTRY_SVC_SHOWN];
+uint32_t g_svc_state1[ENTRY_SVC_SHOWN];
+
+/*
  * 486's run B, answered as a record: **the object, read before it is called.**
  *
  * The class read is done through slot 9 of the object's first word, and run B called it on an object the
@@ -2945,6 +2995,36 @@ __attribute__((noinline)) static void entry_write_485_kv(void)
     entry_write_kv("xnu_entry_cls_fn", g_cls_fn);
     entry_write_kv("xnu_entry_cls_meta", g_cls_meta);
     entry_write_kv("xnu_entry_cls_took", g_cls_took);
+    /*
+     * 487's, in the same group because they are read at the same moment by the same two censuses: the
+     * class of each of the tree's children (`dtcc_*`, keyed by the `seq` `dtk_seq` publishes), and the
+     * second plane - its plane and root pointers, `same`, the child set and both counts, and one record
+     * per attached service with its name, class and two state words. `svc_none` is the reason no reading
+     * was taken, which is a different finding from an empty set and must not print as one.
+     */
+    entry_write_kv("xnu_entry_dtcc_calls", g_dtcc_calls);
+    entry_write_kv("xnu_entry_dtcc_c0", g_dtcc_class0[0]);
+    entry_write_kv("xnu_entry_dtcc_c1", g_dtcc_class1[0]);
+    entry_write_kv("xnu_entry_dtcc_named", g_dtcc_named);
+    entry_write_kv("xnu_entry_svc_calls", g_svc_calls);
+    entry_write_kv("xnu_entry_svc_plane", g_svc_plane);
+    entry_write_kv("xnu_entry_svc_root", g_svc_root);
+    entry_write_kv("xnu_entry_svc_same", g_svc_same);
+    entry_write_kv("xnu_entry_svc_set", g_svc_set);
+    entry_write_kv("xnu_entry_svc_kids", g_svc_kids);
+    entry_write_kv("xnu_entry_svc_count", g_svc_count);
+    entry_write_kv("xnu_entry_svc_shown", g_svc_shown);
+    entry_write_kv("xnu_entry_svc_none", g_svc_none);
+    entry_write_kv("xnu_entry_svc_named", g_svc_named);
+    entry_write_kv("xnu_entry_svc_matched", g_svc_matched);
+    entry_write_kv("xnu_entry_svc_registered", g_svc_registered);
+    entry_write_kv("xnu_entry_svc_child0", g_svc_child[0]);
+    entry_write_kv("xnu_entry_svc_name00", g_svc_name0[0]);
+    entry_write_kv("xnu_entry_svc_name01", g_svc_name1[0]);
+    entry_write_kv("xnu_entry_svc_class00", g_svc_class0[0]);
+    entry_write_kv("xnu_entry_svc_class01", g_svc_class1[0]);
+    entry_write_kv("xnu_entry_svc_state00", g_svc_state0[0]);
+    entry_write_kv("xnu_entry_svc_state01", g_svc_state1[0]);
 }
 
 /*
@@ -5020,6 +5100,104 @@ void entry_note_dtchild(uint32_t seq, uint32_t child, uint32_t name0, uint32_t n
     entry_live_write("xnu_live_dtk_name1", name1);
     entry_live_write("xnu_live_dtk_state0", state0);
     entry_live_write("xnu_live_dtk_state1", state1);
+}
+
+/*
+ * 487: the class of the *same* child `entry_note_dtchild` just described, in a record of its own rather
+ * than two arguments longer, because that record's shape is 485's claim and a later step does not
+ * re-open an earlier step's claim to carry a new number.
+ *
+ * The pair of records is meant to be read together and they carry the same `seq`: one says which child
+ * this is and what state it is in, the other says what class it is. Both are written from the same loop
+ * iteration, so a log in which one of them stops early is a log in which the class read faulted - and
+ * the class read is the one instrument here that *calls* something (`entry_class_words` calls the
+ * object's own `getMetaClass`), which is what 486's run B cost.
+ */
+void entry_note_dtchildcls(uint32_t seq, uint32_t class0, uint32_t class1)
+{
+    g_dtcc_calls++;
+    if (class0 != 0u || class1 != 0u)
+        g_dtcc_named++;
+    if (seq < ENTRY_DTK_SHOWN) {
+        g_dtcc_class0[seq] = class0;
+        g_dtcc_class1[seq] = class1;
+    }
+    entry_live_write("xnu_live_dtcc_seq", seq);
+    entry_live_write("xnu_live_dtcc_class0", class0);
+    entry_live_write("xnu_live_dtcc_class1", class1);
+}
+
+/*
+ * 487's second plane, in the same four parts as 485's first one: the pair of pointers that says *which
+ * object* this is (`svc_root` and `svc_same`, the same cross-check the IODT census publishes with
+ * `dtk_root`/`dtk_same`), the child set and the entry's own count, the array's count of the same
+ * children, and one record per child with its name, its class and its two state words.
+ *
+ * `svc_none` is the record 485's census needed and this one needs more often: `gIOServicePlane` could
+ * be NULL (the plane is made in `IODeviceTreeSupport.cpp`'s `makePlane`, and a boot that never got
+ * there would have no service plane at all) or `getServiceRoot()` could be NULL (nothing has attached
+ * with a NULL provider). "The service plane is empty" and "there is no service plane" are different
+ * findings and only one of them is about drivers, so the reason is a number and not an absence.
+ */
+void entry_note_svcbegin(uint32_t plane, uint32_t root, uint32_t same)
+{
+    g_svc_calls++;
+    g_svc_plane = plane;
+    g_svc_root = root;
+    g_svc_same = same;
+    entry_live_write("xnu_live_svc_calls", g_svc_calls);
+    entry_live_write("xnu_live_svc_plane", plane);
+    entry_live_write("xnu_live_svc_root", root);
+    entry_live_write("xnu_live_svc_same", same);
+}
+
+void entry_note_svcnone(uint32_t why)
+{
+    g_svc_none = why;
+    entry_live_write("xnu_live_svc_none", why);
+}
+
+void entry_note_svcset(uint32_t set, uint32_t kids)
+{
+    g_svc_set = set;
+    g_svc_kids = kids;
+    entry_live_write("xnu_live_svc_set", set);
+    entry_live_write("xnu_live_svc_kids", kids);
+}
+
+void entry_note_svccount(uint32_t count)
+{
+    g_svc_count = count;
+    entry_live_write("xnu_live_svc_count", count);
+}
+
+void entry_note_svcchild(uint32_t seq, uint32_t child, uint32_t name0, uint32_t name1,
+                         uint32_t class0, uint32_t class1, uint32_t state0, uint32_t state1)
+{
+    if (name0 != 0u || name1 != 0u)
+        g_svc_named++;
+    if ((state0 & 0x4u) != 0u)
+        g_svc_matched++;
+    if ((state0 & 0x2u) != 0u)
+        g_svc_registered++;
+    g_svc_shown++;
+    if (seq < ENTRY_SVC_SHOWN) {
+        g_svc_child[seq] = child;
+        g_svc_name0[seq] = name0;
+        g_svc_name1[seq] = name1;
+        g_svc_class0[seq] = class0;
+        g_svc_class1[seq] = class1;
+        g_svc_state0[seq] = state0;
+        g_svc_state1[seq] = state1;
+    }
+    entry_live_write("xnu_live_svc_seq", seq);
+    entry_live_write("xnu_live_svc_child", child);
+    entry_live_write("xnu_live_svc_name0", name0);
+    entry_live_write("xnu_live_svc_name1", name1);
+    entry_live_write("xnu_live_svc_class0", class0);
+    entry_live_write("xnu_live_svc_class1", class1);
+    entry_live_write("xnu_live_svc_state0", state0);
+    entry_live_write("xnu_live_svc_state1", state1);
 }
 #endif /* STAGE90_ENTRY_TRACE */
 

@@ -989,6 +989,30 @@ def _bump(text, needle, replacement):
     return text.replace(needle, replacement, 1)
 
 
+def _move_line(text, needle, after):
+    """The line holding `needle`, moved to just below the line holding `after` - a mutation that says
+    "the census is not where it is" without naming either of the census's neighbours. 487 put a second
+    census between `entry_probe_dt_children()` and `__real_vm_pageout()`, so a mutation written as the
+    adjacent pair stopped matching the text it was about (defect class: a needle that assumes an
+    adjacency); the line is the unit the claim is about, so the line is what moves."""
+    lines = text.splitlines(keepends=True)
+    moved = [l for l in lines if needle in l]
+    assert len(moved) == 1, (needle, len(moved))
+    rest = [l for l in lines if needle not in l]
+    at = [i for i, l in enumerate(rest) if after in l]
+    assert at, after
+    rest.insert(at[-1] + 1, moved[0])
+    return "".join(rest)
+
+
+def _drop_line(text, needle):
+    """The line holding `needle`, gone."""
+    lines = text.splitlines(keepends=True)
+    kept = [l for l in lines if needle not in l]
+    assert len(kept) == len(lines) - 1, (needle, len(lines) - len(kept))
+    return "".join(kept)
+
+
 def mutate_facts(facts, mutate):
     facts = dict(facts)
     facts["trace_defines"] = dict(facts["trace_defines"])
@@ -1078,13 +1102,10 @@ def mutate_facts(facts, mutate):
                              "    entry_note_boot_tail(3u, (uint32_t)(uintptr_t)__real_vm_page_init_local_q);\n",
                              ""))
     elif mutate == "the_census_moves_after_the_call":
-        rederive_trace(_bump(facts["trace_text"],
-                             "    entry_probe_dt_children();\n    __real_vm_pageout();",
-                             "    __real_vm_pageout();\n    entry_probe_dt_children();"))
+        rederive_trace(_move_line(facts["trace_text"], "entry_probe_dt_children();",
+                                  "    __real_vm_pageout();"))
     elif mutate == "the_census_is_dropped":
-        rederive_trace(_bump(facts["trace_text"],
-                             "    entry_probe_dt_children();\n    __real_vm_pageout();",
-                             "    __real_vm_pageout();"))
+        rederive_trace(_drop_line(facts["trace_text"], "entry_probe_dt_children();"))
     elif mutate == "something_runs_after_the_last_call":
         rederive_trace(_bump(facts["trace_text"], "    __real_vm_pageout();\n",
                              "    __real_vm_pageout();\n    g_dtk_calls++;\n"))
@@ -1117,8 +1138,13 @@ def mutate_facts(facts, mutate):
                              "state0 = *(volatile uint32_t *)((const char *)child + "
                              "STAGE90_DTK_STATE0_OFF);"))
     elif mutate == "the_second_state_word_moves_a_word_back":
-        rederive_trace(_bump(facts["trace_text"], "STAGE90_DTK_STATE0_OFF + 4u",
-                             "STAGE90_DTK_STATE0_OFF"))
+        # Every spelling, not the first: the claim is an existence test over the whole file, so a
+        # mutation that fixed one of the two censuses' reads would leave the spelling standing and be
+        # accepted. 487's second census reads the same word, which is what made the first-occurrence
+        # version of this mutation stop being a mutation.
+        assert facts["trace_text"].count("STAGE90_DTK_STATE0_OFF + 4u") >= 1
+        rederive_trace(facts["trace_text"].replace("STAGE90_DTK_STATE0_OFF + 4u",
+                                                   "STAGE90_DTK_STATE0_OFF"))
     elif mutate == "the_mangled_accessor_is_dropped":
         rederive_trace(_bump(facts["trace_text"],
                              '__asm__("_ZNK7OSArray8getCountEv")', '__asm__("_ZNK7OSArray8getCountE")'))
@@ -1188,9 +1214,23 @@ def mutate_facts(facts, mutate):
             l for l in facts["functions"][KERNEL_THREAD] if "__wrap_vm_page_init_local_q" not in l]
         facts["functions"].setdefault("load_context", []).append(moved)
     elif mutate == "the_site_word_is_not_the_function":
-        facts["functions"]["__wrap_vm_pageout"] = [
-            line.replace("movw\tr1, #7924", "movw\tr1, #7920")
-            for line in facts["functions"]["__wrap_vm_pageout"]]
+        # The `movw` is found by the value it materialises rather than by its line, so the mutation
+        # survives an edit to the wrapper's body. Written as a literal immediate it became a no-op when
+        # 487 added code to `__wrap_vm_pageout` and the constant moved - a mutation that matches nothing
+        # is a mutation that proves nothing, and the selftest is what said so.
+        site = facts["symbols"]["vm_pageout"]
+        low = site & 0xFFFF
+        patched, found = [], 0
+        for line in facts["functions"]["__wrap_vm_pageout"]:
+            m = re.search(r"\bmovw\s+(r\d+),\s+#(\d+)", line)
+            if not found and m and int(m.group(2)) == low:
+                patched.append(line.replace("movw\t%s, #%d" % (m.group(1), low),
+                                            "movw\t%s, #%d" % (m.group(1), (low - 4) & 0xFFFF)))
+                found += 1
+            else:
+                patched.append(line)
+        assert found == 1, ("no movw materialises vm_pageout's low half", hex(low))
+        facts["functions"]["__wrap_vm_pageout"] = patched
     else:
         raise SystemExit("unknown mutation %s" % mutate)
     return facts

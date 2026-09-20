@@ -28104,5 +28104,19 @@ run python3 "$REPO_ROOT/tools/check_registry_adoption.py" --image "$OUT/xnu_arm_
     || exit 1
 run python3 "$REPO_ROOT/tools/check_registry_adoption.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
     || exit 1
+
+#
+# **And 487's own check, which is about the second plane rather than the tree.** The census this experiment
+# adds reads `gIOServicePlane` - a different global from `gIODTPlane` - and walks its root's child set the
+# same way the tree's was walked, because the device-tree nodes' *class* is what says whether Apple's
+# `createNubs` pass ran: `IOPlatformDevice` means it did and a nub exists for the node, `IOService` means
+# the node is still the raw object `IODeviceTreeAlloc` made. Both planes are read between the wrapper's own
+# record and `__real_vm_pageout`, which never returns, so the check asserts that order as well as the keys'
+# two writers. It refuses a build that lost either plane, either the nub pass or the two pure virtuals it
+# needs, either census, either class in the prediction, any of the 19 live or 23 report keys, or the order.
+run python3 "$REPO_ROOT/tools/check_driver_plane_census.py" --image "$OUT/xnu_arm_entry.elf" --verbose \
+    || exit 1
+run python3 "$REPO_ROOT/tools/check_driver_plane_census.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
+    || exit 1
 say "the payload build reads the .bin from there directly; nothing to install"
 

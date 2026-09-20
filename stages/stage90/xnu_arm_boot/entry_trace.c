@@ -1491,6 +1491,12 @@ extern void entry_note_class(uint32_t site, uint32_t obj, uint32_t vptr, uint32_
 #define STAGE90_CLS_WALK     1u
 #define STAGE90_CLS_ROOT     2u
 #define STAGE90_CLS_RECORDED 3u
+/* 487: the tree's own children, and the second plane's. Two more sites rather than one, because the
+ * four records answer four different questions - "what is the tree root", "what is the registry slot",
+ * "what is each node of the tree" and "what is attached to the service root" - and a shared site would
+ * make the log unable to say which of them a class word came from. */
+#define STAGE90_CLS_CHILD    4u
+#define STAGE90_CLS_SVCCHILD 5u
 
 static const void *entry_object_meta(uint32_t site, const void *obj)
 {
@@ -2315,6 +2321,7 @@ extern void entry_note_dtclass(uint32_t obj, uint32_t class0, uint32_t class1, u
 extern void entry_note_dtrec(uint32_t obj, uint32_t class0, uint32_t class1, uint32_t kids,
                              uint32_t set);
 extern uint32_t g_dtplane_root;
+extern void entry_note_dtchildcls(uint32_t seq, uint32_t class0, uint32_t class1);
 /* `entry_xnu_registry_root`, `entry_xnu_child_entry`, `entry_xnu_child_set` and `entry_xnu_child_count`
  * are declared by 462's block above, with the mangled names of the same four functions the OS's own
  * `fromPath` calls - one spelling of each in this file, which is what makes this census the same walk
@@ -2331,7 +2338,13 @@ extern uint32_t entry_xnu_entry_state(const void *self)
 #define STAGE90_DTK_MAX 24u
 #define STAGE90_DTK_STATE0_OFF 36u
 
-void entry_probe_dt_children(void)
+/*
+ * 487: this census returns the root it walked, because the second plane's census takes it as its
+ * cross-check - `IOService::getServiceRoot()` is the same object by Apple's own construction
+ * (`IOService.cpp:663-666`), so publishing the pair with a `same` flag is what keeps the two readings
+ * from being two readings of two different things.
+ */
+void *entry_probe_dt_children(void)
 {
     const void *plane = gIODTPlane;
     void *recorded = (void *)(uintptr_t)g_dtplane_root;
@@ -2342,13 +2355,13 @@ void entry_probe_dt_children(void)
 
     if (plane == 0) {
         entry_note_dtnone(0u);
-        return;
+        return 0;
     }
 
     root = entry_xnu_child_entry(entry_xnu_registry_root(), plane);
     if (root == 0) {
         entry_note_dtnone(1u);
-        return;
+        return 0;
     }
 
     entry_note_dtbegin((uint32_t)(uintptr_t)plane, (uint32_t)(uintptr_t)recorded,
@@ -2380,8 +2393,13 @@ void entry_probe_dt_children(void)
                          (uint32_t)(uintptr_t)rset);
     }
 
+    /*
+     * The root is returned whether or not the child set could be read: the second census's cross-check
+     * is about *which object* the OS's own walk starts from, and that reading is complete before this
+     * line. A `return 0` here would turn "the set was empty" into "there is no tree".
+     */
     if (set == 0)
-        return;
+        return root;
 
     n = entry_xnu_array_count(set);
     entry_note_dtcount((uint32_t)n);
@@ -2391,6 +2409,7 @@ void entry_probe_dt_children(void)
         const char *name;
         uint32_t name0 = 0u, name1 = 0u;
         uint32_t state0 = 0u, state1 = 0u;
+        uint32_t cclass0 = 0u, cclass1 = 0u;
 
         if (child == 0)
             continue;
@@ -2402,6 +2421,123 @@ void entry_probe_dt_children(void)
         state0 = entry_xnu_entry_state(child);
         state1 = *(volatile uint32_t *)((const char *)child + STAGE90_DTK_STATE0_OFF + 4u);
         entry_note_dtchild(i, (uint32_t)(uintptr_t)child, name0, name1, state0, state1);
+
+        /*
+         * 487: the child's *class*, which is the one reading 485 and 486 left unmeasured about these
+         * 21 objects. A device-tree node is `new IOService` (`IODeviceTreeSupport.cpp:359`), and the
+         * object Apple's driver layer puts in its place is `new IOPlatformDevice`
+         * (`IOPlatformExpert.cpp:1283`, `IODTPlatformExpert::createNub`, called from `createNubs` at
+         * `:1310`, which `configure` calls at `:1271` through `processTopLevel` at `:1314`). So the
+         * name of the class at this object *is* the answer to "did the driver layer's nub pass run":
+         * `IOService` means these are the tree's raw entries, `IOPlatformDevice` means the OS replaced
+         * them with nubs and attached them for matching. The record is separate from `entry_note_dtchild`
+         * rather than two arguments longer, because that record's shape is 485's claim and a step does
+         * not re-open a previous step's claim to carry a new number.
+         */
+        entry_class_words(STAGE90_CLS_CHILD, child, &cclass0, &cclass1);
+        entry_note_dtchildcls(i, cclass0, cclass1);
+    }
+
+    return root;
+}
+
+/*
+ * ------------------------------------------------------------------- 487: the second plane
+ *
+ * **The IODT census above answers "what is in the tree"; this one answers "what is attached to the
+ * thing that owns the tree", and the second is where a driver would appear.** The goal's second half
+ * is "the basic drivers run", and by 485's own table every one of the 21 nodes is `Registered |
+ * Matched | FirstPublish | FirstMatch` - so the question is no longer whether they are known to the
+ * registry, it is whether anything is *attached* to a provider and therefore eligible for `start`.
+ *
+ * The two planes are separate registries over the same objects, and Apple's ARM boot uses both:
+ * `IOService::attach( provider )` links a service to its provider in `gIOServicePlane`
+ * (`IOService.cpp:639`), while the device tree's own parentage is `gIODTPlane`. `StartIOKit` makes the
+ * platform expert device the *root of the service plane* with `rootNub->attach( 0 )`, whose
+ * zero-provider branch is `gIOServiceRoot = this; attachToParent( getRegistryRoot(), gIOServicePlane )`
+ * (`IOService.cpp:663-666`) - so `IOService::getServiceRoot()` is the object this census already read
+ * as the tree's adopter, and its children in `gIOServicePlane` are the services attached to it.
+ *
+ * The reading is a census and not a trace for 455's reason, restated: `attach`, `start` and
+ * `registerService` are all *virtual*, so none of them can be `--wrap`ped - a wrapper on the name
+ * catches only a qualified direct call, and the OS's own machinery calls every one of them through
+ * the object's vtable. What a virtual call *produces*, on the other hand, is a link in a plane and a
+ * child set that any accessor can read. **A driver that was started left a child behind, and the
+ * child set is the record.**
+ *
+ * The census is deliberately the same shape as the one above - the same four accessors, the same
+ * state offset, the same per-child cap read from one `#define` - because the two numbers are meant to
+ * be compared: two planes, two child counts, one object read twice. `tools/check_driver_plane_census.py`
+ * fails the build unless the shapes are the same and the caps agree.
+ *
+ * Nothing is released and nothing is retained, exactly as above: every accessor here returns a
+ * borrowed reference and `OSArray::getObject` does not retain.
+ */
+extern const void *gIOServicePlane;
+extern void *entry_xnu_service_root(void)
+    __asm__("_ZN9IOService14getServiceRootEv");
+extern void entry_note_svcbegin(uint32_t plane, uint32_t root, uint32_t same);
+extern void entry_note_svcnone(uint32_t why);
+extern void entry_note_svcset(uint32_t set, uint32_t kids);
+extern void entry_note_svccount(uint32_t count);
+extern void entry_note_svcchild(uint32_t seq, uint32_t child, uint32_t name0, uint32_t name1,
+                                uint32_t class0, uint32_t class1, uint32_t state0, uint32_t state1);
+
+#define STAGE90_SVC_MAX 24u
+
+void entry_probe_service_plane(const void *iokit_root)
+{
+    const void *plane = gIOServicePlane;
+    void *root;
+    void *set;
+    unsigned int n, kids, i;
+
+    if (plane == 0) {
+        entry_note_svcnone(0u);
+        return;
+    }
+
+    root = entry_xnu_service_root();
+    if (root == 0) {
+        entry_note_svcnone(1u);
+        return;
+    }
+
+    /*
+     * `same` is the cross-check, and it is the reason this function takes the IODT census's root as an
+     * argument: Apple's own code says the two are one object (`attach(0)` sets the service root to
+     * `this`), so a run where they differ means one of the two readings is of something else - and the
+     * pair of pointers, published together, is what says which.
+     */
+    entry_note_svcbegin((uint32_t)(uintptr_t)plane, (uint32_t)(uintptr_t)root,
+                        (root == iokit_root) ? 1u : 0u);
+
+    kids = entry_xnu_child_count(root, plane);
+    set = entry_xnu_child_set(root, plane);
+    entry_note_svcset((uint32_t)(uintptr_t)set, (uint32_t)kids);
+
+    if (set == 0)
+        return;
+
+    n = entry_xnu_array_count(set);
+    entry_note_svccount((uint32_t)n);
+
+    for (i = 0u; i < n && i < STAGE90_SVC_MAX; i++) {
+        void *child = entry_xnu_array_object(set, i);
+        const char *name;
+        uint32_t name0 = 0u, name1 = 0u;
+        uint32_t class0 = 0u, class1 = 0u;
+        uint32_t state0 = 0u, state1 = 0u;
+
+        if (child == 0)
+            continue;
+        name = entry_xnu_entry_name(child, plane);
+        if (name != 0)
+            entry_str8(name, &name0, &name1);
+        entry_class_words(STAGE90_CLS_SVCCHILD, child, &class0, &class1);
+        state0 = entry_xnu_entry_state(child);
+        state1 = *(volatile uint32_t *)((const char *)child + STAGE90_DTK_STATE0_OFF + 4u);
+        entry_note_svcchild(i, (uint32_t)(uintptr_t)child, name0, name1, class0, class1, state0, state1);
     }
 }
 
@@ -2411,14 +2547,21 @@ void entry_probe_dt_children(void)
  * Reading the registry there rather than earlier is the point: the platform expert's nub pass and
  * every matching attempt have already happened by then, so the table is the *settled* state of the
  * driver layer and not a snapshot of it mid-flight.
+ *
+ * 487 runs *both* censuses at that same moment and passes the first one's root to the second, so the
+ * pair of planes is read as one state rather than as two moments.
  */
-extern void entry_probe_dt_children(void);
+extern void *entry_probe_dt_children(void);
+extern void entry_probe_service_plane(const void *iokit_root);
 
 void __real_vm_pageout(void);
 void __wrap_vm_pageout(void)
 {
+    const void *iokit_root;
+
     entry_note_boot_tail(4u, (uint32_t)(uintptr_t)__real_vm_pageout);
-    entry_probe_dt_children();
+    iokit_root = entry_probe_dt_children();
+    entry_probe_service_plane(iokit_root);
     __real_vm_pageout();
     /*
      * Nothing is recorded after the call and that is itself the reading: `vm_pageout` is followed by
