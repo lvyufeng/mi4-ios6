@@ -233,16 +233,16 @@ extern "C" uint32_t entry_irq_register_client(uint32_t intid, uint32_t handler, 
  *       :62  #define QTIMER_CNTV_LOW_REG   0x008
  *       :63  #define QTIMER_CNTV_HIGH_REG  0x00C
  *       :64  #define QTIMER_CTRL_REG       0x02C
- *       :66  #define QTIMER_FREQ_REG       0x010
+ *       :65  #define QTIMER_FREQ_REG       0x010
  *       :66  #define QTIMER_CNTP_TVAL_REG  0x028
  *       :67  #define QTIMER_CNTV_TVAL_REG  0x038
- *       :50  #define ARCH_TIMER_CTRL_ENABLE   (1 << 0)
- *       :51  #define ARCH_TIMER_CTRL_IT_MASK  (1 << 1)
- *       :52  #define ARCH_TIMER_CTRL_IT_STAT  (1 << 2)
- *       :631 timer_base = of_iomap(frame, 0);              <- the frame's *first* reg
- *       :637 arch_timer_spi = irq_of_parse_and_map(frame, 0);  <- the frame's *first* interrupt
+ *       :51  #define ARCH_TIMER_CTRL_ENABLE   (1 << 0)
+ *       :52  #define ARCH_TIMER_CTRL_IT_MASK  (1 << 1)
+ *       :53  #define ARCH_TIMER_CTRL_IT_STAT  (1 << 2)
+ *       :623 timer_base = of_iomap(frame, 0);              <- the frame's *first* reg
+ *       :629 arch_timer_spi = irq_of_parse_and_map(frame, 0);  <- the frame's *first* interrupt
  *
- * and that kernel applies them to the frame's first `reg` region (`:631`), which is `0xf9021000` -
+ * and that kernel applies them to the frame's first `reg` region (`:623`), which is `0xf9021000` -
  * this node's **second** `reg` entry and the first `reg` entry of the frame node in
  * `arch/arm/boot/dts/msm8974.dtsi:161-167`. `tools/check_timer_line.py` reads those lines out of that
  * file and refuses a build where any offset here disagrees with them, so this block is a copy with a

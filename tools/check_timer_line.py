@@ -191,6 +191,46 @@ def payload_node(text, name):
     return rest[:end]
 
 
+def grounding_block(text):
+    """The comment in one source that grounds this step in the device's own kernel.
+
+    The block is found by the one thing that identifies it without a line number: a comment line that is
+    *nothing but* the device's kernel path. That is how the block that lists the frame's offsets opens,
+    and it is where a *bare* citation lives - a `:NNN` that names no code of its own and is a reference
+    back to a call the block has already quoted. A source with no such line contributes nothing to that
+    one half of the clause, which is honest rather than an omission: `stage90_main.c` cites the two
+    calls inline, beside their names, and the half that reads a citation *with* a name covers it.
+    """
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        content = line.strip().lstrip("*").strip()
+        if content.endswith("arch_timer.c") and "/" in content and " " not in content:
+            lo = i
+            while lo > 0 and (lines[lo - 1].lstrip().startswith("*") or lines[lo - 1].rstrip().endswith("/*")):
+                lo -= 1
+            hi = i
+            while hi + 1 < len(lines) and lines[hi + 1].lstrip().startswith("*"):
+                hi += 1
+            return set(range(lo, hi + 1))
+    return set()
+
+
+def line_citations(text):
+    """Every `:NNN` line citation in a source, as `(cited line, the source line it is written on)`.
+
+    A citation is written on the same line as the name it is about - the number first and the code after
+    it (`:60  #define QTIMER_CNTP_LOW_REG  0x000`) or the sentence first and the number parenthesised
+    after it (``the frame's first `reg` region (`:623`)``). Both shapes put the two within one line of
+    each other, and that is what binds them: a citation separated from its name by a line break is a
+    citation of something else.
+    """
+    out = []
+    for i, line in enumerate(text.split("\n")):
+        for m in re.finditer(r":(\d+)", line):
+            out.append((int(m.group(1)), i, line, m.start()))
+    return out
+
+
 class Facts(object):
     def __init__(self, image):
         self.timer_src = read(TIMER_CPP)
@@ -293,8 +333,10 @@ def claim_offsets_are_the_devices(facts, failures, notes):
                             "0x%x: one of the two moved, and a driver addressing a register its device "
                             "does not have is a driver whose every reading after that is a reading of "
                             "some other register" % (key, ours[key], theirs_name, theirs[theirs_name]))
-    for needle, what in (("of_iomap(frame, 0)", "the frame's first `reg` region"),
-                         ("irq_of_parse_and_map(frame, 0)", "the frame's first interrupt")):
+    needles = (("of_iomap(frame, 0)", "the frame's first `reg` region"),
+               ("irq_of_parse_and_map(frame, 0)", "the frame's first interrupt"))
+    call_lines = {}
+    for needle, what in needles:
         if needle not in facts.arch_timer:
             failures.append("the device's kernel no longer takes %s (`%s` is not in its source), so "
                             "the driver's choice of the frame's *first* entry has nothing behind it"
@@ -309,6 +351,7 @@ def claim_offsets_are_the_devices(facts, failures, notes):
         # the report. The number is now derived from the kernel's own text, so the next time that file
         # moves the citation has to move with it or the build stops with the right number in hand.
         line = facts.arch_timer[:facts.arch_timer.index(needle)].count("\n") + 1
+        call_lines[needle] = line
         for source, who in ((facts.timer_src, "`MSM8974Timer.cpp`"),
                             (facts.payload_src, "`stage90_main.c`")):
             # Either spelling counts. The prose cites the first of the two calls with the file's path
@@ -320,9 +363,66 @@ def claim_offsets_are_the_devices(facts, failures, notes):
                                 "`arch/arm/kernel/arch_timer.c:NNN` or `:NNN`, and either has to be "
                                 "%d - a citation that points at another line is a reading of the "
                                 "wrong text" % (who, needle, line, line))
+
+    # **And every citation that names one of those things, not only the existence of the right number.**
+    # The clause above asks whether the *right* number appears anywhere in the file, and a stale number
+    # beside it is invisible to it - which is exactly what was in this tree when it was first written:
+    # the block that grounds the frame's offsets cited `:631` and `:637` for the two calls *and* `:66`
+    # for `QTIMER_FREQ_REG`, which is at `:65`, while the corrected `:623`/`:629` sat in a different
+    # comment six hundred lines below and satisfied that clause on their own. A clause that asks for the
+    # presence of one citation is not a clause about the absence of another. So each citation is read
+    # *with* the name it is written beside, and that name has to be on the line the citation names.
+    anchors = [name for _, name in FRAME_REG_NAMES + FRAME_BIT_NAMES] + [n for n, _ in needles]
+    kernel_lines = facts.arch_timer.split("\n")
+    cited_calls = set(call_lines.values())
+    checked = 0
+    for source, who in ((facts.timer_src, "`MSM8974Timer.cpp`"),
+                        (facts.payload_src, "`stage90_main.c`")):
+        block = grounding_block(source)
+        # The block finder keys on our own file's shape - the kernel's path alone on a line - and a
+        # property of *the writer* is a claim like any other: if the block is reflowed, the bare
+        # citations inside it stop being read by anything and nothing would say so. The anchored half
+        # below covers twelve of the thirteen without the block; this keeps the thirteenth from going
+        # quietly unchecked.
+        if "external/android_kernel_xiaomi_cancro/arch/arm/kernel/arch_timer.c" in source and not block:
+            failures.append("%s cites the device's kernel by its path but no longer opens that block "
+                            "with the path on a line of its own, so the bare citations in it are read "
+                            "by nothing" % who)
+        for cited, at, line, start in line_citations(source):
+            # A citation that carries a *path* before its number belongs to the file that path names,
+            # and the offset list is full of them: `msm8974.dtsi:161-167` is written two lines below the
+            # call citations, and reading its `161` as a line of the device's kernel is reading a
+            # citation of another file. Only `arch_timer.c`'s own numbers are this claim's business -
+            # and its own long form is one of them, so it is not skipped with the rest.
+            qualified = re.search(r"[\w./-]$", line[:start]) is not None
+            if qualified and "arch_timer.c" not in line[:start]:
+                continue
+            named = [a for a in anchors if a in line]
+            if not named:
+                if at in block and cited_calls and cited not in cited_calls:
+                    failures.append("%s's block that grounds the frame's offsets cites line %d of the "
+                                    "device's kernel with no name on the line, so it is a reference to "
+                                    "one of the two calls the block quotes - and those are at %s. A "
+                                    "citation that points at another line is read as a claim about "
+                                    "whatever is there"
+                                    % (who, cited,
+                                       " and ".join(str(v) for v in sorted(cited_calls))))
+                continue
+            checked += 1
+            for a in named:
+                if not (1 <= cited <= len(kernel_lines)) or a not in kernel_lines[cited - 1]:
+                    failures.append("%s cites `%s` at line %d of the device's kernel, and that line "
+                                    "says `%s` - an offset justified by a citation that points at a "
+                                    "line which does not contain the name it is cited for is justified "
+                                    "by nothing"
+                                    % (who, a, cited,
+                                       kernel_lines[cited - 1].strip() if 1 <= cited <= len(kernel_lines)
+                                       else "(past the end of the file)"))
     if not failures:
         notes.append("the frame's eight register offsets and its three control bits are the device's "
                      "own kernel's, name by name")
+        notes.append("every citation written beside one of those names points at a line of the device's "
+                     "kernel that contains it (%d checked, and one bare reference per block)" % checked)
 
 
 def claim_the_tree_declares_the_devices_line(facts, failures, notes):
@@ -834,6 +934,25 @@ def mutate_facts(facts, mutate):
         # definition of the citation; the number is read out of the kernel's own text instead.
         facts.arch_timer = _bump(facts.arch_timer, "static struct delay_timer arch_delay_timer;",
                                  "static struct delay_timer arch_delay_timer;\n\n/* 498 mutation */")
+    elif mutate == "the_grounding_block_cites_the_line_before_the_call":
+        # **This is the mutation that the clause added for it was written for, and the one the earlier
+        # clause accepts.** The edit restores what the tree actually said when 498 was first written:
+        # the grounding block citing `:631` for the frame's first `reg` region, where the call is at
+        # `:623`. It was invisible because the corrected `arch/arm/kernel/arch_timer.c:623` sits in
+        # another comment six hundred lines below and satisfied the "does the right number appear"
+        # clause on its own - a clause that asks for the presence of one citation is not a clause about
+        # the absence of another.
+        facts.timer_src = _bump(facts.timer_src,
+                                " *       :623 timer_base = of_iomap(frame, 0);",
+                                " *       :631 timer_base = of_iomap(frame, 0);")
+    elif mutate == "the_grounding_block_cites_another_define_line":
+        # The same block, the other kind of citation: a register offset's line number rather than a
+        # call's. `QTIMER_FREQ_REG` is at :65 and the block said :66 - which is `QTIMER_CNTP_TVAL_REG`'s
+        # line, so the citation named a real line of the same file that happens to define a different
+        # register, and every reading of the block would still have looked arbitrary rather than wrong.
+        facts.timer_src = _bump(facts.timer_src,
+                                " *       :65  #define QTIMER_FREQ_REG       0x010",
+                                " *       :66  #define QTIMER_FREQ_REG       0x010")
     else:
         raise SystemExit("unknown mutation %s" % mutate)
     return facts
@@ -856,6 +975,8 @@ MUTATIONS = (
     "a_record_key_disappears",
     "the_citation_points_at_another_line",
     "the_device_kernel_moves_and_the_citation_does_not",
+    "the_grounding_block_cites_the_line_before_the_call",
+    "the_grounding_block_cites_another_define_line",
 )
 
 

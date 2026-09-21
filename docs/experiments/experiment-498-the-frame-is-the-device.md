@@ -187,6 +187,10 @@ and the OS console block is **byte-identical** to 497's (1288 characters, sha256
 
 ## The claim: eight claims and sixteen mutations
 
+> **Corrected by 499, which is the step that measured it.** The citation clause described below — "the number is now derived from the kernel's own text" — asks whether the *right* number appears anywhere in the file, and the block that grounds the frame's offsets still contained six wrong citations when this step was committed: `:631` and `:637` for the calls at `:623`/`:629` (the pair this step's commit message says it corrected, corrected instead in the second comment six hundred lines below), `:66` for `QTIMER_FREQ_REG` at `:65`, and `:50`/`:51`/`:52` for the three `ARCH_TIMER_CTRL_*` defines at `:51`/`:52`/`:53`. The check as committed here **exits 0** on a tree that restores `:631`, which was measured with this commit's own script. 499 binds each citation to the name on its line instead (8 claims / 16 mutations → 8 / 18) and the offsets themselves were right throughout — it was the prose that justified them that was not.
+
+
+
 `tools/check_timer_line.py` is new in this step: **8 claims, 16 mutations**, all refused, run in
 `build_entry.sh` in both modes beside `check_irq_routing.py`.
 
