@@ -318,19 +318,30 @@ exit's own L1 flush, the very call this step's flag-on arm duplicates one line e
   and not a stale interrupt frame left in `cpu_int_state`.
 
 **What this reading does not settle, and the arm about to run is what separates the two.** Which
-instruction put a timebase where a PC belongs. `return_from_irq` and `load_and_go_sys`
-(`locore.s:1455-1473`, `0x8001ab10`–`0x8001ab64`, `0x8001a860`) restore `r0-r12`, `sp` and `pc` **from the
-frame**, in SVC mode, with `sp` itself serving as the frame pointer — so a frame whose `SS_PC` (frame +
-60) held a timebase is one `movs pc, lr` away from exactly this fault, at exactly this `sp`. The other
-candidate the doc named first, the entropy stir, is now the weaker one: its store address is bounded by
-its own wrap test to `[EntropyData+4, EntropyData+68)` = `0x80526504`–`0x80526544`, which is 59 KB from
-this frame, so it cannot be the writer unless the `index_ptr` it reads was itself already corrupt — and
-that is a reading (`_index`) rather than an assumption. `_pc` against `_lr` in the first record, with
-`_kind` and `_cand` saying which frame it read, is the arm's whole question.
+instruction put a timebase where a PC belongs. The return path is the one place in the kernel where that
+becomes a fetch: `load_and_go_sys` ends `0x8001a944 ldr lr, [sp, #60]` (the frame's `SS_PC`) →
+`0x8001a948 ldm sp, {r0-r12}` → `0x8001a94c movs pc, lr`, and that `movs pc, lr` runs **in Abort mode**
+(`0x8001a920 cpsid if,#23`, with `msr SPSR_fsxc` set at `:0x8001a92c` from the frame's `SS_CPSR`) — so a
+frame whose `SS_PC` (frame + 60) held a timebase is one instruction away from exactly this fault, and
+because the mode is Abort an abort taken there is a **double fault**, which is UNPREDICTABLE on ARMv7.
+That is also a candidate shape for 517's own silent death, worth naming as a hypothesis and not as a
+reading: a run that locks up instead of taking the second abort leaves no log, no `MACH Reboot` and no
+USB, which is what 517's run did. The one number in this reading the return-path story does **not**
+account for is the dump's `lr`: the sequence sets `lr` from the frame's `SS_LR` at `0x8001a914` and then
+replaces it with `SS_PC` at `0x8001a944`, so a jump made by `movs pc, lr` would leave the timebase in `lr`
+and the dump shows `0x800462dc` (the frame's `SS_LR`). So the mechanism is a fact about the code and
+*which* instruction jumped is not established by the dump.
+
+The other candidate the doc named first, the entropy stir, is now the weaker one: its store address is
+bounded by its own wrap test to `[EntropyData+4, EntropyData+68)` = `0x80526504`–`0x80526544`, which is
+59 KB from this frame, so it cannot be the writer unless the `index_ptr` it reads was itself already
+corrupt — and that is a reading (`_index`) rather than an assumption. `_pc` against `_lr` in the first
+record, with `_kind` and `_cand` saying which frame it read, is the arm's whole question.
 
 Still owed, and unchanged by the above: the `r4 = r11 = pc + 2` anomaly in 516's dumps (both runs). The
-return-path reading narrows it to two registers that came out of the frame's own slots rather than to the
-frame's shape, and nothing here claims to explain it.
+return-path reading sharpens it rather than explaining it: `ldm sp, {r0-r12}` at `0x8001a948` restores
+both registers out of the frame's own slots, so `r4` and `r11` were already equal in the frame the return
+path was spending, and no instruction in that path writes either.
 
 ## What is owed
 
