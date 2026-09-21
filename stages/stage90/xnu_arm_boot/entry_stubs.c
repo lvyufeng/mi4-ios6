@@ -5014,7 +5014,8 @@ void entry_note_ast_returned(uint32_t seq, uint32_t after, uint32_t sp, uint32_t
  */
 uint32_t g_idle_calls;
 
-void entry_note_idle(uint32_t caller, uint32_t thread, uint32_t pid, uint32_t cpsr, uint32_t now)
+void entry_note_idle(uint32_t caller, uint32_t thread, uint32_t pid, uint32_t cpsr, uint32_t now,
+                     uint32_t en)
 {
     uint32_t n = g_idle_calls + 1u;
 
@@ -5027,6 +5028,192 @@ void entry_note_idle(uint32_t caller, uint32_t thread, uint32_t pid, uint32_t cp
         entry_live_write("xnu_live_idle_pid", pid);
         entry_live_write("xnu_live_idle_cpsr", cpsr);
         entry_live_write("xnu_live_idle_now", now);
+        /* 513's word, and it is on *this* record because this is the only instrument entered on
+         * every pass: `idle_enable` is the first term of `cpu_idle`'s first test, so a door-1 exit
+         * is `idle_enable` or the `SIGPdisabled` bit and this word says which. See 513's block
+         * below for why it is read here rather than in the exit wrapper, and why it needs no
+         * struct offset. */
+        entry_live_write("xnu_live_idle_en", en);
+    }
+}
+
+/*
+ * ------------------------------------------------------------------------------------------------
+ * Experiment 513. Which door the idle leaves by: `cpu_idle`'s three exits, counted at their sites.
+ * ------------------------------------------------------------------------------------------------
+ *
+ * **What 512 left open, and what makes this a step rather than a footnote to it.** 512 counted
+ * 33,554,432 entries into `machine_idle` and at most 127 decrementer writes, and read the pair as
+ * "the idle does not sleep". The source says why it can be either way: `cpu_idle`
+ * (`osfmk/arm/cpu.c:118-161`) leaves by three different doors - its first `if`
+ * (`(!idle_enable) || (cpu_signal & SIGPdisabled)`), its second (`!SetIdlePop()`), or the `wfi` at
+ * the bottom (`cpu_idle_wfi`, `machine_routines_asm.s:69`) - and only the third sleeps. Which of the
+ * first two fires decides what the *repair* is, and they are three different subsystems:
+ * `idle_enable` is a boot-argument decision (`cpu_machine_idle_init`, `cpu.c:533-553`), the
+ * `SIGPdisabled` bit is signal-delivery state (`cpu_common.c:365`, and `cpu_common.c:402` is the
+ * only place in the tree that clears it), and `SetIdlePop` refusing is a timer deadline
+ * (`rtclock.c:365-388`). So the reading has to name one.
+ *
+ * **The door is read out of the *image's* shape, and the shape is checked rather than assumed.**
+ * The compiled `cpu_idle` has **one** branch to `Idle_load_context` for *both* of its early exits:
+ * gcc merges the two identical `if` bodies, and the object's own disassembly shows `beq`
+ * (`cpu_idle+0x28`, the `!idle_enable` arm) and `ble` (`cpu_idle+0x34`, the `SIGPdisabled` arm) both
+ * landing on one `mov lr, pc; b Idle_load_context`. So the exit *site* cannot separate door 1 from
+ * door 2, and this step does not pretend it can. What separates them is the code *between* them:
+ * `SetIdlePop` is called (at `cpu_idle+0x3c`) on exactly the passes where the first test was false,
+ * so
+ *
+ *     door 1 = machine_idle entries - SetIdlePop entries
+ *     door 2 = SetIdlePop entries whose answer was FALSE
+ *     door 3 = SetIdlePop entries whose answer was TRUE
+ *
+ * **and the exits counted by site are the second instrument for the same partition.** The exits at
+ * `cpu_idle`'s site are doors 1 and 2 together; the exits at `cpu_idle_exit`'s site are door 3. A run
+ * whose two readings disagree is a run in which a fourth exit exists that this comment does not know
+ * about - `cpu_idle_exit` has one other caller in the tree (`osfmk/arm/arm_init.c:530`, the
+ * secondary-CPU bring-up), so a second CPU joining would show up exactly there, as a door-3 count
+ * larger than the `SetIdlePop`-TRUE count. That is what the cross-check is for, and it is why both
+ * numbers are on the console line rather than one.
+ *
+ * **`idle_enable` travels with every record because it is the one word that names door 1's cause.**
+ * It is `boolean_t idle_enable` (`osfmk/arm/cpu_common.c:67`), a plain global, so this image reads it
+ * **by name** - the linker decides the address, there is no offset to get wrong - and the build
+ * checks that the image defines it exactly once, that its symbol is one word wide, and that
+ * `cpu_idle`'s own object loads its address (so the word this instrument reads is the word the test
+ * it is about reads, and not a second global with the same name). With `_en = 1` on a run that
+ * leaves by door 1, the disjunction can only be true because of the `SIGPdisabled` bit; with
+ * `_en = 0`, door 1 is `idle_enable` and nothing else.
+ *
+ * **What this step deliberately does not read, and why it does not need to.** `cpu_signal`, `rtcPop`
+ * and `cpu_idle_latency` are `struct cpu_data` fields, and this image has no checked offsets for
+ * them: `stages/stage90/xnu_arm_boot/assym.s` carries `CPU_*` placeholders for the secondary-CPU
+ * paths and says in its own header that producing them properly means compiling
+ * `osfmk/arm/cpu_data_internal.h`. A hand-written offset here would be a plausible number read from
+ * the wrong word - this project's oldest defect class, twenty-four times over - and it is not needed:
+ * the three door counts partition every pass, `idle_enable` splits door 1, and `SetIdlePop`'s own
+ * answer splits its callers. If the run says door 2 is the one, *then* the fields are what the next
+ * step reads, and that step is where the offset generator belongs.
+ *
+ * **The counter is published at powers of two and the site table is not a cursor on the log.** The
+ * house discipline, for 461's reason: a report path written by the thing it measures fills up, and
+ * then the report is a fact about the buffer. The counts are unbounded in the counter and bounded in
+ * the log, which is what makes the two readings independent. `ENTRY_DOOR_SITES` is a *bound* rather
+ * than a budget - a fifth distinct site is counted in `g_door_overflow` and published, so a table
+ * that filled up says so instead of dropping the exit silently.
+ */
+#define ENTRY_DOOR_SITES 4
+
+uint32_t g_door_exits;
+uint32_t g_door_site[ENTRY_DOOR_SITES];
+uint32_t g_door_count[ENTRY_DOOR_SITES];
+uint32_t g_door_nsites;
+uint32_t g_door_overflow;
+uint32_t g_door_first_lr, g_door_first_en, g_door_first_now;
+
+uint32_t g_sip_calls;
+uint32_t g_sip_true;
+uint32_t g_sip_false;
+uint32_t g_sip_site[ENTRY_DOOR_SITES];
+uint32_t g_sip_site_n[ENTRY_DOOR_SITES];
+uint32_t g_sip_nsites;
+uint32_t g_sip_overflow;
+uint32_t g_sip_first_site, g_sip_first_ret, g_sip_first_en, g_sip_first_now;
+
+/*
+ * One site into a small table, counted. The table is what keeps the *site addresses* a reading of the
+ * run rather than a constant in this file: nothing here knows where `cpu_idle` is, and the build
+ * prints the addresses the image's own branches come from, so a log's `_lr` values are matched to the
+ * image's instructions by comparison rather than by an address written down in two places.
+ */
+static void entry_site_count(uint32_t *sites, uint32_t *counts, uint32_t *nsites,
+                             uint32_t *overflow, uint32_t site)
+{
+    uint32_t i;
+
+    for (i = 0; i < *nsites; i++) {
+        if (sites[i] == site) {
+            counts[i]++;
+            return;
+        }
+    }
+    if (*nsites < ENTRY_DOOR_SITES) {
+        sites[*nsites] = site;
+        counts[*nsites] = 1u;
+        *nsites = *nsites + 1u;
+    } else {
+        *overflow = *overflow + 1u;
+    }
+}
+
+/*
+ * One exit from `cpu_idle`. `lr` is what the wrapper was entered with - and on this image it is *not*
+ * a return address: `cpu_idle`'s early exit and `cpu_idle_exit`'s last act are both tail branches
+ * (`b Idle_load_context`, `R_ARM_JUMP24`) that set `lr` to their own continuation with `mov lr, pc`
+ * one instruction earlier, so `lr` is a *site the kernel's own code fixed deliberately*: the `mov lr,
+ * pc` is at `branch - 4` and reads `pc` as its own address + 8, so `lr` is the branch + 4 - which is
+ * why the record's `_lr` is 0x8000cb3c on an image whose branch is at 0x8000cb38, and why the build
+ * checks the `mov lr, pc` *before* each branch rather than assuming the call form. The build prints
+ * each site's address, so the mapping from a logged `_lr` to an instruction is a comparison against
+ * the image. Nothing depends on the `lr` the *real* function is entered with: `Idle_load_context`'s
+ * first act is `ldmia r3!, {r4-r14}`, which loads `lr` itself out of the thread's PCB
+ * (`osfmk/arm/cswitch.s:214-229`), and the wrapper's own frame is discarded the same way, because that
+ * same `ldmia` restores `sp`.
+ */
+void entry_note_door(uint32_t lr, uint32_t en, uint32_t now)
+{
+    uint32_t n = g_door_exits + 1u;
+
+    g_door_exits = n;
+    entry_site_count(g_door_site, g_door_count, &g_door_nsites, &g_door_overflow, lr);
+
+    if (n == 1u) {
+        g_door_first_lr = lr;
+        g_door_first_en = en;
+        g_door_first_now = now;
+    }
+
+    if ((n & (n - 1u)) == 0u) {
+        entry_live_write("xnu_live_door_seq", n);
+        entry_live_write("xnu_live_door_lr", lr);
+        entry_live_write("xnu_live_door_en", en);
+        entry_live_write("xnu_live_door_now", now);
+    }
+}
+
+/*
+ * One call to `SetIdlePop`, recorded **after** the real call so the record carries its answer.
+ * `site` is a genuine call site this time - `cpu_idle` reaches it with `bl` (`R_ARM_CALL` at
+ * `cpu_idle+0x38` for the first test and at `cpu_idle+0xec` for the `idle_timer_notify` block) - so
+ * the `bl` is at `site - 4` in the object's own offsets, and the build checks that every one of those
+ * branches is inside `cpu_idle`. `idle_enable` is read here as well as on 512's record because this
+ * is the pass where door 1 was *false*: reading the word on both sides of the test is what makes a
+ * change in it visible rather than assumed absent.
+ */
+void entry_note_setidlepop(uint32_t site, uint32_t ret, uint32_t en, uint32_t now)
+{
+    uint32_t n = g_sip_calls + 1u;
+
+    g_sip_calls = n;
+    if (ret != 0u)
+        g_sip_true++;
+    else
+        g_sip_false++;
+
+    entry_site_count(g_sip_site, g_sip_site_n, &g_sip_nsites, &g_sip_overflow, site);
+
+    if (n == 1u) {
+        g_sip_first_site = site;
+        g_sip_first_ret = ret;
+        g_sip_first_en = en;
+        g_sip_first_now = now;
+    }
+
+    if ((n & (n - 1u)) == 0u) {
+        entry_live_write("xnu_live_sip_seq", n);
+        entry_live_write("xnu_live_sip_site", site);
+        entry_live_write("xnu_live_sip_ret", ret);
+        entry_live_write("xnu_live_sip_en", en);
+        entry_live_write("xnu_live_sip_now", now);
     }
 }
 

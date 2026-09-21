@@ -143,6 +143,8 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=thread_setentrypoint
                    --wrap=bsd_ast
                    --wrap=machine_idle
+                   --wrap=Idle_load_context
+                   --wrap=SetIdlePop
                    --wrap=psignal
                    --wrap=setPop
                    --wrap=PE_init_platform --wrap=fiq_context_init
@@ -27645,6 +27647,154 @@ verify_trace_symbols() {
     [[ "$mrefs" == "R_ARM_CALL " ]] ||
         layout_fail "the objects in this pool reference machine_idle with [$mrefs] and 512's wrap is only sound while every reference is a call - an R_ARM_ABS32/MOVW/MOVT would be an address taken, and the wrapper could then be reached as a function pointer rather than as a call"
     say "  xnu_entry_512: machine_idle ($mid) is the kernel's own (defined in osfmk/arm/machine_routines_asm.s, not in pass 1's undefined set), all $inside branch(es) to its wrapper ($mwrap) are inside processor_idle ($pidle..$pidlenext) and none is elsewhere, and every reference to it in the pool is a call ($mrefs) - so an xnu_live_idle_* record is the kernel saying it had nothing to run"
+
+    # **513's two wrappers, and their clause is the partition between them.** 512 read "the idle does
+    # not sleep" off a pair of counts; the *reason* is a choice `cpu_idle` makes between three exits -
+    # its first test (`(!idle_enable) || (cpu_signal & SIGPdisabled)`), its second (`!SetIdlePop()`),
+    # or the `wfi` - and the three have three different repairs. The instrument that separates them
+    # does not read `struct cpu_data` (this image has no checked offsets for `cpu_signal`/`rtcPop`/
+    # `cpu_idle_latency`; see 513's block in `entry_stubs.c`), it reads the *control flow*:
+    # `SetIdlePop` is called on exactly the passes where the first test was false, so the passes minus
+    # its entry count are door 1, its FALSE answers are door 2 and its TRUE answers are door 3. And
+    # `Idle_load_context` is reached once per pass, so the exits counted at its two sites are the
+    # second instrument for the same three numbers.
+    #
+    # **What is checked here is what makes those two statements true of *this image*.** The first two
+    # clauses are 455's condition (a name in pass 1's undefined set means the record is a fact about a
+    # stand-in). The reference-kind clauses are 511's and 512's: `--wrap` rewrites an address-taken
+    # reference too, so an `R_ARM_ABS32`/`MOVW`/`MOVT` on wither name would let the wrapper be reached
+    # as something other than a branch from the function this step claims. The site clauses are the
+    # reading's own load-bearing part: an exit recorded from outside `cpu_idle`/`cpu_idle_exit` is not
+    # one of the three doors, and a `SetIdlePop` call from outside `cpu_idle` is not the test between
+    # doors 1 and 2. And the `idle_enable` clauses are the same shape as the site clauses - the word
+    # this instrument reads is the word `cpu_idle`'s own test reads, checked out of the *relocations*
+    # of the object that compiles that test rather than reasoned about.
+    grep -qx "Idle_load_context" "$OUT/xnu_arm_entry_undef.txt" &&
+        layout_fail "513's instrument calls Idle_load_context through \`__real_\` and the pass-1 undefined set contains it - nothing in this image defines it, so the exit record would be a fact about a stand-in rather than about the kernel's own idle path"
+    grep -qx "SetIdlePop" "$OUT/xnu_arm_entry_undef.txt" &&
+        layout_fail "513's instrument calls SetIdlePop through \`__real_\` and the pass-1 undefined set contains it - nothing in this image defines it, so the door-2/3 split would be a fact about a stand-in rather than about the kernel's own idle timer"
+    idlc=$(sym_addr Idle_load_context) || layout_fail "Idle_load_context is not in the linked image - the exits from cpu_idle, which are this step's object, are not here to count"
+    idlcw=$(sym_addr __wrap_Idle_load_context) || layout_fail "__wrap_Idle_load_context is not in the linked image - --wrap=Idle_load_context did not link, and a run with no xnu_live_door_* records would say nothing about the boot"
+    sipf=$(sym_addr SetIdlePop) || layout_fail "SetIdlePop is not in the linked image - the test between cpu_idle's first two doors is not here, so 513 cannot partition the exits"
+    sipfw=$(sym_addr __wrap_SetIdlePop) || layout_fail "__wrap_SetIdlePop is not in the linked image - --wrap=SetIdlePop did not link, and a run with no xnu_live_sip_* records would say nothing about the idle timer"
+    wfix=$(sym_addr cpu_idle_wfi) || layout_fail "cpu_idle_wfi is not in the linked image - the third door does not exist, so a census of two exits would be the whole of this kernel's idle path and the labels below would be wrong"
+    cidle=$(sym_addr cpu_idle) || layout_fail "cpu_idle is not in the linked image - 513's clause needs the function whose exits it counts"
+    cidlenext=$(sym_next "$cidle") || true
+    [[ -n "$cidlenext" ]] || layout_fail "no symbol follows cpu_idle in the image, so its instruction range cannot be read"
+    cexit=$(sym_addr cpu_idle_exit) || layout_fail "cpu_idle_exit is not in the linked image - the door that went through the wfi is counted at its own site, and without it the second instrument for the partition is not there"
+    cexitnext=$(sym_next "$cexit") || true
+    [[ -n "$cexitnext" ]] || layout_fail "no symbol follows cpu_idle_exit in the image, so its instruction range cannot be read"
+    # The two reference kinds, from the pool rather than from this file's flag list. `Idle_load_context`
+    # is reached by a *tail* branch (both its callers are `mov lr, pc; b Idle_load_context`, the first
+    # in `cpu_idle` for the two merged early exits and the second in `cpu_idle_exit`), and `SetIdlePop`
+    # by a call - which is why the door record carries a site the kernel set deliberately (the branch
+    # plus 8) while the `SetIdlePop` record carries an ordinary return address.
+    idlcrefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o 2>/dev/null |
+        awk '/[[:space:]]Idle_load_context$/ { print $2 }' | sort -u | tr '\n' ' ')
+    [[ "$idlcrefs" == "R_ARM_JUMP24 " ]] ||
+        layout_fail "the objects in this pool reference Idle_load_context with [$idlcrefs] and 513's wrap is only sound while every reference is a tail branch - an R_ARM_ABS32/MOVW/MOVT would be an address taken, and --wrap rewrites those too, so the wrapper's address could end up somewhere this step's comment does not describe"
+    sipfrefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o 2>/dev/null |
+        awk '/[[:space:]]SetIdlePop$/ { print $2 }' | sort -u | tr '\n' ' ')
+    [[ "$sipfrefs" == "R_ARM_CALL " ]] ||
+        layout_fail "the objects in this pool reference SetIdlePop with [$sipfrefs] and 513's wrap assumes a call: the record's site is read as a return address (the bl at site - 4), so an address-taken reference would put the wrapper's address where this file says a return address is"
+    # The `mov lr, pc` that makes the door record's site a site, checked on the *object* at the one
+    # place it can be read exactly: the instruction immediately before each `b Idle_load_context`.
+    # This is a gate and not a note because the record's arithmetic depends on it - a log whose `_lr`
+    # is `site + 8` on this image would be `site + 4` on a `bl`, and a reader told the wrong one would
+    # match the log against the wrong instruction. If a future compiler emits the call form, this
+    # fails and the sentence it prints says what to re-read, which is the point of a check like this.
+    cpuo=$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_cpu.o
+    read -r nlr nlrbad <<<"$(arm-none-eabi-objdump -d "$cpuo" 2>/dev/null |
+        awk '/<Idle_load_context>/ && $3 == "b" { n++; if (index(prev, "e1a0e00f") == 0) bad++ } { prev = $0 } END { printf "%d %d", n + 0, bad + 0 }')"
+    [[ "${nlr:-0}" -ge 2 && "${nlrbad:-1}" == 0 ]] ||
+        layout_fail "cpu_idle/cpu_idle_exit reach Idle_load_context with $nlr branch(es) of which $nlrbad are not preceded by \`mov lr, pc\` (0xe1a0e00f) - 513 reads the exit record's site as the branch plus 8 for exactly that reason, so either the reader in entry_trace.c or the sentence in entry_stubs.c has to change with the code"
+    # `idle_enable`'s three properties: one definition, one word, and - the load-bearing one - the
+    # word `cpu_idle`'s own test reads, which is read out of that object's *relocations*: the test
+    # materialises the symbol's address (`R_ARM_MOVW_ABS_NC`/`R_ARM_MOVT_ABS`) inside `cpu_idle` and
+    # the writer does the same inside `cpu_machine_idle_init`. An instrument reading a *different*
+    # global of that name, or an offset into it, would have none of those four relocations.
+    niem=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "idle_enable" { n++ } END { printf "%d", n + 0 }')
+    ie=$(sym_addr idle_enable) || layout_fail "idle_enable is not in the linked image - the flag cpu_idle's first test reads is the one word this step publishes beside every record, and without it a door-1 run cannot say whether the cause is the flag or the signal bit"
+    [[ "${niem:-0}" == 1 ]] ||
+        layout_fail "the image defines ${niem:-0} symbols named idle_enable: 513 publishes the word cpu_idle's first test reads, and a second definition would make the record a fact about the other one"
+    read -r iesize ietype <<<"$(arm-none-eabi-nm -S "$OUT/xnu_arm_entry.elf" |
+        awk '$4 == "idle_enable" { printf "%d %s", strtonum("0x" $2), $3 }')"
+    [[ "${iesize:-0}" == 4 ]] ||
+        layout_fail "idle_enable is ${iesize:-?} byte(s) wide in this image and entry_trace.c reads it as one 32-bit word (\`boolean_t\`, osfmk/mach/arm/boolean.h:68) - a shorter or longer definition would put a neighbouring word into the record"
+    [[ "${ietype:-?}" == "B" || "${ietype:-?}" == "b" ]] ||
+        layout_fail "idle_enable is '${ietype:-?}' in this image and not BSS; 513 reads it as the boot's own 'did the platform enable the idle path' flag (cpu_common.c:67 gives it no initialiser and cpu_machine_idle_init writes it), so an initialised definition would be a different variable"
+    # The two functions' extents *in the object* and the four relocations, in one pass: an object
+    # offset means nothing without the function it is an offset into, and this is the clause that says
+    # the instrument's word is the test's word - the address is materialised by a MOVW/MOVT pair
+    # inside `cpu_idle` (the read the step is about) and inside `cpu_machine_idle_init` (the only
+    # write), and an instrument reading a different global of that name, or a byte offset into it,
+    # would match none of those four.
+    read -r ie_inci ie_inmi ie_other ie_kinds <<<"$(ext=$(arm-none-eabi-nm -S --defined-only "$cpuo" 2>/dev/null |
+            awk '$4 == "cpu_idle" { printf "idle %d %d;", strtonum("0x" $1), strtonum("0x" $2) }
+                 $4 == "cpu_machine_idle_init" { printf "init %d %d;", strtonum("0x" $1), strtonum("0x" $2) }')
+        arm-none-eabi-objdump -r "$cpuo" 2>/dev/null |
+            awk -v ext="$ext" '
+                BEGIN { n = split(ext, e, ";")
+                        for (i = 1; i <= n; i++) { if (e[i] == "") continue; split(e[i], p, " "); lo[p[1]] = p[2] + 0; hi[p[1]] = p[2] + p[3] } }
+                $3 == "idle_enable" {
+                    off = strtonum("0x" $1) + 0
+                    kinds = kinds $2 " "
+                    if (off >= lo["idle"] && off < hi["idle"]) inci++
+                    if (off >= lo["init"] && off < hi["init"]) inmi++
+                    if ($2 != "R_ARM_MOVW_ABS_NC" && $2 != "R_ARM_MOVT_ABS") other++
+                }
+                END { printf "%d %d %d %s", inci + 0, inmi + 0, other + 0, kinds }')"
+    [[ -n "${ie_kinds:-}" ]] ||
+        layout_fail "cpu.o ($cpuo) has no relocation against idle_enable at all, so 513's check of which word this instrument reads measured nothing - the object that compiles cpu_idle's first test is not the object this clause reads, or the symbol moved"
+    [[ "${ie_inci:-0}" -ge 1 ]] ||
+        layout_fail "cpu_idle's own object does not materialise idle_enable's address anywhere inside cpu_idle ($cpuo, kinds seen: ${ie_kinds:-none}) - so the word this instrument publishes is not the word cpu_idle's first test reads, and the step's whole reading of door 1's cause would be about a different variable"
+    [[ "${ie_inmi:-0}" -ge 1 ]] ||
+        layout_fail "cpu_machine_idle_init's own body in $cpuo does not touch idle_enable (kinds seen: ${ie_kinds:-none}) - the only writer of the flag this image reads is the boot-argument decision, and without a write there the symbol this instrument reads has no writer in the object that sets it"
+    [[ "${ie_other:-1}" == 0 ]] ||
+        layout_fail "cpu.o references idle_enable with $ie_other relocation(s) that are neither R_ARM_MOVW_ABS_NC nor R_ARM_MOVT_ABS (kinds: $ie_kinds) - the test this step is about reads it through an address materialised in a register pair, and something else in that object reaches the same word differently"
+    # The sites themselves: the exits counted inside each function, and that nothing outside them
+    # branches to either wrapper. `>= 1` rather than `== 1` for 510's reason (gcc may duplicate a
+    # block; refusing a correct image is worse than under-counting a site list a reader can see).
+    #
+    # **The `lr` printed with each site is `branch + 4`, not `branch + 8`, and 513's first run is what
+    # says so.** The hook is the `mov lr, pc` one instruction *before* the branch (checked above), and
+    # `mov lr, pc` reads `pc` as its own address + 8 - so the value a door record carries is
+    # `(branch - 4) + 8`. This line printed `branch + 8` until that run, which put `0x8000cb40` in the
+    # build's own sentence where the device's log says `0x8000cb3c`: a printed number is a reading too,
+    # and this one had nothing comparing it with the instruction it names.
+    idlesites=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" |
+        awk -v cilo="$((cidle))" -v cihi="$((cidlenext))" -v celo="$((cexit))" -v cehi="$((cexitnext))" '
+            { if (index($0, "<__wrap_Idle_load_context>") && ($3 == "b" || $3 == "bl")) {
+                  split($1, a, ":"); h = strtonum("0x" a[1])
+                  if (h >= cilo && h < cihi) { inci++; cidle_s = cidle_s sprintf(" 0x%x(lr 0x%x)", h, h + 4) }
+                  else if (h >= celo && h < cehi) { ince++; cexit_s = cexit_s sprintf(" 0x%x(lr 0x%x)", h, h + 4) }
+                  else { ilbad++; ilbad_s = ilbad_s sprintf(" 0x%x", h) }
+              } else if (index($0, "<__wrap_SetIdlePop>") && ($3 == "b" || $3 == "bl")) {
+                  split($1, a, ":"); h = strtonum("0x" a[1])
+                  if (h >= cilo && h < cihi) insp++; else { spbad++; spbad_s = spbad_s sprintf(" 0x%x", h) }
+              } else if (index($0, "<cpu_idle_wfi>") && $3 == "bl") {
+                  split($1, a, ":"); h = strtonum("0x" a[1]); if (h >= cilo && h < cihi) wfi++
+              } }
+            END { printf "%d %d %d %d %d %d\n%s|%s|%s|%s\n", inci + 0, ince + 0, ilbad + 0,
+                          insp + 0, spbad + 0, wfi + 0, cidle_s, cexit_s, ilbad_s, spbad_s }')
+    mapfile -t _sites513 <<<"$idlesites"
+    [[ -n "${_sites513[0]:-}" ]] ||
+        layout_fail "513's site reader produced no counts at all - the reader is written against the disassembly's shape, and a reader that measured nothing must stop the build rather than let the clauses below read an empty string as a zero"
+    read -r inci ince ilbad insp spbad wfiin <<<"${_sites513[0]}"
+    IFS='|' read -r cidle_site cexit_site ilbad_s spbad_s <<<"${_sites513[1]:-}"
+    [[ "${inci:-0}" -ge 1 ]] ||
+        layout_fail "no branch to __wrap_Idle_load_context is inside cpu_idle ($cidle..$cidlenext): the exits from cpu_idle's own two tests are the doors this step counts, and without them the site census is not a census of the doors"
+    [[ "${ince:-0}" -ge 1 ]] ||
+        layout_fail "no branch to __wrap_Idle_load_context is inside cpu_idle_exit ($cexit..$cexitnext): the pass that reached the wfi comes back through that site, and a run whose door-3 count has no exits to match it would leave the step's cross-check one-sided"
+    [[ "${ilbad:-1}" == 0 ]] ||
+        layout_fail "this image branches to __wrap_Idle_load_context from ${ilbad} site(s) outside cpu_idle and cpu_idle_exit (${ilbad_s:-}): a fourth exit from the idle path exists, and the three-door partition this step publishes would be missing a door"
+    [[ "${insp:-0}" -ge 1 ]] ||
+        layout_fail "no branch to __wrap_SetIdlePop is inside cpu_idle ($cidle..$cidlenext): door 1's complement is measured by that call, so a call from anywhere else would count a pass that did not go through the first test"
+    [[ "${spbad:-1}" == 0 ]] ||
+        layout_fail "this image branches to __wrap_SetIdlePop from ${spbad} site(s) outside cpu_idle (${spbad_s:-}): SetIdlePop has a second caller in the tree (cpu.c:148, the idle_timer_notify block), so this is the case where the door-2/3 split needs the caller published beside it - fix the reading, do not remove the check"
+    [[ "${wfiin:-0}" -ge 1 ]] ||
+        layout_fail "cpu_idle does not branch to cpu_idle_wfi ($wfix) from inside cpu_idle ($cidle..$cidlenext), so the third door is not reachable in this image and this step's three-way census is really a two-way one"
+    say "  xnu_entry_513: Idle_load_context ($idlc) and SetIdlePop ($sipf) are the kernel's own (defined in osfmk/arm/cswitch.s and osfmk/arm/rtclock.c, not in pass 1's undefined set); the pool reaches the first only by tail branch [$idlcrefs] and the second only by call [$sipfrefs]; the exits are counted at ${inci} site(s) inside cpu_idle ($cidle..$cidlenext)${cidle_site:-} and ${ince} inside cpu_idle_exit ($cexit..$cexitnext)${cexit_site:-} with none elsewhere, and SetIdlePop's ${insp} site(s) are inside cpu_idle with none elsewhere; cpu_idle calls cpu_idle_wfi from inside itself (${wfiin} site(s)), so the third door exists; and idle_enable ($ie) is one ${iesize}-byte ${ietype} in the image, loaded inside cpu_idle and stored inside cpu_machine_idle_init out of cpu.o's own relocations, so a door-1 record's _en is the word cpu_idle's first test reads and a door's _lr is a site the kernel's own code set with mov lr, pc"
 
 
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls

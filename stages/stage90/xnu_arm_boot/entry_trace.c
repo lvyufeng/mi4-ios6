@@ -187,6 +187,30 @@ extern uint32_t g_psignal_calls;
  * cross-check between two instruments. */
 extern uint32_t g_idle_calls;
 
+/* 513's five, defined in `entry_stubs.c` beside the records they count: the exits from `cpu_idle` by
+ * site, the calls to `SetIdlePop` with its answer split, and the site tables' own state. The park's
+ * second console line is written from these, and the reason it is written there rather than in a
+ * wrapper is 512's: the park is the one event that is *known* to have happened, and a print on the
+ * first idle exit would be a durable artifact naming the wrong event, because this image idles in
+ * early boot too. */
+extern uint32_t g_door_exits, g_door_nsites, g_door_overflow;
+extern uint32_t g_door_site[4], g_door_count[4];
+extern uint32_t g_door_first_lr, g_door_first_en, g_door_first_now;
+extern uint32_t g_sip_calls, g_sip_true, g_sip_false, g_sip_nsites, g_sip_overflow;
+extern uint32_t g_sip_site[4], g_sip_site_n[4];
+extern uint32_t g_sip_first_site, g_sip_first_ret, g_sip_first_en;
+
+/* `boolean_t idle_enable` (`osfmk/arm/cpu_common.c:67`), read **by name** - the linker resolves the
+ * address out of the image's own symbol, so there is no offset here to be wrong, which is why this is
+ * a word 513 can read while `cpu_signal`/`rtcPop`/`cpu_idle_latency` are words it deliberately does
+ * not (see 513's block in `entry_stubs.c`). `boolean_t` is `int` on this target
+ * (`osfmk/mach/arm/boolean.h:68`) and no XNU header is included in this file, so the declaration is
+ * the width *this* file needs - and the build does not take it on trust: it requires the symbol in
+ * the image to be exactly one 32-bit BSS word (a `boolean_t` with an initialiser, or anything wider,
+ * would be a different variable and the record beside every idle pass would be about it).
+ */
+extern int idle_enable;
+
 /* `int proc_pid(proc_t)`, written with this file's `void *` spelling of a XNU pointer type for the
  * reason `copyin_word`'s declaration gives: no XNU header is included here, and every pointer this
  * target has is 4 bytes. `proc_pid` is a real function of the image (there is no `--wrap` on it), and
@@ -902,11 +926,40 @@ int __wrap_poll(void *proc, void *uap, int *retval)
     if (timeout >= (uint32_t)ENTRY_PARK_MIN_MS && park_printed == 0u) {
         void *me = current_proc();
         uint32_t pid = (me != 0) ? (uint32_t)proc_pid(me) : 0xFFFFFFFFu;
+        /* 513's two lines, on the same event as 512's for the same reason and printed *after* it, so
+         * the pair reads in the order the arguments are made: the first line says the process parked
+         * and the kernel idled; these say which of `cpu_idle`'s three doors the kernel left by while
+         * it did. `door 1` is the line's own arithmetic - the passes that never reached `SetIdlePop` -
+         * and the site counts on the third line are the second instrument for the same partition, so
+         * a run in which they disagree is a run with a fourth exit that this step does not know
+         * about. **Both counts are read here, at the park's return, and both are cumulative from the
+         * boot's first `cpu_idle` entry** (512 placed that entry 131 us after the first ask began), so
+         * neither is the park's own window on its own: the park's share is the counter *minus* its
+         * value at the park's start, and that value is a bound rather than a record, because the
+         * published series is sparse. In 513's run the 32768th entry precedes the park's start and
+         * the 65536th follows it, so of the 2200344 entries between 2134808 and 2167576 are the
+         * park's - 97.0% to 98.5%, the rest being the idle done during the two short asks. The site
+         * counts are that same counter's, so they carry the same property, and the 2000 ms wording on
+         * the first line was changed from "while it did" to "by that time" for exactly this reason: a
+         * cumulative count read at the end of a window is not the window. */
+        uint32_t door1 = (g_idle_calls > g_sip_calls) ? (g_idle_calls - g_sip_calls) : 0u;
 
         park_printed = 1u;
         printf("mini4: the OS has nothing to run -- pid %d parked in poll for %d ms (caller 0x%x), "
-               "and the kernel's own idle path was entered %d time(s) while it did (ticks 0x%x)\n",
+               "and the kernel's own idle path was entered %d time(s) by that time (ticks 0x%x)\n",
                pid, timeout, caller, g_idle_calls, after - before);
+        printf("mini4: the idle's doors -- pid %d, first test %d time(s) with idle_enable=%d, "
+               "SetIdlePop refusing %d, through the wfi %d; SetIdlePop entered %d time(s) "
+               "(TRUE %d, FALSE %d)\n",
+               pid, door1, (uint32_t)idle_enable, g_sip_false, g_sip_true, g_sip_calls,
+               g_sip_true, g_sip_false);
+        printf("mini4: the idle's exits by site -- %d exit(s) at %d site(s): "
+               "0x%x x%d, 0x%x x%d, 0x%x x%d, 0x%x x%d (overflow %d); first 0x%x with idle_enable=%d; "
+               "SetIdlePop's first site 0x%x answered %d with idle_enable=%d\n",
+               g_door_exits, g_door_nsites,
+               g_door_site[0], g_door_count[0], g_door_site[1], g_door_count[1],
+               g_door_site[2], g_door_count[2], g_door_site[3], g_door_count[3], g_door_overflow,
+               g_door_first_lr, g_door_first_en, g_sip_first_site, g_sip_first_ret, g_sip_first_en);
     }
 
     return error;
@@ -1166,7 +1219,7 @@ int __wrap_read(void *proc, void *uap, void *retval)
  * between the two instruments instead of a claim from one of them.
  */
 extern void entry_note_idle(uint32_t caller, uint32_t thread, uint32_t pid, uint32_t cpsr,
-                            uint32_t now);
+                            uint32_t now, uint32_t en);
 
 
 void __real_machine_idle(void);
@@ -1185,9 +1238,60 @@ void __wrap_machine_idle(void)
     if (now != 0)
         pid = (uint32_t)proc_pid(now);
 
-    entry_note_idle(caller, thread, pid, cpsr, entry_counter());
+    /* 513's word comes with it, read here because this is the only instrument entered on *every*
+     * pass - the exit wrapper is not entered at all on a pass that reaches the `wfi`, and the
+     * `SetIdlePop` wrapper is not entered on a pass that leaves by the first test. See 513's block in
+     * `entry_stubs.c`. */
+    entry_note_idle(caller, thread, pid, cpsr, entry_counter(), (uint32_t)idle_enable);
 
     __real_machine_idle();
+}
+
+/* ------------------------------------------------------------------ 513: the idle's three doors */
+/*
+ * **One wrapper on each side of the test that decides the door, and a tail branch is what makes the
+ * first one a site rather than a return address.** `cpu_idle`'s two early exits compile to a *single*
+ * `mov lr, pc; b Idle_load_context` (`R_ARM_JUMP24` at `cpu_idle+0x48` in the object's own offsets;
+ * gcc merges the identical `if` bodies), so the wrapper sees `lr` set by the kernel's own code to the
+ * branch's continuation: the `mov lr, pc` at `branch - 4` reads `pc` as its own address + 8, so `lr`
+ * is the branch **+ 4** - 0x8000cb3c on an image whose branch is at 0x8000cb38, which is what 513's
+ * first run's record carries. Nothing depends on that `lr`: the real function's first act is
+ * `ldmia r3!, {r4-r14}`, which loads `lr` (and `sp`) out of the thread's PCB, so the wrapper's frame is
+ * discarded along with it and the wrapper must not return - which is why both declarations below are
+ * `noreturn`. `SetIdlePop` is reached with a real `bl` (`R_ARM_CALL`), so its record's `site` is a
+ * return address, and its `bl` is at `site - 4`.
+ *
+ * **Both wrappers run with interrupts masked**, which is the state `machine_idle`'s own `cpsid if`
+ * establishes before `Idle_context` hands the CPU to `cpu_idle`, so neither can be re-entered through
+ * an interrupt while it is writing a record. And both read only one word of state (`idle_enable`)
+ * plus the counter: `cpu_signal`, `rtcPop` and `cpu_idle_latency` are `struct cpu_data` fields this
+ * image has no checked offsets for, and 513's partition does not need them (513's block in
+ * `entry_stubs.c` says why).
+ */
+extern void entry_note_door(uint32_t lr, uint32_t en, uint32_t now);
+extern void entry_note_setidlepop(uint32_t site, uint32_t ret, uint32_t en, uint32_t now);
+
+void __real_Idle_load_context(void) __attribute__((noreturn));
+void __wrap_Idle_load_context(void) __attribute__((noreturn));
+
+void __wrap_Idle_load_context(void)
+{
+    uint32_t lr = (uint32_t)(uintptr_t)__builtin_return_address(0);
+
+    entry_note_door(lr, (uint32_t)idle_enable, entry_counter());
+
+    __real_Idle_load_context();
+}
+
+int __real_SetIdlePop(void);
+int __wrap_SetIdlePop(void)
+{
+    uint32_t site = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    int ret = __real_SetIdlePop();
+
+    entry_note_setidlepop(site, (uint32_t)ret, (uint32_t)idle_enable, entry_counter());
+
+    return ret;
 }
 
 int __real_fork(void *proc, void *uap, int *retval);
