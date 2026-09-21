@@ -771,6 +771,19 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
     apple_dt_prop_str(b, "open-provenance", "stage90-rejected-noopen");
 
     /* /chosen */
+    /*
+     * **515: the two copies of the command line, and the one token they must agree on.** XNU's own
+     * parser reads `PE_boot_args()`, which is `((boot_args *)PE_state.bootArgs)->CommandLine` - this
+     * payload's string in `boot_args.c`, not this property (`pexpert/arm/pe_bootargs.c:11`, and 204
+     * measured the difference). The property is written to agree with it because the port's own
+     * contracts read *this* copy (`xnu_pe_init_platform_false.c:410-413`,
+     * `xnu_pexpert_hook_readiness_contract.c:163-164`), so a token that only one of the two carries
+     * is a token whose check and whose effect are about different strings. The tokens 515 removed -
+     * `serial=0x1` (which `boot_args.c` already records as unreadable from here), `xnu-early-init`,
+     * `live-pmap`, `ttbr-live`, `tlb-live`, `pmap-restore`, `pmap-ref` and `st83dt=0x83` - have no
+     * reader in this stage's code at all, while `up_style_idle_exit=1` is the boot argument
+     * `arm_init` parses to select the uniprocessor branch of Apple's own idle-cache path.
+     */
 #if STAGE90_XNU_REAL_DT
     /*
      * XNU's crash-log registry lives at the physical address this property names - iBoot's job on
@@ -781,7 +794,7 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
      */
     apple_dt_node_begin(b, 6, 1);
     apple_dt_prop_str(b, "name", "chosen");
-    apple_dt_prop_str(b, "boot-args", "debug=0x144 serial=0x1 rd=md0 mi4ios6.stage=83 xnu-early-init xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm live-pmap ttbr-live tlb-live pmap-restore prevm-pexpert dtinit-facts peid-machine pexpert-hook-ready pmap-ref st83dt=0x83");
+    apple_dt_prop_str(b, "boot-args", "debug=0x144 rd=md0 mi4ios6.stage=83 xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm prevm-pexpert dtinit-facts peid-machine pexpert-hook-ready up_style_idle_exit=1");
     apple_dt_prop_str(b, "stdout-path", "ram-console");
     apple_dt_prop_u32_array(b, "ram-console-reg", ram_console_reg, ARRAY_SIZE(ram_console_reg));
     apple_dt_prop(b, "random-seed", chosen_random_seed, sizeof(chosen_random_seed));
@@ -789,7 +802,7 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
 #else
     apple_dt_node_begin(b, 5, 1);
     apple_dt_prop_str(b, "name", "chosen");
-    apple_dt_prop_str(b, "boot-args", "debug=0x144 serial=0x1 rd=md0 mi4ios6.stage=83 xnu-early-init xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm live-pmap ttbr-live tlb-live pmap-restore prevm-pexpert dtinit-facts peid-machine pexpert-hook-ready pmap-ref st83dt=0x83");
+    apple_dt_prop_str(b, "boot-args", "debug=0x144 rd=md0 mi4ios6.stage=83 xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm prevm-pexpert dtinit-facts peid-machine pexpert-hook-ready up_style_idle_exit=1");
     apple_dt_prop_str(b, "stdout-path", "ram-console");
     apple_dt_prop_u32_array(b, "ram-console-reg", ram_console_reg, ARRAY_SIZE(ram_console_reg));
     apple_dt_prop(b, "random-seed", chosen_random_seed, sizeof(chosen_random_seed));

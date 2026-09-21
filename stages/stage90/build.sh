@@ -300,6 +300,62 @@ esac
 CMDLINE_BASE='stage90 mi4ios6=stage90 c-runtime apple-dt macho-fixture load-plan materialize highva-dryrun safe-table stage-owned-tables ttbr0-roundtrip recovery-table cache-bits-preserved xnu-entry-stub xnu-early-init early-pmap-platform xnu-pe-init-false xnu-postpe cpu-topo bootcpu rtclock xnu-armvm live-pmap ttbr-live tlb-live pmap-restore prevm-pexpert dtinit-facts peid-machine xnu-bs-contract xnu-pmap-bs-contract xnu-pmap-table-contract xnu-pmap-page-contract xnu-pmap-attr-contract xnu-pmap-mw-contract xnu-pmap-trans-contract xnu-pexpert-hook xnu-iokit-platform xnu-iokit-match-contract xnu-iokit-regsvc-contract xnu-iokit-provider xnu-iokit-catalog xnu-iokit-propinh xnu-iokit-regtop pexpert-hook-ready iokit-platform-scaffold iokit-match-local iokit-regsvc-local iokit-provider-local iokit-catalog-local iokit-propinh-local iokit-regtop-local irq-timer-hook pmap-bootstrap-ref public-xnu-workspace public-xnu-compile-graph public-xnu-platform-graph public-xnu-object-subset xnu-controlled-link xnu-bounded-pe-gen xnu-arm-pe-bootargs xnu-arm-consistent-debug stage90-xnu-link-proof inert-macho-fixture cancro-target arm-init-stub no-full-xnu-build no-pub-start no-pub-arm-init no-pub-thread no-pub-cpuboot no-pub-rtclock no-pub-pmap no-pub-pexpert no-pub-peinit no-pub-dtinit no-pub-peid no-pub-armvm no-iokit-runtime-exec no-macho-exec'
 CMDLINE="$CMDLINE_BASE $CACHE_TOKEN no-persist-write no-external-mutation"
 
+# -------------------------------------------------------------------------- 515: the boot argument
+#
+# **This check is here and not in the entry build, because the string it reads is the payload's and
+# this is the script that builds it.** The entry build runs first; a check there for a token in
+# `boot_args.o` would be reading the *previous* build's object - 460's defect class, a generated file
+# read from before the edit that produced it. Both halves of the comparison are in hand here: the
+# entry image (built above by `xnu_arm_boot/build_entry.sh`) and the objects just compiled from
+# `boot_args.c` and `stage90_main.c`.
+#
+# 515 supplies the one boot argument Apple's own idle-cache path is switched by:
+# `up_style_idle_exit=1`, which `arm_init` parses (`osfmk/arm/arm_init.c:287-289`) into the global
+# `caches.c:414` tests. It has to be a `name=value` token and not a bare word
+# (`PE_parse_boot_argn_internal` only matches a bare word that begins with `-`), and it has to be in
+# *both* command lines, because the port's own contracts read the tree's copy while XNU's parser reads
+# this one. The name is taken out of the entry image rather than written here: it is the literal the
+# kernel's own call site passes to that parser, so a payload token spelled differently is refused
+# instead of being compared against this script's memory of it.
+# **No `awk ... exit` and no `head` on these three lines, and that is a defect this step found by
+# running them**: `strings` on a 5.5 MB image is still writing when its reader stops, so the reader
+# closing the pipe gives it SIGPIPE, and under `set -o pipefail` the *pipeline* then fails - the
+# first version of this check died with status 141 and no message, which is the same silent death
+# the entry build's own clause warns about. A reader that runs to the end of the stream, and a
+# `|| true` for the case where there is no match at all, are both part of the check working.
+argname=$(arm-none-eabi-strings "$ENTRY_BIN" | awk '$0 == "up_style_idle_exit" { n++; if (n == 1) print }')
+if [[ -z $argname ]]; then
+  echo "FAIL: $ENTRY_BIN carries no literal 'up_style_idle_exit'; arm_init's own PE_parse_boot_argn" >&2
+  echo "      call is what puts it there, so 515's boot argument has no name to be written against." >&2
+  exit 1
+fi
+cmdstr=$(arm-none-eabi-strings "$REPO_ROOT/out/stage90/boot_args.o" | grep -F " $argname=1" || true)
+[[ -n $cmdstr ]] || true   # the test below is the one that fails, with its own message
+if [[ -z $cmdstr ]]; then
+  echo "FAIL: the payload's command line does not carry ' $argname=1'." >&2
+  echo "      That token is 515's repair: it is what makes caches.c:414's test true, and without it" >&2
+  echo "      the boot stops on the same store to 0x130 that 514's two hardware runs stopped on." >&2
+  exit 1
+fi
+if (( ${#cmdstr} > 255 )); then
+  echo "FAIL: the command line is ${#cmdstr} characters and CommandLine is 256 bytes with its NUL." >&2
+  echo "      build_boot_args copies the smaller of the two sizes and drops the tail silently, and" >&2
+  echo "      this step's token is the last one in the string." >&2
+  exit 1
+fi
+dtstr=$(arm-none-eabi-strings "$REPO_ROOT/out/stage90/stage90_main.o" | grep -F " $argname=1" || true)
+[[ -n $dtstr ]] || true   # the test below is the one that fails, with its own message
+if [[ -z $dtstr ]]; then
+  echo "FAIL: stage90_main.o's /chosen boot-args string does not carry ' $argname=1'." >&2
+  echo "      The port's own contracts read that copy (xnu_pe_init_platform_false.c:410-413," >&2
+  echo "      xnu_pexpert_hook_readiness_contract.c:163-164), so a token in one copy only is a check" >&2
+  echo "      and an effect about two different strings." >&2
+  exit 1
+fi
+echo "xnu_entry_515: the payload's command line (${#cmdstr} characters) and the tree's /chosen copy"
+echo "  both carry '$argname=1', the name taken from the entry image's own parse site"
+
+
 $MKBOOTIMG \
   --kernel $REPO_ROOT/out/stage90/stage90.bin \
   --ramdisk $REPO_ROOT/out/stage90/empty-ramdisk \

@@ -146,6 +146,8 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=Idle_load_context
                    --wrap=SetIdlePop
                    --wrap=cpu_idle_wfi
+                   --wrap=platform_cache_idle_enter
+                   --wrap=platform_cache_idle_exit
                    --wrap=psignal
                    --wrap=setPop
                    --wrap=PE_init_platform --wrap=fiq_context_init
@@ -27915,6 +27917,144 @@ verify_trace_symbols() {
     [[ "$wfiword" == "e320f003 wfi" ]] ||
         layout_fail "the word at wfi_inst in this image is [$wfiword] and not 'e320f003 wfi' - either the label has moved or the halt was patched out at build time, and in both cases 'the CPU slept' would be a claim about an instruction that is not there"
     say "  xnu_entry_514: cpu_signal_handler_internal ($sigi) is the kernel's own (defined in osfmk/arm/cpu_common.c, not in pass 1's undefined set, one definition in the image), the pool reaches it by ${sigicalls} call (this step's, inside __wrap_poll $ppoll..$ppollnext at $sigbl site) and by the kernel's own tail branches [$sigirefs], and its compiled body in osfmk_arm_cpu_common.o clears the bit: of ${sig_and} hw_atomic_and call(s) exactly ${sig_and_mvn} is preceded by ~SIGPdisabled, of ${sig_or} hw_atomic_or call(s) ${sig_or_set} is preceded by SIGPdisabled and ${sig_or_zero} read the live word with a zero operand - and the platform's own entry point cpu_signal_handler is 'mov r0, #0; b cpu_signal_handler_internal', the same call with the same argument, whose address ml_processor_register takes for the IPI slot; and cpu_idle_wfi ($wfix, reached from inside cpu_idle only, ${wfib_in} site) is wrapped at $wfiwrap, with Apple's own wfi_inst ($wi) the first symbol after it and the word there 'e320f003 wfi' - so a run's xnu_live_wfi_* record is a halt the CPU was actually given up for, and its ticks are how long for"
+
+    # --------------------------------------------------------------------------- 515: the repair
+    #
+    # **514 named the branch and 515 changes which one is taken, so this clause's job is to make the
+    # whole chain a property of the built artifacts rather than of a reading**: the payload's
+    # CommandLine, the name the kernel's own parse site uses, the two globals Apple's test reads and
+    # the value in the image, and the instructions that read them. Every one of those was read out of
+    # a fault by hand in 514; here it is required, and the one offset the instrument carries (1484) is
+    # compared against this configuration's generated `assym.s` rather than written down twice.
+    sym_addr() { arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk -v s="$1" '$3 == s { print "0x" $1; found = 1 } END { exit(found ? 0 : 1) }'; }
+    sym_next() { arm-none-eabi-nm -n "$OUT/xnu_arm_entry.elf" | awk -v s="${1#0x}" '$1 == s { p = 1; next } p && !d { print "0x" $1; d = 1 }'; }
+
+    # (1) The change itself: a name taken from the kernel's own parse site, and a token in *both*
+    # copies of the command line.
+    #
+    # **The name is counted in the image's `.text` and not in the ELF file, because the file carries
+    # two more copies that are not in the image at all**: the DWARF `.debug_str` copy (the variable's
+    # name, since it is now a symbol of `arm_init`'s own object) and the `.symtab`/`.strtab` copy.
+    # A `strings` over the whole file counts all three and reports the name as appearing twice - which
+    # this check did on its first run, before the payload was built. `.text` is where this link puts
+    # read-only data (there is no `.rodata` section in the image), so one extraction is one answer,
+    # and a build that ever moves the literal out of `.text` fails this check rather than passing it.
+    arm-none-eabi-objcopy -O binary --only-section=.text "$OUT/xnu_arm_entry.elf" "$OUT/xnu_entry_text.bin"
+    argn=$(arm-none-eabi-strings "$OUT/xnu_entry_text.bin" | awk '$0 == "up_style_idle_exit" { n++ } END { printf "%d", n + 0 }')
+    [[ "${argn:-0}" == 1 ]] ||
+        layout_fail "the binary of the linked image's .text carries ${argn:-0} literals equal to 'up_style_idle_exit'; arm_init's own PE_parse_boot_argn call is what puts exactly one there (osfmk/arm/arm_init.c:287), and 515's clause reads the payload's token against that name"
+    # **The two copies of the command line are checked in the *payload* build, not here,**
+    # because the string lives in the payload and this script runs before that build: an entry
+    # build reading `boot_args.o` would be reading the previous build's object (460's defect
+    # class). What belongs here is the image side of the same comparison - the name the kernel's
+    # own parse site uses, above - and the payload side of it is 515's check in
+    # `stages/stage90/build.sh`, which has both artifacts of one build in hand.
+    grep -qx "PE_parse_boot_argn" "$OUT/xnu_arm_entry_undef.txt" &&
+        layout_fail "this step's boot argument is parsed by PE_parse_boot_argn and the pass-1 undefined set contains it: the parse that has to find up_style_idle_exit=1 would then be a property of a stand-in rather than of Apple's own parser"
+
+    # (2) The two operands of Apple's own test, by name, shape and value.
+    upa=$(sym_addr up_style_idle_exit) ||
+        layout_fail "up_style_idle_exit is not in the linked image - it is the left operand of caches.c:414 and the word 515's boot argument sets"
+    rn=$(sym_addr real_ncpus) ||
+        layout_fail "real_ncpus is not in the linked image - it is the right operand of caches.c:414"
+    grep -qx "up_style_idle_exit" "$OUT/xnu_arm_entry_undef.txt" &&
+        layout_fail "up_style_idle_exit is in the pass-1 undefined set: the word the boot argument sets would be a stand-in's, not the one Apple's test reads"
+    grep -qx "real_ncpus" "$OUT/xnu_arm_entry_undef.txt" &&
+        layout_fail "real_ncpus is in the pass-1 undefined set: caches.c:414's right operand would be a stand-in's"
+    read -r upn upt upsz <<<"$(arm-none-eabi-nm -S --defined-only "$OUT/xnu_arm_entry.elf" | awk '$4 == "up_style_idle_exit" { n++; t = $3; sz = $2 } END { printf "%d %s %s", n + 0, t, sz }')"
+    [[ "${upn:-0}" == 1 && "$upt" == "B" && "$upsz" == "00000004" ]] ||
+        layout_fail "up_style_idle_exit is ${upn:-0} definition(s) of type [$upt] and size [$upsz]: it has to be one 32-bit .bss word, because arm_init.c:103 initialises it to 0 and the only thing that may set it is the boot argument this step adds - an initialised (D) or wider value would mean the image ships the branch already chosen"
+    read -r rnn rnt rnsz <<<"$(arm-none-eabi-nm -S --defined-only "$OUT/xnu_arm_entry.elf" | awk '$4 == "real_ncpus" { n++; t = $3; sz = $2 } END { printf "%d %s %s", n + 0, t, sz }')"
+    [[ "${rnn:-0}" == 1 && "$rnsz" == "00000004" ]] ||
+        layout_fail "real_ncpus is ${rnn:-0} definition(s) and size [$rnsz]: it is an int in cpu_common.c:66 and the test compares it with 1, so this is a 4-byte symbol or the reading is about a different one"
+    read -r dsz dvma doff <<<"$(arm-none-eabi-objdump -h "$OUT/xnu_arm_entry.elf" | awk '$2 == ".data" { print $3, $4, $6 }')"
+    [[ -n "$doff" ]] ||
+        layout_fail "the image has no .data section, so real_ncpus's value in it cannot be read and the uniprocessor operand would be an assumption"
+    rnval=$(od -An -tu4 -j $((0x$doff + rn - 0x$dvma)) -N4 -v "$OUT/xnu_arm_entry.elf" | tr -d ' \n')
+    [[ "$rnval" == 1 ]] ||
+        layout_fail "real_ncpus holds $rnval in the image and not 1: caches.c:414's right operand is 'this machine has exactly one CPU' and that number *is* this port's claim to be a uniprocessor - a 2 here would make the up-style branch's own test false for a different reason than the flag"
+
+    # (3) The instructions that read them, inside the function 514's fault was in.
+    pce=$(sym_addr platform_cache_idle_enter) ||
+        layout_fail "platform_cache_idle_enter is not in the linked image - it is the function 514's fault stopped in at +0x58"
+    # `sym_next` prints nothing and *succeeds* when nothing follows, so the test is on the value and
+    # not on the status - the form 514's clause uses, and the one whose absence here would have made
+    # the disassembly below die silently under `set -e` (the file's own recorded defect class: a check
+    # that cannot say why it stopped).
+    pcenext=$(sym_next "$pce") || true
+    [[ -n $pcenext ]] ||
+        layout_fail "no symbol follows platform_cache_idle_enter in the image, so its extent cannot be read"
+    read -r uplo uphi <<<"$(awk -v a="$((upa))" 'BEGIN { printf "0x%x 0x%x", a % 65536, int(a / 65536) }')"
+    read -r rnlo rnhi <<<"$(awk -v a="$((rn))" 'BEGIN { printf "0x%x 0x%x", a % 65536, int(a / 65536) }')"
+    read -r puplo puphi prnlo prnhi pcmp pclean pflush pmrcldr pclw porder <<<"$(arm-none-eabi-objdump -d --start-address=$pce --stop-address=$pcenext "$OUT/xnu_arm_entry.elf" | awk \
+        -v lo="$uplo" -v hi="$uphi" -v rlo="$rnlo" -v rhi="$rnhi" '
+        { split($1, a, ":"); if (a[1] == "") { next }
+          if (index($0, "; " lo) && $3 == "movw") ulo++
+          if (index($0, "; " hi) && $3 == "movt") uhi++
+          if (index($0, "; " rlo) && $3 == "movw") rlo_n++
+          if (index($0, "; " rhi) && $3 == "movt") rhi_n++
+          if ($3 == "cmp" && $4 ~ /^r[0-9]+,$/ && $5 == "#1") cmp1++
+          if (index($0, "<CleanPoU_Dcache>") && $3 == "bl") { clean++; cadd = strtonum("0x" a[1]) }
+          if (index($0, "<FlushPoU_Dcache>") && $3 == "bl") { flush++; fadd = strtonum("0x" a[1]) }
+          if (prev ~ /mrc[ \t]+15, 0, r[0-9]+, cr13, cr0, \{4\}/ && $0 ~ /ldr[ \t]+r[0-9]+, \[r[0-9]+, #1484\]/) mrcldr++
+          if ($0 ~ /str[ \t]+r[0-9]+, \[r[0-9]+, #304\]/) clw++
+          prev = $0 }
+        END { printf "%d %d %d %d %d %d %d %d %d %d", ulo + 0, uhi + 0, rlo_n + 0, rhi_n + 0, cmp1 + 0,
+              clean + 0, flush + 0, mrcldr + 0, clw + 0, (clean && flush && cadd < fadd) ? 1 : 0 }')"
+    [[ "${puplo:-0}" -ge 1 && "${puphi:-0}" -ge 1 ]] ||
+        layout_fail "platform_cache_idle_enter ($pce..$pcenext) does not materialise up_style_idle_exit ($upa) with a movw/movt pair: the left operand of caches.c:414 is then not the word the boot argument sets, and 515's whole change would be about a variable nothing reads"
+    [[ "${prnlo:-0}" -ge 1 && "${prnhi:-0}" -ge 1 && "${pcmp:-0}" -ge 1 ]] ||
+        layout_fail "platform_cache_idle_enter does not read real_ncpus ($rn) with a movw/movt pair and compare it with 1: the right operand is 'this machine has exactly one CPU', and a comparison against anything else would make the uniprocessor claim mean something else"
+    [[ "${pclean:-0}" -ge 1 && "${pflush:-0}" -ge 1 && "${porder:-0}" == 1 ]] ||
+        layout_fail "platform_cache_idle_enter's branches do not both appear in its extent with CleanPoU_Dcache ($pclean) called before FlushPoU_Dcache ($pflush): the up-style branch is the one that reads nothing and the else branch the one that reads getCpuDatap(), so their order is which branch is which"
+    [[ "${pmrcldr:-0}" -ge 1 ]] ||
+        layout_fail "platform_cache_idle_enter does not contain 'mrc p15, 0, r?, cr13, cr0, {4}' followed by 'ldr r?, [r?, #1484]': that pair is getCpuDatap(), the value 514's run dereferenced as 0 with a store to 0x130, and it is the reason a reading taken in that branch is a reading of a disabled-cache load"
+    [[ "${pclw:-0}" -ge 1 ]] ||
+        layout_fail "platform_cache_idle_enter does not store to [r?, #304]: that is caches.c:421's cpu_CLW_active = 0, the instruction 514's two runs faulted on (far = 0x130), so a build where it is gone is a build where the wall has moved and this step's falsifier is about something else"
+    act=$(awk '$1 == "#define" && $2 == "ACT_CPUDATAP" { print $3; exit }' "$REPO_ROOT/out/xnu_assym/$XNU_KERNEL_CONFIG/assym.s" | tr -d '#')
+    [[ "$act" == 1484 ]] ||
+        layout_fail "this configuration's assym.s says ACT_CPUDATAP is [$act] and not 1484: the instrument's own getCpuDatap() reads the same field by the same offset, so the two must be one number - and genassym.c:147 is where it comes from (offsetof(struct thread, machine.CpuDatap))"
+    ewrap=$(sym_addr __wrap_platform_cache_idle_enter) ||
+        layout_fail "__wrap_platform_cache_idle_enter is not in the linked image - --wrap=platform_cache_idle_enter did not link, and this step's census would then be counting nothing"
+    ewrapnext=$(sym_next "$ewrap") || true
+    [[ -n $ewrapnext ]] ||
+        layout_fail "no symbol follows __wrap_platform_cache_idle_enter in the image, so the extent this check reads getCpuDatap() out of has no end"
+    ewbody=$(arm-none-eabi-objdump -d --start-address=$ewrap --stop-address=$ewrapnext "$OUT/xnu_arm_entry.elf")
+    # The wrapper's own copy of the read, and the window is three instructions rather than one: gcc
+    # compiles `entry_cpu_datap()`'s null arm to a `cmp` and a *conditional* load (`ldrne r3,
+    # [r3, #1484]` in this build), so the instruction after the `mrc` is not the load and requiring it
+    # to be was this check's first failure. What matters is that the address came from TPIDRPRW and
+    # the offset is the kernel's own, and both of those are in the window.
+    ewread=$(awk '/mrc[ \t]+15, 0, r[0-9]+, cr13, cr0, \{4\}/ { n = 0; seen = 1; next }
+                  seen && n < 3 { n++; if ($0 ~ /ldr[a-z]*[ \t]+r[0-9]+, \[r[0-9]+, #1484\]/) { print "1"; exit } }' <<<"$ewbody")
+    [[ "${ewread:-0}" == 1 ]] ||
+        layout_fail "515's own wrapper does not read getCpuDatap() the way the kernel's does (TPIDRPRW + #1484): the record's datap would then be a different field of a different structure than the one 514's fault dereferenced"
+
+    # (4) The two wraps, and the edges into them.
+    pcexw=$(sym_addr __wrap_platform_cache_idle_exit) ||
+        layout_fail "__wrap_platform_cache_idle_exit is not in the linked image - the window's far end is where the exit count is taken, and without it a completed window and a faulted one would look the same"
+    pcerefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o 2>/dev/null |
+        awk '/[[:space:]]platform_cache_idle_(enter|exit)$/ { print $2 }' | sort -u | tr '\n' ' ')
+    [[ "$pcerefs" == "R_ARM_CALL " ]] ||
+        layout_fail "the kernel's objects reference caches.c's idle-cache pair with [$pcerefs] and 515's wraps assume calls: an address-taken reference would let --wrap rewrite a value that is later branched to, and the census would then be of this file's own call rather than of cpu_idle's"
+    read -r ein eout <<<"$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" |
+        awk -v clo="$((cidle))" -v chi="$((cidlenext))" '
+            index($0, "<__wrap_platform_cache_idle_enter>") && $3 == "bl" {
+                split($1, a, ":"); h = strtonum("0x" a[1])
+                if (h >= clo && h < chi) inb++; else outb++ }
+            END { printf "%d %d", inb + 0, outb + 0 }')"
+    [[ "${ein:-0}" -ge 1 && "${eout:-1}" == 0 ]] ||
+        layout_fail "the image branches to __wrap_platform_cache_idle_enter from ${ein:-0} site(s) inside cpu_idle ($cidle..$cidlenext) and ${eout:-?} outside it: cpu_idle is the only function that may enter the idle cache window, and a second caller would put this step's readings on a path it has not measured"
+    read -r xin xout <<<"$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" |
+        awk -v clo="$((cidle))" -v chi="$((cidlenext))" '
+            index($0, "<__wrap_platform_cache_idle_exit>") && $3 == "bl" {
+                split($1, a, ":"); h = strtonum("0x" a[1])
+                if (h >= clo && h < chi) inb++; else outb++ }
+            END { printf "%d %d", inb + 0, outb + 0 }')"
+    [[ "${xin:-0}" -ge 1 && "${xout:-1}" == 0 ]] ||
+        layout_fail "the image branches to __wrap_platform_cache_idle_exit from ${xin:-0} site(s) inside cpu_idle and ${xout:-?} outside it: the exit is what re-enables the D-cache (caches.c:490-494), and the enter/exit pair has to be cpu_idle's alone for the two counts to be the two ends of one window"
+    say "  xnu_entry_515: the linked image carries exactly ${argn} literal equal to the name arm_init passes to PE_parse_boot_argn, and that parser is the real one (not in pass 1's undefined set); up_style_idle_exit ($upa) is one 32-bit .bss word and real_ncpus ($rn) one 32-bit .data word holding $rnval in the image, and caches.c:414's two operands are read inside platform_cache_idle_enter ($pce..$pcenext) by a movw/movt pair each with the ncpus one compared against 1, whose up-style branch calls CleanPoU_Dcache and whose else branch calls FlushPoU_Dcache, reads getCpuDatap() as 'mrc cr13,cr0,{4}' + 'ldr [r?, #1484]' (this configuration's ACT_CPUDATAP = $act) and stores to [r?, #304] - the instruction 514's runs faulted on; and that function is wrapped for both its ends, entered from inside cpu_idle only (${ein} site(s) and ${xin} for the exit, none outside), so a run's xnu_live_pce_*/pcx_* pair counts the windows that completed and the ones that did not; the two copies of the command line are checked in the payload build"
+
 
 
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls

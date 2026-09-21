@@ -230,6 +230,43 @@ extern void cpu_signal_handler_internal(int disable_signal);
  * The build resolves the address out of the image and prints it; it is not written down here. */
 extern uint32_t wfi_inst;
 
+/* 515's, and they are the same shape as 514's with one difference that is the whole of their design:
+ * both counters are only ever touched with the D-cache on - see the block in `entry_stubs.c`. */
+extern uint32_t g_pce_calls, g_pce_caller, g_pce_up, g_pce_ncpu, g_pce_datap;
+extern uint32_t g_pce_first_before, g_pce_last_before;
+extern uint32_t g_pcx_calls, g_pcx_ticks_max, g_pcx_first_ticks, g_pcx_last_ticks;
+extern void entry_note_pce(uint32_t caller, uint32_t up, uint32_t ncpu, uint32_t datap,
+                           uint32_t before);
+extern void entry_note_pcx(uint32_t after);
+
+/* **515's two globals, read by name, and they are the operands of Apple's own test.** `caches.c:414`
+ * is `if (up_style_idle_exit && (real_ncpus == 1))`, both words are in this image, and both are read
+ * here *with the cache on* - which is what makes the record a reading of the CPU's value rather than
+ * of what a disabled-cache read of the same address would return. `up_style_idle_exit` is
+ * `boolean_t` = `int` (`arm_init.c:103`, a `.bss` word: the image cannot ship it set, so the boot
+ * argument is the only thing that can) and `real_ncpus` is `int` (`cpu_common.c:66`, an initialised
+ * word whose value in the image must be 1 for this port to be a uniprocessor). The build checks all
+ * four of those properties - section, size, initial value, and that the two addresses are the ones
+ * the compiled test reads - so a reading here cannot be about a different variable. */
+extern uint32_t up_style_idle_exit;
+extern uint32_t real_ncpus;
+
+/* `getCpuDatap()`, in the one instruction the compiler compiles it to: `current_thread()` is
+ * TPIDRPRW (`cpu_data.h:58`) and `machine.CpuDatap` is at 1484 (`ACT_CPUDATAP`,
+ * `osfmk/arm/genassym.c:147` = `offsetof(struct thread, machine.CpuDatap)`). **Only the pointer is
+ * read, never the pointee** - the value is exactly what 514's fault was about (`far = 0x130` for
+ * `0 + 0x130`), and an instrument that dereferenced it would fault in the kernel's own place. The
+ * offset is not written down here and hoped for: the build clause requires the real function's own
+ * compiled load to use it (`ldr r?, [r?, #1484]` inside `platform_cache_idle_enter`), which is the
+ * same instruction 514 read out of the disassembly by hand. */
+static inline uint32_t entry_cpu_datap(void)
+{
+    uint32_t thread;
+
+    __asm__ volatile ("mrc p15, 0, %0, c13, c0, 4" : "=r"(thread));
+    return (thread == 0u) ? 0u : *(volatile uint32_t *)(uintptr_t)(thread + 1484u);
+}
+
 /* `boolean_t idle_enable` (`osfmk/arm/cpu_common.c:67`), read **by name** - the linker resolves the
  * address out of the image's own symbol, so there is no offset here to be wrong, which is why this is
  * a word 513 can read while `cpu_signal`/`rtcPop`/`cpu_idle_latency` are words it deliberately does
@@ -1051,6 +1088,17 @@ int __wrap_poll(void *proc, void *uap, int *retval)
                w_wfi, g_wfi_calls, w_wfi_fast, g_wfi_inst_seen, w_sleep, after - before,
                g_wfi_ticks_max, g_wfi_first_before, g_wfi_first_after,
                g_wfi_last_before, g_wfi_last_after);
+        /* **515's line, and its two numbers are the census rather than a claim about it.** `entered`
+         * and `exited` are the two counters of the kernel's own cache window, and the readings beside
+         * them are the first window's - the three values the function's test and its else branch use,
+         * read with the D-cache on. If the repair took, `up` is 1 and `datap` is not 0 and the two
+         * counts differ by at most the window this line is printed inside; if the else branch ran
+         * instead, the enter count is the larger one and the fault record names the store. */
+        printf("mini4: the idle's cache window -- platform_cache_idle_enter entered %d time(s) from "
+               "0x%x and returned %d, with up_style_idle_exit=%d real_ncpus=%d and the first "
+               "getCpuDatap()=0x%x; the window took %d tick(s) at most (first %d, last %d)\n",
+               g_pce_calls, g_pce_caller, g_pcx_calls, g_pce_up, g_pce_ncpu, g_pce_datap,
+               g_pcx_ticks_max, g_pcx_first_ticks, g_pcx_last_ticks);
     }
 
     return error;
@@ -1428,6 +1476,54 @@ void __wrap_cpu_idle_wfi(int wfi_fast)
     inst = wfi_inst;
 
     entry_note_wfi((uint32_t)wfi_fast, inst, before, after, after - before);
+}
+
+/* --------------------------------------------------- 515: the idle's cache window, both its ends */
+/*
+ * **`platform_cache_idle_enter` is where 514's fault was, and this is the instrument that says which
+ * of its two branches the run takes.** The function is Apple's own (`caches.c:402-430`, linked in
+ * `osfmk_arm_caches.o`) and `cpu_idle` is its only caller, so wrapping it is one edge in the whole
+ * image - which the clause checks. Everything the record carries is read **before** the real call,
+ * while the D-cache is still on: the two operands of the function's own test (`up_style_idle_exit`,
+ * `real_ncpus`) and `getCpuDatap()`, the pointer its else branch stores through. `before` is the
+ * tick, kept so that the far end of the window can be measured from here.
+ *
+ * **Why the readings must be taken here rather than inside.** The real function's first act is
+ * `platform_cache_disable()` (`caches.c:406`), so from that instruction until
+ * `platform_cache_idle_exit` re-enables it (`:490-494`) an access on this CPU does not answer the
+ * L1 or the L2 - which is what 514 measured with a `far` of `0x130`. A read of `up_style_idle_exit`
+ * taken in that window is a read of DRAM, and a *counter* incremented there has the same problem
+ * with the stale cached copy of its line. This file takes neither: the value is read here, and the
+ * counter (`entry_stubs.c`) is only touched before the call and after the exit.
+ */
+void __real_platform_cache_idle_enter(void);
+void __wrap_platform_cache_idle_enter(void)
+{
+    uint32_t before = entry_counter();
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+
+    entry_note_pce(caller, up_style_idle_exit, real_ncpus, entry_cpu_datap(), before);
+
+    __real_platform_cache_idle_enter();
+}
+
+/*
+ * The window's far end: `platform_cache_idle_exit` is the function that re-enables the D-cache, so
+ * the count taken *after* it returns is taken with the cache on whatever branch ran - and the
+ * difference between this count and the enter's is the census 515 is for. A window whose enter
+ * faulted (the else branch, 514's wall) never reaches this wrapper, and the last `xnu_live_pce_*`
+ * record is then the whole reading.
+ *
+ * The wrapper adds no record of its own beyond `entry_note_pcx`'s, and it does not call the exit
+ * anywhere but through the real symbol: a wrapper that called the enter's wrapper here would be a
+ * second path into the window and would make the count in the record a fact about this file.
+ */
+void __real_platform_cache_idle_exit(void);
+void __wrap_platform_cache_idle_exit(void)
+{
+    __real_platform_cache_idle_exit();
+
+    entry_note_pcx(entry_counter());
 }
 
 int __real_fork(void *proc, void *uap, int *retval);

@@ -5334,8 +5334,115 @@ void entry_note_wfi(uint32_t fast, uint32_t inst, uint32_t before, uint32_t afte
     }
 }
 
-/* Experiment 456's probe, defined below its first caller; the declaration is here because
- * `entry_note_iolock` is where the reading is taken (see `entry_registry_probe`). */
+/* ------------------------------------------------------------------------------------------------
+ * 515: the idle's cache window, counted at both of its ends - and the two words that decide it.
+ * ------------------------------------------------------------------------------------------------
+ * **514 read the wall out of a fault: `platform_cache_idle_enter`'s else branch dereferenced a NULL
+ * `getCpuDatap()` and stored to `0x130`, and the reason it took the else branch is that
+ * `up_style_idle_exit` is 0 and `real_ncpus` is 1 - a uniprocessor that never said so.** 515 supplies
+ * the word Apple's own switch is: `up_style_idle_exit=1` in the payload's `CommandLine` and in the
+ * tree's `/chosen/boot-args` copy, which `arm_init` (`osfmk/arm/arm_init.c:287-289`) parses into the
+ * same global `caches.c:414` tests. This block is the instrument that says whether the branch moved,
+ * and it is built so that its readings cannot be affected by the window it measures.
+ *
+ * **Why these two counters are trustworthy where 514's `wfi` count is not.** The window between the
+ * two calls is a window with **`SCTLR.C` cleared** - that is the whole of what
+ * `platform_cache_idle_enter` does first (`caches.c:406`, `platform_cache_disable()`) - and on this
+ * CPU an access with the cache off does not answer the L1 or the L2. A counter incremented *inside*
+ * that window therefore lives in DRAM while the cache keeps a stale copy of the same line, and the
+ * next cached read of it - or the clean that the kernel's own exit path performs - can lose the
+ * increment. **Both of this step's counters are only ever touched with the cache ON**: the enter's
+ * before the real call, the exit's after it (and `platform_cache_idle_exit` ends by re-enabling the
+ * cache, `caches.c:490-494`). That is not an optimization, it is the property that makes a *count*
+ * here a reading: 514's `g_wfi_calls` is incremented inside the window, so its console line and its
+ * running total are the one number in this walk that the step's own finding puts in doubt.
+ *
+ * **What the pair of counts says.** The enter and the exit are two ends of one window whose middle is
+ * `cpu_idle_wfi` and `platform_cache_idle_exit`. If the else branch is taken, the fault happens
+ * *inside* the real enter call, so `xnu_live_pce_seq` advances and `xnu_live_pcx_seq` does not -
+ * which is the signature of the wall, and it is the same signature 514's log carries in its first
+ * fault record. If the up branch is taken, both advance together and the `wfi` in between is a halt
+ * the CPU was actually given up for. So the branch is *counted at both of its ends* rather than
+ * inferred from which fault did not happen - which is what 514's document asked for.
+ *
+ * **`up`, `ncpu` and `datap` are read in the wrapper with the cache on**, one instruction before the
+ * kernel disables it, so they are the CPU's own values and not the values a cache-off read would
+ * return. That distinction is not academic here: it is 514's own finding, and it means a run in which
+ * `up = 1` is published *and* the fault still arrives is a run that has measured the disabled-cache
+ * read of `up_style_idle_exit` rather than a run that has measured the boot argument.
+ */
+uint32_t g_pce_calls;
+uint32_t g_pce_caller;
+uint32_t g_pce_up, g_pce_ncpu, g_pce_datap;
+uint32_t g_pce_first_before, g_pce_last_before;
+uint32_t g_pcx_calls;
+uint32_t g_pcx_ticks_max;
+uint32_t g_pcx_first_ticks, g_pcx_last_ticks;
+
+/*
+ * One entry into the kernel's cache window, taken before the real call. `up`/`ncpu`/`datap` are the
+ * three values that decide what the call will do: the two operands of `caches.c:414`'s test and the
+ * pointer its else branch dereferences. `caller` is the `lr` the wrapper was entered with, so the
+ * `bl` is at `caller - 4` - and it is inside `cpu_idle`, which the build clause requires.
+ *
+ * `before` is kept as well as published, because the *window* the run cares about starts here and
+ * ends after `platform_cache_idle_exit` returns - i.e. it contains the halt - and only the second
+ * half of the instrument knows when that is.
+ */
+void entry_note_pce(uint32_t caller, uint32_t up, uint32_t ncpu, uint32_t datap, uint32_t before)
+{
+    uint32_t n = g_pce_calls + 1u;
+
+    g_pce_calls = n;
+    g_pce_last_before = before;
+    if (n == 1u) {
+        g_pce_caller = caller;
+        g_pce_up = up;
+        g_pce_ncpu = ncpu;
+        g_pce_datap = datap;
+        g_pce_first_before = before;
+    }
+
+    if ((n & (n - 1u)) == 0u) {
+        entry_live_write("xnu_live_pce_seq", n);
+        entry_live_write("xnu_live_pce_caller", caller);
+        entry_live_write("xnu_live_pce_up", up);
+        entry_live_write("xnu_live_pce_ncpu", ncpu);
+        entry_live_write("xnu_live_pce_datap", datap);
+    }
+}
+
+/*
+ * The same window's far end, taken from the exit wrapper *after* the real `platform_cache_idle_exit`
+ * has re-enabled the D-cache - so this counter, like the enter's, is only ever touched with the cache
+ * on, and `_ticks` is the whole window (enter, halt and exit) rather than the exit alone.
+ *
+ * **`_entered` next to `_seq` is the census this step is for.** Both are read here, in one place, so
+ * a window whose enter never came back is not an inference from a missing key: it is the difference
+ * between the two numbers in the last record that was written, and 514's log's signature - an enter
+ * with no exit - reads as `_entered` one greater than `_seq`.
+ */
+void entry_note_pcx(uint32_t after)
+{
+    uint32_t n = g_pcx_calls + 1u;
+    uint32_t ticks = after - g_pce_last_before;
+
+    g_pcx_calls = n;
+    if (ticks > g_pcx_ticks_max)
+        g_pcx_ticks_max = ticks;
+    if (n == 1u)
+        g_pcx_first_ticks = ticks;
+    g_pcx_last_ticks = ticks;
+
+    if (n == 1u || (n & (n - 1u)) == 0u) {
+        entry_live_write("xnu_live_pcx_seq", n);
+        entry_live_write("xnu_live_pcx_entered", g_pce_calls);
+        entry_live_write("xnu_live_pcx_ticks", ticks);
+        entry_live_write("xnu_live_pcx_after", after);
+    }
+}
+
+
 __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);
 /*
  * Experiment 454. One call per entry into the two IOKit deadline sleeps, from their wrappers. `site`
