@@ -278,7 +278,7 @@ case "$(value_of STAGE90_XNU_ENTRY)" in
     echo "                 land in the frame it just built - the frame is 360 bytes below that"
     echo "                 top and the handler reaches it with ~316 bytes of stack. 518 moves"
     echo "                 the handler's start to the middle of that stack. The image this"
-    echo "                 preflight is being run against is a3ee914e... (istack separation on,"
+    echo "                 preflight is being run against is 32a513bc... (istack separation on,"
     echo "                 the exit's PoC flush off); out/stage90/stage90-qcdt.img says which."
     echo
     echo "          Safety: the hardware watchdog is the only net across the jump, deliberately"
