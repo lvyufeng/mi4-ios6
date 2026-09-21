@@ -258,6 +258,11 @@ extern uint32_t g_tb_datap;
 extern uint32_t g_tb_frame_kind, g_tb_frame_cand;
 extern uint32_t g_tb_ret_lo, g_tb_prev_lo, g_tb_sctlr;
 extern uint32_t g_tb_held;
+/* 518: moves `cpu_data->istackptr` to the middle of the interrupt stack, so the interrupt handler's own
+ * spills stop landing in the frame `fleh_irq_kernel` builds below the interrupted sp. See
+ * `entry_stubs.c` for the arithmetic. */
+extern void entry_istack_separate(void);
+extern uint32_t g_istack_before, g_istack_after, g_istack_moved;
 extern void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr);
 
 /* **515's two globals, read by name, and they are the operands of Apple's own test.** `caches.c:414`
@@ -1239,6 +1244,19 @@ int __wrap_poll(void *proc, void *uap, int *retval)
                g_tb_pc, g_tb_lr, g_tb_sp, g_tb_cpsr, g_tb_status, g_tb_vaddr,
                g_tb_ret_lo, g_tb_prev_lo, g_tb_target, g_tb_index,
                (g_tb_hit != 0u) ? "inside" : "outside", g_tb_sctlr, g_tb_held);
+        /* **518's line: where the interrupt handler's stack starts, and what it was.** The frame of an
+         * interrupt taken while the interrupted code is on the interrupt stack is built *below that
+         * code's sp*, and the handler's stack grows down from `istackptr` - so if that pointer is the
+         * top of the stack, the handler's first push is 16 bytes above the frame's last word and its
+         * spills land in the frame's own fields. `before` is what this boot's `arm_init` left there
+         * (`intstack_top`), `after` is the middle of the 16 KB the handler now gets, and `move` is 0 on
+         * the arm that does not move it - in which case the pair is a reading of the arrangement and
+         * not a change to it. */
+        printf("mini4: the interrupt handler's own stack -- cpu_data->istackptr was 0x%x and is 0x%x "
+               "(%d move(s), %d bytes below where an interrupt taken on the interrupt stack puts the "
+               "bottom of its frame)\n",
+               g_istack_before, g_istack_after, g_istack_moved,
+               (int32_t)(g_istack_before - g_istack_after));
     }
 
     return error;
@@ -1501,6 +1519,7 @@ extern void entry_note_idle(uint32_t caller, uint32_t thread, uint32_t pid, uint
                             uint32_t now, uint32_t en);
 
 
+
 void __real_machine_idle(void);
 
 void __wrap_machine_idle(void)
@@ -1522,6 +1541,14 @@ void __wrap_machine_idle(void)
      * `SetIdlePop` wrapper is not entered on a pass that leaves by the first test. See 513's block in
      * `entry_stubs.c`. */
     entry_note_idle(caller, thread, pid, cpsr, entry_counter(), (uint32_t)idle_enable);
+
+    /* 518: the interrupt handler's stack is moved off the top of the interrupt stack, where the frame
+     * of an interrupt taken on that stack is built. This wrapper is the place for it: it is entered on
+     * every pass of the idle loop, in thread context, with interrupts masked (`machine_idle` does
+     * `cpsid if` before `Idle_context` hands the CPU to `cpu_idle`), and the idle path is where the
+     * collision bit. The store is idempotent, so entering it 33 million times is one comparison; see
+     * `entry_stubs.c` for the arithmetic and for the arm. */
+    entry_istack_separate();
 
     __real_machine_idle();
 }

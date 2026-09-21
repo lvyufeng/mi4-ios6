@@ -5841,6 +5841,102 @@ void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr)
 }
 
 
+/* -------------------------------------------------- 518: the handler's stack starts on the frame */
+/*
+ * **What 516's three runs were dying of, and it is one arrangement this kernel makes under the
+ * interrupted code's feet.** `fleh_irq_kernel` builds its 360-byte frame *below the interrupted sp*
+ * (`sub sp, sp, EXC_CTX_SIZE`, `locore.s:1344`) and then **throws that sp away**: it loads the stack it
+ * will run the handler on from `cpu_data->istackptr` (`locore.s:1361-1362`,
+ * `ldr sp, [r9, ACT_CPUDATAP]` / `ldr sp, [sp, CPU_ISTACKPTR]`). `istackptr` is written **twice in the
+ * whole kernel and never per interrupt** - `arm_init.c:227` and `cpu.c:294`, both `= intstack_top` - so
+ * the handler's stack always starts at the top of `intstack`.
+ *
+ * That is fine as long as the interrupted code is not itself on `intstack`: a thread's kernel stack is
+ * in the heap and the frame is nowhere near. It is not fine in this boot, because **the boot runs on
+ * the interrupt stack**: `start.s:310-311` is the image's only `ldr sp, <intstack_top>`
+ * (`LOAD_ADDR(sp, intstack_top)` / `sub sp, sp, SS_SIZE`), and 514's reading of the idle path's own
+ * `sp` (`0x80517ff0` = `intstack_top - 16`) says the idle loop it becomes is still there. So:
+ *
+ *   - the frame is built at `[sp - 360, sp)` = `[0x80517e88, 0x80517ff0)` on 516's runs;
+ *   - the handler's stack grows down from `0x80518000` = `intstack_top`, i.e. **16 bytes above the
+ *     frame's top word**, and the frame's own fields are *inside* the region it grows into;
+ *   - the six words this instrument reads are at frame+52..72 = `0x80517ebc`..`0x80517ed0`, so a handler
+ *     that uses **316 bytes** of stack has already overwritten `SS_PC` (frame+60), **320** overwrites
+ *     `SS_LR`, **324** `SS_SP` - and the handler does real work at that depth (`interrupt_stats`, the
+ *     driver's own handler through `blx r5`, then `ml_get_timebase`).
+ *
+ * **Which is what the runs measured.** 516's panicking frame has `SS_LR` intact and plausible
+ * (`0x800462dc` = the return address of `platform_cache_idle_exit`'s `bl FlushPoU_Dcache`) while
+ * `SS_PC`/`SS_STATUS`/`SS_VADDR` hold a **timebase** and a `5` - and the frame's fields are reached in
+ * exactly that order (frame+72 first, frame+52 last), so "the top three are the handler's spills and
+ * the next three are still the vector's" is what a 316-to-319-byte handler looks like. The values fit
+ * too: the handler calls `ml_get_timebase`, and the pair `r4 = r11 = SS_PC + 2` that both of 516's dumps
+ * carry is two spilled words a tick apart, not a coincidence of two runs.
+ *
+ * **And the fix is the same fact read the other way.** `istackptr` names where the handler's stack
+ * *starts*; pointing it at the middle of the 16 KB interrupt stack leaves the top half to the boot and
+ * idle code whose frames are built there and gives the handler 8 KB below them - which is one store,
+ * idempotent, inside a dedicated stack region, and it cannot change any other behaviour of the kernel:
+ * nothing else in `osfmk/arm` reads the field, and `ml_at_interrupt_context()` (`machine_routines.c:671`)
+ * tests `sp` against `[intstack_top - INTSTACK_SIZE, intstack_top)`, which the middle still satisfies.
+ *
+ * **This is an arm and not a conclusion.** If the collision is the writer, this step's run leaves the
+ * frame clean and the boot should get further than 516's did; if the frame still holds a timebase in
+ * `SS_PC` with the separation on, the writer is something else and 517's records say which. It is done
+ * here rather than after another measurement because it is also the *safer* arm: the instrument that
+ * would measure the collision adds its own stack use to the very handler whose depth is the problem.
+ */
+uint32_t g_istack_before, g_istack_after, g_istack_moved;
+
+#ifndef STAGE90_XNU_ISTACK_SEPARATE
+#define STAGE90_XNU_ISTACK_SEPARATE 1
+#endif
+
+/*
+ * `BootCpuData` and `intstack` are both `.data` symbols in this image (`0x8051a000`, `0x80514000`), and
+ * the field is `cpu_data->istackptr` at `CPU_ISTACKPTR`; `build_entry.sh`'s `xnu_entry_518` clause
+ * compares both numbers against `assym.s` and checks the store the flag compiles to.
+ */
+#define STAGE90_CPU_ISTACKPTR  4u
+#define STAGE90_INTSTACK_SIZE  16384u
+
+extern char intstack[];
+extern char BootCpuData[];
+
+/*
+ * **The store is its own function, and that is for the build's sake rather than the CPU's.** The arm's
+ * whole content is one 32-bit store into a field of `BootCpuData`, and whether that store is in the
+ * image is the difference between a reading and a change - so it is a symbol the build can look for
+ * rather than an instruction inside a larger body it would have to match by shape:
+ * `xnu_entry_518` requires this call iff the flag is on, and requires this body's own store
+ * unconditionally. The value it is given is `intstack + INTSTACK_SIZE/2`, materialized in the caller.
+ */
+__attribute__((noinline)) void entry_istack_store(volatile uint32_t *slot, uint32_t want)
+{
+    *slot = want;
+}
+
+void entry_istack_separate(void)
+{
+    volatile uint32_t *slot = (volatile uint32_t *)(uintptr_t)(BootCpuData + STAGE90_CPU_ISTACKPTR);
+    const uint32_t want = (uint32_t)(uintptr_t)intstack + (STAGE90_INTSTACK_SIZE / 2u);
+
+    g_istack_before = *slot;
+    g_istack_after = want;
+
+#if STAGE90_XNU_ISTACK_SEPARATE
+    if (g_istack_before != want) {
+        entry_istack_store(slot, want);
+        if (g_istack_moved == 0u) {
+            g_istack_moved = 1u;
+            entry_live_write("xnu_live_istack_before", g_istack_before);
+            entry_live_write("xnu_live_istack_after", *slot);
+        }
+    }
+#endif
+}
+
+
 __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);
 /*
  * Experiment 454. One call per entry into the two IOKit deadline sleeps, from their wrappers. `site`

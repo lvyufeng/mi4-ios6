@@ -343,6 +343,81 @@ return-path reading sharpens it rather than explaining it: `ldm sp, {r0-r12}` at
 both registers out of the frame's own slots, so `r4` and `r11` were already equal in the frame the return
 path was spending, and no instruction in that path writes either.
 
+## Addendum 3 (host-side, no device) — the handler's stack is where the frame is, and 518 is the arm
+
+The frame reader and 516's dumps are enough to name a mechanism without another run, and it is a
+property of how this kernel is arranged rather than of any instrument.
+
+**Where the frame goes, and where the handler's stack goes.** `fleh_irq_kernel` builds its 360-byte
+saved state *below the interrupted `sp`* (`locore.s:1344`, `sub sp, sp, EXC_CTX_SIZE`) and then **throws
+that `sp` away**: the stack the handler body runs on comes from `cpu_data->istackptr`
+(`locore.s:1361-1362`, `ldr sp, [r9, ACT_CPUDATAP]` / `ldr sp, [sp, CPU_ISTACKPTR]`). `istackptr` is
+written **twice in the whole kernel and never per interrupt** — `arm_init.c:227` and `cpu.c:294`, both
+`= intstack_top`. So the handler's stack always starts at the **top** of the 16 KB interrupt stack,
+while the interrupted code's frame sits just below the interrupted `sp`.
+
+**And in this boot the interrupted code is on that same stack.** `start.s:310-311` is the image's only
+`ldr sp, <intstack_top>` (`LOAD_ADDR(sp, intstack_top)` / `sub sp, sp, SS_SIZE`), and 514's reading of
+the idle path's own `sp` (`0x80517ff0` = `intstack_top − 16`) says the idle loop it becomes never left
+it. So on 516's runs:
+
+| what | where |
+|---|---|
+| the vector's frame | `[0x80517e88, 0x80517ff0)` — 360 bytes below the interrupted `sp` |
+| the handler's stack top | `0x80518000` = `intstack_top`, i.e. **16 bytes above the frame's top word** |
+| the six recorded words | frame+52..72 = `0x80517ebc`..`0x80517ed0` |
+
+The handler's stack grows down *into* the frame from above. It reaches `SS_VADDR` (frame+72) after
+**304** bytes of use, `SS_PC` (frame+60) after **316**, `SS_LR` after 320 and `SS_SP` after 324 — and the
+handler does real work at that depth (`interrupt_stats`, the driver's handler through `blx r5`, then
+`ml_get_timebase`). **Which is exactly the shape 516's three runs measured**: `SS_LR` intact and
+plausible (`0x800462dc`, the return address of `platform_cache_idle_exit`'s `bl FlushPoU_Dcache`) while
+`SS_PC`/`SS_STATUS`/`SS_VADDR` held **a timebase** and a `5` — and the fields are reached in exactly that
+order, highest address first, so "the top three are the handler's spills and the next three are still
+the vector's" is what a 316-to-319-byte handler produces. The values fit too: the handler calls
+`ml_get_timebase`, and the pair `r4 = r11 = SS_PC + 2` that **both** of 516's dumps carry is two spilled
+words a tick apart, not a coincidence of two runs.
+
+**This also reads 517's silent death the only way the evidence allows, as a hypothesis and not a
+reading.** The instrument 517 added to that path — the `ml_get_timebase` wrapper and
+`entry_note_timebase_call` — *adds stack use to the very handler whose depth is the problem*. If the
+collision is what the three runs were dying of, then a deeper handler overwrites more of the frame:
+316 bytes took `SS_PC`, and past 324 it takes `SS_SP`, after which `load_and_go_sys`'s
+`ldr sp, [ip, #52]` restores a wild stack and the device dies with no log, no `MACH Reboot` and no USB —
+which is what 517's run did. That is a hypothesis; it is also a reason not to run the same image again.
+
+### 518: the arm, and why it is the safe one
+
+`cpu_data->istackptr` names where the handler's stack *starts*. Pointing it at the **middle** of the
+16 KB interrupt stack leaves the top half to the boot and idle code whose frames are built there and
+gives the handler 8 KB below them. It is one store, it is idempotent, it is inside a dedicated stack
+region, and it cannot change any other behaviour of the kernel: nothing else in `osfmk/arm` reads the
+field, and `ml_at_interrupt_context()` (`machine_routines.c:671`) tests `sp` against
+`[intstack_top − INTSTACK_SIZE, intstack_top)`, which the middle still satisfies.
+
+It is done *before* another measurement rather than after one because it is the **safer** arm: it
+removes the interaction it is testing for, where the instrument that would measure the collision adds
+to it. And both outcomes are decisive:
+
+- the frame comes back clean and the boot gets further than 516's did → the collision was the writer,
+  and the OS's death in the idle path is explained;
+- the frame still holds a timebase in `SS_PC` with the separation on → the writer is something else,
+  and 517's records say which of the two forms of frame it read.
+
+Built as `STAGE90_XNU_ISTACK_SEPARATE`, **default 1**; `=0` is 517b's arrangement (the same
+measurement, no state change), and the build asserts the store's call site's *presence or absence*
+against the same variable. Flag-on `stage90-qcdt.img`
+`a3ee914e9a8ac9822e9ceecf77f23626a5d45d6ad35634c9333ee2fc6e2a80df` (`.text` 5,299,552, `.bss` 363,312,
+entry image 5,519,996 — the frame reader and the exit flush are unchanged: `STAGE90_XNU_EXIT_POC_FLUSH`
+is still 0); the flag-off arm is `37c94910fa953fbae8b63d173a6a059cda57a02b9b6a913a0474b083ac89ac86`, which
+is 517b's *arrangement* and not 517b's bytes — the new function, the console line and the reading are in
+it either way, and only the store's call site is absent. Two of the clause's own three failures were the
+check rather than the code: it first looked
+for `#8192` in the compiled body and the compiler had folded `intstack + 8192` into one pool word
+(`0x80516000`) — so the test is now the *computed* address from this image's own `intstack` and this
+configuration's `INTSTACK_SIZE`, and the store is its own symbol (`entry_istack_store`) precisely so
+that "is the change in the image" is a fact the build can look up rather than match by shape.
+
 ## What is owed
 
 1. **The measurement arm's run** — `STAGE90_XNU_EXIT_POC_FLUSH=0`, `stage90-qcdt.img` sha256

@@ -297,6 +297,21 @@ case "$EXIT_POC_FLUSH" in
 esac
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_EXIT_POC_FLUSH="$EXIT_POC_FLUSH")
 
+# **518: the interrupt handler's stack starts in the middle of the interrupt stack, not on top of the
+# frame.** `cpu_data->istackptr` is what `fleh_irq_kernel` loads its stack from and the kernel writes it
+# exactly twice, both `= intstack_top`; the boot and the idle loop run *on* that stack
+# (`start.s:310-311`), so an interrupt taken there builds its frame below the interrupted sp - inside the
+# region the handler's own stack then grows into. This flag moves the handler's stack 8 KB down, out of
+# the boot/idle code's half. It is **on by default** because it is also the safer arm: the instrument
+# that would measure the collision adds its own stack use to the very handler whose depth is the problem.
+# `=0` restores 517b's arm exactly.
+ISTACK_SEPARATE=${STAGE90_XNU_ISTACK_SEPARATE:-1}
+case "$ISTACK_SEPARATE" in
+    0|1) ;;
+    *) echo "STAGE90_XNU_ISTACK_SEPARATE must be 0 or 1, not [$ISTACK_SEPARATE]" >&2; exit 1 ;;
+esac
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_ISTACK_SEPARATE="$ISTACK_SEPARATE")
+
 # The one thing in this image that is neither XNU's nor this project's: the compiler's own runtime.
 # Experiment 182's run stopped at `__aeabi_uldivmod`, which is the ARM EABI helper for 64-bit
 # division and comes from libgcc - measured then, not assumed: no file in the XNU tree mentions the
@@ -505,6 +520,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
     run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
         -O2 -Wall -Wextra -Werror -std=gnu11 \
         -DSTAGE90_XNU_EXIT_POC_FLUSH="$EXIT_POC_FLUSH" \
+        -DSTAGE90_XNU_ISTACK_SEPARATE="$ISTACK_SEPARATE" \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
 fi
@@ -28457,6 +28473,64 @@ verify_trace_symbols() {
     say "  xnu_entry_517: the exit's write-back is this build's STAGE90_XNU_EXIT_POC_FLUSH=$EXIT_POC_FLUSH - __wrap_platform_cache_idle_exit calls FlushPoC_Dcache ($flpoc, ${fl_loops} clean-and-invalidate loops in its own body - the L1's own geometry and the L2's) ${xcpoc} time, and when it is on it is at ${xcpocaddr:-none}, before the call to the real exit at ${xreal2}, so the L2 is cleaned and invalidated one call before caches.c:490 sets SCTLR.C again (Apple's own L1-only FlushPoU_Dcache is still ${pflpush} call inside platform_cache_idle_exit $pcexit..); and the interrupt frame is read from inside the handler that owns it: __wrap_ml_get_timebase ($twrap) calls the kernel's own ml_get_timebase ($mlgt) ${tcnt} time at ${tfrom} and then entry_note_timebase_call ($tnb), which takes the frame pointer out of cpu_data+#$s_int (the field fleh_irq_handler stores it in and return_from_irq clears) and establishes it as one of the frame's two forms rather than by a window: the user form as TPIDRPRW+#$s_pcb exactly (locore.s:1301, ACT_PCBDATA, no read), the kernel form as the identity the vector itself writes into the frame's SS_SP (#$s_sssp, locore.s:1346) - the identity SS_SP == frame + EXC_CTX_SIZE (#$s_exc) - inside this configuration's two kernel data windows, which is the first build of this clause's correction: it bounded the frame by the interrupt stack's own top and 16 KB and that window is neither of the two forms, so every ordinary call would have published _frame = 0 (assym.s and entry_stubs.c agree on ACT_CPUDATAP #$s_dap, ACT_PCBDATA, EXC_CTX_SIZE and CPU_INT_STATE), reads getCpuDatap() as #$s_dap, loads all ${t_offs} of the frame's own words at the six offsets entry_saved_state.h names ([$ss_offs]; the header-to-genassym agreement is check_saved_state_offsets.py's gate, run above), and computes the entropy stir's store address from EntropyData's own size (the clause finds this configuration's 68 in that function's body: ${t_ent}) so that _hit can say whether that address lands inside the frame; every reference to ml_get_timebase in the linked pool is a call [$tbrefs], the twenty record keys are in the image's .text, this instrument spends at most 8 per-call records and then one counter refresh per 256 calls (${twsites} write sites in the compiled body), and it never brings the live channel up from the interrupt path (${twready} call to entry_live_ready, whose body really reads g_live_state), and the exit's record is still taken after the real exit"
 
 
+
+    # ---------------------------------------------------------------- 518: the handler's own stack
+    # **The one number that decides whether an interrupt taken on the interrupt stack writes its own
+    # handler's spills into the frame it just built.** `fleh_irq_kernel` builds the frame below the
+    # interrupted sp and then loads the handler's stack from `cpu_data->istackptr`, which the kernel
+    # writes `= intstack_top` and never adjusts; the boot and the idle loop run on that stack
+    # (`start.s:310-311` is the image's only `ldr sp, <intstack_top>`), so the frame and the handler's
+    # spills share one region. 518 moves the pointer to the middle of the interrupt stack. This clause
+    # is the four things that would make the arm a claim instead of a build: the two numbers are this
+    # configuration's, the pointer is stored rather than described, the store is present exactly when
+    # the flag is on (517's flag-off/flag-on bug, which reached one translation unit and not the other),
+    # and the call site is the idle loop's own wrapper.
+    ia_ip=$(a_of CPU_ISTACKPTR); ia_is=$(a_of INTSTACK_SIZE)
+    is_ip=$(s_of STAGE90_CPU_ISTACKPTR); is_is=$(s_of STAGE90_INTSTACK_SIZE)
+    for v in "$ia_ip" "$ia_is" "$is_ip" "$is_is"; do
+        [[ "$v" =~ ^[0-9]+$ ]] ||
+            layout_fail "518's clause cannot read cpu_data->istackptr's offset or INTSTACK_SIZE out of assym.s or entry_stubs.c (got [$v]): those two numbers are the whole of the store this arm makes, so a build that cannot read them is a build that cannot check it"
+    done
+    [[ "$ia_ip" == "$is_ip" && "$ia_is" == "$is_is" ]] ||
+        layout_fail "assym.s says CPU_ISTACKPTR=[$ia_ip] INTSTACK_SIZE=[$ia_is] and entry_stubs.c's macros say [$is_ip]/[$is_is]: the store has to land on the field fleh_irq_kernel loads its stack from, and the middle of the same 16 KB the top is measured from - two spellings of either would move the arm without moving the reading"
+    isym=$(sym_addr entry_istack_separate) ||
+        layout_fail "entry_istack_separate is not in the linked image: 518's arm would then be a call to nothing and the pointer would stay where arm_init left it"
+    ibody=$(arm-none-eabi-objdump -d --start-address=$isym --stop-address="$(next_global "$isym")" "$OUT/xnu_arm_entry.elf")
+    bcast=$(sym_addr intstack) ||
+        layout_fail "intstack is not in the linked image: the arm's value is intstack + INTSTACK_SIZE/2, and without the symbol this clause cannot say what the pointer is being moved *to*"
+    iwant=$(printf '0x%08x' $((bcast + is_is / 2)))
+    # **The value is checked as the address it is, not as a constant the compiler happened to keep.**
+    # The first build of this clause looked for `#8192` and the compiler had folded `intstack + 8192`
+    # into one pool word (`0x80516000`) - the check would have failed a correct body. So the test is the
+    # *computed* value, from this image's own `intstack` and this configuration's `INTSTACK_SIZE`.
+    ihalf=$(awk -v w="$iwant" '/<entry_istack_separate>:/ { inb = 1; next } inb && index($0, w) > 0 { n++ } END { printf "%d", n + 0 }' <<<"$ibody")
+    [[ "${ihalf:-0}" -ge 1 ]] ||
+        layout_fail "entry_istack_separate's body never materializes $iwant - this image's intstack ($bcast) plus INTSTACK_SIZE/2 ($((is_is / 2))): the arm's whole content is *where* in that $is_is-byte stack the handler's start is moved to, so a body without that value is pointing somewhere else while this clause reports the flag as on"
+    istore=$(sym_addr entry_istack_store) ||
+        layout_fail "entry_istack_store is not in the linked image: the store into cpu_data->istackptr has to be a symbol this clause can look for, because whether it is *called* is the whole difference between this arm and 517b's"
+    ibsites=$(awk '$3 == "bl" && $5 == "<entry_istack_store>" { n++ } END { printf "%d", n + 0 }' <<<"$ibody")
+    istbody=$(arm-none-eabi-objdump -d --start-address=$istore --stop-address="$(next_global "$istore")" "$OUT/xnu_arm_entry.elf")
+    istbody_n=$(awk '/<entry_istack_store>:/ { inb = 1; next } inb && $3 ~ /^str/ { n++ } END { printf "%d", n + 0 }' <<<"$istbody")
+    [[ "${istbody_n:-0}" -ge 1 ]] ||
+        layout_fail "entry_istack_store's body stores nothing: it exists to be the one store into cpu_data->istackptr, so an empty body would make every assertion above a statement about a call to nothing"
+    if [[ "$ISTACK_SEPARATE" == 1 ]]; then
+        [[ "${ibsites:-0}" == 1 ]] ||
+            layout_fail "STAGE90_XNU_ISTACK_SEPARATE=1 and entry_istack_separate calls entry_istack_store ${ibsites:-0} time(s): the image would carry the reading and not the change, which is 517's flag defect in the other direction"
+        for k in xnu_live_istack_before xnu_live_istack_after; do
+            kn=$(arm-none-eabi-strings "$OUT/xnu_entry_text.bin" | awk -v k="$k" '$0 == k { c++ } END { printf "%d", c + 0 }')
+            [[ "${kn:-0}" -ge 1 ]] ||
+                layout_fail "the binary of the linked image's .text carries no literal '$k': a run has to say what the pointer was and what it is, and a key that is not in the image is a record the run cannot write"
+        done
+    else
+        [[ "${ibsites:-0}" == 0 ]] ||
+            layout_fail "STAGE90_XNU_ISTACK_SEPARATE=0 and entry_istack_separate still calls entry_istack_store ${ibsites:-0} time(s): a flag-off image must read the arrangement and not change it - this is the arm 517b's image is comparable with"
+    fi
+    ifsites=$(awk '$3 == "bl" && $5 == "<entry_istack_separate>" { n++ } END { printf "%d", n + 0 }' \
+        <<<"$(arm-none-eabi-objdump -d --start-address="$(sym_addr __wrap_machine_idle)" \
+                 --stop-address="$(next_global "$(sym_addr __wrap_machine_idle)")" "$OUT/xnu_arm_entry.elf")")
+    [[ "${ifsites:-0}" == 1 ]] ||
+        layout_fail "__wrap_machine_idle calls entry_istack_separate ${ifsites:-0} time(s) and not once: the idle loop's own wrapper is the entry point that runs in thread context with interrupts masked on every pass, and the idle path is where the collision was measured - zero means the arm never runs, and two means a second site nobody reasoned about"
+    say "  xnu_entry_518: the interrupt handler's own stack - this build's STAGE90_XNU_ISTACK_SEPARATE=$ISTACK_SEPARATE, so entry_istack_separate ($isym) calls entry_istack_store ($istore, ${istbody_n} store in its own body) ${ibsites} time(s) into cpu_data+#$is_ip (assym.s and entry_stubs.c agree on CPU_ISTACKPTR #$is_ip and INTSTACK_SIZE $is_is) from __wrap_machine_idle (${ifsites} call site, entered once per pass of the idle loop, in thread context, with interrupts masked); the value is intstack + $is_is/2, the value $iwant materialized ${ihalf} time(s) in the compiled body, so the handler's stack starts 8192 bytes below the top of the interrupt stack that the boot and the idle loop are running on (start.s:310-311) - and the frame fleh_irq_kernel builds below the interrupted sp is 360 bytes wide with its six recorded words at +52..+72, i.e. 316 to 324 bytes below that same top, which is the overlap this arm removes"
 
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls
     # `_ZNK9IOService8getStateEv` by mangled name on objects whose dynamic type this file cannot know -
