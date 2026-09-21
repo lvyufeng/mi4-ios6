@@ -1632,6 +1632,7 @@ uint32_t g_sleh_redirected;
 #define SLEH_LIVE_SEEN 64u
 
 void entry_live_write(const char *key, uint32_t value);
+uint32_t entry_live_ready(void);
 
 void entry_note_sleh(uint32_t type, uint32_t fsr, uint32_t far_, uint32_t thread,
                      const uint32_t *frame, uint32_t recover)
@@ -2321,7 +2322,27 @@ static void entry_live_init(void)
  * see before XNU has switched tables. Every other refusal is final, because every other refusal is a
  * property of the machine rather than of the moment. `_attempts` in the report is what tells a
  * retried success from a first-try one.
+ *
+ * **`entry_live_ready` exists for one caller, and 517's review is why (see the block below).** The
+ * channel's first write is not a write - it is `entry_live_init`, which *installs L1 descriptors* for
+ * the console's section. The design above assumes that first call comes from a context where a retry
+ * is free and where editing the live translation table is ordinary work; an interrupt handler is
+ * neither. So a caller that may be on an exception path asks this first, and a channel that is not up
+ * yet is left alone rather than brought up from there. Returns 1 only for state 1 - a channel that is
+ * already installed and appending.
+ *
+ * **`noinline`, and deliberately.** The predicate is two instructions and gcc will happily fold it into
+ * its caller - which is how this guard first read as *absent* to the build check, because the check (and
+ * a reader of the disassembly) looks for the call. Keeping it a call costs one branch per interrupt and
+ * makes the property "the interrupt path asks before it writes" a thing in the image rather than a thing
+ * inferred from a compare's shape. This project has been bitten by the other arrangement: 168 is a check
+ * that measured a label instead of a branch.
  */
+__attribute__((noinline)) uint32_t entry_live_ready(void)
+{
+    return (g_live_state == 1u) ? 1u : 0u;
+}
+
 void entry_live_write(const char *key, uint32_t value)
 {
     if (g_live_state == 0u)
@@ -5586,6 +5607,9 @@ uint32_t g_tb_frame;
 uint32_t g_tb_pc, g_tb_lr, g_tb_sp, g_tb_cpsr, g_tb_status, g_tb_vaddr;
 uint32_t g_tb_index, g_tb_target, g_tb_hit;
 uint32_t g_tb_ret_lo, g_tb_prev_lo, g_tb_sctlr;
+/* Calls that found themselves on the interrupt path before the live channel was up, so their records
+ * were held rather than written - see the guard at the bottom of `entry_note_timebase_call`. */
+uint32_t g_tb_held;
 /* The `cpu_data` this call reached the frame *through*, published beside the frame it produced. 516's
  * pair of readings is the other side of the comparison, and it is taken at another moment: a record
  * whose `_frame` came through a different `cpu_data` than `_pcx_datap` would be a frame of some other
@@ -5614,6 +5638,7 @@ extern char EntropyData[];
 void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr)
 {
     uint32_t n;
+    uint32_t in_interrupt;
 
     g_tb_calls++;
     if ((sctlr & 4u) != 0u)
@@ -5692,6 +5717,31 @@ void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr)
 #define STAGE90_TB_LIVE_MAX    8u
 #define STAGE90_TB_LIVE_EVERY  256u
 
+    /*
+     * **And the interrupt path never brings the channel up.** `_frame != 0` says this call is on
+     * `fleh_irq_handler`'s own path, i.e. an IRQ is in service - and `entry_live_write`'s first call
+     * is not a write, it is `entry_live_init`, which *installs L1 descriptors* for the console's
+     * section (`entry_live_map` x 3). Editing the live translation table from inside an exception,
+     * with the D-cache off, on the interrupt stack, is not work this instrument has any business
+     * doing, and it is not work any other wrapper in this image does from that context: every other
+     * live-writing site runs in thread context, and the abort-path records run after the channel is
+     * long since up. So an interrupt-context call **holds** its records while the channel is not yet
+     * up rather than initialising from there; the `.bss` globals keep counting either way, and the
+     * count of what was held is published so a run where this mattered says so (441's rule).
+     *
+     * The ordering that makes this free in practice is measured rather than assumed: 516's log shows
+     * the channel brought up at `attempts = 1` by the timer-registration wrapper (`xnu_live_tmr_setup_
+     * seq = 1`, `xnu_live_timebase_seq = 2`), in thread context immediately after the jump and before
+     * the decrementer can deliver anything - so every interrupt-context call of a healthy run finds
+     * the channel already up and writes as before. This is a guard against an ordering, not a change
+     * to the normal path.
+     */
+    in_interrupt = (g_tb_frame != 0u) ? 1u : 0u;
+    if (in_interrupt != 0u && entry_live_ready() == 0u) {
+        g_tb_held++;
+        return;
+    }
+
     if (n <= STAGE90_TB_LIVE_MAX) {
         entry_live_write("xnu_live_tb_calls", g_tb_calls);
         entry_live_write("xnu_live_tb_off", g_tb_off);
@@ -5710,9 +5760,11 @@ void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr)
         entry_live_write("xnu_live_tb_ret_lo", g_tb_ret_lo);
         entry_live_write("xnu_live_tb_prev_lo", g_tb_prev_lo);
         entry_live_write("xnu_live_tb_sctlr", g_tb_sctlr);
+        entry_live_write("xnu_live_tb_held", g_tb_held);
     } else if ((g_tb_calls % STAGE90_TB_LIVE_EVERY) == 0u) {
         entry_live_write("xnu_live_tb_calls", g_tb_calls);
         entry_live_write("xnu_live_tb_off", g_tb_off);
+        entry_live_write("xnu_live_tb_held", g_tb_held);
     }
 }
 

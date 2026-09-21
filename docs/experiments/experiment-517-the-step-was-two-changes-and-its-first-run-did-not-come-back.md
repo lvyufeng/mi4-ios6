@@ -5,8 +5,12 @@ way 516 repaired the enter. Both were built into one image, that image was boote
 **the device did not return** — no `MACH Reboot` as in 516, no `panic()`, no watchdog bite, no log, just
 the USB disconnect that is the handoff and then nothing, for ~15 minutes. It needed a power-button press,
 and the cold boot took the ram_console with it. So there is **no reading**: the run cannot say which of
-the two changes did it, and one of them (`FlushPoC_Dcache()` on the idle exit) is the only thing in this
-image that can change what the kernel *does* rather than only what it reports. The step is therefore
+the two changes did it. One of them (`FlushPoC_Dcache()` on the idle exit) is a *state* change rather
+than a reading, so it is the one the split isolates - but **the addendum below corrects how big that
+difference is**: reading Apple's own idle code shows the kernel already does cache maintenance by set/way
+with `SCTLR.C = 0` on both sides of the window, and 517's call is that same operation with one extra loop.
+The more novel half, by the same reading, is the frame reader's *writes* - the first live record installs
+L1 descriptors, and this is the first wrapper here on an interrupt path. The step is therefore
 split, the state change now defaults **off** (`STAGE90_XNU_EXIT_POC_FLUSH=0`, asserted against the image
 in the build), and the measurement — the frame read from inside the handler that owns it — is the arm
 that has not yet had its run. What this step did land is the finding: **the recovery net's record is not
@@ -187,6 +191,63 @@ be. The two halves have different risk shapes, and that is the whole basis of th
   this step's doc cannot pretend that is proof, because 516's runs did not also carry a new wrapper on
   the interrupt path.
 
+## Addendum (same day) — reading Apple's own idle code changed the risk story in both directions
+
+The first version of this doc called the exit flush "the only thing in this image that can change what the
+kernel *does*", and treated the frame reader as the tame half. Both halves of that are wrong, and the
+correction comes from `osfmk/arm/caches.c` and from the disassembly rather than from a run.
+
+**The exit flush is a smaller delta than this doc said.** Apple's own `platform_cache_idle_enter`
+(`caches.c:404`) calls **`platform_cache_disable()` first** — which clears `SCTLR_DCACHE` — and only then
+does its cache maintenance (`CleanPoU_Dcache` with one CPU, else `FlushPoU_Dcache`). So *cache maintenance
+by set/way with `SCTLR.C = 0` is Apple's own idiom on both sides of the idle*, not an invention of this
+step; the exit's `FlushPoU_Dcache` runs with the cache already off. And the two functions are the same
+instruction — `Flush` is clean **and** invalidate in Apple's naming:
+
+    FlushPoU_Dcache 0x80045874   DCCISW (cr7,cr14,{2}) over 128 sets x 4 ways   dsb sy  bx lr
+    FlushPoC_Dcache 0x80045828   the same loop, then DCCISW over 4096 sets x 8 ways, dsb sy, bx lr
+
+and the geometry decodes to exactly this part: the first loop covers 32 KB 4-way (this L1D) and the second
+covers 2 MB 8-way (this L2), so 517's call differs from the kernel's own exit flush by **one extra loop of
+an operation the kernel performs three instructions later** — 16384 `DCCISW` and a `dsb`. It is a
+wholesale L2 clean-and-invalidate at a moment when the CPU has left the coherency domain, which is worth
+saying; it is not a new *kind* of operation on this path, and the honest statement is "one more loop, at a
+moment the kernel already does this", not "the one risky change".
+
+**The frame reader is the more novel half, and the novelty is in its writes rather than its reads.** It is
+the first wrapper in this project on a per-*interrupt* path, and that has a consequence this doc missed:
+`entry_live_write`'s **first call is not a write — it is `entry_live_init`, which installs three L1 page
+descriptors** for the console's section (`entry_live_map`). Every other live-writing site in the image runs
+in thread context, and 516's log shows the channel coming up at `attempts = 1` from the timer-registration
+wrapper (`xnu_live_tmr_setup_seq = 1`, `xnu_live_timebase_seq = 2`), in thread context immediately after the
+jump. So the *ordering* is safe today — but nothing in the code said an interrupt-context call was not
+allowed to be the first, and editing the live translation table from inside an exception, on the interrupt
+stack, with the D-cache off, is the one thing on this path that cannot be retried.
+
+So the instrument now **asks before it writes**: `entry_live_ready()` (one `noinline` predicate over
+`g_live_state`) is called at the top of the write block, and an interrupt-context call (`_frame != 0`) holds
+its records while the channel is not yet up instead of bringing it up from there. The held count is
+published as `xnu_live_tb_held` and printed on the console line, because a refusal that is invisible is how
+441's defect class starts. In a healthy run this changes nothing — the channel is up long before any
+interrupt — and that is a reading rather than an assumption: it is why 516's log was worth reading again.
+
+`entry_live_ready` is `__attribute__((noinline))` deliberately: gcc folds a two-instruction predicate into
+its caller, which made the guard read as *absent* to the build clause — the third time in two steps that a
+check failed on the shape of the code rather than on the property (`168`'s class). Keeping it a call costs
+one branch per interrupt and makes "the interrupt path asks first" a thing in the image.
+
+    xnu_entry_517: ... this instrument spends at most 8 per-call records and then one counter refresh per
+    256 calls (18 write sites in the compiled body), and it never brings the live channel up from the
+    interrupt path (1 call to entry_live_ready, whose body really reads g_live_state) ...
+
+Both arms rebuilt green after this change, and the flag-off image is now
+`83cd02d7e08f45a0396081c8efec0ed74da92f2105fd9a41eb176adc8b38df79` (`stage90-qcdt.img`, `.text`
+5,298,976, `.bss` 363,248 bytes to the same end address as before `g_tb_held` was added - the new word fitted in the
+section's existing tail slack, which is the observation and not an explanation); the flag-on arm is
+`3faee37183974b6774c95513ad3444f9f1cbb04709a18f47ac6bf95cd7b44458`. The image that ran on 2026-09-21 and
+did not come back is still `59618b02…`, and the reason it cannot be attributed is unchanged — it carried
+both halves, and neither this addendum nor anything else here says which one stopped it.
+
 ## What is owed
 
 1. **The measurement arm's run** — `STAGE90_XNU_EXIT_POC_FLUSH=0`, `stage90-qcdt.img` sha256
@@ -220,13 +281,13 @@ section grew 64 bytes. Entry point `0x80000074`, tree at `0x806e0000` + `0x744c`
 `0x8059e000`, `topOfKernelData` `0x80700000`, headroom 1,456,784 bytes. **Wrap census 76** (516: 75; the
 new one is `--wrap=ml_get_timebase`). 129 fixture mutations refused, `xnu_entry_failures = 0`.
 
-The arm that has not run: `stage90-qcdt.img` sha256
-`67075d6439f75086345ffd9202df30874a41f3d7aedf8b24b8a32fde9b450182`, `stage90.bin` `d42968c7…`,
-`stage90.elf` `d00e4e33…`, `xnu_arm_entry.bin` `09aa2dfb…`, `stage90_fixture.macho` `52bc9c35…`. **The
-clause refactor above is proved to be check-only by that hash**: the image was rebuilt after the offsets
-were changed from restated numbers to derived ones, and `67075d64…` is what it was before, byte for byte —
-a check that changes the artifact would not be a check. The flag-on counterpart, built with the flag now
-reaching the compiler, is `498dbde7…` (`stage90.bin` `1ea61459…`, `stage90.elf` `de62c4ee…`).
+The arm that has not run, as rebuilt with the interrupt-path guard: `stage90-qcdt.img` sha256
+`83cd02d7e08f45a0396081c8efec0ed74da92f2105fd9a41eb176adc8b38df79`, `stage90.bin` `2e0b0fb1…`,
+`stage90.elf` `734960f1…`, `xnu_arm_entry.bin` `b4e3291a…`, `stage90_fixture.macho` `52bc9c35…`; the
+flag-on counterpart is `3faee371…`. Two earlier hashes of this same arm appear above and are worth keeping
+straight: `67075d64…` was it before `entry_live_ready` was added, and it is **byte-identical to the build
+before the clause refactor** — which is how a check-only change is proved to be one, since an edit that
+touched the artifact would not be a check.
 
 The arm that **did** run, and did not come back: `stage90-qcdt.img` sha256
 `59618b026ff6978a384ce2d0d2ab8c0a96e30753eae3458df0eadb83c55e3664`, `stage90.bin` `3b0425aa…`,

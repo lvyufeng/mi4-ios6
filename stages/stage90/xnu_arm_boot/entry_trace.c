@@ -256,6 +256,7 @@ extern uint32_t g_tb_pc, g_tb_lr, g_tb_sp, g_tb_cpsr, g_tb_status, g_tb_vaddr;
 extern uint32_t g_tb_index, g_tb_target, g_tb_hit;
 extern uint32_t g_tb_datap;
 extern uint32_t g_tb_ret_lo, g_tb_prev_lo, g_tb_sctlr;
+extern uint32_t g_tb_held;
 extern void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr);
 
 /* **515's two globals, read by name, and they are the operands of Apple's own test.** `caches.c:414`
@@ -1218,11 +1219,13 @@ int __wrap_poll(void *proc, void *uap, int *retval)
                "them with the D-cache off; first: frame 0x%x, cpudatap 0x%x, "
                "SS_PC 0x%x SS_LR 0x%x SS_SP 0x%x cpsr 0x%x status 0x%x vaddr 0x%x; the stir will store "
                "its timebase (this call returned 0x%x, the one before it 0x%x) at 0x%x, from index "
-               "0x%x, and that address is %s the frame (SCTLR=0x%x)\n",
+               "0x%x, and that address is %s the frame (SCTLR=0x%x); %d call(s) were on the interrupt "
+               "path before the live channel was up and had their records held rather than bringing "
+               "the channel up from there\n",
                g_tb_calls, g_tb_off, g_tb_frame, g_tb_datap,
                g_tb_pc, g_tb_lr, g_tb_sp, g_tb_cpsr, g_tb_status, g_tb_vaddr,
                g_tb_ret_lo, g_tb_prev_lo, g_tb_target, g_tb_index,
-               (g_tb_hit != 0u) ? "inside" : "outside", g_tb_sctlr);
+               (g_tb_hit != 0u) ? "inside" : "outside", g_tb_sctlr, g_tb_held);
     }
 
     return error;
