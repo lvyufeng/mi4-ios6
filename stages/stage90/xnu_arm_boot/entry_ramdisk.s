@@ -115,7 +115,7 @@
  * The program, and what it proves
  * ------------------------------------------------------------------------------------------------
  *
- * Seventy-eight instructions, and they are the first thing `/sbin/launchd` runs:
+ * Seventy-nine instructions, and they are the first thing `/sbin/launchd` runs:
  *
  *     entry_code:  svc  #0x80                ; +0   getpid() - a *Unix* syscall, r12 = +20
  *                  cmp  r0, #EXPECTED_PID    ; +4   the pid the kernel assigned this process?
@@ -188,13 +188,14 @@
  *                  mov  r3, #0               ; +272     a second `wait4` is the kernel's own
  *                  mov  r12, #SYS_WAIT4      ; +276     statement that there is no such process,
  *                  svc  #0x80                ; +280     and a wrong answer *is* recorded rather than
- *                  b    spin                 ; +284     branched on - see below
- *     spin:        mov  r12, #SYS_GETPID     ; +288
- *                  svc  #0x80                ; +292 ask again, so the loop's liveness is a record
- *                  cmp  r0, #EXPECTED_PID    ; +296
- *                  bne  entry_failed         ; +300
- *                  b    spin                 ; +304
- *     entry_failed: udf #1                   ; +308 the kernel answered something else
+ *                  b    park                 ; +284     branched on - see below
+ *     park:        mov  r0, #0               ; +288 512 parks the process instead of spinning it:
+ *                  mov  r1, #0               ; +292     poll(NULL, 0, PARK_MS) with the answer
+ *                  movw r2, #PARK_MS         ; +296     recorded and never tested, so the kernel
+ *                  mov  r12, #SYS_POLL       ; +300     has nothing left to run and its own idle
+ *                  svc  #0x80                ; +304     path does the work instead
+ *                  b    park                 ; +308     (an expiring timeout just parks again)
+ *     entry_failed: udf #1                   ; +312 the kernel answered something else
  *
  * **The first three are 479's five minus its loop, unchanged, and they are why this program does not
  * end in a fault.** Until 479 the first instruction was `udf #0`, and the address it named was the
@@ -216,8 +217,12 @@
  *   - `SWITCH_OPTION_WAIT` (2) calls `assert_wait_timeout(..., option_time = 0, ...)` first, and
  *     `clock_interval_to_deadline(0, ...)` makes the deadline *now* -
  *     `assert_wait_timeout` arms `thread->wait_timer` and marks the thread `TH_WAIT`. The only thing
- *     that fires a waitq timer is the timer interrupt, and this image has no timer (it is still
- *     owed), so the timer never fires and nothing else ever wakes an event that has no sender.
+ *     that fires a waitq timer is the timer interrupt, and in 479 this image had no timer (it was
+ *     still owed), so the timer never fired and nothing else ever woke an event that has no sender.
+ *     **503 gave the kernel one, and the two asks further down measure it** - which is what makes
+ *     512's park possible at all: the objection above is an objection to a block, and a block with a
+ *     working countdown behind it is a *sleep*. What 479 settled on instead of one was `getpid`, and
+ *     what 512 changed is which of the two the process's last act is.
  *   - `SWITCH_OPTION_NONE` (0) is worse, not better: it reaches
  *     `thread_block_reason(thread_switch_continue, NULL, AST_YIELD)` with **no wait asserted at
  *     all**. `thread_select` then finds the thread *"eligible to keep running"* only while
@@ -228,6 +233,9 @@
  *
  * What is left is a syscall that **returns a value**, and `getpid` is the smallest one: it reads
  * `p->p_pid` and hands it back, touching no lock that can wait, no port, no timer and no scheduler.
+ * **It is no longer the process's last act** - 512 replaced the loop that called it with a park, for
+ * the reason given at `park` below - and it stays as the program's first act and as 479's reading of
+ * the ABI.
  *
  * **The answer is the reading, because the kernel is what chose it.** `bsd_utaskbootstrap` clones
  * the init process out of `kernproc` and then holds it by name - `initproc = proc_find(1)`
@@ -713,6 +721,52 @@
  *     `Lcopyout_bytewise`), `_lr = 0x80295114` (after `bl copyout` in `wait4_nocancel`),
  *     `_recover = 0x8001644c` = `copyio_error`, `_redirect = 0` - armed, serviced, retried, which is why
  *     `wait4` answered 2 and the page holds `0x300`.
+ *
+ * ------------------------------------------------------------------------------------------------
+ * What 512 adds: the process stops asking and starts waiting, so the kernel has nothing to run
+ * ------------------------------------------------------------------------------------------------
+ *
+ * Every run of this image from 506 to 511 has ended the same way - on the hardware watchdog's 25 s
+ * timeout - and 511's log, read to its end, says why: `xnu_live_getpid_count` was still climbing at
+ * `0x80000` when the watchdog fired, the OS's own service threads were all parked, and the only
+ * process in the system was this fixture, busy in a loop that never blocks. **The OS was healthy and
+ * had nothing to do, and the one thing it could not be measured doing is the thing an operating system
+ * does most of its life: idling.** That is what this step changes, and it is a change to one block:
+ * the `getpid` loop becomes `poll(NULL, 0, PARK_MS)`.
+ *
+ * **The reading the step is for is `machine_idle`'s own entry**, because it is a call the kernel makes
+ * only when it has nothing runnable: `processor_idle` walks its queues, and when every one of them is
+ * empty it calls `machine_idle()` (`osfmk/kern/sched_prim.c:4532`), which disables FIQs and IRQs and
+ * hands the CPU to `Idle_context` until something wakes it. So a run whose log carries an
+ * `xnu_live_idle_*` record has measured the OS in the state it is in when no work exists - and a run
+ * whose log does not is a run where this fixture never stopped asking. The caller the wrapper publishes
+ * is the other half: it is inside `processor_idle`, which is a fact about the linked image rather than
+ * about the boot.
+ *
+ * **Prediction, written before the build:**
+ *
+ *     xnu_live_poll_seq = 3 then 4, both with _nfds = 0, _fds = 0, _error = 0, _retval = 0,
+ *         _timeout_ms = 2000 and _ticks of about 2000 ms - the park's first two turns, which the
+ *         wrapper publishes in full because `entry_note_poll` caps its records at four and 503's two
+ *         asks are the first two. After them `xnu_live_poll_over` climbs at powers of two.
+ *     xnu_live_idle_seq = 1, 2, 4, 8, ... with _caller inside processor_idle (0x800b68d4..),
+ *         _thr the idle thread (whose _pid is 0 - it belongs to `kernel_task`), _cpsr_live = 0x13
+ *         (SVC mode, the mode `machine_idle` is called in, live and not saved)
+ *     no stub_hit, no undef, no osr, no panic, no trap record, no report, and no `pid 1 exited`
+ *
+ * Falsifiers, named in advance:
+ *
+ *   (a) `xnu_live_idle_*` absent while `xnu_live_poll_over` climbs - the process is parking and the
+ *       kernel is still not idle, which would mean something else in this system is runnable and is
+ *       the *finding* rather than the failure;
+ *   (b) `_poll_over` absent as well as `_idle` - the park never returned, i.e. the timeout never
+ *       expired: the timer is not waking a `poll` whose deadline it armed, which would make this
+ *       image's two asks a coincidence rather than a measurement;
+ *   (c) the run ending with `pid 1 exited` or a panic - this is the one call in the program whose
+ *       answer is deliberately not tested, and a `udf` reached from it would kill `initproc`;
+ *   (d) an idle record whose `_caller` is *not* inside `processor_idle` - `machine_idle` is called
+ *       from one place in the whole kernel, and the build checks that, so a record from elsewhere
+ *       would mean the clause and the image disagree.
  */
 
     .syntax unified
@@ -750,7 +804,7 @@
  * 508 makes from the master's line for `wait4` - whose four 4-byte arguments the slot's own
  * `sy_arg_munge32` and `sy_arg_bytes` are checked against in `tools/check_sysent_table.py` - and the
  * composed status `W_EXITCODE` derives from the child's - and decodes
- * the seventy-eight words below
+ * the seventy-nine words below
  * to check they are the program this comment describes, *including* the comparisons that use them. */
     .equ SYS_GETPID,             20
     .equ EXPECTED_PID,           1
@@ -773,6 +827,17 @@
                                          * and 768000 ticks, which is what the two durations the
                                          * wrapper measures are predictions of. */
     .equ POLL_LONG_MS,           40
+    .equ PARK_MS,                2000   /* 512's park, and the number is a *bound* rather than a
+                                         * measurement: the property is that the process is still
+                                         * parked when the hardware watchdog fires, so the timeout has
+                                         * to be longer than one loop turn's worth of scheduling and
+                                         * long enough that the watchdog - not the timeout - is what
+                                         * ends the run. 2000 ms is 48,000,000 ticks at 24 MHz, well
+                                         * inside a 32-bit `CNTV_TVAL`, and the loop re-parks if it
+                                         * ever expires, so the exact value decides nothing except how
+                                         * often the process wakes up to park again. The check states
+                                         * the bound (nonzero, and no comparison on the answer);
+                                         * `tools/host_ramdisk_macho_check.py` reads the number. */
     .equ SYS_READ,               3      /* `3 AUE_NULL ALL { user_ssize_t read(int fd, user_addr_t
                                          * cbuf, user_size_t nbyte); }` - three 4-byte arguments, so
                                          * `munge_www` like `poll`'s. The *return* is 64-bit, which
@@ -1151,21 +1216,42 @@ entry_parent:
     mov     r3, #0                      /* +272 */
     mov     r12, #SYS_WAIT4             /* +276 */
     svc     #0x80                       /* +280: ECHILD, and the wrapper records that it was */
-    b       spin                        /* +284: deliberately not a `bne entry_failed` */
+    b       park                        /* +284: deliberately not a `bne entry_failed` */
 
-/* And the syscall that cannot fill anything, so that the loop is alive after the faults, after both
- * timed blocks, after the driver was read from, after the fork and after the child was reaped, and the
- * log says so: r12 has to be reloaded because the `poll`s above left 230 in it - and 508's `wait4`
- * left 7 there. */
-spin:
-    mov     r12, #SYS_GETPID            /* +288 */
-    svc     #0x80                       /* +292: getpid() again */
-    cmp     r0, #EXPECTED_PID           /* +296 */
-    bne     entry_failed                /* +300 */
-    b       spin                        /* +304 */
+/* **512: the process's last act is to stop asking and start waiting.** 479's loop called `getpid` and
+ * branched on the answer, which is what made this process's liveness a *record* - and it is also why
+ * every run since has ended on the hardware watchdog with the CPU busy: an `init` that never blocks
+ * gives the kernel's idle path nothing to do, so this image has never been measured in the state an
+ * operating system spends most of its life in. `poll(NULL, 0, PARK_MS)` is the same call this program
+ * already makes twice, and the one `bsd/kern/sys_generic.c:1785` calls "an extremely inefficient
+ * sleep": no descriptor to wait on, so the timeout is the whole of the call, the thread parks in
+ * `msleep0`, and the processor it was running on has nothing runnable - which is what
+ * `processor_idle` answers with `machine_idle` (`osfmk/kern/sched_prim.c:4532`).
+ *
+ * **The answer is not tested, and every argument is reloaded on each turn.** Both are deliberate. A
+ * `poll` that came back with an errno is a reading about the kernel's timer path, and a `udf #1` here
+ * would kill `initproc` and panic the boot 478's way - so, like the two asks above and like 508's
+ * second `wait4`, this call's answer is recorded by the wrapper and never branched on. And the loop
+ * goes back to `park` rather than to the `mov r12, #SYS_POLL`, because a syscall's return writes r0: a
+ * loop that re-asked without reloading it would ask `poll(0, 0, PARK_MS)` - the same call, by luck -
+ * and a loop that skipped the reload after a *different* call would ask something else entirely.
+ * Reloading all three is what makes every turn the call the listing says it is.
+ *
+ * **This is the first `park` this image has been able to have.** 479's header rules `thread_switch`
+ * out because every option it accepts ends in a block and the timer was still owed then, so a block
+ * was a hang; 503 gave the kernel a working timer and the two asks above are what measured it (the
+ * run's `xnu_live_poll_ticks` are the deadlines that really expired). A park that could not be woken
+ * would be the same hang by another route, and the reading that it is not is the run's. */
+park:
+    mov     r0, #0                      /* +288: fds = NULL - no descriptor is waited on */
+    mov     r1, #0                      /* +292: nfds = 0 */
+    movw    r2, #PARK_MS                /* +296: so the timeout is the whole of the call */
+    mov     r12, #SYS_POLL              /* +300 */
+    svc     #0x80                       /* +304: the thread parks here and the CPU goes idle */
+    b       park                        /* +308: and if the timeout ever expires, park again */
 
 entry_failed:
-    udf     #1                          /* +308: the kernel answered something else */
+    udf     #1                          /* +312: the kernel answered something else */
 entry_code_end:
 
 /* The two paths, as *file* bytes inside `__TEXT`'s file range - so the mapping that carries the
@@ -1221,14 +1307,16 @@ paths_end:
     .error "the entry point is outside the segment it is loaded from"
     .endif
 /* And what the program's length is, because every branch in it is relative: a `b` that left the file
- * range would raise a fault instead of making a syscall, and the check tool decodes all 78 words by
- * offset. 78 words is the 3 of the getpid call, the 11 of the mmap call and its argument registers,
+ * range would raise a fault instead of making a syscall, and the check tool decodes all 79 words by
+ * offset. 79 words is the 3 of the getpid call, the 11 of the mmap call and its argument registers,
  * the 7 of the two faults, the 1 that keeps the page for 504, the 10 of the two timed asks, the 16 of
  * the two opens and the read between them, the 9 of the fork and the child's exit and its entry
  * label, the 17 of 508's two `wait4`s with the two checks and the two answers between them, and the
- * 5 of the loop with the `udf` behind it. */
-    .if (entry_code_end - entry_code) != 312
-    .error "the program is not the seventy-eight instructions the header describes"
+ * 6 of 512's park with the `udf` behind it. **The count moves with the fixture and the tool's
+ * `PROGRAM_WORDS` is the same number**: a change here that the tool did not follow would leave the
+ * last word of the program unchecked. */
+    .if (entry_code_end - entry_code) != 316
+    .error "the program is not the seventy-nine instructions the header describes"
     .endif
 
 /* The rest of the segment is zeros, and they are *file* bytes rather than a `.bss` tail: the whole

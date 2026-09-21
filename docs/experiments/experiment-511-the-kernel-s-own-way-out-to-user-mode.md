@@ -179,7 +179,7 @@ separates "the thread the AST is delivered on" from "the process the work is don
 ## The image
 
   - **No fixture change and no kernel change.** One flag, one wrapper, one writer pair, one print.
-    `.text` 5288480 → **5288960** (+480: the wrapper, its two record calls and the format string), the
+    `.text` 5288480 → **5289056** (+576: the wrapper, its two record calls and the format string), the
     entry image's file is **5503612 bytes** again, `__bss_start 0x8053fa80` with **362896** bytes to
     0x80598410 — **exactly +8 on 510's 362888**, which is the two words this step adds (`g_ast_calls`
     and the wrapper's `ast_printed` static) and is the one row of this build that closes to the byte —
@@ -187,7 +187,11 @@ separates "the thread the AST is delivered on" from "the process the work is don
     same-object-only** (`_ZN9IOService12matchPassiveEP12OSDictionaryj`), **1 never called here**
     (`sleep`), **10 by address only** (`vcputc getpid mmap poll open read fork exit wait4
     thread_quantum_expire`). `bsd_ast` is in the first category, which is the census's own confirmation
-    of the call-site clause.
+    of the call-site clause. **The `.text` after-value and the delta in this bullet were corrected by
+    512**, which read 5288960 and +480 here for two steps: this build's own log prints `text size
+    5289056 bytes (.text)` (`/tmp/511-run2-build.log:863`) and 510's prints 5288480, so the row was 96
+    low. The before-value was a reading and the after-value was not, which is why they were not checked
+    against each other at the time.
   - the wrapper is at **`0x8047b324`** (`__wrap_bsd_ast`), delivered from `ast_taken_user + 0xc4`
     (`0x80116500`).
   - the six files this step is: `stages/stage90/xnu_arm_boot/entry_trace.c` (the wrapper),

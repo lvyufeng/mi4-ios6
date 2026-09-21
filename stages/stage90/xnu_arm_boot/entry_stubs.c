@@ -4983,6 +4983,53 @@ void entry_note_ast_returned(uint32_t seq, uint32_t after, uint32_t sp, uint32_t
     entry_live_write("xnu_live_ast_calls", g_ast_calls);
 }
 
+/*
+ * ------------------------------------------------------------------------------------------------
+ * Experiment 512. The kernel's own idle path: one record per entry into `machine_idle`.
+ * ------------------------------------------------------------------------------------------------
+ *
+ * **Why this is the reading the step is for.** `machine_idle` is called from exactly one place in the
+ * kernel - `processor_idle` (`osfmk/kern/sched_prim.c:4532`), which `thread_block_reason` and
+ * `idle_thread` both reach when the processor has nothing to run - and its own body disables FIQs and
+ * IRQs and hands the CPU to `Idle_context`. So an entry into it is not a guess about load: it is the
+ * kernel saying *there is nothing runnable*. Until this step no run of this image had ever been in
+ * that state, because the fixture - which is the only process in the system, and is `/sbin/launchd` -
+ * spent the whole run in a loop that called `getpid` and branched on the answer. 512 makes its last
+ * act a `poll` that parks it, and this record is what says the consequence happened.
+ *
+ * **The count is published at powers of two and nothing else is.** `getpid_count`'s own house pattern,
+ * and it is here for 461's reason: a report path that is written by the thing it is measuring fills up,
+ * and then the report is a fact about the buffer. The idle path is entered once per park and the park
+ * repeats, so the count is a series rather than a number - powers of two say the series is progressing
+ * (`1, 2, 4, 8`) without saying it once per turn. The fields published with it are chosen so that a
+ * reader can tell *when* the entry happened and *on what*: `now` is the same counter the two `poll`s
+ * are read with, so an idle record can be placed against two poll records; `thread` is the idle
+ * thread, which is why `pid` is 0 (it belongs to `kernel_task`); and `cpsr` is the **live** register
+ * (`mrs`), not the saved-state `SS_CPSR` that 511's `_cpsr` has always been - the live one carries the
+ * mode the call is made in, while the saved one has been `0x10` in every record this project has taken.
+ *
+ * `caller` is the wrapper's own `lr`, so the `bl` is at `caller - 4`, and the build checks that the
+ * address is inside `processor_idle`'s range: a record from anywhere else would mean the clause and
+ * the image disagree, which is this step's falsifier (d).
+ */
+uint32_t g_idle_calls;
+
+void entry_note_idle(uint32_t caller, uint32_t thread, uint32_t pid, uint32_t cpsr, uint32_t now)
+{
+    uint32_t n = g_idle_calls + 1u;
+
+    g_idle_calls = n;
+
+    if ((n & (n - 1u)) == 0u) {
+        entry_live_write("xnu_live_idle_seq", n);
+        entry_live_write("xnu_live_idle_caller", caller);
+        entry_live_write("xnu_live_idle_thread", thread);
+        entry_live_write("xnu_live_idle_pid", pid);
+        entry_live_write("xnu_live_idle_cpsr", cpsr);
+        entry_live_write("xnu_live_idle_now", now);
+    }
+}
+
 /* Experiment 456's probe, defined below its first caller; the declaration is here because
  * `entry_note_iolock` is where the reading is taken (see `entry_registry_probe`). */
 __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);

@@ -464,6 +464,48 @@ def read_length(decoded):
     return None
 
 
+def park_timeout(decoded):
+    """512's park timeout, as a number of milliseconds, or `None` when that word is not a `movw r2`.
+
+    The third of this file's three *read* numbers, and the reason is the same each time: the value is
+    the fixture's own choice and the property is a bound, so `check_program` states the bound (nonzero,
+    and no test on the answer) and this reads the value back. `None` is what makes a park whose timeout
+    moved to another register fail the word-by-word comparison with `movw r2, #None` beside the word
+    that is really there, rather than being accepted because the number is right.
+    """
+    ins = decoded[PARK_MS_WORD]
+    if ins[0] == "movw" and len(ins[1]) == 3 and ins[1][0] == 2 and isinstance(ins[1][1], int):
+        return ins[1][1]
+    return None
+
+
+def park_threshold():
+    """`ENTRY_PARK_MIN_MS` as the number the C wrapper really uses, read out of the wrapper's own file.
+
+    **This is the one value that lives in C and is checked from here, and it is read rather than
+    restated on purpose.** `entry_trace.c`'s `__wrap_poll` prints this step's console line on the first
+    `poll` whose timeout is at or above this number, so the number is the *premise* of a reading: if it
+    did not sit between the program's two asks and its park, the line would either never be printed or
+    be printed for an ask, and the log would say the OS idled when it had not. So the fixture's three
+    timeouts are compared against this number below - the asks must be under it and the park at or over
+    it - and a park retuned below the threshold fails the build here instead of silently losing the
+    artifact.
+
+    The file is read as text and the define is required to be there: a reader that quietly returned a
+    default when the name changed would make this clause pass by not existing, which is the defect 447
+    recorded about a check that measured the label instead of the branch.
+    """
+    path = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot/entry_trace.c")
+    src = open(path, encoding="utf-8", errors="replace").read()
+    m = re.search(r"^#define\s+ENTRY_PARK_MIN_MS\s+(\d+)\s*$", src, re.M)
+    if not m:
+        sys.exit("stages/stage90/xnu_arm_boot/entry_trace.c no longer defines ENTRY_PARK_MIN_MS as a "
+                 "plain decimal number - the `__wrap_poll` guard that prints 512's console line reads "
+                 "it, and this check cannot compare the fixture's three timeouts against a threshold "
+                 "it cannot find")
+    return int(m.group(1))
+
+
 def dev_path_strings(blob, K):
     """Every `/dev/...` NUL-terminated string in the RAM disk, as `[(offset, text), ...]`.
 
@@ -529,7 +571,7 @@ def sign24(word):
 # How many instructions the program at the entry point is. `entry_ramdisk.s` asserts the same length
 # in an `.if` over its own labels, so the two are a pair: a program that grew would fail to assemble
 # and a program that shrank would fail here.
-PROGRAM_WORDS = 78
+PROGRAM_WORDS = 79
 
 # Where the two `poll` calls' timeouts are, and where the two calls start. The word numbers are the
 # program's own layout - `entry_ramdisk.s`'s listing counts the same offsets - and they are named here
@@ -537,7 +579,12 @@ PROGRAM_WORDS = 78
 # list, the ratio property, and the mutation that breaks the ratio.
 POLL_SHORT_WORD, POLL_LONG_WORD = 24, 29
 POLL_CALL_WORDS = (22, 27)          # the first word of each ask: `mov r0, #0`
-SPIN_WORD, FAILED_WORD = 72, 77     # the loop's first word, and the `udf #1` every check shares
+# 512: the loop is a *park* and these are its five words. `PARK_WORD` is the first (`mov r0, #0`), the
+# word `PARK_BACK_WORD` branches to - which is the first and not the ask, because a syscall's return
+# writes r0 and a loop that did not reload it would ask with a stale argument. `PARK_MS_WORD` is the
+# timeout, and like the two asks' it is read rather than fixed: the property is that it is nonzero.
+PARK_WORD, PARK_MS_WORD, PARK_ASK_WORD, PARK_SVC_WORD, PARK_BACK_WORD = 72, 74, 75, 76, 77
+FAILED_WORD = 78                    # the `udf #1` every check in the program shares
 
 # The words 504 adds, named for the same reason: `PAGE_WORD` keeps 480's mapping in r9, the two `adr`s
 # are the paths the two opens pass, and the read's three words are the call the driver answers.
@@ -547,7 +594,7 @@ READ_FD_WORD, READ_LEN_WORD, READ_CALL_WORD = 37, 38, 39
 
 # And the words 505 adds. `FORK_CALL_WORD` is the `svc` that returns twice, `CHILD_WORD` is the first
 # word of the child's half - which is also the *target* of the branch at `FORK_BRANCH_WORD`, so the
-# two are a pair the way `SPIN_WORD` and the last word are: the parent's `b spin` and the child's
+# two are a pair the way `PARK_WORD` and its back-branch are: the parent's `b park` and the child's
 # branch are what split one return into two processes, and naming them here is what lets the table
 # below say which half each branch goes to instead of saying a number.
 FORK_ARG_WORD, FORK_CALL_WORD = 46, 47   # 505's dead word, and the number `2`
@@ -763,9 +810,11 @@ def program_expectations(decoded, K, adr_targets):
         to, because `thread_set_child` writes 1 there for the child and 0 is the parent's - and the two
         branches whose targets are checked as word indices, with 50 landing on `entry_child` (word 52)
         and 51 on the parent's half, so a program with the halves exchanged fails here rather than
-        passing on matching numbers. (Until 508 that second target was `SPIN_WORD`: the parent's half
+        passing on matching numbers. (Until 508 that second target was `PARK_WORD`: the parent's half
         *was* the loop, and the branch and the loop's first word were one number. 508 is the step that
-        gave the parent something to do before it goes back.) 52..54 are the child's three words, whose
+        gave the parent something to do before it goes back - and 512 is the step that turned that loop
+        from a `getpid` spin into a park, which is why the word is `PARK_WORD` now and not `SPIN_WORD`.)
+        52..54 are the child's three words, whose
         last does not return.
       - **55..71 are 508's two `wait4`s and the two answers between them.** 55..58 are the first call's
         arguments - the status pointer is 504's page in r9, `options` and `rusage` are both zero, and
@@ -775,10 +824,13 @@ def program_expectations(decoded, K, adr_targets):
         refuses a different one; 62..64 are **the reading** - a load of the word the kernel wrote
         through the pointer, compared with `W_EXITCODE(EXIT_RVAL, 0)` - and 65..70 are the same call
         again on the same pid, whose answer (`ECHILD`) is deliberately not tested: word 71 is the
-        unconditional `b` to the loop and nothing between 70 and 72 is allowed to be a conditional
-        branch, which is a property `check_program` states as an absence below.
-      - 72..76 are 479's loop, kept so that the log shows both timed blocks, both opens, the read, the
-        fork and the reaping wait returned rather than killing the boot, and 77 is the failure marker.
+        unconditional `b` into the park and nothing between 70 and the failure marker is allowed to be a
+        conditional branch, which is a property `check_program` states as an absence below.
+      - 72..78 are **512's park and the failure marker**: `poll(NULL, 0, PARK_MS)` with its three
+        arguments reloaded on every turn, an unconditional branch back to the first of them, and the
+        `udf #1` behind it. The `b` at 71 lands on 72, so 508's parent goes straight from its second
+        `wait4` into the park - and from 479 until this step those five words were a `getpid` loop,
+        which is why every run before this one ended with the CPU busy and the kernel never idle.
     """
     # The one value this check does not fix: the word the program puts in r5. It has to be a marker -
     # nonzero, and different from every argument the program loads - because its whole job is to be
@@ -791,14 +843,27 @@ def program_expectations(decoded, K, adr_targets):
     marker = word8[1][1] if (word8[0] == "movw" and len(word8[1]) == 3 and
                              isinstance(word8[1][1], int)) else None
     # And the second: the two timeouts. They are read out of the instruction stream by
-    # `poll_timeouts` for the same reason - their property is an 8:1 ratio and not a value - and they
-    # are `None` here when the word at that offset is not the `movw r2, #imm16` the program's shape
-    # requires, so that a `poll` whose timeout moved to another register fails the comparison here
-    # rather than passing because the number is right.
+    # `poll_timeouts` for the same reason - what this file can assert about them is a relation and not
+    # a value - and they are `None` here when the word at that offset is not the `movw r2, #imm16` the
+    # program's shape requires, so that a `poll` whose timeout moved to another register fails the
+    # comparison here rather than passing because the number is right.
+    #
+    # **The relation is order, not the words' own 8:1 ratio.** The words are 5 and 40 ms, and from 503
+    # until 512's host check this line said their "property is an 8:1 ratio", which no run has ever
+    # produced: what the wrapper publishes is the kernel's tick count across the call, and that count is
+    # the deadline *plus* the wake, so the ratio the device reports is diluted by a per-wake cost that
+    # does not scale with the ask. The two runs measured are 160755 : 898180 (5.6:1) and 361154 :
+    # 1060380 (2.9:1), against the words' 8:1. So the clause below checks the only thing that survives
+    # both runs - the second ask is strictly longer than the first - and the ratio itself is a reading of
+    # the run, not a property of this file.
     short_ms, long_ms = poll_timeouts(decoded)
     # And the third: 504's read length, read the same way for the same reason - the property is a
     # bound (`check_program`'s) and the number is the fixture's.
     read_bytes = read_length(decoded)
+    # And the fourth: 512's park timeout, read the same way again. Its property is a *bound* too - the
+    # process has to still be parked when the watchdog fires, and the loop has to re-park if the
+    # timeout ever expires - so the value is the fixture's and the clause is `check_program`'s.
+    park_ms = park_timeout(decoded)
 
     return [
         (0, ("svc", (0x80,))),
@@ -928,15 +993,24 @@ def program_expectations(decoded, K, adr_targets):
         (68, ("mov", (3, 0, 0))),
         (WAIT2_CALL_WORD, ("mov", (12, K["SYSCALL_WAIT4"], 0))),
         (WAIT2_SVC_WORD, ("svc", (0x80,))),
-        (WAIT_BACK_WORD, ("b", (COND["al"], SPIN_WORD))),
-        # 479's loop, kept so that the log shows both timed blocks, both opens, the read, the fork and
-        # the reaping wait returned rather than killing the boot; and the failure marker the whole
-        # program shares.
-        (SPIN_WORD, ("mov", (12, K["SYSCALL_GETPID"], 0))),
-        (73, ("svc", (0x80,))),
-        (74, ("cmp_i", (0, K["INIT_PID"], 0))),
-        (75, ("b", (COND["ne"], FAILED_WORD))),
-        (76, ("b", (COND["al"], SPIN_WORD))),
+        (WAIT_BACK_WORD, ("b", (COND["al"], PARK_WORD))),
+        # **512's park, and the three arguments are written out rather than inherited.** `poll(NULL, 0,
+        # PARK_MS)` is the same call the two asks above make; what makes this one different is that it
+        # is a *loop*, so every turn has to be the call the listing says. A syscall's return writes r0,
+        # so a loop that branched back to `PARK_ASK_WORD` instead of `PARK_WORD` would ask
+        # `poll(0, 0, PARK_MS)` - the same call by luck - and the same mistake after any other call
+        # would ask something else entirely. The back-branch's target is therefore checked as
+        # `PARK_WORD` and not as a number (see the clause in `check_program`), and the timeout is read
+        # out of the instruction like the two asks' (`park_timeout`) because its property is a bound.
+        (PARK_WORD, ("mov", (0, 0, 0))),
+        (73, ("mov", (1, 0, 0))),
+        (PARK_MS_WORD, ("movw", (2, park_ms, 0))),
+        (PARK_ASK_WORD, ("mov", (12, K["SYSCALL_POLL"], 0))),
+        (PARK_SVC_WORD, ("svc", (0x80,))),
+        # And the loop closes on itself: the only branch in the park goes back to its first word, and
+        # **nothing tests the answer** - 503's rule, and the reason is that a `poll` that came back with
+        # an errno is a reading while a `udf #1` here kills `initproc`.
+        (PARK_BACK_WORD, ("b", (COND["al"], PARK_WORD))),
         (FAILED_WORD, ("udf", (1,))),
     ]
 
@@ -1020,24 +1094,26 @@ def check_device_paths(blob, fpc, decoded, K, p):
 
 
 def check_program(blob, fpc, pc, reg, K):
-    """The 78 words of `entry_ramdisk.s`'s program, decoded against what they are for.
+    """The 79 words of `entry_ramdisk.s`'s program, decoded against what they are for.
 
     This is the assertion experiment 468 wrote for one word, applied to the program 479 replaced it
-    with and 480, 503, 504, 505, 506 and 508 grew: the one-word version asked "is the entry point a
-    `udf #0`", which measured only that the user's mapping was where the file said it was. Every word
+    with and 480, 503, 504, 505, 506, 508 and 512 grew: the one-word version asked "is the entry point
+    a `udf #0`", which measured only that the user's mapping was where the file said it was. Every word
     of a program this size is a way to be wrong - a `cmp` against the wrong register or the wrong pid,
     a branch that lands one instruction away, a syscall number in the wrong register, an argument in
     the wrong register, the sign convention instead of the carry - and every one of them is a *silent*
     difference whose only symptom on the device would be a process that runs when it should have
     stopped, or an init death where 478 already had one.
 
-    Eight of the program's properties are not word-for-word comparisons and are checked here because
+    Nine of the program's properties are not word-for-word comparisons and are checked here because
     no single word holds them: the marker's (that word 8 is nonzero and unlike every argument), the
     branch targets' (that each lands on another instruction of the program), 503's ratio (that word 29
     is larger than word 24 and neither is zero), 504's two paths (`check_device_paths`: that the file
     holds exactly the two strings the two `adr`s point at, and that the first is the character device
     the kernel's own `devfs_make_node` call names), 504's read length (that it is at least the word
-    the wrapper publishes and no longer than the page the buffer is in), **505's split** (that the
+    the wrapper publishes and no longer than the page the buffer is in), **512's park** (that its
+    timeout is nonzero, that the loop closes on the park's *own first word* so every turn reloads its
+    arguments, and that nothing in it tests the call's answer), **505's split** (that the
     fork, the child's half, 508's wait and the loop are in that order, and that the two branches out of
     the one `svc` land on different halves - the one relation in this function that is about the
     program's *shape*, because a per-word table is blind to a program whose fork block was moved inside
@@ -1049,9 +1125,11 @@ def check_program(blob, fpc, pc, reg, K):
     second `wait4`** (508's: no conditional branch between that `svc` and the loop, because `ECHILD` is
     an answer this step wants recorded and not faulted on).
     The
-    ratio is the reading 503 exists for - a wake whose length does not follow what was asked for is a
-    latency and not a deadline - and the pair of paths is the reading 504 exists for, and both have to
-    be properties a mutation can break rather than numbers compared with a header.
+    ordering of the two asks is the reading 503 exists for - a wake whose length does not follow the
+    ask that produced it is a latency and not a deadline - and the pair of paths is the reading 504
+    exists for, and both have to be properties a mutation can break rather than numbers compared with a
+    header. What the ordering clause deliberately does *not* check is the ratio: see the note in
+    `program_expectations` for the two runs that measured it at 5.6:1 and 2.9:1 against the words' 8:1.
     """
     p = f"{pc:#x}: "
     words = [u32(blob, fpc + i * 4) for i in range(PROGRAM_WORDS)]
@@ -1095,6 +1173,7 @@ def check_program(blob, fpc, pc, reg, K):
     # looking like a reading of it. Both are mutations `--selftest` makes.
     short_ms, long_ms = poll_timeouts(decoded)
     read_bytes = read_length(decoded)
+    park_ms = park_timeout(decoded)
     if short_ms is not None and long_ms is not None:
         if min(short_ms, long_ms) == 0:
             fail(f"{p}one of the two `poll` timeouts is 0 ({short_ms} and {long_ms}): a zero timeout "
@@ -1108,8 +1187,9 @@ def check_program(blob, fpc, pc, reg, K):
 
     # Every branch lands inside the program, stated once for all of them: a branch out would leave the
     # user's `__TEXT` for unmapped memory and fault, which the run would show as an abort rather than
-    # as a syscall - and the `b` at word `WAIT_BACK_WORD` has to come back to the loop's first word for
-    # the liveness reading every step in this program is built on.
+    # as a syscall - and the `b` at word `WAIT_BACK_WORD` has to come back to the park's first word, so
+    # that 508's parent goes from its second `wait4` straight into the park rather than into anything
+    # else.
     for index, instruction in enumerate(decoded):
         if instruction[0] == "b" and not isinstance(instruction[1][1], int):
             fail(f"{p}the branch at word {index} (0x{pc + index * 4:x}) targets "
@@ -1133,6 +1213,47 @@ def check_program(blob, fpc, pc, reg, K):
                  f"-byte mapping: everything past it is unmapped, so the driver's copy would run off "
                  f"the end of this process's own page and fault in the middle of a copyout")
 
+    # **And 512's park, which is three claims about a loop rather than about a word.** The table pins
+    # its five instructions, and a program can satisfy every one of those rows and still never park the
+    # process: the timeout could be zero, which makes `poll` return at once (so the loop would be a spin
+    # again, with the kernel never idle - the very state this step exists to leave), or the back-branch
+    # could go to the ask word instead of the park's first word, which is the same spin with a reloaded
+    # syscall number, or a test could be added on the call's answer, which turns a runtime fact about
+    # the timer path into `udf #1` and kills `initproc`.
+    if park_ms is not None:
+        if park_ms == 0:
+            fail(f"{p}512's park asks for a {park_ms} ms timeout: `poll` with a zero timeout returns "
+                 f"without arming a wait timer, so the loop would be a spin with the same shape as the "
+                 f"park - the kernel would have something runnable forever and `machine_idle` would "
+                 f"never be called, which is the state every run before this step was in")
+    else:
+        # Not a `movw r2, #imm16`, which `program_expectations` has already refused word by word - this
+        # branch exists so that the two clauses below are not reached with a value that is not a number.
+        pass
+    if park_ms is not None and long_ms is not None and short_ms is not None:
+        threshold = park_threshold()
+        if not (short_ms < threshold and long_ms < threshold):
+            fail(f"{p}the program's two asks ask for {short_ms} ms and {long_ms} ms and the park's "
+                 f"console line is printed from the wrapper only when a timeout is at least "
+                 f"{threshold} ms (`ENTRY_PARK_MIN_MS` in `entry_trace.c`): an ask at or above that "
+                 f"number would be named as the park, and the durable artifact would say the OS had "
+                 f"nothing to run when it was only waiting on a deadline this program asked for")
+        if park_ms < threshold:
+            fail(f"{p}512's park asks for {park_ms} ms and the wrapper's threshold is {threshold} "
+                 f"(`ENTRY_PARK_MIN_MS` in `entry_trace.c`): the park is the call this step exists for, "
+                 f"and a park below the threshold is one whose return prints nothing - the run would be "
+                 f"up to the reader to notice, and the console line this step adds would be silently "
+                 f"absent from every log it produces")
+
+    if decoded[PARK_BACK_WORD][0] == "b" and isinstance(decoded[PARK_BACK_WORD][1][1], int):
+        target = decoded[PARK_BACK_WORD][1][1]
+        if target != PARK_WORD:
+            fail(f"{p}512's park branches back to word {target} and its first word is "
+                 f"{PARK_WORD}: every turn has to re-write all three arguments, because a syscall's "
+                 f"return writes r0 - a loop that went back to the ask (`mov r12, #SYS_POLL`) would ask "
+                 f"`poll(0, 0, {park_ms})`, which is this call only by luck, and the same edit after "
+                 f"any other call would ask something else entirely")
+
     # **And 505's split, which is the one property of this program no per-word row above can state:
     # the *order* of the three parts.** The table pins every word of the fork block, the child's half
     # and the loop, but each row is about one word at one offset - and the same program with the fork
@@ -1146,10 +1267,10 @@ def check_program(blob, fpc, pc, reg, K):
     # reach it is to edit the program and the constants together - which is exactly the edit this
     # clause is here to refuse.
     if not (FORK_SVC_WORD < CHILD_WORD <= EXIT_SVC_WORD < PARENT_WORD < WAIT2_SVC_WORD
-            < SPIN_WORD < FAILED_WORD):
+            < PARK_WORD < FAILED_WORD):
         fail(f"{p}the program's parts are out of order: the `fork`'s `svc` is word "
              f"{FORK_SVC_WORD}, the child's half words {CHILD_WORD}..{EXIT_SVC_WORD}, 508's wait words "
-             f"{PARENT_WORD}..{WAIT2_SVC_WORD}, and the loop words {SPIN_WORD}..{FAILED_WORD}. The "
+             f"{PARENT_WORD}..{WAIT2_SVC_WORD}, and the loop words {PARK_WORD}..{FAILED_WORD}. The "
              f"fork has to come before the child's half, the child's half before the parent's wait, "
              f"and the wait before the loop - a loop the fork can be reached from would fork on every "
              f"turn, a wait inside the child's half would be a call the dying process makes, and a "
@@ -1174,9 +1295,9 @@ def check_program(blob, fpc, pc, reg, K):
                      f"gives both processes the same half - the loop would fork again from the child, "
                      f"no `exit` would ever run, and the run's `xnu_live_sigchld` would have nothing "
                      f"to record")
-            if SPIN_WORD <= child_target <= FAILED_WORD:
+            if PARK_WORD <= child_target <= FAILED_WORD:
                 fail(f"{p}the child's branch out of the `fork` lands on word {child_target}, which is "
-                     f"inside the loop ({SPIN_WORD}..{FAILED_WORD}): the child would run the loop its "
+                     f"inside the loop ({PARK_WORD}..{FAILED_WORD}): the child would run the loop its "
                      f"parent already runs and never reach the `exit` at words {EXIT_ARG_WORD}"
                      f"..{EXIT_SVC_WORD}, so the step's one reading - the second process's death - "
                      f"could not happen")
@@ -1189,9 +1310,9 @@ def check_program(blob, fpc, pc, reg, K):
             # keys, which is the failure mode this file exists to make loud. The target is compared
             # with `PARENT_WORD`'s own neighbourhood rather than with the number: the parent's half has
             # to start where `PARENT_WORD` says and to be outside the loop.
-            if SPIN_WORD <= parent_target <= FAILED_WORD:
+            if PARK_WORD <= parent_target <= FAILED_WORD:
                 fail(f"{p}the parent's branch out of the `fork` lands on word {parent_target}, which is "
-                     f"inside the loop ({SPIN_WORD}..{FAILED_WORD}): the parent would never reach the "
+                     f"inside the loop ({PARK_WORD}..{FAILED_WORD}): the parent would never reach the "
                      f"wait at words {PARENT_WORD}..{WAIT2_SVC_WORD}, so the child would die unclaimed "
                      f"and the run would have no `xnu_live_wait_*` records at all - a missing reading "
                      f"rather than a wrong one")
@@ -1202,27 +1323,34 @@ def check_program(blob, fpc, pc, reg, K):
                      f"leave through user mode, which would make the child's half a copy of the "
                      f"parent's rather than a process that ends")
 
-    # **And the one answer in this program that must *not* be branched on, checked as an absence.**
+    # **And the two answers in this program that must *not* be branched on, checked as an absence.**
     # 503 established the rule for an answer whose wrongness is a fact about the kernel rather than
     # about the fixture - neither of its two `poll`s tests the return, because a `poll` that came back
     # with an errno is a reading and a `udf #1` here would kill `initproc` and end the boot 478's way -
     # and 508's *second* `wait4` is the same kind of call for the same reason: `ECHILD` is what the
     # source says it answers, and an un-reaped child would make it answer 2 and *block*, which is a
-    # finding this step wants in the log and not in a fault. So between the second call's `svc` and
-    # the loop there must be no conditional branch at all - the unconditional `b` to the loop is the
-    # only branch allowed - and the failure this clause refuses is the tempting edit: a `cmp`/`bne`
-    # pair added under the second call, every word of the table above still satisfied, and the run's
-    # ending changed from a live `getpid_count` to a panic on the one path whose whole purpose was to
-    # report something. It is an absence claim, so no mutation can construct it from a single word
-    # (both halves of the pair would have to be added).
-    for index in range(WAIT2_SVC_WORD + 1, SPIN_WORD):
+    # finding this step wants in the log and not in a fault. **512's park is the third, and the range
+    # below now reaches the failure marker rather than stopping at the loop, because the park's own
+    # answer is unchecked for exactly the two asks' reason**: a `poll` that returned an errno while the
+    # process was parking is *the* reading this step is for - it would say the process never parked at
+    # all - and a `udf` on it would end the run by killing `initproc` instead of recording that.
+    #
+    # So from the second `wait4`'s `svc` to the failure marker there must be no conditional branch at
+    # all: the unconditional `b` at `WAIT_BACK_WORD` and the park's own back-branch are the only two
+    # branches allowed, and both are `al`. The failure this clause refuses is the tempting edit: a
+    # `cmp`/`bne` pair added under either call, every word of the table above still satisfied, and the
+    # run's ending changed from a park the log can read to a panic on the one path whose whole purpose
+    # was to report something. It is an absence claim, so no mutation can construct it from a single
+    # word (both halves of the pair would have to be added).
+    for index in range(WAIT2_SVC_WORD + 1, FAILED_WORD):
         if decoded[index][0] == "b" and decoded[index][1][0] != COND["al"]:
             fail(f"{p}word {index} is a conditional branch between the second `wait4`'s `svc` at word "
-                 f"{WAIT2_SVC_WORD} and the loop at word {SPIN_WORD}, and this call's answer is "
-                 f"deliberately not tested: `ECHILD` is what `wait4_nocancel` answers for a reaped "
-                 f"child (`kern_exit.c:1888`), a wrong answer is a fact about the reap path rather "
-                 f"than about this program, and `udf #1` here would kill `initproc` - 478's outcome - "
-                 f"instead of recording it")
+                 f"{WAIT2_SVC_WORD} and the failure marker at word {FAILED_WORD}, and neither answer is "
+                 f"deliberately tested: `ECHILD` is what `wait4_nocancel` answers for a reaped "
+                 f"child (`kern_exit.c:1888`) and 512's park is a `poll` whose return is the reading - a "
+                 f"wrong answer there is a fact about the timer path or the reap path rather than about "
+                 f"this program, and `udf #1` here would kill `initproc` - 478's outcome - instead of "
+                 f"recording it")
 
     # **And the *sense* of the comparison, which is the one field 506's first run got wrong while this
     # file agreed with it.** `cmp rX, #imm` sets `Z` exactly when `rX == imm`, and `beq` branches
@@ -1264,7 +1392,34 @@ def check_program(blob, fpc, pc, reg, K):
         notes.append(f"{p}words {POLL_SHORT_WORD} and {POLL_LONG_WORD} ask for {short_ms} ms and "
                      f"{long_ms} ms ({long_ms / short_ms:.0f}:1); `entry_note_poll` records each call's "
                      f"tick count as `xnu_live_poll_ticks`, so the run's reading is that the second is "
-                     f"about {long_ms / short_ms:.0f} times the first rather than about equal")
+                     f"longer than the first rather than about equal. **The runs so far measure a ratio "
+                     f"of about 5.6:1 and not {long_ms / short_ms:.0f}:1** - 160755 ticks for the 5 ms ask "
+                     f"and 898180 for the 40 ms one (511's run) - so the tick count carries a component "
+                     f"that does not scale with the timeout, and what the pair separates a deadline from "
+                     f"is *monotonicity* in the timeout rather than the exact multiple this note used to "
+                     f"claim. The fixture's 8:1 is a property of the two words; the device's ratio is the "
+                     f"kernel's own answer and it is the one that counts")
+
+    # **And 512's park, which is the one note here whose reading is about the *kernel* rather than
+    # about this process.** The park's own evidence is `xnu_live_poll_*`: the wrapper publishes its
+    # first four calls in full, so 503's two asks are records 1 and 2 and the park's first two turns are
+    # records 3 and 4, each with `_nfds` = 0 and a `_ticks` near the timeout below; after them
+    # `xnu_live_poll_over` counts the rest at powers of two. What the park is *for* is the other
+    # instrument: `machine_idle` is called from `processor_idle` only when the processor has nothing
+    # runnable, so `xnu_live_idle_*` - published at powers of two, with the idle thread's pointer, its
+    # pid (0, `kernel_task`) and the live CPSR - is the kernel saying so, and its `_now` places each
+    # entry between two poll records. The console line `__wrap_poll` prints on the first park return
+    # carries that count, which is what makes the durable artifact a cross-check between the two.
+    if park_ms is not None:
+        notes.append(f"{p}512's park at words {PARK_WORD}..{PARK_BACK_WORD} asks for {park_ms} ms with "
+                     f"no descriptor (`nfds` = 0), so the timeout is the whole of the call and the "
+                     f"answer is deliberately untested: `xnu_live_poll_seq` 3 and 4 are its first two "
+                     f"turns, `xnu_live_poll_over` counts the rest at powers of two, and "
+                     f"`xnu_live_idle_*` is the kernel's own record of having nothing to run while it "
+                     f"waited (`xnu_live_idle_pid` = 0 - the idle thread belongs to `kernel_task` - and "
+                     f"`xnu_live_idle_cpsr` is the live register, not 511's saved-state one). A run with "
+                     f"the park records and **no** idle records is falsifier (a) of the step: the process "
+                     f"parked and the kernel still had something runnable")
 
     # And 504's two, said the same way: what the two paths are and what the read is a prediction of.
     # The pair of opens is the step's control - the same three arguments and the same syscall on a name
@@ -1317,10 +1472,14 @@ def check_program(blob, fpc, pc, reg, K):
                      f"{PARENT_WORD} is its arm, and 508 is the step that reads the reaped child back "
                      f"out of it - so "
                      f"`xnu_live_getpid_count` climbing with `_last` = 1 beside an `exit` record is the "
-                     f"pair that says two processes were alive at once, and 508's `xnu_live_wait_*` "
-                     f"records beside that same `exit` are what say the process it names is gone for "
-                     f"good - the wait answers with the pid and `ECHILD` is what the second ask gets "
-                     f"back" % K)
+                     f"pair that says two processes were alive at once **(until 512: the parent's own "
+                     f"`getpid` loop is what made that count climb, and this step replaced it with a "
+                     f"park, so the count now reaches only the calls the two processes make as they "
+                     f"start - what says the parent is alive afterwards is `xnu_live_poll_seq` 3 and 4 "
+                     f"with `_timeout_ms` = the park's, returning one after the other)**, and 508's "
+                     f"`xnu_live_wait_*` records beside that same `exit` are what say the process it "
+                     f"names is gone for good - the wait answers with the pid and `ECHILD` is what the "
+                     f"second ask gets back" % K)
 
 
 def check_thread_registers(pc, reg, K):
@@ -1843,7 +2002,7 @@ def main():
             # `entry_ramdisk.s`'s `.if` fixes the program's length, so this list cannot silently stop
             # covering the program.
             #
-            # **Four words are left out on purpose, and they are the places this list is not
+            # **Five words are left out on purpose, and they are the places this list is not
             # complete.** Word 8 is the marker in r5, whose value the check deliberately leaves free (a
             # nonzero `movw` into r5 that repeats no argument - properties, not a value), so a low-bit
             # flip there changes only the property that is free and *should* be accepted (see
@@ -1856,9 +2015,14 @@ def main():
             # number moved, and the relation broken two ways, for the asks. `READ_LEN_WORD` is 504's
             # read length, free for the same reason again - 4, 5 and 8 bytes are all reads whose first
             # word the wrapper can publish - and its mutations below are the two ends of the bound.
+            # `PARK_MS_WORD` is 512's park timeout, free the same way and checked by the same kind of
+            # clause: any number at or above `entry_trace.c`'s threshold makes the call a park, 500 ms
+            # and 40000 ms are both programs this check has no business refusing, and what has to be
+            # refused is a park below the threshold or a *conditional branch* on its answer. The first
+            # of those is a mutation below; the second is an absence no single-word change can build.
             *[(f"program word {i}", 0xE0 + i * 4, u32(blob, 0xE0 + i * 4) ^ 1)
               for i in range(PROGRAM_WORDS)
-              if i not in (8, POLL_SHORT_WORD, POLL_LONG_WORD, READ_LEN_WORD)],
+              if i not in (8, POLL_SHORT_WORD, POLL_LONG_WORD, READ_LEN_WORD, PARK_MS_WORD)],
             # And the mutations that are about a *shape* rather than a value, each a plausible way to
             # write the same intent wrongly. The first is the one this step exists for:
             # `arm_prepare_u32_syscall_return` reports an error by setting the carry bit
@@ -1885,6 +2049,14 @@ def main():
             ("the first ask never waits", 0xE0 + POLL_SHORT_WORD * 4, 0xE3002000),
             ("the ask is not poll's syscall number", 0xE0 + 24 * 4, 0xE3A0C000 | K["SYSCALL_MMAP"]),
             ("the timeout is in nfds' register", 0xE0 + POLL_SHORT_WORD * 4, 0xE3001005),
+            # **And the mutation only the threshold clause can refuse.** 1500 ms is a perfectly legal
+            # second ask - it is still longer than the first, so the ratio clause is satisfied and every
+            # word of the table above is too - but it is no longer *below* the number `__wrap_poll` uses
+            # to tell an ask from 512's park, so that call would be named as the park on the console and
+            # the artifact would claim the kernel had nothing to run while this program was waiting on a
+            # deadline it asked for. Nothing else in this file looks at that number, which is why the
+            # mutation is here rather than being left to the ratio clause.
+            ("the second ask is as long as the park", 0xE0 + POLL_LONG_WORD * 4, 0xE30025DC),
             # 505's six, and they are the ways a program that *looks* like this one stops being it. The
             # first two are the fork itself - a `svc` that is not the call, and a call that is not
             # `fork`'s number - because a program that made a second process with the read's slot would
@@ -1901,7 +2073,7 @@ def main():
             ("the fork is the read's syscall number", 0xE0 + FORK_CALL_WORD * 4,
              0xE3A0C000 | K["SYSCALL_READ"]),
             ("the child's branch goes to the loop too", 0xE0 + FORK_BRANCH_WORD * 4,
-             0x0A000000 | ((SPIN_WORD - FORK_BRANCH_WORD - 2) & 0xFFFFFF)),
+             0x0A000000 | ((PARK_WORD - FORK_BRANCH_WORD - 2) & 0xFFFFFF)),
             ("the parent's branch falls into the child's half", 0xE0 + PARENT_BRANCH_WORD * 4,
              0xEA000000 | ((CHILD_WORD - PARENT_BRANCH_WORD - 2) & 0xFFFFFF)),
             ("the child's status is zero", 0xE0 + EXIT_ARG_WORD * 4, 0xE3A00000),

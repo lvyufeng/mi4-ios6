@@ -76,7 +76,7 @@ ARGS_BYTES=0x00001000          # one page, which is what `boot_args` needs to fi
 REAL_ARM_INIT=${STAGE90_ENTRY_REAL_ARM_INIT:-0}
 STUB_DEFINES=()
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES=(-DSTAGE90_ENTRY_REAL_ARM_INIT=1)
-# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s the sixty-nine symbols listed in
+# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s the seventy symbols listed in
 # `TRACE_LDFLAGS` below - `kalloc_canblock`,
 # `lck_grp_alloc_init`, `kernel_memory_allocate`, `vm_page_wait`, `thread_block`, (447)
 # `ml_get_max_cpus`, `ml_init_max_cpus`, (448) `IODeviceTreeAlloc`, `IOWorkLoop::workLoop`,
@@ -142,6 +142,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=load_init_program
                    --wrap=thread_setentrypoint
                    --wrap=bsd_ast
+                   --wrap=machine_idle
                    --wrap=psignal
                    --wrap=setPop
                    --wrap=PE_init_platform --wrap=fiq_context_init
@@ -27598,6 +27599,53 @@ verify_trace_symbols() {
     [[ "$brefs" == "R_ARM_CALL " ]] ||
         layout_fail "the objects in this pool reference bsd_ast with [$brefs] and 511's wrap is only sound while every reference is a call - an R_ARM_ABS32/MOVW/MOVT would be an address taken, and --wrap rewrites those too, so the wrapper's address could end up in a continuation slot that a thread is jumped to and never returns from"
     say "  xnu_entry_511: bsd_ast is the kernel's own (defined in bsd/kern/kern_sig.c, not in pass 1's undefined set), its only caller ast_taken_user ($atu) is in a different object and branches to the wrapper ($bwrap), and every reference to it in the pool is a call ($brefs) - so the record around it is the kernel's own return path to user mode and no continuation slot can hold the wrapper"
+
+    # **512's wrapper, and its clause is that the record's call site is the kernel's own "nothing to
+    # run".** `machine_idle` is defined in `osfmk/arm/machine_routines_asm.s` and called from
+    # `processor_idle` in `osfmk/kern/sched_prim.c` - a different object, so `--wrap` sees an undefined
+    # reference (455's condition) and the wrap links *and runs*. Three things are asserted, and the
+    # second is the one that makes the record mean what this step says it means: `machine_idle`'s only
+    # caller in this kernel is the branch inside `processor_idle`, so a record from anywhere else would
+    # be a fact about a different path - which is falsifier (d) of the step, and it is checked here
+    # rather than noticed in the log.
+    grep -qx "machine_idle" "$OUT/xnu_arm_entry_undef.txt" &&
+        layout_fail "512's instrument calls machine_idle through \`__real_\` and the pass-1 undefined set contains it - nothing in this image defines it, so the idle record would be a fact about a stand-in rather than about the kernel's own idle path"
+    mid=$(sym_addr machine_idle) || layout_fail "machine_idle is not in the linked image - the kernel's own statement that it has nothing to run is not here, so 512 has no reading to take"
+    mwrap=$(sym_addr __wrap_machine_idle) || layout_fail "__wrap_machine_idle is not in the linked image - --wrap=machine_idle did not link, and the run's absence of xnu_live_idle_* records would say nothing about the boot"
+    pidle=$(sym_addr processor_idle) || layout_fail "processor_idle is not in the linked image - 512's clause needs the one function that calls machine_idle to read the call site out of"
+    pidlenext=$(sym_next "$pidle") || true
+    [[ -n "$pidlenext" ]] || layout_fail "no symbol follows processor_idle in the image, so its instruction range cannot be read"
+    # No pipe in the reader, for the reason 511's clause records at length: `set -o pipefail` can report
+    # a successful `grep -q` as exit 141, and a check that can fail while the artifact is right is worse
+    # than no check because its sentence is believed.
+    pidle_dis=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$pidle" --stop-address="$pidlenext")
+    grep -q "bl[[:space:]]\+${mwrap#0x} <__wrap_machine_idle>" <<<"$pidle_dis" ||
+        layout_fail "processor_idle ($pidle..$pidlenext) does not branch to __wrap_machine_idle ($mwrap) - the idle path went to the real machine_idle (455's same-object case) or the flag list lost the name, and either way the kernel's own idle entry is not recorded"
+    # And *every* site, not one: gcc may tail-duplicate a `bl`, so the property is that all of them are
+    # inside `processor_idle` rather than that there is exactly one - 510's clause learned that from a
+    # build that refused a correct image.
+    msites=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" |
+        awk -v lo="$((pidle))" -v hi="$((pidlenext))" -v pat="<__wrap_machine_idle>" '
+            index($0, pat) && /bl[[:space:]]/ {
+                split($1, a, ":"); here = strtonum("0x" a[1]);
+                if (here >= lo && here < hi) { n++ } else { print; bad++ }
+            } END { printf "%d %d", n + 0, bad + 0 }')
+    read -r inside outside <<<"$msites"
+    [[ "${inside:-0}" != "0" ]] ||
+        layout_fail "512's site reader found no branch to __wrap_machine_idle inside processor_idle ($pidle..$pidlenext), so it measured nothing - the reader is written against the disassembly's shape and the disassembly changed"
+    [[ "${outside:-0}" == "0" ]] ||
+        layout_fail "this image branches to __wrap_machine_idle from $outside site(s) outside processor_idle: the idle path is entered from more than one place in this kernel, so the record would not be the branch 512's reading names"
+    # **And the wrap cannot land in a function-pointer slot.** `machine_idle` is declared `void
+    # machine_idle(void)` in `osfmk/kern/machine.h` and called as a function, never stored - but "never
+    # stored" is a property of the objects, so it is read out of the relocations rather than reasoned
+    # about: an `R_ARM_ABS32`/`MOVW`/`MOVT` there would be an address taken, and `--wrap` rewrites those
+    # too, so the wrapper's address could end up somewhere a thread is jumped to.
+    mrefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o 2>/dev/null |
+        awk '/[[:space:]]machine_idle$/ { print $2 }' | sort -u | tr '\n' ' ')
+    [[ "$mrefs" == "R_ARM_CALL " ]] ||
+        layout_fail "the objects in this pool reference machine_idle with [$mrefs] and 512's wrap is only sound while every reference is a call - an R_ARM_ABS32/MOVW/MOVT would be an address taken, and the wrapper could then be reached as a function pointer rather than as a call"
+    say "  xnu_entry_512: machine_idle ($mid) is the kernel's own (defined in osfmk/arm/machine_routines_asm.s, not in pass 1's undefined set), all $inside branch(es) to its wrapper ($mwrap) are inside processor_idle ($pidle..$pidlenext) and none is elsewhere, and every reference to it in the pool is a call ($mrefs) - so an xnu_live_idle_* record is the kernel saying it had nothing to run"
+
 
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls
     # `_ZNK9IOService8getStateEv` by mangled name on objects whose dynamic type this file cannot know -

@@ -182,6 +182,18 @@ extern void entry_note_sigchld_returned(uint32_t from, uint32_t to);
 /* The count `--wrap=psignal` keeps of *all* signals, SIGCHLD or not - the filter's own denominator,
  * defined in `entry_stubs.c` beside the record it qualifies. */
 extern uint32_t g_psignal_calls;
+/* 512's, defined in `entry_stubs.c` beside the writer that fills it: the number of entries into
+ * `machine_idle` so far. The park's console line carries it, which is what makes that line a
+ * cross-check between two instruments. */
+extern uint32_t g_idle_calls;
+
+/* `int proc_pid(proc_t)`, written with this file's `void *` spelling of a XNU pointer type for the
+ * reason `copyin_word`'s declaration gives: no XNU header is included here, and every pointer this
+ * target has is 4 bytes. `proc_pid` is a real function of the image (there is no `--wrap` on it), and
+ * `build_entry.sh`'s `xnu_entry_505` clause requires it to be defined by this image rather than
+ * stubbed for it - a stand-in would make both pids facts about the stand-in. */
+extern int proc_pid(void *proc);
+extern void *current_proc(void);
 
 /* 508: the pair around `wait4`, and the two records are one reading split in two on purpose - the
  * first is written *before* the kernel's own call runs and the second after it returns, so the log's
@@ -793,6 +805,16 @@ int __wrap_mmap(void *proc, void *uap, uint32_t *retval)
     return error;
 }
 
+/*
+ * The threshold that tells this program's park from its two asks, and it is here rather than in the
+ * fixture because it is the *wrapper's* question. `tools/host_ramdisk_macho_check.py` reads this
+ * number out of this file and refuses the build unless the program's two asks are below it and the
+ * park's timeout is at or above it - so the guard below is a reading (`timeout_ms >= 1000`) whose
+ * premise is checked against the fixture's own bytes rather than asserted in a comment, and a park
+ * retuned to 500 ms fails the build instead of silently losing the console line.
+ */
+#define ENTRY_PARK_MIN_MS 1000
+
 /* ------------------------------------------------------ the deadline a process asks for (503) */
 /*
  * **This is the first syscall in this walk whose point is that it *blocks*.** 479's `getpid` and 480's
@@ -836,18 +858,28 @@ int __wrap_mmap(void *proc, void *uap, uint32_t *retval)
  *
  * **The wrapper returns the syscall's own `int` unchanged**, which is the defect 478 found in this
  * file's own `__wrap_thread_block`: a `void` shape ends in a tail call and leaves the caller's `r0`
- * holding whatever ran last, and here that would be the *fixture's* answer - it compares `r0` against
- * nothing, but the spin loop after it compares `r0` against the pid, so a wrong `r0` would be read as
- * the kernel answering the wrong process.
+ * holding whatever ran last, and here that would be the *fixture's* answer. Until 512 that mattered
+ * because the loop after the asks compared `r0` against the pid; 512's park compares it against
+ * nothing (deliberately - see the fixture), so a clobbered `r0` would now be caught by *nothing at
+ * all*, which is the worse version of the same defect: a record saying the kernel answered something
+ * it did not.
  *
  * `uap` of 0 is recorded as three `0xFFFFFFFF` words rather than dereferenced, for the reason
  * `__wrap_mmap` gives: the kernel never calls a slot that way, and an instrument that faults on a
  * state it was told cannot happen costs the run.
+ *
+ * **And 512 adds the console line here**, on the first call whose timeout is the park's. It is here
+ * and not in `__wrap_machine_idle` because this is where the park is known to have *happened* (the
+ * call has returned, so the process really slept) while `machine_idle` is entered during early boot
+ * too; and it carries `g_idle_calls`, so the durable artifact is a cross-check between the two
+ * instruments rather than a claim from one of them. A run that parks and never idles prints `0
+ * time(s)`, which is this step's falsifier (a) said out loud on the console.
  */
 int __real_poll(void *proc, void *uap, int *retval);
 
 int __wrap_poll(void *proc, void *uap, int *retval)
 {
+    static uint32_t park_printed;
     uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
     const uint32_t *given = (const uint32_t *)uap;
     uint32_t fds = 0xFFFFFFFFu, nfds = 0xFFFFFFFFu, timeout = 0xFFFFFFFFu;
@@ -866,6 +898,17 @@ int __wrap_poll(void *proc, void *uap, int *retval)
 
     entry_note_poll(caller, fds, nfds, timeout, (uint32_t)error,
                     (retval != 0) ? (uint32_t)*retval : 0xFFFFFFFFu, before, after);
+
+    if (timeout >= (uint32_t)ENTRY_PARK_MIN_MS && park_printed == 0u) {
+        void *me = current_proc();
+        uint32_t pid = (me != 0) ? (uint32_t)proc_pid(me) : 0xFFFFFFFFu;
+
+        park_printed = 1u;
+        printf("mini4: the OS has nothing to run -- pid %d parked in poll for %d ms (caller 0x%x), "
+               "and the kernel's own idle path was entered %d time(s) while it did (ticks 0x%x)\n",
+               pid, timeout, caller, g_idle_calls, after - before);
+    }
+
     return error;
 }
 
@@ -1090,13 +1133,62 @@ int __wrap_read(void *proc, void *uap, void *retval)
  */
 #define STAGE90_SIGCHLD 20u
 
-/* `int proc_pid(proc_t)`, written with this file's `void *` spelling of a XNU pointer type for the
- * reason `copyin_word`'s declaration gives: no XNU header is included here, and every pointer this
- * target has is 4 bytes. `proc_pid` is a real function of the image (there is no `--wrap` on it), and
- * `build_entry.sh`'s `xnu_entry_505` clause requires it to be defined by this image rather than
- * stubbed for it - a stand-in would make both pids facts about the stand-in. */
-extern int proc_pid(void *proc);
-extern void *current_proc(void);
+/*
+ * ------------------------------------------------------------------ the kernel's own idle path (512)
+ *
+ * **`machine_idle` is the kernel's statement that it has nothing to run**, and until this step no run
+ * of this image had ever heard it. It is called from exactly one place - `processor_idle`
+ * (`osfmk/kern/sched_prim.c:4532`), which `thread_block_reason` (`:2085`) and `idle_thread` (`:4655`)
+ * both reach with no runnable thread - and its body (`osfmk/arm/machine_routines_asm.s`) disables FIQs
+ * and IRQs and hands the CPU to `Idle_context`. The call site is in `sched_prim.o` and the definition
+ * is in the ARM layer's assembler, so this is a cross-object reference and 455's condition is
+ * satisfied: the wrap links *and runs*.
+ *
+ * **Why this is the step's reading and not a decoration.** Every run from 506 to 511 ended on the
+ * hardware watchdog with the CPU busy, and 511's log read to its end says which loop did it: the
+ * fixture's own `getpid` loop, which branches on the answer and never blocks. The fixture is the only
+ * process in this system - it *is* `/sbin/launchd` - so a fixture that does not block guarantees that
+ * `processor_idle` is never reached with an empty queue, and the kernel can never be measured doing
+ * what an operating system does most of its life. 512 gives the fixture a `poll(NULL, 0, PARK_MS)` as
+ * its last act; this wrapper records the consequence. The two records are read together: `poll`'s
+ * `_ticks` says the process really slept, and `idle`'s `_now` says what the kernel did while it did.
+ *
+ * **The record is written *before* the real call**, because the interesting fact is the entry: the
+ * idle path stays inside `machine_idle` until something wakes it, so a record written after the call
+ * would be a record of the *wakeup*. `entry_note_idle` publishes at powers of two for 461's reason
+ * (see its own comment in `entry_stubs.c`).
+ *
+ * **The console line is printed on the *park's* own return rather than here, and that is deliberate.**
+ * A print on the first idle entry would be a durable artifact naming the wrong event: this image
+ * enters the idle path during early boot too, long before the fixture runs, so "the first idle entry"
+ * is not this step's event. The park is, and `__wrap_poll` is where it is known to have happened - and
+ * it has the count of idle entries to put beside it, which is what makes the line a *cross-check*
+ * between the two instruments instead of a claim from one of them.
+ */
+extern void entry_note_idle(uint32_t caller, uint32_t thread, uint32_t pid, uint32_t cpsr,
+                            uint32_t now);
+
+
+void __real_machine_idle(void);
+
+void __wrap_machine_idle(void)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    uint32_t thread = entry_thread();
+    uint32_t pid = 0xFFFFFFFFu;
+    uint32_t cpsr;
+    void *now;
+
+    __asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr));
+
+    now = current_proc();
+    if (now != 0)
+        pid = (uint32_t)proc_pid(now);
+
+    entry_note_idle(caller, thread, pid, cpsr, entry_counter());
+
+    __real_machine_idle();
+}
 
 int __real_fork(void *proc, void *uap, int *retval);
 int __wrap_fork(void *proc, void *uap, int *retval)

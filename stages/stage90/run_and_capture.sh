@@ -224,7 +224,17 @@ else
   # boot, which is the worst place for it - the run is spent and the log is only reachable until the
   # device takes its next boot. Removing the file first makes the redirect a creation, which needs only
   # write permission on the directory.
-  rm -f "$LOGFILE"
+  #
+  # **And the removal has to be tried as both identities, because the file can be owned by either.**
+  # 511's failure was the invoking user's file and root's refused `O_CREAT`; 512's was the mirror of
+  # it - the file was *root's*, from a hand re-capture under `sudo`, and the invoking user's unlink was
+  # refused with `Operation not permitted` and exit 1 from `rm`, which under `set -e` ended the script
+  # after the boot had already been spent. The same sticky-`/tmp` rule produces both spellings:
+  # whichever identity does not own the file is the one that cannot remove it here. So neither is
+  # assumed - the plain `rm` is tried first (it succeeds whenever the file is the user's, which is
+  # what the redirect below leaves behind) and `sudo`'s is the fallback.
+  rm -f "$LOGFILE" 2>/dev/null || sudo rm -f "$LOGFILE" || \
+    die "could not remove $LOGFILE - neither the invoking user nor root can unlink it, and the redirect would then be reopening someone else's file"
   sudo adb -s "$SERIAL" exec-out 'cat /proc/last_kmsg' > "$LOGFILE" || \
     die "could not read /proc/last_kmsg"
   say "wrote $(wc -c < "$LOGFILE") bytes to $LOGFILE"
