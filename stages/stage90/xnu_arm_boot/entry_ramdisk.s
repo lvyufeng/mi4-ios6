@@ -115,7 +115,7 @@
  * The program, and what it proves
  * ------------------------------------------------------------------------------------------------
  *
- * Sixty-one instructions, and they are the first thing `/sbin/launchd` runs:
+ * Seventy-eight instructions, and they are the first thing `/sbin/launchd` runs:
  *
  *     entry_code:  svc  #0x80                ; +0   getpid() - a *Unix* syscall, r12 = +20
  *                  cmp  r0, #EXPECTED_PID    ; +4   the pid the kernel assigned this process?
@@ -168,16 +168,33 @@
  *                  svc  #0x80                ; +192     are handed the pid rather than this value
  *                  cmp  r1, #CHILD_FLAG      ; +196 506's register: the flag `thread_set_child` writes
  *                  beq  entry_child          ; +200     for the child, 1 there and 0 in the parent -
- *                  b    spin                 ; +204     505 branched on r0, which is the pid in both
+ *                  b    entry_parent         ; +204     505 branched on r0, which is the pid in both
  *     entry_child: mov  r0, #EXIT_RVAL      ; +208 the child leaves by the syscall that cannot
  *                  mov  r12, #SYS_EXIT       ; +212     return, and that from pid 1 is fatal
  *                  svc  #0x80                ; +216
- *     spin:        mov  r12, #SYS_GETPID     ; +220
- *                  svc  #0x80                ; +224 ask again, so the loop's liveness is a record
- *                  cmp  r0, #EXPECTED_PID    ; +228
- *                  bne  entry_failed         ; +232
- *                  b    spin                 ; +236
- *     entry_failed: udf #1                   ; +240 the kernel answered something else
+ *     entry_parent: mov r1, r9              ; +220 508: the parent's half, and the third of the three
+ *                  mov  r2, #0               ; +224     calls a Unix process's life is. `wait4(2,
+ *                  mov  r3, #0               ; +228     &status, 0, NULL)`: r0 is still the pid `fork`
+ *                  mov  r12, #SYS_WAIT4      ; +232     returned in *both* processes, r1 is the page
+ *                  svc  #0x80                ; +236     504's read was given, and rusage is NULL so
+ *                  cmp  r0, #WAIT_PID        ; +240     `p_ru` is never touched. The answer is the
+ *                  bne  entry_failed         ; +244     pid (r0, `retval[0] = p->p_pid`) and, through
+ *                  ldr  r3, [r9]             ; +248     the pointer, the word the kernel composed
+ *                  cmp  r3, #EXIT_STATUS     ; +252     - `0xffff & p->p_xstat`
+ *                  bne  entry_failed         ; +256     (`kern_exit.c:1782`), which is
+ *                  mov  r0, #WAIT_PID        ; +260     `W_EXITCODE(EXIT_RVAL, 0)` = 0x300 by the
+ *                  mov  r1, r9               ; +264     time it gets there. Then the same call again,
+ *                  mov  r2, #0               ; +268     on the pid of a child that has been reaped:
+ *                  mov  r3, #0               ; +272     a second `wait4` is the kernel's own
+ *                  mov  r12, #SYS_WAIT4      ; +276     statement that there is no such process,
+ *                  svc  #0x80                ; +280     and a wrong answer *is* recorded rather than
+ *                  b    spin                 ; +284     branched on - see below
+ *     spin:        mov  r12, #SYS_GETPID     ; +288
+ *                  svc  #0x80                ; +292 ask again, so the loop's liveness is a record
+ *                  cmp  r0, #EXPECTED_PID    ; +296
+ *                  bne  entry_failed         ; +300
+ *                  b    spin                 ; +304
+ *     entry_failed: udf #1                   ; +308 the kernel answered something else
  *
  * **The first three are 479's five minus its loop, unchanged, and they are why this program does not
  * end in a fault.** Until 479 the first instruction was `udf #0`, and the address it named was the
@@ -487,9 +504,9 @@
  * What 506 adds: the register the kernel writes the child's flag in
  * ------------------------------------------------------------------------------------------------
  *
- * **One instruction's register and one instruction's number, and the program stays 61 words**, so every
- * address in 505's document - `0x11a4` where the child was first fetched, `0x11d0` where it died - is
- * unchanged. `cmp r0, #0` becomes `cmp r1, #CHILD_FLAG` and the branch stays `beq entry_child`: the two
+ * **One instruction's register and one instruction's number, and 506 changed no address in 505's
+ * document**, so every address 505's document named - `0x11a4` where the child was first fetched,
+ * `0x11d0` where it died - is unchanged. `cmp r0, #0` becomes `cmp r1, #CHILD_FLAG` and the branch stays `beq entry_child`: the two
  * processes are `(r0 = pid, r1 = 0)` and `(r0 = pid, r1 = 1)`, so the arm that tests *the child's own
  * value* is the one whose first instruction is `mov r0, #EXIT_RVAL`. The `mov r0, #0` stays, because it
  * is the word `xnu_live_fork_uap0` names as *not* the one the argument buffer took, and because a
@@ -594,6 +611,108 @@
  *       the kernel believed, or `initproc` left;
  *   (d) `xnu_live_exit_*` with `_pid` = **1**: the flag is inverted (the parent's `r1` is not 0), which
  *       puts `initproc` on `launchd_crashed_panic` - the outcome 478 measured, and what run 1 took.
+ *
+ * ------------------------------------------------------------------------------------------------
+ * What 508 adds: the parent asks for its child, and the kernel answers with the status it composed
+ * ------------------------------------------------------------------------------------------------
+ *
+ * **The program's third and last call, and the one its two halves were built to leave missing.** A
+ * process that makes another and never asks about it leaves a zombie nothing will reap - which is
+ * exactly the state 507's run ended in: two processes alive, one of them dead and unclaimed, and the
+ * only reading in the log that says so is the *absence* of a reaping parent. `wait4(2, &status, 0,
+ * NULL)` is `sysent[7]`, and it is where the kernel's own answer to "what did that process exit
+ * with" is composed out of things the fixture never sees: the exit status is `p->p_xstat`, written by
+ * `exit1` in the kernel from `W_EXITCODE(uap->rval, 0)` (`kern_exit.c:823`, `:682`), and `wait4`
+ * copies it out masked (`:1782`). **The fixture's 3 becomes 0x300 three source lines and one syscall
+ * away from the register that carried it**, which is why this is a reading and not a tautology: a
+ * zero-filled field, a stale register, or a wrapper publishing its own argument cannot produce it.
+ *
+ * **The four words are the four fields, and that is measured rather than read off the prototype.**
+ * `sysent[7]`'s munger is `munge_wwww` - four words, contiguously - and `wait4_nocancel` reads them
+ * at byte offsets 0, 4, 8 and 12 of the argument struct (`ldr r0, [r6]`, `ldr r1, [r6, #4]`,
+ * `ldrb r0, [r6, #8]`, `ldr r1, [r6, #12]` in `bsd_kern_kern_exit.o`, disassembled), so `user_addr_t`
+ * is one word on this target and r0..r3 are `pid`, `status`, `options`, `rusage` in the master's own
+ * order. `tools/check_sysent_table.py` checks the munger word and the two counts
+ * (`sy_arg_munge32` = `munge_wwww`, `sy_narg` = 4, `sy_arg_bytes` = 16) against the image, because a
+ * slot with three marshalled words would leave r3 stale and the record would be a fact about whatever
+ * the last syscall left in that register.
+ *
+ * **The reap is the other half of this step, and it is the free side of the corpse path 505 hit.** A
+ * zombie found by `wait4` is reaped by `reap_child_locked(q, p, 0, reparentedtoinit, 0, 0)`
+ * (`kern_exit.c:1834`), called *before* `wait4` returns, so the pid it answers with is a process that
+ * no longer exists by the time the parent sees the number - which is what the **second** call is for:
+ * the same `wait4` on the same pid can only come back `ECHILD` (`:1888`), and the wrapper records it.
+ * The second call is deliberately not branched on (503's rule): an answer that is not `ECHILD` is a
+ * fact about the reap path, and a `udf #1` here would kill `initproc` for a reason with nothing to do
+ * with the call it is standing behind.
+ *
+ * **And the wait may *block*, which makes the log's order a reading of its own.** The child is
+ * created microseconds before the parent asks, so the first scan can find it still exiting; the
+ * source then sleeps on `(caddr_t)q` with `msleep0(..., PWAIT | PCATCH | PDROP, "wait", 0,
+ * wait1continue)` (`:1906`) and the child's own `proc_exit` wakes it two instructions after the
+ * SIGCHLD - `wakeup((caddr_t)pp)` under the same list lock, `:1446-1448`. The wrapper therefore writes
+ * a record **before** the call and one **after** it, and if the child's `pth_delete` / `sigchld`
+ * records appear between the two in the log, that is the wakeup measured rather than argued: the
+ * parent was parked inside `wait4` while the child finished dying.
+ *
+ * (The instrument is `entry_trace.c`'s `__wrap_wait4` with `entry_stubs.c`'s two record writers, and
+ * the reason the before/after pair is split the way 505's `psignal` pair is split - one record
+ * written before the real call, one after it - is that the *duration* is not a number any key can
+ * hold, while the log's own order is.)
+ *
+ *
+ * Prediction, written before the build:
+ *
+ *     xnu_live_wait_seq = 1        _caller = <unix_syscall+0x100>   _who = 1  (the *waiter*, proc_pid)
+ *     _pid = 2   _status_ptr = <the page>   _options = 0   _rusage = 0
+ *     xnu_live_wait_done_seq = 1   _error = 0   _ret = 2   _copy_error = 0   _status = 0x300
+ *     xnu_live_wait_seq = 2  ... _pid = 2   ...  and  xnu_live_wait_done_seq = 2  _error = 10 (ECHILD)
+ *     no xnu_live_undef_*, no xnu_live_osr_*, no stub_hit, no panic
+ *     xnu_live_getpid_count still climbing (the parent is back in its loop, with nothing left to do)
+ *
+ * Falsifiers, named in advance:
+ *
+ *   (a) `_error` non-zero on the *first* call, with the fixture's `udf #1` behind it - the marshalling
+ *       is not the four words the disassembly says, or the child was never put in `SZOMB`;
+ *   (b) `_copy_error` = 0 and `_status` != `0x300` - the composition or the mask is not the chain this
+ *       section names, and the number would then be a fact about something else;
+ *   (c) a `stub_hit` inside `reap_child_locked` / `proc_reap` - the free side calls through a slot this
+ *       image's table does not supply (506's falsifier (b), one layer further in), and the run names
+ *       the slot the way 506's run named `pth_proc_hashdelete`;
+ *   (d) `xnu_live_wait_done_seq` absent - the call never came back: a lost wakeup would leave `initproc`
+ *       parked in `msleep0` for the rest of the run, which is visible as a `getpid_count` that stops
+ *       climbing, and is the one outcome here that is not a stop but an ending;
+ *   (e) the *second* call blocking or answering 2 - `reap_child_locked` did not run, and the child is
+ *       still a zombie;
+ *   (f) a panic with `xnu_live_wait_*` present - the reap path panicked *after* answering, which would
+ *       make `proc_checkdeadrefs`' `p_refcount != 0` real (`kern_proc.c:749`; it is empty unless
+ *       `__PROC_INTERNAL_DEBUG`, which is why the wrapper takes no reference of its own on the child).
+ *
+ *
+ * What the run measured, written after it (comments only - the image the device ran is byte-identical to
+ * the one this file builds, proved by `cmp` on the three artifacts):
+ *
+ *   - **The first call blocked, and the sleep record is the proof** rather than the tick count:
+ *     `xnu_live_sleep_site = 0x802950ac` is the instruction after the `bl __wrap_msleep0` at `0x802950a8`
+ *     in `wait4_nocancel`, with `_pri = 0x520` (`PWAIT | PCATCH | PDROP`), `_chan` the parent's own proc
+ *     and `_tmo = 0`. The child's `exit` / `pth_delete` / `sigchld` records then land between the call's
+ *     two records, which is the wakeup read out of the log's order.
+ *   - **The status is the kernel's, and the missing record is not what proves it.** The page held
+ *     `0xfeedface` at line 7818 of the same run (504's pair: `_read_word_before = 0x00102000`,
+ *     `_read_word_after = 0xfeedface`), the second call returns `ECHILD` before any `copyout`, and this
+ *     program reached its loop without taking a `udf` - so both of its checks passed and the word it
+ *     tested was `0x300`.
+ *   - **Falsifier (d) is the one the run took, and it took it in a way that was not predicted**: the
+ *     record `xnu_live_wait_done_seq = 1` is absent, but the *call* came back. The wrapper's second
+ *     writer is unconditional, `xnu_live_capped` is absent and the run used 4409 of `ENTRY_LIVE_CAP`
+ *     (8192) records, so the cause is the console's two-writer exposure, not the writer and not the cap.
+ *     A falsifier that reads "the record is absent" as "the call never came back" cannot tell those
+ *     apart; the reading that can is the second call's own answer.
+ *   - **The kernel's `copyout` of the status faulted on this program's page and was retried**:
+ *     `sleh_seq = 8`, `_user = 0`, `_far = 0x00102000`, `_pc = 0x80016360` (the store in
+ *     `Lcopyout_bytewise`), `_lr = 0x80295114` (after `bl copyout` in `wait4_nocancel`),
+ *     `_recover = 0x8001644c` = `copyio_error`, `_redirect = 0` - armed, serviced, retried, which is why
+ *     `wait4` answered 2 and the page holds `0x300`.
  */
 
     .syntax unified
@@ -627,9 +746,11 @@
  * the syscall numbers from the master, the pid from the sentence above it, the page size from the
  * kernel's own page shift, `prot` and `flags` from `mman.h`, and the character device's own name from
  * the `devfs_make_node` format string in `bsd/dev/memdev.c` that made the node 504 opens, the two
- * syscall numbers 505 makes from the master's own lines for `fork` and `exit`, and the composed
- * status `W_EXITCODE` derives from the child's - and decodes
- * the sixty-one words below
+ * syscall numbers 505 makes from the master's own lines for `fork` and `exit`, the number and the pid
+ * 508 makes from the master's line for `wait4` - whose four 4-byte arguments the slot's own
+ * `sy_arg_munge32` and `sy_arg_bytes` are checked against in `tools/check_sysent_table.py` - and the
+ * composed status `W_EXITCODE` derives from the child's - and decodes
+ * the seventy-eight words below
  * to check they are the program this comment describes, *including* the comparisons that use them. */
     .equ SYS_GETPID,             20
     .equ EXPECTED_PID,           1
@@ -697,10 +818,46 @@
     .equ EXIT_RVAL,              3      /* The child's own exit status, and the value is chosen for what
                                          * the kernel *does* with it: `exit` hands `exit1` the
                                          * expression `W_EXITCODE(uap->rval, 0)` (`kern_exit.c:682`),
-                                         * which is `(rval & 0xff) << 8` - so 3 becomes **0x300**, a number
-                                         * the kernel composed and that no zero-filled field and no
-                                         * read of the fixture's own register can produce. A 0 here
-                                         * would be the one value that says nothing. */
+                                         * and that macro is `((ret) << 8 | (sig))`
+                                         * (`bsd/sys/wait.h:158`) - so 3 becomes **0x300**, a number the
+                                         * kernel composed and that no zero-filled field and no read of
+                                         * the fixture's own register can produce. A 0 here would be
+                                         * the one value that says nothing. 508 is the step that reads
+                                         * that number back, from the process that asked for it: the
+                                         * word is `0xffff & p->p_xstat`, and the mask is
+                                         * `wait4_nocancel`'s (`kern_exit.c:1782`, "Legacy apps expect
+                                         * only 8 bits of status") and not the composition's - the
+                                         * macro has no mask, and this comment said `(rval & 0xff) << 8`
+                                         * until 508 quoted the header instead of paraphrasing it. */
+    .equ SYS_WAIT4,              7      /* `7 AUE_WAIT4 ALL { int wait4(int pid, user_addr_t status,
+                                         * int options, user_addr_t rusage) NO_SYSCALL_STUB; }` -
+                                         * the third of the three calls a Unix process's life is, and
+                                         * the one 508 adds. Four 4-byte words, so the slot's munger
+                                         * is `munge_wwww` (`out/xnu_generated/init_sysent.c`) and
+                                         * `sy_arg_bytes` is 16: r0..r3 land in the argument struct at
+                                         * offsets 0, 4, 8 and 12, which is where `wait4_nocancel`
+                                         * reads them. `tools/check_sysent_table.py` checks the slot's
+                                         * munger and the two counts, and
+                                         * `tools/host_ramdisk_macho_check.py` checks the four
+                                         * registers against the master's own prototype. */
+    .equ WAIT_PID,               2      /* The pid to ask about, and the value is 505's reading rather
+                                         * than this file's choice: the system has one user process
+                                         * when `/sbin/launchd` starts (`initproc = proc_find(1)`), so
+                                         * the first process a user request can make is 2 - which is
+                                         * what `xnu_live_fork_ret_lo`, `xnu_live_exit_pid` and
+                                         * `xnu_live_pth_delete_p`'s proc have all been. `fork` returns
+                                         * the pid in r0 for both halves, so the parent's `r0` at
+                                         * `entry_parent` is that number already and this constant is
+                                         * only what `cmp` and the second call write. */
+    .equ EXIT_STATUS,            (EXIT_RVAL << 8)   /* `W_EXITCODE(EXIT_RVAL, 0)`, computed here and
+                                         * not written as 0x300, because the *derivation* is the claim
+                                         * - the number is the kernel's arithmetic on the fixture's own
+                                         * register, and a literal here would be a second definition of
+                                         * one value. The shift is the header's: the check reads
+                                         * `#define W_EXITCODE(ret, sig) ((ret) << 8 | (sig))` out of
+                                         * `bsd/sys/wait.h` and compares the instruction's immediate
+                                         * with what that macro makes of `EXIT_RVAL` - so a change to
+                                         * either number fails the build rather than the run. */
 
 /* The shape of the three load commands, and the two numbers derived from them. Neither
  * `sizeofcmds` nor the entry point is written down: the first is an expression over the label the
@@ -937,30 +1094,78 @@ entry_code:
     svc     #0x80                       /* +192: returns twice, and the branch below splits them */
     cmp     r1, #CHILD_FLAG             /* +196: r1 is 1 in the child and 0 in the parent */
     beq     entry_child                 /* +200: r1 == CHILD_FLAG, so this is the one `fork` made */
-    b       spin                        /* +204: r1 == 0, so this is the caller: the loop it had */
+    b       entry_parent                /* +204: r1 == 0, so this is the caller - 508's half */
 
 /* The child's half: one call, and it does not return to user mode. `exit` runs `exit1` and then
  * `thread_exception_return()` (`kern_exit.c:684`), and `proc_prepareexit`'s first branch - the one
  * that panics for `initproc` - is not taken here because this process is the one `fork` just made.
  * Its status is 3 and the kernel composes 0x300 out of it, which is the number the instrument reads
- * back from *inside* the exit path rather than from this register. */
+ * back from *inside* the exit path rather than from this register - and 508 is the step that reads it
+ * back from the *outside* too. */
 entry_child:
     mov     r0, #EXIT_RVAL              /* +208: 3, so the composed status is 0x300 */
     mov     r12, #SYS_EXIT              /* +212: 1 */
     svc     #0x80                       /* +216: never returns; the thread is terminated */
 
+/* And the parent's half, which is 508: the third of the three calls a Unix process's life is - make
+ * one, lose one, **ask for it**. `fork` returned the child's pid in r0 for *both* processes and the
+ * branch above sent the child away, so r0 here is the number to ask about; r9 is 504's page, whose
+ * first word the read left holding this file's own magic (`0xfeedface`) and which becomes the word
+ * the kernel answers with.
+ *
+ * **The four words are the four fields of `struct wait4_args` in order, and that is a measurement
+ * rather than a reading of the prototype.** `sysent[7]`'s munger is `munge_wwww`
+ * (`out/xnu_generated/init_sysent.c`), which copies the four words contiguously, and `wait4_nocancel`
+ * reads them back at byte offsets 0, 4, 8 and 12 - `ldr r0, [r6]`, `ldr r1, [r6, #4]`,
+ * `ldrb r0, [r6, #8]`, `ldr r1, [r6, #12]` in the object this image links. So `user_addr_t` is *one
+ * word* on this target and the four registers are the four fields in the order the master writes them
+ * (`7 AUE_WAIT4 ALL { int wait4(int pid, user_addr_t status, int options, user_addr_t rusage); }`).
+ * rusage is 0 and that is the one argument nothing checks: it is read at offset 12 and a stale word
+ * there would send `munge_user32_rusage`'s `copyout` to an address this process does not own, which
+ * would come back as an EFAULT rather than as a fault - the branch on r0 below would then kill
+ * `initproc` for a reason with nothing to do with this step. It is set, and the wrapper publishes it
+ * so that the log says which word the kernel read.
+ *
+ * **The two answers are checked and the second call's is not.** r0 is the pid the kernel answered
+ * with - `retval[0] = p->p_pid` (`kern_exit.c:1779`) - and the word behind the pointer is the status
+ * `wait4` copied out (`:1782`), both of which are facts this program is entitled to fault on: a
+ * `wait4` that returns something else has not done what this step claims. The *second* call is a
+ * different kind of reading - it asks for the same pid again, and the source says it can only come
+ * back `ECHILD` with `retval[0]` untouched (`:1888`) - so it is made, recorded by the wrapper and
+ * **not** branched on, for 503's reason: an answer that is not the expected one is a fact about the
+ * reap path, and a fault here would kill `initproc` and end the boot 478's way. */
+entry_parent:
+    mov     r1, r9                      /* +220: status = the page `mmap` gave and the read filled */
+    mov     r2, #0                      /* +224: options = 0 - and not WNOHANG: the child is a */
+    mov     r3, #0                      /* +228:     zombie, so this returns rather than parking */
+    mov     r12, #SYS_WAIT4             /* +232: 7, `munge_wwww` - see the header */
+    svc     #0x80                       /* +236: and r0 is still the pid the `fork` returned */
+    cmp     r0, #WAIT_PID               /* +240: the pid the kernel answered with */
+    bne     entry_failed                /* +244 */
+    ldr     r3, [r9]                    /* +248: the word the kernel *wrote through* the pointer */
+    cmp     r3, #EXIT_STATUS            /* +252: `W_EXITCODE(EXIT_RVAL, 0)` = 0x300 */
+    bne     entry_failed                /* +256 */
+    mov     r0, #WAIT_PID               /* +260: the same question, of a child that is gone */
+    mov     r1, r9                      /* +264 */
+    mov     r2, #0                      /* +268 */
+    mov     r3, #0                      /* +272 */
+    mov     r12, #SYS_WAIT4             /* +276 */
+    svc     #0x80                       /* +280: ECHILD, and the wrapper records that it was */
+    b       spin                        /* +284: deliberately not a `bne entry_failed` */
+
 /* And the syscall that cannot fill anything, so that the loop is alive after the faults, after both
- * timed blocks and after the driver was read from, and the log says so: r12 has to be reloaded
- * because the `poll`s above left 230 in it. */
+ * timed blocks, after the driver was read from, after the fork and after the child was reaped, and the
+ * log says so: r12 has to be reloaded because the `poll`s above left 230 in it - and 508's `wait4`
+ * left 7 there. */
 spin:
-    mov     r12, #SYS_GETPID            /* +220 */
-    svc     #0x80                       /* +224: getpid() again */
-    cmp     r0, #EXPECTED_PID           /* +228 */
-    bne     entry_failed                /* +232 */
-    b       spin                        /* +236 */
+    mov     r12, #SYS_GETPID            /* +288 */
+    svc     #0x80                       /* +292: getpid() again */
+    cmp     r0, #EXPECTED_PID           /* +296 */
+    bne     entry_failed                /* +300 */
+    b       spin                        /* +304 */
 
 entry_failed:
-    udf     #1                          /* +240: the kernel answered something else */
+    udf     #1                          /* +308: the kernel answered something else */
 entry_code_end:
 
 /* The two paths, as *file* bytes inside `__TEXT`'s file range - so the mapping that carries the
@@ -1016,13 +1221,14 @@ paths_end:
     .error "the entry point is outside the segment it is loaded from"
     .endif
 /* And what the program's length is, because every branch in it is relative: a `b` that left the file
- * range would raise a fault instead of making a syscall, and the check tool decodes all 61 words by
- * offset. 61 words is the 3 of the getpid call, the 11 of the mmap call and its argument registers,
+ * range would raise a fault instead of making a syscall, and the check tool decodes all 78 words by
+ * offset. 78 words is the 3 of the getpid call, the 11 of the mmap call and its argument registers,
  * the 7 of the two faults, the 1 that keeps the page for 504, the 10 of the two timed asks, the 16 of
  * the two opens and the read between them, the 9 of the fork and the child's exit and its entry
- * label, and the 5 of the loop with the `udf` behind it. */
-    .if (entry_code_end - entry_code) != 244
-    .error "the program is not the sixty-one instructions the header describes"
+ * label, the 17 of 508's two `wait4`s with the two checks and the two answers between them, and the
+ * 5 of the loop with the `udf` behind it. */
+    .if (entry_code_end - entry_code) != 312
+    .error "the program is not the seventy-eight instructions the header describes"
     .endif
 
 /* The rest of the segment is zeros, and they are *file* bytes rather than a `.bss` tail: the whole

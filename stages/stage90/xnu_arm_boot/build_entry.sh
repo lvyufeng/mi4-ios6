@@ -138,6 +138,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=poll
                    --wrap=open --wrap=read
                    --wrap=fork --wrap=exit
+                   --wrap=wait4
                    --wrap=psignal
                    --wrap=setPop
                    --wrap=PE_init_platform --wrap=fiq_context_init
@@ -27421,6 +27422,22 @@ verify_trace_symbols() {
         layout_fail "the name proc_prepareexit appears in [${pe_files}] and this step's instrument assumes it appears only in bsd/kern/kern_exit.c - if a caller in another object exists then \`--wrap=proc_prepareexit\` becomes possible and 505's SIGCHLD record is no longer the only reading of the non-init arm"
     say "  xnu_entry_505: proc_prepareexit is named in bsd/kern/kern_exit.c and nowhere else, so its initproc branch is unreachable by --wrap and the step's reading of that arm is the SIGCHLD that only the other arm reaches"
 
+    # **508's wrapper, and the two names beside it that it reuses rather than adds.** Same rule as
+    # 471's, 504's and 505's, for the same reason: `__real_wait4` has to be XNU's own `wait4`, because
+    # a name the generator stood in for would make every record - including the *status word* the step
+    # is for - a fact about the stand-in. `proc_pid` and `copyin_word` are already checked by 505's and
+    # 504's clauses above and are not repeated: this wrapper *calls* both, so a stand-in for either
+    # would make `_who` and `_status` facts about one stub, and the two loops that would say so are
+    # three lines up. What is checked here is the name that is new, and the fact that it is new matters:
+    # `wait4` is called from the sysent table by address and from nowhere else in this tree, so
+    # `--wrap` rewriting the table's initialiser is the *only* way this wrapper can run - and a run
+    # with no `xnu_live_wait_*` records at all looks exactly like a wrapper that is not in the image.
+    for s in wait4; do
+        grep -qx "$s" "$OUT/xnu_arm_entry_undef.txt" &&
+            layout_fail "508's instrument calls $s through \`__real_\` and the pass-1 undefined set contains it - nothing in this image defines that name, so the generator stubbed it and the wait's records would be a fact about the stand-in rather than about the kernel's own reaping answer"
+    done
+    say "  xnu_entry_508: wait4 is defined by this image rather than stubbed for it, so the two records around the parent's call are about the kernel's own wait, and its four argument words are the four the slot's munger marshals"
+
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls
     # `_ZNK9IOService8getStateEv` by mangled name on objects whose dynamic type this file cannot know -
     # whatever the `IOPlatformExpert` metaclass's instance walk yields. That is only correct if
@@ -27524,13 +27541,21 @@ verify_trace_symbols() {
     # `fork` writes no `xnu_live_fork_*` keys and a run with no keys looks exactly like a fork that
     # never happened, which is why 505's evidence that the wrappers are in the slots is
     # `tools/check_sysent_table.py`'s read-back and not the log.
-    local by_address=( vcputc getpid mmap poll open read fork exit thread_quantum_expire )
+    local by_address=( vcputc getpid mmap poll open read fork exit wait4 thread_quantum_expire )
     # 484 adds `thread_quantum_expire`, and it is the *third* shape of this category rather than a
     # fourth copy of the second. `vcputc`, `getpid`, `mmap` and `poll` are all referenced by taking an
     # address that lands in a *table* - `cons_ops[1].putc`, `sysent[20].sy_call`, `sysent[197].sy_call`,
     # `sysent[230].sy_call` - so the address is a word in a data section and
     # `tools/check_sysent_table.py` reads it there (503's `poll` is the third `sysent` slot of that
     # shape and is checked by the same tool, which is why it needs no clause of its own here).
+    # **508's `wait4` is the fifth of that first shape and the last one added here**, and it is the
+    # cleanest case of it in the tree: `grep` for a call finds nothing outside the table, because
+    # `wait4` is called *only* through `sysent[7].sy_call` - `wait1continue` calls `wait4_nocancel`
+    # directly and `wait4_nocancel` is the function that does the work, so the name this wrapper
+    # renames is reached by exactly one address reference in the whole image, in the initialiser
+    # `tools/check_sysent_table.py` reads. That is also why the check below cannot be the evidence for
+    # it: the address is the wrapper's *because the tool says so*, and the census here can only report
+    # that the name has no branch anywhere - which for this name is the design rather than a defect.
     # `thread_quantum_expire`'s one reference is also an address, but it is an *argument* to
     # `timer_call_setup` inside `processor_init`, so the compiler materialises it as a `movw`/`movt`
     # pair across two instructions and there is no word anywhere to read - this step's first attempt to

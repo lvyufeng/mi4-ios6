@@ -4695,6 +4695,100 @@ void entry_note_sigchld_returned(uint32_t from, uint32_t to)
     entry_live_write("xnu_live_sigchld_returned_to", to);
 }
 
+/* Experiment 508, first half. The record written **before** `wait4` runs, from the wrapper in
+ * `entry_trace.c` - and the six numbers are the call's own argument struct, not an interpretation of
+ * it: `who` is `proc_pid(proc)` on the process the dispatcher handed the slot (the *waiter*, which for
+ * this run is 1 - the same process 507's `xnu_live_sigchld_to` named as the one the OS told), `pid` is
+ * the argument the fixture put in r0, `status_ptr` the address it put in r1, and the last two are r2
+ * and r3.
+ *
+ * **The four argument words are published rather than the two the step is about, and that is the
+ * check on the fixture's own derivation.** `entry_ramdisk.s` says r0..r3 are the four fields of
+ * `struct wait4_args` because `sysent[7]`'s munger is `munge_wwww` and `wait4_nocancel` reads the
+ * struct at byte offsets 0, 4, 8 and 12 - and the log's four values are that claim measured at the
+ * kernel's side of the call: `status_ptr` has to be the page address the fixture's `xnu_live_read_buf`
+ * names, and `rusage` has to be 0, because a stale pointer there is a `copyout` to an address this
+ * process does not own and the run would answer with an EFAULT instead.
+ *
+ * **The sequence number is returned rather than kept private**, because the second record has to be
+ * associable with this one: a `wait4` can block and be entered once by the dispatcher, so the two
+ * records are not necessarily adjacent in the log - the child's own `pth_delete` and `sigchld` records
+ * are what can appear between them, and their being between them is the reading that says the parent
+ * was parked. A pair that assumed adjacency would make that ordering unreadable.
+ *
+ * `_status_ptr` and `_status` are deliberately different keys and different records: the first is an
+ * address the fixture chose, the second is the word the kernel wrote at it - read back through
+ * `copyin_word` *after* the call, in the wrapper. Nothing in the first record can be a fact about the
+ * answer, which is the point of splitting them: the before/after pair is the whole instrument.
+ */
+uint32_t g_wait_calls;
+uint32_t g_wait_over;
+
+uint32_t entry_note_wait(uint32_t caller, uint32_t who, uint32_t pid, uint32_t status_ptr,
+                         uint32_t options, uint32_t rusage)
+{
+    uint32_t seq = g_wait_calls + 1u;
+
+    if (g_wait_calls < 4u) {
+        entry_live_write("xnu_live_wait_seq", seq);
+        entry_live_write("xnu_live_wait_caller", caller);
+        entry_live_write("xnu_live_wait_who", who);
+        entry_live_write("xnu_live_wait_pid", pid);
+        entry_live_write("xnu_live_wait_status_ptr", status_ptr);
+        entry_live_write("xnu_live_wait_options", options);
+        entry_live_write("xnu_live_wait_rusage", rusage);
+    } else {
+        /* The same rate-limited record the read's wrapper uses: a `wait4` that ran more than four times
+         * would be a program that got back into the wait from somewhere this step did not design, and
+         * the count is what says so without filling the log. */
+        g_wait_over++;
+        if ((g_wait_over & (g_wait_over - 1u)) == 0u)
+            entry_live_write("xnu_live_wait_over", g_wait_over);
+    }
+
+    g_wait_calls++;
+    return seq;
+}
+
+/* And the second half: the kernel's answer, taken after `__real_wait4` returns. Five of the six
+ * numbers are the answer and the sixth is how long it took to arrive.
+ *
+ * **`error` and `ret` are the syscall's two halves and only one of them is meaningful at a time.**
+ * `wait4` returns 0 and puts the child's pid in `retval[0]` (`kern_exit.c:1779`) - the *answer* this
+ * step is for - or it returns an errno and `retval` is whatever it held, which is why both are
+ * published rather than the wrapper picking one: a reader that saw `ret` = 2 beside a non-zero `error`
+ * would be reading a stale word as a pid. The second call's `error` is the step's other reading:
+ * `ECHILD` (10, `bsd/sys/errno.h:99`) is the kernel saying there is no such child, which is what the
+ * reap did.
+ *
+ * **`copy_error` and `status` are one claim in two words** - 504's rule again: `copyin_word` answering
+ * non-zero means the user's pointer could not be read at all, and then `status` is not a reading of
+ * anything. It is published beside the word rather than folded into it because a wrapper that
+ * published a zero on a failed copy would be publishing the same value a *successful* read of a
+ * zero-filled page produces.
+ *
+ * **`ticks` is the third reading, and it is the one that distinguishes the two ways this call can
+ * succeed.** A `wait4` on a child that is still exiting does not return an answer: it sleeps on the
+ * parent's own proc pointer with `msleep0(..., PWAIT | PCATCH | PDROP, "wait", 0, wait1continue)`
+ * (`kern_exit.c:1906`) and is woken by the child's `wakeup((caddr_t)pp)` (`:1446-1448`, two lines
+ * after the SIGCHLD) - the same continuation mechanism 503's two `poll`s used, measured on the same
+ * counter, whose scale those two calls pin down (a 5 ms block is about 96000 ticks at 19.2 MHz). So a
+ * count in the thousands is the block and a count in the tens is a zombie found on the first scan, and
+ * **the log's order says the same thing from the other side**: if the child's `xnu_live_pth_delete_*`
+ * and `xnu_live_sigchld_*` records appear between `_seq` and `_done_seq` in the log, the parent was
+ * inside the call while the child finished dying, whatever the tick count was.
+ */
+void entry_note_wait_returned(uint32_t seq, uint32_t error, uint32_t ret, uint32_t copy_error,
+                              uint32_t status, uint32_t ticks)
+{
+    entry_live_write("xnu_live_wait_done_seq", seq);
+    entry_live_write("xnu_live_wait_error", error);
+    entry_live_write("xnu_live_wait_ret", ret);
+    entry_live_write("xnu_live_wait_copy_error", copy_error);
+    entry_live_write("xnu_live_wait_status", status);
+    entry_live_write("xnu_live_wait_ticks", ticks);
+}
+
 /* Experiment 456's probe, defined below its first caller; the declaration is here because
  * `entry_note_iolock` is where the reading is taken (see `entry_registry_probe`). */
 __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);

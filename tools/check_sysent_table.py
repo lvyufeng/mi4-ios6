@@ -10,19 +10,22 @@ for 197, with `--wrap=mmap`'s wrapper in *that* slot and six words of arguments 
 the armv7k munger; experiment 503 adds two more asking for 230, whose slot holds `--wrap=poll`'s
 wrapper; and experiment 504 adds the pair that reach a driver - three words for 3 (`read`) and three
 for 5 (`open`), each in its own slot; and experiment 505 adds 1 (`exit`) and 2 (`fork`), the pair
-that ends one process and makes another. Three things can be true of the *image* while the device still
+that ends one process and makes another; and experiment 508 adds 7 (`wait4`), the third call in a Unix
+process's life - the one that asks for the child and gets the status the kernel composed for it. Three
+things can be true of the *image* while the device still
 runs the program `entry_ramdisk.s` describes:
 
   - `--wrap` rewrites an *address reference* exactly as it rewrites a call - 458 read that fact out of
     `cons_ops[1].putc` and 463 out of `IOService::getState`'s name - so `bsd/kern/init_sysent.c`'s
     initialiser is what has to end up holding `__wrap_getpid`, `__wrap_mmap`, `__wrap_poll`,
-    `__wrap_read` and `__wrap_open`. If any
+    `__wrap_read`, `__wrap_open`, `__wrap_fork`, `__wrap_exit` and `__wrap_wait4`. If any
     slot holds the function instead, the wrapper is never entered, no record is written, and a run in
     which process 1 calls that syscall looks exactly like a run in which the instrument is not there.
     Nothing else in the build can see that: the symbol is defined either way, the undefined-symbol
     count does not move, and the census in `build_entry.sh` counts both as reachable *by address* -
-    which is a statement about a reference existing, not about which address it holds. For `mmap` and
-    `poll` the distinction is sharper than for `getpid`: both are ordinary functions with callers, so
+    which is a statement about a reference existing, not about which address it holds. For `mmap`,
+    `poll` and `wait4` the distinction is sharper than for `getpid`: all three are ordinary functions
+    with callers, so
     an image with the wrapper linked and *not* in the slot is byte-for-byte a working kernel whose
     fixture silently says nothing. 504's two are of that sharper kind twice over, and they add a
     consequence none of the first three has: the fixture's two `open`s are a *pair*, so a slot without
@@ -60,21 +63,26 @@ Where each side of the comparison comes from
     non-zero. A `sy_narg` of 3 on `fork` would make the kernel read `r0` as an argument and change
     nothing observable at all: `fork` ignores `uu_arg` and the child's zero comes from the saved
     state's own copy, so every record in the run would be identical. It is checked here because the
-    device cannot show it.
+    device cannot show it. 508 adds the same word in the *positive* form for the slot that has four:
+    `sysent[7].sy_narg` must be 4 and its `sy_arg_bytes` 16, which is what makes the fixture's r0..r3
+    the four fields of `struct wait4_args` - and a count short by one there is a word the kernel reads
+    out of the *previous* syscall's leftovers, which is a stop with a cause three files away.
 
 The witnesses are not decoration: `fork` at 2, `read` at 3, `open` at 5 and `rename` at 128 are four
 different points of the same table, and `enosys` at 8 is the one Apple's own generation turns argument
 mismatches into - so a build whose table had moved would have to move all of them consistently. 1, 2, 3,
-5, 20, 197 and 230 are the seven the fixture reaches, and 20 and 197 are the pair whose *distance*
-matters: 177 entries apart, which no off-by-one in the stride survives. **Four of those seven slots
-hold the real function rather than a wrapper** if the `--wrap` flags are wrong, and 505's two are the
-first that are *adjacent to each other* in the table's own numbering (1 and 2) as well as in the
-program.
+5, 20, 197 and 230 are the seven the fixture reached before 508, and 20 and 197 are the pair whose
+*distance* matters: 177 entries apart, which no off-by-one in the stride survives. **Every one of the
+slots the fixture reaches must hold a wrapper rather than the kernel's own function** - which is what
+the `--wrap` flags are for, and what a wrong flag makes invisible: no record, no error, and a working
+kernel. 505's two are the first that are *adjacent to each other* in the table's own numbering (1 and
+2) as well as in the program; 508's 7 is the fifth of the wrapped slots and the first that is adjacent
+to none of them, which is why its own mutation and its own count check are in `--selftest` below.
 
 `--selftest` mutates a copy of the table **in memory** - swapping two entries, zeroing a wrapper's
 slot, putting a real function back, moving the mmap munger, giving a no-argument slot an argument
-count, and truncating `nsysent` - and requires each mutation to be refused, which is what says the
-comparison is a comparison and not a restatement.
+count, shortening a four-word slot's count, and truncating `nsysent` - and requires each mutation to be
+refused, which is what says the comparison is a comparison and not a restatement.
 
     ./tools/check_sysent_table.py --selftest
     ./tools/check_sysent_table.py                        # out/stage90/xnu_arm_entry.elf
@@ -108,6 +116,7 @@ WRAPPED = [
     (5, "open"),            # 504
     (1, "exit"),            # 505
     (2, "fork"),            # 505
+    (7, "wait4"),           # 508
 ]
 SYSCALL_INDEX, SYSCALL_NAME = WRAPPED[0]
 
@@ -165,6 +174,18 @@ MUNGERS = {
     1: "munge_w",
     # `fork` is deliberately *not* here; see NO_ARGUMENTS below, where the claim about it is the
     # opposite one.
+    # **508's four, and it is the one munger here whose claim is a *shape* rather than an order.** `7
+    # AUE_WAIT4 ALL { int wait4(int pid, user_addr_t status, int options, user_addr_t rusage) }` is
+    # four arguments of which two are `user_addr_t` - eight bytes each in C and *one word each* in this
+    # marshalling, which is the fact `munge_wwww` encodes: four words, contiguously, no gap where
+    # `status`'s alignment would put one. The fixture's r0..r3 are the four fields in the master's
+    # order, and `wait4_nocancel` reads them at byte offsets 0, 4, 8 and 12 (`ldr r0, [r6]`, `ldr r1,
+    # [r6, #4]`, `ldrb r0, [r6, #8]`, `ldr r1, [r6, #12]` in `out/xnu_kernel_obj/bsd_kern_kern_exit.o`),
+    # so a slot naming `munge_www` would marshal three words and leave the fourth - the rusage pointer,
+    # which the fixture sets to 0 *because* it is read - holding whatever the previous syscall left in
+    # the buffer. 505's fork record measured exactly that buffer holding a stale path address, which is
+    # what makes this the difference between a working wait and an EFAULT.
+    7: "munge_wwww",
 }
 
 # **The slots whose argument list is empty, which is a claim about a word the fixture relies on.**
@@ -189,6 +210,20 @@ NO_ARGUMENTS = {
 MUNGER_WORD_OFFSET = 4
 NARG_OFFSET = 12
 ARG_BYTES_OFFSET = 14
+
+# **508: the slot whose *word count* is a claim about the fixture's registers.** `unix_syscall`
+# marshals `sy_narg` words - `arm_get_syscall_args` and the munger's own count - into `uu_arg`, and
+# 508's four registers are meaningful only if four words are copied: with three, r3 never reaches the
+# argument struct and `wait4_nocancel` reads the buffer's word at offset 12, which the *previous*
+# syscall left there. That is why the two counts are checked against the image here rather than being
+# left to the munger's name: the munger says which registers are read and in what order, and these say
+# how many. The values are `AC(wait4_args)` = 16/4 and `sysent[7]`'s own `sy_arg_bytes`, both from
+# `out/xnu_generated/init_sysent.c`'s line for 7 - four 4-byte fields, which is also the *third*
+# statement of the same fact, beside the munger word above and the four `ldr` offsets in
+# `wait4_nocancel`.
+ARGUMENT_WORDS = {
+    7: ("wait4", 4, 16),
+}
 
 # `struct sysent` (`bsd/sys/sysent.h:45`) on this target, where the armv7k `#if` is on:
 # `sy_call`, `sy_arg_munge32`, `sy_return_type`, `sy_narg`, `sy_arg_bytes`. The munger is the second
@@ -409,8 +444,34 @@ def collect(elf, master, mutate=None):
                            "call that reads no register, which is what makes the fixture's r0 a return "
                            "value rather than an argument" % (index, name))
 
-    # Every witness read back, for the log: an eight-line agreement is what makes the stride a reading.
-    for index, name in WITNESSES:
+    # **And how many words a slot marshals, for the one slot where the count is a register claim.**
+    # See `ARGUMENT_WORDS`: `sy_narg` is what `unix_syscall` compares against zero before it calls
+    # `arm_get_syscall_args` at all, and it is also the count the munger is asked to copy. The failure
+    # this refuses is the one that reads as a fact about something else on the device: with three words
+    # marshalled, the fixture's fourth register (the `rusage` pointer, which it sets to 0 for this
+    # reason) never reaches the argument struct, `wait4_nocancel` reads the buffer's word at offset 12
+    # instead, and the `copyout` that word causes either faults or answers with an errno - which the
+    # fixture's own `cmp r0, #WAIT_PID` turns into a `udf #1` and a panic on `initproc`. A stop with a
+    # cause three files away is exactly the outcome this check exists to make unnecessary.
+    for index, (name, narg, argbytes) in sorted(ARGUMENT_WORDS.items()):
+        at = index * SYSENT_STRIDE
+        got_narg, = struct.unpack_from("<h", raw, at + NARG_OFFSET)
+        got_bytes, = struct.unpack_from("<H", raw, at + ARG_BYTES_OFFSET)
+        if got_narg != narg or got_bytes != argbytes:
+            fail("sysent[%d] (`%s`) has sy_narg %d and sy_arg_bytes %d, and this slot has to have %d "
+                 "and %d: the fixture puts %s's %d arguments in r0..r%d and every one of them has to "
+                 "be marshalled into `uu_arg`, because the kernel reads them back out of it at byte "
+                 "offsets 0, 4, 8 and 12. A slot whose counts are short by one word leaves the last "
+                 "register out of the struct, and the word `wait4_nocancel` reads in its place is "
+                 "whatever the *previous* syscall left in that buffer - 505's fork record measured such "
+                 "a word, and it was a string address"
+                 % (index, name, got_narg, got_bytes, narg, argbytes, name, narg, narg - 1))
+        else:
+            summary.append("sysent[%d] = `%s` with sy_narg %d and sy_arg_bytes %d - the four words "
+                           "the fixture's r0..r3 are, copied contiguously into `uu_arg`"
+                           % (index, name, got_narg, got_bytes))
+
+    # Every witness read back, for the log: an eight-line agreement is what makes the stride a reading.    for index, name in WITNESSES:
         got, = struct.unpack_from("<I", raw, index * SYSENT_STRIDE)
         expected = "__wrap_" + name if ("__wrap_" + name) in symbols else name
         say("  sysent[%3d] = 0x%08x = %s (master line %d: %s)"
@@ -449,6 +510,7 @@ def main():
         open_offset = WRAPPED[4][0] * SYSENT_STRIDE   # 504: 5's slot, one entry on from it
         exit_offset = WRAPPED[5][0] * SYSENT_STRIDE   # 505: 1's slot
         fork_offset = WRAPPED[6][0] * SYSENT_STRIDE   # 505: 2's slot, the next entry
+        wait_offset = WRAPPED[7][0] * SYSENT_STRIDE   # 508: 7's slot, five entries on from 2
         other = 24 * SYSENT_STRIDE         # another entry's slot, inside the checked span
         symbols = elf.symbols()
         wrapper = symbols["__wrap_" + SYSCALL_NAME]
@@ -465,6 +527,8 @@ def main():
         exit_real = symbols[WRAPPED[5][1]]
         fork_wrapper = symbols["__wrap_" + WRAPPED[6][1]]
         fork_real = symbols[WRAPPED[6][1]]
+        wait_wrapper = symbols["__wrap_" + WRAPPED[7][1]]
+        wait_real = symbols[WRAPPED[7][1]]
 
         def word(state, where):
             return struct.unpack_from("<I", state["table"], where)[0]
@@ -574,6 +638,27 @@ def main():
             # in the run would be identical. That is why the claim is checked here, structurally.
             struct.pack_into("<h", state["table"], fork_offset + NARG_OFFSET, 3)
 
+        def the_real_wait4(state):
+            # 508's copy of the defect the five above are about: an image whose slot holds `wait4`
+            # instead of its wrapper is a *working* kernel - the child is reaped, the pid and the status
+            # are returned to the parent, the loop goes on - and the run has no `xnu_live_wait_*` key at
+            # all, which reads exactly like a fixture that never asked. The step's two readings (the
+            # status the kernel composed and the ECHILD that says the reap happened) would both be
+            # absent from a log whose every other record is present.
+            put(state, wait_offset, wait_real)
+
+        def wait4_marshalled_with_three_words(state):
+            # **The count claim, and why it is not left to the munger's name.** A slot that marshalled
+            # three words would copy r0..r2 and leave the argument struct's word at offset 12 holding
+            # whatever the previous syscall left in `uu_arg` - so `wait4_nocancel` would read a
+            # `rusage` pointer the fixture never wrote and `copyout` to it. On this device that is not
+            # silent (the EFAULT fails the fixture's pid check and `udf #1` kills `initproc`), but it is
+            # *unattributable*: the panic names an address in a syscall three files away from the word
+            # that was wrong. Both halves are moved, because either alone would leave a slot that says
+            # one thing and does another.
+            struct.pack_into("<h", state["table"], wait_offset + NARG_OFFSET, 3)
+            struct.pack_into("<H", state["table"], wait_offset + ARG_BYTES_OFFSET, 12)
+
         def one_entry_late(state):
             put(state, offset, 0)
             put(state, offset + SYSENT_STRIDE, wrapper)
@@ -606,6 +691,8 @@ def main():
             ("the real exit in its slot", the_real_exit),
             ("the exit and fork wrappers in each other's slot", the_two_505_slots_swapped),
             ("fork given an argument count", fork_given_an_argument_count),
+            ("the real wait4 in its slot", the_real_wait4),
+            ("wait4 marshalled with three words", wait4_marshalled_with_three_words),
             ("the wrapper one entry late", one_entry_late),
             ("entries 20 and 24 swapped", swapped_with_24),
             ("the table shifted by one word (any other stride)", shifted_one_word),

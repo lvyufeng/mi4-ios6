@@ -183,6 +183,17 @@ extern void entry_note_sigchld_returned(uint32_t from, uint32_t to);
  * defined in `entry_stubs.c` beside the record it qualifies. */
 extern uint32_t g_psignal_calls;
 
+/* 508: the pair around `wait4`, and the two records are one reading split in two on purpose - the
+ * first is written *before* the kernel's own call runs and the second after it returns, so the log's
+ * own order says whether the parent was parked inside the call while the child finished dying. The
+ * first returns the call's sequence number, which the second carries, because a `wait4` can block and
+ * be run more than once by the same process: the pair has to be associable without assuming order.
+ * See the two bodies in `entry_stubs.c`. */
+extern uint32_t entry_note_wait(uint32_t caller, uint32_t who, uint32_t pid, uint32_t status_ptr,
+                                uint32_t options, uint32_t rusage);
+extern void entry_note_wait_returned(uint32_t seq, uint32_t error, uint32_t ret,
+                                     uint32_t copy_error, uint32_t status, uint32_t ticks);
+
 /* 481: the kernel's end of the timer chain - the deadline `timer_resync_deadlines` chose and the
  * decrementer value the real `setPop` computed for it, recorded beside what the writer in
  * `entry_timebase.c` was handed. See the wrapper below. */
@@ -1119,6 +1130,83 @@ void __wrap_psignal(void *proc, int signum)
     }
 
     __real_psignal(proc, signum);
+}
+
+/* ---------------------------------------------------- the parent asks for its child (508) */
+/*
+ * **`wait4`, and it is the third of the three calls a Unix process's life is: `fork`, `exit`, `wait`.**
+ * 505 made the process and 507 watched the kernel tell its parent it was gone; what is missing at the
+ * end of 507's run is the parent *asking*, and the answer that only this call can produce - the word
+ * the kernel composed out of the child's exit status. The child is a zombie nothing has reaped, so
+ * this is also the step that measures the free side of the corpse path 505's run stopped in.
+ *
+ * **The four words are read raw and published, for the reason 505's `uap0` is.** `sysent[7]`'s munger
+ * is `munge_wwww` (`out/xnu_generated/init_sysent.c`) - four words, contiguously - and this file
+ * includes no XNU header, so `struct wait4_args` is spelled here as what the object says it is: the
+ * four words at byte offsets 0, 4, 8 and 12 that `wait4_nocancel` loads with `ldr r0, [r6]`,
+ * `ldr r1, [r6, #4]`, `ldrb r0, [r6, #8]` and `ldr r1, [r6, #12]`. Publishing all four rather than
+ * the two the record names is deliberate: the record's own *values* are then the evidence that the
+ * marshalling is what the fixture's header derives, and a `wait4` whose arguments had moved would
+ * show up as a word in the wrong key rather than as a silent difference.
+ *
+ * **`_who` is the *waiter*, and it is the other side of 507's record.** `proc_pid(proc)` on the
+ * process the dispatcher handed the slot is 1 - the same process 507's `xnu_live_sigchld_to` named as
+ * the recipient - and `_pid` is the argument: the child, 2. So one line says who asked, about whom,
+ * with what, and a second says what came back.
+ *
+ * **The word behind the pointer is read back through the kernel's own copy path, after the call.**
+ * 504's rule, for 504's reason: a plain load of a user address is a data abort in the wrapper if the
+ * fixture's page is not mapped when this runs, and `copyin_word` answers `EFAULT` instead - so
+ * `_copy_error` is the record that says whether `_status` is a reading of the user's page or of
+ * nothing. Reading it *after* the call is the whole point: before it, the word is whatever the
+ * fixture's own read left there (this file's magic), and the step's claim is about the word the
+ * kernel wrote through the pointer.
+ *
+ * **`_ticks` is `entry_counter()` at the two ends of the real call, and it is the third kind of
+ * reading in this step.** The child was made microseconds before the parent asks, so the first scan
+ * may find it still exiting; the source then sleeps on `(caddr_t)q` and the child's own `proc_exit`
+ * wakes it (`wakeup((caddr_t)pp)`, `kern_exit.c:1446-1448`, under the same list lock). A non-trivial
+ * count here is that block measured - the same counter 503's `xnu_live_poll_ticks` publishes, whose
+ * scale is known from those two calls - and a handful of ticks is the other answer: the child was
+ * already a zombie and nothing parked.
+ *
+ * **The declaration is `sysproto.h`'s**: `int wait4(struct proc *, struct wait4_args *, int *);` -
+ * `retval` is an `int *` and not a `user_ssize_t *` like `read`'s, so the return path writes `r0`
+ * alone. `tools/check_sysent_table.py` checks the slot's munger and its two counts, and
+ * `tools/host_ramdisk_macho_check.py` checks the four registers against the master's prototype; this
+ * wrapper is the third side of that agreement, and it is the only one that sees the kernel's answer.
+ */
+int __real_wait4(void *proc, void *uap, int *retval);
+int __wrap_wait4(void *proc, void *uap, int *retval)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    const uint32_t *given = (const uint32_t *)uap;
+    uint32_t pid = 0xFFFFFFFFu, status_ptr = 0u, options = 0xFFFFFFFFu, rusage = 0xFFFFFFFFu;
+    uint32_t who = (uint32_t)proc_pid(proc);
+    uint32_t seq, before, after, copy_error = 0xFFFFFFFFu;
+    uint64_t word = 0;
+    int error;
+
+    if (given != 0) {
+        pid = given[0];
+        status_ptr = given[1];
+        options = given[2];
+        rusage = given[3];
+    }
+
+    seq = entry_note_wait(caller, who, pid, status_ptr, options, rusage);
+    before = entry_counter();
+    error = __real_wait4(proc, uap, retval);
+    after = entry_counter();
+
+    if (status_ptr != 0u) {
+        copy_error = (uint32_t)copyin_word(status_ptr, &word, 4u);
+    }
+
+    entry_note_wait_returned(seq, (uint32_t)error,
+                             (retval != 0) ? (uint32_t)retval[0] : 0xFFFFFFFFu,
+                             copy_error, (uint32_t)word, after - before);
+    return error;
 }
 
 /* ---------------------------------------------------- the kernel's own timer deadline (481) */

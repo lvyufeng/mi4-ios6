@@ -315,6 +315,50 @@ def syscall_fork_and_exit():
     return fork_number, exit_number
 
 
+def syscall_wait4():
+    """508's call, from `syscalls.master`'s own line - and the *order* of its four arguments is the claim.
+
+    `7 AUE_WAIT4 ALL { int wait4(int pid, user_addr_t status, int options, user_addr_t rusage)
+    NO_SYSCALL_STUB; }` puts four arguments in four registers, and the fixture's `r0`..`r3` are the
+    four fields of `struct wait4_args` **in this order**: the pid to ask about, the address the status
+    is written to, the options, and the address a `rusage` would be written to. All four are one word
+    on this target - which is not a reading of `user_addr_t`'s `sizeof` but the thing the object says:
+    `wait4_nocancel` loads the argument struct at byte offsets 0, 4, 8 and 12
+    (`ldr r0, [r6]`, `ldr r1, [r6, #4]`, `ldrb r0, [r6, #8]`, `ldr r1, [r6, #12]` in
+    `out/xnu_kernel_obj/bsd_kern_kern_exit.o`), and the slot's `munge_wwww` copies exactly four words
+    contiguously over them. `tools/check_sysent_table.py` checks that side - the munger's name and the
+    two counts - and this function is the other side of the same claim from the master, so a prototype
+    that grew an argument, or swapped `status` and `options`, fails the build instead of moving a
+    register the fixture does not write.
+
+    What it cannot check is that the *kernel* reads them in that order; that is the disassembly above,
+    and it is why this docstring carries the four offsets rather than a count of the parameters.
+    """
+    master = open(os.path.join(XNU, "bsd/kern/syscalls.master"), encoding="utf-8",
+                  errors="replace").read()
+    m = re.search(r"^(\d+)\s+AUE_WAIT4\s+ALL\s+\{\s*int\s+wait4\s*\(([^)]*)\)", master, re.M)
+    if not m:
+        sys.exit("bsd/kern/syscalls.master no longer has the `AUE_WAIT4 ALL { int wait4(...) }` line - "
+                 "508's syscall number and its four argument registers cannot be checked against the "
+                 "master")
+    number = int(m.group(1))
+    if number <= 0:
+        sys.exit(f"syscalls.master puts wait4 at {number}: with a non-positive number `fleh_swi` "
+                 f"routes it to the mach path, so the fixture would not be calling a BSD syscall")
+    args = " ".join(m.group(2).split())
+    params = [q.strip() for q in args.split(",") if q.strip()]
+    shape = [q.split()[0] for q in params if q.split()]
+    want = ["int", "user_addr_t", "int", "user_addr_t"]
+    if shape != want:
+        sys.exit(f"syscalls.master's wait4 takes `{args}`, whose types are {shape}, and 508's fixture "
+                 f"is built on the prototype being {want} - the four words r0..r3 are the pid, the "
+                 f"status address, the options and the rusage address *in that order*, so a "
+                 f"prototype whose parameter list differs puts one of the fixture's registers "
+                 f"somewhere the kernel does not read it (and the rusage word, which the fixture sets "
+                 f"to 0, would be a stale pointer `wait4_nocancel` copies out to)")
+    return number
+
+
 def exit_status_word(rval):
     """`W_EXITCODE(rval, 0)`: the status the kernel composes out of the fixture's own number.
 
@@ -485,7 +529,7 @@ def sign24(word):
 # How many instructions the program at the entry point is. `entry_ramdisk.s` asserts the same length
 # in an `.if` over its own labels, so the two are a pair: a program that grew would fail to assemble
 # and a program that shrank would fail here.
-PROGRAM_WORDS = 61
+PROGRAM_WORDS = 78
 
 # Where the two `poll` calls' timeouts are, and where the two calls start. The word numbers are the
 # program's own layout - `entry_ramdisk.s`'s listing counts the same offsets - and they are named here
@@ -493,7 +537,7 @@ PROGRAM_WORDS = 61
 # list, the ratio property, and the mutation that breaks the ratio.
 POLL_SHORT_WORD, POLL_LONG_WORD = 24, 29
 POLL_CALL_WORDS = (22, 27)          # the first word of each ask: `mov r0, #0`
-SPIN_WORD, FAILED_WORD = 55, 60     # the loop's first word, and the `udf #1` every check shares
+SPIN_WORD, FAILED_WORD = 72, 77     # the loop's first word, and the `udf #1` every check shares
 
 # The words 504 adds, named for the same reason: `PAGE_WORD` keeps 480's mapping in r9, the two `adr`s
 # are the paths the two opens pass, and the read's three words are the call the driver answers.
@@ -509,9 +553,23 @@ READ_FD_WORD, READ_LEN_WORD, READ_CALL_WORD = 37, 38, 39
 FORK_ARG_WORD, FORK_CALL_WORD = 46, 47   # 505's dead word, and the number `2`
 FORK_SVC_WORD = 48                       # the `svc` whose single instruction has two continuations
 FORK_TEST_WORD, FORK_BRANCH_WORD = 49, 50  # 506's `cmp r1, #CHILD_FLAG` and its `beq entry_child`
-PARENT_BRANCH_WORD = 51                  # `b spin` - the half the parent keeps
+PARENT_BRANCH_WORD = 51                  # 508: `b entry_parent` - the half the parent keeps
 CHILD_WORD = 52                          # `entry_child`'s first word, and the branch's target
 EXIT_ARG_WORD, EXIT_CALL_WORD, EXIT_SVC_WORD = 52, 53, 54
+
+# And the words 508 adds, named for the same reason again: the parent's branch above is the *target*
+# `PARENT_WORD` for the first time in this program - until 508 the parent's half was the loop, so the
+# branch and the loop's first word were one number - and the two `wait4` blocks are two calls whose
+# arguments, answers and checks the table has to be able to name. `WAIT_STATUS_WORD` is the load of
+# the word the kernel *wrote through* the pointer the fixture gave, and `WAIT_STATUS_TEST_WORD` is the
+# comparison whose immediate is `W_EXITCODE(EXIT_RVAL, 0)`.
+PARENT_WORD = 55                         # `entry_parent`'s first word: `mov r1, r9`, the status pointer
+WAIT_STATUS_WORD = 62                    # `ldr r3, [r9]` - the answer, read from the page
+WAIT_STATUS_TEST_WORD = 63               # `cmp r3, #EXIT_STATUS`
+WAIT_PID_TEST_WORD = 60                  # `cmp r0, #WAIT_PID` - the pid the kernel answered with
+WAIT_CALL_WORD, WAIT_SVC_WORD = 58, 59   # the first call: `mov r12, #SYS_WAIT4` and its `svc`
+WAIT2_ARG_WORD = 65                      # the second call's `mov r0, #WAIT_PID`
+WAIT2_CALL_WORD, WAIT2_SVC_WORD, WAIT_BACK_WORD = 69, 70, 71
 
 # The ARM condition codes the program's branches use, by name: `bne`, `bcs` and `b`. The names are what
 # the *reading* rests on for one of them - `unix_syscall`'s error convention is the carry bit
@@ -653,7 +711,7 @@ def describe(instruction):
 
 
 def program_expectations(decoded, K, adr_targets):
-    """What each of the program's 61 words must decode to, in the order they are loaded.
+    """What each of the program's 78 words must decode to, in the order they are loaded.
 
     The values come from the headers and from Apple's source (`K`), never from a literal here: the pids
     from `bsd_init.c`'s `initproc = proc_find(N)`, the syscall numbers from `syscalls.master`, the
@@ -704,10 +762,23 @@ def program_expectations(decoded, K, adr_targets):
         argument buffer kept). 49..51 are the split: `cmp r1, #CHILD_FLAG` - the register 506 switched
         to, because `thread_set_child` writes 1 there for the child and 0 is the parent's - and the two
         branches whose targets are checked as word indices, with 50 landing on `entry_child` (word 52)
-        and 51 on `SPIN_WORD`, so a program with the halves exchanged fails here rather than passing on
-        matching numbers. 52..54 are the child's three words, whose last does not return.
-      - 55..59 are 479's loop, kept so that the log shows both timed blocks, both opens, the read and
-        the fork returned rather than killing the boot, and 60 is the failure marker.
+        and 51 on the parent's half, so a program with the halves exchanged fails here rather than
+        passing on matching numbers. (Until 508 that second target was `SPIN_WORD`: the parent's half
+        *was* the loop, and the branch and the loop's first word were one number. 508 is the step that
+        gave the parent something to do before it goes back.) 52..54 are the child's three words, whose
+        last does not return.
+      - **55..71 are 508's two `wait4`s and the two answers between them.** 55..58 are the first call's
+        arguments - the status pointer is 504's page in r9, `options` and `rusage` are both zero, and
+        zero is load-bearing for the last of them: `wait4_nocancel` reads the argument struct's word at
+        offset 12 and a stale pointer there would make it `copyout` a `rusage` to an address this
+        process does not own. 59..61 are the call, the pid it is answered with and the branch that
+        refuses a different one; 62..64 are **the reading** - a load of the word the kernel wrote
+        through the pointer, compared with `W_EXITCODE(EXIT_RVAL, 0)` - and 65..70 are the same call
+        again on the same pid, whose answer (`ECHILD`) is deliberately not tested: word 71 is the
+        unconditional `b` to the loop and nothing between 70 and 72 is allowed to be a conditional
+        branch, which is a property `check_program` states as an absence below.
+      - 72..76 are 479's loop, kept so that the log shows both timed blocks, both opens, the read, the
+        fork and the reaping wait returned rather than killing the boot, and 77 is the failure marker.
     """
     # The one value this check does not fix: the word the program puts in r5. It has to be a marker -
     # nonzero, and different from every argument the program loads - because its whole job is to be
@@ -799,8 +870,8 @@ def program_expectations(decoded, K, adr_targets):
         (FORK_ARG_WORD, ("mov", (0, K["FORK_ARG_VALUE"], 0))),
         (FORK_CALL_WORD, ("mov", (12, K["SYSCALL_FORK"], 0))),
         (FORK_SVC_WORD, ("svc", (0x80,))),
-        # The test and the two branches: `cmp r1, #CHILD_FLAG`, `beq entry_child`, `b spin`. **The
-        # register and the number are the step's subject and both are checked as facts about the
+        # The test and the two branches: `cmp r1, #CHILD_FLAG`, `beq entry_child`, `b entry_parent`.
+        # **The register and the number are the step's subject and both are checked as facts about the
         # instruction**, because 505's run is what a wrong pair costs: with `cmp r0, #0` / `beq`, the
         # child - whose `r0` is the pid too - took the parent's arm and died on the program's own
         # `udf #1`. 506's *first* run inverted the condition instead (`cmp r1, #CHILD_FLAG` / `bne`,
@@ -811,22 +882,61 @@ def program_expectations(decoded, K, adr_targets):
         # child's branch is checked as a *target* as well - word `CHILD_WORD`, which is where
         # `entry_child` is - because the other failure this pair can have is the two halves swapped,
         # and a table of numbers would accept a program that gave the parent the exit and the child
-        # the loop.
+        # the loop. The parent's target is `PARENT_WORD` since 508, and *where* it lands is a clause
+        # of its own below for the same reason: until this step it was the loop, and a program that
+        # left it there would still satisfy every row of this table.
         (FORK_TEST_WORD, ("cmp_i", (1, K["CHILD_FLAG"], 0))),
         (FORK_BRANCH_WORD, ("b", (COND["eq"], CHILD_WORD))),
-        (PARENT_BRANCH_WORD, ("b", (COND["al"], SPIN_WORD))),
+        (PARENT_BRANCH_WORD, ("b", (COND["al"], PARENT_WORD))),
         # And the child's half: three words, the last of which is the only `svc` in this program that
         # does not return to the instruction after it.
         (EXIT_ARG_WORD, ("mov", (0, K["EXIT_RVAL"], 0))),
         (EXIT_CALL_WORD, ("mov", (12, K["SYSCALL_EXIT"], 0))),
         (EXIT_SVC_WORD, ("svc", (0x80,))),
-        # 479's loop, kept so that the log shows both timed blocks, both opens, the read and the fork
-        # returned rather than killing the boot; and the failure marker the whole program shares.
+        # **508's two `wait4`s and the two answers between them.** The first three words are the
+        # arguments: the status pointer is the page `mmap` gave this process and the read filled (the
+        # same `r9` 504 kept it in, which is why the load at `WAIT_STATUS_WORD` is about the *page* and
+        # not about a register the kernel returned), `options` is 0 - not `WNOHANG`, because the child
+        # is a zombie and the call is supposed to return rather than to park - and `rusage` is 0, which
+        # is the one argument no run can show being read: a stale word there would make
+        # `wait4_nocancel` copy a `struct user32_rusage` to an address this process does not own, and
+        # the EFAULT would arrive as `_error` rather than as a fault. `WAIT_STATUS_TEST_WORD` is the
+        # step's whole reading in one instruction: a load of the word the kernel *wrote through* the
+        # pointer, compared with the number 506 derived from `W_EXITCODE` and the fixture's own 3.
+        (PARENT_WORD, ("mov_r", (1, 9))),
+        (56, ("mov", (2, 0, 0))),
+        (57, ("mov", (3, 0, 0))),
+        (WAIT_CALL_WORD, ("mov", (12, K["SYSCALL_WAIT4"], 0))),
+        (WAIT_SVC_WORD, ("svc", (0x80,))),
+        (WAIT_PID_TEST_WORD, ("cmp_i", (0, K["WAIT_PID"], 0))),
+        (61, ("b", (COND["ne"], FAILED_WORD))),
+        (WAIT_STATUS_WORD, ("ldr", (3, 9, 0))),
+        # **The step's subject in one instruction**, and the `rot` in the tuple is not decoration:
+        # 0x300 is an eight-bit immediate rotated by twelve, so a `cmp r3, #0x300` written as any
+        # other encoding of the same number fails here - which is the defect this check was built with
+        # in 205 (`imm12` returns the rotated value *and* the count for exactly this row).
+        (WAIT_STATUS_TEST_WORD, ("cmp_i", (3, K["EXIT_STATUS"], 12))),
+        (64, ("b", (COND["ne"], FAILED_WORD))),
+        # And the second call: the same four arguments and the same number, on the pid of a child that
+        # has been reaped. It is followed by a `b` to the loop and by **no comparison at all**, which
+        # is the one place in this program where an answer is deliberately not branched on - see the
+        # fixture's header: `ECHILD` is the expected answer, and a `udf #1` here would kill `initproc`
+        # for a fact about the reap path rather than about this call.
+        (WAIT2_ARG_WORD, ("mov", (0, K["WAIT_PID"], 0))),
+        (66, ("mov_r", (1, 9))),
+        (67, ("mov", (2, 0, 0))),
+        (68, ("mov", (3, 0, 0))),
+        (WAIT2_CALL_WORD, ("mov", (12, K["SYSCALL_WAIT4"], 0))),
+        (WAIT2_SVC_WORD, ("svc", (0x80,))),
+        (WAIT_BACK_WORD, ("b", (COND["al"], SPIN_WORD))),
+        # 479's loop, kept so that the log shows both timed blocks, both opens, the read, the fork and
+        # the reaping wait returned rather than killing the boot; and the failure marker the whole
+        # program shares.
         (SPIN_WORD, ("mov", (12, K["SYSCALL_GETPID"], 0))),
-        (56, ("svc", (0x80,))),
-        (57, ("cmp_i", (0, K["INIT_PID"], 0))),
-        (58, ("b", (COND["ne"], FAILED_WORD))),
-        (59, ("b", (COND["al"], SPIN_WORD))),
+        (73, ("svc", (0x80,))),
+        (74, ("cmp_i", (0, K["INIT_PID"], 0))),
+        (75, ("b", (COND["ne"], FAILED_WORD))),
+        (76, ("b", (COND["al"], SPIN_WORD))),
         (FAILED_WORD, ("udf", (1,))),
     ]
 
@@ -910,28 +1020,35 @@ def check_device_paths(blob, fpc, decoded, K, p):
 
 
 def check_program(blob, fpc, pc, reg, K):
-    """The 61 words of `entry_ramdisk.s`'s program, decoded against what they are for.
+    """The 78 words of `entry_ramdisk.s`'s program, decoded against what they are for.
 
     This is the assertion experiment 468 wrote for one word, applied to the program 479 replaced it
-    with and 480, 503, 504 and 505 grew: the one-word version asked "is the entry point a `udf #0`",
-    which measured only that the user's mapping was where the file said it was. Every word of a program
-    this size is a way to be wrong - a `cmp` against the wrong register or the wrong pid, a branch that
-    lands one instruction away, a syscall number in the wrong register, an argument in the wrong
-    register, the sign convention instead of the carry - and every one of them is a *silent*
+    with and 480, 503, 504, 505, 506 and 508 grew: the one-word version asked "is the entry point a
+    `udf #0`", which measured only that the user's mapping was where the file said it was. Every word
+    of a program this size is a way to be wrong - a `cmp` against the wrong register or the wrong pid,
+    a branch that lands one instruction away, a syscall number in the wrong register, an argument in
+    the wrong register, the sign convention instead of the carry - and every one of them is a *silent*
     difference whose only symptom on the device would be a process that runs when it should have
     stopped, or an init death where 478 already had one.
 
-    Six of the program's properties are not word-for-word comparisons and are checked here because
+    Eight of the program's properties are not word-for-word comparisons and are checked here because
     no single word holds them: the marker's (that word 8 is nonzero and unlike every argument), the
     branch targets' (that each lands on another instruction of the program), 503's ratio (that word 29
     is larger than word 24 and neither is zero), 504's two paths (`check_device_paths`: that the file
     holds exactly the two strings the two `adr`s point at, and that the first is the character device
     the kernel's own `devfs_make_node` call names), 504's read length (that it is at least the word
-    the wrapper publishes and no longer than the page the buffer is in), and **505's split** (that the
-    fork, the child's half and the loop are in that order, and that the two branches out of the one
-    `svc` land on different halves - the one relation in this function that is about the program's
-    *shape*, because a per-word table is blind to a program whose fork block was moved inside the loop
-    with every constant renumbered to match). The
+    the wrapper publishes and no longer than the page the buffer is in), **505's split** (that the
+    fork, the child's half, 508's wait and the loop are in that order, and that the two branches out of
+    the one `svc` land on different halves - the one relation in this function that is about the
+    program's *shape*, because a per-word table is blind to a program whose fork block was moved inside
+    the loop with every constant renumbered to match), **the sense of the fork's comparison** (that
+    the immediate and the condition are one claim about the child's flag - the clause 506 added, and
+    the one that could have refused its first run), **where the parent's branch lands** (508's half of
+    that clause: a program whose parent branch went to the loop would satisfy every row above and never
+    call `wait4`, which is a *missing* reading rather than a wrong one), and **the absence after the
+    second `wait4`** (508's: no conditional branch between that `svc` and the loop, because `ECHILD` is
+    an answer this step wants recorded and not faulted on).
+    The
     ratio is the reading 503 exists for - a wake whose length does not follow what was asked for is a
     latency and not a deadline - and the pair of paths is the reading 504 exists for, and both have to
     be properties a mutation can break rather than numbers compared with a header.
@@ -991,8 +1108,8 @@ def check_program(blob, fpc, pc, reg, K):
 
     # Every branch lands inside the program, stated once for all of them: a branch out would leave the
     # user's `__TEXT` for unmapped memory and fault, which the run would show as an abort rather than
-    # as a syscall - and the `b` at word 50 has to come back to the loop's first word for the liveness
-    # reading the step is built on.
+    # as a syscall - and the `b` at word `WAIT_BACK_WORD` has to come back to the loop's first word for
+    # the liveness reading every step in this program is built on.
     for index, instruction in enumerate(decoded):
         if instruction[0] == "b" and not isinstance(instruction[1][1], int):
             fail(f"{p}the branch at word {index} (0x{pc + index * 4:x}) targets "
@@ -1023,17 +1140,20 @@ def check_program(blob, fpc, pc, reg, K):
     # and be wrong in the worst way this step has: the process would fork again on every turn of the
     # loop, so the log would fill with `xnu_live_fork_seq` and the `exit` at `CHILD_WORD` would never
     # be reached at all. So the three parts have to be in the order the design needs - the fork, then
-    # the child's half, then the loop - which is a relation between the constants and not a fact about
-    # any word. **No `--selftest` mutation constructs its violation, and that is not an oversight:** a
-    # mutation changes one word, and this failure is a reordering, so the only way to reach it is to
-    # edit the program and the constants together - which is exactly the edit this clause is here to
-    # refuse.
-    if not (FORK_SVC_WORD < CHILD_WORD <= EXIT_SVC_WORD < SPIN_WORD < FAILED_WORD):
-        fail(f"{p}the program's three parts are out of order: the `fork`'s `svc` is word "
-             f"{FORK_SVC_WORD}, the child's half words {CHILD_WORD}..{EXIT_SVC_WORD}, and the loop "
-             f"words {SPIN_WORD}..{FAILED_WORD}. The fork has to come before the child's half and the "
-             f"child's half before the loop, or the loop is a place a `fork` can be reached from - "
-             f"which would make this process fork on every turn and never run the child's `exit`")
+    # the child's half, then 508's wait, then the loop - which is a relation between the constants and
+    # not a fact about any word. **No `--selftest` mutation constructs its violation, and that is not an
+    # oversight:** a mutation changes one word, and this failure is a reordering, so the only way to
+    # reach it is to edit the program and the constants together - which is exactly the edit this
+    # clause is here to refuse.
+    if not (FORK_SVC_WORD < CHILD_WORD <= EXIT_SVC_WORD < PARENT_WORD < WAIT2_SVC_WORD
+            < SPIN_WORD < FAILED_WORD):
+        fail(f"{p}the program's parts are out of order: the `fork`'s `svc` is word "
+             f"{FORK_SVC_WORD}, the child's half words {CHILD_WORD}..{EXIT_SVC_WORD}, 508's wait words "
+             f"{PARENT_WORD}..{WAIT2_SVC_WORD}, and the loop words {SPIN_WORD}..{FAILED_WORD}. The "
+             f"fork has to come before the child's half, the child's half before the parent's wait, "
+             f"and the wait before the loop - a loop the fork can be reached from would fork on every "
+             f"turn, a wait inside the child's half would be a call the dying process makes, and a "
+             f"wait after the loop is a wait that never runs")
     # And the two branches out of that `svc`, which is the second opinion about a failure the table is
     # blind to for the same structural reason: a program in which *both* branches go to the loop. Its
     # every word would be right - `fork` would be called, the `cmp` would be the `cmp`, the number
@@ -1060,12 +1180,49 @@ def check_program(blob, fpc, pc, reg, K):
                      f"parent already runs and never reach the `exit` at words {EXIT_ARG_WORD}"
                      f"..{EXIT_SVC_WORD}, so the step's one reading - the second process's death - "
                      f"could not happen")
+            # And 508's half of the same clause: the parent's branch is the *other* thing that one
+            # `svc` decides, so where it lands is the claim that the parent reaches the wait at all.
+            # A program whose parent branch went to the loop - every word of the wait still present and
+            # correct, the counters renumbered to match - would pass every row of the table above and
+            # would never call `wait4`: the child would still die and still send SIGCHLD, the loop would
+            # still be answered, and the only difference in the log would be the *absence* of seven
+            # keys, which is the failure mode this file exists to make loud. The target is compared
+            # with `PARENT_WORD`'s own neighbourhood rather than with the number: the parent's half has
+            # to start where `PARENT_WORD` says and to be outside the loop.
+            if SPIN_WORD <= parent_target <= FAILED_WORD:
+                fail(f"{p}the parent's branch out of the `fork` lands on word {parent_target}, which is "
+                     f"inside the loop ({SPIN_WORD}..{FAILED_WORD}): the parent would never reach the "
+                     f"wait at words {PARENT_WORD}..{WAIT2_SVC_WORD}, so the child would die unclaimed "
+                     f"and the run would have no `xnu_live_wait_*` records at all - a missing reading "
+                     f"rather than a wrong one")
         for index in range(CHILD_WORD, EXIT_SVC_WORD + 1):
             if decoded[index][0] == "b":
                 fail(f"{p}word {index} in the child's half is a branch, and that half is three words "
                      f"whose last one does not return: a branch here would be a way for the child to "
                      f"leave through user mode, which would make the child's half a copy of the "
                      f"parent's rather than a process that ends")
+
+    # **And the one answer in this program that must *not* be branched on, checked as an absence.**
+    # 503 established the rule for an answer whose wrongness is a fact about the kernel rather than
+    # about the fixture - neither of its two `poll`s tests the return, because a `poll` that came back
+    # with an errno is a reading and a `udf #1` here would kill `initproc` and end the boot 478's way -
+    # and 508's *second* `wait4` is the same kind of call for the same reason: `ECHILD` is what the
+    # source says it answers, and an un-reaped child would make it answer 2 and *block*, which is a
+    # finding this step wants in the log and not in a fault. So between the second call's `svc` and
+    # the loop there must be no conditional branch at all - the unconditional `b` to the loop is the
+    # only branch allowed - and the failure this clause refuses is the tempting edit: a `cmp`/`bne`
+    # pair added under the second call, every word of the table above still satisfied, and the run's
+    # ending changed from a live `getpid_count` to a panic on the one path whose whole purpose was to
+    # report something. It is an absence claim, so no mutation can construct it from a single word
+    # (both halves of the pair would have to be added).
+    for index in range(WAIT2_SVC_WORD + 1, SPIN_WORD):
+        if decoded[index][0] == "b" and decoded[index][1][0] != COND["al"]:
+            fail(f"{p}word {index} is a conditional branch between the second `wait4`'s `svc` at word "
+                 f"{WAIT2_SVC_WORD} and the loop at word {SPIN_WORD}, and this call's answer is "
+                 f"deliberately not tested: `ECHILD` is what `wait4_nocancel` answers for a reaped "
+                 f"child (`kern_exit.c:1888`), a wrong answer is a fact about the reap path rather "
+                 f"than about this program, and `udf #1` here would kill `initproc` - 478's outcome - "
+                 f"instead of recording it")
 
     # **And the *sense* of the comparison, which is the one field 506's first run got wrong while this
     # file agreed with it.** `cmp rX, #imm` sets `Z` exactly when `rX == imm`, and `beq` branches
@@ -1156,9 +1313,14 @@ def check_program(blob, fpc, pc, reg, K):
                      f"which this instrument does not publish (run 2 of 506 measured the difference) - "
                      f"with `xnu_live_exit_pid` = `xnu_live_fork_ret_lo` = 2, and then the OS tells the "
                      f"parent: `psignal(pp, SIGCHLD)` = 20 (`xnu_live_sigchld_signal`) to "
-                     f"`xnu_live_sigchld_to` = 1. The parent never reaches it - `b spin` is its arm - so "
+                     f"`xnu_live_sigchld_to` = 1. The parent never runs `exit` - the wait at word "
+                     f"{PARENT_WORD} is its arm, and 508 is the step that reads the reaped child back "
+                     f"out of it - so "
                      f"`xnu_live_getpid_count` climbing with `_last` = 1 beside an `exit` record is the "
-                     f"pair that says two processes were alive at once" % K)
+                     f"pair that says two processes were alive at once, and 508's `xnu_live_wait_*` "
+                     f"records beside that same `exit` are what say the process it names is gone for "
+                     f"good - the wait answers with the pid and `ECHILD` is what the second ask gets "
+                     f"back" % K)
 
 
 def check_thread_registers(pc, reg, K):
@@ -1577,6 +1739,16 @@ def main():
         "CHILD_FLAG": 1,
         "EXIT_RVAL": 3,
         "EXIT_STATUS": exit_status_word(3),
+        # 508: the third of the three calls a Unix process's life is, from the master through the same
+        # reader shape as the other six - with the *order* of its four arguments checked, because the
+        # fixture's r0..r3 are those four fields - and the pid the parent asks about, which is derived
+        # rather than written: the system has one user process when this program starts
+        # (`initproc = proc_find(1)`), so the first process a user request can be given is the next
+        # one. 505's run measured that number at three independent points (`xnu_live_fork_ret_lo`,
+        # `xnu_live_exit_pid`, and the proc `xnu_live_pth_delete_p`), which is why the fixture's `cmp`
+        # and the second call can both name it.
+        "SYSCALL_WAIT4": syscall_wait4(),
+        "WAIT_PID": init_pid() + 1,
     }
     notes.append("from the headers: MH_MAGIC=0x%(MH_MAGIC)x MH_EXECUTE=%(MH_EXECUTE)d "
                  "MH_PIE=0x%(MH_PIE)x MH_DYLDLINK=0x%(MH_DYLDLINK)x "
@@ -1599,7 +1771,11 @@ def main():
                  "(bsd/kern/syscalls.master, the master's `fork(void)` and `exit(int rval)` lines) "
                  "FORK_ARG_VALUE=%(FORK_ARG_VALUE)d CHILD_FLAG=%(CHILD_FLAG)d "
                  "EXIT_RVAL=%(EXIT_RVAL)d "
-                 "EXIT_STATUS=0x%(EXIT_STATUS)x (W_EXITCODE(%(EXIT_RVAL)d, 0), bsd/sys/wait.h)" % K)
+                 "EXIT_STATUS=0x%(EXIT_STATUS)x (W_EXITCODE(%(EXIT_RVAL)d, 0), bsd/sys/wait.h) "
+                 "SYSCALL_WAIT4=%(SYSCALL_WAIT4)d (bsd/kern/syscalls.master, whose `wait4(int pid, "
+                 "user_addr_t status, int options, user_addr_t rusage)` line is the four registers "
+                 "r0..r3 in that order) "
+                 "WAIT_PID=%(WAIT_PID)d (INIT_PID + 1: the first pid a user request can be given)" % K)
 
     blob, size = load(args.elf)
     if blob is None:
