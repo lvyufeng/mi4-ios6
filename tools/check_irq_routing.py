@@ -88,6 +88,7 @@ ENTRY_GIC_H = os.path.join(BOOT_DIR, "entry_gic.h")
 ENTRY_IRQ_C = os.path.join(BOOT_DIR, "entry_irq.c")
 ENTRY_TIMEBASE_C = os.path.join(BOOT_DIR, "entry_timebase.c")
 DRIVER_CPP = os.path.join(REPO_ROOT, "stages/stage90/xnu_platform/MSM8974GIC.cpp")
+TIMER_CPP = os.path.join(REPO_ROOT, "stages/stage90/xnu_platform/MSM8974Timer.cpp")
 
 NM = "arm-none-eabi-nm"
 
@@ -302,6 +303,7 @@ def gather(image):
         "irq_text": read(ENTRY_IRQ_C),
         "timebase_text": read(ENTRY_TIMEBASE_C),
         "driver_text": read(DRIVER_CPP),
+        "timer_text": read(TIMER_CPP),
         "image": image,
     }
     facts["header"] = defines(facts["header_text"])
@@ -309,6 +311,7 @@ def gather(image):
     facts["irq"] = strip_comments(facts["irq_text"])
     facts["timebase"] = strip_comments(facts["timebase_text"])
     facts["driver"] = strip_comments(facts["driver_text"])
+    facts["timer"] = strip_comments(facts["timer_text"])
     facts["symbols"] = nm(image) if image else {}
     return facts
 
@@ -809,7 +812,8 @@ def claim_static_storage(facts, failures, notes):
 
     checked = 0
     for path, text, cxx in ((ENTRY_IRQ_C, facts["irq"], False),
-                            (DRIVER_CPP, facts["driver"], True)):
+                            (DRIVER_CPP, facts["driver"], True),
+                            (TIMER_CPP, facts["timer"], True)):
         source = compiled_text(text, defines(text))
         names = file_scope_statics(source)
         if not names:
@@ -863,7 +867,7 @@ def claim_static_storage(facts, failures, notes):
                      "and it is a marker rather than a record - its position is the claim")
 
     if not failures:
-        notes.append("checked %d file-scope record(s) across both files" % checked)
+        notes.append("checked %d file-scope record(s) across the files this step writes" % checked)
 
 
 def compare(facts, mutate=None):
@@ -926,6 +930,10 @@ def mutate_facts(facts, mutate):
     def rederive_driver(text):
         facts["driver_text"] = text
         facts["driver"] = strip_comments(text)
+
+    def rederive_timer(text):
+        facts["timer_text"] = text
+        facts["timer"] = strip_comments(text)
 
     def rederive_header(text):
         facts["header_text"] = text
@@ -1153,6 +1161,15 @@ def mutate_facts(facts, mutate):
     elif mutate == "the_marker_is_not_published":
         rederive_driver(_bump(facts["driver_text"],
                               '    entry_live_write( "xnu_live_gicdrv_isr_done", 1u );\n', ""))
+    elif mutate == "a_timer_record_the_image_does_not_have":
+        # 498's file, and 497's rule carried to it: the timer driver's seven new records are read from
+        # another call (the handler) or published as they are taken, and this mutation adds the shape
+        # the claim exists to refuse to *that* file - so the claim is about the rule rather than about
+        # the two files it was written for.
+        rederive_timer(_bump(facts["timer_text"], "static uint32_t g_timer_frame_va;",
+                             "static uint32_t g_timer_frame_va;\nstatic uint32_t g_timer_no_storage;"))
+        rederive_timer(_bump(facts["timer_text"], "    g_timer_starts++;",
+                             "    g_timer_starts++;\n    g_timer_no_storage = 1u;"))
     else:
         raise SystemExit("unknown mutation %s" % mutate)
     return facts
@@ -1178,6 +1195,7 @@ MUTATIONS = (
     "a_record_the_image_does_not_have", "a_record_that_is_read_but_never_written",
     "a_driver_record_the_image_does_not_have", "the_driver_marker_becomes_a_variable_again",
     "the_marker_is_published_before_the_withdraw", "the_marker_is_not_published",
+    "a_timer_record_the_image_does_not_have",
 )
 
 
@@ -1227,10 +1245,10 @@ def main():
         "INTID %d - 482's measurement, and neither of the payload's two - the `ICFGR` word and field "
         "are derived from it, and the countdown is unmasked only after the arming said the line is "
         "enabled" % header["STAGE90_GIC_TIMER_INTID"])
-    say("  xnu_entry_497: every file-scope record `entry_irq.c` and `MSM8974GIC.cpp` declare is in "
-        "the image, so no key in this step's record is publishing a copy of a variable the compiler "
-        "removed - and the driver's completion marker is a literal published in the handler's tail, "
-        "after its withdraw block")
+    say("  xnu_entry_497: every file-scope record `entry_irq.c`, `MSM8974GIC.cpp` and "
+        "`MSM8974Timer.cpp` declare is in the image, so no key in this step's record is publishing a "
+        "copy of a variable the compiler removed - and the GIC driver's completion marker is a literal "
+        "published in the handler's tail, after its withdraw block")
     return 0
 
 

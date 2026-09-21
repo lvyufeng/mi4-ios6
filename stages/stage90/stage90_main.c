@@ -58,6 +58,41 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
         0xf9021000u, 0x00001000u,
         0xf9022000u, 0x00001000u,
     };
+    /*
+     * 498: the frame's own line, copied from the device's own tree.
+     *
+     * `external/android_kernel_xiaomi_cancro/arch/arm/boot/dts/msm8974.dtsi:161-167` declares the
+     * timer's frame as
+     *
+     *     frame@f9021000 {
+     *         frame-number = <0>;
+     *         interrupts = <0 8 0x4>,
+     *                      <0 7 0x4>;
+     *         reg = <0xf9021000 0x1000>,
+     *               <0xf9022000 0x1000>;
+     *     };
+     *
+     * and `Documentation/devicetree/bindings/arm/arch_timer.txt` says of a frame's two properties:
+     * "interrupts : Interrupt list for physical and virtual timers in that order" and "reg : The first
+     * and second view base addresses in that order". The device's own kernel agrees with both readings
+     * - `arch/arm/kernel/arch_timer.c:623` takes `of_iomap(frame, 0)` as the register base (the
+     * frame's *first* `reg`, i.e. 0xf9021000) and `:629` takes `irq_of_parse_and_map(frame, 0)` as
+     * `arch_timer_spi` (the frame's *first* interrupt, i.e. `<0 8 0x4>`).
+     *
+     * So the block this tree lists as `/timer`'s second `reg` entry is the timer's device, and the
+     * line that device raises is SPI 8 - which the GIC binding's cell rule turns into **intid 40**
+     * (`type 0` = SPI, `intid = 32 + num`; `type 1` = PPI, `intid = num`). This tree has carried the
+     * frame's `reg` since 492, flattened onto the parent node; 498 adds the half of the frame's
+     * description that says which line it owns.
+     *
+     * Two cells of the third word matter and they are not decoration: `0x4` is the ARM GIC binding's
+     * "level-high" trigger, and a distributor entry for an SPI that has never been programmed is
+     * level-sensitive by default (`GICD_ICFGR` field 0), so the declaration and the reset state agree
+     * - which is what makes the line clearable at the device rather than only by the distributor.
+     */
+    static const uint32_t timer_frame_intr[] = {
+        0u, 8u, 4u,
+    };
     static const uint32_t ram_console_reg[] = {
         RAM_CONSOLE_BASE, RAM_CONSOLE_SIZE,
     };
@@ -883,20 +918,61 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
     apple_dt_prop_u32(b, "chip-revision", 0);
 
     /* /interrupt-controller: MSM QGIC2 / GICv2. */
-    apple_dt_node_begin(b, 5, 0);
+    apple_dt_node_begin(b, 6, 0);
     apple_dt_prop_str(b, "name", "interrupt-controller");
     apple_dt_prop_str(b, "compatible", "qcom,msm-qgic2");
     apple_dt_prop_u32_array(b, "reg", gic_reg, ARRAY_SIZE(gic_reg));
     apple_dt_prop_u32(b, "#interrupt-cells", 3);
     apple_dt_prop_u32(b, "interrupt-controller", 1);
+    /*
+     * 498. A phandle is what makes this node *findable from another node*, and it is the one property
+     * whose absence is not a wrong number but a different route: `IODTFindInterruptParent`
+     * (`IODeviceTreeSupport.cpp:467-487`) resolves `interrupt-parent` through `FindPHandle`, and
+     * `FindPHandle` searches `gIODTPHandles` - the table `AddPHandle` (`:422-431`) fills with exactly
+     * the nodes that carry both `#interrupt-cells` and *this* property. The value also becomes the
+     * controller's *name* in the registry: `IODTInterruptControllerName` (`:489-501`) builds
+     * `IOInterruptController%08X` from it, and it `assert`s the property is present.
+     *
+     * **THE NAME IS `AAPL,phandle`, AND THAT IS NOT DECORATION - 498's first run aborted on it.**
+     * The key is not a literal here or anywhere else in our tree: it is
+     * `gIODTPHandleKey = OSSymbol::withCStringNoCopy("AAPL,phandle")` (`:137-138`), and
+     * `AddPHandle` asks for `gIODTPHandleKey` while `FindPHandle` compares against the *value* of
+     * whatever was registered under it. A node whose property is called `phandle` - which is what
+     * Linux's own binding uses, and what this line said when the first 498 image was built - carries
+     * a property `AddPHandle` never looks at, so `gIODTPHandles` stays empty, `FindPHandle(1)`
+     * returns 0, and `IODTGetICellCounts(parent = 0, ...)` (`:532-533`) loads a vtable from address
+     * 0. The device reported it as
+     *
+     *     panic(cpu 0 caller 0x80450e88): kernel abort type 4: fault_type=0x1, fault_addr=0x0
+     *     pc: 0x80179428   lr: 0x80177a24     <- IODTGetICellCounts+8, IODTMapInterruptsSharing
+     *
+     * before XNU's own publication walk (`:221-225`, which maps every node that has an `interrupts`
+     * property) or this driver ever reached the timer. **The defect is the project's oldest one in
+     * its purest form - one value, two spellings, neither compared** - and it survived 498's own
+     * check because that check compared the two *values* (`phandle` == `interrupt-parent`) and both
+     * were 1. The key name is now derived from Apple's source by `tools/check_timer_line.py`, so a
+     * tree that spells it any other way stops the build.
+     */
+    apple_dt_prop_u32(b, "AAPL,phandle", 1);
 
     /* /timer: MSM/ARM 19.2 MHz timer facts from Linux DT. */
-    apple_dt_node_begin(b, 6, 0);
+    apple_dt_node_begin(b, 8, 0);
     apple_dt_prop_str(b, "name", "timer");
     apple_dt_prop_str(b, "compatible", "qcom,msm-timer");
     apple_dt_prop_u32(b, "frequency", 19200000u);
     apple_dt_prop_u32_array(b, "reg", timer_reg, ARRAY_SIZE(timer_reg));
     apple_dt_prop_str(b, "use", "early-timebase");
+    /*
+     * 498. `interrupt-parent` and `interrupts` are the frame's, flattened onto this node the way the
+     * frame's `reg` already is (492). The value of `interrupt-parent` must equal the controller's
+     * `AAPL,phandle`, and that equality is a property of the *built* tree rather than of this file -
+     * the two numbers are written in two places by construction, which is what a phandle is - so it
+     * is checked against the artefact by `tools/check_timer_line.py` rather than asserted here. The
+     * *key* on both sides is checked there too, and it is the half that the first 498 run got wrong:
+     * see the controller node above.
+     */
+    apple_dt_prop_u32(b, "interrupt-parent", 1);
+    apple_dt_prop_u32_array(b, "interrupts", timer_frame_intr, ARRAY_SIZE(timer_frame_intr));
     /*
      * pe_arm_map_interrupt_controller locates the timer with
      * DTFindEntry("device_type", "timer") - by property *value*, not by the node's name.

@@ -186,11 +186,29 @@
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOTimerEventSource.h>
+/*
+ * 498: `IODTMapInterrupts` and the two keys the OS files its answer under. The header is the one
+ * `MSM8974PlatformExpert.cpp` already includes, and the two `OSSymbol *` keys it needs -
+ * `gIOInterruptSpecifiersKey` and `gIOInterruptControllersKey` - are declared by
+ * `IOKit/IOService.h` (`:144-145`), which is the first include above. Nothing about this mapping is
+ * transcribed here: the function and both key names come out of Apple's headers.
+ */
+#include <IOKit/IODeviceTreeSupport.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSNumber.h>
+#include <libkern/c++/OSSymbol.h>
 
 extern "C" void entry_live_write(const char *key, uint32_t value);
+
+/*
+ * 498's one entry point, declared here for the reason `MSM8974GIC.cpp` declares its two: this file
+ * cannot include `entry_gic.h` (that header's `g_stage90_gic_dist_typer` has C linkage and no
+ * `extern "C"` wrapper, so including it from C++ would give the symbol C++ linkage and a link error),
+ * so the signature is written twice - once in the header and once here - and the two are compared
+ * character by character by `tools/check_driver_catalogue.py`.
+ */
+extern "C" uint32_t entry_irq_register_client(uint32_t intid, uint32_t handler, uint32_t refCon);
 
 /*
  * The register this driver reads through its mapping, at the offset the node's `reg[0]` itself starts
@@ -201,6 +219,78 @@ extern "C" void entry_live_write(const char *key, uint32_t value);
  * word out of the GPT - so there is no second definition of this offset and none is claimed.
  */
 #define MSM8974_TIMER_REG0_OFF  0x000u
+
+/*
+ * 498: the frame's registers, at the offsets the *device's own kernel* uses.
+ *
+ * Grounding, and it is the whole reason this block is a reading rather than a guess. The block this
+ * node describes at `0xf9021000` is the Qcom/ARM memory-mapped timer's frame, and the offsets below
+ * are copied from the device's own driver, which is in this repository:
+
+ *     external/android_kernel_xiaomi_cancro/arch/arm/kernel/arch_timer.c
+ *       :60  #define QTIMER_CNTP_LOW_REG   0x000
+ *       :61  #define QTIMER_CNTP_HIGH_REG  0x004
+ *       :62  #define QTIMER_CNTV_LOW_REG   0x008
+ *       :63  #define QTIMER_CNTV_HIGH_REG  0x00C
+ *       :64  #define QTIMER_CTRL_REG       0x02C
+ *       :66  #define QTIMER_FREQ_REG       0x010
+ *       :66  #define QTIMER_CNTP_TVAL_REG  0x028
+ *       :67  #define QTIMER_CNTV_TVAL_REG  0x038
+ *       :50  #define ARCH_TIMER_CTRL_ENABLE   (1 << 0)
+ *       :51  #define ARCH_TIMER_CTRL_IT_MASK  (1 << 1)
+ *       :52  #define ARCH_TIMER_CTRL_IT_STAT  (1 << 2)
+ *       :631 timer_base = of_iomap(frame, 0);              <- the frame's *first* reg
+ *       :637 arch_timer_spi = irq_of_parse_and_map(frame, 0);  <- the frame's *first* interrupt
+ *
+ * and that kernel applies them to the frame's first `reg` region (`:631`), which is `0xf9021000` -
+ * this node's **second** `reg` entry and the first `reg` entry of the frame node in
+ * `arch/arm/boot/dts/msm8974.dtsi:161-167`. `tools/check_timer_line.py` reads those lines out of that
+ * file and refuses a build where any offset here disagrees with them, so this block is a copy with a
+ * check behind it rather than a second definition.
+ *
+ * The control word's three bits are read as three bits and not as one number: `IT_MASK` is the bit
+ * that *clears* a level-sensitive line (masking the output drops the level, which is what a
+ * distributor sees as pending), and `IT_STAT` is the read-only bit that says the output is asserted -
+ * so a record that published `_ctl` alone could not distinguish "the timer expired and the line is
+ * still held" from "the timer expired and the driver silenced it".
+ */
+#define MSM8974_FRAME_CNTP_LOW_OFF   0x000u
+#define MSM8974_FRAME_CNTP_HIGH_OFF  0x004u
+#define MSM8974_FRAME_CNTV_LOW_OFF   0x008u
+#define MSM8974_FRAME_CNTV_HIGH_OFF  0x00Cu
+#define MSM8974_FRAME_FREQ_OFF       0x010u
+#define MSM8974_FRAME_CNTP_TVAL_OFF  0x028u
+#define MSM8974_FRAME_CTRL_OFF       0x02Cu
+#define MSM8974_FRAME_CNTV_TVAL_OFF  0x038u
+
+#define MSM8974_FRAME_CTRL_ENABLE    0x1u
+#define MSM8974_FRAME_CTRL_IT_MASK   0x2u
+#define MSM8974_FRAME_CTRL_IT_STAT   0x4u
+
+/*
+ * Which of the node's `reg` entries is the frame. `reg` is `{parent, frame@1000, frame@2000}` - the
+ * three `{address, size}` pairs the tree has carried since 492 - and entry 1 is the frame's first view,
+ * the one the device's kernel maps with `of_iomap(frame, 0)`. Written once and used by the mapping
+ * *and* by the physical-address comparison, so the two cannot come to disagree.
+ */
+#define MSM8974_TIMER_FRAME_ENTRY  1u
+
+/*
+ * The GIC binding's cell rule, from the same tree that declares the frame:
+ *
+ *     arch/arm/boot/dts/msm8974.dtsi - a node's `interrupts` is `<type number trigger>` with the
+ *     controller's `#interrupt-cells = <3>`, `type 0` = a shared peripheral interrupt and `type 1` =
+ *     a private peripheral interrupt. The `type 0` numbers are the ones the distributor's
+ *     `GICD_ISENABLER<n>` bits are counted from intid 32; the `type 1` numbers *are* their intid.
+ *
+ * So the tree's `<0 8 4>` is GIC intid 40 and not 8: the +32 is the whole of the translation, and it
+ * is the number a distributor register address is derived from below. A driver that read "8" off the
+ * tree and enabled `ISENABLER0` bit 8 would be enabling SGI 8 - a line it can raise itself and which
+ * would therefore look like it worked.
+ */
+#define MSM8974_GIC_SPI_BASE     32u
+#define MSM8974_INTR_TYPE_SPI    0u
+#define MSM8974_INTR_TYPE_PPI    1u
 
 /*
  * 495: the interval this driver asks the OS for, and how many times the callback re-arms itself before
@@ -295,6 +385,92 @@ msm8974_timer_timeout( OSObject * owner, IOTimerEventSource * sender )
     }
 }
 
+/*
+ * 498: the frame's address, kept where the interrupt handler can find it.
+ *
+ * `start` returns and the handler may run long afterwards, on the boot thread's stack unwound and
+ * inside the payload's exception path - so the mapping is saved in a file-scope variable exactly as
+ * `MSM8974GIC.cpp` saves `g_gic_mapvaddr` for the same reason. A handler that re-derived the address
+ * from the provider would be a handler doing memory mapping with interrupts masked.
+ *
+ * **It is a record because it is read where its value is not already known, and 497 is why that
+ * sentence is here rather than "it is a record because it is a variable".** `start` writes it and the
+ * handler reads it *from another call*, which is the one shape the compiler cannot forward across;
+ * the handler also publishes it, so a mapping that silently failed is visible as a zero rather than as
+ * a handler that did nothing.
+ */
+static uint32_t g_timer_frame_va;
+static uint32_t g_timer_line_intid;
+
+static uint32_t g_timer_isr_calls;
+static uint32_t g_timer_isr_intid;
+static uint32_t g_timer_isr_agree;
+static uint32_t g_timer_isr_ctl;
+static uint32_t g_timer_isr_stat;
+static uint32_t g_timer_isr_ctl_after;
+static uint32_t g_timer_isr_done;
+
+/*
+ * The handler registered for the frame's line with the payload's own registry, in the shape that
+ * registry takes: `typedef void (*entry_irq_client_t)( void * refCon, uint32_t intid )`
+ * (`entry_irq.c:184`), called from the dispatcher between the timer case and the spurious case.
+ *
+ * **It clears the device before it publishes anything, and that order is the step's safety
+ * property.** The frame's line is level-sensitive: the output stays asserted until the device's
+ * control word is written, so a handler that returned without masking the timer would be re-entered
+ * immediately and forever. The write is `CTRL |= IT_MASK`, which is the *device's* own clear - the
+ * frame drops its output the moment the mask bit is set - and it is the one thing this function must do
+ * even if every key below it were to be dropped. The read-back (`_isr_ctl_after`) is there because a
+ * write to a device with no clock behind it can vanish, and "the driver wrote the bit" and "the device
+ * took the bit" are different findings.
+ *
+ * The interrupt id is published because it is *not* known in advance which of the frame's two lines
+ * this machine asserts (`arch/boot/dts/msm8974.dtsi` gives the frame `interrupts = <0 8 0x4>, <0 7
+ * 0x4>`, and the driver registered for the first): `_isr_intid` is the machine's answer to a question
+ * the tree only describes. And it is held against the line the driver registered for
+ * (`_isr_agree`), which is the reading that separates "the dispatcher called this handler for the
+ * line it was registered under" from "some other line reached it".
+ *
+ * **`g_timer_line_intid` is read here and nowhere else, which is 497's rule and not an accident.**
+ * The first cut of this step wrote the variable in `start` and never read it anywhere - it is the
+ * registration's own input, and `entry_irq_register_client` was handed the local instead - and `nm`
+ * on the linked image shows no `g_timer_line_intid` at all: a store nothing reads is a store the
+ * compiler removes. The reader below is in a *different call* on a different stack, which is the one
+ * place the value is not already known, and the seven file-scope records of this step are checked by
+ * `tools/check_irq_routing.py`'s claim 8 for exactly this reason.
+ */
+static void
+msm8974_timer_isr( void * refCon, uint32_t intid )
+{
+    uint32_t ctl = 0u;
+
+    (void) refCon;
+
+    ++g_timer_isr_calls;
+    g_timer_isr_intid = intid;
+    g_timer_isr_agree = ( g_timer_line_intid == intid ) ? 1u : 0u;
+
+    if( g_timer_frame_va != 0u) {
+        ctl = *(volatile uint32_t *)(uintptr_t)( g_timer_frame_va + MSM8974_FRAME_CTRL_OFF );
+        g_timer_isr_ctl = ctl;
+        g_timer_isr_stat = ( ctl & MSM8974_FRAME_CTRL_IT_STAT ) ? 1u : 0u;
+        *(volatile uint32_t *)(uintptr_t)( g_timer_frame_va + MSM8974_FRAME_CTRL_OFF ) =
+            ctl | MSM8974_FRAME_CTRL_IT_MASK;
+        g_timer_isr_ctl_after =
+            *(volatile uint32_t *)(uintptr_t)( g_timer_frame_va + MSM8974_FRAME_CTRL_OFF );
+    }
+
+    g_timer_isr_done = 1u;
+
+    entry_live_write( "xnu_live_timerdrv_isr_calls", g_timer_isr_calls );
+    entry_live_write( "xnu_live_timerdrv_isr_intid", g_timer_isr_intid );
+    entry_live_write( "xnu_live_timerdrv_isr_agree", g_timer_isr_agree );
+    entry_live_write( "xnu_live_timerdrv_isr_ctl", g_timer_isr_ctl );
+    entry_live_write( "xnu_live_timerdrv_isr_stat", g_timer_isr_stat );
+    entry_live_write( "xnu_live_timerdrv_isr_ctl_after", g_timer_isr_ctl_after );
+    entry_live_write( "xnu_live_timerdrv_isr_done", g_timer_isr_done );
+}
+
 class MSM8974Timer : public IOService
 {
     OSDeclareDefaultStructors(MSM8974Timer);
@@ -346,6 +522,49 @@ MSM8974Timer::start( IOService * provider )
     uint32_t   tormc = 0u;
     uint64_t   armed_at = 0u;
     uint64_t   due = 0u;
+    /* 498 */
+    OSData   * intr = 0;
+    uint32_t   dt_cells = 0u;
+    uint32_t   dt_type = 0u;
+    uint32_t   dt_num = 0u;
+    uint32_t   dt_trig = 0u;
+    uint32_t   line = 0u;
+    uint32_t   line_rule = 0u;
+    uint32_t   line_parent = 0u;
+    bool       osmap = false;
+    OSArray  * osmap_specs = 0;
+    OSArray  * osmap_ctrlrs = 0;
+    uint32_t   osmap_n = 0u;
+    uint32_t   osmap_w0 = 0u;
+    uint32_t   osmap_w1 = 0u;
+    uint32_t   osmap_w2 = 0u;
+    uint32_t   osmap_same = 0u;
+    uint32_t   osmap_ph = 0u;
+    uint32_t   osmap_ph_agree = 0u;
+    IOMemoryDescriptor * framerange = 0;
+    IOMemoryMap * framemap = 0;
+    uint32_t   frame_objkind = 0u;
+    uint32_t   frame_phys = 0u;
+    uint32_t   frame_len = 0u;
+    uint32_t   frame_va = 0u;
+    uint32_t   frame_freq = 0u;
+    uint32_t   cnt_lo_a = 0u;
+    uint32_t   cnt_hi_a = 0u;
+    uint32_t   cnt_lo_b = 0u;
+    uint32_t   cnt_hi_b = 0u;
+    uint64_t   frame_cnt_a = 0u;
+    uint64_t   frame_cnt_b = 0u;
+    uint64_t   frame_mac_a = 0u;
+    uint64_t   frame_mac_b = 0u;
+    uint32_t   frame_cnt_d = 0u;
+    uint32_t   frame_mac_d = 0u;
+    uint32_t   frame_slack = 0u;
+    uint32_t   frame_rate_ok = 0u;
+    uint32_t   frame_ctl = 0u;
+    uint32_t   frame_ctl_en = 0u;
+    uint32_t   frame_ctl_mask = 0u;
+    uint32_t   frame_ctl_stat = 0u;
+    uint32_t   line_cli_rc = 0u;
 
     if( !super::start( provider )) return( false );
     if( provider == 0) return( false );
@@ -620,6 +839,309 @@ MSM8974Timer::start( IOService * provider )
     entry_live_write( "xnu_live_timerdrv_arm_hi", (uint32_t)( armed_at >> 32 ));
     entry_live_write( "xnu_live_timerdrv_due_lo", (uint32_t) due );
     entry_live_write( "xnu_live_timerdrv_due_hi", (uint32_t)( due >> 32 ));
+
+    /* ---- 498: the frame, and the line the tree names for it -----------------------------------
+     *
+     * 492-497 answered "which line does a driver own" with a line the driver raises itself: SGI 0,
+     * pended by a write to `GICD_SGIR` in `MSM8974GIC::start`. This step is the same question asked of
+     * a **device**, and the device is the one this driver already matched: the timer's frame.
+     *
+     * Where the frame is, and why 494 read a zero
+     * -------------------------------------------
+     * 494 mapped this node's `reg[0]` - `0xf9020000` - and read one word out of it: `_rd0 = 0`. The
+     * node's `reg` has three `{address, size}` entries (`_regwords = 6`), and the block that reads
+     * zero is the *first* of them. The device's own tree says what the other two are:
+     *
+     *     arch/arm/boot/dts/msm8974.dtsi:153-167
+     *       timer@f9020000 {                      <- the node this driver matched; reg 0xf9020000
+     *           compatible = "arm,armv7-timer-mem";
+     *           reg = <0xf9020000 0x1000>;
+     *           clock-frequency = <19200000>;
+     *           frame@f9021000 {
+     *               frame-number = <0>;
+     *               interrupts = <0 8 0x4>, <0 7 0x4>;
+     *               reg = <0xf9021000 0x1000>, <0xf9022000 0x1000>;
+     *           };
+     *       };
+     *
+     * and the device's own kernel reads both of a frame's registers and its line out of the *frame*:
+     * `timer_base = of_iomap(frame, 0)` (`arch/arm/kernel/arch_timer.c:623`) and `arch_timer_spi =
+     * irq_of_parse_and_map(frame, 0)` (`:629`). So `0xf9020000` is a container with no registers of
+     * its own - which is what a stored zero looks like when it is read - and the timer is one page up,
+     * at `0xf9021000`, where the tree puts the `interrupts`. **That is 494's owed second definition,
+     * and it is structural rather than numerical**: the property that says this block is a device
+     * (`interrupts`) is on the frame, one `reg` entry away from the block that read zero.
+     *
+     * The line, and the rule that turns the tree's cells into it
+     * --------------------------------------------------------
+     * The tree's frame declares `interrupts = <0 8 0x4>, <0 7 0x4>`, and the binding - copied into
+     * this repository by the same kernel - says of a frame: "interrupts : Interrupt list for physical
+     * and virtual timers in that order" (`Documentation/devicetree/bindings/arm/arch_timer.txt`). So
+     * the first specifier is the **physical** timer's line and the second is the virtual timer's, and
+     * the device's kernel takes `index 0` for the timer it uses. `MSM8974Timer` takes the same one.
+     *
+     * The three cells are `<type number trigger>` because the tree's controller declares
+     * `#interrupt-cells = <3>` (`stage90_main.c`'s `/interrupt-controller`), and the type is what the
+     * number means: `0` is a shared peripheral interrupt, whose GIC interrupt id is `32 + number`, and
+     * `1` is a private one, whose id *is* the number. So `<0 8 0x4>` is **intid 40**, level-high. The
+     * rule is published as `_line_rule` beside the number it produced, because "8" and "40" are both
+     * defensible-looking readings of that property and only one of them is this machine's.
+     *
+     * Two readings of one property, and the one that is Apple's
+     * -------------------------------------------------------
+     * The driver reads the property itself, and then asks the kernel's own device-tree code to read
+     * it: `IODTMapInterrupts` (`IODeviceTreeSupport.cpp:790`) walks `interrupts` through
+     * `IODTFindInterruptParent` (`:467`) - which resolves the `interrupt-parent` phandle this step
+     * adds to the tree - files the specifier under `IOInterruptSpecifiers` and the *controller's name*
+     * under `IOInterruptControllers`, where the name is `IOInterruptController%08X` built from the
+     * **controller node's phandle** (`IODTInterruptControllerName`, `:489-501`). That last part is a
+     * property of the tree the OS itself reads back to us, so `_osmap_ph` is the OS's answer to "which
+     * node answers this line's interrupts", and `_osmap_ph_agree` is that answer held against the
+     * phandle `interrupt-parent` names. A tree whose two halves disagree about which controller owns
+     * the timer is a tree where every other reading below is a reading of the wrong contract.
+     *
+     * **The phandle's *key* is `AAPL,phandle`, and the first 498 run is where that was learned.** The
+     * tree this step first shipped spelled the property `phandle` - Linux's spelling, and the one the
+     * device's own `msm8974.dtsi` uses - while the plane reads it under
+     * `gIODTPHandleKey = OSSymbol::withCStringNoCopy("AAPL,phandle")` (`:137-138`). `AddPHandle`
+     * (`:422-431`) therefore registered nothing, `FindPHandle` (`:434-447`) answered 0, and the OS's
+     * own publication walk (`:221-225` - it maps *every* node that has an `interrupts` property,
+     * which is what made this path reachable for the first time) called `IODTGetICellCounts(0, ...)`
+     * and aborted on a vtable load from address 0 at `IODTGetICellCounts+8`. The step's own comment
+     * asserted the pair `#interrupt-cells` + `phandle`; the pair is right and the *spelling* was
+     * wrong, which is why `tools/check_timer_line.py` now derives the key from Apple's source rather
+     * than reading it out of ours.
+     *
+     * **And the OS's route stops here, which is why the line is registered with the payload's registry
+     * instead - and the reason is a hang, not a preference.** `IOService::registerInterrupt`
+     * (`IOService.cpp:6337`) is `lookupInterrupt` then the controller's `registerInterrupt`, and
+     * `lookupInterrupt`'s second step is `getPlatform()->lookUpInterruptController(name)`
+     * (`IOService.cpp:6290`). That function is
+     *
+     *     IOPlatformExpert::lookUpInterruptController(OSSymbol * name)          // :379-397
+     *     {   IOLockLock(gIOInterruptControllersLock);
+     *         while (1) {
+     *             object = gIOInterruptControllers->getObject(name);
+     *             if (object != 0) break;
+     *             IOLockSleep(gIOInterruptControllersLock, gIOInterruptControllers, THREAD_UNINT);
+     *         }   ... }
+     *
+     * - a sleep that only `registerInterruptController` (`:354-363`) can wake, and the only caller of
+     * *that* in the whole tree is `IOCPU.cpp:783`, inside the CPU interrupt controller's own
+     * initialiser. This image instantiates no CPU driver and registers no controller (405 measured the
+     * consequence of the first), so `gIOInterruptControllers` is empty and **every call to
+     * `IOService::registerInterrupt` on this machine sleeps forever on the calling thread** - before
+     * `IOCPUInterruptController::registerInterrupt` and its `thread_block` are ever reached. 496 read
+     * the *CPU controller's* block out of the tree and called the route unusable; this step's finding
+     * is that the block is one layer earlier and unconditional, so no driver may call it at all.
+     * `tools/check_timer_line.py` refuses a build in which any of this image's sources calls it.
+     *
+     * The result is the registration this driver does make: `entry_irq_register_client`, the payload's
+     * own registry, which is 496's mechanism and the only interrupt-registration mechanism this
+     * machine has.
+     *
+     * What it reads, and what it does not write
+     * -----------------------------------------
+     * The frame is mapped through the same route as 494's `reg[0]` - the OS's own resolution, then
+     * `map( kIOMapAnywhere )` - and three things are read out of it: the frame's own frequency
+     * register, its 64-bit count twice with `IODelay( 1000 )` between, and its control word. Nothing
+     * is written: the line is not enabled at the distributor and the timer is not armed, so this step
+     * cannot raise an interrupt the machine has to survive, and the device is silent throughout.
+     * Arming it is the next step's business and it will need the distributor's enable, its target and
+     * its priority - three registers whose addresses are all derived from the intid.
+     *
+     * The frequency is a **third definition** of 19.2 MHz and it is read as a register: the tree says
+     * 19200000 (`_freq`), the CPU says it in `CNTFRQ` (`_cntfrq`), and the frame says it in its own
+     * `FREQ` register (`_frame_freq`). 492 compared the first two and said in its record that the
+     * third did not exist; it exists and this is it.
+     *
+     * The rate is *measured* rather than declared: the frame's count delta across a one-millisecond
+     * busy wait is held against `mach_absolute_time()`'s delta over the same window, and the two are
+     * the same counter class at the same 19.2 MHz. The tolerance is derived from a measured register
+     * read (`_frame_slack` = four of them, the number of frame reads inside the window) rather than
+     * chosen: the frame's window is *inside* the kernel clock's window by construction, so a correct
+     * rate gives `0 <= mac_d - cnt_d <= slack`, and a frame running at any other rate misses by the
+     * ratio - a 32 kHz frame would answer `cnt_d` ~= 32 against a `mac_d` of ~19200.
+     */
+    frame_va = 0u;
+
+    intr = OSDynamicCast( OSData, provider->getProperty( "interrupts" ));
+    if( intr != 0) {
+        const unsigned char * ib = (const unsigned char *) intr->getBytesNoCopy();
+        dt_cells = intr->getLength() / 4u;
+        if( ib != 0 && dt_cells >= 3u) {
+            dt_type = (uint32_t)ib[0] | ((uint32_t)ib[1]<<8) | ((uint32_t)ib[2]<<16) | ((uint32_t)ib[3]<<24);
+            dt_num  = (uint32_t)ib[4] | ((uint32_t)ib[5]<<8) | ((uint32_t)ib[6]<<16) | ((uint32_t)ib[7]<<24);
+            dt_trig = (uint32_t)ib[8] | ((uint32_t)ib[9]<<8) | ((uint32_t)ib[10]<<16) | ((uint32_t)ib[11]<<24);
+            if( dt_type == MSM8974_INTR_TYPE_SPI ) {
+                line = dt_num + MSM8974_GIC_SPI_BASE;
+                line_rule = 1u;
+            } else if( dt_type == MSM8974_INTR_TYPE_PPI ) {
+                line = dt_num;
+                line_rule = 2u;
+            }
+        }
+    }
+    /* The phandle `interrupt-parent` names, read the way the plane produces it: an `OSData` of one
+     * word. It is the left-hand side of `_osmap_ph_agree` and the reason the two numbers are read
+     * separately rather than assumed equal (a phandle is written twice by construction). */
+    {
+        OSData * ip = OSDynamicCast( OSData, provider->getProperty( "interrupt-parent" ));
+        if( ip != 0 && ip->getLength() >= 4u) {
+            const unsigned char * pb = (const unsigned char *) ip->getBytesNoCopy();
+            if( pb != 0)
+                line_parent = (uint32_t)pb[0] | ((uint32_t)pb[1]<<8) | ((uint32_t)pb[2]<<16) |
+                              ((uint32_t)pb[3]<<24);
+        }
+    }
+
+    osmap = IODTMapInterrupts( provider );
+    osmap_specs  = OSDynamicCast( OSArray, provider->getProperty( gIOInterruptSpecifiersKey ));
+    osmap_ctrlrs = OSDynamicCast( OSArray, provider->getProperty( gIOInterruptControllersKey ));
+    if( osmap_specs != 0) {
+        osmap_n = osmap_specs->getCount();
+        OSData * s0 = OSDynamicCast( OSData, osmap_specs->getObject( 0 ));
+        if( s0 != 0 && s0->getLength() >= 12u) {
+            const unsigned char * sb = (const unsigned char *) s0->getBytesNoCopy();
+            if( sb != 0) {
+                osmap_w0 = (uint32_t)sb[0] | ((uint32_t)sb[1]<<8) | ((uint32_t)sb[2]<<16) | ((uint32_t)sb[3]<<24);
+                osmap_w1 = (uint32_t)sb[4] | ((uint32_t)sb[5]<<8) | ((uint32_t)sb[6]<<16) | ((uint32_t)sb[7]<<24);
+                osmap_w2 = (uint32_t)sb[8] | ((uint32_t)sb[9]<<8) | ((uint32_t)sb[10]<<16) | ((uint32_t)sb[11]<<24);
+                if( osmap_w0 == dt_type && osmap_w1 == dt_num && osmap_w2 == dt_trig)
+                    osmap_same = 1u;
+            }
+        }
+    }
+    if( osmap_ctrlrs != 0) {
+        OSSymbol * cn = OSDynamicCast( OSSymbol, osmap_ctrlrs->getObject( 0 ));
+        if( cn != 0) {
+            const char * cs = cn->getCStringNoCopy();
+            /* The name the OS built is `IOInterruptController%08X`; the eight trailing hex digits are
+             * the controller node's phandle, so they are read back out of the OS's own string rather
+             * than out of the tree. */
+            if( cs != 0) {
+                uint32_t v = 0u;
+                uint32_t seen = 0u;
+                for( uint32_t i = 0; cs[i] != 0 && i < 64u; i++ ) {
+                    uint32_t d;
+                    if( cs[i] >= '0' && cs[i] <= '9')      d = (uint32_t)(cs[i] - '0');
+                    else if( cs[i] >= 'A' && cs[i] <= 'F')  d = (uint32_t)(cs[i] - 'A') + 10u;
+                    else if( cs[i] >= 'a' && cs[i] <= 'f')  d = (uint32_t)(cs[i] - 'a') + 10u;
+                    else { v = 0u; seen = 0u; continue; }
+                    v = (v << 4) | d;
+                    seen++;
+                }
+                if( seen >= 8u)
+                    osmap_ph = v;
+            }
+        }
+    }
+    if( line_parent != 0u && osmap_ph == line_parent)
+        osmap_ph_agree = 1u;
+
+    if( devmem != 0 && devcount > MSM8974_TIMER_FRAME_ENTRY) {
+        OSObject * fentry = devmem->getObject( MSM8974_TIMER_FRAME_ENTRY );
+        framerange = OSDynamicCast( IOMemoryDescriptor, fentry );
+        if( OSDynamicCast( IODeviceMemory, fentry ) != 0)      frame_objkind = 1u;
+        else if( framerange != 0)                              frame_objkind = 2u;
+        if( framerange != 0) {
+            IOByteCount flen = 0u;
+            IOPhysicalAddress fphys = framerange->getPhysicalSegment( 0u, &flen, kIOMemoryMapperNone );
+            frame_phys = (uint32_t) fphys;
+            frame_len  = (uint32_t) flen;
+            framemap = framerange->map( kIOMapAnywhere );
+            if( framemap != 0) {
+                frame_va = (uint32_t)(uintptr_t) framemap->getVirtualAddress();
+                g_timer_frame_va = frame_va;
+                if( frame_va != 0u) {
+                    uint64_t t0, t1;
+                    frame_freq = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_FREQ_OFF );
+                    /* The cost of one register read, measured here so that the rate comparison's
+                     * tolerance is this machine's own number rather than a chosen percentage. */
+                    t0 = mach_absolute_time();
+                    (void) *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_LOW_OFF );
+                    t1 = mach_absolute_time();
+                    frame_slack = 4u * (uint32_t)( t1 - t0 );
+                    frame_mac_a = mach_absolute_time();
+                    cnt_lo_a = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_LOW_OFF );
+                    cnt_hi_a = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_HIGH_OFF );
+                    frame_cnt_a = ((uint64_t) cnt_hi_a << 32) | (uint64_t) cnt_lo_a;
+                    IODelay( 1000u );
+                    cnt_lo_b = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_LOW_OFF );
+                    cnt_hi_b = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_HIGH_OFF );
+                    frame_cnt_b = ((uint64_t) cnt_hi_b << 32) | (uint64_t) cnt_lo_b;
+                    frame_mac_b = mach_absolute_time();
+                    frame_cnt_d = (uint32_t)( frame_cnt_b - frame_cnt_a );
+                    frame_mac_d = (uint32_t)( frame_mac_b - frame_mac_a );
+                    if( frame_mac_d >= frame_cnt_d && ( frame_mac_d - frame_cnt_d ) <= frame_slack)
+                        frame_rate_ok = 1u;
+                    frame_ctl = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CTRL_OFF );
+                    frame_ctl_en   = ( frame_ctl & MSM8974_FRAME_CTRL_ENABLE  ) ? 1u : 0u;
+                    frame_ctl_mask = ( frame_ctl & MSM8974_FRAME_CTRL_IT_MASK ) ? 1u : 0u;
+                    frame_ctl_stat = ( frame_ctl & MSM8974_FRAME_CTRL_IT_STAT ) ? 1u : 0u;
+                }
+            }
+        }
+    }
+
+    entry_live_write( "xnu_live_timerdrv_line_cells",  dt_cells );
+    entry_live_write( "xnu_live_timerdrv_line_type",   dt_type );
+    entry_live_write( "xnu_live_timerdrv_line_num",    dt_num );
+    entry_live_write( "xnu_live_timerdrv_line_trig",   dt_trig );
+    entry_live_write( "xnu_live_timerdrv_line_rule",   line_rule );
+    entry_live_write( "xnu_live_timerdrv_line_intid",  line );
+    entry_live_write( "xnu_live_timerdrv_line_parent", line_parent );
+    entry_live_write( "xnu_live_timerdrv_osmap_ok",    osmap ? 1u : 0u );
+    entry_live_write( "xnu_live_timerdrv_osmap_n",     osmap_n );
+    entry_live_write( "xnu_live_timerdrv_osmap_w0",    osmap_w0 );
+    entry_live_write( "xnu_live_timerdrv_osmap_w1",    osmap_w1 );
+    entry_live_write( "xnu_live_timerdrv_osmap_w2",    osmap_w2 );
+    entry_live_write( "xnu_live_timerdrv_osmap_same",  osmap_same );
+    entry_live_write( "xnu_live_timerdrv_osmap_ph",    osmap_ph );
+    entry_live_write( "xnu_live_timerdrv_osmap_ph_agree", osmap_ph_agree );
+    entry_live_write( "xnu_live_timerdrv_frame_objkind", frame_objkind );
+    entry_live_write( "xnu_live_timerdrv_frame_phys",  frame_phys );
+    entry_live_write( "xnu_live_timerdrv_frame_len",   frame_len );
+    entry_live_write( "xnu_live_timerdrv_frame_map",   (uint32_t)(uintptr_t) framemap );
+    entry_live_write( "xnu_live_timerdrv_frame_va",    frame_va );
+    entry_live_write( "xnu_live_timerdrv_frame_freq",  frame_freq );
+    /* The other two definitions of the same rate, both already in this record: the tree's
+     * (`_freq`) and the CPU's (`_cntfrq`). Held against the frame's here so that one key answers
+     * "do all three agree" rather than three keys that a reader has to compare by hand. */
+    entry_live_write( "xnu_live_timerdrv_frame_freq_agree",
+                      ( frame_freq != 0u && frame_freq == freq_hz && frame_freq == cntfrq ) ? 1u : 0u );
+    entry_live_write( "xnu_live_timerdrv_frame_cnt_lo", cnt_lo_a );
+    entry_live_write( "xnu_live_timerdrv_frame_cnt_hi", cnt_hi_a );
+    entry_live_write( "xnu_live_timerdrv_frame_cnt_d",  frame_cnt_d );
+    entry_live_write( "xnu_live_timerdrv_frame_mac_d",  frame_mac_d );
+    entry_live_write( "xnu_live_timerdrv_frame_slack",  frame_slack );
+    entry_live_write( "xnu_live_timerdrv_frame_rate_ok", frame_rate_ok );
+    entry_live_write( "xnu_live_timerdrv_frame_ctl",    frame_ctl );
+    entry_live_write( "xnu_live_timerdrv_frame_ctl_en", frame_ctl_en );
+    entry_live_write( "xnu_live_timerdrv_frame_ctl_mask", frame_ctl_mask );
+    entry_live_write( "xnu_live_timerdrv_frame_ctl_stat", frame_ctl_stat );
+
+    /* The handler's own keys are published as zeroes *before* the registration, for 495's reason: a
+     * key that only exists after the handler runs would make "the line never fired" and "the driver
+     * never registered" the same silence. */
+    entry_live_write( "xnu_live_timerdrv_isr", (uint32_t)(uintptr_t) &msm8974_timer_isr );
+    entry_live_write( "xnu_live_timerdrv_isr_calls", 0u );
+    entry_live_write( "xnu_live_timerdrv_isr_intid", 0u );
+    entry_live_write( "xnu_live_timerdrv_isr_agree", 0u );
+    entry_live_write( "xnu_live_timerdrv_isr_ctl", 0u );
+    entry_live_write( "xnu_live_timerdrv_isr_stat", 0u );
+    entry_live_write( "xnu_live_timerdrv_isr_ctl_after", 0u );
+    entry_live_write( "xnu_live_timerdrv_isr_done", 0u );
+
+    /* The line is registered only if the tree gave one, and the registration's return is published
+     * either way: `_line_cli_rc` of 1 is the payload's registry taking the handler, 0 is it refusing
+     * (its per-slot cap or its full table) - and with `_line_intid` of 0 beside it, "the tree had no
+     * interrupts property" is a third, distinct record. */
+    if( line != 0u) {
+        g_timer_line_intid = line;
+        line_cli_rc = entry_irq_register_client( line, (uint32_t)(uintptr_t) &msm8974_timer_isr, 0u );
+    }
+    entry_live_write( "xnu_live_timerdrv_line_cli_rc", line_cli_rc );
 
     return( true );
 }

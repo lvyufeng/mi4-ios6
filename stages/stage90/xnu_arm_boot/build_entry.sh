@@ -28074,6 +28074,23 @@ run python3 "$REPO_ROOT/tools/check_irq_routing.py" --image "$OUT/xnu_arm_entry.
 run python3 "$REPO_ROOT/tools/check_irq_routing.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
     || exit 1
 
+# **498's eight claims, about a device and the line it owns.** The step gives `/timer` an
+# `interrupt-parent` and the frame's `interrupts`, and hands the frame's line to
+# `entry_irq_register_client` rather than to `IOService::registerInterrupt`. Two of the eight claims
+# compare this repository's two halves of one fact: the offsets the driver writes against the device's
+# own kernel's (`QTIMER_*`/`ARCH_TIMER_CTRL_*`, `arch_timer.c:60-67`), and our `/timer`'s line and the
+# frame's address against the device's own tree's (`msm8974.dtsi`'s `frame@f9021000`). Neither has any
+# authority inside our tree - Apple's XNU has no driver for this block - so the comparison is the whole
+# of the evidence, and a copy that drifts from the device's is a copy nobody would notice. The rest are
+# shape: the intid is `dt_num + MSM8974_GIC_SPI_BASE` with no constant beside it, the handler masks the
+# frame before it publishes and before it returns, every register access is `frame_va + offset`, the
+# record carries a reader for each of the driver's answers, and no file in this image calls the one
+# registration function that sleeps forever here (`IOPlatformExpert::lookUpInterruptController:391`).
+run python3 "$REPO_ROOT/tools/check_timer_line.py" --image "$OUT/xnu_arm_entry.elf" --verbose \
+    || exit 1
+run python3 "$REPO_ROOT/tools/check_timer_line.py" --image "$OUT/xnu_arm_entry.elf" --selftest \
+    || exit 1
+
 # **484's six claims, about the instrument rather than about the machine.** 483's census counted the
 # armings of the decrementer; this step names their caller, and every way that can go wrong is a way
 # this check can see before a device is touched: a wrapper that passes a source number no reader can map

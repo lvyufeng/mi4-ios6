@@ -1546,12 +1546,25 @@ def claim_entry_class(facts, failures, notes):
         else:
             notes.append("`%s` reads the OS's entry as a `%s`, and the array holds `%s` (whose chain "
                          "is %s)" % (d["file"], casting["cast_to"], built, " -> ".join(chain)))
-        if not re.search(r'xnu_live_\w+_objkind', d["source"]):
+        # **The two keys below are matched by suffix against the driver's own key set, and 498 is the
+        # step that made the difference matter.** The clause was a regex - `xnu_live_\w+_objkind` -
+        # which `\w+` lets a *longer* key satisfy: 498's new `xnu_live_timerdrv_frame_objkind` is the
+        # kind of a *different* entry (the timer frame the driver mapped, not the array entry it cast),
+        # so removing the publication of the entry's kind stopped refusing
+        # `the_driver_stops_publishing_the_entry_kind` while the check went on printing `ok`. That is
+        # 269/272/297/496's family - a needle that is a claim about the file's bytes - in its third
+        # shape: here the needle matched, and matched something else. `live_keys` splits a key at the
+        # first underscore after its name, so a suffix is exact and a key that merely ends in the same
+        # word is a different suffix.
+        suffixes = set()
+        for _suffixes in live_keys(d["source"]).values():
+            suffixes |= _suffixes
+        if "objkind" not in suffixes:
             failures.append("`%s` does not publish the kind of object it found in the OS's array: "
                             "'the OS resolved nothing' and 'this reader's cast answered 0' are the two "
                             "different findings that produced the same zero before 493's second run"
                             % d["file"])
-        if not re.search(r'xnu_live_\w+_objlen', d["source"]):
+        if "objlen" not in suffixes:
             failures.append("`%s` does not publish the entry's own `getLength()`: it is the reading "
                             "that separates a well-formed descriptor (`_objlen` = the node's first "
                             "size) from a segment walk that returned nothing (both `_phys0` and "
