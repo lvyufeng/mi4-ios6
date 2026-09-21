@@ -7,13 +7,15 @@ Why this is a check and not a comment
 Experiment 479 makes the RAM disk's first instructions a `svc #0x80` asking for Unix syscall 20, and
 it puts `--wrap=getpid`'s wrapper in that syscall's slot; experiment 480 adds a second `svc` asking
 for 197, with `--wrap=mmap`'s wrapper in *that* slot and six words of arguments marshalled into it by
-the armv7k munger; and experiment 503 adds two more asking for 230, whose slot holds `--wrap=poll`'s
-wrapper. Three things can be true of the *image* while the device still runs the program
-`entry_ramdisk.s` describes:
+the armv7k munger; experiment 503 adds two more asking for 230, whose slot holds `--wrap=poll`'s
+wrapper; and experiment 504 adds the pair that reach a driver - three words for 3 (`read`) and three
+for 5 (`open`), each in its own slot. Three things can be true of the *image* while the device still
+runs the program `entry_ramdisk.s` describes:
 
   - `--wrap` rewrites an *address reference* exactly as it rewrites a call - 458 read that fact out of
     `cons_ops[1].putc` and 463 out of `IOService::getState`'s name - so `bsd/kern/init_sysent.c`'s
-    initialiser is what has to end up holding `__wrap_getpid`, `__wrap_mmap` and `__wrap_poll`. If any
+    initialiser is what has to end up holding `__wrap_getpid`, `__wrap_mmap`, `__wrap_poll`,
+    `__wrap_read` and `__wrap_open`. If any
     slot holds the function instead, the wrapper is never entered, no record is written, and a run in
     which process 1 calls that syscall looks exactly like a run in which the instrument is not there.
     Nothing else in the build can see that: the symbol is defined either way, the undefined-symbol
@@ -21,8 +23,11 @@ wrapper. Three things can be true of the *image* while the device still runs the
     which is a statement about a reference existing, not about which address it holds. For `mmap` and
     `poll` the distinction is sharper than for `getpid`: both are ordinary functions with callers, so
     an image with the wrapper linked and *not* in the slot is byte-for-byte a working kernel whose
-    fixture silently says nothing.
-  - and the *index* is a second, independent claim: the fixture puts 20, 197 and 230 in `r12`, `fleh_swi`
+    fixture silently says nothing. 504's two are of that sharper kind twice over, and they add a
+    consequence none of the first three has: the fixture's two `open`s are a *pair*, so a slot without
+    its wrapper loses the control as well as the reading.
+  - and the *index* is a second, independent claim: the fixture puts 20, 197, 230, 3 and 5 in `r12`,
+    `fleh_swi`
     routes a positive number to the unix path, and `arm_get_syscall_number` hands that same word to
     `sysent[code]`. A table whose stride or whose numbering is not the one this project believes would
     make the fixture call a different syscall than the one this step documents - silently, because
@@ -87,6 +92,8 @@ WRAPPED = [
     (20, "getpid"),         # 479
     (197, "mmap"),          # 480
     (230, "poll"),          # 503
+    (3, "read"),            # 504
+    (5, "open"),            # 504
 ]
 SYSCALL_INDEX, SYSCALL_NAME = WRAPPED[0]
 
@@ -127,6 +134,14 @@ WITNESSES = [
 MUNGERS = {
     197: "munge_wwwwwl",
     230: "munge_www",
+    # 504's two, and they are the same word for the same reason `poll`'s is: `read`'s three arguments
+    # (`int fd`, `user_addr_t cbuf`, `user_size_t nbyte`) and `open`'s (`user_addr_t path`, `int
+    # flags`, `int mode`) are all four bytes on this 32-bit target, so the munger copies r0..r2 and
+    # nothing else. **The claim they carry is that an *address* is one of the three**: the fixture's
+    # first `open` argument is the address of a string inside its own `__TEXT`, and the munger's shape
+    # is what decides that the number the fixture put in r0 is the number `copyinstr` will read from.
+    3: "munge_www",
+    5: "munge_www",
 }
 
 # `struct sysent` (`bsd/sys/sysent.h:45`) on this target, where the armv7k `#if` is on:
@@ -358,6 +373,8 @@ def main():
         offset = SYSCALL_INDEX * SYSENT_STRIDE
         mmap_offset = WRAPPED[1][0] * SYSENT_STRIDE   # 197's slot, 177 entries away
         poll_offset = WRAPPED[2][0] * SYSENT_STRIDE   # 230's slot, 33 entries past 197
+        read_offset = WRAPPED[3][0] * SYSENT_STRIDE   # 504: 3's slot, in the table's first words
+        open_offset = WRAPPED[4][0] * SYSENT_STRIDE   # 504: 5's slot, one entry on from it
         other = 24 * SYSENT_STRIDE         # another entry's slot, inside the checked span
         symbols = elf.symbols()
         wrapper = symbols["__wrap_" + SYSCALL_NAME]
@@ -366,6 +383,10 @@ def main():
         mmap_real = symbols[WRAPPED[1][1]]
         poll_wrapper = symbols["__wrap_" + WRAPPED[2][1]]
         poll_real = symbols[WRAPPED[2][1]]
+        read_wrapper = symbols["__wrap_" + WRAPPED[3][1]]
+        read_real = symbols[WRAPPED[3][1]]
+        open_wrapper = symbols["__wrap_" + WRAPPED[4][1]]
+        open_real = symbols[WRAPPED[4][1]]
 
         def word(state, where):
             return struct.unpack_from("<I", state["table"], where)[0]
@@ -416,6 +437,35 @@ def main():
             # working kernel calling `poll` with a timeout the fixture never asked for.
             put(state, poll_offset + MUNGER_WORD_OFFSET, symbols[MUNGERS[197]])
 
+        def the_real_read(state):
+            # 504's copy of the defect `the_real_mmap` and `the_real_poll` are about: an image whose
+            # slot holds `read` instead of its wrapper is a *working* kernel whose fixture reads the
+            # driver's bytes and publishes nothing - the log would hold no `xnu_live_read_*` key at
+            # all, which reads exactly like a read that never happened.
+            put(state, read_offset, read_real)
+
+        def the_real_open(state):
+            # And the same for `open`, with one more consequence than the read: the fixture makes two
+            # opens and one of them is the control, so a slot without its wrapper loses the *pair* -
+            # and a pair is the only thing that can say whether the first open's answer was a lookup.
+            put(state, open_offset, open_real)
+
+        def the_two_new_slots_swapped(state):
+            # The off-by-one this step is most exposed to: the fixture's `read` and `open` are adjacent
+            # in its program and 3 and 5 are adjacent in the table's first eight entries, so two
+            # `--wrap`s listed in the wrong order put each wrapper in the other's slot - every call is
+            # still dispatched and every record written, and both wrappers read a `uap` the other call
+            # filled.
+            put(state, read_offset, open_wrapper)
+            put(state, open_offset, read_wrapper)
+
+        def the_poll_wrapper_in_opens_slot(state):
+            # And the one no *shape* comparison could catch, because 230, 3 and 5 all name
+            # `munge_www`: `poll`'s wrapper reads three words of `uap` exactly as `open`'s does, so a
+            # slot holding it publishes `xnu_live_poll_*` keys for an open. The record set would be
+            # complete and every number in it about the wrong call.
+            put(state, open_offset, poll_wrapper)
+
         def one_entry_late(state):
             put(state, offset, 0)
             put(state, offset + SYSENT_STRIDE, wrapper)
@@ -440,6 +490,10 @@ def main():
             ("197's munger word zeroed", zero_the_munger),
             ("the wrapper in 197's munger word", the_wrapper_in_the_munger_slot),
             ("the six-argument munger in 230's slot", the_mmap_munger_in_polls_slot),
+            ("the real read in its slot", the_real_read),
+            ("the real open in its slot", the_real_open),
+            ("the read and open wrappers in each other's slot", the_two_new_slots_swapped),
+            ("the poll wrapper in the open slot", the_poll_wrapper_in_opens_slot),
             ("the wrapper one entry late", one_entry_late),
             ("entries 20 and 24 swapped", swapped_with_24),
             ("the table shifted by one word (any other stride)", shifted_one_word),

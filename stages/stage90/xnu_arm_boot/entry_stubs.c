@@ -4460,6 +4460,108 @@ void entry_note_poll(uint32_t caller, uint32_t fds, uint32_t nfds, uint32_t time
     g_poll_calls++;
 }
 
+/* Experiment 504, first half. One record per `open` from the wrapper in `entry_trace.c` - and there
+ * are two of them per boot, deliberately: the fixture opens `/dev/rmd0`, whose node `mdevadd` made
+ * before process 1 existed, and then `/dev/nosuch`, which no driver can have made a node for.
+ *
+ * **The pair is the reading and either half alone is not.** An `open` that returned a small
+ * non-negative number says a name resolved to a vnode and the vnode's driver claimed it - but a
+ * kernel whose `namei` answers everything, or a wrapper that published its own return, would say the
+ * same. The second call is the control: the *same* three arguments, the *same* syscall, and a name
+ * devfs's tree cannot contain, so the only difference between the two records is the path - and the
+ * run's two `error` words have to differ, one of them 0 and the other `ENOENT` = 2. XNU's own loader
+ * printed that same 2 three lines earlier for its own missing path, which is what makes it the
+ * expected value rather than a number chosen here.
+ *
+ * `path` is the *user address* the fixture passed, not the string: it is the address `adr` computed
+ * inside `__TEXT`, so the run's two path words are the two `adr` targets the host check decodes out of
+ * the same bytes, and reading the string here would be a second, unverified reading of it.
+ *
+ * Live-only for `entry_note_poll`'s reason: `load_init_program` runs after the epilogue, so an
+ * `xnu_entry_open_*` key could only ever publish its initial value.
+ */
+uint32_t g_open_calls;
+uint32_t g_open_over;
+
+void entry_note_open(uint32_t caller, uint32_t path, uint32_t flags, uint32_t mode,
+                     uint32_t error, uint32_t fd)
+{
+    if (g_open_calls < 4u) {
+        entry_live_write("xnu_live_open_seq", g_open_calls + 1u);
+        entry_live_write("xnu_live_open_caller", caller);
+        entry_live_write("xnu_live_open_path", path);
+        entry_live_write("xnu_live_open_flags", flags);
+        entry_live_write("xnu_live_open_mode", mode);
+        entry_live_write("xnu_live_open_error", error);
+        entry_live_write("xnu_live_open_fd", fd);
+    } else {
+        g_open_over++;
+        if ((g_open_over & (g_open_over - 1u)) == 0u)
+            entry_live_write("xnu_live_open_over", g_open_over);
+    }
+
+    g_open_calls++;
+}
+
+/* Experiment 504, second half. The one `read` - and the two words the wrapper reads out of the
+ * *buffer* either side of it, which are the step's whole object.
+ *
+ * **`word_before` and `word_after` are why this record is not just another syscall trace.** The
+ * fixture's buffer is the page 480's `mmap` returned and 480's own store wrote the page's address
+ * into (`str r0, [r0]`), so before the call the first word is a number this image knows - the mapping
+ * the kernel chose - and after it the word is whatever `mdevrw`'s `uiomove64` copied out of the RAM
+ * disk. That value is the *fixture's own* `MH_MAGIC`, because the RAM disk *is* this Mach-O: the same
+ * bytes the kernel loaded the program from. So the pair says a driver moved data, and the data says
+ * which driver moved it over which memory - and neither number could be produced by a wrapper that
+ * published only the call's return.
+ *
+ * `lo`/`hi` are the `retval` `read` wrote, which is a `user_ssize_t` and therefore two words
+ * (`arm_prepare_u32_syscall_return` copies both into `save_r0` and `save_r1`,
+ * `bsd/dev/arm/systemcalls.c:289-298`); the byte count is the low one, and publishing both is what
+ * keeps the width from being an assumption made here.
+ *
+ * **`copy_before`/`copy_after` are the two words' own status, and 504's first run is why they are
+ * here.** Run A's wrapper read the buffer with a plain C load (`out[0]`), the kernel took a data abort
+ * at that instruction, and because nothing had armed a recovery address the handler could not service
+ * it: `xnu_live_sleh_seen` ran to its cap of 64 at one repeated `pc`, `far = 0x00102000` - the
+ * fixture's own buffer - and the run has no `xnu_live_read_*` key at all, because the fault is *one
+ * instruction before* `__real_read` and the record is written after it. So the pair is published
+ * beside the words: **`0` means the kernel's own `copyin_word` read the word out of the user address
+ * and the word beside it is that read's value, and non-zero is the `EFAULT` it returned instead** - a
+ * record that cannot be written as a fault, because the tool that reads it is the kernel's own copy
+ * path and not a dereference. `word_before`/`word_after` keep `0xFFFFFFFF` = *not read* on that path,
+ * so "the buffer held 0xFFFFFFFF" and "the instrument could not read the buffer" stay two readings.
+ */
+uint32_t g_read_calls;
+uint32_t g_read_over;
+
+void entry_note_read(uint32_t caller, uint32_t fd, uint32_t buf, uint32_t nbytes,
+                     uint32_t error, uint32_t lo, uint32_t hi,
+                     uint32_t word_before, uint32_t word_after,
+                     uint32_t copy_before, uint32_t copy_after)
+{
+    if (g_read_calls < 4u) {
+        entry_live_write("xnu_live_read_seq", g_read_calls + 1u);
+        entry_live_write("xnu_live_read_caller", caller);
+        entry_live_write("xnu_live_read_fd", fd);
+        entry_live_write("xnu_live_read_buf", buf);
+        entry_live_write("xnu_live_read_nbytes", nbytes);
+        entry_live_write("xnu_live_read_error", error);
+        entry_live_write("xnu_live_read_ret_lo", lo);
+        entry_live_write("xnu_live_read_ret_hi", hi);
+        entry_live_write("xnu_live_read_word_before", word_before);
+        entry_live_write("xnu_live_read_word_after", word_after);
+        entry_live_write("xnu_live_read_copy_before", copy_before);
+        entry_live_write("xnu_live_read_copy_after", copy_after);
+    } else {
+        g_read_over++;
+        if ((g_read_over & (g_read_over - 1u)) == 0u)
+            entry_live_write("xnu_live_read_over", g_read_over);
+    }
+
+    g_read_calls++;
+}
+
 /* Experiment 456's probe, defined below its first caller; the declaration is here because
  * `entry_note_iolock` is where the reading is taken (see `entry_registry_probe`). */
 __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);

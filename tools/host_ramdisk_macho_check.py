@@ -52,6 +52,7 @@ REPO_ROOT = os.path.dirname(HERE)
 XNU = os.environ.get("XNU_TREE", os.path.join(REPO_ROOT, "external", "xnu-4570.1.46"))
 DEFAULT_ELF = os.path.join(REPO_ROOT, "out", "stage90", "xnu_arm_entry.elf")
 MMAN = os.path.join(XNU, "bsd/sys/mman.h")
+FCNTL = os.path.join(XNU, "bsd/sys/fcntl.h")
 
 PAGE = 0x1000
 
@@ -222,6 +223,90 @@ def syscall_poll():
     return number
 
 
+def syscall_three_words(audit, name):
+    """A syscall 504's program makes, from `syscalls.master`'s own line.
+
+    Both of this step's calls are three 4-byte arguments on this target -
+    `3 AUE_NULL ALL { user_ssize_t read(int fd, user_addr_t cbuf, user_size_t nbyte); }` and
+    `5 AUE_OPEN_RWTC ALL { int open(user_addr_t path, int flags, int mode) NO_SYSCALL_STUB; }` - so
+    both slots name `munge_www`, the same munger 503's `poll` has, and both wrappers in
+    `entry_trace.c` read three words of `uap`. That is a claim about the *prototype*, so it is read
+    here and not written down: a parameter list that grew a fourth argument, or an 8-byte one, would
+    move a register the fixture does not write and the run would show the wrong word in a key.
+
+    `read`'s **return** type is 64-bit (`user_ssize_t`), and that is deliberately not part of what this
+    function refuses: the munger is generated from the *argument* types alone, and the 64-bit return
+    has its own, separate consequence - `unix_syscall` writes `save_r1` as well as `save_r0` for it,
+    which is why the fixture keeps its page address in `r9` rather than in `r1`. The three arguments
+    are `int`, `user_addr_t` and `user_size_t`, four bytes each on this 32-bit kernel.
+    """
+    master = open(os.path.join(XNU, "bsd/kern/syscalls.master"), encoding="utf-8",
+                  errors="replace").read()
+    m = re.search(r"^(\d+)\s+%s\s+ALL\s+\{\s*\w+\s+%s\s*\(([^)]*)\)" % (re.escape(audit),
+                                                                        re.escape(name)),
+                  master, re.M)
+    if not m:
+        sys.exit(f"bsd/kern/syscalls.master no longer has an `{audit} ALL {{ ... {name}(...) }}` "
+                 f"line - the fixture's call cannot be checked against the master")
+    number = int(m.group(1))
+    if number <= 0:
+        sys.exit(f"syscalls.master puts {name} at {number}: with a non-positive number `fleh_swi` "
+                 f"routes it to the mach path, so the fixture would not be calling a BSD syscall")
+    args = m.group(2)
+    params = [q.strip() for q in args.split(",") if q.strip()]
+    if len(params) != 3 or "off_t" in args:
+        sys.exit(f"syscalls.master's {name} takes `{args}`, and the armv7k reading this check encodes "
+                 f"- three 4-byte arguments, so `munge_www` and r0..r2 - is derived from a three-word "
+                 f"prototype. A fourth argument, or an 8-byte one, would put an argument in a register "
+                 f"the fixture does not write")
+    return number
+
+
+def devfs_mount_point():
+    """Where devfs is mounted, from the line that mounts it.
+
+    `bsd/kern/bsd_init.c`'s `char mounthere[] = "/dev";` is the string `devfs_kernel_mount` is handed,
+    and it is the *prefix* of the path the fixture opens - so it is read here rather than written as
+    `/dev`, because a fixture whose prefix was right only by coincidence would still pass a check that
+    compared it against a literal in this file.
+    """
+    src = open(os.path.join(XNU, "bsd/kern/bsd_init.c"), encoding="utf-8", errors="replace").read()
+    m = re.search(r'char\s+mounthere\[\s*\]\s*=\s*"([^"]+)"', src)
+    if not m:
+        sys.exit("bsd/kern/bsd_init.c no longer has a `char mounthere[] = \"...\"` beside "
+                 "devfs_kernel_mount - the mount point the fixture's path is built on cannot be "
+                 "checked against the kernel's own source")
+    return m.group(1)
+
+
+def mdev_node_names():
+    """The two names `mdevadd` makes devfs nodes under, as `(block, char)`, from Apple's own call.
+
+    `bsd/dev/memdev.c` makes *two* nodes per memory device and the format string is the difference:
+    `devfs_make_node(..., DEVFS_BLOCK, ..., 0600, "md%d", devid)` and the same with `DEVFS_CHAR` and
+    `"rmd%d"`. The fixture opens the **character** one, and this function is where that choice is
+    checked against the file that made the node rather than against a comment: the name it opens has to
+    be the one the *character* format produces for the device the boot added, which the run's own log
+    line (`Added memory device md0/rmd0 ...`) is the other end of.
+
+    The minor is 0 and it is not written here: `mdevadd` is called with -1 from
+    `iokit/bsddev/IOKitBSDInit.cpp:447`, which assigns the first free id, and the boot has exactly one
+    memory device - so 0 is the *first* number the formats can produce, and a fixture that opened
+    `/dev/md1` would name a device this boot never made.
+    """
+    src = open(os.path.join(XNU, "bsd/dev/memdev.c"), encoding="utf-8", errors="replace").read()
+    found = {}
+    for m in re.finditer(r"DEVFS_(BLOCK|CHAR)\b(.*?);", src, re.S):
+        fmt = re.search(r'"([^"]*)"', m.group(2))
+        if fmt:
+            found[m.group(1)] = fmt.group(1)
+    if "BLOCK" not in found or "CHAR" not in found:
+        sys.exit("bsd/dev/memdev.c no longer has two `devfs_make_node` calls, one per DEVFS_BLOCK and "
+                 "DEVFS_CHAR - the node the fixture opens cannot be checked against the driver that "
+                 "makes it")
+    return found["BLOCK"] % 0, found["CHAR"] % 0
+
+
 def poll_timeouts(decoded):
     """The two timeouts the program asks for, as `(short_ms, long_ms)`, or `(None, None)`.
 
@@ -241,6 +326,42 @@ def poll_timeouts(decoded):
         else:
             out.append(None)
     return tuple(out)
+
+
+def read_length(decoded):
+    """The byte count 504's `read` asks for, or `None` when that word is not the `mov r2, #imm` it is.
+
+    Read out of the instruction stream for `poll_timeouts`' reason, one step further on: the number is
+    the fixture's own choice and its property is a *bound*, not a value - it has to be big enough for
+    the word the wrapper publishes and small enough to stay inside the page the buffer is - so the
+    clause that states the bound is in `check_program` and the value is read back here.
+    """
+    ins = decoded[READ_LEN_WORD]
+    if ins[0] == "mov" and len(ins[1]) == 3 and ins[1][0] == 2 and isinstance(ins[1][1], int):
+        return ins[1][1]
+    return None
+
+
+def dev_path_strings(blob, K):
+    """Every `/dev/...` NUL-terminated string in the RAM disk, as `[(offset, text), ...]`.
+
+    Found by scanning the bytes rather than by being told where they are, because that is what makes
+    the clause about them a measurement of the file: the fixture is *required* to contain exactly the
+    two paths its two `adr`s point at, and a third one - a path written somewhere a future step forgot -
+    would make the count wrong instead of being invisible.
+    """
+    prefix = (K["DEV_MOUNT"] + "/").encode()
+    out = []
+    at = 0
+    while True:
+        at = blob.find(prefix, at)
+        if at < 0:
+            return out
+        end = blob.find(b"\0", at)
+        if end < 0:
+            return out
+        out.append((at, blob[at:end].decode("latin-1")))
+        at += 1
 
 
 def arm_pgshift():
@@ -286,15 +407,21 @@ def sign24(word):
 # How many instructions the program at the entry point is. `entry_ramdisk.s` asserts the same length
 # in an `.if` over its own labels, so the two are a pair: a program that grew would fail to assemble
 # and a program that shrank would fail here.
-PROGRAM_WORDS = 37
+PROGRAM_WORDS = 52
 
 # Where the two `poll` calls' timeouts are, and where the two calls start. The word numbers are the
 # program's own layout - `entry_ramdisk.s`'s listing counts the same offsets - and they are named here
 # rather than written into the table below because three separate clauses read them: the expectation
 # list, the ratio property, and the mutation that breaks the ratio.
-POLL_SHORT_WORD, POLL_LONG_WORD = 23, 28
-POLL_CALL_WORDS = (21, 26)          # the first word of each ask: `mov r0, #0`
-SPIN_WORD, FAILED_WORD = 31, 36     # the loop's first word, and the `udf #1` every check shares
+POLL_SHORT_WORD, POLL_LONG_WORD = 24, 29
+POLL_CALL_WORDS = (22, 27)          # the first word of each ask: `mov r0, #0`
+SPIN_WORD, FAILED_WORD = 46, 51     # the loop's first word, and the `udf #1` every check shares
+
+# The words 504 adds, named for the same reason: `PAGE_WORD` keeps 480's mapping in r9, the two `adr`s
+# are the paths the two opens pass, and the read's three words are the call the driver answers.
+PAGE_WORD = 21                      # `mov r9, r0` - the page, kept across the calls below
+OPEN_PATH_WORD, CONTROL_PATH_WORD = 32, 41   # `adr r0, path_rmd0` / `adr r0, path_missing`
+READ_FD_WORD, READ_LEN_WORD, READ_CALL_WORD = 37, 38, 39
 
 # The ARM condition codes the program's branches use, by name: `bne`, `bcs` and `b`. The names are what
 # the *reading* rests on for one of them - `unix_syscall`'s error convention is the carry bit
@@ -367,6 +494,23 @@ def decode_arm(word, index):
     if word & 0x0FF00FF0 == 0x01500000:                       # cmp rn, rm
         return ("cmp_r", ((word >> 16) & 0xF, word & 0xF))
 
+    if word & 0x0FEF0FF0 == 0x01A00000:                       # mov rd, rm
+        # The register form, which 504 is the first step to need: `mov r9, r0` keeps 480's page
+        # across the calls below, and `mov r1, r9` hands it to `read` as the buffer. The encoding is a
+        # data-processing word with opcode 1101 and **`Rn` zero**, so the mask fixes bits 19:16 to zero
+        # as well as the opcode, Rd and Rm - and leaves S and the shift bits out, so `movs rd, rm` or a
+        # shifted `mov` is not this shape.
+        return ("mov_r", ((word >> 12) & 0xF, word & 0xF))
+
+    if word & 0x0FFF0000 == 0x028F0000 or word & 0x0FFF0000 == 0x024F0000:
+        # `adr rd, label`, which the assembler writes as `add rd, pc, #imm` (or `sub` for a target
+        # behind it). **This is the one instruction in the program whose operand is an *address in the
+        # file***, so it is returned as the signed byte offset the encoding holds and the caller
+        # compares it against where the path strings really are - not against a number here.
+        value, rot = imm12(word)
+        return ("adr", ((word >> 12) & 0xF, value, rot,
+                        1 if word & 0x0FFF0000 == 0x028F0000 else -1))
+
     if word & 0x0FB00000 == 0x05900000 or word & 0x0FB00000 == 0x05800000:
         # `ldr`/`str rd, [rn, #imm12]`: P=1, U=1, B=0, W=0, L = bit 20. Bit 25 (register offset) is
         # excluded by the mask, so a register-addressed load is not this shape.
@@ -396,6 +540,19 @@ def describe(instruction):
         return f"b{names.get(operands[0], '?')} to {target}"
     if mnemonic in ("mov", "movw", "mvn"):
         return f"{mnemonic} r{operands[0]}, {num(operands[1])}"
+    if mnemonic == "mov_r":
+        return f"mov r{operands[0]}, r{operands[1]}"
+    if mnemonic == "adr":
+        # The target as the instruction encodes it: `pc` is the instruction's address plus eight on
+        # this architecture, so the immediate is a signed offset from this word to the string. The
+        # expected value can be `None` - `check_device_paths` leaves it out when it has already failed
+        # to find the string an `adr` has to point at - and this has to survive printing that, or the
+        # failure message about a wrong target would raise instead of naming it.
+        rd, value, _rot, sign = operands
+        if not isinstance(value, int):
+            return f"adr r{rd}, an offset into this file (not computed: see the failure above)"
+        return (f"adr r{rd}, pc{'+' if sign > 0 else '-'}{value:#x} (the target's offset from "
+                f"this word)")
     if mnemonic == "cmp_i":
         return f"cmp r{operands[0]}, {num(operands[1])}"
     if mnemonic == "cmp_r":
@@ -405,15 +562,19 @@ def describe(instruction):
     return f"{mnemonic} {operands}"
 
 
-def program_expectations(decoded, K):
-    """What each of the program's 37 words must decode to, in the order they are loaded.
+def program_expectations(decoded, K, adr_targets):
+    """What each of the program's 52 words must decode to, in the order they are loaded.
 
     The values come from the headers and from Apple's source (`K`), never from a literal here: the pids
-    from `bsd_init.c`'s `initproc = proc_find(N)`, the three syscall numbers from `syscalls.master`, the
+    from `bsd_init.c`'s `initproc = proc_find(N)`, the syscall numbers from `syscalls.master`, the
     page length from the kernel's own `ARM_PGSHIFT`, and `prot`/`flags` from `bsd/sys/mman.h`'s
-    `PROT_READ|PROT_WRITE` and `MAP_PRIVATE|MAP_ANON`. **Two words are deliberately not fixed as
-    values** - see the marker and the timeouts below - because the properties they have to have are
-    properties and not numbers in a header.
+    `PROT_READ|PROT_WRITE` and `MAP_PRIVATE|MAP_ANON`. **Four words are deliberately not fixed as
+    values** - see the marker, the two timeouts and the read's length below - because the properties
+    they have to have are properties and not numbers in a header. `adr_targets` is the exception to the
+    exception: the two `adr`s' operands are *offsets into this file*, so their expected values are
+    computed by `check_program` from where the path strings really are and passed in here, rather than
+    being left free - a free operand would make the two most important addresses in this program the
+    only two the check does not compare.
 
     Word by word, and what a wrong value there would cost on the device:
 
@@ -430,14 +591,23 @@ def program_expectations(decoded, K):
         touched, then a store to a page the load mapped read-only, each checked afterwards. The `str`
         writes the address into the address it names, so 18..19 are the whole proof that the page is
         the process's own and writable.
-      - **21..30 are 503's two asks**, and they are the only two places in this program where a
+      - **21 is 504's first word and it is a register move, not a call**: `mov r9, r0` keeps that page
+        for the read at 37, and the register is r9 because the return path of a syscall whose return is
+        64-bit - `read` is - writes `save_r1` as well as `save_r0`.
+      - **22..31 are 503's two asks**, and they are the only two places in this program where a
         register is loaded from something that is not a header: `fds` and `nfds` are zero because a
         zero-descriptor `poll` is a pure deadline, and the `timeout` is a *ratio* (checked below).
-        24 and 29 carry the syscall number in r12 - the same register and the same convention as the
-        other two calls - and 22 and 27 are the `mov r1, #0` that make it a sleep rather than a wait on
-        a descriptor, which is the one argument in the program whose *value* is the whole semantic.
-      - 31..35 are 479's loop, kept so that the log shows both timed blocks returned rather than
-        killing the boot, and 36 is the failure marker.
+        25 and 30 carry the syscall number in r12 - the same register and the same convention as the
+        other calls - and 23 and 28 are the `mov r1, #0` that make it a sleep rather than a wait on a
+        descriptor, which is the one argument in the program whose *value* is the whole semantic.
+      - **32..45 are 504's two opens with the read between them.** 32 and 41 are `adr`s whose targets
+        are checked against the bytes of the two path strings below (that is the one clause in this
+        function that is about a *file offset* rather than a value); 33/34 and 42/43 are the flags and
+        the mode, both zero, and zero is `O_RDONLY` read out of `bsd/sys/fcntl.h`; 35 and 44 are the
+        syscall number, which is the same 5 in both; and 37..40 are the read - the buffer is the page
+        in r9, the count is a *bound* (checked below), and the call is number 3.
+      - 46..50 are 479's loop, kept so that the log shows both timed blocks and both opens returned
+        rather than killing the boot, and 51 is the failure marker.
     """
     # The one value this check does not fix: the word the program puts in r5. It has to be a marker -
     # nonzero, and different from every argument the program loads - because its whole job is to be
@@ -455,6 +625,9 @@ def program_expectations(decoded, K):
     # requires, so that a `poll` whose timeout moved to another register fails the comparison here
     # rather than passing because the number is right.
     short_ms, long_ms = poll_timeouts(decoded)
+    # And the third: 504's read length, read the same way for the same reason - the property is a
+    # bound (`check_program`'s) and the number is the fixture's.
+    read_bytes = read_length(decoded)
 
     return [
         (0, ("svc", (0x80,))),
@@ -478,33 +651,136 @@ def program_expectations(decoded, K):
         (18, ("ldr", (1, 0, 0))),
         (19, ("cmp_r", (1, 0))),
         (20, ("b", (COND["ne"], FAILED_WORD))),
+        # 504's first word: the page `mmap` returned, kept in r9 for the read below. It is *not*
+        # checked against a value - nothing in a header says where the kernel will put a mapping - it is
+        # checked as the move it is, and the run's `xnu_live_read_buf` is the number it held.
+        (PAGE_WORD, ("mov_r", (9, 0))),
         # 503's first ask: `poll(NULL, 0, short)`. `fds` and `nfds` are both `mov r_, #0` and not a
         # `movw`, which is not a stylistic choice - a `movw r1, #0` would decode as a different shape
         # and fail here, so "nfds is zero" is stated as the instruction that writes zero.
-        (21, ("mov", (0, 0, 0))),
-        (22, ("mov", (1, 0, 0))),
-        (23, ("movw", (2, short_ms, 0))),
-        (24, ("mov", (12, K["SYSCALL_POLL"], 0))),
-        (25, ("svc", (0x80,))),
-        (26, ("mov", (0, 0, 0))),
-        (27, ("mov", (1, 0, 0))),
-        (28, ("movw", (2, long_ms, 0))),
-        (29, ("mov", (12, K["SYSCALL_POLL"], 0))),
-        (30, ("svc", (0x80,))),
-        (31, ("mov", (12, K["SYSCALL_GETPID"], 0))),
-        (32, ("svc", (0x80,))),
-        (33, ("cmp_i", (0, K["INIT_PID"], 0))),
-        (34, ("b", (COND["ne"], FAILED_WORD))),
-        (35, ("b", (COND["al"], SPIN_WORD))),
-        (36, ("udf", (1,))),
+        (22, ("mov", (0, 0, 0))),
+        (23, ("mov", (1, 0, 0))),
+        (24, ("movw", (2, short_ms, 0))),
+        (25, ("mov", (12, K["SYSCALL_POLL"], 0))),
+        (26, ("svc", (0x80,))),
+        (27, ("mov", (0, 0, 0))),
+        (28, ("mov", (1, 0, 0))),
+        (29, ("movw", (2, long_ms, 0))),
+        (30, ("mov", (12, K["SYSCALL_POLL"], 0))),
+        (31, ("svc", (0x80,))),
+        # 504's first open. The `adr` is checked for its shape here and for its *target* in
+        # `check_program`, because its operand is an offset into this file and not a value in a header.
+        (OPEN_PATH_WORD, ("adr", (0, adr_targets.get(OPEN_PATH_WORD), 0, 1))),
+        (33, ("mov", (1, K["OPEN_RDONLY"], 0))),
+        (34, ("mov", (2, 0, 0))),
+        (35, ("mov", (12, K["SYSCALL_OPEN"], 0))),
+        (36, ("svc", (0x80,))),
+        # And the read: the buffer is the page in r9, the count is the fixture's own bound, and the
+        # call is `read` - three words the munger copies from r0..r2, exactly as `poll`'s are.
+        (READ_FD_WORD, ("mov_r", (1, 9))),
+        (READ_LEN_WORD, ("mov", (2, read_bytes, 0))),
+        (READ_CALL_WORD, ("mov", (12, K["SYSCALL_READ"], 0))),
+        (40, ("svc", (0x80,))),
+        # The control: the same three arguments and the same call, on a path no driver can have made a
+        # node for. It is called *after* the read, and deliberately not before: the fd the read uses is
+        # the first open's, so a control that overwrote r0 first would move the read onto its errno.
+        (CONTROL_PATH_WORD, ("adr", (0, adr_targets.get(CONTROL_PATH_WORD), 0, 1))),
+        (42, ("mov", (1, K["OPEN_RDONLY"], 0))),
+        (43, ("mov", (2, 0, 0))),
+        (44, ("mov", (12, K["SYSCALL_OPEN"], 0))),
+        (45, ("svc", (0x80,))),
+        (46, ("mov", (12, K["SYSCALL_GETPID"], 0))),
+        (47, ("svc", (0x80,))),
+        (48, ("cmp_i", (0, K["INIT_PID"], 0))),
+        (49, ("b", (COND["ne"], FAILED_WORD))),
+        (50, ("b", (COND["al"], SPIN_WORD))),
+        (51, ("udf", (1,))),
     ]
 
 
+def check_device_paths(blob, fpc, decoded, K, p):
+    """504's two paths: that the file holds exactly the two strings the two `adr`s point at, and that
+    the first of them is the character device `mdevadd` made a node for.
+
+    **This is the clause that ties three files together, and it is the reason the fixture's addresses
+    are `adr`s rather than literals.** The path the program opens is built from Apple's own source in
+    two places - the mount point devfs is mounted at (`bsd/kern/bsd_init.c`) and the format string the
+    node was made with (`bsd/dev/memdev.c`) - and the *address* of that string is computed once, by the
+    assembler, from the string's position in this file. So the chain is: the driver's own format
+    string says the node is called `rmd0`, `devfs_kernel_mount("/dev")` says where it lives, the string
+    in this object is that concatenation, the `adr` at `OPEN_PATH_WORD` points at it, and the run's
+    `xnu_live_open_path` is the address the kernel received. Any link being a literal in this file
+    would make the check agree with itself.
+
+    The **control** is the other string, and what is checked about it is what can be checked statically:
+    that it is a `/dev/` path, that it is not the character device's, and that it is not the *block*
+    device's either - `mdevadd` makes both, and a fixture that opened the block one would take a
+    different read path (`spec_read` into the buffer cache rather than `mdevrw`'s own copy), which is
+    the kind of difference that shows up as a different number in a key rather than as a failure. What
+    cannot be checked here is that no *other* driver in this image has a node by that name; that is
+    what the run's `ENOENT` is for, and the docstring says so rather than implying the file proves it.
+
+    Returns the two `adr` operands' expected values, as offsets from the words that encode them -
+    `pc` is the instruction's address plus eight - so that `program_expectations` can compare them
+    like every other word. A path that could not be found, or an `adr` that is not one, leaves the
+    entry out: the failure is recorded here and the comparison then fails with `#None` beside the word.
+    """
+    found = dev_path_strings(blob, K)
+    want = K["DEV_MOUNT"] + "/" + K["CHAR_DEV_NAME"]
+    block = K["DEV_MOUNT"] + "/" + K["BLOCK_DEV_NAME"]
+    if len(found) != 2:
+        fail(f"{p}the RAM disk holds {len(found)} `/dev/`-prefixed strings ({found}) and this step's "
+             f"program has exactly two paths - the open of the character device `mdevadd` made and the "
+             f"control. A third string would be a path some future step wrote and nothing points at")
+        return {}
+
+    expect_offsets = {}
+    real = [off for off, text in found if text == want]
+    if len(real) != 1:
+        fail(f"{p}none of the file's `/dev/` strings is `{want}`, which is what `memdev.c`'s character "
+             f"device format string makes for the device the boot added (`{found}`): the fixture is "
+             f"opening either the block device - whose `read` is a `spec_read` into the buffer cache "
+             f"rather than `mdevrw`'s own `uiomove64` - or a name no driver in this image can have "
+             f"made a node for")
+        return {}
+    expect_offsets[OPEN_PATH_WORD] = real[0]
+    for off, text in found:
+        if text != want:
+            if text == block:
+                fail(f"{p}the control path `{text}` is the *block* device's name, which `mdevadd` "
+                     f"makes a node for too: a control that resolves is not a control, and the run's "
+                     f"two `xnu_live_open_error` words would not separate a working lookup from an "
+                     f"open that always answers")
+            if not text.startswith(K["DEV_MOUNT"] + "/"):
+                fail(f"{p}the control path `{text}` is not under `{K['DEV_MOUNT']}`, where devfs is "
+                     f"mounted, so it is not a name this namespace could hold in any case")
+            expect_offsets[CONTROL_PATH_WORD] = off
+
+    out = {}
+    for index in (OPEN_PATH_WORD, CONTROL_PATH_WORD):
+        ins = decoded[index]
+        if ins[0] != "adr" or len(ins[1]) != 4 or ins[1][0] != 0 or ins[1][2] != 0:
+            fail(f"{p}word {index} is {describe(ins)}, and both of this step's paths have to be "
+                 f"`adr r0, <label>`: the instruction's own target is the address the string is at, "
+                 f"and an address written as a number here would be a second definition of it")
+            continue
+        target = fpc + index * 4 + 8 + ins[1][3] * ins[1][1]
+        if index not in expect_offsets:
+            continue
+        if target != expect_offsets[index]:
+            fail(f"{p}the `adr` at word {index} points at file offset 0x{target:x} and the string it "
+                 f"has to name is at 0x{expect_offsets[index]:x}: the address the device hands `open` "
+                 f"is not this file's own bytes for that path")
+            continue
+        out[index] = expect_offsets[index] - (fpc + index * 4 + 8)
+    return out
+
+
 def check_program(blob, fpc, pc, reg, K):
-    """The 37 words of `entry_ramdisk.s`'s program, decoded against what they are for.
+    """The 52 words of `entry_ramdisk.s`'s program, decoded against what they are for.
 
     This is the assertion experiment 468 wrote for one word, applied to the program 479 replaced it
-    with and 480 and 503 grew: the one-word version asked "is the entry point a `udf #0`", which
+    with and 480, 503 and 504 grew: the one-word version asked "is the entry point a `udf #0`", which
     measured only that the user's mapping was where the file said it was. Every word of a program this
     size is a way to be wrong - a `cmp` against the wrong register or the wrong pid, a branch that
     lands one instruction away, a syscall number in the wrong register, an argument in the wrong
@@ -512,18 +788,24 @@ def check_program(blob, fpc, pc, reg, K):
     difference whose only symptom on the device would be a process that runs when it should have
     stopped, or an init death where 478 already had one.
 
-    Three of the program's properties are not word-for-word comparisons and are checked here because
+    Five of the program's properties are not word-for-word comparisons and are checked here because
     no single word holds them: the marker's (that word 8 is nonzero and unlike every argument), the
-    branch targets' (that each lands on another instruction of the program), and 503's ratio (that
-    word 28 is larger than word 23 and neither is zero). The last is the reading the step exists for -
-    a wake whose length does not follow what was asked for is a latency and not a deadline - so it has
-    to be a property a mutation can break rather than a pair of numbers compared with a header.
+    branch targets' (that each lands on another instruction of the program), 503's ratio (that word 29
+    is larger than word 24 and neither is zero), 504's two paths (`check_device_paths`: that the file
+    holds exactly the two strings the two `adr`s point at, and that the first is the character device
+    the kernel's own `devfs_make_node` call names), and 504's read length (that it is at least the word
+    the wrapper publishes and no longer than the page the buffer is in). The ratio is the reading 503
+    exists for - a wake whose length does not follow what was asked for is a latency and not a deadline
+    - and the pair of paths is the reading 504 exists for, and both have to be properties a mutation can
+    break rather than numbers compared with a header.
     """
     p = f"{pc:#x}: "
     words = [u32(blob, fpc + i * 4) for i in range(PROGRAM_WORDS)]
     decoded = [decode_arm(word, i) for i, word in enumerate(words)]
 
-    for index, expect in program_expectations(decoded, K):
+    adr_targets = check_device_paths(blob, fpc, decoded, K, p)
+
+    for index, expect in program_expectations(decoded, K, adr_targets):
         if decoded[index] != expect:
             fail(f"{p}word {index} at 0x{pc + index * 4:x} is {describe(decoded[index])}, and this "
                  f"check requires {describe(expect)} - the program the device runs is not the one "
@@ -558,6 +840,7 @@ def check_program(blob, fpc, pc, reg, K):
     # wait timer), so it would publish a tick count that says nothing about the timer path while
     # looking like a reading of it. Both are mutations `--selftest` makes.
     short_ms, long_ms = poll_timeouts(decoded)
+    read_bytes = read_length(decoded)
     if short_ms is not None and long_ms is not None:
         if min(short_ms, long_ms) == 0:
             fail(f"{p}one of the two `poll` timeouts is 0 ({short_ms} and {long_ms}): a zero timeout "
@@ -571,13 +854,30 @@ def check_program(blob, fpc, pc, reg, K):
 
     # Every branch lands inside the program, stated once for all of them: a branch out would leave the
     # user's `__TEXT` for unmapped memory and fault, which the run would show as an abort rather than
-    # as a syscall - and the `b` at word 35 has to come back to the loop's first word for the liveness
+    # as a syscall - and the `b` at word 50 has to come back to the loop's first word for the liveness
     # reading the step is built on.
     for index, instruction in enumerate(decoded):
         if instruction[0] == "b" and not isinstance(instruction[1][1], int):
             fail(f"{p}the branch at word {index} (0x{pc + index * 4:x}) targets "
                  f"{instruction[1][1]} - every branch in this program has to land on another "
                  f"instruction of it")
+
+    # **And 504's read length, which is a bound and not a value.** The word the wrapper publishes is
+    # read out of the buffer *after* the call, so a count below four would leave the word it publishes
+    # partly old and partly new - a number in the log that is neither what was there nor what the
+    # driver wrote, which is the worst kind of reading: one that looks like data. The upper bound is the
+    # mapping: the buffer is the *start* of a page `mmap` gave this process and nothing here has mapped
+    # anything past it, so a longer read is `mdevrw`'s `uiomove64` writing into the page after the
+    # mapping ends - a kernel-side copyout that faults, in the one process whose death panics the boot.
+    if read_bytes is not None:
+        if read_bytes < 4:
+            fail(f"{p}the read asks for {read_bytes} bytes, and the wrapper publishes the buffer's "
+                 f"first word: a count below four leaves that word part old and part new, so the log's "
+                 f"`xnu_live_read_word_after` would be a mixture rather than what the driver wrote")
+        if read_bytes > K["MMAP_LENGTH"]:
+            fail(f"{p}the read asks for {read_bytes} bytes and the buffer is one {K['MMAP_LENGTH']:#x}"
+                 f"-byte mapping: everything past it is unmapped, so the driver's copy would run off "
+                 f"the end of this process's own page and fault in the middle of a copyout")
 
     # What the two asks will read as, said once at the end of the program's check: not a claim about
     # the device but the shape the wrapper in `entry_trace.c` publishes, so that a run whose two
@@ -591,6 +891,21 @@ def check_program(blob, fpc, pc, reg, K):
                      f"{long_ms} ms ({long_ms / short_ms:.0f}:1); `entry_note_poll` records each call's "
                      f"tick count as `xnu_live_poll_ticks`, so the run's reading is that the second is "
                      f"about {long_ms / short_ms:.0f} times the first rather than about equal")
+
+    # And 504's two, said the same way: what the two paths are and what the read is a prediction of.
+    # The pair of opens is the step's control - the same three arguments and the same syscall on a name
+    # devfs cannot hold - and the read is the only user-mode instruction in this image whose result
+    # depends on a device's own copy, so the notes name the key each one is read back from.
+    paths = dev_path_strings(blob, K)
+    if len(paths) == 2 and read_bytes is not None:
+        real = K["DEV_MOUNT"] + "/" + K["CHAR_DEV_NAME"]
+        control = [text for _off, text in paths if text != real]
+        notes.append(f"{p}the two opens ask for `{real}` and `{control[0] if control else '?'}` "
+                     f"(`xnu_live_open_path` carries each address), and the read asks for {read_bytes} "
+                     f"bytes into the page `mmap` returned (`xnu_live_read_buf`): `mdevrw`'s "
+                     f"`uiomove64` copies the RAM disk's first bytes there, so "
+                     f"`xnu_live_read_word_after` should be this file's own MH_MAGIC=0x%(MH_MAGIC)x "
+                     f"while `xnu_live_read_word_before` is the mapping's address" % K)
 
 
 def check_thread_registers(pc, reg, K):
@@ -985,6 +1300,16 @@ def main():
         # them with a number in this file (there is no header that defines how long a fixture should
         # sleep). See `poll_timeouts`.
         "SYSCALL_POLL": syscall_poll(),
+        # 504: the two calls that reach a *driver*. Both numbers come from `syscalls.master` through the
+        # same reader shape as the other three, and the path the first one opens is not written here at
+        # all - it is the kernel's own devfs mount point and the driver's own node format, joined. See
+        # `devfs_mount_point` and `mdev_node_names`.
+        "SYSCALL_READ": syscall_three_words("AUE_NULL", "read"),
+        "SYSCALL_OPEN": syscall_three_words("AUE_OPEN_RWTC", "open"),
+        "OPEN_RDONLY": hdr_define(FCNTL, "O_RDONLY"),
+        "DEV_MOUNT": devfs_mount_point(),
+        "BLOCK_DEV_NAME": mdev_node_names()[0],
+        "CHAR_DEV_NAME": mdev_node_names()[1],
     }
     notes.append("from the headers: MH_MAGIC=0x%(MH_MAGIC)x MH_EXECUTE=%(MH_EXECUTE)d "
                  "MH_PIE=0x%(MH_PIE)x MH_DYLDLINK=0x%(MH_DYLDLINK)x "
@@ -996,6 +1321,11 @@ def main():
                  "INIT_PID=%(INIT_PID)d (bsd/kern/bsd_init.c's `initproc = proc_find(N)`) "
                  "SYSCALL_MMAP=%(SYSCALL_MMAP)d (bsd/kern/syscalls.master) "
                  "SYSCALL_POLL=%(SYSCALL_POLL)d (bsd/kern/syscalls.master) "
+                 "SYSCALL_READ=%(SYSCALL_READ)d SYSCALL_OPEN=%(SYSCALL_OPEN)d "
+                 "OPEN_RDONLY=%(OPEN_RDONLY)d (bsd/sys/fcntl.h) "
+                 "DEV_MOUNT=%(DEV_MOUNT)s (bsd/kern/bsd_init.c) "
+                 "BLOCK_DEV_NAME=%(BLOCK_DEV_NAME)s CHAR_DEV_NAME=%(CHAR_DEV_NAME)s "
+                 "(bsd/dev/memdev.c's devfs_make_node formats) "
                  "MMAP_LENGTH=0x%(MMAP_LENGTH)x (1 << ARM_PGSHIFT) "
                  "MMAP_PROT=0x%(MMAP_PROT)x MMAP_FLAGS=0x%(MMAP_FLAGS)x (bsd/sys/mman.h)" % K)
 
@@ -1014,6 +1344,16 @@ def main():
         S1 = 28 + SEG_SIZE             # the second command's first byte
         T = S1 + SEG_SIZE              # the thread command's first byte
         STATE = T + THREAD_HDR + THREAD_STATE   # r[0]
+        # 504's three string mutations are byte-valued rather than word-valued, so they need the two
+        # strings' offsets - and they are found the same way the check finds them, by scanning the
+        # file, rather than by being written as 0x1B0 and 0x1BC here. A baseline that does not hold two
+        # `/dev/` strings has already failed above, and the selftest stops rather than mutating a file
+        # it cannot describe.
+        strings = dev_path_strings(blob, K)
+        if len(strings) != 2:
+            sys.exit("--selftest: this RAM disk holds %d `/dev/` strings and the three mutations "
+                     "about the paths cannot be constructed - the baseline has already failed"
+                     % len(strings))
         mutations = [
             ("magic", 0, K["MH_MAGIC"] ^ 0x1),
             ("cputype", 4, K["CPU_TYPE_ARM"] + 1),
@@ -1055,7 +1395,7 @@ def main():
             # `entry_ramdisk.s`'s `.if` fixes the program's length, so this list cannot silently stop
             # covering the program.
             #
-            # **Three words are left out on purpose, and they are the places this list is not
+            # **Four words are left out on purpose, and they are the places this list is not
             # complete.** Word 8 is the marker in r5, whose value the check deliberately leaves free (a
             # nonzero `movw` into r5 that repeats no argument - properties, not a value), so a low-bit
             # flip there changes only the property that is free and *should* be accepted (see
@@ -1065,10 +1405,12 @@ def main():
             # programs this check has no business refusing. What has to be refused is a change of shape
             # or of the relation, and the mutations below are exactly those: a nop, a zero word, a
             # repeated argument and a rotated `mov` where the `movw` is, for the marker; the syscall
-            # number moved, and the relation broken two ways, for the asks.
+            # number moved, and the relation broken two ways, for the asks. `READ_LEN_WORD` is 504's
+            # read length, free for the same reason again - 4, 5 and 8 bytes are all reads whose first
+            # word the wrapper can publish - and its mutations below are the two ends of the bound.
             *[(f"program word {i}", 0xE0 + i * 4, u32(blob, 0xE0 + i * 4) ^ 1)
               for i in range(PROGRAM_WORDS)
-              if i not in (8, POLL_SHORT_WORD, POLL_LONG_WORD)],
+              if i not in (8, POLL_SHORT_WORD, POLL_LONG_WORD, READ_LEN_WORD)],
             # And the mutations that are about a *shape* rather than a value, each a plausible way to
             # write the same intent wrongly. The first is the one this step exists for:
             # `arm_prepare_u32_syscall_return` reports an error by setting the carry bit
@@ -1095,13 +1437,29 @@ def main():
             ("the first ask never waits", 0xE0 + POLL_SHORT_WORD * 4, 0xE3002000),
             ("the ask is not poll's syscall number", 0xE0 + 24 * 4, 0xE3A0C000 | K["SYSCALL_MMAP"]),
             ("the timeout is in nfds' register", 0xE0 + POLL_SHORT_WORD * 4, 0xE3001005),
+            # 504's five, and they are of three kinds. The first two are the read length's bound at each
+            # end - nothing read at all, and more than the mapping the buffer is the start of - and the
+            # third is the *pair* of paths: the same instruction shape and a target four words away,
+            # which is what a reader of the listing would write if they counted from the wrong string.
+            # The last three are the strings themselves, which no value mutation above can reach: they
+            # are bytes in the file and not words of the program, so they need the byte-valued form.
+            ("the read asks for nothing", 0xE0 + READ_LEN_WORD * 4, 0xE3A02000),
+            ("the read runs past the page", 0xE0 + READ_LEN_WORD * 4, 0xE3002101),
+            ("the control opens the device", 0xE0 + CONTROL_PATH_WORD * 4, 0xE28F0024),
+            ("the control path names the device too", strings[1][0], b"/dev/rmd0\0"),
+            ("the path names the block device", strings[0][0], b"/dev/md0\0\0"),
+            ("the path is not terminated", strings[0][0], b"/dev/rmd0X"),
         ]
         survived = []
         for name, off, value in mutations:
-            if off + 4 > len(blob):
+            width = len(value) if isinstance(value, bytes) else 4
+            if off + width > len(blob):
                 continue
             mutated = bytearray(blob)
-            struct.pack_into("<I", mutated, off, value)
+            if isinstance(value, bytes):
+                mutated[off:off + len(value)] = value
+            else:
+                struct.pack_into("<I", mutated, off, value)
             del failures[:]
             kept = len(notes)
             parse(bytes(mutated), K, size, label=f"selftest:{name}")

@@ -76,7 +76,8 @@ ARGS_BYTES=0x00001000          # one page, which is what `boot_args` needs to fi
 REAL_ARM_INIT=${STAGE90_ENTRY_REAL_ARM_INIT:-0}
 STUB_DEFINES=()
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES=(-DSTAGE90_ENTRY_REAL_ARM_INIT=1)
-# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s thirty-three functions - `kalloc_canblock`,
+# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s the sixty-two symbols listed in
+# `TRACE_LDFLAGS` below - `kalloc_canblock`,
 # `lck_grp_alloc_init`, `kernel_memory_allocate`, `vm_page_wait`, `thread_block`, (447)
 # `ml_get_max_cpus`, `ml_init_max_cpus`, (448) `IODeviceTreeAlloc`, `IOWorkLoop::workLoop`,
 # `IORecursiveLockAlloc`, `IOSimpleLockAlloc`, `IOCommandGate::commandGate`, `kernel_thread_start`,
@@ -135,6 +136,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=sleh_abort --wrap=sleh_undef
                    --wrap=getpid --wrap=mmap
                    --wrap=poll
+                   --wrap=open --wrap=read
                    --wrap=setPop
                    --wrap=PE_init_platform --wrap=fiq_context_init
                    --wrap=timer_call_enter
@@ -27372,6 +27374,21 @@ verify_trace_symbols() {
     done
     say "  xnu_entry_471: os_reason_create and load_machfile are defined by this image rather than stubbed for it, so both wrappers record the real exec path"
 
+    # **504's instrument reads the user's buffer with `copyin_word`, and the image is what says it is
+    # the kernel's own copy path.** Run A of this step dereferenced that buffer with a plain C load and
+    # the run died there (`pc = __wrap_read+0xb8`, `DFSR = 0x5`, `DFAR` = the fixture's own page, 64
+    # entries and no `xnu_live_read_*` key), so the read is now the kernel's, and the same rule as 471's
+    # applies to it for the same reason: `copyin_word` is called *by name*, so a misspelling is a link
+    # error rather than a stub - but a name the generator had to stand in for would make the record a
+    # fact about the stand-in, which is exactly the failure this instrument exists to avoid.
+    # `osfmk/kern/misc_protos.h:101` is the declaration and `bsd/arm/types.h:82-83` is why all three of
+    # its arguments are 4-byte words on this target.
+    for s in copyin_word; do
+        grep -qx "$s" "$OUT/xnu_arm_entry_undef.txt" &&
+            layout_fail "504's instrument reads the user's buffer with $s and the pass-1 undefined set contains it - nothing in this image defines that name, so the generator stubbed it and the wrapper's two 'word' records would be facts about the stand-in rather than about the kernel's own copy path"
+    done
+    say "  xnu_entry_504: copyin_word is defined by this image rather than stubbed for it, so the read wrapper's two buffer words are read through the kernel's own user copy and a bad pointer is an EFAULT rather than a data abort"
+
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls
     # `_ZNK9IOService8getStateEv` by mangled name on objects whose dynamic type this file cannot know -
     # whatever the `IOPlatformExpert` metaclass's instance walk yields. That is only correct if
@@ -27453,7 +27470,14 @@ verify_trace_symbols() {
     # Unlike `mmap`, which is an ordinary function with many callers, `poll`'s reference is *only* that
     # table word, which is why `tools/check_sysent_table.py`'s read-back is the whole of the proof and
     # the census below can only name it.
-    local by_address=( vcputc getpid mmap poll thread_quantum_expire )
+    # 504 adds `open` and `read`, and they are the same shape one slot apart: `sysent[5].sy_call` and
+    # `sysent[3].sy_call`, the same initialiser in the same file, and neither name is called from
+    # anywhere else in this image - so both are entries in this list rather than a fourth and fifth
+    # copy of a branch. What makes them worth their own sentence is that they are the two of the five
+    # whose *slot numbers* are also witnesses in `tools/check_sysent_table.py`'s list of ten, and that
+    # list was written to over-determine the stride: 3 and 5 sit between 2 and 8, so a table whose
+    # numbering was wrong by one would have to satisfy four adjacent witnesses at once.
+    local by_address=( vcputc getpid mmap poll open read thread_quantum_expire )
     # 484 adds `thread_quantum_expire`, and it is the *third* shape of this category rather than a
     # fourth copy of the second. `vcputc`, `getpid`, `mmap` and `poll` are all referenced by taking an
     # address that lands in a *table* - `cons_ops[1].putc`, `sysent[20].sy_call`, `sysent[197].sy_call`,

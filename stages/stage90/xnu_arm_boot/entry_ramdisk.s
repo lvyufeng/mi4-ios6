@@ -115,7 +115,7 @@
  * The program, and what it proves
  * ------------------------------------------------------------------------------------------------
  *
- * Thirty-seven instructions, and they are the first thing `/sbin/launchd` runs:
+ * Fifty-two instructions, and they are the first thing `/sbin/launchd` runs:
  *
  *     entry_code:  svc  #0x80                ; +0   getpid() - a *Unix* syscall, r12 = +20
  *                  cmp  r0, #EXPECTED_PID    ; +4   the pid the kernel assigned this process?
@@ -138,22 +138,37 @@
  *                  ldr  r1, [r0]             ; +72
  *                  cmp  r1, r0               ; +76      ... and now the process owns it, writable
  *                  bne  entry_failed         ; +80
- *                  mov  r0, #0               ; +84  poll(NULL, 0, 5)  - the kernel's own deadline,
- *                  mov  r1, #0               ; +88      no descriptor waited on, so the timeout is
- *                  movw r2, #POLL_SHORT_MS   ; +92      the whole of the call - and then the same
- *                  mov  r12, #SYS_POLL       ; +96      call again eight times longer, because one
- *                  svc  #0x80                ; +100     sample cannot tell a countdown from a fixed
- *                  mov  r0, #0               ; +104     latency. **Neither branches on the answer**:
- *                  mov  r1, #0               ; +108     a wrong one is a fact about the kernel's
- *                  movw r2, #POLL_LONG_MS    ; +112     timer path, and a fault here kills initproc.
- *                  mov  r12, #SYS_POLL       ; +116
- *                  svc  #0x80                ; +120
- *     spin:        mov  r12, #SYS_GETPID     ; +124
- *                  svc  #0x80                ; +128 ask again, so the loop's liveness is a record
- *                  cmp  r0, #EXPECTED_PID    ; +132
- *                  bne  entry_failed         ; +136
- *                  b    spin                 ; +140
- *     entry_failed: udf #1                   ; +144 the kernel answered something else
+ *                  mov  r9, r0               ; +84  503 keeps the page for 504's read (r9 survives
+ *                  mov  r0, #0               ; +88      a syscall: the return path writes r0 and r1)
+ *                  mov  r1, #0               ; +92  poll(NULL, 0, 5)  - the kernel's own deadline,
+ *                  movw r2, #POLL_SHORT_MS   ; +96      no descriptor waited on, so the timeout is
+ *                  mov  r12, #SYS_POLL       ; +100     the whole of the call - and then the same
+ *                  svc  #0x80                ; +104     call again eight times longer, because one
+ *                  mov  r0, #0               ; +108     sample cannot tell a countdown from a fixed
+ *                  mov  r1, #0               ; +112     latency. **Neither branches on the answer**:
+ *                  movw r2, #POLL_LONG_MS    ; +116     a wrong one is a fact about the kernel's
+ *                  mov  r12, #SYS_POLL       ; +120     timer path, and a fault here kills initproc.
+ *                  svc  #0x80                ; +124
+ *                  adr  r0, path_rmd0        ; +128 open("/dev/rmd0", O_RDONLY, 0) - the first call in
+ *                  mov  r1, #0               ; +132     this image that a *driver* answers: `mdev`
+ *                  mov  r2, #0               ; +136     made this node at boot and `mdevopen`
+ *                  mov  r12, #SYS_OPEN       ; +140     returns 0 without touching the disk.
+ *                  svc  #0x80                ; +144
+ *                  mov  r1, r9               ; +148 read(fd, page, 4) - `mdevrw`'s `uiomove64` copies
+ *                  mov  r2, #READ_BYTES      ; +152     the RAM disk's first bytes into the page
+ *                  mov  r12, #SYS_READ       ; +156     `mmap` just gave this process, so what the
+ *                  svc  #0x80                ; +160     log reads back is this file's own magic
+ *                  adr  r0, path_missing     ; +164 open("/dev/nosuch", O_RDONLY, 0) - the control:
+ *                  mov  r1, #0               ; +168     a name devfs cannot have a node for, so the
+ *                  mov  r2, #0               ; +172     pair separates a lookup that worked from an
+ *                  mov  r12, #SYS_OPEN       ; +176     open that returns something either way.
+ *                  svc  #0x80                ; +180
+ *     spin:        mov  r12, #SYS_GETPID     ; +184
+ *                  svc  #0x80                ; +188 ask again, so the loop's liveness is a record
+ *                  cmp  r0, #EXPECTED_PID    ; +192
+ *                  bne  entry_failed         ; +196
+ *                  b    spin                 ; +200
+ *     entry_failed: udf #1                   ; +204 the kernel answered something else
  *
  * **The first three are 479's five minus its loop, unchanged, and they are why this program does not
  * end in a fault.** Until 479 the first instruction was `udf #0`, and the address it named was the
@@ -306,6 +321,62 @@
  * the wrapper publishes the arguments, the return and the duration either way, and the loop's own
  * liveness (`getpid` still being answered after both blocks) is the reading that says control came
  * back to user mode. A step that could only report a success would be a step that cannot fail.
+ *
+ * ------------------------------------------------------------------------------------------------
+ * What 504 adds: the first call a *driver* answers, and the value it hands back
+ * ------------------------------------------------------------------------------------------------
+ *
+ * 480 gave process 1 a page; 503 gave it a deadline. Both are the *kernel's* own services - memory
+ * and time. What no user-mode instruction in this image has ever done is reach a **device**: the
+ * `svc` path so far ends in `kern_mman` or in the timer queue, and neither of those is a thing a
+ * driver owns. `/sbin/launchd` on a real machine opens character devices before it does anything
+ * else, and the first thing it can open *here* was already named in the console log before this
+ * program ran - `Added memory device md0/rmd0 (02000000/0D000000) at 000000008050D000 for
+ * 0000000000002000` is `bsd/dev/memdev.c`'s own `mdevadd` print, and the two nodes it made two lines
+ * later are this file's `RAMDISK_BYTES` pages.
+ *
+ * **`/dev/rmd0` and not `/dev/md0`.** `mdevadd` makes *both* (`:607` and `:616`: `devfs_make_node`
+ * with `DEVFS_BLOCK` and `"md%d"`, then `DEVFS_CHAR` and `"rmd%d"`), and the difference that decides
+ * this fixture is which entry point `read` reaches. The character device's `read` *is* `mdevrw`
+ * (`mdevcdevsw`, `:146`) - the function whose `uiomove64` copies from the RAM disk - while the block
+ * device has no `d_read` at all (`mdevbdevsw`, `:133`), so a read on it is a `spec_read` into the
+ * buffer cache and `mdevstrategy`, a different path with its own `buf_map` and its own trimming at
+ * the end of the device. The character device is the one whose copy is one function, and a fixture
+ * that wants to read one word of its own image wants the short path.
+ *
+ * **And `md0` is the root device**, which is why the *read* had to be thought about before it was
+ * written: `mdevrw` is safe for a user buffer here only because `IOKitBSDInit` adds this device with
+ * `phys` 0 (`iokit/bsddev/IOKitBSDInit.cpp:447`, `mdevadd(-1, ml_static_ptovirt(...) >> 12, ..., 0)`)
+ * - so `mdFlags` has no `mdPhys` and the copy is a plain `uiomove64` to the address the process
+ * passed. With that bit set the same call would treat the *virtual* user address as a physical one.
+ * So the fixture's buffer is the page 480's `mmap` returned, the length is one word, and the word it
+ * reads is the RAM disk's first four bytes - **this file's own `MH_MAGIC`**.
+ *
+ * **That is the reading, and it is self-checking: the page held something else a moment ago.** 480's
+ * store wrote the page's *address* into the page (`str r0, [r0]`), so the word at the buffer is the
+ * address `mmap` returned when the read is made, and `0xfeedface` afterwards. The wrapper reads those
+ * two words either side of the call and publishes both, so the pair says the driver moved data into
+ * a page whose previous content is in the same record. A `read` that returned an errno leaves the
+ * address in place, which is a reading too - and neither possibility is fatal, because nothing here
+ * branches on the answer.
+ *
+ * **The control is a name devfs cannot have a node for.** `open("/dev/nosuch", O_RDONLY, 0)` after
+ * the real one: devfs resolves names against a tree that drivers populate, so a name no driver ever
+ * made has no vnode and `namei` answers `ENOENT` = 2 - the same errno XNU's own loader printed for
+ * its own missing path three lines earlier (`load_init_program: failed loading
+ * /usr/local/sbin/launchd.development: errno 2`). A pair of opens whose second is *also* answered
+ * positively would mean the first told us nothing; a pair in which both fail would mean the path
+ * shape is wrong rather than the driver missing. The `/dev/` prefix and the name are the fixtures'
+ * own choice - they are checked as properties, against `memdev.c`'s two format strings, in
+ * `tools/host_ramdisk_macho_check.py`.
+ *
+ * **The addresses come from `adr`, not from a number written down.** `adr r0, path_rmd0` is a
+ * PC-relative `add` that the assembler resolves within this section, so the path's address appears
+ * *once* in this file - in the instruction that computes it - and the strings below live inside
+ * `__TEXT`'s file range where the mapping that carries this program carries them too. A literal
+ * address here would be the project's oldest defect: one value with two definitions and nothing
+ * comparing them. The check decodes both `adr`s and requires each to land on the bytes of its own
+ * path string, which it finds by scanning the file for them.
  */
 
     .syntax unified
@@ -336,8 +407,10 @@
  * asks for: `PROT_READ|PROT_WRITE` and `MAP_PRIVATE|MAP_ANON` from `bsd/sys/mman.h`, with the length
  * being `1 << ARM_PGSHIFT` (`osfmk/arm/proc_reg.h`), `fd` -1 and offset 0, so the mapping needs no
  * vnode at all. `tools/host_ramdisk_macho_check.py` reads every one of them back out of those files -
- * the two syscall numbers from the master, the pid from the sentence above it, the page size from the
- * kernel's own page shift, `prot` and `flags` from `mman.h` - and decodes the thirty-seven words below
+ * the syscall numbers from the master, the pid from the sentence above it, the page size from the
+ * kernel's own page shift, `prot` and `flags` from `mman.h`, and the character device's own name from
+ * the `devfs_make_node` format string in `bsd/dev/memdev.c` that made the node 504 opens - and decodes
+ * the fifty-two words below
  * to check they are the program this comment describes, *including* the comparisons that use them. */
     .equ SYS_GETPID,             20
     .equ EXPECTED_PID,           1
@@ -360,6 +433,21 @@
                                          * and 768000 ticks, which is what the two durations the
                                          * wrapper measures are predictions of. */
     .equ POLL_LONG_MS,           40
+    .equ SYS_READ,               3      /* `3 AUE_NULL ALL { user_ssize_t read(int fd, user_addr_t
+                                         * cbuf, user_size_t nbyte); }` - three 4-byte arguments, so
+                                         * `munge_www` like `poll`'s. The *return* is 64-bit, which
+                                         * does not change the munger (that is about arguments) but
+                                         * does mean the return path writes r1 as well as r0 - which
+                                         * is why the page address 504 reads into lives in r9. */
+    .equ SYS_OPEN,               5      /* `5 AUE_OPEN_RWTC ALL { int open(user_addr_t path, int
+                                         * flags, int mode) ...; }` - also `munge_www`, and the
+                                         * first argument is an *address*, so the fixture has to be
+                                         * able to name a string in its own mapping. */
+    .equ OPEN_RDONLY,            0      /* `O_RDONLY` is 0 in `bsd/sys/fcntl.h`, which is what
+                                         * `mdevopen` reads as "no FWRITE" and answers 0 to. */
+    .equ READ_BYTES,             4      /* one word: enough for the wrapper to publish the word the
+                                         * driver copied, and no more than the page it lands in. The
+                                         * check states both bounds rather than this number. */
 
 /* The shape of the three load commands, and the two numbers derived from them. Neither
  * `sizeofcmds` nor the entry point is written down: the first is an expression over the label the
@@ -506,6 +594,14 @@ entry_code:
     cmp     r1, r0                      /* +76: ... and now the process owns it */
     bne     entry_failed                /* +80 */
 
+/* 503 keeps the page for 504, and the register is r9 for a reason: a syscall's return path writes
+ * r0 - and, for a call whose return is 64-bit like `read`'s, r1 as well (`unix_syscall`'s
+ * `arm_prepare_u32_syscall_return`, `bsd/dev/arm/systemcalls.c:289-298`) - so the only registers a
+ * value can survive a call in are the ones the kernel does not write back: r2..r12, and r9 is one
+ * this program uses for nothing else. The word the page holds here is the address `mmap` returned,
+ * because the store above wrote it there; that is what makes 504's read a *before and after*. */
+    mov     r9, r0                      /* +84: the page, for the read below */
+
 /* And the two syscalls that ask the kernel for a *deadline* (503). The programs above ask the kernel
  * what it knows - its pid, and for a page it can own; these ask it for *time*, which is the one thing
  * in this image that a driver and a process both need and that nothing in user mode can produce.
@@ -549,19 +645,60 @@ entry_code:
     mov     r12, #SYS_POLL              /* +116 */
     svc     #0x80                       /* +120: the second timed block */
 
-/* And the syscall that cannot fill anything, so that the loop is alive after the faults and after both
- * timed blocks, and the log says so: r12 has to be reloaded because the `poll`s above left 230 in
- * it. */
+/* And the two opens and the read that reach a *driver* (504). `/dev/rmd0` is the character device
+ * `mdevadd` made a node for at boot, whose `read` is `mdevrw`'s one `uiomove64`; `/dev/nosuch` is a
+ * name no driver can have made a node for, and it is the control that keeps the first open's answer
+ * from being a fact about `open` rather than about the device tree. Both are non-branching for 503's
+ * reason: this program is `initproc`, and an `open` that failed is a reading rather than a reason to
+ * fault. The paths are addressed with `adr`, so their addresses are computed once, here, from the
+ * strings below rather than written down. */
+    adr     r0, path_rmd0               /* +128: path = "/dev/rmd0", in this segment's own bytes */
+    mov     r1, #OPEN_RDONLY            /* +132: flags = O_RDONLY, so `mdevopen` cannot answer EACCES */
+    mov     r2, #0                      /* +136: mode, which `open` reads only with O_CREAT */
+    mov     r12, #SYS_OPEN              /* +140 */
+    svc     #0x80                       /* +144: the first user-mode call a driver answers */
+    mov     r1, r9                      /* +148: cbuf = the page, whose first word is the address */
+    mov     r2, #READ_BYTES             /* +152: nbyte = 4 */
+    mov     r12, #SYS_READ              /* +156 */
+    svc     #0x80                       /* +160: `mdevrw` copies this file's own first four bytes */
+    adr     r0, path_missing            /* +164: path = "/dev/nosuch" - the control */
+    mov     r1, #OPEN_RDONLY            /* +168 */
+    mov     r2, #0                      /* +172 */
+    mov     r12, #SYS_OPEN              /* +176 */
+    svc     #0x80                       /* +180: devfs has no such node, so this one is ENOENT */
+
+/* And the syscall that cannot fill anything, so that the loop is alive after the faults, after both
+ * timed blocks and after the driver was read from, and the log says so: r12 has to be reloaded
+ * because the `poll`s above left 230 in it. */
 spin:
-    mov     r12, #SYS_GETPID            /* +124 */
-    svc     #0x80                       /* +128: getpid() again */
-    cmp     r0, #EXPECTED_PID           /* +132 */
-    bne     entry_failed                /* +136 */
-    b       spin                        /* +140 */
+    mov     r12, #SYS_GETPID            /* +184 */
+    svc     #0x80                       /* +188: getpid() again */
+    cmp     r0, #EXPECTED_PID           /* +192 */
+    bne     entry_failed                /* +196 */
+    b       spin                        /* +200 */
 
 entry_failed:
-    udf     #1                          /* +144: the kernel answered something else */
+    udf     #1                          /* +204: the kernel answered something else */
 entry_code_end:
+
+/* The two paths, as *file* bytes inside `__TEXT`'s file range - so the mapping that carries the
+ * program carries them, and the process can hand their addresses to `open` without asking the kernel
+ * for anything. They are placed after `entry_code_end` rather than among the instructions because
+ * the program's length is what the `.if` below and the host check both count; the `adr`s above are
+ * PC-relative and the assembler resolves them here, in this section, with no literal in either.
+ *
+ * The word padding between them is written as a count of bytes and not as `.balign`, and that is not
+ * taste: an alignment directive emits a frag whose size the assembler does not know until the section
+ * is finished, and an `.if` over a difference that spans one is a **non-constant expression** - so
+ * the two assertions below, which are what tie these strings to the segment's file range and to each
+ * other, could not be written at all. `.zero 2` takes "/dev/rmd0" (10 bytes) to the next word, and
+ * the assertions are what say the two lengths still add up. */
+path_rmd0:
+    .asciz "/dev/rmd0"
+    .zero 2
+path_missing:
+    .asciz "/dev/nosuch"
+paths_end:
 
     .equ sizeofcmds_value, (load_commands_end - g_stage90_ramdisk) - 28
     .equ entry_pc_value,   TEXT_VMADDR + (entry_code - g_stage90_ramdisk)
@@ -577,15 +714,32 @@ entry_code_end:
     .if ((entry_code_end - g_stage90_ramdisk) >= TEXT_FILESIZE)
     .error "the program is outside __TEXT's filesize, so validentry would be 0"
     .endif
+/* And the same bound for the two path strings 504 adds, which sit after the program: a string past
+ * `filesize` is not mapped from the file, so `adr` would hand `open` an address that is not there and
+ * the fixture would take a data abort in `copyinstr` instead of making the call. */
+    .if ((paths_end - g_stage90_ramdisk) >= TEXT_FILESIZE)
+    .error "the path strings are outside __TEXT's filesize, so their addresses are not mapped"
+    .endif
+/* And both strings word-aligned, which is what makes each `adr` above a single instruction: an `adr`
+ * whose target is not a multiple of four from the pc has to be assembled as a pair, so a string that
+ * drifted would change the program's *length* and its word numbering at once. The two `.zero`s are
+ * the padding and these are the statements that they are the right amount of it. */
+    .if ((path_rmd0 - g_stage90_ramdisk) % 4) != 0
+    .error "the first path is not word-aligned"
+    .endif
+    .if ((path_missing - g_stage90_ramdisk) % 4) != 0
+    .error "the second path is not word-aligned"
+    .endif
     .if ((entry_pc_value < TEXT_VMADDR) || (entry_pc_value >= (TEXT_VMADDR + TEXT_VMSIZE)))
     .error "the entry point is outside the segment it is loaded from"
     .endif
 /* And what the program's length is, because every branch in it is relative: a `b` that left the file
- * range would raise a fault instead of making a syscall, and the check tool decodes all 37 words by
- * offset. 37 words is the 3 of the getpid call, the 11 of the mmap call and its argument registers,
- * the 7 of the two faults, the 10 of the two timed asks, the 5 of the loop and the `udf` behind it. */
-    .if (entry_code_end - entry_code) != 148
-    .error "the program is not the thirty-seven instructions the header describes"
+ * range would raise a fault instead of making a syscall, and the check tool decodes all 52 words by
+ * offset. 52 words is the 3 of the getpid call, the 11 of the mmap call and its argument registers,
+ * the 7 of the two faults, the 1 that keeps the page for 504, the 10 of the two timed asks, the 16 of
+ * the two opens and the read between them, and the 5 of the loop with the `udf` behind it. */
+    .if (entry_code_end - entry_code) != 208
+    .error "the program is not the fifty-two instructions the header describes"
     .endif
 
 /* The rest of the segment is zeros, and they are *file* bytes rather than a `.bss` tail: the whole

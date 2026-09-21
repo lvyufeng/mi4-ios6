@@ -161,6 +161,12 @@ extern void entry_note_mmap(uint32_t caller, const uint32_t *args, uint32_t erro
  * so their difference is the interval the kernel kept this thread parked. See the wrapper below. */
 extern void entry_note_poll(uint32_t caller, uint32_t fds, uint32_t nfds, uint32_t timeout_ms,
                             uint32_t error, uint32_t retval, uint32_t before, uint32_t after);
+extern void entry_note_open(uint32_t caller, uint32_t path, uint32_t flags, uint32_t mode,
+                            uint32_t error, uint32_t fd);
+extern void entry_note_read(uint32_t caller, uint32_t fd, uint32_t buf, uint32_t nbytes,
+                            uint32_t error, uint32_t lo, uint32_t hi,
+                            uint32_t word_before, uint32_t word_after,
+                            uint32_t copy_before, uint32_t copy_after);
 
 /* 481: the kernel's end of the timer chain - the deadline `timer_resync_deadlines` chose and the
  * decrementer value the real `setPop` computed for it, recorded beside what the writer in
@@ -804,6 +810,156 @@ int __wrap_poll(void *proc, void *uap, int *retval)
 
     entry_note_poll(caller, fds, nfds, timeout, (uint32_t)error,
                     (retval != 0) ? (uint32_t)*retval : 0xFFFFFFFFu, before, after);
+    return error;
+}
+
+/* ---------------------------------------------------- the first call a driver answers (504) */
+/*
+ * **`open` and `read`, and what makes this pair a step rather than two more syscall records.** Every
+ * `svc` this fixture has made until now ended in the *kernel's* own machinery: `getpid` in the proc
+ * table, `mmap` in the pmap, `poll` in the timer queue. `open("/dev/rmd0")` ends in `bsd/dev/memdev.c`
+ * - in a `bdevsw`/`cdevsw` entry a driver installed before process 1 existed - and the `read` after it
+ * ends in that driver's `uiomove64`. So the records below are the first in this walk whose *outcome*
+ * depends on a device, which is why the pair is instrumented as two ends of one reading.
+ *
+ * **The declarations are `sysproto.h`'s, and the two slots' mungers are `munge_www`.**
+ * `out/xnu_generated/bsd/sys/sysproto.h` is `int open(struct proc *, struct open_args *, int *);` and
+ * `int read(struct proc *, struct read_args *, user_ssize_t *);` - so `open`'s `uap` is
+ * `{user_addr_t path; int flags; int mode}` and `read`'s is `{int fd; user_addr_t cbuf; user_size_t
+ * nbyte}`, three 4-byte words each on this 32-bit target, which is why both slots name `munge_www` and
+ * why the fixture's three register writes per call are its three arguments with no padding word.
+ * (`read`'s *return* is 64-bit, which does not touch the munger - that is generated from the argument
+ * types - but it does mean the return path writes `save_r1` as well as `save_r0`, which is why the
+ * fixture keeps its page address in `r9`.) `tools/check_sysent_table.py` reads both munger words back
+ * out of the linked image.
+ *
+ * **`read` reads the *buffer* either side of the call, and that is the step's measurement.** The
+ * fixture's `cbuf` is the page 480's `mmap` returned, into whose first word the fixture's own store
+ * wrote the mapping's address - so `before` is a number this image can predict from the *other* keys
+ * and `after` is what the driver wrote there. The value is the fixture's own `MH_MAGIC`: the RAM disk
+ * these pages are is the file the kernel loaded the program from.
+ *
+ * **And that read is `copyin_word`, not a dereference, because 504's first run faulted on the
+ * dereference and the fault is the finding.** Run A wrote `word_before = out[0]` - a plain kernel
+ * load of the user address - and the kernel took a data abort at exactly that instruction
+ * (`pc = __wrap_read+0xb8`, `DFSR = 0x5` = translation fault/section, `DFAR = 0x00102000` = the
+ * fixture's own buffer). Nothing had armed `thread->recover`, so the handler had no recovery address
+ * to point `pc` at: `xnu_live_sleh_seen` ran to its cap of 64 with `pc`/`far` repeating, and the run
+ * has **no `xnu_live_read_*` key at all** - the load is one instruction before `bl __real_read`, so the
+ * `read` never reached `mdevrw` and the record that would have said so is written after the call that
+ * never happened.
+ *
+ * The mechanism is Apple's own and the image states it: a kernel-mode load of a user address is only
+ * valid inside the copy paths. `COPYIO_HEADER(r0, L_copyin_word_fault)`, `COPYIO_SET_RECOVER()`,
+ * `COPYIO_MAP_USER()` and the single `ldr`/`ldrd` between `COPYIO_UNMAP_USER()` and
+ * `COPYIO_RESTORE_RECOVER()` (`osfmk/arm/machine_routines_asm.s:732-746`) are the whole of
+ * `copyin_word`, and `COPYIO_MAP_USER` (`:548-561`) writes the thread's *user* page-table walk table
+ * and ASID into `TTBR0`/`CONTEXTIDR` while `COPYIO_UNMAP_USER` (`:601-610`) puts the kernel's back.
+ * The linked image is what says that pair is compiled in - `__ARM_USER_PROTECT__` is a `#define` and
+ * the four `mcr p15, 0, ..., c2, c0, 0`/`c13, c0, 1` instructions are in this build's `copyout` at
+ * `0x80015d8c-0x80015da0` and `0x80015df0-0x80015e00`, which is where dispatch's own `copyin_word`
+ * `0x80015e14` is written the same way. **So a wrapper that skips all of that is not copying user
+ * memory, it is dereferencing an address that happens to belong to a process** - which is why run A's
+ * fault could not be serviced and why the retry repeated instead of returning `EFAULT`.
+ *
+ * `copyin_word(user_addr, uint64_t *kernel_addr, vm_size_t nbytes)` is the kernel's own answer to
+ * precisely this (`osfmk/kern/misc_protos.h:101`): "Move an aligned 32 or 64-bit word from user space
+ * to kernel space using a single read instruction ... think `*kernel_addr = *(uint32_t *)user_addr`".
+ * It is the same call XNU's own `kern_event.c:2095`, `sys_ulock.c:455` and `thread_policy.c:2367` use
+ * to read one user word, and its three argument widths are this target's: `user_addr_t` and
+ * `user_size_t` are `u_int32_t` with `__arm64__` undefined (`bsd/arm/types.h:82-83`), so all three are
+ * 4-byte words, and the kernel destination is 8 bytes wide because the same call serves a 64-bit read
+ * - the value is 0-extended into it, so the low word is the word. Two of its own rules are visible in
+ * the record rather than assumed: `nbytes` must be 4 or 8 and the user address must be aligned to it
+ * (`:725-730`, `L_copyin_invalid` at `:746` returning `EINVAL`), and both are true of the fixture's
+ * buffer, which is the page `mmap` returned. It is *not* in `TRACE_LDFLAGS`: it is called directly,
+ * and `build_entry.sh` requires it to be defined by this image rather than stubbed for it.
+ *
+ * `copy_before`/`copy_after` are the two calls' returns, so the record says which of the two readings
+ * is a reading: `0` with a word beside it, or the `EFAULT`/`EINVAL` that means the instrument could
+ * not read the user's page at all - which is the case run A could not even print.
+ *
+ * **Neither wrapper branches on its answer and neither changes it.** Both return the syscall's own
+ * `int` unchanged, for the reason `__wrap_poll` gives: this file's `__wrap_thread_block` once ended in
+ * a tail call and left `r0` holding whatever ran last.
+ */
+int __real_open(void *proc, void *uap, int *retval);
+int __real_read(void *proc, void *uap, void *retval);
+
+/* `copyin_word`'s declaration, written here rather than taken from `<kern/misc_protos.h>` because
+ * this file includes no XNU header: it is the ABI above, with this target's `user_addr_t` spelled as
+ * the 4-byte word `bsd/arm/types.h` defines it to be. The kernel buffer is `uint64_t` because
+ * `copyin_word` requires an 8-byte destination and zero-extends a 32-bit read into it. */
+extern int copyin_word(const uint32_t user_addr, uint64_t *kernel_addr, uint32_t nbytes);
+
+int __wrap_open(void *proc, void *uap, int *retval)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    const uint32_t *given = (const uint32_t *)uap;
+    uint32_t path = 0xFFFFFFFFu, flags = 0xFFFFFFFFu, mode = 0xFFFFFFFFu;
+    uint32_t fd = 0xFFFFFFFFu;
+    int error;
+
+    if (given != 0) {
+        path = given[0];
+        flags = given[1];
+        mode = given[2];
+    }
+
+    error = __real_open(proc, uap, retval);
+    if (retval != 0)
+        fd = (uint32_t)*retval;
+
+    entry_note_open(caller, path, flags, mode, (uint32_t)error, fd);
+    return error;
+}
+
+int __wrap_read(void *proc, void *uap, void *retval)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    const uint32_t *given = (const uint32_t *)uap;
+    uint32_t fd = 0xFFFFFFFFu, buf = 0xFFFFFFFFu, nbytes = 0xFFFFFFFFu;
+    uint32_t lo = 0xFFFFFFFFu, hi = 0xFFFFFFFFu;
+    uint32_t word_before = 0xFFFFFFFFu, word_after = 0xFFFFFFFFu;
+    uint32_t copy_before = 0xFFFFFFFFu, copy_after = 0xFFFFFFFFu;
+    int error;
+
+    if (given != 0) {
+        fd = given[0];
+        buf = given[1];
+        nbytes = given[2];
+    }
+
+    /*
+     * The two reads of the user's buffer, both through the kernel's own copy path, both taken with
+     * the length the fixture asked for. `word` is a `uint64_t` because `copyin_word` requires one and
+     * zero-extends a 32-bit read into it; only the low word is published, which is the word.
+     */
+    if (buf != 0u) {
+        uint64_t word = 0;
+
+        copy_before = (uint32_t)copyin_word(buf, &word, 4u);
+        if (copy_before == 0u)
+            word_before = (uint32_t)word;
+    }
+
+    error = __real_read(proc, uap, retval);
+
+    if (buf != 0u) {
+        uint64_t word = 0;
+
+        copy_after = (uint32_t)copyin_word(buf, &word, 4u);
+        if (copy_after == 0u)
+            word_after = (uint32_t)word;
+    }
+    if (retval != 0) {
+        const uint32_t *words = (const uint32_t *)retval;
+        lo = words[0];
+        hi = words[1];
+    }
+
+    entry_note_read(caller, fd, buf, nbytes, (uint32_t)error, lo, hi,
+                    word_before, word_after, copy_before, copy_after);
     return error;
 }
 
