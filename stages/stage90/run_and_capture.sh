@@ -212,6 +212,19 @@ step "capturing the payload log"
 if [[ $DRY_RUN -eq 1 ]]; then
   say "would run: sudo adb -s $SERIAL exec-out 'cat /proc/last_kmsg' > $LOGFILE"
 else
+  # **The `rm` is not tidiness; it is what makes the redirect work at all on this host.** The log
+  # usually exists already, and it is usually owned by the invoking user - because the natural way to
+  # re-capture by hand is `sudo adb ... > /tmp/cancro-last_kmsg.txt`, where the *shell* does the
+  # redirect and so the file belongs to whoever typed it. `sudo` cannot then reopen that file, and the
+  # three observations that pin it down are these: root's `O_CREAT` on the existing file is refused
+  # (`Permission denied`), root's `rm -f` on the same file succeeds, and root's creation of a file that
+  # does not exist yet succeeds - which is the signature of a sticky `/tmp` with
+  # `fs.protected_regular` and a root that has no `CAP_FOWNER` to override it. (The sysctl itself is
+  # not readable from this container; the three commands are.) 511's first run died here *after* the
+  # boot, which is the worst place for it - the run is spent and the log is only reachable until the
+  # device takes its next boot. Removing the file first makes the redirect a creation, which needs only
+  # write permission on the directory.
+  rm -f "$LOGFILE"
   sudo adb -s "$SERIAL" exec-out 'cat /proc/last_kmsg' > "$LOGFILE" || \
     die "could not read /proc/last_kmsg"
   say "wrote $(wc -c < "$LOGFILE") bytes to $LOGFILE"

@@ -207,6 +207,14 @@ extern uint32_t entry_note_entrypoint(uint32_t caller, uint32_t thread, uint32_t
                                       uint32_t entry_hi, uint32_t before);
 extern void entry_note_entrypoint_returned(uint32_t seq, uint32_t entry, uint32_t after);
 
+/* 511: the other end of the same word - the AST whose return is the kernel's return to user mode. The
+ * pair brackets everything the AST did, which for the first call is the exec itself, so `_after` is
+ * 510's entry point arriving at the place `load_and_go_user` returns from. `_sp`/`_cpsr` are read with
+ * it because the user-mode fault records already name both. See the wrapper below. */
+extern uint32_t entry_note_ast(uint32_t caller, uint32_t thread, uint32_t before);
+extern void entry_note_ast_returned(uint32_t seq, uint32_t after, uint32_t sp, uint32_t cpsr,
+                                    uint32_t pid);
+
 /* **The kernel's real `printf`, declared rather than included - and the only function this file calls
  * on the console path.** `osfmk/kern/printf.c` is where `load_init_program`'s own messages come from
  * (`bl 800399b4 <printf>` immediately before each of its four `load_init_program_at_path` calls in
@@ -1407,6 +1415,117 @@ void __wrap_thread_setentrypoint(void *thread, uint64_t entry)
 
     printf("mini4: the OS starts the process at 0x%x (the thread's user pc was 0x%x)\n",
            (uint32_t)entry, before);
+}
+
+/* ------------------------- the kernel's own way out to user mode (511) */
+/*
+ * **510 names the entry point; this names the return.** The two are different events and only the
+ * second is the process running. Between them lies a path this image has never had a record in:
+ *
+ *     activate_exec_state          (the exec's own state commit - 510's call site)
+ *       -> execve -> load_init_program -> bsdinit_task
+ *         -> bsd_ast               (bsd/kern/kern_sig.c, called by ast_taken_user)
+ *           -> ast_taken_user      (osfmk/kern/ast.c, called by locore.s's load_and_go_user)
+ *             -> load_and_go_user  (the tail of thread_exception_return, locore.s:1897-1943)
+ *
+ * `thread_bootstrap_return` is a label at `load_and_go_user`'s head and nothing calls it - it is a
+ * `thread_continue_t`, an *address* a new thread's PCB is set to and jumped to, which is why the
+ * standing list carried it as a name and why it cannot be wrapped: a C wrapper would put a prologue
+ * and a `bx lr` in the path of a thread that never had a return address. **`bsd_ast` can be**, and it
+ * is the earliest point on that path where the return to user mode is one instruction away and the
+ * thread's saved state is already the state `load_and_go_user` is about to restore.
+ *
+ * **The wrapper's question is the one 509 left open.** 509 measured that the init image is loaded by a
+ * thread running in `kernproc` (`xnu_live_exec_done_current = 0`) and promoted "what starts pid 1's
+ * own thread at a user PC" to the frontier. This wrapper answers it with three numbers that are read
+ * and not inferred: the thread's saved PC before the AST, the same word after it, and the pid
+ * `current_proc()` reports *after* the AST has finished. `_before` is what a thread with no user-mode
+ * history had in that word - a value nothing in this project has ever read - and `_after` should be
+ * 510's entry point, on 510's thread, with a pid that says which process the thread belongs to now.
+ *
+ * **Why the pair is worth a run rather than an argument.** `_after` alone would be 510's number read
+ * twice; the pair is what shows the AST is where it changed. And `_before` is the falsifier for a
+ * possibility no other record can see: if the thread was created with `cloneproc` in
+ * `bsd_utaskbootstrap` (`bsd_init.c:1135-1166`, "clone the bootstrap process from the kernel process")
+ * then it is a thread that has never been in user mode, and its saved PC is whatever that clone left -
+ * not an entry point, and not the exec's answer either.
+ *
+ * **The first run answered that with two calls, and the answer is richer than the prediction.** The
+ * measured records are `_seq = 1` on thread `0xc050bec0` with `_before = _after = _sp = 0`,
+ * `_cpsr = 0x10` and **`_pid = 0`**, then `_seq = 2` on thread `0xc0545830` with
+ * `_before = _after = 0x000010e0`, `_sp = 0x00101efc`, `_cpsr = 0x10` and **`_pid = 1`**. So the
+ * zeroed saved state belongs to the **first** call - the bootstrap thread, which has indeed never been
+ * in user mode - while pid 1's thread is *not* zeroed by the time its AST arrives, because **the exec
+ * that writes 0x10e0 runs *inside the first AST*** (`bsd_ast` → `bsdinit_task` → `load_init_program` →
+ * `execve` → `activate_exec_state` → `thread_setentrypoint`, and 509's and 510's console lines both
+ * come from inside `_seq = 1`). The prediction was that the cloned thread would carry the empty state;
+ * the run says the empty state is the *bootstrap* thread's and that the exec has already run by the
+ * time the second AST is delivered. `xnu_live_ast_calls` is what makes the two calls visible as two
+ * rather than one, and the `_thread` pointer is what joins them to the other two records below.
+ *
+ * **`_sp` and `_cpsr` are read with it because other records already name both**, which is what turns
+ * three numbers into one route: 510's run has user-mode faults at `0x1118`/`0x1124` with
+ * `xnu_live_sleh_sp = 0x00101efc` and `cpsr` mode bits `0x10`, so a `_sp` here that agrees is the same
+ * user stack, and a `_cpsr` here whose mode bits are `0x10` is the mode `load_and_go_user` demands -
+ * it compares them itself and calls `ExceptionVectorPanic` on anything else (`locore.s:1988-1991`).
+ *
+ * **The guard on `thread != 0` and the guard on the print are two different guards.** The first is
+ * 504's rule (a null thread is a dereference, not a reading); the second is 509's (the console is the
+ * durable artifact, so the line on it has to name the event this step is about). `bsd_ast` runs for
+ * every AST_BSD delivery, and the fixture's own `SIGCHLD` (507) is one, so the print is on the first
+ * call whose thread has a user PC - see the condition below - and the count is published as
+ * `xnu_live_ast_calls` instead.
+ */
+void __real_bsd_ast(void *thread);
+void __wrap_bsd_ast(void *thread)
+{
+    const uint32_t pc_delta = (STAGE90_ACT_PCBDATA + STAGE90_SS_PC) / 4;
+    const uint32_t sp_delta = (STAGE90_ACT_PCBDATA + STAGE90_SS_SP) / 4;
+    const uint32_t cpsr_delta = (STAGE90_ACT_PCBDATA + STAGE90_SS_CPSR) / 4;
+    static uint32_t ast_printed;
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    uint32_t before = 0xFFFFFFFFu, after = 0xFFFFFFFFu;
+    uint32_t sp = 0xFFFFFFFFu, cpsr = 0xFFFFFFFFu;
+    uint32_t pid = 0xFFFFFFFFu;
+    uint32_t seq;
+
+    if (thread != 0)
+        before = ((const volatile uint32_t *)thread)[pc_delta];
+
+    seq = entry_note_ast(caller, (uint32_t)(uintptr_t)thread, before);
+    __real_bsd_ast(thread);
+
+    if (thread != 0) {
+        after = ((const volatile uint32_t *)thread)[pc_delta];
+        sp = ((const volatile uint32_t *)thread)[sp_delta];
+        cpsr = ((const volatile uint32_t *)thread)[cpsr_delta];
+    }
+
+    {
+        void *now = current_proc();
+
+        if (now != 0)
+            pid = (uint32_t)proc_pid(now);
+    }
+
+    entry_note_ast_returned(seq, after, sp, cpsr, pid);
+
+    /*
+     * **The print is on the call whose thread has a user PC, and the first build's line is why.**
+     * That build printed on `seq == 1` and the run answered `mini4: the AST is done -- pid 0's thread
+     * is at 0x0 for user mode`: the *first* AST is delivered on the **bootstrap** thread, whose saved
+     * state is all zero because it has never been in user mode, and whose `current_proc()` is
+     * `kernproc`. The AST that carries pid 1's thread out to user mode is the **second** one, on the
+     * thread the exec wrote 0x10e0 into - so a line printed on the first call was, in the walk's own
+     * recurring defect, a durable artifact naming the wrong event. The condition below is a reading
+     * (`after != 0` is "this thread has a user PC to return to") rather than a position in a count, and
+     * the once-flag keeps it to one line whatever the AST count turns out to be.
+     */
+    if (after != 0u && ast_printed == 0u) {
+        ast_printed = 1u;
+        printf("mini4: the AST is done -- pid %d's thread is at 0x%x for user mode (sp 0x%x)\n",
+               pid, after, sp);
+    }
 }
 
 /* ---------------------------------------------------- the kernel's own timer deadline (481) */

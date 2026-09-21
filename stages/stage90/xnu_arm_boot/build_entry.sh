@@ -76,7 +76,7 @@ ARGS_BYTES=0x00001000          # one page, which is what `boot_args` needs to fi
 REAL_ARM_INIT=${STAGE90_ENTRY_REAL_ARM_INIT:-0}
 STUB_DEFINES=()
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES=(-DSTAGE90_ENTRY_REAL_ARM_INIT=1)
-# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s the sixty-eight symbols listed in
+# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s the sixty-nine symbols listed in
 # `TRACE_LDFLAGS` below - `kalloc_canblock`,
 # `lck_grp_alloc_init`, `kernel_memory_allocate`, `vm_page_wait`, `thread_block`, (447)
 # `ml_get_max_cpus`, `ml_init_max_cpus`, (448) `IODeviceTreeAlloc`, `IOWorkLoop::workLoop`,
@@ -141,6 +141,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=wait4
                    --wrap=load_init_program
                    --wrap=thread_setentrypoint
+                   --wrap=bsd_ast
                    --wrap=psignal
                    --wrap=setPop
                    --wrap=PE_init_platform --wrap=fiq_context_init
@@ -27557,6 +27558,46 @@ verify_trace_symbols() {
     [[ "$two" == "$total" && "$three" == "$total" ]] ||
         layout_fail "of 510's $total call(s) to the real thread_setentrypoint, $two write r2 first and $three write r3 - the entry is a 64-bit argument and travels in r2:r3 (see the caller's own object: \`ldr r2, [r8, #4]\` / \`mov r3, #0\`), so a call that leaves either alone passes the caller's leftover word. That is 510's first run exactly: the wrapper declared the parameter uint32_t, read r1, and the run recorded \`_entry = 0x8\` while pid 1 started at the junk and exited"
     say "  xnu_entry_510: all $total call(s) to the real thread_setentrypoint are inside the wrapper and every one writes r2 and r3, so the 64-bit entry is passed through as the pair the caller used - the first build declared it 32-bit, read r1 and left r3 alone, and stored a stale word as pid 1's entry point"
+
+    # **511's wrapper, and its clause is the one that says the route is a route.** The name is
+    # `bsd_ast` - the function `ast_taken_user` calls on the way out to user mode, whose own return is
+    # followed by `load_and_go_user`'s restore-and-return (`osfmk/arm/locore.s:1897-1943`) - and it is
+    # defined in `bsd/kern/kern_sig.c` while its only caller is `osfmk/kern/ast.c`, a different object,
+    # so `--wrap` sees a genuinely undefined reference: 455's condition. Three things are asserted, and
+    # the third is the one this step would otherwise have to take on trust.
+    grep -qx "bsd_ast" "$OUT/xnu_arm_entry_undef.txt" &&
+        layout_fail "511's instrument calls bsd_ast through \`__real_\` and the pass-1 undefined set contains it - nothing in this image defines it, so the state the run reads back would be a fact about the stand-in and not about the kernel"
+    bast=$(sym_addr bsd_ast) || layout_fail "bsd_ast is not in the linked image - the function whose return is the kernel's return to user mode is not here, so 511 has no route to measure"
+    bwrap=$(sym_addr __wrap_bsd_ast) || layout_fail "__wrap_bsd_ast is not in the linked image - --wrap=bsd_ast did not link, and the run's absence of xnu_live_ast_* records would say nothing about the boot"
+    atu=$(sym_addr ast_taken_user) || layout_fail "ast_taken_user is not in the linked image - 511's clause needs the function the AST is delivered from to read the call site out of"
+    atunext=$(sym_next "$atu") || true
+    [[ -n "$atunext" ]] || layout_fail "no symbol follows ast_taken_user in the image, so its instruction range cannot be read"
+    # **The reader captures the disassembly into a variable instead of piping into `grep -q`, and that
+    # is a precaution rather than a diagnosis.** The first build of this clause failed here, with the
+    # sentence below, on an image whose disassembly contains the branch - and the identical command
+    # re-run by hand, 200 times in a row, matched every time, as did a full re-build. The cause is
+    # therefore **not established**, and it is recorded as such: a one-off that recurs is a race, and
+    # the one race this file can name is the one it already carries twice - `set -o pipefail` (line 25)
+    # turns `objdump | grep -q` into a pipeline whose left side can die of SIGPIPE the moment `grep`
+    # exits on its match, reporting a successful match as exit 141 (the `strings ... | grep -q` note
+    # above, and the reader at 27287). A check that can fail without the artifact being wrong is worse
+    # than no check, because the sentence it prints is believed; this form has no pipe, so the exit
+    # status is `grep`'s and nothing else's.
+    atu_dis=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$atu" --stop-address="$atunext")
+    grep -q "bl[[:space:]]\+${bwrap#0x} <__wrap_bsd_ast>" <<<"$atu_dis" ||
+        layout_fail "ast_taken_user ($atu..$atunext) does not branch to __wrap_bsd_ast ($bwrap) - the AST delivery went to the real bsd_ast (455's same-object case) or the flag list lost the name, and either way nothing on the kernel's way out to user mode is recorded"
+    # **And the wrap cannot reach a continuation slot, which is why this function and not the one next
+    # to it.** `thread_exception_return` is the *other* half of this path and it is deliberately not
+    # wrapped: it is a `thread_continue_t`, an address stored into a PCB and jumped to by machinery that
+    # never returns, so a C wrapper there would put a prologue and a `bx lr` in front of a thread with
+    # no return address. `bsd_ast` is safe because every reference to it in this tree is a call - one
+    # `R_ARM_CALL` relocation in `osfmk_kern_ast.o` and nothing else - and that is a property of the
+    # objects, so it is checked here rather than reasoned about in a comment.
+    brefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o 2>/dev/null |
+        awk '/[[:space:]]bsd_ast$/ && $0 !~ /bsd_init_done/ { print $2 }' | sort -u | tr '\n' ' ')
+    [[ "$brefs" == "R_ARM_CALL " ]] ||
+        layout_fail "the objects in this pool reference bsd_ast with [$brefs] and 511's wrap is only sound while every reference is a call - an R_ARM_ABS32/MOVW/MOVT would be an address taken, and --wrap rewrites those too, so the wrapper's address could end up in a continuation slot that a thread is jumped to and never returns from"
+    say "  xnu_entry_511: bsd_ast is the kernel's own (defined in bsd/kern/kern_sig.c, not in pass 1's undefined set), its only caller ast_taken_user ($atu) is in a different object and branches to the wrapper ($bwrap), and every reference to it in the pool is a call ($brefs) - so the record around it is the kernel's own return path to user mode and no continuation slot can hold the wrapper"
 
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls
     # `_ZNK9IOService8getStateEv` by mangled name on objects whose dynamic type this file cannot know -

@@ -4912,6 +4912,77 @@ void entry_note_entrypoint_returned(uint32_t seq, uint32_t entry, uint32_t after
     entry_live_write("xnu_live_entrypt_after", after);
 }
 
+/* ---------------------------- the kernel's own way out to user mode (511) */
+/*
+ * **The other end of 510's measurement, and the reason the route is a reading rather than a story.**
+ *
+ * 510 measures the *decision*: `thread_setentrypoint(thread, entry)` stores `entry` into the thread's
+ * saved PC, and the run reads `_entry = _before = _after = 0x000010e0` on thread `0xc05c81a0`. What it
+ * cannot see is the *return* - the moment the kernel actually goes back to user mode and the process
+ * begins running at that PC. Between the store and the first user-mode instruction there is a path
+ * this image's own records had never named: `thread_setentrypoint` is called from `activate_exec_state`
+ * ← `execve` ← `load_init_program` ← `bsdinit_task` ← **`bsd_ast`** ← `ast_taken_user` ←
+ * `load_and_go_user`, and `load_and_go_user` is the tail of `locore.s`'s `thread_exception_return`
+ * (`osfmk/arm/locore.s:1897-1943`). So the function whose return is the return to user mode is
+ * `bsd_ast`, and everything the route needs is in one place there.
+ *
+ * **`bsd_ast(thread_t thread)` is the right function to wrap, and the argument is why.** It takes the
+ * thread, so the wrapper does not have to ask which one; and `ast_taken_user` calls it from a
+ * *different object* (`osfmk/kern/ast.c` calls it, `bsd/kern/kern_sig.c` defines it), so `--wrap` sees
+ * a genuinely undefined reference - 455's condition, which `thread_exception_return` would have failed
+ * in the other direction: that one is used as a *continuation address* (`thread_continue_t`, set into
+ * a PCB and jumped to by machinery that never returns), and a C wrapper there would put a prologue in
+ * the path of a thread that has no return address. `bsd_ast` is called, not branched to.
+ *
+ * **The pair is on the same word 510 read, one frame out.** `STAGE90_ACT_PCBDATA` is the thread's
+ * user saved state and `SS_PC` is its PC, so reading `thread + ACT_PCBDATA + SS_PC` before
+ * `__real_bsd_ast` and again after it brackets everything the AST did - and the AST is what runs
+ * `bsdinit_task` → `load_init_program` → the exec. So `_before` is the word a thread with no user-mode
+ * history had, and `_after` is the exec's own entry point arriving at the place the kernel returns
+ * from. **`_sp` and `_cpsr` are read with it** because two other records already name them: 510's run
+ * has user-mode faults at `0x1118`/`0x1124` with `_sp = 0x00101efc` and `cpsr` mode bits `0x10`, so a
+ * `_sp` that agrees is the user stack the faults were taken on, and a `_cpsr` whose mode is not
+ * `PSR_USER_MODE` would be a thread `load_and_go_user` is about to panic on
+ * (`locore.s:1988-1991`: `and r3, r4, #PSR_MODE_MASK` / `cmp r3, #PSR_USER_MODE` /
+ * `bne ExceptionVectorPanic`). Every value here is read at one instant and none of them is inferred.
+ *
+ * **`_pid` is `current_proc()`, and that is deliberately the same call 509 used.** 509 measured
+ * `_done_current = 0` from inside `load_init_program` - the loader runs on `kernproc` - so the same
+ * key here, read after the AST has finished, says which process the thread belongs to *now*. A `1`
+ * would say the AST re-parented the thread; a `0` says it did not and the identity in `_who` came from
+ * somewhere else. The key is published rather than argued.
+ *
+ * **The console prints once and the records do not.** `bsd_ast` runs on every AST_BSD delivery, and
+ * the fixture's own `SIGCHLD` (507) is one, so the count is not one - but the first call is the one
+ * that carries the exec, and it is the one the console block should name. `g_ast_calls` is published
+ * so a reader can see how many there were, and the print is guarded on the first.
+ */
+uint32_t g_ast_calls;
+
+uint32_t entry_note_ast(uint32_t caller, uint32_t thread, uint32_t before)
+{
+    uint32_t seq = g_ast_calls + 1u;
+
+    entry_live_write("xnu_live_ast_seq", seq);
+    entry_live_write("xnu_live_ast_caller", caller);
+    entry_live_write("xnu_live_ast_thread", thread);
+    entry_live_write("xnu_live_ast_before", before);
+
+    g_ast_calls++;
+    return seq;
+}
+
+void entry_note_ast_returned(uint32_t seq, uint32_t after, uint32_t sp, uint32_t cpsr,
+                             uint32_t pid)
+{
+    entry_live_write("xnu_live_ast_done_seq", seq);
+    entry_live_write("xnu_live_ast_after", after);
+    entry_live_write("xnu_live_ast_sp", sp);
+    entry_live_write("xnu_live_ast_cpsr", cpsr);
+    entry_live_write("xnu_live_ast_pid", pid);
+    entry_live_write("xnu_live_ast_calls", g_ast_calls);
+}
+
 /* Experiment 456's probe, defined below its first caller; the declaration is here because
  * `entry_note_iolock` is where the reading is taken (see `entry_registry_probe`). */
 __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);
