@@ -418,6 +418,41 @@ for `#8192` in the compiled body and the compiler had folded `intstack + 8192` i
 configuration's `INTSTACK_SIZE`, and the store is its own symbol (`entry_istack_store`) precisely so
 that "is the change in the image" is a fact the build can look up rather than match by shape.
 
+### What the arm does not break, checked rather than assumed
+
+`istackptr` is written exactly twice in this kernel (`arm_init.c:227`, `cpu.c:294`, both
+`= intstack_top`) and **read by eight sites** in `osfmk/arm/locore.s` and `cswitch.s` — the IRQ, FIQ,
+data-abort and prefetch-abort kernel paths, and the two context-switch paths — every one of which reads
+it as *"where to put this stack"*. That is precisely the field 518 changes, so the change is the field's
+meaning and not a side effect on it.
+
+The two places that compare against the *window* rather than the field still hold: `ml_at_interrupt_context()`
+(`machine_routines.c:671`) and KDP's backtracer (`kdp/ml/arm/kdp_machdep.c:498` and `:669`, the two
+`prevfp >= intstack_top - INTSTACK_SIZE && prevfp < intstack_top` tests) both test membership in
+`[intstack_top − 16384, intstack_top)`, and the middle of that range is in it. `ml_stack_remaining()`
+(`:992`) measures from `intstack_top − INTSTACK_SIZE` whatever `sp` is, so a handler running in the lower
+half is measured the same way.
+
+And the overflow boundary is better, not worse: below `intstack`'s 16 KB sits `excepstack`'s 4 KB
+(`data.s:48-52`), whose pointer `excepstackptr` (`arm_init.c:232`) **nothing in this tree reads** — so a
+handler that overran its 8 KB would land in unused storage, where before the arm it landed in the frame
+and said nothing.
+
+### Why the net may not have fired, as a hypothesis
+
+The watchdog's arming is proved at arm time and 506–515 all came back on its bite, so "517's run needed a
+power press" wants an explanation rather than a shrug. The collision supplies a candidate one: the same
+overwrite that put a timebase in `SS_PC` takes `SS_SP` a few tens of bytes deeper, and
+`load_and_go_sys` restores `sp` from `[ip, #52]` — so the CPU returns with a wild stack, and from there
+into a state this project cannot describe: a second abort taken in Abort mode, or a `cpsid`-masked loop
+with the vectors no longer where the exception needs them. **A secure-mode watchdog interrupt cannot be
+delivered to a core whose exception state is UNPREDICTABLE, and `hw_watchdog.c`'s own header already says
+the bite is TrustZone-mediated** rather than independent of all software. That also fits the two runs
+that *did* return: 516's handler was shallow enough to leave `SS_LR` and `SS_SP` intact (it panicked and
+`MACH Reboot`ed), and a deeper one in 517 would not be. This is a hypothesis with a mechanism, not a
+reading, and the arm is the test: 518 removes the collision, so if the net's silence was the collision's
+consequence, the next run either returns or comes back on the bite.
+
 ## What is owed
 
 1. **The measurement arm's run** — `STAGE90_XNU_EXIT_POC_FLUSH=0`, `stage90-qcdt.img` sha256
