@@ -77,13 +77,60 @@ static void build_stage90_apple_dt(struct apple_dt_builder *b)
 
     apple_dt_begin(b, g_apple_dt, sizeof(g_apple_dt));
 
-    /* root: 4 properties, STAGE90_APPLE_DT_ROOT_CHILDREN children - the count mmu.c's
-     * "high root dt summary" step validates, so both sides read one constant. */
-    apple_dt_node_begin(b, 4, STAGE90_APPLE_DT_ROOT_CHILDREN);
+    /*
+     * root: 6 properties, STAGE90_APPLE_DT_ROOT_CHILDREN children - the count mmu.c's
+     * "high root dt summary" step validates, so both sides read one constant.
+     *
+     * **`#address-cells` and `#size-cells` (493) are what makes XNU able to answer "where is this
+     * device".** `IOService::getResources` on a nub is `IOPlatformDevice::getResources`
+     * (`IOPlatformExpert.cpp:1700-1703`), which is `((IOPlatformExpert *)getProvider())->
+     * getNubResources(this)`, and that is `IODTResolveAddressing( nub, "reg", 0 )`
+     * (`:1358-1366`). `IODTResolveAddressing` (`IODeviceTreeSupport.cpp:1206-1254`) reads the
+     * *parent's* cell counts and turns them into the width of one `reg` entry:
+     *
+     *     :1227   IODTGetCellCounts( parentEntry, &sizeCells, &addressCells );
+     *     :1230   cells = sizeCells + addressCells;
+     *     :1232   num = addressProperty->getLength() / (4 * cells);
+     *
+     * and `IODTGetCellCounts` (`:1034-1041`) has **defaults** for a node that says nothing:
+     * `#size-cells` 1, `#address-cells` **2**. So a tree that writes {address, size} pairs and never
+     * declares its cell counts is read as if each entry were three words - 0x1000 here is not an
+     * error, it is Apple's default applied to a tree that did not answer the question. The three
+     * device arrays below (`gic_reg`, `timer_reg`, `platform_driver_reg`) and `io_ranges` are all
+     * `{u32 address, u32 size}`, and `memory_reg`, `ram_console_reg` too, so the two properties here
+     * are the whole of the missing declaration and they are true of every `reg`/`ranges` in this
+     * tree. `cpu_service_reg` is the one array that is not address pairs - it is the cpu indices the
+     * scaffold node publishes - and it belongs to a node no driver claims.
+     *
+     * The parent these are read from is not the root node itself but the entry that carries its
+     * properties: 486 measured that the registry's IODT child is the `IOPlatformExpertDevice`
+     * `StartIOKit` builds and that its property table is a **shallow copy of the tree root's**
+     * (`IORegistryEntry::init(old, plane)`), which is why a property written here is readable one
+     * level up from a nub.
+     *
+     * **What the resolution then does with them is an identity passthrough, and that is deliberate
+     * on Apple's side and load-bearing here.** `IODTResolveAddressCell` (`:1050-…`) starts at the
+     * parent and walks *upward* looking for a `ranges` property; the parent here has none, so the
+     * first iteration takes the "end of the road" arm (`:1090-1094`) and returns the entry's own
+     * address unchanged (`*phys = CellsValue( childAddressCells, cell )`). The absolute addresses in
+     * this tree are therefore resolved as absolute - no `ranges` needs to be rewritten - and
+     * `CellsValue`'s arm branch (`:1026-1027`) reads a two-cell value as
+     * `IOPhysical32( cells[1], cells[0] )`, i.e. **low word first**, which is the order a device
+     * tree writes them.
+     *
+     * The value of the two properties is measured rather than argued: `MSM8974Timer`'s driver reads
+     * `provider->getDeviceMemory()` - the array `IODTResolveAddressing` files under
+     * `gIODeviceMemoryKey` (`:1251`) - and publishes the count and the first entry's physical
+     * address and length beside the node's own `reg` words, so "the OS answered with these
+     * addresses" is a reading of the run and not a reading of this comment.
+     */
+    apple_dt_node_begin(b, 6, STAGE90_APPLE_DT_ROOT_CHILDREN);
     apple_dt_prop_str(b, "name", "/");
     apple_dt_prop_str(b, "compatible", "qcom,msm8974-xnu-stage90");
     apple_dt_prop_str(b, "model", "Xiaomi Mi 4 cancro Stage84");
     apple_dt_prop_str(b, "target-type", "cancro");
+    apple_dt_prop_u32(b, "#address-cells", 1);
+    apple_dt_prop_u32(b, "#size-cells", 1);
 
 
     /* /device-tree: public ARM XNU pexpert looks up name="device-tree" for model/target-type. */

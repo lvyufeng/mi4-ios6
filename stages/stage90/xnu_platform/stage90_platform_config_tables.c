@@ -62,8 +62,9 @@
  * what makes the match a property of the *catalogue* rather than of the device tree.
  *
  * The entries are placed **before** Apple's fallback, and in the boot's own order after that: the
- * platform expert that names this machine, the driver for the first device node it publishes (492),
- * the driver that makes its resource root match, and Apple's designed fallback last as it was. The
+ * platform expert that names this machine, the drivers for the device nodes it publishes (492's timer
+ * and 493's interrupt controller), the driver that makes its resource root match, and Apple's designed
+ * fallback last as it was. The
  * order is not what makes the matching work - `addPersonality` buckets each entry by its
  * `IOProviderClass`, so the array's order only decides the *scores* of entries that share one bucket -
  * but it is what makes this file readable as the boot it describes.
@@ -95,6 +96,23 @@
  * `MSM8974Timer.cpp` holds both names as well, and `tools/check_driver_catalogue.py` compares the two
  * lists - one value, two definitions, and this time compared.
  *
+ * **And a fourth entry (493), which is the second driver in the same bucket.** 492's mechanism had
+ * three parts that could each have been a property of that one node - the bucket (`IOPlatformDevice`),
+ * the probe score, and the name bridge - and one driver cannot tell "the table matches nodes" from
+ * "this node happened to work". So the same three parts are stated again for `/interrupt-controller`
+ * (`compatible = "qcom,msm-qgic2"`), whose names `MSM8974Timer`'s cannot match: `probeCandidates`
+ * walks the whole bucket for every nub, so **both** personalities are probed against **both** nodes
+ * and each run's record says which one started and on which node (`MSM8974GIC.cpp`'s `_match` = 3 or a
+ * start whose `_prov` is the other node would be the falsification). The node is picked for a second
+ * reason as well: 482 and 483 already measured this machine's GIC from the payload side, so the
+ * addresses this entry's driver resolves are addresses this project holds an independent reading of.
+ *
+ * The two entries share a bucket and an `IOProbeScore`, which is correct rather than sloppy: a score
+ * ranks **siblings in one provider-class array** (`IOServiceOrdering` over `gIOProbeScoreKey`) and is
+ * only consulted when more than one entry could claim the same provider, which two entries naming
+ * disjoint node names cannot. What the pair measures is the thing a single driver cannot - that the
+ * bucket is searched for every nub and the *candidate test* is what selects, not the bucket's size.
+ *
  * No `CFBundleIdentifier`, deliberately: `probeCandidates` stalls on
  * `gIOCatalogue->isModuleLoaded(match)` (`IOService.cpp:3253`) and that function's answer is "true" for
  * exactly the personalities that carry no bundle id, "assumed to be an in-kernel driver"
@@ -117,6 +135,12 @@ const char * gIOKernelConfigTables =
     "     'IOClass'         = MSM8974Timer;"
     "     'IOProviderClass' = IOPlatformDevice;"
     "     'IONameMatch'     = (timer, \"qcom,msm-timer\");"
+    "     'IOProbeScore'    = 1616:32;"
+    "   },"
+    "   {"
+    "     'IOClass'         = MSM8974GIC;"
+    "     'IOProviderClass' = IOPlatformDevice;"
+    "     'IONameMatch'     = (interrupt-controller, \"qcom,msm-qgic2\");"
     "     'IOProbeScore'    = 1616:32;"
     "   },"
     "   {"

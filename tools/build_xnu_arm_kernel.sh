@@ -1224,8 +1224,15 @@ done
 # reads this list to check that the class each personality names exists in the link: a personality
 # naming a class no object defines is `OSMetaClass::allocClassWithName` failing at match time, which
 # prints nothing and starts nothing.
+#
+# **493's `MSM8974GIC.cpp` is the fourth, and the second under the same provider class as the timer.**
+# It compiles exactly as the other three do; what it adds is a second node, so that "the catalogue's
+# `IOPlatformDevice` bucket is searched for every nub and the *candidate test* is what selects" is a
+# statement one run can falsify - `probeCandidates` probes every entry in the bucket against every nub,
+# and two entries that name disjoint node names must each start on their own node and no other.
 PLATFORM_SOURCES=("$REPO_ROOT/stages/stage90/xnu_platform/MSM8974PlatformExpert.cpp"
                   "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974Timer.cpp"
+                  "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974GIC.cpp"
                   "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974RootResource.cpp")
 
 # And the two answers the platform expert above gives `IODTPlatformExpert::processTopLevel`, checked
