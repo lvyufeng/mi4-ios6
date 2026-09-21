@@ -553,8 +553,10 @@
  *            (the first eight bytes are 0x67617473 / 0x5f303965, "stag" / "e90_")
  *     caller: 0x80294150 = proc_exit + 0x188
  *
- * `proc_exit` calls `pth_proc_hashdelete(p)` (`bsd/kern/kern_exit.c:1105`, under `#if PSYNCH`) 275
- * source lines *before* the notify block, and the shim is Apple's own three lines -
+ * `proc_exit` calls `pth_proc_hashdelete(p)` (`bsd/kern/kern_exit.c:1105`, under `#if PSYNCH`) **338**
+ * source lines *before* the notify block (`:1443`) - this paragraph said 275 when it was written, which
+ * was an estimate repeated rather than a distance computed from the two line numbers, and 507's run is
+ * what closed it - and the shim is Apple's own three lines -
  * `bsd/kern/pthread_shims.c:364`: `pthread_functions->pth_proc_hashdelete(p)` - which is the `ldr r1,
  * [r1, #36]` / `bx r1` at `0x80205d0c..0x80205d1c` in the linked image. The slot this image's table
  * fills is a stand-in (`stage90_pthread_functions.c:477`), and a stand-in is **terminal**:
@@ -562,11 +564,22 @@
  * (`entry_stubs.c:6107`). So the child's `exit` reached the kernel's teardown, stopped one call later,
  * and the run ended there - which is why `xnu_live_sigchld_*` is absent for the second, unrelated
  * reason: **the parent was never told because the boot stopped first.** The exit arm this step added is
- * 275 lines long and the SIGCHLD is at the far end of it; the next step is the one that gives that
+ * 338 lines long and the SIGCHLD is at the far end of it; the next step is the one that gives that
  * slot a body, the way 465 did for `pth_proc_hashinit` and 473 for the two workqueue slots - both of
  * which this same run measures working (`xnu_live_pth_hashinit_seq = 2` inside `forkproc` at 465's
  * slot, `xnu_live_pth_wqmark_seq` / `_wqexit_seq` = 2 with `p = 0xc058d3a8` in the child's `proc_exit`
  * at 473's).
+ *
+ * **And 507 gave that slot its body, so the arm ran to its end.** Run 3 of this image (nothing in the
+ * fixture changed; the whole step is one function in `xnu_supply`) measured the two records this file
+ * predicted and could not have: `xnu_live_pth_delete_seq = 1` for the child's proc `0xc05b3e38`, then
+ * `xnu_live_sigchld_seq = 1`, `_signal = 0x14` = 20, `_to = 1`, `xnu_live_psignal_calls = 1` - the OS
+ * telling process 1 that process 2 is gone - with **no `stub_hit` anywhere in the run**, the parent's
+ * `getpid_count` still climbing to `0x800000`, and no report, because a run with nothing left to stop
+ * it ends on the hardware watchdog instead of on the epilogue. `xnu_live_sigchld_from` is **0**, not the
+ * dying child's pid: `set_bsdtask_info(task, NULL)` (`kern_exit.c:1371`) clears the task 72 lines above
+ * the call, so `current_proc()` answers `kernproc` (pid 0, `bsd_stubs.c:104`).
+ *
  *
  * Falsifiers, named in advance (and kept after run 1, because run 2 can still take any of them):
  *

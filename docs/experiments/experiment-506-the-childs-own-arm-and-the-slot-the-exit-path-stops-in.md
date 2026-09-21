@@ -7,8 +7,9 @@ kernel's own teardown — `proc_exit`, entered at its `pth_proc_hashdelete(p)` c
 **stopped there**, because that slot is one this image's `pthread_functions` table fills with a
 stand-in (`stage90_pthread_functions.c:477`) and **a stub hit is terminal**: `entry_stub_hit` ends in
 `entry_epilogue("a symbol this image does not provide was called")` (`entry_stubs.c:6107`). So the log's
-last live record *is* the hit, and the `psignal(pp, SIGCHLD)` this step predicted is 275 source lines
-further down the same arm — the parent was never told because the boot stopped first. **Run 1 of this
+last live record *is* the hit, and the `psignal(pp, SIGCHLD)` this step predicted is 338 source lines
+further down the same arm (275 when this was written - 507 computed it from the two line numbers,
+`:1105` to `:1443`, and corrects it here rather than in a footnote) — the parent was never told because the boot stopped first. **Run 1 of this
 step measured the opposite** and is kept as a reading: `bne` in place of `beq` put `initproc` in the
 child's arm, and the console's `pid 1 exited -- no exit reason available -- (signal 0, exit 3)` with
 `xnu_entry_panic_entered = 1` is the cost. The next step is one function in `xnu_supply` and none in the
@@ -137,8 +138,10 @@ The chain is three files long and each link is checkable:
 
 **So the SIGCHLD is absent for a second and unrelated reason.** 505's absence was "the arm was not
 taken". This one is: the arm ran, reached the kernel's teardown, and the teardown needs a slot this
-image does not supply. `psignal(pp, SIGCHLD)` at `kern_exit.c:1443` is 275 source lines below
-`pth_proc_hashdelete` on the same path, and pid 1 is never told because the boot stops 275 lines short.
+image does not supply. `psignal(pp, SIGCHLD)` at `kern_exit.c:1443` is **338** source lines below
+`pth_proc_hashdelete` on the same path (`:1105`; this said 275, an estimate quoted rather than a distance
+computed - corrected by 507, which then measured what is at the end of it), and pid 1 is never told
+because the boot stops 338 lines short.
 
 **The prediction's `_rval` was also one number wrong**, and the run corrected it: `xnu_live_exit_rval` is
 `uap->rval` as the munger marshalled it — the ABI the wrapper is declared by is
@@ -222,7 +225,7 @@ readings above are the live channel's.
 ## What is owed
 
   - **`pth_proc_hashdelete`'s body, which is the next step and is in `xnu_supply`, not in the fixture.**
-    The run stops there, and the exit arm this step added is 275 source lines long with its SIGCHLD at
+    The run stops there, and the exit arm this step added is 338 source lines long with its SIGCHLD at
     the far end. The two slots this same run watches working are the shape to copy: 465's `pth_proc_hashinit`
     and 473's pair record the call, do not dereference `p`, and do not reach into the callbacks table.
     What a *delete* has to undo here has a measured answer — 465's body leaves `p->p_pthhash` NULL,

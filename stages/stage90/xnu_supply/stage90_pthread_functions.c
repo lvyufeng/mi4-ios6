@@ -66,11 +66,11 @@
  *
  * What fills the table
  * --------------------
- * **Every named slot points at a stand-in that stops the run and names itself** - with four exceptions,
+ * **Every named slot points at a stand-in that stops the run and names itself** - with five exceptions,
  * each given a body by the step whose device run stopped in that slot and each with its own section
- * below: `pthread_init` (433), `pth_proc_hashinit` (465), and `workqueue_mark_exiting` with
- * `workqueue_exit` (473) - and this is the rule the whole walk has used for missing symbols, applied to
- * a table:
+ * below: `pthread_init` (433), `pth_proc_hashinit` (465), `workqueue_mark_exiting` with
+ * `workqueue_exit` (473), and `pth_proc_hashdelete` (507) - and this is the rule the whole walk has used
+ * for missing symbols, applied to a table:
  *
  *   - a **NULL** slot is a fault rather than a stop. It would be a data abort or a branch to 0,
  *     which this image reports as `abort_entries != 0` and a `first_dfar` - a shape that says
@@ -429,15 +429,17 @@ extern void entry_note_live(const char *key, uint32_t value);
  *       record is not the cap.
  */
 /*
- * **The four slots with bodies, declared here and defined below the table**, which is where they have
+ * **The five slots with bodies, declared here and defined below the table**, which is where they have
  * to be: every one of them names `pthread_functions` or the table itself. 433's is `pthread_init` and
  * its contract is in this file's header; 465's is `pth_proc_hashinit`, whose section is above; 473's are
- * `workqueue_mark_exiting` and `workqueue_exit`, whose section is above as well. None of the four bodies
- * dereferences the pointer it is given - a NULL or wrong pointer must be a stop that names itself, not
- * a fault - and 465's and 473's keep 433's rule for their own arguments.
+ * `workqueue_mark_exiting` and `workqueue_exit`, whose section is above as well; 507's is
+ * `pth_proc_hashdelete`, whose section is above too. None of the five bodies dereferences the pointer it
+ * is given - a NULL or wrong pointer must be a stop that names itself, not a fault - and 465's, 473's
+ * and 507's keep 433's rule for their own arguments.
  */
 static void stage90_pthread_functions_init(void);
 static void stage90_pthread_slot_pth_proc_hashinit(proc_t p);
+static void stage90_pthread_slot_pth_proc_hashdelete(proc_t p);
 static void stage90_pthread_slot_workqueue_mark_exiting(proc_t p);
 static void stage90_pthread_slot_workqueue_exit(proc_t p);
 
@@ -452,17 +454,20 @@ static void stage90_pthread_slot_workqueue_exit(proc_t p);
 
 /*
  * Every name below is a member of `struct pthread_functions_s`, in declaration order - **except the
- * four slots that have bodies of their own** (`pthread_init`, 433; `pth_proc_hashinit`, 465;
- * `workqueue_mark_exiting` and `workqueue_exit`, 473), which are defined by hand below the table and set
- * explicitly in it. The two lists below therefore hold **35** of the table's 39 named slots, and the
- * constructor's scan still covers all 40 named words (39 slots plus `version`), so a slot missing from
- * either place is a stop that names its word index rather than a branch to zero.
+ * five slots that have bodies of their own** (`pthread_init`, 433; `pth_proc_hashinit`, 465;
+ * `workqueue_mark_exiting` and `workqueue_exit`, 473; `pth_proc_hashdelete`, 507), which are defined by
+ * hand below the table and set explicitly in it. The two lists below therefore hold **34** of the
+ * table's 39 named slots, and the constructor's scan still covers all 40 named words (39 slots plus
+ * `version`), so a slot missing from either place is a stop that names its word index rather than a
+ * branch to zero.
  *
  * (This paragraph said "38 ... except `pthread_init`" between 465 and 473, which was wrong in one word
  * for two steps: 465 stopped defining `pth_proc_hashinit` by the macro and did not move the number. The
  * constructor's NULL scan is what makes the error harmless - a slot in neither list is NULL and named
  * at registration - and the count is written out here so that the next step does not have to re-derive
- * it from the 39 members.)
+ * it from the 39 members. **507 moved it again, 35 -> 34, and that is the arithmetic to copy: the count
+ * is 39 minus the bodies, and `tools/check_pthread_table_slots.py` now reads it back out of the object
+ * rather than out of this paragraph.**)
  */
 STAGE90_PTHREAD_SLOT_DEF(fill_procworkqueue)
 STAGE90_PTHREAD_SLOT_DEF(__unused1)
@@ -474,7 +479,9 @@ STAGE90_PTHREAD_SLOT_DEF(__unused2)
 STAGE90_PTHREAD_SLOT_DEF(workqueue_thread_yielded)
 /* 465: `pth_proc_hashinit` is *not* defined by the macro - it has a hand-written body below, the
  * way `pthread_init` does, because its slot is the one this step retires. */
-STAGE90_PTHREAD_SLOT_DEF(pth_proc_hashdelete)
+/* 507: `pth_proc_hashdelete` is *not* defined by the macro either - it has a hand-written body below,
+ * for the same reason, and this is the second slot in this list 506's run walked past a stand-in for.
+ * It stays in this position so the list still reads as Apple's declaration order. */
 STAGE90_PTHREAD_SLOT_DEF(bsdthread_create)
 STAGE90_PTHREAD_SLOT_DEF(bsdthread_register)
 STAGE90_PTHREAD_SLOT_DEF(bsdthread_terminate)
@@ -517,11 +524,13 @@ static const struct pthread_functions_s stage90_pthread_functions = {
      * (`void (*)(struct proc *)`) and so are written the same way as 465's. */
     .workqueue_mark_exiting = &stage90_pthread_slot_workqueue_mark_exiting,
     .workqueue_exit = &stage90_pthread_slot_workqueue_exit,
+    /* 507: the fifth - see the section above the table. Type-correct (`void (*)(proc_t)`) like the
+     * three before it, so no cast. */
+    .pth_proc_hashdelete = &stage90_pthread_slot_pth_proc_hashdelete,
     STAGE90_PTHREAD_SLOT_ENTRY(fill_procworkqueue)
     STAGE90_PTHREAD_SLOT_ENTRY(__unused1)
     STAGE90_PTHREAD_SLOT_ENTRY(__unused2)
     STAGE90_PTHREAD_SLOT_ENTRY(workqueue_thread_yielded)
-    STAGE90_PTHREAD_SLOT_ENTRY(pth_proc_hashdelete)
     STAGE90_PTHREAD_SLOT_ENTRY(bsdthread_create)
     STAGE90_PTHREAD_SLOT_ENTRY(bsdthread_register)
     STAGE90_PTHREAD_SLOT_ENTRY(bsdthread_terminate)
@@ -641,6 +650,104 @@ stage90_pthread_slot_workqueue_exit(proc_t p)
     entry_note_live("xnu_live_pth_wqexit_p", (uint32_t)(uintptr_t)p);
     entry_note_live("xnu_live_pth_wqexit_tbl", (uint32_t)(uintptr_t)pthread_functions);
     entry_kv("xnu_entry_pth_wqexit_p", (uint32_t)(uintptr_t)p);
+}
+
+/*
+ * **507: the body of `pth_proc_hashdelete` - the slot 506's run stopped in, 338 source lines before the
+ * line that would have said the OS had told a parent its child was gone.**
+ *
+ * Where 506 stopped, and why that is this slot
+ * -------------------------------------------
+ * 506 made the fixture test `r1`, so the child `fork` made took its own arm and called `exit`: the run
+ * measured `xnu_live_exit_seq = 1`, `_caller = 0x80285848`, `_pid = 2`, `_rval = 3`, with the parent
+ * still in its loop (`getpid_count` 14 records to `0x4000`, `_last = 1` every time) and the console
+ * never printing `pid 1 exited`. Then the run's *last* live record was a stub hit, and it was this one:
+ *
+ *     xnu_live_stub_hit_seq = 1
+ *     xnu_live_stub_hit_name_ptr = 0x804c157a          <- "stage90_pthread_functions.pth_proc_hashdelete"
+ *     xnu_live_stub_hit_caller   = 0x80294150          <- proc_exit + 0x188
+ *
+ * `proc_exit` calls `pth_proc_hashdelete(p)` at `bsd/kern/kern_exit.c:1105` under `#if PSYNCH`, and a
+ * stand-in hit is terminal - `entry_stub_hit` ends in `entry_epilogue`, `entry_stubs.c:6107` - so the
+ * child's exit path stopped there. Everything the step predicted downstream of it is therefore still
+ * unmeasured, and the first of those is `psignal(pp, SIGCHLD)` at `kern_exit.c:1443`, **338 source lines
+ * further down the same function** (`:1105` to `:1443`; 506's own documents said 275, which was an
+ * estimate quoted four times rather than a distance computed from the two lines - see 507's document):
+ * the OS telling process 1 that process 2 is gone, which is the reading 505's document named as "the
+ * first inter-process event in this walk".
+ *
+ * What the real slot does, and what this image can honestly answer
+ * ---------------------------------------------------------------
+ * The kext's `pth_proc_hashdelete` frees the per-process psynch hash that `pth_proc_hashinit` built -
+ * the storage `p->p_pthhash` points at, reached through the kernel's own `proc_set_pthhash` - and its
+ * only readers are psynch's own syscalls, seven more slots in the table above. **465's body left
+ * `p->p_pthhash` NULL** (it records the call and does not reach into the callbacks table, for reasons
+ * its own section gives), which is exactly the state a delete would find and have nothing to free in.
+ * So the honest implementation of "there is no psynch hash for this proc to drop" is a body that records
+ * the call and returns - the same answer 433, 465 and 473 gave for their slots, with 465's consequence
+ * stated rather than assumed: `p_pthhash` is NULL because 465 wrote nothing there, and this body leaves
+ * it NULL for the same reason.
+ *
+ * **Like `workqueue_mark_exiting`, the shim is a tail branch** - `pthread_shims.c:364` is
+ * `pthread_functions->pth_proc_hashdelete(p);`, which is the `ldr r1, [r1, #36]` / `bx r1` at
+ * `0x80205d0c..0x80205d1c` in the linked image - so this body is entered with `proc_exit`'s return
+ * address in the link register, which is why 506's record names `proc_exit + 0x188` rather than a
+ * shim. The body does not dereference `p` (433's rule) and does not call the callbacks table.
+ *
+ * Prediction, written before the build: the record appears, and the run does not stop on this slot.
+ *
+ *     xnu_live_pth_delete_seq = 1                (the child's proc, so a 0xc0... pointer)
+ *     xnu_live_pth_delete_p   = the same pointer 506's `fork` record implies, i.e. the child's proc
+ *     xnu_live_pth_delete_tbl = whatever `nm` says `stage90_pthread_functions` is in the new link
+ *
+ * and then, if nothing else stops on the teardown, the two records this step exists for:
+ *
+ *     xnu_live_sigchld_signal = 20   _to = 1   _from = 2   _count >= 1
+ *     xnu_live_getpid_count still climbing (pid 1 in its loop, now with a zombie child)
+ *
+ * **Measured: everything but `_from`.** The record, the `_to`, the signal number 20 and the climbing
+ * counter all came back as written, and the run has **no `stub_hit` at all** - so the exit path is
+ * retired end to end and the boot's first run without a stop ended on the hardware watchdog instead.
+ * `_from` is **0**, and the reason is 72 lines above the call rather than in the wrapper:
+ * `set_bsdtask_info(task, NULL)` (`kern_exit.c:1371`, in the block that clears `p->task`) means the
+ * dying process is no longer what `current_proc()` answers - its fallback arm returns `kernproc`
+ * (`bsd_stubs.c:104`, "Never returns a NULL"), whose pid is 0. The wrapper's null guard, written for a
+ * signal with no BSD process behind it, fired for a real one on its first use. The correction is the
+ * reading: the sender of a `psignal` taken in `proc_exit` cannot name the process that died, and the
+ * pid is on the other side - the `exit` record's `_pid = 2`.
+ *
+ * Falsifiers, named in advance:
+ *
+ *   (a) a stop whose `xnu_live_stub_hit_name_ptr` reads back as this name again - the slot is not the
+ *       word the kernel reads, or the table was not relinked;
+ *   (b) no `xnu_live_pth_delete_seq` **and** no `stub_hit` at all - the shim's `bx` went somewhere that
+ *       is neither this body nor a stand-in, which is what a wrong slot offset looks like;
+ *   (c) a `stub_hit` on a *different* name after this record - a second slot on the teardown path, which
+ *       the next step retires; the names to expect are the table's own, and the walk's rule is that the
+ *       name this run reports is the next step's subject;
+ *   (d) `xnu_live_pth_delete_seq` present and no `xnu_live_sigchld_*` with the boot otherwise continuing
+ *       - a second stop between `:1105` and `:1443`, or the SIGCHLD path taking the arm that does not
+ *       signal. `proc_exit`'s `notify parent` block's `psignal(pp, SIGCHLD)` is reached when the parent's
+ *       `p_flag & P_NOCLDWAIT` is clear (nothing here sets it: `kern_sig.c:694` is the only writer and
+ *       it is `sigaction`), and it is *not* reached on the `P_NOCLDWAIT` arm (`:1409-1411`, which marks
+ *       the child `P_LIST_DEADPARENT` and reaps it without a signal) - so an absent record here would
+ *       say something set that flag, which would be a finding of its own;
+ *   (e) `xnu_entry_abort_entries != 0` with a `first_dfar` at a page-group or session offset - a fault
+ *       inside `proc_exit`'s own teardown (`pg = proc_pgrp(p)` / `fixjobc(p, pg, 0)` at `:1196`/`:1197`,
+ *       fifty lines after this slot), which would say the child was never put in a process group.
+ *       `pinsertchild` (`kern_fork.c:556`/`:1000`) is what puts it in the parent's, and every line of
+ *       that is real code in this image.
+ */
+static uint32_t stage90_pth_delete_calls;
+
+static void
+stage90_pthread_slot_pth_proc_hashdelete(proc_t p)
+{
+    stage90_pth_delete_calls++;
+    entry_note_live("xnu_live_pth_delete_seq", stage90_pth_delete_calls);
+    entry_note_live("xnu_live_pth_delete_p", (uint32_t)(uintptr_t)p);
+    entry_note_live("xnu_live_pth_delete_tbl", (uint32_t)(uintptr_t)pthread_functions);
+    entry_kv("xnu_entry_pth_delete_p", (uint32_t)(uintptr_t)p);
 }
 
 /* Where `pthread_kext_register` writes the kernel's own callbacks table. Nothing here reads it. */
