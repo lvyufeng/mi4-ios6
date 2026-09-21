@@ -5374,10 +5374,12 @@ void entry_note_wfi(uint32_t fast, uint32_t inst, uint32_t before, uint32_t afte
 uint32_t g_pce_calls;
 uint32_t g_pce_caller;
 uint32_t g_pce_up, g_pce_ncpu, g_pce_datap;
+uint32_t g_pce_first_tpidrprw;
 uint32_t g_pce_first_before, g_pce_last_before;
 uint32_t g_pcx_calls;
 uint32_t g_pcx_ticks_max;
 uint32_t g_pcx_first_ticks, g_pcx_last_ticks;
+uint32_t g_pcx_datap, g_pcx_sctlr;
 
 /*
  * One entry into the kernel's cache window, taken before the real call. `up`/`ncpu`/`datap` are the
@@ -5389,7 +5391,8 @@ uint32_t g_pcx_first_ticks, g_pcx_last_ticks;
  * ends after `platform_cache_idle_exit` returns - i.e. it contains the halt - and only the second
  * half of the instrument knows when that is.
  */
-void entry_note_pce(uint32_t caller, uint32_t up, uint32_t ncpu, uint32_t datap, uint32_t before)
+void entry_note_pce(uint32_t caller, uint32_t up, uint32_t ncpu, uint32_t datap, uint32_t tpidrprw,
+                    uint32_t before)
 {
     uint32_t n = g_pce_calls + 1u;
 
@@ -5400,6 +5403,7 @@ void entry_note_pce(uint32_t caller, uint32_t up, uint32_t ncpu, uint32_t datap,
         g_pce_up = up;
         g_pce_ncpu = ncpu;
         g_pce_datap = datap;
+        g_pce_first_tpidrprw = tpidrprw;
         g_pce_first_before = before;
     }
 
@@ -5409,6 +5413,7 @@ void entry_note_pce(uint32_t caller, uint32_t up, uint32_t ncpu, uint32_t datap,
         entry_live_write("xnu_live_pce_up", up);
         entry_live_write("xnu_live_pce_ncpu", ncpu);
         entry_live_write("xnu_live_pce_datap", datap);
+        entry_live_write("xnu_live_pce_tpidrprw", tpidrprw);
     }
 }
 
@@ -5422,7 +5427,7 @@ void entry_note_pce(uint32_t caller, uint32_t up, uint32_t ncpu, uint32_t datap,
  * between the two numbers in the last record that was written, and 514's log's signature - an enter
  * with no exit - reads as `_entered` one greater than `_seq`.
  */
-void entry_note_pcx(uint32_t after)
+void entry_note_pcx(uint32_t after, uint32_t tpidrprw, uint32_t datap, uint32_t sctlr)
 {
     uint32_t n = g_pcx_calls + 1u;
     uint32_t ticks = after - g_pce_last_before;
@@ -5430,8 +5435,11 @@ void entry_note_pcx(uint32_t after)
     g_pcx_calls = n;
     if (ticks > g_pcx_ticks_max)
         g_pcx_ticks_max = ticks;
-    if (n == 1u)
+    if (n == 1u) {
         g_pcx_first_ticks = ticks;
+        g_pcx_datap = datap;
+        g_pcx_sctlr = sctlr;
+    }
     g_pcx_last_ticks = ticks;
 
     if (n == 1u || (n & (n - 1u)) == 0u) {
@@ -5439,6 +5447,72 @@ void entry_note_pcx(uint32_t after)
         entry_live_write("xnu_live_pcx_entered", g_pce_calls);
         entry_live_write("xnu_live_pcx_ticks", ticks);
         entry_live_write("xnu_live_pcx_after", after);
+        entry_live_write("xnu_live_pcx_tpidrprw", tpidrprw);
+        entry_live_write("xnu_live_pcx_datap", datap);
+        entry_live_write("xnu_live_pcx_sctlr", sctlr);
+    }
+}
+
+/*
+ * 516: **the same four values, read again on the far side of the window's own write-back.**
+ * ------------------------------------------------------------------------------------------------
+ * 515 ended with the boot one layer deeper than 514: `up_style_idle_exit=1` took its branch, and the
+ * fault then arrived *inside* the window - an interrupt whose handler is Apple's own IRQ prologue,
+ * which calls `ml_get_timebase()` (`locore.s:1421-1423`) and faults reading
+ * `[getCpuDatap(), #88]` with `r3 = 0` (`machine_routines_asm.s:988-989`). The `4804` run's own
+ * counters say which kind of "0" that was: `g_sleh_seq` receded from the 8 the channel had published
+ * to the 3 DRAM held, i.e. the window's accesses and the cache disagreed about a line - and the field
+ * that faulted is a line of the same kind.
+ *
+ * **So 516 writes the cache back before the window opens** (`entry_trace.c`'s
+ * `CleanPoU_Dcache()` in the enter wrapper, called while `SCTLR.C` is still set) and this pair of
+ * records is what decides whether that was the defect: `xnu_live_pce_*` is the four values read with
+ * the cache **on**, one instruction before the call, and `xnu_live_pce_after_*` is the same four read
+ * *after* the real `platform_cache_idle_enter` has returned - i.e. with the cache **off**, in the
+ * window, after the write-back. `_sctlr` is carried because it is what makes "the cache is off" a
+ * reading rather than an assumption (its `C` bit is `0x4`), and because a run in which `_after_sctlr`
+ * still has `C` set would mean the window never opened and every other reading here is of something
+ * else.
+ *
+ * **What the differences mean, before the run.** `_after_datap == _datap == 0x8051a000` says the write
+ * back reached DRAM and the window's cache-off reads are coherent - and then an `ml_get_timebase`
+ * fault would have to be about a *different* thread, which `_after_tpidrprw` against `sleh_thr` rules
+ * in or out. `_after_datap == 0` while `_datap == 0x8051a000` says the field's line is still not in
+ * memory after a whole-cache clean, which would make the defect something other than the write-back.
+ * `_after_up`/`_after_ncpu` are the two operands of the kernel's own test read the same way, so a run
+ * can see the test's own values change when it is read with the cache off.
+ *
+ * **The counter is incremented inside the window and that is deliberate, and safe for the one thing
+ * it is used for.** `n == 1` is the only gate that matters, and DRAM holds 0 for this word before the
+ * first window for a reason that does not depend on the cache: `.bss` is zeroed by the payload with
+ * the cache off (`xnu_entry_bss_bytes`, before the jump), and nothing writes this word with the cache
+ * on. A stale read here therefore costs a repeated record and not a lost one.
+ */
+uint32_t g_pce_after_calls;
+uint32_t g_pce_after_tpidrprw, g_pce_after_datap, g_pce_after_up, g_pce_after_ncpu;
+uint32_t g_pce_after_sctlr;
+
+void entry_note_pce_after(uint32_t tpidrprw, uint32_t datap, uint32_t up, uint32_t ncpu,
+                          uint32_t sctlr)
+{
+    uint32_t n = g_pce_after_calls + 1u;
+
+    g_pce_after_calls = n;
+    if (n == 1u) {
+        g_pce_after_tpidrprw = tpidrprw;
+        g_pce_after_datap = datap;
+        g_pce_after_up = up;
+        g_pce_after_ncpu = ncpu;
+        g_pce_after_sctlr = sctlr;
+    }
+
+    if (n == 1u || (n & (n - 1u)) == 0u) {
+        entry_live_write("xnu_live_pce_after_seq", n);
+        entry_live_write("xnu_live_pce_after_tpidrprw", tpidrprw);
+        entry_live_write("xnu_live_pce_after_datap", datap);
+        entry_live_write("xnu_live_pce_after_up", up);
+        entry_live_write("xnu_live_pce_after_ncpu", ncpu);
+        entry_live_write("xnu_live_pce_after_sctlr", sctlr);
     }
 }
 

@@ -28055,6 +28055,138 @@ verify_trace_symbols() {
         layout_fail "the image branches to __wrap_platform_cache_idle_exit from ${xin:-0} site(s) inside cpu_idle and ${xout:-?} outside it: the exit is what re-enables the D-cache (caches.c:490-494), and the enter/exit pair has to be cpu_idle's alone for the two counts to be the two ends of one window"
     say "  xnu_entry_515: the linked image carries exactly ${argn} literal equal to the name arm_init passes to PE_parse_boot_argn, and that parser is the real one (not in pass 1's undefined set); up_style_idle_exit ($upa) is one 32-bit .bss word and real_ncpus ($rn) one 32-bit .data word holding $rnval in the image, and caches.c:414's two operands are read inside platform_cache_idle_enter ($pce..$pcenext) by a movw/movt pair each with the ncpus one compared against 1, whose up-style branch calls CleanPoU_Dcache and whose else branch calls FlushPoU_Dcache, reads getCpuDatap() as 'mrc cr13,cr0,{4}' + 'ldr [r?, #1484]' (this configuration's ACT_CPUDATAP = $act) and stores to [r?, #304] - the instruction 514's runs faulted on; and that function is wrapped for both its ends, entered from inside cpu_idle only (${ein} site(s) and ${xin} for the exit, none outside), so a run's xnu_live_pce_*/pcx_* pair counts the windows that completed and the ones that did not; the two copies of the command line are checked in the payload build"
 
+    # --------------------------------------------------------------------------- 516: the write-back
+    #
+    # **515 took the branch 514's document asked for and the boot stopped one layer deeper - and the
+    # cause turned out to be one loop wide, which is what this clause exists to make a property of the
+    # built artifact rather than of a paragraph.** The repair is one call: `CleanPoC_Dcache()` in the
+    # enter wrapper, made while `SCTLR.C` is still set - one call earlier than Apple's own clean at
+    # `caches.c:415`, and one *level* further than it, because the difference between `CleanPoU_Dcache`
+    # and `CleanPoC_Dcache` is the L2 loop. The Point of Unification on this CPU is the L2, and a read
+    # with `SCTLR.C = 0` answers neither the L1 nor the L2, so a PoU clean leaves the line somewhere the
+    # window never looks. That is what 514's `else` branch read as a NULL `getCpuDatap()` four
+    # instructions after its own `FlushPoU_Dcache`, and what 515's `up` branch read the same way after
+    # `CleanPoU_Dcache` at `caches.c:415`. The counts below are the difference, taken in each function's
+    # own body: one `DCCSW` loop in `CleanPoU_Dcache`, two in `CleanPoC_Dcache`.
+    #
+    # Four things have to hold for the call to be the one it claims to be: it is the image's own
+    # function, it is not itself wrapped, it is inside the wrapper, and it is *before* the call that
+    # opens the window. The record keys that carry the paired readings are required beside them,
+    # because a repair whose reading cannot be taken is the thing this project refuses to ship.
+    cpou=$(sym_addr CleanPoC_Dcache) ||
+        layout_fail "CleanPoC_Dcache is not in the linked image - 516's repair is that call, and without it the window still opens with the cache and DRAM disagreeing about the lines the window's reads answer from"
+    grep -qx "CleanPoC_Dcache" "$OUT/xnu_arm_entry_undef.txt" &&
+        layout_fail "CleanPoC_Dcache is in the pass-1 undefined set: the write-back this step depends on would be a stand-in's, and a stand-in that returns without touching the cache is exactly the failure that would come back as 'the repair did not help'"
+    # **Counted without `-S`, and that is not a style choice**: these are assembly labels with no size
+    # in their symbol tables, so `nm -S` prints no size field for them and a reader keyed on
+    # `$4 == "CleanPoC_Dcache"` finds zero definitions of a function the image plainly has (it is
+    # called by `platform_cache_idle_enter` itself). The first version of this check did exactly that
+    # and stopped the build. The field it means is the name, and the name is the *last* one.
+    cpoun=$(arm-none-eabi-nm --defined-only "$OUT/xnu_arm_entry.elf" | awk '$3 == "CleanPoC_Dcache" { n++ } END { printf "%d", n + 0 }')
+    [[ "${cpoun:-0}" == 1 ]] ||
+        layout_fail "CleanPoC_Dcache is ${cpoun:-0} definition(s) in this image: 516's write-back has to be the kernel's own L1+L2 way/set loop (caches_asm.s:121-158) - the one `cpu_sleep` (cpu.c:105), `platform_cache_clean` (caches.c:364) and `platform_cache_shutdown` (caches.c:377) all call when they mean 'this has to be in memory' - or the reading beside it is about another function"
+    # It must not be wrapped. A `--wrap=CleanPoC_Dcache` would put this file's own function between the
+    # wrapper and the loop, and then "the cache was written back before the window opened" would be a
+    # statement about a function this project wrote rather than about the kernel's.
+    arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | grep -q '__wrap_CleanPoC_Dcache' &&
+        layout_fail "the image defines __wrap_CleanPoC_Dcache: 516's write-back has to be the kernel's own CleanPoC_Dcache, and a wrapper there would make the step's product a call into this repository"
+    # **The distinction the step is *for*, counted where it is visible: two loops against one.** Both
+    # routines are the same way/set loop; the PoC form runs it a second time with the L2's geometry
+    # (`clean_l2dcacheline`/`clean_l2dcacheway`, caches_asm.s:130-158). A build in which that second
+    # loop is gone - or in which the wrapper's call resolves to the PoU form - would leave this step
+    # reproaching a wall it does not actually address, and the whole reading would be of the same
+    # stale line as 514's and 515's.
+    # **`sym_next` is the wrong boundary here and that is a defect this step's own clause found**: the
+    # way/set loops carry *local* labels (`clean_dcacheline`, `clean_l2dcacheline`, ...), so the next
+    # symbol after `CleanPoC_Dcache` is `clean_dcacheline` four bytes in, and a body read between them
+    # contains no loop at all - which is exactly how this check first failed, reporting two DCCSW
+    # instructions where the range held none. The boundary this needs is the next *global*, which is
+    # where one function's body ends and the next begins.
+    # (`nm` prints `address type name` without `-S`, so the type is `$2` and the name `$3` - the
+    # opposite of the `-S` form, and writing this one against `$3` finds no global at all.)
+    # (Two global names can share one address - `clean_mmu_dcache` and `CleanPoC_Dcache` do - so the
+    # boundary has to be *after* the address and not merely not-before it, or the first such alias is
+    # returned and the range is empty.)
+    next_global() { arm-none-eabi-nm -n "$OUT/xnu_arm_entry.elf" | awk -v s="${1#0x}" '
+        { a = strtonum("0x" $1) }
+        p && !d && $2 ~ /^[A-Z]$/ && a > sa { print "0x" $1; d = 1 }
+        $1 == s { p = 1; sa = a }'; }
+    cpoubody=$(arm-none-eabi-objdump -d --start-address=$cpou --stop-address="$(next_global "$cpou")" "$OUT/xnu_arm_entry.elf")
+    read -r cpoc_loops cpou_addr_cpou <<<"$(awk '
+        /<CleanPoC_Dcache>:/ { inb = 1; next }
+        inb && /mcr[ \t]+15, 0, r[0-9]+, cr7, cr10, \{2\}/ { n++ }
+        END { printf "%d %d", n + 0, 0 }' <<<"$cpoubody")"
+    [[ "${cpoc_loops:-0}" == 2 ]] ||
+        layout_fail "CleanPoC_Dcache's own body in this image contains ${cpoc_loops:-0} DCCSW instruction(s) (\`mcr p15,0,r0,cr7,cr10,{2}\`) and not 2: that function is the L1 loop *plus* the L2 loop, and it is only the second one that reaches DRAM on a CPU whose Point of Unification is the L2 - with one loop this call is \`CleanPoU_Dcache\` under another name and 516's repair would be the call 515 already measured as not enough"
+    pou=$(sym_addr CleanPoU_Dcache) || true
+    [[ -n "${pou:-}" ]] || layout_fail "CleanPoU_Dcache is no longer in the image: the function the up arm calls at caches.c:415 is the one this step's repair is an earlier and deeper form of, and without it the comparison above has nothing to be a difference from"
+    poubody=$(arm-none-eabi-objdump -d --start-address=$pou --stop-address="$(next_global "$pou")" "$OUT/xnu_arm_entry.elf")
+    pou_loops=$(awk '
+        /<CleanPoU_Dcache>:/ { inb = 1; next }
+        inb && /mcr[ \t]+15, 0, r[0-9]+, cr7, cr10, \{2\}/ { n++ }
+        END { printf "%d", n + 0 }' <<<"$poubody")
+    [[ "${pou_loops:-0}" == 1 ]] ||
+        layout_fail "CleanPoU_Dcache's own body contains ${pou_loops:-0} DCCSW instruction(s) and not 1: this step's finding is that that function stops at the Point of Unification - one loop, no L2 - and if its body has grown a second loop then it is no longer the function 514's and 515's runs faulted behind"
+    # The call, its position inside the wrapper, and the pair of reads the record is taken from.
+    # **The real function is spelled `<platform_cache_idle_enter>` in the disassembly and not
+    # `<__real_platform_cache_idle_enter>`**: `--wrap` renames the original to `__real_X` for the
+    # *linker*, and the symbol that comes out of it keeps its own name - so a matcher keyed on the
+    # `__real_` spelling finds zero calls to a function the wrapper plainly branches to, which is
+    # how this check failed its second run.
+    # `ewrap`/`ewrapnext` are the wrapper's extent, established by the clause above - which stops the
+    # build if it cannot be read - so this clause reads the same body rather than deriving it twice.
+    ebod=$(arm-none-eabi-objdump -d --start-address=$ewrap --stop-address=$ewrapnext "$OUT/xnu_arm_entry.elf")
+    read -r cpocnt cpoaddr realaddr <<<"$(awk '
+        /<__wrap_platform_cache_idle_enter>:/ { inb = 1; next }
+        !inb { next }
+        $3 == "bl" && index($0, "<CleanPoC_Dcache>") > 0 { split($1, a, ":"); c = strtonum("0x" a[1]); n++ }
+        $3 == "bl" && $5 == "<platform_cache_idle_enter>" { split($1, a, ":"); r = strtonum("0x" a[1]) }
+        END { printf "%d %d %d", n + 0, c + 0, r + 0 }' <<<"$ebod")"
+    [[ "${cpocnt:-0}" == 1 ]] ||
+        layout_fail "the image calls CleanPoC_Dcache ${cpocnt:-0} time(s) inside __wrap_platform_cache_idle_enter ($ewrap..$ewrapnext) and 516's repair is exactly one write-back at that point: none would leave the window opening on a cache and a memory that disagree - which is the run 515 ended on - and more than one would make the window's opening a different event from the one the record beside it describes"
+    [[ "${realaddr:-0}" != 0 && "${cpoaddr:-0}" -lt "${realaddr:-0}" ]] ||
+        layout_fail "the write-back at ${cpoaddr:-?} does not precede the call that opens the window at ${realaddr:-?} inside __wrap_platform_cache_idle_enter: the whole of 516 is that the clean happens while SCTLR.C is still set, and a clean placed after the real enter is Apple's own (caches.c:415) - the call 515 already measured as not early enough"
+    # The kernel's own clean, still where it was and still the PoU form. 516's call is an *addition* to
+    # caches.c:415 and not a replacement of it: the up arm's clean is Apple's instruction and this step
+    # does not rewrite it - what it does is put a deeper clean *before* the window, so that what the up
+    # arm's own clean then has to do is keep the L2 consistent rather than be the only write-back.
+    pcebody=$(arm-none-eabi-objdump -d --start-address=$pce --stop-address=$pcenext "$OUT/xnu_arm_entry.elf")
+    pcoclean=$(awk '$3 == "bl" && index($0, "<CleanPoU_Dcache>") > 0 { n++ } END { printf "%d", n + 0 }' <<<"$pcebody")
+    [[ "${pcoclean:-0}" == 1 ]] ||
+        layout_fail "platform_cache_idle_enter calls CleanPoU_Dcache ${pcoclean:-0} time(s) and not once: that call is caches.c:415, the up arm's own clean - the instruction this step's earlier and deeper write-back is an addition to, and the call whose reach is the whole of 516's finding - so if it is gone or duplicated, the branch 515 chose is not the one this build reasons about"
+    # The paired readings. The two `getCpuDatap()` windows are `>= 2` and not `== 2` because the
+    # wrapper reads the field once for the cache-on record and once for the cache-off one, and gcc
+    # inlines `entry_cpu_datap()` at each - a third window would be another read and not a defect. The
+    # SCTLR read is what makes "with the cache off" a value in the log rather than an assumption.
+    read -r dapwins sctlrreads <<<"$(awk '
+        /mrc[ \t]+15, 0, r[0-9]+, cr13, cr0, \{4\}/ { n = 0; seen = 1; next }
+        seen && n >= 3 { seen = 0 }
+        seen { n++; if ($0 ~ /ldr[a-z]*[ \t]+r[0-9]+, \[r[0-9]+, #1484\]/) { w++; seen = 0 } }
+        /mrc[ \t]+15, 0, r[0-9]+, cr1, cr0, \{0\}/ { s++ }
+        END { printf "%d %d", w + 0, s + 0 }' <<<"$ebod")"
+    [[ "${dapwins:-0}" -ge 2 ]] ||
+        layout_fail "the enter wrapper reads getCpuDatap() ${dapwins:-0} time(s) and 516's pair needs two - one with the D-cache on, before the call, and one inside the window after it: the difference between those two numbers is the whole reading, and a single read would make the cache-off side of it an assumption"
+    [[ "${sctlrreads:-0}" -ge 1 ]] ||
+        layout_fail "the enter wrapper never reads SCTLR: the record carries the register as the fact that its second reading was taken with the D-cache off, and without it a run that never opened the window would publish two agreeing values that mean nothing"
+    # The far end reads it a third time, and its own call comes first.
+    xbod=$(arm-none-eabi-objdump -d --start-address=$pcexw --stop-address="$(sym_next "$pcexw")" "$OUT/xnu_arm_entry.elf")
+    read -r xreal xsctlr <<<"$(awk '
+        /<__wrap_platform_cache_idle_exit>:/ { inb = 1; next }
+        !inb { next }
+        $3 == "bl" && $5 == "<platform_cache_idle_exit>" { split($1, a, ":"); r = strtonum("0x" a[1]) }
+        /mrc[ \t]+15, 0, r[0-9]+, cr1, cr0, \{0\}/ { split($1, a, ":"); s = strtonum("0x" a[1]) }
+        END { printf "%d %d", r + 0, s + 0 }' <<<"$xbod")"
+    [[ "${xreal:-0}" != 0 && "${xsctlr:-0}" -gt "${xreal:-0}" ]] ||
+        layout_fail "the exit wrapper's SCTLR read at ${xsctlr:-?} does not come after its call to the real exit at ${xreal:-?}: that wrapper's reading is the one taken with the cache back ON (caches.c:490-494), and a read before the call would be a third cache-off reading wearing the label of the cache-on one"
+    # The record keys, counted in the image's `.text` - the same extraction and the same reason as the
+    # clause above (the file carries copies that are not in the image).
+    for k in xnu_live_pce_tpidrprw xnu_live_pce_after_seq xnu_live_pce_after_tpidrprw xnu_live_pce_after_datap xnu_live_pce_after_up xnu_live_pce_after_sctlr xnu_live_pcx_datap xnu_live_pcx_sctlr; do
+        kn=$(arm-none-eabi-strings "$OUT/xnu_entry_text.bin" | awk -v k="$k" '$0 == k { c++ } END { printf "%d", c + 0 }')
+        [[ "${kn:-0}" -ge 1 ]] ||
+            layout_fail "the binary of the linked image's .text carries no literal '$k': 516's reading is the pair of values that key names, and a key that is not in the image is a record the run cannot write"
+    done
+    say "  xnu_entry_516: the window opens on a cache and a memory that agree, and they agree because the write-back reaches the Point of Coherency and not the Point of Unification - CleanPoC_Dcache ($cpou) is the kernel's own function (one definition, not in pass 1's undefined set, not itself wrapped, ${cpoc_loops} DCCSW loops in its own body against CleanPoU_Dcache $pou's ${pou_loops}, which is the whole of the difference and the whole of this step) and __wrap_platform_cache_idle_enter calls it ${cpocnt} time at ${cpoaddr}, before the call that opens the window at ${realaddr}, i.e. while SCTLR.C is still set and one call earlier than Apple's own PoU clean at caches.c:415 (still exactly one CleanPoU_Dcache and one FlushPoU_Dcache inside platform_cache_idle_enter $pce..$pcenext); the wrapper reads getCpuDatap() from TPIDRPRW+#1484 ${dapwins} time(s) with ${sctlrreads} SCTLR read(s), the exit wrapper reads SCTLR after its call to the real exit (${xsctlr}), and the eight keys that carry the two sides of the comparison are in the image's .text"
+
 
 
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls

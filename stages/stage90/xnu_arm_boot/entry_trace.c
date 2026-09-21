@@ -235,9 +235,18 @@ extern uint32_t wfi_inst;
 extern uint32_t g_pce_calls, g_pce_caller, g_pce_up, g_pce_ncpu, g_pce_datap;
 extern uint32_t g_pce_first_before, g_pce_last_before;
 extern uint32_t g_pcx_calls, g_pcx_ticks_max, g_pcx_first_ticks, g_pcx_last_ticks;
+extern uint32_t g_pce_after_calls;
+extern uint32_t g_pce_after_tpidrprw, g_pce_after_datap, g_pce_after_up, g_pce_after_ncpu;
+extern uint32_t g_pce_after_sctlr;
+extern uint32_t g_pce_first_tpidrprw;
+extern uint32_t g_pcx_datap, g_pcx_sctlr;
 extern void entry_note_pce(uint32_t caller, uint32_t up, uint32_t ncpu, uint32_t datap,
-                           uint32_t before);
-extern void entry_note_pcx(uint32_t after);
+                           uint32_t tpidrprw, uint32_t before);
+/* 516: the same window's other side, and the exit's own three readings beside 515's count. See the
+ * two bodies in `entry_stubs.c` for what the differences mean. */
+extern void entry_note_pce_after(uint32_t tpidrprw, uint32_t datap, uint32_t up, uint32_t ncpu,
+                                 uint32_t sctlr);
+extern void entry_note_pcx(uint32_t after, uint32_t tpidrprw, uint32_t datap, uint32_t sctlr);
 
 /* **515's two globals, read by name, and they are the operands of Apple's own test.** `caches.c:414`
  * is `if (up_style_idle_exit && (real_ncpus == 1))`, both words are in this image, and both are read
@@ -266,6 +275,56 @@ static inline uint32_t entry_cpu_datap(void)
     __asm__ volatile ("mrc p15, 0, %0, c13, c0, 4" : "=r"(thread));
     return (thread == 0u) ? 0u : *(volatile uint32_t *)(uintptr_t)(thread + 1484u);
 }
+
+/* 516: the same register `entry_cpu_datap()` starts from, published on its own. The value above is 0
+ * for two different reasons - DRAM holds 0 for the field, or TPIDRPRW names a thread whose field
+ * really is 0 - and only this one can tell them apart, because it is a register read and needs no
+ * cache. `sleh_thr` is the abort handler's own copy of it, taken in the same window, so the two
+ * together are the comparison that separates "a stale line" from "a different thread". */
+static inline uint32_t entry_tpidrprw(void)
+{
+    uint32_t thread;
+
+    __asm__ volatile ("mrc p15, 0, %0, c13, c0, 4" : "=r"(thread));
+    return thread;
+}
+
+/* `SCTLR` (`c1, c0, 0`), carried so that "this read was taken with the D-cache off" is a reading and
+ * not an assumption: `SCTLR_C` is bit 2, so a value with `0x4` clear is one taken inside the window.
+ * This is a coprocessor read and answers the register, not memory, which is why it is the one fact
+ * about the window that can be published from inside it without being affected by it. */
+static inline uint32_t entry_sctlr(void)
+{
+    uint32_t v;
+
+    __asm__ volatile ("mrc p15, 0, %0, c1, c0, 0" : "=r"(v));
+    return v;
+}
+
+/* 516's write-back, declared here rather than through an XNU header for this file's usual reason (no
+ * XNU header is included in it). The build clause requires this to be the image's own function from
+ * `caches_asm.o` and not a stand-in: a stubbed clean would make the step's whole product - the
+ * write-back before the window - a call that does nothing.
+ *
+ * **It is `CleanPoC_Dcache` and not `CleanPoU_Dcache`, and that is 516's whole finding.** The two
+ * routines differ by one loop and the difference is the L2:
+ *
+ *     CleanPoU_Dcache (0x800457a8)   mov r0,#0; mcr p15,0,r0,cr7,cr10,{2} ... bx lr
+ *     CleanPoC_Dcache (0x8004575c)   ... the same loop ...; mov r0,#2; mcr p15,0,r0,cr7,cr10,{2}
+ *                                    ... the same loop with the L2's geometry ...; bx lr
+ *
+ * - one `cr7, cr10, {2}` (DCCSW) in the first and two in the second, which the build clause counts
+ * in each body rather than taking on trust. On this CPU the **Point of Unification is the L2** - the
+ * I-cache and the D-cache are unified there and not at DRAM - so `CleanPoU_Dcache` writes a dirty line
+ * into the L2 and stops, and `FlushPoU_Dcache` (`cr7, cr14, {2}`, DCCISW) does the same. `SCTLR.C = 0`
+ * does not answer the L1 or the L2, so the window's reads go to DRAM, which those two never touched:
+ * that is why 514's `else` branch read a NULL `getCpuDatap()` four instructions after its own
+ * `FlushPoU_Dcache`, and why 515's `up` branch faulted the same way after `CleanPoU_Dcache` at
+ * `caches.c:415`, and why this step's first form - a `CleanPoU_Dcache()` here - changed the fault's
+ * address without changing its cause. `CleanPoC_Dcache` is what XNU itself calls when it means "this
+ * has to be in memory": `cpu_sleep` (`cpu.c:105`, before quiescing a CPU), `platform_cache_clean`
+ * (`caches.c:364`) and `platform_cache_shutdown` (`caches.c:377`). */
+extern void CleanPoC_Dcache(void);
 
 /* `boolean_t idle_enable` (`osfmk/arm/cpu_common.c:67`), read **by name** - the linker resolves the
  * address out of the image's own symbol, so there is no offset here to be wrong, which is why this is
@@ -1099,6 +1158,21 @@ int __wrap_poll(void *proc, void *uap, int *retval)
                "getCpuDatap()=0x%x; the window took %d tick(s) at most (first %d, last %d)\n",
                g_pce_calls, g_pce_caller, g_pcx_calls, g_pce_up, g_pce_ncpu, g_pce_datap,
                g_pcx_ticks_max, g_pcx_first_ticks, g_pcx_last_ticks);
+        /* **516's line: the same expression in the two cache states, and the write-back between
+         * them.** `before` is 515's reading, taken with the D-cache on; `after` is the same four
+         * values read inside the window, with the D-cache off and after this step's `CleanPoC_Dcache`.
+         * They agree exactly when the write-back did its job, and `sctlr` is printed in full so that
+         * "the cache was off for the second reading" is a value in the log (bit 2 clear) rather than
+         * an assumption - as is `tpidrprw`, which is the one input to the expression that is a
+         * register and not a line. */
+        printf("mini4: the idle's cache window, twice -- with the cache on: getCpuDatap()=0x%x "
+               "up_style_idle_exit=%d real_ncpus=%d (tpidrprw 0x%x); with it off, inside the window "
+               "after the write-back: getCpuDatap()=0x%x up_style_idle_exit=%d real_ncpus=%d "
+               "(tpidrprw 0x%x, SCTLR=0x%x); and at the window's far end, with the cache on again: "
+               "0x%x (SCTLR=0x%x)\n",
+               g_pce_datap, g_pce_up, g_pce_ncpu, g_pce_first_tpidrprw,
+               g_pce_after_datap, g_pce_after_up, g_pce_after_ncpu, g_pce_after_tpidrprw,
+               g_pce_after_sctlr, g_pcx_datap, g_pcx_sctlr);
     }
 
     return error;
@@ -1501,10 +1575,48 @@ void __wrap_platform_cache_idle_enter(void)
 {
     uint32_t before = entry_counter();
     uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    uint32_t up = up_style_idle_exit;
+    uint32_t ncpu = real_ncpus;
+    uint32_t datap = entry_cpu_datap();
 
-    entry_note_pce(caller, up_style_idle_exit, real_ncpus, entry_cpu_datap(), before);
+    entry_note_pce(caller, up, ncpu, datap, entry_tpidrprw(), before);
+
+    /*
+     * 516: **the write-back, made while the cache is still on, and made to the Point of Coherency.**
+     *
+     * 515's window ends one layer deeper than 514's fault, inside the cache-off part of the idle:
+     * an interrupt is taken there, Apple's own IRQ prologue calls `ml_get_timebase()`
+     * (`locore.s:1421-1423`), and that function's `[getCpuDatap(), #88]` reads 0
+     * (`machine_routines_asm.s:988-989`) - the same expression 514 named, read asynchronously. The
+     * run's own numbers say the window's accesses and the cache disagree about a line
+     * (`g_sleh_seq` receded from the published 8 to DRAM's 3), and Apple's own up arm cleans the
+     * whole D-cache at `caches.c:415` - but *after* `platform_cache_disable()` at `:406`, which
+     * leaves a gap the width of the test in which an interrupt's reads answer a cache that has just
+     * been switched off. This call does that write-back one call earlier, where `SCTLR.C` is still
+     * set - **and it does it to the Point of Coherency rather than to the Point of Unification**,
+     * because a PoU clean leaves the line in the L2 and the window's reads do not look there. DRAM
+     * and the cache agree before the window opens, and every cache-off read inside it - the kernel's,
+     * and the abort handler's - is then a read of the values the CPU was actually using.
+     *
+     * It is a pure write-back: `CleanPoC_Dcache` (`caches_asm.s:121-158`) is a way/set loop of
+     * `mcr p15, 0, r0, c7, c10, 2` with no address and no state, run once for the L1 and once for the
+     * L2. It changes nothing except which copy of a dirty line is authoritative - and the L2 half is
+     * the part that matters, because the Point of Unification on this CPU is the L2: see the
+     * declaration above for what `CleanPoU_Dcache` (one loop, no L2) does and does not reach.
+     */
+    CleanPoC_Dcache();
 
     __real_platform_cache_idle_enter();
+
+    /*
+     * 516: the same four values, read again with the cache **off** - inside the window, after the real
+     * call has disabled the D-cache and after this step's write-back (below the record above) has run.
+     * `entry_tpidrprw()` is carried because it is the one input to the expression that is a *register*:
+     * the field cannot be read at all without it, so a run in which the window's `datap` is 0 and the
+     * abort's `sleh_thr` is a different thread has answered a different question than a stale line.
+     */
+    entry_note_pce_after(entry_tpidrprw(), entry_cpu_datap(), up_style_idle_exit, real_ncpus,
+                         entry_sctlr());
 }
 
 /*
@@ -1517,13 +1629,17 @@ void __wrap_platform_cache_idle_enter(void)
  * The wrapper adds no record of its own beyond `entry_note_pcx`'s, and it does not call the exit
  * anywhere but through the real symbol: a wrapper that called the enter's wrapper here would be a
  * second path into the window and would make the count in the record a fact about this file.
+ *
+ * 516 adds the same expression, read here with the cache **back on** - so a run that reaches this
+ * wrapper has three readings of one field in three cache states, and the middle one is the only one
+ * taken in the window.
  */
 void __real_platform_cache_idle_exit(void);
 void __wrap_platform_cache_idle_exit(void)
 {
     __real_platform_cache_idle_exit();
 
-    entry_note_pcx(entry_counter());
+    entry_note_pcx(entry_counter(), entry_tpidrprw(), entry_cpu_datap(), entry_sctlr());
 }
 
 int __real_fork(void *proc, void *uap, int *retval);
