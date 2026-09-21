@@ -264,9 +264,20 @@ def compare(header_text, assym_text, defines_text, proc_reg_text, boot_assym_tex
     # `map->pmap` to `arm_fast_fault`), so a build whose image disagreed with Apple about either one
     # would fault at an address derived from a wrong offset instead of servicing the fault - which is
     # 474's stop, and is not something a run can distinguish from a zero.
+    #
+    # **510 adds the third, and it is the one that reaches the saved state rather than a field beside
+    # it.** `ACT_PCBDATA` is `offsetof(struct thread, machine.PcbData)` - `get_user_regs(thread)`
+    # returns exactly `&thread->machine.PcbData` (`osfmk/arm/status.c:502-505`) and `PcbData` is the
+    # first member of `struct machine_thread`, so the offset of the *user's* saved state inside the
+    # thread is this number, and the PC inside that state is at `ACT_PCBDATA + SS_PC`. 510's wrapper
+    # reads that word before and after `thread_setentrypoint` stores into it, so a header whose
+    # constant was four bytes out would have the instrument reading a *different member* of the
+    # thread - and the pair would still look like a pair. The comparison below is the one that makes
+    # the constant Apple's rather than this project's.
     assym_for_thread = read_assym(assym_text)
     for key, name in (("STAGE90_ACT_MAP", "ACT_MAP"), ("STAGE90_MAP_PMAP", "MAP_PMAP"),
-                      ("STAGE90_TH_RECOVER", "TH_RECOVER")):
+                      ("STAGE90_TH_RECOVER", "TH_RECOVER"),
+                      ("STAGE90_ACT_PCBDATA", "ACT_PCBDATA")):
         if key not in local:
             failures.append("entry_saved_state.h defines no %s, so the offset the abort handler "
                             "dereferences to choose a map is missing from the image" % key)
@@ -411,12 +422,12 @@ def selftest(header_text, assym_text, defines_text, proc_reg_text, boot_assym_te
         return text[:match.start()] + "%s%d%s" % (match.group(1), value, match.group(3)) + text[match.end():]
 
     for key in ("STAGE90_SS_PC", "STAGE90_SS_SP", "STAGE90_ACT_MAP", "STAGE90_MAP_PMAP",
-                "STAGE90_TH_RECOVER"):
+                "STAGE90_TH_RECOVER", "STAGE90_ACT_PCBDATA"):
         mutated = mutate_define(defines_text, key)
         if mutated:
             mutations.append(("entry_saved_state.h's %s moved by one word" % key,
                               dict(defines_text=mutated)))
-    for name in ("SS_PC", "SS_SP", "ACT_MAP", "MAP_PMAP", "TH_RECOVER"):
+    for name in ("SS_PC", "SS_SP", "ACT_MAP", "MAP_PMAP", "TH_RECOVER", "ACT_PCBDATA"):
         mutated = re.sub(r"^(#define\s+%s\s+#)(\d+)\s*$" % name,
                          lambda m: "%s%d" % (m.group(1), int(m.group(2)) + 4),
                          assym_text, count=1, flags=re.M)

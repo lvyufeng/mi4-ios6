@@ -124,6 +124,33 @@
  */
 #define STAGE90_TH_RECOVER     664
 
+/*
+ * **510 adds the third `offsetof(struct thread, ...)`, and it is the one that reaches the saved state
+ * itself.**
+ *
+ * `get_user_regs(thread)` is `&thread->machine.PcbData` (`osfmk/arm/status.c:502-505`) and `PcbData`
+ * is the **first** member of `struct machine_thread` (`osfmk/arm/thread.h`), so `ACT_PCBDATA` is the
+ * offset of the user's saved state inside the thread - and the PC inside it is at
+ * `ACT_PCBDATA + SS_PC`, because `struct arm_saved_state` and `struct arm_thread_state` lay their
+ * members out the same way (`__r[13]`, `sp`, `lr`, `pc`, `cpsr`). **That second half is not a claim
+ * made here**: `ACT_PCBDATA_PC - ACT_PCBDATA == SS_PC` is one of the agreements
+ * `tools/check_saved_state_offsets.py` has checked since 474, and this step's check extends it to
+ * the header's own constant - `STAGE90_ACT_PCBDATA` against the generated `assym.s`'s `ACT_PCBDATA`,
+ * the same two-way comparison the three words above get.
+ *
+ * **What it is for.** `thread_setentrypoint(thread, entry)` (`osfmk/arm/status.c:662-675`) is where
+ * the kernel tells a thread at what PC its user code begins: its whole body is
+ * `sv = get_user_regs(thread); sv->pc = entry;`. So the argument is the kernel's *decision* and the
+ * word at `thread + ACT_PCBDATA + SS_PC` is the kernel's *state* - and a wrapper that reads one
+ * before the call and the other after it has a before/after pair on the same word, one of whose ends
+ * is written by the kernel rather than by the instrument.
+ *
+ * The alternative would be to publish only the argument, and the defect that would hide is the one
+ * this project keeps paying for: a function that returns without doing anything looks exactly like a
+ * correct call from the argument's side. The read-back is what says the store happened.
+ */
+#define STAGE90_ACT_PCBDATA    848
+
 /* `osfmk/arm/trap.h:69-74`, the two abort classes this image can see once 467 and 476 have given
  * slots 4 and 3 to Apple's own first-level handlers. **The class is what says which coprocessor pair
  * is the fault pair** - a prefetch abort's is IFSR (`c5,c0,1`) and IFAR (`c6,c0,2`), a data abort's

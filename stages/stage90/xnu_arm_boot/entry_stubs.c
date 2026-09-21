@@ -4848,6 +4848,70 @@ void entry_note_exec_returned(uint32_t seq, uint32_t who, uint32_t after_who)
     entry_live_write("xnu_live_exec_done_current", after_who);
 }
 
+/* ------------------------------ where the OS starts the process it just loaded (510) */
+/*
+ * **The kernel's own entry point for the process, as a before/after pair on one word.**
+ *
+ * `thread_setentrypoint(thread, entry)` is four instructions and its whole body is `sv->pc = entry`
+ * (`osfmk/arm/status.c:662-675`). So there are two facts to be had and they are different facts:
+ * the *argument*, which is what the exec decided, and the *word*, which is what the thread now holds.
+ * The wrapper in `entry_trace.c` reads the word before and after the call and publishes both, and
+ * that is deliberate rather than thorough: a function that returned without storing anything would
+ * produce the same argument, so an instrument that published only the argument could not tell a
+ * correct store from no store at all - and this project's list of defects has that shape in it more
+ * than once (a `write(2)` that never published, a report path whose buffer held another writer's
+ * text).
+ *
+ * **`_before` is predicted to be 0 and that is a reading about the *exec path*, not about this
+ * file.** `activate_exec_state` calls `thread_state_initialize(thread)` and then `thread_setstatus`
+ * immediately before this call (`bsd/kern/kern_exec.c:730-760`), so the state the PC is about to be
+ * written into is one the kernel has just cleaned - and a non-zero `_before` would say the exec is
+ * reusing a thread whose saved state was never cleared, which is a different boot. The pair is
+ * published as two keys rather than one because they are readable independently: `_entry` alone
+ * answers "where", and `_after` alone answers "did the store happen".
+ *
+ * **All three numbers are one word each and none of them is a pointer into user space.** `thread` is
+ * a kernel object and `entry`/`_before`/`_after` are addresses in the process's own map; nothing here
+ * dereferences a user address, so the failure mode this instrument could have (a fault inside the
+ * record) needs the thread pointer to be wrong rather than the process's map to be absent. The `0`
+ * guard on `thread` is for that reason and not for a case the path takes.
+ *
+ * **`_entry_hi` exists because the argument is 64-bit, and the first run of this step is why.** The
+ * declaration is `void thread_setentrypoint(thread_t thread, mach_vm_offset_t entry)`
+ * (`osfmk/kern/thread.h:980`) and `mach_vm_offset_t` is 64 bits, so the entry arrives as the register
+ * pair **r2:r3** with r1 unused - visible in the caller's own object
+ * (`out/xnu_kernel_obj/bsd_kern_kern_exec.o`: `ldr r2, [r8, #4]` / `mov r3, #0` / `bl`). The first
+ * build's wrapper declared the parameter `uint32_t`, read r1, and passed r2/r3 through untouched, so
+ * the real function stored whatever those registers held: `_entry` came out `0x8`, pid 1 started at
+ * the junk and exited, and the run measured the wrapper instead of the kernel. Publishing the top
+ * half is the cheap structural consequence of the fix - a 32-bit address has `_entry_hi = 0`, so a
+ * run whose `_entry_hi` is not zero is a run whose entry is not an address at all.
+ */
+uint32_t g_entrypoint_calls;
+
+uint32_t entry_note_entrypoint(uint32_t caller, uint32_t thread, uint32_t entry,
+                               uint32_t entry_hi, uint32_t before)
+{
+    uint32_t seq = g_entrypoint_calls + 1u;
+
+    entry_live_write("xnu_live_entrypt_seq", seq);
+    entry_live_write("xnu_live_entrypt_caller", caller);
+    entry_live_write("xnu_live_entrypt_thread", thread);
+    entry_live_write("xnu_live_entrypt_entry", entry);
+    entry_live_write("xnu_live_entrypt_entry_hi", entry_hi);
+    entry_live_write("xnu_live_entrypt_before", before);
+
+    g_entrypoint_calls++;
+    return seq;
+}
+
+void entry_note_entrypoint_returned(uint32_t seq, uint32_t entry, uint32_t after)
+{
+    entry_live_write("xnu_live_entrypt_done_seq", seq);
+    entry_live_write("xnu_live_entrypt_done_entry", entry);
+    entry_live_write("xnu_live_entrypt_after", after);
+}
+
 /* Experiment 456's probe, defined below its first caller; the declaration is here because
  * `entry_note_iolock` is where the reading is taken (see `entry_registry_probe`). */
 __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);

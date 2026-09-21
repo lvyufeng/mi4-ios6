@@ -200,6 +200,13 @@ extern void entry_note_wait_returned(uint32_t seq, uint32_t error, uint32_t ret,
 extern uint32_t entry_note_exec(uint32_t caller, uint32_t who, uint32_t proc);
 extern void entry_note_exec_returned(uint32_t seq, uint32_t who, uint32_t after_who);
 
+/* 510: the pair around `thread_setentrypoint` - the kernel's own single store of a process's user
+ * entry point. The before/after halves are the same word read on the two sides of the call, so the
+ * record says what the kernel *did* and not only what it was asked to do. See the wrapper below. */
+extern uint32_t entry_note_entrypoint(uint32_t caller, uint32_t thread, uint32_t entry,
+                                      uint32_t entry_hi, uint32_t before);
+extern void entry_note_entrypoint_returned(uint32_t seq, uint32_t entry, uint32_t after);
+
 /* **The kernel's real `printf`, declared rather than included - and the only function this file calls
  * on the console path.** `osfmk/kern/printf.c` is where `load_init_program`'s own messages come from
  * (`bl 800399b4 <printf>` immediately before each of its four `load_init_program_at_path` calls in
@@ -1311,6 +1318,95 @@ void __wrap_load_init_program(void *proc)
      * claiming the next microsecond's outcome. */
     printf("mini4: the OS's own init load returned, so pid %d has the init image (caller 0x%x)\n",
            who, caller);
+}
+
+/* ------------------------------------ where the OS starts the process it just loaded (510) */
+/*
+ * **The other end of 509's reading, and the number a real userland binary needs.**
+ *
+ * 509's run measured that the OS loaded its init image and returned, and that the process it loaded
+ * *for* is `initproc` while the loader itself runs on the kernel task. It did not measure where that
+ * process begins - and the run cannot show it: the fixture's first instruction is `svc #0x80`, which
+ * does not fault, so the earliest user-mode record in any log is the *second* access (`0x1118`), not
+ * the entry. So the entry point is only visible if the kernel's own store is read, and the store is
+ * one instruction:
+ *
+ *     void thread_setentrypoint(thread_t thread, mach_vm_offset_t entry)   // osfmk/arm/status.c:662
+ *     {
+ *             struct arm_saved_state *sv = get_user_regs(thread);
+ *             sv->pc = entry;
+ *     }
+ *
+ * `get_user_regs(thread)` is `&thread->machine.PcbData` (`status.c:502-505`) and `PcbData` is the
+ * first member of `struct machine_thread`, so the word is at
+ * `thread + STAGE90_ACT_PCBDATA + STAGE90_SS_PC` - both numbers are Apple's own `offsetof`s out of
+ * the generated `assym.s`, checked by `tools/check_saved_state_offsets.py` against the header *and*
+ * against `ACT_PCBDATA_PC - ACT_PCBDATA == SS_PC`.
+ *
+ * **The record is a before/after pair on that one word, and the pair is what makes it a reading.** The
+ * argument alone would be a fact about what the caller *said*; a function that returned without
+ * storing anything would produce exactly the same argument. Read before the call and again after it,
+ * the two values bracket the kernel's own store.
+ *
+ * **And the first run answered a question this file had not thought to ask** (the run's own
+ * correction, written here): the word was *already* the entry point before the call. The reasoning
+ * above predicted a cleaned state, and it is the opposite - `activate_exec_state` calls
+ * `thread_setstatus(thread, ARM_THREAD_STATE, ...)` first (`kern_exec.c:743-758`) and that copies the
+ * image's whole `LC_UNIXTHREAD` state, `pc` included, into exactly this word. So the boot has **two
+ * derivations of one number**: the mapped thread state, and `thread_setentrypoint`'s argument, which
+ * comes from `load_threadentry` -> `thread_entrypoint` reading `state->pc` out of the same state
+ * (`status.c:683-705`). `_before` and `_after` being equal is therefore the reading rather than a
+ * disappointing one, and `_entry` is the second derivation published beside it. Measured, in the run
+ * with the ABI fixed: `_entry = 0x000010e0`, `_entry_hi = 0`, `_before = _after = 0x000010e0`,
+ * `_caller = activate_exec_state + 0xe8`, and the console line reads
+ * `mini4: the OS starts the process at 0x10e0 (the thread's user pc was 0x10e0)`.
+ *
+ * **The console line states the pair, because a reader's question is "where does the OS start my
+ * program".** The value is the fixture's own `entry_pc_value` - the `pc` word of the Mach-O's
+ * `LC_UNIXTHREAD`, which `tools/host_ramdisk_macho_check.py` reads out of the blob and asserts is
+ * inside `__TEXT` - so the line is the kernel's number standing beside the file's number, in the same
+ * console block, with no filesystem between them.
+ *
+ * **The call site is the exec's own, and that is a check rather than a comment.** `thread_setentrypoint`
+ * is defined in `osfmk/arm/status.c` and called from `bsd/kern/kern_exec.c` - different objects, so
+ * `--wrap` sees a genuinely undefined reference (455's negative result is the other case). The build
+ * reads the `bl` out of `activate_exec_state`'s instruction range, and the census would report a
+ * second call site anywhere else in the image, so "the one record is the exec" is a fact about the
+ * linked image rather than about this boot.
+ *
+ * **The argument is 64-bit and the first version of this wrapper got that wrong.** `thread_setentrypoint`
+ * is declared `void thread_setentrypoint(thread_t thread, mach_vm_offset_t entry)`
+ * (`osfmk/kern/thread.h:980`) and `mach_vm_offset_t` is a 64-bit type, so on this ABI the entry is
+ * passed as the pair **r2:r3** with r1 unused - which the caller's own object shows:
+ * `activate_exec_state` compiles to `ldr r2, [r8, #4]` / `mov r0, r9` / `mov r3, #0` /
+ * `bl thread_setentrypoint` (`out/xnu_kernel_obj/bsd_kern_kern_exec.o`, disassembled). The first
+ * build of this step declared the parameter `uint32_t`, so the wrapper read **r1** - a register the
+ * call does not use - and passed r2/r3 through untouched, and the run measured the consequence
+ * rather than the entry: `xnu_live_entrypt_entry = 0x00000008` (r1's stale word) and pid 1 started at
+ * the junk the *real* function then read, exited, and took the boot with it. The declaration below is
+ * the ABI's, and the build now checks the width from the caller's side.
+ */
+void __real_thread_setentrypoint(void *thread, uint64_t entry);
+void __wrap_thread_setentrypoint(void *thread, uint64_t entry)
+{
+    const uint32_t pc_delta = (STAGE90_ACT_PCBDATA + STAGE90_SS_PC) / 4;
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    uint32_t before = 0xFFFFFFFFu, after = 0xFFFFFFFFu;
+    uint32_t seq;
+
+    if (thread != 0)
+        before = ((const volatile uint32_t *)thread)[pc_delta];
+
+    seq = entry_note_entrypoint(caller, (uint32_t)(uintptr_t)thread,
+                                (uint32_t)entry, (uint32_t)(entry >> 32), before);
+    __real_thread_setentrypoint(thread, entry);
+
+    if (thread != 0)
+        after = ((const volatile uint32_t *)thread)[pc_delta];
+    entry_note_entrypoint_returned(seq, (uint32_t)entry, after);
+
+    printf("mini4: the OS starts the process at 0x%x (the thread's user pc was 0x%x)\n",
+           (uint32_t)entry, before);
 }
 
 /* ---------------------------------------------------- the kernel's own timer deadline (481) */

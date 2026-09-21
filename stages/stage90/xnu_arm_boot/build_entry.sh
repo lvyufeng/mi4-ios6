@@ -76,7 +76,7 @@ ARGS_BYTES=0x00001000          # one page, which is what `boot_args` needs to fi
 REAL_ARM_INIT=${STAGE90_ENTRY_REAL_ARM_INIT:-0}
 STUB_DEFINES=()
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES=(-DSTAGE90_ENTRY_REAL_ARM_INIT=1)
-# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s the sixty-seven symbols listed in
+# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s the sixty-eight symbols listed in
 # `TRACE_LDFLAGS` below - `kalloc_canblock`,
 # `lck_grp_alloc_init`, `kernel_memory_allocate`, `vm_page_wait`, `thread_block`, (447)
 # `ml_get_max_cpus`, `ml_init_max_cpus`, (448) `IODeviceTreeAlloc`, `IOWorkLoop::workLoop`,
@@ -140,6 +140,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=fork --wrap=exit
                    --wrap=wait4
                    --wrap=load_init_program
+                   --wrap=thread_setentrypoint
                    --wrap=psignal
                    --wrap=setPop
                    --wrap=PE_init_platform --wrap=fiq_context_init
@@ -27480,6 +27481,82 @@ verify_trace_symbols() {
         grep -q "bl[[:space:]]\+${wrap_a#0x} <__wrap_load_init_program>" ||
         layout_fail "bsdinit_task ($bid..$bnext) does not branch to __wrap_load_init_program ($wrap_a) - either the OS's own call site went to the real loader (455's same-object case, a wrapper that can never run) or the flag list lost the name; both make a run with no xnu_live_exec_* records indistinguishable from a boot that never got there"
     say "  xnu_entry_509: load_init_program's body branches to panic ($panic_a) and its caller bsdinit_task branches to __wrap_load_init_program ($wrap_a), so xnu_live_exec_done_seq exists only when the OS loaded its init image - and the console line beside it is printed through the real printf"
+
+    # **510's wrapper, and its clause is the one that says "the record is the exec's".** The name is
+    # `thread_setentrypoint` - Apple's own single store of a process's user entry point
+    # (`osfmk/arm/status.c:662-675`, whose whole body is `get_user_regs(thread)->pc = entry`) - and it
+    # is defined in `osfmk/arm/status.c` while its only caller in this tree is
+    # `activate_exec_state` in `bsd/kern/kern_exec.c`, i.e. a different object, so `--wrap` sees a
+    # genuinely undefined reference. That is 455's condition, and the failure it prevents is the one
+    # this step cannot see in a log: a wrapper that never runs produces no records, and a boot with no
+    # entry-point records looks exactly like a boot that never got that far. Two things are asserted:
+    # the name is the kernel's own (membership in pass 1's undefined set), and the branch to the
+    # wrapper is inside `activate_exec_state`.
+    grep -qx "thread_setentrypoint" "$OUT/xnu_arm_entry_undef.txt" &&
+        layout_fail "510's instrument calls thread_setentrypoint through \`__real_\` and the pass-1 undefined set contains it - nothing in this image defines it, so the entry point the run records would be a fact about the stand-in's argument"
+    tse=$(sym_addr thread_setentrypoint) || layout_fail "thread_setentrypoint is not in the linked image - the kernel's own store of a process's user entry point is not here, so 510's wrapper has nothing to wrap"
+    twrap=$(sym_addr __wrap_thread_setentrypoint) || layout_fail "__wrap_thread_setentrypoint is not in the linked image - --wrap=thread_setentrypoint did not link, and the run's absence of xnu_live_entrypt_* records would say nothing about the boot"
+    aes=$(sym_addr activate_exec_state) || layout_fail "activate_exec_state is not in the linked image - 510's clause needs the exec path's own function to read the call site out of"
+    aesnext=$(sym_next "$aes") || true
+    [[ -n "$aesnext" ]] || layout_fail "no symbol follows activate_exec_state in the image, so its instruction range cannot be read"
+    arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$aes" --stop-address="$aesnext" |
+        grep -q "bl[[:space:]]\+${twrap#0x} <__wrap_thread_setentrypoint>" ||
+        layout_fail "activate_exec_state ($aes..$aesnext) does not branch to __wrap_thread_setentrypoint ($twrap) - the exec path went to the real thread_setentrypoint (455's same-object case) or the flag list lost the name, and either way the entry point this step exists to measure is not recorded"
+    # And the call site count is the reading's own bound: `activate_exec_state` is reached for the
+    # kernel's init load and for every `execve`, and this boot has one exec - so a second site in the
+    # image would mean the record is not necessarily the init process's. The census above already
+    # reports every branch to the wrapper; the check below is what makes the *tree* claim (one
+    # caller, in the exec path) a fact about the image rather than about a grep.
+    sites=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" | grep -c "bl[[:space:]]\+${twrap#0x} <__wrap_thread_setentrypoint>" || true)
+    [[ "$sites" == "1" ]] ||
+        layout_fail "this image branches to __wrap_thread_setentrypoint from $sites site(s), and 510's reading - that the recorded entry point is the process the OS starts - holds for exactly one exec path call. A second site means the record needs the caller published beside it (it is: _caller) and this sentence needs rewriting rather than the check removing"
+    say "  xnu_entry_510: thread_setentrypoint is the kernel's own (defined in osfmk/arm/status.c, not in pass 1's undefined set), the one branch to its wrapper ($twrap) is inside activate_exec_state ($aes), and there is exactly $sites such branch in the whole image - so xnu_live_entrypt_after is the user pc the OS wrote for the one process it loaded"
+    # **And the argument's *width*, which the first run of this step got wrong and paid for.** The
+    # declaration is `void thread_setentrypoint(thread_t thread, mach_vm_offset_t entry)`
+    # (`osfmk/kern/thread.h:980`) and `mach_vm_offset_t` is 64 bits, so on this ABI the entry travels
+    # as the register pair **r2:r3** and r1 is not an argument at all - the caller's own object shows
+    # it (`out/xnu_kernel_obj/bsd_kern_kern_exec.o` compiles the call as `ldr r2, [r8, #4]` /
+    # `mov r0, r9` / `mov r3, #0` / `bl thread_setentrypoint`). The first build's wrapper declared the
+    # parameter `uint32_t`, so it read r1 - a stale word - and passed r2/r3 through untouched: the run
+    # recorded `_entry = 0x8`, the real function stored whatever those registers held, pid 1 started at
+    # the junk and exited, and the boot panicked. **That class of defect is not visible in the
+    # instrument's own output** (the record looked well-formed; only the value was nonsense), so it is
+    # checked here from the linked instructions instead: the wrapper must pass the pair through, which
+    # means both r2 and r3 are written in the instructions immediately before its call to the real
+    # function. A wrapper that narrowed the parameter again would write r1 and leave r3 alone, and this
+    # clause stops the build with that sentence rather than spending a device run on it.
+    real=$(sym_addr thread_setentrypoint) || layout_fail "the real thread_setentrypoint has no symbol in the linked image, so 510's width check cannot find the call the wrapper makes to it"
+    twrapnext=$(sym_next "$twrap") || true
+    [[ -n "$twrapnext" ]] || layout_fail "no symbol follows __wrap_thread_setentrypoint in the image, so its instruction range cannot be read"
+    # Every call to the real function must be inside the wrapper: the compiler is free to duplicate the
+    # tail (`thread == 0` and the main path converge after their own record calls, and gcc tail-merged
+    # the `bl` and what follows it into two copies), so "one site" is not the property - "all sites are
+    # the wrapper's" is, and it is also the stronger statement: nothing else in this image reaches the
+    # kernel's entry-point store except through the instrument.
+    outside=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" |
+        awk -v lo="$((twrap))" -v hi="$((twrapnext))" -v pat="<thread_setentrypoint>" '
+            index($0, pat) && /bl[[:space:]]/ {
+                split($1, a, ":"); here = strtonum("0x" a[1])
+                if (here < lo || here >= hi) { print; n++ }
+            } END { exit(n ? 0 : 1) }' || true)
+    [[ -z "$outside" ]] ||
+        layout_fail "this image calls the real thread_setentrypoint from outside __wrap_thread_setentrypoint ($twrap..$twrapnext): $outside - 510's records are then not the whole story about where a process's entry point is stored"
+    # The width, one window per call site.
+    wins=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" |
+        awk -v pat="<thread_setentrypoint>" '
+            index($0, pat) && /bl[[:space:]]/ { for (i = 1; i <= 3; i++) print prev[i]; print; print "---"; next }
+            { prev[3] = prev[2]; prev[2] = prev[1]; prev[1] = $0 }')
+    counted=$(awk 'BEGIN { RS = "---"; total = 0; two = 0; three = 0 }
+                   /bl[[:space:]]/ { total++;
+                        if ($0 ~ /:[[:space:]]+[0-9a-f]+[[:space:]]+(mov|movw|movt|ldr|ldrd)[[:space:]]+r2,/) two++;
+                        if ($0 ~ /:[[:space:]]+[0-9a-f]+[[:space:]]+(mov|movw|movt|ldr|ldrd)[[:space:]]+r3,/) three++ }
+                   END { printf "%d %d %d", total, two, three }' <<<"$wins")
+    read -r total two three <<<"$counted"
+    [[ "${total:-0}" != "0" ]] ||
+        layout_fail "510's width check found no call to the real thread_setentrypoint inside its own window reader, so it measured nothing - the reader is written against the disassembly's shape and the disassembly changed"
+    [[ "$two" == "$total" && "$three" == "$total" ]] ||
+        layout_fail "of 510's $total call(s) to the real thread_setentrypoint, $two write r2 first and $three write r3 - the entry is a 64-bit argument and travels in r2:r3 (see the caller's own object: \`ldr r2, [r8, #4]\` / \`mov r3, #0\`), so a call that leaves either alone passes the caller's leftover word. That is 510's first run exactly: the wrapper declared the parameter uint32_t, read r1, and the run recorded \`_entry = 0x8\` while pid 1 started at the junk and exited"
+    say "  xnu_entry_510: all $total call(s) to the real thread_setentrypoint are inside the wrapper and every one writes r2 and r3, so the 64-bit entry is passed through as the pair the caller used - the first build declared it 32-bit, read r1 and left r3 alone, and stored a stale word as pid 1's entry point"
 
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls
     # `_ZNK9IOService8getStateEv` by mangled name on objects whose dynamic type this file cannot know -
