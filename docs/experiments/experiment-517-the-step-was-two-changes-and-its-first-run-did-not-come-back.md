@@ -248,6 +248,90 @@ section's existing tail slack, which is the observation and not an explanation);
 did not come back is still `59618b02…`, and the reason it cannot be attributed is unchanged — it carried
 both halves, and neither this addendum nor anything else here says which one stopped it.
 
+## Addendum 2 (host-side, before the run) — the frame has two forms, and the guard was written for neither
+
+The frame reader was reviewed against `locore.s` before another device run, and it would have read
+nothing. **The vector puts the saved state in one of two places, and the interrupt stack is not one of
+them:**
+
+- **From user mode it is in the current thread's PCB** — `locore.s:1300-1307`: `mrc p15,0,sp,c13,c0,4`
+  (TPIDRPRW), `add sp, sp, ACT_PCBDATA` (848 here), `stmia sp, {r0-r12, sp, lr}^`. So
+  `cpu_int_state == TPIDRPRW + 848` exactly, and no read is needed to establish it.
+- **From kernel mode it is on the interrupted SVC stack** — `:1344-1349`: `sub sp, sp, EXC_CTX_SIZE`
+  then `add r0, sp, EXC_CTX_SIZE` / `str r0, [sp, SS_SP]`. The vector therefore writes the identity
+  **`frame[SS_SP] == frame + 360`** into the frame itself, and which stack that is depends on the code
+  the interrupt took: a thread's kernel stack, or the interrupt stack when the interrupted code is
+  already on it (this kernel's boot and idle loops are — below).
+
+The guard as built accepted a candidate only inside
+`[cpu_data->intstack_top − INTSTACK_SIZE, cpu_data->intstack_top)`, i.e. 16 KB of one specific stack.
+516's frame happens to be inside it — **and it is the identity, to the byte, that says so**: the frame
+is at `0x80517e88`, its `SS_SP` is `0x80517ff0`, and `0x80517ff0 − 0x80517e88 = 0x168 = 360`. A frame on
+a thread's kernel stack is outside that window, so every ordinary call of a healthy run would have
+published `_frame = 0`, and the run would have spent a wedge — or a power press — to learn nothing. That
+is the *second* time this instrument's own check and code had to be corrected before it flew (the first
+was the write budget, §"What the step changed"), and both were found by reading it rather than by
+running it.
+
+**What changed.** The guard is now the two facts instead of a window: `cand == TPIDRPRW + ACT_PCBDATA`
+(the user form, exact, no read) or `cand` word-aligned, inside one of the two windows this
+configuration's kernel data is known to live in (`0x80000000`–`0x80800000`, the image's own data;
+`0xc0000000`–`0xc1000000`, the heap the thread and registry pointers sit in), **and** carrying the
+identity in its own `SS_SP` word. The windows are a fault-guard — 269's rule is why there is one at all
+— and the identity is the test. Two keys were added: `xnu_live_tb_kind` (1 kernel stack, 2 user PCB) and
+`xnu_live_tb_cand`, which is what `cpu_int_state` held whether the guard accepted it or refused it —
+because `_frame = 0` had three different meanings and only one of them was "no interrupt in service".
+The build's clause was rewritten with it: it now requires the compiled body to use `ACT_PCBDATA` and
+`EXC_CTX_SIZE`, compares all four offsets against `assym.s`, and reads the two header-named offsets
+(`ACT_PCBDATA`, `SS_SP`) from the header the C includes rather than restating them — the build's own
+first run refused the duplicate macros, which is the check doing its job on the clause that had just
+been written.
+
+### And what the same reading turned up in 516's log
+
+516's two runs did not come back through XNU's own path — both took `panics` at the same site — and this
+step's subject was the frame those runs stopped on. The host-side work did not have to wait for a run to
+read that frame: `sleh_abort at interrupt context (saved state:0x80517e88)` with the dump below it is
+complete enough to decode, and the reading is that **the code in progress when it faulted was the idle
+exit's own L1 flush, the very call this step's flag-on arm duplicates one line earlier.**
+
+- `lr: 0x800462dc`. In this image `platform_cache_idle_exit` is `0x800462d4`, and its second instruction
+  is `0x800462d8 bl 80045874 <FlushPoU_Dcache>` — so `+8` is the return address of exactly that call.
+  The abort was taken inside `FlushPoU_Dcache`, called from `platform_cache_idle_exit` at `caches.c:460`.
+- `pc: 0x0723c1f8` and `far: 0x0723c1f8`, `fsr: 0x5` — an `IFSR` translation fault on a **section**, i.e.
+  the *instruction fetch* at that address faulted. `0x0723c1f8` is not code in any image this project
+  builds; it is a **timebase**. The same log's `wfi` records, written immediately before the abort, read
+  `0x071cd428` → `0x0723c215` over `0x6eded` ticks, so the value the machine tried to fetch is 29 ticks
+  below the timebase it read straight after the `WFI` it had just completed.
+- `cpsr: 0x80000093` — SVC mode, I and F set. `sp: 0x80517ff0`, and the frame is at `0x80517e88 = sp − 360`,
+  so the kernel form of the frame is confirmed from both ends.
+- **"at interrupt context" is a statement about `sp`, not about an interrupt.** `ml_at_interrupt_context()`
+  (`machine_routines.c:671`) is literally `sp < cpu_data->intstack_top && sp > intstack_top − INTSTACK_SIZE`,
+  and `intstack`/`intstack_top` are `0x80514000`/`0x80518000` in this image — so `0x80517ff0` is 16 bytes
+  below the top of the interrupt stack and the label was earned by *where the stack pointer was*. The
+  reason it was there: the only `ldr sp, <intstack_top>` in the whole image is at `0x800002d4`, which is
+  `start.s:310`'s `LOAD_ADDR(sp, intstack_top) // Get interrupt stack top` — **the boot runs on the
+  interrupt stack**, and so does the idle loop it becomes, which is why a *boot-time* abort is reported
+  as an interrupt-context one.
+- `xnu_live_sleh_frame_ok = 1` in the same log: 516's own instrument compares the frame's
+  `SS_STATUS`/`SS_VADDR` against the live `cp15` reads, so the frame the panic reported is the abort's own
+  and not a stale interrupt frame left in `cpu_int_state`.
+
+**What this reading does not settle, and the arm about to run is what separates the two.** Which
+instruction put a timebase where a PC belongs. `return_from_irq` and `load_and_go_sys`
+(`locore.s:1455-1473`, `0x8001ab10`–`0x8001ab64`, `0x8001a860`) restore `r0-r12`, `sp` and `pc` **from the
+frame**, in SVC mode, with `sp` itself serving as the frame pointer — so a frame whose `SS_PC` (frame +
+60) held a timebase is one `movs pc, lr` away from exactly this fault, at exactly this `sp`. The other
+candidate the doc named first, the entropy stir, is now the weaker one: its store address is bounded by
+its own wrap test to `[EntropyData+4, EntropyData+68)` = `0x80526504`–`0x80526544`, which is 59 KB from
+this frame, so it cannot be the writer unless the `index_ptr` it reads was itself already corrupt — and
+that is a reading (`_index`) rather than an assumption. `_pc` against `_lr` in the first record, with
+`_kind` and `_cand` saying which frame it read, is the arm's whole question.
+
+Still owed, and unchanged by the above: the `r4 = r11 = pc + 2` anomaly in 516's dumps (both runs). The
+return-path reading narrows it to two registers that came out of the frame's own slots rather than to the
+frame's shape, and nothing here claims to explain it.
+
 ## What is owed
 
 1. **The measurement arm's run** — `STAGE90_XNU_EXIT_POC_FLUSH=0`, `stage90-qcdt.img` sha256

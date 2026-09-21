@@ -28288,16 +28288,21 @@ verify_trace_symbols() {
         "$REPO_ROOT/out/xnu_assym/$XNU_KERNEL_CONFIG/assym.s" | tr -d '#'; }
     s_of() { awk -v m="$1" '$1 == "#define" && $2 == m { v = $3; sub(/u$/, "", v); print v; exit }' \
         "$BOOT_DIR/entry_stubs.c"; }
-    a_int=$(a_of CPU_INT_STATE);       a_top=$(a_of CPU_INTSTACK_TOP)
-    a_istk=$(a_of INTSTACK_SIZE);      a_dap=$(a_of ACT_CPUDATAP)
-    s_int=$(s_of STAGE90_CPU_INT_STATE);  s_top=$(s_of STAGE90_CPU_INTSTACK_TOP)
-    s_istk=$(s_of STAGE90_INTSTACK_SIZE); s_dap=$(s_of STAGE90_ACT_CPUDATAP)
-    for v in "$a_int" "$a_top" "$a_istk" "$a_dap" "$s_int" "$s_top" "$s_istk" "$s_dap"; do
+    # The offsets `entry_saved_state.h` names are read from that file and not from `entry_stubs.c`,
+    # because the C does not restate them - it includes the header, and the build refused a second
+    # spelling of `ACT_PCBDATA` and of `SS_SP` when this clause's guard was first written with both.
+    ss_of() { awk -v m="$1" '$1 == "#define" && $2 == m { v = $3; sub(/^#/, "", v); print v; exit }' \
+        "$BOOT_DIR/entry_saved_state.h"; }
+    a_int=$(a_of CPU_INT_STATE);       a_dap=$(a_of ACT_CPUDATAP)
+    a_pcb=$(a_of ACT_PCBDATA);         a_exc=$(a_of EXC_CTX_SIZE)
+    s_int=$(s_of STAGE90_CPU_INT_STATE);  s_dap=$(s_of STAGE90_ACT_CPUDATAP)
+    s_pcb=$(ss_of STAGE90_ACT_PCBDATA);   s_exc=$(s_of STAGE90_EXC_CTX_SIZE)
+    for v in "$a_int" "$a_dap" "$a_pcb" "$a_exc" "$s_int" "$s_dap" "$s_pcb" "$s_exc"; do
         [[ "$v" =~ ^[0-9]+$ ]] ||
-            layout_fail "517's clause cannot read one of the four offsets out of assym.s or entry_stubs.c (got [$v]): the frame pointer this step publishes is one of those fields and the guard that keeps the dereference from faulting is another, so both files have to name them and both have to be readable here"
+            layout_fail "517's clause cannot read one of the four offsets out of assym.s or entry_stubs.c (got [$v]): the frame pointer this step publishes is one of those fields and each of the frame's two forms is established by another (the user form by ACT_PCBDATA and the kernel form by the identity read at SS_SP), so both files have to name them and both have to be readable here"
     done
-    [[ "$a_int" == "$s_int" && "$a_top" == "$s_top" && "$a_istk" == "$s_istk" && "$a_dap" == "$s_dap" ]] ||
-        layout_fail "assym.s says CPU_INT_STATE=[$a_int] CPU_INTSTACK_TOP=[$a_top] INTSTACK_SIZE=[$a_istk] ACT_CPUDATAP=[$a_dap] and entry_stubs.c's macros say [$s_int]/[$s_top]/[$s_istk]/[$s_dap]: the record is a frame read through the thread's machine block with a bound around it, so the C and genassym have to be one number for each of the four - a configuration whose layout moved must stop the build rather than silently move the reading"
+    [[ "$a_int" == "$s_int" && "$a_dap" == "$s_dap" && "$a_pcb" == "$s_pcb" && "$a_exc" == "$s_exc" ]] ||
+        layout_fail "assym.s says CPU_INT_STATE=[$a_int] ACT_CPUDATAP=[$a_dap] ACT_PCBDATA=[$a_pcb] EXC_CTX_SIZE=[$a_exc] and entry_stubs.c's macros say [$s_int]/[$s_dap]/[$s_pcb]/[$s_exc]: the record is a frame read through the thread's machine block and established either as the PCB frame or by the identity the vector writes into `SS_SP`, so the C and genassym have to be one number for each of the four - a configuration whose layout moved must stop the build rather than silently move the reading"
     # And the six frame offsets, **taken from the one file that names them rather than written here**.
     # `entry_saved_state.h` is this image's spelling of genassym's `SS_*`, and the agreement between
     # those two is already a gate in this same build - `tools/check_saved_state_offsets.py` runs a
@@ -28305,8 +28310,6 @@ verify_trace_symbols() {
     # *reads* them and requires the compiled body to load exactly those. Writing 52/56/60/64/68/72 here
     # as well would be a third definition of one value, which is the defect class that checker exists to
     # refuse, and the frame this step reads is made of those six numbers.
-    ss_of() { awk -v m="$1" '$1 == "#define" && $2 == m { v = $3; sub(/^#/, "", v); print v; exit }' \
-        "$BOOT_DIR/entry_saved_state.h"; }
     ss_offs=""
     for m in STAGE90_SS_SP STAGE90_SS_LR STAGE90_SS_PC STAGE90_SS_CPSR STAGE90_SS_STATUS STAGE90_SS_VADDR; do
         v=$(ss_of "$m")
@@ -28315,11 +28318,14 @@ verify_trace_symbols() {
         ss_offs="$ss_offs $v"
     done
     ss_alt=$(printf '%s|' $ss_offs); ss_alt="${ss_alt%|}"
+    # The identity's own offset, read from the same file the six come from rather than restated here:
+    # `SS_SP` is the first of them, and the kernel form of the frame is `frame[SS_SP] == frame + 360`.
+    s_sssp=$(ss_of STAGE90_SS_SP)
     [[ "$(printf '%s\n' $ss_offs | sort -u | wc -l)" == 6 ]] ||
         layout_fail "entry_saved_state.h's six frame offsets are [$ss_offs] and they are not six distinct numbers: SS_PC is the slot 516's runs found holding a timebase and the other five are what make the frame's identity checkable, so two of them naming one word would be two keys reporting one number"
     s_ent=$(s_of STAGE90_ENTROPY_DATA_SIZE); a_ent=$(a_of ENTROPY_DATA_SIZE)
     [[ "$s_ent" =~ ^[0-9]+$ && "$s_ent" == "$a_ent" ]] ||
-        layout_fail "the entropy buffer's size is [$s_ent] in entry_stubs.c and [$a_ent] in assym.s: the stir's store address is computed from it, and `_hit` is that address against the frame - two different sizes would make the key report a range the store cannot reach"
+        layout_fail "the entropy buffer's size is [$s_ent] in entry_stubs.c and [$a_ent] in assym.s: the stir's store address is computed from it, and \`_hit\` is that address against the frame - two different sizes would make the key report a range the store cannot reach"
     mlgt=$(sym_addr ml_get_timebase) ||
         layout_fail "ml_get_timebase is not in the linked image - 517's instrument is a wrapper on it, and without the real function there is nothing to wrap"
     grep -qx "ml_get_timebase" "$OUT/xnu_arm_entry_undef.txt" &&
@@ -28350,23 +28356,23 @@ verify_trace_symbols() {
     # plainly loads every field, which is what this check did on its first run - a matcher measuring
     # the disassembler's choice of spelling rather than the load.
     reg='[a-z][a-z0-9]*'
-    read -r t_int t_top t_dap t_guard t_ent t_offs <<<"$(awk -v R="$reg" -v O="$ss_alt" \
-            -v INT="$s_int" -v TOP="$s_top" -v DAP="$s_dap" -v ISTK="$s_istk" -v ENT="$s_ent" '
+    read -r t_int t_pcb t_exc t_dap t_ent t_offs <<<"$(awk -v R="$reg" -v O="$ss_alt" \
+            -v INT="$s_int" -v PCB="$s_pcb" -v EXC="$s_exc" -v DAP="$s_dap" -v ENT="$s_ent" '
         $0 ~ ("ldr[a-z]*[ \\t]+" R ", \\[" R ", #" INT "\\]") { i = 1 }
-        $0 ~ ("ldr[a-z]*[ \\t]+" R ", \\[" R ", #" TOP "\\]") { t = 1 }
+        $0 ~ ("#" PCB "\\>") { p = 1 }
+        $0 ~ ("#" EXC "\\>") { x = 1 }
         $0 ~ ("ldr[a-z]*[ \\t]+" R ", \\[" R ", #" DAP "\\]") { d = 1 }
-        $0 ~ ("#" ISTK "\\>") { g = 1 }
         $0 ~ ("#" ENT "\\>") { e = 1 }
         { if ($0 ~ ("ldr[a-z]*[ \\t]+" R ", \\[" R ", #(" O ")\\]")) { match($0, /#[0-9]+\]/); o[substr($0, RSTART, RLENGTH)] = 1 } }
-        END { n = 0; for (k in o) n++; printf "%d %d %d %d %d %d", i + 0, t + 0, d + 0, g + 0, e + 0, n + 0 }' <<<"$tnbody")"
+        END { n = 0; for (k in o) n++; printf "%d %d %d %d %d %d", i + 0, p + 0, x + 0, d + 0, e + 0, n + 0 }' <<<"$tnbody")"
     [[ "${t_int:-0}" == 1 ]] ||
         layout_fail "entry_note_timebase_call does not load [#176] from cpu_data: that field is where fleh_irq_handler puts the frame pointer (locore.s:1403) and where return_from_irq clears it (:1433), so without that load the record is not about the interrupt frame at all"
-    [[ "${t_top:-0}" == 1 && "${t_guard:-0}" == 1 ]] ||
-        layout_fail "entry_note_timebase_call does not load [#8] (cpu_data->intstack_top) beside the bound 16384: the frame pointer is dereferenced inside this function while an interrupt is in service, so a candidate that is not inside the interrupt stack has to be refused by arithmetic and not by hope - a fault here would be a fault inside the instrument that is reading a fault (269)"
+    [[ "${t_pcb:-0}" == 1 && "${t_exc:-0}" == 1 ]] ||
+        layout_fail "entry_note_timebase_call uses neither this configuration's ACT_PCBDATA (${s_pcb}) nor its EXC_CTX_SIZE (${s_exc}) - got [${t_pcb:-0}]/[$t_exc:-0]: those two numbers are the whole of the guard that replaces the intstack window 517's first build used, because the frame has two forms and neither of them is inside the interrupt stack when the interrupt hit a thread's kernel code - \`TPIDRPRW + ACT_PCBDATA\` is the user form and the identity \`frame[SS_SP] == frame + EXC_CTX_SIZE\` is the kernel one, so a body without both is a body that reads a frame by hoping where it is"
     [[ "${t_dap:-0}" == 1 ]] ||
         layout_fail "entry_note_timebase_call does not read getCpuDatap() as 'ldr [r?, #1484]': the frame pointer is reached through the thread's machine block, and 1484 is this configuration's ACT_CPUDATAP"
     [[ "${t_offs:-0}" == 6 ]] ||
-        layout_fail "entry_note_timebase_call loads ${t_offs:-0} of the six frame words entry_saved_state.h names ([$ss_offs]): SS_PC is the slot 516's runs found holding a timebase, and the other five are what make the frame's identity checkable - the record is those six numbers or it is not the frame"
+        layout_fail "entry_note_timebase_call loads ${t_offs:-0} of the six frame words entry_saved_state.h names ([$ss_offs]): SS_PC is the slot 516's runs found holding a timebase, SS_SP is the same load the identity is read from, and the other four are what make the frame's identity checkable - the record is those six numbers or it is not the frame"
     [[ "${t_ent:-0}" == 1 ]] ||
         layout_fail "entry_note_timebase_call never uses the entropy buffer's own size (68, this configuration's ENTROPY_DATA_SIZE): the stir's store address is computed from a pointer read out of EntropyData, and _hit is that address against the frame - with that arithmetic gone the key would report a constant"
     # **The write budget, and this one is about the run's other readings rather than about this one.**
@@ -28380,8 +28386,8 @@ verify_trace_symbols() {
     # channel the `wfi`/`pcx`/`pce` keys a run stops in are written to.
     twsites=$(awk '$3 == "bl" && $5 == "<entry_live_write>" { n++ } END { printf "%d", n + 0 }' <<<"$tnbody")
     twready=$(awk '$3 == "bl" && $5 == "<entry_live_ready>" { n++ } END { printf "%d", n + 0 }' <<<"$tnbody")
-    [[ "${twsites:-0}" -ge 18 && "${twsites:-0}" -le 20 ]] ||
-        layout_fail "entry_note_timebase_call holds ${twsites:-0} call(s) to entry_live_write and this step's budget is 18 (the first eight recorded calls' keys, the two counters and `_held` among them) plus at most 2 for the periodic refresh: fewer means a key the run cannot write, and more means a write has escaped the cadence guard - on this path that is ~2 records x every interrupt of the run, spent out of a channel the rest of the run's readings live in"
+    [[ "${twsites:-0}" -ge 20 && "${twsites:-0}" -le 23 ]] ||
+        layout_fail "entry_note_timebase_call holds ${twsites:-0} call(s) to entry_live_write and this step's budget is 20 (the first eight recorded calls' twenty keys) plus 3 (the periodic refresh of \`_calls\`, \`_off\` and \`_held\`): fewer means a key the run cannot write, and more means a write has escaped the cadence guard - on this path that is many records x every interrupt of the run, spent out of a channel the rest of the run's readings live in"
     # **The interrupt path must not bring the channel up, and this is the check that says it does not.**
     # `entry_live_write`'s first call is `entry_live_init`, which installs three L1 descriptors; doing
     # that from inside an exception, on the interrupt stack, with the D-cache off, is the one thing this
@@ -28415,7 +28421,7 @@ verify_trace_symbols() {
         END { printf "%d", r + 0 }' <<<"$exbod")"
     [[ "${xreal3:-0}" != 0 ]] ||
         layout_fail "the exit wrapper no longer calls the real platform_cache_idle_exit: the window's far end is where the D-cache comes back on, and a wrapper that did not call it would leave the cache disabled for the rest of the run"
-    for k in xnu_live_tb_calls xnu_live_tb_off xnu_live_tb_seq xnu_live_tb_frame xnu_live_tb_pc xnu_live_tb_lr xnu_live_tb_sp xnu_live_tb_cpsr xnu_live_tb_status xnu_live_tb_vaddr xnu_live_tb_index xnu_live_tb_datap xnu_live_tb_target xnu_live_tb_hit xnu_live_tb_ret_lo xnu_live_tb_prev_lo xnu_live_tb_sctlr xnu_live_tb_held; do
+    for k in xnu_live_tb_calls xnu_live_tb_off xnu_live_tb_seq xnu_live_tb_frame xnu_live_tb_kind xnu_live_tb_cand xnu_live_tb_pc xnu_live_tb_lr xnu_live_tb_sp xnu_live_tb_cpsr xnu_live_tb_status xnu_live_tb_vaddr xnu_live_tb_index xnu_live_tb_datap xnu_live_tb_target xnu_live_tb_hit xnu_live_tb_ret_lo xnu_live_tb_prev_lo xnu_live_tb_sctlr xnu_live_tb_held; do
         kn=$(arm-none-eabi-strings "$OUT/xnu_entry_text.bin" | awk -v k="$k" '$0 == k { c++ } END { printf "%d", c + 0 }')
         [[ "${kn:-0}" -ge 1 ]] ||
             layout_fail "the binary of the linked image's .text carries no literal '$k': 517's reading is the frame's own words and the stir's own store address under those names, and a key that is not in the image is a record the run cannot write"
@@ -28448,7 +28454,7 @@ verify_trace_symbols() {
         [[ "$v" =~ ^0x[0-9a-f]+$ ]] ||
             layout_fail "517's clause holds the value [$v] where it expects an address: the clause's own numbers are what the reading beside it is quoted from, so a stray character here is published as part of an address"
     done
-    say "  xnu_entry_517: the exit's write-back is this build's STAGE90_XNU_EXIT_POC_FLUSH=$EXIT_POC_FLUSH - __wrap_platform_cache_idle_exit calls FlushPoC_Dcache ($flpoc, ${fl_loops} clean-and-invalidate loops in its own body - the L1's own geometry and the L2's) ${xcpoc} time, and when it is on it is at ${xcpocaddr:-none}, before the call to the real exit at ${xreal2}, so the L2 is cleaned and invalidated one call before caches.c:490 sets SCTLR.C again (Apple's own L1-only FlushPoU_Dcache is still ${pflpush} call inside platform_cache_idle_exit $pcexit..); and the interrupt frame is read from inside the handler that owns it: __wrap_ml_get_timebase ($twrap) calls the kernel's own ml_get_timebase ($mlgt) ${tcnt} time at ${tfrom} and then entry_note_timebase_call ($tnb), which takes the frame pointer out of cpu_data+#$s_int (the field fleh_irq_handler stores it in and return_from_irq clears), bounds the dereference with intstack_top+#$s_top against INTSTACK_SIZE $s_istk, reads getCpuDatap() as #$s_dap (assym.s and entry_stubs.c agree on all four), loads all ${t_offs} of the frame's own words at the six offsets entry_saved_state.h names ([$ss_offs]; the header-to-genassym agreement is check_saved_state_offsets.py's gate, run above), and computes the entropy stir's store address from EntropyData's own size (the clause finds this configuration's 68 in that function's body: ${t_ent}) so that _hit can say whether that address lands inside the frame; every reference to ml_get_timebase in the linked pool is a call [$tbrefs], the eighteen record keys are in the image's .text, this instrument spends at most 8 per-call records and then one counter refresh per 256 calls (${twsites} write sites in the compiled body), and it never brings the live channel up from the interrupt path (${twready} call to entry_live_ready, whose body really reads g_live_state), and the exit's record is still taken after the real exit"
+    say "  xnu_entry_517: the exit's write-back is this build's STAGE90_XNU_EXIT_POC_FLUSH=$EXIT_POC_FLUSH - __wrap_platform_cache_idle_exit calls FlushPoC_Dcache ($flpoc, ${fl_loops} clean-and-invalidate loops in its own body - the L1's own geometry and the L2's) ${xcpoc} time, and when it is on it is at ${xcpocaddr:-none}, before the call to the real exit at ${xreal2}, so the L2 is cleaned and invalidated one call before caches.c:490 sets SCTLR.C again (Apple's own L1-only FlushPoU_Dcache is still ${pflpush} call inside platform_cache_idle_exit $pcexit..); and the interrupt frame is read from inside the handler that owns it: __wrap_ml_get_timebase ($twrap) calls the kernel's own ml_get_timebase ($mlgt) ${tcnt} time at ${tfrom} and then entry_note_timebase_call ($tnb), which takes the frame pointer out of cpu_data+#$s_int (the field fleh_irq_handler stores it in and return_from_irq clears) and establishes it as one of the frame's two forms rather than by a window: the user form as TPIDRPRW+#$s_pcb exactly (locore.s:1301, ACT_PCBDATA, no read), the kernel form as the identity the vector itself writes into the frame's SS_SP (#$s_sssp, locore.s:1346) - the identity SS_SP == frame + EXC_CTX_SIZE (#$s_exc) - inside this configuration's two kernel data windows, which is the first build of this clause's correction: it bounded the frame by the interrupt stack's own top and 16 KB and that window is neither of the two forms, so every ordinary call would have published _frame = 0 (assym.s and entry_stubs.c agree on ACT_CPUDATAP #$s_dap, ACT_PCBDATA, EXC_CTX_SIZE and CPU_INT_STATE), reads getCpuDatap() as #$s_dap, loads all ${t_offs} of the frame's own words at the six offsets entry_saved_state.h names ([$ss_offs]; the header-to-genassym agreement is check_saved_state_offsets.py's gate, run above), and computes the entropy stir's store address from EntropyData's own size (the clause finds this configuration's 68 in that function's body: ${t_ent}) so that _hit can say whether that address lands inside the frame; every reference to ml_get_timebase in the linked pool is a call [$tbrefs], the twenty record keys are in the image's .text, this instrument spends at most 8 per-call records and then one counter refresh per 256 calls (${twsites} write sites in the compiled body), and it never brings the live channel up from the interrupt path (${twready} call to entry_live_ready, whose body really reads g_live_state), and the exit's record is still taken after the real exit"
 
 
 

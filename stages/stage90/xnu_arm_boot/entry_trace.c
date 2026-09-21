@@ -255,6 +255,7 @@ extern uint32_t g_tb_calls, g_tb_off, g_tb_seen, g_tb_frame;
 extern uint32_t g_tb_pc, g_tb_lr, g_tb_sp, g_tb_cpsr, g_tb_status, g_tb_vaddr;
 extern uint32_t g_tb_index, g_tb_target, g_tb_hit;
 extern uint32_t g_tb_datap;
+extern uint32_t g_tb_frame_kind, g_tb_frame_cand;
 extern uint32_t g_tb_ret_lo, g_tb_prev_lo, g_tb_sctlr;
 extern uint32_t g_tb_held;
 extern void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr);
@@ -1207,8 +1208,16 @@ int __wrap_poll(void *proc, void *uap, int *retval)
          * pair says how much of this run's traffic was inside the window; the six frame words and the
          * stir's own store address are the first such call's, and `hit` is the one number that decides
          * whether the entropy stir can be the writer at all - it is 1 when that address lands inside
-         * the frame just read. A run whose `frame` is 0 has published the count and refused the
-         * dereference, which is the guard doing its job rather than a missing reading.
+         * the frame just read.
+         *
+         * **The frame has two forms and the line says which one it read.** `locore.s:1300` builds it in
+         * the current thread's PCB for an interrupt from user mode and `:1344` builds it on the
+         * interrupted SVC stack for one from kernel mode, carrying the identity `SS_SP == frame + 360`;
+         * the first version of this instrument accepted only a frame inside the interrupt stack, which
+         * is neither form - so `frame` is 0 in three different situations here and the log has to
+         * distinguish them: `cpu_int_state` 0 means no handler was in service at this call, a non-zero
+         * `cpu_int_state` with `frame` 0 means the guard refused it (and `cand` is what it held, so the
+         * guard's own decision is a reading rather than an absence).
          *
          * The two counters are refreshed once per 256 calls and not on every call, because this is the
          * only wrapper here on a per-*interrupt* path and the live channel is a fixed budget for the
@@ -1216,13 +1225,17 @@ int __wrap_poll(void *proc, void *uap, int *retval)
          * multiple of 256, and the first eight calls publish them exactly. */
         printf("mini4: the interrupt frame, read before the return that spends it -- %d call(s) into "
                "ml_get_timebase (this count is refreshed every 256 calls; exact for the first 8), %d of "
-               "them with the D-cache off; first: frame 0x%x, cpudatap 0x%x, "
+               "them with the D-cache off; first: frame 0x%x (%s, cpu_int_state held 0x%x), cpudatap 0x%x, "
                "SS_PC 0x%x SS_LR 0x%x SS_SP 0x%x cpsr 0x%x status 0x%x vaddr 0x%x; the stir will store "
                "its timebase (this call returned 0x%x, the one before it 0x%x) at 0x%x, from index "
                "0x%x, and that address is %s the frame (SCTLR=0x%x); %d call(s) were on the interrupt "
                "path before the live channel was up and had their records held rather than bringing "
                "the channel up from there\n",
-               g_tb_calls, g_tb_off, g_tb_frame, g_tb_datap,
+               g_tb_calls, g_tb_off, g_tb_frame,
+               (g_tb_frame_kind == 1u) ? "on the interrupted SVC stack"
+                 : (g_tb_frame_kind == 2u) ? "in the current thread's PCB"
+                 : (g_tb_frame_cand != 0u) ? "refused by the guard" : "no interrupt in service",
+               g_tb_frame_cand, g_tb_datap,
                g_tb_pc, g_tb_lr, g_tb_sp, g_tb_cpsr, g_tb_status, g_tb_vaddr,
                g_tb_ret_lo, g_tb_prev_lo, g_tb_target, g_tb_index,
                (g_tb_hit != 0u) ? "inside" : "outside", g_tb_sctlr, g_tb_held);

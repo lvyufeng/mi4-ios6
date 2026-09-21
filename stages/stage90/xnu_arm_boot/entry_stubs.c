@@ -5594,13 +5594,37 @@ void entry_note_pce_after(uint32_t tpidrprw, uint32_t datap, uint32_t up, uint32
  * shows `_frame != 0` in the window has measured the window and not the handler, and the two cases are
  * one key apart rather than one name apart.
  *
- * **269's rule is kept by arithmetic and not by hope.** This function runs inside the interrupt the
- * frame belongs to, so it must not take a fault of its own: the frame pointer is dereferenced only
- * when it lies strictly inside `[cpu_data->intstack_top - INTSTACK_SIZE, cpu_data->intstack_top)`,
- * both read from `cpu_data` (offsets 8 and the size 16384 in this configuration's `assym.s`), and a
- * candidate that fails that test is published as `_frame = 0` with the six words zeroed. `_calls`,
- * `_off` and `_seq` are counted either way, so a run in which the guard never let a frame through
- * says that too.
+ * **269's rule is kept by arithmetic and not by hope, and what the arithmetic has to allow for is that
+ * the frame has two forms.** This function runs inside the interrupt the frame belongs to, so it must
+ * not take a fault of its own, and it may not dereference a pointer it has not established. The first
+ * version of this guard established the pointer by requiring it to lie inside
+ * `[cpu_data->intstack_top - INTSTACK_SIZE, cpu_data->intstack_top)` - and that window is **neither of
+ * the two places the vector puts a frame**, so as built the record would have said `_frame = 0` on
+ * every ordinary call and answered nothing:
+ *
+ *   - **From user mode the frame is in the current thread's PCB.** `locore.s:1300-1307`:
+ *     `mrc p15,0,sp,c13,c0,4` (TPIDRPRW), `add sp, sp, ACT_PCBDATA`, `stmia sp, {r0-r12, sp, lr}^`.
+ *     So `cpu_int_state == TPIDRPRW + ACT_PCBDATA` (848 here) **exactly**, no dereference needed to
+ *     establish it, and the interrupted `sp`/`pc` are the *user's*.
+ *   - **From kernel mode the frame is on the interrupted SVC stack.** `locore.s:1344-1349`:
+ *     `sub sp, sp, EXC_CTX_SIZE` then `add r0, sp, EXC_CTX_SIZE` / `str r0, [sp, SS_SP]` - so the
+ *     vector writes the identity **`frame[SS_SP] == frame + EXC_CTX_SIZE`** (360 here) into the frame
+ *     itself, and the frame is on whatever stack the interrupted SVC code was using: a thread's
+ *     kernel stack, or the interrupt stack when the interrupted code is itself on it (this kernel's
+ *     boot and idle loops are - see below).
+ *
+ * 516's panicking frame is the second form and satisfies the identity to the byte: the frame is at
+ * `0x80517e88`, its `SS_SP` is `0x80517ff0`, and `0x80517ff0 - 0x80517e88 = 0x168 = 360`. The window
+ * test accepted it only because that frame happened to be on the interrupt stack; a frame on a
+ * thread's kernel stack is neither inside the window nor outside the kernel, and would have been
+ * published as absent.
+ *
+ * So the guard is the two facts and not a window: `cand == thread + ACT_PCBDATA` (kind 2, exact, no
+ * read), or `cand` word-aligned, inside one of the two windows this configuration's own kernel data
+ * is known to live in, **and carrying the identity in its own `SS_SP` word** (kind 1). The windows are
+ * a fault-guard and the identity is the test. Anything else is published as `_frame = 0` **with
+ * `_cand` beside it**, because a refusal that cannot be told apart from an absent frame is 441's
+ * defect: `_cand` is what `cpu_int_state` held. `_calls`, `_off` and `_seq` are counted either way.
  */
 uint32_t g_tb_calls, g_tb_off, g_tb_seen;
 uint32_t g_tb_frame;
@@ -5615,18 +5639,35 @@ uint32_t g_tb_held;
  * whose `_frame` came through a different `cpu_data` than `_pcx_datap` would be a frame of some other
  * CPU's interrupt stack, and the two numbers are one key apart rather than a reader's inference. */
 uint32_t g_tb_datap;
-
+/* Which of the frame's two forms the guard accepted - 1 kernel stack, 2 user PCB - and what
+ * `cpu_int_state` held in the cases it accepted none of. `_kind = 0` with `_cand = 0` is "the handler
+ * was not in service"; `_kind = 0` with `_cand` non-zero is the guard refusing a frame, and those two
+ * are the same key apart rather than a reader's guess. */
+uint32_t g_tb_frame_kind;
+uint32_t g_tb_frame_cand;
 /*
  * The offsets this function reads, each of them a number this configuration's `assym.s` also carries
- * - `CPU_INT_STATE 176`, `CPU_INTSTACK_TOP 8`, `INTSTACK_SIZE 16384`, `ACT_CPUDATAP 1484`,
+ * - `CPU_INT_STATE 176`, `ACT_CPUDATAP 1484`, `ACT_PCBDATA 848`, `EXC_CTX_SIZE 360`, `SS_SP 52`,
  * `ENTROPY_INDEX_PTR 0`, `ENTROPY_BUFFER 4`, `ENTROPY_DATA_SIZE 68` - and `build_entry.sh`'s
  * `xnu_entry_517` clause compares the *compiled* loads against that file, so a configuration whose
- * layout moves stops the build instead of moving the reading.
+ * layout moves stops the build instead of moving the reading. `STAGE90_KERNEL_LO`/`_HI` and
+ * `STAGE90_KHEAP_LO`/`_HI` are not from `assym.s`: they are the two windows this configuration's own
+ * kernel data is known to live in (`0x80000000` up to `topOfKernelData` 0x80700000, and the kernel
+ * heap the thread and registry pointers in 516's log sit in, `0xc05feb10`/`0xc05d6848`/`0xc060d130`),
+ * used only to keep the identity read out of an address that is not mapped - the identity is what
+ * establishes the frame, not the window.
  */
 #define STAGE90_CPU_INT_STATE      176u
-#define STAGE90_CPU_INTSTACK_TOP   8u
-#define STAGE90_INTSTACK_SIZE      16384u
 #define STAGE90_ACT_CPUDATAP       1484u
+/* `STAGE90_ACT_PCBDATA` (848) and `STAGE90_SS_SP` (52) are **not** repeated here: this file includes
+ * `entry_saved_state.h`, which names both, and the build's first run of this guard refused the
+ * duplicate definitions - which is the check working, since a second spelling of one field is how this
+ * project's oldest defect class starts. `build_entry.sh` reads those two out of that header. */
+#define STAGE90_EXC_CTX_SIZE       360u
+#define STAGE90_KERNEL_LO          0x80000000u
+#define STAGE90_KERNEL_HI          0x80800000u
+#define STAGE90_KHEAP_LO           0xc0000000u
+#define STAGE90_KHEAP_HI           0xc1000000u
 #define STAGE90_ENTROPY_INDEX_PTR  0u
 #define STAGE90_ENTROPY_BUFFER     4u
 #define STAGE90_ENTROPY_DATA_SIZE  68u
@@ -5656,20 +5697,49 @@ void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr)
         uint32_t datap = (thread == 0u) ? 0u
                                         : *(volatile uint32_t *)(uintptr_t)(thread + STAGE90_ACT_CPUDATAP);
         uint32_t fp = 0u;
+        uint32_t kind = 0u;
+        uint32_t cand = 0u;
         uint32_t base = (uint32_t)(uintptr_t)EntropyData;
         uint32_t index, target;
 
         g_tb_datap = datap;
 
         if (datap != 0u) {
-            uint32_t cand = *(volatile uint32_t *)(uintptr_t)(datap + STAGE90_CPU_INT_STATE);
-            uint32_t top = *(volatile uint32_t *)(uintptr_t)(datap + STAGE90_CPU_INTSTACK_TOP);
+            cand = *(volatile uint32_t *)(uintptr_t)(datap + STAGE90_CPU_INT_STATE);
 
-            if (top != 0u && cand > (top - STAGE90_INTSTACK_SIZE) && cand < top)
+            if (cand != 0u && thread != 0u && cand == thread + STAGE90_ACT_PCBDATA) {
+                /* The user path: the vector built the frame at TPIDRPRW + ACT_PCBDATA, so the
+                 * pointer is established by the comparison and nothing has to be read to know it. */
                 fp = cand;
+                kind = 2u;
+            } else if (cand != 0u && (cand & 3u) == 0u) {
+                /* The kernel path: the frame is on the interrupted SVC stack - a thread's kernel
+                 * stack when the interrupt hit a thread's kernel code, the interrupt stack itself
+                 * when it hit the boot or idle loop, which this kernel runs there - and the vector
+                 * wrote the frame's own address into its `SS_SP` word, which is the test that
+                 * establishes it. The two windows are not the test; they keep the identity read out
+                 * of an address this image has no reason to believe is mapped, and they are this
+                 * configuration's own: `0x80000000` up to `topOfKernelData` (0x80700000) holds the
+                 * interrupt stack, the machine blocks and the boot's stolen stacks, and the kernel
+                 * heap the thread pointers themselves live in is at 0xc0xxxxxx. */
+                uint32_t known = 0u;
+
+                if ((cand >= STAGE90_KERNEL_LO && cand < STAGE90_KERNEL_HI)
+                    || (cand >= STAGE90_KHEAP_LO && cand < STAGE90_KHEAP_HI))
+                    known = 1u;
+
+                if (known != 0u
+                    && *(volatile uint32_t *)(uintptr_t)(cand + STAGE90_SS_SP)
+                       == (cand + STAGE90_EXC_CTX_SIZE)) {
+                    fp = cand;
+                    kind = 1u;
+                }
+            }
         }
 
-        g_tb_frame  = fp;
+        g_tb_frame      = fp;
+        g_tb_frame_kind = kind;
+        g_tb_frame_cand = cand;
         g_tb_pc     = 0u;
         g_tb_lr     = 0u;
         g_tb_sp     = 0u;
@@ -5710,7 +5780,7 @@ void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr)
      * written") arriving from the other direction, and it is fixed by arithmetic rather than by hoping
      * the boot is short: the per-call keys are written for the first `STAGE90_TB_LIVE_MAX` recorded
      * calls and never again, and the two counters are refreshed once per `STAGE90_TB_LIVE_EVERY`
-     * calls. Worst case is `8 * 17 + (calls >> 8)` records - about 150 for a 25 s run, whether it is a
+     * calls. Worst case is `8 * 20 + (calls >> 8)` records - about 160 for a 25 s run, whether it is a
      * healthy boot or a storm. The cost is that `_calls`/`_off` are current only to the last multiple
      * of 256; the console line says so, and both are also published per record for the first eight.
      */
@@ -5747,6 +5817,8 @@ void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr)
         entry_live_write("xnu_live_tb_off", g_tb_off);
         entry_live_write("xnu_live_tb_seq", n);
         entry_live_write("xnu_live_tb_frame", g_tb_frame);
+        entry_live_write("xnu_live_tb_kind", g_tb_frame_kind);
+        entry_live_write("xnu_live_tb_cand", g_tb_frame_cand);
         entry_live_write("xnu_live_tb_pc", g_tb_pc);
         entry_live_write("xnu_live_tb_lr", g_tb_lr);
         entry_live_write("xnu_live_tb_sp", g_tb_sp);
