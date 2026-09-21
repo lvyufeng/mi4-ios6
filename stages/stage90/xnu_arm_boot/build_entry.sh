@@ -76,7 +76,7 @@ ARGS_BYTES=0x00001000          # one page, which is what `boot_args` needs to fi
 REAL_ARM_INIT=${STAGE90_ENTRY_REAL_ARM_INIT:-0}
 STUB_DEFINES=()
 [[ $REAL_ARM_INIT -eq 1 ]] && STUB_DEFINES=(-DSTAGE90_ENTRY_REAL_ARM_INIT=1)
-# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s the sixty-two symbols listed in
+# `STAGE90_ENTRY_TRACE=1` links `entry_trace.c` and `--wrap`s the sixty-seven symbols listed in
 # `TRACE_LDFLAGS` below - `kalloc_canblock`,
 # `lck_grp_alloc_init`, `kernel_memory_allocate`, `vm_page_wait`, `thread_block`, (447)
 # `ml_get_max_cpus`, `ml_init_max_cpus`, (448) `IODeviceTreeAlloc`, `IOWorkLoop::workLoop`,
@@ -139,6 +139,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=open --wrap=read
                    --wrap=fork --wrap=exit
                    --wrap=wait4
+                   --wrap=load_init_program
                    --wrap=psignal
                    --wrap=setPop
                    --wrap=PE_init_platform --wrap=fiq_context_init
@@ -27437,6 +27438,48 @@ verify_trace_symbols() {
             layout_fail "508's instrument calls $s through \`__real_\` and the pass-1 undefined set contains it - nothing in this image defines that name, so the generator stubbed it and the wait's records would be a fact about the stand-in rather than about the kernel's own reaping answer"
     done
     say "  xnu_entry_508: wait4 is defined by this image rather than stubbed for it, so the two records around the parent's call are about the kernel's own wait, and its four argument words are the four the slot's munger marshals"
+
+    # **509's wrapper, and this one is checked by *reading the call site out of the image* rather than
+    # by membership.** Two names are called through `__real_`: the loader the OS's own boot thread runs
+    # and the print that makes the reading visible on the OS console. Neither may be a stand-in - a
+    # `load_init_program` the generator stood in for never loads anything, and a `printf` the generator
+    # stood in for is a line that is not there.
+    for s in load_init_program printf; do
+        grep -qx "$s" "$OUT/xnu_arm_entry_undef.txt" &&
+            layout_fail "509's instrument calls $s and the pass-1 undefined set contains it - nothing in this image defines that name, so the generator stubbed it and both the record and the console line would be facts about the stand-in"
+    done
+    # The steps in the same image that make 509 a reading rather than a trace are the two below, and
+    # they are checks rather than prose because both are the kind of claim this project has had to
+    # retract before:
+    #
+    #   * **`load_init_program` returns only on success.** Its body ends in `panic(...)`, and every arm
+    #     that loads sets `error = 0` and returns - so a record after the call exists iff the init
+    #     image loaded. The image is what has to say the `panic` is there, because a `load_init_program`
+    #     that fell through to a return on failure would turn the step's whole reading into a trace of
+    #     "the function was called". The check reads the branch to `panic`'s own address out of the
+    #     function's instruction range.
+    #   * **The call site is in another object.** `--wrap` rewrites *undefined* references, and 455
+    #     measured the whole cost of getting that wrong: a wrapper whose callers are all in the object
+    #     that defines the symbol links, defines its symbol and never runs, and a run that reports
+    #     nothing is indistinguishable from a run where the measured thing did not happen. So the check
+    #     asserts the branch to `__wrap_load_init_program` is inside `bsdinit_task` - the chain link
+    #     489 named from source, now read out of the linked instructions.
+    sym_addr() { arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk -v s="$1" '$3 == s { print "0x" $1; found = 1 } END { exit(found ? 0 : 1) }'; }
+    lip=$(sym_addr load_init_program) || layout_fail "load_init_program is not in the linked image - 509's wrapper has nothing to wrap"
+    panic_a=$(sym_addr panic)        || layout_fail "panic is not in the linked image - 509's check needs the address the loader's failure arm branches to"
+    next_a=$(sym_next "$lip") || true
+    [[ -n "$next_a" ]] || layout_fail "no symbol follows load_init_program in the image, so its instruction range cannot be read"
+    lip_range=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$lip" --stop-address="$next_a")
+    grep -q "bl[[:space:]]\+${panic_a#0x} <panic>" <<<"$lip_range" ||
+        layout_fail "no \`bl $panic_a <panic>\` inside load_init_program ($lip..$next_a) - 509's reading is that the function's *return* is the success arm and its failure arm is a panic, so a body without that branch makes xnu_live_exec_done_seq a record that says nothing"
+    wrap_a=$(sym_addr __wrap_load_init_program) || layout_fail "__wrap_load_init_program is not in the linked image - --wrap=load_init_program did not link, so the loader the boot thread runs is the kernel's own and 509 has no reading at all"
+    bid=$(sym_addr bsdinit_task) || layout_fail "bsdinit_task is not in the linked image - 509's check needs the object whose call site the wrapper has to be reached from"
+    bnext=$(sym_next "$bid") || true
+    [[ -n "$bnext" ]] || layout_fail "no symbol follows bsdinit_task in the image, so its instruction range cannot be read"
+    arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" --start-address="$bid" --stop-address="$bnext" |
+        grep -q "bl[[:space:]]\+${wrap_a#0x} <__wrap_load_init_program>" ||
+        layout_fail "bsdinit_task ($bid..$bnext) does not branch to __wrap_load_init_program ($wrap_a) - either the OS's own call site went to the real loader (455's same-object case, a wrapper that can never run) or the flag list lost the name; both make a run with no xnu_live_exec_* records indistinguishable from a boot that never got there"
+    say "  xnu_entry_509: load_init_program's body branches to panic ($panic_a) and its caller bsdinit_task branches to __wrap_load_init_program ($wrap_a), so xnu_live_exec_done_seq exists only when the OS loaded its init image - and the console line beside it is printed through the real printf"
 
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls
     # `_ZNK9IOService8getStateEv` by mangled name on objects whose dynamic type this file cannot know -

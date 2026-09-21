@@ -194,6 +194,21 @@ extern uint32_t entry_note_wait(uint32_t caller, uint32_t who, uint32_t pid, uin
 extern void entry_note_wait_returned(uint32_t seq, uint32_t error, uint32_t ret,
                                      uint32_t copy_error, uint32_t status, uint32_t ticks);
 
+/* 509: the pair around `load_init_program` - whose *return* is the OS's own success arm (its only
+ * other exit is `panic("Process 1 exec of %s failed")`) and whose single call site in this image is
+ * `bsdinit_task`'s `bl`, in another object. See the wrapper below. */
+extern uint32_t entry_note_exec(uint32_t caller, uint32_t who, uint32_t proc);
+extern void entry_note_exec_returned(uint32_t seq, uint32_t who, uint32_t after_who);
+
+/* **The kernel's real `printf`, declared rather than included - and the only function this file calls
+ * on the console path.** `osfmk/kern/printf.c` is where `load_init_program`'s own messages come from
+ * (`bl 800399b4 <printf>` immediately before each of its four `load_init_program_at_path` calls in
+ * the linked image), so a line printed here lands in the same captured block, above the same still
+ * text, on the same console the reader is looking at. `-ffreestanding -fno-builtin` keep this a call
+ * to that symbol rather than a `puts`, and the two arguments in the one call below are what keep it a
+ * call at all: a literal with no conversions would be turned into something this image has not got. */
+extern int printf(const char *format, ...);
+
 /* 481: the kernel's end of the timer chain - the deadline `timer_resync_deadlines` chose and the
  * decrementer value the real `setPop` computed for it, recorded beside what the writer in
  * `entry_timebase.c` was handed. See the wrapper below. */
@@ -1207,6 +1222,95 @@ int __wrap_wait4(void *proc, void *uap, int *retval)
                              (retval != 0) ? (uint32_t)retval[0] : 0xFFFFFFFFu,
                              copy_error, (uint32_t)word, after - before);
     return error;
+}
+
+/* ------------------------------------------- and the OS's own load of its init (509) */
+/*
+ * **The one place in this walk where the OS says, in its own words and on its own console, that it
+ * reached userspace - and the one place it has never said so.**
+ *
+ * Every console capture this project has taken ends with the same line:
+ *
+ *   load_init_program: attempting to load /sbin/launchd
+ *
+ * and nothing after it. 489 established what that silence *is*: `load_init_program` prints on each
+ * attempt and on each failure and on nothing else, so a boot that stops printing names has loaded its
+ * init - and the readings that say so are four, none of them on the console (`lmf_ret = 0` from
+ * `load_machfile`'s wrapper, the five `tail_seq` records from inside `__wrap_vm_pageout`, the
+ * fixture's own `getpid` answer and its `mmap` result). Those four are correct and they are all
+ * *inferences from elsewhere*: a reader who looks at the console alone sees a stop, because the OS
+ * prints nothing on the arm that matters and every message a later failure would print is compiled
+ * out (`CONFIG_NO_PRINTF_STRINGS`, 458).
+ *
+ * So this step makes the OS say it. **The sink is `printf`, and it is the same one that printed the
+ * line above** - the real `printf` at `osfmk/kern/printf.c`, which `load_init_program`'s own body
+ * calls (`bl 800399b4 <printf>` at four sites in the linked image, one of them immediately before
+ * each `bl load_init_program_at_path`). `IOLog` is deliberately *not* used even though it is also in
+ * this image: `_IOLogv` opens with `assertf(ml_get_interrupts_enabled() || ...)` (`IOLib.cpp:1184`),
+ * and an assertion that fires inside the exec path is a panic, not a missing line.
+ *
+ * **The function wrapped is `load_init_program` (`bsd/kern/kern_exec.c:5119`), and the source is what
+ * makes the wrapper a reading rather than a trace.** It is `void load_init_program(proc_t p)`
+ * (`bsd/sys/systm.h:182`), and its body returns in exactly one place per candidate path -
+ * `if (!error) return;` - and ends in `panic("Process 1 exec of %s failed, errno %d")`. So the
+ * function's *return* is the success arm and its non-return is the panic arm: a wrapper written
+ * around it records the entry, calls it, and its post-call code runs **if and only if the OS loaded
+ * its init image**. That is the property 489 could only argue from the file.
+ *
+ * **It is also wrappable, and that is a fact about this image rather than about the flag list.** The
+ * one call site is `bl 80291114 <load_init_program>` at `0x80048eb4`, inside `bsdinit_task`
+ * (`bsd_kern_bsd_init.o`) - a different object from the `bsd_kern_kern_exec.o` that defines it - so
+ * `--wrap` rewrites a genuinely undefined reference. That distinction is 455's whole negative result:
+ * a wrapper whose only callers are in the object that defines the symbol links, defines its symbol,
+ * and never runs. `bsdinit_task` is the chain link 489 named by reading source, and this is the
+ * step's build check reading the same link out of the linked image's instructions.
+ *
+ * **The line is printed after the real call** - which is only reachable on success, so there is no
+ * condition to write and no branch to get wrong. It is printed from the same task, on the same stack,
+ * through the same sink, as `load_init_program`'s own two lines: the console block is what a reader
+ * looks at, and the silence after `attempting to load /sbin/launchd` is the thing this step removes.
+ *
+ * **`printf` is called with two arguments on purpose.** A format with no conversions becomes a call
+ * to `puts` in a build without `-fno-builtin`, and `puts` is not in this image; with `%d` it stays a
+ * call to the symbol the build checks for. The number is the pid, and the words around it say what it
+ * means, because a console line is read by people who have not read this file.
+ */
+void __real_load_init_program(void *proc);
+void __wrap_load_init_program(void *proc)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    uint32_t who = (uint32_t)proc_pid(proc);
+    uint32_t after_who;
+    uint32_t seq;
+    void *now;
+
+    seq = entry_note_exec(caller, who, (uint32_t)(uintptr_t)proc);
+    __real_load_init_program(proc);
+
+    /* The other side of the image replacement, read the way every other record in this walk reads a
+     * process: `current_proc()` guarded, because the one thing 507 measured about this call is that it
+     * answers `kernproc` rather than NULL when a task has no BSD info - and a panicking instrument
+     * would be the defect, not the reading.
+     *
+     * **The first run of this step answered `0` and the prediction above was wrong**, which is written
+     * here because the comment is where a reader looks: `load_init_program` is called by `bsdinit_task`,
+     * which runs on the *kernel* task, so the process the loader is running in is `kernproc` (pid 0)
+     * while the process it is loading for is `initproc` (pid 1) - the same mechanism 507 measured for
+     * `psignal`'s sender, arriving from the other direction. So the pair is not "the same pid on both
+     * sides": it is the *argument* on one side and the *caller's own* process on the other, and it is
+     * the record that says the init image is loaded by somebody other than the process that gets it. */
+    now = current_proc();
+    after_who = (now != 0) ? (uint32_t)proc_pid(now) : 0xFFFFFFFFu;
+    entry_note_exec_returned(seq, who, after_who);
+
+    /* **The line says what the wrapper measures, which is less than "pid 1 is running".** The
+     * wrapper's post-call code is reached only when `load_init_program` returned, and that function's
+     * only other exit is a panic - so "the load returned" is exactly the reading. That the process then
+     * executes in user mode is a fact about the same run and a different record (the fixture's own
+     * `sleh` entries, user mode, at `0x1118`), and a console line that claimed it here would be
+     * claiming the next microsecond's outcome. */
+    printf("mini4: the OS's own init load returned, so pid %d has the init image (caller 0x%x)\n",
+           who, caller);
 }
 
 /* ---------------------------------------------------- the kernel's own timer deadline (481) */

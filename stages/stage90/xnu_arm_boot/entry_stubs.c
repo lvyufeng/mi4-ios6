@@ -4789,6 +4789,65 @@ void entry_note_wait_returned(uint32_t seq, uint32_t error, uint32_t ret, uint32
     entry_live_write("xnu_live_wait_ticks", ticks);
 }
 
+/* --------------------------------------------------- and the OS's own load of its init (509) */
+/*
+ * **The two records around the kernel's own call to load its init, and the reason they are worth a
+ * stage of their own is that they are the first ones that are *not* about the fixture.** Everything
+ * this walk has measured since 470 is a syscall the fixture made or a stub the kernel reached behind
+ * it; the console's own last line - `load_init_program: attempting to load /sbin/launchd`, with
+ * nothing after it - is the one place where a reader sees the boot stop, and 489's answer to it is an
+ * inference from four other readings rather than a sentence from the OS. `xnu_live_exec_*` is that
+ * sentence's numbers: the kernel's own init load, entered from `bsdinit_task`, returning at all.
+ *
+ * **The reading is the *return*, and it is `load_init_program`'s own structure that makes it one.**
+ * The function is `void load_init_program(proc_t p)` (`bsd/sys/systm.h:182`) and every arm that
+ * succeeds leaves it with `if (!error) return;`; the only way out of its body without returning is
+ * `panic("Process 1 exec of %s failed, errno %d")` (`kern_exec.c:5168`). So a record written after
+ * the call exists **if and only if** the OS loaded its init image - there is no value to compare and
+ * no branch to get wrong, which is why this pair needs no `_error` key: the mere presence of
+ * `xnu_live_exec_done_seq` is the finding.
+ *
+ * **`_who` is `proc_pid(proc)` and `_done_current` is `proc_pid(current_proc())`, read on the two
+ * sides of an image replacement - and the first run says they are `1` and `0`.** The first is the
+ * process the kernel handed the loader (`initproc`); the second is the process the loader is *running
+ * in*, which is `kernproc` (pid 0), because `bsdinit_task` runs on the kernel task and loads an image
+ * on behalf of a process it is not - the mechanism 507 measured for `psignal`'s sender, one layer out.
+ * Recording both is what turns that into a reading instead of an assumption: a single key could not
+ * distinguish "the loader is inside the process it is loading" from "the loader is somewhere else",
+ * and the comment above the wrapper originally predicted the second case would be the same number as
+ * the first. `current_proc()` is guarded, for the reason 507 measured: with no BSD info it answers
+ * `kernproc` and never NULL, so the sentinel here is for the case the guard is written for rather than
+ * for one this path is expected to take.
+ *
+ * **The records are live channel writes and the console line is a print, and the two are not
+ * redundant.** The live records are searched for by name and read by this project's tooling - they are
+ * how a step's reading is found in a log at all - while the console line is what a *human* or a
+ * console-only reader sees, in the place where the console has always fallen silent. A step that
+ * published only the records would leave the silence exactly as it was; the line is the deliverable
+ * and the records are the evidence.
+ */
+uint32_t g_exec_calls;
+
+uint32_t entry_note_exec(uint32_t caller, uint32_t who, uint32_t proc)
+{
+    uint32_t seq = g_exec_calls + 1u;
+
+    entry_live_write("xnu_live_exec_seq", seq);
+    entry_live_write("xnu_live_exec_caller", caller);
+    entry_live_write("xnu_live_exec_who", who);
+    entry_live_write("xnu_live_exec_proc", proc);
+
+    g_exec_calls++;
+    return seq;
+}
+
+void entry_note_exec_returned(uint32_t seq, uint32_t who, uint32_t after_who)
+{
+    entry_live_write("xnu_live_exec_done_seq", seq);
+    entry_live_write("xnu_live_exec_done_who", who);
+    entry_live_write("xnu_live_exec_done_current", after_who);
+}
+
 /* Experiment 456's probe, defined below its first caller; the declaration is here because
  * `entry_note_iolock` is where the reading is taken (see `entry_registry_probe`). */
 __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);
