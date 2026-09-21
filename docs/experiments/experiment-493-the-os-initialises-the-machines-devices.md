@@ -27,8 +27,12 @@ kernel's own device-memory resolution readable for the first time. Run 2:
     _len0       = 0x1000                0x1000              the OS's entry 0 length == the node's `reg[1]`
     _resolve    = 1                     1                   the OS's answer and the tree agree
 
-and 491's third census records **29 of 29 rows** with `kids_of = 1` on both rows - `seq = 0x1a`
-(`interrup…`) and `seq = 0x1b` (`timer`), each carrying the pointer its driver's `_prov` publishes. The
+and 491's third census records **29 of 29 rows** with `kids_of = 1` on both rows - `seq = 0x19`
+(`interrup…`) and `seq = 0x1a` (`timer`), each carrying the pointer its driver's `_prov` publishes.
+(**Corrected at 494, defect 289**: this doc first printed the rows' *positions* in the printed dump,
+which are one higher than the keys because the census writes an unnumbered header row first. The
+keys themselves read `xnu_live_pex_seq = 0x19` for `interrup…` and `0x1a` for `timer` - so a reader
+who greps the earlier number for `interrup…` lands on the timer's row.) The
 catalogue's answers move the way a *layer* moves and a coincidence does not: the same 30 calls as 492,
 but **26 of them now answered with two candidates** instead of 27 with one, because both personalities
 sit in the `IOPlatformDevice` bucket and `probeCandidates` walks the whole bucket for every nub - the
@@ -177,7 +181,7 @@ disjoint node names cannot.
     pex_seen = pex_shown = pex_named = 0x1d (29 of 29)   pex_registered = pex_matchpass = 0x1c
     pex_inactive = 0    pex_kids = pex_deep_l1 = 0x2
 
-Row `0x1a` (`interrup…`, state0 `0x1e`) and row `0x1b` (`timer`, state0 `0x1e`) each read
+Row `0x19` (`interrup…`, state0 `0x1e`) and row `0x1a` (`timer`, state0 `0x1e`) each read
 `kids_of = 1`, and each row's child pointer is the `_prov` its driver published
 (`0xc0485708` and `0xc0485760` in run 2) - so the census and the driver are two readings of the same
 attachment rather than two claims. `MSM8974R…` (`MSM8974RootResource`) still reads `state0 = 0` at

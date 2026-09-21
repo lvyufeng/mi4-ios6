@@ -62,12 +62,28 @@
  * value on this machine, and until this step nothing compared them at run time - the tree's is read by
  * the tree's own selftests host-side and the register's by the payload, in two different programs.
  *
- * **It does not yet touch the device.** The node's `reg[0]` is recorded and not dereferenced: on this
- * machine `0xf9020000` is inside the `io_ranges` window the payload maps (`stage90_main.c`'s
- * `io_ranges = {0, 0xf9000000, 0x07000000}`), but "the window is in the kernel's page tables" is a
- * property of `mmu.c`'s mapping rather than of the device tree, and a first driver that faults on its
- * own device's registers would be the instrument's fault and not the driver's. So the first register
- * read is the next step's, with the mapping proved first.
+ * **Up to 493 it did not touch the device, and 494 makes it.** The node's `reg[0]` was recorded and not
+ * dereferenced: on this machine `0xf9020000` is inside the `io_ranges` window the payload maps
+ * (`stage90_main.c`'s `io_ranges = {0, 0xf9000000, 0x07000000}`), but "the window is in the payload's
+ * page tables" is not "the kernel's page tables map it", and a driver that faults on its own device's
+ * registers would be the instrument's fault and not the driver's. So the first register read waited for
+ * the step that proves the mapping first, and 494 is that step: the driver takes the object the OS's
+ * own resolution filed, calls `IOMemoryDescriptor::map( kIOMapAnywhere )` on it - the kext route to a
+ * device - and reads a word through the address that call returns. **The address is the OS's, not the
+ * tree's and not the payload's**: `map()` on a `kIOMemoryTypePhysical64` descriptor reaches
+ * `IOGeneralMemoryDescriptor::doMap`'s `_task == NULL` arm, which is `device_pager_setup` +
+ * `mach_memory_object_memory_entry_64` (`IOMemoryDescriptor.cpp:641-678`), and the page behind the
+ * returned VA is the physical range `getPhysicalSegment` named. So "the kernel's page tables map the
+ * device" stops being an argument about `mmu.c` and becomes a number in the log.
+ *
+ * **What this node's read is not, and the step is explicit about it**: `/timer`'s `_rd0` has **no
+ * second definition**. `MSM8974GIC.cpp` compares its own read of `GICD_TYPER` - read-only and
+ * constant - against the payload's own read of the same register, and this node has no counterpart:
+ * nothing in this project has ever read a word out of the GPT at `0xf9020000`. The tree declares it,
+ * `PE_state_stage90.timerBase` names it, the payload's handlers use the architectural counter rather
+ * than this block. So `_rd0` is published raw as a first reading, with the mapping beside it, and the
+ * second definition is owed to the step that finds one - which is better than inventing an expected
+ * value and calling the comparison a measurement.
  *
  * **493: and it asks the OS where its device is, instead of decoding `reg` itself.** The two words
  * above are *this driver's* reading of the node. The kernel has its own reading, made before this
@@ -102,7 +118,7 @@
  *
  * The record it leaves
  * --------------------
- * Eighteen live keys, written in the order that makes the record readable if the driver stops: `_seq`
+ * Twenty-two live keys, written in the order that makes the record readable if the driver stops: `_seq`
  * (the ordinal), `_prov` (the provider pointer - the row this driver belongs to in 491's third census,
  * whose `kids_of` is 0 before this step and 1 after it), `_match` (which of the two names matched: 1 =
  * the node's `name`, 2 = its `compatible`, 3 = neither, so a match made on a name this driver does not
@@ -128,6 +144,16 @@
  * `_reg1` and its left-hand sides `_phys0` and `_len0`, so a `_resolve` of 2 has all four of its
  * numbers in the log, and `_objkind`/`_objlen` say whether the zero was the OS's or the reader's.
  *
+ * **And 494's four, which are the access rather than the description**: `_map` (the `IOMemoryMap *`
+ * `map( kIOMapAnywhere )` returned, 0 = the OS could not map the range it had just resolved - a
+ * finding about the *mapping machinery*, which is why it is published rather than used as a branch
+ * with nothing to show for it), `_mapvaddr` and `_mapvlen` (that map's own `getVirtualAddress()` and
+ * `getLength()`), and `_rd0` (the word read at `_mapvaddr`, the node's `reg[0]` register). The two
+ * guards are in the record and not only in the code: a `_map` of 0 leaves `_mapvaddr` 0, and a
+ * `_mapvaddr` of 0 leaves `_rd0` 0 - so the reader can tell "the OS mapped nothing" from "the OS
+ * mapped something and the driver did not read through it", which is the difference between a
+ * finding about the OS and a finding about this file.
+ *
  * **Every key here is live-only, like 492's nine and like every reading since 454**, and 493 does not
  * change that: the report epilogue that writes `entry_write_485_kv` has not run since the boot reached
  * `vm_pageout` (490 measured it), and putting a driver's reading in it would mean exporting the
@@ -145,6 +171,16 @@
 #include <libkern/c++/OSNumber.h>
 
 extern "C" void entry_live_write(const char *key, uint32_t value);
+
+/*
+ * The register this driver reads through its mapping, at the offset the node's `reg[0]` itself starts
+ * at. It is a named symbol rather than a bare `0` for the reason the GIC's two offsets are named: an
+ * offset written into the expression cannot be read out of the file and held against anything, and
+ * `tools/check_driver_catalogue.py` resolves this name and requires it to be the one the read uses.
+ * **This node has no counterpart in the payload's headers** - nothing in this project has ever read a
+ * word out of the GPT - so there is no second definition of this offset and none is claimed.
+ */
+#define MSM8974_TIMER_REG0_OFF  0x000u
 
 class MSM8974Timer : public IOService
 {
@@ -183,6 +219,12 @@ MSM8974Timer::start( IOService * provider )
     uint32_t   phys0 = 0u;
     uint32_t   len0  = 0u;
     uint32_t   resolve = 0u;
+    /* 494 */
+    IOMemoryDescriptor * range = 0;
+    IOMemoryMap * themap = 0;
+    uint32_t   mapvaddr = 0u;
+    uint32_t   mapvlen  = 0u;
+    uint32_t   rd0  = 0u;
 
     if( !super::start( provider )) return( false );
     if( provider == 0) return( false );
@@ -306,7 +348,7 @@ MSM8974Timer::start( IOService * provider )
     devcount = provider->getDeviceMemoryCount();
     if( devmem != 0 && devcount != 0u) {
         OSObject * entry = devmem->getObject( 0 );
-        IOMemoryDescriptor * range = OSDynamicCast( IOMemoryDescriptor, entry );
+        range = OSDynamicCast( IOMemoryDescriptor, entry );
         if( OSDynamicCast( IODeviceMemory, entry ) != 0)       objkind = 1u;
         else if( range != 0)                                   objkind = 2u;
         if( range != 0) {
@@ -339,6 +381,44 @@ MSM8974Timer::start( IOService * provider )
     __asm__ volatile ( "mrc p15, 0, %0, c14, c0, 0" : "=r" (cntfrq) );
     entry_live_write( "xnu_live_timerdrv_cntfrq", cntfrq );
     entry_live_write( "xnu_live_timerdrv_agree", (freq_hz == cntfrq) ? 1u : 0u );
+
+    /* ---- 494: the mapping, and the device read through it ------------------------------------
+     *
+     * The same two calls as `MSM8974GIC.cpp`, on the same object 493's resolution filed, and one word
+     * read through the address the OS's mapping machinery returns. `IOMemoryDescriptor::map(
+     * kIOMapAnywhere )` is the kext route to a device's registers, and this driver takes it for the
+     * reason Apple's own files give: the entry is `kIOMemoryTypePhysical64` (`withRange` passes a NULL
+     * task, `IOMemoryDescriptor.cpp:1176-1179`), so `doMap` reaches its `_task == NULL` arm -
+     * `device_pager_setup` + `mach_memory_object_memory_entry_64` (`:641-678`) - and the page behind
+     * the returned address is the physical range `getPhysicalSegment` named, mapped with the cache
+     * mode a device address gets. `MSM8974GIC.cpp`'s block carries the derivation with its citations;
+     * the two files are the same code on purpose, so that a defect in the reading is a defect in both.
+     *
+     * **What this node does not have is a second definition of what it reads.** `GICD_TYPER` is
+     * read-only, so the GIC driver can hold its own read against the payload's own read of the same
+     * register, and `/timer`'s node has no such counterpart: nothing in this project has ever read a
+     * word out of the GPT at `0xf9020000` - the tree declares it, `PE_state_stage90.timerBase` names
+     * it, and the payload's handlers use the *architectural* counter, not this block. So `_rd0` is a
+     * **first reading with no second definition**, and the step says so rather than dressing it up:
+     * it is published raw, the mapping is published beside it (`_map`, `_mapvaddr`, `_mapvlen`), and
+     * what it means is owed to the step that finds a second way to read the same block. `_rd0` at
+     * offset 0 is the node's own `reg[0]` word - the block's first register, whichever register that
+     * is - and it is read once, because this step's question is whether a read lands at all.
+     *
+     * Nothing here writes a device register. */
+    if( range != 0) {
+        themap = range->map( kIOMapAnywhere );
+        if( themap != 0) {
+            mapvaddr = (uint32_t)(uintptr_t) themap->getVirtualAddress();
+            mapvlen  = (uint32_t) themap->getLength();
+            if( mapvaddr != 0u)
+                rd0 = *(volatile uint32_t *)(uintptr_t)( mapvaddr + MSM8974_TIMER_REG0_OFF );
+        }
+    }
+    entry_live_write( "xnu_live_timerdrv_map", (uint32_t)(uintptr_t) themap );
+    entry_live_write( "xnu_live_timerdrv_mapvaddr", mapvaddr );
+    entry_live_write( "xnu_live_timerdrv_mapvlen", mapvlen );
+    entry_live_write( "xnu_live_timerdrv_rd0", rd0 );
 
     return( true );
 }

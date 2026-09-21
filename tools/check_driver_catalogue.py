@@ -60,6 +60,27 @@ published. So the check also holds:
     nothing while its `_devcount` said three entries: the second occurrence of "the reader's type is a
     reading", in the same file, one step after 492's `_freqkind`.
 
+**494's fifth part: the access, and the one value in it that has two definitions.** 493 left each
+driver holding a number - `_phys0`, the address the kernel made of the node's `reg[0]` - and 494 turns
+it into an access: `map( kIOMapAnywhere )` on the very object the OS's array holds, then a device word
+read through `getVirtualAddress()`. Two more claims hold that:
+
+  * the mapping to be the OS's - the mapped object is the object the entry was cast into (not a
+    descriptor the driver built from the node's own words), the address comes from that map's own
+    `getVirtualAddress()`, the length from its `getLength()`, all three are published, every word is
+    read at an offset **named in the driver's own file** and resolved by this check, and both guards
+    (`map != 0`, `vaddr != 0`) are present *and precede* the read - because a dereference of zero is a
+    data abort whose `far` says nothing about the mapping;
+  * the compared value to be two reads. `GICD_TYPER` is read-only and constant, so the driver can hold
+    its mapped read against the payload's own read of the same register - and this check follows the
+    chain from `gicd_read( STAGE90_GICD_TYPER )` through the variable to the non-`static` global the
+    payload defines and its header declares, requires the driver's `extern` to name that symbol and its
+    comparison to have that symbol on one side and the mapped read on the other, and compares the two
+    definitions of the *offset*. Every link replaced by a constant is a refusal, because a comparison
+    with a typed-in number is one no run can contradict. The driver that has no payload counterpart
+    (`/timer`) is noted rather than failed: nothing here has read a word out of the GPT, and the check
+    says so instead of inventing an expected value for it.
+
 It reads sources and not the linked image on purpose: the image cannot say which provider class a
 personality *would* have matched, only which services ended up matched, and 491's census is exactly the
 case where the image looked correct and the driver tree was empty.
@@ -86,6 +107,13 @@ DEVICE_MEMORY_CPP = os.path.join(IOKIT, "Kernel", "IODeviceMemory.cpp")
 MEMORY_DESCRIPTOR_CPP = os.path.join(IOKIT, "Kernel", "IOMemoryDescriptor.cpp")
 DEVICE_MEMORY_H = os.path.join(IOKIT, "IOKit", "IODeviceMemory.h")
 MEMORY_DESCRIPTOR_H = os.path.join(IOKIT, "IOKit", "IOMemoryDescriptor.h")
+
+# 494: the payload's own GIC header and probe. The check reads them for one reason - the driver that
+# compares its mapped read against the payload's read has to be held to the *payload's* definition of
+# the register's offset and of the symbol that carries the value, and neither may be a transcription
+# into the driver.
+PAYLOAD_GIC_C = os.path.join(REPO_ROOT, "stages", "stage90", "xnu_arm_boot", "entry_gic.c")
+PAYLOAD_GIC_H = os.path.join(REPO_ROOT, "stages", "stage90", "xnu_arm_boot", "entry_gic.h")
 
 # The two provider classes the kernel itself creates, and so the two a personality may name without any
 # device-tree fact behind it: `IOPlatformExpertDevice` is the root nub `StartIOKit` builds
@@ -419,10 +447,17 @@ def reading_cast(source):
     if not m:
         return None
     var = m.group(1)
+    # Two spellings, because 494's drivers declare the entry's slot once at the top of `start` - the
+    # map needs the same object the segment walk used, so it cannot be an inner declaration - and the
+    # class of the cast is the reading either way. The declaration's type is reported when the source
+    # names one, so a mutation that moves the cast *type* is still visible as a moved type.
     m2 = re.search(r"(\w+)\s*\*\s*%s\s*=\s*OSDynamicCast\(\s*(\w+)\s*," % re.escape(var), source)
-    if not m2:
-        return None
-    return {"var": var, "declared": m2.group(1), "cast_to": m2.group(2)}
+    if m2:
+        return {"var": var, "declared": m2.group(1), "cast_to": m2.group(2)}
+    m2 = re.search(r"(?:^|\s)%s\s*=\s*OSDynamicCast\(\s*(\w+)\s*," % re.escape(var), source, re.M)
+    if m2:
+        return {"var": var, "declared": "", "cast_to": m2.group(1)}
+    return None
 
 
 def live_keys(source):
@@ -449,6 +484,122 @@ def resolve_condition(source):
     """
     m = re.search(r"else\s+if\s*\(([^;{}]*)\)\s*resolve\s*=\s*1u\s*;", source, re.S)
     return m.group(1).strip() if m else None
+
+
+def driver_defines(source):
+    """A driver's `#define <NAME> <integer>` table, as `{name: value}`.
+
+    The offsets a driver reads a device register at are named in its own file, and this is what turns
+    those names into the numbers the claim compares. A `#define` whose value is not an integer (the
+    drivers' own `#define super IOService`) is not in the table and cannot be resolved - which is the
+    point of resolving at all: an offset written straight into the read expression has no name for a
+    claim to look up, and a name that resolves to nothing is reported as such instead of passing.
+    """
+    out = {}
+    for name, value in re.findall(r"#define\s+(\w+)\s+(0[xX][0-9a-fA-F]+|\d+)[uU]?\s*$", source, re.M):
+        out[name] = int(value, 0)
+    return out
+
+
+def driver_mapping(source):
+    """One driver's use of the OS's answer as a *device mapping*, as the pieces of that expression.
+
+    Five things, and every one of them is a way the access could be something other than what the
+    record claims:
+
+      * `call` - `map( kIOMapAnywhere )` and the object it is called on. The object must be the one the
+        driver cast the OS's array entry into: a driver that mapped a descriptor it built from the
+        node's `reg` words would be reading an address it computed itself, which is the thing 493's
+        driver comment rejects in as many words.
+      * `mapvar`, `vaddr`, `vlen` - the three names, so the guards and the published keys can be
+        checked against the expression that produced them rather than against a name this check
+        assumes.
+      * `reads` - the device words read through the *mapped* address, each as
+        `(offset_symbol, whole_expression)`. The symbol is what the claim resolves against the file's
+        own `#define`s, so an offset cannot be a number typed into the read and nothing else.
+    """
+    out = {"call": None, "mapvar": None, "srcvar": None, "vaddr": None, "vaddrsrc": None,
+           "vlen": None, "reads": [], "map_guards": []}
+    m = re.search(r"(\w+)\s*=\s*(\w+)\s*->\s*map\(\s*kIOMapAnywhere\s*\)", source)
+    if m:
+        out["call"] = m.group(0)
+        out["mapvar"] = m.group(1)
+        out["srcvar"] = m.group(2)
+    m = re.search(r"(\w+)\s*=\s*\(uint32_t\)\s*\(uintptr_t\)\s*(\w+)\s*->\s*getVirtualAddress\(\)", source)
+    if m:
+        out["vaddr"] = m.group(1)
+        out["vaddrsrc"] = m.group(2)
+    m = re.search(r"(\w+)\s*=\s*\(uint32_t\)\s*\w+\s*->\s*getLength\(\)", source)
+    if m:
+        out["vlen"] = m.group(1)
+    if out["mapvar"]:
+        out["map_guards"].append(re.search(r"if\(\s*%s\s*!=\s*0\)" % re.escape(out["mapvar"]), source))
+    if out["vaddr"]:
+        out["map_guards"].append(re.search(r"if\(\s*%s\s*!=\s*0u\)" % re.escape(out["vaddr"]), source))
+    if out["vaddr"]:
+        for m in re.finditer(
+                r"\*\s*\(\s*volatile\s+uint32_t\s*\*\s*\)\s*\(\s*uintptr_t\s*\)\s*"
+                r"\(\s*%s\s*(?:\+\s*(\w+)\s*)?\)" % re.escape(out["vaddr"]), source):
+            out["reads"].append((m.group(1), m.group(0)))
+    return out
+
+
+def payload_defines(header_text, prefix):
+    """`{NAME: value}` for the payload header's `#define <NAME> <integer>` whose name starts `prefix`."""
+    out = {}
+    for name, value in re.findall(r"#define\s+(%s\w*)\s+(0[xX][0-9a-fA-F]+|\d+)[uU]?"
+                                  % re.escape(prefix), header_text):
+        out[name] = int(value, 0)
+    return out
+
+
+def payload_typer_channel(c_text, h_text):
+    """The payload's own reading of the register the GIC driver compares against, as a chain.
+
+    Four links, and the claim below fails on the first one that is a constant instead of a read: the
+    symbol must be **defined** in the payload's C (a `static` one would not link, so the driver's
+    `extern` would be an undefined symbol and the build would say so), **declared** in the payload's
+    header (one definition, one name), assigned from the variable the probe read the register into, and
+    that variable must itself be assigned from `gicd_read( <macro> )` where `<macro>` is a name the
+    header defines as an integer. A chain that ends in a number makes the driver's `_hwok` a comparison
+    with a value someone typed, which no run could falsify.
+    """
+    out = {"symbol": None, "rhs": None, "macro": None, "offset": None, "declared": False}
+    m = re.search(r"^uint32_t\s+(g_\w+)\s*;", c_text, re.M)
+    if not m:
+        return out
+    out["symbol"] = m.group(1)
+    m = re.search(r"^\s*%s\s*=\s*(\w+)\s*;" % re.escape(out["symbol"]), c_text, re.M)
+    if not m:
+        return out
+    out["rhs"] = m.group(1)
+    m = re.search(r"^\s*%s\s*=\s*gicd_read\(\s*(\w+)\s*\)\s*;" % re.escape(out["rhs"]), c_text, re.M)
+    if not m:
+        return out
+    out["macro"] = m.group(1)
+    out["offset"] = payload_defines(h_text, "STAGE90_GICD_").get(out["macro"])
+    out["declared"] = bool(re.search(r"extern\s+uint32_t\s+%s\s*;" % re.escape(out["symbol"]), h_text))
+    return out
+
+
+def driver_payload_symbol(source):
+    """The payload symbol one driver declares `extern`, and the comparison it makes against it.
+
+    The driver that has a second definition is found by *that declaration* and not by its class name,
+    so a third device driver that gains a payload-side counterpart is checked by adding the declaration
+    and nothing else - the same rule 493's `facts["drivers"]` follows for the personalities.
+    """
+    m = re.search(r'extern\s+"C"\s+uint32_t\s+(\w+)\s*;', source)
+    if not m:
+        return None
+    symbol = m.group(1)
+    out = {"symbol": symbol, "lhs": None, "rhs": None, "verdict": None}
+    m = re.search(r"(\w+)\s*=\s*\(\s*(\w+)\s*==\s*(\w+)\s*\)\s*\?\s*1u\s*:\s*0u\s*;", source)
+    if m:
+        out["verdict"] = m.group(1)
+        out["lhs"] = m.group(2)
+        out["rhs"] = m.group(3)
+    return out
 
 
 def tree_nodes(tree_text):
@@ -518,6 +669,8 @@ def gather(args):
                                          facts["devmem_factory"]["factory_method"])
                              if facts["devmem_factory"] else None)
     facts["devmem_chain"] = class_chain(facts["devmem_built"]) if facts["devmem_built"] else None
+    facts["payload_gic_c"] = read(PAYLOAD_GIC_C)
+    facts["payload_gic_h"] = read(PAYLOAD_GIC_H)
     facts["drivers"] = []
 
     # 493: one record per personality that names a *device node*, with the file that defines its class
@@ -1194,9 +1347,219 @@ def claim_entry_class(facts, failures, notes):
                             "`_len0` 0 with `_objlen` right)" % d["file"])
 
 
+def claim_device_mapping(facts, failures, notes):
+    """12. A driver reaches its device through the OS's own mapping, and only after both guards.
+
+    The step's whole subject: 493 left each driver holding a *number* - `_phys0`, the address the
+    kernel made of the node's `reg[0]` - and this is the access. The route is the one IOKit gives a
+    kext, and the claim is that it is the route the drivers actually take:
+
+      * `map( kIOMapAnywhere )` is called, and it is called **on the object the driver cast the OS's
+        array entry into** (`reading_cast`) - not on a descriptor the driver built from the node's own
+        `reg` words. A driver that mapped its own arithmetic would be measuring itself: 493's claim 9
+        rejects exactly that for the *value*, and this claim rejects it for the *access*. That the call
+        does what the files say (`device_pager_setup` + a physically-typed entry, `IOMemoryDescriptor.cpp
+        :641-678`) is claim 11's neighbourhood and `claim_mechanism`'s subject, not something a source
+        can be asked to prove; what a source *can* be asked is that the address read through is the one
+        this call returned.
+      * The address comes from `getVirtualAddress()` **on that map** and the length from its
+        `getLength()`, and *both* are published (`_map`, `_mapvaddr`, `_mapvlen`). A record that
+        published only the word it read could not tell "the OS mapped nothing" from "the driver read
+        nothing through a map it had" - the two findings this step exists to separate, and the same
+        shape as 493's `_objkind`.
+      * Every device word is read through **`_mapvaddr`** and at an offset **named in the driver's own
+        file**, which this check resolves. A bare `0` in the expression is an offset nothing can hold
+        against anything, and an unresolvable name is reported rather than skipped.
+      * Both guards are present, and the read is *after* them: `if( <map> != 0 )` and
+        `if( <vaddr> != 0u )`. A dereference of zero on this machine is a data abort, and an abort whose
+        `far` is 0 would say nothing about the mapping - so the guard is not defensive style, it is what
+        keeps a failed map from being recorded as a failed *read*.
+    """
+    for d in facts["drivers"]:
+        mapping = driver_mapping(d["source"])
+        casting = reading_cast(d["source"]) or {}
+        if mapping["call"] is None:
+            failures.append("`%s` never calls `map( kIOMapAnywhere )`: the OS's resolution stays a "
+                            "number, so nothing on this machine has asked the kernel's own mapping "
+                            "machinery to reach a device, and the claim that a driver touches its "
+                            "device is not made by this file" % d["file"])
+        elif mapping["srcvar"] != casting.get("var"):
+            failures.append("`%s` maps `%s`, and the OS's entry was cast into `%s`: the mapped object "
+                            "is not the one the OS's array holds, so the address read through is not "
+                            "the OS's answer to where this device is"
+                            % (d["file"], mapping["srcvar"], casting.get("var")))
+        if mapping["vaddr"] is None or mapping["vaddrsrc"] != mapping["mapvar"]:
+            failures.append("`%s` does not take the address to read through from "
+                            "`getVirtualAddress()` of the map it just made (map `%s`, address from "
+                            "`%s`): a device read through anything else is not a reading of the OS's "
+                            "mapping" % (d["file"], mapping["mapvar"],
+                                         mapping["vaddrsrc"] or "nothing"))
+        if mapping["vlen"] is None:
+            failures.append("`%s` does not publish the mapping's own `getLength()`: without it a "
+                            "`_mapvaddr` that landed on the wrong page cannot be told from one that "
+                            "landed on the right one" % d["file"])
+        for suffix, what in (("map", "the `IOMemoryMap *` the map call returned"),
+                             ("mapvaddr", "the mapping's `getVirtualAddress()`"),
+                             ("mapvlen", "the mapping's `getLength()`")):
+            if not re.search(r'xnu_live_\w+_%s\b' % suffix, d["source"]):
+                failures.append("`%s` does not publish `_%s` (%s): a guard that fails silently is a "
+                                "reading that cannot be told from a read that never happened"
+                                % (d["file"], suffix, what))
+        if not mapping["reads"]:
+            failures.append("`%s` reads no device word through the address its mapping returned: the "
+                            "mapping would then be the only thing this driver did with the OS's answer"
+                            % d["file"])
+        for offset_symbol, expr in mapping["reads"]:
+            if offset_symbol is None:
+                failures.append("`%s` reads a device word at a bare offset (%s): an offset nothing "
+                                "names is a constant no claim can hold against the header the payload "
+                                "reads the same register at" % (d["file"], re.sub(r"\s+", " ", expr)))
+                continue
+            resolved = driver_defines(d["source"]).get(offset_symbol)
+            if resolved is None:
+                failures.append("`%s` reads at `%s`, which its own file does not define as an integer: "
+                                "the offset cannot be resolved, so a read of the wrong register would "
+                                "look exactly like this one" % (d["file"], offset_symbol))
+            else:
+                notes.append("`%s` reads `%s` at offset 0x%03x through `%s`"
+                             % (d["file"], offset_symbol, resolved, mapping["vaddr"]))
+        for guard in mapping["map_guards"]:
+            if guard is None:
+                failures.append("`%s` is missing one of the two guards - `if( <map> != 0 )` and "
+                                "`if( <vaddr> != 0u )` - that keep a failed mapping from being "
+                                "recorded as a failed read" % d["file"])
+        if len(mapping["map_guards"]) == 2 and all(mapping["map_guards"]):
+            first_read = min(d["source"].find(expr) for _sym, expr in mapping["reads"])
+            last_guard = max(g.end() for g in mapping["map_guards"])
+            if first_read < last_guard:
+                failures.append("`%s` reads the device before both guards have passed: the read is "
+                                "outside the branch the mapping's success is tested in, so a map that "
+                                "returned 0 would still be dereferenced" % d["file"])
+
+
+def claim_device_value(facts, failures, notes):
+    """13. The value read through the mapping has two definitions, and the comparison is between reads.
+
+    `GICD_TYPER` is the distributor's identification register: read-only, constant, and read by two
+    pieces of code that share nothing but the address the device tree declares - the payload's probe,
+    through a 1 MB section it installed itself (`entry_gic.c`'s `entry_mmio_section`), and the driver,
+    through the mapping the OS's own resolution produced. That is what makes it the one reading in this
+    step that can be falsified by a run: a mapping that reached the wrong page, or a `reg` whose
+    declaration resolved to the wrong pair, returns a value that is not the payload's.
+
+    Every link of the chain is required to be a *read* rather than a transcription, and the chain is
+    followed in one direction from the payload's register read to the driver's comparison:
+
+      * `payload_typer_channel` walks `gicd_read( <macro> )` -> variable -> the named global, requires
+        the global to be defined (not `static`) in the payload's C and declared in the payload's header,
+        and resolves `<macro>` against the header's own `#define`. Any of those links replaced by a
+        number makes the driver's verdict a comparison with a constant no run can contradict.
+      * the driver's `extern "C"` declaration must name that same symbol - found by the declaration and
+        not by the driver's class, so a fourth driver with a payload-side counterpart is checked by
+        adding the declaration;
+      * the driver's comparison's right-hand side must be that symbol, and its left-hand side must be
+        the variable the device read was assigned to - so the verdict compares the *mapped read* with
+        the *payload's read* and not two names that happen to be in the file;
+      * and the offset of that read must be the header's offset: the two definitions of "which register
+        is `GICD_TYPER`" are compared here, which is the same discipline 493 applied to the
+        `#address-cells` declaration.
+
+    The last requirement is a *note* rather than a failure for the driver that declares no payload
+    symbol: `/timer`'s `_rd0` has no second definition on this machine - nothing here has ever read a
+    word out of the GPT - and the check says so out loud rather than inventing one for it.
+    """
+    channel = payload_typer_channel(facts["payload_gic_c"], facts["payload_gic_h"])
+    if channel["symbol"] is None:
+        failures.append("the payload defines no non-`static` `uint32_t g_...` for a driver to compare "
+                        "against: a `static` one would not link, so the driver's `extern` would be an "
+                        "undefined symbol rather than a reading")
+        return
+    if channel["rhs"] is None or channel["macro"] is None:
+        failures.append("`%s` is not assigned from the variable the payload's probe read the register "
+                        "into (`%s`): if the symbol is not the probe's own read, the driver's verdict "
+                        "compares its mapping against a value nothing measured"
+                        % (channel["symbol"], channel["rhs"] or "nothing"))
+        return
+    if channel["offset"] is None:
+        failures.append("`entry_gic.h` does not define `%s` as an integer offset, so the register the "
+                        "driver reads at cannot be held against the register the payload read: the "
+                        "offset would be one definition and one claim" % channel["macro"])
+    if not channel["declared"]:
+        failures.append("`entry_gic.h` does not declare `%s`: the symbol the driver declares `extern` "
+                        "would then have one definition and no header, which is how a name and a value "
+                        "drift apart" % channel["symbol"])
+    notes.append("the payload's `%s` is `gicd_read( %s )` = 0x%03x, the register the driver's mapped "
+                 "read must match" % (channel["symbol"], channel["macro"], channel["offset"] or 0))
+
+    compared = 0
+    for d in facts["drivers"]:
+        declared = driver_payload_symbol(d["source"])
+        if declared is None:
+            notes.append("`%s` declares no payload symbol: its read has one definition on this machine "
+                         "and the step says so rather than inventing an expected value for it"
+                         % d["file"])
+            continue
+        compared += 1
+        if declared["symbol"] != channel["symbol"]:
+            failures.append("`%s` compares against `%s` and the payload publishes `%s`: the two names "
+                            "are two symbols, and the comparison is with whichever one nothing wrote"
+                            % (d["file"], declared["symbol"], channel["symbol"]))
+            continue
+        mapping = driver_mapping(d["source"])
+        if mapping["vaddr"] is None:
+            failures.append("`%s` reads no mapped address, so the comparison has no left-hand side"
+                            % d["file"])
+            continue
+        reads_by_var = {}
+        for m in re.finditer(r"(\w+)\s*=\s*\*\s*\(\s*volatile\s+uint32_t\s*\*\s*\)\s*"
+                             r"\(\s*uintptr_t\s*\)\s*\(\s*%s\s*\+\s*(\w+)\s*\)\s*;"
+                             % re.escape(mapping["vaddr"]), d["source"]):
+            reads_by_var[m.group(1)] = m.group(2)
+        # Which side of the comparison is which is the source's business; what is required is that one
+        # side is a word read through the mapping and the other is the payload's symbol. A comparison
+        # between two names neither of which is a device read is the shape this step must refuse.
+        sides = [declared["lhs"], declared["rhs"]]
+        mapped_side = next((s for s in sides if s in reads_by_var), None)
+        payload_side = sides[0] if mapped_side == sides[1] else sides[1]
+        if mapped_side is None:
+            failures.append("`%s` compares `%s` with `%s`, and neither is assigned from a word read "
+                            "through the mapping: the verdict is not about the OS's mapping at all"
+                            % (d["file"], declared["lhs"], declared["rhs"]))
+        elif not re.search(r"^\s*%s\s*=\s*%s\s*;" % (re.escape(payload_side), re.escape(channel["symbol"])),
+                           d["source"], re.M):
+            failures.append("`%s` compares its mapped read with `%s`, which is not assigned from `%s`: "
+                            "the verdict's other side is a name the payload's read does not reach"
+                            % (d["file"], payload_side, channel["symbol"]))
+        else:
+            offset_symbol = reads_by_var[mapped_side]
+            resolved = driver_defines(d["source"]).get(offset_symbol)
+            if resolved != channel["offset"]:
+                failures.append("`%s` reads `%s` at 0x%03x and the payload reads `%s` at 0x%03x: the "
+                                "two definitions of which register this is disagree, so `_hwok` could "
+                                "be comparing two different registers"
+                                % (d["file"], offset_symbol, resolved or 0, channel["macro"],
+                                   channel["offset"] or 0))
+            else:
+                notes.append("`%s` compares its read of `%s` (0x%03x) with `%s`, the payload's read of "
+                             "the same register" % (d["file"], offset_symbol, resolved,
+                                                    channel["symbol"]))
+        if not re.search(r'xnu_live_\w+_%s\b' % declared["verdict"], d["source"]):
+            failures.append("`%s` publishes no `_%s`: the comparison's outcome is the reading this step "
+                            "is for, and a comparison whose result is discarded measures nothing"
+                            % (d["file"], declared["verdict"]))
+        for suffix in ("maptyper", "probetyper"):
+            if not re.search(r'xnu_live_\w+_%s\b' % suffix, d["source"]):
+                failures.append("`%s` publishes no `_%s`: a verdict of 0 with only one of its operands "
+                                "in the log is a number whose cause is not in the record"
+                                % (d["file"], suffix))
+    if compared == 0:
+        notes.append("no driver compares against the payload's read: the register this step chose for "
+                     "its second definition is read by nothing on the OS side")
+
+
 CLAIMS = (claim_shape, claim_classes, claim_provider, claim_names, claim_root_names,
           claim_property_kinds, claim_bundle_id, claim_cell_counts, claim_resolution_read,
-          claim_mechanism, claim_entry_class)
+          claim_mechanism, claim_entry_class, claim_device_mapping, claim_device_value)
 
 
 def compare(facts, mutate=None):
@@ -1346,13 +1709,49 @@ def mutate_facts(facts, mutate):
     elif mutate == "the_offset_starts_at_something_else":
         facts["resolve_offset"] = 4
 
+    # -- 494's mutations: the access, and the one value in it that has two definitions. Each is a way
+    # the record could still read like an access while the address, the guard or the compared value
+    # came from somewhere other than the OS's own answer.
+    elif mutate == "the_driver_maps_a_descriptor_it_built_itself":
+        facts = _bump_driver(facts, "MSM8974GIC", "themap = range->map( kIOMapAnywhere );",
+                             "themap = regobj->map( kIOMapAnywhere );")
+    elif mutate == "the_driver_reads_the_node_s_own_address":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             "maptyper = *(volatile uint32_t *)(uintptr_t)( mapvaddr + MSM8974_GICD_TYPER_OFF );",
+                             "maptyper = *(volatile uint32_t *)(uintptr_t)( reg0 + MSM8974_GICD_TYPER_OFF );")
+    elif mutate == "the_driver_drops_the_guard_on_the_address":
+        facts = _bump_driver(facts, "MSM8974GIC", "if( mapvaddr != 0u) {", "if( mapvaddr != 1u) {")
+    elif mutate == "the_driver_publishes_no_mapping":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             'entry_live_write( "xnu_live_gicdrv_map", (uint32_t)(uintptr_t) themap );\n',
+                             "")
+    elif mutate == "the_driver_stops_publishing_the_mapped_value":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             'entry_live_write( "xnu_live_gicdrv_maptyper", maptyper );\n', "")
+    elif mutate == "the_driver_reads_at_another_offset":
+        facts = _bump_driver(facts, "MSM8974GIC", "#define MSM8974_GICD_TYPER_OFF  0x004u",
+                             "#define MSM8974_GICD_TYPER_OFF  0x008u")
+    elif mutate == "the_comparison_is_against_a_typed_constant":
+        facts = _bump_driver(facts, "MSM8974GIC", "hwok = (maptyper == probetyper) ? 1u : 0u;",
+                             "hwok = (maptyper == 0x468u) ? 1u : 0u;")
+    elif mutate == "the_header_moves_the_offset":
+        facts["payload_gic_h"] = _bump(facts["payload_gic_h"], "#define STAGE90_GICD_TYPER      0x004u",
+                                       "#define STAGE90_GICD_TYPER      0x008u")
+    elif mutate == "the_payload_publishes_a_constant":
+        facts["payload_gic_c"] = _bump(facts["payload_gic_c"],
+                                       "g_stage90_gic_dist_typer = dist_typer;",
+                                       "g_stage90_gic_dist_typer = 0x468u;")
+    elif mutate == "the_payload_stops_publishing_the_value":
+        facts["payload_gic_h"] = _bump(facts["payload_gic_h"],
+                                       "extern uint32_t g_stage90_gic_dist_typer;\n", "")
+
     # -- 493's second run's finding: the class the OS's array holds, and the class the driver reads it
     # as. The first of these re-introduces the defect the run measured, so the check is shown to be
     # able to see the thing that actually happened rather than a hypothesis about it.
     elif mutate == "the_driver_reads_the_entry_as_an_io_device_memory":
         facts = _bump_driver(facts, "MSM8974Timer",
-                             "IOMemoryDescriptor * range = OSDynamicCast( IOMemoryDescriptor, entry )",
-                             "IODeviceMemory * range = OSDynamicCast( IODeviceMemory, entry )")
+                             "range = OSDynamicCast( IOMemoryDescriptor, entry )",
+                             "range = OSDynamicCast( IODeviceMemory, entry )")
     elif mutate == "the_driver_stops_publishing_the_entry_kind":
         facts = _bump_driver(facts, "MSM8974Timer",
                              'entry_live_write( "xnu_live_timerdrv_objkind", objkind );\n', "")
@@ -1406,6 +1805,16 @@ MUTATIONS = (
     "the_driver_stops_publishing_the_entry_length",
     "the_array_holds_something_that_is_not_a_memory_descriptor",
     "the_factory_cannot_be_read",
+    "the_driver_maps_a_descriptor_it_built_itself",
+    "the_driver_reads_the_node_s_own_address",
+    "the_driver_drops_the_guard_on_the_address",
+    "the_driver_publishes_no_mapping",
+    "the_driver_stops_publishing_the_mapped_value",
+    "the_driver_reads_at_another_offset",
+    "the_comparison_is_against_a_typed_constant",
+    "the_header_moves_the_offset",
+    "the_payload_publishes_a_constant",
+    "the_payload_stops_publishing_the_value",
 )
 
 
@@ -1441,7 +1850,8 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
-    for path in (args.build_script, args.table, args.tree_source, PLATFORM_EXPERT_CPP, BSD_INIT_CPP):
+    for path in (args.build_script, args.table, args.tree_source, PLATFORM_EXPERT_CPP, BSD_INIT_CPP,
+                 PAYLOAD_GIC_C, PAYLOAD_GIC_H):
         if not os.path.exists(path):
             print("missing %s" % path, file=sys.stderr)
             return 2

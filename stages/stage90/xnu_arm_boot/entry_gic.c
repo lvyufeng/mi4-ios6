@@ -239,6 +239,21 @@ static void gic_spin(uint32_t iterations)
 
 static uint32_t g_gic_probed;
 
+/*
+ * Experiment 494: the one reading in this probe that a *driver* also has to be able to read.
+ *
+ * `xnu_live_gic_dist_typer` puts this number in the live ring, which is a report channel: only this
+ * file's own code and the log can see it. `GICD_TYPER` is read-only and constant for the life of the
+ * part - it is the distributor's identification register - so it is the one GIC reading that can serve
+ * as an *independent second definition* of a value another piece of code reads later, through a
+ * different mapping, from a different plane. The OS-side driver for `/interrupt-controller` reads the
+ * same register through the mapping the OS's own device-memory resolution produces and compares the
+ * two (`MSM8974GIC.cpp`'s `_hwok`); a live key cannot be the right-hand side of that comparison, and a
+ * constant typed into the driver would be a claim rather than a reading. So the number is published
+ * here, by name, next to the live key that carries it to the log - one read, two channels.
+ */
+uint32_t g_stage90_gic_dist_typer;
+
 /* The countdown restarted after every window: long enough that it cannot reach zero before the
  * caller overwrites it one instruction later, short enough to stay a plausible 32-bit value. */
 #define GIC_TVAL_PARKED 0x7FFFFFFFu
@@ -392,6 +407,12 @@ void entry_gic_probe(void)
 
     GIC_LIVE("xnu_live_gic_dist_ctlr", dist_ctlr);
     GIC_LIVE("xnu_live_gic_dist_typer", dist_typer);
+    /*
+     * 494: and the same read with a name the OS-side driver can reach. It is stored *before* this
+     * probe writes any register at all - the first `gicc_write` is below, at the CPU-interface guard -
+     * so the value the driver compares against is the one the probe found and not one it caused.
+     */
+    g_stage90_gic_dist_typer = dist_typer;
     GIC_LIVE("xnu_live_gic_isenabler0", isenabler0);
     GIC_LIVE("xnu_live_gic_ispendr0", ispendr0);
     GIC_LIVE("xnu_live_gic_igroupr0", igroupr0);

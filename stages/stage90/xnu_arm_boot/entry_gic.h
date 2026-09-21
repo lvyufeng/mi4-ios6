@@ -184,6 +184,17 @@
 void entry_gic_probe(void);
 
 /*
+ * The distributor's identification register, as this image read it (`entry_gic.c`'s probe, from the
+ * first `ml_set_decrementer` this image makes). **It exists as a named symbol because a second reader
+ * reads it later, through a different mapping, and has to be able to compare.** `GICD_TYPER` is
+ * read-only and constant, so the comparison is a comparison of two *ways of reaching one register* -
+ * this probe's own 1 MB section at `0xf9000000` and the OS-side driver's mapping of the range the
+ * device tree declares - and not of two moments in the value's life. `MSM8974GIC.cpp` declares it
+ * `extern` and publishes `_probetyper` beside its own `_maptyper` and the verdict.
+ */
+extern uint32_t g_stage90_gic_dist_typer;
+
+/*
  * The four accesses both of this window's users go through, and **483's reason for exporting them is
  * 482's reason for exporting the `CNTV` five**: the handler in `entry_irq.c` reads `GICC_IAR`, writes
  * `GICC_EOIR` and reads the distributor, and the alternative was a second set of `volatile` pointer
