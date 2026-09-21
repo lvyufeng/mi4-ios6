@@ -269,6 +269,22 @@ the failure it stopped on.
   runs, and `r3`/`r12` differing by a few hundred (`0x0008a3a5`/`0x0008a31d`,
   `0xde58a327`/`0xde58a3af`). A pair of callee-saved registers holding the faulting address **+2** is a
   shape worth naming before it is explained.
+  *(2026-09-21, host-side, still open.)* Two readings of that panel are now possible and they are
+  distinguishable, which is the most that can be said without a run. **(a) The registers are the
+  interrupted code's, and the interrupted code was this project's own idle-path instrument.**
+  `r0 = r5 = cpu_data`, `r6 = cpu_data + 0xe0`, `r9 = 0xc05feb10 = TPIDRPRW` and `r10 = 0x800ba588 = ` a
+  code address are the register file of a wrapper that has just read the thread pointer and indexed the
+  machine block - `entry_note_idle` is entered with `entry_counter()`, i.e. a **timebase**, and a
+  compiler that needs such a word twice keeps it in two callee-saved registers, which would make
+  `r4 = r11` a callee-save pair rather than a frame slot; `r2 = 0xde500000` and the `r3`/`r12` differences
+  fit the same wrapper's arithmetic. **(b) They are frame slots the handler's stack overwrote**, which is
+  518's subject. **What separates them:** under (a) the pair belongs to the *interrupted thread's own
+  registers* and is therefore present whatever the handler's depth is - so 518's arm must reproduce it;
+  under (b) it is a function of the handler's stack depth, so the same arm removes it. 518's run reads
+  the frame's `SS_PC`/`SS_LR`/`SS_SP` directly (`xnu_live_tb_pc/_lr/_sp` with `_kind` and `_cand`), and
+  this panel is the second reading of the same moment - the two are compared, not one of them explained
+  by the other. Whichever reading holds, `pc = far = a timebase` and `lr = 0x800462dc` are unchanged and
+  the aborting code is still `FlushPoU_Dcache` called from `platform_cache_idle_exit` (517's addendum 3).
 * **Carried, unchanged**: the park's `w_calls`/`w_exits`/`w_sip`/`w_wfi`/`w_sleep` totals are still
   unmeasured (514's own content); the OS's own reboot path (`reboot_kernel` → `host_reboot` →
   `halt_all_cpus` → `PEHaltRestart`) is still unwired *as a path this port can take on purpose*, though
