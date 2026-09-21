@@ -191,6 +191,14 @@ def payload_node(text, name):
     return rest[:end]
 
 
+# The device's kernel's own two-route vocabulary, added by 501. Each is a name that kernel has on the
+# line the driver cites it at, and each is cited in the driver's 501 block - so a citation that drifts
+# one line away is refused, exactly as the offsets block's citations are.
+ROUTE_ANCHORS = ("counter_get_cntpct_mem", "counter_get_cntpct_cp15",
+                 "counter_get_cntvct_mem", "counter_get_cntvct_cp15",
+                 "get_cntpct_func", "get_cntvct_func", "has_cp15")
+
+
 def grounding_block(text):
     """The comment in one source that grounds this step in the device's own kernel.
 
@@ -372,7 +380,16 @@ def claim_offsets_are_the_devices(facts, failures, notes):
     # comment six hundred lines below and satisfied that clause on their own. A clause that asks for the
     # presence of one citation is not a clause about the absence of another. So each citation is read
     # *with* the name it is written beside, and that name has to be on the line the citation names.
-    anchors = [name for _, name in FRAME_REG_NAMES + FRAME_BIT_NAMES] + [n for n, _ in needles]
+    # **501 added a second block of citations to this file, and the anchors are what read it.** The
+    # driver's two-route block cites the device's kernel's own counter functions and the switch that
+    # chooses between them (`:297`/`:310`/`:318`/`:331`/`:339`/`:340`/`:607`-`:609`), and a citation is
+    # only read here when a *name this check knows* is written beside it - so the names are the check's
+    # third list now alongside the frame's offsets and the two calls. An anchor the kernel does not
+    # have on the cited line fails the same way a wrong offset does, which is the whole point: the
+    # block that says "these are the two routes" is checked like the block that says "these are the
+    # registers".
+    anchors = ([name for _, name in FRAME_REG_NAMES + FRAME_BIT_NAMES] + [n for n, _ in needles]
+               + list(ROUTE_ANCHORS))
     kernel_lines = facts.arch_timer.split("\n")
     cited_calls = set(call_lines.values())
     checked = 0
@@ -958,6 +975,12 @@ def mutate_facts(facts, mutate):
         facts.timer_src = _bump(facts.timer_src,
                                 " *       :623 timer_base = of_iomap(frame, 0);",
                                 " *       :631 timer_base = of_iomap(frame, 0);")
+    elif mutate == "the_two_route_block_cites_another_line":
+        # 501's block, one line off: `:296` is the blank line above `counter_get_cntpct_mem`, which is
+        # the exact shape 499 found in the offsets block (a citation pointing at a line that says
+        # something else) - and the shape the anchor list could not see until 501 added its names to it.
+        facts.timer_src = _bump(facts.timer_src, " *     :297  counter_get_cntpct_mem",
+                                " *     :296  counter_get_cntpct_mem")
     elif mutate == "the_grounding_block_cites_another_define_line":
         # The same block, the other kind of citation: a register offset's line number rather than a
         # call's. `QTIMER_FREQ_REG` is at :65 and the block said :66 - which is `QTIMER_CNTP_TVAL_REG`'s
@@ -988,6 +1011,7 @@ MUTATIONS = (
     "a_record_key_disappears",
     "the_citation_points_at_another_line",
     "the_device_kernel_moves_and_the_citation_does_not",
+    "the_two_route_block_cites_another_line",
     "the_grounding_block_cites_the_line_before_the_call",
     "the_grounding_block_cites_another_define_line",
 )

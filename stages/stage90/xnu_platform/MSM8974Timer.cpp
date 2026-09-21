@@ -290,6 +290,68 @@ extern "C" uint32_t entry_irq_enable_line(uint32_t intid, uint32_t target);
 #define MSM8974_TIMER_FRAME_ENTRY  1u
 
 /*
+ * 501: the frame's *second* view, and the frame's other route to the same counters.
+ *
+ * The frame in the device's own tree declares two `reg` regions -
+ * `reg = <0xf9021000 0x1000>, <0xf9022000 0x1000>` (`arch/arm/boot/dts/msm8974.dtsi:161-167`) - and
+ * the binding that sits beside that kernel says what they are:
+ *
+ *     Documentation/devicetree/bindings/arm/arch_timer.txt:43-44
+ *         - reg : The first and second view base addresses in that order. The second view
+ *           base address is optional.
+ *
+ * The device's kernel maps the first (`of_iomap(frame, 0)`, `arch_timer.c:623`) and nothing in it
+ * ever maps the second. This project's tree has carried both since 492, flattened one level up onto
+ * the node this driver matched, so the second view is that node's third `reg` entry and therefore
+ * device-memory object 2 - `MSM8974_TIMER_VIEW2_ENTRY` below, and *not* the frame's entry, which is
+ * the whole point of reading it separately.
+ *
+ * **Why a second view is worth a step.** 500 proved the frame's first view against itself - the rate
+ * measured against `mach_absolute_time`, the control word's own bits - and against nothing else. The
+ * *counters* are reachable a second way, and the device's own kernel is where that second way lives.
+ * The block below is opened with that kernel's path on a line of its own for the same reason the 498
+ * offsets block is: `tools/check_timer_line.py` finds a block that way, and every bare citation in it
+ * is then read with the name written beside it and held against the line it names.
+ *
+ * external/android_kernel_xiaomi_cancro/arch/arm/kernel/arch_timer.c
+ *     :297  counter_get_cntpct_mem      (reads the frame's 0x000/0x004)
+ *     :310  counter_get_cntpct_cp15     (`mrrc p15, 0, ..., c14`)
+ *     :318  counter_get_cntvct_mem      (reads the frame's 0x008/0x00C)
+ *     :331  counter_get_cntvct_cp15     (`mrrc p15, 1, ..., c14`)
+ *     :339  get_cntpct_func is `counter_get_cntpct_cp15`
+ *     :340  get_cntvct_func is `counter_get_cntvct_cp15`
+ *     :577  has_cp15 = false in its own declaration
+ *     :581  has_cp15 = true, from the CPU's feature words
+ *     :607  if (!has_cp15) {
+ *     :608  get_cntpct_func = counter_get_cntpct_mem;
+ *     :609  get_cntvct_func = counter_get_cntvct_mem;
+ *
+ * Two definitions of one value in one file, and the choice between them is made once and never
+ * revisited: the memory route is taken **only** when the CPU has no coprocessor timer (`has_cp15`,
+ * which the kernel sets from the CPU's own feature words), so on a machine that has both - this one -
+ * the loser of that switch is never read again. That is this project's oldest defect family ("one
+ * value, two definitions, N − 1 uncompared") sitting inside the *evidence* for the frame. This step is
+ * the missing comparison: every counter the frame exposes is read through the frame and through the
+ * coprocessor, and both readings are published with their difference, so a wrong offset answers as a
+ * difference of ~10^7 ticks rather than as an argument.
+ *
+ * `QTIMER_CNTV_TVAL_REG` (`:67`, 0x038) earns its own sentence, and 501's run gave it three. The
+ * device's kernel *declares* the frame's virtual countdown and never reads or writes it - it is the
+ * only one of that file's eight timer offsets with no use anywhere in the file, and a search of the
+ * whole kernel tree finds the name exactly once, on its own `#define` - so the name is a definition
+ * with no reader in the file that wrote it. The coprocessor route to that register is `c14, c3, 0`
+ * and the control beside it is `c14, c3, 1`, the pair this image's own `entry_timebase.c` writes for
+ * XNU's decrementer. **And the run says the offset is not the register**: `_rt_tval_fr` reads
+ * `0xf912a3cc` where `_rt_tval_cpu` reads `0x0002d8cb`, `_rt_tval_ok` 0 - a difference of 0x06f034ff
+ * ticks, not of a few reads. So the one offset that file never reads is also the one offset this
+ * machine contradicts, and nothing in that kernel could have noticed. **The reading is allowed to
+ * say what the register is *not* and not what it is**: whether the frame's virtual countdown lives
+ * in its second view, or behind a control word neither this step nor that kernel writes, is a
+ * question that needs a write to answer, which is exactly what this step refuses to make.
+ */
+#define MSM8974_TIMER_VIEW2_ENTRY  2u
+
+/*
  * The GIC binding's cell rule, from the same tree that declares the frame:
  *
  *     arch/arm/boot/dts/msm8974.dtsi - a node's `interrupts` is `<type number trigger>` with the
@@ -592,6 +654,71 @@ msm8974_timer_isr( void * refCon, uint32_t intid )
     entry_live_write( "xnu_live_timerdrv_isr_done", g_timer_isr_done );
 }
 
+/*
+ * 501: the coprocessor route to the counters the frame also exposes, as five accessors.
+ *
+ * Two readings of one value, and the device's kernel holds both. Its coprocessor side is
+ * `counter_get_cntpct_cp15` (`arch/arm/kernel/arch_timer.c:310`), and its two `mrrc` encodings are
+ * what the two accessors below are:
+ *
+ *     :331  counter_get_cntvct_cp15 is the second one
+ *
+ * and its frame side is `counter_get_cntpct_mem` (`:297`), the other half of the same pair:
+ *
+ *     :318  counter_get_cntvct_mem reads the frame's 0x008/0x00C
+ *
+ * The citations are one per line on purpose: `tools/check_timer_line.py` binds a citation to the name
+ * written beside it *on the same line*, so a line that names two things and cites two lines is a
+ * citation that check refuses - which is how the first version of this comment was written, and how
+ * it was found. The virtual countdown's coprocessor pair is `c14, c3, 0` / `c14, c3, 1` - the pair
+ * this image's own `entry_timebase.c` writes for XNU's decrementer, and the reason this step reads
+ * CNTV at all: the frame's virtual countdown is *XNU's*, so the two routes to it are two readings of
+ * a register the OS is already using.
+ */
+static inline uint64_t msm8974_cpu_cntpct(void)
+{
+    uint32_t lo, hi;
+    __asm__ volatile ("mrrc p15, 0, %0, %1, c14" : "=r"(lo), "=r"(hi));
+    return ((uint64_t)hi << 32) | (uint64_t)lo;
+}
+
+static inline uint64_t msm8974_cpu_cntvct(void)
+{
+    uint32_t lo, hi;
+    __asm__ volatile ("mrrc p15, 1, %0, %1, c14" : "=r"(lo), "=r"(hi));
+    return ((uint64_t)hi << 32) | (uint64_t)lo;
+}
+
+static inline uint32_t msm8974_cpu_cntv_tval(void)
+{
+    uint32_t v;
+    __asm__ volatile ("mrc p15, 0, %0, c14, c3, 0" : "=r"(v));
+    return v;
+}
+
+static inline uint32_t msm8974_cpu_cntv_ctl(void)
+{
+    uint32_t v;
+    __asm__ volatile ("mrc p15, 0, %0, c14, c3, 1" : "=r"(v));
+    return v;
+}
+
+static inline uint32_t msm8974_cpu_cntp_ctl(void)
+{
+    uint32_t v;
+    __asm__ volatile ("mrc p15, 0, %0, c14, c2, 1" : "=r"(v));
+    return v;
+}
+
+/* The distance between two readings of one counter, as a magnitude. A counter read twice through two
+ * routes differs by however long the reads took, so the comparison is `|Δ| <= slack` with the slack
+ * measured on this machine - never `==`, which would fail on a correct machine every time. */
+static inline uint32_t msm8974_delta_abs(uint32_t a, uint32_t b)
+{
+    int32_t d = (int32_t)(a - b);
+    return (uint32_t)(d < 0 ? -d : d);
+}
+
 class MSM8974Timer : public IOService
 {
     OSDeclareDefaultStructors(MSM8974Timer);
@@ -693,6 +820,50 @@ MSM8974Timer::start( IOService * provider )
     uint32_t   arm_tval_after = 0u;
     uint32_t   arm_rc = 0u;
     uint32_t   arm_line_rc = 0u;
+    /* 501 - the frame's second view, and the frame's two routes to the same counters */
+    IOMemoryDescriptor * v2range = 0;
+    IOMemoryMap * v2map = 0;
+    uint32_t   v2_objkind = 0u;
+    uint32_t   v2_phys = 0u;
+    uint32_t   v2_len = 0u;
+    uint32_t   v2_va = 0u;
+    uint32_t   v2_freq = 0u;
+    uint32_t   v2_freq_agree = 0u;
+    uint32_t   v2_slack = 0u;
+    uint32_t   v2_cntv_lo = 0u;
+    uint32_t   v2_cntv_hi = 0u;
+    uint32_t   v2_cntv_d = 0u;
+    uint32_t   v2_cntv_ok = 0u;
+    uint32_t   v2_cntp_lo = 0u;
+    uint32_t   v2_cntp_hi = 0u;
+    uint32_t   v2_cntp_d = 0u;
+    uint32_t   v2_cntp_ok = 0u;
+    uint32_t   v2_tval = 0u;
+    uint32_t   fr_cntv_lo = 0u;
+    uint32_t   fr_cntv_hi = 0u;
+    uint32_t   fr_cntp_lo = 0u;
+    uint32_t   fr_cntp_hi = 0u;
+    uint32_t   rt_slack = 0u;
+    uint32_t   rt_cntv_lo_fr = 0u;
+    uint32_t   rt_cntv_hi_fr = 0u;
+    uint32_t   rt_cntv_lo_cpu = 0u;
+    uint32_t   rt_cntv_hi_cpu = 0u;
+    uint32_t   rt_cntv_d = 0u;
+    uint32_t   rt_cntv_ok = 0u;
+    uint32_t   rt_cntp_lo_fr = 0u;
+    uint32_t   rt_cntp_hi_fr = 0u;
+    uint32_t   rt_cntp_lo_cpu = 0u;
+    uint32_t   rt_cntp_hi_cpu = 0u;
+    uint32_t   rt_cntp_d = 0u;
+    uint32_t   rt_cntp_ok = 0u;
+    uint32_t   rt_tval_fr = 0u;
+    uint32_t   rt_tval_cpu = 0u;
+    uint32_t   rt_tval_d = 0u;
+    uint32_t   rt_tval_ok = 0u;
+    uint32_t   rt_ctl_fr = 0u;
+    uint32_t   rt_ctl_cpu = 0u;
+    uint32_t   rt_ctl_agree = 0u;
+    uint32_t   rt_cntv_ctl_cpu = 0u;
 
     if( !super::start( provider )) return( false );
     if( provider == 0) return( false );
@@ -1212,6 +1383,145 @@ MSM8974Timer::start( IOService * provider )
         }
     }
 
+    /* ---- 501: the frame's second view, and the frame's second route to the same counters ---------
+     *
+     * Two measurements, both **read-only**, and that is the step's whole construction: the previous
+     * step's risk was a write to a device nothing had written, and this one's is a wrong *offset*,
+     * which no write can create and no argument can settle. Nothing below stores to either view or to
+     * the coprocessor's control words - `tools/check_driver_catalogue.py`'s claim 17 refuses a build
+     * in which this block writes, because "a step that only reads cannot disturb the OS" is exactly
+     * the kind of claim that has to be structural rather than intended.
+     *
+     * 1. **The second view.** The frame's `reg` is two regions (see `MSM8974_TIMER_VIEW2_ENTRY`), the
+     *    device's kernel maps only the first, and this project has never read the second. If it is a
+     *    second window onto the same frame, its `FREQ` must read the same word and its counters must
+     *    read the *same count* as view 1's within the time the two reads take; if it is another
+     *    device, the difference is not a few ticks but the whole counter. The comparison is therefore
+     *    `|Δ| <= slack` with the slack measured here, on this machine, around a view-2 read - and the
+     *    high words are compared exactly, because a 32-bit difference means nothing if the two
+     *    readings are a 2^32 boundary apart. **The run answers the question and the answer is no**:
+     *    the view maps (`_v2_phys` 0xf9022000, `_v2_va` 0xc218d000, `_v2_len` 0x1000) and reads
+     *    **zero everywhere** - `_v2_freq` 0, `_v2_cntv_lo` 0, `_v2_cntp_lo` 0, `_v2_tval` 0 - so
+     *    `_v2_cntv_d` is the frame's own counter (`0x06ed5bca`) and both `_v2_*_ok` are 0. The second
+     *    view the tree has carried since 492 is not a window onto this frame; it reads like the
+     *    container at 0xf9020000 that 494 read a zero from, and the binding calls it *optional*.
+     * 2. **The two routes to one counter.** `CNTPCT`, `CNTVCT` and `CNTV_TVAL` are read through the
+     *    frame and through the coprocessor, adjacently, and published with their difference. The
+     *    device's kernel has both routes and takes one by `has_cp15` (`arch_timer.c:607`), so on this
+     *    machine - which has both - the memory route it does not choose is never read at all. This is
+     *    that missing comparison, and it is the strongest reading of the frame's offsets available
+     *    here: an offset that is off by one register answers as a difference of ~10^7 ticks.
+     *    **The run's answer is two agreements and one disagreement.** `_rt_cntp_lo_fr` 0x06ed5c6b
+     *    against `_rt_cntp_lo_cpu` 0x06ed5c72 is 7 ticks, and `_rt_cntv_lo_fr` 0x06ed5c1f against
+     *    `_rt_cntv_lo_cpu` 0x06ed5c66 is 71, both inside `_rt_slack` 0x68 (104 ticks, measured here) -
+     *    so `_rt_cntp_ok` and `_rt_cntv_ok` are 1, and the frame's two counters are the CPU's own. The
+     *    control words are equal exactly (`_rt_ctl_fr` 2, `_rt_ctl_cpu` 2, `_rt_ctl_agree` 1), which is
+     *    the coprocessor's `CNTP_CTL` and the frame's `0x02C` reading the same register - the offset
+     *    the whole driver is built on, measured rather than argued. The virtual countdown is the
+     *    exception and the finding (see the block above): `_rt_tval_ok` 0.
+     *    The *control* word is compared exactly rather than with a slack, because a control word does
+     *    not run: at this point nothing has armed the physical timer (`_arm_ctl_before` is read later
+     *    and must equal `_rt_ctl_fr`), and `CNTV_CTL` belongs to the kernel's own decrementer, which is
+     *    published for the reader rather than compared with anything here. `_rt_cntv_ctl_cpu` reads
+     *    1 - `ENABLE` with the mask *off* - which is the state `entry_timebase.c` leaves XNU's
+     *    decrementer in when its arming succeeded, so the reading is also the independent evidence
+     *    that this step did not disturb the OS's timer.
+     */
+    if( devmem != 0 && devcount > MSM8974_TIMER_VIEW2_ENTRY) {
+        OSObject * ventry = devmem->getObject( MSM8974_TIMER_VIEW2_ENTRY );
+        v2range = OSDynamicCast( IOMemoryDescriptor, ventry );
+        if( OSDynamicCast( IODeviceMemory, ventry ) != 0)      v2_objkind = 1u;
+        else if( v2range != 0)                                 v2_objkind = 2u;
+        if( v2range != 0) {
+            IOByteCount vlen = 0u;
+            IOPhysicalAddress vphys = v2range->getPhysicalSegment( 0u, &vlen, kIOMemoryMapperNone );
+            v2_phys = (uint32_t) vphys;
+            v2_len  = (uint32_t) vlen;
+            v2map = v2range->map( kIOMapAnywhere );
+            if( v2map != 0) {
+                uint64_t vt0, vt1;
+                v2_va = (uint32_t)(uintptr_t) v2map->getVirtualAddress();
+                if( v2_va != 0u) {
+                    vt0 = mach_absolute_time();
+                    (void) *(volatile uint32_t *)(uintptr_t)( v2_va + MSM8974_FRAME_CNTV_LOW_OFF );
+                    vt1 = mach_absolute_time();
+                    v2_slack = 4u * (uint32_t)( vt1 - vt0 );
+                    v2_freq = *(volatile uint32_t *)(uintptr_t)( v2_va + MSM8974_FRAME_FREQ_OFF );
+                    v2_freq_agree = ( v2_freq != 0u && v2_freq == frame_freq ) ? 1u : 0u;
+                    v2_tval = *(volatile uint32_t *)(uintptr_t)( v2_va + MSM8974_FRAME_CNTV_TVAL_OFF );
+                    if( frame_va != 0u) {
+                        fr_cntv_lo = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_LOW_OFF );
+                        v2_cntv_lo = *(volatile uint32_t *)(uintptr_t)( v2_va + MSM8974_FRAME_CNTV_LOW_OFF );
+                        fr_cntp_lo = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_LOW_OFF );
+                        v2_cntp_lo = *(volatile uint32_t *)(uintptr_t)( v2_va + MSM8974_FRAME_CNTP_LOW_OFF );
+                        fr_cntv_hi = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_HIGH_OFF );
+                        v2_cntv_hi = *(volatile uint32_t *)(uintptr_t)( v2_va + MSM8974_FRAME_CNTV_HIGH_OFF );
+                        fr_cntp_hi = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_HIGH_OFF );
+                        v2_cntp_hi = *(volatile uint32_t *)(uintptr_t)( v2_va + MSM8974_FRAME_CNTP_HIGH_OFF );
+                        v2_cntv_d = msm8974_delta_abs( v2_cntv_lo, fr_cntv_lo );
+                        v2_cntv_ok = ( v2_cntv_hi == fr_cntv_hi && v2_cntv_d <= v2_slack ) ? 1u : 0u;
+                        v2_cntp_d = msm8974_delta_abs( v2_cntp_lo, fr_cntp_lo );
+                        v2_cntp_ok = ( v2_cntp_hi == fr_cntp_hi && v2_cntp_d <= v2_slack ) ? 1u : 0u;
+                    }
+                }
+            }
+        }
+    }
+
+    if( frame_va != 0u) {
+        uint64_t rt0, rt1;
+        uint64_t rt_cntv_ct, rt_cntp_ct;
+        uint32_t rt_hi_again;
+
+        /* One coprocessor read's cost, in the counter's own ticks, for the same reason as
+         * `_frame_slack` and `_v2_slack`: the tolerance is measured rather than chosen. */
+        rt0 = mach_absolute_time();
+        (void) msm8974_cpu_cntvct();
+        rt1 = mach_absolute_time();
+        rt_slack = 4u * (uint32_t)( rt1 - rt0 );
+
+        /* The counters, frame then coprocessor, adjacent so that the difference is the reads and not
+         * the run. The frame's own high word is read twice and the pair is taken only when they agree
+         * - the loop `counter_get_cntvct_mem` (`arch_timer.c:318`) uses, because a 64-bit counter read
+         * through two 32-bit windows can tear. The coprocessor's `mrrc` is one instruction and cannot. */
+        do {
+            rt_cntv_hi_fr = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_HIGH_OFF );
+            rt_cntv_lo_fr = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_LOW_OFF );
+            rt_hi_again   = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_HIGH_OFF );
+        } while( rt_cntv_hi_fr != rt_hi_again );
+        rt_cntv_ct     = msm8974_cpu_cntvct();
+        rt_cntv_lo_cpu = (uint32_t) rt_cntv_ct;
+        rt_cntv_hi_cpu = (uint32_t)( rt_cntv_ct >> 32 );
+        rt_cntv_d = msm8974_delta_abs( rt_cntv_lo_cpu, rt_cntv_lo_fr );
+        rt_cntv_ok = ( rt_cntv_hi_cpu == rt_cntv_hi_fr && rt_cntv_d <= rt_slack ) ? 1u : 0u;
+
+        do {
+            rt_cntp_hi_fr = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_HIGH_OFF );
+            rt_cntp_lo_fr = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_LOW_OFF );
+            rt_hi_again   = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_HIGH_OFF );
+        } while( rt_cntp_hi_fr != rt_hi_again );
+        rt_cntp_ct     = msm8974_cpu_cntpct();
+        rt_cntp_lo_cpu = (uint32_t) rt_cntp_ct;
+        rt_cntp_hi_cpu = (uint32_t)( rt_cntp_ct >> 32 );
+        rt_cntp_d = msm8974_delta_abs( rt_cntp_lo_cpu, rt_cntp_lo_fr );
+        rt_cntp_ok = ( rt_cntp_hi_cpu == rt_cntp_hi_fr && rt_cntp_d <= rt_slack ) ? 1u : 0u;
+
+        /* The virtual countdown: the frame's `QTIMER_CNTV_TVAL_REG` (`arch_timer.c:67`) against the
+         * coprocessor's `c14, c3, 0`. `CNTV_TVAL` is XNU's own decrementer - this image's
+         * `entry_timebase.c` writes it - so this is a reading of a register the kernel is using, and
+         * it is read and never written. */
+        rt_tval_fr  = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_TVAL_OFF );
+        rt_tval_cpu = msm8974_cpu_cntv_tval();
+        rt_tval_d   = msm8974_delta_abs( rt_tval_cpu, rt_tval_fr );
+        rt_tval_ok  = ( rt_tval_d <= rt_slack ) ? 1u : 0u;
+
+        /* And the control words, which do not run, so these two comparisons are exact. */
+        rt_ctl_fr     = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CTRL_OFF );
+        rt_ctl_cpu    = msm8974_cpu_cntp_ctl();
+        rt_ctl_agree  = ( rt_ctl_fr == rt_ctl_cpu ) ? 1u : 0u;
+        rt_cntv_ctl_cpu = msm8974_cpu_cntv_ctl();
+    }
+
     entry_live_write( "xnu_live_timerdrv_line_cells",  dt_cells );
     entry_live_write( "xnu_live_timerdrv_line_type",   dt_type );
     entry_live_write( "xnu_live_timerdrv_line_num",    dt_num );
@@ -1248,6 +1558,54 @@ MSM8974Timer::start( IOService * provider )
     entry_live_write( "xnu_live_timerdrv_frame_ctl_en", frame_ctl_en );
     entry_live_write( "xnu_live_timerdrv_frame_ctl_mask", frame_ctl_mask );
     entry_live_write( "xnu_live_timerdrv_frame_ctl_stat", frame_ctl_stat );
+
+    /* 501. Every reading of the second view and of the two routes, and then the comparisons. The
+     * five outcome bits are published whatever the device did, and the keys that say *why* are
+     * `_v2_phys`/`_v2_objkind`/`_v2_va` on one side and `_rt_*_lo_fr` on the other: a zero outcome
+     * with `_v2_va` 0 is "the second view never mapped", and a zero outcome with `_v2_va` non-zero is
+     * "it mapped and the two readings disagree" - which is the whole point of publishing both. */
+    entry_live_write( "xnu_live_timerdrv_v2_objkind",    v2_objkind );
+    entry_live_write( "xnu_live_timerdrv_v2_phys",       v2_phys );
+    entry_live_write( "xnu_live_timerdrv_v2_len",        v2_len );
+    entry_live_write( "xnu_live_timerdrv_v2_map",        (uint32_t)(uintptr_t) v2map );
+    entry_live_write( "xnu_live_timerdrv_v2_va",         v2_va );
+    entry_live_write( "xnu_live_timerdrv_v2_freq",       v2_freq );
+    entry_live_write( "xnu_live_timerdrv_v2_freq_agree", v2_freq_agree );
+    entry_live_write( "xnu_live_timerdrv_v2_slack",      v2_slack );
+    entry_live_write( "xnu_live_timerdrv_v2_cntv_lo",    v2_cntv_lo );
+    entry_live_write( "xnu_live_timerdrv_v2_cntv_hi",    v2_cntv_hi );
+    entry_live_write( "xnu_live_timerdrv_v2_cntv_d",     v2_cntv_d );
+    entry_live_write( "xnu_live_timerdrv_v2_cntv_ok",    v2_cntv_ok );
+    entry_live_write( "xnu_live_timerdrv_v2_cntp_lo",    v2_cntp_lo );
+    entry_live_write( "xnu_live_timerdrv_v2_cntp_hi",    v2_cntp_hi );
+    entry_live_write( "xnu_live_timerdrv_v2_cntp_d",     v2_cntp_d );
+    entry_live_write( "xnu_live_timerdrv_v2_cntp_ok",    v2_cntp_ok );
+    entry_live_write( "xnu_live_timerdrv_v2_tval",       v2_tval );
+    entry_live_write( "xnu_live_timerdrv_fr_cntv_lo",    fr_cntv_lo );
+    entry_live_write( "xnu_live_timerdrv_fr_cntv_hi",    fr_cntv_hi );
+    entry_live_write( "xnu_live_timerdrv_fr_cntp_lo",    fr_cntp_lo );
+    entry_live_write( "xnu_live_timerdrv_fr_cntp_hi",    fr_cntp_hi );
+    entry_live_write( "xnu_live_timerdrv_rt_slack",      rt_slack );
+    entry_live_write( "xnu_live_timerdrv_rt_cntv_lo_fr",  rt_cntv_lo_fr );
+    entry_live_write( "xnu_live_timerdrv_rt_cntv_hi_fr",  rt_cntv_hi_fr );
+    entry_live_write( "xnu_live_timerdrv_rt_cntv_lo_cpu", rt_cntv_lo_cpu );
+    entry_live_write( "xnu_live_timerdrv_rt_cntv_hi_cpu", rt_cntv_hi_cpu );
+    entry_live_write( "xnu_live_timerdrv_rt_cntv_d",      rt_cntv_d );
+    entry_live_write( "xnu_live_timerdrv_rt_cntv_ok",     rt_cntv_ok );
+    entry_live_write( "xnu_live_timerdrv_rt_cntp_lo_fr",  rt_cntp_lo_fr );
+    entry_live_write( "xnu_live_timerdrv_rt_cntp_hi_fr",  rt_cntp_hi_fr );
+    entry_live_write( "xnu_live_timerdrv_rt_cntp_lo_cpu", rt_cntp_lo_cpu );
+    entry_live_write( "xnu_live_timerdrv_rt_cntp_hi_cpu", rt_cntp_hi_cpu );
+    entry_live_write( "xnu_live_timerdrv_rt_cntp_d",      rt_cntp_d );
+    entry_live_write( "xnu_live_timerdrv_rt_cntp_ok",     rt_cntp_ok );
+    entry_live_write( "xnu_live_timerdrv_rt_tval_fr",     rt_tval_fr );
+    entry_live_write( "xnu_live_timerdrv_rt_tval_cpu",    rt_tval_cpu );
+    entry_live_write( "xnu_live_timerdrv_rt_tval_d",      rt_tval_d );
+    entry_live_write( "xnu_live_timerdrv_rt_tval_ok",     rt_tval_ok );
+    entry_live_write( "xnu_live_timerdrv_rt_ctl_fr",      rt_ctl_fr );
+    entry_live_write( "xnu_live_timerdrv_rt_ctl_cpu",     rt_ctl_cpu );
+    entry_live_write( "xnu_live_timerdrv_rt_ctl_agree",   rt_ctl_agree );
+    entry_live_write( "xnu_live_timerdrv_rt_cntv_ctl_cpu", rt_cntv_ctl_cpu );
 
     /* The handler's own keys are published as zeroes *before* the registration, for 495's reason: a
      * key that only exists after the handler runs would make "the line never fired" and "the driver

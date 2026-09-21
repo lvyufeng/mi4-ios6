@@ -2653,10 +2653,227 @@ def claim_driver_arming(facts, failures, notes):
                         "any run")
 
 
+def claim_driver_routes(facts, failures, notes):
+    """17. A driver that reads a device reads every way the device can be read, and holds them together.
+
+    500 proved the frame's first view against itself - the rate against `mach_absolute_time`, the control
+    word's three bits - and against nothing outside it. The device has more than one way to be read, and
+    the *evidence* for our reading of it has had the same shape all along: the device's own kernel holds
+    **two routes to every counter** - `counter_get_cntpct_mem`/`_cp15` and
+    `counter_get_cntvct_mem`/`_cp15` (`arch/arm/kernel/arch_timer.c:297`, `:310`, `:318`, `:331`) - and
+    chooses one of the two at boot by `has_cp15` (`:607`), so on the machine that has both the loser is
+    never read again by anything. This claim is about the comparison the kernel can make and does not,
+    plus the frame's *second* view, which no boot in this project has ever read.
+
+    Each clause is a way a step could read like a proof that the offsets are right while being a
+    restatement of them:
+
+      * **the second view is the entry the tree's second `reg` region names**, and it is not the frame.
+        The frame's `reg` is two regions (`msm8974.dtsi:161-167`, and the binding at
+        `arch_timer.txt:43-44` calls them "the first and second view base addresses"), our tree flattens
+        them onto the matched node, and the device's kernel maps only the first. A second view read at
+        the frame's own entry would be the *same* device read twice, which is the one comparison that
+        cannot fail - so the index is a name in the driver's own defines and the two indices are checked
+        to be different, exactly as claim 16 holds the arming's target to a name rather than a number.
+      * **both views are compared, and the comparison is bounded by a slack measured on this machine.**
+        A counter read twice through two windows differs by however long the reads took, so `==` is a
+        claim about how fast the CPU is; `_frame_slack`'s rule (498) is that the tolerance is measured
+        by the code that uses it, and the same rule is checked here for both of this step's slacks.
+      * **the high words are compared exactly.** A 32-bit difference says nothing if the two readings
+        are a `2^32` boundary apart, and the frame's own reader in the device's kernel re-reads the high
+        word for that reason (`:318`'s loop) - so a claim that only compared low words would accept a
+        comparison that cannot fail for the right reason.
+      * **every counter is read both ways, and the coprocessor side is the architected encoding.**
+        `mrrc p15, 0`/`mrrc p15, 1` for the two 64-bit counters and `c14, c3, 0` for the virtual
+        countdown - the encodings the device's kernel and this image's own `entry_timebase.c` use. A
+        "comparison" whose two sides were both the frame would be one reading published twice.
+      * **the frame side of each comparison is the same offset symbol the certified block uses.** The
+        offsets have one definition in this file and `tools/check_timer_line.py` holds them against the
+        device's kernel line by line; a second spelling of `0x038` in the comparison would be this
+        project's oldest defect class inside the code written to expose it.
+      * **the outcome of each comparison is published with what it was made of** - both low words, both
+        high words, the difference, and the bit - because a bit alone cannot say whether the two
+        readings disagreed or the block never ran, and the inputs are what a later step would need to
+        re-derive it (this file's standing rule: the keys that make an outcome readable are part of the
+        outcome).
+      * **and the block writes nothing.** The step's whole safety argument is that it cannot disturb the
+        OS, because every register it touches is read and never written - the virtual countdown it reads
+        is XNU's own decrementer. An argument of that shape has to be structural: the region between the
+        second view's mapping and the last coprocessor read is searched for a *store* through either
+        mapped base, and a build with one is refused.
+
+    **The run answered both questions, and neither answer is one this claim could have made.** The frame's
+    second `reg` region maps and reads **zero everywhere** (`_v2_freq` 0, `_v2_cntv_lo` 0, `_v2_cntp_lo`
+    0), so it is not a window onto this frame - the comparison's `_v2_*_ok` of 0 is a fact about the
+    machine and not a defect in the driver, and the binding's word for that region is *optional*. And the
+    coprocessor agrees with the frame on both counters (`_rt_cntp_d` 7, `_rt_cntv_d` 71, inside a measured
+    `_rt_slack` of 104) and on the control word exactly (`_rt_ctl_agree` 1), while the **virtual countdown
+    disagrees** (`_rt_tval_fr` 0xf912a3cc against `_rt_tval_cpu` 0x0002d8cb, `_rt_tval_ok` 0) - which is
+    the one offset the device's kernel declares and never reads. So the clause above that reads a
+    comparison as *nothing but the presence of a comparison* would have been satisfied by a step that
+    never looked at the answer: what this claim insists on is that both readings, their difference and
+    the verdict are all in the record, so that a disagreement of 0x06f034ff ticks cannot be mistaken for
+    a block that never ran. **A claim can require that a question was asked; it cannot require the answer
+    it wants** - and the two answers this one got are the reason the step exists.
+    """
+    subjects = 0
+    for d in facts["drivers"]:
+        source = d["source"]
+        # The two architected encodings and the timebase are also *quoted* in this file's comments -
+        # the 501 block names the device's kernel's own `mrrc p15, 1` in prose a few lines above the
+        # code that uses it - so the searches below read the source with its comments removed, or a
+        # file that had lost the real encoding would still answer (a needle that is a claim about the
+        # file's bytes, in its fourth shape: 269/272/297/496/500's family).
+        code = strip_comments(source)
+        defines_here = driver_defines(source)
+
+        if not key_writes(source, "frame_va") or not key_writes(source, "frame_freq"):
+            notes.append("`%s` maps no device that reports a frequency: the two-route question this "
+                         "claim asks is about a counter, and this file's device is not one" % d["file"])
+            continue
+        subjects += 1
+
+        # -- the second view is the tree's second region, named once ------------------------------------
+        if not key_writes(source, "v2_va"):
+            failures.append("`%s` reads a frame with two `reg` regions and publishes no `_v2_va`: the "
+                            "second view is a reading this project has never taken, and a claim about "
+                            "the frame's offsets that never leaves the first view is the frame held "
+                            "against itself" % d["file"])
+            continue
+        entries = re.findall(r"getObject\(\s*([A-Za-z_]\w*)\s*\)", source)
+        view2 = "MSM8974_TIMER_VIEW2_ENTRY"
+        if view2 not in entries:
+            failures.append("`%s` maps a second view without naming `%s` as its `reg` entry: the index "
+                            "would be a number in the call, which is one decision written twice with "
+                            "nothing comparing the two" % (d["file"], view2))
+        elif defines_here.get(view2) is None:
+            failures.append("`%s` names `%s` and its own file does not define it as an integer: the "
+                            "entry the second view is read from would not be in the file that reads it"
+                            % (d["file"], view2))
+        elif defines_here.get(view2) == defines_here.get("MSM8974_TIMER_FRAME_ENTRY"):
+            failures.append("`%s` reads its second view from `%s` = %d, the *frame's* own `reg` entry: "
+                            "that is the same device read twice, and the comparison it feeds is one "
+                            "that cannot fail"
+                            % (d["file"], view2, defines_here[view2]))
+        else:
+            notes.append("`%s` reads the frame's second view from `%s` = %d, one region past the frame's"
+                         % (d["file"], view2, defines_here[view2]))
+
+        # -- the two views are compared, with a measured slack and an exact high word -------------------
+        for suffix, what in (("v2_cntv_ok", "the virtual counter"),
+                             ("v2_cntp_ok", "the physical counter"),
+                             ("v2_cntv_d", "the virtual counter's difference"),
+                             ("v2_cntp_d", "the physical counter's difference")):
+            if not key_writes(source, suffix):
+                failures.append("`%s` publishes no `_%s` (%s): the two views would be read and not "
+                                "compared, which is the state this step exists to leave"
+                                % (d["file"], suffix, what))
+        for base in ("v2_slack", "rt_slack"):
+            writes = key_writes(source, base)
+            if not writes:
+                failures.append("`%s` publishes no `_%s`: the tolerance it compares against would be a "
+                                "number no reading of the artifact can recover" % (d["file"], base))
+                continue
+            literal = [v for v, _at in writes if re.fullmatch(r"0*[0-9]+u?", v or "")]
+            if literal:
+                failures.append("`%s` publishes `_%s` as the constant `%s`: a slack chosen rather than "
+                                "measured is a claim about how fast this CPU is, and the two readings "
+                                "it bounds then differ by exactly however much the sign of that claim "
+                                "was wrong" % (d["file"], base, literal[0]))
+        if not re.search(r"mach_absolute_time\(\)", code):
+            failures.append("`%s` slacks off a counter with no timebase behind it: the only thing that "
+                            "can say what a counter read costs on this machine is this machine's clock"
+                            % d["file"])
+        for lo, hi in (("v2_cntv_lo", "v2_cntv_hi"), ("v2_cntp_lo", "v2_cntp_hi"),
+                       ("rt_cntv_lo_fr", "rt_cntv_hi_fr"), ("rt_cntp_lo_fr", "rt_cntp_hi_fr"),
+                       ("rt_cntv_lo_cpu", "rt_cntv_hi_cpu"), ("rt_cntp_lo_cpu", "rt_cntp_hi_cpu")):
+            if not key_writes(source, lo) or not key_writes(source, hi):
+                failures.append("`%s` publishes no `_%s`/`_%s` pair: a 32-bit difference between two "
+                                "readings of a 64-bit counter means nothing unless the high words are in "
+                                "the record too" % (d["file"], lo, hi))
+        if not re.search(r"\b\w*_hi\w*\s*==\s*\w*_hi\w*", source):
+            failures.append("`%s` compares two 64-bit counters without holding their high words against "
+                            "each other: the same comparison across a `2^32` boundary would pass"
+                            % d["file"])
+
+        # -- both routes, the architected encodings, and one definition per offset -----------------------
+        for enc, what in ((r"mrrc\s+p15\s*,\s*0", "`CNTPCT`'s `mrrc p15, 0`"),
+                          (r"mrrc\s+p15\s*,\s*1", "`CNTVCT`'s `mrrc p15, 1`"),
+                          (r"mrc\s+p15\s*,\s*0\s*,\s*%0\s*,\s*c14\s*,\s*c3\s*,\s*0",
+                           "`CNTV_TVAL`'s `c14, c3, 0`")):
+            if not re.search(enc, code):
+                failures.append("`%s` never reads %s: the frame's counters are reachable that way on "
+                                "this machine, and the device's own kernel reads them both ways in one "
+                                "file - a driver that reads one route is holding the frame against "
+                                "itself" % (d["file"], what))
+        for suffix in ("rt_cntv_ok", "rt_cntp_ok", "rt_tval_ok", "rt_ctl_agree"):
+            if not key_writes(source, suffix):
+                failures.append("`%s` publishes no `_%s`: the two readings of one value would be in the "
+                                "record with no statement about whether they agree"
+                                % (d["file"], suffix))
+        # The frame side's offsets have to be the symbols the certified block defines, never a literal:
+        # `tools/check_timer_line.py` holds those symbols against the device's kernel, and a second
+        # spelling in the comparison would be outside that check.
+        for m in re.finditer(r"\(\s*uintptr_t\s*\)\s*\(\s*\w+\s*\+\s*"
+                             r"(0[xX][0-9a-fA-F]+|\d+)[uU]?\s*\)", code):
+            failures.append("`%s` addresses a register at the literal `%s` instead of an offset symbol: "
+                            "the device's kernel's line numbers are held against the *symbols* (claim 1 "
+                            "of `check_timer_line.py`), and a literal here is a reading that check "
+                            "cannot see" % (d["file"], m.group(1)))
+        if not re.search(r'\b(?:rt_tval_fr|rt_tval_cpu)\b', source):
+            failures.append("`%s` compares no virtual countdown: `QTIMER_CNTV_TVAL_REG` (`arch_timer.c:67`) "
+                            "is the one offset the device's kernel declares and never reads, and the "
+                            "coprocessor route to it is what this image's own decrementer uses"
+                            % d["file"])
+        else:
+            # Both sides of that one comparison, and each side's *source* rather than its name: the
+            # offset symbol on the frame's side (so the certified table stays the one definition) and
+            # the coprocessor accessor on the other. A comparison whose two sides read the same
+            # register is the shape this whole claim is about.
+            tval_expr = value_expression(source, "rt_tval_fr")
+            if tval_expr is None or "CNTV_TVAL_OFF" not in tval_expr:
+                failures.append("`%s`'s frame-side reading of the virtual countdown is not from "
+                                "`MSM8974_FRAME_CNTV_TVAL_OFF` (`%s`): the comparison would be between "
+                                "two different countdowns, and the offset that makes it a comparison "
+                                "would be outside `check_timer_line.py`'s table" % (d["file"], tval_expr))
+            if not re.search(r"\b\w*cpu_cntv_tval\s*\(", source):
+                failures.append("`%s` holds the frame's virtual countdown against nothing from the "
+                                "coprocessor: `c14, c3, 0` is the other route to that register and the "
+                                "one `entry_timebase.c` writes for XNU's own decrementer, so a driver "
+                                "that reads only the frame is holding the frame against itself"
+                                % d["file"])
+
+        # -- the block writes nothing --------------------------------------------------------------------
+        # The region is the two blocks and only them: it begins at the call that takes the *second
+        # view's* entry and ends at the last coprocessor control read. The handler's own stores to the
+        # frame (500) are before it and the arming block is after it, and a region bounded any wider
+        # would refuse the driver for doing the thing the previous step measured - which is how the
+        # first version of this clause failed this file, by starting at the *define* whose comment
+        # names the entry and so swallowing the handler.
+        pick = re.search(r"getObject\(\s*%s\s*\)" % view2, source)
+        ctl_call_at = source.rfind("msm8974_cpu_cntv_ctl(")
+        if pick and ctl_call_at > pick.start():
+            region = source[pick.start():ctl_call_at]
+            stores = re.findall(r"\*\s*\(\s*volatile\s+uint32_t\s*\*\s*\)\s*\(\s*uintptr_t\s*\)\s*"
+                                r"\(\s*(?:frame_va|v2_va|\w*_va)\s*\+[^;]*?\)\s*=", region)
+            if stores:
+                failures.append("`%s` writes to a mapped device in the region that reads the second view "
+                                "and the second route (%d store(s)): the step's safety argument is that "
+                                "every register it touches is read, and the virtual countdown it reads is "
+                                "the kernel's own decrementer - which is exactly the argument that cannot "
+                                "be left to intent" % (d["file"], len(stores)))
+            else:
+                notes.append("`%s`'s second-view and two-route region stores to nothing" % d["file"])
+
+    if subjects == 0:
+        failures.append("no driver in `PLATFORM_SOURCES` reads a device that reports a frequency: the "
+                        "two-route comparison this step is for would not exist in any run")
+
+
 CLAIMS = (claim_shape, claim_classes, claim_provider, claim_names, claim_root_names,
           claim_property_kinds, claim_bundle_id, claim_cell_counts, claim_resolution_read,
           claim_mechanism, claim_entry_class, claim_device_mapping, claim_device_value,
-          claim_timer_callback, claim_driver_line, claim_driver_arming)
+          claim_timer_callback, claim_driver_line, claim_driver_arming, claim_driver_routes)
 
 
 def compare(facts, mutate=None):
@@ -3109,6 +3326,57 @@ def mutate_facts(facts, mutate):
         facts = _bump_driver(facts, "MSM8974Timer",
                              '    entry_live_write( "xnu_live_timerdrv_isr_rearmed", '
                              'g_timer_isr_rearmed );\n', "")
+
+    # -- 501's mutations: the frame's second view, and the frame's second route to the same counters.
+    # Eleven ways the step could read like a comparison of two readings while being one reading
+    # published twice, or a comparison whose bound is a claim rather than a measurement - and the last
+    # one is the read-only property the step's safety rests on.
+    elif mutate == "the_second_view_is_the_frame":
+        facts = _bump_driver(facts, "MSM8974Timer", "#define MSM8974_TIMER_VIEW2_ENTRY  2u",
+                             "#define MSM8974_TIMER_VIEW2_ENTRY  1u")
+    elif mutate == "the_second_view_is_a_number_in_the_call":
+        facts = _bump_driver(facts, "MSM8974Timer", "getObject( MSM8974_TIMER_VIEW2_ENTRY )",
+                             "getObject( 2u )")
+    elif mutate == "the_second_view_has_no_name":
+        facts = _bump_driver(facts, "MSM8974Timer", "#define MSM8974_TIMER_VIEW2_ENTRY  2u\n", "")
+    elif mutate == "the_views_are_not_compared":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             '    entry_live_write( "xnu_live_timerdrv_v2_cntv_ok",    v2_cntv_ok );\n',
+                             "")
+    elif mutate == "the_view_slack_is_a_literal":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             '    entry_live_write( "xnu_live_timerdrv_v2_slack",      v2_slack );',
+                             '    entry_live_write( "xnu_live_timerdrv_v2_slack",      64u );')
+    elif mutate == "the_high_words_are_not_published":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             '    entry_live_write( "xnu_live_timerdrv_v2_cntv_hi",    v2_cntv_hi );\n',
+                             "")
+    elif mutate == "the_coprocessor_read_is_not_the_architected_one":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             '__asm__ volatile ("mrrc p15, 1, %0, %1, c14" : "=r"(lo), "=r"(hi));',
+                             'lo = 0u; hi = 0u;')
+    elif mutate == "the_virtual_countdown_is_read_from_another_register":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "        rt_tval_fr  = *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CNTV_TVAL_OFF );",
+                             "        rt_tval_fr  = *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CNTP_TVAL_OFF );")
+    elif mutate == "the_route_offsets_are_written_again":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "            rt_cntp_lo_fr = *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CNTP_LOW_OFF );",
+                             "            rt_cntp_lo_fr = *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "0x000u );")
+    elif mutate == "the_route_words_are_not_published":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             '    entry_live_write( "xnu_live_timerdrv_rt_cntv_lo_cpu", rt_cntv_lo_cpu );\n',
+                             "")
+    elif mutate == "the_second_view_is_written_to":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "                        v2_cntv_lo = *(volatile uint32_t *)(uintptr_t)"
+                             "( v2_va + MSM8974_FRAME_CNTV_LOW_OFF );",
+                             "                        *(volatile uint32_t *)(uintptr_t)( v2_va + "
+                             "MSM8974_FRAME_CNTV_LOW_OFF ) = v2_cntv_lo;")
     else:
         raise AssertionError("unknown mutation %s" % mutate)
     return facts
@@ -3220,6 +3488,20 @@ MUTATIONS = (
     "the_handler_never_masks",
     "the_handler_re_arms_with_a_zero_deadline",
     "the_handler_publishes_no_rearm_count",
+    # 501: the frame's second view and its second route to the same counters. Eleven ways the step could
+    # read like a comparison of two readings while being one reading published twice, a comparison whose
+    # bound is a claim, or a comparison with a write in it.
+    "the_second_view_is_the_frame",
+    "the_second_view_is_a_number_in_the_call",
+    "the_second_view_has_no_name",
+    "the_views_are_not_compared",
+    "the_view_slack_is_a_literal",
+    "the_high_words_are_not_published",
+    "the_coprocessor_read_is_not_the_architected_one",
+    "the_virtual_countdown_is_read_from_another_register",
+    "the_route_offsets_are_written_again",
+    "the_route_words_are_not_published",
+    "the_second_view_is_written_to",
 )
 
 
