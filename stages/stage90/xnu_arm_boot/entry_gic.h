@@ -39,6 +39,23 @@
 #define STAGE90_GICD_ITARGETSR0 0x800u   /* banked for PPIs: per-CPU, and 0 means "this CPU"     */
 
 /*
+ * **The register a *driver* raises an interrupt with, and 496's writing half.** `GICD_SGIR` is the
+ * GICv2 software-generated-interrupt register: a write asks a CPU to take one of the sixteen SGIs,
+ * with the intid in bits `[3:0]` and the target filter in `[25:24]`. It is named here rather than
+ * only in the file that writes it because the payload owns this number: `gic.c`'s
+ * `gic_sgi_selftest` pends SGI 0 to itself exactly this way and counted the delivery
+ * (`gic_sgi_sgi0_count = 1`, `gic_sgi_last_iar = 0`, `gic_sgi_spurious_count = 0` in every run), so
+ * a driver that writes it is the second user of a mechanism this project has already measured - and
+ * `tools/check_gic_routing.py` refuses the link if the two spellings disagree.
+ */
+#define STAGE90_GICD_SGIR       0xf00u
+
+/* `GICD_SGIR`'s target filter for "only the requesting CPU" (the architecture's `0b10`), and the
+ * SGI the payload's own self-test used - both `gic.c`'s (`GICD_SGIR_TARGET_SELF`, `GIC_SGI0_ID`). */
+#define STAGE90_GICD_SGIR_TARGET_SELF (2u << 24)
+#define STAGE90_GIC_SGI0_ID     0u
+
+/*
  * `GICD_ICFGR<n>`, one two-bit field per intid, and **the one offset in this header with no second
  * source in this repository**: `gic.c` does not name it and neither does 143's probe, so unlike every
  * other number here it cannot be compared against the payload. Its source is the architecture
@@ -218,5 +235,32 @@ void entry_irq_handler(void *target, void *refCon, void *nub, int source);
  * become an interrupt**, which is the value that decides whether the caller may stop masking. A 0
  * means the machine is exactly as 482 left it. */
 uint32_t entry_irq_arm(void);
+
+/*
+ * **The client registry: a driver owning a line of this image's dispatcher (496).**
+ *
+ * Until 496 the dispatcher's case for "some other line" was a stop - the shape that cannot loop, and
+ * the right one while nothing in this image enabled a second line. 496 makes one line available to a
+ * driver, and the mechanism is a *registration* rather than a second dispatcher: the driver hands
+ * over an intid and a function, `entry_irq_register_client` files it, and `entry_irq_handler` calls
+ * that function after it has acknowledged the line. Everything else about the dispatcher is
+ * unchanged, including the stop: an intid with no client is still recorded, acknowledged and ended,
+ * which is why the run for a driver that pends an *unregistered* line stops at the same place every
+ * earlier run would have.
+ *
+ * **The handler is a `uint32_t` and not a function-pointer type, on purpose.** This is the one ABI
+ * between a C++ driver and this C image, the driver cannot include this header (it declares its own
+ * `extern "C"` prototypes, as it does for `entry_live_write`), and a function-pointer parameter
+ * spelled in two files is two definitions of one signature with nothing comparing them. Three
+ * `uint32_t`s - an intid, an address, an address - are checkable character by character, and both
+ * sides publish the number they hold so the log carries the same value twice.
+ *
+ * `refCon` is passed back verbatim, and the call is `handler( refCon, intid )`.
+ */
+#define STAGE90_IRQ_CLIENTS     4u
+#define STAGE90_IRQ_CLIENT_CAP  64u
+
+uint32_t entry_irq_register_client(uint32_t intid, uint32_t handler, uint32_t refCon);
+uint32_t entry_irq_unregister_client(uint32_t intid);
 
 #endif /* STAGE90_ENTRY_GIC_H */

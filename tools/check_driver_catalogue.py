@@ -125,6 +125,27 @@ KERNEL_CREATED = ("IOPlatformExpertDevice", "IOResources")
 # project's table reproduces verbatim and last: it names a class this project does not define.
 FALLBACK_CLASS = "IOPanicPlatform"
 
+# 496: the six numbers the interrupt-controller driver writes its device with, paired with the header's
+# name for the same number. One value with two definitions is this project's oldest defect class, and a
+# *write* is where it costs the most: a read at the wrong offset returns a wrong number, a store at the
+# wrong offset programs a different register - `GICD_ICPENDR0` is `GICD_ISPENDR0` + 0x80, so a sign or
+# a digit wrong in one of these turns "clear my line's pending bit" into a write into the register that
+# *sets* it. The two files cannot see each other (the driver cannot include the header, which is why it
+# declares its own `extern "C"` prototypes), so the comparison is this check's.
+DRIVER_GIC_REGISTER_PAIRS = (
+    ("MSM8974_GICD_ISENABLER0_OFF", "STAGE90_GICD_ISENABLER0"),
+    ("MSM8974_GICD_ISPENDR0_OFF", "STAGE90_GICD_ISPENDR0"),
+    ("MSM8974_GICD_ICPENDR0_OFF", "STAGE90_GICD_ICPENDR0"),
+    ("MSM8974_GICD_SGIR_OFF", "STAGE90_GICD_SGIR"),
+    ("MSM8974_GICD_SGIR_SELF", "STAGE90_GICD_SGIR_TARGET_SELF"),
+    ("MSM8974_GIC_OWN_INTID", "STAGE90_GIC_SGI0_ID"),
+)
+
+# The switch that decides whether any of those writes happen at all, as a `#define` in the driver's own
+# source - the driver-side twin of `entry_irq.c`'s `STAGE90_IRQ_ENABLE_LINE`. Its value is published to
+# the live buffer, so a run's log says which machine it was.
+DRIVER_GIC_SWITCH = "MSM8974_GIC_DRIVE_SGI"
+
 
 def read(path):
     with open(path, "r", errors="replace") as fh:
@@ -506,10 +527,24 @@ def driver_defines(source):
     drivers' own `#define super IOService`) is not in the table and cannot be resolved - which is the
     point of resolving at all: an offset written straight into the read expression has no name for a
     claim to look up, and a name that resolves to nothing is reported as such instead of passing.
+
+    **A parenthesised shift of two literals counts as an integer**, and 496 is why: the register a
+    driver raises an interrupt with is written as `MSM8974_GICD_SGIR_SELF (2u << 24)`, and leaving it
+    unresolvable would have meant the claim that the driver's filter equals the payload's could not be
+    made at all. `check_gic_routing.py`'s `defines` grew the same form in the same step, for the same
+    value - the one place where two definitions of it are two parsers is a cost this project pays
+    twice rather than a place to invent a third spelling.
     """
     out = {}
-    for name, value in re.findall(r"#define\s+(\w+)\s+(0[xX][0-9a-fA-F]+|\d+)[uU]?\s*$", source, re.M):
-        out[name] = int(value, 0)
+    for match in re.finditer(r"^#define[ \t]+(\w+)[ \t]+(.*)$", source, re.M):
+        name = match.group(1)
+        text = re.sub(r"[uU]\b", "", match.group(2).strip())
+        if re.fullmatch(r"0[xX][0-9a-fA-F]+|\d+", text):
+            out[name] = int(text, 0)
+            continue
+        shift = re.fullmatch(r"\(\s*(0[xX][0-9a-fA-F]+|\d+)\s*<<\s*(0[xX][0-9a-fA-F]+|\d+)\s*\)", text)
+        if shift:
+            out[name] = int(shift.group(1), 0) << int(shift.group(2), 0)
     return out
 
 
@@ -529,9 +564,15 @@ def driver_mapping(source):
       * `reads` - the device words read through the *mapped* address, each as
         `(offset_symbol, whole_expression)`. The symbol is what the claim resolves against the file's
         own `#define`s, so an offset cannot be a number typed into the read and nothing else.
+      * `writes` - the same for the device words **stored**: the registers a driver programs at, split
+        from `reads` by whether the expression is followed by `=`. 496 is the first step where a driver
+        writes its device at all, and a write is a stronger claim than a read - a wrong offset stores
+        into an unrelated register instead of returning a wrong number - so it is the same *resolved
+        symbol* requirement and a separate list, because the note a claim emits should say which of the
+        two it is looking at.
     """
     out = {"call": None, "mapvar": None, "srcvar": None, "vaddr": None, "vaddrsrc": None,
-           "vlen": None, "reads": [], "map_guards": []}
+           "vlen": None, "reads": [], "writes": [], "map_guards": []}
     m = re.search(r"(\w+)\s*=\s*(\w+)\s*->\s*map\(\s*kIOMapAnywhere\s*\)", source)
     if m:
         out["call"] = m.group(0)
@@ -549,19 +590,33 @@ def driver_mapping(source):
     if out["vaddr"]:
         out["map_guards"].append(re.search(r"if\(\s*%s\s*!=\s*0u\)" % re.escape(out["vaddr"]), source))
     if out["vaddr"]:
-        for m in re.finditer(
-                r"\*\s*\(\s*volatile\s+uint32_t\s*\*\s*\)\s*\(\s*uintptr_t\s*\)\s*"
-                r"\(\s*%s\s*(?:\+\s*(\w+)\s*)?\)" % re.escape(out["vaddr"]), source):
-            out["reads"].append((m.group(1), m.group(0)))
+        pattern = (r"\*\s*\(\s*volatile\s+uint32_t\s*\*\s*\)\s*\(\s*uintptr_t\s*\)\s*"
+                   r"\(\s*%s\s*(?:\+\s*(\w+)\s*)?\)" % re.escape(out["vaddr"]))
+        for m in re.finditer(pattern, source):
+            stored = re.match(r"\s*=", source[m.end():])
+            out["writes" if stored else "reads"].append((m.group(1), m.group(0)))
     return out
 
 
 def payload_defines(header_text, prefix):
-    """`{NAME: value}` for the payload header's `#define <NAME> <integer>` whose name starts `prefix`."""
+    """`{NAME: value}` for the payload header's `#define <NAME> <integer>` whose name starts `prefix`.
+
+    The third form is `(2u << 24)`, added in 496 with `check_gic_routing.py`'s `defines` for the same
+    reason and in the same shape: `GICD_SGIR`'s target-self filter is a *derivation*, both files spell
+    it as one, and leaving it unparsed would have made the comparison a spelling rather than a value -
+    which passes for `(2u << 24)` and `(2u << 23)` alike until either file is reformatted.
+    """
     out = {}
-    for name, value in re.findall(r"#define\s+(%s\w*)\s+(0[xX][0-9a-fA-F]+|\d+)[uU]?"
+    for name, value in re.findall(r"#define\s+(%s\w*)\s+"
+                                  r"(\(?\s*(?:0[xX][0-9a-fA-F]+|\d+)[uU]?\s*<<\s*"
+                                  r"(?:0[xX][0-9a-fA-F]+|\d+)[uU]?\s*\)?|0[xX][0-9a-fA-F]+|\d+)[uU]?"
                                   % re.escape(prefix), header_text):
-        out[name] = int(value, 0)
+        text = re.sub(r"[uU]\b", "", value).strip()
+        shift = re.fullmatch(r"\(\s*(0[xX][0-9a-fA-F]+|\d+)\s*<<\s*(0[xX][0-9a-fA-F]+|\d+)\s*\)", text)
+        if shift:
+            out[name] = int(shift.group(1), 0) << int(shift.group(2), 0)
+        else:
+            out[name] = int(text, 0)
     return out
 
 
@@ -687,6 +742,62 @@ def driver_timeout(source):
     if m:
         out["fires_zero_at"] = m.start()
     return out
+
+
+def driver_irq_client(source):
+    """One driver's registration for an interrupt line, as the pieces of the call it makes.
+
+    496's subject, and the call is read rather than assumed: the intid (a *name*, which the claim
+    resolves against the driver's own `#define`s and against the payload's header), the function whose
+    address is handed over, and the `refCon`. The address is an `&`-expression and not a bare name, so
+    a driver that registered the *value* of a pointer variable - or a function it calls at
+    registration time - is a different shape and is refused rather than silently accepted.
+
+    `rc` is the variable the return is stored in, and it is here because the request that follows must
+    be guarded on it: a driver that raises an interrupt on a line no client is filed for is poking the
+    one dispatcher path this project has measured to stop the run.
+    """
+    out = {"intid": None, "handler": None, "refcon": None, "rc": None, "at": None}
+    m = re.search(r"(\w+)\s*=\s*entry_irq_register_client\(\s*(\w+)\s*,\s*"
+                  r"\(uint32_t\)\s*\(uintptr_t\)\s*&\s*(\w+)\s*,\s*"
+                  r"\(uint32_t\)\s*\(uintptr_t\)\s*(\w+)\s*\)", source)
+    if not m:
+        return out
+    out["rc"], out["intid"] = m.group(1), m.group(2)
+    out["handler"], out["refcon"] = m.group(3), m.group(4)
+    out["at"] = m.start()
+    return out
+
+
+def driver_device_stores(source, base):
+    """Every store to `base + <named offset>`, as `(offset_symbol, expression, index)`.
+
+    The other half of `driver_mapping`'s `reads`, and here it is the *whole* file rather than `start`'s
+    body: 496's driver programs the distributor from two contexts - the enable and the first request
+    from process context, and the next request from **inside its own handler** - so the claim has to be
+    able to see a store that is in a different function. The offsets are symbols so that each one can
+    be resolved and held against the payload's header; `index` is the source offset, which is what the
+    order claims are made of.
+    """
+    out = []
+    if not base:
+        return out
+    pattern = (r"\*\s*\(\s*volatile\s+uint32_t\s*\*\s*\)\s*\(\s*uintptr_t\s*\)\s*"
+               r"\(\s*%s\s*\+\s*(\w+)\s*\)\s*=\s*([^;]+);" % re.escape(base))
+    for m in re.finditer(pattern, source):
+        out.append((m.group(1), m.group(2).strip(), m.start()))
+    return out
+
+
+def preprocessor_arm(text, macro):
+    """What follows `#if <macro>` up to its `#else`/`#endif`, or None if there is no such block.
+
+    The same helper `check_irq_routing.py` has, for the same reason: a switch that says which machine
+    was built is only worth reading if the code it switches is *inside* it, and "is it inside" is a
+    question about the preprocessor and not about the source's shape.
+    """
+    m = re.search(r"^#if\s+%s\s*$(.*?)^#(?:else|endif)" % re.escape(macro), text, re.M | re.S)
+    return m.group(1) if m else None
 
 
 def _braced(text, start):
@@ -1509,30 +1620,37 @@ def claim_device_mapping(facts, failures, notes):
             failures.append("`%s` reads no device word through the address its mapping returned: the "
                             "mapping would then be the only thing this driver did with the OS's answer"
                             % d["file"])
-        for offset_symbol, expr in mapping["reads"]:
+        for offset_symbol, expr, stored in ([(s, e, False) for s, e in mapping["reads"]] +
+                                            [(s, e, True) for s, e in mapping["writes"]]):
             if offset_symbol is None:
-                failures.append("`%s` reads a device word at a bare offset (%s): an offset nothing "
+                failures.append("`%s` %s a device word at a bare offset (%s): an offset nothing "
                                 "names is a constant no claim can hold against the header the payload "
-                                "reads the same register at" % (d["file"], re.sub(r"\s+", " ", expr)))
+                                "%s the same register at"
+                                % (d["file"], "stores" if stored else "reads",
+                                   re.sub(r"\s+", " ", expr), "writes" if stored else "reads"))
                 continue
             resolved = driver_defines(d["source"]).get(offset_symbol)
             if resolved is None:
-                failures.append("`%s` reads at `%s`, which its own file does not define as an integer: "
-                                "the offset cannot be resolved, so a read of the wrong register would "
-                                "look exactly like this one" % (d["file"], offset_symbol))
+                failures.append("`%s` %s at `%s`, which its own file does not define as an integer: "
+                                "the offset cannot be resolved, so a %s of the wrong register would "
+                                "look exactly like this one"
+                                % (d["file"], "stores" if stored else "reads", offset_symbol,
+                                   "write" if stored else "read"))
             else:
-                notes.append("`%s` reads `%s` at offset 0x%03x through `%s`"
-                             % (d["file"], offset_symbol, resolved, mapping["vaddr"]))
+                notes.append("`%s` %s `%s` at offset 0x%03x through `%s`"
+                             % (d["file"], "stores to" if stored else "reads", offset_symbol, resolved,
+                                mapping["vaddr"]))
         for guard in mapping["map_guards"]:
             if guard is None:
                 failures.append("`%s` is missing one of the two guards - `if( <map> != 0 )` and "
                                 "`if( <vaddr> != 0u )` - that keep a failed mapping from being "
                                 "recorded as a failed read" % d["file"])
         if len(mapping["map_guards"]) == 2 and all(mapping["map_guards"]):
-            first_read = min(d["source"].find(expr) for _sym, expr in mapping["reads"])
+            first_read = min(d["source"].find(expr)
+                             for _sym, expr in mapping["reads"] + mapping["writes"])
             last_guard = max(g.end() for g in mapping["map_guards"])
             if first_read < last_guard:
-                failures.append("`%s` reads the device before both guards have passed: the read is "
+                failures.append("`%s` reaches the device before both guards have passed: the access is "
                                 "outside the branch the mapping's success is tested in, so a map that "
                                 "returned 0 would still be dereferenced" % d["file"])
 
@@ -1790,10 +1908,320 @@ def claim_timer_callback(facts, failures, notes):
                         "for - the kernel calling a driver back - would not exist in any run")
 
 
+def claim_driver_line(facts, failures, notes):
+    """15. A driver owns an interrupt line and writes its device, in one order and under one switch.
+
+    492-495 made a driver *read* its device and made the OS call it back on a timeout; none of them
+    made a driver own anything of the machine. 496 does, and every part of the claim is a way the step
+    could be a file that reads like it without being it:
+
+      * **there is exactly one switch, it is a `#define` in the driver's own source, and its value is
+        read back.** `MSM8974_GIC_DRIVE_SGI` decides whether this file writes its device at all. It is
+        checked the way `check_irq_routing.py` checks `entry_irq.c`'s switch - its *value* as well as
+        its presence - because a value the check cannot read is a claim it cannot make about the
+        artifact that ran, and a third value is a build that differs from both measured ones. The
+        value is published to the live buffer, so two builds that differ only here are two machines a
+        log can tell apart.
+      * **every device store in the file is inside a `#if MSM8974_GIC_DRIVE_SGI` block.** The switch
+        is not a switch if a store lives outside it. The claim is about *all* the stores and not only
+        about the switch's own block, because the failure it guards is a later store added next to the
+        handler it belongs to - which would be reachable in a build that turned the feature off.
+      * **the registration comes before the request, and the request is guarded on it.** An intid that
+        reaches the dispatcher with no client is the one path this image documents as *stopping the
+        run*, so a driver that pends a line before filing a client for it ends the boot at the exact
+        place the step exists to keep it out of. The guard on the return value is the second half of
+        the same statement, because a registration can be refused - a full table, a duplicate, the
+        dispatcher's own timer line.
+      * **the handler that is registered is a function this file defines, and the same address is
+        published.** The registration is read out of the call - the intid, the `&`-expression, the
+        `refCon` - and the address must also appear in the record, so the log carries the function the
+        dispatcher will call rather than a name the claim resolved. The `refCon` must be `this`: the
+        kernel's own second-level ABI hands the *controller object* back
+        (`IOCPUInterruptController::handleInterrupt`), so a client that filed anything else is called
+        with an argument that is not the device it owns. And the two functions it calls across the
+        image boundary must each have an `extern "C"` prototype in this file, because this file cannot
+        include the header that defines them - the declaration *is* the ABI.
+      * **the numbers it writes with have one definition.** Six of them - four register offsets, the
+        target filter and the intid - are paired with the header's names for the same registers, both
+        resolved as integers. A store at the wrong offset programs a *different register* rather than
+        returning a wrong number: `GICD_ICPENDR0` is `GICD_ISPENDR0` + 0x80, so one wrong digit turns
+        "clear my line" into "set my line".
+      * **the driver's own handler clears its device and asks for the next interrupt itself.** The
+        handler body must read the pending word, publish it, and be the place at least one further
+        request comes from - which is what makes the call count a *sequence* rather than one event,
+        and it is the same shape 495's callback used to keep its own timer alive. The count it stops
+        at is a named constant, published, and at least 2 so that interrupt context is really where a
+        request is made.
+      * **it gives the line back only when its own device says the line is quiet.** The unregister is
+        the client's decision and it is guarded by the driver's own read of the pending word - a
+        registration withdrawn while a delivery is in flight is exactly the unregistered-intid stop -
+        and the guard's value is published, so the run says which branch was taken.
+
+    A driver that owns no line is *noted* rather than failed - `/timer`'s subject is time - and at
+    least one in the image must, for claim 14's reason: the reading this step is for would otherwise
+    be absent from every run.
+    """
+    header = payload_defines(facts["payload_gic_h"], "STAGE90_GIC")
+    registered = 0
+
+    for d in facts["drivers"]:
+        source = d["source"]
+        defines_here = driver_defines(source)
+        client = driver_irq_client(source)
+        switch = defines_here.get(DRIVER_GIC_SWITCH)
+        if client["at"] is None and switch is None:
+            notes.append("`%s` owns no interrupt line: the driver whose device *is* the interrupt "
+                         "controller is the one with a line to own, and this file's reading is a "
+                         "device word" % d["file"])
+            continue
+        registered += 1
+
+        # -- the switch ---------------------------------------------------------------------------
+        blocks = [(m.start(1), m.end(1)) for m in
+                  re.finditer(r"^#if\s+%s\s*$(.*?)^#(?:else|endif)"
+                              % re.escape(DRIVER_GIC_SWITCH), source, re.M | re.S)]
+        if switch is None:
+            failures.append("`%s` does not define `%s` as an integer: whether this driver writes its "
+                            "device at all would then be unstated, and no reading of the artifact "
+                            "could say which machine was built" % (d["file"], DRIVER_GIC_SWITCH))
+        elif switch not in (0, 1):
+            failures.append("`%s`'s `%s` is %d: it is a two-state switch, and a third value is a "
+                            "build that differs from both measured ones"
+                            % (d["file"], DRIVER_GIC_SWITCH, switch))
+        if not blocks:
+            failures.append("`%s` has no `#if %s` block: the switch would be a number nothing reads, "
+                            "and the code it is supposed to switch would run either way"
+                            % (d["file"], DRIVER_GIC_SWITCH))
+        if not re.search(r'entry_live_write\(\s*"xnu_live_\w+_drive_compiled"\s*,\s*%s\s*\)'
+                         % re.escape(DRIVER_GIC_SWITCH), source):
+            failures.append("`%s` never publishes `%s` to the live buffer: a run's record could not "
+                            "say whether the image that produced it wrote the distributor"
+                            % (d["file"], DRIVER_GIC_SWITCH))
+
+        # -- every device store is inside a switch block --------------------------------------------
+        mapping = driver_mapping(source)
+        # Two bases, and the second one is not decoration: the handler runs long after `start` has
+        # returned, so it writes through the *saved* address rather than through `start`'s local (the
+        # comment on that global says so). A claim that only looked at `mapping["vaddr"]` would see
+        # the stores in `start` and be blind to the one in the handler - which is exactly the store
+        # that must not escape the switch, because the handler is what runs in a build that leaves the
+        # request out.
+        handler_base = None
+        handler_body = (method_body(strip_comments(source), client["handler"])
+                        if client["at"] is not None else None)
+        if handler_body:
+            found = re.findall(r"\*\s*\(\s*volatile\s+uint32_t\s*\*\s*\)\s*\(\s*uintptr_t\s*\)\s*"
+                               r"\(\s*(\w+)\s*\+", handler_body)
+            handler_base = found[0] if found else None
+        stores = []
+        for base in dict.fromkeys(b for b in (mapping["vaddr"], handler_base) if b):
+            stores.extend(driver_device_stores(source, base))
+        stores.sort(key=lambda item: item[2])
+        for symbol, expr, at in stores:
+            if not any(lo <= at < hi for lo, hi in blocks):
+                failures.append("`%s` stores to `%s` at offset %d (outside every `#if %s` block): the "
+                                "switch is then not a switch - with it at 0 the device would still be "
+                                "written" % (d["file"], symbol, at, DRIVER_GIC_SWITCH))
+
+        if client["at"] is None:
+            failures.append("`%s` writes its device and registers no client for a line: the "
+                            "interrupts its own handler would raise have no dispatcher entry to go "
+                            "through, and the payload's stop path is what would answer them"
+                            % d["file"])
+            continue
+
+        # -- the registration ----------------------------------------------------------------------
+        for fn in ("entry_irq_register_client", "entry_irq_unregister_client"):
+            if not re.search(r'extern\s+"C"\s+uint32_t\s+%s\s*\(' % re.escape(fn), source):
+                failures.append("`%s` calls `%s` and declares no `extern \"C\"` prototype for it: "
+                                "this file cannot include the payload's header, so that declaration "
+                                "is the whole ABI between the two and nothing else compares them"
+                                % (d["file"], fn))
+        if client["refcon"] != "this":
+            failures.append("`%s` registers `%s` as its `refCon`: Apple's second-level route hands the "
+                            "*controller object* back to the handler "
+                            "(`IOCPUInterruptController::handleInterrupt`), so a client that filed "
+                            "anything else is called with an argument that is not the device it owns"
+                            % (d["file"], client["refcon"]))
+        if defines_here.get(client["intid"]) is None:
+            failures.append("`%s` registers for `%s`, which its own file does not define as an "
+                            "integer: the line it claims would be a number no claim can hold against "
+                            "the payload's own SGI" % (d["file"], client["intid"]))
+        if handler_body is None:
+            failures.append("`%s` registers the address of `%s` and defines no such function here: "
+                            "the kernel would call whatever that name resolves to at link time, which "
+                            "is a handler no claim in this file is about"
+                            % (d["file"], client["handler"]))
+        if not re.search(r'entry_live_write\(\s*"xnu_live_\w+_isr"\s*,\s*\(uint32_t\)\s*'
+                         r"\(uintptr_t\)\s*&\s*%s\s*\)" % re.escape(client["handler"]), source):
+            failures.append("`%s` registers `&%s` and publishes no key holding that same address: the "
+                            "record would not carry the function the dispatcher was told to call, so a "
+                            "run could not show that the line went to *this* driver"
+                            % (d["file"], client["handler"]))
+        if not re.search(r'entry_live_write\(\s*"xnu_live_\w+_cli_rc"\s*,\s*%s\s*\)'
+                         % re.escape(client["rc"]), source):
+            failures.append("`%s` does not publish the registration's return (`%s`): a refused "
+                            "registration is a line the driver does not own, and it is the one outcome "
+                            "the record has to be able to tell from an accepted one"
+                            % (d["file"], client["rc"]))
+
+        # -- the order: registration, then the request, guarded on the return -----------------------
+        sgir_names = {name for name, value in defines_here.items()
+                      if header.get("STAGE90_GICD_SGIR") is not None
+                      and value == header["STAGE90_GICD_SGIR"]}
+        asks = [(sym, at) for sym, _expr, at in stores if sym in sgir_names]
+        if not asks:
+            failures.append("`%s` registers a client and never requests the line: nothing this driver "
+                            "owns would ever be delivered, and the handler it filed would be a "
+                            "function the kernel never calls" % d["file"])
+        elif not any(at > client["at"] for _sym, at in asks):
+            failures.append("`%s` requests the line before it registers a client for it: an intid "
+                            "that reaches the dispatcher with no client is the path this image "
+                            "documents as stopping the run, so the order is not style - it is the "
+                            "difference between a delivery and a stop" % d["file"])
+        else:
+            first_ask = min(at for _sym, at in asks if at > client["at"])
+            if not re.search(r"\b%s\s*==\s*1u" % re.escape(client["rc"]),
+                             source[client["at"]:first_ask]):
+                failures.append("`%s` requests the line without testing `%s == 1u` first: a "
+                                "registration can be refused - a full table, a duplicate, or the "
+                                "dispatcher's own timer line - and the request would then be an "
+                                "interrupt nobody is filed for" % (d["file"], client["rc"]))
+
+        # -- the six numbers, against the header ----------------------------------------------------
+        for driver_name, header_name in DRIVER_GIC_REGISTER_PAIRS:
+            if driver_name not in defines_here:
+                failures.append("`%s` no longer defines `%s`: one of the six numbers this driver "
+                                "writes its device with has lost its name"
+                                % (d["file"], driver_name))
+            elif header_name not in header:
+                failures.append("`entry_gic.h` no longer defines `%s`, so the driver's `%s` has one "
+                                "definition and no counterpart" % (header_name, driver_name))
+            elif defines_here[driver_name] != header[header_name]:
+                failures.append("`%s` is 0x%x in `%s` and `%s` is 0x%x in `entry_gic.h`: the two "
+                                "definitions of which register this is disagree, and for a *store* "
+                                "that means the driver programs a different register"
+                                % (driver_name, defines_here[driver_name], d["file"], header_name,
+                                   header[header_name]))
+            else:
+                notes.append("`%s`'s `%s` is 0x%03x, the header's `%s`"
+                             % (d["file"], driver_name, defines_here[driver_name], header_name))
+
+        # -- the enable's read-back -----------------------------------------------------------------
+        for suffix, what in (("en_before", "the enable word before the driver wrote it"),
+                             ("en_after", "the enable word after the driver wrote it"),
+                             ("pend_before", "the pending word before anything was asked of the line")):
+            if not re.search(r'xnu_live_\w+_%s\b' % suffix, source):
+                failures.append("`%s` publishes no `_%s` (%s): a device write whose effect is not read "
+                                "back is an assumption about the part, and the readings beside it are "
+                                "what make it a measurement" % (d["file"], suffix, what))
+
+        if handler_body is None:
+            continue
+
+        # -- the handler's own half -----------------------------------------------------------------
+        for suffix, what in (("isr_calls", "how many times the kernel called it"),
+                             ("isr_last", "the intid it was called with"),
+                             ("isr_refcon", "the object it was handed"),
+                             ("isr_pends", "the requests it made from interrupt context"),
+                             ("isr_guard", "whether its own device said the line was quiet")):
+            if not re.search(r'xnu_live_\w+_%s\b' % suffix, handler_body):
+                failures.append("`%s`'s handler publishes no `_%s` (%s): the reading this step is for "
+                                "is the kernel calling a *driver's* function, and a call whose count, "
+                                "argument and effect are not in the log is a call that cannot be told "
+                                "from one that never happened" % (d["file"], suffix, what))
+        if handler_base is None:
+            failures.append("`%s`'s handler touches no device address at all: it would be a function "
+                            "the kernel calls that does nothing to the interrupt source - the line's "
+                            "pending state would then never be cleared by its owner, and the "
+                            "dispatcher's cap would be the thing that ends the run" % d["file"])
+            continue
+        if handler_base != mapping["vaddr"]:
+            # The handler cannot see `start`'s locals, so it reaches the device through a saved
+            # address. That is a *second name* for one address, and the property that keeps it from
+            # being a second address is that the name is assigned from the one that was published.
+            origin = re.search(r"^\s*%s\s*=\s*(\w+)\s*;" % re.escape(handler_base), source, re.M)
+            if origin is None:
+                failures.append("`%s`'s handler writes through `%s`, which no statement in this file "
+                                "assigns: the handler's base would be a variable nothing set, so the "
+                                "address it programs is not the one the driver mapped"
+                                % (d["file"], handler_base))
+            elif not re.search(r'entry_live_write\(\s*"xnu_live_\w+"\s*,\s*%s\s*\)'
+                               % re.escape(origin.group(1)), source):
+                failures.append("`%s`'s handler writes through `%s`, assigned from `%s`, and `%s` is "
+                                "never published: the record could not say which address the handler's "
+                                "stores went to, which is the one thing that separates a write to the "
+                                "driver's mapping from a write to one of the two other ways this "
+                                "machine reaches that device"
+                                % (d["file"], handler_base, origin.group(1), origin.group(1)))
+            else:
+                notes.append("`%s`'s handler reaches the device through `%s`, the saved copy of the "
+                             "published `%s`" % (d["file"], handler_base, origin.group(1)))
+        pend_reads = [(m.group(1), m.group(2), m.end()) for m in re.finditer(
+            r"(\w+)\s*=\s*\*\s*\(\s*volatile\s+uint32_t\s*\*\s*\)\s*\(\s*uintptr_t\s*\)\s*"
+            r"\(\s*%s\s*\+\s*(\w+)\s*\)" % re.escape(handler_base), handler_body)]
+        pend_var = None
+        for var, symbol, _end in pend_reads:
+            if header.get("STAGE90_GICD_ISPENDR0") is not None \
+                    and defines_here.get(symbol) == header["STAGE90_GICD_ISPENDR0"]:
+                pend_var = var
+        if pend_var is None:
+            failures.append("`%s`'s handler never reads its own line's pending bit: the "
+                            "acknowledgement's effect would be assumed rather than measured, and the "
+                            "guard on giving the line back would have nothing to be a guard on"
+                            % d["file"])
+        in_handler = [m.group(1) for m in re.finditer(
+            r"\*\s*\(\s*volatile\s+uint32_t\s*\*\s*\)\s*\(\s*uintptr_t\s*\)\s*"
+            r"\(\s*%s\s*\+\s*(\w+)\s*\)\s*=\s*[^;]+;" % re.escape(handler_base), handler_body)]
+        if not (sgir_names & set(in_handler)):
+            failures.append("`%s`'s handler never asks for the line again: the delivery would then be "
+                            "a single event, with no way to tell an armed line from one that fired "
+                            "once, and the call count would be a constant rather than a sequence"
+                            % d["file"])
+        ask_define = re.search(r'entry_live_write\(\s*"xnu_live_\w+_isr_ask"\s*,\s*(\w+)\s*\)', source)
+        if ask_define is None:
+            failures.append("`%s` publishes no `_isr_ask`: the number of deliveries it will answer "
+                            "for is a decision no reading of the artifact can recover" % d["file"])
+        else:
+            ask = defines_here.get(ask_define.group(1))
+            if ask is None:
+                failures.append("`%s` publishes `%s` as the number of asks and its own file does not "
+                                "define that as an integer" % (d["file"], ask_define.group(1)))
+            elif ask < 2:
+                failures.append("`%s` publishes an ask count of %d: below 2 the handler never asks for "
+                                "the line itself, so the second delivery - the one that makes "
+                                "interrupt context part of the record - would not exist"
+                                % (d["file"], ask))
+            elif not re.search(r"<\s*%s\b" % re.escape(ask_define.group(1)), handler_body):
+                failures.append("`%s`'s handler does not stop asking at `%s`: the line would be asked "
+                                "for until the dispatcher's own cap stops the run"
+                                % (d["file"], ask_define.group(1)))
+        unreg = handler_body.find("entry_irq_unregister_client")
+        if unreg < 0:
+            failures.append("`%s`'s handler never withdraws the registration: the line would be owned "
+                            "for the rest of the boot, and the dispatcher's stop for an unregistered "
+                            "line would be unreachable from the driver's side" % d["file"])
+        elif pend_var is not None:
+            guard_region = handler_body[max(end for _v, _s, end in pend_reads):unreg]
+            if not re.search(r"\b%s\b\s*&" % re.escape(pend_var), guard_region):
+                failures.append("`%s`'s handler withdraws the registration without testing the "
+                                "pending bit it just read (`%s & ...`): a line withdrawn while a "
+                                "delivery is in flight is the unregistered-intid stop, which is the "
+                                "one state a driver must not create" % (d["file"], pend_var))
+        if not re.search(r'xnu_live_\w+_isr_unregs\b', handler_body):
+            failures.append("`%s`'s handler publishes no `_isr_unregs`, so whether it gave the line "
+                            "back at all is not in the record" % d["file"])
+
+    if registered == 0:
+        failures.append("no driver in `PLATFORM_SOURCES` registers a client for an interrupt line: "
+                        "the reading this step is for - a driver owning a line and writing its device "
+                        "- would not exist in any run")
+
+
 CLAIMS = (claim_shape, claim_classes, claim_provider, claim_names, claim_root_names,
           claim_property_kinds, claim_bundle_id, claim_cell_counts, claim_resolution_read,
           claim_mechanism, claim_entry_class, claim_device_mapping, claim_device_value,
-          claim_timer_callback)
+          claim_timer_callback, claim_driver_line)
 
 
 def compare(facts, mutate=None):
@@ -2052,6 +2480,112 @@ def mutate_facts(facts, mutate):
         facts = _bump_driver(facts, "MSM8974Timer", "workloop = IOWorkLoop::workLoop();\n",
                              "workloop = IOWorkLoop::workLoop();\n"
                              '    entry_live_write( "xnu_live_timerdrv_fires", 0u );\n')
+    # -- 496: a driver owns a line and writes its device. Twenty-four ways for the file to read like
+    # one without being one, one per link: the switch, the order, the registration, the numbers, and
+    # the three things the handler does with its own device.
+    elif mutate == "the_driver_has_no_switch":
+        facts = _bump_driver(facts, "MSM8974GIC", "#define MSM8974_GIC_DRIVE_SGI 1\n", "")
+    elif mutate == "the_switch_is_a_third_value":
+        facts = _bump_driver(facts, "MSM8974GIC", "#define MSM8974_GIC_DRIVE_SGI 1",
+                             "#define MSM8974_GIC_DRIVE_SGI 2")
+    elif mutate == "the_switch_is_never_published":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             '    entry_live_write( "xnu_live_gicdrv_drive_compiled", '
+                             'MSM8974_GIC_DRIVE_SGI );\n', "")
+    elif mutate == "a_store_outside_the_switch":
+        # The first `#if` is the one around the handler; the store the claim must still see is the
+        # one in *that* block, because the handler is the code a build with the request left out
+        # still runs.
+        facts = _bump_driver(facts, "MSM8974GIC", "#if MSM8974_GIC_DRIVE_SGI\n", "#if 1\n")
+    elif mutate == "the_request_is_not_guarded_on_the_registration":
+        facts = _bump_driver(facts, "MSM8974GIC", "if( cli_rc == 1u && mapvaddr != 0u) {",
+                             "if( 1 && mapvaddr != 0u) {")
+    elif mutate == "the_request_comes_before_the_registration":
+        ask = ('    if( cli_rc == 1u && mapvaddr != 0u) {\n'
+               '        *(volatile uint32_t *)(uintptr_t)( mapvaddr + MSM8974_GICD_SGIR_OFF )\n'
+               '            = MSM8974_GICD_SGIR_SELF | MSM8974_GIC_OWN_INTID;\n'
+               '        __asm__ volatile ("dsb sy" ::: "memory");\n'
+               '        ++g_gic_pends;\n'
+               '        entry_live_write( "xnu_live_gicdrv_pends", g_gic_pends );\n'
+               '        entry_live_write( "xnu_live_gicdrv_sgir", MSM8974_GICD_SGIR_SELF | '
+               'MSM8974_GIC_OWN_INTID );\n'
+               '    }\n')
+        facts = _bump_driver(facts, "MSM8974GIC", ask, "")
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             "    cli_rc = entry_irq_register_client(", ask +
+                             "    cli_rc = entry_irq_register_client(")
+    elif mutate == "the_registration_is_for_another_line":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             "entry_irq_register_client( MSM8974_GIC_OWN_INTID,",
+                             "entry_irq_register_client( 1u,")
+    elif mutate == "the_registration_files_something_that_is_not_the_driver":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             "                                        (uint32_t)(uintptr_t) this );",
+                             "                                        (uint32_t)(uintptr_t) provider );")
+    elif mutate == "the_registered_function_is_not_in_this_file":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             "                                        (uint32_t)(uintptr_t) "
+                             "&msm8974_gic_isr,",
+                             "                                        (uint32_t)(uintptr_t) "
+                             "&msm8974_gic_ghost,")
+    elif mutate == "the_handler_address_is_not_published":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             '    entry_live_write( "xnu_live_gicdrv_isr", '
+                             '(uint32_t)(uintptr_t) &msm8974_gic_isr );\n', "")
+    elif mutate == "the_registration_result_is_not_published":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             '    entry_live_write( "xnu_live_gicdrv_cli_rc", cli_rc );\n', "")
+    elif mutate == "the_driver_declares_no_prototype_for_the_registry":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             'extern "C" uint32_t entry_irq_register_client(uint32_t intid, '
+                             'uint32_t handler, uint32_t refCon);\n', "")
+    elif mutate == "an_offset_disagrees_with_the_header":
+        facts = _bump_driver(facts, "MSM8974GIC", "#define MSM8974_GICD_SGIR_OFF       0xf00u",
+                             "#define MSM8974_GICD_SGIR_OFF       0xf04u")
+    elif mutate == "the_self_test_filter_disagrees_with_the_header":
+        facts = _bump_driver(facts, "MSM8974GIC", "(2u << 24)", "(1u << 24)")
+    elif mutate == "the_driver_stops_reading_the_enable_back":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             '    entry_live_write( "xnu_live_gicdrv_en_after", en_after );\n', "")
+    elif mutate == "the_header_moves_the_sgir":
+        facts = dict(facts)
+        facts["payload_gic_h"] = _bump(facts["payload_gic_h"],
+                                       "#define STAGE90_GICD_SGIR       0xf00u",
+                                       "#define STAGE90_GICD_SGIR       0xf04u")
+    elif mutate == "the_handler_does_not_read_the_pending_bit":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             "        pend = *(volatile uint32_t *)(uintptr_t)( g_gic_mapvaddr + "
+                             "MSM8974_GICD_ISPENDR0_OFF );",
+                             "        pend = 0u;")
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             "        g_gic_isr_pend = *(volatile uint32_t *)(uintptr_t)( "
+                             "g_gic_mapvaddr + MSM8974_GICD_ISPENDR0_OFF );",
+                             "        g_gic_isr_pend = 0u;")
+    elif mutate == "the_handler_does_not_ask_again":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             "        *(volatile uint32_t *)(uintptr_t)( g_gic_mapvaddr + "
+                             "MSM8974_GICD_SGIR_OFF )",
+                             "        *(volatile uint32_t *)(uintptr_t)( g_gic_mapvaddr + "
+                             "MSM8974_GICD_ISENABLER0_OFF )")
+    elif mutate == "the_handler_stops_asking":
+        facts = _bump_driver(facts, "MSM8974GIC", "calls < MSM8974_GIC_ASK_PENDS", "calls < 1u")
+    elif mutate == "the_driver_answers_the_line_forever":
+        facts = _bump_driver(facts, "MSM8974GIC", "#define MSM8974_GIC_ASK_PENDS       3u",
+                             "#define MSM8974_GIC_ASK_PENDS       1u")
+    elif mutate == "the_handler_withdraws_without_testing_the_bit":
+        facts = _bump_driver(facts, "MSM8974GIC", "( g_gic_isr_pend & bit ) == 0u",
+                             "( 0u & bit ) == 0u")
+    elif mutate == "the_handler_never_withdraws":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             "        g_gic_isr_unreg_rc = entry_irq_unregister_client( "
+                             "MSM8974_GIC_OWN_INTID );",
+                             "        g_gic_isr_unreg_rc = 0u;")
+    elif mutate == "the_handler_publishes_no_call_count":
+        facts = _bump_driver(facts, "MSM8974GIC",
+                             '    entry_live_write( "xnu_live_gicdrv_isr_calls", calls );\n', "")
+    elif mutate == "the_handler_writes_through_an_unpublished_address":
+        facts = _bump_driver(facts, "MSM8974GIC", "    g_gic_mapvaddr = mapvaddr;",
+                             "    g_gic_mapvaddr = 0xf9000000u;")
     else:
         raise AssertionError("unknown mutation %s" % mutate)
     return facts
@@ -2117,6 +2651,31 @@ MUTATIONS = (
     "the_callback_publishes_no_fire_latency",
     "the_callback_never_rearms",
     "the_fire_count_zero_is_published_after_the_work_loop",
+    # 496: a driver owns a line and writes its device.
+    "the_driver_has_no_switch",
+    "the_switch_is_a_third_value",
+    "the_switch_is_never_published",
+    "a_store_outside_the_switch",
+    "the_request_is_not_guarded_on_the_registration",
+    "the_request_comes_before_the_registration",
+    "the_registration_is_for_another_line",
+    "the_registration_files_something_that_is_not_the_driver",
+    "the_registered_function_is_not_in_this_file",
+    "the_handler_address_is_not_published",
+    "the_registration_result_is_not_published",
+    "the_driver_declares_no_prototype_for_the_registry",
+    "an_offset_disagrees_with_the_header",
+    "the_self_test_filter_disagrees_with_the_header",
+    "the_driver_stops_reading_the_enable_back",
+    "the_header_moves_the_sgir",
+    "the_handler_does_not_read_the_pending_bit",
+    "the_handler_does_not_ask_again",
+    "the_handler_stops_asking",
+    "the_driver_answers_the_line_forever",
+    "the_handler_withdraws_without_testing_the_bit",
+    "the_handler_never_withdraws",
+    "the_handler_publishes_no_call_count",
+    "the_handler_writes_through_an_unpublished_address",
 )
 
 

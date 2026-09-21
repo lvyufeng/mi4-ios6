@@ -106,6 +106,21 @@
 extern "C" void entry_live_write(const char *key, uint32_t value);
 
 /*
+ * **496's two entry points, and the shape of the ABI is the reason they are spelled here as three
+ * `uint32_t`s rather than as a function-pointer type.** This driver cannot include `entry_gic.h`
+ * (that header declares `g_stage90_gic_dist_typer` with C linkage and no `extern "C"` wrapper, so
+ * including it from C++ would give the symbol C++ linkage and a link error), which is why every
+ * declaration in this file is written twice - once in the header and once here with `extern "C"`.
+ * A function-pointer parameter would then be two definitions of one signature with nothing comparing
+ * them; three integers are comparable character by character, and
+ * `tools/check_driver_catalogue.py` does compare them. The driver hands over its own ISR's address,
+ * so the number in `_isr` below is a reading of the same value the entry side files as
+ * `xnu_live_irq_cli_handler`.
+ */
+extern "C" uint32_t entry_irq_register_client(uint32_t intid, uint32_t handler, uint32_t refCon);
+extern "C" uint32_t entry_irq_unregister_client(uint32_t intid);
+
+/*
  * The payload's own reading of the distributor's identification register, published by name in
  * `entry_gic.c`/`entry_gic.h` for exactly this comparison. Declared rather than included, as the other
  * three platform sources declare `entry_live_write`.
@@ -121,6 +136,156 @@ extern "C" uint32_t g_stage90_gic_dist_typer;
  */
 #define MSM8974_GICD_CTLR_OFF   0x000u
 #define MSM8974_GICD_TYPER_OFF  0x004u
+
+/*
+ * 496: the four registers this driver **writes**, its own line, and how many times it asks for it.
+ * Every number here has a second definition in the payload - `gic.c`'s register map and
+ * `entry_gic.h`'s transcription of the same map - and none of them is invented: the distributor
+ * offsets match the ones 494 already reads through, `GICD_SGIR` and its target-self encoding are
+ * `gic.c`'s `GICD_SGIR`/`GICD_SGIR_TARGET_SELF` (the pair the payload's own `gic_sgi_selftest`
+ * writes), and the intid is `gic.c`'s `GIC_SGI0_ID`. `tools/check_driver_catalogue.py` refuses the
+ * link when any of them disagrees with the payload's spelling of the same value.
+ *
+ * **SGI 0 and not the line the kernel is already on.** Raising the timer's line would be raising the
+ * OS's own clock source, and an SGI is the one interrupt in this machine that a driver may pend
+ * itself: it belongs to no peripheral, its pending state is cleared by the acknowledgement, and the
+ * payload has already measured the delivery end to end (`gic_sgi_sgi0_count = 1`, `gic_sgi_last_iar
+ * = 0`, `gic_sgi_spurious_count = 0` in every run) - so this is the second reader of a measurement
+ * taken on the other side of the handoff, not a first guess at how the part behaves.
+ */
+#define MSM8974_GICD_ISENABLER0_OFF 0x100u
+#define MSM8974_GICD_ISPENDR0_OFF   0x200u
+#define MSM8974_GICD_ICPENDR0_OFF   0x280u
+#define MSM8974_GICD_SGIR_OFF       0xf00u
+#define MSM8974_GICD_SGIR_SELF      (2u << 24)
+#define MSM8974_GIC_OWN_INTID       0u
+#define MSM8974_GIC_ASK_PENDS       3u
+
+/*
+ * **The one switch that decides whether this driver writes its device at all, and it is a `#define` in
+ * the source for the reason `entry_irq.c`'s `STAGE90_IRQ_ENABLE_LINE` is**: `tools/check_irq_routing.py`
+ * checks the *value* as well as the block, so the switch cannot become a flag on a command line where
+ * the build that ran and the build the check read are two different machines. Everything from the
+ * line's enable to the first request is one `#if` block, and the value itself is published to the live
+ * buffer (`_drive_compiled`) so that a run's log carries which of the two machines it was - a key that
+ * is the honest answer to "did this image write the distributor", and that no reading of the artifact
+ * afterwards has to reconstruct.
+ *
+ * `0` leaves the machine exactly as 494 left it: the map is still made and the same registers are
+ * still read, the client registry is still linked (it is dead code if nothing registers), and no
+ * device register is written and no line is owned.
+ */
+#define MSM8974_GIC_DRIVE_SGI 1
+
+/*
+ * **And everything that only exists because of it is inside `#if MSM8974_GIC_DRIVE_SGI` too** - the
+ * saved mapping, the counters, the handler and, in `start`, the enable, the registration and the
+ * request. The property that buys is worth stating: with the switch at 0 there is no store to this
+ * device through any name in this file, which is a claim a reader can check by looking for the two
+ * `#if`s rather than by reading three functions and reasoning about which stores are reachable.
+ * `tools/check_driver_catalogue.py` asserts it - every device store in the file has to lie inside one
+ * of those blocks - so the invariant cannot be lost by an edit that adds a store somewhere else.
+ */
+#if MSM8974_GIC_DRIVE_SGI
+
+/*
+ * The distributor's base **as the driver's own mapping returned it**, saved because the ISR runs long
+ * after `start` has returned and cannot see its locals. Zero means 494's map failed, and every access
+ * below is guarded on it: a dereference of zero on this machine is a data abort, and an abort that
+ * names a *zero* would say nothing about the mapping. It is a *saved reading* and not a second
+ * address: `xnu_live_gicdrv_mapvaddr` publishes the same number in the same run, and the two are the
+ * record that the ISR is writing the device the driver mapped and not one of the two other ways this
+ * project can reach `0xf9000000` (the payload's identity section, and the node's own `reg[0]`).
+ */
+static uint32_t g_gic_mapvaddr;
+
+/* What the ISR measured. The zeroes are published in `start` before the first request, so "the
+ * kernel never called this driver back" is a value in the log and not an absence. */
+static uint32_t g_gic_pends;            /* requests the driver made, from process context    */
+static uint32_t g_gic_isr_calls;        /* calls the kernel made, one per delivery           */
+static uint32_t g_gic_isr_pends;        /* requests the driver made, from inside its own ISR */
+static uint32_t g_gic_isr_last;         /* the intid of the last call                        */
+static uint32_t g_gic_isr_pend;         /* the pending word after the acknowledgement        */
+static uint32_t g_gic_isr_guard;        /* 1 = the distributor said the line was quiet       */
+static uint32_t g_gic_isr_unregs;       /* times the driver gave the line back               */
+static uint32_t g_gic_isr_unreg_rc;
+static uint32_t g_gic_isr_done;
+
+/*
+ * The driver's interrupt handler, and **the first function in this project that the kernel calls
+ * because a *driver* asked for an interrupt**. 495 made the OS call a driver back on its own
+ * timeout; this is called from the exception path, through `entry_irq_handler`, for a line the
+ * driver enabled at the distributor and asked for itself.
+ *
+ * It runs with interrupts masked, on the entry image's interrupt stack, with the dispatcher having
+ * already written `GICC_EOIR`. Its work is three readings and one decision:
+ *
+ *   - **what the acknowledgement did to the distributor.** The architecture says an SGI's pending
+ *     state is cleared by reading `GICC_IAR`, and this reads `ISPENDR0` rather than believing it -
+ *     if the bit is still set the driver clears it with the write-1-to-clear register, so the
+ *     machine leaves the handler the way it found it either way.
+ *   - **the next request, from the interrupt.** The second and third deliveries are asked for from
+ *     *inside* the handler, which is the same shape 495's callback used to keep its own timer alive,
+ *     and it is what makes `_isr_calls` a sequence rather than a single event: 1, 2, 3, with the
+ *     first asked for in process context and the next two in interrupt context.
+ *   - **the guard on giving the line back.** An intid that reaches the dispatcher with no client is
+ *     the case that stops the run, so this driver unregisters only when `ISPENDR0` says nothing is
+ *     pending on its line. If the bit is still set the driver keeps the registration and simply
+ *     stops asking - the safe direction, and `_isr_guard = 0` is that reading.
+ *
+ * It is a plain function because that is what the registry stores, and it is defined above the class
+ * because `start` takes its address.
+ */
+static void
+msm8974_gic_isr( void * refCon, uint32_t intid )
+{
+    const uint32_t bit = 1u << MSM8974_GIC_OWN_INTID;
+    uint32_t calls = ++g_gic_isr_calls;
+    uint32_t pend = 0u;
+
+    g_gic_isr_last = intid;
+
+    if( g_gic_mapvaddr != 0u) {
+        pend = *(volatile uint32_t *)(uintptr_t)( g_gic_mapvaddr + MSM8974_GICD_ISPENDR0_OFF );
+        if(( pend & bit ) != 0u) {
+            *(volatile uint32_t *)(uintptr_t)( g_gic_mapvaddr + MSM8974_GICD_ICPENDR0_OFF ) = bit;
+            __asm__ volatile ("dsb sy" ::: "memory");
+        }
+        g_gic_isr_pend = *(volatile uint32_t *)(uintptr_t)( g_gic_mapvaddr + MSM8974_GICD_ISPENDR0_OFF );
+    }
+
+    entry_live_write( "xnu_live_gicdrv_isr_calls", calls );
+    entry_live_write( "xnu_live_gicdrv_isr_last", intid );
+    entry_live_write( "xnu_live_gicdrv_isr_refcon", (uint32_t)(uintptr_t) refCon );
+    entry_live_write( "xnu_live_gicdrv_isr_pend_after_ack", pend );
+    entry_live_write( "xnu_live_gicdrv_isr_pend_final", g_gic_isr_pend );
+
+    if( calls < MSM8974_GIC_ASK_PENDS && g_gic_mapvaddr != 0u) {
+        *(volatile uint32_t *)(uintptr_t)( g_gic_mapvaddr + MSM8974_GICD_SGIR_OFF )
+            = MSM8974_GICD_SGIR_SELF | MSM8974_GIC_OWN_INTID;
+        __asm__ volatile ("dsb sy" ::: "memory");
+        ++g_gic_isr_pends;
+        entry_live_write( "xnu_live_gicdrv_isr_pends", g_gic_isr_pends );
+        entry_live_write( "xnu_live_gicdrv_isr_sgir", MSM8974_GICD_SGIR_SELF | MSM8974_GIC_OWN_INTID );
+        return;
+    }
+
+    g_gic_isr_guard = 0u;
+    if( g_gic_mapvaddr != 0u && ( g_gic_isr_pend & bit ) == 0u)
+        g_gic_isr_guard = 1u;
+    entry_live_write( "xnu_live_gicdrv_isr_guard", g_gic_isr_guard );
+
+    if( g_gic_isr_guard == 1u) {
+        g_gic_isr_unreg_rc = entry_irq_unregister_client( MSM8974_GIC_OWN_INTID );
+        g_gic_isr_unregs++;
+        entry_live_write( "xnu_live_gicdrv_isr_unregs", g_gic_isr_unregs );
+        entry_live_write( "xnu_live_gicdrv_isr_unreg_rc", g_gic_isr_unreg_rc );
+    }
+
+    g_gic_isr_done = 1u;
+    entry_live_write( "xnu_live_gicdrv_isr_done", g_gic_isr_done );
+}
+#endif /* MSM8974_GIC_DRIVE_SGI */
 
 class MSM8974GIC : public IOService
 {
@@ -164,6 +329,14 @@ MSM8974GIC::start( IOService * provider )
     uint32_t   maptyper = 0u;
     uint32_t   probetyper = 0u;
     uint32_t   hwok = 0u;
+    /* 496 - the writing half: the enable word read before and after, the pending word the line had
+     * before anything was asked of it, and the registration's return. Four readings around three
+     * writes, so that every write this driver makes has a value beside it that the write is supposed
+     * to move, and one that says what was there first. */
+    uint32_t   en_before = 0u;
+    uint32_t   en_after  = 0u;
+    uint32_t   pend_before = 0u;
+    uint32_t   cli_rc = 0u;
 
     if( !super::start( provider )) return( false );
     if( provider == 0) return( false );
@@ -301,6 +474,72 @@ MSM8974GIC::start( IOService * provider )
     entry_live_write( "xnu_live_gicdrv_maptyper", maptyper );
     entry_live_write( "xnu_live_gicdrv_probetyper", probetyper );
     entry_live_write( "xnu_live_gicdrv_hwok", hwok );
+
+    /*
+     * 496: the line, the writes, and the registration.
+     *
+     * The driver's device *is* the interrupt distributor, and up to here this file had only read it.
+     * This is the part where it programs it - three writes through the same VA 494 established, each
+     * with its own reading beside it, because a device write whose effect is not read back is an
+     * assumption about the part and not a measurement of it:
+     *
+     *     ISENABLER0 |= bit      -> `_en_before` / `_en_after`: the line was already enabled by the
+     *                               boot chain (`0xc7fff` has bit 0 set in every run of the payload's
+     *                               own self-test), so this is an idempotent re-assertion and the two
+     *                               numbers say so rather than claiming the driver turned it on
+     *     SGIR = SELF | intid    -> the request itself, in the register `gic.c` measured
+     *     ISPENDR0 & bit (in the ISR) -> what the acknowledgement did, and ICPENDR0 only if it did
+     *                               not clear it
+     *
+     * **The order is the safety property.** The registration happens before the request: an intid
+     * that arrives with no client is the dispatcher's stop path, so a driver that pended first would
+     * end the run at the one place this step exists to keep it out of. And the zeroes are published
+     * before the request, for the reason 495's are: a driver that is never called back then has a
+     * record that says "asked, never called" instead of keys that are simply absent.
+     *
+     * All of it is inside `#if MSM8974_GIC_DRIVE_SGI`, the switch above; the compiled value is
+     * published outside the block so a run always says which machine it was.
+     */
+    entry_live_write( "xnu_live_gicdrv_drive_compiled", MSM8974_GIC_DRIVE_SGI );
+#if MSM8974_GIC_DRIVE_SGI
+    g_gic_mapvaddr = mapvaddr;
+    entry_live_write( "xnu_live_gicdrv_isr", (uint32_t)(uintptr_t) &msm8974_gic_isr );
+    entry_live_write( "xnu_live_gicdrv_isr_self", (uint32_t)(uintptr_t) this );
+    entry_live_write( "xnu_live_gicdrv_own", MSM8974_GIC_OWN_INTID );
+    entry_live_write( "xnu_live_gicdrv_isr_ask", MSM8974_GIC_ASK_PENDS );
+    entry_live_write( "xnu_live_gicdrv_pends", 0u );
+    entry_live_write( "xnu_live_gicdrv_isr_calls", 0u );
+    entry_live_write( "xnu_live_gicdrv_isr_pends", 0u );
+    entry_live_write( "xnu_live_gicdrv_isr_unregs", 0u );
+    entry_live_write( "xnu_live_gicdrv_isr_done", 0u );
+
+    if( mapvaddr != 0u) {
+        const uint32_t bit = 1u << MSM8974_GIC_OWN_INTID;
+
+        en_before = *(volatile uint32_t *)(uintptr_t)( mapvaddr + MSM8974_GICD_ISENABLER0_OFF );
+        *(volatile uint32_t *)(uintptr_t)( mapvaddr + MSM8974_GICD_ISENABLER0_OFF ) = bit;
+        __asm__ volatile ("dsb sy" ::: "memory");
+        en_after = *(volatile uint32_t *)(uintptr_t)( mapvaddr + MSM8974_GICD_ISENABLER0_OFF );
+        pend_before = *(volatile uint32_t *)(uintptr_t)( mapvaddr + MSM8974_GICD_ISPENDR0_OFF );
+    }
+    entry_live_write( "xnu_live_gicdrv_en_before", en_before );
+    entry_live_write( "xnu_live_gicdrv_en_after", en_after );
+    entry_live_write( "xnu_live_gicdrv_pend_before", pend_before );
+
+    cli_rc = entry_irq_register_client( MSM8974_GIC_OWN_INTID,
+                                        (uint32_t)(uintptr_t) &msm8974_gic_isr,
+                                        (uint32_t)(uintptr_t) this );
+    entry_live_write( "xnu_live_gicdrv_cli_rc", cli_rc );
+
+    if( cli_rc == 1u && mapvaddr != 0u) {
+        *(volatile uint32_t *)(uintptr_t)( mapvaddr + MSM8974_GICD_SGIR_OFF )
+            = MSM8974_GICD_SGIR_SELF | MSM8974_GIC_OWN_INTID;
+        __asm__ volatile ("dsb sy" ::: "memory");
+        ++g_gic_pends;
+        entry_live_write( "xnu_live_gicdrv_pends", g_gic_pends );
+        entry_live_write( "xnu_live_gicdrv_sgir", MSM8974_GICD_SGIR_SELF | MSM8974_GIC_OWN_INTID );
+    }
+#endif /* MSM8974_GIC_DRIVE_SGI */
 
     return( true );
 }

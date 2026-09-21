@@ -12,12 +12,16 @@ run would report as an error:
   1. **the GIC register offsets are one definition.** The GIC is not Apple's - MSM8974's interrupt
      controller is described by this repository's own `stages/stage90/gic.c` (its DT assertions and
      its register map) and by experiment 143's `xnu_msm8974_fiq_probe.c`. `entry_gic.h` transcribes
-     eleven of those numbers plus two bases and every bit it writes, so the check compares **both
-     directions**: each name the header defines must equal the payload's, and each name the payload
-     defines that this step reads must be present in the header. That is the "one value, two
-     definitions" guard applied to the half of this step whose owner is this repository rather than
-     the tree - and it is the first check in this walk that compares two of *this project's* files
-     for the same value.
+     those numbers plus two bases and every bit it writes, so the check compares **both directions**:
+     each name the header defines must equal the payload's, and each name the payload defines that
+     this step reads must be present in the header. That is the "one value, two definitions" guard
+     applied to the half of this step whose owner is this repository rather than the tree - and it is
+     the first check in this walk that compares two of *this project's* files for the same value.
+     **496 added the three names a driver writes**: `GICD_SGIR`, its target-self filter and the SGI's
+     intid. The filter is the first value here that is a *derivation* (`(2u << 24)`, handled by
+     `defines`'s third form) rather than a literal, and the header's justification for the driver
+     using an SGI at all is a measurement in the payload, so the payload's own write sites are read
+     too (`SELF_TEST_WRITE`) rather than only its defines.
 
   2. **the two candidate lines are the payload's, and they are distinct.** The device tree's timer
      node is `interrupts = <1 2 0 1 3 0>` and the xlate maps PPI n to INTID n + 16. `gic.c`'s
@@ -136,11 +140,27 @@ OFFSET_MAP = (
     ("STAGE90_GICC_EOIR", PAYLOAD_GIC_C, "GICC_EOIR"),
     ("STAGE90_GIC_TIMER_PPI0", PAYLOAD_GIC_C, "GIC_TIMER_PPI0_ID"),
     ("STAGE90_GIC_TIMER_PPI1", PAYLOAD_GIC_C, "GIC_TIMER_PPI1_ID"),
+    # 496: the register a *driver* raises an interrupt with. `entry_gic.h` names these three for the
+    # GIC driver, which writes them, and the payload names all three in its own SGI self-test - so the
+    # comparison is of a value two writers share, and `STAGE90_GICD_SGIR_TARGET_SELF` is the first
+    # entry in this map whose value is a *derivation* rather than a literal (`defines`'s third form).
+    ("STAGE90_GICD_SGIR", PAYLOAD_GIC_C, "GICD_SGIR"),
+    ("STAGE90_GICD_SGIR_TARGET_SELF", PAYLOAD_GIC_C, "GICD_SGIR_TARGET_SELF"),
+    ("STAGE90_GIC_SGI0_ID", PAYLOAD_GIC_C, "GIC_SGI0_ID"),
 )
 
 # Names the payload defines that this check requires to agree with *each other* where both files have
 # them: a register 482 reads whose two payload sources disagree is a value nobody can transcribe.
 CROSS_CHECKED_IN_PAYLOAD = ("GICD_CTLR", "GICC_CTLR", "GICC_IAR", "GICC_EOIR")
+
+# 496: the write sites the header's SGI justification cites, as the *text* of the payload's own
+# self-test. These are not defines - they are the statements that make the three numbers above a
+# measurement rather than a transcription, and each is matched with `re.search` against the comment-
+# stripped source so a mention in prose cannot satisfy it.
+SELF_TEST_WRITE = (
+    r"mmio_write32\(\s*dist_base\s*\+\s*GICD_SGIR\s*,\s*GICD_SGIR_TARGET_SELF\s*\|\s*GIC_SGI0_ID\s*\)",
+    r"mmio_write32\(\s*dist_base\s*\+\s*GICD_ISENABLER0\s*,\s*1u\s*<<\s*GIC_SGI0_ID\s*\)",
+)
 
 
 def say(message):
@@ -167,6 +187,14 @@ def defines(text):
     how every one of these files documents the line it is on; a parser anchored at the end of the
     line would silently read only the defines nobody had annotated yet, which is the shape of a check
     that stops checking what it was written for (205/206).
+
+    **A third form is here since 496, and it is a *derivation* rather than a relaxation**:
+    `(2u << 24)`, which is how both the payload and this image's header spell `GICD_SGIR`'s
+    target-self filter. The alternative was to leave it unparsed and compare the two files as text,
+    which would have made the comparison a spelling instead of a value - and a spelling comparison
+    passes for `(2u << 24)` and `(2u << 23)` alike the moment either file is reformatted. A shift of
+    two literals is a number, so it is read as one, and the constant is then held against the other
+    file's the same way every offset in this map is.
     """
     out = {}
     for match in re.finditer(r"^#define[ \t]+([A-Za-z_]\w*)[ \t]+([^\n]+)$", strip_comments(text),
@@ -181,6 +209,11 @@ def defines(text):
             for part in value.split("|"):
                 total |= int(part.strip(), 0)
             out[name] = total
+        else:
+            shift = re.fullmatch(r"\(\s*(0[xX][0-9a-fA-F]+|\d+)\s*<<\s*(0[xX][0-9a-fA-F]+|\d+)\s*\)",
+                                 value)
+            if shift:
+                out[name] = int(shift.group(1), 0) << int(shift.group(2), 0)
     return out
 
 
@@ -410,6 +443,22 @@ def claim_offsets(facts, failures, notes):
         if name not in known:
             failures.append("%s is read by the payload's GIC code and is not in entry_gic.h's map, "
                             "so 482 could transcribe it from nowhere" % name)
+
+    # **And 496's evidence, which is a *write site* rather than a define.** The header's comment
+    # justifies the driver's SGI by citing a measurement - the payload's own `gic_sgi_selftest` pends
+    # SGI 0 to itself and counted the delivery - and a comment that cites a measurement is a claim
+    # about a file, so the file is read: the self-test must still exist, and it must still be the same
+    # two names OR'd together into the same register. Three defines that agree and no writer would be a
+    # header justified by a self-test that had been deleted, which is precisely the shape this project
+    # writes down as "a claim in a comment is not a check".
+    for name in SELF_TEST_WRITE:
+        if not re.search(name, strip_comments(facts["payload_text"])):
+            failures.append("`gic.c` no longer contains the write this header's SGI owes its evidence "
+                            "to (%s): the driver would then be the *first* user of a mechanism whose "
+                            "delivery nothing on this machine has measured, and the header says "
+                            "otherwise" % name)
+    notes.append("the payload's own SGI self-test is still in `gic.c`, so the driver's SGI is the "
+                 "second user of a delivery the payload counted")
 
 
 def claim_bases(facts, failures, notes):
@@ -1000,6 +1049,23 @@ def mutate_facts(facts, mutate):
     elif mutate == "mask_declared_but_unused":
         facts["probe_text"] = _bump(facts["probe_text"], "    cpsr = gic_irq_mask();",
                                     "    cpsr = 0u;")
+    elif mutate == "sgir_target_filter_moved":
+        # The *derivation* form of the map: `(2u << 24)` on both sides, and this is the one mutation
+        # that could only be caught by `defines` having been taught the shift - a filter of `1u << 24`
+        # is a request aimed at the CPUs in the target list, i.e. at none of them.
+        facts["header"]["STAGE90_GICD_SGIR_TARGET_SELF"] = 1 << 24
+    elif mutate == "sgi_intid_moved":
+        facts["header"]["STAGE90_GIC_SGI0_ID"] = 1
+    elif mutate == "sgir_offset_moved":
+        facts["header"]["STAGE90_GICD_SGIR"] += 4
+    elif mutate == "sgir_define_dropped":
+        facts["header"] = {k: v for k, v in facts["header"].items()
+                           if k != "STAGE90_GICD_SGIR_TARGET_SELF"}
+    elif mutate == "self_test_write_removed":
+        facts["payload_text"] = _bump(
+            facts["payload_text"],
+            "mmio_write32(dist_base + GICD_SGIR, GICD_SGIR_TARGET_SELF | GIC_SGI0_ID);",
+            "/* the SGI self-test is gone */")
     else:
         raise SystemExit("unknown mutation %s" % mutate)
     return facts
@@ -1021,6 +1087,8 @@ MUTATIONS = (
     "the_probe_keeps_the_table_to_itself", "the_moved_flag_is_never_written",
     "the_mapper_guard_is_dropped", "the_table_is_published_after_the_refusal",
     "the_justification_is_gone",
+    "sgir_target_filter_moved", "sgi_intid_moved", "sgir_offset_moved", "sgir_define_dropped",
+    "self_test_write_removed",
 )
 
 

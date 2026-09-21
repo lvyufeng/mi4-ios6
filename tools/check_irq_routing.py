@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Check the six things 483's interrupt depends on, before any of them can deliver anything.
+Check the seven things 483's interrupt depends on, before any of them can deliver anything.
 
 482 measured *which line* the virtual timer asserts. 483 is the step that lets a countdown on that line
 become an interrupt, and what it adds to the machine is not a number - it is a *chain*: a handler word in
@@ -30,6 +30,21 @@ so that a later edit cannot leave two copies of it disagreeing (this project's o
      `EOIR` and `rtclock_intr(0)`; a spurious read gets no `EOIR` (the architecture says a spurious read
      acknowledges nothing); and any other intid is acknowledged, recorded, **and stopped** - because an
      unhandled line that returns is an interrupt that arrives again immediately, a hang with no message.
+     **496 made it four, and the fourth is a line a *driver* owns**: between the timer's case and the
+     spurious one, the dispatcher reads a registration table and calls the client filed for that intid
+     after writing its `EOIR`. The shape that makes that safe rather than a second dispatcher is the
+     order of two statements - the scan `continue`s on an intid it does not hold, and the client path
+     `return`s - so every intid this image did not hand out still reaches the stop below, and a driver's
+     mistake is still a stop rather than a storm. That is why the stop count is checked as a *count*
+     (exactly two) and the scan's position as a *position* (after the timer, before the spurious case).
+
+  7. **the registration table's writer and its reader agree on what a slot is.** `entry_irq.c` gains a
+     registry in 496, and the one thing about it a source can hold is the *order* the three fields of a
+     slot are written in: the intid and the `refCon` first and the handler **last**, so a scan racing a
+     registration either does not match the slot's intid yet or finds a zero handler and treats the line
+     as unregistered. The reverse order publishes a handler for an intid the scan has not been told
+     about. The unregister's order is the mirror of it for the same reason, and both are checked here
+     because both are invisible in a run that never loses the race.
 
   5. **the enable is a switch in the source and not a flag on a command line.** `STAGE90_IRQ_ENABLE_LINE`
      is what decides whether a countdown may become an interrupt (this file) and which handler slot 6 must
@@ -299,14 +314,21 @@ def claim_handler(facts, failures, notes):
     spurious = body.find("STAGE90_GICC_SPURIOUS_ID")
     stop = body.find("entry_epilogue(")
     line = body.find("STAGE90_GIC_TIMER_INTID")
+    scan = body.find("for (i = 0u; i < STAGE90_IRQ_CLIENTS; i++)")
+    cli_eoir = body.find("gicc_write(STAGE90_GICC_EOIR", scan) if scan >= 0 else -1
+    cli_cap = body.find("STAGE90_IRQ_CLIENT_CAP", scan) if scan >= 0 else -1
+    cli_stop = body.find("entry_epilogue(", scan) if scan >= 0 else -1
+    cli_call = body.find("client(", scan) if scan >= 0 else -1
 
     for find, name in ((iar, "reads GICC_IAR"), (eoir, "writes GICC_EOIR"),
                        (timer, "calls the kernel's timer service"),
                        (spurious, "handles the spurious read the architecture defines"),
-                       (stop, "names and stops on a line it did not expect")):
+                       (stop, "names and stops on a line it did not expect"),
+                       (scan, "scans the client registration table"),
+                       (cli_call, "calls the client registered for a line")):
         if find < 0:
             failures.append("entry_irq.c's entry_irq_handler no longer %s" % name)
-    if min(iar, eoir, timer, spurious, stop, line) < 0:
+    if min(iar, eoir, timer, spurious, stop, line, scan, cli_eoir, cli_cap, cli_stop, cli_call) < 0:
         return
 
     if not re.search(r"intid\s*=\s*iar\s*&\s*STAGE90_GICC_IAR_INTID_MASK", body):
@@ -330,23 +352,166 @@ def claim_handler(facts, failures, notes):
     if stop < timer:
         failures.append("entry_irq.c's handler's stop path comes before its timer path, so the line "
                         "this step exists for may never be reached")
-    if body.count("entry_epilogue(") != 1:
-        failures.append("entry_irq.c's handler has %d `entry_epilogue` calls: the unexpected-line path "
-                        "is the one that must stop, and a second one is a path this check did not "
+    # **496: which stops there are, and where the client's path sits between them.** The count is two
+    # and the order is the claim: `scan` is found where no `SCAN` text exists in a build that predates
+    # 496, so a file that lost the registry fails above at the presence test rather than here.
+    if body.count("entry_epilogue(") != 2:
+        failures.append("entry_irq.c's handler has %d `entry_epilogue` calls: two are expected - the "
+                        "line the driver owns being asked for more times than this image will answer "
+                        "for, and the unexpected-line path - and a third is a path this check did not "
                         "reason about" % body.count("entry_epilogue("))
-    if body.count("gicc_write(STAGE90_GICC_EOIR") != 2:
-        failures.append("entry_irq.c's handler has %d `GICC_EOIR` writes: exactly two are expected - "
-                        "the timer's, and the unexpected line's, which is acknowledged so that it "
-                        "cannot be asserted straight back. A spurious read has none, because the "
-                        "architecture says it acknowledges nothing."
+    if not (timer < scan < spurious):
+        failures.append("entry_irq.c's handler scans the client table at offset %d, the timer's case "
+                        "is at %d and the spurious case at %d: the scan must sit between them, or it "
+                        "either shadows a line this image services itself (the timer's) or makes the "
+                        "spurious read reachable by a registration" % (scan, timer, spurious))
+    if cli_cap > cli_call:
+        failures.append("entry_irq.c's handler applies `STAGE90_IRQ_CLIENT_CAP` after it calls the "
+                        "client: the bound would then be on the requests already answered rather than "
+                        "on the ones this image is willing to answer")
+    if not (cli_eoir > scan and cli_eoir < cli_call):
+        failures.append("entry_irq.c's handler calls the client at offset %d and writes `EOIR` at "
+                        "%d: the acknowledgement must come first, or a line asserted during the "
+                        "client's own work is still active at the CPU interface" % (cli_call, cli_eoir))
+    if not (cli_cap < cli_stop < cli_call):
+        failures.append("entry_irq.c's handler's client-path stop is at offset %d, the cap test at %d "
+                        "and the call at %d: the stop has to be the branch taken when the cap is "
+                        "exceeded, so a line that keeps re-asserting itself ends the run with the "
+                        "intid recorded instead of being answered until the watchdog" % (cli_stop, cli_cap, cli_call))
+    if not re.search(r"if\s*\(\s*client\s*==\s*0\s*\|\|\s*g_irq_cli_intid\[i\]\s*!=\s*intid\s*\)\s*\n"
+                     r"\s*continue\s*;", body):
+        failures.append("entry_irq.c's handler does not skip a slot whose handler is zero or whose "
+                        "intid is another line: the scan would either call the wrong client or fall "
+                        "into the stop below on the first free slot")
+    if not re.search(r"client\([^;]*\)\s*;\s*\n\s*return\s*;", body):
+        failures.append("entry_irq.c's handler does not `return` after calling the client, so the "
+                        "path continues into the unexpected-line stop - the client's line would be "
+                        "serviced and then end the run")
+    if not (cli_call < spurious):
+        failures.append("entry_irq.c's handler calls the client before its spurious case, so a "
+                        "registration can be reached by the `0x3ff` a CPU interface returns when "
+                        "there is nothing to acknowledge")
+    if body.count("gicc_write(STAGE90_GICC_EOIR") != 3:
+        failures.append("entry_irq.c's handler has %d `GICC_EOIR` writes: exactly three are expected - "
+                        "the timer's, the client's line, and the unexpected line's, which is "
+                        "acknowledged so that it cannot be asserted straight back. A spurious read has "
+                        "none, because the architecture says it acknowledges nothing."
                         % body.count("gicc_write(STAGE90_GICC_EOIR"))
     # And the spurious case must be the one with no EOI, which is the count above's other half.
     tail = body[spurious:]
     if "gicc_write(STAGE90_GICC_EOIR" in tail[:tail.find("return")]:
         failures.append("entry_irq.c's spurious case writes GICC_EOIR with `0x3ff`, which is an "
                         "acknowledgement of an interrupt that does not exist")
-    notes.append("the handler reads IAR, EOIRs and services the line 482 measured, and stops on any "
-                 "other - the shape that cannot loop")
+    notes.append("the handler reads IAR, EOIRs and services the line 482 measured, calls the client a "
+                 "registration filed for any other line, and stops on the two cases that must stop - "
+                 "the shape that cannot loop")
+
+
+def claim_client_registry(facts, failures, notes):
+    """7. A line can be handed to a driver, and a slot's three fields are written in one order.
+
+    The registry is `entry_irq.c`'s in 496, and there are two properties of it that no run can show:
+    the *order* a slot is filled in, which is the whole of its concurrency contract against the
+    dispatcher that reads it, and the *set* of intids it refuses. Both are source-order claims about
+    `entry_irq_register_client`, so both are read out of its body.
+
+      * **the handler is stored last.** `g_irq_cli_intid[slot]` and `g_irq_cli_refcon[slot]` must
+        precede `g_irq_cli_handler[slot]`. The registration runs in process context with interrupts
+        open, so a delivery can be taken between any two of the three stores; the order is what makes
+        the intermediate states describable - a slot is either not yet this line's, or not yet live.
+        The unregister is the mirror of it for the same reason and is checked as such.
+      * **two lines are refused by name.** `STAGE90_GIC_TIMER_INTID` is serviced by the dispatcher
+        before the table is read, so registering it would file a handler that is never called; and
+        `STAGE90_GICC_SPURIOUS_ID` is not a line at all. A refusal is a *value* (`_cli_refused` plus
+        the intid), because a call that quietly did nothing is a driver that believes it owns a line
+        it does not.
+      * **a full table and a duplicate are refusals too, and not overwrites.** A second registration
+        for a line that already has a client would either shadow the first handler or make the
+        dispatcher's choice depend on the order two drivers started in.
+    """
+    body = function_body(facts["irq"], "entry_irq_register_client")
+    if body is None:
+        failures.append("entry_irq.c no longer defines entry_irq_register_client, so the table the "
+                        "dispatcher scans has no writer")
+        return
+    into = body.find("g_irq_cli_intid[slot] =")
+    refcon = body.find("g_irq_cli_refcon[slot] =")
+    handler = body.find("g_irq_cli_handler[slot] =")
+    for at, name in ((into, "g_irq_cli_intid[slot] ="), (refcon, "g_irq_cli_refcon[slot] ="),
+                     (handler, "g_irq_cli_handler[slot] =")):
+        if at < 0:
+            failures.append("entry_irq.c's registration never writes `%s`, so the slot the "
+                            "dispatcher scans is filled in only in part" % name)
+    if min(into, refcon, handler) >= 0:
+        if not (into < handler and refcon < handler):
+            failures.append("entry_irq.c's registration stores the handler at offset %d and the intid "
+                            "at %d / the refCon at %d: the handler has to be the last of the three, "
+                            "because it is what makes the slot live - the other order publishes a "
+                            "handler for an intid the dispatcher has not been told about"
+                            % (handler, into, refcon))
+        else:
+            notes.append("a slot's intid and refCon are written before its handler, so a scan racing "
+                         "a registration sees a slot that is not yet live rather than a live slot with "
+                         "the wrong fields")
+    if body.count("entry_live_write") + body.count("IRQ_LIVE") < 6:
+        failures.append("entry_irq.c's registration publishes %d keys: the accepted registration has "
+                        "to be visible as a sequence (its count, the slot, the intid, the handler "
+                        "address, the refCon) and a refusal as a value - a registration whose outcome "
+                        "is not in the log is a line whose ownership cannot be read out of a run"
+                        % (body.count("entry_live_write") + body.count("IRQ_LIVE")))
+    # The keys, by name and not by the variables behind them: `IRQ_LIVE("xnu_live_irq_cli_intid",
+    # intid)` publishes the *parameter*, and a check that looked for `g_irq_cli_intid` in the call
+    # would refuse a correct file - one value reachable by two spellings is this project's oldest
+    # defect, and a claim is not the place to add a third.
+    for key in ("xnu_live_irq_cli_seq", "xnu_live_irq_cli_slot", "xnu_live_irq_cli_intid",
+                "xnu_live_irq_cli_handler", "xnu_live_irq_cli_refcon", "xnu_live_irq_cli_refused"):
+        if '"%s"' % key not in body:
+            failures.append("entry_irq.c's registration never publishes `%s`: the key that makes the "
+                            "claim this file makes about the table readable is missing" % key)
+    # The refusals, by name, as a *condition* rather than as prose.
+    for macro in ("STAGE90_GIC_TIMER_INTID", "STAGE90_GICC_SPURIOUS_ID"):
+        guard = body[:into] if into >= 0 else body
+        if macro not in guard:
+            failures.append("entry_irq.c's registration does not refuse `%s`: the dispatcher services "
+                            "that case before it reads the table, so a client filed against it would "
+                            "never be called while the driver believed it owned the line" % macro)
+    if "handler == 0u" not in body:
+        failures.append("entry_irq.c's registration accepts a zero handler, so a slot can be filed "
+                        "with an address the dispatcher would take for a free one")
+
+    unreg = function_body(facts["irq"], "entry_irq_unregister_client")
+    if unreg is None:
+        failures.append("entry_irq.c defines no way to withdraw a registration: the line a driver "
+                        "owns would be one it can never stop owning, and the stop the dispatcher takes "
+                        "for an unregistered line would be unreachable from the driver's side")
+        return
+    clear = unreg.find("g_irq_cli_handler[i] = 0")
+    scoured = unreg.find("g_irq_cli_intid[i] = 0u")
+    if clear < 0:
+        failures.append("entry_irq.c's unregister never clears the handler, so the dispatcher keeps "
+                        "calling a client that gave the line back")
+    elif scoured >= 0 and not clear < scoured:
+        failures.append("entry_irq.c's unregister clears the intid before the handler: the slot is "
+                        "still live to the dispatcher while the intid it matches has been zeroed, "
+                        "which is the one state the registration order exists to avoid")
+    else:
+        notes.append("the unregister clears the handler first, so a delivery racing it finds a line "
+                     "with no client - the documented stop - and not a half-cleared slot")
+    if "xnu_live_irq_cli_unreg_gone" not in unreg:
+        failures.append("entry_irq.c's unregister answers nothing for a line it does not hold: a "
+                        "driver that withdraws twice, or after a refused registration, cannot tell "
+                        "those two cases apart in its own record")
+
+    header = facts["header"]
+    for name in ("STAGE90_IRQ_CLIENTS", "STAGE90_IRQ_CLIENT_CAP"):
+        if header.get(name) is None:
+            failures.append("entry_gic.h does not define `%s` as an integer: the table's size and the "
+                            "bound on the calls one slot may take are what the dispatcher's scan and "
+                            "its stop are arithmetic over, and neither can be inferred" % name)
+    if header.get("STAGE90_IRQ_CLIENT_CAP") is not None and header["STAGE90_IRQ_CLIENT_CAP"] < 1:
+        failures.append("entry_gic.h's `STAGE90_IRQ_CLIENT_CAP` is %d: a cap below one makes the "
+                        "first delivery of any registered line a stop"
+                        % header["STAGE90_IRQ_CLIENT_CAP"])
 
 
 def claim_switch(facts, failures, notes):
@@ -473,6 +638,7 @@ def compare(facts, mutate=None):
     claim_icfgr(facts, failures, notes)
     claim_armed_line(facts, failures, notes)
     claim_handler(facts, failures, notes)
+    claim_client_registry(facts, failures, notes)
     claim_switch(facts, failures, notes)
     claim_order(facts, failures, notes)
     claim_image(facts, failures, notes)
@@ -486,6 +652,24 @@ def compare(facts, mutate=None):
 def _bump(text, needle, replacement):
     assert text.count(needle) >= 1, needle
     return text.replace(needle, replacement, 1)
+
+
+def _relocate(text, block, anchor):
+    """Move the single region matching `block` to just after the single line `anchor`.
+
+    A mutation that has to be an *order* rather than a substitution - "the new case was appended at the
+    end of the handler", "the acknowledgement was written after the call" - and it is a relocation
+    rather than a rewrite so that the block's own text is moved verbatim: a mutation that retyped the
+    block would be testing a second copy of it. Both counts are asserted, because a regex that matched
+    twice would move a different region than the one the mutation names and the selftest would then be
+    refusing something other than what it says.
+    """
+    found = re.findall(block, text, re.S)
+    assert len(found) == 1, (block, len(found))
+    assert text.count(anchor) == 1, (anchor, text.count(anchor))
+    moved = found[0]
+    rest = text.replace(moved, "", 1)
+    return rest.replace(anchor, anchor + moved, 1)
 
 
 def mutate_facts(facts, mutate):
@@ -627,6 +811,68 @@ def mutate_facts(facts, mutate):
         facts["symbols"].pop("entry_irq_handler", None)
     elif mutate == "arm_not_in_the_image":
         facts["symbols"].pop("entry_irq_arm", None)
+    elif mutate == "client_scan_after_the_spurious_case":
+        # Appending the new case at the end of the handler is the edit this mutation is: it reads like
+        # the natural place for it and it puts the scan *after* the spurious case, where the `0x3ff` a
+        # CPU interface returns when there is nothing to acknowledge can reach a registration.
+        rederive(_relocate(facts["irq_text"],
+                           r"\n    \{\n        uint32_t i;\n\n"
+                           r"        for \(i = 0u; i < STAGE90_IRQ_CLIENTS; i\+\+\) \{.*?\n    \}\n",
+                           '    entry_epilogue("exception: irq line");\n'))
+    elif mutate == "client_eoir_after_the_call":
+        rederive(_relocate(facts["irq_text"],
+                           r"            gicc_write\(STAGE90_GICC_EOIR, iar\);\n",
+                           "            client((void *)(uintptr_t) g_irq_cli_refcon[i], intid);\n"))
+    elif mutate == "client_cap_after_the_call":
+        rederive(_relocate(facts["irq_text"],
+                           r"            if \(g_irq_cli_calls\[i\] > STAGE90_IRQ_CLIENT_CAP\) \{.*?\n"
+                           r"            \}\n",
+                           "            client((void *)(uintptr_t) g_irq_cli_refcon[i], intid);\n"))
+    elif mutate == "client_guard_removed":
+        rederive(_bump(facts["irq_text"],
+                       "            if (client == 0 || g_irq_cli_intid[i] != intid)\n"
+                       "                continue;",
+                       "            if (0)\n                continue;"))
+    elif mutate == "client_falls_into_the_stop":
+        rederive(_bump(facts["irq_text"],
+                       "            client((void *)(uintptr_t) g_irq_cli_refcon[i], intid);\n"
+                       "            return;",
+                       "            client((void *)(uintptr_t) g_irq_cli_refcon[i], intid);"))
+    elif mutate == "client_handler_stored_first":
+        rederive(_bump(facts["irq_text"],
+                       "    g_irq_cli_intid[slot] = intid;\n"
+                       "    g_irq_cli_refcon[slot] = refCon;\n"
+                       "    g_irq_cli_handler[slot] = (entry_irq_client_t)(uintptr_t) handler;",
+                       "    g_irq_cli_handler[slot] = (entry_irq_client_t)(uintptr_t) handler;\n"
+                       "    g_irq_cli_intid[slot] = intid;\n"
+                       "    g_irq_cli_refcon[slot] = refCon;"))
+    elif mutate == "client_records_no_slot":
+        rederive(_bump(facts["irq_text"], '    IRQ_LIVE("xnu_live_irq_cli_slot", slot);\n', ""))
+    elif mutate == "client_refuses_nothing":
+        rederive(_bump(facts["irq_text"],
+                       "        intid == STAGE90_GIC_TIMER_INTID ||\n"
+                       "        intid == STAGE90_GICC_SPURIOUS_ID) {",
+                       "        0) {"))
+    elif mutate == "client_accepts_a_zero_handler":
+        rederive(_bump(facts["irq_text"], "    if (handler == 0u ||", "    if (0 ||"))
+    elif mutate == "unregister_keeps_the_handler":
+        rederive(_bump(facts["irq_text"], "            g_irq_cli_handler[i] = 0;",
+                       "            g_irq_cli_handler[i] = g_irq_cli_handler[i];"))
+    elif mutate == "unregister_clears_the_intid_first":
+        rederive(_bump(facts["irq_text"],
+                       "            g_irq_cli_handler[i] = 0;\n"
+                       "            g_irq_cli_intid[i] = 0u;",
+                       "            g_irq_cli_intid[i] = 0u;\n"
+                       "            g_irq_cli_handler[i] = 0;"))
+    elif mutate == "unregister_is_silent_about_a_missing_line":
+        rederive(_bump(facts["irq_text"],
+                       '    IRQ_LIVE("xnu_live_irq_cli_unreg_gone", intid);\n', ""))
+    elif mutate == "client_cap_removed_from_the_header":
+        rederive_header(re.sub(r"^#define[ \t]+STAGE90_IRQ_CLIENT_CAP[ \t]+\d+[uU]?", "/* gone */",
+                               facts["header_text"], count=1, flags=re.M))
+    elif mutate == "client_cap_is_zero":
+        rederive_header(_bump(facts["header_text"], "#define STAGE90_IRQ_CLIENT_CAP  64u",
+                              "#define STAGE90_IRQ_CLIENT_CAP  0u"))
     else:
         raise SystemExit("unknown mutation %s" % mutate)
     return facts
@@ -643,6 +889,12 @@ MUTATIONS = (
     "switch_is_a_third_value", "enable_outside_the_switch", "enable_not_in_the_switch", "no_arm_call",
     "unmask_before_arm", "unmask_unconditional", "sample_not_masked", "no_probe", "no_tval_write",
     "arm_before_the_write_count", "handler_not_in_the_image", "arm_not_in_the_image",
+    "client_scan_after_the_spurious_case", "client_eoir_after_the_call", "client_cap_after_the_call",
+    "client_guard_removed", "client_falls_into_the_stop", "client_handler_stored_first",
+    "client_records_no_slot", "client_refuses_nothing", "client_accepts_a_zero_handler",
+    "unregister_keeps_the_handler", "unregister_clears_the_intid_first",
+    "unregister_is_silent_about_a_missing_line", "client_cap_removed_from_the_header",
+    "client_cap_is_zero",
 )
 
 

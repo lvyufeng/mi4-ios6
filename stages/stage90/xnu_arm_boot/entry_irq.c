@@ -150,12 +150,14 @@ void gicc_write(uint32_t off, uint32_t value)
 /* --------------------------------------------------------------------------------------------- */
 
 /*
- * There is exactly one line this handler expects, and one intid it acts on. Everything else is
- * recorded and **named** rather than serviced or ignored, because the two silent failure modes are
- * both worse than a stop: an unhandled line that is EOI'd and returns is an interrupt that will
- * arrive again immediately (a run that looks like a hang with no message), and one that is not
- * EOI'd and returns is an interrupt that will arrive again immediately for a different reason. So
- * the third case names its intid and stops.
+ * There is exactly one line this handler services itself, one intid it acts on, and **since 496 one
+ * table of lines it will hand to a driver**. Everything else is recorded and **named** rather than
+ * serviced or ignored, because the two silent failure modes are both worse than a stop: an unhandled
+ * line that is EOI'd and returns is an interrupt that will arrive again immediately (a run that looks
+ * like a hang with no message), and one that is not EOI'd and returns is an interrupt that will
+ * arrive again immediately for a different reason. So the third case names its intid and stops - and
+ * that case is what a driver gets if it pends a line it never registered, which is why the registry
+ * below is a gate and not a convenience.
  */
 static uint32_t g_irq_seq;
 static uint32_t g_irq_args[4];
@@ -165,6 +167,123 @@ static uint32_t g_irq_spurious_count;
 static uint32_t g_irq_late_count;
 static uint32_t g_irq_last_iar;
 static uint32_t g_irq_first_iar;
+
+/* --------------------------------------------------------------------------------------------- */
+/* The client registry (496)                                                                      */
+/* --------------------------------------------------------------------------------------------- */
+
+/*
+ * **One registration table, and the order its fields are written in is the concurrency contract.**
+ * The dispatcher runs with interrupts masked, but `entry_irq_register_client` runs in *process*
+ * context with them open, so a registration can be preempted by the very IRQ path that reads the
+ * table. The rule that makes that harmless is: a slot is taken only when its handler is zero, the
+ * intid and the `refCon` are stored first, and **the handler is stored last** - so a scan racing the
+ * write either does not match the intid (the slot is not yet that line's) or finds a zero handler and
+ * treats the line as unregistered, which is exactly what it was a moment earlier. The reverse order
+ * would publish a handler for an intid the scan has not yet been told about, which is not a
+ * variation on this - it is a different, broken state.
+ */
+typedef void (*entry_irq_client_t)(void *refCon, uint32_t intid);
+
+static uint32_t g_irq_cli_intid[STAGE90_IRQ_CLIENTS];
+static uint32_t g_irq_cli_refcon[STAGE90_IRQ_CLIENTS];
+static entry_irq_client_t g_irq_cli_handler[STAGE90_IRQ_CLIENTS];
+static uint32_t g_irq_cli_calls[STAGE90_IRQ_CLIENTS];
+static uint32_t g_irq_cli_registered;
+static uint32_t g_irq_cli_unregistered;
+static uint32_t g_irq_cli_refused;
+static uint32_t g_irq_cli_calls_total;
+static uint32_t g_irq_cli_last;
+static uint32_t g_irq_cli_storm;
+
+/*
+ * Register a client for one line, or refuse and say why. **A refusal is a value and not a silence**:
+ * the two lines this image will not hand over are its own - `STAGE90_GIC_TIMER_INTID`, which the
+ * dispatcher services itself before it reaches this table, and `STAGE90_GICC_SPURIOUS_ID`, which is
+ * not a line at all - and a caller that asked for one of them has made a mistake the log should
+ * carry rather than a call that quietly did nothing. `_cli_refused` is that count.
+ */
+uint32_t entry_irq_register_client(uint32_t intid, uint32_t handler, uint32_t refCon)
+{
+    uint32_t i, slot = STAGE90_IRQ_CLIENTS;
+
+    if (handler == 0u ||
+        intid == STAGE90_GIC_TIMER_INTID ||
+        intid == STAGE90_GICC_SPURIOUS_ID) {
+        g_irq_cli_refused++;
+        IRQ_LIVE("xnu_live_irq_cli_refused", g_irq_cli_refused);
+        IRQ_LIVE("xnu_live_irq_cli_refused_intid", intid);
+        return 0u;
+    }
+
+    for (i = 0u; i < STAGE90_IRQ_CLIENTS; i++) {
+        if (g_irq_cli_handler[i] == 0) {
+            if (slot == STAGE90_IRQ_CLIENTS)
+                slot = i;
+        } else if (g_irq_cli_intid[i] == intid) {
+            /* One line, one client. A second registration for a line that already has one is a
+             * driver that has lost track of its own state, and the first client's handler is still
+             * the one the dispatcher will call - which is the safe direction, and recorded. */
+            g_irq_cli_refused++;
+            IRQ_LIVE("xnu_live_irq_cli_refused", g_irq_cli_refused);
+            IRQ_LIVE("xnu_live_irq_cli_refused_intid", intid);
+            return 0u;
+        }
+    }
+
+    if (slot == STAGE90_IRQ_CLIENTS) {
+        g_irq_cli_refused++;
+        IRQ_LIVE("xnu_live_irq_cli_refused", g_irq_cli_refused);
+        IRQ_LIVE("xnu_live_irq_cli_refused_intid", intid);
+        return 0u;
+    }
+
+    g_irq_cli_intid[slot] = intid;
+    g_irq_cli_refcon[slot] = refCon;
+    g_irq_cli_handler[slot] = (entry_irq_client_t)(uintptr_t) handler;
+
+    g_irq_cli_registered++;
+    IRQ_LIVE("xnu_live_irq_cli_seq", g_irq_cli_registered);
+    IRQ_LIVE("xnu_live_irq_cli_slot", slot);
+    IRQ_LIVE("xnu_live_irq_cli_intid", intid);
+    IRQ_LIVE("xnu_live_irq_cli_handler", handler);
+    IRQ_LIVE("xnu_live_irq_cli_refcon", refCon);
+    IRQ_LIVE("xnu_live_irq_cli_capacity", STAGE90_IRQ_CLIENTS);
+    return 1u;
+}
+
+/*
+ * And the way back, which is **the client's own decision and not the dispatcher's**. A registration
+ * that cannot be withdrawn is a line the driver can never stop owning, and the failure that makes
+ * that matter is not hypothetical: an intid that reaches the dispatcher with no client is the case
+ * that *stops the run*, so a driver that gives its line back has to know the line is quiet first.
+ * That guard is the client's - it is the one that can read its own device - and this function only
+ * refuses to lie: a line with no registration is counted (`_cli_unregistered_gone`) and answered 0,
+ * so a driver that unregisters twice, or after a failed registration, can tell that from the case it
+ * is trying to distinguish.
+ */
+uint32_t entry_irq_unregister_client(uint32_t intid)
+{
+    uint32_t i;
+
+    for (i = 0u; i < STAGE90_IRQ_CLIENTS; i++) {
+        if (g_irq_cli_handler[i] != 0 && g_irq_cli_intid[i] == intid) {
+            /* The handler first: the slot stops being live for the dispatcher before anything else
+             * about it changes, so a delivery racing this store is a line with no client - the case
+             * the run's own record names - and not a call through half-cleared state. */
+            g_irq_cli_handler[i] = 0;
+            g_irq_cli_intid[i] = 0u;
+            g_irq_cli_refcon[i] = 0u;
+            g_irq_cli_unregistered++;
+            IRQ_LIVE("xnu_live_irq_cli_unregistered", g_irq_cli_unregistered);
+            IRQ_LIVE("xnu_live_irq_cli_unreg_intid", intid);
+            return 1u;
+        }
+    }
+
+    IRQ_LIVE("xnu_live_irq_cli_unreg_gone", intid);
+    return 0u;
+}
 
 void entry_irq_handler(void *target, void *refCon, void *nub, int source)
 {
@@ -221,6 +340,54 @@ void entry_irq_handler(void *target, void *refCon, void *nub, int source)
         return;
     }
 
+    /*
+     * **496: the lines a driver owns.** Read out of the table one entry at a time and called only
+     * when the intid matches, so the stop below is still reachable for every line this image did not
+     * hand out - which is the property that makes a driver's mistake a stop rather than a storm.
+     *
+     * The acknowledgement is written **here and before the call**, for the timer line's reason:
+     * EOIR'ing first means a line that is re-asserted during the client's work is already back in the
+     * distributor's hands, and it means the client cannot forget. The client's job is its *device* -
+     * clearing its own status, which is the one thing this image cannot do for it.
+     *
+     * The call is counted per slot and the count is a bound: a line that keeps re-asserting itself
+     * without ever being satisfied would otherwise call the client until the watchdog, and the two
+     * silent failure modes this handler already reasons about are both worse than a stop. So the
+     * cap stops *and names the intid*, which is the same shape as the unexpected-line case and the
+     * reason `tools/check_irq_routing.py` requires exactly two stops and not one.
+     */
+    {
+        uint32_t i;
+
+        for (i = 0u; i < STAGE90_IRQ_CLIENTS; i++) {
+            entry_irq_client_t client = g_irq_cli_handler[i];
+
+            if (client == 0 || g_irq_cli_intid[i] != intid)
+                continue;
+
+            gicc_write(STAGE90_GICC_EOIR, iar);
+            g_irq_cli_calls[i]++;
+            g_irq_cli_calls_total++;
+            g_irq_cli_last = intid;
+
+            IRQ_LIVE("xnu_live_irq_cli_last", intid);
+            IRQ_LIVE("xnu_live_irq_cli_calls_total", g_irq_cli_calls_total);
+            if ((g_irq_cli_calls_total & (g_irq_cli_calls_total - 1u)) == 0u)
+                IRQ_LIVE("xnu_live_irq_cli_calls0", g_irq_cli_calls[0]);
+
+            if (g_irq_cli_calls[i] > STAGE90_IRQ_CLIENT_CAP) {
+                g_irq_cli_storm++;
+                IRQ_LIVE("xnu_live_irq_cli_storm", g_irq_cli_storm);
+                IRQ_LIVE("xnu_live_irq_cli_storm_intid", intid);
+                IRQ_LIVE("xnu_live_irq_cli_storm_calls", g_irq_cli_calls[i]);
+                entry_epilogue("exception: irq client storm");
+            }
+
+            client((void *)(uintptr_t) g_irq_cli_refcon[i], intid);
+            return;
+        }
+    }
+
     if (intid == STAGE90_GICC_SPURIOUS_ID) {
         /* No EOI: the architecture says a spurious read acknowledges nothing, so writing `EOIR`
          * with `0x3ff` is an acknowledgement of an interrupt that does not exist. */
@@ -229,14 +396,16 @@ void entry_irq_handler(void *target, void *refCon, void *nub, int source)
         return;
     }
 
-    /* Any other line: nothing in this image enabled one, so this is a fact about the machine and
-     * not a case to service. EOI it so that it cannot be asserted straight back at us, record it,
-     * and stop with the intid in the channel - which is what 308's run needed and did not have. */
+    /* Any other line: this image handed none out (the table above is the only way one becomes
+     * serviceable), so this is a fact about the machine and not a case to service. EOI it so that it
+     * cannot be asserted straight back at us, record it, and stop with the intid in the channel -
+     * which is what 308's run needed and did not have. */
     gicc_write(STAGE90_GICC_EOIR, iar);
     g_irq_other_count++;
     g_irq_last_iar = iar;
     IRQ_LIVE("xnu_live_irq_other_count", g_irq_other_count);
     IRQ_LIVE("xnu_live_irq_other_iar", iar);
+    IRQ_LIVE("xnu_live_irq_other_cli", (uint32_t)(uintptr_t) g_irq_cli_handler);
     IRQ_LIVE("xnu_live_irq_timer_count_final", g_irq_timer_count);
     entry_epilogue("exception: irq line");
 }
