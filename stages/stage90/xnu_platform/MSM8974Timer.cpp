@@ -118,7 +118,7 @@
  *
  * The record it leaves
  * --------------------
- * Twenty-two live keys, written in the order that makes the record readable if the driver stops: `_seq`
+ * Thirty-nine live keys, written in the order that makes the record readable if the driver stops: `_seq`
  * (the ordinal), `_prov` (the provider pointer - the row this driver belongs to in 491's third census,
  * whose `kids_of` is 0 before this step and 1 after it), `_match` (which of the two names matched: 1 =
  * the node's `name`, 2 = its `compatible`, 3 = neither, so a match made on a name this driver does not
@@ -154,6 +154,24 @@
  * mapped something and the driver did not read through it", which is the difference between a
  * finding about the OS and a finding about this file.
  *
+ * **And 495's seventeen, which are the OS's own timeout machinery rather than a device**: the record of
+ * the arming - `_ms` (the interval asked for, out of the one `#define` both `setTimeout` calls use),
+ * `_wl` (the work loop, which is a kernel thread this driver caused to be created), `_ts` (the timer
+ * event source), `_add` (the `addEventSource` result), `_en` (1 = the source reported itself enabled
+ * after `enable()`), `_to` (the `setTimeout` result), `_arm_lo`/`_arm_hi` (`mach_absolute_time` at the
+ * arming) and `_due_lo`/`_due_hi` (the deadline the **OS's own** `clock_interval_to_deadline` computes
+ * for that interval) - and the record the callback writes: `_fires` (how many times the kernel called
+ * this driver back, published as 0 before the arming so "never called" is a value and not an absence),
+ * `_fire_lat_ns` (the OS's own `absolutetime_to_nanoseconds` of the difference between the fire and
+ * **the arming that fire was for** - the driver's own for the first and the callback's re-arm for the
+ * later ones, so the key is one measurement repeated three times rather than a sum that grows),
+ * `_fire_lo`/`_fire_hi` (the clock at the last fire), `_gap_ns` (the same conversion between the last
+ * two fires, so the interval the OS actually delivered is in the record beside the interval `_ms` says
+ * it was asked for) and
+ * `_rearms`/`_rearm_rc` (how many times the callback re-armed itself from inside the callback, and
+ * what that call returned - which is also the reading that says the work loop's gate, held across the
+ * callback, was usable rather than deadlocked).
+ *
  * **Every key here is live-only, like 492's nine and like every reading since 454**, and 493 does not
  * change that: the report epilogue that writes `entry_write_485_kv` has not run since the boot reached
  * `vm_pageout` (490 measured it), and putting a driver's reading in it would mean exporting the
@@ -166,6 +184,8 @@
  */
 #include <IOKit/IOService.h>
 #include <IOKit/IODeviceMemory.h>
+#include <IOKit/IOWorkLoop.h>
+#include <IOKit/IOTimerEventSource.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSNumber.h>
@@ -181,6 +201,99 @@ extern "C" void entry_live_write(const char *key, uint32_t value);
  * word out of the GPT - so there is no second definition of this offset and none is claimed.
  */
 #define MSM8974_TIMER_REG0_OFF  0x000u
+
+/*
+ * 495: the interval this driver asks the OS for, and how many times the callback re-arms itself before
+ * it stops. **One definition, used by both `setTimeout` calls and by the deadline the record publishes**
+ * - a second copy of the number in the arithmetic would be a second definition of the same decision,
+ * which is the defect class this project has paid for twenty-nine times.
+ *
+ * 100 ms is chosen to be unmistakable in either direction: long enough that the callback cannot be
+ * confused with the work of arming it (the arming path is a few hundred instructions and one thread
+ * creation), and short enough that three of them are over well before anything else in the boot
+ * notices. The countdown the OS must reach for the first fire is 100 ms of a 19.2 MHz counter -
+ * 1 920 000 ticks - against a `DECREMENTER_MAX` of `0x7fffffff`.
+ */
+#define MSM8974_TIMER_ASK_MS    100u
+#define MSM8974_TIMER_FIRES      3u
+
+/*
+ * The three OS functions 495 adds to this file's reading of the machine. `mach_absolute_time` is the
+ * kernel's own clock (on this part, the architectural counter); `clock_interval_to_deadline` is the
+ * OS's own conversion of an interval into a deadline, which is what the record publishes as the moment
+ * the callback *should* have run; and `absolutetime_to_nanoseconds` converts a difference of two
+ * readings of that clock into a number that can be held against the interval the driver asked for.
+ *
+ * All three come in through `<IOKit/IOTimerEventSource.h>` -> `<kern/clock.h>` -> `<mach/mach_time.h>`,
+ * so they are declared by Apple's headers and not transcribed here. Reading them out of the header is
+ * the point: the units of `clock_interval_to_deadline`'s third argument are the OS's decision, and a
+ * driver that assumed a return value instead of the out-parameter the header declares would compute a
+ * deadline no one could compare with the fire.
+ */
+static uint32_t g_timer_fires;
+static uint32_t g_timer_rearms;
+static uint32_t g_timer_rearm_rc;
+static uint64_t g_timer_armed;
+static uint64_t g_timer_last;
+
+/*
+ * The callback. This is the function handed to `IOTimerEventSource::timerEventSource` and the only
+ * thing in this image that the OS's timeout machinery calls back into a driver.
+ *
+ * It is a plain function rather than a member because that is the type the event source takes
+ * (`typedef void (*Action)(OSObject *owner, IOTimerEventSource *sender)`, `IOTimerEventSource.h:158`),
+ * and it runs **on the thread-call daemon with the work loop's gate held** (`IOTimerEventSource.cpp`
+ * :146-176: `timeoutAndRelease` closes the gate, invokes the action and opens it again), which is why
+ * re-arming from inside it is legal - it is the same call a real driver makes from its own timeout, and
+ * the run is what says the gate is usable rather than deadlocked.
+ *
+ * Every number it publishes is a reading of the *machine*: `mach_absolute_time()` before and after, the
+ * OS's own conversion of the difference into nanoseconds, and the count of fires. `_fires` is published
+ * on every call and its low values on the way up are published too, because the log is captured when
+ * the watchdog brings the phone back and a number written only at the end is a number never read.
+ *
+ * **And `_fire_lat_ns` means the same thing at every fire, which is 495's first run's one defect.** The
+ * re-arm moves `g_timer_armed` to a fresh `mach_absolute_time()` taken immediately before the
+ * `setTimeout`, exactly as `start` reads its own arming instant. Without that line the key would be
+ * "since the *first* arming" - a cumulative sum that grows by one interval per fire and reads in the
+ * log exactly like a latency, so fire 1's 101.105 ms, fire 2's 202.151 ms and fire 3's 303.199 ms would
+ * all be printed under a name that says "how long the OS took to call this driver back". With it, every
+ * value is the arm-to-fire time of *that* fire, the asked-for interval is `_ms` for all of them, and
+ * the difference between the two is the OS's dispatch latency - the number a reader holds the 100 ms
+ * against.
+ */
+static void
+msm8974_timer_timeout( OSObject * owner, IOTimerEventSource * sender )
+{
+    uint64_t now = mach_absolute_time();
+    uint64_t since_arm = 0u;
+    uint64_t since_last = 0u;
+    uint64_t previous = g_timer_last;
+    uint32_t fires = ++g_timer_fires;
+
+    (void) owner;
+
+    g_timer_last = now;
+
+    absolutetime_to_nanoseconds( now - g_timer_armed, &since_arm );
+    if( fires > 1u && previous != 0u)
+        absolutetime_to_nanoseconds( now - previous, &since_last );
+
+    entry_live_write( "xnu_live_timerdrv_fires", fires );
+    entry_live_write( "xnu_live_timerdrv_fire_lat_ns", (uint32_t) since_arm );
+    entry_live_write( "xnu_live_timerdrv_fire_lo", (uint32_t) now );
+    entry_live_write( "xnu_live_timerdrv_fire_hi", (uint32_t)( now >> 32 ) );
+    if( fires > 1u)
+        entry_live_write( "xnu_live_timerdrv_gap_ns", (uint32_t) since_last );
+
+    if( fires < MSM8974_TIMER_FIRES && sender != 0) {
+        g_timer_armed = mach_absolute_time();
+        g_timer_rearm_rc = (uint32_t) sender->setTimeout( MSM8974_TIMER_ASK_MS, kMillisecondScale );
+        ++g_timer_rearms;
+        entry_live_write( "xnu_live_timerdrv_rearms", g_timer_rearms );
+        entry_live_write( "xnu_live_timerdrv_rearm_rc", g_timer_rearm_rc );
+    }
+}
 
 class MSM8974Timer : public IOService
 {
@@ -225,6 +338,14 @@ MSM8974Timer::start( IOService * provider )
     uint32_t   mapvaddr = 0u;
     uint32_t   mapvlen  = 0u;
     uint32_t   rd0  = 0u;
+    /* 495 */
+    IOWorkLoop * workloop = 0;
+    IOTimerEventSource * timer = 0;
+    uint32_t   addrc = 0u;
+    uint32_t   enabled = 0u;
+    uint32_t   tormc = 0u;
+    uint64_t   armed_at = 0u;
+    uint64_t   due = 0u;
 
     if( !super::start( provider )) return( false );
     if( provider == 0) return( false );
@@ -419,6 +540,86 @@ MSM8974Timer::start( IOService * provider )
     entry_live_write( "xnu_live_timerdrv_mapvaddr", mapvaddr );
     entry_live_write( "xnu_live_timerdrv_mapvlen", mapvlen );
     entry_live_write( "xnu_live_timerdrv_rd0", rd0 );
+
+    /* ---- 495: the OS's own timeout, asked for by this driver ---------------------------------
+     *
+     * 494 gave this driver a *mapping* and one read through it; the driver was still something the
+     * boot did not need. This is the step where the OS calls the driver back: the driver builds a work
+     * loop, puts a timer event source on it, and asks the OS for a timeout. Everything after that is
+     * the kernel's own machinery, and it is machinery that has never run on this machine - the
+     * thread-call subsystem (`thread_call_initialize`, `osfmk/kern/startup.c:446`), the timer queue
+     * expired from the payload's interrupt handler (`entry_irq.c` calls `rtclock_intr(0)` for the
+     * line, `rtclock.c:273` -> `timer_intr` -> `timer_queue_expire`), and the daemon thread that
+     * `thread_call_initialize` started. Nothing here is this image's own code: the callback is called
+     * *by* the kernel, from `IOTimerEventSource::timeoutAndRelease`, on the thread-call thread, with
+     * the work loop's gate held.
+     *
+     * The sequence is the one IOKit requires and each return value is published, because a chain of
+     * five calls that can each fail silently is a reading that cannot be told from a driver that never
+     * armed anything:
+     *
+     *     workLoop()                  -> `_wl`   (0 = the OS could not create one, which includes the
+     *                                             `kernel_thread_start` inside `init()` failing)
+     *     timerEventSource(this, fn)  -> `_ts`   (0 = the event source could not be allocated; its
+     *                                             `setTimeoutFunc` also panics if built twice, so a
+     *                                             non-NULL `_ts` is a statement about `init()`)
+     *     addEventSource(timer)       -> `_add`  (0 = kIOReturnSuccess; a non-zero here means the work
+     *                                             loop refused the source, and `setTimeout` below
+     *                                             would then do nothing at all - `wakeAtTime` requires
+     *                                             `workLoop` non-NULL, `IOTimerEventSource.cpp:476`)
+     *     enable() then isEnabled()   -> `_en`   (1 = the source is enabled; `setTimeout` on a disabled
+     *                                             source stores the time and arms nothing)
+     *     setTimeout(100 ms)          -> `_to`   (0 = kIOReturnSuccess)
+     *
+     * **`_fires` and the four keys the callback owns are published as zeroes *before* the arming**, so
+     * the two findings this step has to keep apart are two different records rather than one absent
+     * one: `_fires = 0` beside a non-zero `_ts` and a zero `_to` is "the OS accepted a deadline and
+     * never called back", while `_wl = 0` or `_add != 0` is "the driver never armed anything". A key
+     * that only exists after the callback runs would make those the same silence.
+     *
+     * **`_due` is the OS's own conversion of the interval this driver asked for** -
+     * `clock_interval_to_deadline( MSM8974_TIMER_ASK_MS, kMillisecondScale, &due )`, the same function
+     * `setTimeout` calls internally - so the moment the callback should run is in the record beside the
+     * moment it did (`_arm_at`, `_fire_*`). The interval itself is one `#define` shared by both
+     * `setTimeout` calls and by this computation, so "the number the driver asked for" and "the number
+     * the driver compared against" cannot drift apart, and the callback publishes the OS's own
+     * `absolutetime_to_nanoseconds` of the elapsed difference (`_fire_lat_ns`, `_gap_ns`) rather than a
+     * number this file computed from a frequency.
+     *
+     * The driver is started once (`_seq` = 1 in every run of 492, 493 and 494), so this arms one timer;
+     * a second `start` would arm a second rather than silently reusing the first, which is the right
+     * failure for a kext that was never matched twice. Nothing here touches a device register, and the
+     * callback writes nothing but keys: the timeout's whole purpose is to be called.
+     */
+    entry_live_write( "xnu_live_timerdrv_fires", 0u );
+    entry_live_write( "xnu_live_timerdrv_rearms", 0u );
+    entry_live_write( "xnu_live_timerdrv_rearm_rc", 0u );
+    entry_live_write( "xnu_live_timerdrv_fire_lat_ns", 0u );
+    entry_live_write( "xnu_live_timerdrv_gap_ns", 0u );
+
+    workloop = IOWorkLoop::workLoop();
+    if( workloop != 0) {
+        timer = IOTimerEventSource::timerEventSource( this, msm8974_timer_timeout );
+        if( timer != 0) {
+            addrc = (uint32_t) workloop->addEventSource( timer );
+            timer->enable();
+            enabled = timer->isEnabled() ? 1u : 0u;
+            armed_at = mach_absolute_time();
+            g_timer_armed = armed_at;
+            clock_interval_to_deadline( MSM8974_TIMER_ASK_MS, kMillisecondScale, &due );
+            tormc = (uint32_t) timer->setTimeout( MSM8974_TIMER_ASK_MS, kMillisecondScale );
+        }
+    }
+    entry_live_write( "xnu_live_timerdrv_ms", MSM8974_TIMER_ASK_MS );
+    entry_live_write( "xnu_live_timerdrv_wl", (uint32_t)(uintptr_t) workloop );
+    entry_live_write( "xnu_live_timerdrv_ts", (uint32_t)(uintptr_t) timer );
+    entry_live_write( "xnu_live_timerdrv_add", addrc );
+    entry_live_write( "xnu_live_timerdrv_en", enabled );
+    entry_live_write( "xnu_live_timerdrv_to", tormc );
+    entry_live_write( "xnu_live_timerdrv_arm_lo", (uint32_t) armed_at );
+    entry_live_write( "xnu_live_timerdrv_arm_hi", (uint32_t)( armed_at >> 32 ));
+    entry_live_write( "xnu_live_timerdrv_due_lo", (uint32_t) due );
+    entry_live_write( "xnu_live_timerdrv_due_hi", (uint32_t)( due >> 32 ));
 
     return( true );
 }

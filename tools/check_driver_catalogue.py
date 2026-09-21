@@ -461,16 +461,28 @@ def reading_cast(source):
 
 
 def live_keys(source):
-    """A driver's `entry_live_write` keys, as `{common_prefix: {suffix, ...}}`.
+    """A driver's `entry_live_write` keys, as `{prefix: {suffix, ...}}`.
 
     The prefix is what makes two drivers' records comparable: 493's two drivers publish the same
     suffixes under different prefixes, so a key-by-key comparison of the two rows is a comparison of
     the same reading on two nodes rather than of two differently-shaped records.
+
+    **The split is a property of the key format, not a guess about how wide a suffix is**, and this is
+    the reading 495 had to correct: the first version cut every key at its *last* underscore, so
+    `xnu_live_timerdrv_arm_lo` was filed under a prefix of its own and the driver appeared to write its
+    record under seven prefixes the moment its keys grew a suffix of two words. The convention the
+    live channel actually has is `xnu_live_<name>_<key>`, where `<name>` names the thing being
+    recorded (a driver, the entry instrument, the trap) and `<key>` is the rest - which may contain
+    underscores. A key that does not have that shape is not silently cut into one that does; it is
+    filed under a prefix of its own, so a stray key is a *different* bucket and the caller refuses it.
     """
     out = {}
     for key in re.findall(r'entry_live_write\(\s*"([^"]+)"', source):
-        head, _, tail = key.rpartition("_")
-        out.setdefault(head, set()).add(tail)
+        m = re.match(r"^(xnu_live_\w+?)_(.+)$", key)
+        if m:
+            out.setdefault(m.group(1) + "_", set()).add(m.group(2))
+        else:
+            out.setdefault("<not of the form xnu_live_<name>_>", set()).add(key)
     return out
 
 
@@ -600,6 +612,94 @@ def driver_payload_symbol(source):
         out["lhs"] = m.group(2)
         out["rhs"] = m.group(3)
     return out
+
+
+def driver_timeout(source):
+    """One driver's use of the OS's own timeout machinery, as the pieces of the chain.
+
+    The step's subject: the kernel calls a driver back. Six links, and each one is a way the record
+    could still say "the driver armed a timeout" while no timeout exists:
+
+      * `workloop` - the variable `IOWorkLoop::workLoop()` was assigned to. `IOWorkLoop::init()`
+        (`IOWorkLoop.cpp:165-172`) is where `kernel_thread_start` happens, so a non-NULL one here is
+        the reason a kernel thread exists at all.
+      * `timer` and `action` - the event source and **the function handed to it**. The action is read
+        out of the `timerEventSource(...)` call rather than assumed by name, so a driver whose
+        callback is wired to something else is refused - and the function's own definition is then
+        read, because a name that is never defined is a callback that cannot run.
+      * `added_loop` - the object `addEventSource` was called on, which must be the work loop above.
+        `IOTimerEventSource::wakeAtTime` arms nothing unless the source has a `workLoop`
+        (`IOTimerEventSource.cpp:476`), which `addEventSource` is what gives it.
+      * `enabled_at` - the source offset of the `enable()` call and of the first `setTimeout`, in that
+        order. A disabled source stores the time and arms nothing.
+      * `armed` - the interval *name* passed to `setTimeout`, resolved against the driver's own
+        `#define`s, and `deadline` - the interval name passed to `clock_interval_to_deadline`. The two
+        must be the same name: the moment the callback should run and the moment it was asked to run
+        are one decision.
+      * `within_action` - the body of the callback, with the interval name it re-arms with and the keys
+        it publishes, so "the callback says it ran" and "the callback keeps the timer alive" are read
+        out of the function that actually runs rather than out of the file at large.
+    """
+    out = {"workloop": None, "timer": None, "action": None, "owner": None, "added_loop": None,
+           "enabled_at": None, "armed_at": None, "armed": None, "deadline": None, "deadline_var": None,
+           "action_def": None, "rearm": None, "action_keys": [], "file_keys": [],
+           "fires_zero_at": None, "arming_at": None}
+    m = re.search(r"(\w+)\s*=\s*IOWorkLoop::workLoop\(\)\s*;", source)
+    if m:
+        out["workloop"] = m.group(1)
+        out["arming_at"] = m.start()
+    m = re.search(r"(\w+)\s*=\s*IOTimerEventSource::timerEventSource\(\s*(\w+)\s*,\s*(\w+)\s*\)",
+                  source)
+    if m:
+        out["timer"], out["owner"], out["action"] = m.group(1), m.group(2), m.group(3)
+    m = re.search(r"(\w+)\s*->\s*addEventSource\(\s*(\w+)\s*\)", source)
+    if m:
+        out["added_loop"] = m.group(1)
+    # `enable()` and the arming `setTimeout` are searched **from the work loop forward**, and the
+    # offsets are kept absolute: the callback is defined above `start` and re-arms from its own body, so
+    # a whole-file search for the first `setTimeout` finds the *re-arm* and reports an order that is
+    # about two different regions of the file (the reading 495's first run of this claim got wrong).
+    if out["arming_at"] is not None:
+        region = source[out["arming_at"]:]
+        base = out["arming_at"]
+        m = re.search(r"(\w+)\s*->\s*enable\(\)\s*;", region)
+        if m:
+            out["enabled_at"] = base + m.start()
+        m = re.search(r"(\w+)\s*->\s*setTimeout\(\s*(\w+)\s*,\s*kMillisecondScale\s*\)", region)
+        if m:
+            out["armed"], out["armed_at"] = m.group(2), base + m.start()
+        m = re.search(r"clock_interval_to_deadline\(\s*(\w+)\s*,\s*kMillisecondScale\s*,\s*&(\w+)\s*\)",
+                      region)
+        if m:
+            out["deadline"], out["deadline_var"] = m.group(1), m.group(2)
+    if out["action"]:
+        m = re.search(r"(?:static\s+void\s+)?\b%s\s*\(\s*OSObject\s*\*\s*owner\s*,\s*"
+                      r"IOTimerEventSource\s*\*\s*sender\s*\)\s*\{" % re.escape(out["action"]), source)
+        if m:
+            body = _braced(source, m.end() - 1)
+            out["action_def"] = body
+            rearm = re.search(r"(\w+)\s*->\s*setTimeout\(\s*(\w+)\s*,\s*kMillisecondScale\s*\)", body)
+            if rearm:
+                out["rearm"] = rearm.group(2)
+            out["action_keys"] = re.findall(r'"(xnu_live_\w+)"', body)
+    out["file_keys"] = re.findall(r'"(xnu_live_\w+)"', source)
+    m = re.search(r'entry_live_write\(\s*"(xnu_live_\w*_fires)"\s*,\s*0u\s*\)', source)
+    if m:
+        out["fires_zero_at"] = m.start()
+    return out
+
+
+def _braced(text, start):
+    """The `{...}` block that begins at `text[start]`, matched by nesting (and over strings loosely)."""
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return text[start:]
 
 
 def tree_nodes(tree_text):
@@ -1557,9 +1657,143 @@ def claim_device_value(facts, failures, notes):
                      "its second definition is read by nothing on the OS side")
 
 
+def claim_timer_callback(facts, failures, notes):
+    """14. The driver asks the OS for a timeout, and the callback the kernel will call is its own.
+
+    493 and 494 made a driver *read* its device; neither made the boot need the driver for anything.
+    This claim is about the step where the kernel calls the driver back: a work loop, a timer event
+    source on it, `enable()`, and `setTimeout` - after which the callback runs on the thread-call
+    daemon, with the work loop's gate held, once the timer queue is expired from the payload's
+    interrupt handler. Nothing in the chain is this image's own code, which is exactly why it has to
+    be read out of the source rather than assumed to work:
+
+      * **the event source is on the work loop that was created.** `addEventSource` is what gives the
+        source its `workLoop`, and `IOTimerEventSource::wakeAtTime` arms nothing without one
+        (`IOTimerEventSource.cpp:476`), so a chain wired to two different objects is a timeout that
+        never becomes a thread call - and the run would show it only as `_fires = 0`.
+      * **the function handed to `timerEventSource` is defined in this file.** The action is read out of
+        the *call*, not looked up by name, so a driver whose callback is wired to another function is
+        refused; and the function must have a body here, because a name with no definition is a
+        callback the kernel cannot reach.
+      * **`enable()` is called before `setTimeout`.** A disabled source stores the time and arms
+        nothing, so the order of two adjacent statements is the difference between a deadline and a
+        recorded intention.
+      * **the interval has one definition.** The name passed to `setTimeout` and the name passed to
+        `clock_interval_to_deadline` must be the same name, and it must be a `#define` in this file with
+        an integer value: the moment the callback should run and the moment it was asked to run are one
+        decision, and the callback's own re-arm must use that same name. A `100u` in one of the three
+        places is a second definition of the interval, which is the defect this project counts.
+      * **the callback says it ran, and keeps itself alive.** The action body must publish the fire
+        count and the OS's own conversion of the elapsed time, and must re-arm. A callback that fires
+        and reports nothing is a reading the log cannot show; one that fires once and never re-arms
+        cannot distinguish a working timer from one that fired by accident.
+      * **the record separates "never armed" from "armed and never called".** The fire count (and the
+        keys the callback owns) must be published *before* the arming, and the arming's own five results
+        (`_wl`, `_ts`, `_add`, `_en`, `_to`) plus the two clock readings (`_arm_*`, `_due_*`) must be in
+        the record. Without the zero, a callback that never ran leaves no key at all and reads exactly
+        like a driver that never asked.
+
+    A driver that arms no timeout is *noted* rather than failed - `/interrupt-controller`'s driver does
+    not need one - but at least one driver in this image must, or the reading this step is for would be
+    absent from the record altogether.
+    """
+    armed_drivers = 0
+    for d in facts["drivers"]:
+        t = driver_timeout(d["source"])
+        if t["workloop"] is None and t["timer"] is None:
+            notes.append("`%s` arms no OS timeout: the driver that does is the one whose subject is "
+                         "time, and this file's reading is the device's" % d["file"])
+            continue
+        armed_drivers += 1
+
+        def has(key):
+            return bool(re.search(r'xnu_live_\w+_%s\b' % re.escape(key), d["source"]))
+
+        if t["workloop"] is None:
+            failures.append("`%s` never calls `IOWorkLoop::workLoop()`: the event source would have no "
+                            "work loop, and `wakeAtTime` arms nothing without one"
+                            % d["file"])
+        if t["timer"] is None:
+            failures.append("`%s` never creates an `IOTimerEventSource`: there is no timeout for the "
+                            "kernel to call back" % d["file"])
+        elif t["added_loop"] != t["workloop"]:
+            failures.append("`%s` adds the timer event source to `%s` and created `%s`: the source's "
+                            "own `workLoop` is the one it is added to, so this timeout would never "
+                            "reach the thread-call machinery"
+                            % (d["file"], t["added_loop"] or "nothing", t["workloop"] or "nothing"))
+        if t["timer"] is not None:
+            if t["action_def"] is None:
+                failures.append("`%s` hands `%s` to `timerEventSource` and defines no such function "
+                                "here: the callback the kernel is told to call is not in this file, so "
+                                "the timeout could only ever call whatever that name resolves to"
+                                % (d["file"], t["action"]))
+            else:
+                action = t["action_def"]
+                if not re.search(r'xnu_live_\w+_fires\b', action):
+                    failures.append("`%s`'s callback `%s` publishes no `_fires`: a callback that runs "
+                                    "and reports nothing leaves the one reading this step is for out "
+                                    "of the log" % (d["file"], t["action"]))
+                if not re.search(r'xnu_live_\w+_fire_lat_ns\b', action):
+                    failures.append("`%s`'s callback `%s` publishes no `_fire_lat_ns`: how long the OS "
+                                    "took to call the driver back is the number the interval it asked "
+                                    "for is held against" % (d["file"], t["action"]))
+                if t["rearm"] is None:
+                    failures.append("`%s`'s callback `%s` never calls `setTimeout` again: a timer that "
+                                    "fires once and stops cannot distinguish an armed deadline from a "
+                                    "single accident" % (d["file"], t["action"]))
+        if t["enabled_at"] is None or t["armed_at"] is None:
+            failures.append("`%s` does not both `enable()` the source and call `setTimeout` on it: a "
+                            "disabled source stores the time and arms no thread call"
+                            % d["file"])
+        elif t["enabled_at"] > t["armed_at"]:
+            failures.append("`%s` arms the timeout before enabling the source: the deadline is stored "
+                            "and no thread call is entered, so the record would say 'armed' about a "
+                            "timeout that can never fire" % d["file"])
+        interval = t["armed"]
+        if interval is None:
+            failures.append("`%s` never calls `setTimeout( <interval>, kMillisecondScale )`"
+                            % d["file"])
+        else:
+            resolved = driver_defines(d["source"]).get(interval)
+            if resolved is None:
+                failures.append("`%s` asks for `%s`, which its own file does not define as an integer: "
+                                "the interval has no name to hold against the deadline the callback is "
+                                "compared with" % (d["file"], interval))
+            elif t["deadline"] != interval:
+                failures.append("`%s` computes its deadline from `%s` and arms `%s`: two definitions of "
+                                "one interval, so the moment the callback was asked to run is not the "
+                                "moment the record compares it with"
+                                % (d["file"], t["deadline"] or "nothing", interval))
+            elif t["rearm"] is not None and t["rearm"] != interval:
+                failures.append("`%s`'s callback re-arms with `%s` and the driver armed `%s`: the "
+                                "second and later intervals would be a decision nothing else in the "
+                                "file makes" % (d["file"], t["rearm"], interval))
+            else:
+                notes.append("`%s` asks for `%s` = %d ms, from one `#define` used by the arming, the "
+                             "deadline and the re-arm" % (d["file"], interval, resolved))
+        if t["fires_zero_at"] is None:
+            failures.append("`%s` publishes no zero `_fires` before arming: a callback that never ran "
+                            "would then leave no key, and 'armed and never called' would read exactly "
+                            "like 'never armed'" % d["file"])
+        elif t["arming_at"] is not None and t["fires_zero_at"] > t["arming_at"]:
+            failures.append("`%s` publishes its `_fires` zero *after* creating the work loop: a "
+                            "timeout whose callback ran between the two lines would be overwritten by "
+                            "the zero" % d["file"])
+        for key in ("ms", "wl", "ts", "add", "en", "to", "arm_lo", "arm_hi", "due_lo", "due_hi"):
+            if not has(key):
+                failures.append("`%s` publishes no `_%s`: the chain of five calls that arms this "
+                                "timeout can each fail silently, and a guard that is not in the log is "
+                                "a reading that cannot be told from a timeout that never existed"
+                                % (d["file"], key))
+    if armed_drivers == 0:
+        failures.append("no driver in `PLATFORM_SOURCES` arms an OS timeout: the reading this step is "
+                        "for - the kernel calling a driver back - would not exist in any run")
+
+
 CLAIMS = (claim_shape, claim_classes, claim_provider, claim_names, claim_root_names,
           claim_property_kinds, claim_bundle_id, claim_cell_counts, claim_resolution_read,
-          claim_mechanism, claim_entry_class, claim_device_mapping, claim_device_value)
+          claim_mechanism, claim_entry_class, claim_device_mapping, claim_device_value,
+          claim_timer_callback)
 
 
 def compare(facts, mutate=None):
@@ -1763,6 +1997,61 @@ def mutate_facts(facts, mutate):
         facts["devmem_chain"] = class_chain("OSArray")
     elif mutate == "the_factory_cannot_be_read":
         facts["devmem_factory"] = None
+
+    # -- 495's subject: the OS calls a driver back. Every one of these leaves a file that still reads
+    # like a driver asking for a timeout, and each is refused for a different link of the chain - which
+    # is the point, because the failure the run can see is `_fires = 0` and the cause of a `_fires = 0`
+    # is one of five silent returns unless the record separates them.
+    elif mutate == "the_driver_creates_no_work_loop":
+        facts = _bump_driver(facts, "MSM8974Timer", "workloop = IOWorkLoop::workLoop();\n", "")
+    elif mutate == "the_event_source_is_added_to_another_object":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "addrc = (uint32_t) workloop->addEventSource( timer );",
+                             "addrc = (uint32_t) timer->addEventSource( timer );")
+    elif mutate == "the_callback_is_another_function":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "IOTimerEventSource::timerEventSource( this, msm8974_timer_timeout )",
+                             "IOTimerEventSource::timerEventSource( this, msm8974_timer_tick )")
+    elif mutate == "the_source_is_never_enabled":
+        facts = _bump_driver(facts, "MSM8974Timer", "            timer->enable();\n", "")
+    elif mutate == "the_timeout_is_armed_before_the_source_is_enabled":
+        facts = _bump_driver(facts, "MSM8974Timer", "            timer->enable();\n", "")
+        facts = _bump_driver(
+            facts, "MSM8974Timer",
+            "            tormc = (uint32_t) timer->setTimeout( MSM8974_TIMER_ASK_MS, kMillisecondScale );\n",
+            "            tormc = (uint32_t) timer->setTimeout( MSM8974_TIMER_ASK_MS, kMillisecondScale );\n"
+            "            timer->enable();\n")
+    elif mutate == "the_deadline_has_a_second_definition_of_the_interval":
+        # The needle carries the statement's `;`: the same call is also *quoted in prose* above the
+        # code, and the first cut of this mutation replaced the sentence rather than the call - a
+        # mutation that ran on the comment and left the code alone, which is the shape of defect this
+        # file counts (a claim about a comment is not a claim about the code).
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "clock_interval_to_deadline( MSM8974_TIMER_ASK_MS, kMillisecondScale, "
+                             "&due );",
+                             "clock_interval_to_deadline( 100u, kMillisecondScale, &due );")
+    elif mutate == "the_callback_rearms_with_another_interval":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "sender->setTimeout( MSM8974_TIMER_ASK_MS, kMillisecondScale )",
+                             "sender->setTimeout( MSM8974_TIMER_REARM_MS, kMillisecondScale )")
+    elif mutate == "the_callback_publishes_no_fire_count":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             'entry_live_write( "xnu_live_timerdrv_fires", fires );\n', "")
+    elif mutate == "the_callback_publishes_no_fire_latency":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             'entry_live_write( "xnu_live_timerdrv_fire_lat_ns", (uint32_t) since_arm );\n',
+                             "")
+    elif mutate == "the_callback_never_rearms":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "g_timer_rearm_rc = (uint32_t) sender->setTimeout( "
+                             "MSM8974_TIMER_ASK_MS, kMillisecondScale );",
+                             "g_timer_rearm_rc = 0u;")
+    elif mutate == "the_fire_count_zero_is_published_after_the_work_loop":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             'entry_live_write( "xnu_live_timerdrv_fires", 0u );\n', "")
+        facts = _bump_driver(facts, "MSM8974Timer", "workloop = IOWorkLoop::workLoop();\n",
+                             "workloop = IOWorkLoop::workLoop();\n"
+                             '    entry_live_write( "xnu_live_timerdrv_fires", 0u );\n')
     else:
         raise AssertionError("unknown mutation %s" % mutate)
     return facts
@@ -1815,6 +2104,19 @@ MUTATIONS = (
     "the_header_moves_the_offset",
     "the_payload_publishes_a_constant",
     "the_payload_stops_publishing_the_value",
+    # 495: the OS calls a driver back. Eleven ways for a file to read like an armed timeout with no
+    # timeout in it, one per link of the chain.
+    "the_driver_creates_no_work_loop",
+    "the_event_source_is_added_to_another_object",
+    "the_callback_is_another_function",
+    "the_source_is_never_enabled",
+    "the_timeout_is_armed_before_the_source_is_enabled",
+    "the_deadline_has_a_second_definition_of_the_interval",
+    "the_callback_rearms_with_another_interval",
+    "the_callback_publishes_no_fire_count",
+    "the_callback_publishes_no_fire_latency",
+    "the_callback_never_rearms",
+    "the_fire_count_zero_is_published_after_the_work_loop",
 )
 
 
