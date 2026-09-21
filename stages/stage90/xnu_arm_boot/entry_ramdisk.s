@@ -166,9 +166,9 @@
  *                  mov  r0, #0               ; +184 fork() - a word with no reader: the slot's munger
  *                  mov  r12, #SYS_FORK       ; +188     word is NULL, its narg is 0, and both processes
  *                  svc  #0x80                ; +192     are handed the pid rather than this value
- *                  cmp  r0, #0               ; +196 ... and the branch below is where 505's run sent
- *                  beq  entry_child          ; +200     the child down the parent's arm, because the
- *                  b    spin                 ; +204     word that separates them is r1, not r0
+ *                  cmp  r1, #CHILD_FLAG      ; +196 506's register: the flag `thread_set_child` writes
+ *                  beq  entry_child          ; +200     for the child, 1 there and 0 in the parent -
+ *                  b    spin                 ; +204     505 branched on r0, which is the pid in both
  *     entry_child: mov  r0, #EXIT_RVAL      ; +208 the child leaves by the syscall that cannot
  *                  mov  r12, #SYS_EXIT       ; +212     return, and that from pid 1 is fatal
  *                  svc  #0x80                ; +216
@@ -448,12 +448,22 @@
  * the one that has killed every previous run: `if (p == initproc) launchd_crashed_panic(p, rv);` in
  * `proc_prepareexit` (`:849`), the function 478's run measured as the end of the boot. `p` here is
  * **pid 2**, so that branch is not taken, and the run's readings are the ones that say which arm ran:
- * the pid and the composed status `rv = 0x300` at the `exit` slot, and - after the child is a zombie -
+ * the pid and the argument at the `exit` slot, and - after the child is a zombie -
  * `psignal(pp, SIGCHLD)` at `proc_exit`'s `:1443`, where `pp` is the parent, i.e. **pid 1**: the
  * first inter-process event in this walk, and the number the OS chose to tell process 1 with is
  * `SIGCHLD` = 20 (`bsd/sys/signal.h:108`). **The 505 run took neither of those arms** - the child went
  * down the parent's, so no `xnu_live_exit_*`, no `xnu_live_sigchld_*` and no `psignal` record appears
- * in its log, and those readings belong to the step that fixes the branch.
+ * in its log, and those readings belong to the step that fixes the branch. **Run 2 took the first and
+ * not the second**, and the reason is falsifier (b) below.
+ *
+ * **The composed status 0x300 is not published by this instrument, and that is the one number in this
+ * file's prediction that the run corrected.** `xnu_live_exit_rval` is `uap->rval` as the munger
+ * marshalled it - the wrapper's own header says so, and the ABI it is declared by is
+ * `(*(callp->sy_call))(proc, &uthread->uu_arg[0], &uthread->uu_rval[0])` - so the record is **3**.
+ * `W_EXITCODE(3, 0)` is computed *inside* the kernel, by `exit`'s own
+ * `exit1(p, W_EXITCODE(uap->rval, 0), retval)` (`kern_exit.c:684`), and lands in `p->p_xstat`
+ * (`:826`); nothing in this image reads that field back. A prediction written into a header is a
+ * claim like any other, and this one named the argument's key for the composed value.
  *
  * **Nothing here branches on any of those answers**, for 503's and 504's reason, and the reason is
  * sharper here than anywhere before it: `cmp r0, #0` is not a check on the kernel, it is the *only*
@@ -472,6 +482,105 @@
  * `xnu_live_getpid_change_value` = 2 are the two numbers that say the OS came back to user mode **with
  * two processes alive**, and the step after this one is the one that makes the child's number an
  * `exit` record instead.
+ *
+ * ------------------------------------------------------------------------------------------------
+ * What 506 adds: the register the kernel writes the child's flag in
+ * ------------------------------------------------------------------------------------------------
+ *
+ * **One instruction's register and one instruction's number, and the program stays 61 words**, so every
+ * address in 505's document - `0x11a4` where the child was first fetched, `0x11d0` where it died - is
+ * unchanged. `cmp r0, #0` becomes `cmp r1, #CHILD_FLAG` and the branch stays `beq entry_child`: the two
+ * processes are `(r0 = pid, r1 = 0)` and `(r0 = pid, r1 = 1)`, so the arm that tests *the child's own
+ * value* is the one whose first instruction is `mov r0, #EXIT_RVAL`. The `mov r0, #0` stays, because it
+ * is the word `xnu_live_fork_uap0` names as *not* the one the argument buffer took, and because a
+ * 61-word program is the one 505 measured.
+ *
+ * **The first run of this step inverted the condition, and it is the one reading this file has that a
+ * human wrote twice from one derivation.** Run 1 was `cmp r1, #CHILD_FLAG` with **`bne`**, which asks
+ * "is r1 *not* the child's flag" - true of the parent - so `initproc` took the child's arm. The device
+ * said so in the two places this step is about: the console's `pid 1 exited -- no exit reason available
+ * -- (signal 0, exit 3)` and the live records
+ *
+ *     xnu_live_exit_seq = 1   _caller = 0x80285848 (unix_syscall+0x100)   _pid = 1   _rval = 3
+ *
+ * with no `xnu_live_sigchld_*` (the parent has no parent), no `xnu_live_undef_*` (the arm it took does
+ * not fault) and a panic: `xnu_entry_panic_entered = 1` with `_len = 0x13fa`. **The check could not
+ * refuse it**: the decode table asserted the same `bne`, and the mutation that would have caught the
+ * inversion (`beq`) was written *from that same table*, so the two agreed with each other and only the
+ * device disagreed. That is the falsifier (d) below, named before the run and taken by it.
+ *
+ * **What this buys is the first `exit` this machine will ever run for a process it made itself**, and
+ * the first inter-process event in this walk. `exit` is `sysent[1].sy_call`, `__attribute__((noreturn))`,
+ * whose `exit1(p, W_EXITCODE(uap->rval, 0), ...)` reaches `proc_prepareexit`'s
+ * `if (p == initproc) launchd_crashed_panic(p, rv)` - and `p` here is pid 2, so the branch that has
+ * ended every wrong run before this one is not the one taken. Then the parent is told: `psignal(pp,
+ * SIGCHLD)` at `proc_exit`'s `:1443`, where `pp` is pid 1.
+ *
+ * **Prediction, written before the build:**
+ *
+ *     xnu_live_exit_seq = 1   _caller = 0x80285848 (unix_syscall+0x100)   _pid = 2   _rval = 3
+ *     xnu_live_sigchld_signal = 20   _to = 1
+ *     xnu_live_getpid_count still climbing (the parent never leaves the loop)
+ *     no xnu_live_undef_*, no xnu_live_osr_*, no corpse-path stub_hit, no panic
+ *
+ * (The `_rval` in the first draft of this block was `0x300`, which is the *composed* status.
+ * `W_EXITCODE` runs inside the kernel and the key holds the argument; see the paragraph above.)
+ *
+ * **Run 1's answer, and what it cost.** The first three of those keys came back with `_pid` = **1**
+ * and `exit 3` on the console, and the panic flags above: the falsifier (d) this file named before the
+ * build. The machine panicked and the device came back on its own inside the capture window, which is
+ * what the recovery nets are for - and the run is the *reason* this step has two, because the sense of
+ * the comparison is the one field in this program that no host-side reading of the fixture can settle
+ * without the kernel's own table: the fixture says `CHILD_FLAG` is 1, `thread_set_child` says the child
+ * gets 1, and "then the branch must be taken on equality" is an argument, not a measurement. **The
+ * device is the measurement.** Run 2 is the same image with the condition this file was written for.
+ *
+ * **Run 2's answer.** `beq` sent the child where this step wanted it, and the two records that say so
+ * are adjacent in the log: `xnu_live_sleh_seq = 8` - the child's first dispatch, the same lazy prefetch
+ * abort at the same `0x000011a4` with the parent's `sp` and `cpsr` as 505's - and then
+ *
+ *     xnu_live_exit_seq = 1   _caller = 0x80285848   _pid = 2   _rval = 3
+ *
+ * The parent never left its loop (`xnu_live_getpid_count` reached `0x4000`, `_last` = 1 at every
+ * record) and the console has no `pid 1 exited` line, so the arm that ran is the child's. That is
+ * falsifier (d) refused and the step's first half measured.
+ *
+ * **And the second half is falsifier (b), which the run took.** The run's *last* live record is a stub
+ * hit, and it is the only one in the run:
+ *
+ *     xnu_live_stub_hit_seq = 1
+ *     name:  0x804c157a -> "stage90_pthread_functions.pth_proc_hashdelete"
+ *            (the first eight bytes are 0x67617473 / 0x5f303965, "stag" / "e90_")
+ *     caller: 0x80294150 = proc_exit + 0x188
+ *
+ * `proc_exit` calls `pth_proc_hashdelete(p)` (`bsd/kern/kern_exit.c:1105`, under `#if PSYNCH`) 275
+ * source lines *before* the notify block, and the shim is Apple's own three lines -
+ * `bsd/kern/pthread_shims.c:364`: `pthread_functions->pth_proc_hashdelete(p)` - which is the `ldr r1,
+ * [r1, #36]` / `bx r1` at `0x80205d0c..0x80205d1c` in the linked image. The slot this image's table
+ * fills is a stand-in (`stage90_pthread_functions.c:477`), and a stand-in is **terminal**:
+ * `entry_stub_hit` ends with `entry_epilogue("a symbol this image does not provide was called")`
+ * (`entry_stubs.c:6107`). So the child's `exit` reached the kernel's teardown, stopped one call later,
+ * and the run ended there - which is why `xnu_live_sigchld_*` is absent for the second, unrelated
+ * reason: **the parent was never told because the boot stopped first.** The exit arm this step added is
+ * 275 lines long and the SIGCHLD is at the far end of it; the next step is the one that gives that
+ * slot a body, the way 465 did for `pth_proc_hashinit` and 473 for the two workqueue slots - both of
+ * which this same run measures working (`xnu_live_pth_hashinit_seq = 2` inside `forkproc` at 465's
+ * slot, `xnu_live_pth_wqmark_seq` / `_wqexit_seq` = 2 with `p = 0xc058d3a8` in the child's `proc_exit`
+ * at 473's).
+ *
+ * Falsifiers, named in advance (and kept after run 1, because run 2 can still take any of them):
+ *
+ *   (a) `xnu_live_undef_pc` = `0x11d0` again with no `xnu_live_exit_*` - the child took the parent's
+ *       arm once more, i.e. its `r1` is not 1 at `+196`, which would make `thread_set_child` not the
+ *       writer of the flag the object says it writes;
+ *   (b) the run stops at a `stub_hit` inside the exit path - a name, and the next step's subject: the
+ *       teardown needs a slot this image's table does not supply, and the run says which. **Run 2 took
+ *       it**, with the name `stage90_pthread_functions.pth_proc_hashdelete` and the caller
+ *       `proc_exit + 0x188`;
+ *   (c) a panic, or a non-zero `xnu_entry_abort_entries` - a stand-in on the exit path returned a value
+ *       the kernel believed, or `initproc` left;
+ *   (d) `xnu_live_exit_*` with `_pid` = **1**: the flag is inverted (the parent's `r1` is not 0), which
+ *       puts `initproc` on `launchd_crashed_panic` - the outcome 478 measured, and what run 1 took.
  */
 
     .syntax unified
@@ -551,10 +660,22 @@
                                          * (`out/xnu_generated/init_sysent.c`), so
                                          * `arm_get_syscall_args` is never called for this slot and no
                                          * register is read as an argument. The `mov r0, #0` before it is
-                                         * therefore a word the kernel does *not* read - it is the
-                                         * child's return value, and the fork wrapper publishing
-                                         * `uu_arg[0]` beside it is what makes that a reading rather
-                                         * than a claim. */
+                                         * therefore a word the kernel does *not* read - and 505's run
+                                         * measured the rest of it: it is not either process's return
+                                         * value either, because the fork wrapper publishing `uu_arg[0]`
+                                         * beside the return is what makes that a reading, and the two
+                                         * processes' `r0` are written by the kernel. */
+    .equ CHILD_FLAG,             1      /* What `fork`'s child is told instead of zero. `fork1` calls
+                                         * `thread_set_child(child_thread, child_proc->p_pid)`
+                                         * (`bsd/kern/kern_fork.c:636`, after `thread_dup` at `:590`) and
+                                         * ARM's body writes `r[0] = pid; r[1] = 1`
+                                         * (`osfmk/arm/status.c:722-730`) - the same pair the ARM64 port
+                                         * writes (`osfmk/arm64/status.c:1253`) - so `r1` is 1 in the child
+                                         * and 0 in the parent, whose `r1` is `uu_rval[1]` as `fork` zeroed
+                                         * it (`:895`, and the run's own `xnu_live_fork_ret_hi`). This is
+                                         * the register the branch at `+196` tests, and 505's run is why:
+                                         * the `r0` it tested before is the pid in both processes, and
+                                         * pid 2 took the parent's arm and died on `udf #1`. */
     .equ SYS_EXIT,               1      /* `1 AUE_EXIT ALL { void exit(int rval) NO_SYSCALL_STUB; }` -
                                          * `munge_w` and `_SYSCALL_RET_NONE`: one 4-byte argument and
                                          * no return value, because the call does not return to user
@@ -786,24 +907,24 @@ entry_code:
     mov     r12, #SYS_OPEN              /* +176 */
     svc     #0x80                       /* +180: devfs has no such node, so this one is ENOENT */
 
-/* And the ask that makes a second process (505). One `svc`, two returns, and - the run's reading -
- * the child comes back with the **pid**, not with the zero this file writes below. `fork1` copies the
+/* And the ask that makes a second process (505), with the branch 506 fixes. One `svc`, two returns,
+ * and the two halves are told apart by the flag the kernel writes beside the pid: `fork1` copies the
  * parent's saved state into the child (`thread_dup` -> `machine_thread_dup`) and then overwrites the
  * child's `r[0]` with the pid and sets `r[1]` to 1 (`thread_set_child`, `osfmk/arm/status.c:722`), so
- * the pair `(r0, r1)` is `(pid, 0)` for the parent and `(pid, 1)` for the child. The `mov r0, #0` is
- * therefore not read by anyone: the fork slot takes no argument (`sy_narg` 0, munger NULL), and both
- * processes' `r0` are written by the kernel after it. The branch below is the only thing that decides
- * which process runs which half; on 505's run it handed the child the parent's arm, and the child's
- * own `udf #1` at `0x11d0` is that reading. Neither arm faults for a *right* answer: the parent's is
- * the loop it has always had, and the child's is the first `exit` this machine has ever run. */
+ * the pair `(r0, r1)` is `(pid, 0)` for the parent - whose `r1` is the `uu_rval[1]` the fork record
+ * publishes - and `(pid, 1)` for the child. 505 branched on `r0`, which is the pid in both, and its
+ * run measured the consequence: the child walked the parent's arm and died on its own `udf #1` at
+ * `0x11d0`. The `mov r0, #0` below is read by nobody - the fork slot takes no argument (`sy_narg` 0,
+ * munger NULL), and both processes' `r0` are written by the kernel after it - and it stays because the
+ * run's `xnu_live_fork_uap0` record names it as the word the argument buffer did *not* take. The
+ * branch on `r1` is the only thing that decides which process runs which half, and with it the
+ * child's arm is the first `exit` this machine has ever run. */
     mov     r0, #0                      /* +184: a word with no reader - see the header */
     mov     r12, #SYS_FORK              /* +188: 2, and a slot whose munger word is NULL */
     svc     #0x80                       /* +192: returns twice, and the branch below splits them */
-    cmp     r0, #0                      /* +196: the branch 505's run measured, and it is the wrong
-                                         *        register: the child's r0 is the pid too, and the
-                                         *        word that separates the halves is r1 */
-    beq     entry_child                 /* +200 */
-    b       spin                        /* +204: the parent keeps the loop it came in with */
+    cmp     r1, #CHILD_FLAG             /* +196: r1 is 1 in the child and 0 in the parent */
+    beq     entry_child                 /* +200: r1 == CHILD_FLAG, so this is the one `fork` made */
+    b       spin                        /* +204: r1 == 0, so this is the caller: the loop it had */
 
 /* The child's half: one call, and it does not return to user mode. `exit` runs `exit1` and then
  * `thread_exception_return()` (`kern_exit.c:684`), and `proc_prepareexit`'s first branch - the one

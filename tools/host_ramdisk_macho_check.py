@@ -272,9 +272,12 @@ def syscall_fork_and_exit():
       - **`fork` takes nothing**, so `sysent[2].sy_narg` is 0 and `unix_syscall`
         (`bsd/dev/arm/systemcalls.c:118`) never calls `arm_get_syscall_args` for it. That is the fact
         the fixture's `mov r0, #0` before the `svc` depends on: the word is *not* read as an argument,
-        and what the child returns with is the copy `machine_thread_dup` (`osfmk/arm/status.c:469`)
-        makes of the parent's saved state. `tools/check_sysent_table.py` checks the slot's own three
-        zero words; this is the prototype they are generated from.
+        and what the two processes return with is written by the kernel - the pid in `r0` for both, and
+        the flag in `r1`: 0 for the parent (`retval[1]`, `bsd/kern/kern_fork.c:895`) and 1 for the child
+        (`thread_set_child`, `osfmk/arm/status.c:722`; 505's run measured both ends of that - the
+        parent's `xnu_live_fork_ret_hi` 0, and the child walking the parent's arm when the branch tested
+        `r0`). `tools/check_sysent_table.py` checks the slot's own three zero words; this is the
+        prototype they are generated from.
       - **`exit` takes exactly one 4-byte word** (`int rval`), so its munger is `munge_w` and the
         fixture's `r0` is that word - the number the kernel composes into the status with
         `W_EXITCODE` (see `exit_status_word` below).
@@ -503,9 +506,9 @@ READ_FD_WORD, READ_LEN_WORD, READ_CALL_WORD = 37, 38, 39
 # two are a pair the way `SPIN_WORD` and the last word are: the parent's `b spin` and the child's
 # branch are what split one return into two processes, and naming them here is what lets the table
 # below say which half each branch goes to instead of saying a number.
-FORK_ARG_WORD, FORK_CALL_WORD = 46, 47   # the child's return value, and the number `2`
+FORK_ARG_WORD, FORK_CALL_WORD = 46, 47   # 505's dead word, and the number `2`
 FORK_SVC_WORD = 48                       # the `svc` whose single instruction has two continuations
-FORK_TEST_WORD, FORK_BRANCH_WORD = 49, 50
+FORK_TEST_WORD, FORK_BRANCH_WORD = 49, 50  # 506's `cmp r1, #CHILD_FLAG` and its `beq entry_child`
 PARENT_BRANCH_WORD = 51                  # `b spin` - the half the parent keeps
 CHILD_WORD = 52                          # `entry_child`'s first word, and the branch's target
 EXIT_ARG_WORD, EXIT_CALL_WORD, EXIT_SVC_WORD = 52, 53, 54
@@ -696,11 +699,13 @@ def program_expectations(decoded, K, adr_targets):
       - **46..54 are 505's fork and the child's exit.** 46 and 47 are the two words either side of the
         one call in this program that returns twice: 47 is the syscall number - 2, and a slot whose
         argument munger is NULL because `fork` takes no argument - and 46 is a word `fork` never reads
-        on this path, which is checked here precisely because it is the word the child's `r0` is a copy
-        of. 49..51 are the split: `cmp r0, #0` and the two branches whose targets are checked as word
-        indices, with 50 landing on `entry_child` (word 52) and 51 on `SPIN_WORD`, so a program with
-        the halves exchanged fails here rather than passing on matching numbers. 52..54 are the child's
-        three words, whose last does not return.
+        on this path, which is checked here precisely because 505's run measured that nothing else reads
+        it either (the child's `r0` is the pid, and the run's `xnu_live_fork_uap0` is the word the
+        argument buffer kept). 49..51 are the split: `cmp r1, #CHILD_FLAG` - the register 506 switched
+        to, because `thread_set_child` writes 1 there for the child and 0 is the parent's - and the two
+        branches whose targets are checked as word indices, with 50 landing on `entry_child` (word 52)
+        and 51 on `SPIN_WORD`, so a program with the halves exchanged fails here rather than passing on
+        matching numbers. 52..54 are the child's three words, whose last does not return.
       - 55..59 are 479's loop, kept so that the log shows both timed blocks, both opens, the read and
         the fork returned rather than killing the boot, and 60 is the failure marker.
     """
@@ -787,18 +792,27 @@ def program_expectations(decoded, K, adr_targets):
         # 505's ask that makes a second process. 46 is a word the kernel **does not read on this call
         # at all** - `fork`'s sysent slot is `{ int fork(void) }`, so its `sy_narg` is 0 and its munger
         # word is NULL, and `unix_syscall` marshals nothing - and that is exactly why the value is
-        # checked here: it is not an argument to `fork`, it is the word `machine_thread_dup` copies out
-        # of the parent's saved state into the child's, which is where the child's zero comes from.
-        # Leaving it out of this table would make the one number the child branches on the one number
-        # nothing compares.
-        (FORK_ARG_WORD, ("mov", (0, K["CHILD_RETURN"], 0))),
+        # checked here: it is not an argument to `fork`, and 505's run measured the other half of the
+        # claim too (it is not either process's return value either: `xnu_live_fork_uap0` names the
+        # word the argument buffer kept, and both processes' `r0` are written by the kernel). Leaving
+        # it out of this table would make the one word nothing reads the one word nothing compares.
+        (FORK_ARG_WORD, ("mov", (0, K["FORK_ARG_VALUE"], 0))),
         (FORK_CALL_WORD, ("mov", (12, K["SYSCALL_FORK"], 0))),
         (FORK_SVC_WORD, ("svc", (0x80,))),
-        # The test and the two branches: `cmp r0, #0`, `beq entry_child`, `b spin`. The child's branch
-        # is checked as a *target* - word `CHILD_WORD`, which is where `entry_child` is - because the
-        # failure this pair can have is not a wrong number but the two halves swapped, and a table of
-        # numbers would accept a program that gave the parent the exit and the child the loop.
-        (FORK_TEST_WORD, ("cmp_i", (0, K["CHILD_RETURN"], 0))),
+        # The test and the two branches: `cmp r1, #CHILD_FLAG`, `beq entry_child`, `b spin`. **The
+        # register and the number are the step's subject and both are checked as facts about the
+        # instruction**, because 505's run is what a wrong pair costs: with `cmp r0, #0` / `beq`, the
+        # child - whose `r0` is the pid too - took the parent's arm and died on the program's own
+        # `udf #1`. 506's *first* run inverted the condition instead (`cmp r1, #CHILD_FLAG` / `bne`,
+        # which is true of the parent) and `initproc` took the child's arm: the device measured that
+        # as `xnu_live_exit_pid` = 1, a panic, and `pid 1 exited` on the console. **The table alone
+        # could not refuse it, which is why `check_fork_branch_sense` below reads the immediate and
+        # the condition as one claim about the child's flag rather than as two checked fields.** The
+        # child's branch is checked as a *target* as well - word `CHILD_WORD`, which is where
+        # `entry_child` is - because the other failure this pair can have is the two halves swapped,
+        # and a table of numbers would accept a program that gave the parent the exit and the child
+        # the loop.
+        (FORK_TEST_WORD, ("cmp_i", (1, K["CHILD_FLAG"], 0))),
         (FORK_BRANCH_WORD, ("b", (COND["eq"], CHILD_WORD))),
         (PARENT_BRANCH_WORD, ("b", (COND["al"], SPIN_WORD))),
         # And the child's half: three words, the last of which is the only `svc` in this program that
@@ -1053,6 +1067,35 @@ def check_program(blob, fpc, pc, reg, K):
                      f"leave through user mode, which would make the child's half a copy of the "
                      f"parent's rather than a process that ends")
 
+    # **And the *sense* of the comparison, which is the one field 506's first run got wrong while this
+    # file agreed with it.** `cmp rX, #imm` sets `Z` exactly when `rX == imm`, and `beq` branches
+    # exactly when `Z` is set - so the pair (immediate, condition) is a *single* claim about what the
+    # child's `r1` holds, and it has two spellings: `ne` with a zero immediate ("the child is the one
+    # whose r1 is not zero") and `eq` with a nonzero immediate ("the child is the one whose r1 is that
+    # value"). The other two combinations are the same two instructions asserting the opposite - `eq`
+    # with zero, and `ne` with `CHILD_FLAG` - and the second of those is run 1's program, whose reading
+    # was `xnu_live_exit_pid` = 1 and a panic. So this clause is a relation between two fields of the
+    # encoding and not a copy of the table's expectation, which is what makes it a second opinion: the
+    # table says *which instruction* is there, and this says the instruction means what the constant's
+    # name says it means. It is the only clause in this file that could have refused run 1 without the
+    # table having to be right about the condition in the first place.
+    if decoded[FORK_TEST_WORD][0] == "cmp_i" and decoded[FORK_BRANCH_WORD][0] == "b":
+        immediate = decoded[FORK_TEST_WORD][1][1]
+        condition = decoded[FORK_BRANCH_WORD][1][0]
+        if isinstance(immediate, int) and isinstance(condition, int) and condition in (COND["eq"], COND["ne"]):
+            want = COND["ne"] if immediate == 0 else COND["eq"]
+            if condition != want:
+                fail(f"{p}the `fork`'s test at word {FORK_TEST_WORD} compares against {immediate} and "
+                     f"the branch at word {FORK_BRANCH_WORD} is taken on "
+                     f"{'equality' if condition == COND['eq'] else 'inequality'}, which is the claim "
+                     f"that the child is the thread whose r1 is "
+                     f"{'zero' if condition == COND['eq'] else 'not ' + str(immediate)} - the opposite "
+                     f"of what `thread_set_child` writes (`r[0] = pid; r[1] = 1`, "
+                     f"`osfmk/arm/status.c:722`). Both relations are legal ARM, which is why 506's "
+                     f"first run built and booted: `initproc` took the child's arm and the console's "
+                     f"`pid 1 exited -- no exit reason available -- (signal 0, exit 3)` is what it "
+                     f"cost. The child's value is the one this program must test for")
+
     # What the two asks will read as, said once at the end of the program's check: not a claim about
     # the device but the shape the wrapper in `entry_trace.c` publishes, so that a run whose two
     # `xnu_live_poll_ticks` are in this relation can be read without the reader re-deriving it. The
@@ -1083,38 +1126,39 @@ def check_program(blob, fpc, pc, reg, K):
 
     # And 505's, which is the first note in this file that predicts a *sequence* rather than a value:
     # the call at word 47 has two returns and the run should show both, so the note says which keys each
-    # half is read from and what separates them. The two predictions that are numbers are the pair the
+    # half is read from and what separates them. **The two predictions that are numbers are the pair the
     # kernel composes (`retval[0]`/`retval[1]` from `fork`) and the status the child's own number
-    # composes into (`EXIT_STATUS`) - and the one thing the note says out loud is that neither is
+    # composes into (`EXIT_STATUS`)** - and the one thing the note says out loud is that neither is
     # *user* mode's: the fixture's r0 words are what the wrapper compares the kernel's answer against.
     #
-    # **The prediction this note used to make about the *child's* r0 was refuted by 505's run, and the
-    # text below is the correction.** It said the child comes back with r0 = CHILD_RETURN, from the copy
-    # `machine_thread_dup` makes - which is true of the copy and false of the resume: `fork1` calls
-    # `thread_set_child(child_thread, child_proc->p_pid)` after `thread_dup` (`kern_fork.c:636`) and
-    # ARM's body writes `r[0] = pid; r[1] = 1` (`osfmk/arm/status.c:722`, `arm64/status.c:1253`), so the
-    # child is handed the pid too and the halves are told apart by r1. The run's records are
-    # `xnu_live_getpid_change_value` = 2 (the child's own first `getpid`) and `xnu_live_undef_pc` =
-    # `0x11d0` (the `entry_failed: udf #1` that a *wrong* pid reaches), and there is no `xnu_live_exit_*`
-    # key at all. What is left of the old prediction is the sentence its own step needed: the `mov r0,
-    # #0` really is a word nobody reads.
+    # **505 branched on the wrong register and its run measured the cost; 506 is the step that switches
+    # to the right one.** `cmp r0, #0` is the pid in both processes, so 505's child walked the parent's
+    # arm and died on the fixture's own `udf #1` (`xnu_live_undef_pc` = `0x11d0`, and
+    # `xnu_live_getpid_change_value` = 2 from the child's own first `getpid`) with no `xnu_live_exit_*`
+    # key in the log at all. `cmp r1, #CHILD_FLAG` is the flag the kernel writes for the child:
+    # `fork1` calls `thread_set_child(child_thread, child_proc->p_pid)` after `thread_dup`
+    # (`kern_fork.c:590`, `:636`) and ARM's body writes `r[0] = pid; r[1] = 1`
+    # (`osfmk/arm/status.c:722`, and the ARM64 port's is the same pair, `arm64/status.c:1253`), so the
+    # child's r1 is 1 and the parent's is 0 - the number `fork` puts in `retval[1]`
+    # (`kern_fork.c:895`), which the run publishes as `xnu_live_fork_ret_hi`.
     if K["SYSCALL_FORK"] and K["SYSCALL_EXIT"]:
         notes.append(f"{p}word {FORK_CALL_WORD} asks for {K['SYSCALL_FORK']} (fork) and word "
                      f"{FORK_SVC_WORD} is the only `svc` in this program that returns twice: the parent "
                      f"comes back at word {FORK_TEST_WORD} with `xnu_live_fork_ret_lo` = the child's pid "
-                     f"and `xnu_live_fork_ret_hi` = {K['CHILD_RETURN']}, and the child comes back at the "
-                     f"same word with r0 = the pid too and r1 = 1 (`thread_set_child`, "
-                     f"`osfmk/arm/status.c:722`) - so the word at {FORK_ARG_WORD} is read by nobody, "
-                     f"neither as an argument (`sy_narg` 0, munger NULL) nor as either process's return "
-                     f"value, and the branch at word {FORK_TEST_WORD} on r0 sends the child down the "
-                     f"parent's arm: 505's run measured that as `xnu_live_getpid_change_value` = 2 from "
-                     f"the child's own first `getpid` and as `xnu_live_undef_pc` = the child's "
-                     f"`entry_failed`. A run whose readings are instead `xnu_live_fork_calls` 1 with "
-                     f"`xnu_live_exit_pid` = `xnu_live_fork_ret_lo`, and the child's `exit` at word "
-                     f"{EXIT_CALL_WORD} carrying {K['EXIT_RVAL']} which `exit1` composes into "
-                     f"0x%(EXIT_STATUS)x (`xnu_live_exit_rval`), with `xnu_live_sigchld_signal` = 20 "
-                     f"(SIGCHLD) and `xnu_live_sigchld_to` = the parent's pid - is the reading that says "
-                     f"the branch tests the register the kernel writes the child's flag in" % K)
+                     f"and `xnu_live_fork_ret_hi` = 0 (its r1), the child comes back at the same word "
+                     f"with r0 = the pid too and r1 = {K['CHILD_FLAG']}, and the branch at word "
+                     f"{FORK_BRANCH_WORD} tests *that* - so the word at {FORK_ARG_WORD}, "
+                     f"{K['FORK_ARG_VALUE']}, is read by nobody: not as an argument (`sy_narg` 0, munger "
+                     f"NULL) and not as either process's return value. The child's half at word "
+                     f"{CHILD_WORD} is the `exit` at word {EXIT_CALL_WORD} carrying {K['EXIT_RVAL']}, "
+                     f"which `exit1` composes into 0x%(EXIT_STATUS)x inside the kernel - the argument "
+                     f"{K['EXIT_RVAL']} is `xnu_live_exit_rval` and the composed word is `p->p_xstat`, "
+                     f"which this instrument does not publish (run 2 of 506 measured the difference) - "
+                     f"with `xnu_live_exit_pid` = `xnu_live_fork_ret_lo` = 2, and then the OS tells the "
+                     f"parent: `psignal(pp, SIGCHLD)` = 20 (`xnu_live_sigchld_signal`) to "
+                     f"`xnu_live_sigchld_to` = 1. The parent never reaches it - `b spin` is its arm - so "
+                     f"`xnu_live_getpid_count` climbing with `_last` = 1 beside an `exit` record is the "
+                     f"pair that says two processes were alive at once" % K)
 
 
 def check_thread_registers(pc, reg, K):
@@ -1523,10 +1567,14 @@ def main():
         # the same reader shape as the other five, with their *argument shapes* checked in the same
         # function (none for `fork`, one 4-byte word for `exit`), and the status the kernel composes out
         # of the child's own number is derived from `bsd/sys/wait.h`'s `W_EXITCODE` rather than written
-        # here. See `syscall_fork_and_exit` and `exit_status_word`.
+        # here. See `syscall_fork_and_exit` and `exit_status_word`. `FORK_ARG_VALUE` is the word 505
+        # wrote before the `svc` and 506 kept: it is checked against the *instruction* and is not
+        # any process's return value - 505's run measured that - and `CHILD_FLAG` is the value of the
+        # register the branch tests, from `thread_set_child`'s own write (`osfmk/arm/status.c:722`).
         "SYSCALL_FORK": syscall_fork_and_exit()[0],
         "SYSCALL_EXIT": syscall_fork_and_exit()[1],
-        "CHILD_RETURN": 0,
+        "FORK_ARG_VALUE": 0,
+        "CHILD_FLAG": 1,
         "EXIT_RVAL": 3,
         "EXIT_STATUS": exit_status_word(3),
     }
@@ -1549,7 +1597,8 @@ def main():
                  "MMAP_PROT=0x%(MMAP_PROT)x MMAP_FLAGS=0x%(MMAP_FLAGS)x (bsd/sys/mman.h) "
                  "SYSCALL_FORK=%(SYSCALL_FORK)d SYSCALL_EXIT=%(SYSCALL_EXIT)d "
                  "(bsd/kern/syscalls.master, the master's `fork(void)` and `exit(int rval)` lines) "
-                 "CHILD_RETURN=%(CHILD_RETURN)d EXIT_RVAL=%(EXIT_RVAL)d "
+                 "FORK_ARG_VALUE=%(FORK_ARG_VALUE)d CHILD_FLAG=%(CHILD_FLAG)d "
+                 "EXIT_RVAL=%(EXIT_RVAL)d "
                  "EXIT_STATUS=0x%(EXIT_STATUS)x (W_EXITCODE(%(EXIT_RVAL)d, 0), bsd/sys/wait.h)" % K)
 
     blob, size = load(args.elf)
@@ -1681,6 +1730,18 @@ def main():
              0xEA000000 | ((CHILD_WORD - PARENT_BRANCH_WORD - 2) & 0xFFFFFF)),
             ("the child's status is zero", 0xE0 + EXIT_ARG_WORD * 4, 0xE3A00000),
             ("the child's exit is a nop", 0xE0 + EXIT_SVC_WORD * 4, 0xE1A00000),
+            # 506's three, and they are the three ways this step's one edit can be undone without
+            # changing the program's *shape*: the test reads the register 505 read (the pid in both
+            # processes - the mutation that reproduces the run 505 measured), the test compares `r1`
+            # against the value the dead word holds instead of the flag `thread_set_child` writes, and
+            # the branch's *sense* is inverted - which is run 1's program, the one that panicked with
+            # `xnu_live_exit_pid` = 1, and the one the sense clause above exists to refuse.
+            ("the child test reads r0 again", 0xE0 + FORK_TEST_WORD * 4,
+             0xE3500000 | K["FORK_ARG_VALUE"]),
+            ("the child's test asks for zero", 0xE0 + FORK_TEST_WORD * 4,
+             0xE3510000 | K["FORK_ARG_VALUE"]),
+            ("the child's branch is taken on inequality", 0xE0 + FORK_BRANCH_WORD * 4,
+             0x1A000000 | ((CHILD_WORD - FORK_BRANCH_WORD - 2) & 0xFFFFFF)),
             # 504's five, and they are of three kinds. The first two are the read length's bound at each
             # end - nothing read at all, and more than the mapping the buffer is the start of - and the
             # third is the *pair* of paths: the same instruction shape and a target four words away,
