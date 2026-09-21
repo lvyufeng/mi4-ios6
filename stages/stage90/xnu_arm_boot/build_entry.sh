@@ -137,6 +137,8 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=getpid --wrap=mmap
                    --wrap=poll
                    --wrap=open --wrap=read
+                   --wrap=fork --wrap=exit
+                   --wrap=psignal
                    --wrap=setPop
                    --wrap=PE_init_platform --wrap=fiq_context_init
                    --wrap=timer_call_enter
@@ -27389,6 +27391,36 @@ verify_trace_symbols() {
     done
     say "  xnu_entry_504: copyin_word is defined by this image rather than stubbed for it, so the read wrapper's two buffer words are read through the kernel's own user copy and a bad pointer is an EFAULT rather than a data abort"
 
+    # **505's three wrappers, and the two helpers their records are made of.** Same rule as 471's and
+    # 504's, for the same reason: `__real_fork`, `__real_exit` and `__real_psignal` have to be XNU's
+    # own functions, because a name the generator stood in for would make every record a fact about
+    # the stand-in - and here that would be a record about a *process* that the stand-in never made.
+    # `proc_pid` and `current_proc` are not wrapped at all: they are called directly by the two
+    # wrappers that publish a pid, so a stubbed `proc_pid` would make both pids - the one the `exit`
+    # slot was entered with and the one the SIGCHLD was sent from - facts about the stub, and the
+    # whole agreement between them (they must be the same 2 the `fork` record published) would be an
+    # agreement between two calls to the same stand-in.
+    for s in fork exit psignal proc_pid current_proc; do
+        grep -qx "$s" "$OUT/xnu_arm_entry_undef.txt" &&
+            layout_fail "505's instrument reads $s and the pass-1 undefined set contains it - nothing in this image defines that name, so the generator stubbed it and the record would be a fact about the stand-in. For \`fork\` and \`exit\` that means the slot would call the stub through \`__real_\`, and for \`proc_pid\` it means both pids in the step are one stub's answer"
+    done
+    say "  xnu_entry_505: fork, exit, psignal, proc_pid and current_proc are defined by this image rather than stubbed for it, so the three records are about the kernel's own fork, its own exit path and its own pid"
+
+    # **And the name this step does *not* wrap, checked rather than claimed.** `proc_prepareexit` is
+    # the function whose first statement panics for `initproc` - the arm this step's child must not
+    # take - and wrapping it is impossible: it is defined in `bsd/kern/kern_exit.c` and every
+    # reference to it is in that same file, so the linker resolves those calls inside their own
+    # object and `ld --wrap` has nothing to rewrite (455's negative result, and the reason 505 reads
+    # the death from *downstream* - `psignal(pp, SIGCHLD)` in `proc_exit` - instead). A future edit
+    # that moved a call into another file would make the wrap possible and this step's instrument
+    # silently incomplete, so the property is checked here from the sources: exactly one file in the
+    # tree mentions the name.
+    local pe_files
+    pe_files=$(grep -rl "proc_prepareexit" "$XNU/bsd" --include=*.c --include=*.h | sed "s|$XNU/||" | sort -u | tr '\n' ' ')
+    [[ "$pe_files" == "bsd/kern/kern_exit.c " ]] ||
+        layout_fail "the name proc_prepareexit appears in [${pe_files}] and this step's instrument assumes it appears only in bsd/kern/kern_exit.c - if a caller in another object exists then \`--wrap=proc_prepareexit\` becomes possible and 505's SIGCHLD record is no longer the only reading of the non-init arm"
+    say "  xnu_entry_505: proc_prepareexit is named in bsd/kern/kern_exit.c and nowhere else, so its initproc branch is unreachable by --wrap and the step's reading of that arm is the SIGCHLD that only the other arm reaches"
+
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls
     # `_ZNK9IOService8getStateEv` by mangled name on objects whose dynamic type this file cannot know -
     # whatever the `IOPlatformExpert` metaclass's instance walk yields. That is only correct if
@@ -27477,7 +27509,22 @@ verify_trace_symbols() {
     # whose *slot numbers* are also witnesses in `tools/check_sysent_table.py`'s list of ten, and that
     # list was written to over-determine the stride: 3 and 5 sit between 2 and 8, so a table whose
     # numbering was wrong by one would have to satisfy four adjacent witnesses at once.
-    local by_address=( vcputc getpid mmap poll open read thread_quantum_expire )
+    # 505 adds `fork` and `exit`, and they are the same shape one pair of slots apart again:
+    # `sysent[2].sy_call` and `sysent[1].sy_call`, the same `init_sysent.c` initialiser, and neither
+    # name is called from anywhere else in **this** image - which is what this list records and what
+    # the census below measures, so it is not a claim about Apple's tree. The two are worth a sentence
+    # anyway because the tree is not empty of them and the difference matters: `vfork` shares `fork1`'s
+    # body but calls `fork1` directly (`kern_fork.c:295`) rather than `fork`, and the callers of `exit`
+    # the tree does have (`bsd/dev/dtrace/blist.c`, `osfmk/prng/YarrowCoreLib`, `libkern/zlib`,
+    # `bsd/netkey/key_debug.c`, and the other files a grep finds) are all in files this configuration
+    # does not compile - *that* is the census's result and not this comment's claim. If any of those
+    # ever entered the build, the census would report a branch to the wrapper and this entry would be
+    # the thing to remove.
+    # **And they are the two whose absence a run would not show**: a `fork` slot holding the real
+    # `fork` writes no `xnu_live_fork_*` keys and a run with no keys looks exactly like a fork that
+    # never happened, which is why 505's evidence that the wrappers are in the slots is
+    # `tools/check_sysent_table.py`'s read-back and not the log.
+    local by_address=( vcputc getpid mmap poll open read fork exit thread_quantum_expire )
     # 484 adds `thread_quantum_expire`, and it is the *third* shape of this category rather than a
     # fourth copy of the second. `vcputc`, `getpid`, `mmap` and `poll` are all referenced by taking an
     # address that lands in a *table* - `cons_ops[1].putc`, `sysent[20].sy_call`, `sysent[197].sy_call`,

@@ -4562,10 +4562,142 @@ void entry_note_read(uint32_t caller, uint32_t fd, uint32_t buf, uint32_t nbytes
     g_read_calls++;
 }
 
+/* Experiment 505, first third. One record per `fork`, from the wrapper in `entry_trace.c` - and the
+ * four numbers are the step's first claim that this OS has ever made a process.
+ *
+ * **`ret_lo` is the pid and it is the only number in the record the kernel *invented*.** Everything
+ * this walk has measured before now was either an argument the fixture chose, a value out of a table
+ * the image was built with, or a word a driver copied; this is a number that did not exist before the
+ * call, that `forkproc` made and that `nprocs` will count from now on. Two facts pin it: process 1
+ * came out of `kernproc` at boot (`bsd/kern/bsd_init.c:1147`), so the count has been 1 for the whole
+ * run and the first pid a *user* request can be given is 2; and `retval[1]` is 0, which is
+ * `fork`'s own "flag parent return for user space" (`bsd/kern/kern_fork.c:885`) - a prediction that
+ * would fail if this were the child's return, because the child does not run this code at all.
+ *
+ * **`uap0` is the reading that the child's zero is not an argument.** `fork` takes no arguments:
+ * `sy_narg` is 0 and the slot's munger word is NULL, so `arm_get_syscall_args` is never called for
+ * index 2 and `uu_arg[0]` still holds the word the *previous* syscall left in it - the control
+ * `open`'s path address, which `xnu_live_open_path` published for `seq 2` a moment earlier. So the
+ * record says, in one line, that the buffer the fixture's `mov r0, #0` could have been read from
+ * still contains a string address, and the child's zero came from the register the saved state was
+ * copied with. **`error` is the syscall's own return**, and a non-zero one is the arm of the step
+ * where the OS refuses to make a process - which would leave the run's records complete and its
+ * conclusion different, which is why it is published rather than branched on.
+ */
+uint32_t g_fork_calls;
+
+void entry_note_fork(uint32_t caller, uint32_t uap0, uint32_t error, uint32_t lo, uint32_t hi)
+{
+    if (g_fork_calls == 0u) {
+        entry_live_write("xnu_live_fork_seq", 1u);
+        entry_live_write("xnu_live_fork_caller", caller);
+        entry_live_write("xnu_live_fork_uap0", uap0);
+        entry_live_write("xnu_live_fork_error", error);
+        entry_live_write("xnu_live_fork_ret_lo", lo);
+        entry_live_write("xnu_live_fork_ret_hi", hi);
+    } else {
+        /* A second `fork` would mean the fixture's branch sent both processes down the same arm, and
+         * the count is what says so: the pid in `_last` is then not a pid but a pid the *first*
+         * record already claimed. */
+        entry_live_write("xnu_live_fork_count", g_fork_calls + 1u);
+        entry_live_write("xnu_live_fork_last", lo);
+    }
+
+    g_fork_calls++;
+}
+
+/* Experiment 505, second third. The `exit` slot, recorded **before** the call runs - see the wrapper
+ * in `entry_trace.c` for why that order is forced rather than chosen: `exit` is
+ * `__attribute__((noreturn))` and ends in `thread_exception_return()`, so there is no moment after
+ * the call at which a record could be written.
+ *
+ * **`pid` is the number this step is about**, read with `proc_pid(proc)` on the process the dispatcher
+ * handed the slot - so it says which process is dying, and it has to be the same 2 the `fork` record
+ * published. `rval` is the fixture's own word, marshalled by `munge_w`; the *composed* form
+ * `W_EXITCODE(rval, 0)` is not published here because the instrument cannot see it from the slot - it
+ * is derived from the fixture's 3 and is the value the child's death is *reported* with, which is a
+ * number this step does not yet read (there is no reaping parent in this run; see `entry_note_sigchld`
+ * for the half of it that is visible).
+ *
+ * `entry_note_exit_returned` is the record that must **not** exist. It is written after `__real_exit`,
+ * so a run in which `xnu_live_exit_returned` appears is a run in which the kernel's `exit` returned to
+ * its caller - which cannot happen while the thread is terminating - and its absence is therefore a
+ * reading with a stated alternative rather than a silence.
+ */
+uint32_t g_exit_calls;
+
+void entry_note_exit(uint32_t caller, uint32_t pid, uint32_t rval)
+{
+    if (g_exit_calls == 0u) {
+        entry_live_write("xnu_live_exit_seq", 1u);
+        entry_live_write("xnu_live_exit_caller", caller);
+        entry_live_write("xnu_live_exit_pid", pid);
+        entry_live_write("xnu_live_exit_rval", rval);
+    } else {
+        entry_live_write("xnu_live_exit_count", g_exit_calls + 1u);
+        entry_live_write("xnu_live_exit_last_pid", pid);
+    }
+
+    g_exit_calls++;
+}
+
+void entry_note_exit_returned(uint32_t pid)
+{
+    entry_live_write("xnu_live_exit_returned", pid);
+}
+
+/* Experiment 505, third third - **the first record in this walk that is about two processes at
+ * once**. `from` is `current_proc()`'s pid in the wrapper: the process whose last thread terminated,
+ * i.e. the child. `to` is `psignal`'s own argument: the parent, which for this run is `initproc`, pid
+ * 1. `signum` is 20 and the filter's denominator is `psignal_calls`, the total number of signals this
+ * boot has sent by the time of this one - published so that a record which only ever appears for
+ * SIGCHLD cannot be mistaken for a record of every signal.
+ *
+ * **Why this is the reading that the child's death was *processed* and not merely requested.** The
+ * call is `kern_exit.c:1443`, inside `proc_exit`, which runs on the child's thread after the last
+ * thread of its task terminates - and the sequence that gets there is `exit` -> `exit1` ->
+ * `exit_with_reason` -> `proc_prepareexit(p, rv, perf_notify)` (`:829`) -> `task_terminate_internal`
+ * (`:833`). `proc_prepareexit`'s first statement is the `if (p == initproc) launchd_crashed_panic(p,
+ * rv);` that the comment above it marks `NOTREACHED` (`:849`) and that ended 478's run, and **it
+ * cannot be wrapped**: it is defined
+ * in `kern_exit.c` and called from `kern_exit.c`, so the reference is resolved inside its own object
+ * and `--wrap` never sees it (`build_entry.sh`'s census classifies such a name as `same-object`).
+ * What can be reached is what the *other* arm arrives at afterwards - this call - so a SIGCHLD record
+ * here is a fact about code that only runs if the panic arm was not taken. That is the whole reason
+ * this record is in the step.
+ *
+ * `entry_note_sigchld_returned` is the opposite kind of record from `entry_note_exit_returned`:
+ * `psignal` *does* return, so this one is expected to be in the log, and a run without it would say
+ * the delivery did not complete.
+ */
+uint32_t g_psignal_calls;
+uint32_t g_sigchld_calls;
+
+void entry_note_sigchld(uint32_t from, uint32_t to, uint32_t signum, uint32_t psignal_calls)
+{
+    if (g_sigchld_calls == 0u) {
+        entry_live_write("xnu_live_sigchld_seq", 1u);
+        entry_live_write("xnu_live_sigchld_from", from);
+        entry_live_write("xnu_live_sigchld_to", to);
+        entry_live_write("xnu_live_sigchld_signal", signum);
+        entry_live_write("xnu_live_psignal_calls", psignal_calls);
+    } else {
+        entry_live_write("xnu_live_sigchld_count", g_sigchld_calls + 1u);
+        entry_live_write("xnu_live_sigchld_last_to", to);
+    }
+
+    g_sigchld_calls++;
+}
+
+void entry_note_sigchld_returned(uint32_t from, uint32_t to)
+{
+    entry_live_write("xnu_live_sigchld_returned_from", from);
+    entry_live_write("xnu_live_sigchld_returned_to", to);
+}
+
 /* Experiment 456's probe, defined below its first caller; the declaration is here because
  * `entry_note_iolock` is where the reading is taken (see `entry_registry_probe`). */
 __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);
-
 /*
  * Experiment 454. One call per entry into the two IOKit deadline sleeps, from their wrappers. `site`
  * is the wrapper's own `lr` - the function that asked IOKit to wait - and `now` is the counter read in

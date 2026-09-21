@@ -9,7 +9,8 @@ it puts `--wrap=getpid`'s wrapper in that syscall's slot; experiment 480 adds a 
 for 197, with `--wrap=mmap`'s wrapper in *that* slot and six words of arguments marshalled into it by
 the armv7k munger; experiment 503 adds two more asking for 230, whose slot holds `--wrap=poll`'s
 wrapper; and experiment 504 adds the pair that reach a driver - three words for 3 (`read`) and three
-for 5 (`open`), each in its own slot. Three things can be true of the *image* while the device still
+for 5 (`open`), each in its own slot; and experiment 505 adds 1 (`exit`) and 2 (`fork`), the pair
+that ends one process and makes another. Three things can be true of the *image* while the device still
 runs the program `entry_ramdisk.s` describes:
 
   - `--wrap` rewrites an *address reference* exactly as it rewrites a call - 458 read that fact out of
@@ -53,16 +54,27 @@ Where each side of the comparison comes from
     in the image, because a build with a different munger there is a working kernel that answers the
     call with different numbers. The pair is the sharper claim of the two: `mmap`'s six argument words
     and `poll`'s three are the difference between a struct with an alignment gap and one without.
+    505 adds the same claim in the *opposite* direction, and it is the one no run can test: the slots
+    in `NO_ARGUMENTS` - 2 (`fork`) and 20 (`getpid`) - must have **no** munger, a `sy_narg` of 0 and a
+    `sy_arg_bytes` of 0, because `unix_syscall` marshals the fixture's registers only when `sy_narg` is
+    non-zero. A `sy_narg` of 3 on `fork` would make the kernel read `r0` as an argument and change
+    nothing observable at all: `fork` ignores `uu_arg` and the child's zero comes from the saved
+    state's own copy, so every record in the run would be identical. It is checked here because the
+    device cannot show it.
 
 The witnesses are not decoration: `fork` at 2, `read` at 3, `open` at 5 and `rename` at 128 are four
 different points of the same table, and `enosys` at 8 is the one Apple's own generation turns argument
-mismatches into - so a build whose table had moved would have to move all of them consistently. 20, 197
-and 230 are the three the fixture reaches, and 20 and 197 are the pair whose *distance* matters: 177
-entries apart, which no off-by-one in the stride survives.
+mismatches into - so a build whose table had moved would have to move all of them consistently. 1, 2, 3,
+5, 20, 197 and 230 are the seven the fixture reaches, and 20 and 197 are the pair whose *distance*
+matters: 177 entries apart, which no off-by-one in the stride survives. **Four of those seven slots
+hold the real function rather than a wrapper** if the `--wrap` flags are wrong, and 505's two are the
+first that are *adjacent to each other* in the table's own numbering (1 and 2) as well as in the
+program.
 
 `--selftest` mutates a copy of the table **in memory** - swapping two entries, zeroing a wrapper's
-slot, putting a real function back, moving the mmap munger, and truncating `nsysent` - and requires
-each mutation to be refused, which is what says the comparison is a comparison and not a restatement.
+slot, putting a real function back, moving the mmap munger, giving a no-argument slot an argument
+count, and truncating `nsysent` - and requires each mutation to be refused, which is what says the
+comparison is a comparison and not a restatement.
 
     ./tools/check_sysent_table.py --selftest
     ./tools/check_sysent_table.py                        # out/stage90/xnu_arm_entry.elf
@@ -94,6 +106,8 @@ WRAPPED = [
     (230, "poll"),          # 503
     (3, "read"),            # 504
     (5, "open"),            # 504
+    (1, "exit"),            # 505
+    (2, "fork"),            # 505
 ]
 SYSCALL_INDEX, SYSCALL_NAME = WRAPPED[0]
 
@@ -142,12 +156,45 @@ MUNGERS = {
     # is what decides that the number the fixture put in r0 is the number `copyinstr` will read from.
     3: "munge_www",
     5: "munge_www",
+    # 505's one: `exit`'s single `int rval` is one 4-byte word, so Apple's generation names `munge_w`.
+    # The claim here is not an ordering - one word cannot be misordered - it is that the word the
+    # fixture puts in `r0` is the argument `exit` reads, and it is the *only* fixture register that
+    # reaches the kernel on this call: `exit` takes nothing else, and the process it happens to is not
+    # an argument at all but the dispatcher's own `proc` (which is why the exit record's pid comes from
+    # `proc_pid(proc)` and not from a register).
+    1: "munge_w",
+    # `fork` is deliberately *not* here; see NO_ARGUMENTS below, where the claim about it is the
+    # opposite one.
 }
+
+# **The slots whose argument list is empty, which is a claim about a word the fixture relies on.**
+# `unix_syscall` (`bsd/dev/arm/systemcalls.c:118`) marshals arguments only `if (callp->sy_narg != 0)`,
+# so a slot with `sy_narg` 0 never calls `arm_get_syscall_args` at all and `uu_arg` keeps whatever the
+# previous syscall left in it. For `getpid` that is decoration (479's fixture is argument-free). For
+# `fork` it is **load-bearing and invisible in any run**: 505's fixture puts `mov r0, #0` before the
+# fork `svc`, and that word is the *child's return value* only because the kernel does not read it as
+# an argument - the child's `save_r0` is the copy `machine_thread_dup` makes of the parent's saved
+# state, and the return path that would overwrite it runs only in the parent. A slot whose `sy_narg`
+# were 3 would marshal r0..r2 into `uu_arg` and change *nothing observable*: `fork` ignores its
+# argument buffer, the child would still get 0, and the run's records would be identical. So the fact
+# is checked here, structurally, because the device cannot show it.
+#
+# The three words are the whole shape: the munger (offset 4), `sy_narg` (12, `int16_t`) and
+# `sy_arg_bytes` (14, `uint16_t`) - one 16-byte `struct sysent`.
+NO_ARGUMENTS = {
+    20: "getpid",     # 479: `{ int getpid(void); }` - nothing to marshal and no register read
+    2: "fork",        # 505: `{ int fork(void) }` - and this one is what makes the child's zero come
+                      #      from the register rather than from the buffer
+}
+MUNGER_WORD_OFFSET = 4
+NARG_OFFSET = 12
+ARG_BYTES_OFFSET = 14
 
 # `struct sysent` (`bsd/sys/sysent.h:45`) on this target, where the armv7k `#if` is on:
 # `sy_call`, `sy_arg_munge32`, `sy_return_type`, `sy_narg`, `sy_arg_bytes`. The munger is the second
-# word, and the stride above agrees with the five members because the first three are 4 bytes each.
-MUNGER_WORD_OFFSET = 4
+# word, the two counts are the last two members, and the stride above agrees with the five because the
+# first three are 4 bytes each and the last two are 2 - which is where `NARG_OFFSET` and
+# `ARG_BYTES_OFFSET` above come from.
 
 failures = []
 notes = []
@@ -337,6 +384,31 @@ def collect(elf, master, mutate=None):
                 summary.append("sysent[%d].sy_arg_munge32 = 0x%08x = %s, the munger the fixture's "
                                "registers are read by" % (index, got, want))
 
+    # **And the slots that read no register at all - the claim 505's fixture rests on.** See
+    # `NO_ARGUMENTS`: `unix_syscall` marshals only when `sy_narg != 0`, so this is the word that decides
+    # whether the fixture's `mov r0, #0` before the fork `svc` is a value the kernel ignores or an
+    # argument it reads. All three of the slot's argument words are required to be zero, and the failure
+    # the check exists for is the one no device run can show: a `sy_narg` of 3 there changes nothing
+    # observable - `fork` never looks at `uu_arg`, so the child's zero and every record would be the
+    # same.
+    for index, name in sorted(NO_ARGUMENTS.items()):
+        at = index * SYSENT_STRIDE
+        munger, = struct.unpack_from("<I", raw, at + MUNGER_WORD_OFFSET)
+        narg, = struct.unpack_from("<h", raw, at + NARG_OFFSET)
+        argbytes, = struct.unpack_from("<H", raw, at + ARG_BYTES_OFFSET)
+        if munger != 0 or narg != 0 or argbytes != 0:
+            fail("sysent[%d] (`%s`) has sy_arg_munge32 0x%08x, sy_narg %d and sy_arg_bytes %d: this "
+                 "slot has to be the shape of a call that takes nothing, because `unix_syscall` "
+                 "marshals the fixture's registers into `uu_arg` only when `sy_narg != 0`. With a "
+                 "non-zero count there, 505's `mov r0, #0` before the fork `svc` is read as an argument "
+                 "- and nothing on the device would show it, because `fork` ignores `uu_arg` and the "
+                 "child's zero comes from the saved state's copy either way"
+                 % (index, name, munger, narg, argbytes))
+        else:
+            summary.append("sysent[%d] = `%s` with sy_arg_munge32 0, sy_narg 0 and sy_arg_bytes 0 - a "
+                           "call that reads no register, which is what makes the fixture's r0 a return "
+                           "value rather than an argument" % (index, name))
+
     # Every witness read back, for the log: an eight-line agreement is what makes the stride a reading.
     for index, name in WITNESSES:
         got, = struct.unpack_from("<I", raw, index * SYSENT_STRIDE)
@@ -375,6 +447,8 @@ def main():
         poll_offset = WRAPPED[2][0] * SYSENT_STRIDE   # 230's slot, 33 entries past 197
         read_offset = WRAPPED[3][0] * SYSENT_STRIDE   # 504: 3's slot, in the table's first words
         open_offset = WRAPPED[4][0] * SYSENT_STRIDE   # 504: 5's slot, one entry on from it
+        exit_offset = WRAPPED[5][0] * SYSENT_STRIDE   # 505: 1's slot
+        fork_offset = WRAPPED[6][0] * SYSENT_STRIDE   # 505: 2's slot, the next entry
         other = 24 * SYSENT_STRIDE         # another entry's slot, inside the checked span
         symbols = elf.symbols()
         wrapper = symbols["__wrap_" + SYSCALL_NAME]
@@ -387,6 +461,10 @@ def main():
         read_real = symbols[WRAPPED[3][1]]
         open_wrapper = symbols["__wrap_" + WRAPPED[4][1]]
         open_real = symbols[WRAPPED[4][1]]
+        exit_wrapper = symbols["__wrap_" + WRAPPED[5][1]]
+        exit_real = symbols[WRAPPED[5][1]]
+        fork_wrapper = symbols["__wrap_" + WRAPPED[6][1]]
+        fork_real = symbols[WRAPPED[6][1]]
 
         def word(state, where):
             return struct.unpack_from("<I", state["table"], where)[0]
@@ -466,6 +544,36 @@ def main():
             # complete and every number in it about the wrong call.
             put(state, open_offset, poll_wrapper)
 
+        def the_real_fork(state):
+            # 505's copy of the defect the three above are about, and the sharpest of the four: an image
+            # whose slot holds `fork` instead of its wrapper is a *working* kernel that makes the child,
+            # runs it, and publishes no `xnu_live_fork_*` key - so the pid the OS chose is missing from a
+            # log that still shows the child's own `exit` and the SIGCHLD sent to pid 1.
+            put(state, fork_offset, fork_real)
+
+        def the_real_exit(state):
+            # And the same for `exit`, where the missing record costs more than itself: the wrapper
+            # publishes *before* the call precisely because the call never returns, so a slot holding
+            # the real function loses the only record the child makes at all - the run would show a
+            # fork, a pid 1 SIGCHLD, and no evidence of which process died.
+            put(state, exit_offset, exit_real)
+
+        def the_two_505_slots_swapped(state):
+            # 1 and 2 are adjacent in the table and adjacent in the fixture's program, so the off-by-one
+            # is the same shape as 504's: both wrappers still run, every record is still written, and
+            # each one reads the other call's `uap` - `exit`'s `rval` would be read out of a buffer
+            # `fork` never fills, and the fork record would publish a status word as a pid.
+            put(state, exit_offset, fork_wrapper)
+            put(state, fork_offset, exit_wrapper)
+
+        def fork_given_an_argument_count(state):
+            # **The mutation no device run can refuse.** `unix_syscall` marshals the fixture's registers
+            # into `uu_arg` only when `sy_narg != 0`, so a 3 in this half-word makes the kernel read r0
+            # as an argument on a call that has none - and *nothing observable changes*: `fork` never
+            # looks at `uu_arg`, the child still returns 0 from the saved state's copy, and every record
+            # in the run would be identical. That is why the claim is checked here, structurally.
+            struct.pack_into("<h", state["table"], fork_offset + NARG_OFFSET, 3)
+
         def one_entry_late(state):
             put(state, offset, 0)
             put(state, offset + SYSENT_STRIDE, wrapper)
@@ -494,6 +602,10 @@ def main():
             ("the real open in its slot", the_real_open),
             ("the read and open wrappers in each other's slot", the_two_new_slots_swapped),
             ("the poll wrapper in the open slot", the_poll_wrapper_in_opens_slot),
+            ("the real fork in its slot", the_real_fork),
+            ("the real exit in its slot", the_real_exit),
+            ("the exit and fork wrappers in each other's slot", the_two_505_slots_swapped),
+            ("fork given an argument count", fork_given_an_argument_count),
             ("the wrapper one entry late", one_entry_late),
             ("entries 20 and 24 swapped", swapped_with_24),
             ("the table shifted by one word (any other stride)", shifted_one_word),

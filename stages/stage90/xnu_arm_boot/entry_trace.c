@@ -168,6 +168,21 @@ extern void entry_note_read(uint32_t caller, uint32_t fd, uint32_t buf, uint32_t
                             uint32_t word_before, uint32_t word_after,
                             uint32_t copy_before, uint32_t copy_after);
 
+/* 505: three, and they are the step's whole instrument. `fork`'s is the pid the kernel made plus the
+ * argument word it did *not* read; `exit`'s is published before the call because the call does not
+ * return, with a second entry point for the record that would only exist if it did; and `sigchld`'s
+ * is the one inter-process record, taken from a function downstream of the branch that ended 478's
+ * run. See the wrappers below. */
+extern void entry_note_fork(uint32_t caller, uint32_t uap0, uint32_t error, uint32_t lo, uint32_t hi);
+extern void entry_note_exit(uint32_t caller, uint32_t pid, uint32_t rval);
+extern void entry_note_exit_returned(uint32_t pid);
+extern void entry_note_sigchld(uint32_t from, uint32_t to, uint32_t signum, uint32_t psignal_calls);
+extern void entry_note_sigchld_returned(uint32_t from, uint32_t to);
+
+/* The count `--wrap=psignal` keeps of *all* signals, SIGCHLD or not - the filter's own denominator,
+ * defined in `entry_stubs.c` beside the record it qualifies. */
+extern uint32_t g_psignal_calls;
+
 /* 481: the kernel's end of the timer chain - the deadline `timer_resync_deadlines` chose and the
  * decrementer value the real `setPop` computed for it, recorded beside what the writer in
  * `entry_timebase.c` was handed. See the wrapper below. */
@@ -961,6 +976,149 @@ int __wrap_read(void *proc, void *uap, void *retval)
     entry_note_read(caller, fd, buf, nbytes, (uint32_t)error, lo, hi,
                     word_before, word_after, copy_before, copy_after);
     return error;
+}
+
+/* ---------------------------------------------- the second process, and the death that is not fatal (505) */
+/*
+ * **504's four calls are all the kernel doing work for *one* process. These three are the kernel doing
+ * work for a process that did not exist before the run started.**
+ *
+ * `entry_ramdisk.s` grows nine instructions: `mov r0, #0` / `mov r12, #SYS_FORK` / `svc #0x80`, then
+ * `cmp r0, #0` / `beq entry_child` / `b spin`, and at `entry_child` the three of `exit`. Every record
+ * below is a number that has to agree with the fixture's branch for the step to mean what it says, and
+ * none of the three wrappers can be predicted from the others.
+ *
+ * ------------------------------------------------------------------ `fork`: the pid the OS made
+ *
+ * `2 AUE_FORK ALL { int fork(void) }` reaches `sysent[2].sy_call` - `bsd/kern/kern_fork.c:872` - and
+ * the slot takes **no argument**: `sy_narg` is 0 and `sy_arg_munge32` is NULL
+ * (`out/xnu_generated/init_sysent.c`'s own line for 2), so `arm_get_syscall_args` is never called for
+ * this index and `uu_arg[0]` is whatever the *previous* syscall left there. That is why this wrapper
+ * publishes `uap0` beside the return: the fixture's `mov r0, #0` is a word the kernel does not read,
+ * and the word in the buffer it does not read is the control `open`'s path address, which the `open`
+ * record published a moment earlier. The two readings together are what rule out "the child's zero
+ * came from its argument buffer" - which would be the only other way a single call could return twice.
+ *
+ * The two halves of the return are `retval[0]` and `retval[1]`: `fork` writes `retval[0] =
+ * child_proc->p_pid` and sets `retval[1] = 0` as "flag parent return for user space"
+ * (`kern_fork.c:878`, `:885`), and `arm_prepare_u32_syscall_return` copies both into `save_r0` and
+ * `save_r1` (`bsd/dev/arm/systemcalls.c:293`). So `ret_hi = 0` is a prediction, and the pid is the
+ * **first pid this machine has ever made for a request from user mode**: process 1 came out of
+ * `kernproc` (`bsd/kern/bsd_init.c:1147`), so `nprocs` has been 1 since the boot began and 2 is the
+ * only number this can be.
+ *
+ * ------------------------------------------------------------------ `exit`: the death, published before it happens
+ *
+ * `1 AUE_EXIT ALL { void exit(int rval) }` reaches `sysent[1].sy_call`, and that function is
+ * `__attribute__((noreturn))` (`bsd/kern/kern_exit.c:677`) - it ends in `thread_exception_return()`
+ * and the thread is marked terminated, so **a record written after `__real_exit` would never be
+ * written**. This wrapper therefore publishes *before* the call, which is the opposite of every other
+ * wrapper in this file and is a property of the callee rather than a choice: the alternative is a
+ * record whose absence cannot be told apart from a call that was never made.
+ *
+ * What it publishes is the caller's own identity - `proc_pid(proc)`, the process's pid read out of the
+ * `proc` the dispatcher handed the slot - and the fixture's `rval` as the munger marshalled it
+ * (`munge_w`, one 4-byte word). The pid is the step's load-bearing number: the same 2 the `fork`
+ * record published, read at a different point of the kernel's call graph, from the *child's* side.
+ *
+ * ------------------------------------------------------------------ `psignal`: the OS telling pid 1
+ *
+ * The third record is the one that says the death was *processed* rather than merely requested, and
+ * it is deliberately not in the exit path's own object. `proc_prepareexit`
+ * (`kern_exit.c:838-850`) - the function whose first statement is the `if (p == initproc)
+ * launchd_crashed_panic(...)` that ended 478's run - **cannot be wrapped**: it is defined in
+ * `kern_exit.c` and called from `kern_exit.c`, so the reference is resolved inside its own object and
+ * `--wrap` never sees it (455's lesson, and the census in `build_entry.sh` classifies such a name as
+ * `same-object`). What can be wrapped is what the non-init arm *reaches afterwards*:
+ * `psignal(pp, SIGCHLD)` at `kern_exit.c:1443`, in `proc_exit`, which runs on the child's thread once
+ * the last thread of the task terminates - **downstream of the branch that panics**, so a SIGCHLD
+ * record for this run is the proof that the branch was not taken, and `pp` is the parent, i.e. pid 1.
+ *
+ * `psignal` is defined in `kern_sig.c` and called from `kern_exit.c`, so this one *is* wrappable, and
+ * it is the first record in this walk that is **about two processes at once**: `xnu_live_sigchld_from`
+ * is `current_proc()`'s pid - the dying child, 2 - and `xnu_live_sigchld_to` is the argument's, the
+ * parent, 1. The signal number is `SIGCHLD` = 20 (`bsd/sys/signal.h:108`), and the filter on it is
+ * deliberate: `psignal` is the boot's general signal path, so the wrapper publishes **only** the
+ * SIGCHLD deliveries and counts the rest, which is what `xnu_live_psignal_calls` reports - a record of
+ * every signal the boot sends would be a record of the boot, and the claim here is about one.
+ *
+ * The guard on `current_proc()` is not decoration: a signal sent from a task with no BSD process
+ * behind it would make that pointer 0, and `proc_pid(0)` is a dereference of a null pointer - 504's
+ * run A is the standing reminder of what an instrument that faults on a state it did not expect costs
+ * the run.
+ */
+#define STAGE90_SIGCHLD 20u
+
+/* `int proc_pid(proc_t)`, written with this file's `void *` spelling of a XNU pointer type for the
+ * reason `copyin_word`'s declaration gives: no XNU header is included here, and every pointer this
+ * target has is 4 bytes. `proc_pid` is a real function of the image (there is no `--wrap` on it), and
+ * `build_entry.sh`'s `xnu_entry_505` clause requires it to be defined by this image rather than
+ * stubbed for it - a stand-in would make both pids facts about the stand-in. */
+extern int proc_pid(void *proc);
+extern void *current_proc(void);
+
+int __real_fork(void *proc, void *uap, int *retval);
+int __wrap_fork(void *proc, void *uap, int *retval)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    const uint32_t *given = (const uint32_t *)uap;
+    uint32_t uap0 = (given != 0) ? given[0] : 0xFFFFFFFFu;
+    uint32_t lo = 0xFFFFFFFFu, hi = 0xFFFFFFFFu;
+    int error = __real_fork(proc, uap, retval);
+
+    if (retval != 0) {
+        const uint32_t *words = (const uint32_t *)retval;
+
+        lo = words[0];
+        hi = words[1];
+    }
+
+    entry_note_fork(caller, uap0, (uint32_t)error, lo, hi);
+    return error;
+}
+
+/* `exit` is `void` and noreturn in the kernel; the declaration here is the ABI the dispatcher uses -
+ * `(*(callp->sy_call))(proc, &uthread->uu_arg[0], &uthread->uu_rval[0])`,
+ * `bsd/dev/arm/systemcalls.c:174` - and the `int` the wrapper returns is never used, because
+ * `sysent[1].sy_return_type` is `_SYSCALL_RET_NONE` (`arm_prepare_u32_syscall_return` writes 0 for
+ * it). It is spelled `int` rather than `void` so that the wrapper is not a tail call: 478's defect. */
+void __real_exit(void *proc, void *uap, int *retval);
+int __wrap_exit(void *proc, void *uap, int *retval)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    const uint32_t *given = (const uint32_t *)uap;
+    uint32_t rval = (given != 0) ? given[0] : 0xFFFFFFFFu;
+    uint32_t pid = (uint32_t)proc_pid(proc);
+
+    /* Before the call, because the call does not come back - see the header. */
+    entry_note_exit(caller, pid, rval);
+
+    __real_exit(proc, uap, retval);
+
+    /* Not reached in any run this step is for. It is written anyway, and what it would mean is
+     * written down: a record after this line says `exit` returned to its caller. */
+    entry_note_exit_returned(pid);
+    return 0;
+}
+
+void __real_psignal(void *proc, int signum);
+void __wrap_psignal(void *proc, int signum)
+{
+    uint32_t to;
+
+    g_psignal_calls++;
+    if ((uint32_t)signum == STAGE90_SIGCHLD) {
+        void *me = current_proc();
+        uint32_t from = (me != 0) ? (uint32_t)proc_pid(me) : 0xFFFFFFFFu;
+
+        to = (proc != 0) ? (uint32_t)proc_pid(proc) : 0xFFFFFFFFu;
+        entry_note_sigchld(from, to, (uint32_t)signum, g_psignal_calls);
+        __real_psignal(proc, signum);
+        entry_note_sigchld_returned(from, to);
+        return;
+    }
+
+    __real_psignal(proc, signum);
 }
 
 /* ---------------------------------------------------- the kernel's own timer deadline (481) */

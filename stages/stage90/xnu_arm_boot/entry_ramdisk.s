@@ -115,7 +115,7 @@
  * The program, and what it proves
  * ------------------------------------------------------------------------------------------------
  *
- * Fifty-two instructions, and they are the first thing `/sbin/launchd` runs:
+ * Sixty-one instructions, and they are the first thing `/sbin/launchd` runs:
  *
  *     entry_code:  svc  #0x80                ; +0   getpid() - a *Unix* syscall, r12 = +20
  *                  cmp  r0, #EXPECTED_PID    ; +4   the pid the kernel assigned this process?
@@ -163,12 +163,21 @@
  *                  mov  r2, #0               ; +172     pair separates a lookup that worked from an
  *                  mov  r12, #SYS_OPEN       ; +176     open that returns something either way.
  *                  svc  #0x80                ; +180
- *     spin:        mov  r12, #SYS_GETPID     ; +184
- *                  svc  #0x80                ; +188 ask again, so the loop's liveness is a record
- *                  cmp  r0, #EXPECTED_PID    ; +192
- *                  bne  entry_failed         ; +196
- *                  b    spin                 ; +200
- *     entry_failed: udf #1                   ; +204 the kernel answered something else
+ *                  mov  r0, #0               ; +184 fork() - a word with no reader: the slot's munger
+ *                  mov  r12, #SYS_FORK       ; +188     word is NULL, its narg is 0, and both processes
+ *                  svc  #0x80                ; +192     are handed the pid rather than this value
+ *                  cmp  r0, #0               ; +196 ... and the branch below is where 505's run sent
+ *                  beq  entry_child          ; +200     the child down the parent's arm, because the
+ *                  b    spin                 ; +204     word that separates them is r1, not r0
+ *     entry_child: mov  r0, #EXIT_RVAL      ; +208 the child leaves by the syscall that cannot
+ *                  mov  r12, #SYS_EXIT       ; +212     return, and that from pid 1 is fatal
+ *                  svc  #0x80                ; +216
+ *     spin:        mov  r12, #SYS_GETPID     ; +220
+ *                  svc  #0x80                ; +224 ask again, so the loop's liveness is a record
+ *                  cmp  r0, #EXPECTED_PID    ; +228
+ *                  bne  entry_failed         ; +232
+ *                  b    spin                 ; +236
+ *     entry_failed: udf #1                   ; +240 the kernel answered something else
  *
  * **The first three are 479's five minus its loop, unchanged, and they are why this program does not
  * end in a fault.** Until 479 the first instruction was `udf #0`, and the address it named was the
@@ -377,6 +386,92 @@
  * address here would be the project's oldest defect: one value with two definitions and nothing
  * comparing them. The check decodes both `adr`s and requires each to land on the bytes of its own
  * path string, which it finds by scanning the file for them.
+ *
+ * ------------------------------------------------------------------------------------------------
+ * What 505 adds: the first process the OS makes for itself, and the first death that is not fatal
+ * ------------------------------------------------------------------------------------------------
+ *
+ * 504's document ended with the ceiling in its own words: user mode "can now ask the kernel for time,
+ * for a page, for a vnode by name, and for bytes out of a device, and the kernel answers all four.
+ * What it still cannot do is *be* init: the fixture reads one word and spins." Every one of those four
+ * is the *kernel* doing work for one process; what no instruction in this image has ever made the OS
+ * do is **make another process** - `load_init_program` created process 1 out of `kernproc`
+ * (`bsd/kern/bsd_init.c:1079`, `:1147`) before this program existed, and nothing since has asked for a
+ * second one.
+ *
+ * **`fork` is that ask, and it is the one call in this program that returns twice.** `2
+ * AUE_FORK ALL { int fork(void) }` reaches `sysent[2].sy_call` - `bsd/kern/kern_fork.c:872` - which
+ * builds the child out of this process (`cloneproc` -> `forkproc` -> `fork_create_child` ->
+ * `task_create_internal(..., inherit_memory = TRUE, ...)`, `kern_fork.c:1000-1030`, `:760`) and then
+ * does the one thing that makes two processes out of one call: `retval[0] = child_proc->p_pid` for the
+ * caller, and `task_clear_return_wait` for the child (`:895`, `:905`).
+ *
+ * **The two answers come from two different places, and the fixture's `mov r0, #0` is the one it
+ * controls.** The *parent* returns through `unix_syscall`'s tail, where
+ * `arm_prepare_u32_syscall_return` writes `save_r0 = uu_rval[0]` (`bsd/dev/arm/systemcalls.c:293`) -
+ * the pid the kernel just made. The *child* never runs that code: its saved state was copied word for
+ * word out of the parent's by `machine_thread_dup` (`osfmk/arm/status.c:469`, a `bcopy` of
+ * `machine.PcbData`) while the parent was inside the `svc`, and it resumes at `load_and_go_user`
+ * through `task_wait_to_return` -> `thread_bootstrap_return` (`osfmk/kern/task.c:479`,
+ * `osfmk/arm/locore.s:1904`) with whatever `save_r0` that copy holds. **And that copy is not the last
+ * writer.** `fork1` calls `thread_dup(child_thread)` and then, forty-six lines later,
+ * `thread_set_child(child_thread, child_proc->p_pid)` (`kern_fork.c:590`, `:636`), whose comment names
+ * its purpose - "this is what gives the child process its 'return' value from a fork() call" - and
+ * ARM's body writes `r[0] = pid; r[1] = 1` (`osfmk/arm/status.c:722-730`; the object's whole function is
+ * `mov r2, #1` / `str r1, [r0, #848]` / `str r2, [r0, #852]` / `bx lr`, and the ARM64 port writes the
+ * same pair at `osfmk/arm64/status.c:1253`). So the child is handed the **pid**, not zero, and the word
+ * that tells the two halves apart is **`r1`**: 1 in the child, 0 in the parent, whose `r1` is
+ * `uu_rval[1]` as `fork` zeroed it (`kern_fork.c:895`).
+ *
+ * **The 505 run measured that, and this paragraph is the correction.** Its readings are
+ * `xnu_live_fork_ret_lo = 2` to the parent, the child's first `getpid` returning **2** at call
+ * `0x5e8b`, and the child's own `udf #1` at `0x11d0`: the `cmp r0, #0` below sends the child to
+ * `b spin`, its spin asks for its pid, is told 2 instead of 1, and `bne entry_failed` finishes it. What
+ * this paragraph used to predict - "`save_r0` has exactly one writer in this tree ... the child's is
+ * the register the fixture set before the `svc`: **zero**" - was a claim about a register no check in
+ * this build could read, and it was wrong in the one word the run *could* read. So the fixture's
+ * `mov r0, #0` is a word with no reader at all: not an argument (`sy_narg` 0, munger NULL), overwritten
+ * in the parent by the return path and in the child by `thread_set_child`. **506's step is the branch
+ * below, not the kernel.**
+ *
+ * **The `mov r0, #0` is also a word the kernel does not read, and that claim stands.** `fork`
+ * takes no arguments: `sy_narg` is 0 and the munger word is NULL, so `arm_get_syscall_args` is never
+ * called for this slot and `uu_arg[0]` keeps whatever the *previous* call left in it - the ENOENT
+ * `open`'s path address, `0x000011e0` in 505's run (`xnu_live_fork_uap0`, and the same word the
+ * `open` record published a moment earlier). The wrapper publishes that word beside the return, so the
+ * run says in one record that the child's `r0` came from neither the argument buffer nor this
+ * instruction.
+ *
+ * **Then the child ends, and that is the step's other half.** `1 AUE_EXIT ALL { void exit(int rval) }`
+ * reaches `sysent[1].sy_call` - `bsd/kern/kern_exit.c:677`, `__attribute__((noreturn))` - whose
+ * `exit1(p, W_EXITCODE(uap->rval, 0), retval)` reaches `exit_with_reason`, and whose first branch is
+ * the one that has killed every previous run: `if (p == initproc) launchd_crashed_panic(p, rv);` in
+ * `proc_prepareexit` (`:849`), the function 478's run measured as the end of the boot. `p` here is
+ * **pid 2**, so that branch is not taken, and the run's readings are the ones that say which arm ran:
+ * the pid and the composed status `rv = 0x300` at the `exit` slot, and - after the child is a zombie -
+ * `psignal(pp, SIGCHLD)` at `proc_exit`'s `:1443`, where `pp` is the parent, i.e. **pid 1**: the
+ * first inter-process event in this walk, and the number the OS chose to tell process 1 with is
+ * `SIGCHLD` = 20 (`bsd/sys/signal.h:108`). **The 505 run took neither of those arms** - the child went
+ * down the parent's, so no `xnu_live_exit_*`, no `xnu_live_sigchld_*` and no `psignal` record appears
+ * in its log, and those readings belong to the step that fixes the branch.
+ *
+ * **Nothing here branches on any of those answers**, for 503's and 504's reason, and the reason is
+ * sharper here than anywhere before it: `cmp r0, #0` is not a check on the kernel, it is the *only*
+ * way a single instruction stream can be two programs. A wrong answer from `fork` - an errno taken as
+ * a pid, or **a child that saw the pid instead of zero** - leaves `initproc` in the parent arm, which
+ * is the arm it was in before this step, and the run's records say so rather than the boot ending.
+ * **505's run is that case**, and it is the falsifier this paragraph named doing its job: the child
+ * followed the parent's arm, failed the pid check, and the records say so - `getpid_change_value` 2,
+ * `undef_pc` `0x11d0`, `osr_*`, the corpse path - with the boot still running. The one thing this
+ * program must not do is fault after the fork: `udf #1` in the *child* would kill pid 2, not the boot,
+ * and `udf #1` in the *parent* would kill `initproc` exactly as 478 measured.
+ *
+ * The `spin` is unchanged and was the last thing *both* processes did in 505's run: the parent fell
+ * back into it after the fork, and the child, sent there by the `cmp r0, #0` above, followed it until
+ * its own pid failed the check. So `xnu_live_getpid_count` climbing past the fork's record *and*
+ * `xnu_live_getpid_change_value` = 2 are the two numbers that say the OS came back to user mode **with
+ * two processes alive**, and the step after this one is the one that makes the child's number an
+ * `exit` record instead.
  */
 
     .syntax unified
@@ -409,8 +504,10 @@
  * vnode at all. `tools/host_ramdisk_macho_check.py` reads every one of them back out of those files -
  * the syscall numbers from the master, the pid from the sentence above it, the page size from the
  * kernel's own page shift, `prot` and `flags` from `mman.h`, and the character device's own name from
- * the `devfs_make_node` format string in `bsd/dev/memdev.c` that made the node 504 opens - and decodes
- * the fifty-two words below
+ * the `devfs_make_node` format string in `bsd/dev/memdev.c` that made the node 504 opens, the two
+ * syscall numbers 505 makes from the master's own lines for `fork` and `exit`, and the composed
+ * status `W_EXITCODE` derives from the child's - and decodes
+ * the sixty-one words below
  * to check they are the program this comment describes, *including* the comparisons that use them. */
     .equ SYS_GETPID,             20
     .equ EXPECTED_PID,           1
@@ -448,6 +545,28 @@
     .equ READ_BYTES,             4      /* one word: enough for the wrapper to publish the word the
                                          * driver copied, and no more than the page it lands in. The
                                          * check states both bounds rather than this number. */
+    .equ SYS_FORK,               2      /* `2 AUE_FORK ALL { int fork(void) NO_SYSCALL_STUB; }` - and
+                                         * the *empty* prototype is the argument the step rests on:
+                                         * `sysent[2].sy_narg` is 0 and its munger word is NULL
+                                         * (`out/xnu_generated/init_sysent.c`), so
+                                         * `arm_get_syscall_args` is never called for this slot and no
+                                         * register is read as an argument. The `mov r0, #0` before it is
+                                         * therefore a word the kernel does *not* read - it is the
+                                         * child's return value, and the fork wrapper publishing
+                                         * `uu_arg[0]` beside it is what makes that a reading rather
+                                         * than a claim. */
+    .equ SYS_EXIT,               1      /* `1 AUE_EXIT ALL { void exit(int rval) NO_SYSCALL_STUB; }` -
+                                         * `munge_w` and `_SYSCALL_RET_NONE`: one 4-byte argument and
+                                         * no return value, because the call does not return to user
+                                         * mode at all (`void exit(...)` is `__attribute__((noreturn))`,
+                                         * `bsd/kern/kern_exit.c:677`). */
+    .equ EXIT_RVAL,              3      /* The child's own exit status, and the value is chosen for what
+                                         * the kernel *does* with it: `exit` hands `exit1` the
+                                         * expression `W_EXITCODE(uap->rval, 0)` (`kern_exit.c:682`),
+                                         * which is `(rval & 0xff) << 8` - so 3 becomes **0x300**, a number
+                                         * the kernel composed and that no zero-filled field and no
+                                         * read of the fixture's own register can produce. A 0 here
+                                         * would be the one value that says nothing. */
 
 /* The shape of the three load commands, and the two numbers derived from them. Neither
  * `sizeofcmds` nor the entry point is written down: the first is an expression over the label the
@@ -667,18 +786,47 @@ entry_code:
     mov     r12, #SYS_OPEN              /* +176 */
     svc     #0x80                       /* +180: devfs has no such node, so this one is ENOENT */
 
+/* And the ask that makes a second process (505). One `svc`, two returns, and - the run's reading -
+ * the child comes back with the **pid**, not with the zero this file writes below. `fork1` copies the
+ * parent's saved state into the child (`thread_dup` -> `machine_thread_dup`) and then overwrites the
+ * child's `r[0]` with the pid and sets `r[1]` to 1 (`thread_set_child`, `osfmk/arm/status.c:722`), so
+ * the pair `(r0, r1)` is `(pid, 0)` for the parent and `(pid, 1)` for the child. The `mov r0, #0` is
+ * therefore not read by anyone: the fork slot takes no argument (`sy_narg` 0, munger NULL), and both
+ * processes' `r0` are written by the kernel after it. The branch below is the only thing that decides
+ * which process runs which half; on 505's run it handed the child the parent's arm, and the child's
+ * own `udf #1` at `0x11d0` is that reading. Neither arm faults for a *right* answer: the parent's is
+ * the loop it has always had, and the child's is the first `exit` this machine has ever run. */
+    mov     r0, #0                      /* +184: a word with no reader - see the header */
+    mov     r12, #SYS_FORK              /* +188: 2, and a slot whose munger word is NULL */
+    svc     #0x80                       /* +192: returns twice, and the branch below splits them */
+    cmp     r0, #0                      /* +196: the branch 505's run measured, and it is the wrong
+                                         *        register: the child's r0 is the pid too, and the
+                                         *        word that separates the halves is r1 */
+    beq     entry_child                 /* +200 */
+    b       spin                        /* +204: the parent keeps the loop it came in with */
+
+/* The child's half: one call, and it does not return to user mode. `exit` runs `exit1` and then
+ * `thread_exception_return()` (`kern_exit.c:684`), and `proc_prepareexit`'s first branch - the one
+ * that panics for `initproc` - is not taken here because this process is the one `fork` just made.
+ * Its status is 3 and the kernel composes 0x300 out of it, which is the number the instrument reads
+ * back from *inside* the exit path rather than from this register. */
+entry_child:
+    mov     r0, #EXIT_RVAL              /* +208: 3, so the composed status is 0x300 */
+    mov     r12, #SYS_EXIT              /* +212: 1 */
+    svc     #0x80                       /* +216: never returns; the thread is terminated */
+
 /* And the syscall that cannot fill anything, so that the loop is alive after the faults, after both
  * timed blocks and after the driver was read from, and the log says so: r12 has to be reloaded
  * because the `poll`s above left 230 in it. */
 spin:
-    mov     r12, #SYS_GETPID            /* +184 */
-    svc     #0x80                       /* +188: getpid() again */
-    cmp     r0, #EXPECTED_PID           /* +192 */
-    bne     entry_failed                /* +196 */
-    b       spin                        /* +200 */
+    mov     r12, #SYS_GETPID            /* +220 */
+    svc     #0x80                       /* +224: getpid() again */
+    cmp     r0, #EXPECTED_PID           /* +228 */
+    bne     entry_failed                /* +232 */
+    b       spin                        /* +236 */
 
 entry_failed:
-    udf     #1                          /* +204: the kernel answered something else */
+    udf     #1                          /* +240: the kernel answered something else */
 entry_code_end:
 
 /* The two paths, as *file* bytes inside `__TEXT`'s file range - so the mapping that carries the
@@ -734,12 +882,13 @@ paths_end:
     .error "the entry point is outside the segment it is loaded from"
     .endif
 /* And what the program's length is, because every branch in it is relative: a `b` that left the file
- * range would raise a fault instead of making a syscall, and the check tool decodes all 52 words by
- * offset. 52 words is the 3 of the getpid call, the 11 of the mmap call and its argument registers,
+ * range would raise a fault instead of making a syscall, and the check tool decodes all 61 words by
+ * offset. 61 words is the 3 of the getpid call, the 11 of the mmap call and its argument registers,
  * the 7 of the two faults, the 1 that keeps the page for 504, the 10 of the two timed asks, the 16 of
- * the two opens and the read between them, and the 5 of the loop with the `udf` behind it. */
-    .if (entry_code_end - entry_code) != 208
-    .error "the program is not the fifty-two instructions the header describes"
+ * the two opens and the read between them, the 9 of the fork and the child's exit and its entry
+ * label, and the 5 of the loop with the `udf` behind it. */
+    .if (entry_code_end - entry_code) != 244
+    .error "the program is not the sixty-one instructions the header describes"
     .endif
 
 /* The rest of the segment is zeros, and they are *file* bytes rather than a `.bss` tail: the whole
