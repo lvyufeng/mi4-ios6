@@ -468,6 +468,47 @@ that *did* return: 516's handler was shallow enough to leave `SS_LR` and `SS_SP`
 reading, and the arm is the test: 518 removes the collision, so if the net's silence was the collision's
 consequence, the next run either returns or comes back on the bite.
 
+### Where the boot actually was when it died, read from the console rather than from the frontier
+
+516's log ends with the OS's own console, in order (`/tmp/516-run3-kmsg.txt`, the same in run 2):
+
+```
+load_init_program: attempting to load /sbin/launchd
+mini4: the OS starts the process at 0x10e0 (the thread's user pc was 0x10e0)
+mini4: the OS's own init load returned, so pid 1 has the init image (caller 0x80049eb8)
+mini4: the AST is done -- pid 1's thread is at 0x10e0 for user mode (sp 0x101efc)
+panic(cpu 0 caller 0x804542dc): sleh_abort at interrupt context (saved state:0x80517e88)
+```
+
+So the OS did not die *on the way in*. `bsd_init` ran, `IOCatalogue`'s matching records are in the same
+log (`xnu_live_cls_calls = 0x3e`, the registry walk's `xnu_live_walk_*`), the memory device was added and
+the RAM disk mounted (`BSD root: md0`), `load_init_program` reached the end of Apple's own list, and
+**pid 1's thread was set up to run in user mode at `0x10e0`** (the project's own 4 KB fixture in the RAM
+disk, not a real `launchd` — which is why `load_init_program` printed its failure for
+`launchd.development` and then succeeded with the fixture). The abort came *after* all of that, in the
+interrupt taken while the boot thread — which by then **is** the idle thread — sat at
+`intstack_top − 16`.
+
+Two things follow, and they are the reason the arm is worth its risk rather than a shot in the dark:
+
+1. **What dies is the idle path, not the OS's bring-up.** The kernel's own driver and registry work has
+   already run by the time of the panic; the machine stops seconds after entering user mode, in the loop
+   that is supposed to keep running while pid 1 does its work.
+2. **So the collision is a candidate for exactly the death that is left**, and removing it is a candidate
+   for the difference between "dies right after entering user mode" and "keeps running" — which is where
+   the goal's driver clause lives.
+
+**The prediction, written before the run, so the reading is not a story told afterwards.** With the arm in
+(`32a513bc…`, `STAGE90_XNU_ISTACK_SEPARATE=1`):
+
+- **if the collision is the writer**: the next log has **no** `sleh_abort at interrupt context`, the idle
+  and `wfi` records continue past the point where 516's stopped, and the console goes on with the OS's own
+  activity instead of a panic — and the device comes back on its own with a log;
+- **if it is not**: the same panic returns, and the record says which case it is without ambiguity —
+  `xnu_live_tb_kind` is 1 (a kernel-stack frame) with `_pc` clean, `_cand` equal to the frame, and
+  `SS_LR`/`SS_SP` intact, i.e. the frame was **not** the handler's spill and the writer is something else
+  that then has a name and a moment.
+
 ## What is owed
 
 1. **The measurement arm's run** — `STAGE90_XNU_EXIT_POC_FLUSH=0`, `stage90-qcdt.img` sha256
