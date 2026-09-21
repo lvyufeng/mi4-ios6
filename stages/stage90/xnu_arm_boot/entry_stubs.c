@@ -5464,15 +5464,16 @@ void entry_note_pcx(uint32_t after, uint32_t tpidrprw, uint32_t datap, uint32_t 
  * to the 3 DRAM held, i.e. the window's accesses and the cache disagreed about a line - and the field
  * that faulted is a line of the same kind.
  *
- * **So 516 writes the cache back before the window opens** (`entry_trace.c`'s
- * `CleanPoU_Dcache()` in the enter wrapper, called while `SCTLR.C` is still set) and this pair of
- * records is what decides whether that was the defect: `xnu_live_pce_*` is the four values read with
- * the cache **on**, one instruction before the call, and `xnu_live_pce_after_*` is the same four read
- * *after* the real `platform_cache_idle_enter` has returned - i.e. with the cache **off**, in the
- * window, after the write-back. `_sctlr` is carried because it is what makes "the cache is off" a
- * reading rather than an assumption (its `C` bit is `0x4`), and because a run in which `_after_sctlr`
- * still has `C` set would mean the window never opened and every other reading here is of something
- * else.
+ * **So 516 writes the cache back before the window opens** (`entry_trace.c`'s `CleanPoC_Dcache()` in
+ * the enter wrapper, called while `SCTLR.C` is still set - and to the *Point of Coherency* and not the
+ * Point of Unification, because a PoU clean leaves the line in the L2 and the window's reads do not
+ * look there) and this pair of records is what decides whether that was the defect: `xnu_live_pce_*`
+ * is the four values read with the cache **on**, one instruction before the call, and
+ * `xnu_live_pce_after_*` is the same four read *after* the real `platform_cache_idle_enter` has
+ * returned - i.e. with the cache **off**, in the window, after the write-back. `_sctlr` is carried
+ * because it is what makes "the cache is off" a reading rather than an assumption (its `C` bit is
+ * `0x4`), and because a run in which `_after_sctlr` still has `C` set would mean the window never
+ * opened and every other reading here is of something else.
  *
  * **What the differences mean, before the run.** `_after_datap == _datap == 0x8051a000` says the write
  * back reached DRAM and the window's cache-off reads are coherent - and then an `ml_get_timebase`
@@ -5513,6 +5514,205 @@ void entry_note_pce_after(uint32_t tpidrprw, uint32_t datap, uint32_t up, uint32
         entry_live_write("xnu_live_pce_after_up", up);
         entry_live_write("xnu_live_pce_after_ncpu", ncpu);
         entry_live_write("xnu_live_pce_after_sctlr", sctlr);
+    }
+}
+
+/*
+ * Experiment 517. **The interrupt frame's own words, read by the one caller that runs between the
+ * handler's dispatch and the return that consumes it.**
+ *
+ * 516's run stopped inside Apple's own exception return. `return_from_irq` (`locore.s:1434` onwards)
+ * falls into `load_and_go_sys` (`0x8001a860`), whose tail is
+ *
+ *     8001a944:  ldr  lr, [sp, #60]     ; SS_PC - the pc the handler is about to return to
+ *     8001a948:  ldm  sp, {r0-r12}
+ *     8001a94c:  movs pc, lr
+ *
+ * so the `pc` the interrupt returns to is **whatever the frame's `SS_PC` slot holds**, and 516's two
+ * runs say that slot held the CPU's own timebase: `sleh_pc = far` was 28 and 29 ticks below the same
+ * run's own post-`wfi` reading, `sleh_lr` was `platform_cache_idle_exit + 8` (the instruction the
+ * interrupt was taken at) and identical in both runs, and `sp`/`cpsr` were the SVC banks the return
+ * had just switched into. The panic dump that goes with it is that frame's own `r0..r12`.
+ *
+ * **This record reads the slot before it is spent.** The frame pointer is not a local of anything a C
+ * wrapper can see, but the kernel puts it in one: `fleh_irq_handler` stores it in
+ * `cpu_data->cpu_int_state` (`locore.s:1403`, `[cpu_data + 176]` this configuration) and
+ * `return_from_irq` clears it again (`locore.s:1433`), so between those two points - and
+ * `ml_get_timebase()` is called at `0x8001aae4`, between the second-level dispatch and that clear -
+ * `[getCpuDatap() + CPU_INT_STATE]` *is* the frame. The wrapper on `ml_get_timebase` therefore reads
+ * the frame's six core words and publishes them beside the value it is returning.
+ *
+ * **Three questions and the key that answers each.** (a) *Is the slot already wrong when the handler
+ * is about to return?* `_pc` against `_lr`: a frame whose `SS_PC` and `SS_LR` differ by the width of
+ * one call is a frame that was interrupted at a `bl`; a frame whose `SS_PC` is a timebase is the
+ * defect itself, read at its last moment. (b) *Is the writer the entropy stir?*
+ * `locore.s:1423-1432` computes its store address from `EntropyData.index_ptr` - a **pointer read
+ * with the cache off** - as `index_ptr + 4`, wrapped to `EntropyData + 4` when it reaches the end of
+ * the buffer, and stores `timebase ^ [that word]` there. So `_index`, `_target` and `_hit` are the
+ * stir's own arithmetic done from the same word the stir will read: `_hit` is 1 when that address
+ * lands inside the frame this record just read. (c) *Which of these calls were inside the window?*
+ * `_calls` counts every entry and `_off` only those taken with `SCTLR.C` clear, and only those are
+ * published in full, because the window is the only cache state this step is about.
+ *
+ * **What the image already says about (b), so that the reading is not the first word on it.**
+ * `EntropyData` (`osfmk/prng/random.h:40-49`) is initialised in the image with
+ * `index_ptr = &EntropyData.buffer` (`random.c:226`, and `arm_init.c:273` writes the same value at
+ * boot), which is `EntropyData + 4`; the stir's target is therefore `EntropyData + 8` on its first
+ * call and inside the buffer on every call after it, **as long as the `index_ptr` word that reaches
+ * the stir is a pointer into that buffer**. A `_index` that is 0 or a stale value would put the store
+ * at address 4 or wherever, which is a *data* abort and not the *prefetch* abort 516 measured - so
+ * this record is where the stir either names itself or is ruled out, and it is written down here
+ * because an instrument whose subject is assumed is not an instrument.
+ *
+ * **The keys are named for the *call* and not for the stir, and that is deliberate.** `ml_get_timebase`
+ * has several callers in this kernel (`rtclock.c`'s four, `caches.c`'s three, `cpu.c`, `locks_arm.c`,
+ * `machine_routines.c`), and `--wrap` reaches all of them; this record therefore publishes on every
+ * entry taken with the D-cache off and *says which caller it was* through `_frame`: the frame pointer
+ * exists in `cpu_int_state` only while an interrupt handler is in service, so `_frame != 0` is the
+ * handler's own call and `_frame == 0` is one of the others, read with the cache off. A run that never
+ * shows `_frame != 0` in the window has measured the window and not the handler, and the two cases are
+ * one key apart rather than one name apart.
+ *
+ * **269's rule is kept by arithmetic and not by hope.** This function runs inside the interrupt the
+ * frame belongs to, so it must not take a fault of its own: the frame pointer is dereferenced only
+ * when it lies strictly inside `[cpu_data->intstack_top - INTSTACK_SIZE, cpu_data->intstack_top)`,
+ * both read from `cpu_data` (offsets 8 and the size 16384 in this configuration's `assym.s`), and a
+ * candidate that fails that test is published as `_frame = 0` with the six words zeroed. `_calls`,
+ * `_off` and `_seq` are counted either way, so a run in which the guard never let a frame through
+ * says that too.
+ */
+uint32_t g_tb_calls, g_tb_off, g_tb_seen;
+uint32_t g_tb_frame;
+uint32_t g_tb_pc, g_tb_lr, g_tb_sp, g_tb_cpsr, g_tb_status, g_tb_vaddr;
+uint32_t g_tb_index, g_tb_target, g_tb_hit;
+uint32_t g_tb_ret_lo, g_tb_prev_lo, g_tb_sctlr;
+/* The `cpu_data` this call reached the frame *through*, published beside the frame it produced. 516's
+ * pair of readings is the other side of the comparison, and it is taken at another moment: a record
+ * whose `_frame` came through a different `cpu_data` than `_pcx_datap` would be a frame of some other
+ * CPU's interrupt stack, and the two numbers are one key apart rather than a reader's inference. */
+uint32_t g_tb_datap;
+
+/*
+ * The offsets this function reads, each of them a number this configuration's `assym.s` also carries
+ * - `CPU_INT_STATE 176`, `CPU_INTSTACK_TOP 8`, `INTSTACK_SIZE 16384`, `ACT_CPUDATAP 1484`,
+ * `ENTROPY_INDEX_PTR 0`, `ENTROPY_BUFFER 4`, `ENTROPY_DATA_SIZE 68` - and `build_entry.sh`'s
+ * `xnu_entry_517` clause compares the *compiled* loads against that file, so a configuration whose
+ * layout moves stops the build instead of moving the reading.
+ */
+#define STAGE90_CPU_INT_STATE      176u
+#define STAGE90_CPU_INTSTACK_TOP   8u
+#define STAGE90_INTSTACK_SIZE      16384u
+#define STAGE90_ACT_CPUDATAP       1484u
+#define STAGE90_ENTROPY_INDEX_PTR  0u
+#define STAGE90_ENTROPY_BUFFER     4u
+#define STAGE90_ENTROPY_DATA_SIZE  68u
+
+/* `EntropyData` is an `entropy_data_t`; declared here by address only, because this file does not
+ * include XNU's headers and the three fields it needs are offsets from `assym.s` above. */
+extern char EntropyData[];
+
+void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr)
+{
+    uint32_t n;
+
+    g_tb_calls++;
+    if ((sctlr & 4u) != 0u)
+        return;                     /* outside the window: counted, not recorded */
+
+    g_tb_off++;
+    n = g_tb_seen + 1u;
+    g_tb_seen = n;
+    g_tb_prev_lo = g_tb_ret_lo;
+    g_tb_ret_lo = ret_lo;
+    g_tb_sctlr = sctlr;
+
+    {
+        uint32_t thread = entry_stubs_thread_pointer();
+        uint32_t datap = (thread == 0u) ? 0u
+                                        : *(volatile uint32_t *)(uintptr_t)(thread + STAGE90_ACT_CPUDATAP);
+        uint32_t fp = 0u;
+        uint32_t base = (uint32_t)(uintptr_t)EntropyData;
+        uint32_t index, target;
+
+        g_tb_datap = datap;
+
+        if (datap != 0u) {
+            uint32_t cand = *(volatile uint32_t *)(uintptr_t)(datap + STAGE90_CPU_INT_STATE);
+            uint32_t top = *(volatile uint32_t *)(uintptr_t)(datap + STAGE90_CPU_INTSTACK_TOP);
+
+            if (top != 0u && cand > (top - STAGE90_INTSTACK_SIZE) && cand < top)
+                fp = cand;
+        }
+
+        g_tb_frame  = fp;
+        g_tb_pc     = 0u;
+        g_tb_lr     = 0u;
+        g_tb_sp     = 0u;
+        g_tb_cpsr   = 0u;
+        g_tb_status = 0u;
+        g_tb_vaddr  = 0u;
+
+        if (fp != 0u) {
+            const uint32_t *frame = (const uint32_t *)(uintptr_t)fp;
+
+            g_tb_sp     = frame[STAGE90_SS_SP     / 4];
+            g_tb_lr     = frame[STAGE90_SS_LR     / 4];
+            g_tb_pc     = frame[STAGE90_SS_PC     / 4];
+            g_tb_cpsr   = frame[STAGE90_SS_CPSR   / 4];
+            g_tb_status = frame[STAGE90_SS_STATUS / 4];
+            g_tb_vaddr  = frame[STAGE90_SS_VADDR  / 4];
+        }
+
+        index = *(volatile uint32_t *)(uintptr_t)(base + STAGE90_ENTROPY_INDEX_PTR);
+        target = index + 4u;
+        if (target >= base + STAGE90_ENTROPY_DATA_SIZE)
+            target = base + STAGE90_ENTROPY_BUFFER;
+
+        g_tb_index  = index;
+        g_tb_target = target;
+        g_tb_hit    = (fp != 0u && target >= fp && target < fp + STAGE90_SS_SIZE) ? 1u : 0u;
+    }
+
+    /*
+     * **The cadence is the whole reason this instrument does not blind the run it is measuring.**
+     * `ml_get_timebase` is called once per *interrupt* - it is the first wrapper in this project on a
+     * per-interrupt path - and every `entry_live_write` spends one of `ENTRY_LIVE_CAP` (8192) records
+     * for the entire run. 516's log carries 4258 `xnu_live_*` records, so the channel is already about
+     * half spent when an XNU boot reaches the idle path; two writes per interrupt for the ~2500
+     * interrupts of a 25 s run would put the *tail* of that budget - the `wfi`, `pcx` and `pce` keys a
+     * run stops in - behind a diagnostic that needs at most eight records of its own. That is 445's
+     * and 461's defect ("the report path's buffer was the tracer's and was full when the report was
+     * written") arriving from the other direction, and it is fixed by arithmetic rather than by hoping
+     * the boot is short: the per-call keys are written for the first `STAGE90_TB_LIVE_MAX` recorded
+     * calls and never again, and the two counters are refreshed once per `STAGE90_TB_LIVE_EVERY`
+     * calls. Worst case is `8 * 17 + (calls >> 8)` records - about 150 for a 25 s run, whether it is a
+     * healthy boot or a storm. The cost is that `_calls`/`_off` are current only to the last multiple
+     * of 256; the console line says so, and both are also published per record for the first eight.
+     */
+#define STAGE90_TB_LIVE_MAX    8u
+#define STAGE90_TB_LIVE_EVERY  256u
+
+    if (n <= STAGE90_TB_LIVE_MAX) {
+        entry_live_write("xnu_live_tb_calls", g_tb_calls);
+        entry_live_write("xnu_live_tb_off", g_tb_off);
+        entry_live_write("xnu_live_tb_seq", n);
+        entry_live_write("xnu_live_tb_frame", g_tb_frame);
+        entry_live_write("xnu_live_tb_pc", g_tb_pc);
+        entry_live_write("xnu_live_tb_lr", g_tb_lr);
+        entry_live_write("xnu_live_tb_sp", g_tb_sp);
+        entry_live_write("xnu_live_tb_cpsr", g_tb_cpsr);
+        entry_live_write("xnu_live_tb_status", g_tb_status);
+        entry_live_write("xnu_live_tb_vaddr", g_tb_vaddr);
+        entry_live_write("xnu_live_tb_index", g_tb_index);
+        entry_live_write("xnu_live_tb_datap", g_tb_datap);
+        entry_live_write("xnu_live_tb_target", g_tb_target);
+        entry_live_write("xnu_live_tb_hit", g_tb_hit);
+        entry_live_write("xnu_live_tb_ret_lo", g_tb_ret_lo);
+        entry_live_write("xnu_live_tb_prev_lo", g_tb_prev_lo);
+        entry_live_write("xnu_live_tb_sctlr", g_tb_sctlr);
+    } else if ((g_tb_calls % STAGE90_TB_LIVE_EVERY) == 0u) {
+        entry_live_write("xnu_live_tb_calls", g_tb_calls);
+        entry_live_write("xnu_live_tb_off", g_tb_off);
     }
 }
 

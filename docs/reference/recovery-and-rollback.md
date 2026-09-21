@@ -147,7 +147,10 @@ fastboot itself.
 ### 4a. When a payload hangs — the device does not come back
 
 This is the expected failure mode of an unbootable Stage payload, and it has happened
-(2026-09-16, `PREFLIGHT_WATCHDOG_ONLY`). It is not a brick.
+(2026-09-16, `PREFLIGHT_WATCHDOG_ONLY`; and again 2026-09-21, experiment 517 — see the note at the
+end of this section). It is not a brick. **It is also not always recoverable without you**, which
+this section used to imply and now says plainly: the nets below have fired many times and have also
+failed once, so treat a hang as costing a power press until the nets say otherwise.
 
 Symptom, from the host kernel log on the phone's USB port:
 
@@ -190,22 +193,29 @@ Recovery:
 5. If `/proc/last_kmsg` has no `MI4IOS6_STAGE90` lines from the run, the power cycle
    reinitialised DRAM and the log is gone. That loss is exactly what the payload's recovery
    nets exist to prevent — see below — and it means the run produced no information at all.
+   **The power press is the long hold is the PMIC reset**, so this is the normal outcome of a
+   hang that needed one: the nets below preserve the log by *rebooting* the phone; a power
+   press does not.
 
 The payload has **two** recovery nets designed to make this procedure unnecessary, and they
 fail in different ways, which is why there are two:
 
 - The **MSM8974 hardware watchdog** (`stages/stage90/hw_watchdog.c`, on by default) is armed
-  at the top of `stage90_main`: bark at 30 s, bite at 33 s, following the vendor driver's own
-  split. It is a hardware counter — no GIC, no timer, no IRQ delivery, no vector table, no
-  unmasked IRQs — so it fires no matter what the CPU is doing. `platform_reboot()` also forces
-  an immediate bite after its PS_HOLD write, so a reboot does not depend on the PMIC write
-  landing. Its arming is logged with a liveness check, not just a read-back: `WDT0_STS` holds
-  a live countdown on this part, so the payload samples it twice and requires it to have
-  moved *and* to sit just under the bark value it programmed.
+  at the top of `stage90_main`: **bark at 25 s, bite at 28 s**, following the vendor driver's
+  own split (`STAGE90_HW_WATCHDOG_TIMEOUT_S` / `_BITE_GAP_S` in `stage90.h`; both registers are
+  20 bits, which is why the timeout is 25 s and not 30 s). It is a hardware counter — no GIC,
+  no timer, no IRQ delivery, no vector table, no unmasked IRQs — so it does not depend on the
+  *payload's* state. `platform_reboot()` also forces an immediate bite after its PS_HOLD write,
+  so a reboot does not depend on the PMIC write landing. Its arming is logged with a liveness
+  check, not just a read-back: `WDT0_STS` **counts up from zero** on this part, so the payload
+  samples it twice and requires it to have moved *and* to sit near zero rather than near
+  aboot's own 20 s arming. One caveat, from the vendor bindings and the driver itself: the bite
+  is a **secure-mode interrupt mediated by TrustZone**, so "independent of the payload" is the
+  accurate claim, not "independent of any software".
 - The **software dead-man** (60 s) is armed at the end of `kernel_entry`'s GIC validation: the
   timer IRQ handler dumps the interrupted PC ring and reboots through PS_HOLD.
 
-The hardware net is the faster and stronger of the two and is the one to rely on. Its
+The hardware net is the faster and stronger of the two and is the one to rely on first. Its
 register programming comes from the cancro device tree and the cancro kernel's own
 `msm_watchdog_v2.c`, and it is the same mechanism Android's panic path uses to produce a
 readable `last_kmsg` — so "bite → reset → last_kmsg" is the device's normal crash path.
@@ -213,7 +223,7 @@ readable `last_kmsg` — so "bite → reset → last_kmsg" is the device's norma
 When the hardware watchdog is armed, `last_kmsg` contains:
 
 ```text
-stage90 hw_watchdog: armed; the SoC will reset itself if the payload stops
+stage90 hw_watchdog: armed and counting; the SoC will reset itself if the payload stops
 ```
 
 and when the software dead-man is the one that fired:
@@ -228,10 +238,31 @@ MI4IOS6_STAGE90 platform_reboot entered
 
 Absence of all of that after a hang means neither net fired, which is itself the finding for
 that run. Both can be tested directly, and the hardware one should be tested first:
-`STAGE90_HW_WATCHDOG_SELFTEST=1` arms the hardware counter and spins forever (~30 s to
+`STAGE90_HW_WATCHDOG_SELFTEST=1` arms the hardware counter and spins forever (~28 s to
 recovery), while `STAGE90_DEADMAN_SELFTEST=1 -DSTAGE90_HW_WATCHDOG=0` does the same for the
 software dead-man alone, so a success is attributable to one mechanism rather than to
 "one of them worked".
+
+**What the nets' record actually is, so this section is not a promise it cannot keep.** Every
+run from experiment 506 to 515 returned on the hardware watchdog's bite — including 512/513 with
+the OS parked in the kernel's own `WFI` idle path and 514/515 in abort storms inside the
+exception path — and 516's two runs came back on XNU's own `Attempting system restart...MACH
+Reboot`, i.e. on the kernel's panic path with the watchdog behind it. Then **experiment 517's
+first run (2026-09-21) did not come back at all**: `fastboot boot` reported `Booting OKAY`, the
+phone disconnected 3 s later as the payload took over, and there was no enumeration on that USB
+port for ~15 minutes — no `adb`, no `fastboot`, no other Xiaomi/Google device on the bus. It
+needed a power press, which reinitialised DRAM, so no log was recovered. See
+`docs/experiments/experiment-517-the-step-was-two-changes-and-its-first-run-did-not-come-back.md`.
+
+Two things follow, and both are about how to read a hang rather than about the device:
+
+- A net's *arming* is proved by its arm-time liveness record; a *bite* is proved by nothing but a
+  phone that came back. So "the nets are proved" is a claim about a history, and this is the
+  counterexample in it.
+- The device is never at risk of a brick — `fastboot boot` does not persist and the Stage payloads
+  touch only MMIO, IMEM and PS_HOLD — but a run can cost you a power press and its own log. Say
+  which single change an image carries before booting it, so a run that does not come back is
+  attributable; 517's carried two and is not.
 
 ### 5. Persistent flash only with explicit approval
 

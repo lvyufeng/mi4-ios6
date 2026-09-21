@@ -248,6 +248,16 @@ extern void entry_note_pce_after(uint32_t tpidrprw, uint32_t datap, uint32_t up,
                                  uint32_t sctlr);
 extern void entry_note_pcx(uint32_t after, uint32_t tpidrprw, uint32_t datap, uint32_t sctlr);
 
+/* 517: the interrupt frame's own words, read from inside the handler that owns it, and the entropy
+ * stir's store address computed from the same word the stir will read. See the block in
+ * `entry_stubs.c` for what each key answers and what the image already says about the stir. */
+extern uint32_t g_tb_calls, g_tb_off, g_tb_seen, g_tb_frame;
+extern uint32_t g_tb_pc, g_tb_lr, g_tb_sp, g_tb_cpsr, g_tb_status, g_tb_vaddr;
+extern uint32_t g_tb_index, g_tb_target, g_tb_hit;
+extern uint32_t g_tb_datap;
+extern uint32_t g_tb_ret_lo, g_tb_prev_lo, g_tb_sctlr;
+extern void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr);
+
 /* **515's two globals, read by name, and they are the operands of Apple's own test.** `caches.c:414`
  * is `if (up_style_idle_exit && (real_ncpus == 1))`, both words are in this image, and both are read
  * here *with the cache on* - which is what makes the record a reading of the CPU's value rather than
@@ -325,6 +335,24 @@ static inline uint32_t entry_sctlr(void)
  * has to be in memory": `cpu_sleep` (`cpu.c:105`, before quiescing a CPU), `platform_cache_clean`
  * (`caches.c:364`) and `platform_cache_shutdown` (`caches.c:377`). */
 extern void CleanPoC_Dcache(void);
+/* 517: the same function's *clean and invalidate* form, and the one the exit needs. `CleanPoC_Dcache`
+ * writes back and leaves the line in the cache; `FlushPoC_Dcache` (`0x80045828`) is
+ * `cleanflush_dcacheline` followed by `cleanflush_l2dcacheline` - `DCCISW` (clean **and** invalidate)
+ * over the L1's geometry and then over the L2's - so it both writes the line out to the Point of
+ * Coherency and discards the copies, which is what a cache that is about to be switched back on wants
+ * to find. It is called on the exit with `SCTLR.C` still clear, where the clean half is a no-op on
+ * lines the enter already cleaned and the invalidate half is the whole of the work.
+ *
+ * **`STAGE90_XNU_EXIT_POC_FLUSH` and why it defaults to 0.** This is the one thing 517 adds that can
+ * change what the kernel *does* rather than only what it reports, and 517's first hardware run did not
+ * come back at all - so the step is split, and the state change is opt-in. See the block on
+ * `__wrap_platform_cache_idle_exit` below for what 516's own doc asked for and why the measurement
+ * comes first. */
+extern void FlushPoC_Dcache(void);
+
+#ifndef STAGE90_XNU_EXIT_POC_FLUSH
+#define STAGE90_XNU_EXIT_POC_FLUSH 0
+#endif
 
 /* `boolean_t idle_enable` (`osfmk/arm/cpu_common.c:67`), read **by name** - the linker resolves the
  * address out of the image's own symbol, so there is no offset here to be wrong, which is why this is
@@ -1173,6 +1201,28 @@ int __wrap_poll(void *proc, void *uap, int *retval)
                g_pce_datap, g_pce_up, g_pce_ncpu, g_pce_first_tpidrprw,
                g_pce_after_datap, g_pce_after_up, g_pce_after_ncpu, g_pce_after_tpidrprw,
                g_pce_after_sctlr, g_pcx_datap, g_pcx_sctlr);
+        /* **517's line: the interrupt frame, read from inside the handler that owns it.** `calls` is
+         * every entry into this wrapper and `off` only the ones taken with `SCTLR.C` clear, so the
+         * pair says how much of this run's traffic was inside the window; the six frame words and the
+         * stir's own store address are the first such call's, and `hit` is the one number that decides
+         * whether the entropy stir can be the writer at all - it is 1 when that address lands inside
+         * the frame just read. A run whose `frame` is 0 has published the count and refused the
+         * dereference, which is the guard doing its job rather than a missing reading.
+         *
+         * The two counters are refreshed once per 256 calls and not on every call, because this is the
+         * only wrapper here on a per-*interrupt* path and the live channel is a fixed budget for the
+         * whole run (`entry_stubs.c` has the arithmetic); so the values below are current to the last
+         * multiple of 256, and the first eight calls publish them exactly. */
+        printf("mini4: the interrupt frame, read before the return that spends it -- %d call(s) into "
+               "ml_get_timebase (this count is refreshed every 256 calls; exact for the first 8), %d of "
+               "them with the D-cache off; first: frame 0x%x, cpudatap 0x%x, "
+               "SS_PC 0x%x SS_LR 0x%x SS_SP 0x%x cpsr 0x%x status 0x%x vaddr 0x%x; the stir will store "
+               "its timebase (this call returned 0x%x, the one before it 0x%x) at 0x%x, from index "
+               "0x%x, and that address is %s the frame (SCTLR=0x%x)\n",
+               g_tb_calls, g_tb_off, g_tb_frame, g_tb_datap,
+               g_tb_pc, g_tb_lr, g_tb_sp, g_tb_cpsr, g_tb_status, g_tb_vaddr,
+               g_tb_ret_lo, g_tb_prev_lo, g_tb_target, g_tb_index,
+               (g_tb_hit != 0u) ? "inside" : "outside", g_tb_sctlr);
     }
 
     return error;
@@ -1633,13 +1683,78 @@ void __wrap_platform_cache_idle_enter(void)
  * 516 adds the same expression, read here with the cache **back on** - so a run that reaches this
  * wrapper has three readings of one field in three cache states, and the middle one is the only one
  * taken in the window.
+ *
+ * **517 adds the mirror of the enter's write-back, and it is the same defect one call later.** The
+ * exit's own first act is `FlushPoU_Dcache()` (`caches.c:460`), which is `DCCISW` over the **L1's**
+ * geometry only: it clean-and-invalidates the L1 and never touches the L2. So on the way *out* the
+ * kernel leaves the L2 holding pre-window copies of everything the L2 had cached before the window
+ * opened - and then `caches.c:490` sets `SCTLR.C` again at the end of this same function, which is
+ * the moment those stale L2 lines become the ones the CPU reads. 515's own record is the first
+ * witness that this is not theory: `g_sleh_seq` receded from the 8 the channel had published to the
+ * 3 DRAM held, which is a clean having reached the L2 and no further. 516 fixed that for the *enter*;
+ * this call fixes it for the exit, one call earlier than the kernel's own flush and with the D-cache
+ * still off - so the clean is a no-op on lines that are already clean and the *invalidate* is what
+ * does the work, discarding the L2's pre-window copies before `SCTLR.C` makes them live again.
+ *
+ * It is a pure state change and it takes no reading: `_pcx`'s record below is still taken after the
+ * real exit, with the cache on, so the three-reading shape of 516 is unchanged.
+ *
+ * **It is off unless `STAGE90_XNU_EXIT_POC_FLUSH=1` names it, and that is 517's own first run
+ * talking.** The image that ran carried this call *and* the frame reader below, and it did not come
+ * back - not on Apple's own panic path the way 516's two runs did, and not on the hardware watchdog
+ * that recovered every run from 506 to 511. Nothing in that run says which of the two changes did
+ * it, and there is no log to ask: the device has to be recovered with the power button, and a cold
+ * boot loses the ram_console. A step whose reading cannot be attributed is not a step, so the next
+ * run carries the measurement alone - the frame reader, whose whole output is numbers in the live
+ * channel and which 516's doc names as the thing owed - and this call waits for a run that can
+ * attribute it. With the flag at 0 this wrapper is byte-for-byte 516's: one call through, one record.
  */
 void __real_platform_cache_idle_exit(void);
 void __wrap_platform_cache_idle_exit(void)
 {
+#if STAGE90_XNU_EXIT_POC_FLUSH
+    FlushPoC_Dcache();
+#endif
+
     __real_platform_cache_idle_exit();
 
     entry_note_pcx(entry_counter(), entry_tpidrprw(), entry_cpu_datap(), entry_sctlr());
+}
+
+/*
+ * Experiment 517. **The one C caller that runs between the interrupt handler's dispatch and the return
+ * that consumes its frame.** `fleh_irq_handler` stores the frame pointer in `cpu_data->cpu_int_state`
+ * (`locore.s:1403`) and `return_from_irq` clears it (`locore.s:1433`); between those two points the
+ * handler calls `ml_get_timebase()` to stir the entropy pool (`locore.s:1421-1423`, the call at
+ * `0x8001aae4`), and that is this wrapper. 516's runs stopped in the return path itself, with the
+ * frame's `SS_PC` slot holding the CPU's own timebase where an address belonged, so a reading taken one
+ * call earlier - of that slot, of the stir's own store address, and of the value this call is
+ * returning - is the measurement the step is for.
+ *
+ * **The wrapper is a C function on the interrupt stack, and that is deliberate rather than incidental.**
+ * It is reached with `sp` inside the boot CPU's interrupt stack, with the D-cache off and interrupts
+ * masked, from one site in Apple's own assembly. It must therefore do the least a C function can do:
+ * one call to the real function, one call into `.bss`, no allocation, no lock, no dereference that is
+ * not bounded by `cpu_data->intstack_top` (see the guard in `entry_stubs.c`). It returns the real
+ * function's 64-bit value unchanged, which is the only thing its caller is entitled to.
+ *
+ * The build clause for this step asserts the things that keep it honest: that `ml_get_timebase` is the
+ * kernel's own function and not a stand-in, that every reference to it in the linked pool is a call,
+ * that the real function is still called exactly once from the wrapper, that the compiled
+ * `entry_note_timebase_call` loads `[.., #176]` and `[.., #8]` and `[.., #1484]` and uses 16384 and 68
+ * and all six of the frame's own offsets, and that the four constants it reads are this
+ * configuration's `assym.s` values. (The offsets are matched against *any* register name: objdump
+ * spells r12 `ip` and r14 `lr` per instruction, and a matcher written against `r[0-9]+` read 0 on a
+ * body that plainly loads every field.)
+ */
+uint64_t __real_ml_get_timebase(void);
+uint64_t __wrap_ml_get_timebase(void)
+{
+    uint64_t t = __real_ml_get_timebase();
+
+    entry_note_timebase_call((uint32_t)t, entry_sctlr());
+
+    return t;
 }
 
 int __real_fork(void *proc, void *uap, int *retval);

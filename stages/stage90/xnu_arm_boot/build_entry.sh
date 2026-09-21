@@ -148,6 +148,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=cpu_idle_wfi
                    --wrap=platform_cache_idle_enter
                    --wrap=platform_cache_idle_exit
+                   --wrap=ml_get_timebase
                    --wrap=psignal
                    --wrap=setPop
                    --wrap=PE_init_platform --wrap=fiq_context_init
@@ -272,6 +273,29 @@ fi
 # the dump. Compiled out entirely when the tracer is not, so the *presence* of the keys is a statement
 # about the image rather than a zero that could mean either thing.
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_ENTRY_TRACE=1)
+
+# ---------------------------------------------------------------- 517, split in two
+#
+# **One step that changed two things is a step whose reading cannot be attributed, and 517's first
+# hardware run is the price of that.** It did not come back - not on the kernel's own panic path, as
+# 516's runs did, and not on the hardware watchdog either - so it needs a power press and a log that
+# does not exist. Two independent changes were in that image: the interrupt frame read from inside
+# `ml_get_timebase` (a measurement, the same class of instrumentation the previous hundred steps put
+# on hotter paths than this one and returned from) and `FlushPoC_Dcache()` on the exit of every idle
+# window (a *state* change on the path that re-enables the D-cache, and the only thing in this image
+# that can alter what the kernel does). Nothing in that run names which one it was.
+#
+# So the two halves are now separable and the state change is **off by default**. `=1` restores
+# exactly the image that ran; the default is the measurement alone, which is the arm 516 asked for
+# ("517: measure the frame slot, and repair the exit the way 516 repaired the enter" - the measuring
+# first). The clause below asserts the flush's *presence or absence* against this same variable, so a
+# build with the flag off cannot publish a say line that claims a write-back it does not contain.
+EXIT_POC_FLUSH=${STAGE90_XNU_EXIT_POC_FLUSH:-0}
+case "$EXIT_POC_FLUSH" in
+    0|1) ;;
+    *) echo "STAGE90_XNU_EXIT_POC_FLUSH must be 0 or 1, not [$EXIT_POC_FLUSH]" >&2; exit 1 ;;
+esac
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_EXIT_POC_FLUSH="$EXIT_POC_FLUSH")
 
 # The one thing in this image that is neither XNU's nor this project's: the compiler's own runtime.
 # Experiment 182's run stopped at `__aeabi_uldivmod`, which is the ARM EABI helper for 64-bit
@@ -471,8 +495,16 @@ STAGE90_CONFIG_TABLES_OBJ=${STAGE90_ENTRY_PLATFORM_CONFIG_TABLES_OBJ:-$REPO_ROOT
 # The hang tracer, only when asked for. Compiled here rather than in the link block because it is a
 # translation unit like the two above, and linked into `LINK_OBJS` at the bottom.
 if [[ $ENTRY_TRACE -eq 1 ]]; then
+    # **`STAGE90_XNU_EXIT_POC_FLUSH` has to be passed here as well, and the first flag-on build is why.**
+    # `STUB_DEFINES` reaches `entry_stubs.c` and `entry_timebase.c` and not this file, so the flag-on
+    # build compiled `#if STAGE90_XNU_EXIT_POC_FLUSH` to its default of 0 - the image would have been
+    # byte-identical to the flag-off one while the build reported the flag as on. The `xnu_entry_517`
+    # clause caught it (it reads the *wrapper's* call count and compares it against the flag), which is
+    # the check earning its place: a switch that does not reach the file it names is `mi4-off-option-two-
+    # spellings`' defect with a shorter fuse.
     run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
         -O2 -Wall -Wextra -Werror -std=gnu11 \
+        -DSTAGE90_XNU_EXIT_POC_FLUSH="$EXIT_POC_FLUSH" \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
 fi
@@ -28158,23 +28190,23 @@ verify_trace_symbols() {
     # wrapper reads the field once for the cache-on record and once for the cache-off one, and gcc
     # inlines `entry_cpu_datap()` at each - a third window would be another read and not a defect. The
     # SCTLR read is what makes "with the cache off" a value in the log rather than an assumption.
-    read -r dapwins sctlrreads <<<"$(awk '
-        /mrc[ \t]+15, 0, r[0-9]+, cr13, cr0, \{4\}/ { n = 0; seen = 1; next }
+    read -r dapwins sctlrreads <<<"$(awk -v R='[a-z][a-z0-9]*' '
+        $0 ~ ("mrc[ \\t]+15, 0, " R ", cr13, cr0, \\{4\\}") { n = 0; seen = 1; next }
         seen && n >= 3 { seen = 0 }
-        seen { n++; if ($0 ~ /ldr[a-z]*[ \t]+r[0-9]+, \[r[0-9]+, #1484\]/) { w++; seen = 0 } }
-        /mrc[ \t]+15, 0, r[0-9]+, cr1, cr0, \{0\}/ { s++ }
+        seen { n++; if ($0 ~ ("ldr[a-z]*[ \\t]+" R ", \\[" R ", #1484\\]")) { w++; seen = 0 } }
+        $0 ~ ("mrc[ \\t]+15, 0, " R ", cr1, cr0, \\{0\\}") { s++ }
         END { printf "%d %d", w + 0, s + 0 }' <<<"$ebod")"
     [[ "${dapwins:-0}" -ge 2 ]] ||
         layout_fail "the enter wrapper reads getCpuDatap() ${dapwins:-0} time(s) and 516's pair needs two - one with the D-cache on, before the call, and one inside the window after it: the difference between those two numbers is the whole reading, and a single read would make the cache-off side of it an assumption"
     [[ "${sctlrreads:-0}" -ge 1 ]] ||
         layout_fail "the enter wrapper never reads SCTLR: the record carries the register as the fact that its second reading was taken with the D-cache off, and without it a run that never opened the window would publish two agreeing values that mean nothing"
     # The far end reads it a third time, and its own call comes first.
-    xbod=$(arm-none-eabi-objdump -d --start-address=$pcexw --stop-address="$(sym_next "$pcexw")" "$OUT/xnu_arm_entry.elf")
-    read -r xreal xsctlr <<<"$(awk '
+    xbod=$(arm-none-eabi-objdump -d --start-address=$pcexw --stop-address="$(next_global "$pcexw")" "$OUT/xnu_arm_entry.elf")
+    read -r xreal xsctlr <<<"$(awk -v R='[a-z][a-z0-9]*' '
         /<__wrap_platform_cache_idle_exit>:/ { inb = 1; next }
         !inb { next }
         $3 == "bl" && $5 == "<platform_cache_idle_exit>" { split($1, a, ":"); r = strtonum("0x" a[1]) }
-        /mrc[ \t]+15, 0, r[0-9]+, cr1, cr0, \{0\}/ { split($1, a, ":"); s = strtonum("0x" a[1]) }
+        $0 ~ ("mrc[ \\t]+15, 0, " R ", cr1, cr0, \\{0\\}") { split($1, a, ":"); s = strtonum("0x" a[1]) }
         END { printf "%d %d", r + 0, s + 0 }' <<<"$xbod")"
     [[ "${xreal:-0}" != 0 && "${xsctlr:-0}" -gt "${xreal:-0}" ]] ||
         layout_fail "the exit wrapper's SCTLR read at ${xsctlr:-?} does not come after its call to the real exit at ${xreal:-?}: that wrapper's reading is the one taken with the cache back ON (caches.c:490-494), and a read before the call would be a third cache-off reading wearing the label of the cache-on one"
@@ -28186,6 +28218,224 @@ verify_trace_symbols() {
             layout_fail "the binary of the linked image's .text carries no literal '$k': 516's reading is the pair of values that key names, and a key that is not in the image is a record the run cannot write"
     done
     say "  xnu_entry_516: the window opens on a cache and a memory that agree, and they agree because the write-back reaches the Point of Coherency and not the Point of Unification - CleanPoC_Dcache ($cpou) is the kernel's own function (one definition, not in pass 1's undefined set, not itself wrapped, ${cpoc_loops} DCCSW loops in its own body against CleanPoU_Dcache $pou's ${pou_loops}, which is the whole of the difference and the whole of this step) and __wrap_platform_cache_idle_enter calls it ${cpocnt} time at ${cpoaddr}, before the call that opens the window at ${realaddr}, i.e. while SCTLR.C is still set and one call earlier than Apple's own PoU clean at caches.c:415 (still exactly one CleanPoU_Dcache and one FlushPoU_Dcache inside platform_cache_idle_enter $pce..$pcenext); the wrapper reads getCpuDatap() from TPIDRPRW+#1484 ${dapwins} time(s) with ${sctlrreads} SCTLR read(s), the exit wrapper reads SCTLR after its call to the real exit (${xsctlr}), and the eight keys that carry the two sides of the comparison are in the image's .text"
+
+
+    # ------------------------------------------------------- 517: the exit's flush, and the frame
+    #
+    # **516 crossed the window and stopped in Apple's own exception return.** The frame's `SS_PC` slot
+    # held the CPU's own timebase where an address belonged, and `return_from_irq` -> `load_and_go_sys`
+    # is the code that spends it (`ldr lr, [sp, #60]` / `ldm sp, {r0-r12}` / `movs pc, lr`). 517 does
+    # two things: it puts the same Point-of-Coherency flush on the *exit* that 516 put on the enter,
+    # because `platform_cache_idle_exit`'s own first act is an **L1-only** `FlushPoU_Dcache`
+    # (`caches.c:460`) and `caches.c:490` sets `SCTLR.C` again at the end of that same function - the
+    # moment the L2's pre-window copies become live; and it reads the frame, from the one C caller that
+    # runs between the handler's dispatch and the return that consumes it.
+    #
+    # Four things have to hold for the second half to be a measurement: the frame pointer has to be
+    # the kernel's own field, the guard around the dereference has to be the kernel's own bound, the
+    # six frame offsets have to be the ones this configuration's `assym.s` names, and the function
+    # under test has to be the kernel's own and not a stand-in.
+    epwrap=$(sym_addr __wrap_platform_cache_idle_exit) ||
+        layout_fail "__wrap_platform_cache_idle_exit is not in the linked image - 517's flush has to be inside that wrapper, before the call that re-enables the D-cache"
+    exbod=$(arm-none-eabi-objdump -d --start-address=$epwrap --stop-address="$(next_global "$epwrap")" "$OUT/xnu_arm_entry.elf")
+    # The function the exit calls, and the *other* half of 516's pair. `CleanPoC_Dcache` writes back and
+    # leaves the line valid; `FlushPoC_Dcache` is the clean-and-invalidate twin, and it is the one the
+    # exit needs, because the exit is the point at which the cache is about to be switched back on and
+    # a stale-but-valid copy in the L2 is exactly what 515 measured (a counter that recedes). The
+    # claim is in `entry_trace.c`'s comment, so it is checked here: the kernel's own function - one
+    # definition, not in pass 1's undefined set, not itself wrapped - with `DCCISW` (`cr7,cr14,{2}`)
+    # loops over both the L1's geometry and the L2's, which is what "clean and invalidate at the Point
+    # of Coherency" means on this CPU.
+    flpoc=$(sym_addr FlushPoC_Dcache) ||
+        layout_fail "FlushPoC_Dcache is not in the linked image: 517's exit repair is a call to it, and without the real function the wrapper's call would resolve to a stand-in or to nothing"
+    grep -qx "FlushPoC_Dcache" "$OUT/xnu_arm_entry_undef.txt" &&
+        layout_fail "FlushPoC_Dcache is in the pass-1 undefined set: this step's exit repair would then be a stand-in's function, and an empty stand-in would leave the L2 exactly as 515 measured it while the log said a flush had run"
+    flbody=$(arm-none-eabi-objdump -d --start-address=$flpoc --stop-address="$(next_global "$flpoc")" "$OUT/xnu_arm_entry.elf")
+    fl_loops=$(awk '
+        /<FlushPoC_Dcache>:/ { inb = 1; next }
+        inb && /mcr[ \t]+15, 0, [a-z][a-z0-9]*, cr7, cr14, \{2\}/ { n++ }
+        END { printf "%d", n + 0 }' <<<"$flbody")
+    [[ "${fl_loops:-0}" == 2 ]] ||
+        layout_fail "FlushPoC_Dcache's own body in this image contains ${fl_loops:-0} clean-and-invalidate instruction(s) (\`mcr p15,0,rX,cr7,cr14,{2}\`) and not 2: the loop count is the difference between the L1-only form and the Point-of-Coherency one, and a single loop here would make this step's exit repair the same shape as the flush it is placed before - one that cannot reach the L2"
+    read -r xcpoc xcpocaddr xreal2 <<<"$(awk '
+        /<__wrap_platform_cache_idle_exit>:/ { inb = 1; next }
+        !inb { next }
+        $3 == "bl" && index($0, "<FlushPoC_Dcache>") > 0 { split($1, a, ":"); c = strtonum("0x" a[1]); n++ }
+        $3 == "bl" && $5 == "<platform_cache_idle_exit>" { split($1, a, ":"); r = strtonum("0x" a[1]) }
+        END { printf "%d %d %d", n + 0, c + 0, r + 0 }' <<<"$exbod")"
+    [[ "${xcpoc:-0}" == "$EXIT_POC_FLUSH" ]] ||
+        layout_fail "the exit wrapper calls FlushPoC_Dcache ${xcpoc:-0} time(s) and this build was made with STAGE90_XNU_EXIT_POC_FLUSH=$EXIT_POC_FLUSH: 517's first hardware run carried that call *and* the frame reader and did not come back, so the two are separable and the build has to agree with the flag - a flush present in a flag-off image would be a state change nobody asked for, and a flush absent from a flag-on image would be a say line claiming a write-back the image does not contain"
+    if [[ "$EXIT_POC_FLUSH" == 1 ]]; then
+        [[ "${xcpocaddr:-0}" != 0 && "${xreal2:-0}" != 0 && "${xcpocaddr:-0}" -lt "${xreal2:-0}" ]] ||
+            layout_fail "the exit's write-back at ${xcpocaddr:-?} does not precede the call to the real exit at ${xreal2:-?}: the whole of 517's first half is that the L2 is cleaned and invalidated *before* the kernel's own L1-only flush and before SCTLR.C comes back on, and a flush placed after the real exit would be a flush of a cache that is already live again"
+    fi
+    # Apple's own exit flush, still where it was: this step adds to `caches.c:460` rather than replacing
+    # it, for the same reason 516 added to `caches.c:415` - the kernel's instruction is not this
+    # project's to rewrite, and the reading beside it is about what the pair does together.
+    pcexit=$(sym_addr platform_cache_idle_exit) || true
+    [[ -n "${pcexit:-}" ]] ||
+        layout_fail "platform_cache_idle_exit is no longer in the image: its own first act is the L1-only flush this step is an addition to, and `_pcx`'s record is taken at its far end"
+    pexbody=$(arm-none-eabi-objdump -d --start-address=$pcexit --stop-address="$(next_global "$pcexit")" "$OUT/xnu_arm_entry.elf")
+    pflpush=$(awk '$3 == "bl" && index($0, "<FlushPoU_Dcache>") > 0 { n++ } END { printf "%d", n + 0 }' <<<"$pexbody")
+    [[ "${pflpush:-0}" == 1 ]] ||
+        layout_fail "platform_cache_idle_exit calls FlushPoU_Dcache ${pflpush:-0} time(s) and not once: that call is caches.c:460, the L1-only flush that leaves the L2 alone - the hole this step's write-back is placed one call earlier than - so if it is gone or duplicated, the exit this build reasons about is not the one 516 stopped in"
+    # The kernel's own fields, by this configuration's own numbers - and read from the two places that
+    # *state* them rather than written here a third time. `entry_stubs.c` names each offset once as a
+    # macro (that is what the C compiles against) and `assym.s` carries genassym's answer for the same
+    # field; the comparison below is the whole point of the block, and a literal 176 in this file would
+    # be a third definition with nothing comparing it.
+    a_of() { awk -v m="$1" '$1 == "#define" && $2 == m { print $3; exit }' \
+        "$REPO_ROOT/out/xnu_assym/$XNU_KERNEL_CONFIG/assym.s" | tr -d '#'; }
+    s_of() { awk -v m="$1" '$1 == "#define" && $2 == m { v = $3; sub(/u$/, "", v); print v; exit }' \
+        "$BOOT_DIR/entry_stubs.c"; }
+    a_int=$(a_of CPU_INT_STATE);       a_top=$(a_of CPU_INTSTACK_TOP)
+    a_istk=$(a_of INTSTACK_SIZE);      a_dap=$(a_of ACT_CPUDATAP)
+    s_int=$(s_of STAGE90_CPU_INT_STATE);  s_top=$(s_of STAGE90_CPU_INTSTACK_TOP)
+    s_istk=$(s_of STAGE90_INTSTACK_SIZE); s_dap=$(s_of STAGE90_ACT_CPUDATAP)
+    for v in "$a_int" "$a_top" "$a_istk" "$a_dap" "$s_int" "$s_top" "$s_istk" "$s_dap"; do
+        [[ "$v" =~ ^[0-9]+$ ]] ||
+            layout_fail "517's clause cannot read one of the four offsets out of assym.s or entry_stubs.c (got [$v]): the frame pointer this step publishes is one of those fields and the guard that keeps the dereference from faulting is another, so both files have to name them and both have to be readable here"
+    done
+    [[ "$a_int" == "$s_int" && "$a_top" == "$s_top" && "$a_istk" == "$s_istk" && "$a_dap" == "$s_dap" ]] ||
+        layout_fail "assym.s says CPU_INT_STATE=[$a_int] CPU_INTSTACK_TOP=[$a_top] INTSTACK_SIZE=[$a_istk] ACT_CPUDATAP=[$a_dap] and entry_stubs.c's macros say [$s_int]/[$s_top]/[$s_istk]/[$s_dap]: the record is a frame read through the thread's machine block with a bound around it, so the C and genassym have to be one number for each of the four - a configuration whose layout moved must stop the build rather than silently move the reading"
+    # And the six frame offsets, **taken from the one file that names them rather than written here**.
+    # `entry_saved_state.h` is this image's spelling of genassym's `SS_*`, and the agreement between
+    # those two is already a gate in this same build - `tools/check_saved_state_offsets.py` runs a
+    # hundred lines above and refuses a disagreement - so this clause does not restate the numbers, it
+    # *reads* them and requires the compiled body to load exactly those. Writing 52/56/60/64/68/72 here
+    # as well would be a third definition of one value, which is the defect class that checker exists to
+    # refuse, and the frame this step reads is made of those six numbers.
+    ss_of() { awk -v m="$1" '$1 == "#define" && $2 == m { v = $3; sub(/^#/, "", v); print v; exit }' \
+        "$BOOT_DIR/entry_saved_state.h"; }
+    ss_offs=""
+    for m in STAGE90_SS_SP STAGE90_SS_LR STAGE90_SS_PC STAGE90_SS_CPSR STAGE90_SS_STATUS STAGE90_SS_VADDR; do
+        v=$(ss_of "$m")
+        [[ "$v" =~ ^[0-9]+$ ]] ||
+            layout_fail "entry_saved_state.h does not define $m as a number (got [$v]): the record this step publishes is made of those six offsets, so an offset that cannot be read here is a reading that cannot be checked"
+        ss_offs="$ss_offs $v"
+    done
+    ss_alt=$(printf '%s|' $ss_offs); ss_alt="${ss_alt%|}"
+    [[ "$(printf '%s\n' $ss_offs | sort -u | wc -l)" == 6 ]] ||
+        layout_fail "entry_saved_state.h's six frame offsets are [$ss_offs] and they are not six distinct numbers: SS_PC is the slot 516's runs found holding a timebase and the other five are what make the frame's identity checkable, so two of them naming one word would be two keys reporting one number"
+    s_ent=$(s_of STAGE90_ENTROPY_DATA_SIZE); a_ent=$(a_of ENTROPY_DATA_SIZE)
+    [[ "$s_ent" =~ ^[0-9]+$ && "$s_ent" == "$a_ent" ]] ||
+        layout_fail "the entropy buffer's size is [$s_ent] in entry_stubs.c and [$a_ent] in assym.s: the stir's store address is computed from it, and `_hit` is that address against the frame - two different sizes would make the key report a range the store cannot reach"
+    mlgt=$(sym_addr ml_get_timebase) ||
+        layout_fail "ml_get_timebase is not in the linked image - 517's instrument is a wrapper on it, and without the real function there is nothing to wrap"
+    grep -qx "ml_get_timebase" "$OUT/xnu_arm_entry_undef.txt" &&
+        layout_fail "ml_get_timebase is in the pass-1 undefined set: the function this step's window readings are taken inside would be a stand-in's, and a stand-in that returns a constant would put the same number in every record"
+    twrap=$(sym_addr __wrap_ml_get_timebase) ||
+        layout_fail "__wrap_ml_get_timebase is not in the linked image - --wrap=ml_get_timebase did not link, and the frame would then be read from nowhere"
+    twbod=$(arm-none-eabi-objdump -d --start-address=$twrap --stop-address="$(next_global "$twrap")" "$OUT/xnu_arm_entry.elf")
+    read -r tcnt tfrom <<<"$(awk '
+        /<__wrap_ml_get_timebase>:/ { inb = 1; next }
+        !inb { next }
+        $3 == "bl" && index($0, "<entry_note_timebase_call>") > 0 { split($1, a, ":"); f = strtonum("0x" a[1]) }
+        $3 == "bl" && index($0, "<ml_get_timebase>") > 0 { split($1, a, ":"); n++; c = strtonum("0x" a[1]) }
+        END { printf "%d %d", n + 0, c + 0 }' <<<"$twbod")"
+    [[ "${tcnt:-0}" == 1 && "${tfrom:-0}" != 0 ]] ||
+        layout_fail "the wrapper calls the real ml_get_timebase ${tcnt:-0} time(s) (call at ${tfrom:-?}): this wrapper has to be a pass-through with one record in it - the caller is Apple's own IRQ prologue, which is between two instructions that must not be reordered, and its 64-bit return is the only thing that caller is entitled to"
+    # The dereference of the frame, and the six offsets, in the function that does it. The frame's
+    # offsets are this configuration's `SS_*` (52/56/60/64/68/72) and they are counted as *distinct
+    # immediates present*, not as a sequence, because the order gcc loads six fields in is the
+    # compiler's business and 515 already records what a check written against a compiler's shape
+    # costs.
+    tnb=$(sym_addr entry_note_timebase_call) ||
+        layout_fail "entry_note_timebase_call is not in the linked image: the wrapper's record would then be a call to nothing, and every key this step publishes would be absent from the run"
+    tnbody=$(arm-none-eabi-objdump -d --start-address=$tnb --stop-address="$(next_global "$tnb")" "$OUT/xnu_arm_entry.elf")
+    # **A register operand is not always spelled `rN`.** objdump names r12 `ip`, r14 `lr`, r13 `sp` and
+    # r15 `pc` whenever it likes, and it does so *per instruction* (the same function emits `ldr r3,
+    # [ip, #176]` two lines after `ldr ip, [r3, #1484]`). So the operand class here is any register
+    # name and not `r[0-9]+`: written the narrow way these five ladders all read 0 on a body that
+    # plainly loads every field, which is what this check did on its first run - a matcher measuring
+    # the disassembler's choice of spelling rather than the load.
+    reg='[a-z][a-z0-9]*'
+    read -r t_int t_top t_dap t_guard t_ent t_offs <<<"$(awk -v R="$reg" -v O="$ss_alt" \
+            -v INT="$s_int" -v TOP="$s_top" -v DAP="$s_dap" -v ISTK="$s_istk" -v ENT="$s_ent" '
+        $0 ~ ("ldr[a-z]*[ \\t]+" R ", \\[" R ", #" INT "\\]") { i = 1 }
+        $0 ~ ("ldr[a-z]*[ \\t]+" R ", \\[" R ", #" TOP "\\]") { t = 1 }
+        $0 ~ ("ldr[a-z]*[ \\t]+" R ", \\[" R ", #" DAP "\\]") { d = 1 }
+        $0 ~ ("#" ISTK "\\>") { g = 1 }
+        $0 ~ ("#" ENT "\\>") { e = 1 }
+        { if ($0 ~ ("ldr[a-z]*[ \\t]+" R ", \\[" R ", #(" O ")\\]")) { match($0, /#[0-9]+\]/); o[substr($0, RSTART, RLENGTH)] = 1 } }
+        END { n = 0; for (k in o) n++; printf "%d %d %d %d %d %d", i + 0, t + 0, d + 0, g + 0, e + 0, n + 0 }' <<<"$tnbody")"
+    [[ "${t_int:-0}" == 1 ]] ||
+        layout_fail "entry_note_timebase_call does not load [#176] from cpu_data: that field is where fleh_irq_handler puts the frame pointer (locore.s:1403) and where return_from_irq clears it (:1433), so without that load the record is not about the interrupt frame at all"
+    [[ "${t_top:-0}" == 1 && "${t_guard:-0}" == 1 ]] ||
+        layout_fail "entry_note_timebase_call does not load [#8] (cpu_data->intstack_top) beside the bound 16384: the frame pointer is dereferenced inside this function while an interrupt is in service, so a candidate that is not inside the interrupt stack has to be refused by arithmetic and not by hope - a fault here would be a fault inside the instrument that is reading a fault (269)"
+    [[ "${t_dap:-0}" == 1 ]] ||
+        layout_fail "entry_note_timebase_call does not read getCpuDatap() as 'ldr [r?, #1484]': the frame pointer is reached through the thread's machine block, and 1484 is this configuration's ACT_CPUDATAP"
+    [[ "${t_offs:-0}" == 6 ]] ||
+        layout_fail "entry_note_timebase_call loads ${t_offs:-0} of the six frame words entry_saved_state.h names ([$ss_offs]): SS_PC is the slot 516's runs found holding a timebase, and the other five are what make the frame's identity checkable - the record is those six numbers or it is not the frame"
+    [[ "${t_ent:-0}" == 1 ]] ||
+        layout_fail "entry_note_timebase_call never uses the entropy buffer's own size (68, this configuration's ENTROPY_DATA_SIZE): the stir's store address is computed from a pointer read out of EntropyData, and _hit is that address against the frame - with that arithmetic gone the key would report a constant"
+    # **The write budget, and this one is about the run's other readings rather than about this one.**
+    # `entry_live_write` spends one of `ENTRY_LIVE_CAP` records for the whole run, and `ml_get_timebase`
+    # is the only wrapper in this image on a per-*interrupt* path: an unconditional pair of writes per
+    # interrupt is ~2500 interrupts x 2 in a 25 s run, against a channel 516's log already had 4258
+    # records of. The instrument therefore writes at most `STAGE90_TB_LIVE_MAX` (8) per-call records and
+    # refreshes the two counters once per `STAGE90_TB_LIVE_EVERY` (256) calls, which bounds it at
+    # 8 * 17 + calls/256. Asserted as a *call-site count* in the compiled body plus the two constants, so
+    # a later edit that hoists a write out of the guard stops the build instead of quietly eating the
+    # channel the `wfi`/`pcx`/`pce` keys a run stops in are written to.
+    twsites=$(awk '$3 == "bl" && $5 == "<entry_live_write>" { n++ } END { printf "%d", n + 0 }' <<<"$tnbody")
+    [[ "${twsites:-0}" -ge 17 && "${twsites:-0}" -le 19 ]] ||
+        layout_fail "entry_note_timebase_call holds ${twsites:-0} call(s) to entry_live_write and this step's budget is 17 (the first eight recorded calls' keys, the two counters among them) plus at most 2 for the periodic refresh: fewer means a key the run cannot write, and more means a write has escaped the cadence guard - on this path that is ~2 records x every interrupt of the run, spent out of a channel the rest of the run's readings live in"
+    for c in STAGE90_TB_LIVE_MAX STAGE90_TB_LIVE_EVERY; do
+        grep -q "define $c" "$BOOT_DIR/entry_stubs.c" ||
+            layout_fail "$c is no longer defined in entry_stubs.c: without it the cadence above is not a property of the source, and the bound this clause asserts would be a fact about one revision of one function"
+    done
+    # `--wrap` reaches a *call*. A reference that is a value - the function's address taken into a
+    # table, say - would keep the original address and the call through it would not be counted, so the
+    # census would be of this file's own site rather than of the handler's. Every reference in the
+    # linked pool has to be a call for the wrap to be total.
+    tbrefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o 2>/dev/null |
+        awk '/[[:space:]]ml_get_timebase$/ { print $2 }' | sort -u | tr '\n' ' ')
+    [[ "$tbrefs" == "R_ARM_CALL " || "$tbrefs" == "R_ARM_CALL R_ARM_JUMP24 " ]] ||
+        layout_fail "the kernel's objects reference ml_get_timebase with [$tbrefs] and this step's instrument assumes calls: an address-taken reference would let --wrap rewrite a value that is later branched through, and the record would then be missing exactly the calls it exists to make"
+    # The exit's record is still taken after the real exit - 517's flush is a state change and takes no
+    # reading, so the three-cache-state shape 516 established is unchanged.
+    read -r xreal3 <<<"$(awk '
+        /<__wrap_platform_cache_idle_exit>:/ { inb = 1; next }
+        !inb { next }
+        $3 == "bl" && $5 == "<platform_cache_idle_exit>" { split($1, a, ":"); r = strtonum("0x" a[1]) }
+        END { printf "%d", r + 0 }' <<<"$exbod")"
+    [[ "${xreal3:-0}" != 0 ]] ||
+        layout_fail "the exit wrapper no longer calls the real platform_cache_idle_exit: the window's far end is where the D-cache comes back on, and a wrapper that did not call it would leave the cache disabled for the rest of the run"
+    for k in xnu_live_tb_calls xnu_live_tb_off xnu_live_tb_seq xnu_live_tb_frame xnu_live_tb_pc xnu_live_tb_lr xnu_live_tb_sp xnu_live_tb_cpsr xnu_live_tb_status xnu_live_tb_vaddr xnu_live_tb_index xnu_live_tb_datap xnu_live_tb_target xnu_live_tb_hit xnu_live_tb_ret_lo xnu_live_tb_prev_lo xnu_live_tb_sctlr; do
+        kn=$(arm-none-eabi-strings "$OUT/xnu_entry_text.bin" | awk -v k="$k" '$0 == k { c++ } END { printf "%d", c + 0 }')
+        [[ "${kn:-0}" -ge 1 ]] ||
+            layout_fail "the binary of the linked image's .text carries no literal '$k': 517's reading is the frame's own words and the stir's own store address under those names, and a key that is not in the image is a record the run cannot write"
+    done
+    # **A number that came out of a command substitution is not yet a number.** This step's own clause
+    # was first written with an unbalanced `)` inside one read's here-string (`<<<"$(awk ... ))"`),
+    # which bash appends to the *last* field - so `tfrom` was `2152187904)` and the say line published
+    # it as an address, while every test that used it compared *strings* and passed. The build was
+    # green and the number in the log was wrong, which is this file's oldest defect wearing a new
+    # spelling; a `-lt` against it would have died instead of lying, and that is luck rather than
+    # safety. So the shape is asserted here rather than assumed: a count is digits and nothing else,
+    # and an address is `0x` and hex.
+    # A count or an address that is empty when the flag is off is not a malformed value, it is an
+    # absent one - so the shape guard is skipped when the flush is compiled out, and `xcpoc` itself is
+    # the flag's own assertion (it must be 0). Every *present* value still has to be the right shape,
+    # because a stray character from a command substitution would ride into the numbers this step
+    # publishes and a string comparison against it would not notice - which is exactly how this
+    # clause's own `tfrom` first came out as `2152187904)`.
+    if [[ "$EXIT_POC_FLUSH" == 1 ]]; then
+        for v in "$xcpocaddr"; do
+            [[ "$v" =~ ^[0-9]+$ ]] ||
+                layout_fail "517's clause holds the value [$v] where it expects the write-back's address: the clause's own numbers are what the reading beside it is quoted from, so a stray character here is published as part of an address"
+        done
+    fi
+    for v in "$tcnt" "$tfrom" "$xcpoc" "$xreal2" "$t_offs" "$t_ent" "$fl_loops" "$pflpush"; do
+        [[ "$v" =~ ^[0-9]+$ ]] ||
+            layout_fail "517's clause holds the value [$v] where it expects a plain count: a character the shell added to a command substitution's output rides along into the comparisons and into the numbers this step publishes, and a string comparison against it does not notice"
+    done
+    for v in "$twrap" "$tnb" "$mlgt" "$flpoc" "$pcexit"; do
+        [[ "$v" =~ ^0x[0-9a-f]+$ ]] ||
+            layout_fail "517's clause holds the value [$v] where it expects an address: the clause's own numbers are what the reading beside it is quoted from, so a stray character here is published as part of an address"
+    done
+    say "  xnu_entry_517: the exit's write-back is this build's STAGE90_XNU_EXIT_POC_FLUSH=$EXIT_POC_FLUSH - __wrap_platform_cache_idle_exit calls FlushPoC_Dcache ($flpoc, ${fl_loops} clean-and-invalidate loops in its own body - the L1's own geometry and the L2's) ${xcpoc} time, and when it is on it is at ${xcpocaddr:-none}, before the call to the real exit at ${xreal2}, so the L2 is cleaned and invalidated one call before caches.c:490 sets SCTLR.C again (Apple's own L1-only FlushPoU_Dcache is still ${pflpush} call inside platform_cache_idle_exit $pcexit..); and the interrupt frame is read from inside the handler that owns it: __wrap_ml_get_timebase ($twrap) calls the kernel's own ml_get_timebase ($mlgt) ${tcnt} time at ${tfrom} and then entry_note_timebase_call ($tnb), which takes the frame pointer out of cpu_data+#$s_int (the field fleh_irq_handler stores it in and return_from_irq clears), bounds the dereference with intstack_top+#$s_top against INTSTACK_SIZE $s_istk, reads getCpuDatap() as #$s_dap (assym.s and entry_stubs.c agree on all four), loads all ${t_offs} of the frame's own words at the six offsets entry_saved_state.h names ([$ss_offs]; the header-to-genassym agreement is check_saved_state_offsets.py's gate, run above), and computes the entropy stir's store address from EntropyData's own size (the clause finds this configuration's 68 in that function's body: ${t_ent}) so that _hit can say whether that address lands inside the frame; every reference to ml_get_timebase in the linked pool is a call [$tbrefs], the seventeen record keys are in the image's .text, this instrument spends at most 8 per-call records and then one counter refresh per 256 calls (${twsites} write sites in the compiled body), and the exit's record is still taken after the real exit"
 
 
 

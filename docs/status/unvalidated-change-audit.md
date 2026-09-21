@@ -33,6 +33,24 @@ not the point: specific, yes, and aimed at the wrong subsystem. A failure that n
 place still costs the debugging time a silent one does, and the fix that mattered was not more
 logging but removing the duplicate definition of the count.
 
+## Post-run update (2026-09-21) — one of the two nets has since failed to recover the device
+
+This document treats the hardware watchdog as *the* bound on a run that hangs, and the body below
+still reasons that way. One correction and one qualification, from experiment 517's first run:
+
+- **The timeout is 25 s bark / 28 s bite, not 30/33.** The 20-bit register truncation this document
+  describes in §1 was fixed by lowering the timeout (`STAGE90_HW_WATCHDOG_TIMEOUT_S = 25u`,
+  `_BITE_GAP_S = 3u` in `stages/stage90/stage90.h`), so the "~33 s" figures below are the pre-fix
+  ones. `adbd`-side recovery is ~28 s, not ~33 s.
+- **A bite is proved by a device that came back, and on 2026-09-21 one did not.** The net recovered
+  every run from experiments 506 to 515 and 516's two runs returned on XNU's own `MACH Reboot`, but
+  experiment 517's first run left the phone with no USB in any mode until it was power-pressed, with
+  the log lost to the resulting cold boot. See
+  [`../experiments/experiment-517-the-step-was-two-changes-and-its-first-run-did-not-come-back.md`](../experiments/experiment-517-the-step-was-two-changes-and-its-first-run-did-not-come-back.md)
+  and §4a of [`../reference/recovery-and-rollback.md`](../reference/recovery-and-rollback.md). The
+  brick half of the standing constraint is unaffected — nothing here writes to storage — but "the
+  net will bring the phone back" is a history, not a guarantee.
+
 ## 0a. Which changes the default build actually exercises — 5 live, 3 inert
 
 "Six changes have never reached hardware" has been said repeatedly in this project's notes,

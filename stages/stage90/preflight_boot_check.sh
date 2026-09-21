@@ -258,17 +258,31 @@ case "$(value_of STAGE90_XNU_ENTRY)" in
     echo "          Nothing after that jump is the payload's: the page tables, vectors, caches"
     echo "          and MMU state are XNU's, and the payload never runs again."
     echo
-    echo "          Two possible endings, and the log says which:"
+    echo "          Endings, and the log says which:"
     echo "            '...real XNU entry: _start ran to completion and branched to arm_init'"
     echo "                 XNU's own entry sequence ran on this device, end to end."
     echo "            '...real XNU entry: exception: <which>'"
     echo "                 it faulted, and the vector names itself."
     echo "            neither, ending at 'jumping to XNU's _start'"
     echo "                 it hung; the hardware watchdog brings the phone back in ~28s."
+    echo "            no log at all, and the device does not come back"
+    echo "                 the net below did not recover it and the ram_console died with the"
+    echo "                 cold boot; the phone needs a power-button press and the run is lost."
+    echo "                 This is not hypothetical and it is not rare enough to ignore: it is"
+    echo "                 experiment 517's first run (2026-09-21). One observation, and the"
+    echo "                 cause is not known - the run had two changes in it, so the next image"
+    echo "                 carries one (see STAGE90_XNU_EXIT_POC_FLUSH in build_entry.sh)."
     echo
     echo "          Safety: the hardware watchdog is the only net across the jump, deliberately"
     echo "          - the software dead-man needs the payload's GIC and vector state, which are"
     echo "          gone the moment _start switches tables. The watchdog needs neither."
+    echo "          Its record, read from the ledgers rather than from this text: it recovered"
+    echo "          every run from 506 to 515, including runs parked in the kernel's own idle"
+    echo "          WFI and runs in an abort storm, and 516's two runs came back on XNU's own"
+    echo "          'MACH Reboot'. It then did not recover 517's first run. So: a net that has"
+    echo "          held many times and is not proved to hold always. A hang here may need a"
+    echo "          power press, and the device is never at risk of being bricked - nothing in"
+    echo "          this project is ever written to storage."
     ;;
 esac
 
