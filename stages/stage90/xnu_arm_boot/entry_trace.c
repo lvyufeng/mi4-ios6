@@ -263,6 +263,8 @@ extern uint32_t g_tb_held;
  * `entry_stubs.c` for the arithmetic. */
 extern void entry_istack_separate(void);
 extern uint32_t g_istack_before, g_istack_after, g_istack_moved;
+extern uint32_t g_istack_calls, g_istack_site;
+extern uint32_t g_istack_cpsr1, g_istack_cpsr2;
 extern void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr);
 
 /* **515's two globals, read by name, and they are the operands of Apple's own test.** `caches.c:414`
@@ -1253,10 +1255,13 @@ int __wrap_poll(void *proc, void *uap, int *retval)
          * the arm that does not move it - in which case the pair is a reading of the arrangement and
          * not a change to it. */
         printf("mini4: the interrupt handler's own stack -- cpu_data->istackptr was 0x%x and is 0x%x "
-               "(%d move(s), %d bytes below where an interrupt taken on the interrupt stack puts the "
-               "bottom of its frame)\n",
-               g_istack_before, g_istack_after, g_istack_moved,
-               (int32_t)(g_istack_before - g_istack_after));
+               "(%d move(s), first from 0x%x, %d call(s), %d bytes below where an interrupt taken on "
+               "the interrupt stack puts the bottom of its frame; CPSR at the first two stores 0x%x and "
+               "0x%x, so the I bit was %s at the store that precedes the platform's interrupt "
+               "controller coming up)\n",
+               g_istack_before, g_istack_after, g_istack_moved, g_istack_site, g_istack_calls,
+               (int32_t)(g_istack_before - g_istack_after), g_istack_cpsr1, g_istack_cpsr2,
+               ((g_istack_cpsr2 & 0x80u) != 0u) ? "set" : "clear");
     }
 
     return error;

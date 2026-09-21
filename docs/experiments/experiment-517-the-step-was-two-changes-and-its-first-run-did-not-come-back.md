@@ -406,17 +406,32 @@ to it. And both outcomes are decisive:
 
 Built as `STAGE90_XNU_ISTACK_SEPARATE`, **default 1**; `=0` is 517b's arrangement (the same
 measurement, no state change), and the build asserts the store's call site's *presence or absence*
-against the same variable. Flag-on `stage90-qcdt.img`
-`a3ee914e9a8ac9822e9ceecf77f23626a5d45d6ad35634c9333ee2fc6e2a80df` (`.text` 5,299,552, `.bss` 363,312,
-entry image 5,519,996 — the frame reader and the exit flush are unchanged: `STAGE90_XNU_EXIT_POC_FLUSH`
-is still 0); the flag-off arm is `37c94910fa953fbae8b63d173a6a059cda57a02b9b6a913a0474b083ac89ac86`, which
-is 517b's *arrangement* and not 517b's bytes — the new function, the console line and the reading are in
-it either way, and only the store's call site is absent. Two of the clause's own three failures were the
-check rather than the code: it first looked
-for `#8192` in the compiled body and the compiler had folded `intstack + 8192` into one pool word
-(`0x80516000`) — so the test is now the *computed* address from this image's own `intstack` and this
-configuration's `INTSTACK_SIZE`, and the store is its own symbol (`entry_istack_store`) precisely so
-that "is the change in the image" is a fact the build can look up rather than match by shape.
+against the same variable.
+
+**Where the store lands is part of the arm, and the first version of it would have been undone by the
+kernel.** `arm_init` calls `PE_init_platform` three times, and the first is the `(FALSE, args)` call at
+`arm_init.c:159` — *before* `arm_init.c:226` writes `BootCpuData.istackptr = intstack_top`, so a store
+made from that wrapper is overwritten by the kernel's own assignment. The call that matters is the
+`(TRUE, &BootCpuData)` one at `:383`, and its wrapper runs before `__real_PE_init_platform` brings the
+interrupt controller up; it re-stores because the condition re-tests the *field* rather than a remembered
+value, which is why the field is re-read on every call and why the build asserts that it is.
+(`__real_PE_init_platform` compiles to a **tail branch** here — `b <PE_init_platform>`, not a `bl` — so
+the clause matches both; its first version matched only the `bl` and called a correct body wrong.)
+
+**And the run says whether it was early enough rather than assuming it.** Both stores' `CPSR` values are
+recorded and printed: store 1 is the one `arm_init` overwrites, store 2 is the one that precedes the
+platform bring-up, and the I bit at store 2 is the difference between "the handler's stack was moved
+before any interrupt could be taken on the boot's own stack" and "it was moved somewhere in the boot and
+the window between `:226` and `:383` was open". Flag-on `stage90-qcdt.img`
+`32a513bc322f6db7465550039069fc93ed5ca4c9622fed95bfee0673b64ca519` (`.text` 5,299,904, `.bss` 363,324,
+entry image 5,519,996 — the frame reader and the exit flush are unchanged:
+`STAGE90_XNU_EXIT_POC_FLUSH` is still 0); the flag-off arm is
+`37c94910…` from the previous build, whose arrangement `=0` restores. Two of the clause's failures were
+the check rather than the code: it first looked for `#8192` in the compiled body and the compiler had
+folded `intstack + 8192` into one pool word (`0x80516000`) — so the test is now the *computed* address
+from this image's own `intstack` and this configuration's `INTSTACK_SIZE` — and the store is its own
+symbol (`entry_istack_store`) precisely so that "is the change in the image" is a fact the build can look
+up rather than match by shape.
 
 ### What the arm does not break, checked rather than assumed
 

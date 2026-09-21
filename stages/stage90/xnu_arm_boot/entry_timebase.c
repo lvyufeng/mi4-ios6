@@ -508,9 +508,24 @@ static void stage90_timebase_register(void *args)
     ml_init_timebase(args, &stage90_tbd_ops, 0u, 0u);
 }
 
+/*
+ * 518's store is made here, before the real call, and the position is the whole point: this is the
+ * earliest place in the image where the interrupt handler's stack can be moved off the top of the
+ * interrupt stack *before* `__real_PE_init_platform` brings this CPU's interrupt controller up. The
+ * window it closes opens at `arm_init`'s own `sp` (`start.s:310-311` puts it at `intstack_top - SS_SIZE`)
+ * and every interrupt taken there builds its frame below it. See `entry_stubs.c` for the arithmetic.
+ *
+ * (`__real_PE_init_platform` compiles to a **tail branch** here - it is this wrapper's last statement -
+ * so the build's clause looks for `b <PE_init_platform>` and not for a `bl` whose target is the
+ * `__real_` name. It still comes after the store in every path, which is what the clause asserts.)
+ */
+extern void entry_istack_separate(void);
+
 void __wrap_PE_init_platform(uint32_t vm_initialized, void *args)
 {
     g_pe_calls++;
+
+    entry_istack_separate();
 
     if ((g_registered == 0u) && (vm_initialized != 0u) && (args == (void *)BootCpuData)) {
         g_reg_seq = g_pe_calls;

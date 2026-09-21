@@ -5886,7 +5886,16 @@ void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr)
  * here rather than after another measurement because it is also the *safer* arm: the instrument that
  * would measure the collision adds its own stack use to the very handler whose depth is the problem.
  */
-uint32_t g_istack_before, g_istack_after, g_istack_moved;
+uint32_t g_istack_before, g_istack_after, g_istack_moved, g_istack_calls, g_istack_site;
+/* **The interrupt mask at the first two stores, and they are the two that matter.** Store 1 is the
+ * `PE_init_platform(FALSE, args)` call early in `arm_init` - *before* `arm_init.c:226` writes
+ * `istackptr = intstack_top`, so the kernel itself overwrites that one. Store 2 is the
+ * `PE_init_platform(TRUE, &BootCpuData)` call at `arm_init.c:383`, which is the last point before the
+ * platform's interrupt controller is up, and it is the one the arm actually rests on. Whether the I bit
+ * was **set** at that store is the difference between "the handler's stack was moved before any
+ * interrupt could be taken on the boot's own stack" and "it was moved at some point in the boot and the
+ * window between `:226` and `:383` was open" - a reading, not an assumption. */
+uint32_t g_istack_cpsr1, g_istack_cpsr2;
 
 #ifndef STAGE90_XNU_ISTACK_SEPARATE
 #define STAGE90_XNU_ISTACK_SEPARATE 1
@@ -5916,21 +5925,62 @@ __attribute__((noinline)) void entry_istack_store(volatile uint32_t *slot, uint3
     *slot = want;
 }
 
+/*
+ * **Two call sites, and the earlier one is the point of them.** The store has to land *before* this CPU
+ * can take an interrupt while its `sp` is in the upper half of the interrupt stack, and that window opens
+ * inside `arm_init`: `start.s:310-311` puts `sp` at `intstack_top - SS_SIZE` and `arm_init` runs there,
+ * so the very first interrupt taken after the platform's GIC is up already builds its frame below that
+ * `sp` - with `arm_init`'s own return frame at the bottom of the pile. `__wrap_PE_init_platform` is
+ * entered at `arm_init`'s fourth call, **before** `__real_PE_init_platform` brings the interrupt
+ * controller up, so it is the earliest place in this image where the store can be made; the idle loop's
+ * wrapper keeps a second, idempotent one so the guarantee does not rest on the boot's ordering alone.
+ *
+ * **This function does not need the live channel, and that is deliberate.** Its first call site runs
+ * before the channel is up (516's log has the channel coming up from the timer registration *inside*
+ * this same `PE_init_platform`), and forcing `entry_live_init` - which installs three L1 descriptors -
+ * to run earlier than it naturally does would be a change to when the channel comes up riding along
+ * with a change of where a stack starts. So the `.bss` globals carry the reading, the epilogue's console
+ * line publishes them, and the live keys are written only when the channel is already up.
+ */
 void entry_istack_separate(void)
 {
     volatile uint32_t *slot = (volatile uint32_t *)(uintptr_t)(BootCpuData + STAGE90_CPU_ISTACKPTR);
     const uint32_t want = (uint32_t)(uintptr_t)intstack + (STAGE90_INTSTACK_SIZE / 2u);
 
-    g_istack_before = *slot;
-    g_istack_after = want;
+    uint32_t cpsr;
+
+    __asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr));
+
+    if (g_istack_calls == 0u) {
+        g_istack_before = *slot;
+        g_istack_site = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    }
+    g_istack_calls++;
+    g_istack_after = *slot;
 
 #if STAGE90_XNU_ISTACK_SEPARATE
-    if (g_istack_before != want) {
+    /* `_moved` is the **count of stores**, so store 1 and store 2 are named by number rather than by
+     * a state machine: 1 is the `arm_init`-overwrites-it one and 2 is the one before
+     * `PE_init_platform(TRUE)`. The condition re-tests the field rather than a remembered value, so a
+     * later write by the kernel to the same field is corrected on the next call instead of being
+     * assumed away. */
+    if (*slot != want) {
+        if (g_istack_moved == 0u)
+            g_istack_cpsr1 = cpsr;
+        if (g_istack_moved == 1u)
+            g_istack_cpsr2 = cpsr;
+
         entry_istack_store(slot, want);
-        if (g_istack_moved == 0u) {
-            g_istack_moved = 1u;
-            entry_live_write("xnu_live_istack_before", g_istack_before);
-            entry_live_write("xnu_live_istack_after", *slot);
+        g_istack_moved++;
+        g_istack_after = *slot;
+
+        if (entry_live_ready() != 0u) {
+            if (g_istack_moved == 1u)
+                entry_live_write("xnu_live_istack_before", g_istack_before);
+            entry_live_write("xnu_live_istack_moved", g_istack_moved);
+            entry_live_write("xnu_live_istack_after", g_istack_after);
+            entry_live_write("xnu_live_istack_cpsr1", g_istack_cpsr1);
+            entry_live_write("xnu_live_istack_cpsr2", g_istack_cpsr2);
         }
     }
 #endif

@@ -28511,12 +28511,19 @@ verify_trace_symbols() {
     ibsites=$(awk '$3 == "bl" && $5 == "<entry_istack_store>" { n++ } END { printf "%d", n + 0 }' <<<"$ibody")
     istbody=$(arm-none-eabi-objdump -d --start-address=$istore --stop-address="$(next_global "$istore")" "$OUT/xnu_arm_entry.elf")
     istbody_n=$(awk '/<entry_istack_store>:/ { inb = 1; next } inb && $3 ~ /^str/ { n++ } END { printf "%d", n + 0 }' <<<"$istbody")
+    # And the store has to be *re-tested against the field* rather than against a remembered value,
+    # because `arm_init.c:226` writes `istackptr = intstack_top` **after** the `PE_init_platform(FALSE)`
+    # call whose wrapper this store also runs in - so a version that stored once and trusted itself
+    # would be undone by the kernel before the call that matters.
+    icmp=$(awk '/<entry_istack_separate>:/ { inb = 1; next } inb && $3 ~ /^ldr/ { n++ } END { printf "%d", n + 0 }' <<<"$ibody")
+    [[ "${icmp:-0}" -ge 1 ]] ||
+        layout_fail "entry_istack_separate loads nothing, so it cannot be re-reading cpu_data->istackptr and comparing it with the half-stack value: arm_init.c:226 assigns that field *after* the first PE_init_platform call, and the store this arm makes there is overwritten by the kernel's own - so the arm has to re-test the field on each call rather than store once"
     [[ "${istbody_n:-0}" -ge 1 ]] ||
         layout_fail "entry_istack_store's body stores nothing: it exists to be the one store into cpu_data->istackptr, so an empty body would make every assertion above a statement about a call to nothing"
     if [[ "$ISTACK_SEPARATE" == 1 ]]; then
         [[ "${ibsites:-0}" == 1 ]] ||
             layout_fail "STAGE90_XNU_ISTACK_SEPARATE=1 and entry_istack_separate calls entry_istack_store ${ibsites:-0} time(s): the image would carry the reading and not the change, which is 517's flag defect in the other direction"
-        for k in xnu_live_istack_before xnu_live_istack_after; do
+        for k in xnu_live_istack_moved xnu_live_istack_after xnu_live_istack_cpsr1 xnu_live_istack_cpsr2; do
             kn=$(arm-none-eabi-strings "$OUT/xnu_entry_text.bin" | awk -v k="$k" '$0 == k { c++ } END { printf "%d", c + 0 }')
             [[ "${kn:-0}" -ge 1 ]] ||
                 layout_fail "the binary of the linked image's .text carries no literal '$k': a run has to say what the pointer was and what it is, and a key that is not in the image is a record the run cannot write"
@@ -28525,12 +28532,32 @@ verify_trace_symbols() {
         [[ "${ibsites:-0}" == 0 ]] ||
             layout_fail "STAGE90_XNU_ISTACK_SEPARATE=0 and entry_istack_separate still calls entry_istack_store ${ibsites:-0} time(s): a flag-off image must read the arrangement and not change it - this is the arm 517b's image is comparable with"
     fi
+    # **Two sites, and the earlier one is checked to be earlier.** The store has to land before this CPU
+    # can take an interrupt with its `sp` in the upper half of the interrupt stack, and that window opens
+    # in `arm_init` itself (`start.s:310-311` puts `sp` at `intstack_top - SS_SIZE`). So
+    # `__wrap_PE_init_platform` - entered before `__real_PE_init_platform` brings the GIC up - has to
+    # hold one site, and it has to be *before* that wrapper's call to the real function.
+    pep=$(sym_addr __wrap_PE_init_platform) ||
+        layout_fail "__wrap_PE_init_platform is not in the linked image, and it is 518's earliest call site: without it the handler's stack is only moved once the idle loop first runs, which is after the interrupt controller is up and after the first interrupt can already have been taken on the boot's own stack"
+    pebody=$(arm-none-eabi-objdump -d --start-address=$pep --stop-address="$(next_global "$pep")" "$OUT/xnu_arm_entry.elf")
+    # The real call is a **tail branch** and not a `bl`, and that is what the first build of this
+    # clause got wrong: `__real_PE_init_platform(...)` is the wrapper's last statement, so gcc emits
+    # `b <PE_init_platform>` and the name in the disassembly is Apple's own, not `__real_`'s. Matching
+    # only `bl ... __real_PE_init_platform` found nothing and the check called a correct body wrong.
+    read -r peist pereal <<<"$(awk '
+        /<__wrap_PE_init_platform>:/ { inb = 1; next }
+        !inb { next }
+        $3 == "bl" && $5 == "<entry_istack_separate>" { split($1, a, ":"); i = strtonum("0x" a[1]) }
+        ($3 == "bl" || $3 == "b") && $5 == "<PE_init_platform>" { split($1, a, ":"); r = strtonum("0x" a[1]) }
+        END { printf "%d %d", i + 0, r + 0 }' <<<"$pebody")"
+    [[ "${peist:-0}" != 0 && "${pereal:-0}" != 0 && "${peist:-0}" -lt "${pereal:-0}" ]] ||
+        layout_fail "518's early site: __wrap_PE_init_platform calls entry_istack_separate at [${peist:-none}] and the real function at [${pereal:-none}], and a store is only early if it precedes it - that ordering is the whole of what this call site is for, because the interrupt controller comes up inside the real call"
     ifsites=$(awk '$3 == "bl" && $5 == "<entry_istack_separate>" { n++ } END { printf "%d", n + 0 }' \
         <<<"$(arm-none-eabi-objdump -d --start-address="$(sym_addr __wrap_machine_idle)" \
                  --stop-address="$(next_global "$(sym_addr __wrap_machine_idle)")" "$OUT/xnu_arm_entry.elf")")
     [[ "${ifsites:-0}" == 1 ]] ||
         layout_fail "__wrap_machine_idle calls entry_istack_separate ${ifsites:-0} time(s) and not once: the idle loop's own wrapper is the entry point that runs in thread context with interrupts masked on every pass, and the idle path is where the collision was measured - zero means the arm never runs, and two means a second site nobody reasoned about"
-    say "  xnu_entry_518: the interrupt handler's own stack - this build's STAGE90_XNU_ISTACK_SEPARATE=$ISTACK_SEPARATE, so entry_istack_separate ($isym) calls entry_istack_store ($istore, ${istbody_n} store in its own body) ${ibsites} time(s) into cpu_data+#$is_ip (assym.s and entry_stubs.c agree on CPU_ISTACKPTR #$is_ip and INTSTACK_SIZE $is_is) from __wrap_machine_idle (${ifsites} call site, entered once per pass of the idle loop, in thread context, with interrupts masked); the value is intstack + $is_is/2, the value $iwant materialized ${ihalf} time(s) in the compiled body, so the handler's stack starts 8192 bytes below the top of the interrupt stack that the boot and the idle loop are running on (start.s:310-311) - and the frame fleh_irq_kernel builds below the interrupted sp is 360 bytes wide with its six recorded words at +52..+72, i.e. 316 to 324 bytes below that same top, which is the overlap this arm removes"
+    say "  xnu_entry_518: the interrupt handler's own stack - this build's STAGE90_XNU_ISTACK_SEPARATE=$ISTACK_SEPARATE, so entry_istack_separate ($isym) calls entry_istack_store ($istore, ${istbody_n} store in its own body) ${ibsites} time(s) into cpu_data+#$is_ip (assym.s and entry_stubs.c agree on CPU_ISTACKPTR #$is_ip and INTSTACK_SIZE $is_is) from two sites - the earlier one in __wrap_PE_init_platform ($pep) at $peist, before its call to the real function at $pereal, so the store lands before that call brings this CPU's interrupt controller up, and one in __wrap_machine_idle (${ifsites} call site, entered once per pass of the idle loop, in thread context, with interrupts masked); the value is intstack + $is_is/2, the value $iwant materialized ${ihalf} time(s) in the compiled body, so the handler's stack starts 8192 bytes below the top of the interrupt stack that the boot and the idle loop are running on (start.s:310-311) - and the frame fleh_irq_kernel builds below the interrupted sp is 360 bytes wide with its six recorded words at +52..+72, i.e. 316 to 324 bytes below that same top, which is the overlap this arm removes"
 
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls
     # `_ZNK9IOService8getStateEv` by mangled name on objects whose dynamic type this file cannot know -
