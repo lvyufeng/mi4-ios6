@@ -533,7 +533,7 @@ uint32_t g_block_ring_result[8];
  *
  * `g_getpid_calls` counts, and it is the only number here that grows without bound - which is why the
  * count is written to the live channel on powers of two and not on every call: the loop in
- * `entry_ramdisk.s` runs as fast as the CPU allows, and `entry_live_write`'s 4096-record cap is a
+ * `entry_ramdisk.s` runs as fast as the CPU allows, and `entry_live_write`'s record cap is a
  * bound that the boot's own report depends on (461: the report path's buffer was the tracer's and was
  * full when the report was written). A power-of-two record is a *monotone* reading - the last one in
  * the log is the count rounded down, and the count only ever doubles - so nothing is lost by not
@@ -2171,6 +2171,13 @@ uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_before_out,
     return entry_section_install(va, pa, l1, g_live_attr, slot_before_out, desc_out);
 }
 
+/*
+ * **The live channel's record cap, as one definition.** It was a literal `4096u` at the one place it
+ * was compared and in four comments that named it; 500's measurement (498 wrote 3967 of it) is why it
+ * moved, and the move is why it is a name. `xnu_live_cap` publishes it into the log.
+ */
+#define ENTRY_LIVE_CAP 8192u
+
 static void entry_live_init(void)
 {
     const uint32_t retry_limit = 8u;
@@ -2275,6 +2282,7 @@ static void entry_live_init(void)
     g_live_records = 0u;
     entry_write_kv("xnu_live_console", 1u);
     entry_write_kv("xnu_live_attempts", g_live_attempts);
+    entry_write_kv("xnu_live_cap", ENTRY_LIVE_CAP);
     entry_write_kv("xnu_live_ttbr0", ttbr0);
     entry_write_kv("xnu_live_ttbr1", ttbr1);
     entry_write_kv("xnu_live_ttbcr", ttbcr);
@@ -2297,8 +2305,16 @@ static void entry_live_init(void)
  *
  * The cap is a *bound*, not a budget: the ram console holds 2 MB and `entry_write_kv` refuses
  * silently past it, so a run that recorded without bound would lose the end of its own trace - the
- * part that says where it stopped. 4096 records is ~200 KB, comfortably inside, and the one record
- * written when the cap is reached says so, which is 441's rule about a refusal having to be visible.
+ * part that says where it stopped. `ENTRY_LIVE_CAP` records at ~50 bytes each is ~400 KB, comfortably
+ * inside, and the one record written when the cap is reached says so, which is 441's rule about a
+ * refusal having to be visible.
+ *
+ * **500 doubled it, and the reason is a measurement rather than a guess.** 498's run wrote 3967 of the
+ * old 4096 - 97% - and 498's own check requires every key the image publishes to have a writer, so the
+ * number of records grows with every step: the margin had become one step wide, and the failure mode is
+ * the *instrument* dropping the end of the trace, which is the one reading this project cannot afford to
+ * lose. The cap is published as `xnu_live_cap` so that the margin is a reading in every run rather than a
+ * number in this comment, and `xnu_entry_live_records` in the pre-jump report carries what was used.
  *
  * A state of 0 means "not installed yet", and 452 keeps it that way for one case only: the live
  * table not being the one this address needs yet, which is what the very first calls of a boot can
@@ -2316,8 +2332,8 @@ void entry_live_write(const char *key, uint32_t value)
         return;
     }
 
-    if (g_live_records >= 4096u) {
-        if (g_live_records == 4096u)
+    if (g_live_records >= ENTRY_LIVE_CAP) {
+        if (g_live_records == ENTRY_LIVE_CAP)
             entry_write_kv("xnu_live_capped", g_live_records);
         g_live_records++;
         return;
@@ -4247,7 +4263,7 @@ void entry_note_block_return(uint32_t caller, uint32_t result, uint32_t seq)
         entry_live_write("xnu_live_block_odd_caller", caller);
         /* The histogram, once, on the one event that makes it worth the channel's budget - written
          * here rather than on every return for the reason `entry_live_write`'s own comment gives:
-         * the channel is a 4096-record budget and the records this step must not lose are the ones
+         * the channel is a bounded record budget and the records this step must not lose are the ones
          * immediately around the panic. */
         for (unsigned i = 0; i < ENTRY_BLOCK_RESULT_SLOTS; i++)
             entry_write_kv(entry_block_result_key(i), g_block_results[i]);
@@ -4268,7 +4284,7 @@ void entry_note_block_return(uint32_t caller, uint32_t result, uint32_t seq)
  * **Why the count is written on powers of two.** The first call is written in full, because it is the
  * reading that ties the instrument to the fixture's first instruction, and after that only
  * `g_getpid_calls & (g_getpid_calls - 1) == 0` is written. The loop in `entry_ramdisk.s` runs as fast
- * as the CPU allows, and `entry_live_write`'s 4096-record cap is a *bound* the boot's own report
+ * as the CPU allows, and `entry_live_write`'s record cap is a *bound* the boot's own report
  * depends on - 461's defect was the report path's buffer being the tracer's and full when the report
  * was written. A doubling count loses nothing a reading needs: the last record in the log says the
  * loop ran at least that many times, and each earlier one says half as much.
@@ -4323,8 +4339,8 @@ void entry_note_getpid(uint32_t caller, uint32_t error, uint32_t value)
  * has no other way to be measured. Unlike `getpid` this syscall is **not** in the fixture's loop: it
  * is called once, outside it, so the second record never comes and the count's job is to say that.
  * The powers-of-two form is kept for the case it does come - a fixture that leaked a page per
- * iteration would fill the ring, and `entry_live_write`'s 4096-record cap is a bound the boot's own
- * report depends on - so an unexpected flood costs eleven records and not four thousand.
+ * iteration would fill the ring, and `entry_live_write`'s record cap is a bound the boot's own
+ * report depends on - so an unexpected flood costs eleven records and not eight thousand.
  *
  * **A second call is a finding, not a detail.** `g_mmap_args` is kept as first-call-only for the same
  * reason `g_getpid_first_value` is: after a second call the buffer holds the second call's words, and

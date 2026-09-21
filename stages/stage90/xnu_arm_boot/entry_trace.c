@@ -639,7 +639,7 @@ int __wrap_thread_block(void *continuation)
  * is `p->p_pid`, the identity `bsd_utaskbootstrap` gave this process
  * (`initproc = proc_find(1)`, `bsd/kern/bsd_init.c:1147`), and the error is the syscall's own return.
  * Neither is touched. `entry_note_getpid` writes the first call in full and then only powers of two,
- * because this loop runs as fast as the CPU allows: the live channel's 4096-record cap is a *bound*
+ * because this loop runs as fast as the CPU allows: the live channel's record cap is a *bound*
  * the boot's own report depends on, and 461's defect was the report path's buffer being the tracer's
  * and full when the report was written.
  */

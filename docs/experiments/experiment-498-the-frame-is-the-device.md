@@ -112,6 +112,21 @@ not enabled at the distributor and the timer is not armed, so this step cannot r
 machine has to survive; arming it is the next step's business and it will need the distributor's
 enable, its target and its priority.
 
+> **Corrected by 500, which is the step that armed it — and the half below that turns out not to be
+> missing is the interesting half.** 500 read the distributor before writing it and found the line
+> **already enabled, already targeted at CPU 0 and already in Group 0** (`_line_isen_before = 0x100`,
+> `_line_target_before = 0x01010101`, `_line_group_before = 0`) — the boot before this image was
+> Android's own kernel, which takes *this frame's* deadline on *this SPI*, so Android enables exactly
+> this line at its own boot. What had never been done was writing a **deadline** into the frame, and
+> that is what `_isr_calls = 0` below was: a line with no device behind it asserts nothing. 500 writes
+> the countdown (`_arm_ticks` 0x2ee00, `_arm_ctl_before` 2 → `_arm_ctl_after` 1) and the same
+> registration delivered three times (`_isr_calls` 3, `_isr_rearmed` 2, `_isr_masked` 1, the last
+> `_isr_ctl_after` 0x7 — the end state this step's handler produced by hand). The claim that reads
+> registrations also had to be widened to see the one below: its reader expected the `refCon` spelled
+> `(uint32_t)(uintptr_t)this`, so this step's `entry_irq_register_client( line, ..., 0u )` was
+> **invisible to it**, and the note it printed about `MSM8974Timer.cpp` — "owns no interrupt line" —
+> was the opposite of what this step had just done to that file.
+
 The frequency is a *third* definition of 19.2 MHz and it is read as a register: the tree says
 19200000, the CPU says it in `CNTFRQ`, and the frame says it in its own `FREQ` register. 492 compared
 the first two and recorded that the third did not exist. It exists, and the run reads it:

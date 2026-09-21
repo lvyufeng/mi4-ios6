@@ -211,6 +211,20 @@ extern "C" void entry_live_write(const char *key, uint32_t value);
 extern "C" uint32_t entry_irq_register_client(uint32_t intid, uint32_t handler, uint32_t refCon);
 
 /*
+ * **500's entry point, and the one that turns a registration into a delivery.** A registration makes an
+ * intid *serviceable*; the distributor's per-line state is what makes it *arrive*, and until this call
+ * nothing in the image wrote any of it for this line. The payload owns the arithmetic - it derives the
+ * enable word and bit, the target byte and the group bit from the intid - and the driver names only the
+ * CPU mask it wants the line on, because that is the one thing the caller knows and the payload cannot
+ * guess.
+ *
+ * Declared here with the same `extern "C"` prototype as the header for the reason above: this file
+ * cannot include `entry_gic.h`, so this declaration *is* the ABI between the driver and the payload, and
+ * `tools/check_driver_catalogue.py` requires one for every `entry_irq_*` function this file calls.
+ */
+extern "C" uint32_t entry_irq_enable_line(uint32_t intid, uint32_t target);
+
+/*
  * The register this driver reads through its mapping, at the offset the node's `reg[0]` itself starts
  * at. It is a named symbol rather than a bare `0` for the reason the GIC's two offsets are named: an
  * offset written into the expression cannot be read out of the file and held against anything, and
@@ -306,6 +320,39 @@ extern "C" uint32_t entry_irq_register_client(uint32_t intid, uint32_t handler, 
  */
 #define MSM8974_TIMER_ASK_MS    100u
 #define MSM8974_TIMER_FIRES      3u
+
+/*
+ * ------------------------------------------------------------------------------------------------
+ * 500: the deadline this driver puts in its own device, and where it wants the line
+ * ------------------------------------------------------------------------------------------------
+ *
+ * **The frame's deadline, and it is this driver's own interval rather than the OS's.** 495's
+ * `MSM8974_TIMER_ASK_MS` is what the driver asks *the OS* for through `setTimeout`; this is what it
+ * puts into the frame's own `CNTP_TVAL`, and the two are different questions with the same shape. Ten
+ * milliseconds at 19.2 MHz is 192 000 ticks - short enough that three of them are over while the first
+ * service is still in the log, long enough that the arming code is not what the callback measures. The
+ * tick count is *derived* from the frequency the frame itself reports (`_frame_freq`, 19 200 000, and
+ * 498 measured that the tree's, the CPU's and the frame's three definitions agree), never written down:
+ * the register the driver programs counts that clock, so a literal here would be a fourth definition of
+ * the same rate.
+ *
+ * **The target byte, and why the number is 1.** `GICD_ITARGETSR`'s byte for an SPI is a CPU mask - bit
+ * *n* selects CPU interface *n* - and this image runs on one CPU. `1` is therefore "CPU 0", and it is the
+ * value this machine already holds for the word the OS's own line lives in: 498's `_irq_targets_word`
+ * read `0x01010101` for the PPI word. The caller names it rather than the payload because the *driver* is
+ * the one that knows which CPU it wants its line on; the payload owns the arithmetic that turns it into
+ * the byte offset.
+ *
+ * **What the driver does not name is the priority.** It is not written at all: the distributor's own
+ * value for the line is kept and published beside the CPU interface's mask, so "the line never arrived"
+ * and "the line's priority is outside the mask" stay different readings.
+ */
+#define MSM8974_FRAME_ARM_MS     10u
+#define MSM8974_TIMER_LINE_TARGET 1u
+
+/* `CNTP_TVAL` is a 32-bit down-counter: a deadline of 0 is "already expired" and anything above this is
+ * not a value the register holds. Both are refusals rather than arming with a wrapped number. */
+#define MSM8974_FRAME_TICKS_MAX  0x7fffffffu
 
 /*
  * The three OS functions 495 adds to this file's reading of the machine. `mach_absolute_time` is the
@@ -411,6 +458,32 @@ static uint32_t g_timer_isr_ctl_after;
 static uint32_t g_timer_isr_done;
 
 /*
+ * **500's two counters, and their storage is a different question from the three above them.** The
+ * handler's readings of its device are written and read inside one call, so a local would do (and one
+ * of them - the countdown's value - is published from a local for exactly that reason); these two
+ * *accumulate*: call *n*'s value is call *n − 1*'s plus one, so the value at the moment of the publish
+ * is not something this call computed, which is the shape 497's rule keeps storage for. They are also
+ * the pair that says which of the handler's two paths the deliveries took - reload the deadline, or
+ * mask the frame - and `tools/check_irq_routing.py`'s claim 8 holds this file to declaring only records
+ * the linked image actually has, so a declaration here that the optimizer removed would be a red check
+ * rather than a silent one. The handler's other two readings are republished zeroes in `start`, before
+ * the line exists, so "the path was never taken" is a reading rather than a missing key.
+ */
+static uint32_t g_timer_isr_rearmed;
+static uint32_t g_timer_isr_masked;
+
+/*
+ * **500's one new file-scope record, and it earns its storage by 497's rule.** `start` derives the
+ * frame's deadline from the frequency the frame reports and stores the tick count here; the handler reads
+ * it from *another call*, on another stack, with interrupts masked - which is the one place the value is
+ * not already known and the one shape the compiler cannot forward across. It is written **before** the
+ * deadline goes into the device, so a handler that fires between the two writes finds the count it needs
+ * instead of a zero, and a zero in the handler means "the arming did not happen" rather than "the arming
+ * happened and the handler could not see it".
+ */
+static uint32_t g_timer_arm_ticks;
+
+/*
  * The handler registered for the frame's line with the payload's own registry, in the shape that
  * registry takes: `typedef void (*entry_irq_client_t)( void * refCon, uint32_t intid )`
  * (`entry_irq.c:184`), called from the dispatcher between the timer case and the spurious case.
@@ -443,6 +516,7 @@ static void
 msm8974_timer_isr( void * refCon, uint32_t intid )
 {
     uint32_t ctl = 0u;
+    uint32_t tval = 0u;
 
     (void) refCon;
 
@@ -452,10 +526,49 @@ msm8974_timer_isr( void * refCon, uint32_t intid )
 
     if( g_timer_frame_va != 0u) {
         ctl = *(volatile uint32_t *)(uintptr_t)( g_timer_frame_va + MSM8974_FRAME_CTRL_OFF );
+        tval = *(volatile uint32_t *)(uintptr_t)( g_timer_frame_va + MSM8974_FRAME_CNTP_TVAL_OFF );
         g_timer_isr_ctl = ctl;
         g_timer_isr_stat = ( ctl & MSM8974_FRAME_CTRL_IT_STAT ) ? 1u : 0u;
-        *(volatile uint32_t *)(uintptr_t)( g_timer_frame_va + MSM8974_FRAME_CTRL_OFF ) =
-            ctl | MSM8974_FRAME_CTRL_IT_MASK;
+        /*
+         * **The device is written on every path, and which write it is is the whole of the handler.**
+         * The frame's line is level-sensitive, so the handler cannot simply return: 498 masked the
+         * frame's output and left the condition latched, which is one delivery and no more. 500 has a
+         * deadline to keep, so the first `FIRES - 1` calls *reload the deadline* - and that write is
+         * itself the acknowledgement, because `CNTP_TVAL` is the down-counter: loading it clears the
+         * expired condition, which drops `IT_STAT`, which drops the line. The last call masks instead,
+         * which is the same end state 498 measured (`_isr_stat` 1 with `IT_MASK` set: the condition is
+         * latched and the driver silenced it).
+         *
+         * **Both paths write the device before they publish to it, and why the order matters is the
+         * step's safety property rather than a style.** The frame's line is level-sensitive, so a
+         * handler that returned with the frame's output still asserted would be re-entered at once and
+         * forever; the two branches are the two ways `CTRL` has of dropping the line - unmask and reload
+         * the deadline, or mask and leave the condition latched - and neither of them returns before the
+         * write lands. `_isr_ctl_after` is read back *from the device* rather than remembered, so a
+         * write that vanished is a reading and not a silence.
+         *
+         * **And the run measured all three of the things this paragraph claims**, which is why the keys
+         * beside it are worth their storage: call 1 of 3 read `_isr_ctl` 0x5 (ENABLE|IT_STAT - the
+         * deadline had passed and the output was asserted), `_isr_tval` 0xffffff73 (141 ticks *past*
+         * zero, so the delivery came ~7 µs after the deadline), wrote `CNTP_TVAL` and `CTRL`, and read
+         * back `_isr_ctl_after` 0x1 - the reload cleared `IT_STAT`, which is the acknowledgement. Calls 1
+         * and 2 re-armed (`_isr_rearmed` 1 then 2, `_isr_tval` 0xffffffae on call 2, another 10 ms and
+         * another expiration); call 3 masked (`_isr_masked` 1, `_isr_ctl_after` 0x7 - latched and
+         * silenced, exactly 498's end state), and there was no fourth call. `_isr_intid` 0x28 and
+         * `_isr_agree` 1 on all three: the dispatcher called this function for the line it was registered
+         * under.
+         */
+        if( g_timer_arm_ticks != 0u && g_timer_isr_calls < MSM8974_TIMER_FIRES) {
+            *(volatile uint32_t *)(uintptr_t)( g_timer_frame_va + MSM8974_FRAME_CNTP_TVAL_OFF ) =
+                g_timer_arm_ticks;
+            *(volatile uint32_t *)(uintptr_t)( g_timer_frame_va + MSM8974_FRAME_CTRL_OFF ) =
+                MSM8974_FRAME_CTRL_ENABLE;
+            g_timer_isr_rearmed++;
+        } else {
+            *(volatile uint32_t *)(uintptr_t)( g_timer_frame_va + MSM8974_FRAME_CTRL_OFF ) =
+                ctl | MSM8974_FRAME_CTRL_IT_MASK;
+            g_timer_isr_masked++;
+        }
         g_timer_isr_ctl_after =
             *(volatile uint32_t *)(uintptr_t)( g_timer_frame_va + MSM8974_FRAME_CTRL_OFF );
     }
@@ -467,6 +580,14 @@ msm8974_timer_isr( void * refCon, uint32_t intid )
     entry_live_write( "xnu_live_timerdrv_isr_agree", g_timer_isr_agree );
     entry_live_write( "xnu_live_timerdrv_isr_ctl", g_timer_isr_ctl );
     entry_live_write( "xnu_live_timerdrv_isr_stat", g_timer_isr_stat );
+    /* The countdown's own value at the moment the device was written, and it is published from the
+     * *local*: `tval` is read off the device in this call and used nowhere else, so 497's rule says a
+     * local is what it is - a file-scope record would be storage the machine does not have. The two
+     * counters below are the opposite case and are declared: they accumulate across calls, so their
+     * value at this point is not something this call computed. */
+    entry_live_write( "xnu_live_timerdrv_isr_tval", tval );
+    entry_live_write( "xnu_live_timerdrv_isr_rearmed", g_timer_isr_rearmed );
+    entry_live_write( "xnu_live_timerdrv_isr_masked", g_timer_isr_masked );
     entry_live_write( "xnu_live_timerdrv_isr_ctl_after", g_timer_isr_ctl_after );
     entry_live_write( "xnu_live_timerdrv_isr_done", g_timer_isr_done );
 }
@@ -565,6 +686,13 @@ MSM8974Timer::start( IOService * provider )
     uint32_t   frame_ctl_mask = 0u;
     uint32_t   frame_ctl_stat = 0u;
     uint32_t   line_cli_rc = 0u;
+    /* 500 */
+    uint32_t   arm_ticks = 0u;
+    uint32_t   arm_ctl_before = 0u;
+    uint32_t   arm_ctl = 0u;
+    uint32_t   arm_tval_after = 0u;
+    uint32_t   arm_rc = 0u;
+    uint32_t   arm_line_rc = 0u;
 
     if( !super::start( provider )) return( false );
     if( provider == 0) return( false );
@@ -1130,8 +1258,15 @@ MSM8974Timer::start( IOService * provider )
     entry_live_write( "xnu_live_timerdrv_isr_agree", 0u );
     entry_live_write( "xnu_live_timerdrv_isr_ctl", 0u );
     entry_live_write( "xnu_live_timerdrv_isr_stat", 0u );
+    entry_live_write( "xnu_live_timerdrv_isr_tval", 0u );
+    entry_live_write( "xnu_live_timerdrv_isr_rearmed", 0u );
+    entry_live_write( "xnu_live_timerdrv_isr_masked", 0u );
     entry_live_write( "xnu_live_timerdrv_isr_ctl_after", 0u );
     entry_live_write( "xnu_live_timerdrv_isr_done", 0u );
+    /* And the arming's own, for the same reason: `_arm_rc` of 1 means the device's `ENABLE` read back,
+     * and a pre-published 0 makes "the arming refused" a reading rather than a missing key. */
+    entry_live_write( "xnu_live_timerdrv_arm_rc", 0u );
+    entry_live_write( "xnu_live_timerdrv_arm_line_rc", 0u );
 
     /* The line is registered only if the tree gave one, and the registration's return is published
      * either way: `_line_cli_rc` of 1 is the payload's registry taking the handler, 0 is it refusing
@@ -1142,6 +1277,105 @@ MSM8974Timer::start( IOService * provider )
         line_cli_rc = entry_irq_register_client( line, (uint32_t)(uintptr_t) &msm8974_timer_isr, 0u );
     }
     entry_live_write( "xnu_live_timerdrv_line_cli_rc", line_cli_rc );
+
+    /*
+     * ------------------------------------------------------------------------------------------------
+     * 500: the deadline goes into the device, and then the line is enabled - in that order
+     * ------------------------------------------------------------------------------------------------
+     *
+     * **The device is the half that was missing, and the run is what says so.** The plan for this step
+     * was that a line is not delivered unless the distributor's per-line state says so - true of a GIC at
+     * reset, and false of this machine, whose distributor arrived with intid 40 already enabled, already
+     * targeted at CPU 0 and already in Group 0 (the run's `_line_isen_before = 0x100`,
+     * `_line_target_before = 0x01010101`, `_line_group_before = 0`). The reason is the frame itself: the
+     * device's own kernel takes this frame's deadline on this SPI, so the machine that booted before this
+     * image had enabled exactly this line for exactly this timer. What no boot had done was put a
+     * *deadline* in the frame, and a line with no device behind it asserts nothing - which is why 498's
+     * `_isr_calls` was 0. 500 writes both, and the before-values are published so that "the distributor
+     * had to be configured" and "it was already configured" stay different readings. The run's answer:
+     * `_arm_rc` 1, `_arm_ctl_after` 0x1 (ENABLE, unmasked), `_arm_tval_after` = the count 27 ticks down,
+     * `_arm_line_rc` 1 - and three deliveries on the same registration.
+     *
+     * **And the order below is the image's discipline rather than what made this machine safe.** The
+     * earlier draft of this comment called the order "the safety argument" - that the frame must be
+     * programmed while the line is still disabled so there is no window with an enabled line and no
+     * deadline behind it. The run shows that window was already open before this driver ran (the line was
+     * enabled at boot; the frame was masked and disabled, `_arm_ctl_before = 2`) and that nothing came of
+     * it, which is the answer the mask state gives: **a disabled or masked frame asserts nothing, so the
+     * invariant that holds across the whole boot is "the frame is masked except while a deadline is being
+     * serviced"** - `_arm_ctl_before` 2, `_isr_ctl_after` 0x1 on the two re-arms and 0x7 (latched +
+     * masked) on the last. The order is still the right discipline and is checked (the store must precede
+     * the enable, and the deadline must precede the store); what it is *not* is the thing that kept this
+     * machine out of trouble.
+     *
+     * **Every precondition is a gate, and each refusal is a distinct set of keys.** The frame must have
+     * been mapped, the registration must have taken (an unregistered line is the dispatcher's *stop*,
+     * so arming it would end the run for a line nobody owns), the frame must report a frequency, and
+     * the derived tick count must land in `[1, MSM8974_FRAME_TICKS_MAX]` - a `CNTP_TVAL` of 0 is
+     * "already expired" and a wrapped one is a deadline in the far past, and both would fire at once
+     * rather than in 10 ms. A refused arming leaves the frame exactly as the machine had it.
+     *
+     * **The tick count is derived from the frame's own frequency** (`_frame_freq`, and 498 measured the
+     * tree's, the CPU's and the frame's three definitions of that rate to agree). A literal 192000 here
+     * would be a fourth definition of 19.2 MHz, which is the defect class this file's whole offset block
+     * exists to avoid. The run's `_arm_ticks` = 0x2ee00 = 192000 is that derivation, not the number.
+     */
+    if( line != 0u && line_cli_rc != 0u && frame_va != 0u && frame_freq != 0u) {
+        uint64_t want = ((uint64_t) frame_freq * (uint64_t) MSM8974_FRAME_ARM_MS) / 1000u;
+
+        arm_ticks = (uint32_t) want;
+        arm_ctl_before = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CTRL_OFF );
+
+        if( want != 0u && want <= (uint64_t) MSM8974_FRAME_TICKS_MAX && arm_ticks == want) {
+            /* The record is written **before** the deadline goes into the device, so a handler that
+             * fires between the two writes finds the count it needs instead of a zero - the rule
+             * `g_timer_arm_ticks` carries above, and the one shape 497 is about. */
+            g_timer_arm_ticks = arm_ticks;
+
+            *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_TVAL_OFF ) = arm_ticks;
+            *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CTRL_OFF ) =
+                MSM8974_FRAME_CTRL_ENABLE;
+
+            /* Read both back *from the device*. A write to a device with no clock behind it can vanish,
+             * and "the driver wrote ENABLE" and "the frame is counting" are different findings: the
+             * second is what the line is being enabled for. */
+            arm_ctl = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CTRL_OFF );
+            arm_tval_after = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_TVAL_OFF );
+            arm_rc = (( arm_ctl & MSM8974_FRAME_CTRL_ENABLE ) != 0u) ? 1u : 0u;
+
+            if( arm_rc != 0u) {
+                arm_line_rc =
+                    entry_irq_enable_line( line, MSM8974_TIMER_LINE_TARGET );
+                if( arm_line_rc == 0u) {
+                    /* The line did not take. Mask the frame rather than leave it counting at a CPU the
+                     * distributor will never tell: the deadline would lapse with nobody to service it,
+                     * and `_arm_line_rc` of 0 beside `_arm_rc` of 1 is the pair that says which of the
+                     * two halves failed. The record goes back to zero with the device, so a nonzero
+                     * `_arm_ticks` in the log means the handler is allowed to re-arm. */
+                    *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CTRL_OFF ) =
+                        arm_ctl | MSM8974_FRAME_CTRL_IT_MASK;
+                    g_timer_arm_ticks = 0u;
+                }
+            } else {
+                /* The device did not take the write. It is masked and disabled as the machine had it,
+                 * and the line is left alone: enabling it would be enabling a line for a frame nothing
+                 * started. */
+                *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CTRL_OFF ) =
+                    MSM8974_FRAME_CTRL_IT_MASK;
+                g_timer_arm_ticks = 0u;
+            }
+        }
+    }
+
+    entry_live_write( "xnu_live_timerdrv_arm_ms",        MSM8974_FRAME_ARM_MS );
+    entry_live_write( "xnu_live_timerdrv_arm_ticks_max", MSM8974_FRAME_TICKS_MAX );
+    entry_live_write( "xnu_live_timerdrv_arm_ticks",     arm_ticks );
+    entry_live_write( "xnu_live_timerdrv_arm_ctl_before", arm_ctl_before );
+    entry_live_write( "xnu_live_timerdrv_arm_ctl_after", arm_ctl );
+    entry_live_write( "xnu_live_timerdrv_arm_tval_after", arm_tval_after );
+    entry_live_write( "xnu_live_timerdrv_arm_rc",        arm_rc );
+    entry_live_write( "xnu_live_timerdrv_arm_target",    MSM8974_TIMER_LINE_TARGET );
+    entry_live_write( "xnu_live_timerdrv_arm_line_rc",   arm_line_rc );
 
     return( true );
 }

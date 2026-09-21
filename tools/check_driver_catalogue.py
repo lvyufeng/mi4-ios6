@@ -115,6 +115,13 @@ MEMORY_DESCRIPTOR_H = os.path.join(IOKIT, "IOKit", "IOMemoryDescriptor.h")
 PAYLOAD_GIC_C = os.path.join(REPO_ROOT, "stages", "stage90", "xnu_arm_boot", "entry_gic.c")
 PAYLOAD_GIC_H = os.path.join(REPO_ROOT, "stages", "stage90", "xnu_arm_boot", "entry_gic.h")
 
+# 500: the payload file that *defines* the arming call, and the driver's side of the same ABI is a
+# declaration in `entry_gic.h`. Three places hold one signature - the header, the definition, the
+# driver's own `extern "C"` line - and the two files cannot see each other, so the comparison is this
+# check's. That is claim 15's reason for the registry's two prototypes, applied to the call that makes a
+# line arrive rather than the one that makes it serviceable.
+PAYLOAD_IRQ_C = os.path.join(REPO_ROOT, "stages", "stage90", "xnu_arm_boot", "entry_irq.c")
+
 # The two provider classes the kernel itself creates, and so the two a personality may name without any
 # device-tree fact behind it: `IOPlatformExpertDevice` is the root nub `StartIOKit` builds
 # (`IOPlatformExpert.cpp:1290-1300` via `new IOPlatformExpertDevice`) and `IOResources` is built by
@@ -756,17 +763,97 @@ def driver_irq_client(source):
     `rc` is the variable the return is stored in, and it is here because the request that follows must
     be guarded on it: a driver that raises an interrupt on a line no client is filed for is poking the
     one dispatcher path this project has measured to stop the run.
+
+    **500 widened one group of this reader, and why is a finding in its own right.** The `refCon` was
+    read as `(uint32_t)(uintptr_t)<name>` - the shape Apple's own route produces and the shape the
+    interrupt-controller driver writes - so `MSM8974Timer.cpp`'s
+    `entry_irq_register_client( line, ..., 0u )` did not match at all. 498's registration was real,
+    was measured (`_line_cli_rc = 1`), and was *invisible to the claim that reads registrations*, whose
+    note then said about that file the opposite of what 498 had just done to it ("owns no interrupt
+    line"). The cast is now optional and the argument's text is what is captured, so a driver whose
+    `refCon` is its own choice is read; whether *this* driver's `refCon` is the right one is a separate
+    rule, and it is claim 15's, because it is a fact about Apple's second-level route rather than about
+    the call's shape.
     """
     out = {"intid": None, "handler": None, "refcon": None, "rc": None, "at": None}
     m = re.search(r"(\w+)\s*=\s*entry_irq_register_client\(\s*(\w+)\s*,\s*"
                   r"\(uint32_t\)\s*\(uintptr_t\)\s*&\s*(\w+)\s*,\s*"
-                  r"\(uint32_t\)\s*\(uintptr_t\)\s*(\w+)\s*\)", source)
+                  r"(?:\(\s*uint32_t\s*\)\s*\(\s*uintptr_t\s*\)\s*)?(\w+)\s*\)\s*;", source)
     if not m:
         return out
     out["rc"], out["intid"] = m.group(1), m.group(2)
     out["handler"], out["refcon"] = m.group(3), m.group(4)
     out["at"] = m.start()
     return out
+
+
+def driver_arming_calls(source):
+    """Every `entry_irq_enable_line( <intid>, <target> )` *call* in a driver's source.
+
+    500's call, and both arguments are read as *text* rather than resolved here: the claim below holds
+    the intid against the variable the driver registered with and the target against the driver's own
+    `#define`s, and a reader that resolved either of them would be a second definition of the question.
+
+    **A declaration is not a call, and that test is `method_body`'s.** The driver's own `extern "C"`
+    prototype has the same text as the call with the same two names inside it, and the first version of
+    this reader took it for the first arming - which made every order claim below subtract two source
+    offsets in the wrong direction and report the driver as arming the line before the registration that
+    precedes it. What separates them is the return type before the name, which a call does not have.
+    """
+    out = []
+    for m in re.finditer(r"entry_irq_enable_line\(\s*([^,()]+?)\s*,\s*([^,()]+?)\s*\)\s*;", source):
+        before = source[:m.start()].rstrip()
+        if re.search(r'(?:extern\s+"C"\s+)?\b(?:uint32_t|uint64_t|int|void)\s*$', before):
+            continue
+        out.append((m.group(1).strip(), m.group(2).strip(), m.start()))
+    return out
+
+
+def key_writes(source, suffix):
+    """Every write of the live key ending in `_<suffix>`, as `(value_text, index)`, in source order.
+
+    The value is read as text for the same reason 493's reader reads the resolution *condition* as text:
+    the question the claims ask is which of several writes is the one where the value is known, and that
+    is a question about the file rather than about the number. `[^;]*?` and not `.*?` because a value
+    can contain parentheses (`(uint32_t)(uintptr_t) &handler`) and cannot contain a `;`.
+    """
+    return [(m.group(2).strip(), m.start()) for m in re.finditer(
+        r'entry_live_write\(\s*"(xnu_live_\w+_%s)"\s*,\s*([^;]*?)\s*\)\s*;' % re.escape(suffix),
+        source, re.S)]
+
+
+def value_expression(source, name):
+    """The expression of the **last** statement that gives `name` a value, or None if there is none.
+
+    A deadline that does not fit the register is computed in two steps on purpose - the product of a
+    64-bit frequency and a millisecond count is not `CNTP_TVAL`'s width - so a claim that only read the
+    published name's right-hand side would see `want` and could not tell a derivation from a literal
+    that happens to be spelled like one. Reading the definition of the name is the same move the rest of
+    this file makes when a value's *source* is what matters.
+
+    **"The last" and not "the first, unless it is a declaration" - and both halves of that are
+    findings.** The first version of this reader skipped anything a return type preceded, which is the
+    test that separates a declaration from a call; here it is the *wrong* test twice over. `want`'s only
+    occurrence is its declaration, so skipping it left the chain unreadable and the claim reported a
+    file that derives its deadline from the frame's frequency as deriving it from something else. And
+    `arm_ticks` has both a declaration (with a zero initialiser, which is what a record looks like
+    before the work) and an assignment, so taking the first would have read the zero. The last write in
+    source order is the value the name holds when the code that follows it runs, which is the question a
+    device store after it is asking. **A name written on two branches** is the case this reader cannot
+    answer, and it says so rather than picking one: the stores would have to be read with their guards.
+
+    **`=(?!=)`, and the first version of this reader read a comparison as an assignment.** `arm_ticks ==
+    want` matched `\s*=\s*` on the first of its two `=`, and what the class then captured ran through a
+    comment - no `;` in it - to the `;` of the next statement, so the "deadline" answered for was a
+    paragraph of prose. The claim that reads it reported a file whose deadline *is* written down as
+    deriving it from the frame's frequency: the mutation this clause exists to refuse was accepted, for
+    the third time in this step by a reader that had to learn the difference between a thing and
+    something spelled nearly like it.
+    """
+    found = None
+    for m in re.finditer(r"\b%s\s*=(?!=)\s*([^;]+);" % re.escape(name), source):
+        found = m.group(1).strip()
+    return found
 
 
 def driver_device_stores(source, base):
@@ -882,6 +969,7 @@ def gather(args):
     facts["devmem_chain"] = class_chain(facts["devmem_built"]) if facts["devmem_built"] else None
     facts["payload_gic_c"] = read(PAYLOAD_GIC_C)
     facts["payload_gic_h"] = read(PAYLOAD_GIC_H)
+    facts["payload_irq_c"] = read(PAYLOAD_IRQ_C)
     facts["drivers"] = []
 
     # 493: one record per personality that names a *device node*, with the file that defines its class
@@ -1982,10 +2070,26 @@ def claim_driver_line(facts, failures, notes):
         defines_here = driver_defines(source)
         client = driver_irq_client(source)
         switch = defines_here.get(DRIVER_GIC_SWITCH)
-        if client["at"] is None and switch is None:
-            notes.append("`%s` owns no interrupt line: the driver whose device *is* the interrupt "
-                         "controller is the one with a line to own, and this file's reading is a "
-                         "device word" % d["file"])
+        # **This claim's subject is the driver whose *own device* is the distributor** - the one that
+        # raises its own line and whose writes to that device are what the switch gates - and 500 is why
+        # the gate says so instead of "registers a client or defines the switch". The reader above could
+        # not see `MSM8974Timer.cpp`'s registration until this step widened it, and the note the old gate
+        # printed for that file - "owns no interrupt line" - was then a claim about a different file
+        # altogether, printed about the one file in the image that had just been given a line. The two
+        # claims partition the drivers that own something: a driver that raises its own line is read
+        # here, a driver that owns a line the machine asserts is read by claim 16, and the note names
+        # which half a file is in rather than asserting that it owns nothing.
+        asks_sgir = (header.get("STAGE90_GICD_SGIR") is not None
+                     and any(v == header["STAGE90_GICD_SGIR"] for v in defines_here.values()))
+        if switch is None and not asks_sgir:
+            owns = driver_irq_client(source)
+            notes.append("`%s` arms no distributor register of its own, so this claim's question - "
+                         "whether a driver that writes the interrupt controller keeps every write inside "
+                         "one switch - is not about this file%s"
+                         % (d["file"],
+                            (": it registers a client for `%s` and the line it owns is the machine's, "
+                             "which claim 16 reads" % owns["intid"]) if owns["at"] is not None
+                            else "; it registers no client for any line"))
             continue
         registered += 1
 
@@ -2231,10 +2335,328 @@ def claim_driver_line(facts, failures, notes):
                         "- would not exist in any run")
 
 
+def claim_driver_arming(facts, failures, notes):
+    """16. The driver that owns a machine line arms it, and programs its device before it does.
+
+    496 made a driver own a line and raise it itself; 498 made one own a line the *machine* asserts.
+    Neither made a line arrive: a registration makes an intid serviceable, and only the distributor
+    delivers it. 500 arms the line through `entry_irq_enable_line` **and** puts the deadline into the
+    frame, and this claim is about the chain between the registration and the delivery.
+
+    **Which of the two halves was missing is a measurement, and this claim was written believing the
+    wrong one.** The first version of its docstring said an SPI is dropped by the distributor because
+    `ITARGETSR` reads 0 at reset. That is what a GIC at reset does, and it is not the state this machine
+    was in: the run reads the line already enabled, already targeted at CPU 0 and already in Group 0
+    (Android's own kernel takes this frame's deadline on this SPI), so every distributor write this step
+    makes was a write of a value that was already there, and what had been missing was the deadline in
+    the device. The claim's checks are unchanged by that - the writes are the architecture's requirement
+    for any machine whose predecessor left the line unconfigured, and the *before* keys are what keep the
+    two cases apart - but the reason given for them, here and in the sources, is now the run's.
+
+    Each clause is a way the step could read like an armed line without being one:
+
+      * **the subject is a driver whose line the device tree gave it**, identified by the record it
+        publishes for that line - the same variable the registration is made with. A driver that raises
+        its own line is not a subject: an SGI does not go through `ITARGETSR` at all, which is why claim
+        15 reads that driver, and a file in neither half is *noted* rather than passed over.
+      * **every arming call arms the line the driver registered for**, read out of the call's own text -
+        an intid armed but not registered reaches the dispatcher with no client, which is the image's
+        documented *stop*.
+      * **the target is a name and not a number, and its value is checked.** `ITARGETSR`'s byte for an
+        SPI is a CPU mask; 0 is the value that means *no CPU*, and a literal in the call is one decision
+        written twice with nothing comparing the two.
+      * **both halves that can fail are tested before the line is enabled**: the registration's return
+        (a full table, a duplicate, or the dispatcher's own timer line can refuse one) and the driver's
+        own read-back of the device's `ENABLE` (a store to a part with no clock behind it can vanish).
+        Enabling a line for a frame nothing started is what a deadline-less delivery would come from.
+      * **the device is programmed before the line is enabled, and the deadline before the enable.** The
+        frame has nothing to assert until its control word is written. What makes the arming safe on this
+        machine is the *mask* - a disabled or masked frame asserts nothing, and the run shows the frame
+        masked before the driver ran and masked again after the last delivery - so the order is the
+        image's discipline rather than the thing that saved it, and it is checked as a discipline.
+      * **the tick count is derived from the frequency the frame reports** and is never written down: a
+        literal 192000 is a fourth definition of 19.2 MHz in an image whose device layer has paid for
+        that defect class repeatedly, and the register being programmed counts that clock.
+      * **the two outcomes publish, and each publishes a zero before the registration.** `_arm_rc` and
+        `_arm_line_rc` are the pair that says *which* half failed - they fail independently - and the
+        zero written where the value is not yet known is what makes "the arming refused" a reading
+        rather than a missing key (495's rule, and the reason 498's `_isr_*` block is shaped that way).
+        The distributor's own before-values are the same rule applied to a *device*: they are what turned
+        "the distributor had to be configured" into a question this step could answer.
+      * **the handler clears its device on every path, and re-arms from the file-scope record.** The
+        line is level-sensitive: a handler that returned with the frame's output still asserted would be
+        re-entered immediately and forever. So one path reloads `CNTP_TVAL` - and the reload *is* the
+        acknowledgement, because loading a down-counter clears the expired condition - while the other
+        masks, which is the end state 498 measured. The reload's number is read from the record the
+        *other* call wrote (497's rule made structural: a deadline recomputed here would be a second
+        definition of the interval), the zero deadline is refused, and the counts of the two paths are
+        published so the last delivery's shape is in the record.
+    """
+    header = payload_defines(facts["payload_gic_h"], "STAGE90_GIC")
+    irq_c = facts.get("payload_irq_c", "") or ""
+    armed = 0
+
+    for d in facts["drivers"]:
+        source = d["source"]
+        code = strip_comments(source)
+        defines_here = driver_defines(source)
+
+        line_writes = key_writes(source, "line_intid")
+        if not line_writes:
+            notes.append("`%s` publishes no `_line_intid`: it owns no line the device tree gave it, so "
+                         "the question this claim asks - how a driver arms a machine line - is not about "
+                         "this file (a driver that raises its own line is claim 15's subject)"
+                         % d["file"])
+            continue
+        armed += 1
+        line_var = line_writes[-1][0]
+
+        own = driver_irq_client(source)
+        if own["at"] is None:
+            failures.append("`%s` publishes `%s` as the line it owns and registers no client for it: an "
+                            "intid nothing is filed for is the dispatcher's stop, so the line this file "
+                            "arms is a line the image would end the run on" % (d["file"], line_var))
+            continue
+        if own["intid"] != line_var:
+            failures.append("`%s` registers for `%s` and publishes `%s` as the line the tree gave it: "
+                            "two names for one decision, and the arming below is read against the "
+                            "published one" % (d["file"], own["intid"], line_var))
+
+        # -- the ABI, in the three places it is written -------------------------------------------------
+        if not re.search(r'extern\s+"C"\s+uint32_t\s+entry_irq_enable_line\s*\(', source):
+            failures.append("`%s` arms a line and declares no `extern \"C\"` prototype for "
+                            "`entry_irq_enable_line`: this file cannot include the payload's header, so "
+                            "that declaration is the whole ABI between the two and nothing else compares "
+                            "them" % d["file"])
+        if "uint32_t entry_irq_enable_line(uint32_t intid, uint32_t target);" not in facts["payload_gic_h"]:
+            failures.append("`entry_gic.h` no longer declares "
+                            "`entry_irq_enable_line(uint32_t, uint32_t)`: the driver's own `extern \"C\"` "
+                            "line would then be the only definition of the ABI on this side of it")
+        if "uint32_t entry_irq_enable_line(uint32_t intid, uint32_t target)" not in irq_c:
+            failures.append("`entry_irq.c` no longer defines "
+                            "`entry_irq_enable_line(uint32_t, uint32_t)`: the header and the driver would "
+                            "both be declaring a function the payload does not have, and the link would "
+                            "be the only thing that noticed")
+
+        # -- the arming calls --------------------------------------------------------------------------
+        calls = driver_arming_calls(source)
+        if not calls:
+            failures.append("`%s` owns the line `%s` and arms nothing at the distributor: a "
+                            "registration is not a delivery, and an SPI whose `ITARGETSR` byte is 0 with "
+                            "its enable bit clear is dropped by the distributor whatever handler is "
+                            "filed - `_isr_calls` of 0 is what that looks like"
+                            % (d["file"], line_var))
+            continue
+        for intid_text, target_text, _at in calls:
+            if intid_text != line_var:
+                failures.append("`%s` arms `%s` and owns `%s`: an intid armed that this driver did not "
+                                "register for reaches the dispatcher with no client, which is the "
+                                "documented stop" % (d["file"], intid_text, line_var))
+            if not re.fullmatch(r"[A-Za-z_]\w*", target_text):
+                failures.append("`%s` arms `%s` with the target `%s`: the CPU mask has to be a name this "
+                                "file defines, because a number in the call is the same decision written "
+                                "a second time with nothing comparing the two"
+                                % (d["file"], line_var, target_text))
+            elif defines_here.get(target_text) is None:
+                failures.append("`%s` arms `%s` with the target `%s`, which its own file does not define "
+                                "as an integer: the mask would be a number no claim can hold against the "
+                                "`ITARGETSR` byte it becomes" % (d["file"], line_var, target_text))
+            elif not 1 <= defines_here[target_text] <= 0xff:
+                failures.append("`%s`'s `%s` is %d: `GICD_ITARGETSR`'s byte for an SPI is a CPU mask, "
+                                "and 0 means *no CPU is targeted* - a line in that state is enabled, "
+                                "pending and never delivered, which is one silence this step's record "
+                                "could not tell from 'the device never asserted'"
+                                % (d["file"], target_text, defines_here[target_text]))
+            else:
+                notes.append("`%s` arms `%s` with `%s` = 0x%02x, a CPU mask"
+                             % (d["file"], line_var, target_text, defines_here[target_text]))
+
+        # -- the device, through the address the driver publishes as its mapping -------------------------
+        frame_writes = key_writes(source, "frame_va")
+        if not frame_writes:
+            failures.append("`%s` arms `%s` and publishes no address for the device it arms: the run "
+                            "could not say which device the deadline went into, and the stores below "
+                            "could be through any name at all"
+                            % (d["file"], line_var))
+            continue
+        frame_base = frame_writes[-1][0]
+        stores = driver_device_stores(source, frame_base)
+        ctrl_at = [at for sym, expr, at in stores
+                   if sym.endswith("_CTRL_OFF") and "ENABLE" in expr]
+        tval_at = [at for sym, expr, at in stores if sym.endswith("_TVAL_OFF")]
+        if not ctrl_at:
+            failures.append("`%s` programs no `CTRL` through `%s`, the address it publishes as the "
+                            "frame's mapping: either the device is never started or the store goes "
+                            "through a name the record does not carry, and from a log those are one "
+                            "finding - the deadline did not reach the device"
+                            % (d["file"], frame_base))
+        else:
+            first_ctrl = min(ctrl_at)
+            early = [at for _i, _t, at in calls if at < first_ctrl]
+            if early:
+                failures.append("`%s` enables the line at the distributor before it programs the frame: "
+                                "an enabled line with a device nothing has started is the one state that "
+                                "could deliver an interrupt with no deadline behind it, and closing "
+                                "that window is the order's whole reason" % d["file"])
+            else:
+                notes.append("`%s` programs the frame through `%s` before it enables `%s`"
+                             % (d["file"], frame_base, line_var))
+            if not tval_at:
+                failures.append("`%s` starts its device without ever writing a deadline to a "
+                                "`_TVAL_OFF` register: a countdown started at the reset value is not the "
+                                "interval this driver says it arms" % d["file"])
+            elif min(tval_at) > first_ctrl:
+                failures.append("`%s` writes `CTRL` before it writes the deadline: the frame would count "
+                                "from whatever value it held, so the interval the record publishes is "
+                                "not the interval the device ran" % d["file"])
+
+        # -- the gates ---------------------------------------------------------------------------------
+        first_call = min(at for _i, _t, at in calls)
+        gate_region = source[own["at"]:first_call]
+        if not re.search(r"\b%s\s*!=\s*0u|\b%s\s*==\s*1u"
+                         % (re.escape(own["rc"]), re.escape(own["rc"])), gate_region):
+            failures.append("`%s` arms the line without testing the registration's return (`%s`): a "
+                            "registration can be refused - a full table, a duplicate, or the "
+                            "dispatcher's own timer line - and the arming would then be an enabled line "
+                            "nobody is filed for" % (d["file"], own["rc"]))
+        rc_writes = key_writes(source, "arm_rc")
+        line_rc_writes = key_writes(source, "arm_line_rc")
+        rc_vars = []
+        for writes, key, what in ((rc_writes, "_arm_rc", "the device's read-back of `ENABLE`"),
+                                  (line_rc_writes, "_arm_line_rc", "the enabler's own return")):
+            if not writes:
+                failures.append("`%s` publishes no `%s` (%s): the two halves of an arming fail "
+                                "independently, so one key cannot say which of them did"
+                                % (d["file"], key, what))
+                continue
+            if not any(v == "0u" and at < own["at"] for v, at in writes):
+                failures.append("`%s` publishes `%s` only where its value is already known: a key "
+                                "written after the work it describes cannot distinguish 'the arming "
+                                "refused' from 'the arming never ran'" % (d["file"], key))
+            computed = [v for v, at in writes if at > own["at"] and v != "0u"]
+            if not computed:
+                failures.append("`%s` writes `%s` and never publishes what it came out as (%s): the "
+                                "record would carry the zero it held before the work and nothing else, "
+                                "so an arming that refused and one that never ran would read the same"
+                                % (d["file"], key, what))
+            elif key == "_arm_rc":
+                rc_vars = computed
+        if ctrl_at and rc_vars:
+            guarded = source[min(ctrl_at):first_call]
+            if not re.search(r"\b%s\s*!=\s*0u" % re.escape(rc_vars[-1]), guarded):
+                failures.append("`%s` enables the line without testing its own read-back of the device's "
+                                "`ENABLE` (`%s != 0u`): enabling a line for a frame that did not start "
+                                "is the delivery-with-no-deadline state, and the read-back is the only "
+                                "thing that can see it" % (d["file"], rc_vars[-1]))
+        elif ctrl_at:
+            failures.append("`%s` enables the line and never publishes a computed `_arm_rc`: whether the "
+                            "frame took the control write would be a number no run carries, so the gate "
+                            "on it is a gate on a value the log does not hold" % d["file"])
+
+        # -- the deadline is derived, not written down ---------------------------------------------------
+        ticks_writes = key_writes(source, "arm_ticks")
+        handler_sources = []
+        if not ticks_writes:
+            failures.append("`%s` publishes no `_arm_ticks`: the deadline it programs is a number no "
+                            "reading of the artifact can recover" % d["file"])
+            ticks_var = None
+        else:
+            ticks_var = ticks_writes[-1][0]
+            # The handler cannot see `start`'s locals, so the value may be reached through a file-scope
+            # copy: `g_timer_arm_ticks = arm_ticks` is that copy and the claim reads both names as the
+            # one value. A handler that worked the interval out again would have neither name.
+            handler_sources = [ticks_var] + [m.group(1) for m in
+                                             re.finditer(r"\b(\w+)\s*=\s*%s\s*;"
+                                                         % re.escape(ticks_var), source)]
+            expr = value_expression(source, ticks_var)
+            freq_writes = key_writes(source, "frame_freq")
+            freq_var = freq_writes[-1][0] if freq_writes else None
+            if expr is None:
+                failures.append("`%s` publishes `%s` as its deadline and no statement in this file "
+                                "assigns it: the record would carry a value whose source is not here"
+                                % (d["file"], ticks_var))
+            else:
+                # One level down, because the product does not fit the register: the expression is read
+                # and so is the definition of each bare name it is made of.
+                text = expr
+                for name in re.findall(r"\b[A-Za-z_]\w*\b", expr):
+                    text += " " + (value_expression(source, name) or "")
+                if freq_var is None or not re.search(r"\b%s\b" % re.escape(freq_var), text):
+                    failures.append("`%s` derives its deadline from something other than the frequency "
+                                    "the frame reports (`%s`): the register it programs counts that "
+                                    "clock, so a number here is a second definition of a rate this "
+                                    "machine already has three of" % (d["file"], freq_var))
+                else:
+                    notes.append("`%s`'s deadline is derived from `%s`, the frame's own frequency"
+                                 % (d["file"], freq_var))
+
+        # -- the handler's half --------------------------------------------------------------------------
+        handler_body = method_body(code, own["handler"]) if own["handler"] else None
+        if handler_body is None:
+            failures.append("`%s` arms `%s` and defines no `%s` here: the line would be enabled for a "
+                            "handler that is not in this file"
+                            % (d["file"], line_var, own["handler"]))
+            continue
+        hb = re.search(r"\*\s*\(\s*volatile\s+uint32_t\s*\*\s*\)\s*\(\s*uintptr_t\s*\)\s*"
+                       r"\(\s*(\w+)\s*\+", handler_body)
+        hstores = driver_device_stores(handler_body, hb.group(1)) if hb else []
+        if not hstores:
+            failures.append("`%s`'s handler touches no device address at all: the line's source would "
+                            "then never be cleared by its owner, and the dispatcher's cap would be what "
+                            "ends the run" % d["file"])
+            continue
+        h_ticks_name = None
+        for sym, expr, _at in hstores:
+            if not sym.endswith("_TVAL_OFF"):
+                continue
+            named = [n for n in handler_sources if re.search(r"\b%s\b" % re.escape(n), expr)]
+            if named:
+                h_ticks_name = named[0]
+                break
+        h_tval = [at for sym, _e, at in hstores if sym.endswith("_TVAL_OFF")]
+        h_en = [at for sym, expr, at in hstores
+                if sym.endswith("_CTRL_OFF") and "ENABLE" in expr]
+        h_mask = [at for sym, expr, at in hstores
+                  if sym.endswith("_CTRL_OFF") and "IT_MASK" in expr]
+        if h_ticks_name is None:
+            failures.append("`%s`'s handler never reloads the deadline from `%s`: the frame's line is "
+                            "level-sensitive, so a handler that only silenced it would deliver exactly "
+                            "once - and a deadline computed here from anything else would be a second "
+                            "definition of the interval" % (d["file"], ticks_var or "_arm_ticks"))
+        if not h_en:
+            failures.append("`%s`'s handler writes no `CTRL` that carries `ENABLE`: the reload of the "
+                            "countdown is the acknowledgement, so a path that writes the deadline "
+                            "without unmasking reloads a value the device ignores" % d["file"])
+        if not h_mask:
+            failures.append("`%s`'s handler has no path that masks the frame: a level-sensitive line "
+                            "whose last write leaves the output asserted is re-entered immediately and "
+                            "forever, and the dispatcher's cap is what would end the run" % d["file"])
+        if h_tval and h_en and min(h_tval) > min(h_en):
+            failures.append("`%s`'s handler unmasks before it reloads the deadline: between the two "
+                            "writes the frame is enabled with an expired countdown, which is the "
+                            "condition the reload exists to clear" % d["file"])
+        if h_ticks_name and not re.search(r"\b%s\s*!=\s*0u" % re.escape(h_ticks_name), handler_body):
+            failures.append("`%s`'s handler re-arms without testing `%s` for zero: a deadline of 0 is "
+                            "`CNTP_TVAL`'s 'already expired', so a record nothing wrote would turn the "
+                            "next delivery into a storm" % (d["file"], h_ticks_name))
+        for suffix, what in (("isr_rearmed", "how many deliveries reloaded the deadline"),
+                             ("isr_masked", "how many silenced the frame instead")):
+            if not re.search(r'xnu_live_\w+_%s\b' % suffix, handler_body):
+                failures.append("`%s`'s handler publishes no `_%s` (%s): which of the two paths the "
+                                "deliveries took would not be in the record, so an armed line and a "
+                                "line that fired once would read the same"
+                                % (d["file"], suffix, what))
+
+    if armed == 0:
+        failures.append("no driver in `PLATFORM_SOURCES` owns a line the device tree gave it: the "
+                        "reading this step is for - a driver making an SPI arrive - would not exist in "
+                        "any run")
+
+
 CLAIMS = (claim_shape, claim_classes, claim_provider, claim_names, claim_root_names,
           claim_property_kinds, claim_bundle_id, claim_cell_counts, claim_resolution_read,
           claim_mechanism, claim_entry_class, claim_device_mapping, claim_device_value,
-          claim_timer_callback, claim_driver_line)
+          claim_timer_callback, claim_driver_line, claim_driver_arming)
 
 
 def compare(facts, mutate=None):
@@ -2599,6 +3021,94 @@ def mutate_facts(facts, mutate):
     elif mutate == "the_handler_writes_through_an_unpublished_address":
         facts = _bump_driver(facts, "MSM8974GIC", "    g_gic_mapvaddr = mapvaddr;",
                              "    g_gic_mapvaddr = 0xf9000000u;")
+
+    # -- 500's mutations: the driver that owns a machine line arms it, and the device comes first. Each
+    # one is a way the file could still read like an armed line while the line never arrives, or arrives
+    # before there is a deadline behind it. The first two are the *device* half of the GICv2 blind spot:
+    # a line with no CPU targeted is dropped however the handler is filed.
+    elif mutate == "the_target_is_zero":
+        facts = _bump_driver(facts, "MSM8974Timer", "#define MSM8974_TIMER_LINE_TARGET 1u",
+                             "#define MSM8974_TIMER_LINE_TARGET 0u")
+    elif mutate == "the_line_is_armed_with_a_literal_target":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "entry_irq_enable_line( line, MSM8974_TIMER_LINE_TARGET )",
+                             "entry_irq_enable_line( line, 1u )")
+    elif mutate == "the_line_armed_is_not_the_line_registered":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "entry_irq_enable_line( line, MSM8974_TIMER_LINE_TARGET )",
+                             "entry_irq_enable_line( line + 1u, MSM8974_TIMER_LINE_TARGET )")
+    elif mutate == "the_line_is_armed_before_the_device":
+        # The arming hoisted above the gate that programs the frame: the failure this is for is an
+        # enabled line with a device nothing has started, which is a delivery with no deadline behind it.
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "    if( line != 0u && line_cli_rc != 0u && frame_va != 0u && "
+                             "frame_freq != 0u) {",
+                             "    arm_line_rc = entry_irq_enable_line( line, "
+                             "MSM8974_TIMER_LINE_TARGET );\n"
+                             "    if( line != 0u && line_cli_rc != 0u && frame_va != 0u && "
+                             "frame_freq != 0u) {")
+    elif mutate == "the_enable_is_written_before_the_deadline":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "            *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CNTP_TVAL_OFF ) = arm_ticks;\n"
+                             "            *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CTRL_OFF ) =\n"
+                             "                MSM8974_FRAME_CTRL_ENABLE;",
+                             "            *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CTRL_OFF ) =\n"
+                             "                MSM8974_FRAME_CTRL_ENABLE;\n"
+                             "            *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CNTP_TVAL_OFF ) = arm_ticks;")
+    elif mutate == "the_frame_is_never_enabled":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "            *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CNTP_TVAL_OFF ) = arm_ticks;\n"
+                             "            *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CTRL_OFF ) =\n"
+                             "                MSM8974_FRAME_CTRL_ENABLE;",
+                             "            *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CNTP_TVAL_OFF ) = arm_ticks;\n"
+                             "            *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CTRL_OFF ) =\n"
+                             "                MSM8974_FRAME_CTRL_IT_MASK;")
+    elif mutate == "the_arming_is_not_guarded_on_the_registration":
+        facts = _bump_driver(facts, "MSM8974Timer", "line_cli_rc != 0u && ", "")
+    elif mutate == "the_arming_is_not_guarded_on_the_device":
+        facts = _bump_driver(facts, "MSM8974Timer", "            if( arm_rc != 0u) {",
+                             "            if( 1u) {")
+    elif mutate == "the_arming_return_is_not_published":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             '    entry_live_write( "xnu_live_timerdrv_arm_line_rc",   '
+                             'arm_line_rc );\n', "")
+    elif mutate == "the_device_read_back_is_not_published":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             '    entry_live_write( "xnu_live_timerdrv_arm_rc",        arm_rc );\n', "")
+    elif mutate == "the_records_are_not_published_before_the_registration":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             '    entry_live_write( "xnu_live_timerdrv_arm_rc", 0u );\n'
+                             '    entry_live_write( "xnu_live_timerdrv_arm_line_rc", 0u );\n', "")
+    elif mutate == "the_driver_declares_no_prototype_for_the_arming":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             'extern "C" uint32_t entry_irq_enable_line(uint32_t intid, '
+                             'uint32_t target);\n', "")
+    elif mutate == "the_tick_count_is_written_down":
+        facts = _bump_driver(facts, "MSM8974Timer", "arm_ticks = (uint32_t) want;",
+                             "arm_ticks = 192000u;")
+    elif mutate == "the_deadline_is_a_second_definition_of_the_rate":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "((uint64_t) frame_freq * (uint64_t) MSM8974_FRAME_ARM_MS) / 1000u",
+                             "(uint64_t) 192000u")
+    elif mutate == "the_handler_re_arms_from_another_number":
+        facts = _bump_driver(facts, "MSM8974Timer", "                g_timer_arm_ticks;",
+                             "                192000u;")
+    elif mutate == "the_handler_never_masks":
+        facts = _bump_driver(facts, "MSM8974Timer", "ctl | MSM8974_FRAME_CTRL_IT_MASK;", "ctl;")
+    elif mutate == "the_handler_re_arms_with_a_zero_deadline":
+        facts = _bump_driver(facts, "MSM8974Timer", "g_timer_arm_ticks != 0u && ", "")
+    elif mutate == "the_handler_publishes_no_rearm_count":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             '    entry_live_write( "xnu_live_timerdrv_isr_rearmed", '
+                             'g_timer_isr_rearmed );\n', "")
     else:
         raise AssertionError("unknown mutation %s" % mutate)
     return facts
@@ -2689,6 +3199,27 @@ MUTATIONS = (
     "the_handler_never_withdraws",
     "the_handler_publishes_no_call_count",
     "the_handler_writes_through_an_unpublished_address",
+    # 500: a driver owning a line the machine asserts, and arming it. Eighteen ways for the arming to be
+    # a file that reads like one - the target, the line, the order, both gates, the two records, the
+    # derived count, and the handler's own two paths.
+    "the_target_is_zero",
+    "the_line_is_armed_with_a_literal_target",
+    "the_line_armed_is_not_the_line_registered",
+    "the_line_is_armed_before_the_device",
+    "the_enable_is_written_before_the_deadline",
+    "the_frame_is_never_enabled",
+    "the_arming_is_not_guarded_on_the_registration",
+    "the_arming_is_not_guarded_on_the_device",
+    "the_arming_return_is_not_published",
+    "the_device_read_back_is_not_published",
+    "the_records_are_not_published_before_the_registration",
+    "the_driver_declares_no_prototype_for_the_arming",
+    "the_tick_count_is_written_down",
+    "the_deadline_is_a_second_definition_of_the_rate",
+    "the_handler_re_arms_from_another_number",
+    "the_handler_never_masks",
+    "the_handler_re_arms_with_a_zero_deadline",
+    "the_handler_publishes_no_rearm_count",
 )
 
 

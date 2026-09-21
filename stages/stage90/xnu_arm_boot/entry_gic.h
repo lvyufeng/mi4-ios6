@@ -38,6 +38,12 @@
 #define STAGE90_GICD_IPRIORITY0 0x400u   /* one byte per intid; +16 is the word holding 16..19  */
 #define STAGE90_GICD_ITARGETSR0 0x800u   /* banked for PPIs: per-CPU, and 0 means "this CPU"     */
 
+/* The architecture's last real interrupt id: 1020..1023 are the "interrupts for signalling" and are not
+ * lines a distributor can enable, and `GICD_ISENABLER<n>` only exists for n < 32. A caller that names
+ * something outside `[1, 1019]` has made a mistake the log should carry rather than a write to whatever
+ * register its arithmetic lands on. */
+#define STAGE90_GIC_MAX_INTID   1020u
+
 /*
  * **The register a *driver* raises an interrupt with, and 496's writing half.** `GICD_SGIR` is the
  * GICv2 software-generated-interrupt register: a write asks a CPU to take one of the sixteen SGIs,
@@ -262,5 +268,48 @@ uint32_t entry_irq_arm(void);
 
 uint32_t entry_irq_register_client(uint32_t intid, uint32_t handler, uint32_t refCon);
 uint32_t entry_irq_unregister_client(uint32_t intid);
+
+/*
+ * **500: arming one line at the distributor, for the driver that owns it.**
+ *
+ * Until 500 the driver owned a line and could not be told about it. 498's run is the shape of that: the
+ * handler was registered, the line was the tree's, the frame's device was read, and `_isr_calls` was 0.
+ *
+ * **The reason 500 first gave for that was wrong, and the run is what corrected it.** The argument was
+ * that an SPI needs the distributor's per-line state and that at reset the state says no: `ITARGETSR`
+ * reads 0 for a shared peripheral - no CPU targeted - and the enable bit is clear, so the line is
+ * dropped whatever else is set. All of that is true of a GIC *at reset*, and **this machine's GIC is not
+ * at reset when a driver arms its line**: the run's own before-values read `_line_isen_before = 0x100`
+ * (intid 40 already enabled), `_line_target_before = 0x01010101` (already CPU 0) and `_line_group_before
+ * = 0` (already Group 0). The reason the line was already in that state is itself the confirmation this
+ * step is for: the device's own kernel takes *this* frame's deadline on *this* SPI, so the machine that
+ * booted before us had already configured and enabled the line - and the four writes below are, on this
+ * machine, writes of the values that were already there.
+ *
+ * So what arming the line needed was not the distributor. It was **the deadline in the frame**: nothing
+ * in the boot had put one there, and a line with no device behind it asserts nothing. 500 writes both,
+ * and every before-value is published precisely so that "the distributor had to be configured" and "it
+ * was already configured" are different readings rather than one assumption - which is what this header
+ * said, wrongly, before the run.
+ *
+ * **The writes are still the architecture's requirement and the image's discipline.** A line whose
+ * target byte is 0 is never delivered, whatever the handler is; a boot whose predecessor did not
+ * configure the line would need all four. They are written from the intid - `ISENABLER<n>` and
+ * `ICPENDR<n>` word `intid / 32`, bit `intid % 32`, and the target and group bytes at `(intid & ~3)`
+ * byte `intid % 4` - because a literal 40 and a literal 8 are the two readings of the same tree cell,
+ * and only one of them is this machine's.
+ *
+ * **`target` is the CPU mask, and `1` is CPU 0** - the GICv2 encoding (bit *n* selects CPU interface
+ * *n*), and the value this machine already held (`0x01010101` for the four bytes around intid 40). It is
+ * a parameter rather than a constant here because the *caller* is the one that knows which CPU it wants
+ * the line on; the payload owns the arithmetic. **The priority is not written at all**: the
+ * distributor's own value for the line is kept and *published* beside the CPU interface's priority mask,
+ * because "the line was never delivered" and "the line's priority is outside the mask" are different
+ * findings and inventing a priority would make the second one unreadable. The run's pair is `_line_prio
+ * = 0xa0` against `_dist_pmr = 0xf0`, which is the line passing the mask with room to spare. A return of
+ * 1 means the enable bit read back set - the same gate `entry_irq_arm` uses, since a write to a device
+ * with no clock behind it can vanish.
+ */
+uint32_t entry_irq_enable_line(uint32_t intid, uint32_t target);
 
 #endif /* STAGE90_ENTRY_GIC_H */

@@ -296,7 +296,7 @@ extern void entry_note_live(const char *key, uint32_t value);
  *   (c) an XNU `panic()` with no `stub_hit` at all - the fourth kind of stop, the one that names its
  *       own cause, which is what a body that returned into a broken caller would produce;
  *   (d) `xnu_live_capped` in the log, or `xnu_live_pth_hashinit_seq` absent with the boot otherwise
- *       continuing - the live channel is capped at 4096 records and 464's run wrote ~756, so this is
+ *       continuing - the live channel is capped at `ENTRY_LIVE_CAP` records (8192 since 500; 4096 then) and 464's run wrote ~756, so this is
  *       the *instrument* failing rather than the step;
  *   (e) and, for the record this whole section exists for: the terminal `stub_hit` record naming a
  *       *truncated* symbol again - `xnu_live_stub_hit_name_w0`/`_w1` and `..._seq` are the fix, and a
@@ -425,7 +425,7 @@ extern void entry_note_live(const char *key, uint32_t value);
  *       cause, which is what a body that returned into a broken caller would produce;
  *   (d) `xnu_live_pth_wqmark_seq` present but `xnu_live_pth_wqexit_seq` absent with the run continuing
  *       - `task_complete_halt` between them returning without a trap would be the interesting finding,
- *       and the live channel is capped at 4096 records with ~756 written by 464's run, so a missing
+ *       and the live channel is capped at `ENTRY_LIVE_CAP` records (8192 since 500) with ~756 written by 464's run, so a missing
  *       record is not the cap.
  */
 /*

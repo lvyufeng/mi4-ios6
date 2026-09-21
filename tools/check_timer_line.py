@@ -630,10 +630,21 @@ def claim_the_handler_clears_the_device_first(facts, failures, notes):
     """5. The handler writes the device - before it publishes anything, and before it returns.
 
     The frame's line is level-sensitive: the output stays asserted until the device's control word is
-    written, so a handler that returns without masking the timer is re-entered immediately and forever.
+    written, so a handler that returns without silencing the timer is re-entered immediately and forever.
     496's registry counts calls per slot and stops with the intid in the channel when the cap is
     exceeded, which makes such a storm a named stop rather than a hang - but a stop is still a run
     spent, and the property that avoids it is an *order*: the store to the device comes first.
+
+    **500 made the clause plural, and the way it broke is worth keeping.** The handler had one device
+    store when this was written - `CTRL |= IT_MASK`, the write that drops the level - and the clause read
+    the value by looking 120 characters past `MSM8974_FRAME_CTRL_OFF ) =`. 500's handler has *two* paths:
+    the re-arm (`CNTP_TVAL` reloaded, `CTRL` written with `ENABLE`, because loading a down-counter clears
+    the expired condition) and the mask. The first store the clause found was then the re-arm's, whose
+    120-character window holds `ENABLE`, the counter's increment and the `else` - and the mask, which is
+    the property being tested, was outside it. So a window measured on one shape reported a handler that
+    still masks on its last call as a handler that clears nothing. The question is now asked of **every**
+    store in the body: at least one of them has to carry `IT_MASK`, which is the same statement about the
+    same bit with no assumption about how many paths the writer left.
 
     Note what this claim cannot say: it is a reading of the source's order, not of the machine's. What
     the machine does with the write - whether the device took the bit - is `_isr_ctl_after` in the
@@ -645,19 +656,20 @@ def claim_the_handler_clears_the_device_first(facts, failures, notes):
                         "registers has no handler, and the frame's level would stay asserted until the "
                         "dispatcher's per-slot cap stopped the run")
         return
-    store = body.find("MSM8974_FRAME_CTRL_OFF ) =")
-    publish = body.find("entry_live_write(")
-    if store < 0:
+    stores = [m.start() for m in re.finditer(r"MSM8974_FRAME_CTRL_OFF \) =", body)]
+    publishes = [m.start() for m in re.finditer(r"entry_live_write\(", body)]
+    if not stores:
         failures.append("`msm8974_timer_isr` never writes the frame's control register: the line is "
                         "level-sensitive, so a handler that only reads the device and returns is "
                         "re-entered as fast as the CPU can take the exception")
         return
-    if "IT_MASK" not in body[store:store + 120]:
-        failures.append("`msm8974_timer_isr` writes the frame's control register without "
-                        "`MSM8974_FRAME_CTRL_IT_MASK` in the value: masking the output is what drops a "
-                        "level-sensitive line, and a write that does not set that bit is a write that "
-                        "clears nothing")
-    if publish >= 0 and store > publish:
+    if not any("IT_MASK" in body[at:at + 120] for at in stores):
+        failures.append("`msm8974_timer_isr` has no write to the frame's control register that carries "
+                        "`MSM8974_FRAME_CTRL_IT_MASK`: masking the output is what drops a "
+                        "level-sensitive line, so a handler whose every path leaves the device unmasked "
+                        "is re-entered as fast as the CPU can take the exception (%d store(s) read)"
+                        % len(stores))
+    if publishes and min(stores) > min(publishes):
         failures.append("`msm8974_timer_isr` publishes a key before it writes the device: the clear is "
                         "the one thing this handler must do even if every key after it were dropped, "
                         "and a key written first is a key written on a path that has not silenced the "
@@ -667,7 +679,8 @@ def claim_the_handler_clears_the_device_first(facts, failures, notes):
                         "come from somewhere else in a handler running on the boot thread's unwound "
                         "stack")
     if not failures:
-        notes.append("`msm8974_timer_isr` masks the frame before it publishes and before it returns")
+        notes.append("`msm8974_timer_isr` writes the frame's control register on every path, one of "
+                     "them with the mask, and every write is before the first key")
 
 
 def claim_no_source_makes_the_blocking_call(facts, failures, notes):
@@ -1035,8 +1048,10 @@ def main(argv):
         return 1
     say("  xnu_entry_498: the frame's offsets are the device's own kernel's, our `/timer` declares "
         "the line the device's own tree declares for its frame, the interrupt id is derived from the "
-        "tree's cells rather than written down, the handler masks the device before it publishes, and "
-        "no source in this image calls the one registration function that cannot return here")
+        "tree's cells rather than written down, every path through the handler writes the frame's "
+        "control register - one of them with the mask that drops a level-sensitive line - before it "
+        "publishes anything, and no source in this image calls the one registration function that "
+        "cannot return here")
     return 0
 
 

@@ -166,6 +166,14 @@ static uint32_t g_irq_other_count;
 static uint32_t g_irq_spurious_count;
 static uint32_t g_irq_late_count;
 
+/* 500's two counters, and they are records by 497's rule rather than by habit: the refusal count is
+ * written where a caller asked for an intid this machine does not have, and the enable count is
+ * incremented in the enable and read by the two keys published after it - in the same call, which is
+ * why it is the *pair* of keys that keeps it: `_line_seq` and `_line_rc` are two readers of values that
+ * depend on the increment, and the check requires both to be published. */
+static uint32_t g_irq_line_enabled;
+static uint32_t g_irq_line_refused;
+
 /* --------------------------------------------------------------------------------------------- */
 /* The client registry (496)                                                                      */
 /* --------------------------------------------------------------------------------------------- */
@@ -280,6 +288,139 @@ uint32_t entry_irq_unregister_client(uint32_t intid)
 
     IRQ_LIVE("xnu_live_irq_cli_unreg_gone", intid);
     return 0u;
+}
+
+/*
+ * ------------------------------------------------------------------------------------------------
+ * 500: the per-line distributor state, written once for the driver that owns the line
+ * ------------------------------------------------------------------------------------------------
+ *
+ * 498 left the line owned and unarmed: `entry_irq_register_client` filed the driver's handler for intid
+ * 40 and `entry_irq_handler` will call it, but a registration is not a delivery. What was missing was
+ * **the deadline in the frame** - nothing in this boot had put one there, and a line with no device
+ * behind it asserts nothing. The run's answer is exact: with the frame's `CNTP_TVAL`/`CTRL` written,
+ * the same registration delivered three times (`_isr_calls` 3, `_isr_intid` 0x28, `_isr_rearmed` 2,
+ * `_isr_masked` 1), and every distributor write below wrote a value that was already there.
+ *
+ * **That last clause is a correction to what this comment first said, and the before-values are what
+ * corrected it.** The argument was that the distributor's per-line state had to be written because at
+ * reset an SPI has `ITARGETSR` 0 and its enable bit clear. True of a GIC at reset - and *this* GIC was
+ * not at reset: the run read `_line_isen_before = 0x100` (intid 40 already enabled), `_line_target_before
+ * = 0x01010101` (already CPU 0) and `_line_group_before = 0` (already Group 0). The machine that booted
+ * before this image had configured the line, which is not a coincidence: the device's own kernel takes
+ * this frame's deadline on this SPI, so the line is one Android enables at its own boot. So the four
+ * writes are the *architecture's* requirement - a line whose target byte is 0 is dropped whatever the
+ * handler is, and a machine whose predecessor left it unconfigured needs all four - and the before/after
+ * pairs are what tell the two cases apart. A step that had asserted the distributor was the reason
+ * `_isr_calls` was 0 in 498 would have recorded a cause the machine does not have.
+ *
+ * What this function writes, then, and why each write is worth its key:
+ *
+ *   1. **the group.** A line is delivered through the CPU interface's bank whose enable bit is set, and
+ *      `GICC_CTLR` on this machine reads 1 (`EnableGrp0` only, 483's and 498's runs) - so the line has to
+ *      be in Group 0, and the register is written to *make* it so rather than assumed, because a line in
+ *      the other group would be enabled, pending, and never delivered.
+ *   2. **the target.** `GICD_ITARGETSR` is one byte per intid. This is the byte that decides *which CPU*
+ *      hears the line, and the caller names the mask because the caller is the one that knows.
+ *   3. **the pending state, cleared.** A line that latched before it was configured would be delivered
+ *      the moment the enable bit went in, which would make the first callback indistinguishable from a
+ *      delivery the driver asked for. The pending bit is read before and after and both are published.
+ *   4. **the enable bit.** Last, so that the three writes above are all in place before the distributor
+ *      can raise anything, and read back, because a write to a device with no clock behind it can
+ *      vanish - the same gate `entry_irq_arm` uses.
+ *
+ * **What is *not* written is as much of the reading as what is.** The priority register is left exactly
+ * as the distributor has it, and published beside `GICC_PMR`: "the line was never delivered" and "the
+ * line's priority is outside the mask" are different findings, and a driver that picked a priority would
+ * make the second one unreadable. The trigger configuration is not written either - it is *read*, and
+ * published as a field, because the tree declares the frame's line level-high while a distributor entry
+ * that was never programmed is level by reset: the two agreeing is a property the log can show and a
+ * comment cannot.
+ *
+ * **Every number is derived from the intid.** `ISENABLER`, `ICENABLER`, `ISPENDR`, `ICPENDR` and
+ * `IGROUPR` are one bit per intid at word `intid / 32`; `ITARGETSR` and `IPRIORITYR` are one byte per
+ * intid; `ICFGR` is two bits. A literal 40 or a literal 8 here would be a second definition of what the
+ * tree's cells mean, and only one of the two readings of `<0 8 0x4>` is this machine's.
+ *
+ * A refusal is a value: an intid outside the architecture's range (0 and 1020 and above are not lines
+ * this machine has) is counted and answered 0 rather than turned into a write at an offset that belongs
+ * to another register.
+ */
+uint32_t entry_irq_enable_line(uint32_t intid, uint32_t target)
+{
+    const uint32_t word   = intid / 32u;                 /* which 32-line word of the bit registers */
+    const uint32_t bit    = 1u << (intid % 32u);         /* the bit inside it                       */
+    const uint32_t isaddr = STAGE90_GICD_ISENABLER0 + word * 4u;
+    const uint32_t cpaddr = STAGE90_GICD_ICPENDR0 + word * 4u;
+    const uint32_t ipaddr = STAGE90_GICD_ISPENDR0 + word * 4u;
+    const uint32_t gaddr  = STAGE90_GICD_IGROUPR0 + word * 4u;
+    const uint32_t bshift = (intid % 4u) * 8u;           /* the byte inside a four-byte register    */
+    const uint32_t tword  = STAGE90_GICD_ITARGETSR0 + (intid & ~3u);
+    const uint32_t pword  = STAGE90_GICD_IPRIORITY0 + (intid & ~3u);
+    const uint32_t iword  = STAGE90_GICD_ICFGR0 + (intid / 16u) * 4u;
+    const uint32_t ishift = (intid % 16u) * 2u;
+    const uint32_t bmask  = 0xffu << bshift;
+    uint32_t isen_before, isen_after, pend_before, pend_after;
+    uint32_t target_before, target_after, group_before, group_after;
+    uint32_t prio, icfgr, ctlr, pmr, rc;
+
+    if (intid == 0u || intid >= STAGE90_GIC_MAX_INTID) {
+        g_irq_line_refused++;
+        IRQ_LIVE("xnu_live_irq_line_refused", g_irq_line_refused);
+        IRQ_LIVE("xnu_live_irq_line_refused_intid", intid);
+        return 0u;
+    }
+
+    isen_before   = gicd_read(isaddr);
+    pend_before   = gicd_read(ipaddr);
+    target_before = gicd_read(tword);
+    group_before  = gicd_read(gaddr);
+    prio          = gicd_read(pword);
+    icfgr         = gicd_read(iword);
+    ctlr          = gicd_read(STAGE90_GICD_CTLR);
+    pmr           = gicc_read(STAGE90_GICC_PMR);
+
+    IRQ_LIVE("xnu_live_irq_line_word", word);
+    IRQ_LIVE("xnu_live_irq_line_bit", bit);
+    IRQ_LIVE("xnu_live_irq_line_isaddr", isaddr);
+    IRQ_LIVE("xnu_live_irq_line_isen_before", isen_before);
+    IRQ_LIVE("xnu_live_irq_line_pend_before", pend_before);
+    IRQ_LIVE("xnu_live_irq_line_target_before", target_before);
+    IRQ_LIVE("xnu_live_irq_line_group_before", group_before);
+    IRQ_LIVE("xnu_live_irq_line_prio", prio);
+    IRQ_LIVE("xnu_live_irq_line_icfgr", icfgr);
+    IRQ_LIVE("xnu_live_irq_line_icfgr_field", (icfgr >> ishift) & 0x3u);
+    IRQ_LIVE("xnu_live_irq_line_dist_ctlr", ctlr);
+    IRQ_LIVE("xnu_live_irq_line_dist_pmr", pmr);
+    IRQ_LIVE("xnu_live_irq_line_target_want", target);
+
+    /* 3: clear whatever is latched before the line can be delivered by the enable below. */
+    gicd_write(cpaddr, bit);
+    pend_after = gicd_read(ipaddr);
+
+    /* 2: the byte this intid lives in, and only that byte - the other three intids' targets are not
+     * this caller's to change. */
+    gicd_write(tword, (target_before & ~bmask) | ((target & 0xffu) << bshift));
+    target_after = gicd_read(tword);
+
+    /* 1: the group the CPU interface actually enables. */
+    gicd_write(gaddr, group_before & ~bit);
+    group_after = gicd_read(gaddr);
+
+    /* 4: the enable, last, and read back - the whole return value. */
+    gicd_write(isaddr, bit);
+    isen_after = gicd_read(isaddr);
+    rc = ((isen_after & bit) != 0u) ? 1u : 0u;
+
+    g_irq_line_enabled++;
+    IRQ_LIVE("xnu_live_irq_line_seq", g_irq_line_enabled);
+    IRQ_LIVE("xnu_live_irq_line_intid", intid);
+    IRQ_LIVE("xnu_live_irq_line_isen_after", isen_after);
+    IRQ_LIVE("xnu_live_irq_line_pend_after", pend_after);
+    IRQ_LIVE("xnu_live_irq_line_target_after", target_after);
+    IRQ_LIVE("xnu_live_irq_line_group_after", group_after);
+    IRQ_LIVE("xnu_live_irq_line_rc", rc);
+    return rc;
 }
 
 void entry_irq_handler(void *target, void *refCon, void *nub, int source)
