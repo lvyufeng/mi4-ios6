@@ -7,21 +7,22 @@ Why this is a check and not a comment
 Experiment 479 makes the RAM disk's first instructions a `svc #0x80` asking for Unix syscall 20, and
 it puts `--wrap=getpid`'s wrapper in that syscall's slot; experiment 480 adds a second `svc` asking
 for 197, with `--wrap=mmap`'s wrapper in *that* slot and six words of arguments marshalled into it by
-the armv7k munger. Two things can be true of the *image* while the device still runs the program
+the armv7k munger; and experiment 503 adds two more asking for 230, whose slot holds `--wrap=poll`'s
+wrapper. Three things can be true of the *image* while the device still runs the program
 `entry_ramdisk.s` describes:
 
   - `--wrap` rewrites an *address reference* exactly as it rewrites a call - 458 read that fact out of
     `cons_ops[1].putc` and 463 out of `IOService::getState`'s name - so `bsd/kern/init_sysent.c`'s
-    initialiser is what has to end up holding `__wrap_getpid` and `__wrap_mmap`. If either slot holds
-    the function instead, the wrapper is never entered, no record is written, and a run in which
-    process 1 calls that syscall looks exactly like a run in which the instrument is not there.
+    initialiser is what has to end up holding `__wrap_getpid`, `__wrap_mmap` and `__wrap_poll`. If any
+    slot holds the function instead, the wrapper is never entered, no record is written, and a run in
+    which process 1 calls that syscall looks exactly like a run in which the instrument is not there.
     Nothing else in the build can see that: the symbol is defined either way, the undefined-symbol
     count does not move, and the census in `build_entry.sh` counts both as reachable *by address* -
-    which is a statement about a reference existing, not about which address it holds. For `mmap` the
-    distinction is sharper than for `getpid`: `mmap` is an ordinary function with callers, so an
-    image with the wrapper linked and *not* in the slot is byte-for-byte a working kernel whose
+    which is a statement about a reference existing, not about which address it holds. For `mmap` and
+    `poll` the distinction is sharper than for `getpid`: both are ordinary functions with callers, so
+    an image with the wrapper linked and *not* in the slot is byte-for-byte a working kernel whose
     fixture silently says nothing.
-  - and the *index* is a second, independent claim: the fixture puts 20 and 197 in `r12`, `fleh_swi`
+  - and the *index* is a second, independent claim: the fixture puts 20, 197 and 230 in `r12`, `fleh_swi`
     routes a positive number to the unix path, and `arm_get_syscall_number` hands that same word to
     `sysent[code]`. A table whose stride or whose numbering is not the one this project believes would
     make the fixture call a different syscall than the one this step documents - silently, because
@@ -35,21 +36,24 @@ Where each side of the comparison comes from
   - the addresses and the bytes come from the image itself: symbols from `nm`, and the table read
     through the section table rather than scraped out of `objdump -s`'s text, so a formatting change
     cannot silently change what is compared;
-  - and the stride is not asserted anywhere. It is *proved* by the witness list: nine entries spread
-    from 0 to 197, each checked against the master's line for that index. A stride that were not 16
-    bytes, or a table that were indexed from a different base, cannot satisfy nine of them at once -
+  - and the stride is not asserted anywhere. It is *proved* by the witness list: ten entries spread
+    from 0 to 230, each checked against the master's line for that index. A stride that were not 16
+    bytes, or a table that were indexed from a different base, cannot satisfy ten of them at once -
     which is what makes "entry 197 is `mmap`" a reading rather than a restatement of this file;
-  - and for the one slot that has one, a fourth claim: `sysent[197].sy_arg_munge32` must be
-    `munge_wwwwwl`, the munger Apple's generation derives from `mmap`'s prototype. That word is what
-    decides which register lands in which word of the argument struct, so it is the fact 480's
-    argument reading stands on - and it is invisible everywhere else in the image, because a build
-    with a different munger there is a working kernel that answers the call with different numbers.
+  - and for the slots that have one, a fourth claim: `sysent[197].sy_arg_munge32` must be
+    `munge_wwwwwl`, the munger Apple's generation derives from `mmap`'s prototype, and
+    `sysent[230].sy_arg_munge32` must be `munge_www`, the one it derives from `poll`'s. That word is
+    what decides which register lands in which word of the argument struct, so it is the fact 480's
+    argument reading and 503's *no-padding* reading both stand on - and it is invisible everywhere else
+    in the image, because a build with a different munger there is a working kernel that answers the
+    call with different numbers. The pair is the sharper claim of the two: `mmap`'s six argument words
+    and `poll`'s three are the difference between a struct with an alignment gap and one without.
 
 The witnesses are not decoration: `fork` at 2, `read` at 3, `open` at 5 and `rename` at 128 are four
 different points of the same table, and `enosys` at 8 is the one Apple's own generation turns argument
-mismatches into - so a build whose table had moved would have to move all of them consistently. 20 and
-197 are the two the fixture reaches, and they are the pair whose *distance* matters: 177 entries apart,
-which no off-by-one in the stride survives.
+mismatches into - so a build whose table had moved would have to move all of them consistently. 20, 197
+and 230 are the three the fixture reaches, and 20 and 197 are the pair whose *distance* matters: 177
+entries apart, which no off-by-one in the stride survives.
 
 `--selftest` mutates a copy of the table **in memory** - swapping two entries, zeroing a wrapper's
 slot, putting a real function back, moving the mmap munger, and truncating `nsysent` - and requires
@@ -76,10 +80,13 @@ COUNT_SYMBOL = "nsysent"
 
 # The syscalls the fixture makes, and the slot each one's wrapper has to occupy. The first is the one
 # the program's `r12` starts with; the second is the call whose *arguments* the armv7k munger marshals,
-# and the one whose slot has to hold a wrapper for a function this image also calls from elsewhere.
+# and the one whose slot has to hold a wrapper for a function this image also calls from elsewhere; the
+# third is 503's pair of timed asks, whose slot has to hold a wrapper for the same reason and whose
+# arguments are three words with no gap between them.
 WRAPPED = [
     (20, "getpid"),         # 479
     (197, "mmap"),          # 480
+    (230, "poll"),          # 503
 ]
 SYSCALL_INDEX, SYSCALL_NAME = WRAPPED[0]
 
@@ -88,9 +95,10 @@ SYSCALL_INDEX, SYSCALL_NAME = WRAPPED[0]
 # the new stride.
 SYSENT_STRIDE = 16
 
-# (index, name) pairs, from `syscalls.master`'s own lines. Nine of them, so that the stride and the
-# numbering are both over-determined rather than assumed - and the last two are the pair the fixture
-# reaches, 177 entries apart so that no small error in the stride can leave both of them satisfied.
+# (index, name) pairs, from `syscalls.master`'s own lines. Ten of them, so that the stride and the
+# numbering are both over-determined rather than assumed - and the last three are the ones the fixture
+# reaches, 20 and 197 being 177 entries apart so that no small error in the stride can leave both of
+# them satisfied.
 WITNESSES = [
     (0, "nosys"),
     (1, "exit"),
@@ -101,20 +109,24 @@ WITNESSES = [
     (20, "getpid"),
     (128, "rename"),
     (197, "mmap"),
+    (230, "poll"),
 ]
 
-# The munger each wrapped slot has to name, where it has one. **This is the word the whole argument
+# The munger each wrapped slot has to name, where it has one. **These are the words the whole argument
 # reading rests on**: `arm_get_u32_syscall_args` (`bsd/dev/arm/systemcalls.c:337`) calls
 # `callp->sy_arg_munge32`, and *which* munger it is decides which registers land in which word of the
-# argument struct - so an image whose slot named a different munger would put the fixture's arguments
-# somewhere else, and the syscall would still work, because `MAP_ANON` makes `fd` and `pos`
-# inoperative. `munge_wwwwwl` is Apple's generated name for `mmap`'s prototype (five 4-byte arguments
-# and one 8-byte `off_t`, `bsd/kern/syscalls.master`), it is what
+# argument struct. `munge_wwwwwl` is Apple's generated name for `mmap`'s prototype (five 4-byte
+# arguments and one 8-byte `off_t`, `bsd/kern/syscalls.master`), it is what
 # `out/xnu_generated/init_sysent.c`'s own line for 197 writes, and `entry_ramdisk.s`'s header derives
-# the register order from it. `getpid` has none: its argument list is empty, so its slot's munger word
-# is NULL and there is nothing to name.
+# the register order from it. `munge_www` is the same for `poll`'s three 4-byte arguments - and there
+# the claim is not only the order but the *absence* of a gap: the two mungers differ by exactly the
+# word `off_t`'s alignment inserts, so a slot naming the wrong one would put the fixture's timeout
+# somewhere the syscall never reads, and `poll` would be called with a timeout that is not the one the
+# program asked for. `getpid` has none: its argument list is empty, so its slot's munger word is NULL
+# and there is nothing to name.
 MUNGERS = {
     197: "munge_wwwwwl",
+    230: "munge_www",
 }
 
 # `struct sysent` (`bsd/sys/sysent.h:45`) on this target, where the armv7k `#if` is on:
@@ -345,12 +357,15 @@ def main():
         # If one survives, the check is decorative and this is the only place that can say so.
         offset = SYSCALL_INDEX * SYSENT_STRIDE
         mmap_offset = WRAPPED[1][0] * SYSENT_STRIDE   # 197's slot, 177 entries away
+        poll_offset = WRAPPED[2][0] * SYSENT_STRIDE   # 230's slot, 33 entries past 197
         other = 24 * SYSENT_STRIDE         # another entry's slot, inside the checked span
         symbols = elf.symbols()
         wrapper = symbols["__wrap_" + SYSCALL_NAME]
         real = symbols[SYSCALL_NAME]
         mmap_wrapper = symbols["__wrap_" + WRAPPED[1][1]]
         mmap_real = symbols[WRAPPED[1][1]]
+        poll_wrapper = symbols["__wrap_" + WRAPPED[2][1]]
+        poll_real = symbols[WRAPPED[2][1]]
 
         def word(state, where):
             return struct.unpack_from("<I", state["table"], where)[0]
@@ -385,6 +400,22 @@ def main():
         def the_wrapper_in_the_munger_slot(state):
             put(state, mmap_offset + MUNGER_WORD_OFFSET, mmap_wrapper)
 
+        def the_real_poll(state):
+            # 503's half of the defect `the_real_mmap` is about, and the one this step cannot do
+            # without: the two `poll`s are the only calls in the program whose *effect* is a block, so a
+            # slot holding `poll` instead of its wrapper is a fixture that blocks for 5 ms and 40 ms and
+            # publishes nothing at all - a run indistinguishable from one where the kernel's timer does
+            # not work, because in both the ledger holds no `xnu_live_poll_*` key.
+            put(state, poll_offset, poll_real)
+
+        def the_mmap_munger_in_polls_slot(state):
+            # The difference between the two mungers is exactly the word `off_t`'s alignment inserts:
+            # `munge_wwwwwl` copies r0..r5, r6 and r8; `munge_www` copies r0..r2. So a slot naming the
+            # six-argument munger would marshal three words the program's registers happen to hold (the
+            # timeout among them in the wrong place) into a struct `poll` reads as three words - a
+            # working kernel calling `poll` with a timeout the fixture never asked for.
+            put(state, poll_offset + MUNGER_WORD_OFFSET, symbols[MUNGERS[197]])
+
         def one_entry_late(state):
             put(state, offset, 0)
             put(state, offset + SYSENT_STRIDE, wrapper)
@@ -404,9 +435,11 @@ def main():
             ("the wrapper's slot zeroed", zero_the_slot),
             ("the real getpid in the slot", the_real_function),
             ("the real mmap in its slot", the_real_mmap),
+            ("the real poll in its slot", the_real_poll),
             ("the mmap wrapper in each other's slot", each_wrapper_in_the_other_slot),
             ("197's munger word zeroed", zero_the_munger),
             ("the wrapper in 197's munger word", the_wrapper_in_the_munger_slot),
+            ("the six-argument munger in 230's slot", the_mmap_munger_in_polls_slot),
             ("the wrapper one entry late", one_entry_late),
             ("entries 20 and 24 swapped", swapped_with_24),
             ("the table shifted by one word (any other stride)", shifted_one_word),

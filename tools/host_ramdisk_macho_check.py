@@ -178,6 +178,71 @@ def syscall_mmap():
     return number
 
 
+def syscall_poll():
+    """The program's third syscall, the one whose *effect* is to make the kernel wait.
+
+    `bsd/kern/syscalls.master`'s own line is
+    `230 AUE_POLL ALL { int poll(struct pollfd *fds, u_int nfds, int timeout); }`, and the prototype
+    is what decides two separate things here:
+
+      - **the three arguments are three 4-byte words, so the slot's munger is `munge_www`.** The
+        armv7k `arm_get_u32_syscall_args` (`bsd/dev/arm/systemcalls.c:337`) calls
+        `sysent[230].sy_arg_munge32`, and `munge_www` (`bsd/dev/arm/munge.c:129`) is `munge_wlll`
+        reduced - it copies `r0..r2` and nothing else. So the fixture's three register writes are
+        `fds`, `nfds` and `timeout`, in that order, with **no padding word** - which is the difference
+        between this call and `mmap`'s, whose 8-byte `off_t` puts one there.
+        `tools/check_sysent_table.py` reads that munger word back out of the linked image; this
+        function is the other end, the prototype the word is generated from.
+      - **the return type is `int`**, so `poll` has one return word and the fixture's `r0` after the
+        `svc` is its value (`0` when the timeout expires with nothing ready) - not an address like
+        `mmap`'s.
+
+    This function is why the count above `nfds` matters: `poll(NULL, 0, ms)` is Apple's own way to
+    sleep on a deadline, and Apple's comment says so in Apple's words (`bsd/kern/sys_generic.c:1785`:
+    "If user space passed 0 FDs, then respect any timeout value passed. This is an extremely
+    inefficient sleep"). A prototype that had grown a fourth argument would put the timeout in a
+    different register than the fixture writes it in.
+    """
+    master = open(os.path.join(XNU, "bsd/kern/syscalls.master"), encoding="utf-8",
+                  errors="replace").read()
+    m = re.search(r"^(\d+)\s+AUE_POLL\s+ALL\s+\{\s*int\s+poll\s*\(([^)]*)\)\s*;", master, re.M)
+    if not m:
+        sys.exit("bsd/kern/syscalls.master no longer has an `AUE_POLL ALL { int poll(...) }` line - "
+                 "the fixture's third syscall cannot be checked against the master")
+    number = int(m.group(1))
+    if number <= 0:
+        sys.exit(f"syscalls.master puts poll at {number}: with a non-positive number `fleh_swi` "
+                 f"routes it to the mach path, so the fixture would not be calling a BSD syscall")
+    params = [q.strip() for q in m.group(2).split(",") if q.strip()]
+    if len(params) != 3 or "off_t" in m.group(2):
+        sys.exit(f"syscalls.master's poll takes `{m.group(2)}`, and the armv7k reading this check "
+                 f"encodes - three 4-byte arguments, so `munge_www` and r0..r2 - is derived from the "
+                 f"three-word prototype it has had since 4570. A fourth argument, or an 8-byte one, "
+                 f"would put an argument in a register the fixture does not write")
+    return number
+
+
+def poll_timeouts(decoded):
+    """The two timeouts the program asks for, as `(short_ms, long_ms)`, or `(None, None)`.
+
+    **These are the one pair of numbers in this program that no header defines**, because they are the
+    fixture's own choice and the property they have to satisfy is a *ratio* and not a value. So this
+    function does not return constants for the caller to compare against: it reads the two `movw r2`
+    immediates and returns them, and `check_program` states the properties. The `None`s are what make
+    a word that is not a `movw` into r2 fail the word-by-word comparison with a message that shows
+    `movw r2, #None` beside the word that is really there, rather than being accepted because it
+    happens to be in the same register.
+    """
+    out = []
+    for index in (POLL_SHORT_WORD, POLL_LONG_WORD):
+        ins = decoded[index]
+        if ins[0] == "movw" and len(ins[1]) == 3 and ins[1][0] == 2 and isinstance(ins[1][1], int):
+            out.append(ins[1][1])
+        else:
+            out.append(None)
+    return tuple(out)
+
+
 def arm_pgshift():
     """The kernel's page shift, from the file that defines it for this architecture.
 
@@ -221,7 +286,15 @@ def sign24(word):
 # How many instructions the program at the entry point is. `entry_ramdisk.s` asserts the same length
 # in an `.if` over its own labels, so the two are a pair: a program that grew would fail to assemble
 # and a program that shrank would fail here.
-PROGRAM_WORDS = 27
+PROGRAM_WORDS = 37
+
+# Where the two `poll` calls' timeouts are, and where the two calls start. The word numbers are the
+# program's own layout - `entry_ramdisk.s`'s listing counts the same offsets - and they are named here
+# rather than written into the table below because three separate clauses read them: the expectation
+# list, the ratio property, and the mutation that breaks the ratio.
+POLL_SHORT_WORD, POLL_LONG_WORD = 23, 28
+POLL_CALL_WORDS = (21, 26)          # the first word of each ask: `mov r0, #0`
+SPIN_WORD, FAILED_WORD = 31, 36     # the loop's first word, and the `udf #1` every check shares
 
 # The ARM condition codes the program's branches use, by name: `bne`, `bcs` and `b`. The names are what
 # the *reading* rests on for one of them - `unix_syscall`'s error convention is the carry bit
@@ -333,13 +406,14 @@ def describe(instruction):
 
 
 def program_expectations(decoded, K):
-    """What each of the program's 27 words must decode to, in the order they are loaded.
+    """What each of the program's 37 words must decode to, in the order they are loaded.
 
     The values come from the headers and from Apple's source (`K`), never from a literal here: the pids
-    from `bsd_init.c`'s `initproc = proc_find(N)`, the two syscall numbers from `syscalls.master`, the
+    from `bsd_init.c`'s `initproc = proc_find(N)`, the three syscall numbers from `syscalls.master`, the
     page length from the kernel's own `ARM_PGSHIFT`, and `prot`/`flags` from `bsd/sys/mman.h`'s
-    `PROT_READ|PROT_WRITE` and `MAP_PRIVATE|MAP_ANON`. **One word is deliberately not** - see the
-    marker below - because the property it has to have is a property and not a value.
+    `PROT_READ|PROT_WRITE` and `MAP_PRIVATE|MAP_ANON`. **Two words are deliberately not fixed as
+    values** - see the marker and the timeouts below - because the properties they have to have are
+    properties and not numbers in a header.
 
     Word by word, and what a wrong value there would cost on the device:
 
@@ -352,12 +426,18 @@ def program_expectations(decoded, K):
       - 12..13 make the call and test **the carry**: `unix_syscall`'s error convention is
         `regs->cpsr |= PSR_CF`, so a `cmp`/`blt` here would read the same flags it just destroyed and
         a failed `mmap` would be taken for a valid address.
-      - 14..20 are the two accesses that are the point of the step: a load of a page nothing has
+      - 14..20 are the two accesses that are the point of that step: a load of a page nothing has
         touched, then a store to a page the load mapped read-only, each checked afterwards. The `str`
         writes the address into the address it names, so 18..19 are the whole proof that the page is
         the process's own and writable.
-      - 21..25 are 479's loop, kept so that the log shows the fault was serviced rather than fatal,
-        and 26 is the failure marker.
+      - **21..30 are 503's two asks**, and they are the only two places in this program where a
+        register is loaded from something that is not a header: `fds` and `nfds` are zero because a
+        zero-descriptor `poll` is a pure deadline, and the `timeout` is a *ratio* (checked below).
+        24 and 29 carry the syscall number in r12 - the same register and the same convention as the
+        other two calls - and 22 and 27 are the `mov r1, #0` that make it a sleep rather than a wait on
+        a descriptor, which is the one argument in the program whose *value* is the whole semantic.
+      - 31..35 are 479's loop, kept so that the log shows both timed blocks returned rather than
+        killing the boot, and 36 is the failure marker.
     """
     # The one value this check does not fix: the word the program puts in r5. It has to be a marker -
     # nonzero, and different from every argument the program loads - because its whole job is to be
@@ -369,11 +449,17 @@ def program_expectations(decoded, K):
     word8 = decoded[8]
     marker = word8[1][1] if (word8[0] == "movw" and len(word8[1]) == 3 and
                              isinstance(word8[1][1], int)) else None
+    # And the second: the two timeouts. They are read out of the instruction stream by
+    # `poll_timeouts` for the same reason - their property is an 8:1 ratio and not a value - and they
+    # are `None` here when the word at that offset is not the `movw r2, #imm16` the program's shape
+    # requires, so that a `poll` whose timeout moved to another register fails the comparison here
+    # rather than passing because the number is right.
+    short_ms, long_ms = poll_timeouts(decoded)
 
     return [
         (0, ("svc", (0x80,))),
         (1, ("cmp_i", (0, K["INIT_PID"], 0))),
-        (2, ("b", (COND["ne"], 26))),
+        (2, ("b", (COND["ne"], FAILED_WORD))),
         (3, ("mov", (0, 0, 0))),
         (4, ("movw", (1, K["MMAP_LENGTH"], 0))),
         (5, ("mov", (2, K["MMAP_PROT"], 0))),
@@ -384,34 +470,54 @@ def program_expectations(decoded, K):
         (10, ("mov", (8, 0, 0))),
         (11, ("mov", (12, K["SYSCALL_MMAP"], 0))),
         (12, ("svc", (0x80,))),
-        (13, ("b", (COND["cs"], 26))),
+        (13, ("b", (COND["cs"], FAILED_WORD))),
         (14, ("ldr", (3, 0, 0))),
         (15, ("cmp_i", (3, 0, 0))),
-        (16, ("b", (COND["ne"], 26))),
+        (16, ("b", (COND["ne"], FAILED_WORD))),
         (17, ("str", (0, 0, 0))),
         (18, ("ldr", (1, 0, 0))),
         (19, ("cmp_r", (1, 0))),
-        (20, ("b", (COND["ne"], 26))),
-        (21, ("mov", (12, K["SYSCALL_GETPID"], 0))),
-        (22, ("svc", (0x80,))),
-        (23, ("cmp_i", (0, K["INIT_PID"], 0))),
-        (24, ("b", (COND["ne"], 26))),
-        (25, ("b", (COND["al"], 21))),
-        (26, ("udf", (1,))),
+        (20, ("b", (COND["ne"], FAILED_WORD))),
+        # 503's first ask: `poll(NULL, 0, short)`. `fds` and `nfds` are both `mov r_, #0` and not a
+        # `movw`, which is not a stylistic choice - a `movw r1, #0` would decode as a different shape
+        # and fail here, so "nfds is zero" is stated as the instruction that writes zero.
+        (21, ("mov", (0, 0, 0))),
+        (22, ("mov", (1, 0, 0))),
+        (23, ("movw", (2, short_ms, 0))),
+        (24, ("mov", (12, K["SYSCALL_POLL"], 0))),
+        (25, ("svc", (0x80,))),
+        (26, ("mov", (0, 0, 0))),
+        (27, ("mov", (1, 0, 0))),
+        (28, ("movw", (2, long_ms, 0))),
+        (29, ("mov", (12, K["SYSCALL_POLL"], 0))),
+        (30, ("svc", (0x80,))),
+        (31, ("mov", (12, K["SYSCALL_GETPID"], 0))),
+        (32, ("svc", (0x80,))),
+        (33, ("cmp_i", (0, K["INIT_PID"], 0))),
+        (34, ("b", (COND["ne"], FAILED_WORD))),
+        (35, ("b", (COND["al"], SPIN_WORD))),
+        (36, ("udf", (1,))),
     ]
 
 
 def check_program(blob, fpc, pc, reg, K):
-    """The 27 words of `entry_ramdisk.s`'s program, decoded against what they are for.
+    """The 37 words of `entry_ramdisk.s`'s program, decoded against what they are for.
 
     This is the assertion experiment 468 wrote for one word, applied to the program 479 replaced it
-    with and 480 grew: the one-word version asked "is the entry point a `udf #0`", which measured only
-    that the user's mapping was where the file said it was. Every word of a program this size is a way
-    to be wrong - a `cmp` against the wrong register or the wrong pid, a branch that lands one
-    instruction away, a syscall number in the wrong register, an argument in the wrong register, the
-    sign convention instead of the carry - and every one of them is a *silent* difference whose only
-    symptom on the device would be a process that runs when it should have stopped, or an init death
-    where 478 already had one.
+    with and 480 and 503 grew: the one-word version asked "is the entry point a `udf #0`", which
+    measured only that the user's mapping was where the file said it was. Every word of a program this
+    size is a way to be wrong - a `cmp` against the wrong register or the wrong pid, a branch that
+    lands one instruction away, a syscall number in the wrong register, an argument in the wrong
+    register, the sign convention instead of the carry - and every one of them is a *silent*
+    difference whose only symptom on the device would be a process that runs when it should have
+    stopped, or an init death where 478 already had one.
+
+    Three of the program's properties are not word-for-word comparisons and are checked here because
+    no single word holds them: the marker's (that word 8 is nonzero and unlike every argument), the
+    branch targets' (that each lands on another instruction of the program), and 503's ratio (that
+    word 28 is larger than word 23 and neither is zero). The last is the reading the step exists for -
+    a wake whose length does not follow what was asked for is a latency and not a deadline - so it has
+    to be a property a mutation can break rather than a pair of numbers compared with a header.
     """
     p = f"{pc:#x}: "
     words = [u32(blob, fpc + i * 4) for i in range(PROGRAM_WORDS)]
@@ -442,15 +548,49 @@ def check_program(blob, fpc, pc, reg, K):
                  f"({value:#x}), so the marker cannot be told apart from a real argument in the "
                  f"munger's output - which is the only place it is read")
 
+    # **And 503's ratio, which is the whole reason there are two asks.** `entry_trace.c`'s wrapper times
+    # both calls with the kernel's own counter, so what the run publishes is a pair of tick counts that
+    # the *user* program chose the ratio of. Nothing on this machine has ever produced a user-visible
+    # interval before, so there is no baseline for the pair and the only thing that can be asserted in
+    # the file is the relation between them. A `poll` whose two timeouts were equal would publish a
+    # ratio of about 1 either way and would read identically whether the wake came from the deadline or
+    # from some fixed latency; a zero timeout would not block at all (`kqueue_scan` would never arm a
+    # wait timer), so it would publish a tick count that says nothing about the timer path while
+    # looking like a reading of it. Both are mutations `--selftest` makes.
+    short_ms, long_ms = poll_timeouts(decoded)
+    if short_ms is not None and long_ms is not None:
+        if min(short_ms, long_ms) == 0:
+            fail(f"{p}one of the two `poll` timeouts is 0 ({short_ms} and {long_ms}): a zero timeout "
+                 f"makes `kqueue_scan` return without arming the thread's wait timer, so the pair "
+                 f"would record two calls that never blocked and the timer path would be untested")
+        if long_ms <= short_ms:
+            fail(f"{p}the second `poll` asks for {long_ms} ms and the first {short_ms} ms: the first "
+                 f"ask has to be the shorter one, because the reading these two calls produce is their "
+                 f"*ratio* and a wake that did not come from the countdown would give the same one for "
+                 f"both. An equal or reversed pair cannot separate a deadline from a latency")
+
     # Every branch lands inside the program, stated once for all of them: a branch out would leave the
     # user's `__TEXT` for unmapped memory and fault, which the run would show as an abort rather than
-    # as a syscall - and the `b` at word 25 has to come back to the loop's first word for the liveness
+    # as a syscall - and the `b` at word 35 has to come back to the loop's first word for the liveness
     # reading the step is built on.
     for index, instruction in enumerate(decoded):
         if instruction[0] == "b" and not isinstance(instruction[1][1], int):
             fail(f"{p}the branch at word {index} (0x{pc + index * 4:x}) targets "
                  f"{instruction[1][1]} - every branch in this program has to land on another "
                  f"instruction of it")
+
+    # What the two asks will read as, said once at the end of the program's check: not a claim about
+    # the device but the shape the wrapper in `entry_trace.c` publishes, so that a run whose two
+    # `xnu_live_poll_ticks` are in this relation can be read without the reader re-deriving it. The
+    # `short_ms > 0` is not decoration: `fail` above records the zero-timeout case and *continues*, and
+    # the ratio this line prints is a division by `short_ms` - so without the guard the selftest's own
+    # mutation would end this check in a `ZeroDivisionError` traceback instead of the failure message
+    # it is made to produce.
+    if short_ms is not None and long_ms is not None and short_ms > 0:
+        notes.append(f"{p}words {POLL_SHORT_WORD} and {POLL_LONG_WORD} ask for {short_ms} ms and "
+                     f"{long_ms} ms ({long_ms / short_ms:.0f}:1); `entry_note_poll` records each call's "
+                     f"tick count as `xnu_live_poll_ticks`, so the run's reading is that the second is "
+                     f"about {long_ms / short_ms:.0f} times the first rather than about equal")
 
 
 def check_thread_registers(pc, reg, K):
@@ -838,6 +978,13 @@ def main():
         "MMAP_LENGTH": 1 << arm_pgshift(),
         "MMAP_PROT": hdr_define(MMAN, "PROT_READ") | hdr_define(MMAN, "PROT_WRITE"),
         "MMAP_FLAGS": hdr_define(MMAN, "MAP_PRIVATE") | hdr_define(MMAN, "MAP_ANON"),
+        # 503: the third syscall, the one whose effect is to make the kernel wait. Its number comes
+        # from `syscalls.master` through the same reader shape as the other two; the two timeouts
+        # deliberately have no entry here, because they are the program's own choice of a *ratio* and
+        # `program_expectations` reads them back out of the instruction stream instead of comparing
+        # them with a number in this file (there is no header that defines how long a fixture should
+        # sleep). See `poll_timeouts`.
+        "SYSCALL_POLL": syscall_poll(),
     }
     notes.append("from the headers: MH_MAGIC=0x%(MH_MAGIC)x MH_EXECUTE=%(MH_EXECUTE)d "
                  "MH_PIE=0x%(MH_PIE)x MH_DYLDLINK=0x%(MH_DYLDLINK)x "
@@ -848,6 +995,7 @@ def main():
                  "SYSCALL_GETPID=%(SYSCALL_GETPID)d (bsd/kern/syscalls.master) "
                  "INIT_PID=%(INIT_PID)d (bsd/kern/bsd_init.c's `initproc = proc_find(N)`) "
                  "SYSCALL_MMAP=%(SYSCALL_MMAP)d (bsd/kern/syscalls.master) "
+                 "SYSCALL_POLL=%(SYSCALL_POLL)d (bsd/kern/syscalls.master) "
                  "MMAP_LENGTH=0x%(MMAP_LENGTH)x (1 << ARM_PGSHIFT) "
                  "MMAP_PROT=0x%(MMAP_PROT)x MMAP_FLAGS=0x%(MMAP_FLAGS)x (bsd/sys/mman.h)" % K)
 
@@ -899,22 +1047,28 @@ def main():
             ("the syscall immediate", 0xE0, 0xEF000081),
             ("the compare's register", 0xE4, 0xE3510001),
             ("the compare with a rotated immediate", 0xE4, 0xE3500101),
-            ("the failure marker", 0xE0 + 26 * 4, 0xE7F000F2),
-            # 480's program, as *every one of its words except 8*: the low bit is the cheapest change
-            # that leaves a word a word, and it moves the `svc`'s immediate, a branch's target, a
-            # `mov`'s value or a load's register - so no word of the program can differ from what the
-            # check requires without the check saying so. `entry_ramdisk.s`'s `.if` fixes the program's
-            # length, so this list cannot silently stop covering the program.
+            ("the failure marker", 0xE0 + FAILED_WORD * 4, 0xE7F000F2),
+            # 480's program, as *every one of its words except the marker and the two timeouts*: the
+            # low bit is the cheapest change that leaves a word a word, and it moves the `svc`'s
+            # immediate, a branch's target, a `mov`'s value or a load's register - so no word of the
+            # program can differ from what the check requires without the check saying so.
+            # `entry_ramdisk.s`'s `.if` fixes the program's length, so this list cannot silently stop
+            # covering the program.
             #
-            # **Word 8 is left out on purpose, and it is the one place this list is not complete.**
-            # That word is the marker in r5, and the check requires it to be a nonzero `movw` into r5
-            # that repeats no argument - properties, not a value - so a low-bit flip there changes only
-            # the property the check deliberately leaves free and *should* be accepted (see
-            # `program_expectations`). What has to be refused is a change of shape or of the properties,
-            # and the mutations below are exactly those: a nop, a zero, a repeated argument, and a
-            # rotated `mov` where the `movw` is.
+            # **Three words are left out on purpose, and they are the places this list is not
+            # complete.** Word 8 is the marker in r5, whose value the check deliberately leaves free (a
+            # nonzero `movw` into r5 that repeats no argument - properties, not a value), so a low-bit
+            # flip there changes only the property that is free and *should* be accepted (see
+            # `program_expectations`). Words `POLL_SHORT_WORD` and `POLL_LONG_WORD` are 503's two
+            # timeouts, and they are free for the same reason one step further on: the property is the
+            # *relation* between them, so 5 ms and 40 ms, 4 ms and 40 ms and 5 ms and 41 ms are all
+            # programs this check has no business refusing. What has to be refused is a change of shape
+            # or of the relation, and the mutations below are exactly those: a nop, a zero word, a
+            # repeated argument and a rotated `mov` where the `movw` is, for the marker; the syscall
+            # number moved, and the relation broken two ways, for the asks.
             *[(f"program word {i}", 0xE0 + i * 4, u32(blob, 0xE0 + i * 4) ^ 1)
-              for i in range(PROGRAM_WORDS) if i != 8],
+              for i in range(PROGRAM_WORDS)
+              if i not in (8, POLL_SHORT_WORD, POLL_LONG_WORD)],
             # And the mutations that are about a *shape* rather than a value, each a plausible way to
             # write the same intent wrongly. The first is the one this step exists for:
             # `arm_prepare_u32_syscall_return` reports an error by setting the carry bit
@@ -927,7 +1081,20 @@ def main():
             ("the pad word is a rotated mov", 0xE0 + 8 * 4, 0xE3A05C5A),
             ("the pad word repeats an argument", 0xE0 + 8 * 4, 0xE3015000),
             ("len in prot's register", 0xE0 + 4 * 4, 0xE3012000),
-            ("the failure marker is 478's udf #0", 0xE0 + 26 * 4, 0xE7F000F0),
+            ("the failure marker is 478's udf #0", 0xE0 + FAILED_WORD * 4, 0xE7F000F0),
+            # 503's two asks, mutated four ways. The first is the pair that has to be *asymmetric*
+            # (this is the mutation whose survival would make the step's reading worthless, because
+            # equal timeouts give a ratio of about 1 whether the wake came from the countdown or from
+            # a fixed latency); the second a timeout that never blocks, so the call would not arm the
+            # thread's wait timer at all and the pair would be two measurements of nothing; and the
+            # last two a call that is not the one the header describes - `poll` replaced by the
+            # fixture's own first syscall, which would still make the log show two entries, and a
+            # timeout in the register `nfds` lives in, which is the one mistake a reader of the
+            # program's listing could make without noticing.
+            ("the second ask is as long as the first", 0xE0 + POLL_LONG_WORD * 4, 0xE3002005),
+            ("the first ask never waits", 0xE0 + POLL_SHORT_WORD * 4, 0xE3002000),
+            ("the ask is not poll's syscall number", 0xE0 + 24 * 4, 0xE3A0C000 | K["SYSCALL_MMAP"]),
+            ("the timeout is in nfds' register", 0xE0 + POLL_SHORT_WORD * 4, 0xE3001005),
         ]
         survived = []
         for name, off, value in mutations:

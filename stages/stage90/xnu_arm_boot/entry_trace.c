@@ -155,6 +155,13 @@ extern void entry_note_getpid(uint32_t caller, uint32_t error, uint32_t value);
  * more together than apart. */
 extern void entry_note_mmap(uint32_t caller, const uint32_t *args, uint32_t error, uint32_t value);
 
+/* 503: what process 1 asked the kernel's clock for, and how long the kernel took to answer. The four
+ * inputs are the call's own arguments and its call site; `error` and `retval` are what it returned;
+ * `before`/`after` are the two `mach_absolute_time` readings the wrapper takes around the real call,
+ * so their difference is the interval the kernel kept this thread parked. See the wrapper below. */
+extern void entry_note_poll(uint32_t caller, uint32_t fds, uint32_t nfds, uint32_t timeout_ms,
+                            uint32_t error, uint32_t retval, uint32_t before, uint32_t after);
+
 /* 481: the kernel's end of the timer chain - the deadline `timer_resync_deadlines` chose and the
  * decrementer value the real `setPop` computed for it, recorded beside what the writer in
  * `entry_timebase.c` was handed. See the wrapper below. */
@@ -721,6 +728,82 @@ int __wrap_mmap(void *proc, void *uap, uint32_t *retval)
 
     entry_note_mmap(caller, args, (uint32_t)error,
                     (retval != 0) ? *retval : 0xFFFFFFFFu);
+    return error;
+}
+
+/* ------------------------------------------------------ the deadline a process asks for (503) */
+/*
+ * **This is the first syscall in this walk whose point is that it *blocks*.** 479's `getpid` and 480's
+ * `mmap` both answer immediately; `poll` with no descriptors sleeps until a deadline the kernel
+ * computes, and the deadline is the object. `entry_ramdisk.s` makes two of them, five milliseconds
+ * apart from forty, so that the answer has a shape rather than a value.
+ *
+ * The chain, and every link of it is a reading this run takes:
+ *
+ *     svc #0x80 (r12 = 230)  -> sysent[230].sy_call, which this wrapper occupies
+ *     poll                   -> poll_nocancel -> kqueue_scan        (`kern_event.c:1666`, `:6100`)
+ *     waitq_assert_wait64_leeway -> timer_call_enter_with_leeway on `thread->wait_timer`
+ *                                                                (`osfmk/kern/waitq.c:2565`)
+ *     thread_block_parameter -> the thread parks
+ *     ... the virtual timer's interrupt 483 armed:
+ *          rtclock_intr -> timer_intr -> timer_queue_expire     (`osfmk/arm/rtclock.c`,
+ *                                                                `osfmk/arm/arm_timer.c`)
+ *          -> thread_timer_expire -> clear_wait_internal(THREAD_TIMED_OUT)
+ *                                                                (`osfmk/kern/sched_prim.c:639`)
+ *     kqueue_scan's switch   -> EWOULDBLOCK, which `poll` maps to 0  (`sys_generic.c:1816-1820`)
+ *
+ * **The two clock readings are taken around the real call and nowhere else.** `entry_counter()` is
+ * `mrrc p15, 0, lo, hi, c14` - the same counter `mach_absolute_time` reads on this target (454's
+ * note above) - so `after - before` is the interval the kernel held this thread, measured with the
+ * kernel's own clock and not with anything this image chose. Both ends are published as well as their
+ * difference: the low word wraps every 3.7 minutes at 19.2 MHz and a difference taken across a wrap
+ * would be a small positive number that looked like a fast return, whereas the pair says which
+ * happened (`after` below `before` is the wrap and nothing else).
+ *
+ * **The declaration is the ABI and it is `sysproto.h`'s.** `out/xnu_generated/bsd/sys/sysproto.h:2483`
+ * is `int poll(struct proc *, struct poll_args *, int *);`, `struct poll_args` is
+ * `user_addr_t fds; u_int nfds; int timeout` (`:778-782`) and `unix_syscall` calls the slot as
+ * `(*(callp->sy_call))(proc, &uthread->uu_arg[0], &uthread->uu_rval[0])`
+ * (`bsd/dev/arm/systemcalls.c:174`), so the three words of `uap` are exactly those three fields, in
+ * that order, marshalled by the slot's own munger. **That munger is the claim the arguments rest on**:
+ * entry 230's is `munge_www` (`out/xnu_generated/init_sysent.c:1317`), which copies `r0..r2` and
+ * nothing else - so the fixture's three register writes are the three arguments and there is no
+ * padding word here to measure, unlike `mmap`'s. `tools/check_sysent_table.py` reads that word back
+ * out of the linked image, and `tools/host_ramdisk_macho_check.py` reads the same two numbers and the
+ * three register writes out of the fixture.
+ *
+ * **The wrapper returns the syscall's own `int` unchanged**, which is the defect 478 found in this
+ * file's own `__wrap_thread_block`: a `void` shape ends in a tail call and leaves the caller's `r0`
+ * holding whatever ran last, and here that would be the *fixture's* answer - it compares `r0` against
+ * nothing, but the spin loop after it compares `r0` against the pid, so a wrong `r0` would be read as
+ * the kernel answering the wrong process.
+ *
+ * `uap` of 0 is recorded as three `0xFFFFFFFF` words rather than dereferenced, for the reason
+ * `__wrap_mmap` gives: the kernel never calls a slot that way, and an instrument that faults on a
+ * state it was told cannot happen costs the run.
+ */
+int __real_poll(void *proc, void *uap, int *retval);
+
+int __wrap_poll(void *proc, void *uap, int *retval)
+{
+    uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    const uint32_t *given = (const uint32_t *)uap;
+    uint32_t fds = 0xFFFFFFFFu, nfds = 0xFFFFFFFFu, timeout = 0xFFFFFFFFu;
+    uint32_t before, after;
+    int error;
+
+    if (given != 0) {
+        fds = given[0];
+        nfds = given[1];
+        timeout = given[2];
+    }
+
+    before = entry_counter();
+    error = __real_poll(proc, uap, retval);
+    after = entry_counter();
+
+    entry_note_poll(caller, fds, nfds, timeout, (uint32_t)error,
+                    (retval != 0) ? (uint32_t)*retval : 0xFFFFFFFFu, before, after);
     return error;
 }
 

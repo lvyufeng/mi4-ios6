@@ -635,7 +635,7 @@ def claim_bounds(facts, failures, notes):
         body = ""
 
     for macro in ("STAGE90_TMR_SETUP_SHOWN", "STAGE90_TMR_ENTER_SHOWN", "STAGE90_TMR_QEXPIRE_SHOWN",
-                  "STAGE90_DEC_SHOWN"):
+                  "STAGE90_TMR_DL_SHOWN", "STAGE90_DEC_SHOWN"):
         if header.get(macro, 0) <= 0:
             failures.append("%s is %s, so the record it bounds is unrecorded or unbounded"
                             % (macro, header.get(macro)))
@@ -674,6 +674,56 @@ def claim_bounds(facts, failures, notes):
             failures.append("entry_timebase_note_timer_enter drops the armings past its bound without "
                             "counting them, which is the defect this project's 459 found in the report "
                             "buffer: a full instrument and a silent one print the same log")
+
+        # **503's half of the same function: source 2's own rule, which is semantic rather than a volume
+        # bound.** The window above samples the first `STAGE90_TMR_ENTER_SHOWN` armings of *any* source,
+        # and in this boot those are all the quantum metronome (source 3) - so on the day this was
+        # written the armings the step exists to read (source 2, `timer_call_enter_with_leeway`, the
+        # wait timer a parked thread is woken by) were published by no rule at all. The five claims
+        # below are what make that visible to the build instead of to a reader of the log: the family
+        # has a branch, the branch publishes its own keys, its window is a bound, the armings past the
+        # bound are *counted*, and the two rules do not share a key - because one key written under two
+        # rules is one key whose meaning depends on the run.
+        if "source == 2u" not in enter:
+            failures.append("entry_timebase_note_timer_enter no longer separates source 2 (the "
+                            "`timer_call_enter_with_leeway` family, the one `waitq_assert_wait64_leeway` "
+                            "arms `thread->wait_timer` through) from the window above: the first "
+                            "STAGE90_TMR_ENTER_SHOWN armings of this boot are all the quantum "
+                            "metronome, so a single rule publishes the metronome and drops the deadline "
+                            "- which is the one family 503's `poll`s produce")
+        for key in ("xnu_live_tmr_dl_seq", "xnu_live_tmr_dl_call", "xnu_live_tmr_dl_flags",
+                    "xnu_live_tmr_dl_deadline_lo", "xnu_live_tmr_dl_deadline_hi",
+                    "xnu_live_tmr_dl_now", "xnu_live_tmr_dl_delta", "xnu_live_tmr_dl_calls"):
+            if key not in enter:
+                failures.append("entry_timebase_note_timer_enter no longer publishes %s, so the two "
+                                "`poll`s cannot be joined against the deadline they asked for" % key)
+        if "g_tmr_dl_n <= STAGE90_TMR_DL_SHOWN" not in enter:
+            failures.append("the deadline family is no longer bounded by STAGE90_TMR_DL_SHOWN: the "
+                            "family is rare in this boot but it is not bounded by construction, and an "
+                            "unbounded rule on a live channel is 461's defect - the buffer a report is "
+                            "written into is the same 8 KB one")
+        if not re.search(r"g_tmr_dl_n\s*&\s*\(g_tmr_dl_n\s*-\s*1u\)", enter):
+            failures.append("the deadline family's records past STAGE90_TMR_DL_SHOWN are dropped rather "
+                            "than counted on the powers of two, so a boot that parked a thread on a "
+                            "deadline in a loop would look like one that parked two: the count is what "
+                            "the bound has to leave behind")
+        deadline_branch = re.search(r"if \(source == 2u\) \{(.*?)\n    \} else if", enter, re.S)
+        window_branch = re.search(r"g_tmr_enter_n <= STAGE90_TMR_ENTER_SHOWN\) \{(.*?)\n    \} else",
+                                  enter, re.S)
+        if deadline_branch is None or window_branch is None:
+            failures.append("entry_timebase_note_timer_enter's two rules are not branches of the shape "
+                            "this check reads, so which keys each one publishes cannot be told")
+        else:
+            for branch, mine, theirs in ((deadline_branch.group(1), "xnu_live_tmr_dl_",
+                                          "xnu_live_tmr_enter_"),
+                                         (window_branch.group(1), "xnu_live_tmr_enter_",
+                                          "xnu_live_tmr_dl_")):
+                if theirs in branch:
+                    failures.append("the branch that publishes `%s...` keys also publishes a `%s...` "
+                                    "key, which is the other rule's family: one key written under two "
+                                    "rules is one key whose meaning depends on the run, and a reader "
+                                    "joining the deadline records against the window's would be "
+                                    "reading the quantum metronome" % (mine, theirs))
 
     if 'TB_LIVE("xnu_live_dec_min",' not in body:
         failures.append("stage90_tbd_set_decrementer no longer publishes the minimum, so 484's census "
@@ -880,7 +930,31 @@ def mutate(facts, name):
                                 "        (void)g_tmr_setup_n;"))
         rederive_timebase(_bump(timebase, "    if (g_tmr_setup_n <= STAGE90_TMR_SETUP_SHOWN) {", "    if (1) {"))
     elif name == "enter_record_unbounded":
-        rederive_timebase(_bump(timebase, "    if (g_tmr_enter_n <= STAGE90_TMR_ENTER_SHOWN) {", "    if (1) {"))
+        rederive_timebase(_bump(timebase,
+                                "} else if (g_tmr_enter_n <= STAGE90_TMR_ENTER_SHOWN) {",
+                                "} else if (1) {"))
+    # 503's five, one per claim about the deadline family. The first is the defect this step's own
+    # first draft had, and it is the reason the rule is semantic rather than a count: stated as the
+    # first N armings of *any* source, the window is all metronome and source 2 is published by nothing.
+    elif name == "deadline_family_shares_the_window":
+        rederive_timebase(_bump(timebase, "    if (source == 2u) {", "    if (source == 3u) {"))
+    elif name == "deadline_drops_a_key":
+        rederive_timebase(_bump(timebase, "            TB_LIVE(\"xnu_live_tmr_dl_now\", now);",
+                                "            (void)now;"))
+    elif name == "deadline_record_unbounded":
+        rederive_timebase(_bump(timebase, "        if (g_tmr_dl_n <= STAGE90_TMR_DL_SHOWN) {",
+                                "        if (1) {"))
+    elif name == "deadline_window_is_sampled_only":
+        rederive_timebase(_bump(timebase, "        if (g_tmr_dl_n <= STAGE90_TMR_DL_SHOWN) {",
+                                "        if ((g_tmr_dl_n & (g_tmr_dl_n - 1u)) == 0u) {"))
+    elif name == "deadline_overflow_uncounted":
+        rederive_timebase(_bump(timebase,
+                                "        } else if ((g_tmr_dl_n & (g_tmr_dl_n - 1u)) == 0u) {",
+                                "        } else if (0) {"))
+    elif name == "deadline_rule_writes_the_windows_keys":
+        rederive_timebase(_bump(timebase, "            TB_LIVE(\"xnu_live_tmr_dl_seq\", g_tmr_dl_n);",
+                                "            TB_LIVE(\"xnu_live_tmr_dl_seq\", g_tmr_dl_n);\n"
+                                "            TB_LIVE(\"xnu_live_tmr_enter_seq\", g_tmr_dl_n);"))
     elif name == "enter_overflow_uncounted":
         rederive_timebase(_bump(timebase, "        g_tmr_enter_over_all++;", "        ;"))
     elif name == "enter_drops_the_source":
@@ -942,7 +1016,11 @@ MUTATIONS = (
     "the_omission_loses_its_argument",
     "setup_table_is_sampled", "setup_overflow_uncounted", "setup_bound_removed",
     "enter_record_unbounded", "enter_overflow_uncounted", "enter_drops_the_source",
-    "enter_drops_the_call", "enter_drops_the_delta", "census_replaces_the_minimum",
+    "enter_drops_the_call", "enter_drops_the_delta",
+    "deadline_family_shares_the_window", "deadline_drops_a_key", "deadline_record_unbounded",
+    "deadline_window_is_sampled_only", "deadline_overflow_uncounted",
+    "deadline_rule_writes_the_windows_keys",
+    "census_replaces_the_minimum",
     "census_includes_call_one", "census_drops_the_call_number", "census_table_unbounded",
     "census_overflow_uncounted", "census_drops_the_reference", "wrap_removed_from_the_build",
     "wrap_moved_to_pass_one", "wrapper_without_a_real", "wrapper_removed_from_the_source",

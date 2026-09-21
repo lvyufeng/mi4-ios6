@@ -694,7 +694,37 @@ void entry_timebase_note_timer_setup(uint32_t call, uint32_t func, uint32_t para
 /* Called from the three `timer_call_enter` wrappers and from the quantum timer's own entry point.
  * `source` is the number documented above the state; `deadline` is the absolute time the caller asked
  * for, and `now` is read here rather than in the wrapper so that the delta and the timestamp are the
- * same instant. */
+ * same instant.
+ *
+ * **503 adds a second publication rule, and it is *semantic* where the one above is a volume bound.**
+ * The window above samples the first `STAGE90_TMR_ENTER_SHOWN` armings of any kind, which in this boot
+ * means the quantum metronome - source 3, thousands of arming, all the same. Source 2 is
+ * `timer_call_enter_with_leeway`, and its only caller in this tree is
+ * `waitq_assert_wait64_leeway`'s arming of `thread->wait_timer` (`osfmk/kern/waitq.c:2565`): **it is
+ * the *deadline* family, the one a thread parks on, and it is the family this step exists to read.**
+ * On this image it has been called once in the whole boot, and the two `poll`s `entry_ramdisk.s` now
+ * makes add two more that land thousands of armings past the window's end - so a rule stated as a
+ * count would have published the metronome and dropped the deadline.
+ *
+ * So source 2's records are published in full, under their own keys, with their own bound: the first
+ * `STAGE90_TMR_DL_SHOWN` of them and then the powers of two, because the family is rare but not
+ * bounded by construction - a boot that parked a thread on a deadline in a loop would fill the live
+ * channel (461's defect, and the channel's cap is a bound the report depends on). **The keys are
+ * separate rather than shared so that a reader can tell which rule produced a record**, and because
+ * one key written under two rules is one key whose meaning depends on the run.
+ *
+ * **The bound is `24` because the run said the family is not as rare as the first draft assumed.** It
+ * was `8`, chosen from "the boot arms a wait timer about once"; the first run with the two polls
+ * measured `xnu_live_tmr_src2` = 18 - the boot's own five are the delayed-call timers, which re-arm in
+ * bursts, and the rest arrive once the polls start waking - so a bound of 8 published the boot and
+ * dropped the step's own two asks, which is the *same* defect as the rule this section exists to fix
+ * (the subject of the measurement falling outside the window) one level down. 24 covers the measured
+ * boot with headroom, and the count itself is published at every power of two past the window, so a
+ * boot that overflowed it prints a number rather than a smaller table.
+ */
+#define STAGE90_TMR_DL_SHOWN 24u
+static uint32_t g_tmr_dl_n;
+
 void entry_timebase_note_timer_enter(uint32_t source, uint32_t call, uint64_t deadline,
                                      uint32_t flags)
 {
@@ -706,7 +736,22 @@ void entry_timebase_note_timer_enter(uint32_t source, uint32_t call, uint64_t de
         g_tmr_src_calls[source]++;
     }
 
-    if (g_tmr_enter_n <= STAGE90_TMR_ENTER_SHOWN) {
+    if (source == 2u) {
+        g_tmr_dl_n++;
+        if (g_tmr_dl_n <= STAGE90_TMR_DL_SHOWN) {
+            now = (uint32_t)stage90_cntvct_read();
+            TB_LIVE("xnu_live_tmr_dl_seq", g_tmr_dl_n);
+            TB_LIVE("xnu_live_tmr_dl_call", call);
+            TB_LIVE("xnu_live_tmr_dl_flags", flags);
+            TB_LIVE("xnu_live_tmr_dl_deadline_lo", (uint32_t)deadline);
+            TB_LIVE("xnu_live_tmr_dl_deadline_hi", (uint32_t)(deadline >> 32));
+            TB_LIVE("xnu_live_tmr_dl_now", now);
+            TB_LIVE("xnu_live_tmr_dl_delta", (uint32_t)(deadline - (uint64_t)now));
+            TB_LIVE("xnu_live_tmr_dl_calls", g_tmr_dl_n);
+        } else if ((g_tmr_dl_n & (g_tmr_dl_n - 1u)) == 0u) {
+            TB_LIVE("xnu_live_tmr_dl_calls", g_tmr_dl_n);
+        }
+    } else if (g_tmr_enter_n <= STAGE90_TMR_ENTER_SHOWN) {
         now = (uint32_t)stage90_cntvct_read();
         TB_LIVE("xnu_live_tmr_enter_seq", g_tmr_enter_n);
         TB_LIVE("xnu_live_tmr_enter_src", source);

@@ -115,7 +115,7 @@
  * The program, and what it proves
  * ------------------------------------------------------------------------------------------------
  *
- * Twenty-seven instructions, and they are the first thing `/sbin/launchd` runs:
+ * Thirty-seven instructions, and they are the first thing `/sbin/launchd` runs:
  *
  *     entry_code:  svc  #0x80                ; +0   getpid() - a *Unix* syscall, r12 = +20
  *                  cmp  r0, #EXPECTED_PID    ; +4   the pid the kernel assigned this process?
@@ -138,12 +138,22 @@
  *                  ldr  r1, [r0]             ; +72
  *                  cmp  r1, r0               ; +76      ... and now the process owns it, writable
  *                  bne  entry_failed         ; +80
- *     spin:        mov  r12, #SYS_GETPID     ; +84
- *                  svc  #0x80                ; +88  ask again, so the loop's liveness is a record
- *                  cmp  r0, #EXPECTED_PID    ; +92
- *                  bne  entry_failed         ; +96
- *                  b    spin                 ; +100
- *     entry_failed: udf #1                   ; +104 the kernel answered something else
+ *                  mov  r0, #0               ; +84  poll(NULL, 0, 5)  - the kernel's own deadline,
+ *                  mov  r1, #0               ; +88      no descriptor waited on, so the timeout is
+ *                  movw r2, #POLL_SHORT_MS   ; +92      the whole of the call - and then the same
+ *                  mov  r12, #SYS_POLL       ; +96      call again eight times longer, because one
+ *                  svc  #0x80                ; +100     sample cannot tell a countdown from a fixed
+ *                  mov  r0, #0               ; +104     latency. **Neither branches on the answer**:
+ *                  mov  r1, #0               ; +108     a wrong one is a fact about the kernel's
+ *                  movw r2, #POLL_LONG_MS    ; +112     timer path, and a fault here kills initproc.
+ *                  mov  r12, #SYS_POLL       ; +116
+ *                  svc  #0x80                ; +120
+ *     spin:        mov  r12, #SYS_GETPID     ; +124
+ *                  svc  #0x80                ; +128 ask again, so the loop's liveness is a record
+ *                  cmp  r0, #EXPECTED_PID    ; +132
+ *                  bne  entry_failed         ; +136
+ *                  b    spin                 ; +140
+ *     entry_failed: udf #1                   ; +144 the kernel answered something else
  *
  * **The first three are 479's five minus its loop, unchanged, and they are why this program does not
  * end in a fault.** Until 479 the first instruction was `udf #0`, and the address it named was the
@@ -259,6 +269,43 @@
  * The `.if` assertions below read those claims back out of the bytes rather than out of this prose:
  * the program's length, `sizeofcmds`, that the entry point is inside `__TEXT`, and that no branch in
  * the program leaves the file range it is loaded from.
+ *
+ * ------------------------------------------------------------------------------------------------
+ * What 503 adds: the two asks, and the clock that answers them
+ * ------------------------------------------------------------------------------------------------
+ *
+ * 480 gave process 1 a page of its own, which is a fact about the *kernel's memory*. What every
+ * driver in this image has been missing since 419 is time: the boot's own threads park on deadlines
+ * and nothing has ever woken one of them, because until 483 this machine had no timer interrupt at
+ * all and no run has ever made a *process* ask for a deadline. `poll(NULL, 0, ms)` is that ask.
+ *
+ * **It is a block, and the block is the object.** The chain is
+ * `poll` -> `poll_nocancel` -> `kqueue_scan` -> `waitq_assert_wait64_leeway` (which arms the thread's
+ * own `wait_timer` through `timer_call_enter_with_leeway`, `osfmk/kern/waitq.c:2565`) ->
+ * `thread_block_parameter`; the expiry runs in the interrupt 483 armed, as
+ * `rtclock_intr` -> `timer_intr` -> `timer_queue_expire` -> `thread_timer_expire` ->
+ * `clear_wait_internal(thread, THREAD_TIMED_OUT)` (`osfmk/kern/sched_prim.c:639`); and
+ * `kqueue_scan`'s own switch maps `THREAD_TIMED_OUT` to `EWOULDBLOCK`, which `poll` turns into a
+ * return of 0 with `retval` 0 (`bsd/kern/sys_generic.c:1816-1820`). Not one of those links has ever
+ * been exercised by a *process* on this machine, and the two ends of it are what the run reads: the
+ * deadline the kernel computed for the wait timer, and the duration the call actually took.
+ *
+ * **Two asks, and the ratio is the point.** The first is 5 ms and the second 40. A wake that came
+ * from anywhere but the countdown - the scheduler's quantum, a stray interrupt, a polling loop -
+ * would return after roughly the same number of ticks whatever was asked for, and one sample cannot
+ * tell that from a clock. The wrapper measures each call's duration in `mach_absolute_time`'s own
+ * ticks, so the pair is a prediction with a *shape* rather than a single number: at the 19.2 MHz this
+ * target counts at, 5 ms is 96000 ticks and 40 ms is 768000, and the two readings have to be in that
+ * ratio.
+ *
+ * **And nothing here branches on the answer, which is a change of kind rather than of degree.**
+ * Every other check in this program ends at `udf #1`, and this program *is* `/sbin/launchd`: a fault
+ * taken in it kills `initproc`, whose death `proc_prepareexit` turns into
+ * `launchd_crashed_panic` - 478's run measured exactly that. A `poll` that returned an errno is a
+ * reading about the kernel's timer path, so the fixture makes both calls and falls into the loop;
+ * the wrapper publishes the arguments, the return and the duration either way, and the loop's own
+ * liveness (`getpid` still being answered after both blocks) is the reading that says control came
+ * back to user mode. A step that could only report a success would be a step that cannot fail.
  */
 
     .syntax unified
@@ -279,10 +326,10 @@
     .equ ARM_THREAD_STATE,       1
     .equ ARM_THREAD_STATE_COUNT, 17
 
-/* The two syscalls the program makes, from the headers rather than from a disassembly: each number is
- * the one in `bsd/kern/syscalls.master`'s own line for that name, and the *sign* is the ABI and not a
- * convention - `fleh_swi` computes `r5 = -r12` and branches to the unix path when that is `<= 0`, so a
- * positive number in r12 is a BSD syscall and a negative one is a mach trap. `EXPECTED_PID` is the
+/* The syscall numbers the program makes, from the headers rather than from a disassembly: each number
+ * is the one in `bsd/kern/syscalls.master`'s own line for that name, and the *sign* is the ABI and not
+ * a convention - `fleh_swi` computes `r5 = -r12` and branches to the unix path when that is `<= 0`, so
+ * a positive number in r12 is a BSD syscall and a negative one is a mach trap. `EXPECTED_PID` is the
  * identity this image's own boot gave the process: `bsd_utaskbootstrap` holds the init process by name
  * (`initproc = proc_find(1)`, `bsd/kern/bsd_init.c:1147`) and 478's console printed `pid 1 exited`.
  * `MMAP_LENGTH`/`MMAP_PROT`/`MMAP_FLAGS` are the kernel's own numbers for the one page this fixture
@@ -290,7 +337,7 @@
  * being `1 << ARM_PGSHIFT` (`osfmk/arm/proc_reg.h`), `fd` -1 and offset 0, so the mapping needs no
  * vnode at all. `tools/host_ramdisk_macho_check.py` reads every one of them back out of those files -
  * the two syscall numbers from the master, the pid from the sentence above it, the page size from the
- * kernel's own page shift, `prot` and `flags` from `mman.h` - and decodes the twenty-seven words below
+ * kernel's own page shift, `prot` and `flags` from `mman.h` - and decodes the thirty-seven words below
  * to check they are the program this comment describes, *including* the comparisons that use them. */
     .equ SYS_GETPID,             20
     .equ EXPECTED_PID,           1
@@ -302,6 +349,17 @@
                                          * `struct mmap_args` and `mmap` never reads - so a marker
                                          * here changes nothing about the call, and the wrapper
                                          * reading it back is what measures the layout */
+    .equ SYS_POLL,               230    /* `230 AUE_POLL ALL { int poll(struct pollfd *fds, u_int
+                                         * nfds, int timeout); }`, and the slot's munger is
+                                         * `munge_www` (`out/xnu_generated/init_sysent.c:1317`), so
+                                         * r0..r2 are exactly the three arguments. Both numbers are
+                                         * read back out of those two files by the check below. */
+    .equ POLL_SHORT_MS,          5      /* the two timeouts are the step's own control: an 8:1
+                                         * ratio, so a wake that came from anything other than the
+                                         * countdown cannot pass for one. 19.2 MHz makes them 96000
+                                         * and 768000 ticks, which is what the two durations the
+                                         * wrapper measures are predictions of. */
+    .equ POLL_LONG_MS,           40
 
 /* The shape of the three load commands, and the two numbers derived from them. Neither
  * `sizeofcmds` nor the entry point is written down: the first is an expression over the label the
@@ -448,17 +506,61 @@ entry_code:
     cmp     r1, r0                      /* +76: ... and now the process owns it */
     bne     entry_failed                /* +80 */
 
-/* And the syscall that cannot fill anything, so that the loop is alive after the fault and the log
- * says so: r12 has to be reloaded because the mmap above left 197 in it. */
+/* And the two syscalls that ask the kernel for a *deadline* (503). The programs above ask the kernel
+ * what it knows - its pid, and for a page it can own; these ask it for *time*, which is the one thing
+ * in this image that a driver and a process both need and that nothing in user mode can produce.
+ *
+ * `poll(NULL, 0, ms)` is Apple's own spelling for it, and the comment at `bsd/kern/sys_generic.c:1785`
+ * says so in Apple's words: "If user space passed 0 FDs, then respect any timeout value passed. This
+ * is an extremely inefficient sleep." The path is `poll` -> `poll_nocancel` ->
+ * `kqueue_scan` (`kern_event.c:6100`), where the deadline becomes a *wait timer*:
+ *
+ *     waitq_assert_wait64_leeway(...)   -> timer_call_enter_with_leeway(&thread->wait_timer, ...)
+ *     thread_block_parameter(cont, kq)  -> the thread parks
+ *     ... the virtual timer's interrupt -> rtclock_intr -> timer_intr -> timer_queue_expire
+ *                                       -> thread_timer_expire -> clear_wait(THREAD_TIMED_OUT)
+ *     ... and kqueue_scan's switch takes THREAD_TIMED_OUT to EWOULDBLOCK, which `poll` maps to 0.
+ *
+ * So the answer is a *register*: `poll` returns 0 and its `retval` is 0 - the timeout expired and no
+ * descriptor was ready - and r0 == 0 is what the kernel hands back to this instruction stream.
+ *
+ * **Two asks of different length, because one cannot distinguish a deadline from a latency.** A wake
+ * that came from anywhere other than the countdown - a fixed polling interval, a stray interrupt, the
+ * quantum - would return after about the same number of ticks whichever timeout was asked for, and a
+ * single sample cannot tell that from a clock. Five milliseconds and forty are an 8:1 ratio, so a
+ * fixed latency shows up as a ratio of about 1 in the readings and the two asks' own durations are
+ * proportional to what was asked for. The wrapper that measures both is in `entry_trace.c`;
+ *
+ * **and neither ask branches on the answer.** Every other check in this program takes a wrong answer
+ * to `entry_failed`, which is `udf #1` - and this program *is* `/sbin/launchd`, so a fault taken here
+ * kills `initproc` and 478's run measured what follows (`pid 1 exited -- exit reason namespace 2
+ * subcode 0x4`, then `launchd_crashed_panic`). A `poll` that returned an errno is a fact about the
+ * kernel's timer path and not a reason to end the boot: the wrapper records the return either way,
+ * and the `spin` below is the reading that says control came back to user mode. So the two calls are
+ * made, and the next instruction is the loop. */
+    mov     r0, #0                      /* +84: fds = NULL - no descriptor is waited on */
+    mov     r1, #0                      /* +88: nfds = 0 - Apple's zero-descriptor sleep */
+    movw    r2, #POLL_SHORT_MS          /* +92: timeout = 5 ms */
+    mov     r12, #SYS_POLL              /* +96: 230; `munge_www` marshals r0..r2 as these three */
+    svc     #0x80                       /* +100: the first timed block */
+    mov     r0, #0                      /* +104: the same call again, and this time the timeout */
+    mov     r1, #0                      /* +108: is eight times longer - the ratio is the reading */
+    movw    r2, #POLL_LONG_MS           /* +112: timeout = 40 ms */
+    mov     r12, #SYS_POLL              /* +116 */
+    svc     #0x80                       /* +120: the second timed block */
+
+/* And the syscall that cannot fill anything, so that the loop is alive after the faults and after both
+ * timed blocks, and the log says so: r12 has to be reloaded because the `poll`s above left 230 in
+ * it. */
 spin:
-    mov     r12, #SYS_GETPID            /* +84 */
-    svc     #0x80                       /* +88: getpid() again */
-    cmp     r0, #EXPECTED_PID           /* +92 */
-    bne     entry_failed                /* +96 */
-    b       spin                        /* +100 */
+    mov     r12, #SYS_GETPID            /* +124 */
+    svc     #0x80                       /* +128: getpid() again */
+    cmp     r0, #EXPECTED_PID           /* +132 */
+    bne     entry_failed                /* +136 */
+    b       spin                        /* +140 */
 
 entry_failed:
-    udf     #1                          /* +104: the kernel answered something else */
+    udf     #1                          /* +144: the kernel answered something else */
 entry_code_end:
 
     .equ sizeofcmds_value, (load_commands_end - g_stage90_ramdisk) - 28
@@ -479,11 +581,11 @@ entry_code_end:
     .error "the entry point is outside the segment it is loaded from"
     .endif
 /* And what the program's length is, because every branch in it is relative: a `b` that left the file
- * range would raise a fault instead of making a syscall, and the check tool decodes all 27 words by
- * offset. 27 words is the 5 of the getpid call, the 11 of the mmap call and its argument registers,
- * the 7 of the two faults, and the 4 of the loop. */
-    .if (entry_code_end - entry_code) != 108
-    .error "the program is not the twenty-seven instructions the header describes"
+ * range would raise a fault instead of making a syscall, and the check tool decodes all 37 words by
+ * offset. 37 words is the 3 of the getpid call, the 11 of the mmap call and its argument registers,
+ * the 7 of the two faults, the 10 of the two timed asks, the 5 of the loop and the `udf` behind it. */
+    .if (entry_code_end - entry_code) != 148
+    .error "the program is not the thirty-seven instructions the header describes"
     .endif
 
 /* The rest of the segment is zeros, and they are *file* bytes rather than a `.bss` tail: the whole

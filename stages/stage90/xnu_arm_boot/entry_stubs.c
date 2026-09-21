@@ -4399,6 +4399,67 @@ void entry_note_mmap(uint32_t caller, const uint32_t *args, uint32_t error, uint
     }
 }
 
+/* Experiment 503. One call per `poll` from the wrapper in `entry_trace.c`. Four of the eight numbers
+ * are the call's *inputs* - the descriptor array (which the fixture leaves NULL), the count (zero),
+ * the timeout in milliseconds, and the `lr` the slot was entered with - and four are its outcome: the
+ * syscall's own return, the `retval` it wrote, and the two `mach_absolute_time` readings that bound
+ * the whole call.
+ *
+ * **`after - before` is the step's headline number, and it is measured here rather than inferred.**
+ * `poll` with no descriptors blocks: the deadline is armed in `kqueue_scan`
+ * (`osfmk/kern/waitq.c:2565`'s `timer_call_enter_with_leeway` on `thread->wait_timer`), the thread
+ * parks in `thread_block_parameter`, and the only thing that can return it is
+ * `thread_timer_expire`'s `clear_wait_internal(thread, THREAD_TIMED_OUT)`
+ * (`osfmk/kern/sched_prim.c:639`) running out of the timer interrupt 483 armed. So the interval
+ * between the wrapper's two readings is *the wall time the kernel kept this thread parked*, and it is
+ * measured with the kernel's own clock rather than with anything this image chose. Two calls with
+ * timeouts in an 8:1 ratio make it a **shape** and not a sample: a wake that came from anywhere but
+ * the countdown - the scheduler's quantum, a stray interrupt, a poll loop - returns after about the
+ * same interval whatever was asked for, and the ratio would read about 1.
+ *
+ * **Both readings are taken in the wrapper and neither is taken here.** A `mach_absolute_time` read
+ * inside this function would be a second reading of a different instant and would make `_ticks` a
+ * difference of two numbers that are not the ends of the call.
+ *
+ * **The keys are live-only, and that is a property of when the epilogue runs rather than a choice.**
+ * 479's note on `entry_note_getpid` has the argument: the epilogue is written at the end of
+ * `arm_init`, which is *before* `load_init_program` creates the process whose syscalls this is about,
+ * so a `xnu_entry_poll_*` key would be published as zero in every run - a key that cannot be anything
+ * but its initial value reads exactly like a call that never happened. Everything this step measures
+ * happens after the epilogue, so the live channel is the only one it has.
+ *
+ * **The bound is the first four calls in full, then powers of two.** The fixture makes exactly two and
+ * the shape of the program is asserted by `tools/host_ramdisk_macho_check.py`, but a `poll` on a
+ * descriptor this image does not have could return immediately in a loop, and the live channel's cap
+ * is a bound the boot's own record depends on (461's defect). Four full records is more than the
+ * fixture makes and few enough that a flood costs four.
+ */
+uint32_t g_poll_calls;
+uint32_t g_poll_over;
+
+void entry_note_poll(uint32_t caller, uint32_t fds, uint32_t nfds, uint32_t timeout_ms,
+                     uint32_t error, uint32_t retval, uint32_t before, uint32_t after)
+{
+    if (g_poll_calls < 4u) {
+        entry_live_write("xnu_live_poll_seq", g_poll_calls + 1u);
+        entry_live_write("xnu_live_poll_caller", caller);
+        entry_live_write("xnu_live_poll_fds", fds);
+        entry_live_write("xnu_live_poll_nfds", nfds);
+        entry_live_write("xnu_live_poll_timeout_ms", timeout_ms);
+        entry_live_write("xnu_live_poll_error", error);
+        entry_live_write("xnu_live_poll_retval", retval);
+        entry_live_write("xnu_live_poll_before", before);
+        entry_live_write("xnu_live_poll_after", after);
+        entry_live_write("xnu_live_poll_ticks", after - before);
+    } else {
+        g_poll_over++;
+        if ((g_poll_over & (g_poll_over - 1u)) == 0u)
+            entry_live_write("xnu_live_poll_over", g_poll_over);
+    }
+
+    g_poll_calls++;
+}
+
 /* Experiment 456's probe, defined below its first caller; the declaration is here because
  * `entry_note_iolock` is where the reading is taken (see `entry_registry_probe`). */
 __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);

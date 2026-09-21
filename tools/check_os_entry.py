@@ -56,10 +56,11 @@ are about the **image and Apple's sources**, and five of them are load-bearing:
    caller, `__wrap_vm_pageout` passes index 4, and `--wrap=load_machfile` is in this build's wrap
    list.
 
-**What this check deliberately does not own.** The *shape* of the fixture's twenty-seven
+**What this check deliberately does not own.** The *shape* of the fixture's thirty-seven
 instructions - the syscall numbers, the munged argument registers, the entry's `LC_UNIXTHREAD` - is
 `tools/host_ramdisk_macho_check.py`'s, and is not restated here. What is claimed here is only the two
-words the boot's own fault records name, and their position, which nothing else reads.
+words the boot's own fault records name, and their position, which nothing else reads: both faults are
+in 480's block, before the two `poll`s 503 appended, so nothing here moved.
 
 **And what it cannot claim.** That `vm_pageout` being reached *implies* `load_init_program` returned
 rests on `bsd_ast`'s once-only guard and on the tail call order, both of which are checked - but the

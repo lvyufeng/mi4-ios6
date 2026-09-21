@@ -134,6 +134,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=os_reason_create --wrap=load_machfile
                    --wrap=sleh_abort --wrap=sleh_undef
                    --wrap=getpid --wrap=mmap
+                   --wrap=poll
                    --wrap=setPop
                    --wrap=PE_init_platform --wrap=fiq_context_init
                    --wrap=timer_call_enter
@@ -27445,11 +27446,20 @@ verify_trace_symbols() {
     # *reference* and the only reference to `mmap` outside `kern_mman.c` is that table word. A census
     # that counted "a call to `mmap`" would pass whether or not the wrapper is in the slot, which is
     # precisely the failure `tools/check_sysent_table.py` exists to refuse.
-    local by_address=( vcputc getpid mmap thread_quantum_expire )
+    # 503 adds `poll`, and it is the *third* entry rather than a third copy of the second: `getpid` and
+    # `mmap` are the two syscall slots the fixture reaches by number and `poll` is the third of them -
+    # its only reference outside `sys_generic.c` is `sysent[230].sy_call`, the same initialiser in the
+    # same file, so there is no branch to `__wrap_poll` anywhere in this image and there never will be.
+    # Unlike `mmap`, which is an ordinary function with many callers, `poll`'s reference is *only* that
+    # table word, which is why `tools/check_sysent_table.py`'s read-back is the whole of the proof and
+    # the census below can only name it.
+    local by_address=( vcputc getpid mmap poll thread_quantum_expire )
     # 484 adds `thread_quantum_expire`, and it is the *third* shape of this category rather than a
-    # fourth copy of the second. `vcputc`, `getpid` and `mmap` are all referenced by taking an address
-    # that lands in a *table* - `cons_ops[1].putc`, `sysent[20].sy_call`, `sysent[197].sy_call` - so
-    # the address is a word in a data section and `tools/check_sysent_table.py` reads it there.
+    # fourth copy of the second. `vcputc`, `getpid`, `mmap` and `poll` are all referenced by taking an
+    # address that lands in a *table* - `cons_ops[1].putc`, `sysent[20].sy_call`, `sysent[197].sy_call`,
+    # `sysent[230].sy_call` - so the address is a word in a data section and
+    # `tools/check_sysent_table.py` reads it there (503's `poll` is the third `sysent` slot of that
+    # shape and is checked by the same tool, which is why it needs no clause of its own here).
     # `thread_quantum_expire`'s one reference is also an address, but it is an *argument* to
     # `timer_call_setup` inside `processor_init`, so the compiler materialises it as a `movw`/`movt`
     # pair across two instructions and there is no word anywhere to read - this step's first attempt to
