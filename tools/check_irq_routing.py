@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Check the seven things 483's interrupt depends on, before any of them can deliver anything.
+Check the eight things 483's interrupt depends on, before any of them can deliver anything.
 
 482 measured *which line* the virtual timer asserts. 483 is the step that lets a countdown on that line
 become an interrupt, and what it adds to the machine is not a number - it is a *chain*: a handler word in
@@ -51,6 +51,12 @@ so that a later edit cannot leave two copies of it disagreeing (this project's o
      hold (`tools/check_gic_routing.py`). One value, read from two places, defined in one - and defined in
      the source because an image and the source that describes it must not be able to disagree.
 
+  8. **and every file-scope record these two files declare is a record the image has.** 497's claim, and
+     it is the only one here that needs the linked image rather than the source: seven names 496 declared
+     were absent from the artifact entirely, because each was written and never read (or read only where
+     the value was already known) and the optimizer removed it. The keys were still right, so no run could
+     show it. The whole argument is in the claim's own docstring.
+
   6. **the handler is installed, and the line enabled, before the mask comes off.** Source-order
      properties in two files: 482's probe, then the arming, then the kernel's own deadline, then the
      unmask - and the arming after `g_dec_writes++`, because `ml_install_interrupt_handler` ends in
@@ -81,6 +87,7 @@ BOOT_DIR = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot")
 ENTRY_GIC_H = os.path.join(BOOT_DIR, "entry_gic.h")
 ENTRY_IRQ_C = os.path.join(BOOT_DIR, "entry_irq.c")
 ENTRY_TIMEBASE_C = os.path.join(BOOT_DIR, "entry_timebase.c")
+DRIVER_CPP = os.path.join(REPO_ROOT, "stages/stage90/xnu_platform/MSM8974GIC.cpp")
 
 NM = "arm-none-eabi-nm"
 
@@ -164,6 +171,128 @@ def irq_enable_line(text):
 
 
 # ------------------------------------------------------------------------------------------------
+# File-scope storage: the records a file declares, and the names the linker gives them
+# ------------------------------------------------------------------------------------------------
+
+# A one-line declarator whose name is followed by `;`, `[` or `=`. **Not `\s*` and not a pattern that
+# can cross a newline**, and both restrictions are load-bearing: `static void` on a line of its own
+# (this tree's K&R style) must not be read as a declaration of `void`, and a pattern allowed to look
+# past the end of the line would find the *next* `;` in the file and report some function's local as a
+# file-scope record - 482's defect 216, a `\s+` that read the next line, in the other direction.
+STATIC_DECL = re.compile(r"^static[ \t]+([^\n;=]*?)\b(\w+)[ \t]*(?=[;\[=])", re.M)
+
+# `#if` expressions in these two files are macro names, integer literals and the usual operators.
+# Anything outside this set is refused rather than guessed at.
+COND_OK = re.compile(r"^[0-9A-Za-z_() \t<>=!&|+\-*/uU]*$")
+
+
+def cond_true(expression, macros):
+    """Evaluate a `#if` expression over a file's own `#define`s.
+
+    Needed for one reason: a file-scope record may be declared inside a conditional block, and 496's
+    driver declares eight of them inside `#if MSM8974_GIC_DRIVE_SGI`. A check that ignored the
+    conditional would demand storage for variables that the switch, at 0, keeps out of the image
+    entirely - so it would be wrong in exactly the state the switch exists to create.
+    """
+    if not COND_OK.match(expression):
+        raise SystemExit("unparsable #if expression: %r" % expression)
+    substituted = re.sub(r"\b[A-Za-z_]\w*\b", lambda m: str(macros.get(m.group(0), 0)), expression)
+    substituted = substituted.replace("u", "").replace("U", "")
+    try:
+        return bool(eval(substituted, {"__builtins__": {}}, {}))  # noqa: S307 - digits and operators only
+    except Exception as error:                                    # noqa: BLE001 - reported, not raised
+        raise SystemExit("could not evaluate #if %r (as %r): %s" % (expression, substituted, error))
+
+
+def compiled_text(text, macros):
+    """`text` with every conditional branch that is not taken removed."""
+    kept, stack, live = [], [], True
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("#if"):
+            enclosing = live
+            if stripped.startswith("#ifdef"):
+                condition = stripped[6:].strip() in macros
+            elif stripped.startswith("#ifndef"):
+                condition = stripped[7:].strip() not in macros
+            elif stripped.startswith("#if "):
+                condition = cond_true(stripped[4:].strip(), macros)
+            else:
+                raise SystemExit("unparsable directive: %r" % stripped)
+            stack.append((enclosing, condition))
+            live = enclosing and condition
+            continue
+        if stripped.startswith("#el"):
+            if stripped.startswith("#elif") or not stack:
+                raise SystemExit("unsupported conditional directive: %r" % stripped)
+            enclosing, condition = stack[-1]
+            stack[-1] = (enclosing, not condition)
+            live = enclosing and not condition
+            continue
+        if stripped.startswith("#endif"):
+            if not stack:
+                raise SystemExit("#endif without #if")
+            live = stack.pop()[0]
+            continue
+        if live:
+            kept.append(line)
+    if stack:
+        raise SystemExit("unterminated #if")
+    return "\n".join(kept)
+
+
+def file_scope_statics(text):
+    """Every `static` object declared at file scope, as `(lineno, name)`.
+
+    `const` ones are excluded: a `static const` table is `__TEXT,__const` and may legitimately be
+    folded, inlined or localized, so requiring it in the symbol table would be a claim about the
+    compiler's choices rather than about the source. A named `static` *function* is excluded by the
+    declarator rule above - this claim is about storage.
+    """
+    out = []
+    for match in STATIC_DECL.finditer(text):
+        if re.search(r"\bconst\b", match.group(1)):
+            continue
+        out.append((text.count("\n", 0, match.start()) + 1, match.group(2)))
+    return out
+
+
+def mangled(name, cxx):
+    """The name the linker gives one of these records. A file-scope `static` at namespace scope in
+    C++ is internal linkage, which `nm` prints as `_ZL<len><name>` - the length is what makes the
+    lookup exact rather than a prefix match on a name that may be a prefix of another."""
+    return "_ZL%d%s" % (len(name), name) if cxx else name
+
+
+def static_function_body(text, name):
+    """`function_body`, for a declarator whose return type is on its own line.
+
+    `function_body`'s single-line `[\\w \\t*]+?` cannot cross the newline between `static void` and
+    the name, which is this tree's K&R style. 496 collapsed two definitions in `entry_irq.c` to the
+    one-line form so that matcher could see them; that was a change to a file for the benefit of a
+    checker, and this is the other, better answer - the second style gets a matcher of its own.
+    Widening `function_body` itself was rejected: allowing `\\n` in the declarator lets the match
+    start a function earlier, and the `{` it then finds belongs to a *different* body.
+    """
+    match = re.search(r"^\s*(?:static\s+)?[\w \t*\n]+?\b%s\s*\(" % re.escape(name), text, re.M)
+    if not match:
+        return None
+    open_brace = text.find("{", match.end())
+    semicolon = text.find(";", match.end())
+    if open_brace < 0 or (0 <= semicolon < open_brace):
+        return None                     # a declaration, not a definition
+    depth = 0
+    for index in range(open_brace, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_brace:index + 1]
+    return None
+
+
+# ------------------------------------------------------------------------------------------------
 # Gather
 # ------------------------------------------------------------------------------------------------
 
@@ -172,12 +301,14 @@ def gather(image):
         "header_text": read(ENTRY_GIC_H),
         "irq_text": read(ENTRY_IRQ_C),
         "timebase_text": read(ENTRY_TIMEBASE_C),
+        "driver_text": read(DRIVER_CPP),
         "image": image,
     }
     facts["header"] = defines(facts["header_text"])
     facts["flag"] = irq_enable_line(facts["irq_text"])
     facts["irq"] = strip_comments(facts["irq_text"])
     facts["timebase"] = strip_comments(facts["timebase_text"])
+    facts["driver"] = strip_comments(facts["driver_text"])
     facts["symbols"] = nm(image) if image else {}
     return facts
 
@@ -630,6 +761,111 @@ def claim_image(facts, failures, notes):
                      "`tools/check_gic_routing.py`'s claim")
 
 
+def claim_static_storage(facts, failures, notes):
+    """8. Every file-scope record these two files declare is in the image, and the key that names one
+    reads it.
+
+    496 found this by accident while accounting for `.bss`: `nm` was asked for the new statics and
+    seven names the source declares were not there at all - `g_irq_first_iar`, `g_irq_last_iar`,
+    `g_irq_icfgr_word`, `g_irq_icfgr_shift`, `g_irq_cli_last` in `entry_irq.c`, and `g_gic_isr_last`
+    and `g_gic_isr_done` in the driver. Six were written and never read - the key beside each store
+    published the local or the parameter the record had just been copied from - so the store was dead,
+    the variable was removed, and every value in the log was still right. The seventh was read but
+    provably constant, so only the storage went.
+
+    497's answer is that those seven were never records, and the measurement that settled it is the
+    one a first plan would not have made: three of the six were given a far-away reader - the fix the
+    report's own "owed" list asked for - and **two of the three were removed by the compiler anyway**,
+    because their only reader is the key written beside the store and a store-to-load forward across
+    one line is free. So the rule is not "a key must read the record"; it is **a record earns its
+    storage by being read where its value is not already known**, and a source that declares one
+    without that is describing a machine that does not exist. All seven are gone; the marker became a
+    literal, whose position is checked below.
+
+    One clause of this claim has no mutation that can test it, and it is worth naming rather than
+    papering over: the conditional filtering (`compiled_text`) means the driver's nine records inside
+    `#if MSM8974_GIC_DRIVE_SGI` are demanded only because the switch is 1 here. There is no source
+    mutation that can show the filter working, because every mutation this selftest can make changes
+    the *source* while the symbols come from one real build - and taking a record out of the compiled
+    set leaves it present in that image, so the claim would pass either way. What was checked instead
+    is the filter itself, by reading `file_scope_statics(compiled_text(driver, switch = 0))` and finding
+    `g_gic_starts` alone; a mutation that merely *added* a name would test nothing about it.
+
+    **The check that finds it is not a reading of the source, and cannot be.** A source-only liveness
+    analysis would have to reproduce the optimizer on a file the check does not compile; one name
+    looked up in the linked image is one instruction and no model. It is also the only form that can
+    say *which* name is wrong: a hand-written note that the store was dead would have been 496's seven
+    names, and 497's whole point is that the eighth edit anyone makes may be different.
+
+    **And the reason it belongs to a checker rather than to `nm`**: the failure is invisible in every
+    run. The keys hold the right values because a copy of the right value was published instead of the
+    record - which is why this defect class ("one value, two definitions") is the oldest one here.
+    """
+    symbols = facts["symbols"]
+    if not symbols:
+        failures.append("no image was read, so the claim that every file-scope record this step "
+                        "declares has storage could not be made")
+        return
+
+    checked = 0
+    for path, text, cxx in ((ENTRY_IRQ_C, facts["irq"], False),
+                            (DRIVER_CPP, facts["driver"], True)):
+        source = compiled_text(text, defines(text))
+        names = file_scope_statics(source)
+        if not names:
+            failures.append("%s declares no file-scope record at all, so this claim is vacuous about "
+                            "it - which would mean the file had been emptied rather than fixed"
+                            % os.path.basename(path))
+            continue
+        lines = source.split("\n")
+        for lineno, name in names:
+            checked += 1
+            symbol = mangled(name, cxx)
+            if symbol not in symbols:
+                failures.append(
+                    "%s:%d declares the file-scope record `%s` and the image has no `%s`: the record "
+                    "is written and never read, or read only where its value is already known, so the "
+                    "optimizer removed it - the source describes storage the machine does not have, "
+                    "every key that names it publishes something else, and the run still reads "
+                    "correctly. Either the record is a record (read it where its value is not already "
+                    "known) or it should not be declared"
+                    % (os.path.relpath(path, REPO_ROOT), lineno, name, symbol))
+        notes.append("%d file-scope record(s) in %s are in the image"
+                     % (len(names), os.path.basename(path)))
+
+    # The marker: 497 made one of the seven a literal, because `g_gic_isr_done = 1u` followed by the
+    # key that published it is a value the compiler folds - and a value defined by the *program point*
+    # has no business in `.bss`. What keeps a literal honest is where it is written, so that is what
+    # is checked: the marker must be published inside the handler and after the withdraw block, or it
+    # would be reachable by a path that returned early or gave the line back.
+    body = static_function_body(facts["driver"], "msm8974_gic_isr")
+    if body is None:
+        failures.append("MSM8974GIC.cpp no longer defines `msm8974_gic_isr`, so the tail the marker "
+                        "key is about does not exist")
+        return
+    marker = body.find('"xnu_live_gicdrv_isr_done"')
+    withdraw = body.find("entry_irq_unregister_client(")
+    if marker < 0:
+        failures.append("`msm8974_gic_isr` never publishes `xnu_live_gicdrv_isr_done`: the run would "
+                        "then have no record that the handler reached its last statement, and "
+                        "`_isr_calls = 2` would be indistinguishable from a handler that stopped "
+                        "halfway")
+    elif withdraw < 0:
+        failures.append("`msm8974_gic_isr` has no withdraw block, so the marker's position is about "
+                        "nothing")
+    elif marker < withdraw:
+        failures.append("`msm8974_gic_isr` publishes `xnu_live_gicdrv_isr_done` **before** its "
+                        "withdraw block: the marker would then be written on a path that has not yet "
+                        "decided whether the line is quiet, which is the opposite of what a marker "
+                        "for 'reached the last statement' means")
+    else:
+        notes.append("`_isr_done` is a literal published in the handler's tail, after the withdraw, "
+                     "and it is a marker rather than a record - its position is the claim")
+
+    if not failures:
+        notes.append("checked %d file-scope record(s) across both files" % checked)
+
+
 def compare(facts, mutate=None):
     if mutate:
         facts = mutate_facts(facts, mutate)
@@ -642,6 +878,7 @@ def compare(facts, mutate=None):
     claim_switch(facts, failures, notes)
     claim_order(facts, failures, notes)
     claim_image(facts, failures, notes)
+    claim_static_storage(facts, failures, notes)
     return failures, notes
 
 
@@ -685,6 +922,10 @@ def mutate_facts(facts, mutate):
     def rederive_tb(text):
         facts["timebase_text"] = text
         facts["timebase"] = strip_comments(text)
+
+    def rederive_driver(text):
+        facts["driver_text"] = text
+        facts["driver"] = strip_comments(text)
 
     def rederive_header(text):
         facts["header_text"] = text
@@ -873,6 +1114,45 @@ def mutate_facts(facts, mutate):
     elif mutate == "client_cap_is_zero":
         rederive_header(_bump(facts["header_text"], "#define STAGE90_IRQ_CLIENT_CAP  64u",
                               "#define STAGE90_IRQ_CLIENT_CAP  0u"))
+    # -- 497: the seven records ----------------------------------------------------------------
+    elif mutate == "a_record_the_image_does_not_have":
+        # The *shape* of all seven of 496's: a file-scope record that is written and never read. The
+        # mutation introduces that shape rather than reverting one of the seven, because a mutation
+        # written against the names a check was built for tests the names and not the rule.
+        rederive(_bump(facts["irq_text"], "static uint32_t g_irq_late_count;",
+                       "static uint32_t g_irq_late_count;\nstatic uint32_t g_irq_no_storage;"))
+        rederive(_bump(facts["irq_text"], "    ++g_irq_seq;",
+                       "    ++g_irq_seq;\n    g_irq_no_storage = 1u;"))
+    elif mutate == "a_record_that_is_read_but_never_written":
+        # The other shape, which the same rule has to refuse and which looks like a *use* in the
+        # source: a record nothing ever writes is a compile-time constant, so the read folds and the
+        # storage goes - and a key that names it publishes a zero that is about no machine.
+        rederive(_bump(facts["irq_text"], "static uint32_t g_irq_late_count;",
+                       "static uint32_t g_irq_late_count;\nstatic uint32_t g_irq_never_written;"))
+        rederive(_bump(facts["irq_text"], "    ++g_irq_seq;",
+                       "    g_irq_seq += g_irq_never_written + 1u;"))
+    elif mutate == "a_driver_record_the_image_does_not_have":
+        rederive_driver(_bump(facts["driver_text"], "static uint32_t g_gic_pends;",
+                              "static uint32_t g_gic_pends;\nstatic uint32_t g_gic_no_storage;"))
+        rederive_driver(_bump(facts["driver_text"], "    uint32_t pend = 0u;",
+                              "    uint32_t pend = 0u;\n\n    g_gic_no_storage = 1u;"))
+    elif mutate == "the_driver_marker_becomes_a_variable_again":
+        # 496's shape for the seventh record, restored: a variable written `1u` and read on the next
+        # line. The compiler folds the load into an immediate and the storage goes, so the key is a
+        # literal either way - which is exactly why the fix is to say so in the source.
+        rederive_driver(_bump(facts["driver_text"], "static uint32_t g_gic_isr_unreg_rc;",
+                              "static uint32_t g_gic_isr_unreg_rc;\nstatic uint32_t g_gic_isr_done;"))
+        rederive_driver(_bump(facts["driver_text"],
+                              '    entry_live_write( "xnu_live_gicdrv_isr_done", 1u );',
+                              "    g_gic_isr_done = 1u;\n"
+                              '    entry_live_write( "xnu_live_gicdrv_isr_done", g_gic_isr_done );'))
+    elif mutate == "the_marker_is_published_before_the_withdraw":
+        rederive_driver(_relocate(facts["driver_text"],
+                                  r"    if\( g_gic_isr_guard == 1u\) \{.*?\n    \}\n",
+                                  '    entry_live_write( "xnu_live_gicdrv_isr_done", 1u );\n'))
+    elif mutate == "the_marker_is_not_published":
+        rederive_driver(_bump(facts["driver_text"],
+                              '    entry_live_write( "xnu_live_gicdrv_isr_done", 1u );\n', ""))
     else:
         raise SystemExit("unknown mutation %s" % mutate)
     return facts
@@ -895,6 +1175,9 @@ MUTATIONS = (
     "unregister_keeps_the_handler", "unregister_clears_the_intid_first",
     "unregister_is_silent_about_a_missing_line", "client_cap_removed_from_the_header",
     "client_cap_is_zero",
+    "a_record_the_image_does_not_have", "a_record_that_is_read_but_never_written",
+    "a_driver_record_the_image_does_not_have", "the_driver_marker_becomes_a_variable_again",
+    "the_marker_is_published_before_the_withdraw", "the_marker_is_not_published",
 )
 
 
@@ -944,6 +1227,10 @@ def main():
         "INTID %d - 482's measurement, and neither of the payload's two - the `ICFGR` word and field "
         "are derived from it, and the countdown is unmasked only after the arming said the line is "
         "enabled" % header["STAGE90_GIC_TIMER_INTID"])
+    say("  xnu_entry_497: every file-scope record `entry_irq.c` and `MSM8974GIC.cpp` declare is in "
+        "the image, so no key in this step's record is publishing a copy of a variable the compiler "
+        "removed - and the driver's completion marker is a literal published in the handler's tail, "
+        "after its withdraw block")
     return 0
 
 

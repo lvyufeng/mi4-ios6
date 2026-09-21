@@ -204,12 +204,10 @@ static uint32_t g_gic_mapvaddr;
 static uint32_t g_gic_pends;            /* requests the driver made, from process context    */
 static uint32_t g_gic_isr_calls;        /* calls the kernel made, one per delivery           */
 static uint32_t g_gic_isr_pends;        /* requests the driver made, from inside its own ISR */
-static uint32_t g_gic_isr_last;         /* the intid of the last call                        */
 static uint32_t g_gic_isr_pend;         /* the pending word after the acknowledgement        */
 static uint32_t g_gic_isr_guard;        /* 1 = the distributor said the line was quiet       */
 static uint32_t g_gic_isr_unregs;       /* times the driver gave the line back               */
 static uint32_t g_gic_isr_unreg_rc;
-static uint32_t g_gic_isr_done;
 
 /*
  * The driver's interrupt handler, and **the first function in this project that the kernel calls
@@ -243,7 +241,6 @@ msm8974_gic_isr( void * refCon, uint32_t intid )
     uint32_t calls = ++g_gic_isr_calls;
     uint32_t pend = 0u;
 
-    g_gic_isr_last = intid;
 
     if( g_gic_mapvaddr != 0u) {
         pend = *(volatile uint32_t *)(uintptr_t)( g_gic_mapvaddr + MSM8974_GICD_ISPENDR0_OFF );
@@ -255,6 +252,16 @@ msm8974_gic_isr( void * refCon, uint32_t intid )
     }
 
     entry_live_write( "xnu_live_gicdrv_isr_calls", calls );
+    /* **497: the `g_gic_isr_last` this used to be published from is gone, and the run's own history is
+     * why.** 496 declared it, stored `intid` into it, and published the *argument* on the next line;
+     * the store was dead, the optimizer removed the variable, and the two runs' logs read exactly as
+     * they should have - so nothing in the artifact, the report or the console could show it. What 497
+     * measured, by making the key read the record, is that the compiler forwards the value across one
+     * line and removes the storage anyway: **a file-scope record whose only reader is the key beside
+     * its store is not a record.** The values this file keeps are the ones read where their value is
+     * not already known - the call count, the pending word, the guard - and
+     * `claim_static_storage` in `tools/check_irq_routing.py` refuses an image in which a declared one
+     * is missing. */
     entry_live_write( "xnu_live_gicdrv_isr_last", intid );
     entry_live_write( "xnu_live_gicdrv_isr_refcon", (uint32_t)(uintptr_t) refCon );
     entry_live_write( "xnu_live_gicdrv_isr_pend_after_ack", pend );
@@ -282,8 +289,15 @@ msm8974_gic_isr( void * refCon, uint32_t intid )
         entry_live_write( "xnu_live_gicdrv_isr_unreg_rc", g_gic_isr_unreg_rc );
     }
 
-    g_gic_isr_done = 1u;
-    entry_live_write( "xnu_live_gicdrv_isr_done", g_gic_isr_done );
+    /* **The marker, and why it is a literal rather than a variable.** 497 measured this one: the
+     * variable was written `1u` and read on the next line, so the compiler folded the load into an
+     * immediate and the store - with the storage - was gone. That is not a defect to work around. A
+     * value defined by the *program point* rather than by the machine has no business in `.bss`, and
+     * "this handler reached its last statement" is such a value. What keeps the marker honest is the
+     * position of this call, which `claim_static_storage` reads: it must come after the withdraw
+     * block and inside the handler, so `_isr_done = 1` cannot be published by a path that returned
+     * early. The keys that vary, and that a run is read for, are `_isr_calls` and `_isr_pends`. */
+    entry_live_write( "xnu_live_gicdrv_isr_done", 1u );
 }
 #endif /* MSM8974_GIC_DRIVE_SGI */
 

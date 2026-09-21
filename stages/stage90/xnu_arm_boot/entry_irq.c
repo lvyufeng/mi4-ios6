@@ -165,8 +165,6 @@ static uint32_t g_irq_timer_count;
 static uint32_t g_irq_other_count;
 static uint32_t g_irq_spurious_count;
 static uint32_t g_irq_late_count;
-static uint32_t g_irq_last_iar;
-static uint32_t g_irq_first_iar;
 
 /* --------------------------------------------------------------------------------------------- */
 /* The client registry (496)                                                                      */
@@ -193,7 +191,6 @@ static uint32_t g_irq_cli_registered;
 static uint32_t g_irq_cli_unregistered;
 static uint32_t g_irq_cli_refused;
 static uint32_t g_irq_cli_calls_total;
-static uint32_t g_irq_cli_last;
 static uint32_t g_irq_cli_storm;
 
 /*
@@ -304,12 +301,20 @@ void entry_irq_handler(void *target, void *refCon, void *nub, int source)
     intid = iar & STAGE90_GICC_IAR_INTID_MASK;
 
     if (g_irq_seq == 1u) {
-        g_irq_first_iar = iar;
         IRQ_LIVE("xnu_live_irq_handler_entered", g_irq_seq);
         IRQ_LIVE("xnu_live_irq_target", g_irq_args[0]);
         IRQ_LIVE("xnu_live_irq_refcon", g_irq_args[1]);
         IRQ_LIVE("xnu_live_irq_nub", g_irq_args[2]);
         IRQ_LIVE("xnu_live_irq_source", g_irq_args[3]);
+        /* **497: the `g_irq_first_iar` this used to be published from does not exist, and that is the
+         * fix rather than the defect.** The static was written here and read one line later, so the
+         * compiler forwarded the value and removed the variable; the key published the local `iar`
+         * and every value in the log was right - which is why nothing in a run could show it. The
+         * honest reading is that there was never a *record* here: the first `IAR` is a value this
+         * function holds at this moment, and it is published as such. A file-scope record earns its
+         * storage by being read where its value is not already known - `g_irq_timer_count` and the
+         * registry's counters are - and `claim_static_storage` in `tools/check_irq_routing.py`
+         * refuses an image in which one of the declared ones is missing. */
         IRQ_LIVE("xnu_live_irq_first_iar", iar);
     }
 
@@ -368,8 +373,9 @@ void entry_irq_handler(void *target, void *refCon, void *nub, int source)
             gicc_write(STAGE90_GICC_EOIR, iar);
             g_irq_cli_calls[i]++;
             g_irq_cli_calls_total++;
-            g_irq_cli_last = intid;
-
+            /* `g_irq_cli_last` was the same shape as `g_irq_first_iar` and got the same answer (497):
+             * a record whose only reader is the key beside its store is not a record. The intid of
+             * this call is published where it is known. */
             IRQ_LIVE("xnu_live_irq_cli_last", intid);
             IRQ_LIVE("xnu_live_irq_cli_calls_total", g_irq_cli_calls_total);
             if ((g_irq_cli_calls_total & (g_irq_cli_calls_total - 1u)) == 0u)
@@ -402,7 +408,6 @@ void entry_irq_handler(void *target, void *refCon, void *nub, int source)
      * which is what 308's run needed and did not have. */
     gicc_write(STAGE90_GICC_EOIR, iar);
     g_irq_other_count++;
-    g_irq_last_iar = iar;
     IRQ_LIVE("xnu_live_irq_other_count", g_irq_other_count);
     IRQ_LIVE("xnu_live_irq_other_iar", iar);
     IRQ_LIVE("xnu_live_irq_other_cli", (uint32_t)(uintptr_t) g_irq_cli_handler);
@@ -428,8 +433,6 @@ static uint32_t g_irq_armed;
 static uint32_t g_irq_cpsr;
 static uint32_t g_irq_istack;
 static uint32_t g_irq_enabled_line;
-static uint32_t g_irq_icfgr_word;
-static uint32_t g_irq_icfgr_shift;
 
 uint32_t entry_irq_arm(void)
 {
@@ -459,6 +462,14 @@ uint32_t entry_irq_arm(void)
     IRQ_LIVE("xnu_live_irq_istackptr", g_irq_istack);
     IRQ_LIVE("xnu_live_irq_cpsr", g_irq_cpsr);
     IRQ_LIVE("xnu_live_irq_intid", STAGE90_GIC_TIMER_INTID);
+    /* **One name, one number - and the reason these two are worth a paragraph.** 496's first cut had
+     * `g_irq_icfgr_word` holding the *value read* while `xnu_live_irq_icfgr_word` published the
+     * *offset*: one name for two different numbers, in the file that defines both. They are the word
+     * and the field in it, taken from the intid in one expression each (`word`, `shift`, above), and
+     * 497's measurement is that a record whose only reader is the key beside its store is not a record
+     * at all: the compiler forwards the value and the variable goes. So these read the expressions,
+     * and `xnu_live_irq_icfgr` below is the *value* read out of that word - a different key, because
+     * it is a different number. */
     IRQ_LIVE("xnu_live_irq_icfgr_word", word);
     IRQ_LIVE("xnu_live_irq_icfgr_shift", shift);
 
@@ -527,8 +538,6 @@ uint32_t entry_irq_arm(void)
      * read-only, and 483 has no measurement that says what to write.
      */
     icfgr = gicd_read(word);
-    g_irq_icfgr_word = icfgr;
-    g_irq_icfgr_shift = shift;
     IRQ_LIVE("xnu_live_irq_icfgr", icfgr);
     IRQ_LIVE("xnu_live_irq_icfgr_field", (icfgr >> shift) & 0x3u);
 
