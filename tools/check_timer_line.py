@@ -341,6 +341,44 @@ def claim_offsets_are_the_devices(facts, failures, notes):
                             "0x%x: one of the two moved, and a driver addressing a register its device "
                             "does not have is a driver whose every reading after that is a reading of "
                             "some other register" % (key, ours[key], theirs_name, theirs[theirs_name]))
+    # **502 added the one frame offset the device's kernel does not have**, and this is the clause that
+    # keeps "one" a number rather than a word. The driver names more `MSM8974_FRAME_*_OFF` registers than
+    # the kernel does, because the virtual timer's *control word* is not in that file's table at all - it
+    # writes and reads the physical timer's control word and never touches the virtual side - so the set
+    # difference being exactly this one name is what "the driver addresses the frame and one register
+    # beside it" means. A second invented offset, or the loss of this one, fails here instead of being a
+    # sentence nobody can falsify, and the one is checked to be a *derivation*: a literal beside a
+    # derivation is this project's oldest defect class in its smallest form, and the pair it derives from
+    # is the one the kernel does name.
+    ours_offsets = {name + "_OFF" for name in
+                    re.findall(r"^[ \t]*#[ \t]*define[ \t]+MSM8974_FRAME_(\w+)_OFF",
+                               facts.timer, re.M)}
+    derived = sorted(ours_offsets - {mine for mine, _ in FRAME_REG_NAMES})
+    if derived != ["CNTV_CTL_OFF"]:
+        failures.append("`MSM8974Timer.cpp` derives the frame offsets %s from the device's kernel's "
+                        "names, and the one register it addresses that the kernel does not name should "
+                        "be the virtual timer's control word alone - `CNTV_CTL_OFF`, the word that says "
+                        "whether a compare value nothing has written is masked. A second one is an "
+                        "offset with no authority behind it and a missing one is a control word the "
+                        "countdown's reading cannot be interpreted without" % (derived or "none",))
+    else:
+        m = re.search(r"^[ \t]*#[ \t]*define[ \t]+MSM8974_FRAME_CNTV_CTL_OFF[ \t]+"
+                      r"\([ \t]*MSM8974_FRAME_CNTV_TVAL_OFF[ \t]*\+[ \t]*"
+                      r"(0[xX][0-9a-fA-F]+|\d+)[uU]?[ \t]*\)[ \t]*$", facts.timer, re.M)
+        if not m:
+            failures.append("`MSM8974_FRAME_CNTV_CTL_OFF` is no longer written as the virtual countdown's "
+                            "own offset plus a constant: the address would be a second literal for a "
+                            "value whose pattern the certified pair already confirms, with nothing "
+                            "comparing the two spellings")
+        elif int(m.group(1), 0) != 4:
+            failures.append("`MSM8974_FRAME_CNTV_CTL_OFF` is the virtual countdown's offset plus %s and "
+                            "the layout puts a control word four bytes after its countdown - the pair the "
+                            "device's kernel's own table shows at `0x028`/`0x02C` (`arch_timer.c:66`, "
+                            "`:64`)" % m.group(1))
+        else:
+            notes.append("the one frame offset the device's kernel does not name is the virtual timer's "
+                         "control word, derived as the countdown's offset plus four")
+
     needles = (("of_iomap(frame, 0)", "the frame's first `reg` region"),
                ("irq_of_parse_and_map(frame, 0)", "the frame's first interrupt"))
     call_lines = {}
@@ -981,6 +1019,13 @@ def mutate_facts(facts, mutate):
         # something else) - and the shape the anchor list could not see until 501 added its names to it.
         facts.timer_src = _bump(facts.timer_src, " *     :297  counter_get_cntpct_mem",
                                 " *     :296  counter_get_cntpct_mem")
+    elif mutate == "the_virtual_control_word_is_written_down":
+        # 502's offset, as a literal: the address is the same, and the *pattern* that produced it - a
+        # control word four bytes after its countdown - is what the clause checks, because a literal is
+        # where a second definition of one address starts.
+        facts.timer = _bump(facts.timer,
+                            "#define MSM8974_FRAME_CNTV_CTL_OFF   (MSM8974_FRAME_CNTV_TVAL_OFF + 0x4u)",
+                            "#define MSM8974_FRAME_CNTV_CTL_OFF   0x03Cu")
     elif mutate == "the_grounding_block_cites_another_define_line":
         # The same block, the other kind of citation: a register offset's line number rather than a
         # call's. `QTIMER_FREQ_REG` is at :65 and the block said :66 - which is `QTIMER_CNTP_TVAL_REG`'s
@@ -1014,6 +1059,7 @@ MUTATIONS = (
     "the_two_route_block_cites_another_line",
     "the_grounding_block_cites_the_line_before_the_call",
     "the_grounding_block_cites_another_define_line",
+    "the_virtual_control_word_is_written_down",
 )
 
 

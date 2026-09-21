@@ -822,6 +822,70 @@ def key_writes(source, suffix):
         source, re.S)]
 
 
+def loop_body(source, header):
+    """The body of the first block that `header` opens, with its braces balanced.
+
+    A clause about what a *loop* does has to read the loop and not the file: every read in this
+    driver's other blocks is spelled the same way, so a property searched for over the whole source can
+    be satisfied by a different block - the defect this file recorded against its own two-ended bracket
+    clause, where the mutation that dropped one end of the bracket was accepted by the mirror's test.
+    Bounding the region with a *marker* (`find` of the next statement) would be worse: that is a claim
+    about where the next step's writer puts its code, which is how claim 17's `rfind` came to swallow
+    the previous block's stores. Braces are the loop's own boundary, so they are the boundary read here.
+    """
+    at = source.find(header)
+    if at < 0:
+        return None
+    start = source.find("{", at)
+    if start < 0:
+        return None
+    depth = 0
+    for i in range(start, len(source)):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:i + 1]
+    return None
+
+
+# An inside test has two spellings - `reading >= low && reading <= high`, which is how the first bracket
+# writes it, and `low <= reading && reading <= high`, which is how a mirror writes it - so a clause that
+# counted one of them would be wrong about half the brackets in the block. The repeated group is the
+# reading, and it is the same name on both sides of the `&&` in either spelling.
+INSIDE_UP = r"(\(?\s*(?:uint32_t\s*\)\s*)?\w+)\s*>=\s*\w+\s*&&\s*\1\s*<=\s*\w+"
+INSIDE_DOWN = r"\w+\s*<=\s*(\(?\s*(?:uint32_t\s*\)\s*)?\w+)\s*&&\s*\1\s*<=\s*\w+"
+
+
+def bracket_counts(region, own_brackets):
+    """How many brackets a region runs, and how many of them test one reading between both ends.
+
+    The brackets that are not the region's own are the mirrors, and a mirror says so by counting an
+    inside sample into a `_m_in` key - so the count is read from the code rather than written down here,
+    and a clause built on it is a property of the block instead of a number chosen for it.
+    """
+    need = own_brackets + len(re.findall(r"cv_\w+_m_in\s*\+\+", region))
+    have = len(re.findall(INSIDE_UP, region)) + len(re.findall(INSIDE_DOWN, region))
+    return need, have
+
+
+def accum_expression(source, name):
+    """The expression of the last statement that *adds to* `name` with `+=`, or None if there is none.
+
+    `value_expression` reads `name = ...` and a `+=` is not that: its pattern wants `=` directly after
+    the name and an accumulation has a `+` there, so an accumulator read with the assignment reader
+    answers None. That is a finding rather than a nuisance - "the two orders are summed" is a claim
+    about accumulations, and a sum built from one order's *first sample* (a plain `=` into the
+    accumulator) is the single-sample shape this step replaces. Reading the `+=` and nothing else is
+    what makes the difference visible.
+    """
+    found = None
+    for m in re.finditer(r"\b%s\s*\+=\s*([^;]+);" % re.escape(name), source):
+        found = m.group(1).strip()
+    return found
+
+
 def value_expression(source, name):
     """The expression of the **last** statement that gives `name` a value, or None if there is none.
 
@@ -2851,7 +2915,13 @@ def claim_driver_routes(facts, failures, notes):
         # first version of this clause failed this file, by starting at the *define* whose comment
         # names the entry and so swallowing the handler.
         pick = re.search(r"getObject\(\s*%s\s*\)" % view2, source)
-        ctl_call_at = source.rfind("msm8974_cpu_cntv_ctl(")
+        # **The region ends at the *first* coprocessor control read after the pick, and 502 is why.**
+        # The clause was written as `rfind` - "the last one in the file" - when the two-route block was
+        # the last thing `start` did, and 502's compare-value block moved into a position *after* the
+        # arming and so put every one of 500's device stores inside the region: a boundary read as "the
+        # last one" is a claim about where the next step's writer put its code. The first one after the
+        # pick is the 501 block's own last read, which is what the clause means.
+        ctl_call_at = source.find("msm8974_cpu_cntv_ctl(", pick.start() if pick else 0)
         if pick and ctl_call_at > pick.start():
             region = source[pick.start():ctl_call_at]
             stores = re.findall(r"\*\s*\(\s*volatile\s+uint32_t\s*\*\s*\)\s*\(\s*uintptr_t\s*\)\s*"
@@ -2870,10 +2940,361 @@ def claim_driver_routes(facts, failures, notes):
                         "two-route comparison this step is for would not exist in any run")
 
 
+def claim_the_compare_values(facts, failures, notes):
+    """18. A countdown is a view of a compare value, and "the compare value is unprogrammed" is arithmetic.
+
+    501 read the frame's `0x038` against the coprocessor's `CNTV_TVAL` and got two numbers that are not
+    the same register's (`_rt_tval_fr` `0xf912a3cc`, `_rt_tval_cpu` `0x0002d8cb`, `_rt_tval_ok` 0) - and
+    the step recorded what it could not settle: whether the frame's virtual countdown lives behind a
+    control word neither step writes is a question that needs a *write*. It does not, and the reason is
+    in the architecture rather than in this driver: a generic-timer countdown is a *view* of a compare
+    value, not a register of its own,
+
+        TVAL = CVAL - <the counter>
+
+    which is what the device's own kernel relies on without ever naming - it programs a deadline by
+    writing `QTIMER_CNTP_TVAL_REG` and reads the countdown back out of the same register
+    (`arch/arm/kernel/arch_timer.c:76`, `:115`), and reads no compare-value register at all. Two things
+    follow, and both are readable without writing anything:
+
+      * **`TVAL + counter` is invariant while the compare value is fixed.** That is a prediction with no
+        unknown in it - no reference value, no ground truth, and no assumption about which timer the
+        register belongs to - and it is what separates "a countdown to a fixed compare value" from "a
+        register that happened to hold a number". One agreement between two readings is not that test,
+        because a single pair of numbers can agree for the wrong reason; the *sum* taken twice is, because
+        the counter has advanced in between and the compare value has not.
+      * **An unprogrammed compare value reads as minus the counter.** If nothing ever wrote the frame's
+        virtual compare value, `0x038` must read `0 - CNTVCT` - and 501's `0xf912a3cc` is that number:
+        `2^32 - 0xf912a3cc` = `0x06ed5c34`, against the frame's own `CNTVCT` of `0x06ed5c1f` taken in the
+        same block. 21 ticks apart is the two reads' own cost.
+
+    **The control is the same frame's other timer**, and it is why this block sits after the arming rather
+    than before it: `0x028` has just been written by this driver, so the physical side's compare value is
+    the file's own `_arm_ticks` and its sum must be `CNTPCT_at_write + _arm_ticks`; the virtual side's is
+    nobody's write and its sum must be zero. One frame, two timers, the same arithmetic, one armed and one
+    not - and an armed side whose arithmetic did not hold would make the unarmed side's zero a coincidence
+    rather than a reading.
+
+    **And the claim 501's slack could not settle.** Its two-route comparison found the frame's counter 71
+    ticks from the coprocessor's inside a measured slack of 104. The numbers agree; the *bound* admits a
+    rival explanation, because **two separate counters counting the same 19.2 MHz clock also read within
+    a hundred ticks of each other**. So the block reads the frame's counter, then the coprocessor's, then
+    the frame's again, and requires the coprocessor's reading to lie **between** the two: one counter
+    must, two counters sit outside by their phase offset. The run answered *outside* - `_cv_inside` 0 of
+    `_cv_n` 8, with `_cv_d0` 70 against a `_cv_wmax` of 13 - and the block's own comment had named only
+    two of the three cases that can produce that (inside, or before the low end), so the reading that
+    came back was one the test's prose did not describe: **past the upper end**.
+
+    That is not yet an answer about the machine, because one order cannot separate three rivals: two
+    counters with a fixed phase, one path returning its reading late (a device read and a coprocessor
+    read are not ordered against each other), or two counters at different rates. Reading the same pair
+    **both** ways round does separate them: with `e` the cost of one read and `K` the phase between the
+    two readings, the two orders' differences are `e + K` and `-e + K`, so their *sum* is `2K` (the read
+    cost cancels, being `+e` once and `-e` once) and their *difference* is `2e` (the phase cancels). The
+    claim below is therefore about the estimator and not about the bracket: `_cv_xv_sum`, `_cv_xp_sum`
+    and `_cv_win_sum` - the virtual pair, the physical pair as 501's own control, and the frame's own
+    `0x000` against its own `0x008`, where both readings use one path and a phase is therefore the only
+    thing the sum can hold whatever the read cost is. Each is the sum of the two orders' accumulations
+    over the same samples rather than a single sample, so a refused sample shows up as a smaller count
+    (`_cv_xv_n`, `_cv_xp_n`, `_cv_win_n`) beside the same arithmetic, and **a sum near zero says one
+    register read twice while a sum that stands above the samples' own noise says two registers that do
+    not agree**. The read cost is measured rather than assumed - every sample carries the two readings of
+    the same side as its own witness against `MSM8974_CV_COST_MAX`, whose headroom is published as
+    `_cv_win_wmax` - and the rates are measured too (`_cv_r_fd` against `_cv_r_cd`, published as
+    `_cv_r_ppm`), because a rate difference is the one answer that would make every frame-against-core
+    difference in this driver meaningless rather than merely offset.
+    """
+    subjects = 0
+    for d in facts["drivers"]:
+        source = d["source"]
+        code = strip_comments(source)
+        defines_here = driver_defines(source)
+
+        if not key_writes(source, "frame_va") or not key_writes(source, "frame_freq"):
+            continue
+        if not key_writes(source, "cv_v_tval1"):
+            notes.append("`%s` maps a device that reports a frequency and asks it for no compare value: "
+                         "the countdown this claim is about is one register of that device's" % d["file"])
+            continue
+        subjects += 1
+
+        # -- the virtual control word is the derived offset, and it is the pair beside the countdown ----
+        ctl = "MSM8974_FRAME_CNTV_CTL_OFF"
+        if ctl not in source:
+            failures.append("`%s` reads its virtual countdown with no control word beside it: the word "
+                            "that says whether the compare value is masked is what makes an unarmed "
+                            "timer's silence a reading rather than an absence" % d["file"])
+        else:
+            if ctl in defines_here:
+                failures.append("`%s` defines `%s` as the literal %d: the address is the countdown's own "
+                                "offset plus four, and a literal beside a derivation is this project's "
+                                "oldest defect class in its smallest form - two spellings of one address "
+                                "with nothing comparing them" % (d["file"], ctl, defines_here[ctl]))
+            elif not re.search(r"#define[ \t]+%s[ \t]+\([ \t]*MSM8974_FRAME_CNTV_TVAL_OFF" % ctl,
+                               source):
+                failures.append("`%s`'s `%s` is no longer written as the virtual countdown's offset plus "
+                                "a constant: the pattern that puts a control word four bytes after its "
+                                "countdown would be a number in the driver's own file instead of a "
+                                "property of the layout the certified pair confirms" % (d["file"], ctl))
+            if not re.search(r"frame_va\s*\+\s*%s" % ctl, code):
+                failures.append("`%s` defines `%s` and reads the virtual control word from another "
+                                "offset: the derivation would be a definition nothing reads"
+                                % (d["file"], ctl))
+
+        # -- both countdowns are summed with their counter, and each sum is taken twice ----------------
+        for suffix, what in (("cv_p_sum1", "the physical side's first sum"),
+                             ("cv_p_sum2", "the physical side's second sum"),
+                             ("cv_v_sum1", "the virtual side's first sum"),
+                             ("cv_v_sum2", "the virtual side's second sum"),
+                             ("cv_p_inv_ok", "the physical side's verdict"),
+                             ("cv_v_inv_ok", "the virtual side's verdict"),
+                             ("cv_v_zero_d", "the virtual sum's distance from zero"),
+                             ("cv_v_zero_ok", "the virtual side's verdict on that distance")):
+            if not key_writes(source, suffix):
+                failures.append("`%s` publishes no `_%s` (%s): the arithmetic would be performed and "
+                                "not recorded, and a sum is the one reading whose *inputs* a reader "
+                                "cannot recover from it" % (d["file"], suffix, what))
+
+        # Each sum is a countdown plus its own counter - not a countdown plus another countdown, which
+        # is the shape that would make the invariance true for a reason that has nothing to do with a
+        # compare value.
+        for name, tval, cnt in (("cv_p_sum1", "MSM8974_FRAME_CNTP_TVAL_OFF", "MSM8974_FRAME_CNTP_LOW_OFF"),
+                                ("cv_p_sum2", "MSM8974_FRAME_CNTP_TVAL_OFF", "MSM8974_FRAME_CNTP_LOW_OFF"),
+                                ("cv_v_sum1", "MSM8974_FRAME_CNTV_TVAL_OFF", "MSM8974_FRAME_CNTV_LOW_OFF"),
+                                ("cv_v_sum2", "MSM8974_FRAME_CNTV_TVAL_OFF", "MSM8974_FRAME_CNTV_LOW_OFF")):
+            expr = value_expression(source, name)
+            if expr is None:
+                continue
+            if tval not in expr and "tval" not in expr:
+                failures.append("`%s`'s `_%s` is `%s`, which adds no countdown to anything: the "
+                                "invariance of the sum is the whole test, and a sum of two counters "
+                                "would be invariant for a reason that says nothing about a compare "
+                                "value" % (d["file"], name, expr))
+            elif cnt not in expr and "ct1_lo" not in expr and "ct2_lo" not in expr:
+                failures.append("`%s`'s `_%s` is `%s`, which adds no counter to the countdown: a "
+                                "countdown read twice and summed with itself is one reading published "
+                                "as two" % (d["file"], name, expr))
+
+        # The second reading has to be a *reading*. Two sums taken from one pair of registers is the
+        # single-sample version of this test, and it cannot fail.
+        for name, off in (("cv_p_tval2", "MSM8974_FRAME_CNTP_TVAL_OFF"),
+                          ("cv_p_ct2_lo", "MSM8974_FRAME_CNTP_LOW_OFF"),
+                          ("cv_v_tval2", "MSM8974_FRAME_CNTV_TVAL_OFF")):
+            expr2 = value_expression(source, name)
+            if expr2 is None:
+                failures.append("`%s` never reads `%s`: the invariance is a statement about two "
+                                "readings, and one reading published twice cannot contradict anything"
+                                % (d["file"], name))
+            elif off not in expr2:
+                failures.append("`%s`'s second reading of `%s` is `%s` rather than a read of the "
+                                "device: a sum whose halves are the first sum's own registers is the "
+                                "same single sample" % (d["file"], name, expr2))
+
+        # -- the armed side is held against this file's own write ---------------------------------------
+        arm = value_expression(source, "cv_p_arm_ct_lo")
+        if arm is None or "arm_ticks" not in arm:
+            failures.append("`%s` derives the physical compare value from `%s` rather than from the "
+                            "count this file wrote: the armed side is the *control*, and a control "
+                            "built out of readings is the thing being tested" % (d["file"], arm))
+        lag = value_expression(source, "cv_p_lag")
+        if lag is None or "arm_ticks" not in lag:
+            failures.append("`%s` publishes no countdown elapsed since the arming (`%s`): the derived "
+                            "compare value and the interval this file asked for are the two halves "
+                            "that make the physical side a control rather than a second reading"
+                            % (d["file"], lag))
+
+        # -- the bracket --------------------------------------------------------------------------------
+        first_body = loop_body(code, "for( cv_i = 0u; cv_i < 8u; cv_i++ )")
+        keys_at = code.find("xnu_live_timerdrv_cv_slack")
+        if first_body is None or keys_at < 0 or code.find("cv_i = 0u") < 0 \
+                or keys_at < code.find("cv_i = 0u"):
+            failures.append("`%s` reads the frame's counter against the coprocessor's once rather than "
+                            "in a bracket: one comparison inside a slack is what 501 already had, and "
+                            "the bound was wide enough to admit a second counter" % d["file"])
+        else:
+            # **The region is one loop, and not "everything the block does before it publishes".** The
+            # first version of this clause read from the first `cv_i` to the first key write, which was
+            # the whole block while the block was a single loop; 502's second half put three more loops
+            # in between, and the mutation that replaces *this* bracket's coprocessor reading with a
+            # frame reading was accepted, because the new loops' `msm8974_cpu_cntvct()` calls satisfied
+            # a clause that was asking about this loop's. `loop_body` reads the loop's own braces, which
+            # is the only boundary a loop owns. It is the same defect as the one the two-ended test
+            # below was rewritten to fix, one step apart: **a needle that matched something else**.
+            if not re.search(r"msm8974_cpu_cntvct\s*\(", first_body):
+                failures.append("`%s`'s bracket reads the frame twice and the coprocessor never: the "
+                                "reading that has to fall between the two is the coprocessor's, and a "
+                                "frame read between two frame reads is a bracket around nothing"
+                                % d["file"])
+            else:
+                # **A bracket is counted now, because the block runs three of them.** The clause that
+                # asked "is there one two-ended test anywhere in the region" was satisfied by the
+                # *mirror's* test as soon as the mirror existed, so a mutation that drops one end of
+                # this bracket would be accepted by the other bracket's code. `bracket_counts` reads
+                # the number of brackets out of the code, so the requirement is a property of the block.
+                need, have = bracket_counts(first_body, 1)
+                if have < need:
+                    failures.append("`%s` runs %d bracket(s) and tests both ends in %d of them: an "
+                                    "inside test needs the same reading between both ends, a one-sided "
+                                    "test accepts every reading the frame has already passed, and a "
+                                    "clause that counts rather than searches is the only kind that "
+                                    "cannot be satisfied by a different bracket"
+                                    % (d["file"], need, have))
+        for suffix, what in (("cv_n", "how many samples were taken"),
+                             ("cv_inside", "how many of them bracketed"),
+                             ("cv_wmax", "the widest bracket"),
+                             ("cv_wmin", "the narrowest bracket"),
+                             ("cv_d0", "the first sample's position inside its bracket"),
+                             ("cv_hi_agree", "whether the high words agreed")):
+            if not key_writes(source, suffix):
+                failures.append("`%s` publishes no `_%s` (%s): the test's power is bounded by the "
+                                "bracket it used, and a count of successes without the width that "
+                                "produced them reads like a test that could have failed"
+                                % (d["file"], suffix, what))
+
+        # -- the same pair read both ways round, the physical pair, and the frame's own two windows -----
+        sample_body = loop_body(code, "for( cv_i2 = 0u; cv_i2 < 8u; cv_i2++ )")
+        pairs = (("cv_xv", "cv_xv_x8", "cv_xv_y8", "msm8974_cpu_cntvct",
+                  "the frame's virtual counter against the coprocessor's"),
+                 ("cv_xp", "cv_xp_x8", "cv_xp_y8", "msm8974_cpu_cntpct",
+                  "the frame's physical counter against the coprocessor's"),
+                 ("cv_win", "cv_win_x8", "cv_win_y8", None,
+                  "the frame's own `0x000` against its own `0x008`"))
+        if sample_body is None:
+            failures.append("`%s` never reads the pair in both orders: the bracket above answers "
+                            "\"outside\" and one order cannot say whether that is a phase, a late "
+                            "reading or two rates, so the sample loop that asks it the other way round "
+                            "is the step" % d["file"])
+        else:
+            for base, acc_a, acc_b, core, what in pairs:
+                total = value_expression(source, base + "_sum")
+                if total is None or not re.fullmatch(r"\s*%s\s*\+\s*%s\s*" % (acc_a, acc_b), total):
+                    failures.append("`%s` publishes no `_%s_sum` that adds `_%s` and `_%s` (%s): the two "
+                                    "orders are the whole test - their sum is twice the phase and their "
+                                    "difference is twice the read cost - and one order published alone is "
+                                    "the bracket this step replaces" % (d["file"], base, acc_a, acc_b, what))
+                diff = value_expression(source, base + "_dif")
+                if diff is None or not re.fullmatch(r"\s*%s\s*-\s*%s\s*" % (acc_a, acc_b), diff):
+                    failures.append("`%s` publishes no `_%s_dif` that subtracts `_%s` from `_%s`: the "
+                                    "combination that cancels the phase is the one that measures the "
+                                    "reads, and without it a sum that is not zero cannot be told from a "
+                                    "sum that is not zero *because* the reads are slow"
+                                    % (d["file"], base, acc_b, acc_a))
+                ea, eb = accum_expression(source, acc_a), accum_expression(source, acc_b)
+                if ea is None or eb is None:
+                    failures.append("`%s` accumulates nothing into `_%s` or `_%s`: a pair read once is "
+                                    "the single sample this step exists to replace"
+                                    % (d["file"], acc_a, acc_b))
+                elif ea == eb:
+                    failures.append("`%s` accumulates `_%s` and `_%s` from the same reading (`%s`): the "
+                                    "two orders are one sample written down twice, and their sum is that "
+                                    "sample doubled whatever the machine's phase is"
+                                    % (d["file"], acc_a, acc_b, ea))
+                if core is not None and len(re.findall(r"\b%s\s*\(" % core, sample_body)) < 3:
+                    failures.append("`%s` reads `%s` fewer than three times for %s: the order with the "
+                                    "coprocessor at its ends needs two of its readings to be the bracket, "
+                                    "and the other order needs one for its own first end - fewer than "
+                                    "three is an order that kept no witness"
+                                    % (d["file"], core, what))
+            wins = re.findall(r"=\s*\*\s*\(\s*volatile\s+uint32_t\s*\*\s*\)\s*\(\s*uintptr_t\s*\)\s*"
+                              r"\(\s*frame_va\s*\+\s*MSM8974_FRAME_(CNTP|CNTV)_LOW_OFF\s*\)\s*;", sample_body)
+            triples = [tuple(wins[i:i + 3]) for i in range(len(wins) - 2)]
+            if ("CNTP", "CNTV", "CNTP") not in triples or ("CNTV", "CNTP", "CNTV") not in triples:
+                failures.append("`%s` reads the frame's own two windows as %s: a pair is a pair only if "
+                                "the two orders read the two registers the other way round, and the two "
+                                "readings taken in one order are the same sample twice"
+                                % (d["file"], wins))
+            need, have = bracket_counts(sample_body, 0)
+            if have < need:
+                failures.append("`%s` runs %d bracket(s) in the both-orders loop and tests both ends "
+                                "in %d of them: each order's bracket is the thing that says whether the "
+                                "reading it holds came back between its own two ends, and a mirror "
+                                "without one measures an offset it never bounded"
+                                % (d["file"], need, have))
+            guards = len(re.findall(r"\(\s*\w+\s*-\s*\w+\s*\)\s*<=\s*MSM8974_CV_COST_MAX", sample_body))
+            if guards < 2 * len(pairs):
+                failures.append("`%s` refuses its samples on %d of the %d cost witnesses they carry "
+                                "(`MSM8974_CV_COST_MAX` against the two readings of the same side): a "
+                                "sample whose own reads cost more than the bound was interrupted, and the "
+                                "difference it holds is the interrupt's duration rather than the "
+                                "machine's phase - while a guard whose left side is not a difference of "
+                                "two readings is the bound's name without the bound"
+                                % (d["file"], guards, 2 * len(pairs)))
+            for suffix, what in (("cv_r_fd", "the frame's counter's advance"),
+                                 ("cv_r_cd", "the core clock's advance over the same interval"),
+                                 ("cv_r_ppm", "the two advances as parts per million"),
+                                 ("cv_r_ok", "whether the frame's counter reached the interval asked for"),
+                                 ("cv_r_n", "how many readings ended the loop")):
+                if not key_writes(source, suffix):
+                    failures.append("`%s` publishes no `_%s` (%s): a rate that is not computed is a rate "
+                                    "that was assumed, and a rate difference is the one answer that "
+                                    "makes every frame-against-core difference in this driver "
+                                    "meaningless" % (d["file"], suffix, what))
+            for name, reading in (("cv_r_f0", "msm8974_frame_lo("), ("cv_r_f1", "msm8974_frame_lo("),
+                                  ("cv_r_c0", "mach_absolute_time()"), ("cv_r_c1", "mach_absolute_time()")):
+                expr = value_expression(source, name)
+                if expr is None or reading not in expr:
+                    failures.append("`%s`'s `_%s` is not a reading of `%s`: the two advances this ratio "
+                                    "divides have to be two clocks read, not two numbers written"
+                                    % (d["file"], name, reading))
+            ppm = value_expression(source, "cv_r_ppm")
+            if ppm is None or "cv_r_fd" not in ppm or "cv_r_cd" not in ppm or "/" not in ppm:
+                failures.append("`%s`'s `_cv_r_ppm` is not the quotient of the two advances: a ratio that "
+                                "is not computed from the readings is a number about the author's "
+                                "expectation of the machine" % d["file"])
+            rate_body = loop_body(code, "for( cv_i2 = 0u; cv_i2 < 0x00100000u; cv_i2++ )")
+            if rate_body is None or "MSM8974_CV_RATE_TICKS" not in rate_body \
+                    or "MSM8974_CV_RATE_BOUND" not in rate_body:
+                failures.append("`%s`'s rate loop has no second bound (`MSM8974_CV_RATE_BOUND` beside "
+                                "`MSM8974_CV_RATE_TICKS`): a frame whose counter is stopped would leave "
+                                "the loop running for the rest of the boot, and the loop that measures "
+                                "the machine is not allowed to be the thing that hangs it" % d["file"])
+
+        # -- the slack is measured, and it is the same rule as every other bound in this file -----------
+        writes = key_writes(source, "cv_slack")
+        if not writes:
+            failures.append("`%s` publishes no `_cv_slack`: the tolerance this step's arithmetic is "
+                            "read within would be a number no reading of the artifact can recover"
+                            % d["file"])
+        else:
+            literal = [v for v, _at in writes if re.fullmatch(r"0*[0-9]+u?", v or "")]
+            if literal:
+                failures.append("`%s` publishes `_cv_slack` as the constant `%s`: four register reads "
+                                "are what it measures, and a chosen number is a claim about how fast "
+                                "this CPU is" % (d["file"], literal[0]))
+        if not re.search(r"mach_absolute_time\(\)", code):
+            failures.append("`%s` bounds its arithmetic with no timebase behind it: the only thing that "
+                            "can say what these reads cost on this machine is this machine's clock"
+                            % d["file"])
+
+        # -- the block writes nothing -------------------------------------------------------------------
+        mark = source.find('entry_live_write( "xnu_live_timerdrv_cv_slack"')
+        head = source.rfind("if( frame_va != 0u) {", 0, mark) if mark > 0 else -1
+        if mark < 0 or head < 0:
+            failures.append("`%s`'s compare-value block is not where this clause looks for it: the "
+                            "region that must store to nothing has no boundary, and an unbounded "
+                            "region is a claim about the writer" % d["file"])
+        else:
+            region = source[head:mark]
+            stores = re.findall(r"\*\s*\(\s*volatile\s+uint32_t\s*\*\s*\)\s*\(\s*uintptr_t"
+                                r"\s*\)\s*\(\s*frame_va\s*\+[^;]*?\)\s*=", region)
+            if stores:
+                failures.append("`%s` writes to the frame while it asks the frame what its compare "
+                                "values are (%d store(s)): the virtual compare value is the deadline "
+                                "the kernel's own decrementer runs on, and this block's whole argument "
+                                "is that it never has to be written" % (d["file"], len(stores)))
+            else:
+                notes.append("`%s`'s compare-value block stores to nothing" % d["file"])
+
+    if subjects == 0:
+        failures.append("no driver in `PLATFORM_SOURCES` asks a device for a compare value: the "
+                        "arithmetic this claim is about would not exist in any run")
+
+
 CLAIMS = (claim_shape, claim_classes, claim_provider, claim_names, claim_root_names,
           claim_property_kinds, claim_bundle_id, claim_cell_counts, claim_resolution_read,
           claim_mechanism, claim_entry_class, claim_device_mapping, claim_device_value,
-          claim_timer_callback, claim_driver_line, claim_driver_arming, claim_driver_routes)
+          claim_timer_callback, claim_driver_line, claim_driver_arming, claim_driver_routes,
+          claim_the_compare_values)
 
 
 def compare(facts, mutate=None):
@@ -3377,6 +3798,102 @@ def mutate_facts(facts, mutate):
                              "( v2_va + MSM8974_FRAME_CNTV_LOW_OFF );",
                              "                        *(volatile uint32_t *)(uintptr_t)( v2_va + "
                              "MSM8974_FRAME_CNTV_LOW_OFF ) = v2_cntv_lo;")
+    # -- 502's mutations: the compare values, the arithmetic, and the bracket's two ends -------------
+    elif mutate == "the_countdown_is_summed_with_itself":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "        cv_v_sum1 = cv_v_tval1 + cv_v_ct1_lo;",
+                             "        cv_v_sum1 = cv_v_tval1 + cv_v_tval2;")
+    elif mutate == "the_second_sum_is_the_first":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "        cv_p_tval2  = *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CNTP_TVAL_OFF );",
+                             "        cv_p_tval2  = cv_p_tval1;")
+    elif mutate == "the_virtual_sum_is_never_bounded":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             '    entry_live_write( "xnu_live_timerdrv_cv_v_zero_ok",  cv_v_zero_ok );\n',
+                             "")
+    elif mutate == "the_armed_side_is_held_against_itself":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "        cv_p_arm_ct_lo = cv_p_cval_lo - arm_ticks;",
+                             "        cv_p_arm_ct_lo = cv_p_tval1;")
+    elif mutate == "the_bracket_reads_the_frame_twice":
+        facts = _bump_driver(facts, "MSM8974Timer", "            c = msm8974_cpu_cntvct();",
+                             "            c = w0;")
+    elif mutate == "the_bracket_tests_one_end":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "                if( (uint32_t)c >= w0 && (uint32_t)c <= w1 )",
+                             "                if( (uint32_t)c >= w0 )")
+    elif mutate == "the_bracket_publishes_no_width":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             '    entry_live_write( "xnu_live_timerdrv_cv_wmax",       cv_wmax );\n'
+                             '    entry_live_write( "xnu_live_timerdrv_cv_wmin",       cv_wmin );\n',
+                             "")
+    elif mutate == "the_virtual_control_word_is_the_physical_one":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "        cv_v_ctl_fr    = *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CNTV_CTL_OFF );",
+                             "        cv_v_ctl_fr    = *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CTRL_OFF );")
+    elif mutate == "the_ctl_offset_is_written_down":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "#define MSM8974_FRAME_CNTV_CTL_OFF   (MSM8974_FRAME_CNTV_TVAL_OFF + 0x4u)",
+                             "#define MSM8974_FRAME_CNTV_CTL_OFF   0x03Cu")
+    elif mutate == "the_compare_value_block_writes_to_the_frame":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "        cv_v_ctl_mask  = ( cv_v_ctl_fr & MSM8974_FRAME_CTRL_IT_MASK ) ? 1u : 0u;",
+                             "        cv_v_ctl_mask  = ( cv_v_ctl_fr & MSM8974_FRAME_CTRL_IT_MASK ) ? 1u : 0u;\n"
+                             "        *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CNTV_TVAL_OFF ) = 0u;")
+    # -- 502's second half: the same pair both ways round, the windows, and the rate ------------------
+    elif mutate == "the_second_order_is_the_first":
+        facts = _bump_driver(facts, "MSM8974Timer", "                    cv_xv_y8 += ( vg0 - vfm );",
+                             "                    cv_xv_y8 += ( vc - vf0 );")
+    elif mutate == "the_two_orders_are_not_summed":
+        facts = _bump_driver(facts, "MSM8974Timer", "            cv_xv_sum = cv_xv_x8 + cv_xv_y8;",
+                             "            cv_xv_sum = cv_xv_x8;")
+    elif mutate == "the_read_cost_is_not_subtracted":
+        facts = _bump_driver(facts, "MSM8974Timer", "            cv_win_dif = cv_win_x8 - cv_win_y8;",
+                             "            cv_win_dif = cv_win_x8 + cv_win_y8;")
+    elif mutate == "the_window_pair_is_read_in_one_order":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "                wy0 = *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CNTV_LOW_OFF );",
+                             "                wy0 = *(volatile uint32_t *)(uintptr_t)( frame_va + "
+                             "MSM8974_FRAME_CNTP_LOW_OFF );")
+    elif mutate == "the_coprocessor_is_read_once":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "                vg0 = (uint32_t)msm8974_cpu_cntvct();",
+                             "                vg0 = vc;")
+    elif mutate == "the_witness_is_not_a_reading":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "                if( ( vf1 - vf0 ) <= MSM8974_CV_COST_MAX &&",
+                             "                if( 0u <= MSM8974_CV_COST_MAX &&")
+    elif mutate == "the_cost_bound_is_written_down":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "                if( ( wx1 - wx0 ) <= MSM8974_CV_COST_MAX &&",
+                             "                if( ( wx1 - wx0 ) <= 0x00002000u &&")
+    elif mutate == "the_rate_is_a_constant":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "            cv_r_ppm = ( cv_r_cd != 0u )\n"
+                             "                     ? (uint32_t)( ( (uint64_t)cv_r_fd * 1000000u ) / "
+                             "(uint64_t)cv_r_cd )\n"
+                             "                     : 0u;",
+                             "            cv_r_ppm = 1000000u;")
+    elif mutate == "the_rate_loop_has_one_bound":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "                if( ( cv_r_f1 - cv_r_f0 ) >= MSM8974_CV_RATE_TICKS ||\n"
+                             "                    ( cv_r_c1 - cv_r_c0 ) >= MSM8974_CV_RATE_BOUND )\n"
+                             "                    break;",
+                             "                if( ( cv_r_f1 - cv_r_f0 ) >= MSM8974_CV_RATE_TICKS )\n"
+                             "                    break;")
+    elif mutate == "the_rate_is_not_read":
+        facts = _bump_driver(facts, "MSM8974Timer",
+                             "                cv_r_f1 = msm8974_frame_lo( frame_va, "
+                             "MSM8974_FRAME_CNTP_LOW_OFF );",
+                             "                cv_r_f1 = cv_r_f0 + MSM8974_CV_RATE_TICKS;")
+    elif mutate == "the_physical_pair_is_not_read":
+        facts = _bump_driver(facts, "MSM8974Timer", "                pc  = (uint32_t)msm8974_cpu_cntpct();",
+                             "                pc  = pf0;")
     else:
         raise AssertionError("unknown mutation %s" % mutate)
     return facts
@@ -3501,7 +4018,28 @@ MUTATIONS = (
     "the_virtual_countdown_is_read_from_another_register",
     "the_route_offsets_are_written_again",
     "the_route_words_are_not_published",
-    "the_second_view_is_written_to",
+        "the_second_view_is_written_to",
+    "the_countdown_is_summed_with_itself",
+    "the_second_sum_is_the_first",
+    "the_virtual_sum_is_never_bounded",
+    "the_armed_side_is_held_against_itself",
+    "the_bracket_reads_the_frame_twice",
+    "the_bracket_tests_one_end",
+    "the_bracket_publishes_no_width",
+    "the_virtual_control_word_is_the_physical_one",
+    "the_ctl_offset_is_written_down",
+    "the_compare_value_block_writes_to_the_frame",
+    "the_second_order_is_the_first",
+    "the_two_orders_are_not_summed",
+    "the_read_cost_is_not_subtracted",
+    "the_window_pair_is_read_in_one_order",
+    "the_coprocessor_is_read_once",
+    "the_witness_is_not_a_reading",
+    "the_cost_bound_is_written_down",
+    "the_rate_is_a_constant",
+    "the_rate_loop_has_one_bound",
+    "the_rate_is_not_read",
+    "the_physical_pair_is_not_read",
 )
 
 

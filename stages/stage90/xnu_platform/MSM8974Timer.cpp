@@ -276,10 +276,53 @@ extern "C" uint32_t entry_irq_enable_line(uint32_t intid, uint32_t target);
 #define MSM8974_FRAME_CNTP_TVAL_OFF  0x028u
 #define MSM8974_FRAME_CTRL_OFF       0x02Cu
 #define MSM8974_FRAME_CNTV_TVAL_OFF  0x038u
+/*
+ * 502: the virtual timer's control word. It is not one of the eight offsets the device's kernel
+ * declares - that file writes and reads the *physical* timer's control word at `0x02C` and never
+ * touches the virtual side - so the address comes from the layout the two pairs share in its own
+ * table, where a countdown and its control word are four bytes apart:
+ *
+ *       :66  QTIMER_CNTP_TVAL_REG  0x028
+ *       :64  QTIMER_CTRL_REG       0x02C
+ *       :67  QTIMER_CNTV_TVAL_REG  0x038
+ *
+ * so the virtual side's control word is the same pattern one timer over, at `0x03C`. The *identity* of
+ * the word at a countdown's `+4` is not an inference: 501 measured it on the physical pair, where the
+ * frame's `0x02C` and the coprocessor's `CNTP_CTL` read the same value (`_rt_ctl_fr` 2, `_rt_ctl_cpu` 2,
+ * `_rt_ctl_agree` 1). This address is that confirmed pattern applied to the pair beside it, and the
+ * claim is that the machine's answer is published (`_cv_v_ctl_fr`, `_cv_v_ctl_agree`) rather than that
+ * the address is right.
+ *
+ * It is written as the countdown's address plus four rather than as a second literal `0x03C`, because a
+ * literal beside a derivation is this project's oldest defect class with the smallest possible blast
+ * radius: the two spellings cannot be made to disagree if there is only one of them.
+ */
+#define MSM8974_FRAME_CNTV_CTL_OFF   (MSM8974_FRAME_CNTV_TVAL_OFF + 0x4u)
 
 #define MSM8974_FRAME_CTRL_ENABLE    0x1u
 #define MSM8974_FRAME_CTRL_IT_MASK   0x2u
 #define MSM8974_FRAME_CTRL_IT_STAT   0x4u
+
+/*
+ * 502: the bounds the two readings at the end of the block below are built on, and neither is a claim
+ * about the machine.
+ *
+ * A *bracket sample* is three readings, and the two that are of the same side measure nothing but the
+ * cost of the reads between them - so a sample whose own cost is large was interrupted, and the
+ * difference it holds is the interrupt's duration rather than the machine's phase. `CV_COST_MAX` is
+ * that refusal bound, set an order of magnitude above the measured cost (12-13 ticks) rather than at
+ * it, so that a *correct* machine never has a sample refused: an unrefused sample set is what makes
+ * `_cv_xv_n` eight, and a refusal is visible as a smaller count rather than as a different sum.
+ *
+ * The rate loop is bounded twice and both bounds are necessary: it stops when the frame's counter has
+ * advanced by `CV_RATE_TICKS`, *or* when the core's clock has advanced by `CV_RATE_BOUND`, whichever
+ * comes first. A frame whose counter is stopped - which would make every ratio in this file meaningless,
+ * and is therefore a thing to find out rather than to wait for - ends the loop instead of hanging the
+ * boot in it, and `_cv_r_ok` records which of the two bounds ended it.
+ */
+#define MSM8974_CV_COST_MAX     0x00002000u   /* 8192 ticks = 426 us, against a measured cost of 12 */
+#define MSM8974_CV_RATE_TICKS   0x00008000u   /* 32768 ticks = 1.7 ms of the frame's counter */
+#define MSM8974_CV_RATE_BOUND   0x00080000u   /* 524288 ticks = 27 ms of `mach_absolute_time` */
 
 /*
  * Which of the node's `reg` entries is the frame. `reg` is `{parent, frame@1000, frame@2000}` - the
@@ -719,6 +762,24 @@ static inline uint32_t msm8974_delta_abs(uint32_t a, uint32_t b)
     return (uint32_t)(d < 0 ? -d : d);
 }
 
+/* 502: the frame's counter, read the way the device's own kernel reads it - the high word, the low
+ * word, the high word again, and the low word kept only if the high word did not move. The kernel's
+ * own reader of this frame's *virtual* counter is `counter_get_cntvct_mem` (`arch_timer.c:318`) and it
+ * is these three reads in this order; the reasons 502 wants the same shape are its two, so it is the
+ * same function for both counters rather than two spellings of one idea. */
+static inline uint32_t msm8974_frame_lo( uintptr_t frame_va, uint32_t off_lo )
+{
+    uint32_t h0, h1, lo;
+
+    do {
+        h0 = *(volatile uint32_t *)(uintptr_t)( frame_va + off_lo + 0x4u );
+        lo = *(volatile uint32_t *)(uintptr_t)( frame_va + off_lo );
+        h1 = *(volatile uint32_t *)(uintptr_t)( frame_va + off_lo + 0x4u );
+    } while( h0 != h1 );
+
+    return lo;
+}
+
 class MSM8974Timer : public IOService
 {
     OSDeclareDefaultStructors(MSM8974Timer);
@@ -864,6 +925,70 @@ MSM8974Timer::start( IOService * provider )
     uint32_t   rt_ctl_cpu = 0u;
     uint32_t   rt_ctl_agree = 0u;
     uint32_t   rt_cntv_ctl_cpu = 0u;
+    /* 502 - the frame's compare values, and whether the frame's counter is the core's */
+    uint32_t   cv_slack = 0u;
+    uint32_t   cv_p_tval1 = 0u;
+    uint32_t   cv_p_ct1_lo = 0u;
+    uint32_t   cv_p_tval2 = 0u;
+    uint32_t   cv_p_ct2_lo = 0u;
+    uint32_t   cv_p_sum1 = 0u;
+    uint32_t   cv_p_sum2 = 0u;
+    uint32_t   cv_p_inv_d = 0u;
+    uint32_t   cv_p_inv_ok = 0u;
+    uint32_t   cv_p_cval_lo = 0u;
+    uint32_t   cv_p_arm_ct_lo = 0u;
+    uint32_t   cv_p_lag = 0u;
+    uint32_t   cv_p_gt_now = 0u;
+    uint32_t   cv_v_tval1 = 0u;
+    uint32_t   cv_v_tval2 = 0u;
+    uint32_t   cv_v_ct1_lo = 0u;
+    uint32_t   cv_v_sum1 = 0u;
+    uint32_t   cv_v_sum2 = 0u;
+    uint32_t   cv_v_inv_ok = 0u;
+    uint32_t   cv_v_zero_d = 0u;
+    uint32_t   cv_v_zero_ok = 0u;
+    uint32_t   cv_v_ctl_fr = 0u;
+    uint32_t   cv_v_ctl_cpu = 0u;
+    uint32_t   cv_v_ctl_agree = 0u;
+    uint32_t   cv_v_ctl_mask = 0u;
+    uint32_t   cv_n = 0u;
+    uint32_t   cv_inside = 0u;
+    uint32_t   cv_wmax = 0u;
+    uint32_t   cv_wmin = 0u;
+    uint32_t   cv_d0 = 0u;
+    uint32_t   cv_hi_agree = 0u;
+
+    /* 502b - the same pair read both ways round, the physical pair as the control, the frame's own
+     * windows, and the two counters' rates against `mach_absolute_time`. */
+    uint32_t   cv_xv_x8 = 0u;
+    uint32_t   cv_xv_y8 = 0u;
+    uint32_t   cv_xv_x0 = 0u;
+    uint32_t   cv_xv_y0 = 0u;
+    uint32_t   cv_xv_n = 0u;
+    uint32_t   cv_xv_m_in = 0u;
+    uint32_t   cv_xv_sum = 0u;
+    uint32_t   cv_xv_dif = 0u;
+    uint32_t   cv_xp_x8 = 0u;
+    uint32_t   cv_xp_y8 = 0u;
+    uint32_t   cv_xp_x0 = 0u;
+    uint32_t   cv_xp_y0 = 0u;
+    uint32_t   cv_xp_n = 0u;
+    uint32_t   cv_xp_m_in = 0u;
+    uint32_t   cv_xp_sum = 0u;
+    uint32_t   cv_xp_dif = 0u;
+    uint32_t   cv_win_x8 = 0u;
+    uint32_t   cv_win_y8 = 0u;
+    uint32_t   cv_win_x0 = 0u;
+    uint32_t   cv_win_y0 = 0u;
+    uint32_t   cv_win_n = 0u;
+    uint32_t   cv_win_wmax = 0u;
+    uint32_t   cv_win_sum = 0u;
+    uint32_t   cv_win_dif = 0u;
+    uint32_t   cv_r_fd = 0u;
+    uint32_t   cv_r_cd = 0u;
+    uint32_t   cv_r_ppm = 0u;
+    uint32_t   cv_r_ok = 0u;
+    uint32_t   cv_r_n = 0u;
 
     if( !super::start( provider )) return( false );
     if( provider == 0) return( false );
@@ -1734,6 +1859,376 @@ MSM8974Timer::start( IOService * provider )
     entry_live_write( "xnu_live_timerdrv_arm_rc",        arm_rc );
     entry_live_write( "xnu_live_timerdrv_arm_target",    MSM8974_TIMER_LINE_TARGET );
     entry_live_write( "xnu_live_timerdrv_arm_line_rc",   arm_line_rc );
+
+    /* ---- 502: what the frame's `0x038` is, and whether the frame's counter is the core's ----------
+     *
+     * 501 read `0x038` - `QTIMER_CNTV_TVAL_REG` (`arch_timer.c:67`), the one of that file's eight timer
+     * offsets with no reader anywhere in the kernel - and found it disagreeing with the coprocessor's
+     * `CNTV_TVAL` by `0x06f034ff` ticks (`_rt_tval_fr` `0xf912a3cc` against `_rt_tval_cpu` `0x0002d8cb`,
+     * `_rt_tval_ok` 0). It recorded the disagreement and said what it could not say: **whether the frame's
+     * virtual countdown lives behind a control word neither step writes, or somewhere else, is a question
+     * that needs a write to answer**. This block answers it with reads, because the ARM generic timer
+     * defines `TVAL` as a *view* of a compare value rather than a register of its own:
+     *
+     *       TVAL  =  CVAL - <the counter>
+     *
+     * - which the device's kernel relies on without ever naming, because it programs deadlines by writing
+     * `QTIMER_CNTP_TVAL_REG` (`arch_timer.c:76`) and reading the countdown back from the same register
+     * (`arch_timer.c:115`), and never reads a compare-value register at all. Two consequences follow,
+     * and both are checkable here:
+     *
+     *   - **While the compare value is fixed, `TVAL + counter` is a constant.** So the sum is invariant
+     *     across two readings a measured interval apart, on either side of the frame. That is a
+     *     prediction with nothing unknown in it - no reference value, no ground truth, no assumption
+     *     about which timer it is - and it is the test that says "this register is a countdown to a
+     *     fixed compare value" rather than "this register happens to hold a number".
+     *   - **An unprogrammed compare value reads as minus the counter.** If nothing ever wrote the
+     *     frame's virtual compare value, then `0 - CNTVCT` is what `0x038` must read, and 501's
+     *     `0xf912a3cc` is that number: `2^32 - 0xf912a3cc` = `0x06ed5c34`, and the frame's `CNTVCT` read
+     *     in the same block is `0x06ed5c1f` - 21 ticks apart, which is the two reads' own cost.
+     *
+     * **The control is the same frame's other timer**, and it is the reason this block sits *after* the
+     * arming above rather than before it: `0x028` has just been written by this driver (`_arm_ticks`
+     * 192000, read back 27 ticks down as `_arm_tval_after`), so the physical side's compare value is
+     * *this file's own write* and its sum must be `CNTPCT_at_write + _arm_ticks` - a number whose two
+     * halves are both published. The virtual side's compare value is nobody's write, and its sum must be
+     * zero. One frame, two timers, the same arithmetic, one armed and one not.
+     *
+     * **And the second half of 501's finding, which its own slack cannot settle.** 501 compared the
+     * frame's counter with the coprocessor's and found them 71 ticks apart inside a measured slack of
+     * 104; the conclusion it drew - "the two routes agree" - is true of the *numbers*, and the bound it
+     * used admits a rival explanation: **two separate counters that both count the same 19.2 MHz clock
+     * would also read within a hundred ticks of each other** if they are phase-locked or nearly so. The
+     * bracket below separates the two readings as tightly as this machine can: read the frame's counter,
+     * then the core's, then the frame's again, and require the core's reading to lie **between** the two
+     * frame readings. If they are one counter, it must - the bracket is the cost of one `mrrc` and the
+     * core's reading is inside it by construction. If they are two counters, the core's reading sits
+     * outside by their phase offset, and the test says so. **The test's power is bounded and the bound is
+     * published** (`_cv_wmax`, `_cv_wmin`, `_cv_d0`): a phase offset smaller than the bracket is not
+     * detectable by this method, and a reader who sees `_cv_inside` = 8 with `_cv_wmax` = 400 has
+     * learned less than one who sees it with `_cv_wmax` = 30.
+     *
+     * Nothing below stores to a device or to a coprocessor register: the compare values are read, not
+     * programmed, and `tools/check_driver_catalogue.py`'s claim 18 refuses a build in which this block
+     * writes through either base.
+     */
+    if( frame_va != 0u) {
+        uint64_t cv_t0, cv_t1;
+        uint32_t cv_i;
+
+        cv_t0 = mach_absolute_time();
+        (void) *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_LOW_OFF );
+        cv_t1 = mach_absolute_time();
+        cv_slack = 4u * (uint32_t)( cv_t1 - cv_t0 );
+
+        /* The physical side, twice: `0x028` against `0x000`, and the same pair again a few reads later.
+         * `arm_ticks` is the count this file wrote, so `_cv_p_lag` should be the ticks the countdown has
+         * run since - tens, not thousands. */
+        cv_p_tval1  = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_TVAL_OFF );
+        cv_p_ct1_lo = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_LOW_OFF );
+        cv_p_tval2  = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_TVAL_OFF );
+        cv_p_ct2_lo = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_LOW_OFF );
+        cv_p_sum1 = cv_p_tval1 + cv_p_ct1_lo;
+        cv_p_sum2 = cv_p_tval2 + cv_p_ct2_lo;
+        cv_p_inv_d  = msm8974_delta_abs( cv_p_sum1, cv_p_sum2 );
+        cv_p_inv_ok = ( cv_p_inv_d <= cv_slack ) ? 1u : 0u;
+
+        /* The compare value the sum implies, held against this file's own write. `_cv_p_gt_now` is the
+         * deadline being ahead of the counter (what an armed timer reads) and `_cv_p_lag` is how far the
+         * countdown has already run - `_arm_ticks` minus the countdown, which is a *derived* number and
+         * not a second copy of the interval. */
+        cv_p_cval_lo  = cv_p_sum1;
+        cv_p_arm_ct_lo = cv_p_cval_lo - arm_ticks;
+        cv_p_gt_now   = ((int32_t)( cv_p_cval_lo - cv_p_ct1_lo ) > 0) ? 1u : 0u;
+        cv_p_lag      = ( cv_p_tval1 <= arm_ticks ) ? ( arm_ticks - cv_p_tval1 ) : 0u;
+
+        /* The virtual side, the same arithmetic. The compare value is nobody's write, so the sum is
+         * zero - within the reads' own cost, which is what `_cv_slack` is. */
+        cv_v_tval1  = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_TVAL_OFF );
+        cv_v_ct1_lo = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_LOW_OFF );
+        cv_v_tval2  = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_TVAL_OFF );
+        cv_v_sum1 = cv_v_tval1 + cv_v_ct1_lo;
+        cv_v_sum2 = cv_v_tval2 + *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_LOW_OFF );
+        cv_v_inv_ok = ( msm8974_delta_abs( cv_v_sum1, cv_v_sum2 ) <= cv_slack ) ? 1u : 0u;
+        cv_v_zero_d = ( cv_v_sum1 <= 0x80000000u ) ? cv_v_sum1 : ( 0u - cv_v_sum1 );
+        cv_v_zero_ok = ( cv_v_zero_d <= cv_slack ) ? 1u : 0u;
+
+        /* The virtual control word, and the register beside it is the one that settles which timer it
+         * belongs to: the core's own `CNTV_CTL` is `ENABLE` with no mask (501's `_rt_cntv_ctl_cpu` 1),
+         * while a compare value of zero has been passed by the counter since boot, so an *unmasked*
+         * frame-side virtual timer would have to read `ISTATUS` set. */
+        cv_v_ctl_fr    = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_CTL_OFF );
+        cv_v_ctl_cpu   = msm8974_cpu_cntv_ctl();
+        cv_v_ctl_agree = ( cv_v_ctl_fr == cv_v_ctl_cpu ) ? 1u : 0u;
+        cv_v_ctl_mask  = ( cv_v_ctl_fr & MSM8974_FRAME_CTRL_IT_MASK ) ? 1u : 0u;
+
+        /* The bracket. Eight samples, and what is published is the aggregate rather than the eight -
+         * `_cv_inside` out of `_cv_n`, the widest and narrowest bracket, and the first sample's
+         * `_cv_d0` (the core's reading measured from the frame's low end), because a count alone cannot
+         * say how much room the test had. `_cv_d0` is the first sample's difference as plain
+         * two's-complement arithmetic, and it has **three** cases rather than the two this comment named
+         * before the run: a value between zero and the bracket's width is the core's reading inside it, a
+         * value near `2^32` is a reading that many ticks *before* the frame's low end, and - the case the
+         * machine produced - a positive value *larger* than the width is a reading past the bracket's
+         * **upper** end. The run measured `_cv_inside` 0 of `_cv_n` 8 with `_cv_wmax` 13 and `_cv_d0` 70,
+         * i.e. the third case by `0x39` ticks, and that is why the block below asks the same question a
+         * second time with the two sides the other way round. A sample whose bracket is wider than
+         * `0x00ffffff` ticks is not counted at all (`_cv_n` then reads less than 8): a preemption inside
+         * the bracket would widen it without bound, and a widened bracket is a weaker test, never a
+         * false one. */
+        for( cv_i = 0u; cv_i < 8u; cv_i++ ) {
+            uint32_t w0, w1, h0, h1, h2, w;
+            uint64_t c;
+
+            do {
+                h0 = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_HIGH_OFF );
+                w0 = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_LOW_OFF );
+                h1 = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_HIGH_OFF );
+            } while( h0 != h1 );
+            c = msm8974_cpu_cntvct();
+            do {
+                h0 = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_HIGH_OFF );
+                w1 = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_LOW_OFF );
+                h2 = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_HIGH_OFF );
+            } while( h0 != h2 );
+
+            if( h1 == h2 && (uint32_t)( c >> 32 ) == h1 )
+                cv_hi_agree++;
+
+            w = w1 - w0;
+            if( w <= 0x00ffffffu ) {
+                if( cv_n == 0u || w > cv_wmax) cv_wmax = w;
+                if( cv_n == 0u || w < cv_wmin) cv_wmin = w;
+                if( (uint32_t)c >= w0 && (uint32_t)c <= w1 )
+                    cv_inside++;
+                if( cv_n == 0u )
+                    cv_d0 = (uint32_t)c - w0;
+                cv_n++;
+            }
+        }
+
+        /* ---- 502: the same bracket the other way round, and two more pairs asked the same question.
+         *
+         * The bracket above read the frame, the core, the frame, and required the core's reading to lie
+         * *between* the two frame readings. It measured `_cv_inside` 0 of `_cv_n` 8 - and not because the
+         * core's reading was near the bracket's edge: `_cv_d0` was 70 while `_cv_wmax` was 13, so the
+         * core's reading was past the bracket's *upper* end by 57 ticks, which is a case the bracket's
+         * own comment did not name. Three machines produce that reading, and one order cannot tell them
+         * apart:
+         *
+         *   - **the frame's counter and the core's are two registers**, offset by a fixed phase, so a
+         *     reading of one is always ahead of a reading of the other taken at the same instant;
+         *   - **one of the two paths returns its reading late**: the frame's counter is a device read
+         *     and the core's is a coprocessor read of `counter_get_cntvct_cp15` (`arch_timer.c:331`),
+         *     and neither is ordered against the other, so a reading can be returned after a read that
+         *     follows it in program order - which is the same reading, with the same sign;
+         *   - **they run at different rates**, in which case a single comparison of two readings means
+         *     nothing at all, and every frame-against-core difference this driver publishes (498's, 501's
+         *     `_rt_cntp_*`/`_rt_cntv_*`, `_cv_p_lag` above) carries a bias that grows with the interval.
+         *
+         * Reading the pair *both* ways round separates them, because two of the three terms cancel and
+         * the third does not - but which of the three the sum ends up holding is the run's question, not
+         * this comment's answer, so the arithmetic is written out and then bounded rather than asserted.
+         * Take one sample of the difference `core - frame` and take it twice: once with the frame's
+         * counter read first and once with the core's read first. Writing `a` for the spacing between two
+         * readings of one sample, `K` for the phase (the core's reading minus the frame's, at one instant)
+         * and `dL` for the difference between the two *paths'* latencies, the two samples are
+         *
+         *       order X (frame, core, frame)   core - frame  =  +a + K + dL
+         *       order Y (core, frame, core)    core - frame  =  -a + K + dL
+         *
+         * so
+         *
+         *       the sum of the two orders   =  2K + 2dL   (the spacing cancels: +a once, -a once)
+         *       the difference of the two   =  2a        (the phase cancels, and so does `dL`)
+         *
+         * **The sum holds the phase *and* a path-latency difference, and one pair cannot tell those two
+         * apart - which is why there are three.** The frame's own two windows take one path on both
+         * sides, so `dL` is zero there by construction and `_cv_win_sum` is the reading that needs no
+         * model: near zero over eight samples means the frame's `0x000` and `0x008` are one register read
+         * twice, and a value that stands above the samples' own noise means they are two registers that
+         * do not agree. `_cv_xv_sum` asks the same question across two *different* paths - the frame's
+         * window and `mrrc p15, 1` - and `_cv_xp_sum` asks it of the physical pair as well, because `dL`
+         * is a property of the two paths and is therefore the same in both pairs: it cancels in their
+         * difference, while a register offset between the frame's counters does not. The physical pair is
+         * 501's own control (measured 7 ticks apart inside a slack of 104), so a control that answers
+         * "two registers" would be saying that slack was hiding this.
+         *
+         * Every sample carries its own witness for the read cost - the two readings of the same side,
+         * which measure nothing else - and a sample whose witness exceeds `MSM8974_CV_COST_MAX` is
+         * refused rather than averaged (`_cv_win_wmax` publishes the widest witness accepted, so the
+         * refusal bound's headroom is in the record and not only in the constant).
+         *
+         * The rate is measured first and measured directly, because it is the one answer that would make
+         * the sums above meaningless: the frame's counter's advance over an interval timed by
+         * `mach_absolute_time`, published as `_cv_r_ppm` - parts per million, where 1000000 is "the frame
+         * ticks at the core's rate". An interrupt inside that interval lengthens both numbers and so
+         * leaves the ratio alone, which is why the rate loop needs no rejection test and the bracket
+         * samples do.
+         *
+         * Nothing below stores to the frame, to the core or to any other device: every line is a read.
+         */
+        {
+            uint32_t cv_r_f0 = msm8974_frame_lo( frame_va, MSM8974_FRAME_CNTP_LOW_OFF );
+            uint32_t cv_r_c0 = (uint32_t)mach_absolute_time();
+            uint32_t cv_r_f1 = cv_r_f0;
+            uint32_t cv_r_c1 = cv_r_c0;
+            uint32_t cv_i2;
+
+            for( cv_i2 = 0u; cv_i2 < 0x00100000u; cv_i2++ ) {
+                cv_r_f1 = msm8974_frame_lo( frame_va, MSM8974_FRAME_CNTP_LOW_OFF );
+                cv_r_c1 = (uint32_t)mach_absolute_time();
+                if( ( cv_r_f1 - cv_r_f0 ) >= MSM8974_CV_RATE_TICKS ||
+                    ( cv_r_c1 - cv_r_c0 ) >= MSM8974_CV_RATE_BOUND )
+                    break;
+            }
+            cv_r_fd  = cv_r_f1 - cv_r_f0;
+            cv_r_cd  = cv_r_c1 - cv_r_c0;
+            cv_r_ok  = ( cv_r_fd >= MSM8974_CV_RATE_TICKS ) ? 1u : 0u;
+            cv_r_n   = cv_i2 + 1u;
+            cv_r_ppm = ( cv_r_cd != 0u )
+                     ? (uint32_t)( ( (uint64_t)cv_r_fd * 1000000u ) / (uint64_t)cv_r_cd )
+                     : 0u;
+
+            for( cv_i2 = 0u; cv_i2 < 8u; cv_i2++ ) {
+                uint32_t vf0, vf1, vc, vg0, vg1, vfm;
+                uint32_t pf0, pf1, pc, pg0, pg1, pfm;
+                uint32_t wx0, wx1, wy0, wy1, wq, wp;
+
+                /* The virtual pair, frame counter against `CNTVCT`. Order X is the shape the bracket
+                 * above used - the frame, then the core, then the frame - and order Y puts the core's
+                 * reading at the ends. The witness is the two readings of the same side. */
+                vf0 = msm8974_frame_lo( frame_va, MSM8974_FRAME_CNTV_LOW_OFF );
+                vc  = (uint32_t)msm8974_cpu_cntvct();
+                vf1 = msm8974_frame_lo( frame_va, MSM8974_FRAME_CNTV_LOW_OFF );
+                vg0 = (uint32_t)msm8974_cpu_cntvct();
+                vfm = msm8974_frame_lo( frame_va, MSM8974_FRAME_CNTV_LOW_OFF );
+                vg1 = (uint32_t)msm8974_cpu_cntvct();
+
+                /* The physical pair, the same two orders, with `CNTPCT` on the core's side. */
+                pf0 = msm8974_frame_lo( frame_va, MSM8974_FRAME_CNTP_LOW_OFF );
+                pc  = (uint32_t)msm8974_cpu_cntpct();
+                pf1 = msm8974_frame_lo( frame_va, MSM8974_FRAME_CNTP_LOW_OFF );
+                pg0 = (uint32_t)msm8974_cpu_cntpct();
+                pfm = msm8974_frame_lo( frame_va, MSM8974_FRAME_CNTP_LOW_OFF );
+                pg1 = (uint32_t)msm8974_cpu_cntpct();
+
+                /* The frame's own two windows, the same two orders, both readings through the device. */
+                wx0 = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_LOW_OFF );
+                wq  = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_LOW_OFF );
+                wx1 = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_LOW_OFF );
+                wy0 = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_LOW_OFF );
+                wp  = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTP_LOW_OFF );
+                wy1 = *(volatile uint32_t *)(uintptr_t)( frame_va + MSM8974_FRAME_CNTV_LOW_OFF );
+
+                if( ( vf1 - vf0 ) <= MSM8974_CV_COST_MAX && ( vg1 - vg0 ) <= MSM8974_CV_COST_MAX ) {
+                    if( cv_xv_n == 0u ) {
+                        cv_xv_x0 = vc - vf0;
+                        cv_xv_y0 = vg0 - vfm;
+                    }
+                    cv_xv_x8 += ( vc - vf0 );
+                    cv_xv_y8 += ( vg0 - vfm );
+                    if( vg0 <= vfm && vfm <= vg1 )
+                        cv_xv_m_in++;
+                    cv_xv_n++;
+                }
+                if( ( pf1 - pf0 ) <= MSM8974_CV_COST_MAX && ( pg1 - pg0 ) <= MSM8974_CV_COST_MAX ) {
+                    if( cv_xp_n == 0u ) {
+                        cv_xp_x0 = pc - pf0;
+                        cv_xp_y0 = pg0 - pfm;
+                    }
+                    cv_xp_x8 += ( pc - pf0 );
+                    cv_xp_y8 += ( pg0 - pfm );
+                    if( pg0 <= pfm && pfm <= pg1 )
+                        cv_xp_m_in++;
+                    cv_xp_n++;
+                }
+                if( ( wx1 - wx0 ) <= MSM8974_CV_COST_MAX && ( wy1 - wy0 ) <= MSM8974_CV_COST_MAX ) {
+                    if( cv_win_n == 0u ) {
+                        cv_win_x0 = wq - wx0;
+                        cv_win_y0 = wy0 - wp;
+                    }
+                    cv_win_x8 += ( wq - wx0 );
+                    cv_win_y8 += ( wy0 - wp );
+                    if( cv_win_n == 0u || ( wx1 - wx0 ) > cv_win_wmax )
+                        cv_win_wmax = wx1 - wx0;
+                    if( ( wy1 - wy0 ) > cv_win_wmax )
+                        cv_win_wmax = wy1 - wy0;
+                    cv_win_n++;
+                }
+            }
+
+            /* The estimator, and it is a sum rather than an average so that a refused sample is a
+             * smaller count beside the same arithmetic rather than a number divided by a count that
+             * moved. The two's-complement reading is the same one `_cv_d0` carries above: 0 means the
+             * pair is one register, and a value near `2^32` means the second side reads *below* the
+             * first by that many ticks. */
+            cv_xv_sum = cv_xv_x8 + cv_xv_y8;
+            cv_xv_dif = cv_xv_x8 - cv_xv_y8;
+            cv_xp_sum = cv_xp_x8 + cv_xp_y8;
+            cv_xp_dif = cv_xp_x8 - cv_xp_y8;
+            cv_win_sum = cv_win_x8 + cv_win_y8;
+            cv_win_dif = cv_win_x8 - cv_win_y8;
+        }
+    }
+
+    entry_live_write( "xnu_live_timerdrv_cv_slack",      cv_slack );
+    entry_live_write( "xnu_live_timerdrv_cv_p_tval1",    cv_p_tval1 );
+    entry_live_write( "xnu_live_timerdrv_cv_p_tval2",    cv_p_tval2 );
+    entry_live_write( "xnu_live_timerdrv_cv_p_sum1",     cv_p_sum1 );
+    entry_live_write( "xnu_live_timerdrv_cv_p_sum2",     cv_p_sum2 );
+    entry_live_write( "xnu_live_timerdrv_cv_p_inv_d",    cv_p_inv_d );
+    entry_live_write( "xnu_live_timerdrv_cv_p_inv_ok",   cv_p_inv_ok );
+    entry_live_write( "xnu_live_timerdrv_cv_p_cval_lo",  cv_p_cval_lo );
+    entry_live_write( "xnu_live_timerdrv_cv_p_arm_ct_lo", cv_p_arm_ct_lo );
+    entry_live_write( "xnu_live_timerdrv_cv_p_gt_now",   cv_p_gt_now );
+    entry_live_write( "xnu_live_timerdrv_cv_p_lag",      cv_p_lag );
+    entry_live_write( "xnu_live_timerdrv_cv_v_tval1",    cv_v_tval1 );
+    entry_live_write( "xnu_live_timerdrv_cv_v_tval2",    cv_v_tval2 );
+    entry_live_write( "xnu_live_timerdrv_cv_v_sum1",     cv_v_sum1 );
+    entry_live_write( "xnu_live_timerdrv_cv_v_sum2",     cv_v_sum2 );
+    entry_live_write( "xnu_live_timerdrv_cv_v_inv_ok",   cv_v_inv_ok );
+    entry_live_write( "xnu_live_timerdrv_cv_v_zero_d",   cv_v_zero_d );
+    entry_live_write( "xnu_live_timerdrv_cv_v_zero_ok",  cv_v_zero_ok );
+    entry_live_write( "xnu_live_timerdrv_cv_v_ctl_fr",   cv_v_ctl_fr );
+    entry_live_write( "xnu_live_timerdrv_cv_v_ctl_cpu",  cv_v_ctl_cpu );
+    entry_live_write( "xnu_live_timerdrv_cv_v_ctl_agree", cv_v_ctl_agree );
+    entry_live_write( "xnu_live_timerdrv_cv_v_ctl_mask", cv_v_ctl_mask );
+    entry_live_write( "xnu_live_timerdrv_cv_n",          cv_n );
+    entry_live_write( "xnu_live_timerdrv_cv_inside",     cv_inside );
+    entry_live_write( "xnu_live_timerdrv_cv_wmax",       cv_wmax );
+    entry_live_write( "xnu_live_timerdrv_cv_wmin",       cv_wmin );
+    entry_live_write( "xnu_live_timerdrv_cv_d0",         cv_d0 );
+    entry_live_write( "xnu_live_timerdrv_cv_hi_agree",   cv_hi_agree );
+    entry_live_write( "xnu_live_timerdrv_cv_xv_x0",      cv_xv_x0 );
+    entry_live_write( "xnu_live_timerdrv_cv_xv_y0",      cv_xv_y0 );
+    entry_live_write( "xnu_live_timerdrv_cv_xv_x8",      cv_xv_x8 );
+    entry_live_write( "xnu_live_timerdrv_cv_xv_y8",      cv_xv_y8 );
+    entry_live_write( "xnu_live_timerdrv_cv_xv_sum",     cv_xv_sum );
+    entry_live_write( "xnu_live_timerdrv_cv_xv_dif",     cv_xv_dif );
+    entry_live_write( "xnu_live_timerdrv_cv_xv_n",       cv_xv_n );
+    entry_live_write( "xnu_live_timerdrv_cv_xv_m_in",    cv_xv_m_in );
+    entry_live_write( "xnu_live_timerdrv_cv_xp_x0",      cv_xp_x0 );
+    entry_live_write( "xnu_live_timerdrv_cv_xp_y0",      cv_xp_y0 );
+    entry_live_write( "xnu_live_timerdrv_cv_xp_x8",      cv_xp_x8 );
+    entry_live_write( "xnu_live_timerdrv_cv_xp_y8",      cv_xp_y8 );
+    entry_live_write( "xnu_live_timerdrv_cv_xp_sum",     cv_xp_sum );
+    entry_live_write( "xnu_live_timerdrv_cv_xp_dif",     cv_xp_dif );
+    entry_live_write( "xnu_live_timerdrv_cv_xp_n",       cv_xp_n );
+    entry_live_write( "xnu_live_timerdrv_cv_xp_m_in",    cv_xp_m_in );
+    entry_live_write( "xnu_live_timerdrv_cv_win_x0",     cv_win_x0 );
+    entry_live_write( "xnu_live_timerdrv_cv_win_y0",     cv_win_y0 );
+    entry_live_write( "xnu_live_timerdrv_cv_win_x8",     cv_win_x8 );
+    entry_live_write( "xnu_live_timerdrv_cv_win_y8",     cv_win_y8 );
+    entry_live_write( "xnu_live_timerdrv_cv_win_sum",    cv_win_sum );
+    entry_live_write( "xnu_live_timerdrv_cv_win_dif",    cv_win_dif );
+    entry_live_write( "xnu_live_timerdrv_cv_win_n",      cv_win_n );
+    entry_live_write( "xnu_live_timerdrv_cv_win_wmax",   cv_win_wmax );
+    entry_live_write( "xnu_live_timerdrv_cv_r_fd",       cv_r_fd );
+    entry_live_write( "xnu_live_timerdrv_cv_r_cd",       cv_r_cd );
+    entry_live_write( "xnu_live_timerdrv_cv_r_ppm",      cv_r_ppm );
+    entry_live_write( "xnu_live_timerdrv_cv_r_ok",       cv_r_ok );
+    entry_live_write( "xnu_live_timerdrv_cv_r_n",        cv_r_n );
 
     return( true );
 }
