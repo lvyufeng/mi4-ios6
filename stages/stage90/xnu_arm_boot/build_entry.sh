@@ -145,6 +145,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
                    --wrap=machine_idle
                    --wrap=Idle_load_context
                    --wrap=SetIdlePop
+                   --wrap=cpu_idle_wfi
                    --wrap=psignal
                    --wrap=setPop
                    --wrap=PE_init_platform --wrap=fiq_context_init
@@ -27772,7 +27773,7 @@ verify_trace_symbols() {
               } else if (index($0, "<__wrap_SetIdlePop>") && ($3 == "b" || $3 == "bl")) {
                   split($1, a, ":"); h = strtonum("0x" a[1])
                   if (h >= cilo && h < cihi) insp++; else { spbad++; spbad_s = spbad_s sprintf(" 0x%x", h) }
-              } else if (index($0, "<cpu_idle_wfi>") && $3 == "bl") {
+              } else if ((index($0, "<cpu_idle_wfi>") || index($0, "<__wrap_cpu_idle_wfi>")) && $3 == "bl") {
                   split($1, a, ":"); h = strtonum("0x" a[1]); if (h >= cilo && h < cihi) wfi++
               } }
             END { printf "%d %d %d %d %d %d\n%s|%s|%s|%s\n", inci + 0, ince + 0, ilbad + 0,
@@ -27793,8 +27794,127 @@ verify_trace_symbols() {
     [[ "${spbad:-1}" == 0 ]] ||
         layout_fail "this image branches to __wrap_SetIdlePop from ${spbad} site(s) outside cpu_idle (${spbad_s:-}): SetIdlePop has a second caller in the tree (cpu.c:148, the idle_timer_notify block), so this is the case where the door-2/3 split needs the caller published beside it - fix the reading, do not remove the check"
     [[ "${wfiin:-0}" -ge 1 ]] ||
-        layout_fail "cpu_idle does not branch to cpu_idle_wfi ($wfix) from inside cpu_idle ($cidle..$cidlenext), so the third door is not reachable in this image and this step's three-way census is really a two-way one"
+        layout_fail "cpu_idle does not branch to the halt from inside cpu_idle ($cidle..$cidlenext), so the third door is not reachable in this image and this step's three-way census is really a two-way one - the reader above accepts either the plain call (513's image) or the wrapped one (514's), because both are the same door"
     say "  xnu_entry_513: Idle_load_context ($idlc) and SetIdlePop ($sipf) are the kernel's own (defined in osfmk/arm/cswitch.s and osfmk/arm/rtclock.c, not in pass 1's undefined set); the pool reaches the first only by tail branch [$idlcrefs] and the second only by call [$sipfrefs]; the exits are counted at ${inci} site(s) inside cpu_idle ($cidle..$cidlenext)${cidle_site:-} and ${ince} inside cpu_idle_exit ($cexit..$cexitnext)${cexit_site:-} with none elsewhere, and SetIdlePop's ${insp} site(s) are inside cpu_idle with none elsewhere; cpu_idle calls cpu_idle_wfi from inside itself (${wfiin} site(s)), so the third door exists; and idle_enable ($ie) is one ${iesize}-byte ${ietype} in the image, loaded inside cpu_idle and stored inside cpu_machine_idle_init out of cpu.o's own relocations, so a door-1 record's _en is the word cpu_idle's first test reads and a door's _lr is a site the kernel's own code set with mov lr, pc"
+
+    # --------------------------------------------------------------------------- 514: the repair
+    #
+    # **This is the first step in this walk that changes the kernel's behaviour, so its clause carries
+    # the two properties that make such a change safe to believe**: that the function called is the
+    # kernel's own and reachable only by call, and that its *compiled body* does the thing the run's
+    # reading will be an effect of. Everything after that is 513's clause read from the other side -
+    # the same door, the same `SetIdlePop` count, now expected to be non-zero.
+    grep -qx "cpu_signal_handler_internal" "$OUT/xnu_arm_entry_undef.txt" &&
+        layout_fail "514's repair calls cpu_signal_handler_internal and the pass-1 undefined set contains it - the call that opens cpu_idle's first door would be a fact about a stand-in rather than about the kernel's own clearing of SIGPdisabled"
+    sigi=$(sym_addr cpu_signal_handler_internal) ||
+        layout_fail "cpu_signal_handler_internal is not in the linked image - the platform's own IPI entry point is what clears SIGPdisabled, and without it this step has no repair"
+    sigidefs=$(arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk '$3 == "cpu_signal_handler_internal" { n++ } END { printf "%d", n + 0 }')
+    [[ "${sigidefs:-0}" == 1 ]] ||
+        layout_fail "the image defines ${sigidefs:-0} symbols named cpu_signal_handler_internal: the repair calls it by name, so a second definition would make the door's opening a fact about the other one"
+    # The reference kinds. The kernel's own two are **tail branches** - `cpu_signal_handler` is
+    # `mov r0, #0; b cpu_signal_handler_internal` and `machine_routines.c:264` is the shutdown path -
+    # and this step adds the only *call*, so the pair of kinds is itself the statement that the wrap-free
+    # direct call is the new thing and the kernel's own uses are unchanged. **The pool here includes the
+    # entry image's own object** (`$OUT/xnu_arm_entry_trace.o`, where the call is), which is the one
+    # object in this link that is not in the kernel pool: a clause that read only the kernel's objects
+    # would find the kernel's two tail branches and no call at all, and would then be measuring a
+    # different image from the one that runs.
+    sigirefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o "$OUT/xnu_arm_entry_trace.o" 2>/dev/null |
+        awk '/[[:space:]]cpu_signal_handler_internal$/ { print $2 }' | sort -u | tr '\n' ' ')
+    [[ "$sigirefs" == "R_ARM_CALL R_ARM_JUMP24 " ]] ||
+        layout_fail "the objects in this pool (the kernel's and this image's own entry_trace.o) reference cpu_signal_handler_internal with [$sigirefs] and 514's clause is written for exactly one call (this step's) plus the kernel's own tail branches - an address-taken reference would mean the wrap-free call this step makes is not the only new edge into it"
+    sigicalls=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o "$OUT/xnu_arm_entry_trace.o" 2>/dev/null |
+        awk '/[[:space:]]cpu_signal_handler_internal$/ && $2 == "R_ARM_CALL" { n++ } END { printf "%d", n + 0 }')
+    [[ "${sigicalls:-0}" == 1 ]] ||
+        layout_fail "the pool makes ${sigicalls:-0} R_ARM_CALL references to cpu_signal_handler_internal; 514's repair is one call made once, so a second call site would make the repair's own count (placed at 1 per park) a fact about the other one"
+    # **The body, because the name is not the effect.** The repair is only the repair if the function
+    # it calls *clears* `SIGPdisabled` on the calling CPU - and that is a property of the compiled
+    # object, not of the source line that was read. Both directions are checked, with the constant
+    # matched as the instruction that materialises it: `mvn r?, #0x80000000` is `~SIGPdisabled` (the
+    # clear, `hw_atomic_and`) and `mov r?, #0x80000000` is `SIGPdisabled` (the disable, `hw_atomic_or`).
+    # If gcc ever restructures this, the clause fails and says which four facts to re-derive.
+    sigobj=$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_cpu_common.o
+    read -r sig_and sig_and_mvn sig_or sig_or_zero sig_or_set <<<"$(ext=$(arm-none-eabi-nm -S --defined-only "$sigobj" 2>/dev/null |
+            awk '$4 == "cpu_signal_handler_internal" { printf "%d %d;", strtonum("0x" $1), strtonum("0x" $2) }')
+        arm-none-eabi-objdump -d "$sigobj" 2>/dev/null | awk -v ext="$ext" '
+            BEGIN { split(ext, e, ";"); if (e[1] == "") { printf "0 0 0 0 0"; exit }
+                    split(e[1], p, " "); lo = p[1] + 0; hi = lo + p[2] }
+            { split($1, a, ":"); off = strtonum("0x" a[1])
+              if (off < lo || off >= hi || a[1] == "") { prev = ""; prev2 = ""; next }
+              # The two instructions before this one, because gcc materialises the mask one or two
+              # instructions ahead of the call: the read is "mov r1, #0; mov r0, r4; bl hw_atomic_or"
+              # and the set is "mov r0, r4; mov r1, #-2147483648; bl hw_atomic_or".
+              win = prev2 " | " prev
+              if ($0 ~ /<hw_atomic_and>/) { andc++; if (win ~ /mvn/ && win ~ /#-2147483648/) and_mvn++ }
+              if ($0 ~ /<hw_atomic_or>/) { orc++
+                                           if (win ~ /mov[^,]*r1, #0([^0-9]|$)/) or_zero++
+                                           if (win ~ /mov[^,]*r1, #-2147483648/) or_set++ }
+              prev2 = prev; prev = $0 }
+            END { printf "%d %d %d %d %d", andc + 0, and_mvn + 0, orc + 0, or_zero + 0, or_set + 0 }')"
+    [[ "${sig_and_mvn:-0}" == 1 ]] ||
+        layout_fail "cpu_signal_handler_internal in $sigobj has ${sig_and_mvn:-0} hw_atomic_and call(s) preceded by \`mvn r?, #0x80000000\` (i.e. ~SIGPdisabled) out of ${sig_and:-0} in the function: the clearing of SIGPdisabled is the one thing this step's call is for, and without it the door stays shut while the console line claims it was opened - the function's other hw_atomic_and calls are the per-signal clears in its while loop and carry other masks"
+    [[ "${sig_or_set:-0}" == 1 ]] ||
+        layout_fail "cpu_signal_handler_internal has ${sig_or_set:-0} hw_atomic_or call(s) preceded by \`mov r?, #0x80000000\` (SIGPdisabled) out of ${sig_or:-0}: the disable direction is the branch this step's FALSE argument does *not* take, and the pair is what makes the argument decide - a body where the only or-with-SIGPdisabled is gone is a body that clears regardless of its argument"
+    [[ "${sig_or_zero:-0}" -ge 1 ]] ||
+        layout_fail "cpu_signal_handler_internal has no hw_atomic_or with a zero operand out of ${sig_or:-0} calls: that read is what makes the function's decision depend on the live word rather than on a cached one, and this step's whole reading is about the live word"
+    # The platform's own entry point, and the slot it is stored into. This is the *reason* a direct
+    # call is the faithful repair rather than a bypass: `cpu_signal_handler` **is**
+    # `cpu_signal_handler_internal(FALSE)`, and `ml_processor_register` is what puts it in the slot the
+    # platform would deliver an IPI through. Both are in this image and both are checked, so the step's
+    # claim that it is doing what the arrival would have done is a property of the build.
+    sigap=$(arm-none-eabi-objdump -d "$sigobj" 2>/dev/null | awk '
+        /<cpu_signal_handler>:/ { grab = 1; n = 0; next }
+        grab { n++; if (n == 1) l1 = $0; else if (n == 2) { l2 = $0; grab = 0 } }
+        END { tail = (index(l2, "<cpu_signal_handler_internal>") > 0 && l2 ~ /[[:space:]]b[[:space:]]/) ? 1 : 0
+              arg  = (index(l1, "<") == 0 && l1 ~ /[[:space:]]mov[[:space:]]/ && l1 ~ /r0, #0/) ? 1 : 0
+              printf "%d %d", tail, arg }')
+    read -r sig_tail sig_arg <<<"$sigap"
+    [[ "${sig_tail:-0}" == 1 && "${sig_arg:-0}" == 1 ]] ||
+        layout_fail "cpu_signal_handler in $sigobj is not \`mov r0, #0; b cpu_signal_handler_internal\` (found tail=$sig_tail arg0=$sig_arg): 514's call is the platform's IPI arrival made explicit, and if that entry point is not the same call with the same argument, the sentence this step prints about 'what the arrival would have done' is not a fact about this image"
+    # (`read` strips the trailing blank the `tr` leaves, so the expected string has none.)
+    read -r sph_refs <<<"$(arm-none-eabi-objdump -r "$REPO_ROOT/out/xnu_kernel_obj/osfmk_arm_machine_routines.o" 2>/dev/null |
+        awk '$3 == "cpu_signal_handler" { print $2 }' | sort -u | tr '\n' ' ')"
+    [[ "$sph_refs" == "R_ARM_MOVT_ABS R_ARM_MOVW_ABS_NC" ]] ||
+        layout_fail "ml_processor_register's own object references cpu_signal_handler with [$sph_refs] and not the address-materialising pair: the platform's IPI slot is where that function would be delivered through, and this step's claim that its call is what the arrival would have done rests on that store being there"
+    # The repair's own call site: one `bl` in the whole image, inside `__wrap_poll`.
+    ppoll=$(sym_addr __wrap_poll) || layout_fail "__wrap_poll is not in the linked image - 514's repair is made from that wrapper, and without it nothing opens the door"
+    ppollnext=$(sym_next "$ppoll") || true
+    [[ -n "$ppollnext" ]] || layout_fail "no symbol follows __wrap_poll in the image, so the repair's call site cannot be attributed to it"
+    read -r sigbl sigblbad <<<"$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" |
+        awk -v plo="$((ppoll))" -v phi="$((ppollnext))" '
+            $3 == "bl" && index($0, "<cpu_signal_handler_internal>") {
+                split($1, a, ":"); h = strtonum("0x" a[1])
+                if (h >= plo && h < phi) inb++; else outb++ }
+            END { printf "%d %d", inb + 0, outb + 0 }')"
+    [[ "${sigbl:-0}" == 1 && "${sigblbad:-1}" == 0 ]] ||
+        layout_fail "the image makes ${sigbl:-0} call(s) to cpu_signal_handler_internal from inside __wrap_poll ($ppoll..$ppollnext) and ${sigblbad:-?} from outside it: the repair must be made once, from the wrapper that also takes the window's snapshot, or the door-1 reading and the repair are not the same event"
+    # The `wfi`, from the three sides that make "the CPU was halted" a reading: the function is
+    # reachable only through this wrapper, the instruction labelled by Apple is inside it, and the
+    # instruction at that label really is a `wfi`.
+    wfiwrap=$(sym_addr __wrap_cpu_idle_wfi) ||
+        layout_fail "__wrap_cpu_idle_wfi is not in the linked image - --wrap=cpu_idle_wfi did not link, and the run's 'the CPU slept' line would then be counting nothing"
+    wfirefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o 2>/dev/null |
+        awk '/[[:space:]]cpu_idle_wfi$/ { print $2 }' | sort -u | tr '\n' ' ')
+    [[ "$wfirefs" == "R_ARM_CALL " ]] ||
+        layout_fail "the objects in this pool reference cpu_idle_wfi with [$wfirefs] and 514's wrap assumes a call: an address-taken reference would let --wrap rewrite a value that is later branched to"
+    wfinext=$(sym_next "$wfix") || true
+    [[ -n "$wfinext" ]] || layout_fail "no symbol follows cpu_idle_wfi in the image, so its extent cannot be read"
+    read -r wfib_in wfib_out <<<"$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" |
+        awk -v clo="$((cidle))" -v chi="$((cidlenext))" '
+            index($0, "<__wrap_cpu_idle_wfi>") && $3 == "bl" {
+                split($1, a, ":"); h = strtonum("0x" a[1])
+                if (h >= clo && h < chi) inb++; else outb++ }
+            END { printf "%d %d", inb + 0, outb + 0 }')"
+    [[ "${wfib_in:-0}" -ge 1 && "${wfib_out:-1}" == 0 ]] ||
+        layout_fail "the image branches to __wrap_cpu_idle_wfi from ${wfib_in:-0} site(s) inside cpu_idle ($cidle..$cidlenext) and ${wfib_out:-?} outside it: cpu_idle's own comment says it is the only function that should call the halt, and a second caller would put a halt on a path this step has not measured"
+    wi=$(sym_addr wfi_inst) || layout_fail "wfi_inst is not in the linked image - the word this step publishes as proof that the halt is a halt has no symbol to be read at"
+    [[ $((wi)) -gt $((wfix)) && "$(sym_next "$wfix")" == "$wi" ]] ||
+        layout_fail "wfi_inst ($wi) is not the first symbol after cpu_idle_wfi ($wfix): Apple exports that label as the address of the instruction *inside* the halt path, so if it has moved out of it the word the record carries is an instruction from somewhere else"
+    wfiword=$(arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" |
+        awk '/<wfi_inst>:/ { seen = 1; next } seen && !got { printf "%s %s", $2, $3; got = 1 }')
+    [[ "$wfiword" == "e320f003 wfi" ]] ||
+        layout_fail "the word at wfi_inst in this image is [$wfiword] and not 'e320f003 wfi' - either the label has moved or the halt was patched out at build time, and in both cases 'the CPU slept' would be a claim about an instruction that is not there"
+    say "  xnu_entry_514: cpu_signal_handler_internal ($sigi) is the kernel's own (defined in osfmk/arm/cpu_common.c, not in pass 1's undefined set, one definition in the image), the pool reaches it by ${sigicalls} call (this step's, inside __wrap_poll $ppoll..$ppollnext at $sigbl site) and by the kernel's own tail branches [$sigirefs], and its compiled body in osfmk_arm_cpu_common.o clears the bit: of ${sig_and} hw_atomic_and call(s) exactly ${sig_and_mvn} is preceded by ~SIGPdisabled, of ${sig_or} hw_atomic_or call(s) ${sig_or_set} is preceded by SIGPdisabled and ${sig_or_zero} read the live word with a zero operand - and the platform's own entry point cpu_signal_handler is 'mov r0, #0; b cpu_signal_handler_internal', the same call with the same argument, whose address ml_processor_register takes for the IPI slot; and cpu_idle_wfi ($wfix, reached from inside cpu_idle only, ${wfib_in} site) is wrapped at $wfiwrap, with Apple's own wfi_inst ($wi) the first symbol after it and the word there 'e320f003 wfi' - so a run's xnu_live_wfi_* record is a halt the CPU was actually given up for, and its ticks are how long for"
 
 
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls

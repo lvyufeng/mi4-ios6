@@ -5217,6 +5217,123 @@ void entry_note_setidlepop(uint32_t site, uint32_t ret, uint32_t en, uint32_t no
     }
 }
 
+/* ------------------------------------------------------------------------------------------------
+ * 514: the repair - the boot CPU's own first arrival, and what the idle does once the door opens.
+ * ------------------------------------------------------------------------------------------------
+ * **512 found the idle spinning and 513 named the door; 514 is the first step that changes the
+ * kernel's behaviour, so it is the first step in this walk whose object is a *repair*.** The door is
+ * `cpu_data->cpu_signal & SIGPdisabled`, and 513's own reading says it is never cleared because the
+ * only thing that clears it is the platform's delivery of an interprocessor interrupt - and this is
+ * a uniprocessor port. `cpu_signal_handler_internal(FALSE)` is that clearing, and it is in this image
+ * (`osfmk/arm/cpu_common.c:386`, at 0x8001201c, reached from `cpu_signal_handler` which
+ * `ml_processor_register` stores into the platform's IPI slot at `machine_routines.c:605`). So the
+ * repair is **one call to the kernel's own function**, from the kernel's own context, and it is not a
+ * stand-in: nothing in this file knows what the bit is, where `cpu_data` is, or what `SIGPdisabled`'s
+ * value is; the whole effect is `.o`-level and the *reading* is taken by 513's instrument, one call
+ * later.
+ *
+ * **Why a uniprocessor port must do this at all.** On Apple's own ARM ports the bit is cleared by the
+ * first IPI the CPU receives; the port's platform expert is what delivers it. This port has exactly
+ * one CPU (`ml_get_max_cpu_number()` reads 0 from a boot-args-only ProcessorInfo) and fills no IPI
+ * source, so no IPI will ever arrive - the CPU is waiting for a message that only a second CPU could
+ * send. The honest description is not "fake an IPI" but "take the one piece of platform glue that a
+ * single-CPU port cannot inherit", and the place it is taken is the same place the reading is taken.
+ *
+ * **The call is made on the park's first turn and the counters are read either side of it**, so the
+ * console's new lines are a *window* measurement and not a cumulative one - which is the defect 513
+ * found in 512's own wording ("while it did" for a counter that began at boot). `before` and `after`
+ * are the counter around the call, which is also the only cost the step adds to the boot path.
+ *
+ * **Two readings make the repair a measurement rather than a claim.** The first is 513's own
+ * instrument, one call later: `SetIdlePop`'s entry count inside the park. If the bit were still set,
+ * `cpu_idle`'s first test would still return early and `SetIdlePop` would still be entered zero times;
+ * a non-zero count is *proof* that the first test's right operand changed, because the left one did
+ * not (`idle_enable` is TRUE, published on every door record). The second is the `wfi`: it is reached
+ * only below the `SetIdlePop` test, so its count and its occupancy are the sleep itself.
+ */
+uint32_t g_repair_calls;
+uint32_t g_repair_caller;
+uint32_t g_repair_before, g_repair_after;
+
+uint32_t g_wfi_calls;
+uint32_t g_wfi_fast_calls;
+uint32_t g_wfi_ticks;
+uint32_t g_wfi_ticks_max;
+uint32_t g_wfi_inst_seen;
+uint32_t g_wfi_first_before, g_wfi_first_after;
+uint32_t g_wfi_last_before, g_wfi_last_after;
+
+/*
+ * One call to `cpu_signal_handler_internal`. `before`/`after` bracket it, so the record carries what
+ * the call itself cost, and `caller` is the `lr` the instrument was entered with - a genuine return
+ * address here, because the instrument calls the function with `bl`, so the `bl` is at `caller - 4`.
+ */
+void entry_note_repair(uint32_t caller, uint32_t before, uint32_t after)
+{
+    uint32_t n = g_repair_calls + 1u;
+
+    g_repair_calls = n;
+    if (n == 1u) {
+        g_repair_caller = caller;
+        g_repair_before = before;
+        g_repair_after = after;
+    }
+
+    if ((n & (n - 1u)) == 0u) {
+        entry_live_write("xnu_live_repair_seq", n);
+        entry_live_write("xnu_live_repair_caller", caller);
+        entry_live_write("xnu_live_repair_before", before);
+        entry_live_write("xnu_live_repair_after", after);
+    }
+}
+
+/*
+ * One `wfi`. This is 513's owed item and 514's second instrument, and the two are the same reading:
+ * the instruction is the one place `cpu_idle` gives the CPU up, so its *count* says how many times the
+ * idle actually halted (against how many times it went round) and `after - before` says how long the
+ * CPU was stopped for.
+ *
+ * **`inst` is the instruction word read live out of the image at `wfi_inst`** - the symbol Apple
+ * exports precisely because the `wfi` can be patched to a `nop` by the `wfi` boot argument
+ * (`cpu.c:553-556`, `bcopy_phys` from `patch_to_nop`). A halt that is not a halt would otherwise look
+ * exactly like one from every other angle, and this is the only reading that can tell them apart: the
+ * build checks that `wfi_inst` is *inside* `cpu_idle_wfi`, and the record carries the word that is
+ * there at the moment the wrapper runs.
+ *
+ * **The instrument runs with interrupts masked** - `machine_idle` does `cpsid if` before jumping to
+ * `cpu_idle` and only `cpsie if` after `Idle_context` has returned through `Idle_load_context` - so
+ * this writer cannot be re-entered, and it is the reason the record is written *after* the halt rather
+ * than around it: a record published before the `wfi` would be a claim about an outcome.
+ */
+void entry_note_wfi(uint32_t fast, uint32_t inst, uint32_t before, uint32_t after, uint32_t ticks)
+{
+    uint32_t n = g_wfi_calls + 1u;
+
+    g_wfi_calls = n;
+    if (fast != 0u)
+        g_wfi_fast_calls++;
+    g_wfi_ticks += ticks;
+    if (ticks > g_wfi_ticks_max)
+        g_wfi_ticks_max = ticks;
+    g_wfi_inst_seen = inst;
+
+    if (n == 1u) {
+        g_wfi_first_before = before;
+        g_wfi_first_after = after;
+    }
+    g_wfi_last_before = before;
+    g_wfi_last_after = after;
+
+    if ((n & (n - 1u)) == 0u) {
+        entry_live_write("xnu_live_wfi_seq", n);
+        entry_live_write("xnu_live_wfi_fast", fast);
+        entry_live_write("xnu_live_wfi_inst", inst);
+        entry_live_write("xnu_live_wfi_before", before);
+        entry_live_write("xnu_live_wfi_after", after);
+        entry_live_write("xnu_live_wfi_ticks", ticks);
+    }
+}
+
 /* Experiment 456's probe, defined below its first caller; the declaration is here because
  * `entry_note_iolock` is where the reading is taken (see `entry_registry_probe`). */
 __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);

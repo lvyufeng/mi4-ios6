@@ -200,6 +200,36 @@ extern uint32_t g_sip_calls, g_sip_true, g_sip_false, g_sip_nsites, g_sip_overfl
 extern uint32_t g_sip_site[4], g_sip_site_n[4];
 extern uint32_t g_sip_first_site, g_sip_first_ret, g_sip_first_en;
 
+/* 514's, the same shape: the counter either side of the one call that opens the door, and the `wfi`'s
+ * own census. `g_wfi_inst_seen` is the instruction word the last halt read out of the image at
+ * `wfi_inst`, which is the only reading that can separate a `wfi` from the `nop` the `wfi` boot
+ * argument patches over it. */
+extern uint32_t g_repair_calls, g_repair_caller, g_repair_before, g_repair_after;
+extern uint32_t g_wfi_calls, g_wfi_fast_calls, g_wfi_ticks, g_wfi_ticks_max, g_wfi_inst_seen;
+extern uint32_t g_wfi_first_before, g_wfi_first_after;
+extern uint32_t g_wfi_last_before, g_wfi_last_after;
+extern void entry_note_repair(uint32_t caller, uint32_t before, uint32_t after);
+
+/* **514's repair, and why this declaration is the whole of it.** `cpu_signal_handler_internal`
+ * (`osfmk/arm/cpu_common.c:386`) is the kernel's own function, present in this image at 0x8001201c
+ * because `cpu_signal_handler` names it and `ml_processor_register` stores that into the platform's
+ * IPI slot; `FALSE` clears `SIGPdisabled` on the calling CPU. `boolean_t` is `int` on this target and
+ * this file includes no XNU header, so the declaration is the width this file needs - and the build
+ * does not take it on trust: it requires the pool to reach the symbol *by call only*, that the image
+ * define it exactly once, and that its compiled body contains the clearing of the bit this image's
+ * idle test reads (see `xnu_entry_514`'s clause in `build_entry.sh`). Nothing in this file knows what
+ * the bit is or where `cpu_data` is. */
+extern void cpu_signal_handler_internal(int disable_signal);
+
+/* `wfi_inst` is Apple's own exported name for the address of the `wfi` instruction itself
+ * (`osfmk/arm/machine_routines_asm.s:81-84`), exported so the `wfi` boot argument can `bcopy_phys`
+ * `patch_to_nop` over it. Reading it here is what makes "the CPU was halted" a reading rather than an
+ * inference from the argument: the wrapper passes the *word* to the writer, so a patched image logs a
+ * `nop` and the falsifier is on the record rather than in a comment.
+ *
+ * The build resolves the address out of the image and prints it; it is not written down here. */
+extern uint32_t wfi_inst;
+
 /* `boolean_t idle_enable` (`osfmk/arm/cpu_common.c:67`), read **by name** - the linker resolves the
  * address out of the image's own symbol, so there is no offset here to be wrong, which is why this is
  * a word 513 can read while `cpu_signal`/`rtcPop`/`cpu_idle_latency` are words it deliberately does
@@ -904,6 +934,15 @@ int __real_poll(void *proc, void *uap, int *retval);
 int __wrap_poll(void *proc, void *uap, int *retval)
 {
     static uint32_t park_printed;
+    /* 514's window. The park's own start is the only place a *window* can be measured from, and 513's
+     * console lines are the reason it is worth measuring: they are cumulative, so the park's share of
+     * them had to be given as a bound. These five are the same counters, taken at the park's start, so
+     * the two lines 514 adds report differences rather than totals. They are statics in this wrapper
+     * rather than globals because nothing else reads them and no record needs them: the console line
+     * is the reading, and it is printed in the same invocation that took them. */
+    static uint32_t snap_calls, snap_door, snap_sip, snap_sip_true, snap_wfi, snap_wfi_fast,
+                    snap_wfi_ticks;
+    static uint32_t snap_valid;
     uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address(0);
     const uint32_t *given = (const uint32_t *)uap;
     uint32_t fds = 0xFFFFFFFFu, nfds = 0xFFFFFFFFu, timeout = 0xFFFFFFFFu;
@@ -914,6 +953,31 @@ int __wrap_poll(void *proc, void *uap, int *retval)
         fds = given[0];
         nfds = given[1];
         timeout = given[2];
+    }
+
+    if (timeout >= (uint32_t)ENTRY_PARK_MIN_MS && park_printed == 0u) {
+        uint32_t rb;
+
+        snap_calls = g_idle_calls;
+        snap_door = g_door_exits;
+        snap_sip = g_sip_calls;
+        snap_sip_true = g_sip_true;
+        snap_wfi = g_wfi_calls;
+        snap_wfi_fast = g_wfi_fast_calls;
+        snap_wfi_ticks = g_wfi_ticks;
+        snap_valid = 1u;
+
+        /* **The repair, and it is one call.** `cpu_signal_handler_internal(FALSE)` is the kernel's own
+         * clearing of `SIGPdisabled` on the calling CPU - the thing the platform's IPI delivery would
+         * do on a machine with a second CPU to send one. It is made *here*, before the park's real
+         * call, so the park that follows is the first window in this walk in which `cpu_idle`'s first
+         * test can be false; and it is made in this context (a syscall on pid 1's thread, interrupts
+         * as the kernel left them) rather than from the payload, so `getCpuDatap()` is the kernel's own
+         * answer about the CPU this process is running on and not this file's guess. The counter is
+         * read either side so the repair's own cost is on the record rather than in a claim. */
+        rb = entry_counter();
+        cpu_signal_handler_internal(0);
+        entry_note_repair(caller, rb, entry_counter());
     }
 
     before = entry_counter();
@@ -937,12 +1001,26 @@ int __wrap_poll(void *proc, void *uap, int *retval)
          * neither is the park's own window on its own: the park's share is the counter *minus* its
          * value at the park's start, and that value is a bound rather than a record, because the
          * published series is sparse. In 513's run the 32768th entry precedes the park's start and
-         * the 65536th follows it, so of the 2200344 entries between 2134808 and 2167576 are the
-         * park's - 97.0% to 98.5%, the rest being the idle done during the two short asks. The site
+         * the 65536th follows it, so of the 2200344 entries the park carries between 2134808 and
+         * 2167576 - 97.0% to 98.5%, the rest being the idle done during the two short asks. The site
          * counts are that same counter's, so they carry the same property, and the 2000 ms wording on
          * the first line was changed from "while it did" to "by that time" for exactly this reason: a
-         * cumulative count read at the end of a window is not the window. */
+         * cumulative count read at the end of a window is not the window.
+         *
+         * **514's two lines answer that with the window itself**, from `snap_*`: the same counters,
+         * read at the park's start and again here, so "in the park" on those two lines is a difference
+         * of two readings and not a bound. That is also what makes them the repair's witness: the door
+         * counts on the third line are cumulative and cannot separate the pre-repair idle from the
+         * post-repair one, and `SetIdlePop`'s park-window count can - it is zero before the repair by
+         * 513's own reading, so any non-zero value here is the repair and nothing else. */
         uint32_t door1 = (g_idle_calls > g_sip_calls) ? (g_idle_calls - g_sip_calls) : 0u;
+        uint32_t w_calls = (snap_valid != 0u) ? (g_idle_calls - snap_calls) : 0u;
+        uint32_t w_exits = (snap_valid != 0u) ? (g_door_exits - snap_door) : 0u;
+        uint32_t w_sip = (snap_valid != 0u) ? (g_sip_calls - snap_sip) : 0u;
+        uint32_t w_sip_true = (snap_valid != 0u) ? (g_sip_true - snap_sip_true) : 0u;
+        uint32_t w_wfi = (snap_valid != 0u) ? (g_wfi_calls - snap_wfi) : 0u;
+        uint32_t w_wfi_fast = (snap_valid != 0u) ? (g_wfi_fast_calls - snap_wfi_fast) : 0u;
+        uint32_t w_sleep = (snap_valid != 0u) ? (g_wfi_ticks - snap_wfi_ticks) : 0u;
 
         park_printed = 1u;
         printf("mini4: the OS has nothing to run -- pid %d parked in poll for %d ms (caller 0x%x), "
@@ -960,6 +1038,19 @@ int __wrap_poll(void *proc, void *uap, int *retval)
                g_door_site[0], g_door_count[0], g_door_site[1], g_door_count[1],
                g_door_site[2], g_door_count[2], g_door_site[3], g_door_count[3], g_door_overflow,
                g_door_first_lr, g_door_first_en, g_sip_first_site, g_sip_first_ret, g_sip_first_en);
+        printf("mini4: the repair -- pid %d, cpu_signal_handler_internal(FALSE) called %d time(s) "
+               "from 0x%x at tick 0x%x (returned at 0x%x, %d tick(s)); SetIdlePop entered %d time(s) "
+               "in the park (TRUE %d, FALSE %d) and the idle path %d time(s), exiting by 0x%x x%d "
+               "with idle_enable=%d\n",
+               pid, g_repair_calls, g_repair_caller, g_repair_before, g_repair_after,
+               g_repair_after - g_repair_before, w_sip, w_sip_true, w_sip - w_sip_true,
+               w_calls, g_door_first_lr, w_exits, (uint32_t)idle_enable);
+        printf("mini4: the CPU slept -- the wfi reached %d of the boot's %d time(s) in the park "
+               "(%d of the park's with wfi_fast=1, instruction 0x%x at wfi_inst) for %d of the park's "
+               "%d tick(s) (longest %d, first 0x%x..0x%x, last 0x%x..0x%x)\n",
+               w_wfi, g_wfi_calls, w_wfi_fast, g_wfi_inst_seen, w_sleep, after - before,
+               g_wfi_ticks_max, g_wfi_first_before, g_wfi_first_after,
+               g_wfi_last_before, g_wfi_last_after);
     }
 
     return error;
@@ -1292,6 +1383,51 @@ int __wrap_SetIdlePop(void)
     entry_note_setidlepop(site, (uint32_t)ret, (uint32_t)idle_enable, entry_counter());
 
     return ret;
+}
+
+/* ------------------------------------------------------------------------- 514: the halt itself */
+/*
+ * **The `wfi`, counted and timed, and the instruction word that proves it is one.** This is 513's
+ * owed item and it is what makes the repair measurable from the far side: the halt is below both of
+ * `cpu_idle`'s early tests, so a pass that reaches it is a pass that went the whole way, and
+ * `after - before` is how long the CPU was given up for. `cpu_idle` is the only caller
+ * (`osfmk/arm/machine_routines_asm.s` says so in its own comment above the function, and the build
+ * clause requires every branch to this wrapper to be inside `cpu_idle`'s extent), and it is in
+ * `machine_routines_asm.o` - a different object from `cpu_idle`'s `cpu.o`, which is what satisfies
+ * 455's rule for the wrap.
+ *
+ * **Three readings, and the third is the one that can falsify the other two.** `fast` is the argument
+ * the caller passed (and the asm's `cmp r0, #0` / `beq` decides between one `wfi` and a 32-iteration
+ * delay loop - so a `wfi_fast` of 0 would mean the "halt" was a busy-wait, which is why the count of
+ * `fast != 0` is on the record separately). `inst` is the word at `wfi_inst`, read live: Apple exports
+ * that symbol as the address of the instruction *because* the `wfi` boot argument patches a `nop`
+ * over it (`cpu.c:553-556`), and a patched image would otherwise look exactly like a halted one from
+ * every other measurement. And `ticks` is the interval the counter ran while the CPU was stopped.
+ *
+ * **The record is written after the call and not around it**, for the reason 513's `SetIdlePop`
+ * record is: a record published before the halt would be a claim about an outcome, and a halt that
+ * never returns is exactly the failure this step has to be able to read. A run that stops inside the
+ * `wfi` therefore leaves the last published `xnu_live_wfi_*` record *without* its `_after`, which is a
+ * reading rather than a silence.
+ */
+extern void entry_note_wfi(uint32_t fast, uint32_t inst, uint32_t before, uint32_t after,
+                           uint32_t ticks);
+
+void __real_cpu_idle_wfi(int wfi_fast);
+void __wrap_cpu_idle_wfi(int wfi_fast)
+{
+    uint32_t before = entry_counter();
+    uint32_t after, inst;
+
+    __real_cpu_idle_wfi(wfi_fast);
+    after = entry_counter();
+
+    /* The instruction at `wfi_inst`, read through the image's own symbol. `wfi_inst` is declared in
+     * this file as a `uint32_t`, and the *object* is the instruction: reading the variable reads the
+     * word the CPU executes. */
+    inst = wfi_inst;
+
+    entry_note_wfi((uint32_t)wfi_fast, inst, before, after, after - before);
 }
 
 int __real_fork(void *proc, void *uap, int *retval);
