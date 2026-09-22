@@ -3,9 +3,9 @@
 Stage90. Built host-side with `STAGE90_XNU_IDLE_STACK=1` (default), `STAGE90_XNU_ISTACK_SEPARATE=0`,
 **`STAGE90_XNU_EXIT_POC_FLUSH=0`** - i.e. 521's exit-side flush is *out* of this image - and the one
 state change 521's non-return left standing: **the D-cache is turned back on at the idle window's near
-end**. Gate green. **The run has not happened**: the device has not been on the bus since 521's
-non-return and needs a power press, so this step's hardware half is still owed. Everything below that is
-not the run is a fact of the image and of its clause.
+end**. Gate green, and **run on 2026-09-22: the device did not come back** - the project's third
+non-return, with no log and a power press owed. Section 3.3 is the run and what it does and does not say;
+sections 1 to 3.2 are the pre-run reading of the image and of its clause and are unchanged by it.
 
 The image is `out/stage90/stage90-qcdt.img`, sha256
 `13d771938336fe65ccaf3dee833c14c0a9280d5365eda3f5c1e74cc6e6948825`, 8,540,160 bytes - the same size as
@@ -461,13 +461,104 @@ device's own storage with a filesystem this kernel can actually read, plus a fir
 rather than a header. That is a new phase, and it should be planned as one rather than discovered as a
 surprise on the next run.
 
+> **Superseded, 2026-09-22:** 522 has now run and did not come back (section 3.3), so "522 remains the
+> right next run" is spent - the run happened. What survives of this paragraph is the half that is not
+> about ordering: the OS still has no root worth the name and nothing to run from it, and closing the idle
+> exit is still the gate in front of every one of those choices. Section 3.3.1 names what comes first now:
+> a null instrument, not a cache fix.
+
+## 3.3 The run
+
+Device `4a2fe00b`. The phone came back onto the bus on 2026-09-22 at 14:13:49 as `2717:0368` and then
+`18d1:4ee7` at 14:14:09 - Android, `adb devices` listing `4a2fe00b	device` - on a human power press: that
+is 521's owed press having happened and the phone being healthy. Gate green (`All checks passed`, exit 0,
+and it printed `13d771938336fe65...` computed from the file itself two screens up). One non-persistent
+`fastboot boot` through `run_and_capture.sh --allow-xnu-entry`: `Sending 'boot.img' (8340 KB) OKAY [
+0.262s]`, `Booting OKAY [ 0.011s]`, `Finished. Total time: 0.291s`. Nothing was flashed and nothing was
+written to storage.
+
+**The device did not come back within the 180 s window, and has not come back since.**
+
+The host's own USB log (`/var/log/kern.log`, every line naming `usb 3-10`) carries the whole signature, and
+it is 521's signature to the second:
+
+| time | dev | id | what it is |
+| --- | --- | --- | --- |
+| 14:13:49 | 77 | `2717:0368` | Android, after 521's power press |
+| 14:14:09 | 78 | `18d1:4ee7` | Android up; `adb devices` = `4a2fe00b device` |
+| 14:14:38 | 78 | - | disconnect: `adb reboot bootloader` |
+| **14:14:45** | **88** | **`18d1:d00d`** | **fastboot - the bootloader took the boot command** |
+| **14:14:46** | **88** | **-** | **disconnect: the payload took the core** |
+| - | - | - | **nothing on `usb 3-10` after that** |
+
+The disconnect at 14:14:46 is *normal*: it is the bootloader handing the core to the payload, which is what
+`Booting OKAY` means, and it is what 520's returning runs look like at the same point. What is not normal is
+the absence of anything after it - a return is `2717:0368` and then `18d1:4ee7` inside ~20 s, and 520's was
+inside the window. The only later event on the bus is an unrelated device on `usb 3-3` (a LeEco LEX727) at
+14:15:11, which is not this phone.
+
+No log: `/tmp/cancro-last_kmsg.txt` is untouched (mtime 02:55, 596,665 bytes - 520's capture), because there
+was no device to read one from. The phone is off the bus now and needs a **power press** (hold Power
+~10-15 s, release, press Power normally); the payload's log lives in the top of DRAM, so that press loses
+whatever the run produced.
+
+## 3.3.1 What the non-return says, and what it does not
+
+**It retires the flush-in-the-window as *the* cause.** 521's section 4 named the full L1 *and* L2
+clean-and-invalidate executed inside the window with `SCTLR.C = 0` as the prime suspect, on two grounds:
+that it was the one operation in that image this hardware had never run, and that it was the only thing the
+project's two non-returns shared. This image **removes** it and turns the cache back on at the window's near
+end - a state change that runs *outside* the window's arithmetic, which is the property the arm was built
+for - and the run did not come back either. A suspect that was present in both non-returns, and absent here,
+is no longer the explanation for this one.
+
+**What both non-returns share, and what nothing that has ever come back has, is the capture/publish path
+521 introduced**: 8 loads and 8 stores per pass into `.data`, executed *inside* the window, where 520's
+capture ran in the callee. 521's section 5 and this log's section 3 both named the arm that follows from
+that before either run: a **null instrument** - the same wrapper with the readings replaced by a counter -
+to separate "the measurements cost something" from "the state change costs something". That naming is now
+the strongest thing this arm produced, and the choice between those two is what the next build is for.
+
+**What it does not say** is which instruction wedged the core, and this run cannot say: there is no log. It
+does not even say the death is at the same `pc`. Section 3 of this log worked through exactly this case
+*before* the run and its argument stands unchanged: with the enable in place, a run that does not come back
+can no longer distinguish "the enable never ran" from "the enable ran and the reading did not reach DRAM" -
+and with no log at all it cannot separate either of those from a death anywhere else on the path. So **none
+of the four readings section 3 names exists**: `xnu_live_slot_cwe_win`, `xnu_live_slot_cwe_set`,
+`xnu_live_slot_cwe_calls` and `xnu_live_slot_post_calls` have no value from this arm, and the mechanical
+verdict block section 3.1 added and tested never had a log to fire on.
+
+**One thing it does say that is worth keeping**, because it is now a repeatable observation rather than a
+single one: the *shape* of the hang is the same across two images with different state changes and the same
+measurement path - the bootloader acknowledges, sends the image, reports `Booting OKAY`, the device leaves
+USB, and nothing ever comes back. The mechanism that 520 identified is still the reason this arm exists, and
+this run neither confirms nor refutes it. It only removes the flush as the explanation for *this* failure,
+which is what the ledger below is for.
+
+The ledger, from the runs rather than from any gate's prose:
+
+| run | window state | capture | returned? |
+| --- | --- | --- | --- |
+| 519, 520 | cache off, no flush | in the callee (4 loads) | yes, inside 180 s, dying at the `pop` |
+| 521 | cache off, **+ L1&L2 flush in the window** | **in the wrapper (8 loads, 8 stores)** | **no** |
+| 522 | cache **on** at the window's near end, flush out | in the wrapper (8 loads, 8 stores) | **no** |
+
+**The ledger this run changes, and a reading of it that this run breaks.** 521's section 4 read the record as
+*flag-off runs come back, flag-on runs do not* - it was true when it was written, and it is what made the
+exit-side flush the prime suspect. **This run falsifies it**: 522 is flag-**off** by construction
+(`STAGE90_XNU_EXIT_POC_FLUSH=0` is what makes it this arm) and it did not come back either. So the flag was
+never the discriminator. What the three non-returns share is a *state change* the returning runs did not
+have - 517's first run and 521 carry the exit-side flush, 522 carries the cache enable - and the one change
+521 and 522 share, and 520 does not, is the capture/publish path 521 introduced. The next arm is the null
+instrument, and the case for it is the table's third column.
+
 ## 4. Safety
 
-Non-persistent `fastboot boot` only, and the run is a single one through
-`preflight_boot_check.sh --allow-xnu-entry` then `run_and_capture.sh --allow-xnu-entry`; nothing is
-flashed and nothing is ever written to storage, so a brick is impossible by construction and the failure
-mode is a hang that needs a power press. **The device is currently in exactly that state from 521 and the
-run cannot be made until it is back** - this step's gate is green and its image is frozen, and the run is
-owed rather than pending on anything in this repository. That the ledger now has two non-returns, both
-with cache maintenance inside the cache-off window and neither with a maintenance operation *outside* it,
-is the reason this arm moves the change out of the window rather than into it.
+Non-persistent `fastboot boot` only, and the run was a single one through
+`preflight_boot_check.sh --allow-xnu-entry` then `run_and_capture.sh --allow-xnu-entry`; nothing was
+flashed and nothing was ever written to storage, so a brick is impossible by construction and the failure
+mode is a hang that needs a power press. **That is what happened** (section 3.3): the phone is off the bus,
+the log is lost with the top of DRAM, and a power press is owed before anything else can run. The arm's own
+premise - that the ledger's two non-returns both had cache maintenance *inside* the cache-off window and
+neither had a maintenance operation *outside* it - is what moved this change out of the window; section
+3.3.1 records that the move did not bring the phone back, and what that retires.
