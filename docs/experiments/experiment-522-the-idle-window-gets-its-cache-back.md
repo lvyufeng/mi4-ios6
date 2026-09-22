@@ -1,0 +1,130 @@
+# 522: the idle window gets its cache back
+
+Stage90. Built host-side with `STAGE90_XNU_IDLE_STACK=1` (default), `STAGE90_XNU_ISTACK_SEPARATE=0`,
+**`STAGE90_XNU_EXIT_POC_FLUSH=0`** - i.e. 521's exit-side flush is *out* of this image - and the one
+state change 521's non-return left standing: **the D-cache is turned back on at the idle window's near
+end**. Gate green. **The run has not happened**: the device has not been on the bus since 521's
+non-return and needs a power press, so this step's hardware half is still owed. Everything below that is
+not the run is a fact of the image and of its clause.
+
+The image is `out/stage90/stage90-qcdt.img`, sha256
+`13d771938336fe65ccaf3dee833c14c0a9280d5365eda3f5c1e74cc6e6948825`, 8,540,160 bytes - the same size as
+521's, 520's and 519's. The copied entry image is `xnu_arm_entry.bin`, 5,519,996 bytes, sha256
+`576ecb326706e1e104e056ef16f420b3fd3e97d2396fc8e4732ea022ea01b312`, the same size as the last three
+because the copied span ends at a pinned `__bss_start`. `.text` is **5,306,504** (+96 against 521's
+5,306,408: `entry_idle_cache_enable` at 24 bytes, `entry_window_note` at 144, and the 4-byte `bl` to the
+exit-side flush that is now compiled out), `.data` 206,804, `.bss` **379,696** - byte-for-byte 519's,
+520's and 521's again, because the seven key tables are initialised and live in `.data`.
+
+## 1. What this arm is, and how it differs from what 521's section 5 predicted
+
+521's section 5 named the next arm as **the enter side cleaning *and* invalidating** - `FlushPoC_Dcache`
+where `__wrap_platform_cache_idle_enter` calls `CleanPoC_Dcache` today - with the exit-side flush back at
+0. The second half of that is what this image does. The first half is not, and the reason is worth
+writing down, because it is the same class of mistake the whole walk keeps finding:
+
+* `CleanPoC_Dcache` (`0x8004575c`), which that call site uses today, is `DCCSW` - it **cleans** and leaves
+  the line **valid**. `FlushPoC_Dcache` (`0x80045828`) is `DCCISW` over L1 **and** L2 - the right
+  operation for a stale valid line. So "replace one with the other at that site" was, on its face, a
+  one-token change that runs entirely outside the window. It was still not what this arm does, because
+  **it repairs the copy and leaves the window's own arithmetic alone**: the enter wrapper's
+  `strd r4, [sp, #-12]!` (the deadline) runs *before* the window, with the cache on, so a clean leaves a
+  valid line in both levels that the window's cache-off `push` cannot update - and that is 520's
+  mechanism exactly, reproduced by the repair as well as by the bug unless the invalidate lands between
+  the `strd` and the window's first store. Fixing the *timing* of a maintenance operation inside a
+  window whose semantics are "the cache is off" is a repair that has to be argued about; removing the
+  need for it is not.
+* **What this arm does instead is make the window's exit path run with the cache on**, so that the
+  question "which copy does the `pop` read" stops having two answers. `entry_idle_cache_enable()`
+  (`0x80007c30`, 24 bytes) reads `SCTLR`, sets bit 0 (`C`), writes it back, then `dsb sy` and `isb` -
+  the exact inverse of the three instructions Apple's own `platform_cache_idle_enter` executes at
+  `0x8004623c..0x80046244`, which the clause still finds in the image (`bic #4` at `0x80046240`), so
+  this is a change of state and not a no-op.
+
+The call is placed at the **near end of the window**, in `__wrap_platform_cache_idle_enter`
+immediately after `__real_platform_cache_idle_enter()` returns and before the WFI: the clause pins it at
+`0x8047c92c`, after the call that opens the window at `0x8047c924`. From there to the `pop` every access
+is a normal cached access:
+
+1. the WFI runs with the cache on;
+2. the exit's `push {fp, lr}` **write-allocates** the line and stores into it - a dirty, valid L1 line,
+   not a DRAM-only write behind a stale line;
+3. Apple's own L1 flush inside the exit (`FlushPoU_Dcache`, `0x80045874`) is `DCCISW`, so it **writes
+   that dirty line back to the Point of Unification - which on this CPU is the L2** - and then
+   invalidates the L1 copy; the L2 therefore ends up holding the *pushed* value and not the pre-window
+   one;
+4. `caches.c:490` sets `SCTLR.C` again (a no-op now, which is why this arm does not disturb Apple's own
+   sequence), and the `pop {fp, pc}` misses L1 and hits an L2 that has the right word in it.
+
+That is the whole prediction, and it is falsifiable in one reading: the panic is absent, or it is not.
+
+## 2. The build, and the defect that the build did *not* catch
+
+The clause `xnu_entry_522` asserts the enable's whole body by disassembly rather than by source order -
+one `SCTLR` read, one `orr ..., #4`, one `SCTLR` write, in that address order, with a `dsb` and an `isb`
+after - the wrapper's single call to it, positioned between the real enter and the WFI, the two `SCTLR`
+reads that bracket it (`_win` before, `_set` after) with the note published between the second read and
+`entry_note_pce_after`, Apple's own `bic ..., #4` still present inside `platform_cache_idle_enter`, and
+the 20-byte `g_slot_cwe` table with its three keys and three write sites. The shared clause lists were
+extended with it: seven tables, **44 keys**, and `entry_window_note:3` in the per-note counts.
+
+Two defects were found while building this, and one of them is the kind that only a reader catches:
+
+* **The objdump operand field.** The first build refused with "`entry_idle_cache_enable` holds 1 SCTLR
+  read(s), 1 SCTLR write(s) and 0 `orr ..., #4`". In `orr r3, r3, #4` objdump's immediate is field 6, not
+  field 5 - the mnemonic occupies a field, which `ldr`/`str` do not have. Fixed in the three places the
+  clause reads a `#4` immediate from (`orr #4`, `orr != #4`, `bic #4`). This is 517's operand-class
+  defect one step further along: not the register's spelling but the *field index*, and it failed the
+  build rather than passing quietly, which is the direction that costs nothing.
+* **The arm that was built first was not this arm.** `/tmp/stage90-521-resume.sh` exports
+  `STAGE90_XNU_EXIT_POC_FLUSH=${STAGE90_XNU_EXIT_POC_FLUSH:-1}` - 521's value, kept as the default when
+  the script was written - so the first 522 image carried the exit-side flush *and* the cache enable,
+  i.e. two state changes, one of them the operation that had just failed to come back. **The build was
+  green, and the 517 clause passed**: that clause asserts the image agrees with the *flag*, and
+  `STAGE90_XNU_EXIT_POC_FLUSH=1` is a perfectly self-consistent image. Nothing in the build compares the
+  flag against **the arm the step intends**, and the only reason it was caught is that the wrapper's
+  disassembly was read by hand and `bl 80045828 <FlushPoC_Dcache>` was sitting at `0x8047c97c`, the first
+  call in the exit wrapper. The image was rebuilt with the flag explicitly at 0. This is filed as a
+  measurement defect: **a resume script's retained default is a decision nobody re-made**, and the tell
+  is that the build log quotes the switch *and* the clause's own say line describes the arm - both were
+  read as "the switch is set the way the step wants" when the only thing they establish is internal
+  consistency.
+
+The rebuilt image's clause output is the one quoted in section 1, and the 517 clause now reads
+`STAGE90_XNU_EXIT_POC_FLUSH=0 - ... calls FlushPoC_Dcache ... 0 time`, which is the image this arm is.
+
+## 3. What the run is to be read for, written before it happens
+
+The gate's own text carries these four, so a run is read the same way whichever surface is opened first:
+
+1. **No `sleh_abort` panic and no `xnu_live_sleh_storm` growth past 520's 9.** The idle exit retires its
+   own epilogue - this is the verdict, and everything else is context for it.
+2. **`xnu_live_slot_cwe_win` shows `C` clear and `xnu_live_slot_cwe_set` shows it set, with `_calls`
+   >= 1.** The enable ran inside the window and really took. A `_win` with `C` already set means
+   `platform_cache_idle_enter` did not clear it where the image thinks it does, and the whole arm is
+   then about a window that was not open.
+3. **`xnu_live_slot_post_calls >= 1`** - the exit *returned* through the wrapper, which 520's run never
+   did (its pass died inside the call). This is the reading that says the `pop` went somewhere legal,
+   independently of where the boot goes next.
+4. **Any later ending than 520's is progress**: a different `pc`, or the boot moving on to whatever it
+   does after the first idle pass. The same death at the same `pc` says the mechanism is not the cache
+   state at all but something the window itself does - and the arm after that is a **null instrument**:
+   the same wrapper with the readings replaced by a counter, to separate the cost of the measurements
+   from the cost of the state change.
+
+One known consequence of this arm, recorded here so that it is not misread as a broken instrument:
+`entry_note_timebase_call` returns early when it sees `SCTLR.C` **set**, so once this enable has run, the
+`xnu_live_tb_*` channel goes quiet for the rest of the boot. That is the instrument declining to work in
+a state it was not written for, not a loss of the arm's own readings - 522's two readings come from
+`entry_window_note` and the slot channel, neither of which tests `C`.
+
+## 4. Safety
+
+Non-persistent `fastboot boot` only, and the run is a single one through
+`preflight_boot_check.sh --allow-xnu-entry` then `run_and_capture.sh --allow-xnu-entry`; nothing is
+flashed and nothing is ever written to storage, so a brick is impossible by construction and the failure
+mode is a hang that needs a power press. **The device is currently in exactly that state from 521 and the
+run cannot be made until it is back** - this step's gate is green and its image is frozen, and the run is
+owed rather than pending on anything in this repository. That the ledger now has two non-returns, both
+with cache maintenance inside the cache-off window and neither with a maintenance operation *outside* it,
+is the reason this arm moves the change out of the window rather than into it.

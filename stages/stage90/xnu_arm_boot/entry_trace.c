@@ -1628,6 +1628,10 @@ extern struct entry_slot_keys g_slot_post;
 extern struct entry_slot_rtc_keys g_slot_rtcpre;
 extern struct entry_slot_tb_keys g_slot_tb;
 extern void entry_slot_note(struct entry_slot_keys *k, uint32_t sp);
+/* 522: the window's near end. `entry_idle_cache_enable` writes `SCTLR.C` back on; `entry_window_note`
+ * publishes the register as Apple's enter left it and as this wrapper left it. See `entry_stubs.c`. */
+extern void entry_idle_cache_enable(void);
+extern void entry_window_note(uint32_t win, uint32_t set);
 extern void entry_slot_rtc_note(struct entry_slot_rtc_keys *k, uint32_t thr);
 extern void entry_slot_tb_note(struct entry_slot_tb_keys *k, uint32_t before, uint32_t after,
                                uint32_t lo);
@@ -1774,7 +1778,21 @@ void __wrap_platform_cache_idle_enter(void)
      * `entry_tpidrprw()` is carried because it is the one input to the expression that is a *register*:
      * the field cannot be read at all without it, so a run in which the window's `datap` is 0 and the
      * abort's `sleh_thr` is a different thread has answered a different question than a stale line.
+     *
+     * **522 turns the D-cache back on here, between the two readings below, and that is the step.**
+     * Everything after this point in a pass - the WFI, the exit's `push {fp, lr}`, the `pop {fp, pc}`
+     * that 519 and 520 died in - then runs with the cache on, so a store updates the line a later load
+     * reads instead of landing in DRAM behind a line nothing invalidated (`entry_stubs.c`'s block at
+     * `g_slot_cwe` has the mechanism and the evidence for it). `win` is read first, with the cache still
+     * off, and is what Apple's function left: `C` clear, which is the window's own proof that it opened.
+     * `set` is read after the write, with the cache back on, and is the change itself.
      */
+    {
+        uint32_t win = entry_sctlr();
+        entry_idle_cache_enable();
+        entry_window_note(win, entry_sctlr());
+    }
+
     entry_note_pce_after(entry_tpidrprw(), entry_cpu_datap(), up_style_idle_exit, real_ncpus,
                          entry_sctlr());
 }

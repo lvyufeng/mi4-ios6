@@ -28845,7 +28845,8 @@ verify_trace_symbols() {
     # `entry_slot_ab_note` is the abort's (those six plus `_rej`, because that site reads a foreign frame
     # and can refuse). `entry_slot_rtc_note` gains `_rin` - 520's run published `sp = 0` and `lr = 0` at
     # every abort with `_rej` still 0, so a refusal inside a mapped thread had no number of its own. 9.
-    for n520 in entry_slot_note:6 entry_slot_ab_note:7 entry_slot_rtc_note:9 entry_slot_tb_note:4; do
+    for n520 in entry_slot_note:6 entry_slot_ab_note:7 entry_slot_rtc_note:9 entry_slot_tb_note:4 \
+                 entry_window_note:3; do
         f520=${n520%%:*}; want520=${n520##*:}
         a520=$(sym_addr "$f520") || true
         b520=$(arm-none-eabi-objdump -d --start-address="$a520" --stop-address="$(next_global "$a520")" "$OUT/xnu_arm_entry.elf")
@@ -28889,7 +28890,8 @@ verify_trace_symbols() {
     # stages in them); the abort's is 40 (7 pointers and 3 counters); an rtc table is 52 (9 and 4); the
     # timebase table is 24 (4 and 2).
     for spec520 in g_slot_pre:48:6:pre g_slot_post:48:6:post g_slot_ab:40:7:ab \
-                    g_slot_rtcpre:52:9:rtcpre g_slot_rtcab:52:9:rtcab g_slot_tb:24:4:tb; do
+                    g_slot_rtcpre:52:9:rtcpre g_slot_rtcab:52:9:rtcab g_slot_tb:24:4:tb \
+                    g_slot_cwe:20:3:cwe; do
         sym520=${spec520%%:*}; rest520=${spec520#*:}
         sz520=${rest520%%:*}; rest520=${rest520#*:}
         cnt520=${rest520%%:*}; tag520=${rest520##*:}
@@ -28902,10 +28904,10 @@ verify_trace_symbols() {
         [[ "${u520:-0}" == "$cnt520" ]] ||
             layout_fail "entry_stubs.c spells ${u520:-0} distinct key(s) beginning xnu_live_slot_${tag520}_ and that site's table has $cnt520 pointer(s): every key the source names has to be one the table publishes, and every pointer the table holds has to be a key the source names - which is the same check 519's clause makes on its six keys, applied to a list this long because 520's readings are the only ones a dying run carries"
     done
-    k520=$(grep -o 'xnu_live_slot_\(pre\|post\|ab\|rtcpre\|rtcab\|tb\)_[a-z0-9_]*' "$BOOT_DIR/entry_stubs.c" | sort -u | wc -l)
-    [[ "${k520:-0}" == 41 ]] ||
-        layout_fail "the six key sets spell ${k520:-0} distinct keys and the instrument's own list is 41 (6+6+7+9+9+4): the number is asserted here and each key is asserted in the entry image below, because a key that is in the source and not in the image is a record the run cannot read and a key in the image and not in the source is one this clause cannot reason about"
-    for k in $(grep -o 'xnu_live_slot_\(pre\|post\|ab\|rtcpre\|rtcab\|tb\)_[a-z0-9_]*' "$BOOT_DIR/entry_stubs.c" | sort -u); do
+    k520=$(grep -o 'xnu_live_slot_\(pre\|post\|ab\|rtcpre\|rtcab\|tb\|cwe\)_[a-z0-9_]*' "$BOOT_DIR/entry_stubs.c" | sort -u | wc -l)
+    [[ "${k520:-0}" == 44 ]] ||
+        layout_fail "the seven key sets spell ${k520:-0} distinct keys and the instrument's own list is 44 (6+6+7+9+9+4+3): the number is asserted here and each key is asserted in the entry image below, because a key that is in the source and not in the image is a record the run cannot read and a key in the image and not in the source is one this clause cannot reason about"
+    for k in $(grep -o 'xnu_live_slot_\(pre\|post\|ab\|rtcpre\|rtcab\|tb\|cwe\)_[a-z0-9_]*' "$BOOT_DIR/entry_stubs.c" | sort -u); do
         # `-a`, and it is not decoration: this image is a binary, and a `grep` that decides a file is
         # binary and skips it answers "no match" for a key that is there - which is the same reading as
         # an arm that never fired, taken by a check that cannot tell them apart. The stored image is a
@@ -28969,7 +28971,88 @@ verify_trace_symbols() {
     ntail_call=$(grep -c 'entry_slot_publish_tail(k->calls)' "$BOOT_DIR/entry_stubs.c")
     [[ "${ntail_def:-0}" == 1 && "${ntail_call:-0}" == 1 ]] ||
         layout_fail "entry_stubs.c holds ${ntail_def:-0} definition(s) of entry_slot_publish_tail and ${ntail_call:-0} call(s) of it on a key table's own call count (the abort site's is the one that should have it): a rare-event rule applied at a site that makes thousands of passes would fill the live channel, and a site that quietly went back to the geometric subsample would only be visible in a run that happened to die on an abort that is neither <= 4 nor a power of two - which is exactly what 520's ninth, fatal abort was"
-        say "  xnu_entry_520: the two words of the idle exit's {fp, lr} slot, watched - __wrap_platform_cache_idle_exit ($(printf '0x%x' "$sxw")) takes sp off the register once (${sxw_mov} read at $(printf '0x%x' "${sxw_movaddr:-0}"), after its only stack movement, which is $sxw_dec decrement of $sxw_decv bytes and one restore), loads the four words ending at it into the table's own words itself (${sxw_nneg} loads at [${sxw_fo}], the first group ending at $(printf '0x%x' "${sxw_flast:-0}") before the first call and the second starting at $(printf '0x%x' "${sxw_lfirst:-0}") after the real exit - 521's repair, because 520 read them through the publisher's own frame and its log's pre_m4 is that function's saved lr -, and publishes them ${sxw_note} time(s) through entry_slot_note ($(printf '0x%x' "$snb")) - once before its call to the real platform_cache_idle_exit at $(printf '0x%x' "${sxw_realaddr:-0}") and once after, so the pair the fatal pop read is published before the push that fills it and the control is published only if the exit returns; the same wrapper reads cpu_data->rtcPop (cpu_data+#$s_pop, the offset cpu_idle's own body adds ${cpop} time) and the idle thread's saved sp/lr through entry_slot_rtc_note ($(printf '0x%x' "$srb")) at $(printf '0x%x' "${sxw_rtcaddr:-0}"), and the abort path carries the same two readings through entry_note_sleh ($(printf '0x%x' "$isleh"), ${sleh_n}+${sleh_r} call) - the words there read in place out of the exception frame by entry_slot_ab_note ($(printf '0x%x' "$sab")), which keeps the guard and the refusal count the two capture sites cannot have - so a run that dies publishes the words the pop read beside what the panel already says; __wrap_ml_get_timebase reads the counter either side of the real function and publishes them through entry_slot_tb_note ($(printf '0x%x' "$stb")), which is the only clock stamp the run has for the interrupt that was in service; the tables are in the image at their stated sizes (g_slot_pre/post 48 bytes = 6 keys, 2 counters and the 4 words the caller stages, g_slot_ab 40 = 7 and 3, g_slot_rtcpre/rtcab 52 = 9 and 4, g_slot_tb 24 = 4 and 2), the body of each holds exactly as many entry_live_write calls as its table has keys (6/7/9/4), and all $k520 keys are in the entry image's strings; the capture sites publish while their count is <= 4 and thereafter at the powers of two, the abort site publishes every abort up to $s_ab (STAGE90_SLOT_AB_MAX) and only then the powers of two - the rule 520's own ninth, fatal abort went missing under - and a reading refused by the kernel map's own window [$h_lo, $h_hi] is published as a zero with its refusal counted at the level it happened (_rej for a thread outside the map, _rin for a field of one inside it, which 520 published as a zero with nothing counting it)"
+        # ================================================ 522: the idle window's near end, and the D-cache
+    #
+    # **The one state change of this arm, and the checks that make it the change it claims to be.** The
+    # D-cache is switched back on in the enter wrapper, immediately after Apple's function returns, so
+    # that every store from there to the exit's `pop {fp, pc}` updates the line that `pop` reads instead
+    # of landing in DRAM behind a line nothing had invalidated - which is the mechanism 520's run
+    # measured (`xnu_live_slot_rtcpre_pop` against `pc`, one call apart) and the reason the `pop` loaded
+    # the deadline. Four things have to be true for that sentence to be about this image, and none of
+    # them can be read off a surface:
+    #
+    #  1. the write is a one-bit read-modify-write of `SCTLR` and nothing wider;
+    #  2. the wrapper calls it exactly once, *after* the real enter (so `_win` is a window that really
+    #     opened) and *before* the WFI and the exit (so the push is the store that has to be coherent);
+    #  3. the window's own clear is still inside `platform_cache_idle_enter` - if Apple's function ever
+    #     stopped clearing `C`, this call would be a no-op and the step would be a comment;
+    #  4. the reading has the two sides the claim has: an `SCTLR` read before the write and one after,
+    #     both in the wrapper's own body, with the note called after the second.
+    cwe=$(sym_addr entry_idle_cache_enable) ||
+        layout_fail "entry_idle_cache_enable is not in the linked image: 522's whole content is one write to SCTLR.C at the window's near end - without it this image is 521's with the flush off, i.e. 520's arm, which dies in the idle exit's pop"
+    cwenext=$(next_global "$cwe") ||
+        layout_fail "522's clause cannot read the end of entry_idle_cache_enable in the image: the four instructions of its body are the change, so a body this clause cannot bound is a change it cannot describe"
+    cwebody=$(arm-none-eabi-objdump -d --start-address="$cwe" --stop-address="$cwenext" "$OUT/xnu_arm_entry.elf")
+    IFS='|' read -r cwe_nmrc cwe_mrcaddr cwe_orr4 cwe_orr cwe_mcr cwe_nmcr cwe_dsb cwe_isb <<<"$(awk -v R='[a-z][a-z0-9]*' '
+        function hex(s) { sub(/:$/, "", s); return strtonum("0x" s) }
+        $3 ~ /^[a-z]/ { a = hex($1) }
+        $0 ~ ("mrc[ \t]+15, 0, " R ", cr1, cr0, \\{0\\}") { n++; if (n == 1) ma = a }
+        $0 ~ ("mcr[ \t]+15, 0, " R ", cr1, cr0, \\{0\\}") { m++; if (m == 1) ca = a }
+        $3 == "orr" && $6 == "#4" { o++; oa = a }
+        $3 == "orr" && $6 != "#4" { oo++ }
+        $3 == "dsb" { d++ }
+        $3 == "isb" { i++ }
+        END { printf "%d|%d|%d|%d|%d|%d|%d|%d", n+0, ma+0, o+0, oa+0, ca+0, m+0, d+0, i+0 }' <<<"$cwebody")"
+    [[ "${cwe_nmrc:-0}" == 1 && "${cwe_nmcr:-0}" == 1 && "${cwe_orr4:-0}" == 1 ]] ||
+        layout_fail "entry_idle_cache_enable holds ${cwe_nmrc:-0} SCTLR read(s), ${cwe_nmcr:-0} SCTLR write(s) and ${cwe_orr4:-0} \`orr ..., #4\`: the change is one bit of one control register - a body with a second write, or with an \`orr\` of another immediate, is a different change wearing this one's name, and the only thing that distinguishes them in the flags is the #4"
+    [[ "${cwe_mrcaddr:-0}" -lt "${cwe_orr:-0}" && "${cwe_orr:-0}" -lt "${cwe_mcr:-0}" ]] ||
+        layout_fail "entry_idle_cache_enable reads SCTLR at ${cwe_mrcaddr:-?}, ORs #4 at ${cwe_orr:-?} and writes it at ${cwe_mcr:-?}: the read has to precede the OR and the OR the write, or the value written is not the value read - which is the whole difference between enabling one bit and choosing a control-register value for this CPU"
+    [[ "${cwe_dsb:-0}" -ge 1 && "${cwe_isb:-0}" -ge 1 ]] ||
+        layout_fail "entry_idle_cache_enable carries ${cwe_dsb:-0} dsb and ${cwe_isb:-0} isb: a change to SCTLR is followed by the barriers that make it visible to the instructions after it, and a write without them is a change whose point in the instruction stream is not defined"
+    # (2) The wrapper: one call, after the real enter, bracketed by the two SCTLR reads, before the note.
+    IFS='|' read -r cwen cweaddr cwebefore cweafter cwenote cwepce <<<"$(awk -v R='[a-z][a-z0-9]*' '
+        function hex(s) { sub(/:$/, "", s); return strtonum("0x" s) }
+        /<__wrap_platform_cache_idle_enter>:/ { inb = 1; next }
+        !inb { next }
+        $3 ~ /^[a-z]/ { a = hex($1) }
+        $0 ~ ("mrc[ \t]+15, 0, " R ", cr1, cr0, \\{0\\}") { if (en == 0) b = a; else if (w == 0 && pa == 0 && af == 0) af = a }
+        $3 == "bl" && index($0, "<entry_idle_cache_enable>") > 0 { en++; ea = a }
+        $3 == "bl" && index($0, "<entry_window_note>") > 0 { w++; wa = a }
+        $3 == "bl" && index($0, "<entry_note_pce_after>") > 0 { pa++; pa2 = a }
+        END { printf "%d|%d|%d|%d|%d|%d", en+0, ea+0, b+0, af+0, wa+0, pa2+0 }' <<<"$ebod")"
+    [[ "${cwen:-0}" == 1 ]] ||
+        layout_fail "__wrap_platform_cache_idle_enter calls entry_idle_cache_enable ${cwen:-0} time(s) and 522's whole content is exactly one write to SCTLR.C in that wrapper: none leaves the window's stores incoherent - which is 520's arm - and more than one would be a second change in the same pass"
+    [[ "${cweaddr:-0}" -gt "${realaddr:-0}" ]] ||
+        layout_fail "the D-cache re-enable at ${cweaddr:-?} is not after the call that opens the window at ${realaddr:-?}: the change is only meaningful on the far side of Apple's clear, and this clause reads the *order* out of the image because a source-order claim is exactly what gcc is entitled to rearrange"
+    [[ "${cwebefore:-0}" != 0 && "${cwebefore:-0}" -lt "${cweaddr:-0}" && "${cweafter:-0}" -gt "${cweaddr:-0}" && "${cwenote:-0}" -gt "${cweafter:-0}" ]] ||
+        layout_fail "the wrapper's SCTLR reads are at ${cwebefore:-?} and ${cweafter:-?}, the write is at ${cweaddr:-?} and entry_window_note is called at ${cwenote:-?}: the pair has to bracket the write - the first is the window's own value, read with the cache still off, the second is what this call left, read with it on - and the note has to come after the second or it publishes a reading of the wrong moment"
+    [[ "${cwepce:-0}" -gt "${cweaddr:-0}" && "${cwenote:-0}" -lt "${cwepce:-0}" ]] ||
+        layout_fail "the re-enable at ${cweaddr:-?}, the note at ${cwenote:-?} and 516's cache-off reading at ${cwepce:-?} are not in that order inside the wrapper: 516's four values are the cache-off side of its comparison and 522's two are the change itself, so a note after 516's reading would put the change's own evidence on the far side of the reading it changed"
+    # (3) The window still opens. Apple's clear is a `bic ..., #4` on SCTLR inside
+    # `platform_cache_idle_enter`, and if it is ever removed (or moved) this step becomes a comment.
+    IFS='|' read -r cl_bic cl_bicaddr cl_mcr cl_ord <<<"$(awk -v R='[a-z][a-z0-9]*' '
+        function hex(s) { sub(/:$/, "", s); return strtonum("0x" s) }
+        $3 ~ /^[a-z]/ { a = hex($1) }
+        $3 == "bic" && $6 == "#4" { n++; ba = a }
+        $0 ~ ("mcr[ \t]+15, 0, " R ", cr1, cr0, \\{0\\}") { m++; if (m == 1) ca = a }
+        END { printf "%d|%d|%d|%d", n+0, ba+0, m+0, (ba && ca && ba < ca) ? 1 : 0 }' <<<"$pcebody")"
+    [[ "${cl_bic:-0}" == 1 && "${cl_mcr:-0}" == 1 && "${cl_ord:-0}" == 1 ]] ||
+        layout_fail "platform_cache_idle_enter holds ${cl_bic:-0} \`bic ..., #4\` and ${cl_mcr:-0} write(s) to SCTLR, in that order: ${cl_ord:-0}: the window's own clear is what makes 522's write a *change* - with the cache never disabled the re-enable is a no-op and this arm would be indistinguishable from 520's, and the two readings it publishes would say so"
+    # (4) The keys and their shape, in the same two directions as the other sites.
+    cwn=$(sym_addr entry_window_note) ||
+        layout_fail "entry_window_note is not in the linked image: 522 publishes the window's two SCTLR values through it, so a build without it carries the change and none of its evidence"
+    cwnnext=$(next_global "$cwn") ||
+        layout_fail "522's clause cannot read the end of entry_window_note in the image: its body is what ties the table's three keys to the run's records"
+    cwe_sz=$(arm-none-eabi-nm -S "$OUT/xnu_arm_entry.elf" | awk -v s=g_slot_cwe '$4 == s { printf "%d", strtonum("0x" $2) }')
+    [[ "${cwe_sz:-0}" == 20 ]] ||
+        layout_fail "g_slot_cwe is ${cwe_sz:-0} bytes in the linked image and 522's table is 20 (three key pointers and the two counters its publisher keeps): the two readings and the pass count are the whole of what says the window was re-opened, and a fourth key added without this number moving would be a key nothing publishes"
+    cwe_pub=$(awk '$3 == "bl" && index($0, "<entry_live_write>") > 0 { n++ }
+                   $3 == "b" && index($0, "<entry_live_write>") > 0 { n++ }
+                   END { printf "%d", n + 0 }' <<<"$(arm-none-eabi-objdump -d --start-address="$cwn" --stop-address="$cwnnext" "$OUT/xnu_arm_entry.elf")")
+    [[ "${cwe_pub:-0}" == 3 ]] ||
+        layout_fail "entry_window_note reaches entry_live_write ${cwe_pub:-0} time(s) and its table names three keys: a body with two writes is a key the run can never read, and one with four publishes a key the table did not name"
+    say "  xnu_entry_520: the two words of the idle exit's {fp, lr} slot, watched - __wrap_platform_cache_idle_exit ($(printf '0x%x' "$sxw")) takes sp off the register once (${sxw_mov} read at $(printf '0x%x' "${sxw_movaddr:-0}"), after its only stack movement, which is $sxw_dec decrement of $sxw_decv bytes and one restore), loads the four words ending at it into the table's own words itself (${sxw_nneg} loads at [${sxw_fo}], the first group ending at $(printf '0x%x' "${sxw_flast:-0}") before the first call and the second starting at $(printf '0x%x' "${sxw_lfirst:-0}") after the real exit - 521's repair, because 520 read them through the publisher's own frame and its log's pre_m4 is that function's saved lr -, and publishes them ${sxw_note} time(s) through entry_slot_note ($(printf '0x%x' "$snb")) - once before its call to the real platform_cache_idle_exit at $(printf '0x%x' "${sxw_realaddr:-0}") and once after, so the pair the fatal pop read is published before the push that fills it and the control is published only if the exit returns; the same wrapper reads cpu_data->rtcPop (cpu_data+#$s_pop, the offset cpu_idle's own body adds ${cpop} time) and the idle thread's saved sp/lr through entry_slot_rtc_note ($(printf '0x%x' "$srb")) at $(printf '0x%x' "${sxw_rtcaddr:-0}"), and the abort path carries the same two readings through entry_note_sleh ($(printf '0x%x' "$isleh"), ${sleh_n}+${sleh_r} call) - the words there read in place out of the exception frame by entry_slot_ab_note ($(printf '0x%x' "$sab")), which keeps the guard and the refusal count the two capture sites cannot have - so a run that dies publishes the words the pop read beside what the panel already says; __wrap_ml_get_timebase reads the counter either side of the real function and publishes them through entry_slot_tb_note ($(printf '0x%x' "$stb")), which is the only clock stamp the run has for the interrupt that was in service; the tables are in the image at their stated sizes (g_slot_pre/post 48 bytes = 6 keys, 2 counters and the 4 words the caller stages, g_slot_ab 40 = 7 and 3, g_slot_rtcpre/rtcab 52 = 9 and 4, g_slot_tb 24 = 4 and 2), the body of each holds exactly as many entry_live_write calls as its table has keys (6/7/9/4), and all $k520 keys are in the entry image's strings; the capture sites publish while their count is <= 4 and thereafter at the powers of two, the abort site publishes every abort up to $s_ab (STAGE90_SLOT_AB_MAX) and only then the powers of two - the rule 520's own ninth, fatal abort went missing under - and a reading refused by the kernel map's own window [$h_lo, $h_hi] is published as a zero with its refusal counted at the level it happened (_rej for a thread outside the map, _rin for a field of one inside it, which 520 published as a zero with nothing counting it)"
+    say "  xnu_entry_522: the idle window's D-cache is turned back on at its near end - __wrap_platform_cache_idle_enter calls entry_idle_cache_enable ($(printf '0x%x' "$cwe")) ${cwen} time at $(printf '0x%x' "${cweaddr:-0}"), after the call that opens the window at $(printf '0x%x' "${realaddr:-0}") and before the WFI, and that function's whole body is one bit of one control register: SCTLR read at $(printf '0x%x' "${cwe_mrcaddr:-0}"), orr #4 at $(printf '0x%x' "${cwe_orr:-0}"), written at $(printf '0x%x' "${cwe_mcr:-0}"), ${cwe_dsb} dsb and ${cwe_isb} isb ((Apple's own clear is still inside platform_cache_idle_enter: ${cl_bic} bic #4 at $(printf '0x%x' "${cl_bicaddr:-0}"), which is what makes this a change of state and not a no-op)) - so the WFI, the exit's push {fp, lr} and the pop {fp, pc} that 519 and 520 died in all run with the cache on, and a store updates the line a later load reads instead of landing in DRAM behind a line nothing had invalidated; the two readings are SCTLR as Apple's enter left it (_win, read with the cache off) and as this call left it (_set, read with it on), published through entry_window_note (g_slot_cwe, $cwe_sz bytes, ${cwe_pub} write(s) against its three keys) on the same <= 4 then powers-of-two schedule as the other per-pass sites, and this image adds no cache maintenance of its own - 521's FlushPoC_Dcache is behind STAGE90_XNU_EXIT_POC_FLUSH, which 517's clause asserts as $EXIT_POC_FLUSH against the image's own call count"
 
 
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls

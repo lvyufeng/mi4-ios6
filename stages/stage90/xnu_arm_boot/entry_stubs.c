@@ -6449,6 +6449,91 @@ __attribute__((noinline)) void entry_slot_rtc_note(struct entry_slot_rtc_keys *k
     entry_live_write(k->k_rin, k->inner);
 }
 
+/*
+ * ============================== 522: the idle window's D-cache, turned back on at its near end ======
+ *
+ * **This is the one state change, and it is the removal of a state rather than the addition of one.**
+ * 520's run answered *what* the fatal `pop {fp, pc}` read - `cpu_data->rtcPop`, the deadline the idle
+ * loop computed (`xnu_live_slot_rtcpre_pop = 0x04b79075` against `pc = 0x04b79074`) - and 521's arm,
+ * which put 517's exit-side clean-and-invalidate in that window, did not come back. What follows from
+ * those two runs together is the mechanism itself, and it needs no cache maintenance at all:
+ *
+ *   `platform_cache_idle_enter` clears `SCTLR.C` (`caches.c:406`), and *every* store between that
+ *   instruction and `platform_cache_idle_exit`'s `SCTLR.C = 1` (`caches.c:490`) therefore goes to DRAM
+ *   and leaves the cache holding whatever it held before the window. The exit's own `push {fp, lr}` is
+ *   such a store. The `pop {fp, pc}` that follows the re-enable then reads a line the push never
+ *   updated: the L1 is invalidated by Apple's own `FlushPoU_Dcache` in that same function, but the
+ *   write-back cache below it still has the pre-window line - which holds the deadline, because this
+ *   image's own `__wrap_platform_cache_idle_enter` spills `cpu_idle`'s `r4` (which is `lastPop`, the
+ *   deadline) at `[sp, #-12]!`, and with the exit wrapper's 8-byte frame the word the `pop` reads as
+ *   `pc` IS that address. So the `pop` loads the deadline and jumps to it.
+ *
+ * **The fix is to make the push's store update the cache, which is what happens when the D-cache is
+ * on.** One write to `SCTLR.C` in the enter wrapper, immediately after Apple's function returns: from
+ * there on the WFI, the exit's push and every reading in between run coherently, and "the cache holds a
+ * stale line for a word written during the window" stops being a possible failure - by construction,
+ * not by maintenance. Nothing else changes: the window's cache *maintenance* (Apple's own CleanPoU at
+ * `caches.c:415`, FlushPoU at `:62d8`, the exit's PoU clean) still runs exactly as before, and this
+ * image adds no cache operation of its own - 521's `FlushPoC_Dcache` in the window is gone, behind the
+ * flag at 0 (517's clause asserts the flag against the image's own call count).
+ *
+ * **Why the near end and not the far one.** The far end is where the loss happens, but it is also where
+ * the cache is off, and a maintenance operation there is the one thing this project has now twice seen
+ * a device not come back from (517's first run, and 521's). The near end is entered with the cache on,
+ * it is the last place before the window whose state this image can still change cheaply, and the
+ * change is a write to a control register rather than a walk over either cache's geometry.
+ *
+ * **The pair of readings says the change happened.** `g_slot_cwe` publishes `SCTLR` as Apple's enter
+ * left it (`_win`, expected `C` clear - the window really did open) and as this call left it (`_set`,
+ * expected `C` set), on the same `<= 4` then powers-of-two schedule as the other per-pass sites. Both
+ * values are read by the *caller*, from the register, before and after the write - `_win` with the
+ * cache off and `_set` with it on - so neither is a memory read that the window could have made stale,
+ * and `_calls` says how many passes published.
+ */
+struct entry_slot_cwe_keys {
+    const char *k_win, *k_set, *k_calls;
+    uint32_t    calls, published;
+};
+
+struct entry_slot_cwe_keys g_slot_cwe = {
+    "xnu_live_slot_cwe_win", "xnu_live_slot_cwe_set", "xnu_live_slot_cwe_calls", 0u, 0u };
+
+__attribute__((noinline)) void entry_window_note(uint32_t win, uint32_t set)
+{
+    g_slot_cwe.calls++;
+    if (entry_slot_publish(g_slot_cwe.calls) == 0u)
+        return;
+    if (entry_live_ready() == 0u)
+        return;
+
+    g_slot_cwe.published++;
+    entry_live_write(g_slot_cwe.k_win, win);
+    entry_live_write(g_slot_cwe.k_set, set);
+    entry_live_write(g_slot_cwe.k_calls, g_slot_cwe.calls);
+}
+
+/*
+ * **The write itself, and it is deliberately the smallest one that does the job.** A read of `SCTLR`,
+ * `orr` with `4` (`C`, the D-cache enable), a write back, then the two barriers the architecture asks
+ * for around a change to a system control register. It is called from the enter wrapper only, and
+ * `build_entry.sh`'s clause reads those four instructions out of the linked body - a `bic`/`orr` pair
+ * with any other immediate, or a `mcr` to a different register, would be a different change wearing
+ * this one's name, and the *flags* one cannot tell the two apart on is exactly what `#4` encodes.
+ *
+ * It does not touch any other bit: `SCTLR` on this CPU is `0x00c50838`-shaped when the kernel runs
+ * (M, Z, I, C, V, U, XP, F, ...), and a read-modify-write of one bit is the least this step can be.
+ */
+void entry_idle_cache_enable(void)
+{
+    uint32_t v;
+
+    __asm__ volatile ("mrc p15, 0, %0, c1, c0, 0" : "=r"(v));
+    v |= 4u;
+    __asm__ volatile ("mcr p15, 0, %0, c1, c0, 0" :: "r"(v) : "memory");
+    __asm__ volatile ("dsb sy" ::: "memory");
+    __asm__ volatile ("isb" ::: "memory");
+}
+
 struct entry_slot_tb_keys {
     const char *k_before, *k_after, *k_lo, *k_calls;
     uint32_t    calls, live;

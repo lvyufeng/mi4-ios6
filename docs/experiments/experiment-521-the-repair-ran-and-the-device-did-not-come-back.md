@@ -135,6 +135,13 @@ Two further consequences worth writing down before the arm is built:
   after that is a *null instrument*: the same wrapper with the capture replaced by a counter, to separate
   "the readings cost something" from "the flush costs something".
 
+> **Superseded, 2026-09-22:** the arm that was built as 522 is **not** the quote above. It keeps the
+> exit-side flush at 0, as predicted here, but its one state change is turning the **D-cache back on at
+> the window's near end** rather than making the enter side invalidate - because repairing the copy still
+> leaves the `strd` and the window's cache-off store arguing about which one the `pop` reads, while
+> re-enabling the cache removes the argument. Experiment 522 section 1 has the reasoning; nothing above
+> is changed, and the second of the two consequences listed here stands as written.
+
 ## 6. Safety
 
 Non-persistent `fastboot boot` only, one run, through `preflight_boot_check.sh --allow-xnu-entry` and
