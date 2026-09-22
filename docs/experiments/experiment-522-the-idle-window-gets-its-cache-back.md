@@ -58,6 +58,45 @@ is a normal cached access:
 
 That is the whole prediction, and it is falsifiable in one reading: the panic is absent, or it is not.
 
+### 1.1 The exit's own disassembly, which turns the prediction into four addresses
+
+Read off this image rather than assumed, because the whole arm turns on *where* `SCTLR.C` comes back
+relative to the exit's `push` and its `pop` - and the two differ by three instructions that separate
+520's death from this arm's prediction:
+
+```
+800462d4 <platform_cache_idle_exit>:
+800462d4:	push	{fp, lr}                     <- 520: C is OFF here, so this store reached DRAM only
+800462d8:	bl	80045874 <FlushPoU_Dcache>   <- L1-only DCCISW: cleans and invalidates, leaves the L2
+800462dc:	...                                  (520's dump read this as lr out of the frame)
+80046304:	bl	80045728 <InvalidatePoU_Icache>
+80046308:	bl	800173c0 <flush_core_tlb>
+8004631c:	mrc	15, 0, r0, cr1, cr0, {0}    <- caches.c:490's read
+80046320:	orr	r0, r0, #4
+80046324:	mcr	15, 0, r0, cr1, cr0, {0}    <- SCTLR.C comes back ON, here
+80046328:	isb	sy
+8004632c:	mrc	15, 0, r0, cr13, cr0, {4}   <- getCpuDatap(), read with the cache already on
+80046338:	str	r1, [r0, #304]	; 0x130     <- cpu_CLW_active = 1 (caches.c:494)
+8004633c:	pop	{fp, pc}                     <- the instruction 519 and 520 faulted on
+```
+
+Three things follow, and none of them was in the arm's design argument until this was read:
+
+* **`SCTLR.C` is set at `0x80046324` - *after* the `push`, *before* the `pop`.** So 520's `pop` did not
+  run with the cache off; it ran with the cache **on**, which is exactly why it *hit* the stale valid line
+  instead of missing it. That is the mechanism, and it is three instructions wide: the window's
+  `SCTLR.C`-clear is undone 24 bytes before the fatal load.
+* **This arm's only job is therefore the `push` at `0x800462d4`.** With `C` on there, the store hits the
+  valid L1 line that holds the pre-window deadline, writes `lr` into it and marks it dirty; the very next
+  instruction - `bl FlushPoU_Dcache`, `DCCISW` - cleans it to the Point of Unification, i.e. **into the
+  L2**, and invalidates the L1 copy. The `pop` 100 bytes later misses L1 and reads the L2, which now holds
+  `lr`. Nothing in that chain is a maintenance operation performed *inside* the window by this image:
+  the enable is at the window's near end and the flush is Apple's own.
+* **`InvalidatePoU_Icache` and `flush_core_tlb` at `0x80046304`/`0x80046308` cannot lose the word**: they
+  touch the I-cache and the TLB, not the D-cache line the `push` dirtied - and they sit *between* the
+  flush and the pop, which is why the ordering above had to be read rather than reasoned about. A
+  D-invalidate in that slot would have made this arm fail in the same direction as 521.
+
 ## 2. The build, and the defect that the build did *not* catch
 
 The clause `xnu_entry_522` asserts the enable's whole body by disassembly rather than by source order -
