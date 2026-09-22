@@ -222,10 +222,14 @@ The gate's own text carries these four, so a run is read the same way whichever 
    from the cost of the state change.
 
 One known consequence of this arm, recorded here so that it is not misread as a broken instrument:
-`entry_note_timebase_call` returns early when it sees `SCTLR.C` **set**, so once this enable has run, the
-`xnu_live_tb_*` channel goes quiet for the rest of the boot. That is the instrument declining to work in
-a state it was not written for, not a loss of the arm's own readings - 522's two readings come from
-`entry_window_note` and the slot channel, neither of which tests `C`.
+`entry_note_timebase_call` increments its counters and then returns early when it sees `SCTLR.C` **set**
+(`entry_stubs.c:5768`), so once this enable has run the `xnu_live_tb_*` records stop. **That is not
+silence, and reading it as silence would be a mistake**: the same function publishes
+`xnu_live_tb_calls` and `xnu_live_tb_off` (`entry_stubs.c:5897-5898`), so what the log shows after the
+enable is both counters rising together with `xnu_live_tb_seq` frozen - the instrument stating *why* it
+has nothing to add, which is a reading rather than a gap. The one C-gated publisher in the image is that
+one; the three the verdict rests on (`xnu_live_sleh_*`, `xnu_live_slot_cwe_*`, `xnu_live_slot_pre/post_*`)
+never test `C`, so this arm cannot blind its own evidence.
 
 **And one consequence of the enable for the readings' *durability*, worked through rather than assumed.**
 The `push` that loses in 520 is not the only thing the window does with `SCTLR.C = 0`: the exit wrapper's
