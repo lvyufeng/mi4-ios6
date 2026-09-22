@@ -1,7 +1,8 @@
 # 519: the idle thread gets a stack of its own
 
-Stage90, host-side. `STAGE90_XNU_IDLE_STACK=1` (default), `STAGE90_XNU_ISTACK_SEPARATE=0`,
-`STAGE90_XNU_EXIT_POC_FLUSH=0`. Device `4a2fe00b` untouched; nothing flashed, nothing booted.
+Stage90. Built host-side with `STAGE90_XNU_IDLE_STACK=1` (default), `STAGE90_XNU_ISTACK_SEPARATE=0`,
+`STAGE90_XNU_EXIT_POC_FLUSH=0`, then **run once on hardware** (§9) through the standing gate, one
+non-persistent `fastboot boot`, nothing flashed and nothing written to storage.
 
 The image this step builds is `out/stage90/stage90-qcdt.img`, sha256
 `40bf8a0bc8cccc33f7e1bd765304364d99807319c006ce774f9394ebc34b66bc`, 8,540,160 bytes (`.text`
@@ -216,3 +217,133 @@ run, when it happens, goes through `stages/stage90/preflight_boot_check.sh --all
 `run_and_capture.sh --allow-xnu-entry`, one non-persistent `fastboot boot`, **nothing flashed and
 nothing written to storage** — so the brick half of the standing constraint ("一定要保证不要让设备彻底
 死机或者变砖") holds by construction, as it has for every run since 506.
+
+## 9. The run
+
+2026-09-22. Gate green (it printed `40bf8a0b...`, the file's own hash, and `found 4a2fe00b in adb`),
+one non-persistent `fastboot boot` (`Sending 'boot.img' (8340 KB) OKAY` / `Booting OKAY`), the device
+returned inside the capture window on its own, and `/tmp/cancro-last_kmsg.txt` came back at 596,958
+bytes with 3,932 `MI4IOS6_STAGE90` lines and 4,264 `xnu_live_*` records, ending `No errors detected`.
+
+**Prediction 1 obtained.** The six keys, verbatim:
+
+```
+xnu_live_idlestack_sp=0x8054fea8          inside [0x8054bee0, 0x8054fee0)
+xnu_live_idlestack_top=0x8054fee0         the array's top, as entry_stubs.c computes it
+xnu_live_idlestack_istackptr=0x80518000   the handler's stack, read live
+xnu_live_idlestack_intstacktop=0x80518000 the field the kernel's predicate reads
+xnu_live_idlestack_inwin=0x00000000       ml_at_interrupt_context() is false here
+xnu_live_idlestack_calls=0x00000001       one pass in the whole boot
+```
+
+The idle body ran on the array, outside the window the predicate tests, and the arm reached the
+instruction the boot takes. The reading also cross-checks the geometry from the live side: the note is
+called from the enter wrapper with its body `sp`, so `sp = 0x8054fea8` puts the enter wrapper's frame at
+`[0x8054fec0, 0x8054fed8)` and the array's top at `0x8054fee0` — hence `cpu_idle`'s `sub sp, sp, #8` at
+`0x8000d460` lands at `0x8054fed8`, the exit wrapper's `str r4, [sp, #-8]!` puts the real exit's entry
+`sp` at **`0x8054fed0`**, and that is exactly the `sp` the panic below prints. Two independent sources,
+one number.
+
+**Prediction 2 obtained, in its second branch.** The fatal abort is the *diagnosed* one:
+
+```
+panic(cpu 0 caller 0x80454584): sleh_abort: prefetch abort in kernel mode: fault_addr=0x7152a6c
+r0:   0x8051a000  r1: 0x00000001  r2: 0xde500000  r3: 0x0008a400
+r4:   0x07152a6d  r5: 0x8051a000  r6: 0x8051a0e0  r7: 0x00000000
+r8:   0x80553520  r9: 0xc04990d0 r10: 0x800ba588 r11: 0x07152a6d
+r12:  0xde58a40a  sp: 0x8054fed0  lr: 0x800462dc  pc: 0x07152a6c
+cpsr: 0x800000b3 fsr: 0x00000005 far: 0x07152a6c
+Attempting system restart...MACH Reboot
+```
+
+so `ml_at_interrupt_context()` answered **false** for the faulting stack and §3's second effect is a
+property the hardware confirmed: 516, 517 and 518 all ended in Apple's flat
+`panic: sleh_abort at interrupt context`; this one names the address and prints the panel. The frame is
+authentic — `xnu_live_sleh_frame_ok = 1`, `_user = 0`, `_fsr_frame = 5`, `_storm = 9`, `_seen = 9` (the
+fatal abort is the ninth of the boot; the boot had already reached `load_init_program` and `/sbin/launchd`
+by then, so the earlier eight are the boot's own page-in faults, not idle-pass events).
+
+**And the panel is the idle path's own context, one instruction before the `pop`** — which is new
+information rather than a restatement, because every field can be traced to an instruction in this image:
+
+* `sp = 0x8054fed0` is the exit's entry `sp` from the live chain above, which is also `pop {fp, pc}`'s
+  *post*-pop value (the writeback is part of the instruction and the branch follows it);
+* `lr = 0x800462dc` is the return address of the exit's own `bl FlushPoU_Dcache` at `0x800462d8`, and the
+  exit never overwrites LR again — reachable only through the `bcc 0x8004630c` at `0x80046300`, which
+  skips both later `bl`s;
+* `r0 = 0x8051a000`, `r1 = 1` are the operands of the exit's last store, `str r1, [r0, #0x130]`
+  (`0x8004632c`..`0x80046338`);
+* `r5 = 0x8051a000` (`cpu_data`) and `r4 = 0x07152a6d` are `cpu_idle`'s own registers at the call:
+  `ldr r5, [r1, #1484]` at `0x8000d470`, and `ldm r6, {r4, r7}` at `0x8000d4b8` with `r6 = r5 + 0xe0` from
+  `0x8000d4b0`, i.e. `r4 = cpu_data->rtcPop`, the deadline `cpu_idle` compares against its own `lastPop`.
+
+So the two words the `pop` read are `fp = 0x07152a6d` and `pc = 0x07152a6c`: two counter readings **one
+tick apart**, the later one in the lower word — and the later one is the very value the panel's `r4`
+holds, i.e. the deadline the idle loop was working with. The idle body's stack is no longer shared with
+anything, and the corruption still lands in the exit's saved `{fp, lr}`.
+
+## 10. The frame arithmetic, read off this image, and what it rules out
+
+`EXC_CTX_SIZE` is not a guess: `genassym.c:188` defines it as
+`sizeof(arm_saved_state) + sizeof(arm_vfpsaved_state) + VFPSAVE_ALIGN` = `80 + 264 + 16 = 360`, and the
+image agrees — `fleh_irq_kernel` (`0x8001a9e8`) opens `cpsid i,#19` / `sub sp, sp, #360` /
+`stm sp, {r0-r12}` / `str r0, [sp, #52]` (SS_SP = `sp + 360`) / `str lr, [sp, #56]`, and
+`prefabt_from_kernel` (`0x8001a5e0`) builds the same 360 bytes on the interrupted stack. The VFP area is
+placed by `add r0, sp, #80` / `bic r0, #15` / `add r0, #16` and is 264 bytes
+(`arm_vfpsaved_state` = `uint32_t r[64]; uint32_t fpscr; uint32_t fpexc`, `thread.h:81`).
+
+Two consequences, and both are arithmetic on the image rather than assumptions about it:
+
+* **No exception frame can write above the `sp` it interrupted.** The VFP area ends at
+  `base + align16(base + 80) + 16 + 264`, and `base = sp - 360`, so it ends at or below `base + 360 = sp`.
+  Everything the vector writes is inside `[sp - 360, sp)`. 518's mechanism — the handler's pushes from
+  `istackptr` downward reaching the idle code's saved `{fp, lr}` — is therefore *not reachable in this
+  image even in principle*, and with `STAGE90_XNU_ISTACK_SEPARATE=0` the handler's top is
+  `0x80518000`, 8 KB above the array's top, besides.
+* **The top 8 bytes of a frame are slack.** When the alignment works out as it does for `sp = 0x8054fed0`,
+  the VFP area ends 8 bytes below the frame's top — and the exit's `{fp, lr}` slot *is* those 8 bytes.
+  The frame reserves that memory and leaves it alone, so a value found there is the interrupted code's
+  own, which is what makes §9's reading of `r0`/`r1`/`r4`/`r5` an identification rather than an
+  interpretation: there was nowhere for a spill to have come from.
+
+That narrows the question the next arm has to answer. The writers the idle path in this image actually
+contains, and what each writes into the two words in question:
+
+| writer | where it stores | what |
+|---|---|---|
+| `platform_cache_idle_exit` `0x800462d4` | `push {fp, lr}` at `sp = 0x8054fed0` → `[0x8054fec8, 0x8054fed0)` | `{cpu_idle's fp, 0x8047c964}` — **the slot**, and the only writer of both words after the pass starts |
+| `__wrap_cpu_idle_wfi` `0x8047c884` | `strd r4, [sp, #-12]!` at `sp = 0x8054fed8` → `[0x8054fecc, 0x8054fed4)` | `(cpu_idle's r4, cpu_idle's r5)` — the slot's **upper** word holds the deadline `0x07152a6d` |
+| `__wrap_platform_cache_idle_enter` `0x8047c8d4` | same idiom, same address | same |
+| `__wrap_platform_cache_idle_exit` `0x8047c958` | `str r4, [sp, #-8]!` → `[0x8054fed0, 0x8054fed8)` | one word, above the slot |
+| `entry_note_pcx` `0x800071b8` (tail-called with `sp = 0x8054fed8`) | 32-byte frame `[0x8054feb8, 0x8054fed8)`; `strd r8, [sp, #16]` | `(sctlr, tpidrprw)` — **on the slot** |
+
+Every one of them runs *before* the exit's `push` in a pass, and none of them writes two successive
+counter readings (the two `strd`s store the deadline and `cpu_data`; `entry_note_pcx` stores two small
+integers). So the enumeration that the disassembly supports does not produce the pair, and the geometry
+says no exception frame can either. **The step's conclusion is therefore not a mechanism but a
+measurement**: the writer has to be watched, not reasoned about — and the slot is narrow enough (two
+words, one fixed address derived from the array's top) that watching it is a cheap instrument.
+
+## 11. What the next arm publishes
+
+Five two-word readings, live (the channel survives a fatal panic — that is why these keys are read
+where they are, not from a console epilogue), each with the pass count and `sp`:
+
+1. in `__wrap_platform_cache_idle_exit`, **before** its `bl platform_cache_idle_exit`, the two words at
+   `[sp-8, sp)` — what the real exit's `push` is about to overwrite and its `pop` will read;
+2. the same two words **after** the call returns, i.e. the control: on a surviving pass they are the
+   pushed `{fp, lr}` (`0x8047c964`-shaped), and if the run dies in the `pop` this reading never arrives;
+3. in `entry_note_sleh`, the two words at `[sp-16, sp-8)` and at `[sp-8, sp)` of the aborted context, so
+   a fatal run reports what the `pop` read beside what the panel already says;
+4. `__wrap_ml_get_timebase`'s own readings — 517's instrument is still in the image and is the only code
+   on this path that could read the counter twice in a row, which is exactly the shape of the pair;
+5. `cpu_data->rtcPop` (`+0xe0`, the value `cpu_idle` keeps in `r4`) and the idle thread's saved `sp`/`lr`
+   from its pcb (`TPIDRPRW + 1480` = `TH_KSTACKPTR`, the saved state at `+16`), so the run can say whether
+   the value that was jumped to is the deadline the idle loop computed.
+
+The decision rule is written into the arm: if reading 1 is already the timebase pair, the writer wrote
+*before* the exit ran and the exit's own `push` cannot be what the `pop` read — which would mean the
+dying `pop` belongs to a different frame than the push that should have filled it. If reading 1 is clean
+and the run still dies in the `pop`, the writer ran between the `push` and the `pop`, and §10 says the
+only thing that can run there is an exception — whose frames are now bounded exactly.
+
