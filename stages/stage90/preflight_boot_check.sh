@@ -1422,6 +1422,58 @@ else
   echo "from here. Read section 4 of that file by hand before narrating a run's outcome."
 fi
 
+# **And the log those instructions name is, right now and usually, NOT the coming run's.** Both
+# branches above end by telling the reader to read the file at `$LOG` - and the runner only writes it
+# in step 5, which it reaches **only if the device returned** (`RETURNED` true). On the path that
+# refuses to call a non-return (the code whose message names this file), and on both `exit 2` paths,
+# the script leaves before that step and `$LOG` is **untouched**. So the file on disk is very often the
+# previous run's, and there is a specific trap in that, not a general caution: the log left there by
+# the 2026-09-22 run already carries **exactly the bracket 547 section 4 pre-registers** - one
+# `pre_calls`, one `rtcpre_calls`, `post_calls` absent - because it is the death that prediction was
+# written from. A run whose capture failed, read through that file, would confirm the prediction with
+# the data that produced it, and the confirmation would be unattributable (the position of the keys in
+# the file cannot separate the two runs either: the ram console's two blocks make line order
+# chronological only within a block). The gate cannot check this after the run - it is a preflight - so
+# it does the two things it can: it records what the file *is* at the only moment a "before" exists,
+# and it names the bracket already in it rather than describing the hazard. After the run, the test is
+# one command: this sha256 must have changed. Unchanged means no capture happened - the state exit 3
+# describes - and the honest reading is that state, not a bracket read out of this file.
+echo "== the log those instructions name, as it stands before the run =="
+echo "  $LOG"
+if [[ ! -e $LOG ]]; then
+  echo "  absent - and that is the useful part: after the run, this file *existing* is itself the first"
+  echo "  check, because the runner writes it with an 'rm' then a redirect from adb (step 5). A file that"
+  echo "  is still absent afterwards captured nothing, whatever the exit code said."
+elif [[ ! -r $LOG ]]; then
+  echo "  UNREAD - present but not readable by $(id -un), so its contents cannot be fingerprinted here."
+  echo "  A hand re-capture under sudo leaves the file root-owned; read it as root before attributing"
+  echo "  anything to the coming run, and fingerprint it as root too."
+else
+  LOG_SHA=$(sha256sum "$LOG" | cut -d' ' -f1 || true)
+  LOG_BYTES=$(wc -c < "$LOG" || true)
+  echo "  now: $(stat -c '%s bytes, mtime %y' "$LOG")"
+  echo "       sha256 $LOG_SHA"
+  # The reader's own rule is `tail -1` (run_and_capture.sh's `keyval`: last occurrence wins), so the
+  # last value is printed beside the count - a count alone cannot say *which* record a reader would
+  # take, and this project has paid for that distinction more than once.
+  for _k in pre rtcpre post; do
+    _c=$(grep -ac "xnu_live_slot_${_k}_calls=" "$LOG" || true)
+    _v=$(grep -ao "xnu_live_slot_${_k}_calls=[0-9a-fx]*" "$LOG" 2>/dev/null | tail -1 || true)
+    printf '       %-40s %s record(s)%s\n' "xnu_live_slot_${_k}_calls" "$_c" \
+      "${_v:+, last $_v}"
+  done
+  _p=$(grep -ac 'xnu_live_slot_pre_calls=' "$LOG" || true)
+  _r=$(grep -ac 'xnu_live_slot_rtcpre_calls=' "$LOG" || true)
+  _q=$(grep -ac 'xnu_live_slot_post_calls=' "$LOG" || true)
+  if [[ ${_p:-0} -ge 1 && ${_r:-0} -ge 1 && ${_q:-0} -eq 0 ]]; then
+    echo "  ** This file already carries the bracket 547 section 4 pre-registers for the arm in out/:"
+    echo "     pre and rtcpre published, post absent. It is an EARLIER run's log - the 2026-09-22 death"
+    echo "     the prediction was written from - so it cannot confirm anything about the coming run."
+    echo "     If its sha256 is the same after the run, the run produced no capture at all, and the"
+    echo "     bracket above is the one that was there before it."
+  fi
+fi
+
 # **And the one address the result reader compares against, checked here because here is the only
 # place both of its definitions are readable** - the reader's own rule, turned on the reader. 554's
 # shape test separates a *predicted* pop death from a *surprise* by comparing the log's published
