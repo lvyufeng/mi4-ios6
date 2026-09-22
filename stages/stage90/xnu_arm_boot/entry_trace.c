@@ -372,6 +372,61 @@ extern void FlushPoC_Dcache(void);
 #define STAGE90_XNU_EXIT_POC_FLUSH 0
 #endif
 
+/*
+ * ---------------------------------------------------------------- 533: the near-end enable is a switch
+ *
+ * **526's run came back negative, and this switch is what that result buys.** The arm was 522's image
+ * with the exit wrapper's capture replaced by a counter - the same frame, the same single `mov %0, sp`,
+ * the same call sites, the same enter-side `entry_idle_cache_enable`, and no loads and no `pend_*`
+ * stores - and the device did **not** come back within the run's 180 s (host USB: `18d1:d00d` at
+ * 16:35:46, gone one second later, nothing on `usb 3-10` after it; the same one-dead-second signature
+ * as 521's and 522's non-returns, and the fourth time the hardware watchdog has not recovered a run -
+ * `STAGE90_HW_WATCHDOG` is `_ARMED` in this image's own build config). So the capture's memory traffic
+ * is not what costs the return, and the question moves to the other place 526 and 520 differ.
+ *
+ * Laid out, the four configurations this phase has measured are:
+ *
+ *   | | exit-side `FlushPoC_Dcache` | enter-side `SCTLR.C` re-enable | capture | return |
+ *   | --- | --- | --- | --- | --- |
+ *   | 518/519/520 | off | off | 520's shape | **yes** - a panic at the pop, on XNU's own `MACH Reboot` |
+ *   | 521 | **on** | off | 521's repair | no (power press) |
+ *   | 522 | off | **on** | 521's repair | no (power press) |
+ *   | 526 | off | **on** | **none** (a counter) | no (power press) |
+ *
+ * Two cells are measured and one is missing. 521's row carries *four* differences from 520's, so it
+ * implicates nothing on its own - the flush has never run without the capture beside it. 522's row and
+ * 526's differ by exactly the capture's memory traffic, and 526 says that traffic is innocent, which
+ * leaves **the enter-side re-enable** as the one deliberate change the last two non-returns share with
+ * 521 and 520's returning cell does not. So the next arm is the one that puts the enable *off* while
+ * everything else stays as 526's, and that is why this switch exists and why **its default is 0**:
+ * the default is the cell that came back, and a build that forgets the variable is the baseline arm
+ * rather than the one under test.
+ *
+ * What the arm's run is for, written before it happens, and the two readings are different questions:
+ *
+ *   1. **does the device come back** - a return says the enable is what costs it, and it also hands the
+ *      phase the thing it has been missing since 521: a *returning* configuration that carries the
+ *      instrument, which is what every driver step needs. A second non-return would say the null
+ *      wrapper's own two-publisher shape is what kills the return - 520 called `entry_slot_note` at the
+ *      same two sites and came back, so that outcome puts the difference between the two publishers
+ *      (four `.bss` reads with the D-cache off, and eight live-channel writes instead of two) on the
+ *      table, and 526's own doc's `_pre_calls`-present-with-the-words-absent rule is then the thing to
+ *      check.
+ *   2. **if it returns, where it dies**: 520's `sleh_storm 9` at the same `pc` is the pop, and anything
+ *      later is progress. `xnu_live_slot_cwe_win` and `_set` are both read by `entry_window_note` and
+ *      with the enable off they must *agree* - both with `C` clear - which is the reading that says
+ *      which arm ran, and is the reason the note stays in the image even when the write it brackets is
+ *      gone: an absent key and a key that says "no change" are different facts (`mi4-silence-is-a-
+ *      reading-only-if-success-is-silent`).
+ */
+#ifndef STAGE90_XNU_IDLE_CACHE_ENABLE
+#define STAGE90_XNU_IDLE_CACHE_ENABLE 0
+#endif
+
+#if (STAGE90_XNU_IDLE_CACHE_ENABLE != 0) && (STAGE90_XNU_IDLE_CACHE_ENABLE != 1)
+#error "STAGE90_XNU_IDLE_CACHE_ENABLE must be 0 or 1"
+#endif
+
 /* `boolean_t idle_enable` (`osfmk/arm/cpu_common.c:67`), read **by name** - the linker resolves the
  * address out of the image's own symbol, so there is no offset here to be wrong, which is why this is
  * a word 513 can read while `cpu_signal`/`rtcPop`/`cpu_idle_latency` are words it deliberately does
@@ -1793,7 +1848,9 @@ void __wrap_platform_cache_idle_enter(void)
      */
     {
         uint32_t win = entry_sctlr();
+#if STAGE90_XNU_IDLE_CACHE_ENABLE
         entry_idle_cache_enable();
+#endif
         entry_window_note(win, entry_sctlr());
     }
 

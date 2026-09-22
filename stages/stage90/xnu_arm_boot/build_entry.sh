@@ -320,6 +320,39 @@ case "$SLOT_NULL" in
 esac
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_SLOT_NULL="$SLOT_NULL")
 
+# ---------------------------------------------------------------- 533: the near-end enable, switched
+#
+# **526's run came back negative, so the enter-side re-enable goes behind a switch whose default is the
+# configuration that returned.** 526 was 522's image with the exit wrapper's capture replaced by a
+# counter - same frame, same `mov %0, sp`, same two call sites, same `entry_idle_cache_enable` - and the
+# device did not come back within the run's 180 s (host USB `usb 3-10`: `18d1:d00d` at 16:35:46, gone a
+# second later, nothing after it). So the capture's eight loads and eight stores per site are not what
+# costs the return. The ledger over the four measured configurations:
+#
+#   | | exit `FlushPoC_Dcache` | enter `SCTLR.C` re-enable | capture | return |
+#   | 518/519/520 | off | off | 520's | yes - panics in the pop, comes back on `MACH Reboot` |
+#   | 521 | on | off | 521's repair | no |
+#   | 522 | off | on | 521's repair | no |
+#   | 526 | off | on | none | no |
+#
+# 521's row differs from 520's in four ways at once, so it implicates nothing by itself - the flush has
+# never run without the capture beside it. 522's and 526's rows differ by the capture's traffic alone,
+# and 526 says that traffic is innocent - which leaves the enter-side re-enable as the one deliberate
+# change 522 and 526 share and 520's returning cell does not. The arm is therefore 526's configuration
+# with the enable *off*: it pins the baseline against the instrument (a return indicts the enable and
+# hands the phase a returning configuration to develop the drivers on; a second non-return puts the
+# null wrapper's own two-publisher shape on the table, which 520's own run can be compared against).
+#
+# The default is 0 because the default has to be the cell that came back: a build that forgets this
+# variable is the baseline arm and not the one under test, and the clause below reads the wrapper's own
+# call count against this variable so a say line cannot describe an arm the image does not contain.
+IDLE_CACHE_ENABLE=${STAGE90_XNU_IDLE_CACHE_ENABLE:-0}
+case "$IDLE_CACHE_ENABLE" in
+    0|1) ;;
+    *) echo "STAGE90_XNU_IDLE_CACHE_ENABLE must be 0 or 1, not [$IDLE_CACHE_ENABLE]" >&2; exit 1 ;;
+esac
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_IDLE_CACHE_ENABLE="$IDLE_CACHE_ENABLE")
+
 # **518: the interrupt handler's stack starts in the middle of the interrupt stack, not on top of the
 # frame.** `cpu_data->istackptr` is what `fleh_irq_kernel` loads its stack from and the kernel writes it
 # exactly twice, both `= intstack_top`; the boot and the idle loop run *on* that stack
@@ -544,6 +577,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -O2 -Wall -Wextra -Werror -std=gnu11 \
         -DSTAGE90_XNU_EXIT_POC_FLUSH="$EXIT_POC_FLUSH" \
         -DSTAGE90_XNU_SLOT_NULL="$SLOT_NULL" \
+        -DSTAGE90_XNU_IDLE_CACHE_ENABLE="$IDLE_CACHE_ENABLE" \
         -DSTAGE90_XNU_ISTACK_SEPARATE="$ISTACK_SEPARATE" \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
@@ -29063,18 +29097,19 @@ verify_trace_symbols() {
     [[ "${cwe_dsb:-0}" -ge 1 && "${cwe_isb:-0}" -ge 1 ]] ||
         layout_fail "entry_idle_cache_enable carries ${cwe_dsb:-0} dsb and ${cwe_isb:-0} isb: a change to SCTLR is followed by the barriers that make it visible to the instructions after it, and a write without them is a change whose point in the instruction stream is not defined"
     # (2) The wrapper: one call, after the real enter, bracketed by the two SCTLR reads, before the note.
-    IFS='|' read -r cwen cweaddr cwebefore cweafter cwenote cwepce <<<"$(awk -v R='[a-z][a-z0-9]*' '
+    IFS='|' read -r cwen cweaddr cwebefore cweafter cwenote cwepce cwenm cwepm <<<"$(awk -v R='[a-z][a-z0-9]*' '
         function hex(s) { sub(/:$/, "", s); return strtonum("0x" s) }
         /<__wrap_platform_cache_idle_enter>:/ { inb = 1; next }
         !inb { next }
         $3 ~ /^[a-z]/ { a = hex($1) }
-        $0 ~ ("mrc[ \t]+15, 0, " R ", cr1, cr0, \\{0\\}") { if (en == 0) b = a; else if (w == 0 && pa == 0 && af == 0) af = a }
+        $0 ~ ("mrc[ \t]+15, 0, " R ", cr1, cr0, \\{0\\}") { nm++; if (w == 0) pm = a; if (en == 0) { if (b == 0) b = a } else if (w == 0 && pa == 0 && af == 0) af = a }
         $3 == "bl" && index($0, "<entry_idle_cache_enable>") > 0 { en++; ea = a }
         $3 == "bl" && index($0, "<entry_window_note>") > 0 { w++; wa = a }
         $3 == "bl" && index($0, "<entry_note_pce_after>") > 0 { pa++; pa2 = a }
-        END { printf "%d|%d|%d|%d|%d|%d", en+0, ea+0, b+0, af+0, wa+0, pa2+0 }' <<<"$ebod")"
-    [[ "${cwen:-0}" == 1 ]] ||
-        layout_fail "__wrap_platform_cache_idle_enter calls entry_idle_cache_enable ${cwen:-0} time(s) and 522's whole content is exactly one write to SCTLR.C in that wrapper: none leaves the window's stores incoherent - which is 520's arm - and more than one would be a second change in the same pass"
+        END { printf "%d|%d|%d|%d|%d|%d|%d|%d", en+0, ea+0, b+0, af+0, wa+0, pa2+0, nm+0, pm+0 }' <<<"$ebod")"
+    [[ "${cwen:-0}" == "$IDLE_CACHE_ENABLE" ]] ||
+        layout_fail "__wrap_platform_cache_idle_enter calls entry_idle_cache_enable ${cwen:-0} time(s) and this build was made with STAGE90_XNU_IDLE_CACHE_ENABLE=$IDLE_CACHE_ENABLE: with the flag on, 522's whole content is exactly one write to SCTLR.C in that wrapper - none leaves the window's stores incoherent, which is 520's arm, and more than one would be a second change in the same pass; with the flag off, 533's arm is the configuration that came back and a call left in it would be the change the step is trying to remove"
+    if [[ "$IDLE_CACHE_ENABLE" == 1 ]]; then
     [[ "${cweaddr:-0}" -gt "${realaddr:-0}" ]] ||
         layout_fail "the D-cache re-enable at ${cweaddr:-?} is not after the call that opens the window at ${realaddr:-?}: the change is only meaningful on the far side of Apple's clear, and this clause reads the *order* out of the image because a source-order claim is exactly what gcc is entitled to rearrange"
     [[ "${cwebefore:-0}" != 0 && "${cwebefore:-0}" -lt "${cweaddr:-0}" && "${cweafter:-0}" -gt "${cweaddr:-0}" && "${cwenote:-0}" -gt "${cweafter:-0}" ]] ||
@@ -29088,8 +29123,29 @@ verify_trace_symbols() {
     # added (the two notes, the capture, the slot publishers, the WFI wrapper's stores) is then on the
     # near side of the window, where a store is an ordinary cached store. Read as addresses rather than
     # as a count so that a future step cannot slip a call in between and keep the count at two.
-    [[ "${cwebefore:-0}" -eq "$(( realaddr + 4 ))" && "${cweaddr:-0}" -eq "$(( realaddr + 8 ))" ]] ||
-        layout_fail "the call that opens the window is at ${realaddr:-?}, the wrapper's SCTLR read at ${cwebefore:-?} and the re-enable at ${cweaddr:-?}: 522 is safe because the image's *entire* presence inside the cache-off window is that one read (which writes no memory) and the write that closes it - so the read has to be the instruction after the call and the call to entry_idle_cache_enable the instruction after that, with nothing of ours in between. This clause reads the two instructions' addresses rather than counting them, so a call inserted between them is refused rather than absorbed. (It also assumes a single-instruction \`bl\`; an out-of-range target would be a movw/movt/blx triple and this would then refuse on the addresses rather than on the property, which is the direction that costs a build and not a run.)"
+        [[ "${cwebefore:-0}" -eq "$(( realaddr + 4 ))" && "${cweaddr:-0}" -eq "$(( realaddr + 8 ))" ]] ||
+            layout_fail "the call that opens the window is at ${realaddr:-?}, the wrapper's SCTLR read at ${cwebefore:-?} and the re-enable at ${cweaddr:-?}: 522 is safe because the image's *entire* presence inside the cache-off window is that one read (which writes no memory) and the write that closes it - so the read has to be the instruction after the call and the call to entry_idle_cache_enable the instruction after that, with nothing of ours in between. This clause reads the two instructions' addresses rather than counting them, so a call inserted between them is refused rather than absorbed. (It also assumes a single-instruction \`bl\`; an out-of-range target would be a movw/movt/blx triple and this would then refuse on the addresses rather than on the property, which is the direction that costs a build and not a run.)"
+    else
+        # **533's arm: the enable's slot is empty, and that is a different image, not a weaker one.** The
+        # three clauses above are all about the write - it comes after the clear, the pair brackets it, the
+        # note follows it - and an arm with no write has nothing for them to be about, so they are not
+        # relaxed here, they are replaced by the clause that says what *is* in the window. What is in it is
+        # the two SCTLR reads and the note: the first read is still the instruction after the call that
+        # opens the window (so nothing of this image's runs inside it before the reading), the second is the
+        # one the note is handed (so the published pair is a pair, taken a few bytes apart on the same side
+        # of Apple's clear), the note comes after it, and 516's own cache-off reading comes after the note.
+        # The note is *inside* the window in this arm, and that is a property of the arm rather than an
+        # oversight: it is the reading that says which arm ran (`_win` and `_set` agreeing, both with C
+        # clear, where a `_set` with C set would be an image still carrying 522's write), and the arm
+        # differs from 522's in having a store there rather than a store *closing* there - which the
+        # returning arm 520 also had, in its exit wrapper's own publication, so it is not a variable this
+        # comparison introduces. What the clause refuses is the enable's old slot being filled by something
+        # else while the flag says the window's near end is Apple's: a call between the two reads would move
+        # the note's read past it, and a call before the first read would move the first read off
+        # $(( realaddr + 4 )).
+        [[ "${cwen:-0}" -eq 0 && "${cwebefore:-0}" -eq "$(( realaddr + 4 ))" && "${cwepm:-0}" -eq "$(( cwebefore + 4 ))" && "${cwenote:-0}" -gt "${cwepm:-0}" && "${cwepce:-0}" -gt "${cwenote:-0}" ]] ||
+            layout_fail "STAGE90_XNU_IDLE_CACHE_ENABLE=0 and this image does not match it: entry_idle_cache_enable is called ${cwen:-0} time(s) (it must be 0), the call that opens the window is at ${realaddr:-?} with the wrapper's first SCTLR read at ${cwebefore:-?} (which has to be the instruction after it) and the second at ${cwepm:-?} (which has to be the instruction after that), entry_window_note at ${cwenote:-?} and 516's cache-off reading at ${cwepce:-?}. The order the arm claims is read < read < note < 516's reading, with the first read adjacent to the call and the two reads adjacent to each other: with the write gone the two reads are the whole of the image's presence inside Apple's cache-off window, and the second of them is what the note publishes beside the first, so an image where they are not bracketed that way - or where something of ours sits between them - is not 533's arm whatever the flag says"
+    fi
     # (3) The window still opens. Apple's clear is a `bic ..., #4` on SCTLR inside
     # `platform_cache_idle_enter`, and if it is ever removed (or moved) this step becomes a comment.
     IFS='|' read -r cl_bic cl_bicaddr cl_mcr cl_ord cl_mcraddr cl_popaddr <<<"$(awk -v R='[a-z][a-z0-9]*' '
@@ -29127,14 +29183,23 @@ verify_trace_symbols() {
         sxw_cap="loads the four words ending at it into the table's own words itself (${sxw_nneg} loads at [${sxw_fo}], the first group ending at $(printf '0x%x' "${sxw_flast:-0}") before the first call and the second starting at $(printf '0x%x' "${sxw_lfirst:-0}") after the real exit - 521's repair, because 520 read them through the publisher's own frame and its log's pre_m4 is that function's saved lr -, and publishes them ${sxw_note} time(s) through entry_slot_note ($(printf '0x%x' "$snb")) - once before its call to the real platform_cache_idle_exit at $(printf '0x%x' "${sxw_realaddr:-0}") and once after, so the pair the fatal pop read is published before the push that fills it and the control is published only if the exit returns;"
     fi
     say "  xnu_entry_520: the two words of the idle exit's {fp, lr} slot, watched - __wrap_platform_cache_idle_exit ($(printf '0x%x' "$sxw")) takes sp off the register once (${sxw_mov} read at $(printf '0x%x' "${sxw_movaddr:-0}"), after its only stack movement, which is $sxw_dec decrement of $sxw_decv bytes and one restore), $sxw_cap the same wrapper reads cpu_data->rtcPop (cpu_data+#$s_pop, the offset cpu_idle's own body adds ${cpop} time) and the idle thread's saved sp/lr through entry_slot_rtc_note ($(printf '0x%x' "$srb")) at $(printf '0x%x' "${sxw_rtcaddr:-0}"), and the abort path carries the same two readings through entry_note_sleh ($(printf '0x%x' "$isleh"), ${sleh_n}+${sleh_r} call) - the words there read in place out of the exception frame by entry_slot_ab_note ($(printf '0x%x' "$sab")), which keeps the guard and the refusal count the two capture sites cannot have - so a run that dies publishes the words the pop read beside what the panel already says; __wrap_ml_get_timebase reads the counter either side of the real function and publishes them through entry_slot_tb_note ($(printf '0x%x' "$stb")), which is the only clock stamp the run has for the interrupt that was in service; the tables are in the image at their stated sizes (g_slot_pre/post 48 bytes = 6 keys, 2 counters and the 4 words the caller stages, g_slot_ab 40 = 7 and 3, g_slot_rtcpre/rtcab 52 = 9 and 4, g_slot_tb 24 = 4 and 2), the body of each holds exactly as many entry_live_write calls as its table has keys (6/7/9/4), and all $k520 keys are in the entry image's strings; the capture sites publish while their count is <= 4 and thereafter at the powers of two, the abort site publishes every abort up to $s_ab (STAGE90_SLOT_AB_MAX) and only then the powers of two - the rule 520's own ninth, fatal abort went missing under - and a reading refused by the kernel map's own window [$h_lo, $h_hi] is published as a zero with its refusal counted at the level it happened (_rej for a thread outside the map, _rin for a field of one inside it, which 520 published as a zero with nothing counting it)"
+    if [[ "$IDLE_CACHE_ENABLE" == 1 ]]; then
     say "  xnu_entry_522: the idle window's D-cache is turned back on at its near end - __wrap_platform_cache_idle_enter calls entry_idle_cache_enable ($(printf '0x%x' "$cwe")) ${cwen} time at $(printf '0x%x' "${cweaddr:-0}"), after the call that opens the window at $(printf '0x%x' "${realaddr:-0}") and before the WFI, and that function's whole body is one bit of one control register: SCTLR read at $(printf '0x%x' "${cwe_mrcaddr:-0}"), orr #4 at $(printf '0x%x' "${cwe_orr:-0}"), written at $(printf '0x%x' "${cwe_mcr:-0}"), ${cwe_dsb} dsb and ${cwe_isb} isb, with ${cwe_nst} store(s) to memory in it ((Apple's own clear is still inside platform_cache_idle_enter: ${cl_bic} bic #4 at $(printf '0x%x' "${cl_bicaddr:-0}"), which is what makes this a change of state and not a no-op)) - so the WFI, the exit's push {fp, lr} and the pop {fp, pc} that 519 and 520 died in all run with the cache on, and a store updates the line a later load reads instead of landing in DRAM behind a line nothing had invalidated; and the window itself is now short enough to name: it is Apple's own tail from its SCTLR write at $(printf '0x%x' "${cl_mcraddr:-0}") to the function's pop at $(printf '0x%x' "${cl_popaddr:-0}") - $(( ${cl_popaddr:-0} - ${cl_mcraddr:-0} )) bytes, all of it Apple's, which is the code that has run in every run since 506 - followed by the wrapper's single SCTLR read at $(printf '0x%x' "${cwebefore:-0}") (which writes no memory) and six bytes of the enable's write at $(printf '0x%x' "${cwe_mcr:-0}"), so this image has no store of its own inside the cache-off window at all: everything it added is on the near side, where a store is an ordinary cached store. The two readings are SCTLR as Apple's enter left it (_win, read with the cache off) and as this call left it (_set, read with it on), published through entry_window_note (g_slot_cwe, $cwe_sz bytes, ${cwe_pub} write(s) against its three keys) on the same <= 4 then powers-of-two schedule as the other per-pass sites, and this image adds no cache maintenance of its own - 521's FlushPoC_Dcache is behind STAGE90_XNU_EXIT_POC_FLUSH, which 517's clause asserts as $EXIT_POC_FLUSH against the image's own call count"
+    else
+        say "  xnu_entry_533: the idle window's near end is left exactly as Apple left it - STAGE90_XNU_IDLE_CACHE_ENABLE=0, so __wrap_platform_cache_idle_enter calls entry_idle_cache_enable ${cwen} time and the image's whole presence inside the cache-off window is the two SCTLR reads at $(printf '0x%x' "${cwebefore:-0}") and $(printf '0x%x' "${cwepm:-0}") plus the entry_window_note call at $(printf '0x%x' "${cwenote:-0}") - and entry_window_note is kept on purpose, because with the write gone the pair it publishes is the reading that says which arm ran: _win is SCTLR as Apple's enter left it (read with the cache off) and _set is the same register read a few bytes later, so the two must *agree* with C clear, and a _set with C set would be an image that still carries 522's write. 522's clauses above assert this against the flag rather than against 1: the call count is compared with $IDLE_CACHE_ENABLE and the adjacency test is the arm's own (the first read still the instruction after the call that opens the window, the note after it). What the run is for, in the order that matters: (1) does the device come back at all - a return indicts 522's near-end enable and hands this phase a returning configuration to develop the drivers on, a second non-return puts the null wrapper's own two-publisher shape on the table; (2) if it returns, where it dies - 520's sleh_storm 9 at the same pc is the pop, and anything later is progress; (3) _win and _set agreeing with C clear is the reading that this image is the arm it says it is; (4) the ending shape, and whether Apple's own panic path runs (520's log carries it), because a returning arm is what 523's console item and the storage arm both need before they can be developed at all. The image this preflight will be run against is the one built with STAGE90_XNU_SLOT_NULL=$SLOT_NULL and STAGE90_XNU_EXIT_POC_FLUSH=$EXIT_POC_FLUSH beside this flag."
+    fi
 
     # **526's own say line, and it exists to name the arm rather than to add a number.** Everything it
     # states is stated by the 520 and 522 lines above as well - which is the point: a null instrument's
     # virtue is that it is the same instrument with one thing removed, so the two say lines read together
     # are the comparison, and this one is what says which of the two images is in front of the reader.
+    if [[ "$IDLE_CACHE_ENABLE" == 1 ]]; then
+        icxwr="untouched, so 522's clause above still asserts the SCTLR.C enable ${cwen} time at $(printf '0x%x' "${cweaddr:-0}")"
+    else
+        icxwr="533's rather than 522's, so it is 533's clause that is above and not 522's: entry_idle_cache_enable is called ${cwen} time and the image's whole presence inside Apple's cache-off window is the two SCTLR reads at $(printf '0x%x' "${cwebefore:-0}") and $(printf '0x%x' "${cwepm:-0}")"
+    fi
     if [[ "$SLOT_NULL" -eq 1 ]]; then
-        say "  xnu_entry_526: **the null instrument** - 522's image with 521's capture taken out of the exit wrapper, so that a run of it separates the cost of the readings from the cost of the state change. This wrapper is otherwise 522's: $sxw_dec decrement of $sxw_decv bytes and one restore, $sxw_mov \`mov r?, sp\` at $(printf '0x%x' "$sxw_movaddr"), the real platform_cache_idle_exit called $sxw_real time at $(printf '0x%x' "${sxw_realaddr:-0}"), 516's CleanPoC_Dcache and 519's rtcPop reading both in place, ${sxw_null} calls to entry_slot_null_note, ${sxw_nneg} negative-offset loads and ${sxw_nstore} slot stores - and the enter wrapper is untouched, so 522's clause above still asserts the SCTLR.C enable ${cwen} time at $(printf '0x%x' "${cweaddr:-0}") out of the same image this line describes. The reading is the ledger's, from the runs rather than from any prose: 521 and 522 both carry the capture and neither came back, 520 carries neither and did, so a return here puts the cost on the readings (and the next arm bisects them) and a third non-return puts it on the state change that 521 and 522 do not share"
+        say "  xnu_entry_526: **the null instrument** - 522's image with 521's capture taken out of the exit wrapper, so that a run of it separates the cost of the readings from the cost of the state change. This wrapper is otherwise 522's: $sxw_dec decrement of $sxw_decv bytes and one restore, $sxw_mov \`mov r?, sp\` at $(printf '0x%x' "$sxw_movaddr"), the real platform_cache_idle_exit called $sxw_real time at $(printf '0x%x' "${sxw_realaddr:-0}"), 516's CleanPoC_Dcache and 519's rtcPop reading both in place, ${sxw_null} calls to entry_slot_null_note, ${sxw_nneg} negative-offset loads and ${sxw_nstore} slot stores - and the enter wrapper is $icxwr out of the same image this line describes. The reading is the ledger's, from the runs rather than from any prose: 521 and 522 both carry the capture and neither came back, 520 carries neither and did, so a return here puts the cost on the readings (and the next arm bisects them) and a third non-return puts it on the state change that 521 and 522 do not share"
     fi
 
 

@@ -100,15 +100,153 @@ echo "== image freshness =="
 STALE=$(find "$STAGE_DIR" -maxdepth 1 -type f \
          \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.ld' \) \
          -newer "$IMAGE" -printf '%f\n' 2>/dev/null | sort)
+# **533: the entry image's own sources are one directory down, and `-maxdepth 1` never looked at
+# them.** `xnu_arm_boot/` is where build_entry.sh, entry_trace.c, entry_stubs.c and entry.ld live,
+# and they decide *which arm* the boot image carries - the one property the XNU-entry block below
+# describes at length and this scan could not see. Editing entry_trace.c and rebuilding only the
+# entry image leaves a payload that embeds the PREVIOUS arm with every check above still green.
+# This directory also matches '*.sh', which the top-level scan deliberately does not: there the
+# build script sits beside the sources it compiles, and build_entry.sh is as much a source of the
+# image as any .c in that directory.
+STALE_ENTRY=$(find "$STAGE_DIR/xnu_arm_boot" -maxdepth 1 -type f \
+               \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.ld' -o -name '*.sh' \) \
+               -newer "$IMAGE" -printf 'xnu_arm_boot/%f\n' 2>/dev/null | sort)
 BUILD_TOOLS_NEWER=$(find "$REPO_ROOT/tools" -maxdepth 1 -name 'mkmacho_fixture.py' \
                     -newer "$IMAGE" -printf '%f\n' 2>/dev/null)
-if [[ -n $STALE || -n $BUILD_TOOLS_NEWER ]]; then
+if [[ -n $STALE || -n $STALE_ENTRY || -n $BUILD_TOOLS_NEWER ]]; then
   echo "source newer than the image:"
-  [[ -n $STALE ]] && echo "$STALE" | sed 's/^/  /'
-  [[ -n $BUILD_TOOLS_NEWER ]] && echo "  tools/$BUILD_TOOLS_NEWER"
+  # `[[ ... ]] && echo` as a bare statement returns 1 when the test is false, which under `set -e`
+  # would leave the script before the `fail` below and print no reason at all. Explicit `if`s.
+  if [[ -n $STALE ]]; then echo "$STALE" | sed 's/^/  /'; fi
+  if [[ -n $STALE_ENTRY ]]; then echo "$STALE_ENTRY" | sed 's/^/  /'; fi
+  if [[ -n $BUILD_TOOLS_NEWER ]]; then echo "  tools/$BUILD_TOOLS_NEWER"; fi
   fail "the image is stale - run ./build.sh, then re-run this gate"
 fi
 echo "no source file is newer than the image"
+
+echo
+echo "== the entry image the payload embeds =="
+# **The image carries the arm out/stage90/xnu_arm_entry.bin holds, byte for byte** - and until now
+# nothing compared the two. The payload does not merely *name* the entry image, it IS it: build.sh
+# generates xnu_arm_entry_blob.c from out/stage90/xnu_arm_entry.bin on every payload build and the
+# linker puts those bytes in .rodata. So a rebuild of one and not the other leaves an image whose
+# manifest verifies, whose build switches are the ones printed above, and whose *arm* is a different
+# one from the source's - the single thing the XNU-entry prose further down describes and cannot
+# check. Measured (2026-09-22, experiment 533's session): out/stage90/stage90-qcdt.img carried
+# 05596cc1... (the 526 arm) at image offset 496100 while out/stage90/xnu_arm_entry.bin was
+# f202f246... (the 533 arm) - the same length, 5519996 bytes, so neither the file size nor
+# SHA256SUMS.txt betrays it.
+#
+# Nothing here is written down: not the offset, not a hash of the entry image compared against
+# prose. The arithmetic is build.sh's own, read back out of the files it produced - the boot image's
+# header carries page_size (build.sh's `--pagesize 2048`) and kernel_addr (its `--kernel_offset
+# 0x00008000`), and kernel_size is the size of the stage90.bin it handed to mkbootimg; the payload
+# ELF's own symbol table carries where the blob and its size word sit. So four readings are compared
+# and no two of them come from the same place: the blob's offset found by searching the bytes, the
+# same offset derived from the symbol's address less kernel_addr, the blob's length as the linker
+# recorded it, and the length the payload *compiled in* (stage90_xnu_entry_blob_size, which
+# build.sh generates from `stat -c%s` of the entry image). That last one is a different reading from
+# the byte comparison: a shrunken entry image would still match the blob's prefix, and only the
+# payload's own size word would say so.
+STAGE90_NM=${STAGE90_NM:-arm-none-eabi-nm}
+ENTRY_BIN=$OUT/xnu_arm_entry.bin
+PAYLOAD_BIN=$OUT/stage90.bin
+PAYLOAD_ELF=$OUT/stage90.elf
+[[ -f $ENTRY_BIN   ]] || fail "no $ENTRY_BIN - the payload embeds the entry image; run ./build.sh"
+[[ -f $PAYLOAD_BIN ]] || fail "no $PAYLOAD_BIN - run ./build.sh"
+[[ -f $PAYLOAD_ELF ]] || fail "no $PAYLOAD_ELF - run ./build.sh"
+# `set -euo pipefail` is on, so a missing tool would abort the assignment below and leave the script
+# *before* the `fail` - a refusal with no reason, which is the same defect as the `[[ ... ]] &&` above.
+command -v "$STAGE90_NM" >/dev/null 2>&1 \
+  || fail "no '$STAGE90_NM' - the entry blob's offset is read out of the payload's symbol table; install binutils-arm-none-eabi, or set STAGE90_NM"
+BLOB_SYM=$("$STAGE90_NM" -S "$PAYLOAD_ELF" 2>/dev/null \
+           | awk '$4 == "stage90_xnu_entry_blob" { print $1, $2 }' || true)
+BLOB_SIZE_SYM=$("$STAGE90_NM" -S "$PAYLOAD_ELF" 2>/dev/null \
+                | awk '$4 == "stage90_xnu_entry_blob_size" { print $1, $2 }' || true)
+[[ -n $BLOB_SYM && -n $BLOB_SIZE_SYM ]] \
+  || fail "$PAYLOAD_ELF has no stage90_xnu_entry_blob / _size symbol - build.sh generates both from the entry image; rebuild"
+BLOB_SIZE_ADDR=$((16#${BLOB_SIZE_SYM%% *}))
+BLOB_SIZE_LEN=$((16#${BLOB_SIZE_SYM##* }))
+[[ $BLOB_SIZE_LEN -eq 4 ]] \
+  || fail "stage90_xnu_entry_blob_size is $BLOB_SIZE_LEN bytes, not 4 - it is not the uint32_t the payload compiled in"
+if ! "$PYTHON" - "$IMAGE" "$PAYLOAD_BIN" "$ENTRY_BIN" \
+                $((16#${BLOB_SYM%% *})) $((16#${BLOB_SYM##* })) "$BLOB_SIZE_ADDR" <<'PY'
+import struct, sys
+
+img_p, payload_p, entry_p = sys.argv[1:4]
+blob_va, blob_sym_size, blob_size_va = (int(a, 0) for a in sys.argv[4:7])
+img = open(img_p, 'rb').read()
+payload = open(payload_p, 'rb').read()
+entry = open(entry_p, 'rb').read()
+
+def die(*a):
+    sys.stdout.flush()
+    print(*a, file=sys.stderr)
+    sys.exit(1)
+
+if img[:8] != b'ANDROID!':
+    die("%s has no ANDROID! magic - it is not a boot image" % img_p)
+# The v0 header, in the order build.sh's mkbootimg invocation fills it in.
+ksize, kaddr = struct.unpack_from('<2I', img, 8)
+psize, = struct.unpack_from('<I', img, 36)
+print("  header: page_size=%d kernel_size=%d kernel_addr=0x%08x" % (psize, ksize, kaddr))
+if psize <= 0 or psize + ksize > len(img):
+    die("%s: the header's page_size (%d) + kernel_size (%d) runs past the file's %d bytes"
+        % (img_p, psize, ksize, len(img)))
+kern = img[psize:psize + ksize]
+if kern != payload:
+    die("%s's kernel section is not %s (%d bytes in the image, %d in the file)"
+        % (img_p, payload_p, len(kern), len(payload)))
+print("  the image's kernel section is %s, byte for byte (%d bytes)" % (payload_p, ksize))
+
+# The payload's own compiled-in claim about the blob, printed before anything is compared so that a
+# refusal below is read beside the length the payload itself believes: it is what catches an entry
+# image that shrank instead of changing, which a prefix match cannot see.
+size_off = blob_size_va - kaddr
+if not 0 <= size_off <= len(payload) - 4:
+    die("stage90_xnu_entry_blob_size at file offset %d is outside %s (%d bytes)"
+        % (size_off, payload_p, len(payload)))
+compiled = struct.unpack_from('<I', payload, size_off)[0]
+if compiled != len(entry):
+    die("%s compiled in a %d-byte entry blob; %s is %d bytes"
+        % (payload_p, compiled, entry_p, len(entry)))
+print("  the payload compiled in a %d-byte entry blob, and %s is %d bytes"
+      % (compiled, entry_p, len(entry)))
+
+def locate(hay, what):
+    """The blob's offset in `hay`, by content: exactly one match, and it must fit whole."""
+    o = hay.find(entry)
+    if o < 0:
+        die("%s does not contain %s at all" % (what, entry_p))
+    if hay.find(entry, o + 1) >= 0:
+        die("%s contains %s more than once" % (what, entry_p))
+    if len(hay) - o < len(entry):
+        die("%s: only %d bytes follow the blob, of the %d it needs"
+            % (what, len(hay) - o, len(entry)))
+    return o
+
+p_off = locate(payload, payload_p)
+i_off = locate(kern, "the image's kernel section")
+if i_off != p_off:
+    die("the blob is at kernel-section offset %d in %s and %d in %s"
+        % (i_off, img_p, p_off, payload_p))
+print("  the blob is %d bytes at payload offset %d = image offset %d (page_size %d + %d)"
+      % (len(entry), p_off, psize + i_off, psize, i_off))
+
+# The same offset, from the linker's symbol table rather than from a search.
+sym_off = blob_va - kaddr
+if sym_off != p_off:
+    die("the payload's symbol table puts stage90_xnu_entry_blob at file offset %d, but its bytes are at %d"
+        % (sym_off, p_off))
+if blob_sym_size != len(entry):
+    die("the linker recorded a %d-byte stage90_xnu_entry_blob; %s is %d bytes"
+        % (blob_sym_size, entry_p, len(entry)))
+print("  the linker's symbol says the blob is %d bytes at %d, which agrees"
+      % (blob_sym_size, sym_off))
+PY
+then
+  fail "the image does not carry the arm $ENTRY_BIN holds, byte for byte (see above)"
+fi
 
 echo
 echo "== storage tripwire =="
