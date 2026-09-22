@@ -258,8 +258,13 @@ Attempting system restart...MACH Reboot
 
 so `ml_at_interrupt_context()` answered **false** for the faulting stack and §3's second effect is a
 property the hardware confirmed: 516, 517 and 518 all ended in Apple's flat
-`panic: sleh_abort at interrupt context`; this one names the address and prints the panel. The frame is
-authentic — `xnu_live_sleh_frame_ok = 1`, `_user = 0`, `_fsr_frame = 5`, `_storm = 9`, `_seen = 9` (the
+`panic: sleh_abort at interrupt context`; this one names the address and prints the panel. And the
+panel's two address fields are the vector's own, not a coincidence: `prefabt_from_kernel` writes SS_LR
+from the *interrupted* SVC LR while it is still in SVC mode (`0x8001a60c`), then switches to Abort mode
+(`cpsid i, #23`, `0x8001a654`) and writes SS_PC from R14_abt (`str lr, [ip, #60]`, `0x8001a658`) — the
+faulting address — with SS_STATUS and SS_VADDR from the IFSR and FAR (`mrc c5/c6`, `0x8001a65c`..), which
+is why `pc == far` in 516, 518 and here alike. The frame is authentic —
+`xnu_live_sleh_frame_ok = 1`, `_user = 0`, `_fsr_frame = 5`, `_storm = 9`, `_seen = 9` (the
 fatal abort is the ninth of the boot; the boot had already reached `load_init_program` and `/sbin/launchd`
 by then, so the earlier eight are the boot's own page-in faults, not idle-pass events).
 
