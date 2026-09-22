@@ -22,15 +22,21 @@
 #
 # Exit status:
 #   0  device came back and the log was captured
-#   1  the gate refused, or the device was not found
+#   1  the gate refused, the device was not found, or - after the boot - the host could not
+#      write the log where it wanted to (an unwritable $LOGFILE in a sticky /tmp: 511, 512)
 #   2  the payload ran and the device did NOT come back - a manual power press is needed
 #      (the log will not survive a power cycle, so this is also a lost run)
-#   3  the device returned to the HOST but was not capturable over adb - the host's USB log
-#      saw the phone enumerate again (and its SoC is running) while `adb devices` stayed
-#      empty. **This is not a hang** and must not be read as one: it is an attempt to capture
+#   3  the device returned to the HOST but no log was captured - the host's USB log saw the
+#      phone enumerate again (and its SoC is running) while `adb devices` stayed empty, so
+#      **this is not a hang** and must not be read as one: it is a failed attempt to capture
 #      a log from a device that came back into a state adb cannot reach. Added 2026-09-22,
 #      when this phone's Android bring-up failed twice in ten minutes (`2717:0368` for 18 s,
 #      one window ending before `4ee7`) and exit 2 would have been the wrong reading.
+#      **It has two producers, and the second one is step 5** (before 564, step 5 called
+#      `die` here, i.e. exit 1, for the same state this code is defined by): section 4 when
+#      the return is seen and adb never comes up, and section 5 when the return is seen, adb
+#      is not *yet* reachable, and the bounded capture window expires. A "1" printed after a
+#      boot that reached section 5 is a host-side write failure and not a device state.
 
 set -euo pipefail
 
@@ -43,6 +49,14 @@ IMAGE=$OUT/stage90-qcdt.img
 SERIAL=${SERIAL:-4a2fe00b}
 LOGFILE=${LOGFILE:-/tmp/cancro-last_kmsg.txt}
 RETURN_TIMEOUT=${RETURN_TIMEOUT:-180}
+# The capture wait is a **second window and not a repeat of the one above**, which is the whole point
+# of it: section 4's criterion is satisfied the moment the host log shows the phone enumerating, and on
+# this phone the fastboot-to-Android handover is 17 s (542: `18d1:d00d` gone at 02:00:59, `2717:0368` at
+# 02:01:16) with Android's own bring-up a further ~20 s to the `18d1:4ee7` that carries adb (522:
+# 14:13:49 -> 14:14:09). adbd therefore does not exist for the first several seconds after the return is
+# seen, so a single immediate `adb exec-out` at step 5 fails on the *normal* path. A read is free and
+# cannot cost a run, so this bounds how long the capture keeps trying, and nothing else uses it.
+CAPTURE_WAIT=${CAPTURE_WAIT:-90}
 
 DRY_RUN=0
 SUMMARISE_ONLY=""
@@ -582,6 +596,48 @@ else
   say "found $SERIAL in $MODE"
 fi
 
+# --- 2b. park the log that is on disk, because it is the PREVIOUS run's ------------------
+#
+# **This is the structural half of the trap the peer session found in the gate (562), and it is here
+# rather than in the reader because it can only be done before the boot.** The file named by `$LOGFILE`
+# is written in step 5, which is reached only if the device returned; so on a non-return and on a failed
+# capture the name still holds the *previous* run's log - and today that file carries, verbatim, the
+# bracket 547 section 4 pre-registers for the arm in `out/` (`pre_calls` 1, `rtcpre_calls` 1,
+# `post_calls` absent), because it is the death that prediction was read from. Read through that file, a
+# run whose capture failed would confirm 547 section 4 with the data 547 section 4 was derived from, and
+# the confirmation would be unattributable. The gate fingerprints the file before the run, which needs a
+# human to make the comparison; vacating the name makes the comparison unnecessary, because after the
+# boot the name is *this* run's or it is absent, and either way the previous bytes cannot be mistaken for
+# this run's. It is a `mv`, not a delete: nothing is destroyed, the gate's own "unchanged sha256 means no
+# capture" test becomes impossible-to-pass-by-accident, and the previous log - today the only copy of a
+# measurement - stays on disk under a name that says what it is.
+PREV_LOG=""
+if [[ $DRY_RUN -eq 1 ]]; then
+  say "would move $LOGFILE (the previous run's log) aside, so that the name holds this run's or nothing"
+elif [[ -e $LOGFILE ]]; then
+  PREV_LOG=$LOGFILE.prev
+  _n=2
+  while [[ -e $PREV_LOG ]]; do PREV_LOG=$LOGFILE.prev.$_n; _n=$(( _n + 1 )); done
+  if mv "$LOGFILE" "$PREV_LOG" 2>/dev/null; then
+    say "parked the previous run's log: $LOGFILE -> $PREV_LOG"
+    say "  ($(wc -c < "$PREV_LOG" || echo '?') bytes, sha256 $(sha256sum "$PREV_LOG" | cut -d' ' -f1 || echo '?')"
+    say "   - the same file the gate fingerprinted before the boot; it is NOT this run's, whatever the"
+    say "   bracket in it says, and 547 section 4's prediction was written from that bracket)"
+  else
+    # Not fatal, and deliberately so: the run is not spent yet and the file is still usable evidence at
+    # its old name. What must not happen is a silent fall-through, because the whole point of this step
+    # is that the name is unambiguous afterwards - so it is said out loud and the operator is told the
+    # one comparison that still applies.
+    PREV_LOG=""
+    say "WARNING: could not move $LOGFILE aside (a sticky /tmp and an identity that does not own it:"
+    say "         511, 512). It will be REPLACED by this run's capture if the capture works, and it"
+    say "         will look untouched if it does not - so in that case compare its sha256 against the"
+    say "         one the gate printed above before reading any bracket out of it."
+  fi
+else
+  say "no log at $LOGFILE yet - so after this run, the name existing at all is the first check"
+fi
+
 # --- 3. boot the payload ----------------------------------------------------------------
 step "boot"
 say "sudo adb -s $SERIAL reboot bootloader   # then fastboot boot, never flash"
@@ -691,11 +747,71 @@ else
   # after the boot had already been spent. The same sticky-`/tmp` rule produces both spellings:
   # whichever identity does not own the file is the one that cannot remove it here. So neither is
   # assumed - the plain `rm` is tried first (it succeeds whenever the file is the user's, which is
-  # what the redirect below leaves behind) and `sudo`'s is the fallback.
-  rm -f "$LOGFILE" 2>/dev/null || sudo rm -f "$LOGFILE" || \
-    die "could not remove $LOGFILE - neither the invoking user nor root can unlink it, and the redirect would then be reopening someone else's file"
-  sudo adb -s "$SERIAL" exec-out 'cat /proc/last_kmsg' > "$LOGFILE" || \
-    die "could not read /proc/last_kmsg"
+  # what the redirect below leaves behind) and `sudo`'s is the fallback. It is a function now because
+  # the attempt loop below repeats it, and **the removal is deferred to the moment a replacement
+  # exists** - see the next note, which is the 564 change.
+  rm_log() {
+    rm -f "$LOGFILE" 2>/dev/null || sudo rm -f "$LOGFILE" 2>/dev/null || \
+      die "could not remove $LOGFILE - neither the invoking user nor root can unlink it, and the redirect would then be reopening someone else's file"
+  }
+  # **The capture is staged through a temporary file, and the reason is the failure path.** The
+  # obvious order - remove `$LOGFILE`, then redirect adb into it - makes a *failed* capture destroy the
+  # previous log, and the previous log is not nothing: the file named by `$LOGFILE` right now is the
+  # 2026-09-22 death that 547 section 4's prediction was read from, and the gate fingerprints its
+  # sha256 immediately before the run precisely so that "the file changed" can serve as the post-hoc
+  # proof that a capture happened. Deleting it on a failed attempt would spend the run, leave that test
+  # unanswerable, and destroy the only copy of a measurement. So the read goes to `$LOGFILE.new` and
+  # only a non-empty result is moved into place; the destination is removed at that point and not
+  # before. A failed capture now leaves the previous file byte-identical, which is also what makes the
+  # gate's before/after test say the true thing - *no capture happened* - rather than "the file is
+  # gone".
+  TMP=$LOGFILE.new
+  # **And the wait is why this loop exists.** `adb exec-out` immediately after section 4 returns is
+  # expected to fail: the return is read out of the host log within seconds of the enumeration, and
+  # adbd is ~20 s behind it (see CAPTURE_WAIT above). One attempt here, failing into `die`, would
+  # report the normal bring-up as a capture failure - and `die` is exit 1, whose meaning is "the gate
+  # refused, or the device was not found", so the header's exit-3 state would have been reached
+  # through a code the header does not name for it. That is one state with two definitions, in the
+  # file that defines them.
+  CAPTURED=0
+  for _attempt in $(seq 1 $(( CAPTURE_WAIT / 5 + 1 ))); do
+    if sudo adb -s "$SERIAL" exec-out 'cat /proc/last_kmsg' > "$TMP" 2>/dev/null && [[ -s $TMP ]]; then
+      rm_log
+      mv "$TMP" "$LOGFILE"
+      CAPTURED=1
+      break
+    fi
+    rm -f "$TMP" 2>/dev/null || true
+    if (( _attempt == 1 )); then
+      say "  adb cannot reach the device yet. That is expected here and not yet a verdict: the return"
+      say "  is read from the host log when the phone enumerates, and adbd appears ~20 s later. Waiting"
+      say "  up to ${CAPTURE_WAIT}s (a read costs nothing and cannot spend a run)."
+    fi
+    sleep 5
+  done
+  if (( CAPTURED == 0 )); then
+    rm -f "$TMP" 2>/dev/null || true
+    say ""
+    say "REFUSING to call this a hang: the device returned to the host (section 4 read a new"
+    say "enumeration of SerialNumber: $SERIAL after the boot), and what failed is the capture."
+    say "The payload's log is in the top of DRAM and survives until the phone's next power"
+    say "*cycle*, so it is still there - do NOT power-cycle first, and do not re-run: a second"
+    say "boot overwrites it and spends another run. Retry this read by hand until Android is up:"
+    say "  sudo adb -s $SERIAL exec-out 'cat /proc/last_kmsg' > $LOGFILE"
+    say "and check the return against the host's own log by serial, not by port (this host's"
+    say "port has a second occupant that appears on its own after hours of silence):"
+    say "  sudo dmesg | grep $SERIAL"
+    if [[ -n $PREV_LOG ]]; then
+      say "$LOGFILE is absent and stays absent, because step 2b parked the previous run's log at"
+      say "  $PREV_LOG"
+      say "- so nothing at the name $LOGFILE can be this run's. Do not read that parked file as this"
+      say "run's either: its bracket is the one 547 section 4 was derived from."
+    else
+      say "$LOGFILE is untouched, so it is still the run before this one - do not read it as this one's"
+      say "(step 2b could not park it, so its sha256 must still equal the one the gate printed)."
+    fi
+    exit 3
+  fi
   say "wrote $(wc -c < "$LOGFILE") bytes to $LOGFILE"
 
   # --- the capture is checked before the run is read as a result ------------------------
@@ -710,6 +826,12 @@ else
   #
   # Reading /proc/last_kmsg is a read, so repeating it touches nothing and cannot cost a run;
   # and if it is still suspect after three reads the log is *named* suspect rather than read.
+  #
+  # **And the re-read is staged through the same temporary file, for a sharper version of the same
+  # reason**: it exists to *repair* a capture that looks wrong, so a failed re-read that had already
+  # truncated `$LOGFILE` would destroy the very bytes it was sent to improve - a repair that can
+  # destroy the thing it repairs. On a failed re-read the file that is on disk is kept, and the loop
+  # stops rather than reading a third time into the same hole.
   for _attempt in 1 2 3; do
     _payload_lines=$(grep -a -c '^MI4IOS6_STAGE90' "$LOGFILE" || true)
     if (( _payload_lines >= 8 )); then
@@ -718,12 +840,26 @@ else
     say "  WARNING: $LOGFILE holds $_payload_lines line(s) of the payload's own output, fewer"
     say "           than any run of this payload produces - re-reading /proc/last_kmsg"
     sleep 5
-    sudo adb -s "$SERIAL" exec-out 'cat /proc/last_kmsg' > "$LOGFILE" || \
-      die "could not read /proc/last_kmsg"
-    say "  re-read $(wc -c < "$LOGFILE") bytes"
+    if sudo adb -s "$SERIAL" exec-out 'cat /proc/last_kmsg' > "$TMP" 2>/dev/null && [[ -s $TMP ]]; then
+      rm_log
+      mv "$TMP" "$LOGFILE"
+      say "  re-read $(wc -c < "$LOGFILE") bytes"
+    else
+      rm -f "$TMP" 2>/dev/null || true
+      say "  the re-read did not come back. Keeping the $(wc -c < "$LOGFILE" || echo 0) bytes already"
+      say "  in $LOGFILE instead of overwriting them with an empty read, and stopping here - the"
+      say "  warning above still stands for the file as it is."
+      break
+    fi
   done
+  # **The count is read out of the loop, not written into the message.** The loop can leave early - the
+  # `break` above on a re-read that did not come back - so a message that says "after three reads" is
+  # a number that was true of the loop's *bound* and false of the loop's path, which is the same shape
+  # as 550's repair (the hardcoded number removed, the hardcoded *test* kept). `_attempt` is the
+  # iteration the loop actually stopped on, so it is the number of reads that were attempted.
+  _reads=${_attempt:-0}
   if (( $(grep -a -c '^MI4IOS6_STAGE90' "$LOGFILE" || true) < 8 )); then
-    say "  WARNING: after three reads $LOGFILE still holds fewer than 8 payload lines. Read"
+    say "  WARNING: after $_reads read(s) $LOGFILE still holds fewer than 8 payload lines. Read"
     say "           this as 'the payload wrote almost nothing', NOT as 'the payload ran and"
     say "           produced this' - and repeat the run before drawing a conclusion from it."
   fi
