@@ -111,7 +111,7 @@ not printed, and `g_kv_len` - the guard - reads 0.** The buffer's contents are u
 is not established. That distinction is what the clause prints, because "the buffer was empty" is the
 reading that would make someone conclude no probes ran.
 
-## 5. What the gate does now, and the three defects in my first version of it
+## 5. What the gate does now, and the four defects: three in my first version of it, one in landing it
 
 Inserted after the log-bracket block, before the reader-address clause: one printed block, **no new
 refusal** (the state it describes - the predicted bracket in the parked file - is the normal state of
@@ -125,8 +125,8 @@ than pinning it:
 | the pair's verdict | `_written` / `_in_dram`, from `$LOG` at gate time | "the pair is not here in full" |
 | the report's completeness - `occ < sites` means the second heading was skipped | the fixture's `entry_write(...)` sites for that literal, against the occurrence count in `$LOG` | `UNREAD` |
 
-Three defects in the first draft, all found by **running the branches rather than the default** (563's
-lesson, and 562's backtick bug is why it is a rule):
+Four defects. The first three are the first draft's, all three found by **running the branches rather
+than the default** (563's rule - and 562's backtick bug is why it is a rule):
 
 - **(a) A completeness verdict on a file with no report.** `occurrences < sites` fired on a log
   carrying no report at all, and printed the loud "** So the buffer is not empty in this file, it was
