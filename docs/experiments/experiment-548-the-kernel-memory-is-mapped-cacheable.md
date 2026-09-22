@@ -1,5 +1,11 @@
 # 548: the kernel's memory is mapped cacheable, so 546's one checkable premise holds
 
+> **Number disambiguation.** There are two commits labelled 548 in this tree. The earlier one, `3448f9f`
+> ("the gate measures the net's reach in the entry image"), is gate-only - `preflight_boot_check.sh`, no
+> document - and is an **ancestor** of this one (`7abbae6`). Renumbering it would rewrite this commit and
+> the 549 that follows, so the later side carries the disambiguator, here and in the README row. Both are
+> pushed; `master` = `stage90-xnu-handoff`.
+
 546 §6 listed exactly one premise that was a property of the pmap rather than of the function - *the idle
 stack is mapped cacheable* - and 547's whole mechanism rests on it: if the stack were mapped
 strongly-ordered or non-cacheable, then a stale valid line for it could not exist and the push/pop story
