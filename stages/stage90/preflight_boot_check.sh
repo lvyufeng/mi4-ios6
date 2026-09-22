@@ -153,6 +153,19 @@ echo "== the entry image the payload embeds =="
 # f202f246... (the 533 arm) - the same length, 5519996 bytes, so neither the file size nor
 # SHA256SUMS.txt betrays it.
 #
+# **That 496100 is a reading of an image that no longer exists, and the difference between it and
+# today's 496148 is itself a reading.** The image measured above was built *without*
+# STAGE90_XNU_ENTRY; the one this gate now passes was built with it, and the `#if` block's `bl` plus
+# its argument setup is exactly 48 bytes: kernel_size 6015308 -> 6015356 and blob offset 496100 ->
+# 496148, so the arm sits 48 bytes later in a payload 48 bytes longer, inside the same-sized image.
+# Two consequences worth having. First, **the switch is visible in two numbers of the boot image's own
+# header, with no disassembly** - a payload that never jumps has a `kernel_size` 48 bytes smaller than
+# one that does, and that is a third way to tell them apart beside the call site and the config dump.
+# Second, the flag-on 533 payload and 526's are the same size (6015356) and put the blob at the same
+# offset (496148), which is what "533 is 526 minus the idle-cache enable" looks like when it is measured
+# by layout rather than asserted. None of it is compared here - the numbers below are computed from
+# these files at gate time, and the parenthetical is a date, not an expectation.
+#
 # Nothing here is written down: not the offset, not a hash of the entry image compared against
 # prose. The arithmetic is build.sh's own, read back out of the files it produced - the boot image's
 # header carries page_size (build.sh's `--pagesize 2048`) and kernel_addr (its `--kernel_offset
