@@ -164,6 +164,15 @@ above it passes with `the linker's symbol says the blob is 5519996 bytes at 4941
 third direction was taken too: a shrunken entry bin (a 5,000,000-byte prefix of the arm the image carries)
 is refused, which a prefix match could not see.
 
+**538 confirmed that same offset against the frozen artifact, and pinned the arm by content rather than
+by the record.** Extracting 5,519,996 bytes at image offset 496,148 from `out/stage90/stage90-qcdt.img`
+(`1daaf44e62456369…`) and hashing gives `f202f2465886aba6daa357e110c6bf50e8208c6673a5c4119a8d069065eab28e`,
+`cmp`-identical to `out/stage90/xnu_arm_entry.bin`. That matters beyond the number being right: the
+record describing which arm the image is (`xnu_arm_entry-config.txt`) is written *by* the build that
+produced it, so every hash in that chain agrees after a wrong-switch rebuild
+(`mi4-self-written-record-is-not-a-constraint`) - the embedded blob is the one link that is **content**,
+and it is what says the image about to be spent is 533's arm and not 522's wearing its name.
+
 ## 5. What the run is to be read for, written before it happens
 
 1. **Does the device come back at all.** This is the experiment rather than a criterion of it, and if it
@@ -172,15 +181,51 @@ is refused, which a prefix match could not see.
    nothing after it - which is what 521, 522 and 526 each produced, and the fourth time in a row that the
    hardware watchdog (armed, 25 s) has not recovered a run.
 2. **If it returns, where it dies.** 520's `sleh_storm 9` at the same `pc` is the idle exit's
-   `pop {fp, pc}`, and anything later is progress.
+   `pop {fp, pc}`, and anything later is progress. **The instrument localizes it positively, and this
+   was verified against the frozen ELF before the run (538) rather than derived after it.**
+   `__wrap_platform_cache_idle_exit` (`0x8047c964`) is a **tail branch** through three bracket
+   publishers of one pass - `bl entry_slot_null_note` with `r0 = g_slot_pre` (`0x8047c978`), then
+   `bl entry_slot_rtc_note` (`0x8047c988`), then `bl platform_cache_idle_exit` (`0x8047c98c`, the
+   `push {fp, lr}` of 534), then `bl entry_slot_null_note` with `r0 = g_slot_post` (`0x8047c998`),
+   then `b entry_note_pcx`. So the presence/absence pattern is a three-way answer:
+
+   | in the log | the death is |
+   | --- | --- |
+   | `slot_pre_calls` present, `slot_rtcab_calls` absent | between the pre note and the rtc note |
+   | both present, `slot_post_calls` absent | **inside `platform_cache_idle_exit`** - the `pop` |
+   | all three present | it got out of the wrapper |
+
+   Absence is informative here rather than merely unread: all three use the same publish schedule
+   (`entry_stubs.c:6236`) *and* the same `entry_live_ready()` gate, and each is called exactly once per
+   pass, so at pass *n* all three counters equal *n* - **if one published, the others would have
+   published had they been reached.** Two caveats: the log must not be truncated after the pre line
+   (last_kmsg is a ring), and the rtc note's keys are `xnu_live_slot_rtcab_*`.
 3. **The two readings that say this image is the arm it claims to be**: `xnu_live_slot_cwe_win` and
-   `_set` must **agree**, both with `C` clear. The note is kept on purpose even though the write it
+   `_set`, which here must both have `C` clear. The note is kept on purpose even though the write it
    brackets is gone, because an absent key and a key that says "no change" are different facts
    (`mi4-silence-is-a-reading-only-if-success-is-silent`) - and a `_set` with `C` set would be an image
-   still carrying 522's write.
+   still carrying 522's write, which is the arm-discriminating half of this pair.
+   **What this pair cannot do is fail on "agreement", and §5 of this document said it must "agree"
+   until 538 read the bytes.** With `IDLE_CACHE_ENABLE=0` the enable is gone from the window and the
+   two reads are adjacent instructions - `mrc p15,0,r0,c1,c0,0` (`0x8047c924`) then
+   `mrc p15,0,r1,c1,c0,0` (`0x8047c928`), nothing between them, then `bl entry_window_note` - so *no
+   instruction can intervene* and the pair agreeing is a property of the code rather than a reading
+   that came out that way. The informative content is entirely in the second value: `C` clear is this
+   arm, `C` set is 522's image, and that distinction survives because 522 had the enable call between
+   the two reads. A criterion that cannot fail is not a criterion, so it is stated here as the shape to
+   expect and not as one of the checks.
 4. **The ending shape**, and whether Apple's own panic path runs (520's log carries it), because a
    returning arm with the instrument intact is what 523's console item and the storage arm both need
    before they can be developed at all.
+5. **The counts in the log are published on a schedule, and the last one is not the total.** All three
+   bracket publishers go through `entry_slot_publish(n)` = `n <= 4 || (n & (n-1)) == 0`
+   (`entry_stubs.c:6236`), so a key reading `0x00000004` means **at least four passes, possibly 5-7** -
+   a site reached five times and one reached exactly four produce the same log. This is by design
+   (bounded log at `entry_stubs.c:6321`) and it is the 406 tell - a counter published on a schedule read
+   as a total - so the hazard is in the reading, not in the image: **read these keys as "reached, at
+   least this many times", never as a count of passes.** Behind the schedule there is a second reason a
+   key can be absent - `entry_live_ready()` returning 0 suppresses the note without publishing - which
+   is the alternative explanation 519 §11's decision rule exists to distinguish.
 
 The two outcomes are not symmetric, and the asymmetry is worth stating before the run rather than after
 it. **A return indicts the enable cleanly**, because 526 and 533 differ by nothing else. **A non-return
@@ -218,3 +263,13 @@ storage, and cannot brick the device by construction - the worst case remains a 
 press, which is what 521's, 522's and 526's runs each needed. **No build script was edited while this
 image's checks ran**, and the two source files this arm is built from are the ones the loop hash-checked
 before and after it.
+
+**538 and 538b (added after the fact, still host-side) changed no artifact and touched no device.** They
+read the frozen image, the frozen entry ELF, `entry_stubs.c` and `run_and_capture.sh`, and what they
+produced is §4's byte-pinning and §5 items 2, 3 and 5 - the death's three-way localization, the
+correction to a criterion that could not fail, and the schedule the counts are published on. All three
+bear on *how this run's log is read*, which is why they belong in this document rather than in a new
+one: the run has not happened, so §5 is still a prediction, and the two clauses that changed are the
+ones a reader would have used to read it. No device action: `sudo fastboot devices` and
+`sudo adb devices` are both empty, and `usb 3-10`'s last event is still the disconnect at device number
+117 - the phone owes a power press before anything here can be spent.
