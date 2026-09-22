@@ -165,7 +165,8 @@ summarise_log() {
   # nothing. This repository has been bitten by that distinction more than once, so the three
   # states are printed separately: PASS, FAIL, and UNREAD.
   if grep -a -q 'xnu_live_slot_cwe_' "$log"; then
-    local cwe_win cwe_set cwe_calls pre_calls rtcab_calls post_calls storm panics user_ones verdict_ok=1
+    local cwe_win cwe_set cwe_calls pre_calls rtcab_calls post_calls storm panics user_ones
+    local pop_death pop_named=0 arm_seen=unknown verdict_ok=1
     # `|| true` is load-bearing and its absence was this block's first defect, found by running it
     # against the state it is meant to refuse: the script sets `pipefail`, so a key that is absent
     # makes `grep` exit 1, the pipeline returns 1, and `set -e` kills the *caller* mid-function -
@@ -190,24 +191,66 @@ summarise_log() {
     storm=$(keyval sleh_storm)
     panics=$(grep -a -c 'panic.*sleh_abort' "$log" || true)
     user_ones=$(grep -a -c 'xnu_live_sleh_user=0x0*1' "$log" || true)
+    # **The pop's own signature, and it is a literal read off the hardware rather than a
+    # derivation.** 520's register dump carries it verbatim (`/tmp/cancro-last_kmsg.txt:4006`):
+    #
+    #     r12:  0xde58b701  sp: 0x8054fed0  lr: 0x800462dc  pc: 0x04b79074
+    #
+    # `lr = 0x800462dc` is the return address the exit's own `bl FlushPoU_Dcache` pushed at
+    # `0x800462d8` - and the two `bl`s that could overwrite it before the pop
+    # (`InvalidatePoU_Icache` at `0x80046304`, `flush_core_tlb` at `0x80046308`) are **skipped** in
+    # this configuration, which 549 read out of this image's own boot-args rather than assumed.
+    # `lr: *` because the dump's spacing is not uniform (`r10:`/`r11:` are single-spaced).
+    #
+    # **The pin is deliberate and its failure direction is noisy, not silent**: an exit that moves
+    # in a later build stops matching, which lands on FAIL below and makes a human look. A shape
+    # test that failed *quietly* on a moved address would be this project's most-paid-for defect
+    # ([[mi4-measurement-defects]]), so do not "fix" this by loosening the match to `lr:` alone.
+    pop_death=$(grep -a -c 'lr: *0x800462dc' "$log" || true)
 
     # The live channel writes its counters as `0x%08x`, so every numeric test below is a hex
     # pattern and the arithmetic is done on the `0x...` text - which bash's `$(( ))` reads. A
     # decimal-only pattern would have made every present key read as UNREAD, which is how this
     # block's first version behaved against a PASS-shaped log.
     say ""
-    say "the idle window's near end, from the pair of SCTLR readings the entry wrapper publishes."
-    say "The arm's verdict is the panic's ABSENCE; the pair says which arm this log came from, and"
-    say "the two arms have opposite expected pairs - so a FAIL here means the shape is one that"
-    say "*neither* arm can produce, not that one of them did not do what it promised."
+    say "the idle window's near end, from the pair of SCTLR readings the entry wrapper publishes"
+    say "and from the shape of the death when the log carries one. The pair says which arm this log"
+    say "came from, and the two arms have opposite expected pairs; each arm's prediction is a shape"
+    say "of death, not the death's absence (547 section 4). So a FAIL below means a shape that"
+    say "neither arm's prediction names, not that one of them did not do what it promised."
 
-    # (1) the verdict
+    # (1) the verdict, read as the death's SHAPE rather than as its absence
+    #
+    # **This clause said "The arm's verdict is the panic's ABSENCE" and printed FAIL for any
+    # `sleh_abort` panic - and that is the prediction of an arm this image is not.** 547 section 4
+    # (`9675e82`, committed *before* the run) predicts for the enable-off cell exactly the
+    # opposite: "the pass reaches the exit, the push runs with `C` = 0, the pop loads the stale
+    # words, the prefetch abort panics at `pc = the popped value & ~1`, and the device comes back
+    # on XNU's `MACH Reboot`". 533 section 5.2 reads the same three-note pattern as "**inside
+    # `platform_cache_idle_exit`** - the `pop`", and 533 section 5.4 lists "whether Apple's own
+    # panic path runs" as an *item to read*. So as written this clause scored the pre-registered
+    # prediction as the arm's failure, on the frozen arm, in the one file that reads the result -
+    # clause (2)'s defect one clause over, and it was fixed there first.
+    #
+    # What separates the two is `pop_death` above, and it is the *only* new machinery: no arm
+    # variable, because whether this log is the enable-off cell is what clause (2) prints.
     if [[ $panics -eq 0 ]]; then
-      say "  PASS  no 'panic ... sleh_abort' in the log - the idle exit retires its own epilogue"
+      say "  PASS  no 'panic ... sleh_abort' in the log - the idle exit retired its own epilogue"
+      say "        rather than dying at its pop, which is past the frontier this phase has been"
+      say "        measuring. 547 section 4's third row is the reading for that: 546's mechanism"
+      say "        did not fire in this cell, so 535 must not be built as designed"
+    elif [[ $pop_death =~ ^[0-9]+$ ]] && (( pop_death >= 1 )); then
+      say "  PREDICTED  $panics 'panic ... sleh_abort' record(s) and the dump carries"
+      say "        lr: 0x800462dc - the exit's own pop {fp, pc}, which is 547 section 4's prediction"
+      say "        for the enable-off cell and *not* a failed arm. It is still not progress: the boot"
+      say "        restarts on MACH Reboot instead of surviving the idle pass, which is 535's job"
+      pop_named=1
     else
-      say "  FAIL  $panics 'panic ... sleh_abort' record(s) - the death 519 and 520 died is back"
-      say "        (521's non-return said the flush is not the answer and 526's took the capture"
-      say "        out; a panic here says the cache state is not it either - which leaves the"
+      say "  FAIL  $panics 'panic ... sleh_abort' record(s) and the dump does not carry"
+      say "        lr: 0x800462dc (matches: ${pop_death:-unread}): a death of a shape that neither"
+      say "        547 section 4 nor 533 section 5 names, so it is a new fault and not this arm's"
+      say "        reading. (521's non-return said the flush is not the answer and 526's took the"
+      say "        capture out; a panic here says the cache state is not it either - which leaves the"
       say "        enter wrapper's own store in the window, 522's addition, as the next thing to"
       say "        bisect)"
       verdict_ok=0
@@ -236,9 +279,11 @@ summarise_log() {
         if [[ $cwe_set =~ ^0x[0-9a-f]+$ ]] && (( (cwe_set & 4) == 4 )); then
           say "  ARM   522's arm: slot_cwe_set=$cwe_set has C set - the near-end re-enable ran and"
           say "        took, so this log is an image that re-enables the D-cache at the window's end"
+          arm_seen=522
         elif [[ $cwe_set =~ ^0x[0-9a-f]+$ ]] && (( (cwe_set & 4) == 0 )); then
           say "  ARM   533's arm: slot_cwe_set=$cwe_set has C clear - the window is left exactly as"
           say "        Apple left it, and *this* is that arm's expected reading, not a failed enable"
+          arm_seen=533
         else
           say "  UNREAD  slot_cwe_set=${cwe_set:-absent} is not a readable SCTLR - the pair is half"
           say "          a reading and which arm ran is not decidable from it"
@@ -271,10 +316,19 @@ summarise_log() {
       say "  DIED IN THE EXIT  pre_calls=$pre_calls and rtcab_calls=$rtcab_calls both published and"
       say "        slot_post_calls did not: the pass reached the wrapper, took the rtcPop reading and"
       say "        got as far as the call, and did not come back through it - so the death is inside"
-      say "        platform_cache_idle_exit, which is 520's pop {fp, pc} at the same pc. That is this"
-      say "        arm's prediction failed, not a missing reading: the three notes share one schedule"
-      say "        and one gate, so a site that published proves the later ones were reachable."
-      verdict_ok=0
+      say "        platform_cache_idle_exit, which is 520's pop {fp, pc} at the same pc. That is a"
+      say "        localization and not a missing reading: the three notes share one schedule and one"
+      say "        gate, so a site that published proves the later ones were reachable."
+      if [[ $pop_named -eq 1 ]]; then
+        say "        And it agrees with clause (1): the dump's lr: 0x800462dc puts the fault at that"
+        say "        pop, which is 547 section 4's prediction for the enable-off cell - so the two"
+        say "        clauses localize the same instruction, and this is not scored as a failure"
+      else
+        say "        **and clause (1) did not find the pop's own lr in the dump**, so this pass died"
+        say "        inside the call but somewhere other than the instruction 547 section 4 names -"
+        say "        that is a new fault, not this arm's prediction arriving"
+        verdict_ok=0
+      fi
     elif [[ $pre_calls =~ ^0x[0-9a-f]+$ ]] && (( pre_calls >= 1 )); then
       say "  DIED BEFORE THE EXIT  pre_calls=$pre_calls published but the rtcPop reading did not, so"
       say "        the pass died between the two - earlier than 520's death and a different fault"
@@ -301,14 +355,41 @@ summarise_log() {
     elif [[ -z $storm ]]; then
       say "            xnu_live_sleh_storm absent - no abort storm was recorded at all"
     fi
-    if [[ $verdict_ok -eq 1 ]]; then
+    if [[ $pop_named -eq 1 ]]; then
+      say "  => the arm's prediction arrived: the death is the exit's own pop, at the instruction"
+      say "     547 section 4 names, with a log and (per the runner's exit code, which is not this"
+      say "     function's reading) a return. What did *not* happen: the boot still does not survive"
+      say "     the idle pass, so 535's PoC flush behind 0x800462d8 is still the next step. This"
+      say "     block is not the reading that decides the arm; the runner's exit code is (551: exit 3"
+      say "     means the SoC returned into a state adb cannot reach)."
+      # The pair from clause (2) is the only thing in the log that says which cell this is, and
+      # 547 section 4's prediction is not for both cells - so the two are put side by side here
+      # rather than left for the reader to join up.
+      case $arm_seen in
+        533)
+          say "     And clause (2) reads the pair as 533's arm, which is the cell 547 section 4's"
+          say "     prediction is for: the two agree." ;;
+        522)
+          say "     **But clause (2) reads the pair as 522's arm, which 547 section 4 does not"
+          say "     predict this for**: 522's cell is an enable-on row and 547 section 3 has both of"
+          say "     those rows dying with *no log at all*, so a log here is itself the surprise. Treat"
+          say "     this as unread against 547 and re-derive which image ran before reading anything"
+          say "     else in this block." ;;
+        *)
+          say "     Clause (2) could not read the pair, so which cell this log is stays open - and"
+          say "     547 section 4's prediction is the enable-off cell's." ;;
+      esac
+    elif [[ $verdict_ok -eq 1 ]]; then
       say "  => the three checks pass: no panic, the window opened and its pair is readable, and the"
       say "     exit returned through the wrapper. The ARM line above says which of the two arms"
       say "     this log came from; item (4) says how much boot happened after the exit, and that is"
-      say "     the next step's question - not this one's."
+      say "     the next step's question - not this one's. And if this log is the enable-off arm, a"
+      say "     genuine return here is 547 section 4's third row: 546's mechanism did not fire."
     else
-      say "  => at least one check above is FAIL or UNREAD; read the verdict line (1) first,"
-      say "     because the arm's prediction is the panic's absence and nothing else."
+      say "  => at least one check above is FAIL or UNREAD. The criteria are 547 section 4's shape"
+      say "     (a panic *at the exit's pop* is PREDICTED for the enable-off cell - its absence, or a"
+      say "     panic of another shape, is the news) and 533 section 5's readings, so read which line"
+      say "     failed before concluding anything about the arm."
     fi
   fi
 }
