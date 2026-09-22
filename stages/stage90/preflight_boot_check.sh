@@ -1385,6 +1385,18 @@ if [[ -n $REGION ]]; then
   grep -nE '^[[:space:]]*exit [0-9]+' <<<"$REGION" \
     | awk -v s="${START:-0}" -F: '{ c = $2; gsub(/[^0-9]/, "", c); printf "    run_and_capture.sh:%d   exit %d\n", s + $1 - 1, c }'
   echo "which code means which state is that file's own wording at those lines - read them there"
+  # **Scope, stated, because the count above is a count of one region and reads like a count of the
+  # file.** Section 5's capture step grew a second `exit 3` (the returned run whose capture failed),
+  # so "3 exit site(s)" is now false of the file while remaining true of the section - and a number
+  # whose scope is unstated is this project's own recurring defect (543, 552). Both censuses are
+  # printed; only the section's codes are the ones this clause narrates, because that is the region
+  # whose states the sentences below describe.
+  NSITES_ALL=$(grep -cE '^[[:space:]]*exit [0-9]+' "$RUNNER" || true)
+  CODES_ALL=$(grep -oE '^[[:space:]]*exit [0-9]+' "$RUNNER" | awk '{print $2}' \
+              | LC_ALL=C sort -n | LC_ALL=C uniq | tr '\n' ' ')
+  CODES_ALL=${CODES_ALL% }
+  echo "for scope: this file has $NSITES_ALL exit site(s) in total, code(s) $CODES_ALL - so the count and"
+  echo "  the codes above are section 4's, and a code can have a second producer outside it."
   # The codes this gate's text explains. A code outside this set is not narrated here in the gate's
   # own words, and the safe direction is to stop rather than paraphrase a state nobody has read: that
   # is the same shape as the entry arm's build-stop repair, an alarm on a drift rather than a proof.
@@ -1438,19 +1450,35 @@ fi
 # and it names the bracket already in it rather than describing the hazard. After the run, the test is
 # one command: this sha256 must have changed. Unchanged means no capture happened - the state exit 3
 # describes - and the honest reading is that state, not a bracket read out of this file.
-echo "== the log those instructions name, as it stands before the run =="
+#
+# **The runner's own 564 made this record no longer load-bearing, and that is worth saying here rather
+# than deleting the block.** Its new step 2b **parks** the file - `mv $LOGFILE $LOGFILE.prev` - before
+# it boots anything, so after the boot the name holds *this* run's capture or nothing, and the previous
+# bytes cannot be mistaken for this run's **even if they are identical**, which a hash comparison cannot
+# do. It also means the runner, not the gate, is where the before-state lives: one value, one
+# definition. What this block still is, and why it stays, is the operator's *independent* record - the
+# runner's own exit-3 message points back at it ("compare its sha256 against the one the gate printed")
+# and it is the fingerprint that identifies a parked file as the one this gate saw. What it is **not**
+# is the test: the test is `[[ -e $LOG ]]` after the run, plus non-empty.
+echo "== the log those instructions name, as it stands at gate time =="
 echo "  $LOG"
+echo "  this is a reading of THIS moment, not a claim about the run: the gate cannot see whether a run"
+echo "  follows it, and run_and_capture.sh's step 2b parks this file before the boot (that file's own"
+echo "  564). So after the run the test is not this number: it is whether $LOG is there at all, and"
+echo "  whether what is there is non-empty - the hand retry exit 3's message asks for is a shell"
+echo "  redirect, which creates the file before adb can fail."
 if [[ ! -e $LOG ]]; then
   echo "  absent - and that is the useful part: after the run, this file *existing* is itself the first"
-  echo "  check, because the runner writes it with an 'rm' then a redirect from adb (step 5). A file that"
-  echo "  is still absent afterwards captured nothing, whatever the exit code said."
+  echo "  check, because nothing here writes it before a capture succeeds. Step 2b says the same thing"
+  echo "  about this exact state ('no log at ... yet'), and step 5 reads into $LOG.new and renames it"
+  echo "  into place only on a non-empty read - so a name still absent afterwards captured nothing,"
+  echo "  whatever the exit code said."
 elif [[ ! -r $LOG ]]; then
   echo "  UNREAD - present but not readable by $(id -un), so its contents cannot be fingerprinted here."
   echo "  A hand re-capture under sudo leaves the file root-owned; read it as root before attributing"
   echo "  anything to the coming run, and fingerprint it as root too."
 else
   LOG_SHA=$(sha256sum "$LOG" | cut -d' ' -f1 || true)
-  LOG_BYTES=$(wc -c < "$LOG" || true)
   echo "  now: $(stat -c '%s bytes, mtime %y' "$LOG")"
   echo "       sha256 $LOG_SHA"
   # The reader's own rule is `tail -1` (run_and_capture.sh's `keyval`: last occurrence wins), so the
