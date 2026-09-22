@@ -1,0 +1,176 @@
+# 546: the pop is cacheable, and nothing in the window invalidates the L2
+
+A host-side reading of the bytes the run dies in, with no device and no build. It is 545's method applied
+to the frontier object itself: the whole of `platform_cache_idle_enter` and `platform_cache_idle_exit`
+read instruction by instruction out of the frozen image, for where the window opens and closes, what
+runs between, and what state the fatal `pop` executes in.
+
+**The reading in one line: the fatal `pop {fp, pc}` executes 24 bytes after Apple's own exit turns the
+D-cache back on, and no cache operation anywhere inside the window invalidates an L2 line - so a stale
+valid L2 copy of the pushed stack line is readable at the pop, and Apple's L1 flush is the wrong level to
+stop it.** That also explains, without being built to, why 516's and 521's cache arms did not work.
+
+## 1. The window, and where the pop sits in it
+
+Six instructions carry the whole story, and the source they were compiled from says the same in Apple's
+own words: `platform_cache_idle_exit` is `osfmk/arm/caches.c:451-497` (the `ARMA7` body), the enter's
+cache-off is `platform_cache_disable()` (`:385-400`, `/* Disable dcache allocation. */`), the exit's
+re-enable carries `/* Enable dcache allocation. */` at `:486`, and the caller is `cpu_idle()`
+(`osfmk/arm/cpu.c:155-157`): `platform_cache_idle_enter(); cpu_idle_wfi(...); platform_cache_idle_exit();`
+- so the `lr` this frame pushed names `cpu_idle`, and the `pop` is the return into it.
+`mrc p15,0,Rt,c1,c0,{0}` is `SCTLR`; `{1}` is `ACTLR`.
+
+| site | instruction | source | effect |
+| --- | --- | --- | --- |
+| `0x8004623c`-`0x80046244` | `mrc` SCTLR / `bic r0, r0, #4` / `mcr` | `caches.c:385-400`, in the enter | **`SCTLR.C` = 0** - `platform_cache_disable()`, second instruction of the enter |
+| `0x800462b8`-`0x800462c0` | `mrc` ACTLR / `bic r0, r0, #0x40` / `mcr` | `caches.c:434` `/* Leave the coherency domain */` | ACTLR bit 6 written low |
+| `0x800462d4` | `push {fp, lr}` | the frame the compiler gave the exit | **inside the window, cache off** - the stores go to memory |
+| `0x800462d8` | `bl FlushPoU_Dcache` | `caches.c:459` `/* Flush L1 caches and TLB ... */` | L1 clean+invalidate only (545 §5) |
+| `0x8004630c`-`0x80046314` | `mrc` ACTLR / `orr r0, r0, #0x40` / `mcr` | `caches.c:473` `/* Rejoin the coherency domain */` | ACTLR bit 6 written high |
+| `0x8004631c`-`0x80046324` | `mrc` SCTLR / `orr r0, r0, #4` / `mcr` | `caches.c:486-490` `/* Enable dcache allocation. */` | **`SCTLR.C` = 1** - the D-cache comes back on |
+| `0x8004633c` | `pop {fp, pc}` | `caches.c:495` follows | **cacheable - the cache is on 24 bytes earlier** |
+
+So the window is bounded by Apple's own two writes (`0x80046240` opens, `0x80046324` closes), the push
+and the pop are both inside it, and the pop is on the **cacheable** side of the re-enable, not the
+uncached side. The push is on the uncached side. The four instructions between the re-enable and the pop
+are a `isb`, the per-CPU read, and a `ldr`/`str` pair - **and not one of them is a `bl`**.
+
+## 2. What the window does to the caches, and the level it never touches
+
+Every cache operation called inside the window `[0x80046240, 0x8004633c)`:
+
+| site | call | what it invalidates |
+| --- | --- | --- |
+| `0x80046274` | `CleanPoU_Dcache` (flag path) | nothing - clean only |
+| `0x80046284` | `FlushPoU_Dcache` (else path) | **L1 only** |
+| `0x800462b0` | `CleanPoC_DcacheRegion(r4, 0x340)` | nothing - clean only, and only the per-CPU struct |
+| `0x800462d8` | `FlushPoU_Dcache` (the exit's) | **L1 only** |
+| `0x80046304` | `InvalidatePoU_Icache` | the L1 **I-cache** |
+| `0x80046308` | `flush_core_tlb` | the TLB |
+
+Six calls, and **the only lines any of them invalidates are L1 lines**. The two PoU flushes stop at the
+L1 because that is what PoU means (545 §1-§2); the one PoC-named call is a *clean by VA* of 0x340 bytes
+of the per-CPU structure, which has neither an invalidate nor the stack in its range. **No instruction in
+this window invalidates a single L2 line, and none of them can: an invalidate of the L2 would have to
+come from a PoC *flush* (`c7,c14,2` at level 2), and no such call is here.**
+
+**The source says this even more plainly than the bytes do, in Apple's own comment on the first of them**:
+`/* Flush L1 caches and TLB before rejoining the coherency domain */` (`caches.c:459`). Apple wrote the
+exit's flush *as* an L1 flush and labelled it one. The exit contains no PoC operation of any kind - its
+only other memory-related calls are the I-cache invalidate and the TLB flush - so the L2 is not
+maintained by this path on purpose, not by omission, and the two globals that pick the branch
+(`up_style_idle_exit` at `0x805511a4`, `real_ncpus` at `0x80520378`; `caches.c:464`) change *which* L1
+work the enter does, not whether the L2 is touched: on both branches the L2 goes untouched.
+
+## 3. The hypothesis, and why it explains the two failures it was not built to
+
+Set/way maintenance is not gated by `SCTLR.C` - it acts on the cache - so the L1 really is invalidated by
+`0x800462d8` even though the cache is off. That is exactly what makes the L2 the gap:
+
+1. The stack lines the idle thread uses were populated **cacheable** earlier, so a valid copy of them
+   exists in the L1 and has been victimised down to the L2. Those L2 copies hold the *old* stack
+   contents.
+2. The push at `0x800462d4` runs with **`C` = 0**, so its two stores go to memory and the cached copies
+   are not updated. A copy that is not updated is a copy that is now **stale, valid, and in the L2**.
+3. `0x800462d8` invalidates the **L1** copy. The L2 copy is untouched, and nothing later in the window
+   touches it.
+4. `0x80046324` turns the cache back on. The pop at `0x8004633c` loads the stack address, **misses the
+   L1** (just invalidated), and hits the **stale valid L2 line** - returning the value the stack held
+   before the push instead of the `{fp, lr}` the push wrote to memory.
+
+One thing already measured is consistent with this and was read as a curiosity: the value the pop dies
+on is **a counter reading, and the fault's `pc` is that value minus one**. Under this reading that is
+exactly what a stale slot should hold - this frame sits on the idle thread's stack at the address every
+deeper call has already used, so the *previous* contents of the slot are the leftovers of whatever last
+ran there (a counter's value is what a timer read leaves in a register passed down), and on the first
+pass through `cpu_idle`'s new frame there is no earlier `lr` of its own to find. The reading does not
+prove the mechanism - a leftover of any kind would look like this - but it does say the popped value
+should be *garbage that is not an address*, which is what was seen.
+
+**The hypothesis is one sentence - the L2 holds a copy the push could not update, and it is readable
+because the cache is on by the time the pop runs - and it accounts for the two arms that were built
+against this seam and did not work, neither of which was designed with it in mind:**
+
+| arm | what it did | why this reading says it could not help |
+| --- | --- | --- |
+| 516, `CleanPoC_Dcache` in the enter wrapper | cleaned both levels before the window | a **clean** writes the stale copy *out*; it does not remove it. The L2 copy is still there for the pop to hit |
+| 521, `FlushPoC_Dcache` in the enter wrapper | cleaned **and invalidated** both levels | the right operation at the wrong **time**: it runs before the window opens, and every cacheable stack access after it - the wrapper's own note-taking, Apple's enter code, the payload's bracket publishers - can victimise a fresh copy down into the L2 before the push ever happens |
+
+That is the sign worth taking seriously and not as proof: **a mechanism that explains the failures it did
+not cause.** 516 and 521 were each built on the assumption that the L1 was the problem, and under this
+reading each removed the wrong thing - one did not invalidate at all, the other invalidated too early.
+Both were recorded as negative results with no explanation; this supplies one, and it is falsifiable.
+
+## 4. What that does to the seam, which is 535's question
+
+The fix has to invalidate **the L2**, **after the push** (`0x800462d4`) and **before the re-enable**
+(`0x80046324`). Two consequences, one of them a correction to 534/544/545's plan:
+
+1. **534's seam is still the right one, and for a third reason.** The exit's `bl FlushPoU_Dcache` at
+   `0x800462d8` is the **last** `bl` in the span that has any cache work in it (the other two in the span
+   are `InvalidatePoU_Icache` at `0x80046304` and `flush_core_tlb` at `0x80046308`), it is reached in
+   every pass, and it is a `bl` - so it is wrappable, per [[mi4-hooks-live-at-calls]]. What 535 puts
+   behind it should be a **PoC flush**, so that what runs after the push is a clean+invalidate of both
+   levels rather than an L1-only clean+invalidate.
+2. **And it must be told apart from the other three callers of the same routine.** `FlushPoU_Dcache` is
+   called from four sites - `0x80045d08` (`cache_xcall`), `0x80046284` (the enter's else path),
+   `0x800462d8` (the exit), `0x800463bc` (`cache_xcall_handler`) - and wrapping the symbol alone would put
+   the flush in all four. The wrapper has to test the return address it was entered with (`0x800462dc`
+   for the exit), which is what the project's `xnu_entry_stub_caller` mechanism already exists to read.
+
+**And the region between the re-enable and the pop is unwrappable**, which closes off the other obvious
+place to put it: those four instructions contain no `bl` at all, and the `pop` itself is not a call. So
+"flush after the cache comes back on and just before the pop" is not a plan that can be built here - the
+L2 has to be cleaned out *while the cache is off*, which is exactly the window step 1 above names.
+
+## 5. The prediction this makes for 533, stated before the run
+
+533 changes the **enter-side** `SCTLR.C` re-enable (`STAGE90_XNU_IDLE_CACHE_ENABLE=0`) and does not touch
+the flush. Under this reading the stale L2 line is produced by the push and the off-cache window, neither
+of which 533 changes, so:
+
+- the pass should reach the exit and **die at the same `pop`** - `pre_calls` and `rtcab_calls` published
+  with `post_calls` absent, the localization `run_and_capture.sh` now prints; and
+- the `slot_cwe_win`/`slot_cwe_set` pair should both read `C` clear (533's arm's shape, 540 §3).
+
+**One thing 533 cannot change either way, and it is worth knowing before reading its log:** the re-enable
+this section is about is **Apple's own, unconditional, in the exit** (`caches.c:482-495`, `#if __ARM_SMP__`
+inside `#if defined (ARMA7)`), not the wrapper's enter-side one that 533 switches off. So every arm the
+phase has run - including 520's returning cell - executes a `SCTLR.C` set within 24 bytes of the pop. If
+the reading here is right, that write is in the returning runs too, and what saved them was that the stale
+line happened not to be resident; if 533 returns, it is not this write that is being switched and §3's
+step 4 is the wrong mechanism.
+
+**It is written down because it can be wrong, and its being wrong is worth more than its being right:**
+if 533 *returns*, then removing the enter-side re-enable fixed the pop, the L2 story here is not the
+mechanism (or not the only one), and 535's flush would be aimed at the wrong level - which is the one
+outcome that should stop 535 from being built as designed.
+
+## 6. What this does not decide
+
+- **Whether the stack region is mapped cacheable.** `SCTLR.C` = 1 at the pop is read off the bytes; that
+  the idle thread's stack is *normal, write-back* memory is not verified here, and if it were mapped
+  non-cacheable the whole of §3's step 4 would be impossible. It is the one premise of the reading that
+  is a property of the pmap rather than of this function, and it is checkable. Two things narrow it
+  without settling it. The attributes in force are **XNU's**, not the payload's: the payload's build
+  config records `STAGE90_PMAP_ATTR_MODE_SO_ONLY` (`out/stage90/stage90-build-config.txt:11`), which is
+  its own bootstrap table and is replaced before the jump, and by the time this pop runs XNU has been
+  running user-mode code for seconds through its own pmap. And the stack is XNU's wired kernel memory,
+  which is the memory Apple's ARM pmap is built to keep cached - but that is an argument from purpose,
+  not a reading of the descriptor, and this document does not make it.
+- **Whether the death is a cache matter at all**, and which level holds the line the pop actually hit.
+  545 §6's missing-barrier hypothesis and §3's stale-L2 hypothesis are both consistent with the same
+  failures; they are not exclusive, and nothing here ranks them.
+- **533's arm**, which is unchanged, frozen and unrun: `1daaf44e624563694e…` (boot image, `./build.sh`
+  not run) and `f202f2465886aba6…` (entry image). This document adds a prediction about its result and
+  changes nothing about it.
+- **535**, still a design and not an artifact, and the entry lane's to build - now with one more
+  requirement than 534 gave it: a PoC flush, behind the exit's call site only, by return address.
+- **The storage line and TWRP**, unchanged: still withheld.
+
+## 7. Safety
+
+No device action in this step. `objdump` and one `grep` over `out/stage90/xnu_arm_entry.elf`, and grep
+over the memory directory. Nothing written outside `docs/` and the memory files, no build run, no file
+under `out/` touched, `flash` not used, and the frozen pair is untouched (`1daaf44e624563694e…` /
+`f202f2465886aba6…`). The device is off the bus and owes a power press before 533 can run.
