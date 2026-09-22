@@ -143,6 +143,40 @@ reads that bracket it (`_win` before, `_set` after) with the note published betw
 the 20-byte `g_slot_cwe` table with its three keys and three write sites. The shared clause lists were
 extended with it: seven tables, **44 keys**, and `entry_window_note:3` in the per-note counts.
 
+### 2.1 The clause that makes the arm's central claim structural
+
+The arm rests on one sentence - *this image has no store of its own inside the cache-off window* - and a
+sentence in a comment is not a check, so it is now two assertions added to `xnu_entry_522` after the run
+order was read off the image (section 1.1):
+
+* **Adjacency, as addresses rather than a count.** The `SCTLR` read that produces `_win` must be the
+  instruction immediately after the call to `platform_cache_idle_enter`, and the call to
+  `entry_idle_cache_enable` the instruction immediately after that: `cwebefore == realaddr + 4` and
+  `cweaddr == realaddr + 8`, in this image `0x8047c928` and `0x8047c92c` against `realaddr = 0x8047c924`.
+  With that, the wrapper's whole presence inside the window is one `mrc` - which writes no memory - and
+  the count of the image's instructions in the window is two, without the clause having to count them.
+  It also says in its own failure message that it assumes a single-instruction `bl`, because an
+  out-of-range target would be a `movw`/`movt`/`blx` triple and the refusal would then be about the
+  addresses rather than the property - the direction that costs a build and not a run.
+* **No store in `entry_idle_cache_enable`.** The body's mnemonics are counted for `st*`/`push`/`vst*` and
+  that count must be **0**. The function's whole contribution to the window is six bytes of
+  control-register write.
+
+The clause now also *names the window* in its say line, computed rather than asserted: Apple's tail from
+its own `SCTLR` write at `0x80046244` to the function's `pop` at `0x800462d0`, **140 bytes, all of it
+Apple's** - code that has run in every run since 506 - followed by the wrapper's one read and the
+enable's write. It is worth stating what that number replaces: without this arm the cache-off window spans
+the WFI, the WFI wrapper's stores, the whole exit wrapper's capture and publishers, and Apple's exit up to
+`0x80046324` - i.e. essentially the entire idle path, which is where 519, 520 and 521 all failed. After it,
+nothing this project wrote executes with the cache off.
+
+**Both assertions were run against the state they are meant to refuse** before the build was trusted, as
+this repository's rule requires: a store spliced into the enable's body counts as 1 and the check fails,
+and every displacement of the two addresses - `+8`, `+4`, `0`, and the empty case - is refused while the
+true pair passes. The rebuild then came out **byte-identical** in all three artifacts (`stage90-qcdt.img`,
+`xnu_arm_entry.bin`, `xnu_arm_entry.elf`), which is what a clause-only edit should do and is itself the
+evidence that the image the gate approved is the image the clause describes.
+
 Two defects were found while building this, and one of them is the kind that only a reader catches:
 
 * **The objdump operand field.** The first build refused with "`entry_idle_cache_enable` holds 1 SCTLR
