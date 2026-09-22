@@ -728,6 +728,54 @@ PY
   then
     fail "the entry image's reach into the watchdog's page is either real or unread, and both stop this image (see above): a run whose only net is the one the image can touch, or a zero read from an instrument that saw no witness, are the two ways this check can be a sentence instead of a reading"
   fi
+
+  # **Which idle arm this image runs is a boot argument, and it is read out of the artifact that is
+  # about to be booted.** 549's finding: `up_style_idle_exit` is a `.bss` global (default 0) set only by
+  # `arm_init`'s `PE_parse_boot_argn` call, so the arm is a property of the command line and not of the
+  # code. On this image the two arms are exact complements - `platform_cache_idle_enter` takes its
+  # single-CPU branch iff `up != 0 && real_ncpus == 1`, and `platform_cache_idle_exit` skips
+  # `invalidate_mmu_icache` and `flush_core_tlb` under the same condition - so this token decides *both*
+  # sides of the window the run is spent on, and a run whose log is read as if it carried the token
+  # while the image did not is a run read as the wrong instrument.
+  #
+  # **The count is required to be two, and it is read from the payload and the boot image - never from
+  # the entry image.** Measured: `up_style_idle_exit=1` occurs twice in `stage90-qcdt.img` and in
+  # `stage90.bin`, and **zero times in `xnu_arm_entry.bin`**, because the entry image carries only the
+  # token's *name* - `arm_init`'s own parse literal and its two `up_style_idle_exit=%d` format strings.
+  # A clause pointed at the entry image would find that name four times and pass without ever seeing the
+  # argument, which is then a check that cannot fail (548's rule, one file over). Two is the number
+  # because 515's repair is carried in two command lines by design: `boot_args.c`'s `CommandLine`, which
+  # XNU's `PE_boot_args()` reads, and the payload's `/chosen` `boot-args` property, which the port's own
+  # contracts read - and `stage90_main.c`'s comment states the hazard directly: *a token that only one of
+  # the two carries is a token whose check and whose effect are about different strings.* So one
+  # occurrence is refused as loudly as none.
+  echo "== the boot argument that selects the idle arm =="
+  STRINGS=$(command -v strings || command -v arm-none-eabi-strings || true)
+  if [[ -z $STRINGS ]]; then
+    echo "UNREAD: neither 'strings' nor 'arm-none-eabi-strings' is on PATH, so the argument's name"
+    echo "        cannot be read out of the entry image and nothing below could have seen the token."
+    fail "the idle arm's boot argument is not established, and a boot whose arm is unknown cannot be read: this is a scan that could not look, not a token that is absent"
+  fi
+  # the name comes from the entry image rather than from this script, so a payload token spelled
+  # differently is refused instead of compared against the gate's memory of it. `strings` runs to the
+  # end of the stream: no `head` and no `awk ... exit` on it, because under `pipefail` the SIGPIPE from
+  # a reader that stops early fails the pipeline (build.sh's own clause found that the hard way).
+  ARGNAME=$("$STRINGS" -a "$ENTRY_BIN" | awk '$0 == "up_style_idle_exit" { n++; if (n == 1) print }')
+  if [[ -z $ARGNAME ]]; then
+    fail "the entry image carries no bare 'up_style_idle_exit' literal, so arm_init's own call site is not where 549's boot argument gets its name - check the entry build's switches before booting"
+  fi
+  N_IMG=$(grep -ao -- "$ARGNAME=1" "$IMAGE" | wc -l || true)
+  N_PAY=$(grep -ao -- "$ARGNAME=1" "$PAYLOAD_BIN" | wc -l || true)
+  N_OTH=$(grep -aoE -- "$ARGNAME=[0-9]+" "$IMAGE" | grep -vc -- "=1\$" || true)
+  echo "token '$ARGNAME=1': $N_IMG occurrence(s) in $(basename "$IMAGE"), $N_PAY in $(basename "$PAYLOAD_BIN")"
+  grep -aoE -- ".{0,40}$ARGNAME=1" "$IMAGE" | sed 's/^/  .../'
+  if [[ $N_OTH -ne 0 ]]; then
+    fail "'$ARGNAME' appears in this boot image with a value other than 1 ($N_OTH time(s)), and the arm is selected by that value: the analysis is written for $ARGNAME=1"
+  fi
+  if [[ $N_IMG -ne 2 || $N_PAY -ne 2 ]]; then
+    fail "the boot image carries '$ARGNAME=1' $N_IMG time(s) and the payload $N_PAY, where 515's repair must be in two command lines (XNU's PE_boot_args() reads boot_args.c's CommandLine; the port's contracts read the /chosen boot-args property) - with one copy, the two sides are about different strings, and with none this image is not the arm 549's reading is written for"
+  fi
+  echo "ok: the arm 549's reading is written for is the arm in the bytes - both copies carry it"
 fi
 
 case "$HWSELFTEST" in 1|1u)
@@ -1144,35 +1192,91 @@ echo "log before anything else touches the device:"
 echo
 echo "  $STAGE_DIR/run_and_capture.sh $*"
 echo
-echo "Its exit status is the reading: 0 adb saw the device again and the log is at"
-echo "/tmp/cancro-last_kmsg.txt, 2 adb did not see the device inside the window - in which case a"
-echo "manual power press is owed and the log goes with the power cycle."
-echo
-# Exit 2 is adb's verdict, not the SoC's, and the two can differ on this phone: at 19:22:45 on
-# 2026-09-22 it enumerated 2717:0368 (serial 4a2fe00b) for 18 s and then dropped without reaching
-# 18d1:4ee7, so a failed Android bring-up looks exactly like a payload that never returned. Which
-# channel the runner actually waits on is read out of it here rather than asserted (the 520 rule),
-# and a region that cannot be read prints UNREAD rather than a criterion nobody checked.
+# What a run's exit status can mean is read out of run_and_capture.sh here rather than asserted above
+# (the 520 rule: a claim in this gate's prose is computed at gate time from the artifact it
+# describes). That is not academic. This gate said "exit 2 is adb's reading alone" - true when it was
+# written, and false by the evening of 2026-09-22, when the runner's wait section gained a second
+# channel: the host's own USB log, keyed on the *serial* rather than the port. The two readings differ
+# on this phone, and the difference is measured, not hypothetical - at 19:22:45 that day the device
+# enumerated 2717:0368 (serial 4a2fe00b) for 18 s and dropped without ever reaching 18d1:4ee7, so it
+# returned to the host without returning to adb. Those are now different codes, and a sentence that
+# names one code is stale the moment the runner grows another. So this clause reads the *shape* of the
+# wait section and prints each code in the runner's own words, which cannot go stale in this file.
 RUNNER=$STAGE_DIR/run_and_capture.sh
 REGION=$(sed -n '/^# --- 4\. wait for it to come back/,/^# --- 5\./p' "$RUNNER" 2>/dev/null || true)
 if [[ -n $REGION ]]; then
-  A=$(grep -c 'adb devices' <<<"$REGION" || true)
-  F=$(grep -c 'fastboot devices' <<<"$REGION" || true)
-  echo "read from run_and_capture.sh's wait loop at gate time: that loop's body contains"
-  echo "$A adb poll(s) and $F fastboot poll(s)."
-  if [[ $A -gt 0 && $F -eq 0 ]]; then
-    echo "So its exit 2 is adb's reading alone. Before recording a non-return, look for an"
-    echo "enumeration on usb 3-10 *after* the fastboot disconnect (the jump) - an enumeration"
-    echo "there is a return whatever adb said:"
-    echo "  sudo dmesg | grep 'usb 3-10'    # bare dmesg prints nothing on this host"
+  # read in command position - leading whitespace then `exit N` - so a code named inside a message is
+  # not counted as one the section can return. Both sorts are pinned to one locale: a set sorted in
+  # one collation and merged in another is one value with two definitions, which is this project's
+  # most-repeated defect (536).
+  CODES=$(grep -oE '^[[:space:]]*exit [0-9]+' <<<"$REGION" | awk '{print $2}' \
+          | LC_ALL=C sort -n | LC_ALL=C uniq | tr '\n' ' ')
+  CODES=${CODES% }
+  NSITES=$(grep -cE '^[[:space:]]*exit [0-9]+' <<<"$REGION" || true)
+  # the serial and the log path are read out of the runner too, because they are one value with two
+  # definitions otherwise: the runner's `${VAR:-default}` lines are the ones the boot actually uses, so
+  # a change there moves the artifact and this gate's sentence together. Matched with a `case` glob
+  # rather than a regex - `${SERIAL:-` contains a `$`, a `{` and a `:`, and every one of them is a
+  # meta-character in some language; inside single quotes they are all literal.
+  SER=; LOG=
+  while IFS= read -r _l; do
+    case $_l in
+      'SERIAL=${SERIAL:-'*'}')  SER=${_l#'SERIAL=${SERIAL:-'};  SER=${SER%'}'} ;;
+      'LOGFILE=${LOGFILE:-'*'}') LOG=${_l#'LOGFILE=${LOGFILE:-'}; LOG=${LOG%'}'} ;;
+    esac
+    if [[ -n $SER && -n $LOG ]]; then break; fi
+  done < "$RUNNER"
+  SER=${SERIAL:-${SER:-4a2fe00b}}
+  LOG=${LOGFILE:-${LOG:-/tmp/cancro-last_kmsg.txt}}
+  echo "== what run_and_capture.sh's exit status can mean =="
+  if [[ -z ${CODES// /} ]]; then
+    fail "run_and_capture.sh's wait section returns no exit code at all, so what a run's status means is not established from this gate - and a section that cannot say it failed is not a bounded wait"
+  fi
+  # The lines are named rather than the words quoted. A paraphrase here would be this gate's sentence
+  # about another file, which is the defect this clause exists to remove; and quoting the last `say`
+  # before each `exit` prints a *fragment*, because the runner wraps its messages - measured, it
+  # printed `sudo adb -s $SERIAL exec-out ...` as if it were what exit 3 means. So the gate reads the
+  # shape and points at the words, which are the runner's own and cannot go stale in this file.
+  START=$(grep -m1 -n '^# --- 4\. wait for it to come back' "$RUNNER" | cut -d: -f1)
+  echo "read out of that section at gate time: $NSITES exit site(s), distinct code(s) $CODES, at"
+  grep -nE '^[[:space:]]*exit [0-9]+' <<<"$REGION" \
+    | awk -v s="${START:-0}" -F: '{ c = $2; gsub(/[^0-9]/, "", c); printf "    run_and_capture.sh:%d   exit %d\n", s + $1 - 1, c }'
+  echo "which code means which state is that file's own wording at those lines - read them there"
+  # The codes this gate's text explains. A code outside this set is not narrated here in the gate's
+  # own words, and the safe direction is to stop rather than paraphrase a state nobody has read: that
+  # is the same shape as the entry arm's build-stop repair, an alarm on a drift rather than a proof.
+  READ_CODES="2 3"
+  for c in $CODES; do
+    case " $READ_CODES " in
+      *" $c "*) ;;
+      *) fail "run_and_capture.sh's wait section can return $c, which is not a code this gate's reading explains ($READ_CODES) - read section 4 and update this gate before spending a boot on a run whose status it cannot narrate" ;;
+    esac
+  done
+  if [[ $NSITES -gt 1 ]]; then
+    echo "So a non-return is not one thing in that section: it distinguishes states, and its codes are"
+    echo "not interchangeable - one of them says the device *did* come back, into a state adb cannot"
+    echo "reach, which is a capture failure and not a hang. Before recording any of them, confirm"
+    echo "against the host's own log, by serial and not by port (this host's port has a second occupant"
+    echo "that appears on its own after hours of silence, so a port-only test reads *that* as a return):"
+    echo "  sudo dmesg | grep $SER                 # bare dmesg prints nothing on this host"
+    echo "and remember what that log cannot say: a payload that never returned and a phone whose Android"
+    echo "failed to come up are the same reading in adb alone, which is why exit 2 was too wide a claim."
+    echo "Only the code whose own message says the device did not come back owes a power press - not the"
+    echo "one that refuses to call this a non-return - and the log at $LOG survives only until that"
+    echo "press, so read it first."
   else
-    echo "So this gate does NOT claim what exit 2 asserts about the device: the sentence above is"
-    echo "written for an adb-only wait loop, and this one is not that. Read the loop itself:"
-    echo "  run_and_capture.sh, section 4"
+    echo "So that section has a single verdict and the code above is it. Before recording it as a hang,"
+    echo "look for an enumeration on usb 3-10 *after* the fastboot disconnect (the jump) - an enumeration"
+    echo "there is a return whatever adb said:"
+    echo "  sudo dmesg | grep 'usb 3-10'           # bare dmesg prints nothing on this host"
+    echo "The log of the run that returns is at $LOG. A power press is owed for that code, and the log"
+    echo "goes with the power cycle, so read it first rather than power-cycling on the spot."
   fi
 else
-  echo "what exit 2 asserts: UNREAD - the wait loop could not be read out of run_and_capture.sh,"
-  echo "so which channel it polls is not established from here."
+  echo "== what run_and_capture.sh's exit status can mean =="
+  echo "UNREAD - the wait section could not be read out of run_and_capture.sh, so which states it"
+  echo "distinguishes, and therefore what its exit status asserts about the device, is not established"
+  echo "from here. Read section 4 of that file by hand before narrating a run's outcome."
 fi
 echo
 echo "  image: $IMAGE"
