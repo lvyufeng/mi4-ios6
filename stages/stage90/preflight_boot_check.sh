@@ -481,7 +481,27 @@ if [[ -n $ENTRY_SRC_DIFF ]]; then
   # no TAB -> `manifest`.
   printf '%s\n' "$ENTRY_SRC_DIFF" | sed 's/^\t/  on disk:  /; t; s/^/  manifest: /' | awk 'NF'
   echo "  (manifest bound to entry image $manifest_sha, $ENTRY_BIN's own hash)"
-  fail "the entry image is not the build of these sources: $ENTRY_SRC_NAMES. Rebuild the entry image with the switches this arm needs (stages/stage90/xnu_arm_boot/build_entry.sh) and then ./build.sh - the payload embeds the rebuilt bin, and the gate's blob clause refuses the image until it does. If those files are unchanged in content, the manifest is stale rather than the tree: rebuild the entry image, which is reproducible byte for byte and does not disturb the payload"
+  # **539: this clause fired for real, and the remedy it printed first was the harmful one.**
+  # Measured 2026-09-22: a build input in xnu_arm_boot/ was edited *after* the frozen entry image was
+  # built - the manifest recorded `build_entry.sh 68528ccb...` where the file on disk was
+  # `1b4e549a...`, and the committed version a third hash again - so the gate refused, correctly. But
+  # the text then said "rebuild the entry image **and then ./build.sh**", and that second half is the
+  # one instruction this phase cannot follow: the payload link does not reproduce (408), so a
+  # `./build.sh` produces a different image and **spends the freeze** - the frozen `1daaf44e...` that
+  # is the whole point of the arm being ready. The distinction the clause was missing is not "did a
+  # source change" (that is what it just proved) but **did the change reach the compiler**. A build
+  # *recipe* can change without changing the bin - the measurement above is 152 inserted shell lines
+  # and no compiler input - and in that case the entry rebuild alone settles everything: it rewrites
+  # the manifest, and a byte-identical bin leaves the payload's embedded blob, and therefore the boot
+  # image, exactly as they were.
+  #
+  # So the gate stops presuming which of the two it is and names the test that answers it, because the
+  # gate cannot run that test itself (it would have to rebuild, and a gate that rebuilds is not a
+  # reading of the artifact it is about). This is the same rule the freshness refusal above states for
+  # mtime - the gate cannot tell an edit from a checkout, so it says so rather than prescribing - and
+  # the same reason that clause now carries the switches the run needs. What is *not* left to prose is
+  # the hash to compare against: the record's own `STAGE90_XNU_ENTRY_SHA256`, read 60 lines above.
+  fail "the entry image is not the build of these sources: $ENTRY_SRC_NAMES. Two situations print this line and the gate cannot tell them apart, so it names the test rather than presuming the answer. First rebuild the entry image with the switches this arm needs - they are printed under \"the entry image's own switches\" above, and naming them is the whole rebuild: stages/stage90/xnu_arm_boot/build_entry.sh is byte-for-byte reproducible and writes nothing the payload reads except the bin. Then compare: if sha256sum out/stage90/xnu_arm_entry.bin still equals the STAGE90_XNU_ENTRY_SHA256 the record names, the changed source fed no compiler input, the payload's blob clause is already satisfied, and ./build.sh must NOT be run - it does not reproduce (408) and would spend the frozen boot image for a change in nothing the compiler saw. If the hash differs, the arm really is a new one and ./build.sh is owed, with STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' or the new image never jumps into XNU. Neither branch is a checkout: a commit or a git checkout that rewrites an unchanged source still reaches this line, and here that case is free, because the rebuild is reproducible and the hash test settles it in one command"
 fi
 echo "the entry image is the build of xnu_arm_boot/ as it stands: $(printf '%s\n' "$ENTRY_SRC_NOW" | grep -c . || true) file(s), every one matching the manifest, and none the manifest does not name"
 
