@@ -278,6 +278,64 @@ then
 fi
 
 echo
+echo "== the entry image's own switches =="
+# **Which arm the entry image is, in its own words, bound to its own bytes.** The clause above proves
+# the boot image carries the arm `xnu_arm_entry.bin` holds; it cannot say *which variant* that arm is,
+# because the entry side had no record of its switches anywhere - `xnu_arm_entry.h` carries layout
+# only, and `stage90-build-config.txt` is the payload's switches, not the entry image's. So a frozen
+# `xnu_arm_entry.bin` was identified by hash and by prose, and the variant it was built as (null
+# instrument or capture, the D-cache enable or not, the exit flush on or off, the separate interrupt
+# stack or not) existed only in whatever command line made it - the same hole as 520's gate printing a
+# hash out of a comment literal, one level down and for the other artifact.
+#
+# `build_entry.sh` now writes `out/xnu_arm_entry-config.txt` at every build, from the variables that
+# build actually used, with the sha256 of the bin it produced. This reads it and refuses a record that
+# describes a different image, so the three artifacts are chained: image <-> bin (above) and
+# bin <-> record (here). Nothing is written down here: the hash compared is the hash of the file in
+# front of it, computed at gate time.
+ENTRY_CFG=$OUT/xnu_arm_entry-config.txt
+[[ -f $ENTRY_CFG ]] \
+  || fail "no $ENTRY_CFG - the entry image's switches are recorded there by build_entry.sh, and without it this gate can prove which bytes the image carries but not which arm they are; rebuild the entry image (stages/stage90/xnu_arm_boot/build_entry.sh) and then ./build.sh"
+recorded_sha=$(awk -F= '$1 == "STAGE90_XNU_ENTRY_SHA256" { print $2 }' "$ENTRY_CFG")
+[[ -n $recorded_sha ]] \
+  || fail "$ENTRY_CFG has no STAGE90_XNU_ENTRY_SHA256 line - a record that names no artifact is a note, not a reading"
+actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
+[[ "$recorded_sha" == "$actual_sha" ]] \
+  || fail "$ENTRY_CFG describes entry image $recorded_sha and $ENTRY_BIN is $actual_sha: the record names a different artifact than the one on disk, so the switches it lists are about some other image. Rebuild the entry image, then ./build.sh"
+#
+# **Every key by name, because the five that *are* the variant are not named like the artifact.** The
+# four keys that identify the record (SHA256, BYTES, TRACE, REAL_ARM_INIT) all begin `STAGE90_XNU_ENTRY_`
+# or `STAGE90_ENTRY_`, and the five that say *which arm this is* - SLOT_NULL, EXIT_POC_FLUSH,
+# IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK - begin `STAGE90_XNU_` and end there. So the obvious
+# display filter, `$1 ~ /^STAGE90_(XNU_ENTRY|ENTRY_)/`, prints four lines, drops all five of the ones
+# this clause exists to publish, and **prints no error doing it**: the gate would report success while
+# saying nothing about the arm, which is the whole reason the clause was added. Measured on a record
+# with the nine keys `build_entry.sh` writes: 9 in, 4 out.
+#
+# So the keys are named twice - once to be required, once to be printed - and a record missing one is
+# refused rather than shown as a shorter list (`[[ -n $v ]]`, so an empty value is a missing key: an
+# `X=` line is not `X=0`, which is [[mi4-off-option-two-spellings]] one register over).
+ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_TRACE
+                STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT_NULL STAGE90_XNU_EXIT_POC_FLUSH
+                STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE STAGE90_XNU_IDLE_STACK)
+for _k in "${ENTRY_CFG_KEYS[@]}"
+do
+  _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
+  [[ -n $_v ]] \
+    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The five variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK) are exactly the ones a display filter written around the artifact keys drops in silence"
+  printf '  %s=%s\n' "$_k" "$_v"
+done
+# And the converse, so a *tenth* key cannot arrive unshown: every `STAGE90_` key the record carries
+# must be one of the names above. Without this the list above would be the only definition of what is
+# visible, and a key added on the build side would be recorded and never read - the same defect with
+# the arrow reversed.
+_unshown=$(awk -F= '!/^#/ && $1 ~ /^STAGE90_/ { print $1 }' "$ENTRY_CFG" | sort -u \
+           | comm -23 - <(printf '%s\n' "${ENTRY_CFG_KEYS[@]}" | sort -u))
+[[ -z $_unshown ]] \
+  || fail "$ENTRY_CFG carries key(s) this gate does not print: $(printf '%s\n' "$_unshown" | tr '\n' ' ')- a switch recorded on the build side and not shown here is a switch the next run would go out with unread; add it to ENTRY_CFG_KEYS above"
+echo "  (recorded in $ENTRY_CFG, bound to $actual_sha)"
+
+echo
 echo "== storage tripwire =="
 # Two independent checks, because they catch different things and only one of them is
 # sufficient. Symbols catch a NAMED storage reference. Addresses catch an unnamed one - a raw
