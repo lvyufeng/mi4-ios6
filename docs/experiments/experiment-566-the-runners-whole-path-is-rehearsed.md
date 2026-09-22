@@ -57,6 +57,32 @@ stub to be *late*, not merely failing - with the enumeration prompt, section 4 r
 the producer instead, which is what variants 1 and 2 measured. **A test that only makes the device fail
 tests the wrong producer.**
 
+## 3b. And the reading procedure for the coming run, rehearsed on the real log
+
+The strongest available rehearsal of the run that is owed is not a synthetic log: it is **520's real
+capture with only the one pair 533's arm adds**, appended.
+
+```
+cp /tmp/cancro-last_kmsg.txt /tmp/t566-real520.txt     # 3931 payload lines, real brackets, real storm counts
+printf '..._slot_cwe_calls=0x00000001\n..._cwe_win=0x00c50830\n..._cwe_set=0x00c50830\n' >> ...
+```
+
+520's log carries **none** of the `cwe_*` keys (verified: `grep -ao 'xnu_live_slot_cwe_[a-z]*='` is empty), so
+that pair is exactly what 533's image adds and the appended lines are the only invented thing in the file.
+The reader then runs its whole block on real data: clause (1) **PREDICTED** (`sleh_lr=0x800462dc`, the exit's
+own `pop`), clause (2) **PASS** then **`ARM 533's arm`** (`_win` = `_set` = `0x00c50830`, C clear - the
+agreement that is this arm's expected reading), clause (3) **DIED IN THE EXIT**
+(`pre_calls=0x00000001`, `rtcpre_calls=0x00000001`, `post_calls` absent), and the closing line *"the arm's
+prediction arrived"*.
+
+Two things this buys that the nine-key synthetic did not. The counts are **real**: `storm=0x00000009`,
+`episodes_seen=0x00000009`, and 3 user-mode fault records - so the reader's `tail -1` key discipline (555) is
+exercised against a log whose two blocks carry both the fatal episode and an earlier one (557), not against
+a file where every record is the only record. And it is the **predicted shape** of the next run: 547 §4's
+row (i) is "dies at the pop, log present, device returns", which is precisely this file's bracket. So if the
+run returns, the reader has already been shown to print the right verdict for the log it will produce - the
+remaining unknown is the device, not the reading.
+
 ## 4. The gate's narration and the runner now agree, measured rather than argued
 
 562/563/563b have been rewriting the gate's sentences about where the log lives after a non-return, and
