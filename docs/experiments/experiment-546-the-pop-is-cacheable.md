@@ -146,6 +146,16 @@ if 533 *returns*, then removing the enter-side re-enable fixed the pop, the L2 s
 mechanism (or not the only one), and 535's flush would be aimed at the wrong level - which is the one
 outcome that should stop 535 from being built as designed.
 
+> **[547](experiment-547-the-load-succeeded-and-the-value-is-wrong.md) sharpens this prediction and
+> reconciles it with the ledger.** 520's register dump shows the abort is a **prefetch** abort at the
+> popped value with `lr = 0x800462dc` - so both loads of the `pop` succeeded and only the *value* was
+> wrong, which eliminates the address-arithmetic family without any cache hypothesis. And the two cells
+> that carry the wrapper's `SCTLR.C` write (522, 526) are the two that produce **no log at all**, which is
+> the cell in which this document's precondition - a store the cache did not see - is *absent*: their push
+> is cacheable, so this mechanism should not fire in them. The prediction 547 states is therefore the
+> sharper one: **533 should die at the pop, log it, and come back on `MACH Reboot`** - and 547 §4 gives the
+> three outcomes as a falsifier table.
+
 ## 6. What this does not decide
 
 - **Whether the stack region is mapped cacheable.** `SCTLR.C` = 1 at the pop is read off the bytes; that
