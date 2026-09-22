@@ -6312,6 +6312,40 @@ __attribute__((noinline)) void entry_slot_note(struct entry_slot_keys *k, uint32
     entry_live_write(k->k_calls, k->calls);
 }
 
+#if STAGE90_XNU_SLOT_NULL
+/*
+ * **526's null instrument: the same two sites, the same table, the counter and nothing else.**
+ *
+ * A metrology null is an instrument that is identical to the real one except that it measures nothing:
+ * what it can show is whether *the instrument itself* changed the outcome. The reading here is the pass
+ * count alone, published on the same schedule (`<= STAGE90_SLOT_LIVE_MAX`, then the powers of two) and
+ * behind the same `entry_live_ready()` gate, so the log of a null run is read the same way as the log of
+ * a 522 run: `xnu_live_slot_pre_calls` / `_post_calls` present and rising is "the site ran", and their
+ * absence is "it did not".
+ *
+ * **What it deliberately does not do is publish the four words, or `sp`.** A null that still published
+ * them would not be a null - the `k_sp` store is one of the stores the arm exists to remove, and the four
+ * `pend_*` fields would be whatever the last real capture left, which is a published reading of a past
+ * pass. So this function writes `k_calls` and reads nothing: it dereferences no stack address, it touches
+ * no field the caller staged, and the only memory it writes is one word of a table in `.data` that the
+ * wrapper would have written anyway.
+ *
+ * `noinline`, for the same reason `entry_slot_note` is: a folded call is a reading absent from the image
+ * with every surface still green, and 526's clause counts the `bl`s in the wrapper.
+ */
+__attribute__((noinline)) void entry_slot_null_note(struct entry_slot_keys *k)
+{
+    k->calls++;
+    if (entry_slot_publish(k->calls) == 0u)
+        return;
+    if (entry_live_ready() == 0u)
+        return;
+
+    k->live++;
+    entry_live_write(k->k_calls, k->calls);
+}
+#endif /* STAGE90_XNU_SLOT_NULL */
+
 /*
  * **The abort site's publisher, which reads the aborted context's own words out of the frame.**
  * `sp` here is the frame's `SS_SP` - the `sp` the vector saved before any handler ran - so the four

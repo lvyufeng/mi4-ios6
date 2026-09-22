@@ -1628,6 +1628,10 @@ extern struct entry_slot_keys g_slot_post;
 extern struct entry_slot_rtc_keys g_slot_rtcpre;
 extern struct entry_slot_tb_keys g_slot_tb;
 extern void entry_slot_note(struct entry_slot_keys *k, uint32_t sp);
+/* 526: the null instrument. Same wrapper, same state change, no capture - the site publishes its pass
+ * count and nothing else, so that "the readings cost something" and "the state change costs something"
+ * stop being one fact. See `entry_stubs.c`. */
+extern void entry_slot_null_note(struct entry_slot_keys *k);
 /* 522: the window's near end. `entry_idle_cache_enable` writes `SCTLR.C` back on; `entry_window_note`
  * publishes the register as Apple's enter left it and as this wrapper left it. See `entry_stubs.c`. */
 extern void entry_idle_cache_enable(void);
@@ -1862,6 +1866,13 @@ void __wrap_platform_cache_idle_enter(void)
  * the idle enter wrapper's `strd r4, [sp, #-12]!` (the deadline) at the address this `pop` reads as
  * `pc`, and a 16-byte frame would move the slot out from under that store and stop testing 520's
  * mechanism while every surface stayed green. The clause asserts 8.
+ *
+ * **526 makes the capture a switch, and the switch's default is the capture.** `STAGE90_XNU_SLOT_NULL=1`
+ * replaces the two capture-and-publish pairs with a count and nothing else; everything else in the
+ * wrapper - the frame, the single `mov %0, sp`, 516's `CleanPoC_Dcache`, the rtc note, the call to the
+ * real exit, 522's `entry_idle_cache_enable` in the enter wrapper - is byte-identical to 522. The case
+ * for it is the ledger in 522's section 3.3.1: every image that has not come back carries this capture
+ * and the images that came back do not, and 521 and 522 differ only in their state change.
  */
 void __real_platform_cache_idle_exit(void);
 void __wrap_platform_cache_idle_exit(void)
@@ -1873,14 +1884,45 @@ void __wrap_platform_cache_idle_exit(void)
 #endif
 
     __asm__ volatile ("mov %0, sp" : "=r"(sp));
+#if STAGE90_XNU_SLOT_NULL
+    /*
+     * 526: **the capture replaced by a counter, and nothing else about this wrapper moved.**
+     *
+     * Both non-returns in the ledger - 521's and 522's - carry 521's repair of this site (the four words
+     * read by the caller, into the table's own `pend_*` words), and the returning runs before them do not;
+     * 521 and 522 differ only in which state change they carry, and 520 carries neither. So the four
+     * loads and the four stores per site are the one thing that has been in every image that did not come
+     * back and in no image that did, and this is the image that takes them out while keeping 522's state
+     * change: if it comes back, the readings cost something; if it does not, the state change does.
+     *
+     * The `mov` above stays even though the counter does not need the address. It is not decoration: it
+     * keeps this image's frame and its instruction stream as close to 522's as the arm can be while the
+     * capture is gone, and it keeps the clause's claim - one read of `sp` off the register, in the same
+     * place, with the frame's only decrement 8 bytes - true of both arms at once, so the two images can be
+     * compared instruction by instruction rather than by a diff of their sources.
+     *
+     * The keys this site publishes become `_pre_calls` alone, and that is the reading the arm is for: the
+     * count present with the four words absent says the site ran and published no words, which is
+     * different from the site not running (`xnu_live_slot_pre_calls` missing) - the distinction 519's
+     * section 11 rests on. `xnu_live_slot_post_calls` is likewise still the mechanical verdict's third
+     * criterion, so 522's block in `run_and_capture.sh --summarise` reads this image's log too.
+     */
+    (void)sp;
+    entry_slot_null_note(&g_slot_pre);
+#else
     STAGE90_SLOT_CAPTURE(&g_slot_pre, sp);
     entry_slot_note(&g_slot_pre, sp);
+#endif
     entry_slot_rtc_note(&g_slot_rtcpre, entry_tpidrprw());
 
     __real_platform_cache_idle_exit();
 
+#if STAGE90_XNU_SLOT_NULL
+    entry_slot_null_note(&g_slot_post);
+#else
     STAGE90_SLOT_CAPTURE(&g_slot_post, sp);
     entry_slot_note(&g_slot_post, sp);
+#endif
 
     entry_note_pcx(entry_counter(), entry_tpidrprw(), entry_cpu_datap(), entry_sctlr());
 }
