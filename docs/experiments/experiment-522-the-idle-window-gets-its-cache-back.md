@@ -162,6 +162,46 @@ during the halt: there is no branch in the kernel whose outcome depends on `SCTL
 timing and the coherence of this image's own stores - both of which is section 3's argument, and both of
 which the two readings measure directly.
 
+### 1.4 The same window is opened in a second place - and Apple stores inside it there
+
+The census above is about *reading* `SCTLR.C`. A census of the other thing - *who opens the window* - turns
+up a second opener, and it is worth writing down both because it scopes this arm's claim honestly and
+because it names the same class of hazard in the path this project has not reached yet.
+
+`platform_cache_disable` (the `bic #4` in a function of its own, `0x80046224`) has **three** call sites in
+the image, not one:
+
+* `0x8047c924` - inside `platform_cache_idle_enter`. This is the window 522 closes early.
+* `0x8000dfe8` and `0x8000e088` - inside **`ml_arm_sleep`** (`0x8000dfc0`), Apple's suspend path. The first
+  is the **non-boot CPU** branch (never taken on a uniprocessor); the second is the boot CPU's, and the
+  instructions after it read:
+
+  ```
+  8000e088:  bl  platform_cache_disable     <- the window opens, and nothing closes it early
+  8000e08c:  bl  platform_cache_shutdown    (CleanPoC_Dcache, caches.c:373-381)
+  8000e090:  ... bcopy(suspend_signature /*0x80487c48*/, [0x805511b8]+128 /*IOS_STATE*/, 8)
+  8000e0b0:  dsb sy
+  8000e0b4:  b   0x8000e0b4                <- an infinite spin, noreturn
+  ```
+
+  **So Apple's own code stores with `SCTLR.C` clear on that path** - the 8-byte suspend signature - which is
+  the very semantics this whole walk has been assuming (a store with the cache off reaches DRAM) and which
+  `ml_arm_sleep` *depends* on, since the signature is what the wake path reads. It is also the same shape of
+  store 520 died in, in a path where nothing does the equivalent of 522's enable.
+
+* **Reachability, checked rather than assumed**: `ml_arm_sleep` has **no caller** in the linked image - no
+  `bl`/`b` to `0x8000dfc0` anywhere, no pointer to it in `.data`/`.rodata`, and its name occurs only in the
+  ELF `.strtab`, which the payload does not copy (the copied span ends at the pinned `__bss_start`). It is
+  `T`/global because a platform kext could call it, and this boot loads no such kext. **So the second
+  window is dead code today**, and this arm's claim holds as written: *the image* has no store of its own
+  inside *the idle* window, and the idle window is the only one this boot reaches.
+
+**Where that lands as an obligation**: the moment a platform driver that can suspend exists - i.e. the
+"get the drivers running" milestone, which is also where 522's coherence-domain note (section 1.2) points -
+`ml_arm_sleep` becomes reachable with the cache off and Apple's own signature store inside the window. That
+step will have to answer the same question this one did, in a path where the answer cannot be "the cache is
+off for 140 bytes and all of them are Apple's".
+
 ## 2. The build, and the defect that the build did *not* catch
 
 The clause `xnu_entry_522` asserts the enable's whole body by disassembly rather than by source order -
