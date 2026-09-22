@@ -25,6 +25,12 @@
 #   1  the gate refused, or the device was not found
 #   2  the payload ran and the device did NOT come back - a manual power press is needed
 #      (the log will not survive a power cycle, so this is also a lost run)
+#   3  the device returned to the HOST but was not capturable over adb - the host's USB log
+#      saw the phone enumerate again (and its SoC is running) while `adb devices` stayed
+#      empty. **This is not a hang** and must not be read as one: it is an attempt to capture
+#      a log from a device that came back into a state adb cannot reach. Added 2026-09-22,
+#      when this phone's Android bring-up failed twice in ten minutes (`2717:0368` for 18 s,
+#      one window ending before `4ee7`) and exit 2 would have been the wrong reading.
 
 set -euo pipefail
 
@@ -54,6 +60,25 @@ done
 say() { printf '%s\n' "$*"; }
 step() { printf '\n== %s ==\n' "$*"; }
 die() { printf 'run_and_capture: %s\n' "$*" >&2; exit 1; }
+
+# --- the return criterion, and why it is not `adb devices` alone -------------------------
+#
+# `adb devices` is what says *where* to capture the log from. It is not what says whether the
+# device came back: this phone's Android bring-up is intermittent (2026-09-22, `2717:0368`
+# with serial 4a2fe00b for 18 s at 19:22:45, dropped without reaching `18d1:4ee7`; two of the
+# three recent `2717:0368` windows ended the same way), so a run that returns the SoC
+# correctly while Android fails to come up leaves `adb devices` empty - and exit 2 is the one
+# reading this phase cannot afford to get wrong.
+#
+# The host's own USB log is the independent reading, and it is a reading of the port *and the
+# serial*: `usb 3-10` also carries a serial-less `05c6:f006` occupant, which today appeared
+# on its own after 2 h 38 m of an empty port, so a port-only test would read that as a return.
+# `SerialNumber: 4a2fe00b` is printed only for this phone.
+serial_enum_count() {
+  local n
+  n=$(sudo dmesg 2>/dev/null | grep -c "SerialNumber: $SERIAL" 2>/dev/null) || true
+  [[ $n =~ ^[0-9]+$ ]] && printf '%s' "$n"
+}
 
 summarise_log() {
   local log=$1
@@ -354,19 +379,58 @@ fi
 step "waiting up to ${RETURN_TIMEOUT}s for the device to return"
 say "(a bounded self-test should return on its own; a hang will not)"
 RETURNED=0
+RETURN_HOW=""
+ENUM_BEFORE=$(serial_enum_count)
+ENUM_BEFORE=${ENUM_BEFORE:-UNREAD}
 if [[ $DRY_RUN -eq 0 ]]; then
+  say "(return criterion: serial $SERIAL in \`adb devices\`, or a new \`SerialNumber: $SERIAL\`"
+  say " enumeration in the host log - adb alone is not it, see the note at serial_enum_count)"
+  [[ $ENUM_BEFORE == UNREAD ]] && say "(the host log is unreadable here, so only adb can speak)"
   for _ in $(seq 1 $((RETURN_TIMEOUT / 3))); do
     if sudo adb devices 2>/dev/null | grep -q "^$SERIAL"; then
-      RETURNED=1
-      break
+      RETURNED=1; RETURN_HOW="adb"; break
+    fi
+    if [[ $ENUM_BEFORE != UNREAD ]]; then
+      _now=$(serial_enum_count)
+      if [[ -n $_now && $_now -gt $ENUM_BEFORE ]]; then
+        RETURNED=1; RETURN_HOW="host log"; break
+      fi
     fi
     sleep 3
   done
 fi
 
 if [[ $DRY_RUN -eq 0 && $RETURNED -eq 0 ]]; then
+  ENUM_AFTER=$(serial_enum_count)
+  ENUM_AFTER=${ENUM_AFTER:-UNREAD}
   say ""
-  say "The device did NOT come back within ${RETURN_TIMEOUT}s."
+  say "bounded wait expired after ${RETURN_TIMEOUT}s. Evidence:"
+  say "  adb:      serial $SERIAL not listed"
+  say "  host log: $ENUM_BEFORE -> $ENUM_AFTER enumeration(s) of SerialNumber: $SERIAL"
+  if [[ $ENUM_BEFORE != UNREAD && $ENUM_AFTER != UNREAD && $ENUM_AFTER -gt $ENUM_BEFORE ]]; then
+    say ""
+    say "REFUSING to call this a non-return: the host log shows the phone enumerating again"
+    say "after the boot, so the device DID come back - it came back into a state adb cannot"
+    say "reach, which is a capture failure and not a hang. Do not read this as exit 2."
+    say "The log lives in the top of DRAM and survives until a power cycle, so if the phone"
+    say "settles into Android, re-read it with:"
+    say "  sudo adb -s $SERIAL exec-out 'cat /proc/last_kmsg' > $LOGFILE"
+    exit 3
+  fi
+  if [[ $ENUM_BEFORE == UNREAD || $ENUM_AFTER == UNREAD || $ENUM_AFTER -lt $ENUM_BEFORE ]]; then
+    say ""
+    say "UNREAD: the host log could not be compared, so this says the device did not return"
+    say "to *adb*, and it does not say whether it returned to the host. Check by hand:"
+    say "  sudo dmesg | grep 'usb 3-10'   # the phone is usb 3-10, serial $SERIAL"
+    say "The reading is: an enumeration on that port after the fastboot disconnect, with the"
+    say "SoC reset behind it, is a return whatever adb said; a single dead second in fastboot"
+    say "with nothing after it is a hang."
+    [[ $ENUM_BEFORE != UNREAD && $ENUM_AFTER != UNREAD ]] && say "  (a *fall* in the count - $ENUM_BEFORE -> $ENUM_AFTER - is the dmesg ring buffer rotating,"
+    [[ $ENUM_BEFORE != UNREAD && $ENUM_AFTER != UNREAD ]] && say "   which is not evidence of absence; the two counts are not comparable)"
+    exit 2
+  fi
+  say ""
+  say "The device did not come back: no adb entry, and no new enumeration in the host log."
   say "It needs a power press: hold Power ~10-15 s, release, press Power normally."
   say "Do NOT power-cycle before considering this: the payload's log lives in the top of"
   say "DRAM and is lost on a cold boot, so a power cycle also loses whatever the run"
