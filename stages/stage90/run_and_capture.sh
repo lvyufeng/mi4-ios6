@@ -61,6 +61,53 @@ say() { printf '%s\n' "$*"; }
 step() { printf '\n== %s ==\n' "$*"; }
 die() { printf 'run_and_capture: %s\n' "$*" >&2; exit 1; }
 
+# --- the exit's own return address: derived when it is used, never a literal ---------------------
+#
+# The one criterion the idle-window block compares a run's abort against is `lr` at the exit's
+# `pop {fp, pc}` - the return address the exit's own `bl FlushPoU_Dcache` pushes - and **an address a
+# check compares against is the same object as an address a gate prints**: 520's defect was a gate
+# narrating the previous image's hash out of a comment literal, and a pinned `lr` would be that
+# defect one level down ([[mi4-a-claim-in-a-comment-is-not-a-check]]). So it is computed here, out
+# of the entry image's own ELF, with no pinned address in the arithmetic either:
+#
+#   * `platform_cache_idle_exit`'s start and size come from the ELF's symbol table;
+#   * its body is disassembled from those two numbers;
+#   * the answer is the address of the instruction *after* the `bl` to `FlushPoU_Dcache` - which in
+#     this build is `movw r0,#4516 / movt r0,#32853`, the load of `up_style_idle_exit` at
+#     0x805511a4, so the address identifies itself to a reader who checks it.
+#
+# On any failure the callers fall back to `EXIT_POP_LR_LITERAL` **and print that they did**, so a
+# re-read from a tree whose `out/` has been cleaned still answers - labelled, rather than silently
+# unread, which is the direction this project keeps paying for.
+EXIT_POP_LR_LITERAL=0x800462dc
+exit_pop_lr_addr() {
+  local elf=${1:-$OUT/xnu_arm_entry.elf} od=${OBJDUMP:-arm-none-eabi-objdump}
+  local start size body ret
+  [[ -r $elf ]] || return 1
+  command -v "$od" >/dev/null 2>&1 || return 1
+  read -r start size < <("$od" -t "$elf" 2>/dev/null \
+    | awk '$NF == "platform_cache_idle_exit" { print "0x" $1, "0x" $5; exit }') || return 1
+  [[ $start =~ ^0x[0-9a-fA-F]+$ && $size =~ ^0x[0-9a-fA-F]+$ ]] || return 1
+  body=$("$od" -d --start-address="$start" --stop-address=$(( start + size )) "$elf" 2>/dev/null) \
+    || return 1
+  # The call site line carries the callee's name; the next line that begins with a hex address is
+  # the instruction the `bl` returns to. The colon is stripped rather than required, because the two
+  # disassemblers this project has disagree about whether to print a separate symbol line for an
+  # address that is not a symbol (`llvm-objdump` does, `arm-none-eabi-objdump` does not) - and a
+  # rule that assumed one of them would have found nothing under the other, which is how this
+  # derivation failed on its first run.
+  ret=$(printf '%s\n' "$body" | awk '
+    /<FlushPoU_Dcache>/ { seen = 1; next }
+    seen && $1 ~ /^[0-9a-f]+:?$/ { a = $1; sub(/:$/, "", a); print "0x" a; exit }') || return 1
+  [[ $ret =~ ^0x[0-9a-fA-F]+$ ]] || return 1
+  # A return address is the instruction after a `bl`: 4-byte aligned, inside the kernel's own VA
+  # range (`pmap_kernel_va` is [0x80000000, 0xFFFEFFFF]), and not the function's own entry.
+  (( ret % 4 == 0 )) || return 1
+  (( ret >= 0x80000000 && ret <= 0xFFFEFFFF )) || return 1
+  (( ret != start )) || return 1
+  printf '0x%08x' "$ret"
+}
+
 # --- the return criterion, and why it is not `adb devices` alone -------------------------
 #
 # `adb devices` is what says *where* to capture the log from. It is not what says whether the
@@ -166,7 +213,9 @@ summarise_log() {
   # states are printed separately: PASS, FAIL, and UNREAD.
   if grep -a -q 'xnu_live_slot_cwe_' "$log"; then
     local cwe_win cwe_set cwe_calls pre_calls rtcab_calls post_calls storm panics user_ones
-    local pop_death pop_named=0 arm_seen=unknown verdict_ok=1
+    local sleh_lr="" sleh_pc="" sleh_sp="" sleh_seen=""
+    local pop_lr="" pop_lr_src="" pop_death=0 pop_named=0 cache_arm=unread arm_seen=unknown
+    local pce_up="" pce_ncpu="" verdict_ok=1
     # `|| true` is load-bearing and its absence was this block's first defect, found by running it
     # against the state it is meant to refuse: the script sets `pipefail`, so a key that is absent
     # makes `grep` exit 1, the pipeline returns 1, and `set -e` kills the *caller* mid-function -
@@ -191,22 +240,63 @@ summarise_log() {
     storm=$(keyval sleh_storm)
     panics=$(grep -a -c 'panic.*sleh_abort' "$log" || true)
     user_ones=$(grep -a -c 'xnu_live_sleh_user=0x0*1' "$log" || true)
-    # **The pop's own signature, and it is a literal read off the hardware rather than a
-    # derivation.** 520's register dump carries it verbatim (`/tmp/cancro-last_kmsg.txt:4006`):
+
+    # **The abort's own registers, from the keys this image publishes - not from the dump's text.**
+    # 520's log carries the final abort as first-class fields (`:8341-8350`: `sleh_storm=9`,
+    # `sleh_seen=9`, `pc=0x04b79074`, `lr=0x800462dc`, `sp`, `cpsr`, `fsr_frame`, `far_frame`),
+    # identical to the human-readable dump at `:4006`. Two reasons this replaces the block's first
+    # version, which grepped `lr: *0x800462dc` out of the dump text:
     #
-    #     r12:  0xde58b701  sp: 0x8054fed0  lr: 0x800462dc  pc: 0x04b79074
+    #  * **the same file holds an earlier, unrelated abort episode** (`:7651`, `lr=0x8029231c`,
+    #    `pc=0x800176c0`, `seq=2` of nine), so a whole-file match on the text can be satisfied by the
+    #    wrong episode, and a panic dump belonging to a sibling abort satisfies the pattern just as
+    #    well as the death does. `keyval` takes the **last** publication - which is the fatal one,
+    #    because the episode that panics is the last one that happens;
+    #  * the dump line is space-padded (`r12:  0xde58b701  sp: ...`, two spaces), so a single-space
+    #    pattern misses it - an *ambiguous* miss, which is the shape this project's measurement
+    #    defects keep taking.
     #
-    # `lr = 0x800462dc` is the return address the exit's own `bl FlushPoU_Dcache` pushed at
-    # `0x800462d8` - and the two `bl`s that could overwrite it before the pop
-    # (`InvalidatePoU_Icache` at `0x80046304`, `flush_core_tlb` at `0x80046308`) are **skipped** in
-    # this configuration, which 549 read out of this image's own boot-args rather than assumed.
-    # `lr: *` because the dump's spacing is not uniform (`r10:`/`r11:` are single-spaced).
-    #
-    # **The pin is deliberate and its failure direction is noisy, not silent**: an exit that moves
-    # in a later build stops matching, which lands on FAIL below and makes a human look. A shape
-    # test that failed *quietly* on a moved address would be this project's most-paid-for defect
-    # ([[mi4-measurement-defects]]), so do not "fix" this by loosening the match to `lr:` alone.
-    pop_death=$(grep -a -c 'lr: *0x800462dc' "$log" || true)
+    # (Peer session's finding, verified here against the log and against the frozen image: every
+    # `xnu_live_sleh_*` and `xnu_live_pce_*` name this block reads is in
+    # `out/stage90/xnu_arm_entry.bin`, `f202f246…`, one occurrence each.)
+    sleh_lr=$(keyval sleh_lr)
+    sleh_pc=$(keyval sleh_pc)
+    sleh_sp=$(keyval sleh_sp)
+    sleh_seen=$(keyval sleh_seen)
+
+    # The criterion the shape test compares against, **derived at run time** - see
+    # `exit_pop_lr_addr` - and labelled when it could not be, so a re-read from a tree whose `out/`
+    # has been cleaned says which it used instead of quietly comparing against a number nobody
+    # recomputed.
+    pop_lr=$(exit_pop_lr_addr 2>/dev/null || true)
+    if [[ $pop_lr =~ ^0x[0-9a-fA-F]+$ ]]; then
+      pop_lr_src="derived from $OUT/xnu_arm_entry.elf at run time"
+    else
+      pop_lr=$EXIT_POP_LR_LITERAL
+      pop_lr_src="*** PINNED LITERAL - the entry ELF could not be read, so this criterion is NOT derived ***"
+    fi
+    pop_death=0
+    [[ $sleh_lr == "$pop_lr" ]] && pop_death=1
+
+    # **The lr test is the enable-off cell's criterion, and which cell this log is comes out of the
+    # log too.** In the other arm of `platform_cache_idle_enter`/`_exit` the two `bl`s at
+    # `0x80046304` (`InvalidatePoU_Icache`) and `0x80046308` (`flush_core_tlb`) are **taken**, and
+    # then `lr` at the pop is whatever `flush_core_tlb` left there - not this address - so a plain
+    # "lr != the criterion" test would print FAIL for a run behaving exactly as *that* arm predicts.
+    # Both selectors are published by name, so neither is inferred: `up_style_idle_exit`/`real_ncpus`
+    # by the enter wrapper (`xnu_live_pce_up`/`_ncpu`, 549) and the `SCTLR.C` pair's far side by the
+    # same wrapper's note (`_cwe_set`, 540).
+    pce_up=$(keyval pce_up)
+    pce_ncpu=$(keyval pce_ncpu)
+    if [[ $pce_up =~ ^0x[0-9a-f]+$ && $pce_ncpu =~ ^0x[0-9a-f]+$ ]]; then
+      if (( pce_up == 1 && pce_ncpu == 1 )); then cache_arm=up1; else cache_arm=other; fi
+    else
+      cache_arm=unread
+    fi
+    arm_seen=unknown
+    if [[ $cwe_set =~ ^0x[0-9a-f]+$ ]]; then
+      if (( (cwe_set & 4) == 4 )); then arm_seen=522; else arm_seen=533; fi
+    fi
 
     # The live channel writes its counters as `0x%08x`, so every numeric test below is a hex
     # pattern and the arithmetic is done on the `0x...` text - which bash's `$(( ))` reads. A
@@ -218,6 +308,9 @@ summarise_log() {
     say "came from, and the two arms have opposite expected pairs; each arm's prediction is a shape"
     say "of death, not the death's absence (547 section 4). So a FAIL below means a shape that"
     say "neither arm's prediction names, not that one of them did not do what it promised."
+    say "  lr criterion: ${pop_lr:-?}   ($pop_lr_src)"
+    say "  this log's abort: xnu_live_sleh_lr=${sleh_lr:-absent} pc=${sleh_pc:-absent}"
+    say "                    storm=${storm:-absent} episodes_seen=${sleh_seen:-absent}"
 
     # (1) the verdict, read as the death's SHAPE rather than as its absence
     #
@@ -232,26 +325,55 @@ summarise_log() {
     # prediction as the arm's failure, on the frozen arm, in the one file that reads the result -
     # clause (2)'s defect one clause over, and it was fixed there first.
     #
-    # What separates the two is `pop_death` above, and it is the *only* new machinery: no arm
-    # variable, because whether this log is the enable-off cell is what clause (2) prints.
+    # What separates the shapes is `pop_death` above - `xnu_live_sleh_lr` against the address the
+    # exit's own `bl` returns to - and the criterion is *derived* at run time rather than pinned, so
+    # this clause compares against the image that was booted rather than against a number written
+    # down once. The test's scope is asserted too: it is the **enable-off** arm's criterion, which
+    # the log itself says by publishing `up_style_idle_exit`/`real_ncpus`.
     if [[ $panics -eq 0 ]]; then
       say "  PASS  no 'panic ... sleh_abort' in the log - the idle exit retired its own epilogue"
       say "        rather than dying at its pop, which is past the frontier this phase has been"
-      say "        measuring. 547 section 4's third row is the reading for that: 546's mechanism"
-      say "        did not fire in this cell, so 535 must not be built as designed"
-    elif [[ $pop_death =~ ^[0-9]+$ ]] && (( pop_death >= 1 )); then
-      say "  PREDICTED  $panics 'panic ... sleh_abort' record(s) and the dump carries"
-      say "        lr: 0x800462dc - the exit's own pop {fp, pc}, which is 547 section 4's prediction"
-      say "        for the enable-off cell and *not* a failed arm. It is still not progress: the boot"
-      say "        restarts on MACH Reboot instead of surviving the idle pass, which is 535's job"
+      say "        measuring"
+      # 547 section 4's third row, and it is a *falsifier* rather than a pass when the log is the
+      # cell whose prediction is that it dies: the peer session's point, and the reason this line
+      # is printed loudly instead of left inside the PASS sentence.
+      if [[ $arm_seen == 533 ]]; then
+        say "  FALSIFIER  and this log's pair is the enable-off cell's, whose prediction is that it"
+        say "        DOES die at the pop - 547 section 4's third row. If the runner's exit code says"
+        say "        the device returned, this falsifies 546's mechanism for this cell and 535 must"
+        say "        not be built as designed. It is the loudest reading in this block"
+      fi
+    elif [[ $cache_arm == unread ]]; then
+      say "  UNREAD  $panics 'panic ... sleh_abort' record(s), but the enter wrapper's own"
+      say "        xnu_live_pce_up/_ncpu are absent, so the arm that decides what lr at the pop IS"
+      say "        (${pop_lr:-?}) cannot be read - in the other arm the two skipped bls run and lr is"
+      say "        whatever flush_core_tlb leaves. Nothing is claimed about the death's shape"
+      verdict_ok=0
+    elif [[ $cache_arm == other ]]; then
+      say "  UNREAD  $panics 'panic ... sleh_abort' record(s), and xnu_live_pce_up=$pce_up /"
+      say "        _ncpu=$pce_ncpu say the window took the OTHER cache arm - the one where the exit's"
+      say "        InvalidatePoU_Icache/flush_core_tlb are taken, so lr at the pop is not ${pop_lr:-?}"
+      say "        and this block's criterion does not apply to this log at all. No frozen image of"
+      say "        this phase has that arm: it means the boot-args changed"
+      verdict_ok=0
+    elif [[ $pop_death -eq 1 ]]; then
+      say "  PREDICTED  $panics 'panic ... sleh_abort' record(s) and xnu_live_sleh_lr=$sleh_lr is the"
+      say "        return address of the exit's own bl FlushPoU_Dcache - i.e. the death is at its"
+      say "        pop {fp, pc}, which is 547 section 4's prediction for the enable-off cell and *not*"
+      say "        a failed arm. It is still not progress: the boot restarts on MACH Reboot instead"
+      say "        of surviving the idle pass, which is 535's job"
+      say "        (criterion $pop_lr, $pop_lr_src)"
+      say "        Corroborate the shape by eye: the aborted pc should be a value that is NOT a"
+      say "        valid address - 520's is pc=$sleh_pc sp=$sleh_sp at storm=$storm, and 547"
+      say "        section 1 reads it as the popped word itself, pc = r11 & ~1"
       pop_named=1
     else
-      say "  FAIL  $panics 'panic ... sleh_abort' record(s) and the dump does not carry"
-      say "        lr: 0x800462dc (matches: ${pop_death:-unread}): a death of a shape that neither"
-      say "        547 section 4 nor 533 section 5 names, so it is a new fault and not this arm's"
-      say "        reading. (521's non-return said the flush is not the answer and 526's took the"
-      say "        capture out; a panic here says the cache state is not it either - which leaves the"
-      say "        enter wrapper's own store in the window, 522's addition, as the next thing to"
+      say "  FAIL  $panics 'panic ... sleh_abort' record(s) and xnu_live_sleh_lr=${sleh_lr:-absent}"
+      say "        is not the exit pop's own return address (${pop_lr:-?}) - a death of a shape that"
+      say "        neither 547 section 4 nor 533 section 5 names, so it is a new fault and not this"
+      say "        arm's reading. (521's non-return said the flush is not the answer and 526's took"
+      say "        the capture out; a panic here says the cache state is not it either - which leaves"
+      say "        the enter wrapper's own store in the window, 522's addition, as the next thing to"
       say "        bisect)"
       verdict_ok=0
     fi
@@ -268,22 +390,21 @@ summarise_log() {
     # against this one) in the one file that reads the run's result, so 533's doc section 5 and this
     # block disagreed about what 533's log should contain.
     #
-    # The arm this log came from is *not* decidable from anything else in the log - the entry image
-    # publishes no build marker, only its readings - so the pair is reported for what it is and each
-    # arm's shape is named beside it. FAIL is kept for the one shape no arm can produce: `_win` with
-    # C *set*, which would say the window was never open where the image claims to read it.
+    # `arm_seen` is decided in the extraction block above rather than here, because clause (1) needs
+    # it too (547 section 4's third row is a falsifier for the enable-off cell and a plain pass for
+    # the other). The pair is the only thing in the log that can decide it - the entry image
+    # publishes no build marker, only its readings - and FAIL is kept for the one shape no arm can
+    # produce: `_win` with C *set*, which would say the window was never open where the image says.
     if [[ $cwe_calls =~ ^0x[0-9a-f]+$ ]] && (( cwe_calls >= 1 )); then
       if [[ $cwe_win =~ ^0x[0-9a-f]+$ ]] && (( (cwe_win & 4) == 0 )); then
         say "  PASS  slot_cwe_win=$cwe_win has SCTLR.C clear - the window really opened where the"
         say "        image says it does, which is what makes the second reading worth anything"
-        if [[ $cwe_set =~ ^0x[0-9a-f]+$ ]] && (( (cwe_set & 4) == 4 )); then
+        if [[ $arm_seen == 522 ]]; then
           say "  ARM   522's arm: slot_cwe_set=$cwe_set has C set - the near-end re-enable ran and"
           say "        took, so this log is an image that re-enables the D-cache at the window's end"
-          arm_seen=522
-        elif [[ $cwe_set =~ ^0x[0-9a-f]+$ ]] && (( (cwe_set & 4) == 0 )); then
+        elif [[ $arm_seen == 533 ]]; then
           say "  ARM   533's arm: slot_cwe_set=$cwe_set has C clear - the window is left exactly as"
           say "        Apple left it, and *this* is that arm's expected reading, not a failed enable"
-          arm_seen=533
         else
           say "  UNREAD  slot_cwe_set=${cwe_set:-absent} is not a readable SCTLR - the pair is half"
           say "          a reading and which arm ran is not decidable from it"
@@ -320,13 +441,19 @@ summarise_log() {
       say "        localization and not a missing reading: the three notes share one schedule and one"
       say "        gate, so a site that published proves the later ones were reachable."
       if [[ $pop_named -eq 1 ]]; then
-        say "        And it agrees with clause (1): the dump's lr: 0x800462dc puts the fault at that"
-        say "        pop, which is 547 section 4's prediction for the enable-off cell - so the two"
-        say "        clauses localize the same instruction, and this is not scored as a failure"
+        say "        And it agrees with clause (1): xnu_live_sleh_lr=$sleh_lr is the pop's own return"
+        say "        address, which is 547 section 4's prediction for the enable-off cell - so the two"
+        say "        clauses localize the same instruction, and this is not scored as a failure."
+        say "        (This exemption is conditioned on **both**: an attributed death *and* a panic."
+        say "        post_calls absent with no panic anywhere stays loud - the bracket's absence is"
+        say "        informative precisely because all three publishers share one schedule and one"
+        say "        gate, 538, and it must not be excused by an lr nobody saw.)"
       else
-        say "        **and clause (1) did not find the pop's own lr in the dump**, so this pass died"
-        say "        inside the call but somewhere other than the instruction 547 section 4 names -"
-        say "        that is a new fault, not this arm's prediction arriving"
+        say "        **and clause (1) did not find the pop's own return address (${pop_lr:-?}) in this"
+        say "        log's abort**, so the pass died inside the call but somewhere other than the"
+        say "        instruction 547 section 4 names - a new fault, not this arm's prediction arriving."
+        say "        Note that a log with no panic at all takes this branch, and is meant to: absence"
+        say "        of the bracket is not absence of a death"
         verdict_ok=0
       fi
     elif [[ $pre_calls =~ ^0x[0-9a-f]+$ ]] && (( pre_calls >= 1 )); then
@@ -383,8 +510,11 @@ summarise_log() {
       say "  => the three checks pass: no panic, the window opened and its pair is readable, and the"
       say "     exit returned through the wrapper. The ARM line above says which of the two arms"
       say "     this log came from; item (4) says how much boot happened after the exit, and that is"
-      say "     the next step's question - not this one's. And if this log is the enable-off arm, a"
-      say "     genuine return here is 547 section 4's third row: 546's mechanism did not fire."
+      say "     the next step's question - not this one's."
+      if [[ $arm_seen == 533 ]]; then
+        say "     **Read the FALSIFIER line at clause (1) before this one**: for this pair, no death"
+        say "     at the pop is 547 section 4's third row, the cell that forbids 535"
+      fi
     else
       say "  => at least one check above is FAIL or UNREAD. The criteria are 547 section 4's shape"
       say "     (a panic *at the exit's pop* is PREDICTED for the enable-off cell - its absence, or a"

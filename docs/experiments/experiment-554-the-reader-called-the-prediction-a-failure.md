@@ -1,5 +1,16 @@
 # 554: the reader called 533's pre-registered prediction a failure
 
+> **Superseded in part by [555](experiment-555-the-death-is-read-from-the-key-and-the-criterion-is-derived.md).**
+> The finding and the repair direction stand, and 555 is the same file after the peer session's review
+> of the *criteria*: the abort's registers are read from the keys the image publishes rather than from
+> the dump's text (520's log holds an earlier, unrelated abort episode whose dump also prints an `lr`),
+> the criterion address is derived at run time instead of pinned, the `lr` test's *scope* is asserted
+> from `xnu_live_pce_up`/`_ncpu`, and 547 §4's third row is printed as a FALSIFIER rather than left
+> inside a PASS sentence. **§1 below - the twenty lines of clause text and the two documents they
+> contradict - is unchanged by that**, and is the reason both exist. Kept rather than rewritten
+> because this tree already has one pair of same-numbered commits (548) and disambiguating them cost
+> more than the duplicate label.
+
 A host-side repair to `run_and_capture.sh`'s verdict block, no device and no build, and it is the same
 defect class as 551 - a reading in this phase's own path that was measured against the wrong arm. 551
 repaired what *exit 2* measured; this repairs what **clause (1)** and **clause (3)** of
