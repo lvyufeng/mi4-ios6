@@ -346,6 +346,30 @@ a partial answer: a run that dies at the same `pop` can no longer distinguish "t
 "the enable ran and the reading did not reach DRAM", so the verdict for that outcome rests on the panic's
 presence and on `xnu_live_slot_cwe_calls` in the *previous* pass's data rather than on the new keys alone.
 
+## 3.1 The verdict is now read mechanically, and the reading was tested before the run
+
+A run can cost a power press and a log, so the four criteria above are no longer something an operator holds
+in their head while looking at a fresh failure: `run_and_capture.sh --summarise FILE` now prints 522's verdict
+for itself. The block is **self-selecting** - it fires only when the log carries `xnu_live_slot_cwe_*`, which
+exists in exactly one image built in this project, so it appears for 522's run and never for another step's -
+and it prints **PASS / FAIL / UNREAD** as three separate states, because "the key is absent" and "the value
+is zero" are different readings about different things.
+
+It was run against four logs before being trusted, as this repository requires of a new check:
+
+| log | expected | got |
+|---|---|---|
+| 520's real capture (596,665 bytes, no 522 keys) | the block does **not** appear | absent, summary unchanged |
+| a log shaped like a pass (`win` with `C` clear, `set` with it set, both counts 1, 4 user-mode records) | all three checks PASS and the "idle exit completed" line | exactly that |
+| a log shaped like 520's death (a `sleh_abort` panic, `post_calls = 0`) | verdict FAIL, exit FAIL | exactly that |
+| a sparse log carrying one key only | UNREAD branches, no crash, exit 0 | exactly that |
+
+Two defects were found by that exercise and both are in the *reading*: the extraction's `grep` status ends
+the caller under `set -e`/`pipefail` when a key is absent (fixed with a load-bearing `|| true`, and it is the
+same shape as a defect documented four lines above it in the same file), and the shape tests were written in
+decimal while the live channel writes `0x%08x`, so every key that *was* present read as UNREAD. Both are
+recorded in this project's measurement-defect table, and neither could have reached a hardware run.
+
 ## 4. Safety
 
 Non-persistent `fastboot boot` only, and the run is a single one through

@@ -117,6 +117,114 @@ summarise_log() {
   if [[ $abort -gt 0 ]]; then
     say "  an abort was logged - see the 'exception'/'abort' lines above"
   fi
+
+  # --- 522's verdict, and it prints only for a log that carries 522's own keys ----------------
+  #
+  # The gate is self-selecting: `xnu_live_slot_cwe_*` exists in exactly one image built in this
+  # project (522's), so the block below appears when the log came from that image and never for
+  # another step's run. That is deliberate - a verdict block that printed for every log would be
+  # a block whose criteria nobody re-derives, which is how a stale check outlives its step.
+  #
+  # Every value is extracted with its *shape* asserted before it is compared as a number. A bare
+  # `-gt` on a missing key reads as 0, and "the key is absent" and "the value is zero" are
+  # different readings - one says the instrument never ran, the other says it ran and saw
+  # nothing. This repository has been bitten by that distinction more than once, so the three
+  # states are printed separately: PASS, FAIL, and UNREAD.
+  if grep -a -q 'xnu_live_slot_cwe_' "$log"; then
+    local cwe_win cwe_set cwe_calls post_calls storm panics user_ones verdict_ok=1
+    # `|| true` is load-bearing and its absence was this block's first defect, found by running it
+    # against the state it is meant to refuse: the script sets `pipefail`, so a key that is absent
+    # makes `grep` exit 1, the pipeline returns 1, and `set -e` kills the *caller* mid-function -
+    # the same shape as the `[[ ... ]] && say ...` defect documented four lines above. An absent
+    # key has to reach the code that can say "this is UNREAD", not end the summary.
+    keyval() { grep -ao "xnu_live_$1=[0-9a-fx]*" "$log" 2>/dev/null | tail -1 | sed 's/^[^=]*=//' || true; }
+    cwe_win=$(keyval slot_cwe_win)
+    cwe_set=$(keyval slot_cwe_set)
+    cwe_calls=$(keyval slot_cwe_calls)
+    post_calls=$(keyval slot_post_calls)
+    storm=$(keyval sleh_storm)
+    panics=$(grep -a -c 'panic.*sleh_abort' "$log" || true)
+    user_ones=$(grep -a -c 'xnu_live_sleh_user=0x0*1' "$log" || true)
+
+    # The live channel writes its counters as `0x%08x`, so every numeric test below is a hex
+    # pattern and the arithmetic is done on the `0x...` text - which bash's `$(( ))` reads. A
+    # decimal-only pattern would have made every present key read as UNREAD, which is how this
+    # block's first version behaved against a PASS-shaped log.
+    say ""
+    say "522's arm - the idle window's D-cache is re-enabled at its near end. The verdict is"
+    say "the panic's ABSENCE; the other three say whether the enable did what the image claims."
+
+    # (1) the verdict
+    if [[ $panics -eq 0 ]]; then
+      say "  PASS  no 'panic ... sleh_abort' in the log - the idle exit retires its own epilogue"
+    else
+      say "  FAIL  $panics 'panic ... sleh_abort' record(s) - the death 519 and 520 died is back"
+      say "        (521's non-return said the flush is not the answer; a panic here says the"
+      say "        cache state is not either, and the next arm is the null instrument)"
+      verdict_ok=0
+    fi
+
+    # (2) the enable ran inside the window and really took
+    if [[ $cwe_calls =~ ^0x[0-9a-f]+$ ]] && (( cwe_calls >= 1 )); then
+      if [[ $cwe_win =~ ^0x[0-9a-f]+$ ]] && (( (cwe_win & 4) == 0 )); then
+        say "  PASS  slot_cwe_win=$cwe_win has SCTLR.C clear - the window was open when the"
+        say "        wrapper read it, which is what makes the enable a change of state"
+      else
+        say "  FAIL  slot_cwe_win=${cwe_win:-absent}: C was NOT clear there, so the window was"
+        say "        not open where the image claims and this arm tested nothing"
+        verdict_ok=0
+      fi
+      if [[ $cwe_set =~ ^0x[0-9a-f]+$ ]] && (( (cwe_set & 4) == 4 )); then
+        say "  PASS  slot_cwe_set=$cwe_set has SCTLR.C set - the write took"
+      else
+        say "  FAIL  slot_cwe_set=${cwe_set:-absent}: C is not set on the far side of the call,"
+        say "        so the re-enable did not happen"
+        verdict_ok=0
+      fi
+      say "        (the enable ran $cwe_calls time(s) in the passes this log recorded)"
+    else
+      say "  UNREAD  slot_cwe_calls=${cwe_calls:-absent} is not a count >= 1: 522's keys are in"
+      say "          this log but the enable's own count is not readable, so nothing is claimed"
+      say "          about whether the write took"
+      verdict_ok=0
+    fi
+
+    # (3) the exit *returned* through the wrapper - 520's run died inside the call (its count was 0)
+    if [[ $post_calls =~ ^0x[0-9a-f]+$ ]] && (( post_calls >= 1 )); then
+      say "  PASS  slot_post_calls=$post_calls - the exit returned through the wrapper, which"
+      say "        520's run never did (its pass died inside the call)"
+    elif [[ -n $post_calls ]]; then
+      say "  FAIL  slot_post_calls=$post_calls: the exit did not return through the wrapper in"
+      say "        this log"
+      verdict_ok=0
+    else
+      say "  UNREAD  slot_post_calls is absent, so whether the exit returned is not readable"
+      verdict_ok=0
+    fi
+
+    # (4) progress: the boot got past the idle loop rather than dying in it
+    say ""
+    if [[ $user_ones =~ ^[0-9]+$ ]] && (( user_ones > 3 )); then
+      say "  progress: $user_ones user-mode fault record(s) - 520 had 3 (0x1118, 0x1124, 0x11a4),"
+      say "            so this boot got further into user mode than any run has"
+    else
+      say "  progress: ${user_ones:-0} user-mode fault record(s) - 520 had 3; not more than that"
+      say "            means the boot did not get further than it already had"
+    fi
+    if [[ $storm =~ ^0x[0-9a-f]+$ ]] || [[ $storm =~ ^[0-9]+$ ]]; then
+      say "            xnu_live_sleh_storm=$storm (520's fatal run ended at 9)"
+    elif [[ -z $storm ]]; then
+      say "            xnu_live_sleh_storm absent - no abort storm was recorded at all"
+    fi
+    if [[ $verdict_ok -eq 1 ]]; then
+      say "  => all three checks pass: this is the first log in the walk where the idle exit"
+      say "     completed. Item (4) says how much boot happened after it, and that is the next"
+      say "     step's question - not this one's."
+    else
+      say "  => at least one check above is FAIL or UNREAD; read the verdict line (1) first,"
+      say "     because the arm's prediction is the panic's absence and nothing else."
+    fi
+  fi
 }
 
 if [[ -n $SUMMARISE_ONLY ]]; then
