@@ -1603,6 +1603,27 @@ void __wrap_machine_idle(void)
 extern void entry_note_door(uint32_t lr, uint32_t en, uint32_t now);
 extern void entry_note_setidlepop(uint32_t site, uint32_t ret, uint32_t en, uint32_t now);
 
+/*
+ * 520's instrument, defined in `entry_stubs.c` (the block that opens with `entry_slot_mapped`). The
+ * types are incomplete here on purpose: every one of these calls takes a pointer to one `.bss` key
+ * table and two scalars, so this file never needs the tables' layout - which is what keeps the number
+ * of arguments to four and below, and that is not cosmetic. The exit wrapper's whole frame is one
+ * `str r4, [sp, #-8]!`; gcc spills *outgoing* stack arguments into its own frame, so a call with five
+ * register-or-more arguments there would move `sp` off the address the slot is read from. The build
+ * clause asserts the wrapper has no other stack adjustment, and this comment is why it is asserted.
+ */
+struct entry_slot_keys;
+struct entry_slot_rtc_keys;
+struct entry_slot_tb_keys;
+extern struct entry_slot_keys g_slot_pre;
+extern struct entry_slot_keys g_slot_post;
+extern struct entry_slot_rtc_keys g_slot_rtcpre;
+extern struct entry_slot_tb_keys g_slot_tb;
+extern void entry_slot_note(struct entry_slot_keys *k, uint32_t sp);
+extern void entry_slot_rtc_note(struct entry_slot_rtc_keys *k, uint32_t thr);
+extern void entry_slot_tb_note(struct entry_slot_tb_keys *k, uint32_t before, uint32_t after,
+                               uint32_t lo);
+
 void __real_Idle_load_context(void) __attribute__((noreturn));
 void __wrap_Idle_load_context(void) __attribute__((noreturn));
 
@@ -1789,15 +1810,35 @@ void __wrap_platform_cache_idle_enter(void)
  * run carries the measurement alone - the frame reader, whose whole output is numbers in the live
  * channel and which 516's doc names as the thing owed - and this call waits for a run that can
  * attribute it. With the flag at 0 this wrapper is byte-for-byte 516's: one call through, one record.
+ *
+ * **520 adds the two readings either side of the call, and they are the arm's centre.** `sp` here is
+ * the real exit's own entry `sp`: this wrapper's frame is one 8-byte writeback (the build clause
+ * asserts it is the only stack adjustment in the body), so `[sp-8, sp)` is exactly the slot
+ * `platform_cache_idle_exit`'s `push {fp, lr}` overwrites and its `pop {fp, pc}` reads - the slot 519's
+ * run died in, holding a counter where a return address belonged. Reading it *before* the call says
+ * whether the pair was already there (in which case the exit's own push cannot be what the `pop` read);
+ * reading it *after* the call says what a pass that survives gets back (`{cpu_idle's fp, 0x8047c964}`).
+ * The second reading only exists when the exit returned, so a run that dies in the `pop` publishes the
+ * first and leaves the second absent - and 519's section 11 writes the decision rule on exactly that
+ * asymmetry. `sp` is read once, in the body, and reused: a second `mov %0, sp` after the call would be
+ * the same value, and one read is one thing to check.
  */
 void __real_platform_cache_idle_exit(void);
 void __wrap_platform_cache_idle_exit(void)
 {
+    uint32_t sp;
+
 #if STAGE90_XNU_EXIT_POC_FLUSH
     FlushPoC_Dcache();
 #endif
 
+    __asm__ volatile ("mov %0, sp" : "=r"(sp));
+    entry_slot_note(&g_slot_pre, sp);
+    entry_slot_rtc_note(&g_slot_rtcpre, entry_tpidrprw());
+
     __real_platform_cache_idle_exit();
+
+    entry_slot_note(&g_slot_post, sp);
 
     entry_note_pcx(entry_counter(), entry_tpidrprw(), entry_cpu_datap(), entry_sctlr());
 }
@@ -1831,9 +1872,30 @@ void __wrap_platform_cache_idle_exit(void)
 uint64_t __real_ml_get_timebase(void);
 uint64_t __wrap_ml_get_timebase(void)
 {
+    uint32_t before = entry_counter();
     uint64_t t = __real_ml_get_timebase();
+    uint32_t after = entry_counter();
 
     entry_note_timebase_call((uint32_t)t, entry_sctlr());
+
+    /*
+     * 520: **the counter read twice in a row, which is the shape of the pair the fatal `pop` read.**
+     * The two words in the slot are two counter values one tick apart, and `entry_counter()` either
+     * side of `ml_get_timebase()` - whose whole body is one `mrrc` - is the only place on this path
+     * that produces that shape. `after - before` is therefore how long the timebase read takes (0 or 1
+     * ticks here), and `before` itself is a clock stamp for the interrupt that was in service: it is
+     * the reading that lets the log say *when* the slot's pair was written, which no other record in
+     * this image carries.
+     *
+     * **The two reads are taken around the real call and not around 517's record**, because the value
+     * 517's record publishes is the real function's own return; putting the second read after that call
+     * would measure this instrument instead of the function. The order of the two calls below is the
+     * other way round on purpose: `entry_note_timebase_call` is 517's and its early return on
+     * `SCTLR.C` set is what 519's log measured as *no record at all*, so it runs first and 520's reading
+     * - which is published with the cache in either state - runs second and is the one the log's
+     * `xnu_live_slot_tb_calls` count can be read against.
+     */
+    entry_slot_tb_note(&g_slot_tb, before, after, (uint32_t)t);
 
     return t;
 }

@@ -1662,6 +1662,19 @@ uint32_t g_sleh_redirected;
 void entry_live_write(const char *key, uint32_t value);
 uint32_t entry_live_ready(void);
 
+/*
+ * 520's two readings on this path, declared here so the abort carries them and defined with the rest of
+ * 520's instrument further down this file (the block that opens with `entry_slot_mapped`). The keys are
+ * separate from every other site's because a reading that is absent at one site must not hide another
+ * site's - which is the shape of the decision rule 519's section 11 writes.
+ */
+struct entry_slot_keys;
+struct entry_slot_rtc_keys;
+extern struct entry_slot_keys g_slot_ab;
+extern struct entry_slot_rtc_keys g_slot_rtcab;
+void entry_slot_note(struct entry_slot_keys *k, uint32_t sp);
+void entry_slot_rtc_note(struct entry_slot_rtc_keys *k, uint32_t thr);
+
 void entry_note_sleh(uint32_t type, uint32_t fsr, uint32_t far_, uint32_t thread,
                      const uint32_t *frame, uint32_t recover)
 {
@@ -1745,6 +1758,24 @@ void entry_note_sleh(uint32_t type, uint32_t fsr, uint32_t far_, uint32_t thread
         entry_live_write("xnu_live_sleh_frame_ok", g_sleh_frame_ok);
         entry_live_write("xnu_live_sleh_user", g_sleh_user_mode);
     }
+
+    /*
+     * 520: **what the aborted context's own stack held, and what the idle loop was waiting until.**
+     *
+     * This is 519's section 11, readings 3 and 5, and it is the half of the arm that does not depend on
+     * the run surviving: the vector saved `SS_SP` - the `sp` of the code the exception interrupted -
+     * *before* any handler ran, and `prefabt_from_kernel`'s frame is 360 bytes deep and never reaches
+     * above the `sp` it interrupted (519's section 10), so nothing the handler did can have moved the
+     * words at `[SS_SP-16, SS_SP)`. On 519's fatal abort `SS_SP` was `0x8054fed0`, which is
+     * `platform_cache_idle_exit`'s entry `sp`; the two words ending there are therefore the two words
+     * that function's `pop {fp, pc}` read, read after the fact rather than inferred.
+     *
+     * The two calls are last so that the abort's own 490/516 records keep the log's order, and both are
+     * bounded and counted inside 520's instrument: a `frame` of 0 leaves `sp` 0 and the reading is
+     * refused and counted rather than taken at an address that is not memory.
+     */
+    entry_slot_note(&g_slot_ab, sp);
+    entry_slot_rtc_note(&g_slot_rtcab, thread);
 }
 
 void entry_note_sleh_back(uint32_t redirected)
@@ -6104,6 +6135,256 @@ void entry_idle_stack_note(void)
         entry_live_write("xnu_live_idlestack_inwin", inwin);
         entry_live_write("xnu_live_idlestack_calls", g_idlestack_calls);
     }
+}
+
+/*
+ * ======================================== 520: the two words of the slot, watched ==================
+ *
+ * **What this is for, in one sentence: 519's run identified the context the fatal `pop` belonged to and
+ * proved by arithmetic that no exception frame can reach above the `sp` it interrupted, and what
+ * remained was the one thing arithmetic could not do - say who wrote the two words the `pop` read, and
+ * when.** Section 10 of 519's doc enumerates every writer the idle path in that image contains and shows
+ * that none of them writes two successive counter readings; the step's own conclusion is that the writer
+ * has to be watched rather than reasoned about, and 519's section 11 is the list of readings that does
+ * the watching. This is that list, and nothing else: every one of these calls is a *measurement*, it
+ * changes no kernel state, and the only memory it writes is this image's own `.bss`.
+ *
+ * **The slot, and why its address is derivable.** `fleh_irq_kernel`'s arithmetic (`EXC_CTX_SIZE = 360`)
+ * puts 519's fatal abort at `pc = far = 0x07152a6c` with `sp = 0x8054fed0`, and that `sp` is both the
+ * `pop`'s post-pop value and `platform_cache_idle_exit`'s entry `sp` - so the slot that `pop` read is
+ * `[entry_sp - 8, entry_sp)`, the two words `push {fp, lr}` writes and `pop {fp, pc}` reads. A C body
+ * inside `__wrap_platform_cache_idle_exit` sees exactly that `entry_sp` as its own `sp` (the wrapper's
+ * whole frame is one `str r4, [sp, #-8]!`, which the build clause asserts), so the wrapper publishes its
+ * `sp` and this function reads the four words that end at it. Four rather than two because 519's
+ * section 11 asks for `[sp-16, sp-8)` at the abort as well as `[sp-8, sp)`: the lower doubleword is what
+ * the frame reserves and leaves alone, and a value found there is one more writer ruled out.
+ *
+ * **The reading is published on a schedule, not on every call, and the reason is 518's own defect class
+ * from the other side.** The idle loop can make thousands of passes; six records per pass would fill
+ * 8192-record channel and evict the trace this step exists to read (the failure 498's run measured at
+ * 97% of the old cap). So each site publishes while its count is at most `STAGE90_SLOT_LIVE_MAX` and
+ * thereafter at the powers of two - `1, 2, 3, 4, 8, 16, ...` - which is O(log n) records and guarantees
+ * that the *last* published reading is at least half way to the run's last call. The count itself is
+ * always kept and published with the reading, so a sample is never mistaken for the last call.
+ *
+ * **A reading that cannot be taken says so rather than reading something else.** `sp` comes from the
+ * aborted frame at one of the sites, and a `sp` outside every window this image's kernel data lives in
+ * (the kernel's own `[0x80000000, 0x80800000)` and the kernel heap `[0xc0000000, 0xc1000000)`, the two
+ * windows 517's clause established) is refused and *counted*: an absent reading is then a number in the
+ * log rather than a silence, which is this project's oldest rule about readings.
+ *
+ * **Offsets are named once and compared by the build.** `TH_KSTACKPTR` (1480) and `ACT_CPUDATAP` (1484)
+ * are `genassym`'s answers for two fields of one `thread`, and `build_entry.sh`'s `xnu_entry_520` clause
+ * requires each of these macros to equal `assym.s`'s own number - a layout that moved must stop the
+ * build instead of moving the reading. `rtcPop` at `+0xe0` is `cpu_idle`'s own field
+ * (`osfmk/arm/rtclock.c:337-410`, and the image's `add r6, r5, #0xe0` at `0x8000d4b0`), and the saved
+ * state `Idle_context` stores and `Load_context` restores is eleven words whose tenth and eleventh are
+ * `sp` and `lr` (`cswitch.s`, `stmia r3!, {r4..ip, sp, lr}` after `add r3, r3, #16`).
+ */
+#define STAGE90_SLOT_LIVE_MAX   4u
+#define STAGE90_TH_KSTACKPTR    1480u
+/* `cpu_data->rtcPop`, and it is written in decimal on purpose: `build_entry.sh`'s `s_of` reads these
+ * macros as decimal text and compares them with `assym.s`'s, so `0xe0u` would be a spelling that clause
+ * could not read at all - and a value a check cannot parse is a value nothing compares. 224 is 0xe0. */
+#define STAGE90_CPU_RTCPOP      224u
+#define STAGE90_CTX_SAVED_OFF   16u
+#define STAGE90_CTX_SP_OFF      36u
+#define STAGE90_CTX_LR_OFF      40u
+
+/* The two windows this configuration's kernel data lives in. Not from `assym.s` and not new here: the
+ * same two numbers are 517's guard's, and the reading this gate protects is of a stack and of a heap
+ * object, so a `sp` or a `thread` outside both is an address the dereference would fault on. */
+static uint32_t entry_slot_mapped(uint32_t p)
+{
+    return ((p >= STAGE90_KERNEL_LO && p < STAGE90_KERNEL_HI)
+            || (p >= STAGE90_KHEAP_LO && p < STAGE90_KHEAP_HI)) ? 1u : 0u;
+}
+
+/* `<= 4` and then the powers of two: see the block above for why this is not "the first four". */
+static uint32_t entry_slot_publish(uint32_t n)
+{
+    return (n <= STAGE90_SLOT_LIVE_MAX || (n & (n - 1u)) == 0u) ? 1u : 0u;
+}
+
+struct entry_slot_keys {
+    const char *k_sp, *k_m16, *k_m12, *k_m8, *k_m4, *k_calls, *k_rej;
+    uint32_t    calls, live, rejected;
+};
+
+/* Three sites, three key sets, and the keys are distinct strings rather than one set per position: a
+ * site whose reading is absent must leave the *other* sites' readings readable, which is the whole
+ * shape of the decision rule in 519's section 11. */
+struct entry_slot_keys g_slot_pre = {
+    "xnu_live_slot_pre_sp", "xnu_live_slot_pre_m16", "xnu_live_slot_pre_m12",
+    "xnu_live_slot_pre_m8", "xnu_live_slot_pre_m4", "xnu_live_slot_pre_calls",
+    "xnu_live_slot_pre_rej", 0u, 0u, 0u };
+struct entry_slot_keys g_slot_post = {
+    "xnu_live_slot_post_sp", "xnu_live_slot_post_m16", "xnu_live_slot_post_m12",
+    "xnu_live_slot_post_m8", "xnu_live_slot_post_m4", "xnu_live_slot_post_calls",
+    "xnu_live_slot_post_rej", 0u, 0u, 0u };
+struct entry_slot_keys g_slot_ab = {
+    "xnu_live_slot_ab_sp", "xnu_live_slot_ab_m16", "xnu_live_slot_ab_m12",
+    "xnu_live_slot_ab_m8", "xnu_live_slot_ab_m4", "xnu_live_slot_ab_calls",
+    "xnu_live_slot_ab_rej", 0u, 0u, 0u };
+
+/*
+ * `sp` is the caller's own stack pointer, read by the caller and not by this function - a call changes
+ * it, so a `sp` read in here would be this frame's and not the site's, which is the defect 394 recorded
+ * from the other side (a live register compared against a value saved at a different instruction
+ * boundary). The four words read are the two doublewords ending at `sp`.
+ *
+ * **A refused reading is published as a zero, and every key is written on every call.** The guard is
+ * "this address is inside one of the two windows this image's kernel data lives in", and a `sp` outside
+ * both cannot be dereferenced - so it is refused, published as `_sp = 0` with the words zeroed and the
+ * refusal counted in `_rej`, rather than passed over in silence: a key that is *absent* and a key that
+ * says *nothing was read* are two different readings and only one of them is a measurement. Writing
+ * every key on both paths also makes the compiled body's shape checkable - exactly seven
+ * `entry_live_write` calls against the seven key pointers this struct's own initializer names, which is
+ * the "one value, two definitions" rule applied to a key list.
+ *
+ * `noinline` for the reason 517's `entry_live_ready` carries it: this function and its two callers are
+ * in one translation unit, so gcc may fold the call away - and the reading this step is taken by would
+ * then be absent from the image with every surface still green. The build clause looks for the `bl`.
+ */
+__attribute__((noinline)) void entry_slot_note(struct entry_slot_keys *k, uint32_t sp)
+{
+    uint32_t m16 = 0u, m12 = 0u, m8 = 0u, m4 = 0u, got;
+
+    k->calls++;
+    if (entry_slot_publish(k->calls) == 0u)
+        return;
+    if (entry_live_ready() == 0u)
+        return;
+
+    got = (entry_slot_mapped(sp) != 0u && entry_slot_mapped(sp - 16u) != 0u) ? 1u : 0u;
+    if (got != 0u) {
+        m16 = *(volatile uint32_t *)(uintptr_t)(sp - 16u);
+        m12 = *(volatile uint32_t *)(uintptr_t)(sp - 12u);
+        m8  = *(volatile uint32_t *)(uintptr_t)(sp - 8u);
+        m4  = *(volatile uint32_t *)(uintptr_t)(sp - 4u);
+        k->live++;
+    } else {
+        sp = 0u;
+        k->rejected++;
+    }
+
+    entry_live_write(k->k_sp, sp);
+    entry_live_write(k->k_m16, m16);
+    entry_live_write(k->k_m12, m12);
+    entry_live_write(k->k_m8, m8);
+    entry_live_write(k->k_m4, m4);
+    entry_live_write(k->k_calls, k->calls);
+    entry_live_write(k->k_rej, k->rejected);
+}
+
+struct entry_slot_rtc_keys {
+    const char *k_thr, *k_datap, *k_pop, *k_pcb, *k_sp, *k_lr, *k_calls, *k_rej;
+    uint32_t    calls, live, rejected;
+};
+
+struct entry_slot_rtc_keys g_slot_rtcpre = {
+    "xnu_live_slot_rtcpre_thr", "xnu_live_slot_rtcpre_datap", "xnu_live_slot_rtcpre_pop",
+    "xnu_live_slot_rtcpre_pcb", "xnu_live_slot_rtcpre_sp", "xnu_live_slot_rtcpre_lr",
+    "xnu_live_slot_rtcpre_calls", "xnu_live_slot_rtcpre_rej", 0u, 0u, 0u };
+struct entry_slot_rtc_keys g_slot_rtcab = {
+    "xnu_live_slot_rtcab_thr", "xnu_live_slot_rtcab_datap", "xnu_live_slot_rtcab_pop",
+    "xnu_live_slot_rtcab_pcb", "xnu_live_slot_rtcab_sp", "xnu_live_slot_rtcab_lr",
+    "xnu_live_slot_rtcab_calls", "xnu_live_slot_rtcab_rej", 0u, 0u, 0u };
+
+/*
+ * 519's section 11, reading 5: **`cpu_data->rtcPop` and the idle thread's own saved `sp`/`lr`.**
+ *
+ * The question this answers is an identity rather than a location. 519's run has `r4 = 0x07152a6d` in
+ * the panic's own panel, and `cpu_idle` loads exactly that value from `cpu_data->rtcPop` into `r4`
+ * (`ldm r6, {r4, r7}` at `0x8000d4b8` with `r6 = cpu_data + 0xe0`), while the address the CPU was made
+ * to jump to is `0x07152a6c` - the same value with bit 0 clear, which is what a `pop {fp, pc}` onto a
+ * Thumb address looks like from the fault's side. So the reading of `rtcPop` at the abort is what turns
+ * "the `pop` read a counter" into "the `pop` read *this* deadline", and it is the difference between a
+ * panic that is consistent with a corrupted slot and one that names what the slot held.
+ *
+ * `thr` is the thread pointer (`TPIDRPRW`, read by the caller - it is a register and this function
+ * cannot see the caller's), and every one of this function's dereferences is bounded: the thread's own
+ * field for `cpu_data`, then `cpu_data->rtcPop`, and the pcb's own words. The pcb's saved `sp`/`lr` are
+ * `TH_KSTACKPTR`'s address plus 16 (where `Idle_context` begins to store the eleven registers) plus the
+ * tenth and eleventh words of them. A `thr` outside both windows is the one refusal that skips the
+ * whole reading, and it is counted in `_rej` like the slot note's.
+ */
+__attribute__((noinline)) void entry_slot_rtc_note(struct entry_slot_rtc_keys *k, uint32_t thr)
+{
+    uint32_t datap = 0u, pop = 0u, pcb = 0u, ssp = 0u, slr = 0u, got;
+
+    k->calls++;
+    if (entry_slot_publish(k->calls) == 0u)
+        return;
+    if (entry_live_ready() == 0u)
+        return;
+
+    got = entry_slot_mapped(thr);
+    if (got != 0u) {
+        datap = *(volatile uint32_t *)(uintptr_t)(thr + STAGE90_ACT_CPUDATAP);
+        if (entry_slot_mapped(datap) != 0u && entry_slot_mapped(datap + STAGE90_CPU_RTCPOP) != 0u)
+            pop = *(volatile uint32_t *)(uintptr_t)(datap + STAGE90_CPU_RTCPOP);
+        pcb = *(volatile uint32_t *)(uintptr_t)(thr + STAGE90_TH_KSTACKPTR);
+        if (entry_slot_mapped(pcb) != 0u
+            && entry_slot_mapped(pcb + STAGE90_CTX_SAVED_OFF + STAGE90_CTX_LR_OFF) != 0u) {
+            ssp = *(volatile uint32_t *)(uintptr_t)(pcb + STAGE90_CTX_SAVED_OFF + STAGE90_CTX_SP_OFF);
+            slr = *(volatile uint32_t *)(uintptr_t)(pcb + STAGE90_CTX_SAVED_OFF + STAGE90_CTX_LR_OFF);
+        }
+        k->live++;
+    } else {
+        thr = 0u;
+        k->rejected++;
+    }
+
+    entry_live_write(k->k_thr, thr);
+    entry_live_write(k->k_datap, datap);
+    entry_live_write(k->k_pop, pop);
+    entry_live_write(k->k_pcb, pcb);
+    entry_live_write(k->k_sp, ssp);
+    entry_live_write(k->k_lr, slr);
+    entry_live_write(k->k_calls, k->calls);
+    entry_live_write(k->k_rej, k->rejected);
+}
+
+struct entry_slot_tb_keys {
+    const char *k_before, *k_after, *k_lo, *k_calls;
+    uint32_t    calls, live;
+};
+
+struct entry_slot_tb_keys g_slot_tb = {
+    "xnu_live_slot_tb_before", "xnu_live_slot_tb_after", "xnu_live_slot_tb_lo",
+    "xnu_live_slot_tb_calls", 0u, 0u };
+
+/*
+ * 519's section 11, reading 4: **`__wrap_ml_get_timebase`'s own two counter readings.**
+ *
+ * The pair the fatal `pop` read is two counter values one tick apart, and this is the only code on that
+ * path that reads the counter twice in a row: `entry_counter()` on either side of the real
+ * `ml_get_timebase()`, whose whole body is one `mrrc`. So `after - before` is how long the timebase read
+ * takes (0 or 1 ticks on this CPU), and `before` itself *dates the last interrupt* - which is what makes
+ * this reading worth a call on the interrupt path: it is the only clock stamp the run has for the
+ * interrupt that was in service when the idle path died, and a slot pair whose values sit a tick or two
+ * below this one's is a pair written in the same instant rather than at boot.
+ *
+ * 517's instrument at the same site is left exactly as it was (`entry_note_timebase_call`, whose early
+ * return on `SCTLR.C` set is why 519's log carries no `xnu_live_tb_*` record at all - a fact this
+ * reading's own count makes comparable, since this one is published with the cache in either state).
+ * There is no guard here and no `_rej`: this function dereferences nothing.
+ */
+__attribute__((noinline)) void entry_slot_tb_note(struct entry_slot_tb_keys *k, uint32_t before,
+                                                  uint32_t after, uint32_t lo)
+{
+    k->calls++;
+    if (entry_slot_publish(k->calls) == 0u)
+        return;
+    if (entry_live_ready() == 0u)
+        return;
+
+    k->live++;
+    entry_live_write(k->k_before, before);
+    entry_live_write(k->k_after, after);
+    entry_live_write(k->k_lo, lo);
+    entry_live_write(k->k_calls, k->calls);
 }
 
 __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);
