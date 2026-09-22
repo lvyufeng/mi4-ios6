@@ -1144,9 +1144,36 @@ echo "log before anything else touches the device:"
 echo
 echo "  $STAGE_DIR/run_and_capture.sh $*"
 echo
-echo "Its exit status is the reading: 0 the device came back and the log is at"
-echo "/tmp/cancro-last_kmsg.txt, 2 the payload ran and the device did NOT come back - a manual"
-echo "power press is owed and the log goes with the power cycle."
+echo "Its exit status is the reading: 0 adb saw the device again and the log is at"
+echo "/tmp/cancro-last_kmsg.txt, 2 adb did not see the device inside the window - in which case a"
+echo "manual power press is owed and the log goes with the power cycle."
+echo
+# Exit 2 is adb's verdict, not the SoC's, and the two can differ on this phone: at 19:22:45 on
+# 2026-09-22 it enumerated 2717:0368 (serial 4a2fe00b) for 18 s and then dropped without reaching
+# 18d1:4ee7, so a failed Android bring-up looks exactly like a payload that never returned. Which
+# channel the runner actually waits on is read out of it here rather than asserted (the 520 rule),
+# and a region that cannot be read prints UNREAD rather than a criterion nobody checked.
+RUNNER=$STAGE_DIR/run_and_capture.sh
+REGION=$(sed -n '/^# --- 4\. wait for it to come back/,/^# --- 5\./p' "$RUNNER" 2>/dev/null || true)
+if [[ -n $REGION ]]; then
+  A=$(grep -c 'adb devices' <<<"$REGION" || true)
+  F=$(grep -c 'fastboot devices' <<<"$REGION" || true)
+  echo "read from run_and_capture.sh's wait loop at gate time: that loop's body contains"
+  echo "$A adb poll(s) and $F fastboot poll(s)."
+  if [[ $A -gt 0 && $F -eq 0 ]]; then
+    echo "So its exit 2 is adb's reading alone. Before recording a non-return, look for an"
+    echo "enumeration on usb 3-10 *after* the fastboot disconnect (the jump) - an enumeration"
+    echo "there is a return whatever adb said:"
+    echo "  sudo dmesg | grep 'usb 3-10'    # bare dmesg prints nothing on this host"
+  else
+    echo "So this gate does NOT claim what exit 2 asserts about the device: the sentence above is"
+    echo "written for an adb-only wait loop, and this one is not that. Read the loop itself:"
+    echo "  run_and_capture.sh, section 4"
+  fi
+else
+  echo "what exit 2 asserts: UNREAD - the wait loop could not be read out of run_and_capture.sh,"
+  echo "so which channel it polls is not established from here."
+fi
 echo
 echo "  image: $IMAGE"
 echo "  booted, never flashed, so no outcome of this run can write to storage."
