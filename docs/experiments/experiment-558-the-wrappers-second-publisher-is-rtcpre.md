@@ -91,7 +91,23 @@ same order:
 
 Neither edit changes what 547 §4 or 533 §5 predict for the run.
 
-## 5. Reported not patched
+**And this list was incomplete, in a way worth recording.** The census behind it was "the files I touched
+in this phase", and that is the wrong predicate: [560](experiment-560-the-same-wrong-key-in-four-more-files.md)
+(`35a450b`) found the same key in **546 §5, 547 §4, 554 §1 and 557 §4c** - all four written or edited
+this phase, none of them grepped for the key. The enumeration that terminates is **every file that names
+the key**, and `grep -rn 'rtcab' docs/ stages/stage90/` is the whole of it. This is the same defect one
+turn further down than the one 558 exists to fix: 557 found `rtcab` was not per-pass and did not go back
+to the check that consumed it; 558 fixed the check and did not go back to the prose; 560 is that omission,
+found by the peer session rather than by me.
+
+## 5. Reported not patched, and the report is now spent
+
+> **Pointer (561): the gate has been repaired, so "still has it" below is true of `e362a28` and false of
+> the tree.** The patch is [559](experiment-559-the-brackets-middle-key-was-named-wrong-in-the-one-block-that-governs.md)
+> (`92f6aca`), by the file's owner; the quoted `echo` block is the gate's **pre-559** text and is kept
+> here as the evidence the report was made on, not as a description of the current file. Read the two
+> together. The rest of this section is unchanged, including the reason it was reported rather than
+> patched.
 
 **The gate's own bracket paragraph still has it, and now contradicts itself.** `preflight_boot_check.sh`
 prints, at the `--allow-xnu-entry` capture-site block:
