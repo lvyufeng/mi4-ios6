@@ -37,30 +37,35 @@ are a `isb`, the per-CPU read, and a `ldr`/`str` pair - **and not one of them is
 
 ## 2. What the window does to the caches, and the level it never touches
 
-Every cache operation called inside the window `[0x80046240, 0x8004633c)`:
+Every cache operation called inside the window `[0x80046240, 0x8004633c)` - and, since **the branches that
+choose them are not all taken**, which of them actually runs in this image (the branch analysis is
+[549](experiment-549-which-arm-runs-is-a-boot-arg.md); the image's boot-args end in
+`up_style_idle_exit=1` and `real_ncpus` is `1`):
 
-| site | call | what it invalidates |
-| --- | --- | --- |
-| `0x80046274` | `CleanPoU_Dcache` (flag path) | nothing - clean only |
-| `0x80046284` | `FlushPoU_Dcache` (else path) | **L1 only** |
-| `0x800462b0` | `CleanPoC_DcacheRegion(r4, 0x340)` | nothing - clean only, and only the per-CPU struct |
-| `0x800462d8` | `FlushPoU_Dcache` (the exit's) | **L1 only** |
-| `0x80046304` | `InvalidatePoU_Icache` | the L1 **I-cache** |
-| `0x80046308` | `flush_core_tlb` | the TLB |
+| site | call | what it invalidates | runs in this image? |
+| --- | --- | --- | --- |
+| `0x80046274` | `CleanPoU_Dcache` | nothing - clean only, L1 | **yes** - the arm this image takes |
+| `0x80046284` | `FlushPoU_Dcache` | L1 only | no (the other arm) |
+| `0x800462b0` | `CleanPoC_DcacheRegion(r4, 0x340)` | nothing - a *clean by VA* of the per-CPU struct, not a set/way sweep | no (the other arm) |
+| `0x800462d8` | `FlushPoU_Dcache` (the exit's) | **L1 only** | **yes** |
+| `0x80046304` | `InvalidatePoU_Icache` | the L1 **I-cache** | no (`up_style_idle_exit == 1`, `real_ncpus < 2`) |
+| `0x80046308` | `flush_core_tlb` | the TLB | no (same condition) |
 
-Six calls, and **the only lines any of them invalidates are L1 lines**. The two PoU flushes stop at the
-L1 because that is what PoU means (545 §1-§2); the one PoC-named call is a *clean by VA* of 0x340 bytes
-of the per-CPU structure, which has neither an invalidate nor the stack in its range. **No instruction in
-this window invalidates a single L2 line, and none of them can: an invalidate of the L2 would have to
-come from a PoC *flush* (`c7,c14,2` at level 2), and no such call is here.**
+So the window's entire cache work in this configuration is **two operations, both D-side and both L1**:
+a clean at the enter and a clean-and-invalidate at the exit. (My first version of this table listed all six
+as executed; the branch analysis corrected it, and the correction makes the point below *stronger*, not
+weaker.) **The only lines invalidated anywhere in the window are L1 lines**, and an L2 invalidate would
+have to come from a PoC *flush* (`c7,c14,2` at level 2), for which there is no call in the window at all -
+taken or not.
 
 **The source says this even more plainly than the bytes do, in Apple's own comment on the first of them**:
 `/* Flush L1 caches and TLB before rejoining the coherency domain */` (`caches.c:459`). Apple wrote the
 exit's flush *as* an L1 flush and labelled it one. The exit contains no PoC operation of any kind - its
-only other memory-related calls are the I-cache invalidate and the TLB flush - so the L2 is not
-maintained by this path on purpose, not by omission, and the two globals that pick the branch
-(`up_style_idle_exit` at `0x805511a4`, `real_ncpus` at `0x80520378`; `caches.c:464`) change *which* L1
-work the enter does, not whether the L2 is touched: on both branches the L2 goes untouched.
+only other memory-related calls are the I-cache invalidate and the TLB flush, and in this image's
+configuration those two are **skipped** - so the L2 is not maintained by this path on purpose, not by
+omission. The two globals that pick the branches (`up_style_idle_exit` at `0x805511a4`, `real_ncpus` at
+`0x80520378`; `caches.c:414`/`:464`) change *which* L1 work runs, and on **neither** branch is the L2
+touched: the arm this image takes is the cheapest one, a single clean.
 
 ## 3. The hypothesis, and why it explains the two failures it was not built to
 
@@ -107,11 +112,12 @@ The fix has to invalidate **the L2**, **after the push** (`0x800462d4`) and **be
 (`0x80046324`). Two consequences, one of them a correction to 534/544/545's plan:
 
 1. **534's seam is still the right one, and for a third reason.** The exit's `bl FlushPoU_Dcache` at
-   `0x800462d8` is the **last** `bl` in the span that has any cache work in it (the other two in the span
-   are `InvalidatePoU_Icache` at `0x80046304` and `flush_core_tlb` at `0x80046308`), it is reached in
-   every pass, and it is a `bl` - so it is wrappable, per [[mi4-hooks-live-at-calls]]. What 535 puts
-   behind it should be a **PoC flush**, so that what runs after the push is a clean+invalidate of both
-   levels rather than an L1-only clean+invalidate.
+   `0x800462d8` is the **only** cache operation the exit performs in this image's configuration - the
+   other two `bl`s in the span (`InvalidatePoU_Icache` at `0x80046304`, `flush_core_tlb` at `0x80046308`)
+   are skipped by the `up_style_idle_exit == 1` / `real_ncpus < 2` branch, and both are I-side or TLB
+   anyway - it is reached in every pass, and it is a `bl`, so it is wrappable, per
+   [[mi4-hooks-live-at-calls]]. What 535 puts behind it should be a **PoC flush**, so that what runs after
+   the push is a clean+invalidate of both levels rather than an L1-only clean+invalidate.
 2. **And it must be told apart from the other three callers of the same routine.** `FlushPoU_Dcache` is
    called from four sites - `0x80045d08` (`cache_xcall`), `0x80046284` (the enter's else path),
    `0x800462d8` (the exit), `0x800463bc` (`cache_xcall_handler`) - and wrapping the symbol alone would put
