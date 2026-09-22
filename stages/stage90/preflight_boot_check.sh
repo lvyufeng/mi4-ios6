@@ -1175,9 +1175,32 @@ case "$(value_of STAGE90_XNU_ENTRY)" in
     echo "                 the record, and that line governs this one; where the write IS in the image,"
     echo "                 522's block in run_and_capture.sh --summarise reads this log for it too -"
     echo "                 xnu_live_slot_cwe_win shows C clear, _set shows it set with _calls >= 1; (4) the"
-    echo "                 ending: the same sleh_storm 9 at"
-    echo "                 the same pc as 520 would say the mechanism is neither the capture nor the re-enable,"
-    echo "                 and any later ending is progress."
+    echo "                 ending, and here the arm decides what the ending means rather than the ending"
+    echo "                 deciding the arm: 547 section 4 pre-registers this death for the enable-off arm -"
+    echo "                 the pass reaches the exit, the push runs with C clear, the pop loads the stale"
+    echo "                 words and the prefetch abort panics - so on that arm a death whose lr is the"
+    echo "                 address the exit's own bl FlushPoU_Dcache returns to is the *prediction* and not"
+    echo "                 a negative result, and what falsifies 546's mechanism is a **return with no pop"
+    echo "                 death at all**, which is the one reading that forbids 535 as designed. Which"
+    echo "                 cell this log is in, and whether the death is the predicted shape, is what"
+    echo "                 run_and_capture.sh --summarise decides - it derives that address from this"
+    echo "                 image's own ELF at run time and separates the two by the log's published"
+    echo "                 xnu_live_sleh_lr, so nothing above restates the rule and a death read here by"
+    echo "                 eye is read that way and not by this sentence. Any"
+    echo "                 later ending than 520's is progress."
+    echo "                 What this arm costs, read off 520's own log rather than assumed: that log's"
+    echo "                 per-pass publishers have exactly one record each"
+    echo "                 (xnu_live_slot_pre_calls, xnu_live_slot_rtcpre_calls, xnu_live_sip_seq and the"
+    echo "                 xnu_live_pce_seq/_after_seq pair), while the door counter's last published record"
+    echo "                 is 32768 - so the cache window itself was entered once, and that one entry is the"
+    echo "                 death. A run of this arm gets one pass at the exit, so a non-return costs a power"
+    echo "                 press and nothing else, which is why this phase is expensive in boots and not in"
+    echo "                 passes. And the item that localises the death is the *bracket*, not the ending:"
+    echo "                 pre and rtcpre published with xnu_live_slot_post_calls absent is what puts the"
+    echo "                 death inside platform_cache_idle_exit, with no second pass to confuse it. (Line"
+    echo "                 numbers quoted from that log are readable within their own block only: the ram"
+    echo "                 console's records and its console text are two writers into two blocks, so a"
+    echo "                 line's number says nothing about its order against a line in the other one.)"
     echo "                 The image this preflight is being run against is"
     echo "                 ${IMAGE_SHA16}... , computed from the file itself two screens up."
     echo
@@ -1393,6 +1416,103 @@ else
   echo "UNREAD - the wait section could not be read out of run_and_capture.sh, so which states it"
   echo "distinguishes, and therefore what its exit status asserts about the device, is not established"
   echo "from here. Read section 4 of that file by hand before narrating a run's outcome."
+fi
+
+# **And the one address the result reader compares against, checked here because here is the only
+# place both of its definitions are readable** - the reader's own rule, turned on the reader. 554's
+# shape test separates a *predicted* pop death from a *surprise* by comparing the log's published
+# `xnu_live_sleh_lr` against the address the exit's own `bl FlushPoU_Dcache` returns to, and the
+# reader **derives** that address from `out/stage90/xnu_arm_entry.elf` at run time, falling back to a
+# literal (`EXIT_POP_LR_LITERAL`) when the ELF cannot be read - a cleaned `out/`, or a summarise run
+# in another tree. The fallback is *labelled* in the log, which is the right direction, but a label
+# is not a check: it is a second definition of one address, and **this gate is the one place that can
+# compare the two**, because at summarise time the ELF is precisely what was not readable. So the
+# comparison happens here, and a disagreement stops the gate instead of a run: a log read through the
+# fallback would attribute the death by a number that is not in the image, and 554's three-way test
+# would print FAIL for the death 547 section 4 predicts. The test is scoped to the *function* the
+# reader's comment names (`platform_cache_idle_exit`), because the image calls `FlushPoU_Dcache` from
+# several sites and only the caller tells them apart - guarding on the callee is not a style choice
+# here but the only thing that separates this seam from the others. **The count is printed from this
+# image rather than asserted here**, because this project's notes carried six for it, having listed
+# the two `FlushPoC_Dcache` references - a *different* callee, `0x80045828` - in the same breath as the
+# `bl` sites that reach `FlushPoU_Dcache`. Measured, the second list is four: `0x80045d08`,
+# `0x80046284`, `0x800462d8`, `0x800463bc`. That is why the printed line names which callee it counted.
+ENTRY_ELF=$OUT/xnu_arm_entry.elf
+_GATE_OD=${STAGE90_OBJDUMP:-arm-none-eabi-objdump}
+# The parse accepts *both* disassemblers' shapes around that call, because they differ and the
+# difference looks like an absence: GNU `arm-none-eabi-objdump` prints the instruction line
+# `800462dc:\te30101a4 …` directly after the `bl`, while `llvm-objdump` prints a *symbol* line first
+# (`800462dc <platform_cache_idle_exit+0x8>:`) and would leave a rule that requires a colon with
+# nothing to print - the same failure shape 549 records, a decoder that answers by printing nothing.
+# So the address is taken from the first line after the call that begins with one, colon optional, and
+# the function's own entry address is excluded: a parse that returned the entry would be comparing the
+# reader's criterion against the top of the function instead of against the return address.
+_pop_lr_from_elf() {
+  "$_GATE_OD" -d --no-show-raw-insn "$ENTRY_ELF" 2>/dev/null | awk '
+    /^[0-9a-f]+ <platform_cache_idle_exit>:/ { infn = 1; a = $1; sub(/:$/, "", a); entry = a; next }
+    infn && /<FlushPoU_Dcache>/ && /bl/      { want = 1; next }
+    want && /^[0-9a-f]+[[:space:]]*[:<]/     { a = $1; sub(/:$/, "", a); if (a != entry) { print a; exit } }
+    /^[0-9a-f]+ <.*>:/                       { infn = 0 }
+  '
+}
+PIN_LINE=$(grep -m1 '^EXIT_POP_LR_LITERAL=0x' "$RUNNER" 2>/dev/null || true)
+PIN=${PIN_LINE#*=}
+PIN=$(tr 'A-Z' 'a-z' <<<"$PIN")
+# `|| true` is load-bearing, and its absence ended this gate's first run of this clause at 141: the
+# awk stops at the instruction it wants, the objdump feeding it is still writing, and `pipefail` turns
+# that SIGPIPE into the pipeline's status - which `set -e` then reads as a failure of the *gate*. The
+# value was correct; the run died before printing it. Same shape as the reader's own `keyval || true`.
+DERIVED=$(_pop_lr_from_elf | tr 'A-Z' 'a-z' || true)
+FLUSH_N=$("$_GATE_OD" -d --no-show-raw-insn "$ENTRY_ELF" 2>/dev/null \
+          | grep -cE 'bl[[:space:]]+(0x)?[0-9a-f]+ <FlushPoU_Dcache>' || true)
+echo "== the address run_and_capture.sh's shape test compares against =="
+if [[ ! -f $ENTRY_ELF ]]; then
+  echo "UNREAD - no $ENTRY_ELF, so the address the death is attributed by cannot be derived here. The"
+  echo "reader will fall back to its literal at run time and label it; read $ENTRY_ELF back (it is a"
+  echo "build product, and its bin is embedded in the frozen pair) before trusting that label."
+elif [[ -z $PIN ]]; then
+  # The address can live in the runner in two spellings: as the fallback the reader assigns to a
+  # variable, and - before that derivation existed - as the literal inside the `grep` pattern the
+  # reader matched the dump with (554 section 2). Only the first is a value this clause may compare:
+  # the second is a *comment* in that file's present shape, and a check that read a comment would be
+  # reading prose. So the second is printed as what it is, and the comparison does not happen.
+  _stray=$(grep -oE 'lr: \*?0x[0-9a-fA-F]+' "$RUNNER" 2>/dev/null | head -1 || true)
+  echo "UNREAD - run_and_capture.sh has no 'EXIT_POP_LR_LITERAL=0x...' line, so the fallback the reader"
+  echo "uses when the ELF is unreadable is not a value this gate can compare. If that file's fallback"
+  echo "was renamed or removed, say so here rather than letting this clause go quiet: a check that"
+  echo "prints nothing when its subject moves is indistinguishable from one that never ran."
+  if [[ -n $_stray ]]; then
+    echo "  (that file does still carry the address as text - '$_stray' - but in a comment, and a"
+    echo "  comment is not the value the reader keys on: find the variable it compares against.)"
+  fi
+elif [[ -z $DERIVED ]]; then
+  echo "UNREAD - $_GATE_OD found no 'bl <FlushPoU_Dcache>' inside platform_cache_idle_exit in"
+  echo "$ENTRY_ELF, so this clause could not derive the address it compares the reader's fallback"
+  echo "against. Read the disassembly by hand before the run; the comparison below did NOT happen."
+elif (( 16#$DERIVED % 4 != 0 )) || (( 16#$DERIVED < 16#80000000 )) || (( 16#$DERIVED > 16#fffeffff )); then
+  echo "UNREAD - the disassembly gave 0x$DERIVED for the address platform_cache_idle_exit's flush"
+  echo "returns to, and that is not a 4-byte-aligned kernel address, so this clause parsed a line that"
+  echo "is not that instruction - a data word, or the function's own entry label. The comparison below"
+  echo "did NOT happen, and the reader's fallback is therefore unchecked; read the disassembly by hand."
+elif [[ $DERIVED != "${PIN#0x}" ]]; then
+  fail "run_and_capture.sh's fallback address for the idle exit's pop is $PIN and $ENTRY_ELF has platform_cache_idle_exit returning from that bl at 0x$DERIVED: two definitions of one address, and they disagree. The reader derives its criterion from this ELF at run time and uses the literal only when the ELF cannot be read, so a log summarised from a tree without out/ would attribute the death by a number that is not in this image - and 554's shape test would then print FAIL for the death 547 section 4 pre-registers for the enable-off arm, which is the defect that clause was written to remove. This gate cannot tell which of the two is stale - the literal, or this ELF and the bin built beside it - so it names the test rather than presuming the answer: disassemble platform_cache_idle_exit by hand. If the address above is this image's, the runner's literal is the one owed a change, and it is a one-line change to a variable that is not the artifact. Nothing is rebuilt by this refusal, and nothing should be: the frozen pair embeds this entry image, so rebuilding it would spend the freeze this gate exists to protect"
+else
+  echo "ok: the reader's criterion and this image agree - $PIN, derived from $ENTRY_ELF's own"
+  echo "  platform_cache_idle_exit, the address its bl <FlushPoU_Dcache> returns to. The scoping is what"
+  if (( FLUSH_N > 0 )); then
+    echo "  that function buys: the image branches to FlushPoU_Dcache from $FLUSH_N site(s) with a bl - and"
+    echo "  the guard is on the caller, because only the caller separates this seam from the others. That"
+    echo "  count is the bl sites to *this* callee; the two FlushPoC_Dcache references are another function."
+  else
+    # The address was read out of a line the count then failed to match, which cannot both be true. So
+    # the count is reported as unusable rather than printed as a zero: "no site found" and "the pattern
+    # did not fit this decoder's spelling" are different readings, and printing the second as the first
+    # is how a wrong number gets quoted as a fact.
+    echo "  that function buys: the guard is on the caller and not on the callee, because the image"
+    echo "  branches to FlushPoU_Dcache from several sites and only the caller separates this seam from"
+    echo "  the others. **The count itself did not fit this decoder's spelling and is NOT reported** - a"
+    echo "  zero here would be a parse failure, not a reading."
+  fi
 fi
 echo
 echo "  image: $IMAGE"
