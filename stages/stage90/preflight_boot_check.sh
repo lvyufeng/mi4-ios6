@@ -97,9 +97,14 @@ echo "== image freshness =="
 # switches and approve the OLD image, which is precisely the failure this gate exists to
 # prevent, in the direction it was blind to. Verified: without this check, touching
 # stage90.h and running the gate passes.
+#
+# `|| true` on each `find`: `find` exits non-zero on a directory it cannot read, and under `set -e` the
+# assignment would then end the script right here with no message at all - the same shape as the
+# `[[ ... ]] && echo` note below and as clause 2's missing-`nm` guard. A scan that could not look is not
+# a scan that found something, and the direction this fails in is the quiet one.
 STALE=$(find "$STAGE_DIR" -maxdepth 1 -type f \
          \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.ld' \) \
-         -newer "$IMAGE" -printf '%f\n' 2>/dev/null | sort)
+         -newer "$IMAGE" -printf '%f\n' 2>/dev/null | sort || true)
 # **533: the entry image's own sources are one directory down, and `-maxdepth 1` never looked at
 # them.** `xnu_arm_boot/` is where build_entry.sh, entry_trace.c, entry_stubs.c and entry.ld live,
 # and they decide *which arm* the boot image carries - the one property the XNU-entry block below
@@ -110,9 +115,9 @@ STALE=$(find "$STAGE_DIR" -maxdepth 1 -type f \
 # image as any .c in that directory.
 STALE_ENTRY=$(find "$STAGE_DIR/xnu_arm_boot" -maxdepth 1 -type f \
                \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.ld' -o -name '*.sh' \) \
-               -newer "$IMAGE" -printf 'xnu_arm_boot/%f\n' 2>/dev/null | sort)
+               -newer "$IMAGE" -printf 'xnu_arm_boot/%f\n' 2>/dev/null | sort || true)
 BUILD_TOOLS_NEWER=$(find "$REPO_ROOT/tools" -maxdepth 1 -name 'mkmacho_fixture.py' \
-                    -newer "$IMAGE" -printf '%f\n' 2>/dev/null)
+                    -newer "$IMAGE" -printf '%f\n' 2>/dev/null || true)
 if [[ -n $STALE || -n $STALE_ENTRY || -n $BUILD_TOOLS_NEWER ]]; then
   echo "source newer than the image:"
   # `[[ ... ]] && echo` as a bare statement returns 1 when the test is false, which under `set -e`
@@ -120,7 +125,18 @@ if [[ -n $STALE || -n $STALE_ENTRY || -n $BUILD_TOOLS_NEWER ]]; then
   if [[ -n $STALE ]]; then echo "$STALE" | sed 's/^/  /'; fi
   if [[ -n $STALE_ENTRY ]]; then echo "$STALE_ENTRY" | sed 's/^/  /'; fi
   if [[ -n $BUILD_TOOLS_NEWER ]]; then echo "  tools/$BUILD_TOOLS_NEWER"; fi
-  fail "the image is stale - run ./build.sh, then re-run this gate"
+  echo "  (compared against the image's own mtime: $(stat -c '%y' "$IMAGE"))"
+  # **"Run ./build.sh" is the wrong remedy about half the time, and for the XNU-entry arm it is the
+  # actively harmful one.** Two different events produce this line and the gate cannot tell them apart:
+  # an edit that was not rebuilt, and a `git checkout` / mirror that rewrote an *unchanged* file and so
+  # bumped its mtime. Measured (2026-09-22): committing 533 and fast-forwarding master left
+  # xnu_arm_boot/build_entry.sh and entry_trace.c at 17:30:27 with `git diff HEAD` empty, two minutes
+  # after the 17:28 image they had in fact produced - a false stale, and the safe direction, but the
+  # operator's next move is a rebuild and a blind `./build.sh` drops -DSTAGE90_XNU_ENTRY back to the
+  # header's default 0, i.e. it rebuilds a payload that never jumps into XNU. Hence the second half of
+  # the message: a rebuild only clears this gate for the run the run was for if it carries the switches
+  # that run needs.
+  fail "the image is stale - rebuild it, then re-run this gate. If the files above are unchanged (a checkout or a master mirror bumps an unchanged file's mtime), rebuild anyway - the gate compares mtimes and cannot tell an edit from a checkout. Rebuild with the switches the run needs: an XNU-entry run is STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' ./build.sh (a plain ./build.sh produces a payload that never jumps into XNU), and the entry image is xnu_arm_boot/build_entry.sh"
 fi
 echo "no source file is newer than the image"
 
@@ -394,7 +410,24 @@ echo
 echo "== entering XNU =="
 case "$(value_of STAGE90_XNU_ENTRY)" in
   0|0u|"")
+    # **The flag and the image can disagree, and until now nothing compared them.** Every step in
+    # this line builds the payload with STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' — e.g.
+    # docs/experiments/experiment-491-the-bit-registration-sets.md, step 4 — and a payload built
+    # without it never jumps: `xnu_kernel.c:234`'s call site is behind `#if STAGE90_XNU_ENTRY`, so the
+    # linked image has no branch to `stage90_xnu_entry_run` at all and the run ends in the payload's
+    # own ladder and a reboot. A `--allow-xnu-entry` run spent against one therefore produces no XNU
+    # log, and the run is paid for with a power press. This is the 533 shape one level out: the gate
+    # described the arm the image carries and could not compare it, and here it describes *whether
+    # the run reaches XNU at all* in prose and then lets the run through. Measured (2026-09-22,
+    # 17:28): out/stage90 was rebuilt without the flag, this gate printed "off" and exited 0, and
+    # `arm-none-eabi-objdump` on that payload has no reference to `stage90_xnu_entry_run` outside its
+    # own body — so the two readings agree and the prose was the only place the mismatch appeared.
+    # Only the flag makes it a refusal: entry off is a legitimate configuration, and every stage
+    # before 241 ran in it.
+    [[ $ALLOW_XNU_ENTRY -eq 0 ]] \
+      || fail "--allow-xnu-entry was passed, but this image was built with STAGE90_XNU_ENTRY off: it never jumps into XNU, so it cannot produce the log the flag is passed for. Rebuild the payload with STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' (see docs/experiments/experiment-491-the-bit-registration-sets.md step 4), or drop the flag if a ladder run is what was meant"
     echo "off: the payload runs its own ladder and reboots, as in every stage so far."
+    echo "          (--allow-xnu-entry was NOT passed, so this image is gated as a ladder run.)"
     ;;
   *)
     [[ $ALLOW_XNU_ENTRY -eq 1 ]] || fail "this build jumps into XNU's _start and never returns; needs --allow-xnu-entry"

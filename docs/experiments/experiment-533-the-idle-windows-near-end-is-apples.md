@@ -96,11 +96,29 @@ doc records two of the same kind; these are this arm's.
    wrapper is untouched, so 522's clause above still asserts the SCTLR.C enable *n* time" whatever the flag
    was - and is now selected by the flag (`build_entry.sh:29197`, `:29199`), because a say line that
    describes an image that does not exist is exactly 520's gate defect.
+3. **The first frozen artifact was the wrong *kind* of image, and neither the build nor the gate said so.**
+   The first payload of this step was built with a plain `./build.sh`, and the canonical run build is
+   `STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' ./build.sh` - without it `STAGE90_XNU_ENTRY` is `0u`, the
+   `bl stage90_xnu_entry_run` at `stage90_main.c` is compiled out, and the image runs the payload's own
+   ladder and reboots. It never jumps into XNU, so **it cannot produce the log this arm exists for**, and a
+   ladder log read as 533's result would have been the wrong run's. Nothing in the build noticed, and the
+   gate printed `off: the payload runs its own ladder and reboots` and exited 0 - the same defect class as
+   1 and 2, one level up: prose that describes the artifact instead of a check that refuses it. The
+   artifact was caught by the peer session's read-only audit (`stage90-build-config.txt` line 7,
+   `STAGE90_XNU_ENTRY 0u`; no `bl` to `stage90_xnu_entry_run` anywhere in the payload), and the gate now
+   refuses the combination - `--allow-xnu-entry` with the switch off is a `REFUSING:` line (the flag is
+   what the run is *for*, so the mismatch is the one thing that must stop it).
+   The image was rebuilt with the switch on, and the 48 bytes it adds are a good test of the gate's own
+   clause: `kernel_size` 6,015,308 → 6,015,356 and therefore the blob's image offset 496,100 → **496,148**,
+   which the gate recomputes from the payload's symbol table and cross-checks against a content search -
+   exactly the property the "no offset written down" requirement was for. The frozen
+   `533-*` files are the rebuilt pair, and the first pair (the ladder image, `ad458ecd…`) is *not* kept:
+   an artifact whose identity is "the wrong kind of image" is a hazard in a directory of references.
 
 ## 4. The image, and a gate that could not see which arm it carried
 
 The step's product is `out/stage90/stage90-qcdt.img`, 8,540,160 bytes,
-`ad458ecd4cd10440a939f233bd5e5a3849c8fb0b3bcb7a98d297a5d4bdcbae94`; the entry image it embeds is
+`1daaf44e624563694e9f5306276dd4b09e743f8a80ada5882aa2c52e8d12fef3`; the entry image it embeds is
 `f202f246…`. Both are frozen as `out/stage90/frozen/533-stage90-qcdt.img` and
 `out/stage90/frozen/533-xnu_arm_entry.bin`, and the gate is green (`preflight_boot_check.sh
 --allow-xnu-entry`, exit 0).
@@ -125,22 +143,24 @@ much a source of the image as any `.c` in it) and `:127-245`, which asserts **th
 `out/stage90/xnu_arm_entry.bin` holds, byte for byte**, out of four readings that no two share a source:
 the payload ELF's own symbol table (`stage90_xnu_entry_blob` at va `0x000809e4`, size 5,519,996, and
 `stage90_xnu_entry_blob_size` at va `0x000809e0`, asserted to be 4 bytes); the image header's `page_size`
-2048, `kernel_size` 6,015,308 and `kernel_addr` 0x00008000, which first prove the image's kernel section
+2048, `kernel_size` 6,015,356 (the XNU-entry build's; the ladder build's was 6,015,308) and `kernel_addr`
+0x00008000, which first prove the image's kernel section
 *is* `stage90.bin` byte for byte; a byte-content search for the entry image inside the payload and inside
 that kernel section, requiring exactly one match; and the payload's compiled-in size word, read out of the
 image at `stage90_xnu_entry_blob_size`'s address. The offset is computed at gate time from the payload's
-own symbol table - `blob_va - kernel_addr` = 494,052, i.e. image offset 496,100 - and cross-checked
+own symbol table - `blob_va - kernel_addr` = 494,100, i.e. image offset 496,148 - and cross-checked
 against the content search, so the two cannot drift.
 
 **One measured number belongs in this doc because the natural guess is wrong.** "The blob is at
 `2048 + size(stage90.bin)`" is not where it is: that is 6,017,356, past the end of the kernel region,
-because the entry image is not appended after the payload - it is *inside* it, at payload offset 494,052,
-which is why the payload is 6,015,308 bytes and not 494 KB. 494,052 is an **offset** and not a size; the
+because the entry image is not appended after the payload - it is *inside* it, at payload offset 494,100
+(494,052 in the ladder build, which is what the paragraph's first number came from),
+which is why the payload is 6,015,356 bytes and not 494 KB. 494,100 is an **offset** and not a size; the
 blob's 5,519,996 bytes end at 6,014,048 and 1,260 bytes follow them. The clause was run in both
 directions before being accepted: against the tree as it stood (image carrying `05596cc1…`, entry bin
 holding `f202f246…`) it fails, and it fails on the bytes and not on the lengths - both entry images are
 5,519,996 bytes, so a size check alone would have called that image correct - and against the image built
-above it passes with `the linker's symbol says the blob is 5519996 bytes at 494052, which agrees`. A
+above it passes with `the linker's symbol says the blob is 5519996 bytes at 494100, which agrees`. A
 third direction was taken too: a shrunken entry bin (a 5,000,000-byte prefix of the arm the image carries)
 is refused, which a prefix match could not see.
 
