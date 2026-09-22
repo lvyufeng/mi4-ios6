@@ -133,6 +133,35 @@ arm can be said to be safe against:
   before Apple's function - reaches DRAM, and neither it nor Apple's `CleanPoU_Dcache` invalidates
   anything, so the pre-window line survives **valid in the L2** for the trap above to read.
 
+### 1.3 Does anything *read* the bit this arm sets early? A census, because 521's non-return cost a log
+
+522 sets `SCTLR.C` at a moment Apple does not choose, and the thing that could make that different from a
+harmless reordering is some *other* code testing that bit and taking a different branch. So the census was
+taken across Apple's whole ARM layer, and it is short enough to state in full:
+
+* **The bit is written in exactly two places**: cleared at `caches.c:393` (`platform_cache_disable`, inside
+  `platform_cache_idle_enter`, the window) and set at `caches.c:490` (the exit). 522 adds a *third* writer
+  and changes neither of Apple's.
+* **It is never tested.** `SCTLR` is read for modification only: `caches.c:390` (whose result is `&= ~`'d)
+  and `caches.c:490` (whose result is `|=`'d). No comparison against `SCTLR_DCACHE` exists anywhere in
+  `osfmk/arm` or `pexpert/arm` — the only other mentions are the `#define` (`proc_reg.h:498`) and the
+  boot-time default mask (`proc_reg.h:511`), which is `start.s:356`'s and runs once, before `arm_init`.
+* **The one accessor that hands the register out, `get_mmu_control`** (`machine_routines_asm.s:396`,
+  read-only), has six callers and every one of them is in `arm_init` (`arm_init.c:312/380/417/443/501/521`)
+  reading-modifying-writing a *different* bit (`SCTLR_PAN_UNCHANGED`, `SCTLR_PREDIC`) — never `C`.
+* **And the body that runs inside the window touches no memory at all**: `cpu_idle_wfi`
+  (`0x800172dc`..`0x80017330`) is a `dsb` and then the `wfi` (`0x8001730c`) with `add`/`subs`/`bne` on
+  registers only — which is why "the WFI now runs with the cache on" is not by itself a statement about
+  memory. What *can* run halted under it is an interrupt handler, and a handler reads Device memory
+  (uncached **by mapping attribute**, which `SCTLR.C` does not touch) and Normal kernel memory (correctly
+  cached); the only Normal-cacheable locations on this path that any agent other than the CPU writes are
+  the `cpu_data` fields of the cross-CPU protocol, and with `real_ncpus = 1` there is no such agent.
+
+**So the arm's change cannot alter a decision anywhere in Apple's code**, including in a handler taken
+during the halt: there is no branch in the kernel whose outcome depends on `SCTLR.C`. What it *can* alter is
+timing and the coherence of this image's own stores - both of which is section 3's argument, and both of
+which the two readings measure directly.
+
 ## 2. The build, and the defect that the build did *not* catch
 
 The clause `xnu_entry_522` asserts the enable's whole body by disassembly rather than by source order -
