@@ -1,5 +1,13 @@
 # 544: no cache routine in this image selects a level, so one of the two loops is always on the wrong one
 
+> **Superseded in part by [545](experiment-545-the-level-is-in-the-operand.md).** The cache level travels
+> in the **set/way operand's own low bits** - `mov r0, #0` at the head of every routine, `mov r0, #2` at
+> the head of every second loop, the `CSSELR` encoding of L1 and L2 - so §2's consequence ("after
+> `do_cacheid` the level is L2 for the rest of the boot"), both branches of §3, and §4's claim that no
+> sequence the project has run can invalidate an L1 line are **wrong**. What stands: §2's two `CSSELR`
+> sites as a fact about `CSSELR`, §5's "a sweep must read `CCSIDR`, not `proc_reg.h`", and the choice of
+> seam (the exit's `FlushPoU_Dcache`) - which 545 re-justifies on coverage rather than on geometry.
+
 A host-side reading with no device and no build, on the critical path of the next arm. It settles what
 534's `CSSELR` finding *means* for the flush the idle exit actually calls, and it does it in a form that
 does not depend on how well I remember the ARM ARM.
