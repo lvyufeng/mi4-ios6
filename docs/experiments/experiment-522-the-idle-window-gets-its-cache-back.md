@@ -85,17 +85,53 @@ Three things follow, and none of them was in the arm's design argument until thi
 * **`SCTLR.C` is set at `0x80046324` - *after* the `push`, *before* the `pop`.** So 520's `pop` did not
   run with the cache off; it ran with the cache **on**, which is exactly why it *hit* the stale valid line
   instead of missing it. That is the mechanism, and it is three instructions wide: the window's
-  `SCTLR.C`-clear is undone 24 bytes before the fatal load.
+  `SCTLR.C`-clear is undone 100 bytes before the fatal load.
+* **The `pop` misses L1 and reads the L2, and only one operation in the whole exit can change that.** The
+  two `bl`s at `0x80046304`/`0x80046308` are `InvalidatePoU_Icache` and `flush_core_tlb`, and they are
+  **not executed in this configuration**: `caches.c:466` guards them with
+  `if (!up_style_idle_exit || (real_ncpus > 1))`, and 515's `up_style_idle_exit=1` with a uniprocessor
+  makes that false - which the image says in its own two globals, the test at `0x800462dc..0x80046300`
+  loading `0x805511a4` and `0x80520378` and the `bcc` at `0x80046300` skipping both calls. So between the
+  `push` and the `pop` the **only** D-cache-affecting instruction is Apple's own `FlushPoU_Dcache` at
+  `0x800462d8` - a `DCCISW` loop over L1 - and everything else in between (the ACTLR rejoin, the `SCTLR`
+  write, `cpu_CLW_active = 1`) leaves the line alone. That is why the reading above is short enough to be
+  a prediction rather than a hope.
 * **This arm's only job is therefore the `push` at `0x800462d4`.** With `C` on there, the store hits the
   valid L1 line that holds the pre-window deadline, writes `lr` into it and marks it dirty; the very next
   instruction - `bl FlushPoU_Dcache`, `DCCISW` - cleans it to the Point of Unification, i.e. **into the
-  L2**, and invalidates the L1 copy. The `pop` 100 bytes later misses L1 and reads the L2, which now holds
-  `lr`. Nothing in that chain is a maintenance operation performed *inside* the window by this image:
-  the enable is at the window's near end and the flush is Apple's own.
-* **`InvalidatePoU_Icache` and `flush_core_tlb` at `0x80046304`/`0x80046308` cannot lose the word**: they
-  touch the I-cache and the TLB, not the D-cache line the `push` dirtied - and they sit *between* the
-  flush and the pop, which is why the ordering above had to be read rather than reasoned about. A
-  D-invalidate in that slot would have made this arm fail in the same direction as 521.
+  L2**, and invalidates the L1 copy. The `pop` then misses L1 (that same invalidate) and reads the L2,
+  which now holds `lr` instead of the deadline. Nothing in that chain is a maintenance operation
+  performed *inside* the window by this image: the enable is at the window's near end and the flush is
+  Apple's own.
+
+### 1.2 The coherence domain, the flag, and what this arm lengthens
+
+The two ends of the idle window are not symmetric, and reading them out of `caches.c` changes what this
+arm can be said to be safe against:
+
+* **Apple's exit rejoins the coherence domain *before* it re-enables the cache.** `platform_cache_idle_exit`
+  is `FlushPoU_Dcache` (`caches.c:458`) -> the guarded I-cache/TLB pair -> "Rejoin the coherency domain"
+  (`ACTLR` bit `0x40` set, `caches.c:475-491`, in the image at `0x8004630c..0x80046318` with the
+  `dsb`/`isb`/`dsb` dance) -> **then** `SCTLR.C |= SCTLR_DCACHE` (`caches.c:493-497`, `0x8004631c..0x80046328`)
+  -> then `cpu_CLW_active = 1` (`caches.c:495`). The enter is the mirror with the same ordering: clear `C`
+  (`platform_cache_disable`, `caches.c:385-395`), clean, and leave the domain at the end.
+* **So 522 re-enables the cache while the CPU is still out of the coherence domain** - the reverse of
+  Apple's order, inside the window instead of at its exit. On this machine that is not observable:
+  `real_ncpus` is 1, so the only agent that could miss a dirty L1 line allocated outside the domain is
+  the core itself, which is exactly the core that allocated it; the exit's own `FlushPoU_Dcache` cleans
+  those lines to the Point of Unification one call later, the rejoin happens immediately after, and the
+  exit's own `SCTLR` write is then a no-op. **It becomes a real hazard the moment a second CPU or a live
+  DMA master exists** - an L1 line dirtied outside the domain is invisible to both - which is precisely
+  the "get the drivers running" milestone of this project. That is recorded here as an obligation of the
+  drivers step, not as a defect of this arm.
+* **`cpu_CLW_active` is not cleared during this window at all**, because the write that clears it
+  (`caches.c:421`) is in the *else* branch of `caches.c:414` and `up_style_idle_exit && (real_ncpus == 1)`
+  is true. The cross-CPU `cache_xcall` protocol therefore never sees this CPU as "in the low-power window"
+  - it stays `1` throughout, which is also the state the exit writes - so the enable does not mislead it.
+  The same branch choice is *why* the enter's own clean is `CleanPoU_Dcache()` (L1 only, `caches.c:415`),
+  which is the piece 516 was about: on this CPU only `CleanPoC_Dcache` - what the enter *wrapper* calls
+  before Apple's function - reaches DRAM, and neither it nor Apple's `CleanPoU_Dcache` invalidates
+  anything, so the pre-window line survives **valid in the L2** for the trap above to read.
 
 ## 2. The build, and the defect that the build did *not* catch
 
@@ -156,6 +192,21 @@ One known consequence of this arm, recorded here so that it is not misread as a 
 `xnu_live_tb_*` channel goes quiet for the rest of the boot. That is the instrument declining to work in
 a state it was not written for, not a loss of the arm's own readings - 522's two readings come from
 `entry_window_note` and the slot channel, neither of which tests `C`.
+
+**And one consequence of the enable for the readings' *durability*, worked through rather than assumed.**
+The `push` that loses in 520 is not the only thing the window does with `SCTLR.C = 0`: the exit wrapper's
+own capture and `entry_slot_note(&g_slot_pre, ...)` run *before* the real exit, i.e. **inside** the
+window, so in 520 those stores went straight to DRAM - which is why 520's `pre` reading was there to be
+read at all. With 522's enable, every one of those stores runs with the cache **on** and lands in L1,
+where it stays until something cleans it. There is no case in which that loses a reading, and the
+argument is short: either the run comes back - and then Apple's own reboot path cleans the cache to the
+Point of Coherency (`platform_cache_shutdown`, `caches.c:373-381`, `CleanPoC_Dcache` plus the dispatch
+hook) before the payload runs again, which 520's own run demonstrates empirically, since its `post`
+readings were written after the real exit with the cache on and were readable - or the run does not come
+back, and then *the whole log is gone*, cached or not, which is 521. What this does change is the shape of
+a partial answer: a run that dies at the same `pop` can no longer distinguish "the enable never ran" from
+"the enable ran and the reading did not reach DRAM", so the verdict for that outcome rests on the panic's
+presence and on `xnu_live_slot_cwe_calls` in the *previous* pass's data rather than on the new keys alone.
 
 ## 4. Safety
 
