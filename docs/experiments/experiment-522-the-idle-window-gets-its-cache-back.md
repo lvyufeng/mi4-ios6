@@ -202,6 +202,37 @@ Two defects were found while building this, and one of them is the kind that onl
 The rebuilt image's clause output is the one quoted in section 1, and the 517 clause now reads
 `STAGE90_XNU_EXIT_POC_FLUSH=0 - ... calls FlushPoC_Dcache ... 0 time`, which is the image this arm is.
 
+## 2.2 What is actually on the far side of the `pop`, read from 520's own log
+
+This is worth stating before the run, because it changes what the run is *for*. 520's captured log
+(`/tmp/cancro-last_kmsg.txt`, 596,665 bytes) is a complete boot, and its own records order it:
+
+| file line | record | value |
+|---|---|---|
+| 3999–4001 | console | `the OS starts the process at 0x10e0 (the thread's user pc was 0x10e0)` / `the OS's own init load returned, so pid 1 has the init image (caller 0x80049eb8)` / `the AST is done -- pid 1's thread is at 0x10e0 for user mode (sp 0x101efc)` |
+| 7643–7781 | `sleh_seq` 1–4 | `user = 0` - ordinary kernel-mode aborts (`far` 0x1000, 0xc8215000, 0xc8256000, 0x101f28) |
+| 7803–7821 | `ast_seq`/`ast_done_seq` 1, 2 | the second AST returns with `ast_sp = 0x00101efc` and `ast_pid = 0x00000001` - **pid 1's thread, with a user stack** |
+| 7842–7871 | `sleh_seq` 5, 6 | `far = 0x00102000`, `pc = 0x00001118` and `0x00001124`, **`user = 1`** |
+| 8188–8202 | `sleh_seq` 7 | `far = pc = 0x000011a4`, **`user = 1`** |
+| 8228–8242 | `sleh_seq` 8 | `far = 0x00102000`, `pc = 0x800176e0`, `user = 0` - the kernel handling it |
+| 8339–8348 | `sleh_storm = 9` | `pc = 0x04b79074`, `user = 0` - the idle exit's `pop` |
+
+**So pid 1 executes in user mode in that run**: aborts taken with `CPSR` mode = user at user-space
+addresses `0x1118`, `0x1124` and `0x11a4` — 0x38, 0x44 and 0xC4 bytes past the entry point the console line
+names — on the user stack `0x00101efc` the AST record names. The root MD device is attached, BSD init has
+run, `launchd` was loaded twice (the developer path failing with `errno 2`, then `/sbin/launchd`), and the
+platform, cache, timer, console and exception paths are all demonstrably working. (The same faults appear in
+510's run, and the header of `entry_note_ast_returned` in `entry_stubs.c` cites them - so this is a standing
+reading of these images, not a new one.)
+
+**What follows for 522 is therefore not "reach the OS" - it is "survive the first idle pass that the OS
+reaches *after* its first user-mode seconds".** The distance between these images and a boot that keeps
+running is the 140-byte window this arm closes, and the frontier beyond it is what pid 1 does next: the
+run should show the boot going *past* the idle loop - further idle passes, more `sleh_user` records, no
+panic - rather than stopping one instruction into the idle exit. A run whose only difference from 520 is
+that the `pop` returns is already the answer to this step; a run that goes on to more user-mode activity is
+the answer to the next question, which is whether the OS can be said to be *running*.
+
 ## 3. What the run is to be read for, written before it happens
 
 The gate's own text carries these four, so a run is read the same way whichever surface is opened first:
