@@ -118,12 +118,21 @@ summarise_log() {
     say "  an abort was logged - see the 'exception'/'abort' lines above"
   fi
 
-  # --- 522's verdict, and it prints only for a log that carries 522's own keys ----------------
+  # --- the idle window's near end, and it prints only for a log that carries the pair -------------
   #
-  # The gate is self-selecting: `xnu_live_slot_cwe_*` exists in exactly one image built in this
-  # project (522's), so the block below appears when the log came from that image and never for
-  # another step's run. That is deliberate - a verdict block that printed for every log would be
-  # a block whose criteria nobody re-derives, which is how a stale check outlives its step.
+  # The gate is self-selecting: `xnu_live_slot_cwe_*` is published by `entry_window_note`, which is
+  # called from the enter wrapper in every image built since 522 - so the block below appears when the
+  # log came from one of those images and never for an earlier step's run. That is deliberate - a
+  # verdict block that printed for every log would be a block whose criteria nobody re-derives, which
+  # is how a stale check outlives its step.
+  #
+  # **It is no longer one arm's block.** When this was written the only image carrying the keys was
+  # 522's, so the block could assert 522's shape; 533 keeps `entry_window_note` on purpose *because*
+  # the pair is the reading that says which arm ran, and the two arms have opposite pairs (`_set` with
+  # C set for 522's re-enable, C clear for 533's absence of it). So the pair is reported and each
+  # arm's shape is named beside it, and FAIL is reserved for the one shape neither can produce. The
+  # long note at clause (2) below has the measurement that made the difference visible; the change is
+  # one of the two arms' expected readings no longer being printed as a failure.
   #
   # Every value is extracted with its *shape* asserted before it is compared as a number. A bare
   # `-gt` on a missing key reads as 0, and "the key is absent" and "the value is zero" are
@@ -131,7 +140,7 @@ summarise_log() {
   # nothing. This repository has been bitten by that distinction more than once, so the three
   # states are printed separately: PASS, FAIL, and UNREAD.
   if grep -a -q 'xnu_live_slot_cwe_' "$log"; then
-    local cwe_win cwe_set cwe_calls post_calls storm panics user_ones verdict_ok=1
+    local cwe_win cwe_set cwe_calls pre_calls rtcab_calls post_calls storm panics user_ones verdict_ok=1
     # `|| true` is load-bearing and its absence was this block's first defect, found by running it
     # against the state it is meant to refuse: the script sets `pipefail`, so a key that is absent
     # makes `grep` exit 1, the pipeline returns 1, and `set -e` kills the *caller* mid-function -
@@ -141,6 +150,17 @@ summarise_log() {
     cwe_win=$(keyval slot_cwe_win)
     cwe_set=$(keyval slot_cwe_set)
     cwe_calls=$(keyval slot_cwe_calls)
+    # **The three bracket publishers, because their *absence* is a localization rather than a gap.**
+    # The exit wrapper calls `entry_slot_null_note(&g_slot_pre)`, `entry_slot_rtc_note(&g_slot_rtcab)`
+    # and then, after the real exit returns, `entry_slot_null_note(&g_slot_post)` - and it ends in a
+    # tail branch rather than returning, so all three are reached in the same pass or the pass died at
+    # the one before. Each is called once per pass, and all three use the same publish schedule
+    # (`entry_stubs.c:6236`: `n <= 4 || power of two`) behind the same `entry_live_ready()` gate, so at
+    # pass n all three counters equal n: **if one published, the others would have published had they
+    # been reached.** That is what turns "post_calls is missing" from UNREAD into the reading this run
+    # exists to produce - and the three cases are the death's own address.
+    pre_calls=$(keyval slot_pre_calls)
+    rtcab_calls=$(keyval slot_rtcab_calls)
     post_calls=$(keyval slot_post_calls)
     storm=$(keyval sleh_storm)
     panics=$(grep -a -c 'panic.*sleh_abort' "$log" || true)
@@ -151,54 +171,94 @@ summarise_log() {
     # decimal-only pattern would have made every present key read as UNREAD, which is how this
     # block's first version behaved against a PASS-shaped log.
     say ""
-    say "522's arm - the idle window's D-cache is re-enabled at its near end. The verdict is"
-    say "the panic's ABSENCE; the other three say whether the enable did what the image claims."
+    say "the idle window's near end, from the pair of SCTLR readings the entry wrapper publishes."
+    say "The arm's verdict is the panic's ABSENCE; the pair says which arm this log came from, and"
+    say "the two arms have opposite expected pairs - so a FAIL here means the shape is one that"
+    say "*neither* arm can produce, not that one of them did not do what it promised."
 
     # (1) the verdict
     if [[ $panics -eq 0 ]]; then
       say "  PASS  no 'panic ... sleh_abort' in the log - the idle exit retires its own epilogue"
     else
       say "  FAIL  $panics 'panic ... sleh_abort' record(s) - the death 519 and 520 died is back"
-      say "        (521's non-return said the flush is not the answer; a panic here says the"
-      say "        cache state is not either, and the next arm is the null instrument)"
+      say "        (521's non-return said the flush is not the answer and 526's took the capture"
+      say "        out; a panic here says the cache state is not it either - which leaves the"
+      say "        enter wrapper's own store in the window, 522's addition, as the next thing to"
+      say "        bisect)"
       verdict_ok=0
     fi
 
-    # (2) the enable ran inside the window and really took
+    # (2) the pair, read as a reading rather than as 522's verdict
+    #
+    # **This clause asserted 522's arm as the only correct one, and 533 is the arm that is not 522.**
+    # 522 re-enables SCTLR.C at the window's near end, so its pair is `_win` clear and `_set` *set*;
+    # 533 leaves the window as Apple left it, so its pair is **both clear**. Written as "FAIL unless
+    # `_set` has C set" - which is what this block said until 533 - the reader would have printed
+    # `FAIL slot_cwe_set=...: C is not set on the far side of the call, so the re-enable did not
+    # happen` for 533's *correct* image, naming an instruction that is not in it. That is this step's
+    # own recurring defect (a check whose shape was copied from the previous arm and never re-read
+    # against this one) in the one file that reads the run's result, so 533's doc section 5 and this
+    # block disagreed about what 533's log should contain.
+    #
+    # The arm this log came from is *not* decidable from anything else in the log - the entry image
+    # publishes no build marker, only its readings - so the pair is reported for what it is and each
+    # arm's shape is named beside it. FAIL is kept for the one shape no arm can produce: `_win` with
+    # C *set*, which would say the window was never open where the image claims to read it.
     if [[ $cwe_calls =~ ^0x[0-9a-f]+$ ]] && (( cwe_calls >= 1 )); then
       if [[ $cwe_win =~ ^0x[0-9a-f]+$ ]] && (( (cwe_win & 4) == 0 )); then
-        say "  PASS  slot_cwe_win=$cwe_win has SCTLR.C clear - the window was open when the"
-        say "        wrapper read it, which is what makes the enable a change of state"
+        say "  PASS  slot_cwe_win=$cwe_win has SCTLR.C clear - the window really opened where the"
+        say "        image says it does, which is what makes the second reading worth anything"
+        if [[ $cwe_set =~ ^0x[0-9a-f]+$ ]] && (( (cwe_set & 4) == 4 )); then
+          say "  ARM   522's arm: slot_cwe_set=$cwe_set has C set - the near-end re-enable ran and"
+          say "        took, so this log is an image that re-enables the D-cache at the window's end"
+        elif [[ $cwe_set =~ ^0x[0-9a-f]+$ ]] && (( (cwe_set & 4) == 0 )); then
+          say "  ARM   533's arm: slot_cwe_set=$cwe_set has C clear - the window is left exactly as"
+          say "        Apple left it, and *this* is that arm's expected reading, not a failed enable"
+        else
+          say "  UNREAD  slot_cwe_set=${cwe_set:-absent} is not a readable SCTLR - the pair is half"
+          say "          a reading and which arm ran is not decidable from it"
+          verdict_ok=0
+        fi
+        say "        (entry_window_note ran $cwe_calls time(s) in the passes this log recorded)"
       else
-        say "  FAIL  slot_cwe_win=${cwe_win:-absent}: C was NOT clear there, so the window was"
-        say "        not open where the image claims and this arm tested nothing"
+        say "  FAIL  slot_cwe_win=${cwe_win:-absent}: C was NOT clear there, so the window was not"
+        say "        open where the image claims - neither arm's second reading means anything"
         verdict_ok=0
       fi
-      if [[ $cwe_set =~ ^0x[0-9a-f]+$ ]] && (( (cwe_set & 4) == 4 )); then
-        say "  PASS  slot_cwe_set=$cwe_set has SCTLR.C set - the write took"
-      else
-        say "  FAIL  slot_cwe_set=${cwe_set:-absent}: C is not set on the far side of the call,"
-        say "        so the re-enable did not happen"
-        verdict_ok=0
-      fi
-      say "        (the enable ran $cwe_calls time(s) in the passes this log recorded)"
     else
-      say "  UNREAD  slot_cwe_calls=${cwe_calls:-absent} is not a count >= 1: 522's keys are in"
-      say "          this log but the enable's own count is not readable, so nothing is claimed"
-      say "          about whether the write took"
+      say "  UNREAD  slot_cwe_calls=${cwe_calls:-absent} is not a count >= 1: the pair's keys are in"
+      say "          this log but the note's own count is not readable, so nothing is claimed about"
+      say "          which arm this log came from"
       verdict_ok=0
     fi
 
-    # (3) the exit *returned* through the wrapper - 520's run died inside the call (its count was 0)
+    # (3) where the pass died, from which of the wrapper's three bracket publishers got out
+    #
+    # The counts are `<= 4 || power of two` (see the keyval note above), so a printed 4 means *at least*
+    # four and possibly 5-7 - the number is the largest published count, not the total (measurement
+    # defect 406, a counter published on a schedule read as a total). Nothing below uses it as a total;
+    # it is used only to answer "did this site publish at all", which the schedule cannot mislead.
     if [[ $post_calls =~ ^0x[0-9a-f]+$ ]] && (( post_calls >= 1 )); then
       say "  PASS  slot_post_calls=$post_calls - the exit returned through the wrapper, which"
       say "        520's run never did (its pass died inside the call)"
-    elif [[ -n $post_calls ]]; then
-      say "  FAIL  slot_post_calls=$post_calls: the exit did not return through the wrapper in"
-      say "        this log"
+    elif [[ $pre_calls =~ ^0x[0-9a-f]+$ ]] && (( pre_calls >= 1 )) \
+      && [[ $rtcab_calls =~ ^0x[0-9a-f]+$ ]] && (( rtcab_calls >= 1 )); then
+      say "  DIED IN THE EXIT  pre_calls=$pre_calls and rtcab_calls=$rtcab_calls both published and"
+      say "        slot_post_calls did not: the pass reached the wrapper, took the rtcPop reading and"
+      say "        got as far as the call, and did not come back through it - so the death is inside"
+      say "        platform_cache_idle_exit, which is 520's pop {fp, pc} at the same pc. That is this"
+      say "        arm's prediction failed, not a missing reading: the three notes share one schedule"
+      say "        and one gate, so a site that published proves the later ones were reachable."
+      verdict_ok=0
+    elif [[ $pre_calls =~ ^0x[0-9a-f]+$ ]] && (( pre_calls >= 1 )); then
+      say "  DIED BEFORE THE EXIT  pre_calls=$pre_calls published but the rtcPop reading did not, so"
+      say "        the pass died between the two - earlier than 520's death and a different fault"
       verdict_ok=0
     else
-      say "  UNREAD  slot_post_calls is absent, so whether the exit returned is not readable"
+      say "  UNREAD  none of the wrapper's three bracket publishers is in the log (pre_calls,"
+      say "          rtcab_calls, post_calls all absent), so this log cannot say where the pass died."
+      say "          The likely causes are a last_kmsg ring that wrapped past them and a run that"
+      say "          never reached the idle exit at all."
       verdict_ok=0
     fi
 
@@ -217,9 +277,10 @@ summarise_log() {
       say "            xnu_live_sleh_storm absent - no abort storm was recorded at all"
     fi
     if [[ $verdict_ok -eq 1 ]]; then
-      say "  => all three checks pass: this is the first log in the walk where the idle exit"
-      say "     completed. Item (4) says how much boot happened after it, and that is the next"
-      say "     step's question - not this one's."
+      say "  => the three checks pass: no panic, the window opened and its pair is readable, and the"
+      say "     exit returned through the wrapper. The ARM line above says which of the two arms"
+      say "     this log came from; item (4) says how much boot happened after the exit, and that is"
+      say "     the next step's question - not this one's."
     else
       say "  => at least one check above is FAIL or UNREAD; read the verdict line (1) first,"
       say "     because the arm's prediction is the panic's absence and nothing else."

@@ -347,9 +347,18 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 # So the keys are named twice - once to be required, once to be printed - and a record missing one is
 # refused rather than shown as a shorter list (`[[ -n $v ]]`, so an empty value is a missing key: an
 # `X=` line is not `X=0`, which is [[mi4-off-option-two-spellings]] one register over).
+#
+# **The list was nine and is twelve, and it grew by enumerating rather than by reading.** 540 found three
+# more switches that shape the linked entry image and were in no record anywhere -
+# `STAGE90_ENTRY_CHECKPOINT` and its two variants (`--wrap=<symbol>` plus an extra object in the link,
+# `:218`-`:236` and `:27218`) - so `build_entry.sh` records them now and this run needs to *show* them:
+# a switch that changes the image and is not printed is a run whose arm nobody read. They are written
+# `(unset)` when empty, so the `[[ -n $_v ]]` test above still means "the key is there" - which is the
+# whole reason that test is `-n` and not a comparison with zero.
 ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_TRACE
                 STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT_NULL STAGE90_XNU_EXIT_POC_FLUSH
-                STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE STAGE90_XNU_IDLE_STACK)
+                STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE STAGE90_XNU_IDLE_STACK
+                STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP STAGE90_ENTRY_CHECKPOINT_AFTER)
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
@@ -357,7 +366,8 @@ do
     || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The five variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK) are exactly the ones a display filter written around the artifact keys drops in silence"
   printf '  %s=%s\n' "$_k" "$_v"
 done
-# And the converse, so a *tenth* key cannot arrive unshown: every `STAGE90_` key the record carries
+# And the converse, so a key the list above does not name cannot arrive unshown (a *tenth* when the list
+# held nine; a thirteenth now): every `STAGE90_` key the record carries
 # must be one of the names above. Without this the list above would be the only definition of what is
 # visible, and a key added on the build side would be recorded and never read - the same defect with
 # the arrow reversed.

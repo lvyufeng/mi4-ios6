@@ -368,6 +368,132 @@ case "$ISTACK_SEPARATE" in
 esac
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_ISTACK_SEPARATE="$ISTACK_SEPARATE")
 
+# ---------------------------------------------------- 533: **an arm change has to be deliberate**
+#
+# **The record and the manifest describe the build that already happened; neither constrains the next
+# one.** Everything this step added is written *by* the build - the config record's switch lines, the
+# sha256 of the bin it just produced, the source manifest - so a build that arrives with the wrong
+# switches rewrites all three in agreement with itself, and the gate, which reads them, is satisfied
+# by an arm nobody chose. That is [[mi4-measurement-defects]]'s *a resume script's retained default is
+# a decision nobody re-made*, with the arrow reversed: there the retained default was inside an image,
+# here it is the absence of anything that notices a switch going back.
+#
+# It is not hypothetical, twice over. 522's first image silently carried 521's flush for exactly this
+# shape of reason, and 533's own first artifact was a ladder image - built by a `./build.sh` that had
+# dropped `-DSTAGE90_XNU_ENTRY=1`, which is the same defect on the payload side and was caught by
+# reading the config dump rather than by any check.
+#
+# **This image's six switches are not this script's defaults, and four of the six differ**:
+# `STAGE90_ENTRY_TRACE` 0 -> 1, `STAGE90_ENTRY_REAL_ARM_INIT` 0 -> 1, `STAGE90_XNU_SLOT_NULL` 0 -> 1,
+# `STAGE90_XNU_ISTACK_SEPARATE` 1 -> 0. So a blind `./build_entry.sh` - which is what this file's own
+# header and `build.sh`'s missing-entry-bin message both tell an operator to run - produces a
+# *different arm*, and every check downstream of it agrees with the result. The arm the run is for
+# then exists only in a command line and in a document.
+#
+# So the build refuses to change an arm it did not mean to. The switch set this invocation will use is
+# read back out of the previous record and compared; a difference stops the build **before anything in
+# `$OUT` is written**, naming both sets. Changing an arm becomes a decision with a name attached -
+# `STAGE90_ENTRY_ARM_CHANGE=1` - instead of a variable somebody forgot.
+#
+# Two choices worth naming. The comparison is over the **switch set and not the bin's hash**: a hash
+# comparison would refuse a rebuild that legitimately re-links the same arm, while the switches are
+# what the decision is actually about (the hash is compared where it belongs, by the gate, against the
+# manifest and the record). And the record is *read, not required*: a first build has nothing to
+# protect and no record to read, and a missing record is therefore a first build rather than a
+# refusal - the same one-way rule `build.sh` uses for `xnu_arm_entry.bin`.
+ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT_NULL
+                STAGE90_XNU_EXIT_POC_FLUSH STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE
+                STAGE90_XNU_IDLE_STACK STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
+                STAGE90_ENTRY_CHECKPOINT_AFTER)
+#
+# **The seven switches are not the whole arm, and finding that out is what made this ten.** Checking
+# the case statement below against the script's own environment reads - `grep -o '${STAGE90_[A-Z0-9_]*:-'`
+# over the whole file - turns up three more that shape the linked image and were in no record
+# anywhere: `STAGE90_ENTRY_CHECKPOINT` (`:218`, `--wrap=<symbol>` at `:235-236` plus
+# `xnu_arm_entry_checkpoint.o` in the link at `:27218`), `STAGE90_ENTRY_CHECKPOINT_SKIP` and
+# `STAGE90_ENTRY_CHECKPOINT_AFTER` (`:224`/`:228`, both compiled into the wrapper at `:693-710`).
+# A build with a checkpoint set keeps all seven of the other switches identical, so it would have
+# passed the refusal below **silently** - the guard would have been total for the dimensions someone
+# listed and blind to three others, which is this project's oldest defect wearing the arm's name.
+# The rest of the environment is `*_OBJ` link-path knobs, which move where an object is read from
+# rather than what the image is.
+#
+# The three are recorded as `(unset)` when empty rather than omitted, because a key the writer does
+# not write is a key the reader cannot require, and `X=` is not `X=(unset)` for the same reason
+# `#define X 0` is not "off" to `#ifdef X`. They are read from the environment here and not from
+# `ENTRY_CHECKPOINT*`, which are assigned further down (`:218`-`:236`) - this block runs before them,
+# deliberately, so that nothing in `$OUT` is written before the refusal can happen.
+ENTRY_ARM_NOW=""
+for _k in "${ENTRY_ARM_KEYS[@]}"
+do
+    case "$_k" in
+        STAGE90_ENTRY_TRACE)          _v=$ENTRY_TRACE ;;
+        STAGE90_ENTRY_REAL_ARM_INIT)  _v=${STAGE90_ENTRY_REAL_ARM_INIT:-0} ;;
+        STAGE90_XNU_SLOT_NULL)        _v=$SLOT_NULL ;;
+        STAGE90_XNU_EXIT_POC_FLUSH)   _v=$EXIT_POC_FLUSH ;;
+        STAGE90_XNU_IDLE_CACHE_ENABLE) _v=$IDLE_CACHE_ENABLE ;;
+        STAGE90_XNU_ISTACK_SEPARATE)  _v=$ISTACK_SEPARATE ;;
+        STAGE90_XNU_IDLE_STACK)       _v=${STAGE90_XNU_IDLE_STACK:-1} ;;
+        STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
+        STAGE90_ENTRY_CHECKPOINT_SKIP) _v=${STAGE90_ENTRY_CHECKPOINT_SKIP:-(unset)} ;;
+        STAGE90_ENTRY_CHECKPOINT_AFTER) _v=${STAGE90_ENTRY_CHECKPOINT_AFTER:-(unset)} ;;
+    esac
+    ENTRY_ARM_NOW+="$_k=$_v "
+done
+ENTRY_ARM_WAS=""
+ENTRY_ARM_WAS_KNOWN=0
+if [[ -f "$OUT/xnu_arm_entry-config.txt" ]]; then
+    # **A record that carries some of the ten keys is not a previous arm, it is a previous arm of
+    # blanks - and read as one it refuses every build.** The read-back below is `KEY=<value> ` per
+    # key whether or not the key is there, so a record holding only `STAGE90_XNU_ENTRY_SHA256` and
+    # `_BYTES` - any record written before 533 added the arm keys, or a hand-written one - gives a
+    # non-empty `ENTRY_ARM_WAS` of ten empty values. Measured by running the block against such a
+    # record: it refused with `the arm already on disk was built with STAGE90_ENTRY_TRACE= ...` and
+    # no way forward but the override, on a build that had no previous arm to differ from. So all
+    # ten must read back before there is anything to compare, and a partial record is reported as
+    # *no previous arm* rather than silently treated as one - which is this block's own rule for a
+    # missing record, applied to a record that is missing the half it compares.
+    _arm_all=1
+    for _k in "${ENTRY_ARM_KEYS[@]}"
+    do
+        _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$OUT/xnu_arm_entry-config.txt")
+        [[ -n $_v ]] || _arm_all=0
+        ENTRY_ARM_WAS+="$_k=$_v "
+    done
+    [[ $_arm_all -eq 1 ]] && ENTRY_ARM_WAS_KNOWN=1
+fi
+if [[ -f "$OUT/xnu_arm_entry-config.txt" && $ENTRY_ARM_WAS_KNOWN -eq 0 ]]; then
+    printf '  xnu_entry_533: note: %s exists but does not carry all ten arm keys (%s), so the arm it describes is not known and the deliberate-change check cannot run for this build. It will be complete from this build on.\n' \
+           "$OUT/xnu_arm_entry-config.txt" "${ENTRY_ARM_WAS% }"
+fi
+if [[ $ENTRY_ARM_WAS_KNOWN -eq 1 && "$ENTRY_ARM_WAS" != "$ENTRY_ARM_NOW" && ${STAGE90_ENTRY_ARM_CHANGE:-0} != 1 ]]; then
+    {
+        echo "REFUSING: this build would change which arm out/xnu_arm_entry.bin is, and no"
+        echo "          deliberate change was asked for. The arm already on disk was built with:"
+        echo "            ${ENTRY_ARM_WAS% }"
+        echo "          and this invocation would build:"
+        echo "            ${ENTRY_ARM_NOW% }"
+        echo
+        echo "  A blind ./build_entry.sh does not reproduce the arm in out/ - four of these six"
+        echo "  switches are off their defaults - and every check downstream of the build agrees"
+        echo "  with whatever it produces, because the record and the manifest are written by the"
+        echo "  build itself. So this is the one place the change can be refused."
+        echo
+        echo "  If the change is the arm you mean to build, say so:"
+        echo "    STAGE90_ENTRY_ARM_CHANGE=1 <the switches you want> ./build_entry.sh"
+        echo "  If it is not, the switches the existing arm needs are the first list above, and the"
+        echo "  gate prints them too (preflight_boot_check.sh, 'the entry image's own switches')."
+    } >&2
+    exit 1
+fi
+if [[ $ENTRY_ARM_WAS_KNOWN -eq 1 && ${STAGE90_ENTRY_ARM_CHANGE:-0} == 1 && "$ENTRY_ARM_WAS" != "$ENTRY_ARM_NOW" ]]; then
+    # `printf` rather than `say`, and not by preference: `say` is defined 100 lines *below* this block,
+    # so calling it here would be a command-not-found under `set -e` on the one path where the operator
+    # has just asked for a deliberate change - a build that dies instead of building the arm they named.
+    printf '  xnu_entry_533: STAGE90_ENTRY_ARM_CHANGE=1 - the arm is being changed on purpose: %s-> %s\n' \
+           "$ENTRY_ARM_WAS" "$ENTRY_ARM_NOW"
+fi
+
 # The one thing in this image that is neither XNU's nor this project's: the compiler's own runtime.
 # Experiment 182's run stopped at `__aeabi_uldivmod`, which is the ARM EABI helper for 64-bit
 # division and comes from libgcc - measured then, not assumed: no file in the XNU tree mentions the
@@ -30174,7 +30300,61 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     echo "STAGE90_XNU_IDLE_CACHE_ENABLE=$IDLE_CACHE_ENABLE"
     echo "STAGE90_XNU_ISTACK_SEPARATE=$ISTACK_SEPARATE"
     echo "STAGE90_XNU_IDLE_STACK=$IDLE_STACK_FOR_RECORD"
+    # The three the refusal above compares and the gate prints: their absence from this file was the
+    # hole that comment describes. `(unset)` rather than an empty value, so `[[ -n ]]` on the reader's
+    # side still means "the key is there" and the gate's nine-key clause keeps its meaning at twelve.
+    echo "STAGE90_ENTRY_CHECKPOINT=${ENTRY_CHECKPOINT:-(unset)}"
+    echo "STAGE90_ENTRY_CHECKPOINT_SKIP=${ENTRY_CHECKPOINT_SKIP:-(unset)}"
+    echo "STAGE90_ENTRY_CHECKPOINT_AFTER=${ENTRY_CHECKPOINT_AFTER:-(unset)}"
 } > "$OUT/xnu_arm_entry-config.txt"
+
+# ------------------------------------------------- 533: **the sources of this image, by content**
+#
+# **The gate's freshness sweep compared mtimes, and this directory is where that refused a correct
+# tree.** `preflight_boot_check.sh` listed `xnu_arm_boot/*.{c,h,S,ld,sh}` against the *payload
+# image's* mtime, so committing 533 - which rewrote this file's mtime to the commit second, 19.9 s
+# after the image the same file had just produced - made the gate refuse a tree whose `git status`
+# was empty and whose content was byte-identical to what the image was built from. The remedy that
+# refusal prescribes is a payload rebuild, and that is the one remedy this phase cannot afford:
+# `build.sh` never reads this file (it consumes exactly one thing from here, `xnu_arm_entry.bin`,
+# at `build.sh:80`), so the refusal is about a file nothing in the payload's build opens - and 408
+# says a payload rebuild does not reproduce, which means a false stale costs a new boot image and
+# the freeze with it, for a change in nothing the payload consumes.
+#
+# The sweep was measuring a proxy, so the repair is to measure the property: **the content of this
+# directory at the moment this image was built**, which is what "is the entry image the build of
+# the sources in front of me" actually asks. mtime cannot tell an edit from a `git checkout` - the
+# gate's own text says so and prescribes "rebuild anyway" - while a hash answers both directions,
+# and it also covers what the sweep's `*.S` pattern never saw: every lowercase `.s` file here
+# (`entry_vectors.s`, `entry_ramdisk.s`, `entry_macho.s`, `entry_arm_rtabi.s`, `assym.s`) is a
+# source of this image and not one of them matched a case-sensitive `*.S`.
+#
+# The rule is the whole directory - one line per regular file, name relative and sorted, hashed -
+# and `preflight_boot_check.sh` applies the identical rule, so the two cannot drift into different
+# definitions of "the sources". There is no exclusion list, deliberately: a file in this directory
+# is a build input until someone moves it out of the directory, and the failure mode of the other
+# choice - a name left off a list so that a change to it goes unnoticed - is this project's
+# recurring one. The manifest is bound to the artifact by its first line, the image's own sha256,
+# so a manifest from an earlier build cannot be read as this one's.
+ENTRY_SRC_MANIFEST=$OUT/xnu_arm_entry-sources.txt
+{
+    echo "# Generated by xnu_arm_boot/build_entry.sh at the same moment, and from the same tree, as the"
+    echo "# entry image whose hash is on the second line. Every regular file in xnu_arm_boot/, by content."
+    echo "# Read by stages/stage90/preflight_boot_check.sh, which recomputes this list and refuses when"
+    echo "# the two differ: an edit that was not rebuilt, and a file added or removed since the build."
+    echo "STAGE90_XNU_ENTRY_SHA256=$ENTRY_IMAGE_SHA256"
+    ( cd "$BOOT_DIR" && find . -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | LC_ALL=C sort \
+      | while IFS= read -r _f
+        do printf '%s  %s\n' "$(sha256sum -- "$_f" | awk '{print $1}')" "$_f"
+        done )
+} > "$ENTRY_SRC_MANIFEST"
+# A manifest that lists nothing would be satisfied by a directory that hashes to nothing, and
+# "the list is empty" and "the directory is empty" are different facts - the rule this project
+# states as [[mi4-silence-is-a-reading-only-if-success-is-silent]] in the other direction.
+ENTRY_SRC_COUNT=$(grep -c '^[0-9a-f][0-9a-f]*  ' "$ENTRY_SRC_MANIFEST" || true)
+[[ $ENTRY_SRC_COUNT -ge 1 ]] \
+    || { say "FAIL: out/xnu_arm_entry-sources.txt lists no source file - a manifest with nothing in it cannot refuse anything"; exit 1; }
 say "  xnu_entry_533: the entry image's own switches are recorded in out/xnu_arm_entry-config.txt, bound to this artifact by its hash ($ENTRY_IMAGE_SHA256), because until now the variant an entry image was built as existed only in the command line that made it - the entry-side half of the hole the gate's blob clause closes from the other end"
+say "  xnu_entry_533: and its sources are recorded by content in out/xnu_arm_entry-sources.txt ($ENTRY_SRC_COUNT files), so the gate asks whether this image is the build of the tree in front of it rather than whether some file is newer than some image - the question mtime answers wrongly for a checkout and, as measured on 2026-09-22, for a commit as well"
 say "the payload build reads the .bin from there directly; nothing to install"
 
