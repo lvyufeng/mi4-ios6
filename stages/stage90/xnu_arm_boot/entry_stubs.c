@@ -59,6 +59,11 @@
 /* `struct arm_saved_state`'s six offsets, one definition for the image and for the check that
  * compares them against Apple's header and this configuration's generated `assym.s`. See the file. */
 #include "entry_saved_state.h"
+/* 520/521's slot table and the four-load capture macro. One definition for this file *and* for
+ * `entry_trace.c`, where the loads are taken: the wrapper cannot pass the four words through registers
+ * (a call is free to use every one of them) and it cannot leave them where they are (the publisher's own
+ * frame lands on them), so the caller stages them and the layout has to be one layout. See the header. */
+#include "entry_slot_capture.h"
 
 #define RAM_CONSOLE_BASE   0xde500000u
 #define RAM_CONSOLE_SIG    0x43474244u  /* 'DBGC' */
@@ -1667,12 +1672,21 @@ uint32_t entry_live_ready(void);
  * 520's instrument further down this file (the block that opens with `entry_slot_mapped`). The keys are
  * separate from every other site's because a reading that is absent at one site must not hide another
  * site's - which is the shape of the decision rule 519's section 11 writes.
+ *
+ * **521 splits the slot site in two, and 520's own run is why.** The exit wrapper's two readings are
+ * *values it captured itself* (see `entry_slot_capture.h`) and are published through
+ * `entry_slot_note`, which therefore has no address to guard and no refusal to count; the abort reads a
+ * foreign frame, which is guarded and counted, and is published through `entry_slot_ab_note`. One
+ * function taking an `sp` and reading it would have to be one of these two shapes at both sites, and
+ * 520's run is the measurement that says which shape each site has.
  */
 struct entry_slot_keys;
+struct entry_slot_ab_keys;
 struct entry_slot_rtc_keys;
-extern struct entry_slot_keys g_slot_ab;
+extern struct entry_slot_ab_keys g_slot_ab;
 extern struct entry_slot_rtc_keys g_slot_rtcab;
 void entry_slot_note(struct entry_slot_keys *k, uint32_t sp);
+void entry_slot_ab_note(struct entry_slot_ab_keys *k, uint32_t sp);
 void entry_slot_rtc_note(struct entry_slot_rtc_keys *k, uint32_t thr);
 
 void entry_note_sleh(uint32_t type, uint32_t fsr, uint32_t far_, uint32_t thread,
@@ -1774,7 +1788,7 @@ void entry_note_sleh(uint32_t type, uint32_t fsr, uint32_t far_, uint32_t thread
      * bounded and counted inside 520's instrument: a `frame` of 0 leaves `sp` 0 and the reading is
      * refused and counted rather than taken at an address that is not memory.
      */
-    entry_slot_note(&g_slot_ab, sp);
+    entry_slot_ab_note(&g_slot_ab, sp);
     entry_slot_rtc_note(&g_slot_rtcab, thread);
 }
 
@@ -5709,12 +5723,11 @@ uint32_t g_tb_frame_cand;
  * - `CPU_INT_STATE 176`, `ACT_CPUDATAP 1484`, `ACT_PCBDATA 848`, `EXC_CTX_SIZE 360`, `SS_SP 52`,
  * `ENTROPY_INDEX_PTR 0`, `ENTROPY_BUFFER 4`, `ENTROPY_DATA_SIZE 68` - and `build_entry.sh`'s
  * `xnu_entry_517` clause compares the *compiled* loads against that file, so a configuration whose
- * layout moves stops the build instead of moving the reading. `STAGE90_KERNEL_LO`/`_HI` and
- * `STAGE90_KHEAP_LO`/`_HI` are not from `assym.s`: they are the two windows this configuration's own
- * kernel data is known to live in (`0x80000000` up to `topOfKernelData` 0x80700000, and the kernel
- * heap the thread and registry pointers in 516's log sit in, `0xc05feb10`/`0xc05d6848`/`0xc060d130`),
- * used only to keep the identity read out of an address that is not mapped - the identity is what
- * establishes the frame, not the window.
+ * layout moves stops the build instead of moving the reading. `STAGE90_KERNEL_LO`/`_HI` are not from
+ * `assym.s`: they are the kernel map's own bounds out of Apple's `vm_param.h` (see the pair's own
+ * comment below, including why 517's second window - the one the boot's heap was *guessed* to be in -
+ * was replaced by 520's run), used only to keep the identity read out of an address that is not this
+ * map - the identity is what establishes the frame, not the window.
  */
 #define STAGE90_CPU_INT_STATE      176u
 #define STAGE90_ACT_CPUDATAP       1484u
@@ -5724,9 +5737,20 @@ uint32_t g_tb_frame_cand;
  * project's oldest defect class starts. `build_entry.sh` reads those two out of that header. */
 #define STAGE90_EXC_CTX_SIZE       360u
 #define STAGE90_KERNEL_LO          0x80000000u
-#define STAGE90_KERNEL_HI          0x80800000u
-#define STAGE90_KHEAP_LO           0xc0000000u
-#define STAGE90_KHEAP_HI           0xc1000000u
+/* **This pair replaced 517's two windows, and 520's own run is what replaced it.** 517's guard asked a
+ * *narrower* question - "is this address in the two regions the boot's data is known to live in",
+ * `[0x80000000, 0x80800000)` and `[0xc0000000, 0xc1000000)` - and published a refusal when the answer was
+ * no. 520's run refuted the second window twice over: its ordinary aborts carry `SS_SP = 0xc820bf14` and
+ * its thread pointers `0xc820bfa0`, both *above* the old ceiling, so every one of them was refused and
+ * published as a zero, which is a refusal that reads exactly like a reading. The honest bound is the
+ * kernel map's own, which is a number Apple's header states rather than one this file guessed:
+ * `VM_MIN_KERNEL_ADDRESS` = 0x80000000 and `VM_MAX_KERNEL_ADDRESS` = 0xFFFEFFFF
+ * (`osfmk/mach/arm/vm_param.h:169-170`), and `STAGE90_KERNEL_HI` is the top *exclusive* so that the
+ * comparison stays a half-open range. The guard's job is only to keep a dereference out of an address
+ * that is not this map at all; the identities that establish a frame (517's `SS_SP == frame + 360`,
+ * 520's vector-written `SS_SP`) are what say the address is a real one. `build_entry.sh` reads both
+ * numbers back out of Apple's header, so a configuration whose map moved stops the build. */
+#define STAGE90_KERNEL_HI          0xfffeffffu
 #define STAGE90_ENTROPY_INDEX_PTR  0u
 #define STAGE90_ENTROPY_BUFFER     4u
 #define STAGE90_ENTROPY_DATA_SIZE  68u
@@ -5776,15 +5800,13 @@ void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr)
                  * stack when the interrupt hit a thread's kernel code, the interrupt stack itself
                  * when it hit the boot or idle loop, which this kernel runs there - and the vector
                  * wrote the frame's own address into its `SS_SP` word, which is the test that
-                 * establishes it. The two windows are not the test; they keep the identity read out
-                 * of an address this image has no reason to believe is mapped, and they are this
-                 * configuration's own: `0x80000000` up to `topOfKernelData` (0x80700000) holds the
-                 * interrupt stack, the machine blocks and the boot's stolen stacks, and the kernel
-                 * heap the thread pointers themselves live in is at 0xc0xxxxxx. */
+                 * establishes it. The window is not the test; it keeps the identity read out of an
+                 * address that is not this kernel's map at all, and it is the map's own bound from
+                 * Apple's header rather than a guess about where the boot's data sits (521's comment
+                 * on the pair records what the guess cost 520's run). */
                 uint32_t known = 0u;
 
-                if ((cand >= STAGE90_KERNEL_LO && cand < STAGE90_KERNEL_HI)
-                    || (cand >= STAGE90_KHEAP_LO && cand < STAGE90_KHEAP_HI))
+                if (cand >= STAGE90_KERNEL_LO && cand <= STAGE90_KERNEL_HI)
                     known = 1u;
 
                 if (known != 0u
@@ -6182,6 +6204,15 @@ void entry_idle_stack_note(void)
  * `sp` and `lr` (`cswitch.s`, `stmia r3!, {r4..ip, sp, lr}` after `add r3, r3, #16`).
  */
 #define STAGE90_SLOT_LIVE_MAX   4u
+/* **The abort site's own bound, and 520's run is why it is a different rule.** A geometric subsample
+ * (`<= 4` then the powers of two) is right for a site in a loop that makes thousands of passes and wrong
+ * for a site whose interesting reading is the *last* one: 520's fatal abort was `seq 9`, which is neither
+ * `<= 4` nor a power of two, so the one reading the whole arm existed for was sampled away - its
+ * `SS_SP = 0x8054fed0` was *inside* the guard, so a reading taken there would have been published. An
+ * abort is a rare event (520's boot had nine), so the abort site publishes every abort up to this bound
+ * and only then falls back to the powers of two; the count is published with every reading, so a run that
+ * reaches the bound says so rather than looking like a run whose aborts stopped. */
+#define STAGE90_SLOT_AB_MAX     64u
 #define STAGE90_TH_KSTACKPTR    1480u
 /* `cpu_data->rtcPop`, and it is written in decimal on purpose: `build_entry.sh`'s `s_of` reads these
  * macros as decimal text and compares them with `assym.s`'s, so `0xe0u` would be a spelling that clause
@@ -6191,13 +6222,14 @@ void entry_idle_stack_note(void)
 #define STAGE90_CTX_SP_OFF      36u
 #define STAGE90_CTX_LR_OFF      40u
 
-/* The two windows this configuration's kernel data lives in. Not from `assym.s` and not new here: the
- * same two numbers are 517's guard's, and the reading this gate protects is of a stack and of a heap
- * object, so a `sp` or a `thread` outside both is an address the dereference would fault on. */
+/* The one window that keeps a dereference out of an address that is not this kernel's map. Not from
+ * `assym.s`: the same two numbers are 517's guard's (`STAGE90_KERNEL_LO`/`_HI` above, whose comment
+ * records what 517's second, narrower window cost 520's run), and the reading this gate protects is of a
+ * stack and of a heap object, so an `sp` or a `thread` outside the map is an address the dereference
+ * would fault on. */
 static uint32_t entry_slot_mapped(uint32_t p)
 {
-    return ((p >= STAGE90_KERNEL_LO && p < STAGE90_KERNEL_HI)
-            || (p >= STAGE90_KHEAP_LO && p < STAGE90_KHEAP_HI)) ? 1u : 0u;
+    return (p >= STAGE90_KERNEL_LO && p <= STAGE90_KERNEL_HI) ? 1u : 0u;
 }
 
 /* `<= 4` and then the powers of two: see the block above for why this is not "the first four". */
@@ -6206,58 +6238,108 @@ static uint32_t entry_slot_publish(uint32_t n)
     return (n <= STAGE90_SLOT_LIVE_MAX || (n & (n - 1u)) == 0u) ? 1u : 0u;
 }
 
-struct entry_slot_keys {
+/* Every call up to the bound, and then the powers of two of the count *since* the bound - so a boot with
+ * more than `STAGE90_SLOT_AB_MAX` aborts still publishes O(log n) of the ones after the first 64 rather
+ * than going silent at exactly the bound. */
+static uint32_t entry_slot_publish_tail(uint32_t n)
+{
+    if (n <= STAGE90_SLOT_AB_MAX)
+        return 1u;
+    n -= STAGE90_SLOT_AB_MAX;
+    return ((n & (n - 1u)) == 0u) ? 1u : 0u;
+}
+
+/* `struct entry_slot_keys` (the two capture sites' table) is in `entry_slot_capture.h`, because the
+ * wrapper that fills its `pend_*` fields is in another translation unit and one layout has to serve
+ * both. The abort site's table has no `pend_*` fields - its words are read in place, out of the
+ * exception frame - and it carries a refusal count the capture sites cannot have: a value in a register
+ * cannot be refused, and 520's `_rej` at those two sites was a key that could only ever read 0. */
+struct entry_slot_ab_keys {
     const char *k_sp, *k_m16, *k_m12, *k_m8, *k_m4, *k_calls, *k_rej;
     uint32_t    calls, live, rejected;
 };
 
 /* Three sites, three key sets, and the keys are distinct strings rather than one set per position: a
  * site whose reading is absent must leave the *other* sites' readings readable, which is the whole
- * shape of the decision rule in 519's section 11. */
+ * shape of the decision rule in 519's section 11. The two capture sites carry six keys - `sp`, the four
+ * words, the count - and the abort carries those six plus its refusal count. */
 struct entry_slot_keys g_slot_pre = {
     "xnu_live_slot_pre_sp", "xnu_live_slot_pre_m16", "xnu_live_slot_pre_m12",
-    "xnu_live_slot_pre_m8", "xnu_live_slot_pre_m4", "xnu_live_slot_pre_calls",
-    "xnu_live_slot_pre_rej", 0u, 0u, 0u };
+    "xnu_live_slot_pre_m8", "xnu_live_slot_pre_m4", "xnu_live_slot_pre_calls", 0u, 0u, 0u, 0u, 0u, 0u };
 struct entry_slot_keys g_slot_post = {
     "xnu_live_slot_post_sp", "xnu_live_slot_post_m16", "xnu_live_slot_post_m12",
-    "xnu_live_slot_post_m8", "xnu_live_slot_post_m4", "xnu_live_slot_post_calls",
-    "xnu_live_slot_post_rej", 0u, 0u, 0u };
-struct entry_slot_keys g_slot_ab = {
+    "xnu_live_slot_post_m8", "xnu_live_slot_post_m4", "xnu_live_slot_post_calls", 0u, 0u, 0u, 0u, 0u, 0u };
+struct entry_slot_ab_keys g_slot_ab = {
     "xnu_live_slot_ab_sp", "xnu_live_slot_ab_m16", "xnu_live_slot_ab_m12",
     "xnu_live_slot_ab_m8", "xnu_live_slot_ab_m4", "xnu_live_slot_ab_calls",
     "xnu_live_slot_ab_rej", 0u, 0u, 0u };
 
 /*
- * `sp` is the caller's own stack pointer, read by the caller and not by this function - a call changes
- * it, so a `sp` read in here would be this frame's and not the site's, which is the defect 394 recorded
- * from the other side (a live register compared against a value saved at a different instruction
- * boundary). The four words read are the two doublewords ending at `sp`.
+ * **The two capture sites' publisher, and it dereferences nothing.** `sp` is the caller's own stack
+ * pointer, read from the register by the caller; the four words are the four `pend_*` fields the caller
+ * filled from `[sp-16, sp)` *before* it called anything (see `entry_slot_capture.h`, which is where that
+ * macro lives and why it is not this function's job). 520's version of this function read those words
+ * out of `[sp-16, sp)` itself, and 520's own run says what that read: a C function called at that `sp`
+ * writes its own saved registers into exactly those words before its first statement, so the published
+ * `pre_m4 = 0x8047c974` was this function's own saved `lr` and `pre_m8 = 0x80553520` one of its saved
+ * general registers. Values handed over in memory cannot be spoiled that way: the only writer of
+ * `pend_*` is the caller, one call earlier, on the same thread.
  *
- * **A refused reading is published as a zero, and every key is written on every call.** The guard is
- * "this address is inside one of the two windows this image's kernel data lives in", and a `sp` outside
- * both cannot be dereferenced - so it is refused, published as `_sp = 0` with the words zeroed and the
- * refusal counted in `_rej`, rather than passed over in silence: a key that is *absent* and a key that
- * says *nothing was read* are two different readings and only one of them is a measurement. Writing
- * every key on both paths also makes the compiled body's shape checkable - exactly seven
- * `entry_live_write` calls against the seven key pointers this struct's own initializer names, which is
- * the "one value, two definitions" rule applied to a key list.
+ * **So there is no guard and no `_rej` here.** The address is not this function's to refuse: the caller's
+ * own stack pointer is mapped by construction - the caller is running on it - and a refusal count at
+ * these two sites could only ever read 0, which is a key that cannot tell a reader anything. The abort
+ * site, which reads a foreign frame, keeps both.
  *
- * `noinline` for the reason 517's `entry_live_ready` carries it: this function and its two callers are
- * in one translation unit, so gcc may fold the call away - and the reading this step is taken by would
- * then be absent from the image with every surface still green. The build clause looks for the `bl`.
+ * `noinline`: this function and its callers are in *different* translation units here, so nothing folds
+ * it away, but 517's `entry_live_ready` carries the same attribute for the same reason (a folded-away
+ * call is a reading absent from the image with every surface still green) and the build clause counts the
+ * `bl`s in the wrapper regardless.
  */
 __attribute__((noinline)) void entry_slot_note(struct entry_slot_keys *k, uint32_t sp)
 {
-    uint32_t m16 = 0u, m12 = 0u, m8 = 0u, m4 = 0u, got;
-
     k->calls++;
     if (entry_slot_publish(k->calls) == 0u)
         return;
     if (entry_live_ready() == 0u)
         return;
 
+    k->live++;
+    entry_live_write(k->k_sp, sp);
+    entry_live_write(k->k_m16, k->pend_m16);
+    entry_live_write(k->k_m12, k->pend_m12);
+    entry_live_write(k->k_m8, k->pend_m8);
+    entry_live_write(k->k_m4, k->pend_m4);
+    entry_live_write(k->k_calls, k->calls);
+}
+
+/*
+ * **The abort site's publisher, which reads the aborted context's own words out of the frame.**
+ * `sp` here is the frame's `SS_SP` - the `sp` the vector saved before any handler ran - so the four
+ * words ending at it are the words the fatal `pop {fp, pc}` read, and they are still there: 519's
+ * section 10 shows the 360-byte exception frame ends at or below the `sp` it interrupted, and the words
+ * above that `sp` are the interrupted code's own and nothing in the handler touches them. This is the
+ * half of the arm that does not need the run to survive, and it is why the abort site keeps a guard: the
+ * values are read at an address that came out of a frame rather than off the register.
+ *
+ * A refused reading is published as `_sp = 0` with the four words zeroed and `_rej` incremented, so
+ * "absent" and "nothing was read here" stay different numbers - and 520's run is why the guard's window
+ * is now the kernel map's own bound rather than a guess (see `STAGE90_KERNEL_LO`/`_HI`): with the old
+ * window every abort of that boot was refused and the refusal was invisible, because `_rej` counts only
+ * this outermost refusal and the four words were published as zeros either way.
+ */
+__attribute__((noinline)) void entry_slot_ab_note(struct entry_slot_ab_keys *k, uint32_t sp)
+{
+    uint32_t m16 = 0u, m12 = 0u, m8 = 0u, m4 = 0u, got;
+    uint32_t first = sp;
+
+    k->calls++;
+    if (entry_slot_publish_tail(k->calls) == 0u)
+        return;
+    if (entry_live_ready() == 0u)
+        return;
+
     got = (entry_slot_mapped(sp) != 0u && entry_slot_mapped(sp - 16u) != 0u) ? 1u : 0u;
-    if (got != 0u) {
+    if (got != 0u && first != 0u) {
         m16 = *(volatile uint32_t *)(uintptr_t)(sp - 16u);
         m12 = *(volatile uint32_t *)(uintptr_t)(sp - 12u);
         m8  = *(volatile uint32_t *)(uintptr_t)(sp - 8u);
@@ -6277,19 +6359,23 @@ __attribute__((noinline)) void entry_slot_note(struct entry_slot_keys *k, uint32
     entry_live_write(k->k_rej, k->rejected);
 }
 
+/* 9 keys and 4 counters = 52 bytes: the abort's seven plus the two levels of refusal this site can
+ * distinguish (`_rej` for a `thr` outside the map, `_rin` for a mapped `thr` whose own field is not). */
 struct entry_slot_rtc_keys {
-    const char *k_thr, *k_datap, *k_pop, *k_pcb, *k_sp, *k_lr, *k_calls, *k_rej;
-    uint32_t    calls, live, rejected;
+    const char *k_thr, *k_datap, *k_pop, *k_pcb, *k_sp, *k_lr, *k_calls, *k_rej, *k_rin;
+    uint32_t    calls, live, rejected, inner;
 };
 
 struct entry_slot_rtc_keys g_slot_rtcpre = {
     "xnu_live_slot_rtcpre_thr", "xnu_live_slot_rtcpre_datap", "xnu_live_slot_rtcpre_pop",
     "xnu_live_slot_rtcpre_pcb", "xnu_live_slot_rtcpre_sp", "xnu_live_slot_rtcpre_lr",
-    "xnu_live_slot_rtcpre_calls", "xnu_live_slot_rtcpre_rej", 0u, 0u, 0u };
+    "xnu_live_slot_rtcpre_calls", "xnu_live_slot_rtcpre_rej", "xnu_live_slot_rtcpre_rin",
+    0u, 0u, 0u, 0u };
 struct entry_slot_rtc_keys g_slot_rtcab = {
     "xnu_live_slot_rtcab_thr", "xnu_live_slot_rtcab_datap", "xnu_live_slot_rtcab_pop",
     "xnu_live_slot_rtcab_pcb", "xnu_live_slot_rtcab_sp", "xnu_live_slot_rtcab_lr",
-    "xnu_live_slot_rtcab_calls", "xnu_live_slot_rtcab_rej", 0u, 0u, 0u };
+    "xnu_live_slot_rtcab_calls", "xnu_live_slot_rtcab_rej", "xnu_live_slot_rtcab_rin",
+    0u, 0u, 0u, 0u };
 
 /*
  * 519's section 11, reading 5: **`cpu_data->rtcPop` and the idle thread's own saved `sp`/`lr`.**
@@ -6300,18 +6386,26 @@ struct entry_slot_rtc_keys g_slot_rtcab = {
  * to jump to is `0x07152a6c` - the same value with bit 0 clear, which is what a `pop {fp, pc}` onto a
  * Thumb address looks like from the fault's side. So the reading of `rtcPop` at the abort is what turns
  * "the `pop` read a counter" into "the `pop` read *this* deadline", and it is the difference between a
- * panic that is consistent with a corrupted slot and one that names what the slot held.
+ * panic that is consistent with a corrupted slot and one that names what the slot held. 520's run read
+ * it in the exit wrapper and got `0x04b79075` against a fault at `0x04b79074`, which is that identity
+ * with a number in it.
  *
  * `thr` is the thread pointer (`TPIDRPRW`, read by the caller - it is a register and this function
  * cannot see the caller's), and every one of this function's dereferences is bounded: the thread's own
  * field for `cpu_data`, then `cpu_data->rtcPop`, and the pcb's own words. The pcb's saved `sp`/`lr` are
  * `TH_KSTACKPTR`'s address plus 16 (where `Idle_context` begins to store the eleven registers) plus the
- * tenth and eleventh words of them. A `thr` outside both windows is the one refusal that skips the
- * whole reading, and it is counted in `_rej` like the slot note's.
+ * tenth and eleventh words of them.
+ *
+ * **Two levels of refusal, counted separately, and 520's third instrument defect is why.** A `thr`
+ * outside the kernel map skips the whole reading (`_rej`). A *mapped* `thr` whose `cpu_data` pointer or
+ * whose pcb is not in the map used to publish `sp = 0` and `lr = 0` with `_rej` still 0 - so at every
+ * abort of 520's run those two keys read zero, which is exactly what a real zero would look like. Each
+ * inner refusal is now counted in `_rin` as well, so "the pcb was not readable" and "the pcb's saved
+ * `sp` was 0" are different numbers.
  */
 __attribute__((noinline)) void entry_slot_rtc_note(struct entry_slot_rtc_keys *k, uint32_t thr)
 {
-    uint32_t datap = 0u, pop = 0u, pcb = 0u, ssp = 0u, slr = 0u, got;
+    uint32_t datap = 0u, pop = 0u, pcb = 0u, ssp = 0u, slr = 0u;
 
     k->calls++;
     if (entry_slot_publish(k->calls) == 0u)
@@ -6319,16 +6413,24 @@ __attribute__((noinline)) void entry_slot_rtc_note(struct entry_slot_rtc_keys *k
     if (entry_live_ready() == 0u)
         return;
 
-    got = entry_slot_mapped(thr);
-    if (got != 0u) {
+    if (entry_slot_mapped(thr) != 0u) {
+        /* `thr` is in the map, so this field of it is; the two dereferences below are not. */
         datap = *(volatile uint32_t *)(uintptr_t)(thr + STAGE90_ACT_CPUDATAP);
-        if (entry_slot_mapped(datap) != 0u && entry_slot_mapped(datap + STAGE90_CPU_RTCPOP) != 0u)
-            pop = *(volatile uint32_t *)(uintptr_t)(datap + STAGE90_CPU_RTCPOP);
+        if (entry_slot_mapped(datap) != 0u) {
+            if (entry_slot_mapped(datap + STAGE90_CPU_RTCPOP) != 0u)
+                pop = *(volatile uint32_t *)(uintptr_t)(datap + STAGE90_CPU_RTCPOP);
+            else
+                k->inner++;
+        } else {
+            k->inner++;
+        }
         pcb = *(volatile uint32_t *)(uintptr_t)(thr + STAGE90_TH_KSTACKPTR);
         if (entry_slot_mapped(pcb) != 0u
             && entry_slot_mapped(pcb + STAGE90_CTX_SAVED_OFF + STAGE90_CTX_LR_OFF) != 0u) {
             ssp = *(volatile uint32_t *)(uintptr_t)(pcb + STAGE90_CTX_SAVED_OFF + STAGE90_CTX_SP_OFF);
             slr = *(volatile uint32_t *)(uintptr_t)(pcb + STAGE90_CTX_SAVED_OFF + STAGE90_CTX_LR_OFF);
+        } else {
+            k->inner++;
         }
         k->live++;
     } else {
@@ -6344,6 +6446,7 @@ __attribute__((noinline)) void entry_slot_rtc_note(struct entry_slot_rtc_keys *k
     entry_live_write(k->k_lr, slr);
     entry_live_write(k->k_calls, k->calls);
     entry_live_write(k->k_rej, k->rejected);
+    entry_live_write(k->k_rin, k->inner);
 }
 
 struct entry_slot_tb_keys {

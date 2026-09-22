@@ -115,6 +115,9 @@
  * never indexed it, which is still true - but the number that says *which* fault pair is the fault
  * pair is the same number `entry_stubs.c`'s comment reasons about, so it is written once. */
 #include "entry_saved_state.h"
+/* `struct entry_slot_keys` and `STAGE90_SLOT_CAPTURE`, one definition for this file and for
+ * `entry_stubs.c`: the four loads are taken here and published there. See the header. */
+#include "entry_slot_capture.h"
 
 /* entry_stubs.c. Records into `g_kv_buf`, which only an epilogue writes out - see above. */
 extern void entry_kv(const char *key, uint32_t value);
@@ -1607,12 +1610,17 @@ extern void entry_note_setidlepop(uint32_t site, uint32_t ret, uint32_t en, uint
  * 520's instrument, defined in `entry_stubs.c` (the block that opens with `entry_slot_mapped`). The
  * types are incomplete here on purpose: every one of these calls takes a pointer to one `.bss` key
  * table and two scalars, so this file never needs the tables' layout - which is what keeps the number
- * of arguments to four and below, and that is not cosmetic. The exit wrapper's whole frame is one
+ * of arguments to two, and that is not cosmetic. The exit wrapper's whole frame is one
  * `str r4, [sp, #-8]!`; gcc spills *outgoing* stack arguments into its own frame, so a call with five
  * register-or-more arguments there would move `sp` off the address the slot is read from. The build
  * clause asserts the wrapper has no other stack adjustment, and this comment is why it is asserted.
+ *
+ * **521 is what made the capture the caller's job.** `struct entry_slot_keys` - and the four-load macro
+ * that fills its `pend_*` fields - is in `entry_slot_capture.h`, included by this file and by
+ * `entry_stubs.c`, because 520's publisher read the four words out of `[sp-16, sp)` itself and 520's run
+ * shows what it read: its own call frame. The loads have to happen in the wrapper, before its first
+ * call, and the values have to travel in memory because they cannot travel in registers.
  */
-struct entry_slot_keys;
 struct entry_slot_rtc_keys;
 struct entry_slot_tb_keys;
 extern struct entry_slot_keys g_slot_pre;
@@ -1822,6 +1830,20 @@ void __wrap_platform_cache_idle_enter(void)
  * first and leaves the second absent - and 519's section 11 writes the decision rule on exactly that
  * asymmetry. `sp` is read once, in the body, and reused: a second `mov %0, sp` after the call would be
  * the same value, and one read is one thing to check.
+ *
+ * **521 moves the four loads to the top of each reading, and 520's own run is the reason.** The slot
+ * words have to be in registers before the first `bl`, because the callee's frame lands on them
+ * (`pre_m4 = 0x8047c974` in 520's log is `entry_slot_note`'s own saved `lr`), and they have to reach the
+ * publisher in memory, because a call may use every caller-saved register. So each reading is
+ * `STAGE90_SLOT_CAPTURE` - four `ldr` at `[sp-16]`, `[sp-12]`, `[sp-8]`, `[sp-4]`, straight into the key
+ * table's `pend_*` fields - followed by the publisher call. The frame does not move: the three calls
+ * here take at most two register arguments (`FlushPoC_Dcache` none, the two publishers two each) and
+ * `entry_note_pcx`'s four are `mrrc`/`mrc` reads that gcc computes into r0-r3 with no call in between, so
+ * gcc needs no callee-saved register beyond the `r4` this frame already holds. That is a property of the
+ * *size* of the frame and not of tidiness: the slot is at `E - 4` where `E = X - 8`, which is what puts
+ * the idle enter wrapper's `strd r4, [sp, #-12]!` (the deadline) at the address this `pop` reads as
+ * `pc`, and a 16-byte frame would move the slot out from under that store and stop testing 520's
+ * mechanism while every surface stayed green. The clause asserts 8.
  */
 void __real_platform_cache_idle_exit(void);
 void __wrap_platform_cache_idle_exit(void)
@@ -1833,11 +1855,13 @@ void __wrap_platform_cache_idle_exit(void)
 #endif
 
     __asm__ volatile ("mov %0, sp" : "=r"(sp));
+    STAGE90_SLOT_CAPTURE(&g_slot_pre, sp);
     entry_slot_note(&g_slot_pre, sp);
     entry_slot_rtc_note(&g_slot_rtcpre, entry_tpidrprw());
 
     __real_platform_cache_idle_exit();
 
+    STAGE90_SLOT_CAPTURE(&g_slot_post, sp);
     entry_slot_note(&g_slot_post, sp);
 
     entry_note_pcx(entry_counter(), entry_tpidrprw(), entry_cpu_datap(), entry_sctlr());

@@ -28780,6 +28780,51 @@ verify_trace_symbols() {
         layout_fail "520's two slot readings are at ${sxw_first:-?} and ${sxw_last:-?} and the real exit is called at ${sxw_realaddr:-?}: the first has to precede that call and the second has to follow it, and if they are both on one side the pair is two readings of one instant - which cannot say whether the push that fills the slot has run yet, and that is the only question this arm asks"
     [[ "${sxw_rtcaddr:-0}" -lt "${sxw_realaddr:-0}" ]] ||
         layout_fail "520's rtcPop/pcb reading is at ${sxw_rtcaddr:-?} and the real exit at ${sxw_realaddr:-?}: 519's reading 5 is a reading of the state the idle loop *entered* with, so it belongs before the call - taken after it, the value would be the deadline the exit has already recomputed, which is the run's own answer read back"
+    # ================================================== 521: the four words are the caller's to read
+    #
+    # **520 read the slot through the publisher's own frame and 520's run says so.** The words are
+    # `[sp-16, sp)` where `sp` is the wrapper's - the slot is the upper doubleword - and 520 called
+    # `entry_slot_note(&g_slot_pre, sp)`, whose own prologue saves registers *below* that `sp`, i.e. in
+    # exactly those words, before its first statement runs. Its log has `pre_m4 = 0x8047c974`, the
+    # instruction after its own `bl`, and `pre_m8 = 0x80553520`, one of its saved general registers. 521's
+    # repair is that the wrapper loads the four words itself, into the table's `pend_*` fields, *before*
+    # its first call; the values cannot go through registers (a call may use every caller-saved one) and
+    # cannot stay where they are (the callee's frame lands on them). This block asserts the four loads
+    # are where the reading says they are *and* on the right side of the calls, which is the property a
+    # source-order check cannot see: gcc is free to hoist, and only the addresses say what it did.
+    IFS='|' read -r sxw_nneg sxw_nbad sxw_fo sxw_lo sxw_flast sxw_lfirst sxw_nstore sxw_so sxw_sbase \
+             <<<"$(awk '
+        function hex(s) { sub(/:$/, "", s); return strtonum("0x" s) }
+        $3 ~ /^[a-z]/ { a = hex($1); m = $3 }
+        m == "mov" && $4 ~ /^r[0-9]+,$/ && $5 == "sp" { r = $4; sub(/,/, "", r) }
+        m == "ldr" && $4 ~ /^r[0-9]+,$/ && $6 ~ /^#-[0-9]+\]$/ {
+            v = $6; gsub(/[^0-9]/, "", v)
+            b = $5; sub(/^\[/, "", b); sub(/,$/, "", b)
+            if (r != "" && b != r) bad++
+            n++
+            if (n <= 4) { fo = fo (n > 1 ? " " : "") v; fl = a }
+            else        { lo = lo (n > 5 ? " " : "") v; if (n == 5) fl5 = a }
+        }
+        m == "str" && $4 ~ /^r[0-9]+,$/ && $5 ~ /^\[r[0-9]+,$/ && $6 ~ /^#[0-9]+\]$/ {
+            v = $6; gsub(/[^0-9]/, "", v)
+            if (v >= 32 && v <= 44) { ns++; so = so (ns > 1 ? " " : "") v
+                                      b = $5; sub(/^\[/, "", b); sub(/,$/, "", b); sb = b }
+        }
+        END { printf "%d|%d|%s|%s|%d|%d|%d|%s|%s", n+0, bad+0, fo, lo, fl+0, fl5+0, ns+0, so, sb }
+    ' <<<"$sxw_body")"
+    [[ "${sxw_nneg:-0}" == 8 && "${sxw_nbad:-0}" == 0 ]] ||
+        layout_fail "520/521's wrapper holds ${sxw_nneg:-0} \`ldr r?, [r?, #-N]\` (${sxw_nbad:-0} of them off the register \`mov\` read \`sp\` into): 521's whole repair is that the four words of the slot are read by the *caller*, twice - once before the exit is called and once after it returns - so eight negative-offset loads is the count, and a load whose base is another register is a load of some other address that this clause would otherwise credit to the slot"
+    [[ "${sxw_fo:-x}" == "16 12 8 4" && "${sxw_lo:-x}" == "16 12 8 4" ]] ||
+        layout_fail "the wrapper's two groups of negative-offset loads are [${sxw_fo:-?}] and [${sxw_lo:-?}] and 521's macro states 16, 12, 8 and 4 for each: the four words are the two doublewords ending at the wrapper's \`sp\`, the *upper* pair being the slot the exit's push writes and its pop reads - an instrument that read four words somewhere else would publish four real, quiet, wrong numbers, which is the failure this whole step exists to stop repeating"
+    [[ "${sxw_flast:-0}" -lt "${sxw_first:-0}" ]] ||
+        layout_fail "the first group's last load is at ${sxw_flast:-?} and the first call to entry_slot_note at ${sxw_first:-?}: the loads have to happen before any call, because the callee's own frame lands on the very words being read - that is 520's defect 395, taken by the publisher instead of the caller, and it cost that run both of its slot readings"
+    [[ "${sxw_lfirst:-0}" -gt "${sxw_realaddr:-0}" ]] ||
+        layout_fail "the second group's first load is at ${sxw_lfirst:-?} and the real platform_cache_idle_exit is called at ${sxw_realaddr:-?}: the post reading is the *control* - what a pass that survives gets back in the slot - so it has to be taken after the call, and a load hoisted above it would read the pre-call words and publish them under the post site's keys"
+    [[ "${sxw_nstore:-0}" == 8 && "${sxw_so:-x}" == "32 36 40 44 32 36 40 44" ]] ||
+        layout_fail "the wrapper holds ${sxw_nstore:-0} store(s) into a table at word offsets [${sxw_so:-?}] and 521's capture macro writes four, twice - once per site: those offsets are the *header's* layout read out of the image, and a field reordered in \`entry_slot_capture.h\` without this number moving would put a captured word in a field the publisher does not read, while a site whose four stores went to a different table's words would publish one site's reading under the other site's keys"
+    # The publisher itself, on the abort path: `entry_slot_ab_note` reads the four words out of the
+    # exception frame, in place, and keeps the guard and the refusal count the two capture sites cannot
+    # have. Its own key list is seven pointers (the six of a capture site plus `_rej`).
     # The three notes' own bodies, and the key list is what is counted. **A note's compiled body has to
     # hold exactly as many entry_live_write calls as its table has key pointers** - seven for a slot
     # site (four words, the sp, the call count, the refusal count), eight for an rtc site (the seven of
@@ -28789,11 +28834,18 @@ verify_trace_symbols() {
     # a pointer the table did not name, which is a record about nothing.
     snb=$(sym_addr entry_slot_note) ||
         layout_fail "entry_slot_note is not in the linked image: this step's whole output is the four words this function publishes, and a clause that cannot find it cannot say the reading is emitted"
+    sab=$(sym_addr entry_slot_ab_note) ||
+        layout_fail "entry_slot_ab_note is not in the linked image: the abort's four words are read out of the exception frame in place (521 moved them off the caller's-frame shape, which was 520's own defect 395) and a build without this symbol would publish the abort site through a function that reads the caller's stack instead"
     srb=$(sym_addr entry_slot_rtc_note) ||
         layout_fail "entry_slot_rtc_note is not in the linked image: 519's reading 5 (rtcPop, the idle thread's saved sp/lr) is what makes the panic's own r4 an identity rather than a coincidence"
     stb=$(sym_addr entry_slot_tb_note) ||
         layout_fail "entry_slot_tb_note is not in the linked image: 519's reading 4 is the only clock stamp the run has for the interrupt that was in service, and without it the slot's pair cannot be dated"
-    for n520 in entry_slot_note:7 entry_slot_rtc_note:8 entry_slot_tb_note:4; do
+    # **521 splits the slot site's publisher in two and the counts follow.** `entry_slot_note` is the two
+    # capture sites' (six keys: sp, the four words staged by the caller, the call count) and
+    # `entry_slot_ab_note` is the abort's (those six plus `_rej`, because that site reads a foreign frame
+    # and can refuse). `entry_slot_rtc_note` gains `_rin` - 520's run published `sp = 0` and `lr = 0` at
+    # every abort with `_rej` still 0, so a refusal inside a mapped thread had no number of its own. 9.
+    for n520 in entry_slot_note:6 entry_slot_ab_note:7 entry_slot_rtc_note:9 entry_slot_tb_note:4; do
         f520=${n520%%:*}; want520=${n520##*:}
         a520=$(sym_addr "$f520") || true
         b520=$(arm-none-eabi-objdump -d --start-address="$a520" --stop-address="$(next_global "$a520")" "$OUT/xnu_arm_entry.elf")
@@ -28813,26 +28865,31 @@ verify_trace_symbols() {
     done
     # And the abort's own two readings, in `entry_note_sleh` - the half of the arm that does not need the
     # run to survive. The vector saved `SS_SP` before any handler ran, so the words this reads are the
-    # ones the fatal `pop` read, read after the fact.
+    # ones the fatal `pop` read, read after the fact. 521 moves the slot half of this to its own
+    # publisher (`entry_slot_ab_note`), because this is the one site that *must* read a foreign frame and
+    # 520's own publisher must not: neither function can be the other's shape.
     isleh=$(sym_addr entry_note_sleh) ||
         layout_fail "entry_note_sleh is not in the linked image: 519's readings 3 and 5 are taken on the abort path, and a run that dies in the idle path publishes *nothing else* about the words that killed it"
     sleh_body=$(arm-none-eabi-objdump -d --start-address="$isleh" --stop-address="$(next_global "$isleh")" "$OUT/xnu_arm_entry.elf")
     # Both forms of the call again, for the reason the note bodies' own counts carry: the second of
     # these two is the *last* statement of `entry_note_sleh`, so the image reaches it by `b` and a check
     # for `bl` alone would read a body that carries both readings as one that carries only the first.
-    sleh_n=$(awk '$3 == "bl" && index($0, "<entry_slot_note>") > 0 { n++ }
-                  $3 == "b" && index($0, "<entry_slot_note>") > 0 { n++ } END { printf "%d", n + 0 }' <<<"$sleh_body")
+    sleh_n=$(awk '$3 == "bl" && index($0, "<entry_slot_ab_note>") > 0 { n++ }
+                  $3 == "b" && index($0, "<entry_slot_ab_note>") > 0 { n++ } END { printf "%d", n + 0 }' <<<"$sleh_body")
     sleh_r=$(awk '$3 == "bl" && index($0, "<entry_slot_rtc_note>") > 0 { n++ }
                   $3 == "b" && index($0, "<entry_slot_rtc_note>") > 0 { n++ } END { printf "%d", n + 0 }' <<<"$sleh_body")
     [[ "${sleh_n:-0}" == 1 && "${sleh_r:-0}" == 1 ]] ||
-        layout_fail "entry_note_sleh calls entry_slot_note ${sleh_n:-0} time(s) and entry_slot_rtc_note ${sleh_r:-0} time(s) and not once each: the abort is where the frame's own SS_SP is still the interrupted code's sp, 360 bytes of vector frame below it and untouched (519's section 10), so these two calls are the only reading of the words the fatal pop read that exists on a run that dies"
+        layout_fail "entry_note_sleh calls entry_slot_ab_note ${sleh_n:-0} time(s) and entry_slot_rtc_note ${sleh_r:-0} time(s) and not once each: the abort is where the frame's own SS_SP is still the interrupted code's sp, 360 bytes of vector frame below it and untouched (519's section 10), so these two calls are the only reading of the words the fatal pop read that exists on a run that dies"
     # The keys, counted twice and from two directions. The *table sizes* say how many pointers each key
     # set has (a slot table is 7 pointers and 3 words: 40 bytes; an rtc table is 8 and 3: 44; the
     # timebase table is 4 and 2: 24) and the *source* says how many distinct key literals each set
     # spells - so a table that names a key twice, or a literal added without a pointer to publish it
     # through, stops the build rather than shipping a key nothing can read.
-    for spec520 in g_slot_pre:40:7:pre g_slot_post:40:7:post g_slot_ab:40:7:ab \
-                    g_slot_rtcpre:44:8:rtcpre g_slot_rtcab:44:8:rtcab g_slot_tb:24:4:tb; do
+    # A capture table is 48 bytes (6 key pointers, the two counters, and the four words 521's caller
+    # stages in them); the abort's is 40 (7 pointers and 3 counters); an rtc table is 52 (9 and 4); the
+    # timebase table is 24 (4 and 2).
+    for spec520 in g_slot_pre:48:6:pre g_slot_post:48:6:post g_slot_ab:40:7:ab \
+                    g_slot_rtcpre:52:9:rtcpre g_slot_rtcab:52:9:rtcab g_slot_tb:24:4:tb; do
         sym520=${spec520%%:*}; rest520=${spec520#*:}
         sz520=${rest520%%:*}; rest520=${rest520#*:}
         cnt520=${rest520%%:*}; tag520=${rest520##*:}
@@ -28847,7 +28904,7 @@ verify_trace_symbols() {
     done
     k520=$(grep -o 'xnu_live_slot_\(pre\|post\|ab\|rtcpre\|rtcab\|tb\)_[a-z0-9_]*' "$BOOT_DIR/entry_stubs.c" | sort -u | wc -l)
     [[ "${k520:-0}" == 41 ]] ||
-        layout_fail "520's six key sets spell ${k520:-0} distinct keys and the arm's own list is 41 (7+7+7+8+8+4): the number is asserted here and each key is asserted in the entry image below, because a key that is in the source and not in the image is a record the run cannot read and a key in the image and not in the source is one this clause cannot reason about"
+        layout_fail "the six key sets spell ${k520:-0} distinct keys and the instrument's own list is 41 (6+6+7+9+9+4): the number is asserted here and each key is asserted in the entry image below, because a key that is in the source and not in the image is a record the run cannot read and a key in the image and not in the source is one this clause cannot reason about"
     for k in $(grep -o 'xnu_live_slot_\(pre\|post\|ab\|rtcpre\|rtcab\|tb\)_[a-z0-9_]*' "$BOOT_DIR/entry_stubs.c" | sort -u); do
         # `-a`, and it is not decoration: this image is a binary, and a `grep` that decides a file is
         # binary and skips it answers "no match" for a key that is there - which is the same reading as
@@ -28863,6 +28920,13 @@ verify_trace_symbols() {
     a_thk=$(a_of TH_KSTACKPTR); s_thk=$(s_of STAGE90_TH_KSTACKPTR)
     a_dap2=$(a_of ACT_CPUDATAP); s_dap2=$(s_of STAGE90_ACT_CPUDATAP)
     s_pop=$(s_of STAGE90_CPU_RTCPOP)
+    # **The abort site's bound, read from the source and asserted as a value.** It is a *reading* bound and
+    # not a fact about Apple's code, so it lives in `entry_stubs.c` and is compared here with the number
+    # the run's log can be read against: 520's fatal abort was the ninth, so anything below 9 would have
+    # been the same defect with a longer fuse.
+    s_ab=$(s_of STAGE90_SLOT_AB_MAX)
+    [[ "$s_ab" =~ ^[0-9]+$ && "$s_ab" -ge 9 ]] ||
+        layout_fail "520/521's clause reads STAGE90_SLOT_AB_MAX as [$s_ab]: 520's fatal abort was seq 9 - the ninth abort of that boot - so a bound that cannot be read or that is below 9 does not cover the one call this rule exists for (the run's log carries the count with every reading, so a boot that reaches the bound says so rather than looking like a boot whose aborts stopped)"
     for v in "$a_thk" "$s_thk" "$a_dap2" "$s_dap2" "$s_pop"; do
         [[ "$v" =~ ^[0-9]+$ ]] ||
             layout_fail "520's clause cannot read one of the offsets it publishes (got [$v]): TH_KSTACKPTR and ACT_CPUDATAP are the thread's own fields and rtcPop is cpu_data's, and a reading that dereferences an offset no file states is a reading of whatever happens to be at that address"
@@ -28875,7 +28939,37 @@ verify_trace_symbols() {
     cpop=$(awk -v o="#$s_pop" '$3 == "add" && $6 == o { n++ } END { printf "%d", n + 0 }' <<<"$cidle_body")
     [[ "${cpop:-0}" -ge 1 ]] ||
         layout_fail "no instruction in cpu_idle's body adds #$s_pop (entry_stubs.c's STAGE90_CPU_RTCPOP): that offset is where the deadline this run's panic holds in r4 is loaded from - locore's own \`add r6, r5, #0xe0\` - so a reading of cpu_data+#$s_pop that cpu_idle does not itself use is a reading of some other field with the same name"
-    say "  xnu_entry_520: the two words of the idle exit's {fp, lr} slot, watched - __wrap_platform_cache_idle_exit ($(printf '0x%x' "$sxw")) takes sp off the register once (${sxw_mov} read at $(printf '0x%x' "${sxw_movaddr:-0}"), after its only stack movement, which is $sxw_dec decrement of $sxw_decv bytes and one restore) and reads the four words ending at it ${sxw_note} time(s) through entry_slot_note ($(printf '0x%x' "$snb")) - once before its call to the real platform_cache_idle_exit at $(printf '0x%x' "${sxw_realaddr:-0}") and once after, so the pair the fatal pop read is published before the push that fills it and the control is published only if the exit returns; the same wrapper reads cpu_data->rtcPop (cpu_data+#$s_pop, the offset cpu_idle's own body adds ${cpop} time) and the idle thread's saved sp/lr through entry_slot_rtc_note ($(printf '0x%x' "$srb")) at $(printf '0x%x' "${sxw_rtcaddr:-0}"), and the abort path carries the same two readings through entry_note_sleh ($(printf '0x%x' "$isleh"), ${sleh_n}+${sleh_r} call) so a run that dies publishes the words the pop read beside what the panel already says; __wrap_ml_get_timebase reads the counter either side of the real function and publishes them through entry_slot_tb_note ($(printf '0x%x' "$stb")), which is the only clock stamp the run has for the interrupt that was in service; the three tables are in the image at their stated sizes (g_slot_pre/post/ab 40 bytes = 7 keys and 3 words, g_slot_rtcpre/rtcab 44 = 8 and 3, g_slot_tb 24 = 4 and 2), the body of each holds exactly as many entry_live_write calls as its table has keys (7/8/4), and all $k520 keys are in the entry image's strings; each site publishes while its count is <= 4 and thereafter at the powers of two, which is O(log n) records out of a channel the rest of the run's readings live in, and a reading refused by the two-window guard is published as a zero with its refusal counted rather than left absent"
+    # **The guard's window is now Apple's own bound, and this is the check that keeps it Apple's.** The two
+    # numbers are `VM_MIN_KERNEL_ADDRESS`/`VM_MAX_KERNEL_ADDRESS` from `osfmk/mach/arm/vm_param.h` - the
+    # source this project already compiles - and 517's narrower pair (which 520's run refuted: its aborts
+    # and its thread pointers are at 0xc82xxxxx, above the old 0xc1000000 ceiling) is gone. Read out of the
+    # header rather than stated here, so a configuration whose map moved stops the build.
+    vm_param=$REPO_ROOT/external/xnu-4570.1.46/osfmk/mach/arm/vm_param.h
+    [[ -f "$vm_param" ]] ||
+        layout_fail "521's clause cannot read $vm_param: the guard's window has to be the kernel map's own bound, and 520's run is what it cost to guess it (every abort of that boot was refused and published as a zero) - fix the path, do not restate the numbers here"
+    h_lo=$(awk '/^#define[ \t]+VM_MIN_KERNEL_ADDRESS[ \t]/ { v = $NF; sub(/\)$/, "", v); print v; exit }' "$vm_param")
+    h_hi=$(awk '/^#define[ \t]+VM_MAX_KERNEL_ADDRESS[ \t]/ { v = $NF; sub(/\)$/, "", v); print v; exit }' "$vm_param")
+    s_lo=$(s_of STAGE90_KERNEL_LO); s_hi=$(s_of STAGE90_KERNEL_HI)
+    for v in "$h_lo" "$h_hi" "$s_lo" "$s_hi"; do
+        [[ "$v" =~ ^0x[0-9a-fA-F]+$ ]] ||
+            layout_fail "521's clause cannot read one of the kernel map's own bounds (got [$v]): one of the four is a hex literal in Apple's header and the other two are the macros entry_stubs.c's guard compiles, and a bound nothing can parse is a bound nothing compares"
+    done
+    # Case-folded, and that is not cosmetic: Apple's header spells the top bound `0xFFFEFFFF` and
+    # `entry_stubs.c` spells its own copy in the lower case the rest of that file uses, so a comparison
+    # that read the two spellings as different values would refuse a build that is right - and the shape
+    # check above is what keeps a *real* difference from hiding behind the folding.
+    [[ "${h_lo,,}" == "${s_lo,,}" && "${h_hi,,}" == "${s_hi,,}" ]] ||
+        layout_fail "vm_param.h says the kernel map is [$h_lo, $h_hi] and entry_stubs.c's guard uses [$s_lo, $s_hi]: the window exists only to keep a dereference out of an address that is not this map, so it has to be the map's own bound and not a guess about where the boot's data sits - 520's run is what the guess cost (every abort refused, published as a zero, with the refusal count still 0 because only the outermost refusal was counted)"
+    # **The abort site publishes every abort, and that is a rule the source has to state.** 520's fatal
+    # abort was `seq 9` - neither `<= 4` nor a power of two - so the one reading the arm existed for was
+    # sampled away by a rule that is right for a loop and wrong for a rare event. `entry_slot_publish_tail`
+    # is that rule, and it is called from exactly one place: a site that quietly went back to the geometric
+    # subsample would otherwise only be visible in a run that happened to die on a non-power-of-two abort.
+    ntail_def=$(grep -c '^static uint32_t entry_slot_publish_tail(' "$BOOT_DIR/entry_stubs.c")
+    ntail_call=$(grep -c 'entry_slot_publish_tail(k->calls)' "$BOOT_DIR/entry_stubs.c")
+    [[ "${ntail_def:-0}" == 1 && "${ntail_call:-0}" == 1 ]] ||
+        layout_fail "entry_stubs.c holds ${ntail_def:-0} definition(s) of entry_slot_publish_tail and ${ntail_call:-0} call(s) of it on a key table's own call count (the abort site's is the one that should have it): a rare-event rule applied at a site that makes thousands of passes would fill the live channel, and a site that quietly went back to the geometric subsample would only be visible in a run that happened to die on an abort that is neither <= 4 nor a power of two - which is exactly what 520's ninth, fatal abort was"
+        say "  xnu_entry_520: the two words of the idle exit's {fp, lr} slot, watched - __wrap_platform_cache_idle_exit ($(printf '0x%x' "$sxw")) takes sp off the register once (${sxw_mov} read at $(printf '0x%x' "${sxw_movaddr:-0}"), after its only stack movement, which is $sxw_dec decrement of $sxw_decv bytes and one restore), loads the four words ending at it into the table's own words itself (${sxw_nneg} loads at [${sxw_fo}], the first group ending at $(printf '0x%x' "${sxw_flast:-0}") before the first call and the second starting at $(printf '0x%x' "${sxw_lfirst:-0}") after the real exit - 521's repair, because 520 read them through the publisher's own frame and its log's pre_m4 is that function's saved lr -, and publishes them ${sxw_note} time(s) through entry_slot_note ($(printf '0x%x' "$snb")) - once before its call to the real platform_cache_idle_exit at $(printf '0x%x' "${sxw_realaddr:-0}") and once after, so the pair the fatal pop read is published before the push that fills it and the control is published only if the exit returns; the same wrapper reads cpu_data->rtcPop (cpu_data+#$s_pop, the offset cpu_idle's own body adds ${cpop} time) and the idle thread's saved sp/lr through entry_slot_rtc_note ($(printf '0x%x' "$srb")) at $(printf '0x%x' "${sxw_rtcaddr:-0}"), and the abort path carries the same two readings through entry_note_sleh ($(printf '0x%x' "$isleh"), ${sleh_n}+${sleh_r} call) - the words there read in place out of the exception frame by entry_slot_ab_note ($(printf '0x%x' "$sab")), which keeps the guard and the refusal count the two capture sites cannot have - so a run that dies publishes the words the pop read beside what the panel already says; __wrap_ml_get_timebase reads the counter either side of the real function and publishes them through entry_slot_tb_note ($(printf '0x%x' "$stb")), which is the only clock stamp the run has for the interrupt that was in service; the tables are in the image at their stated sizes (g_slot_pre/post 48 bytes = 6 keys, 2 counters and the 4 words the caller stages, g_slot_ab 40 = 7 and 3, g_slot_rtcpre/rtcab 52 = 9 and 4, g_slot_tb 24 = 4 and 2), the body of each holds exactly as many entry_live_write calls as its table has keys (6/7/9/4), and all $k520 keys are in the entry image's strings; the capture sites publish while their count is <= 4 and thereafter at the powers of two, the abort site publishes every abort up to $s_ab (STAGE90_SLOT_AB_MAX) and only then the powers of two - the rule 520's own ninth, fatal abort went missing under - and a reading refused by the kernel map's own window [$h_lo, $h_hi] is published as a zero with its refusal counted at the level it happened (_rej for a thread outside the map, _rin for a field of one inside it, which 520 published as a zero with nothing counting it)"
 
 
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls
