@@ -376,6 +376,39 @@ While the device is off the bus there is time to ask the question the goal actua
 an OS is on the far side of the `pop`?* - and the answer is not a matter of opinion. It is in the image and
 in 520's log, and it says that 522 is necessary but nowhere near sufficient for the user's stated milestone.
 
+### 3.2.1 The console, and the drivers that are not there
+
+520's boot output names exactly one console and it is not an I/O Kit one:
+
+```
+MI4IOS6_STAGE90_XNU stage90 xnu_entry: jumping to XNU's _start
+[os-console-459]
+Darwin Kernel Version ###not-built-by-apple###
+...
+MAC Framework successfully initialized
+using 80 buffer headers and 80 cluster IO buffer headers
+mcache: 1 CPU(s), 128 bytes CPU cache line size
+Added memory device md0/rmd0 ... at 0000000080511000 for 0000000000002000
+BSD root: md0, major 2, minor 0
+VM_TEST_DEVICE_PAGER_TRANSPOSE: PASS
+load_init_program: attempting to load /usr/local/sbin/launchd.development
+load_init_program: failed loading /usr/local/sbin/launchd.development: errno 2
+load_init_program: attempting to load /sbin/launchd
+```
+
+`[os-console-459]` is **the payload's own marker** (`os-console-459` is a cmdline token in
+`stages/stage90/build.sh`'s list), so every kernel `printf` below it travels through this stage's console
+shim and not through an OS-visible device. `bsd_init` therefore **completed without a console device**:
+there is no `IOConsole`/`AppleARMPL011`/UART service, no `IOService` matching that produced `/dev/console`,
+and nothing in the image is a driver - `nm` shows `devfs_vfsops`, `mockfs_vfsops`, `routefs_vfsops` and a
+large I/O Kit **core** (`IOService`, `IOBSD`, `IOBufferMemoryDescriptor`, the catalogue and registry
+machinery), which is a framework for drivers rather than any driver. The two things the kernel does *not*
+need a device for are the ones it did: `md0` comes from the platform shim's `RAMDisk` path, and pid 1 comes
+from a fixture. **"把基础驱动跑起来" has not started**; the console is the first item of it, because every
+service's own diagnostics go there.
+
+### 3.2.2 The root device and the filesystem
+
 **The root device is a fixture.** `rd=md0` with the payload's `RAMDisk` entry in `/chosen/memory-map` makes
 XNU attach the 8 KB array `g_stage90_ramdisk` (`0x80511000`, `RAMDISK_BYTES` 0x2000, in `.data`) as `md0` -
 520's log says so itself: `Added memory device md0/rmd0 (02000000/0D000000) at 0000000080511000 for
