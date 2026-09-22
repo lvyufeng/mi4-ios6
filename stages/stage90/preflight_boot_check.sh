@@ -379,6 +379,107 @@ _unshown=$(awk -F= '!/^#/ && $1 ~ /^STAGE90_/ { print $1 }' "$ENTRY_CFG" | LC_AL
 [[ -z $_unshown ]] \
   || fail "$ENTRY_CFG carries key(s) this gate does not print: $(printf '%s\n' "$_unshown" | tr '\n' ' ')- a switch recorded on the build side and not shown here is a switch the next run would go out with unread; add it to ENTRY_CFG_KEYS above"
 echo "  (recorded in $ENTRY_CFG, bound to $actual_sha)"
+#
+# **Which arm those keys add up to, and what it can be read for - because the checklist the XNU-entry arm
+# prints further down is 526's and the image this gate passes is not 526's.** Measured 2026-09-22 on the
+# frozen arm: the record says `SLOT_NULL=1 IDLE_CACHE_ENABLE=0` (entry bin `f202f246...`, the 533 arm -
+# 526's null instrument with the enter-side `SCTLR.C` re-enable taken out), while the block under
+# `== entering XNU ==` ends *"The image this preflight is being run against is 1daaf44e62456369..."* -
+# pinning to this image a checklist written for an image that has the enable in it. Item 3 there says
+# *"the enable is untouched, so ... xnu_live_slot_cwe_win shows C clear, _set shows it set with
+# _calls >= 1"*, and in this arm those two are the same value **by construction**: the only writer of
+# `SCTLR.C` sits inside `#if STAGE90_XNU_IDLE_CACHE_ENABLE` and the note is called either way
+# (`entry_trace.c:1851-1854`), so with the switch at 0 the register is read twice and never written. An
+# operator following item 3 sees `_cwe_set` with `C` still clear and reads a *designed absence* as a
+# *failed enable* - the 533 doc's section 5 item 3 is that same criterion and 538 is where it was shown
+# it cannot fail. So the arm is derived here, one consequence per recorded key, and the enable's line
+# carries the reading rule that follows from its own value rather than a second assertion.
+# The five are read as `grep -c` of the whole `KEY=` prefix rather than as awk's last match, because the
+# three ways a value can be unusable here are three different things and only one of them is `build_entry.sh`
+# refusing a bad value at build time (`:350-352`): a key can be **absent** (a record older than the key, so
+# the clause has no value and `[[ $V -eq 1 ]]` on an empty string would silently take the 0 branch *while the
+# record printed above shows a blank* - a false clearance in the exact shape [[552's exit clause]] was mended
+# for), **defined twice** (one value with two definitions, whose `[[ -eq ]]` would read a multi-line string),
+# or **out of range**. All three refuse, each naming what it is, and **none of them prescribes a rebuild** -
+# the frozen pair's payload embeds the entry image, so "rebuild the entry image" is a refusal whose remedy
+# would spend the very freeze this gate exists to protect (539's defect, one arm later).
+_vmiss=; _vdup=; _vbad=
+for _vk in STAGE90_XNU_SLOT_NULL STAGE90_XNU_EXIT_POC_FLUSH STAGE90_XNU_IDLE_CACHE_ENABLE \
+           STAGE90_XNU_ISTACK_SEPARATE STAGE90_XNU_IDLE_STACK
+do
+  case $(grep -c "^$_vk=" "$ENTRY_CFG") in
+    0) _vmiss="$_vmiss $_vk" ; continue ;;
+    1) ;;
+    *) _vdup="$_vdup $_vk" ; continue ;;
+  esac
+  _vline=$(grep "^$_vk=" "$ENTRY_CFG")
+  _vv=${_vline#*=}
+  case $_vk in
+    STAGE90_XNU_SLOT_NULL)         V_SLOT_NULL=$_vv ;;
+    STAGE90_XNU_EXIT_POC_FLUSH)    V_EXIT_POC_FLUSH=$_vv ;;
+    STAGE90_XNU_IDLE_CACHE_ENABLE) V_IDLE_CACHE_ENABLE=$_vv ;;
+    STAGE90_XNU_ISTACK_SEPARATE)   V_ISTACK_SEPARATE=$_vv ;;
+    STAGE90_XNU_IDLE_STACK)        V_IDLE_STACK=$_vv ;;
+  esac
+  case $_vv in
+    0|1) ;;
+    *) _vbad="$_vbad $_vk=$_vv" ;;
+  esac
+done
+[[ -z $_vmiss ]] \
+  || fail "$ENTRY_CFG has no line for:$_vmiss - and this clause reads which arm the entry image is out of exactly those values, so without them it could only narrate the 0 arm while the record shows a blank. Nothing is rebuilt by this refusal and nothing should be: derive the arm from the record and the sources by hand before the run, or write the keys into the record only if they are what the image really was built with"
+[[ -z $_vdup ]] \
+  || fail "$ENTRY_CFG defines$_vdup more than once: one value with two definitions, and a gate that reads either of them is a gate that compared neither"
+[[ -z $_vbad ]] \
+  || fail "the record's variant key(s)$_vbad are not 0 or 1: these five are switches, and a value that is neither is not an arm this clause can narrate - so the run would go out with a story about it that nothing supports"
+echo "== which arm the entry image in out/ is, in words =="
+if [[ $V_SLOT_NULL -eq 1 ]]; then
+  echo "  capture sites (SLOT_NULL=1): the NULL instrument - entry_slot_null_note publishes the pass"
+  echo "      count alone, so the four slot words are neither loaded nor stored by this image and the"
+  echo "      xnu_live_slot_{pre,post}_{sp,m16,m12,m8,m4} keys are expected ABSENT, not missing."
+else
+  echo "  capture sites (SLOT_NULL=0): the capture - eight loads and eight stores a pass, publishing the"
+  echo "      four words of the idle exit's {fp, lr} slot at each of the two sites. That shape is present"
+  echo "      in every image that did not return and absent from every one that did."
+fi
+echo "  bracket (pre note -> rtc note -> the real exit -> post note; 538 read the three call sites out of"
+echo "      these very bytes): xnu_live_slot_pre_calls, xnu_live_slot_rtcab_calls (the same site's rtcpre"
+echo "      spelling is the other key set this image carries tables for) and xnu_live_slot_post_calls run"
+echo "      in the same pass on one schedule and one gate - so pre without rtcab localizes the death"
+echo "      between the two notes, and pre and rtcab without post puts it inside"
+echo "      platform_cache_idle_exit, which is the localization this arm exists to buy."
+if [[ $V_IDLE_CACHE_ENABLE -eq 1 ]]; then
+  echo "  window's near end (IDLE_CACHE_ENABLE=1): entry_idle_cache_enable's one write to SCTLR.C IS in"
+  echo "      this image, and xnu_live_slot_cwe_win (C clear, read with the cache still off) against"
+  echo "      _cwe_set (C set, read back with it on) with _calls >= 1 is that write taking."
+else
+  echo "  window's near end (IDLE_CACHE_ENABLE=0): the SCTLR.C write is NOT in this image - the wrapper"
+  echo "      calls entry_window_note(win, entry_sctlr()) with the register unchanged, so _cwe_win and"
+  echo "      _cwe_set are the SAME value by construction and the pair says only that the site ran."
+  echo "      **Agreement there is this arm's expected reading, not a failed enable.** The 526 narration"
+  echo "      below predates this line; where its checklist and this derived line differ, this one governs."
+fi
+if [[ $V_EXIT_POC_FLUSH -eq 1 ]]; then
+  echo "  window's far end (EXIT_POC_FLUSH=1): the exit-side FlushPoC_Dcache IS in this image - the one"
+  echo "      operation this project has now twice seen a device not come back from."
+else
+  echo "  window's far end (EXIT_POC_FLUSH=0): no exit-side flush of this image's own."
+fi
+if [[ $V_ISTACK_SEPARATE -eq 1 ]]; then
+  echo "  interrupt stack (ISTACK_SEPARATE=1): separate from the boot thread's, so an interrupt-path"
+  echo "      fault is not a fault on the stack the boot is using."
+else
+  echo "  interrupt stack (ISTACK_SEPARATE=0): SHARED with the boot thread's - an interrupt-path fault"
+  echo "      lands on the same stack the boot is using and must not be read as the cache first."
+fi
+if [[ $V_IDLE_STACK -eq 1 ]]; then
+  echo "  idle stack (IDLE_STACK=1): the wrapper is in this image."
+else
+  echo "  idle stack (IDLE_STACK=0): the wrapper is NOT in this image."
+fi
+echo "  and the count keys are a schedule, never a total: n publishes while n <= 4 and then at the powers"
+echo "      of two (entry_slot_publish, entry_stubs.c:6236), so a published 4 means AT LEAST four - which"
+echo "      is why a count read as a total is 406's tell and not a reading."
 
 echo
 echo "== the entry image's own sources =="
@@ -1033,10 +1134,16 @@ case "$(value_of STAGE90_XNU_ENTRY)" in
     echo "                 or the boot moving on - and the same death at the same pc says the"
     echo "                 mechanism is not the cache state but something the window itself"
     echo "                 does."
-    echo "                 **The 522 arm ran on 2026-09-22 and the device did not come back** (section 3.3"
+    echo "                 **The 522 arm ran on 2026-09-22 and nothing came back to adb** (section 3.3"
     echo "                 of experiment 522 has the USB timeline: dev 88 = 18d1:d00d at 14:14:45, gone at"
-    echo "                 14:14:46, nothing after), so the prediction above is spent and the four readings"
-    echo "                 it named have no values - there was no log. What the non-return did produce is a"
+    echo "                 14:14:46, nothing after) - and 551 is the repair of how that was concluded,"
+    echo "                 because the same d00d-then-gone shape appears in the host log followed by a"
+    echo "                 genuine return ([2163244] through [2173264], serial 4a2fe00b), which is why"
+    echo "                 run_and_capture.sh now enters 2 only when the log itself shows no new enumeration"
+    echo "                 of the serial - and 3, a capture failure and not a hang, when it does. Either way"
+    echo "                 the prediction above is spent and the four readings it named have no values: if"
+    echo "                 the device never came back there was no log, and if it came back unread the run"
+    echo "                 was not the arm's run. What the run did produce is a"
     echo "                 ledger, and it is the reason the arm to run now is different in kind rather than"
     echo "                 in value: 521 and 522 both carry 521's repair of the exit wrapper's capture (the"
     echo "                 four words of the idle exit's {fp, lr} slot read by the caller at each of two"
@@ -1062,9 +1169,13 @@ case "$(value_of STAGE90_XNU_ENTRY)" in
     echo "                 it returns, xnu_live_slot_pre_calls and xnu_live_slot_post_calls are present and"
     echo "                 rising with the four words ABSENT - the site ran and published a count and nothing"
     echo "                 else, which is what a null run should look like, and their absence is the other"
-    echo "                 reading (the site never ran); (3) the enable is untouched, so 522's block in"
-    echo "                 run_and_capture.sh --summarise reads this log too - xnu_live_slot_cwe_win shows C"
-    echo "                 clear, _set shows it set with _calls >= 1; (4) the ending: the same sleh_storm 9 at"
+    echo "                 reading (the site never ran); (3) the enable: whether the SCTLR.C write is in"
+    echo "                 this image at all - and therefore whether the _cwe_* pair is a test or a"
+    echo "                 formality - is what the derived line above the XNU-entry block reads out of"
+    echo "                 the record, and that line governs this one; where the write IS in the image,"
+    echo "                 522's block in run_and_capture.sh --summarise reads this log for it too -"
+    echo "                 xnu_live_slot_cwe_win shows C clear, _set shows it set with _calls >= 1; (4) the"
+    echo "                 ending: the same sleh_storm 9 at"
     echo "                 the same pc as 520 would say the mechanism is neither the capture nor the re-enable,"
     echo "                 and any later ending is progress."
     echo "                 The image this preflight is being run against is"
@@ -1076,8 +1187,13 @@ case "$(value_of STAGE90_XNU_ENTRY)" in
     echo "          Its record, read from the ledgers rather than from this text: it recovered"
     echo "          every run from 506 to 515, including runs parked in the kernel's own idle"
     echo "          WFI and runs in an abort storm, and 516's two runs came back on XNU's own"
-    echo "          'MACH Reboot'. It then did not recover 517's first run. So: a net that has"
-    echo "          held many times and is not proved to hold always. A hang here may need a"
+    echo "          'MACH Reboot'. It then did not recover 517's first run, and the two runs"
+    echo "          whose non-return is what chose the current arm - 521 and 522 - are further"
+    echo "          misses; net-pessimistic, and the route has drifted with the ledgers, so"
+    echo "          what stands is the verdict and not the count. So: a net that has held many"
+    echo "          times and is not proved to hold always - and not the way a non-return is"
+    echo "          judged either, since 551 reads that out of the host log (exit 2 against"
+    echo "          exit 3), which is a reading the net cannot give. A hang here may need a"
     echo "          power press, and the device is never at risk of being bricked - nothing in"
     echo "          this project is ever written to storage."
     ;;
