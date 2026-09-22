@@ -245,6 +245,34 @@ uint32_t intstack_top = (uint32_t)(uintptr_t)&g_intstack[ENTRY_STACK_BYTES];
 uint32_t fiqstack_top = (uint32_t)(uintptr_t)&g_fiqstack[ENTRY_STACK_BYTES];
 #endif /* !STAGE90_ENTRY_REAL_ARM_INIT */
 
+/*
+ * **519: the stack the idle thread runs on, in this image rather than on the interrupt stack.**
+ *
+ * `osfmk/arm/cswitch.s`'s `Idle_context` puts the idle thread on the *interrupt stack*
+ * (`ldr sp, [r12, CPU_ISTACKPTR]`), and that field is the same one the exception vectors read to place
+ * a **handler's** stack - so the idle thread and every interrupt handler run on one stack, and the
+ * handler's 5th and 6th pushed words land on the idle code's own saved return address. Experiment 518's
+ * run caught that at the instruction level: the idle exit's closing `pop {fp, pc}` returned into a
+ * timebase value, and the frame Apple's panic printed was authentic because the damage is one word
+ * *above* it.
+ *
+ * `tools/patch_idle_stack.py` points `Idle_context` at this array instead, so the two stacks are
+ * different memory at the same time - which is the one thing moving `cpu_data->istackptr` cannot do,
+ * because both readers read that one field. Two consequences, and the second is why this is the safer
+ * arm as well as the fix: the idle code also stops running inside
+ * `[intstack_top - INTSTACK_SIZE, intstack_top)`, which is exactly what `ml_at_interrupt_context()`
+ * (`machine_routines.c:671`) tests - so a fault in the idle code is no longer Apple's
+ * `panic: sleh_abort at interrupt context` but an ordinary abort on a path this image already recovers.
+ *
+ * **Not `static`, and not behind a switch**: the name is written into the assembled `Idle_context` by
+ * that script, and a second spelling of the switch here is the defect 517 shipped (a build switch that
+ * reached one translation unit and not the one that reads it). 16 KB is the size of the interrupt stack
+ * the idle thread was borrowing; the build compares this array's size, the size the assembler was given
+ * and the immediate in the object's `Idle_context` against each other.
+ */
+#define STAGE90_IDLE_STACK_SIZE 16384u
+uint8_t stage90_idle_stack[STAGE90_IDLE_STACK_SIZE] __attribute__((aligned(16)));
+
 /* The vector table `_start` fills in with the fleh_* addresses below. */
 uint32_t ExceptionVectorsTable[8] __attribute__((aligned(32)));
 
@@ -5907,6 +5935,14 @@ uint32_t g_istack_cpsr1, g_istack_cpsr2;
  * compares both numbers against `assym.s` and checks the store the flag compiles to.
  */
 #define STAGE90_CPU_ISTACKPTR  4u
+/* **The second field, and 519 needs it because the kernel's own test reads *this* one.** `istackptr`
+ * is where a handler's stack starts; `intstack_top` (offset 8, `genassym.c:223`) is the top of the
+ * region `ml_at_interrupt_context()` (`machine_routines.c:671`) calls the interrupt stack, and its test
+ * is `sp < intstack_top && sp > intstack_top - INTSTACK_SIZE`. `arm_init.c:226-227` writes the two to
+ * the same value for the boot CPU (which is why 518's arm could move the handler's stack by 8 KB and
+ * leave the *test* answering about the region unchanged) - so a reading that named only one of them
+ * could not say what the abort path would decide. */
+#define STAGE90_CPU_INTSTACK_TOP  8u
 #define STAGE90_INTSTACK_SIZE  16384u
 
 extern char intstack[];
@@ -5945,9 +5981,19 @@ __attribute__((noinline)) void entry_istack_store(volatile uint32_t *slot, uint3
 void entry_istack_separate(void)
 {
     volatile uint32_t *slot = (volatile uint32_t *)(uintptr_t)(BootCpuData + STAGE90_CPU_ISTACKPTR);
-    const uint32_t want = (uint32_t)(uintptr_t)intstack + (STAGE90_INTSTACK_SIZE / 2u);
-
     uint32_t cpsr;
+
+    /* **`want` is declared inside the flag, and 519's build is what found that.** With
+     * `STAGE90_XNU_ISTACK_SEPARATE=0` the store below is not compiled, so a `want` declared outside the
+     * `#if` is an unused variable - and this file is built with `-Werror`, so the flag that is supposed
+     * to *read* the arrangement instead of changing it did not build at all. 518b's note that "`=0`
+     * still restores 517b's arrangement" was a claim about the source that no build with the flag off
+     * had tested; 519's arm is the first that needs the flag-off image (an arm that changes where the
+     * idle body runs must be comparable with one that does not), which is how a two-step-old defect
+     * surfaced. */
+#if STAGE90_XNU_ISTACK_SEPARATE
+    const uint32_t want = (uint32_t)(uintptr_t)intstack + (STAGE90_INTSTACK_SIZE / 2u);
+#endif
 
     __asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr));
 
@@ -5986,6 +6032,79 @@ void entry_istack_separate(void)
 #endif
 }
 
+/* ------------------------------------------------------------------ 519: the idle thread's stack */
+/*
+ * **The reading 519 exists to take, and it is taken where the idle body is actually running.** The
+ * idle body reaches its stack through `Idle_context`, which this step's patch redirects, and the first
+ * thing it does on that stack is call `platform_cache_idle_enter` - so `__wrap_platform_cache_idle_enter`
+ * is the earliest and the only place where this file can observe *where the idle code is*, in the same
+ * call whose exit counterpart 518's run caught returning into a timebase value. It is called once per
+ * pass of the idle loop and unconditionally by `cpu_idle`, so a run that dies anywhere in the idle path
+ * has already published it.
+ *
+ * The numbers, and each is one half of a comparison the run has to be able to make from the log alone
+ * (518's void arm is the lesson: its verdict was a subtraction of two numbers it did happen to have):
+ *
+ *   `sp`            the idle body's stack pointer, read from the register - this is the whole claim
+ *   `top`           `stage90_idle_stack + STAGE90_IDLE_STACK_SIZE`, the value the patched `Idle_context`
+ *                   loads, so `sp` can be placed inside the array by subtraction
+ *   `istackptr`     `cpu_data->istackptr`, the handler's stack start, read live (519 leaves it alone)
+ *   `intstacktop`   `cpu_data->intstack_top`, the field `ml_at_interrupt_context()` reads - carried
+ *                   separately from `istackptr` because 518's arm moved one and not the other
+ *   `inwin`         `ml_at_interrupt_context()`'s own predicate, on this `sp` and `intstack_top`'s
+ *                   field: 1 means a fault here would be taken as one "at interrupt context"
+ *   `calls`         how many passes of the idle loop have taken the reading, so `inwin` is a count
+ *                   against a denominator rather than a value with no scale
+ *
+ * **`inwin` is the count, not a flag.** With the idle body on the interrupt stack - the arrangement
+ * 516, 517 and 518 ran - every reading is 1; with it on this array no reading should be 1, and a single
+ * 1 in a run of thousands is the interesting result. So the `.bss` global counts the 1s and the epilogue
+ * prints the count against the call count, and the live channel carries the last reading's six values.
+ *
+ * It is called with the D-cache **on** (before the real enter disables it, and before 516's write-back
+ * or the window's own clean), because a counter touched while the cache is off has the stale-line
+ * problem 515 measured: the write can be lost and the count then reads as zero for the wrong reason.
+ */
+uint32_t g_idlestack_calls, g_idlestack_sp_first, g_idlestack_sp_last, g_idlestack_inwin, g_idlestack_istackptr;
+/* **The three other numbers are globals rather than recomputed by the epilogue, and that is the
+ * "one value, two definitions" rule**: the array's top, the window's low bound and its high bound are
+ * *this* function's arithmetic (the array's address plus the size the assembler was given, and the
+ * field `ml_at_interrupt_context()` reads), so the console line prints the numbers the reading was
+ * taken with instead of a second spelling of them computed in another translation unit. */
+uint32_t g_idlestack_top, g_idlestack_winlo, g_idlestack_winhi;
+
+void entry_idle_stack_note(void)
+{
+    uint32_t sp;
+    uint32_t top = (uint32_t)(uintptr_t)stage90_idle_stack + STAGE90_IDLE_STACK_SIZE;
+    uint32_t istackptr = *(volatile uint32_t *)(uintptr_t)(BootCpuData + STAGE90_CPU_ISTACKPTR);
+    uint32_t intstacktop = *(volatile uint32_t *)(uintptr_t)(BootCpuData + STAGE90_CPU_INTSTACK_TOP);
+    uint32_t inwin;
+
+    __asm__ volatile ("mov %0, sp" : "=r"(sp));
+
+    /* The kernel's own expression, on this sp rather than on a described one. */
+    inwin = ((sp < intstacktop) && (sp > intstacktop - STAGE90_INTSTACK_SIZE)) ? 1u : 0u;
+
+    if (g_idlestack_calls == 0u)
+        g_idlestack_sp_first = sp;
+    g_idlestack_calls++;
+    g_idlestack_sp_last = sp;
+    g_idlestack_istackptr = istackptr;
+    g_idlestack_top = top;
+    g_idlestack_winhi = intstacktop;
+    g_idlestack_winlo = intstacktop - STAGE90_INTSTACK_SIZE;
+    g_idlestack_inwin += inwin;
+
+    if (entry_live_ready() != 0u) {
+        entry_live_write("xnu_live_idlestack_sp", sp);
+        entry_live_write("xnu_live_idlestack_top", top);
+        entry_live_write("xnu_live_idlestack_istackptr", istackptr);
+        entry_live_write("xnu_live_idlestack_intstacktop", intstacktop);
+        entry_live_write("xnu_live_idlestack_inwin", inwin);
+        entry_live_write("xnu_live_idlestack_calls", g_idlestack_calls);
+    }
+}
 
 __attribute__((noinline)) static void entry_registry_probe(uint32_t seq, uint32_t site);
 /*

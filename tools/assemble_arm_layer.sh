@@ -62,6 +62,30 @@ while IFS= read -r d; do
     [[ -n $d ]] && CONFIG_DEFINES+=("$d")
 done <<<"$defines"
 OUT=${XNU_ASM_OBJ:-$REPO_ROOT/out/xnu_asm_obj}
+# **519: where the idle thread runs.** `cswitch.s`'s `Idle_context` takes the idle thread's stack from
+# `cpu_data->istackptr` - the same field the exception vectors read to place a handler's stack - so the
+# idle thread and every handler share one stack, and the handler's 5th and 6th pushed words land on the
+# idle code's own saved return address (experiment 518's run caught the idle exit popping one of them
+# into the PC). Moving the field cannot fix that, because both readers read that one field; the idle
+# thread needs a stack of its own, and `Idle_context` is the one place that can be said. The patch is
+# `tools/patch_idle_stack.py`, bounded to `Idle_context` (`Shutdown_context` keeps the original two
+# instructions), and it is a *semantic* change rather than a dialect translation - so it is its own
+# switch, it is reported, and a source it does not match stops the build.
+#
+# The size is spelled here and in `entry_stubs.c` (the array) and the build compares the two against the
+# object's own immediate, because a mismatch would be an array that does not cover the region the idle
+# thread actually uses.
+IDLE_STACK=${STAGE90_XNU_IDLE_STACK:-1}
+IDLE_STACK_SIZE=${STAGE90_XNU_IDLE_STACK_SIZE:-16384}
+case "$IDLE_STACK" in
+    0|1) ;;
+    *) echo "STAGE90_XNU_IDLE_STACK must be 0 or 1, not [$IDLE_STACK]" >&2; exit 1 ;;
+esac
+case "$IDLE_STACK_SIZE" in
+    ''|*[!0-9]*) echo "STAGE90_XNU_IDLE_STACK_SIZE must be a decimal byte count, not [$IDLE_STACK_SIZE]" >&2; exit 1 ;;
+esac
+PATCH_IDLE_STACK=$TOOLS_DIR/patch_idle_stack.py
+idle_patched=0
 ASSYM=${XNU_ASSYM_OUT:-$REPO_ROOT/out/xnu_assym}/$CONFIG
 OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
 DEVICE_HEADERS=${XNU_DEVICE_HEADERS_OUT:-$REPO_ROOT/out/xnu_device}/$CONFIG
@@ -128,6 +152,10 @@ ASFLAGS=(
     -Dfmrx=vmrs -Dfmxr=vmsr
     -D__NO_UNDERSCORES__=1
 )
+# 519's size, for `patch_idle_stack.py`'s replacement text. It is appended here and not above because
+# the array is assigned, not extended, further down the file - an `ASFLAGS+=(...)` before this line is
+# discarded by this line, which the first version of this change did.
+ASFLAGS+=("-DSTAGE90_IDLE_STACK_SIZE=$IDLE_STACK_SIZE")
 INCLUDES=(
     -I"$ASSYM" -I"$REPO_ROOT/stages/stage90/xnu_arm_boot"
     -I"$OPTION_HEADERS" -I"$DEVICE_HEADERS"
@@ -165,6 +193,31 @@ while read -r src; do
         mv -f "$OUT/translated.tmp" "$OUT/translated/$rel"
         use=$OUT/translated/$rel
         translated=$((translated + 1))
+    fi
+    if [[ $IDLE_STACK -eq 1 && $name == cswitch ]]; then
+        # The patch runs on whichever text is about to be assembled (translated or the tree's own) and
+        # writes to the mirror, and a success cannot then be assembled from the wrong file.
+        #
+        # **What keeps this from writing the tree is `patch_idle_stack.py`'s own `os.replace`, and not the
+        # fact that it writes into `$OUT`.** That mirror is *directories that are real and files that are
+        # symlinks into the tree*, so `$OUT/translated/cswitch.s` is a symlink to
+        # `external/xnu-4570.1.46/osfmk/arm/cswitch.s` whenever the translate step has not replaced it,
+        # and an `open(..., 'w')` on it writes the tree. The first version of this comment claimed a
+        # failure here could not leave the tree changed; the first run of the tool did exactly that, and
+        # the file was restored from git. The translate step above is safe by the same mechanism (`mv -f`
+        # renames over the symlink), which is the mechanism this one now uses too.
+        #
+        # `--count-only` first, so a source the patch does not match is reported as the build's failure
+        # rather than as a compiler error about `LOAD_ADDR`.
+        if [[ $("$PATCH_IDLE_STACK" "$use" --count-only) != 1 ]]; then
+            fail=$((fail + 1))
+            printf '  FAIL %-24s %s\n' "$name" "patch_idle_stack did not match Idle_context"
+            continue
+        fi
+        materialize_for "$rel"
+        "$PATCH_IDLE_STACK" "$use" "$OUT/translated/$rel" || { fail=$((fail + 1)); continue; }
+        use=$OUT/translated/$rel
+        idle_patched=$((idle_patched + 1))
     fi
     if ! clang "${ASFLAGS[@]}" "${INCLUDES[@]}" "${CONFIG_DEFINES[@]}" -c "$use" -o "$OUT/$name.o" 2>"$OUT/$name.log"; then
         fail=$((fail + 1))
@@ -208,4 +261,5 @@ done < "$MANIFEST"
 
 echo
 echo "assemble: $ok ok, $fail failed; $translated file(s) translated, $renamed symbol(s) de-underscored"
+echo "          519: STAGE90_XNU_IDLE_STACK=$IDLE_STACK, size $IDLE_STACK_SIZE; Idle_context patched into $idle_patched object(s) (expected 1)"
 echo "objects in $OUT"

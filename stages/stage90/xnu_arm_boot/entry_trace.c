@@ -265,6 +265,12 @@ extern void entry_istack_separate(void);
 extern uint32_t g_istack_before, g_istack_after, g_istack_moved;
 extern uint32_t g_istack_calls, g_istack_site;
 extern uint32_t g_istack_cpsr1, g_istack_cpsr2;
+/* 519: the idle thread's own stack. `entry_idle_stack_note` is called from the idle's cache-enter
+ * wrapper - the first C on the stack the idle body was given - and the globals are the epilogue's
+ * count of readings taken inside `ml_at_interrupt_context()`'s window. See `entry_stubs.c`. */
+extern void entry_idle_stack_note(void);
+extern uint32_t g_idlestack_calls, g_idlestack_sp_first, g_idlestack_sp_last, g_idlestack_inwin;
+extern uint32_t g_idlestack_top, g_idlestack_winlo, g_idlestack_winhi, g_idlestack_istackptr;
 extern void entry_note_timebase_call(uint32_t ret_lo, uint32_t sctlr);
 
 /* **515's two globals, read by name, and they are the operands of Apple's own test.** `caches.c:414`
@@ -1262,6 +1268,21 @@ int __wrap_poll(void *proc, void *uap, int *retval)
                g_istack_before, g_istack_after, g_istack_moved, g_istack_site, g_istack_calls,
                (int32_t)(g_istack_before - g_istack_after), g_istack_cpsr1, g_istack_cpsr2,
                ((g_istack_cpsr2 & 0x80u) != 0u) ? "set" : "clear");
+
+        /* 519: the idle thread's stack, counted over every pass of the idle loop that reached the
+         * cache window's enter. `sp` should be inside `stage90_idle_stack` (the array's own address is
+         * printed so the placement can be done by subtraction, without the disassembly), and `inwin` is
+         * the number of readings - out of `g_idlestack_calls` - for which `ml_at_interrupt_context()` would
+         * have called this an interrupt context. With the arm on it should be 0, against 1 per call in
+         * the arrangement 516, 517 and 518 ran; the pair of fields is printed because 518's arm moved
+         * one of them and not the other, which is why its panic test kept answering the same way. */
+        printf("mini4: the idle thread's own stack -- %d reading(s) from the cache window's enter, "
+               "sp 0x%x first and 0x%x last, inside stage90_idle_stack..0x%x;  cpu_data->istackptr "
+               "0x%x, cpu_data->intstack_top 0x%x, and %d reading(s) inside "
+               "[intstack_top - %d, intstack_top) - the window `ml_at_interrupt_context()` tests, "
+               "where a fault in the idle code is Apple's own 'sleh_abort at interrupt context'\n",
+               g_idlestack_calls, g_idlestack_sp_first, g_idlestack_sp_last, g_idlestack_top,
+               g_idlestack_istackptr, g_idlestack_winhi, g_idlestack_inwin, (int)(g_idlestack_winhi - g_idlestack_winlo));
     }
 
     return error;
@@ -1678,6 +1699,18 @@ void __wrap_platform_cache_idle_enter(void)
     uint32_t datap = entry_cpu_datap();
 
     entry_note_pce(caller, up, ncpu, datap, entry_tpidrprw(), before);
+
+    /*
+     * 519: **where the idle body is running, taken on the idle body's own stack.** This call is the
+     * earliest C on the stack `Idle_context` chose, and 519's whole content is which stack that is -
+     * so the reading belongs here, in the same wrapper whose *exit* counterpart 518's run caught
+     * returning into a timebase value. It is taken before 516's write-back and before the real call
+     * disables the D-cache, because the record's counter has to be touched with the cache on (515's
+     * stale-line lesson) and because the value is a register, not a memory location. With the arm on
+     * the reading should be a `sp` inside this image's own array and an `inwin` of 0; with it off the
+     * same two numbers are 516's arrangement and an `inwin` of 1.
+     */
+    entry_idle_stack_note();
 
     /*
      * 516: **the write-back, made while the cache is still on, and made to the Point of Coherency.**

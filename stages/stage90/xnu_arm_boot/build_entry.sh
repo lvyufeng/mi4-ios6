@@ -28504,8 +28504,13 @@ verify_trace_symbols() {
     # into one pool word (`0x80516000`) - the check would have failed a correct body. So the test is the
     # *computed* value, from this image's own `intstack` and this configuration's `INTSTACK_SIZE`.
     ihalf=$(awk -v w="$iwant" '/<entry_istack_separate>:/ { inb = 1; next } inb && index($0, w) > 0 { n++ } END { printf "%d", n + 0 }' <<<"$ibody")
-    [[ "${ihalf:-0}" -ge 1 ]] ||
-        layout_fail "entry_istack_separate's body never materializes $iwant - this image's intstack ($bcast) plus INTSTACK_SIZE/2 ($((is_is / 2))): the arm's whole content is *where* in that $is_is-byte stack the handler's start is moved to, so a body without that value is pointing somewhere else while this clause reports the flag as on"
+    # **The count is taken in both arrangements and asserted in only one, and that is a correction this
+    # step's own build made.** The check used to run unconditionally - and 519's arm is the first that
+    # builds with `STAGE90_XNU_ISTACK_SEPARATE=0`, where `want` is not compiled at all (the same run
+    # found it as an unused variable under `-Werror`), so the flag that is supposed to *read* the
+    # arrangement instead of changing it stopped the build with "the arm's whole content is where ... the
+    # handler's start is moved to". 518b's note that `=0` restores 517b's arrangement was a claim about
+    # the source that no build with the flag off had tested.
     istore=$(sym_addr entry_istack_store) ||
         layout_fail "entry_istack_store is not in the linked image: the store into cpu_data->istackptr has to be a symbol this clause can look for, because whether it is *called* is the whole difference between this arm and 517b's"
     ibsites=$(awk '$3 == "bl" && $5 == "<entry_istack_store>" { n++ } END { printf "%d", n + 0 }' <<<"$ibody")
@@ -28521,6 +28526,8 @@ verify_trace_symbols() {
     [[ "${istbody_n:-0}" -ge 1 ]] ||
         layout_fail "entry_istack_store's body stores nothing: it exists to be the one store into cpu_data->istackptr, so an empty body would make every assertion above a statement about a call to nothing"
     if [[ "$ISTACK_SEPARATE" == 1 ]]; then
+        [[ "${ihalf:-0}" -ge 1 ]] ||
+            layout_fail "STAGE90_XNU_ISTACK_SEPARATE=1 and entry_istack_separate's body never materializes $iwant - this image's intstack ($bcast) plus INTSTACK_SIZE/2 ($((is_is / 2))): the arm's whole content is *where* in that $is_is-byte stack the handler's start is moved to, so a body without that value is pointing somewhere else while this clause reports the flag as on"
         [[ "${ibsites:-0}" == 1 ]] ||
             layout_fail "STAGE90_XNU_ISTACK_SEPARATE=1 and entry_istack_separate calls entry_istack_store ${ibsites:-0} time(s): the image would carry the reading and not the change, which is 517's flag defect in the other direction"
         for k in xnu_live_istack_moved xnu_live_istack_after xnu_live_istack_cpsr1 xnu_live_istack_cpsr2; do
@@ -28531,6 +28538,8 @@ verify_trace_symbols() {
     else
         [[ "${ibsites:-0}" == 0 ]] ||
             layout_fail "STAGE90_XNU_ISTACK_SEPARATE=0 and entry_istack_separate still calls entry_istack_store ${ibsites:-0} time(s): a flag-off image must read the arrangement and not change it - this is the arm 517b's image is comparable with"
+        [[ "${ihalf:-0}" -eq 0 ]] ||
+            layout_fail "STAGE90_XNU_ISTACK_SEPARATE=0 and entry_istack_separate's body still materializes $iwant, the middle of the interrupt stack: a flag-off image carrying the moved value is the change without the reading, and the mirror of the check above - with the value gone the wrapper reads the field and leaves it alone, which is what makes it the control 519's arm is compared against"
     fi
     # **Two sites, and the earlier one is checked to be earlier.** The store has to land before this CPU
     # can take an interrupt with its `sp` in the upper half of the interrupt stack, and that window opens
@@ -28558,6 +28567,169 @@ verify_trace_symbols() {
     [[ "${ifsites:-0}" == 1 ]] ||
         layout_fail "__wrap_machine_idle calls entry_istack_separate ${ifsites:-0} time(s) and not once: the idle loop's own wrapper is the entry point that runs in thread context with interrupts masked on every pass, and the idle path is where the collision was measured - zero means the arm never runs, and two means a second site nobody reasoned about"
     say "  xnu_entry_518: the interrupt handler's own stack - this build's STAGE90_XNU_ISTACK_SEPARATE=$ISTACK_SEPARATE, so entry_istack_separate ($isym) calls entry_istack_store ($istore, ${istbody_n} store in its own body) ${ibsites} time(s) into cpu_data+#$is_ip (assym.s and entry_stubs.c agree on CPU_ISTACKPTR #$is_ip and INTSTACK_SIZE $is_is) from two sites - the earlier one in __wrap_PE_init_platform ($pep) at $peist, before its call to the real function at $pereal, so the store lands before that call brings this CPU's interrupt controller up, and one in __wrap_machine_idle (${ifsites} call site, entered once per pass of the idle loop, in thread context, with interrupts masked); the value is intstack + $is_is/2, the value $iwant materialized ${ihalf} time(s) in the compiled body, so the handler's stack starts 8192 bytes below the top of the interrupt stack that the boot and the idle loop are running on (start.s:310-311) - and the frame fleh_irq_kernel builds below the interrupted sp is 360 bytes wide with its six recorded words at +52..+72, i.e. 316 to 324 bytes below that same top, which is the overlap this arm removes"
+
+    # --------------------------------------------------------- 519: the idle thread's own stack
+    # **The arm 518 could not be, and its whole content is one substitution in `cswitch.s`.** The
+    # collision 518 named is real - 518's own run resolved it to the instruction: the idle body's
+    # closing `pop {fp, pc}` returned into a timebase value, because the handler's 5th and 6th pushed
+    # words land on the idle code's saved return address. It cannot be removed by moving
+    # `cpu_data->istackptr`, because that field has *two* readers that both want the stack they are
+    # about to use: the vectors (`locore.s:1361-1362`) and `cswitch.s`'s `Idle_context`. 518's run moved
+    # both and the gap was invariant (`SS_SP == istackptr - 16` before and after), so its arm tested
+    # nothing. 519 is the one place where the two can be told apart, and the reading behind it is that
+    # the idle body was *entered* through that function: `SS_SP = istackptr - 16` is exactly
+    # `Idle_context`'s `sp = istackptr`, then `cpu_idle`'s `sub sp, sp, #8` and the exit wrapper's own
+    # 8-byte frame - a signature no other path produces (the boot's own sp is `intstack_top - 80` from
+    # `start.s:311`, and `machine_idle` runs on the idle *thread's* stack).
+    #
+    # What this clause checks is what makes the substitution a fact of the artifact instead of a claim
+    # in a comment: it is *bounded* (`Shutdown_context` keeps the same instruction, because it wants the
+    # interrupt stack on purpose), the array is as big as the assembler was told and exactly as big as
+    # the compiled code adds, the literal `Idle_context` loads is the array's own top, the whole array
+    # is *outside* `ml_at_interrupt_context()`'s window (so a fault in the idle code is no longer
+    # Apple's `panic: sleh_abort at interrupt context`), and the reading 519 is built around - the idle
+    # body's `sp` against both fields the kernel's own predicate uses - exists and is taken on that
+    # stack.
+    IDLE_STACK=${STAGE90_XNU_IDLE_STACK:-1}
+    case "$IDLE_STACK" in
+        0|1) ;;
+        *) layout_fail "STAGE90_XNU_IDLE_STACK is [$IDLE_STACK] and this build's clause reads it as 0 or 1: the value decides whether the idle thread's stack is this image's array or the interrupt stack, so anything else is a build whose stack nobody chose" ;;
+    esac
+    if [[ $IDLE_STACK -eq 1 && ${ISTACK_SEPARATE:-0} -eq 1 ]]; then
+        layout_fail "STAGE90_XNU_IDLE_STACK=1 and STAGE90_XNU_ISTACK_SEPARATE=1: two state changes in one image is 517's own lesson (its first run was unattributable because its image carried two), and 519 makes 518's store unnecessary - the handler's stack and the idle thread's stack are different memory now, so the field can stay where the kernel put it (arm_init.c:226-227). Set STAGE90_XNU_ISTACK_SEPARATE=0"
+    fi
+    ids_sz=$(s_of STAGE90_IDLE_STACK_SIZE)
+    [[ "$ids_sz" =~ ^[0-9]+$ ]] ||
+        layout_fail "519's clause cannot read STAGE90_IDLE_STACK_SIZE out of entry_stubs.c (got [$ids_sz]): the array's size is what the assembler was told and what the compiled idle context adds, so a build that cannot read it cannot compare the three"
+    iarr=$(sym_addr stage90_idle_stack) ||
+        layout_fail "stage90_idle_stack is not in the linked image: the patched Idle_context loads its address, so without the symbol the idle thread's sp would be whatever the relocation left"
+    iarr_sz=$(arm-none-eabi-nm -S "$OUT/xnu_arm_entry.elf" | awk '$4 == "stage90_idle_stack" { printf "%d", strtonum("0x" $2) }')
+    [[ "${iarr_sz:-0}" == "$ids_sz" ]] ||
+        layout_fail "the array stage90_idle_stack is ${iarr_sz:-0} bytes and entry_stubs.c says STAGE90_IDLE_STACK_SIZE=$ids_sz: the idle thread runs on this region, so a shorter array is a stack that runs off its own end and a longer one is space nothing accounts for"
+    iistack=$(sym_addr intstack) ||
+        layout_fail "intstack is not in the linked image: the window ml_at_interrupt_context() tests is [intstack_top - INTSTACK_SIZE, intstack_top), and 519's second effect is that the idle code is outside it"
+    iitop=$((iistack + is_is))
+    iidle_top=$((iarr + iarr_sz))
+    [[ "$iidle_top" -ne "$iitop" ]] ||
+        layout_fail "$iidle_top is both the idle thread's stack top and intstack_top: that is the arrangement 518's run measured, with the handler and the idle loop on one stack"
+    # **The whole array, not just its top, and that distinction is the point of the check.** The
+    # predicate `ml_at_interrupt_context()` evaluates is on a `sp`, and the idle body's `sp` descends
+    # through its frames - so an array that merely *starts* above `intstack_top` while its lower end
+    # reaches into the window would answer 1 for a fault taken deep in the idle path, which is the run
+    # 516 and 518 both died in. Both bounds have to be outside.
+    if [[ "$iarr" -lt "$iitop" && "$iidle_top" -gt $((iitop - is_is)) ]]; then
+        layout_fail "the idle thread's stack [$iarr, $iidle_top) overlaps ml_at_interrupt_context()'s window [$((iitop - is_is)), $iitop): the collision would still be gone - the handler's stack is istackptr - but a fault taken deep enough in the idle path would still be reported as one taken in an interrupt context, which is Apple's 'sleh_abort at interrupt context', the panic 516 and 518 both died of"
+    fi
+    iidle_sym=$(sym_addr Idle_context) ||
+        layout_fail "Idle_context is not in the linked image: 519's whole content is where that function takes the idle thread's stack from, so the function has to be findable"
+    ishut_sym=$(sym_addr Shutdown_context) ||
+        layout_fail "Shutdown_context is not in the linked image: patch_idle_stack.py is bounded to Idle_context *because* Shutdown_context needs the same instruction, and this clause is how that bound is checked"
+    iidle_next=$(next_global "$iidle_sym"); ishut_next=$(next_global "$ishut_sym")
+    [[ -n "$iidle_next" && -n "$ishut_next" ]] ||
+        layout_fail "519's clause cannot read the end of Idle_context or of Shutdown_context out of the image's symbol table ([${iidle_next:-none}], [${ishut_next:-none}]): an unbounded objdump range would read one function's body as the measurement of the other's, which is the defect 516's own clause found when it used the next *label* instead of the next global"
+    iidle_body=$(arm-none-eabi-objdump -d --start-address="$iidle_sym" --stop-address="$iidle_next" "$OUT/xnu_arm_entry.elf")
+    ishut_body=$(arm-none-eabi-objdump -d --start-address="$ishut_sym" --stop-address="$ishut_next" "$OUT/xnu_arm_entry.elf")
+    # `Shutdown_context` keeps `ldr sp, [r12, CPU_ISTACKPTR]` in *both* arrangements: it runs on the
+    # interrupt stack on purpose and nothing here measures it, so the patch's bound is a fact of the
+    # image rather than a promise in a comment. (objdump spells r12 `ip` and r13 `sp` per instruction,
+    # which is the operand-class defect 517's own clause recorded.)
+    ishut_ld=$(awk '$3 == "ldr" && $4 == "sp," && $5 ~ /^\[(r12|ip),/ && $6 == "#4]" { n++ } END { printf "%d", n + 0 }' <<<"$ishut_body")
+    [[ "${ishut_ld:-0}" -eq 1 ]] ||
+        layout_fail "Shutdown_context loads sp from cpu_data->istackptr ${ishut_ld:-0} time(s) and not exactly once: patch_idle_stack.py must change Idle_context and nothing else, and this is the other function in the same file with that instruction"
+    iidle_istack=$(awk '$3 == "ldr" && $4 == "sp," && $5 ~ /^\[(r12|ip),/ && $6 == "#4]" { n++ } END { printf "%d", n + 0 }' <<<"$iidle_body")
+    iidle_lit=$(awk '/<L_stage90_idle_stack_top>/ { n++ } END { printf "%d", n + 0 }' <<<"$iidle_body")
+    # **The literal is compared as a number and not as a string.** The first version of this check
+    # searched the disassembly for the text `0x<hex>` and would have failed a correct image: objdump
+    # pads a `.word` operand (`0x00004000`), so a build whose literal was right would read as one whose
+    # literal was absent - 518's own clause made the same mistake with a folded constant and recorded
+    # it, and the rule since is that an extracted value has its *shape* asserted and is compared as the
+    # number it is.
+    iidle_val=$(awk -v w="$iidle_top" '$3 == ".word" { v = $4; sub(/^0x/, "", v); if (strtonum("0x" v) == w) n++ } END { printf "%d", n + 0 }' <<<"$iidle_body")
+    # The reading. `ml_at_interrupt_context()` reads `cpu_data->intstack_top` (offset 8) and the handler's
+    # stack field is `cpu_data->istackptr` (offset 4), so the note's two dereferences have to be those
+    # two fields of *this* image's `BootCpuData` - computed from the linked addresses rather than looked
+    # for as `#4`/`#8`, because gcc folds `BootCpuData + 4` into a pool word of its own (518b's lesson).
+    ia_ip=$(a_of CPU_ISTACKPTR); ia_it=$(a_of CPU_INTSTACK_TOP)
+    is_ip=$(s_of STAGE90_CPU_ISTACKPTR); is_it=$(s_of STAGE90_CPU_INTSTACK_TOP)
+    for v in "$ia_ip" "$ia_it" "$is_ip" "$is_it"; do
+        [[ "$v" =~ ^[0-9]+$ ]] ||
+            layout_fail "519's clause cannot read the two cpu_data offsets out of assym.s or entry_stubs.c (got [$v]): the note reads both fields because the kernel's own predicate uses intstack_top while the handler's stack is istackptr, and 518's arm moved one without the other - which is why its panic test kept answering the same way"
+    done
+    [[ "$ia_ip" == "$is_ip" && "$ia_it" == "$is_it" ]] ||
+        layout_fail "assym.s says CPU_ISTACKPTR=[$ia_ip] CPU_INTSTACK_TOP=[$ia_it] and entry_stubs.c's macros say [$is_ip]/[$is_it]: two spellings of either would make the reading a measurement of a field the kernel does not test"
+    ibcd=$(sym_addr BootCpuData) ||
+        layout_fail "BootCpuData is not in the linked image: the reading takes both stack fields from that structure, so this clause cannot say which addresses the note dereferences"
+    inote=$(sym_addr entry_idle_stack_note) ||
+        layout_fail "entry_idle_stack_note is not in the linked image: 519 changes where the idle body runs, and a step that changes a stack without publishing where the idle body ended up is a step whose run cannot be read - the whole failure mode of 518's arm"
+    inote_next=$(next_global "$inote")
+    [[ -n "$inote_next" ]] ||
+        layout_fail "519's clause cannot read the end of entry_idle_stack_note in the image: its body is where the two field reads and the register read have to be counted"
+    inote_body=$(arm-none-eabi-objdump -d --start-address="$inote" --stop-address="$inote_next" "$OUT/xnu_arm_entry.elf")
+    inote_sp=$(awk '$3 == "mov" && $4 ~ /^r[0-9]+,$/ && $5 == "sp" { n++ } END { printf "%d", n + 0 }' <<<"$inote_body")
+    [[ "${inote_sp:-0}" -ge 1 ]] ||
+        layout_fail "entry_idle_stack_note's body reads no general register from sp (${inote_sp:-0} such instruction(s)): the reading is the idle body's own stack pointer, and a version that published a described stack instead of the live one would answer about a stack the CPU is not using"
+    # **The two field reads are checked in *both* of the shapes a compiler can emit, and the first
+    # build of this clause is why.** It looked for the folded address (`BootCpuData + 4`) and stopped the
+    # build on a body that is plainly right, because gcc kept the base in a register and used the field
+    # offsets: `movw/movt` of `0x8051a000`, then `ldr r6, [r3, #4]` and `ldr r5, [r3, #8]`. That is the
+    # mirror image of 518b's own lesson (where `intstack + 8192` *was* folded into one pool word) - so
+    # the shape asserted is "the base is this image's BootCpuData and both offsets are loaded from it",
+    # with the folded form accepted beside it, rather than one compiler's choice of encoding.
+    # **The address can arrive in three shapes and the clause accepts all three**, because the encoding
+    # is the compiler's choice and the *property* is "this body builds `BootCpuData`'s address and loads
+    # both fields out of it": the first build of this clause asserted one shape (the folded address) and
+    # stopped a correct build, which is the same defect 518b recorded from the other side. Measured in
+    # this image: `movw r3, #40960` / `movt r3, #32849` (the two halves of 0x8051a000) with
+    # `ldr r6, [r3, #4]` and `ldr r5, [r3, #8]`.
+    ibcd_lo=$((ibcd & 0xffff)); ibcd_hi=$(((ibcd >> 16) & 0xffff))
+    inote_movw=$(awk '$3 == "movw" && $5 == "#'"$ibcd_lo"'" { n++ } END { printf "%d", n + 0 }' <<<"$inote_body")
+    inote_movt=$(awk '$3 == "movt" && $5 == "#'"$ibcd_hi"'" { n++ } END { printf "%d", n + 0 }' <<<"$inote_body")
+    inote_pool=$(awk -v w="$(printf '0x%08x' "$ibcd")" 'index($0, w) > 0 { n++ } END { printf "%d", n + 0 }' <<<"$inote_body")
+    inote_fold4=$(awk -v w="$(printf '0x%08x' "$((ibcd + is_ip))")" 'index($0, w) > 0 { n++ } END { printf "%d", n + 0 }' <<<"$inote_body")
+    inote_fold8=$(awk -v w="$(printf '0x%08x' "$((ibcd + is_it))")" 'index($0, w) > 0 { n++ } END { printf "%d", n + 0 }' <<<"$inote_body")
+    inote_ld4=$(awk '$3 == "ldr" && $5 ~ /^\[r[0-9]+,$/ && $6 == "#'"$is_ip"']" { n++ } END { printf "%d", n + 0 }' <<<"$inote_body")
+    inote_ld8=$(awk '$3 == "ldr" && $5 ~ /^\[r[0-9]+,$/ && $6 == "#'"$is_it"']" { n++ } END { printf "%d", n + 0 }' <<<"$inote_body")
+    iaddr_ok=0; ifield_ok=0
+    if { [[ "${inote_movw:-0}" -ge 1 && "${inote_movt:-0}" -ge 1 ]] || [[ "${inote_pool:-0}" -ge 1 ]]; }; then
+        iaddr_ok=1
+    fi
+    if [[ "${inote_ld4:-0}" -ge 1 && "${inote_ld8:-0}" -ge 1 ]]; then
+        ifield_ok=1
+    elif [[ "${inote_fold4:-0}" -ge 1 && "${inote_fold8:-0}" -ge 1 ]]; then
+        ifield_ok=1
+    fi
+    [[ $iaddr_ok -eq 1 && $ifield_ok -eq 1 ]] ||
+        layout_fail "entry_idle_stack_note's body does not read both stack fields out of this image's BootCpuData ($ibcd): its address is built ${inote_movw:-0}/${inote_movt:-0} time(s) by the movw/movt pair for the halves $ibcd_lo/$ibcd_hi and appears ${inote_pool:-0} time(s) as a pool word, a load of [#$is_ip] from a register occurs ${inote_ld4:-0} time(s) and of [#$is_it] ${inote_ld8:-0} time(s), and the folded addresses $(printf '0x%08x' "$((ibcd + is_ip))")/$(printf '0x%08x' "$((ibcd + is_it))") appear ${inote_fold4:-0}/${inote_fold8:-0} time(s). The reading has to be of the field the handler's stack is taken from (istackptr, $is_ip) and of the field the kernel's own 'at interrupt context' predicate tests (intstack_top, $is_it), because those two disagreeing is exactly 518's arm - the one that moved both stacks and could not be read"
+    # And the predicate's own width, from this configuration rather than from a literal in this file.
+    inote_win=$(awk '$3 == "sub" && $5 ~ /^r[0-9]+,$/ && $6 == "#'"$is_is"'" { n++ } END { printf "%d", n + 0 }' <<<"$inote_body")
+    [[ "${inote_win:-0}" -ge 1 ]] ||
+        layout_fail "entry_idle_stack_note's body subtracts #$is_is (this configuration's INTSTACK_SIZE) ${inote_win:-0} time(s): the reading reproduces ml_at_interrupt_context()'s own test, and a window of another width would answer about a region the kernel does not call the interrupt stack"
+    iwrap=$(sym_addr __wrap_platform_cache_idle_enter) ||
+        layout_fail "__wrap_platform_cache_idle_enter is not in the linked image: it is the first C on the stack Idle_context chooses and therefore where 519's reading is taken - the same wrapper whose exit counterpart 518's run caught returning into a timebase value"
+    iwrap_next=$(next_global "$iwrap")
+    [[ -n "$iwrap_next" ]] ||
+        layout_fail "519's clause cannot read the end of __wrap_platform_cache_idle_enter in the image: the number of calls to the note inside that wrapper is the site of the reading"
+    iwrap_body=$(arm-none-eabi-objdump -d --start-address="$iwrap" --stop-address="$iwrap_next" "$OUT/xnu_arm_entry.elf")
+    inote_sites=$(awk '$3 == "bl" && $5 == "<entry_idle_stack_note>" { n++ } END { printf "%d", n + 0 }' <<<"$iwrap_body")
+    if [[ $IDLE_STACK -eq 1 ]]; then
+        [[ "${iidle_istack:-0}" -eq 0 ]] ||
+            layout_fail "STAGE90_XNU_IDLE_STACK=1 and Idle_context still loads sp from cpu_data->istackptr ${iidle_istack:-0} time(s): the image would carry the switch and not the change - the same flag defect 517 shipped, from the other side"
+        [[ "${iidle_lit:-0}" -ge 1 ]] ||
+            layout_fail "Idle_context in the linked image has no reference to L_stage90_idle_stack_top: the patched load is a PC-relative one through that literal, so without it the load reads whatever word happens to follow the branch"
+        [[ "${iidle_val:-0}" -ge 1 ]] ||
+            layout_fail "no .word in Idle_context's window holds $iidle_top - the array ($iarr) plus its size ($iarr_sz): the literal is the value the idle thread's sp is set to, so a different number is a different stack from the one this clause just measured"
+    else
+        [[ "${iidle_istack:-0}" -eq 1 && "${iidle_lit:-0}" -eq 0 ]] ||
+            layout_fail "STAGE90_XNU_IDLE_STACK=0 and Idle_context does not load sp from cpu_data->istackptr exactly once with no literal (${iidle_istack:-0} load(s), ${iidle_lit:-0} literal reference(s)): the flag-off image has to be the arrangement 518's run measured, or it is not the control this switch is supposed to be"
+    fi
+    for k in xnu_live_idlestack_sp xnu_live_idlestack_top xnu_live_idlestack_istackptr xnu_live_idlestack_intstacktop xnu_live_idlestack_inwin xnu_live_idlestack_calls; do
+        grep -q "$k" "$OUT/xnu_arm_entry.bin" ||
+            layout_fail "519's record key $k is not in the entry image's strings: the run has to say where the idle body's sp is, where the array's top is, both fields the kernel's predicate could be about, and how many readings landed inside it - because the whole of 518's lesson is that an arm which moves both stacks is an arm that cannot be read"
+    done
+    [[ "${inote_sites:-0}" -eq 1 ]] ||
+        layout_fail "__wrap_platform_cache_idle_enter calls entry_idle_stack_note ${inote_sites:-0} time(s) and not once: that wrapper is the site of the reading - it runs on the stack Idle_context chose, once per pass of the idle loop, with the D-cache still on - so zero means the run would publish nothing (517's frame reader) and two would make the count a fact about this file rather than about the idle path"
+    say "  xnu_entry_519: the idle thread's own stack - this build's STAGE90_XNU_IDLE_STACK=$IDLE_STACK (with STAGE90_XNU_ISTACK_SEPARATE=$ISTACK_SEPARATE, because a second state change in one image is 517's lesson and 519 makes 518's store unnecessary); tools/patch_idle_stack.py rewrites the one instruction in cswitch.s's Idle_context that takes the idle thread's stack from cpu_data->istackptr (Shutdown_context keeps its own, ${ishut_ld} load in the linked image, so the substitution is bounded) into a PC-relative load of L_stage90_idle_stack_top, a .word holding $(printf '0x%x' "$iidle_top") = stage90_idle_stack ($(printf '0x%x' "$iarr")) + STAGE90_IDLE_STACK_SIZE ($iarr_sz, entry_stubs.c's own macro and the assembler's own define); the whole array [$(printf '0x%x' "$iarr"), $(printf '0x%x' "$iidle_top")) is outside ml_at_interrupt_context()'s window [$(printf '0x%x' $((iitop - is_is))), $(printf '0x%x' "$iitop")) - so a fault in the idle code is no longer Apple's 'sleh_abort at interrupt context' - and the handler's stack stays where the kernel put it; the reading is entry_idle_stack_note ($inote), called from __wrap_platform_cache_idle_enter ($iwrap) ${inote_sites} time, which reads sp from the register (${inote_sp} instruction in its body), both fields at this image's own addresses (BootCpuData $(printf '0x%x' "$ibcd") + $is_ip istackptr and + $is_it intstack_top, assym.s agreeing), and counts the readings that land inside the kernel's own window - 0 expected with the arm on, 1 per call with it off"
+
 
     # **463's virtual call, and the image is what says it is safe.** `entry_trace.c` calls
     # `_ZNK9IOService8getStateEv` by mangled name on objects whose dynamic type this file cannot know -
