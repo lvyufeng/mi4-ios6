@@ -135,8 +135,21 @@ L2 has to be cleaned out *while the cache is off*, which is exactly the window s
 the flush. Under this reading the stale L2 line is produced by the push and the off-cache window, neither
 of which 533 changes, so:
 
-- the pass should reach the exit and **die at the same `pop`** - `pre_calls` and `rtcab_calls` published
+- the pass should reach the exit and **die at the same `pop`** - `pre_calls` and `rtcpre_calls` published
   with `post_calls` absent, the localization `run_and_capture.sh` now prints; and
+
+> **Correction (559, before the run): the second key is `rtcpre`, not `rtcab`.** Written here as
+> `rtcab_calls` and corrected above in place; the prediction itself - the same three sites, the same
+> order, the death at the `pop` - is unchanged. The exit wrapper's second publisher is `g_slot_rtcpre`
+> (`entry_trace.c:1973`, `entry_slot_rtc_note(&g_slot_rtcpre, entry_tpidrprw())`); `g_slot_rtcab` is the
+> **abort** path's (`entry_stubs.c:1792`, inside `entry_note_sleh`), so it is a *storm* counter and not a
+> per-pass one - 520's own log has 5 `rtcab` records (`1,2,3,4,8`) against exactly one `rtcpre`. A
+> criterion written on `rtcab` is satisfied by any pass that took an abort, so it would have read this
+> arm's death as "inside the exit" even when the notes say otherwise. The peer session found the same
+> name in `run_and_capture.sh`'s clause (3) and in 533/540 (its 558); this one, 547 §4, 554 §1 and
+> 557 §4c were outside that enumeration and are corrected here. See
+> [560](experiment-560-the-same-wrong-key-in-four-more-files.md) (and, for the gate's own copy of
+> the bracket, [559](experiment-559-the-brackets-middle-key-was-named-wrong-in-the-one-block-that-governs.md)).
 - the `slot_cwe_win`/`slot_cwe_set` pair should both read `C` clear (533's arm's shape, 540 §3).
 
 **One thing 533 cannot change either way, and it is worth knowing before reading its log:** the re-enable

@@ -124,11 +124,15 @@ that they never entered the window. The counter `door_now` spans `0x04a00a8a` �
 (595,144 counts over the 16 records) but **the counter's rate is not established here**, so no per-pass
 cost is derived from it.
 
-**One consequence for the phase.** 533's instrument predicts `pre_calls` and `rtcab_calls` published
+**One consequence for the phase.** 533's instrument predicts `pre_calls` and `rtcpre_calls` published
 with `post_calls` absent, and this reading says why that is the whole of what a run of it can say: the
-pass that publishes them is the only pass there will be. It also means the run is *cheap in passes and
-expensive in boots* - one cache-window entry is the entire experiment, so a non-return costs a power
-press and nothing else can be recovered from it.
+pass that publishes them is the only pass there will be. (This sentence said `rtcab_calls`, which
+contradicts §4a's own table ninety lines above - `rtcab` is the **abort** path's counter and *not*
+per-pass, exactly as that table says - and the two spellings of one prediction inside one file is the
+same defect this step is about, one more turn down. Corrected in place under 560; 546 §5, 547 §4 and 554
+§1 carried it too, and 546/547/554/557 were outside the enumeration 558 worked from.) It also means the
+run is *cheap in passes and expensive in boots* - one cache-window entry is the entire experiment, so a
+non-return costs a power press and nothing else can be recovered from it.
 
 ## 5. Safety
 

@@ -87,9 +87,26 @@ with §3's reconciliation:
 - **the pass reaches the exit, the push runs with `C` = 0, the pop loads the stale words, the prefetch
   abort panics at `pc = the popped value & ~1`, and the device comes back on XNU's `MACH Reboot`** - a
   return, with the log carrying the same panic shape, `lr = 0x800462dc`, and `r11`/`pc` a counter value;
-- `slot_pre_calls` and `slot_rtcab_calls` published with `slot_post_calls` absent (the death is inside
+- `slot_pre_calls` and `slot_rtcpre_calls` published with `slot_post_calls` absent (the death is inside
   `platform_cache_idle_exit`, which is what 540 §3's localization prints);
 - `slot_cwe_win` and `slot_cwe_set` both `C` clear (533's arm's shape).
+
+> **Correction (559, before the run): the second key is `rtcpre`, not `rtcab`.** Written here as
+> `slot_rtcab_calls` and corrected above in place; §4's prediction - the same three sites, the same
+> order, the death at the `pop` - is unchanged, and this section is still the pre-registration the gate
+> cites for the enable-off arm. **The key name is an instrument fact and it was wrong**: the exit
+> wrapper's second publisher is `g_slot_rtcpre` (`entry_trace.c:1973`,
+> `entry_slot_rtc_note(&g_slot_rtcpre, entry_tpidrprw())`), while `g_slot_rtcab` belongs to the **abort**
+> path (`entry_stubs.c:1792`, inside `entry_note_sleh`) - so `rtcab_calls` is a *storm* count and not a
+> per-pass one (520's log: 5 records, `1,2,3,4,8`, against exactly one `rtcpre`). The difference is not
+> cosmetic for a prediction: "`rtcab` present, `post` absent" is satisfied by any pass that took an
+> abort, so the localization this section pre-registers would have been printed for a death *outside*
+> the exit. Corrected in place rather than rewritten, because the run has not happened and a
+> pre-registration that changes silently is not a pre-registration. The peer session found the same name
+> in `run_and_capture.sh`'s clause (3) and in 533/540 (its 558); 546 §5, this section, 554 §1 and 557 §4c
+> were outside that enumeration. See
+> [560](experiment-560-the-same-wrong-key-in-four-more-files.md) (and, for the gate's own copy of
+> the bracket, [559](experiment-559-the-brackets-middle-key-was-named-wrong-in-the-one-block-that-governs.md)).
 
 **The falsifier is worth stating as a table, because the two outcomes mean different things and both are
 useful:**

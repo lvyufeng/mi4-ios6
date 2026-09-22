@@ -28,7 +28,7 @@ Three writings about the frozen arm disagree, and the disagreement is between a 
 | `run_and_capture.sh:260-277` (540) | clause (3)'s `DIED IN THE EXIT` … **"That is this arm's prediction failed"** |
 | `run_and_capture.sh:310-311` (540) | the close: "read the verdict line (1) first, because **the arm's prediction is the panic's absence** and nothing else" |
 | [547](experiment-547-the-load-succeeded-and-the-value-is-wrong.md) §4 (`9675e82`, **before the run**) | "the pass reaches the exit, the push runs with `C` = 0, the pop loads the stale words, **the prefetch abort panics** at `pc = the popped value & ~1`, and the device **comes back** on XNU's `MACH Reboot`" |
-| [533](experiment-533-the-idle-windows-near-end-is-apples.md) §5.2 (before the run) | `pre` + `rtcab` present, `post` absent ⇒ "**inside `platform_cache_idle_exit`** - the `pop`" |
+| [533](experiment-533-the-idle-windows-near-end-is-apples.md) §5.2 (before the run) | `pre` + `rtcpre` present, `post` absent ⇒ "**inside `platform_cache_idle_exit`** - the `pop`" (533 as written said `rtcab`; see its 558 note and [560](experiment-560-the-same-wrong-key-in-four-more-files.md)) |
 | [533](experiment-533-the-idle-windows-near-end-is-apples.md) §5.4 | "whether Apple's own panic path runs" - an **item to read**, not a failure |
 
 So on a returning 533 the reader would have printed two `FAIL`s and a "read the verdict line (1) first"
