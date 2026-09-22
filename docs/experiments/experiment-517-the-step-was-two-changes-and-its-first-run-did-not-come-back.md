@@ -509,12 +509,43 @@ Two things follow, and they are the reason the arm is worth its risk rather than
   `SS_LR`/`SS_SP` intact, i.e. the frame was **not** the handler's spill and the writer is something else
   that then has a name and a moment.
 
+## Addendum 4 (the run, 2026-09-22) — the arm flew, and the run it flew cannot answer the question
+
+`STAGE90_XNU_ISTACK_SEPARATE=1` (`stage90-qcdt.img` sha256 `32a513bc322f6db7465550039069fc93ed5ca4c9622fed95bfee0673b64ca519`)
+ran on device `4a2fe00b` through the gate: green, `Sending 'boot.img' (8340 KB) OKAY` / `Booting OKAY`, the
+device returned on its own inside the capture window, and the log came back at 599,995 bytes. This doc's
+prediction (§3) named two branches. **The second one obtained — the same panic, byte-for-byte in kind** —
+and the run's own records then say the first branch was never testable, because **the arm moved the
+interrupted stack as well as the handler's**: `xnu_live_irq_istackptr = 0x80516000` and every stack address
+in the panic exactly `0x2000` lower than 516's, with `SS_SP == istackptr - 16` in both runs.
+
+So this addendum exists to correct the prediction rather than to report it confirmed. The prediction assumed
+that moving `istackptr` gives the handler a *different* stack from the one the interrupted code is on. It
+does not: the field is read by the vector to place the handler's stack and by `cswitch.s` to place the idle
+thread's, so one store moves both and the 16-byte gap between the handler's first push and the frame's top
+word is invariant. The hypothesis was not tested, and it is not refuted.
+
+Everything else the run produced — the frame shown to be authentic, the `pop {fp, pc}` in
+`platform_cache_idle_exit` and the two counter readings in the handler's 5th and 6th stack words that it
+popped, the two readings that were unpublishable by construction, and the arm that the next step has to be
+instead — is written up as **experiment 518**
+(`experiment-518-the-arm-moved-both-stacks-so-the-collision-was-invariant.md`), which is also where 516's
+reading of `SS_PC`/`SS_STATUS`/`SS_VADDR` as handler spills is corrected: they are the vector's own words,
+and the collision lands one word higher, on the idle code's saved return address.
+
+What this changes in the list below: **item 1 is spent** (the measurement arm's run happened, and its
+instrument recorded nothing — the gate), and **item 4 is answered** (`r4 = r11 = pc + 2` in both of 516's
+dumps is the half of the popped `{fp, pc}` pair that did not become the PC, i.e. the first of two adjacent
+curves on the counter — not a frame slot).
+
 ## What is owed
 
-1. **The measurement arm's run** — `STAGE90_XNU_EXIT_POC_FLUSH=0`, `stage90-qcdt.img` sha256
-   `67075d64…`, image below. Its risk profile is 516's, whose two runs returned. It answers the question
-   the frame reading exists to answer, and it is what 516's doc asked for first ("measure the frame slot,
-   and repair the exit the way 516 repaired the enter").
+1. ~~**The measurement arm's run**~~ — **spent, 2026-09-22** (`67075d64…` was superseded by 518's
+   `32a513bc…`, which carried the same frame reader). The run happened and the instrument published
+   nothing: `entry_note_timebase_call` records only while `SCTLR.C` is clear and prints its totals only from
+   the console epilogue, and a fatal run reaches neither. Publishing from a site that always runs is owed
+   in its place, and the frame is now read from the abort path instead (`xnu_live_sleh_*`, which is what
+   showed it authentic).
 2. **The exit flush's own run** (`=1`) once the measurement arm has returned, so a failure has one
    candidate.
 3. **The watchdog's non-recovery, understood rather than noted.** The bone is worth stating precisely:
@@ -527,7 +558,11 @@ Two things follow, and they are the reason the arm is worth its risk rather than
    so "does not depend on the *payload's* state" was always the claim, never "does not depend on any
    software". A run that can leave the device needing a power press is a cost this project should know
    before it spends it.
-4. Still owed from 516: the `r4 = r11 = pc + 2` register-dump anomaly in both its runs.
+4. ~~Still owed from 516: the `r4 = r11 = pc + 2` anomaly.~~ **Answered by 518's run**: the two
+   registers are the halves of the `{fp, pc}` pair that `platform_cache_idle_exit`'s closing
+   `pop {fp, pc}` loaded — one of them became the PC and the other stayed in `fp`/`r11`, which is why they
+   differ by the tick or two between two adjacent counter readings, and why the pair tracks the timebase
+   rather than a fixed frame slot. See experiment 518 §3.
 
 ## The image
 
