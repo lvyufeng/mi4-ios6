@@ -105,25 +105,29 @@ echo "== image freshness =="
 STALE=$(find "$STAGE_DIR" -maxdepth 1 -type f \
          \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.ld' \) \
          -newer "$IMAGE" -printf '%f\n' 2>/dev/null | sort || true)
-# **533: the entry image's own sources are one directory down, and `-maxdepth 1` never looked at
-# them.** `xnu_arm_boot/` is where build_entry.sh, entry_trace.c, entry_stubs.c and entry.ld live,
-# and they decide *which arm* the boot image carries - the one property the XNU-entry block below
-# describes at length and this scan could not see. Editing entry_trace.c and rebuilding only the
-# entry image leaves a payload that embeds the PREVIOUS arm with every check above still green.
-# This directory also matches '*.sh', which the top-level scan deliberately does not: there the
-# build script sits beside the sources it compiles, and build_entry.sh is as much a source of the
-# image as any .c in that directory.
-STALE_ENTRY=$(find "$STAGE_DIR/xnu_arm_boot" -maxdepth 1 -type f \
-               \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.ld' -o -name '*.sh' \) \
-               -newer "$IMAGE" -printf 'xnu_arm_boot/%f\n' 2>/dev/null | sort || true)
+# **533 put the entry image's own sources in this sweep for one commit, and 533 removed them again -
+# because an mtime is the wrong measurement for that directory and the refusal it produced was of a
+# correct tree.** The entry sources are one directory down and `-maxdepth 1` never looked at them,
+# which was true; but comparing their mtimes against the *payload image's* mtime asks about a file
+# the payload's build never opens. `build.sh` consumes exactly one thing from `xnu_arm_boot/` -
+# `out/stage90/xnu_arm_entry.bin`, byte-embedded at `build.sh:93` - and mentions `build_entry.sh`
+# only in prose, so a newer build script cannot make the payload stale. Measured on the committed
+# tree at 4787622, `git status` empty: `build_entry.sh` 17:53:35 against the image it had produced
+# at 17:53:15, refused, and the remedy this clause prescribes - rebuild - is the one thing this
+# phase cannot do, because a payload rebuild does not reproduce (408) and would cost the freeze for
+# a change in nothing the payload consumes.
+#
+# The entry side is now checked where content can be checked instead (the clause "the entry image's
+# own sources" below, which reads the manifest `build_entry.sh` writes beside the image), so this
+# sweep is back to the payload's own sources - the files `build.sh` actually compiles - and the
+# tools that generate what it compiles.
 BUILD_TOOLS_NEWER=$(find "$REPO_ROOT/tools" -maxdepth 1 -name 'mkmacho_fixture.py' \
                     -newer "$IMAGE" -printf '%f\n' 2>/dev/null || true)
-if [[ -n $STALE || -n $STALE_ENTRY || -n $BUILD_TOOLS_NEWER ]]; then
+if [[ -n $STALE || -n $BUILD_TOOLS_NEWER ]]; then
   echo "source newer than the image:"
   # `[[ ... ]] && echo` as a bare statement returns 1 when the test is false, which under `set -e`
   # would leave the script before the `fail` below and print no reason at all. Explicit `if`s.
   if [[ -n $STALE ]]; then echo "$STALE" | sed 's/^/  /'; fi
-  if [[ -n $STALE_ENTRY ]]; then echo "$STALE_ENTRY" | sed 's/^/  /'; fi
   if [[ -n $BUILD_TOOLS_NEWER ]]; then echo "  tools/$BUILD_TOOLS_NEWER"; fi
   echo "  (compared against the image's own mtime: $(stat -c '%y' "$IMAGE"))"
   # **"Run ./build.sh" is the wrong remedy about half the time, and for the XNU-entry arm it is the
@@ -136,7 +140,16 @@ if [[ -n $STALE || -n $STALE_ENTRY || -n $BUILD_TOOLS_NEWER ]]; then
   # header's default 0, i.e. it rebuilds a payload that never jumps into XNU. Hence the second half of
   # the message: a rebuild only clears this gate for the run the run was for if it carries the switches
   # that run needs.
-  fail "the image is stale - rebuild it, then re-run this gate. If the files above are unchanged (a checkout or a master mirror bumps an unchanged file's mtime), rebuild anyway - the gate compares mtimes and cannot tell an edit from a checkout. Rebuild with the switches the run needs: an XNU-entry run is STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' ./build.sh (a plain ./build.sh produces a payload that never jumps into XNU), and the entry image is xnu_arm_boot/build_entry.sh"
+  #
+  # **The entry side of that pair is gone, and this clause is now payload-only; the false-stale
+  # hazard is not.** A checkout that bumps a payload source (`stage90_main.c`, `stage90.h`, ...) still
+  # reaches this line with the content unchanged, and here the prescribed rebuild is *not* free: 408
+  # says the payload link does not reproduce, so the new image is a different artifact and any frozen
+  # comparison with the old one is spent. That is a decision for the step that takes it - the sound
+  # repair is the same one the entry side got, a content manifest over build.sh's own sources - and
+  # it is deliberately not being smuggled in with this one. What is *not* being deferred is the case
+  # that has actually happened: a false stale produced by a file the payload's build never reads.
+  fail "the image is stale - rebuild it, then re-run this gate. If the files above are unchanged (a checkout or a master mirror bumps an unchanged file's mtime), rebuild anyway - the gate compares mtimes and cannot tell an edit from a checkout. Rebuild with the switches the run needs: an XNU-entry run is STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' ./build.sh (a plain ./build.sh produces a payload that never jumps into XNU)"
 fi
 echo "no source file is newer than the image"
 
@@ -329,11 +342,129 @@ done
 # must be one of the names above. Without this the list above would be the only definition of what is
 # visible, and a key added on the build side would be recorded and never read - the same defect with
 # the arrow reversed.
-_unshown=$(awk -F= '!/^#/ && $1 ~ /^STAGE90_/ { print $1 }' "$ENTRY_CFG" | sort -u \
-           | comm -23 - <(printf '%s\n' "${ENTRY_CFG_KEYS[@]}" | sort -u))
+# `LC_ALL=C` on all three, the same pin as the entry-sources comparison below: these agree with each
+# other under the ambient locale only by accident, and a `comm` whose input was sorted in a different
+# collation answers about the order rather than about the keys - see the note at that clause.
+_unshown=$(awk -F= '!/^#/ && $1 ~ /^STAGE90_/ { print $1 }' "$ENTRY_CFG" | LC_ALL=C sort -u \
+           | LC_ALL=C comm -23 - <(printf '%s\n' "${ENTRY_CFG_KEYS[@]}" | LC_ALL=C sort -u))
 [[ -z $_unshown ]] \
   || fail "$ENTRY_CFG carries key(s) this gate does not print: $(printf '%s\n' "$_unshown" | tr '\n' ' ')- a switch recorded on the build side and not shown here is a switch the next run would go out with unread; add it to ENTRY_CFG_KEYS above"
 echo "  (recorded in $ENTRY_CFG, bound to $actual_sha)"
+
+echo
+echo "== the entry image's own sources =="
+# **Is this entry image the build of the tree in front of it - asked by content, because the question
+# the gate used to ask it with was an mtime and the answer was wrong.** The entry sources used to sit
+# in the freshness sweep above, compared against the *payload image's* mtime: a file the payload's
+# build never opens, so committing an edit to `build_entry.sh` moved its mtime past the image the
+# same file had just produced and the gate refused a tree that was byte-identical to what it was
+# built from. Rebuild was the prescribed remedy and the wrong one here - 408, the payload link does
+# not reproduce - so the repair is to ask the question the refusal was standing in for.
+#
+# `build_entry.sh` writes `out/xnu_arm_entry-sources.txt` beside the image: every regular file in
+# `xnu_arm_boot/`, hashed, with the image's own sha256 on its second line. This recomputes the same
+# list by the same rule and refuses on any difference, which catches three things the mtime sweep
+# either missed or got backwards:
+#
+#   1. an entry source edited and the image not rebuilt - the case the sweep existed for, now caught
+#      by content rather than by a timestamp that a `git checkout` also moves;
+#   2. a source *added or removed* since the build, in either direction: a file the manifest lists and
+#      the directory no longer has, and a file the directory has that the manifest never saw. The
+#      mtime sweep could only see the second, and only if the new file's mtime happened to be newer;
+#   3. the case the sweep produced a false refusal for - a checkout, or a commit, that rewrote an
+#      unchanged file. Same bytes, no difference, no refusal, which is what "unchanged" should mean.
+#
+# **And it closes a blind spot the sweep had from the day it was written: `*.S` is case-sensitive
+# and every assembly source in that directory is lowercase `.s`.** `entry_vectors.s`,
+# `entry_ramdisk.s`, `entry_macho.s`, `entry_arm_rtabi.s` and `assym.s` are all inputs to this image
+# and not one of them was ever compared with anything. That is not a property of the fix being
+# weaker than the sweep; it is the fix being the first check that ever looked at those files.
+#
+# Bound to the artifact the same way the switches are: the manifest's `STAGE90_XNU_ENTRY_SHA256` line
+# must be the hash of the entry bin on disk, so a manifest left over from an earlier build cannot be
+# read as this one's - which is the one way a content check can be satisfied by the wrong content.
+ENTRY_SRC_MANIFEST=$OUT/xnu_arm_entry-sources.txt
+[[ -f $ENTRY_SRC_MANIFEST ]] \
+  || fail "no $ENTRY_SRC_MANIFEST - build_entry.sh writes it beside the image, and without it nothing compares the entry image with the sources it claims to be built from. Rebuild the entry image (stages/stage90/xnu_arm_boot/build_entry.sh)"
+manifest_sha=$(awk -F= '$1 == "STAGE90_XNU_ENTRY_SHA256" { print $2 }' "$ENTRY_SRC_MANIFEST")
+[[ -n $manifest_sha ]] \
+  || fail "$ENTRY_SRC_MANIFEST has no STAGE90_XNU_ENTRY_SHA256 line - a manifest bound to no artifact can be satisfied by any content"
+[[ "$manifest_sha" == "$actual_sha" ]] \
+  || fail "$ENTRY_SRC_MANIFEST was written for entry image $manifest_sha and $ENTRY_BIN is $actual_sha: the source list describes a different build, so it can say nothing about this one. Rebuild the entry image, then ./build.sh"
+# The recorded list is `name hash` so the two sides of `comm` sort by name and a changed file appears
+# once from each side - which is what lets the refusal name it rather than report a count.
+#
+# **`$2`, not `$3`, and the difference is every run.** The manifest is written as `hash` + **two**
+# spaces + `name`, and awk's default field splitting collapses a run of whitespace into one separator,
+# so that line has **two** fields: `$1` is the hash and `$2` is the name - there is no `$3`. Written
+# as `$3 " " $1` this produced a leading space and the hash and **dropped the filename**, which is
+# measured on the real directory rather than argued: the writer's own pipeline and this one both run
+# over `stages/stage90/xnu_arm_boot/` give `comm -3` **40 lines for 20 files** - every file reported
+# as both changed and added, with `comm` additionally printing `file 2 is not in sorted order`,
+# because the space-prefixed lines sort differently from the `name hash` ones. The refusal would then
+# name **hashes** where it promises filenames. With `$2` the same two pipelines give **0**. So the
+# pattern was right - it is the one that matches the writer's two spaces - and the field was wrong,
+# which is the shape this project records as a reader that recognises a shape and then consumes the
+# wrong subject. Two implementations of one rule is the oldest defect here; this is the seam where
+# they meet, so it is asserted by running both against the real directory rather than by eye.
+ENTRY_SRC_RECORDED=$(awk '/^[0-9a-f][0-9a-f]*  / { print $2 " " $1 }' "$ENTRY_SRC_MANIFEST" | LC_ALL=C sort)
+# `|| true` for the same reason as the sweeps above: a `find` that cannot read the directory exits
+# non-zero, and under `set -e` the assignment would end the script with no message at all - a scan
+# that could not look is not a scan that found nothing, in the direction that fails quietly.
+ENTRY_SRC_NOW=$(cd "$STAGE_DIR/xnu_arm_boot" 2>/dev/null && find . -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | LC_ALL=C sort \
+                | while IFS= read -r _f; do
+                    printf '%s %s\n' "$_f" "$(sha256sum -- "$_f" | awk '{print $1}')"
+                  done || true)
+# **A scan that could not look must not be reported as a tree that changed, and without this line it
+# was.** The `|| true` above keeps a directory `find` cannot read from ending the script with no message
+# at all - but it also makes that failure silent in a misleading direction: with `ENTRY_SRC_NOW` empty,
+# *every* recorded file appears as a difference, and the clause refuses with "the entry image is not the
+# build of these sources", naming all twenty of them. Measured by pointing `STAGE_DIR` at a directory
+# that has no `xnu_arm_boot/` under it: the output began `  on disk:  ` with no filename at all - a line
+# whose second column is empty - and then listed all twenty names under `manifest:`, which is the same
+# 40-lines-for-20-files signature the `$2`-vs-`$3` field defect produces, arrived at from the other side.
+# The distinction the `|| true` was written to preserve is exactly the one it loses, so it is asserted
+# here rather than assumed: an empty scan is a tool that could not reach the directory, and the honest
+# answer to "did the sources change" is then "nothing was read", not "all of them did".
+[[ -n $ENTRY_SRC_NOW ]] \
+  || fail "the scan of $STAGE_DIR/xnu_arm_boot produced no files at all, while the manifest names $(printf '%s\n' "$ENTRY_SRC_RECORDED" | grep -c . || true) - so this is a scan that could not look, not a tree in which every source changed. Check that the directory exists and is readable before reading this clause's answer as one about content"
+# **`LC_ALL=C` on `comm` itself, not only on the sorts that feed it - because the two sides were
+# sorted in one locale and compared in another, and `comm` says so out loud.** Run under this host's
+# ambient `LANG=en_US.UTF-8` against the real `xnu_arm_boot/`, the line below printed
+# `comm: file 1 is not in sorted order`, `comm: file 2 is not in sorted order` and
+# `comm: input is not in sorted order`, and exited 1. Both files *are* sorted - by `LC_ALL=C`, three
+# lines up - and glibc's `en_US.UTF-8` collation ignores punctuation at the primary level, so it orders
+# the same twenty names differently from C: C puts `.gitignore` first and `entry.ld` fourth, the ambient
+# order puts `.gitignore` **last** and `entry.ld` ninth. That is not cosmetic, because `comm` merges by
+# walking two files in lockstep and comparing adjacent lines: an order the two sides do not agree on is
+# the assumption the merge is built on, and the answers it can give instead are a line present in both
+# files reported as a difference, or a differing line matched against the wrong counterpart. Measured
+# both ways on one pair: `comm -3` -> three warnings, exit 1; `LC_ALL=C comm -3` -> exit 0, no output.
+# One rule, one locale, so the clause's answer cannot depend on the environment of whoever runs the gate.
+ENTRY_SRC_DIFF=$(LC_ALL=C comm -3 <(printf '%s\n' "$ENTRY_SRC_RECORDED") <(printf '%s\n' "$ENTRY_SRC_NOW") | LC_ALL=C sort || true)
+if [[ -n $ENTRY_SRC_DIFF ]]; then
+  ENTRY_SRC_NAMES=$(printf '%s\n' "$ENTRY_SRC_DIFF" | awk 'NF { print $1 }' | LC_ALL=C sort -u | tr '\n' ' ')
+  echo "files that differ from the manifest $ENTRY_SRC_MANIFEST was written with:"
+  # `s/^/` PREFIXES and `s/^[^ \t]/` REPLACES - and the difference is a character of the filename.
+  # Written with the second form, the "changed" line below printed `ntry_arm_rtabi.s`, one letter
+  # short, because `sed` was substituting the label *for* the first character instead of putting it in
+  # front of the line. Measured on a manifest with one hash altered. The labels are also now the two
+  # sides of `comm` rather than a claim about what happened: column 2 is what is on disk, column 1 is
+  # what the manifest recorded, and a file whose content changed appears **once in each** - so
+  # "added"/"changed" was a guess at an intent the comparison does not compute, while the summary
+  # above it already names each file once. `comm -3` prints the second column with a leading TAB.
+  #
+  # **`t` is load-bearing and its absence is visible in the output.** Two `s` commands in one `sed`
+  # both run over the line: without `t`, the relabelled `on disk` line is fed straight into the second
+  # substitution and prints as `  manifest:   on disk:  <name>`, carrying *both* labels - measured on
+  # the same altered-hash manifest, and it reads as a claim about both sides at once. `t` branches to
+  # the end on a successful substitution, so the two labels are mutually exclusive: TAB -> `on disk`,
+  # no TAB -> `manifest`.
+  printf '%s\n' "$ENTRY_SRC_DIFF" | sed 's/^\t/  on disk:  /; t; s/^/  manifest: /' | awk 'NF'
+  echo "  (manifest bound to entry image $manifest_sha, $ENTRY_BIN's own hash)"
+  fail "the entry image is not the build of these sources: $ENTRY_SRC_NAMES. Rebuild the entry image with the switches this arm needs (stages/stage90/xnu_arm_boot/build_entry.sh) and then ./build.sh - the payload embeds the rebuilt bin, and the gate's blob clause refuses the image until it does. If those files are unchanged in content, the manifest is stale rather than the tree: rebuild the entry image, which is reproducible byte for byte and does not disturb the payload"
+fi
+echo "the entry image is the build of xnu_arm_boot/ as it stands: $(printf '%s\n' "$ENTRY_SRC_NOW" | grep -c . || true) file(s), every one matching the manifest, and none the manifest does not name"
 
 echo
 echo "== storage tripwire =="
