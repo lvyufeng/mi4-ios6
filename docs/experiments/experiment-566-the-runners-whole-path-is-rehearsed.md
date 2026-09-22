@@ -51,11 +51,25 @@ site that stays uninspected, so each was rehearsed in a state where the other ca
 | 2 | adb stops listing the serial after the boot; the enumeration appears promptly | **step 5**, exit 3 | exit **3**; name absent; parked intact |
 | 3 | as 2, but the enumeration appears **only after** the bounded wait expires | **section 4**, exit 3 | exit **3**; `bounded wait expired after 3s` with `adb: not listed` and `host log: 1 -> 2`; section 4's message, count 1, step 5's message count **0** |
 
-Variant 3 is the one worth naming: it is the state the phone actually entered on 2026-09-22 (`2717:0368`
-for 18 s, dropping before `18d1:4ee7`), and it is the case 551 added exit 3 for. Reaching it required the
-stub to be *late*, not merely failing - with the enumeration prompt, section 4 returns and step 5 becomes
-the producer instead, which is what variants 1 and 2 measured. **A test that only makes the device fail
-tests the wrong producer.**
+Variant 3 is the one worth naming: reaching it required the stub to be *late*, not merely failing - with
+the enumeration prompt, section 4 returns and step 5 becomes the producer instead, which is what variants
+1 and 2 measured. **A test that only makes the device fail tests the wrong producer.**
+
+> **Correction (566c, host-side, before the run): variant 3's producer is a property of the rehearsal's
+> wait, not of the 2026-09-22 state, and §3 said otherwise.** The variants shortened `RETURN_TIMEOUT`
+> (5-15 s, stated in §5 as a convenience), and that parameter is what decides the producer: the
+> **default is 180 s** (`run_and_capture.sh:51`), while this phone's measured fastboot-to-Android handover
+> is **~17 s** (542: `18d1:d00d` gone at `02:00:59`, `2717:0368` at `02:01:16`). At the real timeout that
+> enumeration lands well *inside* the wait, so the loop sees the count rise, `RETURNED=1`, section 4
+> returns normally, and when Android never reaches `18d1:4ee7` the capture window expires and the producer
+> is **section 5**. To reach section 4 with the real timeout the phone must be silent for the *whole* 180 s
+> and only then enumerate - a different state from a bring-up that enumerates at 17 s and drops at ~35 s.
+> What §3 got right is the code: **3** is what 551 added exit 3 for, and 3 is what that event would have
+> returned. Only the producer attribution was wrong, and it is this project's most-repeated class: **a
+> conclusion about the device drawn from a harness parameter.** The same correction applied to the runner's
+> own header, which had described the two producers by whether adb came up - a condition section 4
+> satisfies on *both* paths - instead of by when the enumeration was seen. Both are fixed in 566c, and the
+> discriminating column now lives in the file that computes it.
 
 ## 3b. And the reading procedure for the coming run, rehearsed on the real log
 

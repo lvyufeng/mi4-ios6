@@ -33,10 +33,19 @@
 #      when this phone's Android bring-up failed twice in ten minutes (`2717:0368` for 18 s,
 #      one window ending before `4ee7`) and exit 2 would have been the wrong reading.
 #      **It has two producers, and the second one is step 5** (before 564, step 5 called
-#      `die` here, i.e. exit 1, for the same state this code is defined by): section 4 when
-#      the return is seen and adb never comes up, and section 5 when the return is seen, adb
-#      is not *yet* reachable, and the bounded capture window expires. A "1" printed after a
-#      boot that reached section 5 is a host-side write failure and not a device state.
+#      `die` here, i.e. exit 1, for the same state this code is defined by). **What separates
+#      them is *when* the enumeration was seen, not whether adb came up** - and that
+#      distinction is easy to state wrongly, because section 4's own condition ("the host log
+#      shows the phone enumerating") is satisfied on *both* paths:
+#        * the enumeration is seen **inside** the bounded wait -> `RETURNED=1`, section 4
+#          returns normally, and the capture is step 5's problem -> **step 5** exits 3;
+#        * the phone is silent for the **whole** wait and only then enumerates -> section 4's
+#          `exit 3` below fires -> **section 4** exits 3.
+#      At the default `RETURN_TIMEOUT` the first is what this phone does: 542 measured the
+#      fastboot-to-Android handover at ~17 s, well inside 180 s. The second requires a silence
+#      longer than the whole wait, so it is the rarer state - which is why a test that shortens
+#      `RETURN_TIMEOUT` silently moves the producer (566 §3, corrected in 566c). A "1" printed
+#      after a boot that reached step 5 is a host-side write failure and not a device state.
 
 set -euo pipefail
 
@@ -697,6 +706,20 @@ if [[ $DRY_RUN -eq 0 && $RETURNED -eq 0 ]]; then
     say "The log lives in the top of DRAM and survives until a power cycle, so if the phone"
     say "settles into Android, re-read it with:"
     say "  sudo adb -s $SERIAL exec-out 'cat /proc/last_kmsg' > $LOGFILE"
+    # **And the name to read it *into* is vacant, which the hand-retry command above does not say.**
+    # Step 2b parked whatever was there before the boot, so the previous run's log is at `$PREV_LOG`
+    # and not under `$LOGFILE` - and `> $LOGFILE` creates this run's file at a name that currently
+    # holds nothing. 566 §3's producer attribution is what makes this the message that matters: at the
+    # real `RETURN_TIMEOUT`, a phone that enumerates inside the wait leaves section 4 with `RETURNED`
+    # true and this block is never reached, so the operator who *does* reach it is the one whose device
+    # was silent past the whole wait - and for them the earlier log's location is the one thing the
+    # section 5 message says and this one did not. Same condition, same path, said once.
+    if [[ -n $PREV_LOG ]]; then
+      say "The previous run's log is NOT at that name: step 2b parked it before the boot, so reading"
+      say "into $LOGFILE above creates this run's file beside it. The earlier one is at"
+      say "  $PREV_LOG"
+      say "- read it for the 2026-09-22 death, and never as this run's, whatever bracket it carries."
+    fi
     exit 3
   fi
   if [[ $ENUM_BEFORE == UNREAD || $ENUM_AFTER == UNREAD || $ENUM_AFTER -lt $ENUM_BEFORE ]]; then
