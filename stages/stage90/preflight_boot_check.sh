@@ -98,13 +98,28 @@ echo "== image freshness =="
 # prevent, in the direction it was blind to. Verified: without this check, touching
 # stage90.h and running the gate passes.
 #
-# `|| true` on each `find`: `find` exits non-zero on a directory it cannot read, and under `set -e` the
-# assignment would then end the script right here with no message at all - the same shape as the
-# `[[ ... ]] && echo` note below and as clause 2's missing-`nm` guard. A scan that could not look is not
-# a scan that found something, and the direction this fails in is the quiet one.
+# **The two scans below refuse when they fail, and they used to approve instead.** 536 added `|| true`
+# here to stop a `find` that exits non-zero on a directory it cannot read from ending the script with no
+# message at all under `set -e`/`pipefail` - but `|| true` does not preserve the distinction the note
+# above is about, it deletes it in the direction this gate exists to prevent: with the scan empty, the
+# test below finds nothing newer than the image and the gate prints its PASS. Measured by running this
+# block with `STAGE_DIR` pointed at a directory that does not exist, and again at one with mode 000
+# (uid 1001, so the test was meaningful): both printed "PASS: no source file is newer than the image".
+# A scan that could not look is not a scan that found nothing, and "nothing is newer" is a clearance.
+# This is the same defect as the entry-sources clause's empty scan below, reached from the other side -
+# there an empty scan named all twenty sources as changed, here it names none - and it gets the same
+# answer: assert the distinction rather than assume it. `|| fail` still ends the script *with* a message
+# and a non-zero status, which is all the `|| true` was ever for, and `find`'s own stderr is no longer
+# discarded so the reason is in the output rather than only in a comment.
+#
+# The window is narrow and not empty: both roots are resolved from the script's own location
+# (`$STAGE_DIR=$PWD` after `cd "$(dirname "$0")"`, `$REPO_ROOT=$STAGE_DIR/../..`), so the script's
+# directory is present by construction and what this catches is the other root - a relocated or partial
+# tree with no `tools/` - plus anything that removes a root mid-run.
 STALE=$(find "$STAGE_DIR" -maxdepth 1 -type f \
          \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.ld' \) \
-         -newer "$IMAGE" -printf '%f\n' 2>/dev/null | sort || true)
+         -newer "$IMAGE" -printf '%f\n' | sort) \
+  || fail "the freshness scan of $STAGE_DIR failed rather than finished, so this gate has no answer to \"is a source newer than the image\" - and an empty scan must not be read as \"none is\""
 # **533 put the entry image's own sources in this sweep for one commit, and 533 removed them again -
 # because an mtime is the wrong measurement for that directory and the refusal it produced was of a
 # correct tree.** The entry sources are one directory down and `-maxdepth 1` never looked at them,
@@ -121,8 +136,12 @@ STALE=$(find "$STAGE_DIR" -maxdepth 1 -type f \
 # own sources" below, which reads the manifest `build_entry.sh` writes beside the image), so this
 # sweep is back to the payload's own sources - the files `build.sh` actually compiles - and the
 # tools that generate what it compiles.
+# The generator is named here the same way `build.sh:18` names it (`$REPO_ROOT/tools/mkmacho_fixture.py`,
+# the path that build invokes), and this root carries the same `|| fail` as the one above: a missing or
+# unreadable `tools/` is a tool that could not be looked at, not a tool that is older than the image.
 BUILD_TOOLS_NEWER=$(find "$REPO_ROOT/tools" -maxdepth 1 -name 'mkmacho_fixture.py' \
-                    -newer "$IMAGE" -printf '%f\n' 2>/dev/null || true)
+                    -newer "$IMAGE" -printf '%f\n') \
+  || fail "the freshness scan of $REPO_ROOT/tools failed rather than finished, so the generator this gate names against the image was never compared with it - an empty scan is not \"the tool is old enough\""
 if [[ -n $STALE || -n $BUILD_TOOLS_NEWER ]]; then
   echo "source newer than the image:"
   # `[[ ... ]] && echo` as a bare statement returns 1 when the test is false, which under `set -e`
