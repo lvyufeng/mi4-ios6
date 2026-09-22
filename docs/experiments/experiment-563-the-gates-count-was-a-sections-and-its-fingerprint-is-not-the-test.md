@@ -42,7 +42,7 @@ description of states it has not described. A number with its scope stated is ho
 so that a sentence stays true is the same defect moving. The `0` in the file-wide census is printed and
 not explained, which is the point of printing it: the clause says where its narration stops.
 
-## 2. Three stale claims, and the third is a wrong number
+## 2. Three stale claims, and the third is a wrong number — and then a fourth, found by sweeping the predicate
 
 The runner changed in the same window, so every sentence here that described the runner's *mechanics*
 had to be re-measured. Three did not survive:
@@ -58,6 +58,28 @@ The third is worth naming out plain, because it is the cheapest possible instanc
 renumbered to 564 deliberately - "your file existed first, and the 556/548 precedent is that the later
 side moves" - which is exactly the kind of move that leaves a citation behind. It was caught by
 grepping the gate for the string before committing, not by reading it.
+
+**The fourth was found by the sweep the first three should have been run as, and it is the one that
+mattered operationally.** 560's lesson is that a correction sweep has to be run *by predicate*, not by
+provenance - the files the phase has edited are not the set of files carrying the wrong sentence. So
+after landing 563 I grepped the gate for every sentence that describes the runner (`step 2`..`step 5`,
+`section 4`/`5`, `$LOGFILE`, `rm`, `redirect`, `exit 2`/`3`) and re-measured each against the runner as
+it now stands. One survivor, and it was in the block I had just edited:
+
+| 562 said | the tree now does | repair |
+| --- | --- | --- |
+| on a non-return, the script leaves before step 5 and "`$LOG` is **untouched**" | step 2b moves it aside **before** step 3 boots, so on a non-return the name is **absent** and the bytes are at **`$LOGFILE.prev`** | the comment now says that, and both the comment and the printed block point the reader at `$LOGFILE.prev` for the earlier bracket |
+
+Why this one is worse than the other three: it is aimed at the reader of a **non-return**, which is one
+of the two states 547 §4 pre-registers for the arm in `out/`, and "untouched" is the opposite of what
+they will find. An operator who follows it reads `$LOG`, finds nothing, and has no reason to look for
+`.prev` - on the run that just spent the freeze. The gate now prints the parked path in every state
+(the `echo` sits above the branch, so it is not contingent on which one fires): *"if the name is gone
+after the run, the PREVIOUS log was parked rather than lost: step 2b moves it to `$LOG.prev` (then
+`.prev.2`, ...) ... Read that path for the earlier death and never as this run's, whatever the bracket
+in it says."* A gate that tells the reader where the evidence went is the whole point of a preflight;
+one that tells them it is where it is not is worse than silence
+([[mi4-silence-is-a-reading-only-if-success-is-silent]]).
 
 ## 3. The fingerprint is no longer the test, and the block says so instead of being deleted
 
@@ -144,6 +166,11 @@ was removed in the same pass.
 - The absent branch is **not** exercised by a default run, so it was exercised explicitly with a
   `LOGFILE=` override under the job's own `tmp/` - and printed the step-2b/step-5 wording. Without that
   run the branch would have been a sentence nobody had read, which is how 562's backtick bug survived.
+- The predicate sweep of §2 was run **after** the first commit, so its repair is `563b` and the `diff`
+  is a second, separate one: against the 563 output it is **exactly three added lines** - the parked-path
+  pointer - with exit 0 and `bash -n` clean. Splitting it across two commits is the honest record: the
+  first three claims were found by reading the block I was already editing, the fourth only by grepping
+  for the *shape* everywhere, and the second method is the one that should have been used first.
 - The real capture is **read and never written**: `596665 bytes`, mtime `2026-09-22 02:55:16`,
   `sha256 f0285b0f…` identical before and after, and still carrying the bracket 547 §4 pre-registers
   (`pre_calls` 1, `rtcpre_calls` 1, `post_calls` absent) - the 2026-09-22 death the prediction was

@@ -1438,28 +1438,33 @@ fi
 # branches above end by telling the reader to read the file at `$LOG` - and the runner only writes it
 # in step 5, which it reaches **only if the device returned** (`RETURNED` true). On the path that
 # refuses to call a non-return (the code whose message names this file), and on both `exit 2` paths,
-# the script leaves before that step and `$LOG` is **untouched**. So the file on disk is very often the
-# previous run's, and there is a specific trap in that, not a general caution: the log left there by
-# the 2026-09-22 run already carries **exactly the bracket 547 section 4 pre-registers** - one
-# `pre_calls`, one `rtcpre_calls`, `post_calls` absent - because it is the death that prediction was
-# written from. A run whose capture failed, read through that file, would confirm the prediction with
-# the data that produced it, and the confirmation would be unattributable (the position of the keys in
-# the file cannot separate the two runs either: the ram console's two blocks make line order
-# chronological only within a block). The gate cannot check this after the run - it is a preflight - so
-# it does the two things it can: it records what the file *is* at the only moment a "before" exists,
-# and it names the bracket already in it rather than describing the hazard. After the run, the test is
-# one command: this sha256 must have changed. Unchanged means no capture happened - the state exit 3
-# describes - and the honest reading is that state, not a bracket read out of this file.
+# the script leaves before that step - so as of 562 the file on disk is very often the previous run's,
+# and there is a specific trap in that, not a general caution: the log left there by the 2026-09-22 run
+# already carries **exactly the bracket 547 section 4 pre-registers** - one `pre_calls`, one
+# `rtcpre_calls`, `post_calls` absent - because it is the death that prediction was written from. A run
+# whose capture failed, read through that file, would confirm the prediction with the data that
+# produced it, and the confirmation would be unattributable (the position of the keys in the file
+# cannot separate the two runs either: the ram console's two blocks make line order chronological only
+# within a block). The gate cannot check this after the run - it is a preflight - so it does the two
+# things it can: it records what the file *is* at the only moment a "before" exists, and it names the
+# bracket already in it rather than describing the hazard.
 #
-# **The runner's own 564 made this record no longer load-bearing, and that is worth saying here rather
-# than deleting the block.** Its new step 2b **parks** the file - `mv $LOGFILE $LOGFILE.prev` - before
-# it boots anything, so after the boot the name holds *this* run's capture or nothing, and the previous
-# bytes cannot be mistaken for this run's **even if they are identical**, which a hash comparison cannot
-# do. It also means the runner, not the gate, is where the before-state lives: one value, one
-# definition. What this block still is, and why it stays, is the operator's *independent* record - the
-# runner's own exit-3 message points back at it ("compare its sha256 against the one the gate printed")
-# and it is the fingerprint that identifies a parked file as the one this gate saw. What it is **not**
-# is the test: the test is `[[ -e $LOG ]]` after the run, plus non-empty.
+# **564 then removed the trap at the source, and it changed what "`$LOG` is untouched" means - do not
+# read the next sentence the way 562 wrote it.** Its new step 2b **parks** the file - `mv $LOGFILE
+# $LOGFILE.prev` - **before** step 3 boots anything, so on a non-return `$LOG` is not "untouched", it is
+# **absent**, and the previous bytes are at **`$LOGFILE.prev`**. That is the operational point and it
+# bites at the worst moment: after a non-return the reader who wants the previous bracket must read the
+# parked path, and the absence of `$LOG` is the *expected* state rather than evidence about the run. On
+# a returned run the name holds this run's capture or nothing, and the previous bytes cannot be mistaken
+# for this run's **even if they are identical**, which a hash comparison cannot do. So the post-run test
+# is **whether `$LOG` exists and is non-empty**, not a sha; the runner, not the gate, is where the
+# before-state lives (one value, one definition).
+#
+# What this record still is, and why the block stays rather than being deleted: the operator's
+# *independent* record, the fingerprint that identifies a **parked** file as the one this gate saw, and
+# the one comparison that still applies - when step 2b's park **failed** (sticky `/tmp`, identities
+# 511/512), the runner says so and tells the reader to compare this sha. What it is **not** is the test.
+
 echo "== the log those instructions name, as it stands at gate time =="
 echo "  $LOG"
 echo "  this is a reading of THIS moment, not a claim about the run: the gate cannot see whether a run"
@@ -1467,6 +1472,9 @@ echo "  follows it, and run_and_capture.sh's step 2b parks this file before the 
 echo "  564). So after the run the test is not this number: it is whether $LOG is there at all, and"
 echo "  whether what is there is non-empty - the hand retry exit 3's message asks for is a shell"
 echo "  redirect, which creates the file before adb can fail."
+echo "  And if the name is gone after the run, the PREVIOUS log was parked rather than lost: step 2b"
+echo "  moves it to $LOG.prev (then .prev.2, ...), which is where the earlier bracket lives. Read"
+echo "  that path for the earlier death and never as this run's, whatever the bracket in it says."
 if [[ ! -e $LOG ]]; then
   echo "  absent - and that is the useful part: after the run, this file *existing* is itself the first"
   echo "  check, because nothing here writes it before a capture succeeds. Step 2b says the same thing"
