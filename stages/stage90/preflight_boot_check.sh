@@ -974,10 +974,15 @@ fi
 echo "ok: cache and attribute switches agree"
 
 echo
-echo "All checks passed. To run the non-persistent boot (writes nothing to storage):"
+echo "All checks passed. The run is one command, which re-runs this gate with the same flags,"
+echo "enters fastboot, boots the image without writing anything to storage, and captures the"
+echo "log before anything else touches the device:"
 echo
-echo "  sudo adb -s 4a2fe00b reboot bootloader"
-echo "  sudo fastboot boot $IMAGE"
+echo "  $STAGE_DIR/run_and_capture.sh $*"
 echo
-echo "Recover afterwards with:"
-echo "  sudo adb -s 4a2fe00b exec-out 'cat /proc/last_kmsg' > /tmp/cancro-last_kmsg.txt"
+echo "Its exit status is the reading: 0 the device came back and the log is at"
+echo "/tmp/cancro-last_kmsg.txt, 2 the payload ran and the device did NOT come back - a manual"
+echo "power press is owed and the log goes with the power cycle."
+echo
+echo "  image: $IMAGE"
+echo "  booted, never flashed, so no outcome of this run can write to storage."
