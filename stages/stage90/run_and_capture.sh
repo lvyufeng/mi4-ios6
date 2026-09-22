@@ -212,7 +212,7 @@ summarise_log() {
   # nothing. This repository has been bitten by that distinction more than once, so the three
   # states are printed separately: PASS, FAIL, and UNREAD.
   if grep -a -q 'xnu_live_slot_cwe_' "$log"; then
-    local cwe_win cwe_set cwe_calls pre_calls rtcab_calls post_calls storm panics user_ones
+    local cwe_win cwe_set cwe_calls pre_calls rtcpre_calls post_calls storm panics user_ones
     local sleh_lr="" sleh_pc="" sleh_sp="" sleh_seen=""
     local pop_lr="" pop_lr_src="" pop_death=0 pop_named=0 cache_arm=unread arm_seen=unknown
     local pce_up="" pce_ncpu="" verdict_ok=1
@@ -226,7 +226,7 @@ summarise_log() {
     cwe_set=$(keyval slot_cwe_set)
     cwe_calls=$(keyval slot_cwe_calls)
     # **The three bracket publishers, because their *absence* is a localization rather than a gap.**
-    # The exit wrapper calls `entry_slot_null_note(&g_slot_pre)`, `entry_slot_rtc_note(&g_slot_rtcab)`
+    # The exit wrapper calls `entry_slot_null_note(&g_slot_pre)`, `entry_slot_rtc_note(&g_slot_rtcpre)`
     # and then, after the real exit returns, `entry_slot_null_note(&g_slot_post)` - and it ends in a
     # tail branch rather than returning, so all three are reached in the same pass or the pass died at
     # the one before. Each is called once per pass, and all three use the same publish schedule
@@ -234,8 +234,20 @@ summarise_log() {
     # pass n all three counters equal n: **if one published, the others would have published had they
     # been reached.** That is what turns "post_calls is missing" from UNREAD into the reading this run
     # exists to produce - and the three cases are the death's own address.
+    #
+    # **The second of the three is `rtcpre`, not `rtcab`, and the two are different sites.** This
+    # block read `slot_rtcab_calls` here until 558 and that was wrong: `g_slot_rtcpre` is the exit
+    # wrapper's (`entry_trace.c:1973`, `entry_slot_rtc_note(&g_slot_rtcpre, entry_tpidrprw())`), while
+    # `g_slot_rtcab` belongs to the **abort** path (`entry_stubs.c:1792`, inside `entry_note_sleh`,
+    # `entry_slot_rtc_note(&g_slot_rtcab, thread)`) - so `rtcab` is a *storm* count, and 520's own log
+    # shows it: 5 records (`1,2,3,4,8`) against 9 abort episodes, which is the schedule and not one
+    # per exit pass. Keying the bracket on it was a false-localization generator: a pass that reached
+    # the wrapper but took no abort would have missed the `DIED IN THE EXIT` branch below and printed
+    # `DIED BEFORE THE EXIT ... the rtcPop reading did not publish` while the rtcPop reading was in the
+    # log under its own name. (Found by the peer session reading the same three-note claim against the
+    # source; verified here at both call sites before the change, not after.)
     pre_calls=$(keyval slot_pre_calls)
-    rtcab_calls=$(keyval slot_rtcab_calls)
+    rtcpre_calls=$(keyval slot_rtcpre_calls)
     post_calls=$(keyval slot_post_calls)
     storm=$(keyval sleh_storm)
     panics=$(grep -a -c 'panic.*sleh_abort' "$log" || true)
@@ -433,8 +445,8 @@ summarise_log() {
       say "  PASS  slot_post_calls=$post_calls - the exit returned through the wrapper, which"
       say "        520's run never did (its pass died inside the call)"
     elif [[ $pre_calls =~ ^0x[0-9a-f]+$ ]] && (( pre_calls >= 1 )) \
-      && [[ $rtcab_calls =~ ^0x[0-9a-f]+$ ]] && (( rtcab_calls >= 1 )); then
-      say "  DIED IN THE EXIT  pre_calls=$pre_calls and rtcab_calls=$rtcab_calls both published and"
+      && [[ $rtcpre_calls =~ ^0x[0-9a-f]+$ ]] && (( rtcpre_calls >= 1 )); then
+      say "  DIED IN THE EXIT  pre_calls=$pre_calls and rtcpre_calls=$rtcpre_calls both published and"
       say "        slot_post_calls did not: the pass reached the wrapper, took the rtcPop reading and"
       say "        got as far as the call, and did not come back through it - so the death is inside"
       say "        platform_cache_idle_exit, which is 520's pop {fp, pc} at the same pc. That is a"
@@ -457,14 +469,17 @@ summarise_log() {
         verdict_ok=0
       fi
     elif [[ $pre_calls =~ ^0x[0-9a-f]+$ ]] && (( pre_calls >= 1 )); then
-      say "  DIED BEFORE THE EXIT  pre_calls=$pre_calls published but the rtcPop reading did not, so"
-      say "        the pass died between the two - earlier than 520's death and a different fault"
+      say "  DIED BEFORE THE EXIT  pre_calls=$pre_calls published but the rtcPop reading"
+      say "        (slot_rtcpre_calls) did not, so the pass died between the two notes - earlier than"
+      say "        520's death and a different fault"
       verdict_ok=0
     else
       say "  UNREAD  none of the wrapper's three bracket publishers is in the log (pre_calls,"
-      say "          rtcab_calls, post_calls all absent), so this log cannot say where the pass died."
+      say "          rtcpre_calls, post_calls all absent), so this log cannot say where the pass died."
       say "          The likely causes are a last_kmsg ring that wrapped past them and a run that"
       say "          never reached the idle exit at all."
+      say "          (slot_rtcab_calls is NOT one of the three - it is the abort path's counter, so"
+      say "          its presence or absence says nothing about whether the wrapper was reached.)"
       verdict_ok=0
     fi
 

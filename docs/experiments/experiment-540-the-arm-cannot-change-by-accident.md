@@ -157,7 +157,7 @@ synthetic logs - 533-shaped, 522-shaped, and the impossible one - each run again
 to refuse.
 
 **And item (3) became the run's actual prediction.** The exit wrapper calls three bracket publishers -
-`entry_slot_null_note(&g_slot_pre)`, `entry_slot_rtc_note(&g_slot_rtcab)`, and after the real exit
+`entry_slot_null_note(&g_slot_pre)`, `entry_slot_rtc_note(&g_slot_rtcpre)`, and after the real exit
 returns `entry_slot_null_note(&g_slot_post)` - and it ends in a tail branch rather than returning, so all
 three are reached in the same pass or the pass died at the one before. They share one publish schedule
 (`entry_stubs.c:6236`, `n <= 4 || power of two`) and one `entry_live_ready()` gate, so **if one published,
@@ -167,9 +167,17 @@ UNREAD into a localization:
 | in the log | reading |
 | --- | --- |
 | `post_calls` ≥ 1 | the exit returned through the wrapper - the pass survived |
-| `pre_calls` and `rtcab_calls` published, `post_calls` absent | **the death is inside `platform_cache_idle_exit`** - 520's `pop {fp, pc}` |
+| `pre_calls` and `rtcpre_calls` published, `post_calls` absent | **the death is inside `platform_cache_idle_exit`** - 520's `pop {fp, pc}` |
 | `pre_calls` only | died between the two notes, earlier than 520's death |
 | none of the three | the log cannot say; a wrapped ring buffer or a pass that never reached the exit |
+
+> **Correction (558): every `rtcab` in this section was `rtcpre`.** The second of the wrapper's three
+> publishers is `g_slot_rtcpre` (`entry_trace.c:1973`); `g_slot_rtcab` is the **abort** path's, published
+> from `entry_note_sleh` (`entry_stubs.c:1792`), so it is a storm counter and not a per-pass one - 520's
+> log has 5 `rtcab` records (`1,2,3,4,8`) against 9 abort episodes. The table above is corrected in
+> place, and `run_and_capture.sh`'s clause (3) - which was keyed on `rtcab` and so would have printed
+> `DIED BEFORE THE EXIT` for a pass that reached the wrapper with no abort, or `DIED IN THE EXIT` for one
+> that had aborts and never reached the wrapper - is repaired in 558.
 
 Two things a reader must not take from the counts. They are published on a schedule, so a printed `4`
 means *at least* four and possibly 5-7 - the number is the largest published count, not a total

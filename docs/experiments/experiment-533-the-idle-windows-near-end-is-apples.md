@@ -191,7 +191,7 @@ and it is what says the image about to be spent is 533's arm and not 522's weari
 
    | in the log | the death is |
    | --- | --- |
-   | `slot_pre_calls` present, `slot_rtcab_calls` absent | between the pre note and the rtc note |
+   | `slot_pre_calls` present, `slot_rtcpre_calls` absent | between the pre note and the rtc note |
    | both present, `slot_post_calls` absent | **inside `platform_cache_idle_exit`** - the `pop` |
    | all three present | it got out of the wrapper |
 
@@ -199,7 +199,21 @@ and it is what says the image about to be spent is 533's arm and not 522's weari
    (`entry_stubs.c:6236`) *and* the same `entry_live_ready()` gate, and each is called exactly once per
    pass, so at pass *n* all three counters equal *n* - **if one published, the others would have
    published had they been reached.** Two caveats: the log must not be truncated after the pre line
-   (last_kmsg is a ring), and the rtc note's keys are `xnu_live_slot_rtcab_*`.
+   (last_kmsg is a ring), and the rtc note's keys are `xnu_live_slot_rtcpre_*`.
+
+   > **Correction (558, before the run): the second publisher is `rtcpre`, not `rtcab`.** This table and
+   > the caveat above said `xnu_live_slot_rtcab_*`, and the two are different sites: the exit wrapper
+   > calls `entry_slot_rtc_note(&g_slot_rtcpre, entry_tpidrprw())` (`entry_trace.c:1973`), while
+   > `g_slot_rtcab` belongs to the **abort** path - `entry_slot_rtc_note(&g_slot_rtcab, thread)` inside
+   > `entry_note_sleh` (`entry_stubs.c:1792`) - so `rtcab` is a *storm* counter, not a per-pass one. The
+   > prediction is unchanged (the three-way pattern is the same three sites in the same order), but the
+   > key name was wrong, and wrong in the direction that matters: a pass that reached the wrapper without
+   > taking an abort has `rtcab` absent and `rtcpre` present, so a reader following the old row would have
+   > called that "died between the pre note and the rtc note". 520's own log is what shows it - `rtcab`
+   > has 5 records (`1,2,3,4,8`) against 9 abort episodes, and one record each for `pre`/`rtcpre`/`sip`/
+   > `pce`. Found by the peer session reading this claim against the source while writing 556; verified
+   > here at both call sites, and the reader (`run_and_capture.sh` clause 3) was keyed on it too and is
+   > repaired in the same commit.
 3. **The two readings that say this image is the arm it claims to be**: `xnu_live_slot_cwe_win` and
    `_set`, which here must both have `C` clear. The note is kept on purpose even though the write it
    brackets is gone, because an absent key and a key that says "no change" are different facts
