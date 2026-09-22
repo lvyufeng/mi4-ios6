@@ -1508,6 +1508,160 @@ else
     echo "     If its sha256 is the same after the run, the run produced no capture at all, and the"
     echo "     bracket above is the one that was there before it."
   fi
+
+  # =================================================================================================
+  # **The report's two families, and the keys the stop is named by - because in this very file the two
+  # keys a reader is taught to classify a stop with are not readings at all.**
+  #
+  # Every key the log carries from the epilogue is written *after* the epilogue has cleared SCTLR.C and
+  # then SCTLR.M - i.e. after the mmu is off, so every address is physical - and so its value is
+  # whatever a plain load finds in DRAM at that moment. Two things can make that not the value the run
+  # had, and this project has paid for both: the line never reached DRAM (195: a dirty line "reads back
+  # as the zeroes `.bss` was filled with"), or the read is not faithful while the memory is (272's
+  # 88-word build, same source and same layout size as its working twin, "reads the small `.bss` globals
+  # as garbage" - `xnu_entry_why` as the linker's `__entry_text_end`, and `.rodata` string bytes across
+  # the `g_first_abort_*` block). 272's rule is the one to read this block by: **a field is only as good
+  # as its second road.**
+  #
+  # The fixture publishes the second road itself, in the pair's own text: `xnu_entry_kv_written` "is
+  # what the probes recorded, read from a register, so it is right even if the transfer to DRAM was
+  # not", and `xnu_entry_kv_in_dram` "is what the transfer actually produced - they differ only when it
+  # failed". **So the pair is the test that decides whether a report's small-`.bss` family is a reading
+  # at all** - and it is a test over the *file*, not over the source, which is why it is computed below
+  # from whatever $LOG holds at gate time rather than asserted here.
+  #
+  # What makes this worth a clause rather than a sentence in a document is that the family includes the
+  # two keys a reader is most likely to take first. `xnu_entry_why` and `xnu_entry_why_byte` come from
+  # `g_why`, a small `.bss` global, and 340's rule for them is that the byte "is the first byte of the
+  # `why` string, which makes it a one-character telegraph" of the kind of stop (`0x61` = 'a', a stub;
+  # `0x65` = 'e', an exception). **In the 2026-09-22 capture the byte reads `0x00000034`** - '4', and
+  # the report's own opening line reads `real XNU entry: 47`, i.e. the first character of those same
+  # two bytes, so the pair is two roads to one bad read and not two witnesses. **That line is the
+  # fixture's own known artifact**: its note on `g_why` records that this line has come out as `... : `
+  # with nothing after it and, in the storm run, as `... : 47`, and says of both that they are "what a
+  # clobbered stack slot looks like, and neither is what the string says" - the `.bss` copy exists
+  # *because* of that reading, so a report in which even the copy is wrong is the case 272 describes,
+  # not a new one. Neither reading is a classification and neither is the stop's reason being absent:
+  # `0x34` is not the first byte of any `why` string this image has, and the set of those first bytes
+  # is derived below rather than written here, so a byte outside it is read as an *unreadable* reason
+  # rather than as a kind - which is the reading that was once taken wrongly in this phase, from a
+  # grep for the reason *strings* while the report was carrying these two keys all along.
+  #
+  # The same family explains the *absence* of the results buffer, and that absence is the one thing
+  # this report is not allowed to leave ambiguous: the fixture's own doctrine, written for the trap
+  # record's buffer, is that "one heading per buffer is also what makes the *absence* of one of them
+  # readable" - its heading is printed together with the counter that says whether its writer ran. The
+  # first buffer's heading is guarded instead on `g_kv_len`, the same small `.bss` global the pair's
+  # `_in_dram` reads, so a failed transfer suppresses the buffer *and* the evidence of the failure with
+  # it. The counts below are the reader's substitute: the fixture's own `entry_write()` sites for that
+  # heading, against the number of them in the file.
+  #
+  # This is a reading of the file at gate time and never a claim about the coming run (563's tense
+  # rule): after the run $LOG is this run's capture or absent, and this clause has already said what
+  # the *parked* file's report can be quoted for.
+  FIXTURE=$STAGE_DIR/xnu_arm_boot/entry_stubs.c
+  _lastv() { grep -ao "$1=[0-9a-fx]*" "$LOG" 2>/dev/null | tail -1 || true; }
+  _ishex() { [[ $1 =~ ^0x[0-9a-f]+$ ]]; }
+  _zero()  { _ishex "$1" && (( 16#${1#0x} == 0 )); }
+  # What the fixture publishes each key from: a `.bss` global, or a local the ABI keeps in a register.
+  # Derived from the call rather than listed here, and it says so out loud when it cannot tell - a
+  # classification that prints nothing when its subject moves is indistinguishable from one that ran.
+  _fam() {
+    [[ -f $FIXTURE ]] || { printf 'not read: no fixture at gate time'; return 0; }
+    local call
+    call=$(grep -o "entry_write_kv(\"$1\",[^;]*" "$FIXTURE" 2>/dev/null | head -1 || true)
+    [[ -n $call ]] || call=$(grep -o "entry_panic_kv(\"$1\",[^;]*" "$FIXTURE" 2>/dev/null | head -1 || true)
+    if [[ -z $call ]]; then printf 'NOT FOUND in this fixture'; return 0; fi
+    local arg=${call#*\",}; arg=${arg# }; arg=${arg%)}
+    if [[ $arg =~ (^|[^a-zA-Z0-9_])g_[a-z] ]]; then printf '`%s` (a .bss global)' "$arg"
+    else printf '`%s` (a local - register-held)' "$arg"; fi
+  }
+  _whyfirst=$(grep -o 'entry_epilogue("[^"]' "$FIXTURE" 2>/dev/null | sed 's/.*"//' \
+              | LC_ALL=C sort -u | tr -d '\n' || true)
+  _whyhex=$(printf '%s' "$_whyfirst" | od -An -tx1 | tr -s ' ' | sed 's/^ //; s/ $//; s/ /-/g' || true)
+  _hdr=$(grep -ac 'MI4IOS6_STAGE90_XNU real XNU entry' "$LOG" || true)
+  _hdrsites=$(grep -c 'entry_write(".*MI4IOS6_STAGE90_XNU real XNU entry' "$FIXTURE" 2>/dev/null || true)
+  _guard=$(grep -c 'if (g_kv_len != 0u)' "$FIXTURE" 2>/dev/null || true)
+  _pw=$(_lastv xnu_entry_kv_written); _pw=${_pw#*=}
+  _pd=$(_lastv xnu_entry_kv_in_dram); _pd=${_pd#*=}
+  _val() { local v; v=$(_lastv "$1"); printf '%s' "${v#*=}"; }
+  echo "== the report's two families, read out of the file and the fixture at gate time =="
+  _hasreport=0
+  for _k in xnu_entry_kv_written xnu_entry_kv_in_dram xnu_entry_why xnu_entry_why_byte; do
+    if [[ -n $(_val "$_k") ]]; then _hasreport=1; fi
+  done
+  if (( _hasreport == 0 )); then
+    echo "  this file carries no epilogue report at all, so there is nothing in it to classify by family"
+    echo "  - no pair, no why, no heading. That is a statement about $LOG and not about the image: the"
+    echo "  fixture still writes all of them, and a run's capture will carry them."
+  elif ! _ishex "$_pw" || ! _ishex "$_pd"; then
+    echo "  the pair is not here in full (written=${_pw:-absent}, in_dram=${_pd:-absent}): either this"
+    echo "  file is older than the pair, or the pair is among the lines that did not survive the write."
+    echo "  No *value* in it is classified by family below; the two lines that follow classify the"
+    echo "  fixture's sources, which is not the same claim. Read the fixture's own note on the pair"
+    echo "  before taking any report key here as a reading."
+  else
+    echo "  xnu_entry_kv_written=$_pw  from $(_fam xnu_entry_kv_written)"
+    echo "  xnu_entry_kv_in_dram=$_pd  from $(_fam xnu_entry_kv_in_dram)"
+    if _zero "$_pd" && ! _zero "$_pw"; then
+      echo "  ** THE PAIR DISAGREES, and this is what that buys: with written non-zero the probes did"
+      echo "     record bytes, so in THIS file the small-.bss family did not read back, and every key"
+      echo "     published from a .bss global is the zeroes .bss was filled with and not a reading."
+      echo "     That is the family the two keys below belong to, and by the same reading the results"
+      echo "     buffer below was not empty, it was never dumped - the two are different absences."
+    elif _zero "$_pw" && _zero "$_pd"; then
+      echo "  the pair is zero on both sides, which is a report from a run whose probes recorded nothing:"
+      echo "  it says nothing about the transfer, so the family classification below is unproven here."
+      echo "  (On a real boot this pair going to zero on BOTH sides is itself the news: the probes run"
+      echo "  unconditionally in the epilogue. Read the live channel, not this pair, for that.)"
+    else
+      echo "  the pair agrees, so this file's .bss family did read back: its report keys - the two below"
+      echo "  included - may be taken as the fixture's own values, subject to the second road 272 asks"
+      echo "  for, which for the death's shape is the live channel and not this report."
+    fi
+  fi
+  _w=$(_val xnu_entry_why); _wyb=$(_val xnu_entry_why_byte)
+  echo "  xnu_entry_why=${_w:-absent}  from $(_fam xnu_entry_why)"
+  echo "  xnu_entry_why_byte=${_wyb:-absent}  from $(_fam xnu_entry_why_byte)"
+  _wb=${_wyb: -2}
+  if [[ -z $_whyhex ]]; then
+    echo "  UNREAD - the first bytes of this fixture's why strings could not be derived from $FIXTURE,"
+    echo "  so whether a why_byte is one of them is not a check this gate can make. Read them out of the"
+    echo "  image by hand before classifying a stop with that byte."
+  elif [[ -z $_wb ]]; then
+    echo "  no why_byte in this file, so there is nothing to test against them."
+  elif [[ $_whyhex == *"$_wb"* ]]; then
+    echo "  ok: 0x$_wb is the first byte of one of this image's why strings ($_whyhex), which is the"
+    echo "  cheapest classification there is - but it names the KIND of stop, never which one."
+  else
+    echo "  ** 0x$_wb is NOT one of this fixture's why strings' first bytes ($_whyhex), so it classifies"
+    echo "     nothing: it is a byte read through a pointer that is not a string - 'a' and 'e' are the"
+    echo "     two this project has read, and a value outside the set above means the read is the news."
+  fi
+  echo "  the report's opening line: $_hdr occurrence(s) here, $_hdrsites write site(s) in the fixture"
+  if (( _hasreport == 0 )); then
+    echo "  and there is no heading to compare, because the check above is a check on a report's"
+    echo "  completeness and this file has no report: it says nothing about the run that wrote it."
+  elif [[ -z $_hdrsites || $_hdrsites == 0 ]]; then
+    echo "  UNREAD - the fixture's own heading count could not be derived, so the comparison below did"
+    echo "  not happen. Read its own entry_write() sites for that literal before reading a missing"
+    echo "  results buffer as an empty one."
+  elif [[ ${_hdr:-0} -lt ${_hdrsites:-0} ]]; then
+    echo "  and that is fewer than the fixture writes it: the later heading - the one before the results"
+    if [[ ${_guard:-0} -gt 0 ]]; then
+      echo "  buffer - was skipped, because it is guarded on g_kv_len, the same .bss global the pair reads."
+    else
+      echo "  buffer - was skipped, and its guard ($_guard site(s) matched in the fixture) is not one this"
+      echo "  clause can name: read the guard out of the fixture by hand before attributing the skip."
+    fi
+    echo "  ** So the results buffer's absence in this file is 'not dumped', which is not 'empty' - the"
+    echo "     buffer is printed only when g_kv_len is non-zero, and that is the same global _in_dram"
+    echo "     above reads, so the guard and the evidence cancel. What the probes did record this run is"
+    echo "     the register-held xnu_entry_kv_written, and where the arm and the death's shape are read is"
+    echo "     the live channel (xnu_live_*) - the printed report is not the only road, which is the point."
+  else
+    echo "  which is what a complete report carries, so the results buffer is in this file."
+  fi
 fi
 
 # **And the one address the result reader compares against, checked here because here is the only
