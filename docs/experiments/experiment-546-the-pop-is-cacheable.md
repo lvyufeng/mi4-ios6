@@ -158,16 +158,15 @@ outcome that should stop 535 from being built as designed.
 
 ## 6. What this does not decide
 
-- **Whether the stack region is mapped cacheable.** `SCTLR.C` = 1 at the pop is read off the bytes; that
-  the idle thread's stack is *normal, write-back* memory is not verified here, and if it were mapped
-  non-cacheable the whole of §3's step 4 would be impossible. It is the one premise of the reading that
-  is a property of the pmap rather than of this function, and it is checkable. Two things narrow it
-  without settling it. The attributes in force are **XNU's**, not the payload's: the payload's build
-  config records `STAGE90_PMAP_ATTR_MODE_SO_ONLY` (`out/stage90/stage90-build-config.txt:11`), which is
-  its own bootstrap table and is replaced before the jump, and by the time this pop runs XNU has been
-  running user-mode code for seconds through its own pmap. And the stack is XNU's wired kernel memory,
-  which is the memory Apple's ARM pmap is built to keep cached - but that is an argument from purpose,
-  not a reading of the descriptor, and this document does not make it.
+- **Whether the stack region is mapped cacheable.** *Checked, and it is* -
+  [548](experiment-548-the-kernel-memory-is-mapped-cacheable.md): XNU maps kernel memory with attribute
+  index 0 (`arm_vm_init.c:175-176`, `pmap.c:2641`/`:5416`/`:6232`/`:6240`, `CACHE_ATTRINDX_WRITEBACK`
+  `proc_reg.h:630`), Apple names index 0 *"cache enabled, buffer enabled"*, `NMRR_SETUP = 0x01210121` has
+  `IR0 = NMRR_WRITEBACK`, and the `PRRR.TR0 = 0b10` that is actually installed is cacheable under either
+  reading of that field - so the premise holds. The live `SCTLR` captured **inside the window**
+  (`xnu_live_pce_after_sctlr = 0x30c57879`) has `TRE` set (bit 28), which is what makes the index mean
+  anything; the payload-era reading (`0x00c5487b`) has `TRE` clear, so the attributes in force at the
+  frontier are XNU's.
 - **Whether the death is a cache matter at all**, and which level holds the line the pop actually hit.
   545 §6's missing-barrier hypothesis and §3's stale-L2 hypothesis are both consistent with the same
   failures; they are not exclusive, and nothing here ranks them.
