@@ -569,7 +569,7 @@ fi
 # **The net's record in *this* arm, because the line above promises a net that has not fired in it.**
 # The paragraph above is about the mechanism ("whatever the CPU is doing"); what an operator needs at
 # the moment of a hang is whether it has actually worked in the configuration they are about to boot.
-# For the XNU-entry arm the last three hangs say it has not:
+# For the XNU-entry arm the last four hangs say it has not:
 #
 #   * **517's first run, 521, 522 and 526 did not come back, and each needed a power press.** 526's is
 #     measured on this host rather than taken from a ledger: its `usb 3-10` fastboot device
@@ -578,7 +578,7 @@ fi
 #   * **and nothing after the jump can have disarmed it.** The entry image materialises no address in
 #     `[0xf9010000, 0xf901ffff]` at all (measured over every `mov`/`movw`+`movt` pair in
 #     `out/stage90/xnu_arm_entry.elf`), so neither XNU nor this project's stubs can reach the
-#     watchdog's registers at `0xf9017000`. The arm is the payload's and it stays armed. So the three
+#     watchdog's registers at `0xf9017000`. The arm is the payload's and it stays armed. So the four
 #     hangs are not "the net was turned off"; a hang in this state does not come back from it.
 #   * the last three *returns* (518, 519, 520) came back with XNU's own panic and its own
 #     `Attempting system restart...MACH Reboot` in their logs, so XNU reset the machine itself. Whether
@@ -593,7 +593,7 @@ fi
 # is what has been measured *here*: **a hang in this arm should be expected to need a power press, and
 # the log goes with it.**
 if [[ $ALLOW_XNU_ENTRY -eq 1 ]]; then
-  echo "MEASURED, this arm: the last three hangs (517's first run, 521, 522, 526) did NOT come back"
+  echo "MEASURED, this arm: the last four hangs (517's first run, 521, 522, 526) did NOT come back"
   echo "         and each needed a power press - 526's port has been silent for hours against a bite"
   echo "         due 28 s after the arming, and nothing in the entry image can reach the watchdog's"
   echo "         registers, so the net was not disarmed: a hang here does not come back from it."
