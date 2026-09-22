@@ -370,6 +370,64 @@ same shape as a defect documented four lines above it in the same file), and the
 decimal while the live channel writes `0x%08x`, so every key that *was* present read as UNREAD. Both are
 recorded in this project's measurement-defect table, and neither could have reached a hardware run.
 
+## 3.2 What "the OS" is in these images: a fixture root with one file, whose entry point is its own header
+
+While the device is off the bus there is time to ask the question the goal actually turns on - *how much of
+an OS is on the far side of the `pop`?* - and the answer is not a matter of opinion. It is in the image and
+in 520's log, and it says that 522 is necessary but nowhere near sufficient for the user's stated milestone.
+
+**The root device is a fixture.** `rd=md0` with the payload's `RAMDisk` entry in `/chosen/memory-map` makes
+XNU attach the 8 KB array `g_stage90_ramdisk` (`0x80511000`, `RAMDISK_BYTES` 0x2000, in `.data`) as `md0` -
+520's log says so itself: `Added memory device md0/rmd0 (02000000/0D000000) at 0000000080511000 for
+0000000000002000`, then `BSD root: md0, major 2, minor 0`. It is not a filesystem. It is a **32-bit Mach-O
+executable**, parsed out of the linked image byte by byte:
+
+```
+magic=0xfeedface (MH_MAGIC)  cputype=12 (ARM)  cpusubtype=12 (ARM_V7)  filetype=2 (MH_EXECUTE)
+  LC_SEGMENT __PAGEZERO: vmaddr=0x0    vmsize=0x1000 fileoff=0x0    filesize=0x0
+  LC_SEGMENT __TEXT:     vmaddr=0x1000 vmsize=0x1000 fileoff=0x0    filesize=0x1000 initprot=5 (r-x)
+  LC_UNIXTHREAD flavor=1 (ARM_THREAD_STATE) count=17
+      r0-r12 = 0, r12 = 0x14, sp = 0x0, lr = 0x0, pc = 0x10e0, cpsr = 0x10 (user mode)
+```
+
+**And that `pc = 0x10e0` is pid 1's user pc in 520's console line** - `the OS starts the process at 0x10e0
+(the thread's user pc was 0x10e0)`. So the first process's entry point comes from this stub's own
+`LC_UNIXTHREAD`, and `__TEXT` maps file offset 0, which means the bytes pid 1 begins executing at `0x10e0`
+are **inside the Mach-O header and its load commands**: `__TEXT`'s 4 KB is the header (196 bytes of load
+commands) and nothing else. That is why the run's user-mode faults are at `0x1118`, `0x1124` and `0x11a4` -
+0x38, 0x44 and 0xC4 past that entry, i.e. still inside the header - and why the last of them faults at `far
+= 0x102000`, the page just past `__TEXT`'s 4 KB: the "program" read its own header as instructions until it
+ran off the end of its segment. **It is a stub for the kernel to exec, not a program.**
+
+**The filesystem that serves it is a test fixture, by its own documentation.** `STAGE90_XNU` is
+`[ RELEASE mockfs development ]`, and of the filesystems in that configuration only **mockfs** has a
+`vfc_mountroot` - `build_entry.sh`'s 459 clause checks exactly that, and that devfs and routefs have no
+`mountroot` at the same word, so `vfs_mountroot` mounts mockfs. `mockfs_mountroot`'s own comment describes
+what it builds: *"three nodes; a directory node (to serve as a mountpoint for devfs), a file node meant to
+serve as an executable frontend for rootvp (*we will assume that rootvp is an executable, that the kernel
+can subsequently run*), and the root node."* Its `vnop_lookup` answers the name `launchd` under `sbin` with
+that one file node. So when `load_init_program` walks its list - `/usr/local/sbin/launchd.development`
+(ENOENT, as `development` is in the config) and then `/sbin/launchd` - the second one **succeeds**, which is
+520's second console line: `the OS's own init load returned, so pid 1 has the init image`.
+
+**So the honest statement of where the goal stands**, independent of any cache question:
+
+1. The kernel boots, brings up the platform/cache/timer/console/exception paths, attaches a root device,
+   execs pid 1 into user mode and schedules it - all of which 520's log shows, and all of which is real.
+2. The root device is an 8 KB Mach-O **stub** and the root filesystem is a **fixture with one file**. The OS
+   has nothing to run and nowhere to run it from: no init, no userland, no shell, no on-disk filesystem.
+3. **Mounting the storage - the purpose of the TWRP clause - is therefore a phase that has not begun.** This
+   configuration has no HFS/APFS/UFS/ISO9660 (`nm` finds `devfs_vfsops`, `mockfs_vfsops` and
+   `routefs_vfsops` and nothing that can read Android's or Apple's partitions), so even a correct idle exit
+   leaves the OS with no filesystem to mount a real root from.
+
+The ordering consequence is the useful part: **522 remains the right next run** - the idle exit is on the
+path to everything, and it is built, gated and frozen - but what comes after it is no longer "one more cache
+fix". It is a decision about what the OS's root is going to be: a real in-memory filesystem image, or the
+device's own storage with a filesystem this kernel can actually read, plus a first process that is a program
+rather than a header. That is a new phase, and it should be planned as one rather than discovered as a
+surprise on the next run.
+
 ## 4. Safety
 
 Non-persistent `fastboot boot` only, and the run is a single one through
