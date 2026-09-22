@@ -575,11 +575,22 @@ fi
 #     measured on this host rather than taken from a ledger: its `usb 3-10` fastboot device
 #     disconnected at 16:35:47 and the port has been silent since - over two hours, against a bite due
 #     28 s after the arming.
-#   * **and nothing after the jump can have disarmed it.** The entry image materialises no address in
-#     `[0xf9010000, 0xf901ffff]` at all (measured over every `mov`/`movw`+`movt` pair in
-#     `out/stage90/xnu_arm_entry.elf`), so neither XNU nor this project's stubs can reach the
-#     watchdog's registers at `0xf9017000`. The arm is the payload's and it stays armed. So the four
-#     hangs are not "the net was turned off"; a hang in this state does not come back from it.
+#   * **and the arm itself is the payload's, taken before the jump.** `0xf9017000` is named in exactly
+#     one place in this tree - `hw_watchdog.c:94` - and `stage90_main.c:1205` arms it before
+#     `stage90_xnu_entry_call()` transfers control. So the question this paragraph can answer is the
+#     narrow one: does the image that runs *after* the jump carry an address in the watchdog's page?
+#     As of this commit that is measured at gate time instead of asserted in prose - the clause below
+#     scans the entry image for the three ways an instruction can carry an address (a literal-pool
+#     word, a `movw`/`movt` pair, a `mov`/`mvn` immediate) and finds `[0xf9010000, 0xf901ffff]` empty
+#     in all three, with a witness one nibble below that is not empty. **The claim is deliberately
+#     narrower than "nothing can reach the watchdog's registers"**, and the reason is worth stating
+#     where the check prints: the watchdog shares its 1 MB section with the GIC (`hw_watchdog.c:53`)
+#     and `entry_gic.c:377` maps exactly that section at run time, so an image can reach the registers
+#     without materialising an address in the page. What is established is what it says: no code in
+#     this entry image carries one. The four hangs are not "the net was turned off" - the arm is the
+#     payload's and it stays armed - but *why* they did not come back is not measured here, and the
+#     next two readings (the four non-returns, and the returns that came back on XNU's own reset) are
+#     all this paragraph claims.
 #   * the last three *returns* (518, 519, 520) came back with XNU's own panic and its own
 #     `Attempting system restart...MACH Reboot` in their logs, so XNU reset the machine itself. Whether
 #     the net was also due around then cannot be settled from those logs - the payload's output carries
@@ -595,9 +606,128 @@ fi
 if [[ $ALLOW_XNU_ENTRY -eq 1 ]]; then
   echo "MEASURED, this arm: the last four hangs (517's first run, 521, 522, 526) did NOT come back"
   echo "         and each needed a power press - 526's port has been silent for hours against a bite"
-  echo "         due 28 s after the arming, and nothing in the entry image can reach the watchdog's"
-  echo "         registers, so the net was not disarmed: a hang here does not come back from it."
-  echo "         Expect a power press, and expect the log to go with it."
+  echo "         due 28 s after the arming. Why they did not come back is NOT measured: the entry"
+  echo "         image carries no address in the watchdog's page, which is checked below, but that is"
+  echo "         not the same as unreachable - the watchdog shares its 1 MB section with the GIC, and"
+  echo "         this image maps that section. Expect a power press, and expect the log to go with it."
+
+  # **Whether the entry image can reach the net, measured here instead of asserted in prose.** An
+  # instruction can carry an address in three ways, and all three are scanned: a literal-pool word (an
+  # aligned `0xf901xxxx`, reached by `ldr rN, [pc, #imm]`), a `movw`/`movt` pair (caught by
+  # `movt rD, #0xf901`, whose imm16 high half is the page), and a `mov`/`mvn` immediate. The last two
+  # are matched out of the words rather than disassembled, and that is the whole point of doing it
+  # here: **this ELF declares no arch in `e_flags` and its `BuildAttributes` block is empty, so
+  # `llvm-objdump` defaults to a pre-ARMv7 decoder on it and prints `.word` for every `movw`, `movt`,
+  # `ubfx` and `dmb` in the file** - 118,621 of them over 1.38 M words, with a `movw`/`movt` count of
+  # zero. A search run that way answers "nothing materialises the watchdog's page" while being unable
+  # to see the two encodings most likely to carry it, which is this project's own rule: before
+  # concluding a value is absent, establish that the extractor could have seen it.
+  # (`llvm-objdump --triple=armv7-none-eabi` is the decode that can, and against it these counts agree
+  # exactly where it matters: 8 `movt rD, #0xf900` and 5 `mov` in the witness, 0 of both in the page.
+  # The printed `movt` counts are ceilings because the mask frees the condition field - 17 for that
+  # witness against the disassembler's 8, the extra nine being data words that share the low half -
+  # which is the safe direction for a page that must read zero and harmless for a witness.)
+  #
+  # Two readings make a zero readable instead of merely quiet. The **witness** is one nibble below the
+  # page: the GIC's `0xf9000000` and `0xf9002000` are in this image and it uses both, so the same
+  # three reads must find them, and if they do not, the zero above is the scan failing rather than the
+  # property holding. The **positive control** is the payload, which arms the net: it carries
+  # `movt rD, #0xf901` ten times, so the form is demonstrably visible to this instrument on a real
+  # artifact. A refusal is a build-stop and not a warning: a run of an image that carries the page
+  # would be a run whose only net is the one under suspicion.
+  echo
+  echo "== the net's reach in the entry image =="
+  if ! "$PYTHON" - "$ENTRY_BIN" "$PAYLOAD_BIN" <<'PY'
+import struct, sys
+
+# The three encodings one or two instructions can carry an address in, over two ranges: the watchdog's
+# page, and the GIC one nibble below it - the witness that the scan can see anything at all.
+ENTRY, PAYLOAD = sys.argv[1], sys.argv[2]
+WATCH_LO, WATCH_HI = 0xf9010000, 0xf901ffff
+WIT_LO, WIT_HI = 0xf9000000, 0xf900ffff
+
+def ror(v, n):
+    n &= 31
+    return ((v >> n) | (v << (32 - n))) & 0xffffffff if n else v
+
+def movt_pattern(imm):
+    # cond 0011 0100 imm4 Rd imm12 - imm4 is bits 19-16 and holds the high half of imm16, Rd is bits
+    # 15-12. Masking out the condition and Rd leaves a conditional `movtne` no more hidden than an
+    # unconditional one, and bits 27-25 of the pattern are 001, so nothing in the unconditional
+    # (cond 1111) space can collide with it.
+    return 0x03400000 | ((imm >> 12) & 0xf) << 16 | (imm & 0xfff), 0x0fff0fff
+
+MOVT_WATCH, MASK = movt_pattern(0xf901)
+MOVT_WITNESS, _ = movt_pattern(0xf900)
+
+def census(path):
+    d = open(path, 'rb').read()
+    if len(d) < 4096:
+        sys.exit("  %s is %d bytes - this is a scan that could not look" % (path, len(d)))
+    hit = dict(pool=0, movt=0, mov=0)      # in the watchdog's page, by form
+    wit = dict(pool=0, movt=0, mov=0)      # in the GIC's pages, one nibble below
+    enc = 0                                # words carrying the movt encoding at all, data included
+    for i in range(len(d) // 4):
+        w = struct.unpack_from('<I', d, i * 4)[0]
+        if WATCH_LO <= w <= WATCH_HI:
+            hit['pool'] += 1
+        if WIT_LO <= w <= WIT_HI:
+            wit['pool'] += 1
+        if w & 0x0ff00000 == 0x03400000:
+            enc += 1
+        if w & MASK == MOVT_WATCH:
+            hit['movt'] += 1
+        if w & MASK == MOVT_WITNESS:
+            wit['movt'] += 1
+        # mov/mvn (immediate): 8 bits rotated right by an even amount, and never condition 1111
+        if w >> 28 != 0xf and (w & 0x0fe00000) in (0x03a00000, 0x03e00000):
+            v = ror(w & 0xff, ((w >> 8) & 0xf) * 2)
+            if w & 0x03e00000 == 0x03e00000:
+                v = ~v & 0xffffffff
+            if WATCH_LO <= v <= WATCH_HI:
+                hit['mov'] += 1
+            if WIT_LO <= v <= WIT_HI:
+                wit['mov'] += 1
+    return len(d) // 4, enc, hit, wit
+
+words, enc, hit, wit = census(ENTRY)
+print("  %s:" % ENTRY)
+print("    %d aligned words, %d carrying the movt encoding (a ceiling)" % (words, enc))
+print("    [0xf9010000, 0xf901ffff]   pool word %d   movt rD, #0xf901 %d   mov/mvn immediate %d"
+      % (hit['pool'], hit['movt'], hit['mov']))
+print("    witness, one nibble below - the GIC, which this image does use:")
+print("    [0xf9000000, 0xf900ffff]   pool word %d   movt rD, #0xf900 %d   mov/mvn immediate %d"
+      % (wit['pool'], wit['movt'], wit['mov']))
+print("      the movt counts are ceilings for the same reason: the mask frees the condition field,")
+print("      so a data word sharing the low half is counted too.")
+# Both of these stop the gate, and the second is the one that is easy to leave as a warning: a page
+# that reads zero because it is not carried and a page that reads zero because the instrument saw
+# nothing print the same four numbers, and this project's rule is that a check which succeeds by
+# printing nothing cannot be told from one that never ran. So an unread witness refuses the run
+# loudly, and the remedy is to give the clause a witness it can see rather than to boot anyway.
+unread = not any(wit.values())
+carried = any(hit.values())
+if unread:
+    print("    the witness is EMPTY: this scan did not see the GIC either, so the zero above is a")
+    print("    scan that saw nothing rather than a page that is not carried - that is not a reading.")
+words, _, contr, _ = census(PAYLOAD)
+print("  positive control - the payload, which arms the net, so it must carry the page:")
+print("    %s" % PAYLOAD)
+print("    pool word %d   movt rD, #0xf901 %d   mov/mvn immediate %d"
+      % (contr['pool'], contr['movt'], contr['mov']))
+if not any(contr.values()):
+    print("    NOT SATISFIED: the payload carries the page in none of the three forms either, so")
+    print("    this instrument is not demonstrably able to see one and the entry image's zero is not")
+    print("    a reading - distrust the counts above it.")
+if carried:
+    print("    the entry image carries the watchdog's page: pool word %d, movt %d, mov/mvn %d"
+          % (hit['pool'], hit['movt'], hit['mov']))
+if carried or unread:
+    sys.exit(1)
+PY
+  then
+    fail "the entry image's reach into the watchdog's page is either real or unread, and both stop this image (see above): a run whose only net is the one the image can touch, or a zero read from an instrument that saw no witness, are the two ways this check can be a sentence instead of a reading"
+  fi
 fi
 
 case "$HWSELFTEST" in 1|1u)
