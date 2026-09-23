@@ -1705,10 +1705,28 @@ if [[ -n $REGION ]]; then
   # not counted as one the section can return. Both sorts are pinned to one locale: a set sorted in
   # one collation and merged in another is one value with two definitions, which is this project's
   # most-repeated defect (536).
-  CODES=$(grep -oE '^[[:space:]]*exit [0-9]+' <<<"$REGION" | awk '{print $2}' \
-          | LC_ALL=C sort -n | LC_ALL=C uniq | tr '\n' ' ')
+  #
+  # **`die` is the section's other spelling of an exit site, and a census that counted only the literal
+  # one was invariant to a `die` being added.** Measured on this project's own two revisions of the
+  # runner: the wait section went from one `die` to two (620), and the literal-only count printed `3`
+  # for both - so the number the operator reads did not move when the section gained a state. The code
+  # is therefore read out of `die()`'s own definition, the way `SERIAL`/`LOGFILE` are read below, rather
+  # than assumed to be 1. The pattern is anchored to command position for the *listing* deliberately:
+  # the paragraph above this clause quotes a historical "exit 2 ... exit 1" in prose, and an unanchored
+  # substring scan would list this gate's own sentence as a site in the runner. The `|| die` spelling is
+  # the same exit path written differently and is matched too - it is outside section 4 today
+  # (measured, at :2182/:2202/:2204/:2329/:2337), so this changes nothing now and stops the next one
+  # being invisible.
+  DIE_DEF=$(grep -m1 -E '^die\(\)' "$RUNNER" 2>/dev/null || true)
+  DIE_CODE=$(grep -oE 'exit [0-9]+' <<<"$DIE_DEF" 2>/dev/null | head -1 | awk '{print $2}' || true)
+  DIE_RE='^[[:space:]]*(\|\|[[:space:]]*)?die[[:space:]]'
+  DIE_SITES=$(grep -cE "$DIE_RE" <<<"$REGION" || true)
+  NSITES_LIT=$(grep -cE '^[[:space:]]*exit [0-9]+' <<<"$REGION" || true)
+  NSITES=$(( NSITES_LIT + DIE_SITES ))
+  CODES=$( { grep -oE '^[[:space:]]*exit [0-9]+' <<<"$REGION" | awk '{print $2}' || true
+             printf '%s\n' "$DIE_CODE"
+           } | grep -E '^[0-9]+$' | LC_ALL=C sort -n | LC_ALL=C uniq | tr '\n' ' ' || true )
   CODES=${CODES% }
-  NSITES=$(grep -cE '^[[:space:]]*exit [0-9]+' <<<"$REGION" || true)
   # the serial and the log path are read out of the runner too, because they are one value with two
   # definitions otherwise: the runner's `${VAR:-default}` lines are the ones the boot actually uses, so
   # a change there moves the artifact and this gate's sentence together. Matched with a `case` glob
@@ -1734,26 +1752,62 @@ if [[ -n $REGION ]]; then
   # printed `sudo adb -s $SERIAL exec-out ...` as if it were what exit 3 means. So the gate reads the
   # shape and points at the words, which are the runner's own and cannot go stale in this file.
   START=$(grep -m1 -n '^# --- 4\. wait for it to come back' "$RUNNER" | cut -d: -f1)
-  echo "read out of that section at gate time: $NSITES exit site(s), distinct code(s) $CODES, at"
-  grep -nE '^[[:space:]]*exit [0-9]+' <<<"$REGION" \
-    | awk -v s="${START:-0}" -F: '{ c = $2; gsub(/[^0-9]/, "", c); printf "    run_and_capture.sh:%d   exit %d\n", s + $1 - 1, c }'
+  echo "read out of that section at gate time: $NSITES exit site(s) ($NSITES_LIT written 'exit N', $DIE_SITES"
+  echo "  written as a 'die' call whose code is die()'s own), distinct code(s) $CODES, at"
+  # The two spellings are merged and sorted by line number before printing. Printed as two blocks they
+  # come out of order - measured: with 620 uncommitted the `die` at 2657 printed *after* the literal
+  # `exit` at 2714 - and a list of a file's exits that is not in the file's order reads as if the file
+  # ran out of order. `|| true` on each pipeline because this gate runs under `set -e` with `pipefail`
+  # (its :16): a `grep` that matches nothing fails the pipeline, and here that is a case with an
+  # answer, not an error.
+  { grep -nE '^[[:space:]]*exit [0-9]+' <<<"$REGION" \
+      | awk -F: '{ c = $2; gsub(/[^0-9]/, "", c); printf "%d\t%s\texit %d\n", $1, $1, c }' || true
+    if [[ $DIE_SITES -gt 0 ]]; then
+      grep -nE "$DIE_RE" <<<"$REGION" \
+        | awk -F: -v c="${DIE_CODE:-?}" '{ printf "%d\t%s\tdie -> exit %s\n", $1, $1, c }' || true
+    fi
+  } | LC_ALL=C sort -n \
+    | awk -v s="${START:-0}" -F'\t' '{ printf "    run_and_capture.sh:%d   %s\n", s + $1 - 1, $3 }' || true
   echo "which code means which state is that file's own wording at those lines - read them there"
+  # The code a `die` returns is not written on its line, so it is narrated here once rather than left
+  # to the reader of several call sites. **Code ${DIE_CODE} has two producers in that section and
+  # neither owes a power press**: the host could not read its own USB log (that is a reading of the
+  # *host* failing - there is no reading of the device at all), and the boot call itself reporting no
+  # success (so a non-return after it is not a verdict about the payload). Both are the section
+  # refusing to call the run a non-return, which is exactly why a press spent on them buys nothing.
+  if [[ $DIE_SITES -gt 0 ]]; then
+    echo "the ${DIE_SITES} die site(s) above exit ${DIE_CODE:-?} - read out of die()'s definition, because a die"
+    echo "call does not carry its code on the line. In this section that code has two producers and neither"
+    echo "owes a power press: the host could not read its own USB log (a reading of the host failing, not of"
+    echo "the device), and the boot call reporting no success (so a non-return after it is not a verdict"
+    echo "about the payload). Both refuse to call the run a non-return - the press is owed only by the code"
+    echo "whose own message says the device did not come back. The lines above name each producer's state in"
+    echo "that file's own words, and the code set is checked against this gate below; the *count* of"
+    echo "producers within one code is not checked, so a third one would change this sentence silently."
+  fi
   # **Scope, stated, because the count above is a count of one region and reads like a count of the
-  # file.** Section 5's capture step grew a second `exit 3` (the returned run whose capture failed),
-  # so "3 exit site(s)" is now false of the file while remaining true of the section - and a number
-  # whose scope is unstated is this project's own recurring defect (543, 552). Both censuses are
-  # printed; only the section's codes are the ones this clause narrates, because that is the region
-  # whose states the sentences below describe.
-  NSITES_ALL=$(grep -cE '^[[:space:]]*exit [0-9]+' "$RUNNER" || true)
-  CODES_ALL=$(grep -oE '^[[:space:]]*exit [0-9]+' "$RUNNER" | awk '{print $2}' \
-              | LC_ALL=C sort -n | LC_ALL=C uniq | tr '\n' ' ')
+  # file - and because it now counts both spellings of an exit site.** Section 5's capture step grew a
+  # second `exit 3` (the returned run whose capture failed), so the section's number is false of the
+  # file while true of the section; and the section's own `die` calls are exit sites whose code is not
+  # written on the line, so a literal-only census was blind to one being added (measured above). Both
+  # censuses are printed, each over both spellings; only the section's codes are the ones this clause
+  # narrates, because that is the region whose states the sentences below describe.
+  NSITES_ALL_LIT=$(grep -cE '^[[:space:]]*exit [0-9]+' "$RUNNER" || true)
+  DIE_SITES_ALL=$(grep -cE "$DIE_RE" "$RUNNER" || true)
+  NSITES_ALL=$(( NSITES_ALL_LIT + DIE_SITES_ALL ))
+  CODES_ALL=$( { grep -oE '^[[:space:]]*exit [0-9]+' "$RUNNER" | awk '{print $2}' || true
+                 if [[ $DIE_SITES_ALL -gt 0 ]]; then printf '%s\n' "$DIE_CODE"; fi
+               } | grep -E '^[0-9]+$' | LC_ALL=C sort -n | LC_ALL=C uniq | tr '\n' ' ' || true )
   CODES_ALL=${CODES_ALL% }
-  echo "for scope: this file has $NSITES_ALL exit site(s) in total, code(s) $CODES_ALL - so the count and"
-  echo "  the codes above are section 4's, and a code can have a second producer outside it."
+  echo "for scope: this file has $NSITES_ALL exit site(s) in total over both spellings, code(s) $CODES_ALL -"
+  echo "  so the count and the codes above are section 4's, and a code can have a second producer outside it."
   # The codes this gate's text explains. A code outside this set is not narrated here in the gate's
   # own words, and the safe direction is to stop rather than paraphrase a state nobody has read: that
   # is the same shape as the entry arm's build-stop repair, an alarm on a drift rather than a proof.
-  READ_CODES="2 3"
+  # 1 is in the set because the section can reach it - through `die()`, whose code is read out of its
+  # own definition above - and it is a state this gate does narrate (neither of its producers owes a
+  # press). Leaving it out made the guard fire on a code the gate had just described.
+  READ_CODES="1 2 3"
   for c in $CODES; do
     case " $READ_CODES " in
       *" $c "*) ;;
