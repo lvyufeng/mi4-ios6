@@ -266,17 +266,28 @@ mk_sleeper_log() {
         p=$((p*2))
       done
     fi
-    # the userland fixture's own records: two opens, the read, a fork/exit/wait, two ASTs
-    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_open_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_open_error=0x00000000\n'
-    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_open_seq=0x00000002\nMI4IOS6_STAGE90_XNU loader_xnu_live_open_error=0x00000002\n'
-    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_read_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_read_nbytes=0x00000004\n'
-    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_read_ret_lo=0x00000004\nMI4IOS6_STAGE90_XNU loader_xnu_live_read_buf=0x00102000\n'
-    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_read_word_before=0x00102000\nMI4IOS6_STAGE90_XNU loader_xnu_live_read_word_after=0xfeedface\n'
-    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_getpid_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_getpid_value=0x00000001\n'
-    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_exit_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_exit_pid=0x00000002\nMI4IOS6_STAGE90_XNU loader_xnu_live_exit_rval=0x00000003\n'
-    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_wait_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_wait_seq=0x00000002\n'
-    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_wait_status=0x00000300\nMI4IOS6_STAGE90_XNU loader_xnu_live_wait_error=0x0000000a\n'
-    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_ast_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_ast_seq=0x00000002\n'
+    # the userland fixture's own records: two opens, the read, a fork/exit/wait, two ASTs.
+    #
+    # **Two of the variants exist for the *goal block's* own branch, and not for the arm's ladder.**
+    # That block is outside the arm branch (every log that has payload output reaches it), and its
+    # FAIL has two shapes: the fixture's sequence is *missing* a call (a position - where the boot
+    # stopped) or every call is present and the *values* are wrong (a fault). One state per shape, so
+    # neither side of that split is a paragraph: `goal-truncated` stops the fixture after its first
+    # call, and `goal-bad-values` has every call present with the driver's open answering non-zero.
+    local open1_err=0x00000000
+    [[ $variant == goal-bad-values ]] && open1_err=0x00000005
+    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_open_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_open_error=%s\n' "$open1_err"
+    if [[ $variant != goal-truncated ]]; then
+      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_open_seq=0x00000002\nMI4IOS6_STAGE90_XNU loader_xnu_live_open_error=0x00000002\n'
+      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_read_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_read_nbytes=0x00000004\n'
+      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_read_ret_lo=0x00000004\nMI4IOS6_STAGE90_XNU loader_xnu_live_read_buf=0x00102000\n'
+      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_read_word_before=0x00102000\nMI4IOS6_STAGE90_XNU loader_xnu_live_read_word_after=0xfeedface\n'
+      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_getpid_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_getpid_value=0x00000001\n'
+      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_exit_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_exit_pid=0x00000002\nMI4IOS6_STAGE90_XNU loader_xnu_live_exit_rval=0x00000003\n'
+      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_wait_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_wait_seq=0x00000002\n'
+      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_wait_status=0x00000300\nMI4IOS6_STAGE90_XNU loader_xnu_live_wait_error=0x0000000a\n'
+      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_ast_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_ast_seq=0x00000002\n'
+    fi
     # the polls. 1 and 2 are the two short asks the baseline also makes; 3 is the park (2000 ms).
     local seqs=2 tmo=5
     case $variant in
@@ -364,6 +375,13 @@ reader_state small-timeout    "the largest recorded timeout is 40 ms"
 reader_state door-max-0x8000  "stops at or below 0x8000"
 reader_state no-door-seq      "carries no xnu_live_door_seq= record"
 reader_state no-poll-over     "this arm did what it was built to do at the point that matters"
+# the goal block's FAIL, one state per side of its presence-before-values split - so the *position*
+# reading (the boot stopped inside the fixture) and the *values* reading (a call answered wrongly)
+# each have a state, and neither can be reached only through the other
+reader_state goal-truncated   "no record of the control open" \
+                              "missing here is a POSITION and not a driver fault"
+reader_state goal-bad-values  "the fault is in the values" \
+                              "the driver's open answered 0x00000005 (must be 0)"
 printf '\n  %d ok, %d failed\n' "$rpass" "$rfail"
 (( rfail == 0 )) || { printf '\nREFUSING: the reader has a state it cannot read.\n'; trap - EXIT; exit 1; }
 printf '\nEvery state the next press can produce is read by its own line.\n'

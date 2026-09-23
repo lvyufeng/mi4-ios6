@@ -1753,12 +1753,49 @@ summarise_log() {
     say "        because the whole userland phase happens before the death. Losing it would be a"
     say "        regression; having it says only that the OS still boots to pid 1's syscalls."
   elif (( g_open_n > 0 || g_read_n > 0 || g_getpid_n > 0 )); then
-    say "  FAIL  and the log has user-mode syscalls but not 504's reading of them, so one of the"
-    say "        three links is broken: the driver's open did not answer 0, the control answered 0"
-    say "        as well (which would mean the first told us nothing), or the read did not leave"
-    say "        ${g_magic:-the magic the fixture defines} in the buffer. Read the four values"
-    say "        above against each other before concluding which - 504 names the three cases and"
-    say "        they are not the same fault"
+    # **This FAIL had three named causes and the state that matters was a fourth, which is why the
+    # sequence is read before the values.** The three below are all *wrong values*: the driver's open
+    # answered non-zero, the control answered 0 too, or the read's word did not change. But the
+    # fixture makes its calls in a fixed order - open(driver), open(control), read, getpid, exit,
+    # wait - so a log whose records simply **stop** is a boot that stopped there. That is a
+    # *position*, and on an arm whose whole purpose is to find where the boot stops, it is the
+    # reading the run exists to produce.
+    #
+    # **It was found by building the state, not by reading the branch.** With the log ending after
+    # the driver's open (`xnu_live_open_seq=0x00000001`, `_error=0x00000000`, nothing further), the
+    # block printed "the driver's open did not answer 0" one line under `open 1 call(s), error in
+    # call order: 0x00000000` and two lines above `read 0 call(s)`: **all three named faults were
+    # contradicted by the block's own numbers**, in the single reading 596 added because the goal
+    # asks for it. A FAIL that names a fault its own table refutes is worse than no FAIL, because
+    # the operator's next action is decided by the sentence and not by the table.
+    #
+    # So: presence first, values second. `g_stop` names the first call in the fixture's own sequence
+    # whose record is not in the log, and it is built from `-z` tests and counts only - no arithmetic
+    # on a value that may not be a number.
+    local g_stop=""
+    if   [[ -z $g_open1 ]]; then g_stop="the driver's open"
+    elif [[ -z $g_open2 ]]; then g_stop="the control open"
+    elif [[ -z $g_read_ret || -z $g_read_nb || -z $g_read_after ]]; then g_stop="the read"
+    elif [[ -z $g_getpid_val ]]; then g_stop="getpid"
+    elif [[ -z $g_exit_pid ]];   then g_stop="the child's exit"
+    elif [[ -z $g_wait_status ]]; then g_stop="the wait"
+    fi
+    if [[ -n $g_stop ]]; then
+      say "  FAIL  and the fixture's sequence has no record of ${g_stop}: this log has"
+      say "        ${g_open_n} open(s), ${g_read_n} read(s), ${g_getpid_n} getpid, ${g_exit_n} exit,"
+      say "        ${g_wait_n} wait record(s), and it makes those calls in that order - so **what is"
+      say "        missing here is a POSITION and not a driver fault**: the boot stopped before that"
+      say "        call - on this arm that is the reading the run exists to produce. Read the arm's"
+      say "        own clause above for where it was, and do not read this as the driver failing: the"
+      say "        values that ARE here are the ones printed above, and they are not in dispute"
+    else
+      say "  FAIL  and every one of the fixture's calls is in the log, so the fault is in the values"
+      say "        and not in the sequence: the driver's open answered ${g_open1} (must be 0), the"
+      say "        control answered ${g_open2} (must not be 0), and the read returned"
+      say "        ${g_read_ret:-absent} of ${g_read_nb:-absent} byte(s), leaving"
+      say "        ${g_read_after:-absent} where the fixture's magic is ${g_magic:-unread} - 504 names"
+      say "        these three cases and they are not the same fault"
+    fi
   else
     say "  UNREAD  and none of the fixture's own syscalls is in this log, so the goal's first half"
     say "        is not read here at all. It is not a FAIL: the same absence is what a log truncated"
