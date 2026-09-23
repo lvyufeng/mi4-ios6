@@ -33,7 +33,7 @@ being two runs of the same experiment four hours apart.
 
 ## 2. What the corrected pair shows, in two independent runs
 
-| run | `rtcpre_pop` (from `cpu_data`) | the pop's `fp` | the pop's `pc` | `lr` at the abort |
+| run | `rtcpre_pop` (from `cpu_data`) | the pop's `fp` | the pop's `pc` (a **fetch address** - see the correction below) | `lr` at the abort |
 | --- | --- | --- | --- | --- |
 | 520 (2026-09-22) | `0x04b79075` | `0x04b79075` | `0x04b79074` | `0x800462dc` |
 | 533 (2026-09-23) | `0x33f1c1b5` | `0x33f1c1b5` | `0x33f1c1b4` | `0x800462dc` |
@@ -47,6 +47,15 @@ Two runs, two images, four hours apart, and the same structure:
 - **Neither is the frame.** And `lr` at the abort is `0x800462dc` - the address the exit's own
   `bl FlushPoU_Dcache` returns to, i.e. **the very value the `push` stored into the second word of the
   frame**, still intact in the register because the `pop {fp, pc}` does not write `lr`.
+
+> **Correction (590): the `pc` in that dump is a fetch address, not a second memory word.** `pc` in a
+> prefetch-abort dump is what the CPU was *fetching*, and `far` is the same address - so `0x04b79074`
+> is the loaded value **with bit 0 cleared** (`[S-12] & ~1`), not `[S-12]` itself, and the word is
+> `0x04b79074` *or* `0x04b79075`. The Thumb-address relationship 519 had already named - "`pc =
+> rtcPop - 1`, the Thumb-address relationship read off its own `r4`/`far` pair" - is a statement about
+> **one** value in two spellings; the table above turns it into two values in two words. What is a
+> real memory reading is `fp = 0x04b79075 = rtcPop`, and 590 shows that `rtcPop` is what our own idle
+> wrappers store at exactly those addresses.
 
 **So the death is measurable without a cache theory**: the push's second word is a value the machine
 still holds in `lr`, memory received it (the store went out with the cache off), and the `pop` into `pc`
