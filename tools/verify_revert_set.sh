@@ -27,6 +27,16 @@
 #                                                           bytes; two fields agreeing is what makes a
 #                                                           typo in either a reading and not a silence
 #  5. its sha256 equals the record's                        - the constraint
+#  6. the manifest's member list, twice over:
+#     a. every name in the record's `manifest_members=` field is also a `file=` line of the same set -
+#        criterion B closed over the record. The gate verifies the manifest (`sha256sum -c`, its line
+#        139), and `sha256sum -c` opens every path the manifest names, so a file named only in the
+#        manifest is still read by the gate and a revert that omits it leaves the gate red while nothing
+#        in this record notices. The record's first version omitted two such files.
+#     b. if the target carries a manifest of its own, **every name in it is in the set** - the guard that
+#        fires when a build starts writing a sixth member. Coverage is one-directional, so this is the
+#        only direction that can catch a growing manifest, and it is checked against the file on disk
+#        rather than against a remembered list.
 #
 # WHAT THIS SCRIPT DELIBERATELY DOES NOT READ: the target directory's own `SHA256SUMS.txt`, even though
 # one is a member of the set and is hashed like any other file. Every build writes that file with
@@ -100,7 +110,7 @@ while IFS= read -r line || [[ -n $line ]]; do
   LINENO_REC=$((LINENO_REC + 1))
   [[ $line =~ ^[[:space:]]*# ]] && continue
   [[ -z ${line//[[:space:]]/} ]] && continue
-  s=""; h=""; b=""; f=""; r=""
+  s=""; h=""; b=""; f=""; r=""; mm=""
   for kv in $line; do
     case "$kv" in
       set=*)    s=${kv#set=} ;;
@@ -108,6 +118,7 @@ while IFS= read -r line || [[ -n $line ]]; do
       bytes=*)  b=${kv#bytes=} ;;
       file=*)   f=${kv#file=} ;;
       role=*)   r=${kv#role=} ;;
+      manifest_members=*) mm=${kv#manifest_members=} ;;
       *) refuse "the record's line $LINENO_REC has a field this script does not know: '$kv'. Refusing rather than ignoring it, because an ignored field is how a typo in 'sha256=' becomes a file nobody checked" ;;
     esac
   done
@@ -122,6 +133,7 @@ while IFS= read -r line || [[ -n $line ]]; do
   # the line with a substring test agrees with it only for as long as no set name is a prefix of another.
   eval "REC_$NLINES=\$line"
   eval "RECSET_$NLINES=\$s"
+  eval "RECMAN_$NLINES=\$mm"
   NLINES=$((NLINES + 1))
 done < "$RECORD"
 
@@ -151,9 +163,11 @@ fi
 
 # ---- 3. verify -----------------------------------------------------------------------------------
 OK=0
+OKM=0
 FAILED=0
 for s in $SETS; do
   members=0
+  SEEN=""
   echo "== set $s in $ABS =="
   i=0
   while [[ $i -lt $NLINES ]]; do
@@ -171,6 +185,7 @@ for s in $SETS; do
       esac
     done
     members=$((members + 1))
+    SEEN="$SEEN $f"
 
     if [[ ! -e $ABS/$f ]]; then
       echo "  FAIL  $f is ABSENT from this directory. The set is incomplete: a revert that omits a file"
@@ -215,13 +230,71 @@ for s in $SETS; do
     OK=$((OK + 1))
   done
   [[ $members -gt 0 ]] || refuse "set '$s' selected from the record but no line matched it, which cannot happen after the name check above - refusing rather than printing an empty set as verified"
+
+  # ---- 6a. criterion B, closed over the record ------------------------------------------------
+  # The gate verifies the manifest (its line 139: `sha256sum -c SHA256SUMS.txt`), and `sha256sum -c`
+  # opens every path the manifest names - so a file named only inside the manifest is read by the gate
+  # all the same. A revert that omits one leaves the gate red while every hash in this record matched.
+  # Refusing on a record-only inconsistency (a member not in the set) is not pedantry: it is the state in
+  # which this record's first version shipped two files short of its own criterion.
+  i=0
+  while [[ $i -lt $NLINES ]]; do
+    eval "lset=\$RECSET_$i"
+    eval "lmm=\$RECMAN_$i"
+    eval "lfile=\$REC_$i"
+    i=$((i + 1))
+    [[ $lset == "$s" ]] || continue
+    [[ -n $lmm ]] || continue
+    for m in ${lmm//,/ }; do
+      if ! printf '%s\n' $SEEN | grep -qxF -- "$m"; then
+        echo "  FAIL  the manifest member '$m' is not a file= line of set '$s'. The gate reads it through"
+        echo "        \`sha256sum -c\`, so it belongs in the set; a record that names it in one field and not"
+        echo "        in the other is exactly how a revert leaves the gate red with every hash matching."
+        FAILED=$((FAILED + 1))
+      else
+        printf '  ok    manifest member %-24s is a member of the set (criterion B)\n' "$m"
+        OK=$((OK + 1)); OKM=$((OKM + 1))
+      fi
+    done
+  done
+
+  # ---- 6b. the manifest on disk must not name anything outside the set --------------------------
+  # Coverage is one-directional - a set that is too LARGE still passes 6a - so this is the direction that
+  # catches a build which starts writing a sixth member into the manifest: the gate would read that file
+  # through `sha256sum -c`, the record would not name it, and a revert would leave the gate red with no
+  # hash mismatching. Checked against the file on disk rather than against a remembered list, so it stays
+  # true as `build.sh` changes what it writes.
+  if [[ -s $ABS/SHA256SUMS.txt ]]; then
+    # The optional directory is part of the pattern on purpose: a build writes ABSOLUTE paths, but a
+    # hand-made or relative manifest has none, and a pattern that requires a slash silently derives
+    # NOTHING from those - an empty list, no refusal, a green line. The rehearsal's own cell caught this.
+    ondisk=$(sed -n 's|^[0-9a-f]\{64\}  \(.*/\)\?||p' "$ABS/SHA256SUMS.txt" 2>/dev/null | sort -u)
+    n_ondisk=$(printf '%s\n' $ondisk | grep -c . || true)
+    outside=""
+    for m in $ondisk; do
+      printf '%s\n' $SEEN | grep -qxF -- "$m" || outside="$outside $m"
+    done
+    if [[ -n $outside ]]; then
+      echo "  FAIL  the manifest in this directory names file(s) the set does not:$(printf ' %s' $outside)"
+      echo "        The gate reads every one of them through \`sha256sum -c\`, so a revert that does not"
+      echo "        restore them leaves the gate red. Add them to the record, or the record is not the set."
+      FAILED=$((FAILED + 1))
+    else
+      printf '  ok    every one of the %s member(s) its own manifest names is in the set\n' "$n_ondisk"
+      OK=$((OK + 1)); OKM=$((OKM + 1))
+    fi
+  else
+    printf '  note  this directory carries no manifest, so check 6b had nothing to read here\n'
+  fi
 done
 
 echo
 if [[ $FAILED -eq 0 ]]; then
-  echo "VERIFIED: $OK file(s) of $SETS matched the record at $RECORD, hashed in place in $ABS."
-  echo "          This says these are the recorded bytes. It does not say the set is complete for a"
-  echo "          revert in the sense that matters - that is the gate: revert, then run it."
+  echo "VERIFIED: $((OK - OKM)) file(s) of$SETS matched the record at $RECORD, hashed in place in $ABS,"
+  echo "          and $OKM manifest-member check(s) agree with the set."
+  echo "          This says these are the recorded bytes and that the set covers what the gate reads"
+  echo "          through the manifest it verifies. It does not say a revert cannot leave the gate red in"
+  echo "          some way neither derivation sees - the test for that is revert, then run the gate."
   exit 0
 fi
 echo "REFUSING: $FAILED of $((OK + FAILED)) file(s) did not match the record. Nothing in $ABS was"

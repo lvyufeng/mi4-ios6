@@ -37,7 +37,7 @@ LIVE=$ROOT/out/stage90
 W=$(mktemp -d /tmp/rehearse-revert.XXXXXX) || exit 1
 trap 'rm -rf "$W"' EXIT
 
-FILES="SHA256SUMS.txt stage90.bin stage90-build-config.txt stage90.elf stage90-qcdt.img xnu_arm_entry.bin xnu_arm_entry-config.txt xnu_arm_entry.elf xnu_arm_entry-sources.txt"
+FILES="SHA256SUMS.txt stage90.bin stage90-build-config.txt stage90.elf stage90.img stage90-qcdt.img stage90_fixture.macho xnu_arm_entry.bin xnu_arm_entry-config.txt xnu_arm_entry.elf xnu_arm_entry-sources.txt"
 
 # The record the cells verify against: the real one, retargeted at the fixture's own bytes.
 mkrekord() {   # mkrekord DIR OUT
@@ -212,37 +212,103 @@ cell "host-missing-a-tool" 1 "this host is missing grep"          \
 echo
 echo "== the record covers what the gate reads =="
 
-# The set is DEFINED as "the files the gate reads", so the record has to cover that list - and the list
-# is derived here at run time rather than trusted from the one at the top of this file, because that one
-# was hand-written and carried eight files while the gate read nine. A hand-written list of what a
-# program reads is a claim about that program; this is the check on it.
+# The set is DEFINED as what the gate reads, and **the gate reads in two ways** - so this section derives
+# TWO lists and requires the record to cover their union. One list is not the criterion; it was the whole
+# of this record's first version, and it was wrong.
 #
-# BOTH spellings are required. The gate names eight of the nine through `$OUT/name` and one through
-# `out/stage90/name`, so a derivation that greps for one spelling silently returns a shorter list - and a
-# shorter list is exactly what a missing record line looks like.
+#   A. the paths the gate NAMES IN ITS OWN TEXT. Both spellings are required: the gate writes eight of
+#      the nine `$OUT/name` and one (`xnu_arm_entry.elf`, in a narration path) `out/stage90/name`, so a
+#      derivation that greps one spelling returns a shorter list - and a shorter list is what a missing
+#      record line looks like. That is how this file's first version lost `stage90.elf`.
+#
+#   B. the members of THE MANIFEST THE GATE VERIFIES. `preflight_boot_check.sh:139` is
+#      `( cd "$OUT" && sha256sum -c SHA256SUMS.txt )`, and `sha256sum -c` opens every path the manifest
+#      names. That manifest is itself in A, so B is a property of a file INSIDE the set and not of the
+#      gate's text: **no grep of the gate can return these names.** Two of them
+#      (`stage90.img`, `stage90_fixture.macho`) are in neither A nor this record's first version, and a
+#      revert that omits `stage90.img` makes the restored manifest print `stage90.img: FAILED` - the gate
+#      red. The two `manifest-*` cells below reproduce that mechanism directly.
+#
+# The limit of B as derived here, stated rather than glossed: the fixture's manifest is the one copied
+# from the LIVE tree, so this is the live build's member list and a proxy for the recorded manifest's.
+# The authoritative check stays *revert, then run the gate*.
 GATESRC=$ROOT/stages/stage90/preflight_boot_check.sh
 DERIVED=$W/gate-reads.txt
 grep -oE '\$OUT/[A-Za-z0-9_.-]+|out/stage90/[A-Za-z0-9_.-]+' "$GATESRC" \
   | sed 's|\$OUT/||; s|out/stage90/||' | sort -u > "$DERIVED"
+DERIVED_B=$W/manifest-members.txt
+# B comes out of the RECORD, not out of the live tree. The manifest a revert puts back is the record's own
+# `SHA256SUMS.txt` member, so its member list is a fact the record can pin - and reading it from
+# `out/stage90/SHA256SUMS.txt` instead would read the one file whose contents the next build changes. The
+# two are equal today only by coincidence, so a derivation from the live manifest could not tell them
+# apart and would start being wrong on the build that adds a member.
+grep -E '^set=' "$RECORD" | tr ' ' '\n' | sed -n 's/^manifest_members=//p' | tr ',' '\n' | grep -c . >/dev/null 2>&1 || true
+grep -E '^set=' "$RECORD" | tr ' ' '\n' | sed -n 's/^manifest_members=//p' | tr ',' '\n' | grep . | sort -u > "$DERIVED_B"
+cat "$DERIVED" "$DERIVED_B" | sort -u > "$W/both.txt"
 RECORDED=$W/record-files.txt
 grep -E '^set=' "$RECORD" | tr ' ' '\n' | sed -n 's/^file=//p' | sort -u > "$RECORDED"
 
-nd=$(wc -l < "$DERIVED"); nr=$(wc -l < "$RECORDED")
-printf '  info  the gate reads %s file(s); the record names %s\n' "$nd" "$nr"
+na=$(wc -l < "$DERIVED"); nb=$(wc -l < "$DERIVED_B"); nall=$(wc -l < "$W/both.txt")
+nr=$(wc -l < "$RECORDED")
+printf '  info  the gate names %s file(s); the manifest it verifies names %s; union %s; the record names %s\n' \
+  "$na" "$nb" "$nall" "$nr"
 
-UNCOVERED=$(comm -23 "$DERIVED" "$RECORDED")
-if [[ -n $UNCOVERED ]]; then
-  printf '  FAIL  %-22s the record does not cover: %s\n' "record-covers-gate" "$(echo $UNCOVERED | tr '\n' ' ')"
-  printf '        A revert set missing a file the gate reads leaves the gate red, which is not a revert.\n'
-  BAD=$((BAD + 1))
-else
-  printf '  ok    %-22s all %s file(s) the gate reads are in the record\n' "record-covers-gate" "$nd"
-  OK=$((OK + 1))
-fi
-EXTRA=$(comm -13 "$DERIVED" "$RECORDED")
-if [[ -n $EXTRA ]]; then
-  printf '  info  the record also names file(s) the gate does not read: %s\n' "$(echo $EXTRA | tr '\n' ' ')"
-fi
+for part in A B; do
+  if [[ $part == A ]]; then src=$DERIVED; label="record-covers-gate"; else src=$DERIVED_B; label="record-covers-manifest"; fi
+  if [[ ! -s $src ]]; then
+    printf '  FAIL  %-26s nothing was derived for %s - a derivation that returns nothing is not a pass\n' "$label" "$part"
+    BAD=$((BAD + 1)); continue
+  fi
+  MISS=$(comm -23 "$src" "$RECORDED")
+  if [[ -n $MISS ]]; then
+    printf '  FAIL  %-26s the record does not cover: %s\n' "$label" "$(echo $MISS | tr '\n' ' ')"
+    printf '        A revert set missing a file the gate reads leaves the gate red, which is not a revert.\n'
+    BAD=$((BAD + 1))
+  else
+    printf '  ok    %-26s all %s file(s) of %s are in the record\n' "$label" "$(wc -l < "$src")" "$part"
+    OK=$((OK + 1))
+  fi
+done
+
+# The mechanism, reproduced: a directory holding the recorded set with a manifest that names it must pass
+# the manifest's own check, and one stale member must turn that check red. The second cell is the defect
+# this section exists for - `stage90.img` was in the manifest and not in the record, and this is what it
+# did to a revert.
+MAN=$W/manifest
+mkdir -p "$MAN"; for f in $FILES; do cp "$GOOD/$f" "$MAN/$f"; done
+( cd "$MAN" && sha256sum $(printf '%s\n' $FILES | grep -v '^SHA256SUMS.txt$') > SHA256SUMS.txt )
+# and a record for it that carries the manifest's member list, which is what makes checks 6a/6b run
+mkrekord "$MAN" "$W/manifest-record.txt" || exit 1
+sed -i "s|^set=fixture sha256=\(.*\) file=SHA256SUMS.txt |set=fixture sha256=\1 file=SHA256SUMS.txt manifest_members=$(printf '%s\n' $FILES | grep -v '^SHA256SUMS.txt$' | tr '\n' ',' | sed 's/,$//') |" "$W/manifest-record.txt"
+grep -q 'manifest_members=' "$W/manifest-record.txt" || { echo "the manifest record carries no manifest_members= - the two cells below would then pass by doing nothing" >&2; exit 1; }
+cell "manifest-passes"     0 ""                               \
+  bash -c 'cd "$1" && sha256sum -c SHA256SUMS.txt' _ "$MAN"
+STALE=$W/manifest-stale
+cp -r "$MAN" "$STALE"
+printf '\xff' | dd of="$STALE/stage90.img" bs=1 seek=1000000 conv=notrunc status=none
+# The cell for the defect this section exists for: the manifest still names its five members, one of them
+# is not the recorded bytes, and `sha256sum -c` says so by name. A revert that fails to restore
+# `stage90.img` leaves the gate red on exactly this line.
+cell "stale-member-turns-it-red" 1 "stage90.img: FAILED"          \
+  bash -c 'cd "$1" && sha256sum -c SHA256SUMS.txt' _ "$STALE"
+
+# Check 6b, as a cell: a manifest on disk naming a file the set does not carry. This is the direction
+# coverage cannot catch by itself, and the shape a build that adds a sixth output would produce.
+OUTSIDE=$W/outside
+cp -r "$MAN" "$OUTSIDE"
+printf 'not a build output, just a name the set does not carry\n' > "$OUTSIDE/stage90.map"
+( cd "$OUTSIDE" && sha256sum $(printf '%s\n' $FILES | grep -v '^SHA256SUMS.txt$') stage90.map > SHA256SUMS.txt )
+# The record is regenerated to describe this directory AFTER its manifest was extended, so that the
+# refusal that fires is 6b and not an earlier hash mismatch - otherwise the cell would pass on the wrong
+# message, or here on no message at all.
+mkrekord "$OUTSIDE" "$W/outside-record.txt" || exit 1
+cell "target-manifest-names-outside" 1 "names file(s) the set does not" \
+  bash "$TOOL" "$OUTSIDE" --record="$W/outside-record.txt"
+
+# Check 6a, as a cell: a record whose manifest_members names a file that is not a file= line of the set.
+sed 's/ manifest_members=.*/ manifest_members=stage90-qudt.img/' "$W/manifest-record.txt" > "$W/mm-bad.txt"
+cell "manifest-member-not-in-set"   1 "not a file= line of set" \
+  bash "$TOOL" "$MAN" --record="$W/mm-bad.txt"
 
 echo
 if [[ $BAD -eq 0 ]]; then

@@ -135,9 +135,13 @@ If it fails, reboot/power-cycle. Do not immediately flash.
 
 Going **back** to a payload that was known to work is a separate act from recovering the phone, and it has
 its own record. A stage payload's `out/stage90/` tree can be put back to the frozen 574 arm — the one whose
-readings this project's later steps are all measured against — by copying nine files back, with no rebuild
+readings this project's later steps are all measured against — by copying eleven files back, with no rebuild
 involved. The set, its hashes and the reason that set and not another are `stages/stage90/revert-set.txt`,
-and `tools/verify_revert_set.sh DIR` checks a directory against it:
+and `tools/verify_revert_set.sh DIR` checks a directory against it. **Eleven rather than nine, and that is
+the correction 612 records**: the gate reads a file's path in its text *and* every path named by the
+manifest it verifies (`sha256sum -c SHA256SUMS.txt`, its line 139), so a set built from the gate's text
+alone is two files short — and a revert missing `stage90.img` leaves the gate **red** with every recorded
+hash matching.
 
 ```bash
 tools/verify_revert_set.sh /tmp/r594/frozen-payload     # the recorded park of the 574 set
