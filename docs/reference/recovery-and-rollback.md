@@ -364,8 +364,28 @@ mind, not a defect to fix.
   What makes it *TWRP* is the record — a hash written down in the step that obtained it, from a page whose
   URL is part of the record. A file copied from a forum and renamed `twrp.img` does not verify.
 * **Nothing here has been booted on the device.** The image is downloaded and verified on the host only.
-* **No EDL path is documented for this phone** (see Emergency notes). The rollback in the gate is a
-  fastboot rollback and it assumes fastboot still works.
+* **No EDL path is documented for this phone, and that is a measured gap rather than a pending chore.**
+  EDL (9008) is the one recovery route that does not need fastboot, so it is what the gate's rollback
+  falls back to when fastboot itself is the thing that broke — and nothing in this repository can serve
+  it today. Measured 2026-09-23, so the size of the gap is a set of facts and not an impression:
+  * No EDL host tooling is installed: `qdl`, `edl`, `firehose`, `QSaharaServer`, `fh_loader`, `sahara`,
+    `emmcdl`, `QFIL` are each absent from `PATH` on this host (nine of nine).
+  * **The backup is not an EDL recovery kit.** `xiaomi4-cancro-backup-20260604-112053/` holds partition
+    images, `SHA256SUMS.txt` and two unpacked boot/recovery trees — and no programmer. A sweep for
+    `*.mbn`, `rawprogram*.xml` and `patch*.xml` across the backup and the repository returns **nothing**.
+    EDL needs a signed Firehose programmer (`prog_emmc_firehose_8974.mbn` for MSM8974) plus a
+    `rawprogram*.xml`; partition images alone cannot be pushed over EDL.
+  * **`stages/stage90/firehose/` is not that programmer, despite the name.** It is Apple's libdispatch
+    `firehose_buffer.c` and its headers, ported here so `bsd/kern/subr_log.c` can link (experiment 255);
+    it is XNU's log-ring code and has no relation to Qualcomm's Firehose protocol. The collision is worth
+    knowing before searching the tree for EDL material and finding a directory that looks like an answer.
+
+  So EDL recovery for this phone would today begin by *obtaining* a `cancro`/MSM8974 programmer and
+  provenance-recording it — the same shape as `tool-images.txt` does for TWRP — and it could not be
+  verified without putting a device into 9008 and writing to storage, which is the action the gate
+  exists to gate. It is therefore left undocumented rather than half-documented, and the honest
+  reading of "we have a rollback" is **the fastboot rollback in the gate, which assumes fastboot still
+  works**.
 
 
 
@@ -398,7 +418,17 @@ If fastboot does not work but ADB still works from Android, do not attempt rando
 
 ## Emergency notes
 
-Qualcomm devices may have EDL modes, but this repository does not currently document a verified EDL recovery path for this specific phone. Until an EDL path is verified, assume boot chain partition writes can be unrecoverable in this workflow.
+Qualcomm devices may have EDL modes, and this SoC is one of them, but this repository does not document
+a verified EDL recovery path for this specific phone. One reason the gap is not closed by a download:
+**this tree does not know this phone's secure-boot state**, and that decision changes what a programmer
+must be. `fastboot getvar secure` and `getvar unlocked` were both run and both returned **empty** on this
+bootloader (`docs/reference/local-device-findings.md`); an unsigned programmer works only on a part that
+does not enforce signature checks, and a signed one is bound to the device's own signing chain. So the
+programmer is a *provenance* question of the kind `tool-images.txt` exists to answer for TWRP — and here
+it is a question this host cannot yet even pose correctly. The gap is therefore **measured, not a
+placeholder**: see *No EDL path is documented for this phone* under "What is still missing" above for
+what was checked, when, and what a future EDL path would have to begin with. Until such a path is
+verified, assume boot chain partition writes can be unrecoverable in this workflow.
 
 ## Before every future write
 
