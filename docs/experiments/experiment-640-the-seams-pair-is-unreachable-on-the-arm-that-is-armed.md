@@ -175,6 +175,30 @@ the window is absent only because the window was not reached". The seam's family
 window, is missing from that table, and its absence is described in the one place the table's own
 distinction exists to prevent.
 
+**And the runner's clause (5) is worse than a wrong sentence in the preamble — it is a wrong sentence
+with no second chance.** The whole block - the arm branch, the `sctlr` FINDING/UNREAD, the `lr` PASS/FAIL
+and the pair comparisons - sits behind one gate, `:1752`:
+
+```sh
+if [[ $seam_calls =~ ^0x[0-9a-f]+$ ]] && (( seam_calls >= 1 )); then
+```
+
+On a keyless log `seam_calls` is absent, the gate is false, and **every sentence inside is unreachable -
+including its own `UNREAD` branch for an absent `seam_op`**. So the preamble's "a log from an image that
+does not carry the arm" is not merely the wrong sentence for this log: it is the **only** sentence this
+file says about a keyless seam block. The same `seam_calls` test gates four other prints in the same
+file (`:1466`, `:1523`, `:1565`, `:2071` - the 535/572/597 context blocks and the death-shape block), so
+a keyless seam changes what those say too, and none of them is told why. **The repair is therefore not one
+sentence but the predicate**, and the arm the predicate needs is already derived in the same file
+(`idle_no_sleep_arm`, `:826-828`).
+
+**That makes an owed-LOG defect a separate item from this owed-PRESS one.** The press's log is not
+archived: `run_and_capture.sh` writes `/tmp/cancro-last_kmsg.txt`, which the *next* run overwrites (the
+project's convention is `out/stage90/captures/NNN-…-last_kmsg.txt`, and 526's and 533's are copies of
+that file taken by hand, in the same directory as their own arms). So unless the press's log is copied
+into `captures/` promptly after the run, the evidence this step says not to misread will not exist when
+the repair lands - and the repair is precisely about how that log is read.
+
 Neither file was edited. Both are read by the armed catch: the gate is the file the catcher fires and
 the runner is the file it fires (620), so the repair is owed for after the press - and the gate is
 `run-experiment-526`'s lane, so the finding is sent to them rather than edited here (as 637's was).
