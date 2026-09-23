@@ -818,9 +818,28 @@ rpass=0; rfail=0
 # **The positive text of the new channel clause is asserted, not assumed.** A check whose success is
 # printed only on the bad state cannot be told from one that never ran, so the "not full" line is an
 # expectation of its own on the state where it must appear (609).
+#
+# **And the ladder's own reading of this state is asserted line by line as of 630, because until then
+# it was asserted only through a proxy.** Every row that touched the ladder asserted a way it can FAIL -
+# `door-max-0x8000` ("stops at or below 0x8000"), `poll-seq-2` ("no poll record past the second"),
+# `small-timeout` (the 40 ms ask) - and the two rows that could have caught a *PASS* changing assert the
+# arm clause, which is a paragraph gated on `verdict_ok` and therefore **downstream of rungs 1 and 1b
+# only**. 630 measured both halves of that: a rung-1 flip (`poll_seq_max > 2` raised to `> 99`) and a
+# rung-1b flip (the `poll_tmo_max >= park_min` test raised) each suppress the arm clause, so those two
+# rungs were covered indirectly; and a rung-0 and rung-3 flip (the `door_max > 32768` threshold raised,
+# `[[ -n $park_over ]]` made unsatisfiable) leaves the arm clause and every other cell untouched -
+# **all fifteen reading rows stayed green on the harness's own fixture logs**, measured cell by cell.
+# Rungs 0, 2, 3 and 4 had no cell at all, and the witness the owed run is pre-registered against -
+# `poll_seq` past the second with the largest ask at or above the park's threshold - is read off those
+# lines. The five added expectations are the witness's own reading, on the same fixture.
 reader_state predicted        "this arm did what it was built to do at the point that matters" \
                               "live channel: not full" \
-                              "=> SLEEPER ARM (594's switch)"
+                              "=> SLEEPER ARM (594's switch)" \
+                              "went past the last record every previous boot published" \
+                              "a poll came back after the second" \
+                              "it is the park and not a stray ask" \
+                              "the park's console group is not in the log, although its poll returned" \
+                              "rung 3: xnu_live_poll_over"
 # the falsifier, and the branch inside its FAIL: the arm record is present, so the reader must say
 # the SoC's reset is excluded by measurement rather than only that the park did not come back
 reader_state poll-seq-2       "no poll record past the second" \
