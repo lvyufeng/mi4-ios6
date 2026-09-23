@@ -13,9 +13,11 @@
 # hash mismatch is a real hash mismatch) without carrying a park in the repository, which is also why the
 # fixture directory is a temporary one and is never `/tmp/r594/frozen-payload`.
 #
-# The cells that matter most point the REAL record at the REAL live tree, which currently holds the
-# SLEEPER arm: it must refuse. A verifier that accepted it would be the very defect `revert-set.txt`
-# describes - a verdict about a location read as a verdict about a set.
+# The cells that matter most point the REAL record at the REAL live tree, which holds the arm the next
+# press sends - and the record carries TWO sets, only one of which is that arm. So the same directory
+# gets both verdicts: a pass when the set under test is the one it holds, a refusal when it is not. A
+# verifier that accepted it either way would be the very defect `revert-set.txt` describes - a verdict
+# about a location read as a verdict about a set.
 #
 # The last cell is the one that would have caught this record's first draft. The set is DEFINED as the
 # files the gate reads, so the record must cover that list - and the list is derived from the gate's own
@@ -32,6 +34,11 @@ RECORD=$ROOT/stages/stage90/revert-set.txt
 LIVE=$ROOT/out/stage90
 
 [[ -x $TOOL ]] || { echo "no tool at $TOOL" >&2; exit 1; }
+# The `live-tree-matches-armed-set` cell asserts a PASS by naming the set it expects to have passed, so
+# that name has to exist in the record. Without this guard the cell would fail with a refusal instead - a
+# wrong message about a right property, which is a shape of failure this file keeps having to fix.
+ARMED=armed-sleepless-696a0f39
+grep -q "^set=$ARMED " "$RECORD" || { echo "the record carries no set called $ARMED, so the live tree is not a recorded arm and this rehearsal would be checking a fixture instead" >&2; exit 1; }
 [[ -d $LIVE ]] || { echo "no live tree at $LIVE - this rehearsal needs the real build outputs" >&2; exit 1; }
 
 W=$(mktemp -d /tmp/rehearse-revert.XXXXXX) || exit 1
@@ -92,16 +99,47 @@ cell "good-set"            0 "VERIFIED:"                        \
 cell "good-set-a-set-name" 0 "set fixture in"                   \
   bash "$TOOL" "$GOOD" --record="$W/fixture-record.txt" --set=fixture
 
-# 2. the cells this rehearsal exists for: a record describing ONE set, pointed at a directory holding
-# ANOTHER. This uses the REAL record and the REAL live tree, with no copy in between: `revert-set.txt`
-# describes the parked frozen 574 bytes, and `out/stage90/` currently holds the SLEEPER arm. A verifier
-# that accepted it would be the defect `revert-set.txt` describes - a verdict about a directory read as
-# a verdict about the set, which is what `sha256sum -c` does to every park.
-cell "live-tree-vs-record" 1 "stage90-qcdt.img hashes to"        \
+# 2. the cells this rehearsal exists for: one directory, more than one set, and a verdict that has to
+# name which set it is about. This uses the REAL record and the REAL live tree, with no copy in between.
+#
+# The record carries TWO sets, and `out/stage90/` holds exactly one of them:
+#
+#   * `--set=armed-sleepless-696a0f39` on the live tree must PASS. This direction did not exist before
+#     614: the arm the next press sends is now recorded, so the record can be pointed at the thing it
+#     describes and agree with it. A record that only ever refuses cannot be told from one that is wrong
+#     about everything.
+#   * the same directory with every set selected must REFUSE, on `frozen-574` - same directory, same
+#     invocation shape, opposite verdict once the set under test changes. That pair is the whole
+#     property: **a verdict about a directory that does not name its set is not a verdict about a set**,
+#     which is what `sha256sum -c` does to every park.
+cell "live-tree-matches-armed-set" 0 "VERIFIED: 11 file(s) of armed-sleepless-696a0f39" \
+  bash "$TOOL" "$LIVE" --set=armed-sleepless-696a0f39
+cell "live-tree-vs-the-other-set" 1 "stage90-qcdt.img hashes to"  \
   bash "$TOOL" "$LIVE"
 cell "live-tree-names-the-dir" 1 "in $LIVE"                       \
   bash "$TOOL" "$LIVE"
 
+# 2b. The same situation built entirely out of fixtures, so the property is held without depending on
+# which arm happens to be in `out/` today. A record carrying two sets over ONE directory, one of them
+# describing a file the directory does not hold: the honest set must pass, the other must fail, and the
+# refusal must SAY WHICH IS WHICH. The note is the whole point - without it, "this park is the park of
+# another set" and "this park has rotted" look identical in the failure text, and the two readings send
+# a reader to different places (a backup, or `--set=`).
+TWOSET=$W/twoset-record.txt
+cp "$W/fixture-record.txt" "$TWOSET"
+sed 's/^set=fixture/set=other/' "$W/fixture-record.txt" \
+  | sed 's|^\(set=other sha256=\)[0-9a-f]\{64\}\( bytes=[0-9]* file=stage90\.bin .*\)$|\10000000000000000000000000000000000000000000000000000000000000000\2|' \
+  >> "$TWOSET"
+# Guard, as everywhere else in this file: if the second set did not get written the cells below would
+# assert a note about a record that carries one set, and pass or fail for the wrong reason.
+[[ $(grep -c '^set=other ' "$TWOSET") -eq 11 ]] || { echo "the two-set fixture record did not get its second set (found $(grep -c '^set=other ' "$TWOSET") of 11 lines) - the cells below would be checking nothing" >&2; exit 1; }
+[[ $(grep -c '^set=other sha256=0000' "$TWOSET") -eq 1 ]] || { echo "the second set does not carry the doctored stage90.bin line" >&2; exit 1; }
+cell "one-set-of-two-unnamed"   1 "matches fixture exactly, and fails other" \
+  bash "$TOOL" "$GOOD" --record="$TWOSET"
+# The mirror, and it is the direction a reader gets wrong: naming the DIRTY set does not turn the run
+# green, and must not print the note - there is no clean set to name.
+cell "the-dirty-set-named"      1 "stage90.bin hashes to"          \
+  bash "$TOOL" "$GOOD" --record="$TWOSET" --set=other
 # 3. a one-byte edit, past the header so the file still parses as an image
 BADHASH=$W/badhash
 mkdir -p "$BADHASH"; for f in $FILES; do cp "$GOOD/$f" "$BADHASH/$f"; done

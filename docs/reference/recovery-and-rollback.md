@@ -134,9 +134,10 @@ fastboot boot path/to/known-good-recovery-or-boot.img
 If it fails, reboot/power-cycle. Do not immediately flash.
 
 Going **back** to a payload that was known to work is a separate act from recovering the phone, and it has
-its own record. A stage payload's `out/stage90/` tree can be put back to the frozen 574 arm — the one whose
-readings this project's later steps are all measured against — by copying eleven files back, with no rebuild
-involved. The set, its hashes and the reason that set and not another are `stages/stage90/revert-set.txt`,
+its own record. A stage payload's `out/stage90/` tree can be put back to either recorded arm — the frozen
+574 arm, whose readings this project's later steps are all measured against, or the armed sleepless arm the
+next press sends — by copying eleven files back, with no rebuild involved. The sets, their hashes and the
+reason those sets and not others are `stages/stage90/revert-set.txt`,
 and `tools/verify_revert_set.sh DIR` checks a directory against it. **Eleven rather than nine, and that is
 the correction 612 records**: the gate reads a file's path in its text *and* every path named by the
 manifest it verifies (`sha256sum -c SHA256SUMS.txt`, its line 139), so a set built from the gate's text
@@ -147,8 +148,17 @@ header (step 613), and it is not the split the names suggest: the direction the 
 was blind to is carried by **pinning the manifest as bytes**, not by either member check.
 
 ```bash
-tools/verify_revert_set.sh /tmp/r594/frozen-payload     # the recorded park of the 574 set
+tools/verify_revert_set.sh /tmp/r594/frozen-payload --set=frozen-574
+tools/verify_revert_set.sh out/stage90/frozen/armed-sleepless-696a0f39 --set=armed-sleepless-696a0f39
 ```
+
+**Name the set.** The record carries two of them and a park holds one, so an unnamed run refuses with a
+wall of hash failures on the set the directory is *not* — which reads as rot and is not. Since 614 the
+tool prints which set the directory matched exactly when a refusal has one clean set and one dirty one,
+and that note is the difference between reaching for a backup and reaching for `--set=`. A park is now
+recorded as the *arm it is*, not as a location: `armed-sleepless-696a0f39` is the arm the next press
+sends, parked byte-for-byte while it was still live, because **the payload build is not byte-reproducible**
+(408) and `out/stage90/` was its only copy.
 
 Two facts about it that are worth knowing before trusting any other manifest on this host: the parked
 files live **outside version control** (`out/` is gitignored), so that record *is* the identity; and every

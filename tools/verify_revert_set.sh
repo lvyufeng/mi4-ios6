@@ -188,8 +188,14 @@ fi
 OK=0
 OKM=0
 FAILED=0
+# Per-set failure counts, kept because a single global count cannot tell "this directory is wrong" from
+# "this directory is the park of a DIFFERENT set" - and the second reading is the one a reader arrives
+# with, since this command used to name one set. Recorded as `name:count` pairs rather than an
+# associative array so this file stays runnable wherever the rest of it is.
+SETFAILED=""
 for s in $SETS; do
   members=0
+  SETFAIL=0
   SEEN=""
   echo "== set $s in $ABS =="
   i=0
@@ -213,17 +219,17 @@ for s in $SETS; do
     if [[ ! -e $ABS/$f ]]; then
       echo "  FAIL  $f is ABSENT from this directory. The set is incomplete: a revert that omits a file"
       echo "        the gate reads is not a revert, whatever the files present hash to."
-      FAILED=$((FAILED + 1))
+      FAILED=$((FAILED + 1)); SETFAIL=$((SETFAIL + 1))
       continue
     fi
     if [[ ! -f $ABS/$f ]]; then
       echo "  FAIL  $f is not a regular file"
-      FAILED=$((FAILED + 1))
+      FAILED=$((FAILED + 1)); SETFAIL=$((SETFAIL + 1))
       continue
     fi
     if [[ ! -s $ABS/$f ]]; then
       echo "  FAIL  $f is empty (the record says $b bytes)"
-      FAILED=$((FAILED + 1))
+      FAILED=$((FAILED + 1)); SETFAIL=$((SETFAIL + 1))
       continue
     fi
 
@@ -231,7 +237,7 @@ for s in $SETS; do
     if [[ $got_bytes != "$b" ]]; then
       echo "  FAIL  $f is $got_bytes bytes, the record says $b. Two fields of one file disagreeing is a"
       echo "        refusal before any hashing: these are not the bytes that were measured."
-      FAILED=$((FAILED + 1))
+      FAILED=$((FAILED + 1)); SETFAIL=$((SETFAIL + 1))
       continue
     fi
 
@@ -239,20 +245,21 @@ for s in $SETS; do
     if [[ -z $got ]]; then
       echo "  FAIL  $f could not be read by this user, so it was NOT verified. An unreadable file is not"
       echo "        a file that matched."
-      FAILED=$((FAILED + 1))
+      FAILED=$((FAILED + 1)); SETFAIL=$((SETFAIL + 1))
       continue
     fi
     if [[ $got != "$h" ]]; then
       echo "  FAIL  $f hashes to $got"
       echo "        the record has    $h"
       echo "        role: $r"
-      FAILED=$((FAILED + 1))
+      FAILED=$((FAILED + 1)); SETFAIL=$((SETFAIL + 1))
       continue
     fi
     printf '  ok    %-28s %s  %s bytes\n' "$f" "${got:0:16}…" "$b"
     OK=$((OK + 1))
   done
   [[ $members -gt 0 ]] || refuse "set '$s' selected from the record but no line matched it, which cannot happen after the name check above - refusing rather than printing an empty set as verified"
+  SETFAILED="$SETFAILED $s:$SETFAIL"
 
   # ---- 6a. criterion B, closed over the record ------------------------------------------------
   # The gate verifies the manifest (its line 139: `sha256sum -c SHA256SUMS.txt`), and `sha256sum -c`
@@ -273,7 +280,7 @@ for s in $SETS; do
         echo "  FAIL  the manifest member '$m' is not a file= line of set '$s'. The gate reads it through"
         echo "        \`sha256sum -c\`, so it belongs in the set; a record that names it in one field and not"
         echo "        in the other is exactly how a revert leaves the gate red with every hash matching."
-        FAILED=$((FAILED + 1))
+        FAILED=$((FAILED + 1)); SETFAIL=$((SETFAIL + 1))
       else
         printf '  ok    manifest member %-24s is a member of the set (criterion B)\n' "$m"
         OK=$((OK + 1)); OKM=$((OKM + 1))
@@ -301,7 +308,7 @@ for s in $SETS; do
       echo "  FAIL  the manifest in this directory names file(s) the set does not:$(printf ' %s' $outside)"
       echo "        The gate reads every one of them through \`sha256sum -c\`, so a revert that does not"
       echo "        restore them leaves the gate red. Add them to the record, or the record is not the set."
-      FAILED=$((FAILED + 1))
+      FAILED=$((FAILED + 1)); SETFAIL=$((SETFAIL + 1))
     else
       printf '  ok    every one of the %s member(s) its own manifest names is in the set\n' "$n_ondisk"
       OK=$((OK + 1)); OKM=$((OKM + 1))
@@ -322,4 +329,22 @@ if [[ $FAILED -eq 0 ]]; then
 fi
 echo "REFUSING: $FAILED of $((OK + FAILED)) file(s) did not match the record. Nothing in $ABS was"
 echo "          modified, and no file was copied anywhere: this run only hashed."
+
+# A directory that is exactly one recorded set and not another is the NORMAL state of a park, and the
+# failures it produces are indistinguishable in the text above from a park whose bytes have rotted. Say
+# which is which: a reader arriving with the older one-set command has no other way to tell, and the
+# difference decides whether they reach for a backup or for `--set=`.
+CLEAN=""; DIRTY=""
+for pair in $SETFAILED; do
+  case "${pair##*:}" in
+    0) CLEAN="$CLEAN ${pair%%:*}" ;;
+    *) DIRTY="$DIRTY ${pair%%:*}" ;;
+  esac
+done
+if [[ -n $CLEAN && -n $DIRTY ]]; then
+  echo
+  echo "  note  this directory matches$CLEAN exactly, and fails$DIRTY. If it is the park of one of those"
+  echo "        sets, name it and the verdict is a pass:  --set=$(echo $CLEAN | awk '{print $1}')"
+  echo "        The failures above are then not rot - they are this directory being a different arm."
+fi
 exit 1

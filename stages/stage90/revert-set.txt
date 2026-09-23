@@ -83,8 +83,24 @@
 #             same set. Without this field a reader would have to open the target's manifest - which is
 #             the one file whose contents the next build changes.
 #
+# TWO SETS, AND WHY THE SECOND ONE EXISTS. `frozen-574` is the arm to fall BACK to. `armed-sleepless-696a0f39`
+# is the arm the next press SENDS, and it is recorded for a different reason: **the payload build is not
+# byte-reproducible** (408), so `out/stage90/` is the only copy of it that has ever existed. Nothing
+# wiped it - but nothing protected it either, and a run of `build.sh` or `build_entry.sh` would have
+# destroyed the one unrun arm in this project whose loss cannot be undone by rebuilding. A record of the
+# bytes, plus a park, is the same protection 611 gave the 574 arm, applied where the risk actually was.
+#
+# The two sets differ in 9 of their 11 files: the payload (the entry image is embedded in it), the two
+# ELFs, the entry image, the boot image, the qcdt, the manifest and the entry's own record and source
+# list. Measured by running the tool against the live tree with only the 574 set selected: **9 FAIL
+# lines**. `stage90-build-config.txt` and `stage90_fixture.macho` are byte-identical between the two
+# arms, which is worth stating because "it happens not to matter for two of the eleven" is exactly the
+# reasoning this record exists to replace.
+#
 # The parked copies, which are copies and not the record:
-#   /tmp/r594/frozen-payload/          the 574 set, the revert target for the arm the press sends
+#   /tmp/r594/frozen-payload/          the 574 set, the arm to fall back to
+#   out/stage90/frozen/armed-sleepless-696a0f39/
+#                                      the armed set, byte-for-byte, taken while it was still live
 #   out/stage90/frozen/                526 and 533 are parked here by an older convention, recorded
 #                                      nowhere yet - a reader should know this record does not cover
 #                                      them rather than assume the park directory is complete
@@ -102,3 +118,14 @@ set=frozen-574 sha256=5073b0c4972bf91364851552262a3bbd757a5643a0f23eb1416d4a6b76
 set=frozen-574 sha256=4a4ce2925779cfac1cdb17046dff78b107dcaf6c4ec8d52724689ed27fbe63fa bytes=2104 file=xnu_arm_entry-sources.txt role=entry-source-manifest
 set=frozen-574 sha256=8274b1c4ae2dfc5ea317e17a0cf3f6e024e3bf7eaafdef964cabc5b66d75f339 bytes=6019072 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
 set=frozen-574 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-both-arms-but-a-manifest-member-all-the-same
+set=armed-sleepless-696a0f39 sha256=4ac521e40a59b06ba2fe8b6ac792b49b6103993f936e89ec16d02be8921f88a2 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-sleepless-696a0f39 sha256=ce02edfe5266f8d76f2ef6c05c1c18f4b99386fa96a4c7bc5841b48d4272d071 bytes=6015356 file=stage90.bin role=raw-payload-bin-this-one-embeds-the-sleepless-entry
+set=armed-sleepless-696a0f39 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-byte-identical-to-the-574-arms-and-the-switch-names-the-sleeper
+set=armed-sleepless-696a0f39 sha256=d0ee83c35e44554aef0d87b0cc3693c7c4283c775b7a4e1eb62012fa0ad9fc1f bytes=6077388 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-sleepless-696a0f39 sha256=28ee2c226132d9a40fe28551abb4256b758e556a2bdcd2512be8eda4ec37c1d0 bytes=6019072 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies-this-is-the-live-file-612-measured-the-gate-red-on
+set=armed-sleepless-696a0f39 sha256=60063c47fc977cfe38c3e03e4a7699e03921fe9783a764601c5b4f79925dec9c bytes=8540160 file=stage90-qcdt.img role=qcdt-wrapped-payload-this-is-what-fastboot-boot-sends-and-the-arm-the-next-press-sends
+set=armed-sleepless-696a0f39 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-identical-in-this-arm-and-in-the-574-arm
+set=armed-sleepless-696a0f39 sha256=696a0f39128c3fd4501dc32b1c4e04bb6b612988ce8a028bb21487c8e82a5674 bytes=5519996 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-this-is-the-sleepless-entry-STAGE90_XNU_IDLE_NO_SLEEP-1
+set=armed-sleepless-696a0f39 sha256=6636e2d122fc9ba6306ff66b630e05ea6304df0f0f58fcefd0ffa8baa5af3c12 bytes=756 file=xnu_arm_entry-config.txt role=entry-config-record-its-line-4-names-the-entry-696a0f39
+set=armed-sleepless-696a0f39 sha256=7f80c2cbd9b777880f89fc8f4498a43b87f2896a8b28993a73397d04d9fbdc64 bytes=6698664 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-sleepless-696a0f39 sha256=7ba1ee39d9ec2e1c5932ff81510db034d80744d68e9563cd6d6a0ed5646d9ca4 bytes=2104 file=xnu_arm_entry-sources.txt role=entry-source-manifest
