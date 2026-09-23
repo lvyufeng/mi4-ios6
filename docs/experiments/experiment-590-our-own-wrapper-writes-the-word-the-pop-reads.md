@@ -123,6 +123,50 @@ does not yet say is which of the two legal behaviours this part has, and that is
 bench**: a two-instruction arm that issues the same `strd` and reads both words back says it, and costs
 one boot of a payload that need only print two numbers.
 
+## 5a. Addendum (590a): the align-down reading is largely dead, and the reason is the store's second register
+
+Checked before it reached an arm, which is the only reason this is a paragraph and not a lost boot.
+
+`strd r4, [sp, #-12]!` stores **`r4` and `r5`** - `STRD` takes consecutive registers. And in `cpu_idle`,
+`r5` is the **`cpu_data` pointer**, not a second deadline word:
+
+```
+8000d944:  ldr  r5, [r1, #1484]      ; r5 = cpu_data   (r1 = TPIDRPRW)
+8000d984:  add  r6, r5, #224         ; r6 = cpu_data + 0xe0
+8000d98c:  ldm  r6, {r4, r7}         ; r4 = [cpu_data+0xe0] = rtcPop;  r7 = the high word
+```
+
+So under the **align-down** reading (`r4` at `S-16`, `r5` at `S-12`), the word the `pop` loads as `pc`
+would be `cpu_data` = **`0x8051a000` in 520's run** - a perfectly valid kernel address, and the pop would
+have returned to it instead of taking a prefetch abort at `0x04b79074`. **It aborted.** So align-down
+cannot explain the `pc` word, and §5's "one of the two measured words explained with no cache theory" is
+withdrawn for the `pc` word. It survives only as a caveat about what ARMv7 permits for `LDRD`/`STRD`,
+not as an explanation of this death.
+
+**And the aligned-as-written reading is now the one the measurement fits**, which is the sharper half:
+it puts `r4 = rtcPop` at **`S-12`** - exactly the word the `pop` loads as `pc`, whose measured value is
+`0x04b79074`/`0x04b79075` = `rtcPop - 1`/`rtcPop`. 546's cache story is what the push's `lr` store then
+has to lose to, which is where this project already was.
+
+### 5b. The abort's register file carries the instrument's own values, and one of them does not fit
+
+520's log publishes `rtcpre_datap = 0x8051a000`, `rtcpre_thr = 0xc0573df0`, `rtcpre_pop = 0x04b79075`,
+and the abort's dump reads **`r5 = 0x8051a000`, `r9 = 0xc0573df0`, `r11 = 0x04b79075`** - the same three
+values, in registers. `r6 = 0x8051a0e0` is `cpu_data + 0xe0`, i.e. `cpu_idle`'s own `r6` from
+`0x8000d984`. So the dump's registers are the idle pass's, and `r11` holding `rtcPop` is consistent with
+the `pop` having already committed its `fp` load (`LDM sp!, {r11, pc}` writes `r11` before `pc`) - 585's
+"`[S-16] = rtcPop`" reading, which stands.
+
+**What does not fit is `r4`.** `cpu_idle` sets `r4 = [cpu_data + 0xe0] = rtcPop` at `0x8000d98c`, nothing
+in `cpu_idle` or in any of the three idle wrappers writes `r4` again (`__wrap_platform_cache_idle_enter`
+and `__wrap_cpu_idle_wfi` save it with the same `strd` and restore it with `ldrd r4, [sp]`; the exit
+wrapper only stores it), so `r4` should still be `rtcPop` at the abort. **It is `0x8054fed0`, which is
+`sp`** - the frame slot's own address, not a deadline. Either the abort handler's own prologue touches
+`r4` before the frame it prints is saved, or something in the pass clobbers it; **this document does not
+decide which, and it is recorded as open rather than resolved.** It matters because 519's chain ("the
+writer is the `strd` because `r4` holds the deadline") is a statement about `r4` at the *store site*,
+which the disassembly above confirms, and not about `r4` at the *abort*, which it does not.
+
 ## 6. What this does to the next arm
 
 535's candidate was a *cache operation* at the seam, and 535's run did not come back. This is a different
@@ -133,6 +177,9 @@ smaller than 535's:
   out of the exit's `{fp, lr}` slot);
 - or, if the store stays, have the exit wrapper **invalidate** that one line after the push (invalidate,
   not clean - a clean leaves the line valid and the `pop` still hits it).
+
+The unaligned-store reading that §5 raised is withdrawn as an explanation by §5a; what is left of it is a
+note about the instruction, not a lead about this death.
 
 Either way the first thing to settle is which behaviour the part implements, because under the align-down
 reading there is nothing for a cache repair to fix.
