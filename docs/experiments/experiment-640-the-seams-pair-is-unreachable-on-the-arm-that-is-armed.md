@@ -1,4 +1,4 @@
-# 639: the seam's pair is unreachable on the arm that is armed, and the arm's own table does not carry it
+# 640: the seam's pair is unreachable on the arm that is armed, and the arm's own table does not carry it
 
 638 pre-registered a reading: the seam's `_b1`/`_a1` pair, taken inside `platform_cache_idle_exit`,
 decides between 597's two candidate repairs, and "the owed run" is the log that decides it. This step
@@ -7,6 +7,15 @@ answer is no, by the same proof that says the parked arm is the right arm to sen
 
 Nothing was built, nothing was run, no device was touched. Every figure below is a read of the armed
 record, the armed ELF's instruction stream and call sites, and Apple's own `caches.c`.
+
+**Numbering, and how this step got it wrong once.** This step was first committed as **639**, and 639 was
+already taken: the step numbers are shared with the *gate-only* steps, which take a number and no doc
+(`622 (gate)` is `b0c1c02`, `639 (gate)` is `128b66a`, `627 (gate)` is `9cbad2b`), so `grep '^# 639'` in
+`docs/` and `git log --oneline | grep ' 639 '` name two different steps. **One number, two definitions** -
+this project's most-repeated class - arriving in the record rather than in the code, and the fix is the
+one this file has: 640 was free in both, so the doc, its references and the README row were renumbered in
+the follow-up commit that carries this note. The rule a future step needs is the one the collision
+implies: **a step number is taken if any commit subject carries it, doc or not.**
 
 ## 1. Which arm is armed, read off the record rather than remembered
 
