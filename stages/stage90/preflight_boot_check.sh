@@ -1112,6 +1112,51 @@ PY
     fail "the entry image's reach into the watchdog's page is either real or unread, and both stop this image (see above): a run whose only net is the one the image can touch, or a zero read from an instrument that saw no witness, are the two ways this check can be a sentence instead of a reading"
   fi
 
+  # **And the same measurement has a second consequence that the paragraph above does not draw, so it is
+  # drawn here: with nothing in the entry image carrying the watchdog's page, a run of this arm is
+  # CAPPED.** The net is armed before the jump and nothing pets it, so the SoC resets the machine on its
+  # own clock - and that is a property of a *successful* run as much as of a hung one. The paragraph
+  # above says "expect a power press"; what it does not say, and what an operator reading a green gate
+  # would otherwise assume, is that **a run that goes well also ends within the net's interval**, with the
+  # log intact and the phone back on Android. So "the machine stayed up" has a ceiling in this arm, and
+  # the ceiling is a number in this tree rather than prose: the two constants are read out of `stage90.h`
+  # (rung 1b's rule - a threshold quoted from the file that defines it, never written here again), and
+  # the clause refuses rather than guessing if either cannot be read.
+  #
+  # **The claim that nothing pets it is the clause above, not this one.** `carried == 0` is exactly "no
+  # code in the entry image materialises this page", and the positive control is the payload, which
+  # arms the net and therefore must carry it. The narrower caveat the paragraph above states - the
+  # watchdog shares its 1 MB section with the GIC, which `entry_gic.c:377` maps at run time, so an
+  # image could reach the registers without materialising an address in the page - applies here too and
+  # is why this is a *ceiling* and not a proof of the reset path.
+  #
+  # **And there is a hardware reading of what the ceiling looks like, which is why it is worth printing
+  # rather than asserting.** 513's two captures (2026-09-21) are runs of an image with no repair - the
+  # same regime this arm's switch restores - and their payload records end at `xnu_live_poll_over`
+  # (the fifth poll), with `panic` 0, `Attempting system restart` 0, `MACH Reboot` 0,
+  # `pc_sample_watchdog_fired` 0 and `platform_reboot entered` 0. So **no software path ended either
+  # run**: not XNU's panic-restart, not the payload's own software dead-man. The only reset path left is
+  # the net, and what a capture of that regime looks like is therefore "the records simply stop, after
+  # the work, with no fault text". That is the shape to expect, and it is not a failure.
+  WDT_TMO=$(sed -n 's/^#define STAGE90_HW_WATCHDOG_TIMEOUT_S \([0-9][0-9]*\)u.*/\1/p' "$STAGE_DIR/stage90.h" | head -1)
+  WDT_GAP=$(sed -n 's/^#define STAGE90_HW_WATCHDOG_BITE_GAP_S \([0-9][0-9]*\)u.*/\1/p' "$STAGE_DIR/stage90.h" | head -1)
+  if [[ -z $WDT_TMO || -z $WDT_GAP ]]; then
+    fail "STAGE90_HW_WATCHDOG_TIMEOUT_S / _BITE_GAP_S could not be read from $STAGE_DIR/stage90.h, so the ceiling this arm runs under cannot be stated - and a gate that describes a run without its ceiling is describing a different run"
+  fi
+  echo "  and this image cannot pet the net, so the run is CAPPED: a run of this arm that goes well also"
+  echo "  ends within the net's own interval, not when the payload stops. The two constants are read out"
+  echo "  of stage90.h rather than quoted here:"
+  echo "    STAGE90_HW_WATCHDOG_TIMEOUT_S    $WDT_TMO s   (the bark)"
+  echo "    STAGE90_HW_WATCHDOG_BITE_GAP_S   $WDT_GAP s   (bark -> bite)"
+  echo "    so the bite is at most $(( WDT_TMO + WDT_GAP )) s after the payload arms it, and the payload"
+  echo "    spends about 1 s of that before the jump (measured: 533's payload timebase sample to the"
+  echo "    idle's first read is 1.1805 s on one 19.2 MHz counter)."
+  echo "  MEASURED, what that ceiling looks like: 513's two captures - the same regime, an image with no"
+  echo "  repair - end their payload records at the fifth poll with panic 0, Attempting system restart 0,"
+  echo "  MACH Reboot 0, pc_sample_watchdog_fired 0 and platform_reboot entered 0, so NO software path"
+  echo "  ended either run and the records simply stop after the work, with no fault text. Read a capture"
+  echo "  of this arm that way: 'the log ends without a fault' is the ceiling, not a missing reading."
+
   # **Which idle arm this image runs is a boot argument, and it is read out of the artifact that is
   # about to be booted.** 549's finding: `up_style_idle_exit` is a `.bss` global (default 0) set only by
   # `arm_init`'s `PE_parse_boot_argn` call, so the arm is a property of the command line and not of the
