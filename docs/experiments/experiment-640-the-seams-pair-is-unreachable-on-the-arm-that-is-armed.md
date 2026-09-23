@@ -105,14 +105,18 @@ inside the 28 s. That reading is an *other-site* reading either way: the seam re
 and rejected the site, which is 526's distinction, and it is not a pair.
 
 **And the instrument, because a reader will re-derive this table and one spelling of `objdump` cannot.**
-On this host, bare `objdump -d out/stage90/xnu_arm_entry.elf` prints `file format elf32-little` and **no
-disassembly at all** — it cannot read this architecture — so the same grep over its output returns
-**zero** seam sites, a reading identical to "the seam is not in this image". `arm-none-eabi-objdump` is
-the one that reads it, every address above came from it, and the four sites reproduce under a pattern
-that names no symbol at all (`grep -E '\b(bl|b|blx)\s+8047cb70\b'` → the same four). That blindness was
-found by `run-experiment-526` while re-deriving this table in their own lane, and it is this project's
-first-ranked shape to suspect - **an extractor blind to the state it detects** - arriving in the tool
-rather than in the analysis.
+On this host, bare `objdump -d out/stage90/xnu_arm_entry.elf` produces **62 bytes of output** — the file
+header and nothing else, no disassembly body at all — and exits **0**; `objdump -f` says what the reason
+is (`architecture: UNKNOWN!` against `arm-none-eabi-objdump -f`'s `architecture: armv3m`). So the grep
+over its output is **zero** for every address, and that zero is not "fewer sites than there are" — **the
+instrument produced no text.** It is the same first-ranked shape as a blind filter (an extractor that
+cannot see the state it is looking for) and this spelling is worse in one way: **nothing in the output
+says "I could not read this", and the exit status is 0.** Every address above came from
+`arm-none-eabi-objdump`, and the four sites reproduce under a pattern that names no symbol at all
+(`grep -E '\b(bl|b|blx)\s+8047cb70\b'` → the same four), so the pattern is sound exactly because the
+tool that produced the text can read the ELF. That blindness was found by `run-experiment-526` while
+re-deriving this table in their own lane, and it is a real instance of a defect class this project
+documents rather than a hypothetical one.
 
 **And that is exactly what the gate's own idle narration says**, in the words of the file the press
 runs (`preflight_boot_check.sh:576-580`):
