@@ -468,6 +468,85 @@ summarise_log() {
   # `+276`, `+300`) followed by 593's causal chain, in one uninterrupted run at the end of the file.
   ordered() { grep -ao "xnu_live_$1=0x[0-9a-f]*" "$log" 2>/dev/null | sed 's/^[^=]*=//' || true; }
 
+  # --- the live channel's own capacity, and whether this log filled it (609) ----------------------
+  #
+  # **Every `xnu_live_*` key below travels in a channel that is finite, that says what its capacity
+  # is, and that says once when it starts dropping.** `entry_live_write` (`entry_stubs.c`, the
+  # `ENTRY_LIVE_CAP` block) publishes `xnu_live_cap` at init, and once `g_live_records` reaches the
+  # cap it publishes **`xnu_live_capped` exactly once** - at the moment of the first drop - and then
+  # keeps counting without writing anything. So a log can stop publishing in the middle of a boot
+  # that is still running, and every key's last value then belongs to the machine's state *at the
+  # cap* and not at its death.
+  #
+  # **Until 609 no clause in this file read either key.** By the time it was found, three clauses were
+  # reading absence as a fact about the machine: rung 0 says "this run did not get past 32768 passes"
+  # from where `door_seq` stops, rung 1 says "the park's poll has not come back" because `poll_seq`
+  # stops at 2, and the goal block says an absent fixture value is a **POSITION** - the boot stopping
+  # there. Each of those is a statement about the boot, and a full channel turns each of them into a
+  # statement about the *channel*. That is this project's most-repeated shape (one value, two
+  # definitions) at the level of the instrument rather than of the reading.
+  #
+  # **Measured, so the size of the risk is a number and not a worry.** `xnu_live_cap=0x2000` on every
+  # boot; the archived pair carry **~4400** live records, about 54% of capacity, and **neither is
+  # capped** - which is why no run so far has shown this. A run that goes further publishes more, so
+  # the number to watch is this one, and it is printed on every log rather than only on the bad state.
+  #
+  # Two signals, and the log carries both: the `capped` key when the channel dropped a record, and the
+  # **count of records in the log against the cap the log itself published** - which catches the case
+  # the first signal cannot, a run that ended exactly at the cap (the key is published *when the first
+  # record is dropped*, so a boot that filled the channel and stopped with nothing more to say has
+  # none). Both are read here, and the flag they set is what the three clauses above consult.
+  local live_cap live_capped live_recs live_trunc
+  live_cap=$(keyval cap)
+  live_capped=$(keyval capped)
+  live_recs=$(grep -ao 'xnu_live_[a-z0-9_]*=0x[0-9a-f]*' "$log" 2>/dev/null | grep -c . || true)
+  [[ $live_recs =~ ^[0-9]+$ ]] || live_recs=""
+  live_trunc=0
+  if [[ -n $live_capped ]]; then
+    live_trunc=1
+  elif [[ -n $live_cap && $live_cap =~ ^0x[0-9a-fA-F]+$ && -n $live_recs ]] \
+       && (( live_recs >= 16#${live_cap#0x} )); then
+    live_trunc=1
+  fi
+  if (( live_trunc == 1 )); then
+    say "  live channel: **TRUNCATED** - ${live_capped:+xnu_live_capped=$live_capped, }$live_recs"
+    say "                record(s) against xnu_live_cap=${live_cap:-absent}. The channel stopped"
+    say "                publishing while the machine was still running, so every xnu_live_* value"
+    say "                below is the state at the cap and NOT the machine's last state: an absent"
+    say "                key is a record that was not published, which is not the same as an event"
+    say "                that did not happen. Read the three clauses that say otherwise (rung 0's"
+    say "                'did not get past 32768', rung 1's 'the park's poll has not come back', and"
+    say "                the goal block's 'a POSITION') as UNREAD on this log."
+  else
+    # **And "not full" is a reading of the channel only when the channel is in the log.** The two
+    # states below are not the same fact and one of them is not a value at all (601's class): a log
+    # with no `xnu_live_*` record and no `xnu_live_cap` has no live channel in it - the payload's own
+    # output only - and saying "the channel published every record this boot made" there would be a
+    # claim inferred from a producer that never ran. The middle state is the one that is *about* the
+    # channel and cannot be read as either: records without the capacity line, which the init
+    # publishes before any record, so it is a capture that lost the channel's beginning.
+    if [[ -z $live_cap ]]; then
+      if [[ -z $live_recs || $live_recs == 0 ]]; then
+        say "  live channel: not in this log - no xnu_live_* record at all, and no xnu_live_cap, so"
+        say "                the channel was never brought up in this boot (or this log holds only"
+        say "                the payload's own output). Nothing below is a reading of the live keys"
+      else
+        say "  live channel: $live_recs record(s) and NO xnu_live_cap: the capacity line is published"
+        say "                by the channel's own init, ahead of any record, so records without it mean"
+        say "                the capture lost the beginning of the channel. It cannot be read as 'not"
+        say "                full' from here - but it does not make the three clauses below UNREAD"
+        say "                either, because they read the *last* records and what is lost is the"
+        say "                *first* (the live channel truncates from the end, a console ring from the"
+        say "                start - the two failure directions are opposite and that is why both are"
+        say "                read here)"
+      fi
+    else
+      say "  live channel: not full - $live_recs record(s) of $live_cap, and no xnu_live_capped"
+      say "                record, so the channel published every record this boot made and an absent"
+      say "                key below is an event that did not happen"
+    fi
+  fi
+
   # **594 widened this gate, because the arm it registers has no `slot_cwe_` keys at all - and the
   # gate is the whole block.** The switch skips 514's repair, so `SIGPdisabled` stays set, `cpu_idle`
   # leaves by its first door on every pass, and `platform_cache_idle_enter` / `_wfi` / `_exit` are
@@ -548,6 +627,17 @@ summarise_log() {
     # is `entry_trace.c`'s own definition of which `poll` is the park, and a second copy of it in
     # this file is the defect this project has paid for most often. Unreadable means UNREAD, not a
     # default.
+    #
+    # **And it is this tree's value, which is an assumption about which build the log came from.**
+    # Rung 1b compares the log's `poll_timeout_ms` against the constant in the tree *reading* the log,
+    # so a log from an image built with a different value would be compared against the wrong number -
+    # 593's class, where a value from one build was resolved against another build's artifact. The
+    # assumption has never been violated here and that is measured rather than hoped: the line has
+    # been `1000` at **every commit that carries it** (512, which introduced it, 514, and every step
+    # since), so no log in this tree can be read against a different one. It is stated because the
+    # next change to that constant would silently re-point every archived log's rung 1b, and the
+    # sentence that says which build a comparison is made against is cheap here (the criterion line
+    # below prints its own source for the same reason).
     park_min=""
     if [[ -r $REPO_ROOT/stages/stage90/xnu_arm_boot/entry_trace.c ]]; then
       park_min=$(sed -n 's/^#define ENTRY_PARK_MIN_MS \([0-9][0-9]*\).*/\1/p' \
@@ -614,6 +704,21 @@ summarise_log() {
       say "        the fixture's own waits and the park's repair, sip, pce and wfi, before the fatal"
       say "        sleh. So this run reaching the *next* power of two is the pass that killed every"
       say "        boot before it - the first arrival at the window, 593 - not having happened"
+    elif [[ -n $door_max && $live_trunc -eq 1 ]]; then
+      # **609: the FAIL below is a claim about the machine, and a full channel makes it a claim about
+      # the channel.** The sentence it would print - "this run did not get past 32768 passes" - takes
+      # `door_seq`'s ceiling as the machine's own stopping point, which is true only while the channel
+      # is still publishing. `entry_live_write` drops records once its counter reaches the cap, so on a
+      # truncated log the series ends because the *channel* ended, and the machine may have run far
+      # past 32768 passes with its later publishes discarded. The state is therefore UNREAD here, and
+      # it says which of the two facts it has: the series stops at or below 0x8000 AND the log's own
+      # channel is full, so this reading cannot separate them.
+      say "  UNREAD  and it stops at or below 0x8000 - and this log's live channel is TRUNCATED, so"
+      say "        the two readings this rung exists to separate cannot be separated here: the machine"
+      say "        may have stopped before 32768 passes, or it may have run past them and had its later"
+      say "        publishes dropped at the cap. The line above is the channel's state; rung 1 below"
+      say "        reads the park, and it is UNREAD on this log for the same reason"
+      verdict_ok=0
     elif [[ -n $door_max ]]; then
       say "  FAIL  and it stops at or below 0x8000, the last record 520 and 533 publish: the"
       say "        publisher is powers-of-two with no ceiling and neither log is capped, so a machine"
@@ -689,6 +794,23 @@ summarise_log() {
         say "        park, and what the third call did is not read by this rung"
         verdict_ok=0
       fi
+    elif [[ $live_trunc -eq 1 ]]; then
+      # **609, and this is the rung where it matters most: this FAIL is the arm's falsifier.** "The
+      # park's poll has not come back" is read from `poll_seq` stopping at 2, and on a truncated log
+      # the third poll may have returned with its record dropped at the cap - which would turn the
+      # strongest negative reading this project has into a statement about the instrument. The
+      # distinction is the whole falsifier, so it is UNREAD here rather than FAIL: a falsifier that
+      # fires on a full channel is not a falsifier. The three-causes account below (the arm, the SoC's
+      # reset) does not apply either - it excludes a *cause of the machine not returning*, and this
+      # state is one where the machine may have returned and said so into a full channel.
+      say "  UNREAD  and no poll record past the second (xnu_live_poll_seq reaches"
+      say "        ${poll_seq_max:-absent}) - on a log whose live channel is TRUNCATED, and that is"
+      say "        the one state in which this rung's FAIL is not available: the third poll may have"
+      say "        returned with its record dropped at the cap, so the absence here is a record that"
+      say "        was not published rather than a park that did not come back. **This does not clear"
+      say "        the arm** - it means this log cannot answer the question, and the run that can has"
+      say "        to be one whose channel did not fill"
+      verdict_ok=0
     else
       say "  FAIL  no poll record past the second (xnu_live_poll_seq reaches"
       say "        ${poll_seq_max:-absent}) - the park's own poll has not come back, which is this"
@@ -786,10 +908,22 @@ summarise_log() {
         say "     rather than this one - the third call returned something other than the park's own"
         say "     ask, and what that means is not read here."
       else
-        say "     The park's poll has not come back at all, which is the falsifier 593 section 4"
-        say "     pre-registered for this arm. Read rung 1's FAIL line: it names which half of the"
-        say "     witness is missing, and rung 2's NOTE (if present) says whether the console channel"
-        say "     simply lost the group that rung 1's return should have printed."
+        if (( live_trunc == 1 )); then
+          # **609: this sentence is the falsifier said in the summary's own voice, and on a truncated
+          # log it is the one claim that must not be made.** The branch above prints UNREAD for the
+          # same state; a summary line that then asserts "the park's poll has not come back at all"
+          # would be the reader contradicting itself in its last paragraph, which is worse than either
+          # half alone - a reader that says UNREAD and then draws the conclusion anyway.
+          say "     Whether the park's poll came back is **UNREAD on this log**, because the live"
+          say "     channel is full: the third poll may have returned with its record dropped at the"
+          say "     cap. This is not the falsifier and it is not a clearance - the falsifier needs a"
+          say "     log whose channel published to the end of the run."
+        else
+          say "     The park's poll has not come back at all, which is the falsifier 593 section 4"
+          say "     pre-registered for this arm. Read rung 1's FAIL line: it names which half of the"
+          say "     witness is missing, and rung 2's NOTE (if present) says whether the console channel"
+          say "     simply lost the group that rung 1's return should have printed."
+        fi
       fi
     fi
   # **The third state, and the branch this one changed in 598: the condition was
@@ -1781,13 +1915,32 @@ summarise_log() {
     elif [[ -z $g_wait_status ]]; then g_stop="the wait"
     fi
     if [[ -n $g_stop ]]; then
-      say "  FAIL  and the fixture's sequence has no record of ${g_stop}: this log has"
-      say "        ${g_open_n} open(s), ${g_read_n} read(s), ${g_getpid_n} getpid, ${g_exit_n} exit,"
-      say "        ${g_wait_n} wait record(s), and it makes those calls in that order - so **what is"
-      say "        missing here is a POSITION and not a driver fault**: the boot stopped before that"
-      say "        call - on this arm that is the reading the run exists to produce. Read the arm's"
-      say "        own clause above for where it was, and do not read this as the driver failing: the"
-      say "        values that ARE here are the ones printed above, and they are not in dispute"
+      if (( live_trunc == 1 )); then
+        # **609: the "POSITION" reading is a claim about the boot, and a full channel breaks it.** The
+        # fixture's keys are published by the calls themselves, so an absent one normally means the
+        # call did not happen - which is the position this project wants. On a truncated log the same
+        # absence can be a note that was written and dropped at the cap, and the two are not
+        # distinguishable from here. The branch below has always stated this caveat for a log with *no*
+        # fixture record at all ("the same absence is what a log truncated before userland looks
+        # like"); what 609 adds is that the same caveat applies to a log with *some* records, because
+        # the truncation can fall in the middle of the fixture's sequence rather than before it.
+        say "  UNREAD  and the fixture's sequence has no record of ${g_stop} - and this log's live"
+        say "        channel is TRUNCATED, so the absence is not a position: this log has ${g_open_n}"
+        say "        open(s), ${g_read_n} read(s), ${g_getpid_n} getpid, ${g_exit_n} exit, ${g_wait_n}"
+        say "        wait record(s), and the channel stopped publishing at the cap, so the call after"
+        say "        the last one recorded may have run with its note dropped. **That is not the same"
+        say "        as the driver failing** - the values that ARE here are the ones printed above and"
+        say "        they are not in dispute - and it is not the position either: it says where the"
+        say "        recording stopped, not where the boot stopped"
+      else
+        say "  FAIL  and the fixture's sequence has no record of ${g_stop}: this log has"
+        say "        ${g_open_n} open(s), ${g_read_n} read(s), ${g_getpid_n} getpid, ${g_exit_n} exit,"
+        say "        ${g_wait_n} wait record(s), and it makes those calls in that order - so **what is"
+        say "        missing here is a POSITION and not a driver fault**: the boot stopped before that"
+        say "        call - on this arm that is the reading the run exists to produce. Read the arm's"
+        say "        own clause above for where it was, and do not read this as the driver failing: the"
+        say "        values that ARE here are the ones printed above, and they are not in dispute"
+      fi
     else
       say "  FAIL  and every one of the fixture's calls is in the log, so the fault is in the values"
       say "        and not in the sequence: the driver's open answered ${g_open1} (must be 0), the"

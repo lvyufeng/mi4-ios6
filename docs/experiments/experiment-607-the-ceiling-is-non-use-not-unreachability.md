@@ -101,7 +101,9 @@ interrupt-driven paths.
 ## 6. Safety
 
 No device action, no `fastboot`, no `adb`, **nothing written to storage**, no boot, no build. One
-host-side file edited (`stages/stage90/preflight_boot_check.sh`, not in `xnu_arm_entry-sources.txt`), in
+host-side file edited (`stages/stage90/preflight_boot_check.sh`, not a manifest *entry* in `xnu_arm_entry-sources.txt` - its 21 entries are `xnu_arm_boot/` files,
+and the script appears only in that manifest's own comment on line 3, so a one-line `grep` finds the
+name and not an entry), in
 its `--allow-xnu-entry` narration only — no new `exit`, `fail` or `die`. Gate re-run on this tree:
 **EXIT=0 / 537 stdout lines / 0 stderr** (531 before; +6, all `echo`), exit census unchanged. Reads of
 533's and 513's archived captures and of `entry_gic.c`, `entry_stubs.c`, `hw_watchdog.c`. The payload,

@@ -212,7 +212,7 @@ archived pair alone.
 
 No device action, no `fastboot`, no `adb`, **nothing written to storage**, no boot, no build. Reads of
 two archived captures, reads of `entry_ramdisk.s` and `entry_trace.c`, and edits to
-`run_and_capture.sh` — which is host-side and is not in `xnu_arm_entry-sources.txt` (that manifest
+`run_and_capture.sh` — which is host-side and is not a manifest *entry* in `xnu_arm_entry-sources.txt` (that manifest
 covers `xnu_arm_boot/` by content; the runner lives in `stages/stage90/`, where the gate's freshness
 scan deliberately does not match `*.sh`). `fastboot boot` only — never `flash` — so no outcome of any
 of this can write to storage, and the frozen 574 arm is unchanged and unrun.

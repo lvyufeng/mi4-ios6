@@ -253,14 +253,24 @@ printf 'device, no build, no fastboot and nothing written to storage.\n'
 # branch. The variants remove one thing each.
 
 mk_sleeper_log() {
-  local variant=$1 out=$2
+  # **`-capped` is a modifier and not a variant.** Its base is whatever precedes the suffix, so the
+  # two states it has to separate - "this boot filled the channel and dropped records" and "this boot
+  # did not" - are the same log otherwise, which is what makes the reading a reading of the channel
+  # rather than of some other difference between two fixtures (609).
+  local variant=$1 out=$2 base=${1%-capped}
   {
     printf 'MI4IOS6_STAGE90 stage90_image_end=0x00666000\n'
     printf 'MI4IOS6_STAGE90_XNU loader_xnu_early_init_status_rollup=0x90000001\n'
+    # The channel's own capacity line, which every real capture carries: `entry_live_init` publishes
+    # it ahead of the first record. Without it the reader's new clause is in its third state ("records
+    # and no cap"), which is a real state and is exercised by nothing here - so it is emitted always
+    # and the `-capped` variants add the *second* line, the one published at the first dropped record.
+    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_cap=0x00002000\n'
+    [[ $variant == *-capped ]] && printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_capped=0x00002000\n'
     local p=1
-    if [[ $variant != no-door-seq ]]; then
+    if [[ $base != no-door-seq ]]; then
       while (( p <= 16777216 )); do            # 1, 2, 4, ... 0x1000000 - 25 records
-        if [[ $variant == door-max-0x8000 ]] && (( p > 32768 )); then break; fi
+        if [[ $base == door-max-0x8000 ]] && (( p > 32768 )); then break; fi
         printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_idle_seq=0x%08x\n' "$p"
         printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_door_seq=0x%08x\n' "$p"
         p=$((p*2))
@@ -275,9 +285,9 @@ mk_sleeper_log() {
     # neither side of that split is a paragraph: `goal-truncated` stops the fixture after its first
     # call, and `goal-bad-values` has every call present with the driver's open answering non-zero.
     local open1_err=0x00000000
-    [[ $variant == goal-bad-values ]] && open1_err=0x00000005
+    [[ $base == goal-bad-values ]] && open1_err=0x00000005
     printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_open_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_open_error=%s\n' "$open1_err"
-    if [[ $variant != goal-truncated ]]; then
+    if [[ $base != goal-truncated ]]; then
       printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_open_seq=0x00000002\nMI4IOS6_STAGE90_XNU loader_xnu_live_open_error=0x00000002\n'
       printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_read_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_read_nbytes=0x00000004\n'
       printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_read_ret_lo=0x00000004\nMI4IOS6_STAGE90_XNU loader_xnu_live_read_buf=0x00102000\n'
@@ -290,7 +300,7 @@ mk_sleeper_log() {
     fi
     # the polls. 1 and 2 are the two short asks the baseline also makes; 3 is the park (2000 ms).
     local seqs=2 tmo=5
-    case $variant in
+    case $base in
       poll-seq-2|poll-seq-2-no-arm) seqs=2 ;;
       small-timeout)   seqs=3 ;;
       predicted|door-max-0x8000|no-poll-over) seqs=4 ;;
@@ -302,7 +312,7 @@ mk_sleeper_log() {
       esac
       # the small-timeout variant makes the *third* ask a short one again, so a poll returns but
       # not the park's own
-      if [[ $variant == small-timeout && $i -eq 3 ]]; then tmo=40; fi
+      if [[ $base == small-timeout && $i -eq 3 ]]; then tmo=40; fi
       printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_poll_seq=0x%08x\n' "$i"
       printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_poll_timeout_ms=0x%08x\n' "$tmo"
       printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_poll_error=0x00000000\n'
@@ -313,10 +323,27 @@ mk_sleeper_log() {
     # reader's rung-1 FAIL narration is **guarded on**: with it the reader may say the SoC's reset
     # is not what stopped the park, without it it must say that the interval is cited and not read.
     # The `poll-seq-2-no-arm` variant is the one that removes it, so both branches are states here.
-    [[ $variant == poll-seq-2-no-arm ]] || \
+    [[ $base == poll-seq-2-no-arm ]] || \
       printf 'MI4IOS6_STAGE90_XNU loader_hw_watchdog_counter_running=0x00000001\n'
-    [[ $variant == no-poll-over ]] || printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_poll_over=0x00000008\n'
+    [[ $base == no-poll-over ]] || printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_poll_over=0x00000008\n'
     printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_sleh_user=0x00000001\n'
+  } > "$out"
+}
+
+# **The channel's second signal, and the one no `-capped` variant can exercise.** `xnu_live_capped` is
+# published at the moment of the *first dropped record*, so a boot that filled the channel exactly and
+# then stopped - nothing more to write - carries no such record at all, and the only evidence is the
+# **count**. That is the state this builds: a log with the capacity line and exactly that many records,
+# which the reader must read as truncated from the count alone. Without this row the count half of the
+# clause would be a branch nothing has ever run (609).
+mk_capfull_log() {
+  local out=$1 cap=8192 i
+  {
+    printf 'MI4IOS6_STAGE90 stage90_image_end=0x00666000\n'
+    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_cap=0x00002000\n'
+    for ((i=0; i<cap-1; i++)); do      # the capacity line is itself record #1 of the cap
+      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_fill_seq=0x%08x\n' "$i"
+    done
   } > "$out"
 }
 
@@ -336,7 +363,7 @@ reader_state() {
   local variant=$1; shift
   local -a WANT=("$@")
   local log=$WORK/reader-$variant.log
-  mk_sleeper_log "$variant" "$log"
+  if [[ $variant == cap-full ]]; then mk_capfull_log "$log"; else mk_sleeper_log "$variant" "$log"; fi
   local out=$WORK/reader-$variant.out err=$WORK/reader-$variant.err
   bash "$RUNNER" --summarise "$log" > "$out" 2> "$err"
   local code=$? ok=1 why="" want
@@ -362,7 +389,11 @@ reader_state() {
 
 printf '\n== the reading, on every state the coming run can produce ==\n\n'
 rpass=0; rfail=0
-reader_state predicted        "this arm did what it was built to do at the point that matters"
+# **The positive text of the new channel clause is asserted, not assumed.** A check whose success is
+# printed only on the bad state cannot be told from one that never ran, so the "not full" line is an
+# expectation of its own on the state where it must appear (609).
+reader_state predicted        "this arm did what it was built to do at the point that matters" \
+                              "live channel: not full"
 # the falsifier, and the branch inside its FAIL: the arm record is present, so the reader must say
 # the SoC's reset is excluded by measurement rather than only that the park did not come back
 reader_state poll-seq-2       "no poll record past the second" \
@@ -382,6 +413,19 @@ reader_state goal-truncated   "no record of the control open" \
                               "missing here is a POSITION and not a driver fault"
 reader_state goal-bad-values  "the fault is in the values" \
                               "the driver's open answered 0x00000005 (must be 0)"
+# **The three states 609 added, one per clause that read absence as a fact about the machine.** Each is
+# the *same log* as the FAIL it replaces, plus the channel's own `capped` record, so the difference in
+# the reader's output is attributable to the channel and nothing else. Without these the three UNREAD
+# branches would be narration that nothing has ever run - which is the debt 603 section 7 named.
+reader_state door-max-0x8000-capped "live channel: **TRUNCATED**" \
+                              "UNREAD  and it stops at or below 0x8000"
+reader_state poll-seq-2-capped "UNREAD  and no poll record past the second" \
+                              "Whether the park's poll came back is **UNREAD on this log**"
+reader_state goal-truncated-capped "UNREAD  and the fixture's sequence has no record of" \
+                              "live channel: **TRUNCATED**"
+# and the count-only state: full channel, no `capped` record, so the number is the whole of the evidence
+reader_state cap-full         "live channel: **TRUNCATED**" \
+                              "0x00002000"
 printf '\n  %d ok, %d failed\n' "$rpass" "$rfail"
 (( rfail == 0 )) || { printf '\nREFUSING: the reader has a state it cannot read.\n'; trap - EXIT; exit 1; }
 printf '\nEvery state the next press can produce is read by its own line.\n'

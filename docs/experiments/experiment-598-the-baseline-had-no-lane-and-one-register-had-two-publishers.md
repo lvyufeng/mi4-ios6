@@ -164,7 +164,7 @@ are annotated rather than left, because each is a statement about *this file's* 
 ## 7. Safety
 
 No device action, no `fastboot`, no `adb`, **nothing written to storage**, no boot, no build. One
-host-side file edited (`stages/stage90/run_and_capture.sh`, which is not in `xnu_arm_entry-sources.txt`
+host-side file edited (`stages/stage90/run_and_capture.sh`, which is not a manifest *entry* in `xnu_arm_entry-sources.txt`
 — that manifest covers `xnu_arm_boot/` by content, and the gate's freshness scan deliberately does not
 match `*.sh`); reads of two archived captures, of `entry_trace.c` / `entry_stubs.c`, and of the two
 entry ELFs at run time by the clauses' own derivation. Five synthetic logs under `/tmp/r598/`, all

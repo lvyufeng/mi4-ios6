@@ -105,7 +105,7 @@ is built knowing what its clock is.
 ## 6. Safety
 
 No device action, no `fastboot`, no `adb`, **nothing written to storage**, no boot, no build. One
-host-side file edited (`stages/stage90/preflight_boot_check.sh`, not in `xnu_arm_entry-sources.txt`; the
+host-side file edited (`stages/stage90/preflight_boot_check.sh`, not a manifest *entry* in `xnu_arm_entry-sources.txt`; the
 gate's freshness scan deliberately does not match `*.sh`), in its `--allow-xnu-entry` narration only — no
 new `exit`, no new `die`, no new `fail`. Gate re-run on this tree: **EXIT=0 / 531 stdout lines / 0
 stderr** (518 before; +13, all `echo`), exit census unchanged. Reads of 533's and 513's archived
