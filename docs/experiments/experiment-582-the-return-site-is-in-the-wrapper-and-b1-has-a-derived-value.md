@@ -88,6 +88,9 @@ news about the window rather than about the arm.
 
 - **520's real log: `0 FAIL`, `0 UNREAD`, exit 0** - unchanged (that image predates the seam keys, so the
   block is gated out by design, which is the property 564 documented).
+- **All six reachable outcomes of section 4 and step 5 re-run after this edit and unchanged**, exit code
+  for exit code: `fail 1`, `silent 1`, `fall 2`, `none 2`, `late3 3` (section 4), `late2 3` (step 5) -
+  the same file's other paths, exercised with its final version rather than reasoned about.
 - **The full success path on the 574-shaped synthetic log still exits 0**, and the new line fires inside
   the run: `READING b1=0x80017330 … (0x8047c990)`. That input is a rehearsal stub, **not** a capture, and
   the fact that the new check reads it as "not this image's return site" is the point - the old range test
