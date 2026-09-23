@@ -144,11 +144,46 @@ which is the sentence that decides whether the press is worth taking.
 * **It does not advance 「起码要能进入操作系统，把基础驱动跑起来」.** The device is off the bus; the only
   event that can move the goal is the user's **unplug `33e80afe`, then Vol-Down + Power**.
 
-## 6. Safety
+## 6. The lane's owner reproduced it independently, and added two extensions
+
+The finding was sent to `run-experiment-526` - whose lane `preflight_boot_check.sh` is, and who owns the
+repair - rather than edited by this session. Their reply is worth recording for its *method*, because
+this project's most-repeated defect is a claim that nobody re-derived:
+
+* they re-derived rather than accepted every figure here: `value_of()`'s pattern at `:122-124`, the
+  **13** keys enumerated **off the source and not off this document's count**, and `[[ -n $MODE ]] || fail`
+  at `:134` as the only presence assertion;
+* they drove their own extractor against four synthetic records and reproduced **both** directions
+  (`0u` → OFF; **two spaces → `" 0u"` → the fault-injection branch**; no value → OFF; tab → OFF);
+* they read the live `out/stage90/stage90-build-config.txt` through the gate's own extractor and
+  confirmed all thirteen keys are present and read correctly - so § 4's "latent" is confirmed by the
+  file's owner, not asserted by the reporter.
+
+**Two extensions they added, both of which this step had not measured:**
+
+1. **`#define K` with nothing after it is also swallowed.** The emptiness that § 2 shows for a
+   *missing* key is the same emptiness for a key **emitted with no value** - and the compiler does not
+   default that to 0, it is a syntax error `build.sh` would catch. So the gate would have printed "off"
+   for a record that could not have been built. It is the same one-sentence-for-two-states, with a
+   third cause behind the empty value.
+2. **The converse gap is wider than a missing key.** A key that is *present in the record* and *absent
+   from the gate's thirteen* is invisible here - the record carries it and nothing reads it. That is
+   the half `ENTRY_CFG_KEYS`' `comm -23` clause already guards for the entry record and this record has
+   no equivalent of, so § 1's "one discipline" argument covers one more case than § 1 listed.
+
+**Ownership and timing, agreed by both sessions.** The repair does not land before the press: the
+catcher fires this file, so an edit now changes what the run does - the same reason 620 keeps the
+runner and 635 keeps the catcher unedited. The shape they intend is § 1's discipline applied to
+`$CONFIG` - a key array, a per-key presence refusal, the converse - **plus** the extractor made
+whitespace-tolerant (`s/^#define $1[[:space:]]*//p`) so an aligned value column cannot flip a switch.
+
+## 7. Safety
 
 No device action, no boot, no build, no `fastboot`, no `adb`, **nothing written to storage**. Every
 measurement is a read of two generated records and one shell file, plus three code fragments lifted
 verbatim into `/tmp/637` and driven with stub functions. Nothing in `stages/`, `tools/` or `out/` was
 modified: `git status` is clean and the arm still hashes to `60063c47…`. Both catchers were confirmed
-alive (pid 1344846 watcher, pid 4067419 relay) before and after. `fastboot boot` only - never `flash` -
-so no outcome of this step can write to storage.
+alive (pid 1344846 watcher, pid 4067419 relay) before and after, and the peer's own device reading
+agrees with 635's: off the bus ~9 h, `4a2fe00b` absent from both lists, `33e80afe` alone in fastboot,
+press not spent. `fastboot boot` only - never `flash` - so no outcome of this step can write to
+storage.
