@@ -371,6 +371,30 @@ run_state() {
          trap - EXIT; exit 1 ;;
     esac
   done
+  # **And an absence needs a positive expectation beside it, which this section did not require until
+  # 631 - and the reason it was missing is a false claim in a comment.** `reader_state` has carried this
+  # guard since 626, and its own comment says it is "the guard the path cells below carry for the same
+  # reason". **The path cells did not carry it.** So the rule was written down, exercised in one section,
+  # and asserted to exist in the other by a sentence nothing executes - 604's class ("a claim in a comment
+  # is not a check") turning into a *reason not to look*, because a reader who trusts the comment has no
+  # reason to go and check whether `run_state` really refuses one.
+  #
+  # **Measured, not argued (631)**: a cell written as
+  # `run_state PROBE-ABSENCE-ONLY 0 "" 'forbid:The device did not come back'` - no expectation at all,
+  # one forbid - printed `ok    PROBE-ABSENCE-ONLY           exit=0`. Accepted, on a green table row. That
+  # is 628's defect one layer down and in the other section: there, only the *fastboot* half of the plan
+  # line went unasserted; here, a whole row can carry nothing but an absence, and an absence is satisfied
+  # by a state that reached nothing, printed nothing and called nothing.
+  #
+  # The refusal is the exact mirror of `reader_state`'s, including its wording, so the two sections'
+  # rules are one rule rather than two that agree today.
+  if (( ${#FORBID[@]} > 0 )) && [[ -z $expect_text ]]; then
+    printf 'rehearse: run_state %s asserts only an absence; give it a positive expectation too\n' \
+           "$name" >&2
+    printf '          a command that failed to run at all also "did not say" the thing, so this row\n' >&2
+    printf '          would pass on a runner that reached none of the state its label names.\n' >&2
+    trap - EXIT; exit 1
+  fi
   local out=$d/out.txt err=$d/err.txt
   # **`RETURN_TIMEOUT=6` rather than 3, and it is 617's code that needs the second poll.** At 3 the
   # loop makes exactly one check before its `sleep 3` and then exits, so nothing that takes any time
@@ -772,10 +796,12 @@ reader_state() {
       *)        WANT+=("$w") ;;
     esac
   done
-  # **And an absence needs a positive expectation beside it**, the guard the path cells below carry
-  # for the same reason: a command that failed to run at all says nothing, so "it did not say X" is
-  # true of a run that produced nothing. A row whose every expectation is a forbidding one is refused
-  # here rather than silently passable.
+  # **And an absence needs a positive expectation beside it**, which this section has required since 626
+  # and which the path section now carries too. **The sentence that used to be here - "the guard the path
+  # cells below carry for the same reason" - was false, and 631 measured that it was**: `run_state`
+  # accepted a cell with no expectation and one `forbid:` and printed it as `ok`. So the comment did not
+  # merely fail to help; it named the other section as already guarded, which is a reason for the next
+  # reader not to look there. The two sections now refuse the same shape with the same wording.
   if (( ${#FORBID[@]} > 0 )) && (( ${#WANT[@]} == 0 )); then
     printf 'rehearse: reader_state %s asserts only an absence; give it a positive expectation too\n' \
            "$variant" >&2
@@ -907,6 +933,21 @@ PPASS=0; PFAIL=0
 path_state() {  # path_state NAME EXPECTED_EXIT MUST_SAY MUST_NOT_SAY DIR ARGS...
   local name=$1 want=$2 must=$3 mustnot=$4 dir=$5; shift 5
   local out rc
+  # **The rule stated in the comment below was, until 631, stated in three sections and enforced in
+  # one.** `reader_state` got the refusal in 626; `run_state` got it in 631; this is the third, and its
+  # comment claimed the rule was already carried - "So MUST_NOT_SAY is only ever asserted together with
+  # a positive expectation" is a sentence about every caller, and nothing checked it. A cell with an
+  # empty `MUST_SAY` and a non-empty `MUST_NOT_SAY` would have been accepted and printed `ok`, for the
+  # shape 631's other two sections now refuse: the absence is satisfied by a runner that printed nothing
+  # at all, which is what a cell whose invocation never reached the runner also produces. Refused before
+  # the runner is called, with `reader_state`'s and `run_state`'s own wording.
+  if [[ -z $must && -n $mustnot ]]; then
+    printf 'rehearse: path_state %s asserts only an absence; give it a positive expectation too\n' \
+           "$name" >&2
+    printf '          a command that failed to run at all also "did not say" the thing, so this row\n' >&2
+    printf '          would pass on an invocation that never reached the runner.\n' >&2
+    trap - EXIT; exit 1
+  fi
   out=$( cd "$dir" && bash "$RUNNER" "$@" 2>&1 ); rc=$?
   local why=""
   (( rc == want )) || why="exit $rc, promised $want"
@@ -914,8 +955,8 @@ path_state() {  # path_state NAME EXPECTED_EXIT MUST_SAY MUST_NOT_SAY DIR ARGS..
     printf '%s' "$out" | grep -qF -- "$must" || why="${why:+$why; }did not say: $must"
   fi
   # The absence assertion carries the same guard the shrink cells in the revert-set rehearsal needed:
-  # a command that failed to run at all also "did not say" the thing. So MUST_NOT_SAY is only ever
-  # asserted together with a positive expectation that the same output does contain.
+  # a command that failed to run at all also "did not say" the thing - which is why the refusal above
+  # refuses an absence-only cell rather than trusting this sentence about its callers.
   if [[ -n $mustnot ]]; then
     printf '%s' "$out" | grep -qF -- "$mustnot" && why="${why:+$why; }said what it must not: $mustnot"
   fi
