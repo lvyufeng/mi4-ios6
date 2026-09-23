@@ -138,7 +138,10 @@ Every state is 520's real captured log with keys injected; nothing below touched
 | I | A with `OBJDUMP=/bin/false` | `PREDICTED` with the criterion printed as `*** PINNED LITERAL … NOT derived ***` |
 
 Also: `bash -n`; `--summarise` on 520's **unmodified** log, which prints no idle-window block at all
-(the gate on that block is `xnu_live_slot_cwe_`, which no image before 522 published); the derived
+(the gate on that block is `xnu_live_slot_cwe_`, which no image before 522 published — **corrected by 598:
+the gate is now `xnu_live_door_seq`, the arm's signature rather than the newest instrument, so 520's log
+is read by clauses (1)–(5) today and 520's own fatal `pc=0x04b79074` is scored against the derived
+criterion**); the derived
 address equals the literal `0x800462dc` in this build, which is a cross-check and not the criterion;
 and the gate read-only, **exit 0**, with its three exit sites re-derived at gate time (`:629`, `:641`,
 `:651` - moved again by this edit, which is what 552 made it do).

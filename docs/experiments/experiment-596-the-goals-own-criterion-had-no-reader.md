@@ -204,7 +204,9 @@ archived pair alone.
 * It does not decide 「能进入操作系统」. The block reads a *floor*; the ceiling is that the machine
   stays up, and that is still the idle exit's `pop`.
 * It does not route a baseline-signature log into clauses (1)–(5). 595 §9(b) left that as its own
-  step and it is still owed; this step only made sure the new block is not silent for such a log.
+  step and it was still owed *when this step ran*; **598 landed it**, so the file's clause block now
+  reads a 520-shaped log (112 lines → 151) and this sentence is the state 596 left rather than the
+  state the runner is in.
 
 ## 7. Safety
 

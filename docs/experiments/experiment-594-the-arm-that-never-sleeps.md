@@ -262,6 +262,13 @@ the baseline has exactly 1 (593 section 1).
 > changes the condition under which five clauses run, and validating that against 520 deserves its own
 > verification rather than being folded into a change made with a boot pending.)
 >
+> **Landed as 598.** The `elif` is now `xnu_live_door_seq`'s presence — the arm's signature rather than
+> 533's instrument — so 520's own capture is read by clauses (1)–(5) (112 lines → **151**, clause (1)
+> `PREDICTED` at `pc=0x04b79074`, clause (3) `DIED IN THE EXIT`), and the step found a second thing on
+> the way: the window's `SCTLR` has an **older publisher** (`xnu_live_pce_after_sctlr`, the same
+> register read at the same point in the same wrapper), so 520's *cell* is readable too — from a key
+> whose equal value is now compared against the pair's wherever an image carries both.
+>
 > **And the backtick guard written in this same experiment caught this same experiment's next edit.**
 > The new `else` was first written with symbol names in backticks inside `say "..."`; the guard added in
 > section 4 fired, named the four lines and refused to run — one hour after it was written, on the

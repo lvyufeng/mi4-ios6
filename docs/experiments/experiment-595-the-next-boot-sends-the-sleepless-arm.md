@@ -154,7 +154,9 @@ gated on 533's instrument and **half of this project's own baseline got no readi
 prints an UNREAD that names the state and censuses the keys it found. Routing a baseline-signature log into
 clauses (1)–(5) is the *better* fix and is deliberately left as its own step: it changes the condition under
 which five clauses run, and validating that against 520 deserves its own verification rather than being
-folded into a change made with a boot pending.
+folded into a change made with a boot pending. **Landed as 598** — the lane is `xnu_live_door_seq`'s
+presence, 520's capture is now read by clauses (1)–(5), and the step also found that the window's `SCTLR`
+has an older publisher that makes 520's *cell* readable (`xnu_live_pce_after_sctlr`).
 
 **(c) And the backtick guard from 594 caught 595's own edit.** The new `else` was first written with symbol
 names in backticks inside `say "..."` — the exact defect 594 §4 documents — and the check added there fired,

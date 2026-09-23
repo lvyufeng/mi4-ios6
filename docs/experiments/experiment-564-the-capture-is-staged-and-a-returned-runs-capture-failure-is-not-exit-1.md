@@ -157,6 +157,11 @@ Worth recording, because it was noticed while smoke-testing this step and could 
 `--summarise /tmp/cancro-last_kmsg.txt` prints **no clause block at all**, only the marker table. That is
 the block's design, not a regression: it is gated on the `xnu_live_slot_cwe_*` pair, which
 `entry_window_note` publishes only in images built since 522, and 520's log carries no such key
+(**corrected by 598**: the gate is now `xnu_live_door_seq`, so a 520-shaped log *does* get the clause
+block — 151 lines instead of 112, with clause (1) `PREDICTED` and clause (3) `DIED IN THE EXIT` — and
+the pair is only what clause (2) reads the *cell* from, with a fallback to the older publisher of the
+same register. The smoke test this paragraph records was right about the file it ran and became false
+of the file 598 landed, which is the point of annotating rather than deleting it)
 (`grep -ao 'xnu_live_slot_[a-z_]*=' ` over it lists 27 keys and none of them is `cwe_*`). **533's image
 does carry the pair**, and a 533-shaped log of nine keys runs the whole block correctly on the current
 file - PREDICTED (the pop's return address), PASS then `ARM 533's arm` on the pair, DIED IN THE EXIT on

@@ -99,7 +99,9 @@ Nothing below touched a device or a build. Each state is 520's real captured log
 | E | `_cwe_set` unreadable | `UNREAD` at clause (2) + clause (3) agreement + the `*` arm branch |
 
 Also run: `bash -n`; `--summarise` on 520's **unmodified** log, which prints no idle-window block at all
-(the gate on that block is `xnu_live_slot_cwe_`, which 520's image never published); and the gate
+(the gate on that block is `xnu_live_slot_cwe_`, which 520's image never published — **corrected by 598:
+the gate is now `xnu_live_door_seq`, which 520's log does publish, so that log is read by clauses (1)–(5)
+today; the sentence here is the state this step found**); and the gate
 read-only, **exit 0**, with its three `exit` sites re-derived at gate time (`run_and_capture.sh:499`,
 `:511`, `:521` - the line numbers moved because of this edit, which is exactly why 552 made the gate
 compute them rather than pin them).

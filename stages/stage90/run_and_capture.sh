@@ -354,13 +354,19 @@ summarise_log() {
     say "  an abort was logged - see the 'exception'/'abort' lines above"
   fi
 
-  # --- the idle window's near end, and it prints only for a log that carries the pair -------------
+  # --- the idle window's near end, and it prints for every log that reached `cpu_idle` -------------
   #
-  # The gate is self-selecting: `xnu_live_slot_cwe_*` is published by `entry_window_note`, which is
-  # called from the enter wrapper in every image built since 522 - so the block below appears when the
-  # log came from one of those images and never for an earlier step's run. That is deliberate - a
-  # verdict block that printed for every log would be a block whose criteria nobody re-derives, which
-  # is how a stale check outlives its step.
+  # The gate is self-selecting, and **598 moved the selector from the instrument to the signature**.
+  # It was `xnu_live_slot_cwe_*`'s presence - `entry_window_note`'s key, published by an image built
+  # since 522 - which is a fact about the *image* and not about the arm: 520's image predates the
+  # instrument and carries the same arm, so half of this project's baseline satisfied every criterion
+  # this block has and could not enter it. The selector is now `xnu_live_door_seq`, published by
+  # `__wrap_Idle_load_context` on the earliest passes of every boot that reaches `cpu_idle`: the
+  # block appears for any log that got to the idle, which is exactly the set of logs its five clauses
+  # are written for, and clause (2) reads the *cell* from whichever of the two publishers that log's
+  # image has. That is still not "every log" - a verdict block whose criteria nobody re-derives is how
+  # a stale check outlives its step, and this one is now gated on the boot having reached the
+  # question rather than on the image having the newest instrument for it.
   #
   # **It is no longer one arm's block.** When this was written the only image carrying the keys was
   # 522's, so the block could assert 522's shape; 533 keeps `entry_window_note` on purpose *because*
@@ -666,11 +672,30 @@ summarise_log() {
         say "     simply lost the group that rung 1's return should have printed."
       fi
     fi
-  elif grep -a -q 'xnu_live_slot_cwe_' "$log"; then
+  # **The third state, and the branch this one changed in 598: the condition was
+  # `grep -a -q 'xnu_live_slot_cwe_'`, which is 533's *instrument* rather than the arm's signature.**
+  # Half of this project's baseline - 520 - has no `slot_cwe_` key at all, because its image predates
+  # `entry_window_note`, so a log that satisfies the baseline signature *and* one that never reached
+  # `cpu_idle` arrived at the same place: the `else` below, under one paragraph that separated them in
+  # prose and not in control flow. The three states are now three branches, and the test between the
+  # second and third is the one that paragraph already named - `xnu_live_door_seq`, published by
+  # `__wrap_Idle_load_context` on the first passes of every boot that reaches `cpu_idle`:
+  #
+  #   * the sleeper arm   - `door_seq` present, `repair_seq`/`sip_seq`/`pce_seq`/`wfi_seq` absent;
+  #   * the baseline arm  - `door_seq` present, and the window family present *or not*, because an
+  #     image older than the pair is still this arm and its death is still the reading;
+  #   * no `door_seq`     - `cpu_idle` was never entered, which is a fault earlier than either arm's.
+  #
+  # So the `elif` is a **widening**, not a re-keying: every log that took this branch before still
+  # does, and the gain is exactly the logs that satisfy the *baseline* signature without the pair.
+  # 594 section 5 and 595 section 9(b) named this as the better fix and left it as its own step,
+  # because it changes the condition under which five clauses run and the validation it owes is
+  # against 520 - a real artifact, and the one log in this project that lands in the gap.
+  elif grep -a -q 'xnu_live_door_seq=' "$log"; then
     local cwe_win cwe_set cwe_calls pre_calls rtcpre_calls post_calls storm panics user_ones
     local sleh_lr="" sleh_pc="" sleh_sp="" sleh_seen=""
     local pop_lr="" pop_lr_src="" pop_death=0 pop_named=0 cache_arm=unread arm_seen=unknown
-    local pce_up="" pce_ncpu="" verdict_ok=1
+    local pce_up="" pce_ncpu="" pce_after_sctlr="" arm_set="" arm_set_key="" verdict_ok=1
     cwe_win=$(keyval slot_cwe_win)
     cwe_set=$(keyval slot_cwe_set)
     cwe_calls=$(keyval slot_cwe_calls)
@@ -764,9 +789,35 @@ summarise_log() {
     else
       cache_arm=unread
     fi
-    arm_seen=unknown
+    # **The cell, read from whichever of the two publishers this image has - and the second is not a
+    # stand-in for the first.** `slot_cwe_set` is `entry_window_note`'s read of `SCTLR` at the
+    # window's near end; `xnu_live_pce_after_sctlr` is `entry_note_pce_after`'s read of the *same
+    # register immediately afterwards*, and the source is why the two must be equal: `entry_trace.c`
+    # calls `entry_window_note(win, entry_sctlr())` and then, with nothing between but the two
+    # publishers' own argument reads, `entry_note_pce_after(..., entry_sctlr())` - no `SCTLR` writer
+    # between them, and neither publish path contains a cache operation. Both archived baselines
+    # carry the older key; only 533 carries the pair.
+    #
+    # Keying the cell on the pair alone left **half of this project's baseline with no cell reading at
+    # all** (520, whose image predates `entry_window_note`), which is what 598 is for. The
+    # substitution is *checked* wherever both keys are present - clause (2) compares them and says so
+    # in the log - because two names for one value is the defect class this project has paid for most
+    # often, and the check is what makes this a reading of one register rather than a second definition
+    # of one number.
+    pce_after_sctlr=$(keyval pce_after_sctlr)
     if [[ $cwe_set =~ ^0x[0-9a-f]+$ ]]; then
-      if (( (cwe_set & 4) == 4 )); then arm_seen=522; else arm_seen=533; fi
+      arm_set=$cwe_set
+      arm_set_key="xnu_live_slot_cwe_set"
+    elif [[ $pce_after_sctlr =~ ^0x[0-9a-f]+$ ]]; then
+      arm_set=$pce_after_sctlr
+      arm_set_key="xnu_live_pce_after_sctlr"
+    else
+      arm_set=""
+      arm_set_key=""
+    fi
+    arm_seen=unknown
+    if [[ -n $arm_set ]]; then
+      if (( (arm_set & 4) == 4 )); then arm_seen=522; else arm_seen=533; fi
     fi
 
     # The live channel writes its counters as `0x%08x`, so every numeric test below is a hex
@@ -851,8 +902,14 @@ summarise_log() {
       say "        of surviving the idle pass, which is 535's job"
       say "        (criterion $pop_lr, $pop_lr_src)"
       say "        Corroborate the shape by eye: the aborted pc should be a value that is NOT a"
-      say "        valid address - 520's is pc=$sleh_pc sp=$sleh_sp at storm=$storm, and 547"
+      say "        valid address - this log's is pc=$sleh_pc sp=$sleh_sp at storm=$storm, and 547"
       say "        section 1 reads it as the popped word itself, pc = r11 & ~1"
+      # **"520's is" until 598, and it interpolates this log's own registers.** The sentence
+      # compares nothing - it prints `$sleh_pc`/`$sleh_sp`/`$storm` from the log in hand - so on
+      # 533 it read "520's is pc=0x33f1c1b4", a value 520's log does not contain anywhere (520's
+      # abort is `pc=0x04b79074`, as this same file's clause (1) note says). It was written when
+      # 520 was the only baseline that carried this line and became false the moment a second one
+      # did; the fix is to name the artifact the numbers actually come from.
       pop_named=1
     else
       say "  FAIL  $panics 'panic ... sleh_abort' record(s) and xnu_live_sleh_lr=${sleh_lr:-absent}"
@@ -898,10 +955,10 @@ summarise_log() {
         say "  PASS  slot_cwe_win=$cwe_win has SCTLR.C clear - the window really opened where the"
         say "        image says it does, which is what makes the second reading worth anything"
         if [[ $arm_seen == 522 ]]; then
-          say "  ARM   522's arm: slot_cwe_set=$cwe_set has C set - the near-end re-enable ran and"
+          say "  ARM   522's arm: $arm_set_key=$arm_set has C set - the near-end re-enable ran and"
           say "        took, so this log is an image that re-enables the D-cache at the window's end"
         elif [[ $arm_seen == 533 ]]; then
-          say "  ARM   533's arm: slot_cwe_set=$cwe_set has C clear - the window is left exactly as"
+          say "  ARM   533's arm: $arm_set_key=$arm_set has C clear - the window is left exactly as"
           say "        Apple left it, and *this* is that arm's expected reading, not a failed enable"
           # The pair decides the *cell*, and since 535 the cell has two images in it: 535 leaves the
           # window as 533 does (`STAGE90_XNU_IDLE_CACHE_ENABLE=0` in both), so this line names a cell
@@ -917,8 +974,8 @@ summarise_log() {
             say "        and 535's arm is not in it)"
           fi
         else
-          say "  UNREAD  slot_cwe_set=${cwe_set:-absent} is not a readable SCTLR - the pair is half"
-          say "          a reading and which arm ran is not decidable from it"
+          say "  UNREAD  neither xnu_live_slot_cwe_set nor xnu_live_pce_after_sctlr is a readable"
+          say "          SCTLR in this log, so which arm ran is not decidable from it"
           verdict_ok=0
         fi
         say "        (entry_window_note ran $cwe_calls time(s) in the passes this log recorded)"
@@ -927,11 +984,54 @@ summarise_log() {
         say "        open where the image claims - neither arm's second reading means anything"
         verdict_ok=0
       fi
-    else
-      say "  UNREAD  slot_cwe_calls=${cwe_calls:-absent} is not a count >= 1: the pair's keys are in"
-      say "          this log but the note's own count is not readable, so nothing is claimed about"
-      say "          which arm this log came from"
+    elif [[ -z $cwe_set && -z $pce_after_sctlr ]]; then
+      # **An image older than both publishers, and the state this branch is for is *not* 520's.**
+      # 520 predates the pair and carries `xnu_live_pce_after_sctlr`, so it is read by the branch
+      # above; what lands here is a log that has `door_seq` (so `cpu_idle` ran) and no SCTLR publisher
+      # at all, and for it the cell is not a reading under either name. The text that used to sit here
+      # said "the pair's keys are in this log but the note's own count is not readable", which was
+      # true when this branch was reachable *only* through the pair and became false of exactly the
+      # logs 598's widening adds - a reader would have gone looking for keys the log does not have.
+      # The first draft of this very branch named 520 as its example anyway, and **running it on 520
+      # is what caught that**: 520 took the branch above and never reached this text. The printed
+      # sentence now says so in as many words, because the next reader will make the same guess.
+      say "  UNREAD BY CONSTRUCTION  this log carries xnu_live_door_seq, so cpu_idle ran, and it"
+      say "          carries neither the pair (xnu_live_slot_cwe_*) nor the older publisher of the"
+      say "          same register (xnu_live_pce_after_sctlr): the cell is not a reading of this log"
+      say "          under either name, as a fact about the image rather than a failed read."
+      say "          **This is not 520's shape** - 520 predates the pair and carries the older key,"
+      say "          which is why it is read instead of named here; the state this branch is for is an"
+      say "          image older than *both*. Clauses (1) and (3) still read the log - the death's"
+      say "          shape and where the pass stopped - and they are what this lane exists for."
       verdict_ok=0
+    else
+      say "  UNREAD  slot_cwe_calls=${cwe_calls:-absent} is not a count >= 1, while some key of the"
+      say "          pair or the older publisher is in the log: the count did not publish and the"
+      say "          window's own proof (slot_cwe_win) is missing with it, so nothing is claimed"
+      say "          here about the window's opening. Clause (1) above reads the death without it"
+      verdict_ok=0
+    fi
+
+    # **The substitution's own check, and it is why the fallback above is a reading rather than a
+    # second definition of one value.** Wherever an image carries both publishers they are two reads
+    # of one register at one point in the wrapper (see the note above the extraction), so they must be
+    # equal; the sentence is printed on both outcomes rather than only on the disagreement, because a
+    # check that succeeds by printing nothing cannot be told from one that never ran. A disagreement
+    # is a FAIL and not a curiosity: it would mean one of the two keys is not the register read this
+    # file's note says it is, and every cell reading in this block rests on that.
+    if [[ $cwe_set =~ ^0x[0-9a-f]+$ && $pce_after_sctlr =~ ^0x[0-9a-f]+$ ]]; then
+      if [[ $cwe_set == "$pce_after_sctlr" ]]; then
+        say "  both publishers of the window's SCTLR agree: xnu_live_slot_cwe_set=$cwe_set and"
+        say "        xnu_live_pce_after_sctlr=$pce_after_sctlr are the same value, so the cell read"
+        say "        above does not depend on which of the two this block keyed on"
+      else
+        say "  FAIL  xnu_live_slot_cwe_set=$cwe_set and xnu_live_pce_after_sctlr=$pce_after_sctlr"
+        say "        disagree, and they are two reads of one register with no SCTLR writer between"
+        say "        them (entry_trace.c: entry_window_note(win, entry_sctlr()) then"
+        say "        entry_note_pce_after(..., entry_sctlr())). One of the two keys is therefore not"
+        say "        the read this file's note says it is, and the cell reading above rests on it"
+        verdict_ok=0
+      fi
     fi
 
     # (3) where the pass died, from which of the wrapper's three bracket publishers got out
@@ -1369,22 +1469,22 @@ summarise_log() {
       # rather than left for the reader to join up.
       case $arm_seen in
         533)
-          say "     And clause (2) reads the pair as 533's arm, which is the cell 547 section 4's"
-          say "     prediction is for: the two agree."
+          say "     And the cell is read as 533's arm, from $arm_set_key=$arm_set, which is the cell"
+          say "     547 section 4's prediction is for: the two agree."
           if [[ $seam_calls =~ ^0x[0-9a-f]+$ ]] && (( seam_calls >= 1 )); then
             say "     The image this log came from is the later one in that cell, though - 535's, whose"
             say "     cache settings are 533's - so clause (5)'s pair is the reading and the pop's"
             say "     survival is 535's question rather than this prediction's"
           fi ;;
         522)
-          say "     **But clause (2) reads the pair as 522's arm, which 547 section 4 does not"
-          say "     predict this for**: 522's cell is an enable-on row and 547 section 3 has both of"
+          say "     **But the cell is read as 522's arm ($arm_set_key=$arm_set), which 547 section 4"
+          say "     does not predict this for**: 522's cell is an enable-on row and 547 section 3 has both of"
           say "     those rows dying with *no log at all*, so a log here is itself the surprise. Treat"
           say "     this as unread against 547 and re-derive which image ran before reading anything"
           say "     else in this block." ;;
         *)
-          say "     Clause (2) could not read the pair, so which cell this log is stays open - and"
-          say "     547 section 4's prediction is the enable-off cell's." ;;
+          say "     Neither publisher of the window's SCTLR is readable in this log, so which cell"
+          say "     it is stays open - and 547 section 4's prediction is the enable-off cell's." ;;
       esac
     elif [[ $verdict_ok -eq 1 ]]; then
       say "  => the three checks pass: no panic, the window opened and its pair is readable, and the"
@@ -1402,28 +1502,35 @@ summarise_log() {
       say "     failed before concluding anything about the arm."
     fi
   else
-    # **The state the block printed nothing about, and it had no `else` until 595.** Every branch above
-    # is reached by *recognising the log*, so a log that matches none of them was passed over in
-    # silence - and a reader silent for a reason and a reader silent because it broke read identically
-    # from outside (564, and 593 for the same defect one layer up). This is not hypothetical and it is
-    # not only a hypothetical future image: **520, half of this project's own baseline, lands here.**
-    # Measured on the two archived captures, which differ in exactly this: `xnu_live_slot_cwe_*` has
-    # **3** occurrences in 533 and **0** in 520 (the pair postdates that image), while both carry
-    # `door_seq`=16 records, `sip_seq`/`pce_seq`/`wfi_seq`/`repair_seq`=1 and `slot_pre_calls`=1 - i.e.
-    # 520 satisfies the *baseline* signature and the clauses were gated on 533's instrument. That is
-    # clause-level as well as message-level: the honest repair is to say which state this is, and to
-    # name the test that decides it, rather than to guess a branch.
-    say "  UNREAD  this log carries payload output but matches neither arm's signature, so no clause"
-    say "          above could be read:"
+    # **The state with no arm at all, and until 598 this paragraph described three states while the
+    # control flow kept two.** Every branch above is reached by *recognising* a log, so one that
+    # matched none was passed over in silence - a reader silent for a reason and a reader silent
+    # because it broke read identically from outside (564, and 593 for the same defect one layer up),
+    # and 595 gave the state this `else`. Its census was right about the keys and wrong about which
+    # logs reach it: **it named 520 as landing here**, and 520 is half of this project's own baseline.
+    # 598 moved the `elif` above from `xnu_live_slot_cwe_*`'s presence (533's *instrument*) to
+    # `xnu_live_door_seq`'s (the *arm's* signature), so 520 is read by clauses (1)-(5) and this branch
+    # is now reached only by a log that never got to `cpu_idle` at all. Measured rather than assumed:
+    # 520's capture carries `door_seq`=16 records with `sip_seq`/`pce_seq`/`wfi_seq`/`repair_seq`=1 and
+    # `slot_pre_calls`=1 and `xnu_live_slot_cwe_*` **0** times - `xnu_live_slot_cwe_*` has 3 in 533 -
+    # so it always satisfied the baseline signature and it was only the gate that kept it out. The
+    # census is kept because it is the evidence for this diagnosis either way.
+    say "  UNREAD  this log carries payload output and carries no xnu_live_door_seq= record, so no"
+    say "          clause above could be read:"
     say "            xnu_live_slot_cwe_ keys:  $(grep -a -c 'xnu_live_slot_cwe_' "$log" || true)"
     say "            xnu_live_door_seq:        $(grep -a -c 'xnu_live_door_seq=' "$log" || true)"
     say "            the window family:        sip=$(grep -a -c 'xnu_live_sip_seq=' "$log" || true)"
-    say "          The two signatures are complements and both are measured: the sleepless arm (594) has"
-    say "          door_seq and none of sip_seq/pce_seq/wfi_seq/repair_seq; the baseline has door_seq"
-    say "          and all four, with slot_cwe_ or without it (without = 520, whose image predates the"
-    say "          pair). So the deciding test is whether xnu_live_door_seq is present at all: its"
-    say "          absence means cpu_idle was never entered - a boot that never reached the idle - and"
-    say "          that is a different fault from either arm's, which is why it is named here"
+    say "          xnu_live_door_seq is published by __wrap_Idle_load_context on the earliest passes of"
+    say "          every boot that reaches cpu_idle, so its absence is not a signature this project has"
+    say "          read an arm by: it says the boot did not reach the idle at all, which is a fault"
+    say "          *earlier* than either arm's and a different question from this block's"
+    say "          **And this branch no longer holds a baseline.** Until 598 it did: the clause above"
+    say "          was entered on xnu_live_slot_cwe_'s presence - 533's instrument, not the arm's"
+    say "          signature - so 520, whose image predates that instrument, satisfied the baseline"
+    say "          signature and landed here, under a paragraph that named the three states in prose"
+    say "          while the control flow kept two. The lane is now door_seq's presence, so a baseline"
+    say "          log is read by clauses (1)-(5) whether or not its image has the pair, and anything"
+    say "          that reaches this line has lost the key itself"
     verdict_ok=0
   fi
 
