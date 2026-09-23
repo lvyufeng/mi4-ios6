@@ -8,6 +8,14 @@ the `pop`'s lookup. This step reads the instruction stream and the source of tha
 records **what its pair can and cannot decide** — so that the one press this phase gets is read as a
 decision rather than as a yes/no.
 
+> **639 corrects this step's applicability, and only that.** The arm that is armed is the one whose idle
+> never sleeps, and that arm cannot reach `platform_cache_idle_exit` at all: the seam's acting site is a
+> `bl` inside it, its only caller is `cpu_idle` behind the `SIGPdisabled` gate, and 599 section 5 shows
+> that gate never opens on this arm. So the pair below is **unreadable on the owed run** — the owed log
+> will carry no `xnu_live_seam_*` key — and what follows is a pre-registration for an arm that enters the
+> window (`IDLE_NO_SLEEP=0` with `SEAM_MEASURE=1`), which no build has carried. The physics below stands;
+> the run that can read it is not this one. See 639 sections 2-4.
+
 **Three things were corrected or established, all from bytes that are in the tree.** Nothing was built
 and nothing was run.
 
@@ -67,6 +75,12 @@ whole routine is inert with `SCTLR.C` clear (so neither half acted). Both leave 
 
 ## 3. The pre-registered reading: which half is the agent, and which repair each selects
 
+> **639: this section is a reading of an arm that enters the window, and the armed arm is not one.** Both
+> rows below are statements about `_b1`/`_a1`, which only the seam's acting branch publishes — and that
+> branch is reachable only from inside `platform_cache_idle_exit`, which the armed arm cannot reach
+> (639 section 2). So neither row applies to the owed run, and a log with no pair must not be scored as
+> the second row.
+
 597 named two candidate repairs and could not choose between them, because no run has ever produced
 one of these pairs alongside a return. **The pair is the choice**, and this is what each reading means:
 
@@ -83,7 +97,9 @@ taken either way, so a run that gets past the `pop` still selects between the tw
 597 showed that the fatal `pc` in both archived runs is the **value of the enter wrapper's spilled
 `r4`**, with bit 0 masked (`0x04b79075 → pc 0x04b79074`; `0x33f1c1b5 → pc 0x33f1c1b4`). No run has ever
 had both the seam's pair and a log — 535 left no log (572 §1), and the sleeper arm is **UNRUN**. So
-the owed run is the first that can close the loop **inside one log**:
+the owed run is the first that can close the loop **inside one log** (639 section 4: on the armed arm
+the premise "if the run dies at the `pop`" does not hold, so the self-check is one the *next* seam arm
+gives, not this press):
 
 > if the run dies at the `pop`, then `min(b1, a1)` masked to bit 0 should equal the value the log
 > reports as the fatal `pc` — and the one of the two that matches says which side of the flush the
