@@ -81,7 +81,7 @@ REH_PAYLOAD_LOG=${REH_PAYLOAD_LOG:-/tmp/513-run2-kmsg.txt}
   { printf 'MI4IOS6_STAGE90 stage90_image_end=0x00666000\n'
     for k in xnu_live_idle_seq=0x00000001 xnu_live_door_seq=0x00000001 xnu_live_poll_seq=0x00000001 \
              xnu_live_poll_timeout_ms=0x00000005 xnu_live_poll_error=0x00000000; do
-      printf 'MI4IOS6_STAGE90_XNU loader_%s\n' "$k"; done
+      printf ' %s\n' "$k"; done
   } > "$REH_PAYLOAD_LOG"; }
 export REH_PAYLOAD_LOG
 cleanup() { rm -rf "$WORK"; }
@@ -577,6 +577,19 @@ printf 'device, no build, no fastboot and nothing written to storage.\n'
 # two with no ceiling, the poll records of a boot that got to the userland fixture, and **none** of
 # the window family (`repair`/`sip`/`pce`/`wfi`/`slot_cwe_`) - which is what makes it take the arm
 # branch. The variants remove one thing each.
+#
+# **And the live records are written in the shape their writer emits, which the capture's own shape
+# is not (626).** `entry_live_write` hands its key to `entry_write_kv`, which puts down a leading
+# space and then `key=0x%08x` and nothing else (`entry_stubs.c:2419` and `:2499`), so a live record in
+# a real capture is ` xnu_live_poll_seq=0x00000001` - **bare**, with no `MI4IOS6_STAGE90` in the line
+# at all; only the payload's own *result* records carry the `MI4IOS6_STAGE90_XNU loader_` prefix.
+# These fixtures used to prefix the live records too, and it never mattered because every pattern in
+# the reader is a loose substring match. It is named here because it very nearly did matter: 626's
+# first draft asked whether the payload *record* carried each arm key, which is a stricter pattern,
+# and on that form these fixtures stay green (the prefix is present) while **every real capture** -
+# 520, 533 and 513's pair all carry the keys bare - would have lost `door_seq` and been read as "the
+# boot never reached the idle". A fixture that is not the artifact's shape cannot falsify a pattern
+# change, which is the whole reason it is written the writer's way now.
 
 mk_sleeper_log() {
   # **`-capped` is a modifier and not a variant.** Its base is whatever precedes the suffix, so the
@@ -591,14 +604,14 @@ mk_sleeper_log() {
     # it ahead of the first record. Without it the reader's new clause is in its third state ("records
     # and no cap"), which is a real state and is exercised by nothing here - so it is emitted always
     # and the `-capped` variants add the *second* line, the one published at the first dropped record.
-    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_cap=0x00002000\n'
-    [[ $variant == *-capped ]] && printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_capped=0x00002000\n'
+    printf ' xnu_live_cap=0x00002000\n'
+    [[ $variant == *-capped ]] && printf ' xnu_live_capped=0x00002000\n'
     local p=1
     if [[ $base != no-door-seq ]]; then
       while (( p <= 16777216 )); do            # 1, 2, 4, ... 0x1000000 - 25 records
         if [[ $base == door-max-0x8000 ]] && (( p > 32768 )); then break; fi
-        printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_idle_seq=0x%08x\n' "$p"
-        printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_door_seq=0x%08x\n' "$p"
+        printf ' xnu_live_idle_seq=0x%08x\n' "$p"
+        printf ' xnu_live_door_seq=0x%08x\n' "$p"
         p=$((p*2))
       done
     fi
@@ -612,17 +625,17 @@ mk_sleeper_log() {
     # call, and `goal-bad-values` has every call present with the driver's open answering non-zero.
     local open1_err=0x00000000
     [[ $base == goal-bad-values ]] && open1_err=0x00000005
-    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_open_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_open_error=%s\n' "$open1_err"
+    printf ' xnu_live_open_seq=0x00000001\n xnu_live_open_error=%s\n' "$open1_err"
     if [[ $base != goal-truncated ]]; then
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_open_seq=0x00000002\nMI4IOS6_STAGE90_XNU loader_xnu_live_open_error=0x00000002\n'
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_read_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_read_nbytes=0x00000004\n'
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_read_ret_lo=0x00000004\nMI4IOS6_STAGE90_XNU loader_xnu_live_read_buf=0x00102000\n'
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_read_word_before=0x00102000\nMI4IOS6_STAGE90_XNU loader_xnu_live_read_word_after=0xfeedface\n'
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_getpid_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_getpid_value=0x00000001\n'
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_exit_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_exit_pid=0x00000002\nMI4IOS6_STAGE90_XNU loader_xnu_live_exit_rval=0x00000003\n'
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_wait_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_wait_seq=0x00000002\n'
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_wait_status=0x00000300\nMI4IOS6_STAGE90_XNU loader_xnu_live_wait_error=0x0000000a\n'
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_ast_seq=0x00000001\nMI4IOS6_STAGE90_XNU loader_xnu_live_ast_seq=0x00000002\n'
+      printf ' xnu_live_open_seq=0x00000002\n xnu_live_open_error=0x00000002\n'
+      printf ' xnu_live_read_seq=0x00000001\n xnu_live_read_nbytes=0x00000004\n'
+      printf ' xnu_live_read_ret_lo=0x00000004\n xnu_live_read_buf=0x00102000\n'
+      printf ' xnu_live_read_word_before=0x00102000\n xnu_live_read_word_after=0xfeedface\n'
+      printf ' xnu_live_getpid_seq=0x00000001\n xnu_live_getpid_value=0x00000001\n'
+      printf ' xnu_live_exit_seq=0x00000001\n xnu_live_exit_pid=0x00000002\n xnu_live_exit_rval=0x00000003\n'
+      printf ' xnu_live_wait_seq=0x00000001\n xnu_live_wait_seq=0x00000002\n'
+      printf ' xnu_live_wait_status=0x00000300\n xnu_live_wait_error=0x0000000a\n'
+      printf ' xnu_live_ast_seq=0x00000001\n xnu_live_ast_seq=0x00000002\n'
     fi
     # the polls. 1 and 2 are the two short asks the baseline also makes; 3 is the park (2000 ms).
     local seqs=2 tmo=5
@@ -639,11 +652,11 @@ mk_sleeper_log() {
       # the small-timeout variant makes the *third* ask a short one again, so a poll returns but
       # not the park's own
       if [[ $base == small-timeout && $i -eq 3 ]]; then tmo=40; fi
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_poll_seq=0x%08x\n' "$i"
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_poll_timeout_ms=0x%08x\n' "$tmo"
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_poll_error=0x00000000\n'
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_poll_retval=0x00000000\n'
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_poll_ticks=0x024c072a\n'
+      printf ' xnu_live_poll_seq=0x%08x\n' "$i"
+      printf ' xnu_live_poll_timeout_ms=0x%08x\n' "$tmo"
+      printf ' xnu_live_poll_error=0x00000000\n'
+      printf ' xnu_live_poll_retval=0x00000000\n'
+      printf ' xnu_live_poll_ticks=0x024c072a\n'
     done
     # the payload's own arm record, which every real capture carries (533 does) and which the
     # reader's rung-1 FAIL narration is **guarded on**: with it the reader may say the SoC's reset
@@ -651,8 +664,32 @@ mk_sleeper_log() {
     # The `poll-seq-2-no-arm` variant is the one that removes it, so both branches are states here.
     [[ $base == poll-seq-2-no-arm ]] || \
       printf 'MI4IOS6_STAGE90_XNU loader_hw_watchdog_counter_running=0x00000001\n'
-    [[ $base == no-poll-over ]] || printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_poll_over=0x00000008\n'
-    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_sleh_user=0x00000001\n'
+    [[ $base == no-poll-over ]] || printf ' xnu_live_poll_over=0x00000008\n'
+    printf ' xnu_live_sleh_user=0x00000001\n'
+    # **626: the two sides of the arm test, one state each, differing in one kind of key.** Everything
+    # above is the *sleeper* signature, which is why every variant here takes the arm's ladder - so
+    # until 626 nothing in this battery had ever run the *branch choice*, and the choice was the thing
+    # 622 measured: a behavioural key present with no `repair_seq` failed the six-term test and the log
+    # was read as the baseline arm, printing the other arm's death block with the rung lines simply
+    # missing. `slot-cwe-only` is that log, built the honest way (one `win` record added to this same
+    # signature, nothing else changed), and `baseline-arm` is the same signature plus the
+    # **structural** key, which is the one an image with the repair publisher must publish. A reader
+    # that confuses the two has a cell red here rather than a paragraph somewhere.
+    if [[ $base == slot-cwe-only ]]; then
+      printf ' xnu_live_slot_cwe_win=0x00000005\n'
+      printf ' xnu_live_slot_cwe_set=0x00000005\n'
+      printf ' xnu_live_slot_cwe_calls=0x00000005\n'
+    fi
+    if [[ $base == baseline-arm ]]; then
+      printf ' xnu_live_repair_seq=0x00000001\n'
+      printf ' xnu_live_repair_caller=0x00000001\n'
+      printf ' xnu_live_repair_before=0x00000001\n'
+      printf ' xnu_live_repair_after=0x00000002\n'
+      printf ' xnu_live_sip_seq=0x00000001\n'
+      printf ' xnu_live_pce_seq=0x00000001\n'
+      printf ' xnu_live_wfi_seq=0x00000001\n'
+      printf ' xnu_live_slot_cwe_win=0x00000005\n'
+    fi
   } > "$out"
 }
 
@@ -666,9 +703,9 @@ mk_capfull_log() {
   local out=$1 cap=8192 i
   {
     printf 'MI4IOS6_STAGE90 stage90_image_end=0x00666000\n'
-    printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_cap=0x00002000\n'
+    printf ' xnu_live_cap=0x00002000\n'
     for ((i=0; i<cap-1; i++)); do      # the capacity line is itself record #1 of the cap
-      printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_fill_seq=0x%08x\n' "$i"
+      printf ' xnu_live_fill_seq=0x%08x\n' "$i"
     done
   } > "$out"
 }
@@ -687,7 +724,27 @@ mk_capfull_log() {
 # rung-1b row did (`below the park's own threshold`). Each expectation here is one printed line.
 reader_state() {
   local variant=$1; shift
-  local -a WANT=("$@")
+  # **`forbid:` is how a row asserts an absence, and it is scoped to this function the way section B's
+  # `reader_state` is scoped to the reader.** 626 needed it: the cell that matters is not only "the
+  # sleeper arm's ladder ran" but "the baseline arm's death block did not", and a row that could only
+  # say what must appear would let a reader print *both* and pass.
+  local -a WANT=() FORBID=()
+  local w
+  for w in "$@"; do
+    case $w in
+      forbid:*) FORBID+=("${w#forbid:}") ;;
+      *)        WANT+=("$w") ;;
+    esac
+  done
+  # **And an absence needs a positive expectation beside it**, the guard the path cells below carry
+  # for the same reason: a command that failed to run at all says nothing, so "it did not say X" is
+  # true of a run that produced nothing. A row whose every expectation is a forbidding one is refused
+  # here rather than silently passable.
+  if (( ${#FORBID[@]} > 0 )) && (( ${#WANT[@]} == 0 )); then
+    printf 'rehearse: reader_state %s asserts only an absence; give it a positive expectation too\n' \
+           "$variant" >&2
+    trap - EXIT; exit 1
+  fi
   local log=$WORK/reader-$variant.log
   if [[ $variant == cap-full ]]; then mk_capfull_log "$log"; else mk_sleeper_log "$variant" "$log"; fi
   local out=$WORK/reader-$variant.out err=$WORK/reader-$variant.err
@@ -697,13 +754,20 @@ reader_state() {
   for want in "${WANT[@]}"; do
     grep -qF -- "$want" "$out" || { ok=0; why="${why:+$why$'\n'}    the reader did not say: $want"; }
   done
+  for want in "${FORBID[@]}"; do
+    grep -qF -- "$want" "$out" && { ok=0; why="${why:+$why$'\n'}    said what this state must NOT say: $want"; }
+  done
   if (( ok == 1 )); then
     rpass=$((rpass+1))
     # The table says how many expectations the row carried, because a row with two of them that
     # printed only its first would look exactly like a row with one - and the second is the one that
     # tests the branch. A pass that hides what it checked is the shape this file exists to catch.
-    if (( ${#WANT[@]} > 1 )); then
-      printf '  ok    %-22s %s (+%d more)\n' "$variant" "${WANT[0]}" "$(( ${#WANT[@]} - 1 ))"
+    # **626: the forbidding expectations are counted in that number too**, for the same reason in the
+    # other direction - a row that asserts an absence and prints only its positive half would read as
+    # a row that never checked the absence at all.
+    local total=$(( ${#WANT[@]} + ${#FORBID[@]} ))
+    if (( total > 1 )); then
+      printf '  ok    %-22s %s (+%d more)\n' "$variant" "${WANT[0]}" "$(( total - 1 ))"
     else
       printf '  ok    %-22s %s\n' "$variant" "${WANT[0]}"
     fi
@@ -719,7 +783,8 @@ rpass=0; rfail=0
 # printed only on the bad state cannot be told from one that never ran, so the "not full" line is an
 # expectation of its own on the state where it must appear (609).
 reader_state predicted        "this arm did what it was built to do at the point that matters" \
-                              "live channel: not full"
+                              "live channel: not full" \
+                              "=> SLEEPER ARM (594's switch)"
 # the falsifier, and the branch inside its FAIL: the arm record is present, so the reader must say
 # the SoC's reset is excluded by measurement rather than only that the park did not come back
 reader_state poll-seq-2       "no poll record past the second" \
@@ -732,6 +797,18 @@ reader_state small-timeout    "the largest recorded timeout is 40 ms"
 reader_state door-max-0x8000  "stops at or below 0x8000"
 reader_state no-door-seq      "carries no xnu_live_door_seq= record"
 reader_state no-poll-over     "this arm did what it was built to do at the point that matters"
+# **626: the branch choice itself, one row per side, and the row that was the defect.** Every state
+# above is the sleeper signature, so before 626 not one of them ran the *choice* - and the choice is
+# what 622 measured. `slot-cwe-only` is the sleeper signature plus ONE behavioural key: the reader must
+# say the two definitions disagree, must keep the ladder's own PASS line (so the arm's reading is not
+# lost), and must NOT print the baseline arm's death block. `baseline-arm` is the same signature plus
+# the **structural** key, which is the only one that makes a log the baseline arm's, and there the
+# death block *is* the reading - so the two rows assert opposite halves of one decision.
+reader_state slot-cwe-only    "AND A DISAGREEMENT: a behavioural key IS present in this log" \
+                              "this arm did what it was built to do at the point that matters" \
+                              'forbid:from the pair of SCTLR readings the entry wrapper publishes'
+reader_state baseline-arm     "=> BASELINE ARM, decided on repair_seq present" \
+                              "the idle window's near end"
 # the goal block's FAIL, one state per side of its presence-before-values split - so the *position*
 # reading (the boot stopped inside the fixture) and the *values* reading (a call answered wrongly)
 # each have a state, and neither can be reached only through the other

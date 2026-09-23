@@ -762,11 +762,12 @@ summarise_log() {
   #
   # The signature has to separate "this arm ran" from "the log is truncated", and the key that does
   # it is in the *live channel*, which the arm does not silence: `xnu_live_door_seq` is published by
-  # `__wrap_Idle_load_context`, so its presence proves `cpu_idle` ran at all. The rest of the
-  # conjunction is the base arm's own evidence *absent* - `repair_seq` (the note went inside the
-  # `#if` with the call), `sip_seq`, `pce_seq`, `wfi_seq` (all three inside the window). Each of
-  # those four alone would be weaker: their absence is also what an image that never reached
-  # `cpu_idle` looks like, which is why `door_seq`'s presence is required in the same conjunction.
+  # `__wrap_Idle_load_context`, so its presence proves `cpu_idle` ran at all. The other half of the
+  # test is the base arm's own evidence *absent* - `repair_seq` (the note went inside the `#if` with
+  # the call, `entry_trace.c:1283`). **626 narrowed this to those two keys**, because the four
+  # window-family absences are behavioural and not structural: an image that reaches the window
+  # publishes them and would otherwise be read as the baseline arm. The table that decision now prints
+  # is below; the two keys' *kinds* are the whole of the reading.
   #
   # **The park's console group is deliberately not the marker, and this is the part worth writing
   # down.** It reads like the obvious arm marker - the line says
@@ -775,26 +776,114 @@ summarise_log() {
   # *after* it", both counts "read here, at the park's return"), and on the baseline the park's poll
   # never returns - so the group is in neither 520's log nor 533's. A marker the baseline cannot
   # produce cannot separate the two arms; here it is a witness instead, and a strong one (below).
+  # --- the arm, as a table of the keys it is decided on, and which KIND each key is (626) --------
+  #
+  # **The conjunction that stood here tested six keys as though they were one kind, and 622 measured
+  # what treating them as one kind costs.** Exactly one of the six is absent on this arm *by
+  # construction*: `entry_note_repair` - the publisher of `xnu_live_repair_seq` - sits inside
+  # `#if !STAGE90_XNU_IDLE_NO_SLEEP` in `entry_trace.c` (`:1283`, the call at `:1295`), so the image
+  # that skips the repair cannot publish that key whatever the machine does. The other four are
+  # **behavioural** - their publishers are compiled into both images and are reached only by a pass
+  # that gets into the window: `slot_cwe_*` from `entry_window_note` (`entry_trace.c:1973`, inside the
+  # exit), `sip_seq` from `entry_note_setidlepop` (`:1835`, past `cpu_idle`'s first test), `pce_seq`
+  # from `entry_note_pce` (`:1912`, the enter wrapper), `wfi_seq` from `entry_note_wfi` (`:1882`).
+  # `door_seq` (`entry_note_door`, `:1824`) is neither: it is published on **both** arms, and its
+  # absence means `cpu_idle` was never entered at all - which makes it a *reach guard* and not an arm
+  # test.
+  #
+  # **So the old test could be failed by behaviour while the structural key agreed, and the branch it
+  # then took was the baseline arm's.** That is the sleeper arm's own reading printed as the other
+  # arm's ordinary death, with the rung lines simply absent and nothing anywhere saying why. 622
+  # measured it on a 533-derived fixture: appending ONE `xnu_live_slot_cwe_win=` line to a log that
+  # had scored rung 1 and rung 1b PASS turned the whole reading into a death block. An absence no
+  # clause reads is 609's shape, and here the unread absence was the rung lines themselves.
+  #
+  # **So the decision is the structural key plus the reach guard, and the four behavioural keys are
+  # reported rather than scored.** `door_seq` present with `repair_seq` absent is the sleeper arm;
+  # `door_seq` present with `repair_seq` present is the baseline arm; no `door_seq` is the third state
+  # below. Excluding the behavioural keys is 598's widening read one level further in: an image older
+  # than one of their instruments is still its arm, and 520 is the measured case - it carries
+  # `repair_seq`/`sip_seq`/`pce_seq`/`wfi_seq` and **no** `slot_cwe_` key at all, because its image
+  # predates that instrument. Measured against every log on this host with a live channel in it (520,
+  # 533, 513's two captures, the 576 rehearsal pair), the new test chooses **the same branch the old
+  # conjunction chose in all six cases**, so nothing with an artifact behind it is re-keyed. What
+  # differs is exactly the log 622 built - a behavioural key present with no `repair_seq` - which now
+  # stays on the ladder and prints the disagreement instead of silently becoming a death block.
+  #
+  # **And the table is printed in every state, before the branch, because the branch choice was the
+  # thing answered by silence**: a reader could not tell "this log is the sleeper arm" from "one
+  # behavioural key was present and the ladder was skipped". One definition feeds both the branch and
+  # the six lines, so a table that says one thing and a branch that does another is not expressible
+  # here.
+  local arm_door arm_cwe arm_repair arm_sip arm_pce arm_wfi arm_behav
+  arm_door=$(grep -a -c 'xnu_live_door_seq=' "$log" || true)
+  arm_cwe=$(grep -a -c 'xnu_live_slot_cwe_' "$log" || true)
+  arm_repair=$(grep -a -c 'xnu_live_repair_seq=' "$log" || true)
+  arm_sip=$(grep -a -c 'xnu_live_sip_seq=' "$log" || true)
+  arm_pce=$(grep -a -c 'xnu_live_pce_seq=' "$log" || true)
+  arm_wfi=$(grep -a -c 'xnu_live_wfi_seq=' "$log" || true)
+  arm_behav=$(( (arm_cwe > 0 || arm_sip > 0 || arm_pce > 0 || arm_wfi > 0) ? 1 : 0 ))
   idle_no_sleep_arm=0
-  if ! grep -a -q 'xnu_live_slot_cwe_' "$log" \
-     && grep -a -q 'xnu_live_door_seq=' "$log" \
-     && ! grep -a -q 'xnu_live_repair_seq=' "$log" \
-     && ! grep -a -q 'xnu_live_sip_seq=' "$log" \
-     && ! grep -a -q 'xnu_live_pce_seq=' "$log" \
-     && ! grep -a -q 'xnu_live_wfi_seq=' "$log"; then
+  if (( arm_door > 0 )) && (( arm_repair == 0 )); then
     idle_no_sleep_arm=1
+  fi
+  local -a arm_words=(absent present)
+  say ""
+  say "  arm: which arm this log reads as, and on which keys. Each state is a count from this log, and"
+  say "  the KIND is what an absence means: a key whose publisher the arm's switch removes is absent by"
+  say "  CONSTRUCTION, and a key published inside the window is absent only because the window was not"
+  say "  reached."
+  printf '    %-26s %-8s %s\n' 'xnu_live_door_seq'   "${arm_words[$(( arm_door   > 0 ))]}" 'reach guard (published on BOTH arms)'
+  printf '    %-26s %-8s %s\n' 'xnu_live_repair_seq' "${arm_words[$(( arm_repair > 0 ))]}" 'STRUCTURAL (entry_trace.c:1283)'
+  printf '    %-26s %-8s %s\n' 'xnu_live_slot_cwe_*' "${arm_words[$(( arm_cwe    > 0 ))]}" 'behavioural (the exit wrapper)'
+  printf '    %-26s %-8s %s\n' 'xnu_live_sip_seq'    "${arm_words[$(( arm_sip    > 0 ))]}" "behavioural (past cpu_idle's first test)"
+  printf '    %-26s %-8s %s\n' 'xnu_live_pce_seq'    "${arm_words[$(( arm_pce    > 0 ))]}" 'behavioural (the enter wrapper)'
+  printf '    %-26s %-8s %s\n' 'xnu_live_wfi_seq'    "${arm_words[$(( arm_wfi    > 0 ))]}" 'behavioural (the WFI)'
+  if (( arm_door == 0 )); then
+    say "  => NO door_seq: cpu_idle was never entered, so neither arm's clause is reached - the third"
+    say "     branch below is the only one that applies, and it says which fault that is."
+  elif (( arm_repair == 0 )); then
+    say "  => SLEEPER ARM (594's switch), decided on the two keys that can decide it: door_seq present"
+    say "     and repair_seq absent. The ladder below is the reading the owed run is pre-registered"
+    say "     against, and it runs on this log."
+    if (( arm_behav == 1 )); then
+      say "     **AND A DISAGREEMENT: a behavioural key IS present in this log, and on this arm nothing"
+      say "     gets into the window** - the switch removes the repair, so SIGPdisabled stays set and"
+      say "     cpu_idle leaves by its first door on every pass. A log with a behavioural key and no"
+      say "     repair_seq is therefore a log on which the two definitions disagree: the structural key"
+      say "     says this image skips the repair, and the behavioural key says the window ran anyway."
+      say "     Both can hold only if SIGPdisabled was cleared by something other than the skipped"
+      say "     repair, which this phase has never seen - so this reader does not decide it, and says"
+      say "     what it did instead: **the ladder below runs**, because its witnesses (door_seq,"
+      say "     poll_seq, poll_timeout_ms, the park's console group) are published by sites compiled into"
+      say "     BOTH arms and are therefore readings of the machine rather than of the image - and the"
+      say "     baseline arm's pop-death block is **withheld on this log**. If the pop's own keys are"
+      say "     here (xnu_live_slot_cwe_win / _set / _calls, or a panic ... sleh_abort at the exit), then"
+      say "     the window WAS reached and the death block is the reading that applies: read it there,"
+      say "     beside the rung lines below, and read the gate's record for which image is in the"
+      say "     machine."
+    fi
+  else
+    say "  => BASELINE ARM, decided on repair_seq present - the positive half of the same test, since"
+    say "     that key is published from inside the switch and an image carrying the publisher cannot be"
+    say "     the arm that skips the call. The behavioural keys above are reported and are not part of"
+    say "     the decision: an image older than one of their instruments is still this arm, and 520 is"
+    say "     the measured case - repair_seq/sip_seq/pce_seq/wfi_seq present and no slot_cwe_ key at all,"
+    say "     because its image predates the window instrument. The death block below is this arm's"
+    say "     reading."
   fi
 
   if (( idle_no_sleep_arm == 1 )); then
-    # (6) the arm where the idle never slept - **and this branch is entered from the log's own keys (the
-    # conjunction above), never from the image.** A capture whose image predates the repair lands here
-    # too: 513's two captures (2026-09-21, an image with no repair instrument at all) satisfy all six
-    # tests and take this branch. So what this clause reads is the *machine's behaviour* - "the window
-    # did not run" - and which image produced it is the *gate's* reading (the arm switch is in the
-    # build's own record). The two cases differ in cause and not in reading: on 594's arm the window's
-    # whole family is absent *by construction*, on 513's it is absent because the window was never
-    # reached, and the ladder below scores both the same - correctly, since rung 1's park is the same
-    # park either way. The gate's note above is what keeps the pair apart; nothing in the log can.
+    # (6) the arm where the idle never slept - **and this branch is entered from the log's own keys
+    # (626's table above), never from the image.** A capture whose image predates the repair lands here
+    # too: 513's two captures (2026-09-21, an image with no repair instrument at all) satisfy both
+    # tests (door_seq present, repair_seq absent) and take this branch. So what this clause reads is
+    # the *machine's behaviour* - "the window did not run" - and which image produced it is the
+    # *gate's* reading (the arm switch is in the build's own record). The two cases differ in cause and
+    # not in reading: on 594's arm the window's whole family is absent *by construction*, on 513's it is
+    # absent because the window was never reached, and the ladder below scores both the same -
+    # correctly, since rung 1's park is the same park either way. The gate's note above is what keeps
+    # the pair apart; nothing in the log can.
     #
     # **This clause had to exist before the arm was built, not after.** See the gate's note above for
     # why the block would otherwise be skipped; what follows is the reading that replaces it, and it
@@ -850,28 +939,43 @@ summarise_log() {
 
     # **This clause's opening used to assert a fact about the image that the log cannot establish,
     # and 600 measured the counterexample on a real artifact.** It said "This log's image skipped
-    # 514's one-shot repair" - but what the conjunction above tests (door_seq present, the window
-    # family absent) is *"the window did not run"*, and an image that **predates the repair's
-    # existence** satisfies it identically. Measured: 513's two archived captures (2026-09-21, two
-    # days before the arm existed, an image with no repair to skip and no `entry_window_note` to
-    # publish) carry `door_seq` 25 records to `0x01000000`, `poll_seq` to 4 with two 2000 ms parks,
-    # and **no** `repair_seq`/`sip_seq`/`pce_seq`/`wfi_seq`/`slot_cwe_*` - so this branch prints its
-    # PASS lines for them, which it should: the machine did reach the park and did come back. What it
-    # must not do is call that a reading of *this arm*, because the log alone cannot tell the two
-    # apart - an image publishes no build marker (549), so the arm is the **gate's** reading and the
-    # record's, and this clause reads the machine's behaviour. The sentence now says which is which.
+    # 514's one-shot repair" - but what the test above asks (door_seq present, repair_seq absent) is
+    # *"the window did not run"*, and an image that **predates the repair's existence** satisfies it
+    # identically. Measured: 513's two archived captures (2026-09-21, two days before the arm existed,
+    # an image with no repair to skip and no `entry_window_note` to publish) carry `door_seq` 25
+    # records to `0x01000000`, `poll_seq` to 4 with two 2000 ms parks, and **no**
+    # `repair_seq`/`sip_seq`/`pce_seq`/`wfi_seq`/`slot_cwe_*` - so this branch prints its PASS lines
+    # for them, which it should: the machine did reach the park and did come back. What it must not do
+    # is call that a reading of *this arm*, because the log alone cannot tell the two apart - an image
+    # publishes no build marker (549), so the arm is the **gate's** reading and the record's, and this
+    # clause reads the machine's behaviour. The sentence now says which is which.
+    #
+    # **And the paragraph below makes a claim about the machine that a behavioural key falsifies, so
+    # 626 conditionalised it.** "SIGPdisabled stayed set / the window was never entered" is the
+    # ordinary reading of this branch, and a behavioural key is published only by a pass that *did*
+    # enter the window - so on the disagreement log the reader would be asserting the opposite of a
+    # record it printed two paragraphs above. That is the defect this file names most often, in the
+    # one place where it would be the reader contradicting itself.
     say ""
-    say "  the idle does not sleep - which is 594's arm, and also any image where the window did not"
-    say "  run. **What this log establishes is the machine's behaviour, not the image's identity**:"
-    say "  SIGPdisabled stayed set, cpu_idle left by its first door on every pass, and the window"
-    say "  whose pop {fp, pc} this phase measures was never entered - so the whole family clauses"
-    say "  (1)-(5) score is absent, and this clause reads what is left. **Measured counterexample, so"
-    say "  the distinction is not academic**: 513's two captures (2026-09-21, an image that predates"
-    say "  514's repair, so there was nothing for it to skip) satisfy this same conjunction - and"
-    say "  **measured on those two logs**, the ladder below scores them rung 0 PASS, rung 1 PASS,"
-    say "  rung 1b PASS, rung 2 its NOTE and rung 3 PASS. So a log in this branch is a reading of"
-    say "  the machine and not of the arm: which image is in the machine is the gate's reading -"
-    say "  the arm switch is in the build's own record - and this clause cannot see it from a log."
+    if (( arm_behav == 1 )); then
+      say "  **Not the ordinary sentence for this branch: this log's own behaviour contradicts it**"
+      say "  (the disagreement above). What that sentence would say - SIGPdisabled stayed set, the idle"
+      say "  left by its first door, the window was never entered - is the opposite of a record this log"
+      say "  carries, so it is not printed and what follows is the ladder alone. Its readings do not"
+      say "  depend on which arm this is: their witnesses are published on both."
+    else
+      say "  the idle does not sleep - which is 594's arm, and also any image where the window did not"
+      say "  run. **What this log establishes is the machine's behaviour, not the image's identity**:"
+      say "  SIGPdisabled stayed set, cpu_idle left by its first door on every pass, and the window"
+      say "  whose pop {fp, pc} this phase measures was never entered - so the whole family clauses"
+      say "  (1)-(5) score is absent, and this clause reads what is left. **Measured counterexample, so"
+      say "  the distinction is not academic**: 513's two captures (2026-09-21, an image that predates"
+      say "  514's repair, so there was nothing for it to skip) satisfy this same test - and"
+      say "  **measured on those two logs**, the ladder below scores them rung 0 PASS, rung 1 PASS,"
+      say "  rung 1b PASS, rung 2 its NOTE and rung 3 PASS. So a log in this branch is a reading of"
+      say "  the machine and not of the arm: which image is in the machine is the gate's reading -"
+      say "  the arm switch is in the build's own record - and this clause cannot see it from a log."
+    fi
     say "    xnu_live_door_seq reaches ${door_max:-absent} - the passes that left by the first door"
     # **Rung 0, and the threshold is `> 32768` rather than `>= 32768`** - which is the correction
     # this clause needed and could only be read off the archived pair. Both publishers of this key
@@ -1139,16 +1243,22 @@ summarise_log() {
   # second and third is the one that paragraph already named - `xnu_live_door_seq`, published by
   # `__wrap_Idle_load_context` on the first passes of every boot that reaches `cpu_idle`:
   #
-  #   * the sleeper arm   - `door_seq` present, `repair_seq`/`sip_seq`/`pce_seq`/`wfi_seq` absent;
-  #   * the baseline arm  - `door_seq` present, and the window family present *or not*, because an
-  #     image older than the pair is still this arm and its death is still the reading;
+  #   * the sleeper arm   - `door_seq` present, `repair_seq` absent (**626**: the four window-family
+  #     absences are no longer part of the test - they are behavioural, and a log that reaches the
+  #     window publishes them, so scoring them here read that log as the arm below);
+  #   * the baseline arm  - `door_seq` present and `repair_seq` present, that key's presence being the
+  #     positive half of the same test, since its publisher is inside the switch; the window family is
+  #     then itself *or not*, because an image older than one of their instruments is still this arm and
+  #     its death is still the reading (520 has no `slot_cwe_` key at all and is read here);
   #   * no `door_seq`     - `cpu_idle` was never entered, which is a fault earlier than either arm's.
   #
   # So the `elif` is a **widening**, not a re-keying: every log that took this branch before still
   # does, and the gain is exactly the logs that satisfy the *baseline* signature without the pair.
   # 594 section 5 and 595 section 9(b) named this as the better fix and left it as its own step,
   # because it changes the condition under which five clauses run and the validation it owes is
-  # against 520 - a real artifact, and the one log in this project that lands in the gap.
+  # against 520 - a real artifact, and the one log in this project that lands in the gap. **626 took
+  # the same step on the other side of the branch**, and measured it the same way: the six logs on this
+  # host with a live channel in them all take the branch they took before.
   elif grep -a -q 'xnu_live_door_seq=' "$log"; then
     local cwe_win cwe_set cwe_calls pre_calls rtcpre_calls post_calls storm panics user_ones
     local sleh_lr="" sleh_pc="" sleh_sp="" sleh_seen=""
