@@ -610,11 +610,30 @@ summarise_log() {
     # the arm would be read with the wrong one of these rules, so an absent `seam_op` is UNREAD here
     # rather than a default.
     #
-    # The `sp` test is the one that says the arm read the *right object*: 546 section 1's slot is the
-    # address the `pop` reads, so if the seam's `sp` and the abort's `sp` disagree the two are readings
-    # of different words and nothing below them joins up.
+    # The `sp` test is the one that says the arm read the *right object*, and **it is a `+8`, not an
+    # equality** - which this block had wrong until 576, and the wrong form prints FAIL on a *good* run.
+    # The arithmetic, from the image and from a log that carries both numbers:
+    #
+    #   * the arm's `sp` at the seam is the exit's own frame slot: `platform_cache_idle_exit` pushes 8
+    #     bytes at `0x800462d4` and the seam's `bl` is the next instruction, so `sp` there is what the
+    #     `push` wrote - and the wrapper is a `naked` three-instruction trampoline, so it hands that same
+    #     `sp` on unchanged;
+    #   * the abort's `sleh_sp` is **the same sp after the `pop`**: the `pop {fp, pc}` at `0x8004633c`
+    #     frees those 8 bytes, and 546 section 1's whole observation is that the push and the pop are 8/8
+    #     with no `sp` change between them - so post-pop `sp` = pre-push `sp` = slot + 8;
+    #   * and the entry wrapper publishes the same number under another name: its own `mov %0, sp` runs
+    #     *after* its prologue (`8047c964: str r4,[sp,#-8]!`), so `xnu_live_slot_pre_sp` is the `sp` the
+    #     real exit is entered with - 520's log has `slot_pre_sp=0x8054fed0` and that same log's fatal
+    #     abort has `sleh_sp=0x8054fed0`, while the exit's slot is 8 below both.
+    #
+    # So the slot is `sleh_sp - 8`, and the two relations are checked separately because they are two
+    # independent records of it: the dump's register and the exit wrapper's own capture. **The reading the
+    # equality would have thrown away is the good run**: 535 and 574 both put a correct arm's `sp` at
+    # 0x8054fec8 against a `sleh_sp` of 0x8054fed0, so `==` prints FAIL for exactly the run this clause
+    # exists to score a PASS.
     if [[ $seam_calls =~ ^0x[0-9a-f]+$ ]] && (( seam_calls >= 1 )); then
       local seam_lr seam_sp seam_sctlr seam_other seam_other_lr rtcpre_pop seam_op
+      local slot_pre_sp seam_m8 seam_m4
       local seam_b0 seam_b1 seam_a0 seam_a1
       seam_op=$(keyval seam_op)
       seam_lr=$(keyval seam_lr)
@@ -627,6 +646,9 @@ summarise_log() {
       seam_a0=$(keyval seam_a0)
       seam_a1=$(keyval seam_a1)
       rtcpre_pop=$(keyval slot_rtcpre_pop)
+      slot_pre_sp=$(keyval slot_pre_sp)
+      seam_m8=$(keyval slot_pre_m8)
+      seam_m4=$(keyval slot_pre_m4)
       say ""
       say "  the seam - the exit's own bl FlushPoU_Dcache, hooked by the return address it was"
       say "  entered with. xnu_live_seam_calls=$seam_calls (the schedule is <=4 then powers of two, so"
@@ -665,17 +687,42 @@ summarise_log() {
         say "          three call sites were reached - only that the seam was"
       fi
       if [[ -n $sleh_sp && -n $seam_sp ]]; then
-        if [[ $seam_sp == "$sleh_sp" ]]; then
-          say "  PASS  seam_sp=$seam_sp equals the abort's own sp: the address the arm read and restored"
-          say "        is the address the pop reads, which is 546 section 1's slot"
+        if (( seam_sp + 8 == sleh_sp )); then
+          say "  PASS  seam_sp=$seam_sp is the exit's frame slot: it is sleh_sp-8, and sleh_sp is that"
+          say "        same sp after the pop freed the 8 bytes the push wrote - so the address the arm read"
+          say "        is the one the pop reads, which is 546 section 1's slot"
         else
-          say "  FAIL  seam_sp=$seam_sp is not the abort's sp=$sleh_sp - the arm's slot and the pop's"
-          say "        are different addresses, so the two readings are of different words"
+          say "  FAIL  seam_sp=$seam_sp is not sleh_sp-8 (the abort's sp is $sleh_sp, so the slot is"
+          say "        $(printf '0x%08x' $(( sleh_sp - 8 )))): the arm's address and the pop's are different words, and"
+          say "        nothing below this line joins up"
           verdict_ok=0
         fi
       else
         say "  UNREAD  ${seam_sp:-seam_sp} against ${sleh_sp:-sleh_sp}: one of the two addresses is"
         say "          absent, so whether the arm read the pop's own slot is not established here"
+      fi
+      # The exit wrapper's own record of the same address, checked as its own relation rather than
+      # folded into the one above: two independent publishers of one value are what makes a
+      # disagreement readable, and folding them would let one silent key hide the other.
+      if [[ -n $slot_pre_sp && -n $seam_sp ]]; then
+        if (( seam_sp + 8 == slot_pre_sp )); then
+          say "  PASS  and the exit wrapper's own capture agrees: slot_pre_sp=$slot_pre_sp is the sp the"
+          say "        real exit was entered with, one push above the slot"
+        else
+          say "  FAIL  slot_pre_sp=$slot_pre_sp should be seam_sp+8=$(printf '0x%08x' $(( seam_sp + 8 ))) - the wrapper's"
+          say "        capture and the arm's slot are two records of one frame and they disagree"
+          verdict_ok=0
+        fi
+      fi
+      # **The slot's two words as the *wrapper* read them, just before the push.** `slot_pre_m8`/`_m4`
+      # are the words at `sp-8`/`sp-4` at the exit wrapper's entry, i.e. exactly the two addresses the
+      # exit's push is about to write - so on a pass through a loop that keeps the same frame they are
+      # the previous pass's leftovers, and this arm's `_b0`/`_b1` are this pass's push. Equal is the
+      # expected reading and *not* a pass: a difference is the frame having moved between two passes
+      # through the same code, which is a fact about the idle loop rather than about this arm.
+      if [[ -n $seam_m8 && -n $seam_m4 ]]; then
+        say "  (the wrapper's own capture of those two addresses, read before the push: m8=$seam_m8"
+        say "   m4=$seam_m4 - equal to b0/b1 when the frame did not move between two passes)"
       fi
       if [[ $seam_b1 =~ ^0x80[0-9a-f]{6}$ ]] && (( seam_b1 < 0x80600000 )); then
         say "  PASS  b1=$seam_b1 is a kernel-text address, so memory held the frame the exit's push"
