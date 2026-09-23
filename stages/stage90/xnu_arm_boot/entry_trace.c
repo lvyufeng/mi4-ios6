@@ -384,11 +384,58 @@ extern void FlushPoC_Dcache(void);
  * this one is not is that an always-linked pass-through wrapper would be a change to *every* caller of
  * `FlushPoU_Dcache` in an image whose whole point is that only one call site moved.
  *
+ * **The seam has two arms since 572, and either switch turns the interception on.** `SEAM_POC` puts the
+ * cleaning operation behind the seam (535's arm); `SEAM_MEASURE` puts nothing behind it and only reads
+ * (572's arm, the control cell for 535's non-return). Both are "the call inside
+ * `platform_cache_idle_exit` is hooked" against "it is Apple's own call and nothing else"; they differ
+ * in the body, which is why they are two keys and the build refuses both at once.
+ *
  * The doc block on the wrapper below is where the arm is argued; this is only where it is named.
- * `build_entry.sh` records it with the other ten arm keys and asserts the wrapper's presence or
- * absence against this same variable, so a flag that does not match the image stops the build. */
+ * `build_entry.sh` records both with the other arm keys and asserts the wrapper's presence or
+ * absence against these same variables, so a flag that does not match the image stops the build. */
 #ifndef STAGE90_XNU_SEAM_POC
 #define STAGE90_XNU_SEAM_POC 0
+#endif
+
+/*
+ * -------------------------------------------------- 572: the same seam, and no operation behind it
+ *
+ * **`STAGE90_XNU_SEAM_MEASURE=1` is 535's interception with the operation removed**, and it exists
+ * because 535's run did not come back. That run's reading is a *state* and not a log (572 section 1: the
+ * runner exited 2 with both halves of the criterion and the host's USB log ended one second after the
+ * download), so the two candidates that log would have separated are still joined: **535's operation
+ * cost the return, or the interception itself did.** This arm separates them, and it does it without
+ * needing a log at all, because the two cells it can land in are opposite:
+ *
+ *   * **it returns** - the interception is harmless, the boot is back to 533's cell (which returned,
+ *     568), and the operation is what changed it: 572 section 5's candidates are the frontier;
+ *   * **it does not return** - the interception itself is implicated before any more cache work, and
+ *     every operation-shaped arm is refuted cheaply.
+ *
+ * **Why it cannot change what the machine does.** With `SCTLR.C` clear - and this arm does not write it -
+ * both reads are non-cacheable loads of two words of the caller's own frame, and the only other things
+ * the body does are a `dsb`, a call to Apple's own `FlushPoU_Dcache` (which 533's cell already made in
+ * every pass, and whose return is what the arm is entered on), and the live-channel writes every arm
+ * publishes through. **No clean, no invalidate, no store to the slot.** That is a property of the shape
+ * rather than of an argument, and the build asserts it: with this switch on, `entry_seam_flush`'s body
+ * has **no** cache-maintenance instruction of any kind and **no** call to `FlushPoC_DcacheRegion`, while
+ * the same body with `STAGE90_XNU_SEAM_POC=1` must have exactly one.
+ *
+ * **What it measures that the operation arm cannot.** The two reads bracket Apple's own L1 flush, so on
+ * this arm an unequal pair is the L1 flush's doing and not the PoC operation's: `_a1` differing from
+ * `_b1` here would say that Apple's own `FlushPoU_Dcache` writes something back at the slot - a reading
+ * 535's run could not produce, because its operation changed the same two words afterwards. So this arm
+ * is not only a bisection; it is the control cell that makes 535's `_a0`/`_a1` interpretable.
+ *
+ * **One arm at a time, and the build refuses the pair.** The two switches select the same interception
+ * with different bodies, so both on is not a third arm but an ambiguity about which one a record names;
+ * `build_entry.sh` stops the build on it, and so does the `#error` below. */
+#ifndef STAGE90_XNU_SEAM_MEASURE
+#define STAGE90_XNU_SEAM_MEASURE 0
+#endif
+
+#if STAGE90_XNU_SEAM_POC && STAGE90_XNU_SEAM_MEASURE
+#error "STAGE90_XNU_SEAM_POC and STAGE90_XNU_SEAM_MEASURE are two arms of one seam: enable one"
 #endif
 
 /*
@@ -2088,7 +2135,26 @@ void __wrap_platform_cache_idle_exit(void)
  * what keeps the neighbours: it writes them back before discarding the line, and only the slot's own
  * two words are then out of date - which step 4 restores. So the operation is a PoC invalidate aimed
  * at the object the frontier is named by, and the arm's shape is recorded that way in
- * `docs/experiments/experiment-569-*.md` before this image is built.
+ * `docs/experiments/experiment-574-*.md` before this image is built.
+ *
+ * **Steps 3 and 4 are one arm's, and the other arm is why they are behind a `#if`.** 535's run did not
+ * come back (572 section 1) and it left no log, so "the operation cost the return" and "the
+ * interception did" are still joined. `STAGE90_XNU_SEAM_MEASURE` keeps steps 1 and 2 - the barrier, the
+ * two words memory holds, and Apple's own flush through - and removes 3 and 4 entirely, so the arm
+ * cannot touch the line at all. What is left is the *measurement*, bracketed around Apple's own L1
+ * flush, which is also what makes it a control cell for 535: with no operation behind it, an unequal
+ * `_a`/`_b` pair is the L1 flush writing the line back, and an equal pair is the arm working as
+ * designed. **The two arms' pairs mean opposite things, so the arm publishes which one it is**
+ * (`xnu_live_seam_op`), and the reader's clause (5) branches on it rather than reading the pair alone.
+ *
+ * **The 64-byte line, named here because it is the arithmetic 535's own design got wrong.** The
+ * operation's body is `and r2, r0, #63` / `bic r0, r0, #63` / `lsr r1, r1, #6` over a
+ * `mcr 15, 0, r0, cr7, cr14, {1}` loop: it walks **whole lines**, so `FlushPoC_DcacheRegion(slot, 8)`
+ * cleans and invalidates all **sixteen** words of the line the slot sits in, not the two the arm reads
+ * and restores. Step 4 restores the two it knows about; the other fourteen are the idle thread's live
+ * frame on this reading (546 section 1), and whether the clean's write-back of *those* is what cost
+ * 535's return is 572 section 5's first candidate - a question this arm's control cell is the
+ * precondition for asking.
  *
  * **What it does not do, and the constraint 547 section 5 puts on it.** It writes no control register,
  * so 522's hazard - `SCTLR.C` written outside the coherency domain - is not available to this arm
@@ -2097,7 +2163,7 @@ void __wrap_platform_cache_idle_exit(void)
  * contents for that line. If the pass survives the `pop` and dies later, `xnu_live_seam_*` says which
  * of the two the run was about, because the readings are taken either way.
  */
-#if STAGE90_XNU_SEAM_POC
+#if STAGE90_XNU_SEAM_POC || STAGE90_XNU_SEAM_MEASURE
 
 /* The one address the identification compares against. It is `platform_cache_idle_exit`'s
  * `bl FlushPoU_Dcache` + 4, i.e. the instruction that call returns to, and `build_entry.sh` reads it
@@ -2156,15 +2222,23 @@ __attribute__((noinline)) void entry_seam_flush(uint32_t slot, uint32_t lr)
 
     __real_FlushPoU_Dcache();
 
+    /* 535's operation, and **only 535's arm has it**. In `STAGE90_XNU_SEAM_MEASURE` the two reads are
+     * taken either side of Apple's own L1 flush and nothing is done to the line: with `SCTLR.C` clear
+     * they are non-cacheable loads, so the arm's whole content is the reading - which is what makes it a
+     * control cell for 535 rather than a second attempt at 535 (see the switch block above). */
+#if STAGE90_XNU_SEAM_POC
     FlushPoC_DcacheRegion(slot, 8u);
     __asm__ volatile ("dsb sy" ::: "memory");
+#endif
 
     a0 = *(volatile uint32_t *)(uintptr_t)slot;
     a1 = *(volatile uint32_t *)(uintptr_t)(slot + 4u);
 
+#if STAGE90_XNU_SEAM_POC
     *(volatile uint32_t *)(uintptr_t)slot = b0;
     *(volatile uint32_t *)(uintptr_t)(slot + 4u) = b1;
     __asm__ volatile ("dsb sy" ::: "memory");
+#endif
 
     sctlr = entry_sctlr();
 
@@ -2172,6 +2246,12 @@ __attribute__((noinline)) void entry_seam_flush(uint32_t slot, uint32_t lr)
     if (entry_seam_publish(g_seam_calls) != 0u && entry_live_ready() != 0u) {
         g_seam_live++;
         entry_live_write("xnu_live_seam_calls", g_seam_calls);
+        /* **Which arm read this**, and it is published because the two arms' pairs mean opposite
+         * things: with the operation, an unequal pair is the clean's write-back; without it, an unequal
+         * pair is Apple's own L1 flush writing the line back - and an *equal* pair there is the arm
+         * working as designed and not "the line was clean". A reader that saw only the pair could not
+         * tell those apart (mi4-silence-is-a-reading-only-if-success-is-silent). */
+        entry_live_write("xnu_live_seam_op", (uint32_t)(STAGE90_XNU_SEAM_POC));
         entry_live_write("xnu_live_seam_lr", lr);
         entry_live_write("xnu_live_seam_sp", slot);
         entry_live_write("xnu_live_seam_sctlr", sctlr);
@@ -2195,7 +2275,7 @@ __attribute__((naked)) void __wrap_FlushPoU_Dcache(void)
                       "b entry_seam_flush\n");
 }
 
-#endif /* STAGE90_XNU_SEAM_POC */
+#endif /* STAGE90_XNU_SEAM_POC || STAGE90_XNU_SEAM_MEASURE */
 
 /*
  * Experiment 517. **The one C caller that runs between the interrupt handler's dispatch and the return
