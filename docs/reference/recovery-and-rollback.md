@@ -133,6 +133,24 @@ fastboot boot path/to/known-good-recovery-or-boot.img
 
 If it fails, reboot/power-cycle. Do not immediately flash.
 
+Going **back** to a payload that was known to work is a separate act from recovering the phone, and it has
+its own record. A stage payload's `out/stage90/` tree can be put back to the frozen 574 arm — the one whose
+readings this project's later steps are all measured against — by copying nine files back, with no rebuild
+involved. The set, its hashes and the reason that set and not another are `stages/stage90/revert-set.txt`,
+and `tools/verify_revert_set.sh DIR` checks a directory against it:
+
+```bash
+tools/verify_revert_set.sh /tmp/r594/frozen-payload     # the recorded park of the 574 set
+```
+
+Two facts about it that are worth knowing before trusting any other manifest on this host: the parked
+files live **outside version control** (`out/` is gitignored), so that record *is* the identity; and every
+build writes its own `SHA256SUMS.txt` with **absolute** paths into the tree it ran in, so
+`sha256sum -c SHA256SUMS.txt` inside a park verifies the *live* tree and prints `FAILED` for every file
+that has changed since while the parked bytes are all correct. The verifier reads its own record and never
+that manifest. For a revert, it is still the gate that decides completeness: copy the set back, then run
+the gate.
+
 For a Stage payload, gate the run first:
 
 ```bash

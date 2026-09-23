@@ -1,0 +1,74 @@
+# The byte sets this project can REVERT `out/stage90/` to, recorded as hashes.
+#
+# WHO WRITES THIS: by hand, in the step that measured the set, and never by the build. That is the same
+# rule `tool-images.txt` follows and for the same reason - a record the build writes agrees with itself
+# and constrains nothing. The comparison lives in `tools/verify_revert_set.sh`, which hashes a directory
+# against the lines below and refuses when a file is absent, empty, the wrong size, or the wrong bytes.
+#
+# WHY A REVERT SET NEEDS A RECORD AT ALL. The user's standing constraint is that the device must never
+# be bricked and never hang permanently, and the mechanism behind that claim is not the watchdog - it is
+# that the arm in `out/` can always be put back to one that was known to reach a specific point. That
+# mechanism is a directory of files. Those files are **outside version control**: `out/` is gitignored
+# and the 574 park is in `/tmp`, so the hashes below are the identity and the copies are only copies.
+# Until this file existed, the identity appeared in prose in 22 documents and in no form a program could
+# compare against.
+#
+# WHAT MAKES A SET COMPLETE, and it is not a list someone remembered: **the set is the files the gate
+# reads**. `preflight_boot_check.sh` consumes nine paths under `$OUT` (`SHA256SUMS.txt`, `stage90.bin`,
+# `stage90-build-config.txt`, `stage90.elf`, `stage90-qcdt.img`, `xnu_arm_entry.bin`,
+# `xnu_arm_entry-config.txt`, `xnu_arm_entry.elf`, `xnu_arm_entry-sources.txt`), and a revert that leaves
+# the gate red is not a revert - so a revert set missing any of them is incomplete however right its qcdt
+# hash is. The criterion is re-derivable at any time:
+#
+#   grep -oE '\$OUT/[A-Za-z0-9_.-]+|out/stage90/[A-Za-z0-9_.-]+' stages/stage90/preflight_boot_check.sh \
+#     | sed 's|\$OUT/||; s|out/stage90/||' | sort -u
+#
+# and the stronger check is revert-then-run-the-gate. Both patterns are needed: the gate spells eight of
+# the nine through `$OUT` and one (`xnu_arm_entry.elf`, in a narration path) through `out/stage90/`, so a
+# derivation that greps only one of the two spellings misses a file. This record's first draft did exactly
+# that and carried **eight** lines while the gate read nine - the omission this comment is written to make
+# findable, and the reason `tools/rehearse_revert_set.sh` now derives the list at run time and refuses if
+# the record does not cover it, instead of trusting the list a human wrote here.
+#
+# THE TRAP THIS FILE EXISTS TO NOT READ. Every build writes its own `SHA256SUMS.txt` with **absolute**
+# paths into the tree that produced it, and a park is a copy of those files *outside* that tree. So
+# `sha256sum -c SHA256SUMS.txt` run inside a park hashes `/mnt/data/mi4-ios6/out/stage90/*` - the live
+# tree, which has moved on since - and prints `FAILED` for every file that changed while the parked
+# bytes are all correct. A manifest of absolute paths is a record of a *location* and not of a
+# *directory*: it verifies wherever you run it, and what it verifies is the path it names. It has
+# already produced one wrong reading in this project (595's session, whose rehearsal mirror re-read the
+# real `out/` from inside the mirror). `verify_revert_set.sh` therefore reads THIS file and never the
+# target's own manifest, and it prints the absolute path of every path in a manifest it finds as a
+# narration line, so the trap is stated at the moment a reader meets the directory.
+#
+# The park's own `SHA256SUMS.txt` is below as a member of the set, with the hash 591 recorded for it. It
+# is deliberately NOT rewritten to relative paths: editing it would falsify 591's record and this one,
+# and a frozen artifact is not something to tidy. The defect is recorded instead - which is why the file
+# that cannot be trusted as a manifest is still pinned as bytes.
+#
+# ONE FILE PER LINE, space-separated key=value:
+#   set=      which revert set the line belongs to; the tool verifies one set or all of them
+#   sha256=   the key into the line; a changed byte anywhere refuses
+#   bytes=    a second, independent field of the same bytes - a size and a hash agreeing is what turns
+#             a typo in either into a reading instead of a silence
+#   file=     the name as it appears in `out/stage90/` and in every park of this set
+#   role=     what this file is for. A role is not inferable from a name, and a revert that omits a
+#             file it did not recognise is the failure mode this field exists to prevent.
+#
+# The parked copies, which are copies and not the record:
+#   /tmp/r594/frozen-payload/          the 574 set, the revert target for the arm the press sends
+#   out/stage90/frozen/                526 and 533 are parked here by an older convention, recorded
+#                                      nowhere yet - a reader should know this record does not cover
+#                                      them rather than assume the park directory is complete
+#
+# MEASURED 2026-09-23, each file hashed in place in the park (not copied from a document).
+
+set=frozen-574 sha256=914f45ac7098341b25c027f71e8551d11c9b13f4f40d3bd9e470714435e2939a bytes=8540160 file=stage90-qcdt.img role=qcdt-wrapped-payload-this-is-what-fastboot-boot-sends
+set=frozen-574 sha256=0f108392b9b20fc025311ea0b71c2a0cec5e8760e7e39867f68994cf5e2092a3 bytes=6015356 file=stage90.bin role=raw-payload-bin
+set=frozen-574 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built
+set=frozen-574 sha256=c869a319028d324b429c77b63b498ae35b56fa4d39771db9ae82ee1a261fa35f bytes=6077388 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=frozen-574 sha256=aeb7862ab66731dbd4a7571b0316a3e849c80376e7a56d72373b95098278b7c8 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above
+set=frozen-574 sha256=151425c40c48cb1a417de1e4c570cb812f5b07a2e45aa41b04421c63fe34d746 bytes=5519996 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload
+set=frozen-574 sha256=3bc726056dfb90eeee4fbcb5afcfec32b8b356a187576a8f63ecaaad8af188c6 bytes=6698664 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=frozen-574 sha256=5073b0c4972bf91364851552262a3bbd757a5643a0f23eb1416d4a6b7675c851 bytes=756 file=xnu_arm_entry-config.txt role=entry-config-record
+set=frozen-574 sha256=4a4ce2925779cfac1cdb17046dff78b107dcaf6c4ec8d52724689ed27fbe63fa bytes=2104 file=xnu_arm_entry-sources.txt role=entry-source-manifest
