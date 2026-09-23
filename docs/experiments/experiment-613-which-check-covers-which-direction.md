@@ -6,9 +6,9 @@ each one carry?** This step answers it by measurement, adds the cells that hold 
 a second defect in the same file, in this project's oldest shape: a header edit that quietly deleted what
 came after it.
 
-Host-side only: two scripts edited, one document added, one index row. No boot, no build, no device, no
-`fastboot`, no `adb`, **nothing written to storage**; the park was hashed and never modified. **TWRP stays
-withheld.**
+Host-side only: two scripts edited, one document added, one index row, and one line of the recovery
+reference (`docs/reference/recovery-and-rollback.md`, §5). No boot, no build, no device, no `fastboot`, no
+`adb`, **nothing written to storage**; the park was hashed and never modified. **TWRP stays withheld.**
 
 ## 1. The partition
 
@@ -137,8 +137,10 @@ back to 35 ok / 0 failed.
 
 No device action, no `fastboot`, no `adb`, **nothing written to storage**, no boot, no build. Two host-side
 files edited: `tools/verify_revert_set.sh` (the header's partition table, and `--help`'s range made
-structural) and `tools/rehearse_revert_set.sh` (four partition cells, one `--help` cell, and two guards that
-make the silence cells readable). Reads of the park, hashed in place, **no file modified** — the shipped
+structural), `tools/rehearse_revert_set.sh` (four partition cells, one `--help` cell, and two guards that
+make the silence cells readable), and `docs/reference/recovery-and-rollback.md` — which now **points at** the
+direction table in the tool's header rather than carrying a second copy of it, the shape 610 measured where
+the duplicate was the copy *without* the measurement. Reads of the park, hashed in place, **no file modified** — the shipped
 tool run against `/tmp/r594/frozen-payload` exits **0** with **11 file(s)** verified and 6 manifest-member
 checks agreeing. The boot gate
 was re-run afterwards → **EXIT=0 / 549 lines / 0 stderr**, unchanged; the rehearsal ran green → **35 ok / 0
