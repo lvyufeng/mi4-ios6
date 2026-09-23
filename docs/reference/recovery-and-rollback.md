@@ -266,6 +266,59 @@ Two things follow, and both are about how to read a hang rather than about the d
 
 ### 5. Persistent flash only with explicit approval
 
+**This step now has a gate: `stages/stage90/preflight_storage_write.sh`.** It refuses by default, runs
+no fastboot, touches no device, and clears exactly one form of the write. Use it before any write this
+document describes; the section below is the reasoning it encodes.
+
+Its four preconditions, and what each one is protecting:
+
+1. **The OS has been observed staying up**, not merely reached. The evidence is a capture log, and the
+   criterion is the *runner's own two clauses* in one capture — the goal block's PASS (user mode reached
+   and a driver answering) **and** the arm's clause PASS (the machine stayed up past the park). The
+   first alone is a floor that the archived baselines 520 and 533 also meet: they got to pid 1 and ran
+   the whole userland fixture, and then died at the idle exit's `pop {fp, pc}`. A gate that accepted the
+   floor would clear a persistent write on the strength of a boot that died. If the phrases are not in
+   `run_and_capture.sh` any more, the gate refuses rather than reading a phrase nothing prints.
+2. **The rollback verifies.** The whole of `xiaomi4-cancro-backup-20260604-112053/SHA256SUMS.txt` must
+   check out AND the target's own stock image must be present. A rollback whose hashes have moved is a
+   promise, not a path.
+3. **The target is `boot` or `recovery`.** Anything else is refused by name, with the partition list
+   this document forbids.
+4. **TWRP is booted, never flashed.** See below.
+
+#### The write the gate clears, and why it flashes nothing
+
+The tempting reading of "use TWRP to write storage" is "flash TWRP". It is not needed, and the gate
+will not print it. TWRP is a **tool** here: boot it non-persistently, then write the target from inside
+it.
+
+```bash
+sudo fastboot devices                       # must list 4a2fe00b
+sudo fastboot boot twrp.img                 # NOT a flash; nothing is written by this
+sudo adb -s 4a2fe00b shell 'cat /proc/partitions; ls -l /dev/block/by-name/boot'
+sudo adb -s 4a2fe00b push payload.img /tmp/write.img
+sudo adb -s 4a2fe00b shell 'dd if=/tmp/write.img of=/dev/block/by-name/boot bs=4096'
+sudo adb -s 4a2fe00b shell 'sync'
+sudo adb -s 4a2fe00b reboot
+```
+
+That leaves **exactly one** persistent change — the intended one — instead of two, and it keeps
+`fastboot flash` out of the picture entirely for the tool. The only `fastboot flash` in the gate's
+output is the rollback, which is a recovery action and is labelled as one.
+
+#### What is still missing, stated so it is not assumed
+
+* **No TWRP image exists in this tree.** `xiaomi4-cancro-backup-20260604-112053/recovery.img` is the
+  **stock** recovery (verified, and it is the rollback target), not TWRP. A TWRP build for `cancro`
+  must be obtained and its provenance recorded before the `--boot-image` argument means anything.
+* **The gate cannot tell you what an image *is*.** It can verify that the boot image parses as an
+  Android boot image and that it is not the same file as the payload; it cannot verify that it is TWRP,
+  unsigned, or built for this device. That verification is yours.
+* **No EDL path is documented for this phone** (see Emergency notes). The rollback in the gate is a
+  fastboot rollback and it assumes fastboot still works.
+
+
+
 A persistent flash should be a separate, explicitly approved step, for example:
 
 ```bash
