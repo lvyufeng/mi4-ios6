@@ -13,16 +13,34 @@ image to reach for** - including one whose name says there is.
 
 ## 1. The census: what this image can and cannot do to a line, by opcode
 
-Every data-cache maintenance site in `out/stage90/xnu_arm_entry.elf`, counted by opcode (measured; the
-counts are sites, not names):
+Every **by-MVA (`{1}`) data-cache** maintenance site in `out/stage90/xnu_arm_entry.elf`, counted by
+opcode (measured; the counts are sites, not names). The scope is the by-MVA forms because an operation
+aimed at *one line* must name an address: the same census over the whole image also finds nine set/way
+`{2}` data-cache sites (`cleanflushline` `0x80000290`, `invall2flushline` `0x800002b0`,
+`clean_dcacheline` `0x80045760`, `clean_l2dcacheline` `0x80045784`, `clean_dcacheline_idle` `0x800457ac`,
+`cleanflush_dcacheline` `0x8004582c`, `cleanflush_l2dcacheline` `0x80045850`, `fpud_line` `0x80045878`,
+`entry_skip_pad_end` `0x80004c68`), five I-cache sites (`cr7,cr5`: `L_start_cpu_0` `0x80000014`,
+`_start` `0x80000080`, `join_start` `0x80000308`, `InvalidatePoU_Icache` `0x8004572c`, `fmir_loop`
+`0x80045748`) and three TLB sites (`cr7,cr8`: `mmu_kvtop` `0x80017500`, `mmu_uvtop` `0x80017550`,
+`mmu_kvtop_wpreflight` `0x800175a0`), none of which can be aimed at a single line.
 
-| opcode | meaning | sites | where |
+The addresses below are **the instruction's own address inside the routine named beside it**, with the
+routine's entry in parentheses - the two are different numbers and the first draft printed one of each
+kind in the same column.
+
+| opcode | meaning | sites | where (instruction_addr; enclosing routine, entry) |
 | --- | --- | --- | --- |
-| `mcr 15,0,rX,cr7,cr10,{1}` | DCCMVAC - clean by MVA **to PoC** | 5 | `CleanPoC_DcacheRegion` (`0x800457fc`, also spelled `_Force`) among them |
-| `mcr 15,0,rX,cr7,cr14,{1}` | DCCIMVAC - **clean and** invalidate by MVA | **2** | `FlushPoC_DcacheRegion` (`0x800458b0`) **and `invalidate_mmu_dcache_region` (`0x80045710`)** |
-| `mcr 15,0,rX,cr7,cr11,{1}` | DCCMVAU - clean by MVA to PoU | 1 | `CleanPoU_DcacheRegion` (`0x800457e4`) |
-| `mcr 15,0,r0,cr7,cr6,{0}` | whole-cache invalidate | 1 | `invalidate_mmu_dcache` (`0x800456f4`) |
+| `mcr 15,0,rX,cr7,cr10,{1}` | DCCMVAC - clean by MVA **to PoC** | 5 | `ccdr_loop` `0x80045810` (in `CleanPoC_DcacheRegion` `0x800457fc`, aliased `CleanPoC_DcacheRegion_Force`) - **and four of the five are the entry's own code**: `entry_epilogue` `0x800049c4` and `0x80004a10`, `entry_mmio_section` `0x800026ac`, `entry_live_map` `0x80002300` |
+| `mcr 15,0,rX,cr7,cr14,{1}` | DCCIMVAC - **clean and** invalidate by MVA | **2** | `cfmdr_loop` `0x800458b0` (in `FlushPoC_DcacheRegion` `0x8004589c`) **and `fmdr_loop` `0x80045710` (in `invalidate_mmu_dcache_region` `0x800456fc`)** |
+| `mcr 15,0,rX,cr7,cr11,{1}` | DCCMVAU - clean by MVA to PoU | 1 | `cudr_loop` `0x800457e4` (in `CleanPoU_DcacheRegion` `0x800457d0`) |
+| `mcr 15,0,r0,cr7,cr6,{0}` | whole-cache invalidate | 1 | `0x800456f4` (in `invalidate_mmu_dcache` `0x800456f0`) |
 | **`mcr 15,0,rX,cr7,cr6,{1}`** | **DCIMVAC - invalidate by MVA, no clean** | **0** | **absent from this image** |
+
+**(Correction, host-side: the first draft of this table called `CleanPoC_DcacheRegion` "also spelled
+`_Force`" and gave its instruction address as a function entry, mixing the two kinds of address in one
+column. The alias is `CleanPoC_DcacheRegion_Force` - `nm` finds no symbol named `_Force` in either
+parked image - and the entries are as above. Nothing in the section's finding changes: the counts, the
+two `cr7,cr14,{1}` sites and the absent `cr7,cr6,{1}` are as measured.)**
 
 **The finding is the second and the last row together.** Apple's function named
 `invalidate_mmu_dcache_region` is a **clean-and-invalidate**: its loop body is the same

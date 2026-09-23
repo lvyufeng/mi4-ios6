@@ -49,8 +49,18 @@ because the second is meaningless without the first.
 
 That closes 574 section 2's list. The arm's safety now rests on four properties read out of the image,
 none of them from prose: `--wrap` in the link with 4 sites redirected and 0 direct; no
-`FlushPoC_DcacheRegion` call and **no coprocessor instruction of any kind** in the body; the same four
+`FlushPoC_DcacheRegion` call and no coprocessor *write* (`mcr`) of any kind in the body; the same four
 publications; and **no store to the slot**.
+
+**(580 correction: this sentence said "no coprocessor instruction of any kind", and that is false of the
+body. Measured, `entry_seam_flush` contains exactly one coprocessor instruction -
+`8047ca64: mrc 15, 0, sl, cr1, cr0, {0}`, the compiler's inline read of `SCTLR` - and so does 535's
+parked body (`8047ca80`). The clause's regex was `$3 ~ /^mcr/`, which cannot match a `mrc`, so the check
+was right and the sentence about it was wrong: a read cannot change cache state, a write can. The clause
+now counts the two apart and prints them (`mcr=0 mcr7=0 mrc=1 mrc7=0`), and refuses an `mrc` naming
+`cr7` as well, because a body that reads a cache register is reaching into the subsystem this arm must
+not touch. The colleague's `579` had already declined to read these counts as the discriminator: what
+separates the two arms is the **callee**, and it is asserted as one.)**
 
 ## 3. The peer session is adding the same property on the gate side, and the two are not duplicates
 

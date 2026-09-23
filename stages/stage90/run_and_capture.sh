@@ -23,9 +23,15 @@
 # Exit status:
 #   0  device came back and the log was captured
 #   1  the gate refused, the device was not found, or - after the boot - the host could not
-#      write the log where it wanted to (an unwritable $LOGFILE in a sticky /tmp: 511, 512)
+#      write the log where it wanted to (an unwritable $LOGFILE in a sticky /tmp: 511, 512),
+#      or the host could not READ its own USB log to compare (dmesg returned nothing, so the
+#      run has no reading of the device at all: 2026-09-23). All of these are host-side
+#      failures that say nothing about the device, which is why they share a code.
 #   2  the payload ran and the device did NOT come back - a manual power press is needed
-#      (the log will not survive a power cycle, so this is also a lost run)
+#      (the log will not survive a power cycle, so this is also a lost run). Also the code a
+#      *fall* in the host log's enumeration count is reported as (the ring buffer rotating):
+#      that is not evidence of absence, and it is not evidence of presence either, so it is
+#      reported as the reading it cannot rule out.
 #   3  the device returned to the HOST but no log was captured - the host's USB log saw the
 #      phone enumerate again (and its SoC is running) while `adb devices` stayed empty, so
 #      **this is not a hang** and must not be read as one: it is a failed attempt to capture
@@ -153,10 +159,33 @@ exit_pop_lr_addr() {
 # serial*: `usb 3-10` also carries a serial-less `05c6:f006` occupant, which today appeared
 # on its own after 2 h 38 m of an empty port, so a port-only test would read that as a return.
 # `SerialNumber: 4a2fe00b` is printed only for this phone.
+#
+# **And the function has to be able to say "I could not read it", or every call site's UNREAD
+# branch is decoration.** The first form was
+#
+#   n=$(sudo dmesg 2>/dev/null | grep -c "SerialNumber: $SERIAL" 2>/dev/null) || true
+#
+# and it cannot: `grep -c` prints `0` for empty input whether the input is empty because the log
+# has no such line or because `dmesg` never produced any output at all. Measured, with a stub whose
+# `dmesg` fails: the count came back `0`, and the call site's `${...:-UNREAD}` was never reached -
+# so a *blind* reader reported the strongest negative reading this phase has ("the device did not
+# come back", exit 2, press power) with no reading behind it. That is the same defect the file's
+# exit-code contract exists to prevent, one level in: a reader silent because it broke reads
+# exactly like a reader that read a zero. So the *read* is tested, not the count: a `dmesg` that
+# fails, or that prints nothing at all, returns no value and every call site sees UNREAD.
+#
+# `return 0` on that path is deliberate and is not a swallowed error: the value is the reading, and
+# an empty reading is a reading, while a non-zero status under this file's `set -e` would abort the
+# run at the *assignment* (line 933/944/954) with exit 1 - whose documented meaning is "the gate
+# refused, or the device was not found" - turning "the host log is unreadable" into a wrong claim
+# about the device.
 serial_enum_count() {
-  local n
-  n=$(sudo dmesg 2>/dev/null | grep -c "SerialNumber: $SERIAL" 2>/dev/null) || true
-  [[ $n =~ ^[0-9]+$ ]] && printf '%s' "$n"
+  local out n
+  out=$(sudo dmesg 2>/dev/null) || return 0
+  [[ -n $out ]] || return 0
+  n=$(printf '%s\n' "$out" | grep -c "SerialNumber: $SERIAL") || true
+  if [[ $n =~ ^[0-9]+$ ]]; then printf '%s' "$n"; fi
+  return 0
 }
 
 summarise_log() {
@@ -981,16 +1010,36 @@ if [[ $DRY_RUN -eq 0 && $RETURNED -eq 0 ]]; then
     fi
     exit 3
   fi
-  if [[ $ENUM_BEFORE == UNREAD || $ENUM_AFTER == UNREAD || $ENUM_AFTER -lt $ENUM_BEFORE ]]; then
+  # **The unreadable case is not exit 2, and the difference matters more than the code does.** Exit
+  # 2's definition is "the payload ran and the device did NOT come back" - a device verdict, and the
+  # one that spends the device, because it tells the operator to press power. This state has no
+  # verdict: `adb devices` is empty and the comparison that stands in for it is the one that failed.
+  # It is reported as **exit 1** - the code this file already uses for host-side failures that say
+  # nothing about the device ("the gate refused, the device was not found", and 511/512's unwritable
+  # `$LOGFILE`), which is what a host log that could not be read is. `serial_enum_count` could not
+  # return UNREAD at all until the same step repaired it (`grep -c` prints `0` for empty input, so a
+  # *failed* read read as a zero), so until now this branch was decoration over a state the file
+  # claimed to detect and never did - and the value it produced instead (0 -> 0) fell through to the
+  # non-return message below, i.e. the strongest reading in the file from no reading at all.
+  if [[ $ENUM_BEFORE == UNREAD || $ENUM_AFTER == UNREAD ]]; then
     say ""
-    say "UNREAD: the host log could not be compared, so this says the device did not return"
-    say "to *adb*, and it does not say whether it returned to the host. Check by hand:"
+    say "UNREAD: the host's own USB log could not be read (dmesg returned nothing), so this run has"
+    say "NO reading of whether the device came back - \`adb devices\` is empty, and the comparison"
+    say "that stands in for it is the one that failed. **This is not a non-return and must not be"
+    say "read as one: it is not a verdict.** Check by hand before pressing power:"
     say "  sudo dmesg | grep 'usb 3-10'   # the phone is usb 3-10, serial $SERIAL"
     say "The reading is: an enumeration on that port after the fastboot disconnect, with the"
     say "SoC reset behind it, is a return whatever adb said; a single dead second in fastboot"
-    say "with nothing after it is a hang."
-    [[ $ENUM_BEFORE != UNREAD && $ENUM_AFTER != UNREAD ]] && say "  (a *fall* in the count - $ENUM_BEFORE -> $ENUM_AFTER - is the dmesg ring buffer rotating,"
-    [[ $ENUM_BEFORE != UNREAD && $ENUM_AFTER != UNREAD ]] && say "   which is not evidence of absence; the two counts are not comparable)"
+    say "with nothing after it is a hang - and if it is a hang, the power press is what it needs."
+    die "the host could not read its own USB log, so this run produced no reading of the device (exit 1, not 2 - see the section above)"
+  fi
+  if [[ $ENUM_AFTER -lt $ENUM_BEFORE ]]; then
+    say ""
+    say "the comparison fell - $ENUM_BEFORE -> $ENUM_AFTER enumeration(s) - which is the dmesg ring"
+    say "buffer rotating rather than evidence of absence, so it is not a reading of the device"
+    say "either. It is reported as exit 2 because that is the reading it cannot rule out; check"
+    say "by hand before pressing power:"
+    say "  sudo dmesg | grep 'usb 3-10'   # the phone is usb 3-10, serial $SERIAL"
     exit 2
   fi
   say ""

@@ -28659,16 +28659,40 @@ verify_trace_symbols() {
             seam_region=$(awk '/^[[:space:]]*[0-9a-f]+:/ && $3 == "bl" && index($0, "<FlushPoC_DcacheRegion>") > 0 { n++ } END { printf "%d", n + 0 }' <<<"$seam_body_dis")
             [[ "${seam_region:-0}" == 0 ]] ||
                 layout_fail "STAGE90_XNU_SEAM_MEASURE=1 and entry_seam_flush calls FlushPoC_DcacheRegion ${seam_region:-0} time(s): this arm's whole content is the reading, so the operation that cost 535 its return (572 section 1) must not be in its body - an arm carrying it while the record says MEASURE is 535 with a record that says 572"
-            seam_mcr=$(awk '/^[[:space:]]*[0-9a-f]+:/ && $3 ~ /^mcr/ { n++ } END { printf "%d", n + 0 }' <<<"$seam_body_dis")
+            # **The census, and the reason it is a census rather than the one number this clause used to
+            # take.** The first version counted `$3 ~ /^mcr/` and called the result "coprocessor
+            # instruction(s)" - in its refusal text, in the arm's narration below, and in 574 section 2
+            # and 577 section 2, which both read as if the body contained **no coprocessor instruction at
+            # all**. It does contain one, and every arm of this seam contains it: `8047ca64: mrc 15, 0, sl,
+            # cr1, cr0, {0}` in the live body, `8047ca80` in 535's parked one - the compiler's inline read
+            # of SCTLR. `^mcr` never matched it, so the check was *right about what matters and wrong about
+            # what it said*: a `mrc` **reads** a coprocessor register and cannot change cache state, while
+            # an `mcr` **writes** one and can - which is why the refusal stays on `mcr`. A `grep -c
+            # 'coprocessor'` over this file now finds a count that names its opcodes.
+            #
+            # And the pair is what separates the arms, not either count: measured,
+            # `mcr=0 mrc=1` in **both** the measurement body and 535's - what differs is the callee
+            # (`bl FlushPoC_DcacheRegion` 0 vs 1, asserted above). So the count is printed, never argued
+            # from, and the cr7 read is refused separately: a `mrc` naming cr7 is the body reaching into
+            # the cache subsystem, which no arm of this seam has any reason to do.
+            read -r seam_mcr seam_mcr7 seam_mrc seam_mrc7 <<<"$(awk '
+                /^[[:space:]]*[0-9a-f]+:/ {
+                    if ($3 == "mcr") { m++; if ($0 ~ /[ \t]cr7,/) m7++ }
+                    else if ($3 == "mrc") { r++; if ($0 ~ /[ \t]cr7,/) r7++ }
+                }
+                END { printf "%d %d %d %d", m + 0, m7 + 0, r + 0, r7 + 0 }' <<<"$seam_body_dis")"
             [[ "${seam_mcr:-0}" == 0 ]] ||
-                layout_fail "entry_seam_flush contains ${seam_mcr:-0} coprocessor instruction(s) in the measurement arm: with no cache maintenance in the body the arm cannot change the cache's state at all, and that - not the operation's shape - is the claim that lets this arm be booted without risking the device"
+                layout_fail "entry_seam_flush contains ${seam_mcr:-0} mcr instruction(s) (coprocessor write) in the measurement arm: with no instruction that writes a coprocessor register the body cannot change the cache's state at all, and that - not the operation's shape - is the claim that lets this arm be booted without risking the device"
+            [[ "${seam_mrc7:-0}" == 0 ]] ||
+                layout_fail "entry_seam_flush contains ${seam_mrc7:-0} mrc instruction(s) (coprocessor read) naming cr7 in the measurement arm: the body's cache-substate claim is that it only reads the slot and publishes; a read of the cache registers is the body inspecting the very subsystem this arm must not reach into, and it is refused by target rather than by count - the one mrc this image has names cr1 (SCTLR), and it is in both arms"
             seam_reads=$(awk '/^[[:space:]]*[0-9a-f]+:/ && $3 == "ldr" { n++ } END { printf "%d", n + 0 }' <<<"$seam_body_dis")
             [[ "${seam_reads:-0}" -ge 2 ]] ||
                 layout_fail "entry_seam_flush has ${seam_reads:-0} load(s) in the measurement arm: the two words of the slot read before Apple's own flush and again after it are the arm's whole content, so fewer than two means the body cannot produce the pair the reader's clause (5) interprets"
             # **The third part of the safety claim, and the one clause (5) alone could not make: the
             # body does not WRITE the slot.** The claim this arm is booted on is that it cannot change
             # what the machine does, and the operation's absence and the absence of coprocessor
-            # instructions are only half of it - a store to the slot would write memory the `pop` is
+            # *writes* (`mcr` - the census above counts the reads apart, because the body has one and
+            # it is a read) are only half of it - a store to the slot would write memory the `pop` is
             # about to read, which is the very object 546's mechanism is about. So the slot's register
             # is identified *from the body* (a register used as a load base with both offset 0 and
             # offset 4, plus anything `mov`ed from it) and no store may use it as a base.
@@ -28725,7 +28749,7 @@ verify_trace_symbols() {
         if [[ $SEAM_POC -eq 1 ]]; then
             say "  xnu_entry_535: the seam is hooked - the exit's own call to FlushPoU_Dcache at ${seam_call} is redirected to __wrap_FlushPoU_Dcache ($seam_wrap), which reads sp and the return address before anything else runs, and where lr == STAGE90_XNU_SEAM_LR ($seam_lr_def, the address that call returns to, read out of entry_trace.c and checked against the image above) entry_seam_flush ($seam_body) runs: dsb, the slot's two words, Apple's own FlushPoU_Dcache (via __real_FlushPoU_Dcache, ${seam_real} call sites in the body - the seam's and the other three sites'), a PoC clean-and-invalidate of the slot's eight bytes (Apple's own FlushPoC_DcacheRegion at $seam_poc, whose body this clause reads as ${seam_mva} x cr7,cr14,{1} with ${seam_cln} clean-by-MVA and ${seam_inv} invalidate-by-MVA), the two words restored, and the readings published - and ${seam_wrapped} of the image's FlushPoU_Dcache call sites are redirected to it, ${seam_direct} left direct"
         else
-            say "  xnu_entry_572: the seam is hooked and NOTHING RUNS BEHIND IT - the exit's own call to FlushPoU_Dcache at ${seam_call} is redirected to __wrap_FlushPoU_Dcache ($seam_wrap), which reads sp and the return address before anything else runs, and where lr == STAGE90_XNU_SEAM_LR ($seam_lr_def, checked against the image above) entry_seam_flush ($seam_body) runs: dsb, the slot's two words, Apple's own FlushPoU_Dcache (via __real_FlushPoU_Dcache, ${seam_real} call sites in the body), the same two words again, and the readings published - with ${seam_reads} load(s), ${seam_mcr} coprocessor instruction(s) and ${seam_region} call(s) to FlushPoC_DcacheRegion in the body, i.e. no cache maintenance, no store to the slot, and no way for this arm to change what the boot does (572 section 6) - and ${seam_wrapped} of the image's FlushPoU_Dcache call sites are redirected to it, ${seam_direct} left direct"
+            say "  xnu_entry_572: the seam is hooked and NOTHING RUNS BEHIND IT - the exit's own call to FlushPoU_Dcache at ${seam_call} is redirected to __wrap_FlushPoU_Dcache ($seam_wrap), which reads sp and the return address before anything else runs, and where lr == STAGE90_XNU_SEAM_LR ($seam_lr_def, checked against the image above) entry_seam_flush ($seam_body) runs: dsb, the slot's two words, Apple's own FlushPoU_Dcache (via __real_FlushPoU_Dcache, ${seam_real} call sites in the body), the same two words again, and the readings published - with ${seam_reads} load(s), ${seam_mcr} mcr (coprocessor write) / ${seam_mrc} mrc (coprocessor read, of which ${seam_mrc7} name cr7) and ${seam_region} call(s) to FlushPoC_DcacheRegion in the body, i.e. no cache maintenance, no store to the slot, and no way for this arm to change what the boot does (572 section 6) - and ${seam_wrapped} of the image's FlushPoU_Dcache call sites are redirected to it, ${seam_direct} left direct"
         fi
         # **The two arms' pairs mean opposite things, and that is the whole reason the arm publishes
         # which one it is.** With the operation, an unequal `_a`/`_b` pair is the clean's write-back and

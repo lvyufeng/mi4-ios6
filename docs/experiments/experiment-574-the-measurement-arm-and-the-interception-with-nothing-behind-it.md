@@ -19,7 +19,7 @@ build that is described here.)**
 | the interception | `--wrap=FlushPoU_Dcache`: **4** sites redirected, **0** direct | the build's census over the whole disassembly |
 | the wrapper | `__wrap_FlushPoU_Dcache` `0x8047cb90`, 12 B, three instructions, no frame | `mov r0, sp` / `mov r1, lr` / `b entry_seam_flush` |
 | the body | `entry_seam_flush` `0x8047c9c4`, **0x1CC bytes** against 535's 0x1D8 | 12 bytes *smaller*: the operation and the restore are gone |
-| its contents | `dsb`, the two words, `__real_FlushPoU_Dcache`, the same two words, the readings | **14 loads, 0 coprocessor instructions, 0 calls to `FlushPoC_DcacheRegion`** |
+| its contents | `dsb`, the two words, `__real_FlushPoU_Dcache`, the same two words, the readings | **14 loads, 0 `mcr` (coprocessor *write*) and 1 `mrc` (the compiler's SCTLR read, present in both arms), 0 calls to `FlushPoC_DcacheRegion`** |
 | what it publishes | the same keys as 535 plus `xnu_live_seam_op=0` | the reader's clause (5) branches on it |
 
 ## 2. Why it cannot change the machine, and what is *not* asserted
@@ -29,8 +29,9 @@ frame; the arm writes no control register; and the body performs no cache mainte
 a line, clean one, discard one, or change memory. The build asserts the parts of that which are
 properties of the image:
 
-- **0 coprocessor instructions in the body** (`$3 ~ /^mcr/`) - the instruction class every cache
-  operation in the ARM is spelled with;
+- **0 `mcr` in the body** - a coprocessor *write* is the instruction class every cache operation in the
+  ARM is spelled with, and a write is the only way this body could move a line or change a control
+  register. (Written as "0 coprocessor instructions" until 580; see the update below.)
 - **0 calls to `FlushPoC_DcacheRegion`** - 535's operation specifically, so a build that kept the call
   and dropped only the restore stops here;
 - **>= 2 loads** - the pair is the arm's whole content, so a body that could not produce it is not this
@@ -40,6 +41,16 @@ properties of the image:
 identifying the slot's registers from the body itself and refusing any store that uses one. Measured on
 both parked arms: this image 2 slot register(s) / 0 stores to them, 535's body the same registers and 2
 stores - the falsification. See `experiment-577-*.md`.)**
+
+**(580 update: and the count in the first bullet was a *pattern* answer that read as a count of the
+class. The body does contain one coprocessor instruction - `8047ca64: mrc 15, 0, sl, cr1, cr0, {0}`, the
+compiler's inline read of `SCTLR` - and **every arm of this seam contains it** (535's parked body has
+the same instruction at `8047ca80`). `^mcr` never matched a `mrc`, so the refusal was right about what
+matters and wrong about what it said: a read cannot change cache state, a write can. The build clause now
+counts the pair apart (`mcr=0 mcr7=0 mrc=1 mrc7=0`, printed in the arm's narration), refuses any `mcr`
+and any `mrc` naming `cr7`, and the property that actually separates this arm from 535's is the **callee**
+(`bl FlushPoC_DcacheRegion`: 0 here, 1 there) and not any count. See
+`experiment-580-the-census-that-names-its-opcodes-and-the-three-outcomes-of-section-4.md`.)**
 
 **What 574 did not assert from the image, named rather than left implicit: that the body contains no store
 to the slot.** The restore lives inside `#if STAGE90_XNU_SEAM_POC`, so with the switch at 0 the compiler
