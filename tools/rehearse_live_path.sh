@@ -429,3 +429,74 @@ reader_state cap-full         "live channel: **TRUNCATED**" \
 printf '\n  %d ok, %d failed\n' "$rpass" "$rfail"
 (( rfail == 0 )) || { printf '\nREFUSING: the reader has a state it cannot read.\n'; trap - EXIT; exit 1; }
 printf '\nEvery state the next press can produce is read by its own line.\n'
+
+# ---------------------------------------------------------------------------------------------------
+# == the path argument, which is the caller's and not this script's =================================
+#
+# 615's defect, and it is the one every cell above was blind to because every cell above passes an
+# ABSOLUTE path: `run_and_capture.sh` `cd`s to its own directory before parsing its arguments, so a
+# relative `--summarise` path was joined to `stages/stage90/` instead of to the caller's directory and
+# refused as `no such log`, naming a file that exists. Measured before the fix: refused from the
+# repository root, and refused from the capture's own directory with the bare filename - only an
+# absolute path worked. The operator's next action after the one gated boot is to re-read that run's
+# capture, and the natural thing to type is a path relative to where they are.
+#
+# The states below are the three the fix has to keep apart, and the third is the one that keeps the
+# note honest: a re-based path must SAY it was re-based, and an absolute path must stay silent, because
+# a note that prints either way is not a note about anything.
+printf '\n== the path argument, resolved against the caller and not this script ==\n\n'
+PPASS=0; PFAIL=0
+path_state() {  # path_state NAME EXPECTED_EXIT MUST_SAY MUST_NOT_SAY DIR ARGS...
+  local name=$1 want=$2 must=$3 mustnot=$4 dir=$5; shift 5
+  local out rc
+  out=$( cd "$dir" && bash "$RUNNER" "$@" 2>&1 ); rc=$?
+  local why=""
+  (( rc == want )) || why="exit $rc, promised $want"
+  if [[ -n $must ]]; then
+    printf '%s' "$out" | grep -qF -- "$must" || why="${why:+$why; }did not say: $must"
+  fi
+  # The absence assertion carries the same guard the shrink cells in the revert-set rehearsal needed:
+  # a command that failed to run at all also "did not say" the thing. So MUST_NOT_SAY is only ever
+  # asserted together with a positive expectation that the same output does contain.
+  if [[ -n $mustnot ]]; then
+    printf '%s' "$out" | grep -qF -- "$mustnot" && why="${why:+$why; }said what it must not: $mustnot"
+  fi
+  if [[ -n $why ]]; then
+    PFAIL=$((PFAIL+1)); printf '  FAIL  %-26s %s\n' "$name" "$why"
+    printf '%s\n' "$out" | sed 's/^/          /' | head -5
+  else
+    PPASS=$((PPASS+1)); printf '  ok    %-26s exit=%s  %s\n' "$name" "$rc" "${must:-$mustnot}"
+  fi
+}
+RELLOG=$WORK/reader-predicted.log
+mk_sleeper_log predicted "$RELLOG"
+RELDIR=$WORK/relative
+mkdir -p "$RELDIR"
+cp "$RELLOG" "$RELDIR/capture.txt"
+# 1. a path relative to the CALLER's directory reads the log (it used to be refused as "no such log")
+path_state relative-path-reads    0 "MI4IOS6_STAGE90 lines:" "no such log"  "$RELDIR" --summarise capture.txt
+# 2. and the same invocation from the repository root, with a path relative to *there* - which is the
+#    shape a user types. Derived rather than written down: a hard-coded tree path would make this cell a
+#    statement about which captures happen to be on this host, and it would pass by not running.
+REL_FROM_ROOT=$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$RELLOG" "$ROOT")
+case $REL_FROM_ROOT in
+  /*) printf '  FAIL  %-26s relpath returned an absolute path (%s), so this cell cannot test anything\n' \
+        "relative-from-root" "$REL_FROM_ROOT"; PFAIL=$((PFAIL+1)) ;;
+  *)  path_state relative-from-root 0 "MI4IOS6_STAGE90 lines:" "no such log" "$ROOT" --summarise "$REL_FROM_ROOT" ;;
+esac
+# 3. an absent relative path is STILL refused, and the refusal names the absolute path and the directory.
+#    This one is a no-regression cell rather than a cell about the resolution - it passes before and
+#    after the fix, because a missing file is refused either way - and it is kept because the failure it
+#    would catch is the fix going too far (a reader that re-bases and then accepts what it finds).
+path_state relative-absent-refused 1 "is not a readable regular file" "" "$RELDIR" --summarise not-here.txt
+# 4. an absolute path prints NO note. **This cell passes in the broken version too** - it asserts an
+#    absence, and the broken version printed no note either, because it printed nothing but the refusal.
+#    Its evidence is only readable together with cells 1 and 2, which assert that the note IS printed
+#    when a path was re-based; the pair is what makes the absence mean "absolute paths stay silent"
+#    rather than "this line never runs". Measured by falsification: with the resolution removed, cells 1
+#    and 2 go red and cells 3 and 4 stay green - the two greens are exactly the two that a broken
+#    version also satisfies.
+path_state absolute-path-no-note  0 "MI4IOS6_STAGE90 lines:" "is a relative path" "$RELDIR" --summarise "$RELLOG"
+printf '\n  %d ok, %d failed\n' "$PPASS" "$PFAIL"
+(( PFAIL == 0 )) || { printf '\nREFUSING: a path argument is interpreted against the wrong directory.\n'; trap - EXIT; exit 1; }
+printf '\nA path the caller names is resolved against the caller.\n'

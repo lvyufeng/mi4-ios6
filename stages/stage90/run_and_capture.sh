@@ -55,14 +55,46 @@
 
 set -euo pipefail
 
+# **The caller's directory, captured before the `cd` below, because paths that arrive as input belong to
+# the caller and not to this script.** This file `cd`s to its own directory at line 58 (so that every
+# relative path it uses internally is stable), and until 615 that `cd` also silently re-based the paths
+# it was *given*: `--summarise out/stage90/captures/533-....txt` from the repository root resolved
+# against `stages/stage90/` and refused with `no such log`, naming a path that exists. Measured before
+# the fix, three ways - from the repo root, and from the capture's own directory with the bare filename -
+# all three refused, and only an absolute path worked. The message blamed the file for a fact about this
+# script's working directory, which is the exact shape of a die that names the artifact when the truth is
+# about the harness (`mi4-a-status-is-a-verdict-only-if-its-producer-delivered-one`). The one thing this
+# reader produces is a reading OF a log, and the log is named by the caller.
+INVOKE_PWD=$PWD
 cd "$(dirname "$0")"
 STAGE_DIR=$PWD
 REPO_ROOT=$(cd "$STAGE_DIR/../.." && pwd)
 OUT=$REPO_ROOT/out/stage90
 IMAGE=$OUT/stage90-qcdt.img
 
+# Resolve an input path against the caller's directory. Absolute paths pass through untouched; a
+# relative one is joined to `$INVOKE_PWD`, and the join is recorded so it can be *printed* rather than
+# performed silently - a re-based path that is invisible is how the next reader is surprised.
+#
+# **The result comes back in `$RESOLVED` rather than on stdout, and that is not style.** The first
+# version of this was `LOGFILE=$(resolve_path ...)` with the function `printf`ing the path, and it
+# silently lost the `REBASED` record: a command substitution runs in a subshell, so the append inside
+# the function was discarded and the note below printed nothing while the resolution itself worked. The
+# symptom was a check that *looked* absent, on a path that had been taken - the same failure shape this
+# project keeps finding in cells, in a shell function.
+RESOLVED=""
+REBASED=""
+resolve_path() {   # resolve_path PATH - sets RESOLVED, appends to REBASED
+  local p=$1
+  RESOLVED=""
+  [[ -z $p ]] && return 0
+  if [[ $p == /* ]]; then RESOLVED=$p; return 0; fi
+  REBASED="$REBASED $p"
+  RESOLVED="$INVOKE_PWD/$p"
+}
+
 SERIAL=${SERIAL:-4a2fe00b}
-LOGFILE=${LOGFILE:-/tmp/cancro-last_kmsg.txt}
+resolve_path "${LOGFILE:-/tmp/cancro-last_kmsg.txt}"; LOGFILE=$RESOLVED
 RETURN_TIMEOUT=${RETURN_TIMEOUT:-180}
 # The capture wait is a **second window and not a repeat of the one above**, which is the whole point
 # of it: section 4's criterion is satisfied the moment the host log shows the phone enumerating, and on
@@ -86,9 +118,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+resolve_path "$SUMMARISE_ONLY"; SUMMARISE_ONLY=$RESOLVED
+
 say() { printf '%s\n' "$*"; }
 step() { printf '\n== %s ==\n' "$*"; }
 die() { printf 'run_and_capture: %s\n' "$*" >&2; exit 1; }
+
+# **The resolution is printed, not silent.** A path argument that was re-based is a decision this script
+# made on the caller's behalf, and a caller who wrote `out/stage90/captures/x.txt` and sees the reading
+# come back has no way to know which directory it was joined to. One line per re-based path, and none
+# when every path was already absolute - so the line's presence is itself information.
+for _rb in $REBASED; do
+  say "note: '$_rb' is a relative path, resolved against the directory this was invoked from"
+  say "      ($INVOKE_PWD), not against $STAGE_DIR. Pass an absolute path to say it exactly."
+done
+unset _rb
 
 # --- a backtick inside a printed string is a command, not punctuation ----------------------------
 #
@@ -1963,7 +2007,11 @@ summarise_log() {
 
 if [[ -n $SUMMARISE_ONLY ]]; then
   step "summarising $SUMMARISE_ONLY"
-  [[ -f $SUMMARISE_ONLY ]] || die "no such log: $SUMMARISE_ONLY"
+  # The refusal names the absolute path it looked at **and** the directory it was resolved against, so a
+  # reader who is told "no such log" can see which file that claim is about. Before 615 this line printed
+  # the caller's own string, so `no such log: out/stage90/captures/533-....txt` was a sentence about a
+  # 597 KB file that was sitting right there - a refusal that named the artifact for a fact about `$PWD`.
+  [[ -f $SUMMARISE_ONLY ]] || die "no such log: $SUMMARISE_ONLY (looked for that path, resolved against ${INVOKE_PWD}; '$SUMMARISE_ONLY' is not a readable regular file)"
   summarise_log "$SUMMARISE_ONLY"
   say ""
   say "done."
