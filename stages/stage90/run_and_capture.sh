@@ -1451,6 +1451,14 @@ summarise_log() {
   # having them is not evidence that the boot got further than any boot has. The sentence that has to
   # survive into the report is the one naming the ceiling: what nobody has yet observed is the
   # machine *staying* up.
+  # **And the one state this block does not run in, named because it was found by looking for it.**
+  # Run against a log with **zero** `MI4IOS6_STAGE90` lines, the goal block prints nothing - because
+  # `summarise_log` returned above, at the `n -eq 0` test, with "NONE. The log has no payload output
+  # from this run". That is the one silence here that is deliberate and named: with no payload output
+  # at all there are no readings, goal included, and a table of `absent`s would be a worse answer than
+  # the sentence already on screen. Every log that carries payload output reaches this block, which is
+  # why it is not gated on anything - and `syn-F` (survived, truncated before userland) is the state
+  # that proves the difference: it has one payload line and the block prints its UNREAD there.
   local g_open_n g_read_n g_getpid_n g_exit_n g_wait_n g_ast_n
   local g_open_err g_open1 g_open2 g_read_ret g_read_nb g_read_before g_read_after g_read_buf
   local g_getpid_val g_exit_pid g_exit_rval g_wait_done g_wait_status g_wait_err

@@ -51,6 +51,16 @@ and it is deliberately *not* gated on the arm signature. The userland phase happ
 branch would be silent for exactly the logs most likely to matter. That is 564's defect and 594's
 missing `else` one layer out — the same lesson, applied before rather than after it bit.
 
+**The one state it does not run in, found by looking for it rather than by assuming it prints always:**
+against a log with **zero** `MI4IOS6_STAGE90` lines it prints nothing, because `summarise_log` returns
+at its own `n -eq 0` test with "NONE. The log has no payload output from this run". That is the one
+silence here that is deliberate and named, and it is the right answer — with no payload output at all
+there are no readings, goal included, and a table of `absent`s would be worse than the sentence already
+on screen. The difference is testable and was tested: `syn-F` is the same shape with one payload line,
+and the block prints its UNREAD there. Both facts are stated in the block's own comment, because a
+future reader who tries the block against a truncated log and sees nothing would otherwise have to
+rediscover which silence is which.
+
 ### The reader's own third helper, and why two were not enough
 
 `keyval` takes the last occurrence and `maxhex` the largest; both collapse a key's history to one
