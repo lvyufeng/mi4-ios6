@@ -423,9 +423,18 @@ port_enum_rollup() {
 # test. Before the wait the two are equivalent, because the presence check immediately above has already
 # established that `$SERIAL` is in the list. They stop being equivalent once a wait is between them: the
 # list can lose this phone and keep the stranger, and a bare count test would then read `1` and pass.
-# What the stronger form buys is a **refusal instead of a raw `fastboot` error** - with `-s "$SERIAL"`
-# and no such device on the bus, `fastboot` fails with its own message, for which this file's exit
-# contract has no clause.
+# What the stronger form buys is a **refusal instead of a raw `fastboot` error**. The reasoning is that
+# with `-s "$SERIAL"` and no such device on the bus, `fastboot` fails with its own message, for which this
+# file's exit contract has no clause - **and that step is an assumption, not a measurement.** What IS
+# measured is what `-s` means: `fastboot --help` says `-s SERIAL  Specify a USB device`, so the call names
+# its target rather than relying on there being exactly one. Whether an *absent* `-s` target makes
+# `fastboot` refuse or fall back to a device that is present is not measured here, and deliberately not:
+# measuring it means sending a fastboot command on a bus where someone else's phone is sitting in
+# fastboot, and the fall-back branch of that test is a touch of a device this project has no business
+# talking to. So the stronger condition is justified on the part that is measured - that it cannot pass a
+# list holding the stranger alone - and this paragraph records the part that is not. If a future run
+# shows `fastboot` falling back to a present device under an absent `-s`, the condition is still correct
+# and the *reason* here is wrong, which is the failure mode this comment exists to make findable.
 fastboot_pinned_only() {
   local list=$1 n
   n=$(printf '%s\n' "$list" | grep -c . || true)
