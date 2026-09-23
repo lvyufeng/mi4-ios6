@@ -209,7 +209,32 @@ and independent of 637's repair in either order (`ad698429998fd898…`).
   event that can move the goal is physical and the user's: **unplug `33e80afe`, then Vol-Down + Power**
   (635). TWRP-to-storage stays withheld: 「如果os已经能进去了的话」 is unmet.
 
-## 7. Safety
+## 7. The catch's cover has two deadlines, and only one of them is the cover
+
+Not the step's subject, but it was written down wrong twice on the way here and the right answer is in a
+file, so it is recorded. The armed catch's own log has two lines that both look like "how long something
+watches":
+
+```
+press-watcher.log:141  [2026-09-23 19:51:34] catch 1 armed (pid 1344846)
+press-watcher.log:86   [2026-09-23 14:16:11] relay armed: will keep exactly one catcher at
+                                              …/press-watcher.sh alive; poll 30s; at most 16 re-arms
+```
+
+The **catch's** line gives a 6 h bound from the *catch's* own start (`:98`), so catch 1 covers a press
+taken up to **2026-09-24 01:51:34** — and that is a statement about catch 1, **not** about the cover.
+The **relay's** line gives the cover, and the loop behind it is exact: `arms=0` (`:179`),
+`arms=$(( arms + 1 ))` (`:206`) before each arm, and the stop at `:199` is `[ "$arms" -ge "$REARM_MAX" ]`
+— so `REARM_MAX=16` is **sixteen** catches numbered 1..16, which is what the file's own comment says
+(`:55`, "16 x ~6 h = ~4 days of continuous cover"). The cover therefore ends about **2026-09-27 19:51**
+(96 h from catch 1, plus a few minutes of ARM_SETTLE, not hours).
+
+**Why it matters here:** a reader asking "is anything still catching a press on the 26th?" who takes the
+catch's bound for the cover concludes the watch lapses tomorrow, and one who counts the initial arm twice
+concludes it ends several hours later than it does. Two lines, one log, two deadlines — the same shape as
+the rest of this step, in the record rather than in the code, and the one to quote is the relay's.
+
+## 8. Safety
 
 No device action, no boot, no build, no `fastboot`, no `adb`, **nothing written to storage**. The
 commands were `nm`/`objdump` on the frozen ELF, one re-run of `tools/check_idle_window_unreachable.py`
