@@ -1725,7 +1725,10 @@ fi
 # would print FAIL for the death 547 section 4 predicts. The test is scoped to the *function* the
 # reader's comment names (`platform_cache_idle_exit`), because the image calls `FlushPoU_Dcache` from
 # several sites and only the caller tells them apart - guarding on the callee is not a style choice
-# here but the only thing that separates this seam from the others. **The count is printed from this
+# here but the only thing that separates this seam from the others. **535 moved that**: with
+# `--wrap=FlushPoU_Dcache` in the link every caller branches to one wrapper, so the seam is separated by
+# the filter *inside* the wrapper and not by the call site - which is why the printed line below now
+# says which of the two mechanisms this image uses instead of asserting the first one. **The count is printed from this
 # image rather than asserted here**, because this project's notes carried six for it, having listed
 # the two `FlushPoC_Dcache` references - a *different* callee, `0x80045828` - in the same breath as the
 # `bl` sites that reach `FlushPoU_Dcache`. Measured, the second list is four: `0x80045d08`,
@@ -1737,13 +1740,21 @@ _GATE_OD=${STAGE90_OBJDUMP:-arm-none-eabi-objdump}
 # `800462dc:\te30101a4 …` directly after the `bl`, while `llvm-objdump` prints a *symbol* line first
 # (`800462dc <platform_cache_idle_exit+0x8>:`) and would leave a rule that requires a colon with
 # nothing to print - the same failure shape 549 records, a decoder that answers by printing nothing.
+# **And the callee's spelling is a property of the link, not of the routine** (535): with
+# `--wrap=FlushPoU_Dcache` in it, the exit's call disassembles as `bl 8047cb9c
+# <__wrap_FlushPoU_Dcache>` - the string `<FlushPoU_Dcache>` is not in that line, so a pattern written
+# as `/<FlushPoU_Dcache>/` matched no line at all and this clause went quiet on the image it exists to
+# bind. It was quiet on a `GATE EXIT=0` run, which is the whole defect: the exit code did not say
+# that the one clause whose job is to bind the reader's criterion to this image had compared nothing.
+# The pattern is therefore about the **routine** and accepts any wrapper prefix - and the branch below
+# that used to be the resting state of a wrapped arm is now a hard stop when the decoder did run.
 # So the address is taken from the first line after the call that begins with one, colon optional, and
 # the function's own entry address is excluded: a parse that returned the entry would be comparing the
 # reader's criterion against the top of the function instead of against the return address.
 _pop_lr_from_elf() {
   "$_GATE_OD" -d --no-show-raw-insn "$ENTRY_ELF" 2>/dev/null | awk '
     /^[0-9a-f]+ <platform_cache_idle_exit>:/ { infn = 1; a = $1; sub(/:$/, "", a); entry = a; next }
-    infn && /<FlushPoU_Dcache>/ && /bl/      { want = 1; next }
+    infn && /<[^<>]*FlushPoU_Dcache>/ && /bl/ { want = 1; next }
     want && /^[0-9a-f]+[[:space:]]*[:<]/     { a = $1; sub(/:$/, "", a); if (a != entry) { print a; exit } }
     /^[0-9a-f]+ <.*>:/                       { infn = 0 }
   '
@@ -1756,8 +1767,17 @@ PIN=$(tr 'A-Z' 'a-z' <<<"$PIN")
 # that SIGPIPE into the pipeline's status - which `set -e` then reads as a failure of the *gate*. The
 # value was correct; the run died before printing it. Same shape as the reader's own `keyval || true`.
 DERIVED=$(_pop_lr_from_elf | tr 'A-Z' 'a-z' || true)
-FLUSH_N=$("$_GATE_OD" -d --no-show-raw-insn "$ENTRY_ELF" 2>/dev/null \
-          | grep -cE 'bl[[:space:]]+(0x)?[0-9a-f]+ <FlushPoU_Dcache>' || true)
+# **Two counts, because the callee's spelling is a property of the link** (535). With
+# `--wrap=FlushPoU_Dcache` in it, all four callers branch to one address, `<__wrap_FlushPoU_Dcache>`
+# (`0x8047cb9c`), and the bare spelling survives only inside the wrapper's own body. A single count
+# printed alone was read as "the callers" before 535 and would be read as "the wrapper" after it - one
+# value with two definitions (558), and the sentence built on it named the wrong thing as the guard. So
+# both spellings are measured and both are printed, and whether `--wrap` is in the link follows from
+# the wrapped count being non-zero rather than from a claim here.
+FLUSH_SITES=$("$_GATE_OD" -d --no-show-raw-insn "$ENTRY_ELF" 2>/dev/null \
+          | grep -cE 'bl[[:space:]]+(0x)?[0-9a-f]+ <[^<>]*FlushPoU_Dcache>' || true)
+FLUSH_WRAP=$("$_GATE_OD" -d --no-show-raw-insn "$ENTRY_ELF" 2>/dev/null \
+          | grep -cE 'bl[[:space:]]+(0x)?[0-9a-f]+ <__wrap_FlushPoU_Dcache>' || true)
 echo "== the address run_and_capture.sh's shape test compares against =="
 if [[ ! -f $ENTRY_ELF ]]; then
   echo "UNREAD - no $ENTRY_ELF, so the address the death is attributed by cannot be derived here. The"
@@ -1779,9 +1799,29 @@ elif [[ -z $PIN ]]; then
     echo "  comment is not the value the reader keys on: find the variable it compares against.)"
   fi
 elif [[ -z $DERIVED ]]; then
-  echo "UNREAD - $_GATE_OD found no 'bl <FlushPoU_Dcache>' inside platform_cache_idle_exit in"
-  echo "$ENTRY_ELF, so this clause could not derive the address it compares the reader's fallback"
-  echo "against. Read the disassembly by hand before the run; the comparison below did NOT happen."
+  # **This branch used to be the resting state of a wrapped arm, which is how 535 found it: the
+  # pattern did not fit `--wrap`'s spelling, so the clause printed UNREAD and the gate still exited 0.**
+  # A quiet clause on a green run is indistinguishable from one that never ran, so the branch now
+  # separates the three things that can make DERIVED empty, and only the last of them is a finding
+  # about the image: no decoder on PATH and a decoder that printed nothing are properties of *this
+  # shell* (549's shape), while a full disassembly with no call in it means the reader's criterion has
+  # no anchor - which is a stop, not a note, because the run after it would attribute the death by an
+  # address that names no instruction.
+  if ! command -v "$_GATE_OD" >/dev/null 2>&1; then
+    echo "UNREAD - $_GATE_OD is not on PATH, so nothing in $ENTRY_ELF could be decoded here. That is a"
+    echo "property of this shell and not of the arm: the comparison below did NOT happen, and this run"
+    echo "says nothing either way about where platform_cache_idle_exit calls FlushPoU_Dcache. Re-run"
+    echo "with STAGE90_OBJDUMP=<a disassembler that is installed> before booting."
+  else
+    _dis_n=$("$_GATE_OD" -d --no-show-raw-insn "$ENTRY_ELF" 2>/dev/null | grep -c '' || true)
+    if (( _dis_n == 0 )); then
+      echo "UNREAD - $_GATE_OD exited without printing anything for $ENTRY_ELF, which is 549's decoder"
+      echo "that answers by printing nothing: a failure to read the image, not a finding about it. The"
+      echo "comparison below did NOT happen; check that $ENTRY_ELF is the ELF it is claimed to be."
+    else
+      fail "$ENTRY_ELF decodes to $_dis_n lines and shows no 'bl <...FlushPoU_Dcache>' inside platform_cache_idle_exit - so the address run_and_capture.sh attributes a pop death by has no anchor in this image, and 554's shape test would compare the log's published lr against a number that names no instruction. The pattern accepts any wrapper prefix ('<__wrap_FlushPoU_Dcache>' as well as '<FlushPoU_Dcache>'), so this is not the --wrap spelling: either this arm moved or removed the exit's flush call, or the callee was renamed. If that was deliberate, the reader's criterion has to move with it and be re-derived where it is defined - do not let this clause go quiet instead, because a check that prints nothing when its subject moves is indistinguishable from one that never ran. Nothing is rebuilt by this refusal: the frozen pair embeds this entry image, so rebuilding it would spend the freeze this gate exists to protect"
+    fi
+  fi
 elif (( 16#$DERIVED % 4 != 0 )) || (( 16#$DERIVED < 16#80000000 )) || (( 16#$DERIVED > 16#fffeffff )); then
   echo "UNREAD - the disassembly gave 0x$DERIVED for the address platform_cache_idle_exit's flush"
   echo "returns to, and that is not a 4-byte-aligned kernel address, so this clause parsed a line that"
@@ -1791,11 +1831,21 @@ elif [[ $DERIVED != "${PIN#0x}" ]]; then
   fail "run_and_capture.sh's fallback address for the idle exit's pop is $PIN and $ENTRY_ELF has platform_cache_idle_exit returning from that bl at 0x$DERIVED: two definitions of one address, and they disagree. The reader derives its criterion from this ELF at run time and uses the literal only when the ELF cannot be read, so a log summarised from a tree without out/ would attribute the death by a number that is not in this image - and 554's shape test would then print FAIL for the death 547 section 4 pre-registers for the enable-off arm, which is the defect that clause was written to remove. This gate cannot tell which of the two is stale - the literal, or this ELF and the bin built beside it - so it names the test rather than presuming the answer: disassemble platform_cache_idle_exit by hand. If the address above is this image's, the runner's literal is the one owed a change, and it is a one-line change to a variable that is not the artifact. Nothing is rebuilt by this refusal, and nothing should be: the frozen pair embeds this entry image, so rebuilding it would spend the freeze this gate exists to protect"
 else
   echo "ok: the reader's criterion and this image agree - $PIN, derived from $ENTRY_ELF's own"
-  echo "  platform_cache_idle_exit, the address its bl <FlushPoU_Dcache> returns to. The scoping is what"
-  if (( FLUSH_N > 0 )); then
-    echo "  that function buys: the image branches to FlushPoU_Dcache from $FLUSH_N site(s) with a bl - and"
-    echo "  the guard is on the caller, because only the caller separates this seam from the others. That"
-    echo "  count is the bl sites to *this* callee; the two FlushPoC_Dcache references are another function."
+  echo "  platform_cache_idle_exit, the address its bl into FlushPoU_Dcache returns to. The scoping is what"
+  if (( FLUSH_SITES > 0 )); then
+    echo "  that function buys: the image branches into FlushPoU_Dcache from $FLUSH_SITES bl site(s) -"
+    if (( FLUSH_WRAP > 0 )); then
+      echo "  $FLUSH_WRAP of them through the *wrapper* (<__wrap_FlushPoU_Dcache>, one address) and"
+      echo "  $(( FLUSH_SITES - FLUSH_WRAP )) spelling the bare callee, which is the wrapper's own body. So --wrap"
+      echo "  IS in this link, every caller arrives at one place, and what separates this seam from the"
+      echo "  other callers is the return-address filter *inside* the wrapper - the address above - and not"
+      echo "  the call site, which is the separation the unwrapped arms had and this one does not."
+    else
+      echo "  and the guard is on the caller, because only the caller separates this seam from the others:"
+      echo "  no call site in this image spells a wrapper, so no --wrap was in the link."
+    fi
+    echo "  Those are bl sites to *this* routine under each spelling; the two FlushPoC_Dcache references"
+    echo "  are another function."
   else
     # The address was read out of a line the count then failed to match, which cannot both be true. So
     # the count is reported as unusable rather than printed as a zero: "no site found" and "the pattern
