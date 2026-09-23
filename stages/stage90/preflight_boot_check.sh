@@ -335,10 +335,10 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 [[ "$recorded_sha" == "$actual_sha" ]] \
   || fail "$ENTRY_CFG describes entry image $recorded_sha and $ENTRY_BIN is $actual_sha: the record names a different artifact than the one on disk, so the switches it lists are about some other image. Rebuild the entry image, then ./build.sh"
 #
-# **Every key by name, because the five that *are* the variant are not named like the artifact.** The
+# **Every key by name, because the six that *are* the variant are not named like the artifact.** The
 # four keys that identify the record (SHA256, BYTES, TRACE, REAL_ARM_INIT) all begin `STAGE90_XNU_ENTRY_`
-# or `STAGE90_ENTRY_`, and the five that say *which arm this is* - SLOT_NULL, EXIT_POC_FLUSH,
-# IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK - begin `STAGE90_XNU_` and end there. So the obvious
+# or `STAGE90_ENTRY_`, and the six that say *which arm this is* - SLOT_NULL, EXIT_POC_FLUSH,
+# IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC - begin `STAGE90_XNU_` and end there. So the obvious
 # display filter, `$1 ~ /^STAGE90_(XNU_ENTRY|ENTRY_)/`, prints four lines, drops all five of the ones
 # this clause exists to publish, and **prints no error doing it**: the gate would report success while
 # saying nothing about the arm, which is the whole reason the clause was added. Measured on a record
@@ -348,26 +348,36 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 # refused rather than shown as a shorter list (`[[ -n $v ]]`, so an empty value is a missing key: an
 # `X=` line is not `X=0`, which is [[mi4-off-option-two-spellings]] one register over).
 #
-# **The list was nine and is twelve, and it grew by enumerating rather than by reading.** 540 found three
+# **The list was nine, then twelve, and is thirteen, and each addition grew it by enumerating rather than
+# by reading.** 540 found three
 # more switches that shape the linked entry image and were in no record anywhere -
 # `STAGE90_ENTRY_CHECKPOINT` and its two variants (`--wrap=<symbol>` plus an extra object in the link,
 # `:218`-`:236` and `:27218`) - so `build_entry.sh` records them now and this run needs to *show* them:
 # a switch that changes the image and is not printed is a run whose arm nobody read. They are written
 # `(unset)` when empty, so the `[[ -n $_v ]]` test above still means "the key is there" - which is the
 # whole reason that test is `-n` and not a comparison with zero.
+#
+# **The thirteenth is 535's, and it arrived from the build side.** `STAGE90_XNU_SEAM_POC` is the switch
+# whose arm *is* the interception (`--wrap=FlushPoU_Dcache`) rather than a branch inside one, so it has to
+# be named here for the same reason 540's checkpoint trio does: a switch that changes the image and is not
+# printed is a run whose arm nobody read. It is also the first key this list gained *before* a record
+# carried it - the build side writes it from the next entry build on - so a gate run between this change
+# and that build refuses at the clause below, and the refusal names the key. That is the whole of the
+# remedy, and it is deliberately not softened: a key that may or may not be there is a key nobody read.
 ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_TRACE
                 STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT_NULL STAGE90_XNU_EXIT_POC_FLUSH
                 STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE STAGE90_XNU_IDLE_STACK
-                STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP STAGE90_ENTRY_CHECKPOINT_AFTER)
+                STAGE90_XNU_SEAM_POC STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
+                STAGE90_ENTRY_CHECKPOINT_AFTER)
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
   [[ -n $_v ]] \
-    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The five variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK) are exactly the ones a display filter written around the artifact keys drops in silence"
+    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The six variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC) are exactly the ones a display filter written around the artifact keys drops in silence"
   printf '  %s=%s\n' "$_k" "$_v"
 done
 # And the converse, so a key the list above does not name cannot arrive unshown (a *tenth* when the list
-# held nine; a thirteenth now): every `STAGE90_` key the record carries
+# held nine; a fourteenth now): every `STAGE90_` key the record carries
 # must be one of the names above. Without this the list above would be the only definition of what is
 # visible, and a key added on the build side would be recorded and never read - the same defect with
 # the arrow reversed.
@@ -394,7 +404,7 @@ echo "  (recorded in $ENTRY_CFG, bound to $actual_sha)"
 # *failed enable* - the 533 doc's section 5 item 3 is that same criterion and 538 is where it was shown
 # it cannot fail. So the arm is derived here, one consequence per recorded key, and the enable's line
 # carries the reading rule that follows from its own value rather than a second assertion.
-# The five are read as `grep -c` of the whole `KEY=` prefix rather than as awk's last match, because the
+# The six are read as `grep -c` of the whole `KEY=` prefix rather than as awk's last match, because the
 # three ways a value can be unusable here are three different things and only one of them is `build_entry.sh`
 # refusing a bad value at build time (`:350-352`): a key can be **absent** (a record older than the key, so
 # the clause has no value and `[[ $V -eq 1 ]]` on an empty string would silently take the 0 branch *while the
@@ -405,7 +415,7 @@ echo "  (recorded in $ENTRY_CFG, bound to $actual_sha)"
 # would spend the very freeze this gate exists to protect (539's defect, one arm later).
 _vmiss=; _vdup=; _vbad=
 for _vk in STAGE90_XNU_SLOT_NULL STAGE90_XNU_EXIT_POC_FLUSH STAGE90_XNU_IDLE_CACHE_ENABLE \
-           STAGE90_XNU_ISTACK_SEPARATE STAGE90_XNU_IDLE_STACK
+           STAGE90_XNU_ISTACK_SEPARATE STAGE90_XNU_IDLE_STACK STAGE90_XNU_SEAM_POC
 do
   case $(grep -c "^$_vk=" "$ENTRY_CFG") in
     0) _vmiss="$_vmiss $_vk" ; continue ;;
@@ -420,6 +430,7 @@ do
     STAGE90_XNU_IDLE_CACHE_ENABLE) V_IDLE_CACHE_ENABLE=$_vv ;;
     STAGE90_XNU_ISTACK_SEPARATE)   V_ISTACK_SEPARATE=$_vv ;;
     STAGE90_XNU_IDLE_STACK)        V_IDLE_STACK=$_vv ;;
+    STAGE90_XNU_SEAM_POC)          V_SEAM_POC=$_vv ;;
   esac
   case $_vv in
     0|1) ;;
@@ -431,7 +442,7 @@ done
 [[ -z $_vdup ]] \
   || fail "$ENTRY_CFG defines$_vdup more than once: one value with two definitions, and a gate that reads either of them is a gate that compared neither"
 [[ -z $_vbad ]] \
-  || fail "the record's variant key(s)$_vbad are not 0 or 1: these five are switches, and a value that is neither is not an arm this clause can narrate - so the run would go out with a story about it that nothing supports"
+  || fail "the record's variant key(s)$_vbad are not 0 or 1: these six are switches, and a value that is neither is not an arm this clause can narrate - so the run would go out with a story about it that nothing supports"
 echo "== which arm the entry image in out/ is, in words =="
 if [[ $V_SLOT_NULL -eq 1 ]]; then
   echo "  capture sites (SLOT_NULL=1): the NULL instrument - entry_slot_null_note publishes the pass"
@@ -480,6 +491,31 @@ else
   echo "      THIS flag and not evidence that the inner seam is absent: an arm that flushes inside the real"
   echo "      exit would arrive as its own switch, and the converse clause above refuses a record carrying a"
   echo "      switch this gate does not print - so such an arm cannot be booted with nobody having read it."
+fi
+if [[ $V_SEAM_POC -eq 1 ]]; then
+  echo "  the seam (SEAM_POC=1): the interception IS in this image, and 535's arm is the record above with"
+  echo "      this one key at 1. \`--wrap=FlushPoU_Dcache\` is in the link, so every call site of that routine"
+  echo "      arrives at one wrapper, and the wrapper acts at exactly one: the call whose return address is"
+  echo "      0x800462dc - the \`bl FlushPoU_Dcache\` *inside* the real platform_cache_idle_exit (547 section"
+  echo "      5's seam), AFTER that function's \`push {fp, lr}\` and BEFORE its \`pop {fp, pc}\`. Every other"
+  echo "      site is handed straight through. The operation is Apple's own \`FlushPoC_DcacheRegion\` over the"
+  echo "      slot's eight bytes, bracketed by \`dsb\`, with the two words read either side of it. The readings"
+  echo "      are the \`xnu_live_seam_*\` keys: the site's own \`calls\` and \`lr\`, the slot before (\`b0\`,"
+  echo "      \`b1\`) and after (\`a0\`, \`a1\`), and \`other\`/\`other_lr\` for the calls handed through - which"
+  echo "      is how a run shows the site test did not divert a call that is not the seam."
+  echo "      **Read this run against 565 section 3's table and not against 547 section 4's enable cells: this"
+  echo "      arm is a state change at the seam itself, so its proof is the death's shape - recovered, or still"
+  echo "      at the pop - and not the value of a key.** Note also what this flag is NOT: it is not"
+  echo "      EXIT_POC_FLUSH, whose flush is the first statement of the exit *wrapper* and therefore runs before"
+  echo "      the real exit's \`push\`; that call cannot cover a line the push has not written yet, and one"
+  echo "      name for the two arms is one value with two definitions."
+else
+  echo "  the seam (SEAM_POC=0): NO interception of this image's own - no \`--wrap=FlushPoU_Dcache\`, so no"
+  echo "      wrapper of ours sits between the real exit's \`push {fp, lr}\` and its \`pop {fp, pc}\`, and the"
+  echo "      flush inside that function is Apple's own. The exit's call is untested by such a run: this is the"
+  echo "      arm 568 already ran (533's configuration), so a record with this key at 0 is a re-run of that arm"
+  echo "      and not a test of 535 - 547 section 5's seam is unprobed, and an absent flag here is an absent"
+  echo "      interception, not an absent problem."
 fi
 if [[ $V_ISTACK_SEPARATE -eq 1 ]]; then
   echo "  interrupt stack (ISTACK_SEPARATE=1): separate from the boot thread's, so an interrupt-path"
