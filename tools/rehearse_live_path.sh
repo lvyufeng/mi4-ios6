@@ -34,8 +34,41 @@ VERBOSE=0
 [[ ${1:-} == -v ]] && VERBOSE=1
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-RUNNER=$ROOT/stages/stage90/run_and_capture.sh
+LIVE_RUNNER=$ROOT/stages/stage90/run_and_capture.sh
+# **`RUNNER_OVERRIDE` exists so a *mutation* can be measured without the live path ever being the
+# mutated file, and it is the peer session's finding (its own m636 rule, one layer out).** m636 says
+# rename-never-in-place, because bash reads a running script by fd and an in-place edit can make the
+# live process execute at a shifted offset. That protects a *process already reading* a file. It does
+# not protect a file that a **live process fires by path**: `press-watcher.sh:286` does `cd "$STAGE"`
+# and `:292` runs `./run_and_capture.sh --allow-xnu-entry`, and neither file holds a lock
+# (`grep -c flock` = 0 in both). So an in-place mutation of the runner is a window in which **a press
+# executes the mutant** - and the two ways that loses the press are a `die` before `fastboot boot`
+# (a press spent on nothing) and a boot that classifies wrongly (a press spent on a reading of the
+# mutation, which is worse, because it produces a plausible log).
+#
+# So the override is not a convenience: it is how the mutation batch points at a *copy* while the
+# press's path stays the recorded bytes. The mutated copy has to sit at `stages/stage90/<name>.sh`
+# because the runner does `cd "$(dirname "$0")"` and derives `STAGE_DIR`/`REPO_ROOT`/`OUT` from `$0`,
+# and a copy in `/tmp` would look for the gate and `out/` beside itself. A `.sh` file there is
+# invisible to the gate's freshness scan (`preflight_boot_check.sh:177-179` is `-type f` and a
+# `-name '*.c' -o '*.h' -o '*.S' -o '*.ld'` list) and is never fired by the catcher, which names
+# `./run_and_capture.sh`.
+RUNNER=${RUNNER_OVERRIDE:-$LIVE_RUNNER}
 [[ -r $RUNNER ]] || { printf 'rehearse: no runner at %s\n' "$RUNNER" >&2; exit 1; }
+# **And the override may not be the live path.** A `RUNNER_OVERRIDE` pointed at `run_and_capture.sh`
+# would silently restore exactly the hazard above while looking like it had been handled, so the
+# refusal is structural rather than a rule in a comment.
+if [[ -n ${RUNNER_OVERRIDE:-} ]]; then
+  _live=$(readlink -f "$LIVE_RUNNER" 2>/dev/null || printf '%s' "$LIVE_RUNNER")
+  _ovr=$(readlink -f "$RUNNER" 2>/dev/null || printf '%s' "$RUNNER")
+  if [[ $_ovr == "$_live" ]]; then
+    printf 'rehearse: RUNNER_OVERRIDE resolves to the LIVE runner (%s).\n' "$RUNNER" >&2
+    printf '          The override exists so a mutation is measured on a copy; pointing it at the live\n' >&2
+    printf '          path puts the mutant back on the path a press fires. Refusing.\n' >&2
+    exit 1
+  fi
+  printf 'rehearse: RUNNER overridden to %s (live path %s untouched)\n' "$RUNNER" "$LIVE_RUNNER"
+fi
 
 WORK=$(mktemp -d /tmp/rehearse-live.XXXXXX) || { printf 'rehearse: mktemp failed\n' >&2; exit 1; }
 
@@ -145,8 +178,30 @@ case "$1" in
         if ! grep -q '^4a2fe00b' "$S/last_fb_list" 2>/dev/null; then
           printf 'fastboot: error: Device 4a2fe00b not found\n' >&2; exit 1
         fi
+        # **620: the boot call's own status, which the runner must record rather than inherit.** The
+        # real `fastboot boot` sends the image and *then* waits for the device to acknowledge, so a
+        # non-zero status can come from either side of the send and the value does not say which. Both
+        # sides are modelled, because the runner's correct behaviour differs between them and neither
+        # is the common case:
+        #
+        #   `boot_fail_rc:N`  the send side - nothing is booted (`$S/booted` untouched, so no return
+        #                     can appear) and the status is N. The runner must still reach the wait and
+        #                     the capture, and must report **exit 1** rather than exit 2, because exit
+        #                     2 claims the payload ran.
+        #   `boot_sent_rc:N`  the acknowledge side - the payload IS running (so the return appears on
+        #                     its own) and the status is still N. Here a run that aborted on the status
+        #                     would throw away the only reading the press produced, which is the whole
+        #                     reason the status is captured instead of fatal.
+        if [[ -f $S/boot_fail_rc ]]; then
+          printf 'fastboot: error: cannot load %s\n' "$2" >&2
+          exit "$(cat $S/boot_fail_rc)"
+        fi
         touch $S/booted $S/fastboot_up; date +%s > $S/booted_at
-        printf 'Sending boot image... OKAY\nBooting... OKAY\n' ;;
+        printf 'Sending boot image... OKAY\nBooting... OKAY\n'
+        if [[ -f $S/boot_sent_rc ]]; then
+          printf 'fastboot: error: the device did not acknowledge the boot\n' >&2
+          exit "$(cat $S/boot_sent_rc)"
+        fi ;;
       "boot -s "*)
         printf 'rehearse-stub: fastboot boot pinned to a serial that is not 4a2fe00b: %s\n' "$*" >&2; exit 64 ;;
       "boot "*)
@@ -258,8 +313,14 @@ run_state() {
   # `FORBID` is the assertion of **absence**, and it is a local so a state that does not set it cannot
   # inherit the previous state's. Per 615, an absence assertion is only worth anything beside a sibling
   # that asserts the presence - the pair is what turns "it did not say X" into "X is what this state
-  # must not say". Both new states in section 6 are such a pair.
-  local FORBID=""
+  # must not say".
+  #
+  # **It is an array as of 620, and the reason is a state that has to forbid two sentences at once.**
+  # `boot-call-fails` must not print what exit 2 says (the action "It needs a power press") *and* must
+  # not print the adb plan line on a path where no adb call is made - two different claims about two
+  # different parts of the runner, and a single-value `FORBID` would silently keep only the last one.
+  # A silent drop is the failure mode this file exists to catch, so the multiplicity is the point.
+  local -a FORBID=()
   rm -rf "$d" "$STATE"; mkdir -p "$d" "$STATE"
   # every state starts with the phone in fastboot unless it says otherwise
   touch "$STATE/fastboot_up" "$STATE/enum_after_boot" "$STATE/capture_ok"
@@ -276,9 +337,11 @@ run_state() {
       fastboot_other)        touch "$STATE/fastboot_other" ;;
       qdl_return)            touch "$STATE/qdl_return" ;;
       leave_after:*)         printf '%s' "${marker#leave_after:}" > "$STATE/leaves_after" ;;
+      boot_fail_rc:*)        printf '%s' "${marker#boot_fail_rc:}" > "$STATE/boot_fail_rc" ;;
+      boot_sent_rc:*)        printf '%s' "${marker#boot_sent_rc:}" > "$STATE/boot_sent_rc" ;;
       no_serial_ever)        touch "$STATE/no_serial_ever" ;;
       return_after:*)        printf '%s' "${marker#return_after:}" > "$STATE/ret_after" ;;
-      forbid:*)              FORBID=${marker#forbid:} ;;
+      forbid:*)              FORBID+=("${marker#forbid:}") ;;
       dmesg_unreadable)      touch "$STATE/dmesg_unreadable" ;;
       no_enum_after_boot)    rm -f "$STATE/enum_after_boot" ;;
       capture_fails)         rm -f "$STATE/capture_ok" ;;
@@ -311,10 +374,14 @@ run_state() {
   if [[ -n $expect_text ]] && ! { grep -qF -- "$expect_text" "$out" || grep -qF -- "$expect_text" "$err"; }; then
     ok=0; why="${why:+$why$'\n'}    did not say (either stream): $expect_text"
   fi
-  # The absence half. Checked on both streams for the same reason the expectation is.
-  if [[ -n $FORBID ]] && { grep -qF -- "$FORBID" "$out" || grep -qF -- "$FORBID" "$err"; }; then
-    ok=0; why="${why:+$why$'\n'}    said what this state must NOT say: $FORBID"
-  fi
+  # The absence half. Checked on both streams for the same reason the expectation is, and every
+  # forbidden phrase is checked rather than the last one (620: the array).
+  local _f
+  for _f in ${FORBID[@]+"${FORBID[@]}"}; do
+    if grep -qF -- "$_f" "$out" || grep -qF -- "$_f" "$err"; then
+      ok=0; why="${why:+$why$'\n'}    said what this state must NOT say: $_f"
+    fi
+  done
   # a stub refusal means the state reached code the rehearsal does not model - that is a refusal,
   # not a pass, whatever the exit code said
   if grep -q 'rehearse-stub: unhandled\|rehearse-stub: REFUSING\|rehearse-stub: a bare\|rehearse-stub: fastboot boot pinned' "$err"; then
@@ -453,6 +520,37 @@ run_state fastboot-other-after-wait  1 "did not settle to" leave_after:3 fastboo
 # leaves `qdl-return` green, so each branch is now pinned by a state that only it can answer.
 run_state return-after-last-poll     3 "the host log shows the phone enumerating again" return_after:5 \
                                        'forbid:an enumeration appeared on'
+
+# --- 620: the boot call's own status, which had no cell because it had no behaviour to check -------
+#
+# Every device call in the runner is guarded except the one that boots the payload, and the battery
+# had cells for every *pre*-boot refusal and none for the call itself. Three now, and they are not
+# three spellings of one state: the two `boot_fail_rc` / `boot_sent_rc` arms differ on **which side of
+# the send** the status came from, which is the thing the runner must not decide for itself.
+#
+# `boot_fail_rc:1` is the send side: nothing was booted, so no return can appear, and the operator
+# must be told that the two facts together are *not* exit 2. **The forbid list is the assertion**, and
+# it is why `FORBID` became an array in this step: `It needs a power press` is the sentence that costs
+# the press (exit 2's action), and `sudo adb -s 4a2fe00b reboot bootloader` is the plan line the runner
+# used to print unconditionally and does not print on this path, because with the device already in
+# fastboot it issues no adb command at all. Two claims about two different parts of the runner, and a
+# single-value `FORBID` would have kept only the last one - silently, which is this file's whole
+# subject.
+run_state boot-call-fails            1 "did not report success" boot_fail_rc:1 no_enum_after_boot \
+                                       'forbid:It needs a power press' \
+                                       'forbid:sudo adb -s 4a2fe00b reboot bootloader'
+# And this is the cell that shows what the abort cost, which is the argument for capturing the status
+# rather than letting `set -e` end the script on it. The status is non-zero *after* the image was sent,
+# so the payload is running and the return appears on its own; a runner that aborted on the non-zero
+# status would exit 1 with fastboot's message and **never reach sections 4 and 5** - the press spent
+# and the only reading lost, because the log does not survive the phone's next power cycle. `exit 0`
+# here is therefore the assertion that the reading was taken, and the expected text is the note that
+# records the status instead of inheriting it.
+run_state boot-call-fails-after-send 0 "fastboot boot exited" boot_sent_rc:1
+# The presence half of the plan-line pair above: on the adb path the line IS the plan, so it must be
+# printed - otherwise "print it never" would satisfy `boot-call-fails` while making the adb path's own
+# recorded plan false in the other direction.
+run_state adb-plan-line              0 "sudo adb -s 4a2fe00b reboot bootloader" adb_up
 
 printf '\n  %d ok, %d failed\n' "$pass" "$fail"
 if (( fail > 0 )); then

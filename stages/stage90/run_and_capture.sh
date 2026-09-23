@@ -31,7 +31,12 @@
 #      cannot be commanded through (619 - `unauthorized`, `offline`, ... - again **nothing
 #      was sent**, and the message names the state so the operator knows what to do). All of
 #      these are host-side, host-list or device-state failures that say nothing about what
-#      the payload would have done, which is why they share a code.
+#      the payload would have done, which is why they share a code. **620 adds the one that
+#      would otherwise have been read as 2**: `fastboot boot` itself exited non-zero and the
+#      device did not come back - a boot call that did not report success cannot support exit
+#      2's claim that the payload ran, the image may never have been sent, and the phone is
+#      probably still in fastboot, so **no press is spent**. Read the section that produces it
+#      before pressing power; it says what to check.
 #   2  the payload ran and the device did NOT come back - a manual power press is needed
 #      (the log will not survive a power cycle, so this is also a lost run). Also the code a
 #      *fall* in the host log's enumeration count is reported as (the ring buffer rotating):
@@ -116,6 +121,14 @@ CAPTURE_WAIT=${CAPTURE_WAIT:-90}
 # 47 min and counting). So a wait cannot replace the refusal, only stop the common, transient case from
 # costing the operator a re-run.
 FB_AMBIG_WAIT=${FB_AMBIG_WAIT:-60}
+# **The status of the one call that spends the press, kept as a value instead of being allowed to
+# end the script.** `fastboot boot` is section 3's last command and had no guard, so under `set -e`
+# a non-zero status aborted the run with fastboot's own code *before section 4 ran at all* - and
+# sections 4 and 5 are the only things that produce a reading. It is declared here, before section
+# 3, so that the section-4 verdict can read it under `set -u` and so that the assignment at the
+# call site is the only thing that ever changes it (`ENUM_ADVANCED`'s two-place rule, 617, read the
+# other way round: initialize where the value is *born*, assign where it is *made*).
+FB_BOOT_RC=0
 
 DRY_RUN=0
 SUMMARISE_ONLY=""
@@ -2287,7 +2300,22 @@ fi
 
 # --- 3. boot the payload ----------------------------------------------------------------
 step "boot"
-say "sudo adb -s $SERIAL reboot bootloader   # then fastboot boot, never flash"
+# **The plan line is selected by the mode, and it was not.** It read `sudo adb -s $SERIAL reboot
+# bootloader   # then fastboot boot, never flash` unconditionally, and printed it in the dry run (where
+# no mode is read) and on the fastboot path - which is where the line is *false*: with the device
+# already in fastboot the `adb` call is skipped entirely (see the `MODE == adb` test below), so the
+# operator reads a command out of this run's own record that this run never issued. The press this
+# phase is waiting on always takes that path - Vol-Down + Power lands in fastboot and adb lists
+# nothing - so it is the *normal* case and not the corner. 520's rule, one layer out: a `say` line
+# describing an action the run does not take is the same defect as one describing an image that does
+# not exist. `${MODE:-}` because the dry run never sets it and `set -u` is on.
+case ${MODE:-} in
+  fastboot)
+    say "fastboot boot -s $SERIAL $IMAGE"
+    say "  (the device is already in fastboot, so this run issues no adb command at all)" ;;
+  *)
+    say "sudo adb -s $SERIAL reboot bootloader   # then fastboot boot, never flash" ;;
+esac
 if [[ $DRY_RUN -eq 0 ]]; then
   if [[ $MODE == adb ]]; then
     # **The `||` is not decoration: without it, a failing `adb` aborts the script under `set -e` and the
@@ -2396,7 +2424,41 @@ if [[ $DRY_RUN -eq 0 ]]; then
   # `-s "$SERIAL"` and not a bare call: written into the command line as well as guarded above,
   # because the guard can only refuse a state it can *see*, and the pin still holds if the list
   # changes between the check and the call.
-  sudo fastboot boot -s "$SERIAL" "$IMAGE"
+  #
+  # --- the status is captured, and this is the one device call in the file that had no guard -------
+  #
+  # 616 pinned *this* call to the serial, 618 guarded the list it acts on, and 619 guarded the `adb`
+  # call a few lines above - and this line, the one that actually boots the payload and spends the
+  # press, was left bare. Under `set -e` a non-zero `fastboot boot` therefore ended the script with
+  # **fastboot's own status**: no sentence from this file, and - because the gate's census counts
+  # literal `exit N` in command position and nothing else (`preflight_boot_check.sh:1708`) - a code
+  # the gate cannot see either. That is 584's defect ("a tool that could not read an artifact passed
+  # its own status out as the gate's verdict") arriving in the runner, on the call that matters most.
+  #
+  # **The repair is deliberately NOT 619's, and the difference is the finding.** There, `|| die` was
+  # right: a failed `adb reboot bootloader` means the boot did not happen. Here a non-zero status does
+  # not establish that. `fastboot boot` **sends the image and then waits for the device to
+  # acknowledge**, so a non-zero status can come from either side of the send - and which side is
+  # **unmeasured**: this project has never observed a failing `fastboot boot` on this phone, and no
+  # amount of reading this file can supply the number. The abort is therefore a *claim* - "it failed,
+  # so nothing was sent" - and if the claim is wrong the abort discards sections 4 and 5, which are
+  # the only things that produce a reading, after which the payload's log dies at the phone's next
+  # power cycle: **the press is spent and the reading is lost, which is the worst outcome this file
+  # has.** So the status becomes a value rather than a verdict, the wait and the capture run either
+  # way (they are a bounded host-side wait and a read - neither can spend anything), and the
+  # non-return verdict below is *conditioned* on it, because "the payload ran and the device did not
+  # come back" is not a claim a boot call that did not report success can support.
+  sudo fastboot boot -s "$SERIAL" "$IMAGE" || FB_BOOT_RC=$?
+  if (( FB_BOOT_RC != 0 )); then
+    say ""
+    say "note: fastboot boot exited $FB_BOOT_RC, and **that is not a verdict about the payload**."
+    say "  It sends the image and then waits for the device to acknowledge, so a non-zero status can"
+    say "  come from either side of the send, and the value does not say which. The run continues to"
+    say "  the wait and the capture because those are the only things that produce a reading - and a"
+    say "  reading, once the phone's next power cycle happens, is gone. **If the device came back"
+    say "  below, the payload ran** and this status was about the acknowledge. If it did not, the"
+    say "  verdict is exit 1 and not exit 2 - the section below says why."
+  fi
 fi
 
 # --- 4. wait for it to come back --------------------------------------------------------
@@ -2593,6 +2655,44 @@ if [[ $DRY_RUN -eq 0 && $RETURNED -eq 0 ]]; then
     say "SoC reset behind it, is a return whatever adb said; a single dead second in fastboot"
     say "with nothing after it is a hang - and if it is a hang, the power press is what it needs."
     die "the host could not read its own USB log, so this run produced no reading of the device (exit 1, not 2 - see the section above)"
+  fi
+  # **The non-return verdict is conditioned on the boot call's own status, and this block is why the
+  # status was captured rather than passed through.** Both of the tests below end in exit 2, whose
+  # definition in this file's header is *"the payload ran and the device did NOT come back"* - a
+  # verdict about the payload, and the one that spends the device, because it tells the operator to
+  # press power. A `fastboot boot` that exited non-zero cannot support that claim: the image may never
+  # have been sent. Reporting exit 2 here would send the operator to press power on a phone that is
+  # probably still sitting in fastboot with nothing booted, and the press is the scarcest thing this
+  # phase has. So the boot call's failure takes precedence over both tests, and the code is **exit 1**
+  # - this file's own code for "a host-side failure that says nothing about what the payload would have
+  # done", the same reading 511/512's unwritable `$LOGFILE` and the UNREAD case above get.
+  #
+  # It sits *after* the two return branches and *after* the UNREAD test on purpose: a return outranks
+  # it (if the device came back, the payload ran and the failed status was about the acknowledge), and
+  # the UNREAD case is exit 1 already with a finer thing to say. The evidence lines the block above
+  # printed still stand and are what the operator reads alongside this.
+  if (( FB_BOOT_RC != 0 )); then
+    say ""
+    say "The device did not come back, AND fastboot boot itself did not report success (exit $FB_BOOT_RC)."
+    say "**Those two facts together are not the exit-2 state.** Exit 2 means *the payload ran and the"
+    say "device did not come back*, and a boot call that did not report success cannot support the"
+    say "claim that the payload ran - the image may never have been sent. So this is **exit 1**, this"
+    say "file's code for a host-side failure that says nothing about the payload, and it is NOT a"
+    say "reading that the payload ran or hung. Check by hand before touching anything:"
+    say "  sudo fastboot devices   # if $SERIAL is listed, no boot was ever started"
+    say "If it is listed, **the press was not spent** - the phone is in fastboot waiting for exactly"
+    say "this command, and re-running costs nothing. If it is not listed and nothing enumerated on"
+    say "$PORT_LABEL, do not press power on this file's word: read the host log by hand"
+    say "  sudo dmesg | grep 'usb ${PHONE_PORT:-3-10}'"
+    say "and treat a payload log that is present in DRAM as the reading, because the phone's next"
+    say "power cycle destroys it."
+    # `die` and not a literal `exit 1`: this is the same code as the UNREAD case above and the file
+    # spells an exit-1 host-side failure that way, which keeps section 4's *literal* exit sites at
+    # `2 3` and puts both exit-1 producers behind `die`'s own definition. That the gate's census had
+    # to learn to read `die` to see either of them is the finding this step is about. The wording
+    # deliberately does **not** reuse "the device did not come back", which is exit 2's headline and
+    # the phrase three rehearsal cells forbid: this block must not read like the verdict it replaces.
+    die "fastboot boot exited $FB_BOOT_RC and no return was seen, so this run has no verdict about the payload (exit 1, not 2 - nothing here says the payload ran; see the lines above)"
   fi
   if [[ $ENUM_AFTER -lt $ENUM_BEFORE ]]; then
     say ""
