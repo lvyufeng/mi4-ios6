@@ -81,6 +81,17 @@ xnu_live_slot_pre_m4=0x8047c974      the word at the slot+4
 and the same run's pop read `{0x33f1c1b5, 0x33f1c1b5}` (both registers in the dump, and
 `xnu_live_slot_rtcpre_pop=0x33f1c1b5` - the deadline the exit wrapper published in that same pass).
 
+> **Correction (585, host-side): that sentence's numbers are 533's, not 520's, and the claim it makes
+> about the two registers is false of 520 in both halves.** `0x33f1c1b5` occurs **zero** times in
+> `out/stage90/captures/520-2026-09-22-last_kmsg.txt`; it is `533-2026-09-23-last_kmsg.txt` that carries
+> it (its abort dump has `r4: 0x33f1c1b5` / `r11: 0x33f1c1b5` / `xnu_live_slot_rtcpre_pop=0x33f1c1b5`).
+> 520's own dump reads `r11 (fp): 0x04b79075` and `pc: 0x04b79074` - **not equal to each other**, and the
+> `pre_m8`/`pre_m4` values quoted above are the ones that are 520's. The pairing is in the source already
+> (`entry_stubs.c:6491` writes `rtcpre_pop = 0x04b79075` against `pc = 0x04b79074`), so the code had the
+> right pair while this document had the wrong run's. See
+> `experiment-585-one-value-two-runs-and-the-pair-the-pop-actually-read.md` for what the corrected pair
+> shows - and it is a stronger reading than the one above, because it reproduces across both runs.
+
 So 520's log holds **both sides of the mechanism measured on one pass**: the frame the push wrote, and
 what the pop actually got. The clause now prints the pair beside the arm's own `_b0`/`_b1`, as a
 *reading* and not a criterion: they are equal when the frame did not move between two passes through the

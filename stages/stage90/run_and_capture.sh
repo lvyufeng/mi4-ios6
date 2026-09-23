@@ -886,9 +886,13 @@ summarise_log() {
           say "        value got it from somewhere this operation does not reach - the falsifier for 546"
           say "        section 3's mechanism rather than its confirmation"
         elif [[ -n $seam_a1 && -n $rtcpre_pop && $seam_a1 == "$rtcpre_pop" ]]; then
-          say "  STALE LINE, WRITTEN OUT  a1=$seam_a1 is this same pass's xnu_live_slot_rtcpre_pop: the"
-          say "        dirty line's copy of the slot's lr word is the deadline that pass read, which is"
-          say "        546 section 3's mechanism seen from the near side, before the pop that died on it"
+          say "  STALE LINE, WRITTEN OUT  a1=$seam_a1 is this same pass's xnu_live_slot_rtcpre_pop,"
+          say "        which the instrumentation reads from cpu_data+RTCPOP - the idle loop's own deadline,"
+          say "        not a stack word (585 section 3). What that means: the word the operation wrote back"
+          say "        is the value the loop computed, i.e. the operation put the loop's own datum where the"
+          say "        frame's word belongs - 546 section 3's mechanism from the near side. 585 measured the"
+          say "        same pair in 520's and 533's fatal dumps, where the pop read (rtcpre_pop,"
+          say "        rtcpre_pop-1) into (fp, pc) while lr still held the address the push had saved"
         else
           say "  CHANGED  the pair came back changed (b=${seam_b0:-?}/${seam_b1:-?} ->"
           say "        a=${seam_a0:-?}/${seam_a1:-?}) and a1 is not this pass's rtcpre_pop=${rtcpre_pop:-absent}:"
