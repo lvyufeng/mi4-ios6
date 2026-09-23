@@ -389,7 +389,7 @@ echo "== the entry image's own switches =="
 ENTRY_CFG=$OUT/xnu_arm_entry-config.txt
 [[ -f $ENTRY_CFG ]] \
   || fail "no $ENTRY_CFG - the entry image's switches are recorded there by build_entry.sh, and without it this gate can prove which bytes the image carries but not which arm they are; rebuild the entry image (stages/stage90/xnu_arm_boot/build_entry.sh) and then ./build.sh"
-_readable "$ENTRY_CFG" "which arm this image is, and the thirteen switches it was built with, are read out of it"
+_readable "$ENTRY_CFG" "which arm this image is, and the fourteen switches it was built with, are read out of it"
 recorded_sha=$(awk -F= '$1 == "STAGE90_XNU_ENTRY_SHA256" { print $2 }' "$ENTRY_CFG")
 [[ -n $recorded_sha ]] \
   || fail "$ENTRY_CFG has no STAGE90_XNU_ENTRY_SHA256 line - a record that names no artifact is a note, not a reading"
@@ -397,11 +397,11 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 [[ "$recorded_sha" == "$actual_sha" ]] \
   || fail "$ENTRY_CFG describes entry image $recorded_sha and $ENTRY_BIN is $actual_sha: the record names a different artifact than the one on disk, so the switches it lists are about some other image. Rebuild the entry image, then ./build.sh"
 #
-# **Every key by name, because the seven that *are* the variant are not named like the artifact.** The
+# **Every key by name, because the eight that *are* the variant are not named like the artifact.** The
 # four keys that identify the record (SHA256, BYTES, TRACE, REAL_ARM_INIT) all begin `STAGE90_XNU_ENTRY_`
-# or `STAGE90_ENTRY_`, and the seven that say *which arm this is* - SLOT_NULL, EXIT_POC_FLUSH,
-# IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE - begin `STAGE90_XNU_` and end there. So the obvious
-# display filter, `$1 ~ /^STAGE90_(XNU_ENTRY|ENTRY_)/`, prints four lines, drops all seven of the ones
+# or `STAGE90_ENTRY_`, and the eight that say *which arm this is* - SLOT_NULL, EXIT_POC_FLUSH,
+# IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, IDLE_NO_SLEEP - begin `STAGE90_XNU_` and end there. So the obvious
+# display filter, `$1 ~ /^STAGE90_(XNU_ENTRY|ENTRY_)/`, prints four lines, drops all eight of the ones
 # this clause exists to publish, and **prints no error doing it**: the gate would report success while
 # saying nothing about the arm, which is the whole reason the clause was added. Measured on a record
 # with the nine keys `build_entry.sh` writes: 9 in, 4 out.
@@ -410,7 +410,7 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 # refused rather than shown as a shorter list (`[[ -n $v ]]`, so an empty value is a missing key: an
 # `X=` line is not `X=0`, which is [[mi4-off-option-two-spellings]] one register over).
 #
-# **The list was nine, then twelve, and is fourteen, and each addition grew it by enumerating rather than
+# **The list was nine, then twelve, and is now fifteen, and each addition grew it by enumerating rather than
 # by reading.** 540 found three
 # more switches that shape the linked entry image and were in no record anywhere -
 # `STAGE90_ENTRY_CHECKPOINT` and its two variants (`--wrap=<symbol>` plus an extra object in the link,
@@ -436,21 +436,46 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 # time). The pair is also why every sentence here that used to read `SEAM_POC=0` as "no interception" is
 # now conditional: what turns the interception on is `SEAM_ON = SEAM_POC | SEAM_MEASURE`, so a 0 on one
 # of the two is an arm and not an absence - one value with two definitions, arriving from the build side.
+#
+# **The fifteenth is 594's, and it is the first one whose arm is the *absence* of a call rather than a
+# switch inside one.** `STAGE90_XNU_IDLE_NO_SLEEP` compiles out 514's one repair -
+# `cpu_signal_handler_internal(FALSE)`, the single clearing of `SIGPdisabled` on this uniprocessor port -
+# so `cpu_idle`'s first test is true on every pass, all three idle wrappers are skipped and the window
+# whose `pop {fp, pc}` is this phase's frontier is **never entered** (593 sections 2 and 3: 32767+ passes
+# leave by the first door before the repair, and exactly one leaves by the third after it). Two things
+# follow for this gate, and the second is why the key must be here rather than in the build's own
+# change-detector alone:
+#
+#   1. **Every family that lives inside that window becomes an expected ABSENCE on this arm** - the four
+#      `xnu_live_slot_*` words, the bracket's `pre`/`rtcpre`/`post` counts, the `window`'s near and far end
+#      (`cwe_*`), and the whole `xnu_live_seam_*` set, because the seam is a call inside the exit that the
+#      arm never reaches. That is the same "absent is not zero" distinction 569 made and 526 named, and it
+#      is what the narration below has to say out loud: an operator reading three absent bracket keys as
+#      "the death is before the pre note" would be reading a window that never opened as a window that
+#      opened and died early - and the *reading* of this arm is a `pop` that is never executed at all.
+#   2. **The repair's own clause in `build_entry.sh` pins three numbers to the literal 1** (`:28193`'s
+#      reference-kind set, `:28199`'s `R_ARM_CALL` count and `:28267`'s in-`__wrap_poll` count) and 594
+#      derives them from this key instead - so the key is not decoration: with it at 1 those clauses expect
+#      `R_ARM_JUMP24 ` and 0, and an image where the call is still made is refused by the build before this
+#      gate ever sees it. The gate's half is that the key reaches the record at all (see the note at
+#      `run_and_capture.sh`'s clauses): a switch the build reads and does not record is a run whose arm
+#      nobody read, which is 591's defect one layer out - and there the record is the *only* thing this
+#      gate can read, so an unrecorded switch is not even refutable here.
 ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_TRACE
                 STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT_NULL STAGE90_XNU_EXIT_POC_FLUSH
                 STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE STAGE90_XNU_IDLE_STACK
                 STAGE90_XNU_SEAM_POC STAGE90_XNU_SEAM_MEASURE
                 STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
-                STAGE90_ENTRY_CHECKPOINT_AFTER)
+                STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_IDLE_NO_SLEEP)
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
   [[ -n $_v ]] \
-    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The seven variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE) are exactly the ones a display filter written around the artifact keys drops in silence"
+    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The eight variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, IDLE_NO_SLEEP) are exactly the ones a display filter written around the artifact keys drops in silence"
   printf '  %s=%s\n' "$_k" "$_v"
 done
 # And the converse, so a key the list above does not name cannot arrive unshown (a *tenth* when the list
-# held nine; a fifteenth now): every `STAGE90_` key the record carries
+# held nine; a sixteenth now): every `STAGE90_` key the record carries
 # must be one of the names above. Without this the list above would be the only definition of what is
 # visible, and a key added on the build side would be recorded and never read - the same defect with
 # the arrow reversed.
@@ -477,7 +502,7 @@ echo "  (recorded in $ENTRY_CFG, bound to $actual_sha)"
 # *failed enable* - the 533 doc's section 5 item 3 is that same criterion and 538 is where it was shown
 # it cannot fail. So the arm is derived here, one consequence per recorded key, and the enable's line
 # carries the reading rule that follows from its own value rather than a second assertion.
-# The seven are read as `grep -c` of the whole `KEY=` prefix rather than as awk's last match, because the
+# The eight are read as `grep -c` of the whole `KEY=` prefix rather than as awk's last match, because the
 # three ways a value can be unusable here are three different things and only one of them is `build_entry.sh`
 # refusing a bad value at build time (`:350-352`): a key can be **absent** (a record older than the key, so
 # the clause has no value and `[[ $V -eq 1 ]]` on an empty string would silently take the 0 branch *while the
@@ -489,7 +514,7 @@ echo "  (recorded in $ENTRY_CFG, bound to $actual_sha)"
 _vmiss=; _vdup=; _vbad=
 for _vk in STAGE90_XNU_SLOT_NULL STAGE90_XNU_EXIT_POC_FLUSH STAGE90_XNU_IDLE_CACHE_ENABLE \
            STAGE90_XNU_ISTACK_SEPARATE STAGE90_XNU_IDLE_STACK STAGE90_XNU_SEAM_POC \
-           STAGE90_XNU_SEAM_MEASURE
+           STAGE90_XNU_SEAM_MEASURE STAGE90_XNU_IDLE_NO_SLEEP
 do
   case $(grep -c "^$_vk=" "$ENTRY_CFG") in
     0) _vmiss="$_vmiss $_vk" ; continue ;;
@@ -506,6 +531,7 @@ do
     STAGE90_XNU_IDLE_STACK)        V_IDLE_STACK=$_vv ;;
     STAGE90_XNU_SEAM_POC)          V_SEAM_POC=$_vv ;;
     STAGE90_XNU_SEAM_MEASURE)      V_SEAM_MEASURE=$_vv ;;
+    STAGE90_XNU_IDLE_NO_SLEEP)     V_IDLE_NO_SLEEP=$_vv ;;
   esac
   case $_vv in
     0|1) ;;
@@ -517,7 +543,7 @@ done
 [[ -z $_vdup ]] \
   || fail "$ENTRY_CFG defines$_vdup more than once: one value with two definitions, and a gate that reads either of them is a gate that compared neither"
 [[ -z $_vbad ]] \
-  || fail "the record's variant key(s)$_vbad are not 0 or 1: these seven are switches, and a value that is neither is not an arm this clause can narrate - so the run would go out with a story about it that nothing supports"
+  || fail "the record's variant key(s)$_vbad are not 0 or 1: these eight are switches, and a value that is neither is not an arm this clause can narrate - so the run would go out with a story about it that nothing supports"
 # **And the pair, because the two seam switches are one seam's two arms and a record can name both.** The
 # build refuses that pair (`build_entry.sh` exits on it and `entry_trace.c` `#error`s), so an image with
 # both set has never been built and cannot be - which makes a record carrying both a record about *no*
@@ -526,6 +552,27 @@ done
 [[ ! ( $V_SEAM_POC -eq 1 && $V_SEAM_MEASURE -eq 1 ) ]] \
   || fail "$ENTRY_CFG has STAGE90_XNU_SEAM_POC=1 and STAGE90_XNU_SEAM_MEASURE=1: one is the interception with 535's operation behind it and the other is the same interception with the operation removed, and no image can be both - build_entry.sh refuses that pair and entry_trace.c #errors on it, so this record describes an image that cannot exist and one of the two values is wrong. The gate cannot tell which, so it names the test rather than narrating an arm: read the seam's own body in out/stage90/xnu_arm_entry.elf (entry_seam_flush, and whether it calls FlushPoC_DcacheRegion) or rebuild the entry image with the switch this arm really needs. Nothing is rebuilt by this refusal, and nothing should be: the frozen pair embeds this entry image"
 echo "== which arm the entry image in out/ is, in words =="
+if [[ $V_IDLE_NO_SLEEP -eq 1 ]]; then
+  echo "  idle sleep (IDLE_NO_SLEEP=1): 593 section 4's arm - 514's one repair is NOT in this image, so"
+  echo "      nothing clears SIGPdisabled, cpu_idle's first test is true on every pass, it leaves by its"
+  echo "      first door (Idle_load_context), and the window whose \`pop {fp, pc}\` is this phase's frontier"
+  echo "      IS NEVER ENTERED. **Everything below about the slot, the bracket, the window's two ends and"
+  echo "      the seam is narration about an arm this one is NOT**, and on this arm those keys are expected"
+  echo "      ABSENT rather than zero - absent because the call inside the window is never made, which is a"
+  echo "      different reading from the same keys missing in an arm that does enter it (569's absent-is-not-"
+  echo "      zero, 526's distinction)."
+  echo "      **So this arm's reading is a boot that does not die - and that is also what a live spin through"
+  echo "      the scheduler looks like from the host.** The death is reachable only through 514's repair, so"
+  echo "      skipping it is a lever that does not have to win the \`pop\`; but \"no death\" is satisfied by a"
+  echo "      machine that is alive and never progresses just as well as by one that reached userland, so read"
+  echo "      the run against a PROGRESS witness - a key or a console line that advances only if pid 1's thread"
+  echo "      really runs past the old death point - pre-registered before the boot. A run of this arm whose"
+  echo "      only reading is that it did not die is not a reading: a check that succeeds by printing"
+  echo "      nothing cannot be told from one that never ran, and here the success and the failure mode are"
+  echo "      the same silence."
+  echo "      **What the arm gives up is the sleep itself** - 512/513's defect and 514's repair - so it is a"
+  echo "      bring-up stopgap traded for a boot, and it is reversible with this one switch."
+fi
 if [[ $V_SLOT_NULL -eq 1 ]]; then
   echo "  capture sites (SLOT_NULL=1): the NULL instrument - entry_slot_null_note publishes the pass"
   echo "      count alone, so the four slot words are neither loaded nor stored by this image and the"
