@@ -1,0 +1,100 @@
+# The readings of the BASELINE captures - the numbers the owed run's rungs are measured against.
+#
+# WHO WRITES THIS: by hand, in the step that measured it (627), and never by the build or by the
+# verifier. Same rule as `revert-set.txt` and `tool-images.txt`: a record its own subject writes agrees
+# with itself and constrains nothing. The comparison lives in `tools/verify_baseline_readings.sh`, which
+# re-derives every line below from the log it names and refuses on a missing log, a wrong hash, a wrong
+# size, or a wrong value.
+#
+# WHY A RECORD AT ALL. `run_and_capture.sh`'s sleeper clause prints thresholds and premises that are
+# **measured on these four logs**, and it says so in its own comments ("measured on those two logs",
+# "520 and 533 both stop at 2, with timeouts 5 ms and 40 ms", "`xnu_live_slot_cwe_*` has 3 in 533",
+# "neither log is capped"). Until this file existed, every one of those numbers was a claim in a comment
+# with nothing able to check it - and a claim in a comment is not a check (604's rule). The premise that
+# costs the most is rung 0's: its test is `door_max > 32768`, and 32768 is `0x8000`, and `0x8000` being
+# *the* last record of both baselines is a fact about these two files rather than about the instrument.
+# If that fact is wrong the rung is wrong, and the rung is the one thing the owed run is pre-registered
+# against.
+#
+# WHY THE LOGS ARE NAMED AND NOT CONTAINED. `out/` is gitignored (`.gitignore`), so no capture is in
+# version control and none will be - the repo carries none, by convention. **The record is the identity
+# and the copies are only copies** (611's rule for the revert set, applied here). 520 and 533 have been
+# in `out/stage90/captures/` since they were captured; 513's pair lived only in `/tmp` and was copied
+# into that directory by this step, because a `/tmp` path is a path this record cannot be checked
+# against on the next host. A verifier run here re-derives; a verifier run where the copies are gone
+# says so and does not pretend.
+#
+# THE KINDS ARE THE RUNNER'S OWN READERS, deliberately. `maxhex` and `keyval` are the two functions the
+# sleeper clause reads its keys with (`run_and_capture.sh`: `maxhex` takes the largest value and
+# `keyval` the last, which is right for a counter and is why the clause's own comment warns that both
+# collapse a key's history), and `count` is a plain record count. Writing these as anything else - a
+# literal table of numbers with no derivation beside it - would be one value with two definitions: the
+# record would say what some step once computed, and the verifier would say what its own code computes.
+#
+# WHAT EACH LINE IS CITED BY, so a reader can tell which premise rests on which reading:
+#   rung 0        `door_max > 32768` - needs door_seq_max for both baselines and for the counterexample
+#   rung 1        "520 and 533 both stop at 2" - poll_seq_max, and the first/last timeouts
+#   rung 1b       `poll_tmo_max >= ENTRY_PARK_MIN_MS` - poll_timeout_ms_max; the park's own ask is 2000
+#   rung 3 / 609  "neither log is capped" - capped_count and the capacity each channel published
+#   598's clause  "`xnu_live_slot_cwe_*` has 3 in 533" and 520's `slot_pre_calls`=1
+#   600's clause  513's pair as the counterexample: door_seq to 0x01000000, and no window family at all
+#
+# MEASURED 2026-09-23, each log hashed in place and every value re-derived by the command in the
+# verifier (not copied from a document, not from an earlier run's output).
+#
+# THE COUNTS ARE PINNED HERE, and the reason is 627's own last falsification. With the counts derived
+# from the record, a record whose lines were all deleted verified **green** - zero logs, zero readings,
+# zero failures, exit 0 - which is 613's shape ("an assertion of silence, the one property a command
+# that does nothing also has") and 612's (a completeness criterion derived from the thing it is meant
+# to bound). So the record states its own size and the verifier refuses if the set it read is smaller.
+# A line deleted from this file is therefore a red run and not a smaller green one.
+
+expect_logs=4
+expect_readings=38
+
+log=520   sha256=f0285b0f6e22eb0a097b5756cc6a5e11f827e1d6b20be03c9eb0b1a0510b2612 bytes=596665 file=520-2026-09-22-last_kmsg.txt role=baseline-arm-capture-2026-09-22
+log=533   sha256=734062592d6f6a4efebd09ca4f252d2587ab4ac9e49311f8565417226b3f2c6d bytes=597641 file=533-2026-09-23-last_kmsg.txt role=baseline-arm-capture-2026-09-23
+log=513r1 sha256=d617497f686b8f5e49ed0108e3c82034a5c4528fa1f5bd5f6730512ea6e75989 bytes=573329 file=513-run1-kmsg.txt role=counterexample-an-image-that-predates-the-repair-2026-09-21
+log=513r2 sha256=44170ae46d0607b01dd7e2dd3959058da1b66e49d7f6556e30e18a41ca6ca1c3 bytes=573121 file=513-run2-kmsg.txt role=counterexample-an-image-that-predates-the-repair-2026-09-21
+
+reading=door_seq_max    log=520   kind=maxhex:xnu_live_door_seq           value=0x00008000 cites=rung-0-the-threshold-is-32768
+reading=door_records    log=520   kind=count:xnu_live_door_seq=          value=16         cites=rung-0-sixteen-records-to-0x8000
+reading=poll_seq_max    log=520   kind=maxhex:xnu_live_poll_seq          value=0x00000002 cites=rung-1-the-third-poll-is-the-park
+reading=poll_tmo_max    log=520   kind=maxhex:xnu_live_poll_timeout_ms   value=0x00000028 cites=rung-1b-below-the-park-threshold
+reading=poll_tmo_last   log=520   kind=keyval:xnu_live_poll_timeout_ms   value=0x00000028 cites=rung-1-the-40-ms-ask
+reading=poll_tmo_first  log=520   kind=first:xnu_live_poll_timeout_ms    value=0x00000005 cites=rung-1-the-5-ms-ask
+reading=live_cap        log=520   kind=maxhex:xnu_live_cap               value=0x00002000 cites=609-the-channel-capacity
+reading=capped_count    log=520   kind=count:xnu_live_capped             value=0          cites=609-neither-baseline-is-capped
+reading=slot_cwe_count  log=520   kind=count:xnu_live_slot_cwe_          value=0          cites=598-520-predates-the-window-instrument
+reading=slot_pre_calls  log=520   kind=maxhex:xnu_live_slot_pre_calls    value=0x00000001 cites=598-the-exit-wrapper-was-reached-once
+reading=repair_seq_max  log=520   kind=maxhex:xnu_live_repair_seq        value=0x00000001 cites=the-arm-test-repair-seq-is-present-on-this-arm
+
+reading=door_seq_max    log=533   kind=maxhex:xnu_live_door_seq           value=0x00008000 cites=rung-0-the-threshold-is-32768
+reading=door_records    log=533   kind=count:xnu_live_door_seq=          value=16         cites=rung-0-sixteen-records-to-0x8000
+reading=poll_seq_max    log=533   kind=maxhex:xnu_live_poll_seq          value=0x00000002 cites=rung-1-the-third-poll-is-the-park
+reading=poll_tmo_max    log=533   kind=maxhex:xnu_live_poll_timeout_ms   value=0x00000028 cites=rung-1b-below-the-park-threshold
+reading=poll_tmo_last   log=533   kind=keyval:xnu_live_poll_timeout_ms   value=0x00000028 cites=rung-1-the-40-ms-ask
+reading=poll_tmo_first  log=533   kind=first:xnu_live_poll_timeout_ms    value=0x00000005 cites=rung-1-the-5-ms-ask
+reading=live_cap        log=533   kind=maxhex:xnu_live_cap               value=0x00002000 cites=609-the-channel-capacity
+reading=capped_count    log=533   kind=count:xnu_live_capped             value=0          cites=609-neither-baseline-is-capped
+reading=slot_cwe_count  log=533   kind=count:xnu_live_slot_cwe_          value=3          cites=598-the-window-instrument-published-three-keys
+reading=slot_pre_calls  log=533   kind=maxhex:xnu_live_slot_pre_calls    value=0x00000001 cites=598-the-exit-wrapper-was-reached-once
+reading=repair_seq_max  log=533   kind=maxhex:xnu_live_repair_seq        value=0x00000001 cites=the-arm-test-repair-seq-is-present-on-this-arm
+
+reading=door_seq_max    log=513r1 kind=maxhex:xnu_live_door_seq           value=0x01000000 cites=600-the-counterexamples-512-times-the-threshold
+reading=door_records    log=513r1 kind=count:xnu_live_door_seq=          value=25         cites=600-twenty-five-records-for-this-pair
+reading=poll_seq_max    log=513r1 kind=maxhex:xnu_live_poll_seq          value=0x00000004 cites=600-two-parks-both-returned
+reading=poll_tmo_max    log=513r1 kind=maxhex:xnu_live_poll_timeout_ms   value=0x000007d0 cites=rung-1b-the-park-ask-is-2000-ms
+reading=live_cap        log=513r1 kind=maxhex:xnu_live_cap               value=0x00002000 cites=609-the-channel-capacity
+reading=capped_count    log=513r1 kind=count:xnu_live_capped             value=0          cites=609-this-pair-is-not-capped-either
+reading=slot_cwe_count  log=513r1 kind=count:xnu_live_slot_cwe_          value=0          cites=600-the-window-family-is-absent
+reading=repair_seq_cnt  log=513r1 kind=count:xnu_live_repair_seq=        value=0          cites=600-there-was-nothing-for-it-to-skip
+
+reading=door_seq_max    log=513r2 kind=maxhex:xnu_live_door_seq           value=0x01000000 cites=600-the-counterexamples-512-times-the-threshold
+reading=door_records    log=513r2 kind=count:xnu_live_door_seq=          value=25         cites=600-twenty-five-records-for-this-pair
+reading=poll_seq_max    log=513r2 kind=maxhex:xnu_live_poll_seq          value=0x00000004 cites=600-two-parks-both-returned
+reading=poll_tmo_max    log=513r2 kind=maxhex:xnu_live_poll_timeout_ms   value=0x000007d0 cites=rung-1b-the-park-ask-is-2000-ms
+reading=live_cap        log=513r2 kind=maxhex:xnu_live_cap               value=0x00002000 cites=609-the-channel-capacity
+reading=capped_count    log=513r2 kind=count:xnu_live_capped             value=0          cites=609-this-pair-is-not-capped-either
+reading=slot_cwe_count  log=513r2 kind=count:xnu_live_slot_cwe_          value=0          cites=600-the-window-family-is-absent
+reading=repair_seq_cnt  log=513r2 kind=count:xnu_live_repair_seq=        value=0          cites=600-there-was-nothing-for-it-to-skip
