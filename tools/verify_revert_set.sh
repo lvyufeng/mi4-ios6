@@ -27,7 +27,24 @@
 #                                                           bytes; two fields agreeing is what makes a
 #                                                           typo in either a reading and not a silence
 #  5. its sha256 equals the record's                        - the constraint
-#  6. the manifest's member list, twice over:
+#  6. the manifest's member list, twice over. The trio of 5, 6a and 6b partitions cleanly, and each leg is
+#     load-bearing - which direction is covered by which check is worth stating because it is not the
+#     obvious split:
+#
+#       | check | reads from              | catches                                                        |
+#       | ----- | ----------------------- | -------------------------------------------------------------- |
+#       |  5    | the record              | the manifest FILE doctored - a member added **or removed**; a   |
+#       |       |                         | 4-member manifest is refused by its size and hash alone         |
+#       |  6a   | the record              | the record naming a member it does not itself carry             |
+#       |  6b   | the target              | a target manifest that has GROWN names outside the set          |
+#
+#     **The shrinkage direction is therefore covered by pinning the manifest as bytes, not by either
+#     member check** - measured: against a park whose manifest names four members, 6a prints its `ok` lines
+#     from the record's own field and 6b prints `every one of the 4 member(s) its own manifest names is in
+#     the set`, and both are SILENT, while check 5 refuses with `SHA256SUMS.txt is 451 bytes, the record
+#     says 560`. So `manifest_members=` and check 5 are complements and not redundant, and a record that
+#     dropped the manifest from its file list would lose this direction entirely.
+#
 #     a. every name in the record's `manifest_members=` field is also a `file=` line of the same set -
 #        criterion B closed over the record. The gate verifies the manifest (`sha256sum -c`, its line
 #        139), and `sha256sum -c` opens every path the manifest names, so a file named only in the
@@ -70,7 +87,13 @@ for arg in "$@"; do
   case "$arg" in
     --record=*) RECORD=${arg#--record=} ;;
     --set=*)    WANT_SET=${arg#--set=} ;;
-    --help|-h)  sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//' | grep -v '^$' | head -24; exit 1 ;;
+    # The header is what this prints, and the range is DERIVED from the file rather than written as a
+    # line number. It was `sed -n '2,45p' ... | head -24` until this step, and editing the header above
+    # moved the 6a/6b description past line 45 - so `--help` silently stopped at check 5 and dropped the
+    # trap, the union criterion and the usage line. A help text pinned to a line number is a claim about
+    # how long the comment is, and this project has already paid for that shape of claim. Now it prints
+    # every leading comment line and stops at the first line of code, whatever the header's length.
+    --help|-h)  awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 1 ;;
     -*)         echo "REFUSING: unknown argument $arg" >&2; exit 1 ;;
     *)          if [[ -n $DIR ]]; then
                   echo "REFUSING: more than one directory given ($DIR and $arg). One directory per run, so the verdict names one thing." >&2

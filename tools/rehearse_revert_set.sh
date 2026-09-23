@@ -194,6 +194,14 @@ cell "two-directories"    1 "more than one directory"            \
 cell "unknown-argument"   1 "unknown argument"                   \
   bash "$TOOL" "$GOOD" --record="$W/fixture-record.txt" --wat=1
 
+# `--help` prints the header, and the phrase asserted is the LAST line of it. That is the whole check:
+# the range was a hard-coded `sed -n '2,45p'` plus a `head -24` until step 613, so a header edit moved
+# text past the boundary and the help silently stopped mid-list - the 6a/6b table, the absolute-path trap
+# and the usage line all dropped, with nothing failing. Asserting the FINAL line is what makes truncation
+# visible, and it fails rather than passes if the header ever grows a line the range does not cover.
+cell "help-prints-the-whole-header" 1 "Exit: 0 = every file of every requested set matched" \
+  bash "$TOOL" --help
+
 # 11. the host-side guard: a PATH that cannot resolve the tools must refuse, and must blame the HOST.
 # The links are absolute (via type -P) on purpose: 608's first attempt built them from `command -v` in
 # an interactive shell, where the name can resolve to a FUNCTION, so the links were self-referential and
@@ -309,6 +317,54 @@ cell "target-manifest-names-outside" 1 "names file(s) the set does not" \
 sed 's/ manifest_members=.*/ manifest_members=stage90-qudt.img/' "$W/manifest-record.txt" > "$W/mm-bad.txt"
 cell "manifest-member-not-in-set"   1 "not a file= line of set" \
   bash "$TOOL" "$MAN" --record="$W/mm-bad.txt"
+
+# THE SHRINKAGE DIRECTION, which neither member check covers. A manifest with a member REMOVED is refused
+# by check 5 - the manifest is itself a hashed member whose bytes the record pins - while 6a and 6b stay
+# silent: 6a reads the record's own `manifest_members=` field, which the shrink does not touch, and 6b
+# looks for names the set does NOT carry, of which a shrunk manifest has none. This is the direction the
+# record's first version was blind to, and the reason `manifest_members=` and check 5 are complements.
+#
+# These cells assert SILENCE, and an assertion of silence is the one form of test that a command which
+# does nothing passes - the defect this battery has already caught four times. So the run is captured once
+# and a preflight requires that it actually refused for the stated reason, that the fixture really shrank,
+# and that the output is non-empty, before either "stayed silent" line is allowed to be green.
+SHRUNK=$W/shrunk
+cp -r "$MAN" "$SHRUNK"
+n_before=$(grep -c . "$MAN/SHA256SUMS.txt")
+grep -v 'stage90\.img$' "$MAN/SHA256SUMS.txt" > "$SHRUNK/SHA256SUMS.txt"
+n_after=$(grep -c . "$SHRUNK/SHA256SUMS.txt")
+if [[ $n_after -ne $((n_before - 1)) ]]; then
+  printf '  FAIL  %-26s the fixture was not shrunk (%s members before, %s after) - the cells below would\n' \
+    "shrunk-fixture" "$n_before" "$n_after"
+  printf '        then be asserting silence about a manifest that was never altered.\n'
+  BAD=$((BAD + 1))
+else
+  printf '  ok    %-26s the manifest went from %s member(s) to %s, which is what check 5 has to catch\n' \
+    "shrunk-fixture" "$n_before" "$n_after"
+  OK=$((OK + 1))
+fi
+SHRUNK_OUT=$(bash "$TOOL" "$SHRUNK" --record="$W/manifest-record.txt" 2>&1); SHRUNK_RC=$?
+if [[ $SHRUNK_RC -ne 1 ]] || ! printf '%s' "$SHRUNK_OUT" | grep -qF -- "bytes, the record says"; then
+  printf '  FAIL  %-26s exit=%s without the check-5 size refusal, so the two cells below would pass by\n' \
+    "shrunk-refused-by-bytes" "$SHRUNK_RC"
+  printf '        saying nothing about a run that said nothing - a silence asserting a silence.\n'
+  BAD=$((BAD + 1))
+else
+  printf '  ok    %-26s exit=%s  bytes, the record says\n' "shrunk-refused-by-bytes" "$SHRUNK_RC"
+  OK=$((OK + 1))
+fi
+for pair in "shrunk-6b-silent:names file(s) the set does not:6b" \
+            "shrunk-6a-silent:not a file= line of set:6a"; do
+  name=${pair%%:*}; rest=${pair#*:}; phrase=${rest%%:*}; which=${rest##*:}
+  if printf '%s' "$SHRUNK_OUT" | grep -qF -- "$phrase"; then
+    printf '  FAIL  %-26s %s fired on the shrunk manifest too - the partition in the verifier header is\n' "$name" "$which"
+    printf '        then wrong about which check covers the shrinkage direction.\n'
+    BAD=$((BAD + 1))
+  else
+    printf '  ok    %-26s %s stayed silent, as the partition says\n' "$name" "$which"
+    OK=$((OK + 1))
+  fi
+done
 
 echo
 if [[ $BAD -eq 0 ]]; then
