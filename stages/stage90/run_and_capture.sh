@@ -932,9 +932,27 @@ summarise_log() {
     # sentence that says which build a comparison is made against is cheap here (the criterion line
     # below prints its own source for the same reason).
     park_min=""
-    if [[ -r $REPO_ROOT/stages/stage90/xnu_arm_boot/entry_trace.c ]]; then
-      park_min=$(sed -n 's/^#define ENTRY_PARK_MIN_MS \([0-9][0-9]*\).*/\1/p' \
-                   "$REPO_ROOT/stages/stage90/xnu_arm_boot/entry_trace.c" | head -1 || true)
+    park_src=$REPO_ROOT/stages/stage90/xnu_arm_boot/entry_trace.c
+    # **The extraction tolerates any whitespace, and the refusal it falls back to names the right
+    # cause - both repaired in 632, and the reason is that this is the witness's own threshold.**
+    #
+    # The pattern used to be `^#define ENTRY_PARK_MIN_MS \([0-9]*\)`, requiring **exactly one space** in
+    # each of the two gaps. 632 measured it, verbatim, against six spellings of one line and **four of
+    # them emptied `park_min` on a perfectly readable file**: two spaces after the name (an editor
+    # aligning the value column), a tab, two spaces after `#define`, and a parenthesised value. So a
+    # reformat - the kind of edit that looks like nothing - would have turned rung 1b from PASS/FAIL
+    # into UNREAD on the morning of a press, and the operator would have had no way to tell the reformat
+    # from a genuinely absent definition.
+    #
+    # **And the sentence it printed was false in that case.** `park_min` is empty in two different
+    # states, and both printed "ENTRY_PARK_MIN_MS could not be read from <path>": the file being
+    # unreadable, and the file being read without the expected form being found. The second names a
+    # failure of *reading* about a file that reads fine - 615's class (a refusal naming a fact about a
+    # different thing) arriving in the clause whose number decides the witness. The two are now separate
+    # sentences, and the second says what actually happened.
+    if [[ -r $park_src ]]; then
+      park_min=$(sed -n 's/^#[[:space:]]*define[[:space:]][[:space:]]*ENTRY_PARK_MIN_MS[[:space:]][[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+                   "$park_src" | head -1 || true)
     fi
 
     # **This clause's opening used to assert a fact about the image that the log cannot establish,
@@ -1091,10 +1109,21 @@ summarise_log() {
       if [[ -n $park_min ]] && (( poll_tmo_max >= park_min )); then
         say "  PASS  and it is the park and not a stray ask: the largest recorded timeout is"
         say "        $poll_tmo_max ms, at or above this tree's own park threshold, $park_min ms"
+      elif [[ -z $park_min && ! -r $park_src ]]; then
+        say "  UNREAD  and whether it is the park is unread: $park_src could not be READ at all, so"
+        say "        this clause has no threshold to compare the largest recorded timeout"
+        say "        (${poll_tmo_max:-none}) against - and it will not write a number here instead,"
+        say "        because a second copy of entry_trace.c's own constant is this project's most"
+        say "        repeated defect"
+        verdict_ok=0
       elif [[ -z $park_min ]]; then
-        say "  UNREAD  and whether it is the park is unread: ENTRY_PARK_MIN_MS could not be read from"
-        say "        $REPO_ROOT/stages/stage90/xnu_arm_boot/entry_trace.c, and the largest recorded"
-        say "        timeout (${poll_tmo_max:-none}) is not compared against a number written here"
+        say "  UNREAD  and whether it is the park is unread: $park_src IS readable and carries no"
+        say "        \`#define ENTRY_PARK_MIN_MS <digits>\` line this clause could read, so the largest"
+        say "        recorded timeout (${poll_tmo_max:-none}) is not compared against a number written"
+        say "        here. **This is a statement about the definition's FORM and not about the file's"
+        say "        presence** - open it and look: a reformat (a second space, a tab, a parenthesised"
+        say "        value) is the likely cause, and 632 measured four such spellings that this clause"
+        say "        used to refuse as if the file were unreadable"
         verdict_ok=0
       else
         say "  FAIL  and the largest recorded timeout is ${poll_tmo_max:-absent} ms, below the"
