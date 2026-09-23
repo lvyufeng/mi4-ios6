@@ -1123,12 +1123,25 @@ PY
   # (rung 1b's rule - a threshold quoted from the file that defines it, never written here again), and
   # the clause refuses rather than guessing if either cannot be read.
   #
-  # **The claim that nothing pets it is the clause above, not this one.** `carried == 0` is exactly "no
-  # code in the entry image materialises this page", and the positive control is the payload, which
-  # arms the net and therefore must carry it. The narrower caveat the paragraph above states - the
-  # watchdog shares its 1 MB section with the GIC, which `entry_gic.c:377` maps at run time, so an
-  # image could reach the registers without materialising an address in the page - applies here too and
-  # is why this is a *ceiling* and not a proof of the reset path.
+  # **The claim that nothing pets it is the clause above, not this one - and the two are different
+  # claims, which is why they are now printed as two.** `carried == 0` is "no code in the entry image
+  # materialises an address in this page", and a store to the watchdog needs one, so the clause does
+  # establish that nothing stores to it. What it does **not** establish is that the registers are
+  # unreachable, and 584's own paragraph above says so in as many words. The reachability question has
+  # a measured answer, and it is the opposite one: **the watchdog's registers are mapped, by this
+  # image, on every boot.** `entry_gic_probe`'s first act is
+  # `entry_mmio_section(0xf9000000, 0xf9000000, ...)` - one 1 MB section descriptor into XNU's own L1,
+  # `entry_gic.c:109` - and 0xf9017000 is inside that megabyte. Both archived captures carry it:
+  # `xnu_live_gic_map=0x00000001` with `xnu_live_gic_desc=0xf901040e`, whose bits[31:20] are 0xf90 and
+  # whose bits[1:0] are 0b10 - base 0xf9000000, a section, so it covers 0xf9000000-0xf90fffff. Its
+  # attribute index is 3 (`xnu_live_attr=0x0c`, `entry_stubs.c`'s `ARM_TTE_BLOCK_ATTRINDX` of the PRRR
+  # field that is 0), which TRE remaps to Strongly-ordered - so the mapping is the *right* kind for a
+  # pet, and a store through it would land uncached.
+  #
+  # So the honest sentence is **reachable and unused**, and the ceiling rests on the second. The
+  # distinction is not pedantry: it is the difference between "this arm's clock cannot be changed
+  # without new machinery" (false - a pet is one store to `0xf9017004` from a wrapper this image
+  # already has) and "nothing in it does" (true, and what the scan measures).
   #
   # **And there is a hardware reading of what the ceiling looks like, which is why it is worth printing
   # rather than asserting.** 513's two captures (2026-09-21) are runs of an image with no repair - the
@@ -1143,14 +1156,20 @@ PY
   if [[ -z $WDT_TMO || -z $WDT_GAP ]]; then
     fail "STAGE90_HW_WATCHDOG_TIMEOUT_S / _BITE_GAP_S could not be read from $STAGE_DIR/stage90.h, so the ceiling this arm runs under cannot be stated - and a gate that describes a run without its ceiling is describing a different run"
   fi
-  echo "  and this image cannot pet the net, so the run is CAPPED: a run of this arm that goes well also"
-  echo "  ends within the net's own interval, not when the payload stops. The two constants are read out"
-  echo "  of stage90.h rather than quoted here:"
+  echo "  and nothing in this image pets the net, so the run is CAPPED: a run of this arm that goes well"
+  echo "  also ends within the net's own interval, not when the payload stops. The two constants are read"
+  echo "  out of stage90.h rather than quoted here:"
   echo "    STAGE90_HW_WATCHDOG_TIMEOUT_S    $WDT_TMO s   (the bark)"
   echo "    STAGE90_HW_WATCHDOG_BITE_GAP_S   $WDT_GAP s   (bark -> bite)"
   echo "    so the bite is at most $(( WDT_TMO + WDT_GAP )) s after the payload arms it, and the payload"
   echo "    spends about 1 s of that before the jump (measured: 533's payload timebase sample to the"
   echo "    idle's first read is 1.1805 s on one 19.2 MHz counter)."
+  echo "  READ IT AS 'UNUSED', NOT 'UNREACHABLE'. This image maps the watchdog's registers on every boot -"
+  echo "  the GIC probe's own 1 MB section descriptor (0xf901040e, base 0xf9000000, attr index 3 ="
+  echo "  strongly-ordered) covers 0xf9017000, and both archived captures carry it. What the scan above"
+  echo "  measures is that nothing STORES to them, and a store is what a pet is. Changing this ceiling is"
+  echo "  therefore not new machinery: it is one store to 0xf9017004 (WDT0_RST) from a path XNU already"
+  echo "  runs, in a wrapper this image already has. That is a decision about the arm and not part of it."
   echo "  MEASURED, what that ceiling looks like: 513's two captures - the same regime, an image with no"
   echo "  repair - end their payload records at the fifth poll with panic 0, Attempting system restart 0,"
   echo "  MACH Reboot 0, pc_sample_watchdog_fired 0 and platform_reboot entered 0, so NO software path"
