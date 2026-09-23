@@ -466,7 +466,15 @@ summarise_log() {
   fi
 
   if (( idle_no_sleep_arm == 1 )); then
-    # (6) 594's arm: the idle never slept, so the window's whole family is absent *by construction*
+    # (6) the arm where the idle never slept - **and this branch is entered from the log's own keys (the
+    # conjunction above), never from the image.** A capture whose image predates the repair lands here
+    # too: 513's two captures (2026-09-21, an image with no repair instrument at all) satisfy all six
+    # tests and take this branch. So what this clause reads is the *machine's behaviour* - "the window
+    # did not run" - and which image produced it is the *gate's* reading (the arm switch is in the
+    # build's own record). The two cases differ in cause and not in reading: on 594's arm the window's
+    # whole family is absent *by construction*, on 513's it is absent because the window was never
+    # reached, and the ladder below scores both the same - correctly, since rung 1's park is the same
+    # park either way. The gate's note above is what keeps the pair apart; nothing in the log can.
     #
     # **This clause had to exist before the arm was built, not after.** See the gate's note above for
     # why the block would otherwise be skipped; what follows is the reading that replaces it, and it
@@ -509,11 +517,30 @@ summarise_log() {
                    "$REPO_ROOT/stages/stage90/xnu_arm_boot/entry_trace.c" | head -1 || true)
     fi
 
+    # **This clause's opening used to assert a fact about the image that the log cannot establish,
+    # and 600 measured the counterexample on a real artifact.** It said "This log's image skipped
+    # 514's one-shot repair" - but what the conjunction above tests (door_seq present, the window
+    # family absent) is *"the window did not run"*, and an image that **predates the repair's
+    # existence** satisfies it identically. Measured: 513's two archived captures (2026-09-21, two
+    # days before the arm existed, an image with no repair to skip and no `entry_window_note` to
+    # publish) carry `door_seq` 25 records to `0x01000000`, `poll_seq` to 4 with two 2000 ms parks,
+    # and **no** `repair_seq`/`sip_seq`/`pce_seq`/`wfi_seq`/`slot_cwe_*` - so this branch prints its
+    # PASS lines for them, which it should: the machine did reach the park and did come back. What it
+    # must not do is call that a reading of *this arm*, because the log alone cannot tell the two
+    # apart - an image publishes no build marker (549), so the arm is the **gate's** reading and the
+    # record's, and this clause reads the machine's behaviour. The sentence now says which is which.
     say ""
-    say "  594's arm - the idle does not sleep. This log's image skipped 514's one-shot repair, so"
-    say "  SIGPdisabled stays set, cpu_idle leaves by its first door on every pass, and the window"
-    say "  whose pop {fp, pc} this phase has been measuring is never entered. So the whole family"
-    say "  that clauses (1)-(5) score is absent on purpose, and this clause reads what is left."
+    say "  the idle does not sleep - which is 594's arm, and also any image where the window did not"
+    say "  run. **What this log establishes is the machine's behaviour, not the image's identity**:"
+    say "  SIGPdisabled stayed set, cpu_idle left by its first door on every pass, and the window"
+    say "  whose pop {fp, pc} this phase measures was never entered - so the whole family clauses"
+    say "  (1)-(5) score is absent, and this clause reads what is left. **Measured counterexample, so"
+    say "  the distinction is not academic**: 513's two captures (2026-09-21, an image that predates"
+    say "  514's repair, so there was nothing for it to skip) satisfy this same conjunction - and"
+    say "  **measured on those two logs**, the ladder below scores them rung 0 PASS, rung 1 PASS,"
+    say "  rung 1b PASS, rung 2 its NOTE and rung 3 PASS. So a log in this branch is a reading of"
+    say "  the machine and not of the arm: which image is in the machine is the gate's reading -"
+    say "  the arm switch is in the build's own record - and this clause cannot see it from a log."
     say "    xnu_live_door_seq reaches ${door_max:-absent} - the passes that left by the first door"
     # **Rung 0, and the threshold is `> 32768` rather than `>= 32768`** - which is the correction
     # this clause needed and could only be read off the archived pair. Both publishers of this key
@@ -558,6 +585,10 @@ summarise_log() {
       say "        capture shows the whole userland phase after it - and died below the next power of"
       say "        two.) So this run did not get past 32768 passes and the arm's own reading is not"
       say "        in it - check the gate's signature before reading anything below as this arm."
+      say "        **And this rung is a progress test, not an identifier**: 513's image - the one that"
+      say "        predates the repair - reaches 0x1000000 here, 512 times this threshold, so passing"
+      say "        it says the machine kept going and not that 594's arm is what ran. The image is the"
+      say "        gate's reading; this is the machine's."
       say "        **And if rung 1 below passes anyway the two disagree, which is itself the"
       say "        reading**: the park is the third poll and cannot return on a machine that never"
       say "        reached 32768"
@@ -596,6 +627,15 @@ summarise_log() {
         say "        repair_seq is 1 in both logs - so they returned with SIGPdisabled SET and the"
         say "        idle leaving by door 1, which is this arm's state. The park's return is the"
         say "        same path, not a new one)"
+        say "        **And the same state has already returned from a park on hardware**: 513's two"
+        say "        captures each ran two 2000 ms parks to completion with SIGPdisabled set and the"
+        say "        window never entered, and their four park tick counts are 0x024c37ca / 0x024c3e14"
+        say "        in the first capture and 0x024c072a / 0x024c0c95 in the second (~38.5 M ticks for"
+        say "        the asked 2000 ms plus this arm's own idle overhead), so rung 1's shape is a"
+        say "        measured outcome of this state and not an extrapolation - and it is also the"
+        say "        hardware confirmation that the tick does not need the IPI, which 599 derived"
+        say "        from the disassembly: three of the four bl rtclock_intr sites are outside the"
+        say "        IPI handler, and here the parks expired with that handler unable to run.)"
       fi
       verdict_ok=1
       if [[ -n $park_min ]] && (( poll_tmo_max >= park_min )); then
