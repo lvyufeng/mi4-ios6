@@ -488,13 +488,43 @@ summarise_log() {
     say "  whose pop {fp, pc} this phase has been measuring is never entered. So the whole family"
     say "  that clauses (1)-(5) score is absent on purpose, and this clause reads what is left."
     say "    xnu_live_door_seq reaches ${door_max:-absent} - the passes that left by the first door"
-    if [[ -n $door_max ]] && (( door_max >= 32768 )); then
-      say "    (>= 32768: the idle really did run, and the publishes are the sparse series, so this"
-      say "     is a bound on the pass count and not the count)"
+    # **Rung 0, and the threshold is `> 32768` rather than `>= 32768`** - which is the correction
+    # this clause needed and could only be read off the archived pair. Both publishers of this key
+    # (`entry_stubs.c`'s `entry_note_idle` and `entry_note_door`) write at powers of two with **no
+    # ceiling**: there is no `0x8000` cap in either, and `xnu_live_capped` is absent from both
+    # archived logs, so the live channel never dropped a record. Both logs therefore stop at
+    # **exactly 16 records ending at `0x8000`**, and that is not what the publisher does - it is
+    # *where the machine died*. A run that survives past that point publishes the next powers of two
+    # and nothing has to be assumed to say so.
+    #
+    # So this is a **witness and not only a guard**, and it is the one that does not need the park's
+    # poll to return: `entry_note_idle` is entered on *every* pass, so a machine whose idle is
+    # spinning past 32768 passes says so whether or not pid 1's thread ever runs again. That is
+    # exactly the ambiguity 593 section 4 named - a live spin looks like a working kernel from
+    # outside - and this rung separates "died at the first window pass" from "did not die", leaving
+    # rung 1 to decide whether the thread also progressed. `>= 32768` could not do that: the
+    # baseline satisfies it, and this clause printed a clearance for a number its own baseline
+    # reaches ([[mi4-measurement-defects]]).
+    if [[ -n $door_max ]] && (( door_max > 32768 )); then
+      say "  PASS  and it went past where every previous boot stopped: 520 and 533 both end their"
+      say "        series at exactly 0x8000 (16 records, and xnu_live_capped absent, so nothing was"
+      say "        dropped), which is where the machine died and not a bound in the publisher. This"
+      say "        run published further, so the pass that killed every boot before it - the first"
+      say "        arrival at the window, 593 - did not happen"
+    elif [[ -n $door_max ]]; then
+      say "  FAIL  and it stops at or below 0x8000, which is exactly where 520 and 533 stop: the"
+      say "        series ending there is this project's measurement of *where the boot died*, not a"
+      say "        bound (the publisher is powers-of-two with no ceiling and neither log is capped)."
+      say "        So this run did not get past 32768 passes and the arm's own reading is not in it -"
+      say "        check the gate's signature before reading anything below as this arm. **And if"
+      say "        rung 1 below passes anyway the two disagree, which is itself the reading**: the"
+      say "        park is the third poll and cannot return on a machine that never reached 32768"
     else
-      say "    **and that is not >= 32768**, so this log does not show the door-1 spin the arm is"
-      say "    made of - read the gate's signature before reading anything below as this arm"
-      say "    (a log that reaches here with a small door count is not a run of this arm)"
+      say "  UNREAD  xnu_live_door_seq is absent, and that is the one thing this arm cannot make"
+      say "        absent: entry_note_idle is entered on every pass and publishes this key from the"
+      say "        first. Its absence means cpu_idle was never reached at all, so nothing below is"
+      say "        a reading of this arm"
+      verdict_ok=0
     fi
     say "    xnu_live_repair_seq absent: the repair was not made, which is the switch. (Baseline:"
     say "    0x00000001, with _before != _after - 593 section 4.)"
@@ -508,6 +538,23 @@ summarise_log() {
       say "        returns, so a published 3 is the park having returned - and on the frozen arm it"
       say "        structurally cannot: 520 and 533 both stop at 2, with timeouts 5 ms and 40 ms,"
       say "        because the boot dies inside the park's own poll. This is the death point passed"
+      # **And the return is measured, not hoped for** - which is what turns the falsifier into a
+      # sharp one. The two polls that DID return in the archived pair both returned *before* the
+      # repair: it is made inside the `timeout >= ENTRY_PARK_MIN_MS` block, so a 5 ms and a 40 ms
+      # ask never enter it, and `xnu_live_repair_seq` is 1 in both logs with `_before != _after`,
+      # i.e. exactly once, at the park. So those two returns happened with `SIGPdisabled` **set**
+      # and `cpu_idle` leaving by door 1 - the state 594's arm freezes the machine in - and both
+      # came back with `error=0`, `retval=0` and tick counts that scale with the ask (5 ms ->
+      # 0x203c7/0x30c06, 40 ms -> 0xd5976/0xe2fd4). The timer path demonstrably works in this
+      # state, so a `poll_seq` of 2 on this arm cannot be explained by a clock that stopped: it
+      # would be a real surprise owing another explanation, which is what a falsifier is for
+      if [[ -n $poll_tmo_max ]]; then
+        say "        (measured premise: the two asks that returned in both archived logs did so"
+        say "        *before* the repair - a 5 ms and a 40 ms ask never enter the park block, and"
+        say "        repair_seq is 1 in both logs - so they returned with SIGPdisabled SET and the"
+        say "        idle leaving by door 1, which is this arm's state. The park's return is the"
+        say "        same path, not a new one)"
+      fi
       verdict_ok=1
       if [[ -n $park_min ]] && (( poll_tmo_max >= park_min )); then
         say "  PASS  and it is the park and not a stray ask: the largest recorded timeout is"
@@ -1318,6 +1365,30 @@ summarise_log() {
       say "     panic of another shape, is the news) and 533 section 5's readings, so read which line"
       say "     failed before concluding anything about the arm."
     fi
+  else
+    # **The state the block printed nothing about, and it had no `else` until 595.** Every branch above
+    # is reached by *recognising the log*, so a log that matches none of them was passed over in
+    # silence - and a reader silent for a reason and a reader silent because it broke read identically
+    # from outside (564, and 593 for the same defect one layer up). This is not hypothetical and it is
+    # not only a hypothetical future image: **520, half of this project's own baseline, lands here.**
+    # Measured on the two archived captures, which differ in exactly this: `xnu_live_slot_cwe_*` has
+    # **3** occurrences in 533 and **0** in 520 (the pair postdates that image), while both carry
+    # `door_seq`=16 records, `sip_seq`/`pce_seq`/`wfi_seq`/`repair_seq`=1 and `slot_pre_calls`=1 - i.e.
+    # 520 satisfies the *baseline* signature and the clauses were gated on 533's instrument. That is
+    # clause-level as well as message-level: the honest repair is to say which state this is, and to
+    # name the test that decides it, rather than to guess a branch.
+    say "  UNREAD  this log carries payload output but matches neither arm's signature, so no clause"
+    say "          above could be read:"
+    say "            xnu_live_slot_cwe_ keys:  $(grep -a -c 'xnu_live_slot_cwe_' "$log" || true)"
+    say "            xnu_live_door_seq:        $(grep -a -c 'xnu_live_door_seq=' "$log" || true)"
+    say "            the window family:        sip=$(grep -a -c 'xnu_live_sip_seq=' "$log" || true)"
+    say "          The two signatures are complements and both are measured: the sleepless arm (594) has"
+    say "          door_seq and none of sip_seq/pce_seq/wfi_seq/repair_seq; the baseline has door_seq"
+    say "          and all four, with slot_cwe_ or without it (without = 520, whose image predates the"
+    say "          pair). So the deciding test is whether xnu_live_door_seq is present at all: its"
+    say "          absence means cpu_idle was never entered - a boot that never reached the idle - and"
+    say "          that is a different fault from either arm's, which is why it is named here"
+    verdict_ok=0
   fi
 }
 

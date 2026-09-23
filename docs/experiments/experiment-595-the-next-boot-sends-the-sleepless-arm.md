@@ -104,13 +104,25 @@ absence on this arm that is a deliberate silence (594 §5).
 | item | value |
 | --- | --- |
 | the boot | `fastboot boot out/stage90/stage90-qcdt.img` (`60063c47…`), which embeds the entry arm `696a0f39…` |
-| **the witness** | `xnu_live_poll_seq` reaching **3** — `entry_note_poll` publishes `g_poll_calls + 1` only *after* `__real_poll` returns, the park is the third poll, and both parked logs stop at **2** (timeouts 5 ms and 40 ms). Corroborated by the largest `xnu_live_poll_timeout_ms` ≥ `ENTRY_PARK_MIN_MS` (1000, read out of `entry_trace.c`) |
+| **rung 0 — did it die where every boot died?** | `xnu_live_door_seq` **strictly greater than `0x8000`**. Both archived logs end their series at exactly 16 records and `0x8000`, `xnu_live_capped` is absent from both, and neither publisher has a ceiling — so `0x8000` is *where the machine died*, not a bound, and a run that survives must publish the next powers of two. This rung is on `entry_note_idle`, entered on every pass, so it needs no thread progress |
+| **rung 1 — did pid 1's thread run past the death point?** | `xnu_live_poll_seq` reaching **3** — `entry_note_poll` publishes `g_poll_calls + 1` only *after* `__real_poll` returns, the park is the third poll (the fixture's `SYS_POLL` sites are `+96`, `+116` and `+300`), and both parked logs stop at **2** (timeouts 5 ms and 40 ms) |
+| rung 1b | the largest `xnu_live_poll_timeout_ms` ≥ `ENTRY_PARK_MIN_MS` (1000, read out of `entry_trace.c`) |
 | second witness | the park's console group `mini4: the repair -- … called 0 time(s)` present — the baseline cannot print it at all (it is in neither 520 nor 533) |
-| the arm's signature | `xnu_live_sip_seq` / `pce_seq` / `wfi_seq` / `repair_seq` / `seam_*` / `slot_cwe_*` / the bracket's `pre`/`rtcpre`/`post` all **absent**; `door_seq` and `idle_seq` still climbing to `0x8000` |
-| **the falsifier** | `poll_seq` still **2**. That is the live spin 593 §4 pre-registered: alive, on the bus, never progressing — and it is *not* a hang, so the runner's exit code cannot tell it from a good run |
+| the arm's signature | `xnu_live_sip_seq` / `pce_seq` / `wfi_seq` / `repair_seq` / `seam_*` / `slot_cwe_*` / the bracket's `pre`/`rtcpre`/`post` all **absent** |
+| **the falsifier** | rung 1 failing: `poll_seq` still **2**. That is the live spin 593 §4 pre-registered: alive, on the bus, never progressing — and it is *not* a hang, so the runner's exit code cannot tell it from a good run |
 | the return path, and why the run is bounded | the payload arms the MSM8974 hardware watchdog once (`stage90_main.c:1205`, `STAGE90_HW_WATCHDOG_TIMEOUT_S` 25 s + a 3 s bark/bite gap) **before** the handoff, and **nothing pets it**: `grep -rn 'stage90_hw_watchdog_arm'` finds one call site and there is no pet function, and the XNU side has no MSM watchdog *driver* — the two mentions in `osfmk/arm/` are the panic-log `WDT timeout` string and a boot-arg. So a spinning XNU still resets at ~28 s, the SoC re-enumerates, and the log in DRAM is readable. A run that ends without a return is the watchdog not biting, which would itself be a finding |
 | expected runner exit | **0** if the phone returns and adb reads the log; **3** if it returns into a state adb cannot reach (551 — a capture failure, not a hang). Neither is 2 |
 | what a good run buys | it is the first boot of any arm that can reach the OS: the pass that killed every previous boot (593's *first arrival* at the window) does not happen, and pid 1's thread runs past the park |
+
+**And rung 1's return is measured rather than hoped for, which is what makes the falsifier a sharp
+one.** The two polls that *did* return in the archived pair both returned **before** the repair: it is
+made inside the `timeout >= ENTRY_PARK_MIN_MS` block, so a 5 ms and a 40 ms ask never enter it, and
+`xnu_live_repair_seq` is 1 in both logs with `_before != _after` — exactly once, at the park. So those
+two returns happened with `SIGPdisabled` **set** and `cpu_idle` leaving by door 1, which is the state
+this arm freezes the machine in, and both came back `error=0`, `retval=0` with tick counts that scale
+with the ask (5 ms → `0x203c7`/`0x30c06`, 40 ms → `0xd5976`/`0xe2fd4`). The timer path demonstrably
+works in this state, so a `poll_seq` of 2 here cannot be explained by a clock that stopped — it would
+be a real surprise owing another explanation, which is what a falsifier is for.
 
 **What it does not buy, stated rather than implied.** A PASS on the witness reads *progress past the death
 point*, not "the OS is up": 593 §4 traded the sleep for the boot, so the CPU spins hot until the watchdog
@@ -118,7 +130,42 @@ bites, and the readings that decide 「能进入操作系统」 are the ones aft
 fixture's own syscalls in the live channel, and item (4)'s user-mode records. And 574's `b1` and the 535/590
 axis are still owed; the frozen arm is deferred, not answered.
 
-## 8. Safety
+## 9. Two corrections the archived pair forced, made after the payload was built
+
+Neither is a change to the payload. `run_and_capture.sh` is host-side and is not an input to the build —
+`xnu_arm_entry-sources.txt` covers `xnu_arm_boot/` by content and the runner lives in `stages/stage90/`,
+where the gate's freshness scan does **not** match `*.sh` (deliberately: `build.sh` sits beside the sources
+it compiles, so matching them there would make the gate permanently stale). So `60063c47…` is still the
+artifact the run will send, and the gate is re-run after these edits rather than assumed green.
+
+**(a) The door-count test was `>= 32768` and had to be `> 32768`.** As written it was satisfied by the
+baseline itself, so it printed a clearance for a number both arms reach. The measurement that fixes it is
+in §7's rung 0: two un-ceilinged powers-of-two publishers, 16 records ending at `0x8000` in both logs, and
+`xnu_live_capped` absent — so `0x8000` is *where the machine died*. The correction also promotes the key
+from guard to **witness**, because it is on the instrument entered on every pass.
+
+**(b) The clause block had no `else`, and 520 lands in the gap.** Every branch was reached by *recognising*
+a log, so a log matching none was passed over in silence — the defect 564/593 name, and this time it was
+not hypothetical: `xnu_live_slot_cwe_*` has 3 occurrences in 533 and **0** in 520, so the clauses were
+gated on 533's instrument and **half of this project's own baseline got no reading at all**. The reader now
+prints an UNREAD that names the state and censuses the keys it found. Routing a baseline-signature log into
+clauses (1)–(5) is the *better* fix and is deliberately left as its own step: it changes the condition under
+which five clauses run, and validating that against 520 deserves its own verification rather than being
+folded into a change made with a boot pending.
+
+**(c) And the backtick guard from 594 caught 595's own edit.** The new `else` was first written with symbol
+names in backticks inside `say "..."` — the exact defect 594 §4 documents — and the check added there fired,
+named the four lines, and refused to run. An hour after it was written, on the class it exists for, by the
+same author. That is the whole argument for making a property structural instead of writing it down.
+
+**Verified on six states, each against what it should say:** the two archived baselines (533 classified;
+520 now named rather than silent) and four synthetic arm logs — survived-and-progressed (rungs 0, 1, 1b, 2,
+3 pass), died-at-32768 (rungs 0 and 1 fail), survived-without-thread-progress (rung 0 passes, rung 1 fails,
+and the closing text calls it the pre-registered falsifier rather than progress), and no-`door_seq` (the new
+UNREAD). The four synthetics are shapes, not artifacts, and are labelled as such — they exercise the clause
+in both directions, which the archived pair alone cannot do for the arm branch.
+
+## 10. Safety
 
 No device action, no `fastboot`, no `adb`, **nothing written to storage**, no boot — the build writes only
 under `out/`. `fastboot boot` only, never `flash`, so no outcome of this can write to the device. The

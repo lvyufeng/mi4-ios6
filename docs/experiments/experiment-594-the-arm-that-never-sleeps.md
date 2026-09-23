@@ -229,6 +229,34 @@ And the one key that *must* be there: `xnu_live_door_seq` reaching `0x8000` — 
 that left `cpu_idle` by its first door. That is 513's door-1 count with the third door at zero, where
 the baseline has exactly 1 (593 section 1).
 
+> **Correction (595): the threshold is `> 32768`, not `>= 32768`, and the difference is a measurement.**
+> `>= 32768` is satisfied by the **baseline itself**, so as written this was a clearance for a number
+> both arms reach — and this clause printed it as one. Measured: both publishers of this key
+> (`entry_stubs.c`'s `entry_note_idle` and `entry_note_door`) write at **powers of two with no
+> ceiling** — there is no `0x8000` cap in either — and `xnu_live_capped` is absent from both archived
+> logs, so the live channel dropped nothing. Both logs therefore stop at **exactly 16 records ending at
+> `0x8000`**, and that is *where the machine died*, not what the publisher does. A run that survives
+> past that point publishes the next powers of two. So the test is **strictly greater**, and it is a
+> **witness** as well as a guard: `entry_note_idle` is entered on *every* pass, so it says "the first
+> arrival at the window did not happen" whether or not pid 1's thread ever runs again — which is
+> exactly the ambiguity 593 section 4 named. Rung 1 (the park's poll returning) is what decides whether
+> the *thread* also progressed, and only rung 1 sets the verdict.
+>
+> **And the clause had no `else`.** Every branch was reached by *recognising* a log, so a log matching
+> none of them was passed over in silence — and this is not hypothetical: **520, half of this project's
+> own baseline, lands there.** Measured: `xnu_live_slot_cwe_*` has 3 occurrences in 533 and **0** in
+> 520 (the pair postdates that image), while both carry `door_seq`=16, `sip_seq`/`pce_seq`/`wfi_seq`/
+> `repair_seq`=1 and `slot_pre_calls`=1. So the clauses were gated on 533's instrument and the fix is a
+> branch that names the state and prints the census rather than guessing. (Routing a log that satisfies
+> the *baseline* signature into clauses (1)–(5) is the better fix and is left as its own step: it
+> changes the condition under which five clauses run, and validating that against 520 deserves its own
+> verification rather than being folded into a change made with a boot pending.)
+>
+> **And the backtick guard written in this same experiment caught this same experiment's next edit.**
+> The new `else` was first written with symbol names in backticks inside `say "..."`; the guard added in
+> section 4 fired, named the four lines and refused to run — one hour after it was written, on the
+> defect class it exists for, by its own author. That is the difference between a check and a comment.
+
 ## 6. What this does not do
 
 * **The arm is not bootable yet.** The payload (`out/stage90/stage90-qcdt.img`) embeds
