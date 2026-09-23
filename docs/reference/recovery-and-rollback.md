@@ -284,7 +284,7 @@ Its four preconditions, and what each one is protecting:
    promise, not a path.
 3. **The target is `boot` or `recovery`.** Anything else is refused by name, with the partition list
    this document forbids.
-4. **TWRP is booted, never flashed.** See below.
+4. **TWRP is booted, never flashed** — and it is *the* TWRP this tree has a record for. See below.
 
 #### The write the gate clears, and why it flashes nothing
 
@@ -294,7 +294,8 @@ it.
 
 ```bash
 sudo fastboot devices                       # must list 4a2fe00b
-sudo fastboot boot twrp.img                 # NOT a flash; nothing is written by this
+sudo fastboot boot twrp-3.7.0_9-0-cancro.img   # NOT a flash; nothing is written by this
+
 sudo adb -s 4a2fe00b shell 'cat /proc/partitions; ls -l /dev/block/by-name/boot'
 sudo adb -s 4a2fe00b push payload.img /tmp/write.img
 sudo adb -s 4a2fe00b shell 'dd if=/tmp/write.img of=/dev/block/by-name/boot bs=4096'
@@ -306,14 +307,63 @@ That leaves **exactly one** persistent change — the intended one — instead o
 `fastboot flash` out of the picture entirely for the tool. The only `fastboot flash` in the gate's
 output is the rollback, which is a recovery action and is labelled as one.
 
+#### Which tool image, and how it is known
+
+`--boot-image` is not "any Android boot image". **The gate will only boot an image this tree has a
+record for.** The record is `stages/stage90/tool-images.txt` — one line per image, keyed by sha256, with
+the source page, the fetch date, the size, an md5 and the signer — and the check is
+`tools/verify_tool_image.sh`, which the gate runs before it prints a single command:
+
+```bash
+tools/verify_tool_image.sh twrp-3.7.0_9-0-cancro.img --require-role=twrp
+```
+
+It refuses if the file is absent, empty, unreadable, **not one of the recorded hashes**, or **not
+recorded with `role=twrp`** — and it corroborates the bytes against the detached PGP signature, which is
+what caught the one case a hash alone cannot: an image edited *and* re-recorded to match hashes to the
+new bytes, and the signature disagrees. A bad signature is a refusal; a host without `gpg` prints
+`NOT CHECKED` and still verifies the hash, because a check that succeeds by printing nothing cannot be
+told from one that never ran.
+
+The image currently recorded is **TWRP 3.7.0_9-0 for `cancro`**, fetched 2026-09-23:
+
+| field | value |
+| --- | --- |
+| file | `twrp-3.7.0_9-0-cancro.img` (repository root, **not committed** — `*.img` is gitignored) |
+| sha256 | `a2f4b9037946ededf9f06f28dff922decebe2e7a0bf1bfff24b6e34327e02443` |
+| md5 / bytes | `525f8796b1e9fa22a5fb7be3b89e76f1` / 16240640 |
+| source page | <https://dl.twrp.me/cancro/twrp-3.7.0_9-0-cancro.img.html> |
+| signed by | `9570 7D42 307C 9D41 D09B F709 1D85 97D7 891A 43DF` (uid `TeamWin <admin@teamw.in>`), 2022-10-11 |
+
+Both hashes equal the values TWRP publishes for that file, and the signature verifies against the key
+kept in `stages/stage90/tool-images/` — so the fetch is reproducible and checkable offline. Two caveats,
+stated rather than glossed: the fetch must go **through the html page** (TWRP's terms forbid linking
+directly to their files; without the page's cookie and referer the same URL answers 200 with a 6,817-byte
+interstitial, which is exactly how the first attempt here produced a "successful" download of the wrong
+thing), and the signing key came from a public keyserver, so the *fingerprint* is worth confirming out of
+band while the *bytes* are already pinned by TWRP's own published hashes.
+
+To re-fetch (if the local copy is lost):
+
+```bash
+curl -sSL -c /tmp/tj.txt https://dl.twrp.me/cancro/twrp-3.7.0_9-0-cancro.img.html
+curl -sSL -b /tmp/tj.txt -e https://dl.twrp.me/cancro/twrp-3.7.0_9-0-cancro.img.html \
+     https://dl.twrp.me/cancro/twrp-3.7.0_9-0-cancro.img -o twrp-3.7.0_9-0-cancro.img
+curl -sSL https://dl.twrp.me/cancro/twrp-3.7.0_9-0-cancro.img.sha256     # compare
+tools/verify_tool_image.sh twrp-3.7.0_9-0-cancro.img --require-role=twrp
+```
+
+The image is booted with its own kernel and ramdisk and carries **no appended DTB** (`dt_size=0`), while
+this project's own payload does; that is normal for TWRP builds of this era and is a fact to keep in
+mind, not a defect to fix.
+
 #### What is still missing, stated so it is not assumed
 
-* **No TWRP image exists in this tree.** `xiaomi4-cancro-backup-20260604-112053/recovery.img` is the
-  **stock** recovery (verified, and it is the rollback target), not TWRP. A TWRP build for `cancro`
-  must be obtained and its provenance recorded before the `--boot-image` argument means anything.
-* **The gate cannot tell you what an image *is*.** It can verify that the boot image parses as an
-  Android boot image and that it is not the same file as the payload; it cannot verify that it is TWRP,
-  unsigned, or built for this device. That verification is yours.
+* **The gate cannot tell you what an image *is*.** It can verify that the file is the one this tree
+  recorded, that it parses as an Android boot image, and that it is not the same file as the payload.
+  What makes it *TWRP* is the record — a hash written down in the step that obtained it, from a page whose
+  URL is part of the record. A file copied from a forum and renamed `twrp.img` does not verify.
+* **Nothing here has been booted on the device.** The image is downloaded and verified on the host only.
 * **No EDL path is documented for this phone** (see Emergency notes). The rollback in the gate is a
   fastboot rollback and it assumes fastboot still works.
 

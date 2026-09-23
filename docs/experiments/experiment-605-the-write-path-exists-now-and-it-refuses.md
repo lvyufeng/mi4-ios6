@@ -115,10 +115,13 @@ met — no capture in this tree meets it, which is exactly why the gate has neve
 
 ## 5. What this does not do
 
-* **No TWRP image exists in this tree.** `xiaomi4-cancro-backup-20260604-112053/recovery.img` is the
-  **stock** recovery — verified against the manifest, and it is the rollback target — not TWRP. A
-  `cancro` TWRP build has to be obtained and its provenance recorded before `--boot-image` means
-  anything. The stock `recovery.img` was used as a stand-in for the mechanics test only.
+* **No TWRP image exists in this tree** — *and 608 closed this.* The stock `recovery.img` in
+  `xiaomi4-cancro-backup-20260604-112053/` (verified against the manifest, and it is the rollback
+  target) is not TWRP, and it was used as a stand-in for the mechanics test only. A `cancro` TWRP
+  build had to be obtained and its provenance recorded before `--boot-image` meant anything: 608
+  obtained it, recorded it in `stages/stage90/tool-images.txt`, and made the gate run
+  `tools/verify_tool_image.sh` before printing a command — which refuses the stock recovery by
+  hash rather than accepting it as a stand-in.
 * **The gate cannot tell you what an image is.** It verifies that the boot image parses as an Android
   boot image and that it is not the same file as the payload; it cannot verify it is TWRP, unsigned, or
   built for this device. That is the operator's check.

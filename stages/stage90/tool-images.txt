@@ -1,0 +1,42 @@
+# Tool images this project is willing to BOOT (never flash) for the persistent-write step.
+#
+# WHO WRITES THIS: by hand, in the step that obtained the image, and never by the build. That makes it
+# a record of a fact about a file on disk rather than an output that agrees with itself - but a record
+# is only a constraint if something compares against it, and the comparison lives in
+# `tools/verify_tool_image.sh`: it hashes the image, requires the hash to be one of the lines below,
+# checks the other fields on that line, parses the image, and corroborates it with the detached PGP
+# signature. `stages/stage90/preflight_storage_write.sh` calls that script and refuses a `--boot-image`
+# it cannot verify, so an image that is not recorded here cannot be cleared, whatever it is called.
+#
+# ONE IMAGE PER LINE, space-separated key=value:
+#   sha256=   the key into the line; a changed byte anywhere refuses
+#   md5=      a second, independent hash of the same bytes - two hashes agreeing is what turns a typo
+#             in either into a reading instead of a silence
+#   bytes=
+#   name=     the file's name as the operator has it, which is also what the `.asc` next to this file
+#             is named after (see the `tool-images/` directory)
+#   role=     what the gate is allowed to use this image for. Only `twrp` satisfies the persistent
+#             write gate; a role that is not stated anywhere cannot be inferred from a filename.
+#   source=   the page the file was fetched THROUGH, not a direct link to it: TWRP's terms forbid
+#             linking directly to their files, and a page URL is also the thing that stays meaningful
+#             if the file moves
+#   fetched=  the date this host downloaded it
+#   signed_by=/signed_on=  the fingerprint the detached signature names and its date, for the operator
+#             who wants to confirm the identity half out of band
+#
+# THE FETCH, exactly as it was done, because a provenance nobody can reproduce is a story:
+#   curl -sSL -c /tmp/tj.txt  https://dl.twrp.me/cancro/twrp-3.7.0_9-0-cancro.img.html   # the page
+#   curl -sSL -b /tmp/tj.txt -e <that page>  https://dl.twrp.me/cancro/twrp-3.7.0_9-0-cancro.img
+#     -> 16,240,640 bytes, content-type application/octet-stream. WITHOUT the cookie and the referer
+#        the same URL answers 200 with a 6,817-byte HTML interstitial, so a fetch that "succeeded" and
+#        produced a small file is that page and not the image - which is exactly how the first attempt
+#        at this download failed here.
+#   published sha256 (dl.twrp.me/cancro/....img.sha256) and md5 (....img.md5) both matched the bytes
+#   downloaded, and the detached signature (....img.asc) verifies against the key kept in
+#   `stages/stage90/tool-images/`.
+#
+# **The image itself is NOT in this repository**: `*.img` is gitignored, so what is committed is this
+# record, the signature and the signing key - enough to re-verify the bytes and not enough to hide
+# them. A copy is kept at the repository root under the name below.
+
+sha256=a2f4b9037946ededf9f06f28dff922decebe2e7a0bf1bfff24b6e34327e02443 md5=525f8796b1e9fa22a5fb7be3b89e76f1 bytes=16240640 name=twrp-3.7.0_9-0-cancro.img role=twrp source=https://dl.twrp.me/cancro/twrp-3.7.0_9-0-cancro.img.html fetched=2026-09-23 signed_by=95707D42307C9D41D09BF7091D8597D7891A43DF signed_on=2022-10-11

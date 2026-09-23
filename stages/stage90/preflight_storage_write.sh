@@ -32,6 +32,15 @@
 #     exactly ONE persistent change - the intended one - instead of two. The plan below prints that
 #     form, and the script has no `fastboot flash` line at all.
 #
+#     **And the tool is THE recorded one, not merely a boot image.** `--boot-image` used to be checked
+#     by parsing it, which is a claim about a *format*; a file that parses and is not the image this
+#     tree recorded would have been cleared. The record is `stages/stage90/tool-images.txt` (hash,
+#     size, md5, source page, signer) and the check is `tools/verify_tool_image.sh`, run below with
+#     `--require-role=twrp`. It refuses anything whose hash is not in the record, anything recorded
+#     for another role, and - the case a hash alone cannot catch - an image edited *and* re-recorded
+#     to match, because TWRP's own detached signature then disagrees. An image that is not recorded
+#     cannot be cleared here whatever it is called (608).
+#
 # WHY THE CRITERION STRINGS ARE READ OUT OF THE RUNNER
 # ---------------------------------------------------
 # Grepping the summariser's output for a phrase is a claim about what that file prints, and this
@@ -42,7 +51,11 @@
 #
 # Usage:
 #   ./preflight_storage_write.sh                       # print the plan and every precondition; refuse
-#   ./preflight_storage_write.sh --evidence=LOG --target=boot --image=PATH --allow-storage-write
+#   ./preflight_storage_write.sh --evidence=LOG --target=boot --image=PATH \
+#        --boot-image=PATH --allow-storage-write
+#
+# `--boot-image` is required: it is the tool that gets BOOTED (never flashed) and the target is
+# written from inside it. Its hash must be one of `stages/stage90/tool-images.txt`'s lines.
 #
 # Exit: 0 = every precondition verified and the commands are printed; 1 = refused, named reason.
 
@@ -175,16 +188,26 @@ echo
 if [[ "$(readlink -f "$BOOTLOADER_IMAGE")" == "$(readlink -f "$IMAGE")" ]]; then
   refuse "--boot-image and --image are the same file. One of them is the tool and the other is the payload; a gate that clears booting the payload in order to write the payload has cleared the wrong thing"
 fi
-# And it must at least be a boot image: a file booted as one that is not one fails on the phone with
-# nothing on the host saying why. The parser is the tree's own reader for these.
-if [[ -r $REPO_ROOT/tools/parse_android_bootimg.py ]]; then
-  if ! python3 "$REPO_ROOT/tools/parse_android_bootimg.py" "$BOOTLOADER_IMAGE" >/dev/null 2>&1; then
-    refuse "$BOOTLOADER_IMAGE does not parse as an Android boot image (tools/parse_android_bootimg.py refused it), so it is not something this gate will tell you to boot"
-  fi
+# And it must be THE image this project recorded, not merely a file that parses as one. Until now
+# this check was the parser alone, which is a statement about a *format* and not about a *file*: any
+# Android boot image would have been cleared to boot. The record at stages/stage90/tool-images.txt
+# names the image by hash, `tools/verify_tool_image.sh` compares the two - and corroborates it with
+# TWRP's own signature - and the requirement is `role=twrp`, because the form this gate clears is the
+# one that boots the recovery tool. An image recorded for any other role is refused by name, and an
+# image that is not recorded at all cannot be cleared whatever it is called.
+VERIFIER=$REPO_ROOT/tools/verify_tool_image.sh
+[[ -r $VERIFIER ]] || refuse "no verifier at $VERIFIER, so whether $BOOTLOADER_IMAGE is the image this project recorded cannot be established - and this gate will not boot an image it cannot name"
+if ! VERIFY_OUT=$(bash "$VERIFIER" "$BOOTLOADER_IMAGE" --require-role=twrp 2>&1); then
+  refuse "the tool image did not verify against the tree's own record:
+$(printf '%s\n' "$VERIFY_OUT" | sed 's/^/          /')
+          This is not a formatting complaint: a tool image is booted only after its origin and its
+          hash are written down, and this one is not the file that record names"
 fi
-TOOL_SHA=$(sha256sum "$BOOTLOADER_IMAGE" | awk '{print $1}') || refuse "could not hash $BOOTLOADER_IMAGE"
+TOOL_SHA=$(printf '%s\n' "$VERIFY_OUT" | sed -n 's/^  ok   sha256 \([0-9a-f]*\) is a record line$/\1/p' | head -1)
+[[ -n $TOOL_SHA ]] || refuse "the verifier passed and printed no sha256, so this gate has no hash to record - and a record without the number is the thing this gate exists to avoid"
 echo "  ok  boot image (booted, never flashed): $BOOTLOADER_IMAGE"
 echo "          sha256 $TOOL_SHA"
+printf '%s\n' "$VERIFY_OUT" | grep -E '^   (name|role|source|fetched) ' | sed 's/^/       /'
 echo
 echo "  1. put the phone in fastboot (Vol-Down + Power), then confirm it is THERE:"
 echo "       sudo fastboot devices          # must list $SERIAL"
