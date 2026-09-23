@@ -373,6 +373,25 @@ extern void FlushPoC_Dcache(void);
 #endif
 
 /*
+ * ------------------------------------------------------------- 535: the seam inside the exit, as a switch
+ *
+ * **The switch is the *interception*, not a flag inside a hook that is always linked.** With
+ * `STAGE90_XNU_SEAM_POC=1` the build adds `--wrap=FlushPoU_Dcache` and the wrapper (the `naked`
+ * trampoline behind it) is in the image; with the default `0` there is no `--wrap`, no wrapper and no
+ * interception, so the arm is "the call inside `platform_cache_idle_exit` is hooked" against "it is
+ * Apple's own call and nothing else" - one difference, and it is the difference the run is about.
+ * 517's flag is the other arrangement (a `#if` inside a wrapper that is always linked), and the reason
+ * this one is not is that an always-linked pass-through wrapper would be a change to *every* caller of
+ * `FlushPoU_Dcache` in an image whose whole point is that only one call site moved.
+ *
+ * The doc block on the wrapper below is where the arm is argued; this is only where it is named.
+ * `build_entry.sh` records it with the other ten arm keys and asserts the wrapper's presence or
+ * absence against this same variable, so a flag that does not match the image stops the build. */
+#ifndef STAGE90_XNU_SEAM_POC
+#define STAGE90_XNU_SEAM_POC 0
+#endif
+
+/*
  * ---------------------------------------------------------------- 533: the near-end enable is a switch
  *
  * **526's run came back negative, and this switch is what that result buys.** The arm was 522's image
@@ -1983,6 +2002,200 @@ void __wrap_platform_cache_idle_exit(void)
 
     entry_note_pcx(entry_counter(), entry_tpidrprw(), entry_cpu_datap(), entry_sctlr());
 }
+
+/* ======================================================= 535: the seam inside `platform_cache_idle_exit` */
+/*
+ * **546 section 4's seam, built: a Point-of-Coherency clean-and-invalidate of the region the idle
+ * exit's frame slot occupies - the two words its own `pop {fp, pc}` reads - placed after its
+ * `push {fp, lr}` and before `SCTLR.C` comes back on.** 533 ran, came back, and its own log put the death where 547 section 4 predicted: both loads of
+ * the `pop` succeeded and the value they brought back was a counter, with `lr = 0x800462dc` and
+ * `pc = r11 & ~1` (`xnu_live_sleh_lr`, `xnu_live_sleh_r11`, 568 section 4). So the frontier's object is
+ * still the same word, and this is the arm the phase has been arming for since 519.
+ *
+ * **The site, and how it is identified rather than assumed.** The window is
+ * `[0x80046240, 0x8004633c)` - Apple's own `SCTLR.C = 0` in `platform_cache_idle_enter` to Apple's own
+ * `SCTLR.C = 1` twenty-four bytes before the `pop` - and the only call reachable inside it is the
+ * exit's `bl FlushPoU_Dcache` at `0x800462d8` (546 section 4: the four instructions between the
+ * re-enable and the `pop` contain no `bl` at all, and an interrupt between them is a different step).
+ * That routine has four callers in this image - `0x80045d08` (`cache_xcall`), `0x80046284` (the
+ * enter's else arm), `0x800462d8` (the exit) and `0x800463bc` (`cache_xcall_handler`) - so wrapping the
+ * symbol alone would put this arm's operation behind all four. The wrapper therefore **tests the
+ * return address it was entered with** against `STAGE90_XNU_SEAM_LR` (`0x800462dc`, the instruction
+ * after that `bl`) and hands every other site straight through, which is the mechanism 546 section 4
+ * names (`xnu_entry_stub_caller`, this project's `__builtin_return_address(0)`) and the one
+ * [[mi4-hooks-live-at-calls]] requires: a hook is a `bl`, so the `bl` is the seam.
+ *
+ * **Why the interception is a `naked` trampoline rather than a C body.** At the `bl`, the stack
+ * pointer *is* the slot: `push {fp, lr}` at `0x800462d4` decremented `sp` by 8 and wrote the two words
+ * at `[sp, sp+8)`, and the `pop` at `0x8004633c` reads those same two words back with no `sp` change
+ * in between (546 section 1). So the address this arm reads and restores is `sp` at the wrapper's own
+ * entry, and a compiler-generated prologue - which pushes the callee's registers *below* `sp`, in the
+ * first instructions - would leave no way to recover it. The two moves that read `sp` and `lr` are
+ * therefore the wrapper's first two instructions. The C body that follows is `noinline` so its call is
+ * in the image and countable, and its own frame is *below* the slot, so unlike 520's capture one TU
+ * over there is no "the frame lands in the words to be read" hazard here: the two words are above
+ * `sp`, which is what makes them the caller's saved registers rather than this function's.
+ *
+ * **The four steps, in order, and what each one is for.**
+ *
+ * 1. **`dsb sy`, then the two words in memory.** The barrier is not decoration. It is 545 section 6's
+ *    hole - the image has no barrier between the push and Apple's own sweep, and the routine being
+ *    swept into ends with its `dsb` rather than starting with one - and here it is also what makes the
+ *    reading mean anything: the push's two stores have to have reached memory before a load with the
+ *    cache off can be a reading of *them* rather than of the store buffer's ordering. `_b0`/`_b1` are
+ *    the push's stores as memory holds them, and `_b1` is the frame's own `lr`, which 546 section 1
+ *    says names `cpu_idle` - a check on the push, taken before this arm does anything.
+ * 2. **Apple's own `FlushPoU_Dcache`, called by the wrapper on the way through.** This arm adds to
+ *    `caches.c:460` rather than replacing it, the same way 516 added to `caches.c:415`: the kernel's
+ *    instruction is not this project's to rewrite, and Apple's L1 sweep is what makes the L1's stale
+ *    copy of the slot unreadable. Its clean half has nothing to write back - the enter's
+ *    `CleanPoU_Dcache` cleaned the whole L1 earlier in this same window - but that is a fact about the
+ *    run, not an assumption the arm makes.
+ * 3. **The PoC clean-and-invalidate of the slot's region, and then the same two words again.**
+ *    `FlushPoC_DcacheRegion(slot, 8)` - Apple's own routine, whose source comment is *"Clean and
+ *    Invalidate d-cache region to Point of Coherency"* (`caches_asm.s:291-309`) and whose body is
+ *    `mcr p15, 0, r0, c7, c14, 1` in a loop over the lines the region touches, then a `dsb`. It is a
+ *    call rather than two open-coded `mcr`s for the reason 516 and 517 called Apple's routines: the
+ *    arithmetic that decides how many lines an 8-byte region at an arbitrary alignment touches is
+ *    Apple's, and a build clause can read the routine's opcode out of the image - two instructions
+ *    written here would be a second definition of an operation this tree already has. `_a0`/`_a1` are
+ *    what it left in memory, and they are this arm's centre as a *measurement*: a clean half that
+ *    finds a **dirty** stale line writes it *out*, so the two words come back changed and, on 546
+ *    section 3's reading, holding `cpu_data->rtcPop` - the value the exit wrapper publishes as
+ *    `xnu_live_slot_rtcpre_pop`, and the value 547 section 1 read out of 520's panic. A dirty stale
+ *    line is therefore 546's mechanism *seen from the near side*, before the `pop` that would
+ *    otherwise have died on it; two equal pairs say the line was clean and the pop's wrong value came
+ *    from somewhere this arm has not touched.
+ * 4. **The restore, then the readings.** Whatever step 3 left there, the two words are written back
+ *    from `_b0`/`_b1` with the cache still off, so they land in memory, and a `dsb` puts them there
+ *    before the `pop` is reachable. This is the step a *clean* cannot provide and a *clean only* would
+ *    make worse: at this one address the window's store is newer than the cache's copy, and the
+ *    operation that repairs the line for its neighbours (a clean) writes the stale copy over it. The
+ *    frame the exit pushed is what the `pop` must read, and after this store it is what memory holds.
+ *
+ * **This is a clean-and-invalidate of the slot's own region rather than the whole-cache PoC flush 546
+ * section 4 named, and the reason is the same one in both directions.** A whole-cache sweep's *clean* writes the
+ * cache's copies over **every** address the window wrote in memory - the window's stores are
+ * DRAM-only by construction, because `SCTLR.C` is clear throughout it, so the sweep would rewrite the
+ * window's own work in the direction of the stale copy, and the addresses that would lose their
+ * updates are not only the slot: they include the per-CPU fields `platform_cache_idle_enter` zeroes
+ * and every frame the window pushes. A whole-cache *invalidate* is worse in the other direction: it
+ * discards dirty lines whose memory copy is *older*, and the slot's line is exactly such a line for
+ * its neighbours - the idle thread's own live frame shares it on both sides of the slot - so the
+ * neighbours' updates would be lost to fix one word. An MVA operation is defined **to the Point of
+ * Coherency**, so it reaches whichever levels hold the line without needing XNU's operand-encoded
+ * level or a geometry from `proc_reg.h` (the two questions 544/545 leave open), and its clean half is
+ * what keeps the neighbours: it writes them back before discarding the line, and only the slot's own
+ * two words are then out of date - which step 4 restores. So the operation is a PoC invalidate aimed
+ * at the object the frontier is named by, and the arm's shape is recorded that way in
+ * `docs/experiments/experiment-569-*.md` before this image is built.
+ *
+ * **What it does not do, and the constraint 547 section 5 puts on it.** It writes no control register,
+ * so 522's hazard - `SCTLR.C` written outside the coherency domain - is not available to this arm
+ * whatever else it does. The only memory it writes is the two words of the caller's own frame slot,
+ * through the same addresses the push used, and the only other state it changes is the cache's
+ * contents for that line. If the pass survives the `pop` and dies later, `xnu_live_seam_*` says which
+ * of the two the run was about, because the readings are taken either way.
+ */
+#if STAGE90_XNU_SEAM_POC
+
+/* The one address the identification compares against. It is `platform_cache_idle_exit`'s
+ * `bl FlushPoU_Dcache` + 4, i.e. the instruction that call returns to, and `build_entry.sh` reads it
+ * back out of the linked image and refuses the build if this constant and that address disagree -
+ * 556's lesson, where the same address had three spellings and only the reader was bound to the
+ * image. A hand-pinned address here would be 520's defect one layer down: right until the kernel's
+ * text moves, and silent about it afterwards. */
+#define STAGE90_XNU_SEAM_LR       0x800462dcu
+#define STAGE90_SEAM_LIVE_MAX     4u
+
+extern void entry_live_write(const char *key, uint32_t value);
+extern uint32_t entry_live_ready(void);
+extern void __real_FlushPoU_Dcache(void);
+/* The operation, and it is Apple's: `Clean and Invalidate d-cache region to Point of Coherency`
+ * (`caches_asm.s:291-309`), over the eight bytes the exit's `push` wrote. The build clause reads its
+ * body out of the image and requires it to be the clean-and-invalidate form and not one of its two
+ * same-sized neighbours (a clean, whose write-back leaves the line readable; an invalidate, which
+ * would discard the neighbours whose memory copy is the older). */
+extern void FlushPoC_DcacheRegion(uint32_t va, uint32_t bytes);
+
+static uint32_t g_seam_calls, g_seam_live, g_seam_other;
+
+/* Every call up to the bound, then the powers of two of the count - the schedule `entry_slot_publish`
+ * uses for the sites one TU over, because 557 measured this window entered **once** per boot and an
+ * arm whose reading stops at one pass would not be able to say so if that were wrong. */
+static uint32_t entry_seam_publish(uint32_t n)
+{
+    return (n <= STAGE90_SEAM_LIVE_MAX || (n & (n - 1u)) == 0u) ? 1u : 0u;
+}
+
+__attribute__((noinline)) void entry_seam_flush(uint32_t slot, uint32_t lr)
+{
+    uint32_t b0, b1, a0, a1, sctlr;
+
+    if (lr != STAGE90_XNU_SEAM_LR) {
+        /*
+         * One of the other three callers. It is handed straight through, with the same argument
+         * registers a direct call would have left it (this function's own `r0`-`r3` are its own to
+         * use, and `FlushPoU_Dcache` takes no argument and returns nothing), and the count is
+         * published so that "the hook never ran" and "the hook ran and rejected this site" stay
+         * different readings - 526's distinction, and the reason the identification is a measurement
+         * here rather than a filter in a comment.
+         */
+        g_seam_other++;
+        if (entry_seam_publish(g_seam_other) != 0u && entry_live_ready() != 0u) {
+            entry_live_write("xnu_live_seam_other", g_seam_other);
+            entry_live_write("xnu_live_seam_other_lr", lr);
+        }
+        __real_FlushPoU_Dcache();
+        return;
+    }
+
+    __asm__ volatile ("dsb sy" ::: "memory");
+    b0 = *(volatile uint32_t *)(uintptr_t)slot;
+    b1 = *(volatile uint32_t *)(uintptr_t)(slot + 4u);
+
+    __real_FlushPoU_Dcache();
+
+    FlushPoC_DcacheRegion(slot, 8u);
+    __asm__ volatile ("dsb sy" ::: "memory");
+
+    a0 = *(volatile uint32_t *)(uintptr_t)slot;
+    a1 = *(volatile uint32_t *)(uintptr_t)(slot + 4u);
+
+    *(volatile uint32_t *)(uintptr_t)slot = b0;
+    *(volatile uint32_t *)(uintptr_t)(slot + 4u) = b1;
+    __asm__ volatile ("dsb sy" ::: "memory");
+
+    sctlr = entry_sctlr();
+
+    g_seam_calls++;
+    if (entry_seam_publish(g_seam_calls) != 0u && entry_live_ready() != 0u) {
+        g_seam_live++;
+        entry_live_write("xnu_live_seam_calls", g_seam_calls);
+        entry_live_write("xnu_live_seam_lr", lr);
+        entry_live_write("xnu_live_seam_sp", slot);
+        entry_live_write("xnu_live_seam_sctlr", sctlr);
+        entry_live_write("xnu_live_seam_b0", b0);
+        entry_live_write("xnu_live_seam_b1", b1);
+        entry_live_write("xnu_live_seam_a0", a0);
+        entry_live_write("xnu_live_seam_a1", a1);
+    }
+}
+
+/*
+ * The wrapper itself: three instructions and no frame. `b` rather than `bl`, so `entry_seam_flush`'s
+ * own `bx lr` returns to the site that called `FlushPoU_Dcache` - the wrapper adds no return address
+ * of its own, which is what keeps the exit's frame, and therefore the slot, exactly where Apple's
+ * `push` left it.
+ */
+__attribute__((naked)) void __wrap_FlushPoU_Dcache(void)
+{
+    __asm__ volatile ("mov r0, sp\n\t"
+                      "mov r1, lr\n\t"
+                      "b entry_seam_flush\n");
+}
+
+#endif /* STAGE90_XNU_SEAM_POC */
 
 /*
  * Experiment 517. **The one C caller that runs between the interrupt handler's dispatch and the return

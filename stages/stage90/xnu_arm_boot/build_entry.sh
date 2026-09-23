@@ -368,6 +368,54 @@ case "$ISTACK_SEPARATE" in
 esac
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_ISTACK_SEPARATE="$ISTACK_SEPARATE")
 
+# ---------------------------------------------------------------- 535: the seam inside the exit
+#
+# **The arm 533's own run unblocked.** 568 read the run: the boot dies at the idle exit's `pop {fp, pc}`,
+# the log is present, and the device comes back on XNU's own `MACH Reboot` - 547 section 4's first row,
+# whose own words are "the enable is confirmed as the difference between a recovered death and a hang".
+# So 565 section 3's destined arm is the one to build: an inner-seam PoC invalidate of the line the
+# `pop` reads, identified by the return address `0x800462dc` of the exit's own `bl FlushPoU_Dcache`.
+#
+# **It is a new interception, not a flag inside an existing wrapper, and that is why this switch adds a
+# `--wrap` rather than only a `-D`** (the shape 517/526/533 use):
+#
+#   * `STAGE90_XNU_SEAM_POC=1` puts `--wrap=FlushPoU_Dcache` in the link, so **every** call to that
+#     routine in this image - the four sites `0x80045d08` (`cache_xcall`), `0x80046284` (the enter's
+#     else arm), `0x800462d8` (the exit's own, i.e. the seam) and `0x800463bc` (`cache_xcall_handler`)
+#     - arrives at one wrapper, and the wrapper hands every site but the seam straight through. Which
+#     of them it was is read from the return address the wrapper was entered with, not inferred from
+#     which symbol was wrapped: `--wrap` renames the callee, so without that test the arm's operation
+#     would run behind all four call sites while every surface still said "the exit's seam".
+#   * `0`, the default, adds no `--wrap` at all and the wrapper is not in the image, so the flag is the
+#     *presence of the interception* rather than a branch inside one: one difference between the two
+#     arms, and the difference the run is about. The default is 0 for the reason 517's is - a build that
+#     forgets the variable has to be the arm that already ran, not a new one.
+#
+# `entry_trace.c`'s block on `__wrap_FlushPoU_Dcache` is where the arm itself is argued (the ordering,
+# the barrier, why a clean-and-invalidate of one line rather than a whole-cache sweep, and the restore
+# a clean cannot provide). What this file owes it is the two checks at the bottom: that the exit's own
+# call is the one that got redirected, and that no call site was left behind.
+SEAM_POC=${STAGE90_XNU_SEAM_POC:-0}
+case "$SEAM_POC" in
+    0|1) ;;
+    *) echo "STAGE90_XNU_SEAM_POC must be 0 or 1, not [$SEAM_POC]" >&2; exit 1 ;;
+esac
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_SEAM_POC="$SEAM_POC")
+# `--wrap` only when the tracer is in the image and the arm is on: the wrapper is `entry_trace.c`'s, so
+# a wrap without that object is an undefined reference, and a wrap with the flag off would be an
+# interception the config record says is not there.
+[[ $ENTRY_TRACE -eq 1 && $SEAM_POC -eq 1 ]] && TRACE_LDFLAGS+=(--wrap=FlushPoU_Dcache)
+#
+# **The name every clause that reads a *call site* of this routine has to expect, defined once.**
+# `--wrap` renames the callee, so a clause written against the unwrapped name counts 0 calls in a
+# flag-on image and refuses - which is how this variable came to exist: 535's first build stopped in
+# 515's clause ("platform_cache_idle_enter's branches do not both appear in its extent with
+# CleanPoU_Dcache (1) called before FlushPoU_Dcache (0)"), which is the check working on a name that
+# had moved. There are two such clauses (the enter's and the exit's) and they must agree, so the
+# name is written here rather than in each of them.
+SEAM_FLUSHPOU_CALLEE=FlushPoU_Dcache
+[[ $ENTRY_TRACE -eq 1 && $SEAM_POC -eq 1 ]] && SEAM_FLUSHPOU_CALLEE=__wrap_FlushPoU_Dcache
+
 # ---------------------------------------------------- 533: **an arm change has to be deliberate**
 #
 # **The record and the manifest describe the build that already happened; neither constrains the next
@@ -404,9 +452,9 @@ esac
 ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT_NULL
                 STAGE90_XNU_EXIT_POC_FLUSH STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE
                 STAGE90_XNU_IDLE_STACK STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
-                STAGE90_ENTRY_CHECKPOINT_AFTER)
+                STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_SEAM_POC)
 #
-# **The seven switches are not the whole arm, and finding that out is what made this ten.** Checking
+# **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
 # the case statement below against the script's own environment reads - `grep -o '${STAGE90_[A-Z0-9_]*:-'`
 # over the whole file - turns up three more that shape the linked image and were in no record
 # anywhere: `STAGE90_ENTRY_CHECKPOINT` (`:218`, `--wrap=<symbol>` at `:235-236` plus
@@ -418,9 +466,15 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
 # The rest of the environment is `*_OBJ` link-path knobs, which move where an object is read from
 # rather than what the image is.
 #
-# The three are recorded as `(unset)` when empty rather than omitted, because a key the writer does
-# not write is a key the reader cannot require, and `X=` is not `X=(unset)` for the same reason
-# `#define X 0` is not "off" to `#ifdef X`. They are read from the environment here and not from
+# **535 is the eleventh, and it is the first one that changes the *link* and not only a `#define`**: it
+# adds `--wrap=FlushPoU_Dcache` (see its own block above), so a build that forgot it would produce an
+# image with no interception at all while the arm on disk said a seam was hooked - the same silent
+# shape, one dimension further out. It is a plain switch name here like the rest; that the link uses it
+# is the block above's business.
+#
+# The three checkpoint keys are recorded as `(unset)` when empty rather than omitted, because a key the
+# writer does not write is a key the reader cannot require, and `X=` is not `X=(unset)` for the same
+# reason `#define X 0` is not "off" to `#ifdef X`. They are read from the environment here and not from
 # `ENTRY_CHECKPOINT*`, which are assigned further down (`:218`-`:236`) - this block runs before them,
 # deliberately, so that nothing in `$OUT` is written before the refusal can happen.
 ENTRY_ARM_NOW=""
@@ -434,6 +488,7 @@ do
         STAGE90_XNU_IDLE_CACHE_ENABLE) _v=$IDLE_CACHE_ENABLE ;;
         STAGE90_XNU_ISTACK_SEPARATE)  _v=$ISTACK_SEPARATE ;;
         STAGE90_XNU_IDLE_STACK)       _v=${STAGE90_XNU_IDLE_STACK:-1} ;;
+        STAGE90_XNU_SEAM_POC)         _v=$SEAM_POC ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_SKIP) _v=${STAGE90_ENTRY_CHECKPOINT_SKIP:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_AFTER) _v=${STAGE90_ENTRY_CHECKPOINT_AFTER:-(unset)} ;;
@@ -443,14 +498,14 @@ done
 ENTRY_ARM_WAS=""
 ENTRY_ARM_WAS_KNOWN=0
 if [[ -f "$OUT/xnu_arm_entry-config.txt" ]]; then
-    # **A record that carries some of the ten keys is not a previous arm, it is a previous arm of
+    # **A record that carries some of the eleven keys is not a previous arm, it is a previous arm of
     # blanks - and read as one it refuses every build.** The read-back below is `KEY=<value> ` per
     # key whether or not the key is there, so a record holding only `STAGE90_XNU_ENTRY_SHA256` and
     # `_BYTES` - any record written before 533 added the arm keys, or a hand-written one - gives a
-    # non-empty `ENTRY_ARM_WAS` of ten empty values. Measured by running the block against such a
+    # non-empty `ENTRY_ARM_WAS` of eleven empty values. Measured by running the block against such a
     # record: it refused with `the arm already on disk was built with STAGE90_ENTRY_TRACE= ...` and
     # no way forward but the override, on a build that had no previous arm to differ from. So all
-    # ten must read back before there is anything to compare, and a partial record is reported as
+    # eleven must read back before there is anything to compare, and a partial record is reported as
     # *no previous arm* rather than silently treated as one - which is this block's own rule for a
     # missing record, applied to a record that is missing the half it compares.
     _arm_all=1
@@ -463,7 +518,7 @@ if [[ -f "$OUT/xnu_arm_entry-config.txt" ]]; then
     [[ $_arm_all -eq 1 ]] && ENTRY_ARM_WAS_KNOWN=1
 fi
 if [[ -f "$OUT/xnu_arm_entry-config.txt" && $ENTRY_ARM_WAS_KNOWN -eq 0 ]]; then
-    printf '  xnu_entry_533: note: %s exists but does not carry all ten arm keys (%s), so the arm it describes is not known and the deliberate-change check cannot run for this build. It will be complete from this build on.\n' \
+    printf '  xnu_entry_533: note: %s exists but does not carry all eleven arm keys (%s), so the arm it describes is not known and the deliberate-change check cannot run for this build. It will be complete from this build on.\n' \
            "$OUT/xnu_arm_entry-config.txt" "${ENTRY_ARM_WAS% }"
 fi
 if [[ $ENTRY_ARM_WAS_KNOWN -eq 1 && "$ENTRY_ARM_WAS" != "$ENTRY_ARM_NOW" && ${STAGE90_ENTRY_ARM_CHANGE:-0} != 1 ]]; then
@@ -705,6 +760,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_SLOT_NULL="$SLOT_NULL" \
         -DSTAGE90_XNU_IDLE_CACHE_ENABLE="$IDLE_CACHE_ENABLE" \
         -DSTAGE90_XNU_ISTACK_SEPARATE="$ISTACK_SEPARATE" \
+        -DSTAGE90_XNU_SEAM_POC="$SEAM_POC" \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
 fi
@@ -28219,7 +28275,7 @@ verify_trace_symbols() {
     read -r uplo uphi <<<"$(awk -v a="$((upa))" 'BEGIN { printf "0x%x 0x%x", a % 65536, int(a / 65536) }')"
     read -r rnlo rnhi <<<"$(awk -v a="$((rn))" 'BEGIN { printf "0x%x 0x%x", a % 65536, int(a / 65536) }')"
     read -r puplo puphi prnlo prnhi pcmp pclean pflush pmrcldr pclw porder <<<"$(arm-none-eabi-objdump -d --start-address=$pce --stop-address=$pcenext "$OUT/xnu_arm_entry.elf" | awk \
-        -v lo="$uplo" -v hi="$uphi" -v rlo="$rnlo" -v rhi="$rnhi" '
+        -v lo="$uplo" -v hi="$uphi" -v rlo="$rnlo" -v rhi="$rnhi" -v w="${SEAM_FLUSHPOU_CALLEE:-FlushPoU_Dcache}" '
         { split($1, a, ":"); if (a[1] == "") { next }
           if (index($0, "; " lo) && $3 == "movw") ulo++
           if (index($0, "; " hi) && $3 == "movt") uhi++
@@ -28227,7 +28283,7 @@ verify_trace_symbols() {
           if (index($0, "; " rhi) && $3 == "movt") rhi_n++
           if ($3 == "cmp" && $4 ~ /^r[0-9]+,$/ && $5 == "#1") cmp1++
           if (index($0, "<CleanPoU_Dcache>") && $3 == "bl") { clean++; cadd = strtonum("0x" a[1]) }
-          if (index($0, "<FlushPoU_Dcache>") && $3 == "bl") { flush++; fadd = strtonum("0x" a[1]) }
+          if (index($0, "<" w ">") && $3 == "bl") { flush++; fadd = strtonum("0x" a[1]) }
           if (prev ~ /mrc[ \t]+15, 0, r[0-9]+, cr13, cr0, \{4\}/ && $0 ~ /ldr[ \t]+r[0-9]+, \[r[0-9]+, #1484\]/) mrcldr++
           if ($0 ~ /str[ \t]+r[0-9]+, \[r[0-9]+, #304\]/) clw++
           prev = $0 }
@@ -28238,7 +28294,7 @@ verify_trace_symbols() {
     [[ "${prnlo:-0}" -ge 1 && "${prnhi:-0}" -ge 1 && "${pcmp:-0}" -ge 1 ]] ||
         layout_fail "platform_cache_idle_enter does not read real_ncpus ($rn) with a movw/movt pair and compare it with 1: the right operand is 'this machine has exactly one CPU', and a comparison against anything else would make the uniprocessor claim mean something else"
     [[ "${pclean:-0}" -ge 1 && "${pflush:-0}" -ge 1 && "${porder:-0}" == 1 ]] ||
-        layout_fail "platform_cache_idle_enter's branches do not both appear in its extent with CleanPoU_Dcache ($pclean) called before FlushPoU_Dcache ($pflush): the up-style branch is the one that reads nothing and the else branch the one that reads getCpuDatap(), so their order is which branch is which"
+        layout_fail "platform_cache_idle_enter's branches do not both appear in its extent with CleanPoU_Dcache ($pclean) called before ${SEAM_FLUSHPOU_CALLEE:-FlushPoU_Dcache} ($pflush): the up-style branch is the one that reads nothing and the else branch the one that reads getCpuDatap(), so their order is which branch is which"
     [[ "${pmrcldr:-0}" -ge 1 ]] ||
         layout_fail "platform_cache_idle_enter does not contain 'mrc p15, 0, r?, cr13, cr0, {4}' followed by 'ldr r?, [r?, #1484]': that pair is getCpuDatap(), the value 514's run dereferenced as 0 with a store to 0x130, and it is the reason a reading taken in that branch is a reading of a disabled-cache load"
     [[ "${pclw:-0}" -ge 1 ]] ||
@@ -28285,7 +28341,7 @@ verify_trace_symbols() {
             END { printf "%d %d", inb + 0, outb + 0 }')"
     [[ "${xin:-0}" -ge 1 && "${xout:-1}" == 0 ]] ||
         layout_fail "the image branches to __wrap_platform_cache_idle_exit from ${xin:-0} site(s) inside cpu_idle and ${xout:-?} outside it: the exit is what re-enables the D-cache (caches.c:490-494), and the enter/exit pair has to be cpu_idle's alone for the two counts to be the two ends of one window"
-    say "  xnu_entry_515: the linked image carries exactly ${argn} literal equal to the name arm_init passes to PE_parse_boot_argn, and that parser is the real one (not in pass 1's undefined set); up_style_idle_exit ($upa) is one 32-bit .bss word and real_ncpus ($rn) one 32-bit .data word holding $rnval in the image, and caches.c:414's two operands are read inside platform_cache_idle_enter ($pce..$pcenext) by a movw/movt pair each with the ncpus one compared against 1, whose up-style branch calls CleanPoU_Dcache and whose else branch calls FlushPoU_Dcache, reads getCpuDatap() as 'mrc cr13,cr0,{4}' + 'ldr [r?, #1484]' (this configuration's ACT_CPUDATAP = $act) and stores to [r?, #304] - the instruction 514's runs faulted on; and that function is wrapped for both its ends, entered from inside cpu_idle only (${ein} site(s) and ${xin} for the exit, none outside), so a run's xnu_live_pce_*/pcx_* pair counts the windows that completed and the ones that did not; the two copies of the command line are checked in the payload build"
+    say "  xnu_entry_515: the linked image carries exactly ${argn} literal equal to the name arm_init passes to PE_parse_boot_argn, and that parser is the real one (not in pass 1's undefined set); up_style_idle_exit ($upa) is one 32-bit .bss word and real_ncpus ($rn) one 32-bit .data word holding $rnval in the image, and caches.c:414's two operands are read inside platform_cache_idle_enter ($pce..$pcenext) by a movw/movt pair each with the ncpus one compared against 1, whose up-style branch calls CleanPoU_Dcache and whose else branch calls ${SEAM_FLUSHPOU_CALLEE:-FlushPoU_Dcache} (this build's callee name for it), reads getCpuDatap() as 'mrc cr13,cr0,{4}' + 'ldr [r?, #1484]' (this configuration's ACT_CPUDATAP = $act) and stores to [r?, #304] - the instruction 514's runs faulted on; and that function is wrapped for both its ends, entered from inside cpu_idle only (${ein} site(s) and ${xin} for the exit, none outside), so a run's xnu_live_pce_*/pcx_* pair counts the windows that completed and the ones that did not; the two copies of the command line are checked in the payload build"
 
     # --------------------------------------------------------------------------- 516: the write-back
     #
@@ -28417,7 +28473,7 @@ verify_trace_symbols() {
         [[ "${kn:-0}" -ge 1 ]] ||
             layout_fail "the binary of the linked image's .text carries no literal '$k': 516's reading is the pair of values that key names, and a key that is not in the image is a record the run cannot write"
     done
-    say "  xnu_entry_516: the window opens on a cache and a memory that agree, and they agree because the write-back reaches the Point of Coherency and not the Point of Unification - CleanPoC_Dcache ($cpou) is the kernel's own function (one definition, not in pass 1's undefined set, not itself wrapped, ${cpoc_loops} DCCSW loops in its own body against CleanPoU_Dcache $pou's ${pou_loops}, which is the whole of the difference and the whole of this step) and __wrap_platform_cache_idle_enter calls it ${cpocnt} time at ${cpoaddr}, before the call that opens the window at ${realaddr}, i.e. while SCTLR.C is still set and one call earlier than Apple's own PoU clean at caches.c:415 (still exactly one CleanPoU_Dcache and one FlushPoU_Dcache inside platform_cache_idle_enter $pce..$pcenext); the wrapper reads getCpuDatap() from TPIDRPRW+#1484 ${dapwins} time(s) with ${sctlrreads} SCTLR read(s), the exit wrapper reads SCTLR after its call to the real exit (${xsctlr}), and the eight keys that carry the two sides of the comparison are in the image's .text"
+    say "  xnu_entry_516: the window opens on a cache and a memory that agree, and they agree because the write-back reaches the Point of Coherency and not the Point of Unification - CleanPoC_Dcache ($cpou) is the kernel's own function (one definition, not in pass 1's undefined set, not itself wrapped, ${cpoc_loops} DCCSW loops in its own body against CleanPoU_Dcache $pou's ${pou_loops}, which is the whole of the difference and the whole of this step) and __wrap_platform_cache_idle_enter calls it ${cpocnt} time at ${cpoaddr}, before the call that opens the window at ${realaddr}, i.e. while SCTLR.C is still set and one call earlier than Apple's own PoU clean at caches.c:415 (still exactly one CleanPoU_Dcache and one ${SEAM_FLUSHPOU_CALLEE:-FlushPoU_Dcache} inside platform_cache_idle_enter $pce..$pcenext); the wrapper reads getCpuDatap() from TPIDRPRW+#1484 ${dapwins} time(s) with ${sctlrreads} SCTLR read(s), the exit wrapper reads SCTLR after its call to the real exit (${xsctlr}), and the eight keys that carry the two sides of the comparison are in the image's .text"
 
 
     # ------------------------------------------------------- 517: the exit's flush, and the frame
@@ -28476,9 +28532,104 @@ verify_trace_symbols() {
     [[ -n "${pcexit:-}" ]] ||
         layout_fail "platform_cache_idle_exit is no longer in the image: its own first act is the L1-only flush this step is an addition to, and `_pcx`'s record is taken at its far end"
     pexbody=$(arm-none-eabi-objdump -d --start-address=$pcexit --stop-address="$(next_global "$pcexit")" "$OUT/xnu_arm_entry.elf")
-    pflpush=$(awk '$3 == "bl" && index($0, "<FlushPoU_Dcache>") > 0 { n++ } END { printf "%d", n + 0 }' <<<"$pexbody")
+    # **535 redirects that call, so which name is in the exit depends on the arm** - and the check has
+    # to be the arm's own, because "--wrap was added" and "the exit's call was redirected" are two
+    # different claims: a wrap that missed this call site would leave Apple's routine reached directly
+    # from the seam, and the arm's whole reading would be about a hook that never ran there.
+    pf_callee=${SEAM_FLUSHPOU_CALLEE:-FlushPoU_Dcache}
+    pflpush=$(awk -v w="<$pf_callee>" '$3 == "bl" && index($0, w) > 0 { n++ } END { printf "%d", n + 0 }' <<<"$pexbody")
     [[ "${pflpush:-0}" == 1 ]] ||
-        layout_fail "platform_cache_idle_exit calls FlushPoU_Dcache ${pflpush:-0} time(s) and not once: that call is caches.c:460, the L1-only flush that leaves the L2 alone - the hole this step's write-back is placed one call earlier than - so if it is gone or duplicated, the exit this build reasons about is not the one 516 stopped in"
+        layout_fail "platform_cache_idle_exit calls $pf_callee ${pflpush:-0} time(s) and not once: that call is caches.c:460, the L1-only flush that leaves the L2 alone - the hole this step's write-back is placed one call earlier than, and (with STAGE90_XNU_SEAM_POC=1) the seam 535 hooks - so if it is gone, duplicated, or reached by a name this build did not expect, the exit this build reasons about is not the one 516 stopped in"
+    # ---------------------------------------------------------------- 535: the seam, in both directions
+    #
+    # **Two claims, and the first is the one this project has been burned by.** The arm's operation is
+    # aimed at *one* of `FlushPoU_Dcache`'s four callers, and the separation is the return address the
+    # wrapper was entered with - so the constant the C compares against must be the address that call
+    # returns to, in this image, and not a number somebody typed twice. 556 is the precedent: one
+    # address, three spellings, and only the reader was bound to the image. `STAGE90_XNU_SEAM_LR` is
+    # read out of the C and compared with the disassembly of the exit's own `bl`.
+    #
+    # The second is the shape of what runs behind the seam, and it is asserted as **counts of the
+    # same-size neighbours**, because `clean-and-invalidate`, `clean` and `invalidate` by MVA are three
+    # instructions that differ in one field of one operand and in what they do to the neighbours of the
+    # line ([[mi4-stand-in-size-is-not-value]]): the body must carry exactly the clean-and-invalidate
+    # form, exactly twice (one per word of the 8-byte slot).
+    t535_of() { awk -v m="$1" '$1 == "#define" && $2 == m { v = $3; sub(/u$/, "", v); print v; exit }' \
+        "$BOOT_DIR/entry_trace.c"; }
+    seam_lr_def=$(t535_of STAGE90_XNU_SEAM_LR)
+    seam_wrap=$(sym_addr __wrap_FlushPoU_Dcache) || true
+    seam_body=$(sym_addr entry_seam_flush) || true
+    if [[ $SEAM_POC -eq 1 ]]; then
+        [[ -n "${seam_wrap:-}" ]] ||
+            layout_fail "STAGE90_XNU_SEAM_POC=1 and __wrap_FlushPoU_Dcache is not in the linked image: the flag adds --wrap=FlushPoU_Dcache, and a flag whose wrapper is absent is a run whose record says a seam was hooked while every call in the image is Apple's own"
+        [[ -n "${seam_body:-}" ]] ||
+            layout_fail "STAGE90_XNU_SEAM_POC=1 and entry_seam_flush is not in the linked image: the wrapper's two moves branch to it, and without it the arm's whole body - the barrier, the two-word reading, the PoC invalidation and the restore - is not in the image the run boots"
+        [[ -n "$seam_lr_def" ]] ||
+            layout_fail "entry_trace.c has no STAGE90_XNU_SEAM_LR: the wrapper's identification is a comparison with that constant, and this clause exists to compare it with the image's own return address rather than to assume it"
+        read -r seam_call seam_back <<<"$(awk '
+            /^[0-9a-f]+:/ { cur = strtonum("0x" substr($1, 1, length($1) - 1)) }
+            $3 == "bl" && index($0, "<__wrap_FlushPoU_Dcache>") > 0 { split($0, a, ":"); print strtonum("0x" a[1]), strtonum("0x" a[1]) + 4; exit }' <<<"$pexbody")"
+        [[ -n "${seam_call:-}" && "${seam_back:-0}" == "$(( seam_lr_def ))" ]] ||
+            layout_fail "the exit's call to FlushPoU_Dcache is at ${seam_call:-?} and returns to ${seam_back:-?}, while entry_trace.c's STAGE90_XNU_SEAM_LR is $seam_lr_def: the arm's identification is a comparison with that constant, so a disagreement means the wrapper would let this very site through (or hook a different instruction) and every reading the run publishes would be about the wrong call"
+        # Every call site redirected: a direct `bl <FlushPoU_Dcache>` left anywhere is a site the
+        # wrapper's test cannot see, i.e. a call the arm silently does not cover.
+        seam_dis="$OUT/xnu_arm_entry_seam.dis"
+        arm-none-eabi-objdump -d "$OUT/xnu_arm_entry.elf" > "$seam_dis"
+        # **Outside the wrapper, and the exclusion is not a convenience.** `__real_FlushPoU_Dcache` is
+        # an alias for the routine itself, so the wrapper's *own* call to Apple's function also
+        # disassembles as `bl <FlushPoU_Dcache>` - that one is the arm's, not a site it missed, and a
+        # count that did not exclude it would refuse every flag-on build (which is what 535's first
+        # clause build did, one line after the 515 clause had stopped it for the same reason: a check
+        # written against a name rather than against what the name is for).
+        read -r seam_direct seam_wrapped <<<"$(awk '
+            /^[0-9a-f]+ <[^>]+>:$/ { match($0, /<[^>]+>:/); cur = substr($0, RSTART + 1, RLENGTH - 3); next }
+            $3 == "bl" && index($0, "<FlushPoU_Dcache>") > 0 && cur != "entry_seam_flush" && cur != "__wrap_FlushPoU_Dcache" { d++ }
+            $3 == "bl" && index($0, "<__wrap_FlushPoU_Dcache>") > 0 { w++ }
+            END { printf "%d %d", d + 0, w + 0 }' "$seam_dis")"
+        [[ "${seam_direct:-0}" == 0 ]] ||
+            layout_fail "$seam_direct call(s) in the linked image still reach FlushPoU_Dcache directly while STAGE90_XNU_SEAM_POC=1: --wrap renames the callee, so a direct call is a call site this arm does not intercept - and the arm's claim is that the return-address test is the *only* thing separating the four sites, which a fifth unredirected one would make false without changing any reading"
+        [[ "${seam_wrapped:-0}" == 4 ]] ||
+            layout_fail "__wrap_FlushPoU_Dcache is the callee at ${seam_wrapped:-0} site(s) and not 4: this image's four callers of FlushPoU_Dcache are 0x80045d08 (cache_xcall), 0x80046284 (the enter's else arm), 0x800462d8 (the exit's, the seam) and 0x800463bc (cache_xcall_handler), and the arm's identification is written against that set - a different count means the set moved and the test's coverage has to be re-derived rather than assumed"
+        seam_body_dis=$(arm-none-eabi-objdump -d --start-address=$seam_body --stop-address="$(next_global "$seam_body")" "$OUT/xnu_arm_entry.elf")
+        seam_region=$(awk '/^[[:space:]]*[0-9a-f]+:/ && $3 == "bl" && index($0, "<FlushPoC_DcacheRegion>") > 0 { n++ } END { printf "%d", n + 0 }' <<<"$seam_body_dis")
+        [[ "${seam_region:-0}" == 1 ]] ||
+            layout_fail "entry_seam_flush calls FlushPoC_DcacheRegion ${seam_region:-0} time(s) and not once: that call *is* the arm - a clean-and-invalidate at the Point of Coherency over the slot's eight bytes, after the push and before SCTLR.C comes back on - and a body without it (or with two of it) is a different step wearing this one's name"
+        seam_poc=$(sym_addr FlushPoC_DcacheRegion) ||
+            layout_fail "FlushPoC_DcacheRegion is not in the linked image: the seam's operation is a call to it, and without the real function the call would resolve to a stand-in or to nothing"
+        grep -qx "FlushPoC_DcacheRegion" "$OUT/xnu_arm_entry_undef.txt" &&
+            layout_fail "FlushPoC_DcacheRegion is in the pass-1 undefined set: the seam's operation would then be a stand-in's function, and an empty stand-in would leave the slot's stale copy exactly where the arm needs it removed while the record says a PoC invalidation ran"
+        # The routine's own body, read rather than described: the MVA clean-and-invalidate (`cr7,c14,1`)
+        # once per line, and **neither of its two same-sized neighbours** - a clean (`cr7,c10,1`), whose
+        # write-back leaves the stale line readable, and an invalidate (`cr7,c6,1`), which discards the
+        # line's neighbours too, whose memory copy is the older one. They differ in one field of one
+        # operand and would be indistinguishable from the outside.
+        seam_poc_dis=$(arm-none-eabi-objdump -d --start-address=$seam_poc --stop-address="$(next_global "$seam_poc")" "$OUT/xnu_arm_entry.elf")
+        seam_mva=$(awk '/^[[:space:]]*[0-9a-f]+:/ && /mcr[ \t]+15, 0, [a-z][a-z0-9]*, cr7, cr14, \{1\}/ { n++ } END { printf "%d", n + 0 }' <<<"$seam_poc_dis")
+        seam_cln=$(awk '/^[[:space:]]*[0-9a-f]+:/ && /mcr[ \t]+15, 0, [a-z][a-z0-9]*, cr7, c10, \{1\}/ { n++ } END { printf "%d", n + 0 }' <<<"$seam_poc_dis")
+        seam_inv=$(awk '/^[[:space:]]*[0-9a-f]+:/ && /mcr[[:space:]]+15, 0, [a-z][a-z0-9]*, cr7, c6, \{1\}/ { n++ } END { printf "%d", n + 0 }' <<<"$seam_poc_dis")
+        [[ "${seam_mva:-0}" == 1 ]] ||
+            layout_fail "FlushPoC_DcacheRegion's body in this image contains ${seam_mva:-0} clean-and-invalidate-by-MVA instruction(s) (mcr p15,0,rX,cr7,cr14,{1}) and not 1: the arm's whole operation is that instruction, run over the lines the slot's eight bytes touch"
+        [[ "${seam_cln:-0}" == 0 && "${seam_inv:-0}" == 0 ]] ||
+            layout_fail "FlushPoC_DcacheRegion's body in this image contains ${seam_cln:-0} clean-by-MVA (cr7,c10,{1}) and ${seam_inv:-0} invalidate-by-MVA (cr7,c6,{1}) instruction(s): this clause counts the three neighbours apart because they are one operand field apart, and an arm carrying either of the other two would look identical from the outside while doing the wrong thing to the line"
+        # The body's calls to Apple's routine, and the *aliasing* is why this counts `b` as well as
+        # `bl`: `__real_FlushPoU_Dcache` and `FlushPoU_Dcache` are one address, so the pass-through's
+        # tail call disassembles as `b <FlushPoU_Dcache>` and the seam's as `bl <FlushPoU_Dcache>`.
+        seam_real=$(awk '/^[[:space:]]*[0-9a-f]+:/ && ($3 == "bl" || $3 == "b") && index($0, "<FlushPoU_Dcache>") > 0 { n++ } END { printf "%d", n + 0 }' <<<"$seam_body_dis")
+        [[ "${seam_real:-0}" == 2 ]] ||
+            layout_fail "entry_seam_flush reaches FlushPoU_Dcache ${seam_real:-0} time(s) - as __real_FlushPoU_Dcache, which is an alias for it - and not twice: once in the seam path (Apple's own caches.c:460 flush, which this arm adds to rather than replaces) and once in the pass-through path the other three sites take. One call would mean one of the two paths does not run Apple's routine, and a caller that lost its flush would be a change this arm did not intend to make"
+        seam_wrap_dis=$(arm-none-eabi-objdump -d --start-address=$seam_wrap --stop-address="$(next_global "$seam_wrap")" "$OUT/xnu_arm_entry.elf")
+        seam_frame=$(awk '/^[[:space:]]*[0-9a-f]+:/ && ($3 == "push" || $3 == "stmdb" || ($3 == "sub" && $4 == "sp")) { n++ } END { printf "%d", n + 0 }' <<<"$seam_wrap_dis")
+        [[ "${seam_frame:-0}" == 0 ]] ||
+            layout_fail "__wrap_FlushPoU_Dcache adjusts the stack ${seam_frame} time(s): its first instruction reads sp as the slot's own address, and that is only true while the wrapper has no frame - a prologue's push would move sp below the two words and the arm would read and restore an address that is not the one the exit's pop reads"
+        seam_move=$(awk '/^[[:space:]]*[0-9a-f]+:/ && /mov[[:space:]]+r[0-9]+, sp/ { n++ } END { printf "%d", n + 0 }' <<<"$seam_wrap_dis")
+        [[ "${seam_move:-0}" -ge 1 ]] ||
+            layout_fail "no instruction in __wrap_FlushPoU_Dcache reads sp (mov rX, sp): the slot's address is sp at this wrapper's entry, and a wrapper that does not read it cannot be the arm this build's record says it is"
+        say "  xnu_entry_535: the seam is hooked - the exit's own call to FlushPoU_Dcache at ${seam_call} is redirected to __wrap_FlushPoU_Dcache ($seam_wrap), which reads sp and the return address before anything else runs, and where lr == STAGE90_XNU_SEAM_LR ($seam_lr_def, the address that call returns to, read out of entry_trace.c and checked against the image above) entry_seam_flush ($seam_body) runs: dsb, the slot's two words, Apple's own FlushPoU_Dcache (via __real_FlushPoU_Dcache, ${seam_real} call sites in the body - the seam's and the other three sites'), a PoC clean-and-invalidate of the slot's eight bytes (Apple's own FlushPoC_DcacheRegion at $seam_poc, whose body this clause reads as ${seam_mva} x cr7,cr14,{1} with ${seam_cln} clean-by-MVA and ${seam_inv} invalidate-by-MVA), the two words restored, and the readings published - and ${seam_wrapped} of the image's FlushPoU_Dcache call sites are redirected to it, ${seam_direct} left direct"
+    else
+        [[ -z "${seam_wrap:-}" ]] ||
+            layout_fail "STAGE90_XNU_SEAM_POC=0 and __wrap_FlushPoU_Dcache IS in the linked image: the arm's flag is the presence of the interception, so an image carrying the wrapper with the flag off is not the arm this build's record names - it is 535 with a record that says 533"
+        say "  xnu_entry_535: no seam - STAGE90_XNU_SEAM_POC=0, so --wrap=FlushPoU_Dcache is not in this build's link, __wrap_FlushPoU_Dcache is not in the image (checked above, not assumed), and the exit's own call to FlushPoU_Dcache at ${pcexit:-?} is Apple's, reached directly - this image is the frontier arm 533 and nothing else"
+    fi
     # The kernel's own fields, by this configuration's own numbers - and read from the two places that
     # *state* them rather than written here a third time. `entry_stubs.c` names each offset once as a
     # macro (that is what the C compiles against) and `assym.s` carries genassym's answer for the same
@@ -30300,6 +30451,10 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     echo "STAGE90_XNU_IDLE_CACHE_ENABLE=$IDLE_CACHE_ENABLE"
     echo "STAGE90_XNU_ISTACK_SEPARATE=$ISTACK_SEPARATE"
     echo "STAGE90_XNU_IDLE_STACK=$IDLE_STACK_FOR_RECORD"
+    # 535's switch, and the only one whose *link* the build changes (see its own block above): the
+    # record is what makes "this image has the seam hook" a thing the gate can read rather than a
+    # thing a reader assumes from the hash.
+    echo "STAGE90_XNU_SEAM_POC=$SEAM_POC"
     # The three the refusal above compares and the gate prints: their absence from this file was the
     # hole that comment describes. `(unset)` rather than an empty value, so `[[ -n ]]` on the reader's
     # side still means "the key is there" and the gate's nine-key clause keeps its meaning at twelve.

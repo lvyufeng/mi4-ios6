@@ -119,8 +119,17 @@ exit_pop_lr_addr() {
   # address that is not a symbol (`llvm-objdump` does, `arm-none-eabi-objdump` does not) - and a
   # rule that assumed one of them would have found nothing under the other, which is how this
   # derivation failed on its first run.
+  #
+  # **The callee's name is matched by its tail, not spelled once.** 535's arm reaches this call through
+  # `--wrap=FlushPoU_Dcache`, so in that image the disassembly reads `bl ... <__wrap_FlushPoU_Dcache>`
+  # and a pattern written as `/<FlushPoU_Dcache>/` - the literal this line carried until 535 - matched
+  # **nothing**: the derivation returned empty, the reader fell back to its pinned literal, and the
+  # criterion stopped being derived from the image in exactly the run whose whole question is that call.
+  # (Measured, not imagined: on 535's `12684433…` the pattern above found 0 call sites and the gate's
+  # own copy of this derivation printed UNREAD for the same reason.) Any wrapper prefix is allowed, so
+  # the rule is about the routine and not about the spelling the linker chose for the call.
   ret=$(printf '%s\n' "$body" | awk '
-    /<FlushPoU_Dcache>/ { seen = 1; next }
+    /<[^<>]*FlushPoU_Dcache>/ { seen = 1; next }
     seen && $1 ~ /^[0-9a-f]+:?$/ { a = $1; sub(/:$/, "", a); print "0x" a; exit }') || return 1
   [[ $ret =~ ^0x[0-9a-fA-F]+$ ]] || return 1
   # A return address is the instruction after a `bl`: 4-byte aligned, inside the kernel's own VA
@@ -299,6 +308,12 @@ summarise_log() {
     sleh_sp=$(keyval sleh_sp)
     sleh_seen=$(keyval sleh_seen)
 
+    # 535's arm, and it is extracted here rather than inside clause (5) because clause (2) needs it
+    # too: that clause reads the SCTLR pair as a *cell*, and since 535 the cell has two images in it
+    # (both leave the window as Apple left it). The seam's counter is what says which image this log
+    # came from, and it is published by 535's own wrapper and by nothing earlier.
+    seam_calls=$(keyval seam_calls)
+
     # The criterion the shape test compares against, **derived at run time** - see
     # `exit_pop_lr_addr` - and labelled when it could not be, so a re-read from a tree whose `out/`
     # has been cleaned says which it used instead of quietly comparing against a number nobody
@@ -373,10 +388,26 @@ summarise_log() {
       # cell whose prediction is that it dies: the peer session's point, and the reason this line
       # is printed loudly instead of left inside the PASS sentence.
       if [[ $arm_seen == 533 ]]; then
-        say "  FALSIFIER  and this log's pair is the enable-off cell's, whose prediction is that it"
-        say "        DOES die at the pop - 547 section 4's third row. If the runner's exit code says"
-        say "        the device returned, this falsifies 546's mechanism for this cell and 535 must"
-        say "        not be built as designed. It is the loudest reading in this block"
+        # **Which image the pair is in decides which of two readings this is, and since 535 the pair
+        # alone does not say.** The third row is a falsifier for *533's* image - the one whose arm is
+        # absent from the seam. In 535's image the operation is at the seam on that very pop, so a
+        # panic-free boot is that arm retiring the epilogue it was built for, and printing "535 must
+        # not be built as designed" over it would score the arm's success as its falsification. 533
+        # did die at the pop (568 section 4), so the row is closed for its cell either way.
+        if [[ $seam_calls =~ ^0x[0-9a-f]+$ ]] && (( seam_calls >= 1 )); then
+          say "  RESULT  and this log's image is the later one in that cell - 535's, whose arm operates"
+          say "        at the seam on that same pop. So this is 535's success and not 547 section 4's"
+          say "        third row: the pass retired the epilogue the arm was built for. The row was a"
+          say "        falsifier for 533's image and 533 died at the pop (568 section 4), so the"
+          say "        mechanism stands for the cell. What this log now decides is how far the boot got"
+          say "        past the exit, which is item (4), and clause (5)'s pair - read those before"
+          say "        calling the frontier moved"
+        else
+          say "  FALSIFIER  and this log's pair is the enable-off cell's, whose prediction is that it"
+          say "        DOES die at the pop - 547 section 4's third row. If the runner's exit code says"
+          say "        the device returned, this falsifies 546's mechanism for this cell and 535 must"
+          say "        not be built as designed. It is the loudest reading in this block"
+        fi
       fi
     elif [[ $cache_arm == unread ]]; then
       say "  UNREAD  $panics 'panic ... sleh_abort' record(s), but the enter wrapper's own"
@@ -410,6 +441,17 @@ summarise_log() {
       say "        the capture out; a panic here says the cache state is not it either - which leaves"
       say "        the enter wrapper's own store in the window, 522's addition, as the next thing to"
       say "        bisect)"
+      # A new shape in an image that *carries* the arm is a different candidate list from one that
+      # does not: the seam's own operation writes two words, its clean half writes a whole line back,
+      # and both are new since 533. So this says which of the two lists to read rather than leaving
+      # the sentence above to be applied to an image it was not written for.
+      if [[ $seam_calls =~ ^0x[0-9a-f]+$ ]] && (( seam_calls >= 1 )); then
+        say "        **and this image carries 535's arm**, so the new fault has two more candidates"
+        say "        before that one: the seam's own two stores to the exit's frame slot, and the clean"
+        say "        half of its operation writing back a line whose other words are the idle thread's."
+        say "        Clause (5) printed what the arm read there - read it against this death's registers"
+        say "        ($sleh_lr/$sleh_pc/$sleh_sp) before any of them is blamed or cleared"
+      fi
       verdict_ok=0
     fi
 
@@ -440,6 +482,19 @@ summarise_log() {
         elif [[ $arm_seen == 533 ]]; then
           say "  ARM   533's arm: slot_cwe_set=$cwe_set has C clear - the window is left exactly as"
           say "        Apple left it, and *this* is that arm's expected reading, not a failed enable"
+          # The pair decides the *cell*, and since 535 the cell has two images in it: 535 leaves the
+          # window as 533 does (`STAGE90_XNU_IDLE_CACHE_ENABLE=0` in both), so this line names a cell
+          # and not necessarily the image. Which image it is comes out of the log rather than being
+          # assumed - `xnu_live_seam_*` is published by 535's arm and by nothing earlier - so the
+          # sentence below is printed from that key and not from this pair.
+          if [[ $seam_calls =~ ^0x[0-9a-f]+$ ]] && (( seam_calls >= 1 )); then
+            say "        **and this log's image is the LATER one in that cell**: xnu_live_seam_calls is"
+            say "        present, so the arm under test is 535's, whose cache settings are 533's. Read"
+            say "        clause (5) for what that arm's own instrument saw"
+          else
+            say "        (no xnu_live_seam_* in this log, so the image is the earlier one in this cell"
+            say "        and 535's arm is not in it)"
+          fi
         else
           say "  UNREAD  slot_cwe_set=${cwe_set:-absent} is not a readable SCTLR - the pair is half"
           say "          a reading and which arm ran is not decidable from it"
@@ -520,20 +575,130 @@ summarise_log() {
     elif [[ -z $storm ]]; then
       say "            xnu_live_sleh_storm absent - no abort storm was recorded at all"
     fi
+    # (5) 535's seam: the exit's own call, and the two pairs of words its readings decide
+    #
+    # **This is the arm's own instrument, and it prints only for a log that carries it.** 535 wraps
+    # `FlushPoU_Dcache` and keeps only the call whose return address is the exit's own `bl`, so
+    # `xnu_live_seam_*` is published by that image and by no earlier one. Like the block the pair above
+    # is gated on, this is self-selecting rather than a verdict on every log: a log without the keys is
+    # a log from an image that does not carry the arm, and silence is the right reading for it - there
+    # is no build marker in the entry image for this block to test instead (clause (2)'s note).
+    #
+    # **The criterion is the one clause (1) already derived, not a second copy of the address.** `pop_lr`
+    # above is `platform_cache_idle_exit`'s own `bl FlushPoU_Dcache` + 4, read out of this tree's entry
+    # ELF at run time; the seam's `lr` must be exactly that, because the seam *is* that call. Writing it
+    # again here would be 556's defect - one address with two definitions and only one of them bound to
+    # the image - and the two would drift the first time either moved.
+    #
+    # **The two pairs are the near-side measurement 546 could only infer.** With `SCTLR.C` clear the
+    # window's stores are DRAM-only, so `_b0`/`_b1` are the frame the exit's `push` wrote *as memory
+    # holds it*, read with the cache off before the arm does anything - and on 546 section 1 the second
+    # of them names `cpu_idle`. `_a0`/`_a1` are what those same two words hold *after* Apple's PoC
+    # clean-and-invalidate of the region: a **dirty** stale line has its copy written out by that
+    # routine's clean half, so the pair comes back changed and, on 546 section 3, holding the
+    # `cpu_data->rtcPop` deadline the exit wrapper publishes in the same pass as
+    # `xnu_live_slot_rtcpre_pop`. Two equal pairs say the line was clean and the pop's wrong value came
+    # from somewhere this arm has not touched.
+    #
+    # The `sp` test is the one that says the arm read the *right object*: 546 section 1's slot is the
+    # address the `pop` reads, so if the seam's `sp` and the abort's `sp` disagree the two are readings
+    # of different words and nothing below them joins up.
+    if [[ $seam_calls =~ ^0x[0-9a-f]+$ ]] && (( seam_calls >= 1 )); then
+      local seam_lr seam_sp seam_sctlr seam_other seam_other_lr rtcpre_pop
+      local seam_b0 seam_b1 seam_a0 seam_a1
+      seam_lr=$(keyval seam_lr)
+      seam_sp=$(keyval seam_sp)
+      seam_sctlr=$(keyval seam_sctlr)
+      seam_other=$(keyval seam_other)
+      seam_other_lr=$(keyval seam_other_lr)
+      seam_b0=$(keyval seam_b0)
+      seam_b1=$(keyval seam_b1)
+      seam_a0=$(keyval seam_a0)
+      seam_a1=$(keyval seam_a1)
+      rtcpre_pop=$(keyval slot_rtcpre_pop)
+      say ""
+      say "  535's seam - the exit's own bl FlushPoU_Dcache, hooked by the return address it was"
+      say "  entered with. xnu_live_seam_calls=$seam_calls (the schedule is <=4 then powers of two, so"
+      say "  a printed 4 means *at least* four idle passes reached it), lr=${seam_lr:-absent}"
+      say "  sp=${seam_sp:-absent} (the frame's own SCTLR at the seam: ${seam_sctlr:-absent})"
+      say "  the two words the exit's push wrote, as memory held them: ${seam_b0:-absent} ${seam_b1:-absent}"
+      say "  the same two after Apple's PoC clean-and-invalidate:      ${seam_a0:-absent} ${seam_a1:-absent}"
+      if [[ $seam_lr == "$pop_lr" ]]; then
+        say "  PASS  seam_lr=$seam_lr is the exit's own call's return address, so the hook was entered"
+        say "        at the seam and not at one of that routine's three other callers"
+      else
+        say "  FAIL  seam_lr=${seam_lr:-absent} is not the exit's own call's return address"
+        say "        (${pop_lr:-?}, $pop_lr_src): the arm published from a site that is not the seam, so"
+        say "        none of the readings below is about the instruction 547 section 5 names"
+        verdict_ok=0
+      fi
+      if [[ $seam_other =~ ^0x[0-9a-f]+$ ]]; then
+        say "  PASS  xnu_live_seam_other=$seam_other call(s) were handed straight through (last lr"
+        say "        ${seam_other_lr:-absent}) - the filter is measured and not asserted: 'the hook never"
+        say "        ran' and 'it ran and rejected this site' are different readings (526)"
+      else
+        say "  UNREAD  xnu_live_seam_other is absent, so nothing here says whether the routine's other"
+        say "          three call sites were reached - only that the seam was"
+      fi
+      if [[ -n $sleh_sp && -n $seam_sp ]]; then
+        if [[ $seam_sp == "$sleh_sp" ]]; then
+          say "  PASS  seam_sp=$seam_sp equals the abort's own sp: the address the arm read and restored"
+          say "        is the address the pop reads, which is 546 section 1's slot"
+        else
+          say "  FAIL  seam_sp=$seam_sp is not the abort's sp=$sleh_sp - the arm's slot and the pop's"
+          say "        are different addresses, so the two readings are of different words"
+          verdict_ok=0
+        fi
+      else
+        say "  UNREAD  ${seam_sp:-seam_sp} against ${sleh_sp:-sleh_sp}: one of the two addresses is"
+        say "          absent, so whether the arm read the pop's own slot is not established here"
+      fi
+      if [[ $seam_b1 =~ ^0x80[0-9a-f]{6}$ ]] && (( seam_b1 < 0x80600000 )); then
+        say "  PASS  b1=$seam_b1 is a kernel-text address, so memory held the frame the exit's push"
+        say "        wrote - 546 section 1's premise for this cell, measured rather than assumed"
+      else
+        say "  READING  b1=${seam_b1:-absent} is not a kernel-text address: memory did *not* hold the"
+        say "        frame the push wrote, so the window's store had not reached it - which contradicts"
+        say "        546 section 1's premise and is a finding in its own right, not a failed arm"
+      fi
+      if [[ -n $seam_b0 && $seam_a0 == "$seam_b0" && $seam_a1 == "$seam_b1" ]]; then
+        say "  CLEAN LINE  the pair came back unchanged (b=${seam_b0}/${seam_b1}), so the line was not"
+        say "        dirty: the clean had nothing to write out, and a pop that still died on a stale"
+        say "        value got it from somewhere this operation does not reach - the falsifier for 546"
+        say "        section 3's mechanism rather than its confirmation"
+      elif [[ -n $seam_a1 && -n $rtcpre_pop && $seam_a1 == "$rtcpre_pop" ]]; then
+        say "  STALE LINE, WRITTEN OUT  a1=$seam_a1 is this same pass's xnu_live_slot_rtcpre_pop: the"
+        say "        dirty line's copy of the slot's lr word is the deadline that pass read, which is"
+        say "        546 section 3's mechanism seen from the near side, before the pop that died on it"
+      else
+        say "  CHANGED  the pair came back changed (b=${seam_b0:-?}/${seam_b1:-?} ->"
+        say "        a=${seam_a0:-?}/${seam_a1:-?}) and a1 is not this pass's rtcpre_pop=${rtcpre_pop:-absent}:"
+        say "        a dirty line, holding something this block does not name"
+      fi
+    fi
+
     if [[ $pop_named -eq 1 ]]; then
       say "  => the arm's prediction arrived: the death is the exit's own pop, at the instruction"
       say "     547 section 4 names, with a log and (per the runner's exit code, which is not this"
       say "     function's reading) a return. What did *not* happen: the boot still does not survive"
-      say "     the idle pass, so 535's PoC flush behind 0x800462d8 is still the next step. This"
-      say "     block is not the reading that decides the arm; the runner's exit code is (551: exit 3"
-      say "     means the SoC returned into a state adb cannot reach)."
+      say "     the idle pass - and which arm was in the image is read off clause (5) rather than"
+      say "     assumed: a printed seam reading means 535's arm was there and the pass died *with* it,"
+      say "     so the near-side pair is the reading and the next step is whatever it names; clause (5)"
+      say "     absent means the image is the earlier one and 535's PoC operation behind 0x800462d8 is"
+      say "     still owed. This block is not the reading that decides the arm; the runner's exit code is"
+      say "     (551: exit 3 means the SoC returned into a state adb cannot reach)."
       # The pair from clause (2) is the only thing in the log that says which cell this is, and
       # 547 section 4's prediction is not for both cells - so the two are put side by side here
       # rather than left for the reader to join up.
       case $arm_seen in
         533)
           say "     And clause (2) reads the pair as 533's arm, which is the cell 547 section 4's"
-          say "     prediction is for: the two agree." ;;
+          say "     prediction is for: the two agree."
+          if [[ $seam_calls =~ ^0x[0-9a-f]+$ ]] && (( seam_calls >= 1 )); then
+            say "     The image this log came from is the later one in that cell, though - 535's, whose"
+            say "     cache settings are 533's - so clause (5)'s pair is the reading and the pop's"
+            say "     survival is 535's question rather than this prediction's"
+          fi ;;
         522)
           say "     **But clause (2) reads the pair as 522's arm, which 547 section 4 does not"
           say "     predict this for**: 522's cell is an enable-on row and 547 section 3 has both of"
