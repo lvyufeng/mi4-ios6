@@ -2059,8 +2059,22 @@ echo "== the seam's own body, read out of this image and not out of the record =
 # Four UNREAD branches, none of them a finding (549's shape, and the clause above spends its own
 # length on the same distinction): no ELF, no decoder, and a decoder that printed nothing are
 # properties of *this shell*, while a symbol named in a full disassembly that yet yields no body is a
-# parse that did not fit - reported as unusable rather than as a zero. Only the four
+# parse that did not fit - reported as unusable rather than as a zero. Only the five
 # record-versus-body disagreements below stop the gate.
+#
+# **591: the fourth of them was missing, and it is the one whose absence is silent rather than
+# loud.** Each arm's branch stops the gate when the *other* arm's operation is the one in the body,
+# and that pair is symmetric - both read `FlushPoC_DcacheRegion`. The measurement arm has a second
+# premise and no guard on it: what makes the interception worth reading with nothing behind it is
+# that the two reads bracket **Apple's own L1 flush**, i.e. the seam's own `bl FlushPoU_Dcache` - the
+# call the ok line below names (its `$_POU_N`) and hands the whole meaning of the pair. With a body
+# whose interception passes the call through by a tail branch instead of calling it, `_POC_N` is
+# still 0, this branch's only test passes, the gate printed `ok`, and the rule narrated above for
+# this arm - an equal pair is the arm working as designed - would be printed over a run in which
+# nothing ran between the two reads, so the pair carries nothing and a *return* would be read as the
+# arm's own reading. 584 section 2's shape (a property asserted of an artifact by a comparison that
+# never ran) and 587's (a clause reading what it could not open), one branch over from the guard the
+# other arm has carried since 579.
 _SEAM_FN=entry_seam_flush
 _seam_stream() { "$_GATE_OD" -d --no-show-raw-insn "$ENTRY_ELF" 2>/dev/null; }
 _n_instr() { grep -cE '^[[:space:]]*[0-9a-f]+:[[:space:]]+([0-9a-f]{8}[[:space:]]+)?[a-z]' <<<"$1" || true; }
@@ -2121,6 +2135,9 @@ else
     if (( V_SEAM_MEASURE == 1 )); then
       if (( _POC_N != 0 )); then
         fail "STAGE90_XNU_SEAM_MEASURE=1 in $ENTRY_CFG and $_SEAM_FN in $ENTRY_ELF calls FlushPoC_DcacheRegion $_POC_N time(s): the record says 535's operation is NOT behind this seam and the image says it is. The narration printed above is the benign arm's, including the one reading rule that arm is worth - with nothing behind the interception an UNEQUAL b/a pair is Apple's own flush writing the line back - and that rule applied to a run of *this* image would invert the meaning of the very pair the arm exists to produce: the run would come back and be read as the other arm, which is the worst of the four states this clause tells apart. Read $_SEAM_FN's body in $ENTRY_ELF by hand, or rebuild the entry image with the switch this arm really needs. Nothing is rebuilt by this refusal, and nothing should be: the frozen pair embeds this entry image"
+      fi
+      if (( _POU_N < 1 )); then
+        fail "STAGE90_XNU_SEAM_MEASURE=1 in $ENTRY_CFG and $_SEAM_FN in $ENTRY_ELF does not call FlushPoU_Dcache at all (FlushPoU_Dcache=$_POU_N): the record names the arm whose seam is the interception with nothing of 535's behind it, and that arm is worth exactly one reading - the two slot reads bracket Apple's own L1 flush, so an unequal b/a pair is that flush writing the line back and an equal pair is the arm working as designed. A body that never calls the routine has nothing between the two reads, so the pair carries nothing at all, and the 'ok' line this clause replaced would have asserted in the same breath the call its own number refutes (591). What this clause can tell is that the record and the body disagree, not which is stale: disassemble $_SEAM_FN in $ENTRY_ELF by hand, or rebuild the entry image with the switch this arm really needs. Nothing is rebuilt by this refusal, and nothing should be: the frozen pair embeds this entry image"
       fi
       echo "  ok: the measurement arm's record and its body agree - the interception is in the link"
       echo "  (FLUSH_WRAP=$FLUSH_WRAP) and $_SEAM_FN calls FlushPoC_DcacheRegion $_POC_N times, so nothing of"
