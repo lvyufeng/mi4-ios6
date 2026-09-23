@@ -127,17 +127,17 @@ Two harness defects are worth recording because both would have read as a pass:
   it; the tell was that the `dup` record printed *two* `SEAM_POC` lines and was still not refused. A
   rehearsal that fails for its own reasons has to be distinguished from one that fails for the clause's.
 
-## 5. What the change costs, and why the green is deferred
+## 5. What the change costs, and the green: attempted red, then taken
 
-**Cost, stated plainly: the key is now required of the record, so the gate refuses today's 12-key record
-until the build side writes the thirteenth.** That is the fail-safe direction — the refusal is upstream of
-the device step and names the key — and it is the same property the other five variant keys already have,
-all of which are written by the same `build_entry.sh`. It is also the point: 535's image is being linked
-with a `--wrap` that changes what a call inside the exit *does*, and a gate that would boot that image
-without its record naming the arm is the gate this project has spent a dozen experiments making noisy.
+**Cost, stated plainly: the key is now required of the record, so the gate refuses a twelve-key record until
+the build side writes the thirteenth.** That is the fail-safe direction — the refusal is upstream of the
+device step and names the key — and it is the same property the other five variant keys already have, all
+of which are written by the same `build_entry.sh`. It is also the point: 535's image is being linked with a
+`--wrap` that changes what a call inside the exit *does*, and a gate that would boot that image without its
+record naming the arm is the gate this project has spent a dozen experiments making noisy.
 
-**The full-gate green is deferred.** It was attempted on the frozen tree and returned **`GATE EXIT=1`** —
-not at any clause this change touches, but at the later entry-blob cross-check:
+**The whole-gate run was first taken mid-build and was red.** It returned **`GATE EXIT=1`** — not at any
+clause this change touches, but at the later entry-blob cross-check:
 
 > `REFUSING: /mnt/data/mi4-ios6/out/stage90/stage90.bin does not contain /mnt/data/mi4-ios6/out/stage90/xnu_arm_entry.bin at all`
 > `… the image does not carry the arm …/xnu_arm_entry.bin holds, byte for byte`
@@ -150,16 +150,43 @@ because `build_entry.sh` rewrites the entry blob before `./build.sh` re-embeds i
 required-key loop, the converse clause and the derivation all agreed with the twelve-key record in front
 of them, and only the blob check downstream refused.
 
-So the honest state of the proof is: `bash -n` clean, five rehearsal states as tabled, and the whole-gate
-`EXIT=0` **owed** — to be taken once the build settles, before any device action. It is owed to the same
-run that will also be the first to see the thirteenth key *in* a record, which is the state this change
-exists for.
+**Then the build settled, and the green was taken on it — on the run that was also the first to see the
+thirteenth key in a record, which is the state this change exists for.** The sequence, because the timing is
+part of the evidence: `xnu_arm_entry-config.txt` was rewritten at `01:05:32` with **thirteen** keys
+(`STAGE90_XNU_SEAM_POC=1`, and a new `STAGE90_XNU_ENTRY_SHA256=12684433…`, i.e. the relinked 535 arm, not
+533's `f202f246…`), `stage90.bin` was re-embedded at `01:06:05`, and the gate was run at `01:06:5x` with
+nothing building. It returned:
+
+```
+GATE EXIT=0
+  STAGE90_XNU_SEAM_POC=1
+  the seam (SEAM_POC=1): the interception IS in this image, and 535's arm is the record above with
+      this one key at 1. `--wrap=FlushPoU_Dcache` is in the link, so every call site of that routine
+      arrives at one wrapper, and the wrapper acts at exactly one: the call whose return address is
+      0x800462dc - the `bl FlushPoU_Dcache` *inside* the real platform_cache_idle_exit (547 section
+      5's seam), AFTER that function's `push {fp, lr}` and BEFORE its `pop {fp, pc}`. …
+```
+
+So the changed text was printed by the same run that exited 0 — not a rehearsal standing in for it. The
+intermediate reading is worth keeping too: a second gate run, taken between the record being written and the
+payload being re-embedded, refused at **`== image freshness ==`** (`:93`, "the image is stale", naming
+`macho_fixture.c`) — a section that sits **long before** `== the entry image's own switches ==` (`:313`),
+which is why that run printed nothing of this change at all. A red gate has to be read by *which* section
+refused, not by the fact that it refused: the first red was the blob check, the second was freshness, and
+neither was a clause of this change — while the region this change lives in cleared the record both times.
+
+The green run's own identifiers, so the proof is pinned to artifacts rather than to a moment: payload
+`stage90.bin` sha256 `5867d4ed…` (`6015356` bytes) and `stage90-qcdt.img` `3d8720c4…`, entry image
+`12684433…` (`5519996` bytes), record's `up_style_idle_exit=1` token at exactly 2 occurrences in each image
+(535 does not touch the idle exit, so the two-copy complement clause is not in play).
 
 ## 6. State
 
-- **535 is in the peer session's lane and is being built now.** Its arm is a per-level CSSELR PoC
+- **535 is in the peer session's lane and is now built**: the entry image is `12684433…` (`5519996` bytes)
+  and the record carries `SEAM_POC=1`, with 533's `f202f246…` replaced. Its arm is a per-level CSSELR PoC
   invalidate wrapped on `lr == 0x800462dc`; it costs one non-persistent `fastboot boot`, and its proof is
-  the death's shape, not a key's value.
+  the death's shape, not a key's value. **The gate is green on that record as of `01:06:56` (`GATE EXIT=0`)**
+  — the artifact hashes above pin it, and any rebuild invalidates it.
 - **533's pair (`1daaf44e…` / `f202f246…`) is spent**, parked under `out/stage90/captures/533-*`, and
   568's run is 547 section 4 row (i): dies at the idle exit's `pop {fp, pc}`, log present, device returns.
 - **535 does not touch the idle-exit address and does not touch `up_style_idle_exit`** (its arm is still
