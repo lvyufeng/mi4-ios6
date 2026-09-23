@@ -797,6 +797,28 @@ summarise_log() {
           say "        capture and the arm's slot are two records of one frame and they disagree"
           verdict_ok=0
         fi
+      elif [[ $pre_calls =~ ^0x[0-9a-f]+$ ]]; then
+        # **This arm cannot publish these words at all, and saying nothing here is the defect.**
+        # `STAGE90_XNU_SLOT_NULL=1` - the frozen 574 arm, and 533's and 535's, all three read out of
+        # their own config files - makes the wrapper call `entry_slot_null_note`, whose whole point is
+        # that it publishes the call count and *not* `sp` or the four words (entry_stubs.c: "What it
+        # deliberately does not do is publish the four words, or `sp`"). So the comparison above is
+        # not run on the coming boot, and the arm's own disassembly says so too: at 0x8047c978 the
+        # wrapper calls `<entry_slot_null_note>`, not `<entry_slot_note>`. An absent comparison in a
+        # block where every neighbouring absence prints a line reads exactly like agreement, which is
+        # 547's silence rule - and the arm publishes the discriminator that distinguishes the cases:
+        # `slot_pre_calls` present with the words absent means the site ran and published no words;
+        # both absent means the site did not run.
+        say "  UNREAD  xnu_live_slot_pre_calls=$pre_calls is published and xnu_live_slot_pre_sp is not:"
+        say "        this arm takes the SLOT_NULL path (STAGE90_XNU_SLOT_NULL=1 - the wrapper calls"
+        say "        entry_slot_null_note, which writes the count and no words), so the wrapper's own"
+        say "        capture cannot be compared with the seam's sp on this boot. The absence of this"
+        say "        line's comparison is a switch in the image, not an agreement"
+      else
+        say "  UNREAD  neither xnu_live_slot_pre_sp nor xnu_live_slot_pre_calls is in this log, so the"
+        say "        wrapper's own capture of the slot did not run on this boot at all - which is a"
+        say "        different fact from the arm taking the null path, and the reason the two are"
+        say "        separated here is that this one is not explained by a build switch"
       fi
       # **The slot's two words as the *wrapper* read them, just before the push.** `slot_pre_m8`/`_m4`
       # are the words at `sp-8`/`sp-4` at the exit wrapper's entry, i.e. exactly the two addresses the
@@ -804,28 +826,71 @@ summarise_log() {
       # the previous pass's leftovers, and this arm's `_b0`/`_b1` are this pass's push. Equal is the
       # expected reading and *not* a pass: a difference is the frame having moved between two passes
       # through the same code, which is a fact about the idle loop rather than about this arm.
-      # **And `pre_m4` is `b1`'s own address, so the derived return site is a prediction about both.**
-      # The wrapper's capture reads its `sp` after its prologue and at negative offsets (`pre_m4` is
-      # `sp-4`), and the real exit is entered with that same `sp` - so `slot+4` and `pre_m4` are one
-      # word, read once before the push and once after it. `pre_m4` is therefore the *previous* pass's
-      # pushed `lr` on a frame that has not moved, and the two sources turn the old "did the frame
-      # move" reading into three distinguishable states: both equal to the derived site (the frame is
-      # in memory and did not move), `b1` right and `pre_m4` not (the frame moved), `b1` wrong
-      # (the push's store did not reach the word the `pop` reads).
+      # **And `pre_m4` is `b1`'s own address, so the derived return site is a prediction about both** -
+      # *on an arm that publishes the words.* The wrapper's capture reads its `sp` after its prologue
+      # and at negative offsets (`pre_m4` is `sp-4`), and the real exit is entered with that same `sp` -
+      # so `slot+4` and `pre_m4` are one word, read once before the push and once after it. `pre_m4` is
+      # therefore the *previous* pass's pushed `lr` on a frame that has not moved, and the two sources
+      # turn the old "did the frame move" reading into four distinguishable states: both equal to the
+      # derived site (the frame is in memory and did not move), `b1` right and `pre_m4` not (the frame
+      # moved), `pre_m4` right and `b1` not (the word was right before the push and the push's store did
+      # not leave it there), and neither (the push's store did not put this code's return address in the
+      # word the `pop` reads).
+      #
+      # **The frozen 574 arm is not one of those arms**, which is why the absence below prints a line
+      # rather than nothing: `STAGE90_XNU_SLOT_NULL=1` makes the wrapper call `entry_slot_null_note`,
+      # which publishes the count and no words. So on the coming boot the *reachable* half of the
+      # prediction is `b1` alone, and 583's promise that it "lands in a second key that the older
+      # instrument already publishes" holds only of an arm built with SLOT_NULL off - 520's, whose
+      # `pre_m4` is that instrument's own pre-521 call frame anyway. Both facts are stated rather than
+      # inferred: the config file carries the switch, and the wrapper's own `bl` names the null note.
+      #
+      # **And this block had the mirror of the defect the `b1` line below records.** Its first version
+      # tested the derived comparison first, so with no readable entry ELF `caller_lr` was empty, both
+      # derived branches failed, and the *fallback* branch printed a sentence about a comparison that
+      # had not happened - one line above the `b1` line's own UNREAD, in the same block, about the same
+      # non-derivation. Measured, not reasoned: `OBJDUMP=/nonexistent` on the `both` rehearsal printed
+      # `m4=0x8047c990 - equal to b0/b1 when the frame did not move between two passes` and then
+      # `UNREAD ... the return site could not be derived`. So the empty-derivation case is tested
+      # first here too, and for the same reason: a reading whose comparison did not happen is UNREAD,
+      # not a reading.
       if [[ -n $seam_m8 && -n $seam_m4 ]]; then
-        if [[ -n $caller_lr && $seam_m4 == "$caller_lr" && $seam_b1 == "$caller_lr" ]]; then
+        if [[ -z $caller_lr ]]; then
+          say "  UNREAD  m8=$seam_m8 m4=$seam_m4: the return site could not be derived (no readable"
+          say "        entry ELF), so whether this word is the one this pass's push writes is not"
+          say "        established here - the b1 line below says the same, for the same reason"
+        elif [[ $seam_m4 == "$caller_lr" && $seam_b1 == "$caller_lr" ]]; then
           say "  PASS  and the wrapper's own capture of the same word agrees: pre_m4=$seam_m4 is the"
           say "        derived return site both before and after the push, so the frame is in memory and"
           say "        did not move between two passes (m8=$seam_m8, to be compared with b0=$seam_b0)"
-        elif [[ -n $caller_lr && $seam_b1 == "$caller_lr" ]]; then
+        elif [[ $seam_b1 == "$caller_lr" ]]; then
           say "        the wrapper's capture reads the same word: pre_m4=$seam_m4 against the derived"
           say "        site ${caller_lr}, so the frame MOVED between two passes - the word the push wrote"
           say "        is this image's return site, and the same word read before the push held something"
           say "        else, i.e. the previous pass used a different frame at this address"
+        elif [[ $seam_m4 == "$caller_lr" ]]; then
+          # The one state the three-way form could not name. `pre_m4` is read *before* this pass's
+          # push and holds the derived site; `b1` is read *after* it and does not. So the word at this
+          # address was right and the push's store did not leave it there - 546 section 1's premise
+          # failing *in the window*, stated from the side that needs no assumption about where the
+          # previous pass's frame was, which is what separates it from the branch above.
+          say "  READING  pre_m4=$seam_m4 is the derived return site read before the push, while"
+          say "        b1=$seam_b1 read after it is not: this word held the right value and the push's"
+          say "        store did not leave it there. That is the window, not the loop - see the b1 line"
+          say "        below for what the pop would then read"
         else
           say "  (the wrapper's own capture of those two addresses, read before the push: m8=$seam_m8"
-          say "   m4=$seam_m4 - equal to b0/b1 when the frame did not move between two passes)"
+          say "   m4=$seam_m4 - equal to b0/b1 when the frame did not move between two passes; and here"
+          say "   b1=$seam_b1 is not the derived site ${caller_lr}, so read the b1 line below first)"
         fi
+      elif [[ $pre_calls =~ ^0x[0-9a-f]+$ ]]; then
+        say "  UNREAD  m8/m4 are the second half of the same absent capture (xnu_live_slot_pre_calls="
+        say "        $pre_calls says the wrapper's site ran; SLOT_NULL says it publishes no words), so on"
+        say "        this boot b1's address has only the seam's own reading behind it and not the"
+        say "        cross-check this block exists to make"
+      else
+        say "  UNREAD  m8/m4 are absent and xnu_live_slot_pre_calls is too, so the wrapper's capture did"
+        say "        not run at all: nothing here is a reading of b1's address from the other side"
       fi
       # **`b1` compared against the one value a correct frame can hold, not against a range.** The
       # frame's second word is the address the real exit returns to, and the wrapper's `bl` fixes it:

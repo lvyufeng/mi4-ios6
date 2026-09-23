@@ -2,10 +2,15 @@
 
 582 derived the one address a correct idle frame holds at `slot+4` - **`0x8047c990`**, the return site of
 the wrapper's `bl platform_cache_idle_exit` - and attached it to the seam's `b1`. Two consequences follow
-from the frame's own arithmetic and from a call census, and both make the coming run's reading sharper
-than 582 left it. Nothing is built or run; the arm is unchanged.
+from the frame's own arithmetic and from a call census, and **one** of them makes the coming run's reading
+sharper than 582 left it; the other is a property of a `SLOT_NULL=0` arm and the coming arm is not one
+(§1's correction, landed as 586). Nothing is built or run; the arm is unchanged.
 
 ## 1. `b1` and `xnu_live_slot_pre_m4` are the same address, so the prediction lands twice
+
+> **Read the correction block below first: the second key is not published by the arm that is about to
+> run.** The arithmetic and the state table are right; their reach is one arm narrower than this section
+> originally said.
 
 From the live arm, read off the image rather than reconstructed:
 
@@ -28,20 +33,38 @@ slot + 4  = X-12 = slot_pre_m4      and    b1 = [slot+4]
 **`b1` and `xnu_live_slot_pre_m4` name the same word.** The reader already prints both, side by side, as a
 *reading* ("equal to `b0`/`b1` when the frame did not move between two passes") - and the capture is taken
 **before** the real exit is called, so on a warm frame `pre_m4` is the *previous* pass's pushed `lr`, which
-is the same address. **So 582's prediction lands in a second key that the older instrument already
-publishes**: on 574's run, `xnu_live_slot_pre_m4` should also be `0x8047c990`, and it says so
+is the same address. **So 582's prediction lands in a second key** - **on an arm that publishes that key,
+which the frozen 574 arm is not.** See the correction below before reading the sentence that follows.
+
+> **Correction (586).** This section's second-key claim was written as a property of "the run" and is a
+> property of the *arm*. The frozen 574 arm's own config says `STAGE90_XNU_SLOT_NULL=1` (as do 533's and
+> 535's), so its wrapper calls `entry_slot_null_note`, which publishes the call count and **neither `sp`
+> nor the four words** - and the arm's disassembly agrees (`0x8047c978: bl <entry_slot_null_note>`). 533's
+> real capture is the shape: `xnu_live_slot_pre_calls` present, and `slot_pre_sp` / `_m16` / `_m12` /
+> `_m8` / `_m4` **all absent**. So the reachable half of 582's prediction on the coming boot is **`b1`
+> alone**; the `pre_m4` cross-check is a key no arm that reaches the seam has published since 520's, and
+> 520's value is that instrument's own pre-521 call frame (§2). What survives of this section is the
+> arithmetic (`pre_m4` *is* `slot+4` when it is published) and the four states below, which are correct
+> for any `SLOT_NULL=0` arm and were rehearsed as such; what does not survive is the claim that they are
+> four states *this* run can be in.
+
+On an arm that publishes the words, 582's prediction lands in a second key the older instrument already
+publishes: `xnu_live_slot_pre_m4` should also be `0x8047c990`, and it says so
 independently of the seam.
 
-That converts the existing "equal or moved" reading into two distinguished states rather than one:
+That converts the existing "equal or moved" reading into two distinguished states rather than one - and,
+after 586 made the block say so out loud, into four:
 
 | `b1` | `pre_m4` | reading |
 | --- | --- | --- |
 | `0x8047c990` | `0x8047c990` | the push's frame is in memory and the frame did not move - 546 §1's premise, measured |
 | `0x8047c990` | something else | the push reached memory, but the **frame moved** between two passes - a fact about the idle loop, and now a *distinguishable* one, because `b1` is right |
-| not `0x8047c990` | anything | the push's store did not put this code's return address in the word the `pop` reads |
+| not `0x8047c990` | `0x8047c990` | the word was right *before* the push and wrong after it: the push's store did not leave it there - 546 §1's premise failing **in the window**, from the side that needs no assumption about the previous pass |
+| not `0x8047c990` | something else | the push's store did not put this code's return address in the word the `pop` reads |
 
-Before the derivation the middle row and the last row were the same event ("the pair is unequal"); now they
-are not.
+Before the derivation the middle rows and the last row were the same event ("the pair is unequal"); now they
+are not. **And on the frozen 574 arm none of the four is reachable** - the words are not published at all,
+so the honest reading of that boot is the absence itself (§1's correction).
 
 ## 2. And 576 §3's open question is decided, by a header that was already in the tree
 

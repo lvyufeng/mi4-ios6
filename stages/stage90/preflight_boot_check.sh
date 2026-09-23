@@ -530,6 +530,23 @@ if [[ $V_SLOT_NULL -eq 1 ]]; then
   echo "  capture sites (SLOT_NULL=1): the NULL instrument - entry_slot_null_note publishes the pass"
   echo "      count alone, so the four slot words are neither loaded nor stored by this image and the"
   echo "      xnu_live_slot_{pre,post}_{sp,m16,m12,m8,m4} keys are expected ABSENT, not missing."
+  # **And the run's own summary has to say that out loud, or the absence reads as agreement.** 583
+  # built a four-state table on `slot_pre_m4` for this arm before 586 measured that this arm cannot
+  # publish the key; the same step made the reader print an explicit UNREAD naming
+  # `xnu_live_slot_pre_calls` where it used to print nothing. Whether the file in the tree does that
+  # is read out of the file here rather than asserted, because a sentence about another file's
+  # mechanics is a claim about that file's future (563) - and 586's own first version is the case in
+  # point: the block was silent on exactly the arm this branch narrates.
+  if grep -q 'xnu_live_slot_pre_calls=' "$STAGE_DIR/run_and_capture.sh"; then
+    echo "      So a run of this arm prints two UNREAD lines for the slot's own capture, naming"
+    echo "      xnu_live_slot_pre_calls - that is this switch and not a disagreement, and a successful"
+    echo "      boot of this arm carries them. Read them as 'the comparison could not be made here'."
+  else
+    echo "      **And $STAGE_DIR/run_and_capture.sh does not name xnu_live_slot_pre_calls anywhere**, so"
+    echo "      the summary of a run of this arm says NOTHING about the slot's own capture - neither a"
+    echo "      reading nor an absence - and silence there is this project's own silence rule. Fix the"
+    echo "      reader before spending a boot on this arm, or the run's verdict will look complete."
+  fi
 else
   echo "  capture sites (SLOT_NULL=0): the capture - eight loads and eight stores a pass, publishing the"
   echo "      four words of the idle exit's {fp, lr} slot at each of the two sites. That shape is present"
