@@ -98,19 +98,59 @@ stayed alive for at least 33 million passes. So there is a lever that does not t
 That is the shape the goal actually wants: XNU reaches userland *before* the idle exit, so a port whose
 idle never sleeps is a port that has reached the OS and stayed there.
 
-**Pre-registered, as one arm, not built** (the phase runs one arm at a time and 574 is frozen):
+**And the premise behind that sentence is measured, not argued** (the peer session's reading, which is a
+better witness than the three console lines this file was written from): the log already archived at
+`/tmp/cancro-last_kmsg.txt.prev` carries `xnu_live_repair_seq=0x00000001`,
+`xnu_live_repair_caller=0x80286898` and `xnu_live_repair_before=0x04afba8b -> xnu_live_repair_after=0x04afba9e`
+— before ≠ after, so the call was *made* and not merely planned — beside the whole
+`xnu_live_poll_{seq,caller,timeout_ms,retval,fds,nfds,ticks}` family. 514's repair is made from inside
+**`__wrap_poll`**, i.e. behind a `poll` **syscall**, and a syscall is entered from user mode. So
+`repair_seq = 1` plus the poll keys say pid 1 ran in user mode, trapped in, and came back — the repair is
+*downstream* of userland, and skipping it gives up no step on the way there.
+
+**Pre-registered, as one arm** (the phase runs one arm at a time and 574 is frozen):
 
 | item | value |
 | --- | --- |
 | the change | a build switch that skips 514's `cpu_signal_handler_internal(0)` call — a switch, because the call is unconditional code and the alternative would be deleting a repair |
 | what it proves if it works | the OS comes up and stays up with the idle spinning: 「起码要能进入操作系统」 reached, and the `pop`'s death is confirmed as reachable only through the sleep path |
-| falsifier | the death moves *earlier* than the idle exit, or the machine stops returning at all: then the death is not in the sleep path and this axis is wrong |
-| what it costs | the idle never sleeps — the port defect 512/513 measured and 514 repaired — so the CPU spins; a bring-up stopgap traded for a boot, and reversible with the same switch |
+| the arm's own signature | `SetIdlePop` never entered and `sip`/`pce`/`wfi` absent or 0, with door 1 ≥ 32767 — the partition of 513's own three counters, now with door 3 at **zero** where the baseline has exactly 1 |
+| **the falsifier is not an absence — an absence is not available here** | the arm's failure mode is **alive, on the bus, and never progressing**: `SIGPdisabled` means a signal is pending with delivery disabled, door 1 is `Idle_load_context`, and the idle thread can be re-selected forever around the one signal it can never deliver. Such a spin returns to the host exactly like a working kernel, so "the machine stops returning" would *not* have caught it. What is pre-registered instead is a **progress witness**: a key or console line that only advances if pid 1's thread really runs past the old death point — `poll_seq`/the park beyond the arm's own values, or a console line later than the AST — because [[mi4-silence-is-a-reading-only-if-success-is-silent]] applies to the machine as much as to a check |
+| and the exit contract needs a rule for it | no death + the host saw the return + no adb is the **exit-3 region** (551), and a *live spin* must not be read as a hang there: the reader has to be taught what this arm's return looks like, or the one reading that matters is the one it cannot name |
+| what it costs | the idle never sleeps — the port defect 512/513 measured and 514 repaired — so the CPU spins hot; a bring-up stopgap traded for a boot, and reversible with the same switch |
 | what it does *not* do | it does not explain the `pop`'s death, and it does not make the idle correct; if the OS comes up this way, 574's `b1` and the 535/590 axis are still owed |
 
 **Honest limit, stated rather than implied:** the pre-514 spin is known to have been *alive*, from 512's
 33-million-entry count, but that count was taken at an earlier phase — the full path into userland has
-never been observed with the idle not sleeping. So this is a candidate with a falsifier, not a fix.
+never been observed with the idle not sleeping, and the progress witness above is exactly the thing that
+has to be *read* rather than assumed before this arm can be called a success. So this is a candidate with a
+falsifier and a witness, not a fix.
+
+> **Correction (594), where the arm was built and the reading was pinned down.** Three of the sentences
+> above are looser than the instruments allow, and the readings that tighten them come from the same two
+> parked logs:
+>
+> * **The witness is the park's own poll, and it has a number.** `entry_note_poll` publishes
+>   `xnu_live_poll_seq = g_poll_calls + 1` **after** `__real_poll` returns, for calls 1–4 (the
+>   powers-of-two schedule belongs to the *else* branch and to `xnu_live_poll_over`), and `g_poll_calls`
+>   counts *returned* polls. The park is the third poll, so a published `poll_seq = 3` **is** the park
+>   having returned — and both parked logs stop at **2**, with `poll_timeout_ms` 5 and 40, neither above
+>   `ENTRY_PARK_MIN_MS`. "`poll_seq` beyond the arm's own values" is therefore exact: **> 2**.
+> * **"or a console line later than the AST" is the same event, not an independent one.** The park's four
+>   `mini4:` lines are printed *after* that same return, so they are a second *record* of the witness and
+>   not a second witness. They are worth having for another reason: the group is in **neither** parked log
+>   (`grep -c 'mini4: the repair --'` is 0 on 520 and 0 on 533; only three `mini4:` lines of any kind are
+>   in each, all from `arm_init`), so its presence cannot be produced by the baseline at all.
+> * **`door 1 ≥ 32767` is not a signature, it is a guard.** The baseline satisfies it too — that is 593
+>   section 2's whole finding — so it says "`cpu_idle` ran" and not "this arm ran". The signature is the
+>   window family being **absent** (`sip`/`pce`/`wfi`, `seam_*`, `slot_cwe_*`, the bracket), and one key
+>   more than this file knew when it was written: `xnu_live_repair_seq`, absent because 594 moved
+>   `entry_note_repair` inside the `#if` with the call. With the note outside the guard the arm would
+>   publish `repair_seq=1` exactly like the baseline and *say it had made a repair it never made*.
+>
+> None of the three changes what the arm is for; all three change what its log looks like, which is the
+> half a pre-registration is worst at. See experiment-594 for the switch, the plumbing and the reader.
+
 
 ## 5. Safety
 

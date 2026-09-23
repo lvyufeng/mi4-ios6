@@ -353,6 +353,26 @@ case "$IDLE_CACHE_ENABLE" in
 esac
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_IDLE_CACHE_ENABLE="$IDLE_CACHE_ENABLE")
 
+# **594: 593 section 4's arm, and its default is the arm that came back.** `IDLE_NO_SLEEP=1` stops 514's
+# `cpu_signal_handler_internal(FALSE)` from being called, so `SIGPdisabled` stays set, `cpu_idle` leaves
+# by its first door on every pass and the window whose `pop {fp, pc}` is this phase's frontier is never
+# entered. The default is 0 for the reason above: a build that forgets this variable is the baseline arm
+# and not the one under test. The value reaches `entry_trace.c`, which `#error`s on anything but 0 or 1,
+# and it is one of the arm keys below **and a line in the record writer at the end of this file**, so a
+# record that says it is 1 and an image where the call is still made is caught by 514's own clause below
+# (three numbers derived from this switch: the pool's call count, the image's `bl` count inside
+# `__wrap_poll`, and the reference-kind set) and by the gate. **The writer is the half the first draft of
+# this change missed**, and the peer session caught it: the key was in the arm-key list, in `STUB_DEFINES`
+# and in the trace `-D` list, and not in the only file the gate reads - so the switch would have reached
+# no record at all and the gate could not have gone loud. An arm-key list is the build's own
+# change-detector; the gate can only catch what the record carries.
+IDLE_NO_SLEEP=${STAGE90_XNU_IDLE_NO_SLEEP:-0}
+case "$IDLE_NO_SLEEP" in
+    0|1) ;;
+    *) echo "STAGE90_XNU_IDLE_NO_SLEEP must be 0 or 1, not [$IDLE_NO_SLEEP]" >&2; exit 1 ;;
+esac
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_IDLE_NO_SLEEP="$IDLE_NO_SLEEP")
+
 # **518: the interrupt handler's stack starts in the middle of the interrupt stack, not on top of the
 # frame.** `cpu_data->istackptr` is what `fleh_irq_kernel` loads its stack from and the kernel writes it
 # exactly twice, both `= intstack_top`; the boot and the idle loop run *on* that stack
@@ -480,7 +500,8 @@ SEAM_FLUSHPOU_CALLEE=FlushPoU_Dcache
 ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT_NULL
                 STAGE90_XNU_EXIT_POC_FLUSH STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE
                 STAGE90_XNU_IDLE_STACK STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
-                STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_SEAM_POC STAGE90_XNU_SEAM_MEASURE)
+                STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_SEAM_POC STAGE90_XNU_SEAM_MEASURE
+                STAGE90_XNU_IDLE_NO_SLEEP)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
 # the case statement below against the script's own environment reads - `grep -o '${STAGE90_[A-Z0-9_]*:-'`
@@ -506,6 +527,19 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
 # image by half of what makes it that image. The build refuses both at once (`:421`) and records both
 # always, `0` included.
 #
+# **594 is the thirteenth, and it is the first key that changes the *kernel's behaviour* rather than what
+# this image measures.** `STAGE90_XNU_IDLE_NO_SLEEP` stops 514's `cpu_signal_handler_internal(FALSE)` from
+# being called, so `SIGPdisabled` stays set and the idle leaves by its first door on every pass - the
+# window whose `pop {fp, pc}` is the frontier is then never entered (593 sections 3 and 4). It belongs in
+# this record for a reason the others do not have: a run of this arm and a run of the baseline differ in
+# whether the *kernel* sleeps, so a record that lost the key would describe a run by the wrong one of two
+# arms whose logs are otherwise identical until the idle starts. It is also the one key whose value a
+# reader can check against the artefact rather than only against the writer: with it at 1 the entry image
+# must not call `cpu_signal_handler_internal` from `__wrap_poll`, and 514's clause below asserts exactly
+# that against this switch (594's change: the three counts it pinned to 1 are now derived from the key,
+# so the same clause refuses the wrong body in *both* arms instead of pinning the literal and refusing the
+# arm it was not written for).
+#
 # The three checkpoint keys are recorded as `(unset)` when empty rather than omitted, because a key the
 # writer does not write is a key the reader cannot require, and `X=` is not `X=(unset)` for the same
 # reason `#define X 0` is not "off" to `#ifdef X`. They are read from the environment here and not from
@@ -524,6 +558,7 @@ do
         STAGE90_XNU_IDLE_STACK)       _v=${STAGE90_XNU_IDLE_STACK:-1} ;;
         STAGE90_XNU_SEAM_POC)         _v=$SEAM_POC ;;
         STAGE90_XNU_SEAM_MEASURE)     _v=$SEAM_MEASURE ;;
+        STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_SKIP) _v=${STAGE90_ENTRY_CHECKPOINT_SKIP:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_AFTER) _v=${STAGE90_ENTRY_CHECKPOINT_AFTER:-(unset)} ;;
@@ -533,14 +568,14 @@ done
 ENTRY_ARM_WAS=""
 ENTRY_ARM_WAS_KNOWN=0
 if [[ -f "$OUT/xnu_arm_entry-config.txt" ]]; then
-    # **A record that carries some of the twelve keys is not a previous arm, it is a previous arm of
+    # **A record that carries some of the thirteen keys is not a previous arm, it is a previous arm of
     # blanks - and read as one it refuses every build.** The read-back below is `KEY=<value> ` per
     # key whether or not the key is there, so a record holding only `STAGE90_XNU_ENTRY_SHA256` and
     # `_BYTES` - any record written before 533 added the arm keys, or a hand-written one - gives a
-    # non-empty `ENTRY_ARM_WAS` of twelve empty values. Measured by running the block against such a
+    # non-empty `ENTRY_ARM_WAS` of thirteen empty values. Measured by running the block against such a
     # record: it refused with `the arm already on disk was built with STAGE90_ENTRY_TRACE= ...` and
     # no way forward but the override, on a build that had no previous arm to differ from. So all
-    # twelve must read back before there is anything to compare, and a partial record is reported as
+    # thirteen must read back before there is anything to compare, and a partial record is reported as
     # *no previous arm* rather than silently treated as one - which is this block's own rule for a
     # missing record, applied to a record that is missing the half it compares.
     _arm_all=1
@@ -553,7 +588,7 @@ if [[ -f "$OUT/xnu_arm_entry-config.txt" ]]; then
     [[ $_arm_all -eq 1 ]] && ENTRY_ARM_WAS_KNOWN=1
 fi
 if [[ -f "$OUT/xnu_arm_entry-config.txt" && $ENTRY_ARM_WAS_KNOWN -eq 0 ]]; then
-    printf '  xnu_entry_533: note: %s exists but does not carry all twelve arm keys (%s), so the arm it describes is not known and the deliberate-change check cannot run for this build. It will be complete from this build on.\n' \
+    printf '  xnu_entry_533: note: %s exists but does not carry all thirteen arm keys (%s), so the arm it describes is not known and the deliberate-change check cannot run for this build. It will be complete from this build on.\n' \
            "$OUT/xnu_arm_entry-config.txt" "${ENTRY_ARM_WAS% }"
 fi
 if [[ $ENTRY_ARM_WAS_KNOWN -eq 1 && "$ENTRY_ARM_WAS" != "$ENTRY_ARM_NOW" && ${STAGE90_ENTRY_ARM_CHANGE:-0} != 1 ]]; then
@@ -797,6 +832,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_ISTACK_SEPARATE="$ISTACK_SEPARATE" \
         -DSTAGE90_XNU_SEAM_POC="$SEAM_POC" \
         -DSTAGE90_XNU_SEAM_MEASURE="$SEAM_MEASURE" \
+        -DSTAGE90_XNU_IDLE_NO_SLEEP="$IDLE_NO_SLEEP" \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
 fi
@@ -28147,12 +28183,21 @@ verify_trace_symbols() {
     # different image from the one that runs.
     sigirefs=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o "$OUT/xnu_arm_entry_trace.o" 2>/dev/null |
         awk '/[[:space:]]cpu_signal_handler_internal$/ { print $2 }' | sort -u | tr '\n' ' ')
-    [[ "$sigirefs" == "R_ARM_CALL R_ARM_JUMP24 " ]] ||
-        layout_fail "the objects in this pool (the kernel's and this image's own entry_trace.o) reference cpu_signal_handler_internal with [$sigirefs] and 514's clause is written for exactly one call (this step's) plus the kernel's own tail branches - an address-taken reference would mean the wrap-free call this step makes is not the only new edge into it"
+    # **594: the expected set is derived from the switch, not pinned.** With the repair in (the default
+    # 0 arm) this step adds the only *call*, so the pool shows `R_ARM_CALL` beside the kernel's two tail
+    # branches; with `STAGE90_XNU_IDLE_NO_SLEEP=1` this step's call is compiled out and only the kernel's
+    # `R_ARM_JUMP24` remains. Pinned to `R_ARM_CALL R_ARM_JUMP24` the clause would have refused the
+    # switch-on build by describing the arm it is *not* - and a criterion pinned as a literal is the
+    # defect 554/555 found one layer down, so it is written against the switch the record carries.
+    sigirefs_want="R_ARM_JUMP24 "
+    [[ "$IDLE_NO_SLEEP" == 0 ]] && sigirefs_want="R_ARM_CALL R_ARM_JUMP24 "
+    [[ "$sigirefs" == "$sigirefs_want" ]] ||
+        layout_fail "the objects in this pool (the kernel's and this image's own entry_trace.o) reference cpu_signal_handler_internal with [$sigirefs] and STAGE90_XNU_IDLE_NO_SLEEP=$IDLE_NO_SLEEP says they should be [$sigirefs_want]: with the repair in, this step adds the pool's only *call* beside the kernel's own tail branches; with the repair skipped, no call of this step's exists and the kernel's tail branches are the whole set. An address-taken reference, or the call present while the record says the repair is skipped, is the record and the body disagreeing about which arm this image is"
     sigicalls=$(arm-none-eabi-objdump -r "$REPO_ROOT"/out/xnu_kernel_obj/*.o "$OUT/xnu_arm_entry_trace.o" 2>/dev/null |
         awk '/[[:space:]]cpu_signal_handler_internal$/ && $2 == "R_ARM_CALL" { n++ } END { printf "%d", n + 0 }')
-    [[ "${sigicalls:-0}" == 1 ]] ||
-        layout_fail "the pool makes ${sigicalls:-0} R_ARM_CALL references to cpu_signal_handler_internal; 514's repair is one call made once, so a second call site would make the repair's own count (placed at 1 per park) a fact about the other one"
+    sigicalls_want=$(( 1 - IDLE_NO_SLEEP ))
+    [[ "${sigicalls:-0}" == "$sigicalls_want" ]] ||
+        layout_fail "the pool makes ${sigicalls:-0} R_ARM_CALL reference(s) to cpu_signal_handler_internal and STAGE90_XNU_IDLE_NO_SLEEP=$IDLE_NO_SLEEP says ${sigicalls_want}: 514's repair is one call made once, and 594's arm is the same code with that call compiled out - so this is the one number that tells the two arms apart in the link, and a value that is neither 1 (the repair in) nor 0 (the repair skipped) is a third arm wearing one of their names"
     # **The body, because the name is not the effect.** The repair is only the repair if the function
     # it calls *clears* `SIGPdisabled` on the calling CPU - and that is a property of the compiled
     # object, not of the source line that was read. Both directions are checked, with the constant
@@ -28212,8 +28257,14 @@ verify_trace_symbols() {
                 split($1, a, ":"); h = strtonum("0x" a[1])
                 if (h >= plo && h < phi) inb++; else outb++ }
             END { printf "%d %d", inb + 0, outb + 0 }')"
-    [[ "${sigbl:-0}" == 1 && "${sigblbad:-1}" == 0 ]] ||
-        layout_fail "the image makes ${sigbl:-0} call(s) to cpu_signal_handler_internal from inside __wrap_poll ($ppoll..$ppollnext) and ${sigblbad:-?} from outside it: the repair must be made once, from the wrapper that also takes the window's snapshot, or the door-1 reading and the repair are not the same event"
+    # **594: the expected count at this site is the switch's own value, not the literal 1.** The property
+    # the clause protects is unchanged - the repair, when it is made, is made once and from the wrapper
+    # that takes the window's snapshot - but "when it is made" is now a value the record carries, so the
+    # two arms are separated here by the same number the record names rather than by a build that
+    # silently refuses the one it was not written for.
+    sigbl_want=$(( 1 - IDLE_NO_SLEEP ))
+    [[ "${sigbl:-0}" == "$sigbl_want" && "${sigblbad:-1}" == 0 ]] ||
+        layout_fail "the image makes ${sigbl:-0} call(s) to cpu_signal_handler_internal from inside __wrap_poll ($ppoll..$ppollnext) and ${sigblbad:-?} from outside it, and STAGE90_XNU_IDLE_NO_SLEEP=$IDLE_NO_SLEEP says the count inside must be ${sigbl_want}: the repair must be made once from the wrapper that also takes the window's snapshot (or, on 594's arm, not at all), and a call from outside that wrapper would make the door-1 reading and the repair two different events"
     # The `wfi`, from the three sides that make "the CPU was halted" a reading: the function is
     # reachable only through this wrapper, the instruction labelled by Apple is inside it, and the
     # instruction at that label really is a `wfi`.
@@ -30597,6 +30648,17 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     echo "STAGE90_ENTRY_CHECKPOINT=${ENTRY_CHECKPOINT:-(unset)}"
     echo "STAGE90_ENTRY_CHECKPOINT_SKIP=${ENTRY_CHECKPOINT_SKIP:-(unset)}"
     echo "STAGE90_ENTRY_CHECKPOINT_AFTER=${ENTRY_CHECKPOINT_AFTER:-(unset)}"
+    # **594's switch, and it is here because the peer session caught it missing.** The key was added to
+    # `ENTRY_ARM_KEYS` and to the `-D` lists and *not* to this writer, which is the only thing the gate
+    # reads - so the switch would have reached no record, `preflight_boot_check.sh`'s "every
+    # `STAGE90_` key in the record must be one the gate prints" could not have fired, and the gate would
+    # have printed a narration about an arm whose window is never entered over an image that never
+    # entered it. That is 591's defect one layer out and, unlike 591's, not even *recordable* - the
+    # arm-key list is the build's own change-detector and the gate can only catch what this file writes.
+    # The lesson is the one this project keeps relearning: **a switch is not plumbed until the artefact
+    # that describes the image carries it**, and the writer is a site a diff of the switch's own name
+    # does not visit, because the diff is keyed on the *name* and this line did not exist to be found.
+    echo "STAGE90_XNU_IDLE_NO_SLEEP=$IDLE_NO_SLEEP"
 } > "$OUT/xnu_arm_entry-config.txt"
 
 # ------------------------------------------------- 533: **the sources of this image, by content**

@@ -90,6 +90,35 @@ say() { printf '%s\n' "$*"; }
 step() { printf '\n== %s ==\n' "$*"; }
 die() { printf 'run_and_capture: %s\n' "$*" >&2; exit 1; }
 
+# --- a backtick inside a printed string is a command, not punctuation ----------------------------
+#
+# 594's own defect, and it was found by *running* the clause it was written for rather than by
+# reading it: a new line read `say " ... entry_note_poll runs only *after* __real_poll ... "` with
+# those two names in backticks, so bash ran them - the printed sentence came out as "the park is the
+# third poll and  runs only *after*  returns" and the two commands were reported missing on stderr.
+# The sentence still read as if it said what it meant, which is exactly the shape this project keeps
+# paying for: a claim that is not what the artifact does
+# ([[mi4-a-claim-in-a-comment-is-not-a-check]]). It is checked here rather than left to review
+# because the check is total and free - the source *is* the artifact, and every string this script
+# prints is a `say`/`step`/`die` argument written in it.
+#
+# Deliberately not "no backticks anywhere": the notes above are full of them, and a rule that
+# refused those would be switched off the first time it was inconvenient.
+_self=$STAGE_DIR/run_and_capture.sh
+if [[ -r $_self ]]; then
+  # `\`` is a *literal* backtick inside a double-quoted string and this file already uses it (the
+  # two reading lines that quote `adb devices`), so the escaped form is stripped before the search -
+  # otherwise the guard refuses the script it is guarding, which is what its first draft did.
+  _bad=$(grep -n -E '^[[:space:]]*(say|step|die)[[:space:]]+"' "$_self" \
+         | sed 's/\\`//g' | grep -E '`' || true)
+  if [[ -n $_bad ]]; then
+    printf 'run_and_capture: a printed string contains a backtick, so bash will RUN it:\n%s\n' \
+           "$_bad" >&2
+    exit 1
+  fi
+fi
+unset _self _bad
+
 # --- the exit's own return address: derived when it is used, never a literal ---------------------
 #
 # The one criterion the idle-window block compares a run's abort against is `lr` at the exit's
@@ -346,17 +375,219 @@ summarise_log() {
   # different readings - one says the instrument never ran, the other says it ran and saw
   # nothing. This repository has been bitten by that distinction more than once, so the three
   # states are printed separately: PASS, FAIL, and UNREAD.
-  if grep -a -q 'xnu_live_slot_cwe_' "$log"; then
+  #
+  # **`keyval` is defined here, above both branches, because 594's clause needs it too** - and a
+  # second copy of one reader is the defect this repository keeps meeting: the two would drift the
+  # first time either moved, and nothing would compare them. `|| true` is load-bearing and its
+  # absence was this block's first defect, found by running it against the state it is meant to
+  # refuse: the script sets `pipefail`, so a key that is absent makes `grep` exit 1, the pipeline
+  # returns 1, and `set -e` kills the *caller* mid-function - the same shape as the
+  # `[[ ... ]] && say ...` defect documented four lines above. An absent key has to reach the code
+  # that can say "this is UNREAD", not end the summary.
+  keyval() { grep -ao "xnu_live_$1=[0-9a-fx]*" "$log" 2>/dev/null | tail -1 | sed 's/^[^=]*=//' || true; }
+
+  # **The largest of a key's occurrences, as a decimal - and why it is not `keyval`.** The keys this
+  # is for (`door_seq`, `poll_seq`, `poll_timeout_ms`) are published once per event and *in
+  # increasing order*, so the last occurrence and the largest agree - until the events outnumber the
+  # publishes a reader wants. `xnu_live_poll_timeout_ms` is the case that decided it: the first four
+  # polls each publish their own timeout, the *park* is the third, and a fourth short ask after the
+  # park would leave `keyval` (which takes the last) reporting the fourth's short timeout as if it
+  # were the park's. Taking the largest asks the question actually being asked - "did any poll with
+  # a park-sized timeout return" - and never depends on which call published last.
+  maxhex() {
+    local m=0 v d
+    while read -r v; do
+      [[ -n $v ]] || continue
+      d=$(( 16#${v#0x} ))
+      if (( d > m )); then m=$d; fi
+    done < <(grep -ao "xnu_live_$1=0x[0-9a-f]*" "$log" 2>/dev/null | sed 's/^[^=]*=//' || true)
+    printf '%s' "$m"
+  }
+
+  # **594 widened this gate, because the arm it registers has no `slot_cwe_` keys at all - and the
+  # gate is the whole block.** The switch skips 514's repair, so `SIGPdisabled` stays set, `cpu_idle`
+  # leaves by its first door on every pass, and `platform_cache_idle_enter` / `_wfi` / `_exit` are
+  # never called. That is every publisher the clauses below score: `slot_cwe_*`, the exit wrapper's
+  # three bracket notes, the seam, and the idle's own three counters. Gated on `slot_cwe_` alone the
+  # block would print *nothing* for such a log, and a reader silent for a reason and a reader silent
+  # because it broke look identical from outside (564's defect, one layer up). So the arm is decided
+  # here, from the log's own keys, and the gate accepts either.
+  #
+  # The signature has to separate "this arm ran" from "the log is truncated", and the key that does
+  # it is in the *live channel*, which the arm does not silence: `xnu_live_door_seq` is published by
+  # `__wrap_Idle_load_context`, so its presence proves `cpu_idle` ran at all. The rest of the
+  # conjunction is the base arm's own evidence *absent* - `repair_seq` (the note went inside the
+  # `#if` with the call), `sip_seq`, `pce_seq`, `wfi_seq` (all three inside the window). Each of
+  # those four alone would be weaker: their absence is also what an image that never reached
+  # `cpu_idle` looks like, which is why `door_seq`'s presence is required in the same conjunction.
+  #
+  # **The park's console group is deliberately not the marker, and this is the part worth writing
+  # down.** It reads like the obvious arm marker - the line says
+  # `cpu_signal_handler_internal(FALSE) called %d time(s)` and the count is 1 on the baseline and 0
+  # here. But those lines are printed *after* `__real_poll` returns (their own comment: "printed
+  # *after* it", both counts "read here, at the park's return"), and on the baseline the park's poll
+  # never returns - so the group is in neither 520's log nor 533's. A marker the baseline cannot
+  # produce cannot separate the two arms; here it is a witness instead, and a strong one (below).
+  idle_no_sleep_arm=0
+  if ! grep -a -q 'xnu_live_slot_cwe_' "$log" \
+     && grep -a -q 'xnu_live_door_seq=' "$log" \
+     && ! grep -a -q 'xnu_live_repair_seq=' "$log" \
+     && ! grep -a -q 'xnu_live_sip_seq=' "$log" \
+     && ! grep -a -q 'xnu_live_pce_seq=' "$log" \
+     && ! grep -a -q 'xnu_live_wfi_seq=' "$log"; then
+    idle_no_sleep_arm=1
+  fi
+
+  if (( idle_no_sleep_arm == 1 )); then
+    # (6) 594's arm: the idle never slept, so the window's whole family is absent *by construction*
+    #
+    # **This clause had to exist before the arm was built, not after.** See the gate's note above for
+    # why the block would otherwise be skipped; what follows is the reading that replaces it, and it
+    # is deliberately not a list of absences scored as passes. Every absence is *named* instead, so a
+    # log missing one of them for a different reason can be told from this one.
+    #
+    #   * `xnu_live_repair_seq` / `_caller` / `_before` / `_after` - the note is inside the `#if`
+    #     with the call, so on this arm the kernel's own clear is not made and nothing is published
+    #     for it. On the baseline all four are present, `_seq=1`, `_before != _after`.
+    #   * `xnu_live_sip_seq` / `_true` - `__wrap_SetIdlePop` is reached only by a pass that gets past
+    #     `cpu_idle`'s first test, and that test is exactly what the skipped repair would make false.
+    #   * `xnu_live_pce_seq` / `xnu_live_wfi_seq` - the enter wrapper and the WFI, both inside.
+    #   * `xnu_live_seam_*` (535/572's instrument) and `xnu_live_slot_cwe_*` - both inside the exit.
+    #   * `xnu_live_slot_pre_*` / `_rtcpre_*` / `_post_*` - the exit wrapper's three bracket
+    #     publishers.
+    #   * `panic ... sleh_abort` at the exit's pop - the death the window leads to. **Its absence is
+    #     not evidence here** and nothing below scores it: on this arm the pop is not reached, so a
+    #     panic-free log is the arm working, and a panic would be a new fault rather than this arm's
+    #     prediction arriving.
+    #
+    # **And what it must contain: a ladder, because no single key is a witness.** 593 section 4's
+    # pre-registered falsifier is *not* an absence - a live spin is on the bus and returns exactly
+    # like a working kernel, so the reading has to be something that advances only if pid 1's thread
+    # runs past the old death point. Weakest rung first, and the verdict is the strongest rung read:
+    local door_max poll_seq_max poll_tmo_max park_min park_over park_group user_ones verdict_ok=0
+    local rung1_ok=0
+    door_max=$(maxhex door_seq)
+    poll_seq_max=$(maxhex poll_seq)
+    poll_tmo_max=$(maxhex poll_timeout_ms)
+    park_over=$(keyval poll_over)
+    user_ones=$(grep -a -c 'xnu_live_sleh_user=0x0*1' "$log" || true)
+    park_group=$(grep -a -c 'mini4: the repair --' "$log" || true)
+    # The threshold comes out of this tree rather than being written here again: `ENTRY_PARK_MIN_MS`
+    # is `entry_trace.c`'s own definition of which `poll` is the park, and a second copy of it in
+    # this file is the defect this project has paid for most often. Unreadable means UNREAD, not a
+    # default.
+    park_min=""
+    if [[ -r $REPO_ROOT/stages/stage90/xnu_arm_boot/entry_trace.c ]]; then
+      park_min=$(sed -n 's/^#define ENTRY_PARK_MIN_MS \([0-9][0-9]*\).*/\1/p' \
+                   "$REPO_ROOT/stages/stage90/xnu_arm_boot/entry_trace.c" | head -1 || true)
+    fi
+
+    say ""
+    say "  594's arm - the idle does not sleep. This log's image skipped 514's one-shot repair, so"
+    say "  SIGPdisabled stays set, cpu_idle leaves by its first door on every pass, and the window"
+    say "  whose pop {fp, pc} this phase has been measuring is never entered. So the whole family"
+    say "  that clauses (1)-(5) score is absent on purpose, and this clause reads what is left."
+    say "    xnu_live_door_seq reaches ${door_max:-absent} - the passes that left by the first door"
+    if [[ -n $door_max ]] && (( door_max >= 32768 )); then
+      say "    (>= 32768: the idle really did run, and the publishes are the sparse series, so this"
+      say "     is a bound on the pass count and not the count)"
+    else
+      say "    **and that is not >= 32768**, so this log does not show the door-1 spin the arm is"
+      say "    made of - read the gate's signature before reading anything below as this arm"
+      say "    (a log that reaches here with a small door count is not a run of this arm)"
+    fi
+    say "    xnu_live_repair_seq absent: the repair was not made, which is the switch. (Baseline:"
+    say "    0x00000001, with _before != _after - 593 section 4.)"
+
+    verdict_ok=0
+    rung1_ok=0
+    if [[ -n $poll_seq_max ]] && (( poll_seq_max > 2 )); then
+      rung1_ok=1
+      say "  PASS  a poll came back after the second: xnu_live_poll_seq reaches $poll_seq_max. The"
+      say "        park is the third poll and entry_note_poll runs only *after* __real_poll"
+      say "        returns, so a published 3 is the park having returned - and on the frozen arm it"
+      say "        structurally cannot: 520 and 533 both stop at 2, with timeouts 5 ms and 40 ms,"
+      say "        because the boot dies inside the park's own poll. This is the death point passed"
+      verdict_ok=1
+      if [[ -n $park_min ]] && (( poll_tmo_max >= park_min )); then
+        say "  PASS  and it is the park and not a stray ask: the largest recorded timeout is"
+        say "        $poll_tmo_max ms, at or above this tree's own park threshold, $park_min ms"
+      elif [[ -z $park_min ]]; then
+        say "  UNREAD  and whether it is the park is unread: ENTRY_PARK_MIN_MS could not be read from"
+        say "        $REPO_ROOT/stages/stage90/xnu_arm_boot/entry_trace.c, and the largest recorded"
+        say "        timeout (${poll_tmo_max:-none}) is not compared against a number written here"
+        verdict_ok=0
+      else
+        say "  FAIL  and the largest recorded timeout is ${poll_tmo_max:-absent} ms, below the"
+        say "        park's own threshold of $park_min ms - so the poll that returned is not the"
+        say "        park, and what the third call did is not read by this rung"
+        verdict_ok=0
+      fi
+    else
+      say "  FAIL  no poll record past the second (xnu_live_poll_seq reaches"
+      say "        ${poll_seq_max:-absent}) - the park's own poll has not come back, which is this"
+      say "        arm's failure mode (593 section 4: the spin is alive and never progresses) and"
+      say "        **not** a hang: the device returns either way, so the runner's exit code cannot"
+      say "        tell these apart and this line is the only thing that can"
+    fi
+
+    if (( park_group > 0 )); then
+      say "  PASS  rung 2, and it is the strongest positive record here: the park's own console group"
+      say "        is in the log ($park_group line(s) matching 'mini4: the repair --'). It is printed"
+      say "        after the park's poll returns and the baseline cannot print it at all - neither"
+      say "        520 nor 533 has it - so it says the same thing as rung 1 and says it as a record"
+      say "        rather than as a count. Read its own count: it should read"
+      say "        'cpu_signal_handler_internal(FALSE) called 0 time(s)' - 0 is this arm stating"
+      say "        itself, where the baseline's would read 1"
+    elif (( verdict_ok == 1 )); then
+      say "  NOTE  the park's console group is not in the log, although its poll returned. The group"
+      say "        is 4 printf lines after that return, so a ring that wrapped between the return and"
+      say "        the read loses them while keeping the live keys - the two are different channels."
+      say "        It costs a corroboration and not rung 1, but it is the thing to check by hand"
+    fi
+
+    if [[ -n $park_over ]]; then
+      say "  PASS  rung 3: xnu_live_poll_over=$park_over - a fifth poll published, so pid 1 ran on"
+      say "        past the park and asked again rather than parking once and never returning"
+    fi
+    if [[ $user_ones =~ ^[0-9]+$ ]] && (( user_ones > 3 )); then
+      say "  PASS  rung 4: $user_ones user-mode fault record(s), against 520's 3 - the boot got"
+      say "        further into user mode than any run has"
+    fi
+
+    say ""
+    if (( verdict_ok == 1 )); then
+      say "  => this arm did what it was built to do at the point that matters: the pass that killed"
+      say "     every boot before it - the first arrival at the window, 593 - did not happen, and the"
+      say "     boot ran past the park. **That is progress and it is not the goal yet**: 593 section 4"
+      say "     traded the sleep for the boot, so the readings that decide 'the OS is up' are the ones"
+      say "     after this point (item (4)'s user-mode records, the console, and the fixture's own"
+      say "     syscalls in the live channel). If they are here, read them before calling this a boot."
+      if (( park_group > 0 )) && (( poll_seq_max > 2 )); then
+        say "     Both of the two independent witnesses are present, which is the conjunction this"
+        say "     phase asks for rather than the weaker of the two."
+      fi
+    else
+      say "  => the arm's own reading: the idle is spinning by the first door - which is the arm"
+      say "     working - and what the park's poll did decides the rest. It is **not a hang and not a"
+      say "     brick**: nothing was written to storage (fastboot boot only), a power press returns the"
+      say "     device, and no outcome of this arm can change that."
+      if (( rung1_ok == 1 )); then
+        say "     A poll that is not the park came back, so rung 1's FAIL is rung 1b's: read that line"
+        say "     rather than this one - the third call returned something other than the park's own"
+        say "     ask, and what that means is not read here."
+      else
+        say "     The park's poll has not come back at all, which is the falsifier 593 section 4"
+        say "     pre-registered for this arm. Read rung 1's FAIL line: it names which half of the"
+        say "     witness is missing, and rung 2's NOTE (if present) says whether the console channel"
+        say "     simply lost the group that rung 1's return should have printed."
+      fi
+    fi
+  elif grep -a -q 'xnu_live_slot_cwe_' "$log"; then
     local cwe_win cwe_set cwe_calls pre_calls rtcpre_calls post_calls storm panics user_ones
     local sleh_lr="" sleh_pc="" sleh_sp="" sleh_seen=""
     local pop_lr="" pop_lr_src="" pop_death=0 pop_named=0 cache_arm=unread arm_seen=unknown
     local pce_up="" pce_ncpu="" verdict_ok=1
-    # `|| true` is load-bearing and its absence was this block's first defect, found by running it
-    # against the state it is meant to refuse: the script sets `pipefail`, so a key that is absent
-    # makes `grep` exit 1, the pipeline returns 1, and `set -e` kills the *caller* mid-function -
-    # the same shape as the `[[ ... ]] && say ...` defect documented four lines above. An absent
-    # key has to reach the code that can say "this is UNREAD", not end the summary.
-    keyval() { grep -ao "xnu_live_$1=[0-9a-fx]*" "$log" 2>/dev/null | tail -1 | sed 's/^[^=]*=//' || true; }
     cwe_win=$(keyval slot_cwe_win)
     cwe_set=$(keyval slot_cwe_set)
     cwe_calls=$(keyval slot_cwe_calls)

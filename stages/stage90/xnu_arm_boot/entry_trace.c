@@ -493,6 +493,37 @@ extern void FlushPoC_Dcache(void);
 #error "STAGE90_XNU_IDLE_CACHE_ENABLE must be 0 or 1"
 #endif
 
+/* **593 section 4's arm: leave `SIGPdisabled` set, so the idle never sleeps.** With the switch off
+ * (the default, and the value every image up to 593 was built with) 514's repair runs: the kernel's own
+ * `cpu_signal_handler_internal(FALSE)` clears the bit once, on pid 1's first long `poll`, and the *very
+ * next* pass of `cpu_idle` falls past its first test into `SetIdlePop` -> `platform_cache_idle_enter` ->
+ * WFI -> `platform_cache_idle_exit` for the first time in the boot - which is the window whose
+ * `pop {fp, pc}` is this phase's frontier (593 sections 2 and 3: 32767+ passes leave by the first door
+ * before that, and exactly one leaves by the third).
+ *
+ * With the switch **on**, that one call is not made. `SIGPdisabled` therefore stays set, `cpu_idle`'s
+ * first test is true on every pass, all three idle wrappers are skipped, and **`pop {fp, pc}` is never
+ * executed** - not survived, not repaired, not reached. The arm is the one the goal wants: XNU reaches
+ * userland *before* the idle exit, so a port whose idle never sleeps is a port that reached the OS and
+ * stayed. What it gives up is the sleep itself - the defect 512/513 measured and 514 repaired - so a
+ * bring-up stopgap is traded for a boot, reversibly, with this one switch.
+ *
+ * **The note goes with the call, and the first draft had it outside the guard.** Keeping
+ * `entry_note_repair` unconditional "so the window is measured either way" reads well and is wrong here,
+ * because the console line it feeds says `cpu_signal_handler_internal(FALSE) called %d time(s)` off the
+ * counter that note increments - so on the arm that skips the call it would print **1** for a call that
+ * was never made. A false sentence in the run's own output about the key this arm is defined by is a
+ * worse failure than a silence, and the silence is not silent anyway: the count prints **0** and the
+ * four `xnu_live_repair_*` keys are simply absent, which is the arm stating itself the way 569's rule
+ * wants (absent is not zero). The peer session caught this. */
+#ifndef STAGE90_XNU_IDLE_NO_SLEEP
+#define STAGE90_XNU_IDLE_NO_SLEEP 0
+#endif
+
+#if (STAGE90_XNU_IDLE_NO_SLEEP != 0) && (STAGE90_XNU_IDLE_NO_SLEEP != 1)
+#error "STAGE90_XNU_IDLE_NO_SLEEP must be 0 or 1"
+#endif
+
 /* `boolean_t idle_enable` (`osfmk/arm/cpu_common.c:67`), read **by name** - the linker resolves the
  * address out of the image's own symbol, so there is no offset here to be wrong, which is why this is
  * a word 513 can read while `cpu_signal`/`rtcPop`/`cpu_idle_latency` are words it deliberately does
@@ -1219,7 +1250,18 @@ int __wrap_poll(void *proc, void *uap, int *retval)
     }
 
     if (timeout >= (uint32_t)ENTRY_PARK_MIN_MS && park_printed == 0u) {
+#if !STAGE90_XNU_IDLE_NO_SLEEP
+        /* Declared inside the guard, because on 594's arm nothing reads it: `-Wall -Wextra -Werror`
+         * is on, and an unused declaration would be a build that refuses the arm rather than one that
+         * reports it. **The guard holds three statements, not two** - `rb = entry_counter();`, the
+         * call, and the note below - and the first draft of this guard moved the declaration and the
+         * call and the note and left `rb = entry_counter();` behind, where the guard deleted it. That
+         * is a defect only `-Werror=maybe-uninitialized` could see, and only from the arm it is *not*
+         * about: on 594's own arm the whole block is `#if 0`, so the build that made the arm compiled
+         * it out and the build that reproduced the baseline is the one that refused. A comment that
+         * counts a set is a claim about that set; this one counted two and the set was three. */
         uint32_t rb;
+#endif
 
         snap_calls = g_idle_calls;
         snap_door = g_door_exits;
@@ -1238,9 +1280,20 @@ int __wrap_poll(void *proc, void *uap, int *retval)
          * as the kernel left them) rather than from the payload, so `getCpuDatap()` is the kernel's own
          * answer about the CPU this process is running on and not this file's guess. The counter is
          * read either side so the repair's own cost is on the record rather than in a claim. */
+#if !STAGE90_XNU_IDLE_NO_SLEEP
         rb = entry_counter();
         cpu_signal_handler_internal(0);
+        /* **The note is inside the guard, and the first draft of 594 had it outside.** The repair's own
+         * key is `xnu_live_repair_seq` and the console line beside it reads
+         * "cpu_signal_handler_internal(FALSE) called %d time(s)" off `g_repair_calls` - a counter
+         * `entry_note_repair` increments. So a note made on the arm that *skips* the call would print
+         * "called 1 time(s)" for a call that was never made: a false sentence in the run's own output,
+         * about the one key this arm is defined by. The peer session caught it. Keeping the note outside
+         * the guard to "measure the window either way" was the wrong trade: an empty window is what the
+         * *absence* of these keys says, and 569's rule is that absent is not zero - so the arm is stated
+         * by nothing being published plus a console count of 0, which is read rather than inferred. */
         entry_note_repair(caller, rb, entry_counter());
+#endif
     }
 
     before = entry_counter();
