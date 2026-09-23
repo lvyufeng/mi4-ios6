@@ -55,6 +55,16 @@ LIVE_RUNNER=$ROOT/stages/stage90/run_and_capture.sh
 # `./run_and_capture.sh`.
 RUNNER=${RUNNER_OVERRIDE:-$LIVE_RUNNER}
 [[ -r $RUNNER ]] || { printf 'rehearse: no runner at %s\n' "$RUNNER" >&2; exit 1; }
+# **And it is made absolute here, because section C `cd`s and the sections do not share a directory.**
+# 628 measured this: with a *relative* `RUNNER_OVERRIDE` (`stages/stage90/.r628-mut.sh`) sections A and
+# B are green and section C reports `No such file or directory` on all four of its cells, because the
+# path-argument section runs the runner from a different directory on purpose (`cd "$dir" && bash
+# "$RUNNER"`) - and a relative runner path is then resolved against *that* directory. The live path is
+# absolute so the default never showed it; the override I added in 620 is what made it reachable, and
+# the failure mode is the worst kind: a mutation measured with a relative path reports section C broken
+# rather than reporting what it was measuring. Resolved once, here, so every section fires the same file.
+RUNNER=$(readlink -f "$RUNNER" 2>/dev/null || printf '%s' "$RUNNER")
+[[ -r $RUNNER ]] || { printf 'rehearse: the runner resolved to %s, which is not readable\n' "$RUNNER" >&2; exit 1; }
 # **And the override may not be the live path.** A `RUNNER_OVERRIDE` pointed at `run_and_capture.sh`
 # would silently restore exactly the hazard above while looking like it had been handled, so the
 # refusal is structural rather than a rule in a comment.
@@ -348,6 +358,17 @@ run_state() {
       log_exists)            printf 'the previous run\n' > "$logfile" ;;
       log_missing)           : ;;
       capture_is_a_real_log) cp "$REH_PAYLOAD_LOG" "$STATE/capture_source" ;;
+      # **An unrecognised marker is a refusal, and 628 measured why it has to be.** This `case` had no
+      # default, so a typo in a cell's marker list - or a marker renamed in one place and not the other -
+      # was **silently ignored**, and the cell then ran in a *different state* than the one its label
+      # names while still printing `ok`. That is a cell that cannot reach the state it claims to test,
+      # which is m639's shape in the harness's own wiring, and it is the failure mode a green table
+      # cannot show. Found by writing exactly such a typo into the new `fastboot-plan-line` row and
+      # noticing that nothing objected.
+      *) printf 'rehearse: unknown state marker %s (cell %s)\n' "$marker" "$name" >&2
+         printf '          The marker would have been ignored and the cell run in a different state\n' >&2
+         printf '          than its label names. Refusing.\n' >&2
+         trap - EXIT; exit 1 ;;
     esac
   done
   local out=$d/out.txt err=$d/err.txt
@@ -551,6 +572,21 @@ run_state boot-call-fails-after-send 0 "fastboot boot exited" boot_sent_rc:1
 # printed - otherwise "print it never" would satisfy `boot-call-fails` while making the adb path's own
 # recorded plan false in the other direction.
 run_state adb-plan-line              0 "sudo adb -s 4a2fe00b reboot bootloader" adb_up
+# **And the other half of that pair, which 628 measured was missing - on the branch the press takes.**
+# Every state in this section starts with the phone in fastboot and no adb (`fastboot_up` is the default
+# marker), which is exactly what Vol-Down + Power produces, so the `fastboot)` arm of the runner's
+# plan-line `case` is the *normal* path. Nothing asserted its text: the only cell that named it was
+# `boot-call-fails`'s **forbid** of the adb line, and a forbidding expectation passes on a `case` that
+# prints nothing at all. Measured rather than argued - with the `fastboot)` arm replaced by `: ;;` the
+# whole of sections A and B stayed green, **19 ok / 0 failed and 15 ok / 0 failed**, so the branch the
+# press takes could have lost its plan line with no cell noticing (613's rule: to assert a phrase's
+# absence the detector must first be seen to see it when present; 614's: a verifier whose only shown
+# behaviour is refusal).
+#
+# It carries **no marker at all** - the default state is already the press's - and the `forbid:` half
+# makes it the converse of `adb-plan-line` rather than a second assertion of the same line.
+run_state fastboot-plan-line         0 "the device is already in fastboot, so this run issues no adb" \
+                                       'forbid:sudo adb -s 4a2fe00b reboot bootloader'
 
 printf '\n  %d ok, %d failed\n' "$pass" "$fail"
 if (( fail > 0 )); then
