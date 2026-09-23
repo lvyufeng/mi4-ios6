@@ -25,7 +25,9 @@
 #   1  the gate refused, the device was not found, or - after the boot - the host could not
 #      write the log where it wanted to (an unwritable $LOGFILE in a sticky /tmp: 511, 512),
 #      or the host could not READ its own USB log to compare (dmesg returned nothing, so the
-#      run has no reading of the device at all: 2026-09-23). All of these are host-side
+#      run has no reading of the device at all: 2026-09-23), or `fastboot devices` never
+#      settled to this phone alone (618 - **nothing was booted**, and the phone is still in
+#      fastboot, so this refusal costs no press). All of these are host-side or host-list
 #      failures that say nothing about the device, which is why they share a code.
 #   2  the payload ran and the device did NOT come back - a manual power press is needed
 #      (the log will not survive a power cycle, so this is also a lost run). Also the code a
@@ -104,6 +106,13 @@ RETURN_TIMEOUT=${RETURN_TIMEOUT:-180}
 # seen, so a single immediate `adb exec-out` at step 5 fails on the *normal* path. A read is free and
 # cannot cost a run, so this bounds how long the capture keeps trying, and nothing else uses it.
 CAPTURE_WAIT=${CAPTURE_WAIT:-90}
+# The wait for an unambiguous `fastboot devices` list, before the boot step refuses one - see the guard
+# there. 60 s and not longer, because the state it waits out is usually seconds: the second phone-class
+# device on this host (`usb 3-3`, serial `33e80afe…`) has 13 fastboot windows in the host log and
+# **11 of them are under 14 s** - but two are not (1946 s on 09-17; and on 2026-09-23 it sat there for
+# 47 min and counting). So a wait cannot replace the refusal, only stop the common, transient case from
+# costing the operator a re-run.
+FB_AMBIG_WAIT=${FB_AMBIG_WAIT:-60}
 
 DRY_RUN=0
 SUMMARISE_ONLY=""
@@ -400,6 +409,34 @@ port_enum_rollup() {
     | sed 's/idVendor=//; s/, idProduct=/:/' | sort | uniq -c \
     | awk '{printf "%s=%s ", $2, $1}' | sed 's/ $//' || true
   return 0
+}
+
+# --- the fastboot list, read ONCE and judged as ONE value --------------------------------------
+#
+# **One command, one list, one reading.** The test takes the list as an argument and counts it itself,
+# rather than reading an `FB_COUNT` and an `FB_LIST` that two earlier lines happened to produce. That is
+# not style: 618 made the check entered twice, once before a wait and once after it, and a version that
+# re-tested a count from one moment against a list from another would be this project's most-repeated
+# defect - one value with two definitions - sitting inside the check that decides whether the boot acts.
+#
+# The condition is "exactly one device AND it is `$SERIAL`", which is **stronger** than a bare count
+# test. Before the wait the two are equivalent, because the presence check immediately above has already
+# established that `$SERIAL` is in the list. They stop being equivalent once a wait is between them: the
+# list can lose this phone and keep the stranger, and a bare count test would then read `1` and pass.
+# What the stronger form buys is a **refusal instead of a raw `fastboot` error** - with `-s "$SERIAL"`
+# and no such device on the bus, `fastboot` fails with its own message, for which this file's exit
+# contract has no clause.
+fastboot_pinned_only() {
+  local list=$1 n
+  n=$(printf '%s\n' "$list" | grep -c . || true)
+  [[ ${n:-0} -eq 1 && $list == "$SERIAL"$'\t'* ]]
+}
+# The count, for prose only. Derived from the same list every time, so the number in a message and the
+# verdict that produced it cannot disagree.
+fastboot_list_count() {
+  local n
+  n=$(printf '%s\n' "$1" | grep -c . || true)
+  printf '%s' "${n:-0}"
 }
 
 summarise_log() {
@@ -2226,17 +2263,59 @@ if [[ $DRY_RUN -eq 0 ]]; then
   # reach, carrying a comment that says what it does, is the defect this project has paid for most
   # (598's three-way test over a two-branch flow); the wrong-serial case is covered by the check that
   # was already there, and this one adds only what was missing.
+  #
+  # --- 618: the condition is stronger, and the guard waits before it refuses -----------------
+  #
+  # Both are changes to what 616 wrote, and both come from measurement rather than from a reading of
+  # the code.
+  #
+  # *The condition* is now "exactly one device, and it is `$SERIAL`". At the moment this line is
+  # entered the two are still equivalent - the presence check above has established that `$SERIAL` is
+  # in the list, so "exactly one" implies "the one is `$SERIAL`" - and that equivalence is exactly why
+  # the separate wrong-serial branch was unreachable. What breaks it is the wait below, which is new: a
+  # wait can lose this phone and keep the stranger, and a bare count test would then read `1` and pass.
+  # That case is reachable *only* through the wait, so it is folded into the one condition rather than
+  # added as a second branch - one test, entered twice, and no branch that nothing can reach.
+  #
+  # *The wait* is here because the state this guard refuses is **usually transient on this host**.
+  # Measured out of the host log, the second phone-class device's 13 fastboot windows are 12.9, 1.6,
+  # 13.0, 3.3, 3.2, 3.1, 1946, 3.1, 11.9, 1.9, 9.8, 152.9 s, and one that began 2026-09-23 10:59:41
+  # and was still open 47 min later. **Eleven of the thirteen are under 14 s.** So the guard as 616
+  # wrote it refuses on the first look at a state that clears itself in seconds, and the cost of that
+  # refusal is not zero to the operator: they have to notice it, work out which of the two devices
+  # moved, and re-run. Waiting cannot turn a refusal into a wrong boot - the list is re-tested after
+  # the wait by the same test, and a list that never settles is refused exactly as before - and it
+  # cannot cost anything else either, because the phone is already in fastboot and nothing has been
+  # sent: a `fastboot boot` that is never reached writes nothing.
   FB_LIST=$(sudo fastboot devices 2>/dev/null || true)
-  FB_COUNT=$(printf '%s\n' "$FB_LIST" | grep -c . || true)
-  if [[ $FB_COUNT -ne 1 ]]; then
-    say "REFUSING: \`fastboot devices\` lists $FB_COUNT device(s), and this step cannot act on an"
-    say "          ambiguous list. Measured on this host: \`usb 3-3\` carries a second"
-    say "          phone-class device (serial 33e80afe…) that also enters fastboot, so more than"
-    say "          one is a state this machine really produces and not a hypothetical. The two"
-    say "          \`fastboot devices\` checks above pass in this state - they ask whether $SERIAL is"
-    say "          PRESENT, and it is - which is why the count has to be checked separately."
+  if ! fastboot_pinned_only "$FB_LIST"; then
+    say "note: \`fastboot devices\` does not list $SERIAL alone - it lists $(fastboot_list_count "$FB_LIST") device(s):"
     printf '%s\n' "$FB_LIST" | sed 's/^/            /'
-    die "fastboot lists $FB_COUNT device(s); nothing was booted. Disconnect the other device, or wait for it to leave fastboot, then re-run - this is a refusal and not a failed run"
+    say "      waiting up to ${FB_AMBIG_WAIT}s for the list to settle; the other device on this host"
+    say "      is usually in fastboot for seconds, but has also sat there for tens of minutes"
+    _fb_t0=$(date +%s)
+    _fb_deadline=$(( _fb_t0 + FB_AMBIG_WAIT ))
+    while ! fastboot_pinned_only "$FB_LIST"; do
+      # The same `test && break` shape the reboot loop above uses, and for the same reason: under
+      # `set -e` a failing test in an `&&` list whose last command is `break` does not end the script.
+      [[ $(date +%s) -ge $_fb_deadline ]] && break
+      sleep 2
+      FB_LIST=$(sudo fastboot devices 2>/dev/null || true)
+    done
+    if fastboot_pinned_only "$FB_LIST"; then
+      say "      the list settled to $SERIAL alone after $(( $(date +%s) - _fb_t0 ))s"
+    fi
+  fi
+  if ! fastboot_pinned_only "$FB_LIST"; then
+    FB_N=$(fastboot_list_count "$FB_LIST")
+    say "REFUSING: this step cannot act on a \`fastboot devices\` list that is not $SERIAL alone."
+    say "          Measured on this host: \`usb 3-3\` carries a second phone-class device"
+    say "          (serial 33e80afe…) that also enters fastboot, so a list like the one above is a"
+    say "          state this machine really produces and not a hypothetical. The two"
+    say "          \`fastboot devices\` checks above pass in this state - they ask whether $SERIAL is"
+    say "          PRESENT, and when they ran it was - which is why the list is judged as a whole."
+    printf '%s\n' "$FB_LIST" | sed 's/^/            /'
+    die "fastboot did not settle to $SERIAL alone within ${FB_AMBIG_WAIT}s (it lists $FB_N device(s)); nothing was booted. Disconnect the other device, or wait for it to leave fastboot, then re-run - this is a refusal and not a failed run"
   fi
 
   # `fastboot boot` writes nothing to storage. This is the whole safety property of the

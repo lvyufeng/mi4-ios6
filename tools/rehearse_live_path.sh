@@ -90,24 +90,51 @@ case "$1" in
     shift
     case "$*" in
       "devices")
-        # Three lists, because the runner has a guard for the first two and the third is the
-        # happy path. `fastboot_other` is a single device that is NOT this phone; `fastboot_two`
-        # is two devices, which is the state `fastboot boot` without `-s` silently picks from.
+        # Four lists, and which one is printed depends on how many times this command has been called
+        # and on the state's markers. `fastboot_other` is a single device that is NOT this phone;
+        # `fastboot_two` is two devices, which is the state `fastboot boot` without `-s` silently
+        # picks from; and `leave_after:N` makes the two-device list appear for the first N calls only,
+        # which is how **618's wait is exercised** - the switch has to land on the call the wait makes,
+        # so N is set from the runner's own call count and not guessed.
+        #
+        # The count is exact for the state it is used in: with the phone already in fastboot, the
+        # runner's calls are (1) mode detection, (2) the boot step's presence check, (3) the guard's
+        # first read, then one per wait poll - so `leave_after:3` puts the switch on the wait's first
+        # refetch. If that call count ever changes, the cell that uses it goes red rather than
+        # quietly testing nothing, because a wait that never runs leaves the refusal in the output.
+        #
+        # **And the list is written to a file, because the boot below is checked against it.** `-s` is
+        # only a pin if the named device is on the bus; a stub that booted anyway would make `-s` look
+        # like a guarantee in a state where it is a no-op.
         if [[ -f $S/fastboot_up ]]; then
-          if [[ -f $S/fastboot_two ]]; then
-            printf '4a2fe00b\tfastboot\n33e80afe\tfastboot\n'
+          _fc=$(cat $S/fb_calls 2>/dev/null || echo 0); _fc=$((_fc+1)); echo "$_fc" > $S/fb_calls
+          _leave=$(cat $S/leaves_after 2>/dev/null || echo 0)
+          if [[ $_fc -le $_leave ]]; then
+            _list=$(printf '4a2fe00b\tfastboot\n33e80afe\tfastboot')
+          elif [[ -f $S/fastboot_two ]]; then
+            _list=$(printf '4a2fe00b\tfastboot\n33e80afe\tfastboot')
           elif [[ -f $S/fastboot_other ]]; then
-            printf '33e80afe\tfastboot\n'
+            _list=$(printf '33e80afe\tfastboot')
           else
-            printf '4a2fe00b\tfastboot\n'
+            _list=$(printf '4a2fe00b\tfastboot')
           fi
+          printf '%s\n' "$_list" > $S/last_fb_list
+          printf '%s\n' "$_list"
         fi ;;
       # **The pin is enforced here rather than asserted in a comment.** The stub accepts the boot
       # only with `-s 4a2fe00b`; a bare `fastboot boot <image>` is refused, so the happy-path
       # state itself proves the serial is on the command line. `boot *` matched both forms before
       # 616, which is exactly why the pin could have been removed without any cell noticing.
-      "boot -s 4a2fe00b "*) 
+      "boot -s 4a2fe00b "*)
         # A STUB. Nothing is booted; no image is sent anywhere.
+        # **The pin is checked against the last list, because the pin is the thing being tested.** Real
+        # `fastboot -s <serial> boot` with that serial absent fails; the state
+        # `fastboot-other-after-wait` exists because the runner must refuse that case *itself*, with a
+        # message, rather than let `fastboot` produce an error this file's exit contract has no clause
+        # for. A stub that booted anyway would have made the count-only condition look sound.
+        if ! grep -q '^4a2fe00b' "$S/last_fb_list" 2>/dev/null; then
+          printf 'fastboot: error: Device 4a2fe00b not found\n' >&2; exit 1
+        fi
         touch $S/booted $S/fastboot_up; date +%s > $S/booted_at
         printf 'Sending boot image... OKAY\nBooting... OKAY\n' ;;
       "boot -s "*)
@@ -236,6 +263,7 @@ run_state() {
       fastboot_two)          touch "$STATE/fastboot_two" ;;
       fastboot_other)        touch "$STATE/fastboot_other" ;;
       qdl_return)            touch "$STATE/qdl_return" ;;
+      leave_after:*)         printf '%s' "${marker#leave_after:}" > "$STATE/leaves_after" ;;
       no_serial_ever)        touch "$STATE/no_serial_ever" ;;
       return_after:*)        printf '%s' "${marker#return_after:}" > "$STATE/ret_after" ;;
       forbid:*)              FORBID=${marker#forbid:} ;;
@@ -255,7 +283,11 @@ run_state() {
   # inside the wait (states 1/2/9) and one delayed past the window (10 s, the port-advance state) is
   # not. It also keeps the battery's clock honest against the stub's - the stub measures elapsed
   # seconds, so the window it is measured against has to be long enough to contain a real poll.
-  LOGFILE=$logfile RETURN_TIMEOUT=6 CAPTURE_WAIT=1 \
+  # **`FB_AMBIG_WAIT=3`, not the runner's 60.** The wait is a time budget and the battery is what it
+  # is measured against, so it is shortened here for the same reason `RETURN_TIMEOUT` is - and it has
+  # to stay *longer than one poll* (the runner sleeps 2 s), or the wait's refetch would never happen
+  # and 618's cell would be testing the refusal path while claiming to test the wait.
+  LOGFILE=$logfile RETURN_TIMEOUT=6 CAPTURE_WAIT=1 FB_AMBIG_WAIT=3 \
     timeout 120 bash "$RUNNER" --allow-xnu-entry > "$out" 2> "$err"
   local code=$?
   local ok=1 why=""
@@ -307,7 +339,12 @@ run_state no-fastboot-after-reboot  1 "device did not appear in fastboot" adb_up
 # same moment redirects the boot to it, and this run then waits for a `usb 3-10`/`4a2fe00b` return that
 # cannot come. Measured on this host: `usb 3-3` carries such a device (serial `33e80afe…`, 12 fastboot
 # entries in the host log). Both states must REFUSE, and neither may boot.
-run_state two-devices-in-fastboot      1 "fastboot lists 2 device(s)"                    fastboot_two
+# `fastboot_two` is the *permanent* ambiguity: the neighbour never leaves, so this cell now covers
+# both halves of 618's change at once - the guard waits its whole budget and then refuses with the
+# same message it would have used immediately. Its expected line moved when the refusal was reworded
+# (`fastboot lists 2 device(s)` -> `did not settle to`), because the new sentence has to be true for
+# N = 0, 1 and 2 rather than only for the case the old one named.
+run_state two-devices-in-fastboot      1 "did not settle to"                             fastboot_two
 # The wrong-serial case never reaches the boot step at all: mode detection asks adb first and
 # fastboot second, and a lone `33e80afe` answers neither, so this state dies at `step "device"`.
 # **This cell has now been wrong twice and both corrections are the point.** The first version
@@ -362,6 +399,20 @@ run_state qdl-return                 3 "REFUSING to call this a non-return: an e
 # port branch on UNREAD-and-zero would pass this cell too.
 run_state port-underivable           2 "The device did not come back" no_serial_ever \
                                        'forbid:an enumeration appeared on'
+# **The state 618's wait exists for, and the one that was refused before it.** `leave_after:3` puts the
+# neighbour's two-device list on the runner's three calls up to and including the guard's first read,
+# and a single-device list on the wait's refetch - so the run must *wait* and then boot, and the
+# assertion is that it reaches the happy path at all. Measured: deleting the wait makes this cell fail
+# (exit 1, `cannot act on a` in the output, which is also what it forbids here).
+run_state neighbour-leaves-fastboot  0 "reading the log this run captured" leave_after:3 \
+                                       capture_is_a_real_log 'forbid:cannot act on a'
+# **And the case that makes the condition stronger than a count.** Here the neighbour's list is
+# followed by a list holding the *stranger* alone - the phone has left fastboot and the other device
+# has not. A bare `count != 1` test would see `1`, pass, and reach `fastboot boot -s 4a2fe00b` against a
+# bus where that serial is absent: `fastboot`'s own error, for which this file's exit contract has no
+# clause. The runner must refuse that itself. The stub refuses such a boot too (see its boot arm), so
+# the count-only version fails this cell on the *message* rather than passing on fastboot's error.
+run_state fastboot-other-after-wait  1 "did not settle to" leave_after:3 fastboot_other
 # **And this is the cell that makes the two branches' ORDER structural rather than a preference**, and
 # it exists because a measurement said it had to. The order was changed to serial-first on the
 # reasoning that a normal return advances BOTH counts, so the port branch written first would have
