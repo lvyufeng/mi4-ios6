@@ -113,7 +113,48 @@ one.** The tempting move when this step began was to add a `tools/verify_park_mi
 showed the guard was already in place one layer up, four cells wide - and that it is the same machinery
 630 built for the ladder's success direction.
 
-## 5. What this does not do
+## 5. Two pre-press verifications, and one of them was wrong first
+
+Rung 1b is half the witness, so before this step closed, two more things were measured against **real
+artifacts** rather than fixtures.
+
+**(a) The four recorded baselines read identically before and after.** `stages/stage90/baseline-readings.txt`
+(627) records 38 readings over four archived captures, and those readings are the ladder's premises; a
+change to `park_min`'s extraction is exactly the kind of edit that could move one. The pre-632 runner
+(`cce24b2`) and the post-632 runner were both run over the four logs in the record:
+
+| capture | pre exit | post exit | differing lines | rung-1b PASS in pre / post | UNREAD lines in post |
+| --- | --- | --- | --- | --- | --- |
+| `520-2026-09-22-last_kmsg.txt` | 0 | 0 | **0** | 0 / 0 (baseline arm: rung 1 FAILs first) | 0 |
+| `533-2026-09-23-last_kmsg.txt` | 0 | 0 | **0** | 0 / 0 | 0 |
+| `513-run1-kmsg.txt` | 0 | 0 | **0** | **1 / 1** | 0 |
+| `513-run2-kmsg.txt` | 0 | 0 | **0** | **1 / 1** | 0 |
+
+**Byte-identical output on all four**, so 632 changes no archived reading - and 513's pair still reaches
+rung 1b and passes it, in both versions.
+
+**(b) And the first attempt at (a) was an artifact of my own harness.** The copies were first made in
+`mktemp -d`, and `run_and_capture.sh` derives `REPO_ROOT` from `$(dirname "$0")/../..` - so from
+`/tmp/tmp.XXXX` that is `/`, the threshold path became `//stages/stage90/xnu_arm_boot/entry_trace.c`, and
+**`park_min` was empty in all four runs, pre and post alike.** The diff then reported 520 and 533 as
+"unchanged" and 513's pair as differing by 8 lines of *wording* - and both halves were meaningless,
+because neither version had read a threshold at all. The tell was the 513 diff itself: the pre-632
+sentence appeared with the same `//stages` path in it. Re-run **in-tree** (`stages/stage90/.633-pre.sh`
+and `.633-post.sh`, so `../..` is the repository root) and the table above is what came out. This is
+629's finding - a mutant made outside the tree measures the harness's relocation - arriving in a
+*regression* test rather than in a falsification, and it is the same reason the parks are verified with
+`verify_revert_set.sh` and never with `sha256sum -c`.
+
+**(c) The press path dry-runs clean.** `run_and_capture.sh --allow-xnu-entry --dry-run`, with
+`sudo`/`adb`/`fastboot` stubbed on `PATH` so a device call could not reach one: **exit 0**, the whole plan
+printed, and the stub record shows only `sudo dmesg` ×4 - host log reads, no `adb`, no `fastboot`, no
+`dd`. **And the limit of that check is worth stating**: the plan line it prints is the **adb** arm
+("`sudo adb -s 4a2fe00b reboot bootloader`"), because with no device visible mode detection cannot select
+the fastboot arm - and the fastboot arm is the branch the press takes. So a dry run cannot tell you the
+plan line a press will use; that is precisely the gap 628 added its cell for, and this measurement is the
+second time the same branch has been found to be the one nothing exercises by default.
+
+## 6. What this does not do
 
 * **It does not touch the device, the arm, the payload or any parked byte.** `out/stage90/stage90-qcdt.img`
   is still the sleeper arm (`60063c47…`), still **UNRUN**. Verified in the same session, immediately
@@ -132,7 +173,7 @@ showed the guard was already in place one layer up, four cells wide - and that i
 * **It does not advance 「起码要能进入操作系统，把基础驱动跑起来」.** The device is off the bus; the only
   event that can move the goal is the user's **Vol-Down + Power**.
 
-## 6. Safety
+## 7. Safety
 
 No device action, no `fastboot`, no `adb`, **nothing written to storage**, no boot, no build. One file
 edited (`stages/stage90/run_and_capture.sh`, this session's lane). The six spelling tests ran in a
