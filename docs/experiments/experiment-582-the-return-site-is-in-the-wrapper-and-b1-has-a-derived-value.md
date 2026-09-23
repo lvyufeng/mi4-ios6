@@ -84,6 +84,25 @@ If `b1` comes back as anything else, the reading is `546 section 1's premise for
 a way that needs no interpretation: the push's own store did not reach the word the pop reads, which is
 news about the window rather than about the arm.
 
+> **Correction (592): what a `b1` match does *not* say, and which word is being compared.** The
+> prediction above stands; the reading rule around it did not. The four seam words are read with
+> `SCTLR.C = 0`, and `platform_cache_idle_exit` puts `C` back to 1 at `0x8004631c`-`0x80046328` - the
+> `mrc`/`orr #4`/`mcr` on `SCTLR` plus its `isb` - from where the `pop {fp, pc}` is sixteen bytes on at
+> `0x8004633c`. So a matching `b1` says **memory** held the frame's word while the caches were off; it
+> is **not** a clearance of the `pop`, whose own lookup happens with `C` on, and a stale L1/L2 line
+> answering that lookup is outside what this key can see. `b1` wrong is a finding; `b1` right plus a
+> death at the `pop` is *consistent* with 546 section 3's mechanism and does not confirm it.
+>
+> And the word being compared is the `pop`'s own: `b1` is `[seam_sp+4]`, the word the push wrote `lr`
+> into, which `pop {fp, pc}` loads into `pc`; `b0` is the pushed `fp`. (The inverted pairing - that the
+> `pop`'s `pc` comes from `b0` - follows from counting the two words instead of the two registers, and
+> it sends a failure to the wrong word.)
+>
+> Both facts are now in the reader rather than in prose: it reads the `C` bit out of
+> `xnu_live_seam_sctlr` (three states: `C=0` a `PASS` that explicitly does not clear the `pop`, `C=1` a
+> `FINDING` plus the `UNREAD` saying what it costs, absent an `UNREAD`), and its `b1` PASS line states
+> the pairing and the limit. See 592.
+
 ## 4. Regression, and safety
 
 - **520's real log: `0 FAIL`, `0 UNREAD`, exit 0** - unchanged (that image predates the seam keys, so the

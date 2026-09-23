@@ -157,6 +157,29 @@ exit_pop_lr_addr() {
 # inside the wrapper's own extent `0x8047c964..0x8047c9c4` - and `0x8047c990` appears nowhere in this
 # repository's prose, because until now nothing compared against it.
 #
+# **Which of the two words that is.** `b0` is `[seam_sp]`, where the push wrote `fp`; `b1` is
+# `[seam_sp+4]`, where it wrote `lr` - and `seam_sp` is that address *not* by assumption but by the
+# check below (`seam_sp + 8 == sleh_sp`, i.e. the abort's own `sp` after the `pop` freed exactly the two
+# words the push wrote). The base is not guessed either: `entry_seam_flush` is reached through
+# `__wrap_FlushPoU_Dcache`, whose first statement is `mov r0, sp` (`0x8047cb90`), and a `bl` does not
+# move `sp`, so that base *is* the exit's `sp` as its `push {fp, lr}` left it. `pop {fp, pc}` at
+# `0x8004633c` loads `fp <- [seam_sp]` and `pc <- [seam_sp+4]`, so **`b1` is the word the pop takes as
+# pc**, and `b0` is not. The reader's own `STALE LINE, WRITTEN OUT` arm already reads the pair this way
+# - it compares `a1` against `xnu_live_slot_rtcpre_pop` - which is the second, independent statement of
+# the same fact. The other pairing (that the pop's `pc` comes from `b0`) is the one arrived at by
+# counting the two *words* instead of the two *registers*, and it sends a failure to the wrong word:
+# `pop {fp, pc}`'s register list is ascending, and in a `pop` the lowest register is loaded from the
+# lowest address.
+#
+# **And all four of those words are read with `SCTLR.C = 0`, while the pop runs with it back at 1.** The
+# `b` pair is read before the arm's `bl FlushPoU_Dcache` and the `a` pair after it, and Apple's flush
+# does not re-enable caching: `platform_cache_idle_exit` does that itself, at `0x8004631c`-`0x80046328`
+# (`mrc`/`orr #4`/`mcr` on `SCTLR` plus an `isb`), and only then reaches the `pop`. So `b1` equal to this
+# address says *DRAM* held the frame's word at a moment when the caches were off. It does not say the
+# pop will see it, because that lookup happens with `C` on and a stale L1/L2 line answers it instead. A
+# **wrong** `b1` is therefore a finding; a **right** `b1` is not a clearance of the pop - which is why
+# the PASS below says what it establishes and stops there.
+#
 # **Why this is derived rather than pinned, and why the loose test it replaces was not enough.** The
 # reader used to ask only whether `b1` looked like kernel text (`^0x80…` and `< 0x80600000`), and 520's
 # own log shows what that admits: a stale stack value such as `0x80553520` passes it - as would any other
@@ -753,6 +776,47 @@ summarise_log() {
         say "        pair below has two meanings and this log does not say which rule applies (the key is"
         say "        written by the body's own STAGE90_XNU_SEAM_POC, and its absence is not a default)"
       fi
+      # **What those four words were read *with* is a value in the log, so it is read rather than
+      # asserted.** The arm takes `b0`/`b1` before its `bl FlushPoU_Dcache` and `a0`/`a1` after it, and
+      # nothing inside the seam writes `SCTLR` - so the one `SCTLR` the arm captures is `C`'s value for
+      # all four reads. Apple puts `C` back to 1 later, at `0x8004631c`-`0x80046328`, after the arm has
+      # returned. `C = 0` is what makes the four words readings of DRAM; `C = 1` would make them readings
+      # *through* the caches, which is a much weaker statement and one this block was not written for -
+      # a cache hit would report the line's contents, so the arm could no longer tell a stale line from a
+      # written-back one, and the pair below would be a reading of the cache rather than of the frame.
+      if [[ $seam_sctlr =~ ^0x[0-9a-f]+$ ]]; then
+        if (( (seam_sctlr >> 2) & 1 )); then
+          say "  FINDING  seam_sctlr=$seam_sctlr has C=1 at the seam, so the four words the arm read were"
+          say "        read *through* the caches and not out of memory - a weaker statement than this block"
+          say "        is built on: a hit reports the line's contents, so a stale line and a correct memory"
+          say "        word are the same reading here. 546 section 1's premise for this cell is that the"
+          say "        seam runs with C=0, so if this line fires *that premise* is the finding, and the pair"
+          say "        below is a reading of the cache rather than of the exit's frame"
+          # Two claims, two labels: the fact above is a FINDING, and what it costs is that the four
+          # words below are not evidence - which is this file's UNREAD, and the one thing that must not
+          # be left to the reader to notice, since every comparison below still runs and still prints.
+          say "  UNREAD  and that makes the four words above, and the comparisons made against them below,"
+          say "        unreadable as evidence about the frame: this log does not establish what the exit's"
+          say "        push left in memory, which is the only thing this block is for"
+          verdict_ok=0
+        else
+          say "  PASS  seam_sctlr=$seam_sctlr has C=0 at the seam, so the four words above were read out"
+          say "        of DRAM and not through the caches - which is what makes them readings of the frame."
+          say "        **It is not a statement about the pop**: the pop at 0x8004633c runs after"
+          say "        platform_cache_idle_exit puts C back to 1 at 0x8004631c, so a stale L1/L2 line can"
+          say "        still answer that lookup, and this key cannot see it. A wrong b1 below refutes the"
+          say "        frame; a right one does not clear the pop"
+        fi
+      else
+        say "  UNREAD  xnu_live_seam_sctlr is ${seam_sctlr:-absent}, so whether the four words above were"
+        say "        read with the caches off is not established here: they are still two pairs, but what"
+        say "        they were read out of is this log's claim to make and it does not make it"
+        # The frozen 574 arm does publish this key (the string is in its own ELF, and 586's key list
+        # was read off the arm), so this branch is a guard and not the expected state - which is the
+        # reason it is `verdict_ok=0` too: a log that reaches here cannot say what the push left in
+        # memory, and that is the same cost as the C=1 case above.
+        verdict_ok=0
+      fi
       if [[ $seam_lr == "$pop_lr" ]]; then
         say "  PASS  seam_lr=$seam_lr is the exit's own call's return address, so the hook was entered"
         say "        at the seam and not at one of that routine's three other callers"
@@ -906,6 +970,11 @@ summarise_log() {
         say "        $OUT/xnu_arm_entry.elf), so memory held the frame the exit's push wrote - 546"
         say "        section 1's premise for this cell, with its value corrected: the return site is in"
         say "        __wrap_platform_cache_idle_exit (the --wrap), not in cpu_idle"
+        say "        **b1 is the pop's own pc word** (b0=[seam_sp] is the pushed fp, b1=[seam_sp+4] the"
+        say "        pushed lr, and pop {fp, pc} loads pc from [seam_sp+4]) - so a wrong b1 refutes the"
+        say "        frame, and this PASS does not clear the pop: all four words are read with SCTLR.C=0,"
+        say "        before Apple re-enables caching at 0x8004631c, and the pop runs after that with C=1."
+        say "        A stale line answering the pop's lookup is outside what this key can see"
       elif [[ -z $caller_lr ]]; then
         # **This test comes before the shape tests, and the first version had it after them**, which
         # made it unreachable: with no decoder `caller_lr` is empty and a `b1` that looks like kernel
