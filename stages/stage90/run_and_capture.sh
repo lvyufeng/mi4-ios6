@@ -298,6 +298,43 @@ summarise_log() {
                  "pc-sampling watchdog: rebooting after sample dump"
                  "platform_reboot entered")
 
+  # --- the log may not be there at all, and that is a state rather than a value ----------------
+  #
+  # **Measured on the live path (601), in the state the device is actually in.** `grep -c` on a
+  # missing file writes `grep: <path>: No such file or directory` to **stderr** and *nothing* to
+  # stdout, and the `|| true` that swallows its exit status does not swallow that message: this
+  # function used to emit **eleven** such lines, one per grep below, and then print
+  # `MI4IOS6_STAGE90 lines: ` with no number next to it - because `n` was the empty string and
+  # `[[ "" -eq 0 ]]` is **true**, so both `-eq 0` tests below were satisfied by a value that was
+  # never produced rather than by a count of zero. The consequences were not only cosmetic: the
+  # marker table printed seven blanks, and the `reading:` section printed
+  # `hardware watchdog: NOT confirmed armed` - a claim about the watchdog inferred from an absent
+  # file, which is the misattribution the `-eq 0` branch twelve lines down says in as many words
+  # that it must not make. `$LOGFILE` is absent right now, so this fires at step 1 of the next run,
+  # before anything has been booted, and it is the first thing the operator reads on the run that
+  # costs the press.
+  #
+  # The two states are named separately because they are different facts (588's rule): a path with
+  # no file behind it is not an empty log, and neither is a log that exists and cannot be read
+  # (511/512's ownership state). Both return **0**: this function's last statement was once
+  # `[[ ... ]] && say ...`, whose status-1-on-false made the *caller* exit under `set -e` before it
+  # booted anything (see the note on the `abort` test at the end of this function).
+  if [[ ! -e $log ]]; then
+    say "MI4IOS6_STAGE90 lines: NONE (no file at $log)"
+    say "NONE. There is no log at that path at all, so no line of it was counted and every count"
+    say "below is absent rather than zero: either nothing has written one yet (this run has not"
+    say "booted anything), or the path is wrong. An empty log is a file that exists - this is not"
+    say "that state, and it is not a reading of any log."
+    return 0
+  fi
+  if [[ ! -r $log ]]; then
+    say "MI4IOS6_STAGE90 lines: UNREAD (a file is there at $log and is not readable)"
+    say "UNREAD. The file exists and cannot be read, so nothing in it was counted - this is a"
+    say "permissions or ownership state (511/512) and not a reading. Read it as root:"
+    say "  sudo head -20 $log"
+    return 0
+  fi
+
   local n
   n=$(grep -a -c 'MI4IOS6_STAGE90' "$log" || true)
   say "MI4IOS6_STAGE90 lines: $n"
