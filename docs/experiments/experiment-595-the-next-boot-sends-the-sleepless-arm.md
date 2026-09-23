@@ -104,7 +104,7 @@ absence on this arm that is a deliberate silence (594 §5).
 | item | value |
 | --- | --- |
 | the boot | `fastboot boot out/stage90/stage90-qcdt.img` (`60063c47…`), which embeds the entry arm `696a0f39…` |
-| **rung 0 — did it die where every boot died?** | `xnu_live_door_seq` **strictly greater than `0x8000`**. Both archived logs end their series at exactly 16 records and `0x8000`, `xnu_live_capped` is absent from both, and neither publisher has a ceiling — so `0x8000` is *where the machine died*, not a bound, and a run that survives must publish the next powers of two. This rung is on `entry_note_idle`, entered on every pass, so it needs no thread progress |
+| **rung 0 — did it get past the last record every previous boot published?** | `xnu_live_door_seq` **strictly greater than `0x8000`**. Both archived logs end their series at exactly 16 records and `0x8000`, `xnu_live_capped` is absent from both, and neither publisher has a ceiling — so a run that survives must publish the next powers of two, and no baseline run reached `0x10000`. This rung is on `entry_note_idle`, entered on every pass, so it needs no thread progress. **The row read "did it die where every boot died" and named `0x8000` as *where the machine died*; 596 measured that false — 533's own capture runs on past that record for the whole remainder of the boot (see its correction), so `0x8000` is where the *publisher* last spoke. The test is unchanged** |
 | **rung 1 — did pid 1's thread run past the death point?** | `xnu_live_poll_seq` reaching **3** — `entry_note_poll` publishes `g_poll_calls + 1` only *after* `__real_poll` returns, the park is the third poll (the fixture's `SYS_POLL` sites are `+96`, `+116` and `+300`), and both parked logs stop at **2** (timeouts 5 ms and 40 ms) |
 | rung 1b | the largest `xnu_live_poll_timeout_ms` ≥ `ENTRY_PARK_MIN_MS` (1000, read out of `entry_trace.c`) |
 | second witness | the park's console group `mini4: the repair -- … called 0 time(s)` present — the baseline cannot print it at all (it is in neither 520 nor 533) |
@@ -141,8 +141,11 @@ artifact the run will send, and the gate is re-run after these edits rather than
 **(a) The door-count test was `>= 32768` and had to be `> 32768`.** As written it was satisfied by the
 baseline itself, so it printed a clearance for a number both arms reach. The measurement that fixes it is
 in §7's rung 0: two un-ceilinged powers-of-two publishers, 16 records ending at `0x8000` in both logs, and
-`xnu_live_capped` absent — so `0x8000` is *where the machine died*. The correction also promotes the key
-from guard to **witness**, because it is on the instrument entered on every pass.
+`xnu_live_capped` absent — so no baseline run reached the next power of two, `0x10000`. The correction
+also promotes the key from guard to **witness**, because it is on the instrument entered on every pass.
+(596 corrects the *sentence* this item first carried — "so `0x8000` is *where the machine died*" — which
+the archived log falsifies: 533's capture runs on past that record for the whole remainder of the boot.
+The threshold and the promotion both stand; only the description of what `0x8000` is changed.)
 
 **(b) The clause block had no `else`, and 520 lands in the gap.** Every branch was reached by *recognising*
 a log, so a log matching none was passed over in silence — the defect 564/593 name, and this time it was

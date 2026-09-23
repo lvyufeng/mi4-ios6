@@ -235,12 +235,22 @@ the baseline has exactly 1 (593 section 1).
 > (`entry_stubs.c`'s `entry_note_idle` and `entry_note_door`) write at **powers of two with no
 > ceiling** — there is no `0x8000` cap in either — and `xnu_live_capped` is absent from both archived
 > logs, so the live channel dropped nothing. Both logs therefore stop at **exactly 16 records ending at
-> `0x8000`**, and that is *where the machine died*, not what the publisher does. A run that survives
-> past that point publishes the next powers of two. So the test is **strictly greater**, and it is a
+> `0x8000`**. A run that survives past that point publishes the next powers of two. So the test is
+> **strictly greater**, and it is a
 > **witness** as well as a guard: `entry_note_idle` is entered on *every* pass, so it says "the first
 > arrival at the window did not happen" whether or not pid 1's thread ever runs again — which is
 > exactly the ambiguity 593 section 4 named. Rung 1 (the park's poll returning) is what decides whether
 > the *thread* also progressed, and only rung 1 sets the verdict.
+>
+> **Correction (596): `0x8000` is where the publisher last spoke, not where the machine died — the
+> sentence above said the second.** Measured on 533's capture, which is one uninterrupted run in
+> insertion order: the `door_seq=0x8000` record is at line 8133 and, after it, the same log carries
+> the fixture's own `poll_seq=2`, `read`, control `open`, `exit`, `wait_done`, then the park's
+> `repair_seq=1`, `sip_seq=1`, `pce_seq=1`, `wfi_seq=1` and finally the fatal `sleh`, through line
+> 8363. So both baselines **lived on past `0x8000` for the whole remainder of the boot** and died
+> below the next power of two. The test does not change — reaching `0x10000` passes is still what no
+> baseline run did — but the *claim* was falsified by the same log that supplied the number, and a
+> reader sent to "where the machine died" would be sent to the wrong record.
 >
 > **And the clause had no `else`.** Every branch was reached by *recognising* a log, so a log matching
 > none of them was passed over in silence — and this is not hypothetical: **520, half of this project's

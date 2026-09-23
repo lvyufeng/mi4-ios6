@@ -404,6 +404,27 @@ summarise_log() {
     printf '%s' "$m"
   }
 
+  # **A key's occurrences in the order the log published them, one per line - and why the two readers
+  # above cannot answer this.** `keyval` takes the last and `maxhex` the largest; both collapse a
+  # key's history to a single value, which is right for a counter and wrong for a *pair of calls*.
+  # The fixture's own driver reading is exactly such a pair: `entry_ramdisk.s` opens `/dev/rmd0` and
+  # then `/dev/nosuch` as its control, and 504 states the criterion in its own words - "a pair of
+  # opens whose second is also answered positively would mean the first told us nothing; a pair in
+  # which both fail would mean the path shape is wrong rather than the driver missing". A reader that
+  # reports one `xnu_live_open_error` reports the **control's** - it is published second, so `keyval`
+  # takes it - while claiming to report the driver's. That is 558's defect ("the number was right and
+  # the question was wrong") in a third place, and the repair is the same: ask the question the pair
+  # asks. `|| true` is load-bearing here for the reason `keyval`'s note gives - the script runs under
+  # `pipefail`, so an absent key makes `grep` exit 1 and `set -e` would kill the caller mid-function.
+  #
+  # **That the values come back in *insertion* order is measured, not assumed** - it is the one
+  # property this reader rests on. 533's capture runs its records as `poll_seq=1`, `door_seq=0x8000`,
+  # `poll_seq=2`, `read`, `open` (the control), `exit`, `wait`, `wait_done`, then the park's
+  # `repair_seq=1`, `sip_seq=1`, `pce_seq=1`, `wfi_seq=1` and finally the fatal `sleh` - which is the
+  # fixture's own program order (`+96`, `+116`, `+140`, `+156`, `+176`, `+188`, `+212`, `+232`,
+  # `+276`, `+300`) followed by 593's causal chain, in one uninterrupted run at the end of the file.
+  ordered() { grep -ao "xnu_live_$1=0x[0-9a-f]*" "$log" 2>/dev/null | sed 's/^[^=]*=//' || true; }
+
   # **594 widened this gate, because the arm it registers has no `slot_cwe_` keys at all - and the
   # gate is the whole block.** The switch skips 514's repair, so `SIGPdisabled` stays set, `cpu_idle`
   # leaves by its first door on every pass, and `platform_cache_idle_enter` / `_wfi` / `_exit` are
@@ -493,11 +514,21 @@ summarise_log() {
     # (`entry_stubs.c`'s `entry_note_idle` and `entry_note_door`) write at powers of two with **no
     # ceiling**: there is no `0x8000` cap in either, and `xnu_live_capped` is absent from both
     # archived logs, so the live channel never dropped a record. Both logs therefore stop at
-    # **exactly 16 records ending at `0x8000`**, and that is not what the publisher does - it is
-    # *where the machine died*. A run that survives past that point publishes the next powers of two
-    # and nothing has to be assumed to say so.
+    # **exactly 16 records ending at `0x8000`**. A run that survives past that point publishes the
+    # next powers of two and nothing has to be assumed to say so.
     #
-    # So this is a **witness and not only a guard**, and it is the one that does not need the park's
+    # **`0x8000` is where the publisher last spoke, not where the machine died - and the earlier
+    # wording said the second.** Measured on 533's capture, which is one uninterrupted run in
+    # insertion order: the `door_seq=0x8000` record sits at line 8133 and the fixture's own
+    # `poll_seq=2`, `read`, `open` (the control), `exit`, `wait_done`, the park's `repair_seq=1`,
+    # `sip_seq=1`, `pce_seq=1`, `wfi_seq=1` and the fatal `sleh` all follow it, through line 8363.
+    # So both baselines **lived on past `0x8000` for the whole remainder of the boot** and died
+    # before reaching the next power of two. The test is unchanged - reaching `0x10000` passes is
+    # still the thing no baseline run did - but the claim that `0x8000` *is* the death point is
+    # falsified by the same log that supplied the number, and a reader sent to "where the machine
+    # died" would look at the wrong record.
+    #
+    # It is a **witness and not only a guard**, and it is the one that does not need the park's
     # poll to return: `entry_note_idle` is entered on *every* pass, so a machine whose idle is
     # spinning past 32768 passes says so whether or not pid 1's thread ever runs again. That is
     # exactly the ambiguity 593 section 4 named - a live spin looks like a working kernel from
@@ -506,19 +537,24 @@ summarise_log() {
     # baseline satisfies it, and this clause printed a clearance for a number its own baseline
     # reaches ([[mi4-measurement-defects]]).
     if [[ -n $door_max ]] && (( door_max > 32768 )); then
-      say "  PASS  and it went past where every previous boot stopped: 520 and 533 both end their"
-      say "        series at exactly 0x8000 (16 records, and xnu_live_capped absent, so nothing was"
-      say "        dropped), which is where the machine died and not a bound in the publisher. This"
-      say "        run published further, so the pass that killed every boot before it - the first"
-      say "        arrival at the window, 593 - did not happen"
+      say "  PASS  and it went past the last record every previous boot published: 520 and 533 both"
+      say "        end their series at exactly 0x8000 (16 records, and xnu_live_capped absent, so"
+      say "        nothing was dropped). That is where the *publisher* last spoke and not where the"
+      say "        machine died - 533's own capture shows the baseline running on past it, through"
+      say "        the fixture's own waits and the park's repair, sip, pce and wfi, before the fatal"
+      say "        sleh. So this run reaching the *next* power of two is the pass that killed every"
+      say "        boot before it - the first arrival at the window, 593 - not having happened"
     elif [[ -n $door_max ]]; then
-      say "  FAIL  and it stops at or below 0x8000, which is exactly where 520 and 533 stop: the"
-      say "        series ending there is this project's measurement of *where the boot died*, not a"
-      say "        bound (the publisher is powers-of-two with no ceiling and neither log is capped)."
-      say "        So this run did not get past 32768 passes and the arm's own reading is not in it -"
-      say "        check the gate's signature before reading anything below as this arm. **And if"
-      say "        rung 1 below passes anyway the two disagree, which is itself the reading**: the"
-      say "        park is the third poll and cannot return on a machine that never reached 32768"
+      say "  FAIL  and it stops at or below 0x8000, the last record 520 and 533 publish: the"
+      say "        publisher is powers-of-two with no ceiling and neither log is capped, so a machine"
+      say "        that reached 65536 passes would have published 0x10000 and this one did not. (It"
+      say "        is a threshold and not a death point: the baselines went on past 0x8000 - 533's"
+      say "        capture shows the whole userland phase after it - and died below the next power of"
+      say "        two.) So this run did not get past 32768 passes and the arm's own reading is not"
+      say "        in it - check the gate's signature before reading anything below as this arm."
+      say "        **And if rung 1 below passes anyway the two disagree, which is itself the"
+      say "        reading**: the park is the third poll and cannot return on a machine that never"
+      say "        reached 32768"
     else
       say "  UNREAD  xnu_live_door_seq is absent, and that is the one thing this arm cannot make"
       say "        absent: entry_note_idle is entered on every pass and publishes this key from the"
@@ -1390,6 +1426,114 @@ summarise_log() {
     say "          that is a different fault from either arm's, which is why it is named here"
     verdict_ok=0
   fi
+
+  # ---------------------------------------------------------------------------------------------
+  # The goal's own criterion: did the OS reach user mode, and did a driver answer it?
+  # ---------------------------------------------------------------------------------------------
+  #
+  # **Every clause above scores the arm against the death point. This one scores it against the
+  # goal.** 「起码要能进入操作系统，把基础驱动跑起来」 is a statement about a boot that reaches user
+  # mode and about a driver answering a call made from it - and this project has had that reading in
+  # hand since 504, which is where `entry_ramdisk.s`'s own header records it: the wrapper publishes
+  # the word at the read's buffer *either side* of the call, so the pair says the driver moved
+  # `MH_MAGIC` into a page whose previous content was the address `mmap` returned, and the control
+  # open answers `ENOENT`. What did not exist until now is the reader: a grep for `xnu_live_open` in
+  # this file returned **nothing**, so the one reading the goal actually asks for would have sat
+  # unread in the same log the operator was handed. The gap was never that the evidence was missing.
+  #
+  # **It sits outside the arm branch on purpose.** The userland phase precedes the pop, so these keys
+  # are published by both arms and by every archived baseline; a block inside a branch would be silent
+  # for exactly the logs most likely to matter. That is 564's defect and 594's missing `else` one
+  # layer out, and the cheap way not to repeat it is not to gate it.
+  #
+  # **And what it prints is a FLOOR, not progress.** All of it is in 520 and 533 - the whole userland
+  # phase happens before the death - so a run has to *lose* these readings to be a regression, and
+  # having them is not evidence that the boot got further than any boot has. The sentence that has to
+  # survive into the report is the one naming the ceiling: what nobody has yet observed is the
+  # machine *staying* up.
+  local g_open_n g_read_n g_getpid_n g_exit_n g_wait_n g_ast_n
+  local g_open_err g_open1 g_open2 g_read_ret g_read_nb g_read_before g_read_after g_read_buf
+  local g_getpid_val g_exit_pid g_exit_rval g_wait_done g_wait_status g_wait_err
+  local g_magic="" g_driver=0 g_pair=0
+  g_open_n=$(ordered open_seq | grep -c . || true)
+  g_read_n=$(ordered read_seq | grep -c . || true)
+  g_getpid_n=$(ordered getpid_seq | grep -c . || true)
+  g_exit_n=$(ordered exit_seq | grep -c . || true)
+  g_wait_n=$(ordered wait_seq | grep -c . || true)
+  g_ast_n=$(ordered ast_seq | grep -c . || true)
+  # The pair, kept apart: the *first* open is the driver's, the second is 504's control, and a reader
+  # that takes one of them answers about the control while claiming to answer about the driver.
+  g_open_err=$(ordered open_error | tr '\n' ' ' || true)
+  g_open1=$(ordered open_error | sed -n '1p' || true)
+  g_open2=$(ordered open_error | sed -n '2p' || true)
+  g_read_ret=$(ordered read_ret_lo | sed -n '1p' || true)
+  g_read_nb=$(ordered read_nbytes | sed -n '1p' || true)
+  g_read_before=$(ordered read_word_before | sed -n '1p' || true)
+  g_read_after=$(ordered read_word_after | sed -n '1p' || true)
+  g_read_buf=$(ordered read_buf | sed -n '1p' || true)
+  g_getpid_val=$(ordered getpid_value | sed -n '1p' || true)
+  g_exit_pid=$(ordered exit_pid | sed -n '1p' || true)
+  g_exit_rval=$(ordered exit_rval | sed -n '1p' || true)
+  g_wait_done=$(maxhex wait_done_seq)
+  g_wait_status=$(ordered wait_status | sed -n '1p' || true)
+  g_wait_err=$(ordered wait_error | sed -n '1p' || true)
+  # The magic comes out of the fixture rather than being written here again - the same rule rung 1b
+  # follows for `ENTRY_PARK_MIN_MS`. `entry_note_read`'s pair is only a reading *against* a known
+  # value, and a second copy of that value in this file is the defect this project has paid for most
+  # often. Unreadable means the comparison cannot be made, which is printed as such.
+  if [[ -r $REPO_ROOT/stages/stage90/xnu_arm_boot/entry_ramdisk.s ]]; then
+    g_magic=$(sed -n 's/^[[:space:]]*\.equ[[:space:]]\+MH_MAGIC,[[:space:]]*\(0x[0-9a-fA-F]*\).*/\1/p' \
+               "$REPO_ROOT/stages/stage90/xnu_arm_boot/entry_ramdisk.s" | head -1 || true)
+  fi
+  if [[ -n $g_open1 && -n $g_open2 ]] \
+     && (( 16#${g_open1#0x} == 0 )) && (( 16#${g_open2#0x} != 0 )); then
+    g_pair=1
+  fi
+  if (( g_pair == 1 )) && [[ -n $g_read_ret && -n $g_read_nb ]] \
+     && (( 16#${g_read_ret#0x} == 16#${g_read_nb#0x} )) \
+     && [[ -n $g_read_after && -n $g_magic ]] \
+     && (( 16#${g_read_after#0x} == 16#${g_magic#0x} )); then
+    g_driver=1
+  fi
+
+  say ""
+  say "  ---- the goal's own criterion: user mode reached, and a driver answering ----"
+  say "    open    ${g_open_n} call(s), error in call order: ${g_open_err:-absent}"
+  say "    read    ${g_read_n} call(s), ret_lo=${g_read_ret:-absent} of nbytes=${g_read_nb:-absent};"
+  say "            buffer ${g_read_buf:-absent} held ${g_read_before:-absent} when the call was made"
+  say "            and ${g_read_after:-absent} after it (the fixture's MH_MAGIC is ${g_magic:-unread})"
+  say "    getpid  ${g_getpid_n} call(s), value ${g_getpid_val:-absent}"
+  say "    exit    ${g_exit_n} call(s), pid ${g_exit_pid:-absent}, rval ${g_exit_rval:-absent}"
+  say "    wait    ${g_wait_n} call(s), reaped at done_seq ${g_wait_done}, status"
+  say "            ${g_wait_status:-absent}, error ${g_wait_err:-absent}"
+  say "    ast     ${g_ast_n} record(s) - the kernel taking a user thread's AST and putting it back"
+
+  if (( g_driver == 1 )); then
+    say "  PASS  and this is 504's reading re-read here, in the log of a boot that got this far: the"
+    say "        first open was answered by a driver (error ${g_open1}) while 504's control open was"
+    say "        not (error ${g_open2}, the ENOENT a name devfs has no node for returns), and the"
+    say "        read came back with ${g_read_ret} byte(s) whose first word is now ${g_read_after},"
+    say "        the fixture's own magic - so a character device's read moved data into a user page."
+    say "        **And it is the floor, not this run's progress**: all of it is in 520 and 533 too,"
+    say "        because the whole userland phase happens before the death. Losing it would be a"
+    say "        regression; having it says only that the OS still boots to pid 1's syscalls."
+  elif (( g_open_n > 0 || g_read_n > 0 || g_getpid_n > 0 )); then
+    say "  FAIL  and the log has user-mode syscalls but not 504's reading of them, so one of the"
+    say "        three links is broken: the driver's open did not answer 0, the control answered 0"
+    say "        as well (which would mean the first told us nothing), or the read did not leave"
+    say "        ${g_magic:-the magic the fixture defines} in the buffer. Read the four values"
+    say "        above against each other before concluding which - 504 names the three cases and"
+    say "        they are not the same fault"
+  else
+    say "  UNREAD  and none of the fixture's own syscalls is in this log, so the goal's first half"
+    say "        is not read here at all. It is not a FAIL: the same absence is what a log truncated"
+    say "        before userland looks like, and the keys are published unconditionally for the first"
+    say "        four calls of each - so check the AST record and the OS console text (the boot's own"
+    say "        exec of /sbin/launchd) before reading this as a boot that never got to user mode"
+  fi
+  say "  ---- and this criterion does not decide whether the machine stayed up. Every reading ----"
+  say "  ---- above is a floor that 520 and 533 also meet; the ceiling is the arm's own clause, ----"
+  say "  ---- and the run that matters is the one whose log has both. ---------------------------"
 }
 
 if [[ -n $SUMMARISE_ONLY ]]; then
