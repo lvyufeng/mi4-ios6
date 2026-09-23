@@ -49,6 +49,61 @@ done
 
 fail() { echo "REFUSING: $*" >&2; exit 1; }
 
+# This file's exit codes are meant to be total: 0 = green, 1 = a refusal printed above, 2 = the argument
+# parser above and nothing else. `set -e` made that false. Under it an unguarded command that failed ended
+# the script with **that command's own status**, so `exit 2` had two producers - and the one an operator is
+# taught to read ("unknown argument") could equally mean a tool that could not READ an artifact. Measured:
+# the entry record present with mode 000 gives `awk: fatal: cannot open file ... Permission denied` (status
+# 2) straight through the `[[ -n $recorded_sha ]]` guard on the next line, with no REFUSING line and no
+# section named. That is the defect this gate exists to catch in other files, arriving in this one: the
+# rule here is "read a red gate by which section refused", and a bare tool status has no section - so a red
+# gate whose only line is a tool's error cannot be read at all. It is 573's `UNREAD` line printed inside an
+# `EXIT=0` run, one layer up: a status that does not carry its own reading. 580 named the same shape on the
+# runner's side (`grep -c` prints 0 for input it never read); here the status is passed through rather than
+# zeroed, and the repair is the same in kind - make the carrier say which reading it is.
+#
+# So every failure that reaches `set -e` is restated as this file's own refusal, naming the command that
+# failed (most of them carry the path they could not read). `fail` is unaffected: it is the command
+# following the final `||`, so its `exit` raises no ERR - and neither does the argument parser's `exit 2`.
+# Both guarded idioms this file leans on (`cmd || true`, and a test in an `if`) are outside ERR by the same
+# rule, so a read that succeeded cannot reach this line.
+_errtrap() {
+  local st=$?
+  echo "REFUSING: the gate stopped with status $st at line $1, before any verdict; the command that failed was:" >&2
+  echo "          $2" >&2
+  echo "          That is the gate failing to READ something - not a finding about the artifact, and not the" >&2
+  echo "          argument parser (the only exit 2). The last reading that completed is the one printed above" >&2
+  echo "          this line; nothing below it was judged. Check that the path named above is readable." >&2
+  exit 1
+}
+trap '_errtrap "$LINENO" "$BASH_COMMAND"' ERR
+
+# Every artifact this gate draws a verdict from is opened by a *tool* below - cat, sed, awk, cmp, nm,
+# sha256sum, the entry-blob python, the disassembler - and `[[ -f ]]` is true for a path this process
+# cannot open (mode 000, another owner, a directory wearing the file's name). Measured on three of these
+# paths, three different clauses answered an unreadable input three different ways: the entry record gave
+# `awk`'s status 2, the build config gave `cat`'s status 1 with no refusal line at all, and the entry image
+# gave the *entry-blob comparison's* verdict - "the image does not carry the arm ... byte for byte" - which
+# is a finding about the artifact produced by a read that never happened, the defect class this project
+# keeps meeting. So readability is checked where existence is checked. This list is the set of artifacts
+# the gate *knows* it reads, and it is deliberately not the invariant: `_errtrap` above is, for the log,
+# the fixture, the decoder and anything added later. And the entry ELF is deliberately not in this list -
+# its unreadability is 579's four-way UNREAD, which is non-fatal by design, because that clause runs last
+# and everything above it has already been judged.
+_readable() {  # _readable <path> <what the gate reads out of it>
+  # The `-e` branch is what the checksum list needs (it has no `-f` guard of its own, because the command
+  # that reads it - `sha256sum -c` - used to be the thing that reported it, as "the image does not match
+  # SHA256SUMS.txt", which is a finding about the image produced by a missing list); for the seven sites
+  # that already have a `[[ -f ]]` guard above it, this branch is unreachable and the message is theirs.
+  [[ -e $1 ]] || fail "no $1 - $2"
+  # `-L`: GNU stat does not dereference by default, and `out/` uses symlinks, so without it this message
+  # would print the *link's* mode (777) while the tools open the target - one value, two definitions, in
+  # the line that exists to report a read that could not happen. And the leaf's mode is not the whole
+  # answer (a parent directory or an ACL can deny the open with the leaf at 644), so the message says which
+  # fact it is giving rather than implying it is the cause.
+  [[ -r $1 ]] || fail "$1 exists but this gate cannot read it; the file's own mode is $(stat -Lc '%04a' "$1" 2>/dev/null || echo '?') (octal, the form chmod takes) and its owner $(stat -Lc '%U' "$1" 2>/dev/null || echo '?'), which is the leaf's fact only - a parent directory or an ACL can deny the open with these at their normal values. $2. A clause whose input could not be opened has no verdict about the artifact, so it stops here instead of reporting one; fix the permissions and re-run"
+}
+
 # The tools this gate calls. PYTHON is configurable for the same reason build.sh's is -
 # the host may have python3 under another name.
 PYTHON=${PYTHON:-python3}
@@ -57,7 +112,9 @@ CONFIG=$OUT/stage90-build-config.txt
 IMAGE=$OUT/stage90-qcdt.img
 
 [[ -f $CONFIG ]] || fail "no $CONFIG - run ./build.sh first to record the build switches"
+_readable "$CONFIG" "the build switches every clause below narrates are read out of it"
 [[ -f $IMAGE  ]] || fail "no $IMAGE - run ./build.sh first"
+_readable "$IMAGE" "the boot image is what the entry-blob comparison and the string scans read"
 
 echo "== build configuration =="
 cat "$CONFIG"
@@ -78,6 +135,7 @@ FAULT_INJECT=$(value_of STAGE90_HANDOFF_FAULT_INJECT_VA)
 
 echo
 echo "== image integrity =="
+_readable "$OUT/SHA256SUMS.txt" "every artifact this run will load is checked against its hashes"
 ( cd "$OUT" && sha256sum -c SHA256SUMS.txt ) || fail "image does not match SHA256SUMS.txt; rebuild before booting"
 echo "sha256 verified against $OUT/SHA256SUMS.txt"
 # **The hash, computed here rather than written into the prose below, and 520 is why.** 519c's edit put
@@ -214,8 +272,11 @@ ENTRY_BIN=$OUT/xnu_arm_entry.bin
 PAYLOAD_BIN=$OUT/stage90.bin
 PAYLOAD_ELF=$OUT/stage90.elf
 [[ -f $ENTRY_BIN   ]] || fail "no $ENTRY_BIN - the payload embeds the entry image; run ./build.sh"
+_readable "$ENTRY_BIN" "the blob the payload must carry is read out of it"
 [[ -f $PAYLOAD_BIN ]] || fail "no $PAYLOAD_BIN - run ./build.sh"
+_readable "$PAYLOAD_BIN" "the blob's offset inside it is searched for in its bytes"
 [[ -f $PAYLOAD_ELF ]] || fail "no $PAYLOAD_ELF - run ./build.sh"
+_readable "$PAYLOAD_ELF" "the blob's offset and length are read out of its symbol table"
 # `set -euo pipefail` is on, so a missing tool would abort the assignment below and leave the script
 # *before* the `fail` - a refusal with no reason, which is the same defect as the `[[ ... ]] &&` above.
 command -v "$STAGE90_NM" >/dev/null 2>&1 \
@@ -328,6 +389,7 @@ echo "== the entry image's own switches =="
 ENTRY_CFG=$OUT/xnu_arm_entry-config.txt
 [[ -f $ENTRY_CFG ]] \
   || fail "no $ENTRY_CFG - the entry image's switches are recorded there by build_entry.sh, and without it this gate can prove which bytes the image carries but not which arm they are; rebuild the entry image (stages/stage90/xnu_arm_boot/build_entry.sh) and then ./build.sh"
+_readable "$ENTRY_CFG" "which arm this image is, and the thirteen switches it was built with, are read out of it"
 recorded_sha=$(awk -F= '$1 == "STAGE90_XNU_ENTRY_SHA256" { print $2 }' "$ENTRY_CFG")
 [[ -n $recorded_sha ]] \
   || fail "$ENTRY_CFG has no STAGE90_XNU_ENTRY_SHA256 line - a record that names no artifact is a note, not a reading"
@@ -622,6 +684,7 @@ echo "== the entry image's own sources =="
 ENTRY_SRC_MANIFEST=$OUT/xnu_arm_entry-sources.txt
 [[ -f $ENTRY_SRC_MANIFEST ]] \
   || fail "no $ENTRY_SRC_MANIFEST - build_entry.sh writes it beside the image, and without it nothing compares the entry image with the sources it claims to be built from. Rebuild the entry image (stages/stage90/xnu_arm_boot/build_entry.sh)"
+_readable "$ENTRY_SRC_MANIFEST" "the list of sources this entry image claims to be built from is read out of it"
 manifest_sha=$(awk -F= '$1 == "STAGE90_XNU_ENTRY_SHA256" { print $2 }' "$ENTRY_SRC_MANIFEST")
 [[ -n $manifest_sha ]] \
   || fail "$ENTRY_SRC_MANIFEST has no STAGE90_XNU_ENTRY_SHA256 line - a manifest bound to no artifact can be satisfied by any content"
