@@ -28665,6 +28665,49 @@ verify_trace_symbols() {
             seam_reads=$(awk '/^[[:space:]]*[0-9a-f]+:/ && $3 == "ldr" { n++ } END { printf "%d", n + 0 }' <<<"$seam_body_dis")
             [[ "${seam_reads:-0}" -ge 2 ]] ||
                 layout_fail "entry_seam_flush has ${seam_reads:-0} load(s) in the measurement arm: the two words of the slot read before Apple's own flush and again after it are the arm's whole content, so fewer than two means the body cannot produce the pair the reader's clause (5) interprets"
+            # **The third part of the safety claim, and the one clause (5) alone could not make: the
+            # body does not WRITE the slot.** The claim this arm is booted on is that it cannot change
+            # what the machine does, and the operation's absence and the absence of coprocessor
+            # instructions are only half of it - a store to the slot would write memory the `pop` is
+            # about to read, which is the very object 546's mechanism is about. So the slot's register
+            # is identified *from the body* (a register used as a load base with both offset 0 and
+            # offset 4, plus anything `mov`ed from it) and no store may use it as a base.
+            #
+            # Measured on both arms rather than asserted: this image has 2 slot register(s) and 0
+            # store(s) to them, while 535's parked body (`out/stage90/captures/535-xnu_arm_entry.elf`,
+            # same registers) carries the two restore stores at `8047ca74`/`8047ca78` and this same
+            # awk finds them. So the check can fail, and it fails on the arm that is supposed to.
+            read -r seam_slotregs seam_slotstores <<<"$(awk '
+                { lines[NR] = $0 }
+                END {
+                    for (i = 1; i <= NR; i++) { line = lines[i]
+                        if (line !~ /ldr/) continue
+                        if (line ~ /\[ *sp/) continue
+                        if (match(line, /\[ *r[0-9]+ *\]/)) { t = substr(line, RSTART, RLENGTH); sub(/^\[ *r/, "", t); sub(/[^0-9].*/, "", t); b0[t] = 1 }
+                        if (match(line, /\[ *r[0-9]+ *, *#4 *\]/)) { t = substr(line, RSTART, RLENGTH); sub(/^\[ *r/, "", t); sub(/[^0-9].*/, "", t); b4[t] = 1 }
+                    }
+                    for (k in b0) if (k in b4) S[k] = 1
+                    for (pass = 0; pass < 4; pass++)
+                        for (i = 1; i <= NR; i++) { line = lines[i]
+                            if (match(line, /mov +r[0-9]+, *r[0-9]+ *$/)) {
+                                d = line; sub(/.*mov +r/, "", d); sub(/,.*/, "", d)
+                                s = line; sub(/.*, *r/, "", s); sub(/ *$/, "", s)
+                                if (s in S) S[d] = 1
+                            }
+                        }
+                    cnt = 0; for (k in S) cnt++
+                    for (i = 1; i <= NR; i++) { line = lines[i]
+                        if (line !~ /st(r|rd|m|rb|rh)/) continue
+                        if (!match(line, /\[ *r[0-9]+/)) continue
+                        t = substr(line, RSTART, RLENGTH); sub(/^\[ *r/, "", t); sub(/[^0-9].*/, "", t)
+                        if (t in S) hits++
+                    }
+                    printf "%d %d", cnt, hits + 0
+                }' <<<"$seam_body_dis")"
+            [[ "${seam_slotregs:-0}" -ge 1 ]] ||
+                layout_fail "this clause could not identify the slot's register in entry_seam_flush (a register used as a load base at both offset 0 and offset 4): the arm's two reads are of the slot and the reads are its whole content, so a body in which they cannot be located is a body whose stores cannot be checked - and the check below would pass by finding nothing"
+            [[ "${seam_slotstores:-1}" == 0 ]] ||
+                layout_fail "entry_seam_flush stores to the frame slot ${seam_slotstores} time(s) in the measurement arm: that arm's whole claim is that it cannot change what the machine does, and a store to the slot writes the two words the exit's pop is about to read - the object 546's mechanism is about - so an image carrying it is the operation arm wearing this one's name. (535's arm stores there twice on purpose - the restore - and this same awk finds both on its parked body; this clause is the difference between the two bodies.)"
         fi
         # The body's calls to Apple's routine, and the *aliasing* is why this counts `b` as well as
         # `bl`: `__real_FlushPoU_Dcache` and `FlushPoU_Dcache` are one address, so the pass-through's

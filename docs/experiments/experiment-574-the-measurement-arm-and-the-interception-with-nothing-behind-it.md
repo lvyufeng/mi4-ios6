@@ -36,7 +36,12 @@ properties of the image:
 - **>= 2 loads** - the pair is the arm's whole content, so a body that could not produce it is not this
   arm.
 
-**What is not asserted from the image, named rather than left implicit: that the body contains no store
+**(577 update: this paragraph is now out of date - the store IS asserted, at build time, by
+identifying the slot's registers from the body itself and refusing any store that uses one. Measured on
+both parked arms: this image 2 slot register(s) / 0 stores to them, 535's body the same registers and 2
+stores - the falsification. See `experiment-577-*.md`.)**
+
+**What 574 did not assert from the image, named rather than left implicit: that the body contains no store
 to the slot.** The restore lives inside `#if STAGE90_XNU_SEAM_POC`, so with the switch at 0 the compiler
 has no such store to emit - but the clause counts instructions, and a *store* is not distinguishable from
 the frame's own pushes and the live-channel writes by opcode alone. The residual risk is nil in effect
