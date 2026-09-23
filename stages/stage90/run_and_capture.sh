@@ -27,8 +27,11 @@
 #      or the host could not READ its own USB log to compare (dmesg returned nothing, so the
 #      run has no reading of the device at all: 2026-09-23), or `fastboot devices` never
 #      settled to this phone alone (618 - **nothing was booted**, and the phone is still in
-#      fastboot, so this refusal costs no press). All of these are host-side or host-list
-#      failures that say nothing about the device, which is why they share a code.
+#      fastboot, so this refusal costs no press), or adb lists the device in a state adbd
+#      cannot be commanded through (619 - `unauthorized`, `offline`, ... - again **nothing
+#      was sent**, and the message names the state so the operator knows what to do). All of
+#      these are host-side, host-list or device-state failures that say nothing about what
+#      the payload would have done, which is why they share a code.
 #   2  the payload ran and the device did NOT come back - a manual power press is needed
 #      (the log will not survive a power cycle, so this is also a lost run). Also the code a
 #      *fall* in the host log's enumeration count is reported as (the ring buffer rotating):
@@ -446,6 +449,37 @@ fastboot_list_count() {
   local n
   n=$(printf '%s\n' "$1" | grep -c . || true)
   printf '%s' "${n:-0}"
+}
+
+# --- what adb says the device's STATE is - a different question from whether adb lists it ---------
+#
+# `adb devices` prints `SERIAL<TAB>STATE`, and the state is not decoration: `adb -s X reboot bootloader`
+# only works from a state where adbd is up and willing. Until 619 the caller tested the serial alone
+# (`grep -q "^$SERIAL"`), which matches field 1 and therefore **every** state column - measured over all
+# of them on this host: `device`, `unauthorized`, `offline`, `no permissions`, `sideload`, `recovery`
+# and `bootloader` **all match**. So the branch that needs a usable device was entered on a listing that
+# only proved presence.
+#
+# The consequence is not theoretical. From `unauthorized` (the host's key has not been accepted on the
+# device - after a wipe, or a `rm /data/misc/adb/adb_keys`) the reboot fails, the 30-poll wait for
+# fastboot expires, and the run ends at `die "device did not appear in fastboot"` - **exit 1, having sent
+# nothing, with a press spent**. From `offline` it is the same failure in transient form, and `offline`
+# is a race rather than a state: adb can report it for minutes while Android is up and adbd is wedged.
+#
+# So the reader returns the state and the caller decides. It returns **nothing** when adb cannot be read
+# at all or does not list the serial - the same UNREAD convention the host-log readers use, and for the
+# same reason the file's own `serial_enum_count` note gives: a failed read and a read of "not there" must
+# not be one value.
+#
+# **`recovery` counts as usable and `sideload` does not**, which is a choice rather than a fact about
+# adb: `reboot bootloader` is a command any adbd that is rooted and running will accept, and TWRP's adbd
+# answers it, while sideload mode's adbd serves exactly one command and is not one this file sends.
+adb_state() {
+  local out
+  out=$(sudo adb devices 2>/dev/null) || return 0
+  [[ -n $out ]] || return 0
+  printf '%s\n' "$out" | awk -v s="$SERIAL" '$1 == s { print $2; exit }'
+  return 0
 }
 
 summarise_log() {
@@ -2162,15 +2196,35 @@ step "device"
 if [[ $DRY_RUN -eq 1 ]]; then
   say "would look for serial $SERIAL via adb or fastboot"
 else
-  if sudo adb devices 2>/dev/null | grep -q "^$SERIAL"; then
+  # **Four questions, in an order with no unreachable branch** - the 616 lesson, applied to a different
+  # predicate. (1) adb lists it AND its state is one adbd can be commanded through -> the adb path. (2)
+  # fastboot lists it -> the fastboot path. (3) adb lists it in a state adbd cannot be commanded through
+  # AND fastboot does not have it -> a message that **names the state and says what to do about it**.
+  # (4) neither -> the dark-device message. Every one of the four is reachable, and (3) is the one 619
+  # adds: before it, that state fell into (1) and died sixty seconds later with a message about fastboot.
+  #
+  # **fastboot is asked before the bad-state message, and that order is deliberate.** It used to be that
+  # a serial cannot be in adb and fastboot at once, so asking adb first could not mask a fastboot listing
+  # - but "cannot" here rests on the two modes being exclusive, which is a fact about USB and not about
+  # this script, and a branch that only survives because of a fact it does not check is the shape this
+  # file keeps paying for. Asking fastboot second costs one command and removes the assumption.
+  ADB_STATE=$(adb_state)
+  if [[ $ADB_STATE == device || $ADB_STATE == recovery ]]; then
     MODE=adb
   elif sudo fastboot devices 2>/dev/null | grep -q "^$SERIAL"; then
     MODE=fastboot
+  elif [[ -n $ADB_STATE ]]; then
+    die "serial $SERIAL is listed by adb, but its state is '$ADB_STATE' - not 'device' or
+       'recovery' - so adb cannot be commanded through it, and fastboot does not list it
+       either. **Nothing was sent.** If the state is 'unauthorized', the host's key is not
+       accepted on the device: accept the RSA prompt on its screen, then re-run. If it is
+       'offline', adbd is wedged: wait, or power press. If it is 'no permissions', this
+       host is missing its udev rule. If it is 'sideload', the device is in adb sideload."
   else
     die "serial $SERIAL not found in adb or fastboot. If the device is dark, it needs a
        power press: hold Power ~10-15 s, release, then press Power normally."
   fi
-  say "found $SERIAL in $MODE"
+  say "found $SERIAL in $MODE (adb state: ${ADB_STATE:-unlisted})"
 fi
 
 # --- 2b. park the log that is on disk, because it is the PREVIOUS run's ------------------
@@ -2236,7 +2290,16 @@ step "boot"
 say "sudo adb -s $SERIAL reboot bootloader   # then fastboot boot, never flash"
 if [[ $DRY_RUN -eq 0 ]]; then
   if [[ $MODE == adb ]]; then
-    sudo adb -s "$SERIAL" reboot bootloader
+    # **The `||` is not decoration: without it, a failing `adb` aborts the script under `set -e` and the
+    # exit code the operator sees is adb's own**, for which this file's contract has no clause - the
+    # defect `mi4-a-status-is-a-verdict-only-if-its-producer-delivered-one` records. The state check
+    # above means this should now be unreachable from `unauthorized`/`offline`, but "should be
+    # unreachable" is what the check is, not a proof about adb, and a run that ends on a foreign status
+    # says nothing about the device. `die` gives exit 1 with a sentence, which is what the contract
+    # documents for a host-side failure.
+    sudo adb -s "$SERIAL" reboot bootloader \
+      || die "adb could not command $SERIAL (state '$ADB_STATE') to reboot into the bootloader.
+       **Nothing was booted.** The device is where it was; re-run, or check \`sudo adb devices\`."
     for _ in $(seq 1 30); do
       sudo fastboot devices 2>/dev/null | grep -q "^$SERIAL" && break
       sleep 2
@@ -2369,6 +2432,13 @@ if [[ $DRY_RUN -eq 0 ]]; then
   [[ $ENUM_BEFORE == UNREAD ]] && say "(the host log is unreadable here, so only adb can speak)"
   [[ $PORT_BEFORE == UNREAD ]] && say "(the phone's port is not in the log, so the port reading is absent rather than zero)"
   for _ in $(seq 1 $((RETURN_TIMEOUT / 3))); do
+    # **The serial alone, and 619 deliberately does NOT tighten this one.** The question here is "did
+    # the device come back", not "can adb command it", and a device listed `unauthorized` or `offline`
+    # has come back - the SoC is running and the USB link is up. The verdict that fits is exit 3's
+    # (returned, capture out of reach), which is where this leads, and tightening the predicate here
+    # would turn a real return into "did not come back", i.e. exit 2 and a power press. Two call sites,
+    # the same `grep`, opposite correct answers - which is why the state reader was added as a *second*
+    # reader at the mode-detection site rather than by rewriting this line.
     if sudo adb devices 2>/dev/null | grep -q "^$SERIAL"; then
       RETURNED=1; RETURN_HOW="adb"; break
     fi

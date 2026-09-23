@@ -73,8 +73,18 @@ case "$1" in
     shift
     case "$*" in
       "devices")
+        # **The state column is part of the output, because 619 made it part of the reading.** The
+        # runner's mode detection now tests the state and not just field 1, so a stub that printed
+        # `device` always would leave the branch 619 added untestable - which is the same defect as
+        # 616's `boot *` glob: a stub whose output is coarser than the thing the runner reads.
         if [[ -f $S/adb_up && ! -f $S/adb_down ]]; then
-          printf 'List of devices attached\n4a2fe00b\tdevice\n'
+          if [[ -f $S/adb_unauthorized ]]; then
+            printf 'List of devices attached\n4a2fe00b\tunauthorized\n'
+          elif [[ -f $S/adb_offline ]]; then
+            printf 'List of devices attached\n4a2fe00b\toffline\n'
+          else
+            printf 'List of devices attached\n4a2fe00b\tdevice\n'
+          fi
         else
           printf 'List of devices attached\n'
         fi ;;
@@ -258,6 +268,8 @@ run_state() {
   for marker in "$@"; do
     case $marker in
       adb_up)                touch "$STATE/adb_up" ;;
+      adb_unauthorized)      touch "$STATE/adb_up" "$STATE/adb_unauthorized" ;;
+      adb_offline)           touch "$STATE/adb_up" "$STATE/adb_offline" ;;
       no_fastboot)           rm -f "$STATE/fastboot_up" ;;
       reboot_disables_fastboot) touch "$STATE/reboot_disables_fastboot" ;;
       fastboot_two)          touch "$STATE/fastboot_two" ;;
@@ -363,6 +375,21 @@ run_state two-devices-in-fastboot      1 "did not settle to"                    
 # present and neither asks whether it is *alone*, which is the state `fastboot boot` without `-s`
 # silently picks from.
 run_state one-device-wrong-serial      1 "serial 4a2fe00b not found in adb or fastboot"  fastboot_other
+# 5c. **The state the listing does not tell you about, and the one 619 exists for.** `adb devices` prints
+# `SERIAL<TAB>STATE`, and before 619 mode detection matched field 1 alone - so all seven states selected
+# the adb branch. From `unauthorized` the reboot fails, the 30-poll wait for fastboot expires, and the
+# run died with `device did not appear in fastboot`: exit 1 either way, but **sixty seconds later, on a
+# message about fastboot, with a press spent** - and with nothing in the text to tell the operator that
+# the device was sitting there waiting for an RSA prompt. The cell asserts the message that names the
+# state, and **forbids the fastboot sentence**, which is what the broken version prints.
+#
+# Two states for one branch on purpose: the message interpolates `$ADB_STATE`, so `adb-offline` fails a
+# version that hard-codes `unauthorized` while the first cell passes it. One cell per branch is the rule;
+# this is one cell per *value the branch reads*, which is the narrower thing.
+run_state adb-unauthorized            1 "its state is 'unauthorized'" adb_unauthorized no_fastboot \
+                                      'forbid:device did not appear in fastboot'
+run_state adb-offline                 1 "its state is 'offline'" adb_offline no_fastboot \
+                                      'forbid:device did not appear in fastboot'
 # and the adb-mode state where the phone answers adb but never appears in fastboot - the middle row
 # of that table, which the `no-fastboot-after-reboot` state above already exercises.
 # 6. the log this run captures is real payload output, and the reader reads it in the same run.
