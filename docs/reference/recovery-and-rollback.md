@@ -141,7 +141,10 @@ and `tools/verify_revert_set.sh DIR` checks a directory against it. **Eleven rat
 the correction 612 records**: the gate reads a file's path in its text *and* every path named by the
 manifest it verifies (`sha256sum -c SHA256SUMS.txt`, its line 139), so a set built from the gate's text
 alone is two files short — and a revert missing `stage90.img` leaves the gate **red** with every recorded
-hash matching.
+hash matching. Which of the verifier's checks covers which direction — the manifest's own bytes versus its
+member list, each read from the record and from the target — is a table in `tools/verify_revert_set.sh`'s
+header (step 613), and it is not the split the names suggest: the direction the first version of the record
+was blind to is carried by **pinning the manifest as bytes**, not by either member check.
 
 ```bash
 tools/verify_revert_set.sh /tmp/r594/frozen-payload     # the recorded park of the 574 set
