@@ -79,10 +79,10 @@ The `12` deletions are the two `echo` lines the empty branch replaced plus the `
 two comment lines the header edit rewrote — a replacement with no suffix loss, which on a file whose
 regions are read by line number is the thing to check rather than assume.
 
-**The four branches were rehearsed from the file's own bytes**, not from a copy of what I meant to write:
-lines `1736-1859` were extracted into a harness that supplies only what the surrounding script supplies
-(`fail`, `RUNNER`, `OUT`), and the harness was run four times with `STAGE90_OBJDUMP` pointed at four
-different things:
+**The four cases of the empty-derivation branch were rehearsed from the file's own bytes**, not from a
+copy of what I meant to write: lines `1736-1859` were extracted into a harness that supplies only what
+the surrounding script supplies (`fail`, `RUNNER`, `OUT`), and the harness was run four times with
+`STAGE90_OBJDUMP` pointed at four different things:
 
 | case | `STAGE90_OBJDUMP` | exit | what it printed |
 |---|---|---|---|
@@ -94,6 +94,28 @@ different things:
 A is the branch that did not exist before this change — before it, that state printed the same `UNREAD`
 as B and C and exited 0. Each case is a run in which the other three cannot fire, because the four
 conditions are decided by four disjoint inputs.
+
+**And the `ok:` narration's own two sides were then observed, one per image, because D alone left the
+second one unread.** D printed the `FLUSH_WRAP > 0` half (535's wrapped ELF); the other half had never
+been printed by anything. It is reachable from a *parked* artifact with no rebuild: 533's unwrapped entry
+image sits at `out/stage90/captures/533-xnu_arm_entry.elf`, so the harness was run once more with `OUT`
+pointed at a temp directory whose `xnu_arm_entry.elf` is a symlink to it —
+
+```
+ok: the reader's criterion and this image agree - 0x800462dc, derived from …/out533/xnu_arm_entry.elf's
+  own platform_cache_idle_exit … the image branches into FlushPoU_Dcache from 4 bl site(s) -
+  and the guard is on the caller, because only the caller separates this seam from the others:
+  no call site in this image spells a wrapper, so no --wrap was in the link.
+```
+
+Two things fall out of that run beyond the branch. First, `FLUSH_WRAP` is **0** on the unwrapped image
+and the two sides are therefore mutually exclusive *by measurement*, not by construction in prose:
+`--wrap`'s presence is now read off the image rather than asserted by the narration that depends on it.
+Second, `FLUSH_SITES` is **4** there — the bare callee is reached from exactly four sites on the image the
+header comment's "Measured, the second list is four" was measured on, so the census that comment carries
+is now confirmed by the clause itself rather than by the note that wrote it down. The address is the same
+`0x800462dc` on both images, which is the expected reading and worth having: 533 and 535 share the exit's
+code, and the arm changed only what the call *does*.
 
 **The live gate, both readings, and they are read by which section refused:**
 
