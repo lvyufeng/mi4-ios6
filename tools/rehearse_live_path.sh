@@ -90,10 +90,29 @@ case "$1" in
     shift
     case "$*" in
       "devices")
-        [[ -f $S/fastboot_up ]] && printf '4a2fe00b\tfastboot\n' ;;
-      boot\ *)
+        # Three lists, because the runner has a guard for the first two and the third is the
+        # happy path. `fastboot_other` is a single device that is NOT this phone; `fastboot_two`
+        # is two devices, which is the state `fastboot boot` without `-s` silently picks from.
+        if [[ -f $S/fastboot_up ]]; then
+          if [[ -f $S/fastboot_two ]]; then
+            printf '4a2fe00b\tfastboot\n33e80afe\tfastboot\n'
+          elif [[ -f $S/fastboot_other ]]; then
+            printf '33e80afe\tfastboot\n'
+          else
+            printf '4a2fe00b\tfastboot\n'
+          fi
+        fi ;;
+      # **The pin is enforced here rather than asserted in a comment.** The stub accepts the boot
+      # only with `-s 4a2fe00b`; a bare `fastboot boot <image>` is refused, so the happy-path
+      # state itself proves the serial is on the command line. `boot *` matched both forms before
+      # 616, which is exactly why the pin could have been removed without any cell noticing.
+      "boot -s 4a2fe00b "*) 
         # A STUB. Nothing is booted; no image is sent anywhere.
         touch $S/booted $S/fastboot_up; printf 'Sending boot image... OKAY\nBooting... OKAY\n' ;;
+      "boot -s "*)
+        printf 'rehearse-stub: fastboot boot pinned to a serial that is not 4a2fe00b: %s\n' "$*" >&2; exit 64 ;;
+      "boot "*)
+        printf 'rehearse-stub: a bare fastboot boot - the runner must pin the serial with -s: %s\n' "$*" >&2; exit 64 ;;
       *) printf 'rehearse-stub: unhandled fastboot: %s\n' "$*" >&2; exit 64 ;;
     esac ;;
   dmesg)
@@ -168,6 +187,8 @@ run_state() {
       adb_up)                touch "$STATE/adb_up" ;;
       no_fastboot)           rm -f "$STATE/fastboot_up" ;;
       reboot_disables_fastboot) touch "$STATE/reboot_disables_fastboot" ;;
+      fastboot_two)          touch "$STATE/fastboot_two" ;;
+      fastboot_other)        touch "$STATE/fastboot_other" ;;
       dmesg_unreadable)      touch "$STATE/dmesg_unreadable" ;;
       no_enum_after_boot)    rm -f "$STATE/enum_after_boot" ;;
       capture_fails)         rm -f "$STATE/capture_ok" ;;
@@ -191,7 +212,7 @@ run_state() {
   fi
   # a stub refusal means the state reached code the rehearsal does not model - that is a refusal,
   # not a pass, whatever the exit code said
-  if grep -q 'rehearse-stub: unhandled\|rehearse-stub: REFUSING\|rehearse-stub: a bare' "$err"; then
+  if grep -q 'rehearse-stub: unhandled\|rehearse-stub: REFUSING\|rehearse-stub: a bare\|rehearse-stub: fastboot boot pinned' "$err"; then
     ok=0; why="${why:+$why$'\n'}    the stub refused: $(grep -o 'rehearse-stub: .*' "$err" | head -1)"
   fi
   local nl; nl=$(printf '%s\n' "$why" | grep -c . || true)
@@ -220,6 +241,32 @@ run_state no-return                 2 "The device did not come back" no_enum_aft
 run_state host-log-unreadable       1 "the host could not read its own USB log" dmesg_unreadable no_enum_after_boot
 # 5. adb mode, and the phone never shows up in fastboot after the reboot.
 run_state no-fastboot-after-reboot  1 "device did not appear in fastboot" adb_up no_fastboot
+# 5b. **The ambiguity guard, and these two states are why it exists.** `fastboot boot` with more than
+# one device listed does not refuse - it picks one - so a second phone-class device in fastboot at the
+# same moment redirects the boot to it, and this run then waits for a `usb 3-10`/`4a2fe00b` return that
+# cannot come. Measured on this host: `usb 3-3` carries such a device (serial `33e80afe…`, 12 fastboot
+# entries in the host log). Both states must REFUSE, and neither may boot.
+run_state two-devices-in-fastboot      1 "fastboot lists 2 device(s)"                    fastboot_two
+# The wrong-serial case never reaches the boot step at all: mode detection asks adb first and
+# fastboot second, and a lone `33e80afe` answers neither, so this state dies at `step "device"`.
+# **This cell has now been wrong twice and both corrections are the point.** The first version
+# asserted a message from a guard branch added for this state - a branch that could not be reached,
+# because the pre-existing check fires first. The second asserted the check at the boot step
+# (`device did not appear in fastboot`) - also unreachable here, because mode detection is earlier
+# still. The state is covered at the FIRST of the three, and the three are a partition worth naming:
+#
+#   | guard                                  | state it refuses                            |
+#   | -------------------------------------- | ------------------------------------------- |
+#   | `step "device"` mode detection         | no device with $SERIAL anywhere             |
+#   | boot step's presence check             | adb mode, serial never shows in fastboot    |
+#   | boot step's COUNT guard (new in 616)   | $SERIAL present AMONG OTHERS                |
+#
+# Only the third is new, and only the third was missing: the other two ask whether `$SERIAL` is
+# present and neither asks whether it is *alone*, which is the state `fastboot boot` without `-s`
+# silently picks from.
+run_state one-device-wrong-serial      1 "serial 4a2fe00b not found in adb or fastboot"  fastboot_other
+# and the adb-mode state where the phone answers adb but never appears in fastboot - the middle row
+# of that table, which the `no-fastboot-after-reboot` state above already exercises.
 # 6. the log this run captures is real payload output, and the reader reads it in the same run.
 run_state happy-reads-the-log       0 "reading the log this run captured" adb_up capture_is_a_real_log
 # 7. and the same exit 3 with an earlier log already at the name: step 2b must park it, and the

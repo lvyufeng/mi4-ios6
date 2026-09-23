@@ -2124,9 +2124,53 @@ if [[ $DRY_RUN -eq 0 ]]; then
   sudo fastboot devices 2>/dev/null | grep -q "^$SERIAL" \
     || die "device did not appear in fastboot"
 
+  # --- the ambiguity guard, and it is here because the LINE BELOW ACTS ----------------------
+  #
+  # Until 616 every device-touching call in this file pinned the serial EXCEPT the one that
+  # actually acts: the two `fastboot devices` checks above pin it, `adb -s "$SERIAL"` pins it, and
+  # `fastboot boot` was bare. `fastboot` with more than one device listed does **not** refuse -
+  # it picks one - so a second phone in fastboot at the same moment redirects the boot to that
+  # phone, and this run then waits for a `usb 3-10` / `4a2fe00b` return that cannot come: a
+  # **false non-return, on the one press this phase gets**.
+  #
+  # This is not hypothetical on this host, and it is measured rather than argued: `usb 3-3`
+  # carries a second phone-class device (serial `33e80afe…`, 218 x `18d1:d001`, 12 x `18d1:d00d`
+  # in the host log) that enters **fastboot** repeatedly. The Mi 4 has never appeared on 3-3
+  # (1530 records of `4a2fe00b`, all on 3-10), so the two are separable - but only if the call
+  # says which one it means.
+  #
+  # So the pin and the guard are both here: the guard refuses an ambiguous list instead of
+  # letting `fastboot` choose, and `-s` makes the choice explicit even when the list is
+  # unambiguous. A guard that only ran on the happy path would be the 613 shape, so it counts
+  # the list rather than asserting non-emptiness.
+  # **The count is the whole guard, and it is deliberately the only branch.** A first version also
+  # refused when the single listed device was not `$SERIAL` - and that branch is UNREACHABLE: the
+  # `grep -q "^$SERIAL"` two lines above already refuses that list, with `device did not appear in
+  # fastboot`. The rehearsal's own `one-device-wrong-serial` state is what showed it: the cell
+  # asserting the new message failed, because the older check had already fired. A branch nothing can
+  # reach, carrying a comment that says what it does, is the defect this project has paid for most
+  # (598's three-way test over a two-branch flow); the wrong-serial case is covered by the check that
+  # was already there, and this one adds only what was missing.
+  FB_LIST=$(sudo fastboot devices 2>/dev/null || true)
+  FB_COUNT=$(printf '%s\n' "$FB_LIST" | grep -c . || true)
+  if [[ $FB_COUNT -ne 1 ]]; then
+    say "REFUSING: \`fastboot devices\` lists $FB_COUNT device(s), and this step cannot act on an"
+    say "          ambiguous list. Measured on this host: \`usb 3-3\` carries a second"
+    say "          phone-class device (serial 33e80afe…) that also enters fastboot, so more than"
+    say "          one is a state this machine really produces and not a hypothetical. The two"
+    say "          \`fastboot devices\` checks above pass in this state - they ask whether $SERIAL is"
+    say "          PRESENT, and it is - which is why the count has to be checked separately."
+    printf '%s\n' "$FB_LIST" | sed 's/^/            /'
+    die "fastboot lists $FB_COUNT device(s); nothing was booted. Disconnect the other device, or wait for it to leave fastboot, then re-run - this is a refusal and not a failed run"
+  fi
+
   # `fastboot boot` writes nothing to storage. This is the whole safety property of the
   # workflow, so it is a separate line that is never generated from a variable.
-  sudo fastboot boot "$IMAGE"
+  #
+  # `-s "$SERIAL"` and not a bare call: written into the command line as well as guarded above,
+  # because the guard can only refuse a state it can *see*, and the pin still holds if the list
+  # changes between the check and the call.
+  sudo fastboot boot -s "$SERIAL" "$IMAGE"
 fi
 
 # --- 4. wait for it to come back --------------------------------------------------------
