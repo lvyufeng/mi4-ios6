@@ -537,6 +537,20 @@ if [[ $V_SLOT_NULL -eq 1 ]]; then
   # is read out of the file here rather than asserted, because a sentence about another file's
   # mechanics is a claim about that file's future (563) - and 586's own first version is the case in
   # point: the block was silent on exactly the arm this branch narrates.
+  #
+  # **And the read itself needs the ninth guard, because the two branches below are a verdict about
+  # that file's contents.** `grep -q` returns 2 for a file it cannot open - absent, a directory, mode
+  # 000 - so without these two lines an unreadable runner would take the `else` and the gate would
+  # assert "does not name xnu_live_slot_pre_calls anywhere" about a file it never read. That is 584
+  # section 2's R7/R8 shape exactly (a property asserted of an artifact by a comparison that never
+  # ran), arriving one commit later inside the clause 586 added for the opposite reason - and it is
+  # costly in the same direction, because the sentence that follows tells the operator to go and fix a
+  # reader that may not be broken. The `-f` branch is here rather than in `_readable` because
+  # `_readable`'s `-e`/`-r` pair is true of a directory of that name; the eight artifact sites above
+  # each have their own `[[ -f ]]` for the same reason.
+  [[ -f $STAGE_DIR/run_and_capture.sh ]] \
+    || fail "no $STAGE_DIR/run_and_capture.sh, or it is not a regular file - this branch's sentence is about what that file's summary prints, so a gate that cannot open it has no verdict about what it does or does not name; and its absence also means the next command of the procedure cannot run at all. Nothing is rebuilt by this refusal"
+  _readable "$STAGE_DIR/run_and_capture.sh" "the summary text this branch's sentence describes is read out of it"
   if grep -q 'xnu_live_slot_pre_calls=' "$STAGE_DIR/run_and_capture.sh"; then
     echo "      So a run of this arm prints two UNREAD lines for the slot's own capture, naming"
     echo "      xnu_live_slot_pre_calls - that is this switch and not a disagreement, and a successful"
