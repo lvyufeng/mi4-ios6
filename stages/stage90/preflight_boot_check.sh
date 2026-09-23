@@ -339,7 +339,27 @@ def locate(hay, what):
     """The blob's offset in `hay`, by content: exactly one match, and it must fit whole."""
     o = hay.find(entry)
     if o < 0:
-        die("%s does not contain %s at all" % (what, entry_p))
+        # Two faults wear one message, and the test between them is made HERE rather than asserted
+        # from the length clause above, because that clause is not this function's contract. Equal
+        # lengths mean the payload does carry a blob of exactly this size and it belongs to another
+        # build - an arm swapped for one of the same length, which is measurable: 151425c4 and
+        # 696a0f39 are both 5519996 bytes, so 2026-09-23's swap reached this branch and no length
+        # test could see it. Unequal lengths mean there is no blob of the size the payload compiled
+        # in. The single wording this replaces stated the second for both, and the first is the case
+        # a reader reads backwards: an absent blob is not what is there.
+        if compiled == len(entry):
+            die("%s does not contain the bytes of %s, while its own compiled-in blob is %d bytes "
+                "and this entry image is %d - the lengths agree and the bytes do not, so what it "
+                "carries at that length is a DIFFERENT build of the entry image rather than an "
+                "absent blob. That is what swapping the arm for another of the same size looks "
+                "like, and it is the reading a plain does-not-contain-it message inverts. The two "
+                "are told apart by the sha256 of the entry image: rebuild the payload to embed the "
+                "image now in out/, or put back the image the payload was built with. Nothing is "
+                "rebuilt by this refusal"
+                % (what, entry_p, compiled, len(entry)))
+        die("%s does not contain %s at all, and its own compiled-in blob is %d bytes against this "
+            "entry image's %d, so there is no blob of the size this payload was built with"
+            % (what, entry_p, compiled, len(entry)))
     if hay.find(entry, o + 1) >= 0:
         die("%s contains %s more than once" % (what, entry_p))
     if len(hay) - o < len(entry):
