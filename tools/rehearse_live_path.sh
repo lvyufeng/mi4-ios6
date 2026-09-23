@@ -108,7 +108,8 @@ case "$1" in
       # 616, which is exactly why the pin could have been removed without any cell noticing.
       "boot -s 4a2fe00b "*) 
         # A STUB. Nothing is booted; no image is sent anywhere.
-        touch $S/booted $S/fastboot_up; printf 'Sending boot image... OKAY\nBooting... OKAY\n' ;;
+        touch $S/booted $S/fastboot_up; date +%s > $S/booted_at
+        printf 'Sending boot image... OKAY\nBooting... OKAY\n' ;;
       "boot -s "*)
         printf 'rehearse-stub: fastboot boot pinned to a serial that is not 4a2fe00b: %s\n' "$*" >&2; exit 64 ;;
       "boot "*)
@@ -117,20 +118,60 @@ case "$1" in
     esac ;;
   dmesg)
     [[ -f $S/dmesg_unreadable ]] && exit 1
-    # The serial is on `usb 3-10`; the count is 1 until the phone re-enumerates, which the stub
-    # makes happen on the *second* dmesg read after the boot - the first is the baseline the
-    # runner takes immediately after `fastboot boot` returns, and that one must not already
-    # contain the return or the comparison would have nothing to detect.
-    if [[ -f $S/booted ]]; then
-      n=$(cat $S/dmesg_calls 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > $S/dmesg_calls
-    else
-      n=0
+    # The serial is on `usb 3-10`. The baseline lines below are the phone as it stands, and the
+    # re-enumeration that follows the boot is added only once enough time has passed for it - see the
+    # note on the elapsed-time test. Both are needed: the comparison the runner makes is
+    # baseline-versus-now, so a stub that showed the return in the baseline would leave it nothing to
+    # detect, and a stub that never showed it could not produce a return at all.
+    # **The return is a function of elapsed TIME, not of how many times the runner has read the log,
+    # and the first version of this stub got that wrong.** It made the re-enumeration appear on the
+    # *second* read after the boot - which was true for as long as the runner took exactly one baseline
+    # read. 617 gave the runner a second baseline (the port-keyed count, taken in the same instant);
+    # under the read-count model the return then landed INSIDE that baseline, so `PORT_BEFORE` came
+    # out already carrying the enumeration, `PORT_AFTER` equalled it, and the one state the new cell
+    # exists to produce became unreachable. The model was a claim about the runner dressed as a model
+    # of the device. A real device does not re-enumerate between two `dmesg` calls microseconds apart:
+    # it takes seconds, and the runner's wait loop sleeps 3 s between polls. So the model is elapsed
+    # seconds since the boot, which stays true however many baseline reads the runner makes.
+    #
+    # The delay is per-state, because which *branch* a return exercises is a function of whether it
+    # lands inside the runner's wait window or after it: `return_after:N` moves it out past the whole
+    # window, which is the only way to reach the post-wait block deliberately.
+    _need=$(cat $S/ret_after 2>/dev/null || echo 2)
+    RET_SEEN=0
+    if [[ -f $S/booted && -f $S/enum_after_boot && -f $S/booted_at ]]; then
+      _el=$(( $(date +%s) - $(cat $S/booted_at) ))
+      (( _el >= _need )) && RET_SEEN=1
     fi
-    printf '[1.0] usb 3-10: New USB device found, idVendor=18d1, idProduct=d00d\n'
-    printf '[1.1] usb 3-10: SerialNumber: 4a2fe00b\n'
-    if [[ -f $S/booted && -f $S/enum_after_boot && ${n:-0} -ge 2 ]]; then
-      printf '[2.0] usb 3-10: New USB device found, idVendor=2717, idProduct=0368\n'
-      printf '[2.1] usb 3-10: SerialNumber: 4a2fe00b\n'
+    # **`no_serial_ever` does NOT print an empty log, and the difference is the whole point of it.**
+    # The runner reads a `dmesg` that printed nothing as a channel it could not read (UNREAD), not as a
+    # log with no phone in it - which is 609's "the machine stopped, or the channel that records it
+    # did", one layer in. A real `dmesg` is never empty. So this state emits a readable log that simply
+    # never mentions the phone: unrelated devices, no `usb 3-10` line at all. That is what makes the
+    # port UNDERIVABLE rather than the log UNREAD, and the two states below are the pair that says so.
+    if [[ -f $S/no_serial_ever ]]; then
+      printf '[0.0] usb 1-1: New USB device found, idVendor=1d6b, idProduct=0002\n'
+      printf '[0.1] usb 2-1: New USB device found, idVendor=8087, idProduct=0024\n'
+      printf '[0.2] hub 2-1:1.0: USB hub found\n'
+    else
+      # The phone's own baseline: `phone_port` DERIVES the port from these lines.
+      printf '[1.0] usb 3-10: New USB device found, idVendor=18d1, idProduct=d00d\n'
+      printf '[1.1] usb 3-10: New USB device strings: Mfr=1, Product=2, SerialNumber=3\n'
+      printf '[1.2] usb 3-10: SerialNumber: 4a2fe00b\n'
+      if (( RET_SEEN == 1 )); then
+        # **Two shapes of return, and the second is the one the serial test cannot see.** `qdl_return`
+        # makes the phone come back in a Qualcomm mode with EMPTY USB descriptors - measured on this
+        # host: `05c6:f006`, `Mfr=0 Product=0 SerialNumber=0`, five seconds apart from the same
+        # device's `2717:0368 MI 4LTE` lines on `usb 3-10`.
+        if [[ -f $S/qdl_return ]]; then
+          printf '[2.0] usb 3-10: New USB device found, idVendor=05c6, idProduct=f006, bcdDevice= 0.00\n'
+          printf '[2.1] usb 3-10: New USB device strings: Mfr=0, Product=0, SerialNumber=0\n'
+        else
+          printf '[2.0] usb 3-10: New USB device found, idVendor=2717, idProduct=0368\n'
+          printf '[2.1] usb 3-10: New USB device strings: Mfr=1, Product=2, SerialNumber=3\n'
+          printf '[2.2] usb 3-10: SerialNumber: 4a2fe00b\n'
+        fi
+      fi
     fi
     if [[ -f $S/booted && -f $S/adb_up && ! -f $S/adb_down ]]; then
       printf '[3.0] usb 3-10: New USB device found, idVendor=18d1, idProduct=4ee7\n'
@@ -177,6 +218,11 @@ declare -a ROWS=()
 run_state() {
   local name=$1 expect_code=$2 expect_text=$3; shift 3
   local d=$WORK/$name
+  # `FORBID` is the assertion of **absence**, and it is a local so a state that does not set it cannot
+  # inherit the previous state's. Per 615, an absence assertion is only worth anything beside a sibling
+  # that asserts the presence - the pair is what turns "it did not say X" into "X is what this state
+  # must not say". Both new states in section 6 are such a pair.
+  local FORBID=""
   rm -rf "$d" "$STATE"; mkdir -p "$d" "$STATE"
   # every state starts with the phone in fastboot unless it says otherwise
   touch "$STATE/fastboot_up" "$STATE/enum_after_boot" "$STATE/capture_ok"
@@ -189,6 +235,10 @@ run_state() {
       reboot_disables_fastboot) touch "$STATE/reboot_disables_fastboot" ;;
       fastboot_two)          touch "$STATE/fastboot_two" ;;
       fastboot_other)        touch "$STATE/fastboot_other" ;;
+      qdl_return)            touch "$STATE/qdl_return" ;;
+      no_serial_ever)        touch "$STATE/no_serial_ever" ;;
+      return_after:*)        printf '%s' "${marker#return_after:}" > "$STATE/ret_after" ;;
+      forbid:*)              FORBID=${marker#forbid:} ;;
       dmesg_unreadable)      touch "$STATE/dmesg_unreadable" ;;
       no_enum_after_boot)    rm -f "$STATE/enum_after_boot" ;;
       capture_fails)         rm -f "$STATE/capture_ok" ;;
@@ -198,7 +248,14 @@ run_state() {
     esac
   done
   local out=$d/out.txt err=$d/err.txt
-  LOGFILE=$logfile RETURN_TIMEOUT=3 CAPTURE_WAIT=1 \
+  # **`RETURN_TIMEOUT=6` rather than 3, and it is 617's code that needs the second poll.** At 3 the
+  # loop makes exactly one check before its `sleep 3` and then exits, so nothing that takes any time
+  # at all can be seen *inside* the wait - every state would land in the post-wait block and the
+  # in-wait branches would stop being exercised. Six gives two polls: a return delayed to 2 s is seen
+  # inside the wait (states 1/2/9) and one delayed past the window (10 s, the port-advance state) is
+  # not. It also keeps the battery's clock honest against the stub's - the stub measures elapsed
+  # seconds, so the window it is measured against has to be long enough to contain a real poll.
+  LOGFILE=$logfile RETURN_TIMEOUT=6 CAPTURE_WAIT=1 \
     timeout 120 bash "$RUNNER" --allow-xnu-entry > "$out" 2> "$err"
   local code=$?
   local ok=1 why=""
@@ -209,6 +266,10 @@ run_state() {
   # whole file is about, and it is why the two streams are tested together rather than assumed.
   if [[ -n $expect_text ]] && ! { grep -qF -- "$expect_text" "$out" || grep -qF -- "$expect_text" "$err"; }; then
     ok=0; why="${why:+$why$'\n'}    did not say (either stream): $expect_text"
+  fi
+  # The absence half. Checked on both streams for the same reason the expectation is.
+  if [[ -n $FORBID ]] && { grep -qF -- "$FORBID" "$out" || grep -qF -- "$FORBID" "$err"; }; then
+    ok=0; why="${why:+$why$'\n'}    said what this state must NOT say: $FORBID"
   fi
   # a stub refusal means the state reached code the rehearsal does not model - that is a refusal,
   # not a pass, whatever the exit code said
@@ -272,6 +333,48 @@ run_state happy-reads-the-log       0 "reading the log this run captured" adb_up
 # 7. and the same exit 3 with an earlier log already at the name: step 2b must park it, and the
 #    message must say where it went, because the operator's next action is to read that file.
 run_state exit3-log-was-parked      3 "step 2b parked the previous run" capture_fails log_exists
+
+# 6. **The return the serial test cannot see, and the state that is only here to make it a reading.**
+#
+# The criterion in section 4 keys the host-log half of the return test on `SerialNumber: $SERIAL`, and
+# this phone does not always carry one: measured out of the host log, `usb 3-10` has 1536 `New USB
+# device found` records, 1530 with `SerialNumber: 4a2fe00b` and **6** that are `05c6:f006` with
+# `Mfr=0 Product=0 SerialNumber=0` - the same device cycling into a Qualcomm mode five seconds after
+# its own `2717:0368 MI 4LTE` lines. A phone that comes back in that mode advanced neither the adb
+# test nor the serial test, so it fell through every branch and was reported as **exit 2, "the device
+# did not come back"** - the one code this contract reserves for a hang, and the one that tells the
+# operator to press power. The device came back; the criterion could not see it.
+#
+# `return_after:5` is the whole difficulty of this cell and it is worth stating, because the value is
+# a window and not a number. The runner reads the host log at the END of its wait, so a return that is
+# to be seen there and *not* during the wait has to land in the last `sleep 3` of the window - with
+# `RETURN_TIMEOUT=6` the in-wait polls are at ~0.05 s and ~3.05 s and the post-wait reads at ~6.05 s,
+# so the band is (3.05, 6.05]. It is one sleep wide and no value can have more than ~1.5 s of margin on
+# both sides, which is a property of the runner (the wait ends and the reads happen at once) and not of
+# the stub. A stub that had to be exact to reproduce this state would be modelling the wrong thing.
+run_state qdl-return                 3 "REFUSING to call this a non-return: an enumeration appeared on" \
+                                       return_after:5 qdl_return 'forbid:The device did not come back'
+# And this is the second half of that pair, and the reason the first one is a reading rather than a
+# lucky exit code. The port is DERIVED from the phone's own `SerialNumber: 4a2fe00b` lines, so with
+# none of them in the log there is no port to key on: `PORT_BEFORE` is UNREAD, the port branch cannot
+# fire, and this state must fall back to the serial criterion and say the non-return it can actually
+# justify. `forbid:` the port refusal here is the assertion - without it, a version that fired the
+# port branch on UNREAD-and-zero would pass this cell too.
+run_state port-underivable           2 "The device did not come back" no_serial_ever \
+                                       'forbid:an enumeration appeared on'
+# **And this is the cell that makes the two branches' ORDER structural rather than a preference**, and
+# it exists because a measurement said it had to. The order was changed to serial-first on the
+# reasoning that a normal return advances BOTH counts, so the port branch written first would have
+# fired for every return the post-wait block saw. Then the change was falsified by putting the port
+# branch back first - and the battery stayed GREEN, because the only state that reached that block
+# with an advance was `qdl-return`, which advances the port and *not* the serial by construction. The
+# claim "a normal return advances both" was covered by nothing: a statement about the ordering with no
+# cell that could observe it. This state is the missing half - a normal return, timed with the same
+# 5 s so it lands after the last in-wait poll, so the post-wait block sees both counts advance and the
+# cell can say which branch owns that state. Measured: reverting the order turns THIS cell red and
+# leaves `qdl-return` green, so each branch is now pinned by a state that only it can answer.
+run_state return-after-last-poll     3 "the host log shows the phone enumerating again" return_after:5 \
+                                       'forbid:an enumeration appeared on'
 
 printf '\n  %d ok, %d failed\n' "$pass" "$fail"
 if (( fail > 0 )); then

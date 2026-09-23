@@ -335,6 +335,73 @@ serial_enum_count() {
   return 0
 }
 
+# --- the PORT reading, and why the criterion needed a second one ------------------------------
+#
+# The comment above the serial counter says the port alone is unsafe because `usb 3-10` "also carries
+# a serial-less `05c6:f006` occupant". **616 measured what that occupant is, and it is this phone.**
+# On 3-10, five seconds apart and numbered consecutively by the host:
+#
+#   2153329 usb 3-10: USB disconnect, device number 74
+#   2153344 usb 3-10: new high-speed USB device number 75 ... 2717:0368, Product: MI 4LTE,
+#                                                              SerialNumber: 4a2fe00b
+#   2153363 usb 3-10: USB disconnect, device number 75
+#   2153368 usb 3-10: new high-speed USB device number 76 ... 05c6:f006, Mfr=0 Product=0
+#                                                              SerialNumber=0
+#
+# Device numbers 74 -> 75 -> 76 in sequence on one port: the phone cycling between Android and a
+# **Qualcomm mode whose USB descriptors are all empty**. Counted over the whole log: 1536
+# `New USB device found` on 3-10, of which **1530** carry the serial and **6** are that mode. So the
+# hardening the serial test exists for made the mirror-image mistake - it is safe against reading a
+# stranger as the phone, and it **cannot see a real return by the phone in a mode that has no
+# serial**, which is precisely the state a failsafe boot is most likely to produce and the state
+# where the operator's next action (power press, or 610's EDL route) is different from "wait".
+#
+# The port is DERIVED from the phone's own enumeration lines rather than written down, so it is a
+# fact about where this phone has been seen and not a constant that drifts when someone re-cables.
+# The count alone cannot establish identity and is not asked to: the rollup below prints the
+# vendor:product of every device seen on that port, so the *reading* stays with the operator and the
+# claim this file makes is only "something enumerated on the port $SERIAL is on, and here is what".
+phone_port() {
+  local out p
+  out=$(sudo dmesg 2>/dev/null) || return 0
+  [[ -n $out ]] || return 0
+  # `|| true` on the assignment is not decoration: this file runs `set -o pipefail`, so a grep that
+  # matches nothing makes the whole pipeline non-zero, and an assignment whose command substitution
+  # failed aborts the script under `set -e` - which would turn "this port is not in the log" into a
+  # run that dies before it boots anything. `serial_enum_count` carries the same guard for the same
+  # reason, and its comment names the symptom.
+  p=$(printf '%s\n' "$out" | grep -oE "usb [0-9]+-[0-9]+: SerialNumber: $SERIAL" \
+        | tail -1 | sed 's/^usb \([0-9]*-[0-9]*\):.*/\1/') || true
+  [[ -n $p ]] && printf '%s' "$p"
+  return 0
+}
+
+# The count of enumerations on the phone's port, **any id**. Deliberately not folded into
+# `serial_enum_count`: they answer different questions - "the phone identified itself" versus
+# "something enumerated where the phone is" - and the second is the one that survives a mode with
+# empty USB descriptors. Both return UNREAD (no value) rather than 0 when they could not read.
+port_enum_count() {
+  local out n
+  out=$(sudo dmesg 2>/dev/null) || return 0
+  [[ -n $out ]] || return 0
+  [[ -n ${PHONE_PORT:-} ]] || return 0
+  n=$(printf '%s\n' "$out" | grep -c "usb $PHONE_PORT: New USB device found") || true
+  if [[ $n =~ ^[0-9]+$ ]]; then printf '%s' "$n"; fi
+  return 0
+}
+
+port_enum_rollup() {
+  local out
+  out=$(sudo dmesg 2>/dev/null) || return 0
+  [[ -n $out ]] || return 0
+  [[ -n ${PHONE_PORT:-} ]] || return 0
+  printf '%s\n' "$out" | grep "usb $PHONE_PORT: New USB device found" \
+    | grep -oE 'idVendor=[0-9a-f]+, idProduct=[0-9a-f]+' \
+    | sed 's/idVendor=//; s/, idProduct=/:/' | sort | uniq -c \
+    | awk '{printf "%s=%s ", $2, $1}' | sed 's/ $//' || true
+  return 0
+}
+
 summarise_log() {
   local log=$1
   local markers=(hw_watchdog_enabled hw_watchdog_counter_running "deadman: armed"
@@ -2005,6 +2072,14 @@ summarise_log() {
   say "  ---- and the run that matters is the one whose log has both. ---------------------------"
 }
 
+# The port the phone is on, resolved once and only when this file is going to touch the device: it
+# needs `sudo dmesg`, and the summarise path must not. UNREAD when the log cannot supply it, which is
+# the same state as an unreadable host log and is treated as such further down.
+PHONE_PORT=""
+if [[ -z $SUMMARISE_ONLY ]]; then
+  PHONE_PORT=$(phone_port)
+fi
+
 if [[ -n $SUMMARISE_ONLY ]]; then
   step "summarising $SUMMARISE_ONLY"
   # The refusal names the absolute path it looked at **and** the directory it was resolved against, so a
@@ -2178,12 +2253,33 @@ step "waiting up to ${RETURN_TIMEOUT}s for the device to return"
 say "(a bounded self-test should return on its own; a hang will not)"
 RETURNED=0
 RETURN_HOW=""
+# Which test saw the return, when the return was seen outside the wait: `serial` or `port`. It is
+# initialized here because the branch that reads it (below, after the two advance tests) needs an
+# empty value to mean "neither fired", and `set -u` is on - `[[ -n $ENUM_ADVANCED ]]` on an unset
+# variable is an error, not a false.
+ENUM_ADVANCED=""
 ENUM_BEFORE=$(serial_enum_count)
 ENUM_BEFORE=${ENUM_BEFORE:-UNREAD}
+# The port-keyed baseline, taken the same way and for the reason the note above `phone_port` gives:
+# the serial test cannot see the phone in a mode that carries no serial, and 6 of the 1536
+# enumerations on the phone's own port are exactly that. `PHONE_PORT` is UNREAD when the log cannot
+# supply it, and then this counter is UNREAD too rather than zero.
+PORT_BEFORE=$(port_enum_count)
+PORT_BEFORE=${PORT_BEFORE:-UNREAD}
+# A label rather than a `${PHONE_PORT:-...}` default carrying words, because an apostrophe inside a
+# parameter-expansion default that itself sits in a double-quoted string ends the string early and
+# the file stops parsing - measured on the first version of the line above, which said
+# `${PHONE_PORT:-the phone's port}` and made `bash -n` report `unexpected EOF while looking for
+# matching `}`" fifteen lines above the real site. Compute the prose once, here.
+if [[ -n $PHONE_PORT ]]; then PORT_LABEL="usb $PHONE_PORT"; else PORT_LABEL="the port (not in the log)"; fi
+PORT_ROLL_BEFORE=$(port_enum_rollup)
 if [[ $DRY_RUN -eq 0 ]]; then
   say "(return criterion: serial $SERIAL in \`adb devices\`, or a new \`SerialNumber: $SERIAL\`"
-  say " enumeration in the host log - adb alone is not it, see the note at serial_enum_count)"
+  say " enumeration in the host log - adb alone is not it, see the note at serial_enum_count;"
+  say " **or a new enumeration on $PORT_LABEL itself**, which is the reading that"
+  say " sees a return by a mode with no serial - see the note above \`phone_port\`)"
   [[ $ENUM_BEFORE == UNREAD ]] && say "(the host log is unreadable here, so only adb can speak)"
+  [[ $PORT_BEFORE == UNREAD ]] && say "(the phone's port is not in the log, so the port reading is absent rather than zero)"
   for _ in $(seq 1 $((RETURN_TIMEOUT / 3))); do
     if sudo adb devices 2>/dev/null | grep -q "^$SERIAL"; then
       RETURNED=1; RETURN_HOW="adb"; break
@@ -2191,7 +2287,15 @@ if [[ $DRY_RUN -eq 0 ]]; then
     if [[ $ENUM_BEFORE != UNREAD ]]; then
       _now=$(serial_enum_count)
       if [[ -n $_now && $_now -gt $ENUM_BEFORE ]]; then
-        RETURNED=1; RETURN_HOW="host log"; break
+        RETURNED=1; RETURN_HOW="host log, serial"; break
+      fi
+    fi
+    # The port reading, and it is checked second on purpose: when both advance the serial is the
+    # stronger statement and should be the one reported.
+    if [[ $PORT_BEFORE != UNREAD ]]; then
+      _pnow=$(port_enum_count)
+      if [[ -n $_pnow && $_pnow -gt $PORT_BEFORE ]]; then
+        RETURNED=1; RETURN_HOW="host log, port"; break
       fi
     fi
     sleep 3
@@ -2201,10 +2305,42 @@ fi
 if [[ $DRY_RUN -eq 0 && $RETURNED -eq 0 ]]; then
   ENUM_AFTER=$(serial_enum_count)
   ENUM_AFTER=${ENUM_AFTER:-UNREAD}
+  PORT_AFTER=$(port_enum_count)
+  PORT_AFTER=${PORT_AFTER:-UNREAD}
+  PORT_ROLL_AFTER=$(port_enum_rollup)
   say ""
   say "bounded wait expired after ${RETURN_TIMEOUT}s. Evidence:"
   say "  adb:      serial $SERIAL not listed"
   say "  host log: $ENUM_BEFORE -> $ENUM_AFTER enumeration(s) of SerialNumber: $SERIAL"
+  say "  the port $SERIAL is on (${PHONE_PORT:-not in the log}):"
+  say "            $PORT_BEFORE -> $PORT_AFTER enumeration(s), any id"
+  # **A port advance is a return, and this is the branch 617 added.** The serial-keyed test cannot
+  # see the phone in a mode whose USB descriptors are empty - measured, 6 of the 1536 enumerations on
+  # 3-10 - so a run that ends with the phone in such a mode used to fall through every test below and
+  # be reported as **exit 2, "the device did not come back"**, which is the one exit code this
+  # contract reserves for a hang and the one that tells the operator to press power. The device did
+  # come back; the criterion could not see it. The ids are printed and the identity claim is left to
+  # the operator, because the port is a fact about where the phone has been and not proof of who
+  # enumerated: `05c6` is also the neighbour's vendor on `usb 3-3`.
+  #
+  # **And the two branches are ordered, not interchangeable**, which the first version of this block
+  # got wrong: the port test was written first, and a normal return advances BOTH counts (the
+  # re-enumeration is on the same port), so the port branch fired for every return and the serial
+  # branch - the one whose message can say the device came back *with* its serial - became
+  # unreachable. The order here matches the wait loop's for the same reason: when both advance, the
+  # serial is the stronger statement and the port branch is left to do only the job it was added for,
+  # seeing the return the serial test is blind to.
+  #
+  # The serial branch taking the `if` and the port branch the `elif` is what makes this a partition
+  # rather than a preference: neither state below can be reported by the other, and the second is only
+  # ever reached when the first found nothing.
+  #
+  # **And that claim is covered by cells rather than by the paragraph above**, which is not how it was
+  # first written: reverting this order left the rehearsal green, because the only state reaching this
+  # block with an advance was the port-only one. Two states in `tools/rehearse_live_path.sh` now pin it
+  # - `return-after-last-poll` (a normal return, both counts advance, this branch must answer) and
+  # `qdl-return` (the port alone, the `elif` must answer) - and reverting the order turns the first red
+  # and leaves the second green.
   if [[ $ENUM_BEFORE != UNREAD && $ENUM_AFTER != UNREAD && $ENUM_AFTER -gt $ENUM_BEFORE ]]; then
     say ""
     say "REFUSING to call this a non-return: the host log shows the phone enumerating again"
@@ -2213,14 +2349,46 @@ if [[ $DRY_RUN -eq 0 && $RETURNED -eq 0 ]]; then
     say "The log lives in the top of DRAM and survives until a power cycle, so if the phone"
     say "settles into Android, re-read it with:"
     say "  sudo adb -s $SERIAL exec-out 'cat /proc/last_kmsg' > $LOGFILE"
-    # **And the name to read it *into* is vacant, which the hand-retry command above does not say.**
-    # Whether it is vacant because step 2b *parked* the previous log or because there never was one is
-    # `$PARK`'s answer and not this line's to assume: 588 replaced the `-n $PREV_LOG` test here, which
-    # distinguished neither of those from a failed park. 566 §3's producer attribution is what makes this
-    # the message that matters: at the real `RETURN_TIMEOUT`, a phone that enumerates inside the wait
-    # leaves section 4 with `RETURNED` true and this block is never reached, so the operator who *does*
-    # reach it is the one whose device was silent past the whole wait - and for them the earlier log's
-    # location is the one thing the section 5 message says and this one did not.
+    ENUM_ADVANCED=serial
+  elif [[ $PORT_BEFORE != UNREAD && $PORT_AFTER != UNREAD && $PORT_AFTER -gt $PORT_BEFORE ]]; then
+    say ""
+    say "REFUSING to call this a non-return: an enumeration appeared on ${PHONE_PORT}, the port"
+    say "$SERIAL is on, after the boot. New vendor:product on that port, versus the baseline:"
+    say "  before: ${PORT_ROLL_BEFORE:-none}"
+    say "  after:  ${PORT_ROLL_AFTER:-none}"
+    say "**This is the reading the serial test is blind to, and it is not automatically the phone.**"
+    say "A \`05c6:*\` id here is what this phone itself presents when it enumerates with empty USB"
+    say "descriptors - the host log carries six enumerations on ${PORT_LABEL}, each an"
+    say "\`idVendor=05c6, idProduct=f006\` followed by \`Mfr=0, Product=0, SerialNumber=0\`, and each"
+    say "five seconds from that same device's \`2717:0368\` \`SerialNumber: 4a2fe00b\` line - but"
+    say "\`05c6\` is also the vendor of a different phone on \`usb 3-3\`. So read the ids above: an id"
+    say "this phone has presented before is this phone back; an id it has not is a different device"
+    say "and this run still produced no reading of yours."
+    say "Either way the capture is out of reach and the log survives until a power cycle, so if the"
+    say "phone settles into Android, re-read it with:"
+    say "  sudo adb -s $SERIAL exec-out 'cat /proc/last_kmsg' > $LOGFILE"
+    ENUM_ADVANCED=port
+  fi
+  # **Both branches above mean the same thing and end the same way, and the first version of this
+  # block did not.** The port branch set `ENUM_ADVANCED=port` and then fell out of the `if`, straight
+  # past the two tests below - neither of which can fire, because a port advance does not move the
+  # serial count - and into the final "The device did not come back", i.e. **`exit 2`**. So the fix
+  # for a false non-return printed the right refusal and then returned the one code it was written to
+  # prevent, which is the same defect one layer in: a message and a status that disagree, and the
+  # status is what the operator's next action reads. The park note is here rather than inside the
+  # serial branch for the same reason: each branch above tells the operator how to re-read the log by
+  # hand, and the name it reads *into* is the one step 2b may have parked, so *which file is at
+  # `$LOGFILE`* is owed by both. It sat inside the serial branch only because until 617 that branch
+  # was the only one; leaving it there would have made "the previous run's log is NOT at that name" a
+  # property of which test happened to fire.
+  #
+  # The history the note itself carries is unchanged: 588 replaced a `-n $PREV_LOG` test that could
+  # not tell "parked" from "failed to park", and 566 §3's producer attribution is why this message
+  # matters - at the real `RETURN_TIMEOUT`, a phone that enumerates inside the wait leaves section 4
+  # with `RETURNED` true and this block is never reached, so the operator who *does* reach it is the
+  # one whose device was silent past the whole wait, and for them the earlier log's location is the
+  # one thing the section 5 message says and this one did not.
+  if [[ -n $ENUM_ADVANCED ]]; then
     case $PARK in
       parked)
         say "The previous run's log is NOT at that name: step 2b parked it before the boot, so reading"
