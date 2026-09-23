@@ -1080,13 +1080,27 @@ fi
 # capture" test becomes impossible-to-pass-by-accident, and the previous log - today the only copy of a
 # measurement - stays on disk under a name that says what it is.
 PREV_LOG=""
+# **`$PREV_LOG` being empty has THREE producers, and until 588 every consumer named one of them.**
+# The name is empty when there was no file to park, when the park failed, and under `--dry-run`. Step 2b
+# says which out loud, but the two messages further down (the wait's, and the capture's) tested
+# `-n $PREV_LOG` and so read all three as "the park failed", printing *"$LOGFILE is untouched, so it is
+# still the run before this one's"* about a file that does not exist. Measured, not reasoned: the first
+# end-to-end rehearsal of the success path ran against an absent `$LOGFILE` - which is the real
+# `/tmp/cancro-last_kmsg.txt`'s state as this is written - and its exit-3 message asserted a previous log
+# where step 2b had said "no log at ... yet". That matters because it is the one sentence that tells the
+# operator what is on disk in the state where the log is still in DRAM and a power press is about to
+# destroy it, which is why 562 and 564 exist. So the state is named once, here, and every consumer reads
+# *it* rather than inferring from the empty string.
+PARK=unknown
 if [[ $DRY_RUN -eq 1 ]]; then
+  PARK=dry
   say "would move $LOGFILE (the previous run's log) aside, so that the name holds this run's or nothing"
 elif [[ -e $LOGFILE ]]; then
   PREV_LOG=$LOGFILE.prev
   _n=2
   while [[ -e $PREV_LOG ]]; do PREV_LOG=$LOGFILE.prev.$_n; _n=$(( _n + 1 )); done
   if mv "$LOGFILE" "$PREV_LOG" 2>/dev/null; then
+    PARK=parked
     say "parked the previous run's log: $LOGFILE -> $PREV_LOG"
     say "  ($(wc -c < "$PREV_LOG" || echo '?') bytes, sha256 $(sha256sum "$PREV_LOG" | cut -d' ' -f1 || echo '?')"
     say "   - the same file the gate fingerprinted before the boot; it is NOT this run's, whatever the"
@@ -1097,12 +1111,14 @@ elif [[ -e $LOGFILE ]]; then
     # is that the name is unambiguous afterwards - so it is said out loud and the operator is told the
     # one comparison that still applies.
     PREV_LOG=""
+    PARK=nopark
     say "WARNING: could not move $LOGFILE aside (a sticky /tmp and an identity that does not own it:"
     say "         511, 512). It will be REPLACED by this run's capture if the capture works, and it"
     say "         will look untouched if it does not - so in that case compare its sha256 against the"
     say "         one the gate printed above before reading any bracket out of it."
   fi
 else
+  PARK=nofile
   say "no log at $LOGFILE yet - so after this run, the name existing at all is the first check"
 fi
 
@@ -1166,19 +1182,35 @@ if [[ $DRY_RUN -eq 0 && $RETURNED -eq 0 ]]; then
     say "settles into Android, re-read it with:"
     say "  sudo adb -s $SERIAL exec-out 'cat /proc/last_kmsg' > $LOGFILE"
     # **And the name to read it *into* is vacant, which the hand-retry command above does not say.**
-    # Step 2b parked whatever was there before the boot, so the previous run's log is at `$PREV_LOG`
-    # and not under `$LOGFILE` - and `> $LOGFILE` creates this run's file at a name that currently
-    # holds nothing. 566 §3's producer attribution is what makes this the message that matters: at the
-    # real `RETURN_TIMEOUT`, a phone that enumerates inside the wait leaves section 4 with `RETURNED`
-    # true and this block is never reached, so the operator who *does* reach it is the one whose device
-    # was silent past the whole wait - and for them the earlier log's location is the one thing the
-    # section 5 message says and this one did not. Same condition, same path, said once.
-    if [[ -n $PREV_LOG ]]; then
-      say "The previous run's log is NOT at that name: step 2b parked it before the boot, so reading"
-      say "into $LOGFILE above creates this run's file beside it. The earlier one is at"
-      say "  $PREV_LOG"
-      say "- read it for the 2026-09-22 death, and never as this run's, whatever bracket it carries."
-    fi
+    # Whether it is vacant because step 2b *parked* the previous log or because there never was one is
+    # `$PARK`'s answer and not this line's to assume: 588 replaced the `-n $PREV_LOG` test here, which
+    # distinguished neither of those from a failed park. 566 §3's producer attribution is what makes this
+    # the message that matters: at the real `RETURN_TIMEOUT`, a phone that enumerates inside the wait
+    # leaves section 4 with `RETURNED` true and this block is never reached, so the operator who *does*
+    # reach it is the one whose device was silent past the whole wait - and for them the earlier log's
+    # location is the one thing the section 5 message says and this one did not.
+    case $PARK in
+      parked)
+        say "The previous run's log is NOT at that name: step 2b parked it before the boot, so reading"
+        say "into $LOGFILE above creates this run's file beside it. The earlier one is at"
+        say "  $PREV_LOG"
+        say "- read it for the 2026-09-22 death, and never as this run's, whatever bracket it carries." ;;
+      nopark)
+        say "The previous run's log is still AT that name - step 2b could not move it aside (511/512),"
+        say "so it and this run's capture share one path. If the hand retry below succeeds it has been"
+        say "REPLACED, and the earlier bytes are then at the sha256 the gate printed; if it cannot read"
+        say "at all the file is still the earlier one, and its sha256 is that same value." ;;
+      nofile)
+        say "There was no log at that name before this boot: step 2b said 'no log at ... yet', so"
+        say "nothing there is an earlier run's and nothing there can be this run's except what the"
+        say "hand retry below writes. A file present afterwards is this run's, whatever its content." ;;
+      *)
+        # Same as the block in step 5: not a dry-run (this one is inside `DRY_RUN -eq 0`), so the only
+        # way here is that step 2b never set the state - a defect in this file, said as one.
+        say "UNREAD  step 2b's park state was never set, so whether an earlier run's log is at"
+        say "        $LOGFILE, at some .prev name, or nowhere is not established here - check by"
+        say "        hand before spending the next power press on an unexplained reading." ;;
+    esac
     exit 3
   fi
   # **The unreadable case is not exit 2, and the difference matters more than the code does.** Exit
@@ -1303,15 +1335,36 @@ else
     say "and check the return against the host's own log by serial, not by port (this host's"
     say "port has a second occupant that appears on its own after hours of silence):"
     say "  sudo dmesg | grep $SERIAL"
-    if [[ -n $PREV_LOG ]]; then
-      say "$LOGFILE is absent and stays absent, because step 2b parked the previous run's log at"
-      say "  $PREV_LOG"
-      say "- so nothing at the name $LOGFILE can be this run's. Do not read that parked file as this"
-      say "run's either: its bracket is the one 547 section 4 was derived from."
-    else
-      say "$LOGFILE is untouched, so it is still the run before this one - do not read it as this one's"
-      say "(step 2b could not park it, so its sha256 must still equal the one the gate printed)."
-    fi
+    # **Four states, four sentences - and the third is the one that was wrong here (588).** This block
+    # used to test `-n $PREV_LOG`, which is false for a *failed* park AND for a run that started with no
+    # log at all, so a run in the second of those printed "it is still the run before this one's" about
+    # a name step 2b had already said nothing was at. It is the message with the least margin for a
+    # wrong sentence: the run is spent, the log is in DRAM, and the next power press destroys it.
+    case $PARK in
+      parked)
+        say "$LOGFILE is absent and stays absent, because step 2b parked the previous run's log at"
+        say "  $PREV_LOG"
+        say "- so nothing at the name $LOGFILE can be this run's. Do not read that parked file as this"
+        say "run's either: its bracket is the one 547 section 4 was derived from." ;;
+      nopark)
+        say "$LOGFILE is untouched, so it is still the run before this one's - do not read it as"
+        say "this one's (step 2b could not park it, so its sha256 must still equal the one the gate"
+        say "printed). It is also the name the hand retry above writes to, so a successful retry"
+        say "replaces it." ;;
+      nofile)
+        say "$LOGFILE does not exist and did not before this boot either (step 2b: 'no log at ..."
+        say "yet'), so there is nothing here to mistake for an earlier run's - and nothing here is"
+        say "this run's until the hand retry above writes it. A file present afterwards is new." ;;
+      *)
+        # **Not a dry-run: this block is inside step 5's `else`, so a dry run cannot reach it** - the
+        # first version of this case said it could, which is an unreachable branch claiming a state
+        # (the defect 582 section 2 and 586 section 2 both name). `unknown` is `$PARK`'s initial value
+        # and means step 2b never set it, which is a defect in this file rather than a state of the log
+        # - so it is said as that, and the operator is not told anything about the file's provenance.
+        say "UNREAD  step 2b's park state was never set, so whether $LOGFILE holds an earlier run's"
+        say "        log, this run's, or nothing is not established by this file - read it by hand"
+        say "        (does it exist, what is its mtime, and does it carry this run's payload banner)" ;;
+    esac
     exit 3
   fi
   say "wrote $(wc -c < "$LOGFILE") bytes to $LOGFILE"
