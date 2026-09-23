@@ -596,6 +596,21 @@ if [[ $V_IDLE_NO_SLEEP -eq 1 ]]; then
   echo "      death point - evidence for this arm and never against it, because its absence is also what the"
   echo "      0 arm's own captures show: the group is in neither parked log, for the reason 593 records,"
   echo "      that the park's poll is where that arm dies."
+  echo "      **And the converse case is not only a different fault to look for - it is a different READING"
+  echo "      of the whole run, because the runner chooses which ladder to print from these same keys.**"
+  echo "      \`run_and_capture.sh --summarise\` decides between this arm's ladder and the baseline arm's"
+  echo "      death block by a five-term conjunction over the log itself (the \`idle_no_sleep_arm\` test,"
+  echo "      around \`:779-784\` in the runner at 621: no \`slot_cwe_\`, \`door_seq\` present, no"
+  echo "      \`repair_seq\`/\`sip_seq\`/\`pce_seq\`/\`wfi_seq\`). **Of those five, only \`repair_seq\` is absent by"
+  echo "      construction** - the four above are absent only because the window is never reached, so a pass"
+  echo "      that does get into it publishes them and the run is read as the baseline arm: the arm's own"
+  echo "      success printed as the other arm's ordinary death. That is not hypothetical, it is measured on"
+  echo "      a fixture built from 533 - appending ONE \`xnu_live_slot_cwe_win=...\` line to a log that scored"
+  echo "      \`rung 1 PASS, rung 1b PASS\` turns it into a death-block reading that names 533's arm, with the"
+  echo "      ladder not run and no line anywhere saying so, so the only tell is that the rung lines are"
+  echo "      missing at all. After the run: **find the pre-registered rung lines before concluding anything"
+  echo "      from their absence**, and read a window key in this run's log as 'the window was entered on"
+  echo "      this boot', never as 'this is the baseline arm'.**"
   echo "      **And that whole list is conditioned on something that is not about the arm, so it is named here"
   echo "      rather than left to the reader.** An absent \`xnu_live_*\` key is a reading about the machine"
   echo "      only if the channel that carries it published every record the boot made. The channel is finite"
@@ -619,6 +634,31 @@ if [[ $V_IDLE_NO_SLEEP -eq 1 ]]; then
   echo "      the same silence."
   echo "      **What the arm gives up is the sleep itself** - 512/513's defect and 514's repair - so it is a"
   echo "      bring-up stopgap traded for a boot, and it is reversible with this one switch."
+else
+  # **The 0 arm had no line here until 639, and the header above it says "in words".** So a gate run on
+  # the baseline arm printed `== which arm the entry image in out/ is, in words ==` and then nothing
+  # about the arm - one line for this whole block, against 47 for the other arm, measured by extracting
+  # the block and running it with each value. A reader cannot tell "the arm is 0" from "this revision has
+  # no arm block", which is the shape this file names elsewhere and had here: a section that answers by
+  # printing nothing. Only the *value* is new below; every sentence is the record's (the switch's
+  # call-site guard, the two parked captures' keys, and 593's reason for the park group's absence).
+  echo "  idle sleep (IDLE_NO_SLEEP=0): the arm that came back - 514's one repair IS in this image, so"
+  echo "      \`SIGPdisabled\` is cleared once from \`__wrap_poll\` on pid 1's thread before the park's real"
+  echo "      call and \`cpu_idle\` can leave by its SECOND door: **the window whose \`pop {fp, pc}\` is this"
+  echo "      phase's frontier IS ENTERED, so everything below - the slot, the bracket, the window's two"
+  echo "      ends and the seam - is narration about THIS arm, and its keys are expected PRESENT.** 533's"
+  echo "      capture carries \`xnu_live_slot_cwe_win\` and \`xnu_live_pce_after_sctlr\`, which is the window"
+  echo "      having been entered and read; 520's carries neither because its image predates the instrument,"
+  echo "      which is why the pair and not one of them settles what this arm does."
+  echo "      **On this arm an absent \`xnu_live_repair_seq\` is a bug rather than the switch** - the"
+  echo "      converse of what the 1 arm's block says, and the pair is the reason this gate prints the arm's"
+  echo "      value from the record before any run rather than leaving it to be inferred from the log after."
+  echo "      Its death is the one both parked captures show and the reason this phase has a frontier at"
+  echo "      all: the exit's \`push {fp, lr}\` / \`pop {fp, pc}\` inside \`platform_cache_idle_exit\`, with the"
+  echo "      park's poll never returning. The park group's"
+  echo "      \`cpu_signal_handler_internal(FALSE) called 1 time(s)\` is therefore **absent for that same"
+  echo "      reason** - it prints only after the park's real poll returns, so on this arm the group's"
+  echo "      absence says the park did not return and not that the repair was skipped."
 fi
 if [[ $V_SLOT_NULL -eq 1 ]]; then
   echo "  capture sites (SLOT_NULL=1): the NULL instrument - entry_slot_null_note publishes the pass"
