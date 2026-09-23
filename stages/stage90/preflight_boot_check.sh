@@ -623,6 +623,71 @@ if [[ $V_IDLE_NO_SLEEP -eq 1 ]]; then
   echo "      pre-registered rung lines before concluding anything from their absence** - now backed by a"
   echo "      printed line rather than by the absence of one - and read a window key in this run's log as"
   echo "      'the window was entered on this boot', never as 'this is the baseline arm'.**"
+  # --- the two figures the paragraph below used to TYPE, derived at gate time instead (520's rule) ---
+  #
+  # **That paragraph printed a record count, a byte size and a percentage - and two lines apart it
+  # printed the console's limit while promising that the limit "is not typed here", a sentence falsified
+  # by the line after it, which is the defect this file names most often.** Both figures come out of
+  # `stages/stage90/baseline-readings.txt` (627) now: 38 readings over the four captures the rungs are
+  # measured against, each written as the runner's own reader, every one re-derived from the log it
+  # names by `tools/verify_baseline_readings.sh`. A figure read from that record cannot go stale in this
+  # file, which is the whole of the 520 rule. The two things it cannot supply - a count of live records
+  # (it does not carry one) and the copies themselves on a host that never had `out/` - are said in
+  # words instead, because a figure a reader can see is missing is a reading and a figure whose absence
+  # reads as agreement is not.
+  #
+  # **None of this can refuse, and that is deliberate**: this gate must not gain a way to stop a press,
+  # so every derivation is guarded (`set -euo pipefail` is on, and a `grep -c` that matched nothing is
+  # exit 1) and every value is validated before it reaches a sentence.
+  BASELINE_RECORD=$STAGE_DIR/baseline-readings.txt
+  REC_NLOGS="?"; REC_CAP=""; REC_BYTES=""; REC_BYTES_LOG=""; REC_LIVE=""
+  if [[ -r $BASELINE_RECORD ]]; then
+    _n=$(awk '$1 ~ /^log=/{n++} END{print n+0}' "$BASELINE_RECORD" 2>/dev/null || true)
+    _c=$(awk '$1=="reading=live_cap"{for(i=1;i<=NF;i++) if ($i ~ /^value=/) { v=$i; sub(/^value=/,"",v); print v }}' \
+           "$BASELINE_RECORD" 2>/dev/null | sort -u | paste -sd, - || true)
+    _b=$(awk '$1 ~ /^log=/{l="";b="";for(i=1;i<=NF;i++){ if($i ~ /^log=/){l=$i;sub(/^log=/,"",l)} if($i ~ /^bytes=/){b=$i;sub(/^bytes=/,"",b)} } if (b ~ /^[0-9]+$/) print b" "l }' \
+           "$BASELINE_RECORD" 2>/dev/null | sort -n | tail -1 || true)
+    if [[ $_n =~ ^[0-9]+$ ]]; then REC_NLOGS=$_n; fi
+    if [[ $_c =~ ^0x[0-9a-fA-F]+(,0x[0-9a-fA-F]+)*$ ]]; then REC_CAP=$_c; fi
+    if [[ $_b =~ ^([0-9]+)\ (.+)$ ]]; then REC_BYTES=${BASH_REMATCH[1]}; REC_BYTES_LOG=${BASH_REMATCH[2]}; fi
+    _lmin=""; _lmax=""; _lmiss=""
+    while IFS= read -r _f; do
+      if [[ -n $_f && -r $OUT/captures/$_f ]]; then
+        _k=$(grep -ac 'xnu_live_' "$OUT/captures/$_f" 2>/dev/null || true)
+        if [[ $_k =~ ^[0-9]+$ ]]; then
+          if [[ -z $_lmin || $_k -lt $_lmin ]]; then _lmin=$_k; fi
+          if [[ -z $_lmax || $_k -gt $_lmax ]]; then _lmax=$_k; fi
+        fi
+      else
+        _lmiss=1
+      fi
+    done < <(awk '$1 ~ /^log=/{for(i=1;i<=NF;i++) if ($i ~ /^file=/) { f=$i; sub(/^file=/,"",f); print f }}' \
+               "$BASELINE_RECORD" 2>/dev/null || true)
+    if [[ -n $_lmin && -z $_lmiss ]]; then REC_LIVE="$_lmin to $_lmax"; fi
+  fi
+  # The population is named as the record names it - "the captures the rungs are measured on", counted,
+  # not "the baselines", because two of the four carry `role=counterexample-...`: a sentence that says
+  # "baselines" while measuring a set that includes counterexamples is one value with two definitions.
+  # The three degrading branches are kept apart on purpose: "not derivable because the record is
+  # unreadable" and "not derivable because the copies it names are absent" are two different findings
+  # about two different files, and a single sentence covering both would be a claim about whichever one
+  # the reader assumed - the shape where one wording serves two states.
+  if [[ -n $REC_LIVE ]]; then
+    if [[ -n $REC_CAP ]]; then
+      REC_CHANNEL="the ${REC_NLOGS} captures the rungs are measured on published ${REC_LIVE} live-channel records each, and the image's \`xnu_live_cap\` declares ${REC_CAP}"
+    else
+      REC_CHANNEL="the ${REC_NLOGS} captures the rungs are measured on published ${REC_LIVE} live-channel records each, against a capacity this gate could not derive"
+    fi
+  elif [[ ! -r $BASELINE_RECORD ]]; then
+    REC_CHANNEL="the record counts of the captures the rungs are measured on are not derivable on this host, because \`stages/stage90/baseline-readings.txt\` is not readable here"
+  else
+    REC_CHANNEL="the record counts of the captures the rungs are measured on are not derivable on this host, because the copies \`baseline-readings.txt\` names are not in ${OUT}/captures - read them there, where \`tools/verify_baseline_readings.sh\` re-derives them from the logs they name"
+  fi
+  if [[ -n $REC_BYTES ]]; then
+    REC_MARGIN="The largest of the ${REC_NLOGS} captures the rungs are measured on is \`${REC_BYTES_LOG}\` at ${REC_BYTES} bytes, read out of \`stages/stage90/baseline-readings.txt\` (627), every line of which \`tools/verify_baseline_readings.sh\` re-derives from the log it names"
+  else
+    REC_MARGIN="The largest capture's size is not derivable here, because \`stages/stage90/baseline-readings.txt\` is not readable - it is recorded there, where \`tools/verify_baseline_readings.sh\` re-derives it from the log it names"
+  fi
   echo "      **And that whole list is conditioned on something that is not about the arm, so it is named here"
   echo "      rather than left to the reader.** An absent \`xnu_live_*\` key is a reading about the machine"
   echo "      only if the channel that carries it published every record the boot made. The channel is finite"
@@ -632,9 +697,9 @@ if [[ $V_IDLE_NO_SLEEP -eq 1 ]]; then
   echo "      above stops being about the arm** - it becomes a record that was never published rather than an"
   echo "      event that did not happen, and this paragraph's list is a list of absences. Read the two"
   echo "      together: this one before the boot, the runner's line after it. It is not hypothetical for THIS"
-  echo "      arm, which is the point of it: the archived captures carry about 4400 records of 8192, and this"
-  echo "      is the arm built to run past where those two stopped, so the run most likely to fill the channel"
-  echo "      is the one most likely to go further - the two are the same run."
+  echo "      arm, which is the point of it: ${REC_CHANNEL}, and this is the arm built to run past where"
+  echo "      those two stopped, so the run most likely to fill the channel is the one most likely to go"
+  echo "      further - the two are the same run."
   echo "      **And which rung survives that is not a matter of degree: one of the three has a witness on the"
   echo "      other channel, so a full channel shortens the ladder rather than voiding it.** All three rung"
   echo "      keys are live-channel records (\`entry_stubs.c:4538\` \`xnu_live_poll_seq\`, \`:4542\`"
@@ -661,9 +726,11 @@ if [[ $V_IDLE_NO_SLEEP -eq 1 ]]; then
   echo "      the tail is where this paragraph's console witness lives (:1342) along with the death shape."
   echo "      So it SATURATES IN SILENCE and it LOSES THE END OF THE RUN, and its tell - there is no"
   echo "      \`capped\` line to announce it - is that same size field reading the limit. The bound is not"
-  echo "      typed here; derive it as \`:2034\` does. The margin is not promised here either: the largest"
-  echo "      log this phase holds is 597,641 bytes of 2,097,140, about 28% - **re-measure it against the"
-  echo "      captures rather than trusting that figure**, and read a console near its limit as one whose"
+  echo "      typed here; derive it as \`:2034\` does. **And it is not typed two lines further down either:"
+  echo "      this paragraph used to print that limit in the same breath as promising not to, which is this"
+  echo "      file's own name for a sentence the line after it falsifies. The margin is derived instead.**"
+  echo "      ${REC_MARGIN}; divide that by \`:2034\`'s expression for the margin, and read a console near"
+  echo "      its limit as one whose"
   echo "      tail, rung 1b's twin included, is missing. Accumulation is the other thing this gate does not"
   echo "      establish: the reset at \`:2036\` fires only when the signature is ABSENT, so a soft reset that"
   echo "      leaves DRAM and the signature intact would append to the previous boot's tail. What has been"
