@@ -1194,6 +1194,25 @@ else
     say "           this as 'the payload wrote almost nothing', NOT as 'the payload ran and"
     say "           produced this' - and repeat the run before drawing a conclusion from it."
   fi
+
+  # --- and the log this run just captured is read here, not left to be remembered ---------
+  #
+  # The run opened by summarising the **previous** log (step "payload output", above) and then spent
+  # the boot to produce this one; until now it ended at `done. Full log: <name>` and the reading was a
+  # command the operator had to know to type. That is the asymmetry this project keeps removing - every
+  # failure path in the wait section prints its reading in full, and the one path that costs a run and
+  # *produces* a reading printed least. On this phase's runs the boot is a single chance (the payload's
+  # log lives in the top of DRAM and a second boot overwrites it), so the reading is printed where it
+  # is produced rather than left to be remembered. It is a read of a file already on disk: it touches
+  # no device, cannot spend anything, and cannot change the capture.
+  #
+  # It is placed after the payload-line check on purpose: with fewer than 8 payload lines the block
+  # above has just said the file is suspect, and the summary is then read under that warning rather
+  # than instead of it. `--summarise` remains the way to re-read a log later, and the two paths print
+  # the same table from the same function.
+  say ""
+  step "reading the log this run captured"
+  summarise_log "$LOGFILE"
 fi
 
 # The marker table is the part that decides what a run *meant*, so it is a function with
