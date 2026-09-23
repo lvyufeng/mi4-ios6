@@ -280,7 +280,7 @@ mk_sleeper_log() {
     # the polls. 1 and 2 are the two short asks the baseline also makes; 3 is the park (2000 ms).
     local seqs=2 tmo=5
     case $variant in
-      poll-seq-2)      seqs=2 ;;
+      poll-seq-2|poll-seq-2-no-arm) seqs=2 ;;
       small-timeout)   seqs=3 ;;
       predicted|door-max-0x8000|no-poll-over) seqs=4 ;;
       *)               seqs=4 ;;
@@ -298,31 +298,51 @@ mk_sleeper_log() {
       printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_poll_retval=0x00000000\n'
       printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_poll_ticks=0x024c072a\n'
     done
+    # the payload's own arm record, which every real capture carries (533 does) and which the
+    # reader's rung-1 FAIL narration is **guarded on**: with it the reader may say the SoC's reset
+    # is not what stopped the park, without it it must say that the interval is cited and not read.
+    # The `poll-seq-2-no-arm` variant is the one that removes it, so both branches are states here.
+    [[ $variant == poll-seq-2-no-arm ]] || \
+      printf 'MI4IOS6_STAGE90_XNU loader_hw_watchdog_counter_running=0x00000001\n'
     [[ $variant == no-poll-over ]] || printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_poll_over=0x00000008\n'
     printf 'MI4IOS6_STAGE90_XNU loader_xnu_live_sleh_user=0x00000001\n'
   } > "$out"
 }
 
-# One row: the variant and a line that must appear. The lines are quoted from the runner, so a state
-# that keeps its shape but changes its message is caught as well.
+# One row: the variant and the line(s) that must appear. The lines are quoted from the runner, so a
+# state that keeps its shape but changes its message is caught as well.
+#
+# **A row may carry more than one expectation**, and that is what makes a *branch* testable: the
+# rung-1 FAIL is one branch with two guards inside it (the arm record present or absent), and one
+# expectation per row would only ever reach the first line of whichever guard ran. Every expectation
+# must appear, so a row with two of them asserts the branch *and* what it said.
 #
 # **The expectation must not span a line wrap.** These messages are `say` strings the runner breaks
 # by hand at ~88 columns, so a phrase taken across a break matches nothing and reports "the reader
 # did not say X" about a reader that said X in two pieces - which is what the first draft of the
 # rung-1b row did (`below the park's own threshold`). Each expectation here is one printed line.
 reader_state() {
-  local variant=$1 expect_text=$2
+  local variant=$1; shift
+  local -a WANT=("$@")
   local log=$WORK/reader-$variant.log
   mk_sleeper_log "$variant" "$log"
   local out=$WORK/reader-$variant.out err=$WORK/reader-$variant.err
   bash "$RUNNER" --summarise "$log" > "$out" 2> "$err"
-  local code=$? ok=1 why=""
+  local code=$? ok=1 why="" want
   (( code == 0 )) || { ok=0; why="exit $code, promised 0"; }
-  if ! grep -qF -- "$expect_text" "$out"; then
-    ok=0; why="${why:+$why$'\n'}    the reader did not say: $expect_text"
-  fi
+  for want in "${WANT[@]}"; do
+    grep -qF -- "$want" "$out" || { ok=0; why="${why:+$why$'\n'}    the reader did not say: $want"; }
+  done
   if (( ok == 1 )); then
-    rpass=$((rpass+1)); printf '  ok    %-22s %s\n' "$variant" "$expect_text"
+    rpass=$((rpass+1))
+    # The table says how many expectations the row carried, because a row with two of them that
+    # printed only its first would look exactly like a row with one - and the second is the one that
+    # tests the branch. A pass that hides what it checked is the shape this file exists to catch.
+    if (( ${#WANT[@]} > 1 )); then
+      printf '  ok    %-22s %s (+%d more)\n' "$variant" "${WANT[0]}" "$(( ${#WANT[@]} - 1 ))"
+    else
+      printf '  ok    %-22s %s\n' "$variant" "${WANT[0]}"
+    fi
   else
     rfail=$((rfail+1)); printf '  FAIL  %-22s %s\n' "$variant" "$why"
     (( VERBOSE == 1 )) && sed 's/^/        | /' "$out" | tail -30
@@ -332,7 +352,14 @@ reader_state() {
 printf '\n== the reading, on every state the coming run can produce ==\n\n'
 rpass=0; rfail=0
 reader_state predicted        "this arm did what it was built to do at the point that matters"
-reader_state poll-seq-2       "no poll record past the second"
+# the falsifier, and the branch inside its FAIL: the arm record is present, so the reader must say
+# the SoC's reset is excluded by measurement rather than only that the park did not come back
+reader_state poll-seq-2       "no poll record past the second" \
+                              "the SoC's own reset is not what stopped it - measured, not argued"
+# and the same FAIL with the arm record *absent*: the reader must say the interval is cited and not
+# read from this log - a branch that no other state reaches
+reader_state poll-seq-2-no-arm "no poll record past the second" \
+                              "whether the reset is what stopped it is not read here"
 reader_state small-timeout    "the largest recorded timeout is 40 ms"
 reader_state door-max-0x8000  "stops at or below 0x8000"
 reader_state no-door-seq      "carries no xnu_live_door_seq= record"

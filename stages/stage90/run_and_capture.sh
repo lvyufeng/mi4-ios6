@@ -695,6 +695,49 @@ summarise_log() {
       say "        arm's failure mode (593 section 4: the spin is alive and never progresses) and"
       say "        **not** a hang: the device returns either way, so the runner's exit code cannot"
       say "        tell these apart and this line is the only thing that can"
+      # **And one cause of this FAIL is excluded by measurement rather than by argument, because
+      # the FAIL has two of them and only one is about the arm.** A park that does not return could
+      # be the arm's failure mode, or it could be the SoC being reset out from under the park - and
+      # the second would make this line a statement about the watchdog instead of about the arm.
+      # It is the first. The numbers are 533's capture and not a recollection: the payload arms the
+      # watchdog before the jump and nothing in the image pets it, so the reset comes 28 s later
+      # (two of the payload's own records cross-check it: bark 0x000c7fb5 at hw_watchdog_hz=0x7ffd
+      # is 25.0 s against hw_watchdog_timeout_s=0x19, and bite 0x000dffac is 28.0 s); and 533's
+      # capture carries both ends of the boot's own share of that budget on ONE counter - the
+      # payload's `timebase_boot_ticks_lo` (0x0355ded6) and the park's first read, which on the arm
+      # that makes the repair is `xnu_live_repair_before` (0x04afba8b), against the image's own
+      # `timebase_cntfrq` - 1.18 s.
+      #
+      # **It is guarded on the arm record, and the guard is the point.** This sentence and the
+      # `hardware watchdog:` line above it are about the same instrument, so an unconditional
+      # version would print "the watchdog is armed, 28 s" twelve lines under "NOT confirmed armed"
+      # on any log that lost the payload's records - one value with two definitions, in one output,
+      # which is this project's most-repeated defect. The guard makes them agree by construction.
+      #
+      # **And the numbers are cited rather than re-read from this log on purpose.** The key that
+      # marks the park's start is `xnu_live_repair_before`, and that key is absent on this arm by
+      # construction (594's guard, `entry_stubs.c`), so a derivation keyed on it would be UNREAD in
+      # exactly the state it exists for - 586's lesson. The mechanism and one artifact that
+      # measures it is what can be said here; the interval's own arithmetic from this log's payload
+      # records is owed and not taken.
+      if (( watchdog > 0 )); then
+        say "        **And the SoC's own reset is not what stopped it - measured, not argued**: this"
+        say "        log carries the payload's own arm record, and nothing in the image pets the"
+        say "        watchdog, so the reset is 28 s after the arm - 533's capture states it twice"
+        say "        over: hw_watchdog_timeout_s=0x19 with bark 0x000c7fb5 at hw_watchdog_hz=0x7ffd"
+        say "        is 25.0 s, and bite 0x000dffac is 28.0 s. 533 also carries both ends of the"
+        say "        boot's own share of that budget on one 19.2 MHz counter - the payload's timebase"
+        say "        sample 0x0355ded6 and the park's first read 0x04afba8b, timebase_cntfrq=0x0124f800"
+        say "        - 1.18 s apart. So the park starts about a second in, and a 2000 ms ask is not"
+        say "        racing a 28 s reset: read this FAIL as the park not coming back."
+      else
+        say "        **And whether the reset is what stopped it is not read here**: this log carries"
+        say "        no arm record (the line above is where that absence is read), so the interval is"
+        say "        cited and not measured - 28 s after an arm the payload makes unconditionally"
+        say "        (stage90_main.c:1205, 533's capture for the number), of which the boot spends"
+        say "        about 1.18 s before the park starts. Read this FAIL as the park not coming back"
+        say "        either way, but on this log the margin between them is 533's and not this log's."
+      fi
     fi
 
     if (( park_group > 0 )); then
