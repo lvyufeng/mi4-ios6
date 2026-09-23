@@ -1659,6 +1659,20 @@ fi
 # *independent* record, the fingerprint that identifies a **parked** file as the one this gate saw, and
 # the one comparison that still applies - when step 2b's park **failed** (sticky `/tmp`, identities
 # 511/512), the runner says so and tells the reader to compare this sha. What it is **not** is the test.
+#
+# **589: the printed block said less than this comment knew, and one of its sentences was false in the
+# state the next run is in.** The narration asserted "the PREVIOUS log was parked rather than lost" for
+# a name that is gone after the run - unconditionally, before the state test - while step 2b parks
+# *nothing* when there was nothing at the name at gate time (`PARK=nofile`), which is `$LOG`'s state
+# whenever the previous run's capture failed to return (the last several did; only `.prev`/`.prev.2`
+# remain). So in the absent state the block offered the reassurance ("parked, not lost") for the very
+# observation the next paragraph reads as *the capture failed*, and it asserted a `mv` that will not
+# run - the same shape as 588 one file over, in the same moment (the log is in DRAM, one power press
+# destroys it). It said **nothing** about the state where the sha *is* the test, which is the exception
+# the paragraph above already describes: whether the park succeeds is a fact about `/tmp`'s sticky bit
+# and the file's identity, and the gate cannot see it from here, so that one belongs in the output too.
+# Both are printed text only - no branch, no exit code, no read added - and the park's `mv` is still
+# the runner's, not the gate's.
 
 echo "== the log those instructions name, as it stands at gate time =="
 echo "  $LOG"
@@ -1666,10 +1680,18 @@ echo "  this is a reading of THIS moment, not a claim about the run: the gate ca
 echo "  follows it, and run_and_capture.sh's step 2b parks this file before the boot (that file's own"
 echo "  564). So after the run the test is not this number: it is whether $LOG is there at all, and"
 echo "  whether what is there is non-empty - the hand retry exit 3's message asks for is a shell"
-echo "  redirect, which creates the file before adb can fail."
-echo "  And if the name is gone after the run, the PREVIOUS log was parked rather than lost: step 2b"
-echo "  moves it to $LOG.prev (then .prev.2, ...), which is where the earlier bracket lives. Read"
-echo "  that path for the earlier death and never as this run's, whatever the bracket in it says."
+echo "  redirect, which creates the file before adb can fail. One state is the exception and the gate"
+echo "  cannot see it from here, because whether the park *succeeds* turns on /tmp's sticky bit and the"
+echo "  file's identity (511/512): if step 2b could not move this file aside, the earlier log stays at"
+echo "  this name, a capture that fails leaves it looking untouched, and *then* the fingerprint below is"
+echo "  the test - the runner says so in its own words when it takes that branch."
+echo "  And the earlier log is not lost when this name is gone after the run: step 2b parks the file"
+echo "  at $LOG.prev (then .prev.2, ...) whenever there is one to park, and that path is where an"
+echo "  earlier bracket lives. Read it for the earlier death and never as this run's, whatever the"
+echo "  bracket in it says - and read 'gone with nothing parked' as the capture it is, not as the park"
+echo "  it is not: with nothing at this name at gate time (the absent case below) step 2b has nothing to"
+echo "  move, so an absence after the run is this run's capture having failed, not an earlier log tucked"
+echo "  away."
 if [[ ! -e $LOG ]]; then
   echo "  absent - and that is the useful part: after the run, this file *existing* is itself the first"
   echo "  check, because nothing here writes it before a capture succeeds. Step 2b says the same thing"
