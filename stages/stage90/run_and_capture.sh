@@ -804,9 +804,28 @@ summarise_log() {
       # the previous pass's leftovers, and this arm's `_b0`/`_b1` are this pass's push. Equal is the
       # expected reading and *not* a pass: a difference is the frame having moved between two passes
       # through the same code, which is a fact about the idle loop rather than about this arm.
+      # **And `pre_m4` is `b1`'s own address, so the derived return site is a prediction about both.**
+      # The wrapper's capture reads its `sp` after its prologue and at negative offsets (`pre_m4` is
+      # `sp-4`), and the real exit is entered with that same `sp` - so `slot+4` and `pre_m4` are one
+      # word, read once before the push and once after it. `pre_m4` is therefore the *previous* pass's
+      # pushed `lr` on a frame that has not moved, and the two sources turn the old "did the frame
+      # move" reading into three distinguishable states: both equal to the derived site (the frame is
+      # in memory and did not move), `b1` right and `pre_m4` not (the frame moved), `b1` wrong
+      # (the push's store did not reach the word the `pop` reads).
       if [[ -n $seam_m8 && -n $seam_m4 ]]; then
-        say "  (the wrapper's own capture of those two addresses, read before the push: m8=$seam_m8"
-        say "   m4=$seam_m4 - equal to b0/b1 when the frame did not move between two passes)"
+        if [[ -n $caller_lr && $seam_m4 == "$caller_lr" && $seam_b1 == "$caller_lr" ]]; then
+          say "  PASS  and the wrapper's own capture of the same word agrees: pre_m4=$seam_m4 is the"
+          say "        derived return site both before and after the push, so the frame is in memory and"
+          say "        did not move between two passes (m8=$seam_m8, to be compared with b0=$seam_b0)"
+        elif [[ -n $caller_lr && $seam_b1 == "$caller_lr" ]]; then
+          say "        the wrapper's capture reads the same word: pre_m4=$seam_m4 against the derived"
+          say "        site ${caller_lr}, so the frame MOVED between two passes - the word the push wrote"
+          say "        is this image's return site, and the same word read before the push held something"
+          say "        else, i.e. the previous pass used a different frame at this address"
+        else
+          say "  (the wrapper's own capture of those two addresses, read before the push: m8=$seam_m8"
+          say "   m4=$seam_m4 - equal to b0/b1 when the frame did not move between two passes)"
+        fi
       fi
       # **`b1` compared against the one value a correct frame can hold, not against a range.** The
       # frame's second word is the address the real exit returns to, and the wrapper's `bl` fixes it:
