@@ -519,13 +519,21 @@ if [[ $V_SEAM_MEASURE -eq 1 ]]; then
   echo "      whose return address is 0x800462dc - the \`bl FlushPoU_Dcache\` *inside* the real"
   echo "      platform_cache_idle_exit, AFTER that function's \`push {fp, lr}\` and BEFORE its \`pop {fp, pc}\`."
   echo "      What it does there is a \`dsb\`, the slot's two words read, Apple's own L1 flush through, the two"
-  echo "      words read again - and nothing else: no \`FlushPoC_DcacheRegion\`, no clean, no invalidate, no"
-  echo "      store of any kind. 535's run did not come back and left no log, so \"the operation cost the"
-  echo "      return\" and \"the interception did\" are still joined; this arm is the cell that separates them,"
+  echo "      words read again - and nothing else: no \`FlushPoC_DcacheRegion\`, no clean, no invalidate, and"
+  echo "      no store **to the slot** - this routine's stores are its own prologue's saves and its counting"
+  echo "      words, counted out of this image below. 535's run did not come back and left no log, so \"the"
+  echo "      operation cost the return\" and \"the interception did\" are still joined; this arm is the cell"
+  echo "      that separates them,"
   echo "      and it is safe by construction because it cannot write the line at all. **So read its pair the"
   echo "      other way round**: with nothing behind it the two reads are of a line only Apple's flush touched,"
   echo "      an UNEQUAL \`b\`/\`a\` pair is that flush writing the line back, and an *equal* pair is the arm"
   echo "      working as designed - where in 535's arm an unequal pair is the operation's own write-back."
+  echo "      **That rule presumes the run has a pair, so it needs the arm to be known from the log:** if"
+  echo "      this run's log carries no \`xnu_live_seam_*\` keys at all, the seam was never reached, there is"
+  echo "      no \`b\`/\`a\` pair to compare, and the rule above is NOT applied - not read as \"working as"
+  echo "      designed\" for the want of an unequal pair. run_and_capture.sh's own clause dispatches the same"
+  echo "      three ways this narration does (working as designed / the L1 flush writes the line back / unread"
+  echo "      and the pair not interpreted), and the two readers must tell one story."
   echo "      **And the published arm key says 0 here, which does not mean \"no seam\":** \`xnu_live_seam_op\`"
   echo "      publishes SEAM_POC, so this run and a no-seam run both show it at 0. They are told apart by"
   echo "      whether the \`xnu_live_seam_*\` keys were written at all - for this arm \`xnu_live_seam_calls\` is"
@@ -534,6 +542,8 @@ if [[ $V_SEAM_MEASURE -eq 1 ]]; then
   echo "      **Read this run against 565 section 3's table and not against 547 section 4's enable cells: this"
   echo "      arm is a state change at the seam itself, so its proof is the death's shape - recovered, or still"
   echo "      at the pop - and not the value of a key.**"
+  echo "      **The body this paragraph describes is read out of this image and not out of the record, at"
+  echo "      \"== the seam's own body, read out of this image and not out of the record ==\" below.**"
 elif [[ $V_SEAM_POC -eq 1 ]]; then
   echo "  the seam (SEAM_POC=1): the interception IS in this image, and 535's arm is the record above with"
   echo "      this one key at 1. \`--wrap=FlushPoU_Dcache\` is in the link, so every call site of that routine"
@@ -1901,6 +1911,118 @@ else
     echo "  zero here would be a parse failure, not a reading."
   fi
 fi
+echo
+echo "== the seam's own body, read out of this image and not out of the record =="
+# **575's rule, one layer down.** Which arm this image is gets narrated above out of
+# xnu_arm_entry-config.txt - a text file the build writes - and every sentence of that narration is a
+# claim about `entry_seam_flush`'s compiled body: "the interception IS in this image and 535's
+# operation is NOT" for one arm, "the operation is Apple's own FlushPoC_DcacheRegion over the slot's
+# eight bytes" for the other. The build checks the same property where it runs (it refuses
+# SEAM_MEASURE=1 with a FlushPoC_DcacheRegion call in the body, and `entry_trace.c` #errors on both
+# switches at once), and 575's own lesson is that a claim enforced only where the build runs is
+# unchecked everywhere the build does not: this gate reads a record, and a record can describe an image
+# that is not the one in out/. So the one property that licenses the boot - the operation is absent
+# from the measurement arm and present in 535's - is read here out of the ELF, which is the third place
+# it is answered and the only one at gate time. It is the same seam the pair clause above refuses a
+# record for: that clause reads the record's two keys against each other, this one reads the record
+# against the artifact, and neither is total alone (a record can be internally consistent and wrong).
+#
+# **What is checked is the callee, not an instruction census, and the difference is measured.** 574's
+# table gives the measurement body "0 coprocessor instructions" and prints its test beside the number
+# (`$3 ~ /^mcr/`): that pattern is right about `mcr` and blind to the class, because the routine in
+# out/ carries one **`mrc`** - `entry_sctlr`'s `15, 0, sl, cr1, cr0, {0}`, a *read* of SCTLR and not a
+# cache operation. Measured on both parked bodies: `^mcr` finds 0, `^mrc` finds 1. So the routine is
+# 115 instruction lines and 8 stores on this arm, and 118 and 10 on 535's - counts that check against
+# 574's own byte figures, 0x1CC = 115 x 4 and 0x1D8 = 118 x 4. Those stores are the
+# prologue's callee-saved saves, the seam's own counting words, and, in 535's arm only, the two words
+# it restores at `[r5]` and `[r5, #4]`. So "0 coprocessor instructions" and "no store of any kind" are
+# false as counts of this routine and true of the slot - and 535's arm is precisely the arm that DOES
+# store to the slot. A claim phrased as a census is one a census refutes, so the census below is
+# printed as a reading and the stop is on the call that names the operation.
+#
+# Four UNREAD branches, none of them a finding (549's shape, and the clause above spends its own
+# length on the same distinction): no ELF, no decoder, and a decoder that printed nothing are
+# properties of *this shell*, while a symbol named in a full disassembly that yet yields no body is a
+# parse that did not fit - reported as unusable rather than as a zero. Only the four
+# record-versus-body disagreements below stop the gate.
+_SEAM_FN=entry_seam_flush
+_seam_stream() { "$_GATE_OD" -d --no-show-raw-insn "$ENTRY_ELF" 2>/dev/null; }
+_n_instr() { grep -cE '^[[:space:]]*[0-9a-f]+:[[:space:]]+([0-9a-f]{8}[[:space:]]+)?[a-z]' <<<"$1" || true; }
+_n_mnem()  { grep -cE "^[[:space:]]*[0-9a-f]+:[[:space:]]+([0-9a-f]{8}[[:space:]]+)?($1)([[:space:]]|\$)" <<<"$2" || true; }
+_n_call()  { grep -cE "bl[[:space:]]+(0x)?[0-9a-f]+ <$1>" <<<"$2" || true; }
+if [[ ! -f $ENTRY_ELF ]]; then
+  echo "UNREAD - no $ENTRY_ELF, so which arm's body this image carries cannot be read here, and the arm"
+  echo "  narrated above rests on the record alone. A record is not the artifact: read the ELF back (it"
+  echo "  is a build product whose bin is embedded in the frozen pair) before booting into this image."
+elif ! command -v "$_GATE_OD" >/dev/null 2>&1; then
+  echo "UNREAD - $_GATE_OD is not on PATH, so the seam's body in $ENTRY_ELF was NOT read. That is a"
+  echo "  property of this shell and not of the image (549's shape): re-run with"
+  echo "  STAGE90_OBJDUMP=<a disassembler that is installed>. The comparison below did NOT happen."
+else
+  _dis_n=$(_seam_stream | grep -c '' || true)
+  _NAME_N=$(_seam_stream | grep -c "<$_SEAM_FN" || true)
+  _BODY=$(_seam_stream | awk -v fn="$_SEAM_FN" '
+    $0 ~ "^[0-9a-f]+ <" fn ">:" { infn = 1; next }
+    infn && /^[0-9a-f]+ <[^>]+>:/      { infn = 0 }
+    infn { print }
+  ' || true)
+  _BODY_N=$(_n_instr "$_BODY")
+  _REC_SEAM=0
+  (( V_SEAM_POC == 1 || V_SEAM_MEASURE == 1 )) && _REC_SEAM=1
+  if (( _dis_n == 0 )); then
+    echo "UNREAD - $_GATE_OD exited without printing anything for $ENTRY_ELF, which is 549's decoder"
+    echo "  that answers by printing nothing: a failure to read the image, not a finding about it. The"
+    echo "  comparison below did NOT happen; check that $ENTRY_ELF is the ELF it is claimed to be."
+  elif (( _BODY_N == 0 && _NAME_N > 0 )); then
+    echo "UNREAD - $_SEAM_FN is in $ENTRY_ELF ($_NAME_N line(s) name it) and this parse extracted no"
+    echo "  body from it: a parse that did not fit its own shape, not an absent seam (549's shape, which"
+    echo "  is why this is reported as unusable rather than as a zero). The comparison below did NOT"
+    echo "  happen; disassemble $_SEAM_FN in $ENTRY_ELF by hand."
+  elif (( _REC_SEAM == 1 && _BODY_N == 0 )); then
+    fail "$ENTRY_CFG records a seam (STAGE90_XNU_SEAM_POC=$V_SEAM_POC, STAGE90_XNU_SEAM_MEASURE=$V_SEAM_MEASURE) and $ENTRY_ELF has no $_SEAM_FN symbol in it at all, so the record names an arm whose body is not in this image and the narration printed above describes a seam this image does not carry. The record-to-bin clause above binds the artifact by hash, and a hash says nothing about what is in the artifact: a record written beside the wrong image passes that clause and stops here instead. Which of the two is stale is not something this gate can tell, so it names the test rather than presuming it - disassemble $ENTRY_ELF and look for $_SEAM_FN, or rebuild the entry image with the switch this arm really needs. Nothing is rebuilt by this refusal, and nothing should be: the frozen pair embeds this entry image"
+  elif (( _REC_SEAM == 0 && _BODY_N > 0 )); then
+    fail "$ENTRY_CFG records no seam (STAGE90_XNU_SEAM_POC=0, STAGE90_XNU_SEAM_MEASURE=0) and $ENTRY_ELF carries $_SEAM_FN, so the 'NO interception of this image's own' paragraph printed above is being printed over an image that has one - and that paragraph's whole content is that the flush inside the real exit is Apple's own and untested by a run of this image, which is false here. This clause reads FLUSH_WRAP=$FLUSH_WRAP for this link. Which of the two is stale is not something this gate can tell: read $_SEAM_FN's body by hand, or rebuild the entry image with the switch this arm really needs. Nothing is rebuilt by this refusal, and nothing should be: the frozen pair embeds this entry image"
+  elif (( _REC_SEAM == 0 )); then
+    echo "  no seam in the record and none in the image: $_SEAM_FN is not in $ENTRY_ELF, and the clause"
+    echo "  above reads FLUSH_WRAP=$FLUSH_WRAP - so the record's two zeros and this link agree that nothing"
+    echo "  of ours sits between the real exit's push {fp, lr} and its pop {fp, pc}. **That the image"
+    echo "  carries no seam at all is measured here rather than inferred from those two keys**; *which*"
+    echo "  unseamed arm it is still rests on the other keys printed above, so a both-0 record over a"
+    echo "  rebuilt non-seam image is that paragraph's shape without being 568's run."
+  else
+    _POC_N=$(_n_call 'FlushPoC_DcacheRegion' "$_BODY")
+    _POU_N=$(_n_call 'FlushPoU_Dcache' "$_BODY")
+    _ST_N=$(_n_mnem 'str|strb|strh|strd|stm|push' "$_BODY")
+    _CP_N=$(_n_mnem 'mcr|mrc|mcrr|mrrc|cdp|ldc|stc' "$_BODY")
+    _LD_N=$(_n_mnem 'ldr|ldrb|ldrh|ldrd|ldm|pop' "$_BODY")
+    echo "  $_SEAM_FN, read out of this image: $_BODY_N instructions, $_ST_N stores, $_CP_N coprocessor"
+    echo "  instruction(s), $_LD_N loads; it calls FlushPoU_Dcache=$_POU_N and"
+    echo "  FlushPoC_DcacheRegion=$_POC_N. The stores are the prologue's callee-saved saves and the seam's"
+    echo "  own counting words, plus the two restored words in 535's arm; the coprocessor instruction is"
+    echo "  entry_sctlr's read of SCTLR in both arms. Those counts are a reading and not the check: the"
+    echo "  check is on the call that names the operation, because the two bodies are built from the same"
+    echo "  mnemonics and the same bl count - what differs between them is which routine a bl targets."
+    if (( V_SEAM_MEASURE == 1 )); then
+      if (( _POC_N != 0 )); then
+        fail "STAGE90_XNU_SEAM_MEASURE=1 in $ENTRY_CFG and $_SEAM_FN in $ENTRY_ELF calls FlushPoC_DcacheRegion $_POC_N time(s): the record says 535's operation is NOT behind this seam and the image says it is. The narration printed above is the benign arm's, including the one reading rule that arm is worth - with nothing behind the interception an UNEQUAL b/a pair is Apple's own flush writing the line back - and that rule applied to a run of *this* image would invert the meaning of the very pair the arm exists to produce: the run would come back and be read as the other arm, which is the worst of the four states this clause tells apart. Read $_SEAM_FN's body in $ENTRY_ELF by hand, or rebuild the entry image with the switch this arm really needs. Nothing is rebuilt by this refusal, and nothing should be: the frozen pair embeds this entry image"
+      fi
+      echo "  ok: the measurement arm's record and its body agree - the interception is in the link"
+      echo "  (FLUSH_WRAP=$FLUSH_WRAP) and $_SEAM_FN calls FlushPoC_DcacheRegion $_POC_N times, so nothing of"
+      echo "  535's operation is behind it. Its $_POU_N bl into FlushPoU_Dcache is the wrapper's own call"
+      echo "  into the real routine - the L1 flush this arm passes the line to - and a call the seam does"
+      echo "  NOT divert leaves by a tail branch, which is not a bl and is not counted here."
+    else
+      if (( _POC_N < 1 )); then
+        fail "STAGE90_XNU_SEAM_POC=1 in $ENTRY_CFG and $_SEAM_FN in $ENTRY_ELF does not call FlushPoC_DcacheRegion at all: the record names 535's arm - Apple's own FlushPoC_DcacheRegion over the slot's eight bytes, bracketed by dsb - and the image carries a seam with no operation behind it, which is the other arm under this arm's name. The two are read in opposite directions: 535's run is the one that has not come back, so a boot of this image would spend the window on the arm that was already spent, and its log would be read against 535's expectations instead of the inverted rule the measurement arm is worth. What this clause can tell is that the record and the body disagree, not which is stale: disassemble $_SEAM_FN in $ENTRY_ELF by hand, or rebuild the entry image with the switch this arm really needs. Nothing is rebuilt by this refusal, and nothing should be: the frozen pair embeds this entry image"
+      fi
+      echo "  ok: 535's arm's record and its body agree - $_SEAM_FN calls FlushPoC_DcacheRegion $_POC_N"
+      echo "  time(s) over the slot's eight bytes, and the arms it is told apart from are the ones where"
+      echo "  that count is 0. Its $_POU_N bl into FlushPoU_Dcache is the wrapper's own call into the real"
+      echo "  routine, as on the other arm; a call the seam does not divert is not counted here."
+    fi
+  fi
+fi
+
 echo
 echo "  image: $IMAGE"
 echo "  booted, never flashed, so no outcome of this run can write to storage."
