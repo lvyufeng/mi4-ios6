@@ -466,9 +466,20 @@ else
 fi
 if [[ $V_EXIT_POC_FLUSH -eq 1 ]]; then
   echo "  window's far end (EXIT_POC_FLUSH=1): the exit-side FlushPoC_Dcache IS in this image - the one"
-  echo "      operation this project has now twice seen a device not come back from."
+  echo "      operation this project has now twice seen a device not come back from. **Read where its site"
+  echo "      is before reading this arm as the one under test: it is the FIRST statement of entry_trace.c's"
+  echo "      __wrap_platform_cache_idle_exit, so it runs before that wrapper's own \`mov %0, sp\` and before"
+  echo "      __real_platform_cache_idle_exit() - i.e. BEFORE the real exit's \`push {fp, lr}\`.** 565 section 2"
+  echo "      measured what that costs: the seam 547 section 5 names for the next arm is the \`bl"
+  echo "      FlushPoU_Dcache\` *inside* the real exit (the call this image's own ELF returns from at"
+  echo "      0x800462dc), which is one call LATER than this flag's. A flush before the push cannot cover a"
+  echo "      line the push has not written yet, so a run with this flag on does not test that arm, and"
+  echo "      calling it that arm's run is one value with two definitions."
 else
-  echo "  window's far end (EXIT_POC_FLUSH=0): no exit-side flush of this image's own."
+  echo "  window's far end (EXIT_POC_FLUSH=0): no exit-side flush of this image's own. That is an absence of"
+  echo "      THIS flag and not evidence that the inner seam is absent: an arm that flushes inside the real"
+  echo "      exit would arrive as its own switch, and the converse clause above refuses a record carrying a"
+  echo "      switch this gate does not print - so such an arm cannot be booted with nobody having read it."
 fi
 if [[ $V_ISTACK_SEPARATE -eq 1 ]]; then
   echo "  interrupt stack (ISTACK_SEPARATE=1): separate from the boot thread's, so an interrupt-path"
