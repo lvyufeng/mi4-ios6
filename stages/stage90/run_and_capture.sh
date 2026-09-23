@@ -146,6 +146,57 @@ exit_pop_lr_addr() {
   printf '0x%08x' "$ret"
 }
 
+# --- the address a correct frame holds in its second word, derived the same way --------------------
+#
+# Clause (5)'s `b0`/`b1` are the two words the exit's `push {fp, lr}` wrote, read back out of memory at
+# the seam. `b1` is therefore a **return address**, and there is exactly one value it can hold on a
+# correct frame: the address `platform_cache_idle_exit` returns to. That value is *not* in `cpu_idle`,
+# which is what 546 section 1 says it is, and the difference is the `--wrap` added in 517: the caller is
+# `__wrap_platform_cache_idle_exit`, whose `bl <platform_cache_idle_exit>` returns into the wrapper.
+# Measured on the frozen 574 arm: that `bl` is at `8047c98c` and returns to **`0x8047c990`**, an address
+# inside the wrapper's own extent `0x8047c964..0x8047c9c4` - and `0x8047c990` appears nowhere in this
+# repository's prose, because until now nothing compared against it.
+#
+# **Why this is derived rather than pinned, and why the loose test it replaces was not enough.** The
+# reader used to ask only whether `b1` looked like kernel text (`^0x80…` and `< 0x80600000`), and 520's
+# own log shows what that admits: a stale stack value such as `0x80553520` passes it - as would any other
+# address the idle thread's stack happens to hold, which is precisely the wrong-value case the arm exists
+# to detect. Comparing against the one address the frame *should* carry turns "is it plausible" into "is
+# it this image's frame", and the wrapper's return site is read out of the ELF at run time, so a rebuild
+# that moves it moves the comparison with it ([[mi4-a-claim-in-comment-is-not-a-check]]).
+#
+# On any failure the callers get the empty string and the reader says UNREAD rather than falling back to
+# a literal: unlike the `lr` criterion above, there is no pinned copy of this address anywhere, and
+# inventing one would be the same defect the derivation exists to avoid.
+exit_caller_lr_addr() {
+  local elf=${1:-$OUT/xnu_arm_entry.elf} od=${OBJDUMP:-arm-none-eabi-objdump}
+  local start size body ret
+  [[ -r $elf ]] || return 1
+  command -v "$od" >/dev/null 2>&1 || return 1
+  read -r start size < <("$od" -t "$elf" 2>/dev/null \
+    | awk '$NF == "__wrap_platform_cache_idle_exit" { print "0x" $1, "0x" $5; exit }') || return 1
+  [[ $start =~ ^0x[0-9a-fA-F]+$ && $size =~ ^0x[0-9a-fA-F]+$ ]] || return 1
+  body=$("$od" -d --start-address="$start" --stop-address=$(( start + size )) "$elf" 2>/dev/null) \
+    || return 1
+  # The callee is matched by its **tail** for the same reason `exit_pop_lr_addr` does it: the name may
+  # be spelled with a `__real_` prefix, and a pattern written as a literal found nothing the once it
+  # mattered. The frame's second word is the *real* routine's return address, so the callee is the one
+  # that is not the wrapper's own name.
+  ret=$(printf '%s\n' "$body" | awk '
+    /<[^<>]*platform_cache_idle_exit>/ && $0 !~ /<__wrap_/ { seen = 1; next }
+    seen && $1 ~ /^[0-9a-f]+:?$/ { a = $1; sub(/:$/, "", a); print "0x" a; exit }') || return 1
+  [[ $ret =~ ^0x[0-9a-fA-F]+$ ]] || return 1
+  (( ret % 4 == 0 )) || return 1
+  (( ret >= 0x80000000 && ret <= 0xFFFEFFFF )) || return 1
+  (( ret != start )) || return 1
+  # And the answer identifies itself to a reader who checks it: it must be inside the wrapper's own
+  # extent, which is the whole point of the correction above. A caller whose frame held something else
+  # is what the comparison is for; a derivation that returned an address *outside* the wrapper would be
+  # a derivation that had found the wrong `bl`.
+  (( ret > start && ret < start + size )) || return 1
+  printf '0x%08x' "$ret"
+}
+
 # --- the return criterion, and why it is not `adb devices` alone -------------------------
 #
 # `adb devices` is what says *where* to capture the log from. It is not what says whether the
@@ -356,6 +407,10 @@ summarise_log() {
     fi
     pop_death=0
     [[ $sleh_lr == "$pop_lr" ]] && pop_death=1
+
+    # The one address a correct frame can hold in its second word, derived from the same ELF - see
+    # `exit_caller_lr_addr`. Empty means UNREAD, and there is deliberately no literal to fall back on.
+    caller_lr=$(exit_caller_lr_addr 2>/dev/null || true)
 
     # **The lr test is the enable-off cell's criterion, and which cell this log is comes out of the
     # log too.** In the other arm of `platform_cache_idle_enter`/`_exit` the two `bl`s at
@@ -753,9 +808,37 @@ summarise_log() {
         say "  (the wrapper's own capture of those two addresses, read before the push: m8=$seam_m8"
         say "   m4=$seam_m4 - equal to b0/b1 when the frame did not move between two passes)"
       fi
-      if [[ $seam_b1 =~ ^0x80[0-9a-f]{6}$ ]] && (( seam_b1 < 0x80600000 )); then
-        say "  PASS  b1=$seam_b1 is a kernel-text address, so memory held the frame the exit's push"
-        say "        wrote - 546 section 1's premise for this cell, measured rather than assumed"
+      # **`b1` compared against the one value a correct frame can hold, not against a range.** The
+      # frame's second word is the address the real exit returns to, and the wrapper's `bl` fixes it:
+      # `${caller_lr:-?}` (derived - see `exit_caller_lr_addr`). The earlier form of this test asked only
+      # whether `b1` looked like kernel text, and 520's own log shows what that admits - a stale stack
+      # word such as `0x80553520` passes it, as would any other address the idle stack happens to hold,
+      # which is exactly the wrong-value case this arm exists to detect. `546 section 1's premise for
+      # this cell` is still the premise, but its *value* is corrected here: the return site is in
+      # `__wrap_platform_cache_idle_exit` (517's `--wrap`), not in `cpu_idle`, so the derived address is
+      # inside the wrapper's own extent rather than in the caller the document names.
+      if [[ -n $caller_lr && $seam_b1 == "$caller_lr" ]]; then
+        say "  PASS  b1=$seam_b1 is the address the real exit returns to in THIS image (derived from"
+        say "        $OUT/xnu_arm_entry.elf), so memory held the frame the exit's push wrote - 546"
+        say "        section 1's premise for this cell, with its value corrected: the return site is in"
+        say "        __wrap_platform_cache_idle_exit (the --wrap), not in cpu_idle"
+      elif [[ -z $caller_lr ]]; then
+        # **This test comes before the shape tests, and the first version had it after them**, which
+        # made it unreachable: with no decoder `caller_lr` is empty and a `b1` that looks like kernel
+        # text fell into the "kernel text but not this image's return site" arm and printed a
+        # *comparison* that had not happened - measured, on the very first rehearsal of this branch
+        # (`OBJDUMP=/nonexistent`, b1=0x8047c990: the reading printed with an empty comparison
+        # address). An UNREAD branch that cannot fire is the defect the three-state convention exists
+        # to prevent, so the "could not derive" case is tested first.
+        say "  UNREAD  b1=${seam_b1:-absent}: the return site could not be derived (no readable entry"
+        say "        ELF), so whether memory held this frame's word is not established here - and the"
+        say "        pinned literal that would let this line answer anyway does not exist, on purpose"
+      elif [[ $seam_b1 =~ ^0x80[0-9a-f]{6}$ ]] && (( seam_b1 < 0x80600000 )); then
+        say "  READING  b1=${seam_b1:-absent} is kernel text but is NOT this image's return site"
+        say "        ($caller_lr): memory held *some* kernel address where the push wrote lr, and"
+        say "        not the one this code leaves there - so the word the pop reads is the idle stack's"
+        say "        own stale content and not this frame's. That is the mechanism, seen from the near"
+        say "        side, and it is a finding rather than a failed arm"
       else
         say "  READING  b1=${seam_b1:-absent} is not a kernel-text address: memory did *not* hold the"
         say "        frame the push wrote, so the window's store had not reached it - which contradicts"
