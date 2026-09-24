@@ -48,12 +48,27 @@ entry sources precisely because a checkout produced a false refusal.
 
 `tools/verify_press_ready.sh` - four checks, one verdict, exit 0/1:
 
+> **Corrigendum (2026-09-24): the table is now five rows.** 646 added the row below from
+> `run-experiment-526`'s proposal, because checks 1-4 say the press will not be *wasted* and none of
+> them says **which arm** it sends - and the reading order for the run depends on that answer. Row 4's
+> own text (`a press would be caught`) and the numbering after it are unchanged in the file, where this
+> row is check 5. Nothing above this block was rewritten; the original table is left as 636 measured it.
+>
+> **Two readings below are therefore counts from *then*, not from now.** Section 3's opening line and
+> the falsification table's `anchor` row both say **3 ok / 1 FAIL**, which was four checks with one
+> FAIL; on the same host now the tool reads **4 ok / 1 FAIL**, and 646's own doc records the two green
+> directions. The FAIL is also not the same FAIL: 636's was `33e80afe` *in* fastboot, while at the time
+> of writing neither list names anything - which is the state a press is taken *from*, and the reason
+> the tool's own sentence says the neighbour must be **unplugged** rather than merely absent (634/635:
+> it returns on its own).
+
 | check | what it reads | what it refuses on |
 | --- | --- | --- |
 | 1. the live arm is the recorded arm | `revert-set.txt` for the set, then every member: hash **live vs record** and `cmp` **live vs park** | an absent member, a live file that is not the recorded bytes, or a park that disagrees with the record |
 | 2. the park verifies against the record | delegated to `tools/verify_revert_set.sh --set=…` - the recorded method (`sha256sum -c` is **not**, its manifest is absolute-pathed) | any member the record's own tool refuses |
 | 3. the gate accepts this tree | `preflight_boot_check.sh --allow-xnu-entry` | any gate refusal |
-| 4. a press would be caught | `fastboot devices` / `adb devices` | a list that is not `$SERIAL` alone, a state the catcher's `usable()` is false for, or **a list it could not read** |
+| 4. **the arm is named by a reading** (646) | `check_idle_window_unreachable.py` on the live entry ELF, and `STAGE90_XNU_IDLE_NO_SLEEP` out of the live entry record | a verdict sentence it has no reading for, an extractor that refuses or times out, a record that does not name the switch exactly once, or **a reading and a record that disagree** |
+| 5. a press would be caught | `fastboot devices` / `adb devices` | a list that is not `$SERIAL` alone, a state the catcher's `usable()` is false for, or **a list it could not read** |
 
 Check 1 carries two independent fields of the same bytes on purpose: the record's hash is the
 authority and the `cmp` against the park is a copy of it - two fields agreeing is what makes a typo in

@@ -114,7 +114,9 @@ about the arm rather than about the operation.
   between them from the host would be exactly the "plausible story" 597 turned into a measurement.
 * **It does not build, run, or edit anything.** No source file was changed; the arm, its park and the
   runner are untouched (`out/stage90/stage90-qcdt.img` is still `60063c47…`, still **UNRUN**), and
-  `tools/verify_press_ready.sh` still reads 3 ok / 1 FAIL with the FAIL being the neighbour.
+  `tools/verify_press_ready.sh` reads 3 ok / 1 FAIL with the FAIL being the neighbour. (That count was
+  638's; since 646 the tool has a fifth row and reads 4 ok / 1 FAIL on the same host - see 646. The
+  arm and the FAIL are unchanged.)
 * **It does not settle whether a set/way maintenance operation is defined with `SCTLR.C` clear.** That
   is the physical question §3's first row decides, and it is a property of this part, not of the ARM
   ARM's permitted implementations — which is why it is left to the run rather than argued here.

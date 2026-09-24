@@ -15,6 +15,19 @@
 #   3. the gate accepts this tree                            - stages/stage90/preflight_boot_check.sh
 #   4. a press now would actually be caught                  - `fastboot devices` / `adb devices`
 #
+# ...and one thing is true of the press *after* it is fired, which is why it is a row here rather than
+# a sentence to remember:
+#
+#   5. WHICH ARM the bytes are, named by a reading of the ELF  - tools/check_idle_window_unreachable.py
+#
+# (5) was added by 646, from `run-experiment-526`'s proposal. The operator has two gate-clean choices
+# that answer *different* questions - the sleeper arm (594/595, whose idle never sleeps and whose log
+# therefore carries no `xnu_live_seam_*` key at all, 640) and the 574 park (which enters the window once
+# per boot and whose log is the one that decides 638 section 3's `a1`/`b1` pair) - and nothing in checks
+# 1-4 says which one `out/` holds. The record cannot say it either: the switch that separates them is an
+# *entry* switch, so `stage90-build-config.txt` - the payload's own switch record - is byte-identical
+# between the two arms (`6c2b6038...`, measured 646), and the payload's switch list is what the gate
+# prints. So the arm is named by a property of the image instead, and (5) is what reads it.
 # (1) is the gap this file is written for. The gate chains image <-> entry bin <-> config record and
 # the source manifest, so it can say the image carries the arm the entry bin holds and that the entry
 # sources are the ones the manifest lists - and all of that is still true of a tree in which
@@ -195,7 +208,60 @@ else
   fi
 fi
 
-# --- 4. a press now would actually be caught -------------------------------------------------------
+# --- 4. which arm the bytes in `out/` are, named by a reading of the ELF --------------------------
+# **Why a reading and not the record.** The reading order for the press depends on this answer: the
+# sleeper arm's log carries no `xnu_live_seam_*` key (640 section 2: its seam's acting site is inside
+# `platform_cache_idle_exit`, behind 599's closed `SIGPdisabled` gate), so scoring its log on 638
+# section 3's `a1`/`b1` pair table would be a reading of a key that cannot appear. And the files a
+# reader would reach for cannot tell the arms apart: the entry record differs by one line
+# (`STAGE90_XNU_IDLE_NO_SLEEP`), and the *payload's* record - the one the gate prints - is
+# byte-identical (`6c2b6038...`, measured), because the separating switch is an entry switch.
+#
+# **The extractor's exit code is not the verdict.** Both of its verdicts exit 0, so the sentence is
+# read out of its text, and a third shape is refused rather than folded into either arm - the rule this
+# project keeps re-learning about an assumed output shape. It is also read with a timeout, because a
+# row that hangs is a row that never reached its verdict.
+ARM_CHECK=$REPO_ROOT/tools/check_idle_window_unreachable.py
+ARM_ELF=$LIVE/xnu_arm_entry.elf
+ARM_CFG=$LIVE/xnu_arm_entry-config.txt
+if [[ ! -x $ARM_CHECK ]]; then
+  bad 'the arm is named by a reading' "$ARM_CHECK is not executable, so which arm this press sends would be an operator's memory and not a reading"
+elif [[ ! -f $ARM_ELF ]]; then
+  bad 'the arm is named by a reading' "$ARM_ELF is absent - the reachability reading is taken from the entry ELF, and the ELF is not here to read"
+elif [[ ! -r $ARM_CFG ]]; then
+  bad 'the arm is named by a reading' "$ARM_CFG is not readable, so the entry record's switch cannot be compared with the reading"
+else
+  aout=$(timeout 120 "$ARM_CHECK" "$ARM_ELF" 2>&1); arc=$?
+  vline=$(printf '%s\n' "$aout" | sed -n 's/^VERDICT: //p' | head -1)
+  nsc=$(grep -c '^STAGE90_XNU_IDLE_NO_SLEEP=' "$ARM_CFG" || true)
+  swe=$(sed -n 's/^STAGE90_XNU_IDLE_NO_SLEEP=//p' "$ARM_CFG" | head -1)
+  want=''; arm=''; conseq=''
+  case $vline in
+    'the window is UNREACHABLE in this image.'*)
+      want=1
+      arm='the SLEEPLESS arm (594/595)'
+      conseq="this press's log carries NO xnu_live_seam_* key, so 638 section 3's pair table and 642's sleh_pc join are UNREAD on it (640)" ;;
+    'the window is reachable EXACTLY ONCE in this image.'*)
+      want=0
+      arm="the arm that ENTERS the window (574's park)"
+      conseq="this press's log carries the seam pair, which is what chooses between 597's candidates (A) and (B) (638 section 3)" ;;
+  esac
+  if (( arc != 0 )); then
+    bad 'the arm is named by a reading' "the reachability check exited $arc on $(basename "$ARM_ELF"), so nothing here names the arm: $(printf '%s' "$aout" | grep -m1 -E 'REFUS|Error|Traceback' | cut -c1-120)"
+  elif [[ -z $vline ]]; then
+    bad 'the arm is named by a reading' "$(basename "$ARM_ELF") produced no line beginning 'VERDICT: ' - the two sentences this row knows are not the output it got, and which arm it is cannot be inferred from either direction"
+  elif (( nsc != 1 )); then
+    bad 'the arm is named by a reading' "$(basename "$ARM_CFG") carries $nsc STAGE90_XNU_IDLE_NO_SLEEP= line(s); the record must name that switch exactly once for the reading to be compared with anything"
+  elif [[ -z $arm ]]; then
+    bad 'the arm is named by a reading' "the extractor's verdict is a sentence this row has no reading for: '$vline' - neither of the two it knows, so the arm is not named rather than named wrongly"
+  elif [[ $swe != "$want" ]]; then
+    bad 'the arm is named by a reading' "the reading says $arm, which is STAGE90_XNU_IDLE_NO_SLEEP=$want, and the entry record says STAGE90_XNU_IDLE_NO_SLEEP=$swe - one quantity with two readings, and they disagree"
+  else
+    ok 'the arm is named by a reading' "$arm: '$vline' and the entry record's STAGE90_XNU_IDLE_NO_SLEEP=$swe agrees, so $conseq"
+  fi
+fi
+
+# --- 5. a press now would actually be caught -------------------------------------------------------
 # The one row that decides whether the press is worth spending. Reads only.
 if ! command -v sudo >/dev/null 2>&1; then
   bad 'the press would be caught' "no sudo on PATH, so the device lists cannot be read - and whether a run would be fired is exactly what this row is for"
