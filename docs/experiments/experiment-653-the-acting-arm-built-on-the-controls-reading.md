@@ -181,3 +181,73 @@ waits for can write to storage and a brick is impossible by construction. The ru
 the payload's armed watchdog, and the arm that just ran is recoverable — its park verifies
 (`tools/verify_revert_set.sh … --set=frozen-574` → exit 0, 11 files) from
 `/mnt/data/mi4-ios6-export/arm-574-idle-no-sleep-0/`, which is outside the tree a build rewrites.
+
+## 6. As built, measured (2026-09-24, host-side, no device)
+
+| | |
+| --- | --- |
+| entry image | `xnu_arm_entry.bin` **`a43304f267f47f650b0fbcbbd370e9286c38d974518553293c9b453de1dc1409`**, 5,519,996 B; `.elf` `f4ef57fc…`; record `e3af19b4…` |
+| the record it wrote | `STAGE90_XNU_SEAM_POC=1`, `STAGE90_XNU_SEAM_MEASURE=0`, `STAGE90_XNU_IDLE_NO_SLEEP=0`, and the seven unchanged keys as §2 lists them — read back out of the file, not from the command line |
+| the change was narrated | `build_entry.sh` printed *"STAGE90_ENTRY_ARM_CHANGE=1 - the arm is being changed on purpose"* and the full `… -> …` pair, whose only differing tokens are the two seam keys |
+| payload | `stage90-qcdt.img` **`a5997bae5e9c4ff90c2f6bc96d47d82a9ceb75728251e9d5eab129e8b57ab512`** (what `fastboot boot` would send), `stage90.bin` `a47bc89f…`, `stage90.elf` `936c2741…`, `stage90.img` `ccbd755f…` |
+| the payload's own record is unchanged | `stage90-build-config.txt` = `6c2b6038…`, **byte-identical to both parks** — the entry switches are not in the payload's dump, which is why §2's attribution rests on the entry image's record and not on this one |
+| gate | **exit 0**, 557 lines: *"the image carries the arm the entry bin holds"* with the blob at payload offset 494,100 = image offset 496,148, and the entry record read back binding `a43304f2…` |
+| park | `out/stage90/frozen/armed-seam-poc-a43304f2/` and the durable copy `/mnt/data/mi4-ios6-export/arm-653-seam-poc-a43304f2/` — 11 files, `tools/verify_revert_set.sh … --set=armed-seam-poc-a43304f2` **exit 0** on **both** copies, manifest-member checks 6 |
+| the record of the set | a new named block in `stages/stage90/revert-set.txt`, written by hand in this step from `sha256sum` on the park's own files, as that file's header requires |
+
+### 6.1 The gate refused the first payload, and that is the step's own finding
+
+The first `./build.sh` of this step was run **without** `STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1'`, so
+the payload compiled `STAGE90_XNU_ENTRY 0u` (read out of the build's own `-dM` dump, not guessed) and the
+image never jumps into XNU. Nothing about the entry image, the park or the switch record was wrong; the
+gate refused on the flag and only on the flag:
+
+```
+REFUSING: --allow-xnu-entry was passed, but this image was built with STAGE90_XNU_ENTRY off: it never
+          jumps into XNU, so it cannot produce the log the flag is passed for. Rebuild the payload with
+          STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' …
+```
+
+That is 533 §(3)'s defect — *"the first frozen artifact was the wrong kind of image"* — reappearing on a
+different arm and caught by the thing built for it: **the gate's own refusal is what stood between a
+mis-built payload and a spent press.** The rebuilt payload carries `STAGE90_XNU_ENTRY 1` and the gate exits
+0. It is recorded because the failure is cheap here only because it was refused *before* the press, and
+because the flag is not in any record the build writes — it is a command-line token, which is exactly the
+shape 533 named.
+
+### 6.2 The readiness verdict, and a defect it had on this arm
+
+`tools/verify_press_ready.sh --park out/stage90/frozen/armed-seam-poc-a43304f2 --set armed-seam-poc-a43304f2`:
+**4 of 5 ok, and the single FAIL is physical** — the neighbour `33e80afe` is on the bus in fastboot
+(`[33e80afe	fastboot;]`), so a run fired now is refused at the ambiguity guard and boots nothing. The four
+ok rows are the arm, the park, the gate and the live-arm/park byte comparison (11 of 11).
+
+**And the arm row named the wrong arm, which is the same defect class this record is about.** It read the
+*reachability* sentence (`the window is reachable EXACTLY ONCE in this image.`) and the record's
+`IDLE_NO_SLEEP`, and printed *"the arm that ENTERS the window (**574's park**) … this press's log carries
+the seam pair, which is what chooses between 597's candidates (A) and (B)"*. **Both halves are now false of
+this arm:** there are two arms that enter the window and they answer that sentence identically, and the
+choice between (A) and (B) was already made by the measure arm's equal pair (652) — the acting arm's pair
+reads the operation's own cells (§3). A row that names the arm is a row an operator reads *before* spending
+the one press, so this is the costly shape: **the reading is the same for two arms, the record's seam pair
+is what separates them, and the row did not read it.**
+
+The repair is in `tools/verify_press_ready.sh`: the arm is named from the record's `SEAM_POC`/`SEAM_MEASURE`
+pair joined to the reachability reading, with three named arms and their own consequence sentences (acting /
+measure / enters-the-window-with-no-interception), and a record that does not carry **both** keys exactly
+once, or carries the impossible `1/1` pair the build refuses, is **refused rather than named** from the
+reachability sentence alone. Exercised in five directions, the two refusals included:
+
+| direction | reading |
+| --- | --- |
+| the live arm (`SEAM_POC=1`) | *the ACTING arm (653 …)* — the row this record pre-registers |
+| 574's park (`SEAM_MEASURE=1`) | *the MEASURE arm (574 park …)* |
+| the sleeper (`IDLE_NO_SLEEP=1`) | *the SLEEPLESS arm (594/595)* — unchanged |
+| `SEAM_POC` line deleted | **refused**: *"carries 0 STAGE90_XNU_SEAM_POC= and 1 STAGE90_XNU_SEAM_MEASURE= line(s) …"* |
+| `SEAM_POC=1 SEAM_MEASURE=1` | **refused**: *"the build refuses both at 1, so there are only three possible pairs (10, 01, 00)"* |
+
+**What is owed for the press, and it is not this arm.** With the arm parked, gated and named, the press
+waits on two things that are not in this lane's gift: the neighbour off the bus (an operator action, and
+634/635 measured that this list does not settle on its own), and a **fresh arming** of the catcher — the
+relay stopped by its own spent-press rule in 652, and the catcher is the peer session's file
+([[mi4-file-lanes]]), with two of its items unlanded. Nothing in this record arms anything.

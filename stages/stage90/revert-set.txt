@@ -129,3 +129,19 @@ set=armed-sleepless-696a0f39 sha256=696a0f39128c3fd4501dc32b1c4e04bb6b612988ce8a
 set=armed-sleepless-696a0f39 sha256=6636e2d122fc9ba6306ff66b630e05ea6304df0f0f58fcefd0ffa8baa5af3c12 bytes=756 file=xnu_arm_entry-config.txt role=entry-config-record-its-line-4-names-the-entry-696a0f39
 set=armed-sleepless-696a0f39 sha256=7f80c2cbd9b777880f89fc8f4498a43b87f2896a8b28993a73397d04d9fbdc64 bytes=6698664 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
 set=armed-sleepless-696a0f39 sha256=7ba1ee39d9ec2e1c5932ff81510db034d80744d68e9563cd6d6a0ed5646d9ca4 bytes=2104 file=xnu_arm_entry-sources.txt role=entry-source-manifest
+
+# 653 (2026-09-24): the ACTING arm - the same seam with the operation put back, on the arm that enters
+# the window. Byte-identical to frozen-574 in every switch except SEAM_POC 0->1 and SEAM_MEASURE 1->0,
+# and it is the arm experiment-653 pre-registers. Measured by `sha256sum` on the park itself, written by
+# hand in the step that made it, and reverting to it is two `cp`s and no build.
+set=armed-seam-poc-a43304f2 sha256=a5997bae5e9c4ff90c2f6bc96d47d82a9ceb75728251e9d5eab129e8b57ab512 bytes=8540160 file=stage90-qcdt.img role=qcdt-wrapped-payload-this-is-what-fastboot-boot-sends-and-the-acting-arm-the-next-press-sends
+set=armed-seam-poc-a43304f2 sha256=a47bc89fbdc92e045dd743a67acb74fcff10401cdbcc09e692a13df9adf24de3 bytes=6015356 file=stage90.bin role=raw-payload-bin-this-one-embeds-the-seam-POC-entry
+set=armed-seam-poc-a43304f2 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-byte-identical-to-the-574-and-sleeper-arms-because-it-is-the-payloads-own-dump-and-the-entry-switches-are-not-in-it
+set=armed-seam-poc-a43304f2 sha256=936c2741c4b161441db5676cb5201d09888b0d8f2cdc31521da53f763b4f539a bytes=6077388 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-seam-poc-a43304f2 sha256=a19cf08f9fd0283ec17d70096d3a6835d2f6de80217e7ae7315987823a21a50f bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-seam-poc-a43304f2 sha256=a43304f267f47f650b0fbcbbd370e9286c38d974518553293c9b453de1dc1409 bytes=5519996 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-this-is-the-acting-entry-STAGE90_XNU_SEAM_POC-1-SEAM_MEASURE-0
+set=armed-seam-poc-a43304f2 sha256=f4ef57fcf9361be238359efac523f35da33a2094a8a5b0302560c26208871761 bytes=6698664 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-seam-poc-a43304f2 sha256=e3af19b4c2d57815277c7d7dff9e2f573d74cd00d1cca46558be845acf3dbc41 bytes=756 file=xnu_arm_entry-config.txt role=entry-config-record-its-line-names-the-entry-a43304f2-and-SEAM_POC-1-SEAM_MEASURE-0-IDLE_NO_SLEEP-0
+set=armed-seam-poc-a43304f2 sha256=61c44584b5ec86826ce42f0d3eb789f1597481d67387ea1343921b429d57bf8f bytes=2104 file=xnu_arm_entry-sources.txt role=entry-source-manifest
+set=armed-seam-poc-a43304f2 sha256=ccbd755ffa7035e31f43d286f711ad61c682734e64050f9239056435d7bdeb29 bytes=6019072 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
+set=armed-seam-poc-a43304f2 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-member-all-the-same

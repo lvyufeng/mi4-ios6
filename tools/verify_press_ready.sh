@@ -216,7 +216,7 @@ else
   fi
 fi
 
-# --- 4. which arm the bytes in `out/` are, named by a reading of the ELF --------------------------
+# --- 4. which arm the bytes in `out/` are, named by a reading of the ELF AND the seam pair ----------
 # **Why a reading and not the record.** The reading order for the press depends on this answer: the
 # sleeper arm's log carries no `xnu_live_seam_*` key (640 section 2: its seam's acting site is inside
 # `platform_cache_idle_exit`, behind 599's closed `SIGPdisabled` gate), so scoring its log on 638
@@ -224,6 +224,17 @@ fi
 # reader would reach for cannot tell the arms apart: the entry record differs by one line
 # (`STAGE90_XNU_IDLE_NO_SLEEP`), and the *payload's* record - the one the gate prints - is
 # byte-identical (`6c2b6038...`, measured), because the separating switch is an entry switch.
+#
+# **Reachability alone stopped naming the arm the moment 653's arm was built, and that is the defect
+# this row was repaired for on 2026-09-24.** There are now **two** arms that enter the window - the
+# 574 park (the seam's *measure* arm, `SEAM_POC=0`/`SEAM_MEASURE=1`) and the acting arm (`SEAM_POC=1`/
+# `SEAM_MEASURE=0`) - and the extractor answers them **identically** (`the window is reachable EXACTLY
+# ONCE in this image.`), so a row that read only reachability named both of them *"574's park"* and
+# pre-registered the *measure* arm's question for the acting arm's log. The two arms' pairs mean
+# different things (572 section 6): the measure arm's pair is Apple's own L1 flush as a control - 652
+# measured it equal - while the acting arm's pair reads its own operation's cells. So the arm is named
+# from the **record's seam pair joined to the reading**, and a record that does not carry that pair
+# exactly once is refused rather than named from the reachability sentence alone.
 #
 # **The extractor's exit code is not the verdict.** Both of its verdicts exit 0, so the sentence is
 # read out of its text, and a third shape is refused rather than folded into either arm - the rule this
@@ -243,6 +254,24 @@ else
   vline=$(printf '%s\n' "$aout" | sed -n 's/^VERDICT: //p' | head -1)
   nsc=$(grep -c '^STAGE90_XNU_IDLE_NO_SLEEP=' "$ARM_CFG" || true)
   swe=$(sed -n 's/^STAGE90_XNU_IDLE_NO_SLEEP=//p' "$ARM_CFG" | head -1)
+  # The seam's arm, read from the record's own pair rather than inferred from the reachability
+  # sentence - the two window-entering arms answer that sentence identically (see the block above).
+  nsp=$(grep -c '^STAGE90_XNU_SEAM_POC=' "$ARM_CFG" || true)
+  nsm=$(grep -c '^STAGE90_XNU_SEAM_MEASURE=' "$ARM_CFG" || true)
+  wsp=$(sed -n 's/^STAGE90_XNU_SEAM_POC=//p' "$ARM_CFG" | head -1)
+  wsm=$(sed -n 's/^STAGE90_XNU_SEAM_MEASURE=//p' "$ARM_CFG" | head -1)
+  seam=''; seamwhy=''
+  if [[ $nsp == 1 && $nsm == 1 ]]; then
+    case "$wsp$wsm" in
+      10) seam=poc ;;
+      01) seam=measure ;;
+      00) seam=none ;;
+      *)  seam=badpair; seamwhy="$ARM_CFG says STAGE90_XNU_SEAM_POC=$wsp STAGE90_XNU_SEAM_MEASURE=$wsm; the build refuses both at 1, so there are only three possible pairs (10, 01, 00)" ;;
+    esac
+  else
+    seam=badcount
+    seamwhy="$ARM_CFG carries $nsp STAGE90_XNU_SEAM_POC= and $nsm STAGE90_XNU_SEAM_MEASURE= line(s); both must be named exactly once, or which of two window-entering arms this is cannot be read at all"
+  fi
   want=''; arm=''; conseq=''
   case $vline in
     'the window is UNREACHABLE in this image.'*)
@@ -251,8 +280,17 @@ else
       conseq="this press's log carries NO xnu_live_seam_* key, so 638 section 3's pair table and 642's sleh_pc join are UNREAD on it (640)" ;;
     'the window is reachable EXACTLY ONCE in this image.'*)
       want=0
-      arm="the arm that ENTERS the window (574's park)"
-      conseq="this press's log carries the seam pair, which is what chooses between 597's candidates (A) and (B) (638 section 3)" ;;
+      case $seam in
+        poc)
+          arm='the ACTING arm (653: the seam WITH its operation, SEAM_POC=1 and SEAM_MEASURE=0)'
+          conseq="this press's log carries the seam pair, and on THIS arm the pair reads the operation's own cells (run_and_capture.sh:2069-2088) - CHANGED is the operation reaching the line, CLEAN LINE is the falsifier that it did not, and STALE LINE, WRITTEN OUT cannot fire while SLOT_NULL=1 leaves rtcpre_pop absent; the frontier reading beside it is slot_post_calls, absent in every capture since 520" ;;
+        measure)
+          arm='the MEASURE arm (574 park: the interception with its operation REMOVED, SEAM_POC=0 and SEAM_MEASURE=1)'
+          conseq="this press's log carries the seam pair as a CONTROL reading - whether Apple's own FlushPoU_Dcache writes the slot's line back, which 652 measured as an equal pair - and it does not by itself select a repair: that was the reading this arm existed to produce" ;;
+        none)
+          arm='an arm that ENTERS the window with NO seam interception (SEAM_POC=0 and SEAM_MEASURE=0)'
+          conseq="this press's log carries NO xnu_live_seam_* key at all, so neither 638 section 3's pair table nor 642's sleh_pc join can be read on it" ;;
+      esac ;;
   esac
   if (( arc != 0 )); then
     bad 'the arm is named by a reading' "the reachability check exited $arc on $(basename "$ARM_ELF"), so nothing here names the arm: $(printf '%s' "$aout" | grep -m1 -E 'REFUS|Error|Traceback' | cut -c1-120)"
@@ -260,6 +298,8 @@ else
     bad 'the arm is named by a reading' "$(basename "$ARM_ELF") produced no line beginning 'VERDICT: ' - the two sentences this row knows are not the output it got, and which arm it is cannot be inferred from either direction"
   elif (( nsc != 1 )); then
     bad 'the arm is named by a reading' "$(basename "$ARM_CFG") carries $nsc STAGE90_XNU_IDLE_NO_SLEEP= line(s); the record must name that switch exactly once for the reading to be compared with anything"
+  elif [[ $seam == badcount || $seam == badpair ]]; then
+    bad 'the arm is named by a reading' "$seamwhy"
   elif [[ -z $arm ]]; then
     bad 'the arm is named by a reading' "the extractor's verdict is a sentence this row has no reading for: '$vline' - neither of the two it knows, so the arm is not named rather than named wrongly"
   elif [[ $swe != "$want" ]]; then

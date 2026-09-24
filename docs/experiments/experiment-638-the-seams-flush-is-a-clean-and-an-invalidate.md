@@ -92,6 +92,18 @@ one of these pairs alongside a return. **The pair is the choice**, and this is w
 **And the same pair is decisive whether or not the sleeper arm survives the `pop`** — the reads are
 taken either way, so a run that gets past the `pop` still selects between the two repairs.
 
+> **Measured, 2026-09-24 17:24 (652, the owed press, exit 0): the second row is the one that governs.**
+> The 574 park returned `b1 == a1 == 0x8047c990` with `SCTLR.C` clear and `seam_op=0`, so the flush **did
+> not** write DRAM: **candidate (B) is provably useless and the repair is candidate (A)** — decided by
+> measurement rather than by choice, and the first run to carry both this pair and a log. The arm it
+> selects is pre-registered in `experiment-653-…`, which is the same code with the operation put back
+> (`STAGE90_XNU_SEAM_POC=1`, `STAGE90_XNU_SEAM_MEASURE=0` — one arm of one seam).
+>
+> **Corrigendum to the `a1 == b1` row (653, measured):** the address it ends with is **`0x8047c8d4`**, not
+> `0x8047c8b4` — one digit. Measured in `out/stage90/xnu_arm_entry.elf`
+> (`__wrap_platform_cache_idle_enter`'s `strd r4, [sp, #-12]!`), and spelled that way in 519, 520, 590,
+> 597 and the gate's own bracket paragraph. The row's conclusion does not turn on the address.
+
 ## 4. A self-check the owed run gives for the first time
 
 597 showed that the fatal `pc` in both archived runs is the **value of the enter wrapper's spilled
