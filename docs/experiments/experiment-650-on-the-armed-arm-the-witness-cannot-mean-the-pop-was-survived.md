@@ -119,6 +119,44 @@ was sent, and the correct next action is a **hand-fired** `run_and_capture.sh --
 the neighbour is off the bus — "wait for it to leave fastboot" and let the catcher retry is the one
 action that cannot work, because there is no catcher any more.
 
+### The scope of that, corrected the same day and narrower than the first draft of this section
+
+**The first version of the paragraph above ended with a generalisation that is false in the safe
+direction** — *"with the neighbour in fastboot when our phone appears, the press is refused **and** the
+cover that would have caught a later attempt is gone"* — and `run-experiment-526` measured the
+counterexample rather than accepting it. Read out of `press-watcher.sh`:
+
+```
+:251   if [[ -n $(adb_state) ]] || fastboot_has; then
+:254     sleep 60                       <- the measured hold
+:255     if [[ -n $(adb_state) ]] || fastboot_has; then
+:256       if ! usable; then            <- present but not usable: waits, spends nothing
+:274       elif ambiguous; then         <- THE NEIGHBOUR-IN-FASTBOOT CASE
+:276         say "HELD and usable, but NOT firing: the fastboot list is ambiguous, so a run would be refused."
+:279         say "      … nothing has been spent; this watcher fires the moment the list settles."
+:280         _was_amb=1
+:282       else                         <- :285 "HELD and usable. Firing the gate…"
+```
+
+**`ambiguous()` is a branch the catcher HOLDS on, not one it fires through** (`:132-137`), and the
+branch loops rather than exiting — so in the neighbour-in-fastboot case the commitment line is never
+printed, `spent()` stays false, and the catcher fires by itself when the list settles (`:283`,
+*"fastboot list settled - proceeding to fire"*). It is the **prevention** case, and the operator need
+not notice anything.
+
+**So the refusal-and-cover-lost path is narrower than the first draft implied**: it needs the neighbour
+to *enter* fastboot between `:255`'s re-check and the runner's own list check — i.e. after
+`adb … reboot bootloader` has already run and the gate has passed — which is a race whose window is
+the gate's runtime plus the runner's startup. `press-watcher.sh:131` states the predicate's own purpose
+(*"a run fired now WOULD be refused"*), which is exactly the hold this section had not read.
+
+**The advice does not change; its reason does, and it changes in the direction that matters.** *Unplug
+`33e80afe` first* stands — the neighbour flaps and the general shape is worth avoiding — but the
+consequence is not "the cover dies if you don't", and an operator told that would be pushed toward
+pulling hardware or hand-firing in a state that needs neither. **This is the failure mode this project
+files as a claim that overstates a mechanism**: the mechanism was measured, the generalisation was not,
+and the generalisation is the half that changes what a person does.
+
 This makes *unplug `33e80afe` first* stronger than a precaution: with the neighbour in fastboot when
 our phone appears, the press is refused **and** the cover that would have caught a later attempt is
 gone. `run-experiment-526` found this; the measurement above reproduces it from the two scripts.
