@@ -193,11 +193,25 @@ sentence but the predicate**, and the arm the predicate needs is already derived
 (`idle_no_sleep_arm`, `:826-828`).
 
 **That makes an owed-LOG defect a separate item from this owed-PRESS one.** The press's log is not
-archived: `run_and_capture.sh` writes `/tmp/cancro-last_kmsg.txt`, which the *next* run overwrites (the
-project's convention is `out/stage90/captures/NNN-…-last_kmsg.txt`, and 526's and 533's are copies of
-that file taken by hand, in the same directory as their own arms). So unless the press's log is copied
-into `captures/` promptly after the run, the evidence this step says not to misread will not exist when
-the repair lands - and the repair is precisely about how that log is read.
+archived: `run_and_capture.sh` writes `/tmp/cancro-last_kmsg.txt`, and the project's convention is
+`out/stage90/captures/NNN-…-last_kmsg.txt`, where 526's and 533's are copies of that file taken by hand,
+in the same directory as their own arms. So unless the press's log is copied into `captures/` promptly
+after the run, the evidence this step says not to misread will not sit where the next reader looks - and
+the repair is precisely about how that log is read.
+
+> **Corrigendum (2026-09-24): the clause this paragraph used to carry - "which the *next* run
+> overwrites" - is false, and the copy is therefore not a race.** Step 2b (`run_and_capture.sh:2382`,
+> the `mv` at `:2417`, the `say` at `:2419`) moves an existing `$LOGFILE` aside to `$LOGFILE.prev` (or
+> `.prev.N`) **before** the boot, and the exit-3 message says where it went (`:2942`). Measured rather
+> than read, with no device: `tools/rehearse_live_path.sh` drives that state end to end and prints
+> `ok exit3-log-was-parked exit=3 "step 2b parked the previous run"`
+> (`tools/rehearse_live_path.sh:511`, over the runner's `PARK=parked` branch) - the harness refuses if
+> the park did not happen. So a press's log survives the next run, and the defect is the weaker but real
+> one: the parked file stays in `/tmp` under a *generational* name that carries no step number and no
+> hash, so it does not say **which** run it is, while `stages/stage90/baseline-readings.txt` identifies
+> captures by name and hash in `captures/`. **The recommendation stands unchanged; the urgency does
+> not** - a second run before the copy no longer destroys the evidence, which is worth knowing because
+> the reading order for this press was written as if it did.
 
 Neither file was edited. Both are read by the armed catch: the gate is the file the catcher fires and
 the runner is the file it fires (620), so the repair is owed for after the press - and the gate is
