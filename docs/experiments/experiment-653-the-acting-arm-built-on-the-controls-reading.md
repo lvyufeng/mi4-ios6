@@ -103,14 +103,16 @@ just ran. Everything else is byte-for-byte the same configuration, which is what
 attributable to the operation rather than to a second difference: **the only thing that changes between
 the two runs is steps 3 and 4 of one function.**
 
-**`SLOT_NULL` stays 1 deliberately, and it costs one reading.** With it at 1 the four `slot_*` words are
-not published, so `xnu_live_slot_rtcpre_pop` is absent — which is why 642's three-way join could only be
-read on one arm of three in 652, and why the reader's `op=1` cell 2 (`a1 == rtcpre_pop`, below) cannot
-fire on this arm either. Turning it to 0 would add that reading *and* a second behavioural difference
-inside the window (extra publication calls in the same pass), so it is left alone: an arm that changes the
-operation and the instrument at once cannot attribute a changed pair to either. **The value of `a1` is
-published regardless** (`xnu_live_seam_a1`), which is the number the join needs; it is named by the reader
-only in a cell that cannot fire here, and that reader gap is recorded rather than patched under a press.
+**`SLOT_NULL` stays 1 deliberately, and it costs nothing that the record claimed it cost.** With it at 1
+the four `slot_*` words are not published — and the claim that followed from that here, that
+`xnu_live_slot_rtcpre_pop` is therefore absent and 642's three-way join "could only be read on one arm of
+three", is **false and is withdrawn**: see 656. `SLOT_NULL` gates `entry_slot_null_note`
+(`entry_stubs.c:6315-6347`, the `xnu_live_slot_{sp,m16,m12,m8,m4,calls}` family) and the `rtcpre` family is
+published from **a different instrument** (`g_slot_rtcpre`, a separate key table with no `#if` guard) whose
+keys merely *start with* `slot_`. Measured: the arm that ran carries `SLOT_NULL=1` **and**
+`xnu_live_slot_rtcpre_pop=0x05006e74`. Turning it to 0 would still add a second behavioural difference
+inside the window, so it is still left alone — an arm that changes the operation and the instrument at once
+cannot attribute a changed pair to either — but the reason is that, not a lost reading.
 
 ## 3. Pre-registered readings, and the falsifiers
 
@@ -121,7 +123,11 @@ so the predictions below are the reader's own sentences, quoted:
 | --- | --- | --- |
 | `a1 ≠ b1` | **`CHANGED`** — *"the pair came back changed … and a1 is not this pass's rtcpre_pop … : a dirty line, holding something this block does not name"* | **the operation reached the line** and wrote it back to DRAM. With the control's equal pair beside it, the difference is the operation and nothing else. The **value** of `a1` is then the line's pre-pop contents, and the number to compare by hand is the death's `pc`/`r11` |
 | `a1 == b1` | **`CLEAN LINE`** — *"the line was not dirty: the clean had nothing to write out, and a pop that still died on a stale value got it from somewhere this operation does not reach — the falsifier for 546 section 3's mechanism rather than its confirmation"* | **the falsifier**: neither the level-arithmetic account, nor the dirty-line account, nor the MVA escape survives for this death. If this cell fires, the mechanism is not the flush at all and m659's identity question (the slot read ≠ the slot consumed) becomes the whole story |
-| `a1 == rtcpre_pop` | **`STALE LINE, WRITTEN OUT`** — 585's cell | the operation wrote the idle loop's own deadline where the frame's word belongs. **Unreachable on this arm** while `SLOT_NULL=1` (`rtcpre_pop` absent), recorded so that its absence is not read as its refutation |
+| `a1 == rtcpre_pop` | **`STALE LINE, WRITTEN OUT`** — 585's cell | the operation wrote the idle loop's own deadline where the frame's word belongs. **Reachable on this arm** — 656 measured that the `SLOT_NULL=1` premise for calling it unreachable was false, and fired the cell on a one-variable fixture built from the 652 capture (`seam_op` 0→1 and `a1` set to that log's own `rtcpre_pop`). It is the **strongest** of the three cells, and it has a known candidate value: the arm that ran came back with `rtcpre_pop = 0x05006e74`, which is also that run's fatal `pc`/`far`/`r11` |
+
+**All three cells are live, and each is distinguishable from the other two by the reader alone** — the
+third one's withdrawal was itself the defect 656 records, so the pre-registration above is now three rows
+of equal standing rather than two plus a note.
 
 **And the independent reading, which does not depend on the pair at all.** The frontier is the `pop`; the
 deaths of 520, 533 and 652 all have `slot_pre_calls`/`slot_rtcpre_calls` published with `slot_post_calls`

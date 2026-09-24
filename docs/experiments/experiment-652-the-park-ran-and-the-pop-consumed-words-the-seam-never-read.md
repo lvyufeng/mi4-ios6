@@ -119,6 +119,18 @@ that carries both sides of it**. The join is now made, and it **disagrees with a
 * `sleh_pc = 0x05006e74` vs `b1 = a1 = 0x8047c990` — no match (`rtcpre_pop` is absent from this log,
   so that arm of the three-way cannot even be read).
 
+> **CORRIGENDUM (656, measured 2026-09-24, host-side).** The parenthesised clause above is **false**: the
+> log *does* carry `xnu_live_slot_rtcpre_pop=0x05006e74` (line 8358 of the archived capture), and the
+> reader's own extractor sees it (`rtcpre_pop=$(keyval slot_rtcpre_pop)`, `run_and_capture.sh:1809`). The
+> absent-key claim came from grepping `xnu_live_rtcpre_pop=` — the *argument* `keyval` takes — instead of
+> the key the publisher writes, which carries a `slot_` infix (`xnu_live_slot_rtcpre_*`).
+>
+> **So the join does not disagree with all three; it matches exactly one of them.** `sleh_pc = far = pc =
+> r11 = r4 = 0x05006e74 = rtcpre_pop`, while `b1 = a1 = 0x8047c990`. Two of the three arms fail and the
+> third is an exact equality — which is a different finding from "matches none", and it narrows the
+> paragraph below ("two mechanisms are consistent with what is measured"): see `experiment-656` §4.
+> Nothing else in this record changes, and the pair's own reading (638 §3's second row) is untouched.
+
 **So the pair the arm published is not the pair the `pop` consumed**, and that is a *different* defect
 from the one the pair was built to test. Two mechanisms are consistent with what is measured, and this
 log does not separate them:
