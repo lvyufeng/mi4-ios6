@@ -262,17 +262,39 @@ THIS arm, and its keys are expected PRESENT."* That block is **18 lines** here a
 armed arm; the two runs differ in five hunks and 162 diff lines, the rest of them the config line and
 the manifest paths.
 
-**Two substitutions were necessary, and neither is free — arming this park by hand needs both:**
+**Two substitutions were necessary in a copy, and exactly one of them transfers to a real arming — the
+other inverts. Read both, because the first draft of this section got the second one backwards:**
 
-1. **The manifest must be the park's own.** The park also carries a copy of the **live**
-   `SHA256SUMS.txt`, whose paths are absolute `/mnt/data/mi4-ios6/out/stage90/…`. Used as-is it
-   verifies the live tree *from inside the park* — a check about a different directory than the one
-   under test, and one that reads OK while the artifacts it is supposed to cover are the park's. The
-   park-relative `SHA256SUMS.park.txt` is the one that belongs at `out/stage90/SHA256SUMS.txt`.
-2. **The mtimes must be fresh.** An arming that preserves them (`cp -a`, `mv`, `tar -p`) is refused by
-   the freshness sweep, because `macho_fixture.c`'s 05:02 mtime is newer than this park's 01:33
-   payload. An ordinary `cp` is not refused. The refusal is false in content and real in effect: it
-   would spend the press on nothing.
+1. **The manifest: park-relative *in a copy*, the park's own *in `out/`* — the two cases want opposite
+   files.** The park carries two manifests. The one named `SHA256SUMS.txt` (`aeb7862a…`, 560 B) has
+   **absolute** paths `/mnt/data/mi4-ios6/out/stage90/…`; `SHA256SUMS.park.txt` (`007c4601…`, 847 B) has
+   park-relative names. **In a copy elsewhere** — this scratch — the absolute form verifies the **live
+   tree** from inside a directory holding the park, i.e. a check about the wrong directory, so the
+   park-relative one is what makes the clause about the subject; that is what row 3 used. **In a real
+   arming of `out/stage90/` the answer is the opposite**: there the park's bytes *are* at those absolute
+   paths, so the park's own `SHA256SUMS.txt` is the correct file — and it is the one the record binds.
+   `stages/stage90/revert-set.txt`'s `set=frozen-574` names **that** file, `aeb7862a…` / 560 B. Putting
+   `SHA256SUMS.park.txt` in `out/stage90/` during a real arming would make `tools/verify_press_ready.sh
+   --set frozen-574` refuse on `SHA256SUMS.txt` — so the scratch's substitution must **not** be carried
+   over, and this paragraph is the correction of an earlier draft of this section that said it should.
+2. **The mtimes must be fresh, in both cases.** An arming that preserves them (`cp -a`, `mv`, `tar -p`)
+   is refused by the freshness sweep, because `macho_fixture.c`'s 05:02 mtime is newer than this park's
+   01:33 payload. An ordinary `cp` is not refused. The refusal is false in content and real in effect:
+   it would spend the press on nothing.
+
+**And the arming path is already recorded, which is the part that makes this actionable.** The park is
+**not** an artifact the record does not know: it *is* `set=frozen-574`, and
+
+```
+tools/verify_revert_set.sh /mnt/data/mi4-ios6-export/arm-574-idle-no-sleep-0 --set=frozen-574
+  → VERIFIED: 11 file(s) of frozen-574 matched the record …, 6 manifest-member check(s) agree
+```
+
+(measured 2026-09-24, read-only, exit 0 — the park is the recorded bytes, and the set covers what the
+gate reads through the manifest it verifies). So a real arming has a pre-press gate of its own:
+`tools/verify_press_ready.sh --set frozen-574 --park /mnt/data/mi4-ios6-export/arm-574-idle-no-sleep-0`,
+whose check 1 (live arm is the recorded arm) becomes the check that the swap landed, exactly as it now
+catches a swap that did *not*.
 
 **A corollary for the live gate, and for 640's repair.** The seam sentence *"for this arm
 `xnu_live_seam_calls` is present"* is printed by **both** runs — it is **true of this park** and
