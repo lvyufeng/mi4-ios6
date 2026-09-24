@@ -132,3 +132,36 @@ measurement is a read of the frozen ELF (disassembly and `nm`) and of Apple's ow
 `external/`. No file was modified: `git status` is clean and the arm still hashes to `60063c47…`. Both
 catchers were confirmed alive (pid 1344846 watcher, pid 4067419 relay). `fastboot boot` only - never
 `flash` - so no outcome of this step can write to storage.
+
+## 7. Corrigendum (2026-09-24): the arm this step pre-registers for is **built**
+
+The banner above says the pair needs "an arm that enters the window (`IDLE_NO_SLEEP=0` with
+`SEAM_MEASURE=1`), **which no build has carried**". **That clause is wrong, and only that clause.** A
+build carried exactly that combination on 2026-09-23:
+
+| | |
+|---|---|
+| entry bin | `151425c40c48cb1a417de1e4c570cb812f5b07a2e45aa41b04421c63fe34d746` (5519996 B) |
+| entry ELF | `3bc726056dfb90eeee4fbcb5afcfec32b8b356a187576a8f63ecaaad8af188c6` |
+| record | `STAGE90_XNU_SEAM_POC=0`, `STAGE90_XNU_SEAM_MEASURE=1`, `STAGE90_XNU_IDLE_NO_SLEEP=0` |
+| payload | `stage90.bin` `0f108392…`, `stage90.img` `8274b1c4…`, `stage90-qcdt.img` `914f45ac…` |
+
+Parked, with its own verified manifest, at `/mnt/data/mi4-ios6-export/arm-574-idle-no-sleep-0/`. Its
+record differs from the armed record in **two lines**, one of them the entry hash: the other is
+`IDLE_NO_SLEEP` `0` vs `1`.
+
+**What "no build has carried" was reaching for is true of a run.** `experiment-594` §"the frozen 574
+arm is untouched (`914f45ac…` / `151425c4…` / `3bc72605…`) and **unrun**". So the pre-registration
+stands exactly as written in §3 — it is *unread*, not unreachable — and the arm that reads it needs a
+**press**, not a build. That distinction is load-bearing rather than pedantic: a `build_entry.sh` run
+with the catcher armed silently swaps the armed image (636), so a reader who takes this banner at face
+value and builds the arm first spends the owed press on nothing.
+
+Two measurements were taken for this corrigendum, both host-only and both recorded in full in the
+park's `README.md` and in `experiment-641`: `tools/check_idle_window_unreachable.py` distinguishes the
+two arms cleanly (armed → `the window is UNREACHABLE in this image`; this park → `reachable EXACTLY
+ONCE`, at `0x8047be64` in `__wrap_poll`), and the two `stage90.bin`s are byte-identical outside the
+entry region, which each one hashes to the entry its own record names.
+
+Nothing else in this step changes. §1's correction to `FlushPoU_Dcache`, §2's two-readings-through-DRAM
+argument and §3's table are about the physics and stand as measured.

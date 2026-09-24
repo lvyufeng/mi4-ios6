@@ -268,3 +268,36 @@ measured inert in 634 (stubbed and unstubbed runs byte-identical, the stub never
 nothing. Nothing in `stages/`, `tools/` or `out/` was modified: `git status` is clean
 and `sha256sum out/stage90/stage90-qcdt.img` is still `60063c47…`. `fastboot boot` only - never
 `flash` - so no outcome of this step can write to storage.
+
+## 9. Corrigendum (2026-09-24): "no build has carried" is true of a **run**, not of a build
+
+§4's fifth bullet says **"The arm that would read the pair is one no build has carried. It needs the
+seam *and* the gate that opens: `IDLE_NO_SLEEP=0` together with `SEAM_MEASURE=1`. The only seam arm ever
+built was 535's, which was `SEAM_POC=1` (572)."** The first sentence and the third are false about
+builds; the paragraph's *conclusion* is right, and its own next clause is what shows why — it goes on to
+talk about a **run** ("its run left no log", "no run has ever produced one of these pairs").
+
+A build carried `IDLE_NO_SLEEP=0` together with `SEAM_MEASURE=1` and `SEAM_POC=0` on 2026-09-23 — entry
+bin `151425c4…`, entry ELF `3bc72605…`, payloads `stage90.bin` `0f108392…` / `stage90.img` `8274b1c4…` /
+`stage90-qcdt.img` `914f45ac…` — and `experiment-594` records it as **unrun**. It is not 535's arm and
+it is not a `SEAM_POC` arm. It is parked, with a verified manifest, at
+`/mnt/data/mi4-ios6-export/arm-574-idle-no-sleep-0/`.
+
+**So 638's pre-registration is unread, not unreachable, and the read costs a press rather than a
+build.** This matters beyond bookkeeping: the sentence as written sends the next reader to
+`build_entry.sh`, and a build **with the catcher armed silently swaps the armed image** (636), so
+following it literally spends the owed press on nothing.
+
+**Everything in §2, §3 and §4's other bullets stands as measured** — the acting site (`0x800462d8`
+inside `platform_cache_idle_exit`), its single route through `cpu_idle` behind the `SIGPdisabled` gate
+208 bytes earlier, the four `bl __wrap_FlushPoU_Dcache` sites, and the fact that the **armed** arm
+publishes no `xnu_live_seam_*` key. The corrigendum is about the existence of a build, not about this
+arm's reachability.
+
+One further measured detail, since §3 lists sites by `bl`: `__wrap_FlushPoU_Dcache` is **three
+instructions and a tail branch** — `mov r0, sp; mov r1, lr; b <entry_seam_flush>` — so a search for
+`bl entry_seam_flush` finds **zero** sites while the hook is in fact live. `entry_seam_flush` is 115
+instructions and byte-for-byte the same body in both arms (shifted by `0x20`); what differs between the
+two arms is reachability, not the instrument. A `bl`-only census of hooks misses every tail-called one,
+which is the mirror of the rule this project already carries — *hooks live at calls, and a hook is not
+always a `bl`*.
