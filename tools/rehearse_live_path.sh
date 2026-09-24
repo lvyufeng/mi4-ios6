@@ -27,7 +27,16 @@
 #   tools/rehearse_live_path.sh -v         # ... and print each state's full runner output
 #
 # Exit: 0 all states behaved as the contract says; 1 at least one did not, or the safety assert
-# failed. The exit code is the verdict, so it is never masked by a pipeline.
+# failed; **2 the live path's own tree (`out/stage90/`) changed under one or more states, so those
+# states have no verdict** - a separate code because "the runner is wrong" and "this run proves
+# nothing about the runner" are different claims, and the second must not be spelled like the first.
+# The TREE verdict and the pin set are explained where they are defined, above the state matrix.
+#
+# To see the TREE detector fire without writing into the live `out/`:
+#   p=$(mktemp); ( sleep 5; printf 'moved\n' >> "$p" ) & REH_TREE_EXTRA=$p tools/rehearse_live_path.sh
+# (the first state runs ~25 s, so the write lands inside it; the run then ends at exit 2 with that
+# state's -- TREE -- row instead of `ok`, and every other state is untouched). The exit code is the
+# verdict, so it is never masked by a pipeline.
 
 set -u
 VERBOSE=0
@@ -308,13 +317,108 @@ for t in sudo adb fastboot; do
   esac
 done
 
+# --- the tree the live path reads, pinned so a concurrent build cannot be read as a runner bug -----
+#
+# WHY THIS EXISTS. The states below fire the LIVE runner, and the live runner's own gate reads five
+# files in `out/stage90/` - their contents and their mtimes decide whether it proceeds or refuses.
+# Nothing here pinned them, so anything that rebuilds the arm rewrites the tree *between two of the
+# gate's own reads*, and the gate then refuses a pair of files that never existed as a whole.
+#
+# **Measured, 2026-09-24 (this is not a hypothetical).** The battery ran 17:30:04-17:39:59 while an
+# entry rebuild in this same session wrote `xnu_arm_entry.elf`/`.bin` at 17:39:41 and the config
+# record at 17:45:44 - so from 17:39:41 until the payload was rebuilt at 17:47:21 the tree was torn.
+# The two cells that straddled the write, `adb-plan-line` (17:39:34-17:39:59) and `fastboot-plan-line`
+# (17:39:59), both came back **exit 1, promised 0**, and both refusals name the tear exactly: the
+# record saying `STAGE90_XNU_SEAM_MEASURE=1` beside an image whose `entry_seam_flush` calls
+# `FlushPoC_DcacheRegion`, and `stage90.bin` embedding an entry of *the same length and different
+# bytes*. The runner was right - refusing a torn tree is the whole point of that clause - and the
+# battery printed it as a runner failure. That is 595's defect ("a harness that reported the tree's
+# motion instead of the edit under test") landing on this file, which cites 595 in its own comment
+# about `RUNNER_OVERRIDE` and did not close the same door one section down.
+#
+# So a cell whose pinned tree changed while it ran has **no verdict**: not ok, and not FAIL either,
+# because "the runner did not behave as its contract says" is a claim the reading cannot support when
+# the contract's inputs were moving. The verdicts are separate and the counts are separate, because a
+# green table that hides a torn read is the same lie in the other direction.
+#
+# **The pins are measurements, not the build's own record.** `out/stage90/SHA256SUMS.txt` is written by
+# the build that produced the files it lists, so it agrees with whatever is on disk and cannot witness
+# a swap ([[mi4-self-written-record-is-not-a-constraint]]); these are `sha256sum` and `stat` on the
+# files themselves. The mtime is part of the identity because the gate's freshness sweep *compares
+# mtimes*, so a rebuild that only rewrote a source file - or a `touch` - moves the tree the runner
+# reads without moving a byte of the five.
+#
+# **`REH_TREE_EXTRA` is this harness's own falsification knob, and it can only ADD pins.** A cell that
+# has never been seen to go TREE is the 613 shape - a detector whose firing is unreported - but a
+# detector can only be shown to fire by moving something it reads, and moving one of the five means
+# writing into the live `out/`. So the knob appends extra paths to the identity: running a state with
+# `REH_TREE_EXTRA=/tmp/probe` while something appends to `/tmp/probe` fires the in-loop guard end to
+# end. It is additive by construction (the live five are always pinned *and* are printed first), so it
+# cannot be used to disarm the guard, which is the failure mode a `TREE_DIR`-style override would have.
+REH_PINS=(xnu_arm_entry.elf xnu_arm_entry.bin stage90.bin stage90-qcdt.img xnu_arm_entry-config.txt)
+TREE_DIR=$ROOT/out/stage90
+tree_pin_line() {
+  local f=$1 label=$2
+  if [[ -r $f ]]; then
+    printf '%s sha=%s mtime=%s\n' "$label" "$(sha256sum "$f" | cut -d' ' -f1)" "$(stat -c %Y "$f")"
+  else
+    printf '%s ABSENT\n' "$label"
+  fi
+}
+tree_identity() {
+  local p e
+  for p in "${REH_PINS[@]}"; do tree_pin_line "$TREE_DIR/$p" "$p"; done
+  if [[ -n ${REH_TREE_EXTRA:-} ]]; then
+    while IFS= read -r e; do [[ -n $e ]] && tree_pin_line "$e" "$e"; done \
+      < <(printf '%s\n' "$REH_TREE_EXTRA" | tr ':' '\n')
+  fi
+}
+# **And the knob's own effect is asserted, because the first version of it added NOTHING and printed
+# as if it had.** `printf '%s' "$REH_TREE_EXTRA"` writes no trailing newline, so with a single path
+# (`REH_TREE_EXTRA=/tmp/probe`, the exact form the usage block documents) the pipeline's only line is
+# unterminated, and `while IFS= read -r` **drops an unterminated last line** - the loop body never ran,
+# `tree_identity` returned the five live pins alone, and the banner below still said "identity extended
+# with ...". Measured: the falsification run of 2026-09-24 18:09 wrote its probe 12 s into `happy-adb`
+# (state window 18:09:25-18:09:49, write 18:09:37) and the state still printed `ok`. So the detector's
+# own proof would have come back "it does not fire" while the thing that did not fire was the *knob* -
+# [[mi4-silence-is-a-reading-only-if-success-is-silent]] at the level of the guard's test, and the
+# second defect found in this block in one sitting. With N >= 2 colon-separated paths only the *last*
+# was dropped, which is the shape that would have hidden it.
+#
+# The repair is `printf '%s\n'` **plus this check**, because the fix's correctness is not the property
+# worth having: a knob whose effect is not counted can go inert again under any later edit to the loop.
+# A refusal here is the difference between "the detector did not fire" and "the detector was never armed".
+if [[ -n ${REH_TREE_EXTRA:-} ]]; then
+  _want=$(( ${#REH_PINS[@]} + $(printf '%s\n' "$REH_TREE_EXTRA" | tr ':' '\n' | grep -c .) ))
+  _got=$(tree_identity | grep -c .)
+  if (( _got != _want )); then
+    printf 'rehearse: REH_TREE_EXTRA is set to %s and the identity carries %d pin(s), not the %d\n' \
+           "$REH_TREE_EXTRA" "$_got" "$_want" >&2
+    printf '          (%d live + the extra ones) that were asked for. The knob exists to show the\n' \
+           "${#REH_PINS[@]}" >&2
+    printf '          TREE detector firing; a knob that silently adds nothing makes this run read as\n' >&2
+    printf '          "the detector does not fire". Refusing rather than running it.\n' >&2
+    trap - EXIT
+    exit 1
+  fi
+  printf 'rehearse: identity extended with %s - the FALSIFICATION knob, not the live pin set.\n' \
+         "$REH_TREE_EXTRA"
+  printf '          The five files in %s are pinned as well; this can only add.\n' "$TREE_DIR"
+  printf '          %d pin(s) in the identity, as asked.\n' "$_got"
+fi
+
 # --- the state matrix --------------------------------------------------------------------------
 #
 # Every row is a state section 1-5 of run_and_capture.sh can reach, the markers that produce it, the
 # exit code its own wording promises, and a line that must appear in its output. The `expect` lines
 # are quoted from the runner, so a state that keeps its code but changes its message is caught too.
+#
+# The pin is applied in `run_state` and deliberately NOT in `reader_state` or in section C: both of
+# those run `--summarise`, which reaches only `summarise_log` and never reads `out/stage90/` (the
+# runner's own gate and plan are below the `SUMMARISE_ONLY` branch, `run_and_capture.sh:2383`), so a
+# TREE verdict there would invalidate a cell whose reading the tree cannot have touched.
 
-pass=0; fail=0
+pass=0; fail=0; invalid=0
 declare -a ROWS=()
 
 run_state() {
@@ -407,9 +511,24 @@ run_state() {
   # is measured against, so it is shortened here for the same reason `RETURN_TIMEOUT` is - and it has
   # to stay *longer than one poll* (the runner sleeps 2 s), or the wait's refetch would never happen
   # and 618's cell would be testing the refusal path while claiming to test the wait.
+  local ident_before
+  ident_before=$(tree_identity)
   LOGFILE=$logfile RETURN_TIMEOUT=6 CAPTURE_WAIT=1 FB_AMBIG_WAIT=3 \
     timeout 120 bash "$RUNNER" --allow-xnu-entry > "$out" 2> "$err"
   local code=$?
+  # **The two reads that bracket the state, and the reason they are here rather than at the end.** The
+  # identity is taken immediately before and immediately after the runner call, so what it witnesses is
+  # *this* state's window and not the whole battery's: a tree that moved once between state 3 and state 4
+  # invalidates neither of them (each saw a constant tree), while the state that straddled it is the one
+  # that gets the TREE verdict. Taking it is O(27 MB) of hashing per read - ~0.1 s - against a state that
+  # takes ~25 s, so it is measured rather than traded against.
+  local ident_after
+  ident_after=$(tree_identity)
+  local moved=0 motion=""
+  if [[ $ident_before != "$ident_after" ]]; then
+    moved=1
+    motion=$(diff <(printf '%s\n' "$ident_before") <(printf '%s\n' "$ident_after") | grep '^[<>]' | head -6)
+  fi
   local ok=1 why=""
   if (( code != expect_code )); then ok=0; why="exit $code, promised $expect_code"; fi
   # The expectation is met by stdout **or** stderr. Half of these states end in `die`, and `die`
@@ -433,7 +552,17 @@ run_state() {
     ok=0; why="${why:+$why$'\n'}    the stub refused: $(grep -o 'rehearse-stub: .*' "$err" | head -1)"
   fi
   local nl; nl=$(printf '%s\n' "$why" | grep -c . || true)
-  if (( ok == 1 )); then
+  # **TREE outranks both.** A state whose inputs moved has no usable reading in either direction: its
+  # exit code may be the runner refusing a torn tree (which is correct behaviour and would still be
+  # printed as `FAIL exit 1, promised 0`), and a state that *passed* is no better evidence - it may have
+  # read a tree that was briefly whole. So the verdict is withheld rather than guessed, and the reader
+  # is told which pin moved instead of which sentence was missing.
+  if (( moved == 1 )); then
+    invalid=$((invalid+1))
+    printf '  TREE  %-28s the pinned tree changed while this state ran - NO VERDICT\n' "$name"
+    printf '%s\n' "$motion" | sed 's/^/        | /'
+    if (( VERBOSE == 1 )); then sed 's/^/        | /' "$out" | tail -20; fi
+  elif (( ok == 1 )); then
     pass=$((pass+1)); printf '  ok    %-28s exit=%s  %s\n' "$name" "$code" "$expect_text"
   else
     fail=$((fail+1)); printf '  FAIL  %-28s %s\n' "$name" "$why"
@@ -612,12 +741,30 @@ run_state adb-plan-line              0 "sudo adb -s 4a2fe00b reboot bootloader" 
 run_state fastboot-plan-line         0 "the device is already in fastboot, so this run issues no adb" \
                                        'forbid:sudo adb -s 4a2fe00b reboot bootloader'
 
-printf '\n  %d ok, %d failed\n' "$pass" "$fail"
+printf '\n  %d ok, %d failed' "$pass" "$fail"
+if (( invalid > 0 )); then printf ', %d with no verdict (the tree moved)' "$invalid"; fi
+printf '\n'
+# **Two exits, two claims, and the order is the point.** A FAIL is outranks TREE, because one real
+# misbehaviour ends the question; but a run with ONLY TREE cells is not exit 1, because exit 1 would say
+# "a live-path state does not behave as its own contract says" about states whose contract inputs were
+# moving. It is exit 2: a distinct verdict, so a reader (or a script) can tell "the runner is wrong" from
+# "this run proves nothing about the runner" without reading prose.
 if (( fail > 0 )); then
   printf '\nREFUSING: at least one live-path state does not behave as its own contract says.\n'
   printf 'Every output is kept under %s while this shell lives; re-run with -v to see them.\n' "$WORK"
   trap - EXIT
   exit 1
+fi
+if (( invalid > 0 )); then
+  printf '\nNO VERDICT: the tree the live path reads changed while %d state(s) were running (above),\n' "$invalid"
+  printf 'so those states were neither green nor red. That is NOT a statement about the runner: %s\n' "$TREE_DIR"
+  printf 'was rewritten under a state that had already read part of it, and the runner'\''s gate refusing a\n'
+  printf 'torn tree is what it is supposed to do. Run the battery against a quiescent tree - nothing\n'
+  printf 'building, in either session - for a reading of the runner. (636 is the same hazard from the\n'
+  printf 'press side: a build with the catch armed swaps the arm the gate is checking.)\n'
+  printf 'Every output is kept under %s while this shell lives; re-run with -v to see them.\n' "$WORK"
+  trap - EXIT
+  exit 2
 fi
 printf '\nAll of the live path''s reachable states behave as their own wording promises, with no\n'
 printf 'device, no build, no fastboot and nothing written to storage.\n'
