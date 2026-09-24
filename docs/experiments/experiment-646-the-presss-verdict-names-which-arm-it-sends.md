@@ -35,7 +35,10 @@ question, two records, and only one of them is about the arm.
 ## 2. The reading, and its positive control
 
 `tools/check_idle_window_unreachable.py` already turns "which arm is this" into a property of the
-image. It is now row 4 of the press verdict, and it reads the ELF's own instruction stream:
+image. It is now a row of the press verdict - the one the table prints as **`the arm is named by a
+reading`**, and cite it by that label rather than by a number: 647 found that 646 had numbered it 4 in
+the body and 5 in the header, so the ordinal named two different rows inside the one file. It reads the
+ELF's own instruction stream:
 
 ```
 tools/verify_press_ready.sh
@@ -152,3 +155,63 @@ storage and a brick is impossible by construction. Both catchers were confirmed 
 watcher, pid 4067419 relay). One file changed - `tools/verify_press_ready.sh` - plus this record.
 `tools/rehearse_live_path.sh` is green on the tree as it stands: **20 ok / 0 failed** on the live-path
 states, 4 ok / 0 failed on the path argument, and the reading table.
+
+## 8. Ordinal correction, same day (647): this step's row had two numbers in one file
+
+`run-experiment-526` measured it in this lane's file, read-only, and the measurement is right. 646
+added its row to `tools/verify_press_ready.sh` and numbered it in **both** places a reader looks -
+and numbered it differently in each:
+
+| where | the device row | the arm row |
+| --- | --- | --- |
+| the header list (`:13-:21`), which is also what `--help` prints | **4** (`a press now would actually be caught`) | **5** (`WHICH ARM the bytes are`) |
+| the body section comments (`:211`, `:264`), i.e. run and print order | **5** | **4** |
+| `70a66f2`'s own message | *"the device row keeps its wording, now check 5"* | *"one row added as check 4"* |
+
+So `check 4` named one row in the header and a different row in the body, **inside one file** -
+`[[mi4-one-value-two-definitions]]`, and the sharper version of it: not two *values* of one quantity but
+two *referents* of one ordinal.
+
+**And it was load-bearing rather than cosmetic**, which is why it is a section and not a footnote. The
+header's own substantive sentence, *"nothing in checks 1-4 says which one `out/` holds"*, is **true
+under the header's numbering** (1-4 are the original four, the arm row is 5) and **false under the
+body's** (4 *is* the arm row, i.e. exactly the row that says which arm `out/` holds). So neither list
+could be read as authoritative by a reader who noticed the disagreement, and both were self-consistent
+in isolation - the shape that makes a defect survive review.
+
+The repair is the header, and it is the direction the file's own reality picks: **the rows are numbered
+in the order they RUN and PRINT**, which is the body's numbering already - `CHECKS[]` is filled live
+arm, park, gate, arm, device, so the arm row is the fourth line of the table. The body section comments
+were left untouched; the header list, its "four separate things" framing, and the three ordinal
+sentences that depended on it were rewritten. The two sentences that *were* the ordinals are now
+statements:
+
+* *"nothing in checks 1-4 says which one `out/` holds"* → **"none of the other rows says which one
+  `out/` holds"**, which is true whichever position the row holds;
+* *"(5) was added by 646"* → **"the arm row was added by 646 ... and it took the fourth position"**,
+  and it says *why* the fourth: the rows are ordered by what they read, and the arm is a property of the
+  bytes in `out/` while the two device reads come last.
+
+**And the file now states the rule its own header was the counterexample to**: its prose cites a row by
+the **label the table prints** (`the arm is named by a reading`, `the press would be caught`), "because
+an ordinal is a name a later insert can silently move to another row". That is the repair's real
+content - the next row inserted into this tool cannot recreate the defect.
+
+**Two things were checked before calling it repaired, and one is the reason it is safe to have done at
+all:**
+
+* **It is comment-only, and the tool proves it.** The tool prints **no ordinal anywhere**: `row()`
+  renders `VERDICT / CHECK / READING` keyed on the name strings in `CHECKS[]`, and both summaries are
+  `%d of %d check(s)`. So no log, no FAIL row, no verdict and no exit code can carry a number. Measured
+  on the two revisions: identical output, **4 ok / 1 FAIL, exit 1**, the same five rows in the same
+  order, and `bash -n` clean.
+* **`verify_press_ready.sh` is not a file the armed catcher fires.** It is a reader the *operator* runs
+  before a press; `press-watcher.sh` and `press-watcher-relay.sh` name neither it nor `tools/` at all
+  (grepped). So editing it while the catch is armed does not change what the owed press executes -
+  which is the 620 rule this step had to satisfy before touching a file, and the reason this repair and
+  the two owed runner/gate repairs are not the same kind of change.
+
+Nothing built, nothing run against a device, no `fastboot`, no `adb`, nothing written to storage; the
+arm is unchanged (`out/stage90/stage90-qcdt.img` is `60063c47…`, entry `696a0f39…`, still **UNRUN**).
+636's corrigendum carries the companion note, because 636's own falsification table cites `check 4` for
+the device row under *636's* numbering and is left as measured.

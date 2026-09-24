@@ -49,10 +49,19 @@ entry sources precisely because a checkout produced a false refusal.
 `tools/verify_press_ready.sh` - four checks, one verdict, exit 0/1:
 
 > **Corrigendum (2026-09-24): the table is now five rows.** 646 added the row below from
-> `run-experiment-526`'s proposal, because checks 1-4 say the press will not be *wasted* and none of
-> them says **which arm** it sends - and the reading order for the run depends on that answer. Row 4's
-> own text (`a press would be caught`) and the numbering after it are unchanged in the file, where this
-> row is check 5. Nothing above this block was rewritten; the original table is left as 636 measured it.
+> `run-experiment-526`'s proposal, because the rows above say the press will not be *wasted* and none
+> of them says **which arm** it sends - and the reading order for the run depends on that answer. The
+> new row took position **4**, and the device row (`a press would be caught`) moved to **5**, so the
+> list reads in the order the checks run and the table prints. Nothing above this block was rewritten;
+> the original table is left as 636 measured it.
+>
+> **And 636's own `check 4` references below are read under *636's* numbering**, where the device row
+> was the fourth: rows **E-H** of section 3's falsification table (`check 4 FAIL *"the device lists
+> could not be READ …"*`, and the three beside it) are all about `the press would be caught`, which is
+> **check 5** in the file now. They were not renumbered, because they are a measurement taken on a
+> four-row tool and a find/replace over someone else's falsification table is how a record stops being
+> one. **The lesson is the file's own, and 647 acted on it there**: a row is cited by the label the
+> table prints, never by its position, because a later insert moves the position silently.
 >
 > **Two readings below are therefore counts from *then*, not from now.** Section 3's opening line and
 > the falsification table's `anchor` row both say **3 ok / 1 FAIL**, which was four checks with one

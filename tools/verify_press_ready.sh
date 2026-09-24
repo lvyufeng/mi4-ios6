@@ -7,27 +7,35 @@
 # The next press sends exactly one command - `fastboot boot out/stage90/stage90-qcdt.img` - and the
 # payload build is NOT byte-reproducible (408). `out/stage90/` holds the only copy of the armed arm
 # that has ever existed, and the press cannot be repeated: one press, one run, and the arm is spent.
-# Four separate things have to be true at the moment of the press, and until this file existed each
-# was checked by a *different* tool, by hand, in a different session:
+# Five things must be true at the moment of the press, and until this file existed each was checked
+# by a *different* tool, by hand, in a different session. **They are numbered in the order they RUN
+# and PRINT, and that is the only numbering in this file** - prose below cites a row by the label the
+# table prints (`the arm is named by a reading`, `the press would be caught`), because an ordinal is
+# a name a later insert can silently move to another row:
 #
 #   1. the bytes in `out/` are the bytes the park holds      - the gate does NOT check this
 #   2. the park is the set the record describes              - tools/verify_revert_set.sh
 #   3. the gate accepts this tree                            - stages/stage90/preflight_boot_check.sh
-#   4. a press now would actually be caught                  - `fastboot devices` / `adb devices`
+#   4. WHICH ARM the bytes are, named by a reading of the ELF - tools/check_idle_window_unreachable.py
+#   5. a press now would actually be caught                  - `fastboot devices` / `adb devices`
 #
-# ...and one thing is true of the press *after* it is fired, which is why it is a row here rather than
-# a sentence to remember:
+# The arm row was added by 646, from `run-experiment-526`'s proposal, and it took the fourth position
+# rather than the fifth because the rows are ordered by what they read - the arm is a property of the
+# bytes in `out/`, and the two device reads come last - so the list reads top to bottom as the run
+# prints it. The operator has two gate-clean choices that answer *different* questions - the sleeper
+# arm (594/595, whose idle never sleeps and whose log therefore carries no `xnu_live_seam_*` key at
+# all, 640) and the 574 park (which enters the window once per boot and whose log is the one that
+# decides 638 section 3's `a1`/`b1` pair) - and none of the other rows says which one `out/` holds.
+# The record cannot say it either: the switch that separates them is an *entry* switch, so
+# `stage90-build-config.txt` - the payload's own switch record - is byte-identical between the two
+# arms (`6c2b6038...`, measured 646), and the payload's switch list is what the gate prints. So the
+# arm is named by a property of the image instead, and the arm row is what reads it.
 #
-#   5. WHICH ARM the bytes are, named by a reading of the ELF  - tools/check_idle_window_unreachable.py
-#
-# (5) was added by 646, from `run-experiment-526`'s proposal. The operator has two gate-clean choices
-# that answer *different* questions - the sleeper arm (594/595, whose idle never sleeps and whose log
-# therefore carries no `xnu_live_seam_*` key at all, 640) and the 574 park (which enters the window once
-# per boot and whose log is the one that decides 638 section 3's `a1`/`b1` pair) - and nothing in checks
-# 1-4 says which one `out/` holds. The record cannot say it either: the switch that separates them is an
-# *entry* switch, so `stage90-build-config.txt` - the payload's own switch record - is byte-identical
-# between the two arms (`6c2b6038...`, measured 646), and the payload's switch list is what the gate
-# prints. So the arm is named by a property of the image instead, and (5) is what reads it.
+# **Rows 1-3 say the press will not be *wasted*; the arm row says what the run that follows will be
+# able to answer, and the device row says whether a press fired now would be caught at all.** That is
+# the distinction that makes the arm row worth having: two gate-clean arms pass rows 1-3 identically,
+# and only the arm row tells the operator which question the one press is about to ask.
+
 # (1) is the gap this file is written for. The gate chains image <-> entry bin <-> config record and
 # the source manifest, so it can say the image carries the arm the entry bin holds and that the entry
 # sources are the ones the manifest lists - and all of that is still true of a tree in which
