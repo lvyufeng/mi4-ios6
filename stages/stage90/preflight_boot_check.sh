@@ -119,8 +119,47 @@ _readable "$IMAGE" "the boot image is what the entry-blob comparison and the str
 echo "== build configuration =="
 cat "$CONFIG"
 
+# Read one `#define` out of the record. The key match is on the WHOLE second field rather than on
+# a prefix, and this is why the function is awk rather than the obviously tidier tolerant `sed`:
+# `s/^#define $1[[:space:]]*//p` repairs the whitespace cases below and opens a prefix collision in
+# the same edit - `STAGE90_K_SHA256 abcd` answers for `STAGE90_K` with `_SHA256 abcd` and
+# `STAGE90_KNEE 7` answers with `NEE 7` (both measured 2026-09-23). The bare `[[:space:]]*` after an
+# unanchored `$1` is what does it; the pattern this replaces happened to be safe only because it
+# demanded a literal space, which is a property of that accident and not of the rule.
+# A key whose line carries no value prints empty here exactly like a key with no line at all. The
+# two are different records and are told apart by `value_reason`, never by this function's output.
 value_of() {
-  sed -n "s/^#define $1 //p" "$CONFIG"
+  awk -v k="$1" '
+    $1 == "#define" && $2 == k {
+      v = $0; sub(/^[[:space:]]*#define[[:space:]]+[^[:space:]]+[[:space:]]*/, "", v); print v; exit
+    }' "$CONFIG"
+}
+
+# Why `value_of` came back empty, as a REASON and not as an emptiness: `absent` (the record has no
+# such line) and `empty` (the line is there and carries nothing - a bare `#define K`, or a value the
+# extractor cannot see) are two different records, and 632's shape is printing them as one sentence
+# naming the wrong one. A tolerant extractor does not make this function unnecessary: `#define K`
+# still answers empty however tolerant the pattern is, so the tolerance moves the boundary and does
+# not remove it.
+value_reason() {
+  awk -v k="$1" '
+    BEGIN { r = "absent" }
+    $1 == "#define" && $2 == k {
+      v = $0; sub(/^[[:space:]]*#define[[:space:]]+[^[:space:]]+[[:space:]]*/, "", v)
+      r = (v == "") ? "empty" : "ok"; exit
+    }
+    END { print r }' "$CONFIG"
+}
+
+# OFF is a value the record STATES, not a value this gate failed to find. The `case` blocks below
+# used to write `0|0u|""`, grouping the empty value with the off values - so a malformed record took
+# the off branch in silence. At the fault-injection block that branch is where the
+# `--allow-fault-inject` refusal sits, which is why that one was functional rather than cosmetic.
+is_off() {
+  case "$1" in
+    0|0u) return 0 ;;
+    *)    return 1 ;;
+  esac
 }
 
 MODE=$(value_of STAGE90_HANDOFF_MODE)
@@ -131,7 +170,48 @@ HWWDT=$(value_of STAGE90_HW_WATCHDOG)
 HWSELFTEST=$(value_of STAGE90_HW_WATCHDOG_SELFTEST)
 FAULT_INJECT=$(value_of STAGE90_HANDOFF_FAULT_INJECT_VA)
 
-[[ -n $MODE ]] || fail "STAGE90_HANDOFF_MODE missing from $CONFIG"
+# The same discipline `ENTRY_CFG_KEYS` applies to the entry record, applied to THIS record - which
+# had one of the sixteen keys asserted and the other fifteen read on faith. `$MODE` guarded the one
+# key every clause below happens to mention; a record missing any other key printed its own absence
+# as an OFF state, because `value_of` answers empty for "no line" and for "a line with no value"
+# alike and the blocks that consumed it grouped empty with off. Presence here is a VALUE, not a
+# line: `#define STAGE90_XNU_ENTRY` with nothing after it is a malformed record and not an off arm.
+BUILD_CFG_KEYS=(STAGE90_HW_WATCHDOG STAGE90_HANDOFF_MODE STAGE90_CACHE_MODE
+                STAGE90_ENTRY_LADDER_LEVEL STAGE90_XNU_ENTRY STAGE90_HANDOFF_FAULT_INJECT_VA
+                STAGE90_DEADMAN_SELFTEST STAGE90_XNU_BOOT_ARGS STAGE90_XNU_MSM8974_FIQ_PROBE
+                STAGE90_XNU_REAL_DT STAGE90_PMAP_ATTR_MODE STAGE90_BYPASS_ENTRY_STUB
+                STAGE90_EXCLUSIVE_PROBE STAGE90_XNU_MSM8974_SHIM STAGE90_DEADMAN_ENABLE
+                STAGE90_HW_WATCHDOG_SELFTEST)
+for _k in "${BUILD_CFG_KEYS[@]}"
+do
+  case "$(value_reason "$_k")" in
+    ok) ;;
+    absent)
+      fail "$CONFIG has no $_k line - every clause below reads this record and narrates a state from
+it, and a key that is not in the record is a state nobody chose. This gate cannot refuse the run
+for the key being unrecorded and useless: the record IS the only place the build's switches are
+readable from, so a missing key would be narrated as the state the code defaults to."
+      ;;
+    empty)
+      fail "$CONFIG has a $_k line with no value after it. This is NOT the same as the key being
+absent: the line is there and the gate cannot read a value out of it. A bare '#define $_k' is the
+common cause, and a value carrying leading whitespace the old extractor did not tolerate was the
+other. Both used to print as an OFF state, and at STAGE90_HANDOFF_FAULT_INJECT_VA the off branch is
+where the --allow-fault-inject refusal is skipped."
+      ;;
+  esac
+  printf '  %s=%s\n' "$_k" "$(value_of "$_k")"
+done
+# And the converse, so a key this list does not name cannot arrive unread - the same arrow-reversed
+# check ENTRY_CFG_KEYS carries, for the same reason: without it the list above would be the only
+# definition of what is visible, and a key added on the build side would be recorded and never read.
+_unshown=$(awk '$1 == "#define" && $2 ~ /^STAGE90_/ { print $2 }' "$CONFIG" | LC_ALL=C sort -u \
+           | LC_ALL=C comm -23 - <(printf '%s\n' "${BUILD_CFG_KEYS[@]}" | LC_ALL=C sort -u))
+[[ -z $_unshown ]] \
+  || fail "$CONFIG carries key(s) this gate does not read: $(printf '%s\n' "$_unshown" | tr '\n' ' ')- a switch recorded on the build side and never read here is a switch this run goes out with unshown; add it to BUILD_CFG_KEYS above"
+# `LC_ALL=C` on all three, the same pin the entry-sources comparison uses: the two agree with each
+# other under the ambient locale only by accident.
+MODE=$(value_of STAGE90_HANDOFF_MODE)
 
 echo
 echo "== image integrity =="
@@ -872,19 +952,37 @@ if [[ $V_SEAM_MEASURE -eq 1 ]]; then
   echo "      an UNEQUAL \`b\`/\`a\` pair is that flush writing the line back, and an *equal* pair is the arm"
   echo "      working as designed - where in 535's arm an unequal pair is the operation's own write-back."
   echo "      **That rule presumes the run has a pair, so it needs the arm to be known from the log:** if"
-  echo "      this run's log carries no \`xnu_live_seam_*\` keys at all, the seam was never reached, there is"
-  echo "      no \`b\`/\`a\` pair to compare, and the rule above is NOT applied - not read as \"working as"
-  echo "      designed\" for the want of an unequal pair. run_and_capture.sh's own clause dispatches the same"
+  echo "      this run's log carries no \`xnu_live_seam_*\` keys at all, there is no \`b\`/\`a\` pair to compare,"
+  echo "      and the rule above is NOT applied - not read as \"working as designed\" for the want of an"
+  echo "      unequal pair. **That absence has two causes and one of them is this record's own switch:**"
+  echo "      either the seam was never reached, or this image is *also* the sleepless arm"
+  echo "      (\`IDLE_NO_SLEEP=1\`), where the acting site is unreachable by construction - the idle block"
+  echo "      above says which of the two this record is, and on that arm the keys are absent on an image"
+  echo "      that genuinely carries the arm, so its keyless log is NOT evidence about the seam at all."
+  echo "      run_and_capture.sh's own clause dispatches the same"
   echo "      three ways this narration does (working as designed / the L1 flush writes the line back / unread"
   echo "      and the pair not interpreted), and the two readers must tell one story."
-  echo "      **And the published arm key says 0 here, which does not mean \"no seam\":** \`xnu_live_seam_op\`"
-  echo "      publishes SEAM_POC, so this run and a no-seam run both show it at 0. They are told apart by"
-  echo "      whether the \`xnu_live_seam_*\` keys were written at all - for this arm \`xnu_live_seam_calls\` is"
-  echo "      present - and a reader that read op=0 as the no-seam arm would be reading two arms as one"
-  echo "      (absent is not zero, 569's reading and 526's distinction)."
-  echo "      **Read this run against 565 section 3's table and not against 547 section 4's enable cells: this"
-  echo "      arm is a state change at the seam itself, so its proof is the death's shape - recovered, or still"
-  echo "      at the pop - and not the value of a key.**"
+  if [[ $V_IDLE_NO_SLEEP -eq 1 ]]; then
+    echo "      **The published arm key says 0 here, and on this record it still does not mean \"no seam\" - but"
+    echo "      the usual way of telling those two apart does not run here:** \`xnu_live_seam_op\` publishes"
+    echo "      SEAM_POC, so a measure arm and a no-seam arm both show it at 0, and the separator that"
+    echo "      sentence used to name (\`xnu_live_seam_calls\` present) is FALSE on this record - the pair keys"
+    echo "      are an expected absence above, so *presence* cannot be the test that separates them here."
+    echo "      **No key in this run's log separates them**, so this paragraph is narration about an arm this"
+    echo "      one is not: read the idle ladder instead, which is the ladder this arm can produce."
+    echo "      **And the next sentence is that other arm's proof too:** 565 section 3's table and 547"
+    echo "      section 4's enable cells both presume a run that reaches the window, and this one leaves by"
+    echo "      the first door on every pass - so its proof is the ladder and the return, not a death shape."
+  else
+    echo "      **And the published arm key says 0 here, which does not mean \"no seam\":** \`xnu_live_seam_op\`"
+    echo "      publishes SEAM_POC, so this run and a no-seam run both show it at 0. They are told apart by"
+    echo "      whether the \`xnu_live_seam_*\` keys were written at all - for this arm \`xnu_live_seam_calls\` is"
+    echo "      present - and a reader that read op=0 as the no-seam arm would be reading two arms as one"
+    echo "      (absent is not zero, 569's reading and 526's distinction)."
+    echo "      **Read this run against 565 section 3's table and not against 547 section 4's enable cells: this"
+    echo "      arm is a state change at the seam itself, so its proof is the death's shape - recovered, or still"
+    echo "      at the pop - and not the value of a key.**"
+  fi
   echo "      **The body this paragraph describes is read out of this image and not out of the record, at"
   echo "      \"== the seam's own body, read out of this image and not out of the record ==\" below.**"
 elif [[ $V_SEAM_POC -eq 1 ]]; then
@@ -1470,24 +1568,25 @@ esac
 
 echo
 echo "== fault injection =="
-case "$FAULT_INJECT" in
-  0|0u|"")
+if is_off "$FAULT_INJECT"; then
     echo "off: the handoff targets the Stage-owned high-VA function as usual."
-    ;;
-  *)
+else
     [[ $ALLOW_FAULT_INJECT -eq 1 ]] || fail "this build jumps at an intentionally unmapped VA ($FAULT_INJECT); needs --allow-fault-inject"
     echo "FAULT INJECTION: this build will jump at $FAULT_INJECT, which is expected to be"
     echo "          unmapped, and the abort path should log the fault and reboot."
     echo "          Expected evidence: an 'exception pabort ... lr=$FAULT_INJECT' line."
     echo "          A silent hang or a boot loop instead means the address IS mapped -"
     echo "          the failure mode this mode exists to avoid."
-    ;;
-esac
+fi
+# `is_off` rather than `case "$FAULT_INJECT" in 0|0u|"")`: with the empty value grouped into the off
+# arm, a record whose fault-inject key carried no value skipped this refusal entirely and narrated
+# "the handoff targets the Stage-owned high-VA function as usual" - a statement about which function
+# the handoff targets, made from a record that does not say. The presence loop above now refuses that
+# record first, so this is the second line of defence and not the first.
 
 echo
 echo "== entering XNU =="
-case "$(value_of STAGE90_XNU_ENTRY)" in
-  0|0u|"")
+if is_off "$(value_of STAGE90_XNU_ENTRY)"; then
     # **The flag and the image can disagree, and until now nothing compared them.** Every step in
     # this line builds the payload with STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' — e.g.
     # docs/experiments/experiment-491-the-bit-registration-sets.md, step 4 — and a payload built
@@ -1506,8 +1605,7 @@ case "$(value_of STAGE90_XNU_ENTRY)" in
       || fail "--allow-xnu-entry was passed, but this image was built with STAGE90_XNU_ENTRY off: it never jumps into XNU, so it cannot produce the log the flag is passed for. Rebuild the payload with STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' (see docs/experiments/experiment-491-the-bit-registration-sets.md step 4), or drop the flag if a ladder run is what was meant"
     echo "off: the payload runs its own ladder and reboots, as in every stage so far."
     echo "          (--allow-xnu-entry was NOT passed, so this image is gated as a ladder run.)"
-    ;;
-  *)
+else
     [[ $ALLOW_XNU_ENTRY -eq 1 ]] || fail "this build jumps into XNU's _start and never returns; needs --allow-xnu-entry"
     echo "ENTERING XNU: the payload copies a linked image containing XNU's real osfmk/arm/start.s"
     echo "          to PA 0x80000000 (experiment 241's base; 0x00200000 before it), hands it a"
@@ -1732,8 +1830,7 @@ case "$(value_of STAGE90_XNU_ENTRY)" in
     echo "          exit 3), which is a reading the net cannot give. A hang here may need a"
     echo "          power press, and the device is never at risk of being bricked - nothing in"
     echo "          this project is ever written to storage."
-    ;;
-esac
+fi
 
 echo
 echo "== later-phase probes =="
@@ -1742,26 +1839,29 @@ echo "== later-phase probes =="
 # are listed rather than ignored so that "the run passed" and "the shim passed" cannot be
 # confused - the payload says so in the log too. Neither changes any mapping or boot decision, so
 # there is nothing to allow; if either ever does, it needs a flag of its own.
-case "$(value_of STAGE90_XNU_BOOT_ARGS)" in
-  0|0u|"") echo "conforming boot_args (Phase 2): off - only the ladder's own identity-based args exist." ;;
-  *)       echo "conforming boot_args (Phase 2): ON, as a second object alongside the ladder's. It"
+if is_off "$(value_of STAGE90_XNU_BOOT_ARGS)"; then
+  echo "conforming boot_args (Phase 2): off - only the ladder's own identity-based args exist."
+else
+  echo "conforming boot_args (Phase 2): ON, as a second object alongside the ladder's. It"
            echo "          is built and its invariants checked against the real __stage90_image_end."
-           echo "          Non-fatal: read xnu_ba_checks/xnu_ba_failures in the log for its verdict." ;;
-esac
-case "$(value_of STAGE90_XNU_MSM8974_SHIM)" in
-  0|0u|"") echo "MSM8974 platform shim (Phase 3): off." ;;
-  *)       echo "MSM8974 platform shim (Phase 3): ON. Registers its tbd_ops and checks the EOI"
+           echo "          Non-fatal: read xnu_ba_checks/xnu_ba_failures in the log for its verdict."
+fi
+if is_off "$(value_of STAGE90_XNU_MSM8974_SHIM)"; then
+  echo "MSM8974 platform shim (Phase 3): off."
+else
+  echo "MSM8974 platform shim (Phase 3): ON. Registers its tbd_ops and checks the EOI"
            echo "          pairing, the measured CNTP interrupt number and the validated CNTFRQ."
-           echo "          Non-fatal: read msm8974_shim_failures in the log for its verdict." ;;
-esac
+           echo "          Non-fatal: read msm8974_shim_failures in the log for its verdict."
+fi
 
-case "$(value_of STAGE90_XNU_MSM8974_FIQ_PROBE)" in
-  0|0u|"") echo "FIQ availability probe: off." ;;
-  *)       echo "FIQ availability probe: ON. Unmasks CPSR.F with the timer armed and a bounded"
+if is_off "$(value_of STAGE90_XNU_MSM8974_FIQ_PROBE)"; then
+  echo "FIQ availability probe: off."
+else
+  echo "FIQ availability probe: ON. Unmasks CPSR.F with the timer armed and a bounded"
            echo "          spin, to measure whether non-secure PL1 can take an FIQ on this SoC."
            echo "          If a FIQ IS delivered the vector logs 'exception: fiq' and reboots,"
-           echo "          which is the expected successful outcome, not a hang." ;;
-esac
+           echo "          which is the expected successful outcome, not a hang."
+fi
 
 echo
 echo "== mapping attributes =="

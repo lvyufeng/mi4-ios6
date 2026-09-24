@@ -815,13 +815,21 @@ summarise_log() {
   # behavioural key was present and the ladder was skipped". One definition feeds both the branch and
   # the six lines, so a table that says one thing and a branch that does another is not expressible
   # here.
-  local arm_door arm_cwe arm_repair arm_sip arm_pce arm_wfi arm_behav
+  local arm_door arm_cwe arm_repair arm_sip arm_pce arm_wfi arm_seam arm_behav
   arm_door=$(grep -a -c 'xnu_live_door_seq=' "$log" || true)
   arm_cwe=$(grep -a -c 'xnu_live_slot_cwe_' "$log" || true)
   arm_repair=$(grep -a -c 'xnu_live_repair_seq=' "$log" || true)
   arm_sip=$(grep -a -c 'xnu_live_sip_seq=' "$log" || true)
   arm_pce=$(grep -a -c 'xnu_live_pce_seq=' "$log" || true)
   arm_wfi=$(grep -a -c 'xnu_live_wfi_seq=' "$log" || true)
+  # **646: the seam family is the one key kind this table was missing, and it is the kind clause (5)
+  # is about.** The family is published from the exit's own `bl` - inside the window - so it behaves
+  # like the behavioural keys on a baseline image and is absent *by construction* on the sleeper, which
+  # is exactly the distinction the KIND column exists to draw and the distinction 640 measured. It is
+  # REPORTED and is deliberately not folded into `arm_behav`, so that this row changes no existing
+  # decision: `arm_behav` drives the DISAGREEMENT narration below, and moving a key into it would
+  # change what that narration says on a log this phase has never seen.
+  arm_seam=$(grep -a -c 'xnu_live_seam_' "$log" || true)
   arm_behav=$(( (arm_cwe > 0 || arm_sip > 0 || arm_pce > 0 || arm_wfi > 0) ? 1 : 0 ))
   idle_no_sleep_arm=0
   if (( arm_door > 0 )) && (( arm_repair == 0 )); then
@@ -832,13 +840,17 @@ summarise_log() {
   say "  arm: which arm this log reads as, and on which keys. Each state is a count from this log, and"
   say "  the KIND is what an absence means: a key whose publisher the arm's switch removes is absent by"
   say "  CONSTRUCTION, and a key published inside the window is absent only because the window was not"
-  say "  reached."
+  say "  reached. A key can be both at once - the seam family is - and that row says which arm makes it"
+  say "  unreachable by construction."
   printf '    %-26s %-8s %s\n' 'xnu_live_door_seq'   "${arm_words[$(( arm_door   > 0 ))]}" 'reach guard (published on BOTH arms)'
   printf '    %-26s %-8s %s\n' 'xnu_live_repair_seq' "${arm_words[$(( arm_repair > 0 ))]}" 'STRUCTURAL (entry_trace.c:1283)'
   printf '    %-26s %-8s %s\n' 'xnu_live_slot_cwe_*' "${arm_words[$(( arm_cwe    > 0 ))]}" 'behavioural (the exit wrapper)'
   printf '    %-26s %-8s %s\n' 'xnu_live_sip_seq'    "${arm_words[$(( arm_sip    > 0 ))]}" "behavioural (past cpu_idle's first test)"
   printf '    %-26s %-8s %s\n' 'xnu_live_pce_seq'    "${arm_words[$(( arm_pce    > 0 ))]}" 'behavioural (the enter wrapper)'
   printf '    %-26s %-8s %s\n' 'xnu_live_wfi_seq'    "${arm_words[$(( arm_wfi    > 0 ))]}" 'behavioural (the WFI)'
+  printf '    %-26s %-8s %s\n' 'xnu_live_seam_*'     "${arm_words[$(( arm_seam   > 0 ))]}" 'window-only (the exit'
+  printf '    %-26s %-8s %s\n' ''                    ''                                      "  own bl) - absent by"
+  printf '    %-26s %-8s %s\n' ''                    ''                                      '  CONSTRUCTION on the sleeper'
   if (( arm_door == 0 )); then
     say "  => NO door_seq: cpu_idle was never entered, so neither arm's clause is reached - the third"
     say "     branch below is the only one that applies, and it says which fault that is."
@@ -1078,7 +1090,15 @@ summarise_log() {
       say "        park is the third poll and entry_note_poll runs only *after* __real_poll"
       say "        returns, so a published 3 is the park having returned - and on the frozen arm it"
       say "        structurally cannot: 520 and 533 both stop at 2, with timeouts 5 ms and 40 ms,"
-      say "        because the boot dies inside the park's own poll. This is the death point passed"
+      if (( idle_no_sleep_arm == 1 )); then
+        say "        because the boot dies inside the park's own poll. **A return here is NOT that"
+        say "        death point passed**: this arm's switch removes the repair, so the window is"
+        say "        unreachable by construction (599 section 5, 649) and the pop that kills the"
+        say "        other arm never runs. A returning park on this arm is 513's outcome - the"
+        say "        window never entered - so it is evidence about the door and not about the pop"
+      else
+        say "        because the boot dies inside the park's own poll. This is the death point passed"
+      fi
       # **And the return is measured, not hoped for** - which is what turns the falsifier into a
       # sharp one. The two polls that DID return in the archived pair both returned *before* the
       # repair: it is made inside the `timeout >= ENTRY_PARK_MIN_MS` block, so a 5 ms and a 40 ms
@@ -1124,6 +1144,15 @@ summarise_log() {
         say "        presence** - open it and look: a reformat (a second space, a tab, a parenthesised"
         say "        value) is the likely cause, and 632 measured four such spellings that this clause"
         say "        used to refuse as if the file were unreadable"
+        verdict_ok=0
+      elif [[ $live_trunc -eq 1 ]]; then
+        say "  UNREAD  and whether it is the park is unread: this log's live channel is TRUNCATED,"
+        say "        and the largest recorded timeout is ${poll_tmo_max:-absent} ms - below the park's"
+        say "        own threshold of $park_min ms. A cap landing between the park's own two writes"
+        say "        publishes poll_seq without its timeout (they are separate entry_live_write calls"
+        say "        and the seq is written first), so the number this clause would compare against is"
+        say "        a statement about the instrument and not about the machine - and a falsifier that"
+        say "        fires on a full channel is not a falsifier"
         verdict_ok=0
       else
         say "  FAIL  and the largest recorded timeout is ${poll_tmo_max:-absent} ms, below the"
@@ -1695,12 +1724,26 @@ summarise_log() {
     fi
     # (5) the seam's own instrument: the exit's own call, and the two pairs of words its readings decide
     #
-    # **This is the arm's own instrument, and it prints only for a log that carries it.** 535 and 572 both
-    # wrap `FlushPoU_Dcache` and keep only the call whose return address is the exit's own `bl`, so
-    # `xnu_live_seam_*` is published by those images and by no earlier one. Like the block the pair above
-    # is gated on, this is self-selecting rather than a verdict on every log: a log without the keys is
-    # a log from an image that does not carry the arm, and silence is the right reading for it - there
-    # is no build marker in the entry image for this block to test instead (clause (2)'s note).
+    # **This block is self-selecting, and until 646 it was self-silencing, which is a different thing.**
+    # 535 and 572 both wrap `FlushPoU_Dcache` and keep only the call whose return address is the exit's
+    # own `bl`, so `xnu_live_seam_*` is published by those images and by no earlier one - there is no
+    # build marker in the entry image for this block to test instead (clause (2)'s note).
+    #
+    # **But "this log has no key" has TWO causes, and the arm key below separates them on both arms of
+    # this phase.** The first is that the image predates the instrument (520's). The second is that the
+    # image CARRIES the arm and cannot publish it: on 594's arm the seam's only acting site is the
+    # exit's own `bl`, `platform_cache_idle_exit` is entered only through `cpu_idle` past the
+    # `SIGPdisabled` gate, and that gate is a closed fixed point when the switch removes 514's repair -
+    # so on that arm the window is entered *never* and the pair is unreachable by construction
+    # (640 sections 2-4, `tools/check_idle_window_unreachable.py`). A reader who took the first cause
+    # alone would read "no key" as "the arm was not run", which is the opposite of the truth on the arm
+    # the owed press sends.
+    #
+    # So a keyless log is **narrated with both causes named** (the `else` at the bottom of this gate,
+    # keyed on the `arm:` table's own `idle_no_sleep_arm`) rather than passed over in silence. The
+    # reading stays honest about what a log can decide: the two causes are separated by the arm table
+    # above, and which *image* is in the machine is the gate's reading and not this log's (628's
+    # discipline, the same one clause (6)'s comment applies to 513's captures).
     #
     # **The criterion is the one clause (1) already derived, not a second copy of the address.** `pop_lr`
     # above is `platform_cache_idle_exit`'s own `bl FlushPoU_Dcache` + 4, read out of this tree's entry
@@ -2049,6 +2092,24 @@ summarise_log() {
         say "        Apple's own L1 flush writing the line back and 535's is its clean's write-back,"
         say "        so reading either rule over this pair would be a claim this log does not carry"
       fi
+    else
+      # **A KEYLESS LOG IS NOT SILENCE - and this branch is only ever the BASELINE case, which the
+      # first draft of this repair got wrong by testing the arm again.** This gate sits inside the
+      # `elif` at `:1291`, whose chain's head is `if (( idle_no_sleep_arm == 1 ))`; so reaching here
+      # *means* `idle_no_sleep_arm == 0`. A second `if (( idle_no_sleep_arm == 1 ))` in this `else`
+      # would be a cell that cannot reach the branch its label names - the defect class this project
+      # ranks first to suspect - so the arm is not re-tested and the two causes are named in one
+      # sentence instead. Measured, not read: 513's capture (sleeper-shaped) prints **0** lines of
+      # clauses (1)-(5) and takes the ladder above, while 520's (baseline-shaped) prints them here.
+      say ""
+      say "  (5) xnu_live_seam_calls is ABSENT. Two causes, and this reader reaches them by different"
+      say "     routes: the window was never reached, or this image predates the instrument. Neither"
+      say "     is decidable from this log - and which image is in the machine is the gate's reading"
+      say "     and not this one's (clause (6) makes the same distinction about 513's captures)."
+      say "     **The third cause is not available here**: a log from the sleeper arm never reaches"
+      say "     this clause at all - its keys are absent by construction and it is read by the ladder"
+      say "     above - so a log that gets this far is not that arm, and the arm row above says so"
+      say "     from the log's own keys rather than from this sentence."
     fi
 
     if [[ $pop_named -eq 1 ]]; then
