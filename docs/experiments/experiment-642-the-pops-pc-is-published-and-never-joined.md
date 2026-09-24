@@ -4,17 +4,17 @@ Clause (5) of `run_and_capture.sh`'s `summarise_log()` reads the seam pair, and 
 says what one of those two words is: **`b1` is the word the `pop {fp, pc}` takes as `pc`** (`:264-267`,
 restated at `:1984-1986`). Clause (1) of the same function reads `xnu_live_sleh_pc`, *the address the
 CPU actually jumped to* — which the file's text also identifies as the popped word (547 section 1,
-`:1508`: "547 section 1 reads it as the popped word itself, `pc = r11 & ~1`"). Both are locals of one
+`:1503`: "547 section 1 reads it as the popped word itself, `pc = r11 & ~1`"). Both are locals of one
 shell function. **No line of that function compares them**, and both places where the comparison is
-wanted ask for it in prose: clause (1) says "Corroborate the shape **by eye**" (`:1507`) and the FAIL
+wanted ask for it in prose: clause (1) says "Corroborate the shape **by eye**" (`:1501`) and the FAIL
 branch says "**read it against** this death's registers (`$sleh_lr`/`$sleh_pc`/`$sleh_sp`)"
-(`:1528`). So the two independently published records of the one quantity — what the `pop` loaded —
+(`:1527-1528`). So the two independently published records of the one quantity — what the `pop` loaded —
 are printed side by side on every run and never joined.
 
 **And on the arm this step is about, the join that *does* exist is in the branch that arm cannot
 take.** The file's only comparison of the pair against a value the pop would load is
-`$seam_a1 == "$rtcpre_pop"` at `:2033`, inside `elif [[ $seam_op == "0x00000001" ]]` (`:2027`) — 535's
-arm. The frozen 574 park publishes `seam_op = 0x00000000`, so it selects 572's branch (`:2012`), where
+`$seam_a1 == "$rtcpre_pop"` at `:2033`, inside `elif [[ $seam_op == "0x00000001" ]]` (`:2026`) — 535's
+arm. The frozen 574 park publishes `seam_op = 0x00000000`, so it selects 572's branch (`:2011`), where
 `$rtcpre_pop` is read at `:1766` and consumed by nothing. The header's argument at `:264-267` cites
 that very comparison as its evidence — "it compares `a1` against `xnu_live_slot_rtcpre_pop` — which is
 the second, independent statement of the same fact" — and **on the arm the pair was pre-registered for,
@@ -67,7 +67,7 @@ The whole of `$rtcpre_pop`'s use, for the same reason:
 | the arm's source (`xnu_arm_boot/entry_trace.c:2307`) | `entry_live_write("xnu_live_seam_op", (uint32_t)(STAGE90_XNU_SEAM_POC));` — unconditional inside `#if STAGE90_XNU_SEAM_POC \|\| STAGE90_XNU_SEAM_MEASURE` (`:2219`) |
 | the gate's narration for that arm (`out/stage90/captures/574-gate-green.txt:90`) | "`xnu_live_seam_op` publishes SEAM_POC, so this run and a no-seam run both show it at 0" |
 
-So the park publishes `xnu_live_seam_op=0x00000000`, the reader takes 572's branch at `:2012`, and the
+So the park publishes `xnu_live_seam_op=0x00000000`, the reader takes 572's branch at `:2011`, and the
 pair is scored as "Apple's own `FlushPoU_Dcache` did not write the slot's line back" (equal pair) or
 "what changed those two words in memory is Apple's own `FlushPoU_Dcache`" (changed pair) — which is
 `experiment-638` section 3's `a1`/`b1` split, correctly printed. **The (A)/(B) call is reached. The
@@ -103,7 +103,7 @@ mechanism. `sleh_pc` is the only published word that speaks to that second half,
 the log being read. A run that dies at the `pop` prints it.
 
 **One caveat on the relation's form, and it is a two-definitions instance of its own.** The runner's
-text states it one way at `:1508` (`pc = r11 & ~1`, 547 section 1) and another at `:2039-2040`
+text states it one way at `:1503` (`pc = r11 & ~1`, 547 section 1) and another at `:2039-2040`
 (585: "the pop read `(rtcpre_pop, rtcpre_pop-1)` into `(fp, pc)`"). Both give the same number whenever
 `rtcpre_pop` is odd, which is the case in both logs measured below — so neither statement has been
 falsified and neither decides the other. Which form the comparison should use is `run_and_capture.sh`'s
@@ -144,7 +144,7 @@ own records, and `keyval`'s last-wins rule is what `:1336` says it is.
 
 ## 7. What would make it structural
 
-1. **One comparison in 572's branch**, beside the pair test at `:2012`: `sleh_pc` against `b1`/`a1`
+1. **One comparison in 572's branch**, beside the pair test at `:2011`: `sleh_pc` against `b1`/`a1`
    (and against `rtcpre_pop`), with the three-way reading of section 4 as its three `say` arms and an
    explicit fourth for "none of them". Without it the file asks a person to do arithmetic on six hex
    numbers from two clauses that are forty lines apart.
@@ -155,3 +155,30 @@ own records, and `keyval`'s last-wins rule is what `:1336` says it is.
 
 This step therefore adds no reader; it records the measurement, so that whichever session edits the
 runner next has the two logs, the two branch lines and the three-way table in one place.
+
+## 8. Anchor correction, same day — five numbers, and each landed on a nearby line about the same subject
+
+Every line number in sections 1 to 7 was re-measured after this doc was written, by **printing the cited
+line** rather than quoting the number — the check the operator sheet's own correction section records
+for two earlier anchors. Five were wrong, and each landed on a nearby, self-consistent line about the
+same subject, which is why none of them looked wrong from inside the doc:
+
+| cited | actually | what sits at the cited line |
+|---|---|---|
+| `:1507` | `:1501` | "Corroborate the shape by eye" is at `:1501`; `:1507` is a clause (1) note about 520 |
+| `:1508` | `:1503` | "`pc = r11 & ~1`" is at `:1503`; `:1508` is that same note's second line |
+| `:1528` | `:1527-1528` | the sentence is a two-line `say`; `:1528` is its second half, not its start |
+| `:2027` | `:2026` | `:2026` is the `elif`; `:2027` is that branch's own comment, one line below |
+| `:2012` | `:2011` | `:2011` is the `if`; `:2012` is that branch's own comment, one line below |
+
+The last two are the instructive pair: the `if`/`elif` and the comment naming the arm sit on consecutive
+lines, so a citation taken from a listing that dropped the predicate line still points at the right
+*arm* and the wrong *line* — one quantity with two readings, the one used silently not the one meant. A
+doc that cites a line number is making a claim about that line, and this doc made five wrong ones.
+
+Nothing else changes: the argument, the measured `awk` (still no output), the `rtcpre_pop` enumeration,
+the three-file agreement on `seam_op=0`, and both retro-validated log pairs all re-check clean. The
+anchors that were re-measured and **hold**: `:258-267`, `:498`, `:826-828`, `:1336`, `:1345-1347`,
+`:1368`, `:1466`, `:1523`, `:1565`, `:1698-1705`, `:1752-1753`, `:1762-1766`, `:1806-1812`, `:1848`,
+`:1984-1986`, `:2033`, `:2043`, `:2071`, `entry_trace.c:2219`, `entry_trace.c:2307`,
+`574-gate-green.txt:90`.
