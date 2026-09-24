@@ -206,16 +206,89 @@ falsified**, and stands as written for the arm in the park.
 * **It does not boot the parked arm, and it is not a claim that the parked arm would produce the
   pair.** It is built and its window is reachable; whether `_b1`/`_a1` actually appears is what a run
   decides, and that is 638 §3's pre-registration, not this step's measurement.
-* **It does not say the parked payload would gate clean.** The arm has never been through
-  `preflight_boot_check.sh`, and its `-sources.txt` manifest is checked against `xnu_arm_boot/` **as
-  the tree stands now** — an entry rebuild or a source edit since 2026-09-23 can make the sources
-  clause refuse. That check is the gate's to make, at the gate, before any press.
+* **It no longer says the parked payload would gate clean — that has since been measured, and it
+  does.** §9 ran `preflight_boot_check.sh` on the park's bytes in a scratch copy: the sources clause
+  passes (20 of 20 files, none the manifest does not name, bound to `151425c4…`) and the gate exits
+  **0**. The caveat that stood here — never through the gate, and a source edit since 2026-09-23 could
+  make the sources clause refuse — is answered on both halves. The remaining refusal this arm meets is
+  the **freshness sweep**, an mtime artifact, and §9 names how to avoid it.
 * **It does not advance 「起码要能进入操作系统，把基础驱动跑起来」.** The OS is still not observed
   booting, and **TWRP-to-storage stays withheld** — 「如果os已经能进去了的话」 is unmet.
 * **It does not touch `out/`, the runner, the gate, or the peer's files.** No file in `stages/`,
   `tools/` or `out/` was modified; the only repo writes are the two corrigenda and this document.
 
-## 9. Safety
+## 9. The parked arm through the gate, measured 2026-09-24
+
+§8's caveat said this arm had never been through `preflight_boot_check.sh`. §6 and §7 answered only the
+**sources** half of it, by hand, with the gate's own pipelines. This section takes the gate's verdict
+itself — on a **copy**, never in `out/`.
+
+**Method.** Under the job's temp directory, a copy of the tree
+(`cp -a stages tools docs Makefile README.md` plus `cp -a out/stage90`), then the park's ten payload
+artifacts written over the copy's, then `stages/stage90/preflight_boot_check.sh --allow-xnu-entry` run
+in the copy. Mtimes are preserved on purpose: the gate's freshness sweep compares source mtimes against
+the image's own, so a copy made with `git archive` (which does not preserve them) makes the *control*
+refuse — which is how the first attempt at this measurement was spent.
+
+| run | bytes in `out/stage90/` | `SHA256SUMS.txt` | mtimes | result |
+|---|---|---|---|---|
+| **control** — the copy as-is | armed | live | fresh | **exit 0, 626 lines** |
+| naive substitution | **park** | live (absolute paths) | park's (01:33) | exit 1, 31 lines — **freshness sweep** |
+| **faithful arming** | **park** | **park's** | refreshed | **exit 0, 536 lines, no refusal** |
+
+The control reproduces the live tree's own gate run line-for-line (626 lines, arm line at 55), so the
+other two rows are readable as differences from it.
+
+**The middle row's refusal is the freshness sweep, not the sources clause**, and it is an mtime
+artifact of a different build session. It names `macho_fixture.c`; the fixture that file produced is
+**byte-identical** between the park and the live build (`stage90_fixture.macho` `52bc9c35…` and
+`stage90-build-config.txt` `6c2b6038…` on both sides), and the live fixture was regenerated at
+05:02:43 during the armed build, after this park's 01:33 payload. In the gate's own words, *"a
+checkout or a master mirror bumps an unchanged file's mtime"* — which is exactly what this is.
+
+**With a manifest that describes its own directory and fresh mtimes, the park gates clean.** The
+sources clause prints, of this park's entry bin:
+
+```
+== the entry image's own sources ==
+the entry image is the build of xnu_arm_boot/ as it stands: 20 file(s), every one matching the
+manifest, and none the manifest does not name
+```
+
+and the `== which arm the entry image in out/ is, in words ==` block reads `IDLE_NO_SLEEP=0` and prints
+what 638 §3 pre-registered for this arm, verbatim: *"514's one repair IS in this image … **the window
+whose `pop {fp, pc}` is this phase's frontier IS ENTERED**, so everything below … is narration about
+THIS arm, and its keys are expected PRESENT."* That block is **18 lines** here against **113** for the
+armed arm; the two runs differ in five hunks and 162 diff lines, the rest of them the config line and
+the manifest paths.
+
+**Two substitutions were necessary, and neither is free — arming this park by hand needs both:**
+
+1. **The manifest must be the park's own.** The park also carries a copy of the **live**
+   `SHA256SUMS.txt`, whose paths are absolute `/mnt/data/mi4-ios6/out/stage90/…`. Used as-is it
+   verifies the live tree *from inside the park* — a check about a different directory than the one
+   under test, and one that reads OK while the artifacts it is supposed to cover are the park's. The
+   park-relative `SHA256SUMS.park.txt` is the one that belongs at `out/stage90/SHA256SUMS.txt`.
+2. **The mtimes must be fresh.** An arming that preserves them (`cp -a`, `mv`, `tar -p`) is refused by
+   the freshness sweep, because `macho_fixture.c`'s 05:02 mtime is newer than this park's 01:33
+   payload. An ordinary `cp` is not refused. The refusal is false in content and real in effect: it
+   would spend the press on nothing.
+
+**A corollary for the live gate, and for 640's repair.** The seam sentence *"for this arm
+`xnu_live_seam_calls` is present"* is printed by **both** runs — it is **true of this park** and
+**false of the armed arm**, whose window is unreachable (640 §2). So the contradiction 640 reports is
+a single-arm falsity, and the guard its repair adds (`if [[ $V_IDLE_NO_SLEEP -eq 1 ]]`) is exactly the
+discriminator rather than a blanket suppression. Nothing about that repair's timing changes: it is
+still staged and unlanded, and the press it waits behind is unchanged.
+
+**What this section does not do.** It does not boot the park, and *"it gates clean"* is not *"it
+boots"*: whether the `_b1`/`_a1` pair appears is 638 §3's pre-registration and a run's to settle. It
+does not arm the park — `out/stage90/` still holds the sleeper image (`60063c47…`, **unrun**), and a
+park written into `out/` by hand is not the same act as a gate run in a scratch copy. What it changes
+is one thing only: the press *could* now be spent on the arm that can answer 638 §3's question, at the
+cost of an arm swap that 636 measured to be **silent**. That choice is the operator's.
+
+## 10. Safety
 
 No device action, no boot, no build, no `fastboot`, no `adb`, **nothing written to storage**. The
 commands were `sha256sum`, `diff`, `tail`/`head`/`cmp`-style reads, `nm` and `objdump` on two frozen
@@ -223,3 +296,9 @@ ELFs, and one host-only run each of `tools/check_idle_window_unreachable.py` (ex
 which touches the device. No file under `out/` was written: the park was made by **reading** `out/` once
 as a control and copying only from `/tmp/r594/`. `fastboot boot` only - never `flash` - so no outcome of
 this step can write to storage, and nothing here arms, fires or re-arms the catcher.
+
+§9 added two host-side runs of `preflight_boot_check.sh --allow-xnu-entry` (the gate is a reader: it
+never runs `fastboot` or `adb`) and one `cp -a` of `out/stage90` — a **read** of `out/`, with every
+byte written under the job's temp directory. `out/stage90/stage90-qcdt.img` is `60063c47…` before and
+after, the catcher's relay and armed watcher were not signalled, and the repo tree was clean at the
+end of the step.
