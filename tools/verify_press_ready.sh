@@ -14,9 +14,12 @@
 # a name a later insert can silently move to another row:
 #
 #   1. the bytes in `out/` are the bytes the park holds      - the gate does NOT check this
+#      (and the park is FOUND from those bytes - see below)
 #   2. the park is the set the record describes              - tools/verify_revert_set.sh
-#   3. the gate accepts this tree                            - stages/stage90/preflight_boot_check.sh
-#   4. WHICH ARM the bytes are, named by a reading of the ELF - tools/check_idle_window_unreachable.py
+#   3. the gate accepts this tree, under the flag set the    - stages/stage90/preflight_boot_check.sh
+#      arm's OWN switches demand
+#   4. WHICH ARM the bytes are: the ELF reading JOINED TO    - tools/check_idle_window_unreachable.py
+#      the payload's own switch record
 #   5. a press now would actually be caught                  - `fastboot devices` / `adb devices`
 #
 # The arm row was added by 646, from `run-experiment-526`'s proposal, and it took the fourth position
@@ -30,6 +33,37 @@
 # `stage90-build-config.txt` - the payload's own switch record - is byte-identical between the two
 # arms (`6c2b6038...`, measured 646), and the payload's switch list is what the gate prints. So the
 # arm is named by a property of the image instead, and the arm row is what reads it.
+#
+# **THREE ARMS NOW, AND THE PAYLOAD RECORD IS NOT THE BLIND ALLEY THAT PARAGRAPH SAYS IT IS.** The
+# sentence above is true of the two arms 646 had, and it was measured true again on 2026-09-25: for the
+# sleeper and the 574 park the separating switch is an *entry* switch, so their payload records are
+# byte-identical (`6c2b6038...`). It is NOT a property of the payload record that it cannot separate
+# arms. 666's arm carries the acting arm's entry byte for byte (`a43304f2...`, the same SEAM_POC=1
+# SEAM_MEASURE=0 IDLE_NO_SLEEP=0) and differs from it in exactly one line of `stage90-build-config.txt`,
+# `#define STAGE90_HW_WATCHDOG_SELFTEST 0u` -> `1`. So the ELF reading alone names 653's arm for BOTH
+# arms, and this row - whose whole job is to say which question the one press is about to ask - was
+# GREEN while naming the wrong arm. That is this file's own subject matter happening inside this file:
+# a reading that is correct about its own input, and answers a different question than the operator is
+# asking. So the arm is named by the ELF reading **joined to** the payload's own switch record, and the
+# join is required rather than best-effort: if that record cannot be read, or a switch it decides on is
+# not named exactly once with a value, the row refuses instead of falling back to the entry reading -
+# because the fallback IS the wrong answer.
+#
+# **THE SAME RECORD DECIDES THE GATE'S FLAG SET, and that is the third repair.** The gate refuses a
+# self-test arm without `--allow-hw-watchdog-selftest` (`preflight_boot_check.sh:1570`), and row 3
+# invoked it with `--allow-xnu-entry` alone - so on the arm in `out/` the row whose whole job is "the
+# gate accepts this tree" printed `exit 1`, and no argument this file accepts could make it green. A
+# refusal is safe. A *permanently* red row on a tree that is fine is not: the next red row gets read as
+# the tool being stale instead of as a press that must not be fired, which is the reading this file
+# exists to protect. The flag set is now DERIVED from the arm's own switches and PRINTED as the command
+# the operator types, so the flags the gate is checked with here and the flags the run is given are one
+# value with one definition. Two checks keep that derivation honest - see the block above row 3.
+#
+# **AND THE PARK IS FOUND, NOT REMEMBERED.** The default used to be the set `armed-sleepless-696a0f39`
+# - an arm that was the live one two steps before this file's last edit - so on any other arm row 1
+# compared the live tree with the WRONG PARK and its refusal was about the default rather than about
+# the tree. A name nobody typed is exactly how the wrong arm gets pressed, so there is no default name
+# any more: row 1 hashes the live `stage90-qcdt.img` and asks the record which set those bytes are.
 #
 # **Rows 1-3 say the press will not be *wasted*; the arm row says what the run that follows will be
 # able to answer, and the device row says whether a press fired now would be caught at all.** That is
@@ -68,9 +102,20 @@
 # Usage:
 #   tools/verify_press_ready.sh                      # the whole chain, one verdict
 #   tools/verify_press_ready.sh --quiet              # only the verdict and any FAIL row
-#   tools/verify_press_ready.sh --park DIR --set NAME
+#   tools/verify_press_ready.sh --park DIR --set NAME   # ask about a NAMED arm instead of the live one
 #   tools/verify_press_ready.sh --gate PATH        (testing seam: falsifies the gate row)
+#   tools/verify_press_ready.sh --gate-flags '--allow-xnu-entry'
+#                                                  (testing seam: replaces the derived flag set with
+#                                                   this one, so the derivation can be falsified)
 #   tools/verify_press_ready.sh --help
+#
+# With no `--set`, the set is FOUND rather than defaulted: the live `stage90-qcdt.img` is hashed and the
+# record is asked which set those bytes belong to (row 1). `--set`/`--park` point this tool at an arm
+# that is not the one in `out/`, which answers a different question than the press's.
+#
+# The flag set the gate is run with is printed near the top and is the set the RUN must be given: the
+# runner passes unrecognised arguments straight to the gate (`run_and_capture.sh:142`), so a press fired
+# with a narrower set is a press spent on a gate refusal.
 #
 # Exit: 0 = every check passed and the live device state is one a press can be fired from;
 #       1 = refused, with the failing check named. A check that could not look refuses too - a
@@ -83,10 +128,23 @@ set -uo pipefail
 SELF=$(readlink -f "${BASH_SOURCE[0]}")
 REPO_ROOT=$(cd "$(dirname "$SELF")/.." && pwd)
 LIVE=${LIVE:-$REPO_ROOT/out/stage90}
-PARK=${PARK:-$LIVE/frozen/armed-sleepless-696a0f39}
-SET=${SET:-armed-sleepless-696a0f39}
+# **No default arm NAME, for the park and for the set alike, and that is one of the three repairs.**
+# The default used to be `armed-sleepless-696a0f39` - the arm that was live two steps before this
+# file's last edit - so on any other arm this tool compared the live tree against the WRONG PARK and
+# row 1's refusal was about the default rather than about the tree. A default is a name nobody typed,
+# and a name nobody typed is how the wrong arm gets pressed. So: empty here means "not given", `--set`
+# names an arm explicitly, and with no `--set` row 1 FINDS the set from the bytes the press sends.
+# Non-empty from the environment still counts as given, which is why this is `${VAR:-}` and not a
+# separate flag variable.
+PARK=${PARK:-}
+SET=${SET:-}
+GATE_FLAGS_SEAM=${GATE_FLAGS_SEAM:-}
 RECORD=$REPO_ROOT/stages/stage90/revert-set.txt
 GATE=$REPO_ROOT/stages/stage90/preflight_boot_check.sh
+# The artifact `fastboot boot` sends - the one file whose bytes name the arm, and the two names read
+# out of the live tree by rows 1, 3 and 4.
+QCDT_NAME=stage90-qcdt.img
+PAYLOAD_CFG_NAME=stage90-build-config.txt
 SERIAL=4a2fe00b
 NEIGHBOUR=33e80afe
 QUIET=0
@@ -96,6 +154,10 @@ while (($# > 0)); do
     --park)  PARK=${2:-}; shift 2 ;;
     --set)   SET=${2:-};  shift 2 ;;
     --live)  LIVE=${2:-}; shift 2 ;;
+    # A testing seam, and named as one: the flag set is derived from the arm's own switches below, and a
+    # derivation that can only ever be seen to work is not a reading. This replaces the derived set
+    # wholesale, so the gate row goes red exactly when the derivation mattered.
+    --gate-flags) GATE_FLAGS_SEAM=${2:-}; shift 2 ;;
     # A testing seam, and named as one: the gate's own branch can only be falsified by a gate that
     # refuses, and the real one accepts this tree.  The tool refuses if the target is not executable,
     # so pointing it at nothing is a refusal and not a pass.
@@ -107,6 +169,188 @@ while (($# > 0)); do
     *) printf 'verify_press_ready: unknown argument %s\n' "$1" >&2; exit 1 ;;
   esac
 done
+
+# ======================================================================================================
+# The readings the rows consume, taken ONCE, before any row runs
+# ======================================================================================================
+# Each of these is a value more than one row needs, so it is read here and not inside a row: a second
+# reading of the same file would be two definitions of one quantity - this project's most repeated
+# defect, and the one that made row 4's old name green on the wrong arm. Nothing here prints a verdict:
+# a reading that fails is consumed by the row whose claim depends on it and refused there, with that
+# row's own reason for needing it.
+
+# --- the record's line format, parsed by NAME and defined ONCE ---------------------------------------
+# `kv_of KEY LINE`. This file's first draft read `set= sha256= bytes= file= role=` positionally - four
+# fixed fields and then the rest - and `file=` is the FOURTH token, so `bytes` was given `file=<name>`
+# and every member was reported absent with a path ending in `manifest_members=stage90_fixture.macho,`.
+# The record's shape was assumed rather than read, and it is not even uniform: the `SHA256SUMS.txt`
+# line carries an extra key before `role=`. A key's name is the only stable handle on a line like this.
+kv_of() {   # kv_of KEY LINE -> the value of KEY= in LINE; empty when the key is not there
+  local t out=''
+  # `set -f` for the word-split below: a `*` anywhere in a role text would otherwise be pathname-
+  # expanded against the current directory, and the token this reads would not be the record's.
+  set -f
+  for t in $2; do
+    case $t in "$1"=*) out=${t#*=}; break ;; esac
+  done
+  set +f
+  printf '%s' "$out"
+}
+
+# --- which SET the live bytes are: FOUND from the artifact the press sends ---------------------------
+# Row 1 asks "are the live bytes the recorded bytes", and it can only ask that once the set is known.
+# The alternatives to finding it were tried and are worse. A default name is a name nobody typed. And
+# the record's own `role=` sentences cannot answer it: THREE sets in this record claim in their role
+# text to be "the arm the next press sends" - `armed-sleepless-696a0f39`, `armed-seam-poc-a43304f2` and
+# `armed-selftest-wdog-ef0361a2` (measured 2026-09-25). A claim in a record is not a reading, so the
+# bytes of `stage90-qcdt.img` - the one file `fastboot boot` sends - are asked instead.
+SET_FOUND=''; SET_WHY=''
+record_sets=()
+if [[ -n $SET ]]; then
+  SET_WHY='given on the command line'
+elif [[ ! -r $RECORD ]]; then
+  SET_WHY="$RECORD is not readable, so which set the live bytes are cannot be found"
+elif [[ ! -f $LIVE/$QCDT_NAME ]]; then
+  SET_WHY="$LIVE/$QCDT_NAME is not a file - the artifact the press sends is not here to be hashed, and it is that artifact's bytes that name the set"
+else
+  live_qcdt=$(sha256sum "$LIVE/$QCDT_NAME" | cut -d' ' -f1)
+  hits=()
+  while read -r rl; do
+    [[ $rl == *set=* ]] || continue
+    _s=$(kv_of set "$rl")
+    [[ -n $_s ]] || continue
+    case " ${record_sets[*]-} " in *" $_s "*) ;; *) record_sets+=("$_s") ;; esac
+    [[ $(kv_of file "$rl") == "$QCDT_NAME" ]] || continue
+    [[ $(kv_of sha256 "$rl") == "$live_qcdt" ]] || continue
+    case " ${hits[*]-} " in *" $_s "*) ;; *) hits+=("$_s") ;; esac
+  done < "$RECORD"
+  if (( ${#hits[@]} == 1 )); then
+    SET_FOUND=${hits[0]}
+    # A reason for the found case too, so the header line never prints an empty parenthesis - the shape
+    # that reads as "the tool did not say" (630: a silence only reads if the successful case is silent,
+    # and here it is printed).
+    SET_WHY="found by hashing the live $QCDT_NAME ($live_qcdt), which exactly one set in the record records"
+  elif (( ${#hits[@]} == 0 )); then
+    SET_WHY="the live $QCDT_NAME ($live_qcdt) is not the $QCDT_NAME of any set in $RECORD (${record_sets[*]-none}) - the tree was rebuilt (408: the payload build is not reproducible) and the new bytes were never recorded, so which arm the press would send is not in the record"
+  else
+    SET_WHY="the live $QCDT_NAME ($live_qcdt) is recorded under ${#hits[@]} set names (${hits[*]}) - one artifact in two sets, so which ARM those bytes are is not something this tool can read"
+  fi
+fi
+[[ -n $SET_FOUND ]] && SET=$SET_FOUND
+if [[ -z $PARK ]]; then
+  # The park's directory is named for its set (that is the convention the park rule rests on), so it
+  # follows the set. An unresolvable set leaves both empty and the rows say so by name rather than
+  # comparing against whatever `frozen/` happens to hold.
+  if [[ -n $SET ]]; then PARK=$LIVE/frozen/$SET; fi
+fi
+
+# --- the payload's own switch record: read ONCE, it decides BOTH row 3's flag set and row 4's name ---
+# Two records, two shapes, and this one is C source (`#define NAME VALUE`) where the entry record is
+# `NAME=VALUE`. The value is extracted with a copy of the gate's own expression
+# (`preflight_boot_check.sh:132-135`, `value_of`'s `sub()`) character for character, and the copy is
+# deliberate: a second, hand-rolled parse of the same line would be a second definition of one value,
+# and the failure it produces - a value that is empty or truncated here and correct there - is exactly
+# the silent kind. What makes the copy safe is that a drift cannot pass unseen: every switch below is
+# required to be named exactly once WITH a value, so a parse that stops seeing a value refuses the row.
+PAYLOAD_CFG=$LIVE/$PAYLOAD_CFG_NAME
+declare -A payload_sw=()
+declare -A payload_sw_n=()
+payload_cfg_ok=0
+payload_cfg_why=''
+if [[ ! -r $PAYLOAD_CFG ]]; then
+  payload_cfg_why="$PAYLOAD_CFG is not readable, so the payload's own switches cannot be read"
+else
+  payload_cfg_ok=1
+  while IFS=$'\t' read -r _name _val; do
+    [[ -n $_name ]] || continue
+    payload_sw[$_name]=$_val
+    payload_sw_n[$_name]=$(( ${payload_sw_n[$_name]:-0} + 1 ))
+  done < <(awk '
+    $1 == "#define" && $2 ~ /^STAGE90_/ {
+      v = $0; sub(/^[[:space:]]*#define[[:space:]]+[^[:space:]]+[[:space:]]*/, "", v)
+      print $2 "\t" v
+    }' "$PAYLOAD_CFG")
+fi
+
+# The switches the two rows decide on, named once, here. A switch this list does not name is not read -
+# and the gate closes the key set from its own side (`BUILD_CFG_KEYS` plus the converse check that
+# refuses any `STAGE90_*` key that list does not carry), so a switch added on the build side is refused
+# by the gate before it could make the flag set below silently incomplete.
+PAYLOAD_SWITCHES=(STAGE90_XNU_ENTRY STAGE90_HW_WATCHDOG_SELFTEST STAGE90_DEADMAN_SELFTEST
+                  STAGE90_HANDOFF_MODE STAGE90_PMAP_ATTR_MODE STAGE90_CACHE_MODE
+                  STAGE90_HANDOFF_FAULT_INJECT_VA)
+sw_problem=''
+if (( payload_cfg_ok == 1 )); then
+  for _s in "${PAYLOAD_SWITCHES[@]}"; do
+    (( ${payload_sw_n[$_s]:-0} == 1 )) \
+      || sw_problem+="$_s is named ${payload_sw_n[$_s]:-0} time(s), and a switch read at all has to be named exactly once; "
+    [[ -n ${payload_sw[$_s]:-} ]] \
+      || sw_problem+="$_s is named with no value after it, which the gate refuses for every key in BUILD_CFG_KEYS because that is where its own off branches sit; "
+  done
+fi
+
+# --- the flag set the RUN must be given, derived from those switches ---------------------------------
+# The gate refuses a state without its `--allow-*` (`preflight_boot_check.sh:1570`, `:1592`, `:1605`,
+# `:1649`, `:1684`, `:1948`, `:1954`, `:1975`, `:1985`; and `:1680` is the one the other way round, a
+# flag it refuses when the switch is OFF). So the flags a run needs are a function of the arm's own
+# switches, and deriving them here is what makes the set the gate is checked with and the set the run
+# is given one value. The table below is a COPY of the gate's conditions, which is a real cost - a copy
+# can drift - and the two checks under it are what bound the cost:
+#   * every flag the gate's own usage line and refusals name must be a flag this table can produce, so
+#     an eleventh flag turns into a refusal that names it rather than a silently under-supplied set;
+#   * the derivation itself is falsifiable with `--gate-flags`, so a green gate row is not the only
+#     thing this code can print.
+# The residual risk, stated rather than papered over: the gate could give an existing `--allow-X` a new
+# meaning while keeping its name, and no check here would see it. That is a change to a flag this table
+# already knows, and the row 3 refusal it would produce is loud.
+sw_on() {   # off is `0|0u`, exactly the gate's `is_off` (`preflight_boot_check.sh:158`)
+  case ${payload_sw[$1]:-} in ''|0|0u) return 1 ;; *) return 0 ;; esac
+}
+sw_flag() { # sw_flag SWITCH FLAG - the flag the gate needs when SWITCH is a hazard the arm declares
+  sw_on "$1" && gate_args+=("$2")
+  return 0
+}
+gate_args=()
+sw_flag STAGE90_XNU_ENTRY --allow-xnu-entry
+sw_flag STAGE90_HW_WATCHDOG_SELFTEST --allow-hw-watchdog-selftest
+sw_flag STAGE90_DEADMAN_SELFTEST --allow-selftest
+sw_flag STAGE90_HANDOFF_FAULT_INJECT_VA --allow-fault-inject
+case ${payload_sw[STAGE90_HANDOFF_MODE]:-} in
+  STAGE90_HANDOFF_MODE_PREFLIGHT_WATCHDOG_ONLY|1|1u) gate_args+=(--allow-preflight) ;;
+  STAGE90_HANDOFF_MODE_FULL|2|2u)                    gate_args+=(--allow-full) ;;
+esac
+case ${payload_sw[STAGE90_PMAP_ATTR_MODE]:-} in
+  STAGE90_PMAP_ATTR_MODE_NORMAL_NC|1|1u) gate_args+=(--allow-attr-normal-nc) ;;
+  STAGE90_PMAP_ATTR_MODE_NORMAL_WB|2|2u) gate_args+=(--allow-attr-normal-wb) ;;
+esac
+case ${payload_sw[STAGE90_CACHE_MODE]:-} in
+  STAGE90_CACHE_MODE_ICACHE|1|1u)        gate_args+=(--allow-icache) ;;
+  STAGE90_CACHE_MODE_ICACHE_DCACHE|2|2u) gate_args+=(--allow-dcache) ;;
+esac
+# `--allow-xnu-entry` is the one flag required in both directions: needed on an entry image, refused on
+# a ladder image (`:1680`). The table has it only in the `sw_flag` above, so an arm with the switch off
+# derives a set without it - which is the set that arm needs.
+GATE_FLAG_VOCAB=(--allow-preflight --allow-full --allow-selftest --allow-attr-normal-nc
+                 --allow-attr-normal-wb --allow-icache --allow-dcache --allow-xnu-entry
+                 --allow-hw-watchdog-selftest --allow-fault-inject)
+gate_arg_unknown=()
+if [[ -r $GATE ]]; then
+  # The gate's flag vocabulary, read out of the gate: its usage line and every refusal that names a
+  # flag. A flag in there that this table cannot produce would make the derived set incomplete and the
+  # row would be green on a set the run does not have - so it is a refusal that names the flag.
+  seen_gate_flags=$( { sed -n 's/^#[[:space:]]*Usage:[[:space:]]*//p' "$GATE"
+                       grep -oE 'needs --allow-[a-z-]+|without --allow-[a-z-]+' "$GATE"; } \
+                     | grep -oE -- '--allow-[a-z-]+' | LC_ALL=C sort -u )
+  while read -r _f; do
+    [[ -n $_f ]] || continue
+    case " ${GATE_FLAG_VOCAB[*]} " in *" $_f "*) ;; *) gate_arg_unknown+=("$_f") ;; esac
+  done <<< "$seen_gate_flags"
+fi
+gate_args_str=''
+if (( ${#gate_args[@]} > 0 )); then
+  gate_args_str=$(printf '%s ' "${gate_args[@]}")
+  gate_args_str=${gate_args_str% }
+fi
 
 CHECKS=(); VERDICT=(); DETAIL=(); NFAIL=0
 ok()   { CHECKS+=("$1"); VERDICT+=(ok);   DETAIL+=("$2"); }
@@ -121,8 +365,20 @@ say() { (( QUIET == 1 )) || printf '%s\n' "$1"; }
 
 say "verify_press_ready: $REPO_ROOT"
 say "  live arm  $LIVE"
-say "  park      $PARK   (set $SET)"
+if [[ -n $SET ]]; then
+  say "  park      $PARK   (set $SET - $SET_WHY)"
+else
+  say "  park      (NOT RESOLVED: $SET_WHY)"
+fi
 say "  record    $RECORD"
+if (( payload_cfg_ok == 1 )) && [[ -z $sw_problem && ${#gate_arg_unknown[@]} -eq 0 ]]; then
+  say "  gate flags  ${gate_args_str:-(none - no switch this arm declares needs one)}"
+  say "  the run     ./preflight_boot_check.sh $gate_args_str   then   ./run_and_capture.sh $gate_args_str"
+  say "              (the runner hands unrecognised flags to the gate, so a press given a NARROWER set"
+  say "               than this is a press spent on a gate refusal)"
+else
+  say "  gate flags  (NOT DERIVED - see row 3, which refuses rather than gating on a guessed set)"
+fi
 say ""
 
 # --- 1. the live bytes ARE the parked bytes -------------------------------------------------------
@@ -131,10 +387,21 @@ say ""
 # of the same bytes - which is what makes a typo in either a reading rather than a silence. The file
 # list comes from the record, so a member the record names and the live tree does not have is named
 # as absent rather than reported as a mismatch.
-if [[ ! -r $RECORD ]]; then
+#
+# **The set this row compares against is FOUND, and when it cannot be found this row refuses rather
+# than comparing against something else.** The finding is done above, once, from the live
+# `stage90-qcdt.img` - the artifact the press sends - because the set's NAME cannot be defaulted and
+# the record's `role=` text cannot be asked (three sets claim to be next; see the finding block). So
+# there are two more red shapes here than there were: a live payload that no set records, and one that
+# two sets record. Both are named in the row's own detail line.
+if [[ -z $SET ]]; then
+  bad 'live arm is the recorded arm' "the set was not found, so there is nothing to compare the live bytes WITH: $SET_WHY"
+elif [[ ! -r $RECORD ]]; then
   bad 'live arm is the recorded arm' "$RECORD is not readable, so which files the armed set has, and what they should hash to, cannot be read at all"
 elif [[ ! -d $LIVE ]]; then
   bad 'live arm is the recorded arm' "$LIVE is not a directory - an absent directory is not a failed read"
+elif [[ -z $PARK ]]; then
+  bad 'live arm is the recorded arm' "the park's directory is named for the set and the set is not resolved, so no park was found to compare against ($SET_WHY)"
 elif [[ ! -d $PARK ]]; then
   bad 'live arm is the recorded arm' "$PARK is not a directory - the park is the only copy of an arm that cannot be rebuilt (408), so its absence is a refusal and not a check that passed"
 else
@@ -147,15 +414,15 @@ else
     # `manifest_members=stage90_fixture.macho,...`. The record's shape was assumed rather than read,
     # which is the defect this project's measurement notes rank among the first to suspect - and it
     # is the more embarrassing here because the record's own line for `SHA256SUMS.txt` carries an
-    # extra key before `role=`, so the shape is not even uniform down the file.
+    # extra key before `role=`, so the shape is not even uniform down the file. The parser itself is
+    # `kv_of`, defined once above, because the set-finding block reads the same lines.
     [[ $line == *"set=$SET "* ]] || continue
-    _kv() { local t; for t in $line; do case $t in "$1"=*) printf '%s' "${t#*=}"; return 0 ;; esac; done; }
-    file=$(_kv file)
+    file=$(kv_of file "$line")
     if [[ -z $file ]]; then
       bad 'live arm is the recorded arm' "a line of set $SET in the record has no file= key, so this check cannot say which member it is about: $(printf '%s' "$line" | cut -c1-90)..."
       nset=-1; break
     fi
-    sha=$(_kv sha256); bytes=$(_kv bytes)
+    sha=$(kv_of sha256 "$line"); bytes=$(kv_of bytes "$line")
     (( nset++ ))
     if [[ ! -f $LIVE/$file ]]; then miss+=("$LIVE/$file (absent)"); continue; fi
     if [[ ! -f $PARK/$file ]]; then miss+=("$PARK/$file (absent)"); continue; fi
@@ -183,7 +450,9 @@ fi
 # Delegated rather than reimplemented: verify_revert_set.sh is the recorded method (and `sha256sum -c`
 # is NOT - the manifest it reads is absolute-pathed, so it would hash the live tree and report a park
 # it never looked at).
-if [[ ! -x $REPO_ROOT/tools/verify_revert_set.sh ]]; then
+if [[ -z $SET || -z $PARK ]]; then
+  bad 'the park verifies against the record' "there is no park to verify - the set was not found and the park's name follows it ($SET_WHY)"
+elif [[ ! -x $REPO_ROOT/tools/verify_revert_set.sh ]]; then
   bad 'the park verifies against the record' "$REPO_ROOT/tools/verify_revert_set.sh is not executable, so the park cannot be compared with the record by the recorded method"
 else
   if out=$("$REPO_ROOT/tools/verify_revert_set.sh" "$PARK" --set="$SET" 2>&1); then
@@ -198,8 +467,23 @@ fi
 # whose sources moved, and a record that binds a different entry bin. It is host-only: the gate never
 # runs fastboot and never touches the device, and its own header says so - measured in 634 by running
 # it with sudo/adb/fastboot stubbed, where the stub was never called and the output was byte-identical.
+#
+# **The flag set is the arm's, not a constant, and the row refuses rather than guesses.** The gate is
+# invoked here with exactly the flags the run must be given (`gate_args`, derived above from the arm's
+# own switches). Until 2026-09-25 this row passed `--allow-xnu-entry` and nothing else, which on the
+# arm 666 put in `out/` is a set the gate refuses (`:1570`) - a *true* refusal, and a useless one: the
+# row is the only thing that says the press will not be wasted, so a permanently red row on a good tree
+# teaches the operator to read the next red row as staleness. The three ways the derivation can fail
+# are all refusals here, because each of them would otherwise make this row a verdict about a
+# *different* invocation than the run's.
 if [[ ! -x $GATE ]]; then
   bad 'the gate accepts this tree' "$GATE is not executable, so the tree has not been checked by the thing that checks it"
+elif (( payload_cfg_ok != 1 )); then
+  bad 'the gate accepts this tree' "the flag set this arm needs cannot be derived: $payload_cfg_why - and the gate's flags are a function of the arm's own switches, so running it with a guessed set would be a verdict about an invocation the run will not make"
+elif [[ -n $sw_problem ]]; then
+  bad 'the gate accepts this tree' "the payload's switch record cannot be read well enough to derive the flag set: $sw_problem"
+elif (( ${#gate_arg_unknown[@]} > 0 )); then
+  bad 'the gate accepts this tree' "the gate names flag(s) this file has no switch for: ${gate_arg_unknown[*]} - so the derived set could be missing one, and a green row here would be a verdict about a set the run does not have. Add the switch that requires it to the table above"
 else
   # Invoked by its own path and not as `./preflight_boot_check.sh` inside its directory: the gate
   # resolves everything it reads from `$(dirname "$0")` itself, so a cd is not needed - and the first
@@ -207,12 +491,30 @@ else
   # invocation** while honouring it for the executability test, so a `--gate` pointing at any other
   # name reported `exit 127` (command not found) as if it were the gate's own verdict. A flag whose
   # value is used in one place and not another is this project's most repeated defect class.
-  if gout=$("$GATE" --allow-xnu-entry 2>&1); then
+  if [[ -n $GATE_FLAGS_SEAM ]]; then
+    used_flags=$GATE_FLAGS_SEAM
+    used_why="the --gate-flags seam, NOT the derivation"
+  else
+    used_flags=$gate_args_str
+    used_why="derived from the arm's own switches"
+  fi
+  # Unquoted on purpose: this is a LIST of flags, and it is the one value here that has to reach the
+  # gate as several arguments. Empty is a legitimate list (an arm whose switches need none of them),
+  # and an unquoted empty variable expands to nothing under `set -u`.
+  if gout=$("$GATE" ${used_flags} 2>&1); then
     gsha=$(printf '%s' "$gout" | sed -n 's/^  sha256  *\([0-9a-f]\{16\}\)[0-9a-f]*.*/\1/p' | head -1)
-    ok 'the gate accepts this tree' "exit 0${gsha:+ (image ${gsha}...)} - the entry sources match the manifest by content, the image carries the arm the entry bin holds, and the record binds that bin"
+    ok 'the gate accepts this tree' "exit 0${gsha:+ (image ${gsha}...)} under '${used_flags:-(no flags)}' ($used_why) - the entry sources match the manifest by content, the image carries the arm the entry bin holds, and the record binds that bin"
   else
     grc=$?
-    bad 'the gate accepts this tree' "exit $grc - $(printf '%s' "$gout" | grep -m1 -E 'REFUS|source newer|not |no ' | cut -c1-160)"
+    # The refusal is the gate's own `REFUSING:` line (`fail()` writes it to stderr, and `2>&1` above
+    # has it). The first draft matched a bare `/REFUS|not |no /` and, on this arm, printed the gate's
+    # *passing* line `no source file is newer than the image` as if it were the reason - measured
+    # 2026-09-25. A FAIL row whose text is a line that does not contain the refusal is worse than no
+    # text, because it reads as a reason.
+    refusal=$(printf '%s' "$gout" | grep -m1 '^REFUSING:' | cut -c1-220)
+    [[ -n $refusal ]] || refusal=$(printf '%s' "$gout" | grep -m1 -E 'REFUS|not allowed|needs --allow|was passed|unknown argument' | cut -c1-220)
+    [[ -n $refusal ]] || refusal="no REFUSING line at all; last line: $(printf '%s' "$gout" | tail -1 | cut -c1-160)"
+    bad 'the gate accepts this tree' "exit $grc under '${used_flags:-(no flags)}' ($used_why) - $refusal"
   fi
 fi
 
@@ -221,9 +523,11 @@ fi
 # sleeper arm's log carries no `xnu_live_seam_*` key (640 section 2: its seam's acting site is inside
 # `platform_cache_idle_exit`, behind 599's closed `SIGPdisabled` gate), so scoring its log on 638
 # section 3's `a1`/`b1` pair table would be a reading of a key that cannot appear. And the files a
-# reader would reach for cannot tell the arms apart: the entry record differs by one line
-# (`STAGE90_XNU_IDLE_NO_SLEEP`), and the *payload's* record - the one the gate prints - is
-# byte-identical (`6c2b6038...`, measured), because the separating switch is an entry switch.
+# reader would reach for cannot tell THOSE TWO arms apart: the entry record differs by one line
+# (`STAGE90_XNU_IDLE_NO_SLEEP`), and their *payload* records - the one the gate prints - are
+# byte-identical (`6c2b6038...`, measured 646 and again 2026-09-25), because the switch separating them
+# is an entry switch. **"The two arms 646 had" is the scope of that sentence, and it is not a property
+# of the payload record** - see the last paragraph here.
 #
 # **Reachability alone stopped naming the arm the moment 653's arm was built, and that is the defect
 # this row was repaired for on 2026-09-24.** There are now **two** arms that enter the window - the
@@ -235,6 +539,19 @@ fi
 # measured it equal - while the acting arm's pair reads its own operation's cells. So the arm is named
 # from the **record's seam pair joined to the reading**, and a record that does not carry that pair
 # exactly once is refused rather than named from the reachability sentence alone.
+#
+# **THE SAME SHAPE RECURRED ONE LEVEL DOWN on 2026-09-25, AND THIS TIME THE READING COULD NOT SEE IT
+# AT ALL.** 666's arm - the hardware-watchdog self-test - carries 653's entry byte for byte
+# (`a43304f2...`, SEAM_POC=1 SEAM_MEASURE=0 IDLE_NO_SLEEP=0 unchanged: the payload never reaches the
+# handoff on a self-test arm, so the entry's seam switches cannot affect it either way) and differs from
+# it in exactly ONE line of the payload's record, `#define STAGE90_HW_WATCHDOG_SELFTEST 0u` -> `1`
+# (measured, 666 section 4). Both of this row's inputs - the reachability sentence and the entry record
+# - are therefore identical between 653's arm and 666's, so the row named "the ACTING arm", with the
+# acting arm's whole pre-registered reading attached, for a press that asks an entirely different
+# question. It did that **green**. So the arm is named by the ELF reading JOINED TO the payload's own
+# switch record, and the join is required rather than best-effort: if that record cannot be read, or a
+# switch the join reads is not named exactly once with a value, this row REFUSES instead of falling back
+# to the entry reading - because the fallback is the wrong answer, and it is the one that was green.
 #
 # **The extractor's exit code is not the verdict.** Both of its verdicts exit 0, so the sentence is
 # read out of its text, and a third shape is refused rather than folded into either arm - the rule this
@@ -249,6 +566,10 @@ elif [[ ! -f $ARM_ELF ]]; then
   bad 'the arm is named by a reading' "$ARM_ELF is absent - the reachability reading is taken from the entry ELF, and the ELF is not here to read"
 elif [[ ! -r $ARM_CFG ]]; then
   bad 'the arm is named by a reading' "$ARM_CFG is not readable, so the entry record's switch cannot be compared with the reading"
+elif (( payload_cfg_ok != 1 )); then
+  bad 'the arm is named by a reading' "$payload_cfg_why - and the entry reading ALONE cannot name this arm: 653's entry and 666's are byte-identical, so without that record the name would be the ENTRY's name, which on 666's arm is the wrong arm and is the answer that was green until 2026-09-25. A missing record here is a refusal and not a fallback"
+elif [[ -n $sw_problem ]]; then
+  bad 'the arm is named by a reading' "the payload's switch record cannot be read well enough to name the arm: $sw_problem"
 else
   aout=$(timeout 120 "$ARM_CHECK" "$ARM_ELF" 2>&1); arc=$?
   vline=$(printf '%s\n' "$aout" | sed -n 's/^VERDICT: //p' | head -1)
@@ -272,26 +593,49 @@ else
     seam=badcount
     seamwhy="$ARM_CFG carries $nsp STAGE90_XNU_SEAM_POC= and $nsm STAGE90_XNU_SEAM_MEASURE= line(s); both must be named exactly once, or which of two window-entering arms this is cannot be read at all"
   fi
-  want=''; arm=''; conseq=''
+  want=''; entry_arm=''; entry_conseq=''
   case $vline in
     'the window is UNREACHABLE in this image.'*)
       want=1
-      arm='the SLEEPLESS arm (594/595)'
-      conseq="this press's log carries NO xnu_live_seam_* key, so 638 section 3's pair table and 642's sleh_pc join are UNREAD on it (640)" ;;
+      entry_arm='the SLEEPLESS arm (594/595)'
+      entry_conseq="this press's log carries NO xnu_live_seam_* key, so 638 section 3's pair table and 642's sleh_pc join are UNREAD on it (640)" ;;
     'the window is reachable EXACTLY ONCE in this image.'*)
       want=0
       case $seam in
         poc)
-          arm='the ACTING arm (653: the seam WITH its operation, SEAM_POC=1 and SEAM_MEASURE=0)'
-          conseq="this press's log carries the seam pair, and on THIS arm the pair reads the operation's own cells (run_and_capture.sh:2069-2088) - and the EXPECTED row is STALE LINE, WRITTEN OUT, i.e. a1 == this log's own rtcpre_pop: the operation issues exactly ONE DCCIMVAC (mcr p15,0,r0,cr7,cr14,{1}, at cfmdr_loop 0x800458b0) and the built call entry_seam_flush:0x8047ca64 passes len 8, so the loop runs once at 0x8054fec0 - the line containing the slot. Clean-and-invalidate is the SAME instruction, so this cell says the invalidate ran as well as the write-back. CLEAN LINE (a1 == b1) has TWO readings and the frontier decides which: the operation inert, OR the line already clean - in which case the invalidate still ran and the boot should still get past the pop. Read that cell TOGETHER with slot_post_calls / poll_seq, never alone. CHANGED (a1 neither) is the least likely of the three. **571's claim that the invalidate does not survive the distance to the pop is measured OUT**: the four instructions 0x8004632c-0x80046338 are mrc TPIDRPRW / mov r1,#1 / ldr r0,[r0,#1484] / str r1,[r0,#304] - no cr7 write of any kind - the load is at 0xc05593bc (TPIDRPRW = 0xc0558df0, this arm's own xnu_live_pce_tpidrprw) and the store at 0x8051a130 (the dump's r0 = 0x8051a000 = cpu_data, +304), and neither is in the slot's line 0x8054fec0-0x8054feff. The live alternative is ONE LEVEL BELOW: an L2 copy that an MVA operation may not reach. The frontier reading beside it is slot_post_calls, absent in every capture since 520" ;;
+          entry_arm='the ACTING arm (653: the seam WITH its operation, SEAM_POC=1 and SEAM_MEASURE=0)'
+          entry_conseq="this press's log carries the seam pair, and on THIS arm the pair reads the operation's own cells (run_and_capture.sh:2069-2088) - and the EXPECTED row is STALE LINE, WRITTEN OUT, i.e. a1 == this log's own rtcpre_pop: the operation issues exactly ONE DCCIMVAC (mcr p15,0,r0,cr7,cr14,{1}, at cfmdr_loop 0x800458b0) and the built call entry_seam_flush:0x8047ca64 passes len 8, so the loop runs once at 0x8054fec0 - the line containing the slot. Clean-and-invalidate is the SAME instruction, so this cell says the invalidate ran as well as the write-back. CLEAN LINE (a1 == b1) has TWO readings and the frontier decides which: the operation inert, OR the line already clean - in which case the invalidate still ran and the boot should still get past the pop. Read that cell TOGETHER with slot_post_calls / poll_seq, never alone. CHANGED (a1 neither) is the least likely of the three. **571's claim that the invalidate does not survive the distance to the pop is measured OUT**: the four instructions 0x8004632c-0x80046338 are mrc TPIDRPRW / mov r1,#1 / ldr r0,[r0,#1484] / str r1,[r0,#304] - no cr7 write of any kind - the load is at 0xc05593bc (TPIDRPRW = 0xc0558df0, this arm's own xnu_live_pce_tpidrprw) and the store at 0x8051a130 (the dump's r0 = 0x8051a000 = cpu_data, +304), and neither is in the slot's line 0x8054fec0-0x8054feff. The live alternative is ONE LEVEL BELOW: an L2 copy that an MVA operation may not reach. The frontier reading beside it is slot_post_calls, absent in every capture since 520" ;;
         measure)
-          arm='the MEASURE arm (574 park: the interception with its operation REMOVED, SEAM_POC=0 and SEAM_MEASURE=1)'
-          conseq="this press's log carries the seam pair as a CONTROL reading - whether Apple's own FlushPoU_Dcache writes the slot's line back, which 652 measured as an equal pair - and it does not by itself select a repair: that was the reading this arm existed to produce" ;;
+          entry_arm='the MEASURE arm (574 park: the interception with its operation REMOVED, SEAM_POC=0 and SEAM_MEASURE=1)'
+          entry_conseq="this press's log carries the seam pair as a CONTROL reading - whether Apple's own FlushPoU_Dcache writes the slot's line back, which 652 measured as an equal pair - and it does not by itself select a repair: that was the reading this arm existed to produce" ;;
         none)
-          arm='an arm that ENTERS the window with NO seam interception (SEAM_POC=0 and SEAM_MEASURE=0)'
-          conseq="this press's log carries NO xnu_live_seam_* key at all, so neither 638 section 3's pair table nor 642's sleh_pc join can be read on it" ;;
+          entry_arm='an arm that ENTERS the window with NO seam interception (SEAM_POC=0 and SEAM_MEASURE=0)'
+          entry_conseq="this press's log carries NO xnu_live_seam_* key at all, so neither 638 section 3's pair table nor 642's sleh_pc join can be read on it" ;;
       esac ;;
   esac
+  # --- the payload's own switches, JOINED to the entry reading ------------------------------------
+  # The entry reading names the ENTRY. The arm the press sends is that entry joined to what the payload
+  # does with it, and today only the two self-test switches change the answer: on such an arm the
+  # payload spins BEFORE the handoff (`stage90_main.c:1224-1249` and `:1251-1264`, both after the DT
+  # build), and `stage90_selftest_bounded_spin` returns only by rebooting - so the entry is never
+  # entered, and every entry-side reading (the reachability sentence, the seam pair, the idle-exit
+  # cells, the `xnu_live_*` keys) is about code this run does not execute.
+  sub_arm=''
+  if sw_on STAGE90_HW_WATCHDOG_SELFTEST; then
+    sub_arm='the HARDWARE-WATCHDOG SELFTEST arm (666: STAGE90_HW_WATCHDOG_SELFTEST=1)'
+    conseq="**THIS PAYLOAD NEVER REACHES THE ENTRY**, so the entry reading above is a fact about the code this payload carries and NOT about what this press's log can contain: there is no xnu_live_* key in it at all, so 638 section 3's a1/b1 pair table, 642's sleh_pc join and the idle-exit cells are UNREAD. THIS press's own keys are the hw_watchdog_* block the payload logs before it spins (hw_watchdog_enabled, hw_watchdog_readback_ok, hw_watchdog_counter_running, hw_watchdog_countdown_plausible, hw_watchdog_checksum) - and that block is the PRECONDITION, not the question: hw_watchdog_enabled=0 says in the log that this press tested no hardware net, which is worth having and is not the answer. The question - does the SoC's own countdown reset the device - is answered by the TIME the device takes to return, which is the spin's own stated result (stage90_selftest_bounded_spin: 'a device back at the net's own timeout means the net fired, and one back at the deadline means it did not'). The two times are 25.0 s bark / 28.0 s bite (533's capture, cited at run_and_capture.sh:1214) against 90.0 s for STAGE90_SELFTEST_DEADLINE_US, 3.2x apart. **And the deadline line's absence is not the watchdog's verdict**: that line ('deadline reached - the hardware watchdog did NOT fire') can be missing because the bite fired OR because the log was read before 90 s had elapsed, since the deadline is measured from the spin's start - so read the return time and the run's exit code (0 or 3 came back, 2 did not) beside it, and never the silence alone"
+    if sw_on STAGE90_DEADMAN_SELFTEST; then
+      conseq="**AND BOTH SELF-TESTS ARE ON in this image**: the dead-man self-test is the #if block BELOW the watchdog's, and the watchdog's spin returns only by rebooting, so the dead-man block is unreachable on this arm and this press is a watchdog press. Build with STAGE90_HW_WATCHDOG=0 to test the dead-man alone, which is what the source says above that block. $conseq"
+    fi
+  elif sw_on STAGE90_DEADMAN_SELFTEST; then
+    sub_arm='the DEAD-MAN SELFTEST arm (STAGE90_DEADMAN_SELFTEST on)'
+    conseq="**THIS PAYLOAD NEVER REACHES THE ENTRY** (stage90_main.c:1251-1264: the block arms the dead-man and then spins before the handoff, and the spin returns only by rebooting), so no xnu_live_* key can be in this log and 638 section 3's pair table and 642's sleh_pc join are UNREAD on it. This arm's own readings are the dead-man's (deadman_gicd_ctlr_*, deadman_gicc_ctlr_*, deadman_interval_us, deadman_samples, and whether stage90_arm_deadman_reset returned 1) plus the TIME the device takes to return: the dead-man's own budget is ~60 s against the 90 s deadline, so a device back at about 60 s is the software net firing. **The hardware watchdog is still armed underneath** unless the payload was built with STAGE90_HW_WATCHDOG=0, so attribute a reset to the dead-man only if the log carries the dead-man's own dump - which is what the source says above that block"
+  fi
+  if [[ -n $sub_arm ]]; then
+    arm=$sub_arm
+  else
+    arm=$entry_arm
+  fi
   if (( arc != 0 )); then
     bad 'the arm is named by a reading' "the reachability check exited $arc on $(basename "$ARM_ELF"), so nothing here names the arm: $(printf '%s' "$aout" | grep -m1 -E 'REFUS|Error|Traceback' | cut -c1-120)"
   elif [[ -z $vline ]]; then
@@ -300,10 +644,12 @@ else
     bad 'the arm is named by a reading' "$(basename "$ARM_CFG") carries $nsc STAGE90_XNU_IDLE_NO_SLEEP= line(s); the record must name that switch exactly once for the reading to be compared with anything"
   elif [[ $seam == badcount || $seam == badpair ]]; then
     bad 'the arm is named by a reading' "$seamwhy"
-  elif [[ -z $arm ]]; then
-    bad 'the arm is named by a reading' "the extractor's verdict is a sentence this row has no reading for: '$vline' - neither of the two it knows, so the arm is not named rather than named wrongly"
+  elif [[ -z $entry_arm ]]; then
+    bad 'the arm is named by a reading' "the extractor's verdict is a sentence this row has no reading for: '$vline' - neither of the two it knows, and a sentence that is not one of them means the ENTRY was not read, so the arm is not named rather than named from the payload switch alone"
   elif [[ $swe != "$want" ]]; then
-    bad 'the arm is named by a reading' "the reading says $arm, which is STAGE90_XNU_IDLE_NO_SLEEP=$want, and the entry record says STAGE90_XNU_IDLE_NO_SLEEP=$swe - one quantity with two readings, and they disagree"
+    bad 'the arm is named by a reading' "the ENTRY reading says $entry_arm, which is STAGE90_XNU_IDLE_NO_SLEEP=$want, and the entry record says STAGE90_XNU_IDLE_NO_SLEEP=$swe - one quantity with two readings, and they disagree"
+  elif [[ -n $sub_arm ]]; then
+    ok 'the arm is named by a reading' "$arm, and the entry it carries is $entry_arm ('$vline', and the entry record's STAGE90_XNU_IDLE_NO_SLEEP=$swe agrees). $conseq"
   else
     ok 'the arm is named by a reading' "$arm: '$vline' and the entry record's STAGE90_XNU_IDLE_NO_SLEEP=$swe agrees, so $conseq"
   fi
@@ -360,6 +706,7 @@ if (( NFAIL > 0 )); then
   exit 1
 fi
 printf 'ok: %d check(s). The bytes the press sends are the recorded armed bytes, the gate accepts the\n' "${#CHECKS[@]}"
-printf '    tree, and a press would be fired on. Nothing here says the press will SUCCEED - that is the\n'
+printf '    tree under %s, and a press would be fired on - give the run those same flags.\n' "'${gate_args_str:-(no flags)}'"
+printf '    Nothing here says the press will SUCCEED - that is the\n'
 printf '    run'"'"'s verdict (exit 0 or 3 came back; 2 did not return and owes another press).\n'
 exit 0
