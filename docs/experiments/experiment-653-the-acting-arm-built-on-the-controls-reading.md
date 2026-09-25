@@ -129,6 +129,19 @@ so the predictions below are the reader's own sentences, quoted:
 third one's withdrawal was itself the defect 656 records, so the pre-registration above is now three rows
 of equal standing rather than two plus a note.
 
+> **CORRIGENDUM (657, measured 2026-09-24, host-side): the two rows above are INVERTED, and the reader's
+> cell order is why.** `run_and_capture.sh:2069-2088` tests `a0 == b0 && a1 == b1` first, then
+> **`a1 == rtcpre_pop`**, then `CHANGED` — so the `a1 ≠ b1` row cannot reach `CHANGED` whenever
+> `a1 == rtcpre_pop`, and the arm that ran measured the line's word at exactly that offset **to be**
+> `rtcpre_pop` (the `pop` read it cacheably while DRAM held the pushed `lr`). A clean writes the whole line
+> to DRAM, so a *working* operation puts that deadline at `slot+4` and the row that fires is the one this
+> table filed as unreachable. **`a1 == rtcpre_pop` → `STALE LINE, WRITTEN OUT` is the expected outcome,
+> and it is also the row that predicts the boot gets past the `pop`**: the seam's `a`-reads precede its
+> restore (`entry_trace.c:2254-2300`), the restore then rewrites both words in DRAM with `C` clear, and the
+> line has just been invalidated — so the `pop`, the first cacheable load after the re-enable at
+> `0x80046320-24`, misses and fetches the repaired DRAM. `a1 == b1` is the falsifier and `CHANGED` the
+> least likely of the three. See `experiment-657` for the instruction stream this is read from.
+
 **And the independent reading, which does not depend on the pair at all.** The frontier is the `pop`; the
 deaths of 520, 533 and 652 all have `slot_pre_calls`/`slot_rtcpre_calls` published with `slot_post_calls`
 **absent**, because the pass never came back through the wrapper. So:
