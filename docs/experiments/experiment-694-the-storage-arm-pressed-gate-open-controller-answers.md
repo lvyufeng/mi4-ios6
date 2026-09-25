@@ -148,8 +148,9 @@ what the index means. Read out of the log rather than argued:
 
 * `xnu_live_prrr = 0x1f08022a` — its index fields, two bits each, are `2, 2, 2, 0, …`, so **the first
   index whose field is 0 is 3**, which is what the mapper's own recipe searches for;
-* the recipe encodes that index as `B = i[0] = 1`, `C = i[1] = 1`, `TEX[2] = i[2] = 0` — exactly the
-  `0x040e` observed;
+* the recipe encodes that index as `B = i[0] = 1`, `C = i[1] = 1`, `TEX[0]` — the bit
+  `ARM_TTE_BLOCK_ATTRINDX` writes `i[2]` into, `ARM_TTE_BLOCK_TEX0SHIFT = 12` (`proc_reg.h:789`) — `= 0`,
+  exactly the `0x040e` observed;
 * and the attribute word the mapper used is published by the channel itself: **`xnu_live_attr = 0xc`**
   (`= (1<<3) | (1<<2)`), the value both `entry_stubs.c`'s comment and this press's log carry.
 
@@ -159,15 +160,45 @@ not a Normal/cacheable mapping. That matters for the claim §3 of the 693 record
 path: `0xfc4ab000` is in the megabyte this arm installed, and it is installed with **device semantics**,
 so a store through it would reach the pin rather than sit in a cache line.
 
-**`tools/decode_armv7_descriptor.py` prints `Reserved` for this combination**, and that is a defect in the
+**`tools/decode_armv7_descriptor.py` printed `Reserved` for this combination**, and that is a defect in the
 tool and not in the mapping: with `SCTLR.TRE` clear, `TEX=000, C=1, B=1` is the reserved row, but with TRE
-set those two bits are the `PRRR` index and the tool has no input for TRE — it decodes the *descriptor*
+set those two bits are the `PRRR` index and the tool had no input for TRE — it decoded the *descriptor*
 correctly and the *attribute* by a rule that this device does not use. The tool's own header names the
 problem in the shape of an assumption it does not state: it decodes against Apple's `ARM_PTE_*`, where the
-low twenty bits are one opaque `ATTR_MASK`. Read the two descriptors through it with this step's log beside
-it, not alone. (Its output for `0x0001140e` — TEX=001, C=1, B=1, "Write-Back, Write-Allocate" — happens to
-agree with the reference because under TRE that index's PRRR field is 3, "use TEX/C/B", which is also why
-the reference's own table is right for the kernel's DRAM mappings and wrong as a rule for MMIO.)
+low twenty bits are one opaque `ATTR_MASK`. **This step repaired it** (`--tre`, `--prrr=`, `--nmrr=`), and
+the repair turned up two things the repair's own first draft got wrong, both recorded here because a
+tool's help text is a claim like any other:
+
+* **The rule that names a descriptor is a property of the regime it runs in, not of the descriptor.**
+  `0x0001140e` is the *payload's* `STAGE90_PMAP_DESC_SECTION_NORMAL_WB` (`stage90.h:4423`), and the
+  payload's Phase-1 tables run with TRE **clear** — so for it the `TEX/C/B` table *is* the rule and the
+  reference's "Normal, Write-back, write-allocate" row is right; the sentence that used to stand here (that
+  its index's `PRRR` field was 3, the "use TEX/C/B" row) was **wrong arithmetic**: `0x0001140e` is
+  `TEX[0] = 1, C = 1, B = 1`, so its index is **7**, whose field on this machine is `0b00`. The
+  counterfactual is the interesting half: read under the regime the *entry image's* installs run in, the
+  payload's three section descriptors would be "Strongly-ordered" (index 7, field 0) for `NORMAL_WB`,
+  "Write-Back" (index 4, field `0b10`, `NMRR` IR4 = 1) for `NORMAL_NC`, and "Write-Back" (index 0) for
+  `SO_ONLY` — i.e. **inverted**, which is why the two regimes must never be decoded with one rule.
+* **`PRRR` field `0b00` is now evidenced rather than asserted, and `0b10` is not a type at all.** The
+  machine installs `PRRR_SETUP = 0x1F08022A` (`TR0..TR7 = 2,2,2,0,2,0,0,0`) beside `NMRR_SETUP =
+  0x01210121` (`IR0..IR7 = 1,0,2,0,1,0,0,0`, `proc_reg.h:530`/`:550`), and those `NMRR` fields are
+  **exactly** Apple's own names for the first six `CACHE_ATTRINDX_*` (`:630-636`): 1 = `WRITEBACK` at
+  index 0, 0 = `DISABLED` at index 1 (`WRITECOMB`, "no cache, buffered writes"), 2 = `WRITETHRU` at 2,
+  0 = `DISABLED` at 3 (`DISABLE`), 1 = `WRITEBACK` at 4 (`INNERWRITEBACK`), 0 at 5 (`POSTED`). So the
+  field that sits on the two indices Apple calls `DISABLE` (`0b00`, indices 3 and 5) is the uncached
+  one — which is the field `entry_stubs.c` searches `PRRR` for — and `0b10`, which sits on a write-back
+  index *and* on a write-combining one, cannot name a type by itself: it hands the attribute to `NMRR`.
+  **That settles 548 §5's first residual by evidence rather than by choosing a reading**: XNU's kernel
+  mapping is `ATTRINDX(0)` (descriptor `TEX=000, C=0, B=0`), its `PRRR` field is `0b10`, and `NMRR` `IR0
+  = NMRR_WRITEBACK` — **write-back, write-allocate**, not the "fixed normal type" alternative.
+* **And the misnaming that started this is in the entry image's own source, not only in this document.**
+  `entry_stubs.c:2322` reads `/* ARM_TTE_BLOCK_ATTRINDX(i): B = i[0], C = i[1], TEX[2] = i[2]. */` beside
+  the code that computes `(((i >> 2) & 1u) << 12)` — and bit 12 is `ARM_TTE_BLOCK_TEX0SHIFT`, i.e. the
+  descriptor's **TEX[0]**, exactly where Apple's macro (`proc_reg.h:803`) puts it. The arithmetic is right
+  and the name is wrong, and a wrong name is what a reader copies: this document's first draft said
+  `TEX[2]` for the same reason, and so did the tool's. **Owed, and it must ride along with the next edit
+  inside `xnu_arm_boot/`** — that directory is content-hashed into `xnu_arm_entry-sources.txt` (`673`), so
+  a comment-only touch now would change the parked arm's own identity and the gate would refuse it.
 
 ## 5. The ending fired — and it did NOT end the run
 
@@ -296,10 +327,16 @@ shift a rebuild should produce, and the reason a fault site is identified by `pc
   `tools/check_storage_refs.py` disassembles the payload where the entry image sits as **data**. This
   press's payload carries `movt #0xf982` at file offset 580376 and `movt #0xfc40` in the entry blob, and
   the fixed `out/stage90` was gated green with it.
-* **A tool defect, in this lane**: `tools/decode_armv7_descriptor.py` decodes `TEX/C/B` as a memory type
-  with no `SCTLR.TRE` input, so it prints `Reserved` for the Strongly-ordered descriptors this project's
-  own MMIO mapper installs (§4). It is right for the kernel's DRAM mappings and wrong as a rule; the fix
-  is a `--tre`/`--prrr` input rather than a changed table.
+* **A tool defect, in this lane — repaired in this step**: `tools/decode_armv7_descriptor.py` decoded
+  `TEX/C/B` as a memory type with no `SCTLR.TRE` input, so it printed `Reserved` for the Strongly-ordered
+  descriptors this project's own MMIO mapper installs (§4). It now takes the regime (`--tre`, `--prrr=`,
+  `--nmrr=`); what it got wrong in the first draft is written up in §4, because a help text that names a
+  `PRRR` field is a claim like any other. **The reference doc's `TEX/C/B` table stays as it is** and is now
+  labelled with the regime it belongs to (`docs/reference/pmap-attribute-map.md`): every descriptor on
+  that page is the payload's, and the payload's tables run with TRE clear.
+* **A misnamed bit in the entry image's own comment** (§4): `entry_stubs.c:2322` says `TEX[2] = i[2]`
+  where the `<< 12` it sits beside is `TEX[0]`. A comment-only fix, and it waits for the next edit inside
+  `xnu_arm_boot/` because that directory is content-hashed into the parked arm's identity.
 * **Carried, unchanged**: the 691 §5 one-store `entry_note_wfi` readback; `entry_reset.h`'s false IMEM
   claim; the `RESTART_REASON` decision; 676 §6 / 677 §6; the 684-owed runner clause for the 678 arm;
   `tools/xnu_dt_requirements.py` not encoding the `"master"` value.

@@ -189,6 +189,19 @@ TEX[2:0] / C / B select the memory type:
 S (section bit 16 / small-page bit 10) selects shareability for Normal memory; it is ignored
 for Strongly-ordered and Device.
 
+**The table above is the rule for the regime these mappings run in, and that is a fact about the
+register state rather than about the encodings.** Every descriptor on this page is the payload's own
+(`STAGE90_PMAP_DESC_*`), and the payload's tables run with `SCTLR.TRE` **clear** —
+`xnu_entry_stub_sctlr_after = 0x00c5487b`, bit 28 = 0 (548 §3). The mappings **XNU** runs under do not:
+with `xnu_live_sctlr = 0x30c5787d` TRE is **set**, and then those three bits are an index into `PRRR`
+whose field names the memory. The entry image's own device sections (`0x…1040e`, both the GIC's and the
+storage probe's) are index 3, and this machine's `PRRR` (`xnu_live_prrr = 0x1f08022a`, fields
+`2,2,2,0,2,0,0,0`) makes that field `0b00` = **Strongly-ordered** — the same type the table above gives
+them by accident of the no-remap reading; XNU's kernel memory is `ATTRINDX(0)`, field `0b10`, which hands
+the attribute to `NMRR` (`IR0 = NMRR_WRITEBACK`) and is therefore write-back. `tools/decode_armv7_descriptor.py
+--tre --prrr=0x1f08022a` does that step; run without `--tre` on `0x…1040e` it prints `Reserved`, and the
+answer to that is `--tre`, not a different table.
+
 ## Consistency per physical address
 
 The constraint on any attribute change is not "keep everything Strongly-ordered" — it is that

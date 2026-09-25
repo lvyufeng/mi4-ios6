@@ -11,6 +11,47 @@ Usage:
     decode_armv7_descriptor.py 0x00010c02 [more descriptors...]
     decode_armv7_descriptor.py --section 0x00010c02
     decode_armv7_descriptor.py --smallpage 0x12
+    decode_armv7_descriptor.py --tre --prrr=0x1f08022a --section 0xfc41040e
+    decode_armv7_descriptor.py --tre --prrr=0x1f08022a --nmrr=0x01210121 --section 0x0001140e
+
+**694 (2026-09-25) added `--tre`, `--prrr=`, `--nmrr=`, and the reason is a reading this tool got wrong
+without saying so.** The table below is the ARMv7-A memory-attribute encoding for `TEX[2:0], C, B`
+**with `SCTLR.TRE` clear**, and which of the two rules applies is a *property of the regime the
+descriptor runs in*, not of the descriptor:
+
+* the **payload's** own phase-1 table (`STAGE90_PMAP_DESC_SECTION_NORMAL_WB = 0x0001140e`, its page
+  twin `0x0000045e`, `SO_ONLY = 0x00010c02`) runs with TRE **clear** - `xnu_entry_stub_sctlr_after =
+  0x00c5487b`, bit 28 = 0 (548 §3) - so for those the table below *is* the rule, which is why the
+  reference's "Normal, Write-back, write-allocate" is right about `0x0001140e`;
+* a descriptor **XNU** runs under does not: with `xnu_live_sctlr = 0x30c5787d` TRE is **set**, and then
+  those three bits are not a memory type at all - `i[1:0]` (C, B) and `i[2]`, which
+  `ARM_TTE_BLOCK_ATTRINDX(i)` (`proc_reg.h:803`) writes into `ARM_TTE_BLOCK_TEX0SHIFT` = **bit 12**
+  (so the index's bit 2 is the descriptor's **TEX[0]**, not TEX[2]), are an **index into `PRRR`**, and
+  `PRRR`'s two-bit field for that index names the memory.
+
+So the entry image's MMIO installs (`0x...1040e`, index 3) are the second kind, and read without
+`--tre` this tool prints **`Reserved`** for them - true of the table, false of the mapping. Pass `--tre`
+and, from the log, `--prrr=0x<xnu_live_prrr>`; add `--nmrr=0x<nmrr>` when the `PRRR` field is `0b10`
+(the remap case) and you want the inner attribute named too.
+
+**The two `PRRR` fields this tool is willing to name, and the evidence for each.** `PRRR_SETUP =
+0x1F08022A` (`proc_reg.h:530`, the value this device installs) has `TR0..TR7 = 2,2,2,0,2,0,0,0`, and
+`NMRR_SETUP = 0x01210121` (`:550`) has `IR0..IR7 = 1,0,2,0,1,0,0,0`:
+
+| index | 0 | 1 | 2 | 3 | 4 | 5 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Apple's name (`proc_reg.h:630-636`) | `WRITEBACK` | `WRITECOMB` | `WRITETHRU` | `DISABLE` | `INNERWRITEBACK` | `POSTED` |
+| `NMRR` field | 1 | 0 | 2 | 0 | 1 | 0 |
+| `NMRR` name (`:544-547`) | `WRITEBACK` | `DISABLED` | `WRITETHRU` | `DISABLED` | `WRITEBACK` | `DISABLED` |
+| `PRRR` field | 2 | 2 | 2 | **0** | 2 | **0** |
+
+`NMRR`'s field is exactly the inner attribute Apple's own name promises for each index - that is what
+makes the table evidence rather than a lookup - and it is why **`0b00` is Strongly-ordered** (the field
+sits on the two indices Apple calls `DISABLE`, and it is the field `entry_stubs.c` searches `PRRR` for
+when it wants an uncached MMIO mapping) and why **`0b10` cannot itself name a type** (it sits on index 0,
+write-back, *and* on index 1, write-combining) but must hand the attribute to `NMRR`'s field for the
+same index. `0b01` and `0b11` are named by no index in any table this project uses, and are not guessed
+here.
 """
 
 import sys
@@ -28,6 +69,33 @@ MEMORY_ATTRS = {
     (0b010, 0, 0): "Device, non-shareable",
     (0b010, 0, 1): "Reserved",
 }
+
+# PRRR's two-bit field, for the index (TEX[0], C, B) that selects it when SCTLR.TRE is set. Only two
+# values are named, and the evidence is in the module docstring: 0b00 is the field the entry image's
+# mapper searches for to get an uncached MMIO mapping, and 0b10 is the remap case, which names nothing
+# by itself because it sits on both a write-back index and a write-combining one.
+PRRR_FIELD = {
+    0b00: "Strongly-ordered (the field the MMIO mapper searches PRRR for)",
+    0b01: "unnamed here (no index this project uses has this field)",
+    0b10: "Normal - the attribute comes from NMRR's field for the same index",
+    0b11: "unnamed here (no index this project uses has this field)",
+}
+
+# NMRR's two-bit field, reached only when PRRR's field is 0b10. The names are the header's own
+# (proc_reg.h:544-547).
+NMRR_FIELD = {
+    0b00: "Non-cacheable",
+    0b01: "Write-Back, Write-Allocate",
+    0b10: "Write-Through, no Write-Allocate",
+    0b11: "Write-Back, no Write-Allocate",
+}
+
+# The value NMRR_SETUP installs, so --nmrr is only needed for a machine that differs.
+NMRR_SETUP = 0x01210121
+
+TRE = False
+PRRR = None
+NMRR = None
 
 # Access permission encodings, indexed by (AP[2], AP[1:0]).
 AP_SECTION = {
@@ -66,6 +134,42 @@ def memtype(tex, c, b):
     if tex & 0b100:
         return "Normal, cached via PRRR/NMRR indirection (TEX[0],C,B is the index)"
     return "unknown"
+
+
+def attr_index(d, tex0_bitpos):
+    """(TEX[0], C, B) - the PRRR/NMRR index when SCTLR.TRE is set."""
+    return (bit(d, tex0_bitpos) << 2) | (bit(d, 3) << 1) | bit(d, 2)
+
+
+def parse_num(raw):
+    try:
+        return int(raw.split("=", 1)[1], 0)
+    except ValueError:
+        raise SystemExit("%s needs a number" % raw.split("=", 1)[0])
+
+
+def tre_rows(d, tex0_bitpos):
+    """The rows a TRE-aware decode adds, and a note when --tre was not given."""
+    if not TRE:
+        return [("note", "SCTLR.TRE decides which rule names this attribute, and it is a property of "
+                         "the regime the descriptor runs in: the payload's own phase-1 table runs with "
+                         "TRE clear (548: xnu_entry_stub_sctlr_after = 0x00c5487b, bit 28 = 0) and the "
+                         "table above is the rule; a descriptor XNU runs under does not "
+                         "(xnu_live_sctlr = 0x30c5787d, bit 28 = 1) - for those pass --tre and "
+                         "--prrr=0x<xnu_live_prrr>. The entry image's own MMIO installs (0x...1040e) "
+                         "are the second kind, and without --tre this tool prints Reserved for them")]
+    idx = attr_index(d, tex0_bitpos)
+    rows = [("attr index (TRE)", "%d (TEX[0]=%d, C=%d, B=%d) = PRRR/NMRR bits [%d:%d]"
+             % (idx, bit(d, tex0_bitpos), bit(d, 3), bit(d, 2), 2 * idx + 1, 2 * idx))]
+    if PRRR is None:
+        rows.append(("PRRR field", "unknown - pass --prrr=0x<xnu_live_prrr> to name it"))
+        return rows
+    field = (PRRR >> (2 * idx)) & 3
+    rows.append(("PRRR field", "%s = %s" % (format(field, "02b"), PRRR_FIELD[field])))
+    if field == 0b10 and NMRR is not None:
+        inner = (NMRR >> (2 * idx)) & 3
+        rows.append(("NMRR field", "%s = %s" % (format(inner, "02b"), NMRR_FIELD[inner])))
+    return rows
 
 
 def decode_section(d):
@@ -112,6 +216,7 @@ def decode_smallpage(d):
 
 
 def main():
+    global TRE, PRRR, NMRR
     args = sys.argv[1:]
     if not args:
         print(__doc__)
@@ -125,6 +230,20 @@ def main():
     for raw in args:
         if raw in ("--section", "--smallpage"):
             mode = raw
+            continue
+
+        if raw == "--tre":
+            TRE = True
+            continue
+
+        if raw.startswith("--prrr="):
+            PRRR = parse_num(raw)
+            TRE = True                        # a PRRR is only meaningful with TRE set
+            continue
+
+        if raw.startswith("--nmrr="):
+            NMRR = parse_num(raw)
+            TRE = True
             continue
 
         if mode is None:
@@ -141,6 +260,9 @@ def main():
         kind = "section" if mode == "--section" else "small page"
         print("descriptor %s (%s)" % (raw, kind))
         fields = decode_section(d) if mode == "--section" else decode_smallpage(d)
+        # TEX[0] is bit 12 in a section and bit 6 in a small page (Apple's ARM_TTE_BLOCK_TEX0SHIFT
+        # and ARM_PTE_TEX0SHIFT), so it is passed in rather than assumed.
+        fields = fields + tre_rows(d, 12 if mode == "--section" else 6)
         for name, value in fields:
             print("  %-24s %s" % (name, value))
         print()

@@ -856,14 +856,21 @@ set=armed-storage-gcc-1fc30bfe sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364
 # THE ATTRIBUTE, AND A TOOL THAT CANNOT SEE TRE. Both descriptors carry `0x…1040e`, and on this machine
 # `SCTLR.TRE` is set (`xnu_live_sctlr=0x30c5787d`), so the C/B bits are a `PRRR` index: the log's own
 # `xnu_live_prrr=0x1f08022a` has its first zero two-bit field at **index 3**, and the mapper's recipe
-# encodes that index as `B=1, C=1, TEX[2]=0` - the `0x040e` observed. The channel publishes the attribute
-# word itself as **`xnu_live_attr=0xc`**, which is `(1<<3)|(1<<2)`, and `PRRR` field 0 is the
+# encodes that index as `B=1, C=1, TEX[0] (bit 12) =0` - the `0x040e` observed. The channel publishes the
+# attribute word itself as **`xnu_live_attr=0xc`**, which is `(1<<3)|(1<<2)`, and `PRRR` field 0 is the
 # Strongly-ordered encoding. **So both sections are Strongly-ordered shareable device mappings**, which is
 # what makes the 693 block's PS_HOLD sentence true with device semantics rather than only as an address.
-# **And `tools/decode_armv7_descriptor.py` prints `Reserved` for this combination**: it decodes TEX/C/B as a
-# memory type with no `SCTLR.TRE` input, so it is right for the kernel's DRAM mappings (whose index 3 means
-# "use TEX/C/B") and wrong as a rule for this project's own MMIO mapper. That is a defect in the tool and
-# not in the mapping; it is owed a `--tre`/`--prrr` input.
+# **And `tools/decode_armv7_descriptor.py` printed `Reserved` for this combination**: it decoded TEX/C/B as
+# a memory type with no `SCTLR.TRE` input, which is the rule for the payload's own tables (their regime has
+# TRE clear) and not for XNU's or the entry image's. **Repaired after the press**: `--tre`, `--prrr=` and
+# `--nmrr=`; and the repair's first draft named a wrong field (index 7's, not 3's), which the 694 document
+# section 4 records beside the evidence that `PRRR` field 0 sits on exactly the two indices Apple's
+# `CACHE_ATTRINDX_*` calls DISABLE, while field 0b10 hands the attribute to `NMRR`. The table in
+# `docs/reference/pmap-attribute-map.md` is unchanged and is now labelled with the regime it belongs to.
+# **And the misnaming is in the entry image's own source**: `entry_stubs.c:2322` says `TEX[2] = i[2]`
+# beside the `<< 12` it describes, and bit 12 is `ARM_TTE_BLOCK_TEX0SHIFT`, i.e. the descriptor's TEX[0].
+# The arithmetic is right and the name is wrong; it is a comment-only fix, owed, and it waits for the next
+# edit inside `xnu_arm_boot/` because that directory is content-hashed into this arm's identity (673).
 #
 # THE ENDING FIRED AND DID NOT END THE RUN - and this is the one sentence in the 663/678/686/690 line that
 # this press corrects. `xnu_live_post_end_calls=0x00000007` is PRESENT, so the ending FIRED on the seventh
