@@ -497,12 +497,12 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 [[ "$recorded_sha" == "$actual_sha" ]] \
   || fail "$ENTRY_CFG describes entry image $recorded_sha and $ENTRY_BIN is $actual_sha: the record names a different artifact than the one on disk, so the switches it lists are about some other image. Rebuild the entry image, then ./build.sh"
 #
-# **Every key by name, because the nine that *are* the variant are not named like the artifact.** The
+# **Every key by name, because the ten that *are* the variant are not named like the artifact.** The
 # four keys that identify the record (SHA256, BYTES, TRACE, REAL_ARM_INIT) all begin `STAGE90_XNU_ENTRY_`
-# or `STAGE90_ENTRY_`, and the nine that say *which arm this is* - SLOT_NULL, EXIT_POC_FLUSH,
-# IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, SEAM_END_RUN, IDLE_NO_SLEEP -
-# begin `STAGE90_XNU_` and end there. So the obvious
-# display filter, `$1 ~ /^STAGE90_(XNU_ENTRY|ENTRY_)/`, prints four lines, drops all nine of the ones
+# or `STAGE90_ENTRY_`, and the ten that say *which arm this is* - SLOT_NULL, EXIT_POC_FLUSH,
+# IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, SEAM_END_RUN, POST_END_RUN,
+# IDLE_NO_SLEEP - begin `STAGE90_XNU_` and end there. So the obvious
+# display filter, `$1 ~ /^STAGE90_(XNU_ENTRY|ENTRY_)/`, prints four lines, drops all ten of the ones
 # this clause exists to publish, and **prints no error doing it**: the gate would report success while
 # saying nothing about the arm, which is the whole reason the clause was added. Measured on a record
 # with the nine keys `build_entry.sh` wrote at the time: 9 in, 4 out.
@@ -571,17 +571,25 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 # loud rather than filtered, and no safety clause - the entry-sources manifest, the storage tripwire, the
 # identity check - is touched. The two prose counts that named the variant set as eight are corrected in the
 # same edit; the `9 in, 4 out` measurement further up is left as the historical record it is.
+# 686: the seventeenth name, from the same lane and for the same reason, one arm later.
+# `STAGE90_XNU_POST_END_RUN` is 686's ending - the same `entry_seam_end_run` called at the far end of
+# `__wrap_platform_cache_idle_exit` instead of inside the seam - and it is a key `ENTRY_ARM_KEYS` gained
+# (`build_entry.sh:577`) and the record therefore carries, so without this line the converse clause refuses
+# every press of that arm exactly as it refused 678's. The change is the same class as 683's and is recorded
+# the same way: **one more name this gate prints, and no clause moved.** The two counts that name the
+# `ENTRY_CFG_KEYS` variant subset move from nine to ten again, for the same reason 683 moved them.
 ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_TRACE
                 STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT_NULL STAGE90_XNU_EXIT_POC_FLUSH
                 STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE STAGE90_XNU_IDLE_STACK
                 STAGE90_XNU_SEAM_POC STAGE90_XNU_SEAM_MEASURE STAGE90_XNU_SEAM_END_RUN
+                STAGE90_XNU_POST_END_RUN
                 STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_IDLE_NO_SLEEP)
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
   [[ -n $_v ]] \
-    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The nine variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, SEAM_END_RUN, IDLE_NO_SLEEP) are exactly the ones a display filter written around the artifact keys drops in silence"
+    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The ten variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, SEAM_END_RUN, POST_END_RUN, IDLE_NO_SLEEP) are exactly the ones a display filter written around the artifact keys drops in silence"
   printf '  %s=%s\n' "$_k" "$_v"
 done
 # And the converse, so a key the list above does not name cannot arrive unshown (a *tenth* when the list

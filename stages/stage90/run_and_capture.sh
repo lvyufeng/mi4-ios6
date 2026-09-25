@@ -1501,6 +1501,7 @@ summarise_log() {
     local sleh_lr="" sleh_pc="" sleh_sp="" sleh_seen=""
     local pop_lr="" pop_lr_src="" pop_death=0 pop_named=0 cache_arm=unread arm_seen=unknown
     local pce_up="" pce_ncpu="" pce_after_sctlr="" arm_set="" arm_set_key="" verdict_ok=1
+    local seam_post_end=""
     cwe_win=$(keyval slot_cwe_win)
     cwe_set=$(keyval slot_cwe_set)
     cwe_calls=$(keyval slot_cwe_calls)
@@ -1528,6 +1529,13 @@ summarise_log() {
     pre_calls=$(keyval slot_pre_calls)
     rtcpre_calls=$(keyval slot_rtcpre_calls)
     post_calls=$(keyval slot_post_calls)
+    # **686's ending, extracted here rather than in clause (5) where the other two arm keys are read.**
+    # It is needed *in this early block* and not only in the pair reading, because what `post_calls`
+    # absent MEANS depends on it: on 653's arm and on 686's an absent post count is a pop that died,
+    # while on 678's arm it is the arm's own design (the run ends before the pop). Clause (3) below is
+    # the block that has to say which, and clause (5) reads the same value under its own name - one
+    # `keyval` call per key, which is this file's rule for a log read.
+    seam_post_end=$(keyval seam_post_end_run)
     storm=$(keyval sleh_storm)
     panics=$(grep -a -c 'panic.*sleh_abort' "$log" || true)
     user_ones=$(grep -a -c 'xnu_live_sleh_user=0x0*1' "$log" || true)
@@ -1848,6 +1856,17 @@ summarise_log() {
     if [[ $post_calls =~ ^0x[0-9a-f]+$ ]] && (( post_calls >= 1 )); then
       say "  PASS  slot_post_calls=$post_calls - the exit returned through the wrapper, which"
       say "        520's run never did (its pass died inside the call)"
+      if [[ $seam_post_end == "0x00000001" ]]; then
+        say "  AND ON THIS ARM THAT IS THE PRESS'S ANSWER (686). xnu_live_seam_post_end_run=$seam_post_end"
+        say "        says the ending is the one on the FAR side of the pop, so the reading above is not a"
+        say "        pass that happened to survive: the operation's clean-and-invalidate and its two restore"
+        say "        stores carried a pop that every earlier run died on. The boot then ended at that ending,"
+        say "        deliberately, so **the death this log also reports is the ending's own store and NOT the"
+        say "        pop** - and clause (1) above, if it printed a death pc that is not the pop's own return"
+        say "        address, is reading that store. 662 section 4's first explanation (\"the repair worked"
+        say "        and the boot continued, then hung somewhere later\") is thereby measured rather than"
+        say "        assumed, and the frontier is not the pop on this arm."
+      fi
     elif [[ $pre_calls =~ ^0x[0-9a-f]+$ ]] && (( pre_calls >= 1 )) \
       && [[ $rtcpre_calls =~ ^0x[0-9a-f]+$ ]] && (( rtcpre_calls >= 1 )); then
       say "  DIED IN THE EXIT  pre_calls=$pre_calls and rtcpre_calls=$rtcpre_calls both published and"
@@ -1856,6 +1875,16 @@ summarise_log() {
       say "        platform_cache_idle_exit, which is 520's pop {fp, pc} at the same pc. That is a"
       say "        localization and not a missing reading: the three notes share one schedule and one"
       say "        gate, so a site that published proves the later ones were reachable."
+      if [[ $seam_post_end == "0x00000001" ]]; then
+        say "        **AND ON THIS ARM THAT LOCALIZATION IS THE PRESS'S NEGATIVE ANSWER (686).**"
+        say "        xnu_live_seam_post_end_run=$seam_post_end says the ending was moved to the far side of"
+        say "        the pop, so the pop RAN and this branch is the cell that says it died anyway: the"
+        say "        operation's clean-and-invalidate and its restore stores were in the image and did not"
+        say "        carry it. This is 574-park repeated with the operation enabled - a cell the tree has"
+        say "        never filled - and it refutes the reading that the operation is the repair, without"
+        say "        costing the run: the ending is never reached, the abort path resets the phone, and the"
+        say "        log comes back either way."
+      fi
       if [[ $pop_named -eq 1 ]]; then
         say "        And it agrees with clause (1): xnu_live_sleh_lr=$sleh_lr is the pop's own return"
         say "        address, which is 547 section 4's prediction for the enable-off cell - so the two"
@@ -2031,6 +2060,14 @@ summarise_log() {
       elif [[ $seam_end_run == "0x00000000" ]]; then
         say "  xnu_live_seam_end_run=$seam_end_run  the seam RETURNS: the pop runs, and the pair is read"
         say "  against its death - which is how the 535 and 572 cells below were written."
+        if [[ $seam_post_end == "0x00000001" ]]; then
+          say "  xnu_live_seam_post_end_run=$seam_post_end  **686: and the run then ends on the FAR side of"
+          say "  that pop**, deliberately, in the wrapper - so this is the one arm whose pair is read against"
+          say "  a pop that ran AND whose ending is not what the seam does. Where the pass died is therefore"
+          say "  read from slot_post_calls and from nothing else: present means the pop carried the"
+          say "  operation's repair and the death is the ending's own store; absent means the pop died,";
+          say "  which is the localization clause (3) printed above."
+        fi
       else
         say "  xnu_live_seam_end_run=${seam_end_run:-absent}  UNREAD - and it has two causes this log"
         say "        cannot tell apart: the image predates 678's ending (653's arm and every earlier one),"

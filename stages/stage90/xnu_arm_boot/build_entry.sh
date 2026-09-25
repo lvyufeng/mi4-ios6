@@ -485,13 +485,43 @@ if [[ $SEAM_END_RUN -eq 1 && $SEAM_MEASURE -eq 1 ]]; then
     echo "arm (SEAM_POC=1 SEAM_MEASURE=0) or not at all" >&2
     exit 1
 fi
-# **The interception is on when any of the three is**, for the reason above and one more: an
+# **686 adds the fourth: the same ending, called from the other end of the same exit.** The word the
+# `pop` dies on is planted by this image's own `__wrap_platform_cache_idle_enter` (`strd r4, [sp, #-12]!`
+# with `r4 = cpu_data->rtcPop`, which at that `sp` is exactly the word the exit's `pop` reads as `pc`),
+# and the exit's `push` cannot correct it because the push runs with `SCTLR.C` clear - so the seam's own
+# pair reads DRAM and says nothing about the copy the `pop` will be answered from. The operation arm
+# therefore *should* carry the `pop`, and its one press (03:53:50) did not come back: 662 section 4's
+# first explanation, unread. `STAGE90_XNU_POST_END_RUN=1` ends the run **after** the exit returns
+# instead of before it, so `xnu_live_slot_post_calls` - the project's own key for "the exit completed" -
+# is what the press reads, and a run whose `pop` died and a run whose `pop` returned both come back with
+# a log. It joins `SEAM_ON` on the same reasoning as `END_RUN`: an ending with no seam to sit behind is
+# an image whose record names an arm it is not, and the `!POC` refusal below is the same one.
+SEAM_POST_END_RUN=${STAGE90_XNU_POST_END_RUN:-0}
+case "$SEAM_POST_END_RUN" in
+    0|1) ;;
+    *) echo "STAGE90_XNU_POST_END_RUN must be 0 or 1, not [$SEAM_POST_END_RUN]" >&2; exit 1 ;;
+esac
+if [[ $SEAM_POST_END_RUN -eq 1 && $SEAM_POC -ne 1 ]]; then
+    echo "STAGE90_XNU_POST_END_RUN=1 with STAGE90_XNU_SEAM_POC=$SEAM_POC: this ending asks whether the" >&2
+    echo "operation's repair carried the pop, and there is no operation on this arm - so the press would" >&2
+    echo "be read as a verdict about a window nothing repaired (686, entry_trace.c's own #error)" >&2
+    exit 1
+fi
+if [[ $SEAM_POST_END_RUN -eq 1 && $SEAM_END_RUN -eq 1 ]]; then
+    echo "STAGE90_XNU_POST_END_RUN=1 and STAGE90_XNU_SEAM_END_RUN=1: two sites for one ending. The seam's" >&2
+    echo "ending runs before the pop and discards the question this one exists for (whether the exit" >&2
+    echo "returned), so an image carrying both ends the run at the first of them while its record names" >&2
+    echo "the second (686)" >&2
+    exit 1
+fi
+# **The interception is on when any of the four is**, for the reason above and one more: an
 # `END_RUN` arm with no `--wrap` has no seam to end at, so its record would name a forced ending
 # while every call in the image is Apple's own.
-SEAM_ON=$(( SEAM_POC | SEAM_MEASURE | SEAM_END_RUN ))
+SEAM_ON=$(( SEAM_POC | SEAM_MEASURE | SEAM_END_RUN | SEAM_POST_END_RUN ))
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_SEAM_POC="$SEAM_POC")
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_SEAM_MEASURE="$SEAM_MEASURE")
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_SEAM_END_RUN="$SEAM_END_RUN")
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_POST_END_RUN="$SEAM_POST_END_RUN")
 # `--wrap` only when the tracer is in the image and the arm is on: the wrapper is `entry_trace.c`'s, so
 # a wrap without that object is an undefined reference, and a wrap with the flag off would be an
 # interception the config record says is not there.
@@ -544,7 +574,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_EXIT_POC_FLUSH STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE
                 STAGE90_XNU_IDLE_STACK STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_SEAM_POC STAGE90_XNU_SEAM_MEASURE
-                STAGE90_XNU_SEAM_END_RUN STAGE90_XNU_IDLE_NO_SLEEP)
+                STAGE90_XNU_SEAM_END_RUN STAGE90_XNU_POST_END_RUN STAGE90_XNU_IDLE_NO_SLEEP)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
 # the case statement below against the script's own environment reads - `grep -o '${STAGE90_[A-Z0-9_]*:-'`
@@ -595,6 +625,18 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
 # ([[mi4-a-claim-in-a-comment-is-not-a-check]]'s remedy, and 675 section 3's lesson one switch over: the
 # flag has to reach `entry_trace.c`'s own compile line, not only `STUB_DEFINES`).
 #
+# **686 is the fifteenth, and it is the same ending with a different site - so its key is a *second*
+# key and not a new value on the first.** `STAGE90_XNU_POST_END_RUN` makes
+# `__wrap_platform_cache_idle_exit`, after the exit has returned and after the post site has published,
+# end the run through the same `entry_seam_end_run`. The reason it cannot share `SEAM_END_RUN`'s name is
+# the reason 675 was written: the *record* is what a reader has, and `SEAM_END_RUN=1` already means "the
+# run ends at the seam, before the `pop`" - a value of 2 would be one name with two meanings, which is
+# exactly the defect this project pays for most often, and the gate's own variant check reads the value
+# as a 0/1 variant besides. So the two sites are two keys, they are refused together, and each is
+# asserted against the body it names: the clause below counts this arm's call in the *wrapper's*
+# disassembly and requires it to be the body's last `bl`, which is what "after the publish" means as a
+# fact about the image rather than as a sentence in a comment.
+#
 # The three checkpoint keys are recorded as `(unset)` when empty rather than omitted, because a key the
 # writer does not write is a key the reader cannot require, and `X=` is not `X=(unset)` for the same
 # reason `#define X 0` is not "off" to `#ifdef X`. They are read from the environment here and not from
@@ -614,6 +656,7 @@ do
         STAGE90_XNU_SEAM_POC)         _v=$SEAM_POC ;;
         STAGE90_XNU_SEAM_MEASURE)     _v=$SEAM_MEASURE ;;
         STAGE90_XNU_SEAM_END_RUN)     _v=$SEAM_END_RUN ;;
+        STAGE90_XNU_POST_END_RUN)     _v=$SEAM_POST_END_RUN ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_SKIP) _v=${STAGE90_ENTRY_CHECKPOINT_SKIP:-(unset)} ;;
@@ -892,6 +935,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_SEAM_POC="$SEAM_POC" \
         -DSTAGE90_XNU_SEAM_MEASURE="$SEAM_MEASURE" \
         -DSTAGE90_XNU_SEAM_END_RUN="$SEAM_END_RUN" \
+        -DSTAGE90_XNU_POST_END_RUN="$SEAM_POST_END_RUN" \
         -DSTAGE90_XNU_IDLE_NO_SLEEP="$IDLE_NO_SLEEP" \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
@@ -28902,8 +28946,10 @@ verify_trace_symbols() {
             layout_fail "no instruction in __wrap_FlushPoU_Dcache reads sp (mov rX, sp): the slot's address is sp at this wrapper's entry, and a wrapper that does not read it cannot be the arm this build's record says it is"
         if [[ $SEAM_END_RUN -eq 1 ]]; then
             seam_end_say=", and the run then ENDS HERE - STAGE90_XNU_SEAM_END_RUN=1, so entry_seam_flush calls entry_seam_end_run ($seam_endpoc, ${seam_endstores} stores and a wfe loop the ending cannot fall through): the reason word, a dsb, PS_HOLD <- 0, a dsb, and a spin - 663 section 2's step 4/5 and 674 section 3's shape, ending the run THROUGH THE ENTRY IMAGE'S OWN RESET WRITES instead of returning to the idle exit whose pop is where this phase's boot dies. **Read this arm's log for the pair and NOT for a death pc**: the run does not reach the pop, and its xnu_live_seam_end_run key is 1 where every earlier arm's is 0. A log with no pair and no death pc is the third outcome the press is for - the operation hung the machine between the two reads - and the SoC countdown the payload arms before the handoff is what brings that run back (one arming site, no pet anywhere in the image, measured returning the device in 677)"
+        elif [[ $SEAM_POST_END_RUN -eq 1 ]]; then
+            seam_end_say=", and the run then ENDS ON THE FAR SIDE OF THE POP - STAGE90_XNU_POST_END_RUN=1, so __wrap_platform_cache_idle_exit calls entry_seam_end_run - the same two stores and the same wfe loop the seam's arm calls, one definition - after the real exit has returned and after the post site has published. **This is the arm that turns 662 section 4's first explanation into a reading**: the pair is taken exactly as before, and the key the press is read for is xnu_live_slot_post_calls - PRESENT means platform_cache_idle_exit's push/pop pair RETURNED with the operation's clean-and-invalidate and restore behind it, i.e. the frontier is not the pop on this arm; ABSENT means the pop died exactly as it does on the measure arm, with the abort's four words carrying the deadline and this being 574-park repeated with the operation on. Both cells come back with a log, because the ending's first store is the abort that resets the phone (measured on 678's arm at the seam, 684) and a run that dies in the pop reaches the same epilogue - so this is the first arm whose answer does not depend on the boot surviving"
         else
-            seam_end_say=", and the readings published - **and this arm RETURNS to the idle exit** (STAGE90_XNU_SEAM_END_RUN=0), so the pair this run publishes is read out of a log whose run continues into the window whose pop is where the boot dies"
+            seam_end_say=", and the readings published - **and this arm RETURNS to the idle exit** (STAGE90_XNU_SEAM_END_RUN=0 and STAGE90_XNU_POST_END_RUN=0), so the pair this run publishes is read out of a log whose run continues into the window whose pop is where the boot dies"
         fi
         if [[ $SEAM_POC -eq 1 ]]; then
             say "  xnu_entry_535: the seam is hooked - the exit's own call to FlushPoU_Dcache at ${seam_call} is redirected to __wrap_FlushPoU_Dcache ($seam_wrap), which reads sp and the return address before anything else runs, and where lr == STAGE90_XNU_SEAM_LR ($seam_lr_def, the address that call returns to, read out of entry_trace.c and checked against the image above) entry_seam_flush ($seam_body) runs: dsb, the slot's two words, Apple's own FlushPoU_Dcache (via __real_FlushPoU_Dcache, ${seam_real} call sites in the body - the seam's and the other three sites'), a PoC clean-and-invalidate of the slot's eight bytes (Apple's own FlushPoC_DcacheRegion at $seam_poc, whose body this clause reads as ${seam_mva} x cr7,cr14,{1} with ${seam_cln} clean-by-MVA and ${seam_inv} invalidate-by-MVA), the two words restored${seam_end_say} - and ${seam_wrapped} of the image's FlushPoU_Dcache call sites are redirected to it, ${seam_direct} left direct"
@@ -28919,10 +28965,18 @@ verify_trace_symbols() {
         # with 535's rule ([[mi4-silence-is-a-reading-only-if-success-is-silent]]).
         grep -a -q 'xnu_live_seam_op' "$OUT/xnu_arm_entry.bin" ||
             layout_fail "xnu_live_seam_op is not among the entry image's strings: the two seam arms publish the same four keys and mean opposite things by them, so an image that does not say which arm it is leaves the reader interpreting one arm's pair with the other's rule - and this image's record names exactly one arm"
+        # **686's identity key, asserted the same way and for a sharper version of the same reason.**
+        # This arm's log and 653's differ by one key - `xnu_live_slot_post_calls`, present only if the
+        # exit returned - and that is a difference in what happened and not in which arm ran, so a reader
+        # holding the capture alone has to be told. Published unconditionally by the seam (both endings are
+        # reached after it), read by `run_and_capture.sh` beside `seam_end_run`, and asserted here so that
+        # an image which lost the key is refused rather than read as an arm that outlived its own record.
+        grep -a -q 'xnu_live_seam_post_end_run' "$OUT/xnu_arm_entry.bin" ||
+            layout_fail "xnu_live_seam_post_end_run is not among the entry image's strings: the seam publishes it beside xnu_live_seam_end_run on every seam arm (it is the same publish block), and a log that cannot say WHERE the ending was is a log whose two endings - before the pop and after it - are read with each other's rules"
     else
         [[ -z "${seam_wrap:-}" ]] ||
-            layout_fail "STAGE90_XNU_SEAM_POC=$SEAM_POC and STAGE90_XNU_SEAM_MEASURE=$SEAM_MEASURE and STAGE90_XNU_SEAM_END_RUN=$SEAM_END_RUN and __wrap_FlushPoU_Dcache IS in the linked image: each arm's flag is the presence of the interception, so an image carrying the wrapper with all three off is not the arm this build's record names - it is 535, 572 or 678 with a record that says 533"
-        say "  xnu_entry_535: no seam - all three seam switches are 0 (STAGE90_XNU_SEAM_POC=$SEAM_POC, STAGE90_XNU_SEAM_MEASURE=$SEAM_MEASURE, STAGE90_XNU_SEAM_END_RUN=$SEAM_END_RUN), so --wrap=FlushPoU_Dcache is not in this build's link, __wrap_FlushPoU_Dcache is not in the image (checked above, not assumed), and the exit's own call to FlushPoU_Dcache at ${pcexit:-?} is Apple's, reached directly - this image is the frontier arm 533 and nothing else"
+            layout_fail "STAGE90_XNU_SEAM_POC=$SEAM_POC and STAGE90_XNU_SEAM_MEASURE=$SEAM_MEASURE and STAGE90_XNU_SEAM_END_RUN=$SEAM_END_RUN and STAGE90_XNU_POST_END_RUN=$SEAM_POST_END_RUN and __wrap_FlushPoU_Dcache IS in the linked image: each arm's flag is the presence of the interception, so an image carrying the wrapper with all four off is not the arm this build's record names - it is 535, 572 or 678 with a record that says 533"
+        say "  xnu_entry_535: no seam - all four seam switches are 0 (STAGE90_XNU_SEAM_POC=$SEAM_POC, STAGE90_XNU_SEAM_MEASURE=$SEAM_MEASURE, STAGE90_XNU_SEAM_END_RUN=$SEAM_END_RUN, STAGE90_XNU_POST_END_RUN=$SEAM_POST_END_RUN), so --wrap=FlushPoU_Dcache is not in this build's link, __wrap_FlushPoU_Dcache is not in the image (checked above, not assumed), and the exit's own call to FlushPoU_Dcache at ${pcexit:-?} is Apple's, reached directly - this image is the frontier arm 533 and nothing else"
     fi
     # The kernel's own fields, by this configuration's own numbers - and read from the two places that
     # *state* them rather than written here a third time. `entry_stubs.c` names each offset once as a
@@ -29399,8 +29453,24 @@ verify_trace_symbols() {
     ' <<<"$sxw_body")"
     [[ "${sxw_dec:-0}" == 1 && "${sxw_decv:-0}" == 8 ]] ||
         layout_fail "__wrap_platform_cache_idle_exit moves sp down ${sxw_dec:-0} time(s) by [${sxw_decv:-?}] and not once by 8: this wrapper's own frame *is* the address the reading is taken at - a C body whose \`sp\` is the real exit's entry \`sp\` because the only stack it ever takes is the 8 bytes it saves r4 and lr in. A second decrement, a \`push\`, or a frame of another size puts the four words the reading publishes at an address that is no longer the slot, and it would read memory that is real and quiet and wrong, which is the failure this whole step is trying to avoid repeating"
+    if [[ $SEAM_POST_END_RUN -eq 1 ]]; then
+        # **686: on this arm the wrapper does not return, so the frame's give-back is the compiler's to
+        # drop - and the first build is what measured that it does.** With the ending called at the end
+        # of the body, gcc emitted `bl entry_seam_end_run` and no `add sp, sp, #8` at all: it knows the
+        # callee cannot return, so restoring `sp` would be dead code. That is not a defect of this arm
+        # and not a loosening of 520's clause - the clause's own reason is "the wrapper returns to its
+        # caller", and here it does not. What has to hold instead is the pair of properties the two
+        # clauses around this one assert: the decrement is still once by 8 (the frame the *pre* reading
+        # is taken at, which this arm still takes), nothing follows the ending's call, and the ending's
+        # own body is a loop it cannot fall through. A wrapper that gave the 8 bytes back *and* ended
+        # would satisfy this; one that neither gave them back nor ended would satisfy this too, which is
+        # why it is allowed here and refused by the last-call clause below.
+        [[ "${sxw_inc:-0}" -le 1 ]] ||
+            layout_fail "__wrap_platform_cache_idle_exit moves sp back up ${sxw_inc:-0} time(s) with STAGE90_XNU_POST_END_RUN=1: this arm's wrapper ends in a call that cannot return, so its frame is either given back once (the compiler restored sp before the ending) or not at all (it did not) - a second give-back would hand the ending a stack 8 bytes above where the wrapper found it, and the clause below is what refuses the body that neither restores nor ends"
+    else
     [[ "${sxw_inc:-0}" == 1 ]] ||
         layout_fail "__wrap_platform_cache_idle_exit moves sp back up ${sxw_inc:-0} time(s) and not once: the wrapper returns to its caller, so the 8 bytes it took have to be given back exactly once - two would hand the idle loop a stack 8 bytes above where it left it"
+    fi
     [[ "${sxw_mov:-0}" == 1 && "${sxw_movaddr:-0}" -gt "${sxw_decaddr:-0}" ]] ||
         layout_fail "520's clause reads ${sxw_mov:-0} \`mov r?, sp\` in __wrap_platform_cache_idle_exit (first at ${sxw_movaddr:-?}, the frame decrement at ${sxw_decaddr:-?}): the wrapper has to publish its own \`sp\` after its prologue and before its call - one read of the register, and the value it publishes is the address this site's whole record is about"
     if [[ "$SLOT_NULL" -eq 1 ]]; then
@@ -29476,6 +29546,40 @@ verify_trace_symbols() {
         layout_fail "the second group's first load is at ${sxw_lfirst:-?} and the real platform_cache_idle_exit is called at ${sxw_realaddr:-?}: the post reading is the *control* - what a pass that survives gets back in the slot - so it has to be taken after the call, and a load hoisted above it would read the pre-call words and publish them under the post site's keys"
     [[ "${sxw_nstore:-0}" == 8 && "${sxw_so:-x}" == "32 36 40 44 32 36 40 44" ]] ||
         layout_fail "the wrapper holds ${sxw_nstore:-0} store(s) into a table at word offsets [${sxw_so:-?}] and 521's capture macro writes four, twice - once per site: those offsets are the *header's* layout read out of the image, and a field reordered in \`entry_slot_capture.h\` without this number moving would put a captured word in a field the publisher does not read, while a site whose four stores went to a different table's words would publish one site's reading under the other site's keys"
+    fi
+    # ------------------------------------------------- 686: the ending is in the OTHER body
+    #
+    # **The same question asked of `__wrap_platform_cache_idle_exit` instead of the seam, and it is a
+    # question about a position rather than about a count.** This arm's whole content is *where* the
+    # ending is called, so the clause reads the wrapper's own body - which is why it sits here, after
+    # `sxw_body` exists, and not beside the seam's copy of it: an edit that reads a variable another
+    # region defines is the shape of mistake this file's clauses exist to catch, and the first build of
+    # this clause made it (`sxw_body: unbound variable`, under `set -u`). Three things are asked: the
+    # call is there exactly when the switch says so; it comes **after** the site that publishes the
+    # exit's completion; and it is the body's **last** call. All three are what makes the press
+    # readable - a call placed before `entry_slot_null_note` would end the run before the key that
+    # answers the question exists, and a call with an instruction of the wrapper's own after it would be
+    # a call whose `noreturn` the compiler had not been told about.
+    #
+    # `entry_slot_note` and `entry_slot_null_note` are the two spellings of the post site (521's capture
+    # and 526's null), and this clause accepts either as the publisher the ending has to follow, because
+    # which one is in the body is `STAGE90_XNU_SLOT_NULL`'s business and is asserted a few clauses above.
+    read -r sxw_pend sxw_pendaddr sxw_lastbl sxw_lastpub <<<"$(awk '
+        function hex(s) { sub(/:$/, "", s); return strtonum("0x" s) }
+        $3 ~ /^[a-z]/ { a = hex($1); m = $3 }
+        (m == "bl" || m == "b") { lastbl = a }
+        (m == "bl" || m == "b") && index($0, "<entry_slot_null_note>") > 0 { lastpub = a }
+        (m == "bl" || m == "b") && index($0, "<entry_slot_note>") > 0 { lastpub = a }
+        (m == "bl" || m == "b") && index($0, "<entry_seam_end_run>") > 0 { n++; e = a }
+        END { printf "%d %d %d %d", n+0, e+0, lastbl+0, lastpub+0 }
+    ' <<<"$sxw_body")"
+    [[ "${sxw_pend:-0}" == "$SEAM_POST_END_RUN" ]] ||
+        layout_fail "__wrap_platform_cache_idle_exit reaches entry_seam_end_run ${sxw_pend:-0} time(s) while STAGE90_XNU_POST_END_RUN=$SEAM_POST_END_RUN: the switch's whole content is that the run ends on the far side of the pop, after the post site has published - so a wrapper that does not call the ending is the operation arm wearing this arm's record (a press spent re-running 03:53:50's unreadable non-return), and one that called it twice would end the run at the first call and leave the second unreached. The ending is the same \`noreturn\` function the seam's arm calls, one definition, so this count is a fact about the image rather than a property of the compiler's inlining"
+    if [[ $SEAM_POST_END_RUN -eq 1 ]]; then
+        [[ "${sxw_pendaddr:-0}" -gt "${sxw_lastpub:-0}" ]] ||
+            layout_fail "the ending is called at ${sxw_pendaddr:-?} and the post site's publisher at ${sxw_lastpub:-?}: the reading this arm produces is \`xnu_live_slot_post_calls\` and nothing else separates its two cells, so an ending placed before the publisher would end the run without the key and make the whole press indistinguishable from a run that died in the pop - which is the reading 662 section 4 says the project has been unable to obtain"
+        [[ "${sxw_pendaddr:-0}" == "${sxw_lastbl:-0}" ]] ||
+            layout_fail "the ending is called at ${sxw_pendaddr:-?} and the last call in __wrap_platform_cache_idle_exit is at ${sxw_lastbl:-?}: the ending is \`noreturn\`, so nothing of the wrapper's own can follow it - an instruction after it is either dead code this arm's shape does not have, or a call site the compiler was not told cannot return, and both make this body something other than the one the arm's record describes"
     fi
     # The publisher itself, on the abort path: `entry_slot_ab_note` reads the four words out of the
     # exception frame, in place, and keeps the guard and the refusal count the two capture sites cannot
@@ -30784,6 +30888,7 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # what 594 wrote, and this step is the measurement that a comment about a site a name-keyed diff
     # does not visit is not a constraint ([[mi4-a-claim-in-a-comment-is-not-a-check]]).
     echo "STAGE90_XNU_SEAM_END_RUN=$SEAM_END_RUN"
+    echo "STAGE90_XNU_POST_END_RUN=$SEAM_POST_END_RUN"
 } > "$OUT/xnu_arm_entry-config.txt"
 
 # ------------------------------------------------- 678: the record and the arm-key list, both ways

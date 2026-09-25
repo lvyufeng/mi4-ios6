@@ -518,6 +518,76 @@ extern void FlushPoC_Dcache(void);
 #endif
 
 /*
+ * --------------------------------------------- 686: the ending moved to the far end of the same exit
+ *
+ * **This switch exists because 685 went looking for a writer in a five-instruction window and the writer
+ * was not there - it is in this image, one phase earlier, and it is this project's own store.** The two
+ * readings that decide the arm:
+ *
+ *   * **The word the `pop` dies on is planted by the idle *enter* wrapper.** `__wrap_platform_cache_idle_enter`
+ *     opens with `strd r4, [sp, #-12]!` (`0x8047c904`, read out of the arm's own disassembly), and `r4` is
+ *     `cpu_data->rtcPop` - `cpu_idle` loaded it there itself, `ldm r6, {r4, r7}` with `r6 = cpu_data + 0xe0`.
+ *     At the enter wrapper's `sp` that address is `X - 12`, i.e. **exactly the word the exit's `pop {fp, pc}`
+ *     reads as `pc`** (the slot arithmetic three paragraphs above this line is about the same address), and
+ *     the store is made with `SCTLR.C` **on**, so it is a cache line and not only a memory word.
+ *   * **The exit's `push` cannot correct it.** `platform_cache_idle_exit` runs with `SCTLR.C` clear - the
+ *     enter disabled the cache and the exit re-enables it only twenty-four bytes before the `pop` - so the
+ *     push's two stores reach DRAM while the cache keeps the older copy. Apple's own `FlushPoU_Dcache` in
+ *     the same window cleans and invalidates the **L1**; the stale copy that survives it is one level
+ *     below, at the Point of Unification. The `pop`, with `C` back on, misses the L1 and is answered by
+ *     the L2 with the deadline.
+ *
+ * **That is what the seam's pair has been measuring, and it is why it reads equal on every arm that dies.**
+ * With `SCTLR.C` clear both of the seam's reads are non-cacheable and therefore answered from DRAM, where
+ * the push's stores are correct by construction; `b1 == a1` is a property of the reading and not a verdict
+ * about the cache. 653 section 3's hedge ("the pair says whether Apple's own L1 flush writes the slot's
+ * line back") now has its mechanism, and the answer is the one DRAM had all along.
+ *
+ * **And it is why the operation arm's press is not evidence about the operation.** `FlushPoC_DcacheRegion`
+ * is a clean-and-invalidate **to the Point of Coherency**, and the two restore stores that follow it write
+ * the words the seam read back to DRAM with the cache still off. So on the operation arm the `pop` should
+ * be answered out of DRAM with the frame the exit pushed - it should **return**. That arm was pressed once
+ * (03:53:50) and did not come back, which is exit 2 and no log; 662 section 4 listed "the repair worked and
+ * the boot continued, then hung somewhere later" as its first of three explanations and refused to claim it,
+ * because n = 1 on each side and a hang produces no reading. **This switch is how that explanation is read
+ * without letting the boot run on into the hang that produced the non-return.**
+ *
+ * **So the ending moves to the far side of the `pop`.** `STAGE90_XNU_POST_END_RUN=1` calls the *same*
+ * `entry_seam_end_run` - one definition, one shape, unchanged - from the end of `__wrap_platform_cache_idle_exit`'s
+ * body, after the post-site publish and after `entry_note_pcx`, instead of from inside the seam. One press
+ * then lands in one of two cells and **both of them come back with a log**:
+ *
+ *   * **the `pop` died anyway** - the abort path takes it exactly as it does today: `xnu_live_slot_post_calls`
+ *     is absent, the abort's four words carry the deadline, and this is 574-park repeated with the operation
+ *     enabled - a cell the tree has never filled;
+ *   * **the `pop` returned** - the post site publishes `xnu_live_slot_post_calls >= 1`, the ending runs after
+ *     it, its first store is the abort that brings the phone back, and the log says in the project's own keys
+ *     that **the frontier is not the `pop` on this arm**. That is the reading 663 section 5 said the ending
+ *     discards, obtained without letting the machine continue into whatever hung it.
+ *
+ * **Why the far end rather than only the seam.** 678's arm ends the run before the `pop` and so can never say
+ * whether the operation repaired it; this one ends it after and so can never say what the boot does next -
+ * deliberately, because the run is ended at the first point where the answer exists and the machine is never
+ * left to continue into the unknown. The two endings are refused together, and both are refused without
+ * `SEAM_POC=1`: an arm whose ending sits behind an operation it does not have is measuring the wrong window.
+ *
+ * **What it does not move.** Nothing in the interception, the two reads, the operation, the restore or either
+ * publish changes; the only difference from the operation arm is the site of a call into an ending that is
+ * already in this file. The build asserts the wrapper's body contains exactly one call to it and that it is
+ * that body's last `bl`, so "the ending is after the publish" is a fact about the image and not a sentence here.
+ */
+#ifndef STAGE90_XNU_POST_END_RUN
+#define STAGE90_XNU_POST_END_RUN 0
+#endif
+
+#if STAGE90_XNU_POST_END_RUN && !STAGE90_XNU_SEAM_POC
+#error "STAGE90_XNU_POST_END_RUN ends a run through the store entry_epilogue makes, and it is only defined on the operation arm: the question it answers is whether the operation's repair carried the pop, and an ending behind an operation the image does not have would be read as a verdict about a window nothing repaired"
+#endif
+#if STAGE90_XNU_POST_END_RUN && STAGE90_XNU_SEAM_END_RUN
+#error "STAGE90_XNU_POST_END_RUN and STAGE90_XNU_SEAM_END_RUN are two sites for one ending: the seam's ending discards the question this one exists for (whether the pop returned) by running before it, so an image carrying both would end the run at the first of them while its record named the second"
+#endif
+
+/*
  * ---------------------------------------------------------------- 533: the near-end enable is a switch
  *
  * **526's run came back negative, and this switch is what that result buys.** The arm was 522's image
@@ -2129,6 +2199,22 @@ void __wrap_platform_cache_idle_enter(void)
  * for it is the ledger in 522's section 3.3.1: every image that has not come back carries this capture
  * and the images that came back do not, and 521 and 522 differ only in their state change.
  */
+
+#if STAGE90_XNU_POST_END_RUN
+/*
+ * **686: the ending is declared here and defined once, far below, inside the seam's own block.** A forward
+ * declaration rather than a second body, because the whole of this arm is *where* the ending is called and
+ * not what it does: `entry_seam_end_run` is one `noreturn` function with one shape, and two definitions of
+ * it would be [[mi4-one-value-two-definitions]] in the one place this project can least afford it - an arm
+ * whose two endings could drift apart while both records still named `POST_END_RUN=1`.
+ *
+ * The declaration is guarded by this switch alone rather than by the seam's block because this file's order
+ * puts the exit wrapper *above* the seam: when the compiler reaches the wrapper the ending has not been
+ * written yet, and when it reaches the ending it has already passed the wrapper.
+ */
+static void entry_seam_end_run(void) __attribute__((noreturn, noinline));
+#endif
+
 void __real_platform_cache_idle_exit(void);
 void __wrap_platform_cache_idle_exit(void)
 {
@@ -2180,6 +2266,19 @@ void __wrap_platform_cache_idle_exit(void)
 #endif
 
     entry_note_pcx(entry_counter(), entry_tpidrprw(), entry_cpu_datap(), entry_sctlr());
+
+#if STAGE90_XNU_POST_END_RUN
+    /*
+     * **686: the run ends here, on the far side of the `pop`, and that is the whole arm.** Everything the
+     * exit's completion is read from has already been published - the post site's counter (whose presence
+     * *is* "the exit returned") and `entry_note_pcx` - so the ending cannot discard a reading, and the
+     * call is the body's last instruction rather than an early exit. Its first store is the abort that
+     * brings the phone back (measured on 678's arm at the seam, 684), so a run whose `pop` returned and a
+     * run whose `pop` died both end with a log; which of the two happened is read from
+     * `xnu_live_slot_post_calls`, and only from it, because the abort's own keys are filled in both cells.
+     */
+    entry_seam_end_run();
+#endif
 }
 
 /* ======================================================= 535: the seam inside `platform_cache_idle_exit` */
@@ -2326,7 +2425,7 @@ static uint32_t entry_seam_publish(uint32_t n)
     return (n <= STAGE90_SEAM_LIVE_MAX || (n & (n - 1u)) == 0u) ? 1u : 0u;
 }
 
-#if STAGE90_XNU_SEAM_END_RUN
+#if STAGE90_XNU_SEAM_END_RUN || STAGE90_XNU_POST_END_RUN
 /*
  * 678: end the run here, on purpose, and never come back.
  *
@@ -2352,6 +2451,13 @@ static uint32_t entry_seam_publish(uint32_t n)
  * one (664 measured `f9017` at 0 occurrences in all four encodings) to buy a net that is already
  * armed, and it would muddy the one time this arm is read for: a return at the countdown's interval
  * rather than immediately is exactly the shape a *failed* PS_HOLD store would have.
+ *
+ * **686 moved the call site and not one byte of this body.** The function is now reachable from two
+ * sites that never coexist - the tail of `entry_seam_flush` (`SEAM_END_RUN=1`, before the `pop`) and
+ * the tail of `__wrap_platform_cache_idle_exit` (`POST_END_RUN=1`, after it) - which is why it is still
+ * one function: two bodies that could drift would be two records printing the same switch value. What it
+ * stores, and the reason the first store is the one that faults on the arm in `out/`, are unchanged, and
+ * the build counts the calls in each body separately so that an image cannot carry both.
  */
 static void entry_seam_end_run(void) __attribute__((noreturn, noinline));
 
@@ -2440,6 +2546,13 @@ __attribute__((noinline)) void entry_seam_flush(uint32_t slot, uint32_t lr)
          * the config record, for the same reason `_op` is: a run's own log is the only thing a
          * capture is read with, and a missing line must not be read as a 0. */
         entry_live_write("xnu_live_seam_end_run", (uint32_t)(STAGE90_XNU_SEAM_END_RUN));
+        /* **686: and *where* the ending is, published for the same reason both keys above are.** The
+         * record names the arm, but the log is what a capture is read with, and this arm's log differs
+         * from 653's by one key (`xnu_live_slot_post_calls`, present only if the pop returned) - which
+         * is a difference in *outcome* and not in *identity*, so a reader holding the log alone could
+         * not tell which arm produced it. It is published here, beside `_end_run`, because the seam runs
+         * before either ending on both arms and both sites therefore carry it. */
+        entry_live_write("xnu_live_seam_post_end_run", (uint32_t)(STAGE90_XNU_POST_END_RUN));
     }
 #if STAGE90_XNU_SEAM_END_RUN
     /* The forced ending. Last in the body, and reached only from the seam's own site: the four
