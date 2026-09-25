@@ -137,10 +137,17 @@ tools:
    — the two `0x10C` stores *were* in the inlined `st_clock_set` and did land — and the **GCC window came
    out EMPTY**. Fixed by making the helper `always_inline`: the stores now land in the body the clause
    reads, `entry_storage_probe` is back at **`0x8000cff8`**, and the growth (entry text
-   **5315592 → 5317032**, exactly +1440 B) moved **two** symbols, `cpu_idle_wfi` (+1568) and `arm_init`
+   **5310816 → 5312256**, exactly +1440 B) moved **two** symbols, `cpu_idle_wfi` (+1568) and `arm_init`
    (+1560), while **the seam `0x800472dc`, `platform_cache_entry/exit`, the wrappers and the probe's own
    `bl` did not move at all** — an alignment fill contracted by the same amount, which is
-   [[mi4-linker-fill-term]] in the direction this project depends on.
+   [[mi4-linker-fill-term]] in the direction this project depends on. **CORRECTED 2026-09-25 (708):** this
+   pair read `5315592 → 5317032` when this document was written, and both bases were wrong by exactly
+   `+3336` while the delta was right. Measured with three tools that agree (`arm-none-eabi-size -A`,
+   `objdump -h`, `readelf -S`) against the four parks: `.text` is `5309568` (rung 4) → `5310816` (rung 5)
+   → `5312256` (rung 6) → `5316960` (rung 7), and `.data` is **`206512`** in all four, not the `206804`
+   this document and the record below also carried — that value is experiment-501's `.data`, for an image
+   whose `.text` was `5280296` and whose `.bss` was `362824`. The lesson is the pair's shape and not the
+   arithmetic: **a correct delta applied to a stale base passes every check either number takes.**
 2. **The window's store set was being measured per base register.** The census collected each window's
    offsets from *the base register carrying most of them* (`c[k] > m`), correct only while each window
    happened to be written through one register. Rung 6 broke that twice: the two `CORE_VENDOR_SPEC`
@@ -207,9 +214,11 @@ refusal was removed from the device-list row (`grep -q … <<<"$fb"`), and the r
   CBCR bit is cleared anywhere.
 * **No card power.** The card is unpowered and `POWER_CONTROL 0x29` is still unreachable in the linked
   image: the `hc_mem` store set is `47 44 44` and offset 41 does not appear. The same
-  `sdhci_do_set_ios` reaches `sdhci_set_power`, whose first act is a **zero** write there (a bus-off
-  request) followed by `sdhci_msm_check_power_status`' **unbounded `wait_for_completion`** — the next
-  rung's subject, named and refused rather than attempted.
+  `sdhci_do_set_ios` reaches `sdhci_set_power` — and **708 §1.2 corrects this bullet**: on this host
+  `SDHCI_QUIRK_SINGLE_POWER_WRITE` is set (`sdhci-msm.c:2897`), so the zero write is **not** on the path
+  and the act is one store (`pwr | SDHCI_POWER_ON`) followed by one
+  `sdhci_msm_check_power_status(REQ_BUS_ON)`, whose **unbounded `wait_for_completion`** is the hazard and
+  the next rung's subject, named and refused rather than attempted.
 * **No command, no sector, no partition table, no mount**, and no driver beyond the fixture: the floor
   (pid 1, `open` answering 0, the control open `ENOENT`, the fixture's `0xfeedface` in a user page) is
   met exactly as 520, 533, 699, 703 and 705 met it.

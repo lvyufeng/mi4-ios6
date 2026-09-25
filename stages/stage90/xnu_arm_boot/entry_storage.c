@@ -108,8 +108,8 @@
 #ifndef STAGE90_XNU_STORAGE_PROBE
 #define STAGE90_XNU_STORAGE_PROBE 0
 #endif
-#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 6
-#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store), 4 = 3 plus the driver's own SDHCI_RESET_ALL (ONE byte store to SOFTWARE_RESET 0x2F, plus a bounded poll of that same byte) - the rung that writes through hc_mem for the first time - 5 = 4 plus the CLOCK SURFACE read at its own widths (the GCC's four SDCC1 branches and the apps root's five RCG words, plus CORE_VENDOR_SPEC 0x10C), a rung of reads that stores NOTHING anywhere, and 6 = 5 plus THE DRIVER'S FIRST CLOCK SET (sdhci_msm_set_clock at 400 kHz): four CBCR read-modify-writes of BIT(0) on the GCC each followed by a bounded halt check, two CORE_VENDOR_SPEC 0x10C read-modify-writes (MCLK select <- DFLT, HC_SELECT_IN cleared), and the standard's two CLOCK_CONTROL halfwords with the stability poll between them - SIX stores and NO rate, because sup_clock == msm_host->clk_rate on the first call (experiment-706 section 2) - and it writes neither BCR 0x04C0 nor any RCG word, nor POWER_CONTROL 0x29. A value above the ladder is refused here rather than shaping an image whose switches claim something else."
+#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 7
+#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store), 4 = 3 plus the driver's own SDHCI_RESET_ALL (ONE byte store to SOFTWARE_RESET 0x2F, plus a bounded poll of that same byte) - the rung that writes through hc_mem for the first time - 5 = 4 plus the CLOCK SURFACE read at its own widths (the GCC's four SDCC1 branches and the apps root's five RCG words, plus CORE_VENDOR_SPEC 0x10C), a rung of reads that stores NOTHING anywhere, and 6 = 5 plus THE DRIVER'S FIRST CLOCK SET (sdhci_msm_set_clock at 400 kHz): four CBCR read-modify-writes of BIT(0) on the GCC each followed by a bounded halt check, two CORE_VENDOR_SPEC 0x10C read-modify-writes (MCLK select <- DFLT, HC_SELECT_IN cleared), and the standard's two CLOCK_CONTROL halfwords with the stability poll between them - SIX stores and NO rate, because sup_clock == msm_host->clk_rate on the first call (experiment-706 section 2) - and it writes neither BCR 0x04C0 nor any RCG word, nor POWER_CONTROL 0x29, and 7 = 6 plus THE DRIVER'S OWN FIRST POWER BYTE (mmc_power_up's PASS A: sdhi_set_power at sdhci.c:1663 - ONE 8-bit store to POWER_CONTROL 0x29, the value derived from the CAPABILITIES register the way sdhci_add_host and mmc_power_up derive it), with the vendor's REQ_BUS_ON wait NOT taken (sdhci-msm.c:2179-2209 would wait_for_completion on an IRQ this image cannot deliver) - a rung of one store and five readings. A value above the ladder is refused here rather than shaping an image whose switches claim something else."
 #endif
 
 /*
@@ -173,7 +173,12 @@ extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_befo
 #define ST_SDHCI_MAX_CURRENT    0x48u   /* sdhci.h:217 */
 #define ST_SDHCI_PRESENT_STATE  0x24u   /* sdhci.h:64  */
 #define ST_SDHCI_HOST_CONTROL   0x28u   /* sdhci.h:76  - a BYTE, and at an offset no 32-bit access reaches */
-#define ST_SDHCI_POWER_CONTROL  0x29u   /* sdhci.h:87  - a BYTE; read only, see the census below */
+#define ST_SDHCI_POWER_CONTROL  0x29u   /* sdhci.h:87  - a BYTE. **READ ONLY UNTIL RUNG 7, WHICH WRITES
+                                         * IT**: rung 3 reads it, and rung 7 makes the one 8-bit store
+                                         * to it that `sdhci_set_power` makes (the value derived from
+                                         * CAPABILITIES 0x40 below). The census clause moved it from the
+                                         * asserted-absent set `47 44 44` to the asserted-present one
+                                         * `47 44 44 41` in the same build */
 #define ST_SDHCI_CLOCK_CONTROL  0x2Cu   /* sdhci.h:100 - 16-bit */
 #define ST_SDHCI_SOFTWARE_RESET 0x2Fu   /* sdhci.h:113 - a BYTE */
 #define ST_SDHCI_RESET_ALL      0x01u   /* sdhci.h:114 - the mask the driver resets with, and it
@@ -920,6 +925,12 @@ static void st_clock_census(void)
  * be exactly the four branch offsets in order - and `POWER_CONTROL 0x29` stays unreachable in the
  * `hc_mem` window, because the driver's power path writes **0** there (a bus-off request) and then waits
  * unbounded (`sdhci.c:1352-1355`, `sdhci-msm.c:2179-2209`): that act is the next rung's subject.
+ * **708: the next rung is rung 7, and it does not write that zero.** `SDHCI_QUIRK_SINGLE_POWER_WRITE` is
+ * set for this host (`sdhci-msm.c:2897`), so `sdhci.c:1352`'s zero/bus-off write is *not* on the path -
+ * what `mmc_power_up`'s pass A takes is the one store `sdhci.c:1317-1334` derives from `CAPABILITIES`,
+ * and the unbounded wait is NOT taken (this image cannot deliver the threaded handler's IRQ, measured
+ * silent in 708 section 1.3). So the sentence above is rung 6's reading of this register and not the
+ * ladder's; the `hc_mem` window's store set is `47 44 44 41` from rung 7 on.
  *
  * **And the AHB branch's `has_sibling` does not make its enable a different act, which the rung-5 census's
  * own comment asked this rung to say.** `gcc_sdcc1_ahb_clk` carries `has_sibling = 1`, and
@@ -1180,6 +1191,164 @@ static void st_clock_set(void)
 #endif /* STAGE90_XNU_STORAGE_PROBE >= 6 - st_branch_enable is called four times (and is
         * always_inline so its stores are the probe's own) and st_clock_set once, and -Werror is on */
 
+#if STAGE90_XNU_STORAGE_PROBE >= 7
+/*
+ * **708: rung 7 - the driver's own first power byte, and the wait that is not taken.**
+ * `docs/experiments/experiment-708-the-rung-7-pre-registration-the-card-power-byte-and-the-wait-that-is-not-taken.md`
+ * is the pre-registration and this block is its sections 1.2-1.4 read out of the vendor's own source:
+ *
+ *   `mmc_power_up`'s PASS A (`core.c:1916-1924` - `ios.clock` is still 0 and `ios.power_mode =
+ *   MMC_POWER_UP`) -> `sdhci_do_set_ios` -> `if (ios->clock)` false, so **no clock set on this pass** ->
+ *   `if (ios->power_mode & MMC_POWER_UP)` (`sdhci.c:1658`, true only for `UP` because `ON` is 2 and the
+ *   test is `& 1`) -> `enable_controller_clock` -> **`sdhci_set_power(host, ios->vdd)` (`:1663`)**.
+ *   Rung 6 was PASS B's act (the clock), this is PASS A's (the power), and the ladder appends rather than
+ *   reorders - `_pwr_cc_before` is the cell that says so.
+ *
+ * **`SDHCI_QUIRK_SINGLE_POWER_WRITE` is SET on this host (`sdhci-msm.c:2897`), so the `0` write and its
+ * `REQ_BUS_OFF` are NOT on this path**: `sdhci.c:1352`'s block is skipped and the whole act is ONE store
+ * - `pwr |= SDHCI_POWER_ON` then `sdhci_writeb` (`:1368-1370`) - followed by ONE
+ * `sdhci_msm_check_power_status(host, REQ_BUS_ON)` (`:1371-1372`). 706 section 4 and 707 section 7 called
+ * the act "both hazards in three lines"; the bus-off write is not one of them, and both documents carry
+ * the correction. **It writes `0x0B` and never `0x00`.**
+ *
+ * **And the wait is NOT taken here, which is this rung's boundary.** With `curr_pwr_state` and
+ * `curr_io_level` both 0 - they are written ONLY by the threaded `sdhci_msm_pwr_irq` (`sdhci-msm.c:2092-2094`)
+ * and every run has measured the power surface silent (`_reg_pwrctl_mask = 0x0f`, `_reg_pwrctl_status = 0`)
+ * - `check_power_status(REQ_BUS_ON)` takes `wait_for_completion(&msm_host->pwr_irq_completion)` and waits
+ * for an IRQ this image cannot deliver: **the driver's power-up cannot be performed the driver's way in
+ * this image.** So this rung does the register act and takes the reading the handler would have taken
+ * (`CORE_PWRCTL_STATUS 0xDC`), left latched - no write to `CORE_PWRCTL_CLEAR 0xE4`, `CORE_PWRCTL_CTL 0xE8`
+ * or `CORE_PWRCTL_MASK 0xE0`, and no call to the vendor's check.
+ *
+ * **The byte is a derivation, and its input is a reading this project already published.** `host->ocr_avail`
+ * comes from `caps[0]` = `SDHCI_CAPABILITIES 0x40` (`sdhci.c:3185`, `:3421-3481`), and `mmc_power_up` takes
+ * `fls(ocr_avail) - 1` (`core.c:1912-1914`); 705's `_mode_capabilities = 0x742dc8b2` has VDD_330 **clear**,
+ * VDD_300 **clear** and VDD_180 **set**, so `ocr_avail = MMC_VDD_165_195` and the byte is
+ * `SDHCI_POWER_180 | SDHCI_POWER_ON = 0x0B` - a **1.8 V request**, not the `0x0F` a 3.3 V-reporting host
+ * gives. The default arm of the driver's own `switch (1 << power)` is `BUG()` (`sdhci.c:1333-1334`) and
+ * `_pwr_refused` is this arm's mirror of it: refuse and publish rather than write a byte the driver never
+ * would.
+ */
+#define ST_SDHCI_POWER_ON     0x01u       /* sdhci.h:88  */
+#define ST_SDHCI_POWER_180    0x0Au       /* sdhci.h:89  */
+#define ST_SDHCI_POWER_300    0x0Cu       /* sdhci.h:90  */
+#define ST_SDHCI_POWER_330    0x0Eu       /* sdhci.h:91  */
+#define ST_SDHCI_CAN_VDD_330  0x01000000u /* sdhci.h:195 - the bit sdhci_add_host tests for 3.3 V */
+#define ST_SDHCI_CAN_VDD_300  0x02000000u /* sdhci.h:196 */
+#define ST_SDHCI_CAN_VDD_180  0x04000000u /* sdhci.h:197 */
+#define ST_MMC_VDD_165_195    0x00000080u /* host.h:220 - `1 << power` for power = 7 */
+#define ST_MMC_VDD_29_30      0x00020000u /* host.h:230 */
+#define ST_MMC_VDD_30_31      0x00040000u /* host.h:231 */
+#define ST_MMC_VDD_32_33      0x00100000u /* host.h:233 */
+#define ST_MMC_VDD_33_34      0x00200000u /* host.h:234 */
+
+/*
+ * `fls`/`ffs` written out rather than taken from a builtin, because this arm's subject is the driver's own
+ * definition of the bit and not a compiler's choice of instruction: a loop is the definition, and it is
+ * the same for every build of this image.
+ */
+static uint32_t st_fls32(uint32_t v)   /* 1-based position of the highest set bit; 0 for v == 0 */
+{
+    uint32_t r = 0u;
+    while (v != 0u) { r++; v >>= 1; }
+    return r;
+}
+
+static uint32_t st_ffs32(uint32_t v)   /* 1-based position of the lowest set bit; 0 for v == 0 */
+{
+    uint32_t r = 0u;
+    if (v == 0u)
+        return 0u;
+    while ((v & 1u) == 0u) { r++; v >>= 1; }
+    return r + 1u;
+}
+
+static void st_power_set(void)
+{
+    uint32_t cap, avail, vdd, vdd_ocr, pwr, refused;
+    uint8_t before, after;
+
+    ST_LIVE("xnu_live_storage_pwr_calls", 1u);
+
+    cap = st_read32(ST_HC_MEM_BASE + ST_SDHCI_CAPABILITIES);
+    ST_LIVE("xnu_live_storage_pwr_cap", cap);
+
+    /* sdhci.c:3421-3465 - the driver's own ocr_avail, from `caps[0]` and its three bits. */
+    avail = 0u;
+    if ((cap & ST_SDHCI_CAN_VDD_330) != 0u)
+        avail |= ST_MMC_VDD_32_33 | ST_MMC_VDD_33_34;
+    if ((cap & ST_SDHCI_CAN_VDD_300) != 0u)
+        avail |= ST_MMC_VDD_29_30 | ST_MMC_VDD_30_31;
+    if ((cap & ST_SDHCI_CAN_VDD_180) != 0u)
+        avail |= ST_MMC_VDD_165_195;
+    ST_LIVE("xnu_live_storage_pwr_avail", avail);
+
+    refused = 0u;
+    if (avail == 0u) {
+        /* `fls(0) - 1` is not a bit index, so the driver's own path cannot reach a power byte from this
+         * register state; the arm refuses for the same reason the switch below does. */
+        refused = 1u;
+        vdd = 0u;
+        vdd_ocr = 0u;
+    } else {
+        vdd = st_fls32(avail) - 1u;                                            /* core.c:1914 */
+        vdd_ocr = st_ffs32(1u << (st_fls32(avail) - 1u)) - 1u;                  /* core.c:1912 */
+    }
+    ST_LIVE("xnu_live_storage_pwr_vdd", vdd);
+    ST_LIVE("xnu_live_storage_pwr_vdd_ocr", vdd_ocr);
+
+    pwr = 0u;
+    switch (1u << vdd) {                       /* sdhci.c:1317-1334, `switch (1 << power)` */
+    case ST_MMC_VDD_165_195:
+        pwr = ST_SDHCI_POWER_180;
+        break;
+    case ST_MMC_VDD_29_30:
+    case ST_MMC_VDD_30_31:
+        pwr = ST_SDHCI_POWER_300;
+        break;
+    case ST_MMC_VDD_32_33:
+    case ST_MMC_VDD_33_34:
+        pwr = ST_SDHCI_POWER_330;
+        break;
+    default:
+        refused = 1u;                          /* the driver's own arm here is BUG() */
+        break;
+    }
+    ST_LIVE("xnu_live_storage_pwr_voltage_bits", pwr);
+    ST_LIVE("xnu_live_storage_pwr_refused", refused);
+    if (refused != 0u) {
+        ST_LIVE("xnu_live_storage_pwr_done", 0u);
+        return;
+    }
+
+    /* The readings the rung takes before the store - including the ones the handler that cannot run
+     * would have taken, and the clock and card state this pass is defined against. */
+    before = st_read8(ST_HC_MEM_BASE + ST_SDHCI_POWER_CONTROL);
+    ST_LIVE("xnu_live_storage_pwr_before", (uint32_t)before);
+    ST_LIVE("xnu_live_storage_pwr_status_before",
+            st_read32(ST_CORE_MEM_BASE + ST_CORE_PWRCTL_STATUS));
+    ST_LIVE("xnu_live_storage_pwr_mask", st_read32(ST_CORE_MEM_BASE + ST_CORE_PWRCTL_MASK));
+    ST_LIVE("xnu_live_storage_pwr_ctl", st_read32(ST_CORE_MEM_BASE + ST_CORE_PWRCTL_CTL));
+    ST_LIVE("xnu_live_storage_pwr_ps_before", st_read32(ST_HC_MEM_BASE + ST_SDHCI_PRESENT_STATE));
+    ST_LIVE("xnu_live_storage_pwr_cc_before",
+            (uint32_t)st_read16(ST_HC_MEM_BASE + ST_SDHCI_CLOCK_CONTROL));
+
+    /* THE STORE - one byte, and the value is the derivation above with SDHCI_POWER_ON. */
+    ST_LIVE("xnu_live_storage_pwr_wrote", pwr | ST_SDHCI_POWER_ON);
+    st_write8(ST_HC_MEM_BASE + ST_SDHCI_POWER_CONTROL, (uint8_t)(pwr | ST_SDHCI_POWER_ON));
+
+    after = st_read8(ST_HC_MEM_BASE + ST_SDHCI_POWER_CONTROL);
+    ST_LIVE("xnu_live_storage_pwr_after", (uint32_t)after);
+    ST_LIVE("xnu_live_storage_pwr_status_after",
+            st_read32(ST_CORE_MEM_BASE + ST_CORE_PWRCTL_STATUS));
+    ST_LIVE("xnu_live_storage_pwr_ps_after", st_read32(ST_HC_MEM_BASE + ST_SDHCI_PRESENT_STATE));
+    ST_LIVE("xnu_live_storage_pwr_cc_after",
+            (uint16_t)st_read16(ST_HC_MEM_BASE + ST_SDHCI_CLOCK_CONTROL));
+
+    ST_LIVE("xnu_live_storage_pwr_done", 1u);
+}
+#endif /* STAGE90_XNU_STORAGE_PROBE >= 7 - two small helpers and one caller */
+
 void entry_storage_probe(void)
 {
     uint32_t slot_before = 0u, desc = 0u, mapped, section, hc_section;
@@ -1416,5 +1585,18 @@ void entry_storage_probe(void)
      */
     if (g_storage_mode_complete != 0u)
         st_clock_set();
+#endif
+#if STAGE90_XNU_STORAGE_PROBE >= 7
+    /*
+     * **708: rung 7 - PASS A's act, appended after rung 6's PASS B act.** The same interlock, and the
+     * one register this rung writes is `POWER_CONTROL 0x29`: the byte is derived from the CAPABILITIES
+     * register (`_pwr_cap`), the value is `SDHCI_POWER_180 | SDHCI_POWER_ON`, and the arm refuses rather
+     * than writing one whose voltage bits have no entry in the driver's own map (`_pwr_refused`). What
+     * it deliberately does NOT do is wait: `sdhci_msm_check_power_status(REQ_BUS_ON)` would block on a
+     * completion only this SoC's power IRQ completes, and this image delivers no IRQ - section 1.3 of
+     * experiment-708. The status register is read and left latched instead.
+     */
+    if (g_storage_mode_complete != 0u)
+        st_power_set();
 #endif
 }

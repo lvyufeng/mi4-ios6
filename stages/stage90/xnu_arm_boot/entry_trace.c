@@ -2667,11 +2667,18 @@ void __wrap_platform_cache_idle_exit(void)
  * (`entry_timebase.o`, `entry_gic.o`, `entry_irq.o`, `entry_storage.o`) *before* the kernel's, so
  * every byte they add moves Apple's text - and when the entry group crosses a page boundary the whole
  * kernel run moves by `0x1000` at once. 692 to 693 moved the same region by `+0xE0` (that step's own
- * record), i.e. the group had slack left then and does not now. The value below is the one 696's
- * build measured, and it is the value this arm's image carries; the *class* - a kernel address pinned
- * in an entry source - is recorded as owed rather than repaired here, because the repair is a link
- * order and this step's question is the mode sequence. */
-#define STAGE90_XNU_SEAM_LR       0x800472dcu
+ * record), i.e. the group had slack left then and does not now. **It moved a second time on rung 7
+ * (708), by the same page and for the same reason**: the rung-7 block (`st_power_set` and its two
+ * helpers, `entry_storage.c`) added ~1.4 KB, more than the remainder of the same alignment slack, so
+ * the exit's `bl` came out at `0x800482d8` returning to `0x800482dc` and this build refused with this
+ * clause again. The value below is the one 708's build measured - the disassembly agrees with it to
+ * the instruction - and it is the value every arm from 708 on carries. **The move is a property of the
+ * entry group's size and not of what a rung does**: any rung that pushes the group past the next page
+ * boundary moves every kernel-text address in the image at once, and the clause above is what makes
+ * that a refused build rather than a silent mis-identification at run time. The *class* - a kernel
+ * address pinned in an entry source - stays recorded as owed, because the repair is still a link order
+ * and not this step's question. */
+#define STAGE90_XNU_SEAM_LR       0x800482dcu
 #define STAGE90_SEAM_LIVE_MAX     4u
 
 extern void entry_live_write(const char *key, uint32_t value);

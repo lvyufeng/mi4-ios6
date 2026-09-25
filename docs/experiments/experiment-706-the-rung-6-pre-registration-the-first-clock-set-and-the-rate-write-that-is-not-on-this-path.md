@@ -131,6 +131,15 @@ the build** rather than avoided by review. The one write that changes the medium
   the linked image** — the clause 701 built for the reset rung stays exactly as it is (`:29986-30017`).
   Enabling the SD clock before the card is powered is the driver's own order, and the vendor's own comment
   says so (`sdhci.c:1651-1657`): *"we may end up enabling card clock before giving power to the card"*.
+
+  > **CORRECTION (708 §1.2, 2026-09-25).** The zero write and its `REQ_BUS_OFF` are **not on this host's
+  > path**: `SDHCI_QUIRK_SINGLE_POWER_WRITE` **is set** (`sdhci-msm.c:2897`), so `sdhci.c:1352`'s block is
+  > skipped and the power act is **one** store (`pwr | SDHCI_POWER_ON`, `:1368-1370`) followed by **one**
+  > `check_power_status(REQ_BUS_ON)` (`:1371-1372`). So the act is **one** hazard in two lines, not two in
+  > three — and the bus-off request 531 §8 names is not something rung 7 has to add an absence for; it was
+  > never on the path. The wait is unchanged and is the hazard, and §1.3 of 708 is why it cannot be taken.
+  > The pre-registration above reproduced a *conditional* as if it were this board's reading — the same
+  > defect class as the rest of this project's record, in the document that named it.
 * **No command, no sector, no partition table, no mount**, and no driver beyond the fixture. The goal's
   floor (pid 1, the driver's `open` answering 0, the fixture's `0xfeedface`) is unchanged.
 * **TWRP-to-storage stays withheld**: the OS is not observed entering and **staying**.

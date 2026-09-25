@@ -595,9 +595,10 @@ esac
 # every rung** - and since 706 holds it to **exactly the four branch offsets, in the vendor's order**, so
 # "this rung writes the branch enables and neither the block reset nor a single RCG word" cannot be undone
 # by an edit that this file's own classifier would otherwise have to guess about. `POWER_CONTROL 0x29`
-# stays unreachable in the `hc_mem` clause for the same reason, and that one is a rung-7 boundary rather
-# than an omission: the driver's power path writes 0 there and then waits unbounded (experiment-706
-# section 4).
+# became reachable at **rung 7** (`708`), and the `hc_mem` clause there is where that door is opened: the
+# expected set gains exactly one byte at 41, the register's own absence assertion becomes its presence
+# assertion, and the bus-off write (0) plus the unbounded wait (experiment-708 sections 1.2-1.3) stay out
+# of the image by that clause and not by review.
 STORAGE_PROBE=${STAGE90_XNU_STORAGE_PROBE:-0}
 case "$STORAGE_PROBE" in
     0) ;;
@@ -607,7 +608,8 @@ case "$STORAGE_PROBE" in
     4) ;;
     5) ;;
     6) ;;
-    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4, 5 or 6, not [$STORAGE_PROBE]" >&2
+    7) ;;
+    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4, 5, 6 or 7, not [$STORAGE_PROBE]" >&2
        echo "        It is a `#if` in two files and not a value, so anything else would reach the" >&2
        echo "        preprocessor as a broken -D and fail there, with the cause named by the wrong" >&2
        echo "        tool (692); and it is a rung rather than a flag since 696, so a value above the" >&2
@@ -29887,8 +29889,12 @@ verify_trace_symbols() {
         # 47 at rung 4, the GCC megabyte empty. Rung 6: `core_mem` `120 0 120 120 268 268`, `hc_mem`
         # `47 44 44` (`strb strh strh`), and the GCC `1224 1220 1256 1252` (all four `str`) - the first rung
         # whose clock-controller store set is not empty, and the two offsets it must never reach are named
-        # in that clause. A rung above 6 does not exist yet, so the GCC set is asserted exactly and not by
-        # bound: a rung-7 edit has to change this sentence too, which is the point.
+        # in that clause. **Rung 7 (`708`) answers the sentence that stood here - "a rung above 6 does not
+        # exist yet, so the GCC set is asserted exactly and not by bound" - and the answer is that rung 7
+        # changes ONE of the three sets and not the other two**: the GCC and `core_mem` sets are rung 6's
+        # unchanged (the power act writes no clock word and no vendor mode word), and `hc_mem` gains exactly
+        # one byte at offset 41 (`POWER_CONTROL 0x29`), which is the register whose ABSENCE this clause has
+        # been asserting since 701. Both messages now name the rung they belong to rather than counting.
         #
         # The classification is collected over the WHOLE body and applied in `END`, because the first
         # draft classified in line order: a store at `0x8000d478` was judged against evidence that only
@@ -30048,14 +30054,32 @@ verify_trace_symbols() {
             # field the first one did not touch. Everything else in that window is still the vendor's
             # bring-up, unchanged, in the same order.
             [[ "$stb_core_off" == "120 0 120 120 268 268 " ]] ||
-                layout_fail "entry_storage_probe's stores in the core_mem window (through [$stb_core_base]) are [$stb_core_off] and rung 6's record says they are 120 0 120 120 268 268 - i.e. the vendor's own mode sequence (CORE_HC_MODE <- 0, CORE_POWER <- |CORE_SW_RST, CORE_HC_MODE <- HC_MODE_EN, CORE_HC_MODE <- |FF_CLK_SW_RST_DIS, sdhci-msm.c:2841-2868) followed by the clock set's TWO CORE_VENDOR_SPEC 0x10C read-modify-writes (MCLK select <- DFLT at :2497-2499, HC_SELECT_IN cleared at :2510-2512). A different count, a different order or a different offset is a store this arm's pre-registration does not describe - and this window is the one the probe's four writes through it have been bounded to since 698, so a store here that the record does not name is exactly the store this clause exists to refuse. (The image's own stores are [$stb_img].) Nothing is rebuilt by this refusal"
+                layout_fail "entry_storage_probe's stores in the core_mem window (through [$stb_core_base]) are [$stb_core_off] and rung 6's record - which rung 7 does NOT change, because the driver's power act writes no vendor mode word - says they are 120 0 120 120 268 268 - i.e. the vendor's own mode sequence (CORE_HC_MODE <- 0, CORE_POWER <- |CORE_SW_RST, CORE_HC_MODE <- HC_MODE_EN, CORE_HC_MODE <- |FF_CLK_SW_RST_DIS, sdhci-msm.c:2841-2868) followed by the clock set's TWO CORE_VENDOR_SPEC 0x10C read-modify-writes (MCLK select <- DFLT at :2497-2499, HC_SELECT_IN cleared at :2510-2512). A different count, a different order or a different offset is a store this arm's pre-registration does not describe - and this window is the one the probe's four writes through it have been bounded to since 698, so a store here that the record does not name is exactly the store this clause exists to refuse. (The image's own stores are [$stb_img].) Nothing is rebuilt by this refusal"
         else
         [[ "$stb_core_off" == "120 0 120 120 " ]] ||
             layout_fail "entry_storage_probe's stores in the core_mem window (through [$stb_core_base]) are [$stb_core_off] and this arm's record says they are 120 0 120 120 - i.e. CORE_HC_MODE <- 0, CORE_POWER <- |CORE_SW_RST, CORE_HC_MODE <- HC_MODE_EN, CORE_HC_MODE <- |FF_CLK_SW_RST_DIS (the vendor's own sequence, sdhci-msm.c:2841-2868). A different count, a different order or a different offset is a store this arm's pre-registration does not describe. Read the probe's own body, decide whether the sequence or the record is what changed, and change the one that is wrong. (The image's own stores are [$stb_img].) Nothing is rebuilt by this refusal"
         fi
-        if [[ $STORAGE_PROBE -ge 6 ]]; then
+        if [[ $STORAGE_PROBE -ge 7 ]]; then
+            # **708: `POWER_CONTROL 0x29` ENTERS the linked image, and the refusal moves with it.**
+            # Rung 7 is `mmc_power_up`'s PASS A - one 8-bit store of `SDHCI_POWER_180 | SDHCI_POWER_ON`
+            # (`sdhci.c:1368-1370`, reached through `sdhci_set_power` because `SDHCI_QUIRK_SINGLE_POWER_WRITE`
+            # is set on this host, `sdhci-msm.c:2897`) - so the expected set is `47 44 44 41` in program
+            # order, and the offset that has been the ASSERTED ABSENCE since 701 becomes the asserted
+            # presence. **What must still be refused is every other offset in this window, a second store to
+            # 41, and a store to 41 on any rung below 7** - a clause that goes from "one byte at 0x2F" to
+            # "four stores" without saying which is which has traded a checked absence for a count
+            # (`mi4-one-value-two-definitions` m718). The two acts the register's neighbours keep out are
+            # unchanged: nothing here writes 0 to 41 (the bus-off request is not on this path at all), and
+            # nothing here writes the vendor's `CORE_PWRCTL_CLEAR`/`CTL`/`MASK` - the power status is read
+            # and left latched.
+            [[ "$stb_hc_off" == "47 44 44 41 " ]] ||
+                layout_fail "entry_storage_probe's stores in the hc_mem window (through [$stb_hc_base]) are [$stb_hc_off] and rung 7's record says 47 44 44 41 - the driver's own reset (one BYTE at SOFTWARE_RESET 0x2F, sdhci.c:246), the clock set's TWO HALFWORDS at CLOCK_CONTROL 0x2C (sdhci.c:1289, :1306), and then the driver's own FIRST POWER BYTE at POWER_CONTROL 0x29 (sdhci.c:1368-1370, mmc_power_up's pass A). A different count, a different order, or a fifth offset is a store this arm's pre-registration does not describe. The value written there is this run's (`_pwr_wrote`); what this clause fixes is that exactly one byte is written and that it is at 41. Nothing is rebuilt by this refusal"
+            [[ "$stb_hc_mne" == "strb strh strh strb " ]] ||
+                layout_fail "entry_storage_probe's stores in the hc_mem window (through [$stb_hc_base]) are [$stb_hc_mne] and rung 7's record says the widths are strb strh strh strb - a byte at SOFTWARE_RESET 0x2F, two halfwords at CLOCK_CONTROL 0x2C, then a byte at POWER_CONTROL 0x29 (sdhci.c:1370 is `sdhci_writeb`, and sdhci.h:87 declares the register 8-bit). The offset check above cannot see this: 0x2C is 4-aligned and 0x28-0x2A are not, so a wider accessor at either would be refused by the alignment census for the wrong reason - the width here is a property of the register and not of the address. Nothing is rebuilt by this refusal"
+        elif [[ $STORAGE_PROBE -ge 6 ]]; then
             # **706: the reset's byte, then the standard's two halfwords, and POWER_CONTROL is still
-            # absent.** `sdhci_writew(host, clk, SDHCI_CLOCK_CONTROL)` runs twice (sdhci.c:1289 and
+            # absent** - this is the clause rung 7 relaxes, and its absence assertion was what kept the
+            # register out of the linked image until this rung. `sdhci_writew(host, clk, SDHCI_CLOCK_CONTROL)` runs twice (sdhci.c:1289 and
             # :1306) with the 20 ms stability poll between them, at offset 44 (0x2C) - and the vendor
             # writes it with the HALFWORD accessor, so the mnemonic is checked and not only the offset
             # (0x2C is 4-aligned, and the alignment census would let a 32-bit store through: the width
@@ -30106,7 +30130,7 @@ verify_trace_symbols() {
             # the mnemonic is checked because a byte or halfword store to a CBCR is not what the vendor
             # writes.
             [[ "$stb_gcc" == "1224:str 1220:str 1256:str 1252:str " ]] ||
-                layout_fail "entry_storage_probe stores [$stb_gcc] into the GCC megabyte (0xfc400000), and rung 6's record says the stores are exactly 1224:str 1220:str 1256:str 1252:str - the FOUR BRANCH ENABLES of sdhci_msm_prepare_clocks in the vendor's own order (pclk = SDCC1_AHB_CBCR 0x4C8, clk = SDCC1_APPS_CBCR 0x4C4, ff_clk = SDCC1_CDCCAL_FF_CBCR 0x4E8, sleep_clk = SDCC1_CDCCAL_SLEEP_CBCR 0x4E4, sdhci-msm.c:2315-2374), each a 32-bit read-modify-write of BIT(0) which cannot clear a branch's enable bit (clock-local2.c:380-382). **Two offsets in this megabyte must never appear and each is a hazard this clause exists to refuse: 480 (0x4C0, SDCC1_BCR - BIT(0) is BCR_BLK_ARES_BIT, the BLOCK RESET, clock-local2.c:66) and 1232-1248 (0x4D0-0x4E0, the apps root clock generator's CMD_RCGR/CFG_RCGR/M/N/D - every rate this rung does not write, because on the first clock set sup_clock == msm_host->clk_rate: experiment-706 section 2).** A store to a clock-control register whose parent root is off is the bus wait nothing ends - the failure this project cannot read a log out of. Read the body and decide whether the rung or the store is what changed. Nothing is rebuilt by this refusal"
+                layout_fail "entry_storage_probe stores [$stb_gcc] into the GCC megabyte (0xfc400000), and rung 6's record - which rung 7 does NOT change, because the power act writes no clock word - says the stores are exactly 1224:str 1220:str 1256:str 1252:str - the FOUR BRANCH ENABLES of sdhci_msm_prepare_clocks in the vendor's own order (pclk = SDCC1_AHB_CBCR 0x4C8, clk = SDCC1_APPS_CBCR 0x4C4, ff_clk = SDCC1_CDCCAL_FF_CBCR 0x4E8, sleep_clk = SDCC1_CDCCAL_SLEEP_CBCR 0x4E4, sdhci-msm.c:2315-2374), each a 32-bit read-modify-write of BIT(0) which cannot clear a branch's enable bit (clock-local2.c:380-382). **Two offsets in this megabyte must never appear and each is a hazard this clause exists to refuse: 480 (0x4C0, SDCC1_BCR - BIT(0) is BCR_BLK_ARES_BIT, the BLOCK RESET, clock-local2.c:66) and 1232-1248 (0x4D0-0x4E0, the apps root clock generator's CMD_RCGR/CFG_RCGR/M/N/D - every rate this rung does not write, because on the first clock set sup_clock == msm_host->clk_rate: experiment-706 section 2).** A store to a clock-control register whose parent root is off is the bus wait nothing ends - the failure this project cannot read a log out of. Read the body and decide whether the rung or the store is what changed. Nothing is rebuilt by this refusal"
         else
         [[ -z "${stb_gcc// /}" ]] ||
             layout_fail "entry_storage_probe stores [$stb_gcc] into the GCC megabyte (0xfc400000), and **no rung of this ladder below 6 writes the clock controller at any value**. Since 704 this window is classified as its own (`GCC`) and asserted empty here below rung 6, because the rung-5 arm reads four SDCC1 branch words, the apps root's five RCG words and CORE_VENDOR_SPEC 0x10C and stores nothing (experiment-704). A store to a clock-control register whose parent root is off is the bus wait nothing ends - the failure this project cannot read a log out of. Before 704 a store here was refused by the DEVBAD clause, whose stated subject is 'not one of the two windows this controller declares' - true, and a statement about the classifier's scope rather than about the clock. Read the body and decide whether the rung or the store is what changed. Nothing is rebuilt by this refusal"
