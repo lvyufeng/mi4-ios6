@@ -1066,3 +1066,184 @@ set=armed-storage-mode-57d55fc9 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b2736
 # `0x800472dc`: the gate compares the two and says which is owed the change, the disassembly decided it, and
 # the press was unspent while it was wrong. And `tools/verify_press_ready.sh`'s row-4 narration gained the
 # rung-2 branch, so a press log names the arm that WRITES rather than describing a read-only one.
+set=armed-storage-census-4d66f871 sha256=4ac231cea76f20ba24e5507f18001b33fe23fa4161c25a4b9da281f8006e1c29 bytes=8556544 file=stage90-qcdt.img role=qcdt-wrapped-payload-this-is-what-fastboot-boot-sends-and-the-arm-the-next-press-sends-STAGE90_XNU_ENTRY-1-this-payload-wraps-the-STORAGE_PROBE-3-entry-image-i-e-the-register-file-CENSUS-arm-it-differs-from-the-696-parks-qcdt-in-596959-bytes-596939-of-which-are-the-payloads-own-every-one-of-them-inside-the-embedded-entry-blob-window-494236-6030616-and-the-other-20-are-the-header-s-sha1-field-at-576-595-so-NO-byte-outside-those-two-regions-moved-and-the-20-are-the-sha1-the-gate-verifies
+set=armed-storage-census-4d66f871 sha256=cf52b17b8e98e48ce3ac08846e44cd75f91a48859ced1d6e8df143a6a4b6fced bytes=6031876 file=stage90.bin role=raw-payload-bin-SAME-SIZE-as-the-696-arms-6031876-and-596939-bytes-differ-from-it-ALL-inside-the-embedded-entry-blob-window-494236-6030616-the-new-entry-bins-own-5536380-bytes-then-1260-of-tail-present-verbatim-and-exactly-once-at-494236-which-is-what-makes-the-payload-s-own-code-NOT-MERELY-SIMILAR-to-the-pressed-arms-but-byte-identical-outside-that-window
+set=armed-storage-census-4d66f871 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-696-693-692-690-688-686-678-and-653-arms-INCLUDING-its-STAGE90_XNU_ENTRY-1-line-so-THIS-FILE-CANNOT-NAME-THIS-ARM-the-entry-switches-are-not-in-the-payloads-dump-and-the-set-is-identified-by-xnu_arm_entry-config.txt-instead-THE-ONE-TIME-THIS-STEP-SAW-A-DIFFERENT-FILE-683-bytes-with-STAGE90_XNU_ENTRY-0u-WAS-A-MISTAKE-A-PLAIN-build.sh-and-it-was-discarded-see-the-prose-block
+set=armed-storage-census-4d66f871 sha256=aee90068a888e41524f79e7270e28e53503c79fd5383785d4de266beac130403 bytes=6093948 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-its-text-is-6030666-bytes-the-SAME-as-the-696-arms-so-the-entry-images-own-growth-moved-nothing-in-the-payloads-own-code-and-the-three-entry-bss-size-immediates-at-VA-4ac40-4ad04-4ad18-are-byte-identical-to-the-696-arms-because-the-entry-images-bss-size-did-not-change-379720-in-both
+set=armed-storage-census-4d66f871 sha256=a2c946ebb084055a5a457a3c6981a7a4d42dc07ee80fc029931f7c0ee76ed75b bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-census-4d66f871 sha256=4d66f871e4f9bd8e8304df80ae5c15109d3a8d750448f9ade475ccf7ba8da4cd bytes=5536380 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ONE-BINARY-THIS-STEP-CHANGED-and-it-is-the-696-entry-57d55fc9-PLUS-the-standard-register-file-census-at-the-tail-of-entry_storage_probe-under-STAGE90_XNU_STORAGE_PROBE-3-ten-reads-at-the-widths-the-vendors-own-accessors-use-plus-the-two-new-width-helpers-and-the-0xFE-version-read-697-section-3-left-owed-it-is-the-SAME-SIZE-as-the-696-bin-5536380-because-that-size-is-padded-the-entry-elfs-own-text-grew-by-480-bytes-5313768-vs-5313288-and-the-596939-differing-bytes-are-that-480-byte-insertion-shifting-everything-after-it-around-file-offset-0x480000-plus-every-absolute-address-that-points-past-it
+set=armed-storage-census-4d66f871 sha256=bb190cd18f64c464a960b477d6e4def2c253b453308fa0d0da59e0c36f5a0976 bytes=6715424 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-its-entry_storage_probe-is-at-8000cff8-and-the-bl-to-it-in-__wrap_platform_cache_idle_exit-0x8047dad8-is-at-8047db2c-the-four-DEVICE-stores-are-UNCHANGED-in-order-and-offset-8000d34c-str-r4-r5-120-8000d388-str-r8-r5-8000d478-str-r8-r5-120-8000d4b8-str-r4-r5-120-and-the-only-other-stores-in-the-body-are-the-TWO-bss-flags-the-696-arm-had-one-for-g_storage_probed-at-8000d064-str-r7-r6-and-rung-3-added-g_storage_mode_complete-at-8000d54c-str-r8-r6-4-g_storage_probed-805541a4-g_storage_mode_complete-805541a8-so-NO-STORE-IN-THIS-BODY-IS-BASED-ON-THE-OTHER-WINDOW-hc_mem-and-POWER_CONTROL-0x29-which-is-THE-register-a-zero-write-busses-off-is-unreachable-by-construction-the-same-four-are-read-out-of-the-build-by-the-store-census-clause-and-the-two-readings-agree-the-wrapper-still-ends-b-entry_post_clock-at-8047db4c-with-entry_seam_end_run-at-8047c47c-entry_seam_flush-at-8047db50-__wrap_FlushPoU_Dcache-at-8047dd6c-and-the-call-that-returns-to-the-seam-0x800472dc-UNCHANGED-from-697
+set=armed-storage-census-4d66f871 sha256=e8ab20fe9c4198b4499d584a264e39a0622d94c14495ac662332d8ab3a7f968b bytes=875 file=xnu_arm_entry-config.txt role=entry-config-record-AND-THE-ONE-RECORD-THAT-NAMES-THIS-ARM-its-last-line-reads-STAGE90_XNU_STORAGE_PROBE-3-beside-SEAM_POC-1-SEAM_MEASURE-0-SEAM_END_RUN-0-POST_END_RUN-0-POST_END_TICKS-115200000-SLOT_NULL-1-IDLE_CACHE_ENABLE-0-ISTACK_SEPARATE-0-IDLE_STACK-1-IDLE_NO_SLEEP-0-and-REAL_ARM_INIT-1-and-EXACTLY-TWO-of-its-lines-differ-from-the-696-arms-the-file-SHA256-field-4d66f871-and-the-rung-digit-2-to-3-and-the-file-keeps-its-875-bytes
+set=armed-storage-census-4d66f871 sha256=a8ea0d151c7aa9f5fa47bc3ce59ecda6fa12ac859a2b7b244aface01dcc27b67 bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest-23-file-lines-28-lines-in-all-and-THREE-of-those-twenty-three-changed-this-step-build_entry-sh-the-rung-3-case-plus-the-store-census-s-classification-repair-plus-the-new-alignment-census-entry_storage-c-the-ten-reads-the-two-width-helpers-the-rename-and-the-census-function-and-entry_storage-h-its-rung-paragraph-and-UNLIKE-696-NOTHING-IN-entry_trace-c-or-entry_stubs-c-moved-because-the-seam-constant-0x800472dc-did-not-move-so-THIS-MANIFEST-AND-THE-LIVE-TREE-AGREED-WHEN-THE-ARM-WAS-PARKED-which-is-what-696-s-manifest-did-not
+set=armed-storage-census-4d66f871 sha256=4671548fe246fc249648dd5edf46c3439791ff5b0d784e3c9c74ec8f8301caac bytes=6035456 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies-its-header-id-field-at-576-595-is-sha1-kernel-len-ramdisk-0-second-0-and-it-differs-from-the-696-arms-because-the-payload-differs-which-is-what-an-image-digest-is-for
+set=armed-storage-census-4d66f871 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-member-all-the-same
+#
+# ================================================================================================
+# 698: THE REGISTER-FILE CENSUS ARM - PARKED, NOT PRESSED. Nothing below is a reading of this arm on
+# the device: the set above is the arm that will be sent, and the press is the next step's act. What
+# is recorded here is what was MEASURED about the set before it was parked, including the one
+# refusal it produced and the one mistake this step made and discarded.
+# ================================================================================================
+#
+# WHAT THE ARM IS. It is the 696 arm plus a read-only census of the SDHCI standard register file at
+# the tail of `entry_storage_probe`, under `STAGE90_XNU_STORAGE_PROBE=3`: ten reads at the widths the
+# vendor's own accessors use (`STAGE90_XNU_STORAGE_PROBE` is the rung ladder's digit and the ladder is
+# 0 inert / 1 read-only probe / 2 + the vendor's mode sequence / 3 + the census). The ten are
+# `PRESENT_STATE 0x24` + `CARD_PRESENT`, `HOST_CONTROL 0x28`, `POWER_CONTROL 0x29`, `CLOCK_CONTROL
+# 0x2C`, `SOFTWARE_RESET 0x2F`, `SLOT_INT_STATUS 0xFC`, `CAPABILITIES_1 0x44`, `MAX_CURRENT 0x48`,
+# and `core_mem`'s `CORE_PWRCTL_MASK 0xE0` / `CORE_PWRCTL_CTL 0xE8` - plus `HOST_VERSION 0xFE`, the
+# read 697 section 3 left owed and the reason `ST_SDHCI_HCI_VERSION 0x00` is renamed
+# `ST_SDHCI_DMA_ADDRESS`. **The rung adds no store**, which is what the store census below now says
+# as a reading of this artifact rather than as a claim about the source, and the ten cells are
+# pre-registered in `docs/experiments/experiment-698-the-standard-register-file-read-at-its-own-widths.md`
+# section 4 - the before-values the driver's own `sdhci_reset(SDHCI_RESET_ALL)` will be read against.
+#
+# THE REFUSAL THIS RUNG PRODUCED, AND THE DEFECT IT FOUND IN 696's CLAUSE. The first build of this
+# arm did not link: the store census refused it with `entry_storage_probe stores to [r6:4 ]`, which
+# are `g_storage_probed` (0x805541a4) and - the flag this very rung added - `g_storage_mode_complete`
+# (0x805541a8), two adjacent `.bss` flags GCC addressed through one base register so that the second
+# arrives at offset 4. **A register holding the image's own address is not a device register**, and
+# 696's clause had written "not `sp`" where it meant "is a device address": the quantity it bounded
+# was "stores in this body" and the quantity it existed for was "stores TO THE BLOCK". The clause is
+# repaired here rather than worked around, because the next rung would have hit the same wall: each
+# store's base register is now CLASSIFIED by what the body materializes it with - a `movt` high half
+# >= 0xf000 is a device megabyte (0xf90../0xf98../0xfc4..), below that is this image's own
+# 0x8000_0000- - and a register the body materializes with BOTH (`AMB`, GCC reuses registers: `r3`
+# carries 0x8054 and 0xf982 in this very body) or with NO `movt` at all (`UNK`, a literal pool or a
+# computed address) REFUSES the build, which is the direction a build check has to fail in.
+#
+# ITS FIRST DRAFT WAS WRONG IN THE UNSAFE DIRECTION, which is why the shapes are written down: it
+# classified each store in line order, and this body materializes `r3` with `movt r3,#0xf982` at
+# 0x8000d52c - AFTER a store at 0x8000d478 - so a device base whose `movt` sits after its store
+# would have been read as IMG, i.e. WAIVED. The classification is collected over the whole body and
+# applied at the end for that reason, and the clause now prints its own reading on success instead
+# of passing silently. **This build's line reads:**
+#
+#   xnu_entry_698: the probe's stores, classified by base register - device [120 0 120 120 ] on r5,
+#                  image [r6:0 r6:4 ], ambiguous [], unknown []
+#
+# and it is proven in both directions: the LIVE rung-3 image and the PRESSED 696 park both accept
+# with exactly the four device stores (their images differ only in which `.bss` flags the body has),
+# and SEVEN mutations of the rung-3 disassembly each refuse through the branch it was built to reach
+# - offset 120 -> 124 (the offsets string), a fifth device store (the count), a store moved onto the
+# IMG base `r6` (the count falling to three), a device store moved to `r3` (AMB), to `r9` (UNK), and
+# a fifth store added on a second device base `r4` (the second-base branch).
+#
+# AND A SECOND CLAUSE OF THE SAME SHAPE IS BESIDE IT, new for this rung: the ALIGNMENT CENSUS. For
+# every memory instruction in `entry_storage_probe` whose base is not `sp`, the offset must be a
+# plain immediate satisfying its own access width's alignment (`ldr`/`str`/`ldrd`/`strd` -> 8,
+# `ldrh`/`strh` -> 2, `ldrb`/`strb` -> 1), and a register-offset form refuses the build with the
+# instruction quoted. The reason is not style: `0x29`, `0x28` and `0x2F` are byte registers and
+# `0xFE` is 16-bit at a non-4-aligned offset, so a 32-bit access to any of them is an UNALIGNED
+# ACCESS TO DEVICE MEMORY, which faults on ARMv7 - the same class of fault 692 measured on this
+# block, reached by alignment instead of by translation. The clause makes the widths in the
+# document's section 1 a property of the linked image instead of a comment. It passes on this image
+# (run standalone against this very ELF before the build, and inside the build).
+#
+# WHAT MOVED IN THE TREE: three of the manifest's twenty-three files - `build_entry.sh` (the rung-3
+# `case`, the store census's classification repair, the new alignment census), `entry_storage.c`
+# (the ten reads, `st_read8`/`st_read16`, the rename, `st_standard_census`) and `entry_storage.h`
+# (its rung paragraph). **`entry_trace.c` did NOT move this time**, and that is a measurement and not
+# an assumption: this image's seam clause reports `STAGE90_XNU_SEAM_LR (0x800472dc` - the value 697
+# had to move in `run_and_capture.sh` - unchanged, so `run_and_capture.sh`'s `EXIT_POP_LR_LITERAL`
+# still matches this arm and readiness row 3 has nothing to refuse.
+#
+# THE DELTAS AGAINST THE PRESSED 696 ARM, all measured, not inferred:
+#   * `stage90.bin` is 6,031,876 bytes in BOTH arms and 596,939 bytes differ - and **every one of
+#     those bytes is inside the embedded entry blob window [494236, 6030616)**: the new entry bin
+#     appears verbatim exactly once at 494236, and the payload's own code is byte-identical to the
+#     pressed arm's outside that window.
+#   * `stage90.elf`'s `.text` is 6,030,666 bytes in both, and the three entry bss-size immediates at
+#     VA 4ac40/4ad04/4ad18 are byte-identical, because the entry image's own bss size did not change
+#     (379,720 both - the new flag landed inside existing padding).
+#   * the entry image itself: the elf's `.text` grew by 480 bytes (5,313,768 vs 5,313,288), the bin
+#     is 5,536,380 in both because that size is padded, and the 596,939 differing bin bytes are that
+#     insertion shifting everything after it around file offset 0x480000, plus every absolute address
+#     that points past it (the difference is a few hundred bytes per 64 KiB block before 0x480000 and
+#     54k-63k per block from 0x480000 to 0x520000).
+#   * `stage90-qcdt.img` differs in 596,959 bytes: the payload's 596,939 plus the header's own
+#     sha1 field at 576..595, which is the 20 bytes the gate checks.
+#   * `stage90-build-config.txt` and `stage90_fixture.macho` are byte-identical to the 696 arm's.
+#
+# THE MISTAKE THIS STEP MADE, recorded because it is the one thing here that could have cost a
+# press. The payload was first rebuilt with a plain `./build.sh`, which writes `#define
+# STAGE90_XNU_ENTRY 0u` - a payload that NEVER JUMPS INTO XNU - producing a 683-byte config, a
+# 6,031,820-byte bin and a 6,030,610-byte `.text`. It was caught by diffing the config against the
+# 696 park before anything was sent, and the payload was rebuilt with
+# `STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' ./build.sh`, which reproduces the 682-byte config and
+# the 6,030,666-byte `.text` above. The arm above is the SECOND payload build. Nothing was sent while
+# the wrong one was in `out/`, and the gate would have refused it anyway
+# (`preflight_boot_check.sh:1715`: `--allow-xnu-entry was passed, but this image was built with
+# STAGE90_XNU_ENTRY off`) - but the refusal would have cost a readiness chain and a re-read of this
+# record, which is exactly the cost the discipline exists to avoid.
+#
+# WHAT THIS SET IS NOT. It is not a press: no readiness chain, no gate and no `fastboot boot` has
+# been run against it. It is not a step towards storage being usable: ten READS of the register file
+# register no block device, read no sector and mount nothing - and the four stores it inherits from
+# 696 put the controller in SDHCI mode and nothing more. **TWRP-to-storage stays withheld**: the
+# user's condition is that the OS can already be entered and stays, and the OS is not observed doing
+# that. No firer is armed.
+#
+# OWED, before this arm is anything: the readiness chain (`tools/verify_press_ready.sh`, then exactly
+# one `preflight_boot_check.sh <printed flags>` and exactly one `run_and_capture.sh <printed flags>
+# --expect-arm=armed-storage-census-4d66f871`), and then the press itself, which is the next step's
+# act.
+#
+# ================================================================================================
+#
+# ================================================================================================
+# 698: PRESSED 2026-09-25 19:35:36-19:37:04 UTC. Readiness 5/5 (exit 0), ONE gate (exit 0, 571 stdout
+# lines) and EXACTLY ONE runner, both under `--allow-xnu-entry --expect-arm=armed-storage-census-
+# 4d66f871`; RUNNER EXIT=0 - returned and captured, the device back 24 s after `fastboot boot`;
+# capture 613,952 B sha256 70f5fc924aec35cf75ea645e5ff57d00e223fbb0da1ff9994e8e77607500680f. One
+# non-persistent `fastboot boot`, serial 4a2fe00b, neighbour 33e80afe off both lists. The firer was
+# `/tmp/g668/press-on-clear.v5.sh` (sha 7f23cae5...) run as `press-on-clear.v5.sh
+# armed-storage-census-4d66f871 600`, the set declared with no default; it printed `done. gate=0
+# runner=0` and exited, so NO FIRER IS ARMED and 660's closure released.
+# ================================================================================================
+#
+# THE CELL-BY-CELL ANSWER IS THE DOCUMENT `docs/experiments/experiment-699-the-census-arm-pressed-the-
+# register-file-answers-the-bus-power-bit-is-clear.md`; what belongs here is the arm's own identity and
+# the two facts that changed the record's owed list.
+#
+# EVERY PRE-REGISTERED CELL IS FILLED, and three of them decide the next step:
+#   * `_reg_power_control=0x00` - bit 0 (`BUS_POWER`) is CLEAR, so the standard block does not believe
+#     the bus is powered: the `SDHCI_RESET_ALL` the driver would run is harmless BY CONSTRUCTION on
+#     this state, which is the direction 698 section 2 registered as the safe one.
+#   * `_reg_clock_control=0x0003` - the internal clock runs and is stable, `SD clock enable` (bit 2) is
+#     clear: `sdhci_set_clock` is ahead of the driver on this block.
+#   * `_reg_software_reset=0x00` with `_reg_present_state=0x01f80000` (both inhibit bits clear) and
+#     `_reg_pwrctl_mask=0x0000000f` - the last one is what makes 697's `_mode_pwrctl_status=0` mean
+#     "nothing latched" rather than "nothing was listening".
+#   * and `_reg_loads` reaches `0x0000000a` with `_regs_done=0x0000000a`, the record's "ten reads"
+#     derived a second time.
+#
+# THE READ 697 SECTION 3 LEFT OWED IS TAKEN: `_mode_host_version=0x00001102` - vendor version `0x11`,
+# spec version `2` (`SDHCI_VENDOR_VER_MASK 0xFF00` / `SDHCI_SPEC_VER_MASK 0x00FF`). It is neither 0 nor
+# 0xffff, so the register answers in SDHCI mode, and the value lands on a branch the vendor's own driver
+# tests: `sdhci-msm.c:2909-2914` compares the vendor nibble with `SDHCI_VER_100` (`:54`, `0x2B`), so the
+# `SDHCI_QUIRK2_SLOW_INT_CLEAR` branch is NOT this hardware's - which is why the reading is decision
+# relevant and not a curiosity.
+#
+# THE MODE SEQUENCE REPRODUCES FROM THE BOOTLOADER STATE: `_hc_mode=0x2000`, `_mode_bit=0`,
+# `_core_power=0x441`, `_mci_version=0x10000011`, `_writes=4` ending at `_mode_w2_read=0x2001` and
+# `_mode_bit_after=1`, `_mode_rst_ticks=6` - every number 694 and 697 took, again. **The controller this
+# payload inherits is the bootloader's state and not the previous run's**, which is what makes the four
+# stores a precondition on every boot.
+#
+# THE ENDING AND THE RETURN, unchanged in shape: `_post_t0=0x052b38d3`, `_post_cntfrq=0x0124f800`
+# (19,200,000 Hz), `_post_elapsed=0x06e259fe` = 115,497,470 ticks = 6,015.49 ms, `_post_end_calls=7`
+# (the deadline crossed 15.49 ms before the returning pass), `_slot_post_calls=4`; then the same panic
+# at `pc=0x8047c488` (`entry_seam_end_run+0xc`, the store to `RESTART_REASON 0x0fa0065c`),
+# `lr=0x8047c5bc`, `fsr=0x00000805`, `frame_ok=1`, `sleh_storm=9`. **Return time 24 s** - a fifth
+# measurement beside 8 (690), 17 (692), 24 (694) and 27 (697), and 697/698 sharing 24 s with different
+# ending overshoots is the one negative fact this run adds: the interval is not a function of the
+# ending's own clock.
+#
+# AND THE GOAL IS NOT MET. No storage: ten reads and the four inherited stores address no sector, mount
+# nothing, and register no block device. No driver beyond the fixture: the goal's floor (pid 1, the
+# driver's `open` answering 0 with the control open answering 2, the fixture's `0xfeedface` read into a
+# user page) is met exactly as 520 and 533 met it. **TWRP-to-storage stays withheld** - the user's
+# condition is that the OS can already be entered and STAYS, and the OS is not observed doing that.
+#
+# ================================================================================================

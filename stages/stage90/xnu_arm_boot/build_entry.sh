@@ -565,14 +565,23 @@ esac
 # prerequisite and not a re-do. A flag would have left two arms - one that only reads and one that also
 # writes - sharing one recorded value, which is exactly the shape 653 paid for when two arms answered a
 # reachability sentence identically. The three values are one ladder: 0 the object links and compiles to
-# nothing, 1 the read-only probe, 2 that probe and the mode sequence. It is still not a count, and the
-# `#error` in `entry_storage.c` refuses a rung above 2 for the same reason this `case` refuses it here.
+# nothing, 1 the read-only probe, 2 that probe and the mode sequence, 3 that plus the standard register
+# file's census. It is still not a count, and the `#error` in `entry_storage.c` refuses a rung above 3 for
+# the same reason this `case` refuses it here.
+#
+# **698: the fourth rung, and it is a rung that adds READS after one that added WRITES** - which is the
+# shape the ladder exists to allow and the reason it is a ladder and not a "how much does this arm do"
+# scale. Rung 3 is the before-value arm for the driver's own `sdhci_reset(SDHCI_RESET_ALL)`, and the
+# clause that makes it safe is the store census below, which asserts exactly the four stores the vendor's
+# sequence makes at every rung >= 2: a rung that added a store would fail it, so "rung 3 wrote nothing
+# new" is a property of the artifact and not of this comment.
 STORAGE_PROBE=${STAGE90_XNU_STORAGE_PROBE:-0}
 case "$STORAGE_PROBE" in
     0) ;;
     1) ;;
     2) ;;
-    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1 or 2, not [$STORAGE_PROBE]" >&2
+    3) ;;
+    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2 or 3, not [$STORAGE_PROBE]" >&2
        echo "        It is a `#if` in two files and not a value, so anything else would reach the" >&2
        echo "        preprocessor as a broken -D and fail there, with the cause named by the wrong" >&2
        echo "        tool (692); and it is a rung rather than a flag since 696, so a value above the" >&2
@@ -29776,54 +29785,157 @@ verify_trace_symbols() {
             layout_fail "__wrap_platform_cache_idle_exit reaches entry_storage_probe ${sxw_nsp:-0} time(s) while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: an image whose record does not name the probe must not dereference the eMMC controller at all - the probe is the one act in this image that touches a device block the project has never read, and its record is the only place that is stated"
     fi
     if [[ $STORAGE_PROBE -ge 2 ]]; then
-        # ---------------------------------------------- 696: the four stores are COUNTED, and their
-        #                                                 offsets are read out of the image
+        # ---------------------------------------------- 696: the four stores are COUNTED, 698: their base
+        #                                                 register is CLASSIFIED instead of assumed
         #
         # **This is the first arm in this project that writes to a device block, so "the writes are safe"
         # cannot be a sentence in a comment** ([[mi4-a-claim-in-a-comment-is-not-a-check]]). What is
         # checked is narrow enough to be read out of the disassembly of `entry_storage_probe`: every
-        # store in that body whose base register is not `sp` must be either one of **exactly four** on a
-        # single base register - the one the second `entry_mmio_section` installed as `core_mem`, i.e.
-        # `0xf9824000` - at offsets **`0x78`, `0x00`, `0x78`, `0x78` in that order**, or a store to
-        # offset 0 of some other pointer (the body's `.bss` first-call guard, which the compiler may
-        # rename or spill). The four are the vendor's own sequence in the vendor's own order
-        # (`sdhci-msm.c:2841-2868`): `CORE_HC_MODE <- 0`, `CORE_POWER <- |CORE_SW_RST`,
-        # `CORE_HC_MODE <- HC_MODE_EN`, `CORE_HC_MODE <- |FF_CLK_SW_RST_DIS`.
+        # store in that body that goes to a **device block** must be one of **exactly four** on a single
+        # base register - the one the second `entry_mmio_section` installed as `core_mem`, i.e.
+        # `0xf9824000` - at offsets **`0x78`, `0x00`, `0x78`, `0x78` in that order**. The four are the
+        # vendor's own sequence in the vendor's own order (`sdhci-msm.c:2841-2868`): `CORE_HC_MODE <- 0`,
+        # `CORE_POWER <- |CORE_SW_RST`, `CORE_HC_MODE <- HC_MODE_EN`, `CORE_HC_MODE <- |FF_CLK_SW_RST_DIS`.
         #
-        # **What this clause makes a checked absence rather than a promise**: a fifth store, a store at
-        # any other offset of the controller, or a store based on the OTHER window (`hc_mem`) all refuse
-        # the build. The one that matters is `POWER_CONTROL 0x29`, the SDHCI standard's power register
-        # in `hc_mem`, where writing 0 **is** a bus-off request on this SoC: it is not reached because
-        # nothing in this body stores through `hc_mem` at all, and that is now a reading of the artifact
-        # the gate will boot and not a claim about the source. The offsets are written down twice - here
-        # and in the probe's own comment - so a build that changes one has to change the other, which is
-        # the point of a check whose subject is a number.
+        # **698 repaired the word "device" in that sentence, which 696 wrote as "not `sp`"** - and the
+        # case that broke it is the body's own first-call guard *and* its rung-3 sibling: two adjacent
+        # `.bss` flags (`.LANCHOR0`) that GCC addressed through one base register, the second at offset
+        # 4, which 696's clause read as a fifth device store and refused. A register holding the
+        # *image's* address is not a device register - [[mi4-measurement-defects]]'s shape, where the
+        # quantity the clause bounded was "stores" and the quantity it meant to bound was "stores to the
+        # block". So each store's base register is now **classified by what this body materializes it
+        # with**: a `movt` whose high half is >= 0xf000 is a device megabyte (this SoC's blocks are
+        # 0xf90.., 0xf98.. and 0xfc4..), a `movt` below that is this image's own 0x8000_0000-:
+        #
+        #   DEV  materialized with a device high half only          -> bounded by this clause
+        #   IMG  materialized with an image high half only          -> listed, out of scope
+        #   AMB  materialized with BOTH (GCC reuses registers)      -> REFUSES the build
+        #   UNK  no `movt` for it at all (literal pool, computed)   -> REFUSES the build
+        #
+        # **AMB and UNK refuse because the clause cannot say which address the store uses**, and the
+        # direction a build check has to fail in is the closed one. **What this clause makes a checked
+        # absence rather than a promise**: a fifth store, a store at any other offset of the controller,
+        # or a store based on the OTHER window (`hc_mem`) all refuse the build. The one that matters is
+        # `POWER_CONTROL 0x29`, the SDHCI standard's power register in `hc_mem`, where writing 0 **is** a
+        # bus-off request on this SoC: it is not reached because nothing in this body stores through
+        # `hc_mem` at all, and that is a reading of the artifact the gate will boot and not a claim about
+        # the source. The offsets are written down twice - here and in the probe's own comment - so a
+        # build that changes one has to change the other, which is the point of a check whose subject is
+        # a number.
+        #
+        # The classification is collected over the WHOLE body and applied in `END`, because the first
+        # draft classified in line order: a store at `0x8000d478` was judged against evidence that only
+        # appears at `0x8000d52c` (`movt r3, #0xf982`), so a device base whose `movt` comes after its
+        # store would have been read as IMG - i.e. waived. This body materializes each register where it
+        # is used, so a whole-body reading is the honest one; a base the body materializes ambiguously is
+        # refused rather than guessed, which is the same direction UNK fails in.
         stb_probe=$(sym_addr entry_storage_probe) ||
             layout_fail "entry_storage_probe is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE, so this arm's four stores cannot be counted at all"
         stb_body=$(arm-none-eabi-objdump -d --start-address="$stb_probe" \
                    --stop-address="$(next_global "$stb_probe")" "$OUT/xnu_arm_entry.elf")
-        # Every store whose operand's base is not `sp`, as `<base>:<offset>` in program order.
-        stb_all=$(awk '
-            $3 ~ /^str/ {
-                if (match($0, /\[[^]]*\]/)) {
-                    op = substr($0, RSTART + 1, RLENGTH - 2)
-                    n = split(op, p, ",")
-                    base = p[1]; gsub(/[ \t]/, "", base)
-                    off = "0"
-                    if (n >= 2) { off = p[2]; gsub(/[ \t#]/, "", off); sub(/!$/, "", off); if (off == "") off = "0" }
-                    if (base != "sp") printf "%s:%s\n", base, off
+        # Every store whose operand's base is not `sp`, as `<class> <base>:<offset>` in program order.
+        stb_raw=$(awk '
+            function isreg(x) { return x ~ /^(r([0-9]|1[0-5])|sp|lr|pc|sl|fp|ip)$/ }
+            $3 == "movt" {
+                d = $4; sub(/,.*$/, "", d)
+                v = $5; sub(/^#/, "", v)
+                if (isreg(d) && v ~ /^-?(0x[0-9a-fA-F]+|[0-9]+)$/) {
+                    if (strtonum(v) >= 61440) dev[d] = 1; else img[d] = 1
+                }
+                next
+            }
+            $3 ~ /^str/ && match($0, /\[[^]]*\]/) {
+                op = substr($0, RSTART + 1, RLENGTH - 2)
+                n = split(op, p, ",")
+                base = p[1]; gsub(/[ \t]/, "", base)
+                off = "0"
+                if (n >= 2) { off = p[2]; gsub(/[ \t#]/, "", off); sub(/!$/, "", off); if (off == "") off = "0" }
+                if (base == "sp" || base == "r13") next
+                buf[++nb] = base ":" off
+                next
+            }
+            END {
+                for (i = 1; i <= nb; i++) {
+                    split(buf[i], q, ":")
+                    b = q[1]; o = q[2]
+                    if (dev[b] && img[b]) printf "AMB %s:%s\n", b, o
+                    else if (dev[b]) printf "DEV %s:%s\n", b, o
+                    else if (img[b]) printf "IMG %s:%s\n", b, o
+                    else printf "UNK %s:%s\n", b, o
                 }
             }' <<<"$stb_body")
+        stb_all=$(awk '$1 == "DEV" { print $2 }' <<<"$stb_raw")
+        stb_img=$(awk '$1 == "IMG" { printf "%s ", $2 }' <<<"$stb_raw")
+        stb_amb=$(awk '$1 == "AMB" { printf "%s ", $2 }' <<<"$stb_raw")
+        stb_unk=$(awk '$1 == "UNK" { printf "%s ", $2 }' <<<"$stb_raw")
         stb_base=$(awk -F: '{ c[$1]++ } END { b = ""; m = 0; for (k in c) if (c[k] > m) { m = c[k]; b = k } print b }' <<<"$stb_all")
         stb_off=$(awk -F: -v b="$stb_base" '$1 == b { printf "%s ", $2 }' <<<"$stb_all")
-        # Everything that is not one of the four, and everything outside the base: the first group must
-        # be empty and the second may hold only offset-0 writes (the body's `.bss` guard).
         stb_other=$(awk -F: -v b="$stb_base" '$1 != b { printf "%s:%s ", $1, $2 }' <<<"$stb_all")
-        stb_bad=$(awk -F: -v b="$stb_base" '$1 != b && $2 != 0 { printf "%s:%s ", $1, $2 }' <<<"$stb_all")
+        [[ -z "${stb_amb// /}" ]] ||
+            layout_fail "entry_storage_probe stores through [$stb_amb], and this body materializes each of those base registers BOTH with a device high half (>= 0xf000) and with the image's own - GCC reuses registers, so a movt alone cannot say which address the store uses. The image's own stores are listed as IMG and the device ones are bounded by this clause, but a register that is both is a store this clause would have to guess about, and it refuses instead. Read the probe's body: if the store is to the image's own memory, give it a base register the body materializes once. Nothing is rebuilt by this refusal"
+        [[ -z "${stb_unk// /}" ]] ||
+            layout_fail "entry_storage_probe stores through [$stb_unk], and this body materializes no address for that base register at all - no movw/movt, so the address is a literal-pool load or a computation and this clause cannot say whether the store goes to a device block. If it is in the OTHER window (hc_mem), POWER_CONTROL 0x29 is in it, where writing 0 IS a bus-off request on this SoC. (The image's own stores are [$stb_img].) Nothing is rebuilt by this refusal"
         [[ "$stb_off" == "120 0 120 120 " ]] ||
-            layout_fail "entry_storage_probe's stores on base $stb_base are [$stb_off] and this arm's record says they are 120 0 120 120 - i.e. CORE_HC_MODE <- 0, CORE_POWER <- |CORE_SW_RST, CORE_HC_MODE <- HC_MODE_EN, CORE_HC_MODE <- |FF_CLK_SW_RST_DIS (the vendor's own sequence, sdhci-msm.c:2841-2868). A different count, a different order or a different offset is a store this arm's pre-registration does not describe: read the probe's own body, decide whether the sequence or the record is what changed, and change the one that is wrong. Nothing is rebuilt by this refusal"
-        [[ -z "${stb_bad// /}" ]] ||
-            layout_fail "entry_storage_probe stores to [$stb_bad], which are neither one of the four the record names (base $stb_base: 120 0 120 120) nor an offset-0 write of a pointer (the body's first-call guard). Every other store in this body is a register this arm's pre-registration does not name - and if it is in the OTHER window (hc_mem), POWER_CONTROL 0x29 is in it, where writing 0 IS a bus-off request on this SoC. The stores found on the four's base are [$stb_off] and the rest are [$stb_other]; read the probe's body and decide which of the two - the sequence or this record - is wrong. Nothing is rebuilt by this refusal"
+            layout_fail "entry_storage_probe's device stores on base $stb_base are [$stb_off] and this arm's record says they are 120 0 120 120 - i.e. CORE_HC_MODE <- 0, CORE_POWER <- |CORE_SW_RST, CORE_HC_MODE <- HC_MODE_EN, CORE_HC_MODE <- |FF_CLK_SW_RST_DIS (the vendor's own sequence, sdhci-msm.c:2841-2868). A different count, a different order or a different offset is a store this arm's pre-registration does not describe - and a device store that is not here at all is one this clause did not see. Read the probe's own body, decide whether the sequence or the record is what changed, and change the one that is wrong. (The image's own stores are [$stb_img].) Nothing is rebuilt by this refusal"
+        [[ -z "${stb_other// /}" ]] ||
+            layout_fail "entry_storage_probe stores to [$stb_other] on a second device base register, and this arm's pre-registration names one base carrying the four. Every other device store in this body is a register this arm does not name - and if it is in the OTHER window (hc_mem), POWER_CONTROL 0x29 is in it, where writing 0 IS a bus-off request on this SoC. The stores on the four's base are [$stb_off], the image's own are [$stb_img]. Read the probe's body and decide which of the two - the sequence or this record - is wrong. Nothing is rebuilt by this refusal"
+        echo "  xnu_entry_698: the probe's stores, classified by base register - device [$stb_off] on $stb_base, image [$stb_img], ambiguous [$stb_amb], unknown [$stb_unk]"
+    fi
+    if [[ $STORAGE_PROBE -ge 3 ]]; then
+        # ---------------------------------------------- 698: EVERY ACCESS'S WIDTH IS CHECKED AGAINST ITS
+        #                                                 OWN OFFSET, because an unaligned Device access
+        #                                                 faults
+        #
+        # **The standard register file is not uniform, and the widths are a rule rather than a style.**
+        # `POWER_CONTROL 0x29`, `HOST_CONTROL 0x28` and `SOFTWARE_RESET 0x2F` are byte registers at
+        # offsets no 4-byte access can reach; `CLOCK_CONTROL 0x2C` and `HOST_VERSION 0xFE` are 16-bit and
+        # `0xFE` is not 4-aligned either. An access to a **Strongly-ordered device section** at an
+        # offset that does not satisfy its own width **faults on ARMv7** - the same abort 692 measured on
+        # this block, reached by *alignment* instead of by translation, and just as fatal to the run.
+        # So the vendor's own accessors (`sdhci.c:98-128`: `readl`/`readw`/`readb` per register) are the
+        # contract, and this clause makes it a property of the linked image rather than a sentence in a
+        # comment: for every load or store in `entry_storage_probe` whose base register is not `sp`, the
+        # offset must be a plain immediate satisfying that mnemonic's width. **A register-offset form
+        # refuses too** - an address this clause cannot see the alignment of is an address whose
+        # safety is unstated, and a computed offset is exactly how a 32-bit access would land on `0x29`.
+        #
+        # It covers the stores as well as the loads for free, and it is the reason the four the store
+        # census counts are known to be 32-bit-aligned: `0x78`, `0x00`, `0x78`, `0x78` all satisfy it,
+        # and a store at a byte offset would fail here rather than on the bench.
+        #
+        # Two parsing notes, both measured rather than assumed. The disassembly's **comment is stripped
+        # first**: `objdump` writes `pop {pc} ; (ldr pc, [sp], #4)` and that bracketed operand is in the
+        # comment, so a matcher that took the first bracket on the line would read a second, invented
+        # access - the one-line form of m698's "print the extractor's inputs". And a block transfer
+        # (`ldm`/`stm`) on a non-`sp` base is refused outright: it has no bracketed offset to check, and
+        # a block transfer to a device register is not something any record in this sequence describes.
+        ac_probe=$(sym_addr entry_storage_probe) ||
+            layout_fail "entry_storage_probe is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE, so its accesses' widths cannot be checked at all"
+        ac_body=$(arm-none-eabi-objdump -d --start-address="$ac_probe" \
+                  --stop-address="$(next_global "$ac_probe")" "$OUT/xnu_arm_entry.elf")
+        ac_bad=$(awk '
+            $3 ~ /^(ldr|str)/ || $3 ~ /^(ldm|stm)/ {
+                line = $0; sub(/;.*$/, "", line)
+                m = $3
+                w = 4
+                c = substr(m, 4, 1)
+                if (c == "b") w = 1; else if (c == "h") w = 2
+                if (m ~ /^(ldm|stm)/) { printf "%s BLOCK\n", m; next }
+                if (!match(line, /\[[^]]*\]/)) next
+                op = substr(line, RSTART + 1, RLENGTH - 2)
+                gsub(/[ \t!]/, "", op)
+                n = split(op, p, ",")
+                base = p[1]
+                if (base == "sp" || base == "r13") next
+                if (n < 2) { off = 0 } else {
+                    off = p[2]; sub(/^#/, "", off)
+                    if (off !~ /^-?(0x[0-9a-fA-F]+|[0-9]+)$/) { printf "%s REG:%s\n", m, op; next }
+                    off = strtonum(off)
+                }
+                if (off % w != 0) printf "%s UNALIGNED:%s(w%d)\n", m, off, w
+            }' <<<"$ac_body")
+        [[ -z "${ac_bad// /}" ]] ||
+            layout_fail "entry_storage_probe makes $(printf '%s\n' $ac_bad | grep -c '') access(es) whose width does not match their own offset, or whose offset is not an immediate: [$(printf '%s ' $ac_bad)]. Each one is an unaligned access to a Strongly-ordered device section, which FAULTS on ARMv7 at the instruction rather than at the address - the same abort class 692 measured on this block, with the cause in the width instead of in the translation. The register file's widths are the vendor accessors' (sdhci.c:98-128: readb for 0x28/0x29/0x2F, readw for 0x2C/0xFC/0xFE, readl for the rest), and a REG: entry means the offset was computed into a register - which is exactly how a 32-bit access can land on a byte register without the source saying so. Read the body and decide which of the two is wrong, the access or the width the record states. Nothing is rebuilt by this refusal"
     fi
     if [[ $SEAM_POST_END_TICKS -gt 0 ]]; then
         # ---------------------------------------------- 690: the chain is two bodies, and both are read

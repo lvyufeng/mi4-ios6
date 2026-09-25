@@ -97,12 +97,19 @@
  * values are one ladder: how far up the storage line this image goes. The record is the only place a
  * reader learns which rung was built, which is why a value above the ladder is refused here rather
  * than shaping an image whose switches claim something else.
+ *
+ * **698: the fourth value, and it is a return to the read-only kind.** Rung 2 is the first arm in this
+ * project that writes to a device block; rung 3 adds **the standard register file's census** and no
+ * store at all, because the next act on this path - the driver's own `sdhci_reset(SDHCI_RESET_ALL)` -
+ * changes four of the registers this census reads, and a before-value can only be taken before. The
+ * ladder is therefore not "how much does this arm do" but "how far up the line", and a rung that adds
+ * reads after a rung that added writes is the shape the ladder was built to allow.
  */
 #ifndef STAGE90_XNU_STORAGE_PROBE
 #define STAGE90_XNU_STORAGE_PROBE 0
 #endif
-#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 2
-#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller)."
+#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 3
+#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store)."
 #endif
 
 /*
@@ -143,6 +150,16 @@ extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_befo
  * - `HCI_VERSION 0x00` and `CAPABILITIES 0x40` - and they are read out of the *other* window precisely
  * because they are standard: a word at `hc_mem + 0x00` that carries a plausible spec version is
  * evidence the second window answers, which `core_mem`'s words cannot give on their own.
+ *
+ * **698: the name was wrong, and the two words were never the standard register file.** The paragraph
+ * above says `HCI_VERSION 0x00`; the vendor's own header says `sdhci.h:27` `SDHCI_DMA_ADDRESS 0x00` and
+ * `:241` `SDHCI_HOST_VERSION 0xFE`, and `sdhci-msm.c:2909` reads the version **at `0xFE`**. 697 is what
+ * made that visible: the pre/post pair is `0x10 -> 0x00`, which is a *soft* register the core reset
+ * clears (a DMA address) and not a version word, while `0x40`'s strapping constant did not move. So the
+ * define is renamed to what it reads, the real version register is added, and the misnamed keys are
+ * renamed beside it. **The readers were enumerated first** ([[mi4-one-value-two-definitions]], m699:
+ * one rename, two readers - and a missed reader fails *silent*): two sites in this file and one line of
+ * 694's document, and nothing in `stages/stage90`'s shell scripts or in `tools/` names either key.
  */
 #define ST_CORE_MEM_BASE        0xf9824000u
 #define ST_HC_MEM_BASE          0xf9824900u
@@ -150,8 +167,35 @@ extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_befo
 #define ST_CORE_MCI_DATA_CTRL   0x2Cu
 #define ST_CORE_MCI_VERSION     0x050u
 #define ST_CORE_HC_MODE         0x78u
-#define ST_SDHCI_HCI_VERSION    0x00u
-#define ST_SDHCI_CAPABILITIES   0x40u
+#define ST_SDHCI_DMA_ADDRESS    0x00u   /* sdhci.h:27 - the name this file carried as HCI_VERSION until 698 */
+#define ST_SDHCI_CAPABILITIES   0x40u   /* sdhci.h:181 */
+#define ST_SDHCI_CAPABILITIES_1 0x44u   /* sdhci.h:215 */
+#define ST_SDHCI_MAX_CURRENT    0x48u   /* sdhci.h:217 */
+#define ST_SDHCI_PRESENT_STATE  0x24u   /* sdhci.h:64  */
+#define ST_SDHCI_HOST_CONTROL   0x28u   /* sdhci.h:76  - a BYTE, and at an offset no 32-bit access reaches */
+#define ST_SDHCI_POWER_CONTROL  0x29u   /* sdhci.h:87  - a BYTE; read only, see the census below */
+#define ST_SDHCI_CLOCK_CONTROL  0x2Cu   /* sdhci.h:100 - 16-bit */
+#define ST_SDHCI_SOFTWARE_RESET 0x2Fu   /* sdhci.h:113 - a BYTE */
+#define ST_SDHCI_SLOT_INT_STAT  0xFCu   /* sdhci.h:239 - 16-bit */
+#define ST_SDHCI_HOST_VERSION   0xFEu   /* sdhci.h:241 - 16-bit, and the register 697 left owed */
+#define ST_SDHCI_CARD_PRESENT   0x00010000u /* sdhci.h:71 - must NOT be read as "no card" here, see below */
+
+/*
+ * **The widths are not a style choice, and the reason is an ARMv7 rule rather than a preference**: an
+ * *unaligned* access to Device memory **faults**, and this arm's mappings are Strongly-ordered
+ * shareable device sections (694 measured both descriptors' attribute). So `POWER_CONTROL 0x29`,
+ * `HOST_CONTROL 0x28` and `SOFTWARE_RESET 0x2F` are byte registers at offsets no 4-byte access can
+ * reach, `CLOCK_CONTROL 0x2C`/`SLOT_INT_STATUS 0xFC`/`HOST_VERSION 0xFE` are 16-bit with `0xFE` not
+ * 4-aligned either, and a 32-bit load at any of those four addresses would fault exactly where 692
+ * faulted - by *alignment* this time rather than by translation. The widths below are the vendor's own
+ * accessors, quoted from `sdhci.c:98-128`'s register dump (`readw` for the version and the two 16-bit
+ * registers, `readb` for the three bytes, `readl` for the rest) and from `:246`/`:259` for
+ * `SOFTWARE_RESET`. `build_entry.sh` refuses the build if any access in this body breaks the rule.
+ */
+#define ST_CORE_PWRCTL_MASK     0xE0u   /* sdhci-msm.c:63, readl at :2946 */
+#define ST_CORE_PWRCTL_CTL      0xE8u   /* sdhci-msm.c:65 - the vendor reads it 32-bit (:2879) and writes it
+                                         * 8-bit at one site (:2069); 0xE8 is 4-aligned, so a 32-bit read is
+                                         * legal and is what the read at :2879 does */
 
 /* 531 section 8's SDCC1 pair, out of `clock-8974.c:244` and the `+4` the UART pair measured. */
 #define ST_GCC_BASE             0xfc400000u
@@ -195,6 +239,25 @@ static uint32_t st_read32(uint32_t addr)
 }
 
 /*
+ * **698: the two narrower widths, and they exist because the register file is not uniform.** The four
+ * offsets they reach (`0x28`, `0x29`, `0x2F` byte; `0x2C`, `0xFC`, `0xFE` halfword) are read that way by
+ * the vendor's own accessors (`sdhci.c:98-128`), and the reason is not style: an unaligned access to a
+ * Strongly-ordered device section **faults on ARMv7**, so a 32-bit read of `0x29` or of `0xFE` would die
+ * on the bench exactly where 692 died - by alignment this time rather than by translation. The `ldrb`/
+ * `ldrh` these compile to are the whole of the arm's protection here, and `build_entry.sh`'s alignment
+ * census refuses the build if any access in this body breaks the rule.
+ */
+static uint8_t st_read8(uint32_t addr)
+{
+    return *(volatile uint8_t *)(uintptr_t)addr;
+}
+
+static uint16_t st_read16(uint32_t addr)
+{
+    return *(volatile uint16_t *)(uintptr_t)addr;
+}
+
+/*
  * **The store, and the `dsb sy` is what makes "the readback was taken after the store" a property of
  * this code rather than of the bus.** The vendor uses `writel_relaxed`/`readl_relaxed` and relies on
  * the interconnect; this image has one barrier already written down in the same shape (`entry_irq.c`'s
@@ -209,6 +272,17 @@ static void st_write32(uint32_t addr, uint32_t value)
 }
 
 static uint32_t g_storage_probed;
+
+#if STAGE90_XNU_STORAGE_PROBE >= 2
+/*
+ * **698: the rung-3 census's interlock, and it is the sequence's own outcome rather than a second
+ * decision.** The census may only read a register file that is in SDHCI mode, and `_mode_stage == 8`
+ * is what says the block reached that state. A flag rather than a re-read of `CORE_HC_MODE` because a
+ * re-read could observe a word the *sequence* did not write, and the census's premise is the sequence's
+ * result and not the register's history.
+ */
+static uint32_t g_storage_mode_complete;
+#endif
 
 #if STAGE90_XNU_STORAGE_PROBE >= 2
 /*
@@ -324,17 +398,126 @@ static void st_mode_sequence(uint32_t core_power, uint32_t mci_version)
     ST_LIVE("xnu_live_storage_mode_bit_after", w2 & ST_HC_MODE_EN);
 
     /*
-     * **And the two standard words again, now through a block in SDHCI mode.** 694's pair
+     * **And the standard words again, now through a block in SDHCI mode.** 694's pair
      * (`0x10`, `0x742dc8b2`) was taken through a block that was *not*, and 694 section 3 says why that
      * makes it a pre-mode pair rather than a spec-valid one. Read here, one store-group later, the two
      * pairs become the reading the arm exists for.
+     *
+     * **698 corrected the first of the two names and added the third read.** `hc_mem + 0x00` is
+     * `SDHCI_DMA_ADDRESS` (`sdhci.h:27`) and not a version register, which 697 measured rather than
+     * argued: the word went `0x10 -> 0x00` across the sequence - a *soft* register the core reset clears
+     * - while `0x40`'s strapping constant did not move. So the key is renamed to what it reads and
+     * `HOST_VERSION 0xFE` (`sdhci.h:241`, read by `sdhci-msm.c:2909`) is read beside it at its own
+     * width: **that is the cell 697's pre-registration left owed**, and it is the first spec-valid
+     * statement about this register file this project can make. `SDHCI_VENDOR_VER_MASK 0xFF00` /
+     * `SDHCI_SPEC_VER_MASK 0x00FF` (`sdhci.h:242-245`) split the word.
      */
     ST_LIVE("xnu_live_storage_mode_stage", 7u);
-    ST_LIVE("xnu_live_storage_mode_hci_version", st_read32(ST_HC_MEM_BASE + ST_SDHCI_HCI_VERSION));
+    ST_LIVE("xnu_live_storage_mode_dma_address", st_read32(ST_HC_MEM_BASE + ST_SDHCI_DMA_ADDRESS));
     ST_LIVE("xnu_live_storage_mode_capabilities", st_read32(ST_HC_MEM_BASE + ST_SDHCI_CAPABILITIES));
+    ST_LIVE("xnu_live_storage_mode_host_version", st_read16(ST_HC_MEM_BASE + ST_SDHCI_HOST_VERSION));
     ST_LIVE("xnu_live_storage_mode_stage", 8u);
+    /* The whole sequence ran: this is what the rung-3 census is conditional on. */
+    g_storage_mode_complete = 1u;
 }
 #endif /* STAGE90_XNU_STORAGE_PROBE >= 2 */
+
+#if STAGE90_XNU_STORAGE_PROBE >= 3
+/*
+ * **698: rung 3 - the standard register file's census, and it is the before-value arm.**
+ *
+ * Every key this project has published about `hc_mem` until now is one of two *words* (`0x00` and
+ * `0x40`). The registers a driver's bring-up actually reads and writes - `PRESENT_STATE`,
+ * `HOST_CONTROL`, `POWER_CONTROL`, `CLOCK_CONTROL`, `SOFTWARE_RESET`, `SLOT_INT_STATUS` - have never
+ * been read, and the next act on this path is `sdhci_reset(SDHCI_RESET_ALL)`, which touches four of
+ * them (`sdhci.c:246` writes `SOFTWARE_RESET`, `:250` clears the driver's own `clock`, and the restore
+ * path reads and re-writes `HOST_CONTROL`). **A before-value can only be taken before**, so this rung
+ * exists between the mode sequence and the reset, and it adds no store: the store census in
+ * `build_entry.sh` asserts exactly the four the vendor's sequence makes and passes unchanged here,
+ * which is itself the proof that a read-only rung wrote nothing new.
+ *
+ * **The two registers this rung is most careful about.**
+ *
+ *   * `POWER_CONTROL 0x29` is **read and never written**, and 696 section 2's reason for not reading it
+ *     ("a load from an address whose meaning this arm is not going to act on is a load that can only
+ *     fault") no longer holds: the window is proven twice over and the value is now decision-relevant,
+ *     because `sdhci.c:1342`/`:1353` are `sdhci_writeb(host, 0, SDHCI_POWER_CONTROL)` - the generic
+ *     SDHCI core turns the bus off by writing 0 to this byte, which on this SoC **is** a bus-off
+ *     request (531 section 8). Whether `SDHCI_RESET_ALL` clears it is the one hazard the next step
+ *     carries, and this key is where the answer starts.
+ *   * `CARD_PRESENT` (bit 16 of `PRESENT_STATE`, `sdhci.h:71`) **must not be read as "no card"**:
+ *     `sdhci-msm.c:2896` sets `SDHCI_QUIRK_BROKEN_CARD_DETECTION`, the DT describes a soldered eMMC
+ *     (`qcom,bus-width = <8>`), and detection on this board is a GPIO. The key is published with the
+ *     bit named so that a reader cannot make that mistake quietly, and the census publishes the whole
+ *     word so the other bits are readable without a second press.
+ *
+ * **The count is bottom-up.** `_reg_loads` is incremented at each read rather than written down, so the
+ * record's "ten reads" and the log's number are two derivations of one fact (m688's rule: a table of
+ * things-to-count is a scope claim unless the counter is the table's own).
+ */
+static void st_standard_census(void)
+{
+    uint32_t loads = 0u;
+    uint8_t host_control, power_control, software_reset;
+    uint16_t clock_control, slot_int_status;
+    uint32_t present_state, capabilities_1, max_current, pwrctl_mask, pwrctl_ctl;
+
+    /*
+     * `SOFTWARE_RESET 0x2F` first among the bytes: it is self-clearing, so a non-zero read would mean a
+     * reset is stuck in progress - and that would falsify 696's and 697's "no reset ran" rather than
+     * anything this arm assumes. Read first so that the reading is in the log before the rest.
+     */
+    software_reset = st_read8(ST_HC_MEM_BASE + ST_SDHCI_SOFTWARE_RESET);
+    ST_LIVE("xnu_live_storage_reg_software_reset", (uint32_t)software_reset);
+    ST_LIVE("xnu_live_storage_reg_loads", ++loads);
+
+    power_control = st_read8(ST_HC_MEM_BASE + ST_SDHCI_POWER_CONTROL);
+    ST_LIVE("xnu_live_storage_reg_power_control", (uint32_t)power_control);
+    ST_LIVE("xnu_live_storage_reg_loads", ++loads);
+
+    host_control = st_read8(ST_HC_MEM_BASE + ST_SDHCI_HOST_CONTROL);
+    ST_LIVE("xnu_live_storage_reg_host_control", (uint32_t)host_control);
+    ST_LIVE("xnu_live_storage_reg_loads", ++loads);
+
+    clock_control = st_read16(ST_HC_MEM_BASE + ST_SDHCI_CLOCK_CONTROL);
+    ST_LIVE("xnu_live_storage_reg_clock_control", (uint32_t)clock_control);
+    ST_LIVE("xnu_live_storage_reg_loads", ++loads);
+
+    slot_int_status = st_read16(ST_HC_MEM_BASE + ST_SDHCI_SLOT_INT_STAT);
+    ST_LIVE("xnu_live_storage_reg_slot_int_status", (uint32_t)slot_int_status);
+    ST_LIVE("xnu_live_storage_reg_loads", ++loads);
+
+    present_state = st_read32(ST_HC_MEM_BASE + ST_SDHCI_PRESENT_STATE);
+    ST_LIVE("xnu_live_storage_reg_present_state", present_state);
+    ST_LIVE("xnu_live_storage_reg_card_present", present_state & ST_SDHCI_CARD_PRESENT);
+    ST_LIVE("xnu_live_storage_reg_loads", ++loads);
+
+    capabilities_1 = st_read32(ST_HC_MEM_BASE + ST_SDHCI_CAPABILITIES_1);
+    ST_LIVE("xnu_live_storage_reg_capabilities_1", capabilities_1);
+    ST_LIVE("xnu_live_storage_reg_loads", ++loads);
+
+    max_current = st_read32(ST_HC_MEM_BASE + ST_SDHCI_MAX_CURRENT);
+    ST_LIVE("xnu_live_storage_reg_max_current", max_current);
+    ST_LIVE("xnu_live_storage_reg_loads", ++loads);
+
+    /*
+     * **The other half of 696 section 3's hazard, and the before-value for the vendor's own
+     * acknowledge.** 697 measured the power-IRQ *status* (0, nothing latched); the mask says whether a
+     * power IRQ would have been *routed* at all, which a status register cannot answer. `CTL` is what
+     * the vendor reads before it writes the success bits back (`:2879` reads, `:2884` writes, `:2069`
+     * writes a byte at one site) - so it is the register the next step's acknowledge would change.
+     */
+    pwrctl_mask = st_read32(ST_CORE_MEM_BASE + ST_CORE_PWRCTL_MASK);
+    ST_LIVE("xnu_live_storage_reg_pwrctl_mask", pwrctl_mask);
+    ST_LIVE("xnu_live_storage_reg_loads", ++loads);
+
+    pwrctl_ctl = st_read32(ST_CORE_MEM_BASE + ST_CORE_PWRCTL_CTL);
+    ST_LIVE("xnu_live_storage_reg_pwrctl_ctl", pwrctl_ctl);
+    ST_LIVE("xnu_live_storage_reg_loads", ++loads);
+
+    ST_LIVE("xnu_live_storage_regs_done", loads);
+}
+#endif /* STAGE90_XNU_STORAGE_PROBE >= 3 */
 
 void entry_storage_probe(void)
 {
@@ -342,6 +525,7 @@ void entry_storage_probe(void)
     uint32_t gcc_mapped, gcc_slot_before = 0u, gcc_desc = 0u, gcc_section;
     uint32_t bcr, cbcr, gate;
     uint32_t core_power, mci_data_ctrl, mci_version, hc_mode, hci_version, capabilities;
+    uint32_t loads = 0u;
 
     if (g_storage_probed != 0u)
         return;
@@ -462,21 +646,36 @@ void entry_storage_probe(void)
      * bit 7 is `CORE_SW_RST` and it is published as its own key because "the core is held in reset" and
      * "the core answers a version word" are two different machines and a reader should not have to
      * shift a word to tell them apart - the same reason the mode bit gets one.
+     *
+     * **698: and the six is counted rather than written down.** It was the literal `6u` until this step,
+     * which is a claim about this block that only a reader could check; `loads` is incremented at each
+     * read and published once, so the record's "six loads" and the log's number are two derivations of
+     * one fact (m688: a table of things-to-count is a scope claim unless the counter is the table's own).
+     * The later blocks publish their own counts for the same reason - `_reg_loads` at rung 3 - and the
+     * three numbers are per-block on purpose: one number for the whole function would hide which block
+     * grew.
      */
+    loads = 0u;
     core_power = st_read32(ST_CORE_MEM_BASE + ST_CORE_POWER);
+    loads++;
     mci_data_ctrl = st_read32(ST_CORE_MEM_BASE + ST_CORE_MCI_DATA_CTRL);
+    loads++;
     mci_version = st_read32(ST_CORE_MEM_BASE + ST_CORE_MCI_VERSION);
+    loads++;
     hc_mode = st_read32(ST_CORE_MEM_BASE + ST_CORE_HC_MODE);
-    hci_version = st_read32(ST_HC_MEM_BASE + ST_SDHCI_HCI_VERSION);
+    loads++;
+    hci_version = st_read32(ST_HC_MEM_BASE + ST_SDHCI_DMA_ADDRESS);
+    loads++;
     capabilities = st_read32(ST_HC_MEM_BASE + ST_SDHCI_CAPABILITIES);
+    loads++;
 
-    ST_LIVE("xnu_live_storage_loads", 6u);
+    ST_LIVE("xnu_live_storage_loads", loads);
     ST_LIVE("xnu_live_storage_writes", 0u);
     ST_LIVE("xnu_live_storage_core_power", core_power);
     ST_LIVE("xnu_live_storage_mci_data_ctrl", mci_data_ctrl);
     ST_LIVE("xnu_live_storage_mci_version", mci_version);
     ST_LIVE("xnu_live_storage_hc_mode", hc_mode);
-    ST_LIVE("xnu_live_storage_hci_version", hci_version);
+    ST_LIVE("xnu_live_storage_dma_address", hci_version);
     ST_LIVE("xnu_live_storage_capabilities", capabilities);
     /*
      * **The two bits this arm exists for.** 531 section 6 asked whether the mode sequence is a
@@ -500,5 +699,22 @@ void entry_storage_probe(void)
      * `0` above is a statement about the read-only path and not about this one.
      */
     st_mode_sequence(core_power, mci_version);
+#endif
+#if STAGE90_XNU_STORAGE_PROBE >= 3
+    /*
+     * **698: rung 3, and it is placed last because it is the only block whose subject is the state the
+     * rungs above left.** The mode sequence's four stores are what makes the standard register file mean
+     * anything (694 section 3), so a census taken before them would be a census of a block that is not
+     * in SDHCI mode - which is exactly the reading 694 could already give. Taken here, it is the state a
+     * driver would find on this boot, and it is the before-value for the reset the next step performs.
+     *
+     * It is guarded by the sequence having run: `_mode_stage == 8` and `_writes == 4` are the two keys
+     * that say so, and a run that refused itself (`_mode_refused = 1`, the block not answering) must
+     * **not** have its register file read, because a block that did not answer a version word is a block
+     * whose census would be a census of nothing. That is the same interlock the sequence uses, applied
+     * one rung up, and it is the only condition under which this rung does not run.
+     */
+    if (g_storage_mode_complete != 0u)
+        st_standard_census();
 #endif
 }

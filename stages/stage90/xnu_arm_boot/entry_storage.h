@@ -22,6 +22,15 @@
  * `__wrap_platform_cache_idle_exit`, still before 690's clock block, still once per boot - because a
  * rung is a property of the arm's own body and not of where in the boot it happens. What does change
  * is the one thing the caller must not have to know: with the rung at 2, the call can write.
+ *
+ * **698: `=3` is 2 plus a read-only census of the standard register file** (`PRESENT_STATE`,
+ * `HOST_CONTROL`, `POWER_CONTROL`, `CLOCK_CONTROL`, `SOFTWARE_RESET`, `SLOT_INT_STATUS`, the two
+ * capability words, `MAX_CURRENT`, and `core_mem`'s power-IRQ mask/control pair), each read at the
+ * width the vendor's own accessors use. It is the *before-value* arm for the driver's own
+ * `sdhci_reset(SDHCI_RESET_ALL)`: the reset touches four of those registers, and a before-value can
+ * only be taken before it. The rung adds no store, and the store census in `build_entry.sh` is what
+ * says so rather than this comment - so the ladder is not "how much does this arm do" but "how far up
+ * the line it stands", and a rung that adds reads after one that added writes is the shape it allows.
  */
 #ifndef STAGE90_ENTRY_STORAGE_H
 #define STAGE90_ENTRY_STORAGE_H
