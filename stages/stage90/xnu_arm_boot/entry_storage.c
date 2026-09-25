@@ -23,28 +23,49 @@
  * writes it made to the controller, so "nothing was written" is a reading in the log rather than a
  * property a reader has to take from this comment.
  *
- * **The gate, and why it comes first.** A load from a block whose clock is off is not a fault on this
- * SoC's fabrics - it is a busy-wait that nothing ends, which is the one failure this project cannot
- * read a log out of (there is no return, so `ram_console` is never recovered). 531 section 8 read
- * SDCC1's two gates out of the vendor clock driver as `clk_ops_branch` clocks, i.e. `BIT(0)` into their
- * own CBCR, and `SDCC1_BCR 0x04C0` (`clock-8974.c:244`) gives the pair at `0xFC4004C0` (BCR) and
- * `0xFC4004C4` (CBCR) - the `+4` being the project's own measurement rather than the file's, since
- * 528 section 8 read `BLSP1_UART2_BCR 0x0700`'s gate at `0xFC400704`. **That megabyte is already
- * mapped** in the context this probe runs in, and not by inference: `entry_epilogue`'s own PS_HOLD
- * store is at `0xfc4ab000`, and that store is measured on every run that comes back. So the gate read
- * costs no new mapping and carries no new hazard, and it is taken **before** the section is installed:
- * a gate of 0 skips the six loads and publishes that it did, which turns a probable press-losing hang
- * into a reading. The interlock can only ever fire in the safe direction - if the offset is wrong the
- * word reads as something else and the arm proceeds exactly as it would have without it.
+ * **The gate, why it comes first, and 692's measurement of what it costs.** A load from a block whose
+ * clock is off is not a fault on this SoC's fabrics - it is a busy-wait that nothing ends, which is
+ * the one failure this project cannot read a log out of (there is no return, so `ram_console` is never
+ * recovered). 531 section 8 read SDCC1's two gates out of the vendor clock driver as `clk_ops_branch`
+ * clocks, i.e. `BIT(0)` into their own CBCR, and `SDCC1_BCR 0x04C0` (`clock-8974.c:244`) gives the pair
+ * at `0xFC4004C0` (BCR) and `0xFC4004C4` (CBCR) - the `+4` being the project's own measurement rather
+ * than the file's, since 528 section 8 read `BLSP1_UART2_BCR 0x0700`'s gate at `0xFC400704`. So the
+ * gate read is taken **before** the storage block is installed: a gate of 0 skips the six loads and
+ * publishes that it did, which turns a probable press-losing hang into a reading. The interlock can
+ * only ever fire in the safe direction - if the offset is wrong the word reads as something else and
+ * the arm proceeds exactly as it would have without it.
+ *
+ * **And 692 pressed that, and the gate read is what died.** The published claim was that `0xFC4` is
+ * already mapped "proved by `entry_epilogue`'s own PS_HOLD store at `0xfc4ab000` on every returning
+ * run" - a *store inside a code path* read as evidence that an *address is mapped*. It is false, and
+ * the arm's own log is the disproof: `xnu_live_sleh_far_frame = 0xfc4004c0`,
+ * `fsr_frame = 0x00000005` (a section translation fault, on a read), `pc = 0x8000d0c4` =
+ * `entry_storage_probe+0xcc` = `ldr r1, [r3, #1216]` with `r3 = 0xfc400000`, and the panic's own
+ * `r0 = 0x80487fc8` is the pointer to the string `xnu_live_storage_bcr`. **So this arm's first act is
+ * one more `entry_mmio_section`, for the GATE's megabyte, and the storage block's install follows it
+ * only once the gate has said the branch is on.** The two installs cannot collide: `0xFC4` and `0xF98`
+ * are different L1 indices in the same table, so 532 section 3.2's occupied-slot refusal cannot fire.
+ *
+ * **And that megabyte is the reset path's as well.** `entry_epilogue`'s two stores are at `0x0fa0065c`
+ * and `0xfc4ab000` - **two different unmapped megabytes** - and 684 measured the first faulting on
+ * 678's arm while 692's own ninth abort shows the payload's deliberate ending faulting at `0x0fa0065c`
+ * too. `0xfc4ab000` shares this arm's `0xFC4` index, so `xnu_live_storage_gcc_map = 1` beside a
+ * readable `_bcr` is also the measurement that the PS_HOLD half of the reset path becomes reachable -
+ * the repair 684 named, taken here as a side effect of the gate's own mapping and not as a second
+ * experiment.
  *
  * **The four refusals are the mapper's, and they are not one reading.** `entry_mmio_section` returns 0
  * for `g_live_state != 1` (no live channel), for a table outside the kernel's window, for an index past
  * the table, and for an **occupied** slot - the last being a skip and not a clobber, which is the one
- * 532 section 3.2 says a two-call arm trips. The four numbers published here (`xnu_live_storage_map`,
- * `_slot_before`, `_desc`, and `_l1`/`_l1_moved`) say which, because 532 section 6's step 2 is that the
- * arm must be able to tell them apart. And when the install refuses, this probe reads **no** register -
- * the GIC probe's own rule, and the reason is the same: a load through a translation this arm cannot
- * vouch for is a fault, not a measurement.
+ * 532 section 3.2 says a two-call arm trips. **This arm makes two calls, at two different indices, so
+ * that refusal cannot be how the second one ends** - and each call publishes its own four numbers
+ * (`xnu_live_storage_gcc_map`/`_slot_before`/`_desc` for the GATE's megabyte,
+ * `xnu_live_storage_map`/`_slot_before`/`_desc` for the storage block's, plus `_l1`/`_l1_moved` read at
+ * the second), because 532 section 6's step 2 is that the arm must be able to tell them apart. And when
+ * an install refuses, this probe reads **no** register through it - the GIC probe's own rule, and the
+ * reason is the same: a load through a translation this arm cannot vouch for is a fault, not a
+ * measurement. 692 measured that such a fault does come back with a log; the rule is about not
+ * spending the arm's reading on an address whose descriptor this run did not write.
  */
 #include <stdint.h>
 
@@ -118,6 +139,7 @@ static uint32_t g_storage_probed;
 void entry_storage_probe(void)
 {
     uint32_t slot_before = 0u, desc = 0u, mapped, section, hc_section;
+    uint32_t gcc_mapped, gcc_slot_before = 0u, gcc_desc = 0u, gcc_section;
     uint32_t bcr, cbcr, gate;
     uint32_t core_power, mci_data_ctrl, mci_version, hc_mode, hci_version, capabilities;
 
@@ -130,35 +152,60 @@ void entry_storage_probe(void)
      * numbers: the index the one install covers, and the index the *other* window falls in. They are
      * equal on this device and they are two keys rather than one because a device whose two windows
      * straddled a 1 MB boundary would make them differ - and nothing in the installer would say so
-     * (532 section 3.3).
+     * (532 section 3.3). **`_gcc_section` is the third**, and it is the one 692's press made
+     * load-bearing: it is the index of the GATE's megabyte, and `0xfc4ab000` - the reset path's
+     * PS_HOLD store - is in it too.
      */
     section = ST_CORE_MEM_BASE >> 20;
     hc_section = ST_HC_MEM_BASE >> 20;
+    gcc_section = ST_GCC_BASE >> 20;
 
     ST_LIVE("xnu_live_storage_calls", 1u);
     ST_LIVE("xnu_live_storage_live_state", g_live_state);
     ST_LIVE("xnu_live_storage_section", section);
     ST_LIVE("xnu_live_storage_hc_mem_section", hc_section);
     ST_LIVE("xnu_live_storage_windows_share_section", (section == hc_section) ? 1u : 0u);
+    ST_LIVE("xnu_live_storage_gcc_section", gcc_section);
+    ST_LIVE("xnu_live_storage_gcc_share_section", (gcc_section == section) ? 1u : 0u);
 
     /*
-     * **The gate, read first, out of a megabyte this image already maps.** `BIT(0)` of the CBCR is the
-     * branch enable; `BCR + 4` is the CBCR and `BCR` itself is read beside it because the pair is what
-     * makes "this offset is the register I think it is" checkable rather than assumed.
+     * **The GATE's own megabyte, installed first, and it is 692's whole correction.** The read below
+     * is the probe's third line and it is the load that faulted on 692's press: `0xFC4` is in no table
+     * this image builds, and the claim that a store elsewhere in the same megabyte proved it mapped is
+     * the defect this install removes. Its own four numbers are published under `_gcc_*` so the two
+     * installs are never confused for one another - `_map`/`_slot_before`/`_desc` belong to the
+     * storage block below and stay that way.
+     *
+     * And when THIS install refuses, the gate is not read either, by the same rule the storage block
+     * gets: a load through a translation this arm cannot vouch for is a fault, not a measurement. 692
+     * showed such a fault comes back with a log, so the rule is not about surviving it - it is about
+     * not spending the arm's one reading on an address whose descriptor this run did not write.
      */
-    bcr = st_read32(ST_GCC_BASE + ST_SDCC1_BCR);
-    cbcr = st_read32(ST_GCC_BASE + ST_SDCC1_CBCR);
-    gate = cbcr & ST_SDCC1_CLK_ENABLE;
+    gcc_mapped = entry_mmio_section(ST_GCC_BASE, ST_GCC_BASE, &gcc_slot_before, &gcc_desc);
+    ST_LIVE("xnu_live_storage_gcc_map", gcc_mapped);
+    ST_LIVE("xnu_live_storage_gcc_slot_before", gcc_slot_before);
+    ST_LIVE("xnu_live_storage_gcc_desc", gcc_desc);
 
-    ST_LIVE("xnu_live_storage_bcr", bcr);
-    ST_LIVE("xnu_live_storage_cbcr", cbcr);
-    ST_LIVE("xnu_live_storage_gate", gate);
+    if (gcc_mapped == 0u) {
+        ST_LIVE("xnu_live_storage_gate_read", 0u);
+        ST_LIVE("xnu_live_storage_gated_out", 0u);
+        ST_LIVE("xnu_live_storage_loads", 0u);
+        ST_LIVE("xnu_live_storage_writes", 0u);
+        return;
+    }
 
     /*
-     * **The install, and it is one call.** 532 section 3.2: a second call for `hc_mem` would find the
-     * slot already holding a block descriptor, so `entry_section_install` returns 0 without writing and
-     * the arm would report a mapping failure *after* mapping the controller correctly. One call, both
-     * windows, and the mistake is loud rather than silent.
+     * **The storage block's install, and it is one call.** 532 section 3.2: a second call for `hc_mem`
+     * would find the slot already holding a block descriptor, so `entry_section_install` returns 0
+     * without writing and the arm would report a mapping failure *after* mapping the controller
+     * correctly. One call, both windows, and the mistake is loud rather than silent.
+     *
+     * **It is placed before the gate read and not after it**, which is the one ordering change 692's
+     * measurement forced - and the safety property is untouched by it, because an install is a
+     * *page-table* write and not an access to the medium's controller. The gate still guards every
+     * load of the block below; what the reordering buys is that a run which ends up gated out still
+     * publishes the four numbers that say whether the section was installed, so "the block was not
+     * touched" and "the block could not be reached" stay two different cells.
      */
     mapped = entry_mmio_section(ST_CORE_MEM_BASE, ST_CORE_MEM_BASE, &slot_before, &desc);
     ST_LIVE("xnu_live_storage_map", mapped);
@@ -169,9 +216,30 @@ void entry_storage_probe(void)
     ST_LIVE("xnu_live_storage_ttbr0", g_live_mmio_ttbr0);
     ST_LIVE("xnu_live_storage_ttbr1", g_live_mmio_ttbr1);
 
+    /*
+     * **The gate, out of the megabyte this arm installed first.** `BIT(0)` of the CBCR is the branch
+     * enable; `BCR` itself is read beside it because the pair is what makes "this offset is the
+     * register I think it is" checkable rather than assumed. `_gate_read` is published as 1 so that a
+     * run whose gate could not be reached cannot be confused with one whose gate was read and found
+     * closed - and `_gcc_map = 0` above is the only way `_gate_read` is 0.
+     */
+    bcr = st_read32(ST_GCC_BASE + ST_SDCC1_BCR);
+    cbcr = st_read32(ST_GCC_BASE + ST_SDCC1_CBCR);
+    gate = cbcr & ST_SDCC1_CLK_ENABLE;
+
+    ST_LIVE("xnu_live_storage_gate_read", 1u);
+    ST_LIVE("xnu_live_storage_bcr", bcr);
+    ST_LIVE("xnu_live_storage_cbcr", cbcr);
+    ST_LIVE("xnu_live_storage_gate", gate);
+
+    /*
+     * Two ways to reach the same cell - no section, or a section and a closed branch - and the two
+     * keys that tell them apart are `_map` and `_gate`. Neither reads a register of the block.
+     */
     if (mapped == 0u) {
-        ST_LIVE("xnu_live_storage_loads", 0u);
         ST_LIVE("xnu_live_storage_gated_out", 0u);
+        ST_LIVE("xnu_live_storage_loads", 0u);
+        ST_LIVE("xnu_live_storage_writes", 0u);
         return;
     }
 

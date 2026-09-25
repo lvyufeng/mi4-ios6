@@ -1,10 +1,14 @@
 /*
- * 692: the storage probe's one entry point.
+ * 692: the storage probe's one entry point. 692 then pressed it, and the press made the probe's first
+ * act a second mapping: the GATE's megabyte (`0xFC4`, the GCC block, which also holds the reset path's
+ * PS_HOLD store) is in no table this image builds, so the arm installs it before it reads anything and
+ * the storage block's install follows.
  *
  * The probe is `entry_storage.c` and the reason it is a file of its own rather than four more lines in
  * `entry_gic.c` is 483's own split: an object is where one definition of "how this image talks to a
  * device" lives. The GIC probe is that object for the distributor; this is that object for the eMMC
- * controller, and the two share only the mapper (`entry_mmio_section`) and the live channel.
+ * controller and for the GCC gate it hangs off, and the three share only the mapper
+ * (`entry_mmio_section`) and the live channel.
  *
  * It is compiled in every build and its records are not, which is the same split `entry_timebase.c`
  * and `entry_gic.c` make and for the same reason: the measurement is the step and the records are the

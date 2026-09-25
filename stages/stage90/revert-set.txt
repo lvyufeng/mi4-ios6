@@ -699,3 +699,116 @@ set=armed-storage-0da7313b sha256=7c2c18ba78e1c5d22cf2626d443def7af9d85c940cd7a5
 set=armed-storage-0da7313b sha256=f091967d1c2d7b9b6a4552f08973b95fe2c5e6291bec45745b484365daf8cdde bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest-23-file-lines-28-lines-in-all-it-gained-TWO-files-entry_storage-c-and-entry_storage-h-and-of-the-nineteen-files-it-carried-before-THREE-changed-this-step-build_entry-sh-entry_gic-c-and-entry_trace-c-all-three-compared-against-the-LIVE-files-because-688-was-refused-once-for-naming-a-build_entry-sh-the-tree-no-longer-had
 set=armed-storage-0da7313b sha256=0f8cffe4a53b54eb09a7fb58c588f4ee3090cd84197ee8fcc3b1d09e9d86e353 bytes=6019072 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies-its-header-id-field-at-576-595-is-sha1-kernel-len-ramdisk-0-second-0-and-it-differs-from-the-690-arms-because-the-payload-differs-which-is-what-an-image-digest-is-for
 set=armed-storage-0da7313b sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-member-all-the-same
+#
+# 693: THE STORAGE ARM'S SECOND MAPPING - `armed-storage-gcc-1fc30bfe`. 692 pressed the storage probe and
+# its FIRST device read died: `entry_storage_probe`'s gate read, `ldr r1,[r3,#1216]` with
+# `r3 = 0xfc400000`, took a section translation fault (`fsr_frame = 0x00000005`,
+# `far_frame = 0xfc4004c0`, and the panic's own `r0 = 0x80487fc8` is the pointer to the string
+# `xnu_live_storage_bcr`). The published claim - that the megabyte is "already mapped ... proved by
+# `entry_epilogue`'s own PS_HOLD store at `0xfc4ab000` on every returning run" - read a STORE inside a
+# code path as evidence that an ADDRESS is mapped, which is the class of
+# `mi4-a-device-address-can-be-right-and-undereferenceable` and whose citation is 532. **This arm is
+# 692's arm with that claim replaced by the install it needed**: one more `entry_mmio_section` for the
+# GATE's megabyte, taken BEFORE the gate is read, with the storage block's own install reordered to
+# follow it.
+#
+# WHY THE REORDER IS SAFE AND WHY IT IS WORTH IT. An install is a PAGE-TABLE write and not an access to
+# the medium's controller, so moving the storage block's install ahead of the gate read does not weaken
+# the interlock: the gate still guards every one of the six loads. What the reorder buys is that a run
+# which ends up gated out still publishes `_map`/`_slot_before`/`_desc`, so "the block was not touched"
+# and "the block could not be reached" stay two different cells - the same distinction 692's own record
+# asked for and could not make.
+#
+# THE TWO INSTALLS CANNOT COLLIDE, and that is 532 section 3.2 answered before it can fire: the GATE's
+# megabyte is L1 index `0xFC4` (4036) and the storage block's is `0xF98` (3992). Both are in TTBR1's
+# table (both VAs are above 0x80000000), both indices are inside 0..4095, and they are different
+# indices - so `entry_section_install`'s occupied-slot refusal cannot be how either call ends.
+# `xnu_live_storage_gcc_share_section` publishes that they are different, as a reading.
+#
+# AND THE SAME MEGABYTE IS THE RESET PATH'S. `entry_epilogue`'s two stores are at `0x0fa0065c`
+# (RESTART_REASON) and `0xfc4ab000` (PS_HOLD) - two different unmapped megabytes. 684 measured the first
+# faulting on 678's arm, and 692's own ninth abort shows the payload's deliberate ending faulting at
+# `0x0fa0065c` as well. `0xfc4ab000` shares this arm's `0xFC4` index, so `xnu_live_storage_gcc_map = 1`
+# beside a readable `_bcr` is ALSO the measurement that the PS_HOLD half of the reset path becomes
+# reachable - the repair 684 named, taken here as a side effect of the gate's own mapping.
+#
+# THE MEASURED ELF SHAPE (the parked entry elf, read with objdump and not inferred). `entry_storage_probe`
+# is at **0x8000cff8** and the wrapper's `bl` to it is unchanged at **0x8047cb2c**. The gate's base is
+# `movt r6, #0xfc40` at 0x8000d084 with `mov r6, r3` (r3 is the function's zero) at 0x8000d064, so r6 is
+# `0xfc400000` from 0x8000d084 on and every later read through it is that megabyte. The three index keys
+# are immediately visible in the immediates: `movw r1,#0xf98` at 0x8000d090 (`_section`) and again at
+# 0x8000d0a0 (`_hc_mem_section`), the constant 1 at 0x8000d0b0 (`_windows_share_section`), and
+# `movw r1,#0xfc4` at 0x8000d0c0 (`_gcc_section` - and `_gcc_share_section` follows it as r5, which is
+# the 0 the guard read, so the compiler folded that comparison to 0). The FIRST `entry_mmio_section` is
+# at 0x8000d0ec with `r0 == r1 == r6` (0xfc400000) and the SECOND at 0x8000d144 with `r0 == r1 == r4`
+# (0xf9824000, materialised as `movw r4,#0x4000` + `movt r4,#0xf982`); the gate is `ldr r9,[r6,#1216]` at
+# 0x8000d1dc and `ldr r6,[r6,#1220]` at 0x8000d1ec with `and r6,r6,#1` at 0x8000d210. **The six loads are
+# the same six and they are all reads**: `[r4]`, `[r4,#44]` (0x2C), `[r4,#80]` (0x50), `[r4,#120]` (0x78),
+# `[r4,#2304]` (=hc_mem+0x00), `[r4,#2368]` (=hc_mem+0x40) at 0x8000d250-0x8000d268 - and **no store to
+# any address based on r4 or r6 anywhere in the function**; the only `str`s are the frame save/restore on
+# `sp` (`strd r4,[sp,#-32]!` at 0x8000cffc). The two derived bits are `and r1,r6,#1` for `HC_MODE_EN`
+# (0x8000d2f4, where r6 has been reloaded with `hc_mode`) and the `CORE_SW_RST` extract from `CORE_POWER`
+# (`ubfx r1,r7,#7,#1` at 0x8000d2e4).
+#
+# **AND THE SAME FAULT SITE PRINTS A DIFFERENT `r0` IN THIS ARM, WHICH IS A READING AND NOT A MOVED SITE.**
+# 692's abort carried `r0 = 0x80487fc8`, and in 692's own entry image that address holds the string
+# `xnu_live_storage_bcr` - verified by reading both pools at the same address: `0x80487fc8` is
+# `xnu_live_storage_bcr` in `armed-storage-0da7313b` and `xnu_live_storage_gcc_section` in this arm's
+# image. The two arms schedule the same pair of loads differently, and that is the whole reason: in 692
+# the `_bcr` key's own immediate pair (`movw r0,#0x7fc8` at 0x8000d0b8, `movt` at 0x8000d0c0) is placed
+# *between* the base's materialisation and the faulting `ldr r1,[r3,#1216]` at 0x8000d0c4, so the
+# leftover `r0` happens to name the very key that load feeds; in this arm the same key's `movw` is placed
+# *after* both loads (0x8000d1f4), so `r0` at 0x8000d1dc is still **`0x80488168` (`_ttbr1`)** from the
+# key write at 0x8000d1c8/0x8000d1d0. So a repeat fault here would print a pointer five keys back from
+# 692's and it would still be the same instruction. **The `pc` is what identifies a fault site; the `r0`
+# of a data abort is a leftover register a reader can mis-read as a name.**
+#
+# THE PAYLOAD HALF IS ONE THING, AND IT IS MEASURED. `stage90-build-config.txt` is
+# `6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b` - **byte-identical to the 692, 690,
+# 688, 686, 678, 653 and sleeper arms'**, so this file cannot name this arm; the set is identified by
+# `xnu_arm_entry-config.txt` instead. `stage90.bin`, `stage90.elf`, `stage90.img` and `stage90-qcdt.img`
+# all keep **exactly the byte counts of the 692 park** (6015492 / 6077564 / 6019072 / 8540160) and differ
+# only in content, so the payload-side change is exactly the embedded entry blob and the entry bss-size
+# immediates, as it has been for every arm since the entry blob was introduced.
+#
+# THE ENTRY-SIDE SWITCHES ARE 692's, UNCHANGED (see `xnu_arm_entry-config.txt`): `STAGE90_XNU_STORAGE_PROBE=1`
+# beside `SEAM_POC=1`, `SEAM_MEASURE=0`, `SEAM_END_RUN=0`, `POST_END_RUN=0`, `POST_END_TICKS=115200000`,
+# `SLOT_NULL=1`, `IDLE_CACHE_ENABLE=0`, `ISTACK_SEPARATE=0`, `IDLE_STACK=1`, `IDLE_NO_SLEEP=0`,
+# `REAL_ARM_INIT=1`, `ENTRY_TRACE=1`. **So the ending is still 690's clock** and, because the probe's call
+# is placed BEFORE the clock's block, a run that gets past the probe is ended at ~6.0 s on a pass boundary
+# exactly as 691 measured - which is what bounds this press.
+#
+# PRE-REGISTRATION (no device was touched for any of it).
+#   * `xnu_live_storage_gcc_map` = 1 and `_gcc_slot_before` = 0 with `_gcc_desc` a block descriptor whose
+#     PA field is 0xfc400000 - the gate's megabyte was unmapped and this arm mapped it.
+#   * `xnu_live_storage_gate_read` = 1 with `_bcr` and `_cbcr` both readable - **the reading 692 could not
+#     take**, and the one that says the GCC block answers.
+#   * `xnu_live_storage_gate` = 1 opens the six loads; 0 gives `_gated_out` = 1 with `_loads` = 0.
+#   * `xnu_live_storage_map` = 1 (the storage install, second call, its own slot numbers), then
+#     `_loads = 6` beside `_writes = 0`, the six words, and the two pre-registered bits `_mode_bit`
+#     (`CORE_HC_MODE & HC_MODE_EN`) and `_sw_rst` (`CORE_POWER >> 7 & 1`) - the two bits 531 section 6
+#     left open and the first reading this project has of the state the bootloader handed over.
+#   * A `_mci_version` of 0 or 0xffffffff is *the block did not answer*, a reading of this arm and not a
+#     failed run.
+#   * The NEGATIVE CELLS, each a different key: `_gcc_map = 0` with `_gate_read = 0` (the GATE's
+#     megabyte could not be installed, and nothing was read through it); `_gate = 0` with
+#     `_gated_out = 1` (installed, clocked off, deliberately not touched); `_map = 0` with
+#     `_gate_read = 1` (the storage block's install refused after the gate was read).
+#   * The map-failure fault address, if one happens anyway, is `xnu_live_sleh_far` = `0xfc400000` for the
+#     gate's megabyte and `0xf9824000` for the storage block's - two addressable cells, which is what
+#     makes the two installs tellable apart in a fault record.
+#   * The ending is 690's clock, unmoved, so `xnu_live_post_end_calls` is still this arm's ending cell.
+#
+# THE 692 SET'S qcdt role line above reads "...the-arm-the-next-press-sends..."; from this step that is
+# THIS set, and that line is not rewritten - the same rule the 692 record followed against the 690 set.
+set=armed-storage-gcc-1fc30bfe sha256=6974403896cb3671d39bfedf8e05d9108e11732174e6b68897c2dd86b156d772 bytes=8540160 file=stage90-qcdt.img role=qcdt-wrapped-payload-this-is-what-fastboot-boot-sends-and-the-arm-the-next-press-sends-STAGE90_XNU_ENTRY-1-this-payload-wraps-the-STORAGE_PROBE-1-entry-image-with-the-GATEs-megabyte-0xFC4-installed-by-one-more-entry_mmio_section-and-only-the-embedded-entry-blob-and-the-entry-bss-size-immediates-differ-from-the-692-park
+set=armed-storage-gcc-1fc30bfe sha256=f5425e0ea4f2a5417d82991f8387b78185c3b34f8604016bae97451e241729a4 bytes=6015492 file=stage90.bin role=raw-payload-bin-SAME-SIZE-as-the-692-arm-and-as-the-690-and-688-arms-the-differing-bytes-are-inside-the-embedded-entry-blob-at-494236-6014232-except-the-five-entry-bss-size-immediates-the-new-entry-bin-is-present-verbatim-and-exactly-once-there
+set=armed-storage-gcc-1fc30bfe sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-692-690-688-686-678-653-and-sleeper-arms-so-THIS-FILE-CANNOT-NAME-THIS-ARM-the-entry-switches-are-not-in-the-payloads-dump-and-the-set-is-identified-by-xnu_arm_entry-config.txt-instead-and-the-payload-side-of-this-step-changed-ONE-thing-only-the-entry-blob-it-embeds
+set=armed-storage-gcc-1fc30bfe sha256=3caacb445fce29f1dfda50ae7863591870285559283a3e05daf2ca5505ffd6b8 bytes=6077564 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-same-size-as-the-692-arm-and-the-entry-bss-size-immediates-at-4ac40-4ad04-4ad18-plus-the-new-entry-probe-and-its-bl-inside-the-embedded-blob-were-read-out-of-it
+set=armed-storage-gcc-1fc30bfe sha256=fc6eff0455d333ca223984c473347b57ab156806adb23c22b10a765fa06f924c bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-gcc-1fc30bfe sha256=1fc30bfe08a6ddd87ed5103fb6c3194aad3dc814bab2eb4f3a307bd7b4d25d4e bytes=5519996 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ONE-BINARY-THIS-STEP-CHANGED-it-is-the-692-entry-0da7313b-with-ONE-MORE-entry_mmio_section-in-entry_storage_probe-for-the-GATEs-megabyte-0xFC4-taken-BEFORE-the-gate-is-read-plus-the-storage-blocks-own-install-reordered-to-follow-it-and-three-new-keys-_gcc_map-_gcc_slot_before-_gcc_desc-beside-_gate_read-_gcc_section-and-_gcc_share_section
+set=armed-storage-gcc-1fc30bfe sha256=d187d494e21fca5d896112d3f395758ecff1fb869f9eac55de5cf456a0d1551d bytes=6699000 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-its-entry_storage_probe-is-at-8000cff8-and-the-bl-to-it-at-8047cb2c-the-gate-base-is-movt-r6-0xfc40-at-8000d084-the-FIRST-entry_mmio_section-at-8000d0ec-with-r0-r1-r6-0xfc400000-and-the-SECOND-at-8000d144-with-r0-r1-r4-0xf9824000-the-gate-is-ldr-r9-r6-1216-at-8000d1dc-and-ldr-r6-r6-1220-at-8000d1ec-and-the-six-loads-off-r4-at-8000d250-8000d268-are-reads-with-NO-store-to-any-address-based-on-r4-or-r6-in-the-whole-function
+set=armed-storage-gcc-1fc30bfe sha256=d4205a79a7c5242dda79cf5cfb6144524c0ac652b3f5bae3e2e73192b00f8ede bytes=875 file=xnu_arm_entry-config.txt role=entry-config-record-AND-THE-ONE-RECORD-THAT-NAMES-THIS-ARM-its-last-line-reads-STAGE90_XNU_STORAGE_PROBE-1-beside-SEAM_POC-1-SEAM_MEASURE-0-SEAM_END_RUN-0-POST_END_RUN-0-POST_END_TICKS-115200000-SLOT_NULL-1-IDLE_CACHE_ENABLE-0-ISTACK_SEPARATE-0-IDLE_STACK-1-IDLE_NO_SLEEP-0-and-REAL_ARM_INIT-1-and-THREE-of-its-lines-differ-from-the-692-arms-the-file-SHA256-field-which-is-the-live-entry-bin-its-hash-line-and-the-bytes-line-6699000-vs-6699000-are-equal-so-only-the-two-hash-lines-differ
+set=armed-storage-gcc-1fc30bfe sha256=0979eb910eedf7b683bc5542066603638f95acb2e58d4be889780b7a34d35713 bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest-23-file-lines-28-lines-in-all-same-count-as-the-692-parks-and-of-its-nineteen-then-files-ONE-changed-content-this-step-entry_storage-c-and-one-more-entry_storage-h-which-is-a-header-comment-only-edit-both-compared-against-the-LIVE-files-because-688-was-refused-once-for-naming-a-build_entry-sh-the-tree-no-longer-had
+set=armed-storage-gcc-1fc30bfe sha256=68d240eeb050c8708fc9e539e55a5f4d51c4282d9716f1811cbb3a1e8404fce7 bytes=6019072 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies-its-header-id-field-at-576-595-is-sha1-kernel-len-ramdisk-0-second-0-and-it-differs-from-the-692-arms-because-the-payload-differs-which-is-what-an-image-digest-is-for
+set=armed-storage-gcc-1fc30bfe sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-member-all-the-same
