@@ -585,6 +585,15 @@ esac
 # register" is a property of the artifact rather than of the record. And the clock is NOT on this rung
 # (701 section 2): `sdhci_msm_set_clock` writes `CORE_VENDOR_SPEC 0x10C` and calls `clk_set_rate` on the
 # GCC at `0xfc400000` - the megabyte 692 measured as not mapped - so it is a step of its own.
+# **704: the sixth rung, and it is a rung of READS again - the clock surface, before anything writes it.**
+# Rung 5 reads the GCC's four SDCC1 branch words, the apps root's five RCG words and `CORE_VENDOR_SPEC
+# 0x10C`, and it stores **nothing anywhere**: the writer on this path is `sdhci_msm_set_clock`, and its
+# first write would land on a branch whose halt bit no run in this project has ever read (see the rung-5
+# pre-registration, `experiment-704` section 2 - the gate has been checking `CBCR_BRANCH_ENABLE_BIT` and
+# not `CBCR_BRANCH_OFF_BIT`). The clause that makes that a property of the artifact is the store census
+# below, which since 704 names the GCC megabyte as its own window and holds its store set to **empty at
+# every rung** - so "this rung does not write the clock" cannot be undone by an edit that this file's own
+# classifier would otherwise have to guess about.
 STORAGE_PROBE=${STAGE90_XNU_STORAGE_PROBE:-0}
 case "$STORAGE_PROBE" in
     0) ;;
@@ -592,7 +601,8 @@ case "$STORAGE_PROBE" in
     2) ;;
     3) ;;
     4) ;;
-    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3 or 4, not [$STORAGE_PROBE]" >&2
+    5) ;;
+    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4 or 5, not [$STORAGE_PROBE]" >&2
        echo "        It is a `#if` in two files and not a value, so anything else would reach the" >&2
        echo "        preprocessor as a broken -D and fail there, with the cause named by the wrong" >&2
        echo "        tool (692); and it is a rung rather than a flag since 696, so a value above the" >&2
@@ -29886,6 +29896,18 @@ verify_trace_symbols() {
         # in the standard file in one of them and a byte inside the vendor's own 0x2C word in the other.
         # The window is therefore named, and ***not named*** refuses: an address this clause cannot put in
         # a window is a store it will not vouch for.
+        #
+        # **704: the third window, and the three are now WINDOWS rather than base addresses.** The
+        # classifier first matched `addr == 0xf9824000` and `addr == 0xf9824900` exactly, which was
+        # correct only because gcc materializes both bases whole and carries the register's own offset in
+        # the store's operand - the same accidental correctness `experiment-702` is about, one reader
+        # over. The rung-5 arm loads many offsets inside the GCC megabyte and would materialize whichever
+        # one it wanted, so a base-address test cannot see a store there at all; all three are window
+        # tests now, with the lengths from the source that declares them (`msm8974.dtsi:503`:
+        # `core_mem` 0x800, `hc_mem` 0x11c) and the whole megabyte for the GCC. Nothing about the two
+        # old windows' own clauses changes - a store outside its window was `DEVBAD` before and is
+        # `DEVBAD` now, and a store *inside* one with the wrong offset was already refused by the
+        # per-window clauses below, which still compare the store's own offset operand.
         stb_raw=$(awk '
             function isreg(x) { return x ~ /^(r([0-9]|1[0-5])|sp|lr|pc|sl|fp|ip)$/ }
             $3 == "movt" {
@@ -29894,7 +29916,7 @@ verify_trace_symbols() {
                 if (isreg(d) && v ~ /^-?(0x[0-9a-fA-F]+|[0-9]+)$/) {
                     n = strtonum(v)
                     if (n >= 61440) devhi[d] = 1; else imghi[d] = 1
-                    hi[d] = n; hiset[d, n] = 1
+                    hi[d] = n; curhi[d] = n; hiset[d, n] = 1
                 }
                 next
             }
@@ -29915,22 +29937,52 @@ verify_trace_symbols() {
                 if (n >= 2) { off = p[2]; gsub(/[ \t#]/, "", off); sub(/!$/, "", off); if (off == "") off = "0" }
                 if (base == "sp" || base == "r13") next
                 lo = (base in curlo) ? curlo[base] : "none"
-                buf[++nb] = base ":" off ":" $3 ":" lo
+                sh = (base in curhi) ? curhi[base] : "none"
+                buf[++nb] = base ":" off ":" $3 ":" lo ":" sh
                 next
             }
             END {
                 for (i = 1; i <= nb; i++) {
                     split(buf[i], q, ":")
-                    b = q[1]; o = q[2]; m = q[3]; lo = q[4]
-                    if (devhi[b] && imghi[b]) { printf "AMB %s:%s:%s:%s\n", b, o, m, lo; continue }
-                    if (imghi[b]) { printf "IMG %s:%s:%s:%s\n", b, o, m, lo; continue }
-                    if (!devhi[b]) { printf "UNK %s:%s:%s:%s\n", b, o, m, lo; continue }
-                    nd = 0; for (k in hiset) { split(k, y, SUBSEP); if (y[1] == b) nd++ }
-                    if (nd > 1) { printf "AMB %s:%s:%s:%s\n", b, o, m, lo; continue }
-                    if (lo == "none") { printf "DEVLO %s:%s:%s:%s\n", b, o, m, lo; continue }
-                    addr = hi[b] * 65536 + lo
-                    if (addr == 4186062848) printf "CORE %s:%s:%s:%s\n", b, o, m, lo
-                    else if (addr == 4186065152) printf "HC %s:%s:%s:%s\n", b, o, m, lo
+                    b = q[1]; o = q[2]; m = q[3]; lo = q[4]; sh = q[5]
+                    if (sh != "none" && sh >= 61440) {
+                        # 704: a materialization of this register PRECEDES the store, and it is a
+                        # device megabyte - so it is the base the store uses, whatever else the body
+                        # later puts in the same register. Program order is authoritative here.
+                        if (lo == "none") { printf "DEVLO %s:%s:%s:%s\n", b, o, m, lo; continue }
+                        addr = sh * 65536 + lo
+                    } else if (sh != "none") {
+                        # 704: and when the materialization that precedes the store is IMAGE memory,
+                        # the store is into this image - whatever else the body later puts in the same
+                        # register. Without this arm the fallback below would pair a device high half
+                        # with the IMAGE low half still live at the store and classify an image store
+                        # as a device one: measured on a synthetic body in the control run of this
+                        # step (an `str` to 0x8055_41a4 read as `GCC`), and a false DEVICE
+                        # classification is the direction that refuses a legitimate build.
+                        printf "IMG %s:%s:%s:%s\n", b, o, m, lo; continue
+                    } else if (imghi[b] && devhi[b]) {
+                        # Nothing precedes the store and the body materializes BOTH kinds into this
+                        # register: there is no reading that says which is live, so this refuses.
+                        printf "AMB %s:%s:%s:%s\n", b, o, m, lo; continue
+                    } else if (imghi[b]) {
+                        printf "IMG %s:%s:%s:%s\n", b, o, m, lo; continue
+                    } else if (!devhi[b]) {
+                        printf "UNK %s:%s:%s:%s\n", b, o, m, lo; continue
+                    } else {
+                        # No device high half precedes the store, and the body materializes one for
+                        # this register somewhere. That is the measured case the whole-body reading
+                        # exists for (`movt` after its store) - but it is only answerable when the
+                        # body materializes exactly ONE device megabyte into this register. Two is
+                        # a store this clause will not guess about.
+                        nd = 0; one = ""
+                        for (k in hiset) { split(k, y, SUBSEP); if (y[1] == b && y[2] >= 61440) { nd++; one = y[2] } }
+                        if (nd != 1) { printf "AMB %s:%s:%s:%s\n", b, o, m, lo; continue }
+                        if (lo == "none") { printf "DEVLO %s:%s:%s:%s\n", b, o, m, lo; continue }
+                        addr = one * 65536 + lo
+                    }
+                    if (addr >= 4186062848 && addr < 4186064896) printf "CORE %s:%s:%s:%s\n", b, o, m, lo
+                    else if (addr >= 4186065152 && addr < 4186065436) printf "HC %s:%s:%s:%s\n", b, o, m, lo
+                    else if (addr >= 4232052736 && addr < 4233101312) printf "GCC %s:%s:%s:%s\n", b, o, m, lo
                     else printf "DEVBAD %s:%s:%s:%s\n", b, o, m, lo
                 }
             }' <<<"$stb_body")
@@ -29947,6 +29999,7 @@ verify_trace_symbols() {
         stb_hc_off=$(awk -F: -v b="$stb_hc_base" '$1 == b { printf "%s ", $2 }' <<<"$stb_hc")
         stb_hc_mne=$(awk -F: -v b="$stb_hc_base" '$1 == b { printf "%s ", $3 }' <<<"$stb_hc")
         stb_other=$(awk -F: -v b="$stb_core_base" '$1 != b { printf "%s:%s ", $1, $2 }' <<<"$stb_core")
+        stb_gcc=$(awk '$1 == "GCC" { printf "%s:%s ", $2, $3 }' <<<"$stb_raw")
         [[ -z "${stb_amb// /}" ]] ||
             layout_fail "entry_storage_probe stores through [$stb_amb], and this body materializes each of those base registers with MORE THAN ONE device high half - GCC reuses registers, so a movt alone cannot say which address the store uses. The image's own stores are listed as IMG and the device ones are named by their own windows below, but a register that carries two device high halves is a store this clause would have to guess about, and it refuses instead. Read the probe's body: if the store is to the image's own memory, give it a base register the body materializes once. Nothing is rebuilt by this refusal"
         [[ -z "${stb_unk// /}" ]] ||
@@ -29954,7 +30007,7 @@ verify_trace_symbols() {
         [[ -z "${stb_devlo// /}" ]] ||
             layout_fail "entry_storage_probe stores through [$stb_devlo], and this body gives that register a device high half but NO low half - no `mov`/`movw` immediate - so the pair of immediates that names a window is incomplete. This is the case 701 added the low half for: `core_mem` (0xf9824000) and `hc_mem` (0xf9824900) share a `movt`, so a store at 0x2F would be a byte in the standard file in one window and a byte inside the vendor's own 0x2C word in the other. Name the window or fail. Nothing is rebuilt by this refusal"
         [[ -z "${stb_devbad// /}" ]] ||
-            layout_fail "entry_storage_probe stores through [$stb_devbad], and the (movt, mov/movw) pair this body materializes names a device address that is NOT one of the two windows this controller declares - `core_mem` (0xf9824000, 0x800 long) and `hc_mem` (0xf9824900, 0x11c long, msm8974.dtsi:503). A store to a device megabyte this arm's record does not name is exactly the store this clause exists to refuse. Nothing is rebuilt by this refusal"
+            layout_fail "entry_storage_probe stores through [$stb_devbad], and the (movt, mov/movw) pair this body materializes names a device address that is in none of the three windows this arm's record names - `core_mem` (0xf9824000, 0x800 long), `hc_mem` (0xf9824900, 0x11c long, msm8974.dtsi:503), and the GCC megabyte (0xfc400000, 0x100000 - the block whose SDCC1 branch words and clock gate this line reads, and whose clock registers no rung writes). A store to a device megabyte this arm's record does not name is exactly the store this clause exists to refuse. Nothing is rebuilt by this refusal"
         [[ "$stb_core_off" == "120 0 120 120 " ]] ||
             layout_fail "entry_storage_probe's stores in the core_mem window ($stb_core_base) are [$stb_core_off] and this arm's record says they are 120 0 120 120 - i.e. CORE_HC_MODE <- 0, CORE_POWER <- |CORE_SW_RST, CORE_HC_MODE <- HC_MODE_EN, CORE_HC_MODE <- |FF_CLK_SW_RST_DIS (the vendor's own sequence, sdhci-msm.c:2841-2868). A different count, a different order or a different offset is a store this arm's pre-registration does not describe. Read the probe's own body, decide whether the sequence or the record is what changed, and change the one that is wrong. (The image's own stores are [$stb_img].) Nothing is rebuilt by this refusal"
         if [[ $STORAGE_PROBE -ge 4 ]]; then
@@ -29972,7 +30025,9 @@ verify_trace_symbols() {
         fi
         [[ -z "${stb_other// /}" ]] ||
             layout_fail "entry_storage_probe stores to [$stb_other] through a second base register in the core_mem window, and this arm's pre-registration names one register carrying the four. Every other store in that window is a register this arm does not name. The stores on the four's register are [$stb_core_off]; the image's own are [$stb_img]. Read the probe's body and decide which of the two - the sequence or this record - is wrong. Nothing is rebuilt by this refusal"
-        echo "  xnu_entry_698: the probe's stores, classified by base register and window - core_mem [$stb_core_off] on $stb_core_base, hc_mem [$stb_hc_off]($stb_hc_mne) on $stb_hc_base, image [$stb_img], ambiguous [$stb_amb], unknown [$stb_unk], unnamed-device [$stb_devbad$stb_devlo]"
+        [[ -z "${stb_gcc// /}" ]] ||
+            layout_fail "entry_storage_probe stores [$stb_gcc] into the GCC megabyte (0xfc400000), and **no rung of this ladder writes the clock controller at any value**. Since 704 this window is classified as its own (`GCC`) and asserted empty here, at every rung, because the rung-5 arm reads four SDCC1 branch words, the apps root's five RCG words and CORE_VENDOR_SPEC 0x10C and stores nothing (experiment-704). The writer on this path is sdhci_msm_set_clock, its first write would land on a branch whose halt bit no run in this project has ever read, and a store to a clock-control register whose parent root is off is the bus wait nothing ends - the failure this project cannot read a log out of. Before 704 a store here was refused by the DEVBAD clause, whose stated subject is 'not one of the two windows this controller declares' - true, and a statement about the classifier's scope rather than about the clock. Read the body and decide whether the rung or the store is what changed. Nothing is rebuilt by this refusal"
+        echo "  xnu_entry_698: the probe's stores, classified by base register and window - core_mem [$stb_core_off] on $stb_core_base, hc_mem [$stb_hc_off]($stb_hc_mne) on $stb_hc_base, gcc [$stb_gcc], image [$stb_img], ambiguous [$stb_amb], unknown [$stb_unk], unnamed-device [$stb_devbad$stb_devlo]"
     fi
     if [[ $STORAGE_PROBE -ge 3 ]]; then
         # ---------------------------------------------- 698: EVERY ACCESS'S WIDTH IS CHECKED AGAINST ITS

@@ -31,6 +31,17 @@
  * only be taken before it. The rung adds no store, and the store census in `build_entry.sh` is what
  * says so rather than this comment - so the ladder is not "how much does this arm do" but "how far up
  * the line it stands", and a rung that adds reads after one that added writes is the shape it allows.
+ *
+ * **704: `=5` is 4 plus the CLOCK SURFACE, read and never written.** The GCC's four SDCC1 branch words
+ * (`SDCC1_BCR`, the apps/AHB/CDCCAL CBCRs), the apps root clock generator's five words
+ * (`CMD_RCGR`/`CFG_RCGR`/`M`/`N`/`D`), and `CORE_VENDOR_SPEC 0x10C` - the fifth `core_mem` offset and the
+ * one register on this path that is not a clock branch. It is the before-value arm for
+ * `sdhci_msm_set_clock`, whose writes land on exactly those registers, and it stores **nothing anywhere**
+ * so that "this rung does not write the clock" is a property of the artifact and not of this comment.
+ * The rung also decomposes the gate the whole line has been guarded by since 692 into the **two** bits
+ * the clock framework itself distinguishes: `CBCR_BRANCH_ENABLE_BIT` (the request, which is all the gate
+ * read) and `CBCR_BRANCH_OFF_BIT` (the halt state, which is what "running" means and which no run in
+ * this project had ever read). See `docs/experiments/experiment-704-...`, section 2.
  */
 #ifndef STAGE90_ENTRY_STORAGE_H
 #define STAGE90_ENTRY_STORAGE_H

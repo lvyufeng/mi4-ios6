@@ -1439,3 +1439,169 @@ set=armed-storage-reset-00b28262 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273
 # whose one gate the probe reads as an interlock.
 #
 # ================================================================================================
+set=armed-storage-clock-6e7fbafa sha256=17c3cb731a18f0071f6659a0febf9adffc4b755f258c9e241caacd05f2a5fc92 bytes=8556544 file=stage90-qcdt.img role=qcdt-wrapped-payload-this-is-what-fastboot-boot-sends-and-the-arm-the-next-press-sends-STAGE90_XNU_ENTRY-1-this-payload-wraps-the-STORAGE_PROBE-5-entry-image-i-e-THE-CLOCK-SURFACE-CENSUS-arm-it-differs-from-the-rung-4-parks-qcdt-in-609004-bytes-608984-of-which-are-the-payloads-own-every-one-of-them-inside-the-embedded-entry-blob-window-494236-6030616-and-the-other-20-are-the-headers-sha1-field-at-576-595-so-NO-byte-outside-those-two-regions-moved-and-the-20-are-the-sha1-the-gate-verifies-the-same-arithmetic-every-arm-since-696-has-carried
+set=armed-storage-clock-6e7fbafa sha256=66b36206e095c07158327b8f2c99d08910c117aa6399bc59c188c00302312f94 bytes=6031876 file=stage90.bin role=raw-payload-bin-SAME-SIZE-as-every-arm-since-696-6031876-and-608984-bytes-differ-from-the-rung-4-arms-ALL-inside-the-embedded-entry-blob-window-494236-6030616-first-495192-last-5997985-i-e-exactly-956-and-5503749-the-entry-bins-own-first-and-last-differing-byte-offset-by-the-window-start-and-the-payload-elfs-text-is-6030666-bytes-in-BOTH-so-the-rung-5-entry-image-grew-and-NOTHING-IN-THE-PAYLOADS-OWN-CODE-MOVED
+set=armed-storage-clock-6e7fbafa sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-every-arm-since-653-INCLUDING-its-STAGE90_XNU_ENTRY-1-line-so-THIS-FILE-CANNOT-NAME-THIS-ARM-the-entry-switches-are-not-in-the-payloads-dump-and-the-set-is-identified-by-xnu_arm_entry-config.txt-instead
+set=armed-storage-clock-6e7fbafa sha256=2eebd2722694e3b0cef25af21e0d974a1f7e9c546d70b623595b10f18edce13b bytes=6093948 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-its-text-is-6030666-bytes-the-SAME-as-every-arm-since-696-and-the-three-entry-bss-size-immediates-at-VA-4ac40-4ad04-4ad18-are-byte-identical-to-the-rung-4-arms-because-the-entry-images-bss-size-did-not-change-379720-in-both
+set=armed-storage-clock-6e7fbafa sha256=4f15882ad7fd7631a89e28c930c24b08abed4a6767272fa00cb601b4b8c565ee bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-so-sha256sum--c-must-NEVER-be-run-inside-a-park-see-the-records-own-note-its-five-members-are-the-other-five-of-this-set-and-FOUR-of-those-five-hashes-differ-from-the-rung-4-arms-manifest-the-fifth-the-fixture-is-BYTE-IDENTICAL-so-the-manifest-differs-because-the-artifacts-do manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-clock-6e7fbafa sha256=6e7fbafabe098086b84a01621f44d29c6287ec406da127aec86df910e239447c bytes=5536380 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ONE-BINARY-THIS-STEP-CHANGED-and-it-is-the-rung-4-entry-00b28262-PLUS-the-rung-5-CLOCK-SURFACE-CENSUS-read-only-at-the-tail-of-entry_storage_probe-under-STAGE90_XNU_STORAGE_PROBE-5-and-that-census-STORES-NOTHING-ANYWHERE-which-is-what-makes-it-the-BEFORE-VALUE-arm-for-sdhci_msm_set_clock-the-writer-on-this-path-it-reads-TWELVE-words-the-GCCs-SDCC1-BCR-0x04C0-and-its-three-other-branch-words-SDCC1_APPS_CBCR-0x04C4-SDCC1_AHB_CBCR-0x04C8-and-the-two-CDCCAL-CBCRs-0x04E4-0x04E8-the-apps-root-clock-generators-five-words-SDCC1_APPS_CMD_RCGR-0x04D0-plus-CFG_RCGR-M-N-D-at-4-8-C-10-CORE_VENDOR_SPEC-0x10C-in-core_mem-the-FIFTH-offset-of-a-window-this-projects-census-has-bounded-to-four-since-698-and-CLOCK_CONTROL-0x2C-read-LAST-so-that-the-census-moved-nothing-is-a-measurement-it-is-the-SAME-SIZE-as-the-rung-4-bin-5536380-because-that-size-is-padded-the-entry-elfs-own-text-grew-by-EXACTLY-1248-bytes-and-608984-bytes-differ-from-the-rung-4-bin-first-at-956-last-at-5503749-AND-THE-GROWTH-WAS-NOT-PASSED-ON-UNIFORMLY-WHICH-IS-THE-READING-THIS-ARM-ADDS-TO-THE-LAYOUT-entry_storage_probe-itself-is-at-8000cff8-UNCHANGED-the-five-device-stores-are-at-8000d350-8000d38c-8000d47c-8000d4bc-8000d728-UNCHANGED-the-wrappers-bl-to-the-probe-is-at-8047db2c-UNCHANGED-and-platform_cache_idle_enter-80047238-platform_cache_idle_exit-800472d4-early_random-80047514-and-THE-SEAM-0x800472dc-are-all-UNCHANGED-while-cpu_idle_wfi-moved-from-80017ddc-to-8001807c-i-e-672-bytes-so-the-1248-landed-as-672-between-entry_storage_probe-and-platform_cache_idle_enter-and-the-rest-was-ABSORBED-BY-ALIGNMENT-FILL-BEFORE-platform_cache_idle_enter-which-is-mi4-linker-fill-term-in-the-direction-that-mattters-here-EVERY-ADDRESS-THE-GATE-AND-THE-RUNNER-PIN-IS-STABLE-BECAUSE-A-FILL-CONTRACTED-AND-NOT-BECAUSE-NOTHING-MOVED
+set=armed-storage-clock-6e7fbafa sha256=8a5fabd1053c9426212f759a5b5dbb4781b18019bfc89612405bf31e9d6f1265 bytes=6715424 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-its-entry_storage_probe-is-at-8000cff8-UNCHANGED-from-every-arm-since-698-and-the-bl-to-it-in-__wrap_platform_cache_idle_exit-8047db2c-is-ALSO-UNCHANGED-the-four-core_mem-DEVICE-stores-are-at-8000d350-str-r4-r5-120-8000d38c-str-r9-r5-8000d47c-str-r9-r5-120-8000d4bc-str-r4-r5-120-in-the-vendors-order-with-the-vendors-offsets-and-THE-RUNG-4-STORES-OWN-ADDRESS-IS-THE-FIFTH-8000d728-strb-r7-r5-47-0x2f-so-the-only-other-stores-in-the-body-are-the-TWO-bss-flags-at-8000d064-str-r7-r6-g_storage_probed-805541a4-and-8000d550-str-r9-r6-4-g_storage_mode_complete-805541a8-and-THE-CENSUS-CLAUSE-AND-THIS-READING-AGREE-that-the-body-writes-core_mem-four-times-and-hc_mem-exactly-once-and-at-47-and-POWER_CONTROL-0x29-which-is-THE-register-a-zero-write-busses-off-is-still-unreachable-by-construction-WHAT-THIS-ARM-ADDED-IS-VISIBLE-AND-AT-ITS-OWN-WIDTHS-INCLUDING-THE-ONE-THAT-MATTERS-the-twelve-loads-are-8000d8a4-ldr-r5-r4-1216-0x4c0-8000d8c8-ldr-r5-r4-1220-0x4c4-8000d90c-ldr-r5-r4-1224-0x4c8-8000d950-ldr-r5-r4-1252-0x4e4-8000d994-ldr-r5-r4-1256-0x4e8-8000d9d8-ldr-r5-r4-1232-0x4d0-8000da1c-ldr-r5-r4-1236-0x4d4-8000da64-ldr-r1-r4-1240-0x4d8-8000da74-ldr-r1-r4-1244-0x4dc-8000da84-ldr-r1-r4-1248-0x4e0-8000daa0-ldr-r4-r3-268-0x10c-CORE_VENDOR_SPEC-and-8000dadc-ldrh-r1-r3-44-0x2c-CLOCK_CONTROL-READ-AS-A-HALFWORD-WHICH-IS-ITS-OWN-WIDTH-and-the-wrapper-still-ends-b-entry_post_clock-at-8047db4c-with-FlushPoU_Dcache-at-80046874-and-the-call-that-returns-to-the-seam-0x800472dc-UNCHANGED-from-690-through-701
+set=armed-storage-clock-6e7fbafa sha256=cffb45c389077d73351e876354a3d937bbac0ebaa3c3410a31cee1ee0dd4832b bytes=875 file=xnu_arm_entry-config.txt role=entry-config-record-AND-THE-ONE-RECORD-THAT-NAMES-THIS-ARM-its-last-line-reads-STAGE90_XNU_STORAGE_PROBE-5-beside-SEAM_POC-1-SEAM_MEASURE-0-SEAM_END_RUN-0-POST_END_RUN-0-POST_END_TICKS-115200000-SLOT_NULL-1-IDLE_CACHE_ENABLE-0-ISTACK_SEPARATE-0-IDLE_STACK-1-IDLE_NO_SLEEP-0-and-REAL_ARM_INIT-1-and-EXACTLY-TWO-of-its-lines-differ-from-the-rung-4-arms-the-file-SHA256-field-6e7fbafa-and-the-rung-digit-4-to-5-and-the-file-keeps-its-875-bytes
+set=armed-storage-clock-6e7fbafa sha256=59c0959242dd622e49fad815cf307e515294398b5b5504c28e5b5d6d6720979f bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest-23-file-lines-28-lines-in-all-and-THREE-of-those-twenty-three-changed-this-step-build_entry-sh-the-rung-5-case-the-GCC-window-in-the-store-classifier-and-the-two-repairs-recorded-below-entry_storage-c-the-rung-5-block-its-twelve-loads-the-st_clock_census-function-and-the-call-site-guarded-by-g_storage_mode_complete-and-entry_storage-h-the-rung-5-paragraph-and-UNLIKE-701-NOTHING-IN-entry_trace-c-or-entry_stubs-c-moved-because-the-seam-constant-0x800472dc-did-not-move-so-THIS-MANIFEST-AND-THE-LIVE-TREE-AGREED-WHEN-THE-ARM-WAS-PARKED
+set=armed-storage-clock-6e7fbafa sha256=aad66a55d0a504e3c0d9c56160b908f07c71e1bf79d6c0c662c09826deaca19f bytes=6035456 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies-its-header-id-field-at-576-595-is-sha1-kernel-len-ramdisk-0-second-0-and-it-differs-from-the-rung-4-arms-in-the-same-608984-bytes-the-qcdt-does
+set=armed-storage-clock-6e7fbafa sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-entry-nonetheless-and-BYTE-IDENTICAL-to-the-rung-4-park-so-THE-ONLY-TWO-FILES-THAT-DID-NOT-MOVE-ARE-THE-TWO-THAT-DESCRIBE-NOTHING-ABOUT-THE-ENTRY-IMAGE-the-fixture-and-the-payloads-own-switch-dump
+#
+# ================================================================================================
+# 704: THE CLOCK-SURFACE ARM - `armed-storage-clock-6e7fbafa`. PARKED AND PRESSED 2026-09-25.
+# Readiness 5/5 (exit 0, 21:27:23 UTC), ONE gate (exit 0, 573 stdout lines, 21:27:50) and EXACTLY
+# ONE runner, the last two under `--allow-xnu-entry --expect-arm=armed-storage-clock-6e7fbafa`;
+# RUNNER EXIT=0 (21:28:59) - returned and captured, "the device came back 25s after this run called
+# `fastboot boot`" (seen via: host log, serial). One non-persistent `fastboot boot`, serial
+# 4a2fe00b, neighbour 33e80afe off both lists (the firer's own verdict check read `fastboot: []`,
+# `adb: [4a2fe00b device]`). The firer was `/tmp/g668/press-on-clear.v5.sh` (sha 7f23cae5...) run as
+# `press-on-clear.v5.sh armed-storage-clock-6e7fbafa 600`, the set declared with no default; it
+# printed `done. gate=0 runner=0` and exited, so NO FIRER IS ARMED and 660's closure released.
+#
+# **THE PROSE BELOW WAS WRITTEN ONCE, AFTER THE PRESS.** The park's own evidence, taken at park time,
+# is the eleven `set=` lines above and readiness's `VERIFIED, 11 files, 6 manifest-member checks` -
+# this block is the arm's identity and the press's readings, not a park-time note pretending to be
+# one.
+#
+# THE ARM, AND WHY IT IS A RUNG OF READS. It is 701's arm (rungs 1-4) unchanged, under
+# `STAGE90_XNU_STORAGE_PROBE=5`, plus a **read-only census of the clock surface** at the tail of
+# `entry_storage_probe`, guarded by the same `g_storage_mode_complete` interlock every rung above 2
+# uses. Twelve words, in this order: the GCC's `SDCC1_BCR 0x04C0`, `SDCC1_APPS_CBCR 0x04C4`,
+# `SDCC1_AHB_CBCR 0x04C8`, `SDCC1_CDCCAL_SLEEP_CBCR 0x04E4`, `SDCC1_CDCCAL_FF_CBCR 0x04E8`,
+# `SDCC1_APPS_CMD_RCGR 0x04D0` and `CFG_RCGR`/`M`/`N`/`D` at `+4/+8/+0xC/+0x10`, then `core_mem`'s
+# `CORE_VENDOR_SPEC 0x10C` - **the FIFTH offset of a window this project's census has bounded to
+# four since 698** - and finally `CLOCK_CONTROL 0x2C` READ LAST, as a halfword, so that "this census
+# moved nothing" is a measurement. The shipped disassembly carries exactly those twelve loads
+# (eleven `ldr` and one `ldrh`, at 8000d8a4/8000d8c8/8000d90c/8000d950/8000d994/8000d9d8/
+# 8000da1c/8000da64/8000da74/8000da84/8000daa0/8000dadc), which is `_clk_loads=0xc` derived from the
+# artifact and not repeated from this sentence.
+#
+# **THE RUNG WROTE NOTHING, AND THAT IS PUBLISHED RATHER THAN ARGUED**: `_clk_writes=0x00000000` on
+# the path taken. The whole press's write set is unchanged from rungs 2 and 4 - `core_mem` four
+# times (120/0/120/120 on r5, the vendor's own order and offsets) and `hc_mem` exactly once
+# (`strb r6,[r5,#47]`, `SOFTWARE_RESET 0x2F`) - and its own build line says so:
+#   xnu_entry_698: the probe's stores, classified by base register and window - core_mem
+#   [120 0 120 120 ] on r5, hc_mem [47 ](strb ) on r5, gcc [], image [r6:0:str:16804
+#   r6:4:str:16804 ], ambiguous [], unknown [], unnamed-device []
+#
+# WHAT THE RUNG IS FOR, AND IT IS A CORRECTION TO A READING AND NOT TO A VERDICT. Since 692 the
+# probe has published `xnu_live_storage_gate` as `_cbcr & BIT(0)`, and bit 0 of a CBCR is
+# `CBCR_BRANCH_ENABLE_BIT` - THE BIT THE DRIVER WRITES, i.e. the REQUEST (`clock-local2.c:62`,
+# written at `:380-382`) - while what "the clock is running" means is `CBCR_BRANCH_OFF_BIT` = BIT(31)
+# (`:63`), which the framework polls to a bound before it believes the clock is on (`:386-387` ->
+# `branch_clk_halt_check`, `:333-360`, `HALT_CHECK_MAX_LOOPS 500`) and which its own handoff test
+# reads ALONE (`branch_clk_handoff`, `:490-497`). **The gate was reading HALF OF ITSELF.** 694's
+# `_cbcr=0x00004ff1` satisfies both halves, so nothing measured before this press is overturned; what
+# is new is that the census now publishes all three bits per branch. This press's readings:
+#   * ALL FOUR BRANCHES READ `en=1`, `off=0`, `hw=0` - requested AND running, and not under hardware
+#     gating (so the framework does NOT skip its own halt check). The state the pre-registration
+#     named as the one the old reading could not have told apart from "on" (`en=1`, `off=1`) is NOT
+#     this boot's state - the correction is to the reading, not to 694's verdict.
+#   * `_clk_ahb_cbcr=0x2000cff1`, and **`SDCC1_AHB_CBCR 0x04C8` had never been read by any run in
+#     this project.** It answers: the `pclk` branch `sdhci_msm_prepare_clocks` enables
+#     (`sdhci-msm.c:2315`) is already requested and already running, so the controller answering a
+#     version word is not a register file awake while its bus clock is not. The word also carries
+#     BIT(29), which is published and not named.
+#   * **AND THE DISAGREEMENT IS BETWEEN THE BRANCHES AND THE ROOT.** `_clk_rcg_cmd=0`, so
+#     `_clk_rcg_root_en=0` AND `_clk_rcg_root_status=0`, beside an apps branch that reads
+#     requested-and-running one register away. Two readings of one quantity, and they do not agree -
+#     which is how this project's most-repeated defect class arrives inside the clock tree. It is
+#     also why the driver's own order (rate, then enable, then POLL) is the order, and why the write
+#     rung can be BOUNDED: `_clk_rcg_update=0` and `_clk_rcg_cmd=0` are `rcg_update_config`'s poll's
+#     before-values, against its own `UPDATE_CHECK_MAX_LOOPS 500` (`clock-local2.c:44`, `:90-108`).
+#   * `_clk_bcr=0x0` with **`_clk_bcr_ares=0x0`** - `BCR_BLK_ARES_BIT` (`:66`) CLEAR, so the block is
+#     not held in reset, which is what gives 694's `_bcr` a meaning and makes every branch reading
+#     above a statement about a clock.
+#   * the apps root's current configuration: `_clk_rcg_src=0x5`, `_clk_rcg_div=0x7`,
+#     `_clk_rcg_mnd_mode=0`, `_clk_rcg_m=0x0`, `_clk_rcg_n=0x0`, `_clk_rcg_d=0xff` - a D-only
+#     divider, and `mnd_mode=0` beside `n=0` is the cross-check the pre-registration registered (the
+#     dual-edge value would need `N != 0`). NO RATE IS PUBLISHED: the parent's rate table
+#     (`gpll0`/`gpll4`/`cxo`, `clock-8974.c:1564-1574`) is not in this image, and a frequency
+#     computed here beside the framework's own cached rate would be the same defect one level up.
+#   * `_clk_vendor_spec=0x0` with `_clk_vendor_pwrsave=0` and `_clk_vendor_mclk_sel=0` - the two
+#     fields `sdhci_msm_set_clock` reads before it decides, and the MCLK select is what the write rung
+#     will read-modify-write.
+#   * both CD-calibration branches read `0x00000001` (`en=1`, `off=0`, `hw=0`). Their parents are
+#     `cxo_clk_src` and not the apps root (`clock-8974.c:2362-2373`), so they were the two that could
+#     have read differently - and they do not.
+#   * `_clk_clock_control_after=0x0003` - bit 0 and bit 1 set, **bit 2 `SD clock enable` STILL
+#     CLEAR**, so no clock has been set by this image or any before it and `sdhci_set_clock` is still
+#     entirely ahead of the driver.
+#
+# WHAT THE STEP'S FIRST BUILD FOUND WAS TWO DEFECTS IN A READER, and both were repaired before the
+# arm was frozen:
+#   * the store census counted EVERY materialization of a high register half, so a probe that uses
+#     one register as a `core_mem` base, then as an `hc_mem` load base, then as a GCC base was
+#     AMBIGUOUS BY CONSTRUCTION - the first mutation written for this rung was refused by the `AMB`
+#     clause instead of by the new GCC clause, i.e. refused for a reason that had nothing to do with
+#     what it tested. Repaired by classifying IN PROGRAM ORDER (the last device high half
+#     materialized before the store decides the window; a preceding IMAGE pair classifies IMG first).
+#     **A build clause that cannot say which address a store uses is a reading about the clause's own
+#     scope, not about the image.**
+#   * the repair itself misclassified image stores as GCC (measured on a synthetic body: an `str` to
+#     0x805541a4 classified `GCC`), because the device fallback paired a device high half with an
+#     image low half when both were true. Fixed, then CONTROLLED IN BOTH DIRECTIONS on eleven
+#     synthetic bodies against the reader taken from `git show HEAD:` - after a first attempt whose
+#     "old" column was extracted from the already-edited file and so measured nothing. **A control
+#     whose baseline comes from the thing under test is not a control.**
+#   * the three mutations, all refused after the repair: a store to 0xfc400000 -> the new GCC clause
+#     ("...and no rung of this ladder writes the clock controller at any value"); an unaligned 32-bit
+#     read -> the width census; `stb`->`sth` -> the per-window mnemonic clause.
+#
+# THE LADDER REPRODUCED, THE ENDING FIRED, AND THE RETURN IS A SEVENTH MEASUREMENT. The whole 1-4
+# ladder on a fresh boot: `_gcc_map=1`, `_map=1`, `_gate_read=1`, `_bcr=0`, `_cbcr=0x00004ff1`,
+# `_gate=1`, `_loads=6`, `_writes=0` at the gate; `_mode_bit=0` -> `_mode_bit_after=1` with
+# `_mci_version=0x10000011`; `_reg_loads` counting 1..10; and `_rst_stores=1`, `_rst_polls=1`,
+# `_rst_ticks=0xf` (15 ticks against 703's 16). `_post_t0=0x07404b0a`, `_post_cntfrq=0x0124f800`
+# (19,200,000 Hz), `_post_elapsed=0x06df694a` = 115,304,778 ticks = 6,005.46 ms, so the deadline was
+# crossed **104,778 ticks = 5.457 ms before the returning pass** - inside one ~2007 ms idle park, as
+# 694's 11.011, 697's 1,999.0, 698's 15.49 and 703's 10.31 ms were. `_post_end_calls=7` with
+# `_slot_post_calls=4`; the panic is the same one (`fault_addr=0xfa0065c`, the ending's own first
+# store to `RESTART_REASON`), and the runner's seam block is the block 697, 698 and 703 printed.
+# **Return time 25 s** - the seventh measurement (8, 17, 24, 27, 24, 27, 25) and still unattributed.
+#
+# THE LAYOUT IS STABLE FOR A REASON WORTH NAMING. `.text` grew 1248 bytes, yet `entry_storage_probe`
+# (8000cff8), the wrapper's `bl` (8047db2c), the seam (0x800472dc), `platform_cache_idle_enter/exit`
+# and `early_random` are all where they were, and only `cpu_idle_wfi` moved (672 bytes): the growth
+# was absorbed by alignment fill before `platform_cache_idle_enter`. **Every address the gate and the
+# runner pin is stable because a fill contracted, not because nothing moved**
+# (`mi4-linker-fill-term`).
+#
+# AND THE GOAL IS NOT MET. No clock, no `POWER_CONTROL` write, no `CLOCK_CONTROL` write, no command,
+# no sector, no partition table, no mount; the eMMC device is not addressed. No driver beyond the
+# fixture: the floor (pid 1, the driver's `open` answering 0 with the control open answering 2, the
+# fixture's 0xfeedface read into a user page) is met exactly as 520, 533, 699 and 703 met it.
+# **TWRP-to-storage stays withheld** - the user's condition is that the OS can already be entered and
+# STAYS, and the OS is not observed doing that.
+#
+# THE STEP THIS RUNG CLEARS THE WAY FOR: **the write rung**, and this press is what lets it be
+# bounded rather than experimental. `CORE_VENDOR_SPEC 0x10C`'s MCLK select is a read-modify-write of
+# a field the vendor also writes (`_clk_vendor_mclk_sel=0` is its before-value);
+# `clk_prepare_enable` on the AHB branch is a CBCR read-modify-write PLUS a halt handshake on a
+# branch with `has_sibling = 1` (whose `round_rate`/`list_rate` are `-EPERM` by the framework's own
+# rule); and `clk_set_rate` on the apps RCG is `M`/`N`/`D`, then `CFG_RCGR`, then `CMD_RCGR`'s update
+# bit AND A BOUNDED POLL of it - whose before-values `_clk_rcg_update=0` and `_clk_rcg_cmd=0` are now
+# measured.
+#
+# OWED AND CARRIED: the root-versus-branch disagreement above is owed a DECISION and not just a
+# reading (is the driver's order what this SoC needs, or does a clear apps-root `root_en` mean a
+# clock the branch reports as running is not reaching the block?); `CLOCK_CONTROL` bit 2 has never
+# been set by this image; BIT(29) of `_clk_ahb_cbcr` is published and unnamed; **the gate's narration
+# of `STAGE90_XNU_STORAGE_PROBE` is now FOUR RUNGS SHORT (2, 3, 4 and 5 are not described in it) -
+# peer lane, by message and never by edit**; a pre-registration's key names are not a check (three
+# whole-CBCR keys are spelled `_clk_cbcr_ahb`/`_clk_cbcr_cdccal_sleep`/`_clk_cbcr_cdccal_ff` in 704
+# section 3 and `_clk_ahb_cbcr`/`_clk_cdccal_sleep_cbcr`/`_clk_cdccal_ff_cbcr` in the image, and the
+# narration sweep checks the narration and not the doc); the width clause of the store census still
+# has not been observed to fire on a WIDENED DEVICE store; what actually returns a run; the ending's
+# first store still faulting into a panic; the 691 section 5 `entry_note_wfi` readback;
+# `entry_reset.h`'s false IMEM claim; 676 section 6 / 677 section 6; the 684-owed runner clause for
+# the 678 arm; `tools/xnu_dt_requirements.py` and the `"master"` value; the two peer-lane tripwire
+# repairs; and the seam address pinned in two files.
+#
+# THE CELL-BY-CELL ANSWER IS THE DOCUMENT
+# `docs/experiments/experiment-705-the-clock-surface-pressed-every-branch-running-and-the-root-off.md`;
+# the pre-registration it fills is `docs/experiments/experiment-704-the-rung-5-pre-registration-the-clock-surface-read-before-it-is-written.md`.

@@ -108,8 +108,8 @@
 #ifndef STAGE90_XNU_STORAGE_PROBE
 #define STAGE90_XNU_STORAGE_PROBE 0
 #endif
-#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 4
-#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store), 4 = 3 plus the driver's own SDHCI_RESET_ALL (ONE byte store to SOFTWARE_RESET 0x2F, plus a bounded poll of that same byte) - the rung that writes through hc_mem for the first time. Set no clock here: sdhci_msm_set_clock is the GCC (0xfc400000), a separate step."
+#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 5
+#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store), 4 = 3 plus the driver's own SDHCI_RESET_ALL (ONE byte store to SOFTWARE_RESET 0x2F, plus a bounded poll of that same byte) - the rung that writes through hc_mem for the first time - and 5 = 4 plus the CLOCK SURFACE read at its own widths (the GCC's four SDCC1 branches and the apps root's five RCG words, plus CORE_VENDOR_SPEC 0x10C), which is a rung of reads and stores NOTHING anywhere: sdhci_msm_set_clock is what would write those, and it is the next step. A value above the ladder is refused here rather than shaping an image whose switches claim something else."
 #endif
 
 /*
@@ -205,6 +205,71 @@ extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_befo
 #define ST_SDCC1_BCR            0x04C0u
 #define ST_SDCC1_CBCR           0x04C4u
 #define ST_SDCC1_CLK_ENABLE     0x1u
+
+/*
+ * **704: the third block's surface, and the four names below are `clock-8974.c`'s own.** The file
+ * already carried the BCR and one CBCR (`ST_SDCC1_BCR`/`ST_SDCC1_CBCR`, the pair the gate comes out of);
+ * what rung 5 adds is the other three branches of the same controller and the **root clock generator**
+ * their parent is, plus the one register on this path that is not a clock branch at all - all of it read
+ * and none of it written, because the writer is `sdhci_msm_set_clock` and that is the next step
+ * (`docs/experiments/experiment-704-...`, the pre-registration this rung is built from).
+ *
+ * **Why the AHB branch is the rung's open question.** `sdhci_msm_prepare_clocks` (`sdhci-msm.c:2315`)
+ * enables `pclk` *and* `clk`, and `msm8974.dtsi`'s SDCC1 node binds `pclk` to this branch
+ * (`SDCC1_AHB_CBCR`, `clock-8974.c:340`, `gcc_sdcc1_ahb_clk` at `:2339-2341`). **No run in this project
+ * has ever read this register**, and the controller answers its register file today - which *suggests*
+ * the branch is on, and is not the same statement. Its `branch_clk` is also the one that carries
+ * `has_sibling = 1`, which the framework's own rule turns into `-EPERM` for `round_rate` and
+ * `list_rate` (`clock-local2.c:444-446`, `:460-462`) - so enabling it is a different act from enabling
+ * the apps branch and rung 6 will have to say so.
+ */
+#define ST_GCC_SDCC1_AHB_CBCR           0x04C8u   /* clock-8974.c:340 - the pclk branch */
+#define ST_GCC_SDCC1_APPS_RCG           0x04D0u   /* clock-8974.c:140, :1584 - sdcc1_apps_clk_src's CMD_RCGR */
+#define ST_GCC_SDCC1_CDCCAL_SLEEP_CBCR  0x04E4u   /* clock-8974.c:341 */
+#define ST_GCC_SDCC1_CDCCAL_FF_CBCR     0x04E8u   /* clock-8974.c:342 */
+
+/*
+ * **The RCG's five words are four bytes apart and they are `clock-local2.c`'s own arithmetic**
+ * (`:49-53`: `CMD_RCGR_REG(x) (*(x)->base + (x)->cmd_rcgr_reg)`, `CFG_RCGR_REG` `+0x4`, `M_REG` `+0x8`,
+ * `N_REG` `+0xC`, `D_REG` `+0x10`), not an address anyone found in a table. All five are 4-aligned, so
+ * they are 32-bit reads and 698's width census checks them for free.
+ */
+#define ST_RCG_CMD              0x00u
+#define ST_RCG_CFG              0x04u
+#define ST_RCG_M                0x08u
+#define ST_RCG_N                0x0Cu
+#define ST_RCG_D                0x10u
+
+/*
+ * **The bits, each quoted from the file that defines it.** The three CBCR bits are
+ * `clock-local2.c:62-63` and `:67`; the BCR's one bit is `:66`; the RCG's four are `:61-65` and
+ * `:68-71`. They are named here rather than shifted inline because §2 of the rung-5 pre-registration is
+ * about exactly this: `CBCR_BRANCH_ENABLE_BIT` and `CBCR_BRANCH_OFF_BIT` are **two** bits about one
+ * quantity, and this file carried only the first of them as "the gate" from 692 until 704.
+ */
+#define ST_CBCR_ENABLE_BIT      (1u << 0)     /* CBCR_BRANCH_ENABLE_BIT - what the driver WRITES */
+#define ST_CBCR_OFF_BIT         (1u << 31)    /* CBCR_BRANCH_OFF_BIT    - what "running" means */
+#define ST_CBCR_HW_CTL_BIT      (1u << 1)     /* CBCR_HW_CTL_BIT - set => the framework skips its halt check */
+#define ST_BCR_ARES_BIT         (1u << 0)     /* BCR_BLK_ARES_BIT - the block reset, not on this path */
+#define ST_RCG_ROOT_EN_BIT      (1u << 1)     /* CMD_RCGR_ROOT_ENABLE_BIT */
+#define ST_RCG_UPDATE_BIT       (1u << 0)     /* CMD_RCGR_CONFIG_UPDATE_BIT - the bit rcg_update_config polls */
+#define ST_RCG_ROOT_STATUS_BIT  (1u << 31)    /* CMD_RCGR_ROOT_STATUS_BIT */
+#define ST_RCG_CFG_DIV_MASK     0x0000001Fu   /* CFG_RCGR_DIV_MASK, BM(4,0) */
+#define ST_RCG_CFG_SRC_MASK     0x00000700u   /* CFG_RCGR_SRC_SEL_MASK, BM(10,8) */
+#define ST_RCG_CFG_SRC_SHIFT    8u
+#define ST_RCG_CFG_MND_MASK     0x00003000u   /* MND_MODE_MASK, BM(13,12) - 0x2 is the dual-edge value */
+
+/*
+ * **`CORE_VENDOR_SPEC 0x10C`, the fifth `core_mem` offset and the one register `sdhci_msm_set_clock`
+ * reads before it decides anything** (`sdhci-msm.c:92`). It is a 4-aligned 32-bit register read with
+ * `st_read32`; the two fields below are the only two the driver's own code touches (`:93-96`), and the
+ * MCLK select is the one it writes on the non-HS400 path (`:2466-2494`). Rung 5 reads both and writes
+ * neither, which is what makes them rung 6's before-values.
+ */
+#define ST_CORE_VENDOR_SPEC     0x10Cu        /* sdhci-msm.c:92 - the fifth offset in this window */
+#define ST_VENDOR_PWRSAVE_BIT   (1u << 1)     /* CORE_CLK_PWRSAVE, :93 */
+#define ST_VENDOR_MCLK_MASK     0x00000300u   /* CORE_HC_MCLK_SEL_MASK, :96 - BM(9,8) */
+#define ST_VENDOR_MCLK_SHIFT    8u
 
 /*
  * **696: the vendor's sequence, and every offset below is a `#define` in the same file it is read out
@@ -665,6 +730,155 @@ static void st_driver_reset(void)
 }
 #endif /* STAGE90_XNU_STORAGE_PROBE >= 4 */
 
+#if STAGE90_XNU_STORAGE_PROBE >= 5
+/*
+ * **704: rung 5 - the clock surface, read and never written.** The rung-5 pre-registration
+ * (`docs/experiments/experiment-704-...`) is the design and §2 of it is the reason this function
+ * decomposes the gate into three bits instead of reusing the one the probe already has.
+ *
+ * **The defect this rung exists to correct, in one line.** `entry_storage_probe` has guarded this whole
+ * line since 692 with
+ *
+ *     gate = cbcr & ST_SDCC1_CLK_ENABLE;              // ST_SDCC1_CLK_ENABLE is BIT(0)
+ *
+ * and `BIT(0)` of a CBCR is `CBCR_BRANCH_ENABLE_BIT` - **the bit the driver writes**, i.e. the *request*
+ * (`clock-local2.c:62`, written at `:380-382`). What "the clock is running" means is a second bit two
+ * lines away, `CBCR_BRANCH_OFF_BIT` = `BIT(31)` (`:63`), which the framework then *polls* to a bound
+ * before it believes the clock is on (`:386-387` -> `branch_clk_halt_check`, `:333-360`) and which its
+ * own handoff test reads **alone**, without looking at `BIT(0)` at all (`branch_clk_handoff`, `:490-497`:
+ * `BIT(31)` set is `HANDOFF_DISABLED_CLK`). **The two can disagree**, and the ordinary state in which
+ * they do is a branch whose enable is requested while the root above it is off - the clock has not
+ * propagated, and a read through it is the bus wait nothing ends. 694's `_cbcr = 0x00004ff1` satisfies
+ * both halves, so nothing measured so far is overturned; what is corrected is that the guard was reading
+ * **half of itself**, and this rung publishes both halves for all four branches.
+ *
+ * **Why this rung writes nothing, stated as a reading and not as a comment.** The rung's whole claim is
+ * that these registers can be read at all and what they say; the writer is `sdhci_msm_set_clock`, whose
+ * first write would be a read-modify-write of a field on a branch whose halt state this run has never
+ * read. `_clk_writes` is published as 0 on every path, and the store census in `build_entry.sh` refuses
+ * a build in which this window holds any store at any rung - so the sentence "this rung does not write
+ * the clock" is a property of the linked image rather than of this paragraph.
+ *
+ * **What it does not do**: no rate. The MND and source-select *fields* are published, and converting
+ * them to Hz needs the parent's rate (`gpll0`/`gpll4`/`cxo`, `clock-8974.c:1564-1574`), which is a table
+ * this image does not carry. Publishing a computed frequency beside the framework's own cached
+ * `msm_host->clk_rate` would be the same one-value-two-definitions defect one level up.
+ */
+static void st_clock_census(void)
+{
+    uint32_t loads = 0u;
+    uint32_t bcr, apps, ahb, cd_sleep, cd_ff;
+    uint32_t rcg_cmd, rcg_cfg, rcg_m, rcg_n, rcg_d;
+    uint32_t vendor;
+
+    ST_LIVE("xnu_live_storage_clk_calls", 1u);
+    ST_LIVE("xnu_live_storage_clk_writes", 0u);
+
+    /*
+     * **The block reset word, and the bit 694 published as a number.** `_bcr` has been in the log since
+     * 694 without a key saying what a bit of it means; `BCR_BLK_ARES_BIT` (`clock-local2.c:66`) is the
+     * only one that matters here, and `ares = 0` is what makes the branch readings below mean "the clock
+     * is off" rather than "the block is held in reset and nothing it says is about anything".
+     */
+    bcr = st_read32(ST_GCC_BASE + ST_SDCC1_BCR);
+    loads++;
+    ST_LIVE("xnu_live_storage_clk_bcr", bcr);
+    ST_LIVE("xnu_live_storage_clk_bcr_ares", (bcr & ST_BCR_ARES_BIT) ? 1u : 0u);
+
+    /*
+     * **The four branches, each as a word and as the three bits the framework itself distinguishes.**
+     * `en` is the request, `off` is the halt state, and `hw` is `CBCR_HW_CTL_BIT` (`:67`) - set means the
+     * branch is under hardware gating, and the framework skips its own halt check there (`:346-347`), so
+     * an `off` bit is not consulted in that mode and a reader has to see it to know that.
+     */
+    apps = st_read32(ST_GCC_BASE + ST_SDCC1_CBCR);
+    loads++;
+    ST_LIVE("xnu_live_storage_clk_apps_cbcr", apps);
+    ST_LIVE("xnu_live_storage_clk_apps_en", (apps & ST_CBCR_ENABLE_BIT) ? 1u : 0u);
+    ST_LIVE("xnu_live_storage_clk_apps_off", (apps & ST_CBCR_OFF_BIT) ? 1u : 0u);
+    ST_LIVE("xnu_live_storage_clk_apps_hw", (apps & ST_CBCR_HW_CTL_BIT) ? 1u : 0u);
+
+    ahb = st_read32(ST_GCC_BASE + ST_GCC_SDCC1_AHB_CBCR);
+    loads++;
+    ST_LIVE("xnu_live_storage_clk_ahb_cbcr", ahb);
+    ST_LIVE("xnu_live_storage_clk_ahb_en", (ahb & ST_CBCR_ENABLE_BIT) ? 1u : 0u);
+    ST_LIVE("xnu_live_storage_clk_ahb_off", (ahb & ST_CBCR_OFF_BIT) ? 1u : 0u);
+    ST_LIVE("xnu_live_storage_clk_ahb_hw", (ahb & ST_CBCR_HW_CTL_BIT) ? 1u : 0u);
+
+    cd_sleep = st_read32(ST_GCC_BASE + ST_GCC_SDCC1_CDCCAL_SLEEP_CBCR);
+    loads++;
+    ST_LIVE("xnu_live_storage_clk_cdccal_sleep_cbcr", cd_sleep);
+    ST_LIVE("xnu_live_storage_clk_cdccal_sleep_en", (cd_sleep & ST_CBCR_ENABLE_BIT) ? 1u : 0u);
+    ST_LIVE("xnu_live_storage_clk_cdccal_sleep_off", (cd_sleep & ST_CBCR_OFF_BIT) ? 1u : 0u);
+    ST_LIVE("xnu_live_storage_clk_cdccal_sleep_hw", (cd_sleep & ST_CBCR_HW_CTL_BIT) ? 1u : 0u);
+
+    cd_ff = st_read32(ST_GCC_BASE + ST_GCC_SDCC1_CDCCAL_FF_CBCR);
+    loads++;
+    ST_LIVE("xnu_live_storage_clk_cdccal_ff_cbcr", cd_ff);
+    ST_LIVE("xnu_live_storage_clk_cdccal_ff_en", (cd_ff & ST_CBCR_ENABLE_BIT) ? 1u : 0u);
+    ST_LIVE("xnu_live_storage_clk_cdccal_ff_off", (cd_ff & ST_CBCR_OFF_BIT) ? 1u : 0u);
+    ST_LIVE("xnu_live_storage_clk_cdccal_ff_hw", (cd_ff & ST_CBCR_HW_CTL_BIT) ? 1u : 0u);
+
+    /*
+     * **The root clock generator the apps branch hangs off, and `_rcg_update` is the premise of the
+     * poll the next rung will run.** `rcg_update_config` (`clock-local2.c:90-108`) sets
+     * `CMD_RCGR_CONFIG_UPDATE_BIT` and then polls *that same bit* clear to a bound of
+     * `UPDATE_CHECK_MAX_LOOPS 500` (`:44`) - so a `_rcg_update = 0` before anything writes is what makes
+     * "a bit that does not clear afterwards is a failed update" a reading rather than an assumption.
+     * Read in the same order the poll would find them: command, then configuration, then the three MND
+     * words, which are `set_rate_mnd`'s own inputs (`:126-146`) written **before** the config word.
+     */
+    rcg_cmd = st_read32(ST_GCC_BASE + ST_GCC_SDCC1_APPS_RCG + ST_RCG_CMD);
+    loads++;
+    ST_LIVE("xnu_live_storage_clk_rcg_cmd", rcg_cmd);
+    ST_LIVE("xnu_live_storage_clk_rcg_root_en", (rcg_cmd & ST_RCG_ROOT_EN_BIT) ? 1u : 0u);
+    ST_LIVE("xnu_live_storage_clk_rcg_update", (rcg_cmd & ST_RCG_UPDATE_BIT) ? 1u : 0u);
+    ST_LIVE("xnu_live_storage_clk_rcg_root_status", (rcg_cmd & ST_RCG_ROOT_STATUS_BIT) ? 1u : 0u);
+
+    rcg_cfg = st_read32(ST_GCC_BASE + ST_GCC_SDCC1_APPS_RCG + ST_RCG_CFG);
+    loads++;
+    ST_LIVE("xnu_live_storage_clk_rcg_cfg", rcg_cfg);
+    ST_LIVE("xnu_live_storage_clk_rcg_src", (rcg_cfg & ST_RCG_CFG_SRC_MASK) >> ST_RCG_CFG_SRC_SHIFT);
+    ST_LIVE("xnu_live_storage_clk_rcg_div", rcg_cfg & ST_RCG_CFG_DIV_MASK);
+    ST_LIVE("xnu_live_storage_clk_rcg_mnd_mode", (rcg_cfg & ST_RCG_CFG_MND_MASK) >> 12);
+
+    rcg_m = st_read32(ST_GCC_BASE + ST_GCC_SDCC1_APPS_RCG + ST_RCG_M);
+    loads++;
+    ST_LIVE("xnu_live_storage_clk_rcg_m", rcg_m);
+    rcg_n = st_read32(ST_GCC_BASE + ST_GCC_SDCC1_APPS_RCG + ST_RCG_N);
+    loads++;
+    ST_LIVE("xnu_live_storage_clk_rcg_n", rcg_n);
+    rcg_d = st_read32(ST_GCC_BASE + ST_GCC_SDCC1_APPS_RCG + ST_RCG_D);
+    loads++;
+    ST_LIVE("xnu_live_storage_clk_rcg_d", rcg_d);
+
+    /*
+     * **The one register on this path that is not a clock branch**, and the fifth offset in a window the
+     * census has bounded to four since 698. `sdhci_msm_set_clock` reads it at five sites and writes a
+     * field of it at five more; rung 5 reads both fields and writes neither, which is what makes them the
+     * write rung's before-values.
+     */
+    vendor = st_read32(ST_CORE_MEM_BASE + ST_CORE_VENDOR_SPEC);
+    loads++;
+    ST_LIVE("xnu_live_storage_clk_vendor_spec", vendor);
+    ST_LIVE("xnu_live_storage_clk_vendor_pwrsave", (vendor & ST_VENDOR_PWRSAVE_BIT) ? 1u : 0u);
+    ST_LIVE("xnu_live_storage_clk_vendor_mclk_sel",
+            (vendor & ST_VENDOR_MCLK_MASK) >> ST_VENDOR_MCLK_SHIFT);
+
+    /*
+     * **The after-value, and it is the same register 703 read after the reset.** `CLOCK_CONTROL 0x2C`
+     * read last means "the census moved nothing" is a measurement: bit 2 (`SD clock enable`) still clear
+     * says this rung did not set a clock, and bits 0/1 still set say it did not clear one either.
+     */
+    ST_LIVE("xnu_live_storage_clk_clock_control_after",
+            (uint32_t)st_read16(ST_HC_MEM_BASE + ST_SDHCI_CLOCK_CONTROL));
+    loads++;
+
+    ST_LIVE("xnu_live_storage_clk_loads", loads);
+    ST_LIVE("xnu_live_storage_clk_done", 1u);
+}
+#endif /* STAGE90_XNU_STORAGE_PROBE >= 5 */
+
 void entry_storage_probe(void)
 {
     uint32_t slot_before = 0u, desc = 0u, mapped, section, hc_section;
@@ -875,5 +1089,18 @@ void entry_storage_probe(void)
      */
     if (g_storage_mode_complete != 0u)
         st_driver_reset();
+#endif
+#if STAGE90_XNU_STORAGE_PROBE >= 5
+    /*
+     * **704: rung 5, and it is placed after the reset for the same reason the reset is placed after the
+     * census.** The clock surface is the *next* act's before-values (`sdhci_msm_set_clock` is what writes
+     * these registers), and a before-value can only be taken before - so a run that dies in the write rung
+     * still carries what the block's clock tree looked like on a boot nobody had touched. It is guarded by
+     * the same `g_storage_mode_complete` interlock every rung above 2 uses: a block that did not answer a
+     * version word is a block whose clock tree must not be read either, because the same branch gates
+     * both. The rung writes nothing at any path, so the guard is about *meaning* and not about safety.
+     */
+    if (g_storage_mode_complete != 0u)
+        st_clock_census();
 #endif
 }
