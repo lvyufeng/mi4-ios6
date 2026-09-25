@@ -4221,8 +4221,36 @@ struct stage90_xnu_macho_loader_result {
  *
  * 90s is 3x the hardware watchdog's 33s bite and 1.5x the dead-man's 60s budget, so neither
  * net is rushed.
+ *
+ * **The paragraph above was false as built, and the check below is what makes it a property
+ * instead of a claim.** `timebase_elapsed_us` multiplied in 32 bits, so it could not return
+ * any value above 4294967295/96 = 44,739,242us - and the only caller with a window that long
+ * is this deadline. The guard in `stage90_selftest_bounded_spin` was therefore
+ * *unsatisfiable*: the spin never broke, `platform_reboot()` behind it was dead code, and the
+ * one run whose design says "the device comes back without being touched" was the one run
+ * that could hang until someone held the power button. The conversion itself is fixed
+ * (`timebase.c`, where the old comment's "for short intervals used here, low 32-bit deltas are
+ * enough" is replaced by the two bounds that are actually load-bearing).
+ *
+ * What remains is the deadline's own bound: its tick count has to fit the low 32 bits of the
+ * delta `timebase_elapsed_us` takes (`(uint32_t)(end - start)`), or the delta wraps before the
+ * deadline is ever reached and the check is unreachable again.
+ *
+ * The preprocessor evaluates this in 64-bit arithmetic, which is what makes it a bound on the
+ * *value* rather than a second copy of the overflow under test. A second check on the
+ * function's `uint32_t` return is **not** written, because it cannot fire: ticks are 19.2x
+ * microseconds, so bounding the ticks also bounds the microseconds, at 223,696,213us. One
+ * check that can fail beats two where one is a restatement.
+ *
+ * The `#define` comes before the check, and that order is the check's whole value: an `#if`
+ * written above it would read the macro as 0, pass for every input, and leave a guard that
+ * prints nothing and guards nothing.
  */
 #define STAGE90_SELFTEST_DEADLINE_US 90000000u
+
+#if (STAGE90_SELFTEST_DEADLINE_US * 96u / 5u) > 4294967295u
+#error "STAGE90_SELFTEST_DEADLINE_US exceeds the 32-bit tick delta timebase_elapsed_us takes"
+#endif
 
 /*
  * Produce a boot_args conforming to the contract in XNU's own entry code
@@ -7094,6 +7122,7 @@ void timebase_init(void);
 uint64_t timebase_ticks(void);
 uint32_t timebase_freq_hz(void);
 uint32_t timebase_elapsed_us(uint64_t start, uint64_t end);
+uint32_t timebase_usec_to_ticks(uint32_t usec);
 void delay_us(uint32_t usec);
 void run_timebase_selftest(void);
 

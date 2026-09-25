@@ -147,11 +147,12 @@ static inline void write_cntp_tval(uint32_t v)
     __asm__ volatile ("isb" ::: "memory");
 }
 
-static uint32_t timer_usec_to_ticks(uint32_t usec)
-{
-    /* CNTFRQ is 19.2 MHz on cancro: ticks = usec * 19.2 = usec * 96 / 5. */
-    return (usec * 96u) / 5u;
-}
+/*
+ * The `usec -> ticks` conversion used to be defined here as well, identically to
+ * `timebase.c`'s. It is not any more: one conversion with one definition, so a fix in either
+ * place cannot leave the other wrong. See `timebase_usec_to_ticks` for why the product's range
+ * and the division's width are both load-bearing.
+ */
 
 static void generic_timer_shutdown(void)
 {
@@ -416,7 +417,7 @@ int gic_timer_selftest(void)
 {
     const uint32_t dist_base = GIC_state_stage90.distBase;
     const uint32_t cpu_base = GIC_state_stage90.cpuBase;
-    const uint32_t timer_ticks = timer_usec_to_ticks(5000u);
+    const uint32_t timer_ticks = timebase_usec_to_ticks(5000u);
     const uint32_t enable_before = mmio_read32(dist_base + GICD_ISENABLER0);
     uint64_t start;
 
@@ -519,7 +520,7 @@ int stage90_arm_pc_sampling_watchdog(uint32_t interval_us, uint32_t max_samples)
 {
     const uint32_t dist_base = GIC_state_stage90.distBase;
     const uint32_t cpu_base = GIC_state_stage90.cpuBase;
-    const uint32_t interval_ticks = timer_usec_to_ticks(interval_us);
+    const uint32_t interval_ticks = timebase_usec_to_ticks(interval_us);
 
     xnu_log_puts("stage90 pc-sampling watchdog: arming\n");
     xnu_log_kv32("watchdog_interval_us", interval_us);

@@ -1205,6 +1205,22 @@ void stage90_main(void)
     (void)stage90_hw_watchdog_arm(STAGE90_HW_WATCHDOG_TIMEOUT_S);
 #endif
 
+    /*
+     * The self-tests are NOT here. They sit after `build_stage90_apple_dt()`, below, and the
+     * reason is a property of the *image* rather than of the code: 515's repair has to be in
+     * two command lines (this file's `/chosen` `boot-args` property and `boot_args.c`'s
+     * `CommandLine`), the gate counts the two literals in the boot image, and a spin entered
+     * before the DT build makes `build_stage90_apple_dt` unreachable - so the compiler drops
+     * the static function and its literal with it, and the image carries ONE copy. Measured:
+     * an arm built that way is refused by `preflight_boot_check.sh` at the two-command-lines
+     * clause after its payload bytes were already parked and recorded. The watchdog is armed
+     * above, so the DT build is already under the hardware net while the self-test waits.
+     */
+
+    build_stage90_apple_dt(&b);
+    dt_len = apple_dt_finish(&b);
+    log_kv32("built_apple_dt_len", dt_len);
+
 #if STAGE90_HW_WATCHDOG_SELFTEST
     /*
      * Hardware-watchdog self-test: the software dead-man is deliberately NOT armed, so
@@ -1212,9 +1228,14 @@ void stage90_main(void)
      * STAGE90_HW_WATCHDOG_TIMEOUT_S (plus the bite gap) the last-resort reset is proven.
      *
      * The spin is bounded, so a watchdog that does NOT fire still returns the device - via
-     * PS_HOLD, at STAGE90_SELFTEST_DEADLINE_US - and says so. See that macro for why: an
+     * PS_HOLD, at STAGE90_SELFTEST_DEADLINE_US - and says so. See that macro for why, and
+     * for the 32-bit conversion defect that made this bound unreachable until 2026-09-25: an
      * unbounded spin here would make the run whose purpose is to prove the recovery net the
-     * one run that could hang worst.
+     * one run that could hang worst, which is the one thing this arm must not be.
+     *
+     * Placed after the DT build for the reason given above: it costs the arm nothing (the
+     * builder is pure memory writes under an already-armed watchdog) and it is what keeps
+     * this image the same payload as every other arm of this stage, at two command lines.
      */
     /* The bark/bite gap is 3s, so the reset lands at TIMEOUT_S + 3. Say the number rather
      * than a literal, since the timeout has already changed once (30 -> 25, see stage90.h). */
@@ -1234,17 +1255,13 @@ void stage90_main(void)
      * success to the software dead-man alone, build with STAGE90_HW_WATCHDOG=0.
      *
      * Bounded for the same reason as the other self-test, with a longer deadline since the
-     * dead-man's own budget is 60s.
+     * dead-man's own budget is 60s. Moved here with it - see the placement comment above.
      */
     (void)stage90_arm_deadman_reset();
     log_puts("MI4IOS6_STAGE90 deadman SELFTEST: spinning; the dead-man should dump and reboot us at ~60s\n");
     stage90_selftest_bounded_spin(STAGE90_SELFTEST_DEADLINE_US,
                                   "deadman SELFTEST: deadline reached - the dead-man did NOT fire");
 #endif
-
-    build_stage90_apple_dt(&b);
-    dt_len = apple_dt_finish(&b);
-    log_kv32("built_apple_dt_len", dt_len);
     {
         /*
          * The seed is a simulated input, so the run's log says which one it was. `sum` and

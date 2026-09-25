@@ -145,3 +145,66 @@ set=armed-seam-poc-a43304f2 sha256=e3af19b4c2d57815277c7d7dff9e2f573d74cd00d1cca
 set=armed-seam-poc-a43304f2 sha256=61c44584b5ec86826ce42f0d3eb789f1597481d67387ea1343921b429d57bf8f bytes=2104 file=xnu_arm_entry-sources.txt role=entry-source-manifest
 set=armed-seam-poc-a43304f2 sha256=ccbd755ffa7035e31f43d286f711ad61c682734e64050f9239056435d7bdeb29 bytes=6019072 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
 set=armed-seam-poc-a43304f2 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-member-all-the-same
+
+# 666 (2026-09-25): the WATCHDOG-SELFTEST arm - the arm experiment-664 section 4 concluded should be
+# next, built for the first time here, and the first set this record has had to ADMIT rather than revert
+# to. The gate refused the live out/ with `NO set recorded ... nearest: armed-seam-poc-a43304f2(5/11)`
+# and named this remedy, which is the order this file has always specified: recorded BEFORE its press.
+#
+# WHY THE ARM EXISTS. 664 split the next rehearsal in two: the PS_HOLD forced reset is proven by every
+# returning run (`entry_epilogue` is the entry image's own run-ending store), while the hardware
+# watchdog's bite has never been observed to fire - against five hangs with no return. So this arm
+# forces the bite ALONE. `STAGE90_HW_WATCHDOG_SELFTEST=1` arms the watchdog, deliberately does NOT arm
+# the software dead-man, and spins. Its verdict is the log's own content, not a timing: a device back
+# without the deadline line means the bite fired; the deadline line - `hw_watchdog SELFTEST: deadline
+# reached - the hardware watchdog did NOT fire` - means it did not, and PS_HOLD returned the device.
+# Both directions print, so both directions are readable, which is 665 section 5's requirement.
+#
+# **THE FALLBACK THAT MAKES THAT ARM SAFE WAS BROKEN UNTIL THIS STEP, AND BUILDING THE ARM IS WHAT FOUND
+# IT.** `timebase_elapsed_us` multiplied in 32 bits, so it could not return any value above 44,739,242us;
+# the deadline is 90,000,000us. The bounded spin's exit test was therefore unsatisfiable: the spin was
+# unbounded and `platform_reboot()` behind it was dead code, so the one arm whose own comment promises
+# "the device comes back without being touched" was the one arm that could not - it could have hung until
+# someone held the power button. Measured three ways (the object's 32-bit `add r0, r0, r0, lsl #2`
+# product; a host program on the exact types; and the guard firing only after the conversion was fixed).
+# The conversion is repaired exactly and without a libgcc helper (`timebase.c`), and the deadline's
+# reachability is now a compile-time `#error` in stage90.h rather than a sentence in a comment -
+# falsified by raising the deadline past the 32-bit tick delta and watching the build refuse.
+#
+# **THIS ARM WAS BUILT TWICE AND ONLY THE SECOND BUILD IS RECORDED HERE.** The first build
+# (`stage90-qcdt.img` 23fa1138..., parked at out/stage90/frozen/armed-selftest-wdog-23fa1138/) put the
+# self-test's spin BEFORE `build_stage90_apple_dt()`. A spin that never returns makes that static
+# function unreachable, the compiler drops it, and the image then carries ONE copy of
+# `up_style_idle_exit=1` where 515's repair has to be in two command lines - so the gate refused it at
+# exactly that clause, after its bytes had already been parked and recorded. The repair is a placement:
+# the self-test now sits AFTER the DT build (the watchdog is still armed before anything else, so the
+# builder runs under the hardware net), the 515 leg in `build.sh` passes without any skip, and the image
+# carries the token twice. **The first build's park is left in place and named, and it must not be sent**
+# - it is not a set in this file, and no line below matches it. The `build.sh` clause this step had
+# briefly added to SKIP the 515 leg for a self-test build was deleted with it: the gate re-runs that
+# property itself, so a skip could only ever have let through an image the gate then refuses.
+#
+# THE TOKEN COMES FROM THE PAYLOAD, NOT THE ENTRY, and it is the one naming rule this file breaks. The
+# three sets above are named for the entry image because the entry image was what changed. Here the entry
+# is byte-identical to armed-seam-poc-a43304f2 (a43304f2..., the seam arm, SEAM_POC=1 SEAM_MEASURE=0
+# IDLE_NO_SLEEP=0, unchanged) - the payload never reaches the handoff on this arm, so the entry's seam
+# switches cannot affect it either way - and what changes is the payload's own switch. The token is the
+# first eight of the payload qcdt's hash, i.e. of the artifact `fastboot boot` sends.
+#
+# SUPERSEDES ONE SENTENCE RATHER THAN EDITING IT. The role= of the acting arm's stage90-qcdt.img line
+# above reads "the arm the next press sends"; from this step that is this set. The line is not rewritten
+# - a step's record is not tidied by a later step, the same rule the parked absolute-pathed manifest
+# follows above - and this paragraph is the correction.
+#
+# MEASURED 2026-09-25, each file hashed in place in out/stage90/frozen/armed-selftest-wdog-ef0361a2/.
+set=armed-selftest-wdog-ef0361a2 sha256=ef0361a2bd761eb70b5d951b73f6618137991221742226e52a9ac9493a6753af bytes=8540160 file=stage90-qcdt.img role=qcdt-wrapped-payload-this-is-what-fastboot-boot-sends-and-the-arm-the-next-press-sends-STAGE90_HW_WATCHDOG_SELFTEST-1-STAGE90_XNU_ENTRY-1-and-THIS-BUILD-is-the-one-whose-image-carries-up_style_idle_exit-1-twice
+set=armed-selftest-wdog-ef0361a2 sha256=fdcea7eea75c44d2c488524462db8e9d2dd412a5c0e38b4fe603e3f8debcf84b bytes=6015252 file=stage90.bin role=raw-payload-bin-this-one-arms-the-watchdog-and-not-the-dead-man-and-then-spins-after-the-DT-build
+set=armed-selftest-wdog-ef0361a2 sha256=7d54be1ee31dd2444e1b0aac4343043cc9f8f84956cfa5cfc256206d65115be5 bytes=681 file=stage90-build-config.txt role=payload-switch-set-as-built-AND-THE-ONE-DUMP-THAT-NAMES-THIS-ARM-its-line-16-reads-STAGE90_HW_WATCHDOG_SELFTEST-1-where-all-three-sets-above-read-0u-so-this-set-is-identifiable-from-the-payloads-own-record-and-not-only-from-this-file-NOTE-this-file-is-byte-identical-in-both-builds-of-this-arm-because-the-two-differ-in-placement-and-not-in-switches
+set=armed-selftest-wdog-ef0361a2 sha256=20e2c0fd0d8aed55b5a09517a7082f8389fbb3027b36bd0c366e1719e7881849 bytes=6077272 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-selftest-wdog-ef0361a2 sha256=316553e7714e54f5e181bd0d21f1ef1eef9c78500861caff5fcbe140648908e6 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-selftest-wdog-ef0361a2 sha256=a43304f267f47f650b0fbcbbd370e9286c38d974518553293c9b453de1dc1409 bytes=5519996 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-this-is-the-ACTING-seam-entry-a43304f2-and-this-arm-does-NOT-change-it-the-payload-resets-before-the-handoff
+set=armed-selftest-wdog-ef0361a2 sha256=f4ef57fcf9361be238359efac523f35da33a2094a8a5b0302560c26208871761 bytes=6698664 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-selftest-wdog-ef0361a2 sha256=e3af19b4c2d57815277c7d7dff9e2f573d74cd00d1cca46558be845acf3dbc41 bytes=756 file=xnu_arm_entry-config.txt role=entry-config-record-its-line-names-the-entry-a43304f2-and-SEAM_POC-1-SEAM_MEASURE-0-unchanged-by-this-arm
+set=armed-selftest-wdog-ef0361a2 sha256=61c44584b5ec86826ce42f0d3eb789f1597481d67387ea1343921b429d57bf8f bytes=2104 file=xnu_arm_entry-sources.txt role=entry-source-manifest
+set=armed-selftest-wdog-ef0361a2 sha256=149999c72abc3b164f0132947cff99482a44f47289041879bfd54363a7fec1f0 bytes=6019072 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
+set=armed-selftest-wdog-ef0361a2 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-member-all-the-same
