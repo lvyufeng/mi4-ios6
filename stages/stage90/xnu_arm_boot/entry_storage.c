@@ -108,8 +108,8 @@
 #ifndef STAGE90_XNU_STORAGE_PROBE
 #define STAGE90_XNU_STORAGE_PROBE 0
 #endif
-#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 5
-#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store), 4 = 3 plus the driver's own SDHCI_RESET_ALL (ONE byte store to SOFTWARE_RESET 0x2F, plus a bounded poll of that same byte) - the rung that writes through hc_mem for the first time - and 5 = 4 plus the CLOCK SURFACE read at its own widths (the GCC's four SDCC1 branches and the apps root's five RCG words, plus CORE_VENDOR_SPEC 0x10C), which is a rung of reads and stores NOTHING anywhere: sdhci_msm_set_clock is what would write those, and it is the next step. A value above the ladder is refused here rather than shaping an image whose switches claim something else."
+#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 6
+#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store), 4 = 3 plus the driver's own SDHCI_RESET_ALL (ONE byte store to SOFTWARE_RESET 0x2F, plus a bounded poll of that same byte) - the rung that writes through hc_mem for the first time - 5 = 4 plus the CLOCK SURFACE read at its own widths (the GCC's four SDCC1 branches and the apps root's five RCG words, plus CORE_VENDOR_SPEC 0x10C), a rung of reads that stores NOTHING anywhere, and 6 = 5 plus THE DRIVER'S FIRST CLOCK SET (sdhci_msm_set_clock at 400 kHz): four CBCR read-modify-writes of BIT(0) on the GCC each followed by a bounded halt check, two CORE_VENDOR_SPEC 0x10C read-modify-writes (MCLK select <- DFLT, HC_SELECT_IN cleared), and the standard's two CLOCK_CONTROL halfwords with the stability poll between them - SIX stores and NO rate, because sup_clock == msm_host->clk_rate on the first call (experiment-706 section 2) - and it writes neither BCR 0x04C0 nor any RCG word, nor POWER_CONTROL 0x29. A value above the ladder is refused here rather than shaping an image whose switches claim something else."
 #endif
 
 /*
@@ -223,6 +223,13 @@ extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_befo
  * `list_rate` (`clock-local2.c:444-446`, `:460-462`) - so enabling it is a different act from enabling
  * the apps branch and rung 6 will have to say so.
  */
+#define ST_GCC_SDCC1_APPS_CBCR          0x04C4u   /* clock-8974.c:339 - the clk branch, and it is the
+                                                  * SAME WORD the gate comes out of (`ST_SDCC1_CBCR`
+                                                  * above): the gate is this branch's `BIT(0)`. The
+                                                  * second name is 704's, kept because every rung-1..5
+                                                  * reading is published under `_gate`/`_cbcr` and
+                                                  * renaming those keys would move a record a press
+                                                  * already answered */
 #define ST_GCC_SDCC1_AHB_CBCR           0x04C8u   /* clock-8974.c:340 - the pclk branch */
 #define ST_GCC_SDCC1_APPS_RCG           0x04D0u   /* clock-8974.c:140, :1584 - sdcc1_apps_clk_src's CMD_RCGR */
 #define ST_GCC_SDCC1_CDCCAL_SLEEP_CBCR  0x04E4u   /* clock-8974.c:341 */
@@ -341,8 +348,11 @@ static uint16_t st_read16(uint32_t addr)
  * this code rather than of the bus.** The vendor uses `writel_relaxed`/`readl_relaxed` and relies on
  * the interconnect; this image has one barrier already written down in the same shape (`entry_irq.c`'s
  * write helper) and the project's own reset path is specified as a store followed by `dsb sy`, so the
- * device write here is that shape too. Three of them per run at most, against a block whose clock this
- * arm has already read as enabled.
+ * device write here is that shape too. Ten of them per run at most - the vendor's mode sequence's four,
+ * then rung 6's four branch enables and two CORE_VENDOR_SPEC read-modify-writes - beside the byte store
+ * of the reset and the two CLOCK_CONTROL halfwords, and every one is a read-modify-write (or an
+ * already-set bit's own value) of a field the vendor's own driver writes, against a block whose clock
+ * this arm has already read as enabled.
  */
 static void st_write32(uint32_t addr, uint32_t value)
 {
@@ -879,6 +889,297 @@ static void st_clock_census(void)
 }
 #endif /* STAGE90_XNU_STORAGE_PROBE >= 5 */
 
+#if STAGE90_XNU_STORAGE_PROBE >= 6
+/*
+ * **706: rung 6 - the driver's first clock set, and the rate write that is not on this path.**
+ * `docs/experiments/experiment-706-...md` is the pre-registration and the whole of this block is its
+ * section 1 read out of the vendor's own source, in the vendor's own order:
+ *
+ *   `sdhci_do_set_ios` (`sdhci.c:1635-1636`) -> `sdhci_set_clock(host, 400000)` -> the vendor hook
+ *   (`sdhci.c:1211-1214`) -> `sdhci_msm_set_clock` (`sdhci-msm.c:2402-2535`) -> then the standard's own
+ *   divisor arithmetic and its two `CLOCK_CONTROL` halfwords (`sdhci.c:1254-1267`, `:1285-1306`).
+ *
+ * **`clock = 400000` is a reading, not a choice.** `mmc_rescan_try_freq(host, host->f_min)` sets
+ * `host->f_init = freq` (`drivers/mmc/core/core.c:3077-3079`, called at `:3251`) and `host->f_min` is
+ * `sup_clk_table[0]` (`sdhci-msm.c:2233`) = the first entry of the DT's `qcom,clk-rates`
+ * (`msm8974pro.dtsi:1768`), i.e. 400000.
+ *
+ * **And the rate write is NOT on this path, which is section 2's finding and the reason this rung is
+ * small.** `sdhci_msm_get_sup_clk_rate(host, 400000)` returns 400000 and `msm_host->clk_rate` was
+ * initialised to `get_min_clock(host)` = the same 400000 (`:2795`), so `sup_clock != msm_host->clk_rate`
+ * is false and `clk_set_rate` - the only thing here that writes the RCG - is skipped. The driver believes
+ * the clock is 400 kHz while 705 measured the register file at `gpll4`/div 4 (192 MHz): two readings of
+ * one quantity that disagree by 480x, and nothing reconciles them until the first *speed change*. So the
+ * RCG's five words are read here (rung 5 did that) and **written nowhere**, `_clk_set_rate_writes = 0`.
+ *
+ * **Why the writes below cannot gate a clock, and what the build refuses instead.** The four CBCR stores
+ * are read-modify-writes of `BIT(0)` - a bit 705 measured *set* on all four branches - so they cannot
+ * disable one; the two `CORE_VENDOR_SPEC` stores touch only `MCLK_SEL` (`2 << 8`) and the `HC_SELECT_IN`
+ * pair, neither of which gates anything. **`BCR 0x04C0` (block reset) and the whole RCG (`0x04D0`-`0x04E0`)
+ * are refused by `build_entry.sh` rather than avoided here** - the GCC window's store set is asserted to
+ * be exactly the four branch offsets in order - and `POWER_CONTROL 0x29` stays unreachable in the
+ * `hc_mem` window, because the driver's power path writes **0** there (a bus-off request) and then waits
+ * unbounded (`sdhci.c:1352-1355`, `sdhci-msm.c:2179-2209`): that act is the next rung's subject.
+ *
+ * **And the AHB branch's `has_sibling` does not make its enable a different act, which the rung-5 census's
+ * own comment asked this rung to say.** `gcc_sdcc1_ahb_clk` carries `has_sibling = 1`, and
+ * `clock-local2.c:444-446`/`:460-462` turns that into `-EPERM` for `round_rate` and `list_rate` - both of
+ * which are *queries about a rate*, reached from `clk_set_rate` and `clk_round_rate`. The path this rung
+ * takes is `clk_prepare_enable`, and that is `:373-390`: a CBCR read-modify-write of `BIT(0)` followed by
+ * the halt check, with no branch on `has_sibling` anywhere. 705 measured that bit already set
+ * (`_clk_ahb_cbcr = 0x2000cff1`), so this store writes back the word it read - the same shape as the other
+ * three. What `has_sibling` *does* mean here is the one thing the halt check has to handle and this image
+ * already handles: the AHB branch is the one whose ON value is `BRANCH_NOC_FSM_ON_VAL` and not
+ * `BRANCH_ON_VAL` (`clock-local2.c:325-328`, `:357-358`), which is why `st_branch_enable` accepts both.
+ */
+#define ST_BRANCH_CHECK_MASK      0xF0000000u    /* BM(31, 28), clock-local2.c:325 */
+#define ST_BRANCH_ON_VAL          0x00000000u    /* BRANCH_ON_VAL,      :326 */
+#define ST_BRANCH_NOC_FSM_ON_VAL  0x20000000u    /* BRANCH_NOC_FSM_ON_VAL, :328 - the AHB branch's own
+                                                  * value, and 705 measured it: `_clk_ahb_cbcr = 0x2000cff1`
+                                                  * reads 0x2 in bits 31:28, which `:357-358` accepts as ON */
+#define ST_HALT_CHECK_MAX_LOOPS   500u           /* :36 - with a 1 us delay between failed reads */
+#define ST_HALT_TICK_BUDGET       9600u          /* 500 us at this machine's 19,200,000 Hz */
+#define ST_VENDOR_MCLK_DFLT       0x00000200u    /* CORE_HC_MCLK_SEL_DFLT = (2 << 8), sdhci-msm.c:94 */
+#define ST_VENDOR_SELECT_IN_EN    (1u << 18)     /* CORE_HC_SELECT_IN_EN,   :98 */
+#define ST_VENDOR_SELECT_IN_MASK  (7u << 19)     /* CORE_HC_SELECT_IN_MASK, :100 */
+#define ST_SDHCI_CLOCK_INT_EN     0x0001u        /* sdhci.h:109 */
+#define ST_SDHCI_CLOCK_INT_STABLE 0x0002u        /* sdhci.h:108 - read-only */
+#define ST_SDHCI_CLOCK_CARD_EN    0x0004u        /* sdhci.h:107 - THE SD CLOCK ENABLE BIT */
+#define ST_SET_INIT_CLOCK         400000u        /* host->f_init = host->f_min = sup_clk_table[0] */
+#define ST_SET_MAX_CLK            384000000u     /* msm8974pro.dtsi:1768's last entry, via
+                                                  * sdhci-msm.c:2240 get_max_clock - the divisor
+                                                  * arithmetic's one non-register input */
+#define ST_SET_MAX_CLK_STD        200000000u     /* msm8974.dtsi:339 - the ALTERNATIVE table, and the cell
+                                                  * that tells the two apart is `_clk_set_divisor_alt` */
+#define ST_SET_DIV_MAX            2046u          /* SDHCI_MAX_DIV_SPEC_300, sdhci.h:255 */
+#define ST_CC_TICK_BUDGET         384000u        /* the driver's `timeout = 20` ms (sdhci.c:1292) */
+#define ST_CC_POLL_STEPS          4096u          /* the backstop: 4096 halfword reads cannot outlast
+                                                  * 20 ms, so the clock bound is the one that fires */
+
+/*
+ * **The halfword store, and rung 6 is the reason it exists.** `CLOCK_CONTROL 0x2C` is a 16-bit register
+ * (`sdhci.h:100`) written with `sdhci_writew` (`sdhci.c:1289`, `:1306`), so a 32-bit store there would be
+ * a *wider* access than the vendor's own contract - and `0x2C` is 4-aligned, so the alignment census
+ * would let it through: the width here is a property of the register, not of the address, which is why
+ * `build_entry.sh`'s `hc_mem` clause checks the mnemonic and not only the offset.
+ */
+static void st_write16(uint32_t addr, uint16_t value)
+{
+    *(volatile uint16_t *)(uintptr_t)addr = value;
+    __asm__ volatile ("dsb sy" ::: "memory");
+}
+
+/*
+ * **One branch enable, as `branch_clk_enable` writes it** (`clock-local2.c:373-390`): read the CBCR, set
+ * `BIT(0)`, write it back, then run the halt check (`:333-371`) - which for every branch on this path is
+ * the `HALT` arm, because `gcc_sdcc1_ahb_clk` and `gcc_sdcc1_cdccal_sleep_clk` declare `has_sibling = 1`
+ * and none of the four declares a `halt_check` (`clock-8974.c:2339-2381`), so the field's value is 0 =
+ * `HALT` (`clock-local2.h`). The poll's terminal state is published rather than inferred from the count,
+ * and the count is published rather than inferred from the state: a first-read pass (expected) and a
+ * 500th-read pass (a bound that was spent) are different readings of the same bit.
+ */
+struct st_branch_poll {
+    uint32_t before;
+    uint32_t after;
+    uint32_t polls;
+    uint32_t ticks;
+    uint32_t halted;
+};
+
+/*
+ * **`always_inline`, and the reason is a clause's subject rather than speed.** `build_entry.sh`'s
+ * store census reads `entry_storage_probe`'s OWN body and classifies every store in it, which is what
+ * makes "the offsets are the property" true of the artifact the gate boots - the four branch enables
+ * must therefore be *this body's* stores. GCC does not inline a helper with four call sites (it does
+ * inline its single-call siblings: `st_clock_census`, `st_clock_set`) and the first build of this rung
+ * measured exactly that: `st_branch_enable` came out as a symbol at `0x8000cff8` with the probe pushed
+ * to `0x8000d09c`, the census reported `core_mem [120 0 120 120 ]` (the two `0x10C` stores were in the
+ * inlined `st_clock_set` and did land), the GCC window came out EMPTY, and the arm's own record was
+ * refused by two clauses at once. A helper the arm's safety claim has to name is not a helper this
+ * image wants outlined, so the attribute makes the compiler's choice the arm's choice and the stores
+ * land where the record says they are.
+ */
+static inline __attribute__((always_inline)) void
+st_branch_enable(uint32_t addr, struct st_branch_poll *r)
+{
+    uint32_t value, t0, polls = 0u, halted = 0u;
+
+    r->before = st_read32(addr);
+    value = r->before | ST_CBCR_ENABLE_BIT;      /* clock-local2.c:381 */
+    st_write32(addr, value);                     /* clock-local2.c:382 - the read-modify-write */
+    r->after = st_read32(addr);
+
+    t0 = (uint32_t)stage90_cntvct_read();
+    for (polls = 1u; polls <= ST_HALT_CHECK_MAX_LOOPS; polls++) {
+        uint32_t v = st_read32(addr) & ST_BRANCH_CHECK_MASK;
+
+        if (v == ST_BRANCH_ON_VAL || v == ST_BRANCH_NOC_FSM_ON_VAL) {   /* :357-358 */
+            halted = 1u;
+            break;
+        }
+        if ((uint32_t)stage90_cntvct_read() - t0 >= ST_HALT_TICK_BUDGET)
+            break;
+    }
+    r->ticks = (uint32_t)stage90_cntvct_read() - t0;
+    r->polls = polls;
+    r->halted = halted;
+}
+
+static void st_clock_set(void)
+{
+    struct st_branch_poll b;
+    uint32_t writes = 0u, gcc_writes = 0u, rate_writes = 0u;
+    uint32_t vendor, v1, v2, vendor_after;
+    uint32_t cc_before, div, real_div = 0u, word_int, word_card, cc_after;
+    uint32_t stable = 0u, cc_polls = 0u, cc_steps = 0u, t0;
+    uint32_t alt = 0u;
+
+    ST_LIVE("xnu_live_storage_clk_set_calls", 1u);
+
+    /*
+     * **1. `sdhci_msm_prepare_clocks(host, true)` (`sdhci-msm.c:2315-2374`), and the order is the
+     * vendor's**: `pclk` (= `gcc_sdcc1_ahb_clk`, `clock-8974.c:2339`), `clk` (= `gcc_sdcc1_apps_clk`,
+     * `:2350`), then `bus_clk`, `ff_clk` (= `gcc_sdcc1_cdccal_ff_clk`, `:2361`) and `sleep_clk`
+     * (= `gcc_sdcc1_cdccal_sleep_clk`, `:2372`). `bus_clk` is `devm_clk_get(&pdev->dev, "bus_clk")`
+     * (`:2758`) and this board's SDCC1 node has no such clock, so `IS_ERR_OR_NULL` skips it - which is
+     * why four branches are enabled and not five.
+     */
+    st_branch_enable(ST_GCC_BASE + ST_GCC_SDCC1_AHB_CBCR, &b);
+    writes++;
+    gcc_writes++;
+    ST_LIVE("xnu_live_storage_clk_set_ahb_before", b.before);
+    ST_LIVE("xnu_live_storage_clk_set_ahb_after", b.after);
+    ST_LIVE("xnu_live_storage_clk_set_ahb_polls", b.polls);
+    ST_LIVE("xnu_live_storage_clk_set_ahb_ticks", b.ticks);
+    ST_LIVE("xnu_live_storage_clk_set_ahb_halted", b.halted);
+    ST_LIVE("xnu_live_storage_clk_set_writes", writes);
+    ST_LIVE("xnu_live_storage_clk_set_gcc_writes", gcc_writes);
+
+    st_branch_enable(ST_GCC_BASE + ST_GCC_SDCC1_APPS_CBCR, &b);
+    writes++;
+    gcc_writes++;
+    ST_LIVE("xnu_live_storage_clk_set_apps_before", b.before);
+    ST_LIVE("xnu_live_storage_clk_set_apps_after", b.after);
+    ST_LIVE("xnu_live_storage_clk_set_apps_polls", b.polls);
+    ST_LIVE("xnu_live_storage_clk_set_apps_ticks", b.ticks);
+    ST_LIVE("xnu_live_storage_clk_set_apps_halted", b.halted);
+    ST_LIVE("xnu_live_storage_clk_set_writes", writes);
+    ST_LIVE("xnu_live_storage_clk_set_gcc_writes", gcc_writes);
+
+    st_branch_enable(ST_GCC_BASE + ST_GCC_SDCC1_CDCCAL_FF_CBCR, &b);
+    writes++;
+    gcc_writes++;
+    ST_LIVE("xnu_live_storage_clk_set_ff_before", b.before);
+    ST_LIVE("xnu_live_storage_clk_set_ff_after", b.after);
+    ST_LIVE("xnu_live_storage_clk_set_ff_polls", b.polls);
+    ST_LIVE("xnu_live_storage_clk_set_ff_ticks", b.ticks);
+    ST_LIVE("xnu_live_storage_clk_set_ff_halted", b.halted);
+    ST_LIVE("xnu_live_storage_clk_set_writes", writes);
+    ST_LIVE("xnu_live_storage_clk_set_gcc_writes", gcc_writes);
+
+    st_branch_enable(ST_GCC_BASE + ST_GCC_SDCC1_CDCCAL_SLEEP_CBCR, &b);
+    writes++;
+    gcc_writes++;
+    ST_LIVE("xnu_live_storage_clk_set_sleep_before", b.before);
+    ST_LIVE("xnu_live_storage_clk_set_sleep_after", b.after);
+    ST_LIVE("xnu_live_storage_clk_set_sleep_polls", b.polls);
+    ST_LIVE("xnu_live_storage_clk_set_sleep_ticks", b.ticks);
+    ST_LIVE("xnu_live_storage_clk_set_sleep_halted", b.halted);
+    ST_LIVE("xnu_live_storage_clk_set_writes", writes);
+    ST_LIVE("xnu_live_storage_clk_set_gcc_writes", gcc_writes);
+
+    /*
+     * **2. The vendor spec's two read-modify-writes (`sdhci-msm.c:2495-2513`), the non-HS400 arm**, and
+     * the `curr_pwrsave` pair above them (`:2427-2441`) is **not** taken at this clock: both of its arms
+     * need `clock > 400000` or `curr_pwrsave`, and rung 5 measured `_clk_vendor_pwrsave = 0`. So the two
+     * stores here are the MCLK select and the HC_SELECT_IN clears, and nothing else on 0x10C.
+     */
+    vendor = st_read32(ST_CORE_MEM_BASE + ST_CORE_VENDOR_SPEC);
+    v1 = (vendor & ~ST_VENDOR_MCLK_MASK) | ST_VENDOR_MCLK_DFLT;            /* :2497-2499 */
+    st_write32(ST_CORE_MEM_BASE + ST_CORE_VENDOR_SPEC, v1);
+    writes++;
+    ST_LIVE("xnu_live_storage_clk_set_vendor_before", vendor);
+    ST_LIVE("xnu_live_storage_clk_set_vendor_w1", v1);
+    ST_LIVE("xnu_live_storage_clk_set_writes", writes);
+
+    v2 = st_read32(ST_CORE_MEM_BASE + ST_CORE_VENDOR_SPEC)
+         & ~ST_VENDOR_SELECT_IN_EN & ~ST_VENDOR_SELECT_IN_MASK;           /* :2510-2512 */
+    st_write32(ST_CORE_MEM_BASE + ST_CORE_VENDOR_SPEC, v2);
+    writes++;
+    vendor_after = st_read32(ST_CORE_MEM_BASE + ST_CORE_VENDOR_SPEC);
+    ST_LIVE("xnu_live_storage_clk_set_vendor_w2", v2);
+    ST_LIVE("xnu_live_storage_clk_set_vendor_after", vendor_after);
+    ST_LIVE("xnu_live_storage_clk_set_writes", writes);
+
+    /*
+     * **3. The rate write, and it is not reached.** `sup_clock = sdhci_msm_get_sup_clk_rate(host, 400000)
+     * = 400000` (the table's first entry equals the request) and `msm_host->clk_rate = 400000` from
+     * `:2795`, so `:2517`'s condition is false and the RCG - whose before-values rung 5 published - is
+     * not written. This key is the rung's central claim, published rather than argued.
+     */
+    ST_LIVE("xnu_live_storage_clk_set_rate_writes", rate_writes);
+
+    /*
+     * **4. The standard's own two halfwords and the poll between them** (`sdhci.c:1254-1306`). The
+     * divisor is the count's, computed with the driver's own loop and the one input that is not a
+     * register: `max_clk = get_max_clock(host) = sup_clk_table[sup_clk_cnt-1]` = the DT's last entry.
+     * `_clk_set_divisor_alt` is what tells the two candidate tables apart in the log.
+     */
+    ST_LIVE("xnu_live_storage_clk_set_max_clk", ST_SET_MAX_CLK);
+
+    if (ST_SET_MAX_CLK <= ST_SET_INIT_CLOCK) {
+        div = 1u;                                                        /* :1257-1258 */
+    } else {
+        for (div = 2u; div < ST_SET_DIV_MAX; div += 2u)                  /* :1260-1261 */
+            if ((ST_SET_MAX_CLK / div) <= ST_SET_INIT_CLOCK)
+                break;
+    }
+    real_div = div;
+    div >>= 1u;                                                          /* :1266 */
+    if (real_div == (ST_SET_MAX_CLK_STD / ST_SET_INIT_CLOCK))
+        alt = 1u;
+
+    ST_LIVE("xnu_live_storage_clk_set_real_div", real_div);
+    ST_LIVE("xnu_live_storage_clk_set_div", div);
+    ST_LIVE("xnu_live_storage_clk_set_divisor_alt", alt);
+
+    cc_before = (uint32_t)st_read16(ST_HC_MEM_BASE + ST_SDHCI_CLOCK_CONTROL);
+    word_int = (uint32_t)(((div & 0xFFu) << 8)
+                          | (((div & 0x300u) >> 8) << 6)             /* :1285-1286 */
+                          | ST_SDHCI_CLOCK_INT_EN);                  /* :1288 */
+    st_write16(ST_HC_MEM_BASE + ST_SDHCI_CLOCK_CONTROL, (uint16_t)word_int);
+    writes++;
+    ST_LIVE("xnu_live_storage_clk_set_cc_before", cc_before);
+    ST_LIVE("xnu_live_storage_clk_set_cc_int", word_int);
+    ST_LIVE("xnu_live_storage_clk_set_writes", writes);
+
+    t0 = (uint32_t)stage90_cntvct_read();
+    for (cc_steps = 1u; cc_steps <= ST_CC_POLL_STEPS; cc_steps++) {
+        cc_polls = (uint32_t)st_read16(ST_HC_MEM_BASE + ST_SDHCI_CLOCK_CONTROL);
+        if ((cc_polls & ST_SDHCI_CLOCK_INT_STABLE) != 0u) {           /* sdhci.c:1293-1294 */
+            stable = 1u;
+            break;
+        }
+        if ((uint32_t)stage90_cntvct_read() - t0 >= ST_CC_TICK_BUDGET)
+            break;
+    }
+    ST_LIVE("xnu_live_storage_clk_set_cc_stable", stable);
+    ST_LIVE("xnu_live_storage_clk_set_cc_polls", cc_steps);
+    ST_LIVE("xnu_live_storage_clk_set_cc_ticks", (uint32_t)stage90_cntvct_read() - t0);
+
+    word_card = word_int | ST_SDHCI_CLOCK_CARD_EN;                    /* :1305 */
+    st_write16(ST_HC_MEM_BASE + ST_SDHCI_CLOCK_CONTROL, (uint16_t)word_card);
+    writes++;
+    cc_after = (uint32_t)st_read16(ST_HC_MEM_BASE + ST_SDHCI_CLOCK_CONTROL);
+    ST_LIVE("xnu_live_storage_clk_set_cc_card", word_card);
+    ST_LIVE("xnu_live_storage_clk_set_cc_after", cc_after);
+    ST_LIVE("xnu_live_storage_clk_set_writes", writes);
+    ST_LIVE("xnu_live_storage_clk_set_gcc_writes", gcc_writes);
+    ST_LIVE("xnu_live_storage_clk_set_done", 1u);
+}
+#endif /* STAGE90_XNU_STORAGE_PROBE >= 6 - st_branch_enable is called four times (and is
+        * always_inline so its stores are the probe's own) and st_clock_set once, and -Werror is on */
+
 void entry_storage_probe(void)
 {
     uint32_t slot_before = 0u, desc = 0u, mapped, section, hc_section;
@@ -1102,5 +1403,18 @@ void entry_storage_probe(void)
      */
     if (g_storage_mode_complete != 0u)
         st_clock_census();
+#endif
+#if STAGE90_XNU_STORAGE_PROBE >= 6
+    /*
+     * **706: rung 6, the first rung that writes the clock controller, and it is placed last for the
+     * reason every rung above 2 is guarded**: `g_storage_mode_complete` says the block answered a version
+     * word, so the four branch enables and the MMC clock are written only into a controller this image has
+     * already read. The three things it does NOT write are the ones that matter - the RCG (a rate is not
+     * on this path, section 2), `BCR 0x04C0` (block reset) and `POWER_CONTROL 0x29` (where the driver's
+     * own power path writes 0, a bus-off request) - and the build's clauses are what keep all three out
+     * of the linked image rather than this comment.
+     */
+    if (g_storage_mode_complete != 0u)
+        st_clock_set();
 #endif
 }

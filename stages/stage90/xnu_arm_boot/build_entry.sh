@@ -591,9 +591,13 @@ esac
 # first write would land on a branch whose halt bit no run in this project has ever read (see the rung-5
 # pre-registration, `experiment-704` section 2 - the gate has been checking `CBCR_BRANCH_ENABLE_BIT` and
 # not `CBCR_BRANCH_OFF_BIT`). The clause that makes that a property of the artifact is the store census
-# below, which since 704 names the GCC megabyte as its own window and holds its store set to **empty at
-# every rung** - so "this rung does not write the clock" cannot be undone by an edit that this file's own
-# classifier would otherwise have to guess about.
+# below, which since 704 names the GCC megabyte as its own window and held its store set to **empty at
+# every rung** - and since 706 holds it to **exactly the four branch offsets, in the vendor's order**, so
+# "this rung writes the branch enables and neither the block reset nor a single RCG word" cannot be undone
+# by an edit that this file's own classifier would otherwise have to guess about. `POWER_CONTROL 0x29`
+# stays unreachable in the `hc_mem` clause for the same reason, and that one is a rung-7 boundary rather
+# than an omission: the driver's power path writes 0 there and then waits unbounded (experiment-706
+# section 4).
 STORAGE_PROBE=${STAGE90_XNU_STORAGE_PROBE:-0}
 case "$STORAGE_PROBE" in
     0) ;;
@@ -602,7 +606,8 @@ case "$STORAGE_PROBE" in
     3) ;;
     4) ;;
     5) ;;
-    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4 or 5, not [$STORAGE_PROBE]" >&2
+    6) ;;
+    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4, 5 or 6, not [$STORAGE_PROBE]" >&2
        echo "        It is a `#if` in two files and not a value, so anything else would reach the" >&2
        echo "        preprocessor as a broken -D and fail there, with the cause named by the wrong" >&2
        echo "        tool (692); and it is a rung rather than a flag since 696, so a value above the" >&2
@@ -29877,6 +29882,14 @@ verify_trace_symbols() {
         # build that changes one has to change the other, which is the point of a check whose subject is
         # a number.
         #
+        # **706: the expected sets are a function of the rung, and this block is where each of the three
+        # is stated.** Rungs 2-5: `core_mem` `120 0 120 120`, `hc_mem` empty below rung 4 and one `strb` at
+        # 47 at rung 4, the GCC megabyte empty. Rung 6: `core_mem` `120 0 120 120 268 268`, `hc_mem`
+        # `47 44 44` (`strb strh strh`), and the GCC `1224 1220 1256 1252` (all four `str`) - the first rung
+        # whose clock-controller store set is not empty, and the two offsets it must never reach are named
+        # in that clause. A rung above 6 does not exist yet, so the GCC set is asserted exactly and not by
+        # bound: a rung-7 edit has to change this sentence too, which is the point.
+        #
         # The classification is collected over the WHOLE body and applied in `END`, because the first
         # draft classified in line order: a store at `0x8000d478` was judged against evidence that only
         # appears at `0x8000d52c` (`movt r3, #0xf982`), so a device base whose `movt` comes after its
@@ -29884,7 +29897,7 @@ verify_trace_symbols() {
         # is used, so a whole-body reading is the honest one; a base the body materializes ambiguously is
         # refused rather than guessed, which is the same direction UNK fails in.
         stb_probe=$(sym_addr entry_storage_probe) ||
-            layout_fail "entry_storage_probe is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE, so this arm's four stores cannot be counted at all"
+            layout_fail "entry_storage_probe is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE, so the stores of this rung cannot be counted at all"
         stb_body=$(arm-none-eabi-objdump -d --start-address="$stb_probe" \
                    --stop-address="$(next_global "$stb_probe")" "$OUT/xnu_arm_entry.elf")
         # Every store whose operand's base is not `sp`, as `<window> <base>:<offset>:<mnemonic>` in program
@@ -29993,13 +30006,32 @@ verify_trace_symbols() {
         stb_unk=$(awk '$1 == "UNK" { printf "%s ", $2 }' <<<"$stb_raw")
         stb_devlo=$(awk '$1 == "DEVLO" { printf "%s ", $2 }' <<<"$stb_raw")
         stb_devbad=$(awk '$1 == "DEVBAD" { printf "%s ", $2 }' <<<"$stb_raw")
-        stb_core_base=$(awk -F: '{ c[$1]++ } END { b = ""; m = 0; for (k in c) if (c[k] > m) { m = c[k]; b = k } print b }' <<<"$stb_core")
-        stb_core_off=$(awk -F: -v b="$stb_core_base" '$1 == b { printf "%s ", $2 }' <<<"$stb_core")
-        stb_hc_base=$(awk -F: '{ c[$1]++ } END { b = ""; m = 0; for (k in c) if (c[k] > m) { m = c[k]; b = k } print b }' <<<"$stb_hc")
-        stb_hc_off=$(awk -F: -v b="$stb_hc_base" '$1 == b { printf "%s ", $2 }' <<<"$stb_hc")
-        stb_hc_mne=$(awk -F: -v b="$stb_hc_base" '$1 == b { printf "%s ", $3 }' <<<"$stb_hc")
-        stb_other=$(awk -F: -v b="$stb_core_base" '$1 != b { printf "%s:%s ", $1, $2 }' <<<"$stb_core")
-        stb_gcc=$(awk '$1 == "GCC" { printf "%s:%s ", $2, $3 }' <<<"$stb_raw")
+        # **706: the window's store set is the WINDOW's, and the base register is GCC's business.**
+        # Until this rung the offsets were collected from the single base register carrying most of the
+        # window's stores (`c[k] > m`), and that was true only while each window happened to be written
+        # through one register: [[mi4-one-value-two-definitions]]'s shape, in the clause rather than in
+        # the artifact - the record names "the stores to this window, in program order" and the clause
+        # measured "the stores through the register that carries the most of them". Rung 6 broke the
+        # coincidence twice: the two `CORE_VENDOR_SPEC 0x10C` read-modify-writes use a register the mode
+        # sequence's four do not (`r7` against `r4`), and `hc_mem`'s three stores use three different
+        # registers (`sl`, `r4`, `r3`). Worse, with the counts *tied* the old expression's answer was
+        # decided by awk's `for (k in c)` iteration order - a reading that could change under an
+        # unrelated edit and say nothing about the arm. The offsets and the mnemonics are therefore
+        # taken from every store in the window in program order, and the registers are reported as a SET
+        # so a reader can see how many carried them. What still refuses is per store and unchanged: AMB,
+        # UNK, DEVLO and DEVBAD each mean this clause cannot name the address a store uses.
+        stb_core_base=$(awk -F: '{ if (!($1 in seen)) { seen[$1] = 1; printf "%s ", $1 } }' <<<"$stb_core")
+        stb_core_off=$(awk -F: '{ printf "%s ", $2 }' <<<"$stb_core")
+        stb_hc_base=$(awk -F: '{ if (!($1 in seen)) { seen[$1] = 1; printf "%s ", $1 } }' <<<"$stb_hc")
+        stb_hc_off=$(awk -F: '{ printf "%s ", $2 }' <<<"$stb_hc")
+        stb_hc_mne=$(awk -F: '{ printf "%s ", $3 }' <<<"$stb_hc")
+        # `$2` is the classifier's own `<base>:<offset>:<mnemonic>:<low-half>` tuple, so the offset and
+        # the mnemonic are its SECOND and THIRD fields - the base is not part of this comparison, for the
+        # same reason 706 made the window's lists base-agnostic. The first draft wrote `$2, $3` and the
+        # clause's first reading of a non-empty GCC set was `[r4:1224:str:0: ...]` against a record of
+        # `1224:str ...`: a comparison that could never have passed, caught by the build it was written
+        # for rather than by the rung it was written about (this window was empty on every rung below 6).
+        stb_gcc=$(awk '$1 == "GCC" { n = split($2, q, ":"); printf "%s:%s ", q[2], q[3] }' <<<"$stb_raw")
         [[ -z "${stb_amb// /}" ]] ||
             layout_fail "entry_storage_probe stores through [$stb_amb], and this body materializes each of those base registers with MORE THAN ONE device high half - GCC reuses registers, so a movt alone cannot say which address the store uses. The image's own stores are listed as IMG and the device ones are named by their own windows below, but a register that carries two device high halves is a store this clause would have to guess about, and it refuses instead. Read the probe's body: if the store is to the image's own memory, give it a base register the body materializes once. Nothing is rebuilt by this refusal"
         [[ -z "${stb_unk// /}" ]] ||
@@ -30008,26 +30040,78 @@ verify_trace_symbols() {
             layout_fail "entry_storage_probe stores through [$stb_devlo], and this body gives that register a device high half but NO low half - no `mov`/`movw` immediate - so the pair of immediates that names a window is incomplete. This is the case 701 added the low half for: `core_mem` (0xf9824000) and `hc_mem` (0xf9824900) share a `movt`, so a store at 0x2F would be a byte in the standard file in one window and a byte inside the vendor's own 0x2C word in the other. Name the window or fail. Nothing is rebuilt by this refusal"
         [[ -z "${stb_devbad// /}" ]] ||
             layout_fail "entry_storage_probe stores through [$stb_devbad], and the (movt, mov/movw) pair this body materializes names a device address that is in none of the three windows this arm's record names - `core_mem` (0xf9824000, 0x800 long), `hc_mem` (0xf9824900, 0x11c long, msm8974.dtsi:503), and the GCC megabyte (0xfc400000, 0x100000 - the block whose SDCC1 branch words and clock gate this line reads, and whose clock registers no rung writes). A store to a device megabyte this arm's record does not name is exactly the store this clause exists to refuse. Nothing is rebuilt by this refusal"
+        if [[ $STORAGE_PROBE -ge 6 ]]; then
+            # **706: the same window, two more offsets, and they are the FIFTH and SIXTH this census
+            # names.** `CORE_VENDOR_SPEC 0x10C` (268) is written twice by `sdhci_msm_set_clock`'s
+            # non-HS400 arm - the MCLK select and the HC_SELECT_IN clears (:2497-2499, :2510-2512) - and
+            # the pair is what makes the field a *sequence*: the second store is a read-modify-write of a
+            # field the first one did not touch. Everything else in that window is still the vendor's
+            # bring-up, unchanged, in the same order.
+            [[ "$stb_core_off" == "120 0 120 120 268 268 " ]] ||
+                layout_fail "entry_storage_probe's stores in the core_mem window (through [$stb_core_base]) are [$stb_core_off] and rung 6's record says they are 120 0 120 120 268 268 - i.e. the vendor's own mode sequence (CORE_HC_MODE <- 0, CORE_POWER <- |CORE_SW_RST, CORE_HC_MODE <- HC_MODE_EN, CORE_HC_MODE <- |FF_CLK_SW_RST_DIS, sdhci-msm.c:2841-2868) followed by the clock set's TWO CORE_VENDOR_SPEC 0x10C read-modify-writes (MCLK select <- DFLT at :2497-2499, HC_SELECT_IN cleared at :2510-2512). A different count, a different order or a different offset is a store this arm's pre-registration does not describe - and this window is the one the probe's four writes through it have been bounded to since 698, so a store here that the record does not name is exactly the store this clause exists to refuse. (The image's own stores are [$stb_img].) Nothing is rebuilt by this refusal"
+        else
         [[ "$stb_core_off" == "120 0 120 120 " ]] ||
-            layout_fail "entry_storage_probe's stores in the core_mem window ($stb_core_base) are [$stb_core_off] and this arm's record says they are 120 0 120 120 - i.e. CORE_HC_MODE <- 0, CORE_POWER <- |CORE_SW_RST, CORE_HC_MODE <- HC_MODE_EN, CORE_HC_MODE <- |FF_CLK_SW_RST_DIS (the vendor's own sequence, sdhci-msm.c:2841-2868). A different count, a different order or a different offset is a store this arm's pre-registration does not describe. Read the probe's own body, decide whether the sequence or the record is what changed, and change the one that is wrong. (The image's own stores are [$stb_img].) Nothing is rebuilt by this refusal"
-        if [[ $STORAGE_PROBE -ge 4 ]]; then
+            layout_fail "entry_storage_probe's stores in the core_mem window (through [$stb_core_base]) are [$stb_core_off] and this arm's record says they are 120 0 120 120 - i.e. CORE_HC_MODE <- 0, CORE_POWER <- |CORE_SW_RST, CORE_HC_MODE <- HC_MODE_EN, CORE_HC_MODE <- |FF_CLK_SW_RST_DIS (the vendor's own sequence, sdhci-msm.c:2841-2868). A different count, a different order or a different offset is a store this arm's pre-registration does not describe. Read the probe's own body, decide whether the sequence or the record is what changed, and change the one that is wrong. (The image's own stores are [$stb_img].) Nothing is rebuilt by this refusal"
+        fi
+        if [[ $STORAGE_PROBE -ge 6 ]]; then
+            # **706: the reset's byte, then the standard's two halfwords, and POWER_CONTROL is still
+            # absent.** `sdhci_writew(host, clk, SDHCI_CLOCK_CONTROL)` runs twice (sdhci.c:1289 and
+            # :1306) with the 20 ms stability poll between them, at offset 44 (0x2C) - and the vendor
+            # writes it with the HALFWORD accessor, so the mnemonic is checked and not only the offset
+            # (0x2C is 4-aligned, and the alignment census would let a 32-bit store through: the width
+            # here is a property of the register, not of the address). **0x29 (41) is the register whose
+            # absence this clause is really about** - offset 41 is four bytes from 44, and writing 0
+            # there is a bus-off request on this SoC, which the driver's own power-up path does
+            # (sdhci.c:1352-1355) before waiting unbounded in sdhci_msm_check_power_status. That act is
+            # rung 7's subject; here it is a refusal.
+            [[ "$stb_hc_off" == "47 44 44 " ]] ||
+                layout_fail "entry_storage_probe's stores in the hc_mem window (through [$stb_hc_base]) are [$stb_hc_off] and rung 6's record says 47 44 44 - the driver's own reset (one BYTE at SOFTWARE_RESET 0x2F, sdhci.c:246) followed by the clock set's TWO HALFWORDS at CLOCK_CONTROL 0x2C (sdhci.c:1289, :1306). Offset 41 (POWER_CONTROL 0x29) must not appear: writing 0 there IS a bus-off request on this SoC, and it is the register the driver's power path writes before it waits unbounded (sdhci.c:1352-1355, sdhci-msm.c:2179-2209) - that is the next rung's act and not this one's. A store anywhere else in this window is a register this arm's pre-registration does not name. Nothing is rebuilt by this refusal"
+            [[ "$stb_hc_mne" == "strb strh strh " ]] ||
+                layout_fail "entry_storage_probe's stores in the hc_mem window (through [$stb_hc_base]) are [$stb_hc_mne] and rung 6's record says the widths are strb strh strh - a byte at SOFTWARE_RESET 0x2F (sdhci.h:113, written at sdhci.c:246) and two halfwords at CLOCK_CONTROL 0x2C (sdhci.h:100, written at sdhci.c:1289 and :1306 with sdhci_writew). The offset check above cannot see this: 0x2C is 4-aligned, so a 32-bit store there passes the alignment census and is still NOT the vendor's accessor. The width here is a property of the register and not of the address. Nothing is rebuilt by this refusal"
+        elif [[ $STORAGE_PROBE -ge 4 ]]; then
             # **701: the rung's ONE store, and it is a byte in the OTHER window.** `sdhci_writeb(host,
             # SDHCI_RESET_ALL, SDHCI_SOFTWARE_RESET)` is the whole of the driver's reset, so the expected
             # set is one `strb` at 0x2F - and the mnemonic is checked with the offset because a 32-bit
             # store at 0x2F is the unaligned Device access the alignment census refuses two blocks down.
             [[ "$stb_hc_off" == "47 " ]] ||
-                layout_fail "entry_storage_probe's stores in the hc_mem window ($stb_hc_base) are [$stb_hc_off] and rung 4's record says exactly one, at offset 47 (0x2F) - the driver's own `sdhci_writeb(host, SDHCI_RESET_ALL, SDHCI_SOFTWARE_RESET)` (sdhci.c:246, SDHCI_RESET_ALL = 0x01 at sdhci.h:114). A store anywhere else in this window is a register this rung's pre-registration does not name, and the register four offsets away is `POWER_CONTROL 0x29`, where writing 0 IS a bus-off request on this SoC - so this clause is what makes the reset rung unable to touch it. Nothing is rebuilt by this refusal"
+                layout_fail "entry_storage_probe's stores in the hc_mem window (through [$stb_hc_base]) are [$stb_hc_off] and rung 4's record says exactly one, at offset 47 (0x2F) - the driver's own `sdhci_writeb(host, SDHCI_RESET_ALL, SDHCI_SOFTWARE_RESET)` (sdhci.c:246, SDHCI_RESET_ALL = 0x01 at sdhci.h:114). A store anywhere else in this window is a register this rung's pre-registration does not name, and the register four offsets away is `POWER_CONTROL 0x29`, where writing 0 IS a bus-off request on this SoC - so this clause is what makes the reset rung unable to touch it. Nothing is rebuilt by this refusal"
             [[ "$stb_hc_mne" == "strb " ]] ||
-                layout_fail "entry_storage_probe's store in the hc_mem window ($stb_hc_base) at offset 47 is [$stb_hc_mne], not a byte store. SOFTWARE_RESET 0x2F is a BYTE register (sdhci.h:113, and the vendor writes it with sdhci_writeb at sdhci.c:246), so a wider store there is an unaligned access to a Strongly-ordered device section - 692's abort class, by alignment - and the driver's own accessor is the width this record states. Nothing is rebuilt by this refusal"
+                layout_fail "entry_storage_probe's store in the hc_mem window (through [$stb_hc_base]) at offset 47 is [$stb_hc_mne], not a byte store. SOFTWARE_RESET 0x2F is a BYTE register (sdhci.h:113, and the vendor writes it with sdhci_writeb at sdhci.c:246), so a wider store there is an unaligned access to a Strongly-ordered device section - 692's abort class, by alignment - and the driver's own accessor is the width this record states. Nothing is rebuilt by this refusal"
         else
             [[ -z "${stb_hc_off// /}" ]] ||
                 layout_fail "entry_storage_probe stores through the hc_mem window [$stb_hc_off] while the rung is $STORAGE_PROBE, and every rung below 4 is defined as reading that window and writing nothing in it. A store there on a read-only rung is a build that does not match the rung it claims to be - and the register four offsets from 0x2F is POWER_CONTROL 0x29, where writing 0 IS a bus-off request on this SoC. Nothing is rebuilt by this refusal"
         fi
-        [[ -z "${stb_other// /}" ]] ||
-            layout_fail "entry_storage_probe stores to [$stb_other] through a second base register in the core_mem window, and this arm's pre-registration names one register carrying the four. Every other store in that window is a register this arm does not name. The stores on the four's register are [$stb_core_off]; the image's own are [$stb_img]. Read the probe's body and decide which of the two - the sequence or this record - is wrong. Nothing is rebuilt by this refusal"
+        # **706 retired the refusal that used to stand here** - `stb_other`, which refused any store in
+        # the core_mem window that was not on the register carrying most of them, on the ground that
+        # "this arm's pre-registration names one register carrying the four". That was a *proxy* for the
+        # window's store set, and a proxy may decide when to ask and never whether to act
+        # ([[mi4-one-value-two-definitions]]'s m697): the register is chosen by GCC's allocator, the
+        # record names stores and offsets, and rung 6's two `0x10C` writes arrive on `r7` while the
+        # sequence's four stay on `r4` - a legitimate arm the old clause would have refused. Nothing is
+        # lost by retiring it: what it was protecting is now the offset list itself, which is the whole
+        # window's, in program order, and compared for equality below.
+        if [[ $STORAGE_PROBE -ge 6 ]]; then
+            # **706: the clock controller's store set, named offset by offset, and this is the clause that
+            # keeps the two dangerous writes out of the linked image.** Rung 6 writes four branch enables -
+            # `sdhci_msm_prepare_clocks`' own order: pclk, clk, ff_clk, sleep_clk (`sdhci-msm.c:2315-2374`
+            # with `bus_clk` skipped, an ERR_OR_NULL on this board) - so the expected set is
+            # `1224 1220 1256 1252` = `0x4C8`, `0x4C4`, `0x4E8`, `0x4E4`, each a 32-bit read-modify-write of
+            # `BIT(0)` (clock-local2.c:380-382) that cannot clear a bit. **Every other offset in the
+            # megabyte is refused**, and the two that matter are named: `0x4C0` (480, `SDCC1_BCR`, whose
+            # `BIT(0)` is `BCR_BLK_ARES_BIT`, the BLOCK RESET, clock-local2.c:66) and the apps root clock
+            # generator's five words - `0x4D0`-`0x4E0` (1232-1248, `CMD_RCGR`/`CFG_RCGR`/`M`/`N`/`D`,
+            # clock-local2.c:49-53), i.e. **every rate this rung does not write** (experiment-706 section 2:
+            # `sup_clock == msm_host->clk_rate` on the first call, so `clk_set_rate` is skipped). The values
+            # are the run's and not this clause's - `_clk_set_<branch>_before`/`_after` and the halt polls - and
+            # the mnemonic is checked because a byte or halfword store to a CBCR is not what the vendor
+            # writes.
+            [[ "$stb_gcc" == "1224:str 1220:str 1256:str 1252:str " ]] ||
+                layout_fail "entry_storage_probe stores [$stb_gcc] into the GCC megabyte (0xfc400000), and rung 6's record says the stores are exactly 1224:str 1220:str 1256:str 1252:str - the FOUR BRANCH ENABLES of sdhci_msm_prepare_clocks in the vendor's own order (pclk = SDCC1_AHB_CBCR 0x4C8, clk = SDCC1_APPS_CBCR 0x4C4, ff_clk = SDCC1_CDCCAL_FF_CBCR 0x4E8, sleep_clk = SDCC1_CDCCAL_SLEEP_CBCR 0x4E4, sdhci-msm.c:2315-2374), each a 32-bit read-modify-write of BIT(0) which cannot clear a branch's enable bit (clock-local2.c:380-382). **Two offsets in this megabyte must never appear and each is a hazard this clause exists to refuse: 480 (0x4C0, SDCC1_BCR - BIT(0) is BCR_BLK_ARES_BIT, the BLOCK RESET, clock-local2.c:66) and 1232-1248 (0x4D0-0x4E0, the apps root clock generator's CMD_RCGR/CFG_RCGR/M/N/D - every rate this rung does not write, because on the first clock set sup_clock == msm_host->clk_rate: experiment-706 section 2).** A store to a clock-control register whose parent root is off is the bus wait nothing ends - the failure this project cannot read a log out of. Read the body and decide whether the rung or the store is what changed. Nothing is rebuilt by this refusal"
+        else
         [[ -z "${stb_gcc// /}" ]] ||
-            layout_fail "entry_storage_probe stores [$stb_gcc] into the GCC megabyte (0xfc400000), and **no rung of this ladder writes the clock controller at any value**. Since 704 this window is classified as its own (`GCC`) and asserted empty here, at every rung, because the rung-5 arm reads four SDCC1 branch words, the apps root's five RCG words and CORE_VENDOR_SPEC 0x10C and stores nothing (experiment-704). The writer on this path is sdhci_msm_set_clock, its first write would land on a branch whose halt bit no run in this project has ever read, and a store to a clock-control register whose parent root is off is the bus wait nothing ends - the failure this project cannot read a log out of. Before 704 a store here was refused by the DEVBAD clause, whose stated subject is 'not one of the two windows this controller declares' - true, and a statement about the classifier's scope rather than about the clock. Read the body and decide whether the rung or the store is what changed. Nothing is rebuilt by this refusal"
-        echo "  xnu_entry_698: the probe's stores, classified by base register and window - core_mem [$stb_core_off] on $stb_core_base, hc_mem [$stb_hc_off]($stb_hc_mne) on $stb_hc_base, gcc [$stb_gcc], image [$stb_img], ambiguous [$stb_amb], unknown [$stb_unk], unnamed-device [$stb_devbad$stb_devlo]"
+            layout_fail "entry_storage_probe stores [$stb_gcc] into the GCC megabyte (0xfc400000), and **no rung of this ladder below 6 writes the clock controller at any value**. Since 704 this window is classified as its own (`GCC`) and asserted empty here below rung 6, because the rung-5 arm reads four SDCC1 branch words, the apps root's five RCG words and CORE_VENDOR_SPEC 0x10C and stores nothing (experiment-704). A store to a clock-control register whose parent root is off is the bus wait nothing ends - the failure this project cannot read a log out of. Before 704 a store here was refused by the DEVBAD clause, whose stated subject is 'not one of the two windows this controller declares' - true, and a statement about the classifier's scope rather than about the clock. Read the body and decide whether the rung or the store is what changed. Nothing is rebuilt by this refusal"
+        fi
+        echo "  xnu_entry_698: the probe's stores, classified by window and offset - core_mem [$stb_core_off] through [$stb_core_base], hc_mem [$stb_hc_off]($stb_hc_mne) through [$stb_hc_base], gcc [$stb_gcc], image [$stb_img], ambiguous [$stb_amb], unknown [$stb_unk], unnamed-device [$stb_devbad$stb_devlo]"
     fi
     if [[ $STORAGE_PROBE -ge 3 ]]; then
         # ---------------------------------------------- 698: EVERY ACCESS'S WIDTH IS CHECKED AGAINST ITS

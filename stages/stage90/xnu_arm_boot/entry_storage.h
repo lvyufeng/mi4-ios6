@@ -42,6 +42,20 @@
  * the clock framework itself distinguishes: `CBCR_BRANCH_ENABLE_BIT` (the request, which is all the gate
  * read) and `CBCR_BRANCH_OFF_BIT` (the halt state, which is what "running" means and which no run in
  * this project had ever read). See `docs/experiments/experiment-704-...`, section 2.
+ *
+ * **706: `=6` is 5 plus THE DRIVER'S FIRST CLOCK SET, and it is the first rung that writes the clock
+ * controller.** `sdhci_msm_set_clock` at `clock = 400000` (the DT's `qcom,clk-rates` first entry, reached
+ * through `mmc_rescan_try_freq(host, host->f_min)`) is six stores: four `CBCR` read-modify-writes of
+ * `BIT(0)` - the four branches `sdhci_msm_prepare_clocks` enables, each followed by the framework's own
+ * bounded halt check - and two `CORE_VENDOR_SPEC 0x10C` read-modify-writes (`MCLK_SEL <- DFLT`,
+ * `HC_SELECT_IN` cleared), beside the standard's two `CLOCK_CONTROL 0x2C` halfwords with the 20 ms
+ * stability poll between them. **It writes no rate at all**: on the first call `sup_clock =
+ * get_sup_clk_rate(400000) = 400000` equals `msm_host->clk_rate`, which the probe initialised to
+ * `get_min_clock(host)`, so `clk_set_rate` - the only writer of the RCG - is skipped, and the RCG's five
+ * words stay rung 5's before-values. It writes no `BCR 0x04C0` (block reset) and no RCG word, and
+ * `POWER_CONTROL 0x29` stays unreachable: the build's clauses say so, because the driver's own power
+ * path writes **0** there (a bus-off request) and then waits unbounded in
+ * `sdhci_msm_check_power_status`. See `docs/experiments/experiment-706-...`, sections 1 and 2.
  */
 #ifndef STAGE90_ENTRY_STORAGE_H
 #define STAGE90_ENTRY_STORAGE_H
