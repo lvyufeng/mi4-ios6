@@ -487,9 +487,28 @@ else
   # Unquoted on purpose: this is a LIST of flags, and it is the one value here that has to reach the
   # gate as several arguments. Empty is a legitimate list (an arm whose switches need none of them),
   # and an unquoted empty variable expands to nothing under `set -u`.
+  #
+  # **AND `--live` IS THE SAME DEFECT CLASS ONE FLAG OVER, WHICH 679 MEASURED RATHER THAN ASSUMED.** The
+  # gate resolves its tree from its own directory (`preflight_boot_check.sh:21` is
+  # `OUT=$REPO_ROOT/out/stage90`, and there is no seam for it), so **this row reads `out/stage90`
+  # whatever `--live` says**, while rows 1, 2, 4 and 5 read `--live`. Measured 2026-09-25: `--live
+  # out/stage90/frozen/armed-selftest-wdog-ef0361a2` printed rows 1/2/4/5 about the self-test park and a
+  # row 3 whose refusal named `/mnt/data/mi4-ios6/out/stage90/xnu_arm_entry-config.txt`. Nothing about
+  # that is wrong in itself - the gate is right about its own tree - but a **green** row 3 read under
+  # `--live` is a verdict about another arm, and the operator pointing the tool at a park is reading row
+  # 4, four lines below, with no hint that row 3 is not about the same bytes. It is not repaired by
+  # honouring `--live` here (the gate has no way to be pointed elsewhere, and inventing one would change
+  # what row 3 means for every caller), so it is **said out loud in the reading** - the same treatment
+  # the 667 finding block grew for row 1.
+  _live_abs=$(readlink -f "$LIVE" 2>/dev/null || printf '%s' "$LIVE")
+  if [[ $_live_abs != "$REPO_ROOT/out/stage90" ]]; then
+    gate_tree_note=" **AND THIS ROW READ $REPO_ROOT/out/stage90 AND NOT $_live_abs**: the gate resolves its own tree (\`preflight_boot_check.sh:21\`) and there is no seam for it, so this verdict is about the live tree and not about the arm rows 1, 2, 4 and 5 read - read the two together and not as one."
+  else
+    gate_tree_note=''
+  fi
   if gout=$("$GATE" ${used_flags} 2>&1); then
     gsha=$(printf '%s' "$gout" | sed -n 's/^  sha256  *\([0-9a-f]\{16\}\)[0-9a-f]*.*/\1/p' | head -1)
-    ok 'the gate accepts this tree' "exit 0${gsha:+ (image ${gsha}...)} under '${used_flags:-(no flags)}' ($used_why) - the entry sources match the manifest by content, the image carries the arm the entry bin holds, and the record binds that bin"
+    ok 'the gate accepts this tree' "exit 0${gsha:+ (image ${gsha}...)} under '${used_flags:-(no flags)}' ($used_why) - the entry sources match the manifest by content, the image carries the arm the entry bin holds, and the record binds that bin$gate_tree_note"
   else
     grc=$?
     # The refusal is the gate's own `REFUSING:` line (`fail()` writes it to stderr, and `2>&1` above
@@ -500,7 +519,7 @@ else
     refusal=$(printf '%s' "$gout" | grep -m1 '^REFUSING:' | cut -c1-220)
     [[ -n $refusal ]] || refusal=$(printf '%s' "$gout" | grep -m1 -E 'REFUS|not allowed|needs --allow|was passed|unknown argument' | cut -c1-220)
     [[ -n $refusal ]] || refusal="no REFUSING line at all; last line: $(printf '%s' "$gout" | tail -1 | cut -c1-160)"
-    bad 'the gate accepts this tree' "exit $grc under '${used_flags:-(no flags)}' ($used_why) - $refusal"
+    bad 'the gate accepts this tree' "exit $grc under '${used_flags:-(no flags)}' ($used_why) - $refusal$gate_tree_note"
   fi
 fi
 
@@ -590,7 +609,7 @@ else
       case $seam in
         poc)
           entry_arm='the ACTING arm (653: the seam WITH its operation, SEAM_POC=1 and SEAM_MEASURE=0)'
-          entry_conseq="this press's log carries the seam pair, and on THIS arm the pair reads the operation's own cells (run_and_capture.sh:2069-2088) - and the EXPECTED row is STALE LINE, WRITTEN OUT, i.e. a1 == this log's own rtcpre_pop: the operation issues exactly ONE DCCIMVAC (mcr p15,0,r0,cr7,cr14,{1}, at cfmdr_loop 0x800458b0) and the built call entry_seam_flush:0x8047ca64 passes len 8, so the loop runs once at 0x8054fec0 - the line containing the slot. Clean-and-invalidate is the SAME instruction, so this cell says the invalidate ran as well as the write-back. CLEAN LINE (a1 == b1) has TWO readings and the frontier decides which: the operation inert, OR the line already clean - in which case the invalidate still ran and the boot should still get past the pop. Read that cell TOGETHER with slot_post_calls / poll_seq, never alone. CHANGED (a1 neither) is the least likely of the three. **571's claim that the invalidate does not survive the distance to the pop is measured OUT**: the four instructions 0x8004632c-0x80046338 are mrc TPIDRPRW / mov r1,#1 / ldr r0,[r0,#1484] / str r1,[r0,#304] - no cr7 write of any kind - the load is at 0xc05593bc (TPIDRPRW = 0xc0558df0, this arm's own xnu_live_pce_tpidrprw) and the store at 0x8051a130 (the dump's r0 = 0x8051a000 = cpu_data, +304), and neither is in the slot's line 0x8054fec0-0x8054feff. The live alternative is ONE LEVEL BELOW: an L2 copy that an MVA operation may not reach. The frontier reading beside it is slot_post_calls, absent in every capture since 520" ;;
+          entry_conseq="this press's log carries the seam pair, and on THIS arm the pair reads the operation's own cells (run_and_capture.sh:2069-2088) - and the EXPECTED row is STALE LINE, WRITTEN OUT, i.e. a1 == this log's own rtcpre_pop: the operation issues exactly ONE DCCIMVAC (mcr p15,0,r0,cr7,cr14,{1}, at cfmdr_loop 0x800458b0) and the built call passes len 8, so the loop runs once, over the line containing the slot. **That call's address is NOT quoted here, and 679 removed it because it is the one address in this sentence that moves with the arm**: it stood at 0x8047ca64 and is 0x8047cab4 in 678's image, because it is a site INSIDE entry_seam_flush - the function the next arm edits. The gate prints the seam's own call count and the eight bytes it covers, which is the reading; the site address is not. Clean-and-invalidate is the SAME instruction, so this cell says the invalidate ran as well as the write-back. CLEAN LINE (a1 == b1) has TWO readings and the frontier decides which: the operation inert, OR the line already clean - in which case the invalidate still ran and the boot should still get past the pop. Read that cell TOGETHER with slot_post_calls / poll_seq, never alone. CHANGED (a1 neither) is the least likely of the three. **571's claim that the invalidate does not survive the distance to the pop is measured OUT**: the four instructions 0x8004632c-0x80046338 are mrc TPIDRPRW / mov r1,#1 / ldr r0,[r0,#1484] / str r1,[r0,#304] - no cr7 write of any kind - the load is at 0xc05593bc (TPIDRPRW = 0xc0558df0, this arm's own xnu_live_pce_tpidrprw) and the store at 0x8051a130 (the dump's r0 = 0x8051a000 = cpu_data, +304), and neither is in the slot's line 0x8054fec0-0x8054feff. The live alternative is ONE LEVEL BELOW: an L2 copy that an MVA operation may not reach. **Those four and cfmdr_loop were re-measured against 678's image and are correct there**: 0x800458b0 is \`mcr 15,0,r0,cr7,cr14,{1}\` under its own \`cfmdr_loop\` symbol, and 0x8004632c is \`platform_cache_idle_exit+0x58\` and decodes to exactly the four mnemonics above - they sit before entry_seam_flush in .text, which is why they did not move with it. The frontier reading beside it is slot_post_calls, absent in every capture since 520" ;;
         measure)
           entry_arm='the MEASURE arm (574 park: the interception with its operation REMOVED, SEAM_POC=0 and SEAM_MEASURE=1)'
           entry_conseq="this press's log carries the seam pair as a CONTROL reading - whether Apple's own FlushPoU_Dcache writes the slot's line back, which 652 measured as an equal pair - and it does not by itself select a repair: that was the reading this arm existed to produce" ;;
@@ -637,6 +656,30 @@ else
   elif [[ -n $sub_arm ]]; then
     ok 'the arm is named by a reading' "$arm, and the entry it carries is $entry_arm ('$vline', and the entry record's STAGE90_XNU_IDLE_NO_SLEEP=$swe agrees). $conseq"
   else
+    # **THE TWO READERS OF ONE RENAME, AND UNTIL 679 THE SECOND ONE READ A NAME THAT DID NOT EXIST.**
+    # 667 split one variable into two - the entry-level consequence became `entry_conseq` and a new
+    # `conseq` took over the sub-arm (self-test) sentence - and it updated the reader above and **not
+    # this one**, which was left saying `$conseq`. On a self-test arm `conseq` is assigned, so the row
+    # above was correct and this row was never reached; on any arm with **neither** self-test switch on,
+    # `sub_arm` is empty and this branch runs, and `set -u` aborted the whole run here.
+    #
+    # Measured 2026-09-25 on `armed-seam-endrun-88972ba9` (678's arm):
+    #
+    #     tools/verify_press_ready.sh: line 640: conseq: unbound variable   ->  exit 1, NO VERDICT AT ALL
+    #
+    # The row that dies is row 4 and the row that is therefore never reached is row 5 - *a press now
+    # would actually be caught*, the one row that decides whether the press is worth spending. So the
+    # failure is not a missing sentence: **readiness prints nothing and a launcher waiting on it waits
+    # forever.** And the defect was invisible in the step that introduced it, because the only arm in
+    # `out/` when 667 measured its own five rows was **666's**, a self-test arm - one arm, and its own
+    # switch selects exactly the branch that hides the break. `stage90-build-config.txt` is byte-identical
+    # (`6c2b6038...`) across the 653 seam arm, the sleeper and this one, so **every non-self-test arm
+    # since 666 has aborted here**, not just this one.
+    #
+    # The repair is the reader 646 wrote: an arm that reaches the entry reads its consequence from
+    # `entry_conseq`. The orphan ran the other way too - 667 renamed the four assignment sites and left
+    # `entry_conseq` read by nothing - so this line is also what makes that prose reachable at all.
+    conseq=$entry_conseq
     ok 'the arm is named by a reading' "$arm: '$vline' and the entry record's STAGE90_XNU_IDLE_NO_SLEEP=$swe agrees, so $conseq"
   fi
 fi
