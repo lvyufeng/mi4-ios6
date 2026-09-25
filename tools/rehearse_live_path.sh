@@ -74,6 +74,50 @@ RUNNER=${RUNNER_OVERRIDE:-$LIVE_RUNNER}
 # rather than reporting what it was measuring. Resolved once, here, so every section fires the same file.
 RUNNER=$(readlink -f "$RUNNER" 2>/dev/null || printf '%s' "$RUNNER")
 [[ -r $RUNNER ]] || { printf 'rehearse: the runner resolved to %s, which is not readable\n' "$RUNNER" >&2; exit 1; }
+
+# **The arm the live tree holds, resolved by the same tool the runner resolves it with, and passed to
+# every live-path state.** 668 made `run_and_capture.sh` require `--expect-arm=<recorded set>`, because
+# a run that does not say which arm it is for cannot be attributed afterwards and a *stale caller*
+# silently booting a superseded arm is a real measured state on this host (the armed launcher, 667
+# section 5). The battery is a caller like any other, so it has to name the arm - and it must name the
+# one that is actually in `out/`, or every cell below would be exercising the refusal instead of the
+# path it is about. Resolving it with `tools/resolve_arm_set.sh` rather than reading a name out of the
+# record with an `awk` here is deliberate: a second parser of one line format is a second definition of
+# it, and this one would be wrong in the direction that fails loudly (the runner refuses) rather than
+# quietly - but a battery that cannot run is still a battery that is not measuring anything.
+#
+# A tree whose arm cannot be resolved is a refusal here and not a skip: every cell in this file asserts
+# something about the live path, and a live path that sends no image is not the subject.
+RESOLVE_ARM_SET=$ROOT/tools/resolve_arm_set.sh
+[[ -x $RESOLVE_ARM_SET ]] || { printf 'rehearse: %s is not executable, so the arm the live tree holds cannot be named and no live-path cell below could run\n' "$RESOLVE_ARM_SET" >&2; exit 1; }
+if ! _arm_line=$("$RESOLVE_ARM_SET" "$ROOT/out/stage90" 2>&1); then
+  printf 'rehearse: the live arm could not be resolved, so this battery cannot drive the live path:\n  %s\n' "$_arm_line" >&2
+  exit 1
+fi
+LIVE_ARM=$(printf '%s' "$_arm_line" | head -1 | cut -f1)
+[[ -n $LIVE_ARM ]] || { printf 'rehearse: the resolver printed no set name, which is a silence and not an arm\n' >&2; exit 1; }
+EXPECT_ARM=(--expect-arm="$LIVE_ARM")
+
+# **And the gate's flags, for the same reason and from the same kind of place.** The live path runs the
+# gate first, and the gate refuses a hazardous arm without its own `--allow-*` - so a battery that passes
+# `--allow-xnu-entry` by hand goes red on every cell the moment the arm in `out/` needs a second flag.
+# That is not hypothetical: measured 2026-09-25, **all twenty cells of this file failed** on the arm 666
+# parked, with `REFUSING: the hardware-watchdog SELFTEST ... needs --allow-hw-watchdog-selftest`, and they
+# had been failing since that arm was built. The same defect appeared in `verify_press_ready.sh` (667) and
+# in the armed press launcher. `tools/gate_flags_for_arm.sh` is the one derivation; this file asks it
+# instead of holding a list, so the battery's flag set and the arm's switches cannot drift apart.
+GATE_FLAGS_TOOL=$ROOT/tools/gate_flags_for_arm.sh
+[[ -x $GATE_FLAGS_TOOL ]] || { printf 'rehearse: %s is not executable, so the flags the live path needs cannot be derived\n' "$GATE_FLAGS_TOOL" >&2; exit 1; }
+if ! _flags=$("$GATE_FLAGS_TOOL" "$ROOT/out/stage90" 2>&1); then
+  printf 'rehearse: the gate flags for the live arm could not be derived:\n  %s\n' "$_flags" >&2
+  exit 1
+fi
+GATE_ARGS=()
+while IFS= read -r _f; do
+  [[ -n $_f ]] || continue
+  GATE_ARGS+=("$_f")
+done <<< "$_flags"
+printf '   gate flags: %s\n' "${GATE_ARGS[*]:-(none - this arm declares no hazard that needs one)}"
 # **And the override may not be the live path.** A `RUNNER_OVERRIDE` pointed at `run_and_capture.sh`
 # would silently restore exactly the hazard above while looking like it had been handled, so the
 # refusal is structural rather than a rule in a comment.
@@ -514,7 +558,7 @@ run_state() {
   local ident_before
   ident_before=$(tree_identity)
   LOGFILE=$logfile RETURN_TIMEOUT=6 CAPTURE_WAIT=1 FB_AMBIG_WAIT=3 \
-    timeout 120 bash "$RUNNER" --allow-xnu-entry > "$out" 2> "$err"
+    timeout 120 bash "$RUNNER" "${GATE_ARGS[@]}" "${EXPECT_ARM[@]}" > "$out" 2> "$err"
   local code=$?
   # **The two reads that bracket the state, and the reason they are here rather than at the end.** The
   # identity is taken immediately before and immediately after the runner call, so what it witnesses is

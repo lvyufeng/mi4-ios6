@@ -132,22 +132,67 @@ FB_BOOT_RC=0
 
 DRY_RUN=0
 SUMMARISE_ONLY=""
+say() { printf '%s\n' "$*"; }
+step() { printf '\n== %s ==\n' "$*"; }
+die() { printf 'run_and_capture: %s\n' "$*" >&2; exit 1; }
+
+# **Which arm the press is FOR, declared by the caller, with no default - and it is required.**
+# 654 section 6 named this file's exposure: the gate call is not atomic against a build ("the gate reads
+# five files in sequence, so a rebuild can put a *different* consistent pair in front of it"), and 660
+# sharpened it - *a rebuild is not caught by anything*, because image, config and manifest move
+# together, so every gate clause is satisfied by construction and **nothing compares `out/` against the
+# arm the press is OWED for**. This variable is that comparison's left-hand side, and the right-hand
+# side is read out of `revert-set.txt` below rather than out of the record's `role=` sentences: three of
+# those claim to be "the arm the next press sends" (667), so they cannot answer the question.
+#
+# **There is no default, and that is the same decision the readiness tool took in 667.** A default is a
+# name nobody typed, and a name nobody typed is how the wrong arm gets pressed. The flag is REQUIRED for
+# a run that would actually send an image; `--dry-run` prints what it would check instead of refusing,
+# so the flag can be exercised without the phone. A caller that does not know the arm it is for has the
+# answer already: readiness row 4 names it, and this file names the candidate sets in its own refusal.
+EXPECT_ARM=""
 GATE_FLAGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
     # Summarise a log that was already captured - useful when the run happened in another
     # shell, or when re-reading one after the fact. Takes the path as the next argument.
-    --summarise) SUMMARISE_ONLY=${2:-}; shift 2 ;;
+    #
+    # **The value is required, and the check is not decoration.** `set -euo pipefail` is on, so a
+    # `shift 2` with one argument left fails and ends the script with status 1 and **no output at
+    # all** - measured 2026-09-25 on this flag and on the new one beside it (`--summarise` alone:
+    # `EXIT=1 lines=0`). A refusal that prints nothing cannot be told from a crash, and an operator
+    # reading it has no way to know which flag was wrong. The pre-existing one is fixed here rather
+    # than reported: it is two lines in the same `case`, and leaving a known silent exit beside a new
+    # flag is the shape this project ranks first to suspect.
+    --summarise)
+      [[ -n ${2:-} ]] || die "--summarise needs a log path after it (e.g. --summarise /tmp/cancro-last_kmsg.txt); an empty value is a refusal here and not an empty read"
+      SUMMARISE_ONLY=$2; shift 2 ;;
+    # Both spellings, and the separate-argument one is not a convenience: a launcher that builds its
+    # command as a string cannot use `--expect-arm=NAME` without quoting games, and a launcher is
+    # exactly the caller this flag exists for (the armed one on this host fires
+    # `./run_and_capture.sh --allow-xnu-entry` and nothing else - see the finding in 667's section 5).
+    --expect-arm)
+      # An empty value is refused here rather than at the pin, because "the caller did not say" and
+      # "the caller said nothing" are two different records (632) and only one of them is a caller who
+      # does not know the answer.
+      [[ -n ${2:-} ]] || die "--expect-arm needs a recorded set name after it (e.g. --expect-arm=armed-selftest-wdog-ef0361a2). Which sets exist is in $STAGE_DIR/revert-set.txt, and readiness row 4 names the one the bytes in out/ are"
+      EXPECT_ARM=$2; shift 2 ;;
+    --expect-arm=*)
+      EXPECT_ARM=${1#--expect-arm=}
+      [[ -n $EXPECT_ARM ]] || die "--expect-arm= was passed with nothing after the '='; that is an empty value and not an absent flag, and both are refused"
+      shift ;;
+    # **A typo here must not become a gate flag.** `*)` sends anything unrecognised to the gate, which
+    # refuses an unknown argument at exit 2 - and a misspelled `--expect_arm=...` would then read as the
+    # gate's own verdict about the tree. The prefix test below catches that class by name before the
+    # fallthrough, at the cost of one pattern.
+    --expect*) die "unknown argument $1 (did you mean --expect-arm=SET?)" ;;
     *) GATE_FLAGS+=("$1"); shift ;;
   esac
 done
 
 resolve_path "$SUMMARISE_ONLY"; SUMMARISE_ONLY=$RESOLVED
 
-say() { printf '%s\n' "$*"; }
-step() { printf '\n== %s ==\n' "$*"; }
-die() { printf 'run_and_capture: %s\n' "$*" >&2; exit 1; }
 
 # **The resolution is printed, not silent.** A path argument that was re-based is a decision this script
 # made on the caller's behalf, and a caller who wrote `out/stage90/captures/x.txt` and sees the reading
@@ -2395,6 +2440,89 @@ fi
 
 say ""
 
+# --- 0. WHAT ARM IS THIS PRESS FOR, pinned before the gate reads anything ----------------------
+#
+# 654 section 6's open item (R4), and the last of the three repairs 660 named. The exposure it closes
+# has two halves and they are different:
+#
+#   * **the wrong arm, consistently built.** `out/` holds a complete, self-consistent arm - image,
+#     entry bin, config and manifest all agreeing - and it is not the arm this press was
+#     pre-registered for. Every clause in the gate passes. Readiness row 4 names the arm *of the
+#     bytes*, which is the right answer to a different question: it says what WOULD be sent, never
+#     whether that is what was meant. On 2026-09-25 the armed launcher on this host was found pinned
+#     to a superseded arm (`--set armed-seam-poc-a43304f2` against a live `ef0361a2...`) with a
+#     `--allow-xnu-entry`-only flag line the gate refuses for the owed arm - three stale things in the
+#     one file whose job is to spend the press, and nothing in this runner could see any of them.
+#   * **the right arm, moved mid-window.** The gate is not atomic: it reads its five files in sequence,
+#     and the device checks below can wait up to `FB_AMBIG_WAIT` seconds afterwards. A build landing in
+#     that window changes the bytes between the gate's verdict and the send, and the gate's verdict
+#     would be quoted for an image it never read.
+#
+# So this step does three things, and each is a *reading* rather than a convention:
+#
+#   1. **resolve what the bytes ARE**, from `revert-set.txt` - the recorded sets, matched by the
+#      `stage90-qcdt.img` hash. Zero matches and two-or-more are both refusals that name what they
+#      found, because the name has to come from a record that can be checked and the record's `role=`
+#      sentences cannot supply it (three of them claim to be "the arm the next press sends", 667).
+#   2. **require the caller to say which arm the press is FOR** (`--expect-arm`), and refuse unless the
+#      two are the same string. Not a warning: a press is one shot and its bytes are the instrument the
+#      reading is taken with, so an undeclared arm is a press whose result cannot be attributed.
+#   3. **pin the image's hash** and re-check it immediately before the send and once after it, so
+#      "what the gate read" and "what was sent" are joined rather than assumed equal.
+#
+# The pin is the *image* and nothing else, and that is the whole set on purpose: `stage90-qcdt.img` is
+# the one file `fastboot boot` sends, so any rebuild that could change what this press does changes its
+# hash, and a rebuild that does not change its hash did not change what this press does. Widening the
+# pin to the other four files the gate reads would be a check that cannot fail for the reason that
+# matters, which is the shape this project keeps paying for.
+step "the arm this press is for"
+IMAGE_SHA_PIN=""; IMAGE_BYTES_PIN=""; SET_ARM=""
+REVERT_RECORD=$STAGE_DIR/revert-set.txt
+# **The resolution is a tool and not a block here, and that is the one-definition rule applied to the
+# thing this file most needs to get right.** `tools/resolve_arm_set.sh` is the single place that answers
+# "which recorded set are these bytes" - it is what `tools/verify_press_ready.sh` calls and what
+# `tools/rehearse_live_path.sh` calls to build the `--expect-arm` below. The first draft of this step had
+# its own scan plus its own copy of the record's `set= ./ sha256= ./ file=` parser, which is how 667's
+# readiness repair and this one would have drifted apart in opposite directions with both of them green.
+if [[ ! -x $REPO_ROOT/tools/resolve_arm_set.sh ]]; then
+  die "$REPO_ROOT/tools/resolve_arm_set.sh is not executable, so which arm the bytes in $OUT are cannot be resolved - and a run that cannot name the arm it sends is the run this check exists to stop. Nothing was sent"
+fi
+_resolved=""; _resolve_why=""
+if _out=$("$REPO_ROOT/tools/resolve_arm_set.sh" "$OUT" 2>&1); then
+  _resolved=$(printf '%s' "$_out" | head -1)
+  SET_ARM=$(printf '%s' "$_resolved" | cut -f1)
+  IMAGE_SHA_PIN=$(printf '%s' "$_resolved" | cut -f2)
+  IMAGE_BYTES_PIN=$(printf '%s' "$_resolved" | cut -f3)
+else
+  _resolve_why=$_out
+fi
+
+if [[ -z $SET_ARM ]]; then
+  # The refusal is the resolver's own sentence, quoted rather than paraphrased: a second wording of one
+  # finding is a second definition of it, and the resolver's version names the hash it looked for and
+  # the sets the record does have.
+  say "REFUSING: this press has no name for what it would send."
+  printf '%s\n' "$_resolve_why" | sed 's/^/          /'
+  die "the arm of the bytes in $OUT could not be resolved, so nothing was sent. A rebuild rewrites image, config and manifest together, so the gate would accept such a tree - this is the check that does not (654 section 6, 660)"
+fi
+
+say "the bytes to be sent are the recorded set '$SET_ARM'"
+say "  image  $IMAGE_SHA_PIN  ($IMAGE_BYTES_PIN bytes, the file \`fastboot boot\` sends)"
+
+if [[ -z $EXPECT_ARM ]]; then
+  if (( DRY_RUN == 1 )); then
+    say "note: --expect-arm was not passed, so a LIVE run would refuse here. The bytes above are"
+    say "      '$SET_ARM', and that is what --expect-arm=$SET_ARM would declare."
+  else
+    die "--expect-arm=<set> was not given, and this run would SEND an image. The press is one shot and the bytes it sends ARE the instrument its reading is taken with, so a run that does not say which arm it is for cannot be attributed afterwards. The bytes in $OUT are '$SET_ARM' (resolved from their hash just above) - if that is the arm this press was pre-registered for, re-run with --expect-arm=$SET_ARM. There is deliberately no default: a default is a name nobody typed, and a name nobody typed is how the wrong arm gets pressed"
+  fi
+elif [[ $EXPECT_ARM != "$SET_ARM" ]]; then
+  say "REFUSING: this press was declared for '$EXPECT_ARM' and the bytes in $OUT are '$SET_ARM'."
+  die "--expect-arm=$EXPECT_ARM does not match the arm in $OUT ($IMAGE_SHA_PIN, set '$SET_ARM'). Nothing was sent. This is the check separate launchers could not make: a stale caller names an arm that has been superseded, and the only symptom used to be a run that booted the wrong one"
+else
+  say "ok: declared arm '$EXPECT_ARM' == the recorded set of the bytes to be sent"
+fi
+
 # --- 1. the gate, with whatever flags the caller gave ------------------------------------
 step "gate"
 if [[ $DRY_RUN -eq 1 ]]; then
@@ -2648,7 +2776,44 @@ if [[ $DRY_RUN -eq 0 ]]; then
   # way (they are a bounded host-side wait and a read - neither can spend anything), and the
   # non-return verdict below is *conditioned* on it, because "the payload ran and the device did not
   # come back" is not a claim a boot call that did not report success can support.
+  # --- R4, first half: the bytes about to be sent are the bytes the gate read --------------------
+  #
+  # This is the re-check 654 section 6 asked for, and the window it closes is real and not theoretical:
+  # the gate ran several hundred lines ago and the device checks above may have waited up to
+  # `FB_AMBIG_WAIT` seconds since. A build landing in that window replaces the image, and this run would
+  # then quote the gate's verdict for bytes it never read. The pin is a hash of the file, so this is one
+  # `sha256sum` and cannot be fooled by an mtime.
+  #
+  # **Refused, not warned.** Up to here nothing has been sent and the phone is already in fastboot, so
+  # the cost of this refusal is the attempt and not the press - which is exactly the trade the check is
+  # for. Below this line the cost inverts: `fastboot boot` spends the press on whatever bytes are there.
+  _sha_now=$(sha256sum "$IMAGE" 2>/dev/null | cut -d' ' -f1)
+  if [[ $_sha_now != "$IMAGE_SHA_PIN" ]]; then
+    say "REFUSING: the image CHANGED between the gate's verdict and the send."
+    say "          the gate read and accepted  $IMAGE_SHA_PIN"
+    say "          the file is now             ${_sha_now:-<unreadable>}"
+    die "something rebuilt $OUT while this run was in flight. Nothing was sent. Re-run so the gate reads the bytes it is about to vouch for, and note the standing rule this measures: do not build while a battery or a press is running (654)"
+  fi
+
   sudo fastboot boot -s "$SERIAL" "$IMAGE" || FB_BOOT_RC=$?
+
+  # --- R4, second half: and the bytes sent were still those bytes when they left ----------------
+  #
+  # The third reading, and it is the one that makes the first two mean something: without it, "the file
+  # is right just before the call" is a claim about a moment, and a build that lands *during* the call
+  # is invisible. It cannot undo the send - the press is spent either way - so this is a **note** and not
+  # a refusal, and its job is to stop the log being read as a reading of the arm it names. A `TREE`-like
+  # state gets no verdict in its own direction (662), and after the send there is no direction left but
+  # to say so.
+  _sha_after=$(sha256sum "$IMAGE" 2>/dev/null | cut -d' ' -f1)
+  if [[ $_sha_after == "$IMAGE_SHA_PIN" ]]; then
+    say "the bytes sent were the bytes the gate read: $IMAGE_SHA_PIN, unchanged across the send"
+  else
+    say "**NOTE, and it is about this log's provenance rather than about the payload**: $IMAGE moved"
+    say "  BETWEEN the send and this check - the gate read $IMAGE_SHA_PIN and the file is now"
+    say "  ${_sha_after:-<unreadable>}. The payload that ran is the one that was in place at the call;"
+    say "  whatever this run's log says about an arm, it is not evidence about the arm now on disk."
+  fi
   if (( FB_BOOT_RC != 0 )); then
     say ""
     say "note: fastboot boot exited $FB_BOOT_RC, and **that is not a verdict about the payload**."

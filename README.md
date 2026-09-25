@@ -27,13 +27,24 @@ sha256sum -c out/stage90/SHA256SUMS.txt  # per-stage build manifest
 cd stages/stage90 && ./preflight_boot_check.sh   # verify + gate a hardware run
 sudo fastboot boot out/stage90/stage90-qcdt.img  # non-persistent validation
 
-cd stages/stage90 && ./run_and_capture.sh        # gate + boot + capture, in one step
+cd stages/stage90 && ./run_and_capture.sh --expect-arm=<set>   # gate + boot + capture, in one step
 ```
 
 `run_and_capture.sh` does the whole cycle — gate, boot, wait for the device, capture
 `/proc/last_kmsg`, summarise the markers — so the commands are not retyped at the moment they
 matter most. It never flashes, and it captures the log before touching the device again. It
 exits 2 if the device does not come back, which means a manual power press is needed.
+
+**`--expect-arm` is required, and it is the one argument to type from memory rather than from
+this file.** A run sends exactly one image, and that image *is* the instrument its reading is
+taken with, so a run that does not say which arm it is for cannot be attributed afterwards —
+and a launcher left pointing at an arm that has since been superseded boots the wrong one with
+no symptom at all. The flag's value is a recorded set name from
+`stages/stage90/revert-set.txt`; `tools/resolve_arm_set.sh out/stage90` prints the one the
+bytes currently in `out/` are, and `tools/verify_press_ready.sh` prints it too, along with the
+gate flags that arm needs. The runner resolves the same thing itself and refuses if the two
+disagree, if the image is not a recorded set, or if the image moves between the gate's verdict
+and the send.
 
 Every snapshot resolves the repository root itself, so its `build.sh` works from any working directory. Booting is deliberately not a `make` target: flashing is a per-operation decision, and `fastboot boot` never writes to the device.
 

@@ -204,36 +204,33 @@ kv_of() {   # kv_of KEY LINE -> the value of KEY= in LINE; empty when the key is
 # text to be "the arm the next press sends" - `armed-sleepless-696a0f39`, `armed-seam-poc-a43304f2` and
 # `armed-selftest-wdog-ef0361a2` (measured 2026-09-25). A claim in a record is not a reading, so the
 # bytes of `stage90-qcdt.img` - the one file `fastboot boot` sends - are asked instead.
+#
+# **Asked OF A TOOL AND NOT OF A SCAN HERE, since 668.** This block resolved the set inline from 667
+# until the runner needed the same answer (`--expect-arm`, 668) and the rehearsal needed it too - one
+# question with three would-be answers, on the file whose whole job is to name the arm a press sends.
+# `tools/resolve_arm_set.sh` is now the only place that answers *which set are these bytes*, and it is
+# called from here, from `run_and_capture.sh` and from `tools/rehearse_live_path.sh`. The test that
+# keeps this honest is not the comment: `kv_of` below is NOT that parser being kept alive a second time
+# - it reads a *different* question (enumerate the members of a NAMED set) - and if the two ever
+# disagreed about the record's line format, the set would resolve here and the member hashes would not,
+# which row 1 would report as ten members "not the recorded bytes".
 SET_FOUND=''; SET_WHY=''
-record_sets=()
+RESOLVE_ARM_SET=$REPO_ROOT/tools/resolve_arm_set.sh
 if [[ -n $SET ]]; then
   SET_WHY='given on the command line'
-elif [[ ! -r $RECORD ]]; then
-  SET_WHY="$RECORD is not readable, so which set the live bytes are cannot be found"
-elif [[ ! -f $LIVE/$QCDT_NAME ]]; then
-  SET_WHY="$LIVE/$QCDT_NAME is not a file - the artifact the press sends is not here to be hashed, and it is that artifact's bytes that name the set"
+elif [[ ! -x $RESOLVE_ARM_SET ]]; then
+  SET_WHY="$RESOLVE_ARM_SET is not executable, so which set the live bytes are cannot be resolved - and this row must not fall back to a name it made up"
 else
-  live_qcdt=$(sha256sum "$LIVE/$QCDT_NAME" | cut -d' ' -f1)
-  hits=()
-  while read -r rl; do
-    [[ $rl == *set=* ]] || continue
-    _s=$(kv_of set "$rl")
-    [[ -n $_s ]] || continue
-    case " ${record_sets[*]-} " in *" $_s "*) ;; *) record_sets+=("$_s") ;; esac
-    [[ $(kv_of file "$rl") == "$QCDT_NAME" ]] || continue
-    [[ $(kv_of sha256 "$rl") == "$live_qcdt" ]] || continue
-    case " ${hits[*]-} " in *" $_s "*) ;; *) hits+=("$_s") ;; esac
-  done < "$RECORD"
-  if (( ${#hits[@]} == 1 )); then
-    SET_FOUND=${hits[0]}
-    # A reason for the found case too, so the header line never prints an empty parenthesis - the shape
-    # that reads as "the tool did not say" (630: a silence only reads if the successful case is silent,
-    # and here it is printed).
-    SET_WHY="found by hashing the live $QCDT_NAME ($live_qcdt), which exactly one set in the record records"
-  elif (( ${#hits[@]} == 0 )); then
-    SET_WHY="the live $QCDT_NAME ($live_qcdt) is not the $QCDT_NAME of any set in $RECORD (${record_sets[*]-none}) - the tree was rebuilt (408: the payload build is not reproducible) and the new bytes were never recorded, so which arm the press would send is not in the record"
+  if _ro=$("$RESOLVE_ARM_SET" "$LIVE" 2>&1); then
+    SET_FOUND=$(printf '%s' "$_ro" | head -1 | cut -f1)
+    # The resolver's own second and third fields are printed rather than recomputed: they are the
+    # hash it compared, and hashing the file again here would be a second reading of the thing the
+    # first reading was about.
+    SET_WHY="found by hashing the live $QCDT_NAME ($(printf '%s' "$_ro" | head -1 | cut -f2)), which exactly one set in the record records"
   else
-    SET_WHY="the live $QCDT_NAME ($live_qcdt) is recorded under ${#hits[@]} set names (${hits[*]}) - one artifact in two sets, so which ARM those bytes are is not something this tool can read"
+    # Its refusal is quoted, not paraphrased: a second wording of one finding is a second definition
+    # of it, and the resolver's version names the hash it looked for and the sets that do exist.
+    SET_WHY="$_ro"
   fi
 fi
 [[ -n $SET_FOUND ]] && SET=$SET_FOUND
@@ -289,68 +286,54 @@ if (( payload_cfg_ok == 1 )); then
   done
 fi
 
-# --- the flag set the RUN must be given, derived from those switches ---------------------------------
-# The gate refuses a state without its `--allow-*` (`preflight_boot_check.sh:1570`, `:1592`, `:1605`,
-# `:1649`, `:1684`, `:1948`, `:1954`, `:1975`, `:1985`; and `:1680` is the one the other way round, a
-# flag it refuses when the switch is OFF). So the flags a run needs are a function of the arm's own
-# switches, and deriving them here is what makes the set the gate is checked with and the set the run
-# is given one value. The table below is a COPY of the gate's conditions, which is a real cost - a copy
-# can drift - and the two checks under it are what bound the cost:
-#   * every flag the gate's own usage line and refusals name must be a flag this table can produce, so
-#     an eleventh flag turns into a refusal that names it rather than a silently under-supplied set;
-#   * the derivation itself is falsifiable with `--gate-flags`, so a green gate row is not the only
-#     thing this code can print.
-# The residual risk, stated rather than papered over: the gate could give an existing `--allow-X` a new
-# meaning while keeping its name, and no check here would see it. That is a change to a flag this table
-# already knows, and the row 3 refusal it would produce is loud.
-sw_on() {   # off is `0|0u`, exactly the gate's `is_off` (`preflight_boot_check.sh:158`)
-  case ${payload_sw[$1]:-} in ''|0|0u) return 1 ;; *) return 0 ;; esac
-}
-sw_flag() { # sw_flag SWITCH FLAG - the flag the gate needs when SWITCH is a hazard the arm declares
-  sw_on "$1" && gate_args+=("$2")
-  return 0
-}
-gate_args=()
-sw_flag STAGE90_XNU_ENTRY --allow-xnu-entry
-sw_flag STAGE90_HW_WATCHDOG_SELFTEST --allow-hw-watchdog-selftest
-sw_flag STAGE90_DEADMAN_SELFTEST --allow-selftest
-sw_flag STAGE90_HANDOFF_FAULT_INJECT_VA --allow-fault-inject
-case ${payload_sw[STAGE90_HANDOFF_MODE]:-} in
-  STAGE90_HANDOFF_MODE_PREFLIGHT_WATCHDOG_ONLY|1|1u) gate_args+=(--allow-preflight) ;;
-  STAGE90_HANDOFF_MODE_FULL|2|2u)                    gate_args+=(--allow-full) ;;
-esac
-case ${payload_sw[STAGE90_PMAP_ATTR_MODE]:-} in
-  STAGE90_PMAP_ATTR_MODE_NORMAL_NC|1|1u) gate_args+=(--allow-attr-normal-nc) ;;
-  STAGE90_PMAP_ATTR_MODE_NORMAL_WB|2|2u) gate_args+=(--allow-attr-normal-wb) ;;
-esac
-case ${payload_sw[STAGE90_CACHE_MODE]:-} in
-  STAGE90_CACHE_MODE_ICACHE|1|1u)        gate_args+=(--allow-icache) ;;
-  STAGE90_CACHE_MODE_ICACHE_DCACHE|2|2u) gate_args+=(--allow-dcache) ;;
-esac
-# `--allow-xnu-entry` is the one flag required in both directions: needed on an entry image, refused on
-# a ladder image (`:1680`). The table has it only in the `sw_flag` above, so an arm with the switch off
-# derives a set without it - which is the set that arm needs.
-GATE_FLAG_VOCAB=(--allow-preflight --allow-full --allow-selftest --allow-attr-normal-nc
-                 --allow-attr-normal-wb --allow-icache --allow-dcache --allow-xnu-entry
-                 --allow-hw-watchdog-selftest --allow-fault-inject)
-gate_arg_unknown=()
-if [[ -r $GATE ]]; then
-  # The gate's flag vocabulary, read out of the gate: its usage line and every refusal that names a
-  # flag. A flag in there that this table cannot produce would make the derived set incomplete and the
-  # row would be green on a set the run does not have - so it is a refusal that names the flag.
-  seen_gate_flags=$( { sed -n 's/^#[[:space:]]*Usage:[[:space:]]*//p' "$GATE"
-                       grep -oE 'needs --allow-[a-z-]+|without --allow-[a-z-]+' "$GATE"; } \
-                     | grep -oE -- '--allow-[a-z-]+' | LC_ALL=C sort -u )
-  while read -r _f; do
-    [[ -n $_f ]] || continue
-    case " ${GATE_FLAG_VOCAB[*]} " in *" $_f "*) ;; *) gate_arg_unknown+=("$_f") ;; esac
-  done <<< "$seen_gate_flags"
+# --- the flag set the RUN must be given: DERIVED, and by a tool since 668 --------------------------
+# The gate refuses a hazardous state without its own `--allow-*` (`preflight_boot_check.sh:1570`, `:1592`,
+# `:1605`, `:1649`, `:1684`, `:1948`, `:1954`, `:1975`, `:1985`; and `:1680` is the one the other way
+# round, a flag it refuses when the switch is OFF). So the set a run needs is a function of the arm's own
+# switches - and **this file had its own copy of that derivation until 668**, which is how it came to
+# invoke the gate with `--allow-xnu-entry` alone while the arm in `out/` needed a second flag (667's
+# section 1b). `tools/gate_flags_for_arm.sh` is now the one place that answers it, and it is called from
+# here and from `tools/rehearse_live_path.sh` - whose twenty live-path cells were red on this arm for the
+# same missing definition.
+#
+# What stays HERE is the payload's own record parse, and that is not the same question asked twice: row 4
+# needs the *values* of two switches to name the arm (`STAGE90_HW_WATCHDOG_SELFTEST` and
+# `STAGE90_DEADMAN_SELFTEST`), where the tool needs the whole table to derive flags. Two questions, two
+# readers, one record - and the drift between them is loud rather than quiet: a parse that stopped seeing
+# a value refuses row 4 and the tool both, each in its own words.
+GATE_FLAGS_FOR_ARM=$REPO_ROOT/tools/gate_flags_for_arm.sh
+gate_args=(); gate_args_str=''; gate_flags_ok=0; gate_flags_why=''
+if [[ ! -x $GATE_FLAGS_FOR_ARM ]]; then
+  gate_flags_why="$GATE_FLAGS_FOR_ARM is not executable, so the flag set this arm needs cannot be derived - and the gate's flags are a function of the arm's own switches, so without it this row would be gating on a guessed set"
+else
+  # `--gate` is passed through so the vocabulary check reads the same gate this row invokes, and both get
+  # the `--gate` seam's value: a flag whose value is used in one place and not another is this project's
+  # most repeated defect class, and it has happened once in this very file (the first draft's
+  # `cd ... && ./preflight_boot_check.sh` ignored the seam for the invocation and reported `exit 127` as
+  # the gate's own verdict).
+  if _gfo=$("$GATE_FLAGS_FOR_ARM" "$LIVE" --gate "$GATE" 2>&1); then
+    gate_flags_ok=1
+    while IFS= read -r _f; do
+      [[ -n $_f ]] || continue
+      gate_args+=("$_f")
+    done <<< "$_gfo"
+    if (( ${#gate_args[@]} > 0 )); then
+      gate_args_str=$(printf '%s ' "${gate_args[@]}")
+      gate_args_str=${gate_args_str% }
+    fi
+  else
+    # The tool's own sentence, quoted rather than paraphrased: a second wording of one finding is a
+    # second definition of it, and this one names the switch or the flag it could not derive.
+    gate_flags_why=$_gfo
+  fi
 fi
-gate_args_str=''
-if (( ${#gate_args[@]} > 0 )); then
-  gate_args_str=$(printf '%s ' "${gate_args[@]}")
-  gate_args_str=${gate_args_str% }
-fi
+
+# Row 4's arms: which of the two self-tests this payload runs. `0|0u` is the gate's own `is_off`
+# (`preflight_boot_check.sh:158`) and the empty value has already been refused above, so an empty value
+# cannot take the off arm here and silently name a self-test arm that is not built.
+sw_on() {
+  case ${payload_sw[$1]:-} in 0|0u) return 1 ;; *) return 0 ;; esac
+}
 
 CHECKS=(); VERDICT=(); DETAIL=(); NFAIL=0
 ok()   { CHECKS+=("$1"); VERDICT+=(ok);   DETAIL+=("$2"); }
@@ -371,11 +354,18 @@ else
   say "  park      (NOT RESOLVED: $SET_WHY)"
 fi
 say "  record    $RECORD"
-if (( payload_cfg_ok == 1 )) && [[ -z $sw_problem && ${#gate_arg_unknown[@]} -eq 0 ]]; then
+if (( gate_flags_ok == 1 )); then
   say "  gate flags  ${gate_args_str:-(none - no switch this arm declares needs one)}"
-  say "  the run     ./preflight_boot_check.sh $gate_args_str   then   ./run_and_capture.sh $gate_args_str"
+  # **The runner's line carries `--expect-arm` and the gate's does not, and the asymmetry is the point.**
+  # Since 668 `run_and_capture.sh` refuses to send anything unless the caller says which arm the press is
+  # for, so a press fired without that argument never reaches the gate at all; the gate has no such
+  # argument and refuses an unknown one. The name is the set resolved above, so the two lines below are a
+  # pair that agrees by construction rather than two commands to be assembled by hand.
+  say "  the run     ./preflight_boot_check.sh ${gate_args_str:-(no flags)}"
+  say "              ./run_and_capture.sh $gate_args_str --expect-arm=${SET:-<unresolved>}"
   say "              (the runner hands unrecognised flags to the gate, so a press given a NARROWER set"
-  say "               than this is a press spent on a gate refusal)"
+  say "               than this is a press spent on a gate refusal - and a press given no --expect-arm"
+  say "               is refused before the gate runs, with nothing sent)"
 else
   say "  gate flags  (NOT DERIVED - see row 3, which refuses rather than gating on a guessed set)"
 fi
@@ -478,12 +468,8 @@ fi
 # *different* invocation than the run's.
 if [[ ! -x $GATE ]]; then
   bad 'the gate accepts this tree' "$GATE is not executable, so the tree has not been checked by the thing that checks it"
-elif (( payload_cfg_ok != 1 )); then
-  bad 'the gate accepts this tree' "the flag set this arm needs cannot be derived: $payload_cfg_why - and the gate's flags are a function of the arm's own switches, so running it with a guessed set would be a verdict about an invocation the run will not make"
-elif [[ -n $sw_problem ]]; then
-  bad 'the gate accepts this tree' "the payload's switch record cannot be read well enough to derive the flag set: $sw_problem"
-elif (( ${#gate_arg_unknown[@]} > 0 )); then
-  bad 'the gate accepts this tree' "the gate names flag(s) this file has no switch for: ${gate_arg_unknown[*]} - so the derived set could be missing one, and a green row here would be a verdict about a set the run does not have. Add the switch that requires it to the table above"
+elif (( gate_flags_ok != 1 )); then
+  bad 'the gate accepts this tree' "$gate_flags_why - and the gate's flags are a function of the arm's own switches, so running it with a guessed set would be a verdict about an invocation the run will not make"
 else
   # Invoked by its own path and not as `./preflight_boot_check.sh` inside its directory: the gate
   # resolves everything it reads from `$(dirname "$0")` itself, so a cd is not needed - and the first
