@@ -586,22 +586,31 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 # `POST_END_RUN` at 0 and `POST_END_TICKS` at a number, the log's `xnu_live_post_t0` /
 # `xnu_live_post_elapsed` pair is a *duration* and not a pass count, and the press is read for
 # `xnu_live_post_end_calls` rather than for `xnu_live_slot_post_calls`.
+# 692: the nineteenth name, and it is the same class a third time - one more name this gate prints and no
+# clause moved. `STAGE90_XNU_STORAGE_PROBE` is the storage line's first on-device act: `entry_storage.c`'s
+# probe, called from `__wrap_platform_cache_idle_exit` before 690's clock block, installs **one** 1 MB
+# section for the eMMC controller's megabyte (`0xF98`, both windows of 531 inside it) and reads six of its
+# registers behind a clock-gate interlock read out of a megabyte the image already maps. The variant
+# subset counts move from eleven to twelve, and the pair of counts in the converse check below moves with
+# them. What this key buys a reader is the one thing the arm's other keys cannot say: with it at 1 the run
+# dereferences a device block the image has never touched, and its log carries `xnu_live_storage_*` - and
+# with it at 0 the arm is 690's clock arm with an object in the link whose body compiles to nothing.
 ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_TRACE
                 STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT_NULL STAGE90_XNU_EXIT_POC_FLUSH
                 STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE STAGE90_XNU_IDLE_STACK
                 STAGE90_XNU_SEAM_POC STAGE90_XNU_SEAM_MEASURE STAGE90_XNU_SEAM_END_RUN
-                STAGE90_XNU_POST_END_RUN STAGE90_XNU_POST_END_TICKS
+                STAGE90_XNU_POST_END_RUN STAGE90_XNU_POST_END_TICKS STAGE90_XNU_STORAGE_PROBE
                 STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_IDLE_NO_SLEEP)
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
   [[ -n $_v ]] \
-    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The eleven variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, SEAM_END_RUN, POST_END_RUN, POST_END_TICKS, IDLE_NO_SLEEP) are exactly the ones a display filter written around the artifact keys drops in silence"
+    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The twelve variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, SEAM_END_RUN, POST_END_RUN, POST_END_TICKS, STORAGE_PROBE, IDLE_NO_SLEEP) are exactly the ones a display filter written around the artifact keys drops in silence"
   printf '  %s=%s\n' "$_k" "$_v"
 done
 # And the converse, so a key the list above does not name cannot arrive unshown (a *tenth* when the list
-# held nine; a sixteenth now): every `STAGE90_` key the record carries
+# held nine; a nineteenth now): every `STAGE90_` key the record carries
 # must be one of the names above. Without this the list above would be the only definition of what is
 # visible, and a key added on the build side would be recorded and never read - the same defect with
 # the arrow reversed.

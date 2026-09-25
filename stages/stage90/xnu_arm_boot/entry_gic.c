@@ -144,7 +144,22 @@
 #define STAGE90_ENTRY_GIC_TRACED 0
 #endif
 
-#if STAGE90_ENTRY_GIC_TRACED
+/*
+ * **692: the five declarations are outside the `#if`, and that is a repair rather than tidying.** They
+ * were inside it until this step, and the no-op arm of the macro below still *evaluates* its two
+ * arguments (`(void)(value)`), so a build with `STAGE90_ENTRY_GIC_TRACED=0` was a build that could not
+ * compile this file: measured on 2026-09-25 with the object's own command line,
+ *
+ *   arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding ... -DSTAGE90_ENTRY_GIC_TRACED=0 \
+ *       -fsyntax-only entry_gic.c   ->   'g_live_mmio_l1' undeclared (first use in this function)
+ *
+ * `build.sh`'s and this script's default is `STAGE90_ENTRY_TRACE=0`, which sets that `-D` to 0, so the
+ * untraced build has been unreachable since 484 added these names - and it stayed invisible because
+ * **every arm this project has pressed was built with the tracer on**. A declaration is not code: moving
+ * the five out changes no object byte of any traced image, which is why the arm on disk is unmoved by
+ * this line. The defect is named here rather than in a document because this is where the next reader
+ * of the `#else` arm will be standing.
+ */
 extern void entry_live_write(const char *key, uint32_t value);
 extern uint32_t g_live_state;
 /* 484: the table `entry_mmio_section` read at the install, and whether it was the console's latch. */
@@ -152,6 +167,7 @@ extern uint32_t g_live_mmio_l1;
 extern uint32_t g_live_mmio_l1_moved;
 extern uint32_t g_live_mmio_ttbr0;
 extern uint32_t g_live_mmio_ttbr1;
+#if STAGE90_ENTRY_GIC_TRACED
 #define GIC_LIVE(key, value) entry_live_write((key), (uint32_t)(value))
 #else
 #define GIC_LIVE(key, value) do { (void)(key); (void)(value); } while (0)

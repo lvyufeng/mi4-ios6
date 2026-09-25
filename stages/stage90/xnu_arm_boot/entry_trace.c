@@ -123,6 +123,12 @@
  * `#define` does not reach this translation unit, and the seam's ending below is the second writer.
  * See the header. */
 #include "entry_reset.h"
+/* 692: the storage probe's own entry point, called from the exit wrapper below. The line the arm is on
+ * is the probe's own body (`entry_storage.c`); this file only decides *when* it runs, and it runs here
+ * for the two reasons 690's clock does - it is the one place this image is already inside the handed-off
+ * kernel with the live channel up, and the wrapper's frame is not disturbed by a call whose arguments
+ * are by value and whose state lives in the probe's own file. */
+#include "entry_storage.h"
 
 /* entry_stubs.c. Records into `g_kv_buf`, which only an epilogue writes out - see above. */
 extern void entry_kv(const char *key, uint32_t value);
@@ -2488,6 +2494,30 @@ void __wrap_platform_cache_idle_exit(void)
     if (g_slot_post.calls >= (uint32_t)STAGE90_XNU_POST_END_RUN) {
         entry_seam_end_run();
     }
+#endif
+
+#ifndef STAGE90_XNU_STORAGE_PROBE
+#define STAGE90_XNU_STORAGE_PROBE 0
+#endif
+#if STAGE90_XNU_STORAGE_PROBE
+    /*
+     * **692: the storage line's first act on the device, and the site is the same one 690 chose for the
+     * clock.** The probe's own ordering - gate, install, loads - is `entry_storage.c`'s business; what
+     * this line decides is *where in the boot* it happens, and this wrapper is where it can happen at
+     * all. `entry_mmio_section` refuses unless the live channel exists (`g_live_state != 1` is the first
+     * of its four refusals), and the live channel is a console write's own proof; the exit wrapper is
+     * inside the handed-off kernel, after that proof, and in the same context the seam's own publishes
+     * already run in. It is called **before** the clock's block below so the probe's records precede the
+     * ending's last one: if the arm's clock runs out, the probe has already published; and if the probe's
+     * six loads do not come back at all, the ending is never reached and the log is the probe's own
+     * partial record - which is the reading, and not a loss.
+     *
+     * It runs on the wrapper's first call and only on it (the probe's own `g_storage_probed` guard), so
+     * it costs one compare on every later pass. Nothing here is live across the call, so the frame stays
+     * the 8 bytes the slot lives in - the property 690's block below states at length, and the reason the
+     * clock was moved out of this function in the first place.
+     */
+    entry_storage_probe();
 #endif
 
 #if STAGE90_XNU_POST_END_TICKS

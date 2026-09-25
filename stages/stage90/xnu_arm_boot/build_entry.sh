@@ -550,6 +550,36 @@ case "$SEAM_POST_END_TICKS" in
            exit 1
        fi ;;
 esac
+# **692: the storage probe's switch, and it is the one switch in this list that says the arm
+# dereferences a *new* device block.** Everything else here changes when or how the boot's existing
+# instrument behaves; this one installs a section for the eMMC controller's own megabyte (`0xF98`,
+# `entry_storage.c`) and reads six of its registers. So it carries a hazard the others do not - a load
+# from a block whose clock is off is a bus wait nothing ends, which is the one failure this project
+# cannot read a log out of - and the probe's own first act is the clock gate that decides it. The switch
+# is a flag and not a count for the reason `POST_END_RUN` was: there is one probe, it runs once, and a
+# number would be a second definition of "how many times" that the log already carries as
+# `xnu_live_storage_calls`.
+STORAGE_PROBE=${STAGE90_XNU_STORAGE_PROBE:-0}
+case "$STORAGE_PROBE" in
+    0) ;;
+    1) ;;
+    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0 or 1, not [$STORAGE_PROBE]" >&2
+       echo "        It is a `#if` in two files and not a value, so anything else would reach the" >&2
+       echo "        preprocessor as a broken -D and fail there, with the cause named by the wrong" >&2
+       echo "        tool (692)" >&2
+       exit 1 ;;
+esac
+# The trace is the instrument, the probe is a record and a mapping: without `entry_trace.c` in the image
+# there is no wrapper to call the probe from, so the switch would be *silently inert* - an arm whose
+# record named a probe no call in the image reaches. That is the shape 617's note calls this project's
+# oldest defect, and it is refused here rather than found in a log.
+if [[ $STORAGE_PROBE -eq 1 && $ENTRY_TRACE -ne 1 ]]; then
+    echo "STAGE90_XNU_STORAGE_PROBE=1 with STAGE90_ENTRY_TRACE=$ENTRY_TRACE: the probe is called from" >&2
+    echo "        __wrap_platform_cache_idle_exit, which is entry_trace.c's own wrapper - so on this" >&2
+    echo "        build there is no caller and the switch would shape nothing while the record said it" >&2
+    echo "        did (692)" >&2
+    exit 1
+fi
 if [[ $SEAM_POST_END_TICKS -gt 0 && $SEAM_POST_END_RUN -gt 0 ]]; then
     echo "STAGE90_XNU_POST_END_TICKS=$SEAM_POST_END_TICKS and STAGE90_XNU_POST_END_RUN=$SEAM_POST_END_RUN:" >&2
     echo "two triggers for one ending at one site. Both call entry_seam_end_run from the tail of" >&2
@@ -583,6 +613,15 @@ SEAM_ON=$(( SEAM_POC | SEAM_MEASURE | SEAM_END_RUN | SEAM_POST_END_ON ))
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_SEAM_END_RUN="$SEAM_END_RUN")
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_POST_END_RUN="$SEAM_POST_END_RUN")
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_POST_END_TICKS="$SEAM_POST_END_TICKS")
+# 692: the storage probe's flag is **not** here, and the first build of this arm is why. It was added to
+# `STUB_DEFINES` on the reasoning that the flag is the same kind of switch as 690's - and `STUB_DEFINES`
+# reaches `entry_stubs.c` and `entry_timebase.c` and not `entry_trace.c`, which is the file whose `#if`
+# consumes it. That build **exited 0**: the object was linked, the record carried
+# `STAGE90_XNU_STORAGE_PROBE=1`, and the disassembly of `__wrap_platform_cache_idle_exit` held no
+# `bl entry_storage_probe` at all - a switch recorded on one side and inert on the other, which is
+# [[mi4-off-option-two-spellings]] with the fuse already burnt. It goes on `entry_trace.c`'s own command
+# line above, which is where the file's `EXIT_POC_FLUSH` note says a switch reaching this file has to be
+# written, and the clause added below reads the assembled object so that this cannot recur silently.
 # `--wrap` only when the tracer is in the image and the arm is on: the wrapper is `entry_trace.c`'s, so
 # a wrap without that object is an undefined reference, and a wrap with the flag off would be an
 # interception the config record says is not there.
@@ -636,6 +675,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_IDLE_STACK STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_SEAM_POC STAGE90_XNU_SEAM_MEASURE
                 STAGE90_XNU_SEAM_END_RUN STAGE90_XNU_POST_END_RUN STAGE90_XNU_POST_END_TICKS
+                STAGE90_XNU_STORAGE_PROBE
                 STAGE90_XNU_IDLE_NO_SLEEP)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -730,6 +770,7 @@ do
         STAGE90_XNU_SEAM_END_RUN)     _v=$SEAM_END_RUN ;;
         STAGE90_XNU_POST_END_RUN)     _v=$SEAM_POST_END_RUN ;;
         STAGE90_XNU_POST_END_TICKS)   _v=$SEAM_POST_END_TICKS ;;
+        STAGE90_XNU_STORAGE_PROBE)    _v=$STORAGE_PROBE ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_SKIP) _v=${STAGE90_ENTRY_CHECKPOINT_SKIP:-(unset)} ;;
@@ -911,6 +952,17 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
     -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
     -DSTAGE90_IRQ_TRACED="$ENTRY_TRACE" \
     -c "$BOOT_DIR/entry_irq.c" -o "$OUT/xnu_arm_entry_irq.o"
+# **692: the storage probe.** Compiled on the same condition as the three above and for the same reason -
+# it is a measurement whose numbers only exist in a traced build - with one difference of its own: its
+# switch is `STAGE90_XNU_STORAGE_PROBE` and not `$ENTRY_TRACE`, because a traced build is what makes the
+# probe *callable* while this flag is what makes it *armed*. A traced build with the flag off is 690's arm
+# with an object in the link that does nothing, which is the state a reader of the record should see.
+# `STUB_DEFINES` already carries the flag for `entry_trace.c`; it is repeated here rather than relied on,
+# because this object is the one whose whole body is inside the `#if`.
+run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
+    -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
+    -DSTAGE90_XNU_STORAGE_PROBE="$STORAGE_PROBE" \
+    -c "$BOOT_DIR/entry_storage.c" -o "$OUT/xnu_arm_entry_storage.o"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
 
@@ -1010,6 +1062,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_SEAM_END_RUN="$SEAM_END_RUN" \
         -DSTAGE90_XNU_POST_END_RUN="$SEAM_POST_END_RUN" \
         -DSTAGE90_XNU_POST_END_TICKS="$SEAM_POST_END_TICKS" \
+        -DSTAGE90_XNU_STORAGE_PROBE="$STORAGE_PROBE" \
         -DSTAGE90_XNU_IDLE_NO_SLEEP="$IDLE_NO_SLEEP" \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
@@ -1084,6 +1137,13 @@ LINK_OBJS=(
 # which the kernel objects define; nothing in it needs the stub generator to invent a name, which is
 # the property the comment on `entry_timebase.o` states for the two above.
 [[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_irq.o")
+
+# 692: the storage probe, on the same condition and with the one dependency of its own stated: it names
+# `entry_mmio_section` (`entry_stubs.c`) and the live channel's four `g_live_mmio_*` words, and nothing
+# else - no kernel object, no stub-generator name. A build that left it out would have a wrapper whose
+# `#if` is on and whose callee is undefined, which is a link error and not a quiet difference; it is in
+# this list because the wrapper is not the only reader of `STAGE90_XNU_STORAGE_PROBE`.
+[[ $ENTRY_TRACE -eq 1 ]] && LINK_OBJS+=("$OUT/xnu_arm_entry_storage.o")
 
 if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # --- XNU's own objects, and a generated stub for everything they still need -------------------
@@ -29667,7 +29727,7 @@ verify_trace_symbols() {
     # `entry_slot_note` and `entry_slot_null_note` are the two spellings of the post site (521's capture
     # and 526's null), and this clause accepts either as the publisher the ending has to follow, because
     # which one is in the body is `STAGE90_XNU_SLOT_NULL`'s business and is asserted a few clauses above.
-    read -r sxw_pend sxw_pendaddr sxw_lastbl sxw_lastpub sxw_npc sxw_pcaddr <<<"$(awk '
+    read -r sxw_pend sxw_pendaddr sxw_lastbl sxw_lastpub sxw_npc sxw_pcaddr sxw_nsp sxw_spaddr <<<"$(awk '
         function hex(s) { sub(/:$/, "", s); return strtonum("0x" s) }
         $3 ~ /^[a-z]/ { a = hex($1); m = $3 }
         (m == "bl" || m == "b") { lastbl = a }
@@ -29675,8 +29735,30 @@ verify_trace_symbols() {
         (m == "bl" || m == "b") && index($0, "<entry_slot_note>") > 0 { lastpub = a }
         (m == "bl" || m == "b") && index($0, "<entry_seam_end_run>") > 0 { n++; e = a }
         (m == "bl" || m == "b") && index($0, "<entry_post_clock>") > 0 { npc++; c = a }
-        END { printf "%d %d %d %d %d %d", n+0, e+0, lastbl+0, lastpub+0, npc+0, c+0 }
+        (m == "bl" || m == "b") && index($0, "<entry_storage_probe>") > 0 { nsp++; sp = a }
+        END { printf "%d %d %d %d %d %d %d %d", n+0, e+0, lastbl+0, lastpub+0, npc+0, c+0, nsp+0, sp+0 }
     ' <<<"$sxw_body")"
+    # ------------------------------------------------ 692: the probe the record names is a call in the body
+    #
+    # **This clause exists because the first build of this arm exited 0 without it and without the call.**
+    # `STAGE90_XNU_STORAGE_PROBE` was added to `STUB_DEFINES`, which does not reach `entry_trace.c`, so the
+    # `#if` around the call compiled to nothing while the record carried `=1` - a switch recorded on one
+    # side and inert on the other, and the object, the record and the gate's own printable key list all
+    # agreed with the record rather than with the image. Nothing in the build could have caught it, which
+    # is the same hole `xnu_entry_517` (EXIT_POC_FLUSH) and this clause's 690 neighbours were written for.
+    # So the property is read out of the **assembled wrapper**, in both directions: a build that names the
+    # flag must reach the probe exactly once, and a build that does not name it must reach it not at all -
+    # the second half matters because a stray call in an arm whose record says 0 would spend a press on a
+    # register file the arm's own narration does not describe.
+    if [[ $STORAGE_PROBE -eq 1 ]]; then
+        [[ "${sxw_nsp:-0}" == 1 ]] ||
+            layout_fail "__wrap_platform_cache_idle_exit reaches entry_storage_probe ${sxw_nsp:-0} time(s) while STAGE90_XNU_STORAGE_PROBE=1: this arm's whole new act is that one call - the probe installs the eMMC controller's section and reads six of its registers - so a wrapper without it is 690's clock arm wearing this record, and a press spent on it would come back with a log carrying no \`xnu_live_storage_*\` key at all while the record, the sources and the gate's key list all said the arm was the storage one. Measured: this is not hypothetical, it is what the first build of this arm produced"
+        aps=$(sym_addr entry_storage_probe) ||
+            layout_fail "entry_storage_probe is not in the linked image while STAGE90_XNU_STORAGE_PROBE=1: the call in the wrapper would then be a reference to nothing (a link error, so this clause can only fire on an image where the symbol was renamed or made static), and a clause that cannot find the symbol cannot say the probe is in the artifact the gate will boot"
+    else
+        [[ "${sxw_nsp:-0}" == 0 ]] ||
+            layout_fail "__wrap_platform_cache_idle_exit reaches entry_storage_probe ${sxw_nsp:-0} time(s) while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: an image whose record does not name the probe must not dereference the eMMC controller at all - the probe is the one act in this image that touches a device block the project has never read, and its record is the only place that is stated"
+    fi
     if [[ $SEAM_POST_END_TICKS -gt 0 ]]; then
         # ---------------------------------------------- 690: the chain is two bodies, and both are read
         #
@@ -31067,6 +31149,11 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     echo "STAGE90_XNU_SEAM_END_RUN=$SEAM_END_RUN"
     echo "STAGE90_XNU_POST_END_RUN=$SEAM_POST_END_RUN"
     echo "STAGE90_XNU_POST_END_TICKS=$SEAM_POST_END_TICKS"
+    # 692's switch, written here in the same breath as the two above it, and for the reason 678's block
+    # states at length: this writer is the one site a name-keyed diff does not visit and the only site the
+    # gate ever reads. The two-way check after the file is written is what makes forgetting it a refusal
+    # rather than a commit.
+    echo "STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE"
 } > "$OUT/xnu_arm_entry-config.txt"
 
 # ------------------------------------------------- 678: the record and the arm-key list, both ways
