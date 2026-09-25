@@ -71,13 +71,17 @@ The disassembly of that tail is §1's two stores: `RESTART_REASON ← 0x78665501
 then `800057a0 wfe` / `800057a4 b 800057a0` — the halt. And the function is `noreturn`, so **this is not a
 diagnostic tail; it is the end of the run.**
 
-**And the frontier's own handler reaches it.** The run dies at the idle exit's `pop {fp, pc}` — a data abort —
-and `fleh_dabort` ends:
+**And the frontier's own handler reaches it.** The run dies at the idle exit's `pop {fp, pc}` — and **the fault
+is a *prefetch* abort, not a data abort** (corrected by 665 §1, from the returning run's own log:
+`sleh_abort: prefetch abort in kernel mode: fault_addr=0x5006e74`, and `0x05006e74` is the `rtcpre_pop` word the
+`pop` loaded into `pc`). The entry handler for it is `fleh_prefabt` (`0x8000ae34`, `entry_stubs.c:9298-9318`),
+and **both** abort handlers end in the same place:
 
 ```
-:9395     entry_epilogue("exception: data abort");
+fleh_prefabt  (:9318)    entry_epilogue("exception: prefetch abort");
+fleh_dataabt  (:9395)    entry_epilogue("exception: data abort");
 ...
-:9401     entry_epilogue("a data abort inside the data-abort handler");
+              (:9401)    entry_epilogue("a data abort inside the data-abort handler");
 ```
 
 So the chain for every run that ends the way the frontier ends is: `pop` faults → `fleh_dabort` records the
@@ -94,14 +98,18 @@ entry side.
    `entry_epilogue` and did *not* reset would sit in the `wfe` loop with the phone dark, and no capture would
    exist. Captures exist (513, 520, 533, 574-park). So the rehearsal arm of 663 §3.1 has a **proven** half
    and an **unproven** half, and they are not the two §3 gave equal weight.
-2. **The abort path cannot leave the phone dark by itself.** Both exits from `fleh_dabort` end in the same
-   store, and the second one — reached when the epilogue's *own* path faulted — is the code's own comment's
+2. **The abort path cannot leave the phone dark by itself.** Both abort handlers end in the same store, and
+   `fleh_dataabt`'s *second* exit — reached when the epilogue's own path faulted — is the code's own comment's
    loop (*"a loop here is a loop that never ends"*). So a non-return after a fault means the epilogue's path
-   faulted *and* recursed, which is a narrower and more specific thing than 662 §4's three explanations, and
-   it leaves 662 §4's *second* explanation (a hang that takes no fault at all, so no handler runs) as the one
-   that needs no extra assumption.
+   faulted *and* recursed, which is narrower and more specific than 662 §4's three explanations. **And 665 §2
+   removes the third of them outright** — the returning run's log shows it entered XNU's own reboot path
+   (`Attempting system restart...MACH Reboot`) and spun there, which XNU's path provably does — leaving *a hang
+   that takes no fault at all* as the explanation that needs no extra assumption.
 3. **It changes which half of the rehearsal is worth a press.** §2's PS_HOLD write is proven by construction;
    the watchdog bite has never been observed to fire. So the rehearsal arm's new code is the bite alone.
+   **And 665 §3 adds a requirement to that arm**: a returning run cannot be *attributed* to the bite from
+   outside, because the other net may have been what returned it and the report's own caller field
+   (`xnu_entry_why`) read NULL in the run that needed it — so the arm must publish a marker that survives.
 
 ## 3. The watchdog half survives a proper check — in four encodings, not one
 
