@@ -601,6 +601,92 @@ extern void FlushPoC_Dcache(void);
 #endif
 
 /*
+ * ---------------------------------------------------------------- 690: the ending is gated on a clock
+ *
+ * **A count answers "how many passes"; the question the goal's own criterion needs is "what does the boot
+ * do in a bounded time", and 689's press is what makes the second askable at all.** That press ended a
+ * machine that was *asleep*: both of the idle windows it recorded went through a real `wfi` (21.2 ms and
+ * 100.6 ms of stopped CPU, read live through Apple's own symbol), and the run ended **inside the fixture's
+ * own 2000 ms park** - `poll(NULL, 0, PARK_MS)`, whose record and whose console line are both absent.
+ * `STAGE90_XNU_POST_END_TICKS` is the same site, the same ending and one definition, with the trigger
+ * changed: **elapsed ticks of the counter the log already carries**, instead of a number of passes.
+ *
+ * **The baseline is this site's own first call, so the arm needs no new count and no new site.** `t0` is
+ * `entry_counter()` at the pass whose `g_slot_post.calls == 1`, and every later pass compares `now - t0`
+ * against the switch. `calls` is the post site's own field (688's argument, unchanged) - the comparison
+ * and the log's `xnu_live_slot_post_calls` are one number with one definition - and it is also the
+ * validity test, so nothing has to say "have I taken the baseline yet".
+ *
+ * **Why the switch is in ticks and not in milliseconds.** The counter is read here as a *number of ticks*;
+ * its **rate is not in this image**. 19.2 MHz is a comment (`entry_counter`'s own: "at 19.2 MHz it wraps
+ * every 3.7 minutes") and the payload's device tree, and nothing in this project has ever measured it - so
+ * a switch in milliseconds would bake an unmeasured number into the arm's trigger. The arm therefore
+ * **publishes the rate it can read**: `CNTFRQ` (`mrc p15, 0, r?, c14, c0, 0`), the hardware's own statement
+ * and the first reading of it this project will have. A 0 read is a reading too - it would say the device
+ * tree is the only source this machine has.
+ *
+ * **The one reading the arm is for, and the other two it publishes.** `xnu_live_post_elapsed` is the
+ * elapsed ticks at the pass that reads them, published on the powers of two of the pass count (the
+ * schedule this file uses for a number that grows without bound, minus its `<= 4` prefix: the prefix's job
+ * is "the first few calls exactly", and here the first call has no elapsed at all - its reading is `t0`)
+ * **and published again, unconditionally, on the pass that reaches the switch**, so a run that reaches the
+ * ending carries the exact number and not a rounded-down power of two. `xnu_live_post_end_calls` is that
+ * pass's own count: the passes are deep-idle windows, so it is the other half of "what a bounded time of
+ * idle looks like".
+ *
+ * **What it costs, and the shape of its two cells.** A run that stops passing this wrapper never reaches
+ * the ending, and that is a **non-return** (exit 2, paid with a power press) exactly as on 688's arm - the
+ * one cost, unchanged. The *negative* cell is the new one: a log with `xnu_live_post_t0` and the elapsed
+ * trace in it and **no** `xnu_live_post_end_calls` says the machine stopped **before the clock ran out**,
+ * and the last published elapsed says how long it had been running.
+ */
+#ifndef STAGE90_XNU_POST_END_TICKS
+#define STAGE90_XNU_POST_END_TICKS 0
+#endif
+
+/* The switch's two bounds, named once here and refused in the same words by `build_entry.sh`: below the
+ * floor the ending fires on the second pass by construction, which is 688's arm wearing a clock-shaped
+ * name; above the ceiling the run is longer than the payload's own countdown tolerates after a boot that
+ * has already run for seconds, so the press would be a re-run of the watchdog arm's question and not this
+ * one's. At the 19.2 MHz `entry_counter`'s comment states, the floor is ~52 ms and the ceiling ~10.5 s. */
+#define STAGE90_POST_END_TICKS_FLOOR   1000000u
+#define STAGE90_POST_END_TICKS_CEILING 201326592u   /* 0x0C000000 */
+
+#if (STAGE90_XNU_POST_END_TICKS) != 0 && \
+    ((STAGE90_XNU_POST_END_TICKS) < STAGE90_POST_END_TICKS_FLOOR || \
+     (STAGE90_XNU_POST_END_TICKS) > STAGE90_POST_END_TICKS_CEILING)
+#error "STAGE90_XNU_POST_END_TICKS is an elapsed-ticks deadline, and it is outside the range this arm is a step in: below 1000000 ticks (~52 ms at the rate entry_counter's comment states) the ending fires on the second pass whatever the boot does, which is 688's N=2 with a clock-shaped name and no new reading; above 201326592 ticks (~10.5 s) the run outlives the payload's own countdown, so the press answers the watchdog arm's question and this arm's deadline is never reached. 0 = this ending is not in the image"
+#endif
+#if STAGE90_XNU_POST_END_TICKS && STAGE90_XNU_POST_END_RUN
+#error "STAGE90_XNU_POST_END_TICKS and STAGE90_XNU_POST_END_RUN are two triggers for one ending at one site: both call entry_seam_end_run from the end of __wrap_platform_cache_idle_exit, so an image carrying both would end the run on whichever came first while its record named one number - a pass count and a tick count are not two readings of one arm, they are two arms"
+#endif
+#if STAGE90_XNU_POST_END_TICKS && !STAGE90_XNU_SEAM_POC
+#error "STAGE90_XNU_POST_END_TICKS ends a run through the store entry_epilogue makes, and it is only defined on the operation arm: the question it answers is what the boot does after the operation's repair carried the pop, and a deadline behind an operation the image does not have would be timed against a window nothing repaired"
+#endif
+#if STAGE90_XNU_POST_END_TICKS && STAGE90_XNU_SEAM_END_RUN
+#error "STAGE90_XNU_POST_END_TICKS and STAGE90_XNU_SEAM_END_RUN are two sites for one ending: the seam's ending runs before the pop, so an image carrying both would never reach the clock this one is"
+#endif
+
+/*
+ * The clock itself is three words of this file's own, and it is deliberately **not** a field of a slot
+ * table: a slot site's fields are readings its publisher writes and the log carries, and a baseline for
+ * this arm is neither. The three are kept beside the wrapper rather than in `entry_stubs.c` because the
+ * arm's whole content is here - the clock's own function is the only reader and the only writer, and a
+ * definition one TU away from both of those is the arrangement this project has paid for most often.
+ * They are `t0` (the baseline), the last elapsed reading, and the rate read out of `CNTFRQ`.
+ */
+#if STAGE90_XNU_POST_END_TICKS
+static uint32_t g_post_clock_t0;
+static uint32_t g_post_clock_elapsed;
+static uint32_t g_post_clock_freq;
+
+/* The live channel's two entry points, declared here because this file's order puts the wrapper above the
+ * seam's own declarations of them and there is no header both sides share. */
+extern void entry_live_write(const char *key, uint32_t value);
+extern uint32_t entry_live_ready(void);
+#endif
+
+/*
  * ---------------------------------------------------------------- 533: the near-end enable is a switch
  *
  * **526's run came back negative, and this switch is what that result buys.** The arm was 522's image
@@ -2213,7 +2299,7 @@ void __wrap_platform_cache_idle_enter(void)
  * and the images that came back do not, and 521 and 522 differ only in their state change.
  */
 
-#if STAGE90_XNU_POST_END_RUN
+#if STAGE90_XNU_POST_END_RUN || STAGE90_XNU_POST_END_TICKS
 /*
  * **686: the ending is declared here and defined once, far below, inside the seam's own block.** A forward
  * declaration rather than a second body, because the whole of this arm is *where* the ending is called and
@@ -2221,11 +2307,86 @@ void __wrap_platform_cache_idle_enter(void)
  * it would be [[mi4-one-value-two-definitions]] in the one place this project can least afford it - an arm
  * whose two endings could drift apart while both records still named `POST_END_RUN=1`.
  *
- * The declaration is guarded by this switch alone rather than by the seam's block because this file's order
- * puts the exit wrapper *above* the seam: when the compiler reaches the wrapper the ending has not been
- * written yet, and when it reaches the ending it has already passed the wrapper.
+ * The declaration is guarded by these switches alone rather than by the seam's block because this file's
+ * order puts the exit wrapper *above* the seam: when the compiler reaches the wrapper the ending has not
+ * been written yet, and when it reaches the ending it has already passed the wrapper. 690 adds the second
+ * of the two switches that reach this line, and it is the *call site* and not the trigger that decides
+ * which: both arms call the one ending from the wrapper's tail.
  */
 static void entry_seam_end_run(void) __attribute__((noreturn, noinline));
+#endif
+
+#if STAGE90_XNU_POST_END_TICKS
+/*
+ * **690: the clock, in its own function, called once from the wrapper's tail.** The wrapper's body is the
+ * slot - its own frame is the two words the exit's `push` writes and its `pop {fp, pc}` reads - so the arm's
+ * logic cannot live there: the first build of this step put it inline and the frame went from 8 bytes to 16
+ * (measured: `strd r4, [sp, #-16]!`, `str r6, [sp, #8]`, `str lr, [sp, #12]`), which is a *different*
+ * address for the reading and the build's own frame clause refused it. Here the two arguments arrive by
+ * value (`now` is `entry_counter()` read at the call, `calls` is the post site's own count) and the only
+ * thing that leaves this function is the ending's own `noreturn` call, so nothing of the wrapper's has to
+ * survive a `bl`.
+ *
+ * **Three facts in order, and nothing else.** The first return takes the baseline and publishes it with the
+ * rate; every later return measures the elapsed ticks; and the return whose elapsed has reached the switch
+ * publishes the exact pair and ends the run. `calls <= 1` is the validity test *and* the baseline's
+ * timestamp in one condition: the first return through this wrapper is the only pass whose elapsed is zero
+ * by definition, so no other object has to say whether the clock has started.
+ *
+ * **Why the rate is published rather than assumed.** The switch is in ticks because the counter's rate is
+ * nowhere in this image - 19.2 MHz is a comment and the payload's device tree, and this project has never
+ * measured it. `CNTFRQ` is the hardware's own statement, read once beside the baseline where it cannot
+ * change; a 0 in the log is a reading too, and it would say the device tree is the only source this machine
+ * has. The published pair (a baseline in ticks, the rate those ticks are counted at) is what makes the
+ * elapsed a duration rather than a number.
+ *
+ * **The trace, and why the ending's own publish is separate.** `xnu_live_post_elapsed` is published on the
+ * powers of two of the pass count, so a run that dies *before* the clock runs out still says in its log how
+ * long it had been running - that is this arm's negative cell, and it is the one 688's arm could not fill.
+ * The pass that reaches the switch publishes the same key again, unconditionally, plus the pass count
+ * (`xnu_live_post_end_calls`), because the ending's own record has to carry the *number* and not a
+ * rounded-down power of two: it is the arm's answer, and the last record of a key is the one a reader takes.
+ * The `<= 4` prefix of the slot sites' schedule is deliberately not reproduced: its job is "the first few
+ * calls exactly", and here the first call's reading *is* the baseline.
+ */
+__attribute__((noinline)) static void entry_post_clock(uint32_t now, uint32_t calls)
+{
+    uint32_t end_now, pub;
+
+    if (calls <= 1u) {
+        __asm__ volatile ("mrc p15, 0, %0, c14, c0, 0" : "=r"(g_post_clock_freq));
+        g_post_clock_t0 = now;
+        g_post_clock_elapsed = 0u;
+        end_now = 0u;
+        pub = 1u;
+    } else {
+        g_post_clock_elapsed = now - g_post_clock_t0;
+        end_now = (g_post_clock_elapsed >= (uint32_t)STAGE90_XNU_POST_END_TICKS) ? 1u : 0u;
+        pub = (end_now != 0u || (calls & (calls - 1u)) == 0u) ? 1u : 0u;
+    }
+    if (pub != 0u && entry_live_ready() != 0u) {
+        /* **One publish site and three keys, so a reader never has to hold a value from an older record.**
+         * `t0` and the rate are re-published beside every elapsed reading rather than once at the baseline:
+         * the pair is what makes the elapsed a duration, so a log whose first records were evicted from the
+         * live channel still carries it, and the channel's record cap (461) is the reason that matters. The
+         * pass count is the ending's own half of the answer and is published only there. */
+        entry_live_write("xnu_live_post_t0", g_post_clock_t0);
+        entry_live_write("xnu_live_post_cntfrq", g_post_clock_freq);
+        entry_live_write("xnu_live_post_elapsed", g_post_clock_elapsed);
+        if (end_now != 0u)
+            entry_live_write("xnu_live_post_end_calls", calls);
+    }
+    if (end_now != 0u) {
+        /* The ending is this function's **last** call and the wrapper's last call is *this* function: the
+         * build asserts both halves of that chain (the wrapper's body reaches `entry_post_clock` once, as
+         * its last call; this body reaches `entry_seam_end_run` once, as its last call), because on this
+         * arm "after the post site has published" is a property of two bodies and not of one. The first
+         * draft published the baseline in an early-return branch and the build's own clause refused it -
+         * the branch's tail-branched write was laid out *after* the ending, so "the last call" was no
+         * longer a fact about the body. One publish site, reached by both paths, is what makes it one. */
+        entry_seam_end_run();
+    }
+}
 #endif
 
 void __real_platform_cache_idle_exit(void);
@@ -2327,6 +2488,23 @@ void __wrap_platform_cache_idle_exit(void)
     if (g_slot_post.calls >= (uint32_t)STAGE90_XNU_POST_END_RUN) {
         entry_seam_end_run();
     }
+#endif
+
+#if STAGE90_XNU_POST_END_TICKS
+    /*
+     * **690: one call, and this wrapper's frame stays the 8 bytes the slot lives in.** The whole arm is
+     * *when* the ending is called, and every part of it that needs state across a `bl` lives in
+     * `entry_post_clock`'s own frame instead of this one - which is not a matter of taste. The first
+     * build of this step had the clock written out here, and the build refused it: `strd r4, [sp, #-16]!`
+     * plus `str r6, [sp, #8]` and `str lr, [sp, #12]`, a **16-byte** frame, because the reading, the
+     * post site's address and the clock's own two words all had to stay in callee-saved registers across
+     * three `bl`s. This wrapper's `sp` **is** the slot - the exit's `push {fp, lr}` lands on it and its
+     * `pop {fp, pc}` reads it back - so a frame of another size puts the two words the arm reads at an
+     * address that is real and quiet and wrong, which is the failure [[mi4-idle-exit-l2-line]]'s whole
+     * line of steps exists to avoid. The clock's arguments are by value and its outcome is a call into
+     * the ending, so nothing here is live across it.
+     */
+    entry_post_clock(entry_counter(), g_slot_post.calls);
 #endif
 }
 
@@ -2474,7 +2652,7 @@ static uint32_t entry_seam_publish(uint32_t n)
     return (n <= STAGE90_SEAM_LIVE_MAX || (n & (n - 1u)) == 0u) ? 1u : 0u;
 }
 
-#if STAGE90_XNU_SEAM_END_RUN || STAGE90_XNU_POST_END_RUN
+#if STAGE90_XNU_SEAM_END_RUN || STAGE90_XNU_POST_END_RUN || STAGE90_XNU_POST_END_TICKS
 /*
  * 678: end the run here, on purpose, and never come back.
  *
@@ -2602,6 +2780,15 @@ __attribute__((noinline)) void entry_seam_flush(uint32_t slot, uint32_t lr)
          * not tell which arm produced it. It is published here, beside `_end_run`, because the seam runs
          * before either ending on both arms and both sites therefore carry it. */
         entry_live_write("xnu_live_seam_post_end_run", (uint32_t)(STAGE90_XNU_POST_END_RUN));
+        /* **690: and the second trigger at that site, for the same reason and one of its own.** A log
+         * from this arm and a log from the arm that *returns* to the idle exit (532/653, where all three
+         * of these keys read 0) carry the same `_post_end_run=0`, and they differ only in whether the
+         * boot later reached an ending - which is an outcome and not an identity. Worse, this arm's
+         * negative cell is a run that died *before* its deadline: that log has `_post_end_run=0` and no
+         * `xnu_live_post_end_calls`, which is exactly what the operation arm's log looks like. So the
+         * deadline is published here, where every pass carries it, and the reader has the trigger's own
+         * number in the log rather than inferring it from a key's absence. */
+        entry_live_write("xnu_live_seam_post_end_ticks", (uint32_t)(STAGE90_XNU_POST_END_TICKS));
     }
 #if STAGE90_XNU_SEAM_END_RUN
     /* The forced ending. Last in the body, and reached only from the seam's own site: the four

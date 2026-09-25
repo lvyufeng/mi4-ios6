@@ -469,3 +469,119 @@ set=armed-post-endrun2-57d441cc sha256=438f063b97d90cc05550c41763fa5b9e5c2596fc8
 set=armed-post-endrun2-57d441cc sha256=e27794dec5f524b003185fcabf5bf7602b931f64d9d5ef3bc16a980050b852f3 bytes=2184 file=xnu_arm_entry-sources.txt role=entry-source-manifest-21-file-lines-26-lines-in-all-of-which-this-step-changed-two-its-build_entry-sh-line-and-its-entry_trace-c-line-and-whose-build_entry-sh-line-is-the-LIVE-file-s-this-is-the-manifest-a-SECOND-688-entry-build-wrote-after-the-first-one-named-a-build_entry-sh-the-tree-no-longer-had
 set=armed-post-endrun2-57d441cc sha256=5a9ed0207ca1254180c0fa5679ff5497236ff1450c83bb5a3df3cb4ba1d9079e bytes=6019072 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
 set=armed-post-endrun2-57d441cc sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-member-all-the-same
+#
+# 690: THE CLOCK ARM - `armed-post-endticks-b12616bc`. 688 ended the run at a COUNT (the second post
+# call); this one ends it at a CLOCK (an elapsed-ticks deadline) at the same site and through the same
+# call. `STAGE90_XNU_POST_END_TICKS=115200000` replaces `STAGE90_XNU_POST_END_RUN=2`; the two are
+# mutually exclusive, refused by `entry_trace.c` (`#error` on both set) and by `build_entry.sh`.
+#
+# WHY TICKS AND NOT MILLISECONDS, and where the rate comes from. 115,200,000 is 6000 ms at the 19200
+# ticks/ms the payload's own device tree states - 3x the fixture's 2000 ms park (`PARK_MS` in
+# `entry_ramdisk.s`), so the boundary lands inside a park and not between two. But that rate is a
+# COMMENT and a device-tree claim: nothing in this project has ever measured it (grepped). So the
+# switch is in the units the hardware counts - CNTVCT ticks, via `entry_counter()` - and the arm
+# PUBLISHES the hardware's own statement of the rate, `CNTFRQ`, as `xnu_live_post_cntfrq`.
+# `run_and_capture.sh` computes milliseconds from the log's own rate when it is present and PRINTS which
+# source it used, so 6000 ms in this record is the expected reading and not an assumed one.
+#
+# MEASURED IN THE ELF, not inferred from the switch:
+#  * `__wrap_platform_cache_idle_exit` (0x8047cad8) keeps its EIGHT-byte frame (`str r4, [sp, #-8]!` /
+#    `str lr, [sp, #4]`), gives it back (`add sp, sp, #8`) and ends in a TAIL BRANCH, not a call:
+#    `8047cb44: ldr r1, [r3, #24]` - `g_slot_post` 0x805100f8 + 24, the post site's own `calls` field, so
+#    no new counter and no new site - then `8047cb48: b 8047b530 <entry_post_clock>`. **This frame IS the
+#    slot**: the exit's `push {fp, lr}` writes *this* `sp` and its `pop {fp, pc}` reads it back, so a
+#    16-byte frame moves the reading to an address that is real and quiet and wrong. The 690 build caught
+#    exactly that - an inline first version of the clock came out `strd r4, [sp, #-16]!` - which is why
+#    the clock is `noinline`.
+#  * `entry_post_clock` (0x8047b530) takes `now` and `calls`. Its first-call path (`cmp r1, #1` / `bls`
+#    at 0x8047b530/0x8047b540) reads CNTFRQ (`mrc 15, 0, r2, cr14, cr0, {0}`, 0x8047b5e4) and stores the
+#    baseline: `g_post_clock_freq` 0x805a0570, `g_post_clock_t0` 0x805a0574, `g_post_clock_elapsed`
+#    0x805a0578 - three `static uint32_t`, 12 bytes, which is why `.bss` grew 8 and not 12.
+#  * the deadline is a `mov`/`movt` pair - `mov r3, #0xd000` / `movt r3, #0x6dd` = 0x06ddd000 =
+#    115,200,000 - compared by `sub r0, r0, r2` / `cmp r0, r3` (r2 = t0) / `bcc` at 0x8047b55c-0x8047b568.
+#  * `entry_seam_end_run` is at 0x8047b47c in BOTH ELFs - it did not move - while the wrapper moved from
+#    0x8047c994 to 0x8047cad8 (+0x344). The ending is `bl entry_seam_end_run` at 0x8047b5b8, whose
+#    IMMEDIATELY PRECEDING instruction is `bl entry_live_write` at 0x8047b5b4: the publish is the last
+#    thing before the ending, *locally*, which is the clause the build checks. The stronger test - "the
+#    ending is the function's last call by address" - is not a fact about the function (gcc keeps the
+#    first-call branch and a second copy of the publish after the ending's block), and the build's own
+#    failure text says that rather than pretending otherwise.
+#  * the four live keys are in the image verbatim: `xnu_live_post_t0`, `xnu_live_post_cntfrq`,
+#    `xnu_live_post_elapsed`, `xnu_live_post_end_calls`. The fourth is published on the ending path ONLY,
+#    which is what makes the negative cell readable. The arm's identity is published by the seam as
+#    `xnu_live_seam_post_end_ticks` (0x06ddd000) beside `xnu_live_seam_post_end_run` (0).
+#
+# PRE-REGISTERED HERE, BEFORE ANY PRESS, because the ending moved one call deeper and the abort records
+# the call site: the ending is reached by a TAIL BRANCH out of the wrapper, so the `bl` that leaves `lr`
+# for `entry_seam_end_run` is the one inside `entry_post_clock` at 0x8047b5b8. This arm's abort should
+# therefore read **`xnu_live_sleh_lr=0x8047b5bc`** (the instruction after it, `sub r3, r1, #1`), where the
+# 688 arm read 0x8047ca0c (after its counted `bl` at 0x8047ca08). `xnu_live_sleh_pc` stays 0x8047b488,
+# the restart-reason store at `entry_seam_end_run+0xc`; and the payload's `cpu_idle` calls this wrapper at
+# `8000da3c: bl 8047cad8`, so the wrapper's own return address (0x8000da40) is in `lr` up to 0x8047cb3c
+# and is NOT what the abort should show. Three readings that must agree on this arm: the seam's
+# `post_end_ticks`, `post_end_run=0`, and this `lr`.
+#
+# THE NEGATIVE CELL, and this arm's one cost. Ending on a clock makes the ending INDEPENDENT of how many
+# passes happen - the first arm here whose ending counts nothing - and it moves the negative from "the
+# counter did not reach N" to "the machine stopped before the clock ran out". If a pass dies where the
+# first one did not, the ending never fires and this run is a no-return (exit 2), the same cost as 688's,
+# paid with a power press and not with the device. And on an arm whose ending is a store that ABORTS,
+# a no-return cannot be told from a hang by the log at all - the log only comes back with a return. No
+# net is armed in these bytes: 666's hardware-watchdog self test is a different arm.
+#
+# THE ORDER, AND WHAT THIS STEP GOT WRONG BEFORE ANYTHING WAS BUILT: edit -> build -> park -> record ->
+# gate -> re-arm. Four separate defects were caught by the build's own clauses and by nothing else - the
+# 16-byte frame above; a tail-branched early return that put a publish AFTER the ending; the "last call
+# by address" clause being a claim about gcc's layout rather than about the arm; and three shell
+# variable-name slips in the new image clauses, each of which made a CORRECT image fail. The build was
+# walked from exit 1 to exit 0 / 0 FAILs, and the shape it measures is the shape written above.
+#
+# MEASURED 2026-09-25 15:09 UTC, each file hashed in place in
+# out/stage90/frozen/armed-post-endticks-b12616bc/ and compared against the live out/stage90/ (all eleven
+# agree). NINE of these eleven differ from armed-post-endrun2-57d441cc, and the two that agree are again
+# `stage90-build-config.txt` and `stage90_fixture.macho` - the two files that do not contain the entry
+# image. Unlike every park before it (the 688 record states all eleven kept their exact byte counts),
+# TWO of the nine GROW: `xnu_arm_entry.elf` 6,698,696 -> 6,698,832 (+136; `readelf`: `.text` 0x50e900 ->
+# 0x50eae0 = +480, `.bss` NOBITS 0x05cb40 -> 0x05cb48 = +8, `.data` unmoved at the same file offset,
+# entry point 0x80000074, BSS_START 0x80543a80) and `xnu_arm_entry-config.txt` 810 -> 847 (+37 = the new
+# `STAGE90_XNU_POST_END_TICKS=115200000` line with its newline). The entry bin keeps 5,519,996 bytes. The
+# sources manifest differs from the 688 park's in exactly three lines - the entry-hash line, the
+# `build_entry.sh` line and the `entry_trace.c` line - and both of those last two were re-hashed against
+# the LIVE files (ff2f5e17… and 67e1e2d3…), which is the 688 lesson kept.
+#
+# THE PAYLOAD HALF WAS MEASURED DIRECTLY AND CLOSES EXACTLY. `stage90.bin` differs from the 688 park in
+# 586,101 bytes: 586,096 of them inside the embedded entry blob (span 494236..6014232 in `stage90.bin`,
+# with 1,260 bytes of payload after it; 496284 in the qcdt, the same offset as 688's) and FIVE in
+# `stage90_xnu_entry_run`, every one of which is the entry image's bss SIZE - `movw r3, #0x5c0` /
+# `movt r3, #0x805a` -> `movw r3, #0x5c8` at VA 0x4ac40 (BSS_END 0x805a05c0 -> 0x805a05c8; the compiler
+# switches from a rotate-imm8 `mov` to `movw` because 0x5c8 is not an 8-bit-rotated immediate) and two
+# `movw r2/r1, #0xcb40` -> `#0xcb48` at 0x4ad04/0x4ad18 (the bss byte count 0x5cb40 -> 0x5cb48, passed to
+# `memset` and logged as `xnu_entry_bss_bytes`). `stage90.img` and `stage90-qcdt.img` differ in 586,121,
+# and the extra 20 are at file offsets 576..595. **Five bytes, all derivable from the 12 bytes of clock
+# statics; no payload code differs.** The 586,096 inside the blob arrive as 64,485 runs, mostly two-byte
+# runs at four-byte spacing - the `movw` immediates renumbered because `.text` grew 480 bytes - with the
+# largest single run 4,394 bytes.
+#
+# AND THAT LAST FIELD IS WHERE 688's RECORD IS WRONG, corrected here because the wrong sentence is in
+# THIS file and a reader would carry it forward. Bytes 576..595 are not "inside the boot image's command
+# line (cmdline offset 514..533)": the v0 header's command line is 64..575 and 576 begins the 32-byte
+# `id` field, of which the first 20 are the digest and the last 12 are zero. Nor is it "a digest the
+# build writes into the command line that follows the entry image": it is `mkbootimg`'s own id over the
+# kernel, and it is REPRODUCED here exactly - `sha1(stage90.bin || len(stage90.bin) || ramdisk(empty) ||
+# 0 || second(empty) || 0)` = b4895a518bd220d63aba5ccfd5582afb99031cfa = the field. It differs between
+# arms because the payload differs, which is what an image digest is for, and it is not a byte of this
+# arm's code.
+#
+# THE 688 SET'S qcdt role line above reads "...and-the-arm-the-next-press-sends..."; from this step that
+# is THIS set. That line is not rewritten - the same rule the 686 record followed against 678's.
+set=armed-post-endticks-b12616bc sha256=f5ed8a0b9f390e7ee79db204c8efd909c4d8a6a6962cab43b9eb8fc3c8a3a278 bytes=8540160 file=stage90-qcdt.img role=qcdt-wrapped-payload-this-is-what-fastboot-boot-sends-and-the-arm-the-next-press-sends-STAGE90_XNU_ENTRY-1-this-payload-wraps-the-POST_END_TICKS-115200000-entry-image-and-only-five-bytes-of-its-own-code-differ-from-the-688-parks-all-derivable-from-the-12-bytes-of-clock-statics
+set=armed-post-endticks-b12616bc sha256=18833ead20fb951900f778255f24e21cfd40a8c0095b34dfcdd537a28c6c28ec bytes=6015492 file=stage90.bin role=raw-payload-bin-SAME-SIZE-as-the-688-arms-all-586101-differing-bytes-are-inside-the-embedded-entry-blob-at-494236-6014232-except-five-that-are-the-entry-bss-size-immediates-at-VA-4ac40-4ad04-4ad18-and-the-entry-bin-is-present-verbatim-and-exactly-once-there
+set=armed-post-endticks-b12616bc sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-688-arms-the-686-arms-the-678-arms-the-653-seam-arms-and-the-sleepers-so-THIS-FILE-CANNOT-NAME-THIS-ARM-the-entry-switches-are-not-in-the-payloads-dump-and-the-set-is-identified-by-xnu_arm_entry-config.txt-instead
+set=armed-post-endticks-b12616bc sha256=e6098129d1145ad272e96af4e049bfd38876a91794b501e617cc14ef8be6d80b bytes=6077564 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-same-size-as-the-688-arms-and-it-is-where-the-entry-bss-size-immediates-at-4ac40-4ad04-4ad18-and-the-boot-image-side-of-the-embedded-blob-were-read
+set=armed-post-endticks-b12616bc sha256=0482fe43e77c24a15fb6f5cecbdc6408dd599f261c739c395d19ea3091ba3540 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-post-endticks-b12616bc sha256=b12616bc2734043f30fbacdd32d55298acea4263f0f4ed1283b7c4501dc651d1 bytes=5519996 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ONE-BINARY-THIS-STEP-CHANGED-it-is-the-688-entry-57d441cc-with-the-ending-gated-on-an-ELAPSED-TICK-DEADLINE-instead-of-a-pass-count-the-wrapper-takes-entry_counter-as-a-baseline-on-its-FIRST-return-and-calls-entry_post_clock-by-tail-branch-on-every-return-which-ends-the-run-with-entry_seam_end_run-once-now-minus-t0-has-reached-115200000-ticks
+set=armed-post-endticks-b12616bc sha256=83654e700ce5a026797539a47b2cf4674e5a186c94d13526f171b1f7c4a59742 bytes=6698832 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-its-__wrap_platform_cache_idle_exit-is-at-8047cad8-keeps-its-8-byte-frame-and-ends-ldr-r1-r3-24-at-8047cb44-then-b-8047b530-entry_post_clock-and-entry_post_clock-reads-CNTFRQ-on-its-first-call-compares-now-minus-t0-at-8047b55c-8047b568-and-calls-entry_seam_end_run-at-8047b5b8-immediately-after-a-bl-entry_live_write-at-8047b5b4-while-entry_seam_end_run-itself-is-still-at-8047b47c
+set=armed-post-endticks-b12616bc sha256=7fe5111585ac1b466a795d1cf3b93fa962b7149b906df289764cfe7f22bb72e8 bytes=847 file=xnu_arm_entry-config.txt role=entry-config-record-AND-THE-ONE-RECORD-THAT-NAMES-THIS-ARM-its-last-three-arm-lines-read-STAGE90_XNU_SEAM_END_RUN-0-STAGE90_XNU_POST_END_RUN-0-and-STAGE90_XNU_POST_END_TICKS-115200000-beside-SEAM_POC-1-SEAM_MEASURE-0-SLOT_NULL-1-and-IDLE_NO_SLEEP-0-and-three-of-its-lines-differ-from-the-688-arms-this-record-line-4-file-SHA256-field-which-is-the-live-entry-bin-line-19-the-POST_END_RUN-digit-2-to-0-and-the-new-line-20-which-is-the-37-bytes-the-file-grew
+set=armed-post-endticks-b12616bc sha256=b7f84a1420b292448ecdcca59aa6074baf4bacd1c06ee910e67e46fa02db9df1 bytes=2184 file=xnu_arm_entry-sources.txt role=entry-source-manifest-21-file-lines-26-lines-in-all-of-which-this-step-changed-two-its-build_entry-sh-line-and-its-entry_trace-c-line-beside-the-hash-line-and-both-of-those-two-were-compared-against-the-LIVE-files-because-688-was-refused-once-for-naming-a-build_entry-sh-the-tree-no-longer-had
+set=armed-post-endticks-b12616bc sha256=ca0eda49be01c666080602609fb8387fdacd33bca82091795fd78e87767fbf1a bytes=6019072 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies-its-header-id-field-at-576-595-is-sha1-kernel-len-ramdisk-0-second-0-not-the-command-line-field-688s-record-called-it
+set=armed-post-endticks-b12616bc sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-member-all-the-same

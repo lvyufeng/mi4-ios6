@@ -1501,7 +1501,8 @@ summarise_log() {
     local sleh_lr="" sleh_pc="" sleh_sp="" sleh_seen=""
     local pop_lr="" pop_lr_src="" pop_death=0 pop_named=0 cache_arm=unread arm_seen=unknown
     local pce_up="" pce_ncpu="" pce_after_sctlr="" arm_set="" arm_set_key="" verdict_ok=1
-    local seam_post_end=""
+    local seam_post_end="" seam_post_end_ticks="" post_end_t=0
+    local post_t0="" post_elapsed="" post_cntfrq="" post_end_calls=""
     cwe_win=$(keyval slot_cwe_win)
     cwe_set=$(keyval slot_cwe_set)
     cwe_calls=$(keyval slot_cwe_calls)
@@ -1543,6 +1544,18 @@ summarise_log() {
     post_end_n=0
     if [[ $seam_post_end =~ ^0x[0-9a-f]+$ ]]; then
       post_end_n=$(( seam_post_end ))
+    fi
+    # **690: the second trigger at the same site, read here because it says which *clock* the post keys
+    # below are on.** `xnu_live_seam_post_end_ticks` is the arm's own deadline in counter ticks (0 on every
+    # arm that is not 690's), published by the seam beside `_post_end_run` on every arm - so a log from this
+    # arm carries it even when the run died before the deadline, which is the cell this arm exists to be
+    # able to read. With it non-zero the ending fires on **elapsed ticks** and the answer is
+    # `xnu_live_post_end_calls` beside `xnu_live_post_elapsed`; with it zero the post keys belong to 688's
+    # pass count and are read as they were before this step. Same one-`keyval`-per-key rule as above, and
+    # the conversion happens once, here, so no reading block has to know the key's spelling.
+    seam_post_end_ticks=$(keyval seam_post_end_ticks)
+    if [[ $seam_post_end_ticks =~ ^0x[0-9a-f]+$ ]]; then
+      post_end_t=$(( seam_post_end_ticks ))
     fi
     storm=$(keyval sleh_storm)
     panics=$(grep -a -c 'panic.*sleh_abort' "$log" || true)
@@ -1864,7 +1877,62 @@ summarise_log() {
     if [[ $post_calls =~ ^0x[0-9a-f]+$ ]] && (( post_calls >= 1 )); then
       say "  PASS  slot_post_calls=$post_calls - the exit returned through the wrapper, which"
       say "        520's run never did (its pass died inside the call)"
-      if [[ $seam_post_end == "0x00000001" ]]; then
+      if (( post_end_t > 0 )); then
+        # **690: the press's answer is a TIME, and it is the first arm this project has whose answer is a
+        # duration.** Everything the reading needs is in the log under four keys: `post_t0` (the counter at
+        # the first return through the wrapper - the baseline), `post_elapsed` (the elapsed ticks, published
+        # on the powers of two of the pass count *and* again on the pass that ends the run), `post_cntfrq`
+        # (the hardware's own rate, read once beside the baseline) and `post_end_calls` (the pass count at
+        # the ending, which is present **only** if the ending fired). The ms are computed from the rate the
+        # log itself carries when it carries one, and from the payload's device tree (19200 ticks/ms) when
+        # it does not - and which of the two was used is printed, because a duration whose rate is assumed
+        # is the one thing this arm was designed not to produce (`CNTFRQ` is the hardware's statement; the
+        # device tree is the payload's).
+        post_t0=$(keyval post_t0)
+        post_elapsed=$(keyval post_elapsed)
+        post_cntfrq=$(keyval post_cntfrq)
+        post_end_calls=$(keyval post_end_calls)
+        local rate_n=0 rate_src="" el_n=0 el_ms="" dead_ms="" park_n=""
+        if [[ $post_cntfrq =~ ^0x[0-9a-f]+$ ]] && (( post_cntfrq > 0 )); then
+          rate_n=$(( post_cntfrq ))
+          rate_src="the hardware's own CNTFRQ (xnu_live_post_cntfrq=$post_cntfrq = ${rate_n} Hz)"
+        else
+          rate_n=19200
+          rate_src="the payload's device tree (19200 ticks/ms) - xnu_live_post_cntfrq is ${post_cntfrq:-absent}, so the machine stated no rate of its own"
+        fi
+        if [[ $post_elapsed =~ ^0x[0-9a-f]+$ ]]; then
+          el_n=$(( post_elapsed ))
+        fi
+        el_ms=$(awk -v t="$el_n" -v f="$rate_n" 'BEGIN { printf "%.1f", t * 1000 / f }')
+        dead_ms=$(awk -v t="$post_end_t" -v f="$rate_n" 'BEGIN { printf "%.1f", t * 1000 / f }')
+        park_n=$(awk -v t="$el_n" -v f="$rate_n" 'BEGIN { printf "%.2f", t * 1000 / f / 2000 }')
+        if [[ $post_end_calls =~ ^0x[0-9a-f]+$ ]]; then
+          say "  AND ON THIS ARM THAT IS THE PRESS'S ANSWER (690), AND IT IS A DURATION."
+          say "        xnu_live_seam_post_end_ticks=$seam_post_end_ticks is the arm's deadline (${dead_ms} ms at"
+          say "        $rate_src); xnu_live_post_end_calls=$post_end_calls says the ending FIRED, on that many"
+          say "        deep-idle windows after the baseline; and the elapsed it fired at is"
+          say "        xnu_live_post_elapsed=$post_elapsed = **${el_ms} ms** - ${park_n} of the fixture's own"
+          say "        2000 ms parks (xnu_live_post_t0=$post_t0 was the counter at the first return, and the"
+          say "        deadline is 3 parks by construction, in the kernel's own tick units)."
+          say "        **So the machine stayed up and idled for the whole window, and the elapsed is the"
+          say "        measurement**: 688's arm could say how many passes happened and 689's press found the"
+          say "        machine asleep inside its park; this says *for how long*, with the rate printed beside"
+          say "        it rather than assumed. The death this log also reports is the ending's own store,"
+          say "        deliberately placed there."
+        else
+          say "  AND ON THIS ARM THIS IS THE PRESS'S NEGATIVE ANSWER (690). xnu_live_seam_post_end_ticks="
+          say "        $seam_post_end_ticks is the arm's deadline, and xnu_live_post_end_calls is ABSENT - the"
+          say "        ending never fired - while the elapsed trace is in the log at xnu_live_post_elapsed="
+          say "        ${post_elapsed:-absent} (${el_ms} ms at $rate_src). **So the machine stopped before the"
+          say "        clock ran out**, and the last elapsed it published is how long it had been running: this"
+          say "        is the cell 688's arm could not distinguish from a run that never reached the site at"
+          say "        all, and it is why the baseline and the trace are published separately."
+          if [[ -z $post_elapsed ]]; then
+            say "        (And the trace is absent as well, so the run did not reach a second return through the"
+            say "        wrapper - read clause (3)'s bracket above for where the first one died.)"
+          fi
+        fi
+      elif [[ $seam_post_end == "0x00000001" ]]; then
         say "  AND ON THIS ARM THAT IS THE PRESS'S ANSWER (686). xnu_live_seam_post_end_run=$seam_post_end"
         say "        says the ending is the one on the FAR side of the pop, so the reading above is not a"
         say "        pass that happened to survive: the operation's clean-and-invalidate and its two restore"
@@ -1905,7 +1973,17 @@ summarise_log() {
       say "        platform_cache_idle_exit, which is 520's pop {fp, pc} at the same pc. That is a"
       say "        localization and not a missing reading: the three notes share one schedule and one"
       say "        gate, so a site that published proves the later ones were reachable."
-      if (( post_end_n >= 1 )); then
+      if (( post_end_t > 0 )); then
+        say "        **AND ON THIS ARM THIS IS NOT THE NEGATIVE CELL (690).** xnu_live_seam_post_end_ticks="
+        say "        $seam_post_end_ticks says the ending is gated on a *clock* and not on reaching this site,"
+        say "        so a pass that died inside the exit is a machine that stopped before its deadline - the"
+        say "        arm's negative cell is read from the elapsed trace in the block above (absent"
+        say "        xnu_live_post_end_calls with whatever xnu_live_post_elapsed got to), and this bracket is"
+        say "        the localization of *where* it stopped. On this arm that is the shape a non-return that"
+        say "        came back would have: 688's arm could not run at all without the pop returning on every"
+        say "        pass, and this one is armed for a window long enough (three parks) that a one-shot repair"
+        say "        would show up here rather than at the ending."
+      elif (( post_end_n >= 1 )); then
         say "        **AND ON THIS ARM THAT LOCALIZATION IS THE PRESS'S NEGATIVE ANSWER (686/687).**"
         say "        xnu_live_seam_post_end_run=$seam_post_end says the ending was moved to the far side of"
         say "        the pop, so the pop RAN and this branch is the cell that says it died anyway: the"
@@ -2095,7 +2173,15 @@ summarise_log() {
       elif [[ $seam_end_run == "0x00000000" ]]; then
         say "  xnu_live_seam_end_run=$seam_end_run  the seam RETURNS: the pop runs, and the pair is read"
         say "  against its death - which is how the 535 and 572 cells below were written."
-        if (( post_end_n >= 1 )); then
+        if (( post_end_t > 0 )); then
+          say "  xnu_live_seam_post_end_ticks=$seam_post_end_ticks  **690: and the run then ends on a CLOCK at"
+          say "  the far side of that pop** - the same site as 686's and 687's ending, with the trigger changed"
+          say "  from a pass count to elapsed ticks of the counter the log already carries. Where the pass died"
+          say "  is therefore read from the elapsed trace and from xnu_live_post_end_calls: the count present"
+          say "  means the ending fired (the pop carried the operation's repair for the whole window); the"
+          say "  count absent means the machine stopped before the clock ran out, and the last"
+          say "  xnu_live_post_elapsed is how long it had been running."
+        elif (( post_end_n >= 1 )); then
           say "  xnu_live_seam_post_end_run=$seam_post_end  **686/687: and the run then ends on the FAR side of"
           say "  that pop**, deliberately, in the wrapper - so this is the one arm whose pair is read against"
           say "  a pop that ran AND whose ending is not what the seam does. Where the pass died is therefore"

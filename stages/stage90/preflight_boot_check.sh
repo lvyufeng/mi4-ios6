@@ -578,18 +578,26 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 # every press of that arm exactly as it refused 678's. The change is the same class as 683's and is recorded
 # the same way: **one more name this gate prints, and no clause moved.** The two counts that name the
 # `ENTRY_CFG_KEYS` variant subset move from nine to ten again, for the same reason 683 moved them.
+# 690: the eighteenth name, and it is the same class again - one more name this gate prints and no clause
+# moved. `STAGE90_XNU_POST_END_TICKS` is 690's ending: the *same* `entry_seam_end_run`, called from the same
+# site, with a clock behind it instead of a pass count (`ENTRY_ARM_KEYS` gained it and the record therefore
+# carries it, exactly as 683's and 686's did). The variant subset counts move from ten to eleven. What a
+# reader gets from this key is the one thing the arm's other keys cannot say on their own: with
+# `POST_END_RUN` at 0 and `POST_END_TICKS` at a number, the log's `xnu_live_post_t0` /
+# `xnu_live_post_elapsed` pair is a *duration* and not a pass count, and the press is read for
+# `xnu_live_post_end_calls` rather than for `xnu_live_slot_post_calls`.
 ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_TRACE
                 STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT_NULL STAGE90_XNU_EXIT_POC_FLUSH
                 STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE STAGE90_XNU_IDLE_STACK
                 STAGE90_XNU_SEAM_POC STAGE90_XNU_SEAM_MEASURE STAGE90_XNU_SEAM_END_RUN
-                STAGE90_XNU_POST_END_RUN
+                STAGE90_XNU_POST_END_RUN STAGE90_XNU_POST_END_TICKS
                 STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_IDLE_NO_SLEEP)
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
   [[ -n $_v ]] \
-    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The ten variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, SEAM_END_RUN, POST_END_RUN, IDLE_NO_SLEEP) are exactly the ones a display filter written around the artifact keys drops in silence"
+    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The eleven variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, SEAM_END_RUN, POST_END_RUN, POST_END_TICKS, IDLE_NO_SLEEP) are exactly the ones a display filter written around the artifact keys drops in silence"
   printf '  %s=%s\n' "$_k" "$_v"
 done
 # And the converse, so a key the list above does not name cannot arrive unshown (a *tenth* when the list
