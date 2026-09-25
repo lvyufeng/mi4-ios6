@@ -976,3 +976,93 @@ set=armed-storage-mode-57d55fc9 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b2736
 # block device, read no sector and mount nothing. And **TWRP-to-storage stays withheld** - the user's
 # condition is that the OS can already be entered, the OS is not observed booting and staying, so the
 # condition is unmet and no write to storage has been made. No firer is armed.
+#
+# ================================================================================================
+# 697: THIS SET WAS PRESSED, AND THE BLOCK IS IN SDHCI MODE. Read this block before the 696 one
+# above, whose pre-registration is what these sentences confirm or refute - and note that
+# **nothing in the set changed**: the arm that was sent is the arm recorded above, byte for byte.
+# ================================================================================================
+#
+# THE PRESS: 2026-09-25, readiness exit 0 (5/5, adb listing `4a2fe00b` as `device` and the neighbour
+# `33e80afe` off both lists), `preflight_boot_check.sh --allow-xnu-entry` **exit 0 / 570 lines**,
+# exactly one `run_and_capture.sh --allow-xnu-entry --expect-arm=armed-storage-mode-57d55fc9`, and
+# **RUNNER EXIT=0** - returned and captured, "the device came back 27s after this run called
+# `fastboot boot` (seen via: adb)". Capture 615,362 B, sha256
+# `ce54a0539371d44d933c976318af25711de29ea5b15f0f1d5809a1b324004008`, archived by hand under
+# `out/stage90/captures/697-storage-mode-pressed-2026-09-25-{last_kmsg.txt,run.log,gate.log,press.log}`.
+# Nothing was flashed, the send was one non-persistent `fastboot boot`, and the only device state that
+# changed is the boot. **Nothing was written to the flash medium** - see the last paragraph.
+#
+# AND EVERY CELL THE 696 BLOCK PRE-REGISTERED, IN THE DIRECTION THAT COSTS A WRITE. All eleven keys are
+# in the log, in the source's own order, with `_writes` published as a progress count (0 then 1/2/3/4)
+# and `_mode_stage` beside it (1, 2, 3, 5, 6, 7, 8 - 4 is the timeout path's):
+#   * `_mode_calls=1`, `_mode_refused=0`, `_mode_stage=1` - the version guard passed
+#     (`_mci_version=0x10000011`), so the arm was ALLOWED to write, and its first act was not taken.
+#   * `_writes=1`, `_mode_w0_read=0x00000000` - store 1 landed and `FF_CLK_SW_RST_DIS` is now CLEAR.
+#   * `_writes=2`, `_mode_power_wr=0x000004C1` - `CORE_POWER <- 0x441 | CORE_SW_RST`, exactly the form
+#     the vendor's sequence writes and nothing else.
+#   * `_mode_rst_polls=1`, `_mode_rst_steps=0`, `_mode_rst_ticks=0x6`, `_mode_rst_cleared=1`,
+#     `_mode_timeout=0` - **the reset was already clear on the first read: 6 CNTVCT ticks = 0.3125 us**
+#     at the device's own 19,200,000 Hz. The vendor's "~40us" is a worst case at minimum clock rates, so
+#     this is a resolution of it and not a contradiction; `_mode_timeout=1` with `_writes=2` and
+#     `_mode_stage=4` remains the failure path and is not this run's cell.
+#   * `_mode_pwrctl_status=0x00000000` - **the hazard 696 section 3 named and could not mitigate did not
+#     occur**: the reset latched no power-IRQ status, so the `CORE_PWRCTL_CLEAR 0xE4` acknowledge this arm
+#     deliberately does not write was not owed on this hardware state (`_core_power=0x441`, i.e. the
+#     previous state WAS BUS_ON, which is the case the vendor's own comment predicts it for).
+#   * `_writes=3`, `_mode_w1_read=0x00000001` - `HC_MODE_EN` set.
+#   * `_writes=4`, `_mode_w2_read=0x00002001`, **`_mode_bit_after=1`** - the final `CORE_HC_MODE` is the
+#     vendor's own end state bit for bit, and `HC_MODE_EN` is SET where 694 measured it CLEAR. **531
+#     section 6's "prerequisite" is now the state**: the block is in SDHCI mode on this boot.
+#   * `_mode_stage=7`, `_mode_hci_version=0x00000000`, `_mode_capabilities=0x742dc8b2` - **the one cell
+#     that came back as NEITHER branch**, and it found a wrong NAME in the arm's own source. 696
+#     pre-registered "a differing pair = the mode change made visible; an identical pair = the mode bit
+#     alone does not move these two words"; the reading is one word moved (`0x10 -> 0x00`) and the other
+#     did not, and the vendor's own header says why: `drivers/mmc/host/sdhci.h:27` is
+#     `SDHCI_DMA_ADDRESS 0x00`, `:181` `SDHCI_CAPABILITIES 0x40`, `:241` `SDHCI_HOST_VERSION 0xFE` (read
+#     there by `sdhci-msm.c:2909`). So `ST_SDHCI_HCI_VERSION 0x00` and the two keys named after it read
+#     the **SDMA system address register** - a soft register the core reset clears, which makes this
+#     reading a SECOND positive measurement that the reset happened - while the strapping constant at
+#     `0x40` correctly did not move. **The first spec-valid version read is still owed, at `0xFE`**, and
+#     the rename waits for the next edit inside `xnu_arm_boot/` because that directory is content-hashed
+#     into this arm's identity (673).
+#   * `_mode_stage=8` - the whole sequence ran. **Not one cell of the pre-registered table is the failure
+#     or the refusal cell, and the dangerous register was never touched** - not because this run checked
+#     that it was not (a run cannot) but because `build_entry.sh`'s store census refuses to link a rung-2
+#     image whose probe stores anywhere but `0x78/0x00/0x78/0x78` on one base, and this arm passed it.
+#
+# THE ENDING FIRED, THE PANIC PATH WAS TAKEN, AND 694's RECORD IS CORRECTED FROM ITS OWN PARKED CAPTURE.
+# `xnu_live_post_end_calls=0x00000008` with `xnu_live_post_elapsed=0x0927730f` = **7,998.97 ms** against
+# the armed 115,200,000 ticks - **1,999.0 ms** past the deadline, where 694 overshot by **11.011 ms**. The
+# two runs together measure the arm's resolution as **one idle sleep (~2007 ms of park)**: a single run's
+# overshoot only says where the deadline fell inside the sleep. Then the ending's first store faulted -
+# `panic(cpu 0 caller 0x80455668): kernel abort type 4: fault_type=0x3, fault_addr=0xfa0065c`,
+# `pc=0x8047c488` (`entry_seam_end_run+0xc`), `lr=0x8047c5bc`, `far=0x0fa0065c` = RESTART_REASON,
+# `frame_ok=1`, `sleh_storm=9`/`sleh_seen=9` - followed by `Attempting system restart...MACH Reboot`.
+# **And 694's own parked capture carries the same two lines at its 4012/4019**, with the same caller kind
+# and the same `fault_addr`: 694's sentence "recovered rather than fatal (`frame_ok=1`, no
+# `panic ... sleh_abort`)" was true of a *pattern* and false of the machine. The correct form is "the frame
+# was recovered AND the kernel panicked on the abort". The return is now a fourth measurement -
+# **8 s / 17 s / 24 s / 27 s** - and still unattributed, but narrowed: the log shows the panic path was
+# reached, and XNU's reboot path cannot reset this device, so the reset is a hardware write (watchdog
+# `0xf9017014` or `PS_HOLD 0xfc4ab000`). **This is the first arm in the sequence whose tables map
+# `0xFC4`** - the megabyte `PS_HOLD` lives in - so `entry_epilogue`'s second store was reachable in
+# principle, and the log cannot say whether it happened: the fatal abort is the *ending's* first store and
+# neither of the epilogue's stores is published as a key.
+#
+# WHAT THIS PRESS DID NOT DO, AND THE ONE THING IT CHANGES. No storage: four stores to the controller's own
+# `CORE_HC_MODE`/`CORE_POWER`, no command, no sector, no partition table, no mount, and the eMMC *device*
+# is not addressed at all. No driver beyond the fixture, and the goal's floor is unchanged (pid 1, a driver
+# answering the first `open`, the fixture's `0xfeedface` read into a user page). **TWRP-to-storage stays
+# withheld** - the user's condition is that the OS can already be entered and stays, and it is not observed
+# doing that. What it changes is the next step's shape: the controller is now in the mode a driver would
+# use, so the next act is that driver's own reset path (`sdhci_reset(SDHCI_RESET_ALL)` and the version read
+# at `0xFE`) and only then a clock/power state before any `CMD0`/`CMD8` - and a command sequence against a
+# bus whose power state the OS has not set is the first act the *medium* would see.
+#
+# AND THE TWO TOOL-SIDE MOVES OF THIS STEP, NEITHER OF THEM A DEVICE ACTION. **Readiness row 3 refused this
+# arm's tree before any press**, because `run_and_capture.sh`'s `EXIT_POP_LR_LITERAL` is a second definition
+# of the exit's `bl FlushPoU_Dcache` return address and still carried `0x800462dc` while this arm's ELF has
+# `0x800472dc`: the gate compares the two and says which is owed the change, the disassembly decided it, and
+# the press was unspent while it was wrong. And `tools/verify_press_ready.sh`'s row-4 narration gained the
+# rung-2 branch, so a press log names the arm that WRITES rather than describing a read-only one.
