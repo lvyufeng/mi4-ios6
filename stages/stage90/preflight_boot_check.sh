@@ -1165,6 +1165,61 @@ fi
 echo "the entry image is the build of xnu_arm_boot/ as it stands: $(printf '%s\n' "$ENTRY_SRC_NOW" | grep -c . || true) file(s), every one matching the manifest, and none the manifest does not name"
 
 echo
+echo "== the arm the record owes =="
+# **660 section 3, repaired.** Every clause above asks whether this tree is the build of the image
+# in front of it - a question a REBUILD answers "yes" to *by construction*, because
+# `build_entry.sh` rewrites `xnu_arm_entry-config.txt` and `xnu_arm_entry-sources.txt` **bound to
+# the new image's hash**. So the chain was satisfied by any internally consistent tree, and
+# nothing asked *which arm* these bytes are. This does, and it reads the one record in the chain
+# the build never writes: `stages/stage90/revert-set.txt`, whose own header says it plainly -
+# *"a record the build writes agrees with itself and constrains nothing"*.
+#
+# The question: do the bytes in $OUT equal, file for file, ONE of the sets recorded there?
+#
+#   * A rebuild of UNCHANGED sources passes, and that is correct rather than a loophole: the entry
+#     build is byte-for-byte reproducible, so such a rebuild reproduces the same hashes.
+#   * A rebuild of a CHANGED source is a set nobody recorded, and is refused.
+#   * A set MIXED from two arms is refused even though every file matches some recorded set - which
+#     is what the readiness tool's `--set` argument prevents by name and this clause cannot.
+#   * The near-miss is named (`10/11 [differ: xnu_arm_entry.bin]`), so the operator sees *how* it is
+#     wrong and not only *that* it is.
+REVERT_RECORD=$STAGE_DIR/revert-set.txt
+_readable "$REVERT_RECORD" "the sets this project can revert out/ to are read out of it"
+_arm_match=""
+_arm_partial=""
+_arm_sets=$(grep -o '^set=[^ ]*' "$REVERT_RECORD" | sed 's/^set=//' | LC_ALL=C sort -u)
+for _s in $_arm_sets; do
+  _tot=0
+  _hit=0
+  _bad=""
+  while IFS= read -r _line; do
+    _f=$(printf '%s\n' "$_line" | sed -n 's/.*[ ]file=\([^ ]*\).*/\1/p')
+    _h=$(printf '%s\n' "$_line" | sed -n 's/.*[ ]sha256=\([0-9a-f]\{64\}\).*/\1/p')
+    [[ -n $_f && -n $_h ]] || continue
+    _tot=$(( _tot + 1 ))
+    if [[ -r $OUT/$_f ]] && [[ $(sha256sum "$OUT/$_f" | awk '{print $1}') == "$_h" ]]; then
+      _hit=$(( _hit + 1 ))
+    else
+      _bad="$_bad $_f"
+    fi
+  done < <(grep "^set=$_s " "$REVERT_RECORD")
+  echo "  set $_s: $_hit/$_tot file(s) of out/ match${_bad:+   [differ:$_bad]}"
+  # A set the record names but whose lines could not be read (_tot 0) must not match, or a record
+  # made unreadable would pass every press - which is the silent-success shape this file keeps
+  # paying for.
+  if [[ -z $_arm_match ]] && (( _tot > 0 && _hit == _tot )); then
+    _arm_match=$_s
+  fi
+  if (( _hit > 0 && _hit < _tot )); then
+    _arm_partial="$_arm_partial $_s($_hit/$_tot)"
+  fi
+done
+if [[ -z $_arm_match ]]; then
+  fail "the bytes in $OUT are NO set recorded in $REVERT_RECORD${_arm_partial:+, nearest:$_arm_partial}. **Nothing has been sent.** Either out/ is mid-edit - rebuild it, or put the parked set back - or these are a NEW arm, in which case record them in $REVERT_RECORD in the step that MEASURED them: that record is written by hand and never by the build, and that is the only reason it can constrain anything. A new arm must be recorded BEFORE its press, or this clause cannot tell it apart from a mistake"
+fi
+echo "the bytes in $OUT are the recorded set '$_arm_match', file for file; the other $(($(printf '%s\n' "$_arm_sets" | grep -c .) - 1)) recorded set(s) do not match"
+
+echo
 echo "== storage tripwire =="
 # Two independent checks, because they catch different things and only one of them is
 # sufficient. Symbols catch a NAMED storage reference. Addresses catch an unnamed one - a raw
@@ -1175,11 +1230,31 @@ echo "== storage tripwire =="
 # added to the payload, the symbol check below found NOTHING and would have approved the
 # run. The address check caught it. Both are kept because the symbol check is cheap and
 # catches a different shape.
-if arm-none-eabi-nm -a "$OUT/stage90.elf" 2>/dev/null \
-     | grep -iE 'sdcc|emmc|\bmmc\b|ufs|partition|flash_|nand' ; then
-  fail "payload references storage symbols (see above)"
+# **661: the patterns are anchored, and the rule is a DELIMITER rather than a word boundary.**
+# `\b` treats `_` as a word character, so `\bpartition` does not match `bdev_partition_scan` and
+# `\bmmc\b` does not match `mmc_host_alloc` - measured on a synthetic positive control of nine
+# storage-shaped names, the pattern below catches 9/9 where the old one caught 8/9. The old pattern
+# was also noisy in the other direction: it matched **25** symbols in the entry image and all 25
+# were false positives (`ufs` inside `bufsize`/`nkdbufs`/`ubc_upl_maxbufsize`, `partition` inside
+# IODTNVRAM's `getNVRAMPartitions`), which is why 658 section 3(a) could not simply widen this
+# check's scope. The pattern is fixed here, so the scope is widened with it: the check now covers
+# the image the payload *jumps into* and not only the payload, and both real images come out at 0.
+# The remaining hole is named rather than papered over: a **camelCase** storage name
+# (`AppleSDXCController_probe`) still matches nothing, because a delimiter rule needs a delimiter.
+# This is a heuristic - which is what `check_storage_refs.py` says of itself too.
+STORAGE_SYM_RE='(^|[^A-Za-z0-9])(sdcc|emmc|nand|mmc|ufs|flash|partition)'
+_storage_sym_hit=0
+for _img in "$OUT/stage90.elf" "$OUT/xnu_arm_entry.elf"; do
+  [[ -r $_img ]] || fail "no $_img - the symbol half of the storage tripwire now reads two images, and a clean answer from the other one would say nothing about this one"
+  if arm-none-eabi-nm -a "$_img" 2>/dev/null | grep -iE "$STORAGE_SYM_RE"; then
+    echo "  ^ in $(basename "$_img")"
+    _storage_sym_hit=1
+  fi
+done
+if (( _storage_sym_hit != 0 )); then
+  fail "storage symbols in the payload or in the image it jumps into (see above) - the pattern is anchored on a delimiter, so a hit here is a storage-shaped NAME and not a substring of one"
 fi
-echo "no storage symbols in the payload"
+echo "no storage symbols in the payload or in the entry image it jumps into"
 
 if [[ -x $REPO_ROOT/tools/check_storage_refs.py ]] || [[ -f $REPO_ROOT/tools/check_storage_refs.py ]]; then
   "$PYTHON" "$REPO_ROOT/tools/check_storage_refs.py" "$OUT/stage90.elf" \
