@@ -586,6 +586,19 @@ else
   nsm=$(grep -c '^STAGE90_XNU_SEAM_MEASURE=' "$ARM_CFG" || true)
   wsp=$(sed -n 's/^STAGE90_XNU_SEAM_POC=//p' "$ARM_CFG" | head -1)
   wsm=$(sed -n 's/^STAGE90_XNU_SEAM_MEASURE=//p' "$ARM_CFG" | head -1)
+  # **683: the ending switch, read here for exactly the reason `_POC`/`_MEASURE` are.** 653's entry
+  # reading and 678's are the SAME sentence - the operation is byte-identical between them, only the
+  # ending is new - so the reachability verdict cannot tell those two arms apart, and until this line
+  # nothing else did either: row 4 named 678's arm as the ACTING arm and printed 535's pop-based
+  # consequences for a run in which **the pop is never executed**. That is the defect 680 repaired in
+  # `run_and_capture.sh`, one file over, and the same shape 679 was spent on.
+  #
+  # An ABSENT line is a legitimate reading and not a zero: `SEAM_END_RUN` did not exist before 678, so
+  # every parked arm older than it - 653's, the sleeper, 666's, the 574 park - has no such line, and
+  # refusing them would break the rows readiness exists to print for those arms. Absent therefore means
+  # *this image predates the switch and its seam returns through the pop*, which is said below rather
+  # than read as 0.
+  wse=$(sed -n 's/^STAGE90_XNU_SEAM_END_RUN=//p' "$ARM_CFG" | head -1)
   seam=''; seamwhy=''
   if [[ $nsp == 1 && $nsm == 1 ]]; then
     case "$wsp$wsm" in
@@ -618,6 +631,18 @@ else
           entry_conseq="this press's log carries NO xnu_live_seam_* key at all, so neither 638 section 3's pair table nor 642's sleh_pc join can be read on it" ;;
       esac ;;
   esac
+  # --- the ending, joined to the operation it ends -------------------------------------------------
+  # **683.** The block above names the ENTRY and its operation. This one says whether that operation
+  # ends the run after publishing, and it is a separate join for the same reason the payload join below
+  # is: the entry reading is one sentence for both arms, so the arm's name is the reading PLUS this.
+  # Written once and appended in one place - a second copy of the sentences above would be one value
+  # with two definitions, the defect class this project pays for most often.
+  if [[ $wse == 1 ]]; then
+    entry_arm="$entry_arm - **and this is NOT that arm: it is 678's ENDING arm** (STAGE90_XNU_SEAM_END_RUN=1), which runs that same operation, publishes the pair, and then **ends the run on purpose through PS_HOLD**"
+    entry_conseq+=" **BUT THE POP NEVER RUNS ON THIS ARM**, and that is the one thing 535 section 4's cells did not anticipate: the seam publishes the pair and then resets the machine, so the FACTS above hold and their CONSEQUENCES - every clause about what the pop then read - do not. \`STALE LINE, WRITTEN OUT\` therefore reads *the operation put the loop's own datum where the frame's word belongs, the pair was published, and the run then ended where this project told it to*: the reading survives a machine that would have died at the pop, which is what this arm exists for (663 section 2). And this arm has ONE cell no earlier arm can produce - \`seam_calls >= 1\` with **no pair at all** - which is *the operation did not return between the two reads* and NOT \"a dirty line, holding something this block does not name\" (680). \`run_and_capture.sh\` selects these readings off the log's own \`xnu_live_seam_end_run\` (:2025), so this press's log is read with THIS arm's rules and not 653's. **A hang at the pop is not a possible failure of this press**: the run ends before it, deliberately, on the one net every returning run has proven."
+  elif [[ $seam == poc ]]; then
+    entry_conseq+=" **And the entry record does not name STAGE90_XNU_SEAM_END_RUN at all**, so this image predates 678 and its seam RETURNS: the cells above are read against the pop's death, and the log will carry no xnu_live_seam_end_run key. Absent here is a fact about which image this is, never a zero."
+  fi
   # --- the payload's own switches, JOINED to the entry reading ------------------------------------
   # The entry reading names the ENTRY. The arm the press sends is that entry joined to what the payload
   # does with it, and today only the two self-test switches change the answer: on such an arm the
