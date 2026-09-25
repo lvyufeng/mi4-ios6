@@ -1972,10 +1972,11 @@ summarise_log() {
     # 0x8054fec8 against a `sleh_sp` of 0x8054fed0, so `==` prints FAIL for exactly the run this clause
     # exists to score a PASS.
     if [[ $seam_calls =~ ^0x[0-9a-f]+$ ]] && (( seam_calls >= 1 )); then
-      local seam_lr seam_sp seam_sctlr seam_other seam_other_lr rtcpre_pop seam_op
+      local seam_lr seam_sp seam_sctlr seam_other seam_other_lr rtcpre_pop seam_op seam_end_run
       local slot_pre_sp seam_m8 seam_m4
-      local seam_b0 seam_b1 seam_a0 seam_a1
+      local seam_b0 seam_b1 seam_a0 seam_a1 pair_cell
       seam_op=$(keyval seam_op)
+      seam_end_run=$(keyval seam_end_run)
       seam_lr=$(keyval seam_lr)
       seam_sp=$(keyval seam_sp)
       seam_sctlr=$(keyval seam_sctlr)
@@ -2008,6 +2009,36 @@ summarise_log() {
         say "  same two words again:                                    ${seam_a0:-absent} ${seam_a1:-absent}"
         say "        pair below has two meanings and this log does not say which rule applies (the key is"
         say "        written by the body's own STAGE90_XNU_SEAM_POC, and its absence is not a default)"
+      fi
+      # **And whether this arm ENDS THE RUN at the seam - which is what decides what the pair's three
+      # cells below are allowed to say.** Every one of those sentences is about a `pop {fp, pc}` that ran
+      # with the word the pair describes, and on 678's arm the pop does not run at all: the seam publishes
+      # the pair and then ends the run on purpose through the entry image's own reset path, so the exit
+      # this project has been reading a death at is never reached. Printing them there would assert a code
+      # path the log cannot contain, from a log whose whole point is that it exists **without** one.
+      #
+      # The key is read rather than inferred from the arm, for the same reason `seam_op` is: the same
+      # `SEAM_POC=1` body is behind two arms now, and the two need opposite readings of one pair. Its
+      # absence has **two** causes and this log cannot tell them apart - which is the shape 677's
+      # `selftest_tick_us` clause was written for, and it is reported the same way, as a fact about which
+      # image ran rather than as a zero.
+      if [[ $seam_end_run == "0x00000001" ]]; then
+        say "  xnu_live_seam_end_run=$seam_end_run  ARM 678: this arm PUBLISHES the pair above and then"
+        say "  ends the run on purpose - RESTART_REASON, dsb sy, PSHOLD<-0, dsb sy, for(;;) wfe, which is"
+        say "  the entry image's own reset path and the one reset every returning run of this project has"
+        say "  measured. **So the exit never returns and the pop never runs**: the pair above is the whole"
+        say "  reading, and this log's existence says nothing at all about the pop."
+      elif [[ $seam_end_run == "0x00000000" ]]; then
+        say "  xnu_live_seam_end_run=$seam_end_run  the seam RETURNS: the pop runs, and the pair is read"
+        say "  against its death - which is how the 535 and 572 cells below were written."
+      else
+        say "  xnu_live_seam_end_run=${seam_end_run:-absent}  UNREAD - and it has two causes this log"
+        say "        cannot tell apart: the image predates 678's ending (653's arm and every earlier one),"
+        say "        or the machine did not survive to the publish. **A pair above settles which**: the"
+        say "        first call always publishes when the live channel is up (entry_seam_publish's"
+        say "        schedule starts at 1 and entry_seam_flush ends its body on the same call), so a pair"
+        say "        with no ending key is the first cause and is a fact about the image - while"
+        say "        seam_calls>=1 with NO pair at all is the second, and is the arm's own reading."
       fi
       # **What those four words were read *with* is a value in the log, so it is read rather than
       # asserted.** The arm takes `b0`/`b1` before its `bl FlushPoU_Dcache` and `a0`/`a1` after it, and
@@ -2247,12 +2278,62 @@ summarise_log() {
         fi
       elif [[ $seam_op == "0x00000001" ]]; then
 # 535's arm: the operation ran, so the pair is a reading of its clean half.
-        if [[ -n $seam_b0 && $seam_a0 == "$seam_b0" && $seam_a1 == "$seam_b1" ]]; then
+# **One classification, two readings - and 678 is why there are two.** The three conditions below are the
+# only place the pair is turned into a cell, and they stay in one place on purpose: a second copy of them
+# under the ending arm would be one value with two definitions, which is this project's most expensive
+# defect class, and the two copies would drift on the first edit. What differs between the arms is not the
+# classification but **what a cell is allowed to mean**, because on the ending arm no pop ever runs.
+        if [[ -n $seam_b0 && $seam_a0 == "$seam_b0" && $seam_a1 == "$seam_b1" ]]; then pair_cell=clean
+        elif [[ -n $seam_a1 && -n $rtcpre_pop && $seam_a1 == "$rtcpre_pop" ]]; then pair_cell=stale
+        elif [[ -z $seam_b0 && -z $seam_b1 && -z $seam_a0 && -z $seam_a1 ]]; then pair_cell=absent
+        else pair_cell=changed
+        fi
+        if [[ $seam_end_run == "0x00000001" ]]; then
+# 678's arm: the same operation, on an arm that ends the run before the exit returns. Each cell keeps the
+# FACT 535's arm reports and replaces only the consequence, because the consequence is what a pop makes
+# true or false.
+          case $pair_cell in
+            clean)
+          say "  CLEAN LINE  the pair came back unchanged (b=${seam_b0}/${seam_b1}), so the line was not"
+          say "        dirty: the clean had nothing to write out. **And on THIS arm that is a reading of"
+          say "        the operation alone** - the sentence 535's arm prints after it (a pop that still died"
+          say "        on a stale value) is about a code path this log cannot contain, so a clean line here"
+          say "        says 546 section 3's mechanism was not exercised and says nothing about the pop"
+          say "        either way" ;;
+            stale)
+          say "  STALE LINE, WRITTEN OUT  a1=$seam_a1 is this same pass's xnu_live_slot_rtcpre_pop,"
+          say "        which the instrumentation reads from cpu_data+RTCPOP - the idle loop's own deadline,"
+          say "        not a stack word (585 section 3). **And this is the arm's answer**: the operation put"
+          say "        the loop's own datum where the frame's word belongs, the pair was published, and the"
+          say "        run then ended where this project told it to - so the reading survives a machine that"
+          say "        would have died at the pop, which is the whole reason this arm exists (663 section 2)."
+          say "        The near-side confirmation 535's arm quotes (the pop reading (rtcpre_pop,"
+          say "        rtcpre_pop-1) into (fp, pc)) is a fact about 520's and 533's fatal dumps and not about"
+          say "        this log" ;;
+            absent)
+          say "  NO PAIR, and on THIS arm that is the reading the arm was built to make: xnu_live_seam_calls"
+          say "        is ${seam_calls} but none of the four words was published, and the first call always"
+          say "        publishes when the live channel is up - so the machine did **not** survive from the"
+          say "        seam's entry to its publish. Read it with 663 section 2's row for it: the run was"
+          say "        reached, the operation (or the read after it) did not return, and **the pair is lost**."
+          say "        What it does NOT say: whether the pop would have died - nothing here ran the pop. The"
+          say "        device's return time is the next question, and it belongs to the run and not to this"
+          say "        log: a return at the countdown's own interval (25.0 s bark / 28.0 s bite) means the"
+          say "        payload's net brought it back rather than the ending, since the ending was never"
+          say "        reached. And this is the ONE cell that could not have been read before 678: on the"
+          say "        arms that return, an absent pair and a hang are the same silence." ;;
+            *)
+          say "  CHANGED  the pair came back changed (b=${seam_b0:-?}/${seam_b1:-?} ->"
+          say "        a=${seam_a0:-?}/${seam_a1:-?}) and a1 is not this pass's rtcpre_pop=${rtcpre_pop:-absent}:"
+          say "        a dirty line, holding something this block does not name. Read it on this arm as the"
+          say "        operation's own effect and NOT as a pop that survived it" ;;
+          esac
+        elif [[ $pair_cell == clean ]]; then
           say "  CLEAN LINE  the pair came back unchanged (b=${seam_b0}/${seam_b1}), so the line was not"
           say "        dirty: the clean had nothing to write out, and a pop that still died on a stale"
           say "        value got it from somewhere this operation does not reach - the falsifier for 546"
           say "        section 3's mechanism rather than its confirmation"
-        elif [[ -n $seam_a1 && -n $rtcpre_pop && $seam_a1 == "$rtcpre_pop" ]]; then
+        elif [[ $pair_cell == stale ]]; then
           say "  STALE LINE, WRITTEN OUT  a1=$seam_a1 is this same pass's xnu_live_slot_rtcpre_pop,"
           say "        which the instrumentation reads from cpu_data+RTCPOP - the idle loop's own deadline,"
           say "        not a stack word (585 section 3). What that means: the word the operation wrote back"
@@ -2261,6 +2342,15 @@ summarise_log() {
           say "        same pair in 520's and 533's fatal dumps, where the pop read (rtcpre_pop,"
           say "        rtcpre_pop-1) into (fp, pc) while lr still held the address the push had saved"
         else
+          # **This branch also catches `pair_cell=absent`, and that is today's behaviour preserved on
+          # purpose** - on an arm that RETURNS, the four keys being absent and the pair being unreadable
+          # for another reason were never distinguished here, and a log of that shape is one this block
+          # has already been read against. Naming the cell above without changing this arm's text keeps
+          # every capture already in `out/stage90/captures/` reading byte for byte as it did. The
+          # returning arm's own absent-pair sentence is **owed** - it is a reading this block prints
+          # as "a dirty line" from two absent keys, which is the class this project ranks first to
+          # suspect, and it is left as found rather than repaired in a step whose subject is the arm
+          # that makes it reachable.
           say "  CHANGED  the pair came back changed (b=${seam_b0:-?}/${seam_b1:-?} ->"
           say "        a=${seam_a0:-?}/${seam_a1:-?}) and a1 is not this pass's rtcpre_pop=${rtcpre_pop:-absent}:"
           say "        a dirty line, holding something this block does not name"
