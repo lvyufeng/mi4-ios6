@@ -555,26 +555,38 @@ esac
 # instrument behaves; this one installs a section for the eMMC controller's own megabyte (`0xF98`,
 # `entry_storage.c`) and reads six of its registers. So it carries a hazard the others do not - a load
 # from a block whose clock is off is a bus wait nothing ends, which is the one failure this project
-# cannot read a log out of - and the probe's own first act is the clock gate that decides it. The switch
-# is a flag and not a count for the reason `POST_END_RUN` was: there is one probe, it runs once, and a
-# number would be a second definition of "how many times" that the log already carries as
+# cannot read a log out of - and the probe's own first act is the clock gate that decides it. It was a
+# flag and not a count for the reason `POST_END_RUN` was: there is one probe, it runs once, and a number
+# would be a second definition of "how many times" that the log already carries as
 # `xnu_live_storage_calls`.
+# **696: and now it is a rung, for the one reason a flag could not survive - the arm after the probe
+# sends *stores* to that same block.** 694's press answered that `HC_MODE_EN` is clear, so the vendor's
+# mode sequence (`sdhci-msm.c:2841-2868`, four writes into `CORE_HC_MODE`/`CORE_POWER`) is a
+# prerequisite and not a re-do. A flag would have left two arms - one that only reads and one that also
+# writes - sharing one recorded value, which is exactly the shape 653 paid for when two arms answered a
+# reachability sentence identically. The three values are one ladder: 0 the object links and compiles to
+# nothing, 1 the read-only probe, 2 that probe and the mode sequence. It is still not a count, and the
+# `#error` in `entry_storage.c` refuses a rung above 2 for the same reason this `case` refuses it here.
 STORAGE_PROBE=${STAGE90_XNU_STORAGE_PROBE:-0}
 case "$STORAGE_PROBE" in
     0) ;;
     1) ;;
-    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0 or 1, not [$STORAGE_PROBE]" >&2
+    2) ;;
+    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1 or 2, not [$STORAGE_PROBE]" >&2
        echo "        It is a `#if` in two files and not a value, so anything else would reach the" >&2
        echo "        preprocessor as a broken -D and fail there, with the cause named by the wrong" >&2
-       echo "        tool (692)" >&2
+       echo "        tool (692); and it is a rung rather than a flag since 696, so a value above the" >&2
+       echo "        ladder would build an image whose record named an arm that does not exist" >&2
        exit 1 ;;
 esac
 # The trace is the instrument, the probe is a record and a mapping: without `entry_trace.c` in the image
 # there is no wrapper to call the probe from, so the switch would be *silently inert* - an arm whose
 # record named a probe no call in the image reaches. That is the shape 617's note calls this project's
-# oldest defect, and it is refused here rather than found in a log.
-if [[ $STORAGE_PROBE -eq 1 && $ENTRY_TRACE -ne 1 ]]; then
-    echo "STAGE90_XNU_STORAGE_PROBE=1 with STAGE90_ENTRY_TRACE=$ENTRY_TRACE: the probe is called from" >&2
+# oldest defect, and it is refused here rather than found in a log. The test is `-ge 1` and not `-eq 1`
+# since 696, because rung 2 needs the same call site: a rung is a property of the probe's body and the
+# wrapper is what reaches it.
+if [[ $STORAGE_PROBE -ge 1 && $ENTRY_TRACE -ne 1 ]]; then
+    echo "STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE with STAGE90_ENTRY_TRACE=$ENTRY_TRACE: the probe is called from" >&2
     echo "        __wrap_platform_cache_idle_exit, which is entry_trace.c's own wrapper - so on this" >&2
     echo "        build there is no caller and the switch would shape nothing while the record said it" >&2
     echo "        did (692)" >&2
@@ -29750,14 +29762,68 @@ verify_trace_symbols() {
     # flag must reach the probe exactly once, and a build that does not name it must reach it not at all -
     # the second half matters because a stray call in an arm whose record says 0 would spend a press on a
     # register file the arm's own narration does not describe.
-    if [[ $STORAGE_PROBE -eq 1 ]]; then
+    # **696: the same clause covers rung 2, and the test is `-ge 1`.** Both rungs reach the probe exactly
+    # once and are reached by nothing else - the rung is a property of the probe's body, so what this
+    # clause asserts is the *call*, which is what a rung cannot change. The message says rung 2 stores as
+    # well, because that is the half a reader of a failed build would otherwise not know.
+    if [[ $STORAGE_PROBE -ge 1 ]]; then
         [[ "${sxw_nsp:-0}" == 1 ]] ||
-            layout_fail "__wrap_platform_cache_idle_exit reaches entry_storage_probe ${sxw_nsp:-0} time(s) while STAGE90_XNU_STORAGE_PROBE=1: this arm's whole new act is that one call - the probe installs the eMMC controller's section and reads six of its registers - so a wrapper without it is 690's clock arm wearing this record, and a press spent on it would come back with a log carrying no \`xnu_live_storage_*\` key at all while the record, the sources and the gate's key list all said the arm was the storage one. Measured: this is not hypothetical, it is what the first build of this arm produced"
+            layout_fail "__wrap_platform_cache_idle_exit reaches entry_storage_probe ${sxw_nsp:-0} time(s) while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: this arm's whole new act is that one call - the probe installs the eMMC controller's section and reads six of its registers (and, at rung 2, writes four of them back: the vendor's mode sequence) - so a wrapper without it is 690's clock arm wearing this record, and a press spent on it would come back with a log carrying no \`xnu_live_storage_*\` key at all while the record, the sources and the gate's key list all said the arm was the storage one. Measured: this is not hypothetical, it is what the first build of this arm produced"
         aps=$(sym_addr entry_storage_probe) ||
-            layout_fail "entry_storage_probe is not in the linked image while STAGE90_XNU_STORAGE_PROBE=1: the call in the wrapper would then be a reference to nothing (a link error, so this clause can only fire on an image where the symbol was renamed or made static), and a clause that cannot find the symbol cannot say the probe is in the artifact the gate will boot"
+            layout_fail "entry_storage_probe is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: the call in the wrapper would then be a reference to nothing (a link error, so this clause can only fire on an image where the symbol was renamed or made static), and a clause that cannot find the symbol cannot say the probe is in the artifact the gate will boot"
     else
         [[ "${sxw_nsp:-0}" == 0 ]] ||
             layout_fail "__wrap_platform_cache_idle_exit reaches entry_storage_probe ${sxw_nsp:-0} time(s) while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: an image whose record does not name the probe must not dereference the eMMC controller at all - the probe is the one act in this image that touches a device block the project has never read, and its record is the only place that is stated"
+    fi
+    if [[ $STORAGE_PROBE -ge 2 ]]; then
+        # ---------------------------------------------- 696: the four stores are COUNTED, and their
+        #                                                 offsets are read out of the image
+        #
+        # **This is the first arm in this project that writes to a device block, so "the writes are safe"
+        # cannot be a sentence in a comment** ([[mi4-a-claim-in-a-comment-is-not-a-check]]). What is
+        # checked is narrow enough to be read out of the disassembly of `entry_storage_probe`: every
+        # store in that body whose base register is not `sp` must be either one of **exactly four** on a
+        # single base register - the one the second `entry_mmio_section` installed as `core_mem`, i.e.
+        # `0xf9824000` - at offsets **`0x78`, `0x00`, `0x78`, `0x78` in that order**, or a store to
+        # offset 0 of some other pointer (the body's `.bss` first-call guard, which the compiler may
+        # rename or spill). The four are the vendor's own sequence in the vendor's own order
+        # (`sdhci-msm.c:2841-2868`): `CORE_HC_MODE <- 0`, `CORE_POWER <- |CORE_SW_RST`,
+        # `CORE_HC_MODE <- HC_MODE_EN`, `CORE_HC_MODE <- |FF_CLK_SW_RST_DIS`.
+        #
+        # **What this clause makes a checked absence rather than a promise**: a fifth store, a store at
+        # any other offset of the controller, or a store based on the OTHER window (`hc_mem`) all refuse
+        # the build. The one that matters is `POWER_CONTROL 0x29`, the SDHCI standard's power register
+        # in `hc_mem`, where writing 0 **is** a bus-off request on this SoC: it is not reached because
+        # nothing in this body stores through `hc_mem` at all, and that is now a reading of the artifact
+        # the gate will boot and not a claim about the source. The offsets are written down twice - here
+        # and in the probe's own comment - so a build that changes one has to change the other, which is
+        # the point of a check whose subject is a number.
+        stb_probe=$(sym_addr entry_storage_probe) ||
+            layout_fail "entry_storage_probe is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE, so this arm's four stores cannot be counted at all"
+        stb_body=$(arm-none-eabi-objdump -d --start-address="$stb_probe" \
+                   --stop-address="$(next_global "$stb_probe")" "$OUT/xnu_arm_entry.elf")
+        # Every store whose operand's base is not `sp`, as `<base>:<offset>` in program order.
+        stb_all=$(awk '
+            $3 ~ /^str/ {
+                if (match($0, /\[[^]]*\]/)) {
+                    op = substr($0, RSTART + 1, RLENGTH - 2)
+                    n = split(op, p, ",")
+                    base = p[1]; gsub(/[ \t]/, "", base)
+                    off = "0"
+                    if (n >= 2) { off = p[2]; gsub(/[ \t#]/, "", off); sub(/!$/, "", off); if (off == "") off = "0" }
+                    if (base != "sp") printf "%s:%s\n", base, off
+                }
+            }' <<<"$stb_body")
+        stb_base=$(awk -F: '{ c[$1]++ } END { b = ""; m = 0; for (k in c) if (c[k] > m) { m = c[k]; b = k } print b }' <<<"$stb_all")
+        stb_off=$(awk -F: -v b="$stb_base" '$1 == b { printf "%s ", $2 }' <<<"$stb_all")
+        # Everything that is not one of the four, and everything outside the base: the first group must
+        # be empty and the second may hold only offset-0 writes (the body's `.bss` guard).
+        stb_other=$(awk -F: -v b="$stb_base" '$1 != b { printf "%s:%s ", $1, $2 }' <<<"$stb_all")
+        stb_bad=$(awk -F: -v b="$stb_base" '$1 != b && $2 != 0 { printf "%s:%s ", $1, $2 }' <<<"$stb_all")
+        [[ "$stb_off" == "120 0 120 120 " ]] ||
+            layout_fail "entry_storage_probe's stores on base $stb_base are [$stb_off] and this arm's record says they are 120 0 120 120 - i.e. CORE_HC_MODE <- 0, CORE_POWER <- |CORE_SW_RST, CORE_HC_MODE <- HC_MODE_EN, CORE_HC_MODE <- |FF_CLK_SW_RST_DIS (the vendor's own sequence, sdhci-msm.c:2841-2868). A different count, a different order or a different offset is a store this arm's pre-registration does not describe: read the probe's own body, decide whether the sequence or the record is what changed, and change the one that is wrong. Nothing is rebuilt by this refusal"
+        [[ -z "${stb_bad// /}" ]] ||
+            layout_fail "entry_storage_probe stores to [$stb_bad], which are neither one of the four the record names (base $stb_base: 120 0 120 120) nor an offset-0 write of a pointer (the body's first-call guard). Every other store in this body is a register this arm's pre-registration does not name - and if it is in the OTHER window (hc_mem), POWER_CONTROL 0x29 is in it, where writing 0 IS a bus-off request on this SoC. The stores found on the four's base are [$stb_off] and the rest are [$stb_other]; read the probe's body and decide which of the two - the sequence or this record - is wrong. Nothing is rebuilt by this refusal"
     fi
     if [[ $SEAM_POST_END_TICKS -gt 0 ]]; then
         # ---------------------------------------------- 690: the chain is two bodies, and both are read

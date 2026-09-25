@@ -2317,7 +2317,17 @@ static void entry_live_init(void)
             entry_live_refuse(5u);
             return;
         }
-        /* ARM_TTE_BLOCK_ATTRINDX(i): B = i[0], C = i[1], TEX[2] = i[2]. */
+        /*
+         * **ARM_TTE_BLOCK_ATTRINDX(i), and the third term's name was wrong here until 695.**
+         * `ARM_TTE_BLOCK_ATTRINDX` (`proc_reg.h:803`) is `(i[1:0] << ARM_TTE_BLOCK_CBSHIFT) |
+         * (i[2] << ARM_TTE_BLOCK_TEX0SHIFT)`, and `ARM_TTE_BLOCK_TEX0SHIFT` is **12** - which is the
+         * descriptor's bit 12, i.e. **`TEX[0]`** and not `TEX[2]` (bit 14 attaches to `TEX[2]`). The
+         * arithmetic below is right and the name was not, and a wrong name is what a reader copies: it
+         * had travelled into the 695 experiment document and into the descriptor decoder's own header
+         * before the macro was resolved against it. `TEX[2]` is left out of the index by construction -
+         * the value 3 this loop breaks on is `TEX[0]=0, C=1, B=1` = `0x040e`, the descriptor the two MMIO
+         * installs carry.
+         */
         attr = (((i >> 1) & 1u) << 3) | ((i & 1u) << 2) | (((i >> 2) & 1u) << 12);
     }
     g_live_attr = attr;

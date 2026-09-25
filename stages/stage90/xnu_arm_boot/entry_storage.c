@@ -66,13 +66,43 @@
  * reason is the same: a load through a translation this arm cannot vouch for is a fault, not a
  * measurement. 692 measured that such a fault does come back with a log; the rule is about not
  * spending the arm's reading on an address whose descriptor this run did not write.
+ *
+ * **696: and then the block answered, and the answer made the next act a WRITE.** 694 pressed the
+ * read-only probe and all twenty-eight keys came back, none through a fault: both windows are reachable
+ * through a descriptor this arm writes, the branch clock is enabled (`_cbcr = 0x00004ff1`), the block
+ * answers (`_mci_version = 0x10000011`), and **`HC_MODE_EN` is CLEAR** (`_hc_mode = 0x00002000`). So
+ * 531 section 6's "prerequisite or re-do" is answered in the direction that costs a write, and this
+ * file gains the vendor's own bring-up - four stores, one bounded poll, and a readback after each store
+ * - as **rung 2** of the switch above it. It is the first act in this project that writes to a device
+ * block rather than reading one, and everything about its shape is a consequence of that:
+ *
+ *   * the **gate now guards stores**, where it was written to guard loads, and a load from an unclocked
+ *     block is still the failure no bound can end (see the poll's comment);
+ *   * the sequence is **pre-registered** as a write, with its cells and its failure path, in
+ *     `docs/experiments/experiment-696-…`;
+ *   * the count of stores is **published** (`xnu_live_storage_writes`) and it is a number about this
+ *     arm's behaviour rather than about what the file contains - `0` on every path that refuses;
+ *   * and `POWER_CONTROL 0x29` is still not touched, because writing 0 to it *is* a bus-off request.
  */
 #include <stdint.h>
 
 #include "entry_storage.h"
+#include "entry_timebase.h"   /* 696: stage90_cntvct_read, for the reset poll's time bound */
 
+/*
+ * **696: the switch is a rung, and the `#error` says so where a `-D` would otherwise reach the
+ * preprocessor as a value nobody defined.** `STORAGE_PROBE` was a flag - 0 the object links and
+ * compiles to nothing, 1 the read-only probe - and the mode sequence is a *different kind of act*
+ * (four stores to the controller rather than loads from it), so it gets its own value and the three
+ * values are one ladder: how far up the storage line this image goes. The record is the only place a
+ * reader learns which rung was built, which is why a value above the ladder is refused here rather
+ * than shaping an image whose switches claim something else.
+ */
 #ifndef STAGE90_XNU_STORAGE_PROBE
 #define STAGE90_XNU_STORAGE_PROBE 0
+#endif
+#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 2
+#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller)."
 #endif
 
 /*
@@ -129,12 +159,182 @@ extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_befo
 #define ST_SDCC1_CBCR           0x04C4u
 #define ST_SDCC1_CLK_ENABLE     0x1u
 
+/*
+ * **696: the vendor's sequence, and every offset below is a `#define` in the same file it is read out
+ * of (`sdhci-msm.c:55-60`) rather than retyped.** `ST_HC_MODE_EN` and `ST_SDCC1_CLK_ENABLE` are the
+ * same number and it is the same *bit position* - bit 0 - of two different registers: one selects
+ * SDHCI mode in `CORE_HC_MODE` and the other enables the branch's clock in the CBCR. They are kept as
+ * two names because the registers are two and neither bit's meaning follows from the other's, and the
+ * arm's own pair of readings says the two are independent: the gate reads `0x00004ff1` (bit 0 set)
+ * while `_hc_mode` reads bit 0 clear.
+ */
+#define ST_HC_MODE_EN           0x1u
+#define ST_CORE_SW_RST          (1u << 7)
+#define ST_FF_CLK_SW_RST_DIS    (1u << 13)
+#define ST_CORE_PWRCTL_STATUS   0xDCu
+
+/*
+ * **The poll's bounds, and the sentence that must be read beside them: a bound cannot bound a read that
+ * never returns.** A load from a block whose clock is off is a bus wait nothing ends on this SoC's
+ * fabrics, so if the gate reading were wrong the *first* `CORE_POWER` read inside the poll would hang
+ * and no number here would end it - which is why the sequence runs only with `gate == 1`, on a pair of
+ * gate words 694 measured on hardware rather than on the offset's arithmetic. What the bounds do
+ * address is the case they can: a reset that does not complete. The vendor polls to a 1 ms ceiling
+ * (`readl_poll_timeout(..., 10, 1000)`, against a reset its own comment sizes at ~40 us); this ceiling
+ * is 100x that, 1/20 of the fixture's 2000 ms park and 1/60 of this arm's 6 s ending, and it is a
+ * *time* rather than a count because the rate is measured - `xnu_live_post_cntfrq` read 19,200,000 Hz
+ * on 691's and 694's runs, which is 19200 ticks/ms.
+ */
+#define ST_MODE_RST_TICK_BUDGET 1920000u  /* 100 ms at 19.2 MHz */
+#define ST_MODE_RST_STEPS_MAX   4096u     /* the backstop: ~126 ms of reads, so it cannot fire first */
+#define ST_MODE_RST_INNER       1024u     /* device reads between two samples of the clock */
+
 static uint32_t st_read32(uint32_t addr)
 {
     return *(volatile uint32_t *)(uintptr_t)addr;
 }
 
+/*
+ * **The store, and the `dsb sy` is what makes "the readback was taken after the store" a property of
+ * this code rather than of the bus.** The vendor uses `writel_relaxed`/`readl_relaxed` and relies on
+ * the interconnect; this image has one barrier already written down in the same shape (`entry_irq.c`'s
+ * write helper) and the project's own reset path is specified as a store followed by `dsb sy`, so the
+ * device write here is that shape too. Three of them per run at most, against a block whose clock this
+ * arm has already read as enabled.
+ */
+static void st_write32(uint32_t addr, uint32_t value)
+{
+    *(volatile uint32_t *)(uintptr_t)addr = value;
+    __asm__ volatile ("dsb sy" ::: "memory");
+}
+
 static uint32_t g_storage_probed;
+
+#if STAGE90_XNU_STORAGE_PROBE >= 2
+/*
+ * **696: rung 2 - the vendor's mode sequence, and it is this project's first write to a device block.**
+ * `sdhci-msm.c:2841-2868` is the whole of it, and the four stores below are that text in order: write 0
+ * to `CORE_HC_MODE`, set `CORE_SW_RST` in `CORE_POWER`, poll the bit clear, write `HC_MODE_EN`, then
+ * set `FF_CLK_SW_RST_DIS`. It reads the register back after every store, so the log carries what the
+ * block answered rather than what this code asked for, and the count it publishes
+ * (`xnu_live_storage_writes`) is the count of stores it actually made.
+ *
+ * **The state this arm starts from says the sequence's ends matter.** The handed-over `_hc_mode` reads
+ * `0x00002000` = `FF_CLK_SW_RST_DIS` with `HC_MODE_EN` clear, i.e. the vendor's own destination one bit
+ * short. So store 1 (which writes 0) *clears* bit 13, and store 4 is what puts it back: an arm that
+ * skipped the ends would leave the block worse than it found it.
+ *
+ * **The one guard this adds to the gate's.** A block that answered `CORE_MCI_VERSION` with 0 or with a
+ * saturated word is a block that is not answering, and the sequence's second store is to `CORE_POWER`.
+ * So the version word is the condition of the whole sequence: `_mode_refused = 1` with `_writes = 0` is
+ * reached without a single store, and it is the only cell in which this arm changes nothing.
+ *
+ * **What it deliberately does not touch.** `POWER_CONTROL 0x29` (the SDHCI standard's own power
+ * register, in `hc_mem`) - writing 0 to it is a bus-off request on this SoC, and the bus is already
+ * powered. And `CORE_PWRCTL_CLEAR 0xE4`: the vendor acknowledges the power-IRQ status there because it
+ * is about to register a handler, and this arm registers none, so the acknowledge would be a write with
+ * no purpose. The status itself is *read* (`_mode_pwrctl_status`) and left latched - it is the reading
+ * that says whether the reset latched anything, which the vendor's own comment predicts when the
+ * previous power state was BUS_ON, as `_core_power = 0x441` says it was.
+ */
+static void st_mode_sequence(uint32_t core_power, uint32_t mci_version)
+{
+    uint32_t w0, w1, w2, pwr, pwr_wr, polls = 0u, steps = 0u, cleared = 0u, i;
+    uint32_t t0, ticks;
+
+    ST_LIVE("xnu_live_storage_mode_calls", 1u);
+
+    if (mci_version == 0u || mci_version == 0xffffffffu) {
+        ST_LIVE("xnu_live_storage_mode_refused", 1u);
+        ST_LIVE("xnu_live_storage_mode_stage", 0u);
+        ST_LIVE("xnu_live_storage_writes", 0u);
+        return;
+    }
+    ST_LIVE("xnu_live_storage_mode_refused", 0u);
+
+    /* Store 1: the vendor's `writel_relaxed(0, core_mem + CORE_HC_MODE)`. */
+    ST_LIVE("xnu_live_storage_mode_stage", 1u);
+    st_write32(ST_CORE_MEM_BASE + ST_CORE_HC_MODE, 0u);
+    ST_LIVE("xnu_live_storage_writes", 1u);
+    w0 = st_read32(ST_CORE_MEM_BASE + ST_CORE_HC_MODE);
+    ST_LIVE("xnu_live_storage_mode_w0_read", w0);
+
+    /* Store 2: `CORE_POWER |= CORE_SW_RST`. */
+    ST_LIVE("xnu_live_storage_mode_stage", 2u);
+    pwr_wr = core_power | ST_CORE_SW_RST;
+    st_write32(ST_CORE_MEM_BASE + ST_CORE_POWER, pwr_wr);
+    ST_LIVE("xnu_live_storage_writes", 2u);
+    ST_LIVE("xnu_live_storage_mode_power_wr", pwr_wr);
+
+    /*
+     * The poll, and both of its bounds are published with the result. The clock is sampled once per
+     * `ST_MODE_RST_INNER` device reads, which is what keeps the sampler from being the thing being
+     * measured; `steps` reaching its ceiling and `ticks` reaching its budget are two different
+     * statements and the log carries both.
+     */
+    ST_LIVE("xnu_live_storage_mode_stage", 3u);
+    t0 = (uint32_t)stage90_cntvct_read();
+    for (steps = 0u; steps < ST_MODE_RST_STEPS_MAX; steps++) {
+        for (i = 0u; i < ST_MODE_RST_INNER; i++) {
+            pwr = st_read32(ST_CORE_MEM_BASE + ST_CORE_POWER);
+            polls++;
+            if ((pwr & ST_CORE_SW_RST) == 0u) {
+                cleared = 1u;
+                break;
+            }
+        }
+        if (cleared != 0u)
+            break;
+        if ((uint32_t)stage90_cntvct_read() - t0 >= ST_MODE_RST_TICK_BUDGET)
+            break;
+    }
+    ticks = (uint32_t)stage90_cntvct_read() - t0;
+
+    ST_LIVE("xnu_live_storage_mode_rst_polls", polls);
+    ST_LIVE("xnu_live_storage_mode_rst_steps", steps);
+    ST_LIVE("xnu_live_storage_mode_rst_ticks", ticks);
+    ST_LIVE("xnu_live_storage_mode_rst_cleared", cleared);
+    ST_LIVE("xnu_live_storage_mode_timeout", (cleared == 0u) ? 1u : 0u);
+    ST_LIVE("xnu_live_storage_mode_pwrctl_status",
+            st_read32(ST_CORE_MEM_BASE + ST_CORE_PWRCTL_STATUS));
+
+    if (cleared == 0u) {
+        /*
+         * The failure path, and its shape is "no further store": the block is left exactly as stores 1
+         * and 2 left it, and `_mode_w0_read` and `_mode_power_wr` above say what that is.
+         */
+        ST_LIVE("xnu_live_storage_mode_stage", 4u);
+        ST_LIVE("xnu_live_storage_writes", 2u);
+        return;
+    }
+
+    /* Store 3: the vendor's `writel_relaxed(HC_MODE_EN, core_mem + CORE_HC_MODE)`. */
+    ST_LIVE("xnu_live_storage_mode_stage", 5u);
+    st_write32(ST_CORE_MEM_BASE + ST_CORE_HC_MODE, ST_HC_MODE_EN);
+    ST_LIVE("xnu_live_storage_writes", 3u);
+    w1 = st_read32(ST_CORE_MEM_BASE + ST_CORE_HC_MODE);
+    ST_LIVE("xnu_live_storage_mode_w1_read", w1);
+
+    /* Store 4: the vendor's read-modify-write that ends on `FF_CLK_SW_RST_DIS`. */
+    ST_LIVE("xnu_live_storage_mode_stage", 6u);
+    st_write32(ST_CORE_MEM_BASE + ST_CORE_HC_MODE, w1 | ST_FF_CLK_SW_RST_DIS);
+    ST_LIVE("xnu_live_storage_writes", 4u);
+    w2 = st_read32(ST_CORE_MEM_BASE + ST_CORE_HC_MODE);
+    ST_LIVE("xnu_live_storage_mode_w2_read", w2);
+    ST_LIVE("xnu_live_storage_mode_bit_after", w2 & ST_HC_MODE_EN);
+
+    /*
+     * **And the two standard words again, now through a block in SDHCI mode.** 694's pair
+     * (`0x10`, `0x742dc8b2`) was taken through a block that was *not*, and 694 section 3 says why that
+     * makes it a pre-mode pair rather than a spec-valid one. Read here, one store-group later, the two
+     * pairs become the reading the arm exists for.
+     */
+    ST_LIVE("xnu_live_storage_mode_stage", 7u);
+    ST_LIVE("xnu_live_storage_mode_hci_version", st_read32(ST_HC_MEM_BASE + ST_SDHCI_HCI_VERSION));
+    ST_LIVE("xnu_live_storage_mode_capabilities", st_read32(ST_HC_MEM_BASE + ST_SDHCI_CAPABILITIES));
+    ST_LIVE("xnu_live_storage_mode_stage", 8u);
+}
+#endif /* STAGE90_XNU_STORAGE_PROBE >= 2 */
 
 void entry_storage_probe(void)
 {
@@ -287,5 +487,18 @@ void entry_storage_probe(void)
      * version word's answer meaningless rather than absent.
      */
     ST_LIVE("xnu_live_storage_sw_rst", (core_power >> 7) & 1u);
-    ST_LIVE("xnu_live_storage_mode_bit", hc_mode & ST_SDCC1_CLK_ENABLE);
+    ST_LIVE("xnu_live_storage_mode_bit", hc_mode & ST_HC_MODE_EN);
+
+#if STAGE90_XNU_STORAGE_PROBE >= 2
+    /*
+     * **696: rung 2, and it is placed here for the same reason the probe itself is placed before the
+     * clock.** Everything above is a reading this sequence is conditional on - the gate that decides
+     * whether the block may be touched at all, the version word the sequence refuses itself on, and the
+     * two words the sequence's own stores are read against - so if the sequence is reached at all, every
+     * one of those is already published and a run that dies inside the sequence still carries the state
+     * it was entered in. `_writes` is republished by the sequence with its true count, which is why the
+     * `0` above is a statement about the read-only path and not about this one.
+     */
+    st_mode_sequence(core_power, mci_version);
+#endif
 }

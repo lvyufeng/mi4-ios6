@@ -13,6 +13,15 @@
  * It is compiled in every build and its records are not, which is the same split `entry_timebase.c`
  * and `entry_gic.c` make and for the same reason: the measurement is the step and the records are the
  * instrument. A build with `STAGE90_XNU_STORAGE_PROBE=0` links a probe whose body does nothing at all.
+ *
+ * **696: the switch is a rung, and the entry point is one call either way.** `..._PROBE=1` is the
+ * read-only probe above; `=2` is that probe **and** the vendor's mode sequence
+ * (`sdhci-msm.c:2841-2868`: four stores, one bounded poll, a readback after each store), which makes
+ * this object the first in the project that writes to a device block rather than reading one. The
+ * caller does not change with the rung - `entry_storage_probe` is still one call from
+ * `__wrap_platform_cache_idle_exit`, still before 690's clock block, still once per boot - because a
+ * rung is a property of the arm's own body and not of where in the boot it happens. What does change
+ * is the one thing the caller must not have to know: with the rung at 2, the call can write.
  */
 #ifndef STAGE90_ENTRY_STORAGE_H
 #define STAGE90_ENTRY_STORAGE_H

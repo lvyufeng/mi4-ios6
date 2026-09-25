@@ -908,3 +908,71 @@ set=armed-storage-gcc-1fc30bfe sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364
 # lane's file, reported by message and not edited here). (4) The descriptor decoder's missing `SCTLR.TRE`
 # input. **TWRP-to-storage stays withheld**: the OS is not observed booting, so the user's condition is
 # unmet and no write has been made.
+set=armed-storage-mode-57d55fc9 sha256=9a4a86950ca5fa5799365c46888488aeb8ee430769e16df8b458a796e0e9bfe6 bytes=8556544 file=stage90-qcdt.img role=qcdt-wrapped-payload-this-is-what-fastboot-boot-sends-and-the-arm-the-next-press-sends-STAGE90_XNU_ENTRY-1-this-payload-wraps-the-STORAGE_PROBE-2-entry-image-i-e-the-mode-sequence-arm-and-only-the-embedded-entry-blob-and-the-entry-bss-size-immediates-differ-from-the-693-park
+set=armed-storage-mode-57d55fc9 sha256=33f389255c35e21faa682b6aae4667ed7ba08009d963a5ead108b9bdb91d2463 bytes=6031876 file=stage90.bin role=raw-payload-bin-it-is-0x4000-LARGER-than-the-693-arms-6015492-because-the-entry-image-it-embeds-grew-by-exactly-that-and-the-differing-bytes-are-inside-the-embedded-entry-blob-at-494236-6030616-the-entry-bins-own-5536380-bytes-then-1260-of-tail-exactly-as-in-the-693-arm-whose-blob-sits-at-494236-6014232-except-the-five-entry-bss-size-immediates-at-VA-4ac40-4ad04-4ad18-the-new-entry-bin-is-present-verbatim-and-exactly-once-there
+set=armed-storage-mode-57d55fc9 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-693-692-690-688-686-678-653-and-sleeper-arms-so-THIS-FILE-CANNOT-NAME-THIS-ARM-the-entry-switches-are-not-in-the-payloads-dump-and-the-set-is-identified-by-xnu_arm_entry-config.txt-instead-and-the-payload-side-of-this-step-changed-ONE-thing-only-the-entry-blob-it-embeds
+set=armed-storage-mode-57d55fc9 sha256=3a0780d98cc928adf077a0a88534247649d4690873026db44fa38d578da924ee bytes=6093948 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-same-shape-as-the-693-arms-0x4000-larger-and-it-is-where-the-entry-bss-size-immediates-at-4ac40-4ad04-4ad18-plus-the-embedded-entry-blob-were-read
+set=armed-storage-mode-57d55fc9 sha256=5f4124aeb32b402cb56b13e05417a03dd0deb49d1d91495210e42b73e9069712 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-mode-57d55fc9 sha256=57d55fc969489873351f5d5999799c3db1f5d63c502b1a173f6fb0a04d5ea711 bytes=5536380 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ONE-BINARY-THIS-STEP-CHANGED-and-it-is-the-FIRST-IMAGE-IN-THIS-PROJECT-THAT-STORES-TO-A-DEVICE-BLOCK-it-is-the-693-entry-1fc30bfe-PLUS-the-vendors-mode-sequence-at-the-tail-of-entry_storage_probe-under-STAGE90_XNU_STORAGE_PROBE-greater-or-equal-2-four-stores-CORE_HC_MODE-lt-0-CORE_POWER-lt-or-CORE_SW_RST-CORE_HC_MODE-lt-HC_MODE_EN-CORE_HC_MODE-lt-or-FF_CLK_SW_RST_DIS-one-bounded-poll-and-a-readback-after-each-store-and-the-three-deltas-of-its-growth-are-measured-in-the-696-document-section-7-the-probe-plus-0x314-platform_cache_idle_enter-plus-0x1000-and-this-bin-plus-0x4000-neither-of-which-is-the-other-number
+set=armed-storage-mode-57d55fc9 sha256=5008170d569262ca553a9cadf66b427722075214255aac5cb96f6765a8aedfc5 bytes=6715384 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-its-entry_storage_probe-is-at-8000cff8-and-the-bl-to-it-in-__wrap_platform_cache_idle_exit-is-at-8047db2c-the-four-stores-are-at-8000d344-str-r4-r5-120-8000d380-str-r7-r5-8000d470-str-r3-r5-120-and-8000d4b0-str-r4-r5-120-in-that-order-and-the-only-other-store-in-the-body-is-the-first-call-guard-8000d068-str-r6-r2-so-NO-STORE-IN-THIS-BODY-IS-BASED-ON-THE-OTHER-WINDOW-hc_mem-and-POWER_CONTROL-0x29-which-is-THE-register-a-zero-write-busses-off-is-unreachable-by-construction-the-same-four-are-read-out-of-the-build-by-the-store-census-clause-and-the-two-readings-agree-the-wrapper-still-opens-str-r4-sp-8-keeps-its-8-byte-frame-and-still-ends-ldr-r1-r3-24-at-8047db48-then-b-8047c530-entry_post_clock-with-entry_seam_end_run-at-8047c47c-and-the-call-that-returns-to-the-seam-0x800472dc-the-exits-bl-FlushPoU_Dcache-at-8000-472d8-right-after-platform_cache_idle_exit-at-8000472d4-which-is-the-constant-696-section-7-had-to-move-from-0x800462dc
+set=armed-storage-mode-57d55fc9 sha256=cecffdad8abb34b1f25c87a7153f119e14314378395e9a8c8286514a58d34ce0 bytes=875 file=xnu_arm_entry-config.txt role=entry-config-record-AND-THE-ONE-RECORD-THAT-NAMES-THIS-ARM-its-last-line-reads-STAGE90_XNU_STORAGE_PROBE-2-beside-SEAM_POC-1-SEAM_MEASURE-0-SEAM_END_RUN-0-POST_END_RUN-0-POST_END_TICKS-115200000-SLOT_NULL-1-IDLE_CACHE_ENABLE-0-ISTACK_SEPARATE-0-IDLE_STACK-1-IDLE_NO_SLEEP-0-and-REAL_ARM_INIT-1-and-THREE-of-its-lines-differ-from-the-693-arms-the-file-SHA256-field-which-is-the-live-entry-bin-the-bytes-field-5536380-vs-5519996-and-the-rung-digit-1-to-2-and-the-file-keeps-its-875-bytes
+set=armed-storage-mode-57d55fc9 sha256=bfe846af8927d342592e19a8a6fc94f70f5e237b77faf9bd28d8362446b25ec2 bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest-23-file-lines-28-lines-in-all-and-FIVE-of-those-twenty-three-changed-this-step-build_entry-sh-the-rung-2-case-plus-the-new-store-census-clause-entry_storage-c-the-sequence-itself-entry_storage-h-its-rung-paragraph-entry_stubs-c-the-TEX-0-comment-695-had-left-owed-and-entry_trace-c-the-seam-LR-constant-the-696-document-section-7-had-to-move-all-five-compared-against-the-LIVE-files-and-THIS-IS-THE-ONE-MEMBER-THAT-MOVED-AFTER-THE-ARM-WAS-PARKED-the-bin-the-elf-the-config-and-EVERY-payload-file-above-are-byte-identical-to-the-park-written-before-this-clause-existed-so-the-only-difference-is-this-files-build_entry-sh-line-because-the-census-is-a-check-and-not-code
+set=armed-storage-mode-57d55fc9 sha256=c4ce35b39c365591d8e73202ee7383f818849602aba0b7bc0e1e5fef788615fa bytes=6035456 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies-its-header-id-field-at-576-595-is-sha1-kernel-len-ramdisk-0-second-0-and-it-differs-from-the-693-arms-because-the-payload-differs-which-is-what-an-image-digest-is-for
+set=armed-storage-mode-57d55fc9 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-member-all-the-same
+#
+# ================================================================================================
+# 696: THE FIRST WRITE ARM - PARKED, NOT PRESSED. Nothing in this block is a reading: the set above
+# is the arm that will be sent, and the press is the next step's act. What is recorded here is what
+# was MEASURED about the set before it was parked, because two of those measurements are new.
+# ================================================================================================
+#
+# THE WRITES ARE NOW A CHECKED PROPERTY OF THE ARTIFACT AND NOT A SENTENCE IN A COMMENT. `build_entry.sh`
+# gained a **store census** for `entry_storage_probe`, run under the same `-ge 2` rung that turns the
+# sequence on: it disassembles the function out of the linked `xnu_arm_entry.elf`, takes every store
+# whose base is not `sp` as `<base>:<offset>` in program order, and refuses the build unless the offsets
+# on one base are exactly `0x78, 0x00, 0x78, 0x78` in that order and every store on any other base is an
+# offset-0 pointer write. The reason it exists is the one register this project has now written down
+# twice: `POWER_CONTROL 0x29` lives in the OTHER window (`hc_mem`), and on this SoC **writing 0 to it IS
+# a bus-off request** - so "no store is based on `hc_mem`" had to stop being a claim about the source and
+# become a reading of the image the gate boots. It is a reading now, in both directions:
+#
+#   * the rung-2 image (`out/stage90/`, the set above): `base=r5 off=[120 0 120 120] other=[r2:0] bad=[]`
+#     - accepted. The four are `str r4,[r5,#120]` (0x8000d344), `str r7,[r5]` (0x8000d380),
+#     `str r3,[r5,#120]` (0x8000d470), `str r4,[r5,#120]` (0x8000d4b0), and the only other store in the
+#     whole body is the `.bss` first-call guard `str r6,[r2]` (0x8000d068). **No store in this body is
+#     based on `hc_mem` at all**, which is what makes `POWER_CONTROL 0x29` unreachable by construction
+#     rather than by review.
+#   * the 693 park control: `base=r2 off=[0] other=[] bad=[]` - **refused**, which is the direction a
+#     check that has only ever passed cannot demonstrate. It is a real image of this project's own
+#     rung-1 arm, hand-run through the clause's own text, and it is why the clause is not a tautology.
+#   * and the honest wart, recorded rather than smoothed over: the base the clause compares is **modal**
+#     (`stb_base` is whatever base carries the most stores), so on a one-store body the modal base is the
+#     guard's register and the refusal above is a base mismatch rather than a sequence mismatch. The
+#     clause never runs on a rung-1 arm - it is inside `-ge 2` - so this is a property of the *control*
+#     and not of the arm; a reader who feeds it another image should read the census line and not the
+#     verdict alone.
+#
+# AND THE CLAUSE IS PROVEN ADDITIVE BY THE STRONGEST AVAILABLE MEASUREMENT: THE IMAGE DID NOT CHANGE.
+# The arm was parked, then the clause was written, then the entry image was rebuilt with the same
+# seventeen switches - and **`xnu_arm_entry.bin` came back `57d55fc9…`, `xnu_arm_entry.elf` `5008170d…`,
+# `stage90.bin` `33f38925…`, `stage90-qcdt.img` `9a4a8695…`: byte for byte the arm above**, with the
+# payload build reporting "nothing to install". The one member that moved is the source manifest's
+# `build_entry.sh` line, which is exactly what a build-script check that emits no code must do. So the
+# 696 set is one arm with two source manifests, and the manifest that stands is the one whose
+# `build_entry.sh` line is the LIVE file's - the same rule that refused 688 once for naming a
+# `build_entry.sh` the tree no longer had.
+#
+# THE FIVE SOURCE FILES THIS STEP TOUCHED, and all five are inside `xnu_arm_boot/` because that
+# directory is content-hashed into this very set (673): `entry_storage.c` (the sequence and its eleven
+# new keys), `entry_storage.h` (the rung paragraph), `build_entry.sh` (the rung-2 `case` and the
+# census), `entry_trace.c` (the seam constant, moved from `0x800462dc` to `0x800472dc` by a build
+# refusal that named both numbers) and `entry_stubs.c` (the `TEX[0]` comment 695 left owed). The
+# decoder repair of 695 and the reference document are **outside** that directory and are therefore not
+# in this manifest - which is why the manifest is 23 files and not the whole tree.
+#
+# WHAT THIS SET IS NOT. It is not a press: no readiness chain, no gate, no runner and no `fastboot boot`
+# has been run against it, so its cells are the 696 document's pre-registration and nothing else. It is
+# not a step towards storage being usable: four stores put the controller in SDHCI mode and register no
+# block device, read no sector and mount nothing. And **TWRP-to-storage stays withheld** - the user's
+# condition is that the OS can already be entered, the OS is not observed booting and staying, so the
+# condition is unmet and no write to storage has been made. No firer is armed.

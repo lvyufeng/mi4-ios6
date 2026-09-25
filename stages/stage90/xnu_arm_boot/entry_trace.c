@@ -2658,8 +2658,20 @@ void __wrap_platform_cache_idle_exit(void)
  * back out of the linked image and refuses the build if this constant and that address disagree -
  * 556's lesson, where the same address had three spellings and only the reader was bound to the
  * image. A hand-pinned address here would be 520's defect one layer down: right until the kernel's
- * text moves, and silent about it afterwards. */
-#define STAGE90_XNU_SEAM_LR       0x800462dcu
+ * text moves, and silent about it afterwards.
+ * **It moved once, on 696, and the clause is how it was noticed rather than how it was avoided.** The
+ * arm after the storage probe adds nine hundred-odd bytes of entry-side code, and 696's first entry
+ * build refused with this exact clause: the exit's `bl` came out at `0x800472d8`, returning to
+ * `0x800472dc`, where the constant had carried `0x800462dc`. **The shift is a page, not the size of
+ * the addition**, and the reason is the link order: `LINK_OBJS` puts the entry objects
+ * (`entry_timebase.o`, `entry_gic.o`, `entry_irq.o`, `entry_storage.o`) *before* the kernel's, so
+ * every byte they add moves Apple's text - and when the entry group crosses a page boundary the whole
+ * kernel run moves by `0x1000` at once. 692 to 693 moved the same region by `+0xE0` (that step's own
+ * record), i.e. the group had slack left then and does not now. The value below is the one 696's
+ * build measured, and it is the value this arm's image carries; the *class* - a kernel address pinned
+ * in an entry source - is recorded as owed rather than repaired here, because the repair is a link
+ * order and this step's question is the mode sequence. */
+#define STAGE90_XNU_SEAM_LR       0x800472dcu
 #define STAGE90_SEAM_LIVE_MAX     4u
 
 extern void entry_live_write(const char *key, uint32_t value);
