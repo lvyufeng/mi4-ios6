@@ -1848,3 +1848,108 @@ set=armed-storage-power-7b1f3799 sha256=61b56fc03d55454da005ec16b22091557953558c
 set=armed-storage-power-7b1f3799 sha256=38ca50e0c9da868a24c8de3d8555df6b1d4bc6598a9947be0d6b09c4c2b1fae3 bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest-23-file-lines-28-lines-in-all-and-THREE-of-those-twenty-three-changed-this-step-build_entry-sh-the-rung-7-case-the-rung-7-hc_mem-clause-and-the-three-messages-that-said-a-rung-above-6-does-not-exist-entry_storage-c-the-rung-7-block-its-one-store-and-its-derivation-the-two-stale-read-only-comments-and-the-call-site-guarded-by-g_storage_mode_complete-and-entry_trace-c-whose-SEAM-constant-MOVED-0x800472dc-to-0x800482dc-and-the-four-files-that-did-NOT-move-by-content-include-entry_stubs-c-and-entry_storage-h-and-this-manifest-was-reparked-once-after-the-rebuild-that-proved-the-comment-correction-comment-only
 set=armed-storage-power-7b1f3799 sha256=9cacee09f548d5d839712bf912cf02edd9a6aef9738e15a360209d0b3e3f8c45 bytes=6035456 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies-its-header-id-field-at-576-595-is-sha1-kernel-len-ramdisk-0-second-0-and-it-differs-from-the-rung-6-arms-in-the-same-4698448-bytes-the-qcdt-does-20-of-them-the-header-and-4698428-inside-the-embedded-entry-blob
 set=armed-storage-power-7b1f3799 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-entry-nonetheless-and-BYTE-IDENTICAL-to-the-rung-6-park-so-THE-ONLY-TWO-FILES-THAT-DID-NOT-MOVE-ARE-THE-TWO-THAT-DESCRIBE-NOTHING-ABOUT-THE-ENTRY-IMAGE-the-fixture-and-the-payloads-own-switch-dump
+# ================================================================================================
+# 709: THIS SET WAS PRESSED, AND THE CARD-POWER BYTE TOOK - AND THE CONTROLLER ANSWERED WITH THE
+# POWER IRQ THIS IMAGE CANNOT SERVICE. Read this block before the 708 narration above, whose
+# expected values it fills (all nineteen of them, and one of them is not what the pre-registration
+# could have asked for). The cell-by-cell record is
+# `docs/experiments/experiment-709-the-card-power-byte-pressed-the-store-took-and-the-power-irq-that-ended-the-run.md`.
+# ================================================================================================
+# 709: PRESSED 2026-09-25 22:49:29-22:51:37 UTC. Readiness 5/5 (exit 0 at 22:50:06, run twice in this
+# step and green both times), ONE gate (exit 0, 575 stdout lines at 22:50:34) and EXACTLY ONE runner
+# (EXIT 0 at 22:51:37), both under `--allow-xnu-entry --expect-arm=armed-storage-power-7b1f3799`;
+# the device came back **18 s** after `fastboot boot` - the ninth return-time measurement (8, 17, 24,
+# 27, 24, 27, 25, 28, **18**) and still unattributed. The capture is 606,657 B, sha256
+# c5bdeac77428ebbd9207366b36b8b57efb858383b6517fc12889a73c1e5349c6, archived by hand under
+# `out/stage90/captures/rung7-pwr-20260925-224929-{last_kmsg.txt,gate.log,run.log,press.log}` (out/ is
+# gitignored, and the runner does not archive the capture: 672's rule; it parks the PREVIOUS log at
+# /tmp/cancro-last_kmsg.txt.prev.N and printed that one through the same verdict list, which is how the
+# seam criterion was seen to reject the previous arm's log and accept this one). One non-persistent
+# `fastboot boot`, serial 4a2fe00b, neighbour 33e80afe off both lists (fastboot: [], adb:
+# [4a2fe00b device]). The firer was `/tmp/g668/press-on-clear.v5.sh` (sha
+# 7f23cae5fb4edf21159d6241606f203c4320eed59641d207fb9a641ec6c485e6) run as
+# `press-on-clear.v5.sh armed-storage-power-7b1f3799 600`, the set declared with no default; it ran its
+# own readiness first (`readiness exit=0`, and `the arm survived the wait and is still
+# 'armed-storage-power-7b1f3799'`), and it printed `done. gate=0 runner=0` and exited, so NO FIRER IS
+# ARMED and 660's closure released.
+#
+# WHAT THE PRESS ANSWERED, IN THE SHORT FORM (every number below is a key in the log):
+#  * THE ACT RAN AND COMPLETED: `_pwr_calls=1`, `_pwr_done=1`, `_pwr_refused=0`.
+#  * THE BYTE WAS DERIVED AS ITS INPUTS SAID: `_pwr_cap=0x742dc8b2` (exactly 705's
+#    `_mode_capabilities`, a RE-READING and not a constant), `_pwr_avail=0x80`, `_pwr_vdd=7`,
+#    `_pwr_vdd_ocr=7`, `_pwr_voltage_bits=0x0a`, **`_pwr_wrote=0x0b`** - the pre-registered byte,
+#    `SDHCI_POWER_180 | SDHCI_POWER_ON`.
+#  * **`_pwr_before=0x00` -> `_pwr_after=0x0b`: THE STORE TOOK AND THE READBACK HELD.** This is the
+#    FIRST DEVICE WRITE IN THIS PROJECT WHOSE OWN READBACK CARRIES THE VALUE WRITTEN. The cell it is
+#    measured against is 706's - rung 6 wrote 0x200 to CORE_VENDOR_SPEC 0x10C and read back 0 - and
+#    that failure is why this cell was pre-registered as the one to read.
+#  * **THE CONTROLLER ANSWERED, AND WITH A REQUEST**: `_pwr_status_before=0` ->
+#    `_pwr_status_after=0x00000002` = BIT(1) = `CORE_PWRCTL_BUS_ON`, with `_pwr_mask=0x0000000f`
+#    (all four power events armed) and `_pwr_ctl=0x00000000`. Nothing cleared it: the two reads are
+#    the same register either side of the one store, so this is the store's own consequence.
+#  * THE ROUTE CELL READ AS PRE-REGISTERED: **`_pwr_cc_before=0x0000e045`** - rung 6's card-enable
+#    word still standing, because this probe runs AFTER the clock set in the same boot, where the
+#    driver's own pass A would see 0x0000 - and `_pwr_cc_after=0x0000e045` unchanged, so powering did
+#    not disturb the clock register. NO CARD: `_pwr_ps_before=_pwr_ps_after=0x01f80000`, whose
+#    CARD_PRESENT bit is clear.
+#  * **AND THE PRESS ANSWERED A QUESTION THE PRE-REGISTRATION DID NOT ASK: THE POWER IRQ ARRIVED.**
+#    The log carries four keys rung 6's does not - `xnu_live_irq_other_count=0x1`,
+#    **`xnu_live_irq_other_iar=0xaa`**, `xnu_live_irq_other_cli=0x8055412c`, and
+#    `xnu_live_irq_timer_count_final=0x5` - and they are published by ONE path, the arm the handler
+#    takes for a line this image handed out to nobody (entry_irq.c:546-557): EOI it, count it, record
+#    the intid, and stop the run through `entry_epilogue("exception: irq line")`. **`0xaa` = 170 =
+#    SPI 138 + 32, and SPI 138 is this controller's `pwr_irq`**: `msm8974.dtsi:502`'s node
+#    `sdhc_1: sdhci@f9824900` - the base this arm writes through - declares
+#    `interrupts = <0 123 0>, <0 138 0>` with `interrupt-names = "hc_irq", "pwr_irq"`. So the three
+#    readings are one event in the order they happened: the byte was written, the controller asked for
+#    the bus, and the request arrived as an interrupt on the line the vendor's
+#    `sdhci_msm_check_power_status` waits on. **The previous arm is the CONTROL**: rung 6 ran sixteen
+#    idle windows and past a 6,000 ms deadline and took no unexpected interrupt at all (its log has no
+#    `_irq_other_*` key), and the two arms differ in the rung-7 block and in nothing but a uniform
+#    +0x1000 address move. **This is 708 section 1.3 measured from the other end: not only is the
+#    wait's completion undeliverable, the request the handler would answer arrived and ended the run.**
+#  * THE ENDING'S CELLS ARE UNREAD ON THIS BOOT, and the reason is the IRQ: `_post_end_calls` is
+#    ABSENT, `_post_elapsed=0x00000000` (0.0 ms at the hardware's own `_post_cntfrq=0x0124f800` =
+#    19200000 Hz), `_slot_post_calls=1`, `_seam_calls=1`, and **no panic at all**
+#    (`xnu_entry_panic_entered=0`, `panic_len=0x24`, against rung 6's `1` / `0x13fa` and its
+#    `fault_addr=0xfa0065c`), with `_sleh_storm` absent. The trace published its zeroth sample and no
+#    more: **the machine stopped inside the first idle pass, before the armed deadline**
+#    (`_seam_post_end_ticks=0x06ddd000` = 115,200,000 ticks = 6000 ms). The 690 ending is a clock that
+#    never ran out and its first store's fault was not reached again.
+#  * THE SEAM IS LIVE, AND ITS CRITERION RE-EXAMINED THE PREVIOUS ARM: `xnu_live_seam_lr=0x800482dc`
+#    is this arm's own log line, and the runner's list - whose `lr criterion` is derived at run time
+#    from the arm in out/ - printed **PASS for this log and FAIL for the previous press's log**
+#    (`seam_lr=0x800472dc is not the exit's own call's return address`). So the re-pinned constant and
+#    the image agree, measured on two logs rather than argued from one. The rest of the runner's list
+#    is the shape 697+ print: PASS no panic, PASS `slot_cwe_win` C=0, PASS `slot_post_calls=1`, PASS
+#    `seam_sctlr` C=0, FAIL `seam_sp=0x80553ec8 is not sleh_sp-8` (the `SLOT_NULL=1` fingerprint), the
+#    paired UNREADs, PASS `b1=0x8047eb04`, CLEAN LINE, and the floor (pid 1, the driver's `open`
+#    answering 0 while the control open answers ENOENT, the fixture's 0xfeedface read into a user page,
+#    two AST records). Eight abort records (`_slot_ab_calls` 1..8) and no storm.
+#
+# AND THE GOAL IS NOT MET. `POWER_CONTROL` carries a real 1.8 V byte and reports it, the controller has
+# asked for the bus, and the clock is enabled at the controller - and there is still no command, no
+# sector, no partition table, no mount, and no driver beyond the fixture; the card has never been
+# addressed, and what a card does with a powered bus is unobserved because nothing on this bus has ever
+# been read back from a card. **TWRP-to-storage stays withheld: the OS is not observed entering and
+# STAYING** - and this press makes that condition more clearly unmet rather than less, because the boot
+# now stops on an interrupt the storage controller itself raises.
+#
+# THE NEXT RUNG'S SUBJECT IS THE POWER IRQ, AND IT IS A DECISION: either mask the power events before
+# the store (`CORE_PWRCTL_MASK <- 0`, which is a write to the controller and therefore its own arm) or
+# hand intid 170 to a client that clears the latch (`CORE_PWRCTL_CLEAR 0xE4`, sdhci-msm.c:64) and
+# completes what `check_power_status` would have completed - the second is what the driver does and what
+# the ladder owes the storage driver.
+#
+# STILL OWED, AND CARRIED UNCHANGED OTHERWISE: the status latch (`_pwr_status_after=0x02`) has no clear
+# in this image; the store's effect on the CARD is unobserved; `CORE_VENDOR_SPEC 0x10C`'s MCLK select
+# did not take under a store; the RCG write (the speed-change rung); the root-versus-branch disagreement
+# (a DECISION); the width clause of the store census still never observed to fire on a WIDENED DEVICE
+# store; what actually returns a run; the ending's first store faulting (rung 6's measurement, UNREAD
+# here); the 691 section 5 `entry_note_wfi` readback; `entry_reset.h`'s false IMEM claim; 676 section 6
+# / 677 section 6; the 684-owed runner clause for the 678 arm; `tools/xnu_dt_requirements.py` and the
+# "master" value; the two peer-lane tripwire repairs; BIT(29) of `_clk_ahb_cbcr` published and unnamed;
+# the seam address pinned in two files (this arm moved it, re-pinned BOTH, and the build now refuses a
+# link where they disagree with the image); and **the gate's narration of `STAGE90_XNU_STORAGE_PROBE` is
+# now SEVEN RUNGS SHORT (2, 3, 4, 5, 6 and 7 are not described in it) - peer lane, by message and never
+# by edit.**
