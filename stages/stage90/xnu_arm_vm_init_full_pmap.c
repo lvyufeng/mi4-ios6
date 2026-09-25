@@ -412,15 +412,15 @@ int stage90_xnu_arm_vm_init_full_pmap_run(
     map_l1_section_dram(stage90_candidate_l1, 0xde500000u, RAM_CONSOLE_BASE);    /* RAM console */
     map_l1_section_dram(stage90_candidate_l1, 0xde600000u, RAM_CONSOLE_BASE + L1_SECTION_SIZE);  /* +1MB */
     map_l1_section_mmio(stage90_candidate_l1, 0xf9000000u, 0xf9000000u);         /* GIC */
-    /* **NOT the IMEM, and this comment said it was until 681.** `MSM_IMEM_BASE_PHYS` is
-     * `0x0fa00000` (`stage90.h:17`) and the reset-reason word `RESTART_REASON` is that base plus
-     * `0x65c` (`stage90.h:18`) - a **low** physical address - while this line maps `0xfa000000`,
-     * which is a different megabyte entirely. Two addresses, one of them written down with the name
-     * of the other, is this project's most expensive defect class; what makes it worth repairing here
-     * is that the name was on the line that does ***not*** carry the word the reset path writes. What
-     * this section is actually for is not established by this step: the entry image's own GIC probe
-     * maps `0xf9000000` live, and this VA has no reader in either image. The real IMEM mapping is at
-     * the Phase 5 line below, and it now says so. */
+    /* **NOT the IMEM, and this comment said it was until 681.** This line maps `0xfa000000`; the
+     * project's `MSM_IMEM_BASE_PHYS` is `0x0fa00000` (`stage90.h:17`), a different megabyte, and the
+     * reset-reason offset `0x65c` is relative to that one (`stage90.h:18`). Two addresses, one of them
+     * written down with the name of the other, is this project's most expensive defect class. What this
+     * section is actually for is not established by this step: the entry image's own GIC probe maps
+     * `0xf9000000` live, and this VA has no reader in either image. **681 said the Phase 5 line below
+     * "is the IMEM" and that this line was the mislabelled one; 682 measured that BOTH were wrong** -
+     * `0x0fa00000` is the SoC's *shared RAM*, not the IMEM, and the IMEM is not mapped here at all.
+     * See the Phase 5 line's own comment. */
     map_l1_section_mmio(stage90_candidate_l1, 0xfa000000u, 0xfa000000u);
     map_l1_section_mmio(stage90_candidate_l1, 0xfc400000u, 0xfc400000u);         /* PS_HOLD */
 
@@ -459,17 +459,19 @@ int stage90_xnu_arm_vm_init_full_pmap_run(
     /* RAM-console alias at its own VA, so it cannot shadow the image alias above. */
     map_l1_section_dram(stage90_candidate_l1, STAGE90_RAM_CONSOLE_ALIAS_BASE, RAM_CONSOLE_BASE);
     map_l1_section_mmio(stage90_candidate_l1, STAGE90_GIC_ALIAS_BASE, 0xf9000000u);
-    /* **The IMEM, and this is the line the reset path depends on.** `MSM_IMEM_BASE_PHYS` is
-     * `0x0fa00000` (`stage90.h:17`) and `RESTART_REASON` is that base plus `0x65c` (`stage90.h:18`)
-     * - the word `platform_reboot` and the entry image's `entry_epilogue` both write to end a run,
-     * and the word Android's `bootinfo.c` reads back as `powerup_reason`'s detail. It is **unconditional**
-     * (no branch guards this line) and it lands in `stage90_candidate_l1`, the table
-     * `xnu_handoff.c:318` installs into TTBR0 - so the byte is reachable from anything running on the
-     * handed-off tables, including the entry image's seam, with no install of its own. 681 verified
-     * that against the source and against the same fact's two other statements: `mmu.c:5156` maps the
-     * same base into the TTBR0 round-trip table, and `entry_reset.h:33` spells the same word as the
-     * literal `0x0fa0065c` (the entry image cannot include this header, so that pair of definitions
-     * is structural - and it is written down on both sides rather than left to be rediscovered). */
+    /* **This is the SHARED RAM, not the IMEM - measured, and 681's comment here said the opposite.**
+     * `0x0fa00000` is `MSM8974_MSM_SHARED_RAM_PHYS`
+     * (`arch/arm/mach-msm/include/mach/msm_iomap-8974.h:26`), consumed as `msm_shared_ram_phys`
+     * (`io.c:317`) and mapped by that kernel at the fixed virtual `MSM_SHARED_RAM_BASE`
+     * (`msm_iomap.h:92`), size `SZ_2M` (`:122`) - i.e. SMEM. The phone's own device tree says the same
+     * thing twice over: `soc/qcom,smem@fa00000/reg` is `0x0FA00000` for `0x200000`, and its first client
+     * `soc/qcom,ipc-spinlock@fa00000/reg` is the same base and size. **The IMEM is elsewhere**:
+     * `soc/qcom,msm-imem@fe805000/reg` is `0xFE805000` for `0x1000`, and Android's own restart-reason
+     * word is `MSM_IMEM_BASE + 0x65C` (`arch/arm/mach-msm/restart.c:48,371`) with `MSM_IMEM_BASE` the
+     * virtual `0xFA00A000` (`msm_iomap.h:72`) that `board-dt.c:82` maps onto that DT page - so
+     * `0xFE80565C`. **So `RESTART_REASON` (SMEM + `0x65c`) is not Android's word, and the reset path
+     * does not depend on this line.** 682 has the measurement and the consequence; the value is NOT
+     * changed here, because changing it is a payload *build* and the arm in `out/` is owed a press. */
     map_l1_section_mmio(stage90_candidate_l1, 0x0fa00000u, 0x0fa00000u);
 
     /* Phase 6: Self-mapping (L1 and L2 pool) */

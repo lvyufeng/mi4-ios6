@@ -13,6 +13,14 @@
 #define RAM_CONSOLE_BASE     0xde500000u
 #define RAM_CONSOLE_SIZE     0x00200000u
 #define RAM_CONSOLE_SIG      0x43474244u /* 'DBGC' */
+/* **The two names below are wrong and the values are deliberately unchanged (682).** `0x0fa00000` is
+ * the SoC's *shared RAM*: `msm_iomap-8974.h:26` names it `MSM8974_MSM_SHARED_RAM_PHYS`, `io.c:317`
+ * consumes it as `msm_shared_ram_phys`, and the phone's own device tree declares it as
+ * `soc/qcom,smem@fa00000` for `0x200000` - so `RESTART_REASON` here is **SMEM + 0x65c**, and it is not
+ * the word Android's own kernel writes. That word is `MSM_IMEM_BASE + 0x65C` with the IMEM page at
+ * `soc/qcom,msm-imem@fe805000` (`0xFE805000`, `0x1000`), i.e. `0xFE80565C`
+ * (`arch/arm/mach-msm/restart.c:48,371`). The value is left alone because changing it moves the
+ * payload's bytes, and the arm in `out/` is owed a press; the decision is 682's, for the next build. */
 #define MSM8974_PSHOLD       0xfc4ab000u
 #define MSM_IMEM_BASE_PHYS   0x0fa00000u
 #define RESTART_REASON       (MSM_IMEM_BASE_PHYS + 0x65cu)
