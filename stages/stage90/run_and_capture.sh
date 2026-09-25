@@ -271,7 +271,25 @@ unset _self _bad
 # On any failure the callers fall back to `EXIT_POP_LR_LITERAL` **and print that they did**, so a
 # re-read from a tree whose `out/` has been cleaned still answers - labelled, rather than silently
 # unread, which is the direction this project keeps paying for.
-EXIT_POP_LR_LITERAL=0x800462dc
+#
+# **And this literal is a SECOND DEFINITION of a value the entry image also pins, which is why it has
+# to move with an arm that moves the exit's text (696).** `entry_trace.c` carries the same address as
+# `STAGE90_XNU_SEAM_LR` - the constant the seam compares its own entry `lr` against - and
+# `preflight_boot_check.sh:2579` compares THIS literal against the live ELF, refusing when they
+# disagree ([[mi4-one-value-two-definitions]]). 696's arm grew the entry image past an alignment point,
+# so the exit's `bl FlushPoU_Dcache` sits at `0x800472d8` and returns to **`0x800472dc`**, where every
+# arm from 678 to 694 read `0x800462dc` - the two copies were moved by two different mechanisms in the
+# same step (`entry_trace.c`'s by the entry build's own clause, naming both numbers; this one by
+# **readiness row 3**, which runs the gate before a press and refused it).
+# **The measurement that decided the direction is the disassembly, not the record**: the gate cannot
+# tell which of the two is stale, and it says so, but `platform_cache_idle_exit`'s body in
+# `out/stage90/xnu_arm_entry.elf` carries the `bl` at `0x800472d8`, so the literal is the one owed the
+# change - and nothing was sent while it was wrong. The structural repair is owed: this literal exists
+# only for the case where the same ELF cannot be read at run time, while the gate's equality clause
+# makes it move with every arm, and a fallback that must be edited per arm is a pin wearing the name
+# of a fallback. Named here rather than done in this step, because removing it needs the gate's clause
+# to accept a labelled absence (the peer lane's file) and that is a step, not a one-line edit.
+EXIT_POP_LR_LITERAL=0x800472dc
 exit_pop_lr_addr() {
   local elf=${1:-$OUT/xnu_arm_entry.elf} od=${OBJDUMP:-arm-none-eabi-objdump}
   local start size body ret

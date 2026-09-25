@@ -280,6 +280,20 @@ naming a `build_entry.sh` the tree no longer had.
   the bus. The arm is parked and recorded (`armed-storage-mode-57d55fc9`, 11 files, verified in `out/`,
   in the in-tree park and in the export park), so the press is the next step's act and nothing else's.
   **The whole of §5 is unread until then**: every cell in it is a pre-registration.
+* **A second copy of the seam's address, and readiness caught it with nothing sent** (§7). The entry
+  side's `STAGE90_XNU_SEAM_LR` was not the only pin: `run_and_capture.sh`'s `EXIT_POP_LR_LITERAL` (the
+  fallback the reader uses when the ELF cannot be read) carried `0x800462dc` - the value every arm from
+  678 to 694 had - while this arm's `platform_cache_idle_exit` returns from its `bl FlushPoU_Dcache` to
+  **`0x800472dc`**. `preflight_boot_check.sh:2579` compares that literal against the live ELF and
+  refuses the disagreement, and **readiness row 3 ran the gate before any press**: `FAIL the gate accepts
+  this tree`, readiness exit 1, **the press unspent** - the mechanism working, on an arm whose whole
+  point is that a spent press cannot be re-taken. The direction was decided by the disassembly and not
+  by the record the gate names both halves of ("the runner's literal is the one owed a change"), and the
+  change is in the runner beside a comment recording the class. **The structural repair is owed**: a
+  fallback that must be edited per arm is a pin wearing the name of a fallback, and removing it needs
+  the gate's clause to accept a labelled absence - the peer lane's file, so a step and not an edit here.
+  Readiness's own row-4 narration also gained the rung-2 branch, so the press log now names the arm that
+  writes rather than describing a read-only one.
 * **What the census does not cover, and why that exclusion is a reading and not a convenience** (§7.2):
   the clause skips stores whose base register is literally `sp`, so "every store this body can make to a
   device register" is only a claim about the *included* class if nothing ever points `sp` at a device.
