@@ -812,3 +812,92 @@ set=armed-storage-gcc-1fc30bfe sha256=d4205a79a7c5242dda79cf5cfb6144524c0ac652b3
 set=armed-storage-gcc-1fc30bfe sha256=0979eb910eedf7b683bc5542066603638f95acb2e58d4be889780b7a34d35713 bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest-23-file-lines-28-lines-in-all-same-count-as-the-692-parks-and-of-its-nineteen-then-files-ONE-changed-content-this-step-entry_storage-c-and-one-more-entry_storage-h-which-is-a-header-comment-only-edit-both-compared-against-the-LIVE-files-because-688-was-refused-once-for-naming-a-build_entry-sh-the-tree-no-longer-had
 set=armed-storage-gcc-1fc30bfe sha256=68d240eeb050c8708fc9e539e55a5f4d51c4282d9716f1811cbb3a1e8404fce7 bytes=6019072 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies-its-header-id-field-at-576-595-is-sha1-kernel-len-ramdisk-0-second-0-and-it-differs-from-the-692-arms-because-the-payload-differs-which-is-what-an-image-digest-is-for
 set=armed-storage-gcc-1fc30bfe sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-member-all-the-same
+#
+# ================================================================================================
+# 694: THIS SET WAS PRESSED, AND IT ANSWERED. Read this block before the 693 one above, whose
+# pre-registration is what these sentences confirm or refute - and note that **nothing in the set
+# changed**: the arm that was sent is the arm recorded above, byte for byte, so the role line that
+# calls `stage90-qcdt.img` "the arm the next press sends" is still true of it.
+# ================================================================================================
+#
+# THE PRESS: 2026-09-25, readiness exit 0 (5/5, adb listing `4a2fe00b` as `device` and the neighbour
+# `33e80afe` off both lists), `preflight_boot_check.sh --allow-xnu-entry` **exit 0 / 569 lines**,
+# exactly one `run_and_capture.sh --allow-xnu-entry --expect-arm=armed-storage-gcc-1fc30bfe`, and
+# **RUNNER EXIT=0** - returned and captured, "the device came back 24s after this run called
+# `fastboot boot` (seen via: host log, serial)". Capture 611,558 B, sha256
+# `d5c42bf9ea86d3b8d72084676f372adcb8607384e4ab8c841c5a69d6dfb9ab91`, archived by hand under
+# `out/stage90/captures/694-storage-gcc-pressed-2026-09-25-{last_kmsg.txt,run.log,gate.log}` (out/ is
+# gitignored, so the capture is not in this record and cannot be). Nothing was flashed, nothing was
+# written to any storage controller, and no device state changed but the boot.
+#
+# THE ANSWER, AND EVERY CELL THE 693 BLOCK PRE-REGISTERED. All twenty-eight keys are in the log, in
+# the source's own order, with no abort at any of the probe's loads:
+#   * `_gcc_map=1`, `_gcc_slot_before=0`, `_gcc_desc=0xfc41040e` - the GATE's megabyte had an **empty**
+#     level-1 slot, so 692's premise was false at the descriptor level and not only at the fault.
+#   * `_map=1`, `_slot_before=0`, `_desc=0xf981040e`, `_l1=0x80704000`, `_l1_moved=1`, `_ttbr0`/`_ttbr1`
+#     both `0x8070404a` - the controller's megabyte was empty too, and the table the mapper read is NOT
+#     the one the console latched (`xnu_live_l1=0x80700000`, `xnu_live_ttbr0=0x8070004a`): 484's finding,
+#     reproduced on a returning run.
+#   * `_gate_read=1`, `_bcr=0x00000000`, `_cbcr=0x00004ff1`, `_gate=0x00000001` - **the reading 692 could
+#     not take.** The GCC block answers and the branch is ENABLED, and `0x4C0`/`0x4C4` as a BCR/CBCR pair
+#     is confirmed on hardware rather than inherited from `clock-8974.c` plus the UART pair's own `+4`.
+#   * `_gated_out=0`, `_loads=6`, `_writes=0` - the six loads ran and **nothing was written to the
+#     block**. `_core_power=0x441` (`CORE_SW_RST` clear), `_mci_data_ctrl=0x8000`,
+#     `_mci_version=0x10000011` (not 0, not 0xffffffff: the "did not answer" cell is falsified),
+#     `_hc_mode=0x2000`, `_hci_version=0x00000010`, `_capabilities=0x742dc8b2`.
+#   * `_sw_rst=0` and **`_mode_bit=0`** - the two bits 531 section 6 left open. `HC_MODE_EN` is CLEAR, so
+#     the vendor's mode sequence is a **PREREQUISITE**: `CORE_HC_MODE <- 0`, then `CORE_SW_RST`, then
+#     `HC_MODE_EN` are all still ahead of this boot, and `POWER_CONTROL 0x29` is still the register the
+#     driver itself avoids (531 section 8: writing 0 to it IS a bus-off request).
+#   * `hci_version` and `capabilities` were taken through a block that is **not yet in SDHCI mode**, which
+#     is exactly the caveat 531 section 6 raised. They are pre-mode words of that window; the arm claims
+#     only that the window answers with non-zero, non-saturated values.
+#
+# THE ATTRIBUTE, AND A TOOL THAT CANNOT SEE TRE. Both descriptors carry `0x…1040e`, and on this machine
+# `SCTLR.TRE` is set (`xnu_live_sctlr=0x30c5787d`), so the C/B bits are a `PRRR` index: the log's own
+# `xnu_live_prrr=0x1f08022a` has its first zero two-bit field at **index 3**, and the mapper's recipe
+# encodes that index as `B=1, C=1, TEX[2]=0` - the `0x040e` observed. The channel publishes the attribute
+# word itself as **`xnu_live_attr=0xc`**, which is `(1<<3)|(1<<2)`, and `PRRR` field 0 is the
+# Strongly-ordered encoding. **So both sections are Strongly-ordered shareable device mappings**, which is
+# what makes the 693 block's PS_HOLD sentence true with device semantics rather than only as an address.
+# **And `tools/decode_armv7_descriptor.py` prints `Reserved` for this combination**: it decodes TEX/C/B as a
+# memory type with no `SCTLR.TRE` input, so it is right for the kernel's DRAM mappings (whose index 3 means
+# "use TEX/C/B") and wrong as a rule for this project's own MMIO mapper. That is a defect in the tool and
+# not in the mapping; it is owed a `--tre`/`--prrr` input.
+#
+# THE ENDING FIRED AND DID NOT END THE RUN - and this is the one sentence in the 663/678/686/690 line that
+# this press corrects. `xnu_live_post_end_calls=0x00000007` is PRESENT, so the ending FIRED on the seventh
+# return, with `xnu_live_post_elapsed=0x06e109da` = **115,411,418 ticks against the armed 115,200,000** -
+# 211,418 ticks (11.011 ms) past the deadline, 6,011.0 ms of live kernel - and
+# `xnu_live_post_cntfrq=0x0124f800` = **19,200,000 Hz**, which is the machine's own statement of the tick
+# rate and confirms the device tree's 19200 ticks/ms exactly. Then the ending's own first store faulted:
+# the ninth abort is `pc=0x8047b488` = `entry_seam_end_run+0xc` (`str r3,[r2,#0x65c]`),
+# `lr=0x8047b5bc` = **exactly the value 690's record pre-registered for this arm**, `far_frame=0x0fa0065c`
+# = RESTART_REASON, still in a megabyte no arm has mapped, recovered rather than fatal (`frame_ok=1`, no
+# `panic ... sleh_abort`). **And the boot went on**: the log carries exactly 4,837 `xnu_live_` lines and
+# the channel reports exactly 4,837 records of 8,192, so every record is here once in write order, and
+# three counters continue past the abort - `xnu_live_cls_calls` 0x3d -> **0x3e**, `xnu_live_walk_seq`
+# 0x07 -> **0x08**, and a new `xnu_live_path_ret` (0xc05f17b8 against 0xc05f0e18 before). So
+# **"this arm ends the run on purpose" means the ending was REACHED and not that it took effect**;
+# 678/686/690's sentence needs that qualifier, and the reset that returned the device at 24 s is
+# **unattributed** - the third in a row (8 s on 690, 17 s on 692, 24 s here) - with the armed hardware
+# watchdog (`hw_watchdog_enabled=1`, counter running, countdown plausible, readback ok) and the payload's
+# dead-man as the two candidates that leave no line.
+#
+# AND THE CONTROL TABLE IS CONFIRMED BY AN ARM THAT MOVED. Episodes 1-8 carry byte-identical `lr`s to
+# 692's capture (`0x8029231c`, `0x80293cd0`, `0x800454a0`, `0x8029368c`, `0`, `0`, `0`, `0x80296114`), the
+# three user-address episodes (`0x1118`, `0x1124`, `0x11a4`) have not moved at all, and the `pc`s inside
+# the entry image have moved `+0xE0` (the `0x8001_7…` pair) and `+0xDC` (the `0x8000_d…` pair) - the entry
+# image growing, which is the shift a rebuild should produce and the reason a fault site is identified by
+# `pc` minus the image base and not by `pc`. Episode 9 is each arm's own: 692's died in the probe and this
+# one in the ending.
+#
+# WHAT IS STILL OWED, and none of it is in this set. (1) **What actually returns a run** is now three
+# measurements (8 s / 17 s / 24 s) and no answer. (2) **The mode sequence is a WRITE and is the next arm**:
+# with `_mode_bit=0` it is a prerequisite, so an arm that performs `CORE_HC_MODE <- 0`, `CORE_SW_RST`, the
+# poll and `HC_MODE_EN` must be pre-registered as a write before it is built, must not touch
+# `POWER_CONTROL 0x29`, and must name its polling bound and its failure path. (3) The gate's storage
+# tripwire still prints `none` about payloads that carry `0xf982` and `0xfc40` (692 section 4; the peer
+# lane's file, reported by message and not edited here). (4) The descriptor decoder's missing `SCTLR.TRE`
+# input. **TWRP-to-storage stays withheld**: the OS is not observed booting, so the user's condition is
+# unmet and no write has been made.
