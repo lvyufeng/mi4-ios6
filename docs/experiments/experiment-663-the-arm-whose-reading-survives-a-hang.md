@@ -134,10 +134,22 @@ console), then the bite (`:314-315`'s idiom).
    is what a device register needs). That is the same install that works today.
 2. **PS_HOLD store (fallback).** `entry_mmio_section(0xfc400000, 0xfc400000, …)` then store 0 to
    `0xfc4ab000` — the address the payload writes at `stage90_main.c:1068` (`MSM8974_PSHOLD`, `stage90.h:16`),
-   and the path whose comment says *"The warm reboot preserves the RAM-console"*. It costs one more section
-   install and relies on one net instead of two. It is the right choice **if** the bite's section turns out
+   and the path whose comment says *"The warm reboot preserves the RAM-console"*. It relies on one net
+   instead of two. It is the right choice **if** the bite's section turns out
    not to be writable from the entry side for a reason not visible in the addresses — which this step has
    measured and found no reason to expect.
+
+   **CORRECTED IN PLACE BY 674: the install call is not needed at all, here or for the bite.**
+   `xnu_arm_vm_init_full_pmap.c:410-416` already maps **both** registers into `stage90_candidate_l1` — the
+   L1 the handed-off kernel runs under — as Phase-4 device sections: `0xf9000000` (the GIC megabyte, which
+   contains the bite at `0xf9017014`) and `0xfc400000` (PS_HOLD, `0xfc4ab000`). The seam runs in that
+   context, and PS_HOLD's writability there is measured rather than inferred: `entry_epilogue`
+   (`entry_stubs.c:4229`) stores 0 to it from the entry image's own code through this same section, and
+   every returning run proves that store lands. So step 4's only new bytes are the bite's address literal
+   and the two stores, and 674 also adds a requirement this step lacks: the block must end in
+   `platform_reboot`'s own `for (;;) wfe` after the stores, or "do not return to the exit" (step 5) is
+   intent rather than control flow — a first store that fails would fall back into `cpu_idle` and reach
+   the `pop`. 674 has the measurements and the re-scoped reading of the owed press.
 
 Whichever is used, the arm must record **which** it used in its config, for the reason 574's record gives: a
 switch that decided the build and is not in the record is a switch the next reader cannot see.
