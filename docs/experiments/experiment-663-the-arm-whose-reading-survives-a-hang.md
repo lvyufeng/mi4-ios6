@@ -111,11 +111,16 @@ does not depend on the PMIC. (The entry side still has to *carry the address*, w
 entry image — a build, which this arm is anyway, and the reason this is a new pre-registration and not an edit
 to the acting arm.)
 
-**And the literal is new on both paths, measured rather than assumed:** the entry image contains **no**
-occurrence of `f9017` and **none** of `fc4ab000` (`arm-none-eabi-objdump -d … | grep -c` → 0 each), which is
-the same absence the gate's note reports as *"pool 0 / movt 0 / mov 0"*. So neither primitive is cheaper on the
-literal axis; **the bite's only advantage is the section it lands in**, and that is the whole of §3's first
-bullet.
+**And the literal's status is not what this step first said — corrected by 664, in place, because the claim
+was published here.** The entry image carries **no** occurrence of `f9017`, in any of the four encodings an
+instruction can put an address in (flat text, `movw`/`movt` halves, an offset immediate from the GIC's base,
+and literal-pool words) — so the bite's literal *is* new. But **`fc4ab000` is not absent**: it is built as
+`movw r3,#0xbfff` + `movt r3,#0xfc4a` + `str r2,[r3,#-4095]` at `8000578c-80005798`, inside **`entry_epilogue`**
+— the entry image's own `noreturn` run-ending reset, which writes `RESTART_REASON ← 0x78665501` and then
+`PSHOLD ← 0` and halts. **So the PS_HOLD half of §3's step 4 already exists and is exercised on every
+returning run**, and the rehearsal of §3.1 is a rehearsal of the *bite* alone. 664 has the measurements; the
+flat grep that produced the false absence could not see a `movw`/`movt` pair, and the tree's own
+`tools/check_storage_refs.py:24` names that exact `movt`.
 
 **Two mechanisms, then — and the honest design is to force BOTH, in `platform_reboot`'s own order.** Its
 comment is not a preference: PS_HOLD *and* the bite are kept together precisely because either one alone
@@ -173,6 +178,12 @@ Three properties make this the right first spend rather than an indulgence:
 * Its **failure direction is informative**, which is rare in this project: both outcomes buy a fact.
 * It is the same discipline 661 applied to R1–R3 and m668 to the mutant copy — **rehearse the scaffolding
   before trusting the thing built on it.** Here the scaffolding is the reset.
+
+**And 664 narrows it to one of the two branches: rehearse the bite alone.** The PS_HOLD half of step 4 is not
+scaffolding to be trusted — it is `entry_epilogue`'s own run-ending store, exercised on every run that has ever
+returned a log, whereas the bite has never been observed to fire against five non-returns. "Force both" is
+still right for the *design* in §2 (either net may be the one that fails); the *rehearsal* should force the
+unproven one.
 
 And it is cheap to make: 663 §2's step 4 verbatim, with steps 1–3 replaced by nothing. It must be recorded in
 `revert-set.txt` before its press like any other arm (R2 enforces it), and its own config must say which
