@@ -1247,3 +1247,195 @@ set=armed-storage-census-4d66f871 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27
 # condition is that the OS can already be entered and STAYS, and the OS is not observed doing that.
 #
 # ================================================================================================
+set=armed-storage-reset-00b28262 sha256=720658f09fb0e1bcd7ea1852f4e5d745aa517210667a5200f463ef495fff6bd0 bytes=8556544 file=stage90-qcdt.img role=qcdt-wrapped-payload-this-is-what-fastboot-boot-sends-and-the-arm-the-next-press-sends-STAGE90_XNU_ENTRY-1-this-payload-wraps-the-STORAGE_PROBE-4-entry-image-i-e-the-DRIVERS-OWN-RESET-arm-it-differs-from-the-698-parks-qcdt-in-600978-bytes-600958-of-which-are-the-payloads-own-every-one-of-them-inside-the-embedded-entry-blob-window-494236-6030616-and-the-other-20-are-the-headers-sha1-field-at-576-595-so-NO-byte-outside-those-two-regions-moved-and-the-20-are-the-sha1-the-gate-verifies
+set=armed-storage-reset-00b28262 sha256=a51339812348bd8a406b1eb73818ca14edb4c082a18244cd2d1835233dd49aea bytes=6031876 file=stage90.bin role=raw-payload-bin-SAME-SIZE-as-the-696-697-and-698-arms-6031876-and-600958-bytes-differ-from-the-698-arms-ALL-inside-the-embedded-entry-blob-window-494236-6030616-first-495192-last-5997985-the-new-entry-bins-own-5536380-bytes-then-1260-of-tail-present-verbatim-and-exactly-once-at-494236-which-is-what-makes-the-payloads-own-code-NOT-MERELY-SIMILAR-to-the-698-arms-but-byte-identical-outside-that-window-and-the-payload-elfs-text-is-6030666-bytes-in-both-so-the-rung-4-entry-image-grew-and-NOTHING-IN-THE-PAYLOADS-OWN-CODE-MOVED
+set=armed-storage-reset-00b28262 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-696-693-692-690-688-686-678-and-653-arms-INCLUDING-its-STAGE90_XNU_ENTRY-1-line-so-THIS-FILE-CANNOT-NAME-THIS-ARM-the-entry-switches-are-not-in-the-payloads-dump-and-the-set-is-identified-by-xnu_arm_entry-config.txt-instead
+set=armed-storage-reset-00b28262 sha256=23f476ed3e291aca155b4835319d7e83271d646d19f3ed6627832d7338d3cf3a bytes=6093948 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-its-text-is-6030666-bytes-the-SAME-as-the-698-arms-and-the-three-entry-bss-size-immediates-at-VA-4ac40-4ad04-4ad18-are-byte-identical-to-the-698-arms-because-the-entry-images-bss-size-did-not-change-379720-in-both
+set=armed-storage-reset-00b28262 sha256=df71d1c9203f39549172aa404590830a3c03c2a913ead1e6eaf23edefa1386f0 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above-its-five-members-are-the-other-five-of-this-set-FOUR-of-those-five-differ-from-the-698-arms-manifest-the-fifth-the-fixture-is-byte-identical-so-the-manifest-differs-because-the-artifacts-do-and-THIS-LINE-IS-A-CORRECTION-HERE-IS-WHY-the-first-draft-of-it-ended-with-the-prose-affixed-to-this-field-so-the-member-list-read-as-five-names-plus-a-sentence-and-verify_revert_set-sh-refused-the-whole-set-with-"the-record's-line-1254-has-a-field-this-script-does-not-know:-and"-which-is-the-tool-working-as-designed-a-field-boundary-is-a-reading-and-a-sentence-after-the-last-field-is-silently-part-of-it manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-reset-00b28262 sha256=00b2826201e15aa56023574fdea5a4b4e385a317b34d7329e3f06d16b69dfc1a bytes=5536380 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ONE-BINARY-THIS-STEP-CHANGED-and-it-is-the-698-entry-4d66f871-PLUS-the-drivers-own-sdhci_reset-SDHCI_RESET_ALL-at-the-tail-of-entry_storage_probe-under-STAGE90_XNU_STORAGE_PROBE-4-ONE-byte-store-of-0x01-to-SOFTWARE_RESET-0x2F-47-decimal-in-hc_mem-which-is-THE-FIRST-STORE-THIS-PROJECT-HAS-EVER-MADE-THROUGH-THAT-WINDOW-plus-a-bounded-poll-of-that-same-byte-and-five-read-after-values-it-is-the-SAME-SIZE-as-the-698-bin-5536380-because-that-size-is-padded-the-entry-elfs-own-text-grew-by-576-bytes-5309568-vs-5308992-and-the-600958-differing-bytes-are-that-576-byte-insertion-shifting-everything-after-it-plus-every-absolute-address-that-points-past-it-first-differing-byte-at-956-last-at-5503749
+set=armed-storage-reset-00b28262 sha256=c2a9ec54db7fe307a15dc9ecf5fe6ad1be02389305b7f05d0cf0382340a1d5d4 bytes=6715424 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-its-entry_storage_probe-is-at-8000cff8-UNCHANGED-from-the-698-arm-and-the-bl-to-it-in-__wrap_platform_cache_idle_exit-0x8047dad8-is-at-8047db2c-ALSO-UNCHANGED-the-four-core_mem-DEVICE-stores-have-each-moved-by-4-bytes-8000d350-str-r4-r5-120-8000d38c-str-r9-r5-8000d47c-str-r9-r5-120-8000d4bc-str-r4-r5-120-in-the-same-order-with-the-same-offsets-and-THE-RUNGS-OWN-STORE-IS-THE-FIFTH-8000d728-strb-r6-r5-47-0x2f-and-the-only-other-stores-in-the-body-are-the-TWO-bss-flags-at-8000d064-str-r7-r6-and-8000d550-str-r9-r6-4-g_storage_probed-805541a4-g_storage_mode_complete-805541a8-so-the-census-clause-and-THIS-READING-AGREE-that-the-body-writes-core_mem-four-times-in-the-vendors-order-and-hc_mem-exactly-once-and-at-47-and-POWER_CONTROL-0x29-which-is-THE-register-a-zero-write-busses-off-is-still-unreachable-by-construction-the-wrapper-still-ends-b-entry_post_clock-at-8047db4c-with-FlushPoU_Dcache-at-80046874-and-the-call-that-returns-to-the-seam-0x800472dc-UNCHANGED-from-697-698-and-690
+set=armed-storage-reset-00b28262 sha256=2d3894c2a0963f6f5afeaca647e665bbb1499f9feb7843b222084043b2f9bfb5 bytes=875 file=xnu_arm_entry-config.txt role=entry-config-record-AND-THE-ONE-RECORD-THAT-NAMES-THIS-ARM-its-last-line-reads-STAGE90_XNU_STORAGE_PROBE-4-beside-SEAM_POC-1-SEAM_MEASURE-0-SEAM_END_RUN-0-POST_END_RUN-0-POST_END_TICKS-115200000-SLOT_NULL-1-IDLE_CACHE_ENABLE-0-ISTACK_SEPARATE-0-IDLE_STACK-1-IDLE_NO_SLEEP-0-and-REAL_ARM_INIT-1-and-EXACTLY-TWO-of-its-lines-differ-from-the-698-arms-the-file-SHA256-field-00b28262-and-the-rung-digit-3-to-4-and-the-file-keeps-its-875-bytes
+set=armed-storage-reset-00b28262 sha256=b279731496ff536e3b2c95e03261695f6fe37f46269e523eb8a0fe57390c56d9 bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest-23-file-lines-28-lines-in-all-and-TWO-of-those-twenty-three-changed-this-step-build_entry-sh-the-rung-4-case-the-two-base-store-census-and-the-strtonum-repair-recorded-below-and-entry_storage-c-the-rung-4-block-its-st_write8-helper-and-the-call-site-guarded-by-g_storage_mode_complete-and-UNLIKE-698-NOTHING-IN-entry_trace-c-or-entry_stubs-c-moved-because-the-seam-constant-0x800472dc-did-not-move-so-THIS-MANIFEST-AND-THE-LIVE-TREE-AGREED-WHEN-THE-ARM-WAS-PARKED
+set=armed-storage-reset-00b28262 sha256=07e09a8f7e864baefbff5dc5bec4be7348b476007837336f9239b78b6a69cc05 bytes=6035456 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies-its-header-id-field-at-576-595-is-sha1-kernel-len-ramdisk-0-second-0-and-it-differs-from-the-698-arms-in-the-same-600978-bytes-the-qcdt-does
+set=armed-storage-reset-00b28262 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-entry-nonetheless-and-BYTE-IDENTICAL-to-the-698-park-so-THE-ONLY-FILES-THAT-DID-NOT-MOVE-ARE-THE-TWO-THAT-DESCRIBE-NOTHING-ABOUT-THE-ENTRY-IMAGE-the-fixture-and-the-payloads-own-switch-dump
+#
+# ================================================================================================
+# 701: THE DRIVER'S-OWN-RESET ARM - PARKED, NOT PRESSED. Nothing below is a reading of this arm on
+# the device: the set above is the arm that will be sent, and the press is the next step's act. What
+# is recorded here is what was MEASURED about the set before it was parked - including the defect the
+# first build of it found in a build clause's own reader, and the mutation suite that says which of
+# the new census clauses fire.
+# ================================================================================================
+#
+# WHAT THE ARM IS. It is the 698 arm plus `sdhci_reset(SDHCI_RESET_ALL)`, read out of the vendor's own
+# source before it was written (`docs/experiments/experiment-701-...md`), under
+# `STAGE90_XNU_STORAGE_PROBE=4`. The ladder is 0 inert / 1 the read-only probe / 2 + the vendor's mode
+# sequence / 3 + the standard register file's census / 4 + the driver's own reset. Rung 4 is
+# **one byte store and a bounded poll**, and everything else in `sdhci_reset` (`sdhci.c:229-279`) is
+# guarded off by state a fresh host does not have: `platform_reset_enter/_exit` are members
+# `sdhci_msm_ops` does not define, `host->pwr` is 0 so the `check_power_status(REQ_BUS_OFF)` at
+# `:254-256` is not reached, and that is the one act in the path that could hang this device -
+# `sdhci_msm_check_power_status` (`sdhci-msm.c:2179-2209`) writes no register and ends in
+# `wait_for_completion(&msm_host->pwr_irq_completion)`, a wait nothing in this image would ever end.
+# **The rung therefore does not emulate it**. The store is `0x01` to `SOFTWARE_RESET 0x2F` in
+# `hc_mem`, the poll is `sdhci_readb(0x2F) & mask` with the driver's own 100 ms bound (1,920,000 ticks
+# at this machine's 19,200,000 Hz, which 699's `_post_cntfrq` measured), and the after-values are the
+# five registers the pre-registration named.
+#
+# **THIS IS THE FIRST STORE THIS PROJECT HAS EVER MADE THROUGH `hc_mem`.** Every device store before
+# it - the four of the vendor's mode sequence - was on `core_mem`. That is why this step's build
+# clause had to learn a second device base (701 section 5), and why it is the clause, and not a
+# comment, that keeps the byte four offsets from this one unwritten.
+#
+# THE STORE CENSUS IS NOW TWO NAMED WINDOWS, AND THE BUILD SAYS SO AS A READING:
+#
+#   xnu_entry_698: the probe's stores, classified by base register and window - core_mem
+#   [120 0 120 120 ] on r5, hc_mem [47 ](strb ) on r5, image [r6:0:str:16804 r6:4:str:16804 ],
+#   ambiguous [], unknown [], unnamed-device []
+#
+# `core_mem` unchanged since 696 (the vendor's own order and offsets) and `hc_mem` exactly once, at
+# 47 = 0x2F, as a **byte** store. **`POWER_CONTROL 0x29` is four offsets away and is what the clause
+# is for**: writing 0 there IS a bus-off request on this SoC (531 section 8), so "the rung that
+# writes the reset bit cannot write the bus-off bit" is a property of the linked image - the same
+# shape `mi4-a-claim-in-a-comment-is-not-a-check` asks for. The two windows SHARE their `movt`
+# (`0xf9824000` and `0xf9824900`), which is why the clause names the window from the *pair* of
+# immediates and why a store it cannot place refuses rather than guesses.
+#
+# THE DEFECT THE FIRST BUILD FOUND, AND IT WAS IN THE READER. The rung-4 build failed with
+# `no branch to __wrap_Idle_load_context is inside cpu_idle_exit (0x8000e504..0x8000e38c)` - an
+# INVERTED range, which is impossible from `nm -n`. The cause was in `build_entry.sh`'s `sym_next`
+# (and, identically, in `next_global`): the reader compared the address with `$1 == s`, and `gawk`
+# compares two *numeric strings* numerically - `8000e504` parses as `8000e504` = `8e507` = **+inf**,
+# so EVERY address whose digits after the `e` are all decimal digits equals every other. Measured:
+# `nm -n` resolves `8000e504` to **416 lines**, and `sym_next` answered `0x8000e38c`, the symbol
+# *before* `cpu_idle_exit`. The reader had been right for every arm until this one because
+# `8000e2b8` and `8000e58c` do not parse (a `b` and a `c` are not digits) and because no earlier
+# window sat in the `e<digits>` shape - i.e. **rung 4 did not cause the defect, it moved a symbol
+# into the shape that exposes it**, and the clause that consumed the wrong range reported a false
+# failure about the image. The repair is `strtonum` on both sides, unit-tested in both directions
+# (old -> `0x8000e38c`, repaired -> `0x8000e58c` = `cpu_init`; and unchanged for `0x8000e19c`,
+# `0x8000e3e8`), and the record of it is `docs/experiments/experiment-702-...md`. **A build failure
+# is not automatically a fact about the image.**
+#
+# THE MUTATION SUITE, in the shape 698 section 5 used, and it is the reason to believe the clauses
+# fire at all (the source was restored byte-for-byte after every mutation and the restore hashed):
+#   * **M1** - a second `hc_mem` store at `POWER_CONTROL 0x29`: REFUSED, as pre-registered, with the
+#     offsets read as `[47 41 ]`. This is the clause that makes the bus-off byte unreachable.
+#   * **M3** - the reset compiled in on rung 3 (a store through `hc_mem` on a read-only rung):
+#     REFUSED, as pre-registered ("every rung below 4 is defined as reading that window and writing
+#     nothing in it").
+#   * **M2, M2b, M4** - the store made 32 bits wide (`st_write8`'s own body, and a direct word store),
+#     and the address aimed at a device megabyte this controller does not declare (`0xf9825000`):
+#     all three REFUSED, but **by the AMB clause and not by the one each was written for** - a
+#     mutated store changes GCC's register allocation, so the base register carries more than one
+#     device high half and the outermost clause refuses first. **The width clause (`strb`) therefore
+#     has NOT been observed to fire**, and the honest state of it is that its subject - a wider store
+#     to 0x2F that still materializes the same base pair - is not a body this source produces. It is
+#     recorded as owed rather than claimed as exercised.
+#   * **M5** - the classifier fed its own input shape directly (a test of the reader, not of a build):
+#     `CORE r11:120:str:16384`, `HC r12:47:strb:18688`, `DEVBAD r14:47:strb:0`, `UNK r8:4:str:none`,
+#     `DEVLO r9:47:strb:none`, `IMG r10:0:str:none` - six records, six classes, and **the pre-701
+#     classifier calls r11, r12 and r14 the same thing** (`DEV`), which is exactly why 701 added the
+#     low half. `DEVBAD` is reached only here, and the difference is named.
+#   * and the same awk run against the live rung-4 body reproduces the build's own census line,
+#     window for window - a second derivation of the same fact.
+#
+# ONE HAZARD THIS STEP MEASURED AND DID NOT HAVE TO FIX. A build that FAILS leaves the mutated image
+# in `out/` while `xnu_arm_entry-config.txt` still describes the last image that passed, so `out/` is
+# momentarily a tree whose bin and record disagree. It is not pressable: the arm-change guard has no
+# matching set, and the gate refused it with the right reading - the payload embeds the *clean*
+# image's bytes while `out/` holds a different build of the same length ("what it carries at that
+# length is a DIFFERENT build of the entry image rather than an absent blob"). The clean rebuild
+# reproduces `00b28262...` exactly, so the build is deterministic and the residue was transient.
+#
+# WHAT THIS ARM DOES NOT DO. **It sets no clock** (701 section 2: `sdhci_msm_ops` replaces
+# `.set_clock`, `sdhci_msm_set_clock` writes `CORE_VENDOR_SPEC 0x10C` and calls `clk_set_rate` on the
+# GCC at `0xfc400000` - the megabyte 692 pressed and measured as NOT MAPPED - so the clock is a third
+# block and its own step). It writes no `POWER_CONTROL`, no `CORE_PWRCTL` and no `CLOCK_CONTROL`. It
+# issues no command, reads no sector, parses no partition table and mounts nothing - **one byte
+# written to one register of a controller whose register file has now been read ten times**, and the
+# five after-reads. **TWRP-to-storage stays withheld**: the user's condition is that the OS can
+# already be entered and STAYS, and the OS is not observed doing that.
+#
+# OWED, before this arm is anything: the readiness chain (`tools/verify_press_ready.sh`, then exactly
+# one `preflight_boot_check.sh <printed flags>` and exactly one `run_and_capture.sh <printed flags>
+# --expect-arm=armed-storage-reset-00b28262`), and then the press itself, which is the next step's
+# act. **No firer is armed.**
+#
+# ================================================================================================
+#
+# ================================================================================================
+# 701: PRESSED 2026-09-25 20:37:13-20:39:25 UTC. Readiness 5/5 (exit 0), ONE gate (exit 0, 572
+# stdout lines) and EXACTLY ONE runner, both under `--allow-xnu-entry --expect-arm=armed-storage-
+# reset-00b28262`; RUNNER EXIT=0 - returned and captured, the device back 27 s after `fastboot boot`;
+# capture 614,436 B sha256 b966ecac914fd66d516cecace8348dc7ef0de4a46b24c2c14923d17f958bbf76, archived
+# by hand under `out/stage90/captures/701-reset-pressed-2026-09-25-{last_kmsg.txt,run.log,gate.log,
+# press.log}` (out/ is gitignored). One non-persistent `fastboot boot`, serial 4a2fe00b, neighbour
+# 33e80afe off both lists (adb listed 4a2fe00b as `device` and `fastboot devices` was empty). The
+# firer was `/tmp/g668/press-on-clear.v5.sh` (sha 7f23cae5...) run as `press-on-clear.v5.sh
+# armed-storage-reset-00b28262 600`, the set declared with no default; it printed `done. gate=0
+# runner=0` and exited, so NO FIRER IS ARMED and 660's closure released.
+# ================================================================================================
+#
+# THE CELL-BY-CELL ANSWER IS THE DOCUMENT `docs/experiments/experiment-703-the-drivers-own-reset-pressed-one-byte-in-one-register-out.md`;
+# what belongs here is the arm's own identity and the readings that change the next step.
+#
+# **EVERY PRE-REGISTERED CELL IS FILLED, AND THE RUNG DID EXACTLY WHAT THE PRE-REGISTRATION SAID IT
+# WOULD - ONE STORE, AND IT CLEARED:**
+#   * `_rst_calls=0x1`, `_rst_before=0x00`, `_rst_refused=0x0` - the refusal path was not taken, and
+#     699's `_reg_software_reset=0x00` is what said it would not be.
+#   * `_rst_wrote=0x1` and `_rst_stores=0x00000001` - **the store landed, and the count is the
+#     record's "one store" derived a second time**, bottom-up from the artifact rather than repeated
+#     from this sentence.
+#   * `_rst_stage` published 1, then 2, then 3 - the three stages in order, ending at done.
+#   * `_rst_polls=0x1` with `_rst_steps=0x0`, `_rst_ticks=0x00000010` (16 ticks = 0.83 us at this
+#     machine's 19,200,000 Hz), `_rst_cleared=0x1`, `_rst_timeout=0x0`, `_rst_done=0x1` - **the reset
+#     bit was already clear on the FIRST read**, which is the standard's self-clearing contract and
+#     the same number 697 measured on the vendor's `CORE_SW_RST` (`_mode_rst_polls=1`) in the other
+#     block. 701 section 1 cited that as evidence; this is the second derivation.
+#   * `_reg_software_reset_after=0x00` - the byte the poll tested, published so the poll's terminal
+#     state is a reading and not an inference.
+#   * **`_reg_power_control_after=0x00` - THE CELL 698 SECTION 2 OWED.** The standard reset did NOT
+#     turn the bus on: bit 0 is still CLEAR, so the block's belief about the bus is exactly what 699
+#     found it, and the driver would find nothing to reconcile with the vendor's own `CORE_PWRCTL`.
+#   * **`_reg_pwrctl_status_after=0x00` - THE HAZARD'S CELL, and it is empty.** 696 section 3
+#     pre-registered that the reset may latch a power-IRQ status when the previous state was BUS_ON,
+#     and `_core_power` says it was - but nothing latched, and `_reg_pwrctl_mask=0x0000000f` (four
+#     bits routed) is what turns that from "nothing happened" into "nothing latched while the mask
+#     was armed".
+#   * `_reg_host_control_after=0x00` and `_reg_present_state_after=0x01f80000` - **both identical to
+#     their before-values**, so "this reset moved exactly one register" is a measurement and not a
+#     reading of the source.
+#
+# **AND THE WHOLE LADDER REPRODUCED ON A FRESH BOOT**: `_mode_bit=0x0` then `_mode_bit_after=0x1`,
+# `_writes` published 0/1/2/3/4, `_mode_w0_read=0`, `_mode_w1_read=1`, `_mode_w2_read=0x00002001`,
+# `_mode_rst_polls=1` with `_mode_rst_ticks=0x6`, `_mode_refused=0`, `_mode_pwrctl_status=0`, and the
+# census's ten reads with `_reg_loads` reaching `0x0000000a` and `_regs_done=0x0000000a` - every
+# number 694, 697, 698 and 699 took, again, on an arm whose code changed under them.
+#
+# THE ENDING, THE PANIC AND THE SIXTH RETURN TIME. `_post_t0=0x075abe53`, `_post_cntfrq=0x0124f800`
+# (19,200,000 Hz), `_post_elapsed=0x06e0d551` = 115,397,969 ticks = 6,010.31 ms, so the deadline was
+# crossed **197,969 ticks = 10.31 ms before the returning pass** - inside one ~2007 ms idle park, as
+# 694's 11.011 ms, 697's 1,999.0 ms and 698's 15.49 ms were. `_post_end_calls=7` (the ending fired on
+# the 7th return) with `_slot_post_calls=4`. The panic is the same one: `fault_addr=0xfa0065c`, the
+# ending's own first store to `RESTART_REASON`, and the runner's seam block is the same block 697 and
+# 698 printed (`PASS seam_lr=0x800472dc`, the `FAIL seam_sp` and the `CLEAN LINE` pair `b=0x800b3648/
+# 0x8047db04`, all three the `STAGE90_XNU_SLOT_NULL=1` switch). **Return time 27 s** - the sixth
+# measurement (8, 17, 24, 27, 24, 27) and still unattributed.
+#
+# AND THE GOAL IS NOT MET. No storage: one byte written to one register of a controller whose register
+# file has now been read ten times, and nothing else - no command, no sector, no partition table, no
+# mount, and the eMMC *device* is not addressed. No driver beyond the fixture: the floor (pid 1, the
+# driver's `open` answering 0 with the control open answering 2, the fixture's 0xfeedface read into a
+# user page) is met exactly as 520, 533, 699 and every arm before it met it. **TWRP-to-storage stays
+# withheld** - the user's condition is that the OS can already be entered and STAYS, and the OS is not
+# observed doing that.
+#
+# THE STEP THE RESET CLEARS THE WAY FOR, NOW NAMED BY A READING RATHER THAN BY A PLAN: **the clock**,
+# because `CLOCK_CONTROL` reads `0x0003` (internal clock enabled and stable, SD clock enable clear)
+# both before and after this reset, so `sdhci_set_clock` is still ahead of the driver; and on this SoC
+# that is `sdhci_msm_set_clock`'s `CORE_VENDOR_SPEC 0x10C` plus `clk_set_rate` on the GCC's SDCC
+# clocks - i.e. **map the `0xfc400000` megabyte first**, which is where 692's fault was and the block
+# whose one gate the probe reads as an interlock.
+#
+# ================================================================================================

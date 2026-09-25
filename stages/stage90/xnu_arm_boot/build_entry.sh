@@ -575,13 +575,24 @@ esac
 # clause that makes it safe is the store census below, which asserts exactly the four stores the vendor's
 # sequence makes at every rung >= 2: a rung that added a store would fail it, so "rung 3 wrote nothing
 # new" is a property of the artifact and not of this comment.
+# **701: the fifth rung, and it is the first one that writes through the OTHER window.** Rung 4 is the
+# driver's own `sdhci_reset(SDHCI_RESET_ALL)` - read out of `sdhci.c:229-279`, that is ONE byte store to
+# `SOFTWARE_RESET 0x2F` in `hc_mem` plus a bounded poll of the same byte - and the clause that makes it
+# safe is the store census below, which since 701 names the *window* of every device store and holds each
+# window to its own list: `core_mem` the four the vendor's sequence makes, `hc_mem` exactly one byte, and
+# only from rung 4 on. `POWER_CONTROL 0x29` is four offsets from that one and is a byte register in the
+# same window, where writing 0 IS a bus-off request on this SoC - so "this rung cannot touch the bus-off
+# register" is a property of the artifact rather than of the record. And the clock is NOT on this rung
+# (701 section 2): `sdhci_msm_set_clock` writes `CORE_VENDOR_SPEC 0x10C` and calls `clk_set_rate` on the
+# GCC at `0xfc400000` - the megabyte 692 measured as not mapped - so it is a step of its own.
 STORAGE_PROBE=${STAGE90_XNU_STORAGE_PROBE:-0}
 case "$STORAGE_PROBE" in
     0) ;;
     1) ;;
     2) ;;
     3) ;;
-    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2 or 3, not [$STORAGE_PROBE]" >&2
+    4) ;;
+    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3 or 4, not [$STORAGE_PROBE]" >&2
        echo "        It is a `#if` in two files and not a value, so anything else would reach the" >&2
        echo "        preprocessor as a broken -D and fail there, with the cause named by the wrong" >&2
        echo "        tool (692); and it is a rung rather than a flag since 696, so a value above the" >&2
@@ -27919,7 +27930,26 @@ verify_trace_symbols() {
     # than no check - so every reader in this function reads its input to the end and selects after
     # the fact. The same trap sits in the `| head -1` idiom, which is only safe while the writer's
     # output fits in the pipe buffer.
-    sym_next() { arm-none-eabi-nm -n "$OUT/xnu_arm_entry.elf" | awk -v s="${1#0x}" '$1 == s { p = 1; next } p && !d { print "0x" $1; d = 1 }'; }
+    #
+    # **And the address has to be compared as a NUMBER, which this reader did not do - the defect
+    # that stopped 701's first rung-4 build.** `$1 == s` is a comparison of two *numeric strings*
+    # whenever the spelling parses as a number, and `gawk` reads `8000e504` as `8000e504` = `8e507`
+    # = **+inf** - so every address whose digits after the `e` are all decimal digits compares equal
+    # to every other such address, and this reader answered with the successor of the *first* one in
+    # the sorted table rather than of the one asked about. Measured on the rung-4 image: `nm -n`
+    # resolves `8000e504` to **416** lines, all of them `+inf`, and this function returned
+    # `0x8000e38c` - the symbol *before* `cpu_idle_exit` - so the clause that consumes it read an
+    # inverted range (`0x8000e504..0x8000e38c`) and **failed the build over a defect in the reading
+    # and not in the image**. It was right for every arm before this one for two reasons that both
+    # happened to hold: `8000e2b8` and `8000e58c` do not parse (a `b` and a `c` are not digits), and
+    # no earlier window sat in the `e<digits>` shape. The fix is `strtonum` on both sides, which
+    # cannot produce a numeric string; nothing else about the reader changed, and it still reads its
+    # input to the end for the SIGPIPE reason above.
+    sym_next() { arm-none-eabi-nm -n "$OUT/xnu_arm_entry.elf" | awk -v s="${1#0x}" '
+        BEGIN { sv = strtonum("0x" s) }
+        { a = strtonum("0x" $1) }
+        a == sv { p = 1; next }
+        p && !d { print "0x" $1; d = 1 }'; }
 
     addr=$(sym_addr _ZN9IOService18getResourceServiceEv) ||
         layout_fail "the traced image has no IOService::getResourceService, which is how entry_rs_state reaches the resource root"
@@ -28561,7 +28591,14 @@ verify_trace_symbols() {
     # a fault by hand in 514; here it is required, and the one offset the instrument carries (1484) is
     # compared against this configuration's generated `assym.s` rather than written down twice.
     sym_addr() { arm-none-eabi-nm "$OUT/xnu_arm_entry.elf" | awk -v s="$1" '$3 == s { print "0x" $1; found = 1 } END { exit(found ? 0 : 1) }'; }
-    sym_next() { arm-none-eabi-nm -n "$OUT/xnu_arm_entry.elf" | awk -v s="${1#0x}" '$1 == s { p = 1; next } p && !d { print "0x" $1; d = 1 }'; }
+    # The same reader as the first copy, with the same repair: the address is compared with
+    # `strtonum` because a bare hex spelling like `8000e504` is a *numeric string* to `gawk` and
+    # compares equal to every other address of that shape. See the note above the first copy.
+    sym_next() { arm-none-eabi-nm -n "$OUT/xnu_arm_entry.elf" | awk -v s="${1#0x}" '
+        BEGIN { sv = strtonum("0x" s) }
+        { a = strtonum("0x" $1) }
+        a == sv { p = 1; next }
+        p && !d { print "0x" $1; d = 1 }'; }
 
     # (1) The change itself: a name taken from the kernel's own parse site, and a token in *both*
     # copies of the command line.
@@ -28741,10 +28778,17 @@ verify_trace_symbols() {
     # (Two global names can share one address - `clean_mmu_dcache` and `CleanPoC_Dcache` do - so the
     # boundary has to be *after* the address and not merely not-before it, or the first such alias is
     # returned and the range is empty.)
+    # **And the address is compared with `strtonum` for the reason measured on `sym_next` above**:
+    # `$1 == s` with a bare hex spelling is a comparison of numeric strings, and every address of the
+    # `e<digits>` shape is `+inf` to `gawk` - so this reader would have set its start marker on the
+    # wrong line and, since the print condition is `a > sa` with `sa` then `+inf`, returned **nothing**
+    # for a function whose address has that shape. That is the same wrong-answer class as the inverted
+    # range, in the direction that reads as "no symbol follows" instead of as a wrong window.
     next_global() { arm-none-eabi-nm -n "$OUT/xnu_arm_entry.elf" | awk -v s="${1#0x}" '
+        BEGIN { sv = strtonum("0x" s) }
         { a = strtonum("0x" $1) }
         p && !d && $2 ~ /^[A-Z]$/ && a > sa { print "0x" $1; d = 1 }
-        $1 == s { p = 1; sa = a }'; }
+        a == sv { p = 1; sa = a }'; }
     cpoubody=$(arm-none-eabi-objdump -d --start-address=$cpou --stop-address="$(next_global "$cpou")" "$OUT/xnu_arm_entry.elf")
     read -r cpoc_loops cpou_addr_cpou <<<"$(awk '
         /<CleanPoC_Dcache>:/ { inb = 1; next }
@@ -29833,14 +29877,33 @@ verify_trace_symbols() {
             layout_fail "entry_storage_probe is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE, so this arm's four stores cannot be counted at all"
         stb_body=$(arm-none-eabi-objdump -d --start-address="$stb_probe" \
                    --stop-address="$(next_global "$stb_probe")" "$OUT/xnu_arm_entry.elf")
-        # Every store whose operand's base is not `sp`, as `<class> <base>:<offset>` in program order.
+        # Every store whose operand's base is not `sp`, as `<window> <base>:<offset>:<mnemonic>` in program
+        # order, where the window is named from the **pair** of immediates this body materializes the base
+        # register with: a `movt` high half >= 0xf000 says a device megabyte, and the low half - from a
+        # `mov` or a `movw` - says WHICH one. **701 added the low half, and the reason is that the two
+        # windows of this controller share their high half**: `core_mem` is 0xf9824000 and `hc_mem` is
+        # 0xf9824900, so a `movt` alone cannot tell them apart, and a store at offset 0x2F is a register
+        # in the standard file in one of them and a byte inside the vendor's own 0x2C word in the other.
+        # The window is therefore named, and ***not named*** refuses: an address this clause cannot put in
+        # a window is a store it will not vouch for.
         stb_raw=$(awk '
             function isreg(x) { return x ~ /^(r([0-9]|1[0-5])|sp|lr|pc|sl|fp|ip)$/ }
             $3 == "movt" {
                 d = $4; sub(/,.*$/, "", d)
                 v = $5; sub(/^#/, "", v)
                 if (isreg(d) && v ~ /^-?(0x[0-9a-fA-F]+|[0-9]+)$/) {
-                    if (strtonum(v) >= 61440) dev[d] = 1; else img[d] = 1
+                    n = strtonum(v)
+                    if (n >= 61440) devhi[d] = 1; else imghi[d] = 1
+                    hi[d] = n; hiset[d, n] = 1
+                }
+                next
+            }
+            ($3 == "movw" || $3 == "mov") {
+                d = $4; sub(/,.*$/, "", d)
+                v = $5; sub(/^#/, "", v)
+                if (isreg(d) && v ~ /^-?(0x[0-9a-fA-F]+|[0-9]+)$/) {
+                    n = strtonum(v)
+                    if (n >= 0 && n <= 65535) curlo[d] = n
                 }
                 next
             }
@@ -29851,35 +29914,65 @@ verify_trace_symbols() {
                 off = "0"
                 if (n >= 2) { off = p[2]; gsub(/[ \t#]/, "", off); sub(/!$/, "", off); if (off == "") off = "0" }
                 if (base == "sp" || base == "r13") next
-                buf[++nb] = base ":" off
+                lo = (base in curlo) ? curlo[base] : "none"
+                buf[++nb] = base ":" off ":" $3 ":" lo
                 next
             }
             END {
                 for (i = 1; i <= nb; i++) {
                     split(buf[i], q, ":")
-                    b = q[1]; o = q[2]
-                    if (dev[b] && img[b]) printf "AMB %s:%s\n", b, o
-                    else if (dev[b]) printf "DEV %s:%s\n", b, o
-                    else if (img[b]) printf "IMG %s:%s\n", b, o
-                    else printf "UNK %s:%s\n", b, o
+                    b = q[1]; o = q[2]; m = q[3]; lo = q[4]
+                    if (devhi[b] && imghi[b]) { printf "AMB %s:%s:%s:%s\n", b, o, m, lo; continue }
+                    if (imghi[b]) { printf "IMG %s:%s:%s:%s\n", b, o, m, lo; continue }
+                    if (!devhi[b]) { printf "UNK %s:%s:%s:%s\n", b, o, m, lo; continue }
+                    nd = 0; for (k in hiset) { split(k, y, SUBSEP); if (y[1] == b) nd++ }
+                    if (nd > 1) { printf "AMB %s:%s:%s:%s\n", b, o, m, lo; continue }
+                    if (lo == "none") { printf "DEVLO %s:%s:%s:%s\n", b, o, m, lo; continue }
+                    addr = hi[b] * 65536 + lo
+                    if (addr == 4186062848) printf "CORE %s:%s:%s:%s\n", b, o, m, lo
+                    else if (addr == 4186065152) printf "HC %s:%s:%s:%s\n", b, o, m, lo
+                    else printf "DEVBAD %s:%s:%s:%s\n", b, o, m, lo
                 }
             }' <<<"$stb_body")
-        stb_all=$(awk '$1 == "DEV" { print $2 }' <<<"$stb_raw")
+        stb_core=$(awk '$1 == "CORE" { print $2 }' <<<"$stb_raw")
+        stb_hc=$(awk '$1 == "HC" { print $2 }' <<<"$stb_raw")
         stb_img=$(awk '$1 == "IMG" { printf "%s ", $2 }' <<<"$stb_raw")
         stb_amb=$(awk '$1 == "AMB" { printf "%s ", $2 }' <<<"$stb_raw")
         stb_unk=$(awk '$1 == "UNK" { printf "%s ", $2 }' <<<"$stb_raw")
-        stb_base=$(awk -F: '{ c[$1]++ } END { b = ""; m = 0; for (k in c) if (c[k] > m) { m = c[k]; b = k } print b }' <<<"$stb_all")
-        stb_off=$(awk -F: -v b="$stb_base" '$1 == b { printf "%s ", $2 }' <<<"$stb_all")
-        stb_other=$(awk -F: -v b="$stb_base" '$1 != b { printf "%s:%s ", $1, $2 }' <<<"$stb_all")
+        stb_devlo=$(awk '$1 == "DEVLO" { printf "%s ", $2 }' <<<"$stb_raw")
+        stb_devbad=$(awk '$1 == "DEVBAD" { printf "%s ", $2 }' <<<"$stb_raw")
+        stb_core_base=$(awk -F: '{ c[$1]++ } END { b = ""; m = 0; for (k in c) if (c[k] > m) { m = c[k]; b = k } print b }' <<<"$stb_core")
+        stb_core_off=$(awk -F: -v b="$stb_core_base" '$1 == b { printf "%s ", $2 }' <<<"$stb_core")
+        stb_hc_base=$(awk -F: '{ c[$1]++ } END { b = ""; m = 0; for (k in c) if (c[k] > m) { m = c[k]; b = k } print b }' <<<"$stb_hc")
+        stb_hc_off=$(awk -F: -v b="$stb_hc_base" '$1 == b { printf "%s ", $2 }' <<<"$stb_hc")
+        stb_hc_mne=$(awk -F: -v b="$stb_hc_base" '$1 == b { printf "%s ", $3 }' <<<"$stb_hc")
+        stb_other=$(awk -F: -v b="$stb_core_base" '$1 != b { printf "%s:%s ", $1, $2 }' <<<"$stb_core")
         [[ -z "${stb_amb// /}" ]] ||
-            layout_fail "entry_storage_probe stores through [$stb_amb], and this body materializes each of those base registers BOTH with a device high half (>= 0xf000) and with the image's own - GCC reuses registers, so a movt alone cannot say which address the store uses. The image's own stores are listed as IMG and the device ones are bounded by this clause, but a register that is both is a store this clause would have to guess about, and it refuses instead. Read the probe's body: if the store is to the image's own memory, give it a base register the body materializes once. Nothing is rebuilt by this refusal"
+            layout_fail "entry_storage_probe stores through [$stb_amb], and this body materializes each of those base registers with MORE THAN ONE device high half - GCC reuses registers, so a movt alone cannot say which address the store uses. The image's own stores are listed as IMG and the device ones are named by their own windows below, but a register that carries two device high halves is a store this clause would have to guess about, and it refuses instead. Read the probe's body: if the store is to the image's own memory, give it a base register the body materializes once. Nothing is rebuilt by this refusal"
         [[ -z "${stb_unk// /}" ]] ||
-            layout_fail "entry_storage_probe stores through [$stb_unk], and this body materializes no address for that base register at all - no movw/movt, so the address is a literal-pool load or a computation and this clause cannot say whether the store goes to a device block. If it is in the OTHER window (hc_mem), POWER_CONTROL 0x29 is in it, where writing 0 IS a bus-off request on this SoC. (The image's own stores are [$stb_img].) Nothing is rebuilt by this refusal"
-        [[ "$stb_off" == "120 0 120 120 " ]] ||
-            layout_fail "entry_storage_probe's device stores on base $stb_base are [$stb_off] and this arm's record says they are 120 0 120 120 - i.e. CORE_HC_MODE <- 0, CORE_POWER <- |CORE_SW_RST, CORE_HC_MODE <- HC_MODE_EN, CORE_HC_MODE <- |FF_CLK_SW_RST_DIS (the vendor's own sequence, sdhci-msm.c:2841-2868). A different count, a different order or a different offset is a store this arm's pre-registration does not describe - and a device store that is not here at all is one this clause did not see. Read the probe's own body, decide whether the sequence or the record is what changed, and change the one that is wrong. (The image's own stores are [$stb_img].) Nothing is rebuilt by this refusal"
+            layout_fail "entry_storage_probe stores through [$stb_unk], and this body materializes no `movt` for that base register at all - the address is a literal-pool load or a computation, and this clause cannot say whether the store goes to a device block. If it does, the standard file's `POWER_CONTROL 0x29` is in one of these windows, where writing 0 IS a bus-off request on this SoC. (The image's own stores are [$stb_img].) Nothing is rebuilt by this refusal"
+        [[ -z "${stb_devlo// /}" ]] ||
+            layout_fail "entry_storage_probe stores through [$stb_devlo], and this body gives that register a device high half but NO low half - no `mov`/`movw` immediate - so the pair of immediates that names a window is incomplete. This is the case 701 added the low half for: `core_mem` (0xf9824000) and `hc_mem` (0xf9824900) share a `movt`, so a store at 0x2F would be a byte in the standard file in one window and a byte inside the vendor's own 0x2C word in the other. Name the window or fail. Nothing is rebuilt by this refusal"
+        [[ -z "${stb_devbad// /}" ]] ||
+            layout_fail "entry_storage_probe stores through [$stb_devbad], and the (movt, mov/movw) pair this body materializes names a device address that is NOT one of the two windows this controller declares - `core_mem` (0xf9824000, 0x800 long) and `hc_mem` (0xf9824900, 0x11c long, msm8974.dtsi:503). A store to a device megabyte this arm's record does not name is exactly the store this clause exists to refuse. Nothing is rebuilt by this refusal"
+        [[ "$stb_core_off" == "120 0 120 120 " ]] ||
+            layout_fail "entry_storage_probe's stores in the core_mem window ($stb_core_base) are [$stb_core_off] and this arm's record says they are 120 0 120 120 - i.e. CORE_HC_MODE <- 0, CORE_POWER <- |CORE_SW_RST, CORE_HC_MODE <- HC_MODE_EN, CORE_HC_MODE <- |FF_CLK_SW_RST_DIS (the vendor's own sequence, sdhci-msm.c:2841-2868). A different count, a different order or a different offset is a store this arm's pre-registration does not describe. Read the probe's own body, decide whether the sequence or the record is what changed, and change the one that is wrong. (The image's own stores are [$stb_img].) Nothing is rebuilt by this refusal"
+        if [[ $STORAGE_PROBE -ge 4 ]]; then
+            # **701: the rung's ONE store, and it is a byte in the OTHER window.** `sdhci_writeb(host,
+            # SDHCI_RESET_ALL, SDHCI_SOFTWARE_RESET)` is the whole of the driver's reset, so the expected
+            # set is one `strb` at 0x2F - and the mnemonic is checked with the offset because a 32-bit
+            # store at 0x2F is the unaligned Device access the alignment census refuses two blocks down.
+            [[ "$stb_hc_off" == "47 " ]] ||
+                layout_fail "entry_storage_probe's stores in the hc_mem window ($stb_hc_base) are [$stb_hc_off] and rung 4's record says exactly one, at offset 47 (0x2F) - the driver's own `sdhci_writeb(host, SDHCI_RESET_ALL, SDHCI_SOFTWARE_RESET)` (sdhci.c:246, SDHCI_RESET_ALL = 0x01 at sdhci.h:114). A store anywhere else in this window is a register this rung's pre-registration does not name, and the register four offsets away is `POWER_CONTROL 0x29`, where writing 0 IS a bus-off request on this SoC - so this clause is what makes the reset rung unable to touch it. Nothing is rebuilt by this refusal"
+            [[ "$stb_hc_mne" == "strb " ]] ||
+                layout_fail "entry_storage_probe's store in the hc_mem window ($stb_hc_base) at offset 47 is [$stb_hc_mne], not a byte store. SOFTWARE_RESET 0x2F is a BYTE register (sdhci.h:113, and the vendor writes it with sdhci_writeb at sdhci.c:246), so a wider store there is an unaligned access to a Strongly-ordered device section - 692's abort class, by alignment - and the driver's own accessor is the width this record states. Nothing is rebuilt by this refusal"
+        else
+            [[ -z "${stb_hc_off// /}" ]] ||
+                layout_fail "entry_storage_probe stores through the hc_mem window [$stb_hc_off] while the rung is $STORAGE_PROBE, and every rung below 4 is defined as reading that window and writing nothing in it. A store there on a read-only rung is a build that does not match the rung it claims to be - and the register four offsets from 0x2F is POWER_CONTROL 0x29, where writing 0 IS a bus-off request on this SoC. Nothing is rebuilt by this refusal"
+        fi
         [[ -z "${stb_other// /}" ]] ||
-            layout_fail "entry_storage_probe stores to [$stb_other] on a second device base register, and this arm's pre-registration names one base carrying the four. Every other device store in this body is a register this arm does not name - and if it is in the OTHER window (hc_mem), POWER_CONTROL 0x29 is in it, where writing 0 IS a bus-off request on this SoC. The stores on the four's base are [$stb_off], the image's own are [$stb_img]. Read the probe's body and decide which of the two - the sequence or this record - is wrong. Nothing is rebuilt by this refusal"
-        echo "  xnu_entry_698: the probe's stores, classified by base register - device [$stb_off] on $stb_base, image [$stb_img], ambiguous [$stb_amb], unknown [$stb_unk]"
+            layout_fail "entry_storage_probe stores to [$stb_other] through a second base register in the core_mem window, and this arm's pre-registration names one register carrying the four. Every other store in that window is a register this arm does not name. The stores on the four's register are [$stb_core_off]; the image's own are [$stb_img]. Read the probe's body and decide which of the two - the sequence or this record - is wrong. Nothing is rebuilt by this refusal"
+        echo "  xnu_entry_698: the probe's stores, classified by base register and window - core_mem [$stb_core_off] on $stb_core_base, hc_mem [$stb_hc_off]($stb_hc_mne) on $stb_hc_base, image [$stb_img], ambiguous [$stb_amb], unknown [$stb_unk], unnamed-device [$stb_devbad$stb_devlo]"
     fi
     if [[ $STORAGE_PROBE -ge 3 ]]; then
         # ---------------------------------------------- 698: EVERY ACCESS'S WIDTH IS CHECKED AGAINST ITS

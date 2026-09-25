@@ -108,8 +108,8 @@
 #ifndef STAGE90_XNU_STORAGE_PROBE
 #define STAGE90_XNU_STORAGE_PROBE 0
 #endif
-#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 3
-#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store)."
+#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 4
+#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store), 4 = 3 plus the driver's own SDHCI_RESET_ALL (ONE byte store to SOFTWARE_RESET 0x2F, plus a bounded poll of that same byte) - the rung that writes through hc_mem for the first time. Set no clock here: sdhci_msm_set_clock is the GCC (0xfc400000), a separate step."
 #endif
 
 /*
@@ -176,6 +176,9 @@ extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_befo
 #define ST_SDHCI_POWER_CONTROL  0x29u   /* sdhci.h:87  - a BYTE; read only, see the census below */
 #define ST_SDHCI_CLOCK_CONTROL  0x2Cu   /* sdhci.h:100 - 16-bit */
 #define ST_SDHCI_SOFTWARE_RESET 0x2Fu   /* sdhci.h:113 - a BYTE */
+#define ST_SDHCI_RESET_ALL      0x01u   /* sdhci.h:114 - the mask the driver resets with, and it
+                                         * is also the bit the poll below tests: the standard says
+                                         * the bit is self-clearing */
 #define ST_SDHCI_SLOT_INT_STAT  0xFCu   /* sdhci.h:239 - 16-bit */
 #define ST_SDHCI_HOST_VERSION   0xFEu   /* sdhci.h:241 - 16-bit, and the register 697 left owed */
 #define ST_SDHCI_CARD_PRESENT   0x00010000u /* sdhci.h:71 - must NOT be read as "no card" here, see below */
@@ -232,6 +235,17 @@ extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_befo
 #define ST_MODE_RST_TICK_BUDGET 1920000u  /* 100 ms at 19.2 MHz */
 #define ST_MODE_RST_STEPS_MAX   4096u     /* the backstop: ~126 ms of reads, so it cannot fire first */
 #define ST_MODE_RST_INNER       1024u     /* device reads between two samples of the clock */
+/*
+ * **701: the driver's own poll bound, and it is the vendor's number rather than a new one.**
+ * `sdhci.c:251-252` is the comment 'Wait max 100 ms' over `timeout = 100`, and the loop
+ * `mdelay(1)`s per decrement (`:267`), so the driver's bound is **100 ms of wall clock** - the same
+ * quantity `ST_MODE_RST_TICK_BUDGET` is, at the same 19,200,000 Hz 699's ending read out of `cntfrq`.
+ * The arm's bound and the driver's bound being the same number is the point: a run that times out here
+ * is a run in which the driver's own `Reset 0x%x never completed` path (`:260-264`) would have fired.
+ */
+#define ST_RST_TICK_BUDGET 1920000u  /* 100 ms at 19.2 MHz */
+#define ST_RST_STEPS_MAX   4096u     /* the backstop: ~126 ms of byte reads, so it cannot fire first */
+#define ST_RST_INNER       1024u     /* byte reads between two samples of the clock */
 
 static uint32_t st_read32(uint32_t addr)
 {
@@ -270,6 +284,22 @@ static void st_write32(uint32_t addr, uint32_t value)
     *(volatile uint32_t *)(uintptr_t)addr = value;
     __asm__ volatile ("dsb sy" ::: "memory");
 }
+
+#if STAGE90_XNU_STORAGE_PROBE >= 4
+/*
+ * **701: the byte store, and rung 4 is the reason it exists.** `SOFTWARE_RESET 0x2F` is a byte register
+ * at an offset no 4-byte access reaches, so the driver's reset cannot be written with `st_write32` - a
+ * 32-bit store there is the unaligned Device access the alignment clause refuses the build over. The
+ * `dsb sy` is in this helper for the same reason it is in the one above: the poll that follows reads
+ * the byte just written, and the barrier is what makes "the poll was taken after the store" a property
+ * of this code rather than of the bus.
+ */
+static void st_write8(uint32_t addr, uint8_t value)
+{
+    *(volatile uint8_t *)(uintptr_t)addr = value;
+    __asm__ volatile ("dsb sy" ::: "memory");
+}
+#endif /* STAGE90_XNU_STORAGE_PROBE >= 4 - the helper has one caller, and -Werror is on */
 
 static uint32_t g_storage_probed;
 
@@ -519,6 +549,122 @@ static void st_standard_census(void)
 }
 #endif /* STAGE90_XNU_STORAGE_PROBE >= 3 */
 
+#if STAGE90_XNU_STORAGE_PROBE >= 4
+/*
+ * **701: rung 4 - the driver's own reset, and it is this project's first store through `hc_mem`.**
+ *
+ * Every store this project has made to a device so far is on `core_mem` and is one of the vendor's four
+ * mode-sequence stores. The driver's own bring-up begins one block over, with
+ * `sdhci_reset(host, SDHCI_RESET_ALL)` - and read out of the vendor's source (`sdhci.c:229-279`) that
+ * function is **one byte write and a bounded poll**, because everything else in it is guarded off by
+ * state a freshly initialized host does not have:
+ *
+ *   * `sdhci_writeb(host, mask, SDHCI_SOFTWARE_RESET)` (`:246`) - `0x01` to `hc_mem + 0x2F`. **This is
+ *     the rung's whole store.**
+ *   * `host->clock = 0` (`:249`) - the driver's own variable, no register.
+ *   * `check_power_status(host, REQ_BUS_OFF)` (`:254-256`) - skipped because `host->pwr` is 0, and it is
+ *     the guard that matters most: `sdhci_msm_check_power_status` (`sdhci-msm.c:2179-2209`) writes no
+ *     register at all and ends in `wait_for_completion(&msm_host->pwr_irq_completion)` - **an unbounded
+ *     wait on a power IRQ**. A payload that "finished the driver's init" by emulating it would be waiting
+ *     for an interrupt nothing in this image raises. Rung 4 therefore stops short of it *deliberately*.
+ *   * `platform_reset_enter`/`_exit` (`:243`, `:271`) - `sdhci_msm_ops` (`sdhci-msm.c:2653-2666`) has no
+ *     such member, so the MSM does not hook this reset beyond the power-status check it cannot reach.
+ *   * the poll (`:259-268`) - `sdhci_readb(SDHCI_SOFTWARE_RESET) & mask`, up to 100 x `mdelay(1)`, with
+ *     the driver's own `Reset 0x%x never completed` path (`:260-264`) if the bound expires. **This rung
+ *     polls the same byte with the same 100 ms bound**, published as ticks on this machine's own counter.
+ *
+ * **And the clocks are not on this path either** (701 section 2): `sdhci_msm_ops` replaces `.set_clock`,
+ * and `sdhci_msm_set_clock` (`:2402-2535`) writes `CORE_VENDOR_SPEC 0x10C` - a fifth `core_mem` offset -
+ * and calls `clk_set_rate` (`:2520`) on the GCC's SDCC clocks, i.e. the `0xfc400000` megabyte 692 pressed
+ * and measured as **not mapped**. So this rung sets no clock, and `CLOCK_CONTROL` is read before and
+ * after only as a before/after pair of a register this rung does not write.
+ *
+ * **The before-values are 699's, which is what makes the reset's effect a measurement**: `_reg_software_reset`
+ * and `_reg_power_control` both read 0, `_reg_present_state`'s inhibit bits are clear, and
+ * `_reg_pwrctl_mask` reads `0x0000000f` - four bits of power IRQ routed, which is what makes
+ * `_reg_pwrctl_status_after` below a reading and not a formality (696 section 3 warned the reset may latch
+ * a power-IRQ status when the previous state was `BUS_ON`, and 699 measured `_core_power=0x00000441`).
+ *
+ * **The guard is the register's own contract.** `SOFTWARE_RESET` is self-clearing, so a byte that reads
+ * non-zero at entry is a reset already in progress - the one state in which writing this byte would be
+ * acting on a block that is mid-reset. 699 measured 0, so that branch is the refusal path and not the
+ * expected one, and it is published rather than silent.
+ */
+static void st_driver_reset(void)
+{
+    uint32_t t0, ticks, polls = 0u, steps = 0u, stores = 0u, i, cleared = 0u, done;
+    uint8_t reset_before;
+
+    ST_LIVE("xnu_live_storage_rst_calls", 1u);
+
+    reset_before = st_read8(ST_HC_MEM_BASE + ST_SDHCI_SOFTWARE_RESET);
+    ST_LIVE("xnu_live_storage_rst_before", reset_before);
+    if ((reset_before & ST_SDHCI_RESET_ALL) != 0u) {
+        ST_LIVE("xnu_live_storage_rst_refused", 1u);
+        ST_LIVE("xnu_live_storage_rst_wrote", 0u);
+        ST_LIVE("xnu_live_storage_rst_stores", 0u);
+        ST_LIVE("xnu_live_storage_rst_stage", 0u);
+        return;
+    }
+    ST_LIVE("xnu_live_storage_rst_refused", 0u);
+
+    /* The store: the driver's own `sdhci_writeb(host, SDHCI_RESET_ALL, SDHCI_SOFTWARE_RESET)`. */
+    ST_LIVE("xnu_live_storage_rst_stage", 1u);
+    st_write8(ST_HC_MEM_BASE + ST_SDHCI_SOFTWARE_RESET, (uint8_t)ST_SDHCI_RESET_ALL);
+    stores++;
+    ST_LIVE("xnu_live_storage_rst_wrote", 1u);
+    ST_LIVE("xnu_live_storage_rst_stores", stores);
+
+    /*
+     * The poll, and both of its bounds are published with the result - the same shape as the mode
+     * sequence's poll, and for the same reason: the clock is sampled once per `ST_RST_INNER` byte reads,
+     * which keeps the sampler from being the thing being measured, and `steps` reaching its ceiling,
+     * `ticks` reaching its budget and the bit clearing are three different statements.
+     */
+    ST_LIVE("xnu_live_storage_rst_stage", 2u);
+    t0 = (uint32_t)stage90_cntvct_read();
+    for (steps = 0u; steps < ST_RST_STEPS_MAX; steps++) {
+        for (i = 0u; i < ST_RST_INNER; i++) {
+            polls++;
+            if ((st_read8(ST_HC_MEM_BASE + ST_SDHCI_SOFTWARE_RESET) & ST_SDHCI_RESET_ALL) == 0u) {
+                cleared = 1u;
+                break;
+            }
+        }
+        if (cleared != 0u)
+            break;
+        if ((uint32_t)stage90_cntvct_read() - t0 >= ST_RST_TICK_BUDGET)
+            break;
+    }
+    ticks = (uint32_t)stage90_cntvct_read() - t0;
+
+    ST_LIVE("xnu_live_storage_rst_polls", polls);
+    ST_LIVE("xnu_live_storage_rst_steps", steps);
+    ST_LIVE("xnu_live_storage_rst_ticks", ticks);
+    ST_LIVE("xnu_live_storage_rst_cleared", cleared);
+    ST_LIVE("xnu_live_storage_rst_timeout", (cleared == 0u) ? 1u : 0u);
+
+    /*
+     * **The after-values, and the first of them is the cell 698 section 2 owed.** `POWER_CONTROL 0x29`
+     * is read here and still never written: a value with bit 0 set after the reset would mean the
+     * standard reset *changed the block's belief about the bus*, and the driver would then have to
+     * reconcile that with `CORE_PWRCTL`; a 0 says the reset left it exactly as 699 found it. The other
+     * three are the registers the *generic* core's reset path can touch on other platforms
+     * (`HOST_CONTROL` is restored under a quirk this SoC does not set; the inhibit bits say whether a
+     * transfer was aborted), so reading them makes "this reset moved one register" a measurement.
+     */
+    ST_LIVE("xnu_live_storage_reg_software_reset_after", st_read8(ST_HC_MEM_BASE + ST_SDHCI_SOFTWARE_RESET));
+    ST_LIVE("xnu_live_storage_reg_power_control_after", st_read8(ST_HC_MEM_BASE + ST_SDHCI_POWER_CONTROL));
+    ST_LIVE("xnu_live_storage_reg_pwrctl_status_after", st_read32(ST_CORE_MEM_BASE + ST_CORE_PWRCTL_STATUS));
+    ST_LIVE("xnu_live_storage_reg_host_control_after", st_read8(ST_HC_MEM_BASE + ST_SDHCI_HOST_CONTROL));
+    ST_LIVE("xnu_live_storage_reg_present_state_after", st_read32(ST_HC_MEM_BASE + ST_SDHCI_PRESENT_STATE));
+
+    done = 1u;
+    ST_LIVE("xnu_live_storage_rst_done", done);
+    ST_LIVE("xnu_live_storage_rst_stage", 3u);
+}
+#endif /* STAGE90_XNU_STORAGE_PROBE >= 4 */
+
 void entry_storage_probe(void)
 {
     uint32_t slot_before = 0u, desc = 0u, mapped, section, hc_section;
@@ -716,5 +862,18 @@ void entry_storage_probe(void)
      */
     if (g_storage_mode_complete != 0u)
         st_standard_census();
+#endif
+#if STAGE90_XNU_STORAGE_PROBE >= 4
+    /*
+     * **701: rung 4, and it is placed after the census because the census is its before-values.** The
+     * reset's effect on `SOFTWARE_RESET`, `POWER_CONTROL`, `PRESENT_STATE` and `HOST_CONTROL` can only be
+     * read as a *change* if those four were read first, which is why 698 was a rung of reads before a
+     * rung of writes - and it is guarded by the same interlock one rung up, `g_storage_mode_complete`,
+     * because a block that did not answer a version word is a block whose reset must not be written: the
+     * census would not have run, so the before-values would be absent and the reset would be an act on a
+     * register file this image has never read.
+     */
+    if (g_storage_mode_complete != 0u)
+        st_driver_reset();
 #endif
 }
