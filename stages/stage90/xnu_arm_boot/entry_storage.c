@@ -272,13 +272,25 @@ extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_befo
 #define ST_RCG_CFG_MND_MASK     0x00003000u   /* MND_MODE_MASK, BM(13,12) - 0x2 is the dual-edge value */
 
 /*
- * **`CORE_VENDOR_SPEC 0x10C`, the fifth `core_mem` offset and the one register `sdhci_msm_set_clock`
- * reads before it decides anything** (`sdhci-msm.c:92`). It is a 4-aligned 32-bit register read with
- * `st_read32`; the two fields below are the only two the driver's own code touches (`:93-96`), and the
- * MCLK select is the one it writes on the non-HS400 path (`:2466-2494`). Rung 5 reads both and writes
- * neither, which is what makes them rung 6's before-values.
+ * **`CORE_VENDOR_SPEC 0x10C`, and the address is the part a reader has to be told about**
+ * (`sdhci-msm.c:92`). It is a 4-aligned 32-bit register read with `st_read32`; the two fields below
+ * are the only two the driver's own code touches (`:93-96`), and the MCLK select is the one it
+ * writes on the non-HS400 path (`:2466-2494`). Rung 5 reads both and writes neither, which is what
+ * makes them rung 6's before-values.
+ *
+ * **710 CORRECTED THE WINDOW THIS MACRO IS APPLIED TO, and the correction is a finding about the
+ * record and not about the device.** Every one of the vendor's **23** uses of this offset goes
+ * through `host->ioaddr` (`:587`, `:597`, `:646`, `:653`, `:2079-2085`, `:2416-2433`, `:2490-2512`)
+ * and **none** through `msm_host->core_mem` - so the register `sdhci_msm_set_clock` writes is
+ * `hc_mem (0xf9824900) + 0x10C` = **`0xF9824A0C`**, inside the standard file's own vendor-specific
+ * area, and the `0xF982410C` this file has read since 705 is the *other* window of the same
+ * controller. 707 section 2's "the field did not take" is therefore an address error: the two
+ * stores landed, and 707's readings are about a register the driver never addresses. The value of
+ * the constant is unchanged and so is every call site - what is corrected is the sentence that said
+ * which window it names. (Rung 8 reads both addresses in one run and settles whether they are two
+ * registers or one; until that reading, no rung writes the MCLK field at the vendor's address.)
  */
-#define ST_CORE_VENDOR_SPEC     0x10Cu        /* sdhci-msm.c:92 - the fifth offset in this window */
+#define ST_CORE_VENDOR_SPEC     0x10Cu        /* sdhci-msm.c:92 - the vendor's `VENDOR_SPEC_FUNC`, which the driver addresses as `hc_mem + 0x10C` (710) */
 #define ST_VENDOR_PWRSAVE_BIT   (1u << 1)     /* CORE_CLK_PWRSAVE, :93 */
 #define ST_VENDOR_MCLK_MASK     0x00000300u   /* CORE_HC_MCLK_SEL_MASK, :96 - BM(9,8) */
 #define ST_VENDOR_MCLK_SHIFT    8u

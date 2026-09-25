@@ -65,6 +65,22 @@ state, or needs something this arm did not do.
 so `_clk_set_divisor_alt=0`, `_clk_set_real_div=0x3c0` (960) and `_clk_set_div=0x1e0` (480), which packs
 to the pre-registered word.
 
+**CORRECTED 2026-09-25 (710): the two `CORE_VENDOR_SPEC` stores above went to the wrong window, and the
+sentence "the field did not take" is an address error rather than a device finding.** `#define
+CORE_VENDOR_SPEC 0x10C` (`sdhci-msm.c:92`) is used **23 times in that file and every one is through
+`host->ioaddr`** — `:587`, `:597`, `:646`, `:653`, `:2079-2085`, `:2416-2433`, and the two read-modify-
+writes this rung read out (`:2490-2512`) — and **zero times through `msm_host->core_mem`**.
+`host->ioaddr` is `hc_mem` (`0xf9824900`), so the register the driver's MCLK select lives in is
+**`0xF9824A0C`**, and this arm wrote `core_mem`'s `0x10C` = `0xF982410C`, 0x900 bytes away. The
+measurements stand as measurements — `_clk_set_vendor_w1=0x200` was *computed* and `_clk_set_vendor_after=0`
+was *read* — but they are readings of a register the driver never addresses for this field, so
+**whether the MCLK field took is UNMEASURED**, and this document's conclusion (*"it ran and the
+register says no"*) is withdrawn. Rung 8 (`docs/experiments/experiment-710-…`) reads both addresses in
+one run and settles whether they are two registers or one; until then no rung moves the store. This is
+[[mi4-one-value-two-definitions]] again — one offset, two windows — and the census could not catch it
+because the census names windows by the `movt`/`movw` pair the *arm* materializes, not by the base the
+*vendor's source* uses.
+
 **The standard's two halfwords and the poll between them, and this is the rung's acting cell**:
 
 | key | reading | what it means |

@@ -1953,3 +1953,82 @@ set=armed-storage-power-7b1f3799 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273
 # link where they disagree with the image); and **the gate's narration of `STAGE90_XNU_STORAGE_PROBE` is
 # now SEVEN RUNGS SHORT (2, 3, 4, 5, 6 and 7 are not described in it) - peer lane, by message and never
 # by edit.**
+#
+# ================================================================================================
+# 710 (2026-09-25): THE RUNG-8 PRE-REGISTRATION - owning intid 170, and the `CORE_VENDOR_SPEC`
+# address this ladder has been reading in the wrong window
+# ================================================================================================
+#
+# The pre-registration this block records is
+# `docs/experiments/experiment-710-the-rung-8-pre-registration-owning-intid-170-and-the-vendor-spec-address-the-ladder-has-been-reading-in-the-wrong-window.md`,
+# and it is a PRE-REGISTRATION: no arm was built at rung 8, `out/` still holds
+# `armed-storage-power-7b1f3799` (708's rung-7 arm, PRESSED by 709, unchanged), and no firer is armed.
+#
+# THE DECISION 709 OWED IS TAKEN, AND IT IS THE SECOND OF THE TWO OPTIONS: rung 8 owns intid 170
+# (SPI 138, `pwr_irq`) rather than masking the power events. The reason is structural and not taste -
+# `entry_irq_register_client` and `entry_irq_enable_line` already exist and were measured at 496/498/500
+# on intid 40, and **rung 8 is their first caller in the ladder** (`grep` over the tree: zero call
+# sites today) - and masking (`CORE_PWRCTL_MASK <- 0`) would leave the driver's own handshake
+# permanently incomplete, because `sdhci_msm_check_power_status`' completion is written by the handler
+# rung 8 installs (`sdhci-msm.c:2092-2096`).
+#  * THE HANDLER IS THE VENDOR'S OWN, WITH THE THREE ARMS THAT SLEEP ABSENT, and the vendor's own
+#    `devm_request_threaded_irq(..., NULL, sdhci_msm_pwr_irq, IRQF_ONESHOT, ...)` (`:2937-2939`) is the
+#    evidence: a NULL primary over ONESHOT makes it a THREADED handler, because
+#    `sdhci_msm_setup_vreg`, `sdhci_msm_setup_pins` and `sdhci_msm_set_vdd_io_vol` may sleep - and this
+#    image's client runs in `fleh_irq_kernel`'s frame. What is left is the register handshake, which is
+#    the reading act: `readb(CORE_PWRCTL_STATUS 0xDC)`, `writeb(status, CORE_PWRCTL_CLEAR 0xE4)`, `mb()`,
+#    the decode, `writeb(ack, CORE_PWRCTL_CTL 0xE8)`.
+#  * THE ACK VALUE IS THE VENDOR'S OWN ON A PATH WITH NO REGULATORS: the probe's pre-acknowledge
+#    (`:2872-2889`) reads `STATUS`, writes it to `CLEAR`, ORs `BUS_SUCCESS` into `CTL` with no vreg call
+#    and no card present, and its comment says why (`CORE_SW_RST` may trigger a power IRQ if the previous
+#    status was BUS_ON). The rung's handler is that preamble moved to the moment the line is raised.
+#  * ONE CONSEQUENCE OF THE DECODE, PRE-REGISTERED BECAUSE IT CHANGES THE CENSUS: for
+#    `irq_status = BUS_ON` the vendor sets BOTH `pwr_state = REQ_BUS_ON` and `io_level = REQ_IO_HIGH`
+#    (`:2028-2029`), so act 6 runs - **`host->ioaddr + CORE_VENDOR_SPEC`'s read-modify-write in `hc_mem`**
+#    (`:2079-2085`) - and the handler is a THREE-store handler, not the two-store one a reader would
+#    predict. `hc_mem` therefore becomes `47 44 44 41 268` (`strb strh strh strb str`).
+#
+# AND THE SAME READING FOUND A DEFECT IN THIS LADDER: `#define CORE_VENDOR_SPEC 0x10C` (sdhci-msm.c:92)
+# is used **23 times in that file and every one of them is through `host->ioaddr`** (`:587`, `:597`,
+# `:646`, `:653`, `:2079-2085`, `:2416-2433`, `:2490-2512`) and **zero times through
+# `msm_host->core_mem`**. `host->ioaddr` is `hc_mem` (0xf9824900), so the register the driver's MCLK
+# select lives in is `hc_mem + 0x10C` = **0xF9824A0C** (inside the standard file's own vendor-specific
+# area, 16 bytes inside `hc_mem`'s declared 0x11c), while this ladder has read and written
+# `core_mem + 0x10C` = **0xF982410C** since 705. **707 section 2's "the field did not take" is an
+# ADDRESS ERROR and is corrected in place; whether the MCLK field took is UNMEASURED.** The census could
+# not catch it: it names windows by the `movt`/`movw` pair the ARM materializes, and the arm really does
+# materialize `core_mem`. Rung 8 reads BOTH addresses in one run and settles two-registers-or-alias;
+# until then no rung moves the store.
+#
+# THE COMMENT-ONLY CORRECTION IS PROVED BY A REBUILD AND A `cmp`: `entry_storage.c`'s claim that 0x10C
+# is "the fifth `core_mem` offset" is replaced by the correction paragraph, and the image rebuilt at
+# THE PRESSED ARM'S OWN SWITCHES (`STAGE90_XNU_STORAGE_PROBE=7` with the sixteen entry switches
+# `out/xnu_arm_entry-config.txt` records - a blind invocation is REFUSED BY NAME, and two of this step's
+# refusals were the build being right: `ENTRY_TRACE=0` "would shape nothing while the record said it
+# did" (692's clause, the m720 shape a second time), then `ISTACK_SEPARATE` defaulting to 1 where the
+# arm has 0). The build exits 0, its census line reads `core_mem [120 0 120 120 268 268 ] ... hc_mem
+# [47 44 44 41 ](strb strh strh strb )`, and **all seven arm files are byte-for-byte identical**:
+# stage90.img 9cacee09, stage90-qcdt.img f0ad4405, xnu_arm_entry.bin 7b1f3799, xnu_arm_entry.elf
+# ad9cac90, stage90.elf 00c28a18, stage90.bin 71086f45, stage90_fixture.macho 52bc9c35. So `out/` still
+# holds the pressed rung-7 arm with the identity readiness finds by hashing its `stage90-qcdt.img`.
+#
+# ONE THING THIS STEP MEASURED ABOUT ITSELF: **two builds at once produce a false verdict about the
+# artifact.** Two of the three rebuild attempts overlapped, and the loser exited 1 with
+# `FAIL: ast_taken_user is not in the linked image - 511's clause needs...` - a sentence about the
+# ARTIFACT, produced while the other build was mid-link rewriting the same object files. Run alone, the
+# same switches exit 0. The message was a reading of a half-written link: a check whose input another
+# writer is rewriting reports a property of the race. **The gate's rule for its firer - one gate, one
+# runner - has a third member: one build.** Memory row m721.
+#
+# STILL OWED AFTER THIS STEP: the rung-8 arm itself (this block is a pre-registration, not a build);
+# `CORE_VENDOR_SPEC`'s MCLK readback at the vendor's own address (rung 8 takes the two-address reading,
+# and moving rung 6's stores would be a re-baseline of its cells); the completion itself (a kernel
+# object); the RCG rate write; the card's rail (nothing in this image powers a supply). Carried
+# unchanged: what actually returns a run (8/17/24/27/24/27/25/28/18 s); the ending's first store
+# faulting (0x0fa0065c, UNREAD in 709); the width clause of the store census never fired on a WIDENED
+# DEVICE store; the 691 section 5 `entry_note_wfi` readback; `entry_reset.h`'s false IMEM claim; 676
+# section 6 / 677 section 6; the 684-owed runner clause; `tools/xnu_dt_requirements.py` and the
+# "master" value; the two peer-lane tripwire repairs; BIT(29) of `_clk_ahb_cbcr` published and unnamed;
+# the seam address pinned in two files; and the gate's narration of `STAGE90_XNU_STORAGE_PROBE`, now
+# EIGHT RUNGS SHORT once rung 8 exists (2-8) - peer lane, by message and never by edit (710's message to
+# `run-experiment-526` carries the rung list rather than asking the peer to read it out of the source).
