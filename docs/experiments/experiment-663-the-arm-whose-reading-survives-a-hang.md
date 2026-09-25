@@ -111,7 +111,11 @@ does not depend on the PMIC. (The entry side still has to *carry the address*, w
 entry image — a build, which this arm is anyway, and the reason this is a new pre-registration and not an edit
 to the acting arm.)
 
-**Two mechanisms, then, and the primary is now the second one:**
+**Two mechanisms, then — and the honest design is to force BOTH, in `platform_reboot`'s own order.** Its
+comment is not a preference: PS_HOLD *and* the bite are kept together precisely because either one alone
+has an unknown failure mode, and this arm has no way to tell which one would have worked. So: PS_HOLD
+first (the payload's order at `stage90_main.c:1067-1071`, whose comment says it preserves the RAM
+console), then the bite (`:314-315`'s idiom).
 
 1. **Watchdog bite (primary).** Two stores into a section already installed; the independent net; the
    device's own idiom; **no new mapping**. Its one requirement is that the section's attributes are the ones
@@ -126,6 +130,47 @@ to the acting arm.)
 
 Whichever is used, the arm must record **which** it used in its config, for the reason 574's record gives: a
 switch that decided the build and is not in the record is a switch the next reader cannot see.
+
+### 3.1 But the premise is a reset this device has failed to deliver five times — so rehearse it first
+
+The whole design rests on one sentence: *force the reset, and the run comes back with the pair*. **That
+sentence is in doubt, and the doubt is measured rather than speculative**, because the reset this design
+forges is the same class of reset that has already failed here:
+
+* The payload's watchdog was **armed** for this arm — the 652 capture carries
+  `hw_watchdog_bark_ticks_written=0x000c7fb5` and `hw_watchdog_bite_ticks_written=0x000dffac`, which over
+  `WDT_HZ = 32765` are the documented **25 s bark / 28 s bite** — and **nothing pets it once XNU runs**
+  (`hw_watchdog.c` writes `WDT_REG_RST` in exactly two places: the arming path at `:231` and the forced bite
+  at `:315`). So on any hang longer than 28 s the bite is due and fires on its own, with no software
+  involvement.
+* **And the phone did not come back.** The 03:53:50 run hung, the bite was due 28 s after the arming, and the
+  phone was still off the bus **282 s** later.
+* The gate has counted the same outcome four times before (*"the last four hangs (517's first run, 521, 522,
+  526) did NOT come back and each needed a power press"*, with 526's port silent for hours against a bite due
+  at 28 s).
+
+**So a forced reset may not return the run either**, and the failure would be indistinguishable from the
+hang it was meant to escape: another power press, another lost log, and a press spent on a design question
+rather than on the frontier. That is a bad way to learn this.
+
+**The fix is a rehearsal arm, and it costs one press:**
+
+> **An arm that does *nothing* at the seam except force both reset paths and not return.** No operation, no
+> pair, no new instrument. Its verdict is one bit and it is unambiguous: **the phone comes back (the reset
+> path works, and 663 §2's design is sound) or it does not (the reset path is broken here, and §2 would have
+> been a wasted press).**
+
+Three properties make this the right first spend rather than an indulgence:
+
+* Its **only** changed variable is the forced-reset code, so it attributes nothing else — 653's `SLOT_NULL`
+  rule again.
+* Its **failure direction is informative**, which is rare in this project: both outcomes buy a fact.
+* It is the same discipline 661 applied to R1–R3 and m668 to the mutant copy — **rehearse the scaffolding
+  before trusting the thing built on it.** Here the scaffolding is the reset.
+
+And it is cheap to make: 663 §2's step 4 verbatim, with steps 1–3 replaced by nothing. It must be recorded in
+`revert-set.txt` before its press like any other arm (R2 enforces it), and its own config must say which
+reset paths it forced.
 
 ## 4. What the arm must also do, and the one thing it must not
 
@@ -143,6 +188,9 @@ switch that decided the build and is not in the record is a switch the next read
   rather than an unrehearsed one, which is the improvement working. The rule stands anyway.
 
 ## 5. What this arm does not settle, and the arm after it
+
+**Note the ordering first: the rehearsal arm of §3.1 comes before this one.** It is cheap, its answer
+is a fact either way, and without it this arm's premise is unmeasured.
 
 The forced ending **deliberately discards the frontier question**: a run that reboots at step 4 says nothing
 about whether the boot would have got past the `pop`. That question needs an arm that *does* return through
