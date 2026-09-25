@@ -111,6 +111,12 @@ does not depend on the PMIC. (The entry side still has to *carry the address*, w
 entry image — a build, which this arm is anyway, and the reason this is a new pre-registration and not an edit
 to the acting arm.)
 
+**And the literal is new on both paths, measured rather than assumed:** the entry image contains **no**
+occurrence of `f9017` and **none** of `fc4ab000` (`arm-none-eabi-objdump -d … | grep -c` → 0 each), which is
+the same absence the gate's note reports as *"pool 0 / movt 0 / mov 0"*. So neither primitive is cheaper on the
+literal axis; **the bite's only advantage is the section it lands in**, and that is the whole of §3's first
+bullet.
+
 **Two mechanisms, then — and the honest design is to force BOTH, in `platform_reboot`'s own order.** Its
 comment is not a preference: PS_HOLD *and* the bite are kept together precisely because either one alone
 has an unknown failure mode, and this arm has no way to tell which one would have worked. So: PS_HOLD
@@ -172,6 +178,65 @@ And it is cheap to make: 663 §2's step 4 verbatim, with steps 1–3 replaced by
 `revert-set.txt` before its press like any other arm (R2 enforces it), and its own config must say which
 reset paths it forced.
 
+### 3.2 Why step 4 must be a hardware write: the OS's own reboot path is a NULL hook behind an infinite spin
+
+§2's step 4 says *"through the payload's own reboot path"*, and that phrase needs the paragraph below, because
+this tree holds **two** things a reader could call a reboot path and only one of them can reset this device.
+The other does not merely fail — it **hangs**, which is the one outcome this whole design exists to avoid. The
+measurement was taken on the frozen images and it closes the question rather than narrowing it.
+
+**(a) The platform hook is an unfilled `.bss` slot.** `PE_halt_restart` is
+`int (*)(unsigned int) = 0` at `iokit/Kernel/IOPlatformExpert.cpp:288` and is **never assigned a non-null
+value anywhere in the tree**: the only four assignments in the whole repo are that same `= 0` definition, once
+per XNU copy (`external/*/iokit/Kernel/IOPlatformExpert.cpp`, `:288` in the built 4570 tree), and every other
+mention is a read, a prototype, an `#include` comment or an export-list line — in the built tree,
+`IOPlatformExpert.h:65`, `config/IOKit.exports:98`, `osfmk/kdp/ml/x86_64/kdp_machdep.c:39` and the two reads
+in **`osfmk/i386/acpi.c:128,135`**, which are i386 sources this ARM build does not compile
+(`find out -name acpi.o` → nothing). In the image it is `0x805858d8` (`B`), and **both** overrides read it and
+take the `-1` branch when it is zero:
+
+| function | the read | the branch taken with the slot zero |
+| --- | --- | --- |
+| `IOPlatformExpert::haltRestart` (`0x801762c0`) | `0x801762d4  ldr r2,[r0]` ← `0x805858d8` | `0x801762dc  beq 0x801762ec` → **`mvn r0,#0`; `bx lr`** |
+| `IODTPlatformExpert::haltRestart` (`0x801781f0`) | `0x80178224  ldr r1,[r0]` ← `0x805858d8` | `0x8017822c  beq 0x80178240` → **`mvn r0,#0`; `pop {r4,pc}`** |
+
+So the virtual call `PEHaltRestart` makes — `0x8017712c`, vtable offset 892 through `gIOPlatform`
+(`0x805858d4`) — returns **-1 without performing any reset on either platform class**.
+
+**(b) `halt_all_cpus` does not return; it spins.** (`0x80011e84`, and it is the OS reboot path's last
+instruction)
+
+```
+80011ea0:  bl  8003a9b4 <printf>
+80011eb0:  bl  80177010 <PEHaltRestart>
+80011eb4:  b   80011eb4 <halt_all_cpus+0x30>      <- forever
+```
+
+`host_reboot` (`0x800fc3e8`) takes `halt_all_cpus` on its default branch and `PEHaltRestart` on the
+`r1 & 0x100` branch, and **neither touches PS_HOLD nor the watchdog**: there is no hardware write anywhere in
+the OS's own reboot path. An arm that entered it would hang with whatever `SCTLR.C` state the seam left and
+with nothing left to bring the phone back — strictly worse than doing nothing at all.
+
+**(c) It is not reachable from the seam in any case.** `reboot_kernel` (`0x8029f230`) has **exactly one** `bl`
+in the whole image — `bsd/kern/kern_xxx.c:140`, inside the `reboot(2)` syscall, whose only caller is userland —
+and **none** of `reboot`, `halt`, `shutdown` or `pei` is among the **77** names the entry image wraps
+(`nm … | grep __wrap_ | sed 's/^__wrap_//'`). So a `--wrap=reboot_kernel` hook, or a `--wrap=host_reboot` one,
+would be entered by nothing the arm can reach: the wrap would move `.text` for a hook no path calls.
+
+**So the rule §2 depends on, measured in three independent ways:** the only reset available to the entry side
+is an **explicit hardware write**, which is §3's two primitives. *"Use the OS's own reboot path"* is not a
+cheaper third option that was overlooked in this design — it is a NULL function pointer behind an infinite
+loop, and §3.1's rehearsal arm must implement step 4 as the writes, not as a call.
+
+**And (a) is a claim about a *scan*, so it needs the scan's own caveat — the first version of that paragraph
+was wrong from it.** `grep -rIn PATTERN .` in this environment **does not descend into `external/` at all**:
+the string `PE_halt_restart` has **55** occurrences under `external/` and a `.`-rooted recursion reports **4**,
+all of them in `docs/`, with **nothing on stderr** to say so; a control (`IOService::getPMRootDomain`, 127 hits
+under `external/`) reads **1**. The enumeration above was re-taken with the path named — `grep -rIn PATTERN
+external/` — which is why the four `= 0` definitions in four XNU copies are visible here at all. **A
+whole-tree grep is not evidence about `external/`**; the two claims that survive are the one verified by an
+explicit path and the one verified in the image by `nm`/`objdump`.
+
 ## 4. What the arm must also do, and the one thing it must not
 
 * **It must keep the acting arm's switches otherwise identical** (`SEAM_POC=1`, `SEAM_MEASURE=0`,
@@ -221,6 +286,8 @@ the exit — which is the arm after this one, and its design depends on this one
 
 No device action: no `fastboot`, no `adb`, nothing sent anywhere, **nothing written to storage**. Every
 reading is host-side — `hw_watchdog.c`'s and `stage90_main.c`'s and the payload map's sources, the entry
-image's symbol table, and the two logs from the 03:53:50 run. No build, no edit to any file in 660 §5's
-closure, and the arm still verifies against the `armed-seam-poc-a43304f2` park. `fastboot boot` only, never
-`flash`; the design in §2 ends a run through the payload's **own** named reboot path and not through storage.
+image's symbol table, and the two logs from the 03:53:50 run. **§3.2's readings are read-only too:**
+`arm-none-eabi-objdump -d` over `out/stage90/xnu_arm_entry.elf`, `nm` over the same file, and greps over the
+source tree — no write to `out/`, and no build. No edit to any file in 660 §5's closure, and the arm still
+verifies against the `armed-seam-poc-a43304f2` park. `fastboot boot` only, never `flash`; the design in §2
+ends a run through the payload's **own** named reboot path and not through storage.
