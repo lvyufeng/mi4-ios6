@@ -136,6 +136,26 @@ say() { printf '%s\n' "$*"; }
 step() { printf '\n== %s ==\n' "$*"; }
 die() { printf 'run_and_capture: %s\n' "$*" >&2; exit 1; }
 
+# **The self-test arm's answer is a TIME, so the run that spends the press measures it.** 666's arm
+# clears its one bit by how long the device takes to come back - ~28 s if the SoC's countdown fired,
+# ~90 s if the bounded spin did instead (`stage90_main.c:1244-1254` states both) - and until 669
+# nothing in this file computed that interval: an operator was expected to subtract two clock readings
+# in their head, on the run whose log is the only copy of the measurement. `BOOT_SENT_AT` is taken
+# immediately before the send and `RETURN_AFTER_S` is filled by `mark_return` at whichever of the
+# three tests saw the return, so the two are one reading and not two.
+#
+# It is the **empty string** while no return has been seen, and not zero. Zero would be a duration
+# ("came back instantly"), and "not measured" and "measured as zero" are different facts (the
+# distinction this file makes everywhere else). `summarise_log` prints the duration only when it is
+# non-empty, and says where it lives when it is not.
+BOOT_SENT_AT=""
+RETURN_AFTER_S=""
+mark_return() {   # mark_return HOW - the return was seen by test HOW
+  RETURNED=1
+  RETURN_HOW=$1
+  RETURN_AFTER_S=$(( $(date +%s) - BOOT_SENT_AT ))
+}
+
 # **Which arm the press is FOR, declared by the caller, with no default - and it is required.**
 # 654 section 6 named this file's exposure: the gate call is not atomic against a build ("the gate reads
 # five files in sequence, so a rebuild can put a *different* consistent pair in front of it"), and 660
@@ -542,7 +562,18 @@ adb_state() {
 
 summarise_log() {
   local log=$1
-  local markers=(hw_watchdog_enabled hw_watchdog_counter_running "deadman: armed"
+  # **The self-test arm's own keys were missing from this table until 669, and they are the ones that
+  # answer its question.** The arm in `out/` (the hardware-watchdog self-test) publishes FIVE
+  # `hw_watchdog_*` keys before it spins (`hw_watchdog.c:161-165`) and two SELFTEST sentences of its own
+  # (`stage90_main.c:1244-1254`), and this list carried two of the five and neither sentence - so the
+  # run whose whole purpose is to test the recovery net printed a marker table that could not show the
+  # net's own evidence. The table is not decoration: it is what the operator reads first, and a key that
+  # is not in it is a key nobody counts.
+  local markers=(hw_watchdog_enabled hw_watchdog_readback_ok hw_watchdog_counter_running
+                 hw_watchdog_countdown_plausible hw_watchdog_checksum
+                 "hw_watchdog SELFTEST: spinning"
+                 "hw_watchdog SELFTEST: deadline reached"
+                 "deadman: armed"
                  "apple_dt selftest ok" "exception"
                  "pc-sampling watchdog: rebooting after sample dump"
                  "platform_reboot entered")
@@ -638,6 +669,73 @@ summarise_log() {
   # like a failed fix was a run that never happened. An `if` has status 0 on both branches.
   if [[ $abort -gt 0 ]]; then
     say "  an abort was logged - see the 'exception'/'abort' lines above"
+  fi
+
+  # --- the self-test arm's own question, and the one number that answers it ------------------------
+  #
+  # A self-test arm does not ask "did the boot get far": it asks **whether the SoC's own countdown
+  # reset the device**, and the answer is a TIME. The arm states its own two times in the log
+  # (`stage90_main.c:1244-1254` prints them with `log_hex32`, so they arrive as `~0x0000001c` and
+  # `~0x0000005a` rather than as 28 and 90), and the run that booted it measures the third: how long
+  # the device took to come back. This clause joins them, and it is here rather than in the run because
+  # the two arm-side numbers live in the LOG and the measurement lives in the RUN - neither site has
+  # both.
+  #
+  # **The selector is the arm's own sentence and not a switch**, deliberately: `--summarise` is used on
+  # logs captured in other sessions, where no configuration file is being read, and a clause gated on
+  # the build record would be silent for exactly the logs a later reader brings back. A log that
+  # carries "SELFTEST: spinning" is a log from a self-test arm, whoever booted it.
+  #
+  # The gap that this clause exists to close, measured 2026-09-25: the arm was parked and owed a press
+  # and *nothing in the tree turned its answer into a number*. The marker table had two of its five
+  # keys, the deadline sentence was not counted, and the runner never computed the return time at all -
+  # so the reading was three hex strings in a 60-line tail and a subtraction the operator was expected
+  # to do by hand, at the moment the run's log is the only copy of the measurement.
+  if grep -aq 'hw_watchdog SELFTEST: spinning' "$log" 2>/dev/null; then
+    local _line _nums _bite _deadline _n
+    _line=$(grep -am1 'hw_watchdog SELFTEST: spinning' "$log" 2>/dev/null || true)
+    # Both spellings of `log_hex32` are accepted - `ram_console.c:37` prints `0x%08x` and
+    # `xnu_log.c:29`'s raw variant prints the eight digits alone - because which one wrote this line is
+    # a property of where the arm was when it logged, not of the arm, and a reader that required one
+    # spelling would report the arm's own numbers as absent (m672's shape: an absence claim is a claim
+    # about how the value is encoded).
+    _nums=$(printf '%s' "$_line" | grep -oE '~(0x)?[0-9a-f]{1,8}' | sed 's/^~//; s/^0x//' || true)
+    say ""
+    say "  HARDWARE-WATCHDOG SELFTEST: this log carries the self-test block, so the arm that ran was"
+    say "    the self-test arm and its question is not whether the boot progressed - it is whether"
+    say "    the SoC's own countdown reset the device. That answer is a TIME, and the numbers that"
+    say "    settle it are the arm's own two - which the log states - and the one the run measured."
+    _n=0
+    while read -r _h; do
+      [[ -n $_h ]] || continue
+      _n=$(( _n + 1 ))
+      case $_n in
+        1) _bite=$(( 16#$_h )); say "      the arm's own statement: the hardware countdown should reboot us at ~${_bite}s" ;;
+        2) _deadline=$(( 16#$_h )); say "      the arm's own statement: if it does not, the bounded spin reboots us at ~${_deadline}s" ;;
+      esac
+    done <<< "$_nums"
+    if (( _n < 2 )); then
+      say "      (only ${_n} of the arm's two numbers could be read out of that line, so the two"
+      say "       candidate readings cannot be told apart from this log alone. The line that states"
+      say "       them is printed whole in the marker table above; read the numbers off it by hand.)"
+    fi
+    if [[ -n $RETURN_AFTER_S ]]; then
+      say "      this run measured: the device came back ${RETURN_AFTER_S}s after \`fastboot boot\` was called"
+      say "      **and that number includes the send and the payload's own start-up, so it is a"
+      say "      little larger than the arm's time** - 633 measured 1.1805 s of that prelude for the"
+      say "      park arm, and the two candidate readings are still far apart: a countdown that fired"
+      say "      lands near the first number, a countdown that did NOT fire lands near the second."
+      say "      Read the return time against BOTH, and read the exit code beside it (0 or 3 came"
+      say "      back, 2 did not): the deadline sentence's ABSENCE is not the countdown's verdict,"
+      say "      because it is also absent when the log was read before the deadline elapsed."
+    elif (( _n >= 2 )); then
+      say "      this run measured: **NOT IN THIS LOG** - the return time is not a property of a"
+      say "      captured log, so a \`--summarise\` of one cannot supply it. It is printed by the run"
+      say "      that booted it, in section 4, as 'the device came back Ns after this run called"
+      say "      fastboot boot'. Read that line beside the two numbers above; if the log arrived by"
+      say "      hand and no run printed it, the difference between ${_bite}s and ${_deadline}s is"
+      say "      3.2x, so the two readings are distinguishable from a stopwatch too."
+    fi
   fi
 
   # --- the idle window's near end, and it prints for every log that reached `cpu_idle` -------------
@@ -2795,6 +2893,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
     die "something rebuilt $OUT while this run was in flight. Nothing was sent. Re-run so the gate reads the bytes it is about to vouch for, and note the standing rule this measures: do not build while a battery or a press is running (654)"
   fi
 
+  BOOT_SENT_AT=$(date +%s)
   sudo fastboot boot -s "$SERIAL" "$IMAGE" || FB_BOOT_RC=$?
 
   # --- R4, second half: and the bytes sent were still those bytes when they left ----------------
@@ -2867,12 +2966,12 @@ if [[ $DRY_RUN -eq 0 ]]; then
     # the same `grep`, opposite correct answers - which is why the state reader was added as a *second*
     # reader at the mode-detection site rather than by rewriting this line.
     if sudo adb devices 2>/dev/null | grep -q "^$SERIAL"; then
-      RETURNED=1; RETURN_HOW="adb"; break
+      mark_return "adb"; break
     fi
     if [[ $ENUM_BEFORE != UNREAD ]]; then
       _now=$(serial_enum_count)
       if [[ -n $_now && $_now -gt $ENUM_BEFORE ]]; then
-        RETURNED=1; RETURN_HOW="host log, serial"; break
+        mark_return "host log, serial"; break
       fi
     fi
     # The port reading, and it is checked second on purpose: when both advance the serial is the
@@ -2880,7 +2979,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
     if [[ $PORT_BEFORE != UNREAD ]]; then
       _pnow=$(port_enum_count)
       if [[ -n $_pnow && $_pnow -gt $PORT_BEFORE ]]; then
-        RETURNED=1; RETURN_HOW="host log, port"; break
+        mark_return "host log, port"; break
       fi
     fi
     sleep 3
@@ -3077,6 +3176,27 @@ if [[ $DRY_RUN -eq 0 && $RETURNED -eq 0 ]]; then
   say "would have preserved the log - so a failure to return means the log is likely"
   say "unrecoverable anyway, but waiting is free and power-cycling is not."
   exit 2
+fi
+
+# **The interval the press is actually read by, printed while the run still knows it.** Section 5 and
+# the summary below both read the payload's LOG, and the log cannot contain this number: how long the
+# device took to come back is a fact about the host's clock and the send, not about anything the
+# payload wrote. For a self-test arm it is the answer (`stage90_main.c:1244-1254`: the countdown
+# rebooting us at ~28 s, the bounded spin at ~90 s), so it is printed here, next to the exit code it
+# must be read beside, rather than left to two clock readings in the operator's head.
+#
+# Printed only when a return was seen and only when the clock was taken: `BOOT_SENT_AT` is set
+# immediately before the send, so `--dry-run` has neither and prints nothing - "not measured" must not
+# render as a number.
+if [[ $DRY_RUN -eq 0 && $RETURNED -eq 1 && -n $RETURN_AFTER_S ]]; then
+  say ""
+  say "the device came back ${RETURN_AFTER_S}s after this run called \`fastboot boot\` (seen via: $RETURN_HOW)."
+  say "**Read this number beside the exit code, and for a self-test arm read it as the answer.**"
+  say "  It is measured from the send, so it includes the transfer and the payload's own start-up"
+  say "  (633 measured 1.1805 s of that prelude for the park arm) and it is therefore a little"
+  say "  larger than the arm's own stated time. The candidate times for a self-test arm are far"
+  say "  apart - for the arm in \`out/\`, ~28 s if the SoC's countdown fired and ~90 s if the bounded"
+  say "  spin did - and the summary below prints both of them out of the arm's own log line."
 fi
 
 # --- 5. capture, before anything else touches the device --------------------------------
