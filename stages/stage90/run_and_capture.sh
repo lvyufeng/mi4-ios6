@@ -736,6 +736,42 @@ summarise_log() {
       say "      hand and no run printed it, the difference between ${_bite}s and ${_deadline}s is"
       say "      3.2x, so the two readings are distinguishable from a stopwatch too."
     fi
+    # --- the device's own statement of how long it lived, and it is the one number a third outcome
+    # --- cannot hide from (677) -------------------------------------------------------------------
+    #
+    # **Why this second number exists at all.** The two candidate readings above are the arm's own
+    # predictions, and 677's run matched *neither*: the device came back inside a session shorter than
+    # the countdown, which is a third outcome the pre-registration did not contain, and this block
+    # could not say so from the log - because the only elapsed-time key the payload had was printed on
+    # the deadline path, i.e. only on the path that means the net did *not* fire. The host clocks had
+    # to reconstruct it afterwards, and that reconstruction is what the periodic tick replaces: the
+    # payload now writes `selftest_tick_us` once a second from inside the spin, into the ram_console,
+    # which a PS_HOLD warm reset preserves. So the **last** such line in the log is the device's own
+    # answer to "how long were you alive", stated at the moment before whatever ended it.
+    #
+    # Read it as a lower bound and say so: it is the last tick *written*, and the run ends somewhere
+    # in the following second. A log with no tick lines is an arm built before 677 and is reported as
+    # absent rather than as zero - the same distinction the `_elapsed` line above makes, and for the
+    # same reason (an absent key is not a value).
+    local _ticks _nticks _lasttick
+    _ticks=$(grep -a -o 'selftest_tick_us=0x[0-9a-f]\{1,8\}' "$log" 2>/dev/null | sed 's/.*=0x//' || true)
+    if [[ -n $_ticks ]]; then
+      _nticks=$(printf '%s\n' "$_ticks" | grep -c . || true)
+      _lasttick=$(printf '%s\n' "$_ticks" | tail -n 1)
+      say "      AND THE DEVICE'S OWN LAST TICK: selftest_tick_us = $(( 16#$_lasttick )) us, out of"
+      say "      ${_nticks} tick(s) in this log - which the payload wrote from inside the spin, once a"
+      say "      second, into the ram_console that the warm reset preserves. **It is a LOWER BOUND on"
+      say "      the payload's life** (the run ends within the following second), and it is the one"
+      say "      number that cannot be produced by a prediction: read it against the arm's two numbers"
+      say "      above. A last tick well BELOW the first number is 677's third outcome - reset, by"
+      say "      something, earlier than the net's own interval - and it is the case this line was"
+      say "      added for."
+    else
+      say "      (no \`selftest_tick_us\` line in this log: the periodic tick is 677's instrument and"
+      say "       an arm built before it does not carry it, so its absence says which image ran and"
+      say "       NOT that the payload lived under a second. 677's own capture is such a log, and the"
+      say "       session length had to be reconstructed from the host's clocks.)"
+    fi
   fi
 
   # --- the idle window's near end, and it prints for every log that reached `cpu_idle` -------------

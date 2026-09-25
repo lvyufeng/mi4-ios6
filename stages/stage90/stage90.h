@@ -4253,6 +4253,42 @@ struct stage90_xnu_macho_loader_result {
 #endif
 
 /*
+ * How often the self-tests state their own elapsed time while they spin - and this one is 677's
+ * instrument, so it is worth saying what it is for.
+ *
+ * The self-test's whole reading is a TIME: the device comes back at the net's own interval if the
+ * net fired, and at the deadline if it did not. Experiment 677 ran that arm and the device came
+ * back **earlier than either** - a third outcome - and the run could not say how long the payload
+ * had lived, because the only elapsed-time key in the image is printed on the *deadline* path
+ * (`stage90_selftest_bounded_spin`, the one path that means the net did not fire). So the number
+ * that would have settled it was published only when it was not the interesting one, and the
+ * measurement had to be reconstructed from two host clocks afterwards.
+ *
+ * A tick every second fixes that in the direction that survives the reset: the RAM console is in
+ * DRAM and a PS_HOLD warm reset preserves it, so the **last line the device wrote** comes back with
+ * the log and the device states its own session length in its own words, whatever ended it. One
+ * second is chosen for being far shorter than either net (25 s and 90 s) and far longer than the
+ * cost of a line - the console is 2 MiB (`RAM_CONSOLE_SIZE`) against ~4 KB for a 90-second run at
+ * this cadence, and `log_puts` **clamps at the end rather than wrapping**, so the failure mode of a
+ * cadence that were too fast is the loss of the newest ticks, which is why it is not.
+ */
+#define STAGE90_SELFTEST_TICK_US 1000000u
+
+/*
+ * Two properties, asserted rather than described, because both are the instrument's whole value.
+ * A tick at or beyond the deadline would never print (the loop leaves on the deadline first), which
+ * is a build whose extra line is unreachable and whose reading is therefore unchanged; and a tick of
+ * zero would print on every pass, spending the console - the failure mode `log_puts` cannot recover
+ * from, because it clamps at the end and the newest ticks are the ones lost.
+ */
+#if STAGE90_SELFTEST_TICK_US == 0u
+#error "STAGE90_SELFTEST_TICK_US is 0: the spin would report on every pass and spend the console"
+#endif
+#if STAGE90_SELFTEST_TICK_US >= STAGE90_SELFTEST_DEADLINE_US
+#error "STAGE90_SELFTEST_TICK_US is at or beyond STAGE90_SELFTEST_DEADLINE_US: the spin leaves on the deadline first, so the tick line would be unreachable"
+#endif
+
+/*
  * Produce a boot_args conforming to the contract in XNU's own entry code
  * (osfmk/arm/start.s), alongside - not instead of - the identity-based one the
  * Stage-owned ladder uses. Roadmap Phase 2; see xnu_boot_args_conformant.c and

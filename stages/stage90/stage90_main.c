@@ -1159,14 +1159,34 @@ uint32_t stage90_deadman_armed(void)
  * return - the point is that the device always comes back, whether or not the net under
  * test fired. The elapsed time is the result: a device back at the net's own timeout means
  * the net fired, and one back at the deadline means it did not.
+ *
+ * **And while it spins it states its own elapsed time once a second, which is 677's fix.** The
+ * reading above is a TIME, and 677's run came back *earlier than either candidate* - a third
+ * outcome - with no way to say how long the payload had actually lived, because this function's
+ * only elapsed key is printed on the deadline path, i.e. only when the net did *not* fire. The
+ * periodic line is written into the ram_console, which a PS_HOLD warm reset preserves, so whatever
+ * ends the run the last tick the device wrote comes back with the log and the device states its own
+ * session length in its own words. `STAGE90_SELFTEST_TICK_US` carries the choice of cadence and its
+ * bounds; the ticks are a *separate* key from `selftest_elapsed_us` on purpose, because the deadline
+ * path's key keeps its meaning - the final time, printed once, by the run that reached the deadline -
+ * and a reader that found a tick under that name would be reading a partial count as the total.
  */
 static void stage90_selftest_bounded_spin(uint32_t deadline_us, const char *deadline_msg)
 {
     uint64_t start = timebase_ticks();
+    uint32_t next_tick_us = STAGE90_SELFTEST_TICK_US;
 
     for (;;) {
-        if (timebase_elapsed_us(start, timebase_ticks()) >= deadline_us) {
+        uint32_t elapsed_us = timebase_elapsed_us(start, timebase_ticks());
+
+        if (elapsed_us >= deadline_us) {
             break;
+        }
+        if (elapsed_us >= next_tick_us) {
+            /* One line per crossing, and the next deadline is measured from the crossing rather
+             * than accumulated, so a late pass reports late once instead of emitting a burst. */
+            log_kv32("selftest_tick_us", elapsed_us);
+            next_tick_us = elapsed_us + STAGE90_SELFTEST_TICK_US;
         }
         __asm__ volatile ("nop" ::: "memory");
     }

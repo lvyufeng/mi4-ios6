@@ -446,9 +446,52 @@ if [[ $SEAM_POC -eq 1 && $SEAM_MEASURE -eq 1 ]]; then
 fi
 # ... and **the interception is on when either is**: one variable decides the link, so a clause that
 # asks "is the seam hooked" cannot answer from one switch and be wrong about the other.
-SEAM_ON=$(( SEAM_POC | SEAM_MEASURE ))
+# ---------------------------------------------------- 678: the arm that ends the run at the seam
+#
+# 662 sent the acting arm and nothing came back - no log, no pair - and 663 section 1 drew the
+# consequence: every instrument in this image writes into a ram_console that only a *returning* run
+# can be read from, so for a run that hangs, more instrumentation produces nothing. This switch is
+# the remedy, and it is the one next arm's whole content: after the seam publishes the pair,
+# `entry_seam_flush` **ends the run on purpose** through the entry image's own reset writes
+# (`entry_seam_end_run`, argued in `entry_trace.c`), so the pair is read out of a log that comes
+# back. The two questions the press is for are then both readable from one run - the pair says
+# whether the operation reached the line, and whether the pair arrived at all says whether the
+# operation hung the machine between the two reads.
+#
+# **It is a modifier and not a third body**, which is why its refusal below is not the POC/MEASURE
+# pair's. 663 section 4 requires the arm to keep the acting arm's switches *otherwise identical* -
+# the only difference from the run that did not return has to be the forced ending, or the run
+# attributes nothing - so this is built on top of `SEAM_POC=1`, and the two bodies it must not join
+# are the ones whose safety claim is that they cannot change what the machine does: the measurement
+# arm (no operation, no `mcr`, no store to the slot) and the no-operation arm. A body that ends the
+# run falsifies that claim, and rather than re-derive those clauses for a body they were not written
+# about, the build refuses the combination here and `entry_trace.c` `#error`s on it too.
+SEAM_END_RUN=${STAGE90_XNU_SEAM_END_RUN:-0}
+case "$SEAM_END_RUN" in
+    0|1) ;;
+    *) echo "STAGE90_XNU_SEAM_END_RUN must be 0 or 1, not [$SEAM_END_RUN]" >&2; exit 1 ;;
+esac
+if [[ $SEAM_END_RUN -eq 1 && $SEAM_POC -ne 1 ]]; then
+    echo "STAGE90_XNU_SEAM_END_RUN=1 with STAGE90_XNU_SEAM_POC=$SEAM_POC: the forced ending is a hardware" >&2
+    echo "write, so it is only defined on the operation arm - the measurement arm and the no-operation" >&2
+    echo "arm are booted on the claim that their body cannot change what the machine does, and ending the" >&2
+    echo "run is the one change those clauses exist to rule out (663 section 4, 678)" >&2
+    exit 1
+fi
+if [[ $SEAM_END_RUN -eq 1 && $SEAM_MEASURE -eq 1 ]]; then
+    echo "STAGE90_XNU_SEAM_END_RUN=1 and STAGE90_XNU_SEAM_MEASURE=1: the measurement arm's whole safety" >&2
+    echo "claim is that its body cannot change what the machine does, which is what lets it be booted" >&2
+    echo "without risking the device - and this switch ends the run. Enable END_RUN on the operation" >&2
+    echo "arm (SEAM_POC=1 SEAM_MEASURE=0) or not at all" >&2
+    exit 1
+fi
+# **The interception is on when any of the three is**, for the reason above and one more: an
+# `END_RUN` arm with no `--wrap` has no seam to end at, so its record would name a forced ending
+# while every call in the image is Apple's own.
+SEAM_ON=$(( SEAM_POC | SEAM_MEASURE | SEAM_END_RUN ))
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_SEAM_POC="$SEAM_POC")
 [[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_SEAM_MEASURE="$SEAM_MEASURE")
+[[ $ENTRY_TRACE -eq 1 ]] && STUB_DEFINES+=(-DSTAGE90_XNU_SEAM_END_RUN="$SEAM_END_RUN")
 # `--wrap` only when the tracer is in the image and the arm is on: the wrapper is `entry_trace.c`'s, so
 # a wrap without that object is an undefined reference, and a wrap with the flag off would be an
 # interception the config record says is not there.
@@ -501,7 +544,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_XNU_EXIT_POC_FLUSH STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE
                 STAGE90_XNU_IDLE_STACK STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_SEAM_POC STAGE90_XNU_SEAM_MEASURE
-                STAGE90_XNU_IDLE_NO_SLEEP)
+                STAGE90_XNU_SEAM_END_RUN STAGE90_XNU_IDLE_NO_SLEEP)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
 # the case statement below against the script's own environment reads - `grep -o '${STAGE90_[A-Z0-9_]*:-'`
@@ -540,6 +583,18 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
 # so the same clause refuses the wrong body in *both* arms instead of pinning the literal and refusing the
 # arm it was not written for).
 #
+# **678 is the fourteenth, and it is the first key whose arm is a *change of control flow* rather than a
+# change of what is measured.** `STAGE90_XNU_SEAM_END_RUN` makes `entry_seam_flush`, after it publishes the
+# pair, end the run through the entry image's own reset writes instead of returning to the idle exit whose
+# `pop {fp, pc}` is where the boot dies. It is in this record for the plainest form of the rule: a run of
+# this arm and a run of the operation arm differ in **whether the boot continues at all**, so a record that
+# lost the key would describe a log with no death `pc` and no pair as a hung baseline arm. And it is the
+# first key here whose *value* the compiled body is asserted to match - the clause below counts this arm's
+# call to `entry_seam_end_run` in `entry_seam_flush`'s own disassembly and requires it to be 1 when the key
+# is 1 and 0 when it is 0, which is what keeps the record and the artifact one statement
+# ([[mi4-a-claim-in-a-comment-is-not-a-check]]'s remedy, and 675 section 3's lesson one switch over: the
+# flag has to reach `entry_trace.c`'s own compile line, not only `STUB_DEFINES`).
+#
 # The three checkpoint keys are recorded as `(unset)` when empty rather than omitted, because a key the
 # writer does not write is a key the reader cannot require, and `X=` is not `X=(unset)` for the same
 # reason `#define X 0` is not "off" to `#ifdef X`. They are read from the environment here and not from
@@ -558,6 +613,7 @@ do
         STAGE90_XNU_IDLE_STACK)       _v=${STAGE90_XNU_IDLE_STACK:-1} ;;
         STAGE90_XNU_SEAM_POC)         _v=$SEAM_POC ;;
         STAGE90_XNU_SEAM_MEASURE)     _v=$SEAM_MEASURE ;;
+        STAGE90_XNU_SEAM_END_RUN)     _v=$SEAM_END_RUN ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_SKIP) _v=${STAGE90_ENTRY_CHECKPOINT_SKIP:-(unset)} ;;
@@ -568,16 +624,19 @@ done
 ENTRY_ARM_WAS=""
 ENTRY_ARM_WAS_KNOWN=0
 if [[ -f "$OUT/xnu_arm_entry-config.txt" ]]; then
-    # **A record that carries some of the thirteen keys is not a previous arm, it is a previous arm of
+    # **A record that carries some of the arm keys is not a previous arm, it is a previous arm of
     # blanks - and read as one it refuses every build.** The read-back below is `KEY=<value> ` per
     # key whether or not the key is there, so a record holding only `STAGE90_XNU_ENTRY_SHA256` and
     # `_BYTES` - any record written before 533 added the arm keys, or a hand-written one - gives a
-    # non-empty `ENTRY_ARM_WAS` of thirteen empty values. Measured by running the block against such a
+    # non-empty `ENTRY_ARM_WAS` of empty values. Measured by running the block against such a
     # record: it refused with `the arm already on disk was built with STAGE90_ENTRY_TRACE= ...` and
-    # no way forward but the override, on a build that had no previous arm to differ from. So all
-    # thirteen must read back before there is anything to compare, and a partial record is reported as
-    # *no previous arm* rather than silently treated as one - which is this block's own rule for a
-    # missing record, applied to a record that is missing the half it compares.
+    # no way forward but the override, on a build that had no previous arm to differ from. So every
+    # key of `ENTRY_ARM_KEYS` must read back before there is anything to compare, and a partial
+    # record is reported as *no previous arm* rather than silently treated as one - which is this
+    # block's own rule for a missing record, applied to a record that is missing the half it
+    # compares. **The count is `${#ENTRY_ARM_KEYS[@]}` and not a number in the sentence**, because
+    # 675 section 4 measured what a typed count costs: this block said "thirteen" in four places and
+    # 678's key made all four false on one commit, with nothing able to fail on them.
     _arm_all=1
     for _k in "${ENTRY_ARM_KEYS[@]}"
     do
@@ -588,8 +647,8 @@ if [[ -f "$OUT/xnu_arm_entry-config.txt" ]]; then
     [[ $_arm_all -eq 1 ]] && ENTRY_ARM_WAS_KNOWN=1
 fi
 if [[ -f "$OUT/xnu_arm_entry-config.txt" && $ENTRY_ARM_WAS_KNOWN -eq 0 ]]; then
-    printf '  xnu_entry_533: note: %s exists but does not carry all thirteen arm keys (%s), so the arm it describes is not known and the deliberate-change check cannot run for this build. It will be complete from this build on.\n' \
-           "$OUT/xnu_arm_entry-config.txt" "${ENTRY_ARM_WAS% }"
+    printf '  xnu_entry_533: note: %s exists but does not carry all %d arm keys (%s), so the arm it describes is not known and the deliberate-change check cannot run for this build. It will be complete from this build on.\n' \
+           "$OUT/xnu_arm_entry-config.txt" "${#ENTRY_ARM_KEYS[@]}" "${ENTRY_ARM_WAS% }"
 fi
 if [[ $ENTRY_ARM_WAS_KNOWN -eq 1 && "$ENTRY_ARM_WAS" != "$ENTRY_ARM_NOW" && ${STAGE90_ENTRY_ARM_CHANGE:-0} != 1 ]]; then
     {
@@ -832,6 +891,7 @@ if [[ $ENTRY_TRACE -eq 1 ]]; then
         -DSTAGE90_XNU_ISTACK_SEPARATE="$ISTACK_SEPARATE" \
         -DSTAGE90_XNU_SEAM_POC="$SEAM_POC" \
         -DSTAGE90_XNU_SEAM_MEASURE="$SEAM_MEASURE" \
+        -DSTAGE90_XNU_SEAM_END_RUN="$SEAM_END_RUN" \
         -DSTAGE90_XNU_IDLE_NO_SLEEP="$IDLE_NO_SLEEP" \
         -c "$BOOT_DIR/entry_trace.c" -o "$OUT/xnu_arm_entry_trace.o"
     say "  STAGE90_ENTRY_TRACE=1: tracing ${TRACE_LDFLAGS[*]}"
@@ -28794,11 +28854,59 @@ verify_trace_symbols() {
         seam_frame=$(awk '/^[[:space:]]*[0-9a-f]+:/ && ($3 == "push" || $3 == "stmdb" || ($3 == "sub" && $4 == "sp")) { n++ } END { printf "%d", n + 0 }' <<<"$seam_wrap_dis")
         [[ "${seam_frame:-0}" == 0 ]] ||
             layout_fail "__wrap_FlushPoU_Dcache adjusts the stack ${seam_frame} time(s): its first instruction reads sp as the slot's own address, and that is only true while the wrapper has no frame - a prologue's push would move sp below the two words and the arm would read and restore an address that is not the one the exit's pop reads"
+        # ---------------------------------------------------------------- 678: the ending is in the body
+        #
+        # **The one thing this arm's content rests on, read out of the image rather than asserted in
+        # prose.** `STAGE90_XNU_SEAM_END_RUN`'s whole effect is that `entry_seam_flush` does not
+        # return: the pair it publishes is read out of a log that comes back *because* the run ends
+        # here. So the switch's claim is a call site, and the count is what this clause compares with
+        # the switch - 1 when it is on, 0 when it is off - rather than a sentence about what the body
+        # does. Both a `bl` and a `b` are counted for the reason `seam_real` counts both: the callee
+        # is `noreturn`, so the compiler is entitled to tail-call it and the mnemonic is the
+        # compiler's business, while the *presence* of the call is the arm's.
+        #
+        # And the function's own body is read for the two writes, because a call to a function whose
+        # body was emptied would satisfy the count above while the run returned to the idle exit and
+        # died at the pop - the arm 678 exists to replace. What is asserted is the *shape* 674
+        # section 3 fixed (two stores, and a `wfe` loop the ending cannot fall through) and not the
+        # addresses inside it: the constants live in `entry_reset.h` beside their argument, and a
+        # clause that re-decoded `movw`/`movt` pairs here would be a second, weaker statement of the
+        # same thing - 664 measured that neither `fc4ab000` nor `f9017` appears as a literal at all.
+        seam_end=$(awk '/^[[:space:]]*[0-9a-f]+:/ && ($3 == "bl" || $3 == "b") && index($0, "<entry_seam_end_run>") > 0 { n++ } END { printf "%d", n + 0 }' <<<"$seam_body_dis")
+        [[ "${seam_end:-0}" == "$SEAM_END_RUN" ]] ||
+            layout_fail "entry_seam_flush reaches entry_seam_end_run ${seam_end:-0} time(s) while STAGE90_XNU_SEAM_END_RUN=$SEAM_END_RUN: this switch's whole content is that the run ends at the seam - after the pair is published and instead of returning to the idle exit whose pop is where this phase's boot dies - so a body that does not call the ending is the acting arm with an END_RUN record (a press spent reproducing the run that did not come back), and a body that calls it twice would end the run before something the arm was built to measure. The ending is deliberately a `noreturn` function of its own so that this count is a fact about the image rather than a property of the compiler's inlining"
+        if [[ $SEAM_END_RUN -eq 1 ]]; then
+            seam_endpoc=$(sym_addr entry_seam_end_run) ||
+                layout_fail "entry_seam_end_run is not in the linked image while STAGE90_XNU_SEAM_END_RUN=1: the seam's block is a call to it, and a build whose ending did not link is an arm whose record says the run ends at the seam while the body returns to the exit"
+            # **The window ends at the next symbol and not at `next_global`.** This function is
+            # `static` (it is `entry_trace.c`'s own, `noinline` so the build can count the call), and
+            # `nm` marks it `t` - the first build of this clause read its body against `next_global`
+            # and the `str` count came out **29**, because the next *global* is not the next symbol:
+            # the range ran on into `entry_str8` and past it, so a six-instruction ending was
+            # reported as twenty-nine stores. The bound here is objdump's own label lines, which is
+            # the disassembler's answer rather than a symbol table's, with a 256-byte cap so that a
+            # function with no following label still has an end.
+            seam_end_dis=$(arm-none-eabi-objdump -d --start-address=$seam_endpoc --stop-address=$(( seam_endpoc + 256 )) "$OUT/xnu_arm_entry.elf" \
+                | awk '/^[[:space:]]*[0-9a-f]+ <.*>:/ { n++; if (n > 1) exit } { print }')
+            read -r seam_endstores seam_endwfe <<<"$(awk '
+                /^[[:space:]]*[0-9a-f]+:/ && $3 == "str" { s++ }
+                /^[[:space:]]*[0-9a-f]+:/ && $3 == "wfe" { f++ }
+                END { printf "%d %d", s + 0, f + 0 }' <<<"$seam_end_dis")"
+            [[ "${seam_endstores:-0}" == 2 ]] ||
+                layout_fail "entry_seam_end_run contains ${seam_endstores:-0} str instruction(s) and not two: the ending is exactly 674 section 3's shape - the reason word, a dsb, PS_HOLD <- 0, a dsb - and a body with fewer stores is an ending that does not release the PMIC line, which is the one hardware write this arm's return is measured on, and one with more is a write to a device register this arm was not argued for"
+            [[ "${seam_endwfe:-0}" -ge 1 ]] ||
+                layout_fail "entry_seam_end_run contains ${seam_endwfe:-0} wfe instruction(s): the ending must not fall through - if the first store does not land, execution has to spin here rather than return into cpu_idle and reach the pop, which is the failure this whole arm exists to replace (674 section 3)"
+        fi
         seam_move=$(awk '/^[[:space:]]*[0-9a-f]+:/ && /mov[[:space:]]+r[0-9]+, sp/ { n++ } END { printf "%d", n + 0 }' <<<"$seam_wrap_dis")
         [[ "${seam_move:-0}" -ge 1 ]] ||
             layout_fail "no instruction in __wrap_FlushPoU_Dcache reads sp (mov rX, sp): the slot's address is sp at this wrapper's entry, and a wrapper that does not read it cannot be the arm this build's record says it is"
+        if [[ $SEAM_END_RUN -eq 1 ]]; then
+            seam_end_say=", and the run then ENDS HERE - STAGE90_XNU_SEAM_END_RUN=1, so entry_seam_flush calls entry_seam_end_run ($seam_endpoc, ${seam_endstores} stores and a wfe loop the ending cannot fall through): the reason word, a dsb, PS_HOLD <- 0, a dsb, and a spin - 663 section 2's step 4/5 and 674 section 3's shape, ending the run THROUGH THE ENTRY IMAGE'S OWN RESET WRITES instead of returning to the idle exit whose pop is where this phase's boot dies. **Read this arm's log for the pair and NOT for a death pc**: the run does not reach the pop, and its xnu_live_seam_end_run key is 1 where every earlier arm's is 0. A log with no pair and no death pc is the third outcome the press is for - the operation hung the machine between the two reads - and the SoC countdown the payload arms before the handoff is what brings that run back (one arming site, no pet anywhere in the image, measured returning the device in 677)"
+        else
+            seam_end_say=", and the readings published - **and this arm RETURNS to the idle exit** (STAGE90_XNU_SEAM_END_RUN=0), so the pair this run publishes is read out of a log whose run continues into the window whose pop is where the boot dies"
+        fi
         if [[ $SEAM_POC -eq 1 ]]; then
-            say "  xnu_entry_535: the seam is hooked - the exit's own call to FlushPoU_Dcache at ${seam_call} is redirected to __wrap_FlushPoU_Dcache ($seam_wrap), which reads sp and the return address before anything else runs, and where lr == STAGE90_XNU_SEAM_LR ($seam_lr_def, the address that call returns to, read out of entry_trace.c and checked against the image above) entry_seam_flush ($seam_body) runs: dsb, the slot's two words, Apple's own FlushPoU_Dcache (via __real_FlushPoU_Dcache, ${seam_real} call sites in the body - the seam's and the other three sites'), a PoC clean-and-invalidate of the slot's eight bytes (Apple's own FlushPoC_DcacheRegion at $seam_poc, whose body this clause reads as ${seam_mva} x cr7,cr14,{1} with ${seam_cln} clean-by-MVA and ${seam_inv} invalidate-by-MVA), the two words restored, and the readings published - and ${seam_wrapped} of the image's FlushPoU_Dcache call sites are redirected to it, ${seam_direct} left direct"
+            say "  xnu_entry_535: the seam is hooked - the exit's own call to FlushPoU_Dcache at ${seam_call} is redirected to __wrap_FlushPoU_Dcache ($seam_wrap), which reads sp and the return address before anything else runs, and where lr == STAGE90_XNU_SEAM_LR ($seam_lr_def, the address that call returns to, read out of entry_trace.c and checked against the image above) entry_seam_flush ($seam_body) runs: dsb, the slot's two words, Apple's own FlushPoU_Dcache (via __real_FlushPoU_Dcache, ${seam_real} call sites in the body - the seam's and the other three sites'), a PoC clean-and-invalidate of the slot's eight bytes (Apple's own FlushPoC_DcacheRegion at $seam_poc, whose body this clause reads as ${seam_mva} x cr7,cr14,{1} with ${seam_cln} clean-by-MVA and ${seam_inv} invalidate-by-MVA), the two words restored${seam_end_say} - and ${seam_wrapped} of the image's FlushPoU_Dcache call sites are redirected to it, ${seam_direct} left direct"
         else
             say "  xnu_entry_572: the seam is hooked and NOTHING RUNS BEHIND IT - the exit's own call to FlushPoU_Dcache at ${seam_call} is redirected to __wrap_FlushPoU_Dcache ($seam_wrap), which reads sp and the return address before anything else runs, and where lr == STAGE90_XNU_SEAM_LR ($seam_lr_def, checked against the image above) entry_seam_flush ($seam_body) runs: dsb, the slot's two words, Apple's own FlushPoU_Dcache (via __real_FlushPoU_Dcache, ${seam_real} call sites in the body), the same two words again, and the readings published - with ${seam_reads} load(s), ${seam_mcr} mcr (coprocessor write) / ${seam_mrc} mrc (coprocessor read, of which ${seam_mrc7} name cr7) and ${seam_region} call(s) to FlushPoC_DcacheRegion in the body, i.e. no cache maintenance, no store to the slot, and no way for this arm to change what the boot does (572 section 6) - and ${seam_wrapped} of the image's FlushPoU_Dcache call sites are redirected to it, ${seam_direct} left direct"
         fi
@@ -28813,8 +28921,8 @@ verify_trace_symbols() {
             layout_fail "xnu_live_seam_op is not among the entry image's strings: the two seam arms publish the same four keys and mean opposite things by them, so an image that does not say which arm it is leaves the reader interpreting one arm's pair with the other's rule - and this image's record names exactly one arm"
     else
         [[ -z "${seam_wrap:-}" ]] ||
-            layout_fail "STAGE90_XNU_SEAM_POC=$SEAM_POC and STAGE90_XNU_SEAM_MEASURE=$SEAM_MEASURE and __wrap_FlushPoU_Dcache IS in the linked image: either arm's flag is the presence of the interception, so an image carrying the wrapper with both off is not the arm this build's record names - it is 535 or 572 with a record that says 533"
-        say "  xnu_entry_535: no seam - both seam switches are 0 (STAGE90_XNU_SEAM_POC=$SEAM_POC, STAGE90_XNU_SEAM_MEASURE=$SEAM_MEASURE), so --wrap=FlushPoU_Dcache is not in this build's link, __wrap_FlushPoU_Dcache is not in the image (checked above, not assumed), and the exit's own call to FlushPoU_Dcache at ${pcexit:-?} is Apple's, reached directly - this image is the frontier arm 533 and nothing else"
+            layout_fail "STAGE90_XNU_SEAM_POC=$SEAM_POC and STAGE90_XNU_SEAM_MEASURE=$SEAM_MEASURE and STAGE90_XNU_SEAM_END_RUN=$SEAM_END_RUN and __wrap_FlushPoU_Dcache IS in the linked image: each arm's flag is the presence of the interception, so an image carrying the wrapper with all three off is not the arm this build's record names - it is 535, 572 or 678 with a record that says 533"
+        say "  xnu_entry_535: no seam - all three seam switches are 0 (STAGE90_XNU_SEAM_POC=$SEAM_POC, STAGE90_XNU_SEAM_MEASURE=$SEAM_MEASURE, STAGE90_XNU_SEAM_END_RUN=$SEAM_END_RUN), so --wrap=FlushPoU_Dcache is not in this build's link, __wrap_FlushPoU_Dcache is not in the image (checked above, not assumed), and the exit's own call to FlushPoU_Dcache at ${pcexit:-?} is Apple's, reached directly - this image is the frontier arm 533 and nothing else"
     fi
     # The kernel's own fields, by this configuration's own numbers - and read from the two places that
     # *state* them rather than written here a third time. `entry_stubs.c` names each offset once as a
@@ -30659,7 +30767,54 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # that describes the image carries it**, and the writer is a site a diff of the switch's own name
     # does not visit, because the diff is keyed on the *name* and this line did not exist to be found.
     echo "STAGE90_XNU_IDLE_NO_SLEEP=$IDLE_NO_SLEEP"
+    # **678's switch, and this line is the second time this writer has been the missing site.**
+    # Its own block above reads exactly like 594's and for the same reason: the switch was added to
+    # `ENTRY_ARM_KEYS`, to `STUB_DEFINES` and to `entry_trace.c`'s compile line, and *not* here -
+    # and the first build of the arm **exited 0** with a record that did not carry it. Nothing else
+    # in this file could have caught it either: the deliberate-change check compares
+    # `ENTRY_ARM_KEYS` against itself, the record the gate reads is written from this block, and the
+    # arm-key list therefore agreed with the switch while the artifact that *describes* the image did
+    # not mention it. On the gate's side the effect is the worst of the shapes this file names -
+    # `preflight_boot_check.sh` would have printed the operation arm's narration over an image whose
+    # body ends the run, i.e. a run whose log comes back with no death pc and no pair read by a
+    # reader expecting the frontier arm's.
+    #
+    # **So the check below is not here; it is after the file is written, and it compares the record's
+    # key set with `ENTRY_ARM_KEYS` in both directions.** A comment saying "remember this site" is
+    # what 594 wrote, and this step is the measurement that a comment about a site a name-keyed diff
+    # does not visit is not a constraint ([[mi4-a-claim-in-a-comment-is-not-a-check]]).
+    echo "STAGE90_XNU_SEAM_END_RUN=$SEAM_END_RUN"
 } > "$OUT/xnu_arm_entry-config.txt"
+
+# ------------------------------------------------- 678: the record and the arm-key list, both ways
+#
+# **The check 594's comment asked for and could not be.** Every site in the roster above is reached
+# by grepping the switch's *name*: the variable, the 0/1 case, `STUB_DEFINES`, the compile line,
+# `ENTRY_ARM_KEYS`, the record loop's `case`. The writer is the one site a name-keyed diff does not
+# visit - it is a list of `echo` lines whose text is `STAGE90_...` regardless of which switch is
+# being plumbed - and it is the only site the *gate* can read: the record is the sole description of
+# the image the gate ever sees. 594 found this by having a peer read its diff; the first build of
+# 678 walked into it again with the roster in front of it, and the build exited 0.
+#
+# So the record is compared with the list it is supposed to be, in both directions, and a
+# disagreement stops the build. The two set differences name the remedy, because the two directions
+# are two different faults: a key in `ENTRY_ARM_KEYS` and not in the record is a switch that shapes
+# the image and reaches no reader (this defect); a key in the record and not in the list is a record
+# line the deliberate-change check does not compare, i.e. a switch whose value this build would not
+# notice changing (`preflight_boot_check.sh:585` refuses this same direction on the gate's side, one
+# artifact over).
+_record_missing=$(printf '%s\n' "${ENTRY_ARM_KEYS[@]}" | LC_ALL=C sort -u \
+                  | LC_ALL=C comm -23 - <(awk -F= '!/^#/ && $1 ~ /^STAGE90_/ { print $1 }' "$OUT/xnu_arm_entry-config.txt" | LC_ALL=C sort -u))
+_record_extra=$(awk -F= '!/^#/ && $1 ~ /^STAGE90_/ { print $1 }' "$OUT/xnu_arm_entry-config.txt" | LC_ALL=C sort -u \
+                | LC_ALL=C comm -23 - <(printf '%s\n' "${ENTRY_ARM_KEYS[@]}" STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES | LC_ALL=C sort -u))
+[[ -z "$_record_missing" ]] \
+    || layout_fail "out/xnu_arm_entry-config.txt does not carry key(s) ENTRY_ARM_KEYS requires: $(printf '%s ' $_record_missing)- and the record is the only thing the gate reads about this image, so a switch that shapes the image and reaches no record is a run whose arm nobody read. Add the echo line to the writer block above; a switch is not plumbed until the artifact that describes the image carries it"
+[[ -z "$_record_extra" ]] \
+    || layout_fail "out/xnu_arm_entry-config.txt carries STAGE90_ key(s) ENTRY_ARM_KEYS does not list: $(printf '%s ' $_record_extra)- those are keys the deliberate-change check above does not compare, so this build would not notice one of them changing, and the gate refuses the same direction on its own side. Add the name to ENTRY_ARM_KEYS and the case arm to the record loop, or drop the echo line"
+# The list and the file are the same *set*; the count is printed because the sets being equal is
+# what makes the two refusals above the whole of the statement, and a future key that is added to
+# both lists but not to the writer would otherwise show up only as this number not moving.
+say "  xnu_entry_678: the record carries ${#ENTRY_ARM_KEYS[@]} arm key(s) plus the two artifact keys, which is exactly the set ENTRY_ARM_KEYS names - compared in both directions against the file just written, so the writer block above is checked rather than remembered"
 
 # ------------------------------------------------- 533: **the sources of this image, by content**
 #

@@ -48,8 +48,21 @@ static uint32_t cache_line_bytes(void)
  * has run `cpu_init` on, `do_cacheid()` (`osfmk/arm/cpuid.c:222-265`) selects L1, reads CCSIDR, and
  * then selects **L2** and reads it again, and never selects L1 back - so anything of ours that runs
  * after XNU inherits CSSELR = 2 and reads the L2's geometry out of it. That is measured, not
- * inferred: experiment 195's entry image read `CSSELR = 2` and a 4096-set, 8-way, 128-byte
- * description (4 MB) on this device, where the L1 is 64 sets, 4 ways, 64 bytes (16 KB).
+ * inferred: experiment 195's entry image read `CSSELR = 2` and this device's L2 description on this
+ * device, where the L1 is 64 sets, 4 ways, 64 bytes (16 KB).
+ *
+ * **The L2's own numbers are corrected by 676, and the correction is the defect this file is
+ * named in.** The sentence above used to give that description as "a 4096-set, 8-way, 128-byte
+ * description (4 MB)" - and 4096 is not a decode of any register word. The measured word is
+ * `0xf0ffe03b`: `LineSize` 3, `Associativity` 7 and `NumSets` 2047, i.e. **2048 sets of 8 ways of
+ * 128-byte lines, 2 MiB**, and the nearest misread of the word (bits[27:12]) gives 4095, not 4096.
+ * 4096 is the **compile-time** L2 geometry (`__ARM_L2CACHE_SIZE_LOG__=21` with `L2_CLINE=6` is 4096
+ * sets of 64-byte lines) - one value with two definitions, one file apart, which is why this
+ * comment and `entry_stubs.c`'s were wrong together. XNU's own source corroborates the register:
+ * `cpuid.c:275` says "capri has a 2MB L2 cache" and this device is capri. The geometry this
+ * function *returns* was never affected - it writes CSSELR, reads CCSIDR and decodes the fields
+ * below - so this is a comment about what a reader would have swept with, and the reader who
+ * matters is an arm built from the comment's numbers rather than from the register's.
  */
 static void cache_dcache_geometry(uint32_t *line_log2, uint32_t *ways, uint32_t *sets)
 {

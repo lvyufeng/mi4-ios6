@@ -64,12 +64,15 @@
  * (a call is free to use every one of them) and it cannot leave them where they are (the publisher's own
  * frame lands on them), so the caller stages them and the layout has to be one layout. See the header. */
 #include "entry_slot_capture.h"
+/* The two hardware writes that end a run and the reason word written first. One definition for this
+ * file *and* for `entry_trace.c`, where 678's seam ending makes the same two writes: the numbers
+ * used to be `#define`s here, and a `#define` in a `.c` is invisible one translation unit over, so
+ * a second writer could only have copied them. See the header for why that is the one thing not to
+ * do. */
+#include "entry_reset.h"
 
 #define RAM_CONSOLE_BASE   0xde500000u
 #define RAM_CONSOLE_SIG    0x43474244u  /* 'DBGC' */
-#define RESTART_REASON     0x0fa0065cu
-#define RESTART_NORMAL     0x78665501u
-#define MSM8974_PSHOLD     0xfc4ab000u
 
 #define ENTRY_STACK_BYTES  0x8000u
 
@@ -3563,12 +3566,26 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
      *
      * Experiment 195 measured what that costs. The sweep below enumerates the D-cache by set and
      * way from CCSIDR, and the value it was handed - `cssidr_before` below, 0xf0ffe03b on this
-     * device - decodes to 4096 sets of 8 ways of 128-byte lines, four megabytes. That is not a
-     * 16-or-32 KB L1, so the sweep was enumerating an L1-shaped address space from a description of
-     * something else, and the results buffer did not reach DRAM: the log came out with an empty
-     * buffer and no way to say whether the probe had run. `cache_ops.c` states the same assumption
-     * ("which defaults to the L1 data cache") and gets away with it because the payload is the only
-     * thing that has run when it does this.
+     * device - is an **L2** description, because XNU's `do_cacheid` (`cpuid.c:265`) leaves CSSELR
+     * at the L2 and never selects the L1 back: 2048 sets of 8 ways of 128-byte lines, two
+     * megabytes. That is not a 16-or-32 KB L1, so the sweep was enumerating an L1-shaped address
+     * space from a description of something else, and the results buffer did not reach DRAM: the
+     * log came out with an empty buffer and no way to say whether the probe had run. `cache_ops.c`
+     * states the same assumption ("which defaults to the L1 data cache") and gets away with it
+     * because the payload is the only thing that has run when it does this.
+     *
+     * **Corrected by 676, and the old sentence here was one value with two definitions.** This
+     * comment, and `cache_ops.c`'s, both said this same register word "decodes to 4096 sets of 8
+     * ways of 128-byte lines, four megabytes", and 4096 is a real number from a different source:
+     * it is the **compile-time** L2 geometry (`__ARM_L2CACHE_SIZE_LOG__=21` with `L2_CLINE=6` is
+     * 4096 sets of 64-byte lines), not a decode of the register. No field boundary gives 4096 from
+     * 0xf0ffe03b - `NumSets` is 2047, so the set count is 2048, and the nearest misread of the
+     * word gives 4095 - so what happened here was a compile-time number wearing the measured
+     * value's name. The two corroborations are XNU's own: `cpuid.c:275` says "capri has a 2MB L2
+     * cache" (this device is capri), and `cpuid.c:289`'s `vm_cache_geometry_colors` is an integer
+     * at 2048 sets (64) and not at 4096 (128). **Nothing about the argument above changes** - 2 MiB
+     * is no more an L1 than 4 MB was - but a reader who took the numbers would have swept a
+     * 2048-set cache as if it had 4096 sets.
      *
      * So CSSELR is now written rather than assumed. The two readings are kept and printed because
      * the pair is the evidence: what the sweep would have used, and what the L1 actually is.
@@ -4224,9 +4241,9 @@ __attribute__((noreturn, noinline)) void entry_epilogue(const char *why)
         entry_write("\n");
     }
 
-    *(volatile uint32_t *)(uintptr_t)RESTART_REASON = RESTART_NORMAL;
+    *(volatile uint32_t *)(uintptr_t)STAGE90_ENTRY_RESET_REASON_ADDR = STAGE90_ENTRY_RESET_REASON_NORMAL;
     __asm__ volatile ("dsb sy" ::: "memory");
-    *(volatile uint32_t *)(uintptr_t)MSM8974_PSHOLD = 0u;
+    *(volatile uint32_t *)(uintptr_t)STAGE90_ENTRY_PSHOLD_ADDR = 0u;
     __asm__ volatile ("dsb sy" ::: "memory");
 
     for (;;) {

@@ -118,6 +118,11 @@
 /* `struct entry_slot_keys` and `STAGE90_SLOT_CAPTURE`, one definition for this file and for
  * `entry_stubs.c`: the four loads are taken here and published there. See the header. */
 #include "entry_slot_capture.h"
+/* 678: the two hardware writes that end a run and the reason word written first. One definition for
+ * this file and for `entry_stubs.c`, which used to hold them as `#define`s of its own - a `.c`
+ * `#define` does not reach this translation unit, and the seam's ending below is the second writer.
+ * See the header. */
+#include "entry_reset.h"
 
 /* entry_stubs.c. Records into `g_kv_buf`, which only an epilogue writes out - see above. */
 extern void entry_kv(const char *key, uint32_t value);
@@ -436,6 +441,80 @@ extern void FlushPoC_Dcache(void);
 
 #if STAGE90_XNU_SEAM_POC && STAGE90_XNU_SEAM_MEASURE
 #error "STAGE90_XNU_SEAM_POC and STAGE90_XNU_SEAM_MEASURE are two arms of one seam: enable one"
+#endif
+
+/*
+ * ---------------------------------------------------------------- 678: the arm that ends the run at the seam
+ *
+ * **The problem this switch exists for is not in this file, it is in the machine.** Every instrument
+ * this image has writes into the ram_console in the top of DRAM, and the top of DRAM is reachable
+ * only by a run that comes back. So for a run that hangs, *no* amount of instrumentation produces a
+ * reading: the log exists and is lost. That is not a hypothesis - it is 662, the acting arm sent and
+ * never seen again, and the fifth such non-return in this phase - and it closes a whole class of
+ * next steps, because "add one more key before the `pop`" cannot be read out of a non-return.
+ *
+ * **So the arm after that one does not instrument more; it makes the run end in a return.**
+ * `STAGE90_XNU_SEAM_END_RUN=1` is 663 section 2 step 4/5: the seam reads the slot, runs whichever
+ * operation its own switches put behind it, publishes the pair exactly as before, and then **ends
+ * the run on purpose** instead of returning to the idle exit whose `pop {fp, pc}` is where the
+ * boot dies. The pair is then in a log that comes back, and the two questions the run is for -
+ * *did the operation reach the line* (the pair) and *did the operation hang the machine before
+ * this point* (whether the pair arrived at all) - are both readable from one press.
+ *
+ * **This is a modifier and not a third body, and 663 section 4 is why.** The whole value of the
+ * comparison is that the run differs from the arm that did not return by **one** thing, the forced
+ * ending; two changed variables would attribute nothing. So this switch is built on top of
+ * `SEAM_POC=1` and changes nothing about the interception, the two reads, the operation or the
+ * publish. It is also why the ending is added *after* the publish rather than instead of it: the
+ * publish is the reading, and an ending that discarded it would be a press spent on a clock.
+ *
+ * **It is refused against the bodies that must not change what the machine does.** The measurement
+ * arm and the no-operation arm are booted on an explicit claim - their body contains no cache
+ * maintenance, no `mcr`, and no store to the slot, so it "cannot change what the machine does" -
+ * and a body that ends the run falsifies that claim by construction. Rather than re-derive those
+ * clauses for a body they were not written about, `build_entry.sh` refuses `END_RUN` without
+ * `POC`, and the `#error` below refuses it in the same breath. So the arm this switch names is
+ * `SEAM_POC=1 SEAM_MEASURE=0 SEAM_END_RUN=1` and nothing else. (`SEAM_END_RUN` does turn the
+ * interception **on** in the build's own `SEAM_ON`, because an ending with no seam to end at is an
+ * image whose record says a seam was hooked while no call in it is redirected.)
+ *
+ * **The ending's shape, and why it is those six instructions.** 674 section 3: `platform_reboot`'s
+ * own shape - a store, `dsb sy`, then `for (;;) wfe` - so that "do not return" is a property of the
+ * control flow and not a sentence of intent. If the store lands, the machine is gone; if it does
+ * not, the `wfe` loop spins rather than falling back into `cpu_idle` and reaching the `pop`, which
+ * is the failure this arm exists to avoid. 674 section 1: **no new mapping and no new section
+ * install** - `0xfc400000` is already in the payload's Phase-4 L1 (`xnu_arm_vm_init_full_pmap.c:
+ * 410-416`), the table the handed-off kernel runs under, and the seam is entered from XNU's
+ * `cpu_idle`, i.e. on those tables. And 664: the store is not an inference - it is the *same
+ * store* `entry_epilogue` makes (`entry_stubs.c`, its tail), and **every run that has ever returned
+ * a log proves it lands**.
+ *
+ * **And the second net is already in the image, so this arm does not need one.** 663 section 3
+ * wanted the SoC's own countdown alongside PS_HOLD "because either one alone has an unknown failure
+ * mode", and assumed the entry side would have to carry the bite's address. It does not have to:
+ * the payload arms the MSM8974 countdown at `stage90_main.c:1205`, **before anything that can
+ * hang** and unconditionally (`STAGE90_HW_WATCHDOG` is `_ARMED` in `stage90.h`), exactly one call
+ * site, and **nothing anywhere pets it** - there is no pet function in the payload's own
+ * `hw_watchdog.c` surface. So a seam that spins is still reset by the SoC's counter, and 677
+ * measured that net returning the device from a payload that did nothing but spin. Two independent
+ * nets, neither of them new bytes in this image: PS_HOLD first (the measured one, 674 section 2's
+ * order), the countdown behind it.
+ *
+ * **What a run of this arm is read for, and what it cannot say.** The log carries the
+ * `xnu_live_seam_*` pair and **no death `pc`**, because the run ends here and not at the `pop` -
+ * which is deliberate and is 663 section 5's point: the forced ending *discards* the frontier
+ * question, and the arm that answers it is the one after this one. A non-return is the informative
+ * third outcome rather than a wasted press: it says the operation hung the machine **before** the
+ * ending, i.e. between the two reads, with the countdown's own interval as the clock. */
+#ifndef STAGE90_XNU_SEAM_END_RUN
+#define STAGE90_XNU_SEAM_END_RUN 0
+#endif
+
+#if STAGE90_XNU_SEAM_END_RUN && !STAGE90_XNU_SEAM_POC
+#error "STAGE90_XNU_SEAM_END_RUN ends a run through PS_HOLD, so it is only defined on the operation arm: the measurement arm and the no-operation arm are booted on the claim that their body cannot change what the machine does, and this switch falsifies it"
+#endif
+#if STAGE90_XNU_SEAM_END_RUN && STAGE90_XNU_SEAM_MEASURE
+#error "STAGE90_XNU_SEAM_END_RUN with STAGE90_XNU_SEAM_MEASURE: the measurement arm's safety claim is that its body cannot change what the machine does, and ending the run is the one change it exists to rule out"
 #endif
 
 /*
@@ -2247,6 +2326,48 @@ static uint32_t entry_seam_publish(uint32_t n)
     return (n <= STAGE90_SEAM_LIVE_MAX || (n & (n - 1u)) == 0u) ? 1u : 0u;
 }
 
+#if STAGE90_XNU_SEAM_END_RUN
+/*
+ * 678: end the run here, on purpose, and never come back.
+ *
+ * Separate from `entry_seam_flush` and a function rather than an inlined block for one measured
+ * reason: this is the arm's **only** guarantee that the pair above reaches a reader, so it must be
+ * small enough to read in a disassembly and must not be reachable from any other path. `noinline`
+ * keeps it a function so the build can count the seam body's calls to it (one) and so the ending's
+ * own body can be read as its own object; `noreturn` is what tells the compiler that the `wfe` loop
+ * at the bottom is the whole of the control flow, which is 674 section 3's requirement in the form
+ * the compiler can enforce - the seam cannot fall back into `cpu_idle`.
+ *
+ * **The addresses are macros from `entry_reset.h`, not literals here**, because `entry_stubs.c`'s
+ * `entry_epilogue` makes the same two writes and one value with two definitions is the defect this
+ * project has paid for most often; that header is where the reasoning and the two corroborations
+ * live (664's store proven on every returning run, 674 section 1's already-installed section).
+ *
+ * **Why `PS_HOLD` and not the watchdog bite.** 674 section 2 fixed the order as the payload's own
+ * (`stage90_main.c`'s `platform_reboot`: PS_HOLD first, the bite second) *precisely because either
+ * one alone has an unknown failure mode*, and this arm keeps that order by not needing the second
+ * write at all: the payload arms the SoC countdown before anything that can hang and nothing pets
+ * it, so the bite is already counting behind this store. The alternative - carrying `0xf9017014`
+ * into this image and writing BITE/RST here - adds a literal to an image that has never contained
+ * one (664 measured `f9017` at 0 occurrences in all four encodings) to buy a net that is already
+ * armed, and it would muddy the one time this arm is read for: a return at the countdown's interval
+ * rather than immediately is exactly the shape a *failed* PS_HOLD store would have.
+ */
+static void entry_seam_end_run(void) __attribute__((noreturn, noinline));
+
+static void entry_seam_end_run(void)
+{
+    *(volatile uint32_t *)(uintptr_t)STAGE90_ENTRY_RESET_REASON_ADDR = STAGE90_ENTRY_RESET_REASON_NORMAL;
+    __asm__ volatile ("dsb sy" ::: "memory");
+    *(volatile uint32_t *)(uintptr_t)STAGE90_ENTRY_PSHOLD_ADDR = 0u;
+    __asm__ volatile ("dsb sy" ::: "memory");
+
+    for (;;) {
+        __asm__ volatile ("wfe");
+    }
+}
+#endif
+
 __attribute__((noinline)) void entry_seam_flush(uint32_t slot, uint32_t lr)
 {
     uint32_t b0, b1, a0, a1, sctlr;
@@ -2312,7 +2433,22 @@ __attribute__((noinline)) void entry_seam_flush(uint32_t slot, uint32_t lr)
         entry_live_write("xnu_live_seam_b1", b1);
         entry_live_write("xnu_live_seam_a0", a0);
         entry_live_write("xnu_live_seam_a1", a1);
+        /* **And whether this arm ends the run here**, because that is the one thing that decides
+         * how the pair above is read: on the operation arm that returns, an absent pair is a seam
+         * that was never reached; on this arm an absent pair and no return say the operation hung
+         * the machine between the two reads. The key is published with the pair rather than left to
+         * the config record, for the same reason `_op` is: a run's own log is the only thing a
+         * capture is read with, and a missing line must not be read as a 0. */
+        entry_live_write("xnu_live_seam_end_run", (uint32_t)(STAGE90_XNU_SEAM_END_RUN));
     }
+#if STAGE90_XNU_SEAM_END_RUN
+    /* The forced ending. Last in the body, and reached only from the seam's own site: the four
+     * callers of `FlushPoU_Dcache` are told apart by `lr` at the top, and the three that are not the
+     * seam return through `__real_FlushPoU_Dcache` long before this line. See the switch block above
+     * for the shape, for why the two stores are these two, and for the second net this arm does not
+     * have to carry. */
+    entry_seam_end_run();
+#endif
 }
 
 /*

@@ -208,3 +208,82 @@ set=armed-selftest-wdog-ef0361a2 sha256=e3af19b4c2d57815277c7d7dff9e2f573d74cd00
 set=armed-selftest-wdog-ef0361a2 sha256=61c44584b5ec86826ce42f0d3eb789f1597481d67387ea1343921b429d57bf8f bytes=2104 file=xnu_arm_entry-sources.txt role=entry-source-manifest
 set=armed-selftest-wdog-ef0361a2 sha256=149999c72abc3b164f0132947cff99482a44f47289041879bfd54363a7fec1f0 bytes=6019072 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
 set=armed-selftest-wdog-ef0361a2 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-member-all-the-same
+#
+# ====================================================================================================
+# 678: armed-seam-endrun-88972ba9 - the seam PUBLISHES ITS PAIR AND THEN ENDS THE RUN ON PURPOSE
+# ====================================================================================================
+#
+# WHY THIS ARM EXISTS, AND IT IS 677's READING THAT ASKED FOR IT. The press was fired 2026-09-25 and
+# the device came back (`RUNNER EXIT=0`, capture 2062 B, sha 542edb59...) - so the bet "the device
+# returns whatever happens" is now measured, not asserted. But the payload lived AT MOST 22 SECONDS:
+# the clock in the capture jumps at 08:05:19, the kernel's own start is 08:05:41, and Android's
+# `2717:0368` binds at 08:06:03. The arm that was owed asked about the hardware watchdog's 28-second
+# countdown and about the 90-second bounded spin, and a run that ends in 22 seconds reaches NEITHER -
+# so the owed question came back UNANSWERED a second time, for a reason this time: not a hang, but an
+# early end. Both of 666's nets (the bite and the bounded spin) are downstream of a payload that did
+# not live long enough to be bitten. It also means the measurement that arm was built to make can never
+# be made by a run that has to RETURN to report it: 663's point - a hang destroys the reading, because
+# the log lives in DRAM and only a return can reach it - applies to an early end too.
+#
+# SO THE NEXT ARM DOES NOT RETURN AT ALL. The frontier (the boot dies at the idle exit's `pop {fp, pc}`)
+# is diagnosed by the pair `entry_seam_flush` publishes - `a1` and `b1`, the slot's value before and
+# after the flush. Returning to the idle exit to publish them is what every seam arm so far has done,
+# and it is the step that dies. This arm publishes the same pair and then ends the run through the
+# ENTRY IMAGE'S OWN reset path: `RESTART_REASON (0x0fa0065c) <- 0x78665501`, `dsb sy`, then
+# `PSHOLD (0xfc4ab000) <- 0`, `dsb sy`, then `for (;;) wfe`. That is exactly `entry_epilogue`'s tail,
+# which is how EVERY returning run comes back ([[mi4-the-run-ends-at-entry-epilogue]]) - so this arm
+# uses the one reset mechanism this project has measured to work, rather than inventing one.
+#
+# **THE DESIGN GOT SMALLER BETWEEN 663 AND THIS STEP, AND BOTH SIMPLIFICATIONS ARE MEASUREMENTS.**
+# 663 section 3 specified a new literal and a second `entry_mmio_section` install. 674 section 1
+# measured that neither is needed: the payload already maps BOTH registers into `stage90_candidate_l1`,
+# the L1 the handed-off kernel runs under (`xnu_arm_vm_init_full_pmap.c:410-416`) - `0xf9000000` (the
+# GIC megabyte) and `0xfc400000` (PS_HOLD at `0xfc4ab000`). 673 section 3 then measured that no switch
+# ends a run at the seam (`entry_seam_flush` publishes and returns at `entry_trace.c:2316`, and all
+# three seam arms return to the exit that dies), so the ending is about ten lines behind a new switch -
+# and that this switch is a MODIFIER of an existing arm rather than a new interception.
+#
+# THE ENTRY IMAGE IS WHAT CHANGED, SO THE TOKEN IS THE ENTRY'S. That is the rule the three sets above
+# follow and the exception 666 broke only because its payload was what changed. Here the payload's own
+# switch dump is BYTE-IDENTICAL to the seam arm's and the sleeper's (`6c2b6038...`) - the entry
+# switches are not in it - so the payload record cannot name this arm at all, and the set is
+# identifiable from `xnu_arm_entry-config.txt`, which is the file whose hash is a member of the set.
+#
+# THE PAYLOAD MOVED TOO, BY 136 BYTES, AND NONE OF IT IS THIS STEP'S. `stage90.bin` is 6,015,492 here
+# against 6,015,356 in armed-seam-poc-a43304f2, and the difference is commit 666's repair of
+# `timebase_elapsed_us` (a 32-bit product that could not exceed 44,739,242us against a 90,000,000us
+# deadline), which landed AFTER that arm's payload was built. It is not this step's edit, and it is
+# measured rather than argued: `timebase.c` compiled against the current `stage90.h` and against HEAD's
+# is byte-identical, and the payload rebuilt with this step's three source edits stashed is
+# byte-identical to the payload rebuilt with them applied (`9fd85093...`, `94c95342...` both ways). The
+# edits are a comment correction in `cache_ops.c`/`entry_stubs.c` (676's 2048-set x 8-way x 128-byte L2
+# decode, where the comment said 4096) and a one-second tick inside the bounded spin, which is behind
+# `STAGE90_HW_WATCHDOG_SELFTEST` and that switch is 0 in this arm - so both are inert in these bytes.
+#
+# **THIS RECORD IS WRITTEN BEFORE THE GATE HAS PASSED, DELIBERATELY, AND 673 section 3 IS WHY**: the
+# order is edit -> build -> park -> record -> gate -> re-arm. The gate is expected to REFUSE this set on
+# its first run and the refusal is not a defect in these bytes: `STAGE90_XNU_SEAM_END_RUN` is the
+# build's fourteenth arm key and the peer lane's `preflight_boot_check.sh` `ENTRY_CFG_KEYS` does not yet
+# carry it, so its converse clause ("carries key(s) this gate does not print") fires. That is the
+# cross-lane pair ([[mi4-file-lanes]]): the key-set equality is the build's half and the gate's half,
+# and the gate's half belongs to the lane that owns that file. **No press may be armed for this set
+# until the gate is green on it.**
+#
+# SUPERSEDES ONE SENTENCE RATHER THAN EDITING IT, the same rule the paragraph above follows. The
+# role= of the armed-selftest-wdog-ef0361a2 qcdt line reads "...and-THE-ARM-THE-NEXT-PRESS-SENDS...";
+# from this step that is this set. That line is not rewritten.
+#
+# MEASURED 2026-09-25, each file hashed in place in out/stage90/frozen/armed-seam-endrun-88972ba9/.
+# Nine of these eleven differ from armed-seam-poc-a43304f2 and the two that agree are the payload's own
+# switch dump and the fixture.
+set=armed-seam-endrun-88972ba9 sha256=94c95342821abe709e046260f4ca9f14a027d0846290e8529e7cc5c772d03555 bytes=8540160 file=stage90-qcdt.img role=qcdt-wrapped-payload-this-is-what-fastboot-boot-sends-and-the-arm-the-next-press-sends-STAGE90_XNU_ENTRY-1-this-payload-wraps-the-END_RUN-entry-image-and-its-own-switch-dump-is-byte-identical-to-the-seam-arms
+set=armed-seam-endrun-88972ba9 sha256=9fd8509309ec72a420b1de6e97046bc829ca4941ad243fe6aa4a829c0e76b504 bytes=6015492 file=stage90.bin role=raw-payload-bin-136-bytes-larger-than-the-seam-arms-and-every-one-of-them-is-commit-666s-timebase-repair-not-this-step
+set=armed-seam-endrun-88972ba9 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-byte-identical-to-the-653-seam-arm-and-the-sleeper-and-THIS-FILE-CANNOT-NAME-THIS-ARM-because-the-entry-switches-are-not-in-the-payloads-dump-the-set-is-identified-by-xnu_arm_entry-config.txt-instead
+set=armed-seam-endrun-88972ba9 sha256=aff819304249b6a6b4d108818d0fe91c2729000b4444b6de9bad8bf0245cfeb9 bytes=6077564 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-seam-endrun-88972ba9 sha256=a99a8a6206e9613a7a4e5f2063f01df1dffbac51fa79851c87bba7de82f46b90 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-seam-endrun-88972ba9 sha256=88972ba93ea34b30f4e586a73458512bd1fee401b79c209ea76f7fbacdcc0ac3 bytes=5519996 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ONE-FILE-THIS-STEP-CHANGED-it-is-the-653-entry-a43304f2-plus-the-SEAM_END_RUN-ending-so-the-seam-publishes-its-pair-and-then-writes-RESTART_REASON-and-PSHOLD-0-instead-of-returning-to-the-idle-exit-that-dies-at-the-pop
+set=armed-seam-endrun-88972ba9 sha256=a0d07bcbda63a3455040b4c5ca53052f65cc858ab3e822d4bfc565f6ed740c0d bytes=6698696 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-seam-endrun-88972ba9 sha256=224810c58fcbf5bb5a6084a9c7a4d7809f3da7294cfd6a8746d8032965b4990a bytes=783 file=xnu_arm_entry-config.txt role=entry-config-record-AND-THE-ONE-RECORD-THAT-NAMES-THIS-ARM-its-last-line-reads-STAGE90_XNU_SEAM_END_RUN-1-beside-SEAM_POC-1-SEAM_MEASURE-0-and-SLOT_NULL-1-so-the-arm-is-readable-from-the-entrys-own-record-and-not-only-from-this-file
+set=armed-seam-endrun-88972ba9 sha256=d2b8b6e37f11c197db986375bb33aa68953354355c6d80597849745e1ff1e1c0 bytes=2184 file=xnu_arm_entry-sources.txt role=entry-source-manifest-26-files-and-the-26th-is-the-new-entry_reset.h-which-is-the-single-definition-of-the-three-constants-the-ending-writes
+set=armed-seam-endrun-88972ba9 sha256=8cc3b8d0b2294fb29058b20794f731b270504743fb03851177841b9fbf6050c1 bytes=6019072 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
+set=armed-seam-endrun-88972ba9 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-member-all-the-same
