@@ -575,9 +575,22 @@ extern void FlushPoC_Dcache(void);
  * publish changes; the only difference from the operation arm is the site of a call into an ending that is
  * already in this file. The build asserts the wrapper's body contains exactly one call to it and that it is
  * that body's last `bl`, so "the ending is after the publish" is a fact about the image and not a sentence here.
+ *
+ * **687: the switch counts passes, and 687's press turned the sentence above into a measurement.** `=1` is the
+ * arm that answered "the operation's repair carries the `pop`" (the log carries
+ * `xnu_live_slot_post_calls=0x00000001`; 687). The very next question is the one that arm deliberately cannot
+ * answer - how far past the exit the boot gets - and it is asked by the same site with a bigger number:
+ * `=N` (2..4) ends the run after the **N-th** call, so the boot completes N-1 whole idle passes first. The
+ * numbering is a count of *this wrapper's returns*, which makes `xnu_live_slot_post_calls` a progress counter:
+ * it reads N when the boot reached the ending, and N-1 or less when it died before it. Both cells still come
+ * back with a log. Nothing else in the file moves, so the record's key set does not change either.
  */
 #ifndef STAGE90_XNU_POST_END_RUN
 #define STAGE90_XNU_POST_END_RUN 0
+#endif
+
+#if STAGE90_XNU_POST_END_RUN < 0 || STAGE90_XNU_POST_END_RUN > 4
+#error "STAGE90_XNU_POST_END_RUN is an idle-pass count: 0 = this ending is not in the image, 1 = 686's arm (end on the first exit return), 2..4 = end after that many returns. Above 4 the arm stops being a step and becomes a run that is allowed to hang before its own ending, which is the non-return this switch exists to avoid"
 #endif
 
 #if STAGE90_XNU_POST_END_RUN && !STAGE90_XNU_SEAM_POC
@@ -2276,8 +2289,44 @@ void __wrap_platform_cache_idle_exit(void)
      * brings the phone back (measured on 678's arm at the seam, 684), so a run whose `pop` returned and a
      * run whose `pop` died both end with a log; which of the two happened is read from
      * `xnu_live_slot_post_calls`, and only from it, because the abort's own keys are filled in both cells.
+     *
+     * **687: the switch is a PASS COUNT, not a flag, and the site did not move.** `=1` is 686's arm
+     * unchanged - end on the first call, the run that answered "the pop returns". `=N` for N >= 2 ends
+     * after the **N-th** call instead, which lets the boot complete N-1 whole idle passes first: the
+     * exit returns, `ClearIdlePop` and `cpu_idle_exit` run, `cpu_idle` is re-entered, its early tests
+     * pass, the enter wrapper opens the window, the `wfi` halts, and the exit returns again. So
+     * `xnu_live_slot_post_calls` becomes a **progress counter** and N is the question: it reads N on the
+     * arm the boot survived to the ending, and N-1 or less on one that died earlier - and both come back
+     * with a log, for the same reason 686's do. One site, one ending, one definition; the number is the
+     * only thing that changes between the arms, which is why this did not need a new key in the record.
+     *
+     * **The count is read out of `g_slot_post.calls`, which is the post site's own counter and not a new
+     * object.** The site has just incremented it two lines above, so the value here is exactly the number
+     * the note publishes as `xnu_live_slot_post_calls` - the arm's reading and the arm's trigger are one
+     * number with one definition, and `g_slot_post` is already in the image for the note to write to. A
+     * counter of this wrapper's own was the first build's shape and it is the wrong one twice over: it
+     * would be a second definition of a number the log already carries, and `build_entry.sh` refused it
+     * correctly for a third reason - the compiler materialized it at a base of its own choosing and the
+     * resulting `str r2, [r3, #36]` matched the clause that counts stores into a slot *table* (offset 36
+     * is one of the four staged words), so an object of ours was being read as a capture that was not
+     * there. Reading the site's own field removes all three problems at once.
+     *
+     * **The comparison is `>=`, and on the stored count rather than the published one.** `entry_slot_publish`
+     * deliberately publishes on a schedule (1..4 then powers of two), which is why the log's number is a
+     * floor; `calls` itself is incremented on every call, so this gates on the true count and no run can
+     * end one pass early because a publish was skipped.
+     *
+     * **Why the pass count and not the `wfi` wrapper.** `cpu_idle`'s own order is
+     * `bl __wrap_platform_cache_idle_enter` (`0x8000da28`), `bl __wrap_cpu_idle_wfi` (`0x8000da38`),
+     * `bl __wrap_platform_cache_idle_exit` (`0x8000da3c`), `bl ClearIdlePop` (`0x8000da44`) - so the
+     * `wfi` of the pass whose `pop` we are measuring is **before** that `pop`, and the first instrumented
+     * site on the far side of the exit is the *next* pass's entry into this same wrapper. Counting here
+     * is therefore both the earliest and the widest step: it covers `ClearIdlePop`, `cpu_idle_exit`, the
+     * loop and the whole next pass up to its exit, and it does not need a new call site or a new mapping.
      */
-    entry_seam_end_run();
+    if (g_slot_post.calls >= (uint32_t)STAGE90_XNU_POST_END_RUN) {
+        entry_seam_end_run();
+    }
 #endif
 }
 

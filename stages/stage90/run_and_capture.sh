@@ -1536,6 +1536,14 @@ summarise_log() {
     # the block that has to say which, and clause (5) reads the same value under its own name - one
     # `keyval` call per key, which is this file's rule for a log read.
     seam_post_end=$(keyval seam_post_end_run)
+    # **687: the same key is now a pass COUNT** (0 = no ending, 1 = 686's arm, 2..4 = end after that
+    # many exit returns), so the readings below compare against a number and not against 1. The
+    # conversion happens once, here, rather than at each of the three places that read it - and it is
+    # guarded, because a log with no such key must stay distinguishable from one that carries a zero.
+    post_end_n=0
+    if [[ $seam_post_end =~ ^0x[0-9a-f]+$ ]]; then
+      post_end_n=$(( seam_post_end ))
+    fi
     storm=$(keyval sleh_storm)
     panics=$(grep -a -c 'panic.*sleh_abort' "$log" || true)
     user_ones=$(grep -a -c 'xnu_live_sleh_user=0x0*1' "$log" || true)
@@ -1866,6 +1874,28 @@ summarise_log() {
         say "        address, is reading that store. 662 section 4's first explanation (\"the repair worked"
         say "        and the boot continued, then hung somewhere later\") is thereby measured rather than"
         say "        assumed, and the frontier is not the pop on this arm."
+      elif (( post_end_n >= 2 )); then
+        # **687: the same site, a pass count.** `slot_post_calls` is the progress counter, and the arm's
+        # own number is what it has to have reached: the ending fires on the Nth return, so a log that
+        # carries the counter at all carries N on a boot that reached the ending.
+        if (( post_calls >= post_end_n )); then
+          say "  AND ON THIS ARM THAT IS THE PRESS'S ANSWER (687). xnu_live_seam_post_end_run=$seam_post_end"
+          say "        and slot_post_calls=$post_calls: the exit returned ${post_calls} time(s) and the ending"
+          say "        fires on the ${seam_post_end}th, so **the boot completed ${seam_post_end} whole idle passes"
+          say "        past the frontier**. Each one is the sequence the phase has never been able to observe:"
+          say "        the pop returns, ClearIdlePop and cpu_idle_exit run, cpu_idle is re-entered, its early"
+          say "        tests pass, the enter wrapper opens the window, the wfi halts, and the exit returns"
+          say "        again. 686 measured that the operation's repair carries the pop (post_calls=1); this"
+          say "        says the OS **stays alive past it and keeps idling**, and that is the first statement"
+          say "        this project has about the boot after the frontier. The death this log also reports is"
+          say "        the ending's own store, deliberately placed there."
+        else
+          say "  FINDING (687) xnu_live_seam_post_end_run=$seam_post_end but slot_post_calls=$post_calls:"
+          say "        the ending is armed for the ${seam_post_end}th exit return and this log's counter is"
+          say "        below it, which cannot happen on a run that reached the ending - so read this log as a"
+          say "        counter that stopped publishing (the schedule prints on every call up to 4), not as"
+          say "        the arm's positive answer."
+        fi
       fi
     elif [[ $pre_calls =~ ^0x[0-9a-f]+$ ]] && (( pre_calls >= 1 )) \
       && [[ $rtcpre_calls =~ ^0x[0-9a-f]+$ ]] && (( rtcpre_calls >= 1 )); then
@@ -1875,8 +1905,8 @@ summarise_log() {
       say "        platform_cache_idle_exit, which is 520's pop {fp, pc} at the same pc. That is a"
       say "        localization and not a missing reading: the three notes share one schedule and one"
       say "        gate, so a site that published proves the later ones were reachable."
-      if [[ $seam_post_end == "0x00000001" ]]; then
-        say "        **AND ON THIS ARM THAT LOCALIZATION IS THE PRESS'S NEGATIVE ANSWER (686).**"
+      if (( post_end_n >= 1 )); then
+        say "        **AND ON THIS ARM THAT LOCALIZATION IS THE PRESS'S NEGATIVE ANSWER (686/687).**"
         say "        xnu_live_seam_post_end_run=$seam_post_end says the ending was moved to the far side of"
         say "        the pop, so the pop RAN and this branch is the cell that says it died anyway: the"
         say "        operation's clean-and-invalidate and its restore stores were in the image and did not"
@@ -1884,6 +1914,11 @@ summarise_log() {
         say "        never filled - and it refutes the reading that the operation is the repair, without"
         say "        costing the run: the ending is never reached, the abort path resets the phone, and the"
         say "        log comes back either way."
+        if (( post_end_n >= 2 )); then
+          say "        (687: and on this arm it also localizes *which* pass - the counter never reached the"
+          say "        ${seam_post_end}th return the ending is armed for, so the pop died on pass 1 or on a"
+          say "        pass before that number.)"
+        fi
       fi
       if [[ $pop_named -eq 1 ]]; then
         say "        And it agrees with clause (1): xnu_live_sleh_lr=$sleh_lr is the pop's own return"
@@ -2060,13 +2095,18 @@ summarise_log() {
       elif [[ $seam_end_run == "0x00000000" ]]; then
         say "  xnu_live_seam_end_run=$seam_end_run  the seam RETURNS: the pop runs, and the pair is read"
         say "  against its death - which is how the 535 and 572 cells below were written."
-        if [[ $seam_post_end == "0x00000001" ]]; then
-          say "  xnu_live_seam_post_end_run=$seam_post_end  **686: and the run then ends on the FAR side of"
+        if (( post_end_n >= 1 )); then
+          say "  xnu_live_seam_post_end_run=$seam_post_end  **686/687: and the run then ends on the FAR side of"
           say "  that pop**, deliberately, in the wrapper - so this is the one arm whose pair is read against"
           say "  a pop that ran AND whose ending is not what the seam does. Where the pass died is therefore"
           say "  read from slot_post_calls and from nothing else: present means the pop carried the"
           say "  operation's repair and the death is the ending's own store; absent means the pop died,";
           say "  which is the localization clause (3) printed above."
+          if (( post_end_n >= 2 )); then
+            say "  (687: and the ending fires on the ${seam_post_end}th return of this wrapper, so"
+            say "  slot_post_calls is a progress counter - it reads ${seam_post_end} on a boot that survived"
+            say "  that many idle passes and less on one that died earlier.)"
+          fi
         fi
       else
         say "  xnu_live_seam_end_run=${seam_end_run:-absent}  UNREAD - and it has two causes this log"
