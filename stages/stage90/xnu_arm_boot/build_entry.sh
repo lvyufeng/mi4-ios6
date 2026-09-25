@@ -599,6 +599,15 @@ esac
 # expected set gains exactly one byte at 41, the register's own absence assertion becomes its presence
 # assertion, and the bus-off write (0) plus the unbounded wait (experiment-708 sections 1.2-1.3) stay out
 # of the image by that clause and not by review.
+#
+# **Rung 8 (`710`) opens a different door, and the clause it opens is a SECOND one rather than a wider
+# one**: this image gains a client for a device's interrupt line - the vendor's own `sdhci_msm_pwr_irq`,
+# registered for intid 170 and armed at the distributor - so a body that used to be out of this image's
+# reach (an interrupt handler with device stores in it) is now in it, and the rung's clause classifies
+# that body's addresses and widths on its own. What rung 8 does NOT do is widen any of rungs 1-7's
+# windows: `core_mem` is still rung 6's set, the byte is still the last device act, and the loudest
+# consequence of the new door - a handler that runs in an exception and may not sleep - is a property no
+# store set can state, which is why that clause also refuses a base it cannot resolve.
 STORAGE_PROBE=${STAGE90_XNU_STORAGE_PROBE:-0}
 case "$STORAGE_PROBE" in
     0) ;;
@@ -609,7 +618,8 @@ case "$STORAGE_PROBE" in
     5) ;;
     6) ;;
     7) ;;
-    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4, 5, 6 or 7, not [$STORAGE_PROBE]" >&2
+    8) ;;
+    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4, 5, 6, 7 or 8, not [$STORAGE_PROBE]" >&2
        echo "        It is a `#if` in two files and not a value, so anything else would reach the" >&2
        echo "        preprocessor as a broken -D and fail there, with the cause named by the wrong" >&2
        echo "        tool (692); and it is a rung rather than a flag since 696, so a value above the" >&2
@@ -27918,6 +27928,17 @@ verify_pad() {
 }
 verify_pad
 
+# **710: a symbol's own SIZE, so a clause's window can be the FUNCTION rather than "up to the next
+# global".** `next_global` stops at global symbols only (`$2 ~ /^[A-Z]$/`), so a static function is
+# invisible to it and the window it computes runs on into whatever global comes next - which, for a
+# clause whose subject is "the stores in THIS body", is a scope claim wearing a window's clothes
+# (m671/m672/m702). `nm -S` carries each symbol's size, locals included (thousands of the `t` symbols
+# in this image have one), so `addr + size` is the body's own extent. A symbol with no size returns
+# nothing and the caller refuses, which is the direction a window has to fail in - and it is a
+# *stricter* window than `next_global` in every case, so a store the old window saw and the new one
+# does not was a neighbour's store being read as this body's.
+sym_size() { arm-none-eabi-nm -S "$OUT/xnu_arm_entry.elf" | awk -v s="$1" '$4 == s && $2 != "" { print "0x" $2; found = 1 } END { exit(found ? 0 : 1) }'; }
+
 # The two properties of the *linked* image the 455 instrument depends on, checked here rather than
 # asserted in a comment. `entry_rs_state` in `entry_stubs.c` calls `IOService::getResourceService()`
 # from the report path to read `gIOResources` - `_ZL12gIOResources` is a *local* symbol, so the
@@ -29904,8 +29925,16 @@ verify_trace_symbols() {
         # refused rather than guessed, which is the same direction UNK fails in.
         stb_probe=$(sym_addr entry_storage_probe) ||
             layout_fail "entry_storage_probe is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE, so the stores of this rung cannot be counted at all"
+        # **710: the end of this window is the probe's own SIZE, and it was `next_global` before.**
+        # The two agree today only because the probe's neighbours happen to be clean; a *static* function
+        # emitted between the probe and the next global sits inside the old window, and its stores would
+        # be read as the probe's - which is the rung-8 handler's exact shape, one function over. The
+        # window a clause about "the stores in this body" needs is this body's, and `nm -S` is where its
+        # extent is written down (`sym_size`).
+        stb_probe_size=$(sym_size entry_storage_probe) ||
+            layout_fail "entry_storage_probe has no size in the symbol table (nm -S), so this census's window has no end and the clause would be reading whatever follows it. Nothing is rebuilt by this refusal"
         stb_body=$(arm-none-eabi-objdump -d --start-address="$stb_probe" \
-                   --stop-address="$(next_global "$stb_probe")" "$OUT/xnu_arm_entry.elf")
+                   --stop-address="$(printf '0x%x' $(( stb_probe + stb_probe_size )))" "$OUT/xnu_arm_entry.elf")
         # Every store whose operand's base is not `sp`, as `<window> <base>:<offset>:<mnemonic>` in program
         # order, where the window is named from the **pair** of immediates this body materializes the base
         # register with: a `movt` high half >= 0xf000 says a device megabyte, and the low half - from a
@@ -30061,6 +30090,16 @@ verify_trace_symbols() {
         fi
         if [[ $STORAGE_PROBE -ge 7 ]]; then
             # **708: `POWER_CONTROL 0x29` ENTERS the linked image, and the refusal moves with it.**
+            #
+            # **710: and rung 8 does NOT move this set, which is the thing to read before changing it.**
+            # Rung 8's `CORE_VENDOR_SPEC` store goes to `hc_mem` (offset 0x10C, the vendor's own window for
+            # that register) - and it is NOT in this list, because this list is the stores in
+            # `entry_storage_probe`'s OWN BODY and the handler that makes that store is its own function:
+            # its address is taken by the registration, so the compiler must emit it out of line, and a
+            # window is a function. The rung-8 clause below classifies the handler's body and asserts its
+            # `hc_mem` store there. A reader who expected `47 44 44 41 268` here - as experiment-710
+            # sections 2 and 5.2 both wrote - was reading a WINDOW claim as an ARM claim, which is m702's
+            # shape: the arm does touch that address, and this window does not contain the touching.
             # Rung 7 is `mmc_power_up`'s PASS A - one 8-bit store of `SDHCI_POWER_180 | SDHCI_POWER_ON`
             # (`sdhci.c:1368-1370`, reached through `sdhci_set_power` because `SDHCI_QUIRK_SINGLE_POWER_WRITE`
             # is set on this host, `sdhci-msm.c:2897`) - so the expected set is `47 44 44 41` in program
@@ -30134,6 +30173,150 @@ verify_trace_symbols() {
         else
         [[ -z "${stb_gcc// /}" ]] ||
             layout_fail "entry_storage_probe stores [$stb_gcc] into the GCC megabyte (0xfc400000), and **no rung of this ladder below 6 writes the clock controller at any value**. Since 704 this window is classified as its own (`GCC`) and asserted empty here below rung 6, because the rung-5 arm reads four SDCC1 branch words, the apps root's five RCG words and CORE_VENDOR_SPEC 0x10C and stores nothing (experiment-704). A store to a clock-control register whose parent root is off is the bus wait nothing ends - the failure this project cannot read a log out of. Before 704 a store here was refused by the DEVBAD clause, whose stated subject is 'not one of the two windows this controller declares' - true, and a statement about the classifier's scope rather than about the clock. Read the body and decide whether the rung or the store is what changed. Nothing is rebuilt by this refusal"
+        fi
+        if [[ $STORAGE_PROBE -ge 8 ]]; then
+            # **710: the rung-8 handler's body, classified by ADDRESS and width.** This is a second
+            # window and not a fifth member of the list above, because the list above is the probe's own
+            # body and the handler is its own function (see that clause's 710 note). The subject is
+            # exactly the same quantity - which device addresses this arm touches, at which widths - and
+            # it is asked of a *different* function, so the two clauses cannot cover for each other.
+            #
+            # **Why addresses and not offsets.** The classifier above names a window from the
+            # `(movt, movw)` pair a body materializes and reports the store's own offset operand beside
+            # it. That is right for a body that materializes each window whole - and the handler does
+            # NOT: GCC keeps `core_mem`'s base (0xf9824000) in one register and expresses the vendor's
+            # `hc_mem + 0x10C` as `[r3, #2572]`, i.e. 0xA0C from the other window's base. The window
+            # the classifier would name is then `core_mem`, while the address the store reaches is
+            # `0xf9824a0c`, inside `hc_mem`'s declared 0x11c. **The window is a property of the
+            # ADDRESS**, so this clause computes `hi*65536 + lo + offset` per access and asserts the
+            # resulting addresses - which is invariant under the compiler's choice of where to fold, and
+            # is why this clause does not have to be re-broken by the next register allocator.
+            #
+            # What it asserts, and every member is a sentence of experiment-710: `0xf98240dc` read
+            # twice (the vendor's `readb_relaxed` and the probe's `readl_relaxed` of
+            # `CORE_PWRCTL_STATUS` 0xDC, the two-width pair) and once more after the acknowledge;
+            # `0xf98240e4` written once (`CORE_PWRCTL_CLEAR` 0xE4 <- the status, the vendor's own
+            # acknowledge); `0xf98240e8` read, written, read (`CORE_PWRCTL_CTL` 0xE8 <- the ack, with the
+            # readback 706's lesson asks for); and `0xf9824a0c` read, written, read (`hc_mem + 0x10C`,
+            # act 6, the read-modify-write the vendor's `IO_HIGH` arm performs - and the register §1.5
+            # measured this ladder reading in the other window). **Any other device address in this body,
+            # any other width at these, and a base this clause cannot resolve all refuse**: the last is
+            # `UNK`, and it refuses for the reason a window clause has to - a store whose address the
+            # clause cannot compute is one it must not vouch for.
+            stb_irq=$(sym_addr st_pwr_irq) ||
+                layout_fail "st_pwr_irq is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE - rung 8 is the client the registration files, so a build at this rung whose handler is absent is an arm whose line has no owner. Nothing is rebuilt by this refusal"
+            stb_irq_size=$(sym_size st_pwr_irq) ||
+                layout_fail "st_pwr_irq has no size in the symbol table (nm -S), so this clause's window has no end and it would classify whatever follows the handler as the handler's own body. Nothing is rebuilt by this refusal"
+            stb_irq_body=$(arm-none-eabi-objdump -d --start-address="$stb_irq" \
+                           --stop-address="$(printf '0x%x' $(( stb_irq + stb_irq_size )))" "$OUT/xnu_arm_entry.elf")
+            # **The classification, and three properties at once.** (1) The DISTINCT device
+            # accesses, in the order they first appear - because the compiler legitimately duplicates
+            # the handler's tail when it lays the decode out along two paths, and a duplicated
+            # instruction is a fact about the allocator and not about the arm. (2) Each pair's COUNT,
+            # with the readbacks held to a minimum rather than a number for the same reason: `dc` read
+            # as a byte must appear at least twice (before the acknowledge and after it), `e8` at least
+            # twice and `a0c` at least twice, because a source that drops a readback keeps the set
+            # identical and loses exactly that property. (3) The image-side accesses, which must be the
+            # handler's own counter and nothing else - so a device access the classifier cannot resolve
+            # cannot hide inside the class that is waived.
+            #
+            # **Why addresses and not the offsets the classifier above reports.** That classifier names
+            # a window from the `(movt, movw)` pair a body materializes and reports the store's own
+            # offset operand beside it. The handler does not materialize `hc_mem` at all: GCC keeps
+            # `core_mem`'s base (0xf9824000) in one register and expresses the vendor's
+            # `hc_mem + 0x10C` as `[r3, #2572]`, i.e. 0xA0C from the other window's base - so the window
+            # a base-pair test would name is `core_mem` while the address reached is `0xf9824a0c`,
+            # inside `hc_mem`'s declared 0x11c. **The window is a property of the ADDRESS**, and this
+            # clause computes `hi*65536 + lo + offset` with the high and low halves resolved in PROGRAM
+            # ORDER (the first draft resolved them whole-body and read the base as `f9820008`, because
+            # the register that carries the pad address is also the one the decode puts `REQ_IO_HIGH` =
+            # `8` in - m704's shape, caught by this clause's first run).
+            stb_irq=$(sym_addr st_pwr_irq) ||
+                layout_fail "st_pwr_irq is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE - rung 8 is the client the registration files, so a build at this rung whose handler is absent is an arm whose line has no owner. Nothing is rebuilt by this refusal"
+            stb_irq_size=$(sym_size st_pwr_irq) ||
+                layout_fail "st_pwr_irq has no size in the symbol table (nm -S), so this clause's window has no end and it would classify whatever follows the handler as the handler's own body. Nothing is rebuilt by this refusal"
+            stb_irq_body=$(arm-none-eabi-objdump -d --start-address="$stb_irq" \
+                           --stop-address="$(printf '0x%x' $(( stb_irq + stb_irq_size )))" "$OUT/xnu_arm_entry.elf")
+            { read -r stb_irq_dev; read -r stb_irq_cnt; read -r stb_irq_img; } < <(awk '
+                function isreg(x) { return x ~ /^(r([0-9]|1[0-5])|sp|lr|pc|sl|fp|ip)$/ }
+                $3 == "movt" {
+                    d = $4; sub(/,.*$/, "", d)
+                    v = $5; sub(/^#/, "", v)
+                    if (isreg(d) && v ~ /^-?(0x[0-9a-fA-F]+|[0-9]+)$/) curhi[d] = strtonum(v)
+                    next
+                }
+                ($3 == "movw" || $3 == "mov") {
+                    d = $4; sub(/,.*$/, "", d)
+                    v = $5; sub(/^#/, "", v)
+                    if (isreg(d) && v ~ /^-?(0x[0-9a-fA-F]+|[0-9]+)$/) {
+                        n = strtonum(v); if (n >= 0 && n <= 65535) curlo[d] = n
+                    }
+                    next
+                }
+                $3 ~ /^(ldr|str)/ && match($0, /\[[^]]*\]/) {
+                    op = substr($0, RSTART + 1, RLENGTH - 2)
+                    n = split(op, p, ",")
+                    base = p[1]; gsub(/[ \t]/, "", base)
+                    off = "0"
+                    if (n >= 2) { off = p[2]; gsub(/[ \t#]/, "", off); sub(/!$/, "", off); if (off == "") off = "0" }
+                    if (base == "sp" || base == "r13" || base == "pc" || base == "r15") next
+                    o = (off ~ /^-?[0-9]+$/) ? off + 0 : 0
+                    if (!(base in curhi))       { img["UNK:" $3] = 1; next }
+                    if (curhi[base] < 61440)    { img["IMG:" $3] = 1; next }
+                    if (!(base in curlo))       { img["DEVLO:" $3] = 1; next }
+                    key = sprintf("%08x:%s", (curhi[base] * 65536 + curlo[base] + o) % 4294967296, $3)
+                    cnt[key]++
+                    if (!(key in seen)) { seen[key] = 1; order[++no] = key }
+                    next
+                }
+                END {
+                    for (i = 1; i <= no; i++) printf "%s ", order[i]
+                    printf "\n"
+                    for (i = 1; i <= no; i++) k = order[i]
+                    for (k in cnt) printf "%s=%d ", k, cnt[k]
+                    printf "\n"
+                    ni = 0; for (k in img) ik[++ni] = k
+                    asort(ik); for (i = 1; i <= ni; i++) printf "%s ", ik[i]
+                    printf "\n"
+                }' <<<"$stb_irq_body")
+            stb_irq_want="f98240dc:ldrb f98240dc:ldr f98240e4:strb f98240e8:ldrb f98240e8:strb f9824a0c:ldr f9824a0c:str"
+            [[ "$stb_irq_dev" == "$stb_irq_want" ]] ||
+                layout_fail "st_pwr_irq's device accesses are [$stb_irq_dev] and rung 8's record says [$stb_irq_want] - i.e. CORE_PWRCTL_STATUS 0xDC (0xf98240dc) read as a byte AND as a word from one moment, CORE_PWRCTL_CLEAR 0xE4 (0xf98240e4) written with the status byte, CORE_PWRCTL_CTL 0xE8 (0xf98240e8) read and written with the ack, and hc_mem + 0x10C (0xf9824a0c, VENDOR_SPEC - the vendor's own window for that register, experiment-710 section 1.5) read and written. **The three arms that may sleep must not appear here at all**: sdhci_msm_setup_vreg, sdhci_msm_setup_pins and sdhci_msm_set_vdd_io_vol are regulator and pinctrl calls, and the vendor's own devm_request_threaded_irq(..., NULL, ..., IRQF_ONESHOT) is the statement that they cannot run in an exception - this client runs in fleh_irq_kernel's frame, so a handler that reaches one of them is a handler that sleeps in an interrupt. Any other device address, any other width, and a base this clause cannot resolve (reported separately as UNK or DEVLO) all refuse. An EMPTY list is the case to be most suspicious of: a call to st_read32/st_write32 would leave this window with nothing in it and the clause would read that emptiness as a clean body, which is rung 6's lesson about st_branch_enable one function over. Nothing is rebuilt by this refusal"
+            stb_irq_cnt_ok=$(awk -v c="$stb_irq_cnt" 'BEGIN {
+                    want["f98240dc:ldrb"] = 2; want["f98240dc:ldr"] = 1; want["f98240e4:strb"] = 1
+                    want["f98240e8:ldrb"] = 2; want["f98240e8:strb"] = 1
+                    want["f9824a0c:ldr"] = 2; want["f9824a0c:str"] = 1
+                    split(c, a, " ")
+                    for (i in a) { split(a[i], b, "="); n[b[1]] = b[2] + 0 }
+                    miss = ""
+                    for (k in want) if (n[k] < want[k]) miss = miss sprintf("%s=%d(want>=%d) ", k, n[k] + 0, want[k])
+                    print miss
+                }')
+            [[ -z "${stb_irq_cnt_ok// /}" ]] ||
+                layout_fail "st_pwr_irq's device accesses are [$stb_irq_cnt] and the counts below the record's minimum are [$stb_irq_cnt_ok] - the readbacks are the property, not the set: CORE_PWRCTL_STATUS must be read at least twice (the value read, and the readback after the acknowledge that says the latch let go), CORE_PWRCTL_CTL at least twice (before the ack store and after it - 706's lesson that a store's own readback is the cell), and hc_mem + 0x10C at least twice (act 6's read-modify-write and its readback). A source that dropped one keeps the set of addresses identical and loses exactly this, which is why the set check above cannot stand alone. The counts are a MINIMUM and not a number because the compiler may duplicate a tail across the decode's two paths. Nothing is rebuilt by this refusal"
+            [[ "$stb_irq_img" == "IMG:ldr IMG:str" ]] ||
+                layout_fail "st_pwr_irq's non-device memory accesses are [$stb_irq_img] and rung 8's record says exactly [IMG:ldr IMG:str] - the handler's own call counter in this image's .bss, read and incremented and nothing else. `UNK` and `DEVLO` must never appear here (they are the classes this clause cannot resolve, and a device access hiding in them is exactly what the waived class must not contain); an `IMG` entry beyond the counter is a device access the classifier read as this image's, which is m704's false-negative direction. Nothing is rebuilt by this refusal"
+            # **One producer per key, and this is the property `entry_irq.c`'s own record already
+            # assumes.** 500 wrote `xnu_live_irq_line_*` as THE record of a line; a second caller of
+            # `entry_irq_enable_line` would make those keys a value with two producers and the record
+            # would read as a claim about one line while being about two. `entry_irq_register_client`'s
+            # keys have the same shape. Both calls are expected in the PROBE's own body, because
+            # `st_pwr_irq_arm` is `always_inline` for the reason rung 6's `st_branch_enable` is: a helper
+            # the build cannot see into is a helper whose stores - or whose calls - are in another
+            # function while the record says they are this arm's.
+            [[ "$(grep -c -- 'bl.*<entry_irq_register_client>' <<<"$stb_body")" == "1" ]] ||
+                layout_fail "entry_storage_probe makes $(grep -c -- 'bl.*<entry_irq_register_client>' <<<"$stb_body") call(s) to entry_irq_register_client and rung 8 makes exactly one - the registration of intid 170. Zero means the rung's client is not registered at all (and the run would stop on the same line rung 7's press stopped on), two or more means the registry's own keys have more than one producer and the record reads as a claim about one line while being about two. Nothing is rebuilt by this refusal"
+            [[ "$(grep -c -- 'bl.*<entry_irq_enable_line>' <<<"$stb_body")" == "1" ]] ||
+                layout_fail "entry_storage_probe makes $(grep -c -- 'bl.*<entry_irq_enable_line>' <<<"$stb_body") call(s) to entry_irq_enable_line and rung 8 makes exactly one - arming intid 170. This is the function whose xnu_live_irq_line_* keys 500 wrote as the record of ONE line; a second caller would make those keys a value with two producers. Zero means the line is registered and never enabled, which is a client the dispatcher can never call. Nothing is rebuilt by this refusal"
+            # **The success path prints its reading, and that is a correction made the same day this
+            # clause was written.** Every assertion above is a refusal, so a passing rung-8 clause and a
+            # clause that never ran - the `-ge 8` guard is a switch, and a switch no build reads is
+            # exactly how a whole clause goes missing (m720) - print the same thing: nothing. The three
+            # lines below are the arm's evidence in the build log: the addresses and widths reached, the
+            # counts the readbacks are held to, the image-side accesses, and the two call counts that
+            # make the registration and the arming one each. Compare a rung-8 log WITH this line against
+            # a rung-7 log WITHOUT it before reading the absence of a FAIL as a pass.
+            echo "  xnu_entry_710: st_pwr_irq's device accesses are [$stb_irq_dev] with counts [$stb_irq_cnt], its non-device accesses are [$stb_irq_img], and entry_storage_probe calls entry_irq_register_client $(grep -c -- 'bl.*<entry_irq_register_client>' <<<"$stb_body") time(s) and entry_irq_enable_line $(grep -c -- 'bl.*<entry_irq_enable_line>' <<<"$stb_body") time(s) - intid 170 registered and armed once, the handler\'s device accesses at their own widths with their readbacks, and nothing in its body that may sleep"
         fi
         echo "  xnu_entry_698: the probe's stores, classified by window and offset - core_mem [$stb_core_off] through [$stb_core_base], hc_mem [$stb_hc_off]($stb_hc_mne) through [$stb_hc_base], gcc [$stb_gcc], image [$stb_img], ambiguous [$stb_amb], unknown [$stb_unk], unnamed-device [$stb_devbad$stb_devlo]"
     fi

@@ -192,6 +192,18 @@ written only at the end is a counter that is never read):
 `_pwr_after = 0x0B`, `_pwr_cc_before = 0xE045`, the nineteen `_pwr_*`), and the store census changes
 in exactly one window for one reason (§5): `hc_mem` gains the handler's `0x10C`.
 
+> **CORRECTED BY THE BUILD (measured 2026-09-25, the rung-8 arm's own build).** The clause above was
+> written as if `entry_storage_probe`'s window would gain an offset. **It does not.** The handler is a
+> separate function with its own symbol, so its `0x10C` read-modify-write is *outside* the probe's
+> window, and the probe's census line reads `hc_mem [47 44 44 41 ](strb strh strh strb )` exactly as
+> rung 7's did — four offsets, none of them 268. What moved inside that line is the messengers
+> (`through [sl r7 r3 r6 ]` → `through [sl r9 r3 r7 ]`) and nothing else, which is itself the reading:
+> the new call sites shifted the register allocator and left the store set identical. The `268` store
+> is asserted by `st_pwr_irq`'s own clause, against `0xf9824a0c`. **This is one value with two
+> readings** — the sentence *"the census changes in one window"* was true and the sentence *"`hc_mem`
+> gains `268`"* was about a different window ([[mi4-one-value-two-definitions]]); see §5.2 and §5.3,
+> corrected below, which is where the prediction was wrong rather than §1.5's address finding.
+
 ## 3. The placement, and why the first rung to move is not a reordering
 
 708 §3 states the ladder's rule — *"every rung appends to the probe so that the cells earlier rungs
@@ -244,20 +256,41 @@ letter of it**, so the reason has to be in the record rather than in the diff:
    §1.5 honest**: the *reading* of the two addresses adds no store, so the set that the clause
    asserts is the same set it asserted before, and a reader who expected the correction to move a
    store can see that it did not.
-2. **`hc_mem` gains exactly one offset**: `47 44 44 41 268` — the reset's byte, the clock set's two
-   halfwords, the power byte, and **the handler's `CORE_VENDOR_SPEC 0x10C` read-modify-write**. The
-   width pairing (`strb strh strh strb str`) is asserted with the messengers, and the clause must
-   refuse a *second* store at 268 and a store at 268 on any rung below 8 — the same shape rung 7's
-   clause was rewritten into, because 268 is now the third offset this window has gained and the two
-   before it each had to say which is which.
+2. ~~**`hc_mem` gains exactly one offset**: `47 44 44 41 268` — the reset's byte, the clock set's
+   two halfwords, the power byte, and **the handler's `CORE_VENDOR_SPEC 0x10C` read-modify-write**.~~
+   **FALSIFIED by the build, and the falsification is the more useful statement.** `hc_mem`'s window
+   is **unchanged**: `47 44 44 41` through `[sl r9 r3 r7 ]`, four offsets, and rung 7's clause stands
+   with only its messengers re-read. The reason is in the same clause's own scope: its body is
+   `entry_storage_probe` and `st_pwr_irq` is a *different symbol*, so the handler's store was never
+   inside the window the sentence named. The width pairing (`strb strh strh strb`) is therefore
+   asserted unchanged, and the clause that must refuse a *store* at 268 in this window is still the
+   right clause — it now refuses one that this rung, as written, does not make, which is what makes
+   it a check rather than a description.
 3. **the handler's own body is classified, in its own clause.** `entry_storage_probe`'s clause
    disassembles **that symbol only** (`--start-address`/`--stop-address` on `next_global`), so a store
    in `st_pwr_irq` is *outside its scope* — a scope claim about the extractor and not about the arm
-   (m671/m672/m693). The new clause classifies `st_pwr_irq` the same way and asserts exactly: one
-   `ldrb` at **220** (`CORE_PWRCTL_STATUS 0xDC`), one `ldrb` at **232** and one `strb` at **232**
-   (`CORE_PWRCTL_CTL 0xE8`), one `strb` at **228** (`CORE_PWRCTL_CLEAR 0xE4`), one `ldr`/`str` pair
-   at **268** in the `hc_mem` window, and **no other device access at all**. The `CLEAR` store is the
-   one the whole rung turns on and it is asserted by offset, not by count.
+   (m671/m672/m693). The new clause takes `st_pwr_irq`'s **own end from `nm -S`** (`sym_size`) rather
+   than from `next_global`, because the body it is reading is the shape `next_global` cannot bound: a
+   *static* function emitted between the probe and the next global would sit inside the probe's window
+   (m693's scope claim, caught by this clause's own draft). What it asserts, as built:
+
+   ```
+   xnu_entry_710: st_pwr_irq's device accesses are
+     [f98240dc:ldrb f98240dc:ldr f98240e4:strb f98240e8:ldrb f98240e8:strb f9824a0c:ldr f9824a0c:str]
+     with counts [f98240dc:ldrb=2 f98240dc:ldr=1 f98240e4:strb=1 f98240e8:ldrb=4 f98240e8:strb=2
+                   f9824a0c:ldr=3 f9824a0c:str=1],
+     its non-device accesses are [IMG:ldr IMG:str], and entry_storage_probe calls
+     entry_irq_register_client 1 time(s) and entry_irq_enable_line 1 time(s)
+   ```
+
+   — i.e. `CORE_PWRCTL_STATUS 0xDC` read as a byte **and** as a word, `CORE_PWRCTL_CLEAR 0xE4`
+   written with the status byte, `CORE_PWRCTL_CTL 0xE8` read and written with the ack, and `hc_mem +
+   0x10C` (`0xf9824a0c`) read and written, **and no other device address at all**. **The counts are a
+   minimum and not a number**, and the built body shows why: `0xDC:ldrb=2` and `0xE8:ldrb=4` are the
+   compiler's tail duplication along the decode's paths, so *"exactly one `ldrb`"* — this section's
+   pre-registration — is a claim about a source, and the clause is a claim about an image. The
+   property that survives both is **which addresses, at which widths, with the readbacks present**.
+   The `CLEAR` store is the one the whole rung turns on and it is held at `>= 1`.
 4. **`bl entry_irq_enable_line` occurs exactly once in the linked image, and `bl
    entry_irq_register_client` exactly once**, both from `entry_storage_probe` — asserted from the
    disassembly. This is not bookkeeping: 500 wrote `xnu_live_irq_line_*` as *the* record of a line,
