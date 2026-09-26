@@ -93,6 +93,12 @@ the 686 correction holds), and the OS's floors intact (`sleh_storm = 9`, `far_fr
 
 ## 3. What the answer points at, and the alternative §1 did not consider
 
+> **CORRECTED 2026-09-26 — see §5.** This section's first half ("`POWER_CONTROL 0x29` reads 0x00 … this
+> ladder has never written that byte") is **wrong**, and the rung-12 log refutes it three lines up. The
+> second half — the `CMD_INHIBIT` / `COMMAND`-readback discriminator — is right and is rung 13's core.
+> The section is left as written, because a record that rewrites itself cannot be read for what it got
+> wrong.
+
 The one register that separates this arm from every arm under it is in the log and is not new: **the
 standard block's own `POWER_CONTROL 0x29` reads 0x00** (`_reg_power_control`,
 `_reg_power_control_after`), and it read 0x00 on the rung-4 reference arm too. The SDHCI specification's
@@ -144,3 +150,41 @@ know yet whether the command left the controller. **XNU is not 正常加载, the
 「如果os已经能进去了的话」 is not triggered — so TWRP-to-storage stays withheld.** What this press bought
 is that every rung above it is now about *why a transaction does not complete*, with the three gates
 proved shut and the ending proved untouched.
+
+## 5. Correction, 2026-09-26: §3's first half is refuted by this log
+
+**Corrected against rung 12's own two files, with no new device action.** §3's first half is wrong on three
+counts and the correction is entirely internal to this run's numbers.
+
+1. **`POWER_CONTROL 0x29` is not 0x00 and this ladder has written it since rung 7.** The two cells §3 cited,
+   `_reg_power_control` and `_reg_power_control_after`, are **rung 3's census** and **rung 4's reset tail**
+   (`entry_storage.c:630` and `:783`) — both read **before** rung 7 runs. The pair that describes the register
+   now is `_pwr_before = 0x00` → `_pwr_wrote = 0x0b` → `_pwr_after = 0x0b` (`:1372`, `:1383-1384`, `:1386`):
+   **the store lands and holds.** §3 read a stale value as the current one — one register, two readings at two
+   times, the earlier one used.
+2. **§3 quoted the write set that refutes it.** It cited `47 44 44 41` as what "makes a store to
+   `POWER_CONTROL` unreachable by construction" — and the fourth offset of that set, `0x41`, **is**
+   `POWER_CONTROL 0x29`. The arm's own clause comment (`build_entry.sh:30353-30368`) names it: "*the driver's
+   own FIRST POWER BYTE at POWER_CONTROL 0x29 (sdhci.c:1368-1370, mmc_power_up's pass A)*". §2 of this same
+   document and §3 of [722](experiment-722-the-rung-12-arm-built-and-parked-two-clauses-the-build-refused.md)
+   both say the byte is written; §3 contradicted them.
+3. **What actually differs from the driver is the voltage field, not the bus-power bit.** Rung 7 derives
+   `SDHCI_POWER_180` because `_mode_capabilities = 0x742dc8b2` has `CAN_VDD_180` set and `CAN_VDD_330` /
+   `CAN_VDD_300` clear, so it stores `0x0A | SDHCI_POWER_ON = 0x0B`; the driver's own byte on this variant is
+   `SDHCI_POWER_ON | SDHCI_POWER_330 = 0x0F` (`sdhci.h:88-91`, `SDHCI_QUIRK_SINGLE_POWER_WRITE` at
+   `sdhci-msm.c:2897`). **Both set bit 0.** So the rung above this one is *not* "write the byte the ladder has
+   never written" — it is the discriminator in §3's second half, which stands, plus a reading of that byte
+   taken **at the moment of the command** rather than at rung 3's moment.
+
+**The correction does not change this run's answer.** Nothing in §1, §2 or §4 depends on §3's first half: the
+three gates held, `COMMAND 0x0E` was written with `0x0000`, and `SDHCI_INT_STATUS` read `0x00000000` on all
+5,140,480 polls. It changes what the *next* rung is, and that is
+[724](experiment-724-the-rung-13-pre-registration-the-instant-of-the-command-and-the-return-path.md).
+
+**Two further record defects were found in the same pass** and are written up in 724 §1.1: `host->ioaddr` is
+`hc_mem` (decidable from the base table — `SDHCI_INT_STATUS 0x30` and `SDHCI_HOST_VERSION 0xFE` are reached
+through it), so rung 6's `0x10C` stores are at the wrong window — **but they are value-no-ops even at the
+right one**, because `_pwr_irq_vendor_hc = 0xa1c` already reads `MCLK_SEL = DFLT` with `HC_SELECT_IN_EN`
+clear, so each store writes back the word it read; and rung 5's `_clk_rcg_cfg = 0x00000507` says the SDCC1
+apps clock is **200 MHz**, not the 384 MHz of `ST_SET_MAX_CLK`, so `_clk_set_div = 0x1e0` yields 208 kHz and
+not 400. Both are defects of the record, not causes.
