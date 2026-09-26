@@ -45,11 +45,18 @@ restore:
 	fi
 	tools/stage-archive.sh restore $(STAGE)
 
-# The one thing worth a target: the claim that every path literal was rewritten is a claim in a commit
-# message otherwise. tools/check_stage_paths.sh reads every tracked file outside docs/ and archive/ and
-# refuses an executable literal that names the old layout.
+# Two claims that are commit-message prose otherwise, and both are about the repository's own bookkeeping
+# rather than about the artifact:
+#   check_stage_paths.sh    reads every tracked file outside docs/ and archive/ and refuses an executable
+#                           literal that names the retired snapshot layout.
+#   check_set_name_rule.sh  reads records/revert-set.txt and refuses a set NAME whose 8 hex characters are
+#                           not the sha256 prefix of one of that set's own members - and, for the storage
+#                           family, not the entry image's. The rule was prose inside a `role=` string until
+#                           732 named an arm after its qcdt and nothing noticed (see that file's header).
+# Neither one touches the device, `out/`, or the gate.
 check:
 	@tools/check_stage_paths.sh
+	@tools/check_set_name_rule.sh
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not
@@ -87,7 +94,7 @@ help:
 	@echo "make                     build the live tree into $(LIVE_OUT)/"
 	@echo "make list                the archived snapshots and where they live now"
 	@echo "make restore STAGE=50    bring an archived snapshot back"
-	@echo "make check               no tracked file still names the retired snapshot layout"
+	@echo "make check               no executable literal names the retired layout, and every set name is a hash of its own bytes"
 	@echo "make clean               refused; the payload and the parks cannot be rebuilt"
 	@echo
 	@echo "Booting is not a make target: flash nothing, and boot non-persistently with"

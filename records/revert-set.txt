@@ -3408,6 +3408,19 @@ set=armed-storage-enable-953ad0f6 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27
 # for - the same silence class one level up - and it is `(( wst >= 3 ))` now. Readiness after the repair:
 # **5 of 5, exit 0**; rehearsal 38 ok / 0 failed; the park VERIFIED in the tree and in the export dir; the
 # seam constant re-derived read-only from `xnu_arm_entry_seam.dis` at 0x800492d8 -> 0x800492dc, did not move.
+#
+# **AND THE 732 BLOCK'S OTHER OWED CHECK LANDED IN THE SAME STEP - the set-name rule is a check now.**
+# 732 section 3 wrote the finding as a sentence - *no check enforces the rule today* - with the claim and
+# its counter-example one line apart in the same block. `tools/check_set_name_rule.sh` reads THIS FILE and
+# refuses a set NAME whose 8 hex characters are not the sha256 prefix of exactly one of that set's own
+# members, and for an `armed-storage-*` set not the ENTRY IMAGE's. Measured over all 25 sets: 23 named from
+# `xnu_arm_entry.bin` (every storage arm plus six earlier entry arms), 1 from `stage90-qcdt.img`
+# (`armed-selftest-wdog-ef0361a2`, the pre-ladder arm - measured and not constrained, because refusing it
+# would make the check red on master), 1 not a hash at all (`frozen-574`, a label). Eight cells, all on
+# perturbed copies of this record: the real file exits 0 with the census; this arm's own name rewritten to
+# its qcdt's prefix (732's first-draft mistake) REFUSED; the suffix borrowed from another set's entry image
+# REFUSED; a storage set with no entry-image member REFUSED; a suffix two members could claim REFUSED; a
+# malformed line REFUSED quoting it; an empty record and an absent record REFUSED. Wired into `make check`.
 # Pre-registration: docs/experiments/experiment-734-the-rung-16-pre-registration-the-quiet-block.md
 # Pressed? NO. This set is ARMED, NOT PRESSED. The last press is still 733's (2026-09-26 10:12:21-10:13:31 UTC,
 # exit 0, 70 s, capture rung15-enable-20260926-101331-last_kmsg.txt, 636,013 B).
