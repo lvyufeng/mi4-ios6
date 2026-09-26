@@ -13,10 +13,12 @@ Superseded design documents and the per-stage milestone log, kept for the record
 
 ## Archived stages
 
-The working tree keeps only the six most recent snapshots (`stages/stage85` …
-`stages/stage90`). Every earlier snapshot is still in the git history; the tag
-`stage-archive-base` points at the last commit where all 91 `stageN/` directories
-were present in the tree.
+The snapshot-per-stage model was retired on 2026-09-26, so there is nothing to
+keep up to date here any more. The five snapshots that were still in the working
+tree at that point are kept in place at `archive/stages/stage85` …
+`archive/stages/stage89`; every earlier snapshot is still in the git history, and
+the tag `stage-archive-base` points at the last commit where all 91 `stageN/`
+directories were present in the tree.
 
 ```bash
 tools/stage-archive.sh list          # archived stage numbers

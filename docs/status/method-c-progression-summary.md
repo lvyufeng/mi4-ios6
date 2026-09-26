@@ -2,7 +2,8 @@
 
 > **Historical — written at Stage83.** Kept as a record of the stages, not as current
 > status. It uses the pre-reorganization flat `stageN/` paths (those directories now live
-> at the tag `stage-archive-base`; see `../../stages/README.md`), and its entries naming
+> at the tag `stage-archive-base`, with stage85-89 kept at `archive/stages/`; see
+> `../../archive/stages/README.md`), and its entries naming
 > "public XNU `_start`" describe Stage-owned stubs with XNU-shaped names — no public XNU
 > object has been linked into or executed by any payload. For the current plan, what has
 > actually been proven, and the findings that reshaped it, see

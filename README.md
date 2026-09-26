@@ -6,7 +6,8 @@ This repository tracks an experimental, owner-controlled research project around
 
 | Path | Contents |
 | --- | --- |
-| `stages/stage85` … `stages/stage90` | The six retained stage snapshots. `stage90` is the current tip. See [`stages/README.md`](stages/README.md). |
+| `archive/stages/stage85` … `archive/stages/stage89` | The snapshots the retired snapshot-per-stage model left behind (`stage0` … `stage84` live at the tag `stage-archive-base`). See [`archive/stages/README.md`](archive/stages/README.md). |
+| `stages/stage90/` | The live tree, still at the old path. |
 | `docs/` | All documentation, indexed in [`docs/README.md`](docs/README.md): `reference/`, `experiments/`, `status/`, `history/`. |
 | `tools/` | Host-side helpers: `stage-archive.sh` for the archived stages, `decode_armv7_descriptor.py` for page-table entries, `check_xnu_struct_abi.py` for the XNU `boot_args` layout, `xnu_dt_requirements.py` for the device-tree lookups XNU makes, and the boot-image and fixture generators. |
 | `Makefile` | Build/list/restore convenience targets. |
@@ -282,7 +283,7 @@ tools/stage-archive.sh show 50 xnu_workspace.c   # read a file without restoring
 tools/stage-archive.sh restore 50       # -> ./stage50/, at the root so it builds
 ```
 
-Restored snapshots land at the repository root, because their scripts predate the `stages/` layout and resolve `../out` / `../external` from that depth. `make restore STAGE=50` is the shorthand. Adding a new stage, and which snapshot to archive when you do, is described in [`stages/README.md`](stages/README.md).
+Restored snapshots land at the repository root, because their scripts predate the `stages/` layout and resolve `../out` / `../external` from that depth. `make restore STAGE=50` is the shorthand. The snapshot-per-stage model itself was retired on 2026-09-26 — there is no next stage to archive for — and what the remaining snapshots are is described in [`archive/stages/README.md`](archive/stages/README.md).
 
 ## Safety rules for this repo
 

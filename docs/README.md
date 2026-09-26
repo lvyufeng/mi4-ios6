@@ -69,5 +69,7 @@ stage number ↔ title). Note the offset: experiment NN corresponds to stage NN-
 
 Path commands written inside the experiment logs are a record of what was actually
 run at the time and have deliberately not been rewritten. Stages 00-84 are no longer
-in the working tree — see `../stages/README.md` for the retention policy and
-`tools/stage-archive.sh` to restore one.
+in the working tree: `archive/stages/stage85` … `archive/stages/stage89` are kept there
+in place, and stage0-84 live at the tag `stage-archive-base`, which
+`tools/stage-archive.sh` reads. See `../archive/stages/README.md` for what the snapshots
+are and why the snapshot-per-stage model was retired.
