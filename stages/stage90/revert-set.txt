@@ -2921,3 +2921,90 @@ set=armed-storage-instant-e8dc64f7 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b2
 # with CARD_EN set, and `_cmd2_rcg_cmd=0` (bit 31 clear = root ENABLED) with src 5 / div 7 = 200 MHz.
 # The record is `docs/experiments/experiment-726-the-rung-13-press-the-command-ran-and-the-status-register-said-nothing.md`.
 # **THE BYTES BELOW ARE UNCHANGED BY THE PRESS**: this set is still the arm that was sent.
+
+# ---------------------------------------------------------------------------------------------------
+# armed-storage-completion-6f49e880 - RUNG 14 (STAGE90_XNU_STORAGE_PROBE=13), 729's arm. **ARMED, NOT
+# PRESSED**: built and parked 2026-09-26, and no press has been taken from these bytes.
+#
+# WHAT THE RUNG ASKS. Rung 13 refuted all five of 724 section 2's hypotheses and left one: this
+# controller RUNS a command to completion and does not set its interrupt-status register. The command
+# reached the CMD line, the block held CMD_INHIBIT while it was in flight and released it when it
+# finished, and `_cmd0_status_any` was 0x00000000 over 5,088,256 reads taken ACROSS that window. The
+# SDHCI normal-interrupt path is `INT_STATUS -> INT_ENABLE -> SIGNAL_ENABLE -> the line`, so rung 14
+# looks for the completion in the two OTHER status registers this block has and in the word it still
+# holds, and then ASKS FOR IT: ONE bit of INT_ENABLE 0x34 (SDHCI_INT_RESPONSE) with SIGNAL_ENABLE 0x38
+# left at ZERO, INT_STATUS read, INT_ENABLE read back, restored to zero and read back again. Two
+# stores, both to 0x34, and no new command. If the block ANDs the two enables the line never rises and
+# the run gets the answer; if it does not, the run ends at the dispatcher as `_irq_other_count=1` /
+# `_irq_other_iar=155`, an ending this image already reads and survives (709's press ended that way on
+# intid 170) and which the payload's own armed watchdog bounds. The pre-registration is
+# `docs/experiments/experiment-728-...`, and its section 1's placement constraint is the one thing
+# 726's prose could not have supplied: the block stands immediately after CMD0's publishes and BEFORE
+# the gate, because `_cmd_gated=1` says the gate FIRED and a block after the commands would never run.
+#
+# THE RECORD'S OWN CLAIM ABOUT THE TWO OTHER STATUS REGISTERS WAS FALSE, AND THE MEASUREMENT IS WHAT
+# REFUTED IT. 726 section 3 and 728 section 2 both write that `SLOT_INT_STATUS 0xFC` is a register
+# "this ladder has never read at all". It is read: rung 3's `st_standard_census` reads it as a
+# halfword (entry_storage.c:642) and 726's own log carries the value - `xnu_live_storage_reg_slot_int_status
+# = 0x00000000`. `CORE_PWRCTL_STATUS 0xDC` is read by rung 2's mode sequence and rung 8's handler
+# (`_pwr_irq_status32 = 0x02` in the same log). The true statement is stronger and is the one this rung
+# needed: NEITHER has ever been read at a moment when there was a completion to report, and rung 3's and
+# rung 8's readings are in the same log as the new cells, so the pair is comparable. Both documents are
+# corrected in 729 by a visible strikethrough rather than by an edit (this file's own rule).
+#
+# **WHAT THE BUILD REFUSED, AND WHAT IT DID NOT.** Three invocations, two refusals, and 728 section 5
+# got the second one wrong in an instructive way:
+#   (1) `build_entry.sh:667`'s own switch guard - `STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, ... or 12`
+#       - refused `13` before the compiler saw it. The build owns that case list and the #error owns the
+#       ladder, so both move in the step that raises the rung (725 recorded the same pair moving to 12).
+#   (2) the new clause's PROGRAM-ORDER comparison refused, and the two strings printed identically:
+#       `classify_body` prints its first line with a trailing space after every entry and `read -r`
+#       strips trailing IFS whitespace, so `$stb_int_dev` carries no trailing space while the `tr`-built
+#       `stb_int_set` does. The set, the counts and the store list all agreed on that same build. The
+#       comparison now spells `${stb_int_dev% }` and says why.
+#   **AND THE SEAM CONSTANT DID NOT MOVE, WHICH REFUTES 728 SECTION 5's "it will move a fourth time".**
+#   The rung's ~1.1 KB of entry-side code landed inside the entry group's alignment slack: the entry bin
+#   is 5,552,764 bytes - BYTE-IDENTICAL in size to the pressed rung-13 arm - and `platform_cache_idle_enter`
+#   is still at 0x80049238 with the exit's `bl` at 0x800492d8 returning to 0x800492dc. What moved is
+#   everything from `st_int_report` (0x8000d978, where `st_cmd_path` used to be) up to `arm_init`, and
+#   nothing above it. **A prediction that a constant must move is a prediction about the LINKER's
+#   padding, which no clause asserts and no arithmetic here sees** - so the seam paragraph in 725 stays
+#   correct and is left where it is.
+#
+# WHAT THE CLAUSES ASSERT, MEASURED (`build_entry.sh`, `xnu_entry_729`). The new body's device accesses,
+# in program order and distinct, are
+#   [f98249fc:ldrh f98240dc:ldr f982490e:ldrh f9824924:ldr f9824930:ldr f9824934:ldr f9824938:ldr f9824934:str]
+# with counts [f9824930:ldr=2 f9824934:ldr=3 f9824934:str=2 f982490e:ldrh=1 f9824924:ldr=1 f9824938:ldr=1
+# f98240dc:ldr=1 f98249fc:ldrh=1], its stores in program order [f9824934:str], and an EMPTY image side;
+# `st_cmd_path` calls it once, after CMD0's publishes and before the gate. **The counts are asserted and
+# not echoed** (rungs 11 and 12 echo theirs): the SET alone cannot see a dropped read, and the two
+# multiplicities this rung's answer rests on are INT_STATUS read TWICE - the baseline with the enables
+# clear, and the answer with the RESPONSE bit set one instruction earlier - and INT_ENABLE read THREE
+# times and written TWICE. The comparison sorts first because `classify_body` prints counts by iterating
+# an awk hash. `st_int_report`'s window is OUTSIDE the width-vs-offset census's (that census reads
+# `[sym_addr entry_storage_probe, next_global)` and `nm` puts a `noinline` static before the probe), so
+# the exact `<address>:<mnemonic>` set above is where this body's widths are checked - and it names
+# `ldrh` for the two offsets no 32-bit access may reach, 0x0E and 0xFC.
+#
+# WHAT IT DOES NOT DO: no new command, no ARGUMENT/COMMAND/RESPONSE write, no data-path register, no
+# POWER_CONTROL store (0x29 is not touched at all by this body), no GCC word, no core_mem write, no byte
+# of the medium, and no persistent enable - the restore is the last store and `_int_enable_readback` is
+# its cell. `st_cmd_path`'s and `st_cmd_census`'s clauses are rung 11's and rung 12's, unchanged.
+#
+# **THIS SET SUPERSEDES THE `instant-e8dc64f7` ARM AS THE ONE THE NEXT PRESS SENDS** - that sentence
+# lives in 724/725/726's record and is left where it is, per this file's own rule that a later step
+# supersedes such a sentence rather than editing it. **THE GOAL IS STILL NOT MET**: XNU is not
+# normally loaded, the OS has not been entered, and 「如果os已经能进去了的话」 is not triggered - so
+# TWRP-to-storage stays withheld.
+
+set=armed-storage-completion-6f49e880 sha256=d53312233074191ea7e990a5a640eeb580588153fe0d2bf93f73ffe649aaab50 bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-and-the-arm-the-next-press-sends-STAGE90_XNU_ENTRY-1-with-the-STORAGE_PROBE-13-entry-image-tne-rung-14-completion-report-and-one-bit-enable-probe
+set=armed-storage-completion-6f49e880 sha256=24bc7c71c03003bab1173b72d90bb0095cbd3b91a5ae5014ffbe63eba499325f bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-rung-14-entry
+set=armed-storage-completion-6f49e880 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-UNCHANGED-from-the-pressed-rung-13-arm-because-only-the-entry-image-changed
+set=armed-storage-completion-6f49e880 sha256=88203457dc20879b3a09e772a6b8a0b4fc6c0e12d289eace399d227412212581 bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-completion-6f49e880 sha256=6ae6346bdab1d835554586f853c3fea9ecdfff97d5e213c9eef4c708abd630a3 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-completion-6f49e880 sha256=6f49e880a4670a984ebe4645151042c96ea0a7baa40ee66500582d873a75dd39 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-this-is-the-rung-14-entry-STAGE90_XNU_STORAGE_PROBE-13-the-8-hex-of-this-hash-is-the-sets-name-and-its-size-is-BYTE-IDENTICAL-to-the-pressed-rung-13-arm-so-the-seam-constant-did-not-move
+set=armed-storage-completion-6f49e880 sha256=f50c7418b6f47e7db971f220a404f94cd640d15b7ef68d00918e4c90ac06aca0 bytes=6732140 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-completion-6f49e880 sha256=dc674503f7fa27a177be35802a39ad9eb298054f8aeb4d98580494d0bd1e6464 bytes=910 file=xnu_arm_entry-config.txt role=entry-config-record-its-rung-line-reads-STAGE90_XNU_STORAGE_PROBE-13
+set=armed-storage-completion-6f49e880 sha256=65045b698bfbe8ae55b59f9b72452c5f0954840c7dd36c4d074ba65eccf872bf bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest
+set=armed-storage-completion-6f49e880 sha256=ae494aaa1ef512f7134da42246d8d57ebdd13768f7b145a4d196b498fb4bfa7c bytes=6051840 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
+set=armed-storage-completion-6f49e880 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-macho-UNCHANGED-since-the-press

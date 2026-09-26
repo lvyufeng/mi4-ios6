@@ -664,7 +664,8 @@ case "$STORAGE_PROBE" in
     10) ;;
     11) ;;
     12) ;;
-    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 or 12, not [$STORAGE_PROBE]" >&2
+    13) ;;
+    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 or 13, not [$STORAGE_PROBE]" >&2
        echo "        It is a `#if` in two files and not a value, so anything else would reach the" >&2
        echo "        preprocessor as a broken -D and fail there, with the cause named by the wrong" >&2
        echo "        tool (692); and it is a rung rather than a flag since 696, so a value above the" >&2
@@ -30819,6 +30820,83 @@ verify_trace_symbols() {
                 [[ "$(grep -c -- 'bl.*<st_cmd_census>' <<<"$stb_path_body")" == "1" ]] ||
                     layout_fail "st_cmd_path makes $(grep -c -- 'bl.*<st_cmd_census>' <<<"$stb_path_body") call(s) to st_cmd_census and rung 12 makes exactly one - it is the first thing the rung does, and \`_cmd2_refused_power\` is the cell that says whether its one refusal was taken. Zero means the census is in the image and nothing calls it, which is m720's shape (a switch no build reads) in the one place this rung cannot afford it: an uncalled census would leave every \`_cmd2_*\` key absent from a log whose reader would then see the rung's whole first act as unperformed rather than as refused. Two or more means the registers are read twice at two moments and the pair published under one name. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_724: st_cmd_census's device accesses are [$stb_cen_set] with counts [$stb_cen_cnt], NO store, an EMPTY image side and one call from st_cmd_path - the register state at the INSTANT of the command: the power byte, the clock halfword and its three bits, PRESENT_STATE and both interrupt-enable registers, and the GCC's SDCC1 block control, two branches and the apps root's CMD_RCGR/CFG_RCGR - and st_send_command gains COMMAND 0x0E read back, PRESENT_STATE's CMD_INHIBIT sampled for the first 1024 polls, the first non-zero INT_STATUS of ANY kind, and an unconditional RESPONSE 0x10 read with resp_read beside it, so that NO store is added and every clause of rung 11 stands over this rung unchanged"
+            fi
+
+            if [[ $STORAGE_PROBE -ge 13 ]]; then
+                # **729: THE RUNG-14 BODY, AND THIS CLAUSE IS ALSO WHERE ITS WIDTH RULE LIVES.**
+                # Both of the following are read out of `nm` rather than assumed, because both decide
+                # what a clause that already exists does and does not cover:
+                #
+                #   * `entry_storage_probe`'s store census (`xnu_entry_698`, below) reads the window
+                #     `[sym_addr entry_storage_probe, next_global)` - and `nm` puts a `noinline` static
+                #     BEFORE the probe, so that census covers the probe's own INLINED bodies and not
+                #     this one. The arm's `hc_mem` store set therefore stops being one clause's subject
+                #     here, exactly as rung 11's three command stores stopped being its subject.
+                #   * the width-vs-offset census (rung 3's, the clause that refuses an unaligned Device
+                #     access before it can fault on the bench) reads the SAME window. So this body's
+                #     widths are checked HERE or nowhere, and what carries them is the exact
+                #     `<address>:<mnemonic>` set below: `COMMAND 0x0E` (not 4-aligned) and
+                #     `SLOT_INT_STATUS 0xFC` (sdhci.h:239 declares it 16-bit, and `sdhci.c` reads it with
+                #     the halfword accessor) are the two offsets in this body no 32-bit access may reach,
+                #     and the expected set names `ldrh` for each. A build that widened either would change
+                #     that set and refuse - which is the whole of the rule the alignment census applies to
+                #     a body inside its window, asserted here for a body outside it.
+                #
+                # **What this clause can assert is that no access is missing and none is extra.** The
+                # INTERLEAVING is not the compiler's business and is not asserted: every access here goes
+                # through a `volatile` lvalue (`st_read16`/`st_read32` dereference `volatile` pointers)
+                # and the writer adds a `dsb sy`, so "the status read is after the store and before the
+                # restore" is C's ordering rule for volatile accesses and not a block layout. What a
+                # compiler CAN do is drop an access it can prove redundant or add one it wants to - and
+                # that is what the set, the counts and the store list refuse.
+                stb_int=$(sym_addr st_int_report) ||
+                    layout_fail "st_int_report is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE - rung 13's whole act IS that body (experiment-728 section 2), so an arm at this rung whose probe is absent is an arm whose record names four reads and two stores that no call in the image makes. Four ways to get here, and they are the three \`st_send_command\`'s clause names plus the reverse of one: renamed, INLINED into \`st_cmd_path\` - which would put the store to INT_ENABLE 0x34 inside a window whose clause asserts NO store AT ALL, and would leave its four reads unclassified there - CLONED (a clone would still be called and would still write the enable; what it would move is the WINDOW, which is the one thing this clause reads), or the call site removed. Nothing is rebuilt by this refusal"
+                stb_int_size=$(sym_size st_int_report) ||
+                    layout_fail "st_int_report has no size in the symbol table (nm -S), so this clause's window has no end and it would classify whatever follows this body as its own. Nothing is rebuilt by this refusal"
+                stb_int_body=$(arm-none-eabi-objdump -d --start-address="$stb_int" \
+                               --stop-address="$(printf '0x%x' $(( stb_int + stb_int_size )))" "$OUT/xnu_arm_entry.elf")
+                stb_int_decl="f982490e f9824924 f9824930 f9824934 f9824938 f98249fc f98240dc"
+                { read -r stb_int_dev; read -r stb_int_cnt; read -r stb_int_img; read -r stb_int_imgaddr; } < <(classify_body "$stb_int_body" "$stb_int_decl")
+                # `awk` and not `grep`, for rung 12's measured reason: `grep` exits 1 when it matches
+                # nothing - which is the GOOD case for the store list's emptiness check - and under this
+                # script's `set -e` the assignment would take that status and kill the build before the
+                # assertion could pass. A check that can only fail is not a check.
+                stb_int_stores=$(printf '%s\n' $stb_int_dev | awk '/:str/ || /:strh/ || /:strb/ { printf "%s ", $0 }')
+                [[ "$stb_int_stores" == "f9824934:str " ]] ||
+                    layout_fail "st_int_report's device STORES, in the body's own program order, are [$stb_int_stores] and rung 13's record says exactly one distinct store, f9824934:str - INT_ENABLE 0x34. **This is the clause's first assertion on purpose.** The whole safety argument of this rung is that ONE register's one bit is written, with SIGNAL_ENABLE 0x38 left at zero so the line cannot rise (experiment-728 section 3), and the offsets one and four bytes away are POWER_CONTROL 0x29-adjacent territory this ladder has guarded since 701: a store to 0x38 is half of the pair whose conjunction raises intid 155, and a store to 0x30 would be a write into the status register this rung is trying to READ. A body justified as instrumentation is the easiest place for a store to hide (rung 12's own clause says so), and this is the first rung since rung 7 whose declared store set is not inside \`st_send_command\`'s window. Nothing is rebuilt by this refusal"
+                stb_int_set=$(printf '%s\n' $stb_int_dev | LC_ALL=C sort | tr '\n' ' ')
+                stb_int_want="f98240dc:ldr f982490e:ldrh f9824924:ldr f9824930:ldr f9824934:ldr f9824934:str f9824938:ldr f98249fc:ldrh "
+                [[ "$stb_int_set" == "$stb_int_want" ]] ||
+                    layout_fail "st_int_report's device accesses are [$stb_int_set] (sorted) and rung 13's record says [$stb_int_want] - \`SLOT_INT_STATUS 0xFC\` read as a HALFWORD (the standard file's other status register, and the one offset here no 32-bit access may reach), \`CORE_PWRCTL_STATUS 0xDC\` read as a word (the vendor path through core_mem), \`COMMAND 0x0E\` read back as a HALFWORD (the second offset no 4-byte access may reach), \`PRESENT_STATE 0x24\`, \`INT_STATUS 0x30\`, \`INT_ENABLE 0x34\`, which is both read and written, and \`SIGNAL_ENABLE 0x38\` READ AND NEVER WRITTEN. A set that is not exactly these eight is a different experiment: an absent \`f9824938:ldr\` is \`SIGNAL_ENABLE\` not read at all, and \`_int_sig_enable\` - the cell the whole safety argument rests on - would be absent from a log whose reader cannot tell that from a device that said nothing; an extra \`f9824938:str\` is the OTHER half of the pair whose conjunction raises intid 155. An EMPTY set is the case to be most suspicious of here, because every one of these is a helper call the compiler may leave un-inlined. Nothing is rebuilt by this refusal"
+                # **The counts, and they are what a set cannot carry.** Line 1 of \`classify_body\` is the
+                # DISTINCT accesses in first-appearance order, so the set above has each register once and
+                # a DROPPED second read of a register already in it would leave it unchanged. The two
+                # multiplicities this rung's answer rests on are \`INT_STATUS\` read TWICE (the baseline and
+                # the answer) and \`INT_ENABLE\` read THREE times and written TWICE (found, held, restored,
+                # and the two writes) - so they are asserted, and NOT echoed the way rungs 11 and 12 echo
+                # theirs. The comparison sorts first and the reason is 706's: \`classify_body\` prints the
+                # counts by iterating an awk hash (\`for (k in cnt)\`), so their order is awk's and not the
+                # body's, and an ordered comparison would be a reading that could change under an unrelated
+                # edit and say nothing about the arm. Nothing is rebuilt by this refusal.
+                stb_int_cntset=$(printf '%s\n' $stb_int_cnt | LC_ALL=C sort | tr '\n' ' ')
+                stb_int_cnt_want="f98240dc:ldr=1 f982490e:ldrh=1 f9824924:ldr=1 f9824930:ldr=2 f9824934:ldr=3 f9824934:str=2 f9824938:ldr=1 f98249fc:ldrh=1 "
+                [[ "$stb_int_cntset" == "$stb_int_cnt_want" ]] ||
+                    layout_fail "st_int_report's device-access counts are [$stb_int_cntset] (sorted) and rung 13's record says [$stb_int_cnt_want] - because the SET alone cannot see a dropped read. \`INT_STATUS 0x30\` is read twice on purpose: \`_int_status_before\` is the baseline taken with the enables CLEAR, and \`_int_status_after\` is the rung's answer taken with the RESPONSE bit of \`INT_ENABLE\` set one instruction earlier. If the count is 1 the two cell names refer to one read taken once, and the log would show a before and an after that are the same moment. \`INT_ENABLE 0x34\` is read three times and written twice on purpose: found (\`_int_enable_before\`), held after the store (\`_int_enable_held\`, which is what separates 'the enable is not the mask' from 'the store never took'), and read back after the restore (\`_int_enable_readback\`, the cell that makes the restore a reading). If the count is 2 then either the store was never checked or the restore was never read, and one of this rung's three parts is unperformed while its record names it. Nothing is rebuilt by this refusal"
+                # **`${stb_int_dev% }` and not `$stb_int_dev`, because the two spellings are the same
+                # string and only one of them is the string this clause compares.** `classify_body` prints
+                # its first line with a trailing space after every entry, and `read -r` strips trailing IFS
+                # whitespace - so this variable, which is that line read into a variable, carries NO trailing
+                # space while the `tr`-built `stb_int_set` above does. The first build of this clause refused
+                # on exactly that difference: the set, the counts and the store list all agreed and this
+                # comparison failed against a value that printed identically. The suffix-strip names the
+                # form instead of relying on the difference being invisible.
+                [[ "${stb_int_dev% }" == "f98249fc:ldrh f98240dc:ldr f982490e:ldrh f9824924:ldr f9824930:ldr f9824934:ldr f9824938:ldr f9824934:str" ]] ||
+                    layout_fail "st_int_report's device accesses IN PROGRAM ORDER, distinct, are [$stb_int_dev] and rung 13's record says [f98249fc:ldrh f98240dc:ldr f982490e:ldrh f9824924:ldr f9824930:ldr f9824934:ldr f9824938:ldr f9824934:str] - the four elsewhere-reads and the baseline first (the two other status registers, the command word, the block's own inhibit state), then the gate's two reads BEFORE it is written, THEN the one-bit store, and the status read and the two readbacks after it. This is the half neither the sorted set nor the counts can carry: a body that read \`INT_STATUS\` for the first time AFTER setting the enable would have the same set and the same counts, and \`_int_status_before\` would then be a reading of an enabled block - a different experiment wearing this record's cell names (m732's shape, one reader over: a cell's meaning is partly WHEN it was read). Nothing is rebuilt by this refusal"
+                [[ -z "${stb_int_img// /}" ]] ||
+                    layout_fail "st_int_report's non-device memory accesses are [$stb_int_img] at [$stb_int_imgaddr] and rung 13's record says that set is EMPTY - this body holds ten locals, publishes through entry_live_write (a call, with a .rodata string) and owns no .bss word, so a symbol here is either one this rung never declared or an access the classifier could not resolve. Nothing is rebuilt by this refusal"
+                [[ "$(grep -c -- 'bl.*<st_int_report>' <<<"$stb_path_body")" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $(grep -c -- 'bl.*<st_int_report>' <<<"$stb_path_body") call(s) to st_int_report and rung 13 makes exactly one, standing immediately after CMD0's publishes and BEFORE the gate. Zero means the probe is in the image and nothing calls it, which is m720's shape (a switch no build reads) with one of the three producers of an absent key guaranteed by construction - and it is the shape rung 13's own log makes fatal here: \`_cmd_gated = 1\` says the gate between the two commands FIRED, so a call placed after the gate would leave every \`_int_*\` key absent from a press and the absence would read as a device that said nothing. Two or more means the enable is written twice at two moments and both published under one name. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_729: st_int_report's device accesses are [$stb_int_set] with counts [$stb_int_cnt], its stores in program order [$stb_int_stores] and an EMPTY image side; st_cmd_path calls it once, after CMD0's publishes and before the gate - where the completion this controller does not put in INT_STATUS 0x30 (726) is looked for in the two status registers it does have (SLOT_INT_STATUS 0xFC as a halfword, CORE_PWRCTL_STATUS 0xDC), in the word the block still holds (COMMAND 0x0E) and in its own state (PRESENT_STATE 0x24), and then ASKED FOR by setting ONE bit of INT_ENABLE 0x34 with SIGNAL_ENABLE 0x38 at zero, reading INT_STATUS, reading the enable back, restoring it to zero and reading THAT back - TWO stores, both to 0x34, and no new command, no POWER_CONTROL store, no GCC word, no core_mem write and no byte of the medium"
             fi
         fi
         echo "  xnu_entry_698: the probe's stores, classified by window and offset - core_mem [$stb_core_off] through [$stb_core_base], hc_mem [$stb_hc_off]($stb_hc_mne) through [$stb_hc_base], gcc [$stb_gcc], image [$stb_img], ambiguous [$stb_amb], unknown [$stb_unk], unnamed-device [$stb_devbad$stb_devlo]"
