@@ -12,7 +12,8 @@ This repository tracks an experimental, owner-controlled research project around
 | `archive/stages/stage85` … `archive/stages/stage89` | The snapshots the retired snapshot-per-stage model left behind (`stage0` … `stage84` live at the tag `stage-archive-base`). See [`archive/stages/README.md`](archive/stages/README.md). |
 | `docs/` | All documentation, indexed in [`docs/README.md`](docs/README.md): `reference/`, `experiments/`, `status/`, `history/`. |
 | `tools/` | Host-side helpers: the press-path tools (`verify_press_ready.sh`, `resolve_arm_set.sh`, `verify_revert_set.sh`, `gate_flags_for_arm.sh`) and the checkers they rest on, `stage-archive.sh` for the archived stages, `decode_armv7_descriptor.py` for page-table entries, `check_xnu_struct_abi.py` for the XNU `boot_args` layout, `xnu_dt_requirements.py` for the device-tree lookups XNU makes, and the boot-image and fixture generators. |
-| `Makefile` | Build/list/restore convenience targets. |
+| `Makefile` | Build/list/restore/check convenience targets. |
+| `docs/reference/repository-layout.md` | The layout above in full, plus what was retired to get here and the shas of the refs that were removed. |
 | `out/stage90/` | Build products (ignored by git): the payload, the entry image, the `frozen/` parks and the `captures/` logs. |
 | `external/` | Public XNU checkout used by the compile-graph and link-proof helpers (ignored by git). |
 | `xiaomi4-cancro-backup-20260604-112053/` | Device partition backups (ignored by git, never committed). |

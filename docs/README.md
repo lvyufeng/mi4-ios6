@@ -18,6 +18,7 @@ restructure moved it: the `reference/` and `status/` pages were re-pointed at th
 ## Reference — `reference/`
 
 - `local-device-findings.md` — detailed local observations, partition map, backup status, and parsed boot/recovery image fields.
+- `repository-layout.md` — where everything is, why `src/` is flat, and the snapshot-per-stage model and branch lines that were retired on 2026-09-26, with the shas of the refs that were removed.
 - `recovery-and-rollback.md` — required recovery checklist and rollback procedure before any persistent write.
 - `boot-tooling.md` — local boot image tooling plan and no-op round-trip results.
 - `cancro-platform.md` — Xiaomi Mi 4 / MSM8974 platform source pointers and bootloader notes.
