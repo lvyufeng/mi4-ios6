@@ -292,16 +292,26 @@ unset _self _bad
 # refused with `the exit's call to FlushPoU_Dcache is at ... and returns to ... while entry_trace.c's
 # STAGE90_XNU_SEAM_LR is 0x800472dc`, and `arm-none-eabi-objdump -d out/stage90/xnu_arm_entry.elf
 # --disassemble=platform_cache_idle_exit` puts the `bl` at `0x800482d8` returning to **`0x800482dc`**.
-# Both copies are that value from 708 on. **The literal's own structural repair is still owed** (a
+# Both copies are that value from 708 on.
+#
+# **724: it moved a THIRD time, by the same page, and the disassembly decided it a third time.** The
+# rung-12 block (the read-only census, the command body's return path and their published cells)
+# added ~3.9 KB to the entry group, so the entry build's own clause refused with the same sentence and
+# `arm-none-eabi-objdump -d out/stage90/xnu_arm_entry.elf --disassemble=platform_cache_idle_exit` puts
+# the `bl` at `0x800492d8` returning to **`0x800492dc`**. Both copies are that value from 724 on, and
+# the third move is the strongest evidence the mechanism is right: three rungs, three page moves, and
+# each one caught by the same pair of clauses rather than by a run.
+#
+# **The literal's own structural repair is still owed** (a
 # fallback that must be edited per arm is a pin wearing the name of a fallback), and the mechanism is
-# now recorded twice: the entry group crossing a page boundary moves every kernel-text address in the
-# image at once, and the only defence is the pair of clauses that compare these two copies with the
+# now recorded three times: the entry group crossing a page boundary moves every kernel-text address in
+# the image at once, and the only defence is the pair of clauses that compare these two copies with the
 # linked image. The structural repair is owed: this literal exists
 # only for the case where the same ELF cannot be read at run time, while the gate's equality clause
 # makes it move with every arm, and a fallback that must be edited per arm is a pin wearing the name
 # of a fallback. Named here rather than done in this step, because removing it needs the gate's clause
 # to accept a labelled absence (the peer lane's file) and that is a step, not a one-line edit.
-EXIT_POP_LR_LITERAL=0x800482dc
+EXIT_POP_LR_LITERAL=0x800492dc
 exit_pop_lr_addr() {
   local elf=${1:-$OUT/xnu_arm_entry.elf} od=${OBJDUMP:-arm-none-eabi-objdump}
   local start size body ret

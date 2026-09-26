@@ -2836,3 +2836,71 @@ set=armed-storage-cmd-892b8b68 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364
 # register the answer points at - `POWER_CONTROL 0x29 = 0x00`, which the driver's own `sdhci_set_power`
 # writes as `0x0F` before any command - is the rung above this one. **The bytes below are unchanged by the
 # press**: this set is still the arm that was sent, and it remains the set a revert puts back.
+
+# ============================================================================================
+# 724: THE RUNG-13 ARM - the register state at the INSTANT of the command, and the command's own
+# return path. `STAGE90_XNU_STORAGE_PROBE=12`. It is the rung-12 arm
+# (`armed-storage-cmd-892b8b68`, PRESSED) plus ONE new read-only body (`st_cmd_census`), the
+# command body's return path (COMMAND 0x0E read back, PRESENT_STATE's CMD_INHIBIT sampled, the
+# first non-zero INT_STATUS of any kind, an unconditional RESPONSE 0x10 read) and their cells -
+# and **NO new store anywhere**, which is the whole safety argument of this rung: the write set
+# this ladder has asserted since 701 is unchanged at `47 44 44 41` in hc_mem, the command body's
+# three stores are unchanged and in the same order, and the census is asserted to make none.
+# The pre-registration is
+# `docs/experiments/experiment-724-the-rung-13-pre-registration-the-instant-of-the-command-and-the-return-path.md`.
+#
+# WHY IT IS RECORDED AND PARKED: `./build.sh` is not byte-reproducible (408), so this payload
+# exists in exactly one place on earth, and a run of either build script would destroy it.
+# `xnu_arm_entry.bin`'s own sha256 begins `e8dc64f7`, which is the suffix this directory is named
+# for - the convention every `armed-storage-*` park in `frozen/` uses.
+#
+# **THE SEAM CONSTANT MOVED A THIRD TIME, AND THE BUILD REFUSED IT.** The first invocation of this
+# step's entry build stopped at the seam clause: `the exit's call to FlushPoU_Dcache is at
+# 2147783384 and returns to 2147783388, while entry_trace.c's STAGE90_XNU_SEAM_LR is 0x800482dc` -
+# i.e. the exit's `bl` is now at `0x800492d8` returning to `0x800492dc`, one more page on from
+# 708's `0x800482dc`. The mechanism held exactly as recorded: the rung's ~3.9 KB of entry-side
+# code pushed the entry group past the next page boundary, so every kernel-text address in the
+# image moved by `0x1000` at once. **The disassembly decided the direction again** (the gate cannot
+# tell which copy is stale): `arm-none-eabi-objdump -d out/stage90/xnu_arm_entry.elf` puts the `bl`
+# at `0x800492d8` returning to `0x800492dc`, and the same pass re-read every other address the seam
+# prose pins - the window `[0x80049240, 0x8004933c)`, the four callers `0x80048d08`/`0x80049284`/
+# `0x800492d8`/`0x800493bc`, `CleanPoU_Dcache 0x800487a8`, `CleanPoC_Dcache 0x8004875c`,
+# `FlushPoC_Dcache 0x80048828` and `bsdinit_task`'s call site `0x8004ceb4` - **all of which the
+# prose had been left carrying at their 696-era values through two moves the define itself had
+# already absorbed.** Both copies of the constant moved: `entry_trace.c`'s `STAGE90_XNU_SEAM_LR` and
+# `run_and_capture.sh`'s `EXIT_POP_LR_LITERAL`, which the gate compares against each other and the
+# live ELF.
+#
+# **AND THE CLAUSES CAUGHT TWO DEFECTS IN THEMSELVES, BOTH NEW SHAPES.** (1) The image-side clause
+# for the command body was written for `[UNK:ldr UNK:str]` and refused `[UNK:ldr UNK:str UNK:strd]`:
+# the two new cells `status_any` and `status_any_polls` are adjacent 32-bit fields assigned in one
+# basic block, so GCC merged them into a single `strdeq` on the same base - a *narrower* reading of
+# the same two cells, and the expected set now names the third mnemonic at rung 12 rather than
+# tolerating it. (2) **The census's own store check could only fail.** It was written
+# `$(printf ... | grep -E ':str|:strh|:strb' | tr ...)`, and `grep` exits 1 when it matches nothing -
+# which is the GOOD case here - so under this script's `set -euo pipefail` the assignment took that
+# status and ended the build *before* the emptiness assertion could pass. An assertion that cannot
+# hold is not a check (m702's shape), and the extractor's status must not be the assertion's status;
+# the extractor is `awk` now, which always exits 0.
+#
+# WHAT IT DOES NOT DO, all of them `build_entry.sh` clauses rather than sentences: **no device store
+# of any kind is added** (the census's clause asserts its store set EMPTY, and the command body's
+# three stores and their order are rung 11's), no write to any RCG word, no `POWER_CONTROL 0x29`
+# write (it is READ, at the command's own moment), no data-path register, no `core_mem` store, no
+# interrupt enabled, and no byte of the medium.
+#
+# **THIS SET SUPERSEDES THE `cmd-892b8b68` ARM AS THE ONE THE NEXT PRESS SENDS** - that sentence
+# lives in 718/719/720/723's record and is left where it is, per this file's own rule that a later
+# step supersedes such a sentence rather than editing it.
+
+set=armed-storage-instant-e8dc64f7 sha256=c9d7ba6cd83a5fdc22321fb1b65a168963e2438c7584ac79f47d6c26887df9d7 bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-and-the-arm-the-next-press-sends-STAGE90_XNU_ENTRY-1-with-the-STORAGE_PROBE-12-entry-image-tne-rung-13-census-and-command-return-path
+set=armed-storage-instant-e8dc64f7 sha256=e076555c6202dce4ca035ccbfd94c3768abf74e060a5bceda78b32681c2ff0ab bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-rung-13-entry
+set=armed-storage-instant-e8dc64f7 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built
+set=armed-storage-instant-e8dc64f7 sha256=c967d4895293a7b0b963eee244ec3fb6a470aad1003664b359d79f3ac862d7ef bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-instant-e8dc64f7 sha256=7de8f301e8ed98d9c61d0eeb2532c9e41abd6394fea7e9576149283de0972342 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-instant-e8dc64f7 sha256=e8dc64f7e7e7e6ab9ab355c3adbbcfe4313c343005a1fc0d92ededf9ff00fa06 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-this-is-the-rung-13-entry-STAGE90_XNU_STORAGE_PROBE-12-the-8-hex-of-this-hash-is-the-sets-name
+set=armed-storage-instant-e8dc64f7 sha256=3d5b11a7ba9a97ae8d376800bc86b8e7aa6210a108214f1f0c9d0e2219cfcf50 bytes=6732108 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-instant-e8dc64f7 sha256=fdcdc15ab9c4d0ae9b1e722ff905637efa2b3259a5a945a60623f42f728ac34c bytes=910 file=xnu_arm_entry-config.txt role=entry-config-record-its-rung-line-reads-STAGE90_XNU_STORAGE_PROBE-12
+set=armed-storage-instant-e8dc64f7 sha256=6186e9720b83ce98b3350dd5093eb17205bd11f300539efcef7737cbf577f0f5 bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest
+set=armed-storage-instant-e8dc64f7 sha256=adafa0750daaa9dfbfbe394e577faa1f9145d9b0264c26c0d840a4a488927dfd bytes=6051840 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
+set=armed-storage-instant-e8dc64f7 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-manifest-member-identical-in-this-arm-and-in-the-others

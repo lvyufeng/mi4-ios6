@@ -348,8 +348,8 @@ static inline uint32_t entry_sctlr(void)
  * **It is `CleanPoC_Dcache` and not `CleanPoU_Dcache`, and that is 516's whole finding.** The two
  * routines differ by one loop and the difference is the L2:
  *
- *     CleanPoU_Dcache (0x800457a8)   mov r0,#0; mcr p15,0,r0,cr7,cr10,{2} ... bx lr
- *     CleanPoC_Dcache (0x8004575c)   ... the same loop ...; mov r0,#2; mcr p15,0,r0,cr7,cr10,{2}
+ *     CleanPoU_Dcache (0x800487a8)   mov r0,#0; mcr p15,0,r0,cr7,cr10,{2} ... bx lr
+ *     CleanPoC_Dcache (0x8004875c)   ... the same loop ...; mov r0,#2; mcr p15,0,r0,cr7,cr10,{2}
  *                                    ... the same loop with the L2's geometry ...; bx lr
  *
  * - one `cr7, cr10, {2}` (DCCSW) in the first and two in the second, which the build clause counts
@@ -365,7 +365,7 @@ static inline uint32_t entry_sctlr(void)
  * (`caches.c:364`) and `platform_cache_shutdown` (`caches.c:377`). */
 extern void CleanPoC_Dcache(void);
 /* 517: the same function's *clean and invalidate* form, and the one the exit needs. `CleanPoC_Dcache`
- * writes back and leaves the line in the cache; `FlushPoC_Dcache` (`0x80045828`) is
+ * writes back and leaves the line in the cache; `FlushPoC_Dcache` (`0x80048828`) is
  * `cleanflush_dcacheline` followed by `cleanflush_l2dcacheline` - `DCCISW` (clean **and** invalidate)
  * over the L1's geometry and then over the L2's - so it both writes the line out to the Point of
  * Coherency and discards the copies, which is what a cache that is about to be switched back on wants
@@ -2543,26 +2543,26 @@ void __wrap_platform_cache_idle_exit(void)
  * **546 section 4's seam, built: a Point-of-Coherency clean-and-invalidate of the region the idle
  * exit's frame slot occupies - the two words its own `pop {fp, pc}` reads - placed after its
  * `push {fp, lr}` and before `SCTLR.C` comes back on.** 533 ran, came back, and its own log put the death where 547 section 4 predicted: both loads of
- * the `pop` succeeded and the value they brought back was a counter, with `lr = 0x800462dc` and
+ * the `pop` succeeded and the value they brought back was a counter, with `lr = 0x800492dc` and
  * `pc = r11 & ~1` (`xnu_live_sleh_lr`, `xnu_live_sleh_r11`, 568 section 4). So the frontier's object is
  * still the same word, and this is the arm the phase has been arming for since 519.
  *
  * **The site, and how it is identified rather than assumed.** The window is
- * `[0x80046240, 0x8004633c)` - Apple's own `SCTLR.C = 0` in `platform_cache_idle_enter` to Apple's own
+ * `[0x80049240, 0x8004933c)` - Apple's own `SCTLR.C = 0` in `platform_cache_idle_enter` to Apple's own
  * `SCTLR.C = 1` twenty-four bytes before the `pop` - and the only call reachable inside it is the
- * exit's `bl FlushPoU_Dcache` at `0x800462d8` (546 section 4: the four instructions between the
+ * exit's `bl FlushPoU_Dcache` at `0x800492d8` (546 section 4: the four instructions between the
  * re-enable and the `pop` contain no `bl` at all, and an interrupt between them is a different step).
- * That routine has four callers in this image - `0x80045d08` (`cache_xcall`), `0x80046284` (the
- * enter's else arm), `0x800462d8` (the exit) and `0x800463bc` (`cache_xcall_handler`) - so wrapping the
+ * That routine has four callers in this image - `0x80048d08` (`cache_xcall`), `0x80049284` (the
+ * enter's else arm), `0x800492d8` (the exit) and `0x800493bc` (`cache_xcall_handler`) - so wrapping the
  * symbol alone would put this arm's operation behind all four. The wrapper therefore **tests the
- * return address it was entered with** against `STAGE90_XNU_SEAM_LR` (`0x800462dc`, the instruction
+ * return address it was entered with** against `STAGE90_XNU_SEAM_LR` (`0x800492dc`, the instruction
  * after that `bl`) and hands every other site straight through, which is the mechanism 546 section 4
  * names (`xnu_entry_stub_caller`, this project's `__builtin_return_address(0)`) and the one
  * [[mi4-hooks-live-at-calls]] requires: a hook is a `bl`, so the `bl` is the seam.
  *
  * **Why the interception is a `naked` trampoline rather than a C body.** At the `bl`, the stack
  * pointer *is* the slot: `push {fp, lr}` at `0x800462d4` decremented `sp` by 8 and wrote the two words
- * at `[sp, sp+8)`, and the `pop` at `0x8004633c` reads those same two words back with no `sp` change
+ * at `[sp, sp+8)`, and the `pop` at `0x8004933c` reads those same two words back with no `sp` change
  * in between (546 section 1). So the address this arm reads and restores is `sp` at the wrapper's own
  * entry, and a compiler-generated prologue - which pushes the callee's registers *below* `sp`, in the
  * first instructions - would leave no way to recover it. The two moves that read `sp` and `lr` are
@@ -2671,14 +2671,21 @@ void __wrap_platform_cache_idle_exit(void)
  * (708), by the same page and for the same reason**: the rung-7 block (`st_power_set` and its two
  * helpers, `entry_storage.c`) added ~1.4 KB, more than the remainder of the same alignment slack, so
  * the exit's `bl` came out at `0x800482d8` returning to `0x800482dc` and this build refused with this
- * clause again. The value below is the one 708's build measured - the disassembly agrees with it to
- * the instruction - and it is the value every arm from 708 on carries. **The move is a property of the
+ * clause again. **It moved a third time on rung 12 (724), by the same page and for the same reason**:
+ * the rung-12 block (the read-only census, the command body's return path and their published cells,
+ * `entry_storage.c`) added ~3.9 KB, so the exit's `bl` came out at `0x800492d8` returning to
+ * `0x800492dc` and this build refused with this clause a third time. The value below is the one 724's
+ * build measured - the disassembly agrees with it to the instruction, and the four callers above and
+ * the window's two ends were re-read from the same disassembly in the same pass, because the prose
+ * around this define had been left carrying the *696-era* addresses (`0x800462xx`) through two moves
+ * that the define itself had already absorbed: a number that moves that often belongs in one place,
+ * and this paragraph is the second place it lives. The value is the one every arm from 724 on carries. **The move is a property of the
  * entry group's size and not of what a rung does**: any rung that pushes the group past the next page
  * boundary moves every kernel-text address in the image at once, and the clause above is what makes
  * that a refused build rather than a silent mis-identification at run time. The *class* - a kernel
  * address pinned in an entry source - stays recorded as owed, because the repair is still a link order
  * and not this step's question. */
-#define STAGE90_XNU_SEAM_LR       0x800482dcu
+#define STAGE90_XNU_SEAM_LR       0x800492dcu
 #define STAGE90_SEAM_LIVE_MAX     4u
 
 extern void entry_live_write(const char *key, uint32_t value);
@@ -3096,9 +3103,10 @@ int __wrap_wait4(void *proc, void *uap, int *retval)
  * its init image**. That is the property 489 could only argue from the file.
  *
  * **It is also wrappable, and that is a fact about this image rather than about the flag list.** The
- * one call site is `bl 80291114 <load_init_program>` at `0x80048eb4`, inside `bsdinit_task`
- * (`bsd_kern_bsd_init.o`) - a different object from the `bsd_kern_kern_exec.o` that defines it - so
- * `--wrap` rewrites a genuinely undefined reference. That distinction is 455's whole negative result:
+ * one call site is `bl 80480068 <__wrap_load_init_program>` at `0x8004ceb4`, inside `bsdinit_task`
+ * (`0x8004ce30`, `bsd_kern_bsd_init.o`) - a different object from the `bsd_kern_kern_exec.o` that
+ * defines it, which is at `0x80295114` - so `--wrap` rewrites a genuinely undefined reference, and the
+ * site's target in this image is the wrapper and not the function. That distinction is 455's whole negative result:
  * a wrapper whose only callers are in the object that defines the symbol links, defines its symbol,
  * and never runs. `bsdinit_task` is the chain link 489 named by reading source, and this is the
  * step's build check reading the same link out of the linked image's instructions.

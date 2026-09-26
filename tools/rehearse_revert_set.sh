@@ -117,9 +117,21 @@ cell "good-set-a-set-name" 0 "set fixture in"                   \
 #     invocation shape, opposite verdict once the set under test changes. That pair is the whole
 #     property: **a verdict about a directory that does not name its set is not a verdict about a set**,
 #     which is what `sha256sum -c` does to every park.
+#
+# **This cell's needle was a MECHANISM and it went red on the rung-13 arm (724).** It asked for
+# `stage90-qcdt.img hashes to`, which is the verifier's *second* refusal form: the tool refuses a file
+# whose recorded **size** disagrees before it hashes it, and prints `hashes to` only when the sizes
+# agree and the bytes do not. Every arm before this one happened to share `stage90-qcdt.img`'s size
+# with some other set in the record, so the hash form appeared and the cell stayed green while it was
+# really measuring the artifact's size distribution. This arm's qcdt is 8572928 bytes and no recorded
+# set shares it, so the size refusal fired for every set and the needle became unproducible - on a
+# correct refusal, which is m728's shape (an assertion the extractor cannot produce) one reader over,
+# and m691's (a uniform verdict is a fact about the instrument first). The needle is now
+# `FAIL  stage90-qcdt.img `, which both refusal forms carry and no `ok` line does, so the cell is
+# about *the file being refused* rather than about *which of the two checks refused it first*.
 cell "live-tree-matches-armed-set" 0 "VERIFIED: 11 file(s) of $ARMED" \
   bash "$TOOL" "$LIVE" --set="$ARMED"
-cell "live-tree-vs-the-other-set" 1 "stage90-qcdt.img hashes to"  \
+cell "live-tree-vs-the-other-set" 1 "FAIL  stage90-qcdt.img "  \
   bash "$TOOL" "$LIVE"
 cell "live-tree-names-the-dir" 1 "in $LIVE"                       \
   bash "$TOOL" "$LIVE"
