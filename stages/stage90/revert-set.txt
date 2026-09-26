@@ -2395,3 +2395,179 @@ set=armed-storage-pwrwait-8b824cac sha256=52bc9c357068b791f777bb9abd2e879fa5b0b2
 # carries no `xnu_live_storage_*` key that names the medium. **TWRP-to-storage stays withheld.** What
 # this press buys is the one fact the next rung's design needs: the completion is interrupt-delivered
 # and the waiter's context masks interrupts.
+
+# 716: THE RUNG-10 ARM BUILT AND PARKED - `armed-storage-pwrwait-aa2b051d`. THE BOUND IS THE
+# EXPERIMENT: rung 9's wait, and NOTHING ELSE, with `STAGE90_XNU_PWR_WAIT_TICKS` 1920000 -> 384000.
+#
+# WHAT THE ARM IS, IN ONE SENTENCE: the arm the operator's rung-9 press left behind, re-linked with
+# one switch moved - 20 ms instead of 100 ms - because the press could not separate two readings that
+# its own design made the same length (experiment-714 section 3): (a) the IRQ was pending throughout
+# the spin and was delivered when the mask lifted, or (b) the controller really took about 100 ms.
+# Under (a) the handler's arrival is pinned to the END OF THE SPIN and stays ~60 us from it whatever
+# the bound; under (b) it is pinned to the BYTE and moves with the bound. `_pwr_irq_at - _wait_t0` is
+# the reading; the separation is 80 ms, four times the bound. Pre-registration and the four outcomes:
+# experiment-715.
+#
+# **THE ARM'S NAME IS ITS SWITCH VALUE, NOT ITS RUNG DIGIT.** `STAGE90_XNU_STORAGE_PROBE=9` names TWO
+# arms now - the pressed one (`..._PWR_WAIT_TICKS=1920000`, 714's 100 ms arm) and this one
+# (`=384000`, the 20 ms arm) - so every sentence below and in the readiness narration names the tick
+# value. That is the whole reason 715 section 5 exists: two arms one rung digit apart are one name
+# with two definitions, which is this project's oldest defect (`mi4-one-value-two-definitions`).
+#
+# **MEASURED CONTAINMENT, AGAINST THE PRESSED RUNG-9 PARK (`armed-storage-pwrwait-8b824cac`), AND IT
+# IS THE TIGHTEST THIS PROJECT HAS RECORDED.** This arm is a *constant* away from an arm that has
+# been to the device:
+#   xnu_arm_entry.bin  differs in EXACTLY 4 BYTES, at file offsets 0xD284, 0xD28C, 0xD420 and 0xD428
+#                      (VA 0x8000D284/0x8000D28C/0x8000D420/0x8000D428): the two `mov`+`movt` pairs
+#                      that carry the budget - `mov r1, #0x4C00`/`movt r1, #0x1D` -> `#0xDC00`/`#0x05`
+#                      on the PUBLISHED `xnu_live_storage_pwr_wait_bound` cell, and the same pair on
+#                      r9, the LOOP'S OWN bound, compared at 0x8000D468 `cmp r0, r9`. Both spellings
+#                      are `mov` (rotated imm8) + `movt`, NOT `movw` + `movt`.
+#   stage90.bin        differs in the same 4 bytes, all four INSIDE `stage90_xnu_entry_blob` (file
+#                      offset 494236 = 0x78a9c) at blob-relative 0xD284 and 0xD420; **ZERO differing
+#                      bytes anywhere else in a 6031876-byte file**.
+#   stage90.img /      differ in EXACTLY 24 bytes: those 4, plus the boot header's 20-byte `id` field
+#   stage90-qcdt.img   at 576-595, which is the legacy AOSP `sha1(kernel || kernel_size ||
+#                      ramdisk_size || second_size)` - REPRODUCED here from the file itself, not
+#                      quoted: sha1(payload + pack('<III', 6031876, 0, 0)) == the field, on both arms.
+#                      **ZERO differing bytes outside those two regions**; the 2521088-byte
+#                      device-tree blob after the payload is BYTE-IDENTICAL, the header's dt_size word
+#                      at 40 is 0x00267800 (img: 0) in both, and the sizes are UNCHANGED (8556544 /
+#                      6035456). So unlike 713 - whose arm sat 4 bytes outside the blob because the
+#                      entry image GREW - this arm has NOTHING outside: its two images are the
+#                      pressed arm's, plus two constants.
+#   stage90.elf        section sizes UNCHANGED (text 6030666, data 1208, bss 644048) and `nm -S`
+#                      output IDENTICAL as a whole to the pressed arm's - all 465 symbols at the same
+#                      address with the same size, and `stage90_xnu_entry_blob` at VA 0x80a9c size
+#                      0x547a7c in both.
+#   xnu_arm_entry.elf  section sizes UNCHANGED (text 0x512740, data 0x326b0, bss 0x5cb88, debug same,
+#                      6715636 bytes) and `nm -S` IDENTICAL as a whole - 26540 symbols, same addresses
+#                      and sizes. **NO SYMBOL MOVED THIS STEP** (rung 9 moved `entry_storage_probe` by
+#                      +8; a changed constant moves nothing), so `STAGE90_XNU_SEAM_LR` 0x800482dc is
+#                      untouched for the third rung running and no file was re-pinned.
+#   xnu_arm_entry-     differs in EXACTLY 2 LINES: the artifact SHA256 field and
+#   config.txt         `STAGE90_XNU_PWR_WAIT_TICKS=1920000` -> `=384000`. All 18 arm keys present.
+#   xnu_arm_entry-     differs in EXACTLY 1 LINE - the SHA256 field. **NO SOURCE FILE CHANGED THIS
+#   sources.txt        STEP**: the arm is a switch value, so `build_entry.sh` and `entry_storage.c`
+#                      hash as they did on 713's arm, and the manifest keeps its 2348 bytes.
+#   stage90-build-     BYTE-IDENTICAL to the pressed park (and to every arm since 653).
+#   config.txt / the
+#   fixture
+# **THE BUILD REFUSED THE FIRST ATTEMPT AND THAT IS THE RECORD WORKING.** The arm-change guard
+# (`build_entry.sh:875-920`) compares the 18 arm keys against the previous record and stops before
+# writing anything; this invocation needed `STAGE90_ENTRY_ARM_CHANGE=1` because
+# `STAGE90_XNU_PWR_WAIT_TICKS` is one of them. A blind `./build_entry.sh` would have produced the
+# pressed arm again and every downstream check would have agreed with it.
+#
+# ONE CONSEQUENCE WORTH NAMING, AND IT IS A MESSAGE AND NOT A CHECK: the build's rung-9 clause accepts
+# `mov`/`movw` + `movt` (its refusal message says "no mov/movw + movt pair"), but its SUCCESS echo
+# still says "carried by the movw/movt pair in its own body" - and on this arm the pair is
+# `mov`+`movt`. The clause is right (it is the acceptance that matters); the sentence a reader takes
+# from the log names the other encoding. Recorded as m724 rather than repaired here, because repairing
+# a print is a build edit and this arm was parked by the build that printed it.
+set=armed-storage-pwrwait-aa2b051d sha256=6f41417d84bbce271d1f20f07ac71233e7a0f6f1f9f6a76145e9e7bde75d987f bytes=8556544 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-AND-THE-RUNG-10-ARM-THE-NEXT-PRESS-SENDS-STAGE90_XNU_ENTRY-1-with-the-STORAGE_PROBE-9-entry-image-at-PWR_WAIT_TICKS-384000-it-differs-from-the-PRESSED-rung-9-park-8b824cac-in-EXACTLY-24-BYTES-20-of-them-the-boot-headers-own-20-byte-id-field-at-576-595-which-is-the-legacy-AOSP-sha1-kernel-concatenated-with-kernel_size-ramdisk_size-second_size-as-little-endian-words-REPRODUCED-here-sha1-payload-pack-III-6031876-0-0-equals-the-field-on-BOTH-arms-so-it-MUST-change-and-4-of-them-INSIDE-the-embedded-entry-blob-stage90_xnu_entry_blob-VA-0x80a9c-size-0x547a7c-at-file-offset-496284-0x7929c-at-blob-relative-0xD284-0xD285-and-0xD420-0xD421-which-are-the-two-mov-movt-pairs-carrying-the-waits-bound-and-MEASURED-ZERO-differing-bytes-OUTSIDE-BOTH-the-2521088-byte-device-tree-blob-after-the-payload-is-BYTE-IDENTICAL-and-the-headers-dt_size-word-at-40-is-0x00267800-UNCHANGED-and-the-size-is-UNCHANGED-8556544
+set=armed-storage-pwrwait-aa2b051d sha256=45d95dffc0639959041d3011fec6afd8109e8416576804fd343dac978908f9f0 bytes=6031876 file=stage90.bin role=raw-payload-bin-SAME-SIZE-as-every-arm-since-696-6031876-and-THIS-ARM-DIFFERS-FROM-THE-PRESSED-RUNG-9-PARK-IN-EXACTLY-4-BYTES-ALL-FOUR-INSIDE-stage90_xnu_entry_blob-file-offset-494236-0x78a9c-at-548128-0x85d20-blob-plus-0xD284-and-548540-0x85ebc-blob-plus-0xD420-so-blob-relative-offsets-EQUAL-to-the-entry-bins-own-differing-offsets-and-ZERO-differing-bytes-OUTSIDE-THE-BLOB-and-consequently-NOTHING-OUTSIDE-BOTH-unlike-713s-arm-whose-entry-image-GREW-and-whose-payload-copy-of-BSS_END-and-the-BSS-length-moved-with-it-the-ELF-here-is-text-6030666-data-1208-bss-644048-ALL-THREE-UNCHANGED-with-all-465-of-its-symbols-comparing-EQUAL-as-a-whole-by-name-address-and-size
+set=armed-storage-pwrwait-aa2b051d sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-pressed-rung-9-park-and-to-every-arm-since-653-INCLUDING-its-STAGE90_XNU_ENTRY-1-line-so-this-file-CANNOT-NAME-THIS-ARM-and-it-does-not-need-to-THIS-STEP-DID-NOT-TOUCH-THE-PAYLOAD-AT-ALL-the-only-thing-this-arm-changed-is-an-entry-switch-value-and-the-payload-was-rebuilt-around-the-new-embedded-entry-bin-and-this-identity-is-the-evidence-that-the-rebuild-reproduced-the-pressed-arms-payload-switch-set-exactly
+set=armed-storage-pwrwait-aa2b051d sha256=9ad5836c76742679d1c5a84707f5418b38a3f0979818b0b0c1010905bb5d1df3 bytes=6093948 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-its-text-is-6030666-bytes-its-data-1208-and-its-bss-644048-all-three-UNCHANGED-from-the-PRESSED-rung-9-park-and-its-nm--S-output-EQUALS-that-parks-output-as-a-whole-so-every-one-of-its-465-symbols-is-at-the-same-address-with-the-same-size-and-stage90_xnu_entry_blob-is-at-VA-0x80a9c-size-0x547a7c-in-BOTH-this-file-differs-from-the-pressed-park-only-in-the-four-blob-bytes-it-embeds-and-it-is-the-cleanest-payload-containment-this-project-has-recorded
+set=armed-storage-pwrwait-aa2b051d sha256=b4ede90f2f4c2d411a800ea833472ab38d6346cb98c2fb5315152a619762ddc0 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-so-sha256sum--c-must-NEVER-be-run-inside-a-park-see-the-records-own-note-its-five-members-are-the-other-five-of-this-set-and-FOUR-of-the-five-hashes-differ-from-the-PRESSED-rung-9-arms-manifest-the-fixture-macho-is-the-one-that-does-not manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-pwrwait-aa2b051d sha256=aa2b051db37e0ca51e83c1722e806cce4546e401c4569bb83c40cb1bbb3a5d52 bytes=5536380 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ONE-BINARY-THIS-STEP-CHANGED-and-its-name-is-its-switch-value-because-the-rung-digit-does-NOT-move-it-is-the-PRESSED-rung-9-entry-8b824cac-with-STAGE90_XNU_PWR_WAIT_TICKS-1920000-to-384000-and-EXACTLY-4-BYTES-DIFFER-at-file-offsets-0xD284-0xD28C-0xD420-and-0xD428-VA-0x8000D284-mov-r1-0x4C00-to-0xDC00-and-0x8000D28C-movt-r1-0x1D-to-0x05-which-are-the-PUBLISHED-xnu_live_storage_pwr_wait_bound-cell-and-0x8000D420-mov-r9-0x4C00-to-0xDC00-and-0x8000D428-movt-r9-0x1D-to-0x05-which-are-the-LOOPS-OWN-bound-read-by-cmp-r0-r9-at-0x8000D468-and-NOTE-THE-ENCODING-both-pairs-are-mov-rotated-imm8-plus-movt-and-NOT-movw-plus-movt-which-the-builds-clause-accepts-because-it-reads-mov-movw-but-whose-success-echo-still-says-movw-movt-recorded-as-m724-and-the-size-is-UNCHANGED-5536380-with-the-entry-elfs-text-data-bss-and-debug-sections-ALL-UNCHANGED-as-is-the-whole-nm--S-output-26540-symbols-NO-SYMBOL-MOVED-THIS-STEP
+set=armed-storage-pwrwait-aa2b051d sha256=dca46c9284acd9ce6f099ff52f6daca9923303f1036385a45b762ec12c5630da bytes=6715636 file=xnu_arm_entry.elf role=entry-elf-SAME-SIZE-as-the-PRESSED-rung-9-arms-6715636-because-nothing-in-it-moved-st_pwr_wait-is-at-0x8000d230-size-0x250-st_pwr_irq-is-at-0x8000cff8-size-0x238-and-entry_storage_probe-is-at-0x8000d480-size-0x173c-ALL-THREE-AT-THE-SAME-ADDRESS-AS-THE-PRESSED-ARM-so-platform_cache_idle_exit-0x800482d4-and-_wrap_platform_cache_idle_exit-0x8047ead8-are-UNCHANGED-and-STAGE90_XNU_SEAM_LR-0x800482dc-did-NOT-move-THE-THIRD-RUNG-RUNNING-and-this-elf-has-26540-symbols-the-SAME-COUNT-as-the-pressed-arm-with-every-name-at-the-same-address-and-the-same-size-and-the-two-mov-movt-pairs-are-inside-st_pwr_wait-0xD284-and-0xD420-are-both-between-0x8000d230-and-0x8000d480
+set=armed-storage-pwrwait-aa2b051d sha256=0d3ae7c0e1f85bcc3c508537cdf4bab02557ea69455fd1e297ff47a28da7e8c0 bytes=909 file=xnu_arm_entry-config.txt role=entry-config-record-AND-THE-ONE-RECORD-THAT-NAMES-THIS-ARM-its-last-two-lines-read-STAGE90_XNU_STORAGE_PROBE-9-and-STAGE90_XNU_PWR_WAIT_TICKS-384000-beside-SEAM_POC-1-SEAM_MEASURE-0-SEAM_END_RUN-0-POST_END_RUN-0-POST_END_TICKS-115200000-SLOT_NULL-1-IDLE_CACHE_ENABLE-0-ISTACK_SEPARATE-0-IDLE_STACK-1-IDLE_NO_SLEEP-0-and-REAL_ARM_INIT-1-and-EXACTLY-TWO-of-its-lines-differ-from-the-PRESSED-rung-9-arms-the-file-SHA256-field-and-PWR_WAIT_TICKS-1920000-to-384000-measured-by-diff-and-the-file-is-ONE-BYTE-SMALLER-than-the-pressed-arms-910-because-1920000-is-seven-digits-and-384000-is-six-and-that-one-byte-is-the-only-thing-about-this-arms-decoration-that-moved-and-the-value-is-the-one-715s-pre-registration-fixed-in-advance-20-ms-at-19200000-Hz
+set=armed-storage-pwrwait-aa2b051d sha256=2ac0ba579064ba41a055d39cfd4857602e8702d460a87f75369b18bf4e10c276 bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest-28-lines-in-all-23-of-them-file-lines-and-EXACTLY-ONE-of-its-lines-changed-this-step-the-entry-SHA256-field-so-NO-SOURCE-FILE-CHANGED-THIS-STEP-build_entry_sh-entry_storage_c-and-the-other-21-hash-as-they-did-on-713s-arm-because-this-arm-is-a-SWITCH-VALUE-and-not-an-edit-and-the-file-keeps-its-2348-bytes-which-is-ALSO-the-check-that-715-changed-no-source-and-that-the-arm-was-produced-by-the-tree-that-was-already-in-front-of-the-gate
+set=armed-storage-pwrwait-aa2b051d sha256=024140e15c7393716761f2bb2bd0138505d008cea96710384aebbc7a9f9077e6 bytes=6035456 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies-its-header-id-field-at-576-595-is-the-same-legacy-AOSP-sha1-REPRODUCED-from-this-file-and-it-differs-from-the-PRESSED-rung-9-park-in-EXACTLY-24-BYTES-the-header-id-and-4-inside-the-embedded-entry-blob-which-this-file-carries-one-2048-byte-header-page-later-at-497240-and-ZERO-OUTSIDE-BOTH-and-its-dt_size-word-at-40-is-0-because-this-file-has-no-device-tree-appended-and-the-image-is-otherwise-stage90-bin-plus-a-1532-byte-ZERO-tail-because-img-2048-equals-bin-EXACTLY
+set=armed-storage-pwrwait-aa2b051d sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-entry-nonetheless-and-BYTE-IDENTICAL-to-the-PRESSED-rung-9-park-so-THE-ONLY-FILES-THAT-DID-NOT-MOVE-ARE-THE-TWO-THAT-DESCRIBE-NOTHING-ABOUT-THE-ENTRY-IMAGE-the-fixture-and-the-payloads-own-switch-dump-and-the-identity-of-the-latter-is-what-shows-the-rebuild-reproduced-the-pressed-arms-payload-configuration-exactly-and-THIS-ARM-IS-THE-FIRST-WHOSE-ENTRY-SWITCH-VALUE-ALONE-CAN-BE-READ-OFF-THE-ARTIFACT-BY-BYTE-COUNT
+
+# 717: THE RUNG-10 ARM PRESSED - `armed-storage-pwrwait-aa2b051d`. **THE BOUND IS NOT THE DEVICE:**
+# the completion arrived 20.17 ms after the byte, and the handler's arrival tracks the END OF THE
+# MASKED SPIN to within 0.73 us.
+#
+# readiness 5/5 exit 0 (00:51:41), ONE gate (`--allow-xnu-entry`, exit 0, 579 stdout lines, 00:52:47),
+# EXACTLY ONE runner (`--expect-arm=armed-storage-pwrwait-aa2b051d`) **EXIT 0** - returned and
+# captured - at 00:53:56, 136 s of wall clock end to end. Firer `/tmp/g668/press-on-clear.v5.sh`
+# (sha256 7f23cae5fb4edf21159d6241606f203c4320eed59641d207fb9a641ec6c485e6), budget 600 s,
+# `done. gate=0 runner=0` - **no firer is armed**. Capture 625,029 B, sha256
+# 98584a316213b735369a7f875150ac0d0d1cc7f32bc1e269a1f464a9e6691688, archived by hand as
+# `out/stage90/captures/rung10-pwrwait20-20260926-005430-{last_kmsg.txt,press,gate,run}` (the runner
+# does NOT archive; the press log's own copy is the `press` file). One non-persistent `fastboot boot`,
+# nothing flashed, `33e80afe` off the bus, device back on its own (`adb devices` -> `4a2fe00b device`).
+#
+# **THE ANSWER, IN TICKS OF THE 19,200,000 Hz COUNTER THE HARDWARE REPORTED (`_post_cntfrq`), BOTH
+# ARMS SIDE BY SIDE.** This arm's bound is 20 ms where the pressed arm's was 100 ms, and the bound is
+# the only thing that moved:
+#
+#   quantity                    rung 9 (bound 1920000)     THIS ARM (bound 384000)     difference
+#   _wait_bound                 1920000                    384000                      the one switch
+#   _wait_ticks                 1921194 = 100.062 ms       386131 = 20.111 ms          -80.000 ms
+#   _wait_polls                 428032                     86016 (84 x 1024)           -4.98x
+#   _wait_timeout               1                          1                           spent again
+#   _wait_ctl_before/after      0x00 / 0x00                0x00 / 0x00                 the ack still absent
+#   _wait_cpsr                  0x80000093                 0x80000093                  SVC, I SET
+#   post_t0 - spin end          217 = 11.30 us             217 = 11.30 us              IDENTICAL
+#   _pwr_irq_at - spin end      1153 = 60.05 us            1167 = 60.78 us             +14 = +0.73 us
+#   _pwr_irq_at - _wait_t0      1922347 = 100.122 ms       387298 = 20.172 ms          -80.000 ms
+#   _pwr_irq_at - post_t0       936 = 48.75 us             950 = 49.48 us              +14 = +0.73 us
+#
+# **READING (b) IS DEAD AND IT DOES NOT NEED THE COUPLING ARGUMENT.** 714 section 3 refused to choose
+# between (a) "the IRQ was pending throughout the spin and was delivered when the mask lifted" and (b)
+# "the controller really takes about 100 ms, and the bound was a hair short". `_pwr_irq_at - _wait_t0`
+# is **20.172 ms**: on this arm the completion arrived **inside 20.17 ms of the byte**, which is where
+# `_wait_t0` is taken. A mechanism that takes ~100 ms cannot deliver in 20.17 ms, so there was never a
+# 100 ms device latency to miss - the 100 ms 714 measured was **its own mask**. That is the reading
+# 714's own evidence favoured and could not prove, and 714's own caution ("this arm set its bound and
+# its mask to the same length by construction") is what made the proof possible by moving the bound.
+#
+# **AND READING (a) IS CONFIRMED TO 0.73 us.** The handler entered 60.78 us after the poll gave up and
+# 49.48 us after the probe's own post record; on the 100 ms arm the same two offsets are 60.05 us and
+# 48.75 us. `post_t0 - spin end` is **217 ticks on both arms** - the probe's own tail reaching its post
+# record, identical because it is the same code - so the unmask is a property of the code AFTER the
+# probe and not of the probe, and it costs a fixed ~49 us. The 0.73 us spread across an 80 ms change
+# in the bound is 0.9 % of the quantity and four orders of magnitude below the change.
+#
+# **WHAT THIS BUYS THE PORT, AS A REQUIREMENT RATHER THAN A FINDING.** The completion is available
+# essentially immediately (the latch is set within microseconds of the byte - rung 7's own pair, re-read
+# on this run as `_pwr_status_before=0x00` -> `_pwr_status_after=0x02`), so **a bounded spin in a
+# context that masks interrupts cannot observe it at ANY budget**: the budget and the mask are not two
+# independent quantities, because the mask ends where the code that owns it returns and the spin is
+# inside that code. The vendor's `wait_for_completion` works precisely because it SLEEPS; a port that
+# keeps the predicate and drops the sleep loses the only mechanism by which the completion can arrive.
+# **The next rung therefore has exactly two shapes and they are not a matter of taste: unmask around
+# the spin, or take the wait where the mask is already clear.** Both are now choices with a measured
+# fact behind them.
+#
+# **THE MATCHED PREDICTION.** 715 pre-registered, before the build: `_wait_bound = 0x0005DC00` in the
+# linked artifact (the log carries 0x0005dc00); `_wait_ticks` = the bound plus a mid-batch remainder
+# (386131, overshoot 2131 ticks = 111 us, inside one 1024-read batch, at 4.49 ticks per read); and
+# `_pwr_irq_at - _wait_t0` at about 385,000 ticks under (a) against about 1,922,000 under (b)
+# (measured 387,298 - the extra ~2,300 ticks are the batch overshoot plus the 1,167-tick wait for the
+# mask to lift).
+#
+# **THE INHERITED CELLS ALL READ AS THEY DID ON THE PRESSED RUNG-9 ARM AND ON THE PRESSED RUNG-8 ARM**,
+# which is the check that this arm changed only what it says it changed: `_storage_calls=1`,
+# `_loads=6`, `_writes` published 0->4 through the mode sequence, `_rst_stores=1`, `_mode_bit_after=1`,
+# `_gate=1`, `_bcr=0x0`, `_cbcr=0x4ff1`, `_gcc_map=1`, `_map=1`, `_pwr_before=0x00` -> `_pwr_after=0x0b`
+# with `_pwr_vdd=7`. **711 section 3 is answered a SECOND time on a SECOND arm**:
+# `_wait_cc_before = _wait_cc_after = 0xE047`, identical halves either side of the twenty milliseconds.
+# The handler's side is unchanged and correct: `_pwr_irq_calls=1`, `_pwr_irq_intid=0xaa` (170),
+# `_pwr_irq_ctl_before=0x0` -> `_pwr_irq_ctl_after=0x1`, `_pwr_irq_status=0x02`, `_pwr_irq_ack=0x01`,
+# `_pwr_irq_status_after=0x00` (the latch let go), `_pwr_irq_state=0x02` and `_pwr_irq_io_level=0x08` -
+# the two fields the predicate reads, written by the handler's tail. No `_irq_other_*` key at all.
+#
+# **AND TWO OF THOSE CELLS ARE EXPECTED BY CONSTRUCTION, WHICH IS m723.**
+# `_pwr_irq_calls_once_before_byte` and `_pwr_irq_calls_probe_end` are 0 on BOTH arms and cannot be
+# anything else while the arm masks interrupts: the handler cannot run between the byte and the read
+# that follows it, and the probe's tail is 11.30 us wide. 710 section 2 pre-registered them as
+# predictions; a cell whose value is fixed by the arm's own mask predicts nothing about the arm, and
+# naming it a prediction makes the next reader trust it twice. Recorded, not repaired, in
+# `mi4-measurement-defects`.
+#
+# **THE ENDING DID NOT MOVE**: `_post_end_calls=0x8` with `_post_cntfrq=0x0124f800` = 19,200,000 Hz and
+# the elapsed pair past 7,997 ms - the 690 clock fired on its own schedule and the machine stayed up
+# through it. **The shorter bound cost the run 20 ms of a 6,000 ms window and nothing else**, which is
+# the safety property the rung was designed for, re-measured on a second arm: the poll is bounded, so
+# the run always continues.
+#
+# **THE GOAL IS STILL NOT MET.** No command, no sector, no partition table, no mount, no driver beyond
+# the fixture - this rung's whole device act is two halfword reads and a poll of one byte, and its log
+# carries no key that names the medium. **TWRP-to-storage stays withheld.** What this press buys is the
+# next rung's shape: the completion is interrupt-delivered, the waiter's context masks interrupts, and
+# the completion is available long before any budget this arm could spend.
