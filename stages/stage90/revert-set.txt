@@ -2768,3 +2768,71 @@ set=armed-storage-pwrwait-unmask-13366e08 sha256=f031b0af2b41a2c7e5f8880fd33f9ec
 # another reading about the wait: the card's rail, the RCG rate write (705/706 measured 192 MHz where
 # the driver believes 400 kHz), rung 6's two stores to hc_mem + 0x10C with the readback cell, or the
 # command path (sdhci_send_command), where "the card answers" begins.
+
+# --- armed-storage-cmd-892b8b68: THE RUNG-11 ARM, THE COMMAND PATH -------------------------------
+#
+# WHAT IT IS. `STAGE90_XNU_STORAGE_PROBE=11`: `sdhci_send_command` (`sdhci.c:1076-1155`) ported for the
+# driver's own first two commands - CMD0 `MMC_GO_IDLE_STATE` (argument 0, `MMC_RSP_NONE`) and CMD1
+# `MMC_SEND_OP_COND` (argument 0, `MMC_RSP_R3`), the pair `mmc.c:1356-1359` issues back to back - with
+# the driver's IRQ completion replaced by a BOUNDED poll of the controller's own `INT_STATUS` because
+# this image enables no SDHCI interrupt (the block's line is SPI 123 -> intid 155 and a delivery would
+# END the run). It is the first act of this line that addresses the CARD rather than the controller,
+# and `docs/experiments/experiment-721-the-rung-12-pre-registration-...md` is its pre-registration.
+#
+# WHY IT IS RECORDED AND PARKED, and it is 611's reason and not a new one: `./build.sh` is not
+# byte-reproducible (408), so this payload exists in exactly one place on earth, and a run of either
+# build script would destroy it. `xnu_arm_entry.bin`'s own sha256 begins `892b8b68`, which is the
+# suffix this directory is named for - the convention every `armed-storage-*` park in `frozen/` uses.
+#
+# **THE TWO DEFECTS THIS ARM'S OWN CLAUSES CAUGHT, BOTH IN THE CLAUSES AND NOT IN THE HARDWARE** -
+# recorded here because each is a shape that will recur: (1) `noinline` alone was not enough. GCC's
+# interprocedural constant propagation rewrote the whole command body into a specialised clone and
+# dropped the original, so `nm` showed `st_send_command.constprop.0` and NO `st_send_command`, and the
+# clause's `sym_addr` refused the build - a clone is a second body with its own extent, and a clause
+# reading the original's window while the image's only command path lived in the clone would have
+# described a function no call reaches. The source carries `noinline` AND `noclone` now (m727). (2) The
+# image-side clause was written as an emptiness - "this function owns no `.bss` word" - and refused a
+# CORRECT image, because `classify_body` reports an access whose base register the body never
+# materialized an address for as `UNK:<mnemonic>`, and this function's result struct is reached through
+# its POINTER ARGUMENT. The claim is now the named pair `[UNK:ldr UNK:str]` with no address, which still
+# refuses the class the clause is about (a symbol this rung never declared must be reached through a
+# materialized base, and that prints `IMG:` WITH an address) - an assertion that cannot hold is not a
+# check (m728).
+#
+# WHAT IT DOES NOT DO, all four of them `build_entry.sh` clauses rather than sentences: no data-path
+# register (`BLOCK_SIZE`/`BLOCK_COUNT`/`TRANSFER_MODE`/`BUFFER` appear in no access of either body), no
+# `POWER_CONTROL 0x29` (the probe's own window is unchanged at `47 44 44 41`), no store to either
+# interrupt-enable register (`0x34`/`0x38` are READ, in `st_cmd_path`, and written nowhere in this
+# image), no clock write, no GCC word, no `core_mem` word, and no byte of the medium. The write set is
+# three stores per call and the clause fixes their ORDER as well as their set: `INT_STATUS` 0x30
+# (write-1-to-clear), then `ARGUMENT` 0x08, then `COMMAND` 0x0E.
+#
+# **THIS SET SUPERSEDES THE `pwrwait-unmask-13366e08` ARM AS THE ONE THE NEXT PRESS SENDS** - that
+# sentence lives in 718/719/720's record and is left where it is, per this file's own rule that a later
+# step supersedes such a sentence rather than editing it.
+
+set=armed-storage-cmd-892b8b68 sha256=104078553f012f6f38df3de7470bd7761c77b8516d0540631f3fa66342de231c bytes=8556544 file=stage90-qcdt.img role=qcdt-wrapped-payload-this-is-what-fastboot-boot-sends-and-the-arm-the-next-press-sends
+set=armed-storage-cmd-892b8b68 sha256=b54884892002634b22d136f8ca664b493767cc7918372dd2c91cb6978b97a28a bytes=6031876 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-rung-11-command-path-entry
+set=armed-storage-cmd-892b8b68 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built
+set=armed-storage-cmd-892b8b68 sha256=cea8ddb3dc1a35bd5dd6eee2b02fdbd2c90d17a25343d9838ca50955c5e36a7f bytes=6093948 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-cmd-892b8b68 sha256=e9eca9edc6290dc9dcb585d1a93755c770cf4fd78f4b7e7e8e549d9af7ff2753 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-cmd-892b8b68 sha256=892b8b68a4065f2d9798a3f7396c6cb4f2eaaf44bc783d17fa623b4a831ca7da bytes=5536380 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-this-is-the-rung-11-entry-STAGE90_XNU_STORAGE_PROBE-11-the-8-hex-of-this-hash-is-the-sets-name
+set=armed-storage-cmd-892b8b68 sha256=ef0a467bbae5928eadf8e5cade9e44083c47a4ebd7279ef02a886959ecf6667a bytes=6715696 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-cmd-892b8b68 sha256=ae8acff0ef5f7d0c4d0756a8a209f01c028a035d093cfcc32e396515f875d29b bytes=910 file=xnu_arm_entry-config.txt role=entry-config-record-its-rung-line-reads-STAGE90_XNU_STORAGE_PROBE-11
+set=armed-storage-cmd-892b8b68 sha256=0ffa31a306e724b3b60773af85a2e52c1d00da3e6c05e1908ed1b161fd13eba8 bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest
+set=armed-storage-cmd-892b8b68 sha256=cd756c8352081abe356ac1c1744c7d774eedbee7e1223d916d0f6d5fb155383f bytes=6035456 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
+set=armed-storage-cmd-892b8b68 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-manifest-member-identical-in-this-arm-and-in-the-others
+
+# **PRESSED 2026-09-26 02:04:54-02:06:36, EXIT 0** (returned and captured, 102 s end to end; readiness
+# 5/5, one gate exit 0 / 581 lines, exactly one runner `--expect-arm=armed-storage-cmd-892b8b68`; firer
+# `/tmp/g668/press-on-clear.v5.sh`, budget 600 s, `done. gate=0 runner=0` -> no firer is armed). The
+# capture is `out/stage90/captures/rung12-cmd-20260926-020454-{last_kmsg.txt,gate.log,run.log,firer.log,press.log}`,
+# 632,182 B, sha256 `e86501c8...`. **The arm's answer is the seventh outcome of 721's section 6, and it is
+# not one of the six**: with all three gates green the command went out (`_cmd0_word=0x0000`,
+# `_cmd0_sent=1`) and the controller latched NOTHING for 23,040,104 ticks (`_cmd0_status_after=0` on
+# 5,140,480 polls, `_cmd0_err=0` - not even its own `SDHCI_INT_TIMEOUT`), so the gate between the two
+# commands refused (`_cmd_gated=1`) and CMD1 was never issued (zero `_cmd1_*` keys). The record is
+# `docs/experiments/experiment-723-the-rung-12-press-the-command-went-out-and-nothing-latched.md`, and the
+# register the answer points at - `POWER_CONTROL 0x29 = 0x00`, which the driver's own `sdhci_set_power`
+# writes as `0x0F` before any command - is the rung above this one. **The bytes below are unchanged by the
+# press**: this set is still the arm that was sent, and it remains the set a revert puts back.

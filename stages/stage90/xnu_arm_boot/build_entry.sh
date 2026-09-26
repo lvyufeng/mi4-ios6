@@ -631,6 +631,17 @@ esac
 # no new store, and no change to either clause**: a published cell is a call to `entry_live_write` with
 # a string, so it is not an access this window's census can see, and the four `.bss` words, the two
 # device addresses and their counts, the single call and the budget pair are all rung 9's.
+# **Rung 11 is the ladder's first act on the CARD**, and it is the first rung since rung 6 that adds
+# registers to the `hc_mem` window: `sdhci_send_command` (`sdhci.c:1076-1155`) for the driver's own
+# first two data-less commands - `mmc_go_idle`'s CMD0 (`mmc_ops.c:107`, argument 0, `MMC_RSP_NONE`)
+# and `mmc_attach_mmc`'s CMD1 (`mmc.c:1923`, argument 0, `MMC_RSP_R3`). The function writes
+# `ARGUMENT 0x08` (32-bit), `COMMAND 0x0E` (16-bit) and `INT_STATUS 0x30` (32-bit, write-1-to-clear)
+# and reads `PRESENT_STATE 0x24`, `INT_STATUS 0x30` and `RESPONSE 0x10` - and it is `noinline`, so
+# those are ITS OWN body's accesses and the probe's window keeps `47 44 44 41` unchanged. The
+# completion is a BOUNDED poll of the controller's own `SDHCI_INT_RESPONSE` bit rather than the
+# driver's IRQ, because enabling the block's `hc_irq` (SPI 123 -> intid 155) would let a delivery
+# reach the dispatcher as an unknown line and end the run. No data-path register, no `POWER_CONTROL`,
+# no GCC word, no `core_mem` word, and no byte of the medium.
 STORAGE_PROBE=${STAGE90_XNU_STORAGE_PROBE:-0}
 case "$STORAGE_PROBE" in
     0) ;;
@@ -644,7 +655,8 @@ case "$STORAGE_PROBE" in
     8) ;;
     9) ;;
     10) ;;
-    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 or 10, not [$STORAGE_PROBE]" >&2
+    11) ;;
+    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 or 11, not [$STORAGE_PROBE]" >&2
        echo "        It is a `#if` in two files and not a value, so anything else would reach the" >&2
        echo "        preprocessor as a broken -D and fail there, with the cause named by the wrong" >&2
        echo "        tool (692); and it is a rung rather than a flag since 696, so a value above the" >&2
@@ -30651,6 +30663,103 @@ verify_trace_symbols() {
             [[ "$stb_wait_pair" == "1" ]] ||
                 layout_fail "st_pwr_wait's body carries no mov/movw + movt pair for $PWR_WAIT_TICKS (lo=0x$(printf '%x' "$stb_wait_lo"), hi=0x$(printf '%x' "$stb_wait_hi")): the wait's own budget does not appear in the linked artifact, so the record's STAGE90_XNU_PWR_WAIT_TICKS=$PWR_WAIT_TICKS would be a number nothing in the image reads - a switch no build reads, which is m720's shape and this project's oldest silent defect. The pair must be the SAME register in movw-then-movt order: a low half alone is a 16-bit constant and a movt on another register is not this wait's bound. GCC -mcpu=cortex-a15 emits the pair; a build that reached for the literal pool instead refuses here deliberately, because a clause that cannot see the number it asserts must not pass. Nothing is rebuilt by this refusal"
             echo "  xnu_entry_712: st_pwr_wait's device accesses are [$stb_wait_dev] with counts [$stb_wait_cnt], its non-device accesses are [$stb_wait_img] at [$stb_wait_imgaddr], entry_storage_probe calls it $(grep -c -- 'bl.*<st_pwr_wait>' <<<"$stb_body") time(s), and its budget $PWR_WAIT_TICKS is carried by the movw/movt pair in its own body - the driver's own completion ported: two halfword readings of CLOCK_CONTROL either side of a bounded poll of the CONTROLLER's ack, and no store to any device"
+        fi
+        if [[ $STORAGE_PROBE -ge 11 ]]; then
+            # **721: THE COMMAND PATH IS TWO BODIES, AND THE TWO CLAUSES BELOW ARE ONE ARGUMENT.**
+            #
+            # Rung 9's clause reads ONE function whose body is the whole act. Rung 11's act is a
+            # function and its caller, and the split is load-bearing: `st_send_command` holds every
+            # device WRITE this rung makes (so its set can be asserted exactly, offset by offset and
+            # width by width) and `st_cmd_path` is asserted to make NONE - so "every device write this
+            # arm makes is in this one function, and it is one of these three" is a property of the
+            # artifact. A single clause over an inlined command path would have to assert the probe's
+            # own `hc_mem` set, which has been `47 44 44 41` since 701 and is what keeps
+            # `POWER_CONTROL 0x29` out of the linked image.
+            #
+            # **The set is the safety claim and the ORDER of the three stores is a second, narrower
+            # one**: the latch clear precedes the ARGUMENT which precedes the COMMAND. The order is
+            # read out of the classifier's own program-order line with the loads removed, which is
+            # sound for exactly the reason the set is: all three are `volatile` stores, so no
+            # reordering across each other is permitted and the compiler's block layout cannot change
+            # their relative order. (The loads' positions *are* a fact about how GCC lays out the two
+            # poll loops, which is why this clause does not assert them - rung 9's "the source being
+            # right and the record wrong" lesson, applied in the direction that keeps a refusal about
+            # the arm rather than about the compiler.)
+            #
+            # **The empty sets are deliberate, and they are not the suspicious empty rung 9 warns
+            # about.** `st_send_command`'s image-side set is EMPTY because it owns no `.bss` word and
+            # writes only the caller's stack structs, which the classifier skips by base register;
+            # `st_cmd_path`'s is empty for the same reason plus `entry_live_write` being a call with a
+            # `.rodata` string. Rung 9's warning was about a DEVICE set coming out empty, and here the
+            # device set of each body is asserted non-empty and exact - the emptiness being asserted
+            # is the absence of a `.bss` word, which is itself the claim that this rung adds no
+            # instrument state.
+            stb_cmd=$(sym_addr st_send_command) ||
+                layout_fail "st_send_command is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE - rung 11's whole device act IS that body (sdhci_send_command ported, sdhci.c:1076-1155), so an arm at this rung whose command function is absent is an arm whose record names a command no call in the image makes. There are exactly three ways to get here and all three are refusals worth having: the function was renamed, or it was INLINED, or it was CLONED - and the third is not hypothetical: the first build of this rung produced \`st_send_command.constprop.0\` and NO \`st_send_command\`, because GCC's constant propagation specialised a body of its own and dropped the original, which is why the source carries \`noinline\` AND \`noclone\`. A command path with no body of its own, or with a body whose extent is a clone's, is a body this clause cannot read at all, and its three stores would then sit inside the probe's own window, where they are not declared. Nothing is rebuilt by this refusal"
+            stb_cmd_size=$(sym_size st_send_command) ||
+                layout_fail "st_send_command has no size in the symbol table (nm -S), so this clause's window has no end and it would classify whatever follows the command function as its own body. Nothing is rebuilt by this refusal"
+            stb_cmd_body=$(arm-none-eabi-objdump -d --start-address="$stb_cmd" \
+                           --stop-address="$(printf '0x%x' $(( stb_cmd + stb_cmd_size )))" "$OUT/xnu_arm_entry.elf")
+            # The DECLARED set is the record's own list of the `hc_mem` registers this rung may reach:
+            # PRESENT_STATE 0x24, INT_STATUS 0x30 (read AND written), RESPONSE 0x10, ARGUMENT 0x08,
+            # COMMAND 0x0E. A device address outside it is the refusal this clause exists for, and so
+            # is an address it cannot resolve (UNK/NODECL/AMBI).
+            stb_cmd_decl="f9824924 f9824930 f9824910 f9824908 f982490e"
+            { read -r stb_cmd_dev; read -r stb_cmd_cnt; read -r stb_cmd_img; read -r stb_cmd_imgaddr; } < <(classify_body "$stb_cmd_body" "$stb_cmd_decl")
+            stb_cmd_set=$(printf '%s\n' $stb_cmd_dev | LC_ALL=C sort | tr '\n' ' ')
+            stb_cmd_want="f9824908:str f982490e:strh f9824910:ldr f9824924:ldr f9824930:ldr f9824930:str "
+            [[ "$stb_cmd_set" == "$stb_cmd_want" ]] ||
+                layout_fail "st_send_command's device accesses are [$stb_cmd_set] (sorted) and rung 11's record says [$stb_cmd_want] - i.e. ARGUMENT 0x08 written 32-bit (sdhci.c:1119), COMMAND 0x0E written 16-bit (:1153), RESPONSE 0x10 read 32-bit (:1174), PRESENT_STATE 0x24 read (:1096 and the before/after pair) and INT_STATUS 0x30 both READ (the latch as found, the latch after the clear, and the completion poll) and WRITTEN (the write-1-to-clear), and NOTHING ELSE. Every other offset in this window is a register this arm does not describe - and three of them are the reason this clause exists: a store to POWER_CONTROL 0x29 is a bus-off request on this SoC, and a store to either interrupt-enable register (0x34, 0x38) is the one act that can let this block raise SPI 123 - intid 155, which this image hands to nobody, whose delivery arrives at the dispatcher as \`_irq_other_count\` and ENDS THE RUN. An EMPTY list is the case to be most suspicious of: st_read32/st_write32/st_write16 are helpers, and a body that calls them without inlining leaves its device accesses in another function while this clause would read the emptiness as a clean body (rung 6's \`st_branch_enable\` lesson, one rung over). Nothing is rebuilt by this refusal"
+            stb_cmd_cnt_ok=$(awk -v c="$stb_cmd_cnt" 'BEGIN {
+                    want["f9824924:ldr"] = 3; want["f9824930:ldr"] = 3; want["f9824930:str"] = 1
+                    want["f9824908:str"] = 1; want["f982490e:strh"] = 1; want["f9824910:ldr"] = 1
+                    split(c, a, " ")
+                    for (i in a) { split(a[i], b, "="); n[b[1]] = b[2] + 0 }
+                    miss = ""
+                    for (k in want) if ((k in n) && n[k] < want[k]) miss = miss sprintf("%s=%d(want>=%d) ", k, n[k] + 0, want[k])
+                    print miss
+                }')
+            [[ -z "${stb_cmd_cnt_ok// /}" ]] ||
+                layout_fail "st_send_command's device accesses are [$stb_cmd_cnt] and the counts below the record's minimum are [$stb_cmd_cnt_ok]. The counts are MINIMA because the two polls are loops the compiler may restructure, and what the rung needs is that each register is reached on the side it is reached on: INT_STATUS read at least three times (the latch as found, the latch after the clear, and at least one read of the completion poll - fewer would make the clear and the poll the same access, and the arm would be reporting a latch it never cleared), INT_STATUS written at least once (the clear itself - a build that dropped it would leave the poll endable by CMD0's own completion, which is the defect this rung's third gate removes), PRESENT_STATE at least three times (the before/after pair plus the inhibit gate's own read), and ARGUMENT, COMMAND and RESPONSE at least once each. Nothing is rebuilt by this refusal"
+            stb_cmd_store_order=$(printf '%s\n' $stb_cmd_dev | grep -v ':ldr' | tr '\n' ' ')
+            [[ "$stb_cmd_store_order" == "f9824930:str f9824908:str f982490e:strh " ]] ||
+                layout_fail "st_send_command's device STORES, in the body's own program order, are [$stb_cmd_store_order] and rung 11's record says [f9824930:str f9824908:str f982490e:strh] - the write-1-to-clear of INT_STATUS 0x30 (first, because the poll's end condition is that bit and a clear issued after the command would race the completion it is meant to make observable), then ARGUMENT 0x08 (sdhci.c:1119), then COMMAND 0x0E (:1153). The set clause above fixes WHICH registers are reached; this one fixes the one property of the sequence that the driver's own code has and that a reordering would break. All three are volatile, so this is a fact about the body and not about GCC's block layout. Nothing is rebuilt by this refusal"
+            #
+            # **THE IMAGE-SIDE CLAUSE IS A NAMED PAIR AND NOT AN EMPTINESS, AND THE FIRST BUILD OF THIS
+            # RUNG IS WHY.** It was written as `[[ -z "${stb_cmd_img// /}" ]]` - "this function owns no
+            # `.bss` word" - and the build refused it with `[UNK:ldr UNK:str]`, which is not a defect in
+            # the arm: `classify_body` reports a load or a store whose base register the body never
+            # materialized an address for as `UNK:<mnemonic>`, and this function's result struct is
+            # reached through its POINTER ARGUMENT, which is exactly such a base and is the whole of its
+            # non-`sp` memory. So the record's claim is asserted as the pair it actually is, and the pair
+            # is what carries the refusal: a `.bss` word this image reaches must be reached through a
+            # base the body materialized (`movw`/`movt`), which the classifier prints as `IMG:` WITH an
+            # address - so any `IMG:` entry, and any address at all on the fourth line, refuses here, and
+            # that is the class this clause exists for. The pair is asserted EXACTLY rather than as "at
+            # most these two", because a set comparison cannot be widened by a later build without the
+            # refusal.
+            #
+            # (A device address could not hide in this pair: it would have to be materialized in this
+            # body, and then it would be on the first line, where `stb_cmd_decl` is the hypothesis space
+            # and a register outside it refuses. The two clauses are one argument in both directions.)
+            [[ "$stb_cmd_img" == "UNK:ldr UNK:str" && -z "${stb_cmd_imgaddr// /}" ]] ||
+                layout_fail "st_send_command's non-device memory accesses are [$stb_cmd_img] at [$stb_cmd_imgaddr] and rung 11's record says exactly [UNK:ldr UNK:str] with NO address - the pointer-argument form: this function's one non-device object is its \`struct st_cmd_result *\`, a caller's stack object, and a base the body never materialized an address for is what the classifier calls UNK. An \`IMG:\` entry, or any address on the fourth line, is a symbol this rung never declared reached through a base this body DOES materialize - which is the reading the clause was first written as an emptiness to catch, and could not: the emptiness is unachievable for a function that writes through a pointer, and an assertion that cannot hold is not a check (m702's shape, one reader over). \`st_cmd_path\`'s clause below keeps the plain emptiness, and it can, because its two structs are \`sp\`-based and the classifier skips that base by rule. Nothing is rebuilt by this refusal"
+            stb_path=$(sym_addr st_cmd_path) ||
+                layout_fail "st_cmd_path is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE - rung 11's two calls, its three gates and every key it publishes are that body, and \`noinline\` with \`noclone\` is what keeps it one body rather than a block of the probe or a clone beside it. Two ways to get here, both worth refusing: the function was renamed, or it was inlined into the probe - and an inlined caller would leave its three device reads unclassified in a window whose own clause is about the reset and the power byte. Nothing is rebuilt by this refusal"
+            stb_path_size=$(sym_size st_cmd_path) ||
+                layout_fail "st_cmd_path has no size in the symbol table (nm -S), so this clause's window has no end. Nothing is rebuilt by this refusal"
+            stb_path_body=$(arm-none-eabi-objdump -d --start-address="$stb_path" \
+                            --stop-address="$(printf '0x%x' $(( stb_path + stb_path_size )))" "$OUT/xnu_arm_entry.elf")
+            stb_path_decl="f9824924 f9824934 f9824938"
+            { read -r stb_path_dev; read -r stb_path_cnt; read -r stb_path_img; read -r stb_path_imgaddr; } < <(classify_body "$stb_path_body" "$stb_path_decl")
+            stb_path_set=$(printf '%s\n' $stb_path_dev | LC_ALL=C sort | tr '\n' ' ')
+            [[ "$stb_path_set" == "f9824924:ldr f9824934:ldr f9824938:ldr " ]] ||
+                layout_fail "st_cmd_path's device accesses are [$stb_path_set] (sorted) and rung 11's record says exactly [f9824924:ldr f9824934:ldr f9824938:ldr] - PRESENT_STATE 0x24 read (the arm's before and after cells), INT_ENABLE 0x34 read and SIGNAL_ENABLE 0x38 read (the first gate, before anything is written) - and **NO STORE AT ALL**. This is the half of the pair that matters: every device WRITE this rung makes is inside st_send_command's window, where the set is asserted exactly, so a store here is a store the arm's record does not describe. The two registers one byte above these ARE the interrupt enables, and a store to either of them is the act that can let the block raise intid 155 and end the run - which is why they are read here and written nowhere in this image. Nothing is rebuilt by this refusal"
+            [[ -z "${stb_path_img// /}" ]] ||
+                layout_fail "st_cmd_path's non-device memory accesses are [$stb_path_img] at [$stb_path_imgaddr] and rung 11's record says that set is EMPTY - this function publishes through entry_live_write (a call, with a .rodata string) and its two result structs live on the stack, which the classifier skips by base register. A non-empty set here means either a symbol this rung never declared or an access it could not resolve. Nothing is rebuilt by this refusal"
+            [[ "$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_path_body")" == "2" ]] ||
+                layout_fail "st_cmd_path makes $(grep -c -- 'bl.*<st_send_command>' <<<"$stb_path_body") call(s) to st_send_command and rung 11 makes exactly two - \`mmc_go_idle\`'s CMD0 and \`mmc_attach_mmc\`'s CMD1 (mmc.c:1356-1359), which is the driver's own pair, in the driver's own order, in one function. Zero means the command function is in the image and nothing calls it (m720's shape: a switch no build reads), one means half of the driver's own sequence, and three or more means this arm is putting a command on the bus that its record does not name. The call is also what keeps st_send_command's body in the image at all - an unreferenced static is dropped, so a zero count and an image WITHOUT the symbol would be one build. Nothing is rebuilt by this refusal"
+            echo "  xnu_entry_721: st_send_command's device accesses are [$stb_cmd_set] with counts [$stb_cmd_cnt], its stores in order [$stb_cmd_store_order] and its image side the pointer-argument pair [$stb_cmd_img]; st_cmd_path's are [$stb_path_set] with NO store and an EMPTY image side, and it calls st_send_command 2 time(s) - the driver's own first command: CMD0 (word 0x0000, no response read) then CMD1 (word 0x0102, MMC_RSP_R3) with the completion polled out of the controller's own INT_STATUS and the response read out of RESPONSE 0x10, and no data-path register, no POWER_CONTROL, no GCC word, no core_mem word and no byte of the medium"
         fi
         echo "  xnu_entry_698: the probe's stores, classified by window and offset - core_mem [$stb_core_off] through [$stb_core_base], hc_mem [$stb_hc_off]($stb_hc_mne) through [$stb_hc_base], gcc [$stb_gcc], image [$stb_img], ambiguous [$stb_amb], unknown [$stb_unk], unnamed-device [$stb_devbad$stb_devlo]"
     fi

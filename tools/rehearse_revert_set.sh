@@ -14,7 +14,7 @@
 # fixture directory is a temporary one and is never `/tmp/r594/frozen-payload`.
 #
 # The cells that matter most point the REAL record at the REAL live tree, which holds the arm the next
-# press sends - and the record carries TWO sets, only one of which is that arm. So the same directory
+# press sends - and the record carries many sets, exactly one of which is that arm. So the same directory
 # gets both verdicts: a pass when the set under test is the one it holds, a refusal when it is not. A
 # verifier that accepted it either way would be the very defect `revert-set.txt` describes - a verdict
 # about a location read as a verdict about a set.
@@ -34,12 +34,17 @@ RECORD=$ROOT/stages/stage90/revert-set.txt
 LIVE=$ROOT/out/stage90
 
 [[ -x $TOOL ]] || { echo "no tool at $TOOL" >&2; exit 1; }
-# The `live-tree-matches-armed-set` cell asserts a PASS by naming the set it expects to have passed, so
-# that name has to exist in the record. Without this guard the cell would fail with a refusal instead - a
-# wrong message about a right property, which is a shape of failure this file keeps having to fix.
-ARMED=armed-sleepless-696a0f39
-grep -q "^set=$ARMED " "$RECORD" || { echo "the record carries no set called $ARMED, so the live tree is not a recorded arm and this rehearsal would be checking a fixture instead" >&2; exit 1; }
 [[ -d $LIVE ]] || { echo "no live tree at $LIVE - this rehearsal needs the real build outputs" >&2; exit 1; }
+# The `live-tree-matches-armed-set` cell asserts a PASS by naming the set it expects to have passed, and
+# **that name is now the live tree's own answer rather than a constant - 729.** It was
+# `armed-sleepless-696a0f39`, hand-written, beside a guard that checked only that the NAME was in the
+# record: the guard looked in the wrong place, because a set name stays in the record for good. So every
+# arm parked after that one left this cell printing FAIL while the bytes it describes were correct, and a
+# rehearsal that always prints one FAIL is a rehearsal whose real refusals are unreadable. The name comes
+# from `tools/resolve_arm_set.sh`, which exists because "which arm are these bytes" had three answers
+# (667/668) - this was the fourth, and it was a `grep` of the record rather than of the tree.
+ARMED=$(bash "$ROOT/tools/resolve_arm_set.sh" "$LIVE" 2>/dev/null | cut -f1)
+[[ -n $ARMED ]] || { echo "no recorded set matches the bytes in $LIVE, so the live-tree cells have no set to name and this rehearsal would be checking a fixture instead" >&2; exit 1; }
 
 W=$(mktemp -d /tmp/rehearse-revert.XXXXXX) || exit 1
 trap 'rm -rf "$W"' EXIT
@@ -112,8 +117,8 @@ cell "good-set-a-set-name" 0 "set fixture in"                   \
 #     invocation shape, opposite verdict once the set under test changes. That pair is the whole
 #     property: **a verdict about a directory that does not name its set is not a verdict about a set**,
 #     which is what `sha256sum -c` does to every park.
-cell "live-tree-matches-armed-set" 0 "VERIFIED: 11 file(s) of armed-sleepless-696a0f39" \
-  bash "$TOOL" "$LIVE" --set=armed-sleepless-696a0f39
+cell "live-tree-matches-armed-set" 0 "VERIFIED: 11 file(s) of $ARMED" \
+  bash "$TOOL" "$LIVE" --set="$ARMED"
 cell "live-tree-vs-the-other-set" 1 "stage90-qcdt.img hashes to"  \
   bash "$TOOL" "$LIVE"
 cell "live-tree-names-the-dir" 1 "in $LIVE"                       \
@@ -278,9 +283,21 @@ echo "== the record covers what the gate reads =="
 # The limit of B as derived here, stated rather than glossed: the fixture's manifest is the one copied
 # from the LIVE tree, so this is the live build's member list and a proxy for the recorded manifest's.
 # The authoritative check stays *revert, then run the gate*.
+#
+# **AND ONE MATCH IS NOT A PATH AT ALL, WHICH IS THE THIRD SPELLING THIS DERIVATION HAD TO LEARN - 729.**
+# `preflight_boot_check.sh:788` is `[[ -n $_f && -r $OUT/captures/$_f ]]`: the gate JOINS a name it took
+# from an argument to `$OUT/captures`, so `captures` is a *directory of archived runs* and the longer
+# expression is a per-run file. The first regex stopped at the `/`, and the derived list therefore
+# carried a tenth entry - `captures` - that no revert set can hold and no park can contain, so the
+# `record-covers-gate` cell printed FAIL about a record that covers everything the gate reads. A
+# derivation that reads a PREFIX of a path expression as a member is a claim about the extractor's scope
+# and not about the record (m671/m672), and a rehearsal with one permanent FAIL is one whose real
+# refusals are unreadable. A match followed by `/` or `$` is now dropped: it is a fragment of a longer
+# expression, not a name.
 GATESRC=$ROOT/stages/stage90/preflight_boot_check.sh
 DERIVED=$W/gate-reads.txt
-grep -oE '\$OUT/[A-Za-z0-9_.-]+|out/stage90/[A-Za-z0-9_.-]+' "$GATESRC" \
+grep -oE '\$OUT/[A-Za-z0-9_.-]+[$/]?|out/stage90/[A-Za-z0-9_.-]+[$/]?' "$GATESRC" \
+  | grep -vE '[/$]$' \
   | sed 's|\$OUT/||; s|out/stage90/||' | sort -u > "$DERIVED"
 DERIVED_B=$W/manifest-members.txt
 # B comes out of the RECORD, not out of the live tree. The manifest a revert puts back is the record's own
