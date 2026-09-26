@@ -3008,3 +3008,94 @@ set=armed-storage-completion-6f49e880 sha256=dc674503f7fa27a177be35802a39ad9eb29
 set=armed-storage-completion-6f49e880 sha256=65045b698bfbe8ae55b59f9b72452c5f0954840c7dd36c4d074ba65eccf872bf bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest
 set=armed-storage-completion-6f49e880 sha256=ae494aaa1ef512f7134da42246d8d57ebdd13768f7b145a4d196b498fb4bfa7c bytes=6051840 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
 set=armed-storage-completion-6f49e880 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-macho-UNCHANGED-since-the-press
+
+# ================================================================================================
+# 730: THIS SET WAS PRESSED, AND THE COMPLETION WAS THERE. **`_int_status_after = 0x00000001`.**
+# Read this block as the answer to the pre-registration above; it supersedes the ARM/SET lines and
+# nothing else in it.
+# ================================================================================================
+# PRESSED 2026-09-26 07:38:48-07:39:59 UTC. Readiness 5/5 (exit 0, run from the same tree immediately
+# before the fire), ONE gate (exit 0, 569 stdout lines) and EXACTLY ONE runner, both under
+# `--allow-xnu-entry --expect-arm=armed-storage-completion-6f49e880`; RUNNER EXIT=0 - returned and
+# captured, **71 s** end to end. One non-persistent `fastboot boot`, serial 4a2fe00b; the neighbour
+# 33e80afe was off BOTH lists (adb: [4a2fe00b device], fastboot: []) and was never touched. Capture
+# `out/stage90/captures/rung14-completion-20260926-074001-last_kmsg.txt`, **626,111 B, sha256
+# `c5d0aeee6cfaadd1d029c65aaca1dcf900c42f1b021afd8d97ed3f464eb23d00`**, archived by hand (out/ is
+# gitignored and the runner does not archive). Nothing was flashed and no byte of the medium moved.
+#
+# **NO FIRER WAS ARMED, AND THAT IS A NEW FACT ABOUT THE RECORD RATHER THAN A CHOICE.** The two
+# commands above were run directly, exactly once each. The firer this record names for every press
+# since 671 - `/tmp/g668/press-on-clear.v5.sh`, sha256 `7f23cae5...` - no longer exists: `/tmp/g668`
+# and `/tmp/r654` (its `press.log`) are gone from this host, and `find / -name 'press-on-clear*'`
+# returns nothing, so **the bytes that sha stands for are recorded nowhere in this repository, this
+# export or the job tree**. A sha whose bytes are not kept is not a check but a claim about a file
+# that cannot be produced again - the class `mi4-a-claim-in-a-comment-is-not-a-check` names - and
+# 726's own record cites it in the same breath as the press it fired. The two commands readiness
+# prints ARE the discipline (661 R1); the launcher was a wrapper around them, with its own rehearsal
+# (the 27-row `rehearse-v3.sh` and `rehearse-wait.sh` harnesses, 672 section 4) that this step could
+# not re-run because those harnesses died with the same job tmp. **OWED: either recreate a launcher
+# WITH its rehearsal and record its bytes, or record that the press path is two commands and the
+# launcher is retired.**
+#
+# THE ANSWER, AND IT IS THE ONE 726 COULD NOT HAVE SEEN: **THE COMPLETION WAS PENDING IN THE BLOCK,
+# AND `INT_ENABLE` WAS THE MASK.**
+#  * `_int_status_before = 0x00000000` and `_int_status_after = 0x00000001` - **the same command, the
+#    same register, the same moment in `st_cmd_path`, with ONE STORE between the two reads** (0x34 <-
+#    0x00000001, `_int_enable_wrote`). Bit 0 of INT_STATUS is `SDHCI_INT_RESPONSE`, the Command
+#    Complete bit. This is the AND-model, confirmed by construction: the two reads differ by the
+#    enable and by nothing else the arm did.
+#  * `_int_enable_before = 0x00000000`, `_int_sig_enable = 0x00000000` - **both enables were clear at
+#    the moment rung 11's poll ran**, which is why `_cmd0_status_any = 0x00000000` over 5,088,256
+#    reads and `_cmd0_status_after = 0x00000000` in this log too. **Rungs 11, 12 and 13 were reading a
+#    register whose enable nothing in this image had ever set**, and the block was never dead.
+#  * The two registers 728 section 1 named as the cheaper alternatives answered NOTHING:
+#    `_int_slot_status = 0x00000000`, `_int_pwrctl_status = 0x00000000`. The block's own copy of the
+#    command word is still the driver's (`_int_cmd_word = 0x00000000`, matching `_cmd0_word`), and
+#    `_int_present = 0x01f80000` with `_int_present_inhibit = 0x00000000` says no command is in flight
+#    at that instant. Rung 3's and rung 8's readings of those two registers are before-values in this
+#    same log, so the pair is a comparison and not a claim (m737 corrected the two documents that had
+#    it the other way).
+#  * **THE PRE-REGISTERED FAILURE MODE DID NOT HAPPEN**: there is no `_irq_other_count` and no
+#    `_irq_other_iar` key in this log. `SIGNAL_ENABLE 0x38` was read and never written, the line never
+#    rose, and the run did not end at the dispatcher - so the two-enable hypothesis was testable
+#    exactly as 728 section 2 said, without putting the SPI 123 line in play.
+#  * THE ENDING DID NOT MOVE: `_post_end_calls = 0x00000007`, `_sleh_storm = 0x00000009`,
+#    `_seam_post_end_ticks = 0x06ddd000`, `_seam_sctlr = 0x30c57879` - every value 726's log carries.
+#    The userland floor the runner prints (open/read/getpid/exit/wait, 504's reading) is met again and
+#    is still the floor and not this run's progress.
+#  * INHERITED CELLS UNCHANGED: `_cmd0_word_read = 0x0000`, `_cmd0_sent = 1`, `_cmd_gated = 1` with
+#    ZERO `_cmd1_*` keys, and the whole `_cmd2_*` census as 726 left it. The only differences between
+#    the two logs' storage keys outside the new family are the per-run jitter cells
+#    (`_cmd0_polls` 0x004da800 -> 0x004da400, `_cmd0_inhibit_seen` 0x21b -> 0x219,
+#    `_pwr_wait_ticks` 0x592 -> 0x598, `_clk_set_cc_polls` 0x11 -> 0x12) - no semantic cell moved.
+#
+# **THE ONE CELL THAT CAME BACK WRONG, AND IT IS NEW: `_int_enable_held = 0x00008001` and
+# `_int_enable_readback = 0x00008000`.** The readback of `INT_ENABLE 0x34` after writing `0x00000001`
+# carries **bit 15**, which `_int_enable_before = 0x00000000` says was CLEAR one body earlier; and the
+# restore write of 0 clears bit 0 (`_int_enable_readback` bit 0 is 0, so the write took) and leaves bit
+# 15 SET. So on this block bit 15 of 0x34 is (a) not a fixed-to-1 read-only bit - the before-value
+# refutes that - and (b) not clearable by writing 0 to the register. Two readings are open and this
+# step does not choose between them: bit 15 is a sticky latch the block sets when an enabled status
+# first pends, or it is a bit with write-1-to-clear semantics that 0 cannot reach. **THE SAFETY
+# CONTRACT SURVIVED EITHER WAY** (the arm's contract was the store, and `_int_enable_readback` is the
+# cell that publishes the block's own answer rather than the arm's intention), and the run behaved
+# exactly as the un-touched arm did, ending included. **OWED, AND CHEAP: read INT_STATUS AGAIN after
+# the restore** - if it reads 0 the status is gated by the enable (AND-model, one more cell); if it
+# reads 1 the bit is a LATCH that survives the enable going away, which would be a different block
+# from the one the spec describes. And read `HOST_VERSION 0xFE` beside it: the 32-bit combined
+# 0x30/0x34/0x38 layout is an SDHCI 3.0 alternative to the 2.0 split pairs (0x30 normal status, 0x34
+# error status, 0x36/0x3A/0x3C enables), and this step's reading is strong evidence for 3.0 but does
+# not by itself name the version register.
+#
+# **WHAT THIS DOES TO THE LADDER, IN ONE SENTENCE: `_cmd_gated = 1` is no longer a statement about the
+# block.** Rung 11's gate refused CMD1 because its poll never saw CMD0 complete; the poll never saw it
+# because nothing had set INT_ENABLE. The next rung is the same command path with `INT_ENABLE` bit 0
+# set before the command and the wait reading INT_STATUS instead of the raw poll - **with
+# `SIGNAL_ENABLE` still at zero, which is the trick this press proved is safe** - and the cell that
+# says it worked is `_cmd_gated = 0` with `_cmd1_*` keys present for the first time.
+#
+# THE RECORD IS `docs/experiments/experiment-730-the-rung-14-press-the-completion-was-there-and-the-enable-was-the-mask.md`.
+# **THE GOAL IS STILL NOT MET**: XNU is not normally loaded, the OS has not been entered, there is no
+# partition table, no mounted volume and no driver beyond the fixture, so 「如果os已经能进去了的话」 is
+# not triggered and **TWRP-to-storage stays withheld**. **AND THIS SET IS NO LONGER THE ARM THE NEXT
+# PRESS SENDS**; the bytes below are the bytes that were sent.
