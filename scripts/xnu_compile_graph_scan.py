@@ -451,11 +451,19 @@ def sha32_text(text: str) -> int:
 
 
 def main() -> int:
+    # **Three directories, and the depth arithmetic moved on 2026-09-26.** Before the restructure this
+    # script lived in `stages/stageNN/`, so the repository root was `parent.parent`; the live tree is
+    # now `src/` beside this script, so the root is `parent` and `stage_dir` no longer means what the
+    # two uses below assume it means. Both were left pointing at the script's own directory and the
+    # scan failed with `exists=0` for all 23 candidates and `root` = the parent of the repository -
+    # a failure that reads exactly like an empty checkout (m702/m698's shape), which is why the fix is
+    # two named directories rather than one re-pointed `stage_dir`.
     stage_dir = Path(__file__).resolve().parent
-    root = stage_dir.parent.parent
+    root = stage_dir.parent
+    src_dir = root / "src"
     out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else root / "out" / "stage90"
     if not out_dir.is_absolute():
-        out_dir = (stage_dir / out_dir).resolve()
+        out_dir = (root / out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     xnu_2050 = root / "external" / "xnu-upstream"
@@ -521,7 +529,7 @@ def main() -> int:
         path = root / c.relpath
         exists = path.exists()
         includes = read_includes(path)
-        missing_shims = [s for s in c.required_shims if not (stage_dir / s).exists()]
+        missing_shims = [sh for sh in c.required_shims if not (src_dir / sh).exists()]
         if not exists:
             all_candidates_present = False
         if c.eligibility in ("reference-only", "abi-reference-only", "blocked-runtime-reference", "wrong-arch-reference-only", "excluded-high-risk", "iokit-reference-only") and (c.allow_compile or c.allow_link):
@@ -583,7 +591,7 @@ def main() -> int:
         sat(BIT_ARM_PEXPERT_RUNTIME_BLOCKED)
     else:
         fail(FAIL_PLATFORM_REFS)
-    if (stage_dir / "xnu_bootstrap_contract.c").exists():
+    if (src_dir / "xnu_bootstrap_contract.c").exists():
         sat(BIT_BOOTSTRAP_CONTRACT_SELECTED)
         bootstrap_contract_selected = 1
     else:

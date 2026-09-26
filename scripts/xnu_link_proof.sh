@@ -27,8 +27,12 @@ PE_GEN_OBJ="$OBJ_DIR/pe_gen.o"
 ARM_PE_BOOTARGS_OBJ="$OBJ_DIR/arm_pe_bootargs.o"
 ARM_PE_CONSISTENT_DEBUG_OBJ="$OBJ_DIR/arm_pe_consistent_debug.o"
 SHIM_OBJ="$OBJ_DIR/xnu_object_shims.o"
-SUPPORT_SRC="xnu_link_support.c"
-NOENTRY_SRC="xnu_link_noentry.c"
+# **Anchored on SRC_DIR, and the reason is the same one build.sh carries at length**: before the
+# 2026-09-26 restructure these two names and this script were in one directory, so a bare name
+# resolved by virtue of where the script sat. The tree moved, the names did not, and the link proof
+# is where the first post-move `./build.sh` died (`missing support xnu_link_support.c`).
+SUPPORT_SRC="$SRC_DIR/xnu_link_support.c"
+NOENTRY_SRC="$SRC_DIR/xnu_link_noentry.c"
 SUPPORT_OBJ="$LINK_DIR/xnu_link_support.o"
 NOENTRY_OBJ="$LINK_DIR/xnu_link_noentry.o"
 LINK_ELF="$LINK_DIR/stage90-xnu-link.elf"
@@ -109,7 +113,7 @@ else
 fi
 
 support_ok=1
-for p in "$SUPPORT_SRC" "$NOENTRY_SRC" xnu_link.ld "$GRAPH_HEADER"; do
+for p in "$SUPPORT_SRC" "$NOENTRY_SRC" "$SRC_DIR/xnu_link.ld" "$GRAPH_HEADER"; do
   if [[ -f "$p" ]]; then
     printf 'present support %s\n' "$p" >> "$MANIFEST_TXT"
   else
@@ -168,7 +172,7 @@ if [[ "$failure" -eq 0 ]]; then
   "$CC" "${COMMON_FLAGS[@]}" -c "$SUPPORT_SRC" -o "$SUPPORT_OBJ"
   "$CC" "${COMMON_FLAGS[@]}" -c "$NOENTRY_SRC" -o "$NOENTRY_OBJ"
   "$CC" -nostdlib \
-    -Wl,-T,xnu_link.ld \
+    -Wl,-T,"$SRC_DIR/xnu_link.ld" \
     -Wl,--build-id=none \
     -Wl,-Map,"$MAP_TXT" \
     "$NOENTRY_OBJ" "$DEVICE_TREE_OBJ" "$BOOTARGS_OBJ" "$PE_GEN_OBJ" "$ARM_PE_BOOTARGS_OBJ" "$ARM_PE_CONSISTENT_DEBUG_OBJ" "$SHIM_OBJ" "$SUPPORT_OBJ" \

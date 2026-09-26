@@ -26,7 +26,7 @@ BOOTARGS_SRC="$XNU_2050/pexpert/gen/bootargs.c"
 PE_GEN_SRC="$XNU_2050/pexpert/gen/pe_gen.c"
 ARM_PE_BOOTARGS_SRC="$XNU_4570/pexpert/arm/pe_bootargs.c"
 ARM_PE_CONSISTENT_DEBUG_SRC="$XNU_4570/pexpert/arm/pe_consistent_debug.c"
-SHIM_SRC="xnu_object_shims.c"
+SHIM_SRC="$SRC_DIR/xnu_object_shims.c"
 GRAPH_HEADER="$OUT_DIR/xnu_compile_graph_generated.h"
 
 STATUS_TXT="$OUT_DIR/xnu-object-subset-status.txt"
@@ -52,7 +52,7 @@ COMMON_FLAGS=(
   -DCONFIG_EMBEDDED=1
   -DKERNEL_PRIVATE=1
   -D__arm__=1
-  -Ishims
+  -I"$SRC_DIR/shims"
   -I"$XNU_2050/pexpert"
   -I"$XNU_2050/osfmk"
   -I"$XNU_2050/libkern"
@@ -144,18 +144,18 @@ fi
 
 shim_ok=1
 for p in \
-  shims/pexpert/boot.h \
-  shims/pexpert/protos.h \
-  shims/pexpert/pexpert.h \
-  shims/kern/kalloc.h \
-  shims/kern/debug.h \
-  shims/pexpert/arm/consistent_debug.h \
-  shims/libkern/OSAtomic.h \
-  shims/machine/machine_routines.h \
-  shims/mach/mach_types.h \
-  shims/mach/machine/vm_types.h \
-  shims/mach/boolean.h \
-  shims/sys/appleapiopts.h \
+  "$SRC_DIR"/shims/pexpert/boot.h \
+  "$SRC_DIR"/shims/pexpert/protos.h \
+  "$SRC_DIR"/shims/pexpert/pexpert.h \
+  "$SRC_DIR"/shims/kern/kalloc.h \
+  "$SRC_DIR"/shims/kern/debug.h \
+  "$SRC_DIR"/shims/pexpert/arm/consistent_debug.h \
+  "$SRC_DIR"/shims/libkern/OSAtomic.h \
+  "$SRC_DIR"/shims/machine/machine_routines.h \
+  "$SRC_DIR"/shims/mach/mach_types.h \
+  "$SRC_DIR"/shims/mach/machine/vm_types.h \
+  "$SRC_DIR"/shims/mach/boolean.h \
+  "$SRC_DIR"/shims/sys/appleapiopts.h \
   "$SHIM_SRC"; do
   if [[ -f "$p" ]]; then
     printf 'present %s\n' "$p" >> "$MANIFEST_TXT"

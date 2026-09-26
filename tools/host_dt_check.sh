@@ -20,6 +20,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 TOOLS_DIR=$PWD
 REPO_ROOT=$(cd "$TOOLS_DIR/.." && pwd)
+# **The base for `tools/check_stage_paths.sh`'s bare-name pass.** This script passes `-I"$STAGE_DIR"`,
+# which is how the four `-include stage90.h` below resolve, so its bare names are the source tree's.
+# check_stage_paths: bare-names-resolve-against=src
 STAGE_DIR=$REPO_ROOT/src
 WORK=$REPO_ROOT/out/host-dt
 

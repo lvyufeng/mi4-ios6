@@ -91,14 +91,14 @@ INCLUDES=(
   # Shims last: a fallback, not an override. Subdirectories because these are named the way
   # the includes are (kern/debug.h, sys/_pthread/_pthread_types.h), unlike the project's own
   # flat shims/ tree.
-  -Ishims
-  -Ishims/kern
-  -Ishims/mach
-  -Ishims_arm
-  -Ishims_arm/kern
-  -Ishims_arm/mach
-  -Ishims_arm/sys
-  -Ishims_arm/sys/_pthread
+  -I"$SRC_DIR/shims"
+  -I"$SRC_DIR/shims/kern"
+  -I"$SRC_DIR/shims/mach"
+  -I"$SRC_DIR/shims_arm"
+  -I"$SRC_DIR/shims_arm/kern"
+  -I"$SRC_DIR/shims_arm/mach"
+  -I"$SRC_DIR/shims_arm/sys"
+  -I"$SRC_DIR/shims_arm/sys/_pthread"
 )
 
 FLAGS=(

@@ -11,10 +11,31 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 SRC_DIR=$REPO_ROOT/src
 mkdir -p $REPO_ROOT/out/stage90
 
-./xnu_workspace_validate.sh $REPO_ROOT/out/stage90
-./xnu_compile_graph_scan.py $REPO_ROOT/out/stage90
-./xnu_object_subset_compile.sh $REPO_ROOT/out/stage90
-./xnu_link_proof.sh $REPO_ROOT/out/stage90
+# **`cd` INTO THE SOURCE TREE, because the payload's own names in this file are relative - and that is
+# the shape the 2026-09-26 restructure broke here without any check seeing it.** Until then this script
+# and the payload's sources were in the same directory, so `SOURCES=(start.S vectors.S ...)`,
+# `-Wl,-T,linker.ld`, `--c-output macho_fixture.c` and four `-include stage90.h` all resolved against
+# the stage root by virtue of where the script happened to sit. The move separated them - the script to
+# `scripts/`, the sources to `src/` - and every one of those literals then pointed at a directory
+# holding none of it. **Nothing in the repository could fail on it**: `tools/check_stage_paths.sh`
+# looks for the old *prefix* and not one of these names carries a prefix, the entry image still built
+# (it has its own directory and its own `cd`), the park is rebuilt from a record rather than from the
+# tree, and `./build.sh` had not been run since the move - the 07:24 payload predates it. The first
+# run after the move died in the link proof with `missing support xnu_link_support.c`, and the two
+# stages before it had failed too.
+#
+# So this is not a prefix substitution and it is not a fifth spelling to catch: the payload's names
+# are relative **to the source tree**, and the honest way to say that is to run from it. Everything
+# else in this file is absolute (`$REPO_ROOT/...`, `$QCDT_DT`, `$ENTRY_BIN`, `$ENTRY_BLOB_OUT`), so
+# the only things this moves are the ones meant to move. The four helper calls below are re-pointed at
+# `$SCRIPT_DIR` for the same reason: they were `./xnu_*.sh` and `./` stops meaning scripts/ here.
+# check_stage_paths: bare-names-resolve-against=src
+cd "$SRC_DIR"
+
+"$SCRIPT_DIR"/xnu_workspace_validate.sh $REPO_ROOT/out/stage90
+"$SCRIPT_DIR"/xnu_compile_graph_scan.py $REPO_ROOT/out/stage90
+"$SCRIPT_DIR"/xnu_object_subset_compile.sh $REPO_ROOT/out/stage90
+"$SCRIPT_DIR"/xnu_link_proof.sh $REPO_ROOT/out/stage90
 
 
 PYTHON=${PYTHON:-python3}
