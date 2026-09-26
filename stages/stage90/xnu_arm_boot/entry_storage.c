@@ -112,8 +112,8 @@
 #ifndef STAGE90_XNU_STORAGE_PROBE
 #define STAGE90_XNU_STORAGE_PROBE 0
 #endif
-#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 9
-#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store), 4 = 3 plus the driver's own SDHCI_RESET_ALL (ONE byte store to SOFTWARE_RESET 0x2F, plus a bounded poll of that same byte) - the rung that writes through hc_mem for the first time - 5 = 4 plus the CLOCK SURFACE read at its own widths (the GCC's four SDCC1 branches and the apps root's five RCG words, plus CORE_VENDOR_SPEC 0x10C), a rung of reads that stores NOTHING anywhere, and 6 = 5 plus THE DRIVER'S FIRST CLOCK SET (sdhci_msm_set_clock at 400 kHz): four CBCR read-modify-writes of BIT(0) on the GCC each followed by a bounded halt check, two CORE_VENDOR_SPEC 0x10C read-modify-writes (MCLK select <- DFLT, HC_SELECT_IN cleared), and the standard's two CLOCK_CONTROL halfwords with the stability poll between them - SIX stores and NO rate, because sup_clock == msm_host->clk_rate on the first call (experiment-706 section 2) - and it writes neither BCR 0x04C0 nor any RCG word, nor POWER_CONTROL 0x29, and 7 = 6 plus THE DRIVER'S OWN FIRST POWER BYTE (mmc_power_up's PASS A: sdhi_set_power at sdhci.c:1663 - ONE 8-bit store to POWER_CONTROL 0x29, the value derived from the CAPABILITIES register the way sdhci_add_host and mmc_power_up derive it), with the vendor's REQ_BUS_ON wait NOT taken (sdhci-msm.c:2179-2209 would wait_for_completion on an IRQ this image cannot deliver) - a rung of one store and five readings, and 8 = 7 plus THE DRIVER'S OWN POWER IRQ (the vendor's sdhci_msm_pwr_irq, sdhci-msm.c:1990-2099, as a CLIENT of this image's own dispatcher: intid 170 - SPI 138, the `pwr_irq` msm8974.dtsi:502 declares - registered and its line enabled BEFORE the power byte, with the three arms that may sleep absent because the vendor's own IRQF_ONESHOT+NULL-primary declares a threaded handler and this image has no thread to sleep in), clearing the latch the byte latched and answering the controller - a rung of three stores, in core_mem and in hc_mem, and the two addresses of VENDOR_SPEC 0x10C read side by side, and 9 = 8 plus THE DRIVER'S OWN COMPLETION (sdhci_set_power's own next statement, sdhci.c:1371-1372: check_power_status(host, REQ_BUS_ON), whose sdhci_msm_check_power_status at sdhci-msm.c:2179 compares the request against the TWO DRIVER-SIDE FIELDS the handler's tail writes - curr_pwr_state/curr_io_level, :2092-2096 - and then blocks; rung 9 ports the predicate and replaces the block with a BOUNDED tick poll whose end condition is the CONTROLLER's own CORE_PWRCTL_CTL bit BUS_SUCCESS, because the probe runs with SCTLR.C clear while the handler may run with the caches on, so an image-side flag written by one can be invisible to the other - the flag is still written and published beside the device ack, and the pair is this rung's new cell), with the budget STAGE90_XNU_PWR_WAIT_TICKS and the three sleeping arms still absent. A value above the ladder is refused here rather than shaping an image whose switches claim something else."
+#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 10
+#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store), 4 = 3 plus the driver's own SDHCI_RESET_ALL (ONE byte store to SOFTWARE_RESET 0x2F, plus a bounded poll of that same byte) - the rung that writes through hc_mem for the first time - 5 = 4 plus the CLOCK SURFACE read at its own widths (the GCC's four SDCC1 branches and the apps root's five RCG words, plus CORE_VENDOR_SPEC 0x10C), a rung of reads that stores NOTHING anywhere, and 6 = 5 plus THE DRIVER'S FIRST CLOCK SET (sdhci_msm_set_clock at 400 kHz): four CBCR read-modify-writes of BIT(0) on the GCC each followed by a bounded halt check, two CORE_VENDOR_SPEC 0x10C read-modify-writes (MCLK select <- DFLT, HC_SELECT_IN cleared), and the standard's two CLOCK_CONTROL halfwords with the stability poll between them - SIX stores and NO rate, because sup_clock == msm_host->clk_rate on the first call (experiment-706 section 2) - and it writes neither BCR 0x04C0 nor any RCG word, nor POWER_CONTROL 0x29, and 7 = 6 plus THE DRIVER'S OWN FIRST POWER BYTE (mmc_power_up's PASS A: sdhi_set_power at sdhci.c:1663 - ONE 8-bit store to POWER_CONTROL 0x29, the value derived from the CAPABILITIES register the way sdhci_add_host and mmc_power_up derive it), with the vendor's REQ_BUS_ON wait NOT taken (sdhci-msm.c:2179-2209 would wait_for_completion on an IRQ this image cannot deliver) - a rung of one store and five readings, and 8 = 7 plus THE DRIVER'S OWN POWER IRQ (the vendor's sdhci_msm_pwr_irq, sdhci-msm.c:1990-2099, as a CLIENT of this image's own dispatcher: intid 170 - SPI 138, the `pwr_irq` msm8974.dtsi:502 declares - registered and its line enabled BEFORE the power byte, with the three arms that may sleep absent because the vendor's own IRQF_ONESHOT+NULL-primary declares a threaded handler and this image has no thread to sleep in), clearing the latch the byte latched and answering the controller - a rung of three stores, in core_mem and in hc_mem, and the two addresses of VENDOR_SPEC 0x10C read side by side, and 9 = 8 plus THE DRIVER'S OWN COMPLETION (sdhci_set_power's own next statement, sdhci.c:1371-1372: check_power_status(host, REQ_BUS_ON), whose sdhci_msm_check_power_status at sdhci-msm.c:2179 compares the request against the TWO DRIVER-SIDE FIELDS the handler's tail writes - curr_pwr_state/curr_io_level, :2092-2096 - and then blocks; rung 9 ports the predicate and replaces the block with a BOUNDED tick poll whose end condition is the CONTROLLER's own CORE_PWRCTL_CTL bit BUS_SUCCESS, because the probe runs with SCTLR.C clear while the handler may run with the caches on, so an image-side flag written by one can be invisible to the other - the flag is still written and published beside the device ack, and the pair is this rung's new cell), with the budget STAGE90_XNU_PWR_WAIT_TICKS and the three sleeping arms still absent, and 10 = 9 plus THE SAME WAIT TAKEN WITH THE MASK OFF: rung 10 measured that the completion arrives within 20 ms of the byte and that the handler is delivered the moment the payload's own idle-exit code lifts `I` (experiment-717), so the mask - not the device and not any budget - is what the poll was measuring; this rung saves the CPSR, clears `I`, runs the SAME bounded poll, restores the saved value and publishes both the CPSR the poll ran under (`_wait_cpsr`, which must now read `0x80000013`) and the state it leaves behind (`_wait_cpsr_after`) - ONE new cell, NO new device access and NO new store, and the first interrupt this image takes inside the cache-off idle-exit window and the first time the handler's two driver-side fields are read back after the handler wrote them. A value above the ladder is refused here rather than shaping an image whose switches claim something else."
 #endif
 
 /*
@@ -1742,12 +1742,29 @@ static void st_pwr_irq_after(void)
  * byte's consequence and the ack is the handler's); it does not touch `hc_irq`; and it makes no store
  * to any device. Its whole device-facing shape is two reads of `CLOCK_CONTROL 0x2C` either side of
  * the wait and the polled `CORE_PWRCTL_CTL` byte.
+ *
+ * **710 adds the one mechanism this wait was missing and changes nothing above.** Rung 9 replaced the
+ * block with a spin and kept the context the block was made in; rung 10 measured that the context, and
+ * not the device, is what the spin was measuring (the completion is there within 20 ms of the byte and
+ * the handler arrives the moment the payload's idle-exit code lifts `I` - experiment-717). So the spin
+ * now runs with `I` clear, bounded by the same switch, with the saved CPSR restored afterwards, and
+ * with one new cell (`_wait_cpsr_after`) beside the one whose *value* is the arm (`_wait_cpsr`). **The
+ * `cpsie` is a mask coming off for a bounded spin and NOT a sleep**: the two statements above about
+ * the arms that may sleep stand unchanged, and the vendor's `wait_for_completion` remains unported in
+ * the one respect that matters here - this poll cannot yield to another thread, because this image has
+ * no thread to yield to. What it can do is let the interrupt in, which is what the block needed.
  */
 __attribute__((noinline)) static void st_pwr_wait(void)
 {
     const uint32_t req = ST_REQ_BUS_ON;   /* sdhci.c:1372 - PASS A's own request, and the only one */
     uint32_t state_before, io_before, done_before, ctl_before, ctl_after, ctl_now;
     uint32_t t0, now, polls = 0u, inner, timeout = 0u, cpsr = 0u;
+#if STAGE90_XNU_STORAGE_PROBE >= 10
+    /* rung 10's two, declared under the guard so that the arm below this rung compiles without them:
+     * an unused declaration is a -Werror diagnostic and a `cpsr_saved` written and never read would be
+     * a second definition of "the mask was restored" with no reader. */
+    uint32_t cpsr_saved = 0u, cpsr_after = 0u;
+#endif /* STAGE90_XNU_STORAGE_PROBE >= 10 - the mask that comes off, and the state it is put back in */
     uint32_t cc_before, cc_after;
 
     /*
@@ -1784,8 +1801,59 @@ __attribute__((noinline)) static void st_pwr_wait(void)
         g_pwr_irq_done = 0u;
         ST_LIVE("xnu_live_storage_pwr_wait_reset", 1u);
         ST_LIVE("xnu_live_storage_pwr_wait_cpsr", cpsr);
+        /* This path waits for nothing, so no mask is taken off and none is put back: both CPSR cells
+         * read 0 here, which is `this path did not read a CPSR` and not a value (the same reading
+         * rung 9 gave `_wait_cpsr` on this branch). */
+#if STAGE90_XNU_STORAGE_PROBE >= 10
+        ST_LIVE("xnu_live_storage_pwr_wait_cpsr_after", cpsr_after);
+#endif
     } else {
         ST_LIVE("xnu_live_storage_pwr_wait_reset", 0u);
+#if STAGE90_XNU_STORAGE_PROBE >= 10
+        /*
+         * **710: the mask comes off for the poll, and this is the only shape of this wait that can
+         * ever be satisfied.** Rung 10 measured the completion `20.172 ms` after the byte and the
+         * handler `60.78 us` after the spin gave up, on a `20 ms` bound, against `100.122 ms` and
+         * `60.05 us` on a `100 ms` one - so the poll has been measuring its own mask and no budget
+         * can change that: the mask ends where the code that owns it returns and this spin is inside
+         * that code (experiment-717 section 2). The vendor's `wait_for_completion` works because it
+         * SLEEPS, i.e. because its context can be interrupted; the port keeps the predicate, the
+         * request and the acknowledge, and to keep the wait satisfiable it has to give the poll the
+         * one thing the block gave it. **Three properties of the shape below are deliberate.**
+         *
+         * 1. **The saved value is read FIRST and restored LAST, and the restore writes that register
+         *    rather than `cpsid i`.** A constant would be a second definition of "as it found it"
+         *    (this arm's own `_wait_cpsr` is the first), and if the caller's `I` had been clear an
+         *    unconditional `cpsid i` would mask an interrupt the payload had left open - the probe
+         *    would have changed the machine while appearing to clean up after itself.
+         * 2. **`cpsie i` and not a CPSR write, so only `I` moves.** `F` is already clear in this
+         *    context, the mode is untouched, and no other bit is rewritten.
+         * 3. **The premise cell keeps its definition.** `_wait_cpsr` was and is *the CPSR the poll
+         *    runs under* - rungs 9 and 10 read `0x80000093` there, this arm must read `0x80000013` -
+         *    and `_wait_cpsr_after` is the new quantity, *the CPSR the probe gives back*, which must
+         *    read `0x80000093`: the value rungs 9 and 10 read as their premise, which is what says
+         *    the restore restored the SAVED state and not some other state that happens to look tidy.
+         *
+         * **What is unchanged is as much of the reading as what is new.** The poll's end condition is
+         * still the CONTROLLER's own `CORE_PWRCTL_CTL` byte and not the image-side flag, the batch is
+         * still 1024 reads between two samples of the clock, the bound is still the same switch, and
+         * **no device store is added**: the ack the poll waits for is still the handler's store, and
+         * a waiter that wrote it would be answering its own completion. This arm's write set is
+         * rung 10's, measured by the same build clause, with one more image-side cell.
+         *
+         * **And this is the first interrupt this image takes inside the cache-off idle-exit window**
+         * (`xnu_live_seam_sctlr` reads `C` clear on every run of this ladder) - the state the payload
+         * masks `I` to avoid. Every earlier delivery happened at the end of the probe, on the way out
+         * of the window. It is also the first arm on which the waiter reads the handler's two
+         * driver-side fields AFTER the handler wrote them: on rungs 9 and 10 the flag reads happened
+         * before the handler had run, so the cache-boundary question this rung's sibling comment
+         * argues about has never had a comparison - and `_wait_done = 1` beside `_wait_ctl_after =
+         * 0x01` is that comparison agreeing through DRAM.
+         */
+        __asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr_saved));
+        __asm__ volatile ("cpsie i" ::: "memory");
+#endif /* STAGE90_XNU_STORAGE_PROBE >= 10 - above this line the poll is masked, below it the same poll
+        * runs with `I` clear and the saved value is still held for the restore at the loop's exit */
         __asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr));
         ST_LIVE("xnu_live_storage_pwr_wait_cpsr", cpsr);
         for (;;) {
@@ -1807,6 +1875,15 @@ __attribute__((noinline)) static void st_pwr_wait(void)
             }
         }
         now = (uint32_t)stage90_cntvct_read();
+        /* The mask goes back on from the SAVED register (property 1 above), and the reading that
+         * says so is taken immediately afterwards, adjacent to the instruction it is about rather
+         * than at the end of the function where anything else could have moved it. */
+#if STAGE90_XNU_STORAGE_PROBE >= 10
+        __asm__ volatile ("msr cpsr_c, %0" :: "r"(cpsr_saved) : "memory");
+        __asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr_after));
+        ST_LIVE("xnu_live_storage_pwr_wait_cpsr_after", cpsr_after);
+#endif /* STAGE90_XNU_STORAGE_PROBE >= 10 - the restore and its own reading, inside the branch that
+        * took the mask off: the arm below this rung has nothing to restore and publishes no cell */
     }
 
     ctl_after = (uint32_t)*(volatile uint8_t *)(uintptr_t)(ST_CORE_MEM_BASE + ST_CORE_PWRCTL_CTL);

@@ -622,6 +622,15 @@ esac
 # Rung 9 widens rung 8's clause in exactly one place and narrows it in none - the handler's non-device
 # accesses gain three words, and "no device access hides in the class this clause waives" is asserted by
 # resolving each of them to a symbol in this image's own `.bss` (the 712 clause 4 pre-registration).
+# **Rung 10 takes the same wait with the mask off and changes nothing else**, because rung 10's press
+# measured what the mask costs: the completion arrives within 20 ms of the byte and the handler is
+# delivered the moment the payload's own idle-exit code lifts `I` (experiment-717), so the poll was
+# measuring its own mask and no budget can separate the two. The waiter saves the CPSR, clears `I` with
+# `cpsie` (only `I` moves), runs the SAME bounded poll, restores the SAVED register and publishes the
+# state it gives back in one new cell beside the one whose value is the arm - **no new device access,
+# no new store, and no change to either clause**: a published cell is a call to `entry_live_write` with
+# a string, so it is not an access this window's census can see, and the four `.bss` words, the two
+# device addresses and their counts, the single call and the budget pair are all rung 9's.
 STORAGE_PROBE=${STAGE90_XNU_STORAGE_PROBE:-0}
 case "$STORAGE_PROBE" in
     0) ;;
@@ -634,7 +643,8 @@ case "$STORAGE_PROBE" in
     7) ;;
     8) ;;
     9) ;;
-    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4, 5, 6, 7, 8 or 9, not [$STORAGE_PROBE]" >&2
+    10) ;;
+    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 or 10, not [$STORAGE_PROBE]" >&2
        echo "        It is a `#if` in two files and not a value, so anything else would reach the" >&2
        echo "        preprocessor as a broken -D and fail there, with the cause named by the wrong" >&2
        echo "        tool (692); and it is a rung rather than a flag since 696, so a value above the" >&2

@@ -2571,3 +2571,200 @@ set=armed-storage-pwrwait-aa2b051d sha256=52bc9c357068b791f777bb9abd2e879fa5b0b2
 # carries no key that names the medium. **TWRP-to-storage stays withheld.** What this press buys is the
 # next rung's shape: the completion is interrupt-delivered, the waiter's context masks interrupts, and
 # the completion is available long before any budget this arm could spend.
+
+# =====================================================================================================
+# 718: THE RUNG-11 ARM - THE WAIT TAKEN WITH THE MASK OFF, AND THE FIRST INTERRUPT THIS IMAGE TAKES
+#      INSIDE THE CACHE-OFF IDLE-EXIT WINDOW. Built 2026-09-26 01:03-01:10, parked here unspent.
+# =====================================================================================================
+#
+# **THE ARM IS `STAGE90_XNU_STORAGE_PROBE=10` WITH `STAGE90_XNU_PWR_WAIT_TICKS=384000`** - 716's arm
+# (20 ms) with ONE MECHANISM ADDED and no switch value moved. The mechanism is `st_pwr_wait`'s: the
+# CPU's `I` bit is cleared for the poll (`mrs cpsr_saved, cpsr` / `cpsie i` / `mrs cpsr, cpsr`), the
+# SAME bounded poll runs with the same `CORE_PWRCTL_CTL` end condition and the same 1024-read batch,
+# and the mask is put back from the SAVED register (`msr cpsr_c, cpsr_saved` / `mrs cpsr_after, cpsr`)
+# before the function's own tail. Encoded in the linked body at 0x8000d430 `mrs sl, CPSR`, 0x8000d434
+# `cpsie i`, 0x8000d438 `mrs r1, CPSR`, then 0x8000d498 `msr CPSR_c, sl` and 0x8000d49c `mrs r1, CPSR`
+# - one register carries the saved state, and the restore is adjacent to the reading that checks it.
+#
+# **WHY, IN ONE LINE OF 717's EVIDENCE.** Rung 10 measured the completion `20.172 ms` after the byte
+# and the handler `60.78 us` after the spin gave up, on a 20 ms bound, against `100.122 ms` and
+# `60.05 us` on the 100 ms one: the handler's distance from the spin's END did not move while its
+# distance from the BYTE moved with the bound, so **the poll was measuring its own mask** and no budget
+# can separate them (the mask ends where the code that owns it returns, and the spin is inside that
+# code). 717 section 2 named two shapes for the next rung - unmask around the spin, or take the wait
+# where the mask is already clear - and **only the first exists in this fixture**, because the whole
+# probe runs inside the seam and `_wait_cpsr` reads `0x80000093` on every arm of this ladder.
+#
+# **THE ONE NEW CELL, AND THE CELL WHOSE VALUE IS THE ARM.** `_wait_cpsr` keeps its definition - the
+# CPSR the poll runs under - and must now read `0x80000013` (SVC, `I` clear, `F` clear, `N` set: the
+# same value with bit 7 cleared) where rungs 9 and 10 read `0x80000093`; **`_wait_cpsr_after`** is the
+# new quantity, the CPSR the probe gives back, which must read `0x80000093` - the value rungs 9 and 10
+# read as their PREMISE, which is what says the restore restored the SAVED state and not a constant
+# that happens to look tidy (and why the restore is `msr` from the saved register and not `cpsid i`).
+# **The outcome cells are rung 10's, flipped**: `_wait_timeout` must read `0` (it read `1` on both
+# rungs 9 and 10) beside `_wait_ctl_after` = `0x01` (it read `0x00`), with `_wait_done` = `1` and
+# `_wait_calls` = `1` - the vendor's predicate satisfied for the first time on this ladder, and the
+# first time the waiter reads the handler's two driver-side fields AFTER the handler wrote them (so
+# the flag-against-ack pair has a comparison for the first time: agreement through DRAM is the
+# expected reading, disagreement is 686's cache-boundary defect measured rather than argued).
+#
+# **WHAT IS NEW ABOUT THE CONTEXT, WHICH IS THE REAL QUESTION: no interrupt has ever been delivered
+# inside this window.** Every earlier delivery happened ~50 us after the spin, on the way OUT of the
+# payload's cache-off idle-exit seam (`xnu_live_seam_sctlr` reads `C` clear on every run of this
+# ladder). The delivery here is nearly certain - this site has taken the handler three times, so the
+# line is enabled, in Group 0, at a priority `GICC_PMR` admits and targeted at this CPU - and the
+# context is entirely new, which is what this press is for. A non-return (exit 2), an `_irq_other_*`
+# key or an ending on `exception: irq line` is therefore a READING on this arm and names the line or
+# the fault. Nothing is flashed, the poll is still bounded, the gate is still read before any store
+# and the watchdog is still armed.
+#
+# **THE SOURCE THIS ARM IS THE BUILD OF: TWO FILES, BOTH NAMED IN THE SOURCES MANIFEST.**
+# `entry_storage.c` gains the unmask, the restore, the new cell and the `#if STAGE90_XNU_STORAGE_PROBE
+# >= 10` guards (so that `STORAGE_PROBE=9` still builds the arm below it byte for byte), and its ladder
+# `#error` now refuses above 10; `build_entry.sh` gains the `10)` case in its rung ladder and the
+# matching sentence in the refusal, which is what made the first invocation refuse with "must be 0, 1,
+# 2, 3, 4, 5, 6, 7, 8 or 9, not [10]" - the ladder is a `#if` in two files and a `case` in a third,
+# and the third is the one a rung digit reaches first.
+#
+# **NO BUILD CLAUSE NEEDED A CHANGE, AND THAT IS A FACT ABOUT THE CLASSIFIER RATHER THAN A LUCK.** The
+# rung-9 clause over `st_pwr_wait`'s body ran on this arm unchanged and printed: device accesses
+# `[f982492c:ldrh f98240e8:ldrb]` with counts `[f982492c:ldrh=2 f98240e8:ldrb=4]`, non-device accesses
+# `[IMG:ldr IMG:str]` at the same four `.bss` words, ONE `bl` to the waiter, and the budget 384000 in
+# its own body as a `mov`/`movt` pair. **`cpsie`/`msr`/`mrs` are not memory accesses, and a published
+# cell is a CALL to `entry_live_write` with a string** - so `_wait_cpsr_after` adds nothing to either
+# set: no device access, no `.bss` word, no new symbol. The write set is rung 10's exactly.
+#
+# **THE CONTAINMENT, AGAINST THE PRESSED RUNG-10 ARM `armed-storage-pwrwait-aa2b051d`.** This is a
+# CODE arm and not a constant arm, so the blob's bytes differ all through the region the code moved
+# through - and **what matters is that NOTHING OUTSIDE THE BLOB MOVED, which is tighter than 713's arm
+# and is a consequence of the growth being in `.text` only**: `stage90.bin` differs in 556511 bytes and
+# **ZERO of them are outside `stage90_xnu_entry_blob`** (5,536,380 bytes at file offset 494236); both
+# `stage90.img` and `stage90-qcdt.img` differ in 556531 = those 556511 inside the blob + **exactly the
+# 20 bytes at 576-595**, the boot header's legacy-AOSP `id` field, which is a FUNCTION of the payload:
+# `sha1(payload || <6031876,0,0>)` reproduces it from the file on BOTH arms (`9717a9e1...` here,
+# `d444ee40...` on the pressed arm) - so the field changed for the reason it must and for no other.
+# **`stage90.elf`'s `nm -S` output EQUALS the pressed arm's as a whole** (0 differing lines; text
+# 6,030,666 / data 1,208 / bss 644,048 all unchanged; `stage90_xnu_entry_blob` still at VA 0x80a9c,
+# size 0x547a7c) and the 2,521,088-byte device tree tail of the qcdt is BYTE-IDENTICAL, with `dt_size`
+# at 40 unchanged and the file size unchanged at 8,556,544. **THE TWO LAYOUT CONSTANTS DID NOT MOVE**,
+# and the reason is the entry image's growth: `xnu_arm_entry.elf`'s `.text` grew 32 bytes (5,323,240 ->
+# 5,323,272) while `.data` (206,804) and `.bss` (379,784) are UNCHANGED, and the payload's BSS_END and
+# BSS-length words are functions of `.bss` alone - which is why `stage90.bin` has zero bytes outside
+# the blob where 713's arm had four. Inside the entry image: `st_pwr_wait` is at 0x8000d230 size
+# 0x284 (was 0x250) and `entry_storage_probe` moved 0x8000d480 -> 0x8000d4b4 with its own size
+# unchanged at 0x173c. **The seam did NOT move**: `platform_cache_idle_exit` is at 0x800482d4 and
+# `STAGE90_XNU_SEAM_LR` 0x800482dc in both arms, so `entry_trace.c`'s constant and `run_and_capture.sh`'s
+# literal were NOT re-pinned - the FOURTH rung running for which that is true.
+#
+# **ONE MEASUREMENT CAVEAT FOUND WHILE WRITING THIS RECORD, RECORDED AND NOT REPAIRED.** The rung-10
+# record's "26,540 symbols" and this arm's check disagree with `nm`'s own line count on the same file
+# (26,636): the recorded number is the count of DISTINCT NAMES, the other is the count of `nm` ENTRIES,
+# and the two differ by 96 duplicated names (`.LANCHOR0` appears 7 times, `L_telemetry_needs_record`,
+# `L_kdebug_enable`, `L_intstack_top` and `L_gVirtBase` 6 times each). Both arms measure 26,540
+# distinct / 26,636 entries, so **no name was added or lost this step** - the defect is that the
+# record's number did not say which of the two it was, and a reader comparing counts across arms would
+# read a 96-symbol jump that is not there. This is `mi4-one-value-two-definitions`' shape at its
+# mildest: one count, two definitions, both reproduce.
+#
+# **THE GOAL IS STILL NOT MET.** No command, no sector, no partition table, no mount, no driver beyond
+# the fixture; the arm's whole device act is still two halfword reads of `CLOCK_CONTROL` and a poll of
+# one `CORE_PWRCTL_CTL` byte, and nothing is written to the medium. **TWRP-to-storage stays withheld.**
+# What this press buys, if it comes back with `_wait_timeout = 0`, is the LAST of the three mechanisms
+# the driver's first handshake needs - request, interrupt, completion - measured working in the only
+# context this fixture can offer, which is the precondition for every rung above it.
+set=armed-storage-pwrwait-unmask-13366e08 sha256=13366e08d90afb233a14e01c22e12a5ccd369b744b2a9f9307018387af6193da bytes=5536380 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ONE-BINARY-THIS-STEP-CHANGED-and-its-name-is-its-own-sha-prefix-13366e08-it-is-the-PRESSED-rung-10-entry-aa2b051d-PLUS-THE-UNMASK-and-the-restore-in-st_pwr_wait-and-ONE-NEW-CELL-_wait_cpsr_after-its-size-is-UNCHANGED-5536380-because-that-size-is-PADDED-while-the-entry-elfs-own-text-grew-by-EXACTLY-32-bytes-5323240-to-5323272-with-data-206804-and-bss-379784-BYTE-FOR-BYTE-unchanged-which-is-why-the-payloads-two-layout-constants-DID-NOT-move-and-why-NOTHING-OUTSIDE-THE-BLOB-in-stage90-bin-differs-the-waiter-is-at-the-SAME-address-0x8000d230-and-grew-0x250-to-0x284-and-the-probe-moved-0x8000d480-to-0x8000d4b4-with-size-0x173c-unchanged-and-the-symbol-set-is-IDENTICAL-as-a-whole
+set=armed-storage-pwrwait-unmask-13366e08 sha256=7c9c98c877359e9316cb8e6df22ee64fd50afc356470d10716aeab12b00e3f34 bytes=6715636 file=xnu_arm_entry.elf role=entry-elf-SAME-FILE-SIZE-as-the-PRESSED-rung-10-arms-6715636-text-5323240-to-5323272-plus-32-data-206804-and-bss-379784-UNCHANGED-st_pwr_wait-0x8000d230-size-0x284-was-0x250-st_pwr_irq-0x8000cff8-size-0x238-UNCHANGED-entry_storage_probe-0x8000d4b4-was-0x8000d480-size-0x173c-unchanged-and-platform_cache_idle_exit-0x800482d4-and-_wrap_platform_cache_idle_exit-0x8047ead8-are-BOTH-UNCHANGED-so-STAGE90_XNU_SEAM_LR-0x800482dc-did-NOT-move-and-the-two-files-that-pin-it-were-NOT-re-pinned-THE-FOURTH-RUNG-RUNNING-and-the-symbol-NAME-set-is-identical-26540-distinct-names-on-both-arms-26636-nm-entries-on-both-so-no-name-was-added-or-lost-and-the-96-entry-difference-with-the-rung-10-records-26540-is-the-two-counts-definitions-not-a-change
+set=armed-storage-pwrwait-unmask-13366e08 sha256=725fa0e40783d82d318d5ef497967f679eaf08d50e3d7e5e8888a6e2db987b62 bytes=910 file=xnu_arm_entry-config.txt role=entry-config-record-AND-THE-ONE-RECORD-THAT-NAMES-THIS-ARM-its-last-two-lines-read-STAGE90_XNU_STORAGE_PROBE-10-and-STAGE90_XNU_PWR_WAIT_TICKS-384000-beside-SEAM_POC-1-SEAM_MEASURE-0-SEAM_END_RUN-0-POST_END_RUN-0-POST_END_TICKS-115200000-SLOT_NULL-1-IDLE_CACHE_ENABLE-0-ISTACK_SEPARATE-0-IDLE_STACK-1-IDLE_NO_SLEEP-0-and-REAL_ARM_INIT-1-and-EXACTLY-TWO-of-its-lines-differ-from-the-PRESSED-rung-10-arms-the-file-SHA256-field-and-the-rung-digit-9-to-10-measured-by-diff-and-the-file-keeps-its-910-bytes-because-ten-and-nine-are-one-character-each
+set=armed-storage-pwrwait-unmask-13366e08 sha256=7569499a834fdfc22b3e289bffdc6b2a3fa793369e83646cde09f11437cf9c32 bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest-28-lines-in-all-23-of-them-file-lines-and-EXACTLY-FOUR-of-its-lines-changed-this-step-the-entry-SHA256-field-and-the-TWO-files-that-changed-by-content-build_entry-sh-2ea248de-to-d5521cfe-the-10-case-in-the-rung-ladder-and-its-message-and-the-comment-above-it-AND-entry_storage-c-17ec162d-to-f2f30db6-the-unmask-the-restore-the-new-cell-the-two-if-storage_probe-10-guards-that-keep-STORAGE_PROBE-9-byte-for-byte-and-the-ladder-error-text-extended-to-10-while-the-other-21-file-lines-hash-as-they-did-on-716s-arm-and-the-file-keeps-its-2348-bytes
+set=armed-storage-pwrwait-unmask-13366e08 sha256=6e509691da6786271a73ee428eb8b4a2b93a05ab2fc5dfc158b109694b66c297 bytes=6031876 file=stage90.bin role=raw-payload-bin-SAME-SIZE-as-every-arm-since-696-6031876-and-556511-bytes-differ-from-the-PRESSED-rung-10-arms-and-ALL-OF-THEM-ARE-INSIDE-stage90_xnu_entry_blob-file-offset-494236-0x78a9c-size-5536380-with-ZERO-DIFFERING-BYTES-OUTSIDE-THE-BLOB-which-is-TIGHTER-than-713s-arm-where-the-entry-.bss-grew-and-the-payloads-copy-of-BSS_END-and-the-BSS-length-had-to-move-THIS-arms-growth-is-in-.text-ONLY-so-those-two-constants-are-unchanged-and-the-ELFs-text-6030666-data-1208-and-bss-644048-are-ALL-THREE-unchanged-with-all-465-of-its-symbols-comparing-EQUAL-as-a-whole-by-name-address-and-size
+set=armed-storage-pwrwait-unmask-13366e08 sha256=4ec83b12307b85457429bd90197419a601fd65d3fd83d1e4288e570281bf6717 bytes=6093948 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of-its-text-is-6030666-bytes-its-data-1208-and-its-bss-644048-all-three-UNCHANGED-from-the-PRESSED-rung-10-park-and-its-nm--S-output-EQUALS-that-parks-output-as-a-whole-so-every-one-of-its-465-symbols-is-at-the-same-address-with-the-same-size-and-stage90_xnu_entry_blob-is-at-VA-0x80a9c-size-0x547a7c-in-BOTH-so-this-file-differs-from-the-pressed-park-ONLY-in-the-556511-blob-bytes-it-embeds
+set=armed-storage-pwrwait-unmask-13366e08 sha256=d49667f0c77c3d05e201ce446fb16d6c16c6ddd45c3c5906c5fab7d4928dd42e bytes=6035456 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies-its-header-id-field-at-576-595-and-it-differs-from-the-PRESSED-rung-10-park-in-EXACTLY-556531-BYTES-556511-of-them-inside-the-embedded-entry-blob-which-this-file-carries-one-2048-byte-header-page-later-at-497240-and-EXACTLY-20-OUTSIDE-BOTH-at-576-595-which-is-the-legacy-AOSP-sha1-kernel-concatenated-with-kernel_size-ramdisk_size-second_size-as-little-endian-words-REPRODUCED-here-as-sha1-payload-pack-III-6031876-0-0-equals-0x9717a9e1-so-the-field-is-a-function-of-the-payload-and-changed-for-the-reason-it-must-and-its-dt_size-word-at-40-is-0-because-this-file-has-no-device-tree-appended-and-the-image-is-otherwise-stage90-bin-plus-a-1532-byte-ZERO-tail
+set=armed-storage-pwrwait-unmask-13366e08 sha256=3e8fb5336056542af0309bbeff0afb426ef1a1279f2bb8fce3af5c5b5bcbfb39 bytes=8556544 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-AND-THE-RUNG-11-ARM-THE-NEXT-PRESS-SENDS-STAGE90_XNU_ENTRY-1-with-the-STORAGE_PROBE-10-entry-image-at-PWR_WAIT_TICKS-384000-it-differs-from-the-PRESSED-rung-10-park-in-EXACTLY-556531-BYTES-the-same-20-byte-header-id-field-at-576-595-and-556511-inside-the-blob-and-MEASURED-ZERO-DIFFERING-BYTES-OUTSIDE-BOTH-the-2521088-byte-device-tree-blob-after-the-payload-is-BYTE-IDENTICAL-and-the-headers-dt_size-word-at-40-is-0x00267800-and-IDENTICAL-to-the-pressed-parks-and-the-size-is-UNCHANGED-8556544
+set=armed-storage-pwrwait-unmask-13366e08 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-PRESSED-rung-10-park-and-to-every-arm-since-653-INCLUDING-its-STAGE90_XNU_ENTRY-1-line-so-this-file-CANNOT-NAME-THIS-ARM-and-THIS-STEP-DID-NOT-TOUCH-THE-PAYLOAD-AT-ALL-the-only-thing-this-arm-changed-is-an-entry-switch-value-and-the-payload-was-rebuilt-around-the-new-embedded-entry-bin-and-this-identity-is-the-evidence-that-the-rebuild-reproduced-the-pressed-arms-payload-switch-set-exactly
+set=armed-storage-pwrwait-unmask-13366e08 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-entry-nonetheless-and-BYTE-IDENTICAL-to-the-PRESSED-rung-10-park-so-again-the-only-files-that-did-not-move-are-the-two-that-describe-nothing-about-the-entry-image-the-fixture-and-the-payloads-own-switch-dump
+set=armed-storage-pwrwait-unmask-13366e08 sha256=f031b0af2b41a2c7e5f8880fd33f9eccf0b843627f153e20d52a56aa20105295 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-so-sha256sum--c-must-NEVER-be-run-inside-a-park-see-the-records-own-note-its-five-members-are-the-other-five-of-this-set-and-FOUR-of-the-five-hashes-differ-from-the-PRESSED-rung-10-arms-manifest-because-four-of-its-five-members-changed-and-the-fixture-macho-is-the-one-that-did-not manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+
+# =====================================================================================================
+# 720: THE RUNG-11 PRESS - `armed-storage-pwrwait-unmask-13366e08`, PRESSED 2026-09-26.
+#      readiness 5/5 exit 0 (01:16:30), ONE gate (--allow-xnu-entry, exit 0, 580 lines, 01:17:00),
+#      EXACTLY ONE runner (--expect-arm=armed-storage-pwrwait-unmask-13366e08) -> EXIT 0 at 01:18:06.
+#      Capture 622312 B sha256 fef6a5e8bf6cf3dea0ad8b28ca1e87f4d1d8908a2ae840f71e9b75afc9bd5d38,
+#      archived by hand as out/stage90/captures/rung11-unmask-20260926-011552-{last_kmsg.txt,press,gate,run}
+#      (the runner does NOT archive; the firer was /tmp/g668/press-on-clear.v5.sh, sha 7f23cae5..., and
+#      it logged `done. gate=0 runner=0`, so NO FIRER IS ARMED). One non-persistent `fastboot boot`,
+#      nothing flashed, 33e80afe off the bus, the device back on its own (adb lists 4a2fe00b device).
+# =====================================================================================================
+#
+# **THE ARM ANSWERED, AND THE ANSWER IS THE VENDOR'S OWN HANDSHAKE SATISFIED.** `_wait_timeout = 0`
+# (it read 1 on BOTH rungs 9 and 10) beside **`_wait_ctl_after = 0x01`** - the controller carries
+# `BUS_SUCCESS` for the first time on this ladder - with `_wait_done = 1`, `_wait_calls = 1`,
+# `_wait_state_after = 0x02` and `_wait_io_after = 0x08`: the vendor's own predicate
+# ((REQ_BUS_ON & curr_pwr_state) | (REQ_BUS_ON & curr_io_level)) is satisfied, and **this is the first
+# time the waiter reads the handler's two driver-side fields AFTER the handler wrote them** - the
+# flag-against-ack comparison rung 9's design argued for and never had. Agreement on both sides, which
+# is the expected reading; disagreement would have been 686's cache-boundary defect measured.
+#
+# **AND `_wait_polls = 1` BESIDE `_wait_ticks = 1,403` (73.07 us) IS THE CELL THAT EXPLAINS HOW.**
+# The exception is taken at the first instruction boundary after `cpsie i`, so **the poll never got to
+# run**: `_pwr_irq_at` is 1,033 ticks (53.80 us) after `_wait_t0` - the client's first statement - its
+# work took ~370 ticks (19.27 us), and the poll's ONE read then saw the handler's own store.
+#   _wait_t0 = 0x076545e2 | _pwr_irq_at = 0x076549eb (+1033 = +53.80 us) | wait end = 0x07654b5d
+#   (+1403 = +73.07 us) | _post_t0 = 0x07654c44 (+231 ticks past the wait's end, against 217 on both
+#   masked arms - the probe's own tail, the same code).
+# **THE ALTERNATIVE READING IS REFUTED BY AN EARLIER PRESS AND NOT BY AN ARGUMENT**: if the poll's
+# first read had executed BEFORE the handler, `_wait_polls = 1` would mean the controller answered by
+# itself within a few ticks of the mask coming off - and rungs 9 and 10 polled that same byte 428,032
+# and 86,016 times and read `0x00` every time, on the same byte written by the same arm. Nothing on
+# this machine raises that bit inside 100 ms except rung 8's handler, so the ack the poll found is the
+# handler's store, the handler is what the interrupt delivered, and the wait was satisfied by the
+# interrupt. **The budget was never touched** (384,000 ticks available, 1,403 spent): with the mask off
+# the bounded poll is no longer an approximation of the block it replaced - it IS the block, and the
+# bound is only the failure path. **The interrupt's own latency is the new reading: 53.80 us from
+# `_wait_t0` to the client's first statement**, against the same path measured from the other end on
+# rungs 9 and 10 as 1,153 and 1,167 ticks (60.05 and 60.78 us) after the spin's end - where the
+# payload's own idle-exit code lifts `I`. Two masked arms and one unmasked arm agree on the order of
+# the delivery's cost, and the ~6 us between them is the difference between the two starting points.
+#
+# **`_pwr_irq_calls_probe_end = 1` IS THE DELIVERY-INSIDE-THE-PROBE WITNESS.** It reads 0 on all three
+# masked arms - where m723 recorded it as EXPECTED BY CONSTRUCTION and therefore not evidence about
+# the spin - so this arm gives that note its counter-example: the client had run before the probe's
+# tail, i.e. inside the probe, i.e. in the window. **AND THE RUN SURVIVED THE FIRST INTERRUPT THIS
+# IMAGE HAS EVER TAKEN INSIDE THE CACHE-OFF IDLE-EXIT SEAM** (`xnu_live_seam_sctlr = 0x30c57879`, `C`
+# clear): no `_irq_other_*` key, no `_irq_spurious_*`, no `_irq_cli_storm`, and the ending fired on its
+# own schedule (`_post_end_calls = 0x7`, `_post_cntfrq = 0x0124f800`, the elapsed pair past
+# 0x06e15472 = 6,011.8 ms of 6,000 ms). The context was new and it did not misbehave; the cost was
+# 73 us of a 6,000 ms window, against 20,000 us on the arm below it.
+#
+# **ONE PREDICTION MISSED, AND IT MISSED ABOUT THE SCOPE OF AN INSTRUCTION.** 718 section 3 said
+# `_wait_cpsr_after` MUST read `0x80000093`; it read **`0x20000093`**. The same control field (mode
+# 0x13 SVC, **I SET**, F clear) with the condition flags left as the poll's own `cmp` left them - bit
+# 29 C set instead of bit 31 N - **because `msr cpsr_c` writes the CONTROL field and not the flags**.
+# Restoring the flags would have been wrong: they belong to the running C code and this function is a
+# called function, not an exception return. The cell is right and the sentence was wrong; **the mask
+# went back on**, which is the arm's safety claim and it is measured, not promised. Two limitations of
+# the premise cell are recorded too: `_wait_cpsr` is read AFTER the `cpsie`, so with the exception
+# taken at the next boundary it is read with the handler already run (it still measures the context
+# the poll runs in, its definition, but it does not order the unmask against the delivery - the cell
+# that does is `_pwr_irq_calls_probe_end`).
+#
+# **EVERY INHERITED CELL READS AS ON THE PRESSED RUNG-10 AND RUNG-9 ARMS**, which is the check that
+# this arm changed only what it says it changed: `_storage_calls=1`, `_loads=6`, `_writes` published
+# 0->4, `_rst_stores=1`, `_mode_bit_after=1`, `_gate=1`, `_bcr=0x0`, `_cbcr=0x4ff1`, `_gcc_map=1`,
+# `_map=1`, `_pwr_before=0x00` -> `_pwr_after=0x0b` with `_pwr_vdd=7`, and the wait's own unchanged
+# cells `_wait_req=0x2`, `_wait_reset=0`, `_wait_bound=0x0005DC00`, `_wait_done_before=0`,
+# `_wait_state_before=0`, `_wait_io_before=0`. **711 section 3 is answered on a THIRD arm**:
+# `_wait_cc_before = _wait_cc_after = 0xE047`. The handler's side is unchanged in value and new in
+# context: `_pwr_irq_calls=1`, `_pwr_irq_intid=0xaa`, `_pwr_irq_ctl_before=0x0` ->
+# `_pwr_irq_ctl_after=0x1`, `_pwr_irq_status=0x02`, `_pwr_irq_ack=0x01`, `_pwr_irq_status_after=0x00`,
+# `_pwr_irq_state=0x02`, `_pwr_irq_io_level=0x08`.
+#
+# **THE GOAL IS STILL NOT MET.** No command, no sector, no partition table, no mount, no driver beyond
+# the fixture - this rung's whole device act is still two halfword reads and a poll of one byte, and
+# its log carries no key that names the medium. **TWRP-to-storage stays withheld.** What this press
+# buys is that the last of the three mechanisms the driver's first handshake needs - the request (rung
+# 7's byte), the interrupt (rung 8's client on intid 170) and the completion (this wait) - now stands
+# in ONE RUN with the vendor's predicate satisfied, in a context that can be interrupted, which is
+# exactly what 717 section 2 asked for. The next rung is therefore a step UP the line rather than
+# another reading about the wait: the card's rail, the RCG rate write (705/706 measured 192 MHz where
+# the driver believes 400 kHz), rung 6's two stores to hc_mem + 0x10C with the readback cell, or the
+# command path (sdhci_send_command), where "the card answers" begins.
