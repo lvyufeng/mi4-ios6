@@ -3604,3 +3604,120 @@ set=armed-storage-cid-dc8d7002 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364
 #   ./scripts/run_and_capture.sh --allow-xnu-entry --expect-arm=armed-storage-cid-dc8d7002
 # The goal is still NOT met: no storage, no filesystem, the OS not observed reaching userland, so
 # TWRP-to-storage stays withheld (the clause is conditioned on "if the OS can already get in").
+
+# ================================================================================================
+# 738: THIS SET WAS PRESSED. **CMD2 WENT ON THE BUS, THE BLOCK GAVE NOTHING BACK, AND THE RESPONSE
+# REGISTER IS NOT A WITNESS.** Read this block as the answer to the pre-registration above; it
+# supersedes the ARM/SET lines and nothing else in it.
+# ================================================================================================
+# PRESSED 2026-09-26 14:41:56-14:43:13 UTC, **RUNNER EXIT=0** (returned and captured). Readiness 5/5
+# (exit 0, run from the same tree immediately before the fire), ONE gate (exit 0, **585** stdout lines)
+# and EXACTLY ONE runner, both under `--allow-xnu-entry --expect-arm=armed-storage-cid-dc8d7002`. One
+# non-persistent `fastboot boot`, serial 4a2fe00b; the neighbour 33e80afe was off BOTH lists at fire
+# time (adb: [4a2fe00b device], fastboot: []) and was never touched. Capture
+# `out/stage90/captures/rung17-cid-20260926-144313-last_kmsg.txt`, **628,500 B, sha256
+# `ad9d77c92df2a7eb2134a01cf0c61d0d8bd9a19f1b14ada9d7bcb5add11b0a3e`**, archived by hand with the gate
+# log, the run log and the combined press log under the same timestamp (out/ is gitignored and the
+# runner does not archive). Nothing was flashed and no byte of the medium moved. **No firer was armed:
+# the press path is the two commands readiness prints, run directly once each (730's finding, and the
+# launcher's bytes are kept nowhere).**
+#
+# THE ORDERING DEFECT 736 FOUND IS REPAIRED, AND THE FOUR-PLACE EXCLUSION HELD IN THE BYTES:
+#  * `_cmd_int_enable = 0x00000000` (NOT `0x00008000`), `_cmd_gate_kind = 0x00000000`,
+#    `_cmd_refused = 0x00000000`, `_cmd_sent = 0x00000002`, `_cmd_ps_after = 0x01f80000`.
+#  * **ZERO `_quiet_*` KEYS** - 15's body is not in this image, so the exclusion is a property of the
+#    bytes and not of three source clauses. This is the FIRST PRESS SINCE 733's on which the command
+#    path ran, so the rung below was re-measured rather than inherited from 736's refusal.
+#
+# CMD2 WENT ON THE BUS, AND THE DRIVER'S OWN WORD IS WHAT THE BLOCK HOLDS:
+#   `_cid_calls = 0x1`, `_cid_gated = 0x0`, `_cid_op = 0x2`, `_cid_flags = 0x7` (MMC_RSP_R2 =
+#   PRESENT|136|CRC), `_cid_word = _cid_word_read = 0x00000209`, `_cid_sent = 0x1`.
+#   `0x0209` = opcode 2 << 8 | RESP_LONG 0x01 | CRC 0x08 - the decode this tree's VENDOR sdhci.h
+#   demands (`:53` RESP_LONG, not upstream Linux's, and INDEX `0x10` correctly absent because
+#   MMC_RSP_R2 carries no MMC_RSP_OPCODE). The three words this ladder puts on `0x0E` are
+#   `_Static_assert`ed in the source and asserted again by the build clause.
+#
+# AND THE BLOCK GAVE NOTHING BACK - **WITH THE ENABLE STANDING FOR THE WHOLE SEND**:
+#   `_cid_ena_wrote = 0x1`, `_cid_ena_held = 0x00008001`, `_cid_sig_enable = 0x0` (read, never
+#   written), and then `_cid_complete = 0x0`, `_cid_status_any = 0x0` over the WHOLE register,
+#   `_cid_polls = 0x004da800` (5,088,256), `_cid_ticks = 0x015f9651` (23,040,593 = 1.200 s at
+#   19.2 MHz), `_cid_timeout = 0x1`, `_cid_err = 0x0`, `_cid_status_post = 0x0`,
+#   `_cid_wrote_back = 0x0`, `_cid_readback = 0x00008000`.
+#   **733's rule (a command's status is latched only while its enable stands) is NECESSARY AND NOT
+#   SUFFICIENT**: CMD0 completed inside rung 14's window on 733 and here; CMD2 ran inside the same
+#   window and nothing latched.
+#   **AND `_cid_inhibit_seen = 0x00000000` over the first 1024 samples with `_cid_inhibit_last =
+#   0x01f80000`** - CMD_INHIBIT was never once observed for CMD2, where CMD0's own was seen 537 times
+#   (`_cmd0_inhibit_seen = 0x219`) in the SAME RUN and CMD1's was also `0`. A command whose word reads
+#   back and whose inhibit is never seen is a word the register file holds and the sequencer did not
+#   take; that reading is available for two commands in this log.
+#
+# **THE 136-BIT READ RETURNED CMD1's RESPONSE WORD, AND THAT IS THIS PRESS'S FINDING**:
+#   `_cid_raw3 (+0x10) = 0x00000000`, `_cid_raw2 (+0x14) = 0x00000000`,
+#   `_cid_raw1 (+0x18) = 0x80000000`, `_cid_raw0 (+0x1c) = 0x0040ff80`;
+#   `_cid_resp0 = 0x40ff8080` (the driver's own read: `(raw0 << 8) | byte at +0x0B`), `_cid_resp1..3 =
+#   0`, `_cid_resp_short = 0`.
+#   **`_cid_resp0` is BIT-FOR-BIT `_cmd1_resp` in the same log** - which 733 read from `RESPONSE +
+#   0x10` (word 0) at CMD1's own moment - and read as one 128-bit big-endian register the four words
+#   are that same 32-bit value ONE BYTE FURTHER ALONG. So the four words are NOT a CID.
+#   The register DID move (after CMD0 `_cmd0_resp = 0x0` with `_cmd0_resp_read = 1`; after CMD1
+#   `0x40ff8080`), so it is not a constant - but this press shows that word sitting in the register
+#   **with no completion latched and no inhibit ever seen**, and re-presented in the long-response
+#   positions when a long response is asked for.
+#   **CONSEQUENCE, STATED PLAINLY**: since 733, `_cmd1_resp = 0x40ff8080` has been read as *the card
+#   answered CMD1*; 733's index row calls it "exactly the reference word", 736 section 5 built the
+#   push from it, and **rung 17's own gate** (`c1.sent != 0 && (c1.resp & MMC_CARD_BUSY) == 0`) is
+#   read off it. The gate's LOGIC still holds (a status-bit gate refuses on every arm of this ladder)
+#   but the EVIDENCE it consumes is weaker than every rung since 733 has treated it as: `0x40ff8080`
+#   has an OCR's SHAPE (bit 30 set, voltage window `0x00ff8000`), which is why it convinced, and shape
+#   is not provenance. **This press did NOT decide whether a card answered CMD1** - it made the
+#   question visible for the first time and left it open.
+#
+# THE RUNG BELOW IS INHERITED UNCHANGED, AND TWO OWED READINGS CAME BACK:
+#   `_cmd0_word_read = 0x0`, `_cmd0_status_any = 0x1`, `_cmd0_any_polls = 0x21b`,
+#   `_cmd0_inhibit_seen = 0x219`, `_cmd0_complete = 0x1`, `_cmd1_word_read = 0x102`,
+#   `_cmd1_resp = 0x40ff8080`, `_cmd1_resp_read = 0x1`, `_cmd1_complete = 0x0`,
+#   `_cmd1_ticks = 0x015f9248`, `_int_status_before = 0x0`, `_int_status_after = 0x1` (730's pair,
+#   reproduced), `_ena_held = 0x8001`, `_ena_readback = 0x8000`, `_ena_restore_seq = 0x1`.
+#   **`_ena_host_version = 0x00001102`** - 697's owed reading, taken at the only width `0xFE`'s
+#   alignment allows (a halfword): vendor `0x11`, spec version `0x02`. It is 730 section d's SDHCI-3.0
+#   hypothesis with a version register beside it, and it is a reading to be read AGAINST that layout
+#   claim, not a proof of it.
+#   **No `_irq_other_*` key at all**, so the pre-registered failure mode (SPI 123 -> intid 155 landing
+#   on the dispatcher) did not occur - a measurement on a second arm rather than a reason.
+#   `_cid_readback = 0x00008000` reproduces the durable bit-15 finding a FOURTH time: a write to `0x34`
+#   sets it and a write of `0` does not clear it.
+#
+# ONE DIFFERENCE, RECORDED RATHER THAN DROPPED: `_post_end_calls = 0x00000006` where 730, 733 and 736
+# all read `0x00000007`. Every other ending cell is unmoved (`_seam_post_end_ticks = 0x06ddd000`,
+# `_seam_sctlr = 0x30c57879`, `_sleh_storm = 9`, `_post_cntfrq = 0x0124f800`), and this log's last
+# `_post_elapsed = 0x06e848ea` sits just above the trigger's floor exactly as 736's does
+# (`0x06de1e04` with the same `_seam_post_end_ticks`). `_post_end_calls` counts idle-exit PASSES and
+# not time, so one fewer pass over the same window is pass-count jitter and not this arm's news - but
+# a reader comparing the four logs will see it, and an unremarked difference is how a real one gets
+# missed.
+#
+# THE RUNNER'S VERDICT: **14 PASS / 2 FAIL**, and BOTH FAILs are the one known storage-arm criterion
+# (`seam_sp=0x80557ec8 is not sleh_sp-8`, which 694, 697, 705, rungs 12 and 13 all carry), so neither
+# is about this arm. The log ends the way 730's, 733's and 736's do - the kernel's own
+# `No errors detected`, the device back on Android on its own - so the ending is the ladder's normal
+# shape.
+#
+# **WHAT THE NEXT RUNG IS, AND IT IS NOT ANOTHER COMMAND.** Two facts decide it and both are in hand:
+#  (1) **THE REGISTER IS NOT A WITNESS.** Read `RESPONSE 0x10..0x1C` on a block with NO command in its
+#      past - the same cheap, READ-ONLY shape as rung 3's census: no store, no new write class, no
+#      command. If it is zero there, then `0x40ff8080` was put there by CMD1 and 733's reading
+#      survives; if it already holds a value, then **the ladder's one piece of evidence that a card
+#      exists is retired** and the whole push from CMD1 must be re-derived from a signal other than
+#      RESPONSE. Otherwise the ladder spends presses collecting answers from a register.
+#  (2) **`CMD_INHIBIT` IS THE DISCRIMINATOR NOBODY HAS USED AS ONE.** CMD0's `_cmd0_inhibit_seen =
+#      0x219` says the block STARTED it; CMD1's (`0x0`) and CMD2's (`0x0`) say the block never showed
+#      a start for either. A command whose inhibit is never observed and whose word reads back is a
+#      command the register file holds and the sequencer did not take.
+# The push the ladder was on before rung 16's detour is unchanged in the driver's own terms - CMD3
+# `mmc_set_relative_addr`, CMD9 `SEND_CSD`, CMD7 `SELECT_CARD`, then CMD17 at LBA 1 where 531
+# section 9's self-verifying reading lives (the eight bytes `EFI PART`, or an MBR ending `55 aa`) -
+# but it now depends on a fact this press put in doubt.
+#
+# **THE GOAL IS STILL NOT MET**: no storage, no filesystem, the OS not observed reaching userland, so
+# TWRP-to-storage stays withheld (the clause is conditioned on "if the OS can already get in").
