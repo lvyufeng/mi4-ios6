@@ -3286,3 +3286,67 @@ set=armed-storage-enable-953ad0f6 sha256=d6ea64e22fac831b359117df3b5e536384229c9
 set=armed-storage-enable-953ad0f6 sha256=53166561d4e8c3acfb4eda8e1a56476ff9f4bca842eee6ae216990a92eca5bbe bytes=2335 file=xnu_arm_entry-sources.txt role=entry-source-manifest
 set=armed-storage-enable-953ad0f6 sha256=e03ee943c297f03eadb78c0480dfdb85f79cc7c714786c7aedb04d50d262cf0f bytes=6051840 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
 set=armed-storage-enable-953ad0f6 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-macho-UNCHANGED-since-the-press-and-regenerated-by-the-build-into-src-verbatim
+
+# 733: THE PRESS OF THE SET ABOVE - `armed-storage-enable-953ad0f6`, 2026-09-26 10:12:21-10:13:31 UTC,
+# RUNNER EXIT 0, 70 s - AND IT ANSWERED, AND ONE OF ITS OWN PREDICTED CELLS FAILED IN A WAY THAT
+# RE-READS 730.
+#
+# **One gate (exit 0 / 591 lines), one runner, one `fastboot boot`, nothing flashed.** Readiness 5/5 exit
+# 0. `33e80afe` verified OFF the bus immediately before the gate, and the arm's own bytes re-hashed as
+# `73d4a8f3...` immediately before the gate as well. Capture
+# `out/stage90/captures/rung15-enable-20260926-101331-last_kmsg.txt`, 636,013 B, sha
+# `3c8418bd35aa33bd920258d77fd1de784cd640f2a2dfbf93d38503dfbdd5ef7c`. The device came back on its own -
+# no watchdog, no power press - and the ending did not move (`_post_end_calls = 7`, `_sleh_storm = 9`,
+# `_seam_post_end_ticks = 0x06ddd000`, `_seam_sctlr = 0x30c57879`, `_seam_lr = 0x800492dc`,
+# `slot_post_calls` reached 4).
+#
+# **THE ARM'S OWN CELL HIT.** `_cmd_gated = 0x00000000` with `_cmd1_*` keys present, and
+# **`_cmd0_complete = 0x00000001`** - so the enable was the mask, and the arm's own numbers date it:
+# `_cmd0_inhibit_seen = 0x219` (CMD_INHIBIT over 537 of the poll's samples) and `_cmd0_inhibit_last =
+# 0x01f80000` (bit 0 clear - it finished), with `_cmd0_status_any = 1` first seen at `_cmd0_any_polls =
+# 0x21b`, THE POLL'S LAST SAMPLE. **The RESPONSE bit appeared at the command's completion and not at the
+# enable's store** - the enable stood from before the send and the poll's first 538 samples read 0.
+# Every other predicted cell holds, the two read off 730's own log included: `_ena_held = 0x00008001`,
+# `_ena_readback = 0x00008000`, `_ena_status_pre = 0`, `_ena_status_post = 0`, `_ena_restore_seq = 1`,
+# `_ena_host_version = 0x00001102`, `_cmd_gate_kind = 0`, `_cmd_sent = 2`.
+#
+# **AND CMD1 WENT OUT, AND THE CARD ANSWERED.** `_cmd1_sent = 1`, `_cmd1_rsp_present = 1`, and
+# **`_cmd1_resp = 0x40ff8080`** - exactly the reference word the pre-registration named, bit 30 set with
+# the voltage window `0x00ff8000` in bits 23:15; `_cmd1_err = 0`; `_cmd1_word_read = 0x00000102` where
+# rung 13 measured CMD0's word reading back as 0x0000. **This is the first CMD1 this line has ever
+# issued, and there is a real card on the other end of it.** CMD1's own poll timed out with
+# `_cmd1_status_any = 0` - EXPECTED, because CMD1's send happens after the window has closed, which is
+# this press's own finding read one command further along.
+#
+# **THE HAZARD DID NOT OCCUR**: no `_irq_other_*` key of any kind, so `SIGNAL_ENABLE 0x38` at zero was
+# the right way to buy this answer.
+#
+# **ONE PREDICTED CELL FAILED: `_int_status_after = 0x00000001` where the pre-registration said `0` -
+# AND ITS FAILURE RE-READS 730.** `_ena_status_post = 0` (the window's close, after CMD0's poll) and
+# `_int_status_before = 0` (st_int_report, later) both read the register clear, and the only write
+# between the pair is `st_int_report`'s own `st_write32(ST_HC_MEM_BASE + ST_SDHCI_INT_ENABLE,
+# ST_SDHCI_INT_RESPONSE)` - an absolute 0x00000001, not a read-modify-write, read out of the source and
+# not inferred. **So the pair goes 0 -> 1 across one store to 0x34 at a moment when the block held no
+# completion.** 730's headline inference - "the completion was there all along and the enable was the
+# mask" - rested on exactly that pair across exactly that store, so **the pair does not separate a
+# completion the enable revealed from an effect of writing 0x34, and 730's STATED evidence is
+# ambiguous**. Its conclusion is not refuted: this press's `_cmd0_complete = 1` is better evidence for
+# it, measured inside the poll that had read nothing for 5,088,256 samples on rung 13.
+#
+# **Two mechanisms remain and this press does not settle which**: (A) a write to 0x34 makes 0x30's
+# RESPONSE bit read 1; (B) the block holds a completion pending and re-latches it into 0x30 when the
+# enable returns - 726's sixth hypothesis, which 730 adopted and which this press does NOT put down. The
+# counter-evidence to the naive form of (A) is in this same log and is not yet reconciled with it: with
+# the enable standing from before the send, CMD0's poll read 0 for its first 538 samples.
+# **THE NEXT RUNG IS NAMED BY THAT**: read `INT_STATUS 0x30` after a store to `0x34` on a block that has
+# been quiet - no command sent since the previous clear - which separates a store's effect from a
+# completion's. It is a read, not a new command class.
+#
+# **What the goal thinks of it**: 「把基础驱动跑起来」 is closer and STILL UNMET. Two commands now run to
+# completion with a real card answering the second of them, but there is **no storage** - no data line
+# has moved a byte and no driver is registered as a storage driver - so **TWRP-to-storage stays
+# withheld** (the clause is conditioned on 「如果os已经能进去了的话」). The frontier reading did not move,
+# so this press advanced the storage arm and not the boot.
+#
+# Pre-registration: docs/experiments/experiment-733-the-rung-15-press-the-enable-was-the-mask-and-the-pair-that-was-not.md
+# Pressed? YES - 2026-09-26 10:12:21-10:13:31 UTC, runner exit 0, 70 s. **THE LAST PRESS IS THIS ONE.**
