@@ -272,6 +272,7 @@ assumed to be clean**: every one of its nine perturbations that produced a layou
 | --- | --- |
 | `tools/verify_press_ready.sh` | **5 of 5, exit 0** — flags `--allow-xnu-entry`, `--expect-arm=armed-storage-rca-c333d09c`; the rung-19 arm paragraph and its own consequence paragraph both ran in the narration |
 | `tools/rehearse_revert_set.sh` | **38 ok / 0 failed** |
+| `tools/rehearse_live_path.sh` | **39 ok / 0 failed, exit 0** — the runner's own state machine driven against stubs with `sudo`, `adb` and `fastboot` replaced first on `PATH` and all three asserted, so no device was touched |
 | `tools/verify_revert_set.sh out/stage90/frozen/armed-storage-rca-c333d09c --set=…` | VERIFIED, 11 files, 6 manifest-member checks |
 | the same against `/mnt/data/mi4-ios6-export/armed-storage-rca-c333d09c` | VERIFIED, 11 files — the park is exported |
 | `tools/check_set_name_rule.sh` | exit 0 — 28 sets, the suffix is the entry bin's own sha256 prefix |

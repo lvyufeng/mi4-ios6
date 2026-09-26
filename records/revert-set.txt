@@ -4065,8 +4065,9 @@ set=armed-storage-rb-05645d1a sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642
 # `0x8000d7d4`, size `0x17c`. `tools/check_arm_variant_pair.sh` agrees.
 #
 # **THE ARM IS ARMED AND NOT PRESSED** and nothing is owed. Readiness 5 of 5 (flags `--allow-xnu-entry`,
-# `--expect-arm=armed-storage-rca-c333d09c`), the park and the export VERIFIED (11 files each), `make
-# check` exit 0, and the gate itself exit 0 - which is the reading that says the tree in front of the gate
+# `--expect-arm=armed-storage-rca-c333d09c`), `tools/rehearse_live_path.sh` **39 ok / 0 failed, exit 0**
+# (the runner's own state machine against stubs - no device), the park and the export VERIFIED (11 files
+# each), `make check` exit 0, and the gate itself exit 0 - which is the reading that says the tree in front of the gate
 # is the tree the image was built from, because the entry sources are verified BY CONTENT. **THE PRESS IS
 # THE OPERATOR'S**, and the paths carry the `scripts/` prefix from the repo root:
 #   sudo -n adb devices   # 4a2fe00b; the neighbour 33e80afe must be ABSENT from BOTH lists
