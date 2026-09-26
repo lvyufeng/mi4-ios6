@@ -4090,3 +4090,114 @@ set=armed-storage-rca-c333d09c sha256=0a1bffc8ec4209a3eef32d3f1aa2997a62528daef3
 set=armed-storage-rca-c333d09c sha256=43416998e716ca99bda8159dd45993ab07ca9e3b05629a04625d4d2b35cf26f2 bytes=2335 file=xnu_arm_entry-sources.txt role=entry-source-manifest-23-files
 set=armed-storage-rca-c333d09c sha256=f15ef1860936564a27de0cebf08dddc7ddbd79147eacbfb5228f7e0bee1fed85 bytes=6051840 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
 set=armed-storage-rca-c333d09c sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-macho-UNCHANGED-since-the-press-and-regenerated-by-the-build-into-src-verbatim
+
+# ================================================================================================
+# 742: THE RUNG-19 ARM WAS PRESSED, AND IT ANSWERED IN TWO CELLS THIS LADDER HAD NEVER SEEN.
+# ================================================================================================
+# `armed-storage-rca-c333d09c` - `STAGE90_XNU_STORAGE_PROBE=18`, ordinal rung 19 - was PRESSED on
+# 2026-09-26, **EXIT 0**, 18:08:10-18:09:22 UTC, by the operator's authorization. One readiness (5 of
+# 5, exit 0, 18:07:33), exactly one `preflight_boot_check.sh --allow-xnu-entry` (exit 0, 587 lines,
+# written 18:08:07), exactly one `run_and_capture.sh --allow-xnu-entry
+# --expect-arm=armed-storage-rca-c333d09c`. `fastboot boot` only, nothing flashed, no `POWER_CONTROL
+# 0x29`, no GCC word, no `core_mem` word, no byte of the medium. The neighbour `33e80afe` was absent
+# from BOTH `fastboot devices` and `adb devices` at fire time (0 occurrences) and no stray runner, gate
+# or watcher was running. The runner's own line: the device came back 28 s after the send; the interval
+# from the gate log's mtime to the captured log's is 74 s. Capture
+# `out/stage90/captures/rung19-rca-20260926-180922-last_kmsg.txt`, 630,486 B, sha256
+# 990983a9477eb556a05fbf50e61f68f7a2625f8a8e3d3de03785e7af0a6c8944, ARCHIVED BY HAND (the runner does
+# not archive - 730 section 6). The three press logs are under the job tmp and are named here so their
+# shas are checkable: readiness (23 lines, 01b4e68b593d67655710eca11fe7a24812b93f8bece44737ad993dd3fad1175b),
+# gate (587 lines, 3a16875d40d60cbe88e496b9bf93d8aa0924c2c00e1f12c74b5f8cd6bb7599e9), combined run log
+# (1095 lines, 8f74372adc27dfd474af790e84b90f0ebacaac4c742997cfeb2242a05ae870e8). THE ARM IS SPENT.
+#
+# THE ANSWER: CMD3 WAS ACCEPTED AND STARTED, AND IT NEVER FINISHED. `_rca_word = _rca_word_read =
+# 0x031a` and `_rca_arg = _rca_arg_wrote = 0x00010000` - BOTH READ BACK OUT OF `COMMAND 0x0E` and
+# `ARGUMENT 0x08`, so the ladder's first non-zero argument and its first INDEX bit are on the bus and
+# in the block - with `_rca_op = 3`, `_rca_flags = 0x15`, `_rca_sent = 1`, `_rca_gated = 0`. AND THEN:
+# `_rca_complete = 0`, `_rca_err = 0`, `_rca_timeout = 1`, `_rca_status_any = 0` with `_rca_any_polls
+# = 0` over `_rca_polls = 0x004da400` (5,088,256 samples) and `_rca_ticks = 0x015f92d7` (23,040,727 =
+# 1.2000 s at 19,200,000 Hz). 726's sixth hypothesis - this controller completes a command and does
+# not set its interrupt-status register - measured a third time.
+#
+# AND THREE THINGS ARE NEW, WHICH IS WHY THIS PRESS CHANGED THE QUESTION:
+#  (1) `_rca_inhibit_seen = 0x400` - ALL 1024 SAMPLES - with `_rca_inhibit_last = 0x01f80001`, BIT 0
+#      STILL SET, and `_rca_ps_after = 0x01f80001` the same word read at the far end. THE FIRST
+#      OBSERVATION IN THIS LADDER OF A COMMAND STILL IN PROGRESS AT THE SAMPLING WINDOW'S END. The
+#      contrast is in the same capture: `_rb_present = 0x01f80000`, `_cmd_ps_before = 0x01f80000` and
+#      `_cmd_ps_after = 0x01f80000` - three PRESENT_STATE reads with bit 0 clear, one of them bracketing
+#      the only command that ever completed.
+#  (2) `_rca_resp_pre = 0x40ff8080` -> `_rca_resp = 0x40ff8080` -> `_rca_resp_post = 0x00000000`, so
+#      `_rca_resp_moved = 1` and `_rca_resp_is_arg = 0`: THE REGISTER MOVED, AND IT MOVED TO ZERO. An
+#      SDHCI host clears RESPONSE when it begins a response-expecting command; the response registers
+#      were CLEARED and nothing was written into them. The contrast is also in the same log - CMD2 left
+#      the register at CMD1's word (`_cid_resp0 = 0x40ff8080`), and CMD3 did not.
+#  (3) The R1 decode is a decode of THAT STALE WORD: `_rca_state = 0`, `_rca_ready = 0`,
+#      **`_rca_illegal = 1` is bit 22 of `0x40ff8080`**, which is CMD1's own OCR-shaped answer - not
+#      'the card rejected CMD3'.
+#
+# THE FOUR COMMANDS' OWN INHIBIT READINGS, SIDE BY SIDE IN ONE LOG (740 section 6's question made
+# answerable rather than asked): CMD0 (`0x0000`) `_inhibit_seen = 0x219`/537, `_inhibit_last` bit 0
+# CLEAR, `_complete = 1`, `_status_any = 1`, poll ended at `_cmd0_ticks = 0x0000132a` (4,906 ticks,
+# 0.26 ms) - the only command whose inhibit CLEARED, and the only one asking for no response at all;
+# CMD1 (`0x0102`) and CMD2 (`0x0209`) never showed inhibit at all (`_inhibit_seen = 0` both); CMD3
+# (`0x031a`) held it for the whole window. ONE CELL IS ABSENT RATHER THAN SMOOTHED OVER: `_cid_inhibit_after`
+# does not exist in this image - CMD2's body publishes the pair and not the third cell - so the table's
+# CMD2 row has a hole that is a property of the arm and not of the run.
+#
+# THE WINDOW'S CELLS AS PRE-REGISTERED: `_rca_ena_wrote = 1` (the gate's own value, not a constant),
+# `_rca_ena_held = 0x8001`, `_rca_sig_enable = 0` READ AND NEVER WRITTEN, `_rca_wrote_back = 0`,
+# `_rca_status_post = 0`, `_rca_readback = 0x8000` (the PARTIAL restore). TWO stores, both to INT_ENABLE
+# 0x34. AND THE PRESS IS ON THE ARM'S OWN RECORD-NOT-PROMISE TERM: bit 16 of `_rca_ps_after` is
+# `SDHCI_CARD_PRESENT` in this tree's vendor header
+# (external/android_kernel_xiaomi_cancro/drivers/mmc/host/sdhci.h:71) and it reads CLEAR - as it does in
+# every reading this ladder has ever taken (`_rb_present` and every `_inhibit_last` baseline carry the
+# same bits 19-24 and a clear bit 16) - so this press adds NOTHING about the card-detect line and must
+# not be read as if it did. What rung 19 added to PRESENT_STATE is BIT 0 and nothing else.
+#
+# THE RUNGS BELOW ARE INHERITED UNCHANGED: all 17 `_rb_*` cells reproduce 740, with **`_rb_resp_zero = 1`**
+# - the cell this whole rung was built on - and `_rb_int_enable = 0`; 736's four-place exclusion holds in
+# the bytes (`_cmd_int_enable = 0`, `_cmd_gate_kind = 0`, `_cmd_refused = 0`, `_cmd_sent = 2`); **there is
+# NO `_quiet_*` KEY AT ALL**, so rung 15's body (compiled for the ladder value 15 and no other) is not in
+# this image; `_cid_word = _cid_word_read = 0x00000209`, `_cid_resp0 = 0x40ff8080`, `_cmd1_resp =
+# 0x40ff8080` with `_cmd1_resp_read = 1`; 730's pair `_int_status_before = 0x00000000` ->
+# `_int_status_after = 0x00000001`; `_ena_host_version = 0x00001102`. THE PRE-REGISTERED SPI 123 -> INTID
+# 155 HAZARD DID NOT OCCUR: **there is NO `_irq_other_*` key in this capture**, on a third arm in a row.
+# THE ENDING IS UNMOVED: `_seam_lr = 0x800492dc`, `_seam_sctlr = 0x30c57879`, `_seam_sp = 0x80557ec8`,
+# `_seam_post_end_ticks = 0x06ddd000`, `_sleh_storm = 9` with episodes_seen = 9, `_slot_post_calls`
+# published 1,2,3,4 (a running counter), and the kernel's own `No errors detected` (1 occurrence).
+#
+# THE RUNNER'S CRITERION BLOCK, READ EXACTLY - AND A CORRECTION TO THE FIRST COUNT, BECAUSE THE COUNT WAS
+# WRONG: the block is **7 PASS / 1 FAIL / 2 UNREAD** in each of its two appearances. The FAIL is the known
+# storage-arm shape criterion (`seam_sp = 0x80557ec8 is not sleh_sp-8`), and the two UNREAD lines are the
+# SLOT_NULL switch (`STAGE90_XNU_SLOT_NULL=1` writes a count and no words) - an absence produced by a
+# switch in the image and not an agreement. NOTHING IN THE BLOCK IS A VERDICT ABOUT CMD3. **The block
+# appears TWICE in the run log**: once inside the gate's `== payload output ==` section, which reads THE
+# LOG THOSE INSTRUCTIONS NAME AS IT STANDS AT GATE TIME - at gate time that was the PREVIOUS run's
+# capture - and once in the runner's own `== reading the log this run captured ==` section over this
+# run's capture. The two blocks are identical except for two lines, and those two lines are what tells
+# them apart: `xnu_live_post_elapsed`/`xnu_live_post_t0` read `0x06ea65db`/`0x07c78b7a` in the first
+# (RUNG 18'S OWN VALUES, checkable in /tmp/cancro-last_kmsg.txt.prev.5) and `0x06eb64fd`/`0x0b558bf2` in
+# the second. **Counting the verdict LINES gives 14 PASS / 2 FAIL; counting the CRITERIA in the block the
+# runner produced for THIS run gives 7 PASS / 1 FAIL / 2 UNREAD.** The first form was quoted as "16 PASS /
+# 2 FAIL" at one point in this step's own notes, which is wrong twice - it double-counts the block AND
+# reads one criterion as two failures. A predicate the tool prints once per artefact it was applied to
+# must be counted PER ARTEFACT and not per line. **Recorded as m751.**
+#
+# WHAT THE NEXT RUNG IS, AND IT IS A SINGLE VARIABLE RATHER THAN A PLAN: the one command that ever
+# completed is the one that asked for NO response (CMD0, `RESP_NONE`, word `0x0000`), so the next rung is
+# THE SAME OPCODE AND THE SAME ARGUMENT WITH A FLAG WORD CARRYING NO RESPONSE DEMAND - `RESP_NONE` on
+# opcode 3, word `0x0300`, argument `0x00010000` - through the same one-bit window, publishing the same
+# triplet. If the block completes THAT, the demand for a response is what stalls it and the subject
+# becomes the response path; if it does not, the opcode or the block's own state is the subject, and the
+# census moves to `SLOT_INT_STATUS 0xFC` and `CORE_PWRCTL_STATUS 0xDC`. Either way the failure mode is a
+# diagnosis: the 1.2 s bound is inside `st_send_command` (measured four times now) and the ending is
+# unmoved. TWO THINGS MUST NOT BE READ INTO THE PRESS: this rung is a CONTROLLER question and not the
+# driver's next statement (`mmc.c` would say CMD9 SEND_CSD, and arming a further response-expecting
+# command on a block whose command line has been held for 1.2 s would stack the same unknown on itself),
+# and `_rca_ps_after`'s clear CARD_PRESENT bit is NOT evidence about a card.
+#
+# NO FIRER IS ARMED, no press is owed, and the press path is the two commands readiness prints, run by
+# hand once each.
+#
+# The goal is still NOT met: no storage, no filesystem, the OS not observed reaching userland, so
+# TWRP-to-storage stays withheld (the clause is conditioned on "if the OS can already get in").
