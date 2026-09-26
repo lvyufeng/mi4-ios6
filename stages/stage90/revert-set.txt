@@ -2260,3 +2260,44 @@ set=armed-storage-pwrwait-8b824cac sha256=ba004d563d8919d574934f22a036c720ddc56e
 set=armed-storage-pwrwait-8b824cac sha256=ff418458a9b13b6a62be3d2b0e829a9a895961e14c91b03c6e89471abc00c4d3 bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest-28-lines-in-all-23-of-them-file-lines-and-EXACTLY-THREE-of-its-lines-changed-this-step-the-entry-SHA256-field-and-the-two-files-that-changed-by-content-build_entry-sh-2478d3e9-to-2ea248de-the-ladder-9-case-and-its-widened-message-the-new-STAGE90_XNU_PWR_WAIT_TICKS-switch-and-its-three-plumbing-sites-the-two-factored-classifier-functions-classify_body-and-resolve_img_addrs-with-their-two-repairs-the-rung-8-clauses-widening-to-the-resolver-and-the-new-rung-9-clause-AND-entry_storage-c-aadf08bc-to-17ec162d-the-two-pass-PWR_WAIT_TICKS-switch-the-four-ST_REQ-constants-the-three-published-words-st_pwr_irqs-timestamp-and-vendor-tail-and-the-whole-STORAGE_PROBE-9-block-with-st_pwr_wait-and-its-probe-wiring-and-the-file-keeps-its-2348-bytes-while-the-files-that-did-NOT-move-include-entry_stubs-c-entry_gic-h-entry_storage-h-and-entry_trace-c-whose-SEAM-constant-did-NOT-move
 set=armed-storage-pwrwait-8b824cac sha256=1197918774ca1d547d25acba57368385294c9bf3c107b949480cba73798fd90a bytes=6035456 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies-its-header-id-field-at-576-595-is-sha1-kernel-len-ramdisk-0-second-0-and-it-differs-from-the-PRESSED-rung-8-arms-in-the-same-644028-bytes-the-qcdt-does-20-of-them-the-header-id-and-644004-inside-the-embedded-entry-blob-which-this-file-carries-one-2048-byte-header-page-later-at-497240-and-4-OUTSIDE-BOTH-at-275520-275521-and-275716-275736-and-the-image-is-otherwise-stage90-bin-plus-a-1532-byte-ZERO-tail-because-img-2048-equals-bin-EXACTLY
 set=armed-storage-pwrwait-8b824cac sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-same-bytes-in-every-arm-but-a-manifest-entry-nonetheless-and-BYTE-IDENTICAL-to-the-PRESSED-rung-8-park-so-THE-ONLY-TWO-FILES-THAT-DID-NOT-MOVE-ARE-THE-TWO-THAT-DESCRIBE-NOTHING-ABOUT-THE-ENTRY-IMAGE-the-fixture-and-the-payloads-own-switch-dump-and-the-identity-of-the-latter-is-what-shows-the-STAGE90_XNU_ENTRY-1-workaround-reproduced-the-pressed-arms-payload-configuration-exactly
+#
+# 713 ADDENDUM, SAME DAY, AFTER THE FIRST READINESS RUN - and the first run refused for two reasons, of
+# which ONE WAS THE READINESS TOOL ITSELF.
+#
+# (1) **A NARRATION LINE CAN PASS `bash -n` AND NEVER RUN AS WRITTEN.** The rung-9 `entry_arm` assignment
+# contained `read as "no wait"` - two BARE double quotes inside a double-quoted string. Bash does not
+# refuse that: the quote toggles, the SPACE inside the pair ends the word, and the line parses as
+# `entry_arm="<everything up to the quote>"` followed by the words `no`, `wait**`, `because`, ... - so the
+# assignment becomes an ENVIRONMENT PREFIX for a command named `no` and **the shell variable is left at its
+# previous value in silence**. `bash -n` said "SYNTAX ok". The measured symptom was
+# `tools/verify_press_ready.sh: line 700: wait** because rung 8 IS the no-wait arm ... : File name too
+# long`, and the damage was invisible in the worst way: `entry_arm` silently kept the value it already had,
+# so the arm-name row refused ("the arm named above does not quote the rung the entry record carries")
+# while the line that broke it looked fine. The repair is `\"no wait\"`; the same line's neighbour in the
+# rung-9 consequence block already used escaped quotes, so this was one line's slip and not a convention
+# gap. **The row caught it, which is the row doing its job** - the same shape as
+# [[mi4-one-value-two-definitions]] and [[mi4-silence-is-a-reading-only-if-success-is-silent]]: a failure
+# that leaves a variable UNCHANGED is indistinguishable from a success unless something downstream reads it.
+#
+# (2) **THE CROSS-LANE HALF, AND NO PRESS MAY BE ARMED FOR THIS SET UNTIL IT IS GREEN.**
+# `STAGE90_XNU_PWR_WAIT_TICKS` is the build's new arm key and the peer lane's `preflight_boot_check.sh`
+# `ENTRY_CFG_KEYS` does not carry it, so the gate's converse clause fires on the FIRST run - exactly the
+# state 678's record describes and 683/686/690/692 each resolved, one name at a time, one arm later. The
+# gate row reads: "REFUSING: out/stage90/xnu_arm_entry-config.txt carries key(s) this gate does not print:
+# STAGE90_XNU_PWR_WAIT_TICKS". The change needed is three lines in that file - the key in
+# `ENTRY_CFG_KEYS` (line 598), a comment paragraph in the 683/686/690/692 series with the two prose counts
+# moving from twelve to thirteen, and the variant-subset list in the refusal at line 609 gaining the name
+# with its count. **It was requested by message and NOT edited**: `run-experiment-526` owns that file
+# ([[mi4-file-lanes]]) and was live and waiting when the message was sent, and the request carries the
+# exact lines, the reason, what the switch is, and the explicit statement that no safety clause of that
+# gate is in scope. The 683/686/690/692 records describe the same change as having been made "under the
+# operator's standing authorisation for exactly this change"; the lane rule still puts the edit in the
+# owning lane's hands first, and this record will say which of the two paths produced it.
+#
+# **READINESS AFTER THE REPAIR: 4 of 5, AND THE ONE RED ROW IS (2).** The arm-name row is now green and
+# reports its own census - "the 56 name(s) and 2 glob(s) it writes were read against the arm's own
+# `xnu_live_` strings, and every name is a suffix of a string this image publishes" - so the rung-9
+# narration is measured against the artifact and not against itself. Row 1 (live bytes ARE the parked
+# bytes), row 2 (the park verifies against the record) and row 5 (a press would be caught: `adb` lists
+# `4a2fe00b` as `device`) are green. **The arm is armed, readable and correct; the gate is the only thing
+# standing between it and a press.**

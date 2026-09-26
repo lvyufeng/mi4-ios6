@@ -282,3 +282,50 @@ sector, no partition table, no mount**, and every `_wait_*` key is a register an
 
 **The goal is still not met.** No command, no sector, no partition table, no mount, no driver beyond
 the fixture — so **TWRP-to-storage stays withheld**.
+
+## 9. Postscript, same day: the first readiness run refused for two reasons, one of them the readiness tool
+
+The arm was parked, recorded and pushed (`0970ff3` on both `stage90-xnu-handoff` and `master`), and then
+the readiness tool was run on it. It came back **2 of 5 red**, and the two reds are different kinds of
+thing.
+
+**One was this lane's own bug, and it is a defect class worth naming.** The rung-9 `entry_arm` narration
+contains `read as "no wait"` — two **bare** double quotes inside a double-quoted string. Bash does not
+refuse that:
+
+* the quote **toggles**, so the string closes early;
+* the **space** inside the pair ends the word, so the assignment is no longer the whole line;
+* the line therefore parses as `entry_arm="<text up to the quote>"` followed by the words `no`, `wait**`,
+  `because`, … — and an assignment followed by more words is an **environment prefix for a command**, not a
+  shell assignment. The command named `no` does not exist, `bash` reports
+  `line 700: wait** because rung 8 IS the no-wait arm …: File name too long`, and **`entry_arm` is left at
+  its previous value in silence.**
+* `bash -n` said **"SYNTAX ok"** — because it is syntactically valid. A syntax check is not a semantic
+  check, and this is the sharpest instance of that this project has recorded.
+
+What caught it was the arm-name row, which refused with "the arm named above does not quote the rung the
+entry record carries" — i.e. **the row that reads the variable downstream of the break is what turned a
+silent no-op into a refusal.** The repair is `\"no wait\"`; the neighbouring rung-9 consequence block
+already used escaped quotes, so this was one line's slip and not a convention gap.
+
+**The other red is the cross-lane half, and no press may be armed for this set until it is green.**
+`STAGE90_XNU_PWR_WAIT_TICKS` is the build's new arm key, and the peer lane's `preflight_boot_check.sh`
+`ENTRY_CFG_KEYS` does not carry it, so the gate's converse clause fires on the very first run:
+*"REFUSING: `out/stage90/xnu_arm_entry-config.txt` carries key(s) this gate does not print:
+STAGE90_XNU_PWR_WAIT_TICKS"*. This is the state 678's record describes and 683/686/690/692 each resolved,
+one name at a time, one arm later. The change is three lines in that file (the key in `ENTRY_CFG_KEYS` at
+line 598; a comment paragraph in the 683/686/690/692 series with the two prose counts moving twelve →
+thirteen; the variant-subset list in the refusal at line 609 gaining the name and its count) and **it was
+requested by message, not edited**: `run-experiment-526` owns that file and was live when the message was
+sent, and the message carries the exact lines, the reason, what the switch is, and the explicit statement
+that no safety clause of that gate is in scope. The four earlier records describe the same change as made
+"under the operator's standing authorisation for exactly this change"; the lane rule still puts the edit in
+the owning lane's hands first, and this record will say which of the two paths produced it.
+
+**Readiness after the repair is 4 of 5, and the one red row is the gate's key list.** The arm-name row is
+green and reports its own census — *"the 56 name(s) and 2 glob(s) it writes were read against the arm's own
+`xnu_live_` strings, and every name is a suffix of a string this image publishes"* — so the rung-9
+narration is measured against the artifact rather than against itself. Row 1 (the live bytes **are** the
+parked bytes), row 2 (the park verifies against the record) and row 5 (a press would be caught: `adb` lists
+`4a2fe00b` as `device`) are green. **The arm is built, parked, recorded, pushed and readable; the gate's
+key list is the only thing standing between it and a press.**
