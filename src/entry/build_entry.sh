@@ -31053,7 +31053,70 @@ verify_trace_symbols() {
                 echo "  xnu_entry_732: st_cmd_enable_restore's device accesses are [$stb_ena_set] with counts [$stb_ena_cnt], its store is the single \`str\` at f9824934, and st_cmd_path calls it 1 time(s); the enable window is \`INT_ENABLE 0x34 <- SDHCI_INT_RESPONSE\` from immediately before CMD0 is put on the bus to the line after its publishes, closed on its ONE unconditional exit - a window opened because 730's press read \`_int_status_after = 0x00000001\` against \`_int_status_before = 0x00000000\` with exactly that one store between them, so \`_cmd_gated = 1\` was the masked poll's answer and not the block's"
             fi
 
-            if [[ $STORAGE_PROBE -ge 15 ]]; then
+            if [[ $STORAGE_PROBE -ge 16 ]]; then
+                # **737: THE 136-BIT RESPONSE BODY, AND ITS OWN CLAUSE FOR THE SAME REASON THE THREE
+                # ABOVE HAVE ONE.** `st_all_send_cid` is a `noinline` static, so `nm` places it before
+                # `entry_storage_probe` and neither the probe's store census nor the width-vs-offset
+                # census reads a line of it. Its widths, its two stores and its access set are asserted
+                # here or nowhere - and the widths are the new thing: this is the ladder's first body
+                # that reads a register a BYTE at a time, and a 32-bit read at one of those three
+                # offsets would return the neighbouring bytes instead of the response's low byte.
+                #
+                # **The name is asserted before the contents**, because an unreferenced static is
+                # dropped and a build without the symbol publishes every `_cid_*` cell as absent while
+                # the record claims the rung - m720's shape, with one of the three producers of an
+                # absent key guaranteed by construction.
+                stb_cid=$(sym_addr st_all_send_cid) ||
+                    layout_fail "st_all_send_cid is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE - rung 16's arm IS this body (experiment-737), and an arm at this rung without it is an arm that sends the ladder's two commands and asks nothing new. Three ways to get here: renamed, INLINED into st_cmd_path (which would put its two stores into the rung-14 window's own census, where the store set is held to two), or its call site removed, which the call-count clause below names. Nothing is rebuilt by this refusal"
+                stb_cid_size=$(sym_size st_all_send_cid) ||
+                    layout_fail "st_all_send_cid has no size in the symbol table (nm -S), so this clause's window has no end. Nothing is rebuilt by this refusal"
+                stb_cid_body=$(arm-none-eabi-objdump -d --start-address="$stb_cid" \
+                               --stop-address="$(printf '0x%x' $(( stb_cid + stb_cid_size )))" "$OUT/xnu_arm_entry.elf")
+                { read -r stb_cid_dev; read -r stb_cid_cnt; read -r stb_cid_img; read -r stb_cid_imgaddr; } < <(classify_body "$stb_cid_body" "f9824910 f9824913 f9824914 f9824917 f9824918 f982491b f982491c f9824924 f9824930 f9824934 f9824938")
+                stb_cid_set=$(printf '%s\n' $stb_cid_dev | LC_ALL=C sort | tr '\n' ' ')
+                stb_cid_set_want="f9824910:ldr f9824913:ldrb f9824914:ldr f9824917:ldrb f9824918:ldr f982491b:ldrb f982491c:ldr f9824924:ldr f9824930:ldr f9824934:ldr f9824934:str f9824938:ldr "
+                [[ "$stb_cid_set" == "$stb_cid_set_want" ]] ||
+                    layout_fail "st_all_send_cid's device accesses are [$stb_cid_set] (sorted) and rung 16's record says exactly [$stb_cid_set_want] - the ONE-bit enable at \`INT_ENABLE 0x34\` and its restore, \`SIGNAL_ENABLE 0x38\` READ AND NEVER WRITTEN, \`INT_STATUS 0x30\` read once after the restore, \`PRESENT_STATE 0x24\` read once at the end, the four RESPONSE 0x10 words at 0x10/0x14/0x18/0x1c, and the three BYTE reads the driver's 136-bit branch takes at 0x13/0x17/0x1b. **An \`f9824938:str\` here is the one store that must never exist at any rung** (the line rises on the conjunction of the two enables, and this block's SPI 123 is a line nobody owns); an \`f9824930:str\` would be a write-1-to-clear into the status register this body reads; and a 32-bit \`ldr\` reading where the driver reads a byte is the width error this rung's whole new surface is about. Nothing is rebuilt by this refusal"
+                stb_cid_cnt_want="f9824910:ldr=1 f9824913:ldrb=1 f9824914:ldr=1 f9824917:ldrb=1 f9824918:ldr=1 f982491b:ldrb=1 f982491c:ldr=1 f9824924:ldr=1 f9824930:ldr=1 f9824934:ldr=2 f9824934:str=2 f9824938:ldr=1 "
+                stb_cid_cnt=$(printf '%s\n' $stb_cid_cnt | LC_ALL=C sort | tr '\n' ' ')
+                [[ "$stb_cid_cnt" == "$stb_cid_cnt_want" ]] ||
+                    layout_fail "st_all_send_cid's device access COUNTS are [$stb_cid_cnt] and rung 16's record says exactly [$stb_cid_cnt_want] - ONE store opens the window and ONE closes it (\`f9824934:str=2\`), each read back (\`f9824934:ldr=2\`, \`_cid_ena_held\` and \`_cid_readback\`), and every other address exactly once. A count of 1 store is a body that sets the enable and never writes it back - the arm's own safety clause absent while every cell it publishes still reads; a count of 3 is a store the record does not name; and a missing \`ldrb\` is the driver's 136-bit read replaced by the 32-bit one it exists to differ from. Nothing is rebuilt by this refusal"
+                stb_cid_stores=$(printf '%s\n' $stb_cid_dev | grep -v ':ldr' | tr '\n' ' ')
+                [[ "$stb_cid_stores" == "f9824934:str " ]] ||
+                    layout_fail "st_all_send_cid's device STORES are [$stb_cid_stores] and rung 16's record says that set is exactly [f9824934:str] - **the only writable register in this body is \`INT_ENABLE 0x34\`**, the same one rungs 13, 14 and 15 write and the only register this image has ever stored to in \`hc_mem\` outside the driver's own command path. \`SIGNAL_ENABLE 0x38\` written here is the act that can raise intid 155, and a store anywhere else is a register this rung does not name. The count clause above fixes HOW MANY (two, at this one address); this one fixes WHERE. **The ORDER and the VALUES of the two are not asserted here**: \`classify_body\` reports a body's accesses as a set with counts, so two accesses at one address are one entry in both lists. What carries them is the arm's own cells - \`_cid_ena_wrote\`, \`_cid_wrote_back\`, \`_cid_ena_held\`, \`_cid_readback\`. Nothing is rebuilt by this refusal"
+                [[ "${stb_cid_dev% }" == "f9824934:str f9824934:ldr f9824938:ldr f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f982491b:ldrb f9824917:ldrb f9824913:ldrb f9824930:ldr f9824924:ldr" ]] ||
+                    layout_fail "st_all_send_cid's device accesses IN PROGRAM ORDER, distinct, are [$stb_cid_dev] and rung 16's record says [f9824934:str f9824934:ldr f9824938:ldr f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f982491b:ldrb f9824917:ldrb f9824913:ldrb f9824930:ldr f9824924:ldr] - **the window's store is FIRST, before the command**, because a window opened after CMD2 is 732's first build and 733's press: the poll that has to see the completion runs inside the command, and an enable written after it measures a masked block. Then the enable read back, the signal enable, and the driver's own four words in its own order - word 3 first, descending - each followed by its byte, then the restore and the two readings after it. **This is the half neither the sorted set nor the counts can carry**, and it is the one that makes this rung a 136-bit read rather than a 32-bit one taken four times. Nothing is rebuilt by this refusal"
+                [[ -z "${stb_cid_img// /}" ]] ||
+                    layout_fail "st_all_send_cid's non-device memory accesses are [$stb_cid_img] at [$stb_cid_imgaddr] and rung 16's record says that set is EMPTY - the body holds a \`struct st_cmd_result\` and four words on its own stack, both reached through \`sp\` and therefore invisible to the classifier, and publishes through \`entry_live_write\` (a call, with a .rodata string). A symbol here is either one this rung never declared or an access the classifier could not resolve. Nothing is rebuilt by this refusal"
+                stb_cid_calls=$(grep -c -- 'bl.*<st_all_send_cid>' <<<"$stb_path_body")
+                [[ "$stb_cid_calls" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $stb_cid_calls call(s) to st_all_send_cid and rung 16 makes exactly one. Zero is the whole arm absent - every \`_cid_*\` cell absent with it, and \`_cid_gated\` too, since the gate and the body are one branch; two or more means CMD2 is issued twice and both are published under one name. This is the clause m720 is about: an absent key's three producers must be named before its absence is read. Nothing is rebuilt by this refusal"
+                stb_cid_ln=$(awk '/bl.*<st_all_send_cid>/{ printf "%d ", NR }' <<<"$stb_path_body")
+                stb_cid_last=$(awk '/bl.*<st_send_command>/{ printf "%d ", NR }' <<<"$stb_path_body")
+                stb_cid_cmd_ln=${stb_cid_last% }
+                stb_cid_cmd_ln=${stb_cid_cmd_ln##* }
+                [[ -n "$stb_cid_ln" && -n "$stb_cid_cmd_ln" ]] ||
+                    layout_fail "the call lines could not be read out of st_cmd_path's disassembly ([$stb_cid_ln] for st_all_send_cid, [$stb_cid_last] for st_send_command), so the ORDER of CMD2 and the two commands below it is not readable here. This refusal is about the SCAN and not about the arm: an unreadable disassembly is not an arm in the wrong order, and the call-count clauses above are the ones that refuse an arm. Nothing is rebuilt by this refusal"
+                (( ${stb_cid_ln% } > ${stb_cid_cmd_ln} )) ||
+                    layout_fail "st_cmd_path calls st_all_send_cid on disassembly line ${stb_cid_ln% } and its last st_send_command on line $stb_cid_cmd_ln: CMD2 must come AFTER both commands and after the between-commands gate. **This is the whole rung.** A body placed above the gate is 732's first build and 736's press - it re-measures the rung below while publishing this rung's names - and a body placed between the two commands would put CMD2 on a bus whose CMD1 has not been answered. Nothing is rebuilt by this refusal"
+                #
+                # **AND THE RUNG BELOW IS EXCLUDED, WHICH IS A REFUSAL AND NOT A SENTENCE.** Rung 15's
+                # `st_quiet_enable_probe` writes `0x34` BEFORE the gate, and 736 pressed the consequence:
+                # bit 15 rides along with any write to that register and no write clears it, so the gate
+                # read `0x00008000` and refused the whole command path (`_cmd_gate_kind = 2`,
+                # `_cmd_sent = 0`). If a later edit put that body back into this build, the rung-15 clause
+                # above would SKIP ITSELF (it is `-eq 15`) and this arm would spend a press with every
+                # `_cid_*` key absent by construction. So the absence is asserted here, on the symbol and
+                # on the call site, in both directions.
+                if sym_addr st_quiet_enable_probe >/dev/null; then
+                    layout_fail "st_quiet_enable_probe is IN THE LINKED IMAGE while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE, and rung 16 is the arm that must not carry it: its store leaves bit 15 set in \`INT_ENABLE 0x34\`, which refuses \`st_cmd_path\`'s gate (736's press measured it) and would make every \`_cid_*\` cell absent by construction. The body is guarded \`== 15\` in \`src/entry/entry_storage.c\`; a \`>= 15\` there is this refusal. Nothing is rebuilt by this refusal"
+                fi
+                [[ "$(grep -c -- 'bl.*<st_quiet_enable_probe>' <<<"$stb_body")" == "0" ]] ||
+                    layout_fail "entry_storage_probe calls st_quiet_enable_probe while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE - rung 15's store above rung 16's gate, which is the shape 736 spent a press on. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_737: st_all_send_cid's device accesses are [$stb_cid_set] with counts [$stb_cid_cnt], its stores in program order [$stb_cid_stores] and an EMPTY image side; st_cmd_path calls it once, on disassembly line ${stb_cid_ln% }, AFTER its last st_send_command on line $stb_cid_cmd_ln, so CMD2 is on the bus only once CMD0 completed and CMD1 answered with the card out of reset: the ONE-bit enable is opened for CMD2 alone, INT_ENABLE 0x34 read and written back, SIGNAL_ENABLE 0x38 read and NEVER written, and the ladder's first 136-bit response read the driver's own way - four 32-bit words and three bytes at 0x13/0x17/0x1b. And st_quiet_enable_probe is absent from this image and from this call site, which is 736's measurement made structural"
+            fi
+            # **AND THE GUARD IS `-eq 15` RATHER THAN `-ge 15`, WHICH IS 736'S MEASUREMENT AND NOT A TIDY-UP.** The body this clause is about is compiled for the VALUE 15 and no other, because what it leaves in `INT_ENABLE 0x34` refuses `st_cmd_path`'s gate on every rung above it - 736 pressed that consequence and read `_cmd_gate_kind = 2` with `_cmd_sent = 0`. A clause guarded `-ge 15` would therefore demand the symbol at rung 16, where the source does not have it, and refuse a correct arm. The exclusion and this guard are two spellings of one fact, and the ladder clause in `src/entry/entry_storage.c` states it a third time beside the value's own name.
+            if [[ $STORAGE_PROBE -eq 15 ]]; then
                 # **734: THE QUIET-BLOCK BODY, AND IT IS A CLAUSE OF ITS OWN FOR THE SAME REASON THE TWO
                 # ABOVE ARE.** `st_quiet_enable_probe` is a `noinline` static, so `nm` places it BEFORE
                 # `entry_storage_probe` and NEITHER the probe's store census nor the width-vs-offset

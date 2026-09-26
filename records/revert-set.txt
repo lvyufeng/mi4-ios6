@@ -3507,3 +3507,100 @@ set=armed-storage-quiet-c9738417 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273
 # sleh_sp-8`, a seam-arm check a storage arm cannot satisfy - 694, 697, 705 and rung 12 all carry it).
 # The log's ending is the same shape as 730's and 733's: the kernel's own `No errors detected`, the device
 # back on Android on its own.
+set=armed-storage-cid-dc8d7002 sha256=63a4dfe7136d8f530d1f76a6a533725ca21b5932623618451f5d0e5035e27da6 bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-16-entry-rung-17-with-CMD2-st_all_send_cid-and-the-FIRST-136-BIT-RESPONSE
+set=armed-storage-cid-dc8d7002 sha256=3051a2fb1164dd3158a4a9164c4933e958efb03fa5ffa08cbd7268c0d355f819 bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-16-entry
+set=armed-storage-cid-dc8d7002 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-pressed-arm-BY-MEASUREMENT-6c2b6038-so-no-payload-switch-moved-and-the-owed-config-comparison-of-the-732-block-holds-for-this-arm-too
+set=armed-storage-cid-dc8d7002 sha256=08e944f1208e8131f2bb55a60a1b457fc26fa30c78b2464785527b2886707d49 bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-cid-dc8d7002 sha256=e3715ace5f576ff045659e3200ade5d23459dd659073bd05edef13befe344aa4 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-cid-dc8d7002 sha256=dc8d7002596d4d035b4a4861084987d649ccd8f5db73ef88a801bc935b9f47ed bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-this-is-the-STORAGE_PROBE-16-entry-the-8-hex-of-this-hash-is-the-sets-name-and-its-SIZE-IS-BYTE-IDENTICAL-to-the-pressed-arm-5552764-so-the-SEAM-CONSTANT-DID-NOT-MOVE-and-this-is-the-first-arm-of-this-ladder-that-does-NOT-carry-rung-15s-st_quiet_enable_probe
+set=armed-storage-cid-dc8d7002 sha256=7b16b4a5d3832cf9753d1b58a0cab78ebd93dd787eee905c686ffabe13e4dc76 bytes=6732208 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-cid-dc8d7002 sha256=c4a2387e1c3980c6752bcb49cce30fa1f16e80a4df0407fb5bf76d8cb2bd79bf bytes=900 file=xnu_arm_entry-config.txt role=entry-config-record-its-rung-line-reads-STAGE90_XNU_STORAGE_PROBE=16
+set=armed-storage-cid-dc8d7002 sha256=332ff0d8e06916a0ffffdd6fc197792f2055e9b5df6a8487ab9d91fd3d5a1b05 bytes=2335 file=xnu_arm_entry-sources.txt role=entry-source-manifest-23-files
+set=armed-storage-cid-dc8d7002 sha256=65b6fab4bca88a81a14fc7c511b03a26b8121d389bd04bc9e126174e911909ac bytes=6051840 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
+set=armed-storage-cid-dc8d7002 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-macho-UNCHANGED-since-the-press-and-regenerated-by-the-build-into-src-verbatim
+# 737: THE ARM THIS SET IS - rung 17 by the ordinal every commit subject counts, `STAGE90_XNU_STORAGE_PROBE=16`
+# in the ladder's own spelling - `armed-storage-cid-dc8d7002`, ARMED AND NOT PRESSED. It is 732's arm's whole
+# act plus `mmc_all_send_cid`'s CMD2, the ladder's first command with a 136-BIT RESPONSE, and its gate is the
+# DRIVER'S own condition read off CMD1's RESPONSE (`c1.sent != 0 && (c1.resp & MMC_CARD_BUSY) == 0`) rather
+# than off a status bit, because 733's press measured `_cmd1_complete = 0` with `_cmd1_resp = 0x40ff8080`.
+# **AND THE FINDING THAT SHAPES IT IS 736's COST, WHICH IS THIS RUNG'S CONSTRAINT**: the first build of this
+# arm compiled rung 15's `st_quiet_enable_probe` in (its guard was `>= 15`, cumulative like every rung below
+# it), that body writes `INT_ENABLE 0x34` BEFORE `st_cmd_path` runs, a write to that register leaves bit 15
+# set with no write to clear it, and the gate would therefore have read `0x00008000` and REFUSED THE WHOLE
+# COMMAND PATH exactly as it did on 736's press - `_cmd_sent = 0`, `c1.sent = 0`, this rung's own gate
+# refusing for reason 1, and EVERY `_cid_*` CELL ABSENT BY CONSTRUCTION while a press was spent. That is
+# m720's shape (an absent key one of whose producers is guaranteed). The repair is an exclusion written in
+# FOUR places: the body's own `#if` is `== 15`, its call site's is `== 15`, the ladder's `#error` clause
+# spells value 16 as "15 with 15's own body left out", and `build_entry.sh` guards the rung-15 clause
+# `-eq 15` while the rung-16 clause REFUSES the symbol's presence and the call site's presence. No rung above
+# 15 needs 15's answer: `_quiet_status_after = 0` was read on 736's press and (A) is refuted in the record.
+# #
+# # THE BUILD CLAUSE, AND IT IS THE ONLY PLACE THIS BODY IS CLASSIFIED. `st_all_send_cid` is a `noinline`
+# static, so `nm` places it before `entry_storage_probe` and neither the probe's store census nor the
+# width-vs-offset census reads a line of it. `xnu_entry_737` holds it to: TWELVE device accesses and no more
+# (`f9824934:str=2` - the window's open and its restore, each read back - `f9824934:ldr=2`, `f9824938:ldr`
+# for SIGNAL_ENABLE READ AND NEVER WRITTEN, `f9824930:ldr` for INT_STATUS after the restore, `f9824924:ldr`
+# for PRESENT_STATE at the end, the four words at 1c/18/14/10, and the three BYTE reads at 1b/17/13 that only
+# this rung takes), the store set `f9824934:str` alone, the program-order list (the store FIRST, before the
+# command, then the enable read back, then the signal enable, then the four words descending each followed by
+# its byte, then the restore), an EMPTY image side, EXACTLY ONE call site, **that call ordered after
+# `st_cmd_path`'s LAST `bl <st_send_command>`** (the clause that refuses the arm placed above the gate), and
+# in the other direction the ABSENCE of `st_quiet_enable_probe` from the image and from the probe's calls.
+# SIX FALSIFICATIONS, each measured on a real build: rung 15's body put back -> FAIL naming the symbol; a
+# byte read made 32-bit -> FAIL naming the set (it loses `f982491b:ldrb`); the call MOVED ABOVE THE GATE ->
+# FAIL naming lines 322 and 336; the restore deleted -> FAIL naming `f9824934:str=1`; the body renamed ->
+# FAIL naming the missing symbol; the call duplicated -> FAIL naming 2 calls. Nothing is rebuilt by any
+# refusal, and the clean build passes every one.
+# #
+# # AND THE THREE WORDS THIS LADDER PUTS ON `SDHCI_COMMAND 0x0E` ARE NOW ASSERTED AT COMPILE TIME, because
+# until this rung nothing checked them: the build's `st_send_command` clause asserts that body's ACCESSES and
+# never the VALUE it stores, so swapping the 136-bit and busy arms would have put `0x020b` on the bus with
+# every set, count and cell still reading the way the record says. The decode is one macro used twice - by
+# the body and by `_Static_assert` - and the three words are `0x0000` (CMD0), `0x0102` (CMD1, which four
+# archived logs read back out of the block) and `0x0209` (CMD2: opcode 2, RESP_LONG 0x01 | CRC 0x08, no
+# INDEX). A comment in the source claimed those two were "asserted by the build clause" and that was FALSE -
+# m742's shape; the assertion now exists.
+# #
+# # A NARRATION DEFECT FOUND ON THE WAY, AND IT WAS 736's OWN EDIT. The 736 addendum inside the rung-14
+# paragraph of `tools/verify_press_ready.sh` was written with FIVE UNESCAPED BACKTICKS inside a double-quoted
+# string, so five key names were executed as command substitutions and the press-time print read
+# `line 829: _cmd_gate_kind: command not found` with the names missing from the sentence - m730 exactly,
+# reintroduced by the step that wrote a sentence about a refusal. Escaped (70 pairs), and row 4 now REFUSES
+# an unescaped backtick on any line that BUILDS the narration, naming the lines; falsified with a pair
+# unescaped on two lines -> FAIL naming [786 832], while a SINGLE unescaped backtick is loud anyway (the file
+# stops parsing). Single-quoted extractor patterns are exempt on purpose, or the check would refuse itself.
+# #
+# # THE SAFETY CONTRACT, and it is the same one rung 14 has with the stores moved below the gate: TWO stores,
+# both to `INT_ENABLE 0x34`, both inside `st_cmd_path`'s own body and BELOW the gate that reads the register;
+# `SIGNAL_ENABLE 0x38` READ AND NEVER WRITTEN at any rung (the conjunction of the two is what raises this
+# block's SPI 123 -> intid 155, a line nobody here owns); CMD2 is a `bcr` with a 136-bit response and NO DATA
+# PHASE, so no `BLOCK_SIZE`/`BLOCK_COUNT`/`TRANSFER_MODE`/`BUFFER`, no `POWER_CONTROL 0x29`, no GCC word, no
+# `core_mem` word, and NO BYTE OF THE MEDIUM CAN CHANGE. The payload's own switch set is byte-identical to
+# the pressed arm's (`6c2b6038...`, measured), so no payload switch moved. The failure mode is a diagnosis:
+# the command bound is inside `st_send_command`, the run's ending is unchanged from 730/733/736, and a
+# `_cid_gated = 1` is a complete answer published WITH its reason rather than a set of keys that are absent.
+# #
+# # THE BUILDS WERE RUN AND THIS IS THE DISCLOSURE: the entry image three times (the first for the
+# measurement, then after the word-assertion refactor, then once for reproducibility - all three of the
+# FINAL source gave `dc8d7002...` byte-for-byte, measured with `cmp`) and the payload once. The pressed arm
+# was parked and exported first. `./scripts/build.sh` does not reproduce the payload (408), so this is not a
+# routine step. Measurements: the entry image is 5,552,764 B - THE SAME SIZE as the pressed arm's - with
+# `.text` 5,331,560 -> 5,332,264 (+704 = `st_all_send_cid` 668 + `st_send_command` +36 + `st_cmd_path` +104
+# - `entry_storage_probe` 16 - `st_quiet_enable_probe` 220), `st_all_send_cid` at 0x8000db38 size 0x29c, its
+# call line 472 against the last `bl <st_send_command>` at 315, and **THE SEAM CONSTANT DID NOT MOVE**: the
+# `bl <__wrap_FlushPoU_Dcache>` is still at 0x800492d8 returning to 0x800492dc, read out of the LIVE ELF.
+# One reading worth keeping: the word-assertion refactor moved `st_send_command` by exactly 4 bytes and
+# every symbol after it with it, and the access sets the rung-11 clause asserts are unchanged - so the
+# refactor is a codegen change and not a behaviour change, and the arm was named from the final build.
+# #
+# # THE ARM IS ARMED AND NOT PRESSED, and nothing is owed. Readiness 5 of 5 (flags `--allow-xnu-entry`,
+# `--expect-arm=armed-storage-cid-dc8d7002`), the park and the export VERIFIED (11 files, 6 manifest
+# members), `tools/check_set_name_rule.sh` exit 0 (26 sets, 25 hash-named), `tools/rehearse_revert_set.sh`
+# 38 ok / 0 failed, `make check` exit 0, and the gate itself exit 0 under `--allow-xnu-entry` - which is the
+# reading that says the tree in front of the gate is the tree the image was built from, because the entry
+# sources are verified BY CONTENT. **THE PRESS IS THE OPERATOR'S**, and the paths are `scripts/`:
+#   sudo -n adb devices   # 4a2fe00b; the neighbour 33e80afe must be ABSENT
+#   ./scripts/preflight_boot_check.sh --allow-xnu-entry
+#   ./scripts/run_and_capture.sh --allow-xnu-entry --expect-arm=armed-storage-cid-dc8d7002
+# The goal is still NOT met: no storage, no filesystem, the OS not observed reaching userland, so
+# TWRP-to-storage stays withheld (the clause is conditioned on "if the OS can already get in").
