@@ -4402,3 +4402,62 @@ set=armed-storage-b7e5a18f sha256=22f97a69de9b0652de5b25e01c96c7bb8b92c78ca3f90e
 set=armed-storage-b7e5a18f sha256=39e201d60763b1b35ac3a8bec6961f10c69b42f5a220315effc409e07f906f2f bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-23-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match
 set=armed-storage-b7e5a18f sha256=94c9422ce088563f319cd26073d76bf598bc68ebe89d4b3fbbd7f7c257f5675b bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
 set=armed-storage-b7e5a18f sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+
+# ================================================================================================
+# 744: THE OWED BUILD-CONFIG CHECK IS CLOSED, AND IT IS A PROPERTY RATHER THAN THE `cmp` THIS RECORD ASKED FOR.
+# ================================================================================================
+# `tools/check_payload_config_entry.sh`, run from `make check`, refuses when the payload switch record in
+# `out/stage90/` does not carry the XNU-entry switch the way this record's arms do. The debt was opened by
+# 732 and repeated by 739, 741 and 743 - four steps that each ended with the same sentence: *a one-line
+# `cmp` of a fresh payload's config against the arm's own record line in `make check` is OWED.*
+#
+# **THE `cmp` THIS RECORD ASKED FOR COULD NOT HAVE FIRED, AND THAT IS WHY THE CHECK IS A PROPERTY.** The
+# mistake happens *before* the new arm is recorded - the payload is built, and the switch is wrong in that
+# build - so at the moment the check is needed there is no record line for the new arm to compare against.
+# The case this record actually documents is 741's: the first payload build was made without
+# `-DSTAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1'`, it was caught by `cmp` **against the parked PREDECESSOR
+# arm**, and the arm's own line was written afterwards from the good build. So the four steps were asking
+# for an instrument that is silent exactly when it is needed. What is checked instead is a property: the
+# live config's own VALUE must be the value this record's arms carry.
+#
+# **WHY NO HASH IN THIS TREE COULD SEE IT, WHICH IS THE WHOLE POINT.** 741's own account, above: *"that
+# payload's own record said `#define STAGE90_XNU_ENTRY 0u`, its embedded blob was the right entry image, and
+# every hash it takes part in matched."* Both builds are internally consistent - the manifest, `SHA256SUMS`,
+# the entry blob, the gate's content check - so the config file is the ONLY record of which switches the
+# build was given, and it is written by the build it is about. That is
+# [[mi4-one-value-two-definitions]] in its purest form, and it is why the check reads the VALUE and not a
+# digest of the file.
+#
+# **WHAT IT CHECKS.** (1) the live config exists and is non-empty, else exit 2 - a check that could not read
+# its subject has not passed; (2) it names `STAGE90_XNU_ENTRY` EXACTLY ONCE, else exit 1 - an absent key and
+# a doubled key are the two ways a value stops being readable (m720), and a `sed` over a file that names it
+# twice prints both into one variable silently; (3) its value equals the value EVERY parked arm carries,
+# else exit 1 - **derived from the 29 parks on disk and not asserted as a constant**, because a `1` written
+# into the tool would be a value nothing in this record could contradict (m719); (4) at least one park is
+# readable, else exit 2 - **zero parks is not unanimity**, which is the shape that would let this pass on a
+# tree with no arms at all. A park whose config does not name the key once is SKIPPED AND COUNTED and the
+# count is printed in both the pass and the refusal line, this record's treatment of a frozen oddity
+# (`tools/check_set_name_rule.sh` names `frozen-574` as a label and does not refuse it).
+#
+# **IT IS DERIVED, AND THE DERIVATION IS UNANIMOUS TODAY, MEASURED**: all 29 parks under
+# `out/stage90/frozen/` carry `STAGE90_XNU_ENTRY 1`. 28 of them carry the SAME payload config
+# (`6c2b6038...`); the one that differs is `armed-selftest-wdog-ef0361a2` (`7d54be1e...`), and the
+# difference is one line - `STAGE90_HW_WATCHDOG_SELFTEST 1` against `0u`. So **a check asserting all
+# configs equal would have refused a correct arm**, and the unanimity this one rests on is on the ONE key
+# whose default the build leaves off.
+#
+# **FALSIFIED IN NINE CELLS BEFORE IT SHIPPED**, all against scratch trees named by the tool's own first
+# argument so nothing under `out/` was touched: live `0u` against parks on `1` -> exit 1, naming both values
+# and printing the rebuild command; parks disagreeing (`1` and `0u`) -> exit 1, *"an ambiguous baseline is
+# not a baseline"*; the key absent from the live config -> exit 1, "0 time(s)"; the key doubled -> exit 1,
+# "2 time(s)"; no parks -> exit 2; the live config absent -> exit 2; only malformed parks -> exit 2; a
+# malformed park beside a good one -> **skipped, named, exit 0**; and the honest case -> exit 0 with what it
+# read printed. `make check` is exit 0 with it in the list, and the live tree's own reading is
+# `STAGE90_XNU_ENTRY 1` against 29 parks.
+#
+# **AND IT IS NOT THE ONLY NET, WHICH IS SAID HERE SO IT IS NOT MISTAKEN FOR ONE.** The gate's own clause
+# (`preflight_boot_check.sh:1699-1719`, readiness row 3) refuses `--allow-xnu-entry` against an image built
+# with the switch off, and that net works - it is a READINESS net, so it fires only when someone chooses to
+# run readiness. This one fires on every `make check`, which is every step. Neither of them makes the
+# mistake impossible: `./scripts/build.sh` still defaults `STAGE90_XNU_ENTRY` to `0u`, and the durable fix
+# for that is the build's own default and not a check on its output.
