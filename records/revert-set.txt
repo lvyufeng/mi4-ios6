@@ -3171,3 +3171,118 @@ set=armed-storage-completion-6f49e880 sha256=52bc9c357068b791f777bb9abd2e879fa5b
 # set is still the 18 keys recorded above, the ending is still 730's, and the goal is still not met -
 # XNU is not normally loaded, the OS has not been entered, and 「如果os已经能进去了的话」 is not
 # triggered, so **TWRP-to-storage stays withheld**.
+
+# ---------------------------------------------------------------------------------------------------
+# 732: THE ARM THIS SET IS - rung 15 by the ordinal every commit subject counts, `STAGE90_XNU_STORAGE_PROBE=14`
+# by the value this ladder counts - AND THE FIRST BUILD OF IT WAS REFUTED WITHOUT A PRESS.
+#
+# **Two spellings of one number, and this record states both because they differ by one.** The ladder in
+# `src/entry/entry_storage.c` counts a rung by the VALUE of `STAGE90_XNU_STORAGE_PROBE` ("14 = 13 plus ...",
+# so `STAGE90_XNU_STORAGE_PROBE=13` is the arm 730 pressed); the commit subjects and the pre-registrations
+# count ORDINAL ARMS and call that same arm rung 14, so this one is **rung 15**. They part company at value
+# 9, which has two arms in the ladder (the second is the same wait with the mask off). A reader holding both
+# numbers holds one arm, and the 731 block above uses the same pair of spellings.
+#
+# **The arm, in one sentence**: the pressed arm's two commands, gates, census and bodies, with the ONE
+# hardware fact they were missing - `INT_ENABLE 0x34` carrying `SDHCI_INT_RESPONSE` (0x00000001) **from
+# immediately before CMD0 is put on the bus to the line immediately after CMD0's publishes**, and
+# `SIGNAL_ENABLE 0x38` still ZERO, which is the one thing 730's press measured is safe. 730's own answer is
+# why: `_int_status_after = 0x00000001` against `_int_status_before = 0x00000000` with one store between
+# them, so the masked poll that produced `_cmd_gated = 1` was reading a status register whose enable nothing
+# in this image had ever set while a command was in flight. The cell that says the rung worked is
+# **`_cmd_gated = 0` with `_cmd1_*` keys present** - the first command this line drives to a completion and
+# the first CMD1 it ever issues - and the cell beside it, new in this arm, is **`_cmd0_complete = 1`**.
+#
+# **THE FIRST BUILD OF THIS ARM SHIPPED AS `armed-storage-enable-306ecedb` AND ITS WINDOW STOOD AFTER CMD0
+# INSTEAD OF BEFORE IT. IT WAS REFUTED BY 730'S OWN LOG, WITH NO DEVICE ACTION.** `st_send_command`'s
+# completion poll is INSIDE CMD0 and it reads `INT_STATUS`; with the window opened below the command that
+# poll ran masked, so `c0.complete` stayed 0, the between-commands gate (`if (c0.sent == 0 || c0.complete == 0
+# || c0.err != 0)`) would have refused, CMD1 would never have been sent, and **the arm's own promised cell
+# `_cmd_gated = 0` was absent by construction** while every other cell it published read plausibly. That is
+# m720's shape (an absent key one of whose producers is guaranteed), and it is the class this step's record
+# names: the pre-registration promised a cell the build could not produce, and the only thing that could
+# refuse it was the ORDER of three instructions. **So the build now asserts the order**: it splits
+# `st_cmd_path`'s disassembly at its first `bl <st_send_command>` and classifies each half with the same
+# `classify_body` the set clauses use - before the first command the enable's `str` must be there counted
+# once, after it the body's own device accesses must be `PRESENT_STATE 0x24` alone, and the restore's call
+# must fall between the two calls. The split is by disassembly line and not by offset pattern, because GCC
+# materializes the block as `movw/movt 0xf9824000` and reaches the register as `[r4, #2356]` - a fact about
+# the compiler, not about the arm - and the clause's first draft matched `#52`, found zero, and died
+# SILENTLY under `set -e` because `grep -c` in an assignment exits 1 on no match.
+#
+# **THE WINDOW'S SHAPE IS NOW ONE ENTRANCE AND ONE EXIT, BOTH UNCONDITIONAL**, and that is a safety
+# property rather than a simplification: the closing call is on the single line after CMD0's publishes and
+# every branch of `st_cmd_path` (the census's refusal and the register half of the gate above the window,
+# the between-commands gate below it) stands outside it. The first build's two-exit shape - the gate's early
+# `return` and the end of the body - described a window that could not be entered.
+#
+# **THE PREDICTED CELLS ARE READ OFF 730'S OWN LOG RATHER THAN OFF THE FIRST BUILD'S CELL TABLE, AND TWO OF
+# THEM CHANGE**: 730 measured its own readback as `_int_enable_held = 0x00008001` for a store of 0x00000001
+# and `_int_enable_readback = 0x00008000` for a store of 0x00000000, so **`_ena_held` is expected 0x00008001
+# and `_ena_readback` 0x00008000, not 0x1 and 0x0** - bit 15 (`SDHCI_INT_ERROR`) is set by a write to 0x34
+# and is not cleared by one, so this rung's restore is a restore of BIT 0 and its own cell says so.
+# `_ena_status_pre` is read here with no command in flight and is expected **0** (730's same read, taken
+# after a command had completed and been cleared, was 1 - so the pair says whether the RESPONSE bit is
+# latched BY the completion or held by the block), and `_cmd0_status_any`/`_cmd0_any_polls` are the cells
+# that say WHEN it appeared: `_any_polls` = 1 is a bit already visible at the poll's first sample, a small
+# value above 1 is a block that latched it while the poll ran.
+#
+# **The set's identity is its own argument.** The entry bin is 5,552,764 bytes - BYTE-IDENTICAL in size to
+# the pressed arm and to this arm's first build - so the seam constant did not move (`0x800492dc`, checked
+# against the live payload by `tools/verify_press_ready.sh`), and the three sets are told apart by HASHING
+# and by nothing else: `armed-storage-completion-6f49e880` (pressed), `armed-storage-enable-306ecedb`
+# (superseded before any press; its park is kept outside `out/` and its lines are NOT in this record), the
+# ladder payload this step built once by omission (`fca2d467`, also outside `out/`), and this one. `stage90-build-config.txt` is byte-identical to the pressed arm's, because the payload's own
+# flags did not change and only the embedded entry image did.
+#
+# **AND THE PAYLOAD'S OWN SWITCH SET WAS BUILT WRONG ONCE, BY THE SAME KIND OF SILENCE, BEFORE THIS SET
+# EXISTED.** `./scripts/build.sh` takes its variant switches from `STAGE90_EXTRA_CFLAGS`, and its default is
+# `STAGE90_XNU_ENTRY=0u` - a LADDER payload, which never jumps into XNU. The pressed arm and this arm were
+# both built with `STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1'`, and the first payload build of this step
+# was run WITHOUT it, so it produced a 683-byte config reading `STAGE90_XNU_ENTRY 0u` instead of this arm's
+# 682-byte `1` - a different experiment, one `fastboot boot` away, and **nothing refused it**: the entry
+# image was identical, the gate accepted the tree under its derived flags (none, because the flag is only
+# required for an XNU-entry payload), and the record's own role line for the config claimed byte-identity
+# with the pressed arm while the bytes said otherwise. **The only cell that carries it is the one line of
+# `stage90-build-config.txt` that differs, and the only reason it was caught is that the claim was written
+# down and then measured.** The rule this leaves: **a step that changes ONE thing must give every build the
+# previous arm's own switch set, read out of the record, and then COMPARE the config it produces with the
+# record's** - which is what was done for the entry image's eighteen keys and is what was not done for the
+# payload. The superseded ladder payload is parked at
+# `/mnt/data/mi4-ios6-export/postrestructure-parks/superseded-ladder-payload-fca2d467-not-pressed/` and its
+# lines are not in this record. OWED: make that comparison a check rather than a habit - `tools/` already
+# derives the gate's flag set from this file, so the same file can answer "is the payload the one the
+# record's last pressed set used".
+#
+# **THE SET'S NAME IS ITS ENTRY IMAGE'S HASH, AND THE FIRST DRAFT GOT THAT WRONG.** A set name's eight
+# hex characters are `xnu_arm_entry.bin`'s sha256 prefix, because the storage ladder is a change to the
+# ENTRY IMAGE and not to the payload. Measured over this whole record: 16 of the 16 `armed-storage-*`
+# sets that predate this one have their suffix equal to their own entry bin's prefix, and the one
+# pre-ladder arm whose name is not entry-bin derived (`armed-selftest-wdog-ef0361a2`) takes its suffix
+# from its qcdt. The first draft of THIS set was named `armed-storage-enable-73d4a8f3` - the qcdt's hash,
+# the file `fastboot boot` actually sends, and wrong by the rule every arm beside it follows. It is now
+# `armed-storage-enable-953ad0f6` (953ad0f6 is this set's entry bin), and **the rename cost nothing but a
+# `sed` and two `mv`s: nothing had been pressed and nothing had been committed.**
+#
+# **The rule lived only as prose, one line from the name that broke it**: this block's own `role=` sentence
+# for `xnu_arm_entry.bin` reads "the 8 hex of this hash is the set's name" - a claim inside a string that no
+# tool parses, and the set name on the very next field contradicted it. That is
+# `[[mi4-a-claim-in-a-comment-is-not-a-check]]`, and it is the same shape as the payload-switch defect
+# above: both were caught by a written claim being MEASURED, and neither was caught by a check. **OWED,
+# together with the config check above: a tool that refuses a set name whose 8-hex suffix is not its own
+# entry bin's prefix.**
+#
+# Pre-registration: docs/experiments/experiment-732-the-rung-15-pre-registration-the-command-path-with-the-enable-set.md
+# Pressed? NO. This set is ARMED, NOT PRESSED. The last press is still 730's (2026-09-26 07:38:48-07:39:59
+# UTC, exit 0, 71 s, capture rung14-completion-20260926-074001-last_kmsg.txt, 626,111 B).
+set=armed-storage-enable-953ad0f6 sha256=73d4a8f325bf3156116107ce56a832342aa71418312269b8106868bebe3b273f bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-14-entry-rung-15-with-the-enable-opened-immediately-before-CMD0-and-closed-on-ONE-unconditional-line-after-CMD0-s-publishes
+set=armed-storage-enable-953ad0f6 sha256=70b8009f3079c18256665f716cc4609d7f1477b19e6cb9a6a7eb8ba402c91ed4 bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-14-entry
+set=armed-storage-enable-953ad0f6 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-pressed-arm-BY-MEASUREMENT-note-the-defect-below-which-is-the-reason-this-line-says-so-out-loud
+set=armed-storage-enable-953ad0f6 sha256=91516e0d620839bb182555a60daf0fd58cb04b63d49d3e859dfb04cd0b023d43 bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-enable-953ad0f6 sha256=41039e2e4ae2dc1660f81bfdc9fb76d0adeba8a2627501683b5bf9c523c66a4b bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-enable-953ad0f6 sha256=953ad0f67fae0fd7cb6b3fa13f18632c8255e4bc8546b4339b8761f8f13d637e bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-this-is-the-STORAGE_PROBE-14-entry-the-8-hex-of-this-hash-is-the-sets-name-and-its-SIZE-IS-BYTE-IDENTICAL-to-the-pressed-arm-so-the-SEAM-CONSTANT-DID-NOT-MOVE
+set=armed-storage-enable-953ad0f6 sha256=3c3b11ceeb52286dd4457543df4a8770fe7e49eee14fa7d9c996abc670c2cabf bytes=6732176 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-enable-953ad0f6 sha256=d6ea64e22fac831b359117df3b5e536384229c98218515973ad2d5d4a3851860 bytes=900 file=xnu_arm_entry-config.txt role=entry-config-record-its-rung-line-reads-STAGE90_XNU_STORAGE_PROBE-14
+set=armed-storage-enable-953ad0f6 sha256=53166561d4e8c3acfb4eda8e1a56476ff9f4bca842eee6ae216990a92eca5bbe bytes=2335 file=xnu_arm_entry-sources.txt role=entry-source-manifest
+set=armed-storage-enable-953ad0f6 sha256=e03ee943c297f03eadb78c0480dfdb85f79cc7c714786c7aedb04d50d262cf0f bytes=6051840 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
+set=armed-storage-enable-953ad0f6 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-macho-UNCHANGED-since-the-press-and-regenerated-by-the-build-into-src-verbatim

@@ -112,8 +112,8 @@
 #ifndef STAGE90_XNU_STORAGE_PROBE
 #define STAGE90_XNU_STORAGE_PROBE 0
 #endif
-#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 13
-#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store), 4 = 3 plus the driver's own SDHCI_RESET_ALL (ONE byte store to SOFTWARE_RESET 0x2F, plus a bounded poll of that same byte) - the rung that writes through hc_mem for the first time - 5 = 4 plus the CLOCK SURFACE read at its own widths (the GCC's four SDCC1 branches and the apps root's five RCG words, plus CORE_VENDOR_SPEC 0x10C), a rung of reads that stores NOTHING anywhere, and 6 = 5 plus THE DRIVER'S FIRST CLOCK SET (sdhci_msm_set_clock at 400 kHz): four CBCR read-modify-writes of BIT(0) on the GCC each followed by a bounded halt check, two CORE_VENDOR_SPEC 0x10C read-modify-writes (MCLK select <- DFLT, HC_SELECT_IN cleared), and the standard's two CLOCK_CONTROL halfwords with the stability poll between them - SIX stores and NO rate, because sup_clock == msm_host->clk_rate on the first call (experiment-706 section 2) - and it writes neither BCR 0x04C0 nor any RCG word, nor POWER_CONTROL 0x29, and 7 = 6 plus THE DRIVER'S OWN FIRST POWER BYTE (mmc_power_up's PASS A: sdhi_set_power at sdhci.c:1663 - ONE 8-bit store to POWER_CONTROL 0x29, the value derived from the CAPABILITIES register the way sdhci_add_host and mmc_power_up derive it), with the vendor's REQ_BUS_ON wait NOT taken (sdhci-msm.c:2179-2209 would wait_for_completion on an IRQ this image cannot deliver) - a rung of one store and five readings, and 8 = 7 plus THE DRIVER'S OWN POWER IRQ (the vendor's sdhci_msm_pwr_irq, sdhci-msm.c:1990-2099, as a CLIENT of this image's own dispatcher: intid 170 - SPI 138, the `pwr_irq` msm8974.dtsi:502 declares - registered and its line enabled BEFORE the power byte, with the three arms that may sleep absent because the vendor's own IRQF_ONESHOT+NULL-primary declares a threaded handler and this image has no thread to sleep in), clearing the latch the byte latched and answering the controller - a rung of three stores, in core_mem and in hc_mem, and the two addresses of VENDOR_SPEC 0x10C read side by side, and 9 = 8 plus THE DRIVER'S OWN COMPLETION (sdhci_set_power's own next statement, sdhci.c:1371-1372: check_power_status(host, REQ_BUS_ON), whose sdhci_msm_check_power_status at sdhci-msm.c:2179 compares the request against the TWO DRIVER-SIDE FIELDS the handler's tail writes - curr_pwr_state/curr_io_level, :2092-2096 - and then blocks; rung 9 ports the predicate and replaces the block with a BOUNDED tick poll whose end condition is the CONTROLLER's own CORE_PWRCTL_CTL bit BUS_SUCCESS, because the probe runs with SCTLR.C clear while the handler may run with the caches on, so an image-side flag written by one can be invisible to the other - the flag is still written and published beside the device ack, and the pair is this rung's new cell), with the budget STAGE90_XNU_PWR_WAIT_TICKS and the three sleeping arms still absent, and 10 = 9 plus THE SAME WAIT TAKEN WITH THE MASK OFF: rung 10 measured that the completion arrives within 20 ms of the byte and that the handler is delivered the moment the payload's own idle-exit code lifts `I` (experiment-717), so the mask - not the device and not any budget - is what the poll was measuring; this rung saves the CPSR, clears `I`, runs the SAME bounded poll, restores the saved value and publishes both the CPSR the poll ran under (`_wait_cpsr`, which must now read `0x80000013`) and the state it leaves behind (`_wait_cpsr_after`) - ONE new cell, NO new device access and NO new store, and the first interrupt this image takes inside the cache-off idle-exit window and the first time the handler's two driver-side fields are read back after the handler wrote them. and 11 = 10 plus THE DRIVER'S OWN FIRST COMMAND (sdhci_send_command, sdhci.c:1076-1155: the bounded wait for SDHCI_CMD_INHIBIT to clear, then ARGUMENT 0x08 and COMMAND 0x0E, with the completion taken as a BOUNDED poll of the CONTROLLER's own SDHCI_INT_RESPONSE bit because this image enables no SDHCI interrupt - the block's hc_irq is SPI 123 -> intid 155, a line nobody here owns, and a delivery would end the run at the dispatcher) for the driver's own first two commands, mmc_go_idle's CMD0 (opcode 0, argument 0, no response: the word 0x0000) and mmc_attach_mmc's CMD1 (opcode 1, argument 0, MMC_RSP_R3: the word 0x0102), with the response read out of RESPONSE 0x10 - the first act of this line that addresses the CARD rather than the controller, the first 32-bit write-1-to-clear to INT_STATUS 0x30, and NO data-path register, NO POWER_CONTROL, NO GCC word, NO core_mem word, and no byte of the medium, and 12 = 11 plus THE REGISTER STATE AT THE INSTANT OF THE COMMAND AND THE COMMAND'S OWN RETURN PATH (experiment-724): a new READ-ONLY census body re-takes - at the command's own moment rather than at rungs 3/4/5/6/11's - the POWER_CONTROL 0x29 byte (723 section 5 corrects 723 section 3: rung 7 writes it and it takes, `_pwr_before 0x00 -> _pwr_after 0x0b`, and what differs from the driver's 0x0F is the VOLTAGE field), CLOCK_CONTROL 0x2C's three bits, PRESENT_STATE 0x24, INT_ENABLE 0x34 and SIGNAL_ENABLE 0x38, and the GCC's SDCC1_APPS_RCG (CMD_RCGR decoded into root_en/root_status/update and CFG_RCGR into src/div/mnd_mode - rung 5's own 0x00000507 says SRC_SEL 5, DIV 7, root_status clear, so the root is ENABLED and the vendor's own pre-divider makes the SDCC1 apps clock 200 MHz, not the 384 MHz ST_SET_MAX_CLK names, and the arm's divider of 480 delivers 208 kHz rather than 400), SDCC1 apps/AHB CBCR and the BCR - and refuses the command if the bus-power bit is clear, which is the one condition rung 11's gate does not check; and the command body gains `_cmdN_word_read` (COMMAND 0x0E read back - the block's own copy of the word, which an absence of interrupt cannot supply), `_cmdN_inhibit_after`/`_inhibit_seen`/`_inhibit_last` (PRESENT_STATE's CMD_INHIBIT sampled immediately after the store and over the first 1024 poll iterations, which is what separates NEVER STARTED from RAN from IN FLIGHT), `_cmdN_status_any`/`_any_polls` (the FIRST non-zero INT_STATUS OF ANY KIND, beside rung 11's narrower poll, so that 'nothing latched' becomes 'exactly this bit latched' if the block said something other than RESPONSE), `_cmdN_resp_read` (1, the companion that makes a zero RESPONSE a reading rather than a silence) and an UNCONDITIONAL RESPONSE 0x10 read - so rung 12 makes NO store anywhere, moves no gate, and every clause of rung 11 stands over it unchanged, and 13 = 12 plus WHERE THIS CONTROLLER REPORTS A COMPLETION (experiment-729): a new body of its own - the first device store this ladder declares OUTSIDE `st_send_command`'s window since rung 7, and the first store to an interrupt-enable register anywhere in this image - which reads the registers a completion could be hiding in (`SLOT_INT_STATUS 0xFC` read as a halfword, `CORE_PWRCTL_STATUS 0xDC`, `COMMAND 0x0E` read back as a halfword, `PRESENT_STATE 0x24`), then writes ONE bit of `INT_ENABLE 0x34` (`SDHCI_INT_RESPONSE`, `0x00000001`) with `SIGNAL_ENABLE 0x38` left at ZERO, reads `INT_STATUS 0x30` immediately, reads `INT_ENABLE` back (the block's own copy of the enable, without which a zero status has two producers and a hardware answer cannot be told from a store that never took), writes `INT_ENABLE` back to zero and reads THAT back, and makes NO new command, no store to `POWER_CONTROL 0x29`, no GCC word, no core_mem write and no byte of the medium; and it runs at the one point in `st_cmd_path` this machine has ever reached, immediately after CMD0's publishes and BEFORE the gate, because rung 13's own log says `_cmd_gated = 1` and a block placed after the gate would sit on a path no press has taken. A value above the ladder is refused here rather than shaping an image whose switches claim something else."
+#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 14
+#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store), 4 = 3 plus the driver's own SDHCI_RESET_ALL (ONE byte store to SOFTWARE_RESET 0x2F, plus a bounded poll of that same byte) - the rung that writes through hc_mem for the first time - 5 = 4 plus the CLOCK SURFACE read at its own widths (the GCC's four SDCC1 branches and the apps root's five RCG words, plus CORE_VENDOR_SPEC 0x10C), a rung of reads that stores NOTHING anywhere, and 6 = 5 plus THE DRIVER'S FIRST CLOCK SET (sdhci_msm_set_clock at 400 kHz): four CBCR read-modify-writes of BIT(0) on the GCC each followed by a bounded halt check, two CORE_VENDOR_SPEC 0x10C read-modify-writes (MCLK select <- DFLT, HC_SELECT_IN cleared), and the standard's two CLOCK_CONTROL halfwords with the stability poll between them - SIX stores and NO rate, because sup_clock == msm_host->clk_rate on the first call (experiment-706 section 2) - and it writes neither BCR 0x04C0 nor any RCG word, nor POWER_CONTROL 0x29, and 7 = 6 plus THE DRIVER'S OWN FIRST POWER BYTE (mmc_power_up's PASS A: sdhi_set_power at sdhci.c:1663 - ONE 8-bit store to POWER_CONTROL 0x29, the value derived from the CAPABILITIES register the way sdhci_add_host and mmc_power_up derive it), with the vendor's REQ_BUS_ON wait NOT taken (sdhci-msm.c:2179-2209 would wait_for_completion on an IRQ this image cannot deliver) - a rung of one store and five readings, and 8 = 7 plus THE DRIVER'S OWN POWER IRQ (the vendor's sdhci_msm_pwr_irq, sdhci-msm.c:1990-2099, as a CLIENT of this image's own dispatcher: intid 170 - SPI 138, the `pwr_irq` msm8974.dtsi:502 declares - registered and its line enabled BEFORE the power byte, with the three arms that may sleep absent because the vendor's own IRQF_ONESHOT+NULL-primary declares a threaded handler and this image has no thread to sleep in), clearing the latch the byte latched and answering the controller - a rung of three stores, in core_mem and in hc_mem, and the two addresses of VENDOR_SPEC 0x10C read side by side, and 9 = 8 plus THE DRIVER'S OWN COMPLETION (sdhci_set_power's own next statement, sdhci.c:1371-1372: check_power_status(host, REQ_BUS_ON), whose sdhci_msm_check_power_status at sdhci-msm.c:2179 compares the request against the TWO DRIVER-SIDE FIELDS the handler's tail writes - curr_pwr_state/curr_io_level, :2092-2096 - and then blocks; rung 9 ports the predicate and replaces the block with a BOUNDED tick poll whose end condition is the CONTROLLER's own CORE_PWRCTL_CTL bit BUS_SUCCESS, because the probe runs with SCTLR.C clear while the handler may run with the caches on, so an image-side flag written by one can be invisible to the other - the flag is still written and published beside the device ack, and the pair is this rung's new cell), with the budget STAGE90_XNU_PWR_WAIT_TICKS and the three sleeping arms still absent, and 10 = 9 plus THE SAME WAIT TAKEN WITH THE MASK OFF: rung 10 measured that the completion arrives within 20 ms of the byte and that the handler is delivered the moment the payload's own idle-exit code lifts `I` (experiment-717), so the mask - not the device and not any budget - is what the poll was measuring; this rung saves the CPSR, clears `I`, runs the SAME bounded poll, restores the saved value and publishes both the CPSR the poll ran under (`_wait_cpsr`, which must now read `0x80000013`) and the state it leaves behind (`_wait_cpsr_after`) - ONE new cell, NO new device access and NO new store, and the first interrupt this image takes inside the cache-off idle-exit window and the first time the handler's two driver-side fields are read back after the handler wrote them. and 11 = 10 plus THE DRIVER'S OWN FIRST COMMAND (sdhci_send_command, sdhci.c:1076-1155: the bounded wait for SDHCI_CMD_INHIBIT to clear, then ARGUMENT 0x08 and COMMAND 0x0E, with the completion taken as a BOUNDED poll of the CONTROLLER's own SDHCI_INT_RESPONSE bit because this image enables no SDHCI interrupt - the block's hc_irq is SPI 123 -> intid 155, a line nobody here owns, and a delivery would end the run at the dispatcher) for the driver's own first two commands, mmc_go_idle's CMD0 (opcode 0, argument 0, no response: the word 0x0000) and mmc_attach_mmc's CMD1 (opcode 1, argument 0, MMC_RSP_R3: the word 0x0102), with the response read out of RESPONSE 0x10 - the first act of this line that addresses the CARD rather than the controller, the first 32-bit write-1-to-clear to INT_STATUS 0x30, and NO data-path register, NO POWER_CONTROL, NO GCC word, NO core_mem word, and no byte of the medium, and 12 = 11 plus THE REGISTER STATE AT THE INSTANT OF THE COMMAND AND THE COMMAND'S OWN RETURN PATH (experiment-724): a new READ-ONLY census body re-takes - at the command's own moment rather than at rungs 3/4/5/6/11's - the POWER_CONTROL 0x29 byte (723 section 5 corrects 723 section 3: rung 7 writes it and it takes, `_pwr_before 0x00 -> _pwr_after 0x0b`, and what differs from the driver's 0x0F is the VOLTAGE field), CLOCK_CONTROL 0x2C's three bits, PRESENT_STATE 0x24, INT_ENABLE 0x34 and SIGNAL_ENABLE 0x38, and the GCC's SDCC1_APPS_RCG (CMD_RCGR decoded into root_en/root_status/update and CFG_RCGR into src/div/mnd_mode - rung 5's own 0x00000507 says SRC_SEL 5, DIV 7, root_status clear, so the root is ENABLED and the vendor's own pre-divider makes the SDCC1 apps clock 200 MHz, not the 384 MHz ST_SET_MAX_CLK names, and the arm's divider of 480 delivers 208 kHz rather than 400), SDCC1 apps/AHB CBCR and the BCR - and refuses the command if the bus-power bit is clear, which is the one condition rung 11's gate does not check; and the command body gains `_cmdN_word_read` (COMMAND 0x0E read back - the block's own copy of the word, which an absence of interrupt cannot supply), `_cmdN_inhibit_after`/`_inhibit_seen`/`_inhibit_last` (PRESENT_STATE's CMD_INHIBIT sampled immediately after the store and over the first 1024 poll iterations, which is what separates NEVER STARTED from RAN from IN FLIGHT), `_cmdN_status_any`/`_any_polls` (the FIRST non-zero INT_STATUS OF ANY KIND, beside rung 11's narrower poll, so that 'nothing latched' becomes 'exactly this bit latched' if the block said something other than RESPONSE), `_cmdN_resp_read` (1, the companion that makes a zero RESPONSE a reading rather than a silence) and an UNCONDITIONAL RESPONSE 0x10 read - so rung 12 makes NO store anywhere, moves no gate, and every clause of rung 11 stands over it unchanged, and 13 = 12 plus WHERE THIS CONTROLLER REPORTS A COMPLETION (experiment-729): a new body of its own - the first device store this ladder declares OUTSIDE `st_send_command`'s window since rung 7, and the first store to an interrupt-enable register anywhere in this image - which reads the registers a completion could be hiding in (`SLOT_INT_STATUS 0xFC` read as a halfword, `CORE_PWRCTL_STATUS 0xDC`, `COMMAND 0x0E` read back as a halfword, `PRESENT_STATE 0x24`), then writes ONE bit of `INT_ENABLE 0x34` (`SDHCI_INT_RESPONSE`, `0x00000001`) with `SIGNAL_ENABLE 0x38` left at ZERO, reads `INT_STATUS 0x30` immediately, reads `INT_ENABLE` back (the block's own copy of the enable, without which a zero status has two producers and a hardware answer cannot be told from a store that never took), writes `INT_ENABLE` back to zero and reads THAT back, and makes NO new command, no store to `POWER_CONTROL 0x29`, no GCC word, no core_mem write and no byte of the medium; and it runs at the one point in `st_cmd_path` this machine has ever reached, immediately after CMD0's publishes and BEFORE the gate, because rung 13's own log says `_cmd_gated = 1` and a block placed after the gate would sit on a path no press has taken. And 14 = 13 plus THE COMMAND PATH WITH THE ENABLE SET (experiment-732): the same two commands, the same gates and the same bodies, with **ONE 32-bit store to `INT_ENABLE 0x34` (`SDHCI_INT_RESPONSE`) taken immediately before CMD0 is put on the bus, and its restore taken on ONE unconditional line immediately after CMD0's publishes** - `SIGNAL_ENABLE 0x38` still ZERO, which is the one thing 730's press measured is safe, and the enable is therefore open for exactly CMD0's own send and its poll. The reason is 730's own answer: `_int_status_after = 0x00000001` against `_int_status_before = 0x00000000` with exactly one store between them, so **`_cmd_gated = 1` was the MASKED POLL's answer and not the block's** - rungs 11, 12 and 13 read a status register whose enable nothing in this image had ever set while a command was in flight. **This rung's FIRST BUILD put the same store after CMD0 instead of before it, and it was refuted without spending a press**: `st_send_command`'s completion poll is inside CMD0, so a window opened below the command leaves `c0.complete == 0` and the between-commands gate refuses - the arm's own promised cell (`_cmd_gated = 0`) was absent by construction, which is m720's shape, an absent key with one of its producers guaranteed. The window now has one entrance and one exit, both unconditional, and every branch of this body (the census's refusal and the register half of the gate above it, the between-commands gate below it) stands outside them. Gate 1 is NARROWED rather than removed: `SIGNAL_ENABLE` must still read zero and `INT_ENABLE`'s only permitted bit is `SDHCI_INT_RESPONSE`, both checked BEFORE the store, and the refusal publishes which of the two fired (`_cmd_gate_kind`: 1 = `SIGNAL_ENABLE` non-zero, 2 = a bit of `INT_ENABLE` other than `RESPONSE`), so a refusal is localised rather than reported as a boolean. The restore publishes its own sequence number, the value written back, the block's readback and `INT_STATUS` read AFTER the disable - and the readback is the cell that says the restore is a PARTIAL one: 730's press measured its own pair as `_int_enable_held = 0x00008001` for a store of `0x00000001` and `_int_enable_readback = 0x00008000` for a store of `0x00000000`, so bit 15 (`SDHCI_INT_ERROR`) is set by a write to 0x34 and is not cleared by one. Three reads 697 and 730 left owed come with it: `HOST_VERSION 0xFE` as a halfword, `INT_STATUS` with the enable set and BEFORE any command - where 0 says the completion bit is latched by the command rather than held by the block - and `INT_STATUS` after the restore. **The cell that says the rung worked is `_cmd_gated = 0` with `_cmd1_*` keys present, and the cell that says the enable was the mask is `_cmd0_complete = 1` beside `_cmd0_status_any != 0`** - the first command this line drives to a completion and the first CMD1 it ever issues. The window is bounded by the two stores and no new write class appears: no new command, no `POWER_CONTROL 0x29`, no GCC word, no `core_mem` word and no byte of the medium. **Two spellings of this rung's number are in use and this clause states both**: this ladder counts a rung by the VALUE of `STAGE90_XNU_STORAGE_PROBE`, so the clause above reads 14, while the commit subjects and the pre-registration count ORDINAL ARMS and call it **rung 15** - the two differ by one from value 9 onwards because value 9 has two arms (the second is the same wait with the mask off), and a reader holding both numbers holds one arm. A value above the ladder is refused here rather than shaping an image whose switches claim something else."
 #endif
 
 /*
@@ -1960,8 +1960,19 @@ __attribute__((noinline)) static void st_pwr_wait(void)
 #define ST_SDHCI_COMMAND           0x0Eu        /* sdhci.h:45  - 16-bit, sdhci.c:1153 */
 #define ST_SDHCI_RESPONSE          0x10u        /* sdhci.h:60  - 32-bit, sdhci.c:1174 */
 #define ST_SDHCI_INT_STATUS        0x30u        /* sdhci.h:118 - 32-bit write-1-to-clear */
-#define ST_SDHCI_INT_ENABLE        0x34u        /* sdhci.h:119 - READ ONLY in this image */
-#define ST_SDHCI_SIGNAL_ENABLE     0x38u        /* sdhci.h:120 - READ ONLY in this image */
+/* **`INT_ENABLE` WAS `READ ONLY in this image` UNTIL 729, AND RUNG 13 IS WHAT MADE THAT FALSE.**
+ * Rung 11's gate reads it and rung 13's body writes it twice (the one-bit probe and its restore),
+ * so the old comment described the image as it stood one rung earlier - a claim in a comment that
+ * no build could contradict, which is this project's oldest defect wearing a register's name
+ * ([[mi4-a-claim-in-a-comment-is-not-a-check]]). What is still true, and is the safety clause and
+ * not a note: **every write to this register in this image is one bit (`SDHCI_INT_RESPONSE`), and
+ * `SIGNAL_ENABLE 0x38` is never written at all** - `build_entry.sh` asserts both sets exactly, and
+ * the conjunction of the two registers is what would raise intid 155. */
+#define ST_SDHCI_INT_ENABLE        0x34u        /* sdhci.h:119 - read by rungs 11/12/13/14, written
+                                                 * by 13 and 14: the one-bit enable and its restore */
+#define ST_SDHCI_SIGNAL_ENABLE     0x38u        /* sdhci.h:120 - READ ONLY in this image, and that
+                                                 * is the half of the pair every rung above 10 keeps
+                                                 * at zero on purpose */
 #define ST_SDHCI_CMD_INHIBIT       0x00000001u  /* sdhci.h:65  - the inhibit gate's bit */
 #define ST_SDHCI_CMD_RESP_NONE     0x00u        /* sdhci.h:52  */
 #define ST_SDHCI_CMD_RESP_SHORT    0x02u        /* sdhci.h:54  */
@@ -2443,6 +2454,46 @@ static __attribute__((noinline, noclone)) void st_int_report(void)
 #endif /* STAGE90_XNU_STORAGE_PROBE >= 13 - one body, one caller, and the only store this rung makes:
         * two 32-bit writes to INT_ENABLE 0x34, the second of them the restore */
 
+#if STAGE90_XNU_STORAGE_PROBE >= 14
+/*
+ * **732: the enable's restore, in a body of its own because it is the window's one closing act and
+ * the build counts its callers.** The rung-14 window is `INT_ENABLE 0x34 <- SDHCI_INT_RESPONSE`
+ * ... the restore, and **it has exactly ONE caller, taken unconditionally on the single line that
+ * follows CMD0's publishes.** The first build of this arm had two callers - the between-commands
+ * gate's early `return` and the end of the body - and it was REFUTED WITHOUT A PRESS: CMD0's own
+ * completion poll is inside the window only if the window opens above the command, and that build
+ * opened it below, so `c0.complete` could not be 1 and the gate the restore was guarding was
+ * unreachable. The two-exit shape described a window that could not be entered.
+ *
+ * Written once rather than twice for the reason the first build gave and which still holds: two
+ * copies of one act leave the copy a later edit forgets on the path the press happens to take.
+ * Written once, the caller is a `bl` the build counts, and `build_entry.sh` asserts this body's
+ * device accesses and its single store exactly.
+ *
+ * **`seq` is a reading and not decoration.** A log carries `_ena_restore_seq` = 1 for the one exit
+ * this window has, so "the restore ran" and "which exit it ran on" are one cell rather than an
+ * inference from the cells around it - and the cell stays even though there is one exit today,
+ * because the next rung that adds an exit would otherwise have to add the cell with it.
+ *
+ * **`INT_STATUS` is read AFTER the disable on purpose.** 730 section 5 left this owed: whether the
+ * bit rung 13 saw was a status the enable had GATED (so clearing the enable takes the reading away)
+ * or a status the enable had merely made VISIBLE (so the bit is still there). `_ena_status_pre` is
+ * that read on the other side of the store, taken before CMD0, and neither reading is a verdict on
+ * its own.
+ */
+static __attribute__((noinline, noclone)) void st_cmd_enable_restore(uint32_t was, uint32_t seq)
+{
+    ST_LIVE("xnu_live_storage_ena_restore_seq", seq);
+    ST_LIVE("xnu_live_storage_ena_wrote_back", was);
+    st_write32(ST_HC_MEM_BASE + ST_SDHCI_INT_ENABLE, was);
+    ST_LIVE("xnu_live_storage_ena_readback",
+            st_read32(ST_HC_MEM_BASE + ST_SDHCI_INT_ENABLE));
+    ST_LIVE("xnu_live_storage_ena_status_post",
+            st_read32(ST_HC_MEM_BASE + ST_SDHCI_INT_STATUS));
+}
+#endif /* STAGE90_XNU_STORAGE_PROBE >= 14 - one body, one caller, one store and four readings */
+
+
 /*
  * **The per-command key block, written once and used twice.** A macro and not a function, because
  * every key is a string literal and the two calls differ only in the tag. Every cell the
@@ -2517,7 +2568,7 @@ static __attribute__((noinline, noclone)) void st_int_report(void)
 static __attribute__((noinline, noclone)) void st_cmd_path(void)
 {
     struct st_cmd_result c0, c1;
-    uint32_t int_enable, sig_enable, sent = 0u, gated = 0u;
+    uint32_t int_enable, sig_enable, gate_kind, sent = 0u, gated = 0u;
 
     ST_LIVE("xnu_live_storage_cmd_calls", 1u);
 
@@ -2555,7 +2606,28 @@ static __attribute__((noinline, noclone)) void st_cmd_path(void)
     ST_LIVE("xnu_live_storage_cmd_int_enable", int_enable);
     ST_LIVE("xnu_live_storage_cmd_sig_enable", sig_enable);
 
-    if (int_enable != 0u || sig_enable != 0u) {
+#if STAGE90_XNU_STORAGE_PROBE >= 14
+    /*
+     * **732: the gate is NARROWED, and the narrowing is the rung's whole premise.** Rungs 11 and 12
+     * refused a non-zero `INT_ENABLE` at all, because their arms enable nothing; rung 14's arm is the
+     * enable, so the register may carry exactly one bit and the line may still not be armed. The two
+     * conditions that remain are the two halves of the conjunction that would raise intid 155:
+     * `SIGNAL_ENABLE 0x38` must read ZERO (which is 730's measured-safe half), and `INT_ENABLE` may
+     * carry `SDHCI_INT_RESPONSE` and nothing else. Both are read above and neither is written here.
+     *
+     * **`_cmd_gate_kind` is a kind and not a boolean, on purpose.** `_cmd_enabled_out` below stays
+     * the rung-11 0/1 - it means "something was enabled out" at every rung - and the new cell says
+     * WHICH, so a refusal is localised instead of being one bit that two different registers
+     * produced. One name for two readings is this project's oldest defect.
+     */
+    gate_kind = (sig_enable != 0u) ? 1u
+              : (((int_enable & ~(uint32_t)ST_SDHCI_INT_RESPONSE) != 0u) ? 2u : 0u);
+    ST_LIVE("xnu_live_storage_cmd_gate_kind", gate_kind);
+#else
+    gate_kind = (int_enable != 0u || sig_enable != 0u) ? 1u : 0u;
+#endif
+
+    if (gate_kind != 0u) {
         ST_LIVE("xnu_live_storage_cmd_enabled_out", 1u);
         ST_LIVE("xnu_live_storage_cmd_refused", 1u);
         ST_LIVE("xnu_live_storage_cmd_sent", 0u);
@@ -2572,6 +2644,67 @@ static __attribute__((noinline, noclone)) void st_cmd_path(void)
     ST_LIVE("xnu_live_storage_cmd_ps_before",
             st_read32(ST_HC_MEM_BASE + ST_SDHCI_PRESENT_STATE));
 
+#if STAGE90_XNU_STORAGE_PROBE >= 14
+    /*
+     * **732: THE ENABLE, AND WHERE IT STANDS IS THE EXPERIMENT RATHER THAN A PREFERENCE.**
+     *
+     * The window opens HERE - immediately before CMD0 is put on the bus - and not anywhere below it,
+     * because the question this rung asks is *can a command's own completion poll see the completion
+     * with the enable set*. `st_send_command`'s poll is inside CMD0, so the enable has to be standing
+     * before CMD0 is sent; the first build of this arm opened the window after CMD0, in the body that
+     * runs just before the between-commands gate, and the arm could not answer its own question by
+     * construction - CMD0's poll ran masked, `c0.complete` stayed 0, and the gate this rung is meant
+     * to pass would have refused. It was refuted by 730's own log without spending a press, and the
+     * cell that says so is `_cmd0_complete` beside `_cmd_gated`.
+     *
+     * **The window closes on ONE line, unconditionally, and that is a safety property rather than a
+     * simplification.** The closing call stands immediately after CMD0's publishes, before the gate
+     * and before `st_int_report()` below, so there is no path out of this interval that skips it -
+     * not the census's refusal (above the window), not the register half of the gate (above it too),
+     * and not the between-commands gate's early `return` (below it, with the enable already closed).
+     * The two-exit shape the first build had described a window whose exits were unreachable.
+     *
+     * **It closes BEFORE `st_int_report()` on purpose.** Rung 13's `_int_status_before` is DEFINED as
+     * the baseline taken with both enables clear, and its `_int_status_after` as the same register
+     * read immediately after that body's own single-bit store. Leaving this window open across that
+     * body would silently redefine a cell of the rung underneath while its name and its reader stayed
+     * the same, which is `[[mi4-one-value-two-definitions]]` inside one function.
+     *
+     * The value written is `int_enable | SDHCI_INT_RESPONSE`, which is `SDHCI_INT_RESPONSE` alone
+     * because the gate above proved the rest of the register is zero. **The OR is written out rather
+     * than the constant** so that the store's value is derived from the read that authorised it, and
+     * the cells below are the pair that makes it a store rather than an intention - the same reason
+     * rung 12 added `_cmdN_word_read`.
+     *
+     * **`_ena_held` is the block's own copy of the enable and it is not the value written.** 730's
+     * press measured its own readback as `0x00008001` for a store of `0x00000001`, and `0x00008000`
+     * for a store of `0x00000000`, so bit 15 (`SDHCI_INT_ERROR`) is set by a write to this register
+     * and is not cleared by one. That is the reason the cell exists: a rung whose restore is a
+     * *partial* restore says so in a cell rather than in a reader's assumption.
+     *
+     * **`_ena_status_pre` is the third of 730's owed reads and it is taken with NO COMMAND IN
+     * FLIGHT.** Rung 13 measured `INT_STATUS 0x30 = 1` immediately after setting the enable, one
+     * instruction after a command that had already completed and been cleared, so there was a
+     * latched RESPONSE bit to see. Read here, before CMD0, the same register answers the other half
+     * of that question: 0 says the bit is *latched by the completion*, and 1 would say the block is
+     * holding a bit no command in this run has produced.
+     *
+     * **`_ena_host_version` is `HOST_VERSION 0xFE` as a HALFWORD** and it is the read experiment 697
+     * left owed and 730 did not take: the SDHCI specification gives this register's low byte the
+     * specification version, and a 3.00-or-later block is the reading under which `INT_STATUS`'s
+     * latching behaviour is described at all. It is one read at an offset no 32-bit access may reach,
+     * and it changes nothing.
+     */
+    ST_LIVE("xnu_live_storage_ena_wrote", int_enable | (uint32_t)ST_SDHCI_INT_RESPONSE);
+    st_write32(ST_HC_MEM_BASE + ST_SDHCI_INT_ENABLE, int_enable | (uint32_t)ST_SDHCI_INT_RESPONSE);
+    ST_LIVE("xnu_live_storage_ena_held",
+            st_read32(ST_HC_MEM_BASE + ST_SDHCI_INT_ENABLE));
+    ST_LIVE("xnu_live_storage_ena_status_pre",
+            st_read32(ST_HC_MEM_BASE + ST_SDHCI_INT_STATUS));
+    ST_LIVE("xnu_live_storage_ena_host_version",
+            (uint32_t)st_read16(ST_HC_MEM_BASE + ST_SDHCI_HOST_VERSION));
+#endif
+
     /* CMD0 - mmc_go_idle (`mmc_ops.c:107`): argument 0, MMC_RSP_NONE, so no response is read. */
     ST_LIVE("xnu_live_storage_cmd0_op", ST_CMD_OP_GO_IDLE_STATE);
     st_send_command(ST_CMD_OP_GO_IDLE_STATE, 0u, 0u, &c0);
@@ -2580,6 +2713,24 @@ static __attribute__((noinline, noclone)) void st_cmd_path(void)
     ST_CMD_PUBLISH_12("0", c0);
 #endif
     sent += c0.sent;
+
+#if STAGE90_XNU_STORAGE_PROBE >= 14
+    /*
+     * **THE WINDOW'S ONE EXIT, AND IT IS TAKEN BEFORE ANYTHING CAN BRANCH.** The enable is closed
+     * here - before the gate and before `st_int_report()`, and on the only line that runs after
+     * CMD0's publishes - so the interval it was open for is exactly CMD0's own send and poll, and
+     * there is no path out of `st_cmd_path` that reaches the gate, CMD1, or a `return` with the
+     * enable still set. `seq = 1` is this exit's name; it is a constant here rather than a branch's
+     * label, and it stays a parameter because the cell it publishes is how a reader tells "the
+     * restore ran" from "the enable was never opened".
+     *
+     * **It is called even when CMD0 was not sent at all** - when the register half of the gate
+     * refused, this line is never reached because the window is opened below it, so the ordering
+     * itself is the guard. That asymmetry is the design: the window has one entrance and one exit,
+     * both unconditional, and the gate that can branch is outside both.
+     */
+    st_cmd_enable_restore(int_enable, 1u);
+#endif
 
 #if STAGE90_XNU_STORAGE_PROBE >= 13
     /*
@@ -2598,6 +2749,7 @@ static __attribute__((noinline, noclone)) void st_cmd_path(void)
      */
     st_int_report();
 #endif
+
 
     /*
      * **THE GATE BETWEEN THE TWO COMMANDS.** CMD1 is `mmc_attach_mmc`'s next act and it is issued
