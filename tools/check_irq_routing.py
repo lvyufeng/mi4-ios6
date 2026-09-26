@@ -83,12 +83,12 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 
-BOOT_DIR = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot")
+BOOT_DIR = os.path.join(REPO_ROOT, "src/entry")
 ENTRY_GIC_H = os.path.join(BOOT_DIR, "entry_gic.h")
 ENTRY_IRQ_C = os.path.join(BOOT_DIR, "entry_irq.c")
 ENTRY_TIMEBASE_C = os.path.join(BOOT_DIR, "entry_timebase.c")
-DRIVER_CPP = os.path.join(REPO_ROOT, "stages/stage90/xnu_platform/MSM8974GIC.cpp")
-TIMER_CPP = os.path.join(REPO_ROOT, "stages/stage90/xnu_platform/MSM8974Timer.cpp")
+DRIVER_CPP = os.path.join(REPO_ROOT, "src/platform/MSM8974GIC.cpp")
+TIMER_CPP = os.path.join(REPO_ROOT, "src/platform/MSM8974Timer.cpp")
 
 NM = "arm-none-eabi-nm"
 

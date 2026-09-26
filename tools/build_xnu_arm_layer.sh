@@ -29,8 +29,8 @@ TOOLS_DIR=$PWD
 REPO_ROOT=$(cd "$TOOLS_DIR/.." && pwd)
 
 XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
-SHIMS=$REPO_ROOT/stages/stage90/shims
-SHIMS_ARM=$REPO_ROOT/stages/stage90/shims_arm
+SHIMS=$REPO_ROOT/src/shims
+SHIMS_ARM=$REPO_ROOT/src/shims_arm
 MIG_HEADERS=${MIG_HEADERS:-$REPO_ROOT/out/mach_headers}
 # The other two generated roots: MIG's output, and the headers the build generates from the
 # configuration - the `OPTIONS/` macros (tools/gen_option_headers.py) plus `libkern/version.h`

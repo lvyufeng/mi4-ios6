@@ -16,7 +16,7 @@
 #   1. the bytes in `out/` are the bytes the park holds      - the gate does NOT check this
 #      (and the park is FOUND from those bytes - see below)
 #   2. the park is the set the record describes              - tools/verify_revert_set.sh
-#   3. the gate accepts this tree, under the flag set the    - stages/stage90/preflight_boot_check.sh
+#   3. the gate accepts this tree, under the flag set the    - scripts/preflight_boot_check.sh
 #      arm's OWN switches demand
 #   4. WHICH ARM the bytes are: the ELF reading JOINED TO    - tools/check_idle_window_unreachable.py
 #      the payload's own switch record
@@ -84,7 +84,7 @@
 #     *different* arm from the parked one, and the gate would still accept it - its freshness sweep
 #     covers the payload's own sources and its entry clause asks by content about the sources, so a
 #     successful rebuild is self-consistent. (1) is what notices.
-#   * **editing anything under `xnu_arm_boot/`** is caught by the gate's entry-source clause, which
+#   * **editing anything under `src/entry/`** is caught by the gate's entry-source clause, which
 #     compares content and not mtime - so check (3) refuses and a press spent then boots NOTHING:
 #     the catcher's own narration for that is `GATE REFUSED - nothing booted, nothing spent`, and the
 #     press that bought it is gone. This is the reason the rule for the armed window is "read the
@@ -139,8 +139,8 @@ LIVE=${LIVE:-$REPO_ROOT/out/stage90}
 PARK=${PARK:-}
 SET=${SET:-}
 GATE_FLAGS_SEAM=${GATE_FLAGS_SEAM:-}
-RECORD=$REPO_ROOT/stages/stage90/revert-set.txt
-GATE=$REPO_ROOT/stages/stage90/preflight_boot_check.sh
+RECORD=$REPO_ROOT/records/revert-set.txt
+GATE=$REPO_ROOT/scripts/preflight_boot_check.sh
 # The artifact `fastboot boot` sends - the one file whose bytes name the arm, and the two names read
 # out of the live tree by rows 1, 3 and 4.
 QCDT_NAME=stage90-qcdt.img
@@ -453,7 +453,7 @@ else
 fi
 
 # --- 3. the gate accepts this tree, right now ------------------------------------------------------
-# This is the check that catches an edit under xnu_arm_boot/ (content, not mtime), an entry image
+# This is the check that catches an edit under src/entry/ (content, not mtime), an entry image
 # whose sources moved, and a record that binds a different entry bin. It is host-only: the gate never
 # runs fastboot and never touches the device, and its own header says so - measured in 634 by running
 # it with sudo/adb/fastboot stubbed, where the stub was never called and the output was byte-identical.

@@ -52,9 +52,9 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 
-DEFAULT_FILES = [os.path.join(REPO_ROOT, "stages", "stage90", "xnu_platform",
+DEFAULT_FILES = [os.path.join(REPO_ROOT, "src", "platform",
                               "MSM8974PlatformExpert.cpp"),
-                 os.path.join(REPO_ROOT, "stages", "stage90", "xnu_platform",
+                 os.path.join(REPO_ROOT, "src", "platform",
                               "MSM8974RootResource.cpp")]
 
 METHODS = ("deleteList", "excludeList")

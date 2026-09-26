@@ -30,7 +30,7 @@ set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TOOL=$ROOT/tools/verify_revert_set.sh
-RECORD=$ROOT/stages/stage90/revert-set.txt
+RECORD=$ROOT/records/revert-set.txt
 LIVE=$ROOT/out/stage90
 
 [[ -x $TOOL ]] || { echo "no tool at $TOOL" >&2; exit 1; }
@@ -306,7 +306,7 @@ echo "== the record covers what the gate reads =="
 # and not about the record (m671/m672), and a rehearsal with one permanent FAIL is one whose real
 # refusals are unreadable. A match followed by `/` or `$` is now dropped: it is a fragment of a longer
 # expression, not a name.
-GATESRC=$ROOT/stages/stage90/preflight_boot_check.sh
+GATESRC=$ROOT/scripts/preflight_boot_check.sh
 DERIVED=$W/gate-reads.txt
 grep -oE '\$OUT/[A-Za-z0-9_.-]+[$/]?|out/stage90/[A-Za-z0-9_.-]+[$/]?' "$GATESRC" \
   | grep -vE '[/$]$' \

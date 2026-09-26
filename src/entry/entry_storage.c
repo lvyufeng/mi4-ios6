@@ -188,7 +188,7 @@ extern uint32_t entry_mmio_section(uint32_t va, uint32_t pa, uint32_t *slot_befo
  * define is renamed to what it reads, the real version register is added, and the misnamed keys are
  * renamed beside it. **The readers were enumerated first** ([[mi4-one-value-two-definitions]], m699:
  * one rename, two readers - and a missed reader fails *silent*): two sites in this file and one line of
- * 694's document, and nothing in `stages/stage90`'s shell scripts or in `tools/` names either key.
+ * 694's document, and nothing in `src`'s shell scripts or in `tools/` names either key.
  */
 #define ST_CORE_MEM_BASE        0xf9824000u
 #define ST_HC_MEM_BASE          0xf9824900u

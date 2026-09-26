@@ -6,7 +6,7 @@ Check the Mach-O the entry image carries as the first userland process's executa
     ./tools/host_ramdisk_macho_check.py path/to/entry.elf
     ./tools/host_ramdisk_macho_check.py --selftest            # prove the checks bite
 
-Since experiment 468, `g_stage90_ramdisk` (`stages/stage90/xnu_arm_boot/entry_ramdisk.s`) is a
+Since experiment 468, `g_stage90_ramdisk` (`src/entry/entry_ramdisk.s`) is a
 Mach-O at offset 0, and the bytes at that offset **are** `/sbin/launchd` - `mockfs` maps its one file
 node directly onto the device's physical pages (`mockfs_fsnode.c:333-344`) and takes the file's size
 from the device (`:80`). So this object is read by `exec_mach_imgact` -> `get_macho_vnode` ->
@@ -495,11 +495,11 @@ def park_threshold():
     default when the name changed would make this clause pass by not existing, which is the defect 447
     recorded about a check that measured the label instead of the branch.
     """
-    path = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot/entry_trace.c")
+    path = os.path.join(REPO_ROOT, "src/entry/entry_trace.c")
     src = open(path, encoding="utf-8", errors="replace").read()
     m = re.search(r"^#define\s+ENTRY_PARK_MIN_MS\s+(\d+)\s*$", src, re.M)
     if not m:
-        sys.exit("stages/stage90/xnu_arm_boot/entry_trace.c no longer defines ENTRY_PARK_MIN_MS as a "
+        sys.exit("src/entry/entry_trace.c no longer defines ENTRY_PARK_MIN_MS as a "
                  "plain decimal number - the `__wrap_poll` guard that prints 512's console line reads "
                  "it, and this check cannot compare the fixture's three timeouts against a threshold "
                  "it cannot find")

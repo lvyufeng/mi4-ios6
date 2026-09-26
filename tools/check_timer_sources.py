@@ -97,7 +97,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 
-BOOT_DIR = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot")
+BOOT_DIR = os.path.join(REPO_ROOT, "src/entry")
 ENTRY_TRACE_C = os.path.join(BOOT_DIR, "entry_trace.c")
 ENTRY_TIMEBASE_C = os.path.join(BOOT_DIR, "entry_timebase.c")
 BUILD_ENTRY_SH = os.path.join(BOOT_DIR, "build_entry.sh")

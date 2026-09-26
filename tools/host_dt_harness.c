@@ -22,7 +22,7 @@
  * Assembly
  * --------
  * Compiled by tools/host_dt_check.sh, which extracts `build_stage90_apple_dt` verbatim
- * from stages/stage90/stage90_main.c and the constants it needs out of stage90.h, so the
+ * from src/stage90_main.c and the constants it needs out of stage90.h, so the
  * code under test is the code that ships rather than a copy that can drift.
  */
 

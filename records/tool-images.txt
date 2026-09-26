@@ -5,7 +5,7 @@
 # is only a constraint if something compares against it, and the comparison lives in
 # `tools/verify_tool_image.sh`: it hashes the image, requires the hash to be one of the lines below,
 # checks the other fields on that line, parses the image, and corroborates it with the detached PGP
-# signature. `stages/stage90/preflight_storage_write.sh` calls that script and refuses a `--boot-image`
+# signature. `scripts/preflight_storage_write.sh` calls that script and refuses a `--boot-image`
 # it cannot verify, so an image that is not recorded here cannot be cleared, whatever it is called.
 #
 # ONE IMAGE PER LINE, space-separated key=value:
@@ -33,7 +33,7 @@
 #        at this download failed here.
 #   published sha256 (dl.twrp.me/cancro/....img.sha256) and md5 (....img.md5) both matched the bytes
 #   downloaded, and the detached signature (....img.asc) verifies against the key kept in
-#   `stages/stage90/tool-images/`.
+#   `records/tool-images/`.
 #
 # **The image itself is NOT in this repository**: `*.img` is gitignored, so what is committed is this
 # record, the signature and the signing key - enough to re-verify the bytes and not enough to hide

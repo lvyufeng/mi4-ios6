@@ -2778,7 +2778,7 @@ void entry_os_console_char(int ch, uint32_t which)
  *   `/chosen/memory-map`'s `RAMDisk` is two machine words, {base, size}
  *   (`:445-447`), and `mdevadd(-1, ml_static_ptovirt(word0) >> 12, word1 >> 12, 0)` is called with
  *   them. `ml_static_ptovirt` is `phystokv` (`osfmk/arm/machine_routines.c:730-734`) and this
- *   image's boot_args have `physBase == virtBase` (`stages/stage90/xnu_entry_jump.c:131-141`), so
+ *   image's boot_args have `physBase == virtBase` (`src/xnu_entry_jump.c:131-141`), so
  *   the identity: **word0 is a virtual address in this image's own window and word1 is a byte
  *   count.** `mdevadd` stores base>>12 and size>>12 in pages (`bsd/dev/memdev.c:624-628`), adds a
  *   block and a character device through `bdevsw_add`/`cdevsw_add_with_bdev`, and makes `/dev/md0`
@@ -5207,7 +5207,7 @@ void entry_note_idle(uint32_t caller, uint32_t thread, uint32_t pid, uint32_t cp
  *
  * **What this step deliberately does not read, and why it does not need to.** `cpu_signal`, `rtcPop`
  * and `cpu_idle_latency` are `struct cpu_data` fields, and this image has no checked offsets for
- * them: `stages/stage90/xnu_arm_boot/assym.s` carries `CPU_*` placeholders for the secondary-CPU
+ * them: `src/entry/assym.s` carries `CPU_*` placeholders for the secondary-CPU
  * paths and says in its own header that producing them properly means compiling
  * `osfmk/arm/cpu_data_internal.h`. A hand-written offset here would be a plausible number read from
  * the wrong word - this project's oldest defect class, twenty-four times over - and it is not needed:

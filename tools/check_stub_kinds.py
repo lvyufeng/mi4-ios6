@@ -82,7 +82,7 @@ STORAGE = set("DBRSGC")
 
 def undefined_names(path):
     if not os.path.isfile(path):
-        sys.exit(f"no {path} - run stages/stage90/xnu_arm_boot/build_entry.sh first")
+        sys.exit(f"no {path} - run src/entry/build_entry.sh first")
     return [l.strip() for l in open(path) if l.strip()]
 
 

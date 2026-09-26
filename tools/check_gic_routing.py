@@ -10,7 +10,7 @@ Every claim below is a claim about a *different* file, and each one can be false
 run would report as an error:
 
   1. **the GIC register offsets are one definition.** The GIC is not Apple's - MSM8974's interrupt
-     controller is described by this repository's own `stages/stage90/gic.c` (its DT assertions and
+     controller is described by this repository's own `src/gic.c` (its DT assertions and
      its register map) and by experiment 143's `xnu_msm8974_fiq_probe.c`. `entry_gic.h` transcribes
      those numbers plus two bases and every bit it writes, so the check compares **both directions**:
      each name the header defines must equal the payload's, and each name the payload defines that
@@ -97,13 +97,13 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 
-BOOT_DIR = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot")
+BOOT_DIR = os.path.join(REPO_ROOT, "src/entry")
 ENTRY_GIC_C = os.path.join(BOOT_DIR, "entry_gic.c")
 ENTRY_GIC_H = os.path.join(BOOT_DIR, "entry_gic.h")
 ENTRY_STUBS_C = os.path.join(BOOT_DIR, "entry_stubs.c")
 ENTRY_IRQ_C = os.path.join(BOOT_DIR, "entry_irq.c")
-PAYLOAD_GIC_C = os.path.join(REPO_ROOT, "stages/stage90/gic.c")
-PAYLOAD_FIQ_PROBE_C = os.path.join(REPO_ROOT, "stages/stage90/xnu_msm8974_fiq_probe.c")
+PAYLOAD_GIC_C = os.path.join(REPO_ROOT, "src/gic.c")
+PAYLOAD_FIQ_PROBE_C = os.path.join(REPO_ROOT, "src/xnu_msm8974_fiq_probe.c")
 ASSYM = os.path.join(REPO_ROOT, "out/xnu_assym/STAGE90_XNU/assym.s")
 ARM_VM_INIT_C = os.path.join(REPO_ROOT, "external/xnu-4570.1.46/osfmk/arm/arm_vm_init.c")
 

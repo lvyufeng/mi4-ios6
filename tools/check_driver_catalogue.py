@@ -95,9 +95,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 
 BUILD_SCRIPT = os.path.join(REPO_ROOT, "tools", "build_xnu_arm_kernel.sh")
-TABLE = os.path.join(REPO_ROOT, "stages", "stage90", "xnu_platform",
+TABLE = os.path.join(REPO_ROOT, "src", "platform",
                      "stage90_platform_config_tables.c")
-TREE_SOURCE = os.path.join(REPO_ROOT, "stages", "stage90", "stage90_main.c")
+TREE_SOURCE = os.path.join(REPO_ROOT, "src", "stage90_main.c")
 IOKIT = os.path.join(REPO_ROOT, "external", "xnu-4570.1.46", "iokit")
 
 PLATFORM_EXPERT_CPP = os.path.join(IOKIT, "Kernel", "IOPlatformExpert.cpp")
@@ -112,15 +112,15 @@ MEMORY_DESCRIPTOR_H = os.path.join(IOKIT, "IOKit", "IOMemoryDescriptor.h")
 # compares its mapped read against the payload's read has to be held to the *payload's* definition of
 # the register's offset and of the symbol that carries the value, and neither may be a transcription
 # into the driver.
-PAYLOAD_GIC_C = os.path.join(REPO_ROOT, "stages", "stage90", "xnu_arm_boot", "entry_gic.c")
-PAYLOAD_GIC_H = os.path.join(REPO_ROOT, "stages", "stage90", "xnu_arm_boot", "entry_gic.h")
+PAYLOAD_GIC_C = os.path.join(REPO_ROOT, "src", "entry", "entry_gic.c")
+PAYLOAD_GIC_H = os.path.join(REPO_ROOT, "src", "entry", "entry_gic.h")
 
 # 500: the payload file that *defines* the arming call, and the driver's side of the same ABI is a
 # declaration in `entry_gic.h`. Three places hold one signature - the header, the definition, the
 # driver's own `extern "C"` line - and the two files cannot see each other, so the comparison is this
 # check's. That is claim 15's reason for the registry's two prototypes, applied to the call that makes a
 # line arrive rather than the one that makes it serviceable.
-PAYLOAD_IRQ_C = os.path.join(REPO_ROOT, "stages", "stage90", "xnu_arm_boot", "entry_irq.c")
+PAYLOAD_IRQ_C = os.path.join(REPO_ROOT, "src", "entry", "entry_irq.c")
 
 # The two provider classes the kernel itself creates, and so the two a personality may name without any
 # device-tree fact behind it: `IOPlatformExpertDevice` is the root nub `StartIOKit` builds

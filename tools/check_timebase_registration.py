@@ -68,7 +68,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 
 XNU = os.path.join(REPO_ROOT, "external/xnu-4570.1.46")
-BOOT = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot")
+BOOT = os.path.join(REPO_ROOT, "src/entry")
 
 ENTRY_H = os.path.join(BOOT, "entry_timebase.h")
 ENTRY_C = os.path.join(BOOT, "entry_timebase.c")

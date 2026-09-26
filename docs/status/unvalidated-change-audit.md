@@ -40,7 +40,7 @@ still reasons that way. One correction and one qualification, from experiment 51
 
 - **The timeout is 25 s bark / 28 s bite, not 30/33.** The 20-bit register truncation this document
   describes in §1 was fixed by lowering the timeout (`STAGE90_HW_WATCHDOG_TIMEOUT_S = 25u`,
-  `_BITE_GAP_S = 3u` in `stages/stage90/stage90.h`), so the "~33 s" figures below are the pre-fix
+  `_BITE_GAP_S = 3u` in `src/stage90.h`), so the "~33 s" figures below are the pre-fix
   ones. `adbd`-side recovery is ~28 s, not ~33 s.
 - **A bite is proved by a device that came back, and on 2026-09-21 one did not.** The net recovered
   every run from experiments 506 to 515 and 516's two runs returned on XNU's own `MACH Reboot`, but

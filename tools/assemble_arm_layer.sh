@@ -38,8 +38,8 @@ TOOLS_DIR=$PWD
 REPO_ROOT=$(cd "$TOOLS_DIR/.." && pwd)
 
 XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
-SHIMS=$REPO_ROOT/stages/stage90/shims
-SHIMS_ARM=$REPO_ROOT/stages/stage90/shims_arm
+SHIMS=$REPO_ROOT/src/shims
+SHIMS_ARM=$REPO_ROOT/src/shims_arm
 CONFIG=${XNU_KERNEL_CONFIG:-RELEASE}
 # The configuration's own options, which this script did not use to pass at all - see
 # `tools/xnu_config/arm_asm_defines.sh` for what that cost and for the one exception. The toolchain
@@ -108,7 +108,7 @@ mkdir -p "$OUT" "$OUT/translated"
 # `$OUT/translated/<path>`. Through the symlink that is `$XNU/<path>`: **every translated copy was a
 # write into Apple's source**, four files were rewritten in place on every run of this script, and
 # the tool's own comment said "the tree is never written to" while it did exactly that. Found by the
-# payload's `external_clean` gate — `stages/stage90/xnu_compile_graph_scan.py` runs `git status` in
+# payload's `external_clean` gate — `scripts/xnu_compile_graph_scan.py` runs `git status` in
 # `external/xnu-4570.1.46` and had been failing `stage90_xnu_compile_graph_no_external_mutation` on a
 # checkout this project believes it never touches. See experiment-155.
 #
@@ -157,7 +157,7 @@ ASFLAGS=(
 # discarded by this line, which the first version of this change did.
 ASFLAGS+=("-DSTAGE90_IDLE_STACK_SIZE=$IDLE_STACK_SIZE")
 INCLUDES=(
-    -I"$ASSYM" -I"$REPO_ROOT/stages/stage90/xnu_arm_boot"
+    -I"$ASSYM" -I"$REPO_ROOT/src/entry"
     -I"$OPTION_HEADERS" -I"$DEVICE_HEADERS"
     -I"$REPO_ROOT/out/xnu_generated" -I"$REPO_ROOT/out/mach_headers"
     -I"$XNU/osfmk" -I"$XNU/bsd" -I"$XNU/libkern" -I"$XNU/EXTERNAL_HEADERS"

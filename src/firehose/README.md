@@ -12,7 +12,7 @@ The files here are that implementation, ported rather than written:
 | `firehose_buffer.c` | `apple-oss-distributions/libdispatch`, `src/firehose/firehose_buffer.c`, Apache-2.0 (the licence header is the file's own, unmodified) |
 | `firehose_buffer_internal.h`, `firehose_buffer_private.h`, `firehose_inline_internal.h`, `firehose_internal.h` | the same release's firehose headers |
 
-The one file this project already ships for this seam — `stages/stage90/shims_arm/os/firehose_buffer_private.h`,
+The one file this project already ships for this seam — `src/shims_arm/os/firehose_buffer_private.h`,
 added by experiment 162 — is what lets `bsd/kern/subr_log.c` compile today.
 
 ## The port, and its status

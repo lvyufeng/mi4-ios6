@@ -78,7 +78,7 @@ CALLED_WHEN_TELEMETRY = ("telemetry_needs_record", "telemetry_mark_curthread")
 # own assembly (a different script, the same `arm_asm_defines.sh`).
 OBJECTS = {
     "kernel_layer": ("out/xnu_asm_obj/locore.o", "tools/assemble_arm_layer.sh"),
-    "entry_image": ("out/stage90/xnu_arm_entry_locore.o", "stages/stage90/xnu_arm_assemble.sh"),
+    "entry_image": ("out/stage90/xnu_arm_entry_locore.o", "scripts/xnu_arm_assemble.sh"),
 }
 
 # The declaration this project's configuration is written with, and the file it lives in. Read as

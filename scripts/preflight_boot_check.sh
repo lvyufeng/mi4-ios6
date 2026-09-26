@@ -16,8 +16,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-STAGE_DIR=$PWD
-REPO_ROOT=$(cd "$STAGE_DIR/../.." && pwd)
+SCRIPT_DIR=$PWD
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+SRC_DIR=$REPO_ROOT/src
 OUT=$REPO_ROOT/out/stage90
 
 ALLOW_PREFLIGHT=0
@@ -241,7 +242,7 @@ echo "== image freshness =="
 # message at all under `set -e`/`pipefail` - but `|| true` does not preserve the distinction the note
 # above is about, it deletes it in the direction this gate exists to prevent: with the scan empty, the
 # test below finds nothing newer than the image and the gate prints its PASS. Measured by running this
-# block with `STAGE_DIR` pointed at a directory that does not exist, and again at one with mode 000
+# block with `SRC_DIR` pointed at a directory that does not exist, and again at one with mode 000
 # (uid 1001, so the test was meaningful): both printed "PASS: no source file is newer than the image".
 # A scan that could not look is not a scan that found nothing, and "nothing is newer" is a clearance.
 # This is the same defect as the entry-sources clause's empty scan below, reached from the other side -
@@ -251,18 +252,29 @@ echo "== image freshness =="
 # discarded so the reason is in the output rather than only in a comment.
 #
 # The window is narrow and not empty: both roots are resolved from the script's own location
-# (`$STAGE_DIR=$PWD` after `cd "$(dirname "$0")"`, `$REPO_ROOT=$STAGE_DIR/../..`), so the script's
-# directory is present by construction and what this catches is the other root - a relocated or partial
-# tree with no `tools/` - plus anything that removes a root mid-run.
-STALE=$(find "$STAGE_DIR" -maxdepth 1 -type f \
+# (`$SCRIPT_DIR=$PWD` after `cd "$(dirname "$0")"`, `$REPO_ROOT=$SCRIPT_DIR/..`, `$SRC_DIR=$REPO_ROOT/src`),
+# so the tree's own root is present by construction and what this catches is the other root - a
+# relocated or partial tree with no `tools/` - plus anything that removes a root mid-run.
+#
+# **THE ROOT MOVED WITH THE SOURCES IN THE 2026-09-26 RESTRUCTURE, AND `-maxdepth 1` DID NOT WIDEN.**
+# The scan used to be rooted at the script's own directory because the script sat in the directory it
+# scanned. The payload's sources are now `src/`, so the root is `$SRC_DIR` and the arguments are
+# otherwise unchanged - deliberately, because widening to `-r` would put back exactly the class of
+# false refusal the paragraph below is about. What `-maxdepth 1` at `src/` covers is *the same set of
+# files* it covered at the old root: all 67 payload `.c` files, the 5 headers, the 3 `.S` and the 2
+# `.ld` are flat in `src/`, and none of them moved one level down. The subtrees under `src/` hold
+# things `build.sh` does not compile (`entry/` and `supply/` feed the *entry* image, `platform/` feeds
+# the host-only compile proof) or things it reaches through `-I` (`shims/`, `shims_arm/`), and their
+# mtimes are not a statement about this image for the reason below.
+STALE=$(find "$SRC_DIR" -maxdepth 1 -type f \
          \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.ld' \) \
          -newer "$IMAGE" -printf '%f\n' | sort) \
-  || fail "the freshness scan of $STAGE_DIR failed rather than finished, so this gate has no answer to \"is a source newer than the image\" - and an empty scan must not be read as \"none is\""
+  || fail "the freshness scan of $SRC_DIR failed rather than finished, so this gate has no answer to \"is a source newer than the image\" - and an empty scan must not be read as \"none is\""
 # **533 put the entry image's own sources in this sweep for one commit, and 533 removed them again -
 # because an mtime is the wrong measurement for that directory and the refusal it produced was of a
 # correct tree.** The entry sources are one directory down and `-maxdepth 1` never looked at them,
 # which was true; but comparing their mtimes against the *payload image's* mtime asks about a file
-# the payload's build never opens. `build.sh` consumes exactly one thing from `xnu_arm_boot/` -
+# the payload's build never opens. `build.sh` consumes exactly one thing from `src/entry/` -
 # `out/stage90/xnu_arm_entry.bin`, byte-embedded at `build.sh:93` - and mentions `build_entry.sh`
 # only in prose, so a newer build script cannot make the payload stale. Measured on the committed
 # tree at 4787622, `git status` empty: `build_entry.sh` 17:53:35 against the image it had produced
@@ -291,7 +303,7 @@ if [[ -n $STALE || -n $BUILD_TOOLS_NEWER ]]; then
   # actively harmful one.** Two different events produce this line and the gate cannot tell them apart:
   # an edit that was not rebuilt, and a `git checkout` / mirror that rewrote an *unchanged* file and so
   # bumped its mtime. Measured (2026-09-22): committing 533 and fast-forwarding master left
-  # xnu_arm_boot/build_entry.sh and entry_trace.c at 17:30:27 with `git diff HEAD` empty, two minutes
+  # src/entry/build_entry.sh and entry_trace.c at 17:30:27 with `git diff HEAD` empty, two minutes
   # after the 17:28 image they had in fact produced - a false stale, and the safe direction, but the
   # operator's next move is a rebuild and a blind `./build.sh` drops -DSTAGE90_XNU_ENTRY back to the
   # header's default 0, i.e. it rebuilds a payload that never jumps into XNU. Hence the second half of
@@ -488,7 +500,7 @@ echo "== the entry image's own switches =="
 # front of it, computed at gate time.
 ENTRY_CFG=$OUT/xnu_arm_entry-config.txt
 [[ -f $ENTRY_CFG ]] \
-  || fail "no $ENTRY_CFG - the entry image's switches are recorded there by build_entry.sh, and without it this gate can prove which bytes the image carries but not which arm they are; rebuild the entry image (stages/stage90/xnu_arm_boot/build_entry.sh) and then ./build.sh"
+  || fail "no $ENTRY_CFG - the entry image's switches are recorded there by build_entry.sh, and without it this gate can prove which bytes the image carries but not which arm they are; rebuild the entry image (src/entry/build_entry.sh) and then ./build.sh"
 _readable "$ENTRY_CFG" "which arm this image is, and the fourteen switches it was built with, are read out of it"
 recorded_sha=$(awk -F= '$1 == "STAGE90_XNU_ENTRY_SHA256" { print $2 }' "$ENTRY_CFG")
 [[ -n $recorded_sha ]] \
@@ -718,7 +730,7 @@ done
 # contradicted a comment.**
 #
 # **The bound is READ, not restated, and that is the repair rather than a style choice.** Both numbers have
-# exactly one definition - the `#if ... < lo || ... > hi` guard in `xnu_arm_boot/entry_storage.c`, the same
+# exactly one definition - the `#if ... < lo || ... > hi` guard in `src/entry/entry_storage.c`, the same
 # line the compiler refuses on when a build names a rung that does not exist - so this clause parses that
 # line. A rung the ladder grows is then a bound this gate picks up with no edit here, and a hand-kept copy
 # of the ladder (the shape 683/686/690/692 each added one more line to) stops being a thing this file has.
@@ -735,7 +747,7 @@ _rung_guard() {   # $1 = the key; prints "<lo> <hi>" out of that key's own `#if`
       match($0, /> [0-9]+/); hi = substr($0, RSTART + 2, RLENGTH - 2)
       print lo, hi
       exit
-    }' "$STAGE_DIR/xnu_arm_boot/entry_storage.c" 2>/dev/null
+    }' "$SRC_DIR/entry/entry_storage.c" 2>/dev/null
 }
 RUNG_KEYS=(STAGE90_XNU_STORAGE_PROBE STAGE90_XNU_PWR_WAIT_TICKS)
 # **There is no `_rungmiss` here, and the reason is measured rather than stylistic.** The first draft had
@@ -768,9 +780,9 @@ done
 [[ -z $_rungdup ]] \
   || fail "$ENTRY_CFG defines$_rungdup more than once: one rung with two definitions, and a gate that reads either of them is a gate that compared neither"
 [[ -z $_rungnb ]] \
-  || fail "this gate could not read the ladder's own bound for$_rungnb out of xnu_arm_boot/entry_storage.c, so it cannot say whether the record's value is a rung that exists - and a bound it cannot read is not a bound it may assume. Check that the file is present and that its \`#if <KEY> < lo || <KEY> > hi\` guard is still one line; if the guard was reformatted, this clause has to be taught the new shape rather than left answering 'in range' from a parse that found nothing"
+  || fail "this gate could not read the ladder's own bound for$_rungnb out of src/entry/entry_storage.c, so it cannot say whether the record's value is a rung that exists - and a bound it cannot read is not a bound it may assume. Check that the file is present and that its \`#if <KEY> < lo || <KEY> > hi\` guard is still one line; if the guard was reformatted, this clause has to be taught the new shape rather than left answering 'in range' from a parse that found nothing"
 [[ -z $_rungbad ]] \
-  || fail "the record's rung key(s)$_rungbad - and the bound is not this gate's opinion: it is the guard in xnu_arm_boot/entry_storage.c that refuses the build, so a record outside it describes either a rung that does not exist or a value that is not a number, and the run would go out with a story about the storage line that nothing supports. Read the ladder's own \`#error\` at that guard - it spells out every rung - and correct the record, or rebuild the entry image with the rung this arm really needs"
+  || fail "the record's rung key(s)$_rungbad - and the bound is not this gate's opinion: it is the guard in src/entry/entry_storage.c that refuses the build, so a record outside it describes either a rung that does not exist or a value that is not a number, and the run would go out with a story about the storage line that nothing supports. Read the ladder's own \`#error\` at that guard - it spells out every rung - and correct the record, or rebuild the entry image with the rung this arm really needs"
 # **And the rung is PRINTED, because a checked value the operator cannot see is a check the operator cannot
 # read.** The path and the bound are named here so that the sentence an operator takes to the log is the
 # gate's own reading of the record and not a rung number they have to remember the meaning of: the ladder
@@ -782,7 +794,7 @@ do
   _rv=$(awk -F= -v k="$_rk" '$1 == k { print $2 }' "$ENTRY_CFG")
   _rg=$(_rung_guard "$_rk")
   [[ -n $_rg ]] || continue
-  printf '  %s=%s  (within [%s, %s], the bound its own `#if` guard declares in xnu_arm_boot/entry_storage.c;\n' \
+  printf '  %s=%s  (within [%s, %s], the bound its own `#if` guard declares in src/entry/entry_storage.c;\n' \
          "$_rk" "$_rv" "${_rg% *}" "${_rg#* }"
   printf '      what that number DOES is spelled out at that guard, in the `#error` the build refuses on -\n'
   printf '      this gate prints the value and the bound and deliberately does not restate the rungs)\n'
@@ -851,7 +863,7 @@ if [[ $V_IDLE_NO_SLEEP -eq 1 ]]; then
   # **That paragraph printed a record count, a byte size and a percentage - and two lines apart it
   # printed the console's limit while promising that the limit "is not typed here", a sentence falsified
   # by the line after it, which is the defect this file names most often.** Both figures come out of
-  # `stages/stage90/baseline-readings.txt` (627) now: 38 readings over the four captures the rungs are
+  # `records/baseline-readings.txt` (627) now: 38 readings over the four captures the rungs are
   # measured against, each written as the runner's own reader, every one re-derived from the log it
   # names by `tools/verify_baseline_readings.sh`. A figure read from that record cannot go stale in this
   # file, which is the whole of the 520 rule. The two things it cannot supply - a count of live records
@@ -862,7 +874,7 @@ if [[ $V_IDLE_NO_SLEEP -eq 1 ]]; then
   # **None of this can refuse, and that is deliberate**: this gate must not gain a way to stop a press,
   # so every derivation is guarded (`set -euo pipefail` is on, and a `grep -c` that matched nothing is
   # exit 1) and every value is validated before it reaches a sentence.
-  BASELINE_RECORD=$STAGE_DIR/baseline-readings.txt
+  BASELINE_RECORD=$REPO_ROOT/records/baseline-readings.txt
   REC_NLOGS="?"; REC_CAP=""; REC_BYTES=""; REC_BYTES_LOG=""; REC_LIVE=""
   if [[ -r $BASELINE_RECORD ]]; then
     _n=$(awk '$1 ~ /^log=/{n++} END{print n+0}' "$BASELINE_RECORD" 2>/dev/null || true)
@@ -902,14 +914,14 @@ if [[ $V_IDLE_NO_SLEEP -eq 1 ]]; then
       REC_CHANNEL="the ${REC_NLOGS} captures the rungs are measured on published ${REC_LIVE} live-channel records each, against a capacity this gate could not derive"
     fi
   elif [[ ! -r $BASELINE_RECORD ]]; then
-    REC_CHANNEL="the record counts of the captures the rungs are measured on are not derivable on this host, because \`stages/stage90/baseline-readings.txt\` is not readable here"
+    REC_CHANNEL="the record counts of the captures the rungs are measured on are not derivable on this host, because \`records/baseline-readings.txt\` is not readable here"
   else
     REC_CHANNEL="the record counts of the captures the rungs are measured on are not derivable on this host, because the copies \`baseline-readings.txt\` names are not in ${OUT}/captures - read them there, where \`tools/verify_baseline_readings.sh\` re-derives them from the logs they name"
   fi
   if [[ -n $REC_BYTES ]]; then
-    REC_MARGIN="The largest of the ${REC_NLOGS} captures the rungs are measured on is \`${REC_BYTES_LOG}\` at ${REC_BYTES} bytes, read out of \`stages/stage90/baseline-readings.txt\` (627), every line of which \`tools/verify_baseline_readings.sh\` re-derives from the log it names"
+    REC_MARGIN="The largest of the ${REC_NLOGS} captures the rungs are measured on is \`${REC_BYTES_LOG}\` at ${REC_BYTES} bytes, read out of \`records/baseline-readings.txt\` (627), every line of which \`tools/verify_baseline_readings.sh\` re-derives from the log it names"
   else
-    REC_MARGIN="The largest capture's size is not derivable here, because \`stages/stage90/baseline-readings.txt\` is not readable - it is recorded there, where \`tools/verify_baseline_readings.sh\` re-derives it from the log it names"
+    REC_MARGIN="The largest capture's size is not derivable here, because \`records/baseline-readings.txt\` is not readable - it is recorded there, where \`tools/verify_baseline_readings.sh\` re-derives it from the log it names"
   fi
   echo "      **And that whole list is conditioned on something that is not about the arm, so it is named here"
   echo "      rather than left to the reader.** An absent \`xnu_live_*\` key is a reading about the machine"
@@ -1021,15 +1033,15 @@ if [[ $V_SLOT_NULL -eq 1 ]]; then
   # reader that may not be broken. The `-f` branch is here rather than in `_readable` because
   # `_readable`'s `-e`/`-r` pair is true of a directory of that name; the eight artifact sites above
   # each have their own `[[ -f ]]` for the same reason.
-  [[ -f $STAGE_DIR/run_and_capture.sh ]] \
-    || fail "no $STAGE_DIR/run_and_capture.sh, or it is not a regular file - this branch's sentence is about what that file's summary prints, so a gate that cannot open it has no verdict about what it does or does not name; and its absence also means the next command of the procedure cannot run at all. Nothing is rebuilt by this refusal"
-  _readable "$STAGE_DIR/run_and_capture.sh" "the summary text this branch's sentence describes is read out of it"
-  if grep -q 'xnu_live_slot_pre_calls=' "$STAGE_DIR/run_and_capture.sh"; then
+  [[ -f $SCRIPT_DIR/run_and_capture.sh ]] \
+    || fail "no $SCRIPT_DIR/run_and_capture.sh, or it is not a regular file - this branch's sentence is about what that file's summary prints, so a gate that cannot open it has no verdict about what it does or does not name; and its absence also means the next command of the procedure cannot run at all. Nothing is rebuilt by this refusal"
+  _readable "$SCRIPT_DIR/run_and_capture.sh" "the summary text this branch's sentence describes is read out of it"
+  if grep -q 'xnu_live_slot_pre_calls=' "$SCRIPT_DIR/run_and_capture.sh"; then
     echo "      So a run of this arm prints two UNREAD lines for the slot's own capture, naming"
     echo "      xnu_live_slot_pre_calls - that is this switch and not a disagreement, and a successful"
     echo "      boot of this arm carries them. Read them as 'the comparison could not be made here'."
   else
-    echo "      **And $STAGE_DIR/run_and_capture.sh does not name xnu_live_slot_pre_calls anywhere**, so"
+    echo "      **And $SCRIPT_DIR/run_and_capture.sh does not name xnu_live_slot_pre_calls anywhere**, so"
     echo "      the summary of a run of this arm says NOTHING about the slot's own capture - neither a"
     echo "      reading nor an absence - and silence there is this project's own silence rule. Fix the"
     echo "      reader before spending a boot on this arm, or the run's verdict will look complete."
@@ -1182,7 +1194,7 @@ echo "== the entry image's own sources =="
 # not reproduce - so the repair is to ask the question the refusal was standing in for.
 #
 # `build_entry.sh` writes `out/xnu_arm_entry-sources.txt` beside the image: every regular file in
-# `xnu_arm_boot/`, hashed, with the image's own sha256 on its second line. This recomputes the same
+# `src/entry/`, hashed, with the image's own sha256 on its second line. This recomputes the same
 # list by the same rule and refuses on any difference, which catches three things the mtime sweep
 # either missed or got backwards:
 #
@@ -1205,7 +1217,7 @@ echo "== the entry image's own sources =="
 # read as this one's - which is the one way a content check can be satisfied by the wrong content.
 ENTRY_SRC_MANIFEST=$OUT/xnu_arm_entry-sources.txt
 [[ -f $ENTRY_SRC_MANIFEST ]] \
-  || fail "no $ENTRY_SRC_MANIFEST - build_entry.sh writes it beside the image, and without it nothing compares the entry image with the sources it claims to be built from. Rebuild the entry image (stages/stage90/xnu_arm_boot/build_entry.sh)"
+  || fail "no $ENTRY_SRC_MANIFEST - build_entry.sh writes it beside the image, and without it nothing compares the entry image with the sources it claims to be built from. Rebuild the entry image (src/entry/build_entry.sh)"
 _readable "$ENTRY_SRC_MANIFEST" "the list of sources this entry image claims to be built from is read out of it"
 manifest_sha=$(awk -F= '$1 == "STAGE90_XNU_ENTRY_SHA256" { print $2 }' "$ENTRY_SRC_MANIFEST")
 [[ -n $manifest_sha ]] \
@@ -1220,7 +1232,7 @@ manifest_sha=$(awk -F= '$1 == "STAGE90_XNU_ENTRY_SHA256" { print $2 }' "$ENTRY_S
 # so that line has **two** fields: `$1` is the hash and `$2` is the name - there is no `$3`. Written
 # as `$3 " " $1` this produced a leading space and the hash and **dropped the filename**, which is
 # measured on the real directory rather than argued: the writer's own pipeline and this one both run
-# over `stages/stage90/xnu_arm_boot/` give `comm -3` **40 lines for 20 files** - every file reported
+# over `src/entry/` give `comm -3` **40 lines for 20 files** - every file reported
 # as both changed and added, with `comm` additionally printing `file 2 is not in sorted order`,
 # because the space-prefixed lines sort differently from the `name hash` ones. The refusal would then
 # name **hashes** where it promises filenames. With `$2` the same two pipelines give **0**. So the
@@ -1232,7 +1244,7 @@ ENTRY_SRC_RECORDED=$(awk '/^[0-9a-f][0-9a-f]*  / { print $2 " " $1 }' "$ENTRY_SR
 # `|| true` for the same reason as the sweeps above: a `find` that cannot read the directory exits
 # non-zero, and under `set -e` the assignment would end the script with no message at all - a scan
 # that could not look is not a scan that found nothing, in the direction that fails quietly.
-ENTRY_SRC_NOW=$(cd "$STAGE_DIR/xnu_arm_boot" 2>/dev/null && find . -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | LC_ALL=C sort \
+ENTRY_SRC_NOW=$(cd "$SRC_DIR/entry" 2>/dev/null && find . -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | LC_ALL=C sort \
                 | while IFS= read -r _f; do
                     printf '%s %s\n' "$_f" "$(sha256sum -- "$_f" | awk '{print $1}')"
                   done || true)
@@ -1240,18 +1252,18 @@ ENTRY_SRC_NOW=$(cd "$STAGE_DIR/xnu_arm_boot" 2>/dev/null && find . -maxdepth 1 -
 # was.** The `|| true` above keeps a directory `find` cannot read from ending the script with no message
 # at all - but it also makes that failure silent in a misleading direction: with `ENTRY_SRC_NOW` empty,
 # *every* recorded file appears as a difference, and the clause refuses with "the entry image is not the
-# build of these sources", naming all twenty of them. Measured by pointing `STAGE_DIR` at a directory
-# that has no `xnu_arm_boot/` under it: the output began `  on disk:  ` with no filename at all - a line
+# build of these sources", naming all twenty of them. Measured by pointing `SCRIPT_DIR` at a directory
+# that has no `src/entry/` under it: the output began `  on disk:  ` with no filename at all - a line
 # whose second column is empty - and then listed all twenty names under `manifest:`, which is the same
 # 40-lines-for-20-files signature the `$2`-vs-`$3` field defect produces, arrived at from the other side.
 # The distinction the `|| true` was written to preserve is exactly the one it loses, so it is asserted
 # here rather than assumed: an empty scan is a tool that could not reach the directory, and the honest
 # answer to "did the sources change" is then "nothing was read", not "all of them did".
 [[ -n $ENTRY_SRC_NOW ]] \
-  || fail "the scan of $STAGE_DIR/xnu_arm_boot produced no files at all, while the manifest names $(printf '%s\n' "$ENTRY_SRC_RECORDED" | grep -c . || true) - so this is a scan that could not look, not a tree in which every source changed. Check that the directory exists and is readable before reading this clause's answer as one about content"
+  || fail "the scan of $SRC_DIR/entry produced no files at all, while the manifest names $(printf '%s\n' "$ENTRY_SRC_RECORDED" | grep -c . || true) - so this is a scan that could not look, not a tree in which every source changed. Check that the directory exists and is readable before reading this clause's answer as one about content"
 # **`LC_ALL=C` on `comm` itself, not only on the sorts that feed it - because the two sides were
 # sorted in one locale and compared in another, and `comm` says so out loud.** Run under this host's
-# ambient `LANG=en_US.UTF-8` against the real `xnu_arm_boot/`, the line below printed
+# ambient `LANG=en_US.UTF-8` against the real `src/entry/`, the line below printed
 # `comm: file 1 is not in sorted order`, `comm: file 2 is not in sorted order` and
 # `comm: input is not in sorted order`, and exited 1. Both files *are* sorted - by `LC_ALL=C`, three
 # lines up - and glibc's `en_US.UTF-8` collation ignores punctuation at the primary level, so it orders
@@ -1284,7 +1296,7 @@ if [[ -n $ENTRY_SRC_DIFF ]]; then
   printf '%s\n' "$ENTRY_SRC_DIFF" | sed 's/^\t/  on disk:  /; t; s/^/  manifest: /' | awk 'NF'
   echo "  (manifest bound to entry image $manifest_sha, $ENTRY_BIN's own hash)"
   # **539: this clause fired for real, and the remedy it printed first was the harmful one.**
-  # Measured 2026-09-22: a build input in xnu_arm_boot/ was edited *after* the frozen entry image was
+  # Measured 2026-09-22: a build input in src/entry/ was edited *after* the frozen entry image was
   # built - the manifest recorded `build_entry.sh 68528ccb...` where the file on disk was
   # `1b4e549a...`, and the committed version a third hash again - so the gate refused, correctly. But
   # the text then said "rebuild the entry image **and then ./build.sh**", and that second half is the
@@ -1303,9 +1315,9 @@ if [[ -n $ENTRY_SRC_DIFF ]]; then
   # mtime - the gate cannot tell an edit from a checkout, so it says so rather than prescribing - and
   # the same reason that clause now carries the switches the run needs. What is *not* left to prose is
   # the hash to compare against: the record's own `STAGE90_XNU_ENTRY_SHA256`, read 60 lines above.
-  fail "the entry image is not the build of these sources: $ENTRY_SRC_NAMES. Two situations print this line and the gate cannot tell them apart, so it names the test rather than presuming the answer. First rebuild the entry image with the switches this arm needs - they are printed under \"the entry image's own switches\" above, and naming them is the whole rebuild: stages/stage90/xnu_arm_boot/build_entry.sh is byte-for-byte reproducible and writes nothing the payload reads except the bin. Then compare: if sha256sum out/stage90/xnu_arm_entry.bin still equals the STAGE90_XNU_ENTRY_SHA256 the record names, the changed source fed no compiler input, the payload's blob clause is already satisfied, and ./build.sh must NOT be run - it does not reproduce (408) and would spend the frozen boot image for a change in nothing the compiler saw. If the hash differs, the arm really is a new one and ./build.sh is owed, with STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' or the new image never jumps into XNU. Neither branch is a checkout: a commit or a git checkout that rewrites an unchanged source still reaches this line, and here that case is free, because the rebuild is reproducible and the hash test settles it in one command"
+  fail "the entry image is not the build of these sources: $ENTRY_SRC_NAMES. Two situations print this line and the gate cannot tell them apart, so it names the test rather than presuming the answer. First rebuild the entry image with the switches this arm needs - they are printed under \"the entry image's own switches\" above, and naming them is the whole rebuild: src/entry/build_entry.sh is byte-for-byte reproducible and writes nothing the payload reads except the bin. Then compare: if sha256sum out/stage90/xnu_arm_entry.bin still equals the STAGE90_XNU_ENTRY_SHA256 the record names, the changed source fed no compiler input, the payload's blob clause is already satisfied, and ./build.sh must NOT be run - it does not reproduce (408) and would spend the frozen boot image for a change in nothing the compiler saw. If the hash differs, the arm really is a new one and ./build.sh is owed, with STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' or the new image never jumps into XNU. Neither branch is a checkout: a commit or a git checkout that rewrites an unchanged source still reaches this line, and here that case is free, because the rebuild is reproducible and the hash test settles it in one command"
 fi
-echo "the entry image is the build of xnu_arm_boot/ as it stands: $(printf '%s\n' "$ENTRY_SRC_NOW" | grep -c . || true) file(s), every one matching the manifest, and none the manifest does not name"
+echo "the entry image is the build of src/entry/ as it stands: $(printf '%s\n' "$ENTRY_SRC_NOW" | grep -c . || true) file(s), every one matching the manifest, and none the manifest does not name"
 
 echo
 echo "== the arm the record owes =="
@@ -1314,7 +1326,7 @@ echo "== the arm the record owes =="
 # `build_entry.sh` rewrites `xnu_arm_entry-config.txt` and `xnu_arm_entry-sources.txt` **bound to
 # the new image's hash**. So the chain was satisfied by any internally consistent tree, and
 # nothing asked *which arm* these bytes are. This does, and it reads the one record in the chain
-# the build never writes: `stages/stage90/revert-set.txt`, whose own header says it plainly -
+# the build never writes: `records/revert-set.txt`, whose own header says it plainly -
 # *"a record the build writes agrees with itself and constrains nothing"*.
 #
 # The question: do the bytes in $OUT equal, file for file, ONE of the sets recorded there?
@@ -1326,7 +1338,7 @@ echo "== the arm the record owes =="
 #     is what the readiness tool's `--set` argument prevents by name and this clause cannot.
 #   * The near-miss is named (`10/11 [differ: xnu_arm_entry.bin]`), so the operator sees *how* it is
 #     wrong and not only *that* it is.
-REVERT_RECORD=$STAGE_DIR/revert-set.txt
+REVERT_RECORD=$REPO_ROOT/records/revert-set.txt
 _readable "$REVERT_RECORD" "the sets this project can revert out/ to are read out of it"
 _arm_match=""
 _arm_partial=""
@@ -1635,10 +1647,10 @@ PY
   # run**: not XNU's panic-restart, not the payload's own software dead-man. The only reset path left is
   # the net, and what a capture of that regime looks like is therefore "the records simply stop, after
   # the work, with no fault text". That is the shape to expect, and it is not a failure.
-  WDT_TMO=$(sed -n 's/^#define STAGE90_HW_WATCHDOG_TIMEOUT_S \([0-9][0-9]*\)u.*/\1/p' "$STAGE_DIR/stage90.h" | head -1)
-  WDT_GAP=$(sed -n 's/^#define STAGE90_HW_WATCHDOG_BITE_GAP_S \([0-9][0-9]*\)u.*/\1/p' "$STAGE_DIR/stage90.h" | head -1)
+  WDT_TMO=$(sed -n 's/^#define STAGE90_HW_WATCHDOG_TIMEOUT_S \([0-9][0-9]*\)u.*/\1/p' "$SRC_DIR/stage90.h" | head -1)
+  WDT_GAP=$(sed -n 's/^#define STAGE90_HW_WATCHDOG_BITE_GAP_S \([0-9][0-9]*\)u.*/\1/p' "$SRC_DIR/stage90.h" | head -1)
   if [[ -z $WDT_TMO || -z $WDT_GAP ]]; then
-    fail "STAGE90_HW_WATCHDOG_TIMEOUT_S / _BITE_GAP_S could not be read from $STAGE_DIR/stage90.h, so the ceiling this arm runs under cannot be stated - and a gate that describes a run without its ceiling is describing a different run"
+    fail "STAGE90_HW_WATCHDOG_TIMEOUT_S / _BITE_GAP_S could not be read from $SRC_DIR/stage90.h, so the ceiling this arm runs under cannot be stated - and a gate that describes a run without its ceiling is describing a different run"
   fi
   echo "  and nothing in this image pets the net, so the run is CAPPED: a run of this arm that goes well"
   echo "  also ends within the net's own interval, not when the payload stops. The two constants are read"
@@ -2160,7 +2172,7 @@ echo "All checks passed. The run is one command, which re-runs this gate with th
 echo "enters fastboot, boots the image without writing anything to storage, and captures the"
 echo "log before anything else touches the device:"
 echo
-echo "  $STAGE_DIR/run_and_capture.sh $*"
+echo "  $SCRIPT_DIR/run_and_capture.sh $*"
 echo
 # What a run's exit status can mean is read out of run_and_capture.sh here rather than asserted above
 # (the 520 rule: a claim in this gate's prose is computed at gate time from the artifact it
@@ -2172,7 +2184,7 @@ echo
 # returned to the host without returning to adb. Those are now different codes, and a sentence that
 # names one code is stale the moment the runner grows another. So this clause reads the *shape* of the
 # wait section and prints each code in the runner's own words, which cannot go stale in this file.
-RUNNER=$STAGE_DIR/run_and_capture.sh
+RUNNER=$SCRIPT_DIR/run_and_capture.sh
 REGION=$(sed -n '/^# --- 4\. wait for it to come back/,/^# --- 5\./p' "$RUNNER" 2>/dev/null || true)
 if [[ -n $REGION ]]; then
   # read in command position - leading whitespace then `exit N` - so a code named inside a message is
@@ -2462,7 +2474,7 @@ else
   # This is a reading of the file at gate time and never a claim about the coming run (563's tense
   # rule): after the run $LOG is this run's capture or absent, and this clause has already said what
   # the *parked* file's report can be quoted for.
-  FIXTURE=$STAGE_DIR/xnu_arm_boot/entry_stubs.c
+  FIXTURE=$SRC_DIR/entry/entry_stubs.c
   _lastv() { grep -ao "$1=[0-9a-fx]*" "$LOG" 2>/dev/null | tail -1 || true; }
   _ishex() { [[ $1 =~ ^0x[0-9a-f]+$ ]]; }
   _zero()  { _ishex "$1" && (( 16#${1#0x} == 0 )); }

@@ -22,8 +22,9 @@
 set -uo pipefail
 
 cd "$(dirname "$0")"
-STAGE_DIR=$PWD
-REPO_ROOT=$(cd "$STAGE_DIR/../.." && pwd)
+SCRIPT_DIR=$PWD
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+SRC_DIR=$REPO_ROOT/src
 
 XNU=$REPO_ROOT/external/xnu-4570.1.46
 [[ -d $XNU ]] || { echo "xnu-4570.1.46 not present at $XNU" >&2; exit 2; }
@@ -47,14 +48,14 @@ INCLUDES=(
   -I$XNU/pexpert
   -I$XNU/osfmk/arm
   -I$XNU/bsd/arm
-  -I$STAGE_DIR/shims
-  -I$STAGE_DIR/shims/kern
-  -I$STAGE_DIR/shims/mach
-  -I$STAGE_DIR/shims_arm
-  -I$STAGE_DIR/shims_arm/kern
-  -I$STAGE_DIR/shims_arm/mach
-  -I$STAGE_DIR/shims_arm/sys
-  -I$STAGE_DIR/shims_arm/sys/_pthread
+  -I$SRC_DIR/shims
+  -I$SRC_DIR/shims/kern
+  -I$SRC_DIR/shims/mach
+  -I$SRC_DIR/shims_arm
+  -I$SRC_DIR/shims_arm/kern
+  -I$SRC_DIR/shims_arm/mach
+  -I$SRC_DIR/shims_arm/sys
+  -I$SRC_DIR/shims_arm/sys/_pthread
 )
 
 # The force-included set. osfmk/arm/simple_lock.h defines decl_simple_lock_data and is included by

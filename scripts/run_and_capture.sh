@@ -69,7 +69,7 @@ set -euo pipefail
 # the caller and not to this script.** This file `cd`s to its own directory at line 58 (so that every
 # relative path it uses internally is stable), and until 615 that `cd` also silently re-based the paths
 # it was *given*: `--summarise out/stage90/captures/533-....txt` from the repository root resolved
-# against `stages/stage90/` and refused with `no such log`, naming a path that exists. Measured before
+# against `src/` and refused with `no such log`, naming a path that exists. Measured before
 # the fix, three ways - from the repo root, and from the capture's own directory with the bare filename -
 # all three refused, and only an absolute path worked. The message blamed the file for a fact about this
 # script's working directory, which is the exact shape of a die that names the artifact when the truth is
@@ -77,8 +77,9 @@ set -euo pipefail
 # reader produces is a reading OF a log, and the log is named by the caller.
 INVOKE_PWD=$PWD
 cd "$(dirname "$0")"
-STAGE_DIR=$PWD
-REPO_ROOT=$(cd "$STAGE_DIR/../.." && pwd)
+SCRIPT_DIR=$PWD
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+SRC_DIR=$REPO_ROOT/src
 OUT=$REPO_ROOT/out/stage90
 IMAGE=$OUT/stage90-qcdt.img
 
@@ -196,7 +197,7 @@ while [[ $# -gt 0 ]]; do
       # An empty value is refused here rather than at the pin, because "the caller did not say" and
       # "the caller said nothing" are two different records (632) and only one of them is a caller who
       # does not know the answer.
-      [[ -n ${2:-} ]] || die "--expect-arm needs a recorded set name after it (e.g. --expect-arm=armed-selftest-wdog-ef0361a2). Which sets exist is in $STAGE_DIR/revert-set.txt, and readiness row 4 names the one the bytes in out/ are"
+      [[ -n ${2:-} ]] || die "--expect-arm needs a recorded set name after it (e.g. --expect-arm=armed-selftest-wdog-ef0361a2). Which sets exist is in $REPO_ROOT/records/revert-set.txt, and readiness row 4 names the one the bytes in out/ are"
       EXPECT_ARM=$2; shift 2 ;;
     --expect-arm=*)
       EXPECT_ARM=${1#--expect-arm=}
@@ -220,7 +221,7 @@ resolve_path "$SUMMARISE_ONLY"; SUMMARISE_ONLY=$RESOLVED
 # when every path was already absolute - so the line's presence is itself information.
 for _rb in $REBASED; do
   say "note: '$_rb' is a relative path, resolved against the directory this was invoked from"
-  say "      ($INVOKE_PWD), not against $STAGE_DIR. Pass an absolute path to say it exactly."
+  say "      ($INVOKE_PWD), not against $SCRIPT_DIR. Pass an absolute path to say it exactly."
 done
 unset _rb
 
@@ -238,7 +239,7 @@ unset _rb
 #
 # Deliberately not "no backticks anywhere": the notes above are full of them, and a rule that
 # refused those would be switched off the first time it was inconvenient.
-_self=$STAGE_DIR/run_and_capture.sh
+_self=$SCRIPT_DIR/run_and_capture.sh
 if [[ -r $_self ]]; then
   # `\`` is a *literal* backtick inside a double-quoted string and this file already uses it (the
   # two reading lines that quote `adb devices`), so the escaped form is stripped before the search -
@@ -1163,7 +1164,7 @@ summarise_log() {
     # sentence that says which build a comparison is made against is cheap here (the criterion line
     # below prints its own source for the same reason).
     park_min=""
-    park_src=$REPO_ROOT/stages/stage90/xnu_arm_boot/entry_trace.c
+    park_src=$REPO_ROOT/src/entry/entry_trace.c
     # **The extraction tolerates any whitespace, and the refusal it falls back to names the right
     # cause - both repaired in 632, and the reason is that this is the witness's own threshold.**
     #
@@ -2726,9 +2727,9 @@ summarise_log() {
   # follows for `ENTRY_PARK_MIN_MS`. `entry_note_read`'s pair is only a reading *against* a known
   # value, and a second copy of that value in this file is the defect this project has paid for most
   # often. Unreadable means the comparison cannot be made, which is printed as such.
-  if [[ -r $REPO_ROOT/stages/stage90/xnu_arm_boot/entry_ramdisk.s ]]; then
+  if [[ -r $REPO_ROOT/src/entry/entry_ramdisk.s ]]; then
     g_magic=$(sed -n 's/^[[:space:]]*\.equ[[:space:]]\+MH_MAGIC,[[:space:]]*\(0x[0-9a-fA-F]*\).*/\1/p' \
-               "$REPO_ROOT/stages/stage90/xnu_arm_boot/entry_ramdisk.s" | head -1 || true)
+               "$REPO_ROOT/src/entry/entry_ramdisk.s" | head -1 || true)
   fi
   if [[ -n $g_open1 && -n $g_open2 ]] \
      && (( 16#${g_open1#0x} == 0 )) && (( 16#${g_open2#0x} != 0 )); then
@@ -2904,7 +2905,7 @@ say ""
 # matters, which is the shape this project keeps paying for.
 step "the arm this press is for"
 IMAGE_SHA_PIN=""; IMAGE_BYTES_PIN=""; SET_ARM=""
-REVERT_RECORD=$STAGE_DIR/revert-set.txt
+REVERT_RECORD=$REPO_ROOT/records/revert-set.txt
 # **The resolution is a tool and not a block here, and that is the one-definition rule applied to the
 # thing this file most needs to get right.** `tools/resolve_arm_set.sh` is the single place that answers
 # "which recorded set are these bytes" - it is what `tools/verify_press_ready.sh` calls and what
@@ -2954,9 +2955,9 @@ fi
 step "gate"
 if [[ $DRY_RUN -eq 1 ]]; then
   say "would run: ./preflight_boot_check.sh ${GATE_FLAGS[*]:-}"
-  "$STAGE_DIR/preflight_boot_check.sh" "${GATE_FLAGS[@]}" || die "the gate refused"
+  "$SCRIPT_DIR/preflight_boot_check.sh" "${GATE_FLAGS[@]}" || die "the gate refused"
 else
-  "$STAGE_DIR/preflight_boot_check.sh" "${GATE_FLAGS[@]}" || die "the gate refused"
+  "$SCRIPT_DIR/preflight_boot_check.sh" "${GATE_FLAGS[@]}" || die "the gate refused"
 fi
 
 # --- 2. is the device where we expect it? ------------------------------------------------

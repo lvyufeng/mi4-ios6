@@ -4,7 +4,7 @@ Check that the offsets this image reads `struct arm_saved_state` at are the ones
 frame with - from three sources that must agree, none of which is a copy of the others.
 
 A fourth source is checked because it exists and should not be trusted on its own:
-`stages/stage90/xnu_arm_boot/assym.s` is a **hand-written** stand-in that mirrors part of this same
+`src/entry/assym.s` is a **hand-written** stand-in that mirrors part of this same
 struct (`SS_R0`, `SS_R12`, `SS_LR`, `SS_PC`, `SS_CPSR`, `SS_SIZE`), and it is first on the entry
 build's include path - so it is what `osfmk/arm/start.s` is assembled against in *this* image, while
 `out/xnu_asm_obj/locore.o` (`dataabt_from_kernel`, which is what actually builds the frame at run
@@ -36,7 +36,7 @@ account.
 `struct arm_saved_state` is Apple's layout, and this image cannot include Apple's header: neither
 `entry_stubs.c` nor `entry_trace.c` has an XNU include path (that is why 467's record reads `DFSR` and
 `DFAR` out of `cp15` with `mrc` rather than out of the frame). So the six offsets appear in
-`stages/stage90/xnu_arm_boot/entry_saved_state.h` as six numbers, and six transcribed numbers is the
+`src/entry/entry_saved_state.h` as six numbers, and six transcribed numbers is the
 shape this project has paid for twenty-four times.
 
 The three sources, and what each one is
@@ -49,7 +49,7 @@ The three sources, and what each one is
      Apple's `osfmk/arm/genassym.c` against that same header. This is the source that matters for the
      *kernel*: `osfmk/arm/locore.s` stores the frame at `SS_PC`, `SS_CPSR`, `SS_STATUS` and
      `SS_VADDR`, so if this disagrees with (1) then the assembled kernel is stale, not the image.
-  3. `stages/stage90/xnu_arm_boot/entry_saved_state.h` - what *this* image reads the frame at.
+  3. `src/entry/entry_saved_state.h` - what *this* image reads the frame at.
 
 A fourth agreement is checked because it reaches the same six numbers from a different direction:
 `ACT_PCBDATA` is the offset of the user PCB's saved state inside the thread's `arm_context`, and the
@@ -76,7 +76,7 @@ two numbers are already known from 472's and 473's logs, so that comparison has 
 The timer step reads four words of `struct cpu_data` - the software decrementer and the three function
 pointers `cpu_timebase_init` copies out of `rtclock_timebase_func` - and it reads them at a place
 (inside `arm_init`, at the first `fiq_context_init`) where there is no frame to check them against. So
-they are transcribed into `stages/stage90/xnu_arm_boot/entry_timebase.h` and compared here against the
+they are transcribed into `src/entry/entry_timebase.h` and compared here against the
 same generated `assym.s`'s `CPU_*`, in both directions, plus one property the four numbers have to
 have jointly: they are **four consecutive words**, in that order. That last one is what makes the read
 a read of one block, and it is the property a per-value comparison cannot see. The failure it guards
@@ -96,13 +96,13 @@ REPO_ROOT = os.path.dirname(HERE)
 XNU = os.path.join(REPO_ROOT, "external/xnu-4570.1.46")
 HEADER = os.path.join(XNU, "osfmk/mach/arm/thread_status.h")
 PROC_REG = os.path.join(XNU, "osfmk/arm/proc_reg.h")
-DEFINES = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot/entry_saved_state.h")
+DEFINES = os.path.join(REPO_ROOT, "src/entry/entry_saved_state.h")
 # The hand-written stand-in the entry image's own `start.s` is assembled against (see above).
-BOOT_ASSYM = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot/assym.s")
+BOOT_ASSYM = os.path.join(REPO_ROOT, "src/entry/assym.s")
 START_S = os.path.join(XNU, "osfmk/arm/start.s")
 # 481's four `cpu_data` offsets. A separate file from `DEFINES` because it is a separate decision -
 # the timer, not the saved-state frame - and compared the same way, against the same generated assym.s.
-TIMEBASE = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot/entry_timebase.h")
+TIMEBASE = os.path.join(REPO_ROOT, "src/entry/entry_timebase.h")
 
 # The struct this image reads, and the members in the order the header declares them. `.` is a member
 # whose width is one word; a name with a `[N]` is N words. Both are Apple's `uint32_t`s, so the
@@ -378,21 +378,21 @@ def compare(header_text, assym_text, defines_text, proc_reg_text, boot_assym_tex
     mirrored = {name: value for name, value in boot.items()
                 if name.startswith(("SS_", "VSS_")) and not name.endswith("_NUM")}
     if not mirrored:
-        failures.append("stages/stage90/xnu_arm_boot/assym.s declares no SS_/VSS_ constant, so the "
+        failures.append("src/entry/assym.s declares no SS_/VSS_ constant, so the "
                         "constants osfmk/arm/start.s is assembled with in this image are unchecked")
     for name in sorted(mirrored):
         if name not in assym:
-            failures.append("stages/stage90/xnu_arm_boot/assym.s declares %s %d and this "
+            failures.append("src/entry/assym.s declares %s %d and this "
                             "configuration's generated assym.s has no such name - a name Apple's "
                             "genassym.c does not declare is a constant this image invented"
                             % (name, mirrored[name]))
         elif mirrored[name] != assym[name]:
-            failures.append("stages/stage90/xnu_arm_boot/assym.s declares %s %d and this "
+            failures.append("src/entry/assym.s declares %s %d and this "
                             "configuration's generated assym.s gives %d - two files mirroring one "
                             "struct, and the one first on this build's include path is the wrong one"
                             % (name, mirrored[name], assym[name]))
     if mirrored:
-        notes.append("stages/stage90/xnu_arm_boot/assym.s: "
+        notes.append("src/entry/assym.s: "
                      + ", ".join("%s %d" % (k, v) for k, v in sorted(mirrored.items())))
         if start_s_text is not None:
             unused = [n for n in sorted(mirrored)

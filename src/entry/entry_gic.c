@@ -46,7 +46,7 @@
  * ------------------------------------------------------------------------------------------------
  *
  * The device tree's timer node is `interrupts = <1 2 0 1 3 0>` and the GIC's xlate maps PPI n to
- * INTID n + 16 (`stages/stage90/gic.c`, whose two constants are the payload's own and are compared
+ * INTID n + 16 (`src/gic.c`, whose two constants are the payload's own and are compared
  * against this file's by `tools/check_gic_routing.py`). That gives exactly two candidates, 18 and 19;
  * 143 measured 19 to be the one **`CNTP`** asserts, and 481 drives **`CNTV`**. So the question is
  * whether the virtual timer is the sibling the device tree lists first, and the probe is built so

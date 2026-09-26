@@ -38,7 +38,7 @@ import sys
 # --- the two definitions -----------------------------------------------------
 
 XNU_HEADER = "external/xnu-4570.1.46/pexpert/pexpert/arm/boot.h"
-OUR_HEADER = "stages/stage90/stage90.h"
+OUR_HEADER = "src/stage90.h"
 
 # Structures whose layout XNU reads by offset. Each is (XNU file, XNU struct name, our file,
 # our struct name). `boot_args` is loaded field-by-field in osfmk/arm/start.s; `tbd_ops` is
@@ -46,11 +46,11 @@ OUR_HEADER = "stages/stage90/stage90.h"
 # XNU reads or calls whatever is at the offset it expects, with no build error and no fault.
 STRUCT_PAIRS = [
     ("external/xnu-4570.1.46/pexpert/pexpert/arm/boot.h", "boot_args",
-     "stages/stage90/stage90.h", "boot_args"),
+     "src/stage90.h", "boot_args"),
     # Our mirror lives in the shim module, not the header - pointed at the file that
     # actually defines it, so the check follows the definition rather than a duplicate.
     ("external/xnu-4570.1.46/osfmk/arm/machine_routines.h", "tbd_ops",
-     "stages/stage90/xnu_msm8974_shim.c", "stage90_xnu_tbd_ops"),
+     "src/xnu_msm8974_shim.c", "stage90_xnu_tbd_ops"),
 ]
 
 # Types as they appear, mapped to (size, alignment) on ARM ILP32. `unsigned long` is

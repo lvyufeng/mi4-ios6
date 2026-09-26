@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Extract the payload's device-tree builder from stages/stage90/stage90_main.c, for a host build.
+Extract the payload's device-tree builder from src/stage90_main.c, for a host build.
 
-    tools/apple_dt_extract.py --src stages/stage90/stage90_main.c --out builder.inc
+    tools/apple_dt_extract.py --src src/stage90_main.c --out builder.inc
     tools/apple_dt_extract.py --src ... --out extract.c --include stage90_dt_shim.h \
                               --facts facts.env
 
@@ -92,7 +92,7 @@ def report_lines(dt_bytes, dt_align, dt_line, seed_bytes, seed_define_line, seed
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", required=True, help="stages/stage90/stage90_main.c")
+    ap.add_argument("--src", required=True, help="src/stage90_main.c")
     ap.add_argument("--out", required=True, help="the extracted text to write")
     ap.add_argument("--include", action="append", default=[],
                     help="a header to #include at the top of the output (repeatable)")

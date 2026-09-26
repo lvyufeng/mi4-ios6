@@ -4,8 +4,8 @@
 #
 # This assembles a host test from the *shipping* sources rather than from a copy:
 #
-#   - build_stage90_apple_dt is extracted verbatim from stages/stage90/stage90_main.c
-#   - the constants it references are extracted from stages/stage90/stage90.h's own
+#   - build_stage90_apple_dt is extracted verbatim from src/stage90_main.c
+#   - the constants it references are extracted from src/stage90.h's own
 #     preprocessor output, so they cannot drift from the payload's values
 #   - apple_dt.c and XNU's pexpert/gen/device_tree.c are compiled as-is
 #
@@ -20,7 +20,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 TOOLS_DIR=$PWD
 REPO_ROOT=$(cd "$TOOLS_DIR/.." && pwd)
-STAGE_DIR=$REPO_ROOT/stages/stage90
+STAGE_DIR=$REPO_ROOT/src
 WORK=$REPO_ROOT/out/host-dt
 
 CC=${CC:-cc}
@@ -88,14 +88,14 @@ fi
 #
 # `build_stage90_apple_dt` uses `STAGE90_XNU_RAMDISK_VA` and `_SIZE` for the `/chosen/memory-map`
 # `RAMDisk` property, and those two numbers live in `out/stage90/xnu_arm_entry.h` - written by
-# `xnu_arm_boot/build_entry.sh` after it links the entry image, because they are the address and
+# `src/entry/build_entry.sh` after it links the entry image, because they are the address and
 # size of `g_stage90_ramdisk` *in that link* and there is nowhere else they can come from. So this
 # harness reads the same header the payload compiles against rather than inventing a value, and it
 # stops loudly if the header is not there: the node it checks is the root device.
 ENTRY_HEADER=$REPO_ROOT/out/stage90/xnu_arm_entry.h
 if [[ ! -f $ENTRY_HEADER ]]; then
   echo "host_dt_check: no $ENTRY_HEADER. The payload's device tree carries the entry image's RAM" >&2
-  echo "               disk address since 459, so run ./stages/stage90/xnu_arm_boot/build_entry.sh" >&2
+  echo "               disk address since 459, so run ./src/entry/build_entry.sh" >&2
   echo "               first - it links the image and writes that header." >&2
   exit 2
 fi

@@ -11,7 +11,7 @@
 # files, with which bytes. Those files are outside version control (`out/` is gitignored and the 574
 # park is in `/tmp`), so until now the identity of the revert set lived in prose in 22 documents.
 #
-# `stages/stage90/revert-set.txt` is the record; this script is the comparison. A record nothing
+# `records/revert-set.txt` is the record; this script is the comparison. A record nothing
 # compares against is not a constraint, which is the failure this file is written to avoid rather than
 # to commit.
 #
@@ -79,7 +79,7 @@
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-RECORD=$ROOT/stages/stage90/revert-set.txt
+RECORD=$ROOT/records/revert-set.txt
 WANT_SET=""
 DIR=""
 

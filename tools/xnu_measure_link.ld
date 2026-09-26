@@ -1,7 +1,7 @@
 /*
  * A linker script for a *measurement* link of the XNU ARM objects.
  *
- * Not a shipping layout. `stages/stage90/xnu_link.ld` places a small payload at PA 0x8000 for the
+ * Not a shipping layout. `src/xnu_link.ld` places a small payload at PA 0x8000 for the
  * Stage90 handoff; this one places the kernel where XNU's own `start.s` says the kernel lives, to
  * answer a different question: **do these 599 objects fit together, and what does the linker say
  * besides "undefined symbol"**.

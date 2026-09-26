@@ -41,7 +41,7 @@ REPO_ROOT=$(cd "$(dirname "$SELF")/.." && pwd)
 
 DIR=""
 MEMBER=stage90-qcdt.img
-RECORD=$REPO_ROOT/stages/stage90/revert-set.txt
+RECORD=$REPO_ROOT/records/revert-set.txt
 
 while (($# > 0)); do
   case $1 in

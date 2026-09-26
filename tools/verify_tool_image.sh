@@ -13,7 +13,7 @@
 # `--boot-image` means anything." This is the other half of that sentence.
 #
 # **A record nothing compares against is not a constraint**, which is the failure this file is written
-# to avoid rather than to commit: `stages/stage90/tool-images.txt` is written by hand, and it does no
+# to avoid rather than to commit: `records/tool-images.txt` is written by hand, and it does no
 # work until something hashes the image and disagrees with it. That something is here, and it runs
 # before the gate prints a single command.
 #
@@ -48,8 +48,8 @@
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-RECORD=$ROOT/stages/stage90/tool-images.txt
-TOOLDIR=$ROOT/stages/stage90/tool-images
+RECORD=$ROOT/records/tool-images.txt
+TOOLDIR=$ROOT/records/tool-images
 REQUIRE_ROLE=""
 
 IMAGE=""

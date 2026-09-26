@@ -165,7 +165,7 @@ SECTIONS
 
     /*
      * **`__bss_start` is the first byte of `.bss`, and it is placed *inside* the output section so that
-     * this is true by construction** - which is what `stages/stage90/linker.ld:19` has always done for
+     * this is true by construction** - which is what `src/linker.ld:19` has always done for
      * the payload, and what this script did not do before experiment 297.
      *
      * It used to be assigned *between* the `.data` and `.bss` output sections, and that is not the same

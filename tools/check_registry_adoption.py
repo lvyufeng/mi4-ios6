@@ -99,7 +99,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 XNU = os.path.join(REPO_ROOT, "external/xnu-4570.1.46")
-BOOT_DIR = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot")
+BOOT_DIR = os.path.join(REPO_ROOT, "src/entry")
 
 ENTRY_TRACE_C = os.path.join(BOOT_DIR, "entry_trace.c")
 ENTRY_STUBS_C = os.path.join(BOOT_DIR, "entry_stubs.c")

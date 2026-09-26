@@ -7,7 +7,7 @@
  * linker; host_boot_args_check.sh supplies it by --defsym, read from the built ELF.
  *
  * Two things make this a real test rather than a re-enactment:
- *   - the module is compiled unmodified from stages/stage90/, and the symbol is only ever used
+ *   - the module is compiled unmodified from src/, and the symbol is only ever used
  *     as an address value, never dereferenced, so --defsym reproduces the device's computation
  *     exactly;
  *   - the harness recomputes all eight invariants itself, from the struct fields, rather than

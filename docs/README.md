@@ -7,7 +7,13 @@
 | `reference/` | Platform research, boot tooling, device findings, safety/recovery rules, source baselines. Stable background material. |
 | `experiments/` | One bring-up log per experiment (`experiment-01` … `experiment-92`), in chronological order. |
 | `status/` | Current progression summary and next-step analysis. |
-| `history/` | Superseded design documents and the per-stage milestone log moved out of the root `README.md`. |
+| `history/` | Superseded design documents, the per-stage milestone log moved out of the root `README.md`, and the four Stage90 working notes that came out of the stage directory in the 2026-09-26 restructure. |
+
+**The live tree is not under `docs/`.** The code is `src/`, the scripts that build and fire it are
+`scripts/`, and the arm record is `records/revert-set.txt`; the root `README.md` has the layout. The
+paths *inside* these documents name the tree as it stood when each was written, and the 2026-09-26
+restructure moved it: the `reference/` and `status/` pages were re-pointed at the new paths, and the
+`experiments/` logs were deliberately left alone, for the reason given under `experiments/` below.
 
 ## Reference — `reference/`
 
@@ -61,6 +67,11 @@
 - `stage1-boot-wrapper-plan.md` — Stage1 boot-wrapper design for XNU-style `boot_args` and Apple-DT handoff.
 - `stage82-pmap-design.md` — Stage82 full kernel virtual address space pmap design.
 - `stage84-sgi-irq-timer-planning.md` — Stage84+ SGI/IRQ timer boundary planning.
+- `stage90-implementation.md`, `stage90-implementation-status.md`, `stage90-quick-start.md`,
+  `stage90-mach-o-loader-notes.md` — the Stage90 working notes, which lived inside the stage
+  directory until the 2026-09-26 restructure and were carried-over copies before that. They are
+  working notes and are not kept in sync for their own sake: a heading can name the previous stage,
+  and the authoritative status *as of that stage* is what they carry.
 
 ## Experiments — `experiments/`
 
@@ -68,8 +79,11 @@ See `experiments/README.md` for the full cross-reference table (experiment numbe
 stage number ↔ title). Note the offset: experiment NN corresponds to stage NN-3.
 
 Path commands written inside the experiment logs are a record of what was actually
-run at the time and have deliberately not been rewritten. Stages 00-84 are no longer
-in the working tree: `archive/stages/stage85` … `archive/stages/stage89` are kept there
-in place, and stage0-84 live at the tag `stage-archive-base`, which
+run at the time and have deliberately not been rewritten, and that now includes the
+2026-09-26 restructure: a log that runs `cd stages/stage90 && ./build.sh` is describing
+the tree as it was, and today's equivalent is `./scripts/build.sh` from the repository
+root. The snapshot-per-stage model was retired on 2026-09-26: `archive/stages/stage85` …
+`archive/stages/stage89` are the five snapshots that were still in the working tree and
+are kept there, and stage0-84 live at the tag `stage-archive-base`, which
 `tools/stage-archive.sh` reads. See `../archive/stages/README.md` for what the snapshots
-are and why the snapshot-per-stage model was retired.
+are and why the model was retired.

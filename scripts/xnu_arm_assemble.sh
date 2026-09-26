@@ -31,8 +31,9 @@
 set -uo pipefail
 
 cd "$(dirname "$0")"
-STAGE_DIR=$PWD
-REPO_ROOT=$(cd "$STAGE_DIR/../.." && pwd)
+SCRIPT_DIR=$PWD
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+SRC_DIR=$REPO_ROOT/src
 
 XNU=$REPO_ROOT/external/xnu-4570.1.46
 if [[ ! -d $XNU ]]; then
@@ -124,7 +125,7 @@ DEFINES=(
 
 INCLUDES=(
   # assym.s first: start.s and locore.s both do #include "assym.s".
-  -I$STAGE_DIR/xnu_arm_boot
+  -I$SRC_DIR/entry
   # The generated OPTIONS headers. `<mach_kdp.h>` is one of them and start.s includes it
   # unconditionally, so without this the entry image does not assemble at all.
   -I$OPTION_HEADERS
@@ -136,14 +137,14 @@ INCLUDES=(
   -I$XNU/osfmk/arm
   -I$XNU/bsd/arm
   # Shims last, as a fallback rather than an override.
-  -I$STAGE_DIR/shims
-  -I$STAGE_DIR/shims/kern
-  -I$STAGE_DIR/shims/mach
-  -I$STAGE_DIR/shims_arm
-  -I$STAGE_DIR/shims_arm/kern
-  -I$STAGE_DIR/shims_arm/mach
-  -I$STAGE_DIR/shims_arm/sys
-  -I$STAGE_DIR/shims_arm/sys/_pthread
+  -I$SRC_DIR/shims
+  -I$SRC_DIR/shims/kern
+  -I$SRC_DIR/shims/mach
+  -I$SRC_DIR/shims_arm
+  -I$SRC_DIR/shims_arm/kern
+  -I$SRC_DIR/shims_arm/mach
+  -I$SRC_DIR/shims_arm/sys
+  -I$SRC_DIR/shims_arm/sys/_pthread
 )
 
 assemble_one() {

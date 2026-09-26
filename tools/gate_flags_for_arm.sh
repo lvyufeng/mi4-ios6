@@ -48,7 +48,7 @@ REPO_ROOT=$(cd "$(dirname "$SELF")/.." && pwd)
 
 DIR=$REPO_ROOT/out/stage90
 CFG_NAME=stage90-build-config.txt
-GATE=$REPO_ROOT/stages/stage90/preflight_boot_check.sh
+GATE=$REPO_ROOT/scripts/preflight_boot_check.sh
 
 while (($# > 0)); do
   case $1 in

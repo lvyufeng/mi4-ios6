@@ -3,9 +3,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# This snapshot lives at stages/stageNN/, two levels below the repo root.
-STAGE_DIR=$PWD
-REPO_ROOT=$(cd "$STAGE_DIR/../.." && pwd)
+# The live tree: this script is in scripts/, one level below the repo root, and the
+# payload it builds lives in src/ beside it. (Before the 2026-09-26 restructure this
+# was stages/stageNN/, two levels down.)
+SCRIPT_DIR=$PWD
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+SRC_DIR=$REPO_ROOT/src
 
 OUT_DIR=${1:-$REPO_ROOT/out/stage90}
 OBJ_DIR="$OUT_DIR/xnu-objects"

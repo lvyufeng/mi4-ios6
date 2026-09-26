@@ -20,7 +20,7 @@
 #   * the stubs are plain shell reading marker files in a temporary directory. There is no code
 #     path from this script to a USB device, and `fastboot boot` in it is a `touch`.
 # It also does not build anything, does not write to the repository, and leaves the tree as it
-# found it (the one file it reads is stages/stage90/run_and_capture.sh).
+# found it (the one file it reads is scripts/run_and_capture.sh).
 #
 # Usage:
 #   tools/rehearse_live_path.sh            # run every state, print a table, refuse on any mismatch
@@ -43,7 +43,7 @@ VERBOSE=0
 [[ ${1:-} == -v ]] && VERBOSE=1
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-LIVE_RUNNER=$ROOT/stages/stage90/run_and_capture.sh
+LIVE_RUNNER=$ROOT/scripts/run_and_capture.sh
 # **`RUNNER_OVERRIDE` exists so a *mutation* can be measured without the live path ever being the
 # mutated file, and it is the peer session's finding (its own m636 rule, one layer out).** m636 says
 # rename-never-in-place, because bash reads a running script by fd and an in-place edit can make the
@@ -56,7 +56,7 @@ LIVE_RUNNER=$ROOT/stages/stage90/run_and_capture.sh
 # mutation, which is worse, because it produces a plausible log).
 #
 # So the override is not a convenience: it is how the mutation batch points at a *copy* while the
-# press's path stays the recorded bytes. The mutated copy has to sit at `stages/stage90/<name>.sh`
+# press's path stays the recorded bytes. The mutated copy has to sit at `src/<name>.sh`
 # because the runner does `cd "$(dirname "$0")"` and derives `STAGE_DIR`/`REPO_ROOT`/`OUT` from `$0`,
 # and a copy in `/tmp` would look for the gate and `out/` beside itself. A `.sh` file there is
 # invisible to the gate's freshness scan (`preflight_boot_check.sh:177-179` is `-type f` and a
@@ -65,7 +65,7 @@ LIVE_RUNNER=$ROOT/stages/stage90/run_and_capture.sh
 RUNNER=${RUNNER_OVERRIDE:-$LIVE_RUNNER}
 [[ -r $RUNNER ]] || { printf 'rehearse: no runner at %s\n' "$RUNNER" >&2; exit 1; }
 # **And it is made absolute here, because section C `cd`s and the sections do not share a directory.**
-# 628 measured this: with a *relative* `RUNNER_OVERRIDE` (`stages/stage90/.r628-mut.sh`) sections A and
+# 628 measured this: with a *relative* `RUNNER_OVERRIDE` (`src/.r628-mut.sh`) sections A and
 # B are green and section C reports `No such file or directory` on all four of its cells, because the
 # path-argument section runs the runner from a different directory on purpose (`cd "$dir" && bash
 # "$RUNNER"`) - and a relative runner path is then resolved against *that* directory. The live path is
@@ -1110,7 +1110,7 @@ printf '\nEvery state the next press can produce is read by its own line.\n'
 #
 # 615's defect, and it is the one every cell above was blind to because every cell above passes an
 # ABSOLUTE path: `run_and_capture.sh` `cd`s to its own directory before parsing its arguments, so a
-# relative `--summarise` path was joined to `stages/stage90/` instead of to the caller's directory and
+# relative `--summarise` path was joined to `src/` instead of to the caller's directory and
 # refused as `no such log`, naming a file that exists. Measured before the fix: refused from the
 # repository root, and refused from the capture's own directory with the bare filename - only an
 # absolute path worked. The operator's next action after the one gated boot is to re-read that run's

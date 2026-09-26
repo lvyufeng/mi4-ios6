@@ -32,7 +32,9 @@ logs from that period contain commands such as `./stage51/build.sh`. Those comma
 are left exactly as they were run. Rewriting them would falsify the log, and the
 paths only make sense again after the corresponding stage has been restored anyway.
 
-For the six retained snapshots the paths *have* been updated: their build scripts
-now resolve the repository root themselves (`REPO_ROOT=$(cd "$STAGE_DIR/../.." &&
-pwd)`), so `stages/stageNN/build.sh` works from any working directory and keeps
-working if the directory moves again.
+For the five snapshots that were still in the working tree (`stage85` .. `stage89`, now
+`archive/stages/`) the paths *were* updated when the tree moved to `stages/stageNN/`: their
+build scripts resolve the repository root themselves, so they worked from any working
+directory. They are kept for reference and for bisecting an old regression and are not a
+build path any more - the tree is one evolving tree now, built by `scripts/build.sh`. See
+`archive/stages/README.md`.

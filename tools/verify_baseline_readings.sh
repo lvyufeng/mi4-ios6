@@ -1,5 +1,5 @@
 #!/bin/bash
-# verify_baseline_readings.sh - re-derive every reading in stages/stage90/baseline-readings.txt from the
+# verify_baseline_readings.sh - re-derive every reading in records/baseline-readings.txt from the
 # log it names, and refuse on any difference.
 #
 # WHY THIS EXISTS. The sleeper clause of `run_and_capture.sh` prints thresholds and premises that are
@@ -29,7 +29,7 @@
 set -u
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
-RECORD=${RECORD_OVERRIDE:-$REPO_ROOT/stages/stage90/baseline-readings.txt}
+RECORD=${RECORD_OVERRIDE:-$REPO_ROOT/records/baseline-readings.txt}
 # The log directory: `--dir=DIR` or a bare first argument. **Both spellings are implemented and not
 # only documented** - the header of this file advertised `--dir` before the first version of the code
 # read `$1` alone, which is a claim in a comment that nothing executes (604's rule) arriving in the

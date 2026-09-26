@@ -14,7 +14,7 @@
 # Why an image rather than objects in the payload. XNU's `_start` is position-dependent: it
 # converts its link-time addresses to physical ones with `addr - virtBase + physBase`, builds its
 # own page tables and switches TTBR0/TTBR1 to them. So it has to be linked at a base of its own,
-# with a `boot_args` describing that base, and entered at that base. See xnu_arm_boot/entry.ld and
+# with a `boot_args` describing that base, and entered at that base. See entry.ld and
 # entry_stubs.c for the layout and for what the symbols do.
 #
 # Two toolchains, deliberately. start.s is assembled by clang (nothing else will do - see
@@ -25,9 +25,16 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-STAGE_DIR=$(cd .. && pwd)
-REPO_ROOT=$(cd "$STAGE_DIR/../.." && pwd)
-BOOT_DIR=$STAGE_DIR/xnu_arm_boot
+# **Three directories, and the third is new.** This script lives in `src/entry/`, so `..` is the
+# source tree and one more is the repository root. Before the 2026-09-26 restructure it lived in
+# `stage90/xnu_arm_boot/` and needed two levels for the root; the layout moved, the arithmetic did
+# not, and `BOOT_DIR` - what the header calls the stage directory - is now simply this directory,
+# because the payload's stage root no longer exists as a place: the sources it named are in `src/`
+# (via `$SRC_DIR`) and the scripts beside this one are in `scripts/` (via `$REPO_ROOT`).
+SCRIPT_DIR=$PWD
+SRC_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+REPO_ROOT=$(cd "$SRC_DIR/.." && pwd)
+BOOT_DIR=$SCRIPT_DIR
 OUT=$REPO_ROOT/out/stage90
 mkdir -p "$OUT"
 
@@ -979,7 +986,7 @@ say() { printf '%s\n' "$*"; }
 run() { [[ $VERBOSE -eq 1 ]] && printf '  %s\n' "$*"; "$@"; }
 
 say "== assembling XNU's entry point =="
-run "$STAGE_DIR/xnu_arm_assemble.sh" > "$OUT/xnu_arm_assemble.log" 2>&1 || {
+run "$REPO_ROOT/scripts/xnu_arm_assemble.sh" > "$OUT/xnu_arm_assemble.log" 2>&1 || {
     tail -5 "$OUT/xnu_arm_assemble.log"; exit 1; }
 say "  osfmk/arm/start.s: $(grep -c . "$OUT/xnu_arm_assemble.log") lines of report"
 
@@ -1139,22 +1146,22 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
 # table's constructor then runs the same Appendix C.1 vector *in the image*, which is what covers the
 # compiler and the target.
 #
-# The sources are in `stages/stage90/xnu_supply/`, which is this project's out-of-manifest directory
+# The sources are in `src/supply/`, which is this project's out-of-manifest directory
 # - the same place 432's pthread table lives - and `stage90_aes.c`'s `STAGE90_AES_SELFTEST` build is
 # its `main()`.
 STAGE90_AES_OBJ="$OUT/xnu_arm_entry_aes.o"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
     -O2 -Wall -Wextra -Werror -std=gnu11 \
-    -c "$REPO_ROOT/stages/stage90/xnu_supply/stage90_aes.c" -o "$STAGE90_AES_OBJ"
+    -c "$REPO_ROOT/src/supply/stage90_aes.c" -o "$STAGE90_AES_OBJ"
 say "== AES-128 known-answer tests, on the host, against the same source =="
 run "${HOST_CC:-cc}" -O2 -Wall -Wextra -Werror -std=gnu11 -DSTAGE90_AES_SELFTEST \
-    "$REPO_ROOT/stages/stage90/xnu_supply/stage90_aes.c" -o "$OUT/stage90_aes_kat"
+    "$REPO_ROOT/src/supply/stage90_aes.c" -o "$OUT/stage90_aes_kat"
 "$OUT/stage90_aes_kat"
 
 # **The personality table (363).** The stock `iokit_KernelConfigTables.o` defines one symbol,
 # `gIOKernelConfigTables`, and the table it points at has exactly one entry: Apple's `IOPanicPlatform`,
 # whose `start` panics because nothing better matched. Experiment 362 measured that fallback firing on
-# this machine. The replacement - `stages/stage90/xnu_platform/stage90_platform_config_tables.c` -
+# this machine. The replacement - `src/platform/stage90_platform_config_tables.c` -
 # keeps Apple's entry and puts this machine's platform expert in front of it, and it is *that* file's
 # object, not the stock one, that the entry link uses (`IOKIT_KERNEL_CONFIGTABLES_OBJ`'s default
 # below), one object for one object so that the link's accounting does not move for a reason that is
@@ -3568,7 +3575,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `KERNELFILES =` empty). The implementation is Apple's own, from
     # `apple-oss-distributions/libdispatch` (`src/firehose/firehose_buffer.c`, Apache-2.0, unmodified),
     # compiled for armv7 freestanding by `build_xnu_arm_kernel.sh`'s `FIREHOSE_SOURCES` block, with the
-    # newer tree's `os/` and firehose headers in `stages/stage90/firehose/portinc/` shadowing the tree's.
+    # newer tree's `os/` and firehose headers in `src/firehose/portinc/` shadowing the tree's.
     # **First time this project builds a component Apple ships outside the tree.**
     #
     # The object: 4096 bytes of text, 12 references. Resolved 2, added 6:
@@ -3627,7 +3634,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `firehose_buffer_create` reads them with `ldrb` - so a stub there is read as *data* and would not
     # stop the run at all, it would hand the buffer `0x40 << 12` (257 recorded the byte). Their
     # definitions are in Apple's closed `libfirehose_kernel` library, and are supplied by the port as
-    # `stages/stage90/firehose/firehose_kernel_config.c`: **16** chunks and **8** io pages, read from
+    # `src/firehose/firehose_kernel_config.c`: **16** chunks and **8** io pages, read from
     # the newer header's `FIREHOSE_BUFFER_KERNEL_DEFAULT_CHUNK_COUNT` / `_IO_PAGES` and agreeing with
     # the 16 this project's shim gave `oslog_init`, which is what sized the 73728-byte allocation 255
     # measured. So the port is two files now: `firehose_buffer.c` (Apple's) and this one.
@@ -4902,7 +4909,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # both are gone"). So the tick was not a net at all; it was an interrupt nothing could handle,
     # and every run ended three statements after the first real context switch because of it.
     #
-    # The change is `stage90_disarm_deadman_timer()` in `stages/stage90/gic.c`, called from
+    # The change is `stage90_disarm_deadman_timer()` in `src/gic.c`, called from
     # `xnu_entry_jump.c` on the last line the payload executes, and it turns the source off at three
     # levels - the timer's own `CNTP_CTL` (`generic_timer_shutdown`), the distributor's enable bit,
     # and the distributor's pending bit - because the fourth (CPU-level IRQ masking) is the one that
@@ -7045,7 +7052,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # is compiled. A narrow `MANIFEST` is for measurement, never for a build step.
     #
     # So the object is ported the way the rest of this image's non-XNU translation units are
-    # (`stages/stage90/xnu_arm_boot/entry_last_kernel_constructor.c`, compiled in this script with
+    # (`src/entry/entry_last_kernel_constructor.c`, compiled in this script with
     # `entry_stubs.c`'s exact flags), and the port is where the second half of Apple's file goes too:
     #
     # | `entry_last_kernel_constructor.o` | |
@@ -11797,7 +11804,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # is `_ZN22IOPlatformExpertDevice12initWithArgsEPvS0_S0_S0_` (0x86C + 8 + 0x340 = 0xBB4 exactly, and it is
     # the vtable's last slot). `pexpert/arm/pe_init.c:279` names the four arguments:
     # `StartIOKit(PE_state.deviceTreeHead, PE_state.bootArgs, (void *)0, (void *)0)`, and both of the walk's
-    # boot-args builders set `deviceTreeP` to a real blob (`stages/stage90/boot_args.c:15`,
+    # boot-args builders set `deviceTreeP` to a real blob (`src/boot_args.c:15`,
     # `xnu_boot_args_conformant.c:181`, with a `NULL` check at 258), so p1 is non-zero and the `IOService::init`
     # branch is not the one taken.
     #
@@ -13125,14 +13132,14 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #
     # ## The two objects, and what each is for
     #
-    # `stages/stage90/xnu_platform/MSM8974PlatformExpert.cpp` (clang, iokit flags, by
+    # `src/platform/MSM8974PlatformExpert.cpp` (clang, iokit flags, by
     # `tools/build_xnu_arm_kernel.sh`'s platform block) is the class: a concrete `IODTPlatformExpert`
     # whose content is its metaclass, the two pure virtuals the base leaves (`deleteList`,
     # `excludeList`), and a `start` that calls `super::start`. Nothing else - `probe`, `configure`,
     # `createNub`, `createNubs`, `processTopLevel`, `getModelName`, `getMachineName`,
     # `getNubResources` and `haltRestart` are Apple's and already linked.
     #
-    # `stages/stage90/xnu_platform/stage90_platform_config_tables.c` (clang, by the same block)
+    # `src/platform/stage90_platform_config_tables.c` (clang, by the same block)
     # *replaces* the pool's `iokit_KernelConfigTables.o` - one object for one object - with the same
     # Apple entry plus this machine's, so the fallback is still there behind ours. Without the
     # `IONameMatch` in it the probe fails: `IODTPlatformExpert::probe` requires
@@ -13391,13 +13398,13 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # It is compiled by `tools/build_xnu_arm_kernel.sh`'s platform block - a `.cpp`, so it needs that
     # script's `CXX_ARGS`, its per-component defines for `iokit` and its 83-object flag set - and it
     # lands in `out/xnu_platform_obj/`, beside the EABI runtime and the firehose, which are the two
-    # other things in this image that are not Apple's. `stage90/xnu_platform/MSM8974PlatformExpert.cpp`
+    # other things in this image that are not Apple's. `src/platform/MSM8974PlatformExpert.cpp`
     # is the source and holds the argument for why the class has to exist.
     STAGE90_PLATFORM_EXPERT_OBJ=${STAGE90_ENTRY_PLATFORM_EXPERT_OBJ:-$REPO_ROOT/out/xnu_platform_obj/MSM8974PlatformExpert.o}
     # =============================================================================================
     # **457: the second out-of-manifest class, and the first driver this image links in.**
     #
-    # `stages/stage90/xnu_platform/MSM8974RootResource.cpp` is an `IOService` subclass whose
+    # `src/platform/MSM8974RootResource.cpp` is an `IOService` subclass whose
     # personality - `IOProviderClass = IOResources`, in the table this image already carries - is what
     # makes `gIOCatalogue->findDrivers(gIOResources)` non-empty, which is what makes `doServiceMatch`
     # fill `resourceKeys`, which is what sets the `IOResourceMatched` array `IOFindBSDRoot`'s
@@ -13421,7 +13428,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # **492: the third out-of-manifest class, and the first one whose personality names a *device*
     # class.**
     #
-    # `stages/stage90/xnu_platform/MSM8974Timer.cpp` is an `IOService` subclass whose personality -
+    # `src/platform/MSM8974Timer.cpp` is an `IOService` subclass whose personality -
     # `IOProviderClass = IOPlatformDevice`, `IONameMatch = (timer, "qcom,msm-timer")`, in the same
     # table of this image - is what makes `gIOCatalogue->findDrivers(<the /timer nub>)` non-empty.
     # The class is the one `IODTPlatformExpert::createNub` builds (`IOPlatformExpert.cpp:1283`), so
@@ -13440,7 +13447,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # =============================================================================================
     # **493: the fourth out-of-manifest class, and the second under `IOPlatformDevice`.**
     #
-    # `stages/stage90/xnu_platform/MSM8974GIC.cpp` is an `IOService` subclass whose personality -
+    # `src/platform/MSM8974GIC.cpp` is an `IOService` subclass whose personality -
     # `IOProviderClass = IOPlatformDevice`, `IONameMatch = (interrupt-controller, "qcom,msm-qgic2")` -
     # names a second node of this machine's device tree. Two entries in one bucket is the point: the
     # bucket `IOCatalogue::findDrivers` returns for a nub holds *every* personality filed under
@@ -14851,7 +14858,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # nothing could - the kext is an Apple binary the tarball does not contain.
     #
     # So this step is a different *shape* from every one before it. It is not a `BSD_*_OBJ` out of
-    # `out/xnu_kernel_obj/`; it is this project's own source, `stages/stage90/xnu_supply/`
+    # `out/xnu_kernel_obj/`; it is this project's own source, `src/supply/`
     # `stage90_pthread_functions.c`, compiled by `tools/build_xnu_arm_kernel.sh`'s platform block
     # (a third list there, added for this step) and linked into the entry image here - not for any
     # symbol this project links into the image, because it has none.
@@ -15210,7 +15217,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `stage90_pthread_functions.pthread_init` with caller key `0x8003B1E8` - and `bsd_init`'s
     # `bl <pthread_init>` is four `bl`s *before* `bl <nwk_wq_init>`, so the boot stops at the slot
     # every time and **no object appended to `LINK_OBJS` can move it one instruction further**.
-    # 433 is therefore an edit to `stages/stage90/xnu_supply/stage90_pthread_functions.c` and nothing
+    # 433 is therefore an edit to `src/supply/stage90_pthread_functions.c` and nothing
     # else: the `pthread_init` slot gets a body that records the kernel's own `pthread_functions`
     # pointer and stops if it is not this table, while the other 38 slots keep their stand-ins. The
     # prediction was `stub_hit=nwk_wq_init` at key `0x8003B1FC` and the run reported exactly that,
@@ -18192,7 +18199,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `IOService::addPowerChild` at `+0x204` (the `bl` at 0x80166228). The object is
     # `iokit_Kernel_IOPowerConnection.o` - the pool definer of that name and of twelve more
     # `IOPowerConnection` members - inserted after `iokit_Kernel_IOCommand.o` and before
-    # `stages/stage90/xnu_platform/MSM8974PlatformExpert.o`. Nothing else changes.
+    # `src/platform/MSM8974PlatformExpert.o`. Nothing else changes.
     #
     # **Predicted: 14 resolved (13 function, 1 storage) / 0 added - 770 -> **756** undefined, 670 ->
     # **657** function, 100 -> **99** storage**; object `.text` **0x8017F63C** (0x1E0); `.data` and
@@ -19572,7 +19579,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #                              resolved, 0 function and 1 storage, 0 added
     #
     # inserted into the entry link between `iokit_Kernel_IOPowerConnection.o` and
-    # `stages/stage90/xnu_platform/MSM8974PlatformExpert.o`, in that order. Nothing else changes.
+    # `src/platform/MSM8974PlatformExpert.o`, in that order. Nothing else changes.
     #
     # **Predicted: 6 resolved (5 function, 1 storage) / 0 added - 756 -> **750** undefined, 657 ->
     # **652** function, 99 -> **98** storage**; `bsd_kern_kern_malloc.o` `.text` **0x8017F820** (0x49C)
@@ -19931,7 +19938,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # 374's stop was `_ZN9IOCommandC2EPK11OSMetaClass`, hit at key `0x8017302C` - the `bl` at
     # `0x80173028` in `IOPMRequest::MetaClass::alloc`'s straight line, one call *before* the `init` 374's
     # block had predicted. The object is `iokit_Kernel_IOCommand.o`, inserted after
-    # `iokit_Kernel_IOPMPowerStateQueue.o` and before `stages/stage90/xnu_platform/MSM8974PlatformExpert.o`.
+    # `iokit_Kernel_IOPMPowerStateQueue.o` and before `src/platform/MSM8974PlatformExpert.o`.
     # Nothing else changes.
     #
     # **Predicted: 5 resolved (3 function, 2 storage) / 0 added - 775 -> **770** undefined, 673 ->
@@ -22349,7 +22356,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     #
     # **The change is one line, moved.** `__bss_start = .;` goes from between the two output sections
     # to the first statement *inside* `.bss`. Nothing else in `entry.ld` moves. That is what
-    # `stages/stage90/linker.ld:19` has always done for the payload - **the two scripts have disagreed
+    # `src/linker.ld:19` has always done for the payload - **the two scripts have disagreed
     # about this for as long as both have existed, and the entry script was the wrong one** - so the
     # fix is the project's own existing answer applied where it was missing, not a new idea. It is a
     # step of its own because it changes the linker script, and so is the step where addresses move.
@@ -25462,7 +25469,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # `0x80002408` itself: a kernel VA in this image's own text, four bytes of `entry_epilogue`.
     # `mmu_kvtop_wpreflight` (machine_routines_asm.s:476) is `mcr p15,0,r1,c7,c8,1` / `mrc
     # p15,0,r0,c7,c4,0` - it asks the *hardware*, and what the hardware answers depends on the
-    # descriptor the payload built, not on XNU's tables. That descriptor is `stages/stage85/mmu.c:8`,
+    # descriptor the payload built, not on XNU's tables. That descriptor is `archive/stages/stage85/mmu.c:8`,
     # `L1_DESC_SECTION_SO = 0x00010c02`: bits[11:10] = 0b11, "domain 0, **AP full access**", S=1,
     # XN=0. A privileged write to a full-access section in domain 0 translates, so PAR reports no
     # abort, `bics r0, r0, r2` leaves the section base 0x80000000 (nonzero, so the sanity check
@@ -26016,7 +26023,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # pmap that disagrees with itself.
     #
     # The mechanism took two runs to get right, and both halves are in
-    # `stages/stage90/xnu_arm_vm_init_full_pmap.c`:
+    # `src/xnu_arm_vm_init_full_pmap.c`:
     #
     #   - The check writes and reads `stage90_full_pmap_probe_word` through *both* its own address
     #     and `STAGE90_VIRT_BASE +` that address, so **two** mappings have to cover it - the low
@@ -26942,7 +26949,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$LIBKERN_CXX_OSUNSERIALIZE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     # 363 replaced the table, so this object is no longer the pool's `iokit_KernelConfigTables.o` but
     # `$STAGE90_CONFIG_TABLES_OBJ` (default `out/xnu_platform_obj/stage90_platform_config_tables.o`,
-    # set at the top of this script from `stages/stage90/xnu_platform/`), which
+    # set at the top of this script from `src/platform/`), which
     # `tools/build_xnu_arm_kernel.sh`'s platform block compiles with clang - the compiler is part of
     # the step, not a detail: see the block at the top of this script. The require stays because the
     # assignment below is a *default*: `STAGE90_ENTRY_IOKIT_KERNEL_CONFIGTABLES_OBJ` can still point
@@ -26967,10 +26974,10 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$IOKIT_KERNEL_IOEVENTSOURCE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_VM_VM_SHARED_REGION_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$OSFMK_KERN_SCHED_AVERAGE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
-    require "$STAGE90_PLATFORM_EXPERT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first (its platform block compiles stages/stage90/xnu_platform/MSM8974PlatformExpert.cpp)"
-    require "$STAGE90_ROOT_RESOURCE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first (its platform block compiles stages/stage90/xnu_platform/MSM8974RootResource.cpp)"
-    require "$STAGE90_TIMER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first (its platform block compiles stages/stage90/xnu_platform/MSM8974Timer.cpp)"
-    require "$STAGE90_GIC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first (its platform block compiles stages/stage90/xnu_platform/MSM8974GIC.cpp)"
+    require "$STAGE90_PLATFORM_EXPERT_OBJ" "run ./tools/build_xnu_arm_kernel.sh first (its platform block compiles src/platform/MSM8974PlatformExpert.cpp)"
+    require "$STAGE90_ROOT_RESOURCE_OBJ" "run ./tools/build_xnu_arm_kernel.sh first (its platform block compiles src/platform/MSM8974RootResource.cpp)"
+    require "$STAGE90_TIMER_OBJ" "run ./tools/build_xnu_arm_kernel.sh first (its platform block compiles src/platform/MSM8974Timer.cpp)"
+    require "$STAGE90_GIC_OBJ" "run ./tools/build_xnu_arm_kernel.sh first (its platform block compiles src/platform/MSM8974GIC.cpp)"
     # =============================================================================================
     # **463: an object this link consumes is *compiled somewhere else*, so `require` is not enough.**
     #
@@ -26994,14 +27001,14 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
         say "    XNU_KERNEL_CONFIG=STAGE90_XNU XNU_MASTER_LOCAL=\$PWD/tools/xnu_config/boot/STAGE90_XNU.local ./tools/build_xnu_arm_kernel.sh --platform-only" >&2
         exit 2
     }
-    platform_obj_fresh "$STAGE90_PLATFORM_EXPERT_OBJ" "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974PlatformExpert.cpp"
-    platform_obj_fresh "$STAGE90_ROOT_RESOURCE_OBJ" "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974RootResource.cpp"
-    platform_obj_fresh "$STAGE90_TIMER_OBJ" "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974Timer.cpp"
-    platform_obj_fresh "$STAGE90_GIC_OBJ" "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974GIC.cpp"
+    platform_obj_fresh "$STAGE90_PLATFORM_EXPERT_OBJ" "$REPO_ROOT/src/platform/MSM8974PlatformExpert.cpp"
+    platform_obj_fresh "$STAGE90_ROOT_RESOURCE_OBJ" "$REPO_ROOT/src/platform/MSM8974RootResource.cpp"
+    platform_obj_fresh "$STAGE90_TIMER_OBJ" "$REPO_ROOT/src/platform/MSM8974Timer.cpp"
+    platform_obj_fresh "$STAGE90_GIC_OBJ" "$REPO_ROOT/src/platform/MSM8974GIC.cpp"
     platform_obj_fresh "$REPO_ROOT/out/xnu_platform_obj/stage90_platform_config_tables.o" \
-                       "$REPO_ROOT/stages/stage90/xnu_platform/stage90_platform_config_tables.c"
+                       "$REPO_ROOT/src/platform/stage90_platform_config_tables.c"
     # **What this rule does not cover, said rather than left to look complete.** The other three
-    # objects in that directory are `stages/stage90/xnu_supply/stage90_pthread_functions.c`,
+    # objects in that directory are `src/supply/stage90_pthread_functions.c`,
     # `.../stage90_crypto_functions.c` - sources in a *different* directory, which this check could be
     # extended to with one more path each - and `stage90_pseudo_inits.o`, whose source
     # `tools/gen_pseudo_inits.py` *generates*, so its freshness is a question about the generator's own
@@ -27087,7 +27094,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     require "$OSFMK_VM_BSD_VM_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_MISCFS_DEVFS_DEVFS_VFSOPS_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
     require "$BSD_KERN_KERN_SIG_OBJ" "run ./tools/build_xnu_arm_kernel.sh first"
-    require "$STAGE90_PTHREAD_FUNCTIONS_OBJ" "run ./tools/build_xnu_arm_kernel.sh --platform-only first (its platform block compiles stages/stage90/xnu_supply/stage90_pthread_functions.c)"
+    require "$STAGE90_PTHREAD_FUNCTIONS_OBJ" "run ./tools/build_xnu_arm_kernel.sh --platform-only first (its platform block compiles src/supply/stage90_pthread_functions.c)"
     for _o in "${MIG_KSERVER_OBJS[@]}"; do
         require "$_o" "run ./tools/gen_mach_headers.sh and ./tools/build_xnu_arm_kernel.sh first"
     done
@@ -27190,7 +27197,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # The AES object, compiled by this script rather than by the platform block because it includes
     # nothing from the tree; see where it is built. Linked beside the table that points into it.
     LINK_OBJS+=("$STAGE90_AES_OBJ")
-    require "$STAGE90_CRYPTO_FUNCTIONS_OBJ" "run ./tools/build_xnu_arm_kernel.sh --platform-only first (its platform block compiles stages/stage90/xnu_supply/stage90_crypto_functions.c)"
+    require "$STAGE90_CRYPTO_FUNCTIONS_OBJ" "run ./tools/build_xnu_arm_kernel.sh --platform-only first (its platform block compiles src/supply/stage90_crypto_functions.c)"
 
     # --------------------------------------------------------------------------------------------
     # 439: `pseudo_inits`, supplied by this image - and it is *this* link line that has to carry it.
@@ -27481,7 +27488,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     if (( ${#POOL_OBJS[@]} < 300 )); then
         say "FAIL: the pool glob found ${#POOL_OBJS[@]} object(s) to add and at least 300 are" >&2
         say "      expected (423 were measured for this step). Run" >&2
-        say "      ./tools/build_xnu_arm_kernel.sh and ./stages/stage90/xnu_arm_assemble.sh first." >&2
+        say "      ./tools/build_xnu_arm_kernel.sh and ./scripts/xnu_arm_assemble.sh first." >&2
         exit 1
     fi
     say "  the whole kernel: ${#POOL_OBJS[@]} object(s) added, $_436_already already named above,"
@@ -27676,7 +27683,7 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
 
     {
         echo '/*'
-        echo ' * Generated by xnu_arm_boot/build_entry.sh from pass 1'"'"'s undefined set.'
+        echo ' * Generated by src/entry/build_entry.sh from pass 1'"'"'s undefined set.'
         echo ' *'
         echo ' * One stub per symbol XNU'"'"'s own objects need and this image does not provide.'
         echo ' * Reaching any of them stops the run and writes its name, which is the measurement.'
@@ -27846,7 +27853,7 @@ layout_fail() { say "FAIL: $*" >&2; exit 1; }
 #
 # Experiment 297 moved this symbol *inside* the `.bss` output section of `entry.ld`, which is the
 # only placement that makes it the start of `.bss` regardless of what the linker places between
-# `.data` and `.bss`. That is also what `stages/stage90/linker.ld` has always done for the payload -
+# `.data` and `.bss`. That is also what `src/linker.ld` has always done for the payload -
 # the two scripts disagreed about this for as long as both existed, and the entry script was the
 # wrong one.
 #
@@ -28727,7 +28734,7 @@ verify_trace_symbols() {
     # build reading `boot_args.o` would be reading the previous build's object (460's defect
     # class). What belongs here is the image side of the same comparison - the name the kernel's
     # own parse site uses, above - and the payload side of it is 515's check in
-    # `stages/stage90/build.sh`, which has both artifacts of one build in hand.
+    # `scripts/build.sh`, which has both artifacts of one build in hand.
     grep -qx "PE_parse_boot_argn" "$OUT/xnu_arm_entry_undef.txt" &&
         layout_fail "this step's boot argument is parsed by PE_parse_boot_argn and the pass-1 undefined set contains it: the parse that has to find up_style_idle_exit=1 would then be a property of a stand-in rather than of Apple's own parser"
 
@@ -31958,7 +31965,7 @@ verify_root_device
 # payload as `@NAME@`. This is 455's rule - a check that stops the build - applied to the generator
 # itself, and the backticks stay in the comment because they are now inert.
 cat > "$OUT/xnu_arm_entry.h" <<'EOF'
-/* Generated by xnu_arm_boot/build_entry.sh. The XNU entry image, as data for the payload.
+/* Generated by src/entry/build_entry.sh. The XNU entry image, as data for the payload.
  *
  * Everything the payload needs to place, jump to and describe this image - including the layout
  * above it, which used to be constants in stage90.h and in xnu_entry_jump.c that had to agree.
@@ -32294,8 +32301,8 @@ ENTRY_IMAGE_SHA256=$(sha256sum "$OUT/xnu_arm_entry.bin" | awk '{print $1}')
 ENTRY_IMAGE_BYTES=$(stat -c%s "$OUT/xnu_arm_entry.bin")
 IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
 {
-    echo "# Generated by xnu_arm_boot/build_entry.sh. The switches THIS entry image was built with,"
-    echo "# and the hash of the artifact they produced. Read by stages/stage90/preflight_boot_check.sh,"
+    echo "# Generated by src/entry/build_entry.sh. The switches THIS entry image was built with,"
+    echo "# and the hash of the artifact they produced. Read by scripts/preflight_boot_check.sh,"
     echo "# which refuses a record whose hash is not the entry bin it is about."
     echo "STAGE90_XNU_ENTRY_SHA256=$ENTRY_IMAGE_SHA256"
     echo "STAGE90_XNU_ENTRY_BYTES=$ENTRY_IMAGE_BYTES"
@@ -32393,7 +32400,7 @@ say "  xnu_entry_678: the record carries ${#ENTRY_ARM_KEYS[@]} arm key(s) plus t
 # ------------------------------------------------- 533: **the sources of this image, by content**
 #
 # **The gate's freshness sweep compared mtimes, and this directory is where that refused a correct
-# tree.** `preflight_boot_check.sh` listed `xnu_arm_boot/*.{c,h,S,ld,sh}` against the *payload
+# tree.** `preflight_boot_check.sh` listed `src/entry/*.{c,h,S,ld,sh}` against the *payload
 # image's* mtime, so committing 533 - which rewrote this file's mtime to the commit second, 19.9 s
 # after the image the same file had just produced - made the gate refuse a tree whose `git status`
 # was empty and whose content was byte-identical to what the image was built from. The remedy that
@@ -32420,9 +32427,9 @@ say "  xnu_entry_678: the record carries ${#ENTRY_ARM_KEYS[@]} arm key(s) plus t
 # so a manifest from an earlier build cannot be read as this one's.
 ENTRY_SRC_MANIFEST=$OUT/xnu_arm_entry-sources.txt
 {
-    echo "# Generated by xnu_arm_boot/build_entry.sh at the same moment, and from the same tree, as the"
-    echo "# entry image whose hash is on the second line. Every regular file in xnu_arm_boot/, by content."
-    echo "# Read by stages/stage90/preflight_boot_check.sh, which recomputes this list and refuses when"
+    echo "# Generated by src/entry/build_entry.sh at the same moment, and from the same tree, as the"
+    echo "# entry image whose hash is on the second line. Every regular file in src/entry/, by content."
+    echo "# Read by scripts/preflight_boot_check.sh, which recomputes this list and refuses when"
     echo "# the two differ: an edit that was not rebuilt, and a file added or removed since the build."
     echo "STAGE90_XNU_ENTRY_SHA256=$ENTRY_IMAGE_SHA256"
     ( cd "$BOOT_DIR" && find . -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | LC_ALL=C sort \

@@ -20,7 +20,7 @@
  *
  * **The chunk count is not a free choice.** `bsd/kern/subr_log.c:863` sizes the kernel's firehose
  * allocation from `FIREHOSE_BUFFER_KERNEL_CHUNK_COUNT` - compiled there against this project's shim
- * (`stages/stage90/shims_arm/os/firehose_buffer_private.h:54`, the constant `16`, taken from
+ * (`src/shims_arm/os/firehose_buffer_private.h:54`, the constant `16`, taken from
  * `libdispatch`'s `os/firehose_buffer_private.h:43` at `libdispatch-913.30.4`) - and
  * `firehose_buffer_create` then lays out the buffer's header for the value *this* variable holds.
  * Experiment 255 measured that allocation on the device: **73728 bytes = 65536 + 2 guard pages**,

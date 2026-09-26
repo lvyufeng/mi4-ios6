@@ -25,7 +25,7 @@
 #      them returns a shorter list, and a shorter list is what a missing record line looks like:
 #
 #        grep -oE '\$OUT/[A-Za-z0-9_.-]+|out/stage90/[A-Za-z0-9_.-]+' \
-#          stages/stage90/preflight_boot_check.sh | sed 's|\$OUT/||; s|out/stage90/||' | sort -u
+#          scripts/preflight_boot_check.sh | sed 's|\$OUT/||; s|out/stage90/||' | sort -u
 #
 #   B. **the members of the manifest it verifies.** `preflight_boot_check.sh:139` is
 #      `( cd "$OUT" && sha256sum -c SHA256SUMS.txt )`, and `sha256sum -c` opens every path the manifest
@@ -3004,8 +3004,8 @@ set=armed-storage-completion-6f49e880 sha256=88203457dc20879b3a09e772a6b8a0b4fc6
 set=armed-storage-completion-6f49e880 sha256=6ae6346bdab1d835554586f853c3fea9ecdfff97d5e213c9eef4c708abd630a3 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
 set=armed-storage-completion-6f49e880 sha256=6f49e880a4670a984ebe4645151042c96ea0a7baa40ee66500582d873a75dd39 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-this-is-the-rung-14-entry-STAGE90_XNU_STORAGE_PROBE-13-the-8-hex-of-this-hash-is-the-sets-name-and-its-size-is-BYTE-IDENTICAL-to-the-pressed-rung-13-arm-so-the-seam-constant-did-not-move
 set=armed-storage-completion-6f49e880 sha256=f50c7418b6f47e7db971f220a404f94cd640d15b7ef68d00918e4c90ac06aca0 bytes=6732140 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
-set=armed-storage-completion-6f49e880 sha256=dc674503f7fa27a177be35802a39ad9eb298054f8aeb4d98580494d0bd1e6464 bytes=910 file=xnu_arm_entry-config.txt role=entry-config-record-its-rung-line-reads-STAGE90_XNU_STORAGE_PROBE-13
-set=armed-storage-completion-6f49e880 sha256=65045b698bfbe8ae55b59f9b72452c5f0954840c7dd36c4d074ba65eccf872bf bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest
+set=armed-storage-completion-6f49e880 sha256=fcefba4c078f9969c64ff862e58af87a2184b82d875865d9a9188f7b3e788fb4 bytes=900 file=xnu_arm_entry-config.txt role=entry-config-record-its-rung-line-reads-STAGE90_XNU_STORAGE_PROBE-13
+set=armed-storage-completion-6f49e880 sha256=15552518e944cd1c55e01013a1b75d5645a555eb5ecf765b7398a2f85f4ae395 bytes=2335 file=xnu_arm_entry-sources.txt role=entry-source-manifest
 set=armed-storage-completion-6f49e880 sha256=ae494aaa1ef512f7134da42246d8d57ebdd13768f7b145a4d196b498fb4bfa7c bytes=6051840 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
 set=armed-storage-completion-6f49e880 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-macho-UNCHANGED-since-the-press
 
@@ -3099,3 +3099,75 @@ set=armed-storage-completion-6f49e880 sha256=52bc9c357068b791f777bb9abd2e879fa5b
 # partition table, no mounted volume and no driver beyond the fixture, so 「如果os已经能进去了的话」 is
 # not triggered and **TWRP-to-storage stays withheld**. **AND THIS SET IS NO LONGER THE ARM THE NEXT
 # PRESS SENDS**; the bytes below are the bytes that were sent.
+
+# ================================================================================================
+# 731: THE 2026-09-26 RESTRUCTURE CORRECTS TWO OF THIS SET'S LINES, AND THE ARM ITSELF DID NOT MOVE.
+# ================================================================================================
+# **THIS IS A RECORD CORRECTION AND NOT A PRESS.** No device action of any kind was taken on
+# 2026-09-26 after 07:39:59 - the rung-14 press above is the last one - and nothing is owed. The
+# correction is to two of the eleven lines of `set=armed-storage-completion-6f49e880`, and it is
+# forced by the reorganization the operator asked for, not by anything about the arm.
+#
+# WHAT MOVED. On 2026-09-26 the repository was reorganized from the snapshot-per-stage model into one
+# evolving tree: the live code left `stages/stage90/` for `src/` (the 67 payload `.c` flat, and the
+# seven named subtrees as `src/entry/`, `src/platform/`, `src/supply/`, `src/shims/`, `src/shims_arm/`,
+# `src/firehose/`, `src/targets/`), the ten shell scripts and the compile-graph scanner left for
+# `scripts/`, the three record `.txt` files for `records/`, `tool-images/` for `records/tool-images/`,
+# and the five archived snapshots `stage85`..`stage89` for `archive/stages/`. `out/` did not move and
+# `out/stage90/`'s name did not change, so every literal that names the arm still resolves.
+#
+# WHY EXACTLY TWO LINES. Nine of the eleven members are the bytes the press sent or artifacts derived
+# from the payload - `stage90-qcdt.img`, `stage90.bin`, `stage90.img`, `stage90.elf`,
+# `stage90-build-config.txt`, `stage90_fixture.macho`, `SHA256SUMS.txt`, `xnu_arm_entry.bin`,
+# `xnu_arm_entry.elf` - and not one of their hashes changed: `cmp` is byte-identical for all nine. The
+# other two are the only recorded members whose **content is derived from the source tree's own paths**,
+# because each carries a header naming where it was generated and what reads it. So they are the only
+# two whose content the move could reach, and it reached exactly the path spellings inside them:
+#
+#   xnu_arm_entry-config.txt   dc674503f7fa27a177be35802a39ad9eb298054f8aeb4d98580494d0bd1e6464  910
+#                           -> fcefba4c078f9969c64ff862e58af87a2184b82d875865d9a9188f7b3e788fb4  900
+#   xnu_arm_entry-sources.txt  65045b698bfbe8ae55b59f9b72452c5f0954840c7dd36c4d074ba65eccf872bf 2348
+#                           -> 15552518e944cd1c55e01013a1b75d5645a555eb5ecf765b7398a2f85f4ae395 2335
+#
+# **The sizes are the arithmetic that shows it, and they are worth reading because a 7-byte delta is
+# what a path spelling costs and nothing else is that shape.** Both files were rewritten twice - once
+# for the move itself and once for the last stale names in `build_entry.sh`'s own header writers - and
+# each rewrite dropped exactly 7 bytes per path it re-spelled: `stages/stage90/` is 15 characters and
+# `scripts/` is 8, so `stages/stage90/preflight_boot_check.sh` -> `scripts/preflight_boot_check.sh` is
+# -7; `xnu_arm_boot/` is 13 and `src/entry/` is 10, so `xnu_arm_boot/build_entry.sh` ->
+# `src/entry/build_entry.sh` is -7 and `Every regular file in xnu_arm_boot/, by content` ->
+# `... in src/entry/, by content` is -7. 910-7-3 = 900 and 2348-7-6 = 2335, and no line's *value* moved:
+# the second line of the config is still `STAGE90_XNU_ENTRY_SHA256=6f49e880...`, the 18 arm keys below
+# it are unchanged, and the manifest's 23 content hashes are the hashes of the 23 files that are in
+# `src/entry/` now. **THE PRESS-TIME TEXT OF BOTH FILES IS KEPT OUTSIDE THE TREE** at
+# `/mnt/data/mi4-ios6-export/postrestructure-parks/at-press-20260926-0740/` (`config.txt.as-parked`,
+# `sources.txt.as-parked`, hashes as above), because these two lines are the only place in the
+# repository that recorded them.
+#
+# **WHAT PROVES THE ARM DID NOT MOVE, MEASURED RATHER THAN ARGUED.** `src/entry/build_entry.sh` was run
+# twice from the restructured tree with this arm's own 18-key switch set (read back out of
+# `out/stage90/xnu_arm_entry-config.txt`, so it is the arm's set and not a transcribed one; the script's
+# own deliberate-change guard passes because the set is identical), and both builds produced
+# `out/stage90/xnu_arm_entry.bin` = 6f49e880a4670a984ebe4645151042c96ea0a7baa40ee66500582d873a75dd39,
+# 5,552,764 bytes, `cmp`-identical to the pressed artifact. `xnu_arm_entry.elf` likewise:
+# f50c7418b6f47e7db971f220a404f94cd640d15b7ef68d00918e4c90ac06aca0, `cmp`-identical. So the eight
+# `src/entry/` files whose content this restructure touched - `assym.s`, `entry.ld`, `entry_gic.c`,
+# `entry_gic.h`, `entry_irq.c`, `entry_storage.c`, `entry_stubs.c` (comments, and comments only) and
+# `build_entry.sh` (a script, not a compiler input) - **fed no compiler input**, which is the condition
+# the gate's own refusal text names for not running `./build.sh`: the payload does not need rebuilding
+# and `./build.sh` must NOT be run, because it does not reproduce (408) and would spend the only
+# in-tree copy of an arm that was already sent. The eight `out/xnu_platform_obj/*.o` inputs the entry
+# link reads were rebuilt from `src/platform/` and `src/supply/` for the same reason, and all eight came
+# back byte-identical: the platform build is reproducible across the move too.
+#
+# **The park was refreshed, and that is a change to the park and not to the arm.** `out/stage90/` and
+# `out/stage90/frozen/armed-storage-completion-6f49e880/` now hold the two corrected metadata files, so
+# row 1 of `tools/verify_press_ready.sh` (live bytes are the parked bytes) and row 2
+# (`tools/verify_revert_set.sh "$PARK" --set=...`) are both green on all eleven members. What the park
+# is *for* - one copy of an arm that cannot be rebuilt - is unchanged, and the press-time text of the
+# two corrected files is in the export directory named above.
+#
+# **WHAT DID NOT MOVE, IN ONE LINE**: the rung is still 14 (`STAGE90_XNU_STORAGE_PROBE=13`), the switch
+# set is still the 18 keys recorded above, the ending is still 730's, and the goal is still not met -
+# XNU is not normally loaded, the OS has not been entered, and 「如果os已经能进去了的话」 is not
+# triggered, so **TWRP-to-storage stays withheld**.

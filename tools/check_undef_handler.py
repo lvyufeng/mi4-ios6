@@ -51,9 +51,9 @@ specifically, because its first version refused the real source (see `calls_at_b
 mutation must be refused.
 
 Usage:
-    tools/check_undef_handler.py --guard --source stages/stage90/xnu_arm_boot/entry_stubs.c
+    tools/check_undef_handler.py --guard --source src/entry/entry_stubs.c
     tools/check_undef_handler.py --split --elf out/stage90/xnu_arm_entry.elf \
-        --source stages/stage90/xnu_arm_boot/entry_stubs.c
+        --source src/entry/entry_stubs.c
     tools/check_undef_handler.py --selftest
 """
 
@@ -398,7 +398,7 @@ def check_split(elf, symbols=None, source_text=None, user_lit_mutation=None, cal
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--source", default="stages/stage90/xnu_arm_boot/entry_stubs.c")
+    parser.add_argument("--source", default="src/entry/entry_stubs.c")
     parser.add_argument("--elf", default="out/stage90/xnu_arm_entry.elf")
     parser.add_argument("--guard", action="store_true", help="run the guard's case table on the host")
     parser.add_argument("--split", action="store_true",

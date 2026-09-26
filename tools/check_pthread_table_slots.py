@@ -10,7 +10,7 @@ shims in `bsd/kern/pthread_shims.c` are twenty bytes each - `movw`/`movt` of `pt
 `ldr r1, [r1]`, `ldr r1, [r1, #N]`, `bx r1` - so a slot that points at the wrong body is neither a stop
 nor a fault:
 
-  - the NULL scan in `stages/stage90/xnu_supply/stage90_pthread_functions.c`'s constructor cannot see
+  - the NULL scan in `src/supply/stage90_pthread_functions.c`'s constructor cannot see
     it, because two slots swapped are two non-NULL words;
   - and no device run can see it either, because the body that runs is a *real* body that names itself
     correctly - it just names the other slot. Experiment 465's own write-up is where this confusion is

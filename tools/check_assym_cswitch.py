@@ -8,7 +8,7 @@ Check that the assembled ARM layer reads `struct thread` at the offsets this con
 
 Why this exists. `assym.s` is a **per-configuration** artifact: `tools/gen_assym.sh` defaults
 `CONFIG=${XNU_KERNEL_CONFIG:-RELEASE}` and writes `out/xnu_assym/$CONFIG/assym.s`, and both
-`tools/assemble_arm_layer.sh` and `stages/stage90/xnu_arm_assemble.sh` read that path. The three
+`tools/assemble_arm_layer.sh` and `scripts/xnu_arm_assemble.sh` read that path. The three
 generator steps - the option headers, `gen_assym.sh`, `assemble_arm_layer.sh` - were hand-run
 prerequisites, so a configuration change could leave the ARM layer assembled against *RELEASE*
 offsets while every C object was compiled with the new configuration's.

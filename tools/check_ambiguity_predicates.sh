@@ -46,7 +46,7 @@
 set -u
 
 REPO_ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
-RUNNER=$REPO_ROOT/stages/stage90/run_and_capture.sh
+RUNNER=$REPO_ROOT/scripts/run_and_capture.sh
 JOB=${CLAUDE_JOB_DIR:-/home/lvyufeng/.claude/jobs/ddfef593}
 WATCHER=${WATCHER:-$JOB/tmp/press-watcher.sh}
 VERBOSE=0

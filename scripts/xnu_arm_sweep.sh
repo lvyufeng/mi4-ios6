@@ -27,8 +27,9 @@
 set -uo pipefail
 
 cd "$(dirname "$0")"
-STAGE_DIR=$PWD
-REPO_ROOT=$(cd "$STAGE_DIR/../.." && pwd)
+SCRIPT_DIR=$PWD
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+SRC_DIR=$REPO_ROOT/src
 
 XNU=$REPO_ROOT/external/xnu-4570.1.46
 if [[ ! -d $XNU ]]; then

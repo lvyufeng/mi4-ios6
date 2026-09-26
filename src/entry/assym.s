@@ -15,7 +15,7 @@
  *        sp, lr, pc, cpsr, fsr, far, exception. Countable by hand; also 4-byte aligned throughout.
  *        **This is a second copy of a layout the generated `assym.s` also carries, and this file is
  *        first on the entry build's include path** (`xnu_arm_assemble.sh` passes
- *        `-I$STAGE_DIR/xnu_arm_boot` before the option headers, while `assemble_arm_layer.sh` puts
+ *        `-I$SRC_DIR/entry` before the option headers, while `assemble_arm_layer.sh` puts
  *        the generated directory first). So every constant below is compared against the generated
  *        one by `tools/check_saved_state_offsets.py`, which runs in `build_entry.sh`: two files
  *        mirroring one struct is the "one value, two definitions" shape, and it is now a build

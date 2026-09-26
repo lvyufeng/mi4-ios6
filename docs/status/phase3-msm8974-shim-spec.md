@@ -5,7 +5,7 @@ replace rather than configure, and which hardware facts it must encode. Grounded
 sources that can all be read in this repository:
 
 1. **What XNU calls and expects** — `external/xnu-4570.1.46/pexpert/arm/`, `osfmk/arm/`
-2. **What the payload already has working on this device** — `stages/stage90/gic.c`,
+2. **What the payload already has working on this device** — `src/gic.c`,
    `timebase.c`, and the hardware logs in `docs/experiments/`
 3. **The vendor's own hardware reference** — `external/android_kernel_xiaomi_cancro/`
 
@@ -111,7 +111,7 @@ driven:
 | `tbd_fiq_handler` | The FIQ entry for the timer; the shim's own vectors, not Apple's |
 
 `int_address`/`int_value` are the EOI address and value. The payload's validated GIC code
-(`stages/stage90/gic.c`) acknowledges with a write to `GICC_EOIR` (`cpu_base + 0x010`) using
+(`src/gic.c`) acknowledges with a write to `GICC_EOIR` (`cpu_base + 0x010`) using
 the IAR value it read, so the natural pairing is `int_address = GICC_EOIR`,
 `int_value = <the IAR read in the handler>` — which is why `tbd_fiq_handler` and the EOI
 value are coupled and must be designed together rather than separately.
@@ -193,7 +193,7 @@ while `cpu_timebase_init` copies all three unconditionally. Whatever the shim su
 account for XNU calling through a NULL in the generic case, or not relying on those two at
 all.
 
-## 2a. Implemented: `stages/stage90/xnu_msm8974_shim.c`
+## 2a. Implemented: `src/xnu_msm8974_shim.c`
 
 The interface above is now written, behind `STAGE90_XNU_MSM8974_SHIM` (default off — it is the
 next stage's work and changes nothing about the current one). What it does:
@@ -258,10 +258,10 @@ Each is cited to its evidence.
 | --- | --- | --- |
 | Distributor base | `0xf9000000` | cancro device tree; `gic_validate_snapshot()` asserts it and passes on hardware |
 | CPU interface base | `0xf9002000` | same |
-| `GICC_IAR` | `+0x00c` | `stages/stage90/gic.c:16` |
-| `GICC_EOIR` | `+0x010` | `stages/stage90/gic.c:17` |
-| `GICC_PMR` | `+0x004` | `stages/stage90/gic.c:14` |
-| Spurious intid | `0x3ff` | `stages/stage90/gic.c:21` |
+| `GICC_IAR` | `+0x00c` | `src/gic.c:16` |
+| `GICC_EOIR` | `+0x010` | `src/gic.c:17` |
+| `GICC_PMR` | `+0x004` | `src/gic.c:14` |
+| Spurious intid | `0x3ff` | `src/gic.c:21` |
 
 ### 3.2 The timer interrupt number — and why it matters
 
@@ -304,7 +304,7 @@ measures a delta over a known delay and compares. The shim's `tbd_get_decremente
 ### 3.4 Watchdog (relevant to Phase 3 only as a dependency)
 
 `0xf9017000`, bark/bite, `WDT_HZ = 32765`. Already implemented in
-`stages/stage90/hw_watchdog.c`; a real kernel would want the same, and the vendor driver
+`src/hw_watchdog.c`; a real kernel would want the same, and the vendor driver
 (`arch/arm/mach-msm/msm_watchdog_v2.c`) is the reference. Note the vendor binding's
 qualification: the bite resets via the *secure* watchdog, so the dependency is on TrustZone,
 not on pure hardware.
@@ -505,7 +505,7 @@ Stated so the next session does not over-read §6.2:
    - **It is not host-side in the sense meant.** `__ARM_TIME__` lives in
      `osfmk/arm/{locore.s,machine_routines_asm.s,machine_routines.c,arm_init.c,rtclock.c}` —
      none of which this project compiles. The public-XNU compile graph is five objects from
-     `pexpert/gen` and `pexpert/arm` (`stages/stage90/targets/cancro.stage90.objects`), and
+     `pexpert/gen` and `pexpert/arm` (`src/targets/cancro.stage90.objects`), and
      every manifest says none of them are linked into the payload. Answering "does that path
      build" means building XNU's ARM kernel — which the project's own README gates to Phase 4
      ("Enter public XNU `_start` / build a full `mach_kernel`").

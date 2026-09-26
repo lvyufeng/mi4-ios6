@@ -76,11 +76,11 @@ if [[ $FINAL -eq 0 ]]; then
     "$LD" -r "${OBJS[@]}" "${RTOBJS[@]}" "${LIBGCC[@]}" -o "$TARGET" 2>"$OUT/$CONFIG-partial.err"
     rc=$?
 else
-    # A full link needs a script that says where everything goes. `stages/stage90/xnu_link.ld` is the
+    # A full link needs a script that says where everything goes. `src/xnu_link.ld` is the
     # one the Stage90 handoff uses for its entry image; it is the only address layout this project
     # has validated on hardware, so it is what a first full link is pointed at.
     TARGET=$OUT/$CONFIG-final.elf
-    "$LD" -T "$REPO_ROOT/stages/stage90/xnu_link.ld" --no-undefined -e _start \
+    "$LD" -T "$REPO_ROOT/src/xnu_link.ld" --no-undefined -e _start \
           "${OBJS[@]}" "${RTOBJS[@]}" "${LIBGCC[@]}" -o "$TARGET" 2>"$OUT/$CONFIG-final.err"
     rc=$?
 fi

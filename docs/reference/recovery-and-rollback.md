@@ -137,7 +137,7 @@ Going **back** to a payload that was known to work is a separate act from recove
 its own record. A stage payload's `out/stage90/` tree can be put back to either recorded arm — the frozen
 574 arm, whose readings this project's later steps are all measured against, or the armed sleepless arm the
 next press sends — by copying eleven files back, with no rebuild involved. The sets, their hashes and the
-reason those sets and not others are `stages/stage90/revert-set.txt`,
+reason those sets and not others are `records/revert-set.txt`,
 and `tools/verify_revert_set.sh DIR` checks a directory against it. **Eleven rather than nine, and that is
 the correction 612 records**: the gate reads a file's path in its text *and* every path named by the
 manifest it verifies (`sha256sum -c SHA256SUMS.txt`, its line 139), so a set built from the gate's text
@@ -171,7 +171,7 @@ the gate.
 For a Stage payload, gate the run first:
 
 ```bash
-cd stages/stage90 && ./build.sh && ./preflight_boot_check.sh \
+./scripts/build.sh && ./scripts/preflight_boot_check.sh \
     [--allow-preflight|--allow-full|--allow-selftest|--allow-attr-normal-nc|--allow-hw-watchdog-selftest]
 ```
 
@@ -235,7 +235,7 @@ Recovery:
 The payload has **two** recovery nets designed to make this procedure unnecessary, and they
 fail in different ways, which is why there are two:
 
-- The **MSM8974 hardware watchdog** (`stages/stage90/hw_watchdog.c`, on by default) is armed
+- The **MSM8974 hardware watchdog** (`src/hw_watchdog.c`, on by default) is armed
   at the top of `stage90_main`: **bark at 25 s, bite at 28 s**, following the vendor driver's
   own split (`STAGE90_HW_WATCHDOG_TIMEOUT_S` / `_BITE_GAP_S` in `stage90.h`; both registers are
   20 bits, which is why the timeout is 25 s and not 30 s). It is a hardware counter — no GIC,
@@ -301,7 +301,7 @@ Two things follow, and both are about how to read a hang rather than about the d
 
 ### 5. Persistent flash only with explicit approval
 
-**This step now has a gate: `stages/stage90/preflight_storage_write.sh`.** It refuses by default, runs
+**This step now has a gate: `scripts/preflight_storage_write.sh`.** It refuses by default, runs
 no fastboot, touches no device, and clears exactly one form of the write. Use it before any write this
 document describes; the section below is the reasoning it encodes.
 
@@ -345,7 +345,7 @@ output is the rollback, which is a recovery action and is labelled as one.
 #### Which tool image, and how it is known
 
 `--boot-image` is not "any Android boot image". **The gate will only boot an image this tree has a
-record for.** The record is `stages/stage90/tool-images.txt` — one line per image, keyed by sha256, with
+record for.** The record is `records/tool-images.txt` — one line per image, keyed by sha256, with
 the source page, the fetch date, the size, an md5 and the signer — and the check is
 `tools/verify_tool_image.sh`, which the gate runs before it prints a single command:
 
@@ -371,7 +371,7 @@ The image currently recorded is **TWRP 3.7.0_9-0 for `cancro`**, fetched 2026-09
 | signed by | `9570 7D42 307C 9D41 D09B F709 1D85 97D7 891A 43DF` (uid `TeamWin <admin@teamw.in>`), 2022-10-11 |
 
 Both hashes equal the values TWRP publishes for that file, and the signature verifies against the key
-kept in `stages/stage90/tool-images/` — so the fetch is reproducible and checkable offline. Two caveats,
+kept in `records/tool-images/` — so the fetch is reproducible and checkable offline. Two caveats,
 stated rather than glossed: the fetch must go **through the html page** (TWRP's terms forbid linking
 directly to their files; without the page's cookie and referer the same URL answers 200 with a 6,817-byte
 interstitial, which is exactly how the first attempt here produced a "successful" download of the wrong
@@ -410,7 +410,7 @@ mind, not a defect to fix.
     `*.mbn`, `rawprogram*.xml` and `patch*.xml` across the backup and the repository returns **nothing**.
     EDL needs a signed Firehose programmer (`prog_emmc_firehose_8974.mbn` for MSM8974) plus a
     `rawprogram*.xml`; partition images alone cannot be pushed over EDL.
-  * **`stages/stage90/firehose/` is not that programmer, despite the name.** It is Apple's libdispatch
+  * **`src/firehose/` is not that programmer, despite the name.** It is Apple's libdispatch
     `firehose_buffer.c` and its headers, ported here so `bsd/kern/subr_log.c` can link (experiment 255);
     it is XNU's log-ring code and has no relation to Qualcomm's Firehose protocol. The collision is worth
     knowing before searching the tree for EDL material and finding a directory that looks like an answer.

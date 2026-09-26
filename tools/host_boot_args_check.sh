@@ -32,7 +32,7 @@ WORK=$REPO_ROOT/out/host-boot-args
 CC=${CC:-cc}
 NM=${NM:-arm-none-eabi-nm}
 
-[[ -f $ELF ]] || { echo "host_boot_args_check: no $ELF - run stages/stage90/build.sh first" >&2; exit 2; }
+[[ -f $ELF ]] || { echo "host_boot_args_check: no $ELF - run scripts/build.sh first" >&2; exit 2; }
 
 mkdir -p "$WORK"
 
@@ -46,11 +46,11 @@ echo "host_boot_args_check: __stage90_image_end = $IMAGE_END (from $ELF)"
 # freestanding and tools/host_32bit_runtime.c supplies the handful of symbols it wants.
 "$CC" -m32 -static -ffreestanding -nostdlib -fno-builtin -std=gnu11 -O1 \
   -Wno-unused-function -Wno-unused-parameter \
-  -I "$REPO_ROOT/stages/stage90" \
+  -I "$REPO_ROOT/src" \
   -o "$WORK/host_boot_args" \
   "$TOOLS_DIR/host_32bit_runtime.c" \
   "$TOOLS_DIR/host_boot_args_harness.c" \
-  "$REPO_ROOT/stages/stage90/xnu_boot_args_conformant.c" \
+  "$REPO_ROOT/src/xnu_boot_args_conformant.c" \
   -Wl,--defsym=__stage90_image_end="$IMAGE_END" \
   -Wl,-e,main
 

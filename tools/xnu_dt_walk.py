@@ -198,7 +198,7 @@ def tree_pa(repo_root):
     The device's `prop` pointer is a physical address, because `xnu_entry_jump.c` sets
     `physBase == virtBase` - so the offset into the blob is `prop - ENTRY_DT_PA`, and
     `ENTRY_DT_PA` is `STAGE90_XNU_ENTRY_BASE + STAGE90_XNU_ENTRY_DT_OFFSET` in the header
-    `xnu_arm_boot/build_entry.sh` writes. Reading it there rather than writing the number here is
+    `src/entry/build_entry.sh` writes. Reading it there rather than writing the number here is
     the point: it moves whenever the image does.
     """
     path = os.path.join(repo_root, "out", "stage90", "xnu_arm_entry.h")
@@ -713,7 +713,7 @@ def main():
     # is the shape of the defect the step was hunting. A stale input is not a measurement of anything,
     # so this refuses rather than printing a table.
     blob_mtime = os.path.getmtime(args.blob)
-    for src in ("stages/stage90/stage90_main.c", "stages/stage90/apple_dt.c",
+    for src in ("src/stage90_main.c", "src/apple_dt.c",
                 "out/stage90/xnu_arm_entry.h"):
         path = os.path.join(REPO_ROOT, src)
         if os.path.isfile(path) and os.path.getmtime(path) > blob_mtime:
@@ -803,7 +803,7 @@ def main():
             pa = tree_pa(REPO_ROOT)
             if pa is None:
                 sys.exit("no out/stage90/xnu_arm_entry.h to take the tree's physical address from - "
-                         "run stages/stage90/xnu_arm_boot/build_entry.sh first, or pass "
+                         "run src/entry/build_entry.sh first, or pass "
                          "--probe-offset")
             print()
             print(f"the device's tree is copied to PA 0x{pa:x} "

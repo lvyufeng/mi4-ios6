@@ -45,7 +45,7 @@
 #
 #     **And the tool is THE recorded one, not merely a boot image.** `--boot-image` used to be checked
 #     by parsing it, which is a claim about a *format*; a file that parses and is not the image this
-#     tree recorded would have been cleared. The record is `stages/stage90/tool-images.txt` (hash,
+#     tree recorded would have been cleared. The record is `records/tool-images.txt` (hash,
 #     size, md5, source page, signer) and the check is `tools/verify_tool_image.sh`, run below with
 #     `--require-role=twrp`. It refuses anything whose hash is not in the record, anything recorded
 #     for another role, and - the case a hash alone cannot catch - an image edited *and* re-recorded
@@ -67,7 +67,7 @@
 #   ./preflight_storage_write.sh --help                # print THIS header, whole, and exit 1
 #
 # `--boot-image` is required: it is the tool that gets BOOTED (never flashed) and the target is
-# written from inside it. Its hash must be one of `stages/stage90/tool-images.txt`'s lines.
+# written from inside it. Its hash must be one of `records/tool-images.txt`'s lines.
 #
 # Exit: 0 = every precondition verified and the commands are printed; 1 = refused, named reason.
 # `--help` also exits 1. **That is not a clearance and never can be** - 0 is the only status that
@@ -77,21 +77,22 @@ set -uo pipefail
 
 # **`$0` is resolved to an absolute path BEFORE the `cd`, and that is a repair, not a style choice.**
 # This file used to `cd "$(dirname "$0")"` with `$0` still relative, and `usage()` reads the file
-# through `$0`; so `bash stages/stage90/preflight_storage_write.sh --help` from the repository root
+# through `$0`; so `bash scripts/preflight_storage_write.sh --help` from the repository root
 # made `$0` the *caller's* relative path, the `cd` made the working directory the *tool's*, and the
-# read then looked for `stages/stage90/stages/stage90/preflight_storage_write.sh` - printing
+# read then looked for `src/scripts/preflight_storage_write.sh` - printing
 # `sed: can't read ...` and **nothing else**. Measured before the repair, and it is 615's defect
 # exactly (a path is the caller's or the tool's, and a `cd` before argument parsing silently makes it
 # the tool's) arriving in the file that guards the only irreversible action this project has. A
 # reader's first move on a gate is `--help`; it answered with an error message.
 SELF=$(readlink -f "${BASH_SOURCE[0]}")
 cd "$(dirname "$SELF")"
-STAGE_DIR=$PWD
-REPO_ROOT=$(cd "$STAGE_DIR/../.." && pwd)
+SCRIPT_DIR=$PWD
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+SRC_DIR=$REPO_ROOT/src
 
 SERIAL=${SERIAL:-4a2fe00b}
 BACKUP=$REPO_ROOT/xiaomi4-cancro-backup-20260604-112053
-RUNNER=$STAGE_DIR/run_and_capture.sh
+RUNNER=$SCRIPT_DIR/run_and_capture.sh
 
 ALLOW_STORAGE_WRITE=0
 TARGET=""
@@ -370,7 +371,7 @@ if [[ "$(readlink -f "$BOOTLOADER_IMAGE")" == "$(readlink -f "$IMAGE")" ]]; then
 fi
 # And it must be THE image this project recorded, not merely a file that parses as one. Until now
 # this check was the parser alone, which is a statement about a *format* and not about a *file*: any
-# Android boot image would have been cleared to boot. The record at stages/stage90/tool-images.txt
+# Android boot image would have been cleared to boot. The record at records/tool-images.txt
 # names the image by hash, `tools/verify_tool_image.sh` compares the two - and corroborates it with
 # TWRP's own signature - and the requirement is `role=twrp`, because the form this gate clears is the
 # one that boots the recovery tool. An image recorded for any other role is refused by name, and an

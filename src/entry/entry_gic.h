@@ -10,7 +10,7 @@
  *
  * **And here there are two sources rather than one, which is the point of the check.** The GIC
  * offsets are not Apple's - MSM8974's interrupt controller is described by the payload's own
- * `stages/stage90/gic.c` and by experiment 143's `xnu_msm8974_fiq_probe.c`, both of which drive the
+ * `src/gic.c` and by experiment 143's `xnu_msm8974_fiq_probe.c`, both of which drive the
  * same registers on the same device and both of which have hardware runs behind them. So the check
  * compares *these* numbers against *those* two files in both directions: every name this header
  * defines must appear in one of them with the same value, and every GIC offset either of them uses

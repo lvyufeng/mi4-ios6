@@ -56,8 +56,8 @@ TOOLS_DIR=$PWD
 REPO_ROOT=$(cd "$TOOLS_DIR/.." && pwd)
 
 XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
-SHIMS=$REPO_ROOT/stages/stage90/shims
-SHIMS_ARM=$REPO_ROOT/stages/stage90/shims_arm
+SHIMS=$REPO_ROOT/src/shims
+SHIMS_ARM=$REPO_ROOT/src/shims_arm
 MIG_HEADERS=${MIG_HEADERS:-$REPO_ROOT/out/mach_headers}
 MIG_KSERVER=${MIG_KSERVER_OUT:-$REPO_ROOT/out/mach_headers/kserver}
 OUT=${XNU_KERNEL_OBJ_OUT:-$REPO_ROOT/out/xnu_kernel_obj}
@@ -75,8 +75,8 @@ COMPONENT_LIST=(osfmk bsd libkern iokit pexpert security san)
 # target lowers it to `memcpy` - so the ELF path needs four symbols Apple's tree never mentions.
 # They are compiled here, with the loop's own flags, because a second flag list is this project's
 # most repeated defect: the target triple used to be spelled out in four scripts before
-# experiment-161. See stages/stage90/xnu_aeabi_runtime.c.
-RUNTIME_SOURCES=("$REPO_ROOT/stages/stage90/xnu_aeabi_runtime.c")
+# experiment-161. See src/xnu_aeabi_runtime.c.
+RUNTIME_SOURCES=("$REPO_ROOT/src/xnu_aeabi_runtime.c")
 RT_OUT=${XNU_RT_OBJ_OUT:-$REPO_ROOT/out/xnu_rt_obj}
 
 # The configuration to build. `RELEASE` is Apple's full iOS kernel; `STAGE90_BOOT` is the minimal
@@ -98,8 +98,8 @@ while [[ $# -gt 0 ]]; do
         # `--platform-only`: compile the four out-of-manifest blocks and nothing else.
         #
         # It exists so that the files in this build that are *this project's* - the platform expert
-        # in `stages/stage90/xnu_platform/` and the pthread function table in
-        # `stages/stage90/xnu_supply/`, whose every edit needs a compile to check - can be iterated
+        # in `src/platform/` and the pthread function table in
+        # `src/supply/`, whose every edit needs a compile to check - can be iterated
         # on without recompiling 698 Apple objects to reach them. Measured cost of the alternative: a
         # full run is minutes, and the first version of that file failed on one undeclared
         # identifier; measured cost of this mode, at the platform block alone: 0.9 seconds.
@@ -1031,7 +1031,7 @@ while read -r src; do
     # before the first token**, because the only other lever is the same trick scoped to
     # `vm/vm_object.h`, and that was measured to fail. A scoped `#define const` around the include
     # leaves the rest of the unit const-qualified, and a declaration reached inside the window then
-    # disagrees with the same declaration reached outside it — `stages/stage90/shims/kern/debug.h:6`
+    # disagrees with the same declaration reached outside it — `src/shims/kern/debug.h:6`
     # and `osfmk/kern/debug.h:423` both declare `Debugger`, and reading one `const char *` and the
     # other `char *` is "conflicting types for 'Debugger'". A unit-wide macro cannot produce that
     # class of disagreement, because there is only one reading of every header.
@@ -1147,15 +1147,15 @@ done
 # does not exist: Apple ships the implementation as a closed kernel library (`libkern/firehose/` in the
 # tarball has `KERNELFILES =` empty), and `bsd/kern/subr_log.c:874` calls `__firehose_buffer_create`
 # anyway - so experiment 255 stopped there. The source is libdispatch's `src/firehose/firehose_buffer.c`,
-# Apache-2.0, unmodified; see `stages/stage90/firehose/README.md` for its provenance. It is compiled
+# Apache-2.0, unmodified; see `src/firehose/README.md` for its provenance. It is compiled
 # here, with the loop's own flags, for the same reason `RUNTIME_SOURCES` is: a second flag list is this
 # project's most repeated defect, and this file reads the same kernel headers the loop's files do.
 # `portinc/` is not a shim - it is the newer tree's `libkern/os/` atomics surface, which this 10.13-era
 # tree does not ship, placed where `<os/...>` resolves (experiment 256).
-FIREHOSE_SOURCES=("$REPO_ROOT/stages/stage90/firehose/firehose_buffer.c" \
-                  "$REPO_ROOT/stages/stage90/firehose/firehose_kernel_config.c")
+FIREHOSE_SOURCES=("$REPO_ROOT/src/firehose/firehose_buffer.c" \
+                  "$REPO_ROOT/src/firehose/firehose_kernel_config.c")
 FH_OUT=${XNU_FIREHOSE_OBJ_OUT:-$REPO_ROOT/out/xnu_firehose_obj}
-FIREHOSE_INCLUDES=(-I"$REPO_ROOT/stages/stage90/firehose/portinc" -I"$REPO_ROOT/stages/stage90/firehose" -I"$XNU/libkern/firehose")
+FIREHOSE_INCLUDES=(-I"$REPO_ROOT/src/firehose/portinc" -I"$REPO_ROOT/src/firehose" -I"$XNU/libkern/firehose")
 mkdir -p "$FH_OUT"
 fh_fail=0
 for _src in "${FIREHOSE_SOURCES[@]}"; do
@@ -1212,7 +1212,7 @@ done
 # so it is an iokit translation unit with an `OSMetaClass` and a vtable exactly as the platform expert
 # is, compiled by the loop below with the same flags, into the same directory. It carries one extra
 # requirement the platform expert does not: its `start` calls the entry image's `entry_live_write`,
-# declared `extern "C"` rather than included, so `out/xnu_arm_boot/build_entry.sh` is what must link it
+# declared `extern "C"` rather than included, so `src/entry/build_entry.sh` is what must link it
 # (the object is not in the manifest, so nothing else ever will).
 #
 # **And 492's `MSM8974Timer.cpp` is the third, which is the first one whose personality names a
@@ -1230,10 +1230,10 @@ done
 # `IOPlatformDevice` bucket is searched for every nub and the *candidate test* is what selects" is a
 # statement one run can falsify - `probeCandidates` probes every entry in the bucket against every nub,
 # and two entries that name disjoint node names must each start on their own node and no other.
-PLATFORM_SOURCES=("$REPO_ROOT/stages/stage90/xnu_platform/MSM8974PlatformExpert.cpp"
-                  "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974Timer.cpp"
-                  "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974GIC.cpp"
-                  "$REPO_ROOT/stages/stage90/xnu_platform/MSM8974RootResource.cpp")
+PLATFORM_SOURCES=("$REPO_ROOT/src/platform/MSM8974PlatformExpert.cpp"
+                  "$REPO_ROOT/src/platform/MSM8974Timer.cpp"
+                  "$REPO_ROOT/src/platform/MSM8974GIC.cpp"
+                  "$REPO_ROOT/src/platform/MSM8974RootResource.cpp")
 
 # And the two answers the platform expert above gives `IODTPlatformExpert::processTopLevel`, checked
 # against the *same list* the loop below compiles rather than against a path repeated here - one
@@ -1249,7 +1249,7 @@ PL_MESSAGE=$("$TOOLS_DIR/check_platform_lists.py" --file "${PLATFORM_SOURCES[@]}
 }
 [[ ${VERBOSE:-0} -eq 0 ]] || printf '%s\n' "$PL_MESSAGE"
 
-PLATFORM_C_SOURCES=("$REPO_ROOT/stages/stage90/xnu_platform/stage90_platform_config_tables.c")
+PLATFORM_C_SOURCES=("$REPO_ROOT/src/platform/stage90_platform_config_tables.c")
 PL_OUT=${XNU_PLATFORM_OBJ_OUT:-$REPO_ROOT/out/xnu_platform_obj}
 PL_ROOTS=(-I"$XNU/iokit")
 for _c in "${COMPONENT_LIST[@]}"; do
@@ -1271,7 +1271,7 @@ PL_COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" iokit) )
 
 # **And a third list (432): the one stage source in this block that includes an XNU header.**
 #
-# `stages/stage90/xnu_supply/stage90_pthread_functions.c` supplies `struct pthread_functions_s` -
+# `src/supply/stage90_pthread_functions.c` supplies `struct pthread_functions_s` -
 # the table `bsd/kern/pthread_shims.c:275` guards on, whose only writer in Apple's tree is
 # `pthread.kext`, a binary that is not in the tarball and that no object in the pool stands in for.
 # 431's run is what named it: the boot reached `bsd_init + 0x7F4` and panicked with
@@ -1299,7 +1299,7 @@ PL_COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" iokit) )
 #     `-include sys/types.h` and under those two plus `sys/kernel_types.h` alike.
 # **And a fourth file in that list (437): the crypto dispatch table.**
 #
-# `stages/stage90/xnu_supply/stage90_crypto_functions.c` supplies `g_crypto_funcs` - the table
+# `src/supply/stage90_crypto_functions.c` supplies `g_crypto_funcs` - the table
 # `aes_encrypt_key128` reads through, whose only writer `register_crypto_functions()` is called by
 # nothing in this tree. 436's whole-kernel run is what named it: `tcp_init`'s inlined `tcp_tfo_init`
 # called `aes_encrypt_key128` unconditionally, and it faulted on `g_crypto_funcs` being NULL.
@@ -1340,8 +1340,8 @@ PL_COMP_DEFINES=( $("$TOOLS_DIR/xnu_config/component_defines.sh" iokit) )
 # `<dev/busvar.h>`, so `struct pseudo_init`'s layout is the kernel's own rather than a copy of it -
 # `-DDRIVER_PRIVATE=1` is in the bsd define set and is what exposes it. The component is **bsd**
 # because that is the header's component and because `bsd_autoconf` is the reader.
-PLATFORM_BSD_SOURCES=("$REPO_ROOT/stages/stage90/xnu_supply/stage90_pthread_functions.c"
-                      "$REPO_ROOT/stages/stage90/xnu_supply/stage90_crypto_functions.c"
+PLATFORM_BSD_SOURCES=("$REPO_ROOT/src/supply/stage90_pthread_functions.c"
+                      "$REPO_ROOT/src/supply/stage90_crypto_functions.c"
                       "$PSEUDO_INITS_SRC")
 PL_BSD_ROOTS=(-I"$XNU/bsd")
 for _c in "${COMPONENT_LIST[@]}"; do

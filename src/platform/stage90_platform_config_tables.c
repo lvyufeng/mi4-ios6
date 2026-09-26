@@ -20,8 +20,8 @@
  * it, and panic with the platform name rather than boot silently with no platform expert at all.
  *
  * The class name is the one the Stage64..75 plane already used for this machine
- * (`/msm8974-platform-driver`'s `IOClass` in `stages/stage90/xnu_iokit_platform_scaffold_contract.c`,
- * built by `stages/stage85/stage85_main.c`, with `IOProbeScore = 0x00000650`), and 1616 is that
+ * (`/msm8974-platform-driver`'s `IOClass` in `src/xnu_iokit_platform_scaffold_contract.c`,
+ * built by `archive/stages/stage85/stage85_main.c`, with `IOProbeScore = 0x00000650`), and 1616 is that
  * score written the way Apple's own entry writes its zero: `<value>:<bits>`. It is greater than
  * every other score in the table, which is what "ahead of the fallback" means here - the fallback's
  * 0 is still a legal score and would still match if this one did not.
@@ -34,7 +34,7 @@
  * `IODTCompareNubName`/`CompareKey` over the provider nub's `name`, `compatible`, `device_type` and
  * `model` (`IODeviceTreeSupport.cpp:799-865`), and the provider is `IOPlatformExpertDevice` built
  * from the root of this machine's device tree, whose properties are written at
- * `stages/stage90/stage90_main.c:79-82`: `name = "/"`, `compatible = "qcom,msm8974-xnu-stage90"`,
+ * `src/stage90_main.c:79-82`: `name = "/"`, `compatible = "qcom,msm8974-xnu-stage90"`,
  * `model = "Xiaomi Mi 4 cancro Stage84"`. The value below is the `compatible` one, which is the
  * device tree's own name for this machine.
  *

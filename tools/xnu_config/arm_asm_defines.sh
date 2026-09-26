@@ -7,7 +7,7 @@
 #   ./tools/xnu_config/arm_asm_defines.sh --exceptions  # the exception list, for a check
 #
 # Why this exists, and it is the finding of experiment 466: the two scripts that assemble a tree
-# `.s` file for this project (`tools/assemble_arm_layer.sh`, `stages/stage90/xnu_arm_assemble.sh`)
+# `.s` file for this project (`tools/assemble_arm_layer.sh`, `scripts/xnu_arm_assemble.sh`)
 # passed the *toolchain* flags - `-DASSEMBLER=1`, `-Dfmrx=vmrs`, `-DSLIDABLE=0` - and **none of the
 # configuration's options**, while every C object got all of them. Apple's build gives a component's
 # assembly the same `-D` list as its C, so the assembly and the C were compiled for two different

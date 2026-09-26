@@ -10,7 +10,7 @@
 # the other five: **the official generator is in the tarball and this project was supplying its
 # output by hand.**
 #
-# `stages/stage90/xnu_arm_boot/assym.s` is 48 lines with 17 defines, and its own header comment says
+# `src/entry/assym.s` is 48 lines with 17 defines, and its own header comment says
 # the real one "is absent from the OSS tarball" and is "the single largest piece of the build
 # configuration that osfmk/arm's assembly needs". **Both halves of that are wrong.**
 # `osfmk/arm/genassym.c` is in the tarball, it is the generator, and it produces **268 lines** —
@@ -43,8 +43,8 @@ XNU=${XNU_TREE:-$REPO_ROOT/external/xnu-4570.1.46}
 CONFIG=${XNU_KERNEL_CONFIG:-RELEASE}
 OUT=${XNU_ASSYM_OUT:-$REPO_ROOT/out/xnu_assym}/$CONFIG
 
-SHIMS=$REPO_ROOT/stages/stage90/shims
-SHIMS_ARM=$REPO_ROOT/stages/stage90/shims_arm
+SHIMS=$REPO_ROOT/src/shims
+SHIMS_ARM=$REPO_ROOT/src/shims_arm
 GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
 OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
 DEVICE_HEADERS=${XNU_DEVICE_HEADERS_OUT:-$REPO_ROOT/out/xnu_device}/$CONFIG

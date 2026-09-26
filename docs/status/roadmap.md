@@ -24,7 +24,7 @@ recovered through `/proc/last_kmsg`, under the safety rules in the root `README.
 | Code execution, IRQ, data-abort and undef handlers at high VA | ✅ | `experiment-88` … `experiment-91` |
 | Mach-O parsing in the payload's loader | ✅ | `experiment-92`, `experiment-94`. **Not** materializing a fixture: the copy path refuses in every mode — see §5 Phase 0 |
 | Crash evidence survives a hang (`ram_console` at top of DRAM) | ✅ | `docs/reference/no-teardown-debugging.md` |
-| A hung payload resets the device itself, with no power press | ✅ | `experiment-94` runs 3 and 6 (MSM8974 hardware watchdog, `stages/stage90/hw_watchdog.c`) |
+| A hung payload resets the device itself, with no power press | ✅ | `experiment-94` runs 3 and 6 (MSM8974 hardware watchdog, `src/hw_watchdog.c`) |
 | MSM8974 hardware watchdog: arm, and read its live countdown back | ✅ | `experiment-94` runs 1–3 |
 | Software dead-man reset (GIC + timer + IRQ path), proved alone | ✅ | `experiment-94` run 8 |
 | Candidate-L1 install followed by a jump, with the fault captured | ✅ | `experiment-94` run 10 (`FULL` + fault injection) |
@@ -70,7 +70,7 @@ closure of `arm_init` is the whole kernel, so the image has to grow by the kerne
 
 **And before that, the whole of this section was true — for the record:** The object
 manifests said so themselves, from Stage76 through Stage90 — e.g.
-`stages/stage90/targets/cancro.stage90.objects`:
+`src/targets/cancro.stage90.objects`:
 
 > `None of the public-XNU objects are linked into or executed by the booted StageNN payload.`
 
@@ -338,7 +338,7 @@ failed, and finding out why reshaped this phase.
   timer, IRQ delivery and the vector table, and it needs IRQs unmasked. If a hang is caused by
   any of those, it cannot fire — and a hang that leaves IRQs masked is not a contrived case.
   So the payload also arms the **MSM8974 hardware watchdog**
-  ([`stages/stage90/hw_watchdog.c`](../../stages/stage90/hw_watchdog.c), on by default, 30 s):
+  ([`src/hw_watchdog.c`](../../src/hw_watchdog.c), on by default, 30 s):
   a hardware counter with no software involvement, whose base address and register
   programming come from the cancro device tree and the cancro kernel's own
   `msm_watchdog_v2.c`, and which is the same mechanism Android relies on to produce a
@@ -347,7 +347,7 @@ failed, and finding out why reshaped this phase.
   payload's state, not from software entirely. `platform_reboot()` also forces an immediate
   bite after its PS_HOLD write, so the reboot no longer depends on the PMIC.
 - `STAGE90_HANDOFF_MODE` now defaults to `HARD_SKIP`, and
-  `stages/stage90/preflight_boot_check.sh` refuses to hand over a boot command for an image
+  `scripts/preflight_boot_check.sh` refuses to hand over a boot command for an image
   built with a mode the caller has not explicitly allowed.
 
 Remaining in this phase: **nothing — closed 2026-09-17.** What was on this list, and how it went:
@@ -399,7 +399,11 @@ three things that can hang: the candidate-L1 *switch*, the watchdog loop and the
 each of these runs buys a lot for very little risk.
 
 ```bash
-cd stages/stage90
+# These are the Phase-0 commands as they were typed in September 2026, when the tree lived at
+# `stages/stage90/`. The restructure of 2026-09-26 moved the scripts to `scripts/` and made
+# every one of them resolve the repository root itself, so the commands below read today as
+# `cd` to the repository root, then `./scripts/<name>.sh` in place of `./<name>.sh`. The text
+# is left as it was run; `archive/stages/README.md` and the root `README.md` have the mapping.
 
 # 1. Prove the hardware watchdog FIRST. [DONE 2026-09-17 - passed on the third attempt;
 #    runs 1 and 2 found two real bugs. It arms the SoC's own counter and then spins in a
@@ -498,7 +502,7 @@ in §2 showed that address is real code under the candidate L1.
   [`experiment-96`](../experiments/experiment-96-stage90-phase1-exclusives-work.md). A
   `LDREX`/`STREX` increment loop is reliable today.
 
-**Baseline measured, then corrected (2026-09-17).** `stages/stage90/exclusive_probe.c` (switch
+**Baseline measured, then corrected (2026-09-17).** `src/exclusive_probe.c` (switch
 `STAGE90_EXCLUSIVE_PROBE`, default off) measures what exclusives actually do here, on one word of
 the payload's own `.bss`.
 
@@ -664,7 +668,7 @@ something a payload run can validate; what is now hardware-exercised is the rest
 holding on the real image. What remains in this phase: the `topOfKernelData` bootstrap tables, and
 running 4570's own readers *on the device* rather than on the host.
 
-**Implemented (2026-09-16).** `stages/stage90/xnu_boot_args_conformant.c`
+**Implemented (2026-09-16).** `src/xnu_boot_args_conformant.c`
 builds and validates a conforming `boot_args` behind `STAGE90_XNU_BOOT_ARGS` (default off — it
 produces a *second* object; the ladder's identity-based one is untouched, since the ladder
 requires `physBase == 0x8000`).
@@ -791,7 +795,7 @@ actually require:
 
 **And the entry path specifically, measured (2026-09-17,
 [`experiment-107`](../experiments/experiment-107-xnu-arm-entry-path-measured.md)).**
-`stages/stage90/xnu_arm_entrypath_sweep.sh` measures the files the entry path needs rather than all
+`scripts/xnu_arm_entrypath_sweep.sh` measures the files the entry path needs rather than all
 32 in `osfmk/arm`: `arm_init.c` — the function `_start` branches to, and therefore the exact thing
 Stage90 stubs — has **seven distinct missing names**, `arm_vm_init.c` the same seven, and
 `machine_routines.c` thirty.
@@ -1050,7 +1054,7 @@ The diagnostic shape is worth keeping: **a header included with no `#if` around 
 nowhere in the tree, whose content is guarded on the very next line.** `osfmk/ipc/ipc_hash.h:128`
 is exactly that, and it identified nine more.
 
-**Ten shims in `stages/stage90/shims_arm/` were deleted** — nine hard-coded a value the
+**Ten shims in `src/shims_arm/` were deleted** — nine hard-coded a value the
 configuration already states (`MACH_ASSERT 0`, `ZONE_DEBUG 0`, `CONFIG_DTRACE 0`, …), one was empty.
 Both configurations' `failed.txt` lists were **byte-identical with and without them**, so they were
 dead the moment the generator existed, and the statement they carried ("absent from the tarball")
@@ -1220,7 +1224,7 @@ configuration's set is absent. **`RELEASE` 513 → 560 of 587, no regressions.**
 `tools/link_xnu_arm.sh` exists because a compiler answers "does this parse" and `nm` answers "what
 does this object want", while only a linker answers **"do these objects fit together"**. After the
 fix: **560 objects, 0 duplicate definitions, exit 0, one 6 338 748-byte relocatable image**. The full
-link (`-T stages/stage90/xnu_link.ld --no-undefined`) fails, correctly, on **889 symbols** — within
+link (`-T src/xnu_link.ld --no-undefined`) fails, correctly, on **889 symbols** — within
 rounding of what the `nm`-based `link_gap.sh` independently reports, which is a useful cross-check.
 `boot_closure.py` narrows it to **19 failing files on the boot path, 78 symbols**.
 
@@ -1452,7 +1456,7 @@ path is the one to do first, because without it every later step is unobservable
 
 **AND THE SIXTH GENERATOR WAS IN THE TARBALL TOO** (2026-09-17,
 [`experiment-136`](../experiments/experiment-136-assym-and-a-correction.md)).
-`stages/stage90/xnu_arm_boot/assym.s` — 48 lines, 17 defines — says in its own header that the real
+`src/entry/assym.s` — 48 lines, 17 defines — says in its own header that the real
 one "is absent from the OSS tarball" and is "the single largest piece of the build configuration that
 osfmk/arm's assembly needs". **Both halves are wrong**: `osfmk/arm/genassym.c` is the generator, and
 `osfmk/conf/Makefile.template:184-189` is the rule that compiles it to assembly and scrapes the
@@ -1921,7 +1925,7 @@ attribution symbol by symbol. Two negative controls decided the shape, and both 
 - **Scoped to the header it fails.** A force-include that neutralizes `const` only while
   `vm/vm_object.h` is read leaves the rest of the unit const-qualified, and a declaration reached
   inside that window then disagrees with the same declaration reached outside it:
-  `stages/stage90/shims/kern/debug.h:6` and `osfmk/kern/debug.h:423` both declare `Debugger`, one
+  `src/shims/kern/debug.h:6` and `osfmk/kern/debug.h:423` both declare `Debugger`, one
   `const char *` and one `char *` — "conflicting types for 'Debugger'". Placed *first*, so that
   everything would be inside the window, it fails earlier on `osfmk/kern/sched.h:214`'s `u_int`. So
   the flag has to precede the first token, and it is an ordinary `-D`, not a header.
@@ -2062,7 +2066,7 @@ tarball is empty because Apple's target is not EABI, and the Mach-O target was c
 experiment-150. So the cost belongs to experiment-150's decision and not to experiment-161's table
 of three.
 
-The four memory intrinsics are now `stages/stage90/xnu_aeabi_runtime.c` — twelve tail calls, **108
+The four memory intrinsics are now `src/xnu_aeabi_runtime.c` — twelve tail calls, **108
 bytes of `.text`**, with `__aeabi_memset`'s EABI `(dst, n, c)` argument order written as specified
 rather than as it looks. The five arithmetic helpers are **`libgcc.a`**, linked rather than copied:
 the ARM-state multilib is chosen deliberately (`thumb/v7ve+simd/softfp` matches the build's
@@ -2173,7 +2177,7 @@ symbol is not missing from the tarball and the header is not really "not in the 
 declares it in `osfmk/kern/zalloc.c`'s translation unit at all, and its one definition in the tree —
 `static inline`, `san/memintrinsics.h:40` — is reached through `osfmk/libsa/string.h:97-99`'s
 `#ifdef PRIVATE`, which in Apple's build *is* the kernel's `<string.h>`. Here `<string.h>` resolves to
-`stages/stage90/shims_arm/string.h`, our own replacement, which declares the same functions and
+`src/shims_arm/string.h`, our own replacement, which declares the same functions and
 dropped that block. The fix belongs in the shim, not in the manifest. Four of the six remaining
 `STAGE90_BOOT` failures are one cause of the same local kind — the config(8)-generated device headers
 exist only for `RELEASE` (`out/xnu_device/RELEASE/{bpfilter,loop,ptmx,pty}.h`), so `conf.c:111`'s and
@@ -2236,7 +2240,7 @@ inline`s at `san/memintrinsics.h:40,43`; those are reached through `osfmk/libsa/
 `#ifdef PRIVATE → #include <san/memintrinsics.h>`; and **nothing in `osfmk`, `bsd`, `libkern`,
 `iokit`, `pexpert` or `security` includes `osfmk/libsa/string.h`, because in Apple's build it *is*
 the kernel's `<string.h>`**. Here `<string.h>` resolves to this project's
-`stages/stage90/shims_arm/string.h`, which declares the same functions and had dropped that block —
+`src/shims_arm/string.h`, which declares the same functions and had dropped that block —
 so with no declaration visible clang emitted an implicit-declaration reference to a symbol nothing
 defines. The fix is the block plus its one missing name, `strncat`, and the `#ifdef PRIVATE` guard is
 deliberately not reproduced: "is this symbol declared" is not a question a per-component define
@@ -2450,7 +2454,7 @@ build to exit 0, and the payload is byte-identical.
 
 **AND THE ASSEMBLY TRANSLATOR HAD BEEN WRITING INTO APPLE'S TREE** (2026-09-18,
 [`experiment-155`](../experiments/experiment-155-the-translator-wrote-into-the-tree.md)). Found
-because `stages/stage90/build.sh` stopped at its own gate:
+because `scripts/build.sh` stopped at its own gate:
 
 ```
 stage90_xnu_compile_graph_no_external_mutation=0x00000000
@@ -2511,7 +2515,7 @@ message names.
 
 **The gap is now a list of twenty symbols, not an adjective (2026-09-17,
 [`experiment-103`](../experiments/experiment-103-xnu-entry-point-assembles.md)).**
-`stages/stage90/xnu_arm_assemble.sh` assembles `osfmk/arm/start.s` — XNU's real `_start`,
+`scripts/xnu_arm_assemble.sh` assembles `osfmk/arm/start.s` — XNU's real `_start`,
 unmodified — with clang 14. The undefined list is: `_arm_init` (+ its two secondary-CPU siblings),
 eight `fleh_*` handlers and `ExceptionVectorsTable` (all in `locore.s`, same treatment), and nine
 XNU data symbols that `globals_asm.h` already enumerates as `LOAD_ADDR_GEN_DEF`s. `assym.s`, the
@@ -2569,7 +2573,7 @@ uses for its five objects):
 
 That reframes the work, and more favourably than the previous section suggests. The project
 does not have to reconstruct Apple's build system — it already has a working mechanism for
-compiling XNU sources outside it, in `stages/stage90/shims/` (16 headers, enough for the five
+compiling XNU sources outside it, in `src/shims/` (16 headers, enough for the five
 pexpert objects). Extending that to the ARM tree is **iterative and mechanical**: point the
 compiler at the next source, be told the next missing header, write it, repeat. The compiler
 walks the include graph for you.
@@ -2583,7 +2587,7 @@ Phase 4 is a weeks-scale or months-scale piece of work.
 **Correction — the estimate below was wrong, and doing the work is what showed it.** An
 initial pass concluded the ARM layer's gap was 8 missing headers: bounded, enumerable, the
 same order of magnitude as the 16 shims already written. Writing them disproves that. With
-four stubs in `stages/stage90/shims_arm/` plus `-DKERNEL=1` plus the `iokit` path on the
+four stubs in `src/shims_arm/` plus `-DKERNEL=1` plus the `iokit` path on the
 include line, the sweep goes from **2 of 32 to 3 of 32** — and the remaining errors stop being
 *missing files* and become **undefined build-configuration symbols** (`AST_NONE`,
 `INTSTACK_SIZE`, `gPhysBase`, `decl_simple_lock_data`). The clearest is
@@ -2732,7 +2736,7 @@ the hardware-specific values explicit before code is written. Two findings that 
   have shaped the shim's timer code. The decrementer callbacks still matter — they are how the
   handler re-arms — but `fleh_fiq_generic` itself does not need reimplementing.
 
-**Phase 3 has started.** [`stages/stage90/xnu_msm8974_shim.c`](../../stages/stage90/xnu_msm8974_shim.c)
+**Phase 3 has started.** [`src/xnu_msm8974_shim.c`](../../src/xnu_msm8974_shim.c)
 implements the interface the spec defines — the `tbd_ops` mirror (asserted in-payload and
 checked against XNU's header by `tools/check_xnu_struct_abi.py`), the `&BootCpuData`
 registration guard reproduced *and verified by reading the registration back*, CNTP-based
@@ -2796,6 +2800,10 @@ the working baseline". Concretely:
 1. Keep `stages/stage90/` as the frozen, hardware-validated base and stop copying it per
    experiment. New work evolves a single tree, with the Phase 1/2/3 feature switches and a
    `make` target per milestone.
+   **> DONE 2026-09-26.** The snapshot-per-stage model was retired: the tree is one evolving
+   > tree at `src/`, the scripts are `scripts/`, and the five snapshots that were still in the
+   > working tree are `archive/stages/stage85` .. `archive/stages/stage89`. This item is kept
+   > as the record of what was proposed and why; `archive/stages/README.md` says what was done.
 2. Record each hardware-validated milestone as a **git tag plus one entry in the milestone
    log (`docs/history/milestones.md`)** — what was proven, the `last_kmsg` evidence, the
    commit. That is what a snapshot was for; a tag carries the same information without

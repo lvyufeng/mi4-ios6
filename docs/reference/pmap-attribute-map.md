@@ -22,8 +22,8 @@ the one every stage so far has used.
 
 ### `L1_DESC_SECTION_SO = 0x00010c02` — 1 MB section
 
-Defined in `stages/stage90/stage90.h` (`STAGE90_PMAP_DESC_SECTION_SO`) and aliased as
-`L1_DESC_SECTION_SO` in `stages/stage90/mmu.c` and `stages/stage90/xnu_arm_vm_init_full_pmap.c`.
+Defined in `src/stage90.h` (`STAGE90_PMAP_DESC_SECTION_SO`) and aliased as
+`L1_DESC_SECTION_SO` in `src/mmu.c` and `src/xnu_arm_vm_init_full_pmap.c`.
 
 | Field | Value | Meaning |
 | --- | --- | --- |
@@ -39,8 +39,8 @@ Defined in `stages/stage90/stage90.h` (`STAGE90_PMAP_DESC_SECTION_SO`) and alias
 
 ### `L2_DESC_PAGE_SO = 0x00000012` — 4 KB small page
 
-Defined in `stages/stage90/stage90.h` (`STAGE90_PMAP_DESC_PAGE_SO`), aliased in
-`stages/stage90/xnu_arm_vm_init_full_pmap.c`.
+Defined in `src/stage90.h` (`STAGE90_PMAP_DESC_PAGE_SO`), aliased in
+`src/xnu_arm_vm_init_full_pmap.c`.
 
 | Field | Value | Meaning |
 | --- | --- | --- |
@@ -140,7 +140,7 @@ on hardware, the exclusive monitor tracks on Strongly-ordered memory, on Normal-
 memory, and with the MMU off entirely (`experiment-96`). What remains true, and is why this is
 still the phase's work, is that XNU's entry code enables the I-cache on its first instructions
 and expects cacheable Normal memory for kernel text and data, and that a DMA-capable driver needs
-the Normal/Device distinction. See `stages/stage90/exclusive_probe.c` for the measurement, and
+the Normal/Device distinction. See `src/exclusive_probe.c` for the measurement, and
 note that it measures rather than asserts precisely because its first version asserted a
 discriminator that turned out to be false on this implementation.
 
@@ -247,7 +247,7 @@ Three consequences that look like mistakes and are not:
 
 ## Phase 1 attribute modes and cache switches
 
-`STAGE90_PMAP_ATTR_MODE` (`stages/stage90/stage90.h`):
+`STAGE90_PMAP_ATTR_MODE` (`src/stage90.h`):
 
 | Mode | DRAM descriptors | Effect |
 | --- | --- | --- |
@@ -257,7 +257,7 @@ Three consequences that look like mistakes and are not:
 
 A cacheable descriptor does nothing on its own: DRAM marked `NORMAL_WB` with the caches off is
 accessed as if non-cacheable. Which cache is enabled is a **separate switch**,
-`STAGE90_CACHE_MODE` (`stages/stage90/stage90.h`): `NONE` (default) or `ICACHE`, the latter
+`STAGE90_CACHE_MODE` (`src/stage90.h`): `NONE` (default) or `ICACHE`, the latter
 setting `SCTLR.I`, `ICACHE_DCACHE` (both, the D-cache in a second `write_sctlr` once the MMU is
 already on and after a whole-cache clean-and-invalidate). It is a compile error to enable a cache
 with an uncacheable attribute mode, because it would then cache nothing.
@@ -313,11 +313,11 @@ drives the dead-man runs through exactly those registers.
 Build and gate it as its own run:
 
 ```bash
-STAGE90_EXTRA_CFLAGS='-DSTAGE90_PMAP_ATTR_MODE=1' ./build.sh
-./preflight_boot_check.sh --allow-attr-normal-nc
+STAGE90_EXTRA_CFLAGS='-DSTAGE90_PMAP_ATTR_MODE=1' ./scripts/build.sh
+./scripts/preflight_boot_check.sh --allow-attr-normal-nc
 
 # and with the probe, to get the comparison that matters:
-STAGE90_EXTRA_CFLAGS='-DSTAGE90_PMAP_ATTR_MODE=1 -DSTAGE90_EXCLUSIVE_PROBE=1' ./build.sh
+STAGE90_EXTRA_CFLAGS='-DSTAGE90_PMAP_ATTR_MODE=1 -DSTAGE90_EXCLUSIVE_PROBE=1' ./scripts/build.sh
 ```
 
 The comparison to make is `stage90_exclusive_probe_result` between the two modes:

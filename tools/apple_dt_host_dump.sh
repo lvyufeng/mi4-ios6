@@ -7,7 +7,7 @@
 # Why this exists, and why it is a *build* rather than a re-implementation. Experiment 440's run
 # ended in `pexpert/gen/device_tree.c:56`'s overflow panic, from `next_prop()` - which means some
 # property in the tree has a `length` that cannot be a length. The tree is built on the device by
-# `build_stage90_apple_dt()` in `stages/stage90/stage90_main.c`, and every node's property count is
+# `build_stage90_apple_dt()` in `src/stage90_main.c`, and every node's property count is
 # written **by hand** at `apple_dt_node_begin(b, N, C)` while the N properties below it are separate
 # statements. A count that has drifted from the statements it counts is invisible to a reader and
 # fatal to an exhaustive walk, and XNU's `DTIterateProperties` (reached only from IOKit's
@@ -27,7 +27,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$REPO_ROOT/stages/stage90/stage90_main.c"
+SRC="$REPO_ROOT/src/stage90_main.c"
 OUT="${1:-$REPO_ROOT/out/apple_dt_host}"
 DEBUG_ROOT="${STAGE90_DEBUG_ROOT_VAL:-0}"
 PYTHON=${PYTHON:-python3}
@@ -48,27 +48,27 @@ mkdir -p "$OUT"
     --src "$SRC" \
     --out "$OUT/builder.inc" \
     --facts "$OUT/builder.facts" \
-    --banner-note "Sliced from stages/stage90/stage90_main.c by tools/apple_dt_extract.py - do not edit."
+    --banner-note "Sliced from src/stage90_main.c by tools/apple_dt_extract.py - do not edit."
 
-# `align4` is the builder's only other dependency, and it is one line in stages/stage90/runtime.c.
+# `align4` is the builder's only other dependency, and it is one line in src/runtime.c.
 # The body is copied rather than re-invented, and compared against the real source so a change there
 # fails this script rather than making the dump a different tree.
-if ! grep -q 'return (v + 3u) & ~3u;' "$REPO_ROOT/stages/stage90/runtime.c"; then
+if ! grep -q 'return (v + 3u) & ~3u;' "$REPO_ROOT/src/runtime.c"; then
     echo "FAIL: runtime.c's align4 is not the one-line definition this harness copies." >&2
-    grep -n -A3 '^uint32_t align4' "$REPO_ROOT/stages/stage90/runtime.c" >&2
+    grep -n -A3 '^uint32_t align4' "$REPO_ROOT/src/runtime.c" >&2
     exit 1
 fi
 
 # The generated header `stage90_main.c` includes (line 5): 459's `/chosen/memory-map` node carries
 # `STAGE90_XNU_RAMDISK_VA`/`_SIZE` from it, and those two words are addresses in the *entry image's*
-# link, written by `xnu_arm_boot/build_entry.sh`. The harness compiles against the same header the
+# link, written by `src/entry/build_entry.sh`. The harness compiles against the same header the
 # payload does, rather than restating the numbers - so the dumped blob carries the device's values and
 # is byte-exact for those eight bytes. Missing header is a loud stop naming the prerequisite, because
 # a dump that silently skipped the node would be the stale-blob defect again.
 ENTRY_HEADER="$REPO_ROOT/out/stage90/xnu_arm_entry.h"
 if [[ ! -f $ENTRY_HEADER ]]; then
     echo "FAIL: no $ENTRY_HEADER. stage90_main.c includes it for the RAM disk's two words, so run" >&2
-    echo "      ./stages/stage90/xnu_arm_boot/build_entry.sh first - it links the entry image and" >&2
+    echo "      ./src/entry/build_entry.sh first - it links the entry image and" >&2
     echo "      writes that header." >&2
     exit 1
 fi
@@ -90,7 +90,7 @@ cat > "$OUT/harness.c" <<HARNESS
 void log_puts(const char *s) { (void)s; }
 void log_kv32(const char *key, uint32_t value) { (void)key; (void)value; }
 
-/* stages/stage90/runtime.c:58-61, asserted above. */
+/* src/runtime.c:58-61, asserted above. */
 uint32_t align4(uint32_t v) { return (v + 3u) & ~3u; }
 
 /*
@@ -103,7 +103,7 @@ uint32_t stage90_xnu_consistent_debug_region_init(void) { return ${DEBUG_ROOT}u;
 
 #include "builder.inc"
 
-#include "$REPO_ROOT/stages/stage90/apple_dt.c"
+#include "$REPO_ROOT/src/apple_dt.c"
 
 int main(int argc, char **argv)
 {
@@ -127,7 +127,7 @@ int main(int argc, char **argv)
 HARNESS
 
 gcc -std=gnu11 -O1 -Wall \
-    -I "$REPO_ROOT/stages/stage90" \
+    -I "$REPO_ROOT/src" \
     -I "$REPO_ROOT/out/stage90" \
     -o "$OUT/apple_dt_dump" "$OUT/harness.c"
 

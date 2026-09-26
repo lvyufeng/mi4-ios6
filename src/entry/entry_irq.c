@@ -53,7 +53,7 @@
  * GIC, so the acknowledgement has to be `GICC_EOIR`, and the shape of it is measured rather than
  * invented: the payload's own IRQ path in this boot reads `GICC_IAR` into `gic_timer_last_iar =
  * 0x13`, matches it against its two PPIs, services, and writes `GICC_EOIR` with the value it read
- * (`stages/stage90/gic.c:246`, `:293`). That is what this handler does.
+ * (`src/gic.c:246`, `:293`). That is what this handler does.
  *
  * The order - EOI before `rtclock_intr` - is chosen and not inherited: `rtclock_intr` re-arms the
  * countdown for the next deadline (through `setPop` -> `ml_set_decrementer` -> this image's writer),

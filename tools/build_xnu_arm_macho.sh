@@ -38,8 +38,8 @@ CONFIG=${XNU_KERNEL_CONFIG:-RELEASE}
 OUT=${XNU_MACHO_OBJ_OUT:-$REPO_ROOT/out/xnu_macho_obj}
 MANIFEST=${MANIFEST:-$REPO_ROOT/out/xnu_arm_manifest.txt}
 
-SHIMS=$REPO_ROOT/stages/stage90/shims
-SHIMS_ARM=$REPO_ROOT/stages/stage90/shims_arm
+SHIMS=$REPO_ROOT/src/shims
+SHIMS_ARM=$REPO_ROOT/src/shims_arm
 GENERATED=${XNU_GENERATED:-$REPO_ROOT/out/xnu_generated}
 OPTION_HEADERS=${XNU_OPTION_HEADERS_OUT:-$REPO_ROOT/out/xnu_options}/$CONFIG
 DEVICE_HEADERS=${XNU_DEVICE_HEADERS_OUT:-$REPO_ROOT/out/xnu_device}/$CONFIG
@@ -134,7 +134,7 @@ if [[ $DO_ASM -eq 1 ]]; then
                  -DASSEMBLER=1 -DSLIDABLE=0 -DARMA7=1 -DKERNEL=1 -DKERNEL_PRIVATE=1 \
                  -D__arm__=1 -DCONFIG_EMBEDDED=1 -D__ARM_L2CACHE_SIZE_LOG__=21 \
                  -Dfmrx=vmrs -Dfmxr=vmsr -D__NO_UNDERSCORES__=1 \
-                 -I"$ASSYM" -I"$REPO_ROOT/stages/stage90/xnu_arm_boot" "${INCLUDES[@]}" \
+                 -I"$ASSYM" -I"$REPO_ROOT/src/entry" "${INCLUDES[@]}" \
                  -c "$src" -o "$OUT/$name.o" 2>"$OUT/$name.log"; then
             ok=$((ok + 1)); rm -f "$OUT/$name.log"
         else

@@ -13,7 +13,7 @@ records *is* the reading, and it is read by comparing it with `osfmk/kern/kern_t
 
 That comparison happens in two places, and both of them are transcriptions:
 
-  1. `entry_block_result_slot` in `stages/stage90/xnu_arm_boot/entry_stubs.c` writes each member's
+  1. `entry_block_result_slot` in `src/entry/entry_stubs.c` writes each member's
      value as a `case` label and the member's name in a comment beside it. **The name is the claim**,
      and until this check nothing compared it with the header: a case labelled `/* THREAD_RESTART */`
      whose value is 10 would have published a slot the enum does not have, and the log would have read
@@ -57,7 +57,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 
 KERN_TYPES = os.path.join(REPO_ROOT, "external/xnu-4570.1.46/osfmk/kern/kern_types.h")
-STUBS = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot/entry_stubs.c")
+STUBS = os.path.join(REPO_ROOT, "src/entry/entry_stubs.c")
 
 # The block that declares the wait results, delimited by Apple's own text rather than by line numbers:
 # the comment above it and the `thread_continue_t` typedef below it.

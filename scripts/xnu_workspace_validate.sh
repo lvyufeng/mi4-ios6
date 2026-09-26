@@ -3,9 +3,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# This snapshot lives at stages/stageNN/, two levels below the repo root.
-STAGE_DIR=$PWD
-REPO_ROOT=$(cd "$STAGE_DIR/../.." && pwd)
+# The live tree: this script is in scripts/, one level below the repo root, and the
+# payload it builds lives in src/ beside it. (Before the 2026-09-26 restructure this
+# was stages/stageNN/, two levels down.)
+SCRIPT_DIR=$PWD
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+SRC_DIR=$REPO_ROOT/src
 
 OUT_DIR=${1:-$REPO_ROOT/out/stage90}
 mkdir -p "$OUT_DIR"
@@ -146,24 +149,24 @@ if [[ "$missing_arm_ref" -eq 0 ]]; then
   add_satisfied 0x00000040
 fi
 
-if grep -q '^STAGE90_TARGET := cancro$' targets/cancro.mk; then
+if grep -q '^STAGE90_TARGET := cancro$' "$SRC_DIR/targets/cancro.mk"; then
   add_satisfied 0x00000080
 else
   add_failure 0x00000080
 fi
-if grep -q '^STAGE90_ARCH := armv7$' targets/cancro.mk; then
+if grep -q '^STAGE90_ARCH := armv7$' "$SRC_DIR/targets/cancro.mk"; then
   add_satisfied 0x00000100
 else
   add_failure 0x00000080
 fi
-if grep -q '^STAGE90_MACHINE := msm8974$' targets/cancro.mk; then
+if grep -q '^STAGE90_MACHINE := msm8974$' "$SRC_DIR/targets/cancro.mk"; then
   add_satisfied 0x00000200
 else
   add_failure 0x00000080
 fi
-if grep -q '^STAGE90_PUBLIC_ONLY := 1$' targets/cancro.mk && \
-   grep -q '^STAGE90_NO_FULL_MACH_KERNEL := 1$' targets/cancro.mk && \
-   grep -q '^STAGE90_NO_XNU_EXECUTION := 1$' targets/cancro.mk; then
+if grep -q '^STAGE90_PUBLIC_ONLY := 1$' "$SRC_DIR/targets/cancro.mk" && \
+   grep -q '^STAGE90_NO_FULL_MACH_KERNEL := 1$' "$SRC_DIR/targets/cancro.mk" && \
+   grep -q '^STAGE90_NO_XNU_EXECUTION := 1$' "$SRC_DIR/targets/cancro.mk"; then
   add_satisfied 0x00000800
   add_satisfied 0x00001000
   add_satisfied 0x00002000
@@ -177,8 +180,8 @@ while IFS= read -r line; do
     ''|'#'*|external/*) ;;
     *) invalid_manifest_line=1 ;;
   esac
-done < targets/cancro.stage90.objects
-if [[ "$invalid_manifest_line" -eq 0 ]] && grep -q '^external/xnu-upstream/pexpert/gen/device_tree.c$' targets/cancro.stage90.objects; then
+done < "$SRC_DIR/targets/cancro.stage90.objects"
+if [[ "$invalid_manifest_line" -eq 0 ]] && grep -q '^external/xnu-upstream/pexpert/gen/device_tree.c$' "$SRC_DIR/targets/cancro.stage90.objects"; then
   add_satisfied 0x00000400
 else
   add_failure 0x00000100
@@ -190,7 +193,7 @@ add_satisfied 0x00010000
 add_satisfied 0x00020000
 add_satisfied 0x00040000
 
-cp targets/cancro.stage90.objects "$PLAN_TXT"
+cp "$SRC_DIR/targets/cancro.stage90.objects" "$PLAN_TXT"
 
 status=0x90000000
 if [[ "$satisfied" -eq 0x0007ffff && "$failure" -eq 0 ]]; then

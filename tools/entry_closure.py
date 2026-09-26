@@ -95,7 +95,7 @@ def main():
     ap.add_argument("--preset", action="append", default=[],
                     help="object already in the image whose definitions must not be duplicated")
     ap.add_argument("--script", default=os.path.join(
-        REPO_ROOT, "stages/stage90/xnu_arm_boot/entry.ld"))
+        REPO_ROOT, "src/entry/entry.ld"))
     ap.add_argument("--pool", action="append", default=None,
                     help="directory of candidate objects (default: the kernel and asm object dirs)")
     ap.add_argument("--max", type=int, default=400, help="give up after this many added objects")

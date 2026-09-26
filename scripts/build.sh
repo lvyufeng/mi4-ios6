@@ -3,9 +3,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# This snapshot lives at stages/stageNN/, two levels below the repo root.
-STAGE_DIR=$PWD
-REPO_ROOT=$(cd "$STAGE_DIR/../.." && pwd)
+# The live tree: this script is in scripts/, one level below the repo root, and the
+# payload it builds lives in src/ beside it. (Before the 2026-09-26 restructure this
+# was stages/stageNN/, two levels down.)
+SCRIPT_DIR=$PWD
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+SRC_DIR=$REPO_ROOT/src
 mkdir -p $REPO_ROOT/out/stage90
 
 ./xnu_workspace_validate.sh $REPO_ROOT/out/stage90
@@ -52,7 +55,7 @@ fi
 # host-unknowable input is __stage90_image_end, which host_boot_args_check.sh reads from the
 # image just built and passes by --defsym, so the module runs unmodified against the real
 # layout. Needs a 32-bit host toolchain; skipped with a warning if there is none.
-if [[ -d $REPO_ROOT/stages/stage90 ]] && "$REPO_ROOT/tools/host_boot_args_check.sh" >/dev/null 2>&1; then
+if [[ -d $REPO_ROOT/src ]] && "$REPO_ROOT/tools/host_boot_args_check.sh" >/dev/null 2>&1; then
   "$REPO_ROOT/tools/host_boot_args_check.sh"
 else
   echo "warning: 32-bit host toolchain unavailable or the check failed; see tools/host_boot_args_check.sh" >&2
@@ -67,7 +70,7 @@ fi
   --symbol-prefix stage90 \
   --metadata-file $REPO_ROOT/out/stage90/xnu-link-macho-metadata.txt
 
-# The entry image is linked by xnu_arm_boot/build_entry.sh into out/stage90/, and the payload
+# The entry image is linked by src/entry/build_entry.sh into out/stage90/, and the payload
 # embeds its bytes. There used to be two copies - a committed hex array and the binary the build
 # produced - with a cmp check to catch them drifting, which is the shape of mistake this project
 # keeps finding. From experiment 175 there is one copy: the binary, and the array the payload
@@ -82,7 +85,7 @@ ENTRY_BLOB_OUT=$REPO_ROOT/out/stage90/xnu_arm_entry_blob.c
 if [[ ! -f $ENTRY_BIN ]]; then
   echo "FAIL: no $ENTRY_BIN - the payload embeds the entry image, and it is not built yet." >&2
   echo "      Build it first:" >&2
-  echo "        (cd stages/stage90/xnu_arm_boot && STAGE90_ENTRY_REAL_ARM_INIT=1 ./build_entry.sh)" >&2
+  echo "        (cd src/entry && STAGE90_ENTRY_REAL_ARM_INIT=1 ./build_entry.sh)" >&2
   exit 2
 fi
 {
@@ -123,7 +126,7 @@ CFLAGS=(
   # Only for xnu_real_dt.c's <pexpert/device_tree.h>, which needs <sys/appleapiopts.h>. Kept to
   # the two paths that header needs rather than the whole XNU tree, so the payload cannot
   # accidentally start resolving its own includes against XNU's.
-  -I$STAGE_DIR/shims
+  -I$SRC_DIR/shims
   -I$REPO_ROOT/external/xnu-upstream/pexpert
 )
 
@@ -306,7 +309,7 @@ CMDLINE="$CMDLINE_BASE $CACHE_TOKEN no-persist-write no-external-mutation"
 # this is the script that builds it.** The entry build runs first; a check there for a token in
 # `boot_args.o` would be reading the *previous* build's object - 460's defect class, a generated file
 # read from before the edit that produced it. Both halves of the comparison are in hand here: the
-# entry image (built above by `xnu_arm_boot/build_entry.sh`) and the objects just compiled from
+# entry image (built above by `src/entry/build_entry.sh`) and the objects just compiled from
 # `boot_args.c` and `stage90_main.c`.
 #
 # 515 supplies the one boot argument Apple's own idle-cache path is switched by:

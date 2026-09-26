@@ -78,7 +78,7 @@ mkdir -p "$OUT"
 mapfile -t OBJS < <(ls "$OBJ"/*.o 2>/dev/null | sort)
 [[ ${#OBJS[@]} -gt 0 ]] || { echo "no .o files in $OBJ" >&2; exit 2; }
 # The assembled ARM layer, when it is there. `start.s` is the entry the kernel actually has, and
-# `out/xnu_asm_obj/` holds whatever `stages/stage90/xnu_arm_assemble.sh` and the build produced.
+# `out/xnu_asm_obj/` holds whatever `scripts/xnu_arm_assemble.sh` and the build produced.
 mapfile -t ASMOBJS < <(ls "$ASM"/*.o 2>/dev/null | sort)
 
 emit_stubs() {   # $1 = undefined-symbol list, $2 = output .s

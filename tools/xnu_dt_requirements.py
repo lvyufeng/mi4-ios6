@@ -12,7 +12,7 @@ What it does
 1. Scans XNU's ARM sources for the lookups that matter: literal paths passed to
    `DTLookupEntry`, literal `(property, value)` pairs passed to `DTFindEntry`, and the
    properties read out of the nodes those find.
-2. Scans our DT builder (`stages/stage90/stage90_main.c`, `build_stage90_apple_dt`) for
+2. Scans our DT builder (`src/stage90_main.c`, `build_stage90_apple_dt`) for
    the nodes and properties it emits.
 3. Reports which lookups our tree can satisfy and which it cannot.
 
@@ -39,7 +39,7 @@ XNU_SOURCES = [
 ]
 
 # Our DT builder and the properties it emits live here.
-OUR_BUILDER = "stages/stage90/stage90_main.c"
+OUR_BUILDER = "src/stage90_main.c"
 
 LOOKUP_RE = re.compile(r'DTLookupEntry\s*\([^,]*,\s*"([^"]+)"')
 FIND_RE = re.compile(r'DTFindEntry\s*\(\s*"([^"]+)"\s*,\s*(?:"([^"]*)"|NULL)')

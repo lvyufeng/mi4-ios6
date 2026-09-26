@@ -6,29 +6,30 @@ This repository tracks an experimental, owner-controlled research project around
 
 | Path | Contents |
 | --- | --- |
+| `src/` | The live tree — one evolving tree, not one directory per stage. The payload's 67 `.c` files are flat here, with `src/entry/` (the ARM entry-image builder), `src/platform/`, `src/supply/`, `src/shims/`, `src/shims_arm/`, `src/firehose/` and `src/targets/` beside them. |
+| `scripts/` | What builds and fires it: `build.sh`, `preflight_boot_check.sh` (the gate), `run_and_capture.sh` (the runner), `preflight_storage_write.sh`, and the `xnu_*.sh` compile-graph helpers. All of them resolve the repository root themselves, so they work from any working directory. |
+| `records/` | The arm record `records/revert-set.txt`, `records/baseline-readings.txt`, and `records/tool-images/`. |
 | `archive/stages/stage85` … `archive/stages/stage89` | The snapshots the retired snapshot-per-stage model left behind (`stage0` … `stage84` live at the tag `stage-archive-base`). See [`archive/stages/README.md`](archive/stages/README.md). |
-| `stages/stage90/` | The live tree, still at the old path. |
 | `docs/` | All documentation, indexed in [`docs/README.md`](docs/README.md): `reference/`, `experiments/`, `status/`, `history/`. |
-| `tools/` | Host-side helpers: `stage-archive.sh` for the archived stages, `decode_armv7_descriptor.py` for page-table entries, `check_xnu_struct_abi.py` for the XNU `boot_args` layout, `xnu_dt_requirements.py` for the device-tree lookups XNU makes, and the boot-image and fixture generators. |
+| `tools/` | Host-side helpers: the press-path tools (`verify_press_ready.sh`, `resolve_arm_set.sh`, `verify_revert_set.sh`, `gate_flags_for_arm.sh`) and the checkers they rest on, `stage-archive.sh` for the archived stages, `decode_armv7_descriptor.py` for page-table entries, `check_xnu_struct_abi.py` for the XNU `boot_args` layout, `xnu_dt_requirements.py` for the device-tree lookups XNU makes, and the boot-image and fixture generators. |
 | `Makefile` | Build/list/restore convenience targets. |
-| `out/stageNN/` | Build products (ignored by git). |
+| `out/stage90/` | Build products (ignored by git): the payload, the entry image, the `frozen/` parks and the `captures/` logs. |
 | `external/` | Public XNU checkout used by the compile-graph and link-proof helpers (ignored by git). |
 | `xiaomi4-cancro-backup-20260604-112053/` | Device partition backups (ignored by git, never committed). |
 
 ## Build and boot
 
 ```bash
-make                       # build the newest snapshot -> out/stage90/
-make list                  # the retained snapshots
-make stage89               # build one specific stage
-cd stages/stage90 && ./build.sh          # what `make` runs
+make                       # build the live tree -> out/stage90/stage90-qcdt.img
+make list                  # the retained snapshots, and where the archived ones live
+./scripts/build.sh         # what `make` runs
 
-sha256sum -c out/stage90/SHA256SUMS.txt  # per-stage build manifest
+sha256sum -c out/stage90/SHA256SUMS.txt          # per-build manifest (absolute paths: run it here)
 
-cd stages/stage90 && ./preflight_boot_check.sh   # verify + gate a hardware run
-sudo fastboot boot out/stage90/stage90-qcdt.img  # non-persistent validation
+./scripts/preflight_boot_check.sh --allow-xnu-entry   # verify + gate a hardware run
+sudo fastboot boot out/stage90/stage90-qcdt.img       # non-persistent validation
 
-cd stages/stage90 && ./run_and_capture.sh --expect-arm=<set>   # gate + boot + capture, in one step
+./scripts/run_and_capture.sh --allow-xnu-entry --expect-arm=<set>   # gate + boot + capture
 ```
 
 `run_and_capture.sh` does the whole cycle — gate, boot, wait for the device, capture
@@ -41,13 +42,13 @@ this file.** A run sends exactly one image, and that image *is* the instrument i
 taken with, so a run that does not say which arm it is for cannot be attributed afterwards —
 and a launcher left pointing at an arm that has since been superseded boots the wrong one with
 no symptom at all. The flag's value is a recorded set name from
-`stages/stage90/revert-set.txt`; `tools/resolve_arm_set.sh out/stage90` prints the one the
+`records/revert-set.txt`; `tools/resolve_arm_set.sh out/stage90` prints the one the
 bytes currently in `out/` are, and `tools/verify_press_ready.sh` prints it too, along with the
 gate flags that arm needs. The runner resolves the same thing itself and refuses if the two
 disagree, if the image is not a recorded set, or if the image moves between the gate's verdict
 and the send.
 
-Every snapshot resolves the repository root itself, so its `build.sh` works from any working directory. Booting is deliberately not a `make` target: flashing is a per-operation decision, and `fastboot boot` never writes to the device.
+Every script resolves the repository root itself, so it works from any working directory. Booting is deliberately not a `make` target: flashing is a per-operation decision, and `fastboot boot` never writes to the device.
 
 ## Current device
 
@@ -121,7 +122,7 @@ Stage90 covers the handoff itself: the Stage-owned `arm_init`-shaped entry stub 
 
 The handoff target is **not** XNU code, and no public XNU object has ever been linked into or executed by any payload — the public-XNU compile graph (`targets/*.objects`) is a host-only linkability proof, and the Mach-O fixture is inert by construction. The jump target `0x80008000` is the fixture's `LC_UNIXTHREAD` PC, i.e. its Mach-O header, and the fixture's `__TEXT,__text` holds the ASCII string `"ST90-TEXT-NOEXEC"`.
 
-That jump did not execute ASCII, though — checking the addresses shows something worse. The candidate L1 maps `VA 0x80000000+X → PA X` for X < 1 MB, so `0x80008000` resolves to PA `0x8000`, which is `_start` (`linker.ld` puts it there). The jump **re-entered the payload's own entry point**, and since `stage90_main` calls `log_init()` first — which resets the ram_console — a restart loop wipes its own log every iteration. That fits "no log output, no recovery" better than executing non-code would. Full reading in [`docs/status/roadmap.md`](docs/status/roadmap.md) §2; whether the original run was this loop is inference, since the hang prevented capturing `last_kmsg`. With zero post-jump visibility, Stage90 is now bisecting the failure instead of re-attempting it, under two independent switches in `stages/stage90/stage90.h`. (An earlier revision of this section described three 0/1 switches; they shadowed each other, and the bisect they drove faked its results, so both were replaced.)
+That jump did not execute ASCII, though — checking the addresses shows something worse. The candidate L1 maps `VA 0x80000000+X → PA X` for X < 1 MB, so `0x80008000` resolves to PA `0x8000`, which is `_start` (`linker.ld` puts it there). The jump **re-entered the payload's own entry point**, and since `stage90_main` calls `log_init()` first — which resets the ram_console — a restart loop wipes its own log every iteration. That fits "no log output, no recovery" better than executing non-code would. Full reading in [`docs/status/roadmap.md`](docs/status/roadmap.md) §2; whether the original run was this loop is inference, since the hang prevented capturing `last_kmsg`. With zero post-jump visibility, Stage90 is now bisecting the failure instead of re-attempting it, under two independent switches in `src/stage90.h`. (An earlier revision of this section described three 0/1 switches; they shadowed each other, and the bisect they drove faked its results, so both were replaced.)
 
 `STAGE90_HANDOFF_MODE` — mutually exclusive, `#error` on any other value. Selects how far the handoff itself goes:
 
@@ -134,7 +135,7 @@ That jump did not execute ASCII, though — checking the addresses shows somethi
 The default is `HARD_SKIP` because the `PREFLIGHT_WATCHDOG_ONLY` run on 2026-09-16 left the
 device hung with a manual power-button hold needed ([`docs/experiments/experiment-93-stage90-phase0-preflight-watchdog.md`](docs/experiments/experiment-93-stage90-phase0-preflight-watchdog.md)).
 Stepping back up to `PREFLIGHT_WATCHDOG_ONLY` and then `FULL` is now a deliberate per-run
-decision, enforced by `stages/stage90/preflight_boot_check.sh`:
+decision, enforced by `scripts/preflight_boot_check.sh`:
 it verifies the image against `SHA256SUMS.txt`, checks the payload references no storage
 symbols, and refuses a run whose image was built with a mode the caller has not explicitly
 allowed (`--allow-preflight` / `--allow-full` / `--allow-selftest` /
@@ -181,7 +182,7 @@ working, and on IRQs being unmasked. **If a hang happens with any of those broke
 IRQs masked, it cannot fire** — which is exactly the failure the 2026-09-16 run produced.
 
 So the payload now also arms the **MSM8974's own hardware watchdog**
-([`stages/stage90/hw_watchdog.c`](stages/stage90/hw_watchdog.c), `STAGE90_HW_WATCHDOG`,
+([`src/hw_watchdog.c`](src/hw_watchdog.c), `STAGE90_HW_WATCHDOG`,
 **on by default**). It is a hardware counter: when it expires the SoC resets whatever the CPU
 is doing, with no software involvement at all. Nothing here is guessed — the base address
 `0xf9017000` is from the cancro device tree (`arch/arm/boot/dts/msm8974.dtsi`,
@@ -214,7 +215,7 @@ None of these modes is a shipped feature; they exist to find the failure.
 Two further switches are off by default and affect nothing unless set:
 `STAGE90_DEADMAN_SELFTEST` (see above) and `STAGE90_EXCLUSIVE_PROBE`, which runs the
 roadmap Phase 1 `LDREX`/`STREX` baseline
-([`stages/stage90/exclusive_probe.c`](stages/stage90/exclusive_probe.c)) — it changes no
+([`src/exclusive_probe.c`](src/exclusive_probe.c)) — it changes no
 mapping and no cache bit, operating on one word of the payload's own `.bss`.
 
 `STAGE90_PMAP_ATTR_MODE` is the Phase 1a mapping change: `SO_ONLY` (**default**,

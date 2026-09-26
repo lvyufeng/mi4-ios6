@@ -19,11 +19,11 @@ fail on the spelling and not only on the value.
 
 What it reads
 -------------
-  * `stages/stage90/xnu_platform/MSM8974Timer.cpp` - the driver that owns the frame.
-  * `stages/stage90/stage90_main.c` - the payload's device tree, where `/timer`'s `interrupts` lives.
+  * `src/platform/MSM8974Timer.cpp` - the driver that owns the frame.
+  * `src/stage90_main.c` - the payload's device tree, where `/timer`'s `interrupts` lives.
   * `external/android_kernel_xiaomi_cancro/arch/arm/boot/dts/msm8974.dtsi` - the device's own tree.
   * `external/android_kernel_xiaomi_cancro/arch/arm/kernel/arch_timer.c` - the device's own driver.
-  * every `.c`/`.cpp` under `stages/stage90/` - for the one call nothing here may make.
+  * every `.c`/`.cpp` under `src/` - for the one call nothing here may make.
 
 The three files under `external/` are the reason this check exists in this form. Apple's XNU has no
 timer driver for this block and this project has never read its registers, so "the offsets are right"
@@ -49,10 +49,10 @@ import subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 
-TIMER_CPP = os.path.join(REPO_ROOT, "stages/stage90/xnu_platform/MSM8974Timer.cpp")
-PAYLOAD_C = os.path.join(REPO_ROOT, "stages/stage90/stage90_main.c")
-PLATFORM_DIR = os.path.join(REPO_ROOT, "stages/stage90/xnu_platform")
-ENTRY_DIR = os.path.join(REPO_ROOT, "stages/stage90/xnu_arm_boot")
+TIMER_CPP = os.path.join(REPO_ROOT, "src/platform/MSM8974Timer.cpp")
+PAYLOAD_C = os.path.join(REPO_ROOT, "src/stage90_main.c")
+PLATFORM_DIR = os.path.join(REPO_ROOT, "src/platform")
+ENTRY_DIR = os.path.join(REPO_ROOT, "src/entry")
 KERNEL_DIR = os.path.join(REPO_ROOT, "external/android_kernel_xiaomi_cancro")
 DTSI = os.path.join(KERNEL_DIR, "arch/arm/boot/dts/msm8974.dtsi")
 ARCH_TIMER_C = os.path.join(KERNEL_DIR, "arch/arm/kernel/arch_timer.c")

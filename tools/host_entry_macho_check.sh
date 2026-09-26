@@ -3,7 +3,7 @@
 # Check the Mach-O header the entry image defines for itself.
 #
 # Since experiment 194 the entry image carries a `struct mach_header` and two `LC_SEGMENT` load
-# commands, pointed at by `_mh_execute_header` (stages/stage90/xnu_arm_boot/entry_macho.s). XNU
+# commands, pointed at by `_mh_execute_header` (src/entry/entry_macho.s). XNU
 # reads it with `osfmk/arm/arm_vm_init.c`'s calls into `libkern/kernel_mach_header.c`, and gets
 # `segTEXTB`, `segDATAB`, `end_kern` and `sane_size` out of it - so a header that is wrong by a
 # field produces a wrong memory map rather than an error.

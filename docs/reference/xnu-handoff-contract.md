@@ -55,7 +55,7 @@ So XNU does not want a page table handed to it — **it builds its own**, in the
 
 ## Where the current Stage90 payload stands
 
-`stages/stage90/boot_args.c` sets:
+`src/boot_args.c` sets:
 
 ```c
 args->virtBase = 0;                  /* Stage84 boot args are still identity-based before MMU handoff. */
@@ -64,7 +64,7 @@ args->memSize  = RAM_CONSOLE_BASE - RAM_PHYS_BASE;
 args->topOfKernelData = (uint32_t)(uintptr_t)__stage90_image_end;
 ```
 
-The struct layout is already right — `stages/stage90/stage90.h`'s `struct boot_args` and
+The struct layout is already right — `src/stage90.h`'s `struct boot_args` and
 `struct boot_video` match `boot.h` field for field and type for type, and
 `BOOT_LINE_LENGTH`/`Revision`/`Version` agree. The *values* do not:
 
@@ -80,7 +80,7 @@ ladder's own validation depends on it (`stage90_arm_init_stub` requires
 `args->physBase == STAGE90_BASE`). So this is not a bug to patch in place — the ladder's
 `boot_args` and a conforming XNU `boot_args` are **two different objects**, and Phase 2 needs
 the second one produced alongside the first — which is what
-`stages/stage90/xnu_boot_args_conformant.c` now does, behind `STAGE90_XNU_BOOT_ARGS`
+`src/xnu_boot_args_conformant.c` now does, behind `STAGE90_XNU_BOOT_ARGS`
 (default off, so it cannot affect a run that does not ask for it).
 
 The `memSize` figure in the table is the ladder's, and it is the one value worth calling out
@@ -91,7 +91,7 @@ below `0x80000000`". The conforming object answers the second question instead.
 ## The unaligned `physBase`, and why it dissolves
 
 `physBase` is not just unaligned, it is unaligned *because of how the payload is loaded*:
-`stages/stage90/build.sh`'s `mkbootimg` invocation uses `--base 0x00000000 --kernel_offset
+`scripts/build.sh`'s `mkbootimg` invocation uses `--base 0x00000000 --kernel_offset
 0x00008000`, so the payload's `_start` runs at physical `0x8000` — the legacy Android
 boot-image convention. That looked like it forced a choice between moving the load address
 and relocating the image at handoff.
@@ -143,7 +143,7 @@ It still does not describe the *whole* device — there is more RAM above the ho
 it needs a region list rather than one span. That is Phase 3's problem; the single-span
 contract is what XNU's `_start` itself consumes.
 
-**Implemented** in `stages/stage90/xnu_boot_args_conformant.c`, behind `STAGE90_XNU_BOOT_ARGS`
+**Implemented** in `src/xnu_boot_args_conformant.c`, behind `STAGE90_XNU_BOOT_ARGS`
 (default off — it builds a *second* `boot_args` and validates it; the ladder's identity-based
 one is untouched, because the ladder itself requires `physBase == 0x8000`).
 
