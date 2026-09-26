@@ -595,18 +595,36 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 # them. What this key buys a reader is the one thing the arm's other keys cannot say: with it at 1 the run
 # dereferences a device block the image has never touched, and its log carries `xnu_live_storage_*` - and
 # with it at 0 the arm is 690's clock arm with an object in the link whose body compiles to nothing.
+# 713: the twentieth name, and it is the same class a fourth time - one more name this gate PRINTS and no
+# clause moved. `STAGE90_XNU_PWR_WAIT_TICKS` is rung 9's bound: the statement `sdhci_set_power` makes
+# immediately after the power byte rung 7 writes (`sdhci.c:1371-1372`, `host->ops->check_power_status(host,
+# REQ_BUS_ON)`), whose vendor implementation (`sdhci-msm.c:2179-2210`) is a cache read of two driver-side
+# fields plus an UNBOUNDED `wait_for_completion`. The arm ports the predicate and replaces the block with a
+# bounded tick poll whose end condition is the CONTROLLER's own `CORE_PWRCTL_CTL & BUS_SUCCESS` and not the
+# image-side flag - the probe runs inside Apple's cache-off idle-exit window (`SCTLR.C` clear) while the
+# client handler may run with the caches on, so a flag written by one can sit in L1/L2 while the other's
+# direct read is answered by DRAM. This key is that bound **in ticks of the device's own 19,200,000 Hz
+# counter** (`xnu_live_post_cntfrq`); 1920000 is 100 ms. `entry_storage.c` `#error`s outside [1, 19200000]
+# and **0 is REFUSED on purpose**, because the no-wait arm is rung 8 and a budget of 0 would make rung 9's
+# cells indistinguishable from the rung below it while the record said otherwise. The variant subset counts
+# move from twelve to thirteen, and the pair of counts in the converse check below moves with them. What
+# this key buys a reader is the one thing the arm's other keys cannot say: with it at a number the run's
+# wait has a bound this gate can see, and with it absent the arm's `_wait_*` cells would be read as a
+# handshake that either completed or did not, with no way to tell a poll that SPENT its bound from one that
+# was never given a budget - which is the shape this project's oldest silent defect has.
 ENTRY_CFG_KEYS=(STAGE90_XNU_ENTRY_SHA256 STAGE90_XNU_ENTRY_BYTES STAGE90_ENTRY_TRACE
                 STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT_NULL STAGE90_XNU_EXIT_POC_FLUSH
                 STAGE90_XNU_IDLE_CACHE_ENABLE STAGE90_XNU_ISTACK_SEPARATE STAGE90_XNU_IDLE_STACK
                 STAGE90_XNU_SEAM_POC STAGE90_XNU_SEAM_MEASURE STAGE90_XNU_SEAM_END_RUN
                 STAGE90_XNU_POST_END_RUN STAGE90_XNU_POST_END_TICKS STAGE90_XNU_STORAGE_PROBE
+                STAGE90_XNU_PWR_WAIT_TICKS
                 STAGE90_ENTRY_CHECKPOINT STAGE90_ENTRY_CHECKPOINT_SKIP
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_IDLE_NO_SLEEP)
 for _k in "${ENTRY_CFG_KEYS[@]}"
 do
   _v=$(awk -F= -v k="$_k" '$1 == k { print $2 }' "$ENTRY_CFG")
   [[ -n $_v ]] \
-    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The twelve variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, SEAM_END_RUN, POST_END_RUN, POST_END_TICKS, STORAGE_PROBE, IDLE_NO_SLEEP) are exactly the ones a display filter written around the artifact keys drops in silence"
+    || fail "$ENTRY_CFG has no $_k line - this gate prints the entry image's variant by name, and a record without that key would let a run go out with a switch nobody recorded. The thirteen variant keys (SLOT_NULL, EXIT_POC_FLUSH, IDLE_CACHE_ENABLE, ISTACK_SEPARATE, IDLE_STACK, SEAM_POC, SEAM_MEASURE, SEAM_END_RUN, POST_END_RUN, POST_END_TICKS, STORAGE_PROBE, PWR_WAIT_TICKS, IDLE_NO_SLEEP) are exactly the ones a display filter written around the artifact keys drops in silence"
   printf '  %s=%s\n' "$_k" "$_v"
 done
 # And the converse, so a key the list above does not name cannot arrive unshown (a *tenth* when the list
