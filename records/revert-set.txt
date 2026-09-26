@@ -3721,3 +3721,112 @@ set=armed-storage-cid-dc8d7002 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364
 #
 # **THE GOAL IS STILL NOT MET**: no storage, no filesystem, the OS not observed reaching userland, so
 # TWRP-to-storage stays withheld (the clause is conditioned on "if the OS can already get in").
+
+# ================================================================================================
+# 739: A NEW ARM IS ARMED, AND IT IS A RUNG WHOSE NEW ACT IS A READ AND NOTHING ELSE.
+# ================================================================================================
+# `armed-storage-rb-05645d1a` - `STAGE90_XNU_STORAGE_PROBE=17`, ordinal rung 18, and the eight hex of
+# its name is `xnu_arm_entry.bin`'s own sha256 prefix (the rule every `armed-storage-*` set in this
+# record follows). It is 737's arm's whole act plus ONE READ-ONLY BODY, `st_resp_before`, called from
+# `entry_storage_probe` immediately BEFORE `st_cmd_path()` and after rung 9's wait. **THE REASON IS
+# 738's PRESS AND IT IS A DOUBT, NOT A NEW ACT**: the ladder's first 136-bit read returned
+# `_cid_resp0 = 0x40ff8080` - **bit-for-bit `_cmd1_resp` from the same log**, with the four raw words
+# holding that same value one byte further along - with `_cid_complete = 0` over 5,088,256 polls and
+# `_cid_inhibit_seen = 0` where CMD0's own inhibit was seen 537 times in the same run. Since 733 that
+# value has been read as *the card answered CMD1*: 733's index row calls it "exactly the reference
+# word", 736 section 5 built the push plan from it, and rung 17's own gate is read off it. It has an
+# OCR's SHAPE, which is why it convinced; **shape is not provenance**, and the register did move in that
+# run (after CMD0 `_cmd0_resp = 0x0` with `_cmd0_resp_read = 1`), so "it changed during CMD1" does not
+# separate the card from the block's own default for a command the sequencer never took.
+#
+# **THE ONE READ THAT DECIDES IT.** `RESPONSE 0x10` is read here and nowhere earlier: the only two
+# bodies in the image that touch it read it AFTER a command (`st_send_command`, `st_all_send_cid`), and
+# rung 3's census of ten registers does not read it at all. So this is the register's first reading on a
+# block that has NEVER carried a command, and the two outcomes are exhaustive:
+#   * `_rb_resp_zero = 1` - the register was EMPTY. CMD1's `0x40ff8080` was put there by CMD1, 733's
+#     reading survives, and the next rung continues the driver from a fact rather than a hope.
+#   * `_rb_resp_zero = 0` - the register already held a value with no command in the block's past. The
+#     four SHIFTED pre-command words beside it then say which value, and if they match the post-CMD2
+#     ones the ladder's one piece of evidence that a card exists is RETIRED and the push from CMD1 must
+#     be re-derived from a signal other than RESPONSE. 738's own second cell - `CMD_INHIBIT` - is the
+#     candidate: `_cmd0_inhibit_seen = 0x219`, `_cmd1_inhibit_seen = 0`, `_cid_inhibit_seen = 0`.
+#
+# **THE BODY, AND IT WRITES NOTHING AT ALL.** Twelve device accesses, EVERY ONE A READ AND EACH ADDRESS
+# EXACTLY ONCE: the four RESPONSE words at `+0x1c/+0x18/+0x14/+0x10` in the driver's own order (word 3
+# first) and the three BYTE fills it takes below them at `0x1b/0x17/0x13`, published twice - four raw
+# words (`_rb_raw0`..`_rb_raw3`) beside four shifted ones (`_rb_resp0`..`_rb_resp3`) through ONE
+# derivation, the same arithmetic `st_all_send_cid` uses after CMD2, so the pre-command words and the
+# post-CMD2 words are comparable one for one in a single log; `_rb_resp_zero` derived in the image from
+# the four raw words (this rung's answer); `PRESENT_STATE 0x24` whole with `_rb_inhibit` = its
+# CMD_INHIBIT bit; `COMMAND 0x0e` as a HALFWORD (`_rb_cmd_word`, which must read `0x0000` if no command
+# has ever carried); and `INT_STATUS 0x30`, `INT_ENABLE 0x34`, `SIGNAL_ENABLE 0x38` - READ AND NEVER
+# WRITTEN, `SIGNAL_ENABLE` included, at every rung. Plus `_rb_calls` and `_rb_done`.
+#
+# **THE WRITE SET IS EMPTY AND THAT IS WHY IT MAY SIT ABOVE `st_cmd_path`'s GATE.** 736's press is the
+# measurement of what a store there costs: rung 15's write left bit 15 set in `INT_ENABLE 0x34` (a write
+# to that register sets it and no write clears it), the gate read `0x00008000`, and NO COMMAND WENT ON
+# THE BUS. A body that stores nothing cannot move a register the gate reads. There is no new command
+# class, no data path, no `POWER_CONTROL 0x29`, no GCC word, no `core_mem` word and no byte of the
+# medium. **AND RUNG 15's BODY IS EXCLUDED HERE, ASSERTED ON THE SYMBOL AND ON THE CALL SITE**:
+# `st_quiet_enable_probe` is compiled for the value 15 and no other, so a log from this arm carrying any
+# `_quiet_*` key is a log from an arm that is not this one.
+#
+# **THE BUILD CLAUSE `xnu_entry_739` HOLDS IT TO ITS OWN SHAPE**, and its store clause is placed FIRST
+# so that a perturbed build which adds a store is refused by the sentence that explains why. Asserted:
+# the symbol is present and sized; its device access SET is exactly the twelve, sorted; its COUNTS are
+# each exactly 1; its store set is EMPTY; its device accesses IN PROGRAM ORDER, distinct, are the four
+# words descending each followed by its byte, then `PRESENT_STATE`, then `COMMAND` as a halfword, then
+# the three interrupt registers; its image side is EMPTY; `entry_storage_probe` calls it exactly ONCE;
+# and that call is ordered BEFORE `st_cmd_path`'s own call. **NINE FALSIFICATIONS, EACH REFUSED BY ITS
+# OWN CLAUSE, EACH NAMEABLE**: a byte read made 32-bit -> the SET clause; a store of a read value added
+# -> the READ-ONLY clause; a write-1-to-clear into `INT_STATUS 0x30` -> the READ-ONLY clause; a second
+# read of a declared register -> the COUNTS clause; a read of an undeclared device offset -> the SET
+# clause, reporting `NODECL-`; the call site moved BELOW `st_cmd_path` -> the ORDER clause; the call
+# site duplicated -> the CALL-COUNT clause; the body renamed -> the SYMBOL clause; and the call site
+# REMOVED -> the compiler's own `-Werror=unused-function`, which is upstream of the clause and is the
+# honest note rather than a claim that the clause fired.
+#
+# **AND TWO CLAUSES WERE REPAIRED BEFORE THEY SHIPPED, BECAUSE THE FIRST DRAFT MADE THEM UNREACHABLE.**
+# The store clause originally sat after the set and count clauses, where it could NEVER fire - any
+# device store appears in the set as a `:str` entry, so the set clause always refuses first - and the
+# set and count clauses' own texts claimed stores as their subject. That is
+# `[[mi4-a-claim-in-a-comment-is-not-a-check]]` in its cheapest form: a refusal that describes a
+# perturbed build it cannot be reached by. The store clause is now FIRST and the other two point at it.
+#
+# **THE BUILDS WERE RUN AND THIS IS THE DISCLOSURE.** The entry image TWICE for reproducibility (both
+# clean builds of the final source gave `05645d1a` byte-for-byte, `cmp`-measured), and the payload
+# ONCE; the pressed arm (`armed-storage-cid-dc8d7002`) was already parked and exported from 738's step
+# and was not touched. `./scripts/build.sh` does not reproduce the payload (408), so this is not a
+# routine step. Measurements: **entry image `05645d1a`, 5,552,764 B - THE SAME SIZE as the pressed
+# arm's, so the seam constant DID NOT MOVE** (`platform_cache_idle_exit` at `0x800492d4`, its
+# `bl <__wrap_FlushPoU_Dcache>` at `0x800492d8` returning to `0x800492dc` = `entry_storage_trace.c`'s
+# `STAGE90_XNU_SEAM_LR`, re-derived read-only from the FRESH `xnu_arm_entry_seam.dis`); `.text`
+# 5,332,264 -> 5,332,776 (+512); `st_resp_before` at `0x8000d7c8`, size `0x17c` (380 B); `st_all_send_cid`
+# moved to `0x8000dcb4`, size unchanged `0x29c`; and **the payload's own switch set is byte-identical to
+# the pressed arm's** (`6c2b6038`, `cmp`-measured), so no payload switch moved and the config comparison
+# the 732 block made owed holds for this arm too. `tools/check_arm_variant_pair.sh` agrees.
+#
+# **THE ARM IS ARMED AND NOT PRESSED** and nothing is owed. Readiness 5 of 5 (flags `--allow-xnu-entry`,
+# `--expect-arm=armed-storage-rb-05645d1a`), the park and the export VERIFIED, `make check` exit 0, and
+# the gate itself exit 0 - which is the reading that says the tree in front of the gate is the tree the
+# image was built from, because the entry sources are verified BY CONTENT. **THE PRESS IS THE
+# OPERATOR'S**, and the paths carry the `scripts/` prefix from the repo root:
+#   sudo -n adb devices   # 4a2fe00b; the neighbour 33e80afe must be ABSENT from BOTH lists
+#   ./scripts/preflight_boot_check.sh --allow-xnu-entry
+#   ./scripts/run_and_capture.sh --allow-xnu-entry --expect-arm=armed-storage-rb-05645d1a
+# **No firer is armed**, and the press path is those two commands run by hand once each (730 section 6:
+# the launcher's bytes are kept nowhere).
+#
+# The goal is still NOT met: no storage, no filesystem, the OS not observed reaching userland, so
+# TWRP-to-storage stays withheld (the clause is conditioned on "if the OS can already get in").
+set=armed-storage-rb-05645d1a sha256=4aa38a6e35065b242ed1d52515a70449571446dc55fc6a96327cf1740cdbfbfd bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-17-entry-rung-18-with-st_resp_before-and-RESPONSE-0x10-READ-BEFORE-ANY-COMMAND-HAS-EVER-BEEN-ON-THE-BUS
+set=armed-storage-rb-05645d1a sha256=a789a2309bc28cc709ea5645f71d2d365da9cefa3c98cabf552ef92ed7d92be0 bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-17-entry
+set=armed-storage-rb-05645d1a sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-pressed-arm-BY-MEASUREMENT-6c2b6038-so-no-payload-switch-moved-and-the-owed-config-comparison-of-the-732-block-holds-for-this-arm-too
+set=armed-storage-rb-05645d1a sha256=1c667b393b99366397491713840299a40316dc7bff1e94cf36eeb132e472358e bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-rb-05645d1a sha256=cc0be37f41afc7c4b943fca8fb072ea61e0d1973996120501e3e65b865297752 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-rb-05645d1a sha256=05645d1a5e7646484b79d92995ddb707da893f2c7a9634fc84e4195db273d2ae bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-this-is-the-STORAGE_PROBE-17-entry-the-8-hex-of-this-hash-is-the-sets-name-and-its-SIZE-IS-BYTE-IDENTICAL-to-the-pressed-arm-5552764-so-the-SEAM-CONSTANT-DID-NOT-MOVE-it-carries-st_resp_before-a-READ-ONLY-body-and-still-carry-NO-rung-15-key
+set=armed-storage-rb-05645d1a sha256=08ae29cbe3d14f9c7104a6b1f74bc3995923d46ef95809196ce5c0ec03790e85 bytes=6732240 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-rb-05645d1a sha256=1cabfad6b82db462f0fe806086602a35214ff4614914004d99e5fb1d406f39fe bytes=900 file=xnu_arm_entry-config.txt role=entry-config-record-its-rung-line-reads-STAGE90_XNU_STORAGE_PROBE=17
+set=armed-storage-rb-05645d1a sha256=1a41532767d2fb1a15b9913d1ad23768217fd95acb93eb1ebe2a43fce9f2e4ac bytes=2335 file=xnu_arm_entry-sources.txt role=entry-source-manifest-23-files
+set=armed-storage-rb-05645d1a sha256=e27fa0abf9f37ece0b62fae04619e358e36f572383cdc24ea2038b6a70a250b8 bytes=6051840 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
+set=armed-storage-rb-05645d1a sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-macho-UNCHANGED-since-the-press-and-regenerated-by-the-build-into-src-verbatim
