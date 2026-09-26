@@ -57,6 +57,7 @@ restore:
 check:
 	@tools/check_stage_paths.sh
 	@tools/check_set_name_rule.sh
+	@tools/check_backtick_messages.sh
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not

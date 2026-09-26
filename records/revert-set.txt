@@ -4201,3 +4201,204 @@ set=armed-storage-rca-c333d09c sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364
 #
 # The goal is still NOT met: no storage, no filesystem, the OS not observed reaching userland, so
 # TWRP-to-storage stays withheld (the clause is conditioned on "if the OS can already get in").
+
+# ================================================================================================
+# 743: A NEW ARM IS ARMED, AND IT IS ONE CONSTANT DIFFERENT FROM THE ARM 742 SPENT.
+# ================================================================================================
+# `armed-storage-b7e5a18f` - `STAGE90_XNU_STORAGE_PROBE=19`, ordinal rung 20, and the eight hex of its
+# name is `xnu_arm_entry.bin`'s own sha256 prefix (the rule every `armed-storage-*` set in this record
+# follows). It is 742's arm's whole act - the same opcode, the same argument `0x00010000`, the same
+# one-bit `INT_ENABLE 0x34` window, the same five registers read at the same widths in the same
+# program order, the same gate (`st_all_send_cid`'s returned `cid_sent`) - with **ONE CONSTANT MOVED**:
+# the flag word goes from `MMC_RSP_R1` to `MMC_RSP_NONE`, so the command word goes from `0x031A` to
+# **`0x0300`** and the demand for a response is GONE from a command that is otherwise identical.
+#
+# **THE REASON IS 742's ANSWER, WHICH IS AN ANSWER AND NOT A DOUBT.** 742 pressed rung 19 and read the
+# driver's own CMD3 as: TAKEN (`_rca_word = _rca_word_read = 0x031a`, `_rca_arg = _rca_arg_wrote =
+# 0x00010000` - the block holds the word the driver wrote), STARTED (`_rca_inhibit_seen = 0x400`, bit 0
+# of `CMD_INHIBIT` in ALL 1024 samples of the poll), and NEVER FINISHED (`_rca_complete = 0`,
+# `_rca_err = 0`, `_rca_timeout = 1`, `_rca_status_any = 0` across 5,081,600 polls) - with the response
+# register EMPTIED across it (`_rca_resp_pre = _rca_resp = 0x40ff8080` -> `_rca_resp_post = 0x00000000`,
+# `_rca_resp_moved = 1`). The one command this ladder has ever driven to a COMPLETION is CMD0, the one
+# that asks for NOTHING BACK. So 742 section 8 named the next rung as a single variable rather than a
+# plan: **the same opcode and the same argument with the flag word carrying no response demand.**
+#
+# **WHAT THE COMMAND IS.** opcode `MMC_SET_RELATIVE_ADDR` 3 (`mmc.h:32`, unchanged), argument
+# `card->rca << 16` with `card->rca = 1` (unchanged, `0x00010000`), flags `MMC_RSP_NONE`, which is
+# `core.h:50`'s literal **zero** - the ABSENCE of `MMC_RSP_PRESENT` - so under `sdhci_cmd_to_flags`
+# (`sdhci.c:1131-1143`) every other term it adds is conditioned away and the word is **`0x0300`**:
+# rung 19's `0x031A` minus `RESP_SHORT`, `CRC` and **`INDEX`** together. **The ladder's first `INDEX`
+# bit does not survive this rung**, and that is the whole of the difference. All of it is
+# `_Static_assert`ed in the source (`ST_SDHCI_CMD_WORD(ST_CMD_OP_SET_RELATIVE_ADDR, ST_MMC_RSP_NONE)
+# == 0x0300u` and `ST_MMC_RSP_NONE == 0u`), because the build's clause asserts that body's ACCESSES and
+# never the value it stores.
+#
+# **THE ANSWER IS A THREEWAY, WHICH IS WHY THIS RUNG IS WORTH A PRESS.** `_nrsp_complete = 1` with
+# `_nrsp_status_any != 0` says the response DEMAND is what stalled CMD3, and the subject becomes the
+# response path (`RESPONSE 0x10`, `SDHCI_INT_RESPONSE`, and the `INT_ENABLE` bit this ladder has carried
+# since rung 13). `_nrsp_inhibit_seen > 0` with `_nrsp_complete = 0` says a no-response command stalls
+# the SAME way, so the demand is EXONERATED and the subject is the opcode or the block's own state - and
+# then the census moves to the two registers 726 section 3 named and no rung has yet read with a
+# completion to report, `SLOT_INT_STATUS 0xFC` and `CORE_PWRCTL_STATUS 0xDC`. `_nrsp_inhibit_seen = 0`
+# with `_nrsp_word_read = 0x0300` says the block never started it at all.
+#
+# **AND THE SECOND READING IS THE RESPONSE REGISTER, TAKEN THREE TIMES.** The body reads `RESPONSE 0x10`
+# through the DRIVER'S OWN WORD-0 DERIVATION (`(readl(RESPONSE + 0x1C) << 8) | readb(RESPONSE + 0x1B)`,
+# `sdhci.c:1164-1172`) immediately BEFORE the window, inside the command object's own `resp`, and again
+# immediately AFTER the publishes - so `_nrsp_resp_pre`, `_nrsp_resp` and `_nrsp_resp_post` are ONE
+# ARITHMETIC AT THREE TIMES and the register is not collapsed into a boolean the way rung 19's
+# `_rca_resp_moved` alone was (742 section 2 records that as that rung's pre-registration defect). With
+# the demand removed, nothing should clear the register during this command, so `_nrsp_resp_post` should
+# STILL HOLD CMD1's word `0x40ff8080` - which rungs 17 and 18 both measured there. **If the R1 command
+# emptied it and the no-response command does not, the CLEARING is tied to the response demand**, and
+# that is 742 section 1's reading CONFIRMED rather than inferred from one press.
+#
+# **`_nrsp_resp` MUST BE READ WITH CARE AND THE ARM SAYS SO IN A COMMENT.** The command asked for no
+# response, so `rsp_present` is zero and that word is a reading of the REGISTER and NOT this command's
+# answer - which is exactly why the three R1-decode cells rung 19 publishes (`_state`, `_ready`,
+# `_illegal`) are ABSENT from this body. A word decoded here would be CMD1's OCR wearing a card-status
+# shape, which is 738's stale-word trap in its cheapest form. **The R1 fields belong to rung 19's log
+# and to no other.**
+#
+# **THE CONTRAST THE PAIR BUYS.** Every rung since 12 publishes its command through `ST_CMD_PUBLISH`,
+# and this command goes through the driver's own `st_send_command` exactly as CMD0, CMD1, CMD2 and rung
+# 19's CMD3 do - so one log will hold FOUR commands' own inhibit readings plus a FIFTH row that is the
+# same opcode as the fourth with the demand removed: `_cmd0_inhibit_seen = 0x219` (537 of 1024) with
+# `_cmd0_complete = 1`, `_rca_inhibit_seen = 0x400` (all 1024) with `_rca_complete = 0`, and this
+# rung's. If the new row looks like CMD0's, the demand is the stall; if it looks like rung 19's, the
+# opcode is.
+#
+# **RUNG 19's BODY IS EXCLUDED FROM THIS IMAGE, AND IT IS ASSERTED TWICE.** Both bodies send the same
+# opcode with the same argument, so an image carrying both would put two response-demand variants of one
+# command on the same bus in one boot and the two cells a press is spent for would answer each other's
+# question. The source compiles `st_set_relative_addr` for the value 18 and NO OTHER (`#if ... == 18`
+# where rung 19 had `>= 18`) and its call site the same; `xnu_entry_743`'s exclusion clause reads the
+# SYMBOL out of the linked image and refuses if it is there. **Measured on this arm: `st_set_relative_addr`
+# is not in the image.** The second assertion is the entry image's own seam - see the falsification
+# paragraph below, where the two were measured to fire in that order.
+#
+# **THE SAFETY CONTRACT IS RUNG 19's AND THE BUILD ASSERTS THAT IT IS, LITERALLY.** TWO stores, both to
+# `INT_ENABLE 0x34`: the one-bit window `(read | SDHCI_INT_RESPONSE)` immediately before the command is
+# put on the bus, and its restore on ONE unconditional line after the publishes, writing back the value
+# the gate read and not a constant. `SIGNAL_ENABLE 0x38` is READ AND NEVER WRITTEN, at every rung - it
+# is the register whose conjunction with `INT_ENABLE` raises this block's SPI 123 -> intid 155, a line
+# nobody here owns. No new command class, no data path, no `POWER_CONTROL 0x29`, no GCC word, no
+# `core_mem` word, and **no byte of the medium**. The restore is PARTIAL and that is a measurement, not
+# a bug (bit 15 rides along on any write to `0x34`): expected `_nrsp_ena_held = 0x00008001`,
+# `_nrsp_readback = 0x00008000`. The failure mode is a DIAGNOSIS and not a lost device: the 1.2 s
+# command bound is inside `st_send_command`, and a delivery on that line ends the run at the dispatcher
+# as `_irq_other_count = 1` / `iat = 155`, an ending this image already reads and survives (709 ended
+# that way on intid 170).
+#
+# **`xnu_entry_743`'s `_want` STRINGS ARE RUNG 19'S, CHARACTER FOR CHARACTER, AND THAT IS THE
+# ONE-VARIABLE CLAIM MADE STRUCTURAL RATHER THAN NARRATED.** `st_cmd3_noresp`'s device access SET is
+# `f982491b:ldrb f982491c:ldr f9824924:ldr f9824930:ldr f9824934:ldr f9824934:str f9824938:ldr`; its
+# COUNTS are `f982491b:ldrb=2 f982491c:ldr=2 f9824924:ldr=1 f9824930:ldr=1 f9824934:ldr=2
+# f9824934:str=2 f9824938:ldr=1`; its STORES are exactly `f9824934:str` (two, both to `0x34`, nothing
+# else anywhere); its PROGRAM ORDER, distinct, is `f982491c:ldr f982491b:ldrb f9824934:str f9824934:ldr
+# f9824938:ldr f9824930:ldr f9824924:ldr` - the freshness baseline FIRST, before any store; its image
+# side is EMPTY; `st_cmd_path` calls it exactly once, after `st_all_send_cid` and after the command
+# path's last `bl <st_send_command>`; and the four command call sites are `[st_cmd_path 2,
+# st_all_send_cid 1, st_cmd3_noresp 1]`. **If the flag word this rung changes had moved a single device
+# access, a width or an ordering, that clause would refuse.** What it does NOT assert is the opcode,
+# the argument, the flags and the word: a body's accesses and its `bl` sites carry no immediate, so
+# `0x0300` is carried by the two `_Static_assert`s and by the run's own `_nrsp_op`, `_nrsp_flags`,
+# `_nrsp_arg` and `_nrsp_word` cells.
+#
+# **THIRTEEN FALSIFICATIONS, AND TWO OF THEM WERE REFUSED BY A DIFFERENT CLAUSE - BOTH OF WHICH IS THE
+# FINDING.** Every perturbation rebuilt the entry image under the arm's own switch set, and every edit
+# asserted `t.count(old) == 1` before it edited (m748; the rung-19 batch had to be re-run for want of
+# it). Against `st_cmd3_noresp`: the `0x1b` byte read made a 32-bit `ldr` -> **SET**,
+# `NODECL-f982-2328:ldr`; the post half taken from the pre half -> **COUNTS**, `f982491b:ldrb=1
+# f982491c:ldr=1`; the window never written back -> **COUNTS**, `f9824934:str=1`; a W1C store into
+# `INT_STATUS 0x30` -> **SET**, `f9824930:str`; a store to `SIGNAL_ENABLE 0x38` -> **SET**,
+# `f9824938:str`; a fifth `st_send_command` call -> the **four-call-site** clause `[2, 1, 2]`; the call
+# site duplicated -> the **one-call-site** clause; the call site removed -> the **compiler**
+# (`entry_storage.c:3141:48: error: 'st_cmd3_noresp' defined but not used [-Werror=unused-function]`).
+# **THE BASELINE DUPLICATED BELOW THE WINDOW'S STORE** was refused by **COUNTS**
+# (`f982491b:ldrb=3 f982491c:ldr=3`), not by PROGRAM ORDER, because that edit ADDED a third reading
+# rather than moving the first and the COUNTS clause sits before the ORDER clause in the same check -
+# so the ORDER clause's own subject was never built. **A LIVE CALL INSERTED ABOVE CMD2** was refused by
+# the **one-call-site** clause for the same reason (it added a second call rather than relocating the
+# gated one), and a cell that MOVED the gated block would be folded away by the compiler first (741
+# section 7's cell 7) - so **the ORDER clause is reached by no perturbation in this table**, and that is
+# recorded rather than dressed up. It is not decoration: it runs and passes on the real image.
+#
+# **THE EXCLUSION WAS REFUSED BY AN EARLIER CLAUSE FIRST, AND THE SECOND CELL NAMES BOTH.** Widening
+# rung 19's guard back to `>= 18` puts a second CMD3 body into the image and **the entry image's own
+# layout moves with it**: the exit's `bl <__wrap_FlushPoU_Dcache>` - the seam every rung since 9 has
+# been built on - moved from `0x800492d8` to `0x8004a2d8`, exactly `0x1000`, and **`xnu_entry_535`**
+# refused because its return address no longer equals `entry_trace.c`'s `STAGE90_XNU_SEAM_LR`. That
+# clause sits at `build_entry.sh:29102` and `xnu_entry_743`'s exclusion at `:31351`, so **the exclusion
+# CANNOT be the first thing to answer this perturbation, and it did not**. The second cell set the seam
+# constant to the address the first cell's own build printed, and **the exclusion fired**: *"st_set
+# relative_addr IS in the linked image while STAGE90_XNU_STORAGE_PROBE=19 ... an image carrying both puts
+# two variants of one command on the same bus in one boot and each reading becomes unattributable to its
+# own flag word."* **Two clauses guard this rung's exclusion and the stronger one is the seam**, and the
+# same measurement says something about the rung: rung 19's arm and this arm have entry images of **the
+# same size to the byte (5,552,764)** with the seam at the **same address**, because rung 20's body
+# occupies rung 19's bytes - which is what a one-constant change should look like.
+# **AND ONE CELL IS NOT A REFUSAL, DELIBERATELY**: the flags changed back to `MMC_RSP_R1` **BUILDS**,
+# which is the honest control and the clause's own stated limit - the disagreement it creates lives
+# between the run's log and the document, not in the build. A table in which every cell refused would be
+# a table testing its own expectation.
+#
+# **THE BUILDS WERE RUN AND THIS IS THE DISCLOSURE.** The entry image was built for the FINAL source
+# TWICE - the build carrying `xnu_entry_743` and a second clean build after the falsification batch
+# restored the source, both giving **`b7e5a18f35ebfa7a7f1d1b411bac405ecdbb7490875ebf17c6126f93be5efc5d`,
+# 5,552,764 B, `cmp`-measured** - and thirteen times more carrying the perturbations above, each of
+# which the build REFUSED except the deliberate one. The payload was built **ONCE**, with
+# `STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1'`, and **its `stage90-build-config.txt` is
+# BYTE-IDENTICAL to the pressed rung-19 arm's (`6c2b6038...`, `cmp`-measured)** - so the owed config
+# comparison of the 732 block holds for this arm on the FIRST build, and `STAGE90_XNU_ENTRY 1` is at
+# line 5 of it. **The trap is still not a refusal**: `./scripts/build.sh` takes its variant switches
+# from that variable and its default leaves the switch at `0u`, where every `armed-storage-*` arm
+# carries `1`; a check that compares a fresh payload's config against the arm's record line in
+# `make check` is still OWED and is still not in this commit.
+#
+# **THE ARM'S OWN MEASUREMENTS.** Entry image `b7e5a18f...`, 5,552,764 B, `.text` **5,329,120**;
+# `platform_cache_idle_exit` at `0x800492d4` (size `0x6c`), its `bl <__wrap_FlushPoU_Dcache>` at
+# **`0x800492d8` returning to `0x800492dc`** = `entry_trace.c:2688`'s `STAGE90_XNU_SEAM_LR` (re-derived
+# read-only from the fresh disassembly; four wrapped call sites in the image, at `0x80048d08`,
+# `0x80049284`, `0x800492d8` and `0x800493bc`); **`st_set_relative_addr` IS NOT IN THE IMAGE** - the
+# exclusion, as a property of the bytes; `st_cmd3_noresp` at **`0x8000df54`, size `0x29c`** (668 B);
+# `st_all_send_cid` at `0x8000dcb4`, size `0x2a0`; `st_cmd_path` at `0x8000e1f0`, size `0x788`;
+# `st_send_command` at `0x8000cff8`, size `0x314`; `st_resp_before` at `0x8000d7c8`, size `0x17c`.
+# `tools/check_arm_variant_pair.sh` agrees. **The `.text` comparison with rung 19's arm is the rung in
+# one number**: rung 19's `st_set_relative_addr` was `0x2d8` (728 B) and this rung's `st_cmd3_noresp` is
+# `0x29c` (668 B) - the same body with three published cells removed - and the two images' `.bin` sizes
+# are equal, so the change is a change and not a shift.
+#
+# **THE ARM IS ARMED AND NOT PRESSED** and nothing is owed. Readiness **5 of 5** (flags
+# `--allow-xnu-entry`, `--expect-arm=armed-storage-b7e5a18f`), `tools/rehearse_revert_set.sh`
+# **38 ok / 0 failed**, `tools/rehearse_live_path.sh` **39 ok / 0 failed, exit 0** (the runner's own
+# state machine against stubs - no device), the park and the export VERIFIED (11 files each), and
+# `make check` exit 0. **THE PRESS IS THE OPERATOR'S**, and the paths carry the `scripts/` prefix from
+# the repo root:
+#   sudo -n adb devices   # 4a2fe00b; the neighbour 33e80afe must be ABSENT from BOTH lists
+#   ./scripts/preflight_boot_check.sh --allow-xnu-entry
+#   ./scripts/run_and_capture.sh --allow-xnu-entry --expect-arm=armed-storage-b7e5a18f
+# **No firer is armed**, and the press path is those two commands run by hand once each (730 section 6:
+# the launcher's bytes are kept nowhere).
+#
+# **TWO THINGS MUST NOT BE READ INTO THE PRESS.** This rung is a CONTROLLER question and not the
+# driver's next statement - `mmc.c` would say CMD9 `SEND_CSD`, and arming a further response-expecting
+# command on a block whose command line rung 19 held for 1.2 s would stack the same unknown on itself.
+# And `_nrsp_ps_after`'s clear `CARD_PRESENT` bit (bit 16 of `PRESENT_STATE 0x24` in this tree's vendor
+# header, `sdhci.h:71`) is a property of what this image has done to the block and **NOT evidence about
+# a card**: it reads clear in every reading this ladder has ever taken.
+#
+# The goal is still NOT met: no storage, no filesystem, the OS not observed reaching userland, so
+# TWRP-to-storage stays withheld (the clause is conditioned on "if the OS can already get in").
+
+set=armed-storage-b7e5a18f sha256=86c9e5d7af3d516eb63bc375b3d330740f1aea87f777e62a415b47bc08324a0f bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-19-entry-rung-20-whose-new-body-is-the-driver-s-own-CMD3-mmc_set_relative_addr-with-the-SAME-opcode-3-and-the-SAME-argument-0x00010000-as-rung-19-and-the-response-demand-REMOVED-word-0x0300
+set=armed-storage-b7e5a18f sha256=dd8d2aabdc0e2dfffb2b02ca363eb4a7b3dd0c45f6cba57237c48701d231ad40 bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-19-entry
+set=armed-storage-b7e5a18f sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-pressed-rung-19-arm-BY-MEASUREMENT-cmp-6c2b6038-so-no-payload-switch-moved-and-the-owed-config-comparison-of-the-732-block-holds-for-this-arm-ON-THE-FIRST-BUILD-with-STAGE90_EXTRA_CFLAGS-DSTAGE90_XNU_ENTRY-1-at-line-5
+set=armed-storage-b7e5a18f sha256=08520c291f2c171610de0ba60853acf11fb6a05210b272ebe1dcb4310d92803d bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-b7e5a18f sha256=86a9a55eda94bc01f487f4ed7dc4393d7083f64bb1674e79e3e21e6182a14473 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-b7e5a18f sha256=b7e5a18f35ebfa7a7f1d1b411bac405ecdbb7490875ebf17c6126f93be5efc5d bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-this-is-the-STORAGE_PROBE-19-entry-the-8-hex-of-this-hash-is-the-sets-name-and-its-SIZE-IS-BYTE-IDENTICAL-to-the-pressed-rung-19-arm-5552764-so-the-SEAM-CONSTANT-DID-NOT-MOVE-it-carries-st_cmd3_noresp-calling-st_send_command-with-opcode-3-argument-0x00010000-and-flags-MMC_RSP_NONE-and-it-carries-NO-rung-15-key-and-NO-st_set_relative_addr
+set=armed-storage-b7e5a18f sha256=c1c7e664ee1632bc1558811346a7cf3b57616b5373a8985ca72504366acc7830 bytes=6732272 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-b7e5a18f sha256=22f97a69de9b0652de5b25e01c96c7bb8b92c78ca3f90ea1cf1d74720c9f9303 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-by-its-hash-the-gate-refuses-a-record-whose-hash-is-not-the-entry-bin-it-is-about
+set=armed-storage-b7e5a18f sha256=39e201d60763b1b35ac3a8bec6961f10c69b42f5a220315effc409e07f906f2f bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-23-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match
+set=armed-storage-b7e5a18f sha256=94c9422ce088563f319cd26073d76bf598bc68ebe89d4b3fbbd7f7c257f5675b bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-b7e5a18f sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
