@@ -3350,3 +3350,75 @@ set=armed-storage-enable-953ad0f6 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27
 #
 # Pre-registration: docs/experiments/experiment-733-the-rung-15-press-the-enable-was-the-mask-and-the-pair-that-was-not.md
 # Pressed? YES - 2026-09-26 10:12:21-10:13:31 UTC, runner exit 0, 70 s. **THE LAST PRESS IS THIS ONE.**
+
+# 734: THE ARM THIS SET IS - rung 16 by the ordinal every commit subject counts, `STAGE90_XNU_STORAGE_PROBE=15`
+# by the value this ladder counts - AND IT ANSWERS 733's FAILED PREDICTION BY CHANGING ONE VARIABLE.
+#
+# **The arm, in one sentence**: the same ONE-bit store to `INT_ENABLE 0x34` (`SDHCI_INT_RESPONSE`) that
+# rungs 13 and 14 make, taken a second time in this ladder at the one moment that differs from theirs in
+# exactly the variable the question needs - `st_quiet_enable_probe`, called from `entry_storage_probe`
+# immediately BEFORE `st_cmd_path()` and after rung 9's wait, on a block that is in SDHCI mode, powered and
+# clocked and HAS NEVER CARRIED A COMMAND. It reads `INT_STATUS 0x30`, `INT_ENABLE 0x34` and
+# `SIGNAL_ENABLE 0x38` and publishes all three, writes `INT_ENABLE <- (read | RESPONSE)`, reads `INT_STATUS`
+# IMMEDIATELY (`_quiet_status_after`, this rung's answer), reads the enable back, writes it back to its
+# before-value, then reads `INT_STATUS` again and the enable again. `SIGNAL_ENABLE` is READ and NEVER
+# WRITTEN. TWO stores, both to `0x34`, the second the undo of the first; no new command, no
+# `POWER_CONTROL 0x29`, no GCC word, no `core_mem` word and no byte of the medium.
+#
+# **WHY, AND IT IS 733's OWN FAILED PREDICTION.** 733 pressed rung 14 and measured
+# `_int_status_before = 0x00000000` -> `_int_status_after = 0x00000001` across exactly one store to `0x34`,
+# while `_ena_status_post = 0` and `_int_status_before = 0` both read the register CLEAR - the same 0 -> 1
+# transition 730 read as *the enable revealed a completion*, on a register just read as clear twice. So that
+# pair does not separate (A) a write to `0x34` that makes `0x30`'s RESPONSE bit READ 1 from (B) a completion
+# the block was holding and re-latched when the enable returned - 726's sixth hypothesis, which 733 did NOT
+# put down. **(B) NEEDS A COMPLETION TO HAVE HAPPENED, AND THIS ARM RUNS WHERE NONE EVER HAS**: (B) predicts
+# `_quiet_status_after = 0` and (A) predicts `1`. **Either reading is an answer**, which is what makes this a
+# cheap rung: one store, its restore, and no new command class.
+#
+# **THE COUNTER-EVIDENCE THAT KEEPS (A) FROM BEING ASSUMED IS IN 733'S LOG**: with the enable standing from
+# before CMD0's send, CMD0's poll read `INT_STATUS = 0` for its first 538 samples (`_cmd0_any_polls = 0x21b`
+# against `_cmd0_inhibit_seen = 0x219`), so a naive *writing 0x34 always sets 0x30's bit 0* does not describe
+# the poll. `_quiet_status_after` beside `_cmd0_any_polls` is the pair that settles it.
+#
+# **The set's identity is its own argument and the name follows the rule**: `c9738417` is this set's own
+# `xnu_arm_entry.bin` sha256 prefix - the rule 16 of 16 prior `armed-storage-*` sets follow, and the one the
+# 732 block's first draft broke. The entry bin's SIZE is byte-identical to the pressed arm's (5,552,764), so
+# the seam constant did not move, and `stage90-build-config.txt` is BYTE-IDENTICAL to the pressed arm's
+# (`6c2b6038...`) - which is the owed config comparison of the 732 block, done by hand here and owed as a
+# check. **The build WAS run again for this arm** (entry once, payload once, each with the pressed arm's own
+# switch set read out of THIS record and with the config compared afterwards), the pressed arm was parked
+# and exported before either, and the entry image's own size is unchanged.
+#
+#
+# **AND PREPARING IT FOUND A DEFECT OF THE SAME CLASS ONE LEVEL UP.** The rung-10 (ff753a23), rung-11 (1c4d0d50)
+# and rung-14 (87fda503) consequence paragraphs in `tools/verify_press_ready.sh` were each written INSIDE the
+# `sw_on STAGE90_HW_WATCHDOG_SELFTEST` branch, where no storage arm reaches them - each anchored on the one
+# before it, and this arm's own rung-15 paragraph was the fourth - so FOUR CONSECUTIVE RUNGS PRINTED A
+# NARRATION WITH NO READING OF THEIR OWN IN IT, and row 4 said `ok`, because every other check that row makes
+# is about the arm's NAME, which was right in all four. The repair is structural rather than a move: one
+# statement per paragraph, `rung_para N "..."`, so the rung's value appears ONCE and the guard and the record
+# are the same occurrence, with `RUNG_HIT` as the reading; row 4 now parses THIS FILE's own `rung_para` call
+# sites (comments skipped) and refuses when the rung the arm carries is one of them and no call recorded it,
+# plus a value claimed twice, a parse that reads nothing at all while the rung is >= 3, and an unreadable
+# `$SELF`. Falsified four ways host-side: a nested paragraph -> FAIL naming `rung_para 15`; a duplicated call
+# site -> FAIL naming 15; the extractor's pattern broken -> FAIL naming the parse; the rung-12 park staged as
+# a live arm -> 5 of 5 ok (a rung with no paragraph of its own is not required to have one). **The fourth
+# exposed the check's own first bound**: `$wst =~ ^[3-9][0-9]*$` looks like "rung >= 3" and means "STARTS
+# WITH 3-9", so it was false for exactly rung 15 and the refusal printed NO FAIL in the one case it exists
+# for - the same silence class one level up - and it is `(( wst >= 3 ))` now. Readiness after the repair:
+# **5 of 5, exit 0**; rehearsal 38 ok / 0 failed; the park VERIFIED in the tree and in the export dir; the
+# seam constant re-derived read-only from `xnu_arm_entry_seam.dis` at 0x800492d8 -> 0x800492dc, did not move.
+# Pre-registration: docs/experiments/experiment-734-the-rung-16-pre-registration-the-quiet-block.md
+# Pressed? NO. This set is ARMED, NOT PRESSED. The last press is still 733's (2026-09-26 10:12:21-10:13:31 UTC,
+# exit 0, 70 s, capture rung15-enable-20260926-101331-last_kmsg.txt, 636,013 B).
+set=armed-storage-quiet-c9738417 sha256=41a3963b569def590e8b61d42b7b3ed0cc9d665c4db39779df30b22a73e8ae3b bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-15-entry-rung-16-with-the-QUIET-BLOCK-read-taken-before-any-command
+set=armed-storage-quiet-c9738417 sha256=efeab95095e871b68fe9fb0c6352f18682ddce14437001a46cb82b825515fb41 bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-15-entry
+set=armed-storage-quiet-c9738417 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-pressed-arm-BY-MEASUREMENT-and-that-is-the-owed-config-comparison-of-the-732-block-done-by-hand
+set=armed-storage-quiet-c9738417 sha256=d90290738ea969e185e863ce2b4765f156e1b4ed54171f0e23551833f1913559 bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-quiet-c9738417 sha256=1031aadd04e211cf4cfb814c068350833276eb5f49573e59c309b44d2f50ff79 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-quiet-c9738417 sha256=c9738417e6a4f1954d6ad81ec735ebc90116c294a149d7fec28721bd03ef44d7 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-this-is-the-STORAGE_PROBE-15-entry-the-8-hex-of-this-hash-is-the-sets-name-and-its-SIZE-IS-BYTE-IDENTICAL-to-the-pressed-arm-so-the-SEAM-CONSTANT-DID-NOT-MOVE
+set=armed-storage-quiet-c9738417 sha256=488b91863fa51fe0a8ff4dcc3981cc8992b2349add36ba7282bcd1be16a7520a bytes=6732216 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-quiet-c9738417 sha256=ca052ac3288b3d38155ac85edcdd8f56beed7403bd5aacd181808b2fa5016a6a bytes=900 file=xnu_arm_entry-config.txt role=entry-config-record-its-rung-line-reads-STAGE90_XNU_STORAGE_PROBE-15
+set=armed-storage-quiet-c9738417 sha256=bb087eb87f6330ad48af1f2de040cc66312bf5bf0ca48d1b7e1163c89f1e3526 bytes=2335 file=xnu_arm_entry-sources.txt role=entry-source-manifest
+set=armed-storage-quiet-c9738417 sha256=eebb1f2f801adfca2efa339954509f0baa4fff0ddc178d8c7c262269adbb2370 bytes=6051840 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
+set=armed-storage-quiet-c9738417 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-macho-UNCHANGED-since-the-press-and-regenerated-by-the-build-into-src-verbatim
