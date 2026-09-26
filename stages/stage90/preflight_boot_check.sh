@@ -592,9 +592,20 @@ actual_sha=$(sha256sum "$ENTRY_BIN" | awk '{ print $1 }')
 # section for the eMMC controller's megabyte (`0xF98`, both windows of 531 inside it) and reads six of its
 # registers behind a clock-gate interlock read out of a megabyte the image already maps. The variant
 # subset counts move from eleven to twelve, and the pair of counts in the converse check below moves with
-# them. What this key buys a reader is the one thing the arm's other keys cannot say: with it at 1 the run
+# them. ~~What this key buys a reader is the one thing the arm's other keys cannot say: with it at 1 the run
 # dereferences a device block the image has never touched, and its log carries `xnu_live_storage_*` - and
-# with it at 0 the arm is 690's clock arm with an object in the link whose body compiles to nothing.
+# with it at 0 the arm is 690's clock arm with an object in the link whose body compiles to nothing.~~
+# **[STRUCK 727, and left visible rather than deleted - see the rung-key clause below.]** Those two
+# sentences read the key as a **boolean**, which is what it was when 692 wrote them, and it is not one: the
+# ladder ran to 12 on 2026-09-26 and the armed record says `STAGE90_XNU_STORAGE_PROBE=12`. So the one
+# narration an operator reads to learn what the storage arm will DO to the device said *"the read-only
+# probe"* about an arm that issues the driver's own commands and makes 32-bit stores to the controller.
+# The sentence was not wrong when written and no clause ever contradicted it - which is exactly why it
+# survived eleven rungs: a narration with no check behind it is not refuted by anything, and every build
+# that raised the rung raised the record's number while this prose stayed where it was. The repair is not
+# a longer sentence here (a restated rung list is a list that goes stale in silence, four times over in
+# this file: 683, 686, 690, 692) - it is the clause below, which READS the ladder's bound out of the one
+# line the compiler refuses on and refuses a record outside it.
 # 713: the twentieth name, and it is the same class a fourth time - one more name this gate PRINTS and no
 # clause moved. `STAGE90_XNU_PWR_WAIT_TICKS` is rung 9's bound: the statement `sdhci_set_power` makes
 # immediately after the power byte rung 7 writes (`sdhci.c:1371-1372`, `host->ops->check_power_status(host,
@@ -697,6 +708,85 @@ done
   || fail "$ENTRY_CFG defines$_vdup more than once: one value with two definitions, and a gate that reads either of them is a gate that compared neither"
 [[ -z $_vbad ]] \
   || fail "the record's variant key(s)$_vbad are not 0 or 1: these eight are switches, and a value that is neither is not an arm this clause can narrate - so the run would go out with a story about it that nothing supports"
+# **727: the two RUNG keys, which the key list above PRINTS and nothing read.** `STAGE90_XNU_STORAGE_PROBE`
+# is a rung (0..N) and `STAGE90_XNU_PWR_WAIT_TICKS` is a budget (1..19200000 ticks of the device's own
+# counter), so neither belongs in the `0|1` test above - and neither was in it, nor in any other clause.
+# What stood in for a check was the 692 sentence struck above: written when the key really was a boolean,
+# left reading `with it at 1 ... and with it at 0` through eleven more rungs. **The class is this project's
+# most-repeated one - one quantity, two readings, the prose taking one while the record means the other -
+# and the reason it survived is the reason it is worth a clause rather than a sentence: nothing ever
+# contradicted a comment.**
+#
+# **The bound is READ, not restated, and that is the repair rather than a style choice.** Both numbers have
+# exactly one definition - the `#if ... < lo || ... > hi` guard in `xnu_arm_boot/entry_storage.c`, the same
+# line the compiler refuses on when a build names a rung that does not exist - so this clause parses that
+# line. A rung the ladder grows is then a bound this gate picks up with no edit here, and a hand-kept copy
+# of the ladder (the shape 683/686/690/692 each added one more line to) stops being a thing this file has.
+#
+# **And a bound that cannot be read is a REFUSAL, not a pass.** A gate that answers "in range" when it
+# could not look has performed the check it claims to have performed - the file's own rule for a missing
+# dependency, and the same one `tools/check_storage_refs.py` is held to further down. The refusal names
+# which of the two it could not read, so the operator is not left guessing whether the ladder moved or the
+# file went missing.
+_rung_guard() {   # $1 = the key; prints "<lo> <hi>" out of that key's own `#if` guard, or nothing
+  awk -v k="$1" '
+    $0 ~ ("^#if " k " < [0-9]+ \\|\\| " k " > [0-9]+") {
+      match($0, /< [0-9]+/); lo = substr($0, RSTART + 2, RLENGTH - 2)
+      match($0, /> [0-9]+/); hi = substr($0, RSTART + 2, RLENGTH - 2)
+      print lo, hi
+      exit
+    }' "$STAGE_DIR/xnu_arm_boot/entry_storage.c" 2>/dev/null
+}
+RUNG_KEYS=(STAGE90_XNU_STORAGE_PROBE STAGE90_XNU_PWR_WAIT_TICKS)
+# **There is no `_rungmiss` here, and the reason is measured rather than stylistic.** The first draft had
+# one, and the sandbox refused to let it fire: deleting the `STAGE90_XNU_STORAGE_PROBE=` line from a copy
+# of the record and re-running gave the refusal from the `ENTRY_CFG_KEYS` loop ABOVE (`:627`, "has no
+# ... line"), never this clause's - because that loop reads every key with `awk` and fails on an empty
+# value, so a missing line and an empty one are both already gone by the time this runs. A second refusal
+# for the same state would be a branch no record can reach, which is the shape
+# [[a cell that cannot reach the branch its label names]] names, and the honest repair is to not write it
+# rather than to leave a check that looks like coverage. **Presence is that clause's; this one owns the
+# value.** Duplication is a different question and this clause does own it: the loop above tests
+# `grep -c` only for the eight switches, so a second `STAGE90_XNU_STORAGE_PROBE=` line reaches here.
+_rungdup=; _rungbad=; _rungnb=
+for _rk in "${RUNG_KEYS[@]}"
+do
+  case $(grep -c "^$_rk=" "$ENTRY_CFG") in
+    0|1) ;;
+    *) _rungdup="$_rungdup $_rk" ; continue ;;
+  esac
+  _rv=$(awk -F= -v k="$_rk" '$1 == k { print $2 }' "$ENTRY_CFG")
+  _rg=$(_rung_guard "$_rk")
+  if [[ -z $_rg ]]; then _rungnb="$_rungnb $_rk" ; continue ; fi
+  _rlo=${_rg% *}; _rhi=${_rg#* }
+  case $_rv in
+    ''|*[!0-9]*) _rungbad="$_rungbad $_rk=$_rv (not a whole number)" ;;
+    *) (( _rv >= _rlo && _rv <= _rhi )) \
+         || _rungbad="$_rungbad $_rk=$_rv (outside [$_rlo, $_rhi], the bound its own guard declares)" ;;
+  esac
+done
+[[ -z $_rungdup ]] \
+  || fail "$ENTRY_CFG defines$_rungdup more than once: one rung with two definitions, and a gate that reads either of them is a gate that compared neither"
+[[ -z $_rungnb ]] \
+  || fail "this gate could not read the ladder's own bound for$_rungnb out of xnu_arm_boot/entry_storage.c, so it cannot say whether the record's value is a rung that exists - and a bound it cannot read is not a bound it may assume. Check that the file is present and that its \`#if <KEY> < lo || <KEY> > hi\` guard is still one line; if the guard was reformatted, this clause has to be taught the new shape rather than left answering 'in range' from a parse that found nothing"
+[[ -z $_rungbad ]] \
+  || fail "the record's rung key(s)$_rungbad - and the bound is not this gate's opinion: it is the guard in xnu_arm_boot/entry_storage.c that refuses the build, so a record outside it describes either a rung that does not exist or a value that is not a number, and the run would go out with a story about the storage line that nothing supports. Read the ladder's own \`#error\` at that guard - it spells out every rung - and correct the record, or rebuild the entry image with the rung this arm really needs"
+# **And the rung is PRINTED, because a checked value the operator cannot see is a check the operator cannot
+# read.** The path and the bound are named here so that the sentence an operator takes to the log is the
+# gate's own reading of the record and not a rung number they have to remember the meaning of: the ladder
+# itself is described in exactly one place, the `#error` this clause just parsed, and this line says so
+# instead of restating it.
+echo "== how far up the storage line this arm goes, read against the ladder's own guard =="
+for _rk in "${RUNG_KEYS[@]}"
+do
+  _rv=$(awk -F= -v k="$_rk" '$1 == k { print $2 }' "$ENTRY_CFG")
+  _rg=$(_rung_guard "$_rk")
+  [[ -n $_rg ]] || continue
+  printf '  %s=%s  (within [%s, %s], the bound its own `#if` guard declares in xnu_arm_boot/entry_storage.c;\n' \
+         "$_rk" "$_rv" "${_rg% *}" "${_rg#* }"
+  printf '      what that number DOES is spelled out at that guard, in the `#error` the build refuses on -\n'
+  printf '      this gate prints the value and the bound and deliberately does not restate the rungs)\n'
+done
 # **And the pair, because the two seam switches are one seam's two arms and a record can name both.** The
 # build refuses that pair (`build_entry.sh` exits on it and `entry_trace.c` `#error`s), so an image with
 # both set has never been built and cannot be - which makes a record carrying both a record about *no*
