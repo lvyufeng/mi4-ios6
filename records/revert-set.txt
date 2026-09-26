@@ -4461,3 +4461,97 @@ set=armed-storage-b7e5a18f sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # run readiness. This one fires on every `make check`, which is every step. Neither of them makes the
 # mistake impossible: `./scripts/build.sh` still defaults `STAGE90_XNU_ENTRY` to `0u`, and the durable fix
 # for that is the build's own default and not a check on its output.
+
+# ================================================================================================
+# 745: THE OS IS OBSERVED REACHING USER MODE, AND THE SENTENCE THIS RECORD REPEATS IS WRONG IN ONE CLAUSE.
+# ================================================================================================
+# **NO DEVICE ACTION AND NO BUILD.** This block is a reading of the capture 742's press already archived
+# (`out/stage90/captures/rung19-rca-20260926-180922-last_kmsg.txt`) plus the arm's own ELF and sources.
+# `out/` is untouched; rung 20 remains ARMED AND NOT PRESSED.
+#
+# EVERY BLOCK IN THIS RECORD ENDS WITH *"the goal is still NOT met: no storage, no filesystem, the OS not
+# observed reaching userland"*. **The first two clauses are true. The third is FALSE AS WRITTEN**, and it
+# has been false since 520: the OS reaches user mode, a user process runs a complete syscall cycle, and a
+# driver answers a read made from it. Measured in 742's capture, in the runner's OWN goal criterion (*user
+# mode reached, and a driver answering*): `BSD root: md0, major 2, minor 0`;
+# `mini4: the OS starts the process at 0x10e0`; `mini4: the AST is done -- pid 1's thread is at 0x10e0 for
+# user mode (sp 0x101efc)`; `_open_seq=0x1 _open_error=0x0 _open_fd=0x0` (the driver's open answered);
+# `_open_seq=0x2 _open_error=0x2` (the control open answered the ENOENT devfs returns for a name it has no
+# node for); `_read_nbytes=0x4 _read_ret_lo=0x4` with **`_read_word_before=0x00102000` ->
+# `_read_word_after=0xfeedface`** (a driver's `uiomove64` moved `MH_MAGIC` into a user page);
+# `_getpid_value=0x1`; **`_exit_pid=0x2 _exit_rval=0x3`** (a SECOND process exited) and
+# `_wait_pid=0x2 _wait_status=0x300` (pid 1 reaped it); `_ast_calls=0x2 _ast_done_seq=0x2
+# _ast_sp=0x00101efc` (the kernel took a user thread's AST and put it back). The idle path was then entered
+# **60,037 time(s)** and `platform_cache_idle_enter` entered once and RETURNED.
+#
+# **AND WHAT ENDS THE RUN IS THE ARM'S OWN CLOCK, NOT THE OS - verified instruction for instruction.** The
+# capture's panic is `panic(cpu 0 caller 0x80457668): kernel abort type 4: fault_type=0x3,
+# fault_addr=0xfa0065c`, and every address in it resolves into the run's deliberate ending:
+# `pc: 0x8047e488` = **`entry_seam_end_run`**, `lr: 0x8047e5bc` = **`entry_post_clock`**,
+# `caller 0x80457668` = `sleh_abort`, `sp: 0x80557ec8` = the seam's own stack. The disassembly agrees with
+# the dump register for register:
+#     8047e5b8: bl  8047e47c <entry_seam_end_run>   (entry_post_clock's call; lr becomes 0x8047e5bc)
+#     8047e47c: movw r3, #21761  ; 0x5501            )
+#     8047e480: mov  r2, #262144000 ; 0xfa00000      ) r2 = 0x0fa00000 = MSM_IMEM_BASE_PHYS
+#     8047e484: movt r3, #30822  ; 0x7866            ) r3 = 0x78665501 = STAGE90_ENTRY_RESET_REASON_NORMAL
+#     8047e488: str  r3, [r2, #1628] ; 0x65c         <- far 0x0fa0065c, fsr 0x00000805
+# so the dump's `r2: 0x0fa00000  r3: 0x78665501  far: 0x0fa0065c  fsr: 0x00000805` matches exactly, and
+# `fsr` bit 11 says **WRITE** with bits[3:0] = 5 = **translation fault, section** - the `0x0fa` megabyte is
+# not mapped in the context the entry image's reset tail runs in. The address is
+# `STAGE90_ENTRY_RESET_REASON_ADDR` (`entry_reset.h:33`) and the value is
+# `STAGE90_ENTRY_RESET_REASON_NORMAL` (`entry_reset.h:35`): **the store that faults is the one that writes
+# "the boot got to its normal end", into an unmapped megabyte.** That store and its sibling at
+# `0xfc4ab000` are already this project's record ([[mi4-the-run-ends-at-entry-epilogue]]); what is new is
+# that the CALLER here is the arm's own deadline clock.
+#
+# **AND THE DEADLINE CLOSES ARITHMETICALLY.** `_seam_post_end_ticks = 0x06ddd000` (115,200,000) at
+# `_post_cntfrq = 0x0124f800` (19,200,000 Hz) is **6.0000 s**; `_post_elapsed` climbs
+# 0 -> 1,947,393 (0.1014 s) -> 38,717,341 (2.0165 s) -> **116,090,109 (6.0464 s)**, and 6.0464 >= 6.0000
+# **crosses**; `_post_end_calls = 0x00000006` is published on the pass that ends the run. **The two OTHER
+# ending switches read `_seam_end_run = 0x00000000` and `_seam_post_end_run = 0x00000000`** - which is how
+# the deadline is known to be the instrument responsible rather than inferred. So the sequence is: boot ->
+# user mode -> the fixture's syscalls -> ~60,000 idle passes -> the arm's own 6-second deadline ->
+# `entry_seam_end_run` -> the unmapped `RESTART_REASON` store -> `sleh_abort` -> panic -> `MACH Reboot`.
+# **THE `kernel abort type 4` THAT READS LIKE A CRASH IS THE INSTRUMENT.**
+#
+# **IT IS STILL NOT THE GOAL, AND THE REASON IS A DIFFERENT CLAUSE.** The driver that answers is
+# `memdev.c`, which `entry_trace.c:1726` names as what serves `open("/dev/rmd0")`, and the root is
+# `md0` - **a RAM disk.** So *no storage, no filesystem* stands exactly as written. And `/sbin/launchd`
+# **FAILED** (`load_init_program: failed loading /usr/local/sbin/launchd.development: errno 2`), so pid 1
+# is **this project's own fixture** (`stage90_fixture.macho`, 1,744 B), not the OS's init - the honest
+# sentence is *the kernel reaches user mode and runs a user process*, and the OS is not usable.
+#
+# **THE RECORD USES A DIFFERENT DEFINITION AND NEVER WROTE THE DIFFERENCE DOWN WHERE THE GOAL IS SCORED.**
+# The runner's own goal block calls all of the above **"a FLOOR, not progress"**: *all of it is in 520 and
+# 533 - the whole userland phase happens before the death - so a run has to LOSE these readings to be a
+# regression, and having them is not evidence that the boot got further than any boot has*; and at its
+# foot, *"this criterion does not decide whether the machine stayed up ... the ceiling is the arm's own
+# clause, and the run that matters is the one whose log has both."* So the project's goal is **user mode
+# AND the machine stays up**, and **it is the SECOND half that is unmet and not the first.** An operator
+# reading *"the OS not observed reaching userland"* will look for a failure in the wrong place. **The
+# precise sentence is: user mode is reached and a driver answers, in every capture since 520; what has
+# never been observed is the machine staying up, and the reason is below.**
+#
+# **AND THAT HALF IS A DESIGN QUESTION, NOT A RUNG.** Every run is ended by one of TWO instruments and
+# neither of them is the OS: (1) **the entry-side deadline** (`STAGE90_XNU_POST_END_TICKS`, which this arm
+# carries as 115200000 = 6.0000 s and which this block measures FIRING); (2) **the payload's own hardware
+# watchdog**, armed before the jump and - per this record's 606 clause - the net that caps a run of this
+# arm at **28 s** (25 s bark + 3 s bite gap) *on a successful run too*. **And the second exists because the
+# operator's standing constraint requires it**: 「一定要保证不要让设备彻底死机或者变砖」 is implemented, in
+# this tree, by the payload arming a watchdog it cannot later disarm. Observing *"the OS stays up"* needs
+# both off, and the one that would have to come off is **the exact net that makes the no-brick property
+# true.** That is the one place in this project where the goal and the safety constraint are in direct
+# tension, and this block is the first place it is stated in one sentence. **The two sides are separately
+# switchable** (`STAGE90_XNU_POST_END_TICKS` / `SEAM_END_RUN` / `POST_END_RUN` on the entry side, the
+# watchdog's own arm/disarm on the payload side), so a future arm with **the entry deadline off and the
+# hardware watchdog on** would buy the longest window the constraint allows - it would still not read
+# *"the OS stays up"*, because the watchdog still ends it at 28 s, but it would read how far past the
+# deadline the boot gets. **NO SUCH ARM EXISTS AND THIS BLOCK ARMS NOTHING.**
+#
+# NO PRESS IS OWED, NO FIRER IS ARMED, and the press path is the two commands readiness prints, run by
+# hand once each. Rung 20 (`armed-storage-b7e5a18f`) is ARMED AND NOT PRESSED, and the ladder's own next
+# step is unmoved.
+#
+# The goal is still NOT met: **no storage, no filesystem, and the machine never observed staying up** -
+# which is a sharper and a truer sentence than the one this record has been repeating. TWRP-to-storage
+# stays withheld.
