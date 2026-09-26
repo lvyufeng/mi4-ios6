@@ -3830,3 +3830,94 @@ set=armed-storage-rb-05645d1a sha256=1cabfad6b82db462f0fe806086602a35214ff461491
 set=armed-storage-rb-05645d1a sha256=1a41532767d2fb1a15b9913d1ad23768217fd95acb93eb1ebe2a43fce9f2e4ac bytes=2335 file=xnu_arm_entry-sources.txt role=entry-source-manifest-23-files
 set=armed-storage-rb-05645d1a sha256=e27fa0abf9f37ece0b62fae04619e358e36f572383cdc24ea2038b6a70a250b8 bytes=6051840 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
 set=armed-storage-rb-05645d1a sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=the-fixture-macho-UNCHANGED-since-the-press-and-regenerated-by-the-build-into-src-verbatim
+
+# ================================================================================================
+# 740: THIS SET WAS PRESSED. **THE RESPONSE REGISTER WAS EMPTY BEFORE ANY COMMAND, AND THE LADDER'S
+# EVIDENCE SURVIVES.** Read this block as the answer to the pre-registration above; it supersedes the
+# ARM/PRESSED lines and nothing else in it.
+# ================================================================================================
+# PRESSED 2026-09-26 15:58:25-15:59:37 UTC, **RUNNER EXIT=0** (returned and captured, 72 s end to end
+# from the gate log's own mtime to the captured log's; the runner's own line is "the device came back
+# 29s after this run called `fastboot boot`"). Readiness 5/5 (exit 0, run from the same tree immediately
+# before the fire), ONE gate (exit 0, **594** stdout lines) and EXACTLY ONE runner, both under
+# `--allow-xnu-entry --expect-arm=armed-storage-rb-05645d1a`. One non-persistent `fastboot boot`, serial
+# 4a2fe00b; the neighbour 33e80afe was off BOTH lists at fire time (adb: [4a2fe00b device], fastboot: [])
+# and was never touched; no stray runner, gate or watcher was running. Capture
+# `out/stage90/captures/rung18-rb-20260926-155937-last_kmsg.txt`, **642,375 B, sha256
+# `eb641e07223b74cad7651b841017fce399f517de890a517775bb5bde47769201`**, archived by hand with the gate log,
+# the run log and the combined press log under the same timestamp (out/ is gitignored and the runner does
+# not archive). Nothing was flashed and no byte of the medium moved. **No firer was armed: the press path
+# is the two commands readiness prints, run directly once each (730's finding).**
+#
+# THE ANSWER: **`_rb_resp_zero = 0x00000001` - `RESPONSE 0x10..0x1C` held NOTHING AT ALL before any
+# command had ever been on the block's bus.** All four raw words read zero (`_rb_raw0` `+0x1C`,
+# `_rb_raw1` `+0x18`, `_rb_raw2` `+0x14`, `_rb_raw3` `+0x10`), all four driver-derived words read zero,
+# and `_rb_calls = _rb_done = 0x1` says the body ran. **So the `0x40ff8080` the SAME log reads after CMD2
+# is not a reset default that was sitting in the register file**: this log carries the whole movement,
+# `0 -> 0 -> 0x40ff8080` - zero before any command, `_cmd0_resp = 0x0` with `_cmd0_resp_read = 0x1` after
+# CMD0, `_cmd1_resp = 0x40ff8080` with `_cmd1_resp_read = 0x1` after CMD1 - so a command MOVED this
+# register. **733's reading of `0x40ff8080` as CMD1's response survives, and 738's doubt about the
+# ladder's one piece of evidence that a card exists is RETIRED**, which is exactly what the
+# pre-registration said this outcome would buy. This is 738 section 4's own sentence discharged: "a read of
+# `RESPONSE` on a block with no command in its past would settle it".
+#
+# THE OTHER TWELVE PRE-COMMAND CELLS CAME BACK AS PRE-REGISTERED, one for one:
+#   `_rb_present    = 0x01f80000`   the controller idle, no command in flight (739 predicted exactly this)
+#   `_rb_inhibit    = 0x00000000`   CMD_INHIBIT clear at the pre-command moment
+#   `_rb_cmd_word   = 0x00000000`   the block's own copy of the last command word: nothing has carried
+#   `_rb_int_status = 0x00000000`
+#   `_rb_int_enable = 0x00000000`   <== **BIT 15 CLEAR**: nothing above the gate has written 0x34
+#   `_rb_sig_enable = 0x00000000`   read and never written, at every rung
+# `_rb_int_enable = 0` IS THE SAFETY READING AND IT IS A READING RATHER THAN A PROMISE. 736's press is the
+# measurement of what a store above `st_cmd_path`'s gate costs - rung 15's write set bit 15 of
+# `INT_ENABLE 0x34`, the gate read `0x00008000` and NO command went on the bus. This rung's body stores
+# nothing, bit 15 is clear at the pre-command moment, and the gate below read `_cmd_int_enable = 0x0` and
+# let the command path run (`_cmd_sent = 0x2`). **The read-only design is verified in the bytes of a real
+# run, not only by the build clause `xnu_entry_739`.**
+#
+# AND THE ORDERING THE BUILD CLAUSE ASSERTS IS VISIBLE IN THE LOG'S OWN LINE NUMBERS: the twelve `_rb_*`
+# cells are at lines 8673-8689 and `_cmd_calls` is at 8690, so the read-only body published all twelve and
+# the command path was entered immediately after. Had the call been placed below `st_cmd_path`, every
+# `_rb_*` value would have been a statement about a block that had already answered three commands and
+# `_rb_resp_zero` could not have meant what its name says.
+#
+# THE EXCLUSION HELD AND THE RUNG BELOW IS INHERITED UNCHANGED:
+#   `_cmd_int_enable = 0x00000000`   NOT 0x00008000
+#   `_cmd_gate_kind  = 0x00000000`   gate 1 did not fire
+#   `_cmd_refused    = 0x00000000`
+#   `_cmd_sent       = 0x00000002`   two commands, not zero
+#   `_cmd_ps_after   = 0x01f80000`   the controller idle, unchanged
+#   `_quiet_*` keys  = 0 occurrences  rung 15's body is not in this image
+# `_cid_*` reproduced 738 one for one: `_cid_word = _cid_word_read = 0x0209`, `_cid_op = 0x2`,
+# `_cid_flags = 0x7`, `_cid_sent = 0x1`, `_cid_gated = 0x0`, `_cid_complete = 0x0`,
+# `_cid_status_any = 0x0`, `_cid_err = 0x0`, `_cid_polls = 0x4da800`,
+# `_cid_inhibit_seen = 0x0`, `_cid_raw0 = 0x0040ff80`, `_cid_raw1 = 0x80000000`,
+# `_cid_raw2 = _cid_raw3 = 0x0`, `_cid_resp0 = 0x40ff8080`, `_cid_resp1..3 = 0x0`. `_cmd*` likewise:
+# `_cmd0_status_any = _cmd0_complete = 0x1`, `_cmd0_inhibit_seen = 0x219`, `_cmd0_polls = 0x21a`,
+# `_cmd1_resp = 0x40ff8080`. **One difference was looked for and is NOT one**:
+# `_cmd1_inhibit_last = 0x00f80000` against `0x01f80000` for CMD0 and CMD2 - but 738's own log reads
+# `0x00f80000` in that cell, so it is a reproduced property of the CMD1 window and not this arm's news
+# (738 section 5's discipline: an unremarked difference between two logs is how a real one gets missed).
+#
+# THE ENDING IS UNMOVED AND THE PRE-REGISTERED FAILURE MODE DID NOT HAPPEN A FOURTH TIME:
+# `_seam_post_end_ticks = 0x06ddd000`, `_seam_sctlr = 0x30c57879`, `_seam_lr = 0x800492dc`,
+# `_sleh_storm = 9`, `_post_cntfrq = 0x0124f800`, `_post_end_calls = 0x6` (738's own value), the seam's
+# four words the clean pair (`_seam_a0 = _seam_b0 = 0x800b5648`, `_seam_a1 = _seam_b1 = 0x8047fb04`),
+# the kernel's own `No errors detected`, and **0 occurrences of any `_irq_other_*` key** - SIGNAL_ENABLE
+# was read and never written, the SPI 123 -> intid 155 line never rose, and the run did not end at the
+# dispatcher. The runner's verdict is **14 PASS / 2 FAIL**, and both FAILs are the one known storage-arm
+# criterion (`seam_sp=0x80557ec8 is not sleh_sp-8`, which 694, 697, 705, rungs 12, 13, 16 and 17 all
+# carry), so neither is about this arm.
+#
+# WHAT THE NEXT RUNG IS, NOW THAT BOTH OF 738 section 7's DECIDING FACTS ARE IN HAND: the register IS a
+# witness, so the push from CMD1 does NOT have to be re-derived; and **`CMD_INHIBIT` is the one thing
+# still unexplained about CMD1 and CMD2** - not as a doubt about the response word, which is retired, but
+# as the next question of its own: a command whose word reads back and whose response register moved, and
+# whose inhibit was never observed, where CMD0's own inhibit was seen 537 times in the same window. CMD2's
+# 136-bit read still returned CMD1's own word rather than a CID, so the CID is not in hand and the
+# driver's continuation is the next rung: CMD3 `mmc_set_relative_addr`, CMD9 `SEND_CSD`, CMD7
+# `SELECT_CARD`, then CMD17 at LBA 1, where 531 section 9's self-verifying reading lives (the eight bytes
+# `EFI PART`, or an MBR ending `55 aa`) - **carrying the inhibit reading beside the response reading**.
+#
+# The goal is still NOT met: no storage, no filesystem, the OS not observed reaching userland, so
+# TWRP-to-storage stays withheld (the clause is conditioned on "if the OS can already get in").
