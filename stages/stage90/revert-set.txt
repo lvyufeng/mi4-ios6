@@ -2904,3 +2904,20 @@ set=armed-storage-instant-e8dc64f7 sha256=fdcdc15ab9c4d0ae9b1e722ff905637efa2b32
 set=armed-storage-instant-e8dc64f7 sha256=6186e9720b83ce98b3350dd5093eb17205bd11f300539efcef7737cbf577f0f5 bytes=2348 file=xnu_arm_entry-sources.txt role=entry-source-manifest
 set=armed-storage-instant-e8dc64f7 sha256=adafa0750daaa9dfbfbe394e577faa1f9145d9b0264c26c0d840a4a488927dfd bytes=6051840 file=stage90.img role=android-boot-image-not-loaded-by-the-boot-but-named-by-the-manifest-the-gate-verifies
 set=armed-storage-instant-e8dc64f7 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=fixture-macho-manifest-member-identical-in-this-arm-and-in-the-others
+
+# **PRESSED 2026-09-26 03:30:16-03:32:00, EXIT 0** (returned and captured, 74 s end to end; readiness
+# 5/5 exit 0, one gate exit 0 / 574 lines, exactly one runner `--expect-arm=armed-storage-instant-e8dc64f7`;
+# firer `/tmp/g668/press-on-clear.v5.sh`, budget 600 s, `done. gate=0 runner=0` -> no firer is armed). The
+# capture is `out/stage90/captures/rung13-instant-20260926-033016-last_kmsg.txt`, 625,475 B, sha256
+# `3aacabdc...`. **THE ARM'S ANSWER TURNS RUNG 12's "NOTHING LATCHED" INTO A PRECISE STATEMENT, AND ALL
+# FIVE OF 724 SECTION 2'S HYPOTHESES ARE REFUTED**: the block HOLDS the driver's own word
+# (`_cmd0_word_read=0x0000`, read out of the block), it STARTED the command (`_cmd0_inhibit_after=1`),
+# the command was IN PROGRESS on the CMD line (`_cmd0_inhibit_seen=0x21b` = 539 of the poll's first 1024
+# samples) and it FINISHED (`_cmd0_inhibit_last=0x01f80000`, bit 0 clear, after ~126 us) - **and
+# `_cmd0_status_any=0x00000000`, the FIRST NON-ZERO VALUE OF THE WHOLE REGISTER, over 5,088,256 polls and
+# 23,040,340 ticks.** `_cmd0_resp_read=1` with `_cmd0_resp=0` makes that zero a reading rather than an
+# absence, and `_cmd_gated=1` with zero `_cmd1_*` keys. The census refutes the other two from the
+# command's own moment: `_cmd2_power_control=0x0b` with `_cmd2_power_bus=1`, `_cmd2_clock_control=0xe047`
+# with CARD_EN set, and `_cmd2_rcg_cmd=0` (bit 31 clear = root ENABLED) with src 5 / div 7 = 200 MHz.
+# The record is `docs/experiments/experiment-726-the-rung-13-press-the-command-ran-and-the-status-register-said-nothing.md`.
+# **THE BYTES BELOW ARE UNCHANGED BY THE PRESS**: this set is still the arm that was sent.
