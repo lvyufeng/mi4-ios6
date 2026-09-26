@@ -2313,3 +2313,85 @@ set=armed-storage-pwrwait-8b824cac sha256=52bc9c357068b791f777bb9abd2e879fa5b0b2
 # bytes), row 2 (the park verifies against the record) and row 5 (a press would be caught: `adb` lists
 # `4a2fe00b` as `device`) are green. **The arm is armed, readable and correct; the gate is the only thing
 # standing between it and a press.**
+
+# ---------------------------------------------------------------------------------------------------
+# 713: THE RUNG-9 ARM PRESSED - `armed-storage-pwrwait-8b824cac`. THE POLL SPENT ITS WHOLE BOUND, THE
+# COMPLETION ARRIVED 60 us LATE, AND THE CONTEXT THAT WAITED HAD IRQs MASKED.
+#
+# Readiness 5 of 5, exit 0, at 00:31:01; ONE gate (exit 0, 578 stdout lines) at 00:31:31; EXACTLY ONE
+# runner (`--expect-arm=armed-storage-pwrwait-8b824cac`) **EXIT 0** - returned and captured - at
+# 00:32:39; capture 625,346 B `816b792244f726b9...` archived by hand as
+# `out/stage90/captures/rung9-pwrwait-20260926-003122-{last_kmsg,press,gate,run}`; firer
+# `/tmp/g668/press-on-clear.v5.sh` (`7f23cae5...`) with `done. gate=0 runner=0`, so NO FIRER IS ARMED.
+# The device came back on its own: `adb devices` lists `4a2fe00b device`, and nothing was flashed
+# (`fastboot boot` only; `33e80afe` was off the bus for the whole press).
+#
+# **THE RUNG'S OWN ANSWER, AND IT IS A REFUTATION OF THE ARM'S DESIGN RATHER THAN OF THE CONTROLLER.**
+# All nineteen `_wait_*` cells are present:
+#   `_wait_req=0x2` (REQ_BUS_ON, the only request), `_wait_bound=0x001d4c00` = 1,920,000 ticks =
+#   100.000 ms (the switch, in the linked artifact, as the build clause asserts).
+#   `_wait_reset=0` - the vendor's already-satisfied branch was NOT taken, so the poll ran.
+#   `_wait_ctl_before=0x00` and `_wait_ctl_after=0x00` - **the controller's `CORE_PWRCTL_CTL` never
+#   carried `BUS_SUCCESS`, before the wait or after it**. `_wait_timeout=1`.
+#   `_wait_polls=0x00068800` = 428,032 = 418 inner batches of 1,024 reads; `_wait_ticks=0x001d50aa`
+#   = 1,921,194 ticks = 100.062 ms, i.e. the bound crossed mid-batch (overshoot 1,194 ticks = 62.2 us),
+#   at 4.49 ticks per device read.
+#   **`_wait_cpsr=0x80000093` - SVC mode, `I` SET (IRQs MASKED), `F` clear.** This is the cell that
+#   explains the rung.
+#   `_wait_done_before=0`, `_wait_state_before=0`, `_wait_io_before=0` and their `_after` twins all 0:
+#   the handler's published fields were never filled, and `_wait_done=0` with `_wait_ctl_after=0x00` is
+#   the two-memory pair AGREEING - the device-side and image-side readings both say the handshake did
+#   not complete, and neither one is a cache-shadowed false negative.
+#   `_wait_calls=0x0` at the wait's own end.
+# **AND THE HANDLER RAN 60 us AFTER THE POLL GAVE UP.** `_wait_t0=0x0748bc55`; the wait's end is
+# `t0 + 0x1d50aa`; the handler's own timestamp `_pwr_irq_at=0x07661180` is **1,153 ticks = 60.05 us
+# after that end** - and `_post_t0` (the ending's clock) is only 217 ticks = 11.3 us after it. The
+# count keys fill in the same story from the other side: `_pwr_irq_calls_once_before_byte=0x0` (the
+# byte raised the line), `_pwr_irq_calls_probe_end=0x0` (the handler had STILL not run at the probe's
+# tail - the wait is inside the probe), and `_pwr_irq_calls=0x1` in the final log (it ran exactly
+# once, after all of it). `_pwr_irq_ctl_before=0x0` -> `_pwr_irq_ctl_after=0x1` with
+# `_pwr_irq_status=0x02` and `_pwr_irq_ack=0x01`: when it finally ran it did the rung-8 acknowledge
+# correctly, and no `_irq_other_*` key appears, so the line still has its owner.
+#
+# **SO THE RUNG'S PREMISE IS FALSIFIED BY ITS OWN MEASUREMENT: A BOUNDED SPIN IN THIS CONTEXT CANNOT
+# OBSERVE THIS COMPLETION AT ALL.** The completion rung 9 waits for is `BUS_SUCCESS` in
+# `CORE_PWRCTL_CTL`, and that bit is written BY THE INTERRUPT HANDLER. The waiter runs with `I` set,
+# so the handler cannot be taken while it spins; the handler is delivered 60 us after the mask lifts,
+# i.e. as soon as it can be. **The vendor's own `wait_for_completion` works precisely because it
+# SLEEPS - it unmasks - and this arm replaced a sleep with a spin.** That is the finding, and it
+# reframes rung 9 rather than grading it: the port kept the predicate and the ack and lost the one
+# property that makes the wait satisfiable in a masked context.
+#
+# **The two readings this press cannot separate, named rather than chosen.** (a) The IRQ was pending
+# throughout the spin and was delivered when the mask lifted; (b) the controller really did take about
+# 100 ms to acknowledge, and would have been caught by a longer bound. The evidence favours (a) -
+# `_wait_cpsr`'s `I`, plus a handler delay that tracks the END of the spin rather than a device timer -
+# but one run cannot separate a 100 ms device latency from a 100 ms masked window, because this arm's
+# bound and its mask have the same length by construction. The distinction is worth a rung: a SECOND
+# wait taken immediately after the first, with the IRQ no longer pending, returns at once under BOTH
+# readings; what separates them is a wait that unmasks (or yields) DURING the spin, or a source of
+# completion that is not the interrupt at all.
+#
+# **AND 711 SECTION 3 IS ANSWERED, ONE RUN INSTEAD OF TWO.** 711 could not tell whether
+# `CLOCK_CONTROL 0x2C` bit 1 was a race or the machine's state, because it had two boots and no
+# before/after inside either. This arm reads the same register THREE times in one run - rung 7's pair
+# around the power byte and the waiter's pair around the wait: `_pwr_cc_before=0xE045` ->
+# `_pwr_cc_after=0xE047` -> `_wait_cc_before=0xE047` -> `_wait_cc_after=0xE047`. **The bit is set BY THE
+# POWER BYTE'S OWN STORE and is STABLE across a hundred milliseconds afterwards**: not a race, and
+# deterministic. It also completes the correction of 711's one unpredicted cell - 709 read `0xE045` on
+# both sides because 709's arm (rung 6) did not write the byte at all.
+#
+# **THE INHERITED CELLS ALL READ AS THEY DID ON THE PRESSED RUNG-8 ARM**, which is the check that this
+# arm changed only what it says it changed: `_storage_calls=1`, `_loads=6`, `_writes` published 0->4
+# through the mode sequence, `_rst_stores=1`, `_mode_bit_after=1`, `_gate=1`, `_bcr=0x0`,
+# `_cbcr=0x4ff1`, `_gcc_map=1`, `_map=1`, `_pwr_before=0x00` -> `_pwr_after=0x0b` with `_pwr_vdd=7`.
+# **The ending is unchanged and did not move**: `_post_end_calls=0x8` with `_post_elapsed=0x090f19e0`
+# = 7,915.9 ms at `_post_cntfrq=0x0124f800` = 19,200,000 Hz, i.e. the 690 clock fired on its own
+# schedule and the machine stayed up through it - so the wait cost the run 100 ms of a 6,000 ms
+# window and nothing else.
+#
+# **THE GOAL IS STILL NOT MET.** No command, no sector, no partition table, no mount, no driver beyond
+# the fixture - this rung's whole device act is two halfword reads and a poll of one byte, and its log
+# carries no `xnu_live_storage_*` key that names the medium. **TWRP-to-storage stays withheld.** What
+# this press buys is the one fact the next rung's design needs: the completion is interrupt-delivered
+# and the waiter's context masks interrupts.
