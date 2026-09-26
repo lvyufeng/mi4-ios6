@@ -50,7 +50,8 @@ list:
 	  if [ "$$n" = "$(notdir $(NEWEST))" ]; then mark=" <- current"; else mark=""; fi; \
 	  printf '  %-9s %3s files%s\n' "$$n" "$$(ls -1 $$d | wc -l)" "$$mark"; \
 	done
-	@echo "Archived (stage0 - stage84): tools/stage-archive.sh list"
+	@echo "Archived: stage85 - stage89 are under archive/stages/ (read-only history);"
+	@echo "          stage0  - stage84 live at the tag: tools/stage-archive.sh list"
 
 clean:
 	@for d in $(STAGES); do \

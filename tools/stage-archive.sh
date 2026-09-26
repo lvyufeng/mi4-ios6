@@ -7,6 +7,11 @@
 # that its build scripts keep working unchanged - they were written when every
 # stage lived at `<root>/stageN/`, so they resolve `../out`, `../external` and
 # `../tools` relative to that location. Delete the directory again afterwards.
+#
+# The snapshot-per-stage model was retired on 2026-09-26; the five snapshots that
+# were still in the working tree then (stage85 .. stage89) live under
+# `archive/stages/` and are NOT under the tag, so `list` reports them separately
+# and `show`/`diff` (which read the tag) do not apply to them.
 set -euo pipefail
 
 ARCHIVE_TAG=${STAGE_ARCHIVE_TAG:-stage-archive-base}
@@ -24,6 +29,11 @@ usage: tools/stage-archive.sh <command> [args]
 The archive tag defaults to `stage-archive-base` (override with
 STAGE_ARCHIVE_TAG). It points at the last commit where all 91 stage directories
 were present in the tree.
+
+Snapshots still kept in the working tree - archived from the retired
+snapshot-per-stage model - live under `archive/stages/` and are listed by
+`list` as well. They are not under the tag, so `show` and `diff` do not reach
+them; read them in place.
 EOF
 }
 
@@ -53,8 +63,16 @@ worktree_stage() {
   elif [[ -d $REPO_ROOT/stages/stage$1 ]]; then
     echo "$REPO_ROOT/stages/stage$1"
     return 0
+  elif [[ -d $REPO_ROOT/archive/stages/stage$1 ]]; then
+    echo "$REPO_ROOT/archive/stages/stage$1"
+    return 0
   fi
   return 1
+}
+
+# The snapshots kept in the working tree under archive/stages/, newest last.
+archived_in_tree() {
+  ls -d "$REPO_ROOT"/archive/stages/stage* 2>/dev/null | sort -V
 }
 
 command=${1:-}
@@ -68,6 +86,14 @@ case "$command" in
       fi
       printf 'stage%-3s %s\n' "$n" "$state"
     done < <(archived_stages)
+    while read -r d; do
+      [[ -n $d ]] || continue
+      printf '%-12s %s files, kept in the working tree at ./%s\n' \
+        "$(basename "$d")" "$(ls -1 "$d" | wc -l)" "${d#"$REPO_ROOT"/}"
+    done < <(archived_in_tree)
+    echo
+    echo "The snapshot-per-stage model was retired on 2026-09-26; the tree above is one"
+    echo "evolving tree now. Read archive/stages/README.md for what the snapshots are."
     ;;
 
   path)
