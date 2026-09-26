@@ -30794,14 +30794,29 @@ verify_trace_symbols() {
             # and a register outside it refuses. The two clauses are one argument in both directions.)
             # **Rung 12 (724) adds ONE mnemonic to this set and it is the compiler's, not the
             # rung's.** The two cells `status_any` and `status_any_polls` are adjacent 32-bit fields
-            # assigned in the same basic block, so GCC merges the two stores into one `strdeq` on the
-            # same base - the classifier reports it as a third access of the same pointer argument,
-            # which is why the expected set names it rather than tolerating it. A merged store is a
-            # *narrower* reading of the same two cells, and naming it keeps the clause exact.
-            stb_cmd_img_want="UNK:ldr UNK:str"
-            if [[ $STORAGE_PROBE -ge 12 ]]; then stb_cmd_img_want="UNK:ldr UNK:str UNK:strd"; fi
-            [[ "$stb_cmd_img" == "$stb_cmd_img_want" && -z "${stb_cmd_imgaddr// /}" ]] ||
-                layout_fail "st_send_command's non-device memory accesses are [$stb_cmd_img] at [$stb_cmd_imgaddr] and this rung's record says exactly [$stb_cmd_img_want] with NO address - the pointer-argument form: this function's one non-device object is its \`struct st_cmd_result *\`, a caller's stack object, and a base the body never materialized an address for is what the classifier calls UNK. An \`IMG:\` entry, or any address on the fourth line, is a symbol this rung never declared reached through a base this body DOES materialize - which is the reading the clause was first written as an emptiness to catch, and could not: the emptiness is unachievable for a function that writes through a pointer, and an assertion that cannot hold is not a check (m702's shape, one reader over). \`st_cmd_path\`'s clause below keeps the plain emptiness, and it can, because its two structs are \`sp\`-based and the classifier skips that base by rule. Nothing is rebuilt by this refusal"
+            # assigned in the same basic block, so GCC may merge the two stores into one `strdeq` on
+            # the same base - the classifier then reports it as a third access of the same pointer
+            # argument, which is why the expected set named it rather than tolerating it. A merged
+            # store is a *narrower* reading of the same two cells.
+            #
+            # **741: AND THE MERGE IS NOW AN OPTION RATHER THAN A FACT, BECAUSE THE FIRST BUILD OF
+            # RUNG 19 LOST IT.** Raising the ladder to 18 added a third caller of `st_send_command`
+            # (`st_set_relative_addr`'s `struct st_cmd_result c3`), and with it in the translation
+            # unit GCC stopped merging that pair in `st_send_command` - a function no edit of this
+            # rung touched. The clause refused, correctly by its own text and wrongly by its own
+            # subject: `[[mi4-a-claim-in-a-comment-is-not-a-check]]`, because the comment above
+            # already said *it is the compiler's, not the rung's* and the assertion pinned it
+            # anyway. So the expected set is now the ENUMERATION of both spellings, which is what
+            # this clause is about - every non-device access in this body goes through the pointer
+            # argument, and nothing on the fourth line means no symbol address was materialized
+            # here. Both spellings are two stores of the same two cells; which one GCC emits is not
+            # a property of the arm, and a record that pinned one of them was a record that would
+            # refuse the arm for a reason the arm cannot have caused.
+            stb_cmd_img_ok=0
+            if [[ "$stb_cmd_img" == "UNK:ldr UNK:str" ]]; then stb_cmd_img_ok=1; fi
+            if [[ $STORAGE_PROBE -ge 12 && "$stb_cmd_img" == "UNK:ldr UNK:str UNK:strd" ]]; then stb_cmd_img_ok=1; fi
+            [[ $stb_cmd_img_ok == 1 && -z "${stb_cmd_imgaddr// /}" ]] ||
+                layout_fail "st_send_command's non-device memory accesses are [$stb_cmd_img] at [$stb_cmd_imgaddr] and this rung's record says exactly one of [UNK:ldr UNK:str] (the pointer argument touched by a store and a load) or, at rung 12 and up, [UNK:ldr UNK:str UNK:strd] (the same two, with the pair \`status_any\`/\`status_any_polls\` merged into ONE \`strd\` by the compiler) - and NO address on the fourth line. The address half is the finding this clause exists for: this function's one non-device object is its \`struct st_cmd_result *\`, a caller's stack object, and a base the body never materialized an address for is what the classifier calls UNK, so an \`IMG:\` entry or any address here is a symbol this rung never declared reached through a base this body DOES materialize - which is the reading the clause was first written as an emptiness to catch, and could not: the emptiness is unachievable for a function that writes through a pointer, and an assertion that cannot hold is not a check (m702's shape, one reader over). \`st_cmd_path\`'s clause below keeps the plain emptiness, and it can, because its two structs are \`sp\`-based and the classifier skips that base by rule. **The mnemonic half is an enumeration of two spellings and not a pattern**: rung 19's first build is the instance that forced the second entry, and the reason it appeared was an edit in a different function. Nothing is rebuilt by this refusal"
             stb_path=$(sym_addr st_cmd_path) ||
                 layout_fail "st_cmd_path is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE - rung 11's two calls, its three gates and every key it publishes are that body, and \`noinline\` with \`noclone\` is what keeps it one body rather than a block of the probe or a clone beside it. Two ways to get here, both worth refusing: the function was renamed, or it was inlined into the probe - and an inlined caller would leave its three device reads unclassified in a window whose own clause is about the reset and the power byte. Nothing is rebuilt by this refusal"
             stb_path_size=$(sym_size st_cmd_path) ||
@@ -31171,6 +31186,89 @@ verify_trace_symbols() {
                 (( ${stb_rb_calls_ln} < ${stb_rb_cmd_ln% *} )) ||
                     layout_fail "entry_storage_probe calls st_resp_before on disassembly line $stb_rb_calls_ln and st_cmd_path on line ${stb_rb_cmd_ln% *}: the pre-command read must come BEFORE the command path. **This is the whole rung.** Placed after it, the block has carried CMD0, CMD1 and CMD2, so a non-zero \`RESPONSE 0x10\` is a fact about a block that has just answered three commands - which is 738's reading, taken again under this rung's key names, with \`_rb_resp_zero\` published as a value that cannot mean what its name says. The position IS the experiment, which is m708's shape, and 732's first build and 736's press are the two instances of a body placed on the wrong side of a boundary in this same function. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_739: st_resp_before's device accesses are [$stb_rb_set] with counts [$stb_rb_cnt] - EVERY address once and NO STORE ANYWHERE - in program order [$stb_rb_order] with an EMPTY image side; entry_storage_probe calls it once, on disassembly line $stb_rb_calls_ln, BEFORE st_cmd_path on line ${stb_rb_cmd_ln% *}, so RESPONSE 0x10 is read for the first time in this ladder at the one moment no command has ever been on the bus: the four words the driver reads, the three bytes it takes below them, PRESENT_STATE 0x24 with its CMD_INHIBIT bit, COMMAND 0x0e as a halfword, and the three interrupt registers 0x30/0x34/0x38 read and never written - and _rb_resp_zero is derived in the image from the four raw words, so 738's doubt (is `0x40ff8080` the card's or the block's?) is answered by a reading rather than by an argument"
+            fi
+            if [[ $STORAGE_PROBE -ge 18 ]]; then
+                # **741: THE DRIVER'S OWN CMD3, AND ITS OWN CLAUSE FOR THE SAME REASON THE FOUR ABOVE
+                # HAVE ONE.** `st_set_relative_addr` is a `noinline` static placed by `nm` before
+                # `entry_storage_probe`, so neither the probe's store census nor the width-vs-offset
+                # census reads a line of it. What this clause is about is the ONE thing this rung adds
+                # to the image's device surface: two more stores at `INT_ENABLE 0x34` (the one-bit
+                # window rung 17 also opens, opened again around CMD3 because 733's press measured that
+                # a command's status bit is latched only while its enable stands), two reads of the
+                # RESPONSE word at 0x1c with the byte at 0x1b below it, and NOTHING ELSE - no data-path
+                # register, no `POWER_CONTROL 0x29`, no GCC word, no `core_mem` word, and `SIGNAL_ENABLE
+                # 0x38` read and never written.
+                #
+                # **The name is asserted before the contents**, because an unreferenced static is
+                # dropped and a build without the symbol publishes every `_rca_*` cell as absent while
+                # the record claims the rung - m720's shape, with one of the three producers of an
+                # absent key guaranteed by construction.
+                stb_rca=$(sym_addr st_set_relative_addr) ||
+                    layout_fail "st_set_relative_addr is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE - rung 19's arm IS this body (experiment-741), and an arm at this rung without it is the rung below with a different config hash: the ladder would drive CMD0, CMD1 and CMD2 and never put the driver's own CMD3 on the bus. Three ways to get here: renamed, INLINED into st_cmd_path (which would put its two stores into the rung-17 window's own census, where the store set is held to two at that same address, and would leave its RESPONSE reads unclassified there), or its call site removed, which the call-count clause below names. Nothing is rebuilt by this refusal"
+                stb_rca_size=$(sym_size st_set_relative_addr) ||
+                    layout_fail "st_set_relative_addr has no size in the symbol table (nm -S), so this clause's window has no end. Nothing is rebuilt by this refusal"
+                stb_rca_body=$(arm-none-eabi-objdump -d --start-address="$stb_rca" \
+                               --stop-address="$(printf '0x%x' $(( stb_rca + stb_rca_size )))" "$OUT/xnu_arm_entry.elf")
+                { read -r stb_rca_dev; read -r stb_rca_cnt; read -r stb_rca_img; read -r stb_rca_imgaddr; } < <(classify_body "$stb_rca_body" "f982491b f982491c f9824924 f9824930 f9824934 f9824938")
+                stb_rca_set=$(printf '%s\n' $stb_rca_dev | LC_ALL=C sort | tr '\n' ' ')
+                stb_rca_set_want="f982491b:ldrb f982491c:ldr f9824924:ldr f9824930:ldr f9824934:ldr f9824934:str f9824938:ldr "
+                [[ "$stb_rca_set" == "$stb_rca_set_want" ]] ||
+                    layout_fail "st_set_relative_addr's device accesses are [$stb_rca_set] (sorted) and rung 19's record says exactly [$stb_rca_set_want] - the ONE-bit enable at \`INT_ENABLE 0x34\` and its restore, \`SIGNAL_ENABLE 0x38\` READ AND NEVER WRITTEN, \`INT_STATUS 0x30\` read once after the restore, \`PRESENT_STATE 0x24\` read once at the end, and the driver's own WORD-0 DERIVATION of \`RESPONSE 0x10\` taken twice (the word at 0x1c and the byte at 0x1b below it, before the window opens and again after the command). **An \`f9824938:str\` here is the one store that must never exist at any rung** (the line rises on the conjunction of the two enables, and this block's SPI 123 is a line nobody owns); an \`f9824930:str\` would be a write-1-to-clear into the status register this body reads; \`f9824934:ldrh\` or a 32-bit read at 0x1b would be the wrong WIDTH at one of the two offsets this rung's whole comparison is built on; and a missing member is a reading the record names and the body does not take. Nothing is rebuilt by this refusal"
+                stb_rca_cnt_want="f982491b:ldrb=2 f982491c:ldr=2 f9824924:ldr=1 f9824930:ldr=1 f9824934:ldr=2 f9824934:str=2 f9824938:ldr=1 "
+                stb_rca_cnt=$(printf '%s\n' $stb_rca_cnt | LC_ALL=C sort | tr '\n' ' ')
+                [[ "$stb_rca_cnt" == "$stb_rca_cnt_want" ]] ||
+                    layout_fail "st_set_relative_addr's device access COUNTS are [$stb_rca_cnt] and rung 19's record says exactly [$stb_rca_cnt_want] - **and the two 2s at 0x1c/\`0x1b\` ARE the rung**: \`_rca_resp_pre\` and \`_rca_resp_post\` are the same derivation taken at two times, so a count of 1 there is a body that took the baseline and never took the reading (or the reverse) and every cell it publishes would still read correctly; \`f9824934:str=2\` is the window's one entrance and its one exit, so a count of 1 is an arm that sets a bit of \`INT_ENABLE 0x34\` and never writes it back - the arm's own safety clause absent while every cell still reads; a count of 3 at 0x34 is a store the record does not name. Nothing is rebuilt by this refusal"
+                stb_rca_stores=$(printf '%s\n' $stb_rca_dev | grep -v ':ldr' | tr '\n' ' ')
+                [[ "$stb_rca_stores" == "f9824934:str " ]] ||
+                    layout_fail "st_set_relative_addr's device STORES are [$stb_rca_stores] and rung 19's record says that set is exactly [f9824934:str] - **the only writable register in this body is \`INT_ENABLE 0x34\`**, the same one rungs 13, 14, 15 and 17 write and the only register this image has ever stored to in \`hc_mem\` outside the driver's own command path. \`SIGNAL_ENABLE 0x38\` written here is the act that can raise intid 155, and a store anywhere else is a register this rung does not name. **The ORDER and the VALUES of the two are not asserted here**: \`classify_body\` reports a body's accesses as a set with counts, so two accesses at one address are one entry in both lists. What carries them is the arm's own cells - \`_rca_ena_wrote\`, \`_rca_wrote_back\`, \`_rca_ena_held\`, \`_rca_readback\`. Nothing is rebuilt by this refusal"
+                [[ "${stb_rca_dev% }" == "f982491c:ldr f982491b:ldrb f9824934:str f9824934:ldr f9824938:ldr f9824930:ldr f9824924:ldr" ]] ||
+                    layout_fail "st_set_relative_addr's device accesses IN PROGRAM ORDER, distinct, are [$stb_rca_dev] and rung 19's record says [f982491c:ldr f982491b:ldrb f9824934:str f9824934:ldr f9824938:ldr f9824930:ldr f9824924:ldr] - **and this is the half neither the sorted set nor the counts can carry.** The FRESHNESS BASELINE IS FIRST, before any store: the word at 0x1c and the byte at 0x1b below it, read at the last moment at which the register still holds what the previous command left. Then the window's store, the enable read back, and \`SIGNAL_ENABLE\` - and only then the command, whose accesses are \`st_send_command\`'s own and not this window's. Then the SAME two reads again, after the command and before the restore. **A body whose baseline came after the store, or whose pair surrounded the restore instead of the command, would publish every cell this rung names and answer a different question** - which is m708's shape, and it is why the order is asserted here rather than left to the body's own comment. Nothing is rebuilt by this refusal"
+                [[ -z "${stb_rca_img// /}" ]] ||
+                    layout_fail "st_set_relative_addr's non-device memory accesses are [$stb_rca_img] at [$stb_rca_imgaddr] and rung 19's record says that set is EMPTY - the body holds a \`struct st_cmd_result\` and four words on its own stack, both reached through \`sp\` and therefore invisible to the classifier, and publishes through \`entry_live_write\` (a call, with a .rodata string). A symbol here is either one this rung never declared or an access the classifier could not resolve. Nothing is rebuilt by this refusal"
+                #
+                # **WHAT THIS CLAUSE DOES NOT ASSERT, SAID HERE SO IT IS NOT MISTAKEN FOR IT**: the
+                # ARGUMENT and the WORD. `st_set_relative_addr` calls `st_send_command` exactly once -
+                # that is asserted below - but WHICH opcode, argument and flags it passes is a property
+                # of that call's operands, and a body's memory accesses plus its `bl` sites carry no
+                # immediate. What carries them instead is the source's own `_Static_assert`s
+                # (`ST_SDHCI_CMD_WORD(ST_CMD_OP_SET_RELATIVE_ADDR, ST_MMC_RSP_R1) == 0x031Au` and
+                # `ST_MMC_RCA_1 == (1u << 16)`, both immediately above the body) and the arm's own cells
+                # (`_rca_op`, `_rca_flags`, `_rca_arg`, `_rca_arg_wrote`, `_rca_word`), which make the RUN
+                # say what went on the bus. A perturbation that changed the argument to zero would build
+                # and this record would then carry `_rca_arg = 0x00000000` beside a document that says
+                # 0x00010000 - a disagreement between the log and the record, and not one this build can
+                # see. The alternative was a `grep '#65536'` over the disassembly, which is the defect
+                # 741's own first build found in the `st_send_command` clause one screen above: an
+                # assertion pinned to the compiler's choice of how to materialize a constant.
+                #
+                # **AND THE FOUR COMMANDS, COUNTED, BECAUSE THIS RUNG'S WHOLE NEW SURFACE IS ONE MORE OF
+                # THEM.** `st_cmd_path` calls `st_send_command` twice (CMD0, CMD1), `st_all_send_cid`
+                # calls it once (CMD2) and `st_set_relative_addr` calls it once (CMD3) - so the arm puts
+                # exactly FOUR commands on the bus, and each of the four counts is asserted rather than
+                # summed. A fifth call site anywhere in these three bodies is a command this record does
+                # not name; a missing one is a rung that claims an act its image does not take. The
+                # counts are read from the three DISASSEMBLIES rather than from the source, so a body
+                # inlined into another is refused by the count that owns it.
+                stb_rca_path_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_path_body")
+                stb_rca_cid_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_cid_body")
+                stb_rca_own_calls=$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_rca_body")
+                [[ "$stb_rca_path_calls" == "2" && "$stb_rca_cid_calls" == "1" && "$stb_rca_own_calls" == "1" ]] ||
+                    layout_fail "the four command call sites are [st_cmd_path $stb_rca_path_calls, st_all_send_cid $stb_rca_cid_calls, st_set_relative_addr $stb_rca_own_calls] and rung 19's record says exactly [2, 1, 1] - CMD0 and CMD1 from the command path, CMD2 from rung 17's body and CMD3 from this one. A count that is too high is a command class this rung does not name; one that is too low is an arm whose record claims an act its image does not take. Nothing is rebuilt by this refusal"
+                stb_rca_calls=$(grep -c -- 'bl.*<st_set_relative_addr>' <<<"$stb_path_body")
+                [[ "$stb_rca_calls" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $stb_rca_calls call(s) to st_set_relative_addr and rung 19 makes exactly one. Zero is the whole arm absent - every \`_rca_*\` cell absent with it, and \`_rca_gated\` too, since the gate and the body are one branch; two or more means CMD3 is issued twice and both are published under one name. This is the clause m720 is about: an absent key's three producers must be named before its absence is read. Nothing is rebuilt by this refusal"
+                stb_rca_ln=$(awk '/bl.*<st_set_relative_addr>/{ printf "%d ", NR }' <<<"$stb_path_body")
+                stb_rca_cid_ln=$(awk '/bl.*<st_all_send_cid>/{ printf "%d ", NR }' <<<"$stb_path_body")
+                stb_rca_cmd_ln=$(awk '/bl.*<st_send_command>/{ printf "%d ", NR }' <<<"$stb_path_body")
+                stb_rca_last=${stb_rca_cmd_ln% }
+                stb_rca_last=${stb_rca_last##* }
+                [[ -n "$stb_rca_ln" && -n "$stb_rca_cid_ln" && -n "$stb_rca_last" ]] ||
+                    layout_fail "the three call lines could not be read out of st_cmd_path's disassembly ([$stb_rca_ln] for st_set_relative_addr, [$stb_rca_cid_ln] for st_all_send_cid, [$stb_rca_last] for the last st_send_command), so the ORDER of CMD3 and the three commands below it is not readable here. This refusal is about the SCAN and not about the arm: an unreadable disassembly is not an arm in the wrong order, and the call-count clauses above are the ones that refuse an arm. Nothing is rebuilt by this refusal"
+                (( ${stb_rca_ln% } > ${stb_rca_cid_ln% } )) ||
+                    layout_fail "st_cmd_path calls st_set_relative_addr on disassembly line ${stb_rca_ln% } and st_all_send_cid on line ${stb_rca_cid_ln% }: CMD3 must come AFTER CMD2. **This is the rung.** Placed above it, CMD3 would go on the bus before the address the driver assigns is meaningful - `mmc_set_relative_addr` follows `mmc_all_send_cid` in `mmc_attach_mmc` (`mmc.c:1378` then `:1409`) - and the gate that decides it reads the value rung 17's body RETURNS, so a call site above rung 17's would read a variable that has not been assigned. Nothing is rebuilt by this refusal"
+                (( ${stb_rca_ln% } > stb_rca_last )) ||
+                    layout_fail "st_cmd_path calls st_set_relative_addr on disassembly line ${stb_rca_ln% } and its last st_send_command on line $stb_rca_last: CMD3 must come AFTER both of the command path's own commands and after the between-commands gate. A body placed between the two commands would put CMD3 on a bus whose CMD1 has not been answered, and a body placed above the gate is 732's first build and 736's press - it re-measures the rung below while publishing this rung's names. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_741: st_set_relative_addr's device accesses are [$stb_rca_set] with counts [$stb_rca_cnt] in program order [$stb_rca_dev], its stores exactly [f9824934:str] and an EMPTY image side; st_cmd_path calls it once, on disassembly line ${stb_rca_ln% }, AFTER st_all_send_cid on line ${stb_rca_cid_ln% } and after the command path's last st_send_command on line $stb_rca_last - and the four command call sites are [2, 1, 1]. So the driver's own CMD3 (`mmc.c:1409` mmc_set_relative_addr, opcode 3, argument card->rca << 16 = 0x00010000, MMC_RSP_R1 = PRESENT|CRC|OPCODE giving the word 0x031a, the ladder's first INDEX and its first non-zero argument) goes on the bus only after CMD2 was SENT, with the SAME one-bit enable window rung 17 opens around CMD2, SIGNAL_ENABLE 0x38 read and NEVER written, and RESPONSE 0x10 read through the driver's own word-0 derivation (the word at 0x1c and the byte at 0x1b) immediately BEFORE that window and again immediately AFTER the command - so _rca_resp_moved is a pair of readings of one derivation at two times rather than a comparison of two derivations, and _rca_resp_is_arg names the alternative producer (a register echoing ARGUMENT 0x08)"
             fi
             # **AND THE GUARD IS `-eq 15` RATHER THAN `-ge 15`, WHICH IS 736'S MEASUREMENT AND NOT A TIDY-UP.** The body this clause is about is compiled for the VALUE 15 and no other, because what it leaves in `INT_ENABLE 0x34` refuses `st_cmd_path`'s gate on every rung above it - 736 pressed that consequence and read `_cmd_gate_kind = 2` with `_cmd_sent = 0`. A clause guarded `-ge 15` would therefore demand the symbol at rung 16, where the source does not have it, and refuse a correct arm. The exclusion and this guard are two spellings of one fact, and the ladder clause in `src/entry/entry_storage.c` states it a third time beside the value's own name.
             if [[ $STORAGE_PROBE -eq 15 ]]; then
