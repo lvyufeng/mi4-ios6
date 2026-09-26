@@ -112,8 +112,33 @@
 #ifndef STAGE90_XNU_STORAGE_PROBE
 #define STAGE90_XNU_STORAGE_PROBE 0
 #endif
-#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 8
-#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store), 4 = 3 plus the driver's own SDHCI_RESET_ALL (ONE byte store to SOFTWARE_RESET 0x2F, plus a bounded poll of that same byte) - the rung that writes through hc_mem for the first time - 5 = 4 plus the CLOCK SURFACE read at its own widths (the GCC's four SDCC1 branches and the apps root's five RCG words, plus CORE_VENDOR_SPEC 0x10C), a rung of reads that stores NOTHING anywhere, and 6 = 5 plus THE DRIVER'S FIRST CLOCK SET (sdhci_msm_set_clock at 400 kHz): four CBCR read-modify-writes of BIT(0) on the GCC each followed by a bounded halt check, two CORE_VENDOR_SPEC 0x10C read-modify-writes (MCLK select <- DFLT, HC_SELECT_IN cleared), and the standard's two CLOCK_CONTROL halfwords with the stability poll between them - SIX stores and NO rate, because sup_clock == msm_host->clk_rate on the first call (experiment-706 section 2) - and it writes neither BCR 0x04C0 nor any RCG word, nor POWER_CONTROL 0x29, and 7 = 6 plus THE DRIVER'S OWN FIRST POWER BYTE (mmc_power_up's PASS A: sdhi_set_power at sdhci.c:1663 - ONE 8-bit store to POWER_CONTROL 0x29, the value derived from the CAPABILITIES register the way sdhci_add_host and mmc_power_up derive it), with the vendor's REQ_BUS_ON wait NOT taken (sdhci-msm.c:2179-2209 would wait_for_completion on an IRQ this image cannot deliver) - a rung of one store and five readings, and 8 = 7 plus THE DRIVER'S OWN POWER IRQ (the vendor's sdhci_msm_pwr_irq, sdhci-msm.c:1990-2099, as a CLIENT of this image's own dispatcher: intid 170 - SPI 138, the `pwr_irq` msm8974.dtsi:502 declares - registered and its line enabled BEFORE the power byte, with the three arms that may sleep absent because the vendor's own IRQF_ONESHOT+NULL-primary declares a threaded handler and this image has no thread to sleep in), clearing the latch the byte latched and answering the controller - a rung of three stores, in core_mem and in hc_mem, and the two addresses of VENDOR_SPEC 0x10C read side by side. A value above the ladder is refused here rather than shaping an image whose switches claim something else."
+#if STAGE90_XNU_STORAGE_PROBE < 0 || STAGE90_XNU_STORAGE_PROBE > 9
+#error "STAGE90_XNU_STORAGE_PROBE is a rung: 0 = inert, 1 = the read-only probe, 2 = the probe and the vendor's mode sequence (four stores to the controller), 3 = 2 plus the standard register file's census (ten reads, no store), 4 = 3 plus the driver's own SDHCI_RESET_ALL (ONE byte store to SOFTWARE_RESET 0x2F, plus a bounded poll of that same byte) - the rung that writes through hc_mem for the first time - 5 = 4 plus the CLOCK SURFACE read at its own widths (the GCC's four SDCC1 branches and the apps root's five RCG words, plus CORE_VENDOR_SPEC 0x10C), a rung of reads that stores NOTHING anywhere, and 6 = 5 plus THE DRIVER'S FIRST CLOCK SET (sdhci_msm_set_clock at 400 kHz): four CBCR read-modify-writes of BIT(0) on the GCC each followed by a bounded halt check, two CORE_VENDOR_SPEC 0x10C read-modify-writes (MCLK select <- DFLT, HC_SELECT_IN cleared), and the standard's two CLOCK_CONTROL halfwords with the stability poll between them - SIX stores and NO rate, because sup_clock == msm_host->clk_rate on the first call (experiment-706 section 2) - and it writes neither BCR 0x04C0 nor any RCG word, nor POWER_CONTROL 0x29, and 7 = 6 plus THE DRIVER'S OWN FIRST POWER BYTE (mmc_power_up's PASS A: sdhi_set_power at sdhci.c:1663 - ONE 8-bit store to POWER_CONTROL 0x29, the value derived from the CAPABILITIES register the way sdhci_add_host and mmc_power_up derive it), with the vendor's REQ_BUS_ON wait NOT taken (sdhci-msm.c:2179-2209 would wait_for_completion on an IRQ this image cannot deliver) - a rung of one store and five readings, and 8 = 7 plus THE DRIVER'S OWN POWER IRQ (the vendor's sdhci_msm_pwr_irq, sdhci-msm.c:1990-2099, as a CLIENT of this image's own dispatcher: intid 170 - SPI 138, the `pwr_irq` msm8974.dtsi:502 declares - registered and its line enabled BEFORE the power byte, with the three arms that may sleep absent because the vendor's own IRQF_ONESHOT+NULL-primary declares a threaded handler and this image has no thread to sleep in), clearing the latch the byte latched and answering the controller - a rung of three stores, in core_mem and in hc_mem, and the two addresses of VENDOR_SPEC 0x10C read side by side, and 9 = 8 plus THE DRIVER'S OWN COMPLETION (sdhci_set_power's own next statement, sdhci.c:1371-1372: check_power_status(host, REQ_BUS_ON), whose sdhci_msm_check_power_status at sdhci-msm.c:2179 compares the request against the TWO DRIVER-SIDE FIELDS the handler's tail writes - curr_pwr_state/curr_io_level, :2092-2096 - and then blocks; rung 9 ports the predicate and replaces the block with a BOUNDED tick poll whose end condition is the CONTROLLER's own CORE_PWRCTL_CTL bit BUS_SUCCESS, because the probe runs with SCTLR.C clear while the handler may run with the caches on, so an image-side flag written by one can be invisible to the other - the flag is still written and published beside the device ack, and the pair is this rung's new cell), with the budget STAGE90_XNU_PWR_WAIT_TICKS and the three sleeping arms still absent. A value above the ladder is refused here rather than shaping an image whose switches claim something else."
+#endif
+
+/*
+ * **712: rung 9's own budget, and it is a switch because the number is the arm's judgement rather than
+ * the vendor's.** `sdhci_msm_check_power_status` (`sdhci-msm.c:2205`) blocks on
+ * `wait_for_completion` with **no bound at all** - the bound it is compared against is the driver's
+ * own reset poll, 100 ms (`sdhci.c:251`, 'Wait max 100 ms', `mdelay(1)` per decrement at `:267`), and
+ * rung 4's reset poll already carries that same 1,920,000 ticks. So the default is that number at the
+ * 19,200,000 Hz 699's ending read out of `cntfrq`, and the range is what a press may spend:
+ *
+ * * **1 is the floor, and 0 is refused rather than read as "no wait".** Rung 8 *is* the no-wait arm -
+ *   it takes the predicate, the registration and the arming and stops - so a budget of 0 would make
+ *   this rung's cells indistinguishable from the rung below it while the record said otherwise.
+ * * **19,200,000 (1 s) is the ceiling**: this arm's run ends on 690's 6,000 ms clock, and a budget past
+ *   a sixth of it turns the press into a reading about the ending rather than about the wait.
+ *
+ * A budget that is a *time* and not a count is the same choice rung 4 made, and for the same measured
+ * reason: the rate is read out of the hardware (`xnu_live_post_cntfrq` = 19,200,000 on 691's, 694's
+ * and 711's runs), so 19200 ticks is a millisecond on this device and not an assumption.
+ */
+#ifndef STAGE90_XNU_PWR_WAIT_TICKS
+#define STAGE90_XNU_PWR_WAIT_TICKS 1920000
+#endif
+#if STAGE90_XNU_PWR_WAIT_TICKS < 1 || STAGE90_XNU_PWR_WAIT_TICKS > 19200000
+#error "STAGE90_XNU_PWR_WAIT_TICKS is rung 9's bounded replacement for sdhci_msm_check_power_status's UNBOUNDED wait_for_completion (sdhci-msm.c:2205), in ticks of this device's own 19,200,000 Hz counter. 1920000 (the default) is 100 ms - the bound sdhci.c:251 states for the driver's own reset poll and the number rung 4's poll already carries. 1 is the floor and 0 is REFUSED rather than read as 'no wait', because rung 8 is the no-wait arm and a budget of 0 would make this rung's cells indistinguishable from the rung below it while the record said otherwise; 19200000 (1 s) is the ceiling, because this arm's run ends on a 6,000 ms clock and a budget past a sixth of it makes the press a reading about the ending rather than about the wait."
 #endif
 
 /*
@@ -1406,7 +1431,11 @@ static void st_power_set(void)
  * (`:2028-2029`, outside the `ret` test), so act 6 runs - a read-modify-write of
  * `host->ioaddr + CORE_VENDOR_SPEC` (`:2079-2085`) - and the handler is a **three-store** handler,
  * not the two-store one a reader would predict from the `readb`/`writeb` pair at the top. That store
- * lands in `hc_mem`, so rung 8's census moves from `47 44 44 41` to `47 44 44 41 268`.
+ * lands in `hc_mem`, so this sentence read "rung 8's census moves from `47 44 44 41` to
+ * `47 44 44 41 268`" - **and 711 section 5's correction is that the build says `47 44 44 41`**: the
+ * handler is a separate symbol, so its store is outside `entry_storage_probe`'s window, and the one
+ * value had two readings of which the pre-registration wrote the wrong one. The store is asserted by
+ * this handler's own clause, against `0xf9824a0c`.
  *
  * **§1.5's two addresses are read here, in one run, before the byte.** `ST_VENDOR_SPEC 0x10C` is used
  * 23 times in the vendor's file, every one through `host->ioaddr`, and zero times through
@@ -1432,12 +1461,33 @@ static void st_power_set(void)
 #define ST_CORE_PWRCTL_IO_SUCCESS   (1u << 2) /* :74 */
 #define ST_CORE_PWRCTL_IO_FAIL      (1u << 3) /* :75 */
 #define ST_CORE_IO_PAD_PWR_SWITCH   (1u << 16) /* :97 - CORE_IO_PAD_PWR_SWITCH, act 6's field       */
+#define ST_REQ_BUS_OFF              (1u << 0) /* sdhci.h:290 - the vendor's own request bits, the    */
+#define ST_REQ_BUS_ON               (1u << 1) /* :291 - first of which is what rung 9 asks about     */
+#define ST_REQ_IO_LOW               (1u << 2) /* :292 */
+#define ST_REQ_IO_HIGH              (1u << 3) /* :293 */
+#define ST_PWR_WAIT_INNER           1024u     /* ack reads between two samples of the clock - the    */
+                                              /* same sampler spacing rung 4's poll uses, so the
+                                               * sampler is not the thing being measured          */
 #define ST_PWR_IRQ_INTID            170u      /* msm8974.dtsi:502 - `<0 138 0>` + 32, `pwr_irq`   */
 #define ST_PWR_IRQ_TARGET           0x01u     /* GICD_ITARGETSR's byte for CPU 0, the same target
                                                * 500's intid-40 arm was given (`_line_target_want`) */
 
 static uint32_t g_pwr_irq_calls;   /* the client's own count of being called, published every call */
 static uint32_t g_pwr_irq_arms;    /* the arming ran exactly once, whatever the probe's guards do  */
+/*
+ * **712: rung 9's three image-side words, and they are the vendor's own two fields plus its
+ * completion.** `msm_host->curr_pwr_state` / `curr_io_level` are the fields
+ * `sdhci_msm_check_power_status` compares `req_type` against (`sdhci-msm.c:2201`) and the handler's
+ * tail fills (`:2092-2094`); `g_pwr_irq_done` stands where `complete(&msm_host->pwr_irq_completion)`
+ * stands (`:2095`). They are **volatile** because two contexts reach them - the handler that fills
+ * them and the probe that spins on the flag - and because the compiler must not hoist the flag's read
+ * out of the polling loop. They carry two names of the driver's on purpose: what rung 8 refused was
+ * publishing a *cell* under the driver's name, and what these are is the driver's own *transition*,
+ * performed where the driver performs it.
+ */
+static volatile uint32_t g_pwr_curr_state;   /* `msm_host->curr_pwr_state` - REQ_* bits, the handler */
+static volatile uint32_t g_pwr_curr_io;      /* `msm_host->curr_io_level`  - REQ_* bits, the handler */
+static volatile uint32_t g_pwr_irq_done;     /* the `complete()` stand-in: set at the handler's tail */
 
 /*
  * **The client, and every device access is written here rather than through the `st_*` helpers.** The
@@ -1461,16 +1511,27 @@ void st_pwr_irq(void *refCon, uint32_t intid)
     const uint32_t ctl_addr    = ST_CORE_MEM_BASE + ST_CORE_PWRCTL_CTL;
     const uint32_t pad_addr    = ST_HC_MEM_BASE + ST_VENDOR_SPEC;
     uint32_t status32, ctl_before, ctl_after, pad_before, pad_after;
-    uint32_t ack = 0u, io_level = 0u;
+    uint32_t ack = 0u, io_level = 0u, pwr_state = 0u, at;
     uint8_t status;
 
     (void)refCon;
     g_pwr_irq_calls++;
 
+    /*
+     * **712: the handler's own timestamp, taken before anything else.** Rung 8's press left the
+     * delivery *time* unmeasured: `_pwr_irq_calls = 0x1` beside `_pwr_irq_calls_probe_end = 0x0` says
+     * the client ran after the probe's tail but not when, and the probe's own clock (`_wait_t0`) is
+     * the base this stamp is read against. The difference is the interrupt's latency from the byte -
+     * a number rather than an assumption, and the cell that tells a budget-expired press what budget
+     * to use next.
+     */
+    at = (uint32_t)stage90_cntvct_read();
+
     /* Act 1 - the status, at both widths, from one moment. */
     status   = *(volatile uint8_t *)(uintptr_t)status_addr;   /* the vendor's `readb_relaxed`   */
     status32 = *(volatile uint32_t *)(uintptr_t)status_addr;  /* the probe's `readl_relaxed`    */
 
+    ST_LIVE("xnu_live_storage_pwr_irq_at", at);
     ST_LIVE("xnu_live_storage_pwr_irq_calls", g_pwr_irq_calls);
     ST_LIVE("xnu_live_storage_pwr_irq_intid", intid);
     ST_LIVE("xnu_live_storage_pwr_irq_refcon", (uint32_t)(uintptr_t)refCon);
@@ -1491,10 +1552,12 @@ void st_pwr_irq(void *refCon, uint32_t intid)
      * is the same reason the probe's preamble ORs `BUS_SUCCESS` unconditionally (`:2880-2883`). */
     if ((status & ST_CORE_PWRCTL_BUS_ON) != 0u) {
         io_level = ST_CORE_PWRCTL_IO_HIGH;     /* `:2029` - the line that makes act 6 run */
+        pwr_state = ST_REQ_BUS_ON;             /* `:2023` - 712: the field rung 9's check reads */
         ack |= ST_CORE_PWRCTL_BUS_SUCCESS;
     }
     if ((status & ST_CORE_PWRCTL_BUS_OFF) != 0u) {
-        io_level = ST_CORE_PWRCTL_IO_LOW;
+        io_level = ST_CORE_PWRCTL_IO_LOW;      /* `:2050` - the other arm sets the other pair */
+        pwr_state = ST_REQ_BUS_OFF;
         ack |= ST_CORE_PWRCTL_BUS_SUCCESS;
     }
     if ((status & ST_CORE_PWRCTL_IO_LOW) != 0u) {
@@ -1526,6 +1589,29 @@ void st_pwr_irq(void *refCon, uint32_t intid)
     __asm__ volatile ("dsb sy" ::: "memory");
     pad_after = *(volatile uint32_t *)(uintptr_t)pad_addr;
 
+    /*
+     * **712: the vendor's own tail (`:2092-2096`), and it is the whole of what rung 9 depends on.**
+     * The two fields are written exactly where the driver writes them - guarded by the same
+     * `if (pwr_state)` / `if (io_level)` tests, because a status that carried neither leaves the
+     * fields alone - and the completion is raised after them, which is what makes `_pwr_irq_calls`
+     * (this function's first statement) and `_wait_done` (the flag) two different readings of one
+     * event: an entry with no flag is an event that did not finish.
+     *
+     * **The barrier is the vendor's `spin_lock_irqsave`'s, taken without the lock.** The vendor
+     * publishes under `host->lock` and `complete()` carries its own barriers; this image is
+     * single-CPU with interrupts masked here, so what matters is that the *device* accesses above
+     * this line have reached the controller before the flag is visible - and `dsb sy` is the same
+     * barrier the raw accesses above carry, for the same reason.
+     */
+    if (pwr_state != 0u)
+        g_pwr_curr_state = pwr_state;
+    if (io_level != 0u)
+        g_pwr_curr_io = io_level;
+    __asm__ volatile ("dsb sy" ::: "memory");
+    g_pwr_irq_done = 1u;
+
+    ST_LIVE("xnu_live_storage_pwr_irq_state", pwr_state);
+    ST_LIVE("xnu_live_storage_pwr_irq_io", io_level);
     ST_LIVE("xnu_live_storage_pwr_irq_ctl_before", ctl_before);
     ST_LIVE("xnu_live_storage_pwr_irq_ack", ack);
     ST_LIVE("xnu_live_storage_pwr_irq_ctl_after", ctl_after);
@@ -1605,6 +1691,139 @@ static void st_pwr_irq_after(void)
     ST_LIVE("xnu_live_storage_pwr_irq_calls_probe_end", g_pwr_irq_calls);
 }
 #endif /* STAGE90_XNU_STORAGE_PROBE >= 8 - two small helpers, one client, and one caller each */
+
+#if STAGE90_XNU_STORAGE_PROBE >= 9
+/*
+ * **712: rung 9 - the driver's own completion, and the first rung whose act is a WAIT.**
+ *
+ * `sdhci_set_power` writes the byte rung 7 writes and then makes one more statement
+ * (`sdhci.c:1371-1372`):
+ *
+ *     if (host->ops->check_power_status)
+ *             host->ops->check_power_status(host, REQ_BUS_ON);
+ *
+ * and `sdhci_msm_check_power_status` (`sdhci-msm.c:2179-2210`) is *not* a device handshake. It
+ * compares `req_type` against **two driver-side fields** (`msm_host->curr_pwr_state`,
+ * `curr_io_level`) which the **handler's tail** fills (`:2092-2094`), and if the request is not
+ * already satisfied it blocks on `wait_for_completion` (`:2205`) with **no bound at all**. So the
+ * function is a cache read plus a block, its completion arrives only from the interrupt rung 8 owns,
+ * and on the first call the predicate is false - which is why 708 could not take it and why 709's
+ * press is the measurement of what it would have blocked on.
+ *
+ * **What this rung ports, and where it departs.** The predicate is the vendor's own, evaluated
+ * first, and the `init_completion` branch is *taken* rather than skipped: on that branch the vendor
+ * resets the completion and does **not** wait (`:2203`), so an arm that waited anyway would be
+ * measuring its own code. The block is replaced by a bounded tick poll - and **the poll's end
+ * condition is the CONTROLLER's own `CORE_PWRCTL_CTL` bit `BUS_SUCCESS`, not the image-side flag.**
+ *
+ * That choice is a defect this project names, met in advance. The probe runs inside Apple's
+ * cache-off idle-exit window (`xnu_live_seam_sctlr = 0x30c57879`, `C` clear); the handler may run
+ * with the caches **on**. A `g_pwr_irq_done` written by the handler can therefore sit in L1/L2 while
+ * the probe's direct read of the same address is answered by DRAM - **one flag, two definitions**
+ * ([[mi4-one-value-two-definitions]]) - and a poll armed with it would time out on a machine whose
+ * handler had already run. `CTL` is the same event *through the device*: it is Strongly-ordered,
+ * read as `0` by the probe on rung 7's press (`_pwr_ctl`), read as `0` and written as `0x01` by the
+ * handler on rung 8's (`_pwr_irq_ctl_before` / `_pwr_irq_ctl_after`), and written by no other arm of
+ * this ladder. **The image-side flag is still written and still published** (`_wait_done`), because
+ * the disagreement between the two is the reading: a device ack with the flag clear is a
+ * driver-side completion that did not cross the cache boundary - the shape 686's correction of 652
+ * describes, one context over.
+ *
+ * **`noinline`, and it is the mirror of rung 6's `always_inline`.** The helpers that write device
+ * registers are inlined into the probe so the store census can see them; this function writes no
+ * device register at all, and what the build must check about it is its own bounded *shape* - the
+ * budget constant, the ack it spins on, and the probe's single call to it. A body whose shape a
+ * clause must read has to be a body.
+ *
+ * **What it does NOT do**: it does not run the three arms that may sleep (the vendor's own
+ * `IRQF_ONESHOT` + NULL primary declares a threaded handler for exactly that reason, and this client
+ * runs in `fleh_irq_kernel`'s frame); it does not mask the power events, which would take away the
+ * interrupt the completion arrives on; it does not write `CORE_PWRCTL_CTL` (the request is the
+ * byte's consequence and the ack is the handler's); it does not touch `hc_irq`; and it makes no store
+ * to any device. Its whole device-facing shape is two reads of `CLOCK_CONTROL 0x2C` either side of
+ * the wait and the polled `CORE_PWRCTL_CTL` byte.
+ */
+__attribute__((noinline)) static void st_pwr_wait(void)
+{
+    const uint32_t req = ST_REQ_BUS_ON;   /* sdhci.c:1372 - PASS A's own request, and the only one */
+    uint32_t state_before, io_before, done_before, ctl_before, ctl_after, ctl_now;
+    uint32_t t0, now, polls = 0u, inner, timeout = 0u, cpsr = 0u;
+    uint32_t cc_before, cc_after;
+
+    /*
+     * The two readings 711 section 3 left open: the same register either side of the wait, which is
+     * a hundred milliseconds or a bounded fraction of one - long enough to say whether the bit two
+     * consecutive boots disagreed about is a race or the machine's state.
+     */
+    cc_before = (uint32_t)st_read16(ST_HC_MEM_BASE + ST_SDHCI_CLOCK_CONTROL);
+
+    ctl_before   = (uint32_t)*(volatile uint8_t *)(uintptr_t)(ST_CORE_MEM_BASE + ST_CORE_PWRCTL_CTL);
+    state_before = g_pwr_curr_state;
+    io_before    = g_pwr_curr_io;
+    done_before  = (((req & state_before) | (req & io_before)) != 0u) ? 1u : 0u;
+
+    ST_LIVE("xnu_live_storage_pwr_wait_req", req);
+    ST_LIVE("xnu_live_storage_pwr_wait_bound", (uint32_t)STAGE90_XNU_PWR_WAIT_TICKS);
+    ST_LIVE("xnu_live_storage_pwr_wait_ctl_before", ctl_before);
+    ST_LIVE("xnu_live_storage_pwr_wait_state_before", state_before);
+    ST_LIVE("xnu_live_storage_pwr_wait_io_before", io_before);
+    ST_LIVE("xnu_live_storage_pwr_wait_done_before", done_before);
+
+    t0  = (uint32_t)stage90_cntvct_read();
+    now = t0;
+    ST_LIVE("xnu_live_storage_pwr_wait_t0", t0);
+
+    if (done_before != 0u) {
+        /*
+         * The vendor's own branch, and it does NOT wait (`:2202-2203`): the request is already
+         * satisfied by what the handler has published, so the completion is *reset* - and the
+         * vendor's comment says why, in the same words this reason needs: a completion raised before
+         * this call would otherwise let the next wait return immediately. `_wait_reset` and the two
+         * branch cells are published from both paths so the log always names which one ran.
+         */
+        g_pwr_irq_done = 0u;
+        ST_LIVE("xnu_live_storage_pwr_wait_reset", 1u);
+        ST_LIVE("xnu_live_storage_pwr_wait_cpsr", cpsr);
+    } else {
+        ST_LIVE("xnu_live_storage_pwr_wait_reset", 0u);
+        __asm__ volatile ("mrs %0, cpsr" : "=r"(cpsr));
+        ST_LIVE("xnu_live_storage_pwr_wait_cpsr", cpsr);
+        for (;;) {
+            for (inner = 0u; inner < ST_PWR_WAIT_INNER; inner++) {
+                polls++;
+                ctl_now = (uint32_t)*(volatile uint8_t *)(uintptr_t)
+                              (ST_CORE_MEM_BASE + ST_CORE_PWRCTL_CTL);
+                if (ctl_now != 0u)
+                    break;
+            }
+            ctl_now = (uint32_t)*(volatile uint8_t *)(uintptr_t)
+                          (ST_CORE_MEM_BASE + ST_CORE_PWRCTL_CTL);
+            if (ctl_now != 0u)
+                break;
+            now = (uint32_t)stage90_cntvct_read();
+            if (now - t0 >= (uint32_t)STAGE90_XNU_PWR_WAIT_TICKS) {
+                timeout = 1u;
+                break;
+            }
+        }
+        now = (uint32_t)stage90_cntvct_read();
+    }
+
+    ctl_after = (uint32_t)*(volatile uint8_t *)(uintptr_t)(ST_CORE_MEM_BASE + ST_CORE_PWRCTL_CTL);
+    cc_after  = (uint32_t)st_read16(ST_HC_MEM_BASE + ST_SDHCI_CLOCK_CONTROL);
+
+    ST_LIVE("xnu_live_storage_pwr_wait_polls", polls);
+    ST_LIVE("xnu_live_storage_pwr_wait_ticks", now - t0);
+    ST_LIVE("xnu_live_storage_pwr_wait_timeout", timeout);
+    ST_LIVE("xnu_live_storage_pwr_wait_ctl_after", ctl_after);
+    ST_LIVE("xnu_live_storage_pwr_wait_done", g_pwr_irq_done);
+    ST_LIVE("xnu_live_storage_pwr_wait_state_after", g_pwr_curr_state);
+    ST_LIVE("xnu_live_storage_pwr_wait_io_after", g_pwr_curr_io);
+    ST_LIVE("xnu_live_storage_pwr_wait_calls", g_pwr_irq_calls);
+    ST_LIVE("xnu_live_storage_pwr_wait_cc_before", cc_before);
+    ST_LIVE("xnu_live_storage_pwr_wait_cc_after", cc_after);
+}
+#endif /* STAGE90_XNU_STORAGE_PROBE >= 9 - one body, one caller, and no device store in either */
 
 void entry_storage_probe(void)
 {
@@ -1866,6 +2085,20 @@ void entry_storage_probe(void)
      */
     if (g_storage_mode_complete != 0u)
         st_power_set();
+#endif
+#if STAGE90_XNU_STORAGE_PROBE >= 9
+    /*
+     * **712: rung 9's own statement, and the first block of this ladder that is not the last one.**
+     * `sdhci.c:1370-1372` is the byte and the check, adjacent statements of one function: the wait
+     * runs immediately after `st_power_set()` and **before** rung 8's tail count, because an arm
+     * that ran it anywhere else would be measuring its own order rather than the driver's. The
+     * consequence for the rung above is deliberate and small: `_pwr_irq_calls_probe_end` still means
+     * "at the probe's own tail", and the tail is now after the wait - so that pair reads the same way
+     * it did and gains a second reading beside it (`_wait_calls`, at the wait's own end). See
+     * experiment-712 section 3.
+     */
+    if (g_storage_mode_complete != 0u)
+        st_pwr_wait();
 #endif
 #if STAGE90_XNU_STORAGE_PROBE >= 8
     /*

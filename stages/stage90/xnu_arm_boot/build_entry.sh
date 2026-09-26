@@ -608,6 +608,20 @@ esac
 # windows: `core_mem` is still rung 6's set, the byte is still the last device act, and the loudest
 # consequence of the new door - a handler that runs in an exception and may not sleep - is a property no
 # store set can state, which is why that clause also refuses a base it cannot resolve.
+#
+# **Rung 9 (`712`) is the first rung of this ladder that is a WAIT rather than an act, and it is the
+# driver's own next statement**: `sdhci_set_power`'s `check_power_status(host, REQ_BUS_ON)`
+# (`sdhci.c:1371-1372`), which the vendor answers in `sdhci_msm_check_power_status` (`sdhci-msm.c:2179`)
+# by comparing the request against the two driver-side fields rung 8's handler tail now writes and then
+# **blocking** - the `wait_for_completion` 708 named and refused. Rung 9 ports the predicate and replaces
+# the block with a poll whose end condition is the CONTROLLER's own `CORE_PWRCTL_CTL` bit `BUS_SUCCESS`,
+# not the image-side flag, because the probe runs with `SCTLR.C` clear while the handler may run with the
+# caches on: **one flag, two definitions** is the defect class this project keeps meeting, and here it is
+# a property of the machine rather than of a reader. The wait is `noinline` for the mirror of rung 6's
+# reason: a helper whose bounded *shape* a clause must read has to be a body the clause can disassemble.
+# Rung 9 widens rung 8's clause in exactly one place and narrows it in none - the handler's non-device
+# accesses gain three words, and "no device access hides in the class this clause waives" is asserted by
+# resolving each of them to a symbol in this image's own `.bss` (the 712 clause 4 pre-registration).
 STORAGE_PROBE=${STAGE90_XNU_STORAGE_PROBE:-0}
 case "$STORAGE_PROBE" in
     0) ;;
@@ -619,11 +633,28 @@ case "$STORAGE_PROBE" in
     6) ;;
     7) ;;
     8) ;;
-    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4, 5, 6, 7 or 8, not [$STORAGE_PROBE]" >&2
+    9) ;;
+    *) echo "STAGE90_XNU_STORAGE_PROBE must be 0, 1, 2, 3, 4, 5, 6, 7, 8 or 9, not [$STORAGE_PROBE]" >&2
        echo "        It is a `#if` in two files and not a value, so anything else would reach the" >&2
        echo "        preprocessor as a broken -D and fail there, with the cause named by the wrong" >&2
        echo "        tool (692); and it is a rung rather than a flag since 696, so a value above the" >&2
        echo "        ladder would build an image whose record named an arm that does not exist" >&2
+       exit 1 ;;
+esac
+# **Rung 9's budget is a second switch and it is range-checked in the SOURCE, not here.** The value has to
+# reach `entry_storage.c` and be asserted against the image, so `entry_storage.c:137-142` owns both the
+# default (`1920000`, 100 ms at the 19,200,000 Hz counter) and the `#error` outside `[1, 19200000]` - and
+# repeating either here would be one quantity with two definitions (`mi4-one-value-two-definitions`),
+# where the two readings are a `#error` and a shell test that can disagree. What this script owns is that
+# the value reaches the compiler as a decimal literal at all: a non-numeric token would reach the `#if`
+# as a broken expression, and this refusal names the switch instead of leaving the compiler to. 0 is a
+# legal *spelling* here and a refused *rung value* one file away, deliberately: the no-wait arm is rung 8,
+# so a spend of 0 ticks would make this rung's cells indistinguishable from the rung below it.
+PWR_WAIT_TICKS=${STAGE90_XNU_PWR_WAIT_TICKS:-1920000}
+case "$PWR_WAIT_TICKS" in
+    ''|*[!0-9]*) echo "STAGE90_XNU_PWR_WAIT_TICKS must be a decimal number of ticks, not [$PWR_WAIT_TICKS]" >&2
+       echo "        The range itself is entry_storage.c's #error (1 .. 19200000) and is deliberately" >&2
+       echo "        not repeated here; this test is only that the token is a number at all" >&2
        exit 1 ;;
 esac
 # The trace is the instrument, the probe is a record and a mapping: without `entry_trace.c` in the image
@@ -735,6 +766,7 @@ ENTRY_ARM_KEYS=(STAGE90_ENTRY_TRACE STAGE90_ENTRY_REAL_ARM_INIT STAGE90_XNU_SLOT
                 STAGE90_ENTRY_CHECKPOINT_AFTER STAGE90_XNU_SEAM_POC STAGE90_XNU_SEAM_MEASURE
                 STAGE90_XNU_SEAM_END_RUN STAGE90_XNU_POST_END_RUN STAGE90_XNU_POST_END_TICKS
                 STAGE90_XNU_STORAGE_PROBE
+                STAGE90_XNU_PWR_WAIT_TICKS
                 STAGE90_XNU_IDLE_NO_SLEEP)
 #
 # **The seven switches are not the whole arm, and finding that out is what made this eleven.** Checking
@@ -830,6 +862,7 @@ do
         STAGE90_XNU_POST_END_RUN)     _v=$SEAM_POST_END_RUN ;;
         STAGE90_XNU_POST_END_TICKS)   _v=$SEAM_POST_END_TICKS ;;
         STAGE90_XNU_STORAGE_PROBE)    _v=$STORAGE_PROBE ;;
+        STAGE90_XNU_PWR_WAIT_TICKS)   _v=$PWR_WAIT_TICKS ;;
         STAGE90_XNU_IDLE_NO_SLEEP)    _v=$IDLE_NO_SLEEP ;;
         STAGE90_ENTRY_CHECKPOINT)      _v=${STAGE90_ENTRY_CHECKPOINT:-(unset)} ;;
         STAGE90_ENTRY_CHECKPOINT_SKIP) _v=${STAGE90_ENTRY_CHECKPOINT_SKIP:-(unset)} ;;
@@ -1018,9 +1051,15 @@ run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-co
 # with an object in the link that does nothing, which is the state a reader of the record should see.
 # `STUB_DEFINES` already carries the flag for `entry_trace.c`; it is repeated here rather than relied on,
 # because this object is the one whose whole body is inside the `#if`.
+#
+# **712 adds a second switch to this line and only to this line**: `STAGE90_XNU_PWR_WAIT_TICKS` is read
+# by `entry_storage.c` and by nothing else, so it goes here the way the rung does - and it is *not* put
+# in `STUB_DEFINES`, for the same reason: a switch that reaches files which do not read it is a switch
+# whose "who sees it" question can no longer be answered by grepping the file that uses it.
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding -fno-builtin -fno-common -fno-pic \
     -O2 -Wall -Wextra -Werror -std=gnu11 "${STUB_DEFINES[@]}" \
     -DSTAGE90_XNU_STORAGE_PROBE="$STORAGE_PROBE" \
+    -DSTAGE90_XNU_PWR_WAIT_TICKS="$PWR_WAIT_TICKS" \
     -c "$BOOT_DIR/entry_storage.c" -o "$OUT/xnu_arm_entry_storage.o"
 run arm-none-eabi-gcc -mcpu=cortex-a15 -marm -ffreestanding \
     -c "$BOOT_DIR/entry_vectors.s" -o "$OUT/xnu_arm_entry_vectors.o"
@@ -29935,6 +29974,198 @@ verify_trace_symbols() {
             layout_fail "entry_storage_probe has no size in the symbol table (nm -S), so this census's window has no end and the clause would be reading whatever follows it. Nothing is rebuilt by this refusal"
         stb_body=$(arm-none-eabi-objdump -d --start-address="$stb_probe" \
                    --stop-address="$(printf '0x%x' $(( stb_probe + stb_probe_size )))" "$OUT/xnu_arm_entry.elf")
+        # **712: the classifier is ONE implementation and TWO windows, and both of those are repairs.**
+        # Rung 8's clause classifies st_pwr_irq's body with this program and rung 9's classifies
+        # st_pwr_wait's with the same program. It was written inline in the rung-8 clause, and rung 9
+        # needs the identical reading of a second body - so a copy of it would be one quantity with two
+        # definitions ([[mi4-one-value-two-definitions]]), where a fix to one window's address arithmetic
+        # need not reach the other, and the two clauses would then disagree about the same instruction.
+        # The WINDOW is the argument: the caller passes the body it has already disassembled, plus the
+        # DECLARED device addresses its own record names. The function prints four lines - the distinct
+        # device accesses in program order, their counts, the image-side classes, and the addresses the
+        # image-side accesses reach (rung 9's widening reads the fourth).
+        #
+        # **The repair inside it is the second, and it is the same defect class as the first.** The
+        # program used to resolve a device address by tracking each register's (movt high, movw/mov low)
+        # pair in PROGRAM ORDER - which is what its own note called the m704 shape when the first draft
+        # resolved the halves whole-body. Rung 9's build falsified the program-order model a second time
+        # and from the other side: GCC duplicated the handler's tail across a `bne`, re-materialized only
+        # the HIGH half at the branch target (`movt r3, #0xf982` over a `mov r3, #0x4000` two blocks
+        # earlier), and left a `mov r3, #1` from the other path as the last low half the linear scan had
+        # seen - so three of the handler's seven device accesses were reported at `f98200e9`/`f9820a0d`,
+        # addresses no code writes. **A linear scan cannot know a register's value across a branch**, and
+        # the honest thing an instrument must do when it cannot compute an address is not to guess: the
+        # program now tracks every half ever materialized for a register, marks a pair FRESH only when
+        # both halves arrived since the last control transfer, and resolves a stale pair by ENUMERATION
+        # against the declared set - accepting it only when exactly ONE candidate is a declared register,
+        # and reporting `NODECL` (no candidate is declared) or `AMBI` (more than one is) otherwise. Both
+        # are refusals, and the strict direction is kept: a FRESH pair is never allowed to fall back, so
+        # an access at an undeclared address computed in the same block still refuses as it always did.
+        #
+        # The mnemonic is normalized at the same time - the CONDITION suffix is dropped and the width is
+        # kept - because `strne` and `str` are one store reached on two paths while `str` and `strb` are
+        # one form at two widths, and only the second is what a device clause is about.
+        classify_body() {
+            local body=$1 decl=$2 tgt
+            tgt=$(awk '
+                {
+                    a = $1; sub(/:$/, "", a)
+                    if (a !~ /^[0-9a-f]+$/) next
+                    if ($3 ~ /^(b|bl|bx|blx|b(eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al))$/ && $4 ~ /^[0-9a-f]+$/) print $4
+                    if ($3 ~ /^(cbz|cbnz)$/ && $5 ~ /^[0-9a-f]+$/) print $5
+                }' <<<"$body" | LC_ALL=C sort -u | tr '\n' ' ')
+            awk -v decl="$decl" -v tgt="$tgt" '
+                function isreg(x) { return x ~ /^(r([0-9]|1[0-5])|sp|lr|pc|sl|fp|ip)$/ }
+                # **712: the mnemonic is normalized by dropping the CONDITION suffix and keeping the width.**
+                # `strne` and `str` are the same store to the same word, reached on two paths; `str` and `strb`
+                # are the same form at two widths, and the width is what a device clause is about.
+                function norm(m,   b, r) {
+                    if (m ~ /^(ldr|str)/) {
+                        b = substr(m, 1, 3); r = substr(m, 4)
+                        sub(/(al|eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le)$/, "", r)
+                        return b r
+                    }
+                    return m
+                }
+                # A control transfer ends the linear region: the compiler may rely on a register whose pair it
+                # materialized in a DIFFERENT block (measured: `movt r3, #0xf982` on a `bne` target, whose low
+                # half is a `mov r3, #0x4000` from two blocks earlier). Only an unconditional or computed branch
+                # ends the fall-through, so only those (and the instruction that loads pc) bump the epoch.
+                function ends_block(m, s, d) {
+                    if (m ~ /^(b|bx|blx)$/) return 1
+                    if (m ~ /^(ldm|pop|ldmib|ldmda|ldmdb|ldmia)$/ && s ~ /pc/) return 1
+                    if (m ~ /^(ldr|ldrd)$/ && d == "pc") return 1
+                    if (m == "mov" && d == "pc") return 1
+                    return 0
+                }
+                BEGIN {
+                    nt = split(tgt, T, " "); for (i = 1; i <= nt; i++) if (T[i] != "") istgt[T[i]] = 1
+                    nd = split(decl, D, " "); for (i = 1; i <= nd; i++) if (D[i] != "") declset[strtonum("0x" D[i])] = 1
+                    epoch = 0
+                }
+                {
+                    a = $1; sub(/:$/, "", a)
+                    if (a ~ /^[0-9a-f]+$/) { if (a in istgt) epoch++ }
+                    if ($3 == "movt") {
+                        d = $4; sub(/,.*$/, "", d)
+                        v = $5; sub(/^#/, "", v)
+                        if (isreg(d) && v ~ /^-?(0x[0-9a-fA-F]+|[0-9]+)$/) {
+                            n = strtonum(v); curhi[d] = n; hiset[d SUBSEP n] = 1; hiep[d] = epoch
+                        }
+                        next
+                    }
+                    if ($3 == "movw" || $3 == "mov") {
+                        d = $4; sub(/,.*$/, "", d)
+                        v = $5; sub(/^#/, "", v)
+                        if (isreg(d) && v ~ /^-?(0x[0-9a-fA-F]+|[0-9]+)$/) {
+                            n = strtonum(v); if (n >= 0 && n <= 65535) { curlo[d] = n; loset[d SUBSEP n] = 1; loep[d] = epoch }
+                        }
+                        next
+                    }
+                    if ($3 ~ /^(ldr|str)/ && match($0, /\[[^]]*\]/)) {
+                        op = substr($0, RSTART + 1, RLENGTH - 2)
+                        n = split(op, p, ",")
+                        base = p[1]; gsub(/[ \t]/, "", base)
+                        off = "0"
+                        if (n >= 2) { off = p[2]; gsub(/[ \t#]/, "", off); sub(/!$/, "", off); if (off == "") off = "0" }
+                        if (!(base == "sp" || base == "r13" || base == "pc" || base == "r15")) {
+                            o = (off ~ /^-?[0-9]+$/) ? off + 0 : 0
+                            mn = norm($3)
+                            if (!(base in curhi)) { img["UNK:" mn] = 1 }
+                            else {
+                                # A pair is FRESH when both halves were materialized since the last control
+                                # transfer; then the address is known exactly and no hypothesis is needed. A
+                                # stale pair is enumerated over every half this body ever materialized for this
+                                # register - which is the only sound thing a linear scan can do, because the
+                                # compiler may rely on a half from another block (measured: `movt r3, #0xf982`
+                                # on a `bne` target over a `mov r3, #0x4000` two blocks earlier).
+                                fresh = (hiep[base] == epoch) && (base in curlo) && (loep[base] == epoch)
+                                nc = 0
+                                if (fresh) cands[++nc] = (curhi[base] * 65536 + curlo[base] + o) % 4294967296
+                                else for (hk in hiset) {
+                                    split(hk, pp, SUBSEP)
+                                    if (pp[1] != base) continue
+                                    for (lk in loset) {
+                                        split(lk, qq, SUBSEP)
+                                        if (qq[1] != base) continue
+                                        cands[++nc] = (pp[2] * 65536 + qq[2] + o) % 4294967296
+                                    }
+                                }
+                                ndev = 0
+                                for (i = 1; i <= nc; i++) if (int(cands[i] / 65536) >= 61440) ndev++
+                                if (ndev > 0) {
+                                    # **A device address this clause must be able to name.** The DECLARED set is
+                                    # the hypothesis space: the record says which registers this arm may reach,
+                                    # and an access whose candidates never hit one is a NEW device address - the
+                                    # refusal this whole clause exists for. Two candidates hitting two declared
+                                    # registers is not a verdict either, so it is refused as `AMBI`.
+                                    kk = 0
+                                    if (fresh) {
+                                        if (cands[1] in declset) { kk = 1; cand = cands[1] }
+                                    } else for (i = 1; i <= nc; i++) if (int(cands[i] / 65536) >= 61440 && (cands[i] in declset)) { kk++; cand = cands[i] }
+                                    if (kk == 1)      key = sprintf("%08x:%s", cand, mn)
+                                    else if (kk == 0) key = sprintf("NODECL-%04x-%d:%s", curhi[base], o, mn)
+                                    else              key = sprintf("AMBI-%04x-%d:%s", curhi[base], o, mn)
+                                    cnt[key]++
+                                    if (!(key in seen)) { seen[key] = 1; order[++no] = key }
+                                } else {
+                                    # The image side is enumerated the same way and EVERY candidate is reported,
+                                    # so a stale pair whose candidates land in two different `.bss` words is
+                                    # refused by the resolution rather than resolved by a guess.
+                                    img["IMG:" mn] = 1
+                                    for (i = 1; i <= nc; i++) {
+                                        k = sprintf("%08x:%s", cands[i], mn)
+                                        if (!(k in seenimg)) { seenimg[k] = 1; imgo[++nio] = k }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (ends_block($3, $0, $4)) epoch++
+                    next
+                }
+                END {
+                    for (i = 1; i <= no; i++) printf "%s ", order[i]
+                    printf "\n"
+                    for (i = 1; i <= no; i++) k = order[i]
+                    for (k in cnt) printf "%s=%d ", k, cnt[k]
+                    printf "\n"
+                    ni = 0; for (k in img) ik[++ni] = k
+                    asort(ik); for (i = 1; i <= ni; i++) printf "%s ", ik[i]
+                    printf "\n"
+                    for (i = 1; i <= nio; i++) printf "%s ", imgo[i]
+                    printf "\n"
+                }' <<<"$body"
+        }
+        # **712: the same one-implementation rule as the classifier, for the image side of a body.**
+        # This resolves every non-device address a body reaches to the symbol that covers it in the
+        # LINKED image, and refuses when that symbol is missing, is not `.bss`, or is not one the
+        # caller waived. Rung 8 asks it of the handler and rung 9 of the waiter; the two windows'
+        # waivers differ and the resolution must not (`mi4-one-value-two-definitions`). `$1` is the
+        # space-separated waiver set and `$2` the classifier's fourth line.
+        resolve_img_addrs() {
+            arm-none-eabi-nm -S "$OUT/xnu_arm_entry.elf" | awk \
+            -v want="$1" -v seen="$2" '
+            $3 ~ /^[bB]$/ {
+                n++; ba[n] = strtonum("0x" $1); bs[n] = strtonum("0x" $2); bn[n] = $4; inbss[$4] = 1; next
+            }
+            END {
+                split(want, wl, " ")
+                for (i in wl) { wx[wl[i]] = 1; if (!(wl[i] in inbss)) printf "%s=not-a-.bss-symbol ", wl[i] }
+                m = split(seen, ent, " ")
+                for (i = 1; i <= m; i++) {
+                    if (ent[i] == "") continue
+                    split(ent[i], p, ":")
+                    a = strtonum("0x" p[1])
+                    hit = ""
+                    for (j = 1; j <= n; j++) if (a >= ba[j] && a < ba[j] + bs[j]) hit = bn[j]
+                    if (hit == "")              printf "%s=no-symbol-in-this-image ", ent[i]
+                    else if (!(hit in wx))      printf "%s=not-waived(%s) ", ent[i], hit
+                    else                        got[hit] = 1
+                }
+                for (i in wl) if (!(wl[i] in got)) printf "%s=not-accessed ", wl[i]
+            }'
+        }
         # Every store whose operand's base is not `sp`, as `<window> <base>:<offset>:<mnemonic>` in program
         # order, where the window is named from the **pair** of immediates this body materializes the base
         # register with: a `movt` high half >= 0xf000 says a device megabyte, and the low half - from a
@@ -30216,9 +30447,11 @@ verify_trace_symbols() {
             # with the readbacks held to a minimum rather than a number for the same reason: `dc` read
             # as a byte must appear at least twice (before the acknowledge and after it), `e8` at least
             # twice and `a0c` at least twice, because a source that drops a readback keeps the set
-            # identical and loses exactly that property. (3) The image-side accesses, which must be the
-            # handler's own counter and nothing else - so a device access the classifier cannot resolve
-            # cannot hide inside the class that is waived.
+            # identical and loses exactly that property. (3) The image-side accesses, which must be this
+            # image's own `.bss` words and nothing else - so a device access the classifier cannot
+            # resolve cannot hide inside the class that is waived. Since 712 that class is wider than one
+            # word (rung 9's tail writes three more), and the check below resolves each address to a
+            # symbol rather than trusting the class name.
             #
             # **Why addresses and not the offsets the classifier above reports.** That classifier names
             # a window from the `(movt, movw)` pair a body materializes and reports the store's own
@@ -30237,51 +30470,17 @@ verify_trace_symbols() {
                 layout_fail "st_pwr_irq has no size in the symbol table (nm -S), so this clause's window has no end and it would classify whatever follows the handler as the handler's own body. Nothing is rebuilt by this refusal"
             stb_irq_body=$(arm-none-eabi-objdump -d --start-address="$stb_irq" \
                            --stop-address="$(printf '0x%x' $(( stb_irq + stb_irq_size )))" "$OUT/xnu_arm_entry.elf")
-            { read -r stb_irq_dev; read -r stb_irq_cnt; read -r stb_irq_img; } < <(awk '
-                function isreg(x) { return x ~ /^(r([0-9]|1[0-5])|sp|lr|pc|sl|fp|ip)$/ }
-                $3 == "movt" {
-                    d = $4; sub(/,.*$/, "", d)
-                    v = $5; sub(/^#/, "", v)
-                    if (isreg(d) && v ~ /^-?(0x[0-9a-fA-F]+|[0-9]+)$/) curhi[d] = strtonum(v)
-                    next
-                }
-                ($3 == "movw" || $3 == "mov") {
-                    d = $4; sub(/,.*$/, "", d)
-                    v = $5; sub(/^#/, "", v)
-                    if (isreg(d) && v ~ /^-?(0x[0-9a-fA-F]+|[0-9]+)$/) {
-                        n = strtonum(v); if (n >= 0 && n <= 65535) curlo[d] = n
-                    }
-                    next
-                }
-                $3 ~ /^(ldr|str)/ && match($0, /\[[^]]*\]/) {
-                    op = substr($0, RSTART + 1, RLENGTH - 2)
-                    n = split(op, p, ",")
-                    base = p[1]; gsub(/[ \t]/, "", base)
-                    off = "0"
-                    if (n >= 2) { off = p[2]; gsub(/[ \t#]/, "", off); sub(/!$/, "", off); if (off == "") off = "0" }
-                    if (base == "sp" || base == "r13" || base == "pc" || base == "r15") next
-                    o = (off ~ /^-?[0-9]+$/) ? off + 0 : 0
-                    if (!(base in curhi))       { img["UNK:" $3] = 1; next }
-                    if (curhi[base] < 61440)    { img["IMG:" $3] = 1; next }
-                    if (!(base in curlo))       { img["DEVLO:" $3] = 1; next }
-                    key = sprintf("%08x:%s", (curhi[base] * 65536 + curlo[base] + o) % 4294967296, $3)
-                    cnt[key]++
-                    if (!(key in seen)) { seen[key] = 1; order[++no] = key }
-                    next
-                }
-                END {
-                    for (i = 1; i <= no; i++) printf "%s ", order[i]
-                    printf "\n"
-                    for (i = 1; i <= no; i++) k = order[i]
-                    for (k in cnt) printf "%s=%d ", k, cnt[k]
-                    printf "\n"
-                    ni = 0; for (k in img) ik[++ni] = k
-                    asort(ik); for (i = 1; i <= ni; i++) printf "%s ", ik[i]
-                    printf "\n"
-                }' <<<"$stb_irq_body")
+            stb_irq_decl="f98240dc f98240e4 f98240e8 f9824a0c"
+            { read -r stb_irq_dev; read -r stb_irq_cnt; read -r stb_irq_img; read -r stb_irq_imgaddr; } < <(classify_body "$stb_irq_body" "$stb_irq_decl")
             stb_irq_want="f98240dc:ldrb f98240dc:ldr f98240e4:strb f98240e8:ldrb f98240e8:strb f9824a0c:ldr f9824a0c:str"
+            # **The declared set, and it is the classifier's hypothesis space as well as this clause's
+            # assertion.** The two uses are the same list on purpose: the record says which registers
+            # this arm may reach, and the classifier resolves a device access it cannot compute exactly
+            # (a pair the compiler split across a branch) by requiring exactly one candidate to be in
+            # THIS list. A candidate outside it - or two inside it - is `NODECL`/`AMBI` and refuses, so
+            # the list cannot be widened without widening the record it is checked against.
             [[ "$stb_irq_dev" == "$stb_irq_want" ]] ||
-                layout_fail "st_pwr_irq's device accesses are [$stb_irq_dev] and rung 8's record says [$stb_irq_want] - i.e. CORE_PWRCTL_STATUS 0xDC (0xf98240dc) read as a byte AND as a word from one moment, CORE_PWRCTL_CLEAR 0xE4 (0xf98240e4) written with the status byte, CORE_PWRCTL_CTL 0xE8 (0xf98240e8) read and written with the ack, and hc_mem + 0x10C (0xf9824a0c, VENDOR_SPEC - the vendor's own window for that register, experiment-710 section 1.5) read and written. **The three arms that may sleep must not appear here at all**: sdhci_msm_setup_vreg, sdhci_msm_setup_pins and sdhci_msm_set_vdd_io_vol are regulator and pinctrl calls, and the vendor's own devm_request_threaded_irq(..., NULL, ..., IRQF_ONESHOT) is the statement that they cannot run in an exception - this client runs in fleh_irq_kernel's frame, so a handler that reaches one of them is a handler that sleeps in an interrupt. Any other device address, any other width, and a base this clause cannot resolve (reported separately as UNK or DEVLO) all refuse. An EMPTY list is the case to be most suspicious of: a call to st_read32/st_write32 would leave this window with nothing in it and the clause would read that emptiness as a clean body, which is rung 6's lesson about st_branch_enable one function over. Nothing is rebuilt by this refusal"
+                layout_fail "st_pwr_irq's device accesses are [$stb_irq_dev] and rung 8's record says [$stb_irq_want] - i.e. CORE_PWRCTL_STATUS 0xDC (0xf98240dc) read as a byte AND as a word from one moment, CORE_PWRCTL_CLEAR 0xE4 (0xf98240e4) written with the status byte, CORE_PWRCTL_CTL 0xE8 (0xf98240e8) read and written with the ack, and hc_mem + 0x10C (0xf9824a0c, VENDOR_SPEC - the vendor's own window for that register, experiment-710 section 1.5) read and written. **The three arms that may sleep must not appear here at all**: sdhci_msm_setup_vreg, sdhci_msm_setup_pins and sdhci_msm_set_vdd_io_vol are regulator and pinctrl calls, and the vendor's own devm_request_threaded_irq(..., NULL, ..., IRQF_ONESHOT) is the statement that they cannot run in an exception - this client runs in fleh_irq_kernel's frame, so a handler that reaches one of them is a handler that sleeps in an interrupt. Any other device address, any other width, and a base this clause cannot resolve - reported as UNK (no high half materialized in this body), DEVLO (no low half), NODECL (an address no declared register matches) or AMBI (two declared registers match) - all refuse. NODECL and AMBI are the two classes 712 added when the program-order model was falsified a second time: an access the compiler split across a branch is resolved by enumerating every half this body materializes for its base register, and it is accepted only when exactly ONE candidate is a register this record declares. An EMPTY list is the case to be most suspicious of: a call to st_read32/st_write32 would leave this window with nothing in it and the clause would read that emptiness as a clean body, which is rung 6's lesson about st_branch_enable one function over. Nothing is rebuilt by this refusal"
             stb_irq_cnt_ok=$(awk -v c="$stb_irq_cnt" 'BEGIN {
                     want["f98240dc:ldrb"] = 2; want["f98240dc:ldr"] = 1; want["f98240e4:strb"] = 1
                     want["f98240e8:ldrb"] = 2; want["f98240e8:strb"] = 1
@@ -30295,7 +30494,39 @@ verify_trace_symbols() {
             [[ -z "${stb_irq_cnt_ok// /}" ]] ||
                 layout_fail "st_pwr_irq's device accesses are [$stb_irq_cnt] and the counts below the record's minimum are [$stb_irq_cnt_ok] - the readbacks are the property, not the set: CORE_PWRCTL_STATUS must be read at least twice (the value read, and the readback after the acknowledge that says the latch let go), CORE_PWRCTL_CTL at least twice (before the ack store and after it - 706's lesson that a store's own readback is the cell), and hc_mem + 0x10C at least twice (act 6's read-modify-write and its readback). A source that dropped one keeps the set of addresses identical and loses exactly this, which is why the set check above cannot stand alone. The counts are a MINIMUM and not a number because the compiler may duplicate a tail across the decode's two paths. Nothing is rebuilt by this refusal"
             [[ "$stb_irq_img" == "IMG:ldr IMG:str" ]] ||
-                layout_fail "st_pwr_irq's non-device memory accesses are [$stb_irq_img] and rung 8's record says exactly [IMG:ldr IMG:str] - the handler's own call counter in this image's .bss, read and incremented and nothing else. `UNK` and `DEVLO` must never appear here (they are the classes this clause cannot resolve, and a device access hiding in them is exactly what the waived class must not contain); an `IMG` entry beyond the counter is a device access the classifier read as this image's, which is m704's false-negative direction. Nothing is rebuilt by this refusal"
+                layout_fail "st_pwr_irq's non-device memory accesses are [$stb_irq_img] and the record says exactly [IMG:ldr IMG:str] - the four words this image's own .bss holds for this handshake (rung 8's counter and the vendor's tail's three, see the address resolution below), read and written with word accesses and nothing else. `UNK`, `DEVLO`, `NODECL` and `AMBI` must never appear here (they are the classes the classifier cannot resolve, and a device access hiding in one of them is exactly what the waived class must not contain). Since 712 the mnemonic is the CONDITION-stripped form, because `strne` and `str` are one store on two paths while `str` and `strb` are one form at two widths. Nothing is rebuilt by this refusal"
+            # **712: the waiver above is widened from one word to four, and this is the clause that keeps
+            # it a waiver rather than a hole.** Rung 9's handler tail writes the vendor's own two fields
+            # and raises its completion (`sdhci-msm.c:2092-2096`), so the mnemonics are the same two
+            # (`ldr`, `str`) while the *addresses* they reach are now four words and not one - and a
+            # mnemonic-keyed set cannot tell "four of this image's own words" from "three of them and one
+            # device access the classifier misread", which is m704's false-negative direction. So the
+            # classifier above now also reports every non-device access's **computed address**, and this
+            # check resolves each of them to a symbol in the linked image's own symbol table: the symbol
+            # must be in `.bss` (`nm`'s `b`/`B`) and it must be one of the four this rung names. **A
+            # symbol that is not in `.bss` is the interesting refusal** - a device address that survived
+            # the classifier's resolution would land inside `entry_storage_probe`'s text or inside a
+            # `.data` word, and neither is a thing this handler may write. The two directions are both
+            # checked: every address seen must be one of the four, and every one of the four must be seen
+            # (a source that dropped a tail write keeps the mnemonic set and loses exactly that).
+            #
+            # **The reorder this made in the classifier is part of the check.** The image test used to be
+            # taken on the high half alone, so an image base whose low half the body never materialized
+            # was waived by name; it is now tested *after* the low half, so such a base is `DEVLO` and
+            # refuses. That is the fail-closed direction and it is deliberate: the whole point of this
+            # clause is that an address it cannot compute is one it will not vouch for.
+            #
+            # **The waiver set is built from `want` and not from the symbol table, and the first draft of
+            # this clause got that wrong.** It marked every `.bss` symbol as waived (`w[$4] = 1` in the
+            # reader), so any `.bss` address at all passed the `not-waived` test and the check could only
+            # ever fail on a symbol that does not exist - the `not-waived` direction, the one this whole
+            # widening exists for, was **vacuous**. The smoke test caught it on the handler's own two
+            # neighbours (`g_pwr_irq_arms` at `805541b0` read as waived), which is the reason the check is
+            # exercised on every branch in the build log rather than only on the green one.
+            stb_irq_want_img="g_pwr_irq_calls g_pwr_curr_state g_pwr_curr_io g_pwr_irq_done"
+            stb_irq_img_bad=$(resolve_img_addrs "$stb_irq_want_img" "$stb_irq_imgaddr")
+            [[ -z "${stb_irq_img_bad// /}" ]] ||
+                layout_fail "st_pwr_irq's non-device accesses are [$stb_irq_imgaddr] resolved against this image's own .bss as [$stb_irq_img_bad], and rung 9's record says those accesses are exactly the four words [$stb_irq_want_img] - the handler's call counter plus the THREE words the vendor's own tail writes (msm_host->curr_pwr_state, curr_io_level, and the completion stand-in the flag stands for, sdhci-msm.c:2092-2096). The failure kinds are named: `not-a-.bss-symbol` means one of the four names is not a .bss object in the linked image (it was renamed, moved to .data, or dropped); `no-symbol-in-this-image` means a non-device access resolved to an address no symbol covers, which is a device access the classifier read as this image's - m704's direction; `not-waived(...)` means it resolved to a *named* symbol that is not one of the four, i.e. this body writes memory the rung never declared; `not-accessed` means one of the four is no longer written at all, which leaves the mnemonic set unchanged and loses exactly the property that makes this rung's wait meaningful. Nothing is rebuilt by this refusal"
             # **One producer per key, and this is the property `entry_irq.c`'s own record already
             # assumes.** 500 wrote `xnu_live_irq_line_*` as THE record of a line; a second caller of
             # `entry_irq_enable_line` would make those keys a value with two producers and the record
@@ -30316,7 +30547,100 @@ verify_trace_symbols() {
             # counts the readbacks are held to, the image-side accesses, and the two call counts that
             # make the registration and the arming one each. Compare a rung-8 log WITH this line against
             # a rung-7 log WITHOUT it before reading the absence of a FAIL as a pass.
-            echo "  xnu_entry_710: st_pwr_irq's device accesses are [$stb_irq_dev] with counts [$stb_irq_cnt], its non-device accesses are [$stb_irq_img], and entry_storage_probe calls entry_irq_register_client $(grep -c -- 'bl.*<entry_irq_register_client>' <<<"$stb_body") time(s) and entry_irq_enable_line $(grep -c -- 'bl.*<entry_irq_enable_line>' <<<"$stb_body") time(s) - intid 170 registered and armed once, the handler\'s device accesses at their own widths with their readbacks, and nothing in its body that may sleep"
+            echo "  xnu_entry_710: st_pwr_irq's device accesses are [$stb_irq_dev] with counts [$stb_irq_cnt], its non-device accesses are [$stb_irq_img] at [$stb_irq_imgaddr], and entry_storage_probe calls entry_irq_register_client $(grep -c -- 'bl.*<entry_irq_register_client>' <<<"$stb_body") time(s) and entry_irq_enable_line $(grep -c -- 'bl.*<entry_irq_enable_line>' <<<"$stb_body") time(s) - intid 170 registered and armed once, the handler\'s device accesses at their own widths with their readbacks, and nothing in its body that may sleep"
+        fi
+        # ---------------------------------------------- 712: rung 9's own window - the WAITER's body
+        #
+        # **A second window and not a wider first one, for rung 8's reason one function over.**
+        # `st_pwr_wait` is `noinline` on purpose, so it is its own symbol with its own `nm -S` extent,
+        # and this clause reads *it*: the probe's census cannot see inside a function it does not
+        # contain, and the handler's window is a different body. What rung 8's clause and this one share
+        # is the classifier and the resolver, both now written once (`classify_body`,
+        # `resolve_img_addrs`), so the two windows cannot drift apart in how they read an instruction.
+        #
+        # **The device accesses are two addresses and no store, and that is the rung's whole device
+        # contract.** `0xf982492c` is `hc_mem + CLOCK_CONTROL 0x2C` read as a HALFWORD (the vendor's
+        # `readw`, `sdhci.h:100`) twice - the reading 711 section 3 left open, now taken either side of
+        # the wait. `0xf98240e8` is `core_mem + CORE_PWRCTL_CTL 0xE8` read as a BYTE - the poll's own
+        # end condition, and **a read is the point**: rung 8's handler is what writes the ack, so a
+        # waiter that wrote it would be answering its own completion. A `str`/`strb` anywhere in this
+        # window therefore fails the set equality rather than a separate assertion, and an EMPTY list is
+        # the case to be most suspicious of for the reason rung 6 taught about `st_branch_enable`:
+        # `st_read16` is a helper, and if a future edit stops inlining it these two halfword reads land
+        # in another function while this clause would read the emptiness as a clean body.
+        #
+        # **The counts are a minimum, for the rung-8 clause's reason.** What the rung needs is that the
+        # register is read on BOTH sides of the wait - once to know the state before it, once to know the
+        # state after it - and the compiler may duplicate a read across the two paths of the vendor's own
+        # decode. A source that dropped one read keeps the address set identical and loses exactly that
+        # property, which is why the set check cannot stand alone.
+        #
+        # **The image side is the same widening, resolved the same way.** `st_pwr_wait` reads the three
+        # words the handler's tail writes and reads its own counter, so its waiver is the same four names
+        # - and the resolution (a `.bss` symbol in the LINKED image, one of the four) is what makes "the
+        # handler and the waiter touch the same four words" a property of the artifact rather than of two
+        # source files agreeing.
+        #
+        # **The budget is checked as the pair of instructions that carries it.** A switch whose value
+        # never reaches the image is `mi4-off-option-two-spellings`' defect with a shorter fuse: the build
+        # would record `STAGE90_XNU_PWR_WAIT_TICKS=$PWR_WAIT_TICKS` and link a body bounded by something
+        # else. The two halves must be the SAME register, in movw-then-movt order - a low half alone is a
+        # 16-bit constant and a `movt` on another register is not this wait's bound. `movw`/`movt` is how
+        # GCC -mcpu=cortex-a15 materializes this constant; a build that reached for the literal pool
+        # instead refuses here, which is the honest outcome - a clause that cannot see the number it is
+        # asserting must not pass.
+        if [[ $STORAGE_PROBE -ge 9 ]]; then
+            stb_wait=$(sym_addr st_pwr_wait) ||
+                layout_fail "st_pwr_wait is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE - rung 9's whole act IS that body (the driver's own check_power_status ported, sdhci.c:1371-1372), so an arm at this rung whose waiter is absent is an arm whose record names a wait no call in the image makes. There are exactly two ways to get here and both are refusals worth having: the function was renamed, or it was INLINED into the probe - and the second is what `noinline` exists to prevent, because a wait with no body of its own is a wait this clause cannot read at all. Nothing is rebuilt by this refusal"
+            stb_wait_size=$(sym_size st_pwr_wait) ||
+                layout_fail "st_pwr_wait has no size in the symbol table (nm -S), so this clause's window has no end and it would classify whatever follows the waiter as the waiter's own body. Nothing is rebuilt by this refusal"
+            stb_wait_body=$(arm-none-eabi-objdump -d --start-address="$stb_wait" \
+                            --stop-address="$(printf '0x%x' $(( stb_wait + stb_wait_size )))" "$OUT/xnu_arm_entry.elf")
+            stb_wait_decl="f98240e8 f982492c"
+            { read -r stb_wait_dev; read -r stb_wait_cnt; read -r stb_wait_img; read -r stb_wait_imgaddr; } < <(classify_body "$stb_wait_body" "$stb_wait_decl")
+            # **The order is PROGRAM ORDER and not sorted** - the same order the classifier prints and
+            # the same order the rung-8 record is written in. It reads backwards here (0x492c's halfword
+            # before 0x40e8's byte) because that is the order the arm takes them in: `check_power_status`
+            # reads CLOCK_CONTROL, then the acks, then CLOCK_CONTROL again. A first draft of this record
+            # wrote the two addresses in ascending order and was refused by this very clause - the
+            # source being right and the record wrong, which is what the refusal is for.
+            stb_wait_want="f982492c:ldrh f98240e8:ldrb"
+            [[ "$stb_wait_dev" == "$stb_wait_want" ]] ||
+                layout_fail "st_pwr_wait's device accesses are [$stb_wait_dev] and rung 9's record says [$stb_wait_want] - i.e. CLOCK_CONTROL 0x2C (hc_mem + 0x2C = 0xf982492c) read as a halfword and CORE_PWRCTL_CTL 0xE8 (core_mem + 0xE8 = 0xf98240e8) read as a byte, and NOTHING ELSE. **No store may appear here at all**: the ack the poll waits for is the HANDLER's store, so a waiter that wrote CTL would be answering its own completion, and a waiter that wrote CLOCK_CONTROL would be the clock set this rung is not. An EMPTY list is the case to be most suspicious of - st_read16 is a helper, and a body that calls it without inlining leaves both halfword reads in another function while this clause would read the emptiness as a clean body (rung 6's st_branch_enable lesson, one function over). Any other address, any other width, and a base this clause cannot resolve (reported as UNK, DEVLO, NODECL or AMBI by the set check) all refuse. Nothing is rebuilt by this refusal"
+            stb_wait_cnt_ok=$(awk -v c="$stb_wait_cnt" 'BEGIN {
+                    want["f982492c:ldrh"] = 2; want["f98240e8:ldrb"] = 2
+                    split(c, a, " ")
+                    for (i in a) { split(a[i], b, "="); n[b[1]] = b[2] + 0 }
+                    miss = ""
+                    for (k in want) if ((k in n) && n[k] < want[k]) miss = miss sprintf("%s=%d(want>=%d) ", k, n[k] + 0, want[k])
+                    print miss
+                }')
+            [[ -z "${stb_wait_cnt_ok// /}" ]] ||
+                layout_fail "st_pwr_wait's device accesses are [$stb_wait_cnt] and the counts below the record's minimum are [$stb_wait_cnt_ok] - the two readings either side of the wait are the property, not the set: CLOCK_CONTROL must be read at least twice (711 section 3's question is whether the bit two consecutive boots disagreed about is a race, and one reading cannot answer it) and CORE_PWRCTL_CTL at least twice (the poll's own end condition, read before the loop and after it - a single read is the latch rung 7 left standing, which is the arm below this one). The counts are a MINIMUM because the compiler may duplicate a read across the vendor's own two decode branches. Nothing is rebuilt by this refusal"
+            [[ "$stb_wait_img" == "IMG:ldr IMG:str" ]] ||
+                layout_fail "st_pwr_wait's non-device memory accesses are [$stb_wait_img] and rung 9's record says exactly [IMG:ldr IMG:str] - the four .bss words below, read and (on the vendor's own reset branch) written, and nothing else. UNK and DEVLO must never appear here: they are the classes the classifier cannot resolve, and a device access hiding in one of them is exactly what the waived class must not contain - which is why this set is asserted exactly and not only measured by the resolution below. Nothing is rebuilt by this refusal"
+            stb_wait_want_img="g_pwr_irq_calls g_pwr_curr_state g_pwr_curr_io g_pwr_irq_done"
+            stb_wait_img_bad=$(resolve_img_addrs "$stb_wait_want_img" "$stb_wait_imgaddr")
+            [[ -z "${stb_wait_img_bad// /}" ]] ||
+                layout_fail "st_pwr_wait's non-device accesses are [$stb_wait_imgaddr] resolved against this image's own .bss as [$stb_wait_img_bad], and rung 9's record says those accesses are exactly the four words [$stb_wait_want_img] - the same four rung 8's clause names, because the waiter and the handler are the two halves of ONE handshake (the handler writes msm_host->curr_pwr_state / curr_io_level and raises the completion, sdhci-msm.c:2092-2096; the waiter reads all three and its own counter). The failure kinds are the rung-8 clause's: not-a-.bss-symbol, no-symbol-in-this-image (a device access the classifier read as this image's), not-waived(...) (memory this rung never declared) and not-accessed (one of the four is no longer reached). Nothing is rebuilt by this refusal"
+            [[ "$(grep -c -- 'bl.*<st_pwr_wait>' <<<"$stb_body")" == "1" ]] ||
+                layout_fail "entry_storage_probe makes $(grep -c -- 'bl.*<st_pwr_wait>' <<<"$stb_body") call(s) to st_pwr_wait and rung 9 makes exactly one - sdhci_set_power's single check_power_status(host, REQ_BUS_ON) (sdhci.c:1371-1372), immediately after rung 7's byte. Zero means the waiter is in the image and nothing calls it (the m720 shape: a switch no build reads), and two or more means the probe is spending the run's ending clock on a second wait the driver does not make. The call is also what keeps this window's body in the image at all - an unreferenced static is dropped, so a zero call count and an image WITHOUT the symbol would be one build. Nothing is rebuilt by this refusal"
+            stb_wait_lo=$(( PWR_WAIT_TICKS & 0xFFFF ))
+            stb_wait_hi=$(( (PWR_WAIT_TICKS >> 16) & 0xFFFF ))
+            stb_wait_pair=$(awk -v hi="$stb_wait_hi" -v lo="$stb_wait_lo" '
+                $3 == "movw" || $3 == "mov" {
+                    d = $4; sub(/,.*$/, "", d); v = $5; sub(/^#/, "", v)
+                    if (v ~ /^(0x[0-9a-fA-F]+|[0-9]+)$/ && strtonum(v) == lo) low[d] = 1
+                    next
+                }
+                $3 == "movt" {
+                    d = $4; sub(/,.*$/, "", d); v = $5; sub(/^#/, "", v)
+                    if (v ~ /^(0x[0-9a-fA-F]+|[0-9]+)$/ && strtonum(v) == hi && (d in low)) hit = 1
+                }
+                END { printf "%d", hit + 0 }' <<<"$stb_wait_body")
+            [[ "$stb_wait_pair" == "1" ]] ||
+                layout_fail "st_pwr_wait's body carries no mov/movw + movt pair for $PWR_WAIT_TICKS (lo=0x$(printf '%x' "$stb_wait_lo"), hi=0x$(printf '%x' "$stb_wait_hi")): the wait's own budget does not appear in the linked artifact, so the record's STAGE90_XNU_PWR_WAIT_TICKS=$PWR_WAIT_TICKS would be a number nothing in the image reads - a switch no build reads, which is m720's shape and this project's oldest silent defect. The pair must be the SAME register in movw-then-movt order: a low half alone is a 16-bit constant and a movt on another register is not this wait's bound. GCC -mcpu=cortex-a15 emits the pair; a build that reached for the literal pool instead refuses here deliberately, because a clause that cannot see the number it asserts must not pass. Nothing is rebuilt by this refusal"
+            echo "  xnu_entry_712: st_pwr_wait's device accesses are [$stb_wait_dev] with counts [$stb_wait_cnt], its non-device accesses are [$stb_wait_img] at [$stb_wait_imgaddr], entry_storage_probe calls it $(grep -c -- 'bl.*<st_pwr_wait>' <<<"$stb_body") time(s), and its budget $PWR_WAIT_TICKS is carried by the movw/movt pair in its own body - the driver's own completion ported: two halfword readings of CLOCK_CONTROL either side of a bounded poll of the CONTROLLER's ack, and no store to any device"
         fi
         echo "  xnu_entry_698: the probe's stores, classified by window and offset - core_mem [$stb_core_off] through [$stb_core_base], hc_mem [$stb_hc_off]($stb_hc_mne) through [$stb_hc_base], gcc [$stb_gcc], image [$stb_img], ambiguous [$stb_amb], unknown [$stb_unk], unnamed-device [$stb_devbad$stb_devlo]"
     fi
@@ -31771,6 +32095,12 @@ IDLE_STACK_FOR_RECORD=${STAGE90_XNU_IDLE_STACK:-1}
     # gate ever reads. The two-way check after the file is written is what makes forgetting it a refusal
     # rather than a commit.
     echo "STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE"
+    # **712's second key, and it is written here rather than beside the two above it for the reason
+    # 678's own note gives at length**: the record is the only description of the image the gate sees,
+    # and a switch that reached the compiler but not this writer is a run whose budget nobody read. The
+    # rung-8 arm above it is not enough on its own: `STAGE90_XNU_PWR_WAIT_TICKS` moves without the rung
+    # moving, so a record that carried only the rung would describe two different waits with one line.
+    echo "STAGE90_XNU_PWR_WAIT_TICKS=$PWR_WAIT_TICKS"
 } > "$OUT/xnu_arm_entry-config.txt"
 
 # ------------------------------------------------- 678: the record and the arm-key list, both ways
