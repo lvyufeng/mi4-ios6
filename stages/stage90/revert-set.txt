@@ -2238,13 +2238,25 @@ set=armed-storage-pwrirq-df4d38e5 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27
 # builds the waiver set from the recorded names, and the refusal is exercised on every branch in the
 # build log.
 #
-# **AND THE BUILD SCRIPT HAS A LIVE DEFECT IN ONE OF ITS TWO LANES.** `./build.sh` silently drops
-# `#define STAGE90_XNU_ENTRY 1`, emitting `0u` (measured by `diff` against the park: `5d4 < #define
-# STAGE90_XNU_ENTRY 1` / `7a7 > #define STAGE90_XNU_ENTRY 0u`) because the payload's macro export has
-# no trailing space and the writer's last pattern never matches it. This arm's payload was therefore
-# built as `STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' ./build.sh`, after which
-# `stage90-build-config.txt` is BYTE-IDENTICAL to the pressed rung-8 park's. Recorded rather than
-# silently re-done; it is a doc/message item for the lane that owns `build.sh`.
+# **AND THE PAYLOAD BUILD'S ENTRY SWITCH HAS NO DEFAULT, WHICH IS THE HAZARD THIS STEP'S FIRST
+# BUILD STEPPED IN.** `./build.sh` carries no default for `STAGE90_XNU_ENTRY`: the switch exists only
+# if `STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1'` is passed, and `stage90.h:7083`'s
+# `#if !defined(STAGE90_XNU_ENTRY)` otherwise defines it as `0u` - so a bare `./build.sh` writes a
+# DIFFERENT ARM into `out/stage90/` in place, in silence. 681 section 4 measured exactly that, and
+# measured with it that the payload build IS byte-for-byte reproducible WHEN the arm's own flags are
+# passed. **A MECHANISM THIS RECORD FIRST ASSERTED FROM THE SYMPTOM IS FALSIFIED BY ITS OWN
+# MEASUREMENT AND IS CORRECTED HERE**: the first version said `./build.sh` "silently drops `#define
+# STAGE90_XNU_ENTRY 1` ... because the payload's macro export has no trailing space and the writer's
+# last pattern never matches it". The `diff` quoted beside it says otherwise - the two lines differ in
+# the VALUE (`1` vs `0u`) and in the POSITION (line 5 vs line 7), so the `0u` line WAS WRITTEN and
+# nothing was dropped. Re-measured on `build.sh`'s own `-dM` pipeline: with no `-D` the line is
+# `#define STAGE90_XNU_ENTRY 0u` at line 7; with `-DSTAGE90_XNU_ENTRY=1` it is `#define
+# STAGE90_XNU_ENTRY 1` at line 5 (a command-line `-D` is defined before the header is read). This
+# arm's payload was therefore built as `STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' ./build.sh`, after
+# which `stage90-build-config.txt` is BYTE-IDENTICAL to the pressed rung-8 park's. The item for the
+# lane that owns `build.sh` is therefore not "repair the writer" (there is nothing wrong with it) but
+# "the arm-critical switch has no default" - and no press may be fired from a tree whose config record
+# was written by a build that did not pass the arm's own flags.
 #
 # THE GATE'S NARRATION OF `STAGE90_XNU_STORAGE_PROBE` IS NOW EIGHT RUNGS SHORT (2 through 9) - peer
 # lane, by message and never by edit.

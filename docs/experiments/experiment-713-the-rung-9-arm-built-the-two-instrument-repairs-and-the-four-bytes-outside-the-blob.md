@@ -142,13 +142,34 @@ and the record was wrong, and the build refused. The record now carries program 
 saying so.
 
 **And the lane's `./build.sh` has a live defect, recorded rather than silently worked around.**
-`./build.sh` **silently drops `#define STAGE90_XNU_ENTRY 1`**, emitting `0u` — measured by `diff`
-against the park: `5d4 < #define STAGE90_XNU_ENTRY 1` / `7a7 > #define STAGE90_XNU_ENTRY 0u`. The
-payload's macro export has no trailing space, so the writer's last pattern never matches it. This
-arm's payload was therefore built as `STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' ./build.sh`, after
-which `stage90-build-config.txt` is **byte-identical to the pressed rung-8 park's** — which is the
-evidence that the workaround reproduced the pressed arm's configuration exactly. It is a doc/message
-item for the lane that owns `build.sh`, not a silent re-do.
+`./build.sh` carries **no default for `STAGE90_XNU_ENTRY`** — the switch exists only if
+`STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1'` is passed, and `stage90.h:7083`'s
+`#if !defined(STAGE90_XNU_ENTRY)` otherwise defines it as `0u`. A bare `./build.sh` therefore writes a
+**different arm into `out/stage90/` in place, in silence** (681 §4 measured that, and measured that the
+payload build IS byte-for-byte reproducible *when the arm's own flags are passed*). This arm's payload
+was built as `STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' ./build.sh`, after which
+`stage90-build-config.txt` is **byte-identical to the pressed rung-8 park's** — which is the evidence
+that the invocation reproduced the pressed arm's configuration exactly.
+
+**A MECHANISM THIS DOCUMENT FIRST ASSERTED IS FALSIFIED BY ITS OWN MEASUREMENT, AND IS CORRECTED
+HERE.** The first version of this paragraph said `./build.sh` "silently drops `#define
+STAGE90_XNU_ENTRY 1` ... because the payload's macro export has no trailing space, so the writer's last
+pattern never matches it". **That is false, and the `diff` quoted beside it is what falsifies it**: the
+park line and the emitted line differ in the VALUE (`1` vs `0u`) *and* in the position (line 5 vs line
+7), which means the `0u` line **was written** — nothing was dropped. Re-measured directly, the two
+invocations of `build.sh`'s own `-dM` pipeline produce:
+
+```
+no -D   ->  line 7:  #define STAGE90_XNU_ENTRY 0u
+-D...=1 ->  line 5:  #define STAGE90_XNU_ENTRY 1
+```
+
+So the grep matches both spellings and the writer emits both; the difference is **which value the
+compiler saw**. The line moves from 7 to 5 because a command-line `-D` is defined before the header is
+read, which is also why the recorded `diff` had the shape it did. The real defect is the hazard 681
+already recorded — no default, so a forgotten flag silently produces a different arm — and the
+sentence above now says that instead. The lesson is `mi4-measurement-defects` m722: a symptom was
+published with the first mechanism that explained it, and one command would have chosen between them.
 
 ## 6. The arm, measured
 
