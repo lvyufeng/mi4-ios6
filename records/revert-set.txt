@@ -4677,3 +4677,138 @@ set=armed-storage-b7e5a18f sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # The goal is still **NOT met**: no storage, no filesystem, no mount, and the machine never observed
 # STAYING UP (745). The goal's floor - *user mode reached, and a driver answering* - is met and no further.
 # **TWRP-to-storage stays withheld.**
+
+# ================================================================================================
+# RUNG 21 ARMED: THE SAME DRIVER'S CMD3 WITH ITS RESPONSE DEMAND PUT BACK AND ITS `INDEX` BIT TAKEN OUT.
+# ================================================================================================
+# `armed-storage-46fe6737` - `STAGE90_XNU_STORAGE_PROBE=20`, ordinal rung 21, and the eight hex of its
+# name is `xnu_arm_entry.bin`'s own sha256 prefix (the rule every `armed-storage-*` set in this record
+# follows). It is rung 20's whole act - the same opcode 3, the same argument `0x00010000`, the same
+# one-bit `INT_ENABLE 0x34` window, the same registers read at the same widths, the same gate
+# (`st_all_send_cid`'s returned `cid_sent`) - with **ONE FLAG BIT MOVED**: `MMC_RSP_NONE` (`0x00`) to
+# `ST_MMC_RSP_R1_NOIDX` (`ST_MMC_RSP_PRESENT | ST_MMC_RSP_CRC`, `0x05`), so the command word goes
+# `0x0300` -> **`0x030A`**. **It sits ONE BIT from each arm of a measured pair**: rung 19's `0x031A`
+# with the `INDEX` bit gone, and rung 20's `0x0300` with the response demand put back.
+#
+# **THE RULE THIS RUNG TESTS, AND IT IS THE FIRST RULE THAT FITS ALL FIVE OF THE LADDER'S WORDS.**
+#
+#   `0x0000`  started, completed     the ladder's first completion
+#   `0x0300`  started, completed     0.255 ms
+#   `0x031A`  started, never finished
+#   `0x0102`  NEVER STARTED
+#   `0x0209`  NEVER STARTED
+#
+# **A word that asks for a response (`ST_MMC_RSP_PRESENT`) and carries no `INDEX` bit is DECLINED.**
+# `0x0300` is the only word here that asks for nothing and the only OTHER word that completes; `0x031A`
+# asks and carries `INDEX`, so it is taken and never finishes; `0x0102` and `0x0209` ask and carry NO
+# `INDEX`, and NEITHER WAS EVER STARTED in all three of the last three presses
+# (`_cmd1_word_read = 0x00000102` with `_cmd1_inhibit_seen = 0` over 5,088,256 samples, identically in
+# rung 18's, rung 19's and rung 20's captures). 746 section 4b named two one-constant moves to test it;
+# THIS IS THE SECOND OF THEM, and the FIRST was refuted in advance by rung 20 (`0x0300` is exactly that
+# shape on opcode 3 and it started), which is why the rule's exclusion is down to the `INDEX` bit.
+#
+# **THE ANSWER IS A THREEWAY, AND EACH BRANCH NAMES THE NEXT ACT.** `_nidx_inhibit_seen = 0` with
+# `_nidx_word_read = 0x030A` CONFIRMS the rule and explains CMD1 and CMD2 in the same stroke, and the
+# subject becomes the block's own sequencer rather than a flag word. `_nidx_inhibit_seen > 0` with
+# `_nidx_complete = 0` KILLS the rule's `INDEX` half and puts the stall back on the response itself,
+# withdrawing rung 20's exoneration of the demand for want of a second sample. `_nidx_complete = 1`
+# kills the rule outright - a response-demanding command can finish on this block.
+#
+# **AND IT CARRIES m756'S REPAIR, DECLARED AND READ-ONLY.** 743 section 7 wrote rung 20's three response
+# readings as ONE arithmetic at three times, `(readl(RESPONSE + 0x1C) << 8) | readb(RESPONSE + 0x1B)`,
+# and it was NOT one: `st_send_command` reads `readl(RESPONSE 0x10)` - WORD 0, the word a 48-bit
+# response actually lives in - while rung 19's and rung 20's bodies took their `before`/`after` pair
+# through the 136-bit formula whose top word is `+0x1C`. So `0x40ff8080 -> 0x00000000` compared word 0
+# against words 2 and 3, and the two agreed at the first moment only because CMD1's word was still in
+# word 0 while CMD2's leftover still sat in words 2/3. **THIS BODY'S PAIR IS `readl(RESPONSE 0x10)` AT
+# BOTH MOMENTS**, the same expression `st_send_command` reads, **and the four raw RESPONSE words are
+# published at both moments this body owns** (`_nidx_raw_pre0..3`, `_nidx_raw_post0..3`), word-3-first
+# in rung 18's own order, plus `_nidx_resp_moved` and `_nidx_resp_is_arg`. **What is deliberately NOT
+# done**: the middle moment's four raw words are not published, because that reading lives in
+# `st_send_command` - the one body every command in this ladder shares - and four new offsets there is
+# a change this arm does not need to make its own point. The R1 decode is BACK for the reason rung 20
+# left it out: this command DOES demand a 48-bit response, so `_nidx_resp` is this command's to read,
+# with rung 19's own caveat that a field is a decode of whatever the register holds.
+#
+# **THE SAFETY CONTRACT HELD AS A SET A BUILD READS.** TWO stores, both to `INT_ENABLE 0x34`: the
+# one-bit window set immediately before the command and its ONE unconditional restore after the
+# publishes. `SIGNAL_ENABLE 0x38` READ and NEVER WRITTEN, which keeps this block's SPI 123 -> intid 155
+# off a line nobody here owns. No data path, no `POWER_CONTROL 0x29`, no GCC word, no `core_mem` word,
+# no `INT_STATUS 0x30` write and no byte of the medium. **The failure mode is a diagnosis and not a
+# lost device**: the 1.2 s bound is inside `st_send_command`, the ending is unmoved, and a delivery on
+# the shared SPI 123 line ends the run at the dispatcher as `_irq_other_count = 1` / `iat = 155` - an
+# ending this image already reads and survives (709 ended that way on intid 170).
+#
+# **WHAT THE BUILD HOLDS IT TO, AND WHAT THE BUILD'S OWN FIRST DRAFT GOT WRONG.** The new clause is
+# `xnu_entry_746` in `src/entry/build_entry.sh`, guarded `-ge 20`, and it asserts the access set, the
+# COUNT of every access (each of the four RESPONSE words exactly 2 - m756's repair as a number), the
+# store set exactly `f9824934:str`, the distinct program order, an EMPTY image side, the call site's
+# position after `st_all_send_cid` and after the command path's last `st_send_command`, the four
+# command call sites `[2, 1, 1]`, and the exclusion of BOTH `st_cmd3_noresp` and `st_set_relative_addr`.
+# **THE FIRST BUILD OF THIS RUNG REFUSED** - `FAIL: st_cmd3_noresp is not in the linked image while
+# STAGE90_XNU_STORAGE_PROBE=20` - because rung 20's own clause was guarded `-ge 19` and so demanded
+# rung 20's symbol in a rung-21 image; it is `-eq 19` now, which is a property rather than a spelling.
+#
+# **AND THE CLAUSE GAINED A SPLIT, BECAUSE A FALSIFICATION CELL BUILT.** The distinct-order assertion
+# cannot see a re-ordering of an access that REPEATS, and this rung repeats twice (four RESPONSE words
+# at two moments, `0x34` stored twice): a cell that moved the window's restore to the body's LAST line
+# came back `rc=0 BUILT-OK`. The body is now cut at its own `bl <st_send_command>` and two sets are
+# asserted - the head exactly `f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str
+# f9824934:ldr f9824938:ldr`, and the whole body with the head's device accesses deleted exactly
+# `f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str f9824930:ldr f9824934:ldr
+# f9824924:ldr` - so the restore must be the tail's FIRST store, ahead of `INT_STATUS 0x30` and
+# `PRESENT_STATE 0x24`. **The pair is deliberately not head/tail**: `classify_body` resolves a base
+# register only from a `movw`/`movt` it has itself seen, so a bare tail half reports every access as
+# `UNK:`; the materialisation is in the head. THREE of the clause's own refusal messages were
+# over-claims and are corrected: a removed call site is refused by the COMPILER first
+# (`-Werror=unused-function`), not by the symbol check; and the exclusion clause is a SECOND net - both
+# exclusion cells, one widening ALL FOUR of rung 20's guards, were refused by the SEAM IDENTIFICATION
+# (`STAGE90_XNU_SEAM_LR is 0x800492dc`), because a body added to that translation unit moves the exit
+# path. The falsification battery is 16 cells plus 2, in `/tmp/vprfix/falsify21.sh` and
+# `/tmp/vprfix/falsify21_extra.sh`; the results are tabulated in experiment-747 section 8b.
+#
+# **THE ARM'S OWN NUMBERS.** entry bin `46fe6737…`, 5552764 B - **the seam constant did NOT move**
+# (`STAGE90_XNU_SEAM_LR (0x800492dc`), and the entry bin's SIZE is byte-identical to the pressed rung-20
+# arm's, so the image grew nowhere. `st_cmd3_noidx` at `0x8000df54`, size `0x338`; `st_cmd3_noresp` and
+# `st_set_relative_addr` BOTH ABSENT (0 occurrences each); 44 `xnu_live_storage_nidx_*` keys in the body
+# plus the two `_nidx_gated*` cells in `st_cmd_path` = 46 strings in the image; the encoded command in
+# the disassembly is `mov r2, #5`, `mov r1, #65536`, `mov r0, #3`, `bl 8000cff8 <st_send_command>`; and
+# the owed config comparison HOLDS - the payload's `stage90-build-config.txt` is BYTE-IDENTICAL to the
+# pressed rung-20 arm's (`cmp` 6c2b6038), so no payload switch moved and the entry config differs in
+# exactly two lines (the entry bin's hash and `STAGE90_XNU_STORAGE_PROBE 19 -> 20`).
+#
+# **THIS BLOCK ARMS A PRESS THAT HAS NOT BEEN AUTHORIZED.** No firer is armed and none is needed; the
+# press path is the two commands readiness prints, run by hand once each (730 section 6). When it is
+# authorized: `tools/verify_press_ready.sh` first, then EXACTLY ONE
+# `./scripts/preflight_boot_check.sh <printed flags>` and EXACTLY ONE
+# `./scripts/run_and_capture.sh <printed flags> --expect-arm=<printed set>`. `fastboot boot` only,
+# NEVER flash; the neighbour `33e80afe` absent from BOTH device lists before firing.
+#
+# The goal is still **NOT met**: no storage, no filesystem, no mount, and the machine never observed
+# STAYING UP (745). **TWRP-to-storage stays withheld.**
+#
+# **AND THE ENTRY IMAGE WAS REBUILT ONCE AFTER THE PAYLOAD, SO ONE MEMBER'S HASH MOVED AND THE OTHERS DID
+# NOT.** `make check` refused this arm's first committed state with SIXTEEN unescaped backticks inside four
+# of `xnu_entry_746`'s own refusal messages - **m730's class**: an unescaped backtick in a double-quoted
+# shell string is a COMMAND SUBSTITUTION, so the refusal fires and its explanation has a hole, and a
+# successful report prints a sentence with a word missing. The fix is escaped backticks, and
+# `build_entry.sh` **IS one of the entry image's 23 recorded sources**, so the tree in front of the gate
+# stopped being the tree the image was built from. The entry build was re-run: the **entry bin did NOT
+# move** (`46fe6737`, 5552764 B - `build_entry.sh` is not compiled into the image, so nothing it does can
+# move a byte of it) and neither did any other member; only `xnu_arm_entry-sources.txt` moved, and the
+# `role=` on its line records why. **The general rule, and it is the one this arm is the first to hit:
+# a check that is green only because nobody ran it is not green - `make check` is part of arming, and a
+# source recorded by content makes every edit to the BUILDER a reason to rebuild.**
+#
+# ------------------------------------------------------------------------------------------------
+set=armed-storage-46fe6737 sha256=3f11e29b80c259ffea2bc7cc654a8e7a37f6ac383af3148cda5223b69e0e5a92 bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-20-entry-rung-21-whose-new-body-is-the-driver-s-own-CMD3-mmc_set_relative_addr-with-the-SAME-opcode-3-and-the-SAME-argument-0x00010000-as-rungs-19-and-20-and-the-response-demand-PUT-BACK-with-the-INDEX-bit-TAKEN-OUT-word-0x030A
+set=armed-storage-46fe6737 sha256=5e74d9618ece1c9616e7bb3b9196827d39be4a1e8c640aa2b911b3d140ddda10 bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-20-entry
+set=armed-storage-46fe6737 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-pressed-rung-20-arm-BY-MEASUREMENT-cmp-6c2b6038-so-no-payload-switch-moved-and-the-owed-config-comparison-of-the-732-block-holds-for-this-arm-ON-THE-FIRST-BUILD-with-STAGE90_EXTRA_CFLAGS-DSTAGE90_XNU_ENTRY-1-at-line-5
+set=armed-storage-46fe6737 sha256=6c7779b6b9152a2b4ab508f4424896edfbb4ac188c4bec1b97b53e14ff6620fe bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-46fe6737 sha256=bfc501e4d998846ec2aa8ca34211c1b73470928af38861fc5140c400690cd989 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-46fe6737 sha256=46fe673799d8150594e428b76698639e24221e040058cc9814c6b10ead0f14ad bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-this-is-the-STORAGE_PROBE-20-entry-the-8-hex-of-this-hash-is-the-sets-name-and-its-SIZE-IS-BYTE-IDENTICAL-to-the-pressed-rung-20-arm-5552764-so-the-SEAM-CONSTANT-DID-NOT-MOVE-it-carries-st_cmd3_noidx-calling-st_send_command-with-opcode-3-argument-0x00010000-and-flags-ST_MMC_RSP_R1_NOIDX-PRESENT-or-CRC-word-0x030A-and-it-carries-NO-rung-15-key-and-NO-st_cmd3_noresp-and-NO-st_set_relative_addr
+set=armed-storage-46fe6737 sha256=f44d7fe55b66cdf45e2a7e136eb3fe04374233f12fe961837ee0aa8ef61821cb bytes=6732268 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-46fe6737 sha256=b67c31df5489458de37af8ed21a3740d06f259c373567baba65cf32db29ac713 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-by-its-hash-the-gate-refuses-a-record-whose-hash-is-not-the-entry-bin-it-is-about
+set=armed-storage-46fe6737 sha256=5d565d3181ea9af9cdfd7ec55654d46007af5dad53df096e0fbbacb6fe71f784 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-23-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match-AND-ITS-HASH-MOVED-ONCE-AFTER-THE-PAYLOAD-WAS-BUILT-because-make-check-caught-SIXTEEN-unescaped-backticks-in-four-of-this-arm-s-own-refusal-messages-the-m730-class-an-unescaped-backtick-in-a-double-quoted-shell-string-is-a-COMMAND-SUBSTITUTION-so-the-refusal-fires-with-a-hole-in-its-explanation-escaping-them-changed-build_entry-sh-which-IS-one-of-the-23-sources-so-the-entry-image-was-rebuilt-the-ENTRY-BIN-DID-NOT-MOVE-46fe6737-and-neither-did-any-other-member
+set=armed-storage-46fe6737 sha256=7fb24ad44e44d31dfdb747b2854ec0d0a830c5b9b590d2c64cf2866a05fa624b bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-46fe6737 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
