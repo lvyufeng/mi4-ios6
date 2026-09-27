@@ -5581,3 +5581,89 @@ set=armed-storage-c3007c37 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # exist - the block starts a response-demanding command and never completes one - so **TWRP-to-storage
 # stays withheld.** What this press buys is that **the next reader does not spend a press on the DLL.**
 
+# ================================================================================================
+# 765 (2026-09-27): THE INTERRUPT-ENABLE CENSUS - THE VENDOR ENABLES ELEVEN STATUS BITS AND THE LADDER
+# ENABLES ONE, SO "THE BLOCK SAID NOTHING" IS A MASKED READING. **NO ARM MOVED, NO PRESS SPENT, NO PRESS
+# OWED, out/ UNTOUCHED.** Host-side only; the vendor tree read at line numbers, the ladder's own store
+# census, and the rung-22 capture's cells.
+# ================================================================================================
+#
+# THE VENDOR'S SET: `sdhci_init` (sdhci.c:284-296), called once from `sdhci_add_host` at `:3589`, ends in
+# `sdhci_clear_set_irqs(host, SDHCI_INT_ALL_MASK, <11 bits>)`, and `sdhci_clear_set_irqs` (sdhci.c:181-189)
+# writes that ONE value to BOTH `INT_ENABLE 0x34` AND `SIGNAL_ENABLE 0x38` as 32-bit words - so the
+# error-enable halves at 0x36/0x3A are written too. `SDHCI_INT_ALL_MASK` is `(unsigned int)-1`
+# (sdhci.h:152), so the clear is total, and the eleven bits are `0x01FF0003`, INCLUDING
+# `SDHCI_INT_TIMEOUT 0x00010000` (sdhci.h:130), `SDHCI_INT_CRC 0x00020000`, `SDHCI_INT_END_BIT 0x00040000`
+# and `SDHCI_INT_INDEX 0x00080000` - the four `SDHCI_INT_CMD_MASK` (sdhci.h:144-147) groups as THIS
+# COMMAND'S OWN error set. `sdhci_msm_ops` (sdhci-msm.c:2653-2664) overrides neither `.irq` nor
+# `.set_timeout` and never writes 0x34/0x38, so that call is the WHOLE of the vendor's enable programming.
+#
+# THE LADDER'S SET, ENUMERATED: every write to 0x34 in src/entry/entry_storage.c is `0`, `1`,
+# `int_enable | RESPONSE`, or a restore of the value read back - **NEVER AN ERROR BIT** - and the write
+# count to `SIGNAL_ENABLE 0x38` is **0**. Measured in the rung-22 capture: `_int_enable_before =
+# 0x00008000`, `_int_enable_held = 0x00008001`, `_int_enable_readback = 0x00008000`, `_nidx_sig_enable = 0`
+# - against the vendor's `0x01FF0003`.
+#
+# AND `TIMEOUT_CONTROL 0x2E` IS A REGISTER NEITHER SIDE WRITES ON THIS PATH: the ladder has zero
+# occurrences, and the vendor writes it only in `sdhci_prepare_data` (sdhci.c:827-828) inside
+# `if (data || (cmd->flags & MMC_RSP_BUSY))` - and every command this ladder has sent is data-less and
+# none carries `RSP_BUSY`.
+#
+# SO `_status_any = 0` IS A MASKED READING, AND 726's SECOND REFUTATION DOES NOT HOLD AS STATED. 726
+# refuted *wrong bit* with *"refuted by construction, `status_any` covers the whole register"* - and the
+# poll DOES cover the whole register OF THE READ (st_read32 at entry_storage.c:2296, :2299, :2361, :2603,
+# :2621, so 0x30-0x33 includes the error half where SDHCI_INT_TIMEOUT is bit 16). **BUT 730 MEASURED ON
+# THIS VERY BLOCK that a status bit appears only while its enable stands** - the completion was there all
+# along and INT_ENABLE was the mask - with 733's rule and 738's *necessary and not sufficient* the same
+# finding from two more presses. If the latch is enable-gated, a poll over a register whose error-enable
+# half is zero cannot see an error bit however many samples it takes, and the ladder has NEVER ONCE set an
+# error enable. The correct statement is narrower than 726's and stronger than "nothing was latched": no
+# bit was ever seen in INT_STATUS, and its error half has had its enable at zero for every one of those
+# samples - so the absence is a reading about the MASK as much as about the block, and it CANNOT
+# DISTINGUISH "the controller had nothing to report" from "the controller's error reporting was switched
+# off". `_status_any = 0` is cited in five documents as *the block said nothing*; it measures *no enabled
+# bit was latched*. Plus an observation left OPEN: 0x34 reads 0x00008000 (bit 15, SDHCI_INT_ERROR) both
+# before the ladder's first write and after a write of 0.
+#
+# AND 764 SECTION 4's FIRST CANDIDATE IS REFUTED BY THE VENDOR'S OWN DT. 764 named *"the card is not
+# powered ... no rung has ever touched the PMIC"* as the most likely remaining candidate.
+# `msm8974-mtp.dtsi:384-410` gives `&sdhc_1` `vdd-supply = <&pm8941_l20>`, `vdd-io-supply = <&pm8941_s3>`
+# AND `qcom,vdd-always-on` / `qcom,vdd-io-always-on`; `sdhci_msm_dt_get_vreg_info` parses
+# `"qcom,%s-always-on"` into `vreg->is_always_on` (sdhci-msm.c:1072-1074) and `sdhci_msm_vreg_disable`'s
+# own comment is **"Never disable regulator marked as always_on"** (:1795-1796), the always-on branch only
+# demoting it to LPM (:1813-1817). And `sdhci.c:3583` asks for `regulator_get(..., "vmmc")` - the con_id
+# `vmmc`, where the DT supplies `vdd-supply` - so it takes IS_ERR, prints "no vmmc regulator found" and
+# sets `vmmc = NULL`, making every `mmc_regulator_set_ocr` call (:1625-1626, :1667-1669, :1688-1689, all
+# guarded by `host->vmmc &&`) a NO-OP. **The vendor does not turn the card's power on either.** Withdrawn
+# at the strength of the evidence: no board file here supplies `vmmc` to `sdhc_1` and the platform's own
+# marks both rails always-on - which refutes "the ladder skipped a power act the vendor performs", not
+# that the rails are up on the physical device (the Mi 4's own board dts is not in this tree).
+#
+# THE PRE-REGISTRATION FOR THE NEXT ARM (NO RUNG IS BUILT FROM THIS WITHOUT THE OPERATOR'S AUTHORIZATION):
+# in the rung-21/22 window's position with the rung-21 command still sent, write FIVE BITS to `INT_ENABLE
+# 0x34` - RESPONSE | TIMEOUT | CRC | END_BIT | INDEX - with **`SIGNAL_ENABLE 0x38` HELD AT ZERO** so no
+# line can rise and no delivery can end the run, then read `INT_STATUS 0x30` whole and `TIMEOUT_CONTROL
+# 0x2E` as a byte, then undo both stores with both readbacks published. SAFE BECAUSE 730 MEASURED IT: that
+# press wrote INT_ENABLE, took no command on the bus and took no interrupt (`_post_end_calls = 7`, no
+# `_irq_other_*`). THE ANSWER SPACE, EACH BRANCH NAMING THE NEXT ACT:
+#   0x00010000 (TIMEOUT) latched -> THE CARD DID NOT ANSWER AND THE CONTROLLER KNEW IT: the stall is the
+#     CARD's silence and the whole rungs-13-22 reading is refuted in one bit; the subject becomes the bus
+#     width, the CMD/DAT pads and the board's `qcom,pad-*` settings.
+#   0x00020000 / 0x00080000 / 0x00040000 -> the card answered and the word was malformed; subject =
+#     sampling and bus width.
+#   NOTHING, WITH THE ENABLES UP -> the STRONG form of the negative: a command taken, started and held
+#     1.2 s never armed a response timeout; subject = the block's own command path.
+#   BIT 15 ONLY -> the sticky bit is a property of the IP and the observation closes with no news.
+# Two free cells ride along: `TIMEOUT_CONTROL 0x2E` (never read by this ladder) and `PRESENT_STATE 0x24`
+# BIT 24, the CMD line's own level, sampled DURING a response-demanding command (749 section 3 measured
+# that bit separating two producers of `inhibit_seen = 0`).
+#
+# New instance m773: COVERAGE OF A READ READ AS ENABLEMENT OF A LATCH - a read's WIDTH offered as proof
+# that an absence is real; the test is to name the enable, the mask and the mode a bit needs to appear.
+#
+# **NO ARM MOVED, NO PRESS SPENT, NO PRESS OWED.** `out/` still holds the PRESSED rung-22 arm
+# `armed-storage-c3007c37`; its park is intact (11 members). The press path is the two commands readiness
+# prints, run by hand once each. The goal is **STILL NOT MET**: no storage, no filesystem, no mount, and
+# **TWRP-to-storage stays withheld.** What this step buys is that the next press is spent on a question the
+# ladder has never asked, instead of on a fourth sample of a masked one.
+
