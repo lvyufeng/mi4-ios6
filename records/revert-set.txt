@@ -5508,3 +5508,76 @@ set=armed-storage-c3007c37 sha256=5dd95a69dc56f710a1395fe8a6f0e9c9d1ed92f779395c
 set=armed-storage-c3007c37 sha256=66f933eacd4f7767662987534ed7c0b41e43297802a745608f9207e233cd2793 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match
 set=armed-storage-c3007c37 sha256=e7b0d572f6a3d8325ba0381a16b26b2685c20475b74c747a7a07f242143fc271 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
 set=armed-storage-c3007c37 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+
+# ================================================================================================
+# 764 (2026-09-27 08:03:28-08:04:41 UTC): **THE RUNG-22 ARM WAS PRESSED - EXIT 0, 73 s, RETURNED AND
+# CAPTURED - AND IT ANSWERED: THE DLL WAS ALREADY RESET AND POWERED DOWN.** ONE PRESS SPENT WITH THE
+# OPERATOR'S AUTHORIZATION. **EVERY DEVICE TOUCH COSTS ONE PRESS AND THIS ONE IS SPENT.**
+# ================================================================================================
+#
+# THE RUN: one `fastboot boot` only, NEVER flash; neighbour `33e80afe` absent from BOTH `adb devices`
+# and `fastboot devices` at fire time; EXACTLY ONE gate (`scripts/preflight_boot_check.sh
+# --allow-xnu-entry`, EXIT 0, 590 lines) and EXACTLY ONE runner (`scripts/run_and_capture.sh
+# --allow-xnu-entry --expect-arm=armed-storage-c3007c37`), both with the flags readiness printed,
+# `tools/verify_press_ready.sh` 5 of 5 / EXIT 0 beforehand. Capture archived BY HAND (the runner does
+# NOT archive): `out/stage90/captures/rung22-dllcensus-20260927-080441-last_kmsg.txt`, 631,439 B, sha256
+# `5ee96f58ee9b5082b399fc77f7113b61c2b79ccb64eb5b46860377eeaf882b1d`, with `-gate.log`, `-run.log` and
+# `-press.log` companions.
+#
+# THE ANSWER - THE FIRST BRANCH OF 756 SECTION 6's PRE-REGISTERED THREE-WAY:
+#   `_dll_config` = 0x60006400  ->  `_dll_rst` = 1 (bit 30 SET) and `_dll_pdn` = 1 (bit 29 SET), with
+#                                    `_dll_en` = 0 (bit 16), `_dll_ckout` = 0 (bit 18), and the whole
+#                                    tail below bit 16 reading 0x6400.
+#   `_dll_status` = 0x00000000  ->  `_dll_lock` = 0 (bit 7), consistent with a reset, powered-down DLL.
+#   `_dll_ctrl2`  = 0x00000000  ->  `_dll_ctrl2_uhs` = 0 - the SECOND half of 756 section 4 answered in
+#                                    the same press: rung 4's SDHCI_RESET_ALL DID reach HOST_CONTROL2 and
+#                                    the spec argument holds, so the vendor's ctrl_2 write at
+#                                    sdhci-msm.c:2597 is NOT live as a missing act.
+#   `_dll_loads` published 1,2,3 and `_dll_done` = 3 - A COMPLETE RUN of all three reads.
+#
+# **THE DLL IS ALREADY RESET AND ALREADY POWERED DOWN BEFORE THIS IMAGE'S FIRST INSTRUCTION**, so 756
+# section 3's hypothesis - the block running with an undischarged DLL at 400 kHz against the vendor's own
+# comment - IS DEAD, and **BOTH of the two writes 761 section 5 closed the candidate space at are closed
+# at ZERO**. There is no "something the vendor disabled and the ladder left on" left to find on this
+# path, and the pre-registration's own branch says NOTHING further is owed here. A negative result, bought
+# with three reads, that removes a hypothesis completely rather than narrowing it.
+#
+# AND THE RUNG-21 COMMAND REPRODUCED ITS OWN STALL, CELL FOR CELL (the arm was purely additive by design:
+# rung 21's call site is guarded `>= 20`, so a value-21 image sends 0x030A as well):
+#   `_nidx_word` = `_nidx_word_read` = 0x0000030a;  `_nidx_inhibit_seen` = 0x00000400 (all 1024 samples);
+#   `_nidx_inhibit_after` = 1, `_nidx_inhibit_last` = 0x01f80001;  `_nidx_complete` = 0;
+#   `_nidx_status_any` = 0 over `_nidx_any_polls` = 0;  `_nidx_timeout` = 1;
+#   `_nidx_ticks` = 0x015f95a7 (1.20002 s) against 758's 0x015f91be;  `_nidx_polls` = 0x004db800
+#   (5,093,376) against 758's 0x004da000 (5,087,232);  `_nidx_ena_held` = 0x8001,
+#   `_nidx_readback` = 0x8000, `_nidx_sig_enable` = 0.  TWO PRESSES, TWO ARMS, TWO DAYS, ONE STALL.
+#
+# **THE SAFETY CONTRACT HELD CELL BY CELL**: `_gate` = 1, `_gate_read` = 1, `_gated_out` = 0,
+# `_loads` = 6, `_writes` published 0-4 (rung 21's own set, UNCHANGED - the census added NO store at all,
+# which the build clause asserted before the press), `SIGNAL_ENABLE 0x38` read and never written, no
+# `_irq_other_*` key, nothing flashed. The ending is unmoved: `_post_end_calls` = 0x6,
+# `_seam_sctlr` = 0x30c57879, `_seam_post_end_ticks` = 0x06ddd000, `_sleh_storm` = 9.
+#
+# WHAT REMAINS, STATED EXACTLY: every register the ladder has measured is now consistent with a
+# CORRECTLY CONFIGURED controller - SDHCI mode (`_mode_bit_after` = 1), powered at 3.3 V (`_pwr_after` =
+# 0x0b), clock on and stable (`_clk_set_cc_after` = 0xe045), DLL reset and down, HOST_CONTROL2 clean,
+# card-detect the DT's own quirk (`_reg_card_present` = 0 on an 8-bit eMMC node). **The anomaly is no
+# longer "something is configured wrong". It is that a controller in a correct state, given a
+# response-demanding command, holds CMD_INHIBIT for a full 1.2 s and sets NO BIT OF `INT_STATUS` AT ALL -
+# not the completion, and not the driver's own TIMEOUT.** A block whose response never arrives should
+# raise `SDHCI_INT_TIMEOUT`; `_status_any` = 0 over 5,093,376 polls says it does not. Three candidates
+# remain and NONE has been tested: (1) THE CARD IS NOT POWERED - the eMMC's VCC/VCCQ come from the PMIC
+# and NO RUNG IN THIS LADDER HAS EVER TOUCHED THE PMIC, which is the only candidate explaining both
+# halves; (2) the response timeout is not armed on this IP for these `RESP_TYPE` values; (3) the block is
+# not actually issuing onto the bus. **Candidate 1 is the one the ladder has never had a cell for,
+# because the PMIC is a different block. Naming it does not make it true and NO RUNG IS DESIGNED from
+# this document.**
+#
+# **NO FIRER IS ARMED AND NO PRESS IS OWED.** `out/` still holds `armed-storage-c3007c37` - now PRESSED -
+# and its park `out/stage90/frozen/armed-storage-c3007c37` is intact (11 members). The press path is the
+# two commands readiness prints, run by hand once each; no press may be spent without the operator's
+# authorization.
+#
+# The goal is **STILL NOT MET**: no storage, no filesystem, no mount. The SDHCI storage driver does not
+# exist - the block starts a response-demanding command and never completes one - so **TWRP-to-storage
+# stays withheld.** What this press buys is that **the next reader does not spend a press on the DLL.**
+
