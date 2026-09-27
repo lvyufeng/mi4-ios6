@@ -37,7 +37,11 @@ the count over polls 1..1024.
 | `inhibit_last` bit 24 (CMD line) | `0x01f80000` HIGH | `0x00f80000` **LOW** | `0x01f80000` HIGH | `0x01f80001` HIGH |
 | `word_read` after the store | `0x0000` (consumed) | `0x0102` (held) | `0x0209` (held) | `0x030A` (held) |
 | `status_any` over the poll | **`0x00000001`** | **`0x00000000`** | **`0x00000000`** | **`0x00018000`** |
-| polls | `0x219` = 537 | `0x4dac00` = 5,090,304 | `0x4db000` = 5,088,256 | `0x6fd` = 1,789 |
+| polls | `0x219` = 537 | `0x4dac00` = 5,090,304 | `0x4db000` = 5,091,328 | `0x6fd` = 1,789 |
+
+> **CORRECTED BY 778 (the `polls` row only).** `0x4DB000` is 5,091,328; the decimal this row gave it,
+> 5,088,256, is `0x4DA400` - the value two commands over. The row's point (three counts of the same
+> size) survives: 5,090,304 and 5,091,328 are 1,024 apart.
 | `ticks` | `0x1328` | `0x15f9927` | `0x15fa1b7` | `0x31e3` |
 | the poll's own end | completed | **step bound exhausted** (`timeout = 0`) | **tick budget** (`timeout = 1`) | break on `TIMEOUT` |
 | outcome | `complete = 1` | nothing latched, 1.2 s | nothing latched, 1.2 s | `err = 0x00010000` at **665.2 µs** |
@@ -117,12 +121,17 @@ cell in the row is downstream of it.
 absent from **every** capture in the archive. It is the one cell the table is missing, and **publishing it
 costs no device access at all**: the value is already in the struct.
 
-**A third correction, one number wide, and it is in the same sentence.** That paragraph writes CMD1's poll
-count as `_cmd1_polls = 0x004db000` = 5,088,000. The capture's `cmd1_polls` is **`0x004DAC00` = 5,090,304**
-— the hexadecimal `0x004db000` is CMD2's `cid_polls` (`0x004DB000` = 5,088,256, to which the decimal is
-also not equal). The sentence's point is unmoved by the number, which is exactly why nobody has checked it:
-**a count quoted for one command and taken from another** is the smallest instance of the class this
-document is about.
+**A third correction, one number wide — AND THE CORRECTION ITSELF IS WRONG IN BOTH HALVES (778).** That
+paragraph writes CMD1's poll count as `_cmd1_polls = 0x004db000`, with the decimal 5,088,000. What is wrong
+there is the DECIMAL: `0x004DB000` is **5,091,328**, and 5,091,328 is exactly what rung 15's and rung 20's
+captures report for `cmd1_polls` — so the hexadecimal was correctly attributed all along. The sentence this
+section was correcting belongs to the press whose capture carries a `_cmd1_polls` cell at all, and the
+`cmd1_polls = 0x004DAC00` this section compares it against is **rung 24's** — a different press. And
+`0x004DB000` is **not** 5,088,256; that is `0x004DA400`. The two counts **swap between presses** (rung 20:
+CMD1 `0x4DB000`, CMD2 `0x4DAC00`; rung 24: CMD1 `0x4DAC00`, CMD2 `0x4DB000`), which is precisely why a
+remembered pair reads right against one capture and wrong against the next — the trap this section names,
+sprung on the section itself. See **778**, which also owes `src/entry/entry_storage.c:3054`, the sentence
+this section is about: an entry source, so a comment there costs a rebuild of the armed arm.
 
 ## 6. What the table cannot separate, and the two reads that would
 

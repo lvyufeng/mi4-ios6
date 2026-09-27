@@ -40,7 +40,7 @@ had been calling two different behaviours by one name:
 | --- | --- | --- | --- | --- | --- |
 | CMD0 `GO_IDLE_STATE` | `0x0000` | `0x00` | **1** | `0x219` (537 of 538) | **started → completed** |
 | CMD1 `SEND_OP_COND` | `0x0102` | `0x02` | **0** | **0** of 5,088,256 | **NEVER STARTED** |
-| CMD2 `ALL_SEND_CID` | `0x0209` | `0x09` | (cell absent) | **0** of 5,088,000 | **NEVER STARTED** |
+| CMD2 `ALL_SEND_CID` | `0x0209` | `0x09` | (cell absent) | **0** of 5,090,304 (778) | **NEVER STARTED** |
 | CMD3 rung 19 | `0x031a` | `0x1A` | **1** | `0x400` (all 1024) | started → never finished |
 | CMD3 rung 20 | `0x0300` | `0x00` | **1** | `0x21a` (538 of 539) | **started → completed** |
 

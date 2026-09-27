@@ -64,12 +64,36 @@ restore:
 #                           once truncating a macro-generated key to half a name. Both times the
 #                           table it printed looked plausible. A reference tool that can lie like
 #                           that has to carry a self-test, and the self-test has to run.
+#   check_count_citations.py
+#                           reads every tracked file outside archive/ and refuses a count quoted in two
+#                           bases that do not agree with each other. The hexadecimal word is the reading
+#                           and the decimal beside it is a transcription of it, and the transcription had
+#                           never been checked: three were wrong at once in one sentence, and one of them
+#                           is the count the ladder's `#error` text, the record and this repository's
+#                           readiness narration all quote for CMD1 - the device printed 5,091,328 there and
+#                           the decimal written down was 5,088,000 (778). **This comment quotes that pair
+#                           in prose and NOT as the form the tool reads, deliberately**: a citation of a
+#                           defect and the defect are the same characters, so the note in
+#                           records/revert-set.txt that refutes the wrong pair spells its two halves in
+#                           separate sentences, and so does this one.
+#                           It REFUSES on `tools/`, `scripts/`, `records/`, `Makefile` and `src/` minus
+#                           `src/entry/` - exempt for a COST reason and not a lane reason, because an
+#                           entry source is a member of the entry image's recorded source manifest and a
+#                           comment there makes the gate refuse the arm a press is waiting on - and it
+#                           only PRINTS what it finds under docs/experiments/, which is the historical
+#                           record and is superseded rather than rewritten. It carries a self-test, run by
+#                           the line above it, because it is a reference tool like the one above - and the
+#                           self-test asserts the four idioms that look like a citation and are not:
+#                           `offset (step)`, a tick count beside a millisecond figure, a decimal with no
+#                           separators, and a pair three orders of magnitude apart.
 check:
 	@tools/check_stage_paths.sh
 	@tools/check_set_name_rule.sh
 	@tools/check_backtick_messages.sh
 	@tools/check_payload_config_entry.sh
 	@tools/read_storage_key_order.py --selftest >/dev/null
+	@tools/check_count_citations.py --selftest >/dev/null
+	@tools/check_count_citations.py
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not
@@ -111,7 +135,8 @@ help:
 	@echo "make                     build the live tree into $(LIVE_OUT)/"
 	@echo "make list                the archived snapshots and where they live now"
 	@echo "make restore STAGE=50    bring an archived snapshot back"
-	@echo "make check               no executable literal names the retired layout, and every set name is a hash of its own bytes"
+	@echo "make check               the repository's own bookkeeping: the retired layout, set names, backticked"
+	@echo "                         messages, the payload's entry switch, and every count quoted in two bases"
 	@echo "make clean               refused; the payload and the parks cannot be rebuilt"
 	@echo
 	@echo "Booting is not a make target: flash nothing, and boot non-persistently with"

@@ -62,7 +62,11 @@ which is the point of the mode. **B2's two are new**, and they are the substance
 | `inhibit_after` | `1` | `1` | `1` |
 | `inhibit_seen` | `0x21b` (539) | `0x219` (537) | `0x400` (1024 — **all of them**) |
 | `inhibit_last` | `0x01f80000` — bit 0 **CLEAR** | `0x01f80000` — bit 0 **CLEAR** | `0x01f80001` — bit 0 **SET** |
-| `polls` | `0x004da800` (5,088,256) | `0x004da400` (5,088,000) | `0x004da400` |
+| `polls` | `0x004da800` (5,089,280) | `0x004da400` (5,088,256) | `0x004da400` |
+
+> **CORRECTED BY 778.** Both parenthesised decimals were wrong: `0x4DA800` is 5,089,280 (this row said
+> 5,088,256) and `0x4DA400` is 5,088,256 (this row said 5,088,000, a number no capture in the archive
+> produced). The row's point - three counts of the same size - is unmoved.
 | `complete` | `0` | `0` | `0` |
 | `status_any` | `0` | `0` | `0` |
 | 747 §5 branch | **B2** | **B2** | **B2** |

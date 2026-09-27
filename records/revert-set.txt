@@ -1672,8 +1672,8 @@ set=armed-storage-clkset-b4b696d9 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27
 #    `_mode_bit_after=1` (the vendor's mode sequence is still a PREREQUISITE and not a re-do),
 #    `_rst_cleared=1`, and every rung-1..5 reading unchanged.
 #  * THE ENDING FIRED AND DID NOT END THE RUN, in the sense 678/686/690 need the qualifier for:
-#    `_post_end_calls=0x00000007`, `_post_elapsed=0x06e0953c` = 115,318,588 ticks = 6006.2 ms -
-#    crossed 6.2 ms after the armed 6000.0 ms deadline, inside one idle window - 16 idle windows,
+#    `_post_end_calls=0x00000007`, `_post_elapsed=0x06e0953c` = 115,381,564 ticks = 6009.5 ms -   **778: the decimal and the millisecond figure were both transcribed from a number the device never printed; the hexadecimal is the reading in rung6's capture and 115,381,564 / 19,200 = 6,009.5 ms.**
+#    crossed 9.5 ms after the armed 6000.0 ms deadline, inside one idle window - 16 idle windows,
 #    the seam pair CLEAN LINE, and the same panic (`fault_addr=0xfa0065c`, the ending's own first
 #    store to `RESTART_REASON`, `pc=0x8047c488` = `entry_seam_end_run+0xc`). **The deadline was
 #    REACHED; the store faulted; the boot went on.** What returns a run (8, 17, 24, 27, 24, 27, 25,
@@ -3640,7 +3640,7 @@ set=armed-storage-cid-dc8d7002 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364
 # AND THE BLOCK GAVE NOTHING BACK - **WITH THE ENABLE STANDING FOR THE WHOLE SEND**:
 #   `_cid_ena_wrote = 0x1`, `_cid_ena_held = 0x00008001`, `_cid_sig_enable = 0x0` (read, never
 #   written), and then `_cid_complete = 0x0`, `_cid_status_any = 0x0` over the WHOLE register,
-#   `_cid_polls = 0x004da800` (5,088,256), `_cid_ticks = 0x015f9651` (23,040,593 = 1.200 s at
+#   `_cid_polls = 0x004da800` (5,089,280), `_cid_ticks = 0x015f9651` (23,040,593 = 1.200 s at
 #   19.2 MHz), `_cid_timeout = 0x1`, `_cid_err = 0x0`, `_cid_status_post = 0x0`,
 #   `_cid_wrote_back = 0x0`, `_cid_readback = 0x00008000`.
 #   **733's rule (a command's status is latched only while its enable stands) is NECESSARY AND NOT
@@ -4217,7 +4217,7 @@ set=armed-storage-rca-c333d09c sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364
 # driver's own CMD3 as: TAKEN (`_rca_word = _rca_word_read = 0x031a`, `_rca_arg = _rca_arg_wrote =
 # 0x00010000` - the block holds the word the driver wrote), STARTED (`_rca_inhibit_seen = 0x400`, bit 0
 # of `CMD_INHIBIT` in ALL 1024 samples of the poll), and NEVER FINISHED (`_rca_complete = 0`,
-# `_rca_err = 0`, `_rca_timeout = 1`, `_rca_status_any = 0` across 5,081,600 polls) - with the response
+# `_rca_err = 0`, `_rca_timeout = 1`, `_rca_status_any = 0` across 5,088,256 polls) (778: this read 5,081,600) - with the response
 # register EMPTIED across it (`_rca_resp_pre = _rca_resp = 0x40ff8080` -> `_rca_resp_post = 0x00000000`,
 # `_rca_resp_moved = 1`). The one command this ladder has ever driven to a COMPLETION is CMD0, the one
 # that asks for NOTHING BACK. So 742 section 8 named the next rung as a single variable rather than a
@@ -4587,8 +4587,8 @@ set=armed-storage-b7e5a18f sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # SPLIT IS THREE-WAY, NOT TWO-WAY - THE CORRECTION THIS BLOCK'S HEADLINE NEEDS**, added after the table was
 # first written by reading the same capture again: the block **STARTED** CMD0 and this CMD3, **STARTED AND
 # STUCK** on rung 19's CMD3 R1, and **NEVER TOOK CMD1 AND CMD2 AT ALL** - `_cmd1_inhibit_after = 0` with
-# `_cmd1_inhibit_seen = 0` over **5,088,256** samples while `_cmd1_word_read = 0x0102` proves the word
-# reached the register, and `_cid_inhibit_seen = 0` over 5,088,000 with `_cid_word_read = 0x0209` for CMD2.
+# `_cmd1_inhibit_seen = 0` over **5,091,328** samples while `_cmd1_word_read = 0x0102` proves the word
+# reached the register, and `_cid_inhibit_seen = 0` over 5,090,304 with `_cid_word_read = 0x0209` for CMD2. **778: 5,088,256 is rung 18's own CMD1 count and 5,088,000 is no capture's count at all - this block's `this capture` is rung 20's, whose CMD1 and CMD2 counts are 5,091,328 and 5,090,304.**
 # **Identical in all three of the last three presses** - rungs 18, 19 and 20 carry the same three CMD1
 # values. So `inhibit_seen = 0` is not *no inhibit was observed* but **the block declined the command**, and
 # the sampler demonstrably catches this bit: CMD0's was seen **537 times in 538 samples**. **The headline
@@ -5346,7 +5346,8 @@ set=armed-storage-46fe6737 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #
 # **AND THE ABSENCES ARE READINGS, CHECKED RATHER THAN ASSERTED** (749's and 760's discipline).
 # _cmd0_polls = 0x0000021a = 538 with _cmd0_any_polls = 538 (a completion was seen); _cmd1_polls =
-# 0x004da000 = 5,088,256 with _cmd1_any_polls = 0; _cid_polls = 0x004da400 = 5,088,768 with 0;
+# 0x004da000 = 5,087,232 with _cmd1_any_polls = 0; _cid_polls = 0x004da400 = 5,088,256 with 0;  **778: the
+# decimals here were the row below's, one command over - the hexes are rung 21's own.**
 # _nidx_polls = 0x004da000 with 0. **5,088,256 samples is not zero samples** - `any_polls` is the cell
 # that distinguishes "ran and saw nothing" from "did not run", and the three commands ran the same-size
 # 1.2 s bound.
@@ -6156,13 +6157,35 @@ set=armed-storage-f72e9f18 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #   command and dropped it* from *it never loaded it*; and one `INT_STATUS 0x30` read immediately BEFORE
 #   and one immediately AFTER the enable store separates the two surviving readings of `0x00018000`.
 #
-#   TWO NUMBERS CORRECTED IN THE SAME 737 SENTENCE, quoted so a reader can check them: `_cmd1_polls` is
-#   written there as `0x004db000` = 5,088,000, and the capture says `cmd1_polls = 0x004DAC00` = 5,090,304
-#   (the hexadecimal written is CMD2's `cid_polls`, to which the decimal is also not equal); and
+#   TWO NUMBERS IN THE SAME 737 SENTENCE - AND 771's CORRECTION OF THEM IS ITSELF WRONG IN BOTH HALVES
+#   (778). The sentence writes `_cmd1_polls` as `0x004db000` with the decimal 5,088,000 - quoted here
+#   SPLIT so that this note is not itself a false equality claim, which is the one thing the new check in
+#   `make check` cannot tell from a defect - and it is about the press whose
+#   capture carries a `_cmd1_polls` cell: rung 15's and rung 20's both read `0x004DB000`, whose decimal is
+#   5,091,328 - so the DECIMAL is the only thing wrong there and the hexadecimal was never mis-attributed.
+#   771 section 5 called the hexadecimal "CMD2's `cid_polls`" and gave its own value for it as `0x004DB000`
+#   = 5,088,256; both are false, and it got there by comparing a sentence about one press against rung 24's
+#   capture, where `0x004DB000` IS CMD2's count. The two counts SWAP between presses (rung 20 CMD1
+#   `0x4DB000` / CMD2 `0x4DAC00`; rung 24 CMD1 `0x4DAC00` / CMD2 `0x4DB000`), which is why a remembered pair
+#   reads right against one capture and wrong against the next. The repair is one decimal, not a hex; and
 #   `ena_host_version = 0x00001102` says this block reports SDHCI specification 2.00, while the sentence
 #   that introduced the cell argues from "a 3.00-or-later block" - so any argument in this ladder that
 #   rests on what the specification says about latching has to name the specification the block says it is.
 #
+#
+#   AND TWO THINGS THIS STEP MEASURED THAT THE NEXT BUILD SHOULD CARRY. (1) THE POLL LOOP'S EXIT IS A
+#   MULTIPLE OF 1,024. `entry_storage.c`'s poll is nested - an inner block of `ST_CMD_DONE_INNER` = 1024
+#   iterations that increments `polls` and leaves through `cmd_done` on a mask bit, and an outer step that
+#   reads the clock and breaks on `ST_CMD_DONE_TICK_BUDGET`. A command that latched NOTHING can only leave
+#   by the second, on a multiple of 1,024; and the seven distinct large counts in the ten archived rung
+#   captures are exactly the seven multiples of 1,024 in [0x004DA000, 0x004DB800]. So a decimal in that
+#   band that is not a multiple of 1,024 is not a reading at all, and three were quoted as readings:
+#   5,088,000 and 5,088,768 and 5,081,600, none of them on the lattice. (2) FOUR `5,088,000`s REMAIN AND
+#   THEY ARE ALL IN ONE ENTRY SOURCE - `entry_storage.c:116` twice, `:3054` and `:3861` - owed for the COST
+#   reason and not a lane reason, because a comment there moves the entry image's own source manifest and
+#   the gate would then refuse the arm a press is waiting on. Fourteen other sites were corrected in place
+#   this step, and `tools/check_count_citations.py` now refuses any count quoted in two bases that
+#   disagree, so the next one of these is caught at `make check` instead of fourteen steps later.
 # NO set= line follows this block: no arm was built, no park was made, and the 34 sets above are unchanged.
 
 # 772: THE RUNG-26 ARM - armed-storage-a1378a48, STAGE90_XNU_STORAGE_PROBE=25.

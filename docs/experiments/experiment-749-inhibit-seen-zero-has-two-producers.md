@@ -50,7 +50,7 @@ a verdict that the readings do not support. This document reads the condition ag
 | command | word | flags | `inhibit_after` | `inhibit_seen` | outcome |
 | --- | --- | --- | --- | --- | --- |
 | CMD1 `SEND_OP_COND` | `0x0102` | `0x02` | **0** | **0** of 5,088,256 | **NEVER STARTED** |
-| CMD2 `ALL_SEND_CID` | `0x0209` | `0x09` | (cell absent) | **0** of 5,088,000 | **NEVER STARTED** |
+| CMD2 `ALL_SEND_CID` | `0x0209` | `0x09` | (cell absent) | **0** of 5,090,304 (778) | **NEVER STARTED** |
 
 and names the reading that produces it:
 

@@ -2,7 +2,9 @@
 
 The press 690 armed was fired. **The device returned and the log came back** (exit 0, **28 s**), and the
 pre-registered cell is filled: **`xnu_live_post_end_calls=0x00000008`** — the ending *fired*, on the eighth
-deep-idle window, at an elapsed of **`xnu_live_post_elapsed=0x092a0bea` = 153,747,946 ticks = 8007.84 ms**.
+deep-idle window, at an elapsed of **`xnu_live_post_elapsed=0x092a0bea` = 153,750,506 ticks = 8007.84 ms** (**778**: the decimal was
+153,747,946, which is `0x092A01EA` and not the word the device printed; the millisecond figure beside it
+agrees with the hexadecimal and is unmoved).
 
 **And the arm's other pre-registration held to the digit**: the abort's own record of its call site reads
 **`xnu_live_sleh_lr=0x8047b5bc`**, the instruction after the `bl entry_seam_end_run` inside

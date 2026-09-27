@@ -80,7 +80,7 @@ window rung 14 opens and puts `mmc_all_send_cid`'s CMD2 on the bus under it:
 masked block. And **why the enable has to be standing at all is 733's measurement**: on that press CMD0
 ran inside the enabled window and completed (`_cmd0_complete = 1`, `_cmd0_status_any = 1`), while CMD1
 ran with the window closed, **was answered by the card** (`_cmd1_resp = 0x40ff8080`, a valid OCR) and
-never latched anything (`_cmd1_complete = 0`, `_cmd1_status_any = 0` over 5,088,000 polls). On this
+never latched anything (`_cmd1_complete = 0`, `_cmd1_status_any = 0` over 5,091,328 polls (778: this read 5,088,000, a decimal no count of this loop can be)). On this
 controller a command's status bit is latched only while its enable stands — so a CMD2 sent the way CMD1
 was would answer the same way and teach nothing.
 

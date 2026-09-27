@@ -121,7 +121,9 @@ difference — four — is the vendor spec's two plus the standard's two.
 
 `_post_t0=0x050cfa9f`, `_post_cntfrq=0x0124f800` (19,200,000 Hz), the deadline
 `_seam_post_end_ticks=0x06ddd000` = 115,200,000 ticks = 6000.0 ms, and **`_post_end_calls=0x00000007`**
-— the ending fired on the **7th** return, at `_post_elapsed=0x06e0953c` = 115,318,588 ticks =
+— the ending fired on the **7th** return, at `_post_elapsed=0x06e0953c` = 115,381,564 ticks =  **778: this decimal and the millisecond figure
+after it were both transcribed from a number the device never printed - 115,318,588 is `0x06DF9F3C`,
+and the hexadecimal beside it is rung6's own reading. It is 6,009.5 ms, not 6,006.2 ms.**
 **6006.2 ms**, i.e. **6.2 ms past the deadline**, inside one ~860 ms idle window. `_slot_post_calls`
 reaches 4 and `_seam_calls` 4, with the pair `a0/b0 = 0x800b3648`, `a1/b1 = 0x8047db04` — the CLEAN LINE
 the 686 correction says to read *beside* those counts and never alone.

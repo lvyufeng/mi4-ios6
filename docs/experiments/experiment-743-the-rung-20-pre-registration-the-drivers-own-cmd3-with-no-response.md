@@ -27,7 +27,7 @@ came back in one shape:
     _rca_inhibit_seen = 0x400                CMD_INHIBIT, in ALL 1024 samples of the poll
     _rca_inhibit_last = 0x01f80001           bit 0 STILL SET when the 1.2 s bound ran out
     _rca_complete = 0  _rca_err = 0  _rca_timeout = 1   neither finished, nor failed, nor timed out
-    _rca_status_any = 0                      nothing latched in INT_STATUS over 5,081,600 polls
+    _rca_status_any = 0                      nothing latched in INT_STATUS over 5,088,256 polls (778: this read 5,081,600)
     _rca_resp_pre = _rca_resp = 0x40ff8080   CMD1's word, still there inside the command
     _rca_resp_post = 0x00000000              and EMPTY after it
     _rca_resp_moved = 1

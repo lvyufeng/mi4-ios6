@@ -141,7 +141,7 @@ answer it, which is why 743 §7 named *"the block never started it at all"* as a
 | --- | --- | --- | --- | --- | --- |
 | CMD0 `GO_IDLE_STATE` | `0x0000` | `0x00` | **1** | `0x219` (537 of 538) | **started → completed** |
 | CMD1 `SEND_OP_COND` | `0x0102` | `0x02` | **0** | **0** of 5,088,256 | **NEVER STARTED** |
-| CMD2 `ALL_SEND_CID` | `0x0209` | `0x09` | (cell absent — §4b's note) | **0** of 5,088,000 | **NEVER STARTED** |
+| CMD2 `ALL_SEND_CID` | `0x0209` | `0x09` | (cell absent — §4b's note) | **0** of 5,090,304 (778) | **NEVER STARTED** |
 | CMD3 rung 19 | `0x031a` | `0x1A` | **1** | `0x400` (all 1024) | started → never finished |
 | CMD3 rung 20 | `0x0300` | `0x00` | **1** | `0x21a` (538 of 539) | **started → completed** |
 
@@ -211,7 +211,7 @@ command is refused* and *why a response-demanding command that IS taken never fi
 in one name**, and §4b names a one-constant move for each. What the ladder's next question is, is narrower
 than any it has asked:
 **a command that asks for a 48-bit response and gets none never completes and never times out** — `_rca_err
-= 0`, the whole `INT_STATUS` register zero over 5,088,000 polls, and (per 726's census) the block's own
+= 0`, the whole `INT_STATUS` register zero over 5,088,256 polls (778: this read 5,088,000), and (per 726's census) the block's own
 `TIMEOUT` never set either. That is not the SDHCI timeout behaviour, and it is not the card's: **it is this
 block waiting for a CMD-line reply that nothing on the other end is sending.**
 

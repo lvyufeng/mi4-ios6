@@ -89,9 +89,13 @@ This is the discipline the record paid for in 749 and 760, and it is checked rat
 different commands ran the same poll and two saw no non-zero sample at all:**
 
     _cmd0_polls = 0x0000021a = 538          _cmd0_any_polls = 0x0000021a   (a completion was seen)
-    _cmd1_polls = 0x004da000 = 5,088,256    _cmd1_any_polls = 0x00000000   (nothing, over the whole bound)
-    _cid_polls  = 0x004da400 = 5,088,768    _cid_any_polls  = 0x00000000
-    _nidx_polls = 0x004da000 = 5,088,256    _nidx_any_polls = 0x00000000
+    _cmd1_polls = 0x004da000 = 5,087,232    _cmd1_any_polls = 0x00000000   (nothing, over the whole bound)
+    _cid_polls  = 0x004da400 = 5,088,256    _cid_any_polls  = 0x00000000
+    _nidx_polls = 0x004da000 = 5,087,232    _nidx_any_polls = 0x00000000
+
+> **CORRECTED BY 778.** The decimal attached to this hexadecimal was not the hexadecimal's value: it
+> was transcribed rather than computed. The hexadecimal is the reading and it is unmoved.
+
 
 **5,088,256 samples is not zero samples.** The poll ran to its full 1.2 s bound in three commands and
 `any_polls` distinguishes "ran and saw nothing" from "did not run" — they are different cells, and the one
