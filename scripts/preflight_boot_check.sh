@@ -326,9 +326,11 @@ if [[ -n $STALE || -n $BUILD_TOOLS_NEWER ]]; then
   #
   # **The entry side of that pair is gone, and this clause is now payload-only; the false-stale
   # hazard is not.** A checkout that bumps a payload source (`stage90_main.c`, `stage90.h`, ...) still
-  # reaches this line with the content unchanged, and here the prescribed rebuild is *not* free: 408
-  # says the payload link does not reproduce, so the new image is a different artifact and any frozen
-  # comparison with the old one is spent. That is a decision for the step that takes it - the sound
+  # reaches this line with the content unchanged, and here the prescribed rebuild is *not* free: a plain
+  # `./build.sh` drops the `STAGE90_XNU_ENTRY=1` switch this arm needs and overwrites the armed image in
+  # `out/`, so the arm survives only in its park. **763 corrected the reason this comment gave** - it cited
+  # 408's "the payload link does not reproduce", and 666 section 5 measured that away on three builds, one
+  # of them a parked arm rebuilt from the tree with all seven members identical. That is a decision for the step that takes it - the sound
   # repair is the same one the entry side got, a content manifest over build.sh's own sources - and
   # it is deliberately not being smuggled in with this one. What is *not* being deferred is the case
   # that has actually happened: a false stale produced by a file the payload's build never reads.
@@ -1314,9 +1316,16 @@ if [[ -n $ENTRY_SRC_DIFF ]]; then
   # built - the manifest recorded `build_entry.sh 68528ccb...` where the file on disk was
   # `1b4e549a...`, and the committed version a third hash again - so the gate refused, correctly. But
   # the text then said "rebuild the entry image **and then ./build.sh**", and that second half is the
-  # one instruction this phase cannot follow: the payload link does not reproduce (408), so a
-  # `./build.sh` produces a different image and **spends the freeze** - the frozen `1daaf44e...` that
-  # is the whole point of the arm being ready. The distinction the clause was missing is not "did a
+  # one instruction this phase cannot follow: a plain `./build.sh` rebuilds the payload WITHOUT the
+  # `STAGE90_XNU_ENTRY=1` switch this arm needs (that switch's default is OFF - `check_payload_config_entry`
+  # measures it), so it overwrites `out/stage90/` with an image that never jumps into XNU and **spends the
+  # freeze** - the frozen `1daaf44e...` that is the whole point of the arm being ready, and after a source
+  # change the only place it still exists is its park (`tools/verify_revert_set.sh DIR --set=NAME`).
+  # **The reason this comment used to give - "the payload link does not reproduce (408)" - was wrong, and
+  # 763 corrected it here and at the refusal below**: 666 section 5 built the payload three times, twice
+  # plain and identical, and a parked arm rebuilt from the tree with all seven members identical - and
+  # 408's own 48 bytes are exactly this switch (`kernel_size` 6,015,356 with it against 6,015,308
+  # without). **The cost of a careless `./build.sh` is the SWITCH and not nondeterminism.** The distinction the clause was missing is not "did a
   # source change" (that is what it just proved) but **did the change reach the compiler**. A build
   # *recipe* can change without changing the bin - the measurement above is 152 inserted shell lines
   # and no compiler input - and in that case the entry rebuild alone settles everything: it rewrites
@@ -1329,7 +1338,7 @@ if [[ -n $ENTRY_SRC_DIFF ]]; then
   # mtime - the gate cannot tell an edit from a checkout, so it says so rather than prescribing - and
   # the same reason that clause now carries the switches the run needs. What is *not* left to prose is
   # the hash to compare against: the record's own `STAGE90_XNU_ENTRY_SHA256`, read 60 lines above.
-  fail "the entry image is not the build of these sources: $ENTRY_SRC_NAMES. Two situations print this line and the gate cannot tell them apart, so it names the test rather than presuming the answer. First rebuild the entry image with the switches this arm needs - they are printed under \"the entry image's own switches\" above, and naming them is the whole rebuild: src/entry/build_entry.sh is byte-for-byte reproducible and writes nothing the payload reads except the bin. Then compare: if sha256sum out/stage90/xnu_arm_entry.bin still equals the STAGE90_XNU_ENTRY_SHA256 the record names, the changed source fed no compiler input, the payload's blob clause is already satisfied, and ./build.sh must NOT be run - it does not reproduce (408) and would spend the frozen boot image for a change in nothing the compiler saw. If the hash differs, the arm really is a new one and ./build.sh is owed, with STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' or the new image never jumps into XNU. Neither branch is a checkout: a commit or a git checkout that rewrites an unchanged source still reaches this line, and here that case is free, because the rebuild is reproducible and the hash test settles it in one command"
+  fail "the entry image is not the build of these sources: $ENTRY_SRC_NAMES. Two situations print this line and the gate cannot tell them apart, so it names the test rather than presuming the answer. First rebuild the entry image with the switches this arm needs - they are printed under \"the entry image's own switches\" above, and naming them is the whole rebuild: src/entry/build_entry.sh is byte-for-byte reproducible and writes nothing the payload reads except the bin. Then compare: if sha256sum out/stage90/xnu_arm_entry.bin still equals the STAGE90_XNU_ENTRY_SHA256 the record names, the changed source fed no compiler input, the payload's blob clause is already satisfied, and ./build.sh must NOT be run for it - a plain ./build.sh rebuilds the payload WITHOUT this arm's STAGE90_XNU_ENTRY=1 switch (that switch's default is OFF), so it overwrites the armed image in out/ with one that never jumps into XNU, and after a source change the armed bytes then exist only in their park (tools/verify_revert_set.sh restores them). The build itself is not the hazard: 666 section 5 measured it reproducible - three builds, twice plain and identical, and a parked arm rebuilt from the tree with all seven members identical - and 408's own 48 bytes ARE this switch. This sentence cited \"it does not reproduce (408)\" before 763 corrected it. If the hash differs, the arm really is a new one and ./build.sh is owed, with STAGE90_EXTRA_CFLAGS='-DSTAGE90_XNU_ENTRY=1' or the new image never jumps into XNU. Neither branch is a checkout: a commit or a git checkout that rewrites an unchanged source still reaches this line, and here that case is free, because the rebuild is reproducible and the hash test settles it in one command"
 fi
 echo "the entry image is the build of src/entry/ as it stands: $(printf '%s\n' "$ENTRY_SRC_NOW" | grep -c . || true) file(s), every one matching the manifest, and none the manifest does not name"
 

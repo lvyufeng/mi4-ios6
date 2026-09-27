@@ -4,9 +4,14 @@
 #
 # WHY THIS EXISTS
 # ---------------
-# The next press sends exactly one command - `fastboot boot out/stage90/stage90-qcdt.img` - and the
-# payload build is NOT byte-reproducible (408). `out/stage90/` holds the only copy of the armed arm
-# that has ever existed, and the press cannot be repeated: one press, one run, and the arm is spent.
+# The next press sends exactly one command - `fastboot boot out/stage90/stage90-qcdt.img` - and
+# `out/stage90/` holds the only copy of the armed arm that has ever existed. The build is reproducible
+# from the tree AND this arm's switch set (666 section 5: three payload builds, twice plain and
+# identical, and a parked arm rebuilt file-for-file) - but not from a tree that has since moved, and not
+# without `STAGE90_XNU_ENTRY=1`, which the build leaves OFF by default and which no hash in the tree can
+# see. The press cannot be repeated: one press, one run, and the arm is spent. **763 corrected the reason
+# this header used to give** - it cited 408, and 408's "the payload link does not reproduce" is exactly
+# what 666 section 5 measured away.
 # Five things must be true at the moment of the press, and until this file existed each was checked
 # by a *different* tool, by hand, in a different session. **They are numbered in the order they RUN
 # and PRINT, and that is the only numbering in this file** - prose below cites a row by the label the
@@ -417,7 +422,7 @@ elif [[ ! -d $LIVE ]]; then
 elif [[ -z $PARK ]]; then
   bad 'live arm is the recorded arm' "the park's directory is named for the set and the set is not resolved, so no park was found to compare against ($SET_WHY)"
 elif [[ ! -d $PARK ]]; then
-  bad 'live arm is the recorded arm' "$PARK is not a directory - the park is the only copy of an arm that cannot be rebuilt (408), so its absence is a refusal and not a check that passed"
+  bad 'live arm is the recorded arm' "$PARK is not a directory - the park is bytes on disk outside the build path, and it is the only remaining copy of the armed arm once src/ has moved, so its absence is a refusal and not a check that passed (763: this message cited 408, whose \"the payload build does not reproduce\" 666 section 5 measured away)"
 else
   nset=0; nlive=0; ncmp=0; miss=(); wrong=(); diffs=()
   while read -r line; do
@@ -1187,7 +1192,9 @@ if (( NFAIL > 0 )); then
   printf 'REFUSING: %d of %d check(s) failed. The press sends the bytes in %s, once.\n' \
     "$NFAIL" "${#CHECKS[@]}" "$LIVE"
   printf '          Read the FAIL row(s) above before pressing: a press spent on a refused gate is a\n'
-  printf '          press spent on nothing, and the payload build does not reproduce (408).\n'
+  printf '          press spent on nothing, and the payload build is reproducible from the tree AND this\n'
+  printf '          arm'\''s switch set but not from a tree that has moved (666 section 5; 763 corrected\n'
+  printf '          the 408 citation this line used to carry).\n'
   exit 1
 fi
 printf 'ok: %d check(s). The bytes the press sends are the recorded armed bytes, the gate accepts the\n' "${#CHECKS[@]}"

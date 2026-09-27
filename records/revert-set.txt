@@ -5362,8 +5362,13 @@ set=armed-storage-46fe6737 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #
 # **NO ARM MOVED: out/ still holds `armed-storage-46fe6737` (STAGE90_XNU_STORAGE_PROBE=20), the arm 758's
 # press spent.** No firer is armed and none is needed; the press path is the two commands readiness
-# prints, run by hand once each. **A NEW RUNG COSTS THE LIVE PAYLOAD - ./build.sh does not reproduce
-# (408).** `fastboot boot` only, NEVER flash, and no press may be spent without the operator's
+# prints, run by hand once each. **A NEW RUNG COSTS ONE PRESS AND THE ARM IN `out/` ITS REBUILDABILITY,
+# not the payload and not this park: 666 section 5 measured that the payload build DOES reproduce (the
+# 48 bytes 408 read as nondeterminism are exactly the STAGE90_XNU_ENTRY switch), and what would spend the
+# armed image is a plain ./build.sh, which drops that switch - the arm's park is bytes on disk, outside
+# the build path, and reverting to it is a `cp`. Corrected by 763; 760 corrected the same sentence
+# earlier in this block and left this second occurrence, which is why 763's census counts occurrences
+# rather than sites.** `fastboot boot` only, NEVER flash, and no press may be spent without the operator's
 # authorization.
 #
 # The goal is still **NOT met**: no storage, no filesystem, no mount. The block starts a command and
