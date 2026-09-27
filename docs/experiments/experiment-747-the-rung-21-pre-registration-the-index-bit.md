@@ -315,6 +315,35 @@ record already declares.
 | 15 | a `POWER_CONTROL 0x29` read added | **SET** — `NODECL-f982-41:ldrb` | |
 | 16 | the post-command baseline reads moved above the command | **COUNT** — `f9824910:ldr=3 …` | the cell expected the STRIPPED clause; the COUNT check is the earlier net, and the cell's expectation is the thing that was wrong |
 
+### 8c. `make check` refused the arm's first state, and the reason is m730's class
+
+**After the payload was built and the arm parked, `make check` refused the tree** — sixteen unescaped
+backticks inside four of `xnu_entry_746`'s own refusal messages:
+
+    src/entry/build_entry.sh:31370: 6 unescaped backtick(s) inside a double-quoted string
+    src/entry/build_entry.sh:31431: 4 unescaped backtick(s) ...
+    src/entry/build_entry.sh:31463: 2 unescaped backtick(s) ...
+    src/entry/build_entry.sh:31466: 4 unescaped backtick(s) ...
+
+**An unescaped backtick in a double-quoted shell string is a COMMAND SUBSTITUTION** — the name vanishes
+from the message and the shell tries to *run* it — so the refusal fires with a hole in its explanation.
+That is **m730**, and the project has a check for it that runs from `make check`. The fix is a backslash
+before each backtick.
+
+**And the fix moved a recorded artifact, which is the part worth carrying.** `build_entry.sh` **is one
+of the entry image's 23 recorded sources** (`xnu_arm_entry-sources.txt` lists every regular file in
+`src/entry/` **by content**), so escaping those backticks stopped the tree being the tree the image was
+built from. The entry build was re-run and **exactly one member of the arm moved**:
+`xnu_arm_entry-sources.txt`, `a8cf21ae…` → `5d565d31…`, 2,335 B either way. **The entry bin did not
+move** (`46fe6737`, 5,552,764 B — `build_entry.sh` is not compiled into the image, so nothing done to it
+can move a byte of it) and neither did the payload's qcdt, `.bin`, `.img`, `.elf`, config, manifest or
+fixture. Both parks were re-copied and re-verified, and the `role=` on the record's line for the sources
+file records why its hash moved.
+
+**The rule this arm is the first to hit: a check that is green only because nobody ran it is not
+green.** `make check` is part of arming an arm, not a formality after it — and a source recorded *by
+content* makes every edit to the **builder** a reason to rebuild and re-park.
+
 **What the battery establishes, in one sentence**: of the eighteen cells, **twelve were refused by
 `xnu_entry_746` itself** (cells 16's refusal is that clause's COUNT check, one net earlier than the
 cell's expectation), **one built as declared, two were refused by the compiler and three by the seam
