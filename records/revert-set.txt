@@ -5612,7 +5612,13 @@ set=armed-storage-c3007c37 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # SO `_status_any = 0` IS A MASKED READING, AND 726's SECOND REFUTATION DOES NOT HOLD AS STATED. 726
 # refuted *wrong bit* with *"refuted by construction, `status_any` covers the whole register"* - and the
 # poll DOES cover the whole register OF THE READ (st_read32 at entry_storage.c:2296, :2299, :2361, :2603,
-# :2621, so 0x30-0x33 includes the error half where SDHCI_INT_TIMEOUT is bit 16). **BUT 730 MEASURED ON
+# :2621, so 0x30-0x33 includes the error half where SDHCI_INT_TIMEOUT is bit 16). AND THE COVERAGE IS
+# EXACT, which is what makes this worth stating carefully: the recorded cell is the RAW, UNMASKED word
+# (`if (r->status_after != 0u && r->status_any == 0u) r->status_any = r->status_after;` at
+# entry_storage.c:2362-2365), so `_status_any` is the first non-zero reading of EVERY bit of the
+# register; the mask appears only in the poll's BREAK condition (:2389) and the pre-send staleness gate
+# (:2300). So there is no masking defect in the EXTRACTOR - the register really was read whole five
+# million times and really did read zero. **BUT 730 MEASURED ON
 # THIS VERY BLOCK that a status bit appears only while its enable stands** - the completion was there all
 # along and INT_ENABLE was the mask - with 733's rule and 738's *necessary and not sufficient* the same
 # finding from two more presses. If the latch is enable-gated, a poll over a register whose error-enable
@@ -5654,9 +5660,16 @@ set=armed-storage-c3007c37 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #   NOTHING, WITH THE ENABLES UP -> the STRONG form of the negative: a command taken, started and held
 #     1.2 s never armed a response timeout; subject = the block's own command path.
 #   BIT 15 ONLY -> the sticky bit is a property of the IP and the observation closes with no news.
-# Two free cells ride along: `TIMEOUT_CONTROL 0x2E` (never read by this ladder) and `PRESENT_STATE 0x24`
-# BIT 24, the CMD line's own level, sampled DURING a response-demanding command (749 section 3 measured
-# that bit separating two producers of `inhibit_seen = 0`).
+# The cells that ride along, at the width they are actually new: `TIMEOUT_CONTROL 0x2E` read as a byte
+# (GENUINELY NEW - never read by this ladder, and left at reset on the vendor's own path for every
+# data-less command, so a non-zero value would be a finding), and PRESENT_STATE 0x24 BIT 24 - THE CMD
+# LINE'S LEVEL - which is ONE NEW SAMPLE AND NOT A NEW CELL, corrected in the document in place: the bit IS
+# already published through `_..._inhibit_last`, the whole PRESENT_STATE word at the poll's last sample
+# (`_nidx_inhibit_last = 0x01f80001` has bit 24 SET, as do 758's and 742's `0x01f80001` and 730's
+# `0x01f80000` - the line HIGH at the end on all of them). What no rung has is bit 24 at any moment other
+# than "last" - the question 749 section 3's table asks is whether the line ever goes LOW during a
+# response-demanding word - so the new cell is the COUNT OF SAMPLES IN WHICH BIT 24 WAS LOW over the first
+# 1024, beside the bit-0 count `inhibit_seen` already keeps.
 #
 # New instance m773: COVERAGE OF A READ READ AS ENABLEMENT OF A LATCH - a read's WIDTH offered as proof
 # that an absence is real; the test is to name the enable, the mask and the mode a bit needs to appear.

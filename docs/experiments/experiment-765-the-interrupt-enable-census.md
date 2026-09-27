@@ -99,9 +99,17 @@ The ladder's headline negative is `_nidx_status_any = 0` over `_nidx_any_polls =
 taken, started, held for a full 1.2 s, and **reports nothing in `INT_STATUS`**.
 
 726 read that as refuting *wrong bit*, because the poll reads `INT_STATUS 0x30` as a **32-bit word**
-(`st_read32`, confirmed at `entry_storage.c:2296`, `:2299`, `:2361`, `:2603`, `:2621`) and a 32-bit read at
-`0x30` covers `0x30`–`0x33`, i.e. the normal status **and** the error status half — where
-`SDHCI_INT_TIMEOUT` (`0x00010000`, bit 16 = error status bit 0) lives.
+(`st_read32` at `entry_storage.c:2296`, `:2299`, `:2361`, `:2603`, `:2621`) and a 32-bit read at `0x30`
+covers `0x30`–`0x33`, i.e. the normal status **and** the error status half — where `SDHCI_INT_TIMEOUT`
+(`0x00010000`, bit 16 = error status bit 0) lives.
+
+**And the coverage is exact, which is what makes this worth stating carefully rather than loosely.** The
+poll's recorded cell is the **raw, unmasked** word — `if (r->status_after != 0u && r->status_any == 0u)
+r->status_any = r->status_after;` (`entry_storage.c:2362-2365`) — so `_status_any` is the first non-zero
+reading of *every* bit of the register, error half included. The mask appears only in the poll's **break**
+condition (`:2389`, `if ((r->status_after & ST_SDHCI_INT_CMD_MASK) != 0u) goto cmd_done;`) and in the
+pre-send staleness gate (`:2300`). **So there is no masking defect in the extraction: the register really
+was read whole, five million times, and really did read zero every time.**
 
 **The read covers the bit. The latch may not.** 730's press measured, on this very block, that a status bit
 appears **only while its enable stands**: the completion was latched all along and `INT_ENABLE` was the mask,
@@ -205,11 +213,20 @@ of the same window the ladder has been writing since rung 4.
 | **nothing, with the enables up** | the strong form of the negative: a command that was taken, started and held for 1.2 s never reached the point of arming a response timeout — which is a statement about the block's internal command path, and the one reading the ladder has never been able to make | the subject is the block: `TIMEOUT_CONTROL 0x2E`'s value, `CLOCK_CONTROL`'s divider at the moment of the command, and whether `PRESENT_STATE`'s bit 24 (the CMD line level) ever moves for a response-demanding word |
 | `_newint_status` bit 15 only, or the same `0x00008000`-shaped value as before | the sticky bit is a property of the IP and not a report | §2's open observation closes with no news, and the third row's subject is the one to take |
 
-**And the two cells that cost nothing and should ride along:** `TIMEOUT_CONTROL 0x2E` read as a byte (never
-read by this ladder, and zero on the vendor's own path for every data-less command — so a non-zero value
-would be a finding), and `PRESENT_STATE 0x24`'s **bit 24**, the CMD line's own signal level, sampled during
-the poll — 749 §3 measured that exact bit separating two producers of `inhibit_seen = 0`, and no rung has
-sampled it *during* a response-demanding command.
+**And the cells that ride along, stated at the width they are actually new:**
+
+- **`TIMEOUT_CONTROL 0x2E`, read as a byte** — genuinely new: never read by this ladder, and left at its
+  reset value on the vendor's own path for every data-less command, so **a non-zero value here would be a
+  finding**.
+- **`PRESENT_STATE 0x24`'s bit 24, the CMD line's signal level — one new sample, not a new cell.**
+  *Corrected in place, because the first draft of this section called it a cell the ladder has never had and
+  the tree says otherwise:* the bit **is** already published, through `_…_inhibit_last`, which is the whole
+  `PRESENT_STATE` word at the poll's last sample — **`_nidx_inhibit_last = 0x01f80001` has bit 24 SET** (the
+  CMD line HIGH at the end), and 758's, 742's and 730's arms read `0x01f80001` / `0x01f80001` /
+  `0x01f80000`, all with bit 24 set. **What no rung has is bit 24 at any moment other than "last"**, and the
+  question 749 §3's table asks is whether the line ever goes LOW during a response-demanding word. So the
+  new cell is **the count of samples in which bit 24 was LOW, over the first 1024 as `inhibit_seen` already
+  counts bit 0** — a two-line addition beside the existing census and not a new register.
 
 ## 5. What this document does not say
 
