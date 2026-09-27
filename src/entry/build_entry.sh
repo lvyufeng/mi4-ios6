@@ -31441,20 +31441,45 @@ verify_trace_symbols() {
                     layout_fail "st_cmd3_noidx is in the image and its size could not be read out of it"
                 stb_nidx_body=$(arm-none-eabi-objdump -d --start-address="$stb_nidx" \
                                --stop-address="$(printf '0x%x' $(( stb_nidx + stb_nidx_size )))" "$OUT/xnu_arm_entry.elf")
-                { read -r stb_nidx_dev; read -r stb_nidx_cnt; read -r stb_nidx_img; read -r stb_nidx_imgaddr; } < <(classify_body "$stb_nidx_body" "f9824910 f9824914 f9824918 f982491c f9824924 f9824930 f9824934 f9824938")
-                stb_nidx_set=$(printf '%s\n' $stb_nidx_dev | LC_ALL=C sort | tr '\n' ' ')
+                # **TWO SHAPES, ONE CLAUSE, AND THE VALUE PICKS WHICH - the whole of rung 23's structural
+                # claim.** Rungs 21, 22 and 23 share this one body and differ in one constant, so there is
+                # no symbol to exclude a mixture by (the way rung 19's and rung 20's clauses exclude theirs)
+                # and the shape of the BYTES is what carries it instead: every expected set below is
+                # computed from $STORAGE_PROBE, so a source whose rung-23 guard was widened from `>= 22` to
+                # `>= 21` - which would silently move the arm already pressed as rung 22 - is refused AT
+                # VALUE 21 and again AT VALUE 20, and the two values are the two arms it would have
+                # replaced. What rung 23 adds is exactly TWO accesses: one `f9824930:ldr` (INT_STATUS 0x30
+                # between the enable store and its readback) and one `f982492e:ldrb` (TIMEOUT_CONTROL 0x2E,
+                # 8-bit, after the restore) - so its counts are rung 21's with `f9824930:ldr` 1 -> 2 and
+                # `f982492e:ldrb` 1, and its store set is rung 21's UNCHANGED.
+                stb_nidx_decl="f9824910 f9824914 f9824918 f982491c f9824924 f9824930 f9824934 f9824938"
                 stb_nidx_set_want="f9824910:ldr f9824914:ldr f9824918:ldr f982491c:ldr f9824924:ldr f9824930:ldr f9824934:ldr f9824934:str f9824938:ldr "
-                [[ "$stb_nidx_set" == "$stb_nidx_set_want" ]] ||
-                    layout_fail "st_cmd3_noidx's device accesses are [$stb_nidx_set] (sorted) and rung 21's record says exactly [$stb_nidx_set_want] - which is rung 20's set with the THREE OTHER RESPONSE WORDS added at their own offsets (0x14, 0x18, 0x1c): PRESENT_STATE 0x24, INT_STATUS 0x30, INT_ENABLE 0x34 twice (read and the window's store), SIGNAL_ENABLE 0x38 read only, and the whole RESPONSE block 0x10..0x1c read at four widths-identical offsets. A set that differs is either a new register class this rung never declared or a reading it promised and does not take"
                 stb_nidx_cnt_want="f9824910:ldr=2 f9824914:ldr=2 f9824918:ldr=2 f982491c:ldr=2 f9824924:ldr=1 f9824930:ldr=1 f9824934:ldr=2 f9824934:str=2 f9824938:ldr=1 "
+                stb_nidx_order_want="f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str f9824934:ldr f9824938:ldr f9824930:ldr f9824924:ldr"
+                stb_nidx_h_want="f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str f9824934:ldr f9824938:ldr"
+                stb_nidx_s_want="f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str f9824930:ldr f9824934:ldr f9824924:ldr"
+                stb_nidx_shape="rung 21"
+                if (( STORAGE_PROBE >= 22 )); then
+                    stb_nidx_decl+=" f982492e"
+                    stb_nidx_set_want="f9824910:ldr f9824914:ldr f9824918:ldr f982491c:ldr f9824924:ldr f982492e:ldrb f9824930:ldr f9824934:ldr f9824934:str f9824938:ldr "
+                    stb_nidx_cnt_want="f9824910:ldr=2 f9824914:ldr=2 f9824918:ldr=2 f982491c:ldr=2 f9824924:ldr=1 f982492e:ldrb=1 f9824930:ldr=2 f9824934:ldr=2 f9824934:str=2 f9824938:ldr=1 "
+                    stb_nidx_order_want="f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str f9824930:ldr f9824934:ldr f9824938:ldr f982492e:ldrb f9824924:ldr"
+                    stb_nidx_h_want="f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str f9824930:ldr f9824934:ldr f9824938:ldr"
+                    stb_nidx_s_want="f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str f9824930:ldr f982492e:ldrb f9824934:ldr f9824924:ldr"
+                    stb_nidx_shape="rung 23"
+                fi
+                { read -r stb_nidx_dev; read -r stb_nidx_cnt; read -r stb_nidx_img; read -r stb_nidx_imgaddr; } < <(classify_body "$stb_nidx_body" "$stb_nidx_decl")
+                stb_nidx_set=$(printf '%s\n' $stb_nidx_dev | LC_ALL=C sort | tr '\n' ' ')
+                [[ "$stb_nidx_set" == "$stb_nidx_set_want" ]] ||
+                    layout_fail "st_cmd3_noidx's device accesses are [$stb_nidx_set] (sorted) and $stb_nidx_shape's record says exactly [$stb_nidx_set_want] - which is rung 20's set with the THREE OTHER RESPONSE WORDS added at their own offsets (0x14, 0x18, 0x1c): PRESENT_STATE 0x24, INT_STATUS 0x30, INT_ENABLE 0x34 twice (read and the window's store), SIGNAL_ENABLE 0x38 read only, and the whole RESPONSE block 0x10..0x1c read at four widths-identical offsets. A set that differs is either a new register class this rung never declared or a reading it promised and does not take"
                 stb_nidx_cnt=$(printf '%s\n' $stb_nidx_cnt | LC_ALL=C sort | tr '\n' ' ')
                 [[ "$stb_nidx_cnt" == "$stb_nidx_cnt_want" ]] ||
-                    layout_fail "st_cmd3_noidx's device access COUNTS are [$stb_nidx_cnt] and rung 21's record says exactly [$stb_nidx_cnt_want] - and the counts are the m756 REPAIR AS A NUMBER: EVERY ONE of the four RESPONSE words is read TWICE, once before the window and once after the command, which is what makes the freshness pair one arithmetic of the whole block instead of a comparison of two derivations; and every other register is read exactly as often as rung 20's body read it. A count that differs is a reading moved, a word dropped, or a store lost"
+                    layout_fail "st_cmd3_noidx's device access COUNTS are [$stb_nidx_cnt] and $stb_nidx_shape's record says exactly [$stb_nidx_cnt_want] - and the counts are the m756 REPAIR AS A NUMBER: EVERY ONE of the four RESPONSE words is read TWICE, once before the window and once after the command, which is what makes the freshness pair one arithmetic of the whole block instead of a comparison of two derivations; and every other register is read exactly as often as rung 20's body read it. A count that differs is a reading moved, a word dropped, or a store lost"
                 stb_nidx_stores=$(printf '%s\n' $stb_nidx_dev | grep -v ':ldr' | tr '\n' ' ')
                 [[ "$stb_nidx_stores" == "f9824934:str " ]] ||
-                    layout_fail "st_cmd3_noidx's device STORES are [$stb_nidx_stores] and rung 21's record says that set is exactly [f9824934:str] - TWO stores, both to INT_ENABLE 0x34, and nothing else anywhere. This is the rung's safety contract as a set a build can read: a store to SIGNAL_ENABLE 0x38 would put this block's SPI 123 on the wire, a write-1-to-clear into INT_STATUS 0x30 would clear the very bit the poll reads, and a store anywhere else is a register class this arm never declared. The four extra RESPONSE reads this rung adds are READS for exactly this reason - the repair m756 asks for costs no store"
-                [[ "${stb_nidx_dev% }" == "f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str f9824934:ldr f9824938:ldr f9824930:ldr f9824924:ldr" ]] ||
-                    layout_fail "st_cmd3_noidx's device accesses IN PROGRAM ORDER, distinct, are [$stb_nidx_dev] and rung 21's record says exactly [f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str f9824934:ldr f9824938:ldr f9824930:ldr f9824924:ldr] - the four RESPONSE words word-3-first, then the window's store and its two readbacks, then the rest. **AND THAT IS ALL THIS LINE PROVES: IT IS FIRST-APPEARANCE ORDER OF DISTINCT KEYS, so a re-ordering of an access that REPEATS is invisible to it** - the four RESPONSE words are read at both moments and 0x34 is stored twice, so the list below is satisfied whether the restore is the first instruction of the tail or the last one. That is m702's shape (a claim the reader cannot see) and it was measured rather than argued: the first build of this clause's falsification battery moved the restore BELOW the readbacks and it BUILT. The two claims that need repeats are made by the SPLIT below, which is the same mechanism 732's clause uses on st_cmd_path"
+                    layout_fail "st_cmd3_noidx's device STORES are [$stb_nidx_stores] and both rungs' record says that set is exactly [f9824934:str] - TWO stores, both to INT_ENABLE 0x34, and nothing else anywhere. This is the rung's safety contract as a set a build can read: a store to SIGNAL_ENABLE 0x38 would put this block's SPI 123 on the wire, a write-1-to-clear into INT_STATUS 0x30 would clear the very bit the poll reads, and a store anywhere else is a register class this arm never declared. The four extra RESPONSE reads this rung adds are READS for exactly this reason - the repair m756 asks for costs no store"
+                [[ "${stb_nidx_dev% }" == "$stb_nidx_order_want" ]] ||
+                    layout_fail "st_cmd3_noidx's device accesses IN PROGRAM ORDER, distinct, are [$stb_nidx_dev] and $stb_nidx_shape's record says exactly [f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str f9824934:ldr f9824938:ldr f9824930:ldr f9824924:ldr] - the four RESPONSE words word-3-first, then the window's store and its two readbacks, then the rest. **AND THAT IS ALL THIS LINE PROVES: IT IS FIRST-APPEARANCE ORDER OF DISTINCT KEYS, so a re-ordering of an access that REPEATS is invisible to it** - the four RESPONSE words are read at both moments and 0x34 is stored twice, so the list below is satisfied whether the restore is the first instruction of the tail or the last one. That is m702's shape (a claim the reader cannot see) and it was measured rather than argued: the first build of this clause's falsification battery moved the restore BELOW the readbacks and it BUILT. The two claims that need repeats are made by the SPLIT below, which is the same mechanism 732's clause uses on st_cmd_path"
 
                 # **THE SPLIT, AND IT IS WHAT MAKES THE TAIL'S SHAPE A PROPERTY.** 732's clause splits a body
                 # at its first `bl` and classifies each half, because a store cannot be found by matching an
@@ -31490,14 +31515,12 @@ verify_trace_symbols() {
                         if (base != "sp" && base != "r13" && base != "pc" && base != "r15") next
                     }
                     { print }')
-                { read -r stb_nidx_h_dev; read -r stb_nidx_h_cnt; read -r stb_nidx_h_img; read -r stb_nidx_h_addr; } < <(classify_body "$stb_nidx_head" "f9824910 f9824914 f9824918 f982491c f9824924 f9824930 f9824934 f9824938")
-                stb_nidx_h_want="f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str f9824934:ldr f9824938:ldr"
+                { read -r stb_nidx_h_dev; read -r stb_nidx_h_cnt; read -r stb_nidx_h_img; read -r stb_nidx_h_addr; } < <(classify_body "$stb_nidx_head" "$stb_nidx_decl")
                 [[ -n "${stb_nidx_h_dev// /}" && "${stb_nidx_h_dev% }" == "$stb_nidx_h_want" ]] ||
-                    layout_fail "the half of st_cmd3_noidx that runs BEFORE its st_send_command has device accesses [${stb_nidx_h_dev% }] and rung 21's record says exactly [$stb_nidx_h_want] - SEVEN accesses and not four: the four RESPONSE words word-3-first, then the window's ONE store to INT_ENABLE 0x34, then the register read back, then SIGNAL_ENABLE 0x38. A set that is not exactly this seven is either a baseline read the arm does not take before the command or an access that has moved across it - and a body whose four baseline reads sit AFTER the window's store has the same SET and the same COUNTS as this one, which is why this line exists"
-                { read -r stb_nidx_s_dev; read -r stb_nidx_s_cnt; read -r stb_nidx_s_img; read -r stb_nidx_s_addr; } < <(classify_body "$stb_nidx_stripped" "f9824910 f9824914 f9824918 f982491c f9824924 f9824930 f9824934 f9824938")
-                stb_nidx_s_want="f982491c:ldr f9824918:ldr f9824914:ldr f9824910:ldr f9824934:str f9824930:ldr f9824934:ldr f9824924:ldr"
+                    layout_fail "the half of st_cmd3_noidx that runs BEFORE its st_send_command has device accesses [${stb_nidx_h_dev% }] and $stb_nidx_shape's record says exactly [$stb_nidx_h_want] - SEVEN accesses and not four: the four RESPONSE words word-3-first, then the window's ONE store to INT_ENABLE 0x34, then the register read back, then SIGNAL_ENABLE 0x38. A set that is not exactly this seven is either a baseline read the arm does not take before the command or an access that has moved across it - and a body whose four baseline reads sit AFTER the window's store has the same SET and the same COUNTS as this one, which is why this line exists"
+                { read -r stb_nidx_s_dev; read -r stb_nidx_s_cnt; read -r stb_nidx_s_img; read -r stb_nidx_s_addr; } < <(classify_body "$stb_nidx_stripped" "$stb_nidx_decl")
                 [[ -n "${stb_nidx_s_dev// /}" && "${stb_nidx_s_dev% }" == "$stb_nidx_s_want" ]] ||
-                    layout_fail "the accesses of st_cmd3_noidx that come AFTER its st_send_command, in program order, distinct, are [${stb_nidx_s_dev% }] and rung 21's record says exactly [$stb_nidx_s_want] - the four RESPONSE words again, then the window's RESTORE to INT_ENABLE 0x34, then INT_STATUS 0x30, then the register read back, then PRESENT_STATE 0x24. **The restore is the FIRST store to appear here and that is this rung's whole tail shape**: \`_nidx_readback\` and \`_nidx_ps_after\` are taken with the enable closed only if it precedes them and precedes the INT_STATUS read, and a body whose restore is the LAST thing it does publishes three cells read through an enable that is still open. That cell BUILT against the clause before this one, which is why it is here"
+                    layout_fail "the accesses of st_cmd3_noidx that come AFTER its st_send_command, in program order, distinct, are [${stb_nidx_s_dev% }] and $stb_nidx_shape's record says exactly [$stb_nidx_s_want] - the four RESPONSE words again, then the window's RESTORE to INT_ENABLE 0x34, then INT_STATUS 0x30, then the register read back, then PRESENT_STATE 0x24. **The restore is the FIRST store to appear here and that is this rung's whole tail shape**: \`_nidx_readback\` and \`_nidx_ps_after\` are taken with the enable closed only if it precedes them and precedes the INT_STATUS read, and a body whose restore is the LAST thing it does publishes three cells read through an enable that is still open. That cell BUILT against the clause before this one, which is why it is here"
                 [[ -z "${stb_nidx_img// /}" ]] ||
                     layout_fail "st_cmd3_noidx's non-device memory accesses are [$stb_nidx_img] at [$stb_nidx_imgaddr] and rung 21's record says the image side is EMPTY - twelve device reads into locals and two stores to a register, with no image word written by this body"
 
@@ -31536,6 +31559,15 @@ verify_trace_symbols() {
                 fi
 
                 echo "  xnu_entry_746: st_cmd3_noidx's device accesses are [$stb_nidx_set] with counts [$stb_nidx_cnt] in program order [$stb_nidx_dev], its stores exactly [f9824934:str] and an EMPTY image side; st_cmd_path calls it once, on disassembly line ${stb_nidx_ln% }, AFTER st_all_send_cid on line ${stb_nidx_cid_ln% } and after the command path's last st_send_command on line $stb_nidx_last, and the body is SPLIT at its own st_send_command on line $stb_nidx_split so that the half before it must be exactly [${stb_nidx_h_dev% }] and what follows it exactly [${stb_nidx_s_dev% }] - which is what makes "the baseline is read before the command" and "the restore is closed before the readbacks" properties of the bytes rather than sentences, since neither can be seen in a list of distinct keys; the four command call sites are [2, 1, 1], and rungs 19's and 20's bodies are BOTH ABSENT from this image. So the driver's own CMD3 (mmc.c:1409 mmc_set_relative_addr, opcode 3, argument card->rca << 16 = 0x00010000, ST_MMC_RSP_R1_NOIDX = PRESENT|CRC giving the word 0x030A - rung 19's 0x031A minus the ONE INDEX bit) goes on the bus with the SAME one-bit enable window rungs 17, 19 and 20 open around the same command, SIGNAL_ENABLE 0x38 read and NEVER written, and the WHOLE RESPONSE BLOCK 0x10..0x1c read at BOTH moments - which is m756's repair as a property of the bytes: rung 19's and rung 20's freshness pair took the 136-bit formula over 0x1c and the byte at 0x1b, while st_send_command's own resp cell is readl(0x10) - WORD 0, where a 48-bit response actually lives - so the three cells of that pair were two different words and the two agreed at the first moment only because CMD1's word was still in word 0 while CMD2's leftover was still in words 2 and 3. **What this clause does NOT assert**: the opcode, the argument, the flags and the word itself. A body's memory accesses and its bl sites carry no immediate, so 0x030A is carried by two _Static_asserts in the source and by the run's own _nidx_op, _nidx_flags, _nidx_arg and _nidx_word cells - and a perturbation that changed the flags to MMC_RSP_R1 would build, leaving this record to disagree with that log rather than this build to refuse"
+                if (( STORAGE_PROBE >= 22 )); then
+                    # **RUNG 23'S OWN ECHO, AND IT IS CONDITIONAL FOR THE REASON THE LISTS AT THE TOP
+                    # OF THIS CLAUSE ARE**: the two arms share a body, so the only way a build log can
+                    # say WHICH one it made is for the clause to say which shape it accepted. What the
+                    # line must carry is the difference and not the whole set - one constant's worth of
+                    # widening (`SDHCI_INT_ENABLE_CMD` = 0x000F0001, five bits, in place of the lone
+                    # `SDHCI_INT_RESPONSE`) and the two reads that ride with it.
+                    echo "  xnu_entry_766: st_cmd3_noidx is RUNG 23's shape - the same command, the same argument, the same flag word and the same two stores as rung 21's, with the window's enable word WIDENED from the one-bit SDHCI_INT_RESPONSE to ST_SDHCI_INT_ENABLE_CMD (0x000F0001 - the completion plus TIMEOUT/CRC/END_BIT/INDEX, and NOT the vendor's eleven: AUTO_CMD_ERR and the DATA_* half are excluded because neither is a fact about the card), and with TWO accesses no rung below has: f9824930:ldr between the enable store and its readback (_nidx_status_pre, INT_STATUS 0x30 read with the wider mask in place and no command of this arm's on the bus) and f982492e:ldrb after the restore (_nidx_tout_ctl, TIMEOUT_CONTROL 0x2E as a byte - the register no rung has ever read, and 0x00 here is the field's LONGEST setting rather than the absence of a timeout). The access set is [${stb_nidx_set% }] with counts [${stb_nidx_cnt% }]; the STORE SET is UNCHANGED from rung 21's (exactly [f9824934:str], both to INT_ENABLE 0x34) and SIGNAL_ENABLE 0x38 is READ AND NEVER WRITTEN, which is the half of the conjunction 730's press measured is what keeps this block's SPI 123 off the wire; the body is still SPLIT at its own st_send_command on line $stb_nidx_split, so [${stb_nidx_h_dev% }] is what runs before the command and [${stb_nidx_s_dev% }] what runs after, and the restore is still the FIRST store in the tail - which is what makes _nidx_readback, _nidx_status_post and _nidx_tout_ctl readings taken with the enable CLOSED"
+                fi
             fi
             # **AND THE GUARD IS `-eq 15` RATHER THAN `-ge 15`, WHICH IS 736'S MEASUREMENT AND NOT A TIDY-UP.** The body this clause is about is compiled for the VALUE 15 and no other, because what it leaves in `INT_ENABLE 0x34` refuses `st_cmd_path`'s gate on every rung above it - 736 pressed that consequence and read `_cmd_gate_kind = 2` with `_cmd_sent = 0`. A clause guarded `-ge 15` would therefore demand the symbol at rung 16, where the source does not have it, and refuse a correct arm. The exclusion and this guard are two spellings of one fact, and the ladder clause in `src/entry/entry_storage.c` states it a third time beside the value's own name.
             if [[ $STORAGE_PROBE -eq 15 ]]; then
@@ -33086,9 +33118,21 @@ say "  xnu_entry_678: the record carries ${#ENTRY_ARM_KEYS[@]} arm key(s) plus t
 # was empty and whose content was byte-identical to what the image was built from. The remedy that
 # refusal prescribes is a payload rebuild, and that is the one remedy this phase cannot afford:
 # `build.sh` never reads this file (it consumes exactly one thing from here, `xnu_arm_entry.bin`,
-# at `build.sh:80`), so the refusal is about a file nothing in the payload's build opens - and 408
-# says a payload rebuild does not reproduce, which means a false stale costs a new boot image and
-# the freeze with it, for a change in nothing the payload consumes.
+# at `build.sh:80`), so the refusal is about a file nothing in the payload's build opens - and a false
+# stale would then demand the one remedy this phase cannot afford.
+#
+# **AND THIS SENTENCE USED TO GIVE 408 AS THE REASON, WHICH IS NOT WHAT 408 MEASURED - corrected here
+# by 766, which is the first step to rebuild the entry image since 763 section 5 recorded this site as
+# owed.** 408's 48 bytes are `kernel_size` 6,015,356 with `STAGE90_XNU_ENTRY=1` against 6,015,308
+# without it: **a SWITCH, not a nondeterminism.** The payload build is reproducible from this tree and
+# its switch set (666 section 5: three builds, twice plain and identical, and the parked acting arm
+# rebuilt from the tree with all seven members identical), and what a careless `./build.sh` actually
+# costs is that `STAGE90_XNU_ENTRY`'s DEFAULT is OFF - so a plain rebuild produces an image that never
+# jumps into XNU and overwrites the armed bytes in `out/`, after which the arm exists only in its park.
+# The old wording said the rebuild is dangerous because it is not deterministic, which is false and
+# therefore ignorable; the new one says it is dangerous because of one switch's default, which is a
+# thing a reader can look up. (763's census counts seventeen occurrences of the old wording across five
+# files; nine were corrected there and six are left standing as the history of past steps.)
 #
 # The sweep was measuring a proxy, so the repair is to measure the property: **the content of this
 # directory at the moment this image was built**, which is what "is the entry image the build of

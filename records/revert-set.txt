@@ -5680,3 +5680,93 @@ set=armed-storage-c3007c37 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # **TWRP-to-storage stays withheld.** What this step buys is that the next press is spent on a question the
 # ladder has never asked, instead of on a fourth sample of a masked one.
 
+
+# ================================================================================================
+# 766 (2026-09-27): **THE RUNG-23 ARM - THE WINDOW S ENABLE WORD WIDENED FROM ONE BIT TO THE FIVE
+# 765 section 4 PRE-REGISTERED, BUILT AND PARKED. NO PRESS SPENT, NO PRESS OWED, NO FIRER ARMED.**
+# ================================================================================================
+#
+# WHY THIS RUNG EXISTS. 730 pressed the rule on THIS block - a status bit is latched only while its
+# enable stands (the completion was there all along and INT_ENABLE was the mask) - and 765 section 1
+# measured the distance: the vendor own sdhci_init (sdhci.c:284-296, called once from sdhci_add_host
+# at :3589) writes ELEVEN status bits, 0x01FF0003, into INT_ENABLE 0x34 AND SIGNAL_ENABLE 0x38, while
+# this ladder has enabled exactly ONE bit in its whole history. So the ladder headline negative -
+# _nidx_status_any = 0 over 5,093,376 polls at rung 22 - is a statement about a MASK as much as about
+# the block, and 765 section 2 is its narrowest true form. 765 section 3 then REFUTED 764 section 4
+# candidate 1 from the vendor own DT (msm8974-mtp.dtsi:384-410 marks both eMMC rails
+# qcom,vdd-always-on, and sdhci.c:3583 asks for con_id vmmc which the DT does not supply, so
+# host->vmmc = NULL and every mmc_regulator_set_ocr call is a no-op). The press that separates
+# the two readings is this rung.
+#
+# WHAT IT CHANGES, AND IT IS ONE CONSTANT: st_cmd3_noidx writes ST_SDHCI_INT_ENABLE_CMD =
+# 0x000F0001 = RESPONSE | TIMEOUT | CRC | END_BIT | INDEX into INT_ENABLE 0x34 in place of the lone
+# SDHCI_INT_RESPONSE, at the SAME call site, in the SAME position, with the SAME opcode (3), the
+# SAME argument (0x00010000) and the SAME flag word (0x030A). FIVE bits and not the vendor eleven:
+# AUTO_CMD_ERR (0x01000000) and the DATA_*/BUS_POWER half (0x00F00000) are excluded because neither
+# is a fact about the card, and the exclusions are carried by SIX _Static_asserts in
+# src/entry/entry_storage.c because NO BUILD CLAUSE CAN READ A VALUE - a body memory accesses and
+# its bl sites carry no immediate.
+#
+# AND TWO NEW READS, BOTH 765 section 4 PRE-REGISTERED: _nidx_status_pre is INT_STATUS 0x30 read
+# BETWEEN the enable store and its readback, with the wider mask in place and no command of this
+# arm on the bus; _nidx_tout_ctl is TIMEOUT_CONTROL 0x2E read as a BYTE after the restore, the
+# register no rung has ever read (the vendor writes it only from sdhci_prepare_data, sdhci.c:827-828,
+# under if (data || (cmd->flags & MMC_RSP_BUSY)) - so a NON-ZERO value here would be a finding, and
+# 0x00 is the field LONGEST setting rather than the absence of a timeout).
+#
+# THE PRIMARY ANSWER NEEDS NO NEW MACHINERY. st_send_command poll publishes the RAW, UNMASKED
+# INT_STATUS word it first saw non-zero in (entry_storage.c:2362-2365), over 5.09 million readings.
+# The same poll that has always read zero is the poll that will read 0x00010000 if the card is
+# silent and the block knows it. THE FOUR-ROW ANSWER SPACE, each row naming the next act:
+#   0x00010000 (TIMEOUT) latched -> THE CARD DID NOT ANSWER AND THE CONTROLLER KNEW IT. One bit
+#     refutes the whole rungs-13-22 reading; the subject becomes the card and the bus - bus width,
+#     the CMD/DAT pads, the clock at the card pins, the board file qcom,pad-* settings.
+#   0x00020000 / 0x00040000 / 0x00080000 (CRC / END_BIT / INDEX) -> the card ANSWERED and the word
+#     was malformed; subject = sampling and bus width.
+#   NOTHING, WITH THE ENABLES UP -> the STRONG form of the negative: a command taken, started and
+#     held 1.2 s that never armed its own response timeout; subject = the block own command path,
+#     TIMEOUT_CONTROL value, CLOCK_CONTROL divider at the moment of the command, and whether
+#     PRESENT_STATE bit 24 ever moves for a response-demanding word.
+#   BIT 15 ONLY, or the same 0x00008000-shaped value as before -> the sticky bit is a property of
+#     the IP and not a report.
+#
+# SAFETY, AS A PROPERTY OF THE BYTES AND NOT A SENTENCE. The line rises on the CONJUNCTION of
+# INT_ENABLE and SIGNAL_ENABLE; SIGNAL_ENABLE 0x38 is READ AND NEVER WRITTEN at this rung, and 730
+# press wrote INT_ENABLE on this block, took no command and took no interrupt (_post_end_calls = 7,
+# no _irq_other_* key). Rungs 17, 19, 20, 21 and 22 have each written that register with the signal
+# enable at zero and none took a delivery. build_entry.sh holds this body store set to EXACTLY
+# [f9824934:str] - TWO stores, both to INT_ENABLE 0x34, and nothing else anywhere.
+#
+# THE BUILD. The first invocation refused on STAGE90_ENTRY_TRACE (the pressed arm carries 1); the
+# second refused on STAGE90_XNU_SEAM_POC; the third FAILED the compiler on one of the six new
+# _Static_asserts - (ST_SDHCI_INT_ENABLE_CMD & ST_SDHCI_INT_CMD_ERR) == ST_SDHCI_INT_CMD_ERR, which
+# is FALSE by construction because ST_SDHCI_INT_CMD_ERR is 0x010F0000 and CARRIES AUTO_CMD_ERR that
+# this window excludes; the literal 0x000F0000 replaced it. The fourth FAILED the clause this step
+# had just made value-dependent, on NODECL-... for nine of ten accesses: the declared-address list
+# had been turned into a variable and passed UNQUOTED, and classify_body takes its second POSITIONAL
+# argument alone - so declset held one address and every other access was refused. `bash -n` cannot
+# see it; the clause the step was writing is what caught it (m774). With the argument quoted the
+# entry build exits 0 printing xnu_entry_766 and the payload build follows with
+# STAGE90_EXTRA_CFLAGS=-DSTAGE90_XNU_ENTRY=1 (NOT STAGE90_XNU_ENTRY=1 - the earlier bare form left the
+# config at 0u and would have produced an image that never jumps into XNU).
+#
+# AND THIS IS THE STEP THAT PAID 763 section 5 SITE: src/entry/build_entry.sh comment on 408. It had
+# said a payload rebuild does not reproduce; 408 48 bytes are kernel_size 6,015,356 WITH
+# STAGE90_XNU_ENTRY=1 against 6,015,308 without it - a SWITCH and not a nondeterminism - and the
+# correct reason is that the switch DEFAULT is OFF, so a careless ./build.sh makes an image that
+# never jumps into XNU and overwrites the armed bytes in out/.
+#
+# **NO PRESS, NO FIRER, NO DEVICE ACTION OF ANY KIND.** out/ now holds THIS arm, ARMED AND NOT
+# PRESSED; the previously pressed arm armed-storage-c3007c37 is still parked and intact. Spending
+# this press is the operator decision.
+set=armed-storage-3a92aa52 sha256=ce4bf86777bd54b0a464b055838cc49d0a918a82cdb516e6039b15c1b3759914 bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-22-entry-rung-23-whose-window-writes-THE-VENDORS-OWN-five-bit-command-error-enable-set-into-INT_ENABLE-0x34-with-SIGNAL_ENABLE-0x38-held-at-zero
+set=armed-storage-3a92aa52 sha256=9e9af7460b95eee63074bc39034d1abec2bcb817d2bdf0c5d810208dc0111e7f bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-22-entry
+set=armed-storage-3a92aa52 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-pressed-arm-EXCEPT-NOTHING-the-probe-switch-lives-in-the-entry-arms-own-record
+set=armed-storage-3a92aa52 sha256=27b2081598501fbd8989286f0972226192b8506e3e494c3186dbf3a0e5f9d1db bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-3a92aa52 sha256=063dbb087cccb7357de4388a82fa710289e2cd9dbfab577ce324f788c205846a bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above
+set=armed-storage-3a92aa52 sha256=3a92aa527791056b2f70d0f54fc25e445acc7de94ac037d6587bbba9b32c39ee bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-3a92aa52-IS-THE-SET-NAME-and-its-window-enables-FIVE-status-bits-instead-of-rung-21s-ONE
+set=armed-storage-3a92aa52 sha256=0132c4d1d424fe8fe50ede6154bd9c2ff04606ea3a5241213aefb5ed760c0ec6 bytes=6732300 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-3a92aa52 sha256=5f8e264fe6cdce6754cb4e8416470a0a29e5f5b256196a4980f845f787acd67b bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact
+set=armed-storage-3a92aa52 sha256=999f4c005a6ccfde48486d6f058a336bb25c812c5f8a1156a01a37a647e4a423 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-23-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match
+set=armed-storage-3a92aa52 sha256=b498cc680aa9673b3b8a6c080dbb38c40cc09b2f94c98ce1ff645a67bf51f661 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-3a92aa52 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
