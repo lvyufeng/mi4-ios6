@@ -66,7 +66,9 @@ restructure moved it: the `reference/` and `status/` pages were re-pointed at th
   refuses a rung outside the domain parsed from the file's own `#error` guard, and calls a cell published
   from an interrupt client an **INTERVAL** rather than inventing a point for it. Its **`--selftest`**,
   which re-derives m732 and m763 from the call order, runs as a clause of `make check` — because the tool
-  was wrong four times while it was written, twice while printing a plausible table (754).
+  was wrong four times while it was written, twice while printing a plausible table (754). **Every header it
+  prints carries BOTH rung spellings** - `# rung 20 (switch VALUE; the record's ordinal rung 21)` - because 754
+  section 4 quoted its one-spelling header while comparing against a capture named in the other spelling (755).
 
 ## Status — `status/`
 

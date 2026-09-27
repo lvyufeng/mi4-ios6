@@ -675,7 +675,8 @@ def render_path(detail):
 
 
 def cmd_table(model, rung):
-    print(f"the probe's stage calls, in source order (rung {rung}):")
+    print(f"the probe's stage calls, in source order "
+          f"(switch value {rung} = ordinal rung {rung + 1}):")
     for line, name, gl in stage_table(model, rung):
         cond = " && ".join(gl) if gl else "(unguarded)"
         v = eval_guard(gl[-1], rung) if gl else True
@@ -715,7 +716,8 @@ def cmd_key(model, names, rung):
 
 def cmd_after(model, event, names, rung):
     bad = 0
-    print(f"claim: each key below is READ AFTER `{event}`, at rung {rung}.")
+    print(f"claim: each key below is READ AFTER `{event}` "
+          f"(switch value {rung} = ordinal rung {rung + 1}).")
     for name in names:
         rel, why = compare(model, name, event, rung)
         ok = rel == "AFTER"
@@ -750,7 +752,8 @@ SELFTEST = [
 
 def cmd_selftest(model, rung):
     bad = 0
-    print(f"the two landed moments defects, re-derived by the call order (rung {rung}):")
+    print(f"the two landed moments defects, re-derived by the call order "
+          f"(switch value {rung} = ordinal rung {rung + 1}):")
     for event, key, want, why in SELFTEST:
         rel, why2 = compare(model, key, event, rung)
         ok = rel == want
@@ -841,7 +844,15 @@ def main(argv=None):
               f"changed shape, and either way this tool has no reading to give.", file=sys.stderr)
         return 2
 
-    print(f"# rung {rung} ({how}; domain {cond})")
+    # **Both spellings, always, and that is not decoration.** The guards in the source, the value
+    # in `out/`'s config and this tool all count the SWITCH; the capture filenames and the commit
+    # subjects count ORDINAL arms (`rung20-nrsp-...` is value 19). The two are one apart, and the
+    # 754 section 4 sentence that got this wrong did so *while quoting this tool's header* - which
+    # carried only the switch's spelling. So every header carries both, and the ordinal is derived
+    # here rather than left to a reader who has already read the header and is now looking at a
+    # capture's name.
+    print(f"# rung {rung} (switch VALUE; the record's ordinal rung {rung + 1}) "
+          f"[{how}; domain {cond}]")
 
     def resolve(names):
         out, missing = [], []

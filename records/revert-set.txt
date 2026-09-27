@@ -5059,3 +5059,70 @@ set=armed-storage-46fe6737 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #
 # The goal is still **NOT met**: no storage, no filesystem, no mount, and the machine never observed
 # STAYING UP (745). **TWRP-to-storage stays withheld.**
+
+# ================================================================================================
+# 755 - READ OUT OF THE ARCHIVE AND THE SOURCE; NO DEVICE ACTION, NO BUILD, out/ UNTOUCHED.
+# ================================================================================================
+# WHAT CHANGED IN THE RECORD. **Nothing in this file's arms, gates or flags.** No set= was added
+# (still 330) and no arm moved. 755 re-derives a landed conclusion from a second clock, corrects a
+# landed document's rung spelling, and puts a number on what the storage probe costs the OS. Plus the
+# one live-code fix: `tools/read_storage_key_order.py`'s headers now print BOTH rung spellings.
+# See docs/experiments/experiment-755-the-os-poll-is-late-by-exactly-the-probes-blocking-commands.md.
+#
+# THE FINDING. 503's `_poll_ticks` is, by its own source comment, "the wall time the kernel kept this
+# thread parked" (entry_stubs.c:4561, comment at :4523) - WALL TIME, not the timeout. Across nine
+# captures the third poll (the first asking 2000 ms) returns late by exactly the probe's full-bound
+# command polls minus the 2000 ms the OS asked for:
+#
+#   rung6/8/9/16   probe has NO full-bound poll            p3 = 2.0077..2.0093   (+7.7..+9.3 ms)
+#   rung12/13/14   ONE  (cmd0 1.2001)                      p3 = 2.0076..2.0093   (fits in the window)
+#   rung15         ONE  (cmd1 1.2001)                      p3 = 2.0090
+#   rung17         TWO  (cmd1 1.2000 + cid 1.2001 = 2.4001) p3 = 2.4270          (+427.0 ms)
+#   rung18         TWO  (2.4003)                            p3 = 2.4220          (+422.0 ms)
+#   rung19         THREE(cmd1+cid+rca = 3.6003)             p3 = 3.6241          (+1624.1 ms)
+#   rung20         TWO  (2.4002)                            p3 = 2.4249          (+424.9 ms)
+#
+# Each excess agrees with the probe's own published total to a residual of 21.6 - 26.8 ms (the tail
+# after the last command).
+#
+# **THE INDEPENDENT CONFIRMATION OF 746.** rung 19 -> rung 20 moved ONE constant (RSP_SHORT -> NONE);
+# _rca_ticks 1.2000 s became _nrsp_ticks 0.0003 s; the probe's full-bound total fell 3.6003 -> 2.4002 s;
+# and **the OS's poll lateness fell 1624.1 -> 424.9 ms - 1199.2 ms measured against 1200.1 ms of probe
+# time removed, agreeing to 0.9 ms.** That is 746's headline reached from a clock the ladder does not
+# own. It also confirms the rung-value-to-ordinal mapping four times over from the guards alone
+# (cmd0_ticks >= 11 first at rung12; cid_ticks >= 16 first at rung17; rca == 18 at rung19;
+# nrsp == 19 at rung20).
+#
+# TWO MORE CONSTANTS. The poll-to-poll handoff (p4.before - p3.after) is **1.505 - 1.529 ms across
+# twelve boots on nine rungs (a 1.6% spread)**. The 5 ms/40 ms pair's DIFFERENCE is **37.69 - 38.57 ms
+# for a 35 ms difference in the ask - constant to 0.88 ms across thirteen boots**, so 503's own
+# falsifier passes for that pair; and it FAILS for the 2000/2000 pair on rungs 17-20 only (same ask,
+# durations differing by 411-1609 ms) - the falsifier fired and the storage probe is the explanation,
+# not the kernel's timer.
+#
+# **A CORRECTION TO 754 SECTION 4.** Its sentence "a reader holding a rung-20 capture and a sentence
+# quoting `_nrsp_complete` is quoting a cell that cannot exist in that image" is WRONG: _nrsp_complete's
+# guard is `== 19`, and the capture named `rung20-nrsp` is the ORDINAL rung 20 = value 19, where that
+# body is exactly the one that ran. The tool's report had used the switch-VALUE spelling (20 = the
+# armed arm, where nrsp is indeed dead). The cause was the tool's own header carrying ONE spelling;
+# fixed rather than annotated - every header now prints `# rung 20 (switch VALUE; the record's ordinal
+# rung 21)` and `--rung 21` still refuses with the note that the ladder's "rung 21" IS value 20.
+# `--selftest` is unmoved and `make check` still exits 0. **This is the fifth instance in five
+# experiments of the name-with-two-readings family, and the first that landed inside a tool whose own
+# refusal message warns about it** - the warning was in the refusal path, the header was not.
+#
+# A READING FOR THE SECOND STRATEGIC DECISION. `entry_post_clock` (entry_trace.c:2358) is a HARD STOP
+# (end_now -> entry_seam_end_run()), and at the buzzer the OS is HEALTHY: /dev/rmd0 opened (error 0),
+# /dev/nosuch refused (error 2, 503's control pair), a child reaped (_wait_status = 0x300), four polls
+# plus _poll_over = 1, in a repeating poll(nfds=0, 2000 ms) loop whose _poll_retval = 0 says it returns
+# normally every time - and the gap to the deadline is **4.0249 s = exactly 2.000 x a 2000 ms poll**.
+# So the "stays up" arm would test FOR HOW LONG an idle OS with a 2-second sleep loop keeps returning,
+# not whether the OS survives.
+#
+# **NO ARM MOVED: out/ holds `armed-storage-46fe6737` (STAGE90_XNU_STORAGE_PROBE=20, entry rung 21),
+# ARMED AND NOT PRESSED.** No firer is armed and none is needed; the press path is the two commands
+# readiness prints, run by hand once each. `fastboot boot` only, NEVER flash; neighbour 33e80afe absent
+# from BOTH lists before firing, and no press may be spent without the operator's authorization.
+#
+# The goal is still **NOT met**: no storage, no filesystem, no mount, and the machine never observed
+# STAYING UP (745). **TWRP-to-storage stays withheld.**
