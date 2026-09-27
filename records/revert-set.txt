@@ -6200,6 +6200,81 @@ set=armed-storage-f72e9f18 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #   0 disagreeing in the refusing scope, 11 in the historical record** - and the 11 are the 778 document's
 #   own deliberate quotations of the bad pairs, in the scope that reports and does not refuse.
 #
+#
+# 779: THE PAD EXPECTATION IS ONE OF THE DEVICE'S FOUR MTP BOARDS' WORD, AND THE DEVICE'S OWN DEVICE TREE IS
+# ON DISK. HOST-SIDE ONLY: no device action, no press, no firer, nothing built, and `out/` is byte-identical
+# before and after - the armed rung-28 arm (armed-storage-d5d98738) is unspent. The gate was run ONCE,
+# host-side, because this step edits its narration and a narration edit is verified by running the gate:
+# readiness 5 of 5, exit 0, under the arm's own flags.
+#
+#   WHAT 776's GUARD COMPARES AGAINST, AND WHAT THE SOURCE SAYS IT IS. `ST_TLMM_SDC1_EXPECT` = `0x00009F24`,
+#   and `entry_storage.c:302-303` calls `msm8974pro-ac-pm8941-mtp-v5.dts` *the Mi 4's own board file*. Both
+#   halves are wrong and neither is visible from the source: the vendor checkout holds NO CANCRO OR XIAOMI
+#   DEVICE TREE AT ALL (381 dts files, every one a Qualcomm reference board - MTP, CDP, FLUID, LIQUID - and
+#   V5 is one of FOUR MSM8974PRO-AC MTP variants), and `.gitignore:12` excludes `external/` under a comment
+#   that calls those checkouts large and reproducible - so the citation names a file no clone can resolve.
+#
+#   THE DEVICE'S OWN TREE IS THE dt.img THE IMAGE PACKS. `scripts/build.sh:130` sets
+#   QCDT_DT=.../boot-unpacked/dt.img, the Mi 4's own partition backup: 2521088 bytes, sha256
+#   c8faf487909b668fcebddfb2dcbd793bfb94d0411286c1f5c588bc0015120efe, a QCDT v2 table - A LIST OF
+#   ALTERNATIVES, one of which the bootloader selects ON THE DEVICE. Six FDT trees, five with an
+#   `sdhci@f9824900` node, and they declare TWO pad words:
+#     #0 Qualcomm MSM 8974Pro-AC + PMA8084 MTP   board-id 8 1     pull [0,3,3,1] drv [7,4,4] -> 0x00009FE4
+#     #1 Qualcomm MSM 8974Pro-AC MTP             board-id 8 256   pull [0,3,3,1] drv [4,4,4] -> 0x00009F24
+#     #2 Qualcomm MSM 8974Pro-AC MTP V4          board-id 8 1024  pull [0,3,3,1] drv [4,4,4] -> 0x00009F24
+#     #3 Qualcomm MSM 8974Pro-AC MTP V5          board-id 8 1280  pull [0,3,3,1] drv [4,4,4] -> 0x00009F24
+#     #4 Qualcomm MSM SAMARIUM RUMI              (no SDC1 node)
+#     #5 Qualcomm MSM 8974Pro-AA/AB MTP          board-id 8 0     pull [0,3,3,1] drv [4,4,4] -> 0x00009F24
+#   The two words differ in ONE MASKED FIELD OF ONE REGISTER: CLK hdrive 7 against 4. WHICH TREE THE
+#   BOOTLOADER SELECTS IS NOT ESTABLISHED ANYWHERE IN THIS TREE, and 779 does not establish it.
+#
+#   AND THE FORK'S SECOND ROW IS NARROWER THAN IT READS - corrected in the gate's own narration for this arm,
+#   in both places it is printed, BEFORE any press. `_pad_write_skipped = 0` means *the register did not hold
+#   0x9F24*, NOT *the vendor's act was never applied*: a register holding 0x9FE4 is a CONFIGURED pad -
+#   declared by another tree on this same device - that the arm would re-configure to V5's word, and
+#   `_pad_after_match = 1` is then not the statement that the fix landed on an unconfigured pad. The fork is
+#   `raw == 0x9F24` versus `raw != 0x9F24`; `_pad_raw` is the reading and it is taken unconditionally. The
+#   narration's other over-claim is corrected in the same edit: it called the constant "the value this
+#   board's own arrays produce", and it is a value SOME tree on this board produces.
+#
+#   AND THE RAIL CAVEAT IS ANSWERED AT ITS PROVENANCE WITHOUT BEING CLOSED. Every tree that carries the node
+#   declares `qcom,vdd-always-on` and `qcom,vdd-io-always-on`, so the sentence at 5646 - "not that the rails
+#   are up on the physical device (the Mi 4's own board dts is not in this tree)" - no longer rests on a
+#   missing file: the device's own device tree IS in this tree, in the boot backup. It is still NOT a
+#   measurement, and no capture in the archive contains a PMIC, SPMI or regulator reading of any kind.
+#
+#   THE REPAIR IS A DERIVATION AND A TRACKED READING, BECAUSE THE INPUT CANNOT BE TRACKED. Three artifacts:
+#   `tools/derive_sdc1_pads.py` parses any QCDT blob, walks each tree, re-derives the word through the
+#   kernel's own shift and mask (`msm_tlmm_set_field`, gpio-msm-common.c:481-496; hdrive width 3 at 6/3/0,
+#   pull width 2 at 13/11/9/15, DT arrays indexed from the enum base) and PICKS NO TREE;
+#   `records/sdc1-pad-candidates.txt` is the TRACKED reading - every candidate word, the model and board-id
+#   of each tree declaring it, and the sha256 of the dt.img it was read from - which is what converts a
+#   gitignored derivation into something a clone holds; and `tools/check_sdc1_pad_expectation.py`, in
+#   `make check` with a 9-cell `--selftest` on its own line, reads the RECORD and refuses a constant that
+#   matches NO candidate. **ITS SCOPE IS DELIBERATELY NARROWER THAN "is the constant right"**: it catches a
+#   constant no board on this device implies and it CANNOT catch one the wrong board implies, because the
+#   record holds two words and the choice is made on the device - so a record holding both PASSES and
+#   PRINTS the ambiguity, and the fact lives in the output of every `make check`. Four falsification cells
+#   were run against scratch records (only the other word -> refuse; no candidate line -> refuse; no
+#   input/sha header -> refuse; both -> pass and print).
+#
+#   AND make check WAS RED ON MASTER AT 9a0291e (this is the 779a commit, which landed first). The cause is
+#   778's own class a third time: `check_count_citations.py` scans `git ls-files`, so while that file was
+#   untracked its ten SELFTEST cells were invisible to it - and three of those cells ARE the defect they
+#   test - so committing the file made the check refuse itself with exit 2. 778's recorded green was
+#   therefore measured in a state the commit destroys. Repaired 778's own way: the three cells are now ONE
+#   string in the source split across two adjacent literals, so the cell still tests the real string at
+#   runtime and no line of the file contains the bad pair.
+#
+# OWED, named rather than inferred: `entry_storage.c:302-303`'s mis-citation itself (COST reason - an entry
+# source moves the image's recorded source manifest and the gate would refuse the arm a press is waiting on;
+# the fix is to name the tree the word came from and cite `records/sdc1-pad-candidates.txt` for the
+# candidates); and the SUBSTANTIVE repair - make the arm compare against the SET of candidate words and
+# publish which member matched - which is a BUILD, PRE-REGISTERED HERE AND NOT BUILT, because the arm is
+# armed and unspent and moving `out/` is the operator's decision. Also unchanged from 775-778: the
+# `rung_para` correction for values 12..23, the seam-address class, `run_and_capture.sh`'s
+# `EXIT_POP_LR_LITERAL`, the 737 window paragraph, and the four `5,088,000`s in `entry_storage.c`.
+#
 # NO set= line follows this block: no arm was built, no park was made, and the 34 sets above are unchanged.
 
 # 772: THE RUNG-26 ARM - armed-storage-a1378a48, STAGE90_XNU_STORAGE_PROBE=25.

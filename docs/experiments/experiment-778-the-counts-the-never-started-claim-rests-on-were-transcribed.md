@@ -200,8 +200,14 @@ that were not defects:
 
 It **refuses** on `tools/`, `scripts/`, `records/`, `Makefile` and `src/`; it is **exempt** on `src/entry/`
 for a cost reason (§8); and it only **prints** what it finds under `docs/experiments/`, which is the
-historical record and is superseded rather than rewritten (the restructure's own rule). On the tree as this
-step lands it reads 73 counts, with none disagreeing in any scope — and **it refused its own author twice**,
+historical record and is superseded rather than rewritten (the restructure's own rule). **CORRECTED BY 779a**: the reading
+below was taken while this tool was still UNTRACKED, and the scan walks `git ls-files` — so the file being
+verified was excluded from its own verification. The commit that added it made three of its `SELFTEST` cells
+— which ARE the defect they test — visible, and `make check` went red on master at `9a0291e`. The cells are
+now one string split across two adjacent literals, and the honest reading is **108 counts, 0 disagreeing in
+the refusing scope, 11 in the historical record** (this document's own deliberate quotations of the bad
+pairs, in the scope that reports). The sentence as this step landed it read: *it reads 73 counts, with none
+disagreeing in any scope* — and **it refused its own author twice**,
 which is the strongest thing that can be said for it:
 
 1. Against the first draft of `records/revert-set.txt`, where the correction note quoted the false equality

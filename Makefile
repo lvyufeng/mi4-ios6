@@ -86,6 +86,20 @@ restore:
 #                           self-test asserts the four idioms that look like a citation and are not:
 #                           `offset (step)`, a tick count beside a millisecond figure, a decimal with no
 #                           separators, and a pair three orders of magnitude apart.
+#   check_sdc1_pad_expectation.py
+#                           reads the TRACKED record records/sdc1-pad-candidates.txt and refuses an
+#                           `ST_TLMM_SDC1_EXPECT` that matches no board the DEVICE'S OWN device tree
+#                           declares. It reads the record and not the device tree because the device
+#                           tree is `.gitignore`d (`xiaomi4-cancro-backup-*/`, like `external/`), so a
+#                           clone cannot have it - and that is the point of the record: the source's
+#                           comment cites `msm8974pro-ac-pm8941-mtp-v5.dts` as *the Mi 4's own board
+#                           file*, and the vendor checkout holds no cancro device tree at all, only
+#                           Qualcomm's reference boards. The tool that writes the record
+#                           (`tools/derive_sdc1_pads.py --write-record`) does need the dt.img, and says
+#                           so when it is missing. It does NOT refuse on ambiguity: this device declares
+#                           two different pad words and the bootloader's choice is made on the device,
+#                           so an ambiguous record prints its candidates and passes, and a no-match is
+#                           the only refusal (779).
 check:
 	@tools/check_stage_paths.sh
 	@tools/check_set_name_rule.sh
@@ -94,6 +108,8 @@ check:
 	@tools/read_storage_key_order.py --selftest >/dev/null
 	@tools/check_count_citations.py --selftest >/dev/null
 	@tools/check_count_citations.py
+	@tools/check_sdc1_pad_expectation.py --selftest >/dev/null
+	@tools/check_sdc1_pad_expectation.py
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not
@@ -136,7 +152,8 @@ help:
 	@echo "make list                the archived snapshots and where they live now"
 	@echo "make restore STAGE=50    bring an archived snapshot back"
 	@echo "make check               the repository's own bookkeeping: the retired layout, set names, backticked"
-	@echo "                         messages, the payload's entry switch, and every count quoted in two bases"
+	@echo "                         messages, the payload's entry switch, every count quoted in two bases, and"
+	@echo "                         the board-derived pad constant against the device's own device tree"
 	@echo "make clean               refused; the payload and the parks cannot be rebuilt"
 	@echo
 	@echo "Booting is not a make target: flash nothing, and boot non-persistently with"
