@@ -6227,3 +6227,45 @@ set=armed-storage-a1378a48 sha256=fd63d9baa13e3112fc7021e3846fb6b312a08f8206e452
 set=armed-storage-a1378a48 sha256=2fd9874221bf0e4fdb54adbec2cbb3ea4dd41be73f5bdbda92d7a8e7201c7c56 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-23-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match
 set=armed-storage-a1378a48 sha256=4f55edbfa44bd8606e8b403feda18d6322a73b5b58a9f4f414f8e53c2e8e5b29 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
 set=armed-storage-a1378a48 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+
+# 773 - THE REACHABLE SET, COUNTED. NO ARM IS BUILT BY THIS STEP AND NOTHING IN `out/` MOVED: the live arm
+# is still 772's armed-storage-a1378a48 (STAGE90_XNU_STORAGE_PROBE=25), ARMED AND NOT PRESSED. This block
+# exists because the step VERIFIED a load-bearing claim that 769 had only inferred, and because it
+# pre-registers the arm that would follow:
+#
+#   THE CENSUS. 769 section 3 said only the power IRQ's BUS_ON branch applies the SDC1 pads - an inference
+#   from reading one function's neighbourhood. It is now counted over the whole vendor tree: every caller
+#   of sdhci_msm_setup_pins/setup_pad is sdhci-msm.c:1000 (the dispatcher's only call), :2019 (the BUS_ON
+#   branch - the ONLY enable = true), :2034 (power-off, false) and :3144 (teardown, false). And
+#   setup_pins carries a latch (:994-995, cfg_sts == enable -> return), so within one Linux boot the pads
+#   are written ONCE, on the first BUS_ON - so a board that went straight to fastboot has them at
+#   BOOTLOADER state, whatever that is, and nothing in this repository can say what the bootloader wrote.
+#
+#   THE THREE ACTS, AND THE REACHABLE SET IS SIZE ONE. sdhci-msm.c:2015-2032 does setup_vreg ->
+#   setup_pins -> set_vdd_io_vol. Acts 1 and 3 both end in regulator_* (:1826, :1922) - the PMIC, no path
+#   from hc_mem - while act 2 lands in MSM_TLMM_BASE + 0x2044 = 0xFD512044, ONE register in the 0xFD5
+#   megabyte rung 25 installs. So the vendor's PIN work is the only one of the three a rung can perform,
+#   and it is exactly the register rung 26 reads - which is why 769 section 4 could pre-register an
+#   expected value at all. AND THE CENSUS RETIRES A STANDING WORRY: setup_vreg's own head says what
+#   qcom,vdd-always-on (msm8974-mtp.dtsi:388) means when the data is absent - "vreg info unavailable,
+#   assuming the slot is powered by always on domain" (:1835, goto out, ret = 0) - so acts 1 and 3 are
+#   satisfied by construction here and their unreachability costs nothing.
+#
+#   THE RUNG-27 DESIGN, PRE-REGISTERED AND NOT BUILT: read 0xFD512044 (rung 26's own read, kept), compare
+#   against ST_TLMM_SDC1_EXPECT = 0x00009F24, and write ONLY if it does not match - one masked RMW over
+#   all seven fields at once, then read back. Faithful to msm_tlmm_set_field (gpio-msm-common.c:481-496),
+#   which is a plain __raw_readl / mask / __raw_writel / mb() - no unlock, no W1C, no FIFO, no shadow - and
+#   a single masked RMW makes the vendor's six-call order IRRELEVANT, which is what makes one store safe
+#   where six interleaved ones would need an argument. It STRICTLY CONTAINS rung 26, so one press answers
+#   the pad question AND the fix question, and rungs 25 and 26 need never be pressed.
+#
+#   THE FORK: _pad_raw = 0x00009F24 with _pad_write_skipped = 1 means the pads were already configured and
+#   the pad candidate is RETIRED, leaving the PMIC rails (acts 1/3, unreachable) as the whole frontier;
+#   anything else with _pad_write_skipped = 0 means the vendor act was never applied and the write has been
+#   made and read back. The build clause for rung 27 must assert the store is GUARDED, and the log's safety
+#   reading is _pad_writes in {0, 1} as an ACTUAL COUNT and never a constant. A single masked RMW to this
+#   register cannot reach another register, another peripheral's pads (0x2044 vs SDC2's 0x2048, disjoint
+#   masks), a FUNCTION (there is no function-select field - 769 section 2), the bus (no transfer in
+#   flight), or the PMIC/rails/clocks.
+#
+# NO set= line follows this block: no arm was built, no park was made, and the 35 sets above are unchanged.
