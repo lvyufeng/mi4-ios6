@@ -401,15 +401,21 @@ esac
 # the log is present, and the device comes back on XNU's own `MACH Reboot` - 547 section 4's first row,
 # whose own words are "the enable is confirmed as the difference between a recovered death and a hang".
 # So 565 section 3's destined arm is the one to build: an inner-seam PoC invalidate of the line the
-# `pop` reads, identified by the return address `0x800462dc` of the exit's own `bl FlushPoU_Dcache`.
+# `pop` reads, identified by the return address of the exit's own `bl FlushPoU_Dcache` - a value the
+# arm keeps in exactly ONE place, `entry_trace.c`'s `STAGE90_XNU_SEAM_LR`, and the check at the bottom
+# of this file refuses a build whose linked image disagrees with it. **The absolute addresses in this
+# block are era-stamped**: they are the 546 build's, and the value has since moved four times (696,
+# 708, 724, 770) - by one page each time, because the entry group crossing a page boundary moves every
+# kernel-text address in the image at once. They are left as written rather than re-pinned per move,
+# which is the lesson `entry_trace.c`'s paragraph beside its define now states.
 #
 # **It is a new interception, not a flag inside an existing wrapper, and that is why this switch adds a
 # `--wrap` rather than only a `-D`** (the shape 517/526/533 use):
 #
 #   * `STAGE90_XNU_SEAM_POC=1` puts `--wrap=FlushPoU_Dcache` in the link, so **every** call to that
-#     routine in this image - the four sites `0x80045d08` (`cache_xcall`), `0x80046284` (the enter's
-#     else arm), `0x800462d8` (the exit's own, i.e. the seam) and `0x800463bc` (`cache_xcall_handler`)
-#     - arrives at one wrapper, and the wrapper hands every site but the seam straight through. Which
+#     routine in this image - the four sites, one each in `cache_xcall`, the enter's else arm, the
+#     exit's own (the seam) and `cache_xcall_handler` - arrives at one wrapper, and the wrapper hands
+#     every site but the seam straight through. Which
 #     of them it was is read from the return address the wrapper was entered with, not inferred from
 #     which symbol was wrapped: `--wrap` renames the callee, so without that test the arm's operation
 #     would run behind all four call sites while every surface still said "the exit's seam".
@@ -29118,7 +29124,7 @@ verify_trace_symbols() {
         [[ "${seam_direct:-0}" == 0 ]] ||
             layout_fail "$seam_direct call(s) in the linked image still reach FlushPoU_Dcache directly while STAGE90_XNU_SEAM_POC=1: --wrap renames the callee, so a direct call is a call site this arm does not intercept - and the arm's claim is that the return-address test is the *only* thing separating the four sites, which a fifth unredirected one would make false without changing any reading"
         [[ "${seam_wrapped:-0}" == 4 ]] ||
-            layout_fail "__wrap_FlushPoU_Dcache is the callee at ${seam_wrapped:-0} site(s) and not 4: this image's four callers of FlushPoU_Dcache are 0x80045d08 (cache_xcall), 0x80046284 (the enter's else arm), 0x800462d8 (the exit's, the seam) and 0x800463bc (cache_xcall_handler), and the arm's identification is written against that set - a different count means the set moved and the test's coverage has to be re-derived rather than assumed"
+            layout_fail "__wrap_FlushPoU_Dcache is the callee at ${seam_wrapped:-0} site(s) and not 4: this image's four callers of FlushPoU_Dcache are one each in cache_xcall, the enter's else arm, the exit's own (the seam) and cache_xcall_handler, and the arm's identification is written against that set - a different count means the set moved and the test's coverage has to be re-derived rather than assumed. **The four addresses are deliberately NOT printed here**: they are kernel-text addresses that every rung crossing a page boundary moves at once, and a refusal whose explanation names four stale ones sends a reader to the wrong instructions"
         seam_body_dis=$(arm-none-eabi-objdump -d --start-address=$seam_body --stop-address="$(next_global "$seam_body")" "$OUT/xnu_arm_entry.elf")
         # **Which arm's body this is, and it is read rather than assumed.** 572's arm and 535's are
         # one interception with two bodies, so the assertions below differ by switch: with the
@@ -31255,6 +31261,58 @@ verify_trace_symbols() {
                 # about the absence of a command**, which is the distinction a reader needs and the one a
                 # \`-eq 20\` guard change would have made unavailable for a pressed rung.
                 echo "  xnu_entry_756: st_dll_census's device accesses are [$stb_dll_set] with counts [$stb_dll_cnt] - EVERY address once and NO STORE ANYWHERE - in program order [$stb_dll_order] with an EMPTY image side; entry_storage_probe calls it once, on disassembly line $stb_dll_calls_ln, BEFORE st_cmd_path on line ${stb_dll_cmd_ln% *}, so HOST_CONTROL2 0x3E (as a halfword), CORE_DLL_CONFIG 0x100 and CORE_DLL_STATUS 0x108 are read at the one moment the vendor's own bring-up has finished and no command has ever been on the bus: the UHS field the reset may or may not have cleared, the DLL_RST and DLL_PDN bits the vendor sets at this clock and this ladder never has, and the lock bit that says whether the block is sampling on the DLL. **The window is hc_mem's 0x1a0 tail and not core_mem**, which the Pro override in msm8974pro.dtsi:1765 is what settles"
+            fi
+            if [[ $STORAGE_PROBE -ge 24 ]]; then
+                # **769: rung 25's clause block, and it is the same five-part shape the three read-only
+                # censuses above share** - a symbol, a size, the body's own disassembly, and then the
+                # store set, the device set, the counts, the program order, the image side, the call
+                # count and the call order, each refusing with the sentence that explains WHY that
+                # property is the reading rather than a style.
+                #
+                # **What makes this rung's clause set different from rs 18/21's is the WINDOW.** Those
+                # two names declared `f982...` addresses and the `hc_mem` window is what settled them.
+                # This body reads a THIRD device at `fd512044` - the TLMM's SDC1 pad-control register -
+                # so the declared list carries that one address and the INSTALL's own megabyte is
+                # `0xFD5`, read as `va >> 20`. 692's press is why the install cannot be skipped: its
+                # third line was a load from a megabyte no table this image had written, and it came
+                # back with `fsr_frame = 0x5`. The classifier cannot see a page-table write, so what
+                # this block CAN assert is that the body's only declared device address is the pad
+                # register and that nothing in it is stored - and the install's presence is held by
+                # the symbol clause plus the source's own `entry_mmio_section` call.
+                stb_pad=$(sym_addr st_pad_census) ||
+                    layout_fail "st_pad_census is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE - rung 25's arm IS this body (experiment-769 section 6), and an arm at this rung without it is the rung below with a different config hash: the press would come back carrying rung 24's cells and NONE of the pad reading, while the record claimed the rung. Three ways to get here: renamed, INLINED into entry_storage_probe (where the probe's own store census would read its lines and its position against the gate would be ordered by nothing this build checks), or its call site removed - which the call-count clause below names. Nothing is rebuilt by this refusal"
+                stb_pad_size=$(sym_size st_pad_census) ||
+                    layout_fail "st_pad_census is in the image and its size could not be read out of it"
+                stb_pad_body=$(arm-none-eabi-objdump -d --start-address="$stb_pad" \
+                               --stop-address="$(printf '0x%x' $(( stb_pad + stb_pad_size )))" "$OUT/xnu_arm_entry.elf")
+                { read -r stb_pad_dev; read -r stb_pad_cnt; read -r stb_pad_img; read -r stb_pad_imgaddr; } < <(classify_body "$stb_pad_body" "fd512044")
+                stb_pad_str_count=$(printf '%s\n' $stb_pad_dev | awk '/:str/{c++} END{print c+0}')
+                [[ "$stb_pad_str_count" == "0" ]] ||
+                    layout_fail "st_pad_census contains $stb_pad_str_count device store(s) and rung 25 is READ-ONLY - its whole act is one 32-bit read. **This refusal is the arm's safety argument for touching a THIRD device's megabyte**: the register is one the vendor only ever writes (\`sdhci_msm_setup_pad\` -> \`msm_tlmm_set_hdrive\`/\`msm_tlmm_set_pull\`), so a store here would put a drive strength or a pull on a pad bank while the boot is watching, and no other clause in this file can say there are NONE. It is FIRST, before the set and count clauses, so that a perturbed build that adds a store is refused by the sentence that explains why a store here is the one thing this rung must not have. Placed after them it could never fire: any device store appears in the set below as a \`:str\` entry. Nothing is rebuilt by this refusal"
+                stb_pad_set=$(printf '%s\n' $stb_pad_dev | LC_ALL=C sort | tr '\n' ' ')
+                stb_pad_set_want="fd512044:ldr "
+                [[ "$stb_pad_set" == "$stb_pad_set_want" ]] ||
+                    layout_fail "st_pad_census's device accesses are [$stb_pad_set] (sorted) and rung 25's record says exactly [$stb_pad_set_want] - ONE 32-bit read of the TLMM's SDC1 pad-control register, \`TLMM + 0x2044\` = 0xfd512044. **The WIDTH is part of the claim and not a style**: the address is 4-aligned, so a 32-bit read is legal, and a halfword or byte read there would be a different question about the same register - the vendor's own \`msm_tlmm_set_field\` (gpio-msm-common.c:481-496) opens with \`__raw_readl\` on exactly this address, which is the accessor this reading matches. What a store cannot produce is a width error, and this clause is what refuses one. Nothing is rebuilt by this refusal"
+                stb_pad_cnt_want="fd512044:ldr=1 "
+                stb_pad_cnt=$(printf '%s\n' $stb_pad_cnt | LC_ALL=C sort | tr '\n' ' ')
+                [[ "$stb_pad_cnt" == "$stb_pad_cnt_want" ]] ||
+                    layout_fail "st_pad_census's device access COUNTS are [$stb_pad_cnt] and rung 25's record says exactly [$stb_pad_cnt_want] - the register read EXACTLY ONCE and not written. A count of 2 would be the register read twice under one set of names, which makes the second reading the one a reader takes while the first is the one the record describes - and the whole rung is a single sample of a register nothing in this image changes, so a second read is pure cost. This is m736's shape at the clause level: a comparison whose operands a reader cannot distinguish. Nothing is rebuilt by this refusal"
+                stb_pad_order=$(printf '%s\n' $stb_pad_dev | tr '\n' ' ')
+                [[ "${stb_pad_order% }" == "fd512044:ldr" ]] ||
+                    layout_fail "st_pad_census's device accesses IN PROGRAM ORDER, distinct, are [$stb_pad_order] and rung 25's record says [fd512044:ldr] - one access, so the order clause is the same as the set clause here and that is stated rather than left to be noticed. It exists because the four clauses above are a family and a later rung that adds a second pad register will need the order to carry which of the two the decodes belong to. Nothing is rebuilt by this refusal"
+                [[ -z "${stb_pad_img// /}" ]] ||
+                    layout_fail "st_pad_census's non-device memory accesses are [$stb_pad_img] at [$stb_pad_imgaddr] and rung 25's record says that set is EMPTY - the body holds three words on its own stack (\`slot_before\`, \`desc\`, \`raw\`), reachable as arguments to \`entry_mmio_section\` and to the decodes, and it publishes through \`entry_live_write\` (a call, with a .rodata string). A symbol here is either one this rung never declared or an access the classifier could not resolve. Nothing is rebuilt by this refusal"
+                stb_pad_calls=$(grep -c -- 'bl.*<st_pad_census>' <<<"$stb_body")
+                [[ "$stb_pad_calls" == "1" ]] ||
+                    layout_fail "entry_storage_probe makes $stb_pad_calls call(s) to st_pad_census and rung 25 makes exactly one. Zero is the whole arm absent - every \`_pad_*\` cell absent with it, INCLUDING \`_pad_raw\`, which is this rung's answer; and an absent key has three producers (m720: the branch did not run, the channel refused, the cap dropped it) so its absence must be nameable before it is read. Two or more means the register is read twice under one set of names and the fields are decoded twice from two samples of a register nothing changes. Nothing is rebuilt by this refusal"
+                stb_pad_cmd_ln=$(awk '/bl.*<st_cmd_path>/{ printf "%d ", NR }' <<<"$stb_body")
+                stb_pad_own_ln=$(awk '/bl.*<st_pad_census>/{ printf "%d ", NR }' <<<"$stb_body")
+                stb_pad_calls_ln=${stb_pad_own_ln% }
+                [[ -n "$stb_pad_cmd_ln" && -n "$stb_pad_calls_ln" ]] ||
+                    layout_fail "the two call lines could not be read out of entry_storage_probe's disassembly ([$stb_pad_cmd_ln] for st_cmd_path, [$stb_pad_calls_ln] for st_pad_census), so the ORDER of the pad read and the command path is not readable here. This refusal is about the SCAN and not about the arm: an unreadable disassembly is not an arm in the wrong order, and the call-count clauses above are the ones that refuse an arm. Nothing is rebuilt by this refusal"
+                (( ${stb_pad_calls_ln} < ${stb_pad_cmd_ln% *} )) ||
+                    layout_fail "entry_storage_probe calls st_pad_census on disassembly line $stb_pad_calls_ln and st_cmd_path on line ${stb_pad_cmd_ln% *}: the pad read must come BEFORE the command path. **For THIS rung the position is well-defined rather than load-bearing** - the body reads a different device from a different megabyte, so no command this ladder sends can change it and no register the gate reads is touched by it. What the ordering still buys is that the reading describes the pads as they were handed over, before a boot that then stalls for a second on a command that never completes, and that a future rung which reads the pads AFTER a command cannot be reached by relaxing this clause without the build saying so. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_769: st_pad_census's device accesses are [$stb_pad_set] with counts [$stb_pad_cnt] - ONE READ of 0xfd512044 and NO STORE ANYWHERE - in program order [$stb_pad_order] with an EMPTY image side; entry_storage_probe calls it once, on disassembly line $stb_pad_calls_ln, BEFORE st_cmd_path on line ${stb_pad_cmd_ln% *}, so the TLMM's SDC1 pad-control register is read at the one moment the boot has not yet stalled on a command: the hdrive fields (clk/cmd/data at bits 6/3/0) and the pull fields (clk/cmd/data/rclk at 13/11/9/15), published raw beside the value the board's own qcom,pad-pull-on/qcom,pad-drv-on arrays say they should hold - and PULL SDC1_CMD is the field the mechanism rests on, because MMC's CMD line is open-drain during identification and returns HIGH only through it. The megabyte is 0xFD5 and the install is entry_mmio_section's, which 692's press is why it cannot be skipped"
             fi
             # **743: `-eq 18` RATHER THAN `-ge 18`, WHICH IS THE SAME KIND OF CHANGE 736 FORCED ON
             # RUNG 15 AND A DIFFERENT REASON.** Rung 20 sends the same opcode with the same argument

@@ -2674,18 +2674,31 @@ void __wrap_platform_cache_idle_exit(void)
  * clause again. **It moved a third time on rung 12 (724), by the same page and for the same reason**:
  * the rung-12 block (the read-only census, the command body's return path and their published cells,
  * `entry_storage.c`) added ~3.9 KB, so the exit's `bl` came out at `0x800492d8` returning to
- * `0x800492dc` and this build refused with this clause a third time. The value below is the one 724's
- * build measured - the disassembly agrees with it to the instruction, and the four callers above and
- * the window's two ends were re-read from the same disassembly in the same pass, because the prose
- * around this define had been left carrying the *696-era* addresses (`0x800462xx`) through two moves
- * that the define itself had already absorbed: a number that moves that often belongs in one place,
- * and this paragraph is the second place it lives. The value is the one every arm from 724 on carries. **The move is a property of the
+ * `0x800492dc` and this build refused with this clause a third time. **It moved a FOURTH time on rung
+ * 25 (770), by the same page and for the same reason**: the rung-25 block (`st_pad_census` - one
+ * 32-bit read of `0xFD512044` and no store, in `entry_storage.c`) pushed the group past the same
+ * boundary, so the exit's `bl` came out at `0x8004a2d8` returning to `0x8004a2dc`,
+ * `platform_cache_idle_enter` at `0x8004a238` and `platform_cache_idle_exit` at `0x8004a2d4`, and
+ * this build refused with this clause a fourth time. **AND THE FOURTH MOVE SHOWS WHAT A SIZE
+ * COMPARISON CANNOT SEE**: `xnu_arm_entry.bin` came out at 5552764 bytes - BYTE-IDENTICAL in size to
+ * the arm before it - because the growth fitted the padding while the page boundary *inside* it was
+ * still crossed, so "the bin did not change size" is not the same claim as "nothing moved".
+ *
+ * **The value below is the one THIS build measured, and it is the only copy that is kept in step.**
+ * The disassembly agrees with it to the instruction, and the four callers and the window's two ends
+ * were re-read from the same disassembly at each of the four moves. **The absolute addresses in the
+ * prose above are era-stamped**: each is the address of the build in which its sentence was written
+ * and they are NOT kept in step - the 546 paragraph's window, 568's `lr`, and the four call-site
+ * numbers name the values of their own arms. That is stated rather than repaired because a paragraph
+ * that must be edited on every move is a second pin wearing the name of a record; a reader who needs
+ * the address reads it here, or from the build's own clause (which prints both numbers), or from the
+ * live ELF's `platform_cache_idle_exit`. **The move is a property of the
  * entry group's size and not of what a rung does**: any rung that pushes the group past the next page
  * boundary moves every kernel-text address in the image at once, and the clause above is what makes
  * that a refused build rather than a silent mis-identification at run time. The *class* - a kernel
  * address pinned in an entry source - stays recorded as owed, because the repair is still a link order
  * and not this step's question. */
-#define STAGE90_XNU_SEAM_LR       0x800492dcu
+#define STAGE90_XNU_SEAM_LR       0x8004a2dcu
 #define STAGE90_SEAM_LIVE_MAX     4u
 
 extern void entry_live_write(const char *key, uint32_t value);

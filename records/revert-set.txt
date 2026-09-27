@@ -5980,3 +5980,133 @@ set=armed-storage-94de2ede sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # is still NOT met - no storage, no filesystem, no mount - and TWRP-to-storage
 # stays withheld.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 770: THE RUNG-25 ARM - `armed-storage-f72e9f18`, STAGE90_XNU_STORAGE_PROBE=24.
+# Built 2026-09-27 host-side only: NO device action, NO press, NO gate against a
+# device, NO runner, NO firer. It is 769 section 6's pre-registration made real,
+# and it is the smallest arm this ladder has ever carried: **ONE READ, ONE NEW
+# MEGABYTE, ZERO STORES.**
+#
+# WHAT IT IS. `st_pad_census` installs the 0xFD5 megabyte through
+# `entry_mmio_section` (693's design; 692's press is why the install comes
+# before the dereference - an uninstalled megabyte faults with fsr = 0x5), then
+# takes ONE 32-bit read of `0xFD512044` - `TLMM + 0x2044`, the SDC1
+# dedicated-pad drive/pull register, in a SECOND device's megabyte that no rung
+# in this ladder has ever read or written. It publishes the word raw as
+# `xnu_live_storage_pad_raw` beside seven field decodes (clk/cmd/data drive at
+# bits 6/3/0, clk/cmd/data/rclk pull at 13/11/9/15), the derived expectation
+# `xnu_live_storage_pad_expect = 0x00009F24`, a one-bit `_pad_match`, the
+# `entry_mmio_section` outcome (`_pad_map`, `_pad_slot_before`, `_pad_desc`) and
+# **`xnu_live_storage_pad_writes = 0`, a count that never leaves zero.**
+#
+# THE EXPECTATION IS DERIVED AND NOT TYPED. `qcom,pad-pull-on = <0x0 0x3 0x3 0x1>`
+# and `qcom,pad-drv-on = <0x4 0x4 0x4>` (`msm8974pro-ac-pm8941-mtp-v5.dts:25-29`)
+# through `msm_tlmm_set_field`'s shift-and-mask (hdrive width 3, pull width 2,
+# `gpio-msm-common.c:481-496`) evaluate to 0x00009F24, and six `_Static_assert`s
+# in `entry_storage.c` fix the address (== 0xfd512044), its megabyte
+# (`>> 20 == 0xFD5`), its alignment, the seven masks' disjointness (their sum
+# equals their OR) and that the expectation ANDs with the CMD-pull mask - so the
+# value the arm compares against is computed from the DT arrays on every build
+# rather than pasted from this paragraph.
+#
+# THE TWO-ROW ANSWER, PRE-REGISTERED IN 769 SECTION 6 AND UNCHANGED:
+# ROW 1: `_pad_raw = 0x00009F24` -> THE PADS ARE CONFIGURED. 768 section 5's
+#        other half is retired, `PULL SDC1_CMD` is present, and the subject moves
+#        to the PMIC rails - `sdhci_msm_setup_vreg` (`sdhci-msm.c:2019`), a bus
+#        the ladder cannot reach from `hc_mem`.
+# ROW 2: `_pad_raw = 0x00000000`, or any field at odds with the DT -> THE VENDOR
+#        ACT WAS NEVER APPLIED ON THIS PATH: no pull-up on CMD, no pull-up on
+#        DATA, drive strength at minimum. The next rung is then a single
+#        read-modify-write of ONE register in a megabyte whose section this arm
+#        has already installed.
+# ONE CAVEAT THE CELL CANNOT CARRY, recorded with it: the read is taken at the
+# arm's own moment, which is BEFORE the command path, so row 1 is a reading about
+# the pads' STATE and not a proof that this image applied them - the boot chain
+# may have left exactly the same values. Only row 2 carries an act.
+#
+# **THE SEAM CONSTANT MOVED A FOURTH TIME AND THE BUILD REFUSED IT.**
+# `st_pad_census` and its call site grew `entry_storage.o` past the entry group's
+# remaining alignment slack, so the whole kernel text run moved by one page and
+# the exit's `bl FlushPoU_Dcache` is now at **0x8004a2d8** returning to
+# **0x8004a2dc** (`0x800492d8` -> `0x800492dc` on 724's arm, which is the value
+# every arm from 724 to 768 carried). The build refused with its own clause -
+# `the exit's call to FlushPoU_Dcache is at 2147787480 and returns to 2147787484,
+# while entry_trace.c's STAGE90_XNU_SEAM_LR is 0x800492dc` - and after the refusal
+# BOTH copies of the address were moved: `entry_trace.c:2688`'s
+# `STAGE90_XNU_SEAM_LR` and `scripts/run_and_capture.sh:315`'s
+# `EXIT_POP_LR_LITERAL`, which `preflight_boot_check.sh` compares against the live
+# ELF ([[mi4-one-value-two-definitions]]). **The mechanism is the one 696, 708 and
+# 724 measured: the move is a page, and it is a property of the entry group's SIZE
+# and not of what a rung does.** `platform_cache_idle_enter` is now
+# 0x8004a238..0x8004a2d4 and the entry's window is [0x8004a240, 0x8004a33c).
+#
+# **A REFUSED ENTRY BUILD LEAVES `out/` IN A STATE WORTH NAMING.** The entry
+# build writes `xnu_arm_entry.bin` BEFORE its clause family runs, so the refused
+# rung-25 build left a new entry bin (`594d539ae41f28da…`) sitting beside the
+# rung-24 arm's own config record (`94de2ede…`, 08:54) - a pair the record does
+# not describe and the gate's blob clause refuses. The live ARM was never in
+# doubt (`stage90-qcdt.img` was untouched, still 94de2ede's), but **the lesson is
+# that a refused entry build must be finished or re-armed from a park before any
+# press**: `out/` is not left as it was.
+#
+# WHAT DID NOT MOVE, MEASURED ON THE NEW ARTIFACTS RATHER THAN ASSERTED:
+# `xnu_arm_entry.bin` is 5552764 bytes, unchanged - the growth fitted the padding
+# while the page boundary inside it was still crossed. The payload's switch set is
+# BYTE-IDENTICAL to rung 24's and rung 23's (`6c2b6038...`, `stage90-build-config.txt`,
+# 682 bytes, with `STAGE90_XNU_ENTRY 1` at line 5), which is the trap 763 section 5
+# paid for and `tools/check_payload_config_entry.sh` now refuses. The build's own
+# rung-25 clause reports the body's device set as `[fd512044:ldr ]` with counts
+# `[fd512044:ldr=1 ]` and an EMPTY image side, in program order, called once from
+# `entry_storage_probe` before `st_cmd_path` - so the arm's safety reading is the
+# build's reading and not this paragraph's.
+#
+# **`out/` NOW HOLDS THIS ARM, ARMED AND NOT PRESSED.** Rung 24's
+# `armed-storage-94de2ede` is SPENT (768's press) and its park is intact; rung
+# 23's `armed-storage-3a92aa52` remains a SUPERSEDED, UNSPENT park and must not be
+# pressed. NO PRESS IS SPENT BY THIS STEP AND NONE IS AUTHORIZED - building and
+# parking are host-side, and spending an arm is the operator's decision.
+#
+# **AND THE SAME STEP PAID TWO PROSE DEBTS, WHICH IS WHY ITS SOURCES RECORD MOVED WHILE ITS
+# ARTIFACT DID NOT.** `src/entry/entry_trace.c`'s seam paragraph closed with "The value is the one
+# every arm from 724 on carries" - a live claim this build makes FALSE - so it now records the
+# FOURTH move with the addresses read out of the linked image (`0x8004a2d8` returning to
+# `0x8004a2dc`, `platform_cache_idle_enter` `0x8004a238`, `platform_cache_idle_exit` `0x8004a2d4`)
+# and states that the absolute addresses in the prose above it are ERA-STAMPED rather than kept in
+# step. `src/entry/build_entry.sh`'s seam header and its four-caller refusal message still named the
+# 696-era addresses (`0x800462xx`); the refusal now names the four callers by FUNCTION and prints no
+# addresses at all, because a refusal whose explanation names stale addresses sends a reader to the
+# wrong instructions - m776's shape, in the most load-bearing place a wrong address can sit.
+# **BOTH EDITS ARE COMMENT-ONLY AND THE ARTIFACT PROVES IT**: the entry build re-ran and
+# `xnu_arm_entry.bin` came out at `f72e9f18...`, BYTE-IDENTICAL to the arm built before them, so the
+# set's name did not move and only `xnu_arm_entry-sources.txt` changed (`9c6abedd...` ->
+# `47325aa4...`), which is the one member that records source CONTENT rather than an artifact.
+#
+# **AND `make check` REFUSED THIS STEP'S OWN NEW TEXT BEFORE IT WAS GREEN.**
+# `tools/check_backtick_messages.sh` found unescaped backticks inside double-quoted `layout_fail`
+# messages at `build_entry.sh:31285`, `:31289` and `:31298` (6, 6 and 10 of them) and inside the
+# rung-25 readiness narration (2). **The class is INVISIBLE UNTIL THE REFUSAL FIRES**: a
+# double-quoted string is expanded only when the call runs, so the build itself exited 0 with all
+# three present and printing one would have produced a sentence with the register's name replaced
+# by the output of a command named after it. All four sites are escaped; that is m730's shape and
+# the reason the check exists.
+#
+# **AND THE RUNG-25 NARRATION CARRIES A CORRECTION THE FILE HAS OWED SINCE RUNG 12.** The shared
+# storage consequence paragraph (692/693 era, opening "THIS ARM READS A BLOCK THE IMAGE HAS NEVER
+# TOUCHED") closes with "a `_loads=6` with `_writes=0` is the run this arm exists for". A guard
+# corrects it for values 2..11 and rungs 3 and 4 correct it in their own paragraphs, and **every
+# value from 12 on carries it uncorrected** - `rung_para 24` now states the correction for this arm
+# and NAMES the omission for 12..23 rather than papering over it with a range guard this file has
+# not re-read arm by arm. Those are narrations of arms already spent, so no press is bought or lost
+# by the gap.
+# ---------------------------------------------------------------------------
+set=armed-storage-f72e9f18 sha256=54f88bba6c2eca4f811df0e0fea61d35092394dfe07ecf9cb629c8b6c5a0edd9 bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-24-entry-rung-25-whose-one-new-body-reads-the-SDC1-pad-control-register-at-0xfd512044-once-and-stores-nothing
+set=armed-storage-f72e9f18 sha256=bd88366514e71002b3e408a3c411e00380fc9c42a3e018fae5dbf9c77d55d34b bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-24-entry
+set=armed-storage-f72e9f18 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rung-23-s-and-rung-24-s-MEASURED-cmp-so-no-payload-switch-moved-and-STAGE90_XNU_ENTRY-is-1-at-line-5
+set=armed-storage-f72e9f18 sha256=dfa948b86ec0ec03391b2b7b57ea499a80d0e835f7a36716a8b625672575a9d9 bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-f72e9f18 sha256=d859626b331d82894f4eb8609af5ba73d03c5249d7dc067dc001deae8c681435 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above
+set=armed-storage-f72e9f18 sha256=f72e9f188369269f2b578fc013d9ec000feaaa375080e8b7a7cb51fcb1896923 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-f72e9f18-IS-THE-SET-NAME-and-its-SIZE-IS-UNCHANGED-at-5552764-even-though-THE-SEAM-CONSTANT-MOVED-A-FOURTH-TIME-to-0x8004a2dc-because-the-growth-fitted-the-padding-while-crossing-the-page-boundary-inside-it
+set=armed-storage-f72e9f18 sha256=f0cebf0938abaa70f72af2cd4376f4378cbfb09ae46ed53307a28b30f915a5ba bytes=6732328 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-f72e9f18 sha256=4a08dba0611c4c8dbccc8a0de3270c9d9409606971ff11e250a22863b00f166c bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE-24
+set=armed-storage-f72e9f18 sha256=47325aa4854ce53b37a3c4f02caf22624bed5c8192e941e5fc318943153b223e bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-23-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match
+set=armed-storage-f72e9f18 sha256=4315ef657506952052c218a9881ee9cae82860778f6157447c6a841970a8f6dd bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-f72e9f18 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list

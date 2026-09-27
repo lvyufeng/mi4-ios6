@@ -312,7 +312,21 @@ unset _self _bad
 # makes it move with every arm, and a fallback that must be edited per arm is a pin wearing the name
 # of a fallback. Named here rather than done in this step, because removing it needs the gate's clause
 # to accept a labelled absence (the peer lane's file) and that is a step, not a one-line edit.
-EXIT_POP_LR_LITERAL=0x800492dc
+#
+# **770: it moved a FOURTH time, by the same page, and the disassembly decided it a fourth
+# time.** The rung-25 pad census (`st_pad_census`, one read of `0xFD512044` and no store) grew
+# `entry_storage.o` past the entry group's remaining alignment slack, so the entry build's own
+# clause refused with the same sentence it has used since 696 -
+# `the exit's call to FlushPoU_Dcache is at 2147787480 and returns to 2147787484, while
+# entry_trace.c's STAGE90_XNU_SEAM_LR is 0x800492dc` - and
+# `arm-none-eabi-objdump -d out/stage90/xnu_arm_entry.elf --disassemble=platform_cache_idle_exit`
+# puts the `bl` at `0x8004a2d8` returning to **`0x8004a2dc`**. Both copies are that value from
+# 770 on, and `platform_cache_idle_enter` is now `0x8004a238..0x8004a2d4`. **Four moves, four
+# pages, and every one caught by the same pair of clauses rather than by a run** - and the fourth
+# move happened even though `xnu_arm_entry.bin` came out at 5552764 bytes, BYTE-IDENTICAL in size
+# to the arm before it: the growth fitted the padding while the page boundary inside it was still
+# crossed, so a size comparison would have said "did not move" and been wrong.
+EXIT_POP_LR_LITERAL=0x8004a2dc
 exit_pop_lr_addr() {
   local elf=${1:-$OUT/xnu_arm_entry.elf} od=${OBJDUMP:-arm-none-eabi-objdump}
   local start size body ret
