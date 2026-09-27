@@ -50,7 +50,11 @@ restructure moved it: the `reference/` and `status/` pages were re-pointed at th
   table while **it has two producers** (749, `m760`). It prints a shape and **deliberately prints no
   verdict** for an ambiguous row, because the archive holds two disagreeing readings of CMD1 and neither
   may be a premise; absent cells print `UNREAD` rather than defaulting to zero. Validated against the
-  five archived command-carrying captures, where it reproduces 749's finding independently.
+  five archived command-carrying captures, where it reproduces 749's finding independently. Its
+  **`--branch-audit`** mode reads many captures and reports, for each branch of 747 §5, **how many distinct
+  producer shapes satisfy its condition**, exiting 1 when any branch has more than one — which is how
+  752 found that **branch 2's condition is satisfied both by a stuck command with an `INDEX` bit and by a
+  released one without any**.
 
 ## Status — `status/`
 

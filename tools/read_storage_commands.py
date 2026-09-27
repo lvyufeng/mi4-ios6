@@ -36,6 +36,7 @@ compared. The table prints which exit each row took so the comparison is made on
 Usage:  tools/read_storage_commands.py <capture> [<capture> ...]
 Exit 0 if every capture was read; 1 if one could not be.
 """
+import os
 import re
 import sys
 
@@ -211,11 +212,120 @@ def table(path):
     return True
 
 
+# ================================================================================================
+# 752: THE BRANCH TABLE AS A CHECK. 747 section 5 states three branches and a verdict for each, and
+# the verdicts are what the next rung is chosen FROM. Two of the three conditions turn out to be
+# satisfied by more than one SHAPE in the archive - the same defect 749 found in branch 1 and the tool
+# above already discriminates - so this mode reports, per branch, HOW MANY distinct shapes satisfy it,
+# and refuses to print a verdict for a branch whose condition has more than one.
+#
+# It is a check and not a paragraph for 751's reason: 749's correction was prose a reader had to
+# remember at press time, and this mode is that correction made mechanical for all three branches.
+# ================================================================================================
+
+# 747 section 5's three branches, in the order the table lists them (a reader takes the FIRST match).
+BRANCHES = [
+    ("B1", "the block DECLINED the command - the rule is CONFIRMED",
+     lambda seen, comp, last: seen == 0 and comp is not None),
+    ("B2", "the block TOOK it and it never finished - the rule's INDEX half is KILLED",
+     lambda seen, comp, last: seen is not None and comp is not None and seen > 0 and comp == 0),
+    ("B3", "the word STARTED and COMPLETED - the rule is killed outright",
+     lambda seen, comp, last: comp == 1 and seen is not None),
+]
+
+
+def producer_shape(seen, comp, last, pb, pa):
+    """The SHAPE a row is a producer of. Two rows with the same shape are ONE piece of evidence about
+    the branch condition; two different shapes under one condition mean the condition's name is doing
+    the work of two facts, which is the defect both 749 and this mode exist for."""
+    if seen is None:
+        return "no `inhibit_seen` published (the body predates the cell)"
+    if seen == 0:
+        if last is None:
+            return "seen=0, CMD line never sampled"
+        moved = ((last & CMD_LINE_BIT) == 0
+                 or any(v is not None and (v & CMD_LINE_BIT) == 0 for v in (pb, pa)))
+        return "seen=0, CMD line MOVED (the CMD1 shape)" if moved \
+            else "seen=0, CMD line NEVER MOVED (the CMD2 shape)"
+    if comp == 1:
+        return "seen>0, COMPLETED (inhibit bit clear, completion latched)"
+    if last is None:
+        return "seen>0, complete=0, `inhibit_last` not published"
+    return ("seen>0, complete=0, STILL STUCK (inhibit bit SET at the last sample)"
+            if (last & CMD_INHIBIT_BIT)
+            else "seen>0, complete=0, RELEASED with nothing latched (inhibit bit CLEAR)")
+
+
+def branch_audit(paths):
+    """Per 747 section 5 branch: the distinct SHAPES in the archive that satisfy it."""
+    shapes = {}          # shape -> [(capture, family)]
+    matched = {}         # branch key -> set of shapes
+    for p in paths:
+        fams = read_cells(p)
+        for key, f in fams.items():
+            if "sent" not in f:
+                continue          # not a command body
+            sh = producer_shape(f.get("inhibit_seen"), f.get("complete"), f.get("inhibit_last"),
+                                f.get("ps_before"), f.get("ps_after"))
+            if f.get("inhibit_seen") is None and f.get("complete") is None:
+                continue          # a read-only body: no branch condition applies to it
+            shapes.setdefault(sh, []).append("%s:%s" % (os.path.basename(p)[:26], key))
+            for k, _v, test in BRANCHES:
+                if test(f.get("inhibit_seen"), f.get("complete"), f.get("inhibit_last")):
+                    matched.setdefault(k, set()).add(sh)
+                    break         # FIRST match wins, as the table is read
+    print("=" * 108)
+    print("747 section 5's branch table, audited against %d capture(s)" % len(paths))
+    print("=" * 108)
+    ok = True
+    for k, verdict, _test in BRANCHES:
+        got = sorted(matched.get(k, ()))
+        print()
+        print("  %s  condition: %s" % (k, verdict))
+        if not got:
+            print("      a condition no archived row satisfies - NOT EXERCISED")
+            continue
+        if len(got) == 1:
+            print("      ONE shape satisfies it: %s" % got[0])
+        else:
+            ok = False
+            print("      *** %d DIFFERENT SHAPES SATISFY IT, AND THE TABLE GIVES THEM ONE VERDICT ***"
+                  % len(got))
+            for s in got:
+                print("        - %s" % s)
+                for w in shapes[s][:3]:
+                    print("            %s" % w)
+            print("      A press whose log lands in this branch cannot be read by this branch's")
+            print("      sentence alone. Name the shape first (749 did this for B1).")
+    print()
+    print("  every distinct shape in the archive, and which branch it falls in:")
+    for sh in sorted(shapes):
+        br = "-"
+        s0 = shapes[sh][0]
+        print("    %-62s %-4s %d row(s), e.g. %s" % (sh[:62], br, len(shapes[sh]), s0))
+    print()
+    print("  RESULT: %s" % ("every branch's condition has exactly one producer shape"
+                            if ok else
+                            "AT LEAST ONE BRANCH CONDITION HAS MORE THAN ONE PRODUCER - see above"))
+    return ok
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__.strip().splitlines()[0])
         print("usage: %s <capture> [<capture> ...]" % argv[0])
+        print("       %s --branch-audit <capture> [<capture> ...]" % argv[0])
         return 1
+    if argv[1] == "--branch-audit":
+        paths = argv[2:]
+        if not paths:
+            print("--branch-audit needs at least one capture")
+            return 1
+        try:
+            return 0 if branch_audit(paths) else 1
+        except OSError as e:
+            print("could not read a capture: %s" % e)
+            return 1
     ok = True
     for p in argv[1:]:
         try:

@@ -4871,3 +4871,78 @@ set=armed-storage-46fe6737 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #
 # The goal is still **NOT met**: no storage, no filesystem, no mount, and the machine never observed
 # STAYING UP (745). **TWRP-to-storage stays withheld.**
+#
+# ================================================================================================
+# 752 (2026-09-27): 747 SECTION 5'S BRANCH 2 HAS THE SAME DEFECT AS BRANCH 1 - AND ITS TWO
+# PRODUCERS ARE A COMMAND **WITH** AN `INDEX` BIT AND A COMMAND **WITHOUT** ONE. No arm was built,
+# moved or pressed: this block records a measurement about a BRANCH TABLE, and it changes the READING
+# of the press this record already holds armed.
+# ================================================================================================
+#
+# 749 fixed 747 section 5's BRANCH 1 (its condition was satisfied by two shapes). BRANCH 2 has the
+# same defect, and this is what 751's tool found when it was pointed at the whole archive instead of
+# one capture - a new `--branch-audit` mode that reports, per branch, HOW MANY DISTINCT PRODUCER
+# SHAPES satisfy the branch's condition, and exits 1 when any branch has more than one:
+#
+#   B1  the block DECLINED the command          -> 2 shapes  (749's finding, reproduced by a check)
+#   B2  the block TOOK it and never finished    -> 2 shapes  (THIS FINDING)
+#   B3  the word STARTED and COMPLETED          -> 1 shape   (clean)
+#
+# B2's condition is `_nidx_inhibit_seen > 0` with `_nidx_complete = 0`, and the archive holds TWO rows
+# that satisfy it which are NOT the same event:
+#
+#   * rung 19's CMD3-R1 (`_rca_`): word 0x031A, _rca_inhibit_seen = 0x400 (ALL 1024 samples),
+#     _rca_inhibit_last = 0x01f80001 - **the inhibit bit STILL SET at the last sample**: taken and
+#     STUCK, and the driver's own `sdhci_send_command` would still be waiting on it.
+#
+#   * rung 13's and rung 14's CMD0 (`_cmd0_`): word 0x0000, _cmd0_inhibit_seen = 0x21b / 0x219,
+#     _cmd0_inhibit_last = 0x01f80000 - **the bit CLEAR**: the block raised CMD_INHIBIT, held it for
+#     about 126 us, RELEASED it, and latched nothing - no completion, no error, not one bit of the
+#     whole INT_STATUS register, across 5,088,256 polls and the arm's own 1.2 s bound.
+#
+# **AND 0x0000 IS A WORD WITH NO RESPONSE DEMAND AND NO `INDEX` BIT AT ALL** (`rsp_present = 0` in both
+# logs; flags 0x00 = RESP_NONE, no CRC, no INDEX). So if rung 21's log lands in B2 with inhibit_last
+# bit 0 CLEAR, 747's sentence - "the rule's INDEX half is KILLED, 0x031A and 0x030A behave alike" -
+# would be printed about a shape the ladder has ALREADY measured on a command carrying neither of the
+# bits the branch is about. The CLEAR member's subject is 730's `INT_ENABLE` mask, not the flag word.
+#
+# THE CONFOUND IS UNAVOIDABLE, BECAUSE THREE RUNGS DIFFER IN ONE CELL. Rung 13's, rung 14's and rung
+# 15's CMD0 drive the SAME word 0x0000 with the SAME _cmd0_inhibit_last = 0x01f80000 and (14 against
+# 15) the SAME _cmd0_inhibit_seen = 0x219 - and `complete` is 0, 0, 1 with status_any 0, 0, 1. Rungs
+# 13/14 are B2 and rung 15 is B3 **on an identical command word**. The record attributes the difference
+# to the `INT_ENABLE` window (730's press: _int_status_after = 1 against _int_status_before = 0 with
+# one store between them), so **`complete` is a function of the ARM'S OWN WINDOW as well as of the
+# command** - and a table reading `complete = 0` as a statement about the command's flags is reading a
+# cell the arm itself also decides.
+#
+# THE CORRECTED READING OF B2, a refinement and not a retraction:
+#
+#   seen > 0, complete = 0, **bit 0 of inhibit_last SET**   -> STILL STUCK (rung 19's shape). The
+#       rule's INDEX half is genuinely in question.
+#   seen > 0, complete = 0, **bit 0 CLEAR**                 -> RELEASED, NOTHING LATCHED (rungs 13/14's
+#       shape). This is the mask subject, and it has been measured on a word with no INDEX bit.
+#   seen > 0, complete = 1                                  -> COMPLETED (branch 3, one shape).
+#
+# **THE DISCRIMINATOR IS BIT 0 OF `_inhibit_last`, ALREADY PUBLISHED** - so NO REBUILD, and the parked
+# arm stays valid. It is the second time in two experiments that a bit sitting unused inside a word the
+# record had ALREADY printed was the whole of the missing reading (bit 24 of PRESENT_STATE 0x24 in 749).
+#
+# B3 IS CLEAN and is checked: one shape, six rows, all with inhibit_seen > 0. One note, recorded
+# because a reader comparing B2's two shapes with B3's one should know the six rows behind it: **all six
+# are commands that ask for nothing back** - CMD0 five times (0x0000) and rung 20's CMD3-no-response
+# (0x0300) once - so B3's verdict ("a response-demanding command can finish on this block") is correct
+# as a new reading and has simply never been produced. That is the branch rung 21 exists to reach.
+#
+# WHAT THIS DOES NOT DO. It does not move the arm, the payload, `out/`, or the entry image; nothing here
+# is compiled. It does not say B2's verdict is wrong - rung 19's member of it is a real, well-measured
+# stuck command and the INDEX question is genuinely raised by it. **What is wrong is the MERGE: two
+# shapes, one name, for the THIRD time in three experiments** (746 section 4b's CMD1/CMD2, 749's branch
+# 1, this branch 2). See m762 and m760.
+#
+# **NO ARM MOVED: `out/` holds `armed-storage-46fe6737` (STORAGE_PROBE=20, entry rung 21), ARMED AND
+# NOT PRESSED.** No firer is armed and none is needed; the press path is the two commands readiness
+# prints, run by hand once each. `fastboot boot` only, NEVER flash; neighbour 33e80afe absent from
+# BOTH lists before firing, and no press may be spent without the operator's authorization.
+#
+# The goal is still **NOT met**: no storage, no filesystem, no mount, and the machine never observed
+# STAYING UP (745). **TWRP-to-storage stays withheld.**
