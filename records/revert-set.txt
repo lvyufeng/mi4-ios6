@@ -7135,3 +7135,150 @@ set=armed-storage-5fca6210 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # before and after this block. THE GOAL IS STILL NOT MET - the block names an error on CMD2 and
 # still completes no transfer, no filesystem is reached and no mount is made, so
 # TWRP-to-storage stays withheld.
+
+# 787: THE RUNG-30 ARM - armed-storage-dfc4ae78, STAGE90_XNU_STORAGE_PROBE=29.
+# Built, parked and recorded here. Rung 29's park (armed-storage-5fca6210) is intact and is SPENT;
+# every park before it is intact. This arm SUPERSEDES rung 29 because it strictly contains it,
+# MEASURED rather than argued (the value-28 build from this same source is byte-identical to the
+# parked rung-29 arm and to its own xnu_arm_entry.bin - see the containment paragraph). NO PRESS IS
+# SPENT AND NONE IS AUTHORIZED: the press is the operator's, and the path to it is the two commands
+# readiness prints, run by hand once each.
+#
+# WHAT IT IS. 786 read rung 29's press and found, out of the capture's own line order, that rung
+# 14's restore - `_ena_wrote_back = 0x00000000` at capture line 8789 - runs BEFORE the
+# between-commands gate and therefore before CMD1. So `st_cmd_path`'s widened window covers CMD0
+# alone, and CMD1 has run with the completion bit NOT enabled on every arm from rung 14 on:
+#
+#   _cmd1_status_any = 0x00000000   over   _cmd1_polls = 0x004da000 = 5,087,232
+#   _cmd1_timeout    = 0x00000001   and    _cmd1_complete = 0x00000000
+#
+# CMD1 is SEND_OP_COND - the command an eMMC must answer for this ladder to move at all, and the
+# question 764 section 5 left open. So this arm is the first time the ladder gives that command an
+# enable that can report anything.
+#
+# THE ACT IS TWO MORE STORES TO THE SAME INT_ENABLE 0x34, IN AN INTERVAL THE LADDER HAS BEEN
+# RUNNING CMD1 IN ALL ALONG. Same register, same constant (ST_SDHCI_INT_ENABLE_CMD == 0x000F0001 -
+# rung 23's five bits: RESPONSE | TIMEOUT | CRC | END_BIT | INDEX, and NOT the vendor's eleven),
+# same width, no new address, no new megabyte, no new device. SIGNAL_ENABLE 0x38 is still READ and
+# never written, so nothing here can raise a line this image cannot service. The window's two ends
+# are bodies of their own - st_cmd1_enable_open (:2976, called once at :4526) and st_cmd1_enable_restore (:2999, called once at :4582) - called
+# once each from st_cmd_path, which is what keeps that function's OWN device surface at rung 14's
+# and keeps every rung-14 clause in build_entry.sh true at the digit rather than relaxed. The value
+# it puts back is the word the open RETURNED, so `_c1_ena_wrote == _c1_ena_wrote_back` is a READING
+# and not two evaluations of one expression.
+#
+# NO NEW KEY AND NO NEW STATUS CELL. The two bodies publish only the four words that make the
+# window itself readable - _c1_ena_wrote, _c1_ena_held, _c1_ena_wrote_back, _c1_ena_readback - and
+# NEITHER BODY TOUCHES INT_STATUS 0x30: each is one store to INT_ENABLE 0x34 and its readback, which
+# is the same one-register surface rung 14's own restore has. So what this arm changes is what the
+# CMD1 cells the ladder ALREADY CARRIES can mean - _cmd1_status_any, _cmd1_err, _cmd1_complete,
+# _cmd1_timeout, and _cmd1_stale / _cmd1_status_after, which are st_send_command's own entrance and
+# exit reads of 0x30 and are published for every command - and not a new reading beside them. That
+# is rung 23's shape one command over: the widening changed what CMD3's existing cells could mean.
+# NO NEW REGISTER, NO NEW WIDTH, NO NEW WINDOW IN ANY OTHER FUNCTION, NO NEW MEGABYTE, NO NEW
+# DEVICE, NO NEW COMMAND.
+#
+# THE ANSWER SPACE, FOUR ROWS, AND THE FIRST IS THE ONE THAT MOVES THE LADDER. With the five bits
+# standing across CMD1's send and its poll:
+#   * bit 0 (SDHCI_INT_RESPONSE) VISIBLE means CMD1 COMPLETED and the block latched it. The latch is
+#     a hardware event the enable only GATES THE VIEW OF, so on that row the 1.2 s "timeout" every
+#     arm from rung 14 on has reported was THIS LADDER'S OWN MASK and the completion may have been
+#     there all along. That row changes what the next arm is: the ladder stops asking what is wrong
+#     with the card and starts reading CMD1's own answer.
+#   * ERR | TIMEOUT (0x00018000) means the block armed its OWN response timeout and the card did not
+#     answer within it - the reading CMD3 already carries (_nidx_status_any = 0x00018000 beside
+#     _nidx_status_pre = 0x00028000) - and puts the subject on the card and on the power/clock path
+#     784 gave a shape to.
+#   * CRC, END_BIT or INDEX means the card answered and the answer was malformed.
+#   * NOTHING AT ALL with all five bits enabled is the strong negative: the block set no bit of
+#     INT_STATUS during a command it was given.
+#
+# **AND THE ERR | TIMEOUT ROW IS NOT ALREADY EXCLUDED, WHICH IS THIS ARM'S SECOND QUESTION.** 786
+# section 4 read the CMD2 and CMD3 rows (ERR | CRC, ERR | TIMEOUT) as showing that bit 15 TRACKS the
+# error bits, and concluded that CMD1's row "would not have moved at all". But _ena_readback =
+# 0x00008000 in rung 29's OWN capture says bit 15 STANDS during CMD1 - no write clears it - and BOTH
+# of 786's rows come from arms on which the specific error bit was ENABLED. Two readings are open
+# and this window separates them:
+#   (a) bit 15 rises with any error whatever its own bit's enable - then no error occurred at CMD1
+#       and only bit 0 can be new;
+#   (b) bit 15 rises only when the specific error bit is enabled - then CMD1 may have timed out
+#       INVISIBLY on every arm from rung 14 on, and 786 section 4's sentence is too strong.
+#
+# A NEGATIVE IS READ ONLY WHERE THE LINE MOVED (771's rule, one window over): _cmd1_cmdlow_seen on
+# rung 29's capture is 0x0000028a = 650 of the first 1024 samples, so the CMD line DID move during
+# CMD1 on that arm, and a zero status count beside it is a statement about the block and not about
+# a bus nobody drove. _cmd1_polls and _cmd1_ticks are read BESIDE it, because a sampler slower than
+# one bit period could miss a transmission and report a zero.
+#
+# NO CELL OF THIS ARM IS READ AS AN ANSWER FROM THE CARD. 0x40ff8080 stands in the RESPONSE
+# registers after a command that TIMED OUT (_nidx_resp_pre = 0x00000000 then _nidx_resp_post =
+# 0x40ff8080 beside _nidx_status_any = 0x00018000), the image never WRITES those registers (every
+# one of its accesses to RESPONSE 0x10 is a read), and rung 19's capture records the same word
+# BEFORE CMD3 was put on the bus. So a non-zero _cmd1_resp is NOT evidence the card answered. The
+# comment at the head of CMD1 says of exactly this value "the card ANSWERED"; that inference is
+# unsupported and is COST-owed to this arm's successor.
+#
+# AND THE CLAUSE IS THE READING, NOT THIS SENTENCE. build_entry.sh's `xnu_entry_787` asserts, against
+# the LINKED image, for each of the two new bodies: its device set is exactly [f9824934:ldr
+# f9824934:str], its image side is EMPTY, it is referenced exactly once from st_cmd_path, the OPEN's
+# call falls BEFORE the second st_send_command and the CLOSE's AFTER it. The last two are the
+# property 785's false sentence needed and are positions read out of the linked image, not out of a
+# comment.
+set=armed-storage-dfc4ae78 sha256=8c86586ab2017379872c23a94296a087868841dcfa9ac8834a225a32503f14d9 bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-29-entry-rung-30-whose-ONE-NEW-ACT-is-a-THIRD-INT_ENABLE-0x34-WINDOW-around-CMD1-SEND_OP_COND-with-rung-23-s-five-bit-constant-0x000F0001-and-NO-new-register-NO-new-width-NO-new-megabyte-NO-new-device-NO-new-status-cell-and-whose-value-28-build-from-this-same-source-is-BYTE-IDENTICAL-MEASURED-on-ALL-ELEVEN-MEMBERS-to-the-rung-29-park-armed-storage-5fca6210
+set=armed-storage-dfc4ae78 sha256=f1c5e54ca7db5de13a1014dadca0a95e846705c49c95cd9976daeb380dcdeeb4 bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-29-entry
+set=armed-storage-dfc4ae78 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-29-s-MEASURED-by-cmp-so-no-payload-switch-moved-and-STAGE90_XNU_ENTRY-is-1
+set=armed-storage-dfc4ae78 sha256=96ea7684d87486cf4458746b1019bdfba04f293ab141ddf3147384e472336c23 bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-dfc4ae78 sha256=58fad3cfaf3c15a6d1f16f7b807672331f5fe205f929b9baec15628f61be49f3 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above
+set=armed-storage-dfc4ae78 sha256=dfc4ae784e0dfecd4bf4b6bc9e330a124078c59b0773d8316d50b1a4e1fbd935 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-dfc4ae78-IS-THE-SET-NAME-and-its-SIZE-IS-UNCHANGED-at-5552764-bytes-770-measured-that-an-unchanged-size-is-NOT-the-claim-that-nothing-moved-and-HERE-IT-DID-MOVE-the-value-28-build-from-this-same-source-is-BYTE-IDENTICAL-MEASURED-to-the-rung-29-park-s-member-5fca6210
+set=armed-storage-dfc4ae78 sha256=2aae6a53a9c0174e0c6ac7af64af2446ffab14fe1409560085a16e7bfc0e8b8e bytes=6732404 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-ITS-SIZE-MOVED-by-76-bytes-and-the-two-new-symbols-st_cmd1_enable_open-0x8000ddc4-and-st_cmd1_enable_restore-0x8000de18-are-in-it
+set=armed-storage-dfc4ae78 sha256=25accb891be15250e4ff3762799fb9cb5b7b39f7d012061e132e34c26c66b403 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE-29-and-it-differs-from-the-rung-29-park-s-member-in-EXACTLY-TWO-LINES-the-rung-number-and-this-artifact-s-own-sha256
+set=armed-storage-dfc4ae78 sha256=f1162f01327b0f67717cabc7ed22e1f8d545ee1214381d47486c72bd92469ac1 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match-it-differs-from-the-rung-29-park-s-member-in-EXACTLY-THREE-LINES-this-artifact-s-own-sha256-and-TWO-source-files-content-hashes-src-entry-build_entry-sh-eb9b6c7f-to-5e9bca03-and-src-entry-entry_storage-c-7c8800c3-to-6afc5d29
+set=armed-storage-dfc4ae78 sha256=c71e1f4ccb7ec3cf5af31ad922ae18118318b5f7b4d3e6b5d26215b05fb0ba00 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-dfc4ae78 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-bytes-across-every-arm-since-574
+#
+# THE PARK IS out/stage90/frozen/armed-storage-dfc4ae78/ - ELEVEN MEMBERS, the eleven set= lines
+# above, each verified IN PLACE by tools/verify_revert_set.sh against this record before this
+# block was committed. The live out/stage90/ and the park were compared file by file with cmp and
+# agree byte for byte.
+#
+# AND THE CONTAINMENT IS MEASURED ON ALL ELEVEN MEMBERS, WHICH IS STRONGER THAN THE TWO ARTIFACTS
+# EARLIER RUNGS MEASURED. The value-28 entry build from this same source is byte-identical to the
+# rung-29 park's xnu_arm_entry.bin (5fca6210), AND a payload built with that value-28 entry image is
+# byte-identical to the rung-29 park on EVERY ONE of the eleven members - qcdt img, raw bin, build
+# config, payload elf, manifest, entry bin, entry elf, entry config, entry sources, payload img and
+# the fixture. So the delta this arm carries is exactly the >= 29 lines and nothing else, and there
+# is no artifact on which the two arms agree by accident.
+#
+# WHAT THE ENTRY'S OWN RECORDS SAY THE DELTA IS: xnu_arm_entry-config.txt differs from the rung-29
+# park's in EXACTLY TWO LINES (STAGE90_XNU_STORAGE_PROBE 28 -> 29 and the artifact's own sha256),
+# and xnu_arm_entry-sources.txt differs in EXACTLY THREE (that sha256, build_entry.sh eb9b6c7f ->
+# 5e9bca03, entry_storage.c 7c8800c3 -> 6afc5d29). stage90-build-config.txt is byte-identical
+# (6c2b6038) to rungs 23 through 29, so NO PAYLOAD SWITCH MOVED and STAGE90_XNU_ENTRY is 1.
+#
+# THE SAFETY READING IS UNCHANGED IN KIND. _c1_ena_wrote and _c1_ena_wrote_back are published as the
+# word stored and the word put back - and they are the SAME WORD because the close takes what the
+# open returned - so the arm's own constant is read out of the log rather than inferred from the
+# source. The store count is two more of the same store to INT_ENABLE 0x34; SIGNAL_ENABLE 0x38 is
+# still read and never written; neither new body touches INT_STATUS 0x30; and the arm is still
+# `fastboot boot` only with nothing flashed. Nothing in this build touches the PMIC, the rails, the
+# clocks, the DLL, the pad register or any address outside INT_ENABLE 0x34.
+#
+# AND THE CENSUS MOVED WITH THE ARM, READ RATHER THAN ASSERTED: tools/report_int_enable_windows.py
+# now reports the five-bit word built at FOUR sites and reaching FOUR stores - st_all_send_cid,
+# st_cmd1_enable_open, st_cmd3_noidx and st_cmd_path - where before this step it read three.
+#
+# AND THE BUILD CLAUSE IS WHAT MAKES THE ARM'S OWN CLAIM CHECKED RATHER THAN STATED: build_entry.sh
+# gained xnu_entry_787, which asserts against the LINKED image that each new body exists, has
+# device set exactly [f9824934:ldr f9824934:str], has an EMPTY image side, is called exactly once
+# from st_cmd_path, and - the property 785's false sentence needed - that the OPEN's call falls
+# BEFORE the second st_send_command and the CLOSE's AFTER it, both positions read out of the
+# linked image's own disassembly.
+#
+# AND THE OWED SITES THIS BUILD DOES NOT PAY STAY OWED AND NAMED: the four `5,088,000`s and the
+# mis-citation at src/entry/entry_storage.c:302-303 (COST-owed, still carried); the set-comparison
+# pad repair (779 section 7, pre-registered, not built); the rung_para correction for values 12..23;
+# the seam-address class; run_and_capture.sh's EXIT_POP_LR_LITERAL; fdt_nodes's lack of a synthetic
+# FDT cell (782 section 6); 784's rail_name cell; and the 0x40ff8080 "the card ANSWERED" comment at
+# the head of CMD1, which 787 measured to be unsupported and which is COST-owed to this arm's
+# successor. **NO PRESS IS SPENT BY THIS STEP AND NONE IS AUTHORIZED**: the press is the operator's,
+# and the path to it is the two commands readiness prints, run by hand once each.

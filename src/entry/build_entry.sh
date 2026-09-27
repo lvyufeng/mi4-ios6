@@ -30923,6 +30923,68 @@ verify_trace_symbols() {
                     layout_fail "the half of st_cmd_path that runs AFTER the first st_send_command has device accesses [$stb_t_set] (sorted) and rung 14 says exactly [f9824924:ldr] - PRESENT_STATE's after-cell and NOTHING ELSE of this body's own. Everything else on that path is inside a called body: rung 13's census, CMD0's send, the enable's restore and the status read that closes it, the gate, and CMD1. An \`f9824934:str\` here is the first build of this arm exactly (the enable written after CMD0's poll had already given up); an \`f9824938:\` of any width is the other half of the pair whose conjunction raises intid 155; and an \`f9824930:str\` is a write into the status register the arm is reading. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_732: the enable's place in st_cmd_path, read out of the linked image by splitting the body at its first st_send_command (disassembly lines ${stb_path_cmd_ln[0]} and ${stb_path_cmd_ln[1]}, restore on ${stb_path_ena_ln[0]}) - BEFORE CMD0 the body's device accesses are [$stb_h_set] with f9824934:str counted $stb_h_str, AFTER it they are [$stb_t_set], and the restore falls between the two calls: the enable is open for exactly CMD0's own send and its poll, which is the interval whose question this rung asks"
             fi
+            if [[ $STORAGE_PROBE -ge 29 ]]; then
+                # **787: RUNG 30's THIRD WINDOW, AND WHY THE CLAUSE GROUP ABOVE IS UNCHANGED BY IT.**
+                # Rung 30 opens an `INT_ENABLE 0x34` window around CMD1 - the interval that has
+                # carried an enable enabling NOTHING since rung 14, which 786 read out of rung 29's
+                # own capture (`_ena_wrote_back = 0x00000000` beside `_cmd1_status_any = 0` over
+                # 5,087,232 polls and `_cmd1_timeout = 1`; CMD1 is `SEND_OP_COND`, the command an eMMC
+                # must answer for this ladder to move at all). **Its open and its close are two bodies
+                # of their own and `st_cmd_path` gains two `bl`s and NO device access**, which is not
+                # a convenience: the clause group above asserts that the half of `st_cmd_path` after
+                # CMD0's send touches `PRESENT_STATE 0x24` and NOTHING ELSE of its own - a property
+                # whose whole value is that everything else on that path is inside a NAMED body - and
+                # relaxing it for this rung would delete the clause that would catch a store put there
+                # in future. So the four numbers above stay at rung 14's for every value, and a value
+                # at or above 29 is checked by the three clauses below instead.
+                #
+                # Three properties per body, and the third and fourth are what make each window an
+                # INTERVAL rather than a store:
+                #   1. the symbol exists and is referenced exactly once from `st_cmd_path`. Zero
+                #      callers would drop the static and leave `INT_ENABLE` carrying the five bits for
+                #      the rest of the run with nothing writing it back - and `SIGNAL_ENABLE 0x38`
+                #      still reads zero, so it would be harmless and every other cell would read
+                #      correctly, which is exactly what makes it worth a refusal rather than a reading;
+                #   2. its device set is `INT_ENABLE 0x34` and NOTHING ELSE - no `SIGNAL_ENABLE`, no
+                #      `INT_STATUS`, no address any other rung named - and its image side is EMPTY;
+                #   3. the OPEN's call falls BEFORE the second `st_send_command` (CMD1), and
+                #   4. the CLOSE's call falls AFTER it. **The second is 785's defect turned into a
+                #      refusal**: 783 and 785 both believed this function's rung-14 window covered
+                #      CMD0 and CMD1, and 786 refuted it out of the capture's own line order - so the
+                #      position of the close relative to CMD1 is asserted against the linked image and
+                #      not stated in a comment.
+                c1_open_ena=$(sym_addr st_cmd1_enable_open) || layout_fail "rung 30's open is not in the image: out/xnu_arm_entry.elf has no \`st_cmd1_enable_open\`, so CMD1 would run with the enable rung 14's restore left standing and the arm's own claim about that interval would be about nothing"
+                c1_open_next=$(sym_next "$c1_open_ena") || layout_fail "nothing follows st_cmd1_enable_open in the linked image, so the window this check disassembles has no end"
+                c1_open_body=$(arm-none-eabi-objdump -d --start-address="$c1_open_ena" --stop-address="$c1_open_next" "$OUT/xnu_arm_entry.elf")
+                { read -r c1o_dev; read -r c1o_cnt; read -r c1o_img; read -r c1o_addr; } < <(classify_body "$c1_open_body" "f9824930 f9824934")
+                c1o_set=$(printf '%s\n' $c1o_dev | LC_ALL=C sort | tr '\n' ' ')
+                [[ "$c1o_set" == "f9824934:ldr f9824934:str " ]] ||
+                    layout_fail "st_cmd1_enable_open's device accesses are [$c1o_set] (sorted) and rung 30 says exactly [f9824934:ldr f9824934:str] - INT_ENABLE 0x34 written and read back, and NOTHING ELSE - ONE store and ONE readback, with no read of INT_STATUS 0x30 here that the poll's own entrance read does not already carry"
+                [[ -z "${c1o_img// /}" ]] ||
+                    layout_fail "st_cmd1_enable_open's non-device memory accesses are [$c1o_img] at [$c1o_addr] and rung 30's record says that set is EMPTY: this body publishes only through entry_live_write, which is a call"
+                c1o_calls=$(grep -c -- 'bl.*<st_cmd1_enable_open>' <<<"$stb_path_body")
+                [[ "$c1o_calls" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $c1o_calls call(s) to st_cmd1_enable_open and rung 30 makes exactly one - the third window's ONE entrance. Zero means the window is never opened; two or more is an entrance the record does not name"
+                c1o_ln=$(awk '/bl.*<st_cmd1_enable_open>/{ printf "%d", NR }' <<<"$stb_path_body")
+                (( c1o_ln < stb_path_cmd_ln[1] )) ||
+                    layout_fail "st_cmd_path calls st_cmd1_enable_open on disassembly line $c1o_ln and its second st_send_command is on line ${stb_path_cmd_ln[1]}: rung 30's window is the CMD1 interval, so it must be opened BEFORE CMD1 \`SEND_OP_COND\` goes on the bus. An open below the command is a window drawn around nothing"
+                c1_ena=$(sym_addr st_cmd1_enable_restore) || layout_fail "rung 30's close is not in the image: out/xnu_arm_entry.elf has no \`st_cmd1_enable_restore\`, so the third window's store would stand for the rest of the run with nothing writing it back"
+                c1_ena_next=$(sym_next "$c1_ena") || layout_fail "nothing follows st_cmd1_enable_restore in the linked image, so the window this check disassembles has no end"
+                c1_ena_body=$(arm-none-eabi-objdump -d --start-address="$c1_ena" --stop-address="$c1_ena_next" "$OUT/xnu_arm_entry.elf")
+                { read -r c1_dev; read -r c1_cnt; read -r c1_img; read -r c1_imgaddr; } < <(classify_body "$c1_ena_body" "f9824930 f9824934")
+                c1_set=$(printf '%s\n' $c1_dev | LC_ALL=C sort | tr '\n' ' ')
+                [[ "$c1_set" == "f9824934:ldr f9824934:str " ]] ||
+                    layout_fail "st_cmd1_enable_restore's device accesses are [$c1_set] (sorted) and rung 30 says exactly [f9824934:ldr f9824934:str] - INT_ENABLE 0x34 written back and read, and NOTHING ELSE - ONE store and ONE readback, with no read of INT_STATUS 0x30. A store here to any other address is a rung the record does not name; a MISSING store is a window that is never closed"
+                [[ -z "${c1_img// /}" ]] ||
+                    layout_fail "st_cmd1_enable_restore's non-device memory accesses are [$c1_img] at [$c1_imgaddr] and rung 30's record says that set is EMPTY: this body publishes only through entry_live_write, which is a call"
+                c1_calls=$(grep -c -- 'bl.*<st_cmd1_enable_restore>' <<<"$stb_path_body")
+                [[ "$c1_calls" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $c1_calls call(s) to st_cmd1_enable_restore and rung 30 makes exactly one - the third window's ONE exit. Zero means INT_ENABLE 0x34 is left carrying the five bits for the rest of the run with nothing writing it back; two or more is an exit the record does not name"
+                c1_ln=$(awk '/bl.*<st_cmd1_enable_restore>/{ printf "%d", NR }' <<<"$stb_path_body")
+                (( c1_ln > stb_path_cmd_ln[1] )) ||
+                    layout_fail "st_cmd_path calls st_cmd1_enable_restore on disassembly line $c1_ln and its second st_send_command is on line ${stb_path_cmd_ln[1]}: rung 30's window is the CMD1 interval, so its close must fall after CMD1 \`SEND_OP_COND\`. A close above the second command is a window that never covered the command it exists for - and 785's arm is the measured case of the belief that it did, refuted by 786 out of the press's own capture"
+                echo "  xnu_entry_787: rung 30's third INT_ENABLE window, read out of the linked image: st_cmd_path's own device surface is rung 14's UNCHANGED at this value, and the window is the interval between its ONE call to st_cmd1_enable_open (disassembly line $c1o_ln, a body whose device set is [$c1o_set]) and its ONE call to st_cmd1_enable_restore (line $c1_ln, [$c1_set]) - so the enable stands across CMD1 on line ${stb_path_cmd_ln[1]} and is put back after the command's own publishes, both positions asserted and neither stated"
+            fi
             [[ -z "${stb_path_img// /}" ]] ||
                 layout_fail "st_cmd_path's non-device memory accesses are [$stb_path_img] at [$stb_path_imgaddr] and rung 11's record says that set is EMPTY - this function publishes through entry_live_write (a call, with a .rodata string) and its two result structs live on the stack, which the classifier skips by base register. A non-empty set here means either a symbol this rung never declared or an access it could not resolve. Nothing is rebuilt by this refusal"
             [[ "$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_path_body")" == "2" ]] ||
