@@ -4946,3 +4946,60 @@ set=armed-storage-46fe6737 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #
 # The goal is still **NOT met**: no storage, no filesystem, no mount, and the machine never observed
 # STAYING UP (745). **TWRP-to-storage stays withheld.**
+
+# ================================================================================================
+# 753 - READ OUT OF THE ARCHIVE AND THE SOURCE; NO DEVICE ACTION, NO BUILD, out/ UNTOUCHED.
+# ================================================================================================
+# WHAT CHANGED IN THE RECORD. **Nothing in this file's arms, gates or flags.** 753 is a correction
+# to a landed document (748 section 4) and one more elimination from rung 21's candidate set; it
+# adds no set=, moves no arm, and compiles nothing. See
+# docs/experiments/experiment-753-the-key-read-after-the-power-byte-reads-bus-on.md.
+#
+# THE DEFECT. 748 section 4 dismissed CORE_PWRCTL_STATUS 0xDC with "the archive has read it after
+# the power byte on fifteen boots, all zero". The COUNT is exact and the KEY is the one it named
+# (_reg_pwrctl_status_after, fifteen captures) - **the MOMENT is not.** That key is emitted at the
+# end of st_driver_reset (entry_storage.c:784, function at :719, rung >= 4), and the probe calls
+# st_driver_reset() FIRST (:4063), before st_pwr_irq_arm() :4100, st_power_set() :4113 and
+# st_pwr_wait() :4127 - so on EVERY rung it is read before the block is asked anything. The key
+# read either side of the byte is a DIFFERENT one, _pwr_status_before / _pwr_status_after
+# (:1374 / :1388, the st_write8 at :1384 between them), and it reads:
+#
+#     _pwr_status_before = 0x00000000   ->  store POWER_CONTROL 0x29  ->  _pwr_status_after = 0x00000002
+#
+# **twelve captures, one value each**, 0x02 = ST_CORE_PWRCTL_BUS_ON (rung7, rung8, rung9, rung12..rung20).
+# This is the m732 shape again: a cell that stands for a register has to be asked WHEN it was read.
+#
+# AND THE BLOCK ANSWERS. Over the ELEVEN captures carrying the rung-8 client: _pwr_irq_status =
+# _pwr_irq_status32 = 0x00000002 (the rung's own two-widths self-check, passing on eleven boots),
+# _pwr_irq_ctl_before = 0x00 -> _pwr_irq_ctl_after = 0x01 (vendor's read either side of the ack store,
+# :1573-1576). The wait agrees on nine consecutive rungs (_pwr_wait_timeout = 0, _pwr_wait_ctl_after
+# = 0x01), and the TIMING is now a number: _pwr_irq_at - _pwr_wait_t0 = 1033, 1059, 1055, 1045, 1049,
+# 1044, 1048, 1053, 1053 on rungs 12-20 - **nine boots within 26 ticks (2.5%) of ~1,050.**
+#
+# RUNG 9 IS THE SOLE OUTLIER AT 1922347 (1,831x) AND THE SAME CAPTURE SAYS WHY. _pwr_wait_cpsr =
+# 0x80000093 (bit 7, I, SET) against rung 12/20's 0x80000013 (clear); the handler entered 1,153 ticks
+# after the poll gave up against a bound of 1,920,000 - it lost by 0.06% of its own bound.
+# **So _pwr_wait_timeout = 1 on rung 9 is a property of the WAITER, not of the block**, and the record
+# has been quoting it beside the block. (The direct measurement of the block's assertion instant on
+# rung 9 is NOT in the archive - that capture's _pwr_irq_at is stamped at the handler's entry, after
+# the unmask. The inference is labelled as such in the document.)
+#
+# WHAT IT DOES TO RUNG 21. 748 section 4's VERDICT survives and its REASON does not: 0xDC is still not
+# worth a rung, now for the stronger reason that the key it quoted is read before the block is asked.
+# And it removes one more explanation for CMD1/CMD2's silence - a block holding an unanswered power
+# request would show 0x02 with no ctl_after = 1, and the archive has never shown that pair.
+#
+# **THE CAVEAT, STATED RATHER THAN BURIED.** The handler FOLDS the vendor's two regulator branches to
+# the success direction (:1551, "there is no regulator call here to fail"), so _pwr_irq_ctl_after = 0x01
+# is THIS IMAGE's acknowledgement, not a PMIC's. What is proved is that the block's handshake ran to
+# completion and was answered here; **what is NOT proved is that the eMMC's supplies are physically up**,
+# because nothing in this image talks to the PMIC. The elimination is among the explanations this ladder
+# can distinguish, and it is stated that way on purpose.
+#
+# **NO ARM MOVED: out/ holds `armed-storage-46fe6737` (STAGE90_XNU_STORAGE_PROBE=20, entry rung 21),
+# ARMED AND NOT PRESSED.** No firer is armed and none is needed; the press path is the two commands
+# readiness prints, run by hand once each. `fastboot boot` only, NEVER flash; neighbour 33e80afe absent
+# from BOTH lists before firing, and no press may be spent without the operator's authorization.
+#
+# The goal is still **NOT met**: no storage, no filesystem, no mount, and the machine never observed
+# STAYING UP (745). **TWRP-to-storage stays withheld.**
