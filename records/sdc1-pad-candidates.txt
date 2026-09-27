@@ -26,18 +26,29 @@
 #   ST_TLMM_DT_DRV_ON_CLK CMD DATA = 4 4 4
 #   ST_TLMM_SDC1_EXPECT = 0x00009f24
 #
-# model                          board-id     pad-pull-on      pad-drv-on      expect
-# Qualcomm MSM 8974Pro-AC + PMA8 8 1          [0, 3, 3, 1]     [7, 4, 4]       0x00009fe4
-# Qualcomm MSM 8974Pro-AC MTP    8 256        [0, 3, 3, 1]     [4, 4, 4]       0x00009f24
-# Qualcomm MSM 8974Pro-AC MTP V4 8 1024       [0, 3, 3, 1]     [4, 4, 4]       0x00009f24
-# Qualcomm MSM 8974Pro-AC MTP V5 8 1280       [0, 3, 3, 1]     [4, 4, 4]       0x00009f24
+# model                          board-id     pad-pull-on      pad-drv-on      ON word     OFF word
+# Qualcomm MSM 8974Pro-AC + PMA8 8 1          [0, 3, 3, 1]     [7, 4, 4]       0x00009fe4  0x00009e00
+# Qualcomm MSM 8974Pro-AC MTP    8 256        [0, 3, 3, 1]     [4, 4, 4]       0x00009f24  0x00009e00
+# Qualcomm MSM 8974Pro-AC MTP V4 8 1024       [0, 3, 3, 1]     [4, 4, 4]       0x00009f24  0x00009e00
+# Qualcomm MSM 8974Pro-AC MTP V5 8 1280       [0, 3, 3, 1]     [4, 4, 4]       0x00009f24  0x00009e00
 # Qualcomm MSM SAMARIUM RUMI                  (no sdhci@f9824900 node)
-# Qualcomm MSM 8974Pro-AA/AB MTP 8 0          [0, 3, 3, 1]     [4, 4, 4]       0x00009f24
+# Qualcomm MSM 8974Pro-AA/AB MTP 8 0          [0, 3, 3, 1]     [4, 4, 4]       0x00009f24  0x00009e00
 #
 # The machine-readable form of the same reading, one line per DISTINCT word. A check that
 # reads this file rather than this table is reading a token and not a column position.
 # candidate 0x00009fe4  pull-on [0, 3, 3, 1] drv-on [7, 4, 4]  on Qualcomm MSM 8974Pro-AC + PMA8084 MTP
 # candidate 0x00009f24  pull-on [0, 3, 3, 1] drv-on [4, 4, 4]  on Qualcomm MSM 8974Pro-AC MTP, Qualcomm MSM 8974Pro-AC MTP V4, Qualcomm MSM 8974Pro-AC MTP V5, Qualcomm MSM 8974Pro-AA/AB MTP
+#
+# The OFF words: what the SAME declarations imply for this register at a moment the
+# controller is powered DOWN, through the same arithmetic on `qcom,pad-pull-off` and
+# `qcom,pad-drv-off`. This is the second column of the register's own two-valued
+# story and the reason a two-row fork on the arm is not enough: an off word carries the
+# SAME pull fields as the on word and differs only in drive, so a register holding the
+# off word has SDC1_CMD's pull-up PRESENT -- the mechanism 769 section 2 named for a
+# card that cannot see the host -- while its drive fields are not the vendor's on
+# state. A check that reads these lines refuses a guard set to an off word, which is a
+# guard that would call a powered-down pad CONFIGURED.
+# offword 0x00009e00  pull-off [0, 3, 3, 1] drv-off [0, 0, 0]  on Qualcomm MSM 8974Pro-AC + PMA8084 MTP, Qualcomm MSM 8974Pro-AC MTP, Qualcomm MSM 8974Pro-AC MTP V4, Qualcomm MSM 8974Pro-AC MTP V5, Qualcomm MSM 8974Pro-AA/AB MTP
 #
 # The controller census of the same file: every node whose name this SoC gives a
 # controller, with the properties that say which one carries the eMMC. Read by

@@ -6276,6 +6276,55 @@ set=armed-storage-f72e9f18 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # `EXIT_POP_LR_LITERAL`, the 737 window paragraph, and the four `5,088,000`s in `entry_storage.c`.
 #
 #
+# 782: THE ARMED FORK IS A TABLE WITH FOUR ROWS - the same declarations name the register's OFF state,
+# and a two-row fork merges it with "never applied". HOST-SIDE ONLY: no device action, no press, no gate
+# against a device, no runner, no firer, nothing built, and `out/` is untouched - the armed rung-28 arm
+# (armed-storage-d5d98738, 93026ca1... / d5d98738..., equal to its own set lines) is unspent.
+#
+#   THE OFF WORD, out of the same node's `qcom,pad-pull-off` / `qcom,pad-drv-off` through the same
+#   arithmetic: ALL FIVE trees that carry `sdhci@f9824900` declare `pull-off [0, 3, 3, 1]`,
+#   `drv-off [0, 0, 0]` -> **0x00009E00**, the PULL HALF OF 0x9F24 WITH THE DRIVE HALF ZEROED. The three
+#   words differ ONLY in the three hdrive fields: 0x00009F24 = 0x9E00 | 0x124 (4/4/4), 0x00009FE4 =
+#   0x9E00 | 0x1E4 (7/4/4), 0x00009E00 = 0x9E00 | 0x000 (0/0/0).
+#
+#   SO `_pad_raw` IS A FOUR-ROW READING AND NOT A TWO-ROW FORK: 0x9F24 -> the pads are at the vendor's
+#   CORE_PWRCTL_BUS_ON state; 0x9FE4 -> configured to the OTHER declared board's word; **0x9E00 -> the
+#   PULLS ARE PRESENT AND THE DRIVE IS OFF**, a state no BUS_ON leaves, whose pull half is IDENTICAL to
+#   row 1's, so 769 section 2's missing-pull-up mechanism is RETIRED on this row too and a fork that
+#   calls it "the vendor act was never applied" merges it with row 4; 0x00000000 or anything else -> a
+#   state NO declaration in this archive produces, the row that would say a bootloader used its own
+#   values. On row 3 the three hdrive fields stay the subject; on row 4 the pull fields are zero and the
+#   mechanism is live.
+#
+#   LANDED AS A CHECK AND NOT A SENTENCE. tools/derive_sdc1_pads.py derives and prints the OFF words
+#   (via `derive_or_none`, which returns NONE for an array shorter than the field list rather than
+#   silently truncating it through `zip` - SDC2's three-entry array is the live case); the tracked
+#   record carries an OFF-word column per tree and one machine-readable `# offword 0x00009e00 ...` line;
+#   and tools/check_sdc1_pad_expectation.py REFUSES a guard constant equal to an off word, because the
+#   guard asks *does the register already hold the word I expect* and a constant set to the off word
+#   would report a POWERED-DOWN PAD AS ALREADY CONFIGURED. One register, two states, one name for both:
+#   779's defect class one level down. Falsified against a scratch record (the guard's own constant
+#   written as the `# offword` line -> REFUSED with the reading named); five selftest cells pin
+#   `offword_verdict` as a pure function.
+#
+#   AND THIS STEP PAYS 779's OWED SELF-TEST for tools/derive_sdc1_pads.py: eleven cells, SEVEN on the
+#   arithmetic alone (both ON words, the OFF word, and the three short/absent array shapes that must
+#   answer NO WORD rather than a truncated one) and FOUR against the device's own file (the four
+#   controller addresses, the two enabled ones, the ladder's node at five trees and window 0x1a0, and
+#   `prop_summary` reporting the differing pad array AS DIFFERING). Where dt.img does not exist the four
+#   file cells print SKIPPED BY NAME, because a cell that cannot run must not read as one that ran; the
+#   tool is in `make check` now, --selftest first.
+#
+#   WHAT IT DOES NOT DO: it changes no cell, no store and not a byte of the arm - the guard still
+#   compares `_pad_raw` against 0x9F24 alone (editing entry_storage.c to compare against the SET would
+#   invalidate the armed arm for 763 section 5's measured COST). It does not say the pads are the cause:
+#   three of the four rows have PULL SDC1_CMD present, so on three the pull-up is not the reason the
+#   card is silent. It does not establish the card is powered. NO PRESS IS SPENT AND NONE IS AUTHORIZED.
+#   tools/verify_press_ready.sh was run once, HOST-SIDE, because this step edits its narration - 5 of 5,
+#   exit 0, under the arm's own flags, no device action.
+#
+# NO set= line follows this block: no arm was built, no park was made, and the sets above are unchanged.
+
 # 781: THE DEVICE'S OWN TREE AND ITS OWN BOOTLOADER PUT THE eMMC ON THE NODE THE LADDER READS - and the
 # tree that wins is a hardware subtype no file in this archive carries. HOST-SIDE ONLY: no device action,
 # no press, no gate against a device, no runner, no firer, nothing built, and `out/` is untouched - the

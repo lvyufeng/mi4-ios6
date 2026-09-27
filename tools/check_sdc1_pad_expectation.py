@@ -25,6 +25,13 @@ record prints its candidates and passes, and a *no*-match is the only refusal. T
 honest scope: this can catch a constant that no board on this device implies, and it
 cannot catch one that the wrong board implies.
 
+**A third refusal, added by 782: a constant set to an OFF word.** The same declarations
+imply a second word -- the state with the controller powered down (`qcom,pad-pull-off` /
+`qcom,pad-drv-off` through the same arithmetic), which shares the pull fields and differs in
+drive. The guard asks *does the register already hold the word I expect*, so a constant set
+to an off word would report a powered-down pad as already configured. One register, two
+states, one name for both: the same defect class 779 found one level down.
+
 **A second refusal, added by 781: the record's controller census.** The same record now
 carries one `# node 0x........ <name> core 0x........ window 0x.. status .. trees n/m`
 line per controller the device's own tree declares, and this check refuses when the address
@@ -51,6 +58,7 @@ from derive_sdc1_pads import (HDRV, PULL, derive, source_bases,  # noqa: E402
 CANDIDATE = re.compile(r'^#\s*candidate\s+(0x[0-9a-fA-F]{8})\s')
 SHA_LINE = re.compile(r'^#\s*sha256\s+([0-9a-f]{64})\s*$')
 INPUT_LINE = re.compile(r'^#\s*input\s+(\S+)\s*$')
+OFFWORD_LINE = re.compile(r'^#\s*offword\s+(0x[0-9a-fA-F]{8})\s')
 NODE_LINE = re.compile(r'^#\s*node\s+(0x[0-9a-fA-F]+)\s+(\S+)\s+core\s+(0x[0-9a-fA-F]+)'
                        r'\s+window\s+(0x[0-9a-fA-F]+)\s+status\s+(\S+)\s+trees\s+(\d+)/(\d+)')
 
@@ -82,6 +90,40 @@ def nodes(path=DEFAULT_RECORD):
                 out.append((int(m.group(1), 16), m.group(2), int(m.group(3), 16),
                             int(m.group(4), 16), m.group(5), int(m.group(6)), int(m.group(7))))
     return out
+
+
+def offwords(path=DEFAULT_RECORD):
+    """The record's OFF words: what its declarations imply with the controller powered down."""
+    out = []
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            m = OFFWORD_LINE.match(line)
+            if m:
+                out.append(int(m.group(1), 16))
+    return out
+
+
+def offword_verdict(offs, want):
+    """(ok, why) for the guard's constant against the register's two-valued story.
+
+    **One register, two states, one name for both -- this project's oldest defect class.**
+    `ST_TLMM_SDC1_EXPECT` is the word the vendor's `CORE_PWRCTL_BUS_ON` leaves, i.e. the ON
+    word. The same board declarations also imply an OFF word (same pull fields, drive at
+    zero), and the arm's guard asks *does the register already hold the word I expect* --
+    so a constant set to an OFF word would make the arm answer **the pads are already
+    configured** about a pad with its drive fields at zero. That is exactly the mistake
+    779 found one level down (a value that is *a* board's being read as *the* device's), so
+    it is a refusal and not a note.
+
+    Pure, so its cells need no device tree.
+    """
+    if want in offs:
+        return False, ('0x%08x is an OFF word in the record -- the value these declarations '
+                       'imply with the controller powered DOWN. The guard compares the live '
+                       'register against the ON word, so a constant set to an off word would '
+                       'report a powered-down pad as already configured' % want)
+    return True, ('0x%08x is not any of the %d off word(s) the record declares (%s)'
+                  % (want, len(offs), ', '.join('0x%08x' % o for o in sorted(offs))))
 
 
 def node_verdict(census, hc, core):
@@ -156,6 +198,12 @@ def check(record=DEFAULT_RECORD, source=ENTRY_SRC, out=sys.stdout):
     want = derive(pull, drv)
     w(f'source    {os.path.relpath(source, REPO)} declares pull-on {pull} drv-on {drv}\n')
     w(f'          -> ST_TLMM_SDC1_EXPECT = 0x{want:08x}\n')
+    offs = offwords(record)
+    ok_off, why_off = offword_verdict(offs, want)
+    if not ok_off:
+        w(f'REFUSED {why_off}\n')
+        return 1
+    w(f'OK: {why_off}\n')
     w(f'record    {os.path.relpath(record, REPO)}  (input {inp}, sha256 {sha[:16]}...)\n')
     w(f'          {len(words)} distinct word(s) declared: '
       f'{", ".join("0x%08x" % x for x in sorted(set(words)))}\n')
@@ -193,6 +241,15 @@ SELFTEST_CELLS = (
 )
 
 
+SELFTEST_OFFWORDS = (
+    # (off words the record declares, the constant, wants_refusal)
+    ([0x00009E00], 0x00009F24, False),   # the ladder's own constant, an ON word
+    ([0x00009E00], 0x00009FE4, False),   # the other tree's ON word
+    ([0x00009E00], 0x00009E00, True),    # the OFF word: a powered-down pad called configured
+    ([], 0x00009F24, False),             # a record that declares none is not a refusal
+    ([0x00009E00, 0x00000000], 0x00000000, True),   # an all-zero off word too
+)
+
 SELFTEST_NODES = (
     # (census rows, hc, core, wants_refusal)
     ([(0xf9824900, 'sdhci@f9824900', 0xf9824000, 0x1a0, 'ok', 5, 6)], 0xf9824900,
@@ -212,6 +269,12 @@ SELFTEST_NODES = (
 
 def selftest():
     bad = 0
+    for offs, want, want_refusal in SELFTEST_OFFWORDS:
+        ok, why = offword_verdict(offs, want)
+        if ok == want_refusal:
+            print(f'  offwords {[hex(o) for o in offs]} want 0x{want:08x}: expected '
+                  f'refusal={want_refusal}, got {not ok} ({why})')
+            bad += 1
     for census, hc, core, want_refusal in SELFTEST_NODES:
         ok, why = node_verdict(census, hc, core)
         if ok == want_refusal:
@@ -232,8 +295,9 @@ def selftest():
     if derive([0, 3, 3, 1], [7, 4, 4]) != 0x00009FE4:
         print('  the other tree on this device implies 0x9FE4, and it has moved')
         bad += 1
-    print(f'selftest ok: {len(SELFTEST_CELLS) + 2} word cells and '
-          f'{len(SELFTEST_NODES)} census cells; both words this device declares are pinned')
+    print(f'selftest ok: {len(SELFTEST_CELLS) + 2} word cells, {len(SELFTEST_OFFWORDS)} '
+          f'off-word cells and {len(SELFTEST_NODES)} census cells; both words this device '
+          f'declares are pinned')
     return 1 if bad else 0
 
 

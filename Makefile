@@ -86,6 +86,11 @@ restore:
 #                           self-test asserts the four idioms that look like a citation and are not:
 #                           `offset (step)`, a tick count beside a millisecond figure, a decimal with no
 #                           separators, and a pair three orders of magnitude apart.
+#   derive_sdc1_pads.py --selftest
+#                           the pad arithmetic and the census rules, as cells. The ptr-only cells need
+#                           no input at all; the four census cells run against the device's own dt.img and
+#                           are SKIPPED BY NAME where it does not exist, so a cell that cannot run never
+#                           reads as one that ran and agreed.
 #   check_sdc1_pad_expectation.py
 #                           reads the TRACKED record records/sdc1-pad-candidates.txt and refuses an
 #                           `ST_TLMM_SDC1_EXPECT` that matches no board the DEVICE'S OWN device tree
@@ -108,6 +113,7 @@ check:
 	@tools/read_storage_key_order.py --selftest >/dev/null
 	@tools/check_count_citations.py --selftest >/dev/null
 	@tools/check_count_citations.py
+	@tools/derive_sdc1_pads.py --selftest >/dev/null
 	@tools/check_sdc1_pad_expectation.py --selftest >/dev/null
 	@tools/check_sdc1_pad_expectation.py
 

@@ -26,6 +26,7 @@ table of alternatives and the choice is made on the device. This tool reports ev
 alternative and the word each one implies; it does not pick.
 
 Usage:
+    tools/derive_sdc1_pads.py --selftest          # the arithmetic and the census rules, no dt.img needed
     tools/derive_sdc1_pads.py                     # print the table for the default dt.img
     tools/derive_sdc1_pads.py --dt PATH           # a different QCDT blob
     tools/derive_sdc1_pads.py --mmc-census        # every controller node, and which one is the eMMC
@@ -194,12 +195,27 @@ def cells(data):
 # ---------------------------------------------------------------- derivation
 
 
+def derive_or_none(pull_arr, drv_arr):
+    """`derive` when the arrays are complete, None when they are short or absent."""
+    if pull_arr is None or drv_arr is None:
+        return None
+    if len(pull_arr) != len(PULL) or len(drv_arr) != len(HDRV):
+        return None
+    return derive(pull_arr, drv_arr)
+
+
 def derive(pull_on, drv_on):
     """The register word `sdhci_msm_setup_pins` would leave for these DT arrays.
 
     The kernel sets each field with `reg |= (val & (2**w - 1)) << off`, and the DT array
     is indexed from the enum base, so element 0 of `pull-on` is CLK and element 0 of
     `drv-on` is CLK.
+
+    **The arrays must be exactly as long as the field list, or this returns None.** An
+    array of three entries (SDC2's, which has no RCLK field) is silently truncated by
+    `zip`, and a truncated word looks exactly like a real one -- so the honest answer for
+    a short array is *no word*, which the caller prints as such. This is the same defect
+    class as a value derived from the wrong board: plausible and wrong.
     """
     word = 0
     for (name, shift), v in zip(PULL, pull_on):
@@ -467,6 +483,8 @@ def collect(dt_path):
             'io_always_on': 'qcom,vdd-io-always-on' in props,
             'bus_width': cells(props['qcom,bus-width']),
             'expect': derive(pull_on, drv_on),
+            'offword': derive_or_none(cells(props['qcom,pad-pull-off']),
+                                      cells(props['qcom,pad-drv-off'])),
         })
     return table, rows, hashlib.sha256(raw).hexdigest()
 
@@ -509,6 +527,22 @@ def report(dt_path, table, rows, sha, out=sys.stdout):
              'yes' if r['always_on'] else 'NO', 'yes' if r['io_always_on'] else 'NO'))
         w('       pull-off %-11s drv-off %-11s vdd %s vdd-io %s bus-width %s\n'
           % (r['pull_off'], r['drv_off'], r['vdd'], r['vdd_io'], r['bus_width']))
+    offs = sorted({r['offword'] for r in hit if r['offword'] is not None})
+    if offs:
+        w('\nthe OFF words, which are what these same declarations imply for the register at a')
+        w('\nmoment the controller is powered DOWN -- derived from the same two arrays by the same')
+        w('\narithmetic, and the reason a two-row fork is not enough: an off word shares its PULL')
+        w('\nfields with the on word and differs only in DRIVE:\n\n')
+        for o in offs:
+            rs = [r for r in hit if r['offword'] == o]
+            w('  0x%08x  pull-off %-12s drv-off %-12s on %s\n'
+              % (o, rs[0]['pull_off'], rs[0]['drv_off'],
+                 ', '.join(r['model'] for r in rs)))
+    short = [r for r in hit if r['offword'] is None]
+    if short:
+        w('\n  %d node(s) declare fewer pad fields than the register has (no RCLK field), so no\n'
+          '  off word is derived for them: %s\n'
+          % (len(short), ', '.join(r['model'] for r in short)))
     return seen
 
 
@@ -550,14 +584,16 @@ def write_record(path, dt_path, table, rows, sha, seen, src, node_lines=()):
             f'#   ST_TLMM_SDC1_EXPECT = 0x{derive(pull, drv):08x}',
             '#',
         ]
-    lines.append('# model                          board-id     pad-pull-on      pad-drv-on      expect')
+    lines.append('# model                          board-id     pad-pull-on      pad-drv-on      '
+                 'ON word     OFF word')
     for r in rows:
         if not r['node']:
             lines.append('# %-30s %-12s (no %s node)' % (r['model'][:30], '', NODE))
             continue
-        lines.append('# %-30s %-12s %-16s %-15s 0x%08x'
+        lines.append('# %-30s %-12s %-16s %-15s 0x%08x  %s'
                      % (r['model'][:30], ' '.join(str(c) for c in r['board_id']),
-                        str(r['pull_on']), str(r['drv_on']), r['expect']))
+                        str(r['pull_on']), str(r['drv_on']), r['expect'],
+                        ('0x%08x' % r['offword']) if r['offword'] is not None else '(short array)'))
     lines += [
         '#',
         '# The machine-readable form of the same reading, one line per DISTINCT word. A check that',
@@ -566,6 +602,23 @@ def write_record(path, dt_path, table, rows, sha, seen, src, node_lines=()):
     for key, rs in seen.items():
         lines.append('# candidate 0x%08x  pull-on %s drv-on %s  on %s'
                      % (rs[0]['expect'], rs[0]['pull_on'], rs[0]['drv_on'],
+                        ', '.join(r['model'] for r in rs)))
+    lines += [
+        '#',
+        '# The OFF words: what the SAME declarations imply for this register at a moment the',
+        '# controller is powered DOWN, through the same arithmetic on `qcom,pad-pull-off` and',
+        '# `qcom,pad-drv-off`. This is the second column of the register\'s own two-valued',
+        '# story and the reason a two-row fork on the arm is not enough: an off word carries the',
+        '# SAME pull fields as the on word and differs only in drive, so a register holding the',
+        '# off word has SDC1_CMD\'s pull-up PRESENT -- the mechanism 769 section 2 named for a',
+        '# card that cannot see the host -- while its drive fields are not the vendor\'s on',
+        '# state. A check that reads these lines refuses a guard set to an off word, which is a',
+        '# guard that would call a powered-down pad CONFIGURED.',
+    ]
+    for o in sorted({r['offword'] for r in rows if r['node'] and r['offword'] is not None}):
+        rs = [r for r in rows if r['node'] and r['offword'] == o]
+        lines.append('# offword 0x%08x  pull-off %s drv-off %s  on %s'
+                     % (o, rs[0]['pull_off'], rs[0]['drv_off'],
                         ', '.join(r['model'] for r in rs)))
     lines += [
         '#',
@@ -587,7 +640,75 @@ def write_record(path, dt_path, table, rows, sha, seen, src, node_lines=()):
     open(path, 'w', encoding='utf-8').write('\n'.join(lines))
 
 
+# ---------------------------------------------------------------- self-test
+
+
+SELFTEST_DERIVE = (
+    # (pull array, drv array, expected word or None)
+    ([0, 3, 3, 1], [4, 4, 4], 0x00009F24),   # four of the device's trees, the ON word
+    ([0, 3, 3, 1], [7, 4, 4], 0x00009FE4),   # the PMA8084 MTP tree, the other ON word
+    ([0, 3, 3, 1], [0, 0, 0], 0x00009E00),   # every tree's OFF word: same pulls, no drive
+    ([0, 3, 3], [7, 4, 4], None),            # SDC2's short array is NOT silently truncated
+    ([0, 3, 3, 1], [4, 4], None),            # nor a short drv array
+    (None, [4, 4, 4], None),                 # nor an absent one
+    ([], [], None),                          # and an empty pair is not the zero word
+)
+
+
+def selftest():
+    bad = 0
+    for pull, drv, want in SELFTEST_DERIVE:
+        got = derive_or_none(pull, drv)
+        if got != want:
+            print(f'  derive_or_none({pull}, {drv}) -> {got}, wanted {want}')
+            bad += 1
+    # The two words the device declares, and the state between them, pinned as constants so a
+    # change to the shift table is caught here rather than at a press.
+    if len(SELFTEST_DERIVE) < 3 or derive_or_none([0, 3, 3, 1], [4, 4, 4]) != 0x00009F24:
+        print('  0x9F24 has moved')
+        bad += 1
+    ran = len(SELFTEST_DERIVE)
+
+    # The census, on the device's own file, when this machine has it. The four cells below are
+    # the rules `census` and `prop_summary` exist for; on a machine without `dt.img` they are
+    # SKIPPED BY NAME rather than passed, because a cell that cannot run must not read as one
+    # that ran and agreed.
+    if not os.path.exists(DEFAULT_DT):
+        print('  (4 census cells SKIPPED: no dt.img at '
+              f'{os.path.relpath(DEFAULT_DT, REPO)} on this machine)')
+    else:
+        table, rows, _sha = census(DEFAULT_DT)
+        by = census_words(rows)
+        if sorted(by) != [0xF9824900, 0xF9864900, 0xF98A4900, 0xF98E4900]:
+            print(f'  the four controller addresses have moved: {[hex(b) for b in sorted(by)]}')
+            bad += 1
+        ran += 1
+        enabled = [b for b in by
+                   if 'ok' in {r['props'].get('status', b'').rstrip(b'\0').decode('latin1')
+                               for r in by[b]}]
+        if enabled != [0xF9824900, 0xF98A4900]:
+            print(f'  the enabled controller set has moved: {[hex(b) for b in enabled]}')
+            bad += 1
+        ran += 1
+        hc = by.get(0xF9824900, [])
+        win = cells(hc[0]['props']['reg'])[1] if hc else 0
+        if len(hc) != 5 or win != 0x1A0:
+            print(f"  the ladder's node: {len(hc)} tree(s), window 0x{win:x} (wanted 5, 0x1a0)")
+            bad += 1
+        ran += 1
+        if prop_summary(hc, 'qcom,pad-drv-on').count('|') != 1:
+            print('  prop_summary no longer reports the differing pad array AS differing: '
+                  f'{prop_summary(hc, "qcom,pad-drv-on")!r}')
+            bad += 1
+        ran += 1
+    print(f'selftest ok: {ran} cells ran -- {len(SELFTEST_DERIVE)} on the arithmetic alone, '
+          f'{ran - len(SELFTEST_DERIVE)} against the device\'s own file')
+    return 1 if bad else 0
+
+
 def main(argv):
+    if '--selftest' in argv:
+        return selftest()
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--dt', default=DEFAULT_DT)
     ap.add_argument('--write-record', action='store_true')
