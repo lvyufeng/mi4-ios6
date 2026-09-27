@@ -6110,3 +6110,57 @@ set=armed-storage-f72e9f18 sha256=4a08dba0611c4c8dbccc8a0de3270c9d9409606971ff11
 set=armed-storage-f72e9f18 sha256=47325aa4854ce53b37a3c4f02caf22624bed5c8192e941e5fc318943153b223e bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-23-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match
 set=armed-storage-f72e9f18 sha256=4315ef657506952052c218a9881ee9cae82860778f6157447c6a841970a8f6dd bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
 set=armed-storage-f72e9f18 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+
+# 771 - THE FOUR COMMANDS READ AS ONE TABLE, AND TWO LIVE EXPLANATIONS REFUTED. NO ARM IS BUILT BY THIS
+# STEP AND NOTHING IN `out/` MOVED: the live arm is still 770's armed-storage-f72e9f18
+# (STAGE90_XNU_STORAGE_PROBE=24), ARMED AND NOT PRESSED, and rung 23's armed-storage-3a92aa52 stays a
+# superseded, unspent park. This block exists because the step CHANGED THE GATE and the change has to be
+# findable from the record rather than from a commit subject:
+#
+#   tools/verify_press_ready.sh - the rung-24 narration. Its sentence **THE RUNGS-13-22 HEADLINE IS
+#   FALSE**: ... *it did not, because the error-enable half of `INT_ENABLE 0x34` was zero* is WITHDRAWN,
+#   because the SAME capture the sentence cites carries the refutation: `INT_ENABLE` was `0x00000001` -
+#   bit for bit the same word, written by two different windows - when CMD0 was issued (`_ena_wrote`) and
+#   when CMD2 was (`_cid_ena_wrote`), and CMD0 completed and latched `INT_RESPONSE` while CMD2 latched
+#   NOTHING across `_cid_polls` = 5,088,256 polls. The enable word separates those two rows in NEITHER
+#   direction, so it is not the reason and the sentence now says so. `_nidx_status_pre = 0x00018000` is
+#   still a real reading and is NOT withdrawn: what is withdrawn is the attribution, because
+#   `_cid_status_post = 0` was read immediately before it and the only write between the two is the enable
+#   store itself - so whether that word arrived during CMD2 or is the store's own effect on this block is
+#   UNSEPARATED, and 771 names the two reads that would separate it. The frontier sentence is also
+#   NARROWED from the same log: the CLOCK is not a candidate (`clk_set_max_clk = 0x16E36000` = 384 MHz
+#   against `clk_set_real_div` = 0x3C0 = 960 is 400,000 Hz EXACTLY, and `cmd2_clock_control = 0x0000E047`
+#   carries `SD_CLOCK_CARD_EN`), so the remaining subject is the PADS AND THE RAILS and not the clock
+#   register.
+#
+#   docs/experiments/experiment-771-the-command-table-read-as-one-table.md - the reading itself, with the
+#   four-row table (CMD0 / CMD1 / CMD2 / CMD3 against word, response demand, the enable word written before
+#   it, `inhibit_after`, `inhibit_seen`, `word_read`, `status_any`, polls, ticks, the poll's own end and its
+#   outcome) and the second refutation: 737's window rationale at entry_storage.c:3024-3031 is refuted AS
+#   A PREDICTION, because CMD2 was sent inside that window and `_cid_status_any = 0`, `_cid_complete = 0`,
+#   `_cid_err = 0` - `_cid_inhibit_seen = 0` says why, the block never raised `CMD_INHIBIT` so there was no
+#   completion for any enable to deliver. The window is NOT removed (a pressed arm's evidence); the
+#   sentence that says what it BUYS is corrected, and so is the same paragraph's `_cmd1_resp` reading,
+#   which 769 section 5.3/7 already retired in both directions.
+#
+#   WHAT THE TABLE DOES SUPPORT IS ONE CELL: `CMD_INHIBIT`. `_inhibit_seen` is 536 / 0 / 0 / 1024 for
+#   CMD0 / CMD1 / CMD2 / CMD3 against completed / nothing / nothing / TIMEOUT at 665.2 us, and
+#   `inhibit_after` - the same bit one instruction after the store - agrees on the three rows that publish
+#   it (1 / 0 / not published / 1). THE MISSING CELL IS MEASURED AND THROWN AWAY: `cid_inhibit_after` is
+#   filled into the result struct by every command and printed by no publish block, so it is absent from
+#   EVERY capture in the archive - and publishing it costs NO DEVICE ACCESS AT ALL.
+#
+#   TWO READS PRE-REGISTERED HERE AND NOT BUILT (a rung carrying them is host-side work; spending it is
+#   the operator's decision, and rung 25's pad read is ahead of them): one `PRESENT_STATE 0x24` read AFTER
+#   the poll loop ends (outside it, so the poll's own traffic is unchanged) separates *the block held the
+#   command and dropped it* from *it never loaded it*; and one `INT_STATUS 0x30` read immediately BEFORE
+#   and one immediately AFTER the enable store separates the two surviving readings of `0x00018000`.
+#
+#   TWO NUMBERS CORRECTED IN THE SAME 737 SENTENCE, quoted so a reader can check them: `_cmd1_polls` is
+#   written there as `0x004db000` = 5,088,000, and the capture says `cmd1_polls = 0x004DAC00` = 5,090,304
+#   (the hexadecimal written is CMD2's `cid_polls`, to which the decimal is also not equal); and
+#   `ena_host_version = 0x00001102` says this block reports SDHCI specification 2.00, while the sentence
+#   that introduced the cell argues from "a 3.00-or-later block" - so any argument in this ladder that
+#   rests on what the specification says about latching has to name the specification the block says it is.
+#
+# NO set= line follows this block: no arm was built, no park was made, and the 34 sets above are unchanged.
