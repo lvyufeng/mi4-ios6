@@ -5224,3 +5224,79 @@ set=armed-storage-46fe6737 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # absent from BOTH lists before firing, and no press may be spent without the operator's authorization.
 #
 # The goal is still **NOT met**: no storage, no filesystem, no mount. **TWRP-to-storage stays withheld.**
+#
+# 758 - **THE PRESS WAS SPENT.** 2026-09-27, one press, WITH THE OPERATOR'S AUTHORIZATION, on
+# `armed-storage-46fe6737` (STAGE90_XNU_STORAGE_PROBE=20, entry ordinal rung 21). `fastboot boot` only,
+# NEVER flash; neighbour 33e80afe absent from BOTH the adb and fastboot lists before firing; exactly one
+# gate (`--allow-xnu-entry`, exit 0) and exactly one runner (`--allow-xnu-entry
+# --expect-arm=armed-storage-46fe6737`). **EXIT 0 - returned and captured, the device back 29 s after the
+# send.** Capture out/stage90/captures/rung21-noidx-20260927-last_kmsg.txt, 639,147 B, sha256
+# 25512586ae087d17210b33debe6fb1d5217d2e21681ab137b90be3ca745a385b. See
+# docs/experiments/experiment-758-the-rung-21-press-the-index-rule-is-refuted.md.
+#
+# READINESS REFUSED FIRST, AND THAT IS PART OF THIS RECORD. `tools/verify_press_ready.sh` returned 1 of 5
+# on the armed arm: 747 ARMED THIS ARM AND NEVER WROTE ITS NARRATION - the branch chain in that file stopped
+# at `wst == 19`, so value 20 fell to the else arm's sentence and the row would have printed 693's name.
+# That is the 698 defect exactly (a branch that enumerates the values it knows mis-names the next one in
+# silence), caught by the clause written for it. Commit 89525c6 wrote the arm sentence and the
+# consequence paragraph; readiness then went 5 of 5, exit 0. **Two names the first draft nearly carried
+# were ABSENT from the image and were removed before landing** - `_rca_gated` and `_nrsp_gated`, whose
+# bodies are compiled out at this value - measured with arm-none-eabi-strings; the row's own name check
+# reports 53 names and 0 globs read against the ELF's keys.
+#
+# **THE ANSWER: THE INDEX RULE IS REFUTED.** The arm asked whether a word that demands a response and
+# carries no INDEX bit is DECLINED. It is not. 0x030A was ACCEPTED AND STARTED - _nidx_inhibit_seen =
+# 0x00000400 (ALL 1024 samples), _nidx_inhibit_after = 1, _nidx_inhibit_last bit 0 STILL SET - and never
+# finished: _nidx_complete = 0, _nidx_status_any = 0 over _nidx_any_polls = 0, _nidx_timeout = 1,
+# _nidx_ticks = 0x015f91be = 1.20002 s. The word was read back out of the block (_nidx_word =
+# _nidx_word_read = 0x0000030a), so this is not a store that failed to land.
+#
+# **AND 0x030A IS INDISTINGUISHABLE FROM rung 19's 0x031A IN EVERY STOPPING CELL.** One bit apart on the
+# bus (INDEX), and: inhibit_seen 0x400 both; inhibit_last 0x01f80001 both (bit 0 set at the last sample);
+# complete 0 both; status_any 0 both; any_polls 0 both; ticks 1.20002 s against 1.20004 s - **20 us apart
+# on a 1.2 s quantity (1.7 ppm)**. A block that could tell the two words apart would not produce that.
+#
+# SO THE RUNG-19/20 PAIR'S COMPETING EXPLANATION IS DEAD AND 746's HEADLINE SURVIVES, NARROWER. Across all
+# six words on the record - 0x0000 (no demand, completes 0.2553 ms), 0x0300 (no demand, completes
+# 0.2554 ms), 0x031A (demand, starts, stalls), 0x030A (demand, starts, stalls), 0x0102 and 0x0209 (demand,
+# NEVER STARTED) - the variable that tracks the outcome is RESP_PRESENT alone, and it is now the only one
+# standing. The arm's own three-way resolved against its own published prediction: 747's SECOND branch
+# fired verbatim.
+#
+# THE WINDOW AND THE ENDING ARE UNMOVED: _nidx_ena_wrote = 0x00000001, _nidx_ena_held = 0x00008001,
+# _nidx_readback = 0x00008000, _nidx_wrote_back = 0, _nidx_sig_enable = 0 (read and never written),
+# _nidx_status_post = 0; _seam_sctlr = 0x30c57879, _seam_post_end_ticks = 0x06ddd000, _post_end_calls = 6,
+# _sleh_storm = 9 - every one the rung-20 press's value. **The declared failure mode did not fire**, and it
+# had been declared in advance so its absence is a reading rather than a relief.
+#
+# **AND 746's REPAIR EARNED ITS KEEP ON ITS FIRST PRESS.** The arm's pair is one readl(RESPONSE 0x10) at
+# both moments (rungs 19 and 20 used the 136-bit formula whose top word is a different offset - m756) and
+# it publishes the four raw words at BOTH moments so a reader can check the claim. Checked:
+#   _rca_resp  0x40ff8080 -> 0x00000000   (rung 19)
+#   _nrsp_resp 0x40ff8080 -> 0x00000000   (rung 20)
+#   _nidx_resp 0x00000000 -> 0x40ff8080   (THIS PRESS)
+# and this press's raw words: pre 0x1C=0x0040ff80 0x18=0x80000000 0x14=0 0x10=0; post 0x1C=0 0x18=0 0x14=0
+# 0x10=0x40ff8080. SAME VALUE, SAME REGISTER, OPPOSITE DIRECTIONS on arms one flag bit apart, with the
+# byte pattern one word up before this command. **What moved the register is UNNAMED and nothing answered**
+# (_nidx_resp_is_arg = 0); _nidx_state/_nidx_ready/_nidx_illegal are a decode of 0x40ff8080 - the word the
+# ladder has read since 733 - and 738's stale-word trap is exactly that shape, which is why the arm
+# published the raw word beside the decode.
+#
+# **THE QUESTION THIS PRESS OPENED, RECORDED AND NOT ANSWERED.** Four words in ONE capture split into two
+# behaviours - {0x0000, 0x030A} started, {0x0102, 0x0209} never started - and the OPCODE column is the only
+# field that splits them cleanly ({0,3} against {1,2}); CRC_CHECK splits it wrong on 0x0209; RESP_TYPE
+# splits it wrong on 0x0209; ARGUMENT splits it wrong on 0x0102; and CMD_INDEX - the field the refuted rule
+# was about - does not split it at all. **A clean split is not an explanation and the record says the
+# ladder does not know which.** Two facts bound the search and both are measured: (a) the CMD2 gate at
+# entry_storage.c:3742 (`c1.sent != 0u && (c1.resp & ST_MMC_CARD_BUSY) == 0u`) PASSED - _cid_gated = 0,
+# _cid_sent = 1, _cmd1_resp = 0x40ff8080 with bit 31 clear - so CMD2 was not skipped by the ladder; and
+# (b) _cmd1_any_polls = 0 and _cid_any_polls = 0, so neither word's poll saw one non-zero INT_STATUS
+# sample - the same never-started the rung-20 press measured, reproduced.
+#
+# **NO ARM IS DESIGNED OR ARMED BY THIS STEP, AND out/ STILL HOLDS THE ARM THIS PRESS SPENT
+# (`armed-storage-46fe6737`, STAGE90_XNU_STORAGE_PROBE=20). No firer is armed and none is needed; the press
+# path is the two commands readiness prints, run by hand once each. Any further press is the operator's
+# decision - and the payload build does not reproduce (408), so a new rung spends the live payload.**
+#
+# The goal is still **NOT met**: no storage, no filesystem, no mount. The block starts a command and never
+# completes one. **TWRP-to-storage stays withheld.**
