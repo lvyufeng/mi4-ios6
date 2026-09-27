@@ -31287,21 +31287,103 @@ verify_trace_symbols() {
                                --stop-address="$(printf '0x%x' $(( stb_pad + stb_pad_size )))" "$OUT/xnu_arm_entry.elf")
                 { read -r stb_pad_dev; read -r stb_pad_cnt; read -r stb_pad_img; read -r stb_pad_imgaddr; } < <(classify_body "$stb_pad_body" "fd512044")
                 stb_pad_str_count=$(printf '%s\n' $stb_pad_dev | awk '/:str/{c++} END{print c+0}')
-                [[ "$stb_pad_str_count" == "0" ]] ||
-                    layout_fail "st_pad_census contains $stb_pad_str_count device store(s) and rung 25 is READ-ONLY - its whole act is one 32-bit read. **This refusal is the arm's safety argument for touching a THIRD device's megabyte**: the register is one the vendor only ever writes (\`sdhci_msm_setup_pad\` -> \`msm_tlmm_set_hdrive\`/\`msm_tlmm_set_pull\`), so a store here would put a drive strength or a pull on a pad bank while the boot is watching, and no other clause in this file can say there are NONE. It is FIRST, before the set and count clauses, so that a perturbed build that adds a store is refused by the sentence that explains why a store here is the one thing this rung must not have. Placed after them it could never fire: any device store appears in the set below as a \`:str\` entry. Nothing is rebuilt by this refusal"
+                # **776: the store count is a function of the rung's VALUE and no longer a constant.**
+                # At values 24, 25 and 26 this body is read-only and the count must be ZERO; at 27 it is
+                # exactly ONE, and the guard clause below is what refuses an UNGUARDED one. The two are
+                # one clause read against the rung the arm carries rather than two policies, so the
+                # read-only arm's own safety sentence survives untouched at the values it was written
+                # for - and a `>= 27` guard here is also what refuses a second store at 27 rather than
+                # relaxing the check.
+                if [[ $STORAGE_PROBE -ge 27 ]]; then stb_pad_str_want=1; else stb_pad_str_want=0; fi
+                [[ "$stb_pad_str_count" == "$stb_pad_str_want" ]] ||
+                    layout_fail "st_pad_census contains $stb_pad_str_count device store(s) and rung $STORAGE_PROBE's record says $stb_pad_str_want. **At values 24..26 this refusal is the arm's safety argument for touching a THIRD device's megabyte**: the register is one the vendor only ever writes (\`sdhci_msm_setup_pad\` -> \`msm_tlmm_set_hdrive\`/\`msm_tlmm_set_pull\`), so a store there would put a drive strength or a pull on a pad bank while the boot is watching, and no other clause in this file can say there are NONE. **At 27 the count is ONE and the same clause refuses a SECOND store**: this arm's whole act is one read and AT MOST one conditional write, and two stores is a different arm - one that writes the register twice, or writes a second register, under key names this record does not carry. It is FIRST, before the set and count clauses, so that a perturbed build that adds a store is refused by the sentence that explains why the count is what it is. Placed after them it could never fire: any device store appears in the set below as a \`:str\` entry. Nothing is rebuilt by this refusal"
+                if [[ $STORAGE_PROBE -ge 27 ]]; then
+                    # **And at 27 the store must be SKIPPABLE, which is 773 section 5's fork made
+                    # structural.** Two compiled forms are accepted and nothing else: the store is
+                    # PREDICATED (\`strne\` and the rest - and the classifier's own \`norm\` already strips
+                    # the condition suffix, which is why the count clause above cannot see it), or a
+                    # CONDITIONAL BRANCH SPANS it - a conditional branch whose own address is below the
+                    # store's and whose target is above it, i.e. a path that reaches the code after the
+                    # store without executing it. **This is a NECESSARY reading of the guard, and the
+                    # clause says so rather than implying more**: the guard's SUFFICIENT argument is the
+                    # \`if\` in src/entry/entry_storage.c, which the source clause below reads by line
+                    # number against this body's own store. What it makes refusable is the failure that
+                    # matters - a perturbed build in which the store came out on the only path, which is
+                    # a different arm and one whose log could not tell the two rows of the fork apart.
+                    stb_pad_guard=$(awk '
+                        function iscb(m) { return m ~ /^b(eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le)$/ }
+                        function ispr(m) { return m ~ /^(ldr|str)(eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le)$/ }
+                        $1 ~ /^[0-9a-f]+:$/ {
+                            a = strtonum("0x" substr($1, 1, length($1) - 1))
+                            if ($3 ~ /^str/ && match($0, /\[[^]]*\]/)) {
+                                op = substr($0, RSTART + 1, RLENGTH - 2)
+                                n = split(op, q, ",")
+                                base = q[1]; gsub(/[ \t]/, "", base)
+                                if (base != "sp" && base != "r13" && sa == 0) { sa = a; sm = $3 }
+                            }
+                            nb++; ba[nb] = a
+                            if (iscb($3) && $4 ~ /^[0-9a-f]+$/) bt[nb] = strtonum("0x" $4)
+                            next
+                        }
+                        END {
+                            if (sa == 0) { print "NOSTORE"; exit }
+                            if (ispr(sm)) { print "PREDICATED(" sm ")"; exit }
+                            for (i = 1; i <= nb; i++)
+                                if (bt[i] > sa && ba[i] < sa) { printf "SPANNED-BY(%08x)", ba[i]; exit }
+                            print "UNGUARDED(" sm ")"
+                        }' <<<"$stb_pad_body")
+                    [[ "$stb_pad_guard" == PREDICATED* || "$stb_pad_guard" == SPANNED-BY* ]] ||
+                        layout_fail "st_pad_census's one store came out [$stb_pad_guard] and rung 27 requires it GUARDED. **The arm is the guard**: 773 section 5 made the whole rung a fork between the pads being already configured and the vendor's pad act never having been applied on this path, and an arm whose store can fire unconditionally is not that arm - it is a write to a pad bank on EVERY boot, which is a different act with a different reading (the log would carry _pad_writes = 1 with nothing to compare it against, and no cell could say whether the store had been needed). The two accepted forms are the store PREDICATED and a conditional branch SPANNING it, because those are the two shapes a compiled \`if\` takes here. \`NOSTORE\` means the count clause above and this one disagree about the same disassembly, which is a scan failure and not an arm. Nothing is rebuilt by this refusal"
+                fi
                 stb_pad_set=$(printf '%s\n' $stb_pad_dev | LC_ALL=C sort | tr '\n' ' ')
-                stb_pad_set_want="fd512044:ldr "
+                # **776: the set, the counts and the order at 27 are this arm's own, DERIVED here from
+                # the rung rather than typed twice.** Below 27 they are rung 25's record unchanged.
+                if [[ $STORAGE_PROBE -ge 27 ]]; then
+                    stb_pad_set_want="fd512044:ldr fd512044:str "
+                    stb_pad_cnt_want="fd512044:ldr=2 fd512044:str=1 "
+                    stb_pad_order_want="fd512044:ldr fd512044:str"
+                else
+                    stb_pad_set_want="fd512044:ldr "
+                    stb_pad_cnt_want="fd512044:ldr=1 "
+                    stb_pad_order_want="fd512044:ldr"
+                fi
                 [[ "$stb_pad_set" == "$stb_pad_set_want" ]] ||
-                    layout_fail "st_pad_census's device accesses are [$stb_pad_set] (sorted) and rung 25's record says exactly [$stb_pad_set_want] - ONE 32-bit read of the TLMM's SDC1 pad-control register, \`TLMM + 0x2044\` = 0xfd512044. **The WIDTH is part of the claim and not a style**: the address is 4-aligned, so a 32-bit read is legal, and a halfword or byte read there would be a different question about the same register - the vendor's own \`msm_tlmm_set_field\` (gpio-msm-common.c:481-496) opens with \`__raw_readl\` on exactly this address, which is the accessor this reading matches. What a store cannot produce is a width error, and this clause is what refuses one. Nothing is rebuilt by this refusal"
-                stb_pad_cnt_want="fd512044:ldr=1 "
-                stb_pad_cnt=$(printf '%s\n' $stb_pad_cnt | LC_ALL=C sort | tr '\n' ' ')
-                [[ "$stb_pad_cnt" == "$stb_pad_cnt_want" ]] ||
-                    layout_fail "st_pad_census's device access COUNTS are [$stb_pad_cnt] and rung 25's record says exactly [$stb_pad_cnt_want] - the register read EXACTLY ONCE and not written. A count of 2 would be the register read twice under one set of names, which makes the second reading the one a reader takes while the first is the one the record describes - and the whole rung is a single sample of a register nothing in this image changes, so a second read is pure cost. This is m736's shape at the clause level: a comparison whose operands a reader cannot distinguish. Nothing is rebuilt by this refusal"
+                    layout_fail "st_pad_census's device accesses are [$stb_pad_set] (sorted) and rung $STORAGE_PROBE's record says exactly [$stb_pad_set_want] - the 32-bit read of the TLMM's SDC1 pad-control register, \`TLMM + 0x2044\` = 0xfd512044, and at 27 the ONE 32-bit store to that same word. **The WIDTH is part of the claim and not a style**: the address is 4-aligned, so a 32-bit access is legal, and a halfword or byte access there would be a different question about the same register - the vendor's own \`msm_tlmm_set_field\` (gpio-msm-common.c:481-496) reaches it with \`__raw_readl\`/\`__raw_writel\` on exactly this address, which is the accessor pair this arm matches. **And a store to a DIFFERENT address is the refusal this clause exists for at 27**: one masked read-modify-write of one register is an act this record can describe; a second address is an act it cannot. Nothing is rebuilt by this refusal"
+                # **776: the counts are SORTED here and were not before, because at 27 there are two
+                # keys and `for (k in cnt)` in the classifier's END block is not ordered.** Below 27 there
+                # is one key, so this comparison is the same sentence it was - the sort is a
+                # generalization of it and not a relaxation: both sides are compared whole.
+                stb_pad_cnt_sorted=$(printf '%s\n' $stb_pad_cnt | LC_ALL=C sort | tr '\n' ' ')
+                [[ "$stb_pad_cnt_sorted" == "$stb_pad_cnt_want" ]] ||
+                    layout_fail "st_pad_census's device access COUNTS are [$stb_pad_cnt] and rung $STORAGE_PROBE's record says exactly [$stb_pad_cnt_want]. **Below 27**: the register read EXACTLY ONCE and not written - and the whole rung is a single sample of a register nothing in this image changes, so a second read is pure cost and m736's shape at the clause level, a comparison whose operands a reader cannot distinguish. **At 27 the second read is the READ-BACK and it is the point**: it is taken only on the branch that wrote, and it is what makes \`_pad_after\` a measurement rather than the value we believe we stored - a count of 2 with no store, or a store with no read-back, is a different arm in either direction. Nothing is rebuilt by this refusal"
                 stb_pad_order=$(printf '%s\n' $stb_pad_dev | tr '\n' ' ')
-                [[ "${stb_pad_order% }" == "fd512044:ldr" ]] ||
-                    layout_fail "st_pad_census's device accesses IN PROGRAM ORDER, distinct, are [$stb_pad_order] and rung 25's record says [fd512044:ldr] - one access, so the order clause is the same as the set clause here and that is stated rather than left to be noticed. It exists because the four clauses above are a family and a later rung that adds a second pad register will need the order to carry which of the two the decodes belong to. Nothing is rebuilt by this refusal"
+                [[ "${stb_pad_order% }" == "$stb_pad_order_want" ]] ||
+                    layout_fail "st_pad_census's device accesses IN PROGRAM ORDER, distinct, are [$stb_pad_order] and rung $STORAGE_PROBE's record says [$stb_pad_order_want]. **At 27 the order is the arm's own reading and it is why this clause is no longer the set clause**: read, then write, then read again is the vendor's own shape (a read-modify-write) and the reverse would be a write whose operand was neither the register as found nor a value this arm declared. It also exists because the clauses above are a family and a later rung that adds a second pad register will need the order to carry which of the two the decodes belong to. Nothing is rebuilt by this refusal"
                 [[ -z "${stb_pad_img// /}" ]] ||
-                    layout_fail "st_pad_census's non-device memory accesses are [$stb_pad_img] at [$stb_pad_imgaddr] and rung 25's record says that set is EMPTY - the body holds three words on its own stack (\`slot_before\`, \`desc\`, \`raw\`), reachable as arguments to \`entry_mmio_section\` and to the decodes, and it publishes through \`entry_live_write\` (a call, with a .rodata string). A symbol here is either one this rung never declared or an access the classifier could not resolve. Nothing is rebuilt by this refusal"
+                    layout_fail "st_pad_census's non-device memory accesses are [$stb_pad_img] at [$stb_pad_imgaddr] and rung $STORAGE_PROBE's record says that set is EMPTY - the body holds its words on its own stack (\`slot_before\`, \`desc\`, \`raw\`, and at 27 \`want\` and \`after\`), reachable as arguments to \`entry_mmio_section\` and to the decodes, and it publishes through \`entry_live_write\` (a call, with a .rodata string). A symbol here is either one this rung never declared or an access the classifier could not resolve. **At 27 it is also the cell that says the guarded store did not need a SECOND window**: \`want\` is computed in registers and from \`raw\`, so the write adds no memory the read did not already reach. Nothing is rebuilt by this refusal"
+                if [[ $STORAGE_PROBE -ge 27 ]]; then
+                    # **776: the guard's SUFFICIENT argument, read out of the SOURCE by line number.**
+                    # The disassembly clause above is necessary and not sufficient - it can see that the
+                    # store is skippable, not that the condition it is skipped on is the comparison this
+                    # arm's fork rests on. So the two lines are read out of src/entry/entry_storage.c and
+                    # their ORDER is asserted: the store is in the ELSE arm of
+                    # `if (raw == ST_TLMM_SDC1_EXPECT)`, and each of the two appears exactly once in the
+                    # file, so there is no second guard and no second store to be confused with it.
+                    # A source grep is a weaker instrument than a clause on the artifact, and it is used
+                    # here only because the guard is a C-level fact: the compiled evidence is the clause
+                    # above, and the two together are why the fork is a property of the build.
+                    stb_pad_src="$BOOT_DIR/entry_storage.c"
+                    stb_pad_guard_n=$(grep -c -F 'if (raw == ST_TLMM_SDC1_EXPECT) {' "$stb_pad_src" || true)
+                    stb_pad_write_n=$(grep -c -F 'st_write32(ST_TLMM_SDC1_PAD_ADDR, want);' "$stb_pad_src" || true)
+                    [[ "$stb_pad_guard_n" == "1" && "$stb_pad_write_n" == "1" ]] ||
+                        layout_fail "rung 27 reads $stb_pad_guard_n occurrence(s) of the guard \`if (raw == ST_TLMM_SDC1_EXPECT) {\` and $stb_pad_write_n of the guarded store \`st_write32(ST_TLMM_SDC1_PAD_ADDR, want);\` in $stb_pad_src, and rung 27's fork is exactly one of each. Zero of either is the arm absent or the store made unconditional in a rewrite; two is a second guard or a second store, and the log could not tell them apart because the count clause above counts the COMPILED stores and not the sources. The clause is a grep and says so: it is here for the C-level half of the guard, and the disassembly clause above is the arm's own half. Nothing is rebuilt by this refusal"
+                    stb_pad_guard_ln=$(grep -n -F -m1 'if (raw == ST_TLMM_SDC1_EXPECT) {' "$stb_pad_src" | cut -d: -f1)
+                    stb_pad_write_ln=$(grep -n -F -m1 'st_write32(ST_TLMM_SDC1_PAD_ADDR, want);' "$stb_pad_src" | cut -d: -f1)
+                    stb_pad_between=$(sed -n "${stb_pad_guard_ln},${stb_pad_write_ln}p" "$stb_pad_src" | grep -c -F '} else {' || true)
+                    if (( ${stb_pad_write_ln:-0} > ${stb_pad_guard_ln:-0} )) && [[ "$stb_pad_between" == "1" ]]; then :; else
+                        layout_fail "the guard is on line $stb_pad_guard_ln and the store on line $stb_pad_write_ln of $stb_pad_src, with $stb_pad_between \`} else {\` line(s) between them; rung 27 requires the store to come AFTER the guard and in its ELSE arm, i.e. exactly one \`} else {\` between the two. A store above the guard, or between the guard and its own else, is not the conditional this rung's answer space describes - and a store in the guard's THEN arm would make _pad_write_skipped and the store the same branch. Nothing is rebuilt by this refusal"
+                    fi
+                fi
                 stb_pad_calls=$(grep -c -- 'bl.*<st_pad_census>' <<<"$stb_body")
                 [[ "$stb_pad_calls" == "1" ]] ||
                     layout_fail "entry_storage_probe makes $stb_pad_calls call(s) to st_pad_census and rung 25 makes exactly one. Zero is the whole arm absent - every \`_pad_*\` cell absent with it, INCLUDING \`_pad_raw\`, which is this rung's answer; and an absent key has three producers (m720: the branch did not run, the channel refused, the cap dropped it) so its absence must be nameable before it is read. Two or more means the register is read twice under one set of names and the fields are decoded twice from two samples of a register nothing changes. Nothing is rebuilt by this refusal"
@@ -31312,7 +31394,12 @@ verify_trace_symbols() {
                     layout_fail "the two call lines could not be read out of entry_storage_probe's disassembly ([$stb_pad_cmd_ln] for st_cmd_path, [$stb_pad_calls_ln] for st_pad_census), so the ORDER of the pad read and the command path is not readable here. This refusal is about the SCAN and not about the arm: an unreadable disassembly is not an arm in the wrong order, and the call-count clauses above are the ones that refuse an arm. Nothing is rebuilt by this refusal"
                 (( ${stb_pad_calls_ln} < ${stb_pad_cmd_ln% *} )) ||
                     layout_fail "entry_storage_probe calls st_pad_census on disassembly line $stb_pad_calls_ln and st_cmd_path on line ${stb_pad_cmd_ln% *}: the pad read must come BEFORE the command path. **For THIS rung the position is well-defined rather than load-bearing** - the body reads a different device from a different megabyte, so no command this ladder sends can change it and no register the gate reads is touched by it. What the ordering still buys is that the reading describes the pads as they were handed over, before a boot that then stalls for a second on a command that never completes, and that a future rung which reads the pads AFTER a command cannot be reached by relaxing this clause without the build saying so. Nothing is rebuilt by this refusal"
-                echo "  xnu_entry_769: st_pad_census's device accesses are [$stb_pad_set] with counts [$stb_pad_cnt] - ONE READ of 0xfd512044 and NO STORE ANYWHERE - in program order [$stb_pad_order] with an EMPTY image side; entry_storage_probe calls it once, on disassembly line $stb_pad_calls_ln, BEFORE st_cmd_path on line ${stb_pad_cmd_ln% *}, so the TLMM's SDC1 pad-control register is read at the one moment the boot has not yet stalled on a command: the hdrive fields (clk/cmd/data at bits 6/3/0) and the pull fields (clk/cmd/data/rclk at 13/11/9/15), published raw beside the value the board's own qcom,pad-pull-on/qcom,pad-drv-on arrays say they should hold - and PULL SDC1_CMD is the field the mechanism rests on, because MMC's CMD line is open-drain during identification and returns HIGH only through it. The megabyte is 0xFD5 and the install is entry_mmio_section's, which 692's press is why it cannot be skipped"
+                if [[ $STORAGE_PROBE -ge 27 ]]; then
+                    stb_pad_act="ONE READ of 0xfd512044 and ONE GUARDED STORE to that same word - skipped entirely when the read already matches, which is the fork 773 section 5 pre-registered - compiled as [$stb_pad_guard], with the store on line $stb_pad_write_ln of src/entry/entry_storage.c inside the else arm of the guard on line $stb_pad_guard_ln"
+                else
+                    stb_pad_act="ONE READ of 0xfd512044 and NO STORE ANYWHERE"
+                fi
+                echo "  xnu_entry_769: st_pad_census's device accesses are [$stb_pad_set] with counts [$stb_pad_cnt] - $stb_pad_act - in program order [$stb_pad_order] with an EMPTY image side; entry_storage_probe calls it once, on disassembly line $stb_pad_calls_ln, BEFORE st_cmd_path on line ${stb_pad_cmd_ln% *}, so the TLMM's SDC1 pad-control register is read at the one moment the boot has not yet stalled on a command: the hdrive fields (clk/cmd/data at bits 6/3/0) and the pull fields (clk/cmd/data/rclk at 13/11/9/15), published raw beside the value the board's own qcom,pad-pull-on/qcom,pad-drv-on arrays say they should hold - and PULL SDC1_CMD is the field the mechanism rests on, because MMC's CMD line is open-drain during identification and returns HIGH only through it. The megabyte is 0xFD5 and the install is entry_mmio_section's, which 692's press is why it cannot be skipped"
             fi
             # **743: `-eq 18` RATHER THAN `-ge 18`, WHICH IS THE SAME KIND OF CHANGE 736 FORCED ON
             # RUNG 15 AND A DIFFERENT REASON.** Rung 20 sends the same opcode with the same argument

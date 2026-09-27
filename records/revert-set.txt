@@ -6363,3 +6363,95 @@ set=armed-storage-8096cb2c sha256=c4ec207647a45831b14b26de70dbe3995d795213a177dd
 set=armed-storage-8096cb2c sha256=f99518c49b70c70291416dba49c1270c8c4eeea251e1d365ea64f6fca12d8313 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-23-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match
 set=armed-storage-8096cb2c sha256=8c0ba257769e8ed3095bd9032483be308e10990842a8b501422bdcc32bce58f4 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
 set=armed-storage-8096cb2c sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+# 776: THE RUNG-28 ARM - armed-storage-d5d98738, STAGE90_XNU_STORAGE_PROBE=27.
+# Built, parked and recorded here. HOST-SIDE ONLY: no device action, no press, no gate
+# against a device, no runner, no firer. Rungs 27, 26, 25 and 23's parks are all intact;
+# this arm SUPERSEDES rung 27 because it strictly contains it, MEASURED rather than argued
+# (the value-26 build from this same source is byte-identical to 8096cb2c).
+#
+# WHAT IT IS. The FIRST STORE THIS LADDER HAS EVER MADE TO A SECOND DEVICE: st_pad_census -
+# the body rung 25 added to READ the TLMM's SDC1 pad-control register at physical 0xFD512044
+# - now ends in an `if`. When the 32-bit read already equals ST_TLMM_SDC1_EXPECT (0x00009F24,
+# the value this board's own qcom,pad-pull-on / qcom,pad-drv-on arrays produce through the
+# kernel's own shift and mask) it publishes _pad_write_skipped = 1 and _pad_writes = 0 and
+# NO STORE IS MADE AT ALL. Otherwise it writes (raw & ~MASK) | EXPECT - ONE masked
+# read-modify-write over the UNION OF THE SEVEN FIELDS, 0x0001FFFF: hdrive clk/cmd/data at
+# bits 6/3/0 and pull clk/cmd/data/rclk at 13/11/9/15 - and publishes _pad_write_skipped = 0,
+# _pad_writes = 1, _pad_wrote, _pad_after and _pad_after_match.
+#   xnu_live_storage_pad_write_skipped / _writes / _wrote / _after / _after_match
+#
+# THE BITS OUTSIDE THE SEVEN ARE THE BITS THE READ HANDED BACK, carried through unchanged -
+# which is what makes this a field write and not a whole-word write to a register a
+# bootloader may have owned. And the value written is the VENDOR'S OWN: sdhci_msm_setup_pad
+# (sdhci-msm.c:964) walks those same seven fields to those same two arrays, so the guard is
+# what makes the ANSWER readable and NOT what makes the store safe - even an unguarded fire
+# would be a word Linux itself stores at every CORE_PWRCTL_BUS_ON (sdhci-msm.c:2015-2032).
+#
+# THE STORE IS A PLAIN READ-MODIFY-WRITE WITH A MASK, field for field msm_tlmm_set_field's
+# (gpio-msm-common.c:481-496): no unlock sequence, no write-one-to-clear, no FIFO, no shadow
+# register - so one masked RMW over the union makes the vendor's six-call ORDER irrelevant,
+# and that is why one store is safe here where six interleaved ones would need an argument.
+#
+# AND THE BUILD REFUSES THE ARM WITHOUT THE GUARD, TWICE AND INDEPENDENTLY. The store COUNT
+# is 0 at values 24..26 and exactly 1 at 27, one clause read against the rung rather than two
+# policies; the one `str` must be PREDICATED or SPANNED BY A CONDITIONAL BRANCH in the body's
+# own disassembly (this arm is SPANNED-BY(8000ecdc) - the beq there spans the str at
+# 0x8000edb4); and the SOURCE must carry exactly one `if (raw == ST_TLMM_SDC1_EXPECT) {` with
+# the store in its else arm, read by line number (3565 and 3571 of src/entry/entry_storage.c).
+# The disassembly reading is necessary and not sufficient and says so; the source reading is
+# the sufficient half and is a grep, which is the weaker instrument and is named as one.
+#
+# THE ANSWER IS A FORK, AND ITS FIRST ROW IS THE ONE NOTHING IS WRITTEN ON. _pad_raw =
+# 0x00009F24 with _pad_write_skipped = 1 and _pad_writes = 0 means the pads were ALREADY
+# CONFIGURED - by the bootloader, since no rung and no Linux on this path wrote them (773
+# section 2's latch) - and on that row 768 section 5's other half is retired and the pad
+# candidate is CLOSED, leaving the PMIC rails alone (acts 1 and 3 of the vendor's BUS_ON
+# branch, which 773 section 3 counted as unreachable from hc_mem). Anything else with
+# _pad_write_skipped = 0 means the vendor act was never applied on this path and the write
+# HAS BEEN MADE, with _pad_after = 0x00009F24 meaning it landed.
+#
+# THE SAFETY READING IS A COUNT AND NOT A CONSTANT: _pad_writes is published as what happened,
+# so 0 and 1 are the only two values a well-formed run can carry.
+#
+# WHAT IT CANNOT DO: reach another register (one word, no indexed or block access); reach
+# another pad bank (0x2044 is not SDC2's 0x2048, and the seven masks are disjoint so their
+# union is their sum - 776 adds ST_TLMM_SDC1_ALL_MASK == 0x0001FFFF); change a FUNCTION (every
+# field is drive strength or pull, and 769 section 2 established by layout that there is no
+# function-select field to write); put the bus at risk (no transfer in flight); touch the
+# PMIC, the rails or any clock. It is not the DLL path and not the clock register, so 764
+# section 1 and 768 section 4 stay closed.
+#
+# AND IT STRICTLY CONTAINS RUNG 27, MEASURED: every new line sits inside
+# `#if STAGE90_XNU_STORAGE_PROBE >= 27`, and the value-26 build from this same source came out
+# BYTE-IDENTICAL to the parked armed-storage-8096cb2c (8096cb2c..., 5552764 bytes, exit 0),
+# with cmp agreeing against the park's own member. So ONE press answers the SDC1 pad question,
+# the fix question, rung 27's eleven publishes, rung 26's four cells and rung 23's window -
+# and rungs 23, 25, 26 and 27 need never be pressed.
+#
+# AND A COST ALREADY ON RECORD IS PAID IN THIS SAME BUILD: 771 refuted the 737 window
+# paragraph in src/entry/entry_storage.c and left it standing for a COST reason and not a lane
+# reason - correcting a comment forces a build, and the next build should be an arm that
+# carries the correction. This is that build. The paragraph's rationale AS A PREDICTION ("a
+# CMD2 sent the way CMD1 was would answer the same way") is withdrawn in place, with 771's
+# measurement named beside it: CMD2 WAS sent inside that window and gained nothing, because
+# _cid_inhibit_seen = 0 over all 1024 samples - the block never raised CMD_INHIBIT, so the
+# window was open above a command that was never issued. The window itself stays, below the
+# gate, and the corrected paragraph says what it is for.
+#
+# AND tools/verify_press_ready.sh's SHARED STORAGE PARAGRAPH IS REPAIRED HERE. It carried
+# rung 1's "a _loads=6 with _writes=0 is the run this arm exists for" with the correction
+# attached only inside a `wst == 2..11` guard, so EVERY arm from 12 up carried the sentence
+# uncorrected and three separate rung_para calls (24, 25 and 27) had to disclaim it in their
+# own words. The guard now has an else and the correction travels with the sentence for every
+# value - which is the shape that file's own rung_para comment names.
+set=armed-storage-d5d98738 sha256=93026ca15c809d8f111e177ea92c8e24c50ab5255f15fc2e4295365569451037 bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-27-entry-rung-28-whose-ONE-NEW-ACT-is-ONE-MASKED-READ-MODIFY-WRITE-OF-ONE-REGISTER-AT-0xFD512044-GUARDED-BY-THE-READ-THAT-PRECEDES-IT-and-whose-value-26-build-from-this-same-source-is-BYTE-IDENTICAL-MEASURED-to-8096cb2c-so-one-press-answers-everything-rung-27-would-have
+set=armed-storage-d5d98738 sha256=babe9364e25d6c1171c76f5264c0ff13484a909c72e70353fe36dda1e4ba6ffd bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-27-entry
+set=armed-storage-d5d98738 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-24-25-26-and-27-s-MEASURED-by-cmp-so-no-payload-switch-moved-and-STAGE90_XNU_ENTRY-is-1
+set=armed-storage-d5d98738 sha256=419c48a0a933e899aee1e6e38e7d22b57a79326c5d63f94bea79a3d509150b4b bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-d5d98738 sha256=b543a2ffddaf475aa260eaf048418293ba1909f577d747d8d6595165e9cfee73 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above
+set=armed-storage-d5d98738 sha256=d5d98738b63faae4d95cc8297893f79c7451540a5d7247cbeb83643f16d44cb9 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-d5d98738-IS-THE-SET-NAME-and-its-SIZE-IS-UNCHANGED-at-5552764-bytes-770-measured-that-an-unchanged-size-is-NOT-the-claim-that-nothing-moved-and-the-seam-clause-accepted-STAGE90_XNU_SEAM_LR-0x8004a2dc-against-the-linked-image-so-no-page-was-crossed
+set=armed-storage-d5d98738 sha256=e92f744f8c06f3b5d7bfd05b9ba240cbee9f19270469674054434dbf553bca56 bytes=6732328 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-d5d98738 sha256=82694f6323dc43376fbc9431537c84edfe341667a77d2ef76a42344e2b7786be bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE-27
+set=armed-storage-d5d98738 sha256=7e29dfa4d7057f56621606ae9d6ad36d2c76b70689e2468bc1e936ea30a406d9 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match-THIS-MEMBER-MOVED-ONCE-AND-ONLY-BECAUSE-build_entry-sh-CHANGED-A-MESSAGE-backtick-escape-for-make-check-s-check_backtick_messages-and-the-ARTIFACT-HASH-d5d98738-DID-NOT-MOVE-WHEN-IT-WAS-REBUILT-THREE-TIMES-IN-A-ROW
+set=armed-storage-d5d98738 sha256=092f94d4e4b77ace9a8f75b47ed7f09eee9e40dd45fcfac6ecbd01d8e666caa2 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-d5d98738 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
