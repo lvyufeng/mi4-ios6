@@ -42,6 +42,15 @@ restructure moved it: the `reference/` and `status/` pages were re-pointed at th
 - `check_storage_refs.py` — fails if a payload can address an MSM8974 storage controller, by `movt` high halves and literal-pool words. Closes a hole the symbol tripwire could not see: with a deliberate storage store added to the payload, the symbol check found nothing.
 - `count_descriptors.py` — counts ARMv7 page-descriptor constants in a built payload. Its `--diff` mode compares two builds that differ by one switch, which is the sound way to check that a memory-attribute switch does what it claims; absolute counting is unreliable because a descriptor is often built in pieces.
 - `stage-archive.sh` — list/restore the archived stage0–84 snapshots.
+- `read_storage_commands.py` — reads a capture and prints the storage ladder's **per-command table**
+  with the `PRESENT_STATE` **CMD line bit (24)** decoded out of `inhibit_last` and `ps_before`/`ps_after`,
+  and names each row's **shape**. It exists because two things went wrong in the hand-built version of
+  that table, both in the same column: the word was published whole and every table decoded **bit 0
+  only**, and `inhibit_seen = 0` was read as one outcome through 746 §4b, 747 §7 and rung 21's branch
+  table while **it has two producers** (749, `m760`). It prints a shape and **deliberately prints no
+  verdict** for an ambiguous row, because the archive holds two disagreeing readings of CMD1 and neither
+  may be a premise; absent cells print `UNREAD` rather than defaulting to zero. Validated against the
+  five archived command-carrying captures, where it reproduces 749's finding independently.
 
 ## Status — `status/`
 
