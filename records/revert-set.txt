@@ -5817,3 +5817,74 @@ set=armed-storage-94de2ede sha256=363434237b5c7aa3419fe1457928ea304a9136f4fcb5a3
 set=armed-storage-94de2ede sha256=809dac584ee5830b6b7d1fbfe4a96900940fdbab1ba9c91cb6bd3ec232ba5538 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-23-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match
 set=armed-storage-94de2ede sha256=34f795cb828a6558681ab510263976a98dec8405a711313e3581ae4fd478a7ef bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
 set=armed-storage-94de2ede sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+
+# ---------------------------------------------------------------------------
+# 768: THE RUNG-24 PRESS - `armed-storage-94de2ede` WAS PRESSED AND IT ANSWERED.
+# ONE PRESS SPENT, WITH THE OPERATOR'S AUTHORIZATION, 2026-09-27 09:05:22-09:06:36
+# UTC (74 s), EXIT 0, returned and captured. One `fastboot boot` only, never
+# flash; neighbour `33e80afe` absent from BOTH `adb devices` and `fastboot devices`
+# at fire time (`4a2fe00b` present as `device`); exactly one gate
+# (`--allow-xnu-entry`, exit 0, 600 lines) and exactly one runner
+# (`--allow-xnu-entry --expect-arm=armed-storage-94de2ede`), both with the flags
+# readiness printed; readiness 5 of 5 beforehand. Capture archived by hand
+# (the runner does not archive) as
+# `out/stage90/captures/rung24-cmdline-20260927-090636-last_kmsg.txt`, 631,581 B,
+# sha256 053818944ec8009f55e1ebeded90c82b45cdaa24861e2fe6e9d4013d130c506e, with
+# its `-gate.log` and `-run.log` companions.
+#
+# **THE ANSWER IS ROW 1 OF THE PRE-REGISTERED FOUR-ROW TABLE.** `_nidx_status_any
+# = 0x00018000` = `SDHCI_INT_ERROR` (bit 15) + `SDHCI_INT_TIMEOUT` (bit 16),
+# `_nidx_err = 0x00010000`, `_nidx_complete = 0`, `_nidx_timeout = 0` (a break at
+# poll 1789, not the 1.2 s budget), `_nidx_ticks = 0x31e3` = 12,771 ticks =
+# **665.2 us** - THE CARD DID NOT ANSWER AND THE CONTROLLER KNEW IT.
+#
+# **AND THE 665 us IS THE TIMEOUT'S OWN SIGNATURE**: `TIMEOUT_CONTROL 0x2E` read
+# 0, value 0 = 2^13 TMCLK cycles, and 8192 / 665.2 us = 12.31 MHz against this
+# platform's 12.288 MHz - **666.7 us predicted, 665.2 us measured**.
+#
+# **AND THE CMD LINE MOVED**: `_nidx_cmdlow_seen = 0x187` = 391 of the first 1024
+# samples, so 764 section 4's candidate 3 (the block never put anything on the
+# bus) is RETIRED; candidate 2 (the response timeout not armed) is retired by the
+# 665 us itself.
+#
+# **THE LARGER RESULT IS IN THE SAME LOG FROM RUNG 11**: `_cmd0_complete = 1` and
+# `_cmd0_status_any = 0x00000001` (`SDHCI_INT_RESPONSE`) at poll 537 in 255.4 us.
+# A no-response command completes and says so; a response-demanding one is
+# issued, drives the line, and arms and FIRES its own timeout. **THE RUNGS-13-22
+# HEADLINE - "this controller runs a command and never sets its status" - IS
+# FALSE**, and it was false because the error-enable half of `INT_ENABLE 0x34`
+# was zero. 765's mask finding is confirmed one cell deeper:
+# `_nidx_status_pre = 0x00018000` (INT_STATUS read between the enable store and
+# its readback) shows a timeout summary LATCHED AND INVISIBLE since an earlier
+# command. Two producers - named as m739's shape - and the poll settles the fresh
+# latch independently: `_nidx_clear_after = 0`, then a break at poll 1789.
+#
+# Safety, cell by cell: `_nidx_sig_enable = 0` (SIGNAL_ENABLE never written) and
+# NO `_irq_other_*` key anywhere in the log - no delivery reached the dispatcher;
+# `_nidx_ena_held = 0x000f8001`, `_nidx_readback = 0x00008000`; all
+# `persistent_write_attempted` and `failure_mask` zero; ending unmoved
+# (`_post_end_calls = 6`, `_seam_sctlr = 0x30c57879`, `_sleh_storm = 9`).
+#
+# **WHAT IS LEFT.** The controller is exonerated. The candidate space is the
+# card's power and the clock at its pins - the two things a register read of the
+# controller cannot see. Host-side, three obvious suspicions are CLOSED: the
+# 1.8 V power byte is correct (`_pwr_wrote = 0x0b` = `SDHCI_POWER_180|ON`, from
+# CAPABILITIES 0x742dc8b2's VDD_180-only, and the board's
+# `qcom,vdd-io-voltage-level = <1800000 1800000>` agrees); the `qcom,pad-*`
+# settings are drive strength and pull and NOT a function mux; and HOST_CONTROL's
+# bus width cannot matter for data-less commands.
+#
+# **m776 - a field's DIRECTION stated backwards in a live instruction.**
+# `TIMEOUT_CONTROL`'s `0x00` was called the field's LONGEST setting in 765
+# section 4 and carried into 766 and into BOTH the rung-23 and rung-24 readiness
+# narrations. It is the SHORTEST (value v selects 2^(13+v) TMCLK cycles), and
+# this press measured it. The correction in `src/entry/entry_storage.c` is OWED,
+# not paid: that file is one of the entry image's 23 recorded sources, so editing
+# its `#error` text makes the gate refuse the arm this press just spent (763
+# section 5's measured cost). It is corrected in the experiment document and in
+# `tools/verify_press_ready.sh`, which is not an entry source.
+#
+# **RUNG 23's PARK IS NOW SUPERSEDED AND UNSPENT.** `armed-storage-3a92aa52`'s
+# question is answered by this press, and its park stays intact and verified.
+# NO PRESS IS OWED AND NONE IS AUTHORIZED; `out/` still holds this arm, pressed.
+# ---------------------------------------------------------------------------
