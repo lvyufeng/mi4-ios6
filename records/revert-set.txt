@@ -7566,3 +7566,113 @@ set=armed-storage-dfc4ae78 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # seam-address class; run_and_capture.sh's EXIT_POP_LR_LITERAL; fdt_nodes's lack of a synthetic FDT
 # cell (782 section 6); 784's rail_name cell; and 783's window-scope check, landed at rung 30's
 # window and NOT at the ladder's other windows.
+
+# 791: THE CMD2 CENSUS - THE IMMEDIATE CRC IS UNIQUE TO THE ONE COMMAND THAT ASKS FOR A 136-BIT
+# RESPONSE, AND THE NARROW ARMS' ZERO IS A MASKED READING, MEASURED.
+# HOST-SIDE ONLY. NOTHING WAS BUILT, NO SOURCE WAS EDITED AND out/ IS BYTE-IDENTICAL BEFORE AND AFTER
+# THIS BLOCK, so the spent rung-30 arm's park (armed-storage-dfc4ae78, 11 members) and every park
+# before it are unchanged and every set= line in this file still resolves. NO PRESS IS SPENT, NO ARM
+# IS ARMED AND NONE IS AUTHORIZED.
+#
+# THE CENSUS. Nine arms carry CMD2's cells and EXACTLY THE TWO WHOSE CMD2 WINDOW CARRIED THE CRC
+# ENABLE READ NON-ZERO:
+#   rung 29 / rung 30   INT_ENABLE 0x000f0001   _cid_status_any = 0x00028000   at _cid_any_polls = 0x1
+#   rungs 17/18/19/20/21/22/24   INT_ENABLE 0x00000001   _cid_status_any = 0x00000000   over ~5.09M polls
+# 0x00028000 is SDHCI_INT_ERR (bit 15) | SDHCI_INT_CRC (bit 17).
+#
+# THE BRACKET, AND IT LEAVES NOTHING BETWEEN THE CLEAN READ AND THE LATCH:
+#   _cid_stale       = 0x00000001   INT_STATUS at CMD2's entrance, AFTER its own 0x34 store: bit 0 only
+#   _cid_clear_wrote = 0x00000001   the write-1-to-clear
+#   _cid_clear_after = 0x00000000   THE LATCH WAS CLEAN
+#   _cid_word = _cid_word_read = 0x00000209   the block accepted the word into its COMMAND register
+#   _cid_status_any = 0x00028000 at _cid_any_polls = 0x00000001
+# The only device accesses between _cid_clear_after and that first poll are the ARGUMENT store, the
+# COMMAND store, and the COMMAND and PRESENT_STATE readbacks. So the block latched ERR|CRC between
+# being handed the command word and the next read of INT_STATUS.
+#
+# AND IT IS FAR TOO EARLY FOR A RESPONSE, SAID WITHOUT ANY CLOCK FREQUENCY. _cmd0_ticks - the same
+# counter, boot and bus, for one 48-bit no-response frame - is 0x132d/0x132a/0x1325/0x132d/0x1328/
+# 0x1327/0x132a = 4909/4906/4901/4909/4904/4903/4906 across SEVEN arms (spread 8 ticks, 0.16 per cent).
+# _cid_ticks = 0x00000011 = 17 IS 0.35 PER CENT OF ONE SUCH FRAME - before a start bit, a command index
+# and a CRC could have been shifted out, let alone a 136-bit response shifted in. The narrow arms' CMD2
+# poll ran _cid_ticks = 0x015f9xxx = about 23,040,000 ticks, roughly 4700 _cmd0 frames, and read zero
+# at every one of them.
+#
+# THE ISOLATION: THE CORRELATE IS THE RESPONSE LENGTH AND NOT THE CRC ENABLE. Three commands have now
+# been given a wide enough enable, and the command word is a property of the COMMAND and not of the
+# enable:
+#   CMD1  SEND_OP_COND       PRESENT        0x0102   48-bit   CRC check OFF   COMPLETED, poll 1236, no error bit
+#   CMD3  SET_RELATIVE_ADDR  R1_NOIDX       0x030a   48-bit   CRC check ON    ERR|TIMEOUT, BIT 17 NEVER SET
+#   CMD2  ALL_SEND_CID       R2             0x0209   136-bit  CRC check ON    ERR|CRC at poll 1, 17 ticks
+# CMD3's word carries the SAME 0x08 CRC bit as CMD2's, so the CRC bit's presence is not explained by the
+# command's own CRC check; the one thing CMD2 has that no other command in this ladder has is a 136-BIT
+# RESPONSE REQUEST. The table's missing corner is 136-bit with the CRC check OFF - ONE BIT.
+#
+# AND THE NARROW ARMS' ZERO IS A MASKED READING, MEASURED RATHER THAN INFERRED. Rung 24 is the one
+# narrow arm whose NEXT body opens a WIDE window, and that makes it the control the census otherwise
+# lacks:
+#   _cid_ena_wrote   = 0x00000001   one bit, no CRC
+#   _cid_status_any  = 0x00000000   over _cid_polls = 0x004db000 = 5091328 reads
+#   _cid_status_post = 0x00000000   read with INT_ENABLE restored to 0
+#   _nidx_status_pre = 0x00018000   THE NEXT BODY, under the FIVE-BIT word
+# ERR|TIMEOUT was sitting in the latch at the top of the next body, one command after a window whose
+# poll had read zero 5,091,328 times. So at CMD2 (1) 788 section 3's conclusion is now a MEASUREMENT AT
+# THIS WINDOW rather than an inference from other windows, and (2) _cid_status_post = 0 DOES NOT MEAN
+# THE LATCH IS CLEAN, because it is read through INT_ENABLE = 0.
+#
+# AND THAT SECOND POINT IS A NAMED DEFECT CLASS, NOT ONE CELL. Every *_wrote_back cell in the archive
+# is 0x00000000 - every window in this ladder closes by storing int_enable, which is zero - so ALL FOUR
+# *_status_post CELLS ARE 100 PER CENT MASKED READS:
+#   _ena_status_post (14 onward) / _cid_status_post (16 onward) / _nidx_status_post (20 onward) /
+#   _rca_status_post (18/19) - every one of them 0x00000000 on every arm.
+# The _*_readback = 0x00008000 beside them is the tell that the store happened at all (bit 15 stands in
+# INT_ENABLE and no write clears it) and is not itself a status reading.
+#
+# WHAT IT DOES NOT SEPARATE, NAMED AND NOT LEFT. On the narrow control the latched value has bit 16 and
+# NOT bit 17 while the command word is IDENTICAL, so two mechanisms are admissible: (i) the enable
+# switches the CHECK on, so no CRC check runs without the CRC enable and rung 24's condition was the
+# block's own response timeout; or (ii) the enable gates VISIBILITY only and the CRC bit is an EARLY
+# SPURIOUS LATCH raised when a CRC check is enabled on a 136-bit request. And a third asymmetry a
+# reader must not read past: because the wide arms BREAK AT POLL 1, the ladder has NEVER observed
+# whether a wide enable at CMD2 later latches TIMEOUT as well - the wide reading is a FIRST latch and
+# the narrow reading is a LATER one, and whether they are one condition seen twice or two conditions is
+# not in the archive.
+#
+# THE PRE-REGISTERED NEXT ARM IS ONE BIT OUT OF CMD2'S FLAGS, AND ITS BEST ROW REACHES THE CID. CMD2
+# (ALL_SEND_CID, opcode 2, argument 0) sent with MMC_RSP_PRESENT | MMC_RSP_136 - the CRC flag dropped
+# and NOTHING ELSE MOVED: same opcode, same argument, same window, same position in the driver's order,
+# same five-bit INT_ENABLE. Flags 0x07 -> PRESENT|136, word 0x0209 -> 0x0201. Dropping the CRC check
+# from a 136-bit response is legal on the wire: the card still returns the CID and the block simply does
+# not check it. FOUR ROWS:
+#   _cid_complete = 1          THE CID IS TAKEN - the largest single step available from here, after
+#                              which the driver order is CMD9 (CSD), CMD7 (select), CMD16, then data.
+#   ERR|TIMEOUT (0x00018000)   the CRC latch needs the command's own CRC flag, and the real condition
+#                              at CMD2 is the block's own response timeout - which moves the subject to
+#                              why a 136-bit response never arrives.
+#   ERR|CRC (0x00028000) anyway  the CRC bit is not about the command's CRC flag at all, WHICH REFUTES
+#                              the isolation above and puts the 136-bit path itself on the block.
+#   nothing, full bound, and the next wide read shows TIMEOUT   the same as row 2 from the other side,
+#                              and it separates (i) from (ii) by whether the bit appears at all.
+# The control is in the same log: _cmd0_ticks and CMD1's own completion bracket the new word from both
+# ends. THE ARM IS PRE-REGISTERED AND NOT BUILT - building it moves out/, and a build is a later step's
+# act, not this one's.
+#
+# WHAT THIS DOES NOT DO. It builds nothing and spends no press; out/ is byte-identical and every park is
+# intact. It does not decide (i) versus (ii), and it does not say whether CMD2's condition is on the card
+# or on the block - it isolates the CORRELATE and does not name the cause. And IT DOES NOT REACH THE
+# GOAL: no transfer completes, no filesystem is reached and no mount is made, so TWRP-TO-STORAGE STAYS
+# WITHHELD.
+#
+# OWED: the pre-registered one-bit arm above (built by a later step, pressed only by the operator); the
+# *_status_post class, whose repair is a read of INT_STATUS BEFORE the restore at each window (a source
+# change, COST-owed to a build); whether the wide enable at CMD2 also latches TIMEOUT later (one more
+# read after the break would carry it); and, unchanged from 787-790, the 0x40ff8080 "the card ANSWERED"
+# comment at CMD1's head, a _cmd1_raw_pre*/_cmd1_raw_post* pair around CMD1's own RESPONSE registers,
+# c3.inhibit_timeout not published for the nidx family, the four 5,088,000s and the mis-citation at
+# src/entry/entry_storage.c:302-303, a check that counts ST_LIVE sites per key (789 section 4), the
+# _Static_assert message's bit map at entry_storage.c:2360 (789 section 5), _cid_ps_after's second
+# producer (789 section 2), the set-comparison pad repair (779 section 7), the rung_para correction for
+# values 12..23, the seam-address class, run_and_capture.sh's EXIT_POP_LR_LITERAL, fdt_nodes's lack of a
+# synthetic FDT cell (782 section 6), 784's rail_name cell, and 783's window-scope check.
+#
+# CARRIED INTO tools/verify_press_ready.sh's rung-29 narration, which is what the next press prints.
