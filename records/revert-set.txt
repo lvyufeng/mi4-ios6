@@ -6902,10 +6902,17 @@ set=armed-storage-d5d98738 sha256=7e29dfa4d7057f56621606ae9d6ad36d2c76b70689e246
 set=armed-storage-d5d98738 sha256=092f94d4e4b77ace9a8f75b47ed7f09eee9e40dd45fcfac6ecbd01d8e666caa2 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
 set=armed-storage-d5d98738 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
 # 785: THE RUNG-29 ARM - armed-storage-5fca6210, STAGE90_XNU_STORAGE_PROBE=28.
-# Built, parked and recorded here. HOST-SIDE ONLY so far: no device action, no press, no runner,
-# no firer. Rungs 28, 27, 26, 25 and 23's parks are all intact; this arm SUPERSEDES rung 28
-# because it strictly contains it, MEASURED rather than argued (the value-27 build from this same
-# source is byte-identical to d5d98738, the parked rung-28 arm - see the containment paragraph).
+# Built, parked and recorded here. Rungs 28, 27, 26, 25 and 23's parks are all intact; this arm
+# SUPERSEDES rung 28 because it strictly contains it, MEASURED rather than argued (the value-27
+# build from this same source is byte-identical to d5d98738, the parked rung-28 arm - see the
+# containment paragraph).
+#
+# **SUPERSEDED IN PART: THIS ARM WAS PRESSED 2026-09-27 15:18:47-15:20:01 UTC, EXIT 0 (returned
+# and captured). It is SPENT.** The press's reading, and a correction to one claim THIS block
+# makes about which commands the widened window covers, are in the `# 786:` block at the end of
+# this file. Read that block beside this one: the containment claim above and the description of
+# the act are unchanged, and the sentence below that calls st_cmd_path's window "CMD0 and CMD1"
+# is WRONG.
 #
 # WHAT IT IS. 783 read the scope of the widening rung 23 introduced and found it had reached ONE
 # OF THREE command windows. 766's lesson (765 section 1) was that this block's INT_STATUS is a
@@ -7018,4 +7025,113 @@ set=armed-storage-5fca6210 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # above, each verified IN PLACE by tools/verify_revert_set.sh before this block was committed. The
 # live out/stage90/ and the park were compared file by file with cmp and agree byte for byte.
 # armed-storage-d5d98738 (rung 28) and every park before it are untouched and remain the fallback.
-# THE PRESS IS THE OPERATOR'S: this arm is ARMED AND NOT PRESSED.
+#
+# AND THE PRESS WAS SPENT: 2026-09-27 15:18:47-15:20:01 UTC, EXIT 0, the device back 29 s after
+# `fastboot boot`, capture out/stage90/captures/rung29-2win-20260927-152001-last_kmsg.txt
+# (633827 B, sha256 f9012bf6...), gate exit 0 / 605 lines, readiness 5 of 5, no firer, fastboot
+# boot only, nothing flashed. THIS ARM IS SPENT. Its reading is in the `# 786:` block below.
+# 786: THE RUNG-29 PRESS - WHAT IT MEASURED, AND ONE CLAIM OF 785's OWN THAT IT REFUTES.
+# THE PRESS: 2026-09-27 15:18:47-15:20:01 UTC, EXIT 0 (returned and captured), the device back
+# 29 s after `fastboot boot` (seen via adb). Readiness 5 of 5 exit 0; ONE gate exit 0 / 605 lines
+# at 15:18:11; ONE runner; no firer; `fastboot boot` only; nothing flashed; serial 4a2fe00b;
+# 33e80afe absent from BOTH lists. Capture out/stage90/captures/rung29-2win-20260927-152001-{last_kmsg.txt,gate.log,run.log},
+# archived by hand; last_kmsg 633827 B sha256 f9012bf6... THE ARM IS SPENT. Every key below is read
+# out of that capture, by name, and nothing here is inferred from the source except where said.
+#
+# 1. THE ARM'S OWN ACT IS CONFIRMED AT BOTH STORES. `xnu_live_storage_ena_wrote = 0x000f0001` and
+# `xnu_live_storage_cid_ena_wrote = 0x000f0001` - the five-bit word, at the two windows 785
+# widened, out of the log. And two readings BESIDE them that bound what an enable can be on this
+# block: `_ena_wrote_back = 0x00000000` (the restore stores zero) and `_ena_readback = 0x00008000`
+# (and it reads back 0x8000) - so `SDHCI_INT_ERROR` is a bit of INT_ENABLE that NO WRITE CLEARS,
+# which 736 measured with a press and which every enable readback in this capture carries.
+#
+# 2. THE WIDENING PRODUCED A NAMED ERROR AT THE CMD2 WINDOW, AND THAT IS THE PRESS'S NEWS.
+#   xnu_live_storage_cid_status_any = 0x00028000   (SDHCI_INT_ERR | SDHCI_INT_CRC)
+#   xnu_live_storage_cid_err        = 0x00020000   (CRC alone, out of the driver's own CMD_MASK)
+#   xnu_live_storage_cid_any_polls  = 0x00000001   (it stood at the FIRST poll)
+#   xnu_live_storage_cid_complete   = 0, _cid_timeout = 0, _cid_polls = 0x00000001
+# No arm before this one could have reported either bit: rung 16's pressed arm read
+# `_cid_status_any = 0` and every arm since carried that as the CMD2 row. So the widening bought
+# exactly the class of reading it was built for, at ONE of the two windows.
+#
+# 3. AND IT REFUTES 785's OWN CLAIM ABOUT THE OTHER ONE - WITH THE LOG's OWN ORDER, NOT WITH A
+# READING OF THE SOURCE. 785 (and 783 before it) described st_cmd_path's window as "CMD0 and
+# CMD1". IT IS CMD0 ALONE. The log says so by its own line order: `_ena_wrote_back = 0x00000000`
+# is the RESTORE, and it prints at capture line 8789, BEFORE `_cmd1_status_any` at 8832. So CMD1
+# ran with INT_ENABLE = 0x00008000, and
+#   xnu_live_storage_cmd1_status_any = 0x00000000 over _cmd1_polls = 0x004da000 = 5,087,232
+#   (NOT 5,088,256 - this step first wrote that number here and `make check` refused it at line
+#   7062, which is 778's own class: 0x004DA000 is 5,087,232 and this file already carried the
+#   correct pair at its line 5349. The 1,024 difference is the poll loop's own bound and not a
+#   reading of this press's)
+#   xnu_live_storage_cmd1_timeout    = 1
+# is a reading under a ONE-BIT-plus-ERR mask and NOT under the widened word - the same masked
+# reading rung 28 would have produced. The source says it in its own words and always did: the
+# `>= 14` window's comment reads "the interval it was open for is exactly CMD0's own send and
+# poll, and there is no path out of st_cmd_path that reaches the gate, CMD1, or a return with the
+# enable still set". **783 read the SCOPE by counting which COMMAND each FUNCTION carries; a
+# window is an INTERVAL, and the two are not the same question.** The false sentence is now in
+# five places - the entry source's `>= 28` comment (src/entry/entry_storage.c, the RUNG 29 block
+# at the `st_cmd_path` window), this file's `# 785:` block, tools/verify_press_ready.sh's value-28
+# narration and its rung_para 28 paragraph, the 785 experiment doc and the 785 commit message.
+# Corrected in place in this file and in tools/verify_press_ready.sh; the ENTRY SOURCE comment is
+# COST-owed to the next build, because correcting a comment forces one (771's rule) and this arm
+# is already spent.
+#
+# 4. AND IT NARROWS 765's PREMISE, WHICH IS THE SHARPER OF THE TWO FINDINGS. 765 established that
+# INT_STATUS here is a GATED VIEW and every arm since has read `_status_any = 0` as a reading
+# about a one-bit MASK. But `SDHCI_INT_ERROR` (bit 15, 0x8000) IS ENABLED ON EVERY ARM - item 1's
+# `_ena_wrote_back`/`_ena_readback` pair is the measurement - and on this block INT_ERR TRACKS THE
+# ERROR BITS rather than standing beside them:
+#   `_nidx_status_any = 0x00018000` = ERR | TIMEOUT   (CMD3's TIMEOUT, rung 23's cell reproduced)
+#   `_cid_status_any  = 0x00028000` = ERR | CRC       (item 2)
+# So a zero `_status_any` on the narrow arms was NOT blind to the EXISTENCE of an error. What a
+# one-bit command window could not show is the error's IDENTITY, and what it could not show at all
+# is a non-error bit other than the completion. **765's premise is true and NARROWER than the
+# ladder has been stating it: the widening buys identity, not existence - which is exactly what
+# item 2 shows, and why the CMD2 row changes from 0 to a named CRC while the CMD1 row would not
+# have changed at all.**
+#
+# 5. RUNG 28's PAD QUESTION IS ANSWERED, IN THE SAME PRESS, OFF 785's CONTAINMENT CLAIM - AND THE
+# ANSWER IS THE ROW NOTHING IS WRITTEN ON.
+#   xnu_live_storage_pad_raw          = 0x00009f24   (== _pad_expect: the register ALREADY held it)
+#   xnu_live_storage_pad_match        = 1
+#   xnu_live_storage_pad_write_skipped= 1
+#   xnu_live_storage_pad_writes       = 0            (NOTHING WAS STORED)
+#   xnu_live_storage_pad_cmd_pull     = 3, _pad_data_pull = 3, _pad_rclk_pull = 1,
+#   xnu_live_storage_pad_clk_hdrv     = 4, _pad_cmd_hdrv = 4, _pad_data_hdrv = 4
+# So the TLMM's SDC1 pad register was ALREADY at the vendor's CORE_PWRCTL_BUS_ON state when the
+# arm read it - the bootloader put it there, since no rung and no Linux on this path wrote it -
+# and 768 section 5's other half is RETIRED, with `PULL SDC1_CMD` present as 769 section 2's
+# mechanism requires. **The guard held: the arm's first row is the one on which its ONE STORE does
+# not happen, and `_pad_writes = 0` is that fact read out of the log.** 776 section 3's `0x9E00`
+# row (pulls present, drive off) did not occur and the two-row fork's else arm is not the row this
+# device is on.
+#
+# 6. THE CMD LINE MOVED DURING THREE OF THE FOUR COMMANDS, WHICH RETIRES A CANDIDATE.
+#   _cmd0_cmdlow_seen = 0x1bc (444 of the first 1024 samples)  _cmd0_polls = 0x219
+#   _cmd1_cmdlow_seen = 0x28a (650 of 1024)                    _cmd1_polls = 0x004da000
+#   _nidx_cmdlow_seen = 0x176 (374 of 1024)                    _nidx_polls = 0x000005d5
+#   _cid_cmdlow_seen  = 0x0 - and its window was ONE poll (_cid_polls = 1), so it is a window too
+#   short to sample the line and NOT a reading that the line was still.
+# 764 section 4's candidate 3 ("nothing was ever driven onto the bus") is therefore RETIRED: the
+# block drives the line. What stays open is what the line was driven WITH and what the card did
+# about it.
+#
+# 7. WHAT THIS PRESS DOES NOT DECIDE, NAMED RATHER THAN LEFT. The CRC is a COMMAND-LEVEL error
+# bit and the block raises it AT THE FIRST POLL after the command word was written; rung 6 set the
+# card clock to 400 kHz, at which a 48-bit command and its response take ~240 us, so the window
+# CMD2's own cells describe (`_cid_ticks = 0x11`) is far too short for a card's answer to have been
+# clocked in. `_cid_stale = 1` with `_cid_clear_after = 0` says the latch was CLEAN before the
+# command, so the bit did not stand there from an earlier window - but whether it is (a) the card
+# answering and the block refusing the answer, (b) the block signalling an ILLEGAL COMMAND because
+# CMD1's 1.2 s timeout left its command state machine wedged (rung 19 measured exactly that
+# wedge), or (c) the bit re-asserting from the pad the arm did not write, is NOT decided by this
+# press. `_nidx_status_pre = 0x00028000` - the same two bits still set at CMD3's window, one
+# window later - is the cell that says the pair is STICKY across at least one further command, and
+# it is the cheapest next reading there is: it is already in this capture.
+#
+# NOTHING HERE IS A NEW ARM, A NEW FILE IN out/, OR A DEVICE ACTION: out/ is byte-identical
+# before and after this block. THE GOAL IS STILL NOT MET - the block names an error on CMD2 and
+# still completes no transfer, no filesystem is reached and no mount is made, so
+# TWRP-to-storage stays withheld.
