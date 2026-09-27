@@ -136,7 +136,12 @@ explanations that are not the word have now been measured away.**
 - **It does not move the arm, the payload, `out/`, or the entry image.** Nothing here is compiled. `out/`
   still holds the arm 758's press spent.
 - **It does not arm anything, and no press may be spent without the operator's authorization.** A new rung
-  costs the live payload, because `./build.sh` does not reproduce (408).
+  costs **one press**, and it costs the arm in `out/` its **rebuildability** — once `src/` moves, a past arm's
+  bytes can still be sent and still restored from its park, but cannot be produced from the tree again
+  (666 §5). **It does not cost the live payload and it does not cost the park**: 666 §5 measured that
+  `./build.sh` *does* reproduce (the 48 bytes 408 read as nondeterminism are the `STAGE90_XNU_ENTRY` switch),
+  and the park is bytes on disk outside the build path. **This bullet said the opposite before 760 corrected
+  it** — see `experiment-760-a-cost-asserted-from-a-citation.md`.
 - **It does not advance 「挂载存储」.** No storage, no filesystem, no mount. It spends no press, adds no
   reading, and buys exactly one thing: **the next reader does not have to spend a press ruling out the three
   things this capture already rules out.**

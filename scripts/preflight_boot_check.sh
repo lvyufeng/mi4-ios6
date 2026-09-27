@@ -279,8 +279,22 @@ STALE=$(find "$SRC_DIR" -maxdepth 1 -type f \
 # only in prose, so a newer build script cannot make the payload stale. Measured on the committed
 # tree at 4787622, `git status` empty: `build_entry.sh` 17:53:35 against the image it had produced
 # at 17:53:15, refused, and the remedy this clause prescribes - rebuild - is the one thing this
-# phase cannot do, because a payload rebuild does not reproduce (408) and would cost the freeze for
-# a change in nothing the payload consumes.
+# phase cannot do, because a payload rebuild would replace the arm those frozen bytes are, for a
+# change in nothing the payload consumes.
+#
+# **THE REASON WAS WRONG WHEN IT WAS WRITTEN, AND IS CORRECTED HERE (760, 2026-09-27): it said "a
+# payload rebuild does not reproduce (408)".** 666 section 5 measured the opposite on three builds -
+# two plain builds whose `stage90-qcdt.img` was identical both times, and a rebuild from the tree of
+# the parked arm `armed-seam-poc-a43304f2` identical to it in all seven members - and the 48 bytes
+# 408 read as nondeterminism are exactly the `STAGE90_XNU_ENTRY` switch (`kernel_size` 6,015,356
+# with it against 6,015,308 without). **So what refuses a rebuild here is not reproducibility: it is
+# that a rebuild replaces the arm in `out/`, and a payload embeds `xnu_arm_entry.bin`, so once
+# `src/` has moved a past arm can no longer be produced from the tree** (666 section 5). **The park
+# is affected either way more narrowly than the old sentence implied**: it is bytes on disk outside
+# the build path, a rebuild never opens `frozen/`, and reverting to it is a `cp`. "Cost the freeze"
+# therefore means *the arm in `out/` stops matching its record*, not *the park is spent*. **A right
+# rule carried by a wrong reason is the defect 760 records as m770**, and this comment was its worst
+# site, because the sentence sat beside the remedy the clause itself prescribes.
 #
 # The entry side is now checked where content can be checked instead (the clause "the entry image's
 # own sources" below, which reads the manifest `build_entry.sh` writes beside the image), so this

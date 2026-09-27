@@ -5296,7 +5296,11 @@ set=armed-storage-46fe6737 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # **NO ARM IS DESIGNED OR ARMED BY THIS STEP, AND out/ STILL HOLDS THE ARM THIS PRESS SPENT
 # (`armed-storage-46fe6737`, STAGE90_XNU_STORAGE_PROBE=20). No firer is armed and none is needed; the press
 # path is the two commands readiness prints, run by hand once each. Any further press is the operator's
-# decision - and the payload build does not reproduce (408), so a new rung spends the live payload.**
+# decision - and a new rung costs ONE PRESS and the arm in `out/` its REBUILDABILITY, not the payload and
+# not this park: 666 section 5 measured that the payload build DOES reproduce (the 48 bytes 408 read as
+# nondeterminism are the STAGE90_XNU_ENTRY switch), so what a source change costs is that a past arm can no
+# longer be produced from the tree - its park is bytes on disk, outside the build path, and reverting to it
+# is a `cp`. Corrected by 760; this block said the opposite before that step.**
 #
 # The goal is still **NOT met**: no storage, no filesystem, no mount. The block starts a command and never
 # completes one. **TWRP-to-storage stays withheld.**
