@@ -6269,3 +6269,37 @@ set=armed-storage-a1378a48 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #   flight), or the PMIC/rails/clocks.
 #
 # NO set= line follows this block: no arm was built, no park was made, and the 35 sets above are unchanged.
+
+# 774 - THE RCG'S ROOT IS ENABLED, AND THE CELL THAT SAYS OTHERWISE READS A BIT NO CODE IN THIS TREE WRITES.
+# NO ARM IS BUILT AND NOTHING IN `out/` MOVED: the live arm is still 772's armed-storage-a1378a48
+# (STAGE90_XNU_STORAGE_PROBE=25), ARMED AND NOT PRESSED. This block exists because a cell's MEANING was
+# wrong in the direction its own name invites, and the correction strengthens a live conclusion:
+#
+#   WHAT THE TWO CELLS SAY. This ladder publishes xnu_live_storage_clk_rcg_root_en and _rcg_root_status
+#   (and the cmd2_ pair), all reading 0, and a reader can take that as "the root clock is off".
+#
+#   WHICH BIT IS WHICH. clock-local2.c:61-65 defines CMD_RCGR_ROOT_ENABLE_BIT BIT(1) - what you WRITE -
+#   and CMD_RCGR_ROOT_STATUS_BIT BIT(31) - what the hardware REPORTS. The vendor reads the STATUS bit in
+#   three places, always the same way (:299 _rcg_clk_handoff, :727 and :804): if the bit is SET it returns
+#   HANDOFF_DISABLED_CLK, else HANDOFF_ENABLED_CLK. So SET means DISABLED and CLEAR means ENABLED, and
+#   _rcg_root_status = 0 is therefore a POSITIVE reading that the SDC1 apps root is enabled, by the
+#   vendor's own test.
+#
+#   AND _rcg_root_en READS A BIT NOTHING WRITES. grep -rn 'ROOT_ENABLE' arch/arm/mach-msm/ drivers/clk/
+#   returns ONE hit - the #define. rcg_clk_prepare (:152-161) is a no-op that only WARNs if the rate was
+#   never set; __clk_pre_reparent (clock.c:247) recurses into the parent's prepare/enable, which for an
+#   rcg is that same no-op; and the one path that DOES write CMD_RCGR does not write that bit - set_rate_mnd
+#   (:127-150) writes M_REG/N_REG/D_REG, then CFG_RCGR's DIV_MASK/SRC_SEL_MASK/MND_MODE_MASK, then
+#   rcg_update_config: five words and the update bit, never the root enable. So its 0 carries no
+#   information about whether the root is running. That is m737's shape and m776's shape again: a cell
+#   whose NAME states a direction, read as though the 0 were the finding, when the finding is the
+#   neighbouring cell and its sign is the opposite of the one the name invites.
+#
+#   WHAT IT CHANGES. It STRENGTHENS 771 section 7 - the clock is not a candidate - with a second,
+#   independent reading that shares no mechanism with the divider arithmetic (384 MHz / 960 = 400,000 Hz
+#   exactly). It disturbs no other rung: nothing in the press path reads _rcg_root_en as evidence of a
+#   disabled clock, and rung_para 5's sentence is not made false. It does NOT say the clock reaches the
+#   PADS - rung 5 already separated a branch's REQUEST (CBCR bit 0) from the framework's belief (bit 31),
+#   and this closes the ROOT half while leaving the PAD half where rung 25 put it.
+#
+# NO set= line follows this block: no arm was built, no park was made, and the 35 sets above are unchanged.
