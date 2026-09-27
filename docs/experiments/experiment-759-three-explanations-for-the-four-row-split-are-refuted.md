@@ -100,6 +100,15 @@ the same for the response reads.
 
 ## 5. What is left, stated exactly
 
+> **CORRECTED 2026-09-27 by `experiment-761-the-merged-class-and-the-vendor-write-census.md`, and the text
+> below is left standing as the record of what this step concluded.** The two sets are `inhibit_seen`-defined,
+> and **this project's own tool gives the four words four shape names, the second set's two members among
+> them** (`0x0102` is `LINE MOVED INSIDE THE WINDOW`, `0x0209` is `LINE NEVER MOVED` — 749 §3 measured the
+> cell that separates them). **The opcode claim below does not survive that**: under the only split a measured
+> shape supports, the field of the `COMMAND` register that separates the words that completed from the words
+> that did not is **bit 1, `RESP_PRESENT`** — 746's headline — and the opcode column is **not** clean (`3`
+> appears in both sets). See 761 §3 for the field-by-field table and 761 §8 for the defect instance.
+
 With §1 (not the enable window), §2 (not a code path — they take the same one) and §3 (not order) removed,
 the split is **in the command word**, and within the word:
 

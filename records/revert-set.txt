@@ -5368,3 +5368,49 @@ set=armed-storage-46fe6737 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #
 # The goal is still **NOT met**: no storage, no filesystem, no mount. The block starts a command and
 # never completes one. **TWRP-to-storage stays withheld.**
+#
+# 761 - READ OUT OF THE ARCHIVED CAPTURES AND THE VENDORED KERNEL TREE; NO DEVICE ACTION, NO PRESS, NO GATE,
+# NO RUNNER, NO BUILD, out/ UNTOUCHED. **NO ARM MOVED.** Two landed claims read back against their own
+# evidence: 759 section 5's "only the opcode separates them" FAILS, and 756's gap list PASSES.
+#
+# (a) 759 section 5's class {0x0102, 0x0209} is TWO of the archive's own four shapes - tools/
+# read_storage_commands.py, run over every archived capture (39 in out/stage90/captures/, 9 carrying a command
+# body), names them: TAKEN -> COMPLETED (0x0000, 0x0300), LINE MOVED INSIDE THE WINDOW (0x0102),
+# LINE NEVER MOVED (0x0209), TAKEN -> STUCK AT THE BOUND (0x031A, 0x030A). 749 section 3 already measured the
+# cell that separates the merged pair: inhibit_last 0x00f80000 vs 0x01f80000 - bit 24, the CMD line, LOW vs
+# HIGH - and RESPONSE 0x00000000 -> 0x40ff8080 against unmoved. The opcode claim fails under either reading of
+# "started": merged, the class is a label whose members a published cell separates; unmerged, the
+# not-started class is {0x0209} ALONE and a class of one separates nothing.
+#
+# (b) AND THE MERGE CHANGED THE ANSWER. Under the split a measured shape supports - the two
+# TAKEN -> COMPLETED words against the four that did not complete - the only field of the COMMAND register
+# that separates them is BIT 1, RESP_PRESENT (0,0 against 1,1,1,1). RESP_TYPE_SELECT's low bit, CRC_CHECK,
+# CMD_INDEX and CMD_TYPE all fail, and the OPCODE fails too (3 is in both sets). 759 section 5 listed those
+# fields and omitted RESP_PRESENT, because its merged split made 0x0102 and 0x030A one class, both
+# RESP_TYPE = 10. **746's headline survives and is strengthened: RESP_PRESENT is the unique separating bit of
+# the word across all six commands. 758's INDEX refutation is untouched.**
+#
+# (c) 756's GAP LIST, ENUMERATED RATHER THAN CITED, AND IT PASSES. Every register the vendor's power-up path
+# writes at the ladder's clock: CORE_VENDOR_SPEC 0x10C (MCLK select <- DFLT, HC_SELECT_IN cleared,
+# sdhci-msm.c:2496-2513, plus CLK_PWRSAVE :2415-2440) - IMPLEMENTED by rung 6; CORE_DLL_CONFIG 0x100
+# |CORE_DLL_RST (:2578-2580) then |CORE_DLL_PDN (:2583-2585) - NOT touched (0 occurrences in
+# src/entry/entry_storage.c); HOST_CONTROL2 0x3E (:2597) - NOT touched (0). Reachability checked, which 756
+# asserted: sdhci.c:1784-1785 sits inside `if (host->version >= SDHCI_SPEC_300) {` (:1729) with NO timing
+# test, and power-up is MMC_TIMING_LEGACY at host->clock 0 or 400 kHz - both <= CORE_FREQ_100MHZ (:164). And
+# CORE_DLL_CONFIG has FIVE writers in the vendor tree with exactly ONE reachable before the first command:
+# msm_config_cm_dll_phase (:392-423, tuning), msm_init_cm_dll (:571-687, ENABLES the DLL, execute_tuning
+# only), sdhci_msm_toggle_cdr (:2216/:2220, called only from sdhci.c:1007-1011, the DATA path), and
+# sdhci_msm_set_uhs_signaling (:2578-2585, every set_ios, and it DISABLES the DLL). **So the candidate set
+# for "a write the vendor makes that the ladder does not" is exactly two writes, and both turn something OFF.**
+#
+# (d) THE CONTROLLER'S IDENTITY, SETTLED FROM THE DT: msm8974.dtsi:24 `sdhc1 = &sdhc_1; /* SDC1 eMMC slot */`,
+# :500 `qcom,bus-width = <8>`, msm8974pro.dtsi:1765 `reg = <0xf9824900 0x1a0>` - and 0xf9824900 IS
+# ST_HC_MEM_BASE. So xnu_live_storage_reg_card_present = 0x00000000 is the quirk sdhci-msm.c:2896 names
+# (SDHCI_QUIRK_BROKEN_CARD_DETECTION) and NOT an empty socket; "the ladder has been probing an empty SD slot"
+# is refuted.
+#
+# **NO ARM IS DESIGNED OR ARMED BY THIS STEP, AND out/ STILL HOLDS THE ARM 758's PRESS SPENT
+# (`armed-storage-46fe6737`, STAGE90_XNU_STORAGE_PROBE=20). No firer is armed and none is needed. Any further
+# press is the operator's decision.** New instance m771: a class built by merging two rows that a published
+# cell separates - "started" is not a column of any capture.
+#
