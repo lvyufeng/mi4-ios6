@@ -6303,3 +6303,63 @@ set=armed-storage-a1378a48 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #   and this closes the ROOT half while leaving the PAD half where rung 25 put it.
 #
 # NO set= line follows this block: no arm was built, no park was made, and the 35 sets above are unchanged.
+
+# 775: THE RUNG-27 ARM - armed-storage-8096cb2c, STAGE90_XNU_STORAGE_PROBE=26.
+# Built, parked and recorded here. HOST-SIDE ONLY: no device action, no press, no gate
+# against a device, no runner, no firer. Rungs 26, 25 and 23's parks are all intact;
+# this arm SUPERSEDES rung 26 because it strictly contains it, MEASURED rather than
+# argued (the value-25 build from this same source is byte-identical to a1378a48).
+#
+# WHAT IT IS. Eleven fields of the CMD2 result that st_send_command fills for EVERY command
+# and the st_all_send_cid publish block has never printed - because that block was written
+# at rung 16, before rungs 12 and 24 added the entrance state and the inhibit gate to
+# struct st_cmd_result. NO NEW DEVICE ACCESS, NO REGISTER, NO WINDOW, NO MEGABYTE AND NO
+# STORE: every one of the eleven is already in the struct when the block runs.
+#   xnu_live_storage_cid_ps_before / _inhibit_before / _inhibit_polls / _inhibit_ticks /
+#   _inhibit_timeout / _stale / _clear_wrote / _arg / _ps_after / _rsp_present / _resp_read
+#
+# AND ONE OF THEM DECIDES SOMETHING NO OTHER CELL IN THE ARCHIVE CAN. 771 saw the anomaly
+# and could not read it: the block ACKNOWLEDGES CMD0 (inhibit rises, INT_RESPONSE latches)
+# and CMD3 (inhibit held for all 1024 samples, INT_TIMEOUT latches at 665.2 us) but raises
+# NOTHING for CMD1 and CMD2 (inhibit_seen = 0, status_any = 0 over 5.09 M all-zero reads
+# each). And the press DOES show _nidx_status_pre = 0x00018000, i.e. ERROR | TIMEOUT was
+# latched somewhere between CMD2's poll giving up and CMD3's entrance - while the ONLY write
+# in that interval is a store to 0x34, which 736 measured sets bit 15 by itself. So whether
+# bit 16 (INT_TIMEOUT) is a real CMD2 timeout that arrived late, or the enable store's own
+# effect, is UNSEPARATED by every capture on record. _cid_stale is INT_STATUS 0x30 as FOUND
+# at CMD2's ENTRANCE - the first read of that register since CMD1's poll gave up 1.2 s
+# earlier - and the interval it sits in contains NO write to 0x34 at all. A non-zero there
+# is CMD1 doing something after its poll ended; a zero is CMD1 doing nothing.
+#
+# CONTAINMENT, MEASURED: every new line sits inside `#if STAGE90_XNU_STORAGE_PROBE >= 26`,
+# and the value-25 build from this same source came out BYTE-IDENTICAL to the parked
+# armed-storage-a1378a48 (a1378a48..., 5552764 bytes, exit 0). One press therefore answers
+# the SDC1 pad question, rung 26's four cells AND these eleven, and rungs 23, 25 and 26
+# need never be pressed.
+#
+# WHAT DID NOT MOVE, MEASURED: xnu_arm_entry.bin is 5552764 bytes - the SAME size as the arm
+# before it, because the eleven keys fitted the padding - and since 770 measured that an
+# unchanged size is NOT the claim that nothing moved, the claim rests on the hash (8096cb2c,
+# different) and on the seam clause, which accepted STAGE90_XNU_SEAM_LR = 0x8004a2dc against
+# the linked image, so the entry text did NOT cross a page. The payload's switch record is
+# BYTE-IDENTICAL to rungs 23, 24, 25 and 26 (6c2b6038..., 682 bytes).
+#
+# A BUILD DEFECT WORTH RECORDING (m778): the first build of this arm was REFUSED with
+# `entry_storage.c:116: error: missing terminating ' character`, and the cause was an ODD
+# NUMBER OF APOSTROPHES in the appended ladder text - because `#error`'s text is a single
+# DOUBLE-QUOTED STRING, an odd count leaves one character constant unterminated. Rewording
+# three possessives took the inserted segment from 3 apostrophes to 0. The class is invisible
+# in a diff and the compiler is the only reader that sees it.
+#
+# NO PRESS IS SPENT HERE AND NONE IS AUTHORIZED.
+set=armed-storage-8096cb2c sha256=c04d9c04fcfb9cabbffc75ac3900edcbf2b73ded9d5bb5bf2240f11181b1fa78 bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-26-entry-rung-27-whose-eleven-new-keys-are-THE-REST-OF-THE-CMD2-RESULT-already-measured-and-thrown-away-and-whose-value-25-build-from-this-same-source-is-BYTE-IDENTICAL-MEASURED-so-one-press-answers-everything-rung-26-would-have
+set=armed-storage-8096cb2c sha256=f8a320391ac8b177c99de040b38c50da0d4cda5b6e0f3e1b43b323171c027120 bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-26-entry
+set=armed-storage-8096cb2c sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-24-25-and-26-s-MEASURED-by-cmp-so-no-payload-switch-moved-and-STAGE90_XNU_ENTRY-is-1
+set=armed-storage-8096cb2c sha256=ab0e9a44977127d98f5139e502f04ec09f63dcac83a0e2119fa71dac9a357141 bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-8096cb2c sha256=43bbf08095bbad5e174d85fb586b3034545458071ff327f672bb79a7add65c9c bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above
+set=armed-storage-8096cb2c sha256=8096cb2c38f1ceb84183acd09bf31298302db244dc87fdea6e74fe07dc57d287 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-8096cb2c-IS-THE-SET-NAME-and-its-SIZE-IS-UNCHANGED-at-5552764-bytes-because-the-eleven-new-keys-fitted-the-padding-770-measured-that-an-unchanged-size-is-NOT-the-claim-that-nothing-moved-and-the-seam-clause-accepted-STAGE90_XNU_SEAM_LR-0x8004a2dc-against-the-linked-image-so-no-page-was-crossed
+set=armed-storage-8096cb2c sha256=23c226037ac67bc1066ac5c3d4f0fe988836b652c1a2369606f0b21b41f9f75e bytes=6732328 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-8096cb2c sha256=c4ec207647a45831b14b26de70dbe3995d795213a177ddf76b7f937f01d0f550 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE-26
+set=armed-storage-8096cb2c sha256=f99518c49b70c70291416dba49c1270c8c4eeea251e1d365ea64f6fca12d8313 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-23-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match
+set=armed-storage-8096cb2c sha256=8c0ba257769e8ed3095bd9032483be308e10990842a8b501422bdcc32bce58f4 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-8096cb2c sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
