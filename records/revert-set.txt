@@ -6336,6 +6336,107 @@ set=armed-storage-f72e9f18 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #
 # NO set= line follows this block: no arm was built, no park was made, and the sets above are unchanged.
 
+# 784: THE EMMC'S TWO RAILS ARE RPM RESOURCES, AND WHICH PMIC CARRIES THEM IS THE TREE'S BUSINESS.
+# HOST-SIDE ONLY: no device action, no press, no gate against a device, no runner, no firer, nothing
+# built, and `out/` is untouched - the armed rung-28 arm (armed-storage-d5d98738, 93026ca1... /
+# d5d98738..., equal to its own set lines) is unspent. The input is the device's own dt.img, which is
+# .gitignore'd, so the reading is landed as a TRACKED record as in 779/781/782.
+#
+#   THE CANDIDATE. The safety gate's own notes carry it as *"the eMMC's VCC/VCCQ come from the PMIC and
+#   no rung in this ladder has ever touched the PMIC"* - NAMED, NOT ESTABLISHED. 780 weakened the
+#   record's reason for closing it (the vendor's sdhci-msm DOES enable both rails through
+#   regulator_enable; always_on gates only the RELEASE path) and did not close it.
+#
+#   THE RAILS, resolved through the collector node's own phandles, in every tree that has the node:
+#     vdd-supply     /soc/qcom,rpm-smd/rpm-regulator-ldoa20/regulator-l20
+#                    name 8941_l20 on trees #1/#2/#3/#5, name 8084_l20 on tree #0
+#                    init-uv 2950000 (0x2d0370)  qcom,set 3  min = max  always-on NONE
+#     vdd-io-supply  /soc/qcom,rpm-smd/rpm-regulator-smpa3/regulator-s3  (trees #1/#2/#3/#5)
+#                    /soc/qcom,rpm-smd/rpm-regulator-smpa4/regulator-s4  (tree #0)
+#                    name 8941_s3 / 8084_s4     init-uv 1800000 (0x1b7740)  qcom,set 3  always-on NONE
+#   sdhci@f9824900 declares exactly these two supplies and no third.
+#
+#   THE PATH IS INVARIANT AND THE NAME IS NOT - ONE PATH, TWO DEFINITIONS. regulator-l20 is the SAME
+#   path in all five trees and carries TWO names, and the vdd-io rail moves between smpa3/s3 and
+#   smpa4/s4 as well. So the rail's identity is a property of the tree the bootloader selects, which
+#   is 781's hardware subtype one level down: tree #0's arbiter declares pm8941@2/@3 and pma8084@0/@1
+#   and its rails are named for the PMA8084; the other four declare pm8941@0/@1 and pm8841@4/@5 and
+#   their rails are named for the PM8941.
+#
+#   AND THE RAIL'S NAME AND ITS CHIP'S NODE NAME DO NOT CONTAIN EACH OTHER IN THE DIRECTION A SUBSTRING
+#   TEST WOULD NEED: rail 8941_l20, child qcom,pm8941@0 - 8941 IS a substring; rail 8084_l20, children
+#   qcom,pma8084@0/@1 - 8084 is a SUFFIX of pma8084 and not a substring of its front. So the rule the
+#   check states is *the token is the last four characters of a declared SPMI child's name*, and it is
+#   a rule because a rail named with no `_` has no token at all.
+#
+#   THE RAILS ARE NOT ALWAYS-ON, AND THE FILE MARKS OTHER RAILS ALWAYS-ON - COMPUTED. Across the six
+#   trees there are 42 separate regulator-always-on / regulator-boot-on declarations (vph_pwr_vreg, l2,
+#   l3, l12, l18, l22, lvs1, the disp_* pair, spi_eth_phy_vreg) and **0 of the 42 lands on a rail the
+#   ladder's controller declares**. So the device's own tree USES the always-on vocabulary and does not
+#   use it for LDO20 or S3/S4 - qcom,vdd-always-on on the collector node is the CONSUMER-side flag the
+#   vendor driver reads on its release path (780), NOT the RPM holding the rail up. This CORRECTS an
+#   inference 781's record drew from the same two properties. The rails' runtime state is a REQUEST,
+#   and the only requester 780 could name is sdhci-msm's vreg_enable, which this payload does not
+#   execute because it is not the Linux driver.
+#
+#   THE AP'S DECLARED ROUTES, AND WHY NO STORE CAN POWER THE CARD. The same file declares BOTH families
+#   this SoC has and puts the eMMC's two in the RPM one:
+#     RPM resource      /soc/qcom,rpm-smd/... - compatible qcom,rpm-regulator-smd and **NO `reg` at
+#                       all** - reached through /soc/qcom,smem@fa00000 with qcom,smd-rpm
+#                       (compatible qcom,smd, edge 0xf) and a node whose rpm-channel-name is
+#                       **rpm_requests** with rpm-channel-type 0xf.
+#     SPMI-direct reg   /soc/qcom,spmi@fc4c0000/qcom,<pmic>@n/regulator@XXXX - 78 to 126 of them per
+#                       tree - through the arbiter /soc/qcom,spmi@fc4c0000 (qcom,spmi-pmic-arb,
+#                       reg <0xfc4cf000 0x1000 0xfc4cb000 0x1000 0xfc4ca000 0x1000>, reg-names
+#                       core/intr/cnfg).
+#   So there is NO ADDRESS whose store is the rail: the AP asks for it BY NAMING A CHANNEL. A rung that
+#   powered the rails would be an SMD/RPM client, not a register poke - which is why the rung-28 arm's
+#   pad question needs no PMIC and is the cheap one.
+#
+#   AND THE LADDER HAS NEVER TOUCHED ANY OF IT, MEASURED: grep over src/entry/entry_storage.c finds the
+#   regulator/PMIC/SPMI vocabulary twice, both times inside the two comments carrying 779's wrong
+#   msm8974pro-ac-pm8941-mtp-v5.dts citation (:300, :3550). No store to the arbiter, no RPM request, no
+#   LDO/SMPS register. ONE QUALIFICATION, because it is a real touch: the reset path writes PS_HOLD at
+#   0xfc4ab000 (src/entry/entry_reset.h:37) in entry_epilogue on every returning run, and 0xfc4ab000
+#   sits in the `0xFC4` megabyte where 0xfc4004c0 already faulted on 692's press - the entry source says
+#   so itself (:50-52). The precise statement is: the ladder has never touched a REGULATOR; it does
+#   write one PMIC line, in a megabyte that is not uniformly mapped.
+#
+#   AND THE RPM FIRMWARE IS NOT THE DIFFERENTIATOR EITHER. rpm.img (1048576 bytes, sha256 18402f25...)
+#   carries BOTH /rpm/pmic/target/pm8x41 and /rpm/pmic/target/pma8084, plus PMIC_ARB, the rail-name
+#   fragments (ldoa, smpa, vsa, ldoa4K), the channel name rpm_requests, and the RPM's own format string
+#   `%s (Enabled: 0/1)`. One image serves both boards, and the tree the bootloader selects decides.
+#
+#   LANDED AS THREE ARTIFACTS. tools/derive_sdc1_pads.py gained `--rails`: the phandle-resolved reading,
+#   the always-on contrast COMPUTED, the arbiter and its children, the RPM channel, and - because a
+#   producer that can write what its own checker refuses is the m749 class - THE VERDICT THE TRACKED
+#   RECORD'S CHECK WILL REACH, printed at read time on the same rule object. records/
+#   sdc1-pad-candidates.txt carries `# rail`, `# spmi` and `# rpm` lines (children are `;`-separated
+#   because a PMIC node name is itself `qcom,pm8941@2`, so a comma-separated list of them is not
+#   separable). tools/check_sdc1_pad_expectation.py gained a FOURTH REFUSAL: the record's rails must
+#   attribute to PMICs the record's own `# spmi` lines declare - a rail named for a chip the same record
+#   does not declare is 779's defect one level down, a citation to another board standing where a
+#   reading of this one should be.
+#
+#   FALSIFIED, NOT ASSERTED. Six cells pin rail_census_verdict as a pure function (the device's own
+#   reading passes; 8084_l20 against a record declaring only the PM8941 refuses and the converse; a rail
+#   with no token refuses; no rail lines refuses; rails with no declared chip refuses) and eight more pin
+#   rail_verdict's token rule, including the case a SUBSTRING TEST WOULD GET WRONG: 8084_l20 against
+#   qcom,pma8084@0 passes, 8084_s4 against qcom,pm8941@0 refuses. tools/derive_sdc1_pads.py --selftest
+#   grew from 11 cells to 26 (8 rail attributions, 1 token rule, 10 against the device's own file,
+#   including the computed 0-of-42). make check exit 0.
+#
+#   WHAT IT DOES NOT SAY. It does not say the rails are up, and it does not say they are down - no
+#   capture in this archive holds a PMIC, SPMI, RPM or rail reading of any kind. It does not change the
+#   arm. It does not name which tree the bootloader selects, so it does not name which PMIC is on this
+#   board - only that the device's own file declares both candidates. And it does not propose a rung.
+#   Two cheap readings are NAMED and not designed: /soc/qcom,rpm-log@fc19dc00 (reg <0xfc19dc00 0x4000>,
+#   and the RPM's own format string is `%s (Enabled: 0/1)`) and /soc/qcom,rpm-master-stats@fc428150
+#   (reg <0xfc428150 0x3200>) - each in a megabyte this image's tables do not cover, so each carries
+#   the same interlock cost and 692's rule applies unchanged.
+#
+# NO set= line follows this block: no arm was built, no park was made, and the sets above are unchanged.
+
 # 782: THE ARMED FORK IS A TABLE WITH FOUR ROWS - the same declarations name the register's OFF state,
 # and a two-row fork merges it with "never applied". HOST-SIDE ONLY: no device action, no press, no gate
 # against a device, no runner, no firer, nothing built, and `out/` is untouched - the armed rung-28 arm

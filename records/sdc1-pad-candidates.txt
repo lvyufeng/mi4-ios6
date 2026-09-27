@@ -60,7 +60,32 @@
 # node 0xf98a4900 sdhci@f98a4900 core 0xf98a4000 window 0x11c status ok trees 5/6
 # node 0xf98e4900 sdhci@f98e4900 core 0xf98e4000 window 0x11c status disable trees 5/6
 #
+# The rails: the two supplies `sdhci@f9824900` declares, resolved through their own
+# phandles to the regulator nodes this device's trees put them on, and the routes the
+# AP has to a PMIC at all. The RAIL PATH is the same in every tree and the NAME is not,
+# so the name is what says which chip a rail is on -- and a rail named for a PMIC this
+# device does not declare is a citation to another board, which is what the check
+# refuses. The eMMC's two rails are declared under `qcom,rpm-smd`, i.e. as RPM
+# resources with NO `reg` and no AP address: the AP names them on a channel. That is
+# why no store can power the card, and it is why the rails are still UNMEASURED -- see
+# the record's own closing note.
+# rail vdd-supply /soc/qcom,rpm-smd/rpm-regulator-ldoa20/regulator-l20 name 8084_l20 pmic 8084 init-uv 2950000 set 3 always-on no trees 0/6
+# rail vdd-supply /soc/qcom,rpm-smd/rpm-regulator-ldoa20/regulator-l20 name 8941_l20 pmic 8941 init-uv 2950000 set 3 always-on no trees 1,2,3,5/6
+# rail vdd-io-supply /soc/qcom,rpm-smd/rpm-regulator-smpa4/regulator-s4 name 8084_s4 pmic 8084 init-uv 1800000 set 3 always-on no trees 0/6
+# rail vdd-io-supply /soc/qcom,rpm-smd/rpm-regulator-smpa3/regulator-s3 name 8941_s3 pmic 8941 init-uv 1800000 set 3 always-on no trees 1,2,3,5/6
+# spmi /soc/qcom,spmi@fc4c0000 reg 0xfc4cf000 0x1000 0xfc4cb000 0x1000 0xfc4ca000 0x1000 reg-names core;intr;cnfg children qcom,pm8841@4;qcom,pm8841@5;qcom,pm8941@0;qcom,pm8941@1 trees 1,2,3,5/6
+# spmi /soc/qcom,spmi@fc4c0000 reg 0xfc4cf000 0x1000 0xfc4cb000 0x1000 0xfc4ca000 0x1000 reg-names core;intr;cnfg children qcom,pm8941@2;qcom,pm8941@3;qcom,pma8084@0;qcom,pma8084@1 trees 0/6
+# spmi /soc/qcom,spmi@fc4c0000 reg 0xfc4cf000 0x1000 0xfc4cb000 0x1000 0xfc4ca000 0x1000 reg-names core;intr;cnfg children qcom,pma8084@0;qcom,pma8084@1 trees 4/6
+# rpm channel rpm_requests type 15 smd-edge 15 smem 0xfa00000 trees 0,1,2,3,5/6
+# rpm channel - type - smd-edge 15 smem 0xfa00000 trees 4/6
+#
 # always-on flags, per tree: every tree above carries both qcom,vdd-always-on and
-# qcom,vdd-io-always-on, or the row says which it lacks. A DEVICE TREE IS A
-# DECLARATION, NOT A MEASUREMENT: this closes the provenance gap -- the file is the
-# device's own -- and it does not establish that the rails are up.
+# qcom,vdd-io-always-on on the collector node, or the row says which it lacks. And the
+# rail lines above say `always-on no` for ALL of them: the device's own tree marks
+# eight other rails always-on (vph_pwr_vreg, l2, l3, l12, l18, l22, lvs1, the disp_*
+# pair, spi_eth_phy_vreg) and does NOT mark the eMMC's two -- so qcom,vdd-always-on is
+# the CONSUMER-side flag the vendor driver reads on its release path (780), and it is
+# not the RPM's statement that the rail is held up. A DEVICE TREE IS A DECLARATION,
+# NOT A MEASUREMENT: this closes the provenance gap -- the file is the device's own --
+# and it does not establish that the rails are up. No capture in this archive holds a
+# PMIC, SPMI, RPM or card rail reading of any kind.

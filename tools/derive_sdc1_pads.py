@@ -30,6 +30,7 @@ Usage:
     tools/derive_sdc1_pads.py                     # print the table for the default dt.img
     tools/derive_sdc1_pads.py --dt PATH           # a different QCDT blob
     tools/derive_sdc1_pads.py --mmc-census        # every controller node, and which one is the eMMC
+    tools/derive_sdc1_pads.py --rails             # the regulator each SDC1 supply resolves to, per tree
     tools/derive_sdc1_pads.py --write-record      # also rewrite records/sdc1-pad-candidates.txt
     tools/derive_sdc1_pads.py --check             # compare against entry_storage.c, exit 1 on no match
 """
@@ -417,6 +418,285 @@ def census_record_lines(rows, src, total_trees=None):
     return lines
 
 
+# ---------------------------------------------------------------- the rails
+
+
+#: The two ways this SoC's device trees put a supply on a PMIC, and they are not the same thing.
+#: A rail under `qcom,rpm-smd` has **no `reg` at all** -- its address belongs to the RPM and the
+#: AP names it on a channel -- while a `regulator@XXXX` under an SPMI PMIC child is the AP's
+#: direct register window into the chip. Which family the eMMC's two supplies are declared in
+#: decides whether any rung can power the card with a store, so it is reported and not assumed.
+RPM_RAIL = '/soc/qcom,rpm-smd/'
+SPMI_ARB = '/soc/qcom,spmi@'
+
+#: What a rail node says about itself. `qcom,set` is the RPM state set the request applies to.
+RAIL_PROPS = ('regulator-name', 'qcom,init-voltage', 'qcom,set', 'regulator-min-microvolt',
+              'regulator-max-microvolt', 'regulator-always-on', 'regulator-boot-on',
+              'qcom,always-on')
+
+#: The props that mean *do not switch this off*, as a set: the file's own vocabulary for it.
+ALWAYS_TOKEN = ('regulator-always-on', 'regulator-boot-on', 'qcom,always-on')
+
+
+def rail_name(props):
+    """A rail's own name, from `regulator-name` in either of the spellings a DT uses for it."""
+    raw = props.get('regulator-name')
+    if raw is None:
+        return None
+    return raw.rstrip(b'\0').decode('latin1')
+
+
+def rail_pmic(name):
+    """The PMIC token a rail's name carries -- `8941` from `8941_l20`, `8084` from `8084_s4`.
+
+    **The rail's name and the chip's node name have two spellings and neither contains the other
+    in the direction a substring test would need.** The rail is `8941_l20`; the SPMI child is
+    `qcom,pm8941@0`. `8941` IS a substring of `pm8941` -- but the PMA8084's rail is `8084_l20`
+    while its child is `qcom,pma8084@0`, where `8084` is a **suffix** and not a substring of the
+    front. So the rule `rail_verdict` applies is *the token is the last four characters of a
+    declared SPMI child's name*, and it is stated as a rule because it is one: a rail named with
+    no `_` has no token at all, and is not a rail this tool will attribute to a chip.
+    """
+    if not name or '_' not in name:
+        return None
+    return name.split('_', 1)[0]
+
+
+def spmi_children(nodes):
+    """`([(child name, slave-id cells)], arbiter path)` for every PMIC the arbiter declares."""
+    arb = sorted(p for p in nodes if p.startswith(SPMI_ARB) and p.count('/') == 2)
+    if not arb:
+        return [], None
+    arb = arb[0]
+    kids = sorted(q for q in nodes if q.startswith(arb + '/') and q.count('/') == 3)
+    return [(k.rsplit('/', 1)[-1], cells(nodes[k].get('reg', b''))) for k in kids], arb
+
+
+def phandle_map(nodes):
+    """Every phandle in one tree, as `{phandle: path}`."""
+    out = {}
+    for path, props in nodes.items():
+        for key in ('phandle', 'linux,phandle'):
+            for h in cells(props.get(key, b'')):
+                out[h] = path
+    return out
+
+
+def rail_verdict(name, children):
+    """Whether a rail's own name can be attributed to a PMIC this tree declares. Pure.
+
+    `children` is the arbiter's child node names (`['qcom,pm8941@0', 'qcom,pm8841@4']`). The
+    verdict is the 779 class: a rail whose name names a chip this device's tree does not declare
+    is a citation to another board standing where a reading of this one should be.
+    """
+    tok = rail_pmic(name)
+    if tok is None:
+        return False, f'{name!r} carries no PMIC token (no underscore)'
+    for c in children:
+        chip = c.rsplit('@', 1)[0]
+        chip = chip.split(',', 1)[-1]
+        if chip[-4:] == tok:
+            return True, f'{tok} is {c}'
+    return False, (f'{name!r} names a PMIC this tree does not declare as an SPMI child '
+                   f'({", ".join(children) or "none"})')
+
+
+def rails(dt_path):
+    """Every tree's resolution of SDC1's two supplies, and what it declares around them."""
+    raw = open(dt_path, 'rb').read()
+    table = parse_qcdt(raw)
+    rows, trees = [], []
+    for idx, off, blob in table['trees']:
+        nodes = fdt_nodes(blob)
+        ph = phandle_map(nodes)
+        root = nodes.get('', {})
+        kids, arb = spmi_children(nodes)
+        rpm = next((p for p in nodes if p.endswith('/qcom,rpm-smd')), None)
+        smd = next((p for p in nodes if p.endswith('/qcom,smd-rpm')), None)
+        model = root.get('model', b'').rstrip(b'\0').decode('latin1') or '(unnamed)'
+        trees.append({
+            'index': idx, 'model': model,
+            'board_id': cells(root.get('qcom,board-id', b'')),
+            'spmi_arb': arb,
+            'spmi_reg': cells(nodes[arb].get('reg', b'')) if arb else [],
+            'spmi_regnames': texts(nodes[arb].get('reg-names', b'')) if arb else [],
+            'spmi_children': kids,
+            'rpm_channel': strv(nodes[rpm].get('rpm-channel-name', b'')) if rpm else None,
+            'rpm_type': cells(nodes[rpm].get('rpm-channel-type', b'')) if rpm else [],
+            'smd_edge': cells(nodes[smd].get('qcom,smd-edge', b'')) if smd else [],
+            'smem': cells(nodes.get('/soc/qcom,smem@fa00000', {}).get('reg', b'')),
+            'always_on_props': sorted({(k, p) for p, pr in nodes.items() for k in pr
+                                       if k in ALWAYS_TOKEN}),
+        })
+        sdc = next((p for p in nodes if p.endswith('sdhci@f9824900')), None)
+        if sdc is None:
+            continue
+        for supply in ('vdd-supply', 'vdd-io-supply'):
+            hs = cells(nodes[sdc].get(supply, b''))
+            for h in hs:
+                path = ph.get(h)
+                rp = nodes.get(path, {})
+                rows.append({
+                    'index': idx, 'model': model, 'supply': supply, 'phandle': h,
+                    'rail_path': path, 'name': rail_name(rp) if path else None,
+                    'family': ('rpm' if path and path.startswith(RPM_RAIL)
+                               else 'spmi' if path and path.startswith(SPMI_ARB)
+                               else 'other' if path else 'unresolved'),
+                    'props': {k: rp[k] for k in RAIL_PROPS if k in rp},
+                })
+    return table, trees, rows, hashlib.sha256(raw).hexdigest()
+
+
+def report_rails(table, trees, rows, out=sys.stdout):
+    """The reading, in the order the question has to be asked: which rail, whose, how reached."""
+    w = out.write
+    by = {t['index']: t for t in trees}
+    w('the two supplies the ladder\'s own controller declares (`sdhci@f9824900`), resolved\n'
+      'through their phandles, per tree:\n\n')
+    w('  %-4s %-34s %-14s %s\n' % ('tree', 'model', 'supply', 'rail the device declares'))
+    for r in rows:
+        w('  #%-3d %-34s %-14s %s\n'
+          % (r['index'], r['model'][:34], r['supply'], r['rail_path'] or '(phandle resolves to no node)'))
+        if r['name']:
+            pr = r['props']
+            w('       %-10s family %-10s init %-9s set %-5s min/max %s/%s  always-on %s\n'
+              % (r['name'], r['family'],
+                 ' '.join(str(c) for c in cells(pr.get('qcom,init-voltage', b''))) or '-',
+                 ' '.join(str(c) for c in cells(pr.get('qcom,set', b''))) or '-',
+                 ' '.join(str(c) for c in cells(pr.get('regulator-min-microvolt', b''))) or '-',
+                 ' '.join(str(c) for c in cells(pr.get('regulator-max-microvolt', b''))) or '-',
+                 ','.join(k for k in ALWAYS_TOKEN if k in pr) or 'NONE'))
+
+    paths = {}
+    for r in rows:
+        if r['name']:
+            paths.setdefault(r['rail_path'], {}).setdefault(r['name'], []).append(r['index'])
+    w('\nthe rail PATHS, and every name each one carries on this device. A path that carries\n'
+      'more than one name is one path with two definitions, and the NAME is the one that says\n'
+      'which chip the rail is on:\n\n')
+    for path, names in sorted(paths.items()):
+        w('  %s\n' % path)
+        for n, ts in sorted(names.items()):
+            w('      %-12s on trees %s   (%s)\n'
+              % (n, ', '.join('#%d' % i for i in ts),
+                 'the PMIC the name carries: ' + (rail_pmic(n) or 'none')))
+        if len(names) > 1:
+            w('      ^ %d names on one path: the name is board-dependent.\n' % len(names))
+
+    w('\nand whether this device\'s own trees mark ANY rail always-on, so that the absence on\n'
+      'these two is read as a choice the file makes and not as a property it never uses:\n\n')
+    named = {r['rail_path'] for r in rows if r['rail_path']}
+    hit_any = []
+    for t in trees:
+        aop = [k for k, p in t['always_on_props']]
+        w('  #%-3d %-34s %d always-on declaration(s) %s\n'
+          % (t['index'], t['model'][:34], len(t['always_on_props']),
+             sorted(set(aop)) or '(none)'))
+        on_rails = sorted({p.rsplit('/', 1)[-1] for k, p in t['always_on_props']
+                           if p.startswith(RPM_RAIL) and '/regulator-' in p})
+        w('        the RPM rails it marks: %s   -- and any of the eMMC\'s two among them: %s\n'
+          % (', '.join(on_rails) or '(none)',
+             ', '.join(sorted(p for k, p in t['always_on_props'] if p in named)) or 'NO'))
+        hit_any += [p for k, p in t['always_on_props'] if p in named]
+    w('  COMPUTED, not asserted: %d of the %d always-on declarations across these trees lands\n'
+      '  on a rail the ladder\'s controller declares.\n' % (len(hit_any), sum(
+          len(t['always_on_props']) for t in trees)))
+
+    w('\nand the AP\'s declared routes to a PMIC, which is what a rung would have to use:\n\n')
+    for t in trees:
+        w('  #%-3d SPMI arbiter %s  reg %s  reg-names %s\n'
+          % (t['index'], t['spmi_arb'] or '(none)',
+             ' '.join('0x%x' % c for c in t['spmi_reg']) or '-',
+             ' '.join(t['spmi_regnames']) or '-'))
+        w('        children %s\n' % ', '.join('%s (slave %s)' % (n, c)
+                                              for n, c in t['spmi_children']) or '(none)')
+        w('        RPM channel %r type %s  SMD edge %s  smem %s\n'
+          % (t['rpm_channel'], ' '.join(str(c) for c in t['rpm_type']) or '-',
+             ' '.join(str(c) for c in t['smd_edge']) or '-',
+             ' '.join('0x%x' % c for c in t['smem'][:2]) or '-'))
+
+    # **The verdict the check downstream will apply, printed here so the two can never disagree
+    # silently.** `--write-record` will write a rail line whatever it reads -- a rail whose name
+    # carries no PMIC token gets `pmic -` -- and the check REFUSES that line. A producer that can
+    # write what its own checker refuses is the m749 class, so the tool reports the verdict at
+    # read time, on the same rule object, rather than leaving the disagreement for `make check`.
+    w('\nand the verdict the tracked record\'s check will reach about each rail, computed here on\n'
+      'the same rule: a rail\'s name carries the last four characters of the PMIC node it lives on,\n'
+      'so a rail named for a chip this tree does not declare is refused.\n\n')
+    refusals = 0
+    for t in trees:
+        kids = [n for n, _c in t['spmi_children']]
+        for r in [q for q in rows if q['index'] == t['index'] and q['name']]:
+            ok, why = rail_verdict(r['name'], kids)
+            if not ok:
+                refusals += 1
+                w('  #%-3d REFUSED %s\n' % (t['index'], why))
+    w('  %d refusal(s) over %d rail reading(s).\n'
+      % (refusals, len([r for r in rows if r['name']])))
+    return paths
+
+
+def rails_record_lines(trees, rows, total_trees):
+    """The `# rail` / `# spmi` / `# rpm` lines the tracked record carries.
+
+    One line per DISTINCT reading and never one per tree: the same rail read off five trees is
+    one reading with a tree list, and five identical lines is how a reader learns to skip a
+    column. The path is what is invariant and the name is what varies, so both are printed and
+    the check downstream reads the NAME against the arbiter's children.
+    """
+    lines = []
+
+    def trees_of(pred):
+        ts = sorted({r['index'] for r in rows if pred(r)})
+        return ','.join(str(i) for i in ts) or '-'
+
+    for supply in ('vdd-supply', 'vdd-io-supply'):
+        seen = []
+        for r in [q for q in rows if q['supply'] == supply and q['name']]:
+            key = (r['rail_path'], r['name'])
+            if key in seen:
+                continue
+            seen.append(key)
+            pr = r['props']
+            lines.append(
+                '# rail %s %s name %s pmic %s init-uv %s set %s always-on %s trees %s/%d'
+                % (supply, r['rail_path'], r['name'], rail_pmic(r['name']) or '-',
+                   (cells(pr.get('qcom,init-voltage', b'')) or ['-'])[0],
+                   (cells(pr.get('qcom,set', b'')) or ['-'])[0],
+                   'yes' if any(k in pr for k in ALWAYS_TOKEN) else 'no',
+                   trees_of(lambda q, s=supply, k=key: q['supply'] == s
+                            and (q['rail_path'], q['name']) == k),
+                   total_trees))
+    for key in sorted({(t['spmi_arb'], tuple(n for n, _ in t['spmi_children'])) for t in trees}):
+        arb, kids = key
+        t0 = next(t for t in trees
+                  if (t['spmi_arb'], tuple(n for n, _ in t['spmi_children'])) == key)
+        # `;` and not `,`: a PMIC node name is `qcom,pm8941@2`, so a comma-separated list of
+        # them is not separable -- splitting it yields the vendor prefix as a chip name.
+        lines.append('# spmi %s reg %s reg-names %s children %s trees %s/%d'
+                     % (arb or '-', ' '.join('0x%x' % c for c in t0['spmi_reg']) or '-',
+                        ';'.join(t0['spmi_regnames']) or '-', ';'.join(kids) or '-',
+                        ','.join(str(t['index']) for t in trees
+                                 if (t['spmi_arb'],
+                                     tuple(n for n, _ in t['spmi_children'])) == key),
+                        total_trees))
+    seen_rpm = []
+    for t in trees:
+        key = (t['rpm_channel'], tuple(t['rpm_type']), tuple(t['smd_edge']))
+        if key in seen_rpm:
+            continue
+        seen_rpm.append(key)
+        lines.append('# rpm channel %s type %s smd-edge %s smem %s trees %s/%d'
+                     % (t['rpm_channel'] or '-', (t['rpm_type'] or ['-'])[0],
+                        (t['smd_edge'] or ['-'])[0],
+                        ('0x%x' % t['smem'][0]) if t['smem'] else '-',
+                        ','.join(str(q['index']) for q in trees
+                                 if (q['rpm_channel'], tuple(q['rpm_type']),
+                                     tuple(q['smd_edge'])) == key),
+                        total_trees))
+    return lines
+
+
 # ---------------------------------------------------------------- the source's own constants
 
 
@@ -546,7 +826,7 @@ def report(dt_path, table, rows, sha, out=sys.stdout):
     return seen
 
 
-def write_record(path, dt_path, table, rows, sha, seen, src, node_lines=()):
+def write_record(path, dt_path, table, rows, sha, seen, src, node_lines=(), rail_lines=()):
     lines = [
         '# The SDC1 pad expectation, re-derived from the device\'s own device tree.',
         '#',
@@ -631,10 +911,29 @@ def write_record(path, dt_path, table, rows, sha, seen, src, node_lines=()):
     lines += list(node_lines)
     lines += [
         '#',
+        '# The rails: the two supplies `sdhci@f9824900` declares, resolved through their own',
+        '# phandles to the regulator nodes this device\'s trees put them on, and the routes the',
+        '# AP has to a PMIC at all. The RAIL PATH is the same in every tree and the NAME is not,',
+        '# so the name is what says which chip a rail is on -- and a rail named for a PMIC this',
+        '# device does not declare is a citation to another board, which is what the check',
+        '# refuses. The eMMC\'s two rails are declared under `qcom,rpm-smd`, i.e. as RPM',
+        '# resources with NO `reg` and no AP address: the AP names them on a channel. That is',
+        '# why no store can power the card, and it is why the rails are still UNMEASURED -- see',
+        '# the record\'s own closing note.',
+    ]
+    lines += list(rail_lines)
+    lines += [
+        '#',
         '# always-on flags, per tree: every tree above carries both qcom,vdd-always-on and',
-        '# qcom,vdd-io-always-on, or the row says which it lacks. A DEVICE TREE IS A',
-        '# DECLARATION, NOT A MEASUREMENT: this closes the provenance gap -- the file is the',
-        '# device\'s own -- and it does not establish that the rails are up.',
+        '# qcom,vdd-io-always-on on the collector node, or the row says which it lacks. And the',
+        '# rail lines above say `always-on no` for ALL of them: the device\'s own tree marks',
+        '# eight other rails always-on (vph_pwr_vreg, l2, l3, l12, l18, l22, lvs1, the disp_*',
+        '# pair, spi_eth_phy_vreg) and does NOT mark the eMMC\'s two -- so qcom,vdd-always-on is',
+        '# the CONSUMER-side flag the vendor driver reads on its release path (780), and it is',
+        '# not the RPM\'s statement that the rail is held up. A DEVICE TREE IS A DECLARATION,',
+        '# NOT A MEASUREMENT: this closes the provenance gap -- the file is the device\'s own --',
+        '# and it does not establish that the rails are up. No capture in this archive holds a',
+        '# PMIC, SPMI, RPM or card rail reading of any kind.',
         '',
     ]
     open(path, 'w', encoding='utf-8').write('\n'.join(lines))
@@ -655,6 +954,23 @@ SELFTEST_DERIVE = (
 )
 
 
+#: The rail rules, on the arithmetic alone: `rail_pmic`'s token and `rail_verdict`'s attribution.
+#: The cells that matter are the two the device's own trees produce (`8941_l20` on a board whose
+#: arbiter declares `qcom,pm8941@0`, and `8084_l20` on a board whose arbiter declares
+#: `qcom,pma8084@0`) -- and the refusals: the SAME `8084` rail read against a tree that declares
+#: only the PM8941, where a substring test on the name would have called it a match.
+SELFTEST_RAILS = (
+    ('8941_l20', ['qcom,pm8941@0', 'qcom,pm8841@4'], True),
+    ('8941_s3', ['qcom,pm8941@0', 'qcom,pm8841@4'], True),
+    ('8084_l20', ['qcom,pma8084@0', 'qcom,pma8084@1'], True),
+    ('8084_s4', ['qcom,pm8941@0', 'qcom,pm8941@1'], False),   # the other board's chip
+    ('8941_l20', ['qcom,pma8084@0'], False),                  # and the converse
+    ('lvs1', ['qcom,pm8941@0'], False),                       # no token at all
+    (None, ['qcom,pm8941@0'], False),                         # an unnamed rail is not attributed
+    ('8941_l20', [], False),                                  # no arbiter, nothing to attribute
+)
+
+
 def selftest():
     bad = 0
     for pull, drv, want in SELFTEST_DERIVE:
@@ -662,12 +978,71 @@ def selftest():
         if got != want:
             print(f'  derive_or_none({pull}, {drv}) -> {got}, wanted {want}')
             bad += 1
+    for name, children, want in SELFTEST_RAILS:
+        got, why = rail_verdict(name, children)
+        if got != want:
+            print(f'  rail_verdict({name!r}, {children}) -> {got} ({why}), wanted {want}')
+            bad += 1
+    if rail_pmic('8941_l20') != '8941' or rail_pmic('lvs1') is not None:
+        print('  rail_pmic no longer reads the token off the underscore: '
+              f'{rail_pmic("8941_l20")!r} / {rail_pmic("lvs1")!r}')
+        bad += 1
     # The two words the device declares, and the state between them, pinned as constants so a
     # change to the shift table is caught here rather than at a press.
     if len(SELFTEST_DERIVE) < 3 or derive_or_none([0, 3, 3, 1], [4, 4, 4]) != 0x00009F24:
         print('  0x9F24 has moved')
         bad += 1
-    ran = len(SELFTEST_DERIVE)
+    ran = len(SELFTEST_DERIVE) + len(SELFTEST_RAILS) + 1
+
+    # The rails, on the device's own file: the same two rules `--rails` prints, pinned.
+    if not os.path.exists(DEFAULT_DT):
+        print('  (4 rail cells SKIPPED: no dt.img at '
+              f'{os.path.relpath(DEFAULT_DT, REPO)} on this machine)')
+    else:
+        _t, rtree, rrows, _s = rails(DEFAULT_DT)
+        want_pats = {'/soc/qcom,rpm-smd/rpm-regulator-ldoa20/regulator-l20',
+                     '/soc/qcom,rpm-smd/rpm-regulator-smpa3/regulator-s3',
+                     '/soc/qcom,rpm-smd/rpm-regulator-smpa4/regulator-s4'}
+        got_pats = {r['rail_path'] for r in rrows}
+        if got_pats != want_pats:
+            print(f'  the rail paths these trees declare have moved: {sorted(got_pats)}')
+            bad += 1
+        ran += 1
+        if {r['family'] for r in rrows} != {'rpm'}:
+            print('  a supply no longer resolves into the RPM family: '
+                  f'{sorted({r["family"] for r in rrows})}')
+            bad += 1
+        ran += 1
+        got_names = sorted({r['name'] for r in rrows})
+        if got_names != ['8084_l20', '8084_s4', '8941_l20', '8941_s3']:
+            print(f'  the rail names have moved: {got_names}')
+            bad += 1
+        ran += 1
+        # And the rule the check downstream applies, run here against the device's own file: every
+        # rail this device declares must attribute to a PMIC its own arbiter declares.
+        for t in rtree:
+            kids = [n for n, _c in t['spmi_children']]
+            for r in [q for q in rrows if q['index'] == t['index']]:
+                ok, why = rail_verdict(r['name'], kids)
+                if not ok:
+                    print(f'  tree #{t["index"]}: {why}')
+                    bad += 1
+        ran += 1
+        # The load-bearing absence, COMPUTED: this device's trees mark other rails always-on and
+        # mark the eMMC's two not at all, which is why `qcom,vdd-always-on` on the collector node
+        # is read as the vendor driver's consumer flag and not as the RPM holding the rail up.
+        named = {r['rail_path'] for r in rrows if r['rail_path']}
+        hits = [(k, p) for t in rtree for k, p in t['always_on_props'] if p in named]
+        if hits:
+            print(f'  an eMMC rail is now marked always-on: {hits}')
+            bad += 1
+        ran += 1
+        if sum(len(t['always_on_props']) for t in rtree) < 8:
+            print('  the trees no longer mark OTHER rails always-on, so the absence above is no '
+                  'longer a choice the file makes: %d declaration(s)'
+                  % sum(len(t['always_on_props']) for t in rtree))
+            bad += 1
+        ran += 1
 
     # The census, on the device's own file, when this machine has it. The four cells below are
     # the rules `census` and `prop_summary` exist for; on a machine without `dt.img` they are
@@ -701,8 +1076,10 @@ def selftest():
                   f'{prop_summary(hc, "qcom,pad-drv-on")!r}')
             bad += 1
         ran += 1
-    print(f'selftest ok: {ran} cells ran -- {len(SELFTEST_DERIVE)} on the arithmetic alone, '
-          f'{ran - len(SELFTEST_DERIVE)} against the device\'s own file')
+    arith = len(SELFTEST_DERIVE) + len(SELFTEST_RAILS) + 1
+    print(f'selftest ok: {ran} cells ran -- {arith} on the arithmetic alone '
+          f'({len(SELFTEST_DERIVE)} pad words, {len(SELFTEST_RAILS)} rail attributions, 1 token '
+          f'rule), {ran - arith} against the device\'s own file')
     return 1 if bad else 0
 
 
@@ -717,6 +1094,9 @@ def main(argv):
                     help='exit 1 when the source constants match no tree in dt.img')
     ap.add_argument('--mmc-census', action='store_true',
                     help='print every controller node of every tree, and which one is the eMMC')
+    ap.add_argument('--rails', action='store_true',
+                    help='print the regulator the SDC1 supplies resolve to, per tree, and the '
+                         'AP routes to a PMIC')
     args = ap.parse_args(argv[1:])
 
     if not os.path.exists(args.dt):
@@ -737,6 +1117,11 @@ def main(argv):
     if args.mmc_census:
         print()
         report_census(args.dt, table, crows, csha, bases)
+
+    rtable, rtree, rrows, rsha = rails(args.dt)
+    if args.rails:
+        print()
+        report_rails(rtable, rtree, rrows)
 
     print()
     if src is None:
@@ -760,7 +1145,8 @@ def main(argv):
 
     if args.write_record:
         write_record(args.record, args.dt, table, rows, sha, seen, src,
-                     census_record_lines(crows, bases, len(table['trees'])))
+                     census_record_lines(crows, bases, len(table['trees'])),
+                     rails_record_lines(rtree, rrows, len(table['trees'])))
         print(f'\nwrote {os.path.relpath(args.record, REPO)}')
 
     if args.check and not match:

@@ -52,7 +52,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from derive_sdc1_pads import (HDRV, PULL, derive, source_bases,  # noqa: E402
+from derive_sdc1_pads import (HDRV, PULL, derive, rail_pmic, rail_verdict, source_bases,  # noqa: E402
                               source_constants, DEFAULT_RECORD, ENTRY_SRC, REPO)
 
 CANDIDATE = re.compile(r'^#\s*candidate\s+(0x[0-9a-fA-F]{8})\s')
@@ -61,6 +61,10 @@ INPUT_LINE = re.compile(r'^#\s*input\s+(\S+)\s*$')
 OFFWORD_LINE = re.compile(r'^#\s*offword\s+(0x[0-9a-fA-F]{8})\s')
 NODE_LINE = re.compile(r'^#\s*node\s+(0x[0-9a-fA-F]+)\s+(\S+)\s+core\s+(0x[0-9a-fA-F]+)'
                        r'\s+window\s+(0x[0-9a-fA-F]+)\s+status\s+(\S+)\s+trees\s+(\d+)/(\d+)')
+RAIL_LINE = re.compile(r'^#\s*rail\s+(\S+)\s+(\S+)\s+name\s+(\S+)\s+pmic\s+(\S+)\s+'
+                       r'init-uv\s+(\S+)\s+set\s+(\S+)\s+always-on\s+(\S+)\s+trees\s+(\S+)')
+SPMI_LINE = re.compile(r'^#\s*spmi\s+(\S+)\s+reg\s+(.*?)\s+reg-names\s+(\S+)\s+'
+                       r'children\s+(\S+)\s+trees\s+(\S+)')
 
 
 def candidates(path=DEFAULT_RECORD):
@@ -156,6 +160,56 @@ def node_verdict(census, hc, core):
                   % (base, name, ncore, window, ntree, total))
 
 
+def rails(path=DEFAULT_RECORD):
+    """The record's rails: (supply, path, name, pmic, init-uv, set, always-on, trees)."""
+    out = []
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            m = RAIL_LINE.match(line)
+            if m:
+                out.append(m.groups())
+    return out
+
+
+def spmi_declared(path=DEFAULT_RECORD):
+    """Every PMIC name the record's own `# spmi` lines declare, unioned across them."""
+    kids = []
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            m = SPMI_LINE.match(line)
+            if m and m.group(4) != '-':
+                # `;`-separated, because a PMIC node name is itself `qcom,pm8941@2`
+                kids += [k for k in m.group(4).split(';') if k]
+    return sorted(set(kids))
+
+
+def rail_census_verdict(rail_rows, children):
+    """(ok, why) for the record's rails against the PMICs the same record declares. Pure.
+
+    **Why this is a refusal and not a note.** The record's `# rail` lines say which regulator the
+    eMMC's two supplies resolve to; its `# spmi` lines say which PMICs the device's own arbiter
+    declares. A rail attributed to a chip that is not among them is **a citation to another
+    board standing where a reading of this one should be** -- 779's defect, one level down, and
+    the same shape as 781's node refusal and 782's off-word refusal. Pure, so its cells need no
+    device tree, and it reuses `rail_verdict` rather than defining a second spelling of the rule
+    (`rail_pmic` is the token rule; a second implementation would be two producers of one name).
+    """
+    if not rail_rows:
+        return False, ('the record carries no `# rail <supply> <path> name ...` line, so nothing '
+                       'in it says what the controller\'s two supplies resolve to')
+    if not children:
+        return False, ('the record carries rails but no `# spmi ... children ...` line, so there '
+                       'is no declared PMIC set to attribute them to')
+    for _supply, rpath, name, _pmic, _uv, _set, _always, _trees in rail_rows:
+        ok, why = rail_verdict(name, children)
+        if not ok:
+            return False, (f'{why}; the rail line names path {rpath}. A rail attributed to a '
+                           f'chip this record does not declare is another board\'s reading')
+    return True, ('%d rail(s) on %d declared PMIC(s); every rail\'s token is the last four '
+                  'characters of one of them: %s'
+                  % (len(rail_rows), len(children), ', '.join(children)))
+
+
 def check(record=DEFAULT_RECORD, source=ENTRY_SRC, out=sys.stdout):
     w = out.write
     words, sha, inp = candidates(record)
@@ -186,6 +240,23 @@ def check(record=DEFAULT_RECORD, source=ENTRY_SRC, out=sys.stdout):
         w(f'REFUSED {why}\n')
         return 1
     w(f'OK: {why}\n')
+
+    rail_rows = rails(record)
+    kids = spmi_declared(record)
+    ok_rail, why_rail = rail_census_verdict(rail_rows, kids)
+    w(f'record    {len(rail_rows)} rail line(s), {len(kids)} declared PMIC(s)\n')
+    if not ok_rail:
+        w(f'REFUSED {why_rail}\n')
+        return 1
+    w(f'OK: {why_rail}\n')
+    for supply, rpath, name, pmic, uv, st, always, trees in rail_rows:
+        w(f'          {supply:<14} {rpath}\n'
+          f'          {"":<14} name {name:<10} pmic {pmic:<6} init-uv {uv:<8} set {st:<3} '
+          f'always-on {always:<4} trees {trees}\n')
+    if any(r[6] == 'yes' for r in rail_rows):
+        w('    NOTE a rail line says `always-on yes`: this device\'s own trees mark other\n'
+          '         rails always-on and mark the eMMC\'s two not at all, so such a line means\n'
+          '         the record was written from a different device tree than the one above.\n')
 
     src = source_constants(source)
     if src is None:
@@ -267,8 +338,34 @@ SELFTEST_NODES = (
 )
 
 
+SELFTEST_RAILS = (
+    # (rail rows, declared children, wants_refusal)
+    ([('vdd-supply', '/soc/qcom,rpm-smd/rpm-regulator-ldoa20/regulator-l20', '8941_l20', '8941',
+       '2950000', '3', 'no', '1,2,3,5/6')],
+     ['qcom,pm8941@0', 'qcom,pm8841@4'], False),                       # the device's own reading
+    ([('vdd-io-supply', '/soc/qcom,rpm-smd/rpm-regulator-smpa3/regulator-s3', '8941_s3', '8941',
+       '1800000', '3', 'no', '1,2,3,5/6')],
+     ['qcom,pm8941@0', 'qcom,pm8841@4'], False),
+    ([('vdd-supply', '/soc/qcom,rpm-smd/rpm-regulator-ldoa20/regulator-l20', '8941_l20', '8941',
+       '2950000', '3', 'no', '1,2,3,5/6')],
+     ['qcom,pma8084@0'], True),                                        # the other board's chip
+    ([('vdd-supply', '/soc/qcom,rpm-smd/rpm-regulator-ldoa20/regulator-l20', '8084_l20', '8084',
+       '2950000', '3', 'no', '0/6')],
+     ['qcom,pm8941@0'], True),                                         # and the converse
+    ([], ['qcom,pm8941@0'], True),                                     # no rail line at all
+    ([('vdd-supply', '/soc/qcom,rpm-smd/rpm-regulator-ldoa20/regulator-l20', '8941_l20', '8941',
+       '2950000', '3', 'no', '1/6')], [], True),                       # rails, no declared chip
+)
+
+
 def selftest():
     bad = 0
+    for rail_rows, kids, want_refusal in SELFTEST_RAILS:
+        ok, why = rail_census_verdict(rail_rows, kids)
+        if ok == want_refusal:
+            print(f'  rails {[r[2] for r in rail_rows]} children {kids}: expected '
+                  f'refusal={want_refusal}, got {not ok} ({why})')
+            bad += 1
     for offs, want, want_refusal in SELFTEST_OFFWORDS:
         ok, why = offword_verdict(offs, want)
         if ok == want_refusal:
@@ -296,8 +393,9 @@ def selftest():
         print('  the other tree on this device implies 0x9FE4, and it has moved')
         bad += 1
     print(f'selftest ok: {len(SELFTEST_CELLS) + 2} word cells, {len(SELFTEST_OFFWORDS)} '
-          f'off-word cells and {len(SELFTEST_NODES)} census cells; both words this device '
-          f'declares are pinned')
+          f'off-word cells, {len(SELFTEST_NODES)} census cells and {len(SELFTEST_RAILS)} rail '
+          f'cells; both words this device declares are pinned, and so is the PMIC every rail '
+          f'is attributed to')
     return 1 if bad else 0
 
 
