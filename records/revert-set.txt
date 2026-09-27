@@ -5888,3 +5888,95 @@ set=armed-storage-94de2ede sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # question is answered by this press, and its park stays intact and verified.
 # NO PRESS IS OWED AND NONE IS AUTHORIZED; `out/` still holds this arm, pressed.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 769: THE SDC1 PADS - HOST-SIDE ONLY. NO DEVICE ACTION, NO PRESS, NO ARM BUILT,
+# NO GATE AGAINST A DEVICE, NO RUNNER, NO FIRER. `out/` is untouched: the live
+# arm is still 768's spent `armed-storage-94de2ede`, and rung 23's
+# `armed-storage-3a92aa52` remains a superseded, unspent park. Nothing in this
+# block was measured on hardware; every claim carries its `file:line`.
+#
+# **768 SECTION 5's *FUNCTION MUX* IS RETIRED BY CONSTRUCTION.** MSM8974 routes
+# SDC1 through DEDICATED PADS, not GPIOs: `sdhci-msm.c:267-270` documents the
+# distinction and `sdhci-msm.c:1266` picks the pad branch because `sdhc_1` has no
+# `gpios` property; `sdhci_msm_setup_pad` (`sdhci-msm.c:964-988`) calls only
+# `msm_tlmm_set_hdrive`/`msm_tlmm_set_pull`, both landing in `MSM_TLMM_BASE`
+# (phys 0xFD510000, `msm_iomap-8974.h:34-35`) at `SDC1_HDRV_PULL_CTL = 0x2044`
+# -> **0xFD512044**. Every field of that register is drive strength or pull
+# (`gpio-msm-common.c:59-88`); there is no function-select field to write. The
+# function-select writers that exist in this tree are applied only to the
+# GPIO-routed SDC3/SDC4.
+#
+# **THE VENDOR WRITES THE PADS FROM INSIDE THE POWER ISR.** `sdhci_msm_pwr_irq`'s
+# `CORE_PWRCTL_BUS_ON` branch (`sdhci-msm.c:2015-2032`) does
+# `sdhci_msm_setup_vreg` -> `sdhci_msm_setup_pins` -> `sdhci_msm_set_vdd_io_vol`.
+# Rung 7 wrote the power byte and rung 8 registered the handler, but the ladder's
+# handler acks the latch rather than performing the vendor's BUS_ON work, so
+# **the pads' drive and pull have been attempted by no rung.**
+#
+# **THE PRE-REGISTERED EXPECTED VALUE.** `msm8974pro-ac-pm8941-mtp-v5.dts:25-29`
+# gives `&sdhc_1` `qcom,pad-pull-on = <0x0 0x3 0x3 0x1>` and
+# `qcom,pad-drv-on = <0x4 0x4 0x4>`; through `msm_tlmm_set_field`'s
+# `reg &= ~(mask<<off); reg |= (val&mask)<<off;` (`gpio-msm-common.c:481-496`)
+# that evaluates field by field to **0x00009F24**. The field that is the
+# mechanism is `PULL SDC1_CMD = pull-up`: MMC's CMD line is OPEN-DRAIN during
+# identification and returns HIGH only through this pull, which on this SoC is
+# the pad register rather than a discrete resistor. A board left at reset reads
+# 0x00000000 - no pull-up on CMD, no pull-up on DATA.
+#
+# **NEXT ARM PRE-REGISTERED, NOT BUILT.** Install the 0xFD5 megabyte through
+# `entry_mmio_section` (693's design; 0xFD512044 >> 20 = 0xFD5 and no other
+# device lives there, so 692's `addr >> 20` interlock is satisfied by
+# construction), then ONE 32-bit read, ZERO stores, published raw as `_pad_raw`
+# beside seven field decodes plus `_pad_map` and `_pad_writes = 0`.
+# ROW 1: `0x00009F24` -> the pads are configured, 768 section 5's other half is
+# retired, and the subject moves to the PMIC rails (`sdhci_msm_setup_vreg`, a bus
+# the ladder cannot reach from `hc_mem`).
+# ROW 2: `0x00000000`, or any field at odds with the DT -> the vendor act was
+# never applied on this path, and the next rung is a single read-modify-write of
+# one register whose section is already installed.
+#
+# **THREE CANDIDATES RETIRED AND ONE CONTRADICTION FOUND IN 768.**
+# (i) `HOST_CONTROL2 0x3E` bit 3 `VDD_180` = 0 is NOT a defect:
+# `sdhci_msm_set_uhs_signaling` read-modify-writes only `UHS_MASK`
+# (`sdhci-msm.c:2544-2546`, `:2597`), and the only writer of `VDD_180` is
+# `sdhci_do_start_signal_voltage_switch` (`sdhci.c:2015`), called on timing
+# switches and not at 400 kHz init. The vendor's own HOST_CONTROL2 is 0 at the
+# first command too.
+# (ii) 768 section 1's mechanism attribution is a coincidence read as causation:
+# `SDHCI_INT_TIMEOUT` (`sdhci.h:130`) is the COMMAND timeout, and `sdhci.c`
+# writes `TIMEOUT_CONTROL 0x2E` only at `:115` (a dump) and `:828` (inside
+# `if (data || (cmd->flags & MMC_RSP_BUSY))` at `:826`). No ladder command
+# carries either, so the register is at its RESET value and *unset* and *set to
+# longest* are indistinguishable when the field is 0. The 665.2 us against
+# 2^13 @ 12.288 MHz = 666.7 us is still a real reading - and a positive
+# measurement that TMCLK runs - but the attribution is not.
+# (iii) 768 section 3's "the RESPONSE register was read and never changed" is
+# refuted by the arm's own cells: `_nidx_resp_pre = 0` -> `_nidx_resp` =
+# `_nidx_resp_post` = 0x40ff8080 with `_nidx_resp_moved = 1`, and the pre-words
+# at +12/+8 (0x0040ff80 / 0x80000000) went to zero. All three reads are
+# `ST_SDHCI_RESPONSE 0x10`, so the change is about ONE register.
+#
+# **AND THE CONTRADICTION IS SETTLED HOST-SIDE, WITH NO PRESS.** Rung 20's
+# archived capture carries a CMD3 with `_nrsp_flags = 0x00000000`
+# (`MMC_RSP_NONE`) and `_nrsp_resp_moved = 1` (0x40ff8080 -> 0): **a command that
+# demanded nothing moves the register.** So the movement is the block's own and
+# **RESPONSE is retired as a cell about the card in BOTH directions** - rung 19
+# 0x40ff8080->0, rung 20 0x40ff8080->0, rung 24 0->0x40ff8080, the direction
+# tracking the field's prior content and not what the command asked for.
+#
+# **A CENSUS CLAIM RECORDED AS WRONG SO IT IS NOT CARRIED.** A reading of the
+# vendor bring-up pass produced "the vendor writes 0x29 = 0x0E | 0x01 = 0x0F, VDD
+# 3.3 V". It is false: `sdhci_set_power` switches on `1 << power` where `power =
+# ios->vdd` is a BIT INDEX (`sdhci.c:1312-1318`); `ocr_avail = MMC_VDD_165_195`
+# because `CAPABILITIES 0x742dc8b2` has CAN_VDD_330/CAN_VDD_300 clear and
+# CAN_VDD_180 set (`sdhci.h:195-197`; `sdhci.c:3434/3447/3460`); `fls(ocr_avail)
+# - 1 = 7` -> `SDHCI_POWER_180 = 0x0A` -> **0x0B**, which is what the ladder
+# writes. The wrong claim came from reading the storage assignment
+# `sdhci.c:1339 host->pwr = pwr` without evaluating the switch above it - m737's
+# shape: a claim about a REGISTER that is really a claim about a MOMENT.
+#
+# **NO PRESS SPENT, NO ARM BUILT, NO PRESS OWED AND NONE AUTHORIZED.** The goal
+# is still NOT met - no storage, no filesystem, no mount - and TWRP-to-storage
+# stays withheld.
+# ---------------------------------------------------------------------------
