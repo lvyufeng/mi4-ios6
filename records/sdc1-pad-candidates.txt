@@ -39,6 +39,16 @@
 # candidate 0x00009fe4  pull-on [0, 3, 3, 1] drv-on [7, 4, 4]  on Qualcomm MSM 8974Pro-AC + PMA8084 MTP
 # candidate 0x00009f24  pull-on [0, 3, 3, 1] drv-on [4, 4, 4]  on Qualcomm MSM 8974Pro-AC MTP, Qualcomm MSM 8974Pro-AC MTP V4, Qualcomm MSM 8974Pro-AC MTP V5, Qualcomm MSM 8974Pro-AA/AB MTP
 #
+# The controller census of the same file: every node whose name this SoC gives a
+# controller, with the properties that say which one carries the eMMC. Read by
+# tools/check_sdc1_pad_expectation.py, which compares the ladder's own two window
+# bases against the enabled node named here -- so "the ladder reads a controller this
+# device's own tree enables" is a check on tracked files and not a sentence.
+# node 0xf9824900 sdhci@f9824900 core 0xf9824000 window 0x1a0 status ok trees 5/6
+# node 0xf9864900 sdhci@f9864900 core 0xf9864000 window 0x11c status disable trees 5/6
+# node 0xf98a4900 sdhci@f98a4900 core 0xf98a4000 window 0x11c status ok trees 5/6
+# node 0xf98e4900 sdhci@f98e4900 core 0xf98e4000 window 0x11c status disable trees 5/6
+#
 # always-on flags, per tree: every tree above carries both qcom,vdd-always-on and
 # qcom,vdd-io-always-on, or the row says which it lacks. A DEVICE TREE IS A
 # DECLARATION, NOT A MEASUREMENT: this closes the provenance gap -- the file is the

@@ -25,6 +25,15 @@ record prints its candidates and passes, and a *no*-match is the only refusal. T
 honest scope: this can catch a constant that no board on this device implies, and it
 cannot catch one that the wrong board implies.
 
+**A second refusal, added by 781: the record's controller census.** The same record now
+carries one `# node 0x........ <name> core 0x........ window 0x.. status .. trees n/m`
+line per controller the device's own tree declares, and this check refuses when the address
+`ST_HC_MEM_BASE` holds is not a node the record carries, is carried with a status other
+than `ok`, or is paired with a `core` base that is not `ST_CORE_MEM_BASE`. That is a check
+of a different kind from the one above -- it is about the *addresses the ladder uses* being
+a controller this device's own device tree enables, which no earlier check could see: the
+source's own comment says what the block is called, and a name is not an address.
+
 Usage:
     tools/check_sdc1_pad_expectation.py
     tools/check_sdc1_pad_expectation.py --selftest
@@ -36,12 +45,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from derive_sdc1_pads import (HDRV, PULL, derive, source_constants,  # noqa: E402
-                              DEFAULT_RECORD, ENTRY_SRC, REPO)
+from derive_sdc1_pads import (HDRV, PULL, derive, source_bases,  # noqa: E402
+                              source_constants, DEFAULT_RECORD, ENTRY_SRC, REPO)
 
 CANDIDATE = re.compile(r'^#\s*candidate\s+(0x[0-9a-fA-F]{8})\s')
 SHA_LINE = re.compile(r'^#\s*sha256\s+([0-9a-f]{64})\s*$')
 INPUT_LINE = re.compile(r'^#\s*input\s+(\S+)\s*$')
+NODE_LINE = re.compile(r'^#\s*node\s+(0x[0-9a-fA-F]+)\s+(\S+)\s+core\s+(0x[0-9a-fA-F]+)'
+                       r'\s+window\s+(0x[0-9a-fA-F]+)\s+status\s+(\S+)\s+trees\s+(\d+)/(\d+)')
 
 
 def candidates(path=DEFAULT_RECORD):
@@ -61,6 +72,48 @@ def candidates(path=DEFAULT_RECORD):
     return words, sha, inp
 
 
+def nodes(path=DEFAULT_RECORD):
+    """The record's controller census, as (base, name, core, window, status, n, total)."""
+    out = []
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            m = NODE_LINE.match(line)
+            if m:
+                out.append((int(m.group(1), 16), m.group(2), int(m.group(3), 16),
+                            int(m.group(4), 16), m.group(5), int(m.group(6)), int(m.group(7))))
+    return out
+
+
+def node_verdict(census, hc, core):
+    """(ok, why) for the ladder's own two window bases against the record's census.
+
+    **Why this is a check and not a sentence.** `src/entry/entry_storage.c` says in prose
+    which controller it reads; the two `#define`s beside that prose are the addresses a run
+    actually dereferences, and the record carries what the device's own device tree
+    declares at them. A mismatch means the ladder is reading an address no tree in the
+    device's own file enables -- which is the difference between *the card did not answer*
+    and *the run was never looking at the card*. Pure, so its cells can be tested without a
+    device tree, which is the same reason `derive` has cells.
+    """
+    if not census:
+        return False, ('the record carries no `# node 0x........ ...` line, so nothing in it '
+                       'says the addresses the ladder uses are controller(s) this file declares')
+    match = [n for n in census if n[0] == hc]
+    if not match:
+        return False, ('no `# node` line names 0x%08x, the address ST_HC_MEM_BASE holds; '
+                       'the record declares %s'
+                       % (hc, ', '.join('0x%08x' % n[0] for n in census)))
+    base, name, ncore, window, status, ntree, total = match[0]
+    if status != 'ok':
+        return False, ('the record carries 0x%08x with status %s: the node the ladder reads '
+                       'is not enabled in the file the record was read from' % (base, status))
+    if ncore != core:
+        return False, ('the record pairs 0x%08x with core 0x%08x while ST_CORE_MEM_BASE is '
+                       '0x%08x -- not the pair this node declares' % (base, ncore, core))
+    return True, ('0x%08x is %s, core 0x%08x, window 0x%x, status ok on %d/%d trees'
+                  % (base, name, ncore, window, ntree, total))
+
+
 def check(record=DEFAULT_RECORD, source=ENTRY_SRC, out=sys.stdout):
     w = out.write
     words, sha, inp = candidates(record)
@@ -74,6 +127,23 @@ def check(record=DEFAULT_RECORD, source=ENTRY_SRC, out=sys.stdout):
           f'whole point of the\n        record is that it names the input it was read from, '
           f'which is a file this repository does not hold.\n')
         return 1
+
+    bases = source_bases(source)
+    if bases is None:
+        w(f'REFUSED {source}: could not read ST_HC_MEM_BASE and ST_CORE_MEM_BASE. The '
+          f'addresses the ladder\n        dereferences are what the census below is '
+          f'checked against; an unreadable source refuses\n        rather than passing '
+          f'quietly.\n')
+        return 1
+    census = nodes(record)
+    ok, why = node_verdict(census, bases['hc'], bases['core'])
+    w(f'source    ST_HC_MEM_BASE = 0x{bases["hc"]:08x}  '
+      f'ST_CORE_MEM_BASE = 0x{bases["core"]:08x}\n')
+    w(f'record    {len(census)} controller node(s) declared\n')
+    if not ok:
+        w(f'REFUSED {why}\n')
+        return 1
+    w(f'OK: {why}\n')
 
     src = source_constants(source)
     if src is None:
@@ -123,8 +193,31 @@ SELFTEST_CELLS = (
 )
 
 
+SELFTEST_NODES = (
+    # (census rows, hc, core, wants_refusal)
+    ([(0xf9824900, 'sdhci@f9824900', 0xf9824000, 0x1a0, 'ok', 5, 6)], 0xf9824900,
+     0xf9824000, False),
+    ([], 0xf9824900, 0xf9824000, True),                                   # no census at all
+    ([(0xf98a4900, 'sdhci@f98a4900', 0xf98a4000, 0x11c, 'ok', 5, 6)], 0xf9824900,
+     0xf9824000, True),                                                   # the ladder's node absent
+    ([(0xf9824900, 'sdhci@f9824900', 0xf9824000, 0x1a0, 'disable', 5, 6)], 0xf9824900,
+     0xf9824000, True),                                                   # carried, not enabled
+    ([(0xf9824900, 'sdhci@f9824900', 0xf98a4000, 0x1a0, 'ok', 5, 6)], 0xf9824900,
+     0xf9824000, True),                                                   # core base is another node's
+    ([(0xf98a4900, 'sdhci@f98a4900', 0xf98a4000, 0x11c, 'ok', 5, 6),
+      (0xf9824900, 'sdhci@f9824900', 0xf9824000, 0x1a0, 'ok', 5, 6)], 0xf9824900,
+     0xf9824000, False),                                                  # both enabled: the ladder's is found
+)
+
+
 def selftest():
     bad = 0
+    for census, hc, core, want_refusal in SELFTEST_NODES:
+        ok, why = node_verdict(census, hc, core)
+        if ok == want_refusal:
+            print(f'  census {census} hc=0x{hc:08x}: expected refusal={want_refusal}, got '
+                  f'{not ok} ({why})')
+            bad += 1
     # the constant the ladder's source carries, written out so a change to the arithmetic is
     # caught here and not at a press: 0x9E00 of pull | 0x124 of drv
     for cands, (pull, drv), want_finding in SELFTEST_CELLS:
@@ -139,8 +232,8 @@ def selftest():
     if derive([0, 3, 3, 1], [7, 4, 4]) != 0x00009FE4:
         print('  the other tree on this device implies 0x9FE4, and it has moved')
         bad += 1
-    print(f'selftest ok: {len(SELFTEST_CELLS) + 2} cells, and both words this device '
-          f'declares are pinned')
+    print(f'selftest ok: {len(SELFTEST_CELLS) + 2} word cells and '
+          f'{len(SELFTEST_NODES)} census cells; both words this device declares are pinned')
     return 1 if bad else 0
 
 

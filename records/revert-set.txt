@@ -6276,6 +6276,56 @@ set=armed-storage-f72e9f18 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # `EXIT_POP_LR_LITERAL`, the 737 window paragraph, and the four `5,088,000`s in `entry_storage.c`.
 #
 #
+# 781: THE DEVICE'S OWN TREE AND ITS OWN BOOTLOADER PUT THE eMMC ON THE NODE THE LADDER READS - and the
+# tree that wins is a hardware subtype no file in this archive carries. HOST-SIDE ONLY: no device action,
+# no press, no gate against a device, no runner, no firer, nothing built, and `out/` is untouched - the
+# armed rung-28 arm (armed-storage-d5d98738) and every park are byte-identical before and after.
+#
+#   THE CENSUS, from the device's own dt.img (2,521,088 B, sha256 c8faf487... - the input
+#   records/sdc1-pad-candidates.txt already names): 6 FDT trees, 20 controller nodes, 4 distinct
+#   addresses, and TWO of them enabled in every tree that carries them -
+#     0xf9824900 sdhci@f9824900 status ok  reg <0xf9824900 0x1a0 0xf9824000 0x800>  always-on yes/yes
+#                qcom,bus-speed-mode HS400_1p8v, HS200_1p8v, DDR_1p8v  vdd 2,950,000  vdd-io 1,800,000
+#     0xf98a4900 sdhci@f98a4900 status ok  reg <0xf98a4900 0x11c 0xf98a4000 0x800>  always-on NO/NO
+#                no bus-speed-mode, vdd-io 1,800,000-2,950,000, THREE pad entries (no RCLK)
+#     0xf9864900 sdhci@f9864900 status disable   (0x11c, core 0xf9864000)
+#     0xf98e4900 sdhci@f98e4900 status disable   (0x11c, core 0xf98e4000)
+#   and the vendor's own msm8974.dtsi:24-27 names what they are - sdhc1 = SDC1 eMMC slot (:500),
+#   sdhc2 = SDC2 SD card slot (:530), sdhc3/sdhc4 SDIO (:557, :599). So THE LADDER'S TWO WINDOWS ARE THE
+#   FIRST `reg` CELL PAIR OF A NODE THIS DEVICE'S OWN TREE MARKS ok IN ALL FIVE TREES THAT CARRY IT, at
+#   the widened 0x1a0 window 531 read out of the vendor's msm8974pro.dtsi:1763-1769.
+#
+#   AND THE DEVICE'S OWN BOOTLOADER SAYS IT BY NAME: boot.img's cmdline, the one aboot wrote, carries
+#   `androidboot.bootdevice=msm_sdcc.1` - SDCC instance 1, the controller the device boots from. The
+#   string is on record in 01 and 608; what is new here is using it as the identification it is.
+#
+#   THE ONE PROPERTY THAT VARIES ACROSS THOSE FIVE TREES IS 779'S PAD DECLARATION, and the census prints
+#   it as varying on purpose (qcom,pad-drv-on = 0x7 0x4 0x4 on tree #0, 0x4 0x4 0x4 on the other four): an
+#   aggregate row carrying tree #0's array would be 779's defect one level up.
+#
+#   WHAT IT CLOSES: "the ladder may be reading a controller the eMMC is not on, or a node this device's
+#   tree disables" - a candidate the record never named and every rung since 531 assumed - closed by the
+#   device's own files in two independent channels. It is 779's defect class one level up: an assumption
+#   about this device standing in for a reading of it.
+#   WHAT IT DOES NOT SAY: that the card is powered, clocked or able to answer - no capture in this
+#   archive holds a PMIC, SPMI, regulator or card reading of any kind. AND WHICH TREE WINS IS NOT
+#   ANSWERABLE FROM THIS ARCHIVE, now established rather than assumed: `qcom,board-id` is the ONLY
+#   board-identification string in the 4,194,304 bytes of aboot.img, the five trees' cells are (8,1)
+#   (8,256) (8,1024) (8,1280) (8,0), and a board-id is a value the bootloader reads off the hardware -
+#   the rung-28 arm's `_pad_raw` is the cheapest place that question has ever been asked.
+#
+#   LANDED AS A CHECK AND NOT A SENTENCE: records/sdc1-pad-candidates.txt now carries one machine-readable
+#   `# node 0x... <name> core 0x... window 0x... status ... trees n/m` line per controller (rewritten by
+#   tools/derive_sdc1_pads.py --write-record, which gained `--mmc-census`), and
+#   tools/check_sdc1_pad_expectation.py refuses when the record does not name ST_HC_MEM_BASE's address
+#   with status ok and paired with ST_CORE_MEM_BASE. Four falsification cells (node line removed, status
+#   disable, core swapped to the other enabled node, address renamed) all refuse with the reading named;
+#   six selftest cells pin `node_verdict` as a pure function; `make check` exit 0. The refusal compares
+#   the record against the source's two `#define`s and cannot see whether the record was written from
+#   THIS device - that half is the input's sha256, a value a rewrite cannot invent.
+#
+# NO set= line follows this block: no arm was built, no park was made, and the sets above are unchanged.
+
 # 780: THE VENDOR'S OWN PATH POWERS THE CARD - the reason this record gave for closing 764 section 3's
 # power candidate is a driver reading that does not apply to this board. HOST-SIDE ONLY: no device action,
 # no press, no gate, no runner, no firer, nothing built, and `out/` is byte-identical before and after -

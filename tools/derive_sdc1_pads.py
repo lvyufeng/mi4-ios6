@@ -28,6 +28,7 @@ alternative and the word each one implies; it does not pick.
 Usage:
     tools/derive_sdc1_pads.py                     # print the table for the default dt.img
     tools/derive_sdc1_pads.py --dt PATH           # a different QCDT blob
+    tools/derive_sdc1_pads.py --mmc-census        # every controller node, and which one is the eMMC
     tools/derive_sdc1_pads.py --write-record      # also rewrite records/sdc1-pad-candidates.txt
     tools/derive_sdc1_pads.py --check             # compare against entry_storage.c, exit 1 on no match
 """
@@ -138,6 +139,53 @@ def fdt_root_props(blob):
     return vals
 
 
+def fdt_nodes(blob):
+    """Every node of one FDT, as `{path: {property: bytes}}`.
+
+    `fdt_walk` answers for one node by name and `fdt_root_props` for the root only; the
+    census below needs the whole tree, because the question it answers is *which
+    controllers this device enables* and that is only visible from the sibling nodes.
+    """
+    magic, tot, off_struct, off_str = struct.unpack_from('>4I', blob, 0)
+    if magic != 0xd00dfeed:
+        raise ValueError(f'not an FDT: magic {magic:#x}')
+    path, out, pos = [], {}, off_struct
+    while pos < len(blob):
+        tok = struct.unpack_from('>I', blob, pos)[0]
+        pos += 4
+        if tok == 1:                                   # BEGIN_NODE
+            name = blob[pos:blob.index(b'\0', pos)].decode('latin1')
+            pos += (len(name) + 1 + 3) // 4 * 4
+            path.append(name)
+            out.setdefault('/'.join(path), {})
+        elif tok == 2:                                 # END_NODE
+            if path:
+                path.pop()
+        elif tok == 3:                                 # PROP: token, len, nameoff, value
+            ln, noff = struct.unpack_from('>II', blob, pos)
+            pos += 8
+            name = blob[off_str + noff:blob.index(b'\0', off_str + noff)].decode('latin1')
+            out['/'.join(path)][name] = blob[pos:pos + ln]
+            pos += (ln + 3) // 4 * 4
+        elif tok == 4:
+            continue
+        else:
+            break
+    return out
+
+
+#: The controller nodes this device could hand an eMMC to. `sdhci@` is this device's own
+#: spelling (`qcom,sdhci-msm`); the others are accepted so a differently named node in a
+#: future image is *printed* rather than silently missed.
+CONTROLLER_PREFIXES = ('sdhci@', 'sdcc@', 'sdhc@', 'mmc@')
+
+#: The properties that say which controller is the eMMC, in the order they are read.
+CENSUS_PROPS = ('compatible', 'status', 'reg', 'vdd-supply', 'vdd-io-supply',
+                'qcom,vdd-always-on', 'qcom,vdd-io-always-on', 'qcom,bus-speed-mode',
+                'qcom,vdd-voltage-level', 'qcom,vdd-io-voltage-level',
+                'qcom,pad-pull-on', 'qcom,pad-drv-on', 'non-removable')
+
+
 def cells(data):
     n = len(data) // 4
     return list(struct.unpack('>%dI' % n, data[:n * 4])) if n else []
@@ -186,7 +234,187 @@ def parse_qcdt(raw):
             'entry_len': entry_len, 'trees': out, 'raw_len': len(raw)}
 
 
+# ---------------------------------------------------------------- the controller census
+
+
+def census(dt_path):
+    """Every controller node of every tree in `dt_path`, with the properties that name one.
+
+    **The question this answers, and why it is not the pad table's question.** 779 derived
+    the pad word for ONE node -- `sdhci@f9824900`, the node the ladder reads -- and did not
+    ask whether that node is the controller this device boots from, nor whether a second
+    controller is enabled beside it. Both are visible in the same file, and both have to be
+    read before *the card does not answer* can be a statement about the card rather than
+    about the address.
+    """
+    raw = open(dt_path, 'rb').read()
+    table = parse_qcdt(raw)
+    rows = []
+    for idx, off, blob in table['trees']:
+        root = fdt_root_props(blob)
+        model = root.get('model', b'').rstrip(b'\0').decode('latin1') or '(unnamed)'
+        bid = cells(root.get('qcom,board-id', b''))
+        for path, props in sorted(fdt_nodes(blob).items()):
+            if not path.rsplit('/', 1)[-1].startswith(CONTROLLER_PREFIXES):
+                continue
+            reg = cells(props.get('reg', b''))
+            rows.append({
+                'index': idx, 'offset': off, 'model': model, 'board_id': bid,
+                'path': path,
+                'base': reg[0] if reg else None,
+                'window': reg[1] if len(reg) >= 2 else None,
+                'core': reg[2] if len(reg) >= 3 else None,
+                'props': {k: props[k] for k in CENSUS_PROPS if k in props},
+            })
+    return table, rows, hashlib.sha256(raw).hexdigest()
+
+
+def texts(data):
+    """A DT string-list property as the strings it holds."""
+    return [s for s in data.decode('latin1').split('\0') if s]
+
+
+def strv(data):
+    """A DT string property as one string."""
+    return data.rstrip(b'\0').decode('latin1')
+
+
+def reg_str(r):
+    """The node's `reg` cells, as `<base window core size>` and however many there are."""
+    return ' '.join('0x%x' % c for c in cells(r['props'].get('reg', b'')))
+
+
+def census_words(rows):
+    """`{controller base: [rows]}`, one entry per distinct address."""
+    out = {}
+    for r in rows:
+        if r['base'] is not None:
+            out.setdefault(r['base'], []).append(r)
+    return out
+
+
+def prop_summary(rs, key):
+    """One property across the trees that declare this controller.
+
+    **A property that differs between trees is printed as differing, with the trees named.**
+    779's whole finding is that the pad declaration is one board's and not the device's, so
+    an aggregate row that printed the first tree's array would be the same defect one level
+    up: a value presented as the device's when it is a tree's.
+    """
+    seen = {}
+    for r in rs:
+        if key not in r['props']:
+            continue
+        v = r['props'][key]
+        if key == 'compatible':
+            s = strv(v)
+        elif key == 'qcom,bus-speed-mode':
+            s = ', '.join(texts(v))
+        else:
+            s = ' '.join('0x%x' % c for c in cells(v))
+        seen.setdefault(s, []).append(r['index'])
+    if not seen:
+        return None
+    if len(seen) == 1:
+        return next(iter(seen))
+    return ' | '.join('%s (trees %s)' % (s, ', '.join('#%d' % i for i in idx))
+                      for s, idx in seen.items())
+
+
+def report_census(dt_path, table, rows, sha, src, out=sys.stdout):
+    w = out.write
+    by = census_words(rows)
+    w(f'controller census of {os.path.relpath(dt_path, REPO)} (sha256 {sha[:16]}...)\n')
+    w(f'  {len(table["trees"])} FDT tree(s), {len(rows)} controller node(s), '
+      f'{len(by)} distinct address(es)\n\n')
+    for base in sorted(by):
+        rs = by[base]
+        st = sorted({r['props'].get('status', b'(absent)').rstrip(b'\0').decode('latin1')
+                     for r in rs})
+        w('  0x%08x  %-18s status %s\n        reg <%s>  on trees %s\n'
+          % (base, rs[0]['path'].rsplit('/', 1)[-1], '/'.join(st), reg_str(rs[0]),
+             ', '.join('#%d' % r['index'] for r in rs)))
+        for k in ('compatible', 'qcom,vdd-always-on', 'qcom,vdd-io-always-on',
+                  'non-removable', 'qcom,bus-speed-mode', 'qcom,vdd-voltage-level',
+                  'qcom,vdd-io-voltage-level', 'qcom,pad-pull-on', 'qcom,pad-drv-on'):
+            if k in ('qcom,vdd-always-on', 'qcom,vdd-io-always-on', 'non-removable'):
+                n = sum(1 for r in rs if k in r['props'])
+                if n:
+                    w('        %-26s %s\n'
+                      % (k, 'present' if n == len(rs) else 'present on %d of %d trees'
+                         % (n, len(rs))))
+                continue
+            s = prop_summary(rs, k)
+            if s is not None:
+                w('        %-26s %s\n' % (k, s))
+    hc = (src or {}).get('hc')
+    core = (src or {}).get('core')
+    w('\nthe ladder reads ')
+    if hc is None:
+        w('an address this run could not read from the source\n')
+        return by
+    w('0x%08x (hc_mem) / 0x%08x (core_mem)\n' % (hc, core))
+    rs = by.get(hc, [])
+    if not rs:
+        w('  NO TREE in this file declares a controller at that address. The ladder is not\n'
+          '  reading a node this device\'s own tree carries.\n')
+        return by
+    st = sorted({r['props'].get('status', b'(absent)').rstrip(b'\0').decode('latin1')
+                 for r in rs})
+    w('  %d of %d tree(s) declare it, status %s; always-on %s / %s; bus-speed-mode %s\n'
+      % (len(rs), len(table['trees']), '/'.join(st),
+         'yes' if 'qcom,vdd-always-on' in rs[0]['props'] else 'NO',
+         'yes' if 'qcom,vdd-io-always-on' in rs[0]['props'] else 'NO',
+         ', '.join(texts(rs[0]['props'].get('qcom,bus-speed-mode', b''))) or '(none)'))
+    others = [b for b in by if b != hc
+              and 'ok' in {r['props'].get('status', b'').rstrip(b'\0').decode('latin1')
+                           for r in by[b]}]
+    if others:
+        w('  and it is NOT the only enabled one: %s also carry status ok, so the\n'
+          '  address alone does not say which controller is the eMMC. The properties do:\n'
+          % ', '.join('0x%08x' % b for b in sorted(others)))
+        for b in sorted(others):
+            r = by[b][0]
+            w('    0x%08x  always-on %s / %s  bus-speed-mode %s\n'
+              % (b, 'yes' if 'qcom,vdd-always-on' in r['props'] else 'NO',
+                 'yes' if 'qcom,vdd-io-always-on' in r['props'] else 'NO',
+                 ', '.join(texts(r['props'].get('qcom,bus-speed-mode', b''))) or '(none)'))
+    return by
+
+
+def census_record_lines(rows, src, total_trees=None):
+    """The `# node ...` lines the tracked record carries, one per distinct controller.
+
+    `total_trees` is the file's own FDT count, so the fraction reads as *trees carrying
+    this node out of the trees in this file* -- tree #4 carries no controller at all.
+    """
+    lines = []
+    for base in sorted(census_words(rows)):
+        rs = census_words(rows)[base]
+        st = sorted({r['props'].get('status', b'(absent)').rstrip(b'\0').decode('latin1')
+                     for r in rs})
+        lines.append('# node 0x%08x %s core 0x%08x window 0x%x status %s trees %d/%d'
+                     % (base, rs[0]['path'].rsplit('/', 1)[-1], rs[0]['core'] or 0,
+                        rs[0]['window'] or 0, '/'.join(st), len(rs),
+                        total_trees if total_trees is not None
+                        else len({r['index'] for r in rows})))
+    return lines
+
+
 # ---------------------------------------------------------------- the source's own constants
+
+
+def source_bases(path=ENTRY_SRC):
+    """`ST_HC_MEM_BASE` and `ST_CORE_MEM_BASE` from the entry source."""
+    try:
+        text = open(path, encoding='utf-8', errors='replace').read()
+    except OSError:
+        return None
+    pat = re.compile(r'^#define\s+(ST_HC_MEM_BASE|ST_CORE_MEM_BASE)\s+(0x[0-9a-fA-F]+)u', re.M)
+    got = {k: int(v, 16) for k, v in pat.findall(text)}
+    if 'ST_HC_MEM_BASE' not in got or 'ST_CORE_MEM_BASE' not in got:
+        return None
+    return {'hc': got['ST_HC_MEM_BASE'], 'core': got['ST_CORE_MEM_BASE']}
 
 
 def source_constants(path=ENTRY_SRC):
@@ -284,7 +512,7 @@ def report(dt_path, table, rows, sha, out=sys.stdout):
     return seen
 
 
-def write_record(path, dt_path, table, rows, sha, seen, src):
+def write_record(path, dt_path, table, rows, sha, seen, src, node_lines=()):
     lines = [
         '# The SDC1 pad expectation, re-derived from the device\'s own device tree.',
         '#',
@@ -341,6 +569,15 @@ def write_record(path, dt_path, table, rows, sha, seen, src):
                         ', '.join(r['model'] for r in rs)))
     lines += [
         '#',
+        '# The controller census of the same file: every node whose name this SoC gives a',
+        '# controller, with the properties that say which one carries the eMMC. Read by',
+        '# tools/check_sdc1_pad_expectation.py, which compares the ladder\'s own two window',
+        '# bases against the enabled node named here -- so "the ladder reads a controller this',
+        '# device\'s own tree enables" is a check on tracked files and not a sentence.',
+    ]
+    lines += list(node_lines)
+    lines += [
+        '#',
         '# always-on flags, per tree: every tree above carries both qcom,vdd-always-on and',
         '# qcom,vdd-io-always-on, or the row says which it lacks. A DEVICE TREE IS A',
         '# DECLARATION, NOT A MEASUREMENT: this closes the provenance gap -- the file is the',
@@ -357,6 +594,8 @@ def main(argv):
     ap.add_argument('--record', default=DEFAULT_RECORD)
     ap.add_argument('--check', action='store_true',
                     help='exit 1 when the source constants match no tree in dt.img')
+    ap.add_argument('--mmc-census', action='store_true',
+                    help='print every controller node of every tree, and which one is the eMMC')
     args = ap.parse_args(argv[1:])
 
     if not os.path.exists(args.dt):
@@ -370,7 +609,13 @@ def main(argv):
     table, rows, sha = collect(args.dt)
     seen = report(args.dt, table, rows, sha)
     src = source_constants()
+    bases = source_bases()
     words = sorted({r['expect'] for r in rows if r['node']})
+
+    _, crows, csha = census(args.dt)
+    if args.mmc_census:
+        print()
+        report_census(args.dt, table, crows, csha, bases)
 
     print()
     if src is None:
@@ -393,7 +638,8 @@ def main(argv):
             print('    0x%08x' % w)
 
     if args.write_record:
-        write_record(args.record, args.dt, table, rows, sha, seen, src)
+        write_record(args.record, args.dt, table, rows, sha, seen, src,
+                     census_record_lines(crows, bases, len(table['trees'])))
         print(f'\nwrote {os.path.relpath(args.record, REPO)}')
 
     if args.check and not match:
