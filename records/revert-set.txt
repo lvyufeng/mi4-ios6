@@ -7282,3 +7282,69 @@ set=armed-storage-dfc4ae78 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # the head of CMD1, which 787 measured to be unsupported and which is COST-owed to this arm's
 # successor. **NO PRESS IS SPENT BY THIS STEP AND NONE IS AUTHORIZED**: the press is the operator's,
 # and the path to it is the two commands readiness prints, run by hand once each.
+
+# 788: THE FOUR-ARM ENABLE MATRIX - HOST-SIDE ONLY, A READING OF CAPTURES ALREADY ON DISK.
+# NOTHING WAS BUILT, NO SOURCE WAS EDITED AND out/ IS BYTE-IDENTICAL BEFORE AND AFTER THIS BLOCK,
+# so the armed rung-30 arm (armed-storage-dfc4ae78, STAGE90_XNU_STORAGE_PROBE=29) is unchanged and
+# every set= line in this file still resolves. NO PRESS IS SPENT AND NONE IS AUTHORIZED.
+#
+# 787 section 4 named two readings of what a widened window can do and could not choose between
+# them without a press: (a) bit 15 (SDHCI_INT_ERROR) rises with ANY error whatever its own bit's
+# enable, or (b) it rises only when the specific error bit is enabled - in which case CMD1 may have
+# been timing out INVISIBLY on every arm from rung 14 on. 786 section 4 inferred (a) from two rows,
+# and this step reads the case that separates them.
+#
+# WHAT THE ARCHIVE SHOWS, AND IT IS (b). Across SIX narrow arm-windows on disk, bit 15 STOOD in
+# INT_ENABLE for the whole window (_cid_ena_held / _nidx_ena_held = 0x00008001 on every one) and
+# INT_STATUS read ZERO for the whole window - _status_any is st_send_command's own field, the FIRST
+# non-zero INT_STATUS of any kind read RAW with no mask (src/entry/entry_storage.c:2635-2637):
+#
+#   CMD2 (st_all_send_cid), enable written 0x00000001, held 0x00008001:
+#     rung17-cid    v16   _cid_polls = 5,089,280   _cid_status_any = 0x00000000   _cid_timeout = 1
+#     rung19-rca    v18   _cid_polls = 5,088,256   _cid_status_any = 0x00000000   _cid_timeout = 1
+#     rung21-noidx  v20   _cid_polls = 5,088,256   _cid_status_any = 0x00000000   _cid_timeout = 1
+#     rung24-cmdline v23  _cid_polls = 5,091,328   _cid_status_any = 0x00000000   _cid_timeout = 1
+#     rung29-2win   v28   _cid_polls = 1           _cid_status_any = 0x00028000   _cid_err = 0x00020000
+#   CMD3 (st_cmd3_noidx), enable written 0x00000001, held 0x00008001:
+#     rung21-noidx  v20   _nidx_polls = 5,087,232  _nidx_status_any = 0x00000000  _nidx_timeout = 1
+#     rung22-dllcensus v21 _nidx_polls = 5,093,376 _nidx_status_any = 0x00000000  _nidx_timeout = 1
+#     rung24-cmdline v23  _nidx_polls = 1,789      _nidx_status_any = 0x00018000  _nidx_err = 0x00010000
+#     rung29-2win   v28   _nidx_polls = 1,493      _nidx_status_any = 0x00018000  _nidx_err = 0x00010000
+#
+# 30,537,728 READS OF INT_STATUS, WITH SDHCI_INT_ERROR STANDING IN INT_ENABLE THE WHOLE TIME, AND
+# BIT 15 APPEARED IN NONE OF THEM. The two arms whose enable ALSO carried the specific bits reported
+# ERR | CRC and ERR | TIMEOUT AT THE FIRST POLL. So a standing bit 15 in INT_ENABLE is NOT
+# sufficient for bit 15 to appear in INT_STATUS on this block, and 786 section 4's sentence - that
+# bit 15 TRACKS the error bits so a zero _status_any on a narrow arm was never blind to an error's
+# EXISTENCE - is refuted by the archive's own data: its two rows were both taken on arms whose
+# enable carried the bit, which cannot distinguish TRACKING from CO-LATCHING.
+#
+# AND 786 SECTION 4's CONCLUSION `the widening buys identity, not existence` IS WITHDRAWN AS
+# STATED. At these two windows the widening is what makes an error appear AT ALL.
+#
+# THE SAME MECHANISM REFUTES A 777 PREDICTION OF THE SAME SHAPE. _cid_stale is INT_STATUS as
+# st_send_command finds it for CMD2, read AFTER st_all_send_cid's own store to INT_ENABLE
+# (:3189 the store, :2560 the read inside the callee). 777 corrected one false sentence with
+# `that store raises bit 15 by itself, so _cid_stale >= 0x00008000 on EVERY run and the ZERO row
+# does not exist`. The ONLY arm carrying the key reads _cid_stale = 0x00000001 - bit 0, NOT bit 15,
+# with _cid_clear_after = 0x00000000 beside it. (It is the only arm because rungs 25-28 were strict
+# containments and were never pressed.) What the CMD2 window's own enable store leaves in INT_STATUS
+# is the COMPLETION bit, not the error bit.
+#
+# WHAT THIS CHANGES ABOUT THE NEXT PRESS, AND NOTHING ELSE. _cmd1_status_any = 0, _cmd1_stale = 0
+# and _cmd1_status_after = 0 on every arm carrying them are ONE MASKED READING TAKEN THREE TIMES and
+# not three independent zeros: CMD1 has run under INT_ENABLE = 0x00008000 since rung 14. So on the
+# rung-30 arm, which carries all five bits into that interval, a ZERO is the strongest negative this
+# ladder can produce - the enable is not why a bit would be missing - and ERR | TIMEOUT is a LIVE
+# ROW rather than an excluded one.
+#
+# THE RESIDUAL IS NAMED AND NOT HIDDEN: whether an enable gates a condition's VISIBILITY or whether
+# it switches the CHECK on cannot be separated from these captures. The evidence leans to visibility
+# - the error bit is present at the FIRST poll on the widened arms, and at CMD3 _nidx_status_pre is
+# already ERR | TIMEOUT at the instant the store lands - but that is an argument and not a
+# measurement, because _cid_stale read microseconds earlier does not yet carry the CRC. No row of
+# the next arm is read as proof the card did or did not answer.
+#
+# THE ARM IS UNCHANGED BY ALL OF THIS: same bytes, same park, same switch set. The value of the
+# press went up; its cost did not. THE GOAL IS STILL NOT MET - no transfer completes, no filesystem
+# is reached and no mount is made, so TWRP-to-storage stays withheld.
