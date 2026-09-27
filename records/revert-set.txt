@@ -5126,3 +5126,101 @@ set=armed-storage-46fe6737 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #
 # The goal is still **NOT met**: no storage, no filesystem, no mount, and the machine never observed
 # STAYING UP (745). **TWRP-to-storage stays withheld.**
+#
+# 756 - READ OUT OF THE VENDOR TREE AND THE PAYLOAD SOURCE; NO DEVICE ACTION, NO BUILD, out/ UNTOUCHED.
+# The vendor's bring-up disables the DLL before its FIRST command and this ladder has never touched
+# that register. See
+# docs/experiments/experiment-756-the-vendors-bring-up-disables-the-dll-and-the-ladder-never-has.md.
+#
+# THE DIFF IS A DIFF, NOT A MEASUREMENT. Rungs 2, 6 and 7 transcribe sdhci_msm_init's mode sequence,
+# sdhci_msm_set_clock and mmc_power_up's PASS A - **and all three are faithful transcriptions of
+# functions that do not contain the write in question.** The write is sdhci_msm_set_uhs_signaling
+# (sdhci-msm.c:2537-2600), reached by the MMC core through sdhci_set_ios -> sdhci_do_set_ios
+# (sdhci.c:1784-1785; .set_ios at :2384; sdhci_msm_ops at sdhci-msm.c:2653) DURING POWER-UP, BEFORE
+# THE FIRST COMMAND. At host->clock <= CORE_FREQ_100MHZ (:164 = 100 MHz; this ladder is at 400 kHz,
+# rung 6) it does TWO things: ctrl_2 &= ~SDHCI_CTRL_UHS_MASK (net 0 = SDR12 for MMC_TIMING_LEGACY,
+# because no arm of the seven-arm else-if chain at :2547-2560 matches LEGACY), and it sets
+# **CORE_DLL_RST (1<<30) and CORE_DLL_PDN (1<<29) in CORE_DLL_CONFIG 0x100** (:2578, :2583) - "make
+# sure DLL is disabled when not required" - then writes HOST_CONTROL2 unconditionally at :2597.
+# The vendor's own comment is the point: "the feedback clock must be provided and DLL must not be
+# used so that tuning can be skipped" - a statement about HOW THE CONTROLLER SAMPLES, and
+# msm_host->calibration_done = false is set with it.
+#
+# WHY THIS IS A CANDIDATE FOR THE STALL. The ladder's own five-command table (746, 749) said the
+# failure is confined to RECEIVING: CMD0 and the rung-20 CMD3 complete in 0.255-0.30 ms while every
+# command that must receive a response is TAKEN (the word is in the register, CMD_INHIBIT rises on
+# the read after the store) and then never completes, with _status_any = 0 across the whole
+# INT_STATUS register over 5,088,256 polls and 1.200 s. **A receive path that cannot sample has
+# exactly this signature, and a command that asks for nothing back cannot see it.**
+#
+# THE GAP IS STRUCTURAL, AND THAT IS WHAT MAKES IT WORTH A NOTE. If sdhci_msm_set_clock contained the
+# same DLL writes the ladder would have them at rung 6 by transcription and the observation would
+# collapse. It does not: sdhci_msm_set_clock (:2402-2535, read in full) writes CORE_VENDOR_SPEC and
+# the standard clock registers and calls clk_set_rate, and **CORE_DLL_CONFIG appears nowhere in it**.
+# The DLL is the one low-clock setup step that lives on the function this ladder did not port. And
+# the only other DLL code - msm_init_cm_dll (:577-630, with msm_cm_dll_set_freq :549,
+# msm_config_cm_dll_phase :379, msm_dll_poll_ck_out_en :351, sdhci_msm_cdclp533_calibration :661) -
+# **ENABLES** the DLL and is reachable only from sdhci_msm_execute_tuning (:792, via :820 and :846),
+# i.e. the TUNING path. So this block has exactly two vendor statements about the DLL at 400 kHz -
+# disable it on set_ios, enable it on tuning - and it is on the first one.
+#
+# SDHCI_HOST_CONTROL2 0x3E IS THE SECOND REGISTER THE LADDER HAS NEVER READ OR WRITTEN, and for it
+# the answer is genuinely UNKNOWN rather than probably fine. The argument that rung 4's RESET_ALL
+# already clears its bits[2:0] is a SPEC read against ONE STORE with no cell - and it is undercut by
+# the vendor's own code: sdhci_reset (sdhci.c:229-283) writes ONLY SDHCI_SOFTWARE_RESET 0x2F and
+# HOST_CONTROL2 appears nowhere in it, while the vendor writes the field explicitly on every
+# set_ios. A register a driver always writes explicitly is one it does not trust a reset to set.
+# CORE_DLL_CONFIG is at 0x100, far outside the register file Software Reset for All is defined over,
+# and set_uhs_signaling's own comment says the DLL "needs to be restored and CDCLP533 recalibrated
+# when the clock frequency is set back to 400MHz" - a reset that left it sane would make the flag
+# and the comment unnecessary. So BOTH offsets go into the one arm, and each has three outcomes.
+#
+# THE CENSUS SKIPS BOTH AND THE CENSUS IS THE INSTRUMENT THAT WOULD HAVE CAUGHT THEM. Rung 3
+# (st_standard_census, entry_storage.c:612-674) reads TEN values: eight register-file offsets
+# (0x2F 0x29 0x28 0x2C 0xFC 0x24 0x44 0x48) and two MSM-core ones (0xE0 0xE8) - and it STOPS at 0x44,
+# skipping 0x3E between 0x2C and it. `grep -n 'HOST_CONTROL2|0x3E|host_control2|DLL_CONFIG|dll'`
+# over entry_storage.c RETURNS NOTHING (exit 1), so neither register has a cell in any capture. The
+# file is otherwise careful about exactly this - ST_SDHCI_HOST_CONTROL 0x28's own comment is "a BYTE,
+# and at an offset no 32-bit access reaches" (:204) - and 0x40 and 0x44 are two separate constants
+# (:200-201) of which the census reads the second, so offsets have been chosen one register per press.
+#
+# THE NEGATIVE HALF, WHICH IS WORTH AS MUCH. Every register sdhci-msm.c writes falls into four
+# families and three are implemented AND MEASURED: the mode/core-reset sequence (rung 2; _mode_w0_read
+# 0x0 -> _mode_w1_read 0x1 -> _mode_w2_read 0x2001, _mode_bit_after = 1 on ALL 13 captures); the
+# power-IRQ handshake (rungs 8/9; 753); and the clock plus its vendor register (rung 6, whose own
+# #error text names the two CORE_VENDOR_SPEC 0x10C read-modify-writes). Only the DLL/CDC/calibration
+# family has no cell of any kind.
+#
+# AND SDHCI_TIMEOUT_CONTROL 0x2E IS RETIRED FOR THIS LADDER - same shape as 748 section 2, and it
+# deserves to stop being proposed. sdhci.c touches it EXACTLY TWICE: read at :115 inside
+# sdhci_dumpregs (the debug dump, exactly like SLOT_INT_STATUS 0xFC), and written at :828, guarded by
+# :826's `if (data || (cmd->flags & MMC_RSP_BUSY))`. **Not one of the ladder's six commands carries
+# MMC_RSP_BUSY (1 << 3, include/linux/mmc/core.h:31)** - the words are R2 0x07, R1 0x15, NONE 0x00,
+# R1_NOIDX 0x05, PRESENT 0x01 - and ST_SDHCI_CMD_RESP_SHORT_BUSY 0x03 exists in the payload only as a
+# macro and a _Static_assert. So on the COMMAND path this register is dead for the same reason
+# SLOT_INT_STATUS is, and it goes live the moment the driver has a DATA path, which is where the
+# storage driver the goal needs will first need it. A note for a future rung, NOT a proposal for this.
+#
+# THE DISCRIMINATOR IS TWO READS IN ONE ARM, AND IT IS SAFE BY CONSTRUCTION. Read hc_mem + 0x3E and
+# hc_mem + 0x100 (0xf982493E, 0xf9824A00). hc_mem 0xf9824900 >> 20 = 0xf98; both offsets are in that
+# same megabyte, i.e. the one every register this image already reads lives in, so the
+# addr >> 20 interlock (692's lesson) is satisfied BEFORE the arm is written rather than argued after.
+# Both are inside the declared window too, and the window is the PRO one: msm8974.dtsi:503 declares
+# `reg = <0xf9824900 0x11c>` and msm8974pro.dtsi:1765-1766 OVERRIDES `&sdhc_1` to **0x1a0**, which is
+# the applicable one for cancro (MSM8974Pro-AC). No new mapping, NO STORE, so no mechanism risk at
+# all - which matters because the ladder is mid-flight and out/ is parked. A cheaper half-step exists
+# if the operator prefers it (the same two reads with NO command in the arm). Neither is armed here.
+#
+# WHAT IT DOES NOT SAY. It does not say the DLL is the cause: four facts are measured and the causal
+# link is named as a hypothesis. It does not say HOST_CONTROL2 is set wrong: both directions of that
+# argument are given with their exact strength and the question goes into the arm instead of into
+# prose. It does not re-open 753. It does not move the arm, the payload, out/, or the entry image:
+# **RUNG 21 STAYS ARMED AND NOT PRESSED, and it tests the INDEX bit, not the sampling clock, so this
+# finding does not change what rung 21 will read.** No rung is designed or armed by this document.
+#
+# **NO ARM MOVED: out/ holds `armed-storage-46fe6737` (STAGE90_XNU_STORAGE_PROBE=20, entry rung 21),
+# ARMED AND NOT PRESSED.** No firer is armed and none is needed; the press path is the two commands
+# readiness prints, run by hand once each. `fastboot boot` only, NEVER flash; neighbour 33e80afe
+# absent from BOTH lists before firing, and no press may be spent without the operator's authorization.
+#
+# The goal is still **NOT met**: no storage, no filesystem, no mount. **TWRP-to-storage stays withheld.**
