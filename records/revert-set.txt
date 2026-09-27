@@ -5641,7 +5641,7 @@ set=armed-storage-c3007c37 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # demoting it to LPM (:1813-1817). And `sdhci.c:3583` asks for `regulator_get(..., "vmmc")` - the con_id
 # `vmmc`, where the DT supplies `vdd-supply` - so it takes IS_ERR, prints "no vmmc regulator found" and
 # sets `vmmc = NULL`, making every `mmc_regulator_set_ocr` call (:1625-1626, :1667-1669, :1688-1689, all
-# guarded by `host->vmmc &&`) a NO-OP. **The vendor does not turn the card's power on either.** Withdrawn
+# guarded by `host->vmmc &&`) a NO-OP. **The vendor does not turn the card's power on either.** **(780: THIS SENTENCE IS FALSE AS WRITTEN AND ITS REASON DOES NOT APPLY TO THIS BOARD. `host->vmmc` is `sdhci.c`'s OWN rail handle; `sdhci-msm.c` - the driver that binds `sdhc_1` - has its own vreg table from the same node's `vdd-supply`/`vdd-io-supply` and its own path ENABLES both rails: `probe:2826` -> `vreg_init:1873` -> `vreg_reset:1865` `setup_vreg(pdata,1,true)` -> `vreg_enable:1765` `regulator_enable` with NO `is_always_on` test. The early return this block also leans on is keyed on `vreg_data == NULL` (`:1833`), which `populate_pdata:1397` makes UNREACHABLE here - it allocates `vreg_data` unconditionally, before parsing, and both `-supply` phandles exist - and `qcom,vdd-always-on`'s ONLY behavioural effect is in the RELEASE path (`vreg_disable:1796` / `:1813`), where it demotes to LPM instead of disabling. So `always_on` means *enable it and never release it*, the opposite of *skip the regulator call*. THE CONCLUSION SURVIVES ON A STRONGER READING - the vendor's own bring-up is what leaves the rails enabled and the flag is what keeps them so - and 764 section 3's candidate 1 is thereby WEAKENED and still UNMEASURED. See 780.)** Withdrawn
 # at the strength of the evidence: no board file here supplies `vmmc` to `sdhc_1` and the platform's own
 # marks both rails always-on - which refutes "the ladder skipped a power act the vendor performs", not
 # that the rails are up on the physical device (the Mi 4's own board dts is not in this tree).
@@ -6275,7 +6275,70 @@ set=armed-storage-f72e9f18 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # `rung_para` correction for values 12..23, the seam-address class, `run_and_capture.sh`'s
 # `EXIT_POP_LR_LITERAL`, the 737 window paragraph, and the four `5,088,000`s in `entry_storage.c`.
 #
-# NO set= line follows this block: no arm was built, no park was made, and the 34 sets above are unchanged.
+#
+# 780: THE VENDOR'S OWN PATH POWERS THE CARD - the reason this record gave for closing 764 section 3's
+# power candidate is a driver reading that does not apply to this board. HOST-SIDE ONLY: no device action,
+# no press, no gate, no runner, no firer, nothing built, and `out/` is byte-identical before and after -
+# the armed rung-28 arm (armed-storage-d5d98738) is unspent. Every vendor line below was read in the
+# checkout at external/android_kernel_xiaomi_cancro/, which `.gitignore:12` excludes.
+#
+#   THE TWO HALVES OF THE SENTENCE AT 5644. (1) TRUE: `sdhci.c:3583-3587` does `regulator_get(mmc_dev(mmc),
+#   "vmmc")`, the DT supplies `vdd-supply`, so it takes IS_ERR, prints "no vmmc regulator found" and sets
+#   `host->vmmc = NULL`, and every `mmc_regulator_set_ocr` is guarded by `host->vmmc &&` (`:1625`, `:1667`,
+#   `:1688`, `:1833`) - verified, and re-verified in 780. (2) FALSE: "The vendor does not turn the card's
+#   power on either." `host->vmmc` is `sdhci.c`'s OWN rail handle. `sdhci-msm.c` - the driver that binds
+#   `sdhc_1` (`compatible = "qcom,sdhci-msm"`; the legacy `sdcc1` node is `status = "disabled"`,
+#   `msm8974-mtp.dtsi:368-370`) - has its own vreg table from the SAME node's `vdd-supply`/`vdd-io-supply`
+#   and its own path, read end to end:
+#     sdhci_msm_probe:2826        sdhci_msm_vreg_init(&pdev->dev, msm_host->pdata, true)
+#     sdhci_msm_vreg_init:1873    is_init true -> vreg_init_reg(h) per rail (regulator_get)
+#                                 -> sdhci_msm_vreg_reset(pdata)
+#     sdhci_msm_vreg_reset:1861   setup_vreg(pdata, 1, true)   <-- ENABLE
+#                                 setup_vreg(pdata, 0, true)
+#     sdhci_msm_vreg_enable:1765  regulator_enable(vreg->reg)   <-- NO is_always_on TEST
+#   So on any Linux boot of this board `regulator_enable()` runs on BOTH `pm8941_l20` and `pm8941_s3`.
+#
+#   AND `qcom,vdd-always-on` DOES NOT CAUSE THE EARLY RETURN THIS BLOCK ALSO LEANS ON. That return's own
+#   comment (`:1834-1836`) says "vreg info unavailable, assuming the slot is powered by always on domain",
+#   and the phrase is what made it look like the property's effect. The guard is `if (!curr_slot)` on
+#   `pdata->vreg_data`, and `vreg_data == NULL` CANNOT HAPPEN on a DT-bound device: `populate_pdata:1397`
+#   allocates it UNCONDITIONALLY, before parsing anything, and `goto out`s only on allocation failure;
+#   the per-rail parse (`:1060-1064`) returns early - leaving that rail NULL - only when the `-supply`
+#   phandle is MISSING, and this board declares both. The flag's ONLY behavioural consumer is in the
+#   RELEASE path: `:1072-1074` sets `is_always_on` from `qcom,%s-always-on`, `vreg_disable:1796` skips
+#   `regulator_disable` when it is set, and `:1813-1817` demotes to LPM instead (and `qcom,vdd-lpm-sup` is
+#   declared at `msm8974-mtp.dtsi:389`). **`always_on` means ENABLE IT AND NEVER RELEASE IT - the opposite
+#   of "skip the regulator call".**
+#
+#   THE CONCLUSION SURVIVES, AND ON A STRONGER READING THAN THE ONE IT USED. `vreg_reset` enables both rails
+#   and then calls the DISABLE path immediately; on an always-on rail that path does not disable but only
+#   demotes to LPM - so THE VENDOR'S OWN BRING-UP IS WHAT LEAVES THE RAILS ENABLED AND THE FLAG IS WHAT
+#   KEEPS THEM SO. Two consequences, and they are the point: 764 section 3's candidate 1 is WEAKENED, not
+#   strengthened - nothing in this tree disables the card's supplies, the vendor's path explicitly enables
+#   them, and a board that also boots FROM this eMMC to `fastboot` has had that bus powered and driven; and
+#   the candidate stays **UNMEASURED**, which is the honest state, but it is no longer a loose end a reader
+#   would expect to be productive. A future reader taking the old sentence at face value could argue FROM
+#   it that the card's power is nobody's act - which is the opposite of what the tree says - which is why
+#   the sentence is corrected in place above rather than only here.
+#
+#   AND "THE PMIC IS UNREACHABLE" IS FALSE AS STATED, in a way worth naming. 773 section 3's table counts
+#   acts 1/3 as `regulator_*`, hence "no" for reachable from `hc_mem`. That verdict is right about the ACT
+#   and wrong about the BLOCK: the PMIC's interface has an MMIO window on this SoC and it is INSIDE A
+#   MEGABYTE THIS LADDER ALREADY INSTALLS. `msm8974.dtsi:848-854` - `qcom,spmi@fc4c0000`,
+#   `reg = <0xfc4cf000 0x1000>, <0xfc4cb000 0x1000>, <0xfc4ca000 0x1000>` - and `0xFC4` is `ST_GCC_BASE`'s
+#   section (`entry_storage.c:280`), with `_gcc_map = 1` in EVERY capture since 694. So the accurate
+#   statement is narrower and more interesting: the arbiter's three pages ARE readable from a megabyte the
+#   ladder already holds, while THE PMIC'S OWN REGISTERS ARE NOT MEMORY MAPPED AT ALL - they are
+#   SPMI-addressed by `usid:offset` - so reading a rail's state would mean driving the arbiter through its
+#   command registers, a protocol and not a load. And the path the AP would USE to change a rail is
+#   `rpm-smd` (`msm8974.dtsi:2102-2105`, `rpm-channel-name = "rpm_requests"`, `rpm-channel-type = <15>`
+#   SMD_APPS_RPM) - a vote into shared memory answered by the RPM firmware, not the arbiter.
+#
+# NO RUNG IS PROPOSED FROM ANY OF IT: driving an SPMI bus is an act with a failure mode this ladder has not
+# measured, the previous candidate in this direction is 748's two dead-end registers, and the ladder has
+# never read `0xFC4Cxxxx`. NO set= line follows this block: no arm was built, no park was made, and the
+# sets above are unchanged.
+#
 
 # 772: THE RUNG-26 ARM - armed-storage-a1378a48, STAGE90_XNU_STORAGE_PROBE=25.
 # Built, parked and recorded here. HOST-SIDE ONLY: no device action, no press, no gate
