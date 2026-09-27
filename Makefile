@@ -86,6 +86,12 @@ restore:
 #                           self-test asserts the four idioms that look like a citation and are not:
 #                           `offset (step)`, a tick count beside a millisecond figure, a decimal with no
 #                           separators, and a pair three orders of magnitude apart.
+#   report_int_enable_windows.py
+#                           the census of every store to INT_ENABLE 0x34: which word each command
+#                           window writes, resolved by NAME through the assignment that builds it and
+#                           never by line number. Reports the SCOPE of the rung-23 widening (one window
+#                           of three) and refuses a store whose value is a bare literal, because a
+#                           literal there is one value with two definitions.
 #   derive_sdc1_pads.py --selftest
 #                           the pad arithmetic and the census rules, as cells. The ptr-only cells need
 #                           no input at all; the four census cells run against the device's own dt.img and
@@ -113,6 +119,8 @@ check:
 	@tools/read_storage_key_order.py --selftest >/dev/null
 	@tools/check_count_citations.py --selftest >/dev/null
 	@tools/check_count_citations.py
+	@tools/report_int_enable_windows.py --selftest >/dev/null
+	@tools/report_int_enable_windows.py
 	@tools/derive_sdc1_pads.py --selftest >/dev/null
 	@tools/check_sdc1_pad_expectation.py --selftest >/dev/null
 	@tools/check_sdc1_pad_expectation.py

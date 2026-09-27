@@ -6276,6 +6276,66 @@ set=armed-storage-f72e9f18 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # `EXIT_POP_LR_LITERAL`, the 737 window paragraph, and the four `5,088,000`s in `entry_storage.c`.
 #
 #
+# 783: THE MASK THE LADDER FOUND WAS LIFTED AT ONE OF THREE WINDOWS - CMD1's and CMD2's still run with
+# the one-bit enable. HOST-SIDE ONLY: no device action, no press, no gate against a device, no runner, no
+# firer, nothing built, and `out/` is untouched - the armed rung-28 arm (armed-storage-d5d98738,
+# 93026ca1... / d5d98738..., equal to its own set lines) is unspent. This is a reading of the
+# REPOSITORY'S OWN SOURCE and not of a gitignored input.
+#
+#   THE SENTENCE THIS FOLLOWS. 765 section 1 measured that the vendor's own `sdhci_init` writes ELEVEN
+#   bits (0x01FF0003) into INT_ENABLE 0x34 and drew: *"if the latch is enable-gated, a poll over a
+#   register whose error-enable half is zero cannot see an error bit however many samples it takes, and
+#   the ladder has NEVER ONCE set an error enable."* Rung 23 acted on it and the rung-24 press confirmed
+#   the rule (the CMD3 row that had read status_any = 0 over 5,088,256 polls now reads 0x00018000, break
+#   at poll 1789, 665.2 us). **WHAT HAS NEVER BEEN WRITTEN IS THE SCOPE.**
+#
+#   THE WINDOW CENSUS, now computed on every `make check` by tools/report_int_enable_windows.py:
+#     4317  st_cmd_path          CMD0, CMD1, CMD2  int_enable | ST_SDHCI_INT_RESPONSE  -> 0x00000001
+#     3110  st_all_send_cid      CMD2              int_enable | ST_SDHCI_INT_RESPONSE  -> 0x00000001
+#     3981  st_cmd3_noidx        CMD3              ena (built :3976 under #if >= 22)    -> 0x000f0001
+#   and the tool's own summary: the FIVE-BIT word is built at ONE line and reaches ONE store, all in
+#   st_cmd3_noidx; the ONE-BIT word is written at every other command window. (st_set_relative_addr and
+#   st_cmd3_noresp also write the one-bit word; both are rungs the armed arm does not contain, and both
+#   are in the census so the table is the whole reading.)
+#
+#   WHAT IT MEANS FOR THE ARMED PRESS. In the rung-28 arm CMD1's and CMD2's windows still run with
+#   INT_ENABLE = 0x00000001, so their _status_any = 0 over the full 1.2 s is STILL THE MASKED READING
+#   765 described - on this arm the mask was lifted for the LAST command and left standing for the two
+#   that run FIRST. CMD1 is SEND_OP_COND, the command an eMMC must answer for the ladder to move at all.
+#   THE PRESS WOULD ANSWER THE PAD QUESTION AND THE CMD-LINE COUNTS AND LEAVE THE CMD1 TIMEOUT QUESTION
+#   WHERE RUNG 21 LEFT IT --- not a reason not to spend it (row 1 of the pad fork closes a candidate on
+#   its own), but the reason to know before the press that the arm asks two questions and not three.
+#
+#   AND THE CMD1 QUESTION IS NOT ALREADY ANSWERABLE FROM THE ARCHIVE, cell by cell: _cmd1_status_any = 0
+#   is a masked read; _cid_stale (INT_STATUS at CMD2's entrance, after CMD1's poll gave up) reads
+#   0x00000000, and on this block a bit latches only while its enable stands, so a zero there is
+#   CONSISTENT WITH A TIMEOUT THAT COULD NOT LATCH and separates nothing; and _nidx_status_pre =
+#   0x00018000 is read after CMD2's window too and does not reach back to CMD1. So NO PRESS OF THE ARMED
+#   ARM CAN ANSWER IT.
+#
+#   THE FIX IS ONE CONSTANT WIDE IN THE SAME SENSE RUNG 23 WAS: st_cmd_path's store and st_all_send_cid's
+#   store would each take int_enable | ST_SDHCI_INT_ENABLE_CMD under a new #if threshold, and then ONE
+#   press answers the pad question, the CMD-line counts, the CMD3 row AND the CMD1/CMD2 latch question
+#   together. It is a BUILD, which moves out/ and supersedes the armed arm unspent, so it is the
+#   operator's decision and NOT this step's. Both shapes are one press.
+#
+#   LANDED AS A CHECK AND NOT A SENTENCE: tools/report_int_enable_windows.py prints the assignments that
+#   BUILD a word (with the #if threshold guarding each) and every store to 0x34 with what it writes,
+#   resolved BY NAME through the assignment and never by line number; make check runs it and its
+#   --selftest, so THE SCOPE OF EVERY WIDENING IS PRINTED ON EVERY CHECK. Its ONE REFUSAL is a defect and
+#   not a choice: a store whose value is a bare literal, because a literal there is one value with two
+#   definitions. Four selftest cells pin it.
+#
+#   AND ONE DEFECT OF THIS TOOL'S OWN, found by running it and recorded because it is the project's
+#   oldest class: the first version classified a store by SUBSTRING ('int_enable' in expr), and
+#   `int_enable | (uint32_t)ST_SDHCI_INT_RESPONSE` CONTAINS `int_enable` - so every command window was
+#   called a passthrough and the census printed ZERO five-bit windows: a tool built to report the scope of
+#   a widening, reporting that the widening had not happened. The repair is per-OPERAND (split on `|`,
+#   strip casts, ask what each operand is). A reading that is a property of the instrument - 778's count
+#   defect and 779's board constant, a third time.
+#
+# NO set= line follows this block: no arm was built, no park was made, and the sets above are unchanged.
+
 # 782: THE ARMED FORK IS A TABLE WITH FOUR ROWS - the same declarations name the register's OFF state,
 # and a two-row fork merges it with "never applied". HOST-SIDE ONLY: no device action, no press, no gate
 # against a device, no runner, no firer, nothing built, and `out/` is untouched - the armed rung-28 arm
