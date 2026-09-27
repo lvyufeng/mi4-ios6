@@ -7348,3 +7348,63 @@ set=armed-storage-dfc4ae78 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # THE ARM IS UNCHANGED BY ALL OF THIS: same bytes, same park, same switch set. The value of the
 # press went up; its cost did not. THE GOAL IS STILL NOT MET - no transfer completes, no filesystem
 # is reached and no mount is made, so TWRP-to-storage stays withheld.
+
+# 789: THE PRESENT_STATE CENSUS - HOST-SIDE ONLY, A READING OF CAPTURES ALREADY ON DISK.
+# NOTHING WAS BUILT, NO SOURCE WAS EDITED AND out/ IS BYTE-IDENTICAL BEFORE AND AFTER THIS BLOCK,
+# so the armed rung-30 arm (armed-storage-dfc4ae78, STAGE90_XNU_STORAGE_PROBE=29) is unchanged and
+# every set= line in this file still resolves. NO PRESS IS SPENT AND NONE IS AUTHORIZED.
+#
+# THE CENSUS. Every PRESENT_STATE 0x24 word the ladder has ever published - 148 READS OVER 20
+# CAPTURES - takes EXACTLY THREE values:
+#   0x01f80000 x142   INHIBIT=0  CMD_LVL=HIGH   the steady state, every command's _ps_before/_ps_after
+#   0x01f80001 x5     INHIBIT=1  CMD_LVL=HIGH   _nidx_ps_after on rungs 21/22/24/29, _rca_ps_after on 19
+#   0x00f80000 x1     INHIBIT=0  CMD_LVL=LOW    _cid_ps_after on rung 29, the SECOND of its two lines
+# Bits 21-23 (WP/CD/STABLE) are 111 in all three. Bits 17/18 are 0 in ALL 148 reads and bits 19/20 are
+# 1 in all of them, so under the standard SDHCI map DAT[3] and DAT[2] read low at every measurement -
+# CONSTANT across the archive and therefore a reading about nothing in this run. It is either this
+# IP's fixed value for those bits or a genuinely static low, and NOTHING IN THE ARCHIVE SEPARATES THE
+# TWO. Named, not concluded.
+#
+# AND THE SELECTOR HAD TO BE FIXED BEFORE THE CENSUS COULD BE TAKEN. A first pass keyed on \S*ps\S*
+# swept in fourteen keys that are not PRESENT_STATE at all, and above all _clk_set_apps_before, whose
+# 0x00004ff1 then appeared in the table as if it were a bus reading - because **`apps_before` CONTAINS
+# `ps_before` as a substring**, which is the m-class a-name-that-contains-another-name. The census
+# above is taken with the token ANCHORED AT THE END OF THE KEY. A census whose selector is looser than
+# its claim produces a table that looks like a measurement.
+#
+# AND THE ONE KEY WITH TWO PRODUCERS IS THE ONE THAT PRODUCED THE UNIQUE VALUE.
+# xnu_live_storage_cid_ps_after is published from TWO sites in the same function:
+#   :3270  c2.ps_after            - the word st_send_command recorded AT THE END OF CMD2'S POLL
+#   :3306  a FRESH READ of 0x24   - on the line after the window's exit, beside _cid_readback
+# On rung 29's arm they printed DIFFERENT VALUES: 0x01f80000 at capture line 8867 and 0x00f80000 at
+# line 8885. So one name covers two moments - the m739 class (a name with two producers) and the m732
+# class (a cell's meaning is partly WHEN it was read) at once - and it is THE ONLY KEY IN THE ARCHIVE
+# that carries two values in a single run. A reader quoting _cid_ps_after MUST SAY WHICH LINE.
+#
+# AND THE SECOND LINE IS THE ONLY PRESENT_STATE WORD IN THE ARCHIVE'S WHOLE HISTORY WITH THE CMD LINE
+# READ LOW OUTSIDE THE POLL'S OWN SAMPLES - 1 read in 148. It sits after the window's one exit
+# (_cid_wrote_back, the INT_ENABLE store, _cid_status_post, _cid_readback), so AT CMD2'S EXIT THE BLOCK
+# STILL REPORTED ITS OWN CMD LINE LOW: the line was still being driven a whole window after the poll
+# gave up. Its companion is _cmd1_inhibit_last = 0x00f80000, the last sample of CMD1's inhibit window,
+# which 786 section 6 already recorded. TWO CELLS, TWO WINDOWS, THE SAME WORD. That is a WEDGE
+# SIGNATURE, and it is not a new observation so much as a new place to read it: rung 19 found the
+# inhibit held for all 1024 samples of CMD3's window, and this says the line itself is still low one
+# window later. IT IS NOT EVIDENCE THE CARD IS HOLDING THE LINE - the block drives the line, and 788
+# section 4's residual is untouched by it.
+#
+# AND NOTHING IN THE TREE CATCHES A KEY WITH TWO PRODUCERS. tools/read_storage_commands.py reasons
+# about producer SHAPES of branch conditions, which is a different question, and it is NOT in make
+# check; a grep over tools/ and src/entry/ finds no check that counts the ST_LIVE sites per key. So the
+# m739 class is named repeatedly in this project's records AND ENFORCED NOWHERE, and the paragraph
+# above is the demonstration that the class is live rather than hypothetical.
+#
+# AND ONE PIECE OF UNVERIFIED PROSE IS NAMED HERE. entry_storage.c:2360 carries, inside a
+# _Static_assert MESSAGE, the bit map "23 is DAT[0], 24 is CMD, 25-27 are DAT[3:1]". The assert it
+# belongs to checks only (ST_SDHCI_CMD_LINE_LEVEL & ~0xFF000000u) == 0u - THE BIT MAP IN THE MESSAGE IS
+# READ BY NOTHING - and it disagrees with the standard map (16 CMD signal level, 17-20 DAT[3]..DAT[0],
+# 23 card stable, 24 CMD level). Under the message's map bits 25-27 are 0 in all 148 reads; under the
+# standard map bits 17/18 are. Both say some data lines are low; neither can be confirmed.
+#
+# THE ARM IS UNCHANGED AND THE NEXT PRESS IS UNCHANGED: same armed-storage-dfc4ae78, same park, same
+# switch set, no park member moved, no press spent or authorized. THE GOAL IS STILL NOT MET - no
+# transfer completes, no filesystem is reached and no mount is made, so TWRP-to-storage stays withheld.
