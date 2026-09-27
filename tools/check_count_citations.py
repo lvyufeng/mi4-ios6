@@ -105,16 +105,28 @@ def scan():
 
 SELFTEST = (
     # (text, expected number of findings)
-    ("`_cmd1_polls = 0x004db000` = 5,088,000 polls", 1),
+    #
+    # **THREE OF THESE CELLS ARE THE DEFECT THEY TEST, AND THEY ARE WRITTEN SO THAT NO LINE OF
+    # THIS FILE CONTAINS IT.** The scan runs over `git ls-files`, so while this file was untracked
+    # these cells were invisible to it; the commit that added the file made them visible and this
+    # check refused itself -- `make check` exit 2 on the three cells below, which is the same
+    # collision 778 documents in records/revert-set.txt and in the Makefile: a citation of a
+    # defect and the defect are the same characters, so the writer has to keep them apart. Here
+    # they are apart in the SOURCE and joined at RUNTIME, by adjacent string literals, so the cell
+    # still tests the real string and the file still scans clean.
+    ("`_cmd1_polls = 0x004db000`"
+     " = 5,088,000 polls", 1),
     ("the same count written correctly: 0x004db000 = 5,091,328", 0),
     ("a tick count beside a millisecond figure: `0x06e0953c` = 6,006 ms", 0),
     ("the offset-and-step idiom: 0x2404 (281)", 0),
     ("a value with no separators is not a citation: 0x18 = 24", 0),
     ("a decimal three orders below its hexadecimal is another quantity: 0x01000000 = 16,777", 0),
     ("a comma-grouped exact value is clean: 0x01000000 = 16,777,216", 0),
-    ("the parenthesised form, two groups: `0x004da800` (5,088,256)", 1),
+    ("the parenthesised form, two groups: `0x004da800`"
+     " (5,088,256)", 1),
     ("the parenthesised form, one group, is the offset idiom: 0x801D9100 (4)", 0),
-    ("a transposed decimal: 0x092a0bea` = 153,747,946", 1),
+    ("a transposed decimal: 0x092a0bea`"
+     " = 153,747,946", 1),
 )
 
 

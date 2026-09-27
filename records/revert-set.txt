@@ -6186,6 +6186,20 @@ set=armed-storage-f72e9f18 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #   the gate would then refuse the arm a press is waiting on. Fourteen other sites were corrected in place
 #   this step, and `tools/check_count_citations.py` now refuses any count quoted in two bases that
 #   disagree, so the next one of these is caught at `make check` instead of fourteen steps later.
+#
+#   **AND 778's OWN `make check exit 0` WAS MEASURED IN A STATE THE COMMIT DESTROYS (779a).** The block
+#   above records the check's reading as *73 counts, 0 disagreeing in any scope*. That reading was taken
+#   while `tools/check_count_citations.py` was still UNTRACKED, and the check scans `git ls-files` - so the
+#   file that was being verified was itself excluded from the verification, and so was the document that
+#   quotes the defects. Committing them made both visible and `make check` went RED on master at `9a0291e`:
+#   three of the check's own ten `SELFTEST` cells ARE the defect they test, so the check refused itself.
+#   It is the same collision 778 documents twice in this record and once in the Makefile - a citation of a
+#   defect and the defect are the same characters - and it is repaired the same way: the three cells are now
+#   ONE string in the source split across two adjacent literals, so they still test the real string at
+#   runtime and no line of the file contains the bad pair. The honest count after the repair is **108 counts,
+#   0 disagreeing in the refusing scope, 11 in the historical record** - and the 11 are the 778 document's
+#   own deliberate quotations of the bad pairs, in the scope that reports and does not refuse.
+#
 # NO set= line follows this block: no arm was built, no park was made, and the 34 sets above are unchanged.
 
 # 772: THE RUNG-26 ARM - armed-storage-a1378a48, STAGE90_XNU_STORAGE_PROBE=25.
