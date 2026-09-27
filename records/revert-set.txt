@@ -5300,3 +5300,67 @@ set=armed-storage-46fe6737 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #
 # The goal is still **NOT met**: no storage, no filesystem, no mount. The block starts a command and never
 # completes one. **TWRP-to-storage stays withheld.**
+#
+# 759 - READ OUT OF THE RUNG-21 CAPTURE AND THE PAYLOAD SOURCE; NO DEVICE ACTION, NO PRESS, NO BUILD,
+# out/ UNTOUCHED. **NO ARM MOVED.** Three explanations for 758's four-row split are refuted by cells the
+# same capture already carries. See
+# docs/experiments/experiment-759-three-explanations-for-the-four-row-split-are-refuted.md.
+#
+# (1) **THE ENABLE WINDOW DOES NOT PREDICT `started`.** CMD2 and CMD3 carry the IDENTICAL five window
+# cells - _cid_ena_wrote = 1, _cid_ena_held = 0x8001, _cid_readback = 0x8000, _cid_sig_enable = 0, and
+# the same four plus _nidx_ena_wrote for CMD3 - and CMD2 never started while CMD3 did. CMD0 ran with
+# rung 14's window OPEN (_int_enable_wrote = 1, _int_enable_held = 0x8001) and started; CMD1 ran with
+# that window restored (_int_enable_readback = 0x8000, bit 0 clear) and did not. **An open window is
+# present in ONE of the two failing rows and BOTH succeeding rows; a closed window in the other failing
+# row. The window takes two values and the outcome takes both values under each.**
+#
+# **AND THIS REFUTES THE CODEBASE'S OWN COMMENT**, which is why it is worth a record block.
+# entry_storage.c:3833-3836 says a second command in one boot "would meet the driver's own inhibit guard
+# inside st_send_command and either wait out its 10 ms bound or be refused". That is a PREDICTION,
+# written before this ladder had ever sent four commands in one boot; the rung-21 press is the first
+# boot that can test it, and it does not hold. The guard itself was not reached: _cmd1_inhibit_before =
+# 0x00000000, _cmd1_inhibit_polls = 1, _cmd1_inhibit_ticks = 8, _cmd1_inhibit_timeout = 0, so the
+# `return` at :2263 that would leave sent = 0 was not taken. The comment is NOT edited - it did its job.
+# **Note the cell asymmetry and do not smooth it over**: st_all_send_cid and st_cmd3_noidx are their own
+# bodies and NEITHER publishes `inhibit_before` or `ps_before` (0 occurrences of _cid_inhibit_before,
+# _cid_ps_before, _cid_inhibit_after in the capture), so for those two rows the evidence is
+# `_*_sent = 1` and the word read back, and that is stated rather than assumed.
+#
+# (2) **st_send_command HAS NO PER-OPCODE BRANCH.** Read in full: it clears its result, reads
+# PRESENT_STATE (:2239), runs the inhibit loop (:2246-2260), clears the latch (:2267-2270), writes
+# ARGUMENT (:2277), builds the word with ST_SDHCI_CMD_WORD(opcode, mmc_flags) (:2299), stores it 16-bit
+# to COMMAND 0x0E (:2301), sets r->sent = 1u (:2302), reads word and inhibit back (:2322-2323). **The
+# only use of `opcode` anywhere in the function is the macro argument at :2299.** So CMD0 and CMD1 take
+# identical code with SEVEN identical cells - ps_before 0x01f80000, inhibit_before 0, stale 0,
+# clear_wrote 0, clear_after 0, arg 0, sent 1, word = word_read - **and the two cells that differ are
+# the answer**: _cmd0_inhibit_after = 1 / _cmd0_inhibit_seen = 0x219 against _cmd1_inhibit_after = 0 /
+# _cmd1_inhibit_seen = 0. Nothing between the store and the block is visible to this image.
+#
+# (3) **ORDER ALONE DOES NOT EXPLAIN IT.** Started: the 1st and the 4th. Never started: the 2nd and the
+# 3rd. A block that stopped accepting after its first command would not start the fourth, and one wedged
+# by a stalled command (rung 19's CMD3 stalled 1.2 s) would not start on the next one. Not monotonic.
+#
+# **AND THE ABSENCES ARE READINGS, CHECKED RATHER THAN ASSERTED** (749's and 760's discipline).
+# _cmd0_polls = 0x0000021a = 538 with _cmd0_any_polls = 538 (a completion was seen); _cmd1_polls =
+# 0x004da000 = 5,088,256 with _cmd1_any_polls = 0; _cid_polls = 0x004da400 = 5,088,768 with 0;
+# _nidx_polls = 0x004da000 with 0. **5,088,256 samples is not zero samples** - `any_polls` is the cell
+# that distinguishes "ran and saw nothing" from "did not run", and the three commands ran the same-size
+# 1.2 s bound.
+#
+# **WHAT IS LEFT.** The split {0x0000, 0x0300, 0x030A, 0x031A} against {0x0102, 0x0209} separates by
+# OPCODE {0,3} against {1,2} and by NO other bit-field of the COMMAND register: RESP_TYPE_SELECT fails
+# on 0x0102 (type 10, did not start; 0x030A type 10, did); CRC_CHECK fails (0x0102 off and 0x0209 on
+# both did not start); CMD_INDEX is set only on 0x031A; CMD_TYPE is 00 on all six; the argument fails
+# (0x0000 is 0 and started, 0x0102 is 0 and did not); and any numeric threshold is the opcode statement
+# in another spelling, opcode being bits 13:8. **AND AN OPCODE IS NOT A MECHANISM** - nothing in the
+# payload branches on it and nothing in the register's field definitions makes 1 and 2 a family. Three
+# alternatives are measured away; no cause is named and no rung is designed.
+#
+# **NO ARM MOVED: out/ still holds `armed-storage-46fe6737` (STAGE90_XNU_STORAGE_PROBE=20), the arm 758's
+# press spent.** No firer is armed and none is needed; the press path is the two commands readiness
+# prints, run by hand once each. **A NEW RUNG COSTS THE LIVE PAYLOAD - ./build.sh does not reproduce
+# (408).** `fastboot boot` only, NEVER flash, and no press may be spent without the operator's
+# authorization.
+#
+# The goal is still **NOT met**: no storage, no filesystem, no mount. The block starts a command and
+# never completes one. **TWRP-to-storage stays withheld.**
