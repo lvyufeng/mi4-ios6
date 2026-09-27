@@ -79,7 +79,8 @@ a response never do.**
 
 **The only two rows with a completion are the only two rows whose flags are zero.** That is the whole
 finding, and it is a property of the pair rather than of either rung alone — which is why the rung was worth
-a press.
+a press. **Read §4b before using this sentence: two of the three response commands in this table were never
+taken by the block at all**, so the table has three rows for what this paragraph calls one outcome.
 
 **And it retires 726 §2's sixth hypothesis.** 726 wrote that *"this controller completes a command and does
 not set its interrupt-status register"*, on a log where `_cmd0_status_any = 0` over 5,088,256 polls of the
@@ -128,6 +129,64 @@ wrote them as one. Its cost is not a wrong number in a cell; it is that the cere
 comparison compared two different words, and the number that came back **agreed** with the middle one for a
 reason nobody chose.
 
+## 4b. The correction §3 needs: two of the three response commands were **never taken by the block at all**
+
+**Written after §3, reading the same capture again, and it changes the next subject.** §3 says *"the commands
+that ask for nothing back complete, and the commands that ask for a response never do"*. **True, and it hides
+a distinction the ladder already has the vocabulary for.** The full reading needs a third column — **did the
+block START the command at all** — and `_inhibit_after` / `_inhibit_seen` are exactly the two cells that
+answer it, which is why 743 §7 named *"the block never started it at all"* as a branch of its own.
+
+| command | word | flags | `inhibit_after` | `inhibit_seen` | outcome |
+| --- | --- | --- | --- | --- | --- |
+| CMD0 `GO_IDLE_STATE` | `0x0000` | `0x00` | **1** | `0x219` (537 of 538) | **started → completed** |
+| CMD1 `SEND_OP_COND` | `0x0102` | `0x02` | **0** | **0** of 5,088,256 | **NEVER STARTED** |
+| CMD2 `ALL_SEND_CID` | `0x0209` | `0x09` | (cell absent — §4b's note) | **0** of 5,088,000 | **NEVER STARTED** |
+| CMD3 rung 19 | `0x031a` | `0x1A` | **1** | `0x400` (all 1024) | started → never finished |
+| CMD3 rung 20 | `0x0300` | `0x00` | **1** | `0x21a` (538 of 539) | **started → completed** |
+
+**So there are three behaviours and not two**, and `inhibit_seen = 0` is not "no inhibit was observed" — it
+is **the block declined the command**, and it is a distinction with more than one producer (the sequencer
+refused it; or it ran so briefly no sample caught it; or the poll's own sampling missed it — the third is
+retired here because CMD1's poll ran **5,088,256** samples and saw nothing while CMD0's saw the bit 537 times
+in 538, so the sampler demonstrably can catch this bit).
+
+**And it is not a one-run artefact: all three of the last three presses carry it identically.**
+`xnu_live_storage_cmd1_inhibit_after = 0x00000000` with `_cmd1_inhibit_seen = 0x00000000` and
+`_cmd1_word_read = 0x00000102` in **rung 18's, rung 19's and rung 20's** captures — the same three values in
+the same three logs — while CMD0's `inhibit_after = 1` and `inhibit_seen = 0x219` are equally constant. **The
+word is in the register and the block did not take it**, three times.
+
+**What this does and does not change.** It does **not** touch the headline: rung 19's CMD3 and rung 20's are
+a matched pair — same opcode, same argument, same window, same gate, one flag word different — and they
+differ in outcome, so *the response demand is what the block stalls on* stands **for the one command it was
+measured on**. What it changes is the reach: **the ladder cannot yet say that a response demand makes the
+block refuse a command, because two of the three response commands were never taken, and the only
+response-demanding command that WAS taken is CMD3.** CMD1 and CMD2 were declined with the **same enable
+window open as CMD0** (rung 17 opens one around CMD2: `_cid_ena_wrote = 1`, `_cid_ena_held = 0x8001`), so the
+window is not the discriminator either.
+
+**So the next subject is narrower than §6 says, and it has two candidate first questions, both
+one-constant moves:**
+
+1. **is the flag word what the block declines?** Send **opcode 1 or 2 with `MMC_RSP_NONE`** — the same opcode
+   and the same argument as a command that was never taken, with the flag word changed to the value that
+   demonstrably starts (`CMD0`'s `0x00`). Starts ⇒ the response-demand bits are the refusal. Does not start
+   ⇒ the flag word is exonerated and the subject is the block's own state at that moment;
+2. **or is it the shape of the demand?** Send **CMD3 with `RESP_SHORT` alone** (word `0x0302`) — exactly
+   CMD1's flag shape on the opcode that demonstrably starts. Never starts ⇒ the *shape* is the refusal and
+   `0x0302`/`0x0209` are one class; starts and stalls ⇒ the `CRC`/`INDEX` bits are what let it start.
+
+**Neither is designed here and neither is armed.** This section records a reading, not a plan — and the
+reading is that **the ladder has been calling two different outcomes by one name for three presses.**
+
+**A note on the absent cell, so the table is not read as complete.** CMD2's `_inhibit_after` **does not
+exist**: `st_all_send_cid` publishes `_cid_inhibit_last` and `_cid_inhibit_seen` and not the third cell, a
+gap rung 19's record already names. So CMD2's row rests on `inhibit_seen = 0` and `inhibit_last =
+0x01f80000` (bit 0 clear at the window's end), which is the same evidence CMD1's row rests on plus one more
+cell — not the same evidence CMD1's row has. **The row is still a "never started" reading, and it is a
+slightly weaker one, and that is worth one line rather than a footnote.**
+
 ## 5. Everything else, unmoved
 
 **The ending is 690's clock and it did not move.** `_seam_post_end_ticks = 0x06ddd000`, `_post_cntfrq =
@@ -146,7 +205,11 @@ log exactly as in 745 §1, and the block's own sentence stands beside it: **it i
 
 ## 6. What the next rung is for, and what it is not
 
-**The subject is now the response path**, and the ladder's next question is narrower than any it has asked:
+**The subject is now the response path — with §4b's correction, and the correction is what makes the next
+question askable**: the block declined CMD1 and CMD2 outright and took CMD3, so *why a response-demanding
+command is refused* and *why a response-demanding command that IS taken never finishes* are **two questions
+in one name**, and §4b names a one-constant move for each. What the ladder's next question is, is narrower
+than any it has asked:
 **a command that asks for a 48-bit response and gets none never completes and never times out** — `_rca_err
 = 0`, the whole `INT_STATUS` register zero over 5,088,000 polls, and (per 726's census) the block's own
 `TIMEOUT` never set either. That is not the SDHCI timeout behaviour, and it is not the card's: **it is this

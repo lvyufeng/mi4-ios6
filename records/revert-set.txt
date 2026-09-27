@@ -4583,7 +4583,28 @@ set=armed-storage-b7e5a18f sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # **1.2000 s**, the full bound.
 #
 # **AND THE LADDER NOW HOLDS ONE TABLE IT COULD NOT BUILD UNTIL THIS RUNG EXISTED** - five commands' own
-# inhibit and completion readings, four in this capture and the fifth (rung 19's CMD3) in 742's:
+# inhibit and completion readings, four in this capture and the fifth (rung 19's CMD3) in 742's. **AND THE
+# SPLIT IS THREE-WAY, NOT TWO-WAY - THE CORRECTION THIS BLOCK'S HEADLINE NEEDS**, added after the table was
+# first written by reading the same capture again: the block **STARTED** CMD0 and this CMD3, **STARTED AND
+# STUCK** on rung 19's CMD3 R1, and **NEVER TOOK CMD1 AND CMD2 AT ALL** - `_cmd1_inhibit_after = 0` with
+# `_cmd1_inhibit_seen = 0` over **5,088,256** samples while `_cmd1_word_read = 0x0102` proves the word
+# reached the register, and `_cid_inhibit_seen = 0` over 5,088,000 with `_cid_word_read = 0x0209` for CMD2.
+# **Identical in all three of the last three presses** - rungs 18, 19 and 20 carry the same three CMD1
+# values. So `inhibit_seen = 0` is not *no inhibit was observed* but **the block declined the command**, and
+# the sampler demonstrably catches this bit: CMD0's was seen **537 times in 538 samples**. **The headline
+# stands** (rungs 19 and 20 are a matched pair differing in ONE flag word and their outcomes differ), but its
+# reach is narrower than the sentence - **the ladder cannot yet say that a response demand makes the block
+# REFUSE a command, because two of the three response commands were never taken and the only
+# response-demanding command it ever took is CMD3.** CMD1 and CMD2 were declined with the SAME enable window
+# open as CMD0 (rung 17 opens one around CMD2: `_cid_ena_wrote = 1`, `_cid_ena_held = 0x8001`), so the window
+# is not the discriminator. **Two one-constant moves follow, and NEITHER IS DESIGNED HERE and neither is
+# armed**: (1) **opcode 1 or 2 with `MMC_RSP_NONE`** - the same opcode and the same argument as a command that
+# was never taken, with the flag word changed to the value that demonstrably starts - which asks whether the
+# FLAG WORD is the refusal; (2) **CMD3 with `RESP_SHORT` alone, word `0x0302`** - exactly CMD1's flag shape on
+# the opcode that demonstrably starts - which asks whether the SHAPE is. A note so the table is not read as
+# complete: **CMD2's `_inhibit_after` does not exist** (`st_all_send_cid` publishes the pair and not the third
+# cell), so its "never started" row rests on one cell less than CMD1's - a slightly weaker reading, said
+# rather than footnoted.
 #
 #   command                   word      inhibit_seen  inhibit_last   polls      ticks        complete status_any
 #   CMD0 GO_IDLE_STATE        0x0000    0x219 (537)   0x01f80000     0x21a      0x1326           1          1
