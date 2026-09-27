@@ -4555,3 +4555,104 @@ set=armed-storage-b7e5a18f sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # The goal is still NOT met: **no storage, no filesystem, and the machine never observed staying up** -
 # which is a sharper and a truer sentence than the one this record has been repeating. TWRP-to-storage
 # stays withheld.
+
+# ================================================================================================
+# 746: THE RUNG-20 PRESS - THE RESPONSE DEMAND WAS THE STALL.
+# ================================================================================================
+# `armed-storage-b7e5a18f` (`STAGE90_XNU_STORAGE_PROBE=19`, ordinal rung 20, park
+# `out/stage90/frozen/armed-storage-b7e5a18f`), the driver's own CMD3 `SET_RELATIVE_ADDR` with
+# `MMC_RSP_NONE` in place of `MMC_RSP_R1`, so the command word is `0x0300` where rung 19's was `0x031A`.
+# **ONE PRESS, SPENT BY HAND UNDER THE OPERATOR'S OWN AUTHORIZATION.** Readiness 5 of 5 exit 0 (flags
+# `--allow-xnu-entry`, set `armed-storage-b7e5a18f`, found by hashing the live `stage90-qcdt.img`
+# `86c9e5d7…`); **exactly one** `./scripts/preflight_boot_check.sh --allow-xnu-entry` (exit 0, 596 lines);
+# **exactly one** `./scripts/run_and_capture.sh --allow-xnu-entry --expect-arm=armed-storage-b7e5a18f`.
+# Fired 2026-09-27 01:21:21 UTC, returned 01:22:35 UTC: **RUNNER EXIT=0**, 74 s, the device back 28 s after
+# the send (seen via adb). `fastboot boot` only, **nothing flashed**, no firer armed, no stray runner, gate
+# or watcher, and the neighbour `33e80afe` absent from BOTH `fastboot devices` and `adb devices` at fire
+# time (0 occurrences). Capture `out/stage90/captures/rung20-nrsp-20260927-012235-last_kmsg.txt`,
+# **630,462 B**, sha256 `9f4473862d313ccc3ae16dd7af7e2da3eae9f14b79199c56f55f5ba6e3f606a5`, archived by hand
+# with its run log and its gate log (the runner does not archive - 730 section 6).
+#
+# **IT ANSWERED, AND IT IS THE FIRST BRANCH OF 743 SECTION 7'S THREEWAY: THE RESPONSE DEMAND WAS THE
+# STALL.** `_nrsp_complete = 0x00000001` beside `_nrsp_status_any = 0x00000001`, with `_nrsp_err = 0` and
+# `_nrsp_timeout = 0`. The block took the driver's own word (`_nrsp_word = _nrsp_word_read = 0x0300`, read
+# back out of `COMMAND 0x0E`), `CMD_INHIBIT` rose on the read after the store (`_nrsp_inhibit_after = 1`),
+# stayed up for 538 of the poll's 539 samples (`_nrsp_inhibit_seen = 0x21a`) and was **CLEAR at the last
+# one** (`_nrsp_inhibit_last = 0x01f80000`, where rung 19's was `0x01f80001`), and the whole command ran
+# `_nrsp_ticks = 0x1327` = **4,903 ticks = 0.255 ms** against rung 19's `0x015f92d7` = 23,040,727 ticks =
+# **1.2000 s**, the full bound.
+#
+# **AND THE LADDER NOW HOLDS ONE TABLE IT COULD NOT BUILD UNTIL THIS RUNG EXISTED** - five commands' own
+# inhibit and completion readings, four in this capture and the fifth (rung 19's CMD3) in 742's:
+#
+#   command                   word      inhibit_seen  inhibit_last   polls      ticks        complete status_any
+#   CMD0 GO_IDLE_STATE        0x0000    0x219 (537)   0x01f80000     0x21a      0x1326           1          1
+#   CMD1 SEND_OP_COND  (R3)   0x0102    0               0x00f80000     0x4db000   0x015f9067       0          0
+#   CMD2 ALL_SEND_CID  (R2)   0x0209    0               0x01f80000     0x4dac00   0x015f9ceb       0          0
+#   CMD3 rung 19       (R1)   0x031a    0x400 (1024)    0x01f80001     0x4da400   0x015f92d7       0          0
+#   CMD3 rung 20       (NONE) 0x0300    0x21a (538)     0x01f80000     0x21b      0x1327           1          1
+#
+# **The only two rows with a completion are the only two rows whose flags are zero.** That is a property of
+# the PAIR and of neither rung alone, which is why the rung was worth a press. **And it retires 726
+# section 2's sixth hypothesis** (*"this controller completes a command and does not set its
+# interrupt-status register"*): `INT_STATUS` bit 0 DOES latch for a completing command, through the same
+# window on the same block in the same image - what rungs 13, 14 and 15 read was a block whose commands
+# never finished.
+#
+# **THE ONE PREDICTION THAT WAS REFUTED, AND THE REFUTATION IS A DEFECT IN THE PRE-REGISTRATION.** 743
+# section 7 predicted that with the demand removed nothing should clear `RESPONSE 0x10`, so
+# `_nrsp_resp_post` should still hold `0x40ff8080`. **It reads `0x00000000`**, exactly as rung 19's did -
+# so **the clearing is NOT tied to the response demand**, and 742 section 1's reading cannot be inferred
+# from this pair. **And the three readings 743 section 7 called "one arithmetic at three times, the
+# driver's own `(readl(RESPONSE + 0x1C) << 8) | readb(RESPONSE + 0x1B)`" are TWO DIFFERENT WORDS**:
+# `_nrsp_resp_pre` and `_nrsp_resp_post` are that derivation (`st_cmd3_noresp`'s `before`/`after` pair),
+# while `_nrsp_resp` is a bare `readl(RESPONSE + 0x10)` read inside `st_send_command` - word 0 - and the
+# middle reading agreeing with the first is CMD1's `0x40ff8080` still sitting in word 0 while CMD2's
+# leftover still sat in words 2 and 3. **SO THIS RECORD DOES NOT SAY THE RESPONSE REGISTER WAS CLEARED**,
+# because the pair published does not license it. The discriminating reading is owed and it is cheap: **the
+# four raw `RESPONSE` words at their four offsets, at the three moments** - the shape rung 17's and rung
+# 18's bodies already publish (`_cid_raw0..3`, `_rb_raw0..3`) and this arm's CMD3 body does not. Recorded as
+# an instance of the project's most-repeated class (`mi4-one-value-two-definitions`): one quantity - what
+# the RESPONSE block holds after CMD3 - with **two readings**, and a pre-registration that wrote them as
+# one. Its cost is not a wrong cell; it is that a three-time comparison compared two different words and
+# the number that came back agreed with the middle one for a reason nobody chose.
+#
+# **THE SAFETY CONTRACT HELD, AND EVERY CELL OF IT IS IN THE LOG.** Two stores, both to `INT_ENABLE 0x34`:
+# the one-bit window `(read | SDHCI_INT_RESPONSE)` before the command (`_nrsp_ena_wrote = 0x00000001`,
+# `_nrsp_ena_held = 0x00008001` - the partial readback rung 14 measured, bit 15 set by a write and not
+# cleared by one) and its restore on ONE unconditional line after the publishes (`_nrsp_wrote_back =
+# 0x00000000`, `_nrsp_readback = 0x00008000`). **`SIGNAL_ENABLE 0x38` READ AND NEVER WRITTEN**
+# (`_nrsp_sig_enable = 0`), which is what keeps this block's SPI 123 -> intid 155 off a line nobody here
+# owns. No data path, no `POWER_CONTROL 0x29`, no GCC word, no `core_mem` word, no byte of the medium - and
+# **0 `xnu_live_irq_other_*` keys anywhere in the capture**, so the pre-registered delivery did not occur,
+# the fourth arm in a row.
+#
+# **THE ENDING IS 690's CLOCK AND IT DID NOT MOVE**: `_seam_post_end_ticks = 0x06ddd000`,
+# `_post_cntfrq = 0x0124f800` (19,200,000 Hz), `_post_elapsed` climbing 0 -> 0x001db763 -> 0x024e1686 ->
+# **0x06e94a31** (= 116,083,761 ticks = 6.0460 s, crossing the 6.0000 s deadline), **`_post_end_calls =
+# 0x00000006`**, with `_seam_end_run = 0` and `_seam_post_end_run = 0`, so the deadline is the one that
+# fired. `_seam_lr = 0x800492dc` unmoved, `_seam_sp = 0x80557ec8`, `_seam_sctlr = 0x30c57879`,
+# `_sleh_storm = 0x9`. The runner's criterion block is the known storage-arm shape - **7 PASS / 1 FAIL / 2
+# UNREAD counted per criterion** (the `seam_sp = 0x80557ec8 is not sleh_sp-8` FAIL and the two `SLOT_NULL`
+# UNREADs) - and it is printed TWICE in the run log, so counting LINES reads one criterion as two failures
+# (m751).
+#
+# **THE NEXT SUBJECT IS THE RESPONSE PATH, and two readings are owed before any new command class.**
+# (1) **A 48-bit demand that gets no reply never completes AND never times out**: rung 19's CMD3 ran
+# 5,088,256 polls with `_rca_err = 0`, the WHOLE `INT_STATUS` register zero (`_rca_status_any = 0`), and
+# per 726's census the block's own `TIMEOUT` bit never set either - which is not the SDHCI timeout
+# behaviour and not the card's, but this block waiting on a CMD-line reply nothing on the other end is
+# sending. (2) **Which words move** - the four raw `RESPONSE` words at the four offsets at the three
+# moments, the reading 743 section 7 thought it was publishing. **And a third thing that is a READING and
+# not a verdict**: `PRESENT_STATE 0x24` reads `0x01f80000` at ALL TWELVE moments this capture published it,
+# with bit 16 (`SDHCI_CARD_PRESENT`) clear - **and this record does NOT read that as "no card"**, because
+# the arm's own source says at `entry_storage.c:218` that the bit *"must NOT be read as 'no card' here"*.
+# A bit that cannot be read either way needs a second reading beside it, not a verdict.
+#
+# **THIS BLOCK ARMS NOTHING.** Rung 20 is pressed and spent; no firer is armed; **no press is owed**; and
+# the press path remains the two commands readiness prints, run by hand once each (730 section 6 - the
+# launcher's bytes are kept nowhere).
+#
+# The goal is still **NOT met**: no storage, no filesystem, no mount, and the machine never observed
+# STAYING UP (745). The goal's floor - *user mode reached, and a driver answering* - is met and no further.
+# **TWRP-to-storage stays withheld.**
