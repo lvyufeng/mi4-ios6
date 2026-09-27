@@ -5414,3 +5414,92 @@ set=armed-storage-46fe6737 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # press is the operator's decision.** New instance m771: a class built by merging two rows that a published
 # cell separates - "started" is not a column of any capture.
 #
+#
+# ================================================================================================
+# 762 (2026-09-27): THE RUNG-22 ARM IS BUILT AND PARKED - THE VENDOR'S DLL AND HOST_CONTROL2
+# CENSUS, THREE READS AND NO STORE, AND THE FIRST ARM THIS LADDER HAS BUILT SINCE 747.
+# **NO PRESS IS SPENT BY THIS BLOCK AND NO FIRER IS ARMED.**
+# ================================================================================================
+#
+# THE ARM: `armed-storage-c3007c37`, identified by the sha256 prefix of its own `xnu_arm_entry.bin`
+# (`c3007c37891a4d38...`). Switch VALUE 21, which this record counts as its ORDINAL rung 22 - the two
+# spellings are one apart (755 section 7) - `STAGE90_XNU_STORAGE_PROBE=21`.
+#
+# WHAT IT ADDS: three reads in a new body `st_dll_census`, at the position rung 18's `st_resp_before`
+# takes - immediately BEFORE `st_cmd_path()`, after rung 9's wait, i.e. at the one moment the vendor's
+# own bring-up has finished and no command has ever been on this bus. Pre-registration is 756 section
+# 6; the alternative space was closed by 761 section 5.
+#
+#   HOST_CONTROL2 0x3E   as a HALFWORD (`f982493e:ldrh`) - sdhci.h:79; the register
+#                        `sdhci_msm_set_uhs_signaling` writes UNCONDITIONALLY at sdhci-msm.c:2597, and
+#                        the only thing in this image that could have cleared its UHS field is rung 4's
+#                        SDHCI_RESET_ALL.
+#   CORE_DLL_CONFIG 0x100 as a WORD (`f9824a00:ldr`) - sdhci-msm.c:80. The vendor's
+#                        `sdhci_msm_set_uhs_signaling` sets `CORE_DLL_RST` (1<<30, :2578) and
+#                        `CORE_DLL_PDN` (1<<29, :2583) here at `host->clock <= CORE_FREQ_100MHZ`
+#                        (`:2567`; 100 MHz, `:164`) with the vendor's own comment "the feedback clock
+#                        must be provided and DLL must not be used so that tuning can be skipped".
+#   CORE_DLL_STATUS 0x108 as a WORD (`f9824a08:ldr`) - sdhci-msm.c:89, whose bit 7 is CORE_DLL_LOCK.
+#
+# **THE WINDOW IS `hc_mem` AND NOT `core_mem`, AND THAT IS THE ONE ERROR THAT WOULD MAKE THESE READINGS
+# MEAN SOMETHING ELSE.** The vendor reaches both registers as `host->ioaddr + CORE_DLL_CONFIG`, and
+# `host->ioaddr` is `sdhci_pltfm_init`'s FIRST memory resource - `hc_mem` (`msm8974.dtsi:500`,
+# `reg-names = "hc_mem", "core_mem"`). The DT settles it: `msm8974pro.dtsi:1765` widens `&sdhc_1` from
+# the base node's `0x11c` to `0x1a0`, and `0x100`/`0x108` are beyond `0x11c` - the window was widened to
+# cover exactly this pair. `core_mem + 0x100` is a different register file one window away, and both
+# windows share their high half `0xf982`, so a reading taken there would publish under these names with
+# every cell in the log agreeing with the record.
+#
+# **THE THREE-WAY, PRE-REGISTERED (756 section 6), AND EACH WAY NAMES THE NEXT ACT:**
+#   `_dll_rst` AND `_dll_pdn` BOTH 1 -> the DLL is already reset and powered down by something that ran
+#     before this image; **the 756 section 3 hypothesis is DEAD and nothing further is owed here**.
+#   EITHER BIT 0 -> the block is running with an undischarged DLL at 400 kHz against the vendor's own
+#     comment; **doing what the vendor does - set both bits - becomes the cheapest untried thing on
+#     this path**, and that would be the NEXT rung (a store, and therefore its own pre-registration).
+#   `_dll_ctrl2_uhs = 0` -> 756 section 4's spec argument holds and rung 4's RESET_ALL did reach
+#     HOST_CONTROL2; nonzero -> the reset does NOT clear that field on this IP and the second half of
+#     the vendor's write becomes live too.
+#
+# **SAFETY, AS A PROPERTY OF THE BYTES AND NOT A SENTENCE**: `build_entry.sh`'s clause for this rung
+# asserts `st_dll_census`'s device store set is EMPTY and its three addresses are each accessed exactly
+# once (`f982493e:ldrh=1 f9824a00:ldr=1 f9824a08:ldr=1`), that its image-side access set is empty, that
+# it is called EXACTLY ONCE from `entry_storage_probe`, and that its call line precedes `st_cmd_path`'s.
+# **The empty store set is the whole safety argument for reading above the command gate**, the same one
+# 739 wrote for rung 18: 736's press cost a press because rung 15's store to `INT_ENABLE 0x34` sits
+# above that gate and bit 15 rides with any write to that register and no write clears it, so the gate
+# read `0x00008000` and NO COMMAND WENT ON THE BUS. **No new window and no new mapping**: all three
+# addresses are in the megabyte `0xf98` this image already installs and reads, and 692's `addr >> 20`
+# interlock is satisfied by construction.
+#
+# **AND THE RUNG-21 COMMAND IS STILL SENT, DELIBERATELY.** Rung 21's call site is guarded `>= 20` in
+# `src/entry/entry_storage.c`, and this rung changes no guard on a rung that has already been built,
+# armed and pressed. So a value-21 image carries BOTH the census and the `0x030A` CMD3: the log carries
+# the three DLL readings taken BEFORE the first command beside a second sample of the stall. **That is
+# recorded rather than edited away**, and it is why this rung is purely additive - no existing rung's
+# guard, body or reading was moved to build it.
+#
+# **THE BUILD, AND WHAT IT COST**: `src/entry/build_entry.sh` refused the first two invocations on
+# purpose - its own arm-change gate, which requires `STAGE90_ENTRY_ARM_CHANGE=1` and printed the switch
+# set the parked arm needed, catching TWO switches this step had wrong (`STAGE90_XNU_ISTACK_SEPARATE`
+# defaults to 1 and `STAGE90_XNU_POST_END_TICKS` to 0; the pressed arm carries 0 and 115200000). The
+# third invocation also refused, on this rung's own new clause - `st_dll_census` was INLINED because the
+# body was declared plain `static`, and every other body this clause family asserts carries
+# `__attribute__((noinline, noclone))` (m731: `noinline` alone does not stop GCC cloning). With both
+# attributes the entry build exits 0 printing this rung's clause, and the payload build follows with
+# `-DSTAGE90_XNU_ENTRY=1`.
+#
+# WHAT WAS NOT DONE: **no press, no firer, no device action of any kind.** The previous arm
+# (`armed-storage-46fe6737`, value 20) is still parked and its bytes are untouched; its park is what
+# `out/` is now restored from if this arm is ever to be withdrawn. `armed-storage-c3007c37` IS ARMED AND
+# NOT PRESSED, and spending it is the operator's decision.
+set=armed-storage-c3007c37 sha256=07f2c11af1df717a77789b0338d686454bc396bc23b2247935d3cc44c5a8859d bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-21-entry-rung-22-whose-new-body-is-a-READ-ONLY-CENSUS-OF-THE-VENDORS-DLL-AND-HOST_CONTROL2-registers-the-three-reads-756-section-6-pre-registered
+set=armed-storage-c3007c37 sha256=5c33ca84814f211a8a7ba22d41ef3938659cc28ef233a9f227d69b068035884d bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-21-entry
+set=armed-storage-c3007c37 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-the-pressed-arm-EXCEPT-NOTHING-the-probe-switch-lives-in-the-entry-arms-own-record
+set=armed-storage-c3007c37 sha256=b76577eb5b795351817ed59f8993332b236050e91e5545a3a9fd727f36884451 bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-c3007c37 sha256=27096722f2e828f88d221c5861668ac04927dfa9d1b4c84292774a6c61908003 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above
+set=armed-storage-c3007c37 sha256=c3007c37891a4d38ad5083bd581edceafc00ef14ccebf0d4686e589c55b34234 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-c3007c37-IS-THE-SET-NAME-and-it-carries-THREE-NEW-READS-st_dll_census-with-an-EMPTY-store-set
+set=armed-storage-c3007c37 sha256=c22769b190b8592d44eb42f24906eca33725d0512c9d32a22d97990b5e8a5edd bytes=6732300 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-c3007c37 sha256=5dd95a69dc56f710a1395fe8a6f0e9c9d1ed92f779395c78b47d142627acf39d bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact
+set=armed-storage-c3007c37 sha256=66f933eacd4f7767662987534ed7c0b41e43297802a745608f9207e233cd2793 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match
+set=armed-storage-c3007c37 sha256=e7b0d572f6a3d8325ba0381a16b26b2685c20475b74c747a7a07f242143fc271 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-c3007c37 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list

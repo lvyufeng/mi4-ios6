@@ -31187,6 +31187,75 @@ verify_trace_symbols() {
                     layout_fail "entry_storage_probe calls st_resp_before on disassembly line $stb_rb_calls_ln and st_cmd_path on line ${stb_rb_cmd_ln% *}: the pre-command read must come BEFORE the command path. **This is the whole rung.** Placed after it, the block has carried CMD0, CMD1 and CMD2, so a non-zero \`RESPONSE 0x10\` is a fact about a block that has just answered three commands - which is 738's reading, taken again under this rung's key names, with \`_rb_resp_zero\` published as a value that cannot mean what its name says. The position IS the experiment, which is m708's shape, and 732's first build and 736's press are the two instances of a body placed on the wrong side of a boundary in this same function. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_739: st_resp_before's device accesses are [$stb_rb_set] with counts [$stb_rb_cnt] - EVERY address once and NO STORE ANYWHERE - in program order [$stb_rb_order] with an EMPTY image side; entry_storage_probe calls it once, on disassembly line $stb_rb_calls_ln, BEFORE st_cmd_path on line ${stb_rb_cmd_ln% *}, so RESPONSE 0x10 is read for the first time in this ladder at the one moment no command has ever been on the bus: the four words the driver reads, the three bytes it takes below them, PRESENT_STATE 0x24 with its CMD_INHIBIT bit, COMMAND 0x0e as a halfword, and the three interrupt registers 0x30/0x34/0x38 read and never written - and _rb_resp_zero is derived in the image from the four raw words, so 738's doubt (is \`0x40ff8080\` the card's or the block's?) is answered by a reading rather than by an argument"
             fi
+            if [[ $STORAGE_PROBE -ge 21 ]]; then
+                # **756 section 6: THE DLL AND \`HOST_CONTROL2\` CENSUS - the ladder's SECOND body whose
+                # whole subject is a read, and its own clause for the reason rung 18's has one.** It is a
+                # \`static\` function called from \`entry_storage_probe\`, so its three device reads are in
+                # neither the probe's own store census nor its width-vs-offset census (the store census sees
+                # no store because there is none, and that is exactly the clause that has to exist for the
+                # absence to be a reading rather than a silence - m720's shape, one function over).
+                #
+                # **And the EMPTY store set is the whole safety argument for reading above
+                # \`st_cmd_path\`'s gate**, the same argument 739 wrote for rung 18: 736's press cost a press
+                # because rung 15's store to \`INT_ENABLE 0x34\` sits above that gate and bit 15 rides with
+                # any write to that register and no write clears it, so the gate read \`0x00008000\` and NO
+                # COMMAND WENT ON THE BUS.
+                #
+                # **The window is the second claim here and the reason this clause declares addresses rather
+                # than offsets.** The vendor reaches \`CORE_DLL_CONFIG\` as \`host->ioaddr + 0x100\`, and
+                # \`host->ioaddr\` is \`sdhci_pltfm_init\`'s FIRST memory resource - \`hc_mem\`
+                # (\`msm8974.dtsi:500\`, \`reg-names = "hc_mem", "core_mem"\`). \`core_mem + 0x100\` is a
+                # DIFFERENT register file one window away, and this block's two windows share their high half,
+                # so a body that took the reading there would publish it under these names and be wrong with
+                # every cell in the log agreeing with the record. The declared addresses below are the
+                # \`hc_mem\` ones, and the DT is what settles them: \`msm8974pro.dtsi:1765\` widens \`&sdhc_1\`
+                # from the base node's \`0x11c\` to \`0x1a0\`, and \`0x100\`/\`0x108\` are beyond \`0x11c\` -
+                # the window was widened to cover exactly this pair, which is a reading of the device tree and
+                # not a coincidence of arithmetic.
+                stb_dll=$(sym_addr st_dll_census) ||
+                    layout_fail "st_dll_census is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE - rung 22's arm IS this body (experiment-756 section 6), and an arm at this rung without it is the rung below with a different config hash: the press would come back carrying a second sample of rung 21's stall and NONE of the cells 756 section 6 pre-registered, while the record claimed the rung. Three ways to get here: renamed, INLINED into entry_storage_probe (where the probe's own store census would read its lines and its position against the gate would be ordered by nothing this build checks), or its call site removed - which the call-count clause below names. Nothing is rebuilt by this refusal"
+                stb_dll_size=$(sym_size st_dll_census) ||
+                    layout_fail "st_dll_census is in the image and its size could not be read out of it"
+                stb_dll_body=$(arm-none-eabi-objdump -d --start-address="$stb_dll" \
+                               --stop-address="$(printf '0x%x' $(( stb_dll + stb_dll_size )))" "$OUT/xnu_arm_entry.elf")
+                { read -r stb_dll_dev; read -r stb_dll_cnt; read -r stb_dll_img; read -r stb_dll_imgaddr; } < <(classify_body "$stb_dll_body" "f982493e f9824a00 f9824a08")
+                stb_dll_str_count=$(printf '%s\n' $stb_dll_dev | awk '/:str/{c++} END{print c+0}')
+                [[ "$stb_dll_str_count" == "0" ]] ||
+                    layout_fail "st_dll_census contains $stb_dll_str_count device store(s) and rung 22 is READ-ONLY - its whole act is three reads. **This refusal is the arm's safety argument for being placed where it is placed**: it runs immediately BEFORE \`st_cmd_path()\`, above the between-commands gate, and 736's press is the measurement of what a store above that gate costs. Writing \`CORE_DLL_CONFIG\` to disable the DLL is the NEXT rung's act and not this one's - the reading has to say whether the bits are already set before the write is worth a press, and 756 section 6's first branch is that a body which finds them already set owes nothing further. It is FIRST, before the set and count clauses, so a perturbed build that adds a store is refused by the sentence that explains why. Nothing is rebuilt by this refusal"
+                stb_dll_set=$(printf '%s\n' $stb_dll_dev | LC_ALL=C sort | tr '\n' ' ')
+                stb_dll_set_want="f982493e:ldrh f9824a00:ldr f9824a08:ldr "
+                [[ "$stb_dll_set" == "$stb_dll_set_want" ]] ||
+                    layout_fail "st_dll_census's device accesses are [$stb_dll_set] (sorted) and rung 22's record says exactly [$stb_dll_set_want] - HOST_CONTROL2 0x3E as a HALFWORD (sdhci.h:79; the vendor reads it with sdhci_readw at sdhci-msm.c:2544, and 0x3E is 2-aligned and not 4-aligned, so a \`ldr\` there would be an unaligned access to a Strongly-ordered device section - 692's abort class by alignment), CORE_DLL_CONFIG 0x100 as a WORD (sdhci-msm.c:80) and CORE_DLL_STATUS 0x108 as a WORD (sdhci-msm.c:89). **The two 0x1xx offsets are in \`hc_mem\` and not in \`core_mem\`**, which is why the declared list above carries full addresses: both windows share their high half \`0xf982\`, so a body that read \`core_mem + 0x100\` would resolve to a declared-adjacent address and its reading would be about a different register file. What a store cannot produce is a WIDTH error, and that is what this clause is for. Nothing is rebuilt by this refusal"
+                stb_dll_cnt_want="f982493e:ldrh=1 f9824a00:ldr=1 f9824a08:ldr=1 "
+                stb_dll_cnt=$(printf '%s\n' $stb_dll_cnt | LC_ALL=C sort | tr '\n' ' ')
+                [[ "$stb_dll_cnt" == "$stb_dll_cnt_want" ]] ||
+                    layout_fail "st_dll_census's device access COUNTS are [$stb_dll_cnt] and rung 22's record says exactly [$stb_dll_cnt_want] - EVERY address exactly once and NONE written. A count of 2 at one of the three is a register read twice under one name, which makes the second reading the one a reader takes while the first is the one the record describes; and a MISSING entry is the case to be most suspicious of, because a reading this body dropped would leave the set clause above satisfied only if the address vanished entirely - which the set clause does refuse. The two clauses are a pair and neither substitutes for the other. Nothing is rebuilt by this refusal"
+                stb_dll_order=$(printf '%s\n' $stb_dll_dev | tr '\n' ' ')
+                [[ "${stb_dll_order% }" == "f982493e:ldrh f9824a00:ldr f9824a08:ldr" ]] ||
+                    layout_fail "st_dll_census's device accesses IN PROGRAM ORDER, distinct, are [$stb_dll_order] and rung 22's record says [f982493e:ldrh f9824a00:ldr f9824a08:ldr] - HOST_CONTROL2 first, then the DLL's configuration word, then its status word. **The order is the reading's shape and not a style**: \`CORE_DLL_STATUS 0x108\` answers whether the DLL is LOCKED, which is a question about the DLL whose configuration was read one access earlier, and taking the status first would make the pair two readings of two moments with no way to tell which configuration the lock belongs to. Nothing is rebuilt by this refusal"
+                [[ -z "${stb_dll_img// /}" ]] ||
+                    layout_fail "st_dll_census's non-device memory accesses are [$stb_dll_img] at [$stb_dll_imgaddr] and rung 22's record says that set is EMPTY - the body holds three words and a counter on its own stack, reached through \`sp\` and therefore invisible to the classifier, and publishes through \`entry_live_write\` (a call, with a .rodata string). A symbol here is either one this rung never declared or an access the classifier could not resolve. Nothing is rebuilt by this refusal"
+                stb_dll_calls=$(grep -c -- 'bl.*<st_dll_census>' <<<"$stb_body")
+                [[ "$stb_dll_calls" == "1" ]] ||
+                    layout_fail "entry_storage_probe makes $stb_dll_calls call(s) to st_dll_census and rung 22 makes exactly one. Zero is the whole arm absent - every \`_dll_*\` cell absent with it, and \`_dll_ctrl2_uhs\` too, so 756 section 6's HOST_CONTROL2 half would be read as 'the reset did not clear the field' from a log with no cell for it at all. Two or more means the registers are read twice under one set of names. This is the clause m720 is about: an absent key's three producers must be named before its absence is read. Nothing is rebuilt by this refusal"
+                stb_dll_cmd_ln=$(awk '/bl.*<st_cmd_path>/{ printf "%d ", NR }' <<<"$stb_body")
+                stb_dll_own_ln=$(awk '/bl.*<st_dll_census>/{ printf "%d ", NR }' <<<"$stb_body")
+                stb_dll_calls_ln=${stb_dll_own_ln% }
+                [[ -n "$stb_dll_cmd_ln" && -n "$stb_dll_calls_ln" ]] ||
+                    layout_fail "the two call lines could not be read out of entry_storage_probe's disassembly ([$stb_dll_cmd_ln] for st_cmd_path, [$stb_dll_calls_ln] for st_dll_census), so the ORDER of the census and the command path is not readable here. This refusal is about the SCAN and not about the arm: an unreadable disassembly is not an arm in the wrong order, and the call-count clauses above are the ones that refuse an arm. Nothing is rebuilt by this refusal"
+                (( ${stb_dll_calls_ln} < ${stb_dll_cmd_ln% *} )) ||
+                    layout_fail "entry_storage_probe calls st_dll_census on disassembly line $stb_dll_calls_ln and st_cmd_path on line ${stb_dll_cmd_ln% *}: the census must come BEFORE the command path. **This is the whole rung.** \`HOST_CONTROL2\` and the DLL words are what the vendor's own bring-up sets during power-up (\`sdhci_msm_set_uhs_signaling\` at \`sdhci-msm.c:2567-2597\`), and 756 section 6's three outcomes per register are statements about what a driver would find on this boot having set the clock and not yet sent anything. Placed after the command, \`CORE_DLL_STATUS\` would be read on a block that has been running a 1.2 s stalled command, and the pairing of a lock bit with a configuration word would be a pairing of two moments. The position IS the experiment (m708's shape); 732's first build and 736's press are the two instances of a body on the wrong side of a boundary in this same function. Nothing is rebuilt by this refusal"
+                # **AND THE RUNG BELOW STILL SENDS ITS COMMAND, WHICH IS DELIBERATE AND IS NOT AN
+                # OMISSION.** Rung 21's call site is guarded \`>= 20\` in \`src/entry/entry_storage.c\`, so
+                # a value-21 image carries BOTH this census and the \`0x030A\` command. This rung changes no
+                # guard that is already pressed - the rung-21 arm was built, armed, pressed and archived -
+                # and the consequence is recorded rather than edited away: the log carries the three DLL
+                # readings taken BEFORE the first command (the position this clause just asserted) beside a
+                # second sample of the stall. **The claim below is therefore about the POSITION and not
+                # about the absence of a command**, which is the distinction a reader needs and the one a
+                # \`-eq 20\` guard change would have made unavailable for a pressed rung.
+                echo "  xnu_entry_756: st_dll_census's device accesses are [$stb_dll_set] with counts [$stb_dll_cnt] - EVERY address once and NO STORE ANYWHERE - in program order [$stb_dll_order] with an EMPTY image side; entry_storage_probe calls it once, on disassembly line $stb_dll_calls_ln, BEFORE st_cmd_path on line ${stb_dll_cmd_ln% *}, so HOST_CONTROL2 0x3E (as a halfword), CORE_DLL_CONFIG 0x100 and CORE_DLL_STATUS 0x108 are read at the one moment the vendor's own bring-up has finished and no command has ever been on the bus: the UHS field the reset may or may not have cleared, the DLL_RST and DLL_PDN bits the vendor sets at this clock and this ladder never has, and the lock bit that says whether the block is sampling on the DLL. **The window is hc_mem's 0x1a0 tail and not core_mem**, which the Pro override in msm8974pro.dtsi:1765 is what settles"
+            fi
             # **743: `-eq 18` RATHER THAN `-ge 18`, WHICH IS THE SAME KIND OF CHANGE 736 FORCED ON
             # RUNG 15 AND A DIFFERENT REASON.** Rung 20 sends the same opcode with the same argument
             # and the response demand removed, so `st_set_relative_addr` is compiled for the VALUE 18
