@@ -133,6 +133,13 @@ substring test would get **wrong**, `8084_l20` against `qcom,pma8084@0`, which p
 from 11 cells to **26** (8 rail attributions, 1 token rule, and 10 against the device's own file,
 including the computed 0-of-42).
 
+**And `tools/verify_press_ready.sh` was run once, host-side, with no device action — 5 of 5, exit 0**
+— because this step appends a block to `records/revert-set.txt`, the file the arm-resolution and
+park-verification tools parse. It reports the same arm: `armed-storage-d5d98738`, 11 of 11 members
+hashed in place against the record, the park equal to the live `out/`, the gate exit 0 under
+`--allow-xnu-entry`, and the press catcher usable. So the record's new block did not disturb the arm
+resolution, and that is a reading rather than an assumption.
+
 **And one coupling was caught by writing it down**: `--write-record` will write a rail line whatever
 it reads, so a rail with no PMIC token would be written as `pmic -` — and the check refuses exactly
 that. **A producer that can write what its own checker refuses is the m749 class**, so the verdict is
