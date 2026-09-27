@@ -6164,3 +6164,66 @@ set=armed-storage-f72e9f18 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 #   rests on what the specification says about latching has to name the specification the block says it is.
 #
 # NO set= line follows this block: no arm was built, no park was made, and the 34 sets above are unchanged.
+
+# 772: THE RUNG-26 ARM - armed-storage-a1378a48, STAGE90_XNU_STORAGE_PROBE=25.
+# Built, parked and recorded here. HOST-SIDE ONLY: no device action, no press, no gate
+# against a device, no runner, no firer. Rung 25's park (armed-storage-f72e9f18) and rung
+# 23's (armed-storage-3a92aa52) are both untouched; this arm SUPERSEDES rung 25 because it
+# strictly contains it, MEASURED rather than argued: the value-24 build from this same
+# source is byte-identical to f72e9f18 (see the 771 block above for why that matters).
+# The four new cells are already-measured values printed for the first time, so this arm
+# adds NO device access, NO register, NO window, NO megabyte and NO store.
+#
+# WHAT THE ARM IS. Four keys, all of them already in a register when the arm runs, and NO new device
+# access, no new register, no new window, no new megabyte and no store of any kind:
+#   xnu_live_storage_cmd0_cmdlow_seen   the count of the first 1024 samples of CMD0's poll in which
+#   xnu_live_storage_cmd1_cmdlow_seen   `PRESENT_STATE 0x24` bit 24 (ST_SDHCI_CMD_LINE_LEVEL, the CMD
+#   xnu_live_storage_cid_cmdlow_seen    line's OWN LEVEL) was LOW - one count per command, computed by
+#                                       the 724 sampler for EVERY command since rung 24 and published
+#                                       by rung 24 for `nidx` alone
+#   xnu_live_storage_cid_inhibit_after  the fourth row of 771's table and the only row the log has
+#                                       never carried: st_send_command fills it for EVERY command and
+#                                       no publish block has ever printed it
+#
+# WHY IT EXISTS. 771 read the rung-24 press's log as ONE FOUR-ROW TABLE and found the four commands are
+# not the same experiment: _cmd0_inhibit_seen = 0x218 beside a command that completed and latched
+# INT_RESPONSE; _cmd1_inhibit_seen = 0 and _cid_inhibit_seen = 0 beside 5.09 M polls each with NOTHING
+# latched at all; _nidx_inhibit_seen = 0x400 beside a block that armed and FIRED its own response
+# timeout at 665.2 us. AND THE ONLY TRACE OF WHAT THE CMD LINE WAS DOING DURING CMD1 OR CMD2 IS ONE
+# SAMPLE: `inhibit_last` bit 24 reads LOW for CMD1 and HIGH for CMD2 on every capture in the archive
+# (10 cmd0, 8 cmd1, 7 cid). _cmd1_inhibit_last = 0x00F80000 with _cmd1_inhibit_seen = 0 is a
+# contradiction the archive already carries, and one sample cannot separate "the block never started
+# this command" from "the block drove the line and the inhibit bit is not a reliable witness". The
+# count separates them.
+#
+# CONTAINMENT, MEASURED AND NOT ARGUED. Every new line sits inside `#if STAGE90_XNU_STORAGE_PROBE >= 25`,
+# so value 24 is untouched by construction - and that was then MEASURED: the value-24 build from this
+# same source came out BYTE-IDENTICAL to the parked armed-storage-f72e9f18 (f72e9f18..., 5552764 bytes,
+# exit 0). One press therefore answers the SDC1 pad question AND these four cells, and rung 25's park
+# need never be pressed. That is the same relation 767 established between rungs 23 and 24.
+#
+# WHAT DID NOT MOVE, MEASURED. xnu_arm_entry.bin is 5552764 bytes - the SAME size as the arm before it,
+# because the four new keys fitted the padding. 770 measured that an unchanged size is NOT the claim
+# that nothing moved, so the claim here rests on the hash (a1378a48..., different) and on the seam
+# clause: STAGE90_XNU_SEAM_LR is still 0x8004a2dc and the build accepted it against the linked image,
+# so the entry text did NOT cross a page this time. The payload's switch record is BYTE-IDENTICAL to
+# rung 23's, rung 24's and rung 25's (6c2b6038..., 682 bytes) - the 763 section 5 trap, checked by cmp
+# and not by eye.
+#
+# WHAT THE PRESS WILL COST AND WHAT IT BUYS. The arm's hazards are rung 25's own - one read of a TLMM
+# pad register in a megabyte whose section the arm installs - and its new cells add none. Its answer is
+# row 1 of 25's pad table PLUS three counts and one after-bit; neither is a verdict about the card, and
+# a zero count is a reading only if the sampler outran the bus, which is why each count is read beside
+# its own `_polls`/`_ticks`. NO PRESS IS SPENT HERE AND NONE IS AUTHORIZED: building, parking and
+# recording are host-side, and the press is the operator's.
+set=armed-storage-a1378a48 sha256=b782cc1aeffb9fabf67dc845b314905af2cd7aa8ab2a2c5b6598d1e4595b1493 bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-25-entry-rung-26-whose-four-new-cells-are-ALREADY-MEASURED-VALUES-printed-for-the-first-time-cmd0-cmd1-and-cid-cmdlow_seen-and-cid_inhibit_after-and-whose-value-24-build-from-this-same-source-is-BYTE-IDENTICAL-MEASURED-so-one-press-answers-everything-rung-25-would-have
+set=armed-storage-a1378a48 sha256=c4afd616ffb10e183afd4845779c3817a402a632231632867a911ce20411ab9f bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-25-entry
+set=armed-storage-a1378a48 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rung-23-rung-24-and-rung-25-s-MEASURED-by-cmp-so-no-payload-switch-moved-and-STAGE90_XNU_ENTRY-is-1
+set=armed-storage-a1378a48 sha256=ec7118595584d241d87c03f8d65d21dabf3417d7d48aadd5ecd6988f7feaef2e bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-a1378a48 sha256=94d4ce2bb7280ca73f51d80a248b834beff0f3eab7850ddc36a96d20e194a08f bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above
+set=armed-storage-a1378a48 sha256=a1378a485349fc26048f34b8fee3a9775f5563150119611cc3dfcafadbd56ec9 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-a1378a48-IS-THE-SET-NAME-and-its-SIZE-IS-UNCHANGED-at-5552764-bytes-because-the-four-new-keys-fitted-the-padding-770-measured-that-a-unchanged-size-is-NOT-the-claim-that-nothing-moved
+set=armed-storage-a1378a48 sha256=c3eb05d4c6acc3c3d48b5c856434272cfd53db6eb2a472de1f9abda003159c26 bytes=6732328 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-a1378a48 sha256=fd63d9baa13e3112fc7021e3846fb6b312a08f8206e4524d7f32a94c1926dc6c bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE-25
+set=armed-storage-a1378a48 sha256=2fd9874221bf0e4fdb54adbec2cbb3ea4dd41be73f5bdbda92d7a8e7201c7c56 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-23-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match
+set=armed-storage-a1378a48 sha256=4f55edbfa44bd8606e8b403feda18d6322a73b5b58a9f4f414f8e53c2e8e5b29 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-a1378a48 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
