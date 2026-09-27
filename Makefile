@@ -54,11 +54,22 @@ restore:
 #                           family, not the entry image's. The rule was prose inside a `role=` string until
 #                           732 named an arm after its qcdt and nothing noticed (see that file's header).
 # Neither one touches the device, `out/`, or the gate.
+#   read_storage_key_order.py --selftest
+#                           re-derives the two landed *moments* defects - m732 (a rung-3/4 cell
+#                           read for a moment that belongs to rung 7) and m763 (the key quoted
+#                           for "after the power byte" is published by the reset stage, first) -
+#                           from the call order of `entry_storage.c` alone. It is a fifth check
+#                           rather than a fourth because the tool it guards was WRONG TWICE
+#                           while it was being written: once naming every function `__attribute__`,
+#                           once truncating a macro-generated key to half a name. Both times the
+#                           table it printed looked plausible. A reference tool that can lie like
+#                           that has to carry a self-test, and the self-test has to run.
 check:
 	@tools/check_stage_paths.sh
 	@tools/check_set_name_rule.sh
 	@tools/check_backtick_messages.sh
 	@tools/check_payload_config_entry.sh
+	@tools/read_storage_key_order.py --selftest >/dev/null
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not

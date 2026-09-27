@@ -55,6 +55,18 @@ restructure moved it: the `reference/` and `status/` pages were re-pointed at th
   producer shapes satisfy its condition**, exiting 1 when any branch has more than one — which is how
   752 found that **branch 2's condition is satisfied both by a stuck command with an `INDEX` bit and by a
   released one without any**.
+- `read_storage_key_order.py` — reads **`src/entry/entry_storage.c`** and answers *when* a key is
+  published, not what it held: for any `xnu_live_storage_*` key it prints the function that publishes it,
+  the chain of calls from `entry_storage_probe` that reaches it, and the preprocessor guard on every hop.
+  `--after EVENT KEY` **refuses** a "read after X" claim the call order does not support. It exists because
+  the record's most-repeated defect class has two instances that are the same question asked of the same
+  file — **m732** (a rung-3/4 cell read for a moment that belongs to rung 7) and **m763** (the key quoted
+  for "after the power byte" is published by the *reset* stage, which the probe calls first) — and both had
+  been found by hand, one press apart. Defaults the rung to **the value the image in `out/` was built at**,
+  refuses a rung outside the domain parsed from the file's own `#error` guard, and calls a cell published
+  from an interrupt client an **INTERVAL** rather than inventing a point for it. Its **`--selftest`**,
+  which re-derives m732 and m763 from the call order, runs as a clause of `make check` — because the tool
+  was wrong four times while it was written, twice while printing a plausible table (754).
 
 ## Status — `status/`
 
