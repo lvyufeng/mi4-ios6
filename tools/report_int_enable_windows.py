@@ -145,9 +145,15 @@ def report(rows=(), assigns=(), out=sys.stdout):
     # What each store's expression RESOLVES to: the store writes a name, and the name holds one of
     # two words depending on the build. Binding by line number would be wrong -- the assignment and
     # the store are different lines by construction.
+    # **Keyed by (FUNCTION, name) and not by name alone.** Three command windows now each declare a
+    # local `ena` built from a different word under a different `#if`, and a map keyed by name alone
+    # merges them: this tool printed `st_cmd_path`'s store as *backing 0x000f0001 (>= 28), 0x000f0001
+    # (>= 22), 0x00000001 (>= 22)* - three producers of one name, which is m739's shape and a
+    # property of the INSTRUMENT rather than of the arm. A local is scoped to its function, so the
+    # function is part of the name.
     amap = {}
     for n, func, guard, name, expr, kind in assigns:
-        amap.setdefault(name, []).append((kind, guard))
+        amap.setdefault((func, name), []).append((kind, guard))
     w('\n  every store to 0x34:\n\n')
     w('  %-6s %-22s %-8s %-38s %s\n' % ('line', 'function', 'store in', 'expression', 'what it is'))
     for n, func, guard, expr, kind in rows:
@@ -157,11 +163,11 @@ def report(rows=(), assigns=(), out=sys.stdout):
         elif kind == 'passthrough':
             val = 'a value the program read'
             bare = re.sub(r'\((?:uint32_t|u32)\)', '', expr).strip()
-            if IDENT.match(bare) and bare in amap:
+            if IDENT.match(bare) and (func, bare) in amap:
                 val = ('backing ' + ', '.join(
                     '%s (built under %s)' % (WORDS[k.split(':', 1)[1]][0] if k.startswith('constant:') else 'A LITERAL',
                                              ('>= %d' % g) if g is not None else 'no guard')
-                    for k, g in amap[bare]))
+                    for k, g in amap[(func, bare)]))
         elif kind == 'zero':
             val = 'zero -- the absence of an enable, and no second definition'
         elif kind == 'LITERAL':
@@ -176,10 +182,10 @@ def report(rows=(), assigns=(), out=sys.stdout):
       % (len(wide), ', '.join('%s:%d (>= %s)' % (a[1], a[0], a[2]) for a in wide) or '(none)'))
     w('  the ONE-BIT word (`0x00000001`) is built at %d line(s): %s\n'
       % (len(narrow), ', '.join('%s:%d (>= %s)' % (a[1], a[0], a[2]) for a in narrow) or '(none)'))
-    wide_names = {a[3] for a in wide}
+    wide_names = {(a[1], a[3]) for a in wide}
     stores_wide = [r for r in rows
                    if r[4].endswith('ST_SDHCI_INT_ENABLE_CMD')
-                   or re.sub(r'\((?:uint32_t|u32)\)', '', r[3]).strip() in wide_names]
+                   or (r[1], re.sub(r'\((?:uint32_t|u32)\)', '', r[3]).strip()) in wide_names]
     w('  and the FIVE-BIT word reaches %d store(s), all in: %s\n'
       % (len(stores_wide), ', '.join(sorted({r[1] for r in stores_wide})) or '(none)'))
     return wide, narrow

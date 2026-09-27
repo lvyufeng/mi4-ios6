@@ -6901,3 +6901,121 @@ set=armed-storage-d5d98738 sha256=82694f6323dc43376fbc9431537c84edfe341667a77d2e
 set=armed-storage-d5d98738 sha256=7e29dfa4d7057f56621606ae9d6ad36d2c76b70689e2468bc1e936ea30a406d9 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match-THIS-MEMBER-MOVED-ONCE-AND-ONLY-BECAUSE-build_entry-sh-CHANGED-A-MESSAGE-backtick-escape-for-make-check-s-check_backtick_messages-and-the-ARTIFACT-HASH-d5d98738-DID-NOT-MOVE-WHEN-IT-WAS-REBUILT-THREE-TIMES-IN-A-ROW
 set=armed-storage-d5d98738 sha256=092f94d4e4b77ace9a8f75b47ed7f09eee9e40dd45fcfac6ecbd01d8e666caa2 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
 set=armed-storage-d5d98738 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+# 785: THE RUNG-29 ARM - armed-storage-5fca6210, STAGE90_XNU_STORAGE_PROBE=28.
+# Built, parked and recorded here. HOST-SIDE ONLY so far: no device action, no press, no runner,
+# no firer. Rungs 28, 27, 26, 25 and 23's parks are all intact; this arm SUPERSEDES rung 28
+# because it strictly contains it, MEASURED rather than argued (the value-27 build from this same
+# source is byte-identical to d5d98738, the parked rung-28 arm - see the containment paragraph).
+#
+# WHAT IT IS. 783 read the scope of the widening rung 23 introduced and found it had reached ONE
+# OF THREE command windows. 766's lesson (765 section 1) was that this block's INT_STATUS is a
+# GATED VIEW - a status bit is visible only while its enable stands - and the repair was applied
+# in st_cmd3_noidx, the LAST command this ladder sends. The two windows that carry the FIRST four
+# commands were left writing the lone ST_SDHCI_INT_RESPONSE (0x00000001):
+#   st_cmd_path     (src/entry/entry_storage.c:4353)  - CMD0 and CMD1
+#   st_all_send_cid (src/entry/entry_storage.c:3121)  - CMD2
+# This arm widens both to ST_SDHCI_INT_ENABLE_CMD == 0x000F0001 - the completion with the four
+# command-level error bits, TIMEOUT | CRC | END_BIT | INDEX - which is the SAME constant rung 23
+# put in st_cmd3_noidx and NOT a new one.
+#
+# SO THE ARM'S ONE ACT IS ONE CONSTANT, APPLIED AT TWO WINDOWS, WITH NO NEW STORE TO THE BLOCK.
+# Both windows already stored to INT_ENABLE 0x34 on every arm from rung 14 and rung 16 on; what
+# changes is the VALUE stored. The number of stores is unchanged, SIGNAL_ENABLE 0x38 is still
+# read and never written, and no new register, no new width, no new window, no new megabyte and
+# no new device access of any other kind is added. The dead `#else` arms carry rung 14's and rung
+# 16's exact lines, so at a value below 28 this source compiles to what it compiled to before.
+#
+# WHAT THE WIDENING BUYS, AND WHY IT IS WORTH A PRESS. On the rung-28 arm, two of the ladder's
+# five commands reported `_cmd1_status_any = 0` and `_cid_status_any = 0` over their full 1.2 s
+# windows. Those zeros were readings ABOUT THE MASK, not about the block: a bit the mask does not
+# enable is a bit a gated view cannot show. CMD1 is SEND_OP_COND - the command an eMMC must answer
+# for this ladder to move at all, and the one 764 section 5 named as the frontier's question -
+# so widening here is what turns those two zeros into readings about the controller. The keys the
+# widening changes are, per window, the same seven 724 owes every command:
+#   xnu_live_storage_cmd1_status_any / _any_polls / _inhibit_last / _inhibit_seen (CMD1)
+#   xnu_live_storage_cid_status_any  / _any_polls / _inhibit_last / _inhibit_seen (CMD2)
+#   xnu_live_storage_ena_wrote / _cid_ena_wrote - the two words the arm now stores, published as
+#   what was written, so the log carries the widen constant itself and not an inference from it.
+#   BOTH KEYS ALREADY EXIST on the rung-28 arm (measured against that park's own entry ELF: one
+#   string each), so this arm adds NO NEW KEY, NO NEW CELL AND NO NEW COUNT - what changes is the
+#   VALUE one existing key carries, which is why the widen is read out of the log and not argued.
+#
+# THE ANSWER SPACE, FOUR ROWS PER WINDOW AND THE FIRST IS THE VALUABLE ONE. With the five bits
+# enabled, `_status_any` is a count of polls in which ANY status bit stood:
+#   * `_status_any` still 0 over 5,088,000-ish samples with `_any_polls` large means the block set
+#     NO bit of INT_STATUS AT ALL during that command - not the completion and not TIMEOUT - which
+#     is exactly the state rung 22's arm found for `nidx` (764 section 4) and would say the block's
+#     silence at CMD1/CMD2 is the same silence, on a mask that could have shown a timeout.
+#   * bit 15 (TIMEOUT, 0x00008000) alone means the command was issued, held the line, and the
+#     block's own response timeout fired - the sticky bit rung 23's `_nidx_status_pre` already
+#     carries for CMD1, now read at the window that ISSUED it rather than through a later latch.
+#   * CRC / END_BIT / INDEX means the card answered and the answer was malformed.
+#   * bit 0 alone means the completion bit is visible and the command finished.
+#
+# AND IT IS THE LAST OF THE THREE. At VALUE 28 the ladder has no command window left writing the
+# one-bit word: st_cmd3_noidx was widened by rung 23 (its one-bit store at :3995 is the `#else`
+# arm of that widen and is not built at 28), st_quiet_enable_probe (:3016) holds only the
+# read-modify-write that closes its own window and carries NO command, and st_set_relative_addr /
+# st_cmd3_noresp are compiled only at values 19 and 20 so they are absent from this arm entirely.
+# `tools/report_int_enable_windows.py` now reads, over the whole file and every value: the
+# FIVE-BIT word built at 3 sites - st_all_send_cid:3120 (>= 28), st_cmd3_noidx:3993 (>= 22),
+# st_cmd_path:4351 (>= 28) - and reaching 3 stores, against the ONE-BIT word reaching only the
+# command-less probe. That census is the tracked reading of 783's defect being closed rather than
+# re-described, and 783 named a window-scope check as owed.
+#
+# AND IT STRICTLY CONTAINS RUNG 28, MEASURED TWICE, ON BOTH ARTIFACTS THAT MATTER. Every new line
+# sits inside `#if STAGE90_XNU_STORAGE_PROBE >= 28`, written as a whole `#if`/`#else` pair rather
+# than as a conditional expression so that the value-27 source is what it was. Measured from this
+# same source: the value-27 PAYLOAD came out BYTE-IDENTICAL to the parked armed-storage-d5d98738
+# (stage90-qcdt.img 93026ca1..., 8572928 bytes), and the value-27 ENTRY IMAGE came out
+# BYTE-IDENTICAL to that park's own xnu_arm_entry.bin (d5d98738..., 5552764 bytes). So the edit is
+# surgical: nothing outside the >= 28 guards moved. The consequence is that the value-28 arm is
+# rung 28 PLUS one constant per window and nothing else, and that rung 28's pad question (the
+# _pad_raw four-row fork) is answered in the SAME press that answers this one - which is why rung
+# 28 need never be pressed on its own.
+#
+# THE PAYLOAD'S OWN SWITCH SET DID NOT MOVE: stage90-build-config.txt is BYTE-IDENTICAL to the
+# rung-28 park's member (6c2b6038..., 682 bytes) and carries STAGE90_XNU_ENTRY=1. The ENTRY's
+# config differs in exactly two lines - STAGE90_XNU_STORAGE_PROBE 27 -> 28 and the artifact's own
+# STAGE90_XNU_ENTRY_SHA256 - and the entry's sources record differs in exactly two lines: the same
+# sha256, and ONE source file's content hash, src/entry/entry_storage.c.
+#
+# THE SAFETY READING IS UNCHANGED IN KIND. `_ena_wrote` and `_cid_ena_wrote` are published as what
+# was stored, so 0x000f0001 is a reading taken out of the log rather than a property of the source;
+# the enables are the SAME TWO stores to INT_ENABLE 0x34, in the same `#if >= 14` / `#if >= 16`
+# windows, with the same restore calls; SIGNAL_ENABLE 0x38 is still read and never written; and the
+# arm is still `fastboot boot` only with nothing flashed. Nothing in this build touches the PMIC,
+# the rails, the clocks, the DLL, the pad register or any address outside the two windows that
+# already existed.
+#
+# ONE COST IS PAID IN THIS SAME BUILD, and it is the one 763/775/776 named as owed: 784 section 7
+# reported that tools/report_int_enable_windows.py keyed its assignment map by the local NAME of
+# the word it stores, so three functions each declaring a local `ena` collapsed into ONE producer
+# list that printed st_cmd_path's store as backing three words - 739's shape, a name with two
+# producers. That tool now keys by (function, name), which is what makes the census above a
+# reading rather than a statement, and the widening is the first arm that would have been
+# MISREPORTED by the old key.
+#
+# AND THE OWED SITES THIS BUILD DOES NOT PAY STAY OWED AND NAMED: the four `5,088,000`s and the
+# mis-citation at src/entry/entry_storage.c:302-303 (COST-owed, still carried); the set-comparison
+# pad repair (779 section 7, pre-registered, not built); the rung_para correction for values
+# 12..23; the seam-address class; run_and_capture.sh's EXIT_POP_LR_LITERAL; fdt_nodes's lack of a
+# synthetic FDT cell (782 section 6); 784's rail_name cell; and the window-scope check 783 asked
+# for - which this build ANSWERS IN PROSE AND IN THE CENSUS and not as a build-time clause.
+set=armed-storage-5fca6210 sha256=a9fa370380903035c0e5ece5bd9607647833d683a1c6afdcf0ea21c0af79147a bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-28-entry-rung-29-whose-ONE-NEW-ACT-is-ONE-CONSTANT-APPLIED-AT-TWO-INT_ENABLE-WINDOWS-0x000F0001-in-place-of-0x00000001-with-NO-new-store-NO-new-register-NO-new-window-and-NO-new-megabyte-and-whose-value-27-build-from-this-same-source-is-BYTE-IDENTICAL-MEASURED-to-d5d98738
+set=armed-storage-5fca6210 sha256=f4d7c94979dc2edb2f77335ca716cbbedba8b33ae2ff0ad8000e006b778cced3 bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-28-entry
+set=armed-storage-5fca6210 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-28-s-MEASURED-by-cmp-so-no-payload-switch-moved-and-STAGE90_XNU_ENTRY-is-1
+set=armed-storage-5fca6210 sha256=0cdf035d89b46d7c6363bbc73c6c1c85db4b950b2391c4f9b3969b1a7ab23c7b bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-5fca6210 sha256=444b3fd06f7dab2819901e94cbb93de18837bc28204d745994032384179a96c5 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above
+set=armed-storage-5fca6210 sha256=5fca6210c2c2b69f6fa33c1612cecc1acbdea7f73972dba6b4c99670585ff067 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-5fca6210-IS-THE-SET-NAME-and-its-SIZE-IS-UNCHANGED-at-5552764-bytes-770-measured-that-an-unchanged-size-is-NOT-the-claim-that-nothing-moved-and-the-seam-clause-accepted-the-linked-image-so-no-page-was-crossed-and-the-value-27-build-from-this-same-source-is-BYTE-IDENTICAL-MEASURED-to-the-rung-28-park-s-member-d5d98738
+set=armed-storage-5fca6210 sha256=531459e9bd7d07af67456ad964dc06d41c8bb2245dc51268445514593351138a bytes=6732328 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of
+set=armed-storage-5fca6210 sha256=1a1a5a849ee099b76924b16c07f56fe97797c58c6ce3a2843b8b673ec04695df bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE-28-and-BYTE-IDENTICAL-to-the-rung-28-park-s-member-in-EVERY-LINE-EXCEPT-TWO-the-rung-number-and-this-artifact-s-own-sha256
+set=armed-storage-5fca6210 sha256=3e97ffb2a026b6022faaf7982bc0ca334720c3b81fd6a96882a5fbbdadca11b4 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match-it-differs-from-the-rung-28-park-s-member-in-EXACTLY-TWO-LINES-the-artifact-s-own-sha256-and-ONE-source-file-s-content-hash-src-entry-entry_storage-c-263d0116-to-7c8800c3
+set=armed-storage-5fca6210 sha256=26caefaecc93904e5b72b176d338df45feb6ffbfc51bf5949d19765037737f1b bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-5fca6210 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-bytes-across-every-arm-since-574
+#
+# THE PARK IS out/stage90/frozen/armed-storage-5fca6210/ - ELEVEN MEMBERS, the eleven set= lines
+# above, each verified IN PLACE by tools/verify_revert_set.sh before this block was committed. The
+# live out/stage90/ and the park were compared file by file with cmp and agree byte for byte.
+# armed-storage-d5d98738 (rung 28) and every park before it are untouched and remain the fallback.
+# THE PRESS IS THE OPERATOR'S: this arm is ARMED AND NOT PRESSED.
