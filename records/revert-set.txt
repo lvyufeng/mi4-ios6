@@ -6328,8 +6328,19 @@ set=armed-storage-a1378a48 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # bit 16 (INT_TIMEOUT) is a real CMD2 timeout that arrived late, or the enable store's own
 # effect, is UNSEPARATED by every capture on record. _cid_stale is INT_STATUS 0x30 as FOUND
 # at CMD2's ENTRANCE - the first read of that register since CMD1's poll gave up 1.2 s
-# earlier - and the interval it sits in contains NO write to 0x34 at all. A non-zero there
-# is CMD1 doing something after its poll ended; a zero is CMD1 doing nothing.
+# earlier.
+#
+# **CORRECTED BY 777.** The sentence that stood here read: "and the interval it sits in contains
+# NO write to 0x34 at all. A non-zero there is CMD1 doing something after its poll ended; a zero
+# is CMD1 doing nothing." THAT IS FALSE AND THE SECOND ROW IS UNREACHABLE. st_all_send_cid
+# writes INT_ENABLE 0x34 at entry_storage.c:3110, and _cid_stale is c2.stale, read inside
+# st_send_command at :2560 - AFTER that store and after its own inhibit gate. 736 measured that
+# any write to 0x34 SETS bit 15 (SDHCI_INT_ERROR) by itself and nothing clears it, so the cell is
+# >= 0x00008000 on EVERY run by construction. Read it as == 0x00008000 EXACTLY (nothing but this
+# arm's own store is in the register) versus anything ABOVE it. The value on any future press is
+# unchanged; what was wrong was the sentence an operator would have read as a measurement.
+# entry_storage.c:3167 carries the same false reason and is OWED to the next build (a comment
+# there forces one, which is 771's COST rule). See experiment-777.
 #
 # CONTAINMENT, MEASURED: every new line sits inside `#if STAGE90_XNU_STORAGE_PROBE >= 26`,
 # and the value-25 build from this same source came out BYTE-IDENTICAL to the parked

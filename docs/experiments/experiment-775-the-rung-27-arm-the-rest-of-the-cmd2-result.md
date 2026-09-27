@@ -39,10 +39,18 @@ CMD2's poll giving up and CMD3's entrance. **The only write in that interval is 
 measured sets bit 15 by itself.** So whether bit 16 (`INT_TIMEOUT`) is a real CMD2 timeout that arrived after
 the poll gave up, or the enable store's own effect, is **unseparated by every capture on record.**
 
-**`_cid_stale` is that reading taken one command earlier.** It is `INT_STATUS` as found at **CMD2's entrance**
-— the first read of that register since CMD1's poll gave up 1.2 seconds earlier — and the interval it sits in
-contains **no write to `0x34` at all**. A non-zero there is CMD1 doing something after its poll ended; a zero
-is CMD1 doing nothing.
+**`_cid_stale` is that reading taken one command earlier.** It is `INT_STATUS` as `st_send_command` finds it
+for CMD2 — the first read of that register since CMD1's poll gave up 1.2 seconds earlier.
+
+> **CORRECTED BY 777.** The sentence that stood here — *the interval it sits in contains no write to `0x34`
+> at all. A non-zero there is CMD1 doing something after its poll ended; a zero is CMD1 doing nothing* — is
+> **false in its reason and empty in its second row**. `st_all_send_cid` writes `0x34` at
+> `entry_storage.c:3110`, and `_cid_stale` is read inside `st_send_command` at `:2560`, **after** that store
+> and after its own inhibit gate; by 736's measurement any write to `0x34` **sets bit 15 by itself** and
+> nothing clears it. So the cell is `>= 0x00008000` on every run by construction and **the `zero` row is
+> unreachable**. Read it as `== 0x00008000` exactly (*nothing but this arm's own store is in the register*)
+> versus anything above it. See **777**, which corrects this claim in the gate and here, and names
+> `entry_storage.c:3167` — this arm's own copy of the same sentence — as owed to the next build.
 
 **Its zero is a reading only if something would have set it**, so it is read beside `_cid_clear_after = 0`
 and `_cmd1_status_any = 0` — the same register at two other moments — and beside `_cid_status_any`, which is
@@ -119,7 +127,9 @@ the seam-address class itself — *a kernel address pinned in an entry source* �
 `run_and_capture.sh`'s `EXIT_POP_LR_LITERAL` structural repair; the 737 window paragraph in
 `entry_storage.c`, owed for a **cost** reason and not a lane reason; and **the rung-28 pad write, already
 pre-registered in 773 §4** — read `0xFD512044`, compare against `0x00009F24`, write only if unconfigured,
-read back.
+read back — **now built as 776's rung-28 arm** — and **`entry_storage.c:3167`, this arm's own copy of the
+`_cid_stale` reason 777 measured to be false**, owed for the same COST reason: a comment there forces a
+build, and the next build should be an arm that carries the correction.
 
 **The goal is still NOT met.** 「起码要能进入操作系统，把基础驱动跑起来」 is partially met (user mode and the
 `memdev.c` fixture, per 745); the SDHCI storage driver does not exist and 「让os可以正常启动并且挂载存储」 is
