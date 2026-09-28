@@ -421,6 +421,62 @@ sed 's/ manifest_members=.*/ manifest_members=stage90-qudt.img/' "$W/manifest-re
 cell "manifest-member-not-in-set"   1 "not a file= line of set" \
   bash "$TOOL" "$MAN" --record="$W/mm-bad.txt"
 
+# ---- 6c, both directions, AND NEITHER IS VISIBLE TO 6a OR 6b. This is 801's defect, rebuilt as a cell.
+#
+# 801 found the armed arm's own record naming TWO of the five members its manifest names, and every check
+# in the verifier printed `ok` - because 6a closes the FIELD over the SET and 6b closes the MANIFEST over
+# the SET, so a field that is SHORT of the manifest satisfies both. What was wrong was the relation
+# BETWEEN them. `manifest_members=` is a claim ABOUT the manifest, so the two are compared as sets, and
+# these are the two cells that show each direction refusing.
+#
+# The short direction is the one that shipped, and its consequence is the reason it is a refusal rather
+# than a note: the gate verifies the manifest with `sha256sum -c`, so a member named only inside the
+# manifest is READ by the gate. A reader who trusts the field reverts fewer files than the gate reads and
+# gets a red gate with every recorded hash matching.
+SHORTF=$W/mm-short.txt
+sed 's/ manifest_members=.*/ manifest_members=stage90_fixture.macho,stage90.img,stage90.img/' \
+  "$W/manifest-record.txt" > "$SHORTF"
+# The guard every door in this file gets: if the doctoring did not land, the cell below asserts a refusal
+# about a field that is not there, and passes or fails for the wrong reason. The count is DERIVED from the
+# record rather than written as a number, so this guard keeps meaning what it says if $FILES grows.
+_short_want=$(printf '%s\n' $FILES | grep -vc '^SHA256SUMS.txt$')
+grep -q 'manifest_members=stage90_fixture.macho,stage90.img,stage90.img$' "$SHORTF" || { echo "the short-field record did not take the truncated field - the cell below would check nothing" >&2; exit 1; }
+[[ $(grep -o 'manifest_members=.*' "$SHORTF" | tr ',' '\n' | grep -c .) -lt $_short_want ]] || { echo "the short-field record is not short ($(grep -o 'manifest_members=.*' "$SHORTF" | tr ',' '\n' | grep -c .) names against the manifest's $_short_want) - a cell for a field that is too SHORT, over a field that is not" >&2; exit 1; }
+cell "field-short-of-manifest"      1 "the record's field for 'fixture' does not:" \
+  bash "$TOOL" "$MAN" --record="$SHORTF"
+
+# And the OTHER direction, which has a different cause and so gets its own cell and its own wording: the
+# field names `SHA256SUMS.txt`, which IS a `file=` line of the set - so 6a is satisfied - and is never a
+# member of the manifest's own member list, because a manifest that lists itself records the hash of the
+# empty file the redirect truncated. A field that names it describes a manifest that is not the one here.
+EXTRAF=$W/mm-extra.txt
+sed "s/ manifest_members=.*/ manifest_members=SHA256SUMS.txt,$(printf '%s\n' $FILES | grep -v '^SHA256SUMS.txt$' | tr '\n' ',' | sed 's/,$//')/" \
+  "$W/manifest-record.txt" > "$EXTRAF"
+grep -q '^set=fixture .* manifest_members=SHA256SUMS.txt,' "$EXTRAF" || { echo "the extra-field record did not take the doctored field - the cell below would check nothing" >&2; exit 1; }
+# It must still satisfy 6a, or the refusal would come from the wrong check and the cell would pass on a
+# message it is not about.
+cell "field-extra-name-in-set"      1 "names member(s) this directory's manifest does not: SHA256SUMS.txt" \
+  bash "$TOOL" "$MAN" --record="$EXTRAF"
+# **AND IT MUST STILL SATISFY 6a, OR THE CELL ABOVE PASSES ON A MESSAGE IT IS NOT ABOUT.** This is not a
+# `cell` but a preflight with its own refusal, because the property it asserts is the ABSENCE of 6a's
+# FAIL - and `cell` asserts an exit code and a phrase, neither of which can express "this other check
+# stayed quiet". It runs the real tool and requires 6a's own `ok` line for `SHA256SUMS.txt` to be there.
+#
+# **The output is captured and then grepped, and that is not style: the first draft wrote the obvious
+# `if bash "$TOOL" ... | grep -q PATTERN; then` and it FAILED while the pattern matched.** The tool exits
+# 1 by design under this record - 6c is refusing - and this file runs `set -o pipefail`, so the PIPELINE's
+# status is the tool's status and the `if` never sees grep's. That is the project's own "a status is a
+# verdict only if its producer delivered one" one door over: the status being read belonged to a
+# different producer than the one the sentence named.
+_extra_out=$(bash "$TOOL" "$MAN" --record="$EXTRAF" 2>&1)
+if grep -q 'manifest member SHA256SUMS.txt *is a member of the set (criterion B)' <<<"$_extra_out"; then
+  printf '  ok    %-22s 6a printed its ok line for SHA256SUMS.txt, so the refusal above is 6c alone\n' "field-extra-6a-satisfied"
+  OK=$((OK + 1))
+else
+  printf '  FAIL  %-22s 6a did not print its ok line for SHA256SUMS.txt, so the cell above may be passing on 6a\n' "field-extra-6a-satisfied"
+  BAD=$((BAD + 1))
+fi
+
 # THE SHRINKAGE DIRECTION, which neither member check covers. A manifest with a member REMOVED is refused
 # by check 5 - the manifest is itself a hashed member whose bytes the record pins - while 6a and 6b stay
 # silent: 6a reads the record's own `manifest_members=` field, which the shrink does not touch, and 6b

@@ -27,9 +27,9 @@
 #                                                           bytes; two fields agreeing is what makes a
 #                                                           typo in either a reading and not a silence
 #  5. its sha256 equals the record's                        - the constraint
-#  6. the manifest's member list, twice over. The trio of 5, 6a and 6b partitions cleanly, and each leg is
-#     load-bearing - which direction is covered by which check is worth stating because it is not the
-#     obvious split:
+#  6. the manifest's member list, three ways over. The four checks 5, 6a, 6b and 6c partition cleanly, and
+#     each leg is load-bearing - which direction is covered by which check is worth stating because it is
+#     not the obvious split:
 #
 #       | check | reads from              | catches                                                        |
 #       | ----- | ----------------------- | -------------------------------------------------------------- |
@@ -37,6 +37,8 @@
 #       |       |                         | 4-member manifest is refused by its size and hash alone         |
 #       |  6a   | the record              | the record naming a member it does not itself carry             |
 #       |  6b   | the target              | a target manifest that has GROWN names outside the set          |
+#       |  6c   | the target, against the | the record's `manifest_members=` field DISAGREEING with the     |
+#       |       | record's FIELD          | manifest it claims to describe - in either direction            |
 #
 #     **The shrinkage direction is therefore covered by pinning the manifest as bytes, not by either
 #     member check** - measured: against a park whose manifest names four members, 6a prints its `ok` lines
@@ -54,6 +56,18 @@
 #        fires when a build starts writing a sixth member. Coverage is one-directional, so this is the
 #        only direction that can catch a growing manifest, and it is checked against the file on disk
 #        rather than against a remembered list.
+#     c. if the target carries a manifest of its own, **the record's `manifest_members=` field for this
+#        set names exactly those members, and no others** - the field is a claim ABOUT that manifest, so
+#        the two are compared as sets. **Neither 6a nor 6b can see this**, and that is why it is a third
+#        check rather than a widening of one: 6a closes the field over the SET (`field <= set`) and 6b
+#        closes the manifest over the SET (`disk <= set`), so a field that is SHORT of the manifest
+#        satisfies both. That is not hypothetical - 801 found the armed arm's own record naming TWO of
+#        the five members its manifest names, with thirteen predecessor sets naming all five, and every
+#        check in this file printed `ok`. The two directions of the disagreement have different causes
+#        and are refused with different wording: a name the MANIFEST carries and the field omits is a
+#        field that was truncated or never finished, and a name the FIELD carries and the manifest does
+#        not (including `SHA256SUMS.txt` itself, which is a `file=` line of the set and never a member
+#        of its own member list) is a field describing a manifest that no longer exists.
 #
 # WHAT THIS SCRIPT DELIBERATELY DOES NOT READ: the target directory's own `SHA256SUMS.txt`, even though
 # one is a member of the set and is hashed like any other file. Every build writes that file with
@@ -316,12 +330,68 @@ for s in $SETS; do
   else
     printf '  note  this directory carries no manifest, so check 6b had nothing to read here\n'
   fi
+
+  # ---- 6c. the record's manifest_members= field must BE the manifest's member list -----------------
+  # 801's defect, and neither existing direction can see it: 6a closes the field over the SET and 6b
+  # closes the manifest over the SET, so a field that is SHORT of the manifest satisfies both. What was
+  # wrong in 801 is the relation BETWEEN them, which nothing compared - the armed arm's record named two
+  # of the five members its manifest names, and every line of this file printed `ok`.
+  #
+  # The refusal is real rather than pedantic, and for the same reason 6a's is: the gate verifies the
+  # manifest with `sha256sum -c`, so a member named only inside the manifest is READ by the gate. A
+  # reader who trusts the field - which is what the field is FOR - would revert the field's members and
+  # leave the gate red with every hash in the record matching.
+  if [[ -s $ABS/SHA256SUMS.txt ]]; then
+    # The same derivation 6b uses, for the same reason, and both spellings of the path: the optional
+    # directory is in the pattern on purpose, because a hand-made or relative manifest has none.
+    disk=$(sed -n 's|^[0-9a-f]\{64\}  \(.*/\)\?||p' "$ABS/SHA256SUMS.txt" 2>/dev/null | sort -u)
+    field=""
+    i=0
+    while [[ $i -lt $NLINES ]]; do
+      eval "lset=\$RECSET_$i"
+      eval "lmm=\$RECMAN_$i"
+      i=$((i + 1))
+      [[ $lset == "$s" ]] || continue
+      [[ -n $lmm ]] || continue
+      field="$field ${lmm//,/ }"
+    done
+    if [[ -z ${field// /} ]]; then
+      printf '  note  set %s carries no manifest_members= field, so check 6c had nothing to compare\n' "$s"
+    else
+      short=""; extra=""
+      for m in $disk; do
+        printf '%s\n' $field | grep -qxF -- "$m" || short="$short $m"
+      done
+      for m in $field; do
+        printf '%s\n' $disk | grep -qxF -- "$m" || extra="$extra $m"
+      done
+      if [[ -n $short ]]; then
+        echo "  FAIL  the manifest in this directory names member(s) the record's field for '$s' does not:$(printf ' %s' $short)"
+        echo "        The field is a claim ABOUT this manifest, and it is SHORT of it. The gate reads every"
+        echo "        name in the manifest through \`sha256sum -c\`, so a reader who trusts the field reverts"
+        echo "        fewer files than the gate reads and gets a red gate with every recorded hash matching."
+        FAILED=$((FAILED + 1)); SETFAIL=$((SETFAIL + 1))
+      fi
+      if [[ -n $extra ]]; then
+        echo "  FAIL  the record's field for '$s' names member(s) this directory's manifest does not:$(printf ' %s' $extra)"
+        echo "        The field describes a manifest that is not the one here. Either the field is stale or"
+        echo "        the manifest is, and the two readings send a reader to different places."
+        FAILED=$((FAILED + 1)); SETFAIL=$((SETFAIL + 1))
+      fi
+      if [[ -z $short && -z $extra ]]; then
+        printf '  ok    the field names exactly the %s member(s) this manifest names\n' "$(printf '%s\n' $disk | grep -c .)"
+        OK=$((OK + 1)); OKM=$((OKM + 1))
+      fi
+    fi
+  else
+    printf '  note  this directory carries no manifest, so check 6c had nothing to compare\n'
+  fi
 done
 
 echo
 if [[ $FAILED -eq 0 ]]; then
   echo "VERIFIED: $((OK - OKM)) file(s) of$SETS matched the record at $RECORD, hashed in place in $ABS,"
-  echo "          and $OKM manifest-member check(s) agree with the set."
+  echo "          and $OKM manifest-member check(s) agree with the set and with the field that describes it."
   echo "          This says these are the recorded bytes and that the set covers what the gate reads"
   echo "          through the manifest it verifies. It does not say a revert cannot leave the gate red in"
   echo "          some way neither derivation sees - the test for that is revert, then run the gate."
