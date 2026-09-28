@@ -114,6 +114,7 @@ restore:
 check:
 	@tools/check_stage_paths.sh
 	@tools/check_set_name_rule.sh
+	@tools/check_backtick_messages.sh --selftest >/dev/null
 	@tools/check_backtick_messages.sh
 	@tools/check_payload_config_entry.sh
 	@tools/read_storage_key_order.py --selftest >/dev/null
@@ -166,8 +167,9 @@ help:
 	@echo "make list                the archived snapshots and where they live now"
 	@echo "make restore STAGE=50    bring an archived snapshot back"
 	@echo "make check               the repository's own bookkeeping: the retired layout, set names, backticked"
-	@echo "                         messages, the payload's entry switch, every count quoted in two bases, and"
-	@echo "                         the board-derived pad constant against the device's own device tree"
+	@echo "                         messages (a code span that would run a command is refused too), the"
+	@echo "                         payload's entry switch, every count quoted in two bases, and the"
+	@echo "                         board-derived pad constant against the device's own device tree"
 	@echo "make clean               refused; the payload and the parks cannot be rebuilt"
 	@echo
 	@echo "Booting is not a make target: flash nothing, and boot non-persistently with"
