@@ -7881,3 +7881,62 @@ set=armed-storage-f9613649 sha256=8d915a1c8cc143e99ee0b3b6dd9ecb10f28b4cd2b7aa1e
 # row 1b a READING instead of an eye comparison with one bit computed from the four raw words against
 # their pre-command values - no new device access - and that is COST-owed.
 #
+#
+# 794: THE ROW THAT SAID "THE DRIVER ORDER THEN OPENS" - THE IMAGE'S WHOLE COMMAND VOCABULARY IS
+# CMD0...CMD3 AND THERE IS NO DATA PATH.
+#
+# HOST-SIDE ONLY. No device action, no press, no gate against a device, no runner, no firer, NOTHING
+# BUILT. `out/` is byte-identical: `armed-storage-f9613649` is UNSPENT and its park is intact, and no
+# source under `src/` was edited. ONE PRESS SPENT: NONE. NO PRESS IS AUTHORIZED.
+#
+# THE CLAIM UNDER TEST, and it was written four times in two steps: 792 section 7's row 1 -
+# "`_cid_complete = 1` - THE CID IS TAKEN. The driver order opens: CMD9 (CSD), CMD7 (select), CMD16
+# (block length), then data" - 793 section 5 keeping that consequence verbatim, and
+# `tools/verify_press_ready.sh`'s `entry_conseq` (line 1104) and `rung_para 30` (line 1216) carrying it,
+# SO IT IS THE TEXT THE NEXT PRESS PRINTS. That sentence is TRUE OF THE LINUX MMC DRIVER AND FALSE OF
+# THIS IMAGE.
+#
+# (1) THE VOCABULARY IS FOUR OPCODES. `grep -cE '^#define ST_CMD_OP_' src/entry/entry_storage.c` = 4,
+#     and they are opcodes 0, 1, 2 and 3: CMD0, CMD1, CMD2, CMD3. There is NO `ST_CMD_OP_SEND_CSD`
+#     define at all, no body, and no call site.
+#
+# (2) AND THE FOURTH IS THE LAST. `st_cmd_path()` is called EXACTLY ONCE (`grep -c 'st_cmd_path();'` =
+#     1) and the only thing after it in `entry_storage_probe` (`:5144`) is `st_pwr_irq_after()` and
+#     then a return. Inside, the sequence is CMD0 (`:4506`), CMD1 (`:4603`), CMD2 (`:4678`/`:4680`),
+#     CMD3 (`:4742`/`:4775`).
+#
+# (3) AND THERE IS NO DATA PATH - measured, anchored, case-SENSITIVE:
+#         grep -rnE '\b(BLOCK_SIZE|BLOCK_COUNT|TRANSFER_MODE|ADMA|SDHCI_DATA|SDHCI_BLOCK|DMA_ADDRESS)\b' \
+#              src/ --include=*.c --include=*.h
+#     returns TWO lines and BOTH ARE COMMENTS - one of them the source's own "no data-path register at
+#     all" (`:2076`). `ST_SDHCI_DMA_ADDRESS 0x00` is defined and READ TWICE AS A VERSION/IDENTITY WORD
+#     (`:695`, `:4932`), never as a transfer address. The NAME is in the tree; the PATH is not.
+#
+# WHAT THIS CHANGES. A perfect CID at rung 31 does NOT move this ladder one command closer to
+# 「挂载存储」. The ladder's frontier is TWO frontiers and only one had been named: (i) the CMD2 bit the
+# last five steps have been on, and (ii) THE BREADTH GAP - the storage path is an INITIALIZATION
+# SEQUENCE that stops after CMD3, and a mount needs CMD9, CMD7, CMD16 and a data path behind them.
+# Row 1a is STILL WORTH THE PRESS: it is the last item this sequence asks for and it settles the 136-bit
+# question. What changes is what row 1a BUYS.
+#
+# WHERE IT LANDED. `docs/experiments/**` is a historical record and is NOT rewritten, so 792's and 793's
+# rows stand as written and this document supersedes them. The LIVE narration is corrected in place and
+# APPENDED BESIDE the original sentence: `tools/verify_press_ready.sh`'s `entry_conseq` rung-30 branch
+# and `rung_para 30`, the two places whose text the next press prints. LANE, STATED RATHER THAN LEFT:
+# that file is not `preflight_boot_check.sh`, the one file this session (run-experiment-526, the gate
+# owner) owns, and `ListAgents` names two peers NEITHER of them `mi4-ios6-1a` - so this is the
+# LANE-ownerless case and NOT the COST case, THE SECOND TIME IN TWO STEPS the same file had no live
+# owner to report a wrong press-facing sentence to.
+#
+# AND A DEFECT THIS STEP MADE ITSELF, recorded because the selector is the lesson. The first pass of
+# that search was `-i` and UNANCHORED and returned fifteen lines - FOURTEEN OF THEM `deadman`
+# (`stage90_disarm_deADMAn_timer`, `stage90_arm_deADMAn_reset`, `g_deADMAn_armed`). The selector
+# matched a substring of a word it was never about, and a table built from that output would have said
+# the tree contains ADMA machinery. Anchored (`\b...\b`) and case-sensitive it is two hits, both
+# comments. Class: a selector looser than its claim (789 section 1's `apps_before` containing
+# `ps_before`), here with the CASE flag as the un-tightened dimension.
+#
+# COST. None to the armed arm: no source was edited and `out/` did not move. The next BUILD's subject is
+# named in section 9 of the record: THE FIRST BODY PAST CMD3, and the `ST_CMD_OP_SEND_CSD` constant with
+# its `_Static_assert` pair ahead of it - COST-owed to builds, not to a press.
+#
