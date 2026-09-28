@@ -8463,3 +8463,122 @@ set=armed-storage-ce2f589c sha256=2eafd2f80b735b0fdd255d4870b7fc80b7421ddde6b0cc
 # (7) THE GOAL IS NOT MET. No transfer completes, no filesystem is reached, no mount is made; 794
 # section 1's BREADTH GAP is untouched and is now the whole distance (four opcodes, no CMD9 define, no
 # data path). TWRP-to-storage STAYS WITHHELD.
+#
+# 804: THE RUNG-34 ARM - armed-storage-7341f5f6, STAGE90_XNU_STORAGE_PROBE=33 (switch VALUE 33 =
+# ordinal rung 34). A BUILD, A PARK AND A RECORD: no press, no device action, no runner, no firer,
+# `out/` was rebuilt and a new arm is in it.
+#
+# THE ARM IS THE CMD2 GATE GIVEN THE WORD THE DRIVER ACTUALLY TESTS, AND IT IS THE RUNG 800 NAMED AS
+# THE SEPARATE ONE. 799's own comment above `op_busy` says it in the source: "Gating CMD2 on the loop's
+# answer is the driver's semantics and it is a SEPARATE rung - one change per rung is this ladder's own
+# discipline". The rung-33 press (803) is what made it a measurement rather than a tidy-up, and it did
+# so by showing that the old condition is not merely inverted - it reads the WRONG WORD.
+#
+# (1) WHAT CHANGED, AND IT IS ONE CONDITION. `entry_storage.c`'s CMD2 gate tested
+# `c1.sent != 0 && (c1.resp & ST_MMC_CARD_BUSY) == 0` - the PROBE's response - and now tests
+# `c1.sent != 0 && op_busy != 0` - the LOOP's result, the value `st_op_cond_loop` has returned since
+# rung 33 and which the rung below computes and throws away with a `(void)` cast. The two arms call the
+# same bodies, in the same order, at the same place in the driver's own sequence; what changes is WHICH
+# WORD DECIDES WHETHER THE SECOND OF THEM RUNS. The split is `#if >= 33 / #else` INSIDE rung 16's own
+# guard, so a value below 33 compiles the old condition byte for byte.
+#
+# (2) WHY THE OLD CONDITION IS WRONG RATHER THAN BACKWARDS. `mmc_send_op_cond` returns after ONE CMD1
+# (`mmc_ops.c:148-150`'s `if (ocr == 0) break;`), so the probe's word is what a card that has not
+# finished power-up answers: the OCR with bit 31 CLEAR. `(c1.resp & MMC_CARD_BUSY) == 0` is therefore
+# TRUE and the old gate PASSES - it fires on the one reading that means "come back later" and passes on
+# the reading that means "not ready yet". That is why `_cid_gated` read 0 on every arm from rung 16
+# through rung 32 and why all of them put CMD2 and CMD3 on the bus at a card that had not finished
+# power-up. The driver's own condition is `mmc_ops.c:157`'s `if (cmd.resp[0] & MMC_CARD_BUSY) break;` -
+# the loop leaves when bit 31 SETS - and that is exactly what `op_busy` is.
+#
+# (3) THE PRESS THAT MEASURED IT. 803's numbers are the two halves in one log: `_opcond_sends = 2` with
+# `_opcond_busy_seen = 1` and `_opcond_last_resp = 0xc0ff8080` against `_cmd1_resp = 0x40ff8080` - THE
+# SAME OCR DIFFERING BY EXACTLY THE BUSY BIT - and then `_cid_complete = 1` with a real SanDisk
+# `SDW16G` CID that nine arms could never read. So the two words are not two readings of one thing:
+# they are the answers to two different questions, and the gate was asking the one the driver does not.
+#
+# (4) TWO NEW CELLS, PUBLISHED ON BOTH PATHS, AND THEY ARE THE REPAIR MADE READABLE.
+# `xnu_live_storage_cid_gate_word` is the word the gate tested, read out of the LOOP's own result
+# struct; `xnu_live_storage_cid_gate_busy` is the test's own result printed beside its source, the
+# shape `_cmd1_resp_busy` already has four lines above. On a row where the card became ready the word
+# differs from `_cmd1_resp` by exactly the busy bit; on a row where the loop never saw the card out of
+# reset the two are EQUAL and `_cid_gated` is 1 - which is the row the old gate could not produce at
+# all. `c1.sent != 0` is KEPT so `_cid_gated_reason` still separates 1 (CMD1 never reached the bus)
+# from 2 (it did, and the loop never saw the card out of reset); reason 2's MEANING is what moves.
+#
+# (5) NO NEW STORE, NO NEW ADDRESS, NO NEW WIDTH, NO NEW MEGABYTE, NO NEW DEVICE AND NO NEW KEY OF ANY
+# DEVICE REGISTER. The rung-33 arm's two bodies keep their EMPTY device sets, `st_cmd_path`'s device
+# surface is rung 14's unchanged, `st_send_command` is still called exactly twice from it, and the two
+# arms call the same bodies. `xnu_live_storage_writes` does not move.
+#
+# (6) THE BUILD CLAUSE IS THE READING, NOT THIS BLOCK: `build_entry.sh` gained `xnu_entry_804`, which
+# reads THREE numbers out of the LINKED IMAGE in the window between `st_cmd_path`'s call to
+# `st_op_cond_arg` and its call to `st_all_send_cid`, and each one FAILS ON THE SPENT RUNG-33 PARK:
+#
+#   |                              | value 32 (armed-storage-ce2f589c) | value 33 (this arm) |
+#   | ---------------------------- | --------------------------------- | ------------------- |
+#   | sign-conditioned branches    | **1** (`bge` at 8000eea8)         | **0**               |
+#   | loads from the PROBE's word  | **1** (slot [sp, #188])           | **0**               |
+#   | loads from the LOOP's struct | **0**                             | **1** ([sp, #300])  |
+#   | the two new key strings      | **0 / 0**                         | **1 / 1**           |
+#
+# **BOTH SLOTS ARE DERIVED AND NOT TYPED**: the probe's word's slot is the `ldr r0, [sp, #N]` that
+# feeds `st_op_cond_arg` (both images load [sp, #188] there), and the loop struct's base is the
+# `add r1, sp, #N` that materialises `&c1b` before the `st_op_cond_loop` call (both images say 224) -
+# so a frame that shifts moves the numbers with it and the check does not go blind. The `bge` is the
+# point: `(x & 0x80000000) == 0` is a SIGN test, and the value-32 image carries exactly one inside this
+# window at 8000eea8 - the branch that PASSES when the card reports it has NOT finished power-up.
+#
+# (7) THE CLAUSE REFUSED IN SILENCE TWICE BEFORE IT PRINTED A NUMBER, AND BOTH ARE WORTH THE SENTENCE.
+# (a) `(( _off >= gw_loop_off )) && gw_hi=$((gw_hi + 1))` as the last command of a `while` body: a bare
+# arithmetic command returns 1 when the comparison is false, and this script runs `set -e`, so the
+# first offset BELOW the base ended the build with NO MESSAGE. (b) `x=$(... | grep -oE ...)` and
+# `x=$(grep -c ... || true)`'s absence: `grep` exits 1 when it matches nothing and `grep -c` exits 1
+# WHEN THE COUNT IS ZERO - which is this clause's GOOD case - so the substitution ended the same way.
+# Every pipeline in the clause now carries `|| true` and the emptiness is handled as a refusal with a
+# cause. Both are 692's class: a failure reported by the wrong producer, or by none.
+#
+# (8) CONTAINMENT, MEASURED ON ALL ELEVEN MEMBERS OF THE RUNG BELOW. The value-32 build from THIS SAME
+# SOURCE is TEN OF ELEVEN MEMBERS BYTE-IDENTICAL to the SPENT rung-33 park
+# `out/stage90/frozen/armed-storage-ce2f589c/` - `xnu_arm_entry.bin` `ce2f589c...` and `stage90-qcdt.img`
+# `2c9c2492...` included, i.e. THE ENTRY IMAGE REPRODUCED BYTE FOR BYTE AT VALUE 32 - and the eleventh
+# is `xnu_arm_entry-sources.txt`, which records sources BY CONTENT and must move when the tools are
+# edited: EXACTLY TWO OF ITS 28 LINES, `build_entry.sh` and `entry_storage.c`, the two files this step
+# touched, with the artifact's own hash line identical and the file set identical at 23 files. The
+# `#else` branch is what buys this: it is the old condition, verbatim.
+#
+# (9) THE ARM'S OWN DELTA, MEASURED AGAINST THE SPENT RUNG-33 PARK:
+#   entry `.text` (size -A)  5,335,680 -> 5,335,744   **+64**
+#   `xnu_arm_entry.elf`      6,732,528 -> 6,732,528   SIZE UNCHANGED (Total 5,934,887 -> 5,934,951, +64)
+#   `xnu_arm_entry.bin`      5,552,764 -> 5,552,764   SIZE UNCHANGED, **546,395 bytes differ** - an
+#                                                     insertion, not 546,395 edits
+#   `stage90-build-config.txt` BYTE-IDENTICAL to rungs 23 through 33 (`6c2b6038...`): no payload switch
+#                                                     moved
+#   `stage90-qcdt.img`       8,572,928 -> 8,572,928   the boot image the press sends
+#   `xnu_arm_entry-config.txt` TWO LINES move: the artifact's own hash, and STORAGE_PROBE 32 -> 33
+#
+# (10) AND THE ARM IS REPRODUCIBLE: the value-33 build was run twice (once before the containment
+# build, once after it) and BOTH RUNS' ELEVEN MEMBERS ARE BYTE-IDENTICAL TO THIS PARK, so the park is
+# the build of the tree in front of it and not a lucky copy.
+#
+# THE PRESS IS THE OPERATOR'S AND NO PRESS IS SPENT OR AUTHORIZED HERE. The arm is ARMED AND NOT
+# PRESSED, its park is `out/stage90/frozen/armed-storage-7341f5f6/` with eleven members verified in
+# place, and the press path is the two commands `tools/verify_press_ready.sh` prints, run by hand once
+# each. **THE GOAL IS NOT MET BY THIS ARM**: no transfer completes, no filesystem is reached and no
+# mount is made, and 794 section 1's breadth gap (four opcodes, NO CMD9 DEFINE, no data path) is the
+# whole distance - CMD9's `MMC_RSP_R2` is the next command in the driver's order and the breadth gap's
+# first body, and THIS rung is what makes it reachable. So 「让os可以正常启动并且挂载存储」 is not
+# reached and **TWRP-TO-STORAGE STAYS WITHHELD**.
+#
+set=armed-storage-7341f5f6 sha256=b9319777d68f20b85fe2ab963eb8ecb53fc09ac2bc6fccacc397655e768e8e07 bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-33-entry
+set=armed-storage-7341f5f6 sha256=d15fd4e7a04ebc965524131a4b1b40960f81ab23e7a84c12eb6200c4d8057e36 bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-33-entry
+set=armed-storage-7341f5f6 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-33-s-MEASURED
+set=armed-storage-7341f5f6 sha256=e9eb4db1b99e3ae73f268daeee5f1e93f2f18ee131d619454c5f16091f3a6deb bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-7341f5f6 sha256=85b549e5fb96164783d4dc993d7e226ba4ca3d8df83885f1374083d235dc3426 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-7341f5f6 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-7341f5f6 sha256=d8093e4f90842c9ee33c27da0de062f85bef5fdb5dc420babe2201456b70291e bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-7341f5f6 sha256=7341f5f6b2077d735aec68d63fe7147abc0de7b8a4fa6f88a127bca99afd5ce8 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-7341f
+set=armed-storage-7341f5f6 sha256=6f66302f0b550676837861c2de27a55f3eff77bcb72c6326e19a2e11e21dd5d2 bytes=6732528 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-its-SIZE-did-not-move-from-the-spent-rung-33-arm-and-64-bytes-in-text-were-absorbed-by-page-alignment
+set=armed-storage-7341f5f6 sha256=b5568d2d8660177cf75ee99104346760203d0a91bf1e936ad840cbec9786b7d1 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=33
+set=armed-storage-7341f5f6 sha256=ce929b8c20150f11d57a3080c4b6f4b000703febe7fe789ecad2d870ed1e5afc bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one
+#

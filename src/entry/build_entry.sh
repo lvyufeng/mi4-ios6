@@ -31273,6 +31273,95 @@ verify_trace_symbols() {
                 (( opl_ln < opa_cid_ln )) ||
                     layout_fail "st_cmd_path calls st_op_cond_loop on disassembly line $opl_ln and calls st_all_send_cid on line $opa_cid_ln: rung 33's loop is part of the DRIVER'S OWN CMD1 SEQUENCE and must finish before CMD2 goes on the bus (mmc.c:1359 precedes mmc.c:1375). A loop below CMD2 would be asking the card whether it is ready after the ladder had already stopped waiting. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_799: rung 33's ported CMD1 loop, read out of the linked image: st_op_cond_arg (device set EMPTY, carrying #127 and #1073741824 - mmc.c:1943's ocr &= ~0x7F and mmc.c:1359's (1 << 30)) is called ONCE on line $opa_ln and st_op_cond_loop (device set EMPTY, ONE bl to st_send_command carrying #100 and #101 - mmc_ops.c:145's 100-send bound) ONCE on line $opl_ln, in that order, both after CMD1 - the probe, whose response the argument is derived from, and the last of the body's two calls to st_send_command - on line $opa_cmd_ln, and both before CMD2 on line $opa_cid_ln - so the second CMD1 is sent with an argument derived from the first response, retried up to the driver's own 100 sends with mmc_delay(10) between them, exiting on the ONE sign-conditioned branch that leaves the loop when resp[0] & MMC_CARD_BUSY SETS (mmc_ops.c:157, against the direction the image's own CMD2 gate reads it), and no device register outside st_send_command is touched by either body"
+
+            if [[ $STORAGE_PROBE -ge 33 ]]; then
+                # **804: RUNG 34 IS A CONDITION, AND THIS IS THE WINDOW IT LIVES IN.** The arm changes
+                # no body, no store, no address and no key of any device register: it changes WHICH WORD
+                # decides whether CMD2 is sent. So the only place the change is visible as an artefact
+                # is the instruction sequence of `st_cmd_path` between the call that derives CMD1's
+                # argument and the call that issues CMD2 - and that is the window this clause reads.
+                #
+                # **THE THREE ASSERTIONS ARE ONE PROPERTY EACH AND EACH ONE FAILS ON THE ARM BELOW.**
+                # That is the point of writing them here rather than in the record: the value-32 arm is
+                # still in the tree as `out/stage90/frozen/armed-storage-ce2f589c/`, and every number in
+                # the three refusal messages below was MEASURED against it before this clause was
+                # written - 1 sign-conditioned branch and 1 load from the probe's word there against 0
+                # and 0 here, and 0 loads from the loop's own struct there against 1 here.
+                #
+                # **(1) NO SIGN-CONDITIONED BRANCH IN THE WINDOW.** `(c1.resp & ST_MMC_CARD_BUSY) == 0`
+                # is a test of bit 31, so the compiler lowers it to a SIGNED comparison against zero and
+                # emits `bge` - measured, at `8000eea8` of the value-32 image. The repaired condition
+                # tests a 0/1 flag returned by a function, which is an equality test and lowers to
+                # `cmpne`/`bne` - measured, at `8000eec0` here. **A WINDOW WITH A SIGN TEST IN IT IS A
+                # WINDOW THAT IS STILL TESTING A RESPONSE WORD'S TOP BIT**, which is the direction that
+                # inverted this ladder for seventeen rungs.
+                #
+                # **(2) NO LOAD OF THE PROBE'S WORD IN THE WINDOW, AND THE SLOT IS DERIVED RATHER THAN
+                # TYPED.** The value `st_op_cond_arg` is HANDED is the probe's response - it is
+                # `st_op_cond_arg(c1.resp)` in the source and `ldr r0, [sp, #188]` immediately before
+                # its `bl` in BOTH images - so the slot that load names is the probe's word's slot, read
+                # out of this artefact and not carried here as a number. A frame that shifts moves this
+                # number with it and the check does not go blind.
+                #
+                # **(3) AT LEAST ONE LOAD FROM THE LOOP'S OWN STRUCT IN THE WINDOW, AND THAT BASE IS
+                # DERIVED TOO.** `st_op_cond_loop(op_arg, &c1b)` materializes the struct's address as
+                # `add r1, sp, #224` immediately before its `bl` in BOTH images, so any load in the
+                # window at an offset at or above that base is a read of the loop's result - which is
+                # what `_cid_gate_word` is. At value 32 the only slot the window loads is the probe's;
+                # here it is `[sp, #300]`, the loop struct's own `resp` field.
+                #
+                # **AND THE TWO NEW KEYS ARE ASSERTED PRESENT, BECAUSE (3) CANNOT SEE THE FLAG CELL.**
+                # `_cid_gate_busy` is a `mov r1, r6` and no load at all, so the property that the arm
+                # publishes the test's own result is not a memory-access claim and is checked as what it
+                # is: two strings in the image.
+                gw_a_ln=$(awk '/bl.*<st_op_cond_arg>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
+                gw_b_ln=$(awk '/bl.*<st_all_send_cid>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
+                gw_l_ln=$(awk '/bl.*<st_op_cond_loop>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
+                [[ -n "$gw_a_ln" && -n "$gw_b_ln" && -n "$gw_l_ln" ]] ||
+                    layout_fail "rung 34's gate window cannot be located in st_cmd_path while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: the body makes no call to st_op_cond_arg, to st_op_cond_loop or to st_all_send_cid, so the three assertions below have nothing to read. That is itself the refusal - an arm at this value whose command path is absent is an arm whose gate has no word. Nothing is rebuilt by this refusal"
+                gw_win=$(awk -v A="$gw_a_ln" -v B="$gw_b_ln" 'NR > A && NR <= B' <<<"$stb_path_body")
+                # **THE OBJECTIVE WORD'S SLOT, READ OUT OF THE IMAGE**: the last load into r0 at or
+                # above the argument call is the argument itself, i.e. the probe's response.
+                # **`|| true` ON EVERY PIPELINE BELOW, AND IT IS NOT DECORATION.** `grep` exits 1
+                # when it matches nothing and this script runs `set -e`, so a substitution like
+                # `x=$(... | grep -oE ...)` ends the build with NO MESSAGE at all - which is how this
+                # clause refused in silence twice before it ever printed a number. The emptiness is
+                # handled below as a refusal with a cause; the pipeline must not be the thing that
+                # reports it.
+                gw_probe_off=$(awk -v A="$gw_a_ln" 'NR < A && /ldr[[:space:]]+r0, \[sp, #/ { m=$0 } END{ print m }' <<<"$stb_path_body" |
+                    { grep -oE '\[sp, #[0-9]+\]' || true; } | { grep -oE '[0-9]+' || true; })
+                # **AND THE LOOP STRUCT'S BASE**: the address the loop is handed.
+                gw_loop_off=$(awk -v A="$gw_l_ln" 'NR < A && /add[[:space:]]+r1, sp, #/ { m=$0 } END{ print m }' <<<"$stb_path_body" |
+                    { grep -oE '#[0-9]+' || true; } | tr -d '#')
+                [[ -n "$gw_probe_off" && -n "$gw_loop_off" ]] ||
+                    layout_fail "rung 34's two derived slots could not be read out of the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: the probe's word is not loaded into r0 by an \`ldr\` from a stack slot immediately above the argument call, or the loop's struct address is not an \`add r1, sp, #N\` immediately above the loop call. The clause derives both rather than typing them so that a frame which shifts cannot silently point the check at the wrong slot - and a derivation that returns nothing is a refusal rather than a skip, because the two assertions below would otherwise compare against an empty offset and pass on any image at all. Nothing is rebuilt by this refusal"
+                # **AND `grep -c` EXITS 1 WHEN THE COUNT IS ZERO, WHICH IS THIS CLAUSE'S GOOD CASE.**
+                gw_sig=$(grep -cE '^[[:space:]]*[0-9a-f]+:[[:space:]]+[0-9a-f]+[[:space:]]+(blt|bmi|bpl|bge|ble|bgt|bls|bhi)[[:space:]]' <<<"$gw_win" || true)
+                [[ "$gw_sig" == "0" ]] ||
+                    layout_fail "st_cmd_path's gate window - the instructions between its call to st_op_cond_arg (disassembly line $gw_a_ln) and its call to st_all_send_cid (line $gw_b_ln) - carries $gw_sig sign-conditioned branch(es), and rung 34's gate tests a 0/1 FLAG rather than a response word's bit 31. \`(c1.resp & ST_MMC_CARD_BUSY) == 0\` IS a test of bit 31 and DOES lower to a signed comparison: the value-32 arm at out/stage90/frozen/armed-storage-ce2f589c/ carries exactly one, \`bge\` at 8000eea8, and it is the branch that PASSES when the card reports it has NOT finished power-up. A sign test here means the gate is reading a response word's top bit again, which is the inversion 798 section 5 found and 803 measured the cost of: nine arms of CMD2 and CMD3 on a card that was not listening. Nothing is rebuilt by this refusal"
+                gw_probe=$(grep -cE "ldr[[:space:]]+r[0-9]+, \[sp, #${gw_probe_off}\]" <<<"$gw_win" || true)
+                [[ "$gw_probe" == "0" ]] ||
+                    layout_fail "st_cmd_path reloads the PROBE's response word (its slot is [sp, #$gw_probe_off], derived above from the value st_op_cond_arg is handed) $gw_probe time(s) inside rung 34's gate window, and that window is exactly where the two words must be kept apart. The probe is a SINGLE PASS by the driver's own design (mmc_ops.c:148-150), so its word is the OCR with bit 31 CLEAR on a card that has not finished power-up - the reading that made the old gate PASS. The value-32 arm loads this slot once in this window (8000eea4). The loop's word is a different value in a different struct and is what mmc_ops.c:157 tests. Nothing is rebuilt by this refusal"
+                gw_hi=0
+                while read -r _off; do
+                    [[ -n $_off ]] || continue
+                    # **AN `if` AND NOT `(( )) &&`: the bare arithmetic command returns 1 when the
+                    # comparison is false, which is the LAST command of this loop's body, and this
+                    # script runs `set -e` - so the first offset BELOW the base ended the build with
+                    # no message at all.** That is the same class as 692's wrong-cause report and it
+                    # was caught by the first run of this clause refusing in silence.
+                    if (( _off >= gw_loop_off )); then
+                        gw_hi=$((gw_hi + 1))
+                    fi
+                done < <(grep -oE 'ldr[[:space:]]+r[0-9]+, \[sp, #[0-9]+\]' <<<"$gw_win" | grep -oE '[0-9]+\]' | tr -d ']' || true)
+                [[ "$gw_hi" -ge 1 ]] ||
+                    layout_fail "st_cmd_path loads NOTHING from the loop's own result struct inside rung 34's gate window: the struct's base is sp+$gw_loop_off (derived above from the address st_op_cond_loop is handed) and no load in the window is at or above it, so the word the gate tests is not the word the loop produced. The value-32 arm loads nothing there either - the only slot its window reads is the probe's - and that is the rung below, where the two cells that make this reading visible do not exist. rung 34's whole act is that this window reads the LOOP's word. Nothing is rebuilt by this refusal"
+                for _k in xnu_live_storage_cid_gate_word xnu_live_storage_cid_gate_busy; do
+                    grep -qa "$_k" "$OUT/xnu_arm_entry.elf" ||
+                        layout_fail "rung 34 publishes no \`$_k\` string in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: the gate's word and the gate's own test result are the two cells that make the repair a READING rather than a sentence in a comment, and the assertion above - that the window loads the loop's struct - cannot see the flag cell, which is a register and not a load. An arm without these keys answers the same question the rung below it answered. Nothing is rebuilt by this refusal"
+                done
+                echo "  xnu_entry_804: rung 34's gate repair, read out of the linked image: st_cmd_path's window between its call to st_op_cond_arg (line $gw_a_ln) and its call to st_all_send_cid (line $gw_b_ln) carries $gw_sig sign-conditioned branch(es), $gw_probe load(s) from the PROBE's response word (slot [sp, #$gw_probe_off], the value st_op_cond_arg is handed - the last r0 load above the argument call) and $gw_hi load(s) from the LOOP's own result struct (base sp+$gw_loop_off, the address st_op_cond_loop is handed) - so the condition that decides whether CMD2 is sent reads the word mmc_ops.c:157 tests and not the word mmc_ops.c:148-150's single pass left behind, and the value-32 arm is the other way round on all three numbers (1, 1, 0). Both cells are in the image: xnu_live_storage_cid_gate_word (the word the gate tested, read out of the loop's struct) and xnu_live_storage_cid_gate_busy (the test's own result beside its source), and no device register outside st_send_command's own act is touched by either"
+            fi
             fi
             [[ -z "${stb_path_img// /}" ]] ||
                 layout_fail "st_cmd_path's non-device memory accesses are [$stb_path_img] at [$stb_path_imgaddr] and rung 11's record says that set is EMPTY - this function publishes through entry_live_write (a call, with a .rodata string) and its two result structs live on the stack, which the classifier skips by base register. A non-empty set here means either a symbol this rung never declared or an access it could not resolve. Nothing is rebuilt by this refusal"
