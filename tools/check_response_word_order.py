@@ -164,13 +164,22 @@ def statements(lines):
 
 
 def function_bodies(path):
-    """(name, first_line, [statement text by line]) for each function definition in the file.
+    """(name, def_line, [statement text by line]) for each function definition in the file.
 
     The name is the identifier of the final parenthesised group before the opening brace, which is what
     survives an attribute list: `static __attribute__((noinline, noclone)) void st_resp_before(void)`
     matches `__attribute__(` first, but the group at the END of the head is `st_resp_before(void)`. A
     control statement cannot pass, because its final group is not at the end: `if (st_foo(x))` leaves a
     `)` after its last complete group, and `if (x)` is excluded by name.
+
+    **`def_line` is the line the head's `name(...)` group is on, and it is computed, not the statement's
+    first line.** `statements()` joins a logical statement, and a definition that follows a `#if
+    STAGE90_XNU_STORAGE_PROBE >= N` and its documentation comment is joined with them - the comment is
+    blanked by `strip_comments` but its lines are still in the statement - so the statement's first line
+    is the TOP OF THAT COMMENT, up to 84 lines above the definition. Printed as `path:line name()`, that
+    is a citation a reader cannot resolve: 810 and 812 both printed one, and 812's own doc quoted
+    `st_send_csd()` at `:4475` when the definition is at `:4534`. The offset is a count of newlines to
+    the group, so it is exact and it survives the file growing above the function.
     """
     text = strip_comments(open(path, encoding="utf-8").read())
     funcs, cur = [], None
@@ -178,7 +187,7 @@ def function_bodies(path):
         if "{" in stmt:
             m = DEFN.search(stmt.rsplit("{", 1)[0].rstrip())
             if m and m.group(1) not in KEYWORDS:
-                cur = (m.group(1), n, [])
+                cur = (m.group(1), n + stmt[: m.start(1)].count("\n"), [])
                 funcs.append(cur)
                 continue
         if cur is not None:

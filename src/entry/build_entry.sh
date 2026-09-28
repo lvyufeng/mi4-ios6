@@ -31362,6 +31362,77 @@ verify_trace_symbols() {
                 done
                 echo "  xnu_entry_804: rung 34's gate repair, read out of the linked image: st_cmd_path's window between its call to st_op_cond_arg (line $gw_a_ln) and its call to st_all_send_cid (line $gw_b_ln) carries $gw_sig sign-conditioned branch(es), $gw_probe load(s) from the PROBE's response word (slot [sp, #$gw_probe_off], the value st_op_cond_arg is handed - the last r0 load above the argument call) and $gw_hi load(s) from the LOOP's own result struct (base sp+$gw_loop_off, the address st_op_cond_loop is handed) - so the condition that decides whether CMD2 is sent reads the word mmc_ops.c:157 tests and not the word mmc_ops.c:148-150's single pass left behind, and the value-32 arm is the other way round on all three numbers (1, 1, 0). Both cells are in the image: xnu_live_storage_cid_gate_word (the word the gate tested, read out of the loop's struct) and xnu_live_storage_cid_gate_busy (the test's own result beside its source), and no device register outside st_send_command's own act is touched by either"
             fi
+            if [[ $STORAGE_PROBE -ge 34 ]]; then
+                # **812: RUNG 35 IS A NEW COMMAND BODY, AND THIS CLAUSE READS THE WHOLE OF IT OUT OF THE
+                # LINKED IMAGE - three numbers at its call site, the eight response addresses in the
+                # order the silicon will touch them, and the key strings that make the answer a reading.**
+                #
+                # **WHY THE READ ORDER IS THE ASSERTION THAT MATTERS, AND WHY IT IS NOT 810's CHECK.**
+                # `sdhci.c:1163-1172` assembles `resp[]` WORD 3 FIRST (`+ 12`), shifts each word a byte
+                # and ORs in the byte ONE BELOW that word, and gives the LAST word no byte at all.
+                # `tools/check_response_word_order.py` (810) refuses that arithmetic written wrongly in
+                # the SOURCE; this clause refuses it EMITTED wrongly in the ARTEFACT, which is a
+                # different reading of a different object - and the eight addresses below, in program
+                # order, are what the driver's own expression looks like once it is machine code.
+                # **The ABSENCE of a byte at `+ 0x0F` is the `i != 3` half of that expression, and it is
+                # visible in an address list and in nothing else.**
+                #
+                # **AND THE COUNT ON `f9824910:ldr` IS THE OTHER HALF OF THE SAME CLAIM.** The
+                # precondition read (the card's own status word, taken between CMD3 and CMD9) is a
+                # 32-bit read of `RESPONSE 0x10` - the SAME address as the last word of the 136-bit
+                # block. A compiler that commoned the two loads would leave a count of ONE and an order
+                # list that still looks right, and the arm would be publishing the card's state at the
+                # wrong moment with nothing on the wire to show it. So the count is asserted as well.
+                #
+                # **EVERY NUMBER BELOW WAS MEASURED BEFORE IT WAS WRITTEN**, against the image this
+                # clause was added to, and the value-33 image carries no `st_send_csd` at all - so the
+                # rung below fails this clause at its first assertion rather than by argument.
+                csd_addr=$(sym_addr st_send_csd) ||
+                    layout_fail "rung 35's command body is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: out/xnu_arm_entry.elf has no \`st_send_csd\`, so CMD9 is never put on the bus and this arm is the rung below it wearing a new number - and that is an absence no cell can show, because every \`_csd_*\` key would simply not appear and a log carrying none of them reads the same as a run whose storage probe never started. Three ways to get here and all three are worth refusing: the function was renamed, it was INLINED into st_cmd_path (which would put its eight response reads inside a window whose own clause asserts what that body's device surface is, and would make the call-count assertion below unreadable), or it was CLONED - which is why the source carries \`noinline\` AND \`noclone\`, the same pair 737 needed for st_send_command. Nothing is rebuilt by this refusal"
+                csd_next=$(sym_next "$csd_addr") ||
+                    layout_fail "nothing follows st_send_csd in the linked image, so the window this check disassembles has no end. Nothing is rebuilt by this refusal"
+                csd_body=$(arm-none-eabi-objdump -d --start-address="$csd_addr" --stop-address="$csd_next" "$OUT/xnu_arm_entry.elf")
+                csd_bl_count=$(grep -c -- 'bl.*<st_send_command>' <<<"$csd_body" || true)
+                [[ "$csd_bl_count" == "1" ]] ||
+                    layout_fail "st_send_csd makes $csd_bl_count call(s) to st_send_command and rung 35 sends exactly one command - CMD9. Zero means the symbol was reached with an empty window (the scan failed, not the arm); two or more means the immediates this clause reads may belong to the wrong call site, and a clause reading the wrong call site is worse than no clause. Nothing is rebuilt by this refusal"
+                csd_bl_ln=$(awk '/bl.*<st_send_command>/{ printf "%d", NR }' <<<"$csd_body")
+                csd_r0=$(awk -v n="$csd_bl_ln" 'NR < n && $0 ~ /mov[ \t]+r0, #/ { v=$0 } END { print v }' <<<"$csd_body")
+                csd_r1=$(awk -v n="$csd_bl_ln" 'NR < n && $0 ~ /mov[ \t]+r1, #/ { v=$0 } END { print v }' <<<"$csd_body")
+                csd_r2=$(awk -v n="$csd_bl_ln" 'NR < n && $0 ~ /mov[ \t]+r2, #/ { v=$0 } END { print v }' <<<"$csd_body")
+                [[ -n "$csd_r0" && -n "$csd_r1" && -n "$csd_r2" ]] ||
+                    layout_fail "the argument setup before st_send_csd's call to st_send_command could not be read out of the linked image (r0 line [$csd_r0], r1 line [$csd_r1], r2 line [$csd_r2], the call on line $csd_bl_ln). This refusal is about the SCAN and not about the arm: a compiler that builds one of these arguments without a plain \`mov rN, #imm\` (a \`movw\`/\`movt\` pair, or a value already resident in the register) is not an arm with the wrong constant, and the fix is to teach this clause that shape rather than to read its silence as agreement. Nothing is rebuilt by this refusal"
+                csd_r0_imm=$(grep -oE '#[0-9]+' <<<"$csd_r0" | head -1 | tr -d '#')
+                csd_r1_imm=$(grep -oE '#[0-9]+' <<<"$csd_r1" | head -1 | tr -d '#')
+                csd_r2_imm=$(grep -oE '#[0-9]+' <<<"$csd_r2" | head -1 | tr -d '#')
+                [[ "$csd_r0_imm" == "9" ]] ||
+                    layout_fail "st_send_csd loads $csd_r0_imm into the OPCODE register before its call to st_send_command and rung 35 sends CMD9 - \`SEND_CSD\`, opcode 9 (mmc.h:38). An opcode that moved means this rung is not CMD9 at all, and every address this clause checks below would then be the response of a different command. Nothing is rebuilt by this refusal"
+                [[ "$csd_r1_imm" == "65536" ]] ||
+                    layout_fail "st_send_csd loads $csd_r1_imm into the ARGUMENT register before its call to st_send_command, and rung 35 sends 0x00010000 - mmc.c:1400's \`card->rca = 1\` through mmc_ops.c:301's \`card->rca << 16\`, which is what ST_MMC_RCA_1 is defined as and the same value CMD3 carries. **This is the one number in this rung a reader is most likely to get wrong**: an MMC card does not return an RCA to the host - CMD3's response is R1 (mmc.h:32), the 32-bit card status, and it has no RCA field at any offset, while the SD card's R6 puts one at bits 31:16 - so an argument read out of RESPONSE 0x10 is an argument that came from nowhere, and 0 is CMD9 addressed to no card at all. Nothing is rebuilt by this refusal"
+                [[ "$csd_r2_imm" == "7" ]] ||
+                    layout_fail "st_send_csd loads $csd_r2_imm into the FLAGS register before its call to st_send_command, and rung 35 asks for ST_MMC_RSP_R2 = MMC_RSP_PRESENT | MMC_RSP_136 | MMC_RSP_CRC = 7 - the same flag word CMD2 carries, and the driver's own flags for CMD9 (mmc_ops.c:224, \`MMC_RSP_R2 | MMC_CMD_AC\`, with MMC_CMD_AC = 0). A 3 here is CRC dropped - rung 31's word on a command that then reads four words nobody checked; a 5 is the 136-bit bit missing - CMD3's 48-bit word on a command whose clause below would read eight response addresses that its own request never asked to be filled. Nothing is rebuilt by this refusal"
+                csd_decl="f9824910 f9824913 f9824914 f9824917 f9824918 f982491b f982491c f9824924 f9824930 f9824934 f9824938"
+                { read -r csd_dev; read -r csd_cnt; read -r csd_img; read -r csd_imgaddr; } < <(classify_body "$csd_body" "$csd_decl")
+                csd_set=$(printf '%s\n' $csd_dev | LC_ALL=C sort -u | tr '\n' ' ')
+                csd_set_want="f9824910:ldr f9824913:ldrb f9824914:ldr f9824917:ldrb f9824918:ldr f982491b:ldrb f982491c:ldr f9824924:ldr f9824930:ldr f9824934:ldr f9824934:str f9824938:ldr"
+                [[ "${csd_set% }" == "$csd_set_want" ]] ||
+                    layout_fail "st_send_csd's device accesses are [${csd_set% }] and rung 35's record says [$csd_set_want] - and every address there is a NUMBER WITH A MEANING: 0xf9824910 + {0x10, 0x14, 0x18, 0x1C} are the four \`RESPONSE 0x10..0x1C\` words, 0xf9824910 + {0x13, 0x17, 0x1B} are the three CRC bytes ONE BELOW their own words, 0xf9824934 is \`INT_ENABLE 0x34\` (the window, read and written), 0xf9824938 is \`SIGNAL_ENABLE 0x38\`, 0xf9824930 is \`INT_STATUS 0x30\` and 0xf9824924 is \`PRESENT_STATE 0x24\`. **A byte address of 0x0F is absent deliberately - the vendor's \`if (i != 3)\` gives the LAST word no byte - and its appearance here would be a stale byte OR'd onto word 0**, which parses, decodes and publishes with no fault anywhere. A byte at 0x0B or 0x1F would be the pairing off by one. Nothing is rebuilt by this refusal"
+                csd_order=$(printf '%s\n' $csd_dev | tr '\n' ' ')
+                csd_order_want="f9824910:ldr f9824934:str f9824934:ldr f9824938:ldr f982491c:ldr f9824918:ldr f9824914:ldr f982491b:ldrb f9824917:ldrb f9824913:ldrb f9824930:ldr f9824924:ldr"
+                [[ "${csd_order% }" == "$csd_order_want" ]] ||
+                    layout_fail "st_send_csd's device accesses IN PROGRAM ORDER, distinct, are [${csd_order% }] and rung 35's record says [$csd_order_want]. **This is the assertion that reads the driver's arithmetic**: the four words go out as 0x1C, 0x18, 0x14 - WORD 3 FIRST, \`sdhci.c:1167\`'s \`(3-i)*4\` - and then the three bytes as 0x1B, 0x17, 0x13, each ONE BELOW the word it belongs to. An ascending order (0x10, 0x14, 0x18, 0x1C) is the same eight accesses and a 128-bit value with its four words reversed; a byte read above its word, or in the other order, is the pairing inverted. Either one is silent - it parses, decodes and publishes a plausible CSD-shaped number - which is why the order and not only the set is asserted here. Nothing is rebuilt by this refusal"
+                [[ "$csd_cnt" == *"f9824910:ldr=2"* ]] ||
+                    layout_fail "st_send_csd reads RESPONSE 0x10 $csd_cnt time(s) and rung 35 reads it TWICE: once BEFORE the window opens, as the card's own status word taken between CMD3 and CMD9 (the value \`_csd_pre_state\` decodes), and once inside the 136-bit block as WORD 0. **A count of ONE would mean the compiler commoned the two loads**, and the published state would then be a word read at the wrong moment with the order list above still reading correctly - the precondition would become an assumption wearing a cell, which is the one thing this rung publishes it to avoid. Nothing is rebuilt by this refusal"
+                [[ -z "${csd_img// /}" ]] ||
+                    layout_fail "st_send_csd's non-device memory accesses are [$csd_img] at [$csd_imgaddr] and rung 35's record says that set is EMPTY: this body publishes through entry_live_write - a call - and its one result struct lives on the stack, which the classifier skips by base register. A non-empty set here means either a symbol this rung never declared or an access the classifier could not resolve. Nothing is rebuilt by this refusal"
+                csd_calls=$(grep -c -- 'bl.*<st_send_csd>' <<<"$stb_path_body" || true)
+                [[ "$csd_calls" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $csd_calls call(s) to st_send_csd and rung 35 makes exactly one - the driver's own statement at mmc.c:1420, immediately after mmc.c:1409's CMD3. Zero means the body is in the image and nothing calls it, which is m720's shape: a switch no build reads, and the arm would be the rung below it with a dead function in it. Two or more means two CMD9s on the bus in one boot, which is not a command this ladder has measured the second of. Nothing is rebuilt by this refusal"
+                for _k in xnu_live_storage_csd_pre_state xnu_live_storage_csd_op xnu_live_storage_csd_structure xnu_live_storage_csd_mmca_vsn; do
+                    grep -qa "$_k" "$OUT/xnu_arm_entry.elf" ||
+                        layout_fail "rung 35 publishes no \`$_k\` string in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE. **The two kinds of cell are named here because the assertions above cannot see either of them**: \`_csd_pre_state\` is the precondition read a register rather than a load, and it is what makes a card still in IDENT a READING rather than a mystery when CMD9 comes back with nothing; \`_csd_structure\` and \`_csd_mmca_vsn\` are the vendor's own first two CSD decodes (mmc.c:147, mmc.c:165) and they are the self-check - on the eMMC v4 path this card takes they must read 1 and 4, values this image did not supply and could not have chosen. An arm without them answers the same question the rung below it answered, or answers it with a number nothing can check. Nothing is rebuilt by this refusal"
+                done
+                echo "  xnu_entry_812: rung 35's command body, read out of the linked image: st_send_csd (at $csd_addr) loads [r0=#$csd_r0_imm (SEND_CSD), r1=#$csd_r1_imm (ST_MMC_RCA_1, the driver's own card->rca << 16), r2=#$csd_r2_imm (ST_MMC_RSP_R2)] immediately before its bl to st_send_command (disassembly line $csd_bl_ln), and its device accesses in program order are [${csd_order% }] - the four RESPONSE words at 0x1C, 0x18, 0x14, 0x10 (WORD 3 FIRST, sdhci.c:1167's (3-i)*4) and the three CRC bytes at 0x1B, 0x17, 0x13 (each ONE BELOW its own word, sdhci.c:1169-1172), with NO byte at 0x0F because the last word takes none, plus the INT_ENABLE window, SIGNAL_ENABLE, INT_STATUS and PRESENT_STATE; the image side is EMPTY; st_cmd_path calls it $csd_calls time, on the line below rung 21's CMD3, and the four cells that make the answer checkable from outside this image are _csd_pre_state, _csd_op, _csd_structure and _csd_mmca_vsn - the last two being mmc.c:147/165's own decodes, which must read 1 and 4 on this card"
+            fi
             fi
             [[ -z "${stb_path_img// /}" ]] ||
                 layout_fail "st_cmd_path's non-device memory accesses are [$stb_path_img] at [$stb_path_imgaddr] and rung 11's record says that set is EMPTY - this function publishes through entry_live_write (a call, with a .rodata string) and its two result structs live on the stack, which the classifier skips by base register. A non-empty set here means either a symbol this rung never declared or an access it could not resolve. Nothing is rebuilt by this refusal"
