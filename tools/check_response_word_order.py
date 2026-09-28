@@ -39,6 +39,13 @@ THE RULE. Three conditions, each read off the vendor's two lines rather than inv
      most recent assignment in the same function is that read. This is what makes `i != 3` structural: an
      OR onto the offset-0 word has no offset -1 to name, so it cannot be written without using a byte
      that belongs to another word.
+  4. FIELDS COME OFF THE ASSEMBLED WORD, NEVER OFF THE RAW ONE. `resp[]` in the vendor's `UNSTUFF_BITS`
+     is the array `sdhci_finish_command` builds - `(raw << 8) | (the next word's top byte)` - so a field
+     masked out of the RAW register is one byte too high. A variable whose most recent assignment in the
+     function is a bare `st_read32(... RESPONSE + K)` for K in {8, 4, 12}, and an inline read at those
+     offsets, may not be the left operand of `>>`. OFFSET 0 IS EXEMPT AND DELIBERATELY SO: the vendor's
+     short-response branch reads `resp[0]` straight out of that register with no shift, so a right shift
+     of an offset-0 read is the driver's own shape and not this defect.
 
 WHAT IT REFUSES ON, AND WHAT IT ONLY PRINTS. The refusing scope is the entry sources - `src/entry/*.c` -
 because that is the tree the entry image is built from and the tree the gate binds the armed arm to by
@@ -57,6 +64,13 @@ this tool refused four correct sites, and the rule moved, not the code:
     and only one is ever compiled, so a repeated offset across a `#if`/`#else` boundary is not a second
     reading of the same address - which is the thing the rule is about.
 
+RULE 4 NEEDED NO NARROWING, AND THAT WAS MEASURED RATHER THAN HOPED. It was run over the whole of
+`entry_storage.c` - 4,600 lines, seven response-reading functions - in both directions before it landed:
+it refuses exactly the seven sites in `st_send_csd` that read a FIELD off a raw word (the six decodes and
+the capacity line, all added by rung 35) and nothing else in the file, and zero after the fix. The
+measurement is reproducible: `git show HEAD:src/entry/entry_storage.c` through `function_bodies()` and
+`findings_in()` is 7 RAW-FIELD; the working tree is 0.
+
 Exit 0 when the tree is clean; 1 with every divergence printed; 2 on a usage error, and 2 for a failed
 `--selftest` - the check's own width being wrong is a different failure from the tree being wrong.
 """
@@ -69,6 +83,10 @@ RESPONSE = "ST_SDHCI_RESPONSE"
 LEGAL32 = (12, 8, 4, 0)
 LEGAL8 = (11, 7, 3)
 MAX_WORD = 12
+# The offsets whose stored word is NOT the response field: `sdhci_finish_command` shifts each one up by
+# a byte and ORs the next word's top byte in below it. Offset 0 is a short response's `resp[0]` as it
+# stands, which is why rule 4 exempts it.
+RAW_WORDS = (12, 8, 4)
 
 # `ST_SDHCI_RESPONSE + 12u`, and the bare `ST_SDHCI_RESPONSE` the last word is read from.
 OFFSET = re.compile(r"ST_SDHCI_RESPONSE\s*(?:\+\s*(\d+)u)?")
@@ -77,6 +95,8 @@ READ8 = re.compile(r"st_read8\s*\(([^;]*?)\)", re.S)
 SHIFT = re.compile(r"<<\s*8")
 FUNC = re.compile(r"^[A-Za-z_][\w \t*]*\b(\w+)\s*\([^;]*\)\s*$")
 ASSIGN = re.compile(r"^\s*(\w+)\s*=\s*(.*)$", re.S)
+# A whole right-hand side that IS one response read, as opposed to an expression built from one.
+BARE32 = re.compile(r"^\(?\s*(?:\w+\s*\*?\s*)?st_read32\s*\((.*)\)\s*\)?$", re.S)
 
 
 def offset_of(text):
@@ -199,6 +219,7 @@ def findings_in(name, stmts):
     """Every divergence from the three rules, as (line, tag, message)."""
     out = []
     var_offset = {}          # variable -> the offset its last response read32 came from
+    raw_word = {}            # variable -> the offset, when its whole value IS a raw register read
     segment, seen = [], set()
     for n, text in stmts:
         if "st_send_command" in text or text.lstrip().startswith("#"):
@@ -258,6 +279,28 @@ def findings_in(name, stmts):
                     out.append((n, "PAIR", f"the byte at + {byte}u is OR'd onto the word at + {word}u; the "
                                            f"stripped CRC byte belongs to the address ONE BELOW the word "
                                            f"(+ {word - 1}u)"))
+        # --- rule 4: a FIELD comes off the assembled word, never off the raw register -------------
+        m = ASSIGN.match(text)
+        if m:
+            rhs = m.group(2).rstrip().rstrip(";").strip()
+            b = BARE32.match(rhs)
+            off = offset_of(b.group(1)) if b else None
+            if off in RAW_WORDS:
+                raw_word[m.group(1)] = off
+            else:
+                raw_word.pop(m.group(1), None)
+        for v, off in sorted(raw_word.items()):
+            if re.search(r"\b" + re.escape(v) + r"\s*>>", text):
+                out.append((n, "RAW-FIELD", f"`{v}` holds the RAW register at + {off}u and is shifted "
+                                            f"right: the vendor's UNSTUFF_BITS is defined over the array "
+                                            f"sdhci_finish_command ASSEMBLES ((raw << 8) | the next "
+                                            f"word's top byte), so a field masked out of a raw word is "
+                                            f"one byte too high"))
+        for m32 in re.finditer(READ32, text):
+            off = offset_of(m32.group(1))
+            if off in RAW_WORDS and re.match(r"\s*>>", text[m32.end():]):
+                out.append((n, "RAW-FIELD", f"an inline raw {RESPONSE} + {off}u read is shifted right: "
+                                            f"fields come off the assembled array, not off the register"))
     return out
 
 
@@ -350,6 +393,30 @@ SELFTEST = (
     raw0 = st_read32(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE + 12u);
     raw0 = st_read32(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE + 12u);
 }""", 1),
+    # --- rule 4, and the two shapes that are on the right and wrong side of it ------------------
+    ("a FIELD masked out of the ASSEMBLED word",  # :4610's shape after 814
+     """static void j(void) {
+    w0 = st_read32(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE + 12u);
+    a0 = (w0 << 8) | (uint32_t)st_read8(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE + 11u);
+    ST_LIVE("structure", (a0 >> 30) & 0x3u);
+    ST_LIVE("mmca_vsn", (a0 >> 26) & 0xFu);
+}""", 0),
+    ("a FIELD masked out of the RAW register",  # :4610's shape BEFORE 814 - rung 35's defect
+     """static void k(void) {
+    w0 = st_read32(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE + 12u);
+    ST_LIVE("raw", w0);
+    ST_LIVE("structure", (w0 >> 30) & 0x3u);
+}""", 1),
+    ("the same mistake, written inline",
+     """static void l(void) {
+    ST_LIVE("structure", (st_read32(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE + 12u) >> 30) & 0x3u);
+}""", 1),
+    ("a SHORT response's offset-0 word, which carries no byte shift at all",  # :4550's shape
+     """static void m(void) {
+    r1 = st_read32(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE);
+    ST_LIVE("state", (r1 >> 9) & 0xFu);
+    ST_LIVE("ready", (r1 >> 8) & 0x1u);
+}""", 0),
 )
 
 
@@ -365,8 +432,9 @@ def selftest():
             bad += 1
     if bad:
         return 2
-    print(f"selftest ok: {len(SELFTEST)} fixtures - the four shapes this tree holds are clean, and each "
-          f"of the five ways the arithmetic goes wrong is refused")
+    clean = sum(1 for _, _, want in SELFTEST if want == 0)
+    print(f"selftest ok: {len(SELFTEST)} fixtures - the {clean} shapes this tree holds are clean, and "
+          f"each of the {len(SELFTEST) - clean} ways the arithmetic goes wrong is refused")
     return 0
 
 

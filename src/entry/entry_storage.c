@@ -4515,7 +4515,10 @@ static __attribute__((noinline, noclone)) void st_cmd3_noidx(uint32_t int_enable
  * below it is a **build refusal**, so this copy cannot silently disagree with the five above it.
  *
  * **AND THE FOUR WORDS ARE DECODED WITH THE VENDOR'S OWN OFFSETS, WHICH IS WHAT MAKES A CSD ANSWER
- * CHECKABLE FROM OUTSIDE THIS IMAGE.** `mmc_decode_csd` (`mmc.c:147`) reads `csd->structure =
+ * CHECKABLE FROM OUTSIDE THIS IMAGE - AND `resp` IN THAT CALL IS THE ARRAY THE ASSEMBLER PRODUCES,
+ * NOT THE FOUR REGISTERS.** 814's correction, and the reason the two must not be conflated: `resp[]`
+ * holds `(raw << 8) | (the next word's top byte)`, so a field read off a raw word is one byte too
+ * high. `mmc_decode_csd` (`mmc.c:147`) reads `csd->structure =
  * UNSTUFF_BITS(resp, 126, 2)` FIRST and returns `-EINVAL` from `mmc.c:162` unless it is non-zero,
  * then `csd->mmca_vsn = UNSTUFF_BITS(resp, 122, 4)` (`mmc.c:165`); on the eMMC v4 path this card
  * takes (`mmc.c:110`, the same `case 2/3/4` that carries the CID's 32-bit serial) the CSD is v1.2, so
@@ -4535,7 +4538,7 @@ static __attribute__((noinline, noclone)) void st_send_csd(uint32_t int_enable)
 {
     struct st_cmd_result c9;
     uint32_t pre, held, readback, status_post;
-    uint32_t w0, w1, w2, w3, c_size;
+    uint32_t w0, w1, w2, w3, a0, a1, a2, a3, c_size;
 
     ST_LIVE("xnu_live_storage_csd_calls", 1u);
 
@@ -4601,6 +4604,16 @@ static __attribute__((noinline, noclone)) void st_send_csd(uint32_t int_enable)
      * `<< 8` on each, and the byte below each word except the last. ONE command segment, four 32-bit
      * offsets descending and three byte offsets at word-1: that is the whole of what
      * `tools/check_response_word_order.py` reads in this body.
+     *
+     * **THE FOUR RAW WORDS AND THE FOUR ASSEMBLED WORDS ARE TWO DIFFERENT VALUES, AND 814 IS THE
+     * STEP THAT FOUND OUT THE HARD WAY.** `w0..w3` hold the REGISTERS; `a0..a3` hold what
+     * `sdhci_finish_command` makes of them, and the vendor's decoders are written against the
+     * second: `a_i = (w_i << 8) | (w_{i+1} >> 24)`, so `a_i` is NOT `w_i` - it is `w_i` moved up one
+     * byte with the next word's TOP byte shifted in below. Rung 18's own comment already says it in
+     * one line ("the four raw words holding that same 32-bit value one byte further along"). The
+     * first version of this body decoded `w0..w3` with the vendor's shifts anyway, which reads every
+     * field one byte too high - and the two most visible fields, `structure` and `mmca_vsn`, off the
+     * top byte the assembler SHIFTS OUT.
      */
     w0 = st_read32(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE + 12u);
     w1 = st_read32(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE + 8u);
@@ -4610,41 +4623,47 @@ static __attribute__((noinline, noclone)) void st_send_csd(uint32_t int_enable)
     ST_LIVE("xnu_live_storage_csd_raw1", w1);
     ST_LIVE("xnu_live_storage_csd_raw2", w2);
     ST_LIVE("xnu_live_storage_csd_raw3", w3);
-    ST_LIVE("xnu_live_storage_csd_resp0",
-            (w0 << 8) | (uint32_t)st_read8(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE + 11u));
-    ST_LIVE("xnu_live_storage_csd_resp1",
-            (w1 << 8) | (uint32_t)st_read8(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE + 7u));
-    ST_LIVE("xnu_live_storage_csd_resp2",
-            (w2 << 8) | (uint32_t)st_read8(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE + 3u));
-    ST_LIVE("xnu_live_storage_csd_resp3", w3 << 8);
+    a0 = (w0 << 8) | (uint32_t)st_read8(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE + 11u);
+    a1 = (w1 << 8) | (uint32_t)st_read8(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE + 7u);
+    a2 = (w2 << 8) | (uint32_t)st_read8(ST_HC_MEM_BASE + ST_SDHCI_RESPONSE + 3u);
+    a3 = w3 << 8;
+    ST_LIVE("xnu_live_storage_csd_resp0", a0);
+    ST_LIVE("xnu_live_storage_csd_resp1", a1);
+    ST_LIVE("xnu_live_storage_csd_resp2", a2);
+    ST_LIVE("xnu_live_storage_csd_resp3", a3);
 
     /*
-     * **The vendor's own field offsets, over the four words above.** `UNSTUFF_BITS(resp, start, size)`
-     * indexes `resp[3 - start/32]` with `resp[0]` holding bits 127:96, which is exactly what the
-     * assembler above produces - 811 section 4 checked that arithmetically against the CID's serial,
-     * whose bits 47:16 come out of these same two words as the phone's own `ro.serialno`. Each field
-     * below is the vendor's call written out with its shift and mask, so a reader can check the
-     * arithmetic instead of trusting a helper:
+     * **The vendor's own field offsets, over the four ASSEMBLED words above.** `UNSTUFF_BITS(resp,
+     * start, size)` indexes `resp[3 - start/32]` with `resp[0]` holding bits 127:96, and `resp[]` is
+     * `a0..a3` - the array `mmc_send_cxd_native` copies out of `cmd.resp[]`, which
+     * `sdhci_finish_command` filled with the assembler above. 811 section 4 checked the mapping
+     * arithmetically against the CID's serial, whose bits 47:16 come out of `a2`/`a3` as the phone's
+     * own `ro.serialno`; the same two-piece call on `w2`/`w3` gives `0x014a2fe0`, which is not a
+     * serial number. Each field below is the vendor's call written out with its shift and mask, so a
+     * reader can check the arithmetic instead of trusting a helper:
      *
-     *   mmc.c:147  structure    = UNSTUFF_BITS(resp, 126, 2)  -> (w0 >> 30) & 0x3
-     *   mmc.c:165  mmca_vsn     = UNSTUFF_BITS(resp, 122, 4)  -> (w0 >> 26) & 0xF
-     *   mmc.c:173  cmdclass     = UNSTUFF_BITS(resp,  84, 12) -> (w1 >> 20) & 0xFFF
-     *   mmc.c:185  read_blkbits = UNSTUFF_BITS(resp,  80, 4)  -> (w1 >> 16) & 0xF
-     *   mmc.c:175  C_SIZE       = UNSTUFF_BITS(resp,  62, 12) -> spans the w2/w1 boundary, shift 30
-     *   mmc.c:174  C_SIZE_MULT  = UNSTUFF_BITS(resp,  47, 3)  -> (w2 >> 15) & 0x7
+     *   mmc.c:147  structure    = UNSTUFF_BITS(resp, 126, 2)  -> (a0 >> 30) & 0x3
+     *   mmc.c:165  mmca_vsn     = UNSTUFF_BITS(resp, 122, 4)  -> (a0 >> 26) & 0xF
+     *   mmc.c:173  cmdclass     = UNSTUFF_BITS(resp,  84, 12) -> (a1 >> 20) & 0xFFF
+     *   mmc.c:185  read_blkbits = UNSTUFF_BITS(resp,  80, 4)  -> (a1 >> 16) & 0xF
+     *   mmc.c:175  C_SIZE       = UNSTUFF_BITS(resp,  62, 12) -> spans the a2/a1 boundary, shift 30
+     *   mmc.c:174  C_SIZE_MULT  = UNSTUFF_BITS(resp,  47, 3)  -> (a2 >> 15) & 0x7
      *
      * C_SIZE spans the boundary and is the one field where a reader can be wrong quietly, so it is
-     * written as the vendor's own two-piece expression rather than as an approximation of it.
+     * written as the vendor's own two-piece expression rather than as an approximation of it. **A
+     * right shift of a raw word is now a build refusal** - `tools/check_response_word_order.py`'s
+     * rule 4, added by 814 for exactly this defect - so the next copy of this arithmetic cannot be
+     * written the way this one first was.
      */
-    ST_LIVE("xnu_live_storage_csd_structure", (w0 >> 30) & 0x3u);
-    ST_LIVE("xnu_live_storage_csd_mmca_vsn", (w0 >> 26) & 0xFu);
-    ST_LIVE("xnu_live_storage_csd_cmdclass", (w1 >> 20) & 0xFFFu);
-    ST_LIVE("xnu_live_storage_csd_read_blkbits", (w1 >> 16) & 0xFu);
-    ST_LIVE("xnu_live_storage_csd_c_size_mult", (w2 >> 15) & 0x7u);
-    c_size = ((w2 >> 30) | (w1 << 2)) & 0xFFFu;
+    ST_LIVE("xnu_live_storage_csd_structure", (a0 >> 30) & 0x3u);
+    ST_LIVE("xnu_live_storage_csd_mmca_vsn", (a0 >> 26) & 0xFu);
+    ST_LIVE("xnu_live_storage_csd_cmdclass", (a1 >> 20) & 0xFFFu);
+    ST_LIVE("xnu_live_storage_csd_read_blkbits", (a1 >> 16) & 0xFu);
+    ST_LIVE("xnu_live_storage_csd_c_size_mult", (a2 >> 15) & 0x7u);
+    c_size = ((a2 >> 30) | (a1 << 2)) & 0xFFFu;
     ST_LIVE("xnu_live_storage_csd_c_size", c_size);
     ST_LIVE("xnu_live_storage_csd_capacity_blocks",
-            (1u + c_size) << (((w2 >> 15) & 0x7u) + 2u));
+            (1u + c_size) << (((a2 >> 15) & 0x7u) + 2u));
 
     /* --- the window's ONE exit, unconditional, on the line after the publishes ------------------ */
     ST_LIVE("xnu_live_storage_csd_wrote_back", int_enable);

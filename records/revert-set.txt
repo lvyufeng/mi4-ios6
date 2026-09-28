@@ -9076,3 +9076,96 @@ set=armed-storage-6cd6fae8 sha256=8d77ff3a9ad1f2543fd661c6eb1dc538258965c4bc8655
 set=armed-storage-6cd6fae8 sha256=e35251b74e35bda9fa4ddfc8bc76e1b2a8ab05711d4753d0fcda189ea2fdb2cd bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=34
 set=armed-storage-6cd6fae8 sha256=bd7570b019d9d5fc0133c126ec039a2fdb40eb5c73a9829d3dad48e7a4e9fa6c bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-THREE-of-its-28-lines-move-the-STAGE90_XNU_ENTRY_SHA256-line-and-two-of-its-23-file-entries
 #
+#
+# **WITHDRAWN, NEVER PRESSED (814): `armed-storage-6cd6fae8` IS NOT AN ARM TO PRESS.** It was armed,
+# it was never pressed, and 814 found a defect in it before the press instead of by it. The park stays
+# in `out/stage90/frozen/` because a park is the record of what was built; the arm to press is the one
+# this block ends with, `armed-storage-47c657af`. Everything below is the withdrawal and the repair.
+#
+# 814: THE RUNG-35 BUILD, WITHDRAWN AND REPAIRED BEFORE THE PRESS - the CSD fields were decoded off the
+# RAW response registers and `UNSTUFF_BITS` is defined over the ASSEMBLED array. A BUILD, A PARK AND A
+# RECORD: no press, no device action, no runner, no firer.
+#
+# (1) THE DEFECT, IN ONE SENTENCE. `st_send_csd`'s six field decodes applied the shifts and masks of
+# the vendor's `UNSTUFF_BITS(resp, start, size)` to the four RAW `RESPONSE` registers - but `resp[]` in
+# that macro is the array `sdhci_finish_command` ASSEMBLES, `resp[i] = (raw_i << 8) | (raw_{i+1} >> 24)`,
+# so every field came out ONE BYTE TOO HIGH. The two most visible - `_csd_structure` and `_csd_mmca_vsn`,
+# which are the two cells this arm's own outcome table turns on - were read off `raw0`'s TOP byte, the
+# one byte the assembler SHIFTS OUT.
+#
+# (2) IT IS MEASURED AGAINST AN ANSWER ALREADY IN THIS RECORD. The rung-34 press published the CID's
+# four raw words AND its four assembled words, and 811 section 4 decoded the second set into the phone's
+# own `ro.serialno`. The vendor's macro over each set:
+#
+#     field                          ASSEMBLED words        RAW words
+#     manfid   UNSTUFF_BITS(120,8)   0x45  (SanDisk)        0x00
+#     prod_name[0..5]                "SDW16G"               " SDW16"
+#     serial   UNSTUFF_BITS(16,32)   0x4a2fe00b             0x014a2fe0
+#
+# `0x4a2fe00b` is `ro.serialno`; `0x014a2fe0` is not a serial number and is not even eight digits. The
+# same substitution on the body's own six expressions moves all six: `structure` 1 -> 0, `mmca_vsn`
+# 1 -> 0, `cmdclass` 0x445 -> 0x534, `read_blkbits` 7 -> 4, `c_size_mult` 2 -> 6, `c_size` 1241 -> 3268,
+# computed on those same words as a stand-in (the fix's own doc, section 3).
+#
+# (3) WHY IT HAD TO BE FIXED AND NOT MERELY REPORTED. This arm's own closing comment reads: `_csd_complete
+# = 1` with `_csd_structure = 1` and `_csd_mmca_vsn = 4` is a CSD and CMD7 is next; `_csd_complete = 1`
+# with a structure that is neither 1 nor 2 is **738's stale-word trap, one rung up**. A body reading the
+# fields off the wrong bytes does not merely publish wrong numbers - **it publishes a MISLEADING
+# VERDICT**, and the verdict it would have published is the one that sends the next rung after a phantom.
+# This is `one value, two definitions`; and rung 18's own comment already carried the fact that was
+# missed - "the four raw words holding that same 32-bit value ONE BYTE FURTHER ALONG".
+#
+# (4) THE FIX. The four assembled words are bound to locals `a0..a3` and the six decodes read `a0`/`a1`/
+# `a2`. **The four published `_csd_resp*` cells are UNCHANGED IN VALUE** - they were always the assembled
+# expressions - so no log key moved and no key was added. Three comment blocks gained the distinction,
+# including this rung's own header comment. **NO SWITCH MOVED**: `xnu_arm_entry-config.txt` differs from
+# the withdrawn arm's in EXACTLY ONE line, the artifact's own hash, and `stage90-build-config.txt` - the
+# payload's own switch record - is BYTE-IDENTICAL (`6c2b6038...`).
+#
+# (5) THE CLASS IS NOW A BUILD REFUSAL AND NOT A SENTENCE. `tools/check_response_word_order.py` gained
+# **rule 4**: a variable whose whole value is a bare `st_read32(... RESPONSE + K)` for K in {8, 4, 12},
+# and an inline read at those offsets, may not be the left operand of `>>`. **OFFSET 0 IS EXEMPT AND
+# DELIBERATELY SO** - the vendor's short-response branch reads `resp[0]` straight out of that register
+# with no shift, so a right shift of an offset-0 read is the driver's own shape. **MEASURED IN BOTH
+# DIRECTIONS BEFORE IT LANDED**: over the whole of `entry_storage.c` - 4,600 lines, seven
+# response-reading functions - it refuses EXACTLY the seven sites in `st_send_csd` (the six decodes and
+# the capacity line) in HEAD's text and NOTHING ELSE in the file, and ZERO after the fix. `--selftest`
+# grew four fixtures for it (two clean, two refused) to thirteen, and its closing sentence now COUNTS
+# its fixtures rather than naming a number.
+#
+# (6) WHAT THE REPAIRED ARM WILL READ. The outcome table is unchanged, and 813 section 6's prediction is
+# the same one rung stronger: the third row - `_csd_complete = 0` with `_csd_pre_state = 2` - is what the
+# evidence already points at, and the first row's two cross-checks (`_csd_structure = 1`,
+# `_csd_mmca_vsn = 4`) are now values this arithmetic can actually produce.
+#
+# (7) CONTAINMENT, MEASURED MEMBER BY MEMBER AGAINST THE WITHDRAWN PARK: **TWO OF ELEVEN BYTE-IDENTICAL**
+# (`stage90-build-config.txt` and `stage90_fixture.macho` - the two that neither embed nor list the entry
+# image) and NINE MOVE. That is the shape a step that changes EMITTED CODE must have; 812's comment-only
+# correction was the opposite shape (ten of eleven identical), which is why the two are told apart here.
+# `xnu_arm_entry-sources.txt` differs in EXACTLY TWO of its 28 lines - the artifact's own sha256 and
+# `entry_storage.c`'s content hash - so `build_entry.sh` did not move and no source was added or removed;
+# `xnu_arm_entry-config.txt` in EXACTLY ONE, the artifact's own hash. **`xnu_arm_entry.elf`'s SIZE did
+# not move either**: 6,732,556 bytes, the same as the withdrawn arm's.
+#
+# (8) THE BUILD CLAUSE IS THE READING, NOT THIS BLOCK. `xnu_entry_812` reads `st_send_csd` out of the
+# LINKED IMAGE and asserts its device accesses IN PROGRAM ORDER - the four `RESPONSE` words at 0x1C,
+# 0x18, 0x14, 0x10 (word 3 first) then the three CRC bytes at 0x1B, 0x17, 0x13, none at 0x0F - and it was
+# re-run against the repaired body as part of this build, which exited 0.
+#
+# THE PRESS IS THE OPERATOR'S AND NO PRESS IS SPENT OR AUTHORIZED HERE. `out/stage90/` was rebuilt and the
+# arm in it is `armed-storage-47c657af`, parked with eleven members. **THE GOAL IS NOT MET BY THIS ARM**:
+# no transfer completes, no filesystem is reached and no mount is made, so 「让os可以正常启动并且挂载存储」
+# is not reached and **TWRP-TO-STORAGE STAYS WITHHELD**.
+#
+set=armed-storage-47c657af sha256=b703a0a54e2de2cf35aab47fc8b0c3de0b42bec24fcb93ce08c3463a79eb2d59 bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-34-entry-REPAIRED-814
+set=armed-storage-47c657af sha256=3dec0e0da954a1e0fbff9098e45b7577cb0885f6a2fbdd0160c1767ff417eb46 bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-34-entry-REPAIRED-814
+set=armed-storage-47c657af sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-34-s-MEASURED-no-payload-switch-moved-and-byte-identical-to-the-WITHDRAWN-rung-35-arm-s-too
+set=armed-storage-47c657af sha256=462a79964897d37eb464750b6f5f6560ca16a6269b9aeb17a6ad4f57ae5d8da8 bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-47c657af sha256=3f3cc03cad01aba75e41675d0463b0b036142736490271f4e290aacc18b12580 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-47c657af sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-47c657af sha256=f7ce45e8ca0d1781a4aac20b84bd1f1afd6cc0324bc71ddeffb1e57b0f562bc2 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-47c657af sha256=47c657af55c2a44b3f78bf0755cae3af402daf466fce0caa4413d10164688604 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-47c65-is-the-sets-name-AND-IT-IS-THE-REPAIR-OF-THE-WITHDRAWN-6cd6f-arm
+set=armed-storage-47c657af sha256=8a8761a143c581fafe8a4bde8284bd6db295fa7e9f975c560293d4ad1e3898d2 bytes=6732556 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-its-size-DID-NOT-MOVE-from-the-withdrawn-rung-35-arm-6732556-bytes-in-both
+set=armed-storage-47c657af sha256=a249ea8b83581cba7a02fa89eacca3cef4841735b6b71d1ddde275c5bd92d557 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=34-and-differing-from-the-withdrawn-arm-s-in-EXACTLY-ONE-line-the-artifact-s-own-hash
+set=armed-storage-47c657af sha256=62e9d8e228702e61a9235981103a9e3384778be4e5781e41565156f4a09cceb3 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one-TWO-of-its-28-lines-move-the-STAGE90_XNU_ENTRY_SHA256-line-and-entry_storage-c-s-content-hash
+#
