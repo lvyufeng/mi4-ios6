@@ -30985,6 +30985,69 @@ verify_trace_symbols() {
                     layout_fail "st_cmd_path calls st_cmd1_enable_restore on disassembly line $c1_ln and its second st_send_command is on line ${stb_path_cmd_ln[1]}: rung 30's window is the CMD1 interval, so its close must fall after CMD1 \`SEND_OP_COND\`. A close above the second command is a window that never covered the command it exists for - and 785's arm is the measured case of the belief that it did, refuted by 786 out of the press's own capture"
                 echo "  xnu_entry_787: rung 30's third INT_ENABLE window, read out of the linked image: st_cmd_path's own device surface is rung 14's UNCHANGED at this value, and the window is the interval between its ONE call to st_cmd1_enable_open (disassembly line $c1o_ln, a body whose device set is [$c1o_set]) and its ONE call to st_cmd1_enable_restore (line $c1_ln, [$c1_set]) - so the enable stands across CMD1 on line ${stb_path_cmd_ln[1]} and is put back after the command's own publishes, both positions asserted and neither stated"
             fi
+            if [[ $STORAGE_PROBE -ge 16 ]]; then
+                # **791: RUNG 31's ONE CONSTANT, READ OUT OF THE LINKED IMAGE AT ITS CALL SITE, AND
+                # IT IS THE COMPLEMENT OF THE CLAUSE GROUP ABOVE.** The `-ge 16` block asserts what
+                # `st_all_send_cid` READS AND WRITES - its device set, its counts, its program order,
+                # its empty image side - and **none of those moves when a constant moves**: the arm at
+                # this value differs from the one below it by the third argument of one call, which
+                # that clause set cannot see at all, because `classify_body` reports ADDRESSES and
+                # this is an immediate in a register.
+                #
+                # So this clause reads the immediate, and it does it in the one place the linked image
+                # is unambiguous about it: **the argument-register setup immediately before the `bl`
+                # to `st_send_command`.** For a four-argument call GCC emits `r3` first and `r0` last,
+                # so the last `mov r2, #imm` above that `bl` is the flags word - `#7` for
+                # `MMC_RSP_R2` (`PRESENT | 136 | CRC`) below this rung and `#3` for
+                # `MMC_RSP_R2_NOCRC` at and above it. The two companion immediates are pinned
+                # alongside it, because this arm's whole claim is that the opcode and the argument did
+                # NOT move: **`r0 = #2` (`ALL_SEND_CID`) and `r1 = #0` on every value.**
+                #
+                # **What this clause cannot see, and what covers it.** It reads the flags ARGUMENT and
+                # cannot read the command WORD the callee folds out of it - `ST_SDHCI_CMD_FLAGS` runs
+                # inside `st_send_command`, one call away. That side is carried by the source
+                # `_Static_assert` pair this rung adds (`0x0209` under the flag word, `0x0201` over
+                # it), which is a compile-time refusal and not a comment. **One assertion on each side
+                # of the call, and this clause is the half that is read out of the artifact the gate
+                # boots.**
+                #
+                # **The expected value is DERIVED FROM THE SWITCH and not written as a literal**, so
+                # this is a two-way clause rather than a rung-31 clause: at any value below 30 a `#3`
+                # is refused as loudly as a `#7` is above it, and the refusal that catches a constant
+                # which leaked DOWN the ladder is the same one that catches a rung which did not take
+                # effect.
+                cid_body_addr=$(sym_addr st_all_send_cid) ||
+                    layout_fail "st_all_send_cid is not in the linked image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE, so this rung's one constant cannot be read out of the artifact at all. This is the same absence the call-count clause below refuses; it is named here too because a clause that cannot find its subject must not report on it. Nothing is rebuilt by this refusal"
+                cid_body_next=$(sym_next "$cid_body_addr") ||
+                    layout_fail "nothing follows st_all_send_cid in the linked image, so the window this check disassembles has no end. Nothing is rebuilt by this refusal"
+                cid_body=$(arm-none-eabi-objdump -d --start-address="$cid_body_addr" --stop-address="$cid_body_next" "$OUT/xnu_arm_entry.elf")
+                cid_bl_count=$(grep -c -- 'bl.*<st_send_command>' <<<"$cid_body")
+                [[ "$cid_bl_count" == "1" ]] ||
+                    layout_fail "st_all_send_cid makes $cid_bl_count call(s) to st_send_command and rung 16 makes exactly one - CMD2 is one command. Zero means the symbol was reached with an empty window (the scan failed, not the arm); two or more means the flags this clause reads may belong to the wrong call, and a clause reading the wrong call site is worse than no clause. Nothing is rebuilt by this refusal"
+                cid_bl_ln=$(awk '/bl.*<st_send_command>/{ printf "%d", NR }' <<<"$cid_body")
+                cid_r0=$(awk -v n="$cid_bl_ln" 'NR < n && $0 ~ /mov[ \t]+r0, #/ { v=$0 } END { print v }' <<<"$cid_body")
+                cid_r1=$(awk -v n="$cid_bl_ln" 'NR < n && $0 ~ /mov[ \t]+r1, #/ { v=$0 } END { print v }' <<<"$cid_body")
+                cid_r2=$(awk -v n="$cid_bl_ln" 'NR < n && $0 ~ /mov[ \t]+r2, #/ { v=$0 } END { print v }' <<<"$cid_body")
+                [[ -n "$cid_r0" && -n "$cid_r1" && -n "$cid_r2" ]] ||
+                    layout_fail "the argument setup before st_all_send_cid's call to st_send_command could not be read out of the linked image (r0 line [$cid_r0], r1 line [$cid_r1], r2 line [$cid_r2], the call on line $cid_bl_ln). This refusal is about the SCAN and not about the arm: a compiler that builds one of these arguments without a plain \`mov rN, #imm\` (a \`movw\`/\`movt\` pair, or a value already resident in the register) is not an arm with the wrong constant, and the fix is to teach this clause that shape rather than to read its silence as agreement. Nothing is rebuilt by this refusal"
+                cid_r0_imm=$(sed -E 's/.*#[0-9]+.*/&/' <<<"$cid_r0" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+                cid_r1_imm=$(sed -E 's/.*#[0-9]+.*/&/' <<<"$cid_r1" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+                cid_r2_imm=$(sed -E 's/.*#[0-9]+.*/&/' <<<"$cid_r2" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+                if [[ $STORAGE_PROBE -ge 30 ]]; then
+                    cid_flags_want=3
+                    cid_flags_name="MMC_RSP_PRESENT | MMC_RSP_136 (word 0x0201)"
+                else
+                    cid_flags_want=7
+                    cid_flags_name="MMC_RSP_R2 = PRESENT | 136 | CRC (word 0x0209)"
+                fi
+                [[ "$cid_r0_imm" == "2" ]] ||
+                    layout_fail "st_all_send_cid loads $cid_r0_imm into the OPCODE register before its call to st_send_command and rung 16 sends CMD2 - \`ALL_SEND_CID\`, opcode 2 - at every value. An opcode that moved means this rung is not CMD2 at all, and the flags this clause reads would then be a different command's. Nothing is rebuilt by this refusal"
+                [[ "$cid_r1_imm" == "0" ]] ||
+                    layout_fail "st_all_send_cid loads $cid_r1_imm into the ARGUMENT register before its call to st_send_command and rung 16 sends argument 0 - \`mmc_all_send_cid\` takes none. A non-zero argument here is a command this rung's record does not name. Nothing is rebuilt by this refusal"
+                [[ "$cid_r2_imm" == "$cid_flags_want" ]] ||
+                    layout_fail "st_all_send_cid loads $cid_r2_imm into the FLAGS register before its call to st_send_command, and STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE requires $cid_flags_want ($cid_flags_name). This is the ONE CONSTANT this rung moves and the only act it has, so an arm whose flags did not take effect is the rung below it wearing this record: at value 30 or above a \`#7\` means the constant was compiled out and the press would come back with a log identical to the spent rung-30 arm and a record claiming a new arm; below 30 a \`#3\` means the constant leaked down the ladder and EVERY ARM BELOW THIS ONE would be mistaking a CRC-dropped 136-bit request for rung 16's. Both directions are refused here and neither is a comment. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_792: rung 31's ONE CONSTANT, read out of the linked image at its call site: st_all_send_cid loads [r0=#$cid_r0_imm (ALL_SEND_CID), r1=#$cid_r1_imm (no argument), r2=#$cid_r2_imm ($cid_flags_name)] immediately before its bl to st_send_command (disassembly line $cid_bl_ln of the body at $cid_body_addr) - so the opcode and the argument are rung 16's at every value and the FLAGS register is the only thing this rung moves, with the command WORD it folds to pinned on the other side of the call by this rung's _Static_assert pair"
+            fi
             [[ -z "${stb_path_img// /}" ]] ||
                 layout_fail "st_cmd_path's non-device memory accesses are [$stb_path_img] at [$stb_path_imgaddr] and rung 11's record says that set is EMPTY - this function publishes through entry_live_write (a call, with a .rodata string) and its two result structs live on the stack, which the classifier skips by base register. A non-empty set here means either a symbol this rung never declared or an access it could not resolve. Nothing is rebuilt by this refusal"
             [[ "$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_path_body")" == "2" ]] ||

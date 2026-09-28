@@ -7676,3 +7676,138 @@ set=armed-storage-dfc4ae78 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b273642672
 # synthetic FDT cell (782 section 6), 784's rail_name cell, and 783's window-scope check.
 #
 # CARRIED INTO tools/verify_press_ready.sh's rung-29 narration, which is what the next press prints.
+
+# 792: THE RUNG-31 ARM - armed-storage-f9613649, STAGE90_XNU_STORAGE_PROBE=30.
+# Built, parked and recorded here. Rung 30's park (armed-storage-dfc4ae78) is intact and is SPENT;
+# every park before it is intact. This arm SUPERSEDES rung 30 because it strictly contains it,
+# MEASURED rather than argued and with the delta NAMED rather than denied (see the containment
+# paragraph). NO PRESS IS SPENT AND NONE IS AUTHORIZED: the press is the operator's, and the path to
+# it is the two commands readiness prints, run by hand once each.
+#
+# WHAT IT IS. 791 censused every CMD2 this ladder has ever sent - nine arms carry its cells - and found
+# the immediate ERR | CRC (0x00028000 at the FIRST poll) on exactly the TWO arms whose CMD2 window
+# carried the CRC enable. The command word is a property of the COMMAND and not of the enable, and the
+# ladder has given three commands a wide enable:
+#
+#   CMD1  SEND_OP_COND       PRESENT    0x0102  48-bit   CRC check OFF   COMPLETED, poll 1236, no error
+#   CMD3  SET_RELATIVE_ADDR  R1_NOIDX   0x030a  48-bit   CRC check ON    ERR|TIMEOUT, BIT 17 NEVER SET
+#   CMD2  ALL_SEND_CID       R2         0x0209  136-bit  CRC check ON    ERR|CRC at poll 1, 17 ticks
+#
+# CMD3's word carries the SAME 0x08 CRC bit as CMD2's (_nidx_flags = 0x00000005), so the CRC bit's
+# presence is not explained by the command's own CRC check. The one thing CMD2 has that no other
+# command in this ladder has is a 136-BIT RESPONSE REQUEST. THE MISSING CORNER OF THAT TABLE IS
+# 136-BIT WITH THE CRC CHECK OFF, AND IT IS ONE BIT.
+#
+# THE ACT IS ONE CONSTANT. st_all_send_cid sends ALL_SEND_CID with ST_MMC_RSP_R2_NOCRC in place of
+# ST_MMC_RSP_R2 - the same opcode, the same argument, the same window, the same position in the
+# driver order and the same five-bit INT_ENABLE 0x34 - so the word moves from 0x0209 to 0x0201 and
+# NOTHING ELSE MOVES. Dropping the CRC check from a 136-bit response is LEGAL ON THE WIRE: the card
+# returns the CID either way and the block simply does not check it, so an arm that completes here has
+# TAKEN THE CID and not merely removed a check.
+#
+# NO NEW KEY AND NO NEW ADDRESS. _cid_flags publishes the value and _cid_word / _cid_word_read publish
+# the folded word, so the whole change is readable out of keys the ladder ALREADY CARRIES - rung 23's
+# and rung 30's shape one command over. No new device, no new width, no new megabyte, no new register
+# and no new window.
+#
+# THE TWO LINES ARE WRITTEN AS A WHOLE ALTERNATIVE rather than as a variable assigned in two arms, so
+# that at every value below 30 the source is the original text character for character and containment
+# is STRUCTURAL. Measured anyway:
+#
+#   THE VALUE-29 BUILD FROM THIS SAME SOURCE REPRODUCES THE SPENT RUNG-30 PARK armed-storage-dfc4ae78
+#   ON TEN OF ELEVEN MEMBERS, BYTE FOR BYTE - qcdt img, raw bin, payload build config, payload elf,
+#   payload img, fixture, manifest, entry bin, entry elf and the entry switch record, every one
+#   identical. The ELEVENTH member is xnu_arm_entry-sources.txt, WHICH IS THE RECORD OF THE SOURCE
+#   FILES BY CONTENT, and its diff is EXACTLY TWO LINES OF TWENTY-EIGHT:
+#
+#     build_entry.sh    5e9bca03 -> 07bce057
+#     entry_storage.c   6afc5d29 -> cdf1056d
+#
+#   ...which are EXACTLY THE TWO FILES THIS STEP EDITED. So the delta this arm carries at value 29 is
+#   NOT IN THE ARTIFACT AT ALL, and the only member that moved moved BECAUSE THE SOURCE MOVED, which
+#   is what that member is for. That is a STRONGER statement than "all eleven identical": it NAMES the
+#   delta instead of asserting none.
+#
+# AND THE ARM ITSELF DIFFERS FROM THE SPENT RUNG 30 IN TWO BYTES. The value-30 entry image and the
+# value-29 entry image are the SAME SIZE (5,552,764 bytes) - and 770 measured that an unchanged size
+# is NOT the claim that nothing moved - so the claim is MEASURED instead: cmp -l finds EXACTLY TWO
+# DIFFERING BYTES in the whole 5.5 MB image, and they are TWO INSTRUCTIONS OF ONE BODY:
+#
+#   8000def8   mov r1, #7   ->   mov r1, #3     the _cid_flags PUBLISH's own argument
+#   8000df08   mov r2, #7   ->   mov r2, #3     the FLAGS ARGUMENT to st_send_command
+#
+# Two bytes in the entry bin and the same two in the entry elf (whose size is likewise unchanged at
+# 6,732,404 bytes). The entry switch record differs from rung 30's in EXACTLY TWO LINES (the probe
+# number and the artifact's own sha256) and the entry sources record in EXACTLY THREE (that sha256
+# plus the two edited files). stage90-build-config.txt is BYTE-IDENTICAL to rungs 23 through 30
+# (6c2b6038), so NO PAYLOAD SWITCH MOVED and STAGE90_XNU_ENTRY is 1.
+#
+# AND THE CLAUSE IS THE READING, NOT A SENTENCE IN THIS BLOCK. build_entry.sh gained xnu_entry_792,
+# which reads the ONE place the linked image is unambiguous about this arm: the argument-register
+# setup immediately before the bl to st_send_command. For a four-argument call GCC emits r3 first and
+# r0 last, so the last mov r2, #imm above that bl is the flags word. The clause pins all three -
+# r0 = #2 (ALL_SEND_CID), r1 = #0 (no argument), r2 = #3 at value 30 and #7 below it - AND THE
+# EXPECTED VALUE IS DERIVED FROM THE SWITCH, so it is a TWO-WAY clause: a constant which leaked DOWN
+# the ladder is refused by the same check that catches a rung which did not take effect. It fired on
+# this build:
+#
+#   xnu_entry_792: ... st_all_send_cid loads [r0=#2 (ALL_SEND_CID), r1=#0 (no argument), r2=#3
+#   (MMC_RSP_PRESENT | MMC_RSP_136 (word 0x0201))] immediately before its bl to st_send_command
+#   (disassembly line 53 of the body at 0x8000de60) ...
+#
+# THE OTHER SIDE OF THAT CALL IS CARRIED IN THE SOURCE BY A _Static_assert PAIR, because the clause
+# can see the flags ARGUMENT and cannot see the command WORD the callee folds out of it
+# (ST_SDHCI_CMD_FLAGS runs inside st_send_command): ST_SDHCI_CMD_WORD(ALL_SEND_CID, R2_NOCRC) == 0x0201
+# and R2_NOCRC == (R2 & ~CRC). ONE ASSERTION ON EACH SIDE OF THE bl, AND NEITHER IS A COMMENT.
+#
+# AND THE CLAUSE GROUP THAT WAS ALREADY THERE IS UNCHANGED, WHICH IS THE POINT: it asserts what
+# st_all_send_cid READS AND WRITES - device set, counts, program order, empty image side - and A BODY
+# DEVICE SURFACE DOES NOT MOVE WHEN A CONSTANT MOVES. classify_body reports ADDRESSES and this arm
+# changes an immediate in a register, which that clause set cannot see at all. Rung 16's record stands
+# at the digit rather than being relaxed.
+#
+# THE SAFETY READING IS UNCHANGED IN KIND. The body's only writable register is still INT_ENABLE 0x34;
+# SIGNAL_ENABLE 0x38 is still read and never written; the arm is still `fastboot boot` only with
+# nothing flashed; and nothing in this build touches the PMIC, the rails, the clocks, the DLL, the pad
+# register or any address outside INT_ENABLE 0x34 - 784's rail reading stands unchanged.
+#
+# THE FOUR ROWS, AND THE FIRST ONE IS THE ONE THAT MOVES THE LADDER:
+#   _cid_complete = 1              THE CID IS TAKEN - the driver order opens: CMD9 (CSD), CMD7
+#                                  (select), CMD16 (block length) and then data.
+#   ERR|TIMEOUT (0x00018000)       the CRC latch needs the command's own CRC flag and the real
+#                                  condition at CMD2 is a 136-bit response that never arrives.
+#   ERR|CRC (0x00028000) ANYWAY    the strongest reading the arm can return: the CRC bit would then
+#                                  not be about the command's CRC flag at all, refuting 791 section
+#                                  4's isolation and putting the 136-bit path itself on the block.
+#   nothing over the full bound    the negative, read with the next window's wide read beside it.
+# The control is in the same log: _cmd0_ticks (4901 to 4909 across the seven arms carrying it, a spread
+# of 0.16 per cent) and CMD1's own completion at poll 1236 bracket the new word from both ends, so a
+# completion in tens of ticks, a timeout at the bound and a CRC at poll 1 are distinguishable WITHOUT
+# A CLOCK FREQUENCY.
+#
+# AND 0x40ff8080 IS STILL NOT AN ANSWER ON ITS OWN: it stands in the RESPONSE registers on rungs 19,
+# 29 and 30 whether the window was open or closed.
+#
+# THE GOAL IS STILL NOT MET: no transfer completes, no filesystem is reached and no mount is made, so
+# TWRP-TO-STORAGE STAYS WITHHELD. NO PRESS IS SPENT BY THIS STEP AND NONE IS AUTHORIZED.
+#
+# THE PARK IS out/stage90/frozen/armed-storage-f9613649/ - ELEVEN MEMBERS, the eleven set= lines
+# below, each verified IN PLACE by tools/verify_revert_set.sh against this record before this block
+# was committed. The live out/stage90/ and the park were compared file by file with cmp and agree byte
+# for byte.
+#
+# AND THE CENSUS MOVED WITH THE ARM, READ RATHER THAN ASSERTED: the gate reads the ladder's own bound
+# out of entry_storage.c's #if guard, so raising it from 29 to 30 extended the range this record's
+# value is checked against WITHOUT a constant being written into the gate. tools/report_int_enable_
+# windows.py still reports the five-bit word built at FOUR sites and reaching FOUR stores.
+set=armed-storage-f9613649 sha256=782c846f365b15100abc6844e9a78dfd55a361194566a747b13453fe6f73e35e bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-30-entry-rung-31-whose-ONE-ACT-is-ONE-CONSTANT-ST_MMC_RSP_R2_NOCRC-in-place-of-ST_MMC_RSP_R2-at-st_all_send_cid-s-ONE-call-site-so-CMD2-goes-on-the-bus-with-PRESENT-136-and-the-CRC-flag-dropped-word-0x0209-to-0x0201-and-NO-new-address-NO-new-width-NO-new-megabyte-NO-new-device-and-NO-new-key-and-whose-value-29-build-from-this-same-source-reproduces-the-SPENT-rung-30-park-armed-storage-dfc4ae78-on-TEN-OF-ELEVEN-MEMBERS-byte-for-byte-measured-the-eleventh-being-this-very-source-record-whose-diff-is-exactly-the-TWO-files-this-step-edited
+set=armed-storage-f9613649 sha256=98093d09882008899933258534a106dcc99e6956a288254d2b128e3d7f0c3901 bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-30-entry
+set=armed-storage-f9613649 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-30-s-MEASURED-by-cmp-so-no-payload-switch-moved-and-STAGE90_XNU_ENTRY-is-1
+set=armed-storage-f9613649 sha256=63de23546c31214615728fff09f6bcd466859f9c05b99924c79ed39cd5ac0279 bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-f9613649 sha256=f49e242de61495270889f628e7442fec2a4ae20cf335067e187a9ca419a71ff8 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-f9613649 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-bytes-across-every-arm-since-574
+set=armed-storage-f9613649 sha256=0ccb36217cf2d2a928a616d38a2696348d0f9b9c8d2f6690be64d8d756618855 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above
+set=armed-storage-f9613649 sha256=f9613649a89566b27123e0557f9ddfb6ac45ee31e44c4a9edaff3f410bf6274b bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-f9613649-IS-THE-SET-NAME-its-SIZE-is-UNCHANGED-at-5552764-bytes-and-770-measured-that-an-unchanged-size-is-NOT-the-claim-that-nothing-moved-so-the-claim-is-MEASURED-INSTEAD-the-value-29-and-value-30-entry-bins-differ-by-EXACTLY-TWO-BYTES-two-instructions-mov-r1-7-to-3-at-0x8000def8-the-_cid_flags-publish-and-mov-r2-7-to-3-at-0x8000df08-the-st_send_command-FLAGS-ARGUMENT
+set=armed-storage-f9613649 sha256=53316d0e9f1d1b6b95f7aeed945d57d5d4841acf93584895c9b610ec7ab7c810 bytes=6732404 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-ITS-SIZE-is-unchanged-at-6732404-bytes-and-it-differs-from-the-rung-30-entry-elf-in-EXACTLY-TWO-BYTES-the-same-two-instructions
+set=armed-storage-f9613649 sha256=6f77b93acde0eb4229dd6370b1297b212820771392ca7fa85fdb414a52a09b26 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE-30-and-it-differs-from-the-spent-rung-30-park-s-member-in-EXACTLY-TWO-LINES-the-rung-number-and-this-artifact-s-own-sha256
+set=armed-storage-f9613649 sha256=8d915a1c8cc143e99ee0b3b6dd9ecb10f28b4cd2b7aa1e55587263e090b14c66 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match-it-differs-from-the-spent-rung-30-park-s-member-in-EXACTLY-THREE-LINES-of-TWENTY-EIGHT-the-artifact-s-own-sha256-and-EXACTLY-THE-TWO-FILES-THIS-STEP-EDITED-src-entry-build_entry-sh-5e9bca03-to-07bce057-and-src-entry-entry_storage-c-6afc5d29-to-cdf1056d-and-in-the-VALUE-29-containment-comparison-the-same-member-differs-in-EXACTLY-TWO-LINES-because-there-the-artifact-sha256-line-is-IDENTICAL
