@@ -8803,3 +8803,80 @@ set=armed-storage-7341f5f6 sha256=ce929b8c20150f11d57a3080c4b6f4b000703febe7fe78
 # **TWRP-TO-STORAGE STAYS WITHHELD**. Rung 34 (`armed-storage-7341f5f6`, switch value 33) remains
 # ARMED AND NOT PRESSED, and **THE PRESS IS THE OPERATOR'S**.
 #
+# 811: THE RUNG-34 PRESS - THE PRE-REGISTERED ROW CAME BACK, AND THE CID FIELD THE BOOTLOADER ALSO
+# READ AGREES WITH IT. A PRESS, under the operator's authorization asked for and given in this
+# session. **ONE gate exit 0 / 610 lines; ONE runner EXIT 0**; `fastboot boot` only; nothing flashed;
+# nothing written to storage; no reboot commanded; `33e80afe` absent from BOTH device lists at the
+# gate and after the run. The phone came back into Android 10 (uptime 44.53 s, `adb devices` shows
+# `4a2fe00b device`). Capture
+# `out/stage90/captures/rung34-cidgate-20260928-144115-last_kmsg.txt` 636,949 B sha `7bccf28f...`,
+# archived by hand with the gate and run logs beside it. **NOTHING UNDER out/ THAT THE ARM OWNS MOVED**:
+# `xnu_arm_entry.bin` is still `7341f5f6...` and `stage90-qcdt.img` still `b9319777...`.
+#
+# THE ARM: `armed-storage-7341f5f6`, switch VALUE 33 = ordinal rung 34, the CMD2 gate given the word
+# the driver actually tests. Built and parked by 804 (`b122509`), 11 members verified.
+#
+# **ROW 1 OF 804's FOUR CAME BACK, AND IT IS THE ROW THAT MAKES THE NEXT RUNG SAFE.** The two cells
+# 804 added are published and they read exactly as it said they would:
+#     xnu_live_storage_cid_gate_word = 0xc0ff8080
+#     xnu_live_storage_cid_gate_busy = 0x00000001
+#     xnu_live_storage_cid_gated     = 0x00000000
+# `_cid_gate_word` is `_opcond_last_resp` (0xc0ff8080) exactly, and it is off `_cmd1_resp`
+# (0x40ff8080) by exactly the busy bit, 0x80000000 - which is 804's own stated signature for row 1:
+# the gate tested THE LOOP'S word, and the word 803 measured on one boot at rung 33 is the word the
+# gate now reads. Row 4 of the four - `_cid_gate_busy = 0` beside `_cid_gated = 0`, which 804 named
+# IMPOSSIBLE BY CONSTRUCTION - did not occur. The gate passed, CMD2 went out, and the CID came back.
+#
+# EVERY RUNG-33 CELL REPRODUCED. Cell by cell across the two captures: 495 storage cells at rung 33,
+# 497 now, **0 keys lost, 2 keys added (the two above), 474 values IDENTICAL**, 21 moved. Twenty of
+# the 21 are the free-running quantities a boot cannot repeat - poll counts, clock ticks, and the two
+# absolute power-IRQ timestamps (`_pwr_irq_at`, `_pwr_wait_t0`). The twenty-first is
+# `_cid_inhibit_last` `0x00f80000 -> 0x01f80000`, ONE BIT: bit 24, the CMD line's level in
+# PRESENT_STATE. That is a bus-line reading taken at a slightly different instant, and the poll's own
+# verdict is unchanged at both rungs (`_cid_inhibit_seen = 0`, `_cid_inhibit_timeout = 0`). It is named
+# here rather than left in the moved list, because a reading that moved is exactly the kind of thing
+# this record does not let hide.
+#
+# AND THE DECISION CELLS ARE BYTE-IDENTICAL. `_cmd1_resp = 0x40ff8080`, `_cmd1_resp_busy = 0` (the
+# probe's word, bit 31 clear - the reading that made the OLD gate pass), `_opcond_last_resp =
+# 0xc0ff8080`, `_opcond_busy_seen = 1`, `_opcond_sends = 2`, and all NINE CID cells: the four raw
+# words (`0x00450100`, `0x53445731`, `0x3647014a`, `0x2fe00bb1`), the four the 136-bit assembler
+# derives (`0x45010053`, `0x44573136`, `0x47014a2f`, `0xe00bb100`), and `_cid_resp_short =
+# 0x2fe00bb1`. Also `_cid_complete = 1`, `_cid_err = 0`, `_cid_status_any = 0x1` (RESPONSE, no error
+# bit) and `_nidx_resp = 0x00000500` (RCA 0x0500).
+#
+# **AND A READING THAT IS NEW, AND THAT CHECKED THE ASSEMBLY FROM OUTSIDE THE IMAGE.** The 128-bit CID
+# assembled by the driver's word-3-first arithmetic is `450100534457313647014a2fe00bb100`. The vendor's
+# own decode path - `mmc_decode_cid` (`mmc.c:83`), cases 2/3/4 at `:120`, which is the eMMC v4 path this
+# card takes - reads `card->cid.serial = UNSTUFF_BITS(resp, 16, 32)`, i.e. bits [47:16]. That is
+# **0x4a2fe00b**, and `4a2fe00b` is THIS PHONE'S OWN SERIAL NUMBER: `adb devices` lists it as the
+# serial, and the phone reports `ro.serialno = ro.boot.serialno = 4a2fe00b` and
+# `ro.boot.bootdevice = msm_sdcc.1`. So the bootloader read the same field out of the same card,
+# through its own code, before this image existed - and the value the LADDER assembled agrees with it.
+# **That is an independent cross-check of the quantity 810 just made a build refusal**, and it is the
+# strongest statement available about the arithmetic short of a second card: a reader who assembled the
+# four words in the wrong order would not reproduce the phone's own serial number. The product-name
+# field decodes to `DW16G` under the SanDisk manufacturer id `0x45`, which is 803's `SDW16G`.
+#
+# THE RETURN IS THE SAME RETURN. The device came back **28 s** after `fastboot boot` - and the rung-33
+# press measured **28 s** on the same criterion, the rung-32 press **26 s**. The runner's own note
+# gives the two candidates for this arm as ~28 s if the SoC's watchdog countdown fired and ~90 s if the
+# bounded spin did, so **28 s is the countdown**: the reset is the hardware watchdog, the same net and
+# the same interval as the press before it. The runner's criteria read **7 PASS / 1 FAIL / 3 UNREAD**
+# (printed twice in one log, so counting LINES gives 14 / 2 / 6). **The one FAIL is the known `seam_sp`
+# criterion, the same FAIL at rung 33** - `seam_sp=0x80557ec8 is not sleh_sp-8` - so **this press
+# added no failure**, and the three UNREADs are the same `SLOT_NULL` absences the last press reported.
+#
+# WHAT IT MEANS. 804's repair is **BEHAVIOUR-PRESERVING ON THIS CARD**: the gate now reads the word the
+# driver reads, it passes on the same boot the old gate passed on, and every decision cell of rung 33
+# reproduces to the bit. That was 804's row 1 and it is why it said the repair is what makes CMD9 safe
+# to build on. **Row 2 - `_cid_gated = 1` with reason 2, the loop never seeing bit 31 - did not occur
+# this boot**, so the "the card's readiness is not reproducible boot to boot" branch remains untested
+# and is stated as untested rather than as absent.
+#
+# THE GOAL IS NOT MET. No transfer completes, no filesystem is reached and no mount is made, so
+# **TWRP-TO-STORAGE STAYS WITHHELD**. The arm is SPENT. **THE NEXT RUNG IS CMD9** (`SEND_CSD`,
+# `ac R2`): 809 measured that it needs no new mechanism - its R2 flags, its 136-bit assembler and its
+# RCA argument all already exist because CMD2 built them - and 810 made the one part of it that could
+# fail silently a build refusal. No press is authorized or pending for it.
+#
