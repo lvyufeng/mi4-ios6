@@ -28,6 +28,14 @@ block's own default, set by a register no rung has touched, and not a property o
 
 ## 2. The act, and the two ends put on the value at compile time
 
+> **AMENDED BY 797: the bound below is THIS LADDER'S OWN and not the driver's.** 797 read the vendor's
+> tree and found the driver's bounds are **10 ms** (`sdhci.c:1084-1085`, the `CMD_INHIBIT` wait),
+> **100 ms** (`:251-252`, the reset poll) and **10 s** (`SDHCI_REQUEST_TIMEOUT`, `:1074`, a timer and
+> not a poll) — **none of them 1.200 s**. The 1.200 s is `ST_CMD_DONE_TICK_BUDGET` in this image. **The
+> arithmetic below is unaffected** — the number, the 225× and the `0x0B` boundary all stand — and only
+> the attribution is corrected. 797 also found that `sdhci_calc_timeout` would return **`0x0E`** (10.9 s)
+> for a data-less command, i.e. the vendor has no value available to this ladder at all.
+
 **One byte store, `ST_SDHCI_TIMEOUT_CMD2 = 0x03u` = 5,321.6 µs.** The field is a power-of-two
 multiplier of the reset bound, so:
 
@@ -35,7 +43,7 @@ multiplier of the reset bound, so:
 | --- | --- | --- |
 | `0x03` = 5,321.6 µs | **8.00×** | — |
 | 795 §5's extrapolated 136-bit arrival, 1,048.2 µs | 5.08× **above** it | the assumption is the per-bit rate, and 795 §5 names it |
-| the driver's own 1.200 s poll bound (`sdhci.c`'s `timeout = 10` in 100 ms units) | **225× below** it | at or above `0x0B` the ladder's own poll gives up first and the cell stops meaning anything |
+| **this ladder's own poll bound** — `ST_CMD_DONE_TICK_BUDGET` = 23,040,000 ticks = 1.200 s, placed just above the SDHCI spec's fixed ~1 s command timeout so the *block's* timeout is the event it can see (`entry_storage.c:2236`) | **225× below** it | at or above `0x0B` (1.3623 s) the ladder's own poll gives up first and the cell stops meaning anything |
 
 Both ends are on the constant **at compile time**, in `entry_storage.c`:
 
