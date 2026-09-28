@@ -8025,3 +8025,130 @@ set=armed-storage-f9613649 sha256=8d915a1c8cc143e99ee0b3b6dd9ecb10f28b4cd2b7aa1e
 # 「让os可以正常启动并且挂载存储」 is not reached and TWRP-TO-STORAGE STAYS WITHHELD. NO PRESS IS
 # AUTHORIZED: rung 31 is spent and no further arm is armed.
 #
+# 796: THE RUNG-32 ARM - armed-storage-c1f89600, STAGE90_XNU_STORAGE_PROBE=31 (switch VALUE 31 =
+# ordinal rung 32). **THIS IS THE FIRST REPAIR ANY RUNG OF THIS LADDER HAS MADE, AND IT IS ONE BYTE
+# IN ONE REGISTER.**
+#
+# THE READING IT ACTS ON IS 795's OWN AND IT IS A NEGATIVE: `TIMEOUT_CONTROL 0x2E` HAD NEVER BEEN
+# WRITTEN BY ANY RUNG. grep returns the define (entry_storage.c:212) and ONE READ (:4233), and rung
+# 31's own capture read the register back as `_nidx_tout_ctl = 0x00000000` - the RESET VALUE and the
+# SHORTEST bound the register can express. The vendor writes it only from `sdhci_prepare_data`
+# (sdhci.c:827-828), inside `if (data || (cmd->flags & MMC_RSP_BUSY))`, and EVERY COMMAND THIS LADDER
+# SENDS IS DATA-LESS. So every response demand in this ladder has been racing a 665.2 us bound no rung
+# ever set, and 795 section 1 measured that constant twice in one boot: CMD2 `_cid_ticks = 0x31e2` =
+# 12,770 = 665.2 us and CMD3 `_nidx_ticks = 0x31e4` = 12,772 = 665.3 us.
+#
+# THE ACT: one body reads the byte, one body stores a compile-time constant into it, and the constant
+# is `ST_SDHCI_TIMEOUT_CMD2 = 0x03u` = 5,321.6 us. Its arithmetic, from 795's own ladder: the reset
+# bound is 665.2 us, the field doubles per step, so 0x03 is 5.076x the reset bound and 4.68x the
+# 1,048.2 us the record's extrapolation puts a 136-bit response at - AND it stays 225x UNDER the
+# driver's own 1.200 s poll bound (sdhci.c's `timeout = 10` in 100 ms units), which is the other end
+# this value must not cross: at or above 0x0B the device timeout stops being observable at all because
+# the ladder's own poll gives up first. The two `_Static_assert`s in entry_storage.c put those two
+# ends on the constant at COMPILE TIME (`>= 0x01`, `<= 0x0E`, and the field's own high nibble clear).
+#
+# THE TWO BODIES ARE BODIES OF THEIR OWN, and that is the same shape 787 used for CMD1's window:
+# `st_tout_open` (0x8000de60, 124 bytes) and `st_tout_restore` (0x8000e250, 76 bytes), both
+# `noinline, noclone`, each called from `st_cmd_path` and nowhere else. Their device surface is
+# `TIMEOUT_CONTROL 0x2E` AS A BYTE and NOTHING ELSE, measured out of the linked image rather than
+# asserted: `ldrb r4, [r5, #46]` / `strb r3, [r5, #46]` with `mov r3, #3` in the open, and
+# `strb r4, [r3, #46]` / `ldrb r1, [r3, #46]` in the restore. `0x2E` is one byte below
+# `SOFTWARE_RESET 0x2F` (rung 4 writes it) and one byte above `CLOCK_CONTROL 0x2C` (rung 6 writes it)
+# - two registers this ladder HAS written - so a body that drifted one offset would write a register
+# with an entirely different meaning, which is why xnu_entry_796 asserts the offset and the width and
+# not merely the address.
+#
+# SIX KEYS, and they are the window's own state and not a new measurement of the bus: `_tout_calls`
+# (the open ran), `_tout_was` (the byte the register held - THE CONTROL, expected 0 on a first run),
+# `_tout_wrote` (the constant), `_tout_held` (the readback, expected 3), `_tout_wrote_back` (the byte
+# put back), `_tout_readback` (the readback after the restore, expected 0). `_tout_was = 0` beside
+# `_tout_held = 3` is the repair VISIBLE; `_tout_was = _tout_held = 0` would be an arm whose store
+# never landed and whose every other cell reads exactly as rung 31's did, which is the one failure a
+# log cannot otherwise show.
+#
+# THE WINDOW IS THE CMD2 INTERVAL AND CMD3 IS DELIBERATELY OUTSIDE IT. Read out of the linked image:
+# open at 0x8000ed20, the gate's refusal-path close at 0x8000ed70, CMD2's call at 0x8000edb8, the
+# CMD2-path close at 0x8000edc8, CMD3's call at 0x8000ede8. **The close is TWO CALLS IN THE IMAGE
+# WHERE THE SOURCE HAS ONE**, and that is GCC duplicating the tail of the `if/else` that holds CMD2
+# into both of the gate's arms - each path runs exactly one of them. xnu_entry_796 asserts the count
+# as a SHAPE (1 open exactly; 1 to 3 closes) and the POSITIONS over every line: every open above
+# CMD2, the LAST close below CMD2, and every close above CMD3. **The first draft of the clause
+# demanded exactly one close and refused the build**; the refusal was right about the source and wrong
+# about the image, and it is recorded in the clause itself rather than silently relaxed.
+#
+# CMD3 STAYS AT THE RESET BOUND ON PURPOSE, and that is a deliberate part of the arm. CMD3's 48-bit
+# response fits inside 665.2 us (795 section 6), so CMD3 is the independent test of 795 section 6's
+# protocol claim - a card enters IDENT only by accepting CMD2, and CMD3 is only accepted in IDENT.
+# A window that covered CMD3 as well would give CMD3 the same help CMD2 is getting and the two rows
+# would stop being separable. **The falsification is cheap and named: if CMD2 is made to complete and
+# CMD3 STILL times out, 795 section 6's account is wrong.**
+#
+# THE ANSWER SPACE, and the prediction is NUMERIC rather than a direction:
+#   `_cid_complete = 1` AND the four words CHANGED   THE CID IS TAKEN. 793 section 1's row 1a.
+#                                                    `_cid_raw0..3` and `_cid_resp0..3` are already
+#                                                    read and already published, so no new cell is
+#                                                    needed to see it.
+#   `_cid_complete = 1`, words UNCHANGED             793 section 5's fifth row, now on an arm where
+#                                                    the bound is not the suspect.
+#   `ERR | TIMEOUT` again, LONGER tick count         REFUTES 795's arithmetic, and says by how much.
+#   `ERR | CRC` returning                            REFUTES 795 section 2 and puts the immediate
+#                                                    CRC back on the block independent of the bound.
+#
+# WHAT THIS CHANGES ABOUT THE LADDER'S RECORD. (a) The frontier moves from the CMD2 command to the
+# TIMEOUT REGISTER, and the register now has a producer. (b) 795 section 7's pre-registered next arm
+# is made REAL rather than pre-registered. (c) Nothing about rungs 16 through 31 is superseded: their
+# 665.2 us readings stand and this arm is the first that does not run under that bound.
+#
+# CONTAINMENT, MEASURED ON ALL ELEVEN MEMBERS AND NOT ARGUED. The value-30 build from THIS source
+# was compared member by member against the SPENT rung-31 park
+# out/stage90/frozen/armed-storage-f9613649/. **Every line this step added that reaches the COMPILER
+# at value 30 is unchanged - the value-31 code sits inside `#if STAGE90_XNU_STORAGE_PROBE >= 31`
+# guards - and the two edits that are not guarded (the guard's own bound, 30 -> 31, and the `#error`
+# message's tail) are PREPROCESSOR-ONLY and produce no byte of the image.** That last clause is a
+# claim, and the comparison below is what makes it a reading rather than a claim:
+#
+#   SAME stage90-qcdt.img   SAME stage90.bin        SAME stage90-build-config.txt
+#   SAME stage90.elf        SAME stage90.img        SAME stage90_fixture.macho
+#   SAME SHA256SUMS.txt     SAME xnu_arm_entry.bin  SAME xnu_arm_entry.elf
+#   SAME xnu_arm_entry-config.txt
+#   DIFF xnu_arm_entry-sources.txt  - and the diff is EXACTLY TWO LINES OF TWENTY-EIGHT, the two
+#        files this step edited: src/entry/build_entry.sh 07bce057 -> 6f9d3c4b and
+#        src/entry/entry_storage.c cdf1056d -> ea1d06c7. The artifact's own hash line is IDENTICAL,
+#        because the value-30 entry bin reproduced f9613649a895... byte for byte.
+#
+#   **Ten of eleven byte-identical, and the eleventh explained line by line.** The manifest member is
+#   the entry sources recorded BY CONTENT, so it MUST move when the tool is edited; the point is that
+#   nothing else did. There is no artifact on which the two arms agree by accident.
+#
+# THE ARM'S OWN DELTA, measured rather than argued: entry `.text` 5,335,232 -> 5,335,424, **+192
+# bytes** (the two bodies are 124 + 76 = 200 and the call sites are 4 bytes each, the difference being
+# branch relaxation elsewhere); `xnu_arm_entry.elf` 6,732,404 -> 6,732,464, +60 bytes; the entry BIN
+# is UNCHANGED in size at 5,552,764 bytes and differs in 593,023 bytes, which is the whole tail of
+# `.text` shifted by the insertion and NOT 593,023 separate edits - 770's rule that an unchanged size
+# is not the claim that nothing moved, applied in the other direction here. `stage90-build-config.txt`
+# is byte-identical to rungs 23 through 31's, so no payload switch moved and STAGE90_XNU_ENTRY is 1.
+#
+# THE PARK IS out/stage90/frozen/armed-storage-c1f89600/ - ELEVEN MEMBERS, the eleven set= lines
+# below, each verified IN PLACE by tools/verify_revert_set.sh against this record. The live
+# out/stage90/ and the park were compared file by file with cmp and agree byte for byte on all eleven.
+#
+# AND THE CENSUS MOVED WITH THE ARM, READ RATHER THAN ASSERTED: the gate reads the ladder's own bound
+# out of entry_storage.c's #if guard, so raising it from 30 to 31 extended the range this record's
+# value is checked against WITHOUT a constant being written into the gate.
+#
+# THE GOAL IS NOT MET. No transfer completes, no filesystem is reached, no mount is made, so
+# 「让os可以正常启动并且挂载存储」 is not reached and TWRP-TO-STORAGE STAYS WITHHELD. **AN ARM IS
+# ARMED AND NOT PRESSED, AND THE PRESS IS THE OPERATOR'S.** No firer exists; the press path is the two
+# commands readiness prints, run by hand once each.
+#
+set=armed-storage-c1f89600 sha256=bda29ed1eb374ce53fb0c29f3c54149bec49d59a7fb8814f05b0f70923d20696 bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-31-entry-rung-32-THE-FIRST-REPAIR-THIS-LADDER-HAS-MADE-whose-ONE-ACT-is-ONE-BYTESTORE-TO-TIMEOUT_CONTROL-0x2E-the-register-no-rung-has-ever-written-value-0x03-5.32-ms-raised-for-the-CMD2-window-alone-and-restored-after-and-NO-new-address-and-NO-new-device-and-NO-new-command-and-whose-value-30-build-from-this-same-source-reproduces-the-SPENT-rung-31-park-armed-storage-f9613649-on-TEN-OF-ELEVEN-MEMBERS-byte-for-byte-measured-the-eleventh-being-this-very-source-record-whose-diff-is-exactly-the-TWO-files-this-step-edited
+set=armed-storage-c1f89600 sha256=c56b31161a36845ab633dff49779865e4a72104944982ac8050eafc60c317e30 bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-31-entry
+set=armed-storage-c1f89600 sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-31-s-MEASURED-by-cmp-so-no-payload-switch-moved-and-STAGE90_XNU_ENTRY-is-1
+set=armed-storage-c1f89600 sha256=1048b4b5ef67c4302c037a5ebd785b61a084095170180bdba5a9a89bfcf2d8e4 bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-c1f89600 sha256=b35120d950a8fc95fa51b9f59762a019fb3d663b721c61245a1d3359865f4c6c bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-c1f89600 sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-bytes-across-every-arm-since-574
+set=armed-storage-c1f89600 sha256=88e38972d340bd302aca1d69919338fee0dbc110433cbe24a006b59444bb978a bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.elf,stage90.bin,stage90.img,stage90-qcdt.img
+set=armed-storage-c1f89600 sha256=c1f89600a78823cb8c63014f23b554847440ae2f02fd8c369607424046a43194 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-c1f89600-IS-THE-SET-NAME-its-SIZE-is-UNCHANGED-at-5552764-bytes-and-770-measured-that-an-unchanged-size-is-NOT-the-claim-that-nothing-moved-so-the-delta-is-MEASURED-IN-THE-OTHER-DIRECTION-instead-the-value-30-and-value-31-bins-differ-in-593023-bytes-which-is-the-whole-tail-of-text-SHIFTED-by-the-insertion-and-not-593023-separate-edits
+set=armed-storage-c1f89600 sha256=ac2afdda379239919bcd345591f3283515648d0cd9bc30572147b410df2c1e00 bytes=6732464 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-IT-grew-by-60-bytes-from-the-spent-rung-31-arm-s-6732404-and-carries-st_tout_open-at-0x8000de60-and-st_tout_restore-at-0x8000e250-which-the-gate-s-own-796-clause-disassembles-out-of-THIS-file-and-not-out-of-the-source
+set=armed-storage-c1f89600 sha256=11f93b5aa9d0a1165ad94fa73632a6416a8df34f400a57deb69063500dbe09cf bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE-31-and-it-differs-from-the-spent-rung-31-park-s-member-in-EXACTLY-TWO-LINES-the-rung-number-and-this-artifact-s-own-sha256
+set=armed-storage-c1f89600 sha256=6b973e740a1f6315d4b133b170d290085d9ccdd7190bcebe7f69e4b439da6887 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match-it-it-differs-from-the-spent-rung-31-park-s-member-in-EXACTLY-THREE-LINES-of-the-file-s-28-four-comment-lines-plus-one-header-line-plus-23-file-lines-the-artifact-s-own-sha256-and-EXACTLY-THE-TWO-FILES-THIS-STEP-EDITED-src-entry-build_entry-sh-07bce057-to-6f9d3c4b-and-src-entry-entry_storage-c-cdf1056d-to-ea1d06c7-and-in-the-VALUE-30-containment-comparison-the-same-member-differs-in-EXACTLY-TWO-LINES-because-there-the-artifact-sha256-line-is-IDENTICAL-and-the-file-set-is-IDENTICAL-23-files-in-both-so-nothing-was-added-or-removed-under-src-entry

@@ -3108,10 +3108,10 @@ if [[ $REAL_ARM_INIT -eq 1 ]]; then
     # caller argument is therefore not free, and it is bought once for every stub in the image.
     #
     # The device's run: **`stub_hit=vm_map_store_init`, `xnu_entry_stub_caller=0x8004651c`**, which
-    # resolves to `vm_map_create+0x5c` - the return address of `80046518: bl 80083604
+    # resolves to \`vm_map_create+0x5c\` - the return address of \`80046518: bl 80083604
     # <vm_map_store_init>` in the disassembly the prediction was made from. No exception, no abort
     # key, `kv_written == kv_in_dram == 0x3e` (62 bytes: the two lines, 28 + 34). And the stop is
-    # one instruction past `bl zalloc` / `cmp r0, #0` / `bne`, with the object's own `panic` for the
+    # one instruction past \`bl zalloc\` / \`cmp r0, #0\` / \`bne\`, with the object's own \`panic\` for the
     # NULL case *not* taken: a real zone allocation out of `vm_map_zone` returned on this hardware.
     # `zone_init` (`vm_mem_bootstrap+0x204`) is still ahead, so 239's zero zone-map bounds are
     # unchanged; `kmem_suballoc`, its first call, is answered by this same object.
@@ -31047,6 +31047,136 @@ verify_trace_symbols() {
                 [[ "$cid_r2_imm" == "$cid_flags_want" ]] ||
                     layout_fail "st_all_send_cid loads $cid_r2_imm into the FLAGS register before its call to st_send_command, and STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE requires $cid_flags_want ($cid_flags_name). This is the ONE CONSTANT this rung moves and the only act it has, so an arm whose flags did not take effect is the rung below it wearing this record: at value 30 or above a \`#7\` means the constant was compiled out and the press would come back with a log identical to the spent rung-30 arm and a record claiming a new arm; below 30 a \`#3\` means the constant leaked down the ladder and EVERY ARM BELOW THIS ONE would be mistaking a CRC-dropped 136-bit request for rung 16's. Both directions are refused here and neither is a comment. Nothing is rebuilt by this refusal"
                 echo "  xnu_entry_792: rung 31's ONE CONSTANT, read out of the linked image at its call site: st_all_send_cid loads [r0=#$cid_r0_imm (ALL_SEND_CID), r1=#$cid_r1_imm (no argument), r2=#$cid_r2_imm ($cid_flags_name)] immediately before its bl to st_send_command (disassembly line $cid_bl_ln of the body at $cid_body_addr) - so the opcode and the argument are rung 16's at every value and the FLAGS register is the only thing this rung moves, with the command WORD it folds to pinned on the other side of the call by this rung's _Static_assert pair"
+            if [[ $STORAGE_PROBE -ge 31 ]]; then
+                # **796: RUNG 32's WINDOW, AND THIS IS THE FIRST CLAUSE IN THE LADDER WRITTEN FOR AN
+                # ARM WHOSE ACT IS A REPAIR RATHER THAN A MEASUREMENT.** The store raises
+                # `TIMEOUT_CONTROL 0x2E` for the CMD2 interval, so the clause has four things to hold
+                # that no earlier rung's clause could:
+                #
+                #   1. BOTH BODIES EXIST AND ARE CALLED EXACTLY ONCE FROM `st_cmd_path`. Zero for the
+                #      open means the register is never raised and the arm is a no-op wearing a rung
+                #      number - the same shape the three INT_ENABLE windows are checked for, and here
+                #      it matters more because there is no other cell that would show it; zero for the
+                #      close means the byte is left raised for the rest of the run, which is a STATE
+                #      CHANGE this arm's record says it does not make.
+                #   2. EACH BODY'S DEVICE SET IS `TIMEOUT_CONTROL 0x2E` AND NOTHING ELSE. `0x2E` is one
+                #      byte below `SOFTWARE_RESET 0x2F` and one byte above `CLOCK_CONTROL 0x2C`, and
+                #      both of those are registers this ladder HAS written - so a body that drifted one
+                #      offset would write a register with an entirely different meaning, in a window
+                #      whose whole justification is that the register it touches is inert for a
+                #      data-less command.
+                #   3. AND THE BYTE IT WRITES IS THE CONSTANT THE RECORD NAMES, read as the immediate
+                #      the register gets rather than as the C name. **This is the clause that makes the
+                #      repair a reading**: the value is what decides whether the arm has a margin over
+                #      the 1,048.2 us extrapolation AND stays under the driver's own 1.200 s poll bound,
+                #      and neither of those is checkable from a name.
+                #   4. AND THE ORDER IS THE INTERVAL: the open's call above `st_all_send_cid`'s call and
+                #      the close's below it - the same two-position assertion 787 made for CMD1's
+                #      window, for the same reason (785's defect, refuted by 786 out of a capture's
+                #      line order).
+                #
+                # **AND THE CLOSE IS ASSERTED TO FALL BEFORE CMD3.** 796 section 3 makes that a
+                # deliberate part of the arm and not a tidy-up: CMD3's 48-bit response fits inside the
+                # RESET-VALUE bound, so CMD3 is the independent test of 795 section 6's protocol claim
+                # and a window that covered it would destroy the separation. Asserting it here means a
+                # later edit that moved the close below CMD3 is refused rather than silently answered.
+                c2t_open=$(sym_addr st_tout_open) ||
+                    layout_fail "rung 32's window open is not in the image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: out/xnu_arm_entry.elf has no \`st_tout_open\`, so TIMEOUT_CONTROL 0x2E is never raised and CMD2 runs at the 665.2 us reset bound this rung exists to leave behind. An arm whose repair is absent is indistinguishable from the rung below it in every cell the log carries. Nothing is rebuilt by this refusal"
+                c2t_open_next=$(sym_next "$c2t_open") ||
+                    layout_fail "nothing follows st_tout_open in the linked image, so the window this check disassembles has no end"
+                c2t_open_body=$(arm-none-eabi-objdump -d --start-address="$c2t_open" --stop-address="$c2t_open_next" "$OUT/xnu_arm_entry.elf")
+                { read -r c2t_dev; read -r c2t_cnt; read -r c2t_img; read -r c2t_addr; } < <(classify_body "$c2t_open_body" "f982492e")
+                c2t_set=$(printf '%s\n' $c2t_dev | LC_ALL=C sort | tr '\n' ' ')
+                [[ "$c2t_set" == "f982492e:ldrb f982492e:strb " ]] ||
+                    layout_fail "st_tout_open's device accesses are [$c2t_set] (sorted) and rung 32 says exactly [f982492e:ldrb f982492e:strb] - TIMEOUT_CONTROL 0x2E read and written AS A BYTE, and NOTHING ELSE. 0x2E is one below SOFTWARE_RESET 0x2F (rung 4 writes it) and one above CLOCK_CONTROL 0x2C (rung 6 writes it), so a body that drifted one offset would write a register with a different meaning entirely. A WORD access here is the same refusal for the same reason: this register is a byte and the vendor writes it with sdhci_writeb. Nothing is rebuilt by this refusal"
+                [[ -z "${c2t_img// /}" ]] ||
+                    layout_fail "st_tout_open's non-device memory accesses are [$c2t_img] at [$c2t_addr] and rung 32's record says that set is EMPTY: this body publishes only through entry_live_write, which is a call"
+                c2t_open_calls=$(grep -c -- 'bl.*<st_tout_open>' <<<"$stb_path_body")
+                [[ "$c2t_open_calls" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $c2t_open_calls call(s) to st_tout_open and rung 32's SOURCE makes exactly one on a straight line above the gate. Zero means TIMEOUT_CONTROL 0x2E is never raised, the arm is the rung below it wearing a new number, and - because \`_tout_was\`/\`_tout_held\` would read exactly what rung 31 read - it is the one absence the log cannot show. The count is asserted EXACTLY here while the close's is not, and the asymmetry is deliberate: GCC duplicated the CLOSE into the gate's two arms on this very build, and that is the compiler's business; a duplicated OPEN would put the read-and-raise pair at two moments and make \`_tout_was\` unreadable as one value, which is this arm's state rather than a layout detail. Nothing is rebuilt by this refusal"
+                # The VALUE, read out of the INSTRUCTION rather than off a call - and the first build
+                # of this clause is why. `st_write8` is a small static helper and the compiler INLINES
+                # it, so a search for `bl <st_write8>` found no line at all in a body whose device set
+                # `classify_body` had already resolved as `f982492e:strb`: the refusal fired on a body
+                # that does exactly what the arm says, because the clause looked for a CALL as the
+                # evidence of a STORE. What is read now is the store itself - the `strb` to offset 0x2e,
+                # its source register, and the last `mov` of that register above it - so the clause is
+                # indifferent to whether the helper is inlined, and m720's shape (a check that reads an
+                # implementation detail instead of the act) is not repeated here.
+                c2t_st_ln=$(awk '/strb[[:space:]]+r[0-9]+, \[r[0-9]+, #46\]/{ printf "%d", NR; exit }' <<<"$c2t_open_body")
+                [[ -n "$c2t_st_ln" ]] ||
+                    layout_fail "st_tout_open makes NO byte store to TIMEOUT_CONTROL 0x2E (offset 46 = 0x2e of the block's base) and rung 32's whole act IS that store. A window that reads the register and writes nothing would publish every one of this arm's cells correctly and leave the repair absent, which is the one failure a log cannot show: \`_tout_was = 0\` and \`_tout_held = 0\` are exactly what this arm reads on rung 31. Nothing is rebuilt by this refusal"
+                c2t_st_reg=$(awk -v n="$c2t_st_ln" 'NR == n { for (i = 1; i <= NF; i++) if ($i ~ /^r[0-9]+,$/) { sub(/,/, "", $i); print $i; exit } }' <<<"$c2t_open_body")
+                [[ -n "$c2t_st_reg" ]] ||
+                    layout_fail "the source register of st_tout_open's \`strb\` could not be read out of the disassembly line [$c2t_st_ln], so this clause cannot say which register carries the value and would compare an empty string against the constant"
+                c2t_imm=$(awk -v n="$c2t_st_ln" -v reg="$c2t_st_reg," 'NR < n && $3 == "mov" && $4 == reg { v = $5 } END { print v }' <<<"$c2t_open_body")
+                [[ -n "$c2t_imm" ]] ||
+                    layout_fail "no \`mov $c2t_st_reg, #imm\` stands above st_tout_open's store to TIMEOUT_CONTROL, so the value is not a compile-time constant in this build and this clause's assertion about it would be about nothing. Nothing is rebuilt by this refusal"
+                c2t_want=3
+                [[ "$c2t_imm" == "#$c2t_want" ]] ||
+                    layout_fail "st_tout_open loads $c2t_imm into the VALUE register before its store to TIMEOUT_CONTROL and STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE's record names $c2t_want (= 0x$c2t_want, 5.32 ms). The value is what decides the arm: below 0x01 the store writes back the byte this arm found and the repair is a no-op; at or above 0x0B the bound passes the driver's own 1.200 s poll bound and the device timeout stops being observable at all. Nothing is rebuilt by this refusal"
+                c2t_restore=$(sym_addr st_tout_restore) ||
+                    layout_fail "rung 32's window close is not in the image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: out/xnu_arm_entry.elf has no \`st_tout_restore\`, so the raised byte stands for the rest of the run - a STATE CHANGE the arm's record says it does not make, and one that would also hand CMD3 a longer bound and destroy 795 section 6's independent test. Nothing is rebuilt by this refusal"
+                c2t_restore_next=$(sym_next "$c2t_restore") ||
+                    layout_fail "nothing follows st_tout_restore in the linked image, so the window this check disassembles has no end"
+                c2t_restore_body=$(arm-none-eabi-objdump -d --start-address="$c2t_restore" --stop-address="$c2t_restore_next" "$OUT/xnu_arm_entry.elf")
+                { read -r c2tr_dev; read -r c2tr_cnt; read -r c2tr_img; read -r c2tr_addr; } < <(classify_body "$c2t_restore_body" "f982492e")
+                c2tr_set=$(printf '%s\n' $c2tr_dev | LC_ALL=C sort | tr '\n' ' ')
+                [[ "$c2tr_set" == "f982492e:ldrb f982492e:strb " ]] ||
+                    layout_fail "st_tout_restore's device accesses are [$c2tr_set] (sorted) and rung 32 says exactly [f982492e:ldrb f982492e:strb] - TIMEOUT_CONTROL 0x2E written back and read, and NOTHING ELSE. A missing store here is a window that is never closed; a store to any other address is a register this rung never names. Nothing is rebuilt by this refusal"
+                [[ -z "${c2tr_img// /}" ]] ||
+                    layout_fail "st_tout_restore's non-device memory accesses are [$c2tr_img] at [$c2tr_addr] and rung 32's record says that set is EMPTY: this body publishes only through entry_live_write, which is a call"
+                # **THE CLOSE IS ASSERTED AS A POSITION AND NOT AS A COUNT, AND THIS BUILD IS WHY.**
+                # `st_cmd_path`'s source calls `st_tout_restore` ONCE, on the line after the
+                # `if/else` that holds CMD2. GCC **duplicated that tail into both arms of the gate**
+                # - `bl <st_tout_restore>` stands twice in the linked image, once on the path where
+                # the gate refused and once on the path where CMD2 ran, each path executing exactly
+                # one of them before rejoining - so a clause demanding one call refuses an image
+                # that does exactly what the arm says. The count is therefore checked as a SHAPE
+                # against what this build measured, and everything the arm actually claims about
+                # the window is asserted below as disassembly ORDER. **The same distinction 787
+                # drew when it asserted the window's interval and not its statement.**
+                c2t_restore_calls=$(grep -c -- 'bl.*<st_tout_restore>' <<<"$stb_path_body")
+                (( c2t_restore_calls >= 1 )) ||
+                    layout_fail "st_cmd_path makes NO call to st_tout_restore and rung 32's window would never close: the raised byte would stand for the rest of the run - a STATE CHANGE this arm's record says it does not make, and one that would also hand CMD3 a longer bound and destroy 795 section 6's independent test. Nothing is rebuilt by this refusal"
+                (( c2t_restore_calls <= 3 )) ||
+                    layout_fail "st_cmd_path makes $c2t_restore_calls call(s) to st_tout_restore; rung 32's source makes one and its IMAGE makes two (the gate's two arms), so a count above three is a shape nobody has measured and the position assertions below would be asserted over lines that do not mean what they are read as. Nothing is rebuilt by this refusal"
+                # Every call line, as a LIST - because the close is two lines in the image and a
+                # `printf "%d"` over both would concatenate them into a number that is not a line.
+                c2t_open_lns=$(awk '/bl.*<st_tout_open>/{ printf "%d ", NR }' <<<"$stb_path_body")
+                c2t_restore_lns=$(awk '/bl.*<st_tout_restore>/{ printf "%d ", NR }' <<<"$stb_path_body")
+                c2t_open_ln=${c2t_open_lns%% *}
+                c2t_restore_ln=${c2t_restore_lns%% *}
+                c2t_restore_ln_max=$(printf '%s\n' $c2t_restore_lns | sort -n | tail -1)
+                # The CMD2 call line is read HERE rather than taken from the `-ge 16` block's own
+                # `stb_cid_ln`, and that is a scope fact rather than a preference: that variable is
+                # assigned further down this file, so a clause above it would compare its two lines
+                # against an EMPTY string and both assertions would pass on nothing.
+                c2t_cid_ln=$(awk '/bl.*<st_all_send_cid>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
+                [[ -n "$c2t_cid_ln" ]] ||
+                    layout_fail "st_cmd_path makes no call to st_all_send_cid, so rung 32's window cannot be positioned around CMD2 and this clause has nothing to assert. That is itself the refusal: an arm at a value this high whose CMD2 is absent is an arm whose repair has no subject. Nothing is rebuilt by this refusal"
+                for _l in $c2t_open_lns; do
+                    (( _l < c2t_cid_ln )) ||
+                        layout_fail "st_cmd_path calls st_tout_open on disassembly line $_l and calls st_all_send_cid on line $c2t_cid_ln: rung 32's window IS the CMD2 interval, so the byte must be raised BEFORE CMD2 goes on the bus. An open below the command is a window drawn around nothing, and the arm's whole prediction is about the command that never got the longer bound. Nothing is rebuilt by this refusal"
+                done
+                # **THE LAST CLOSE MUST FALL AFTER CMD2, AND THAT IS THE WHOLE CLAIM OF THE WINDOW.**
+                # It is asserted over the LAST restore line and not over each one, because the
+                # compiler's duplicate puts one close textually ABOVE the CMD2 call - on the gate's
+                # refusal path, which does not reach CMD2 at all - and that line says nothing about
+                # the CMD2 path. The CMD2 path's close is the last one in program order, and it is
+                # the one this assertion is about: the bound is put back AFTER the command it was
+                # raised for. Its converse is 785's defect, one window over.
+                (( c2t_restore_ln_max > c2t_cid_ln )) ||
+                    layout_fail "st_cmd_path's LAST call to st_tout_restore is on disassembly line $c2t_restore_ln_max and its call to st_all_send_cid is on line $c2t_cid_ln: the close must fall AFTER CMD2, or the bound is put back before the command it was raised for and the whole arm is a store the command never saw. This is 785's defect turned into a refusal, one window over. Nothing is rebuilt by this refusal"
+                c2t_cmd3_ln=$(awk '/bl.*<st_cmd3_noidx>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
+                if [[ -n "$c2t_cmd3_ln" ]]; then
+                    for _l in $c2t_restore_lns; do
+                        (( _l < c2t_cmd3_ln )) ||
+                            layout_fail "st_cmd_path calls st_tout_restore on disassembly line $_l and calls st_cmd3_noidx on line $c2t_cmd3_ln: rung 32's window must CLOSE BEFORE CMD3, and that is a deliberate part of the arm rather than a tidy-up. CMD3's 48-bit response needs 535.2 us and fits inside the reset-value bound of 665.2 us, so CMD3 running at the RESET bound is 795 section 6's protocol claim tested on its own terms. A window covering CMD3 as well would give CMD3 the same help CMD2 is getting and the two rows would stop being separable. Nothing is rebuilt by this refusal"
+                    done
+                fi
+                echo "  xnu_entry_796: rung 32's TIMEOUT_CONTROL window, read out of the linked image: st_cmd_path's own device surface is rung 14's UNCHANGED at this value, and the window is the interval between its ONE call to st_tout_open (disassembly line $c2t_open_ln, a body whose device set is [$c2t_set], writing $c2t_imm to TIMEOUT_CONTROL 0x2E) and its $c2t_restore_calls call(s) to st_tout_restore (lines [$c2t_restore_lns], [$c2tr_set]) - the compiler's own duplicate of the gate's tail, each arm running exactly one - so the raised bound stands across CMD2 on line $c2t_cid_ln and is put back on line $c2t_restore_ln_max, the value is $c2t_imm and is asserted rather than named, and every close falls before CMD3 so that CMD3 answers at the RESET bound or not at all"
+            fi
             fi
             [[ -z "${stb_path_img// /}" ]] ||
                 layout_fail "st_cmd_path's non-device memory accesses are [$stb_path_img] at [$stb_path_imgaddr] and rung 11's record says that set is EMPTY - this function publishes through entry_live_write (a call, with a .rodata string) and its two result structs live on the stack, which the classifier skips by base register. A non-empty set here means either a symbol this rung never declared or an access it could not resolve. Nothing is rebuilt by this refusal"
