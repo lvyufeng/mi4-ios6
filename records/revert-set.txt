@@ -7940,3 +7940,88 @@ set=armed-storage-f9613649 sha256=8d915a1c8cc143e99ee0b3b6dd9ecb10f28b4cd2b7aa1e
 # named in section 9 of the record: THE FIRST BODY PAST CMD3, and the `ST_CMD_OP_SEND_CSD` constant with
 # its `_Static_assert` pair ahead of it - COST-owed to builds, not to a press.
 #
+#
+# 795: THE RUNG-31 PRESS - THE IMMEDIATE CRC NEEDED THE FLAG AS WELL AS THE 136-BIT REQUEST, AND WHAT
+# REPLACED IT IS THE BLOCK'S OWN 665.2 us TIMEOUT, WHICH IS AN UNSET REGISTER.
+#
+# ONE PRESS SPENT, AND IT WAS AUTHORIZED BY THE OPERATOR BEFORE THE GATE WAS RUN. One gate (exit 0, 607
+# lines), one runner (EXIT 0), one `fastboot boot`, nothing flashed, nothing written to storage, no
+# reboot. `out/` moved: the arm in it is rung 31's and it is now SPENT. `4a2fe00b` present as 'device';
+# `33e80afe` ABSENT from both `adb devices` and `fastboot devices` at fire time. Fired 2026-09-28
+# 03:43:44 UTC. Capture `out/stage90/captures/rung31-nocrc-20260928-034344-last_kmsg.txt` 633,586 B
+# sha256 `9c0baf80380f33ad67d00dbf73c7c59e647d4afe59ec238a2d192186e8989f8b`, archived by hand with its
+# gate.log and run.log (the runner does NOT archive). The runner's verdict is 7 PASS / 1 FAIL / 3 UNREAD
+# COUNTED PER CRITERION - eleven criteria, printed twice in one log (m751) - and it is identical to
+# rungs 29's and 30's, so this press added no failure.
+#
+# THE ARM TOOK EFFECT. `_cid_flags = 0x00000003`; `_cid_word = _cid_word_read = 0x00000201` - the
+# block's own copy of `COMMAND 0x0E`; `_cid_op = 2`.
+#
+# THE HEADLINE: ROW 2 LANDED. The latch moved `ERR | CRC` (`0x00028000`) at poll 1 in 17 ticks to
+# `ERR | TIMEOUT` (`0x00018000`) at poll 1,797 (= `0x00000705`) in 12,770 ticks (= `0x000031e2`) - a
+# 751x longer windup - with `_cid_err` `0x00020000` -> `0x00010000` and `_cid_complete = 0`. SO THE
+# IMMEDIATE CRC NEEDS BOTH CONJUNCTS: a 136-bit request AND the CRC check in the command word. 791
+# section 4 named the length and missed that the flag is necessary - CMD3 carries the flag and never
+# latched bit 17, and this arm does not either.
+#
+# AND THE 136-BIT COMMAND WAS ACTUALLY DRIVEN THIS TIME. `_cid_cmdlow_seen` moved 0 -> 445 of 1024
+# (`0x1bd`); on rung 30 it was 0, because the immediate CRC landed BEFORE the command went on the wire.
+# `_cid_inhibit_after` moved 1 -> 0, so CMD2 no longer wedged the block, so CMD3 WAS SENT
+# (`_nidx_sent = 0x1`) for the first time since rung 19.
+#
+# 12,770 TICKS IS 665.2 us, AND IT IS A CONSTANT. CMD3 in the same boot: `_nidx_polls = 0x701` = 1,793,
+# `_nidx_ticks = 0x31e4` = 12,772 = 665.3 us, `_nidx_status_any = 0x00018000`, `_nidx_err = 0x00010000`,
+# `_nidx_cmdlow_seen = 0x187` = 391 of 1024 - the same bound to within 0.02 per cent, and the same bound
+# rung 24 measured (768's block: "a break at poll 1789 in 665.2 us = TIMEOUT_CONTROL 0x00's 2^13 TMCLK
+# cycles").
+#
+# AND THE REGISTER THAT SETS IT HAS NEVER BEEN WRITTEN. `grep -n 'ST_SDHCI_TIMEOUT_CONTROL'` returns the
+# define (`entry_storage.c:212`) and ONE READ (`:4233`). `_nidx_tout_ctl = 0x00000000` - the reset value,
+# the SHORTEST bound the register can express. The source's own comment says why: the vendor writes it
+# only from `sdhci_prepare_data` (`sdhci.c:827-828`), inside `if (data || (cmd->flags & MMC_RSP_BUSY))`,
+# and EVERY COMMAND THIS LADDER SENDS IS DATA-LESS. So every response demand in this ladder has been
+# racing a 665.2 us bound no rung has ever set.
+#
+# THE TIMING LADDER, one boot, one counter: CMD0 `_cmd0_ticks = 0x1327` = 4,903 = 255.4 us; CMD1
+# `_cmd1_ticks = 0x2824` = 10,276 = 535.2 us and COMPLETED (`_cmd1_complete = 1`,
+# `_cmd1_status_any = 0x1`, `_cmd1_any_polls = 0x4d4` = 1,236); CMD2 12,770 = 665.2 us and CMD3 12,772 =
+# 665.3 us, BOTH TIMED OUT. CMD1's 48-bit response arrives 130 us INSIDE the bound - the narrowest margin
+# in the ladder, and why CMD1 is the one command that completes.
+#
+# AND THE ARITHMETIC, WITH ITS ASSUMPTION NAMED. One 48-bit response added 5,373 ticks (10,276 - 4,903).
+# A 136-bit response is 88 bits more, so at the same measured per-bit rate - THE ASSUMPTION; the rate is
+# not separately measured - it lands 88 x (5,373/48) = 9,850 ticks after CMD1's, at 20,126 ticks
+# = 1,048.2 us against a 665.2 us bound, i.e. the bound is 63 per cent of what is needed. The rate that
+# implies is 5.83 us/bit = 171.5 kHz against rung 6's configured 400 kHz (2.5 us/bit) and THIS STEP DOES
+# NOT EXPLAIN THAT. The conclusion survives either rate: at 400 kHz a 136-bit response still needs 340 us
+# of shifting on top of CMD1's 535.2 us = 875 us, still past the bound.
+#
+# WHY CMD3 FAILS IS A DIFFERENT QUESTION AND THE ARITHMETIC DOES NOT EXPLAIN IT. CMD3's 48-bit response
+# should land at about CMD1's 535.2 us - same length, same clock, same window shape - and it does not.
+# The claim this record offers is the protocol's own and it is NAMED AS A CLAIM, NOT MEASURED: a card
+# enters IDENT state only by accepting CMD2, and CMD3 is only accepted in IDENT. CMD2 has never
+# completed, so the card has never entered IDENT, so CMD3 gets no answer. Falsifiable cheaply: if CMD2 is
+# made to complete and CMD3 still times out, the account is wrong.
+#
+# SO THE NEXT ARM IS THE FIRST REPAIR THIS LADDER HAS HAD, NOT ANOTHER MEASUREMENT: ONE BYTE STORE to
+# `TIMEOUT_CONTROL 0x2E` above 0, before CMD2. `0x01` doubles the bound to 1,330.4 us; `0x02` gives
+# 2,660.8 us; the register's maximum is `0x0E`. THE PREDICTION IS NUMERIC. Rows: `_cid_complete = 1` AND
+# the four words CHANGED (`_cid_raw0..3`, `_cid_resp0..3` - already read, already published, no new cell
+# needed) is THE CID TAKEN; `_cid_complete = 1` with the words unchanged is the fifth row 793 section 5
+# named, now on an arm where the bound is not the suspect; `ERR | TIMEOUT` again at a LONGER tick count
+# REFUTES the arithmetic and says by how much; `ERR | CRC` returning refutes section 2. Its safety
+# surface is one byte, one register, no new address and no new device, and `TIMEOUT_CONTROL` is a
+# register the DRIVER ITSELF WRITES on the data path - the vendor's act, not a new one.
+#
+# WHAT THIS CHANGES ABOUT THE LADDER'S RECORD. (a) 791 section 4 is REFINED, not confirmed and not
+# refuted: the immediate CRC requires both conjuncts. (b) 786 section 7's and 788 section 7's anomaly is
+# EXPLAINED: the CRC at poll 1 of a window whose 136-bit response cannot have been shifted was NEVER a
+# report about the card - it is what this block raises when handed a 136-bit request with its CRC check
+# enabled. (c) 790 section 5's `0x40ff8080` discount is UNCHANGED and STRENGTHENED: identical on rungs
+# 19, 29, 30 and 31, including one where the block drove the bus and timed out. (d) The frontier moved
+# from CMD2 to the TIMEOUT REGISTER.
+#
+# THE GOAL IS NOT MET. No transfer completes, no filesystem is reached, no mount is made, so
+# 「让os可以正常启动并且挂载存储」 is not reached and TWRP-TO-STORAGE STAYS WITHHELD. NO PRESS IS
+# AUTHORIZED: rung 31 is spent and no further arm is armed.
+#
