@@ -8152,3 +8152,106 @@ set=armed-storage-c1f89600 sha256=c1f89600a78823cb8c63014f23b554847440ae2f02fd8c
 set=armed-storage-c1f89600 sha256=ac2afdda379239919bcd345591f3283515648d0cd9bc30572147b410df2c1e00 bytes=6732464 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-IT-grew-by-60-bytes-from-the-spent-rung-31-arm-s-6732404-and-carries-st_tout_open-at-0x8000de60-and-st_tout_restore-at-0x8000e250-which-the-gate-s-own-796-clause-disassembles-out-of-THIS-file-and-not-out-of-the-source
 set=armed-storage-c1f89600 sha256=11f93b5aa9d0a1165ad94fa73632a6416a8df34f400a57deb69063500dbe09cf bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE-31-and-it-differs-from-the-spent-rung-31-park-s-member-in-EXACTLY-TWO-LINES-the-rung-number-and-this-artifact-s-own-sha256
 set=armed-storage-c1f89600 sha256=6b973e740a1f6315d4b133b170d290085d9ccdd7190bcebe7f69e4b439da6887 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match-it-it-differs-from-the-spent-rung-31-park-s-member-in-EXACTLY-THREE-LINES-of-the-file-s-28-four-comment-lines-plus-one-header-line-plus-23-file-lines-the-artifact-s-own-sha256-and-EXACTLY-THE-TWO-FILES-THIS-STEP-EDITED-src-entry-build_entry-sh-07bce057-to-6f9d3c4b-and-src-entry-entry_storage-c-cdf1056d-to-ea1d06c7-and-in-the-VALUE-30-containment-comparison-the-same-member-differs-in-EXACTLY-TWO-LINES-because-there-the-artifact-sha256-line-is-IDENTICAL-and-the-file-set-is-IDENTICAL-23-files-in-both-so-nothing-was-added-or-removed-under-src-entry
+# 798: THE RUNG-32 PRESS - THE REPAIR RAN AND THE BOUND DID NOT MOVE, SO `TIMEOUT_CONTROL 0x2E` IS NOT
+# WHAT ENDS THIS LADDER'S COMMANDS; AND CMD1 IS SENT ONCE WHERE THE DRIVER LOOPS.
+#
+# ONE PRESS SPENT, authorized by the operator BEFORE the gate was run. One gate (exit 0, 608 lines),
+# one runner (EXIT 0), one `fastboot boot`, nothing flashed, nothing written to storage, no reboot;
+# `33e80afe` absent from BOTH device lists at fire time; capture
+# out/stage90/captures/rung32-tout-20260928-081329-{last_kmsg.txt,gate.log,run.log}, archived by hand,
+# last_kmsg 633,759 B sha256 0e33bbcd4950cb037ec3597078ade6a7fdd01b8f3676619ebd7cce9f9ae4de7a.
+# THE MACHINE STAYED UP: `_post_end_calls = 0x7`, `_post_elapsed = 0x06df35b6` = 6004.8 ms at
+# `_post_cntfrq = 0x0124f800` (19.2 MHz), so the 6000 ms deadline FIRED and the OS idled the whole
+# window. Runner's verdict 7 PASS / 1 FAIL / 3 UNREAD COUNTED PER CRITERION (14/2/6 as lines, the block
+# printing twice - the gate's reading of the previous capture and the runner's of this one), the single
+# FAIL the known `seam_sp ... is not sleh_sp-8` criterion: IDENTICAL to rungs 29, 30 and 31, so this
+# press added no failure.
+#
+# (1) THE REPAIR RAN, AND THE SIX NEW CELLS SAY SO. `_tout_calls = 0x1`, `_tout_was = 0x0` - THE
+# REGISTER HELD ZERO, the reset value, exactly as predicted - `_tout_wrote = 0x3`, `_tout_held = 0x3`
+# (THE BLOCK HELD WHAT WAS WRITTEN), `_tout_wrote_back = 0x0`, `_tout_readback = 0x0`. So the window
+# opened, the byte went 0 -> 3 and was put back, and the one failure 796 section 4 said the rest of the
+# log cannot show - a store that never landed - DID NOT HAPPEN.
+#
+# (2) THE HEADLINE: THE BOUND DID NOT MOVE BY ONE TICK-TIME. Rung 31 ran CMD2 under `0x00` = 665.2 us
+# and read `_cid_ticks = 0x31e2` = 12,770; rung 32 ran it under `0x03` = 5,321.6 us, EIGHT TIMES the
+# bound, and read `_cid_ticks = 0x31e4` = 12,772 = 665.3 us, with `_cid_status_any = 0x00018000`
+# (`ERR | TIMEOUT`) at `_cid_any_polls = 0x705` = 1,797 on both arms, `_cid_err = 0x00010000`,
+# `_cid_complete = 0`. **`TIMEOUT_CONTROL 0x2E` DOES NOT GOVERN THIS EVENT.** The SDHCI specification's
+# timeout register scales the DATA timeout; the command response timeout is fixed in the block. 795
+# section 5 built the arm on the assumption that this register sets the bound the ladder has been
+# hitting, and THIS PRESS IS THE MEASUREMENT THAT SAYS IT DOES NOT. It is the pre-registered refutation
+# row and it arrived in the STRONGER form: 796 section 8 named "ERR | TIMEOUT again, at a LONGER tick
+# count"; what came back is the SAME tick count, so it refutes the MECHANISM and not merely the
+# arithmetic. And 795 section 5's extrapolation about where a 136-bit response would land is UNTOUCHED
+# AND UNTESTED - the card is not answering at all, so no response ever raced the bound.
+#
+# (3) AND IT IS A CLEAN ONE-VARIABLE COMPARISON, MEASURED. Rung 31 carries 481 storage keys and rung 32
+# 487, and the six that exist only on rung 32 are the `_tout_*` pair's cells above. Every other cell is
+# identical to within timer jitter: `_cid_status_any` `0x00018000` on both; `_cid_word`/`_cid_flags`
+# `0x0201`/`0x03` on both; `_cid_raw0..3` `0x0040ff80 / 0x80000000 / 0 / 0` and `_cid_resp0..3`
+# `0x40ff8080 / 0 / 0 / 0` on both; `_cmd0_ticks` 4,903 -> 4,901; `_cmd1_any_polls` 1,236 -> 1,238 with
+# CMD1 COMPLETING AGAIN; `_nidx_ticks` `0x31e4` -> `0x31e2`. So the press isolated exactly one variable
+# - the timeout window - and the variable did nothing.
+#
+# (4) A DEFECT THIS STEP FOUND IN ITS OWN PREDECESSOR, AND IT IS A GUARD THAT LEAKED. 796 section 1 and
+# section 3 state that value 31 sends CMD2's `ST_MMC_RSP_R2` - word `0x0209` - and that "rung 31 sent
+# `0x0201` and this arm does NOT". THAT IS FALSE. The capture reads `_cid_word = _cid_word_read =
+# 0x00000201` and `_cid_flags = 0x00000003`: rung 32 sent the CRC-DROPPED word. The source is
+# unambiguous - entry_storage.c:3328's guard is `#if STAGE90_XNU_STORAGE_PROBE >= 30`, and the two
+# `st_all_send_cid` calls at :3348-3353 select on it - so EVERY value at or above 30 inherits rung 31's
+# constant. Rung 32 is a STRICT SUPERSET of rung 31's act: the NOCRC flag AND the timeout window.
+# **AND THE CLAUSE FAMILY DID NOT CATCH IT, BECAUSE IT WAS NEVER ASKED TO**: `xnu_entry_792` asserts the
+# flags register is `#3` and is itself guarded `>= 30`, so at value 31 it asserts `#3` - which the source
+# also builds - AND PASSES. The check was right about the image and the PROSE was wrong about the arm;
+# this is the m-class "a claim in a document no check reads" again, and the tell is that the check and the
+# sentence disagreed and NOTHING COMPARED THEM. The reading in (2) is NOT weakened - the leak made the
+# comparison cleaner, since rungs 31 and 32 then differ in the timeout window and nothing else - but
+# 796's ANSWER SPACE is: its row 4, "ERR | CRC returning refutes 795 section 2", COULD NOT HAVE FIRED,
+# because the CRC flag was not carried.
+#
+# (5) CMD1 IS SENT ONCE, AND THE GATE BELOW IT READS THE DRIVER'S OWN CONDITION BACKWARDS - and this is
+# the finding the press made available, and it is not about the timeout register at all. THE DRIVER
+# LOOPS (`mmc_ops.c:141-166`): `for (i = 100; i; i--)` with `err = mmc_wait_for_cmd(...)` inside and
+# `mmc_delay(10)` between passes, exiting on `if (cmd.resp[0] & MMC_CARD_BUSY) break;` at `:157` - so the
+# driver PROCEEDS WHEN BIT 31 SETS, the card having finished power-up, under the comment "otherwise wait
+# until reset completes". THE LADDER SENDS ONCE: `entry_storage.c:4702` is a single
+# `st_send_command(ST_CMD_OP_SEND_OP_COND, 0u, ST_MMC_RSP_PRESENT, &c1)` with no loop. AND THE LADDER
+# TESTS THE OPPOSITE: `entry_storage.c:4785` is `if (c1.sent != 0u && (c1.resp & ST_MMC_CARD_BUSY) ==
+# 0u)` - bit 31 CLEAR proceeds to CMD2. The constant's own comment at :2197 cites `mmc_ops.c:158`'s
+# condition and the comment above the gate says "the condition is the DRIVER's, read in the direction the
+# driver reads it"; BOTH SENTENCES ARE FALSE against `mmc_ops.c:157`, and both are m-class claims in
+# comments no check reads. AND THE MEASURED VALUES PUT THE LADDER ON THE WRONG SIDE OF THAT TEST:
+# `_cmd1_resp = 0x40ff8080`, and `0x40ff8080 & 0x80000000 = 0`, so the busy bit is CLEAR, so THE DRIVER'S
+# LOOP WOULD NOT HAVE EXITED - it would have retried 99 more times. The ladder proceeded, and
+# `_cid_gated = 0` says so. **SO CMD2 IS PUT ON THE BUS FOR A CARD THAT HAS NEVER REPORTED POWER-UP
+# COMPLETE, AND THE CARD DOES NOT ANSWER.** That is what the 665.2 us is: the block's fixed response
+# window expiring over a silent card - not a bound a register can move, which is exactly what (2)
+# measured with the register. And it explains 795 section 6 without the protocol claim: CMD1 is answered
+# because a card answers CMD1 WHILE it initializes (that is what the retry loop is for), and CMD2 is not
+# answered because the card is not in READY. 795 section 6 reached the right SHAPE from the wrong
+# DIRECTION: the reason CMD3 also fails is one step earlier than it said, at CMD1. THE CAVEAT, NAMED:
+# `0x40ff8080` may not be a real OCR at all (790 section 5, 787 section 6 - it is byte-identical on arms
+# whose window was closed). THE NEXT ARM IS SOUND EITHER WAY.
+#
+# (6) THE NEXT ARM IS THE FIRST TIME THIS LADDER PORTS THE DRIVER'S OWN CONTROL FLOW: the
+# `mmc_send_op_cond` loop - send CMD1 up to N times with the driver's own 10 ms delay, exit when
+# `resp[0] & MMC_CARD_BUSY` SETS, and publish two cells the ladder does not have: HOW MANY SENDS IT TOOK
+# and WHETHER THE BIT EVER SET. Its four rows: the bit sets on some send k = THE CARD FINISHES POWER-UP
+# and the ladder has been sending CMD2 too early since rung 16, after which 793 section 1's row 1a
+# becomes live; the bit NEVER sets over the full count puts the subject on POWER AND CLOCK (784's rails
+# are RPM resources with no `reg`) and NOT on the command sequence; the response CHANGING between sends
+# separates a real OCR from a static pattern WITHOUT knowing which it is; and the response BYTE-IDENTICAL
+# every send extends 790 section 5's discount to every arm.
+#
+# (7) THE GOAL IS NOT MET. No transfer completes, no filesystem is reached, no mount is made, so
+# 「让os可以正常启动并且挂载存储」 is not reached and TWRP-TO-STORAGE STAYS WITHHELD. `_cid_complete = 0`
+# and the eight RESPONSE words are the nine-arm pattern, so 793 section 1's row 1a DID NOT FIRE. NO PRESS
+# IS AUTHORIZED BY THIS STEP: rung 32 is spent and no arm is armed.
+#
+# (8) OWED, AND NAMED RATHER THAN LEFT TO BE INFERRED: entry_storage.c:3328's `>= 30` guard should be
+# `== 30` or the record must say value 31 is a containment (COST); 796 sections 1, 3 and 8's sentences
+# about `0x0209` are false (COST); the CMD1 loop of (6) is the next arm, pre-registered and NOT built;
+# TIMEOUT_CONTROL's real scope is unmeasured on this ladder; the effective bit rate 171.5 kHz against
+# rung 6's configured 400 kHz (795 section 10) is untouched and now more pointed; CMD9's `MMC_RSP_R2`
+# (797 section 6); and the six live-prose corrections of 797 section 1.
