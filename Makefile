@@ -130,6 +130,26 @@ restore:
 #                           two different pad words and the bootloader's choice is made on the device,
 #                           so an ambiguous record prints its candidates and passes, and a no-match is
 #                           the only refusal (779).
+#   check_response_word_order.py
+#                           the 136-bit response has ONE word order and it is the driver's. The vendor's
+#                           `sdhci_finish_command` (external/.../sdhci.c:1163-1172) reads the four words
+#                           WORD 3 FIRST (`SDHCI_RESPONSE + (3-i)*4`), shifts each left by 8, and ORs the
+#                           stripped CRC's low byte back in from the address ONE BELOW the word, except for
+#                           the last (`i != 3`). Every part of that is invisible in the register's name, and
+#                           a copy that gets it wrong CANNOT FAIL LOUDLY: ascending word order, or a dropped
+#                           byte, still yields 128 plausible bits that decode to a zeroed-out CSD or CID -
+#                           no fault, no error, no cell. Rung 33 read a real SanDisk CID through this
+#                           arithmetic and the tree holds SIX response-reading functions, in three shapes
+#                           (the four-word assembly, the word-0 pair `:3995`'s comment calls "one arithmetic
+#                           at three times", and the four raw words as a freshness witness). It refuses an
+#                           offset the register does not have, an ascending or repeated word inside one
+#                           command segment, and a CRC byte that is not the one below its own word. The
+#                           NEXT rung is CMD9 (SEND_CSD, `ac R2`), which is the next place a fifth copy
+#                           would be written: experiment 809's instruction to call the existing assembler
+#                           rather than re-derive it was, until this runs, only a sentence in a document.
+#                           `--selftest` holds nine fixtures - the four shapes this tree holds, and each of
+#                           the five ways the arithmetic goes wrong - and exits 2 for a failed selftest,
+#                           which is a different failure from the tree being wrong (experiment 810).
 check:
 	@tools/check_stage_paths.sh
 	@tools/check_set_name_rule.sh
@@ -146,6 +166,8 @@ check:
 	@tools/check_sdc1_pad_expectation.py
 	@tools/check_line_citations.py --selftest >/dev/null
 	@tools/check_line_citations.py
+	@tools/check_response_word_order.py --selftest >/dev/null
+	@tools/check_response_word_order.py
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not

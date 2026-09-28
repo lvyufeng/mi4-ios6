@@ -8733,3 +8733,73 @@ set=armed-storage-7341f5f6 sha256=ce929b8c20150f11d57a3080c4b6f4b000703febe7fe78
 # **TWRP-TO-STORAGE STAYS WITHHELD**. Rung 34 remains ARMED AND NOT PRESSED, and CMD9 is the next
 # rung the moment that press is taken.
 #
+# 810: THE WORD ORDER THE DRIVER OWNS, MADE A REFUSAL INSTEAD OF A SENTENCE. A CHECK, and it is the
+# first thing in this project that can refuse a 136-bit response assembled wrong. No press, no device
+# action, no runner, no firer, NO BUILD, and NOTHING UNDER out/ WAS WRITTEN: the eleven members of
+# `armed-storage-7341f5f6` are untouched and their sha256 values still agree with the lines above. The
+# arm is still ARMED AND NOT PRESSED and **THE PRESS IS THE OPERATOR'S**.
+#
+# 809 SECTION 4 WROTE THE TRAP DOWN AND LEFT IT AS ADVICE ("a new arm must CALL that assembler and not
+# re-derive it"). THAT IS A CLAIM IN A DOCUMENT, and the class is `mi4-a-claim-in-a-comment-is-not-a-
+# check`; the repair this project applies is to make the property structural.
+#
+# AND MEASUREMENT CORRECTED THE RECORD'S NUMBER. 809 named TWO sites - "the 136-bit assembler at
+# `:3531-3544` and again at `:3639-3654`". The scanner finds SIX response-reading functions and 32
+# accesses, in THREE shapes: `st_send_command` `:2572` (2 - the offset-0 word, under `#if >= 12` and
+# again under the `#else`); **`st_all_send_cid` `:3333` (7) and `st_resp_before` `:3572` (7), the
+# four-word assembly**; `st_set_relative_addr` `:3921` (4) and `st_cmd3_noresp` `:4071` (4), the word-0
+# pair; and `st_cmd3_noidx` `:4186` (8), the four raw words as a freshness witness. **THE ARITHMETIC IS
+# DEFINED FIVE TIMES, NOT TWICE** - and `:3995`'s own comment states the intent out loud: "so that this
+# reading, rung 17's `_cid_resp0` and rung 18's `_rb_resp0` are one arithmetic at three times rather
+# than three derivations that agree." That is `one value, two definitions` caught in the act of being
+# careful: five definitions, currently in agreement, and the next rung is the one that adds a sixth.
+#
+# THE GROUND TRUTH IS THE VENDOR'S OWN TWO EXPRESSIONS, `external/android_kernel_xiaomi_cancro/drivers/
+# mmc/host/sdhci.c:1162-1172`: `SDHCI_RESPONSE + (3-i)*4` - **word 3 first**, 12/8/4/0; `<< 8` on each;
+# and `if (i != 3)` with `-1` - **the CRC-stripped byte comes from the address ONE BELOW the word, and
+# the LAST word takes no byte at all.** The rules are read off those and not invented: a 32-bit offset
+# in {12,8,4,0}, an 8-bit offset in {11,7,3}, the descending order within one stimulus segment (broken
+# at every `st_send_command`), and the byte one below its own word.
+#
+# WHY IT CANNOT BE LEFT TO A READING: read the words ascending and the response is reversed; drop the
+# byte-below OR and each word loses 8 bits; OR a byte onto the last word and its low byte is stale.
+# EVERY ONE OF THEM PARSES, DECODES AND PUBLISHES - no fault, no error, no cell that says "wrong".
+#
+# THE REFUSALS ARE DEMONSTRATED, NOT ASSERTED: five mutations applied TO COPIES OF THE FILE, never to
+# the tree, each refused in place. Ascending first pair -> ASCENDING + PAIR; the byte taken from `+12u`
+# -> OFFSET + PAIR; **the LAST word OR'd with `+3u` -> PAIR** ("the byte at + 3u is OR'd onto the word
+# at + 0u"), which is `i != 3` made structural, because an OR onto the offset-0 word has no offset -1
+# to name; `+13u` -> OFFSET + PAIR; one word read twice in a segment -> REPEAT. And the UNMUTATED FILE
+# IS CLEAN, so the five refusals are the mutation and not the file.
+#
+# TWO NARROWINGS, EACH BY A MEASURED COUNTER-EXAMPLE AND NOT IN ADVANCE - the first two runs refused
+# FOUR CORRECT SITES, and THE RULE MOVED, NOT THE CODE:
+#   * COMMENTS ARE STRIPPED FIRST. A definition is recognised by the last `name(...)` before a `{`, and
+#     this file's comments are full of parenthesised prose, so a comment ending in a brace was read as
+#     the definition of a function called `29` (the text `rung 29 (` is enough) - which reset the
+#     enclosing body and produced two PAIR refusals against correct code at `:3539` and `:3647`.
+#   * A PREPROCESSOR DIRECTIVE ENDS A SEGMENT. `st_send_command` reads the offset-0 word at `:2771`
+#     under `#if >= 12` and again at `:2776` under the `#else`; those are ALTERNATIVES, and only one is
+#     ever compiled, so a repeated offset across a `#if`/`#else` boundary is not a second reading of
+#     one address. Both narrowings are named in the tool's header with the site that produced them.
+#
+# THE TOOL'S OWN WIDTH IS TESTABLE: `--selftest` holds NINE fixtures - the three shapes this tree holds,
+# and each of the five wrong ways - and returns exit 2 for a failed selftest, reserved for "the check's
+# own width is wrong", distinguishable from the exit 1 that means "the tree has a defect". The six sites
+# are PRINTED BY NAME on every run, so the check reports what it read and not only what it refused.
+#
+# WHAT IT DOES NOT DO. It does not say the card answers CMD9 - whether a CSD comes back is a press's
+# answer. It does not make the five definitions one definition: it makes them AGREE and keeps them
+# agreeing, which is the strongest thing a check can do to a value defined five times, and the collapse
+# belongs to the rung that adds the sixth. It has nothing to say about citations or counts, which other
+# checks own. `make check` exit 0, 10.4 s.
+#
+# WHAT IT CHANGES FOR THE NEXT RUNG. CMD9 (`SEND_CSD`, `ac R2`) is the next rung, and 809 measured that
+# it needs no new mechanism. What was a sentence in 809 is NOW A REFUSAL IN `make check`: an arm that
+# builds the CSD in ascending order, forgets the byte below, or ORs the last word FAILS THE BUILD
+# instead of publishing a plausible number. That was the only part of CMD9 that could fail silently.
+#
+# THE GOAL IS NOT MET. No transfer completes, no filesystem is reached and no mount is made, so
+# **TWRP-TO-STORAGE STAYS WITHHELD**. Rung 34 (`armed-storage-7341f5f6`, switch value 33) remains
+# ARMED AND NOT PRESSED, and **THE PRESS IS THE OPERATOR'S**.
+#
