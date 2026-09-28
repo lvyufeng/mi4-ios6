@@ -8255,3 +8255,145 @@ set=armed-storage-c1f89600 sha256=6b973e740a1f6315d4b133b170d290085d9ccdd7190bce
 # TIMEOUT_CONTROL's real scope is unmeasured on this ladder; the effective bit rate 171.5 kHz against
 # rung 6's configured 400 kHz (795 section 10) is untouched and now more pointed; CMD9's `MMC_RSP_R2`
 # (797 section 6); and the six live-prose corrections of 797 section 1.
+# 800: THE RUNG-33 ARM - armed-storage-ce2f589c, STAGE90_XNU_STORAGE_PROBE=32 (switch VALUE 32 =
+# ordinal rung 33). **THE FIRST RUNG WHOSE ACT IS THE DRIVER'S OWN CONTROL FLOW RATHER THAN ONE OF ITS
+# CONSTANTS.**
+#
+# THE READING IT ACTS ON IS 798 section 5's, AND THE PRESS THAT MADE IT IS THE ONLY REASON THIS RUNG
+# EXISTS. The rung-32 press found that `TIMEOUT_CONTROL 0x2E` does not govern the command response
+# timeout, and then handed over a finding that is not about a register at all: **the driver calls CMD1
+# TWICE and this ladder calls it once, and the gate below the one call reads the driver's own test
+# BACKWARDS.** `drivers/mmc/core/mmc_ops.c:141-166` is
+#
+#     for (i = 100; i; i--) {
+#             err = mmc_wait_for_cmd(host, &cmd, 0);
+#             if (err) break;
+#             if (ocr == 0) break;                      /* a probe: one pass */
+#             if (cmd.resp[0] & MMC_CARD_BUSY) break;   /* :157 - PROCEED WHEN BIT 31 SETS */
+#             err = -ETIMEDOUT;
+#             mmc_delay(10);
+#     }
+#
+# - up to 100 sends, 10 ms apart, exiting when `resp[0] & 0x80000000` becomes TRUE. This ladder's
+# `entry_storage.c:4702` sends CMD1 ONCE with argument `0u`, and `:4785` gates CMD2 on
+# `(c1.resp & ST_MMC_CARD_BUSY) == 0u` - PROCEEDS WHEN BIT 31 IS CLEAR, which is the opposite of the
+# line the constant's own comment cites. And the measurement puts the ladder on the wrong side:
+# `_cmd1_resp = 0x40ff8080` has bit 31 clear, so the driver's loop would have retried 99 more times and
+# this ladder went on to CMD2. **So CMD2 has been put on the bus for a card that has never reported
+# power-up complete, since rung 16** - which is what the 665.2 us is.
+#
+# THE TWO STEPS BETWEEN THE DRIVER'S TWO CALLS DO NOT EXIST IN THIS IMAGE, and that is a grep rather
+# than an impression. `mmc.c:1923` is `mmc_send_op_cond(host, 0, &ocr)` - argument 0, and by
+# `mmc_ops.c:148-150` that is a SINGLE PASS BY DESIGN. `mmc.c:1951` is
+# `host->ocr = mmc_select_voltage(host, ocr)` - the intersection of the card's OCR window with the
+# host's. `mmc.c:1359` is `mmc_send_op_cond(host, ocr | (1 << 30), &rocr)` - the LOOPED call, with an
+# argument derived from the first response's window and bit 30 set. In `src/entry/`, anchored and
+# case-sensitive, `select_voltage` occurs once and IN A COMMENT (the note at `entry_storage.c:4724`
+# explaining what it publishes) with no define, no body and no call; the CMD1 argument is the literal
+# `0u`; and `1u << 30` occurs once in the whole file as `ST_HC_DLL_RST` (`:258`, a different register),
+# so **bit 30 has never been set in any command word this image sends.**
+#
+# THE ACT, AND IT IS TWO BODIES OF THEIR OWN - the shape 787 and 796 used, so that `st_cmd_path`'s own
+# device surface does not move by one offset:
+#
+#   `st_op_cond_arg`  0x8000de18,  96 bytes  - `(resp & ~0x7F) | (1 << 30)`, nothing else
+#   `st_op_cond_loop` 0x8000de78, 320 bytes  - the driver's loop, one `bl <st_send_command>` inside it
+#
+# both `noinline, noclone`, each called from `st_cmd_path` and nowhere else. **THEIR DEVICE SETS ARE
+# EMPTY, AND THAT IS MEASURED OUT OF THE LINKED IMAGE AND NOT ASSERTED**: the derived argument is a
+# function of the WORD the caller passes and of nothing the block holds, and the loop's only device act
+# is the command it sends, which belongs to `st_send_command` - whose own body and own clause are
+# unchanged and whose `st_cmd_path` call count is still asserted to be exactly two (the loop's call is
+# inside the loop's body, not in `st_cmd_path`'s). **NO STORE TO ANY REGISTER IS ADDED BY THIS RUNG.**
+#
+# THE FOUR COMPILE-TIME CONSTANTS, and every one of them is asserted out of the image by
+# `xnu_entry_799` rather than trusted from the source:
+#
+#   `ST_OP_COND_OCR_CLR     0x0000007Fu`  - `mmc.c:1943-1948`'s `ocr &= ~0x7F`, emitted as `bic #127`
+#   `ST_OP_COND_BIT30       0x40000000u`  - `mmc.c:1359`'s `(1 << 30)`, emitted as `bic`/`orr`
+#   `ST_OP_COND_SEND_MAX    100u`         - `mmc_ops.c:145`'s `for (i = 100; i; i--)`
+#   `ST_OP_COND_DELAY_TICKS 192000u`      - `mmc_ops.c:164`'s `mmc_delay(10)` = 10 ms at 19.2 MHz
+#
+# EIGHT NEW KEYS, and they are the whole answer space: `_opcond_calls` (the argument body ran),
+# `_opcond_from` (the word it derives from), `_opcond_arg` (the word it derived - THE ARM'S ONLY
+# NUMBER), `_opcond_loop_calls` (the loop ran), `_opcond_sends` (how many sends it took, 1..100),
+# `_opcond_busy_seen` (whether bit 31 EVER set - 798 section 5's own test, run more than once for the
+# first time), `_opcond_last_resp` (the last response word), `_opcond_ticks` (the loop's own cost).
+#
+# **THE PREDICTION IS A NUMBER AND IT IS SHARPER THAN THE RUNG THAT MADE IT POSSIBLE.**
+# `_cmd1_resp = 0x40ff8080` already has bit 30 SET and its low seven bits ZERO, so
+# `(0x40ff8080 & ~0x7F) | 0x40000000 = 0x40ff8080`: **THE DERIVATION IS A NO-OP ON THIS CARD'S OWN
+# WORD, and `_opcond_arg` should equal `_opcond_from` exactly.** A value that differs says the
+# derivation moved something the response did not already satisfy, which is the only way this rung can
+# report on its own first body at all.
+#
+# THE COST IS NAMED RATHER THAN DISCOVERED: the worst case is 100 sends plus 99 ten-millisecond
+# delays, and at the measured 665.2 us per timed-out command that is about **1.06 s added to the
+# storage probe** - spent inside `entry_storage_probe` at the OS's idle-exit, where the run's own
+# deadline is 6,000 ms (`_post_elapsed`). A run that spans the whole loop is a run whose window shrank
+# by that much, and `_opcond_ticks` is the cell that measures what it actually cost.
+#
+# FOUR ROWS, and the first is the one that would open the ladder:
+#
+#   (1) `_opcond_busy_seen = 1` on send k <= 100 - **THE CARD FINISHES POWER-UP AND THE LADDER HAS BEEN
+#       SENDING CMD2 TOO EARLY SINCE RUNG 16**, and the send count k is a number no arm has carried.
+#   (2) `_opcond_busy_seen = 0` over the full 100 sends - the card is not powering up on this path at
+#       all, which puts the subject on POWER AND CLOCK (784's rails are RPM resources with no `reg`)
+#       and NOT on the command sequence.
+#   (3) `_opcond_last_resp` DIFFERS between sends - the block is reading something that MOVES with each
+#       CMD1, which separates a real OCR from a static pattern without needing to know which it is.
+#   (4) `_opcond_last_resp` byte-identical every send, and equal to `_cmd1_resp` - `0x40ff8080` is a
+#       static pattern and 790 section 5's discount extends to every arm.
+#
+# THE CLAUSE FOUND TWO DEFECTS IN ITS OWN FIRST DRAFTS, AND BOTH ARE WORTH THE SENTENCE.
+# (a) `objdump -d` annotates every immediate with its own comment field, so the instruction that clears
+# the low seven bits reads `bic r3, r3, #127    ; 0x7f`. The first draft matched `#127` ANCHORED AT END
+# OF LINE, which objdump never emits, and the clause REFUSED A BUILD THAT DID EXACTLY WHAT THE ARM SAYS
+# - loud, because the pattern is in a `||`-refusal, and it would have refused every future value-32
+# build too. The repair strips objdump's comment field rather than loosening the anchor, because a
+# loosened anchor is the check that also matches `#1274`.
+# (b) The probe whose response the argument is derived from is CMD1, the **LAST** of `st_cmd_path`'s
+# two `bl <st_send_command>` sites, and the first draft took the FIRST - which is CMD0's line. The
+# assertion was true and the sentence printed beside it would have named the wrong command, which is
+# the m-class this project keeps catching. The last is taken now, and the `== 2` assertion further down
+# is what makes "the last" unambiguous. **The clause also asserts the EXIT TEST'S DIRECTION** - one
+# sign-conditioned branch (`blt`/`bmi`) leaving the loop, which is what `(resp & 0x80000000) != 0`
+# compiles to - because that direction is 798 section 5's whole subject and a differently-lowered test
+# refuses the build for a human to read rather than passing on an assertion that no longer means
+# anything.
+#
+# CONTAINMENT, MEASURED ON ALL ELEVEN MEMBERS OF THE RUNG BELOW. The value-31 build from this same
+# source is TEN OF ELEVEN MEMBERS BYTE-IDENTICAL to the SPENT rung-32 park
+# `out/stage90/frozen/armed-storage-c1f89600/` - `stage90-qcdt.img` `bda29ed1...` and `xnu_arm_entry.bin`
+# `c1f89600...` included, i.e. the entry image REPRODUCED byte for byte - and the eleventh is
+# `xnu_arm_entry-sources.txt`, which records source files BY CONTENT and must move when the tools are
+# edited: exactly two of its 28 lines, `build_entry.sh` and `entry_storage.c`, the two files this step
+# touched, with the artifact's own hash line identical and the file set identical at 23 files.
+#
+# THE ARM'S OWN DELTA, MEASURED AGAINST THE SPENT RUNG-32 PARK:
+#   entry `.text` (size -A)  5,335,424 -> 5,335,680   **+256**
+#   `xnu_arm_entry.elf`      6,732,464 -> 6,732,528   **+64** (the .text grew 256 and 192 of it was
+#                                                     absorbed by page alignment, 796 section 7's own
+#                                                     rule that an unchanged size is not a claim)
+#   `xnu_arm_entry.bin`      5,552,764 -> 5,552,764   SIZE UNCHANGED, **603,185 bytes differ** - an
+#                                                     insertion, not 603,185 edits
+#   `stage90-build-config.txt` BYTE-IDENTICAL to rungs 23 through 32 (`6c2b6038...`): no payload switch moved
+#   `stage90-qcdt.img`       8,572,928 -> 8,572,928   the boot image the press sends
+#
+# THE PRESS IS THE OPERATOR'S AND NO PRESS IS SPENT OR AUTHORIZED HERE. The arm is ARMED AND NOT PRESSED,
+# its park is `out/stage90/frozen/armed-storage-ce2f589c/` with eleven members verified in place, and the
+# press path is the two commands `tools/verify_press_ready.sh` prints, run by hand once each. **THE GOAL
+# IS NOT MET BY THIS ARM**: no transfer completes, no filesystem is reached and no mount is made, so
+# 「让os可以正常启动并且挂载存储」 is not reached and **TWRP-TO-STORAGE STAYS WITHHELD**.
+#
+set=armed-storage-ce2f589c sha256=2c9c24928c9e8a3b85294ab73a5c4ed1257ee923714328e6ab19e5e22150a361 bytes=8572928 file=stage90-qcdt.img role=qcdt-wrapped-payload-THIS-IS-WHAT-fastboot-boot-SENDS-the-STORAGE_PROBE-32-entry
+set=armed-storage-ce2f589c sha256=9d28a319f0ab8648d30611c817c7c54aa93d465395cfde348792f6bf1483d85c bytes=6048260 file=stage90.bin role=raw-payload-bin-this-payload-embeds-the-STORAGE_PROBE-32-entry
+set=armed-storage-ce2f589c sha256=6c2b6038d3bcbe30da60084c571682100946a15f191437161dbf1ed1385b547b bytes=682 file=stage90-build-config.txt role=payload-switch-set-as-built-BYTE-IDENTICAL-to-rungs-23-through-32-s-MEASURED
+set=armed-storage-ce2f589c sha256=8555da4a549e88fb8c240c7a2ed6bf6b1b3d7e9383e672c549079a7d811f6226 bytes=6110332 file=stage90.elf role=payload-elf-the-gate-reads-symbols-out-of
+set=armed-storage-ce2f589c sha256=9fb01326ad741259f4670916e750c486878d5a20ce9e1b240827f8d047b342a5 bytes=6051840 file=stage90.img role=payload-image-a-member-of-the-manifest-and-not-of-the-gate-s-own-list
+set=armed-storage-ce2f589c sha256=52bc9c357068b791f777bb9abd2e879fa5b0b27364267220b01215dc5faec97b bytes=1744 file=stage90_fixture.macho role=payload-fixture-a-member-of-the-manifest-and-not-of-the-gate-s-own-list-UNCHANGED-from-every-rung-since-it-was-added
+set=armed-storage-ce2f589c sha256=e005ea99e2732a7b13fe45fb62a0077fb79262234b1ae4e96adb09fb4caeba39 bytes=560 file=SHA256SUMS.txt role=build-manifest-absolute-pathed-see-the-trap-above manifest_members=stage90_fixture.macho,stage90.img
+set=armed-storage-ce2f589c sha256=ce2f589c644f560d506afe9999006dae932a8b6b6a8f3e805dc19817d779a484 bytes=5552764 file=xnu_arm_entry.bin role=entry-image-embedded-in-the-payload-THIS-IS-THE-ARM-ITS-OWN-SHA256-PREFIX-ce2f5
+set=armed-storage-ce2f589c sha256=7baef0f6836288e2d4ce8f5aef74f1ba1355ff7b3c5d4ce9ea8a4e0b572ede64 bytes=6732528 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-IT-grew-by-64-bytes-from-the-spent-rung-32-arm-256-in-text
+set=armed-storage-ce2f589c sha256=e13914e092ac40043504c52fc9c86fa8d2a5dea5433a69b9e8d4e8aa2867257e bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=32
+set=armed-storage-ce2f589c sha256=2eafd2f80b735b0fdd255d4870b7fc80b7421ddde6b0cc63cbb1f7e4b523f9b7 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one

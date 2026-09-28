@@ -31178,6 +31178,102 @@ verify_trace_symbols() {
                 echo "  xnu_entry_796: rung 32's TIMEOUT_CONTROL window, read out of the linked image: st_cmd_path's own device surface is rung 14's UNCHANGED at this value, and the window is the interval between its ONE call to st_tout_open (disassembly line $c2t_open_ln, a body whose device set is [$c2t_set], writing $c2t_imm to TIMEOUT_CONTROL 0x2E) and its $c2t_restore_calls call(s) to st_tout_restore (lines [$c2t_restore_lns], [$c2tr_set]) - the compiler's own duplicate of the gate's tail, each arm running exactly one - so the raised bound stands across CMD2 on line $c2t_cid_ln and is put back on line $c2t_restore_ln_max, the value is $c2t_imm and is asserted rather than named, and every close falls before CMD3 so that CMD3 answers at the RESET bound or not at all"
             fi
             fi
+            if [[ $STORAGE_PROBE -ge 32 ]]; then
+                # **799: RUNG 33 PORTS THE DRIVER'S OWN CONTROL FLOW, AND THIS CLAUSE IS WHAT MAKES THE
+                # PORT A READING RATHER THAN A SENTENCE.** The arm adds TWO BODIES OF THEIR OWN - the
+                # shape 787 and 796 used - so that `st_cmd_path`'s own device surface does not move:
+                # every device access the loop makes is inside `st_send_command`, which `st_cmd_path`
+                # already calls twice and whose own clause above still asserts exactly two.
+                #
+                # **WHY A CLAUSE AT ALL, WHEN THE CELLS WOULD SHOW A MISSING BODY.** They would not:
+                # an arm whose loop body was never linked publishes `_opcond_calls` absent and every
+                # other cell exactly as rung 32's, which is the SAME SHAPE as an arm whose loop ran and
+                # found nothing - and that is the arm's own main row. The two are told apart by the
+                # IMAGE and by nothing in the capture, which is what this clause reads.
+                #
+                # **AND IT ASSERTS THE TWO CONSTANTS THE ARM'S WHOLE ACT IS.** `mmc.c:1943`'s
+                # `ocr &= ~0x7F` and `mmc.c:1359`'s `(1 << 30)` are immediates in `st_op_cond_arg`'s
+                # own body, and `mmc_ops.c:145`'s 100-send bound is an immediate in the loop's - so a
+                # later edit that changed the derived argument, or the loop's bound, is refused here
+                # rather than answered by a press.
+                opa=$(sym_addr st_op_cond_arg) ||
+                    layout_fail "rung 33's OCR argument body is not in the image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: out/xnu_arm_entry.elf has no \`st_op_cond_arg\`, so the second CMD1 is never sent with a derived argument and the arm is the rung below it wearing a new number - and that is the one absence the log cannot show, because \`_opcond_* = 0\` would read the same whether the loop ran and found nothing or never ran at all. Nothing is rebuilt by this refusal"
+                opa_next=$(sym_next "$opa") ||
+                    layout_fail "nothing follows st_op_cond_arg in the linked image, so the window this check disassembles has no end"
+                opa_body=$(arm-none-eabi-objdump -d --start-address="$opa" --stop-address="$opa_next" "$OUT/xnu_arm_entry.elf")
+                { read -r opa_dev; read -r opa_cnt; read -r opa_img; read -r opa_addr; } < <(classify_body "$opa_body" "")
+                opa_set=$(printf '%s\n' $opa_dev | LC_ALL=C sort | tr '\n' ' ')
+                [[ -z "${opa_set// /}" ]] ||
+                    layout_fail "st_op_cond_arg touches device register(s) [$opa_set] and rung 33's record says its device set is EMPTY: the derived argument is a function of the WORD the caller passes and of nothing the block holds, and every device access this arm makes belongs inside st_send_command - so an access here would be a second, unasserted device surface for the same arm. Nothing is rebuilt by this refusal"
+                # **OBJDUMP'S OWN COMMENT FIELD IS STRIPPED BEFORE ANY IMMEDIATE IS MATCHED, AND THAT IS
+                # THE FIRST DRAFT'S DEFECT TURNED INTO A LINE OF THIS CLAUSE.** `objdump -d` annotates
+                # every instruction that carries an immediate with `; 0x..`: the instruction that clears
+                # the low seven bits reads `bic\tr3, r3, #127\t; 0x7f`, so a match anchored at END OF LINE -
+                # the form this clause was first written with - cannot see `#127` in it and the clause
+                # refused a build that did exactly what the arm says. The comment is objdump's, not the
+                # instruction's, so it is removed here rather than the anchor being loosened: a loosened
+                # anchor is the check that also matches `#1274`.
+                opa_txt=$(sed 's/[[:space:]]*;.*$//' <<<"$opa_body")
+                for _imm in 127 1073741824; do
+                    grep -q "#$_imm\$" <<<"$opa_txt" ||
+                        layout_fail "st_op_cond_arg's body carries no immediate #$_imm, and rung 33's derived argument IS that mask: 127 is mmc.c:1943-1948's \`ocr &= ~0x7F\` and 1073741824 is mmc.c:1359's \`(1 << 30)\`. An argument derived from anything else is a different command, and the arm's four rows are all about what the card does with THIS one. Nothing is rebuilt by this refusal"
+                done
+                opl=$(sym_addr st_op_cond_loop) ||
+                    layout_fail "rung 33's loop body is not in the image while STAGE90_XNU_STORAGE_PROBE=$STORAGE_PROBE: out/xnu_arm_entry.elf has no \`st_op_cond_loop\`, so CMD1 is sent ONCE - the probe the image has sent since rung 16 - with none of the driver's retries, and \`_opcond_sends\` absent is indistinguishable in the log from a loop that ran and never saw the card ready. Nothing is rebuilt by this refusal"
+                opl_next=$(sym_next "$opl") ||
+                    layout_fail "nothing follows st_op_cond_loop in the linked image, so the window this check disassembles has no end"
+                opl_body=$(arm-none-eabi-objdump -d --start-address="$opl" --stop-address="$opl_next" "$OUT/xnu_arm_entry.elf")
+                opl_txt=$(sed 's/[[:space:]]*;.*$//' <<<"$opl_body")
+                { read -r opl_dev; read -r opl_cnt; read -r opl_img; read -r opl_addr; } < <(classify_body "$opl_body" "")
+                opl_set=$(printf '%s\n' $opl_dev | LC_ALL=C sort | tr '\n' ' ')
+                [[ -z "${opl_set// /}" ]] ||
+                    layout_fail "st_op_cond_loop touches device register(s) [$opl_set] and rung 33's record says its device set is EMPTY: the loop's ONLY device act is the command it sends, and that act belongs to st_send_command, whose own set is asserted exactly by its own clause. An access here would be a register this rung never names. Nothing is rebuilt by this refusal"
+                opl_sc=$(grep -c -- 'bl.*<st_send_command>' <<<"$opl_body")
+                [[ "$opl_sc" == "1" ]] ||
+                    layout_fail "st_op_cond_loop makes $opl_sc call(s) to st_send_command and rung 33 makes exactly ONE - the single call site INSIDE the driver's own loop (mmc_ops.c:145-166 sends in the loop body and tests after each one), which is what makes 'up to 100 sends' a property of one instruction sequence rather than of two. Zero means the loop body is in the image and cannot put a command on the bus; two or more means two call sites, i.e. a loop whose trip count is not this body's. Nothing is rebuilt by this refusal"
+                for _imm in 100 101; do
+                    grep -q "#$_imm\$" <<<"$opl_txt" ||
+                        layout_fail "st_op_cond_loop's body carries no immediate #$_imm, and rung 33's bound IS that number: mmc_ops.c:145 is \`for (i = 100; i; i--)\`, so the compiled loop's exit test carries MAX+1 = 101 and the clamp carries 100. A loop bounded by something else is a different act from the driver's and the arm's arithmetic about how long it took would be about this ladder's number wearing the driver's name. Nothing is rebuilt by this refusal"
+                done
+                # **AND THE EXIT TEST'S DIRECTION IS ASSERTED, BECAUSE IT IS 798 SECTION 5'S WHOLE
+                # SUBJECT.** \`(last & MMC_CARD_BUSY) != 0\` with \`MMC_CARD_BUSY = 0x80000000\` is a test
+                # of the response's SIGN BIT, so the compiler emits it as a SIGNED comparison against
+                # zero and the branch is sign-conditioned - \`blt\` here, \`bmi\` in the other spelling
+                # GCC uses. A \`bne\` or a \`bcc\` at that line would be a test of some other bit, and that
+                # is exactly the inversion 798 section 5 found in the image's own gate: the ladder
+                # proceeding when bit 31 is CLEAR. **A DIFFERENTLY-LOWERED TEST REFUSES HERE ON
+                # PURPOSE**: the form is the compiler's, so a build that emits a fourth spelling stops
+                # for a human to read it rather than passing on an assertion that no longer means
+                # anything.
+                opl_sig=$(grep -cE '^[[:space:]]*[0-9a-f]+:[[:space:]]+[0-9a-f]+[[:space:]]+(blt|bmi)[[:space:]]' <<<"$opl_txt")
+                [[ "$opl_sig" == "1" ]] ||
+                    layout_fail "st_op_cond_loop carries $opl_sig sign-conditioned branch(es) and rung 33's exit test is exactly one: \`if ((last & ST_MMC_CARD_BUSY) != 0u) { busy = 1u; break; }\` tests the response's bit 31, which the compiler lowers to a signed comparison against zero. Zero means the loop has no sign test at all - a loop that cannot exit on the card becoming ready, which is the whole act - and more than one means a second sign test this arm's record does not describe. Nothing is rebuilt by this refusal"
+                opa_calls=$(grep -c -- 'bl.*<st_op_cond_arg>' <<<"$stb_path_body")
+                opl_calls=$(grep -c -- 'bl.*<st_op_cond_loop>' <<<"$stb_path_body")
+                [[ "$opa_calls" == "1" && "$opl_calls" == "1" ]] ||
+                    layout_fail "st_cmd_path makes $opa_calls call(s) to st_op_cond_arg and $opl_calls to st_op_cond_loop, and rung 33 makes exactly one of each in the order ARG then LOOP. Zero for the argument means the loop is sent the probe's own word unchanged, which is the FIRST call again and not the second; zero for the loop means neither body runs; more than one of either means the arm acts twice in one command path, which the record does not describe. Nothing is rebuilt by this refusal"
+                opa_ln=$(awk '/bl.*<st_op_cond_arg>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
+                opl_ln=$(awk '/bl.*<st_op_cond_loop>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
+                opa_cid_ln=$(awk '/bl.*<st_all_send_cid>/{ printf "%d", NR; exit }' <<<"$stb_path_body")
+                # **THE PROBE IS THE LAST OF THE TWO SENDS AND NOT THE FIRST, AND THE FIRST DRAFT
+                # GOT THAT WRONG.** `st_cmd_path` sends CMD0 (`mmc_go_idle`) and then CMD1, in the
+                # driver's own order, and the response rung 33 derives its argument from is
+                # CMD1's. Taking the FIRST `bl <st_send_command>` names the CMD0 line and the
+                # sentence below would have read "both after the probe on line <CMD0>" - a true
+                # assertion wearing a false label, which is the m-class this project keeps
+                # catching. The `== 2` assertion further down this file is what makes "the last"
+                # unambiguous, so the last is what is taken here.
+                opa_cmd_ln=$(awk '/bl.*<st_send_command>/{ n=NR } END{ printf "%d", n }' <<<"$stb_path_body")
+                [[ -n "$opa_cid_ln" && -n "$opa_cmd_ln" ]] ||
+                    layout_fail "st_cmd_path makes no call to st_all_send_cid or to st_send_command, so rung 33's two new calls cannot be positioned and this clause has nothing to assert. That is itself the refusal: an arm at a value this high whose command path is absent is an arm whose loop has no subject. Nothing is rebuilt by this refusal"
+                (( opa_ln < opl_ln )) ||
+                    layout_fail "st_cmd_path calls st_op_cond_arg on disassembly line $opa_ln and st_op_cond_loop on line $opl_ln: rung 33's order IS the driver's, and the argument is derived FROM the probe's response and then HANDED to the loop (mmc.c:1923 -> mmc.c:1951 -> mmc.c:1359). A loop whose argument is derived after it runs is a loop sent the wrong word. Nothing is rebuilt by this refusal"
+                (( opa_ln > opa_cmd_ln && opl_ln > opa_cmd_ln )) ||
+                    layout_fail "st_cmd_path calls st_op_cond_arg on line $opa_ln and st_op_cond_loop on line $opl_ln but its CMD1 - the probe whose response the argument is derived from, and the LAST of its two calls to st_send_command - is on line $opa_cmd_ln: both new calls must fall AFTER the probe they act on, or the derived argument is a function of a response the probe has not yet produced. Nothing is rebuilt by this refusal"
+                (( opl_ln < opa_cid_ln )) ||
+                    layout_fail "st_cmd_path calls st_op_cond_loop on disassembly line $opl_ln and calls st_all_send_cid on line $opa_cid_ln: rung 33's loop is part of the DRIVER'S OWN CMD1 SEQUENCE and must finish before CMD2 goes on the bus (mmc.c:1359 precedes mmc.c:1375). A loop below CMD2 would be asking the card whether it is ready after the ladder had already stopped waiting. Nothing is rebuilt by this refusal"
+                echo "  xnu_entry_799: rung 33's ported CMD1 loop, read out of the linked image: st_op_cond_arg (device set EMPTY, carrying #127 and #1073741824 - mmc.c:1943's ocr &= ~0x7F and mmc.c:1359's (1 << 30)) is called ONCE on line $opa_ln and st_op_cond_loop (device set EMPTY, ONE bl to st_send_command carrying #100 and #101 - mmc_ops.c:145's 100-send bound) ONCE on line $opl_ln, in that order, both after CMD1 - the probe, whose response the argument is derived from, and the last of the body's two calls to st_send_command - on line $opa_cmd_ln, and both before CMD2 on line $opa_cid_ln - so the second CMD1 is sent with an argument derived from the first response, retried up to the driver's own 100 sends with mmc_delay(10) between them, exiting on the ONE sign-conditioned branch that leaves the loop when resp[0] & MMC_CARD_BUSY SETS (mmc_ops.c:157, against the direction the image's own CMD2 gate reads it), and no device register outside st_send_command is touched by either body"
+            fi
             [[ -z "${stb_path_img// /}" ]] ||
                 layout_fail "st_cmd_path's non-device memory accesses are [$stb_path_img] at [$stb_path_imgaddr] and rung 11's record says that set is EMPTY - this function publishes through entry_live_write (a call, with a .rodata string) and its two result structs live on the stack, which the classifier skips by base register. A non-empty set here means either a symbol this rung never declared or an access it could not resolve. Nothing is rebuilt by this refusal"
             [[ "$(grep -c -- 'bl.*<st_send_command>' <<<"$stb_path_body")" == "2" ]] ||
