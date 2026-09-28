@@ -7811,3 +7811,73 @@ set=armed-storage-f9613649 sha256=f9613649a89566b27123e0557f9ddfb6ac45ee31e44c4a
 set=armed-storage-f9613649 sha256=53316d0e9f1d1b6b95f7aeed945d57d5d4841acf93584895c9b610ec7ab7c810 bytes=6732404 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-ITS-SIZE-is-unchanged-at-6732404-bytes-and-it-differs-from-the-rung-30-entry-elf-in-EXACTLY-TWO-BYTES-the-same-two-instructions
 set=armed-storage-f9613649 sha256=6f77b93acde0eb4229dd6370b1297b212820771392ca7fa85fdb414a52a09b26 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE-30-and-it-differs-from-the-spent-rung-30-park-s-member-in-EXACTLY-TWO-LINES-the-rung-number-and-this-artifact-s-own-sha256
 set=armed-storage-f9613649 sha256=8d915a1c8cc143e99ee0b3b6dd9ecb10f28b4cd2b7aa1e55587263e090b14c66 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-this-image-is-the-build-of-the-tree-in-front-of-it-and-not-whether-the-hashes-match-it-differs-from-the-spent-rung-30-park-s-member-in-EXACTLY-THREE-LINES-of-TWENTY-EIGHT-the-artifact-s-own-sha256-and-EXACTLY-THE-TWO-FILES-THIS-STEP-EDITED-src-entry-build_entry-sh-5e9bca03-to-07bce057-and-src-entry-entry_storage-c-6afc5d29-to-cdf1056d-and-in-the-VALUE-29-containment-comparison-the-same-member-differs-in-EXACTLY-TWO-LINES-because-there-the-artifact-sha256-line-is-IDENTICAL
+#
+# 793: THE 136-BIT READ HAS BEEN TAKEN NINE TIMES AND NEVER ONCE HELD A CID, AND 792's ROW 1 IS AN
+# OVERCLAIM CORRECTED BEFORE THE PRESS.
+#
+# HOST-SIDE ONLY. No device action, no press, no gate against a device, no runner, no firer, NOTHING
+# BUILT. `out/` is byte-identical to what 792 left it: the armed arm `armed-storage-f9613649` is
+# UNSPENT and its eleven-member park is intact, and no source under `src/` was edited. ONE PRESS SPENT:
+# NONE. NO PRESS IS AUTHORIZED.
+#
+# WHY THIS BLOCK EXISTS. 792 section 7 pre-registered rung 31's four rows and gave the first as
+# "`_cid_complete = 1` - THE CID IS TAKEN", and the same sentence is carried into
+# `tools/verify_press_ready.sh`, the two places whose text the next press PRINTS. The claim rests on an
+# assumption that was never checked: that the four RESPONSE words read after CMD2 would be A CID if the
+# command completed. The archive refutes it, nine times over.
+#
+# (1) THE FOUR WORDS ARE READ UNCONDITIONALLY. `st_all_send_cid`'s tail (`src/entry/entry_storage.c`,
+#     the block citing `sdhci.c:1163-1172`, the driver's own 136-bit branch, word 3 first) reads
+#     RESPONSE +12/+8/+4/+0 and publishes `_cid_raw0..3` and `_cid_resp0..3`. There is NO `if` in that
+#     block, so the cells fire on EVERY arm whatever the command did. Their CONTENT is a separate
+#     question from `_cid_complete`.
+#
+# (2) NINE ARMS CARRY THEM AND ALL NINE ARE BYTE-FOR-BYTE IDENTICAL. rungs 17, 18, 19, 20, 21, 22, 24,
+#     29 and 30 - seven narrow windows and two wide enough to report an error, two of them having
+#     latched `ERR | CRC` at poll 1 - hold
+#         `_cid_raw0..3`  = 0x0040ff80 / 0x80000000 / 0 / 0
+#         `_cid_resp0..3` = 0x40ff8080 / 0 / 0 / 0
+#     and the eight published words do not vary on any of them. A CID is 128 bits; three of four words
+#     zero is not a CID. THE LADDER HAS NEVER READ A CID - and completing the command is not by itself
+#     what would give it one, because these cells were read on nine arms that did NOT complete and read
+#     the same thing.
+#
+# (3) AND THE WORD IS NOT A DEFAULT - THE BLOCK MOVES, AND THE LOG'S OWN LINE ORDER PROVES IT.
+#     `st_resp_before` reads the SAME four offsets in the SAME `<< 8` arithmetic (deliberately, since
+#     rung 18's question was "is the word the same before and after CMD2") and runs immediately BEFORE
+#     `st_cmd_path()`. On the three arms carrying both bodies its line stands FIRST. Rung 30:
+#         8674: `_rb_raw0        = 0`            (before the command path)
+#         8777: `_cmd0_resp      = 0`            (RESPONSE+0, after CMD0)
+#         8827: `_cmd1_resp      = 0x40ff8080`   (RESPONSE+0, after CMD1)
+#         8875: `_cid_resp_short = 0`            (RESPONSE+0, after CMD2)
+#         8876: `_cid_raw0       = 0x0040ff80`   (RESPONSE+12, after CMD2)
+#     Rungs 18 and 29 are in the same order. THE REGISTER WAS ZERO WHEN THE LADDER ARRIVED, so
+#     everything it later holds the block put there itself. It does NOT say which command moved it -
+#     two commands, one interval, and no cell separates them.
+#
+# THE CORRECTION. `_cid_complete` is the command's completion latch, not the response. Row 1 becomes:
+#
+#   1a - `_cid_complete = 1` AND the register block CHANGED: `_cid_resp0` off `0x40ff8080`, or any of
+#        `_cid_raw2`, `_cid_raw3`, `_cid_resp1..3` off ZERO (all four have been zero on EVERY arm this
+#        ladder has ever run). THIS IS THE CID TAKEN, and the driver order then opens: CMD9 (CSD),
+#        CMD7 (select), CMD16 (block length), then data.
+#   1b - `_cid_complete = 1` with the nine-arm pattern UNCHANGED. A FIFTH ROW, AND A STRONGER ONE THAN
+#        1a: the block completed a 136-bit command and its response register file NEVER FILLED. That
+#        separates the completion latch from the response path and puts every `_cid_complete` reading
+#        on this ladder under suspicion - 790 section 1's CMD1 row and its 2.094 ratio included.
+#
+# Rows 2 (`ERR | TIMEOUT`), 3 (`ERR | CRC` anyway) and 4 (nothing over the full bound) are unchanged,
+# and row 3 is SHARPENED: `_cid_raw2`/`_cid_raw3` zero on the two wide arms is a second,
+# enable-independent line that the CRC latch fires with no 136-bit response present.
+#
+# WHERE IT LANDED. `tools/verify_press_ready.sh`, in the two places that are the text the press prints:
+# `entry_conseq`'s rung-30 branch and `rung_para 30`. Both carry the split now, APPENDED beside the
+# original sentence rather than replacing it, so a reader who met the old text elsewhere finds the
+# correction next to it. LANE, STATED RATHER THAN LEFT: that file is not `preflight_boot_check.sh`, the
+# one file this session (run-experiment-526, the gate owner) owns, and `ListAgents` names two peers,
+# NEITHER of them `mi4-ios6-1a` - so this is a LANE-ownerless case and NOT the COST case.
+#
+# COST. None to the armed arm: the value of the press went up, its cost did not. The next arm can make
+# row 1b a READING instead of an eye comparison with one bit computed from the four raw words against
+# their pre-command values - no new device access - and that is COST-owed.
+#
