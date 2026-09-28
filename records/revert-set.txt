@@ -8582,3 +8582,82 @@ set=armed-storage-7341f5f6 sha256=6f66302f0b550676837861c2de27a55f3eff77bcb72c63
 set=armed-storage-7341f5f6 sha256=b5568d2d8660177cf75ee99104346760203d0a91bf1e936ad840cbec9786b7d1 bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=33
 set=armed-storage-7341f5f6 sha256=ce929b8c20150f11d57a3080c4b6f4b000703febe7fe789ecad2d870ed1e5afc bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one
 #
+# 808: THE CITATION THE TREE GREW OUT FROM UNDER - a check whose baseline is GIT. NO ARM MOVED: this
+# step added `tools/check_line_citations.py`, wired it into `make check`, and appended this block.
+# `out/` was NOT written - nothing under it is newer than the step's start, the park
+# `out/stage90/frozen/armed-storage-7341f5f6/` verifies 11 file(s), and all ELEVEN live members'
+# sha256 values agree with the `armed-storage-7341f5f6` lines above. The arm is still ARMED AND NOT
+# PRESSED and **THE PRESS IS THE OPERATOR'S**.
+#
+# WHAT IT CLOSES: 802 section 7 owed "a check that every site citing a line number still resolves",
+# and named the drift by hand - the ladder's CMD2 gate had moved from `entry_storage.c:4785` to the
+# line in use now, and the single CMD1 call from the line 798 named to the one in use now. (THE TWO
+# NEW NUMBERS ARE DELIBERATELY NOT WRITTEN HERE. See the paragraph below.)
+#
+# THE OBVIOUS CHECK IS "THE CITATION RESOLVES", AND IT IS WRONG TWICE OVER, BOTH MEASURED BEFORE A
+# LINE WAS WRITTEN: (a) 2050 of 2950 citations under `docs/experiments/` name vendor sources - the
+# Sdhci, Mmc-ops and cache sources that live in the vendor checkout and are NOT tracked here - so a
+# rule against a file that does not resolve would refuse two thousand CORRECT citations and be
+# turned off within a step (m775's shape); and (b) resolving a bare basename to the first hit made an
+# older prototype read `build.sh:389` as the ARCHIVED snapshot's copy, 165 lines long, and report it
+# past the end - **a one-value-two-definitions defect committed by the checker itself**.
+#
+# SO THE BASELINE IS GIT. A tool that stores its own expected values is a self-written record, and
+# `a self-written record is not a constraint` is this project's rule about those. The ground truth
+# already exists: the COMMIT THAT WROTE THE CITATION. One `git log -p --reverse -U0` walk per citing
+# file dates every token in it, and the cited file at that commit yields what the citation MEANT.
+# `MOVED` - the text it named is now at exactly ONE other line - REFUSES and PRINTS the new line.
+# `MOVED-AMBIGUOUS` (two or more candidates) and `RE-WRITTEN` and `UNDATED` and `SITE-ABSENT` and
+# `PAST-END` REPORT; **guessing among duplicates is the defect the check exists to catch, and 147 of
+# `entry_storage.c`'s 4068 distinct line texts occur more than once, so the class is real** - the
+# first cut read a duplicated comment fragment as "moved to line 1". `NOT-IN-REPO` is passed over BY
+# NAME. A bare basename that two LIVE roots hold is `AMBIGUOUS-PATH` and refuses.
+#
+# WHAT REFUSES IS ONLY THE PROSE THAT PRINTS FOR THE LIVE ARM - the `rung_para` line and the
+# `entry_conseq+=` lines for the rung the artifact's own switch record names - because that is what
+# the operator reads at press time. Other rungs' paragraphs, every `#` comment, THIS FILE and
+# `docs/experiments/` are REPORTED, not refused: they are historical records and are superseded
+# rather than rewritten, the same split `tools/check_count_citations.py` makes.
+#
+# **AND THIS BLOCK THEREFORE CITES NO LINE NUMBER, WHICH IS DELIBERATE RATHER THAN STYLISTIC.** A
+# record is checked by this tool like anything else, and a citation written here that the tree later
+# grows past would appear in the check's report the day it drifts - a record that reports itself is
+# noise in the very list it is trying to keep meaningful. Where a number is needed, the block above
+# names the SITE and lets the check or a reader read the line.
+#
+# THE READING: 213 citations over the press path (`tools/verify_press_ready.sh` and this file) -
+# SAME 22, **MOVED 33**, MOVED-AMBIGUOUS 12, RE-WRITTEN 4, NOT-IN-REPO 142 - and the rung-33
+# paragraph that prints TODAY IS CLEAN, so the default run is exit 0. THIRTY-THREE moved citations,
+# where 802 section 7 had found three by hand: a population, not three instances.
+#
+# AND THE REFUSAL IS DEMONSTRATED RATHER THAN ASSERTED. `--live-rung N` changes WHICH PARAGRAPH is
+# examined and nothing else, so the same tree answers for another rung: forced to rung 31 it refuses
+# `tools/verify_press_ready.sh`'s citation of the single CMD1 call and prints the line that call now
+# lives at - **802 section 7's own hand-measured drift, reached independently, with the repair
+# printed.** A check whose refusal has never been observed is not a check.
+#
+# THE SELFTEST IS 15 FIXTURES AND THEY BUILD A SYNTHETIC GIT REPOSITORY, because a baseline that IS
+# git cannot be tested against this repository without pinning its history. BOTH OF THE TOOL'S OWN
+# BUGS WERE FOUND BY RUNNING IT, not by reading it: two fixtures were wrong and the tool was right
+# (the fixtures were corrected, and the second was rebuilt as a third commit so that it tests what
+# it claims); and **`@@` was the WRONG COMMIT MARKER - a unified diff's own hunk header also begins
+# with `@@`, so the reader took hunk headers for commit ids and dated every citation to garbage. The
+# press path then classified 920 SITE-ABSENT with ZERO SAME and ZERO MOVED**, which is the shape of a
+# broken baseline and is named in the code so a reader recognises it.
+#
+# COST, AND THE DEFAULT SCOPE IS BOUNDED AS A MEASUREMENT AND NOT AS A TASTE. One `git log -S` per
+# citation is one full-history diff per citation and did not finish in ten minutes; one history walk
+# per citing file makes the press path 2.2 s. The whole tree is 3687 citations and about eighty
+# seconds, and **a `make check` that takes a minute and a half is a `make check` that gets skipped**,
+# so the default is the press path and `--all` runs the sweep. `make check` is 10 s, exit 0.
+#
+# IT DOES NOT CLAIM A `SAME` CITATION IS CORRECT. It says the cited line has not changed since the
+# citation was written; **a citation that was wrong on the day it was written is invisible to it**,
+# and only a reader catches that one. It says nothing about the vendor sources, whose lines are not
+# in this repository and cannot be checked.
+#
+# THE GOAL IS NOT MET AND THIS STEP DOES NOT ADVANCE IT: no transfer completes, no filesystem is
+# reached and no mount is made, 794 section 1's breadth gap (four opcodes, no CMD9 define, no data
+# path) is the whole distance, and **TWRP-TO-STORAGE STAYS WITHHELD**. CMD9's `MMC_RSP_R2` remains
+# the next rung, and it remains unreachable until rung 34's press is taken.
+#

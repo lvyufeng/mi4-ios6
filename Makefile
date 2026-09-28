@@ -97,6 +97,25 @@ restore:
 #                           no input at all; the four census cells run against the device's own dt.img and
 #                           are SKIPPED BY NAME where it does not exist, so a cell that cannot run never
 #                           reads as one that ran and agreed.
+#   check_line_citations.py
+#                           reads the press path's own prose - `tools/verify_press_ready.sh` and
+#                           `records/revert-set.txt` - and refuses a `file.c:NNNN` citation whose site has
+#                           MOVED. The baseline is GIT and not a file, because a tool that records its own
+#                           expected values is a self-written record: for each citation it takes the commit
+#                           that WROTE it (`git log -p --reverse`, one history walk per citing file) and
+#                           asks what that line said then. 802 section 7 measured by hand that the ladder's
+#                           CMD2 gate had moved from `:4785` to `:4964` and the single CMD1 call from
+#                           `:4702` to `:4808`; the same question over this tree finds THIRTY-THREE moved
+#                           citations in the press path, so this is a population and not three instances.
+#                           **It refuses only the prose that PRINTS FOR THE LIVE ARM** - the `rung_para N`
+#                           line and the `entry_conseq+=` lines for the rung the artifact's own switch
+#                           record names - because a paragraph for another rung does not print on this arm
+#                           and the `#` comments never print; and it only PRINTS what it finds in the
+#                           historical record for the same reason check_count_citations.py does. It does
+#                           NOT decide a citation whose text now appears at more than one line (147 lines of
+#                           `entry_storage.c` are duplicated), because guessing which one it moved to is
+#                           the defect it exists to catch. `--live-rung N` examines another rung's paragraph,
+#                           which is how the refusal path is demonstrated without editing the tool.
 #   check_sdc1_pad_expectation.py
 #                           reads the TRACKED record records/sdc1-pad-candidates.txt and refuses an
 #                           `ST_TLMM_SDC1_EXPECT` that matches no board the DEVICE'S OWN device tree
@@ -125,6 +144,8 @@ check:
 	@tools/derive_sdc1_pads.py --selftest >/dev/null
 	@tools/check_sdc1_pad_expectation.py --selftest >/dev/null
 	@tools/check_sdc1_pad_expectation.py
+	@tools/check_line_citations.py --selftest >/dev/null
+	@tools/check_line_citations.py
 
 # **`make clean` IS REFUSED, AND THAT IS THE POINT OF IT.** It used to `rm -rf out/stageNN` for every
 # retained snapshot. There is exactly one `out/` now and it is not reproducible: `./build.sh` does not
@@ -168,8 +189,9 @@ help:
 	@echo "make restore STAGE=50    bring an archived snapshot back"
 	@echo "make check               the repository's own bookkeeping: the retired layout, set names, backticked"
 	@echo "                         messages (a code span that would run a command is refused too), the"
-	@echo "                         payload's entry switch, every count quoted in two bases, and the"
-	@echo "                         board-derived pad constant against the device's own device tree"
+	@echo "                         payload's entry switch, every count quoted in two bases, the board-derived"
+	@echo "                         pad constant against the device's own device tree, and a cited line"
+	@echo "                         number whose site has moved out from under it"
 	@echo "make clean               refused; the payload and the parks cannot be rebuilt"
 	@echo
 	@echo "Booting is not a make target: flash nothing, and boot non-persistently with"
