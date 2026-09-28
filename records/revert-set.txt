@@ -8397,3 +8397,69 @@ set=armed-storage-ce2f589c sha256=ce2f589c644f560d506afe9999006dae932a8b6b6a8f3e
 set=armed-storage-ce2f589c sha256=7baef0f6836288e2d4ce8f5aef74f1ba1355ff7b3c5d4ce9ea8a4e0b572ede64 bytes=6732528 file=xnu_arm_entry.elf role=entry-elf-the-gate-reads-addresses-out-of-IT-grew-by-64-bytes-from-the-spent-rung-32-arm-256-in-text
 set=armed-storage-ce2f589c sha256=e13914e092ac40043504c52fc9c86fa8d2a5dea5433a69b9e8d4e8aa2867257e bytes=900 file=xnu_arm_entry-config.txt role=the-entry-image-s-own-switch-record-bound-to-the-artifact-STAGE90_XNU_STORAGE_PROBE=32
 set=armed-storage-ce2f589c sha256=2eafd2f80b735b0fdd255d4870b7fc80b7421ddde6b0cc63cbb1f7e4b523f9b7 bytes=2335 file=xnu_arm_entry-sources.txt role=the-entry-image-s-own-sources-recorded-BY-CONTENT-so-the-gate-asks-whether-the-tree-and-the-image-are-one
+#
+# 803: THE RUNG-33 PRESS - THE CARD FINISHES POWER-UP ON THE SECOND CMD1, AND THE CID COMES BACK.
+#
+# ONE PRESS SPENT, authorized by the operator BEFORE the gate was run. One gate (exit 0, 609 lines),
+# one runner (EXIT 0), one `fastboot boot`, nothing flashed, nothing written to storage, no reboot;
+# `33e80afe` absent from BOTH device lists at fire time (measured before the gate); capture
+# out/stage90/captures/rung33-opcond-20260928-123120-{last_kmsg.txt,gate.log,run.log}, archived by hand,
+# last_kmsg 637,213 B sha256 6fe60a12d5b029b34f4bb71fec03c2b38cd2d21f4563ddf677249e848fadecc4.
+# Runner's verdict 7 PASS / 1 FAIL / 3 UNREAD COUNTED PER CRITERION, the single FAIL the known
+# `seam_sp ... is not sleh_sp-8` criterion: IDENTICAL to rungs 29, 30, 31 and 32, so this press added no
+# failure. THE MACHINE STAYED UP: `_post_end_calls = 0x8`, `_post_elapsed` last `0x092a857e` = 8.009 s
+# at `_post_cntfrq = 0x0124f800` (19.2 MHz).
+#
+# (1) THE HEADLINE, AND IT IS 798 SECTION 6's ROW 1. `_opcond_calls = 0x1`, `_opcond_from = 0x40ff8080`,
+# `_opcond_arg = 0x40ff8080` (EQUAL to `_opcond_from` - THE DERIVATION IS A NO-OP ON THIS CARD'S OWN
+# WORD, exactly as pre-registered), `_opcond_loop_calls = 0x1`, **`_opcond_sends = 0x2`**,
+# **`_opcond_busy_seen = 0x1`** - BIT 31 SET, THE CARD REPORTED POWER-UP COMPLETE -
+# `_opcond_last_resp = 0xc0ff8080` (= `0x40ff8080 | 0x80000000`, the same OCR with the busy bit now set),
+# `_opcond_ticks = 0x340ff` = 213,247 = 11.107 ms. The 100-send bound was NOT approached: the loop
+# exited on SEND 2. The arithmetic is exact - 213,247 ticks minus `mmc_ops.c:164`'s `mmc_delay(10)`
+# (192,000 ticks) leaves 21,247 ticks = 1,106.6 us FOR TWO COMMANDS, about 553 us each, both inside the
+# block's 665.2 us window, which is why both completed. The record named 1.06 s as the worst case; what
+# it actually spent is 1.107 ms, 958x less.
+#
+# (2) AND CMD2 ANSWERED: THE CID COMES BACK AFTER NINE ARMS OF SILENCE. `_cid_complete = 0x1` (was 0x0
+# on every arm since rung 16), `_cid_status_any = 0x00000001` (bit 0 SDHCI_INT_RESPONSE, NO ERROR BIT OF
+# ANY KIND, against 0x00018000 ERR|TIMEOUT), `_cid_err = 0x0`, `_cid_ticks = 0x49e2` = 18,914 = 985.1 us
+# (the command really ran, against 12,772 = 665.2 us of the block's own timeout), `_cid_inhibit_after =
+# 0x0` (no longer wedged). THE FOUR RESPONSE WORDS ARE `0x45010053 / 0x44573136 / 0x47014a2f /
+# 0xe00bb100` and the `_cid_raw_*` family is the SAME SIXTEEN BYTES SHIFTED ONE, so the two independent
+# readings agree. IT DECODES AS A REAL CID: MID `0x45` = 69 = SanDisk, OID `0x01 0x00`, PNM `SDW16G`
+# (six ASCII characters), PRV `0x01`, PSN `0x4a2fe00b`, MDT `0xb1`. **793 SECTION 1's ROW 1a IS MET AND
+# 793 SECTION 5's FIFTH ROW IS REFUTED IN THE SAME EVENT** - the completion latch fired AND the response
+# file filled. **It also retires 790 section 5's and 787 section 6's caveat**: `0x40ff8080` was the
+# card's OCR all along, with bit 31 clear because the card had not finished power-up.
+#
+# (3) AND CMD3 ANSWERED TOO, WITH THE RCA. `_nidx_complete = 0x1`, `_nidx_status_any = 0x00000001`,
+# `_nidx_err = 0x0`, `_nidx_ticks = 0x2b22` = 11,042 = 575.1 us, and **`_nidx_resp = 0x00000500` - RCA
+# `0x0500`** - with `_nidx_resp_pre = 0x2fe00bb1` (the CID's tail) replaced by it. 795 section 6's
+# protocol claim is CONFIRMED in the direction it predicted, and this press supplies the cause it was
+# missing: CMD3 failing was always a CONSEQUENCE of CMD2 failing, and neither was the problem - the card
+# was not ready, and CMD1 is where readiness is asked for.
+#
+# (4) THE READING, ONE SENTENCE: every arm from rung 16 through rung 32 was sending CMD2 and CMD3 to a
+# card that had not finished power-up, and the ladder's own gate is why. `entry_storage.c`'s CMD2 gate
+# tests THE PROBE's response (`c1.resp`, the single CMD1 with argument 0) where the driver tests THE
+# LOOP's (`mmc_ops.c:157`). **THE GATE IS NOT MERELY INVERTED; IT IS READING THE WRONG WORD** - the probe
+# is a single pass by the driver's own design (`mmc_ops.c:148-150`), so its response says nothing about
+# readiness. THE REPAIR IS ONE LINE AND IS NOW MEASURED: gate CMD2 on the loop's result. The 665.2 us
+# "timeout" nine rungs chased was never a timeout.
+#
+# (5) SAFETY, CELL BY CELL. Nothing flashed, nothing written to storage, no reboot; the gate's own last
+# line is `booted, never flashed, so no outcome of this run can write to storage.`
+# `xnu_live_storage_writes` 0 -> 4 is the same four inherited mode-sequence stores every arm from rung 3
+# carries, and NO NEW STORE OF ANY KIND: rung 33's own two bodies have an EMPTY DEVICE SET, asserted out
+# of the linked image by `xnu_entry_799` before the press. The 11.107 ms of bus time is the whole of this
+# arm's new cost.
+#
+# (6) ONE DIFFERENCE THIS RECORD DOES NOT EXPLAIN, NAMED RATHER THAN GLOSSED: `_post_end_calls` moved
+# `0x7` -> `0x8` and `_post_elapsed` last `0x06df35b6` (6.005 s) -> `0x092a857e` (8.009 s), one more
+# post-end call and about two more seconds than every arm since rung 24. The storage probe's own delta is
+# 11.107 ms and cannot account for 2 s. OWED A CELL, NOT A SENTENCE.
+#
+# (7) THE GOAL IS NOT MET. No transfer completes, no filesystem is reached, no mount is made; 794
+# section 1's BREADTH GAP is untouched and is now the whole distance (four opcodes, no CMD9 define, no
+# data path). TWRP-to-storage STAYS WITHHELD.
