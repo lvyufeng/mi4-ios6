@@ -8661,3 +8661,75 @@ set=armed-storage-7341f5f6 sha256=ce929b8c20150f11d57a3080c4b6f4b000703febe7fe78
 # path) is the whole distance, and **TWRP-TO-STORAGE STAYS WITHHELD**. CMD9's `MMC_RSP_R2` remains
 # the next rung, and it remains unreachable until rung 34's press is taken.
 #
+# 809: THE REMAINING DISTANCE, COUNTED - CMD9 needs no new mechanism, and the wall is CMD8. A
+# MEASUREMENT OF THE VENDOR DRIVER AND OF THIS LADDER'S OWN SOURCE, NOT OF THE DEVICE: no press, no
+# device action, no runner, no firer, NO BUILD, and NOTHING UNDER out/ WAS WRITTEN. The arm is still
+# ARMED AND NOT PRESSED and **THE PRESS IS THE OPERATOR'S**; the eleven members of
+# `armed-storage-7341f5f6` are untouched and their sha256 values still agree with the lines above.
+#
+# THE RECORD SAID THE DISTANCE WAS "four opcodes, NO CMD9 DEFINE, no data path". THAT IS RIGHT ABOUT
+# THE OPCODE AND MISLEADING ABOUT THE MECHANISM, and the difference changes what the next rung costs.
+#
+# THE DRIVER'S OWN INIT ORDER, read out of `mmc_init_card` and out of the driver's own header, which
+# prints each command's access type beside its number: CMD2 (bcr R2, arg 0) -> CMD3 (ac R1,
+# `RCA << 16`) -> `mmc_set_bus_mode(PUSHPULL)` -> **CMD9 (ac R2, `card->rca << 16`)** ->
+# `mmc_decode_csd` -> `mmc_decode_cid` -> **CMD7 (ac R1, `RCA << 16`)** -> **CMD8 `SEND_EXT_CSD`,
+# printed as `adtc` - 512 BYTES ON THE DAT LINES** -> CMD6, printed as `R1b`, several times.
+#
+# AND ALL THREE OF CMD9's INGREDIENTS ALREADY EXIST IN THIS LADDER, BECAUSE CMD2 BUILT THEM. The
+# driver's `mmc_send_csd` is, for a native host, `mmc_send_cxd_native(host, card->rca << 16, csd,
+# MMC_SEND_CSD)`, and that function's whole body sets `flags = MMC_RSP_R2 | MMC_CMD_AC` - **no data
+# lines** - waits, and copies FOUR response words out. The ladder already has:
+#   * the flag set - `ST_MMC_RSP_R2`, `= PRESENT|136|CRC`, defined at `:2170`;
+#   * the mapping - `ST_MMC_RSP_136` to `ST_SDHCI_CMD_RESP_LONG`, with a `_Static_assert` that the
+#     command word for CMD2 with R2 is the value the ladder already sends;
+#   * **THE 136-BIT ASSEMBLER**, at `:3531-3544` and again at `:3639-3654` - and this is the
+#     non-obvious part, which is why it is written down: the response is NOT four words read in order
+#     from `RESPONSE 0x10`. The driver reads `+12, +8, +4, +0`, shifts each left by 8, and ORs in the
+#     high byte of the NEXT word down, under the comment "CRC is stripped so we need to do some
+#     shifting" (`sdhci.c:1165-1172`). The ladder's copy is that pattern exactly, and it is how rung
+#     33 read a real SanDisk CID. **A builder who read the four words in order would get a wrong
+#     128-bit value that still LOOKS like a CSD: no error, no fault, just a number that decodes to
+#     nonsense.** So a new arm must CALL that assembler and not re-derive it;
+#   * the argument - `ST_MMC_RCA_1 = 0x00010000u`, `_Static_assert`ed, and already sent as CMD3's
+#     argument at three sites.
+# **SO RUNG 35 IS ONE OPCODE DEFINE, ONE CALL AND ITS CELLS - NOT A MECHANISM.**
+#
+# AND THE BUS-MODE TRANSITION THE DRIVER MAKES BETWEEN CMD3 AND CMD9 IS NOT A DEVICE ACT.
+# `mmc.c:1412` calls `mmc_set_bus_mode(host, MMC_BUSMODE_PUSHPULL)` under the comment "quit open
+# drain mode", and **NEITHER `sdhci.c` NOR `sdhci-msm.c` REFERENCES `ios->bus_mode` ANYWHERE - zero
+# occurrences, checked by name over both files.** `sdhci_do_set_ios` reads clock, power mode, bus
+# WIDTH and vdd; never the bus mode. So rung 35 must NOT invent a store for it. What that means for
+# the card's own open-drain state is a question for a press and is named here rather than assumed.
+#
+# CMD7 IS THE SHAPE OF CMD3: `_mmc_select_card` is `MMC_RSP_R1 | MMC_CMD_AC` with `card->rca << 16`,
+# and the ladder already sends R1 commands from four sites. NO NEW MECHANISM.
+#
+# THE WALL IS CMD8, AND IT IS THE FIRST DATA COMMAND. `mmc_send_ext_csd` is `mmc_send_cxd_data(...,
+# MMC_SEND_EXT_CSD, ext_csd, 512)`, which builds a full request with a `struct mmc_data` (`blksz =
+# 512`, `blocks = 1`, `MMC_DATA_READ`, a scatterlist) - and the header prints the access type in the
+# definition itself: `adtc`, the one type this ladder has never sent. **AND THE LADDER SAYS SO IN ITS
+# OWN SOURCE**, long before this step: a comment beside the command-word builders states that there
+# is no data-path register here at all - `BLOCK_SIZE`, `BLOCK_COUNT` and `TRANSFER_MODE` are absent -
+# and another adds that `TRANSFER_MODE` is not written because `sdhci_send_command` returns on its
+# first line for a data-less command.
+#
+# CMD6 IS R1b, THE BUSY RESPONSE, WHOSE MAPPING EXISTS AND HAS NEVER BEEN PASSED.
+# `ST_SDHCI_CMD_RESP_SHORT_BUSY` and the `ST_MMC_RSP_BUSY` arm of the flags macro are both in the
+# file, and **no call site has ever passed `ST_MMC_RSP_BUSY`** - measured, zero uses outside the
+# mapping. That is the shape of a value nothing reads, and it is stated here as a BOUNDARY rather
+# than as a defect: the mapping came with the flags and no rung has needed it. R1b means the card
+# drives DAT0 busy after the response, so the rung that sends CMD6 is the rung that exercises it -
+# a SECOND new mechanism, in the same family as the data path and not smaller.
+#
+# THE DISTANCE COUNTED: CMD9 -> CMD7 -> **the data path, which begins at CMD8** -> CMD6 (R1b) -> bus
+# width and bus speed -> CMD16/17/18 -> and then a filesystem above the block device. TWO
+# CONSEQUENCES FOR THE OPERATOR: the next two rungs are the CHEAPEST this ladder has left and the
+# third is not; and **「进入操作系统」 and 「挂载存储」 ARE GATED BY DIFFERENT THINGS** - nothing in this
+# list puts the OS on the machine. This ladder is the path to a mountable volume. This block measures
+# one of the two and does not claim the other.
+#
+# THE GOAL IS NOT MET. No transfer completes, no filesystem is reached and no mount is made, so
+# **TWRP-TO-STORAGE STAYS WITHHELD**. Rung 34 remains ARMED AND NOT PRESSED, and CMD9 is the next
+# rung the moment that press is taken.
+#
